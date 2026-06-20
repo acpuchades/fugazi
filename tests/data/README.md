@@ -43,10 +43,12 @@ adding any indicator to the generator.
 
 Indicators whose conventions match TA-Lib exactly are checked to `1e-6` over
 every warmed-up bar: **SMA, RSI, STDDEV, BBANDS (upper/mid/lower), MAX, MIN**
-(MAX/MIN of high/low are the Donchian channel), **TRANGE**, and the fast
-stochastic **%K** (`STOCHF`, fed `close` as high/low/close so it positions the
-close within its own rolling range, matching arcana's `Stochastic` scaled to
-`[0, 100]`).
+(MAX/MIN of high/low are the Donchian channel), **TRANGE**, the fast stochastic
+**%K** (`STOCHF`, fed `close` as high/low/close so it positions the close within
+its own rolling range, matching arcana's `Stochastic` scaled to `[0, 100]`), and
+the volume indicators **OBV, AD** (Chaikin A/D line) and **MFI** — cumulative or
+windowed sums with no recursive seed. (**VWAP** has no TA-Lib function, so it is
+covered by unit tests only, not this cross-check.)
 
 **EMA**, **ATR**, **MACD** (line/signal/histogram) and **ADX** (with +DI/-DI)
 differ only in *seeding*: arcana seeds each recurrence from the first sample(s),

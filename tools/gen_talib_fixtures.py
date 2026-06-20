@@ -43,6 +43,7 @@ DONCHIAN_P = 10
 MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
 ADX_P = 14
 STOCH_P = 14
+MFI_P = 14
 
 
 def main() -> None:
@@ -54,6 +55,7 @@ def main() -> None:
     high = np.array([float(r["high"]) for r in rows])
     low = np.array([float(r["low"]) for r in rows])
     close = np.array([float(r["close"]) for r in rows])
+    volume = np.array([float(r["volume"]) for r in rows])
 
     bb_up, bb_mid, bb_lo = talib.BBANDS(
         close, timeperiod=BB_P, nbdevup=BB_K, nbdevdn=BB_K, matype=0
@@ -87,6 +89,9 @@ def main() -> None:
         "minus_di14": talib.MINUS_DI(high, low, close, ADX_P),
         "trange": talib.TRANGE(high, low, close),
         "stochf_k14": stoch_k,
+        "obv": talib.OBV(close, volume),
+        "ad": talib.AD(high, low, close, volume),
+        "mfi14": talib.MFI(high, low, close, volume, MFI_P),
     }
 
     names = list(cols)

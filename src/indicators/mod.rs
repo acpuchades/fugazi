@@ -17,6 +17,7 @@
 
 pub mod ops;
 
+mod ad;
 mod adx;
 mod atr;
 mod bollinger;
@@ -25,6 +26,8 @@ mod donchian;
 mod ema;
 mod identity;
 mod macd;
+mod mfi;
+mod obv;
 mod rma;
 mod rsi;
 mod sma;
@@ -34,7 +37,9 @@ mod stddev;
 mod stochastic;
 mod true_range;
 mod value;
+mod vwap;
 
+pub use ad::Ad;
 pub use adx::{Adx, AdxValue};
 pub use atr::Atr;
 pub use bollinger::{Bollinger, BollingerValue};
@@ -45,6 +50,8 @@ pub use donchian::{Donchian, DonchianValue};
 pub use ema::Ema;
 pub use identity::Identity;
 pub use macd::{Macd, MacdValue};
+pub use mfi::Mfi;
+pub use obv::Obv;
 pub use ops::{
     Add, BinaryOp, Combine, Diff, Div, Extreme, ExtremeOp, Lag, Lookback, LookbackOp, MaxOp,
     MinOp, Mul, Ratio, RollingMax, RollingMin, Sub,
@@ -56,3 +63,4 @@ pub use stddev::StdDev;
 pub use stochastic::{StochRsi, Stochastic};
 pub use true_range::TrueRange;
 pub use value::Value;
+pub use vwap::Vwap;

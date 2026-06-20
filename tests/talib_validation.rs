@@ -14,8 +14,8 @@
 use std::path::PathBuf;
 
 use arcana::indicators::{
-    Adx, Atr, Bollinger, Ema, Identity, Macd, RollingMax, RollingMin, Rsi, Sma, StdDev, Stochastic,
-    TrueRange,
+    Ad, Adx, Atr, Bollinger, Ema, Identity, Macd, Mfi, Obv, RollingMax, RollingMin, Rsi, Sma,
+    StdDev, Stochastic, TrueRange,
 };
 use arcana::prelude::*;
 
@@ -32,6 +32,7 @@ const MACD_SLOW: usize = 26;
 const MACD_SIGNAL: usize = 9;
 const ADX_P: usize = 14;
 const STOCH_P: usize = 14;
+const MFI_P: usize = 14;
 
 /// Tolerance for indicators that share TA-Lib's exact conventions.
 const EXACT_TOL: Real = 1e-6;
@@ -127,7 +128,7 @@ fn matches_talib_reference() {
     const REQUIRED: &[&str] = &[
         "sma10", "ema10", "rsi14", "atr14", "stddev10", "bb_upper", "bb_mid", "bb_lower",
         "max10_high", "min10_low", "macd", "macd_signal", "macd_hist", "adx14", "plus_di14",
-        "minus_di14", "trange", "stochf_k14",
+        "minus_di14", "trange", "stochf_k14", "obv", "ad", "mfi14",
     ];
     if let Some(missing) = REQUIRED.iter().find(|c| !headers.iter().any(|h| h == *c)) {
         eprintln!(
@@ -144,6 +145,7 @@ fn matches_talib_reference() {
     let high = float_col(&ih, &ir, "high");
     let low = float_col(&ih, &ir, "low");
     let close = float_col(&ih, &ir, "close");
+    let volume = float_col(&ih, &ir, "volume");
     let n = close.len();
     assert_eq!(rows.len(), n, "fixture row counts differ");
 
@@ -160,6 +162,9 @@ fn matches_talib_reference() {
     let mut adx = Adx::new(ADX_P);
     let mut tr = TrueRange::new();
     let mut stoch = Stochastic::new(Identity::new(), STOCH_P);
+    let mut obv = Obv::new();
+    let mut ad = Ad::new();
+    let mut mfi = Mfi::new(MFI_P);
 
     let mut sma_o = Vec::with_capacity(n);
     let mut ema_o = Vec::with_capacity(n);
@@ -179,9 +184,12 @@ fn matches_talib_reference() {
     let mut minus_di_o = Vec::with_capacity(n);
     let mut tr_o = Vec::with_capacity(n);
     let mut stoch_o = Vec::with_capacity(n);
+    let mut obv_o = Vec::with_capacity(n);
+    let mut ad_o = Vec::with_capacity(n);
+    let mut mfi_o = Vec::with_capacity(n);
 
     for i in 0..n {
-        let candle = Candle::new(close[i], high[i], low[i], close[i], 0.0);
+        let candle = Candle::new(close[i], high[i], low[i], close[i], volume[i]);
         sma_o.push(sma.update(close[i]));
         ema_o.push(ema.update(close[i]));
         rsi_o.push(rsi.update(close[i]));
@@ -207,6 +215,9 @@ fn matches_talib_reference() {
         tr_o.push(tr.update(candle));
         // arcana yields the stochastic in [0, 1]; TA-Lib's %K is in [0, 100].
         stoch_o.push(stoch.update(close[i]).map(|v| v * 100.0));
+        obv_o.push(obv.update(candle));
+        ad_o.push(ad.update(candle));
+        mfi_o.push(mfi.update(candle));
     }
 
     // Exact-convention indicators: must match to EXACT_TOL across all warmed bars.
@@ -221,6 +232,11 @@ fn matches_talib_reference() {
     total += compare("min10_low", &min_o, &opt_col(&headers, &rows, "min10_low"), EXACT_TOL, 0);
     total += compare("trange", &tr_o, &opt_col(&headers, &rows, "trange"), EXACT_TOL, 0);
     total += compare("stochf_k14", &stoch_o, &opt_col(&headers, &rows, "stochf_k14"), EXACT_TOL, 0);
+    // Volume indicators: cumulative (OBV/AD) or windowed (MFI) sums, no recursive
+    // seed, so they match TA-Lib exactly. (VWAP has no TA-Lib counterpart.)
+    total += compare("obv", &obv_o, &opt_col(&headers, &rows, "obv"), EXACT_TOL, 0);
+    total += compare("ad", &ad_o, &opt_col(&headers, &rows, "ad"), EXACT_TOL, 0);
+    total += compare("mfi14", &mfi_o, &opt_col(&headers, &rows, "mfi14"), EXACT_TOL, 0);
     assert!(total > 0, "no cells were compared — check fixtures");
 
     // EMA/ATR: arcana seeds the recurrence with the first value, whereas TA-Lib

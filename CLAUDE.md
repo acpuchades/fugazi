@@ -35,7 +35,7 @@ Rsi::new(Identity::new(), 14)           // RSI of a raw Real stream
 There is **no pipe/`then`/`Chain`** — chaining *is* construction.
 
 - **Leaf sources** terminate the chain: `Value` (constant), `Identity` (raw `Real` passthrough), and the candle accessors under `Current` (`Current::close()`, `Current::volume()`, …; built on the `Field<F>` / `CandleField` carrier in `candle.rs`).
-- **Bar indicators** consume the whole `Candle` directly (they are not "of a price"): `Atr`, `Adx`, `TrueRange`. These take only parameters, e.g. `Atr::new(14)`.
+- **Bar indicators** consume the whole `Candle` directly (they are not "of a price"): `Atr`, `Adx`, `TrueRange`, and the volume indicators `Obv`, `Vwap`, `Ad` (Chaikin A/D line), `Mfi` (money-flow index). These take only parameters, or none, e.g. `Atr::new(14)`, `Obv::new()`, `Mfi::new(14)`. The cumulative ones (`Obv`/`Vwap`/`Ad`) anchor at construction; `reset()` re-anchors — e.g. at a session boundary for `Vwap`.
 - **Two-source indicators**: `Donchian<H, L>` takes a high source and a low source, e.g. `Donchian::new(Current::high(), Current::low(), 20)`.
 - `Real = f64` and `Candle` (OHLCV) live in `src/types.rs`.
 - Multi-output indicators (`Macd`, `Adx`, `Bollinger`, `Donchian`) expose one named field per output and set `Output` to a small `Copy` struct (`MacdValue`, `AdxValue`, `BollingerValue`, `DonchianValue`); single-output ones expose `value: Option<Real>`.
