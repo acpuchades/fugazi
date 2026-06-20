@@ -248,12 +248,28 @@ impl LookbackOp for RatioOp {
     }
 }
 
+/// Rate of change as a percentage: `100·(current − past)/past` (`None` when
+/// `past == 0`). Matches TA-Lib's `ROC`.
+#[derive(Debug, Clone, Copy)]
+pub struct RocOp;
+impl LookbackOp for RocOp {
+    fn apply(current: Real, past: Real) -> Option<Real> {
+        if past == 0.0 {
+            None
+        } else {
+            Some(100.0 * (current - past) / past)
+        }
+    }
+}
+
 /// Delays a source's output by `period` steps.
 pub type Lag<I> = Lookback<I, LagOp>;
 /// Discrete diff of a source over `period` steps.
 pub type Diff<I> = Lookback<I, DiffOp>;
 /// Ratio of a source to its value `period` steps ago.
 pub type Ratio<I> = Lookback<I, RatioOp>;
+/// Percentage rate of change of a source over `period` steps.
+pub type Roc<I> = Lookback<I, RocOp>;
 
 // ---------------------------------------------------------------------------
 // Rolling extremum over a window

@@ -12,7 +12,7 @@
 use std::marker::PhantomData;
 
 use crate::indicator::Indicator;
-use crate::indicators::{Add, Diff, Div, Lag, Mul, Ratio, RollingMax, RollingMin, Sub, Value};
+use crate::indicators::{Add, Diff, Div, Lag, Mul, Ratio, Roc, RollingMax, RollingMin, Sub, Value};
 use crate::signal::{And, Change, Signal, SignalExt};
 use crate::types::Real;
 
@@ -282,6 +282,12 @@ pub trait IndicatorExt: Indicator<Output = Real> + Sized {
     /// Ratio of `self` to its value `periods` steps ago (`x[t] / x[t-n]`).
     fn ratio(self, periods: usize) -> Ratio<Self> {
         Ratio::new(self, periods)
+    }
+
+    /// Percentage rate of change of `self` over `periods` steps
+    /// (`100·(x[t] − x[t-n]) / x[t-n]`).
+    fn roc(self, periods: usize) -> Roc<Self> {
+        Roc::new(self, periods)
     }
 
     /// Rolling maximum of `self` over `period` steps.

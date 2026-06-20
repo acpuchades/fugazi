@@ -14,8 +14,8 @@
 use std::path::PathBuf;
 
 use arcana::indicators::{
-    Ad, Adx, Atr, Bollinger, Ema, Identity, Macd, Mfi, Obv, RollingMax, RollingMin, Rsi, Sma,
-    StdDev, Stochastic, TrueRange,
+    Ad, Adx, Aroon, Atr, Bollinger, Cci, Current, Dmi, Ema, Hma, Identity, Keltner, Macd, Mfi, Obv,
+    RollingMax, RollingMin, Rsi, Sar, Sma, StdDev, Stochastic, TrueRange, WilliamsR, Wma,
 };
 use arcana::prelude::*;
 
@@ -33,6 +33,18 @@ const MACD_SIGNAL: usize = 9;
 const ADX_P: usize = 14;
 const STOCH_P: usize = 14;
 const MFI_P: usize = 14;
+const WMA_P: usize = 10;
+const HMA_P: usize = 16;
+const ROC_P: usize = 10;
+const WILLR_P: usize = 14;
+const CCI_P: usize = 20;
+const AROON_P: usize = 14;
+const DMI_P: usize = 14;
+const KC_EMA_P: usize = 20;
+const KC_ATR_P: usize = 10;
+const KC_MULT: Real = 2.0;
+const SAR_STEP: Real = 0.02;
+const SAR_MAX: Real = 0.2;
 
 /// Tolerance for indicators that share TA-Lib's exact conventions.
 const EXACT_TOL: Real = 1e-6;
@@ -128,7 +140,9 @@ fn matches_talib_reference() {
     const REQUIRED: &[&str] = &[
         "sma10", "ema10", "rsi14", "atr14", "stddev10", "bb_upper", "bb_mid", "bb_lower",
         "max10_high", "min10_low", "macd", "macd_signal", "macd_hist", "adx14", "plus_di14",
-        "minus_di14", "trange", "stochf_k14", "obv", "ad", "mfi14",
+        "minus_di14", "trange", "stochf_k14", "obv", "ad", "mfi14", "wma10", "hma16", "roc10",
+        "willr14", "cci20", "aroon_up14", "aroon_dn14", "aroon_osc14", "kc_upper", "kc_mid",
+        "kc_lower", "sar",
     ];
     if let Some(missing) = REQUIRED.iter().find(|c| !headers.iter().any(|h| h == *c)) {
         eprintln!(
@@ -165,6 +179,15 @@ fn matches_talib_reference() {
     let mut obv = Obv::new();
     let mut ad = Ad::new();
     let mut mfi = Mfi::new(MFI_P);
+    let mut wma = Wma::new(Identity::new(), WMA_P);
+    let mut hma = Hma::new(Identity::new(), HMA_P);
+    let mut roc = Identity::new().roc(ROC_P);
+    let mut willr = WilliamsR::new(WILLR_P);
+    let mut cci = Cci::new(Current::typical(), CCI_P);
+    let mut aroon = Aroon::new(AROON_P);
+    let mut dmi = Dmi::new(DMI_P);
+    let mut kc = Keltner::new(Current::close(), KC_EMA_P, KC_ATR_P, KC_MULT);
+    let mut sar = Sar::new(SAR_STEP, SAR_MAX);
 
     let mut sma_o = Vec::with_capacity(n);
     let mut ema_o = Vec::with_capacity(n);
@@ -187,6 +210,20 @@ fn matches_talib_reference() {
     let mut obv_o = Vec::with_capacity(n);
     let mut ad_o = Vec::with_capacity(n);
     let mut mfi_o = Vec::with_capacity(n);
+    let mut wma_o = Vec::with_capacity(n);
+    let mut hma_o = Vec::with_capacity(n);
+    let mut roc_o = Vec::with_capacity(n);
+    let mut willr_o = Vec::with_capacity(n);
+    let mut cci_o = Vec::with_capacity(n);
+    let mut aroon_up_o = Vec::with_capacity(n);
+    let mut aroon_dn_o = Vec::with_capacity(n);
+    let mut aroon_osc_o = Vec::with_capacity(n);
+    let mut dmi_plus_o = Vec::with_capacity(n);
+    let mut dmi_minus_o = Vec::with_capacity(n);
+    let mut kc_u = Vec::with_capacity(n);
+    let mut kc_m = Vec::with_capacity(n);
+    let mut kc_l = Vec::with_capacity(n);
+    let mut sar_o = Vec::with_capacity(n);
 
     for i in 0..n {
         let candle = Candle::new(close[i], high[i], low[i], close[i], volume[i]);
@@ -218,6 +255,23 @@ fn matches_talib_reference() {
         obv_o.push(obv.update(candle));
         ad_o.push(ad.update(candle));
         mfi_o.push(mfi.update(candle));
+        wma_o.push(wma.update(close[i]));
+        hma_o.push(hma.update(close[i]));
+        roc_o.push(roc.update(close[i]));
+        willr_o.push(willr.update(candle));
+        cci_o.push(cci.update(candle));
+        let ar = aroon.update(candle);
+        aroon_up_o.push(ar.map(|v| v.up));
+        aroon_dn_o.push(ar.map(|v| v.down));
+        aroon_osc_o.push(ar.map(|v| v.oscillator));
+        dmi.update(candle);
+        dmi_plus_o.push(dmi.plus_di);
+        dmi_minus_o.push(dmi.minus_di);
+        let k = kc.update(candle);
+        kc_u.push(k.map(|v| v.upper));
+        kc_m.push(k.map(|v| v.middle));
+        kc_l.push(k.map(|v| v.lower));
+        sar_o.push(sar.update(candle));
     }
 
     // Exact-convention indicators: must match to EXACT_TOL across all warmed bars.
@@ -237,6 +291,18 @@ fn matches_talib_reference() {
     total += compare("obv", &obv_o, &opt_col(&headers, &rows, "obv"), EXACT_TOL, 0);
     total += compare("ad", &ad_o, &opt_col(&headers, &rows, "ad"), EXACT_TOL, 0);
     total += compare("mfi14", &mfi_o, &opt_col(&headers, &rows, "mfi14"), EXACT_TOL, 0);
+    // WMA/ROC/Williams %R/CCI/Aroon are non-recursive windowed math, and HMA is
+    // pure WMA composition, so all match TA-Lib's conventions exactly. SAR is
+    // recursive but fully deterministic (no smoothed seed), so it matches too.
+    total += compare("wma10", &wma_o, &opt_col(&headers, &rows, "wma10"), EXACT_TOL, 0);
+    total += compare("hma16", &hma_o, &opt_col(&headers, &rows, "hma16"), EXACT_TOL, 0);
+    total += compare("roc10", &roc_o, &opt_col(&headers, &rows, "roc10"), EXACT_TOL, 0);
+    total += compare("willr14", &willr_o, &opt_col(&headers, &rows, "willr14"), EXACT_TOL, 0);
+    total += compare("cci20", &cci_o, &opt_col(&headers, &rows, "cci20"), EXACT_TOL, 0);
+    total += compare("aroon_up14", &aroon_up_o, &opt_col(&headers, &rows, "aroon_up14"), EXACT_TOL, 0);
+    total += compare("aroon_dn14", &aroon_dn_o, &opt_col(&headers, &rows, "aroon_dn14"), EXACT_TOL, 0);
+    total += compare("aroon_osc14", &aroon_osc_o, &opt_col(&headers, &rows, "aroon_osc14"), EXACT_TOL, 0);
+    total += compare("sar", &sar_o, &opt_col(&headers, &rows, "sar"), EXACT_TOL, 0);
     assert!(total > 0, "no cells were compared — check fixtures");
 
     // EMA/ATR: arcana seeds the recurrence with the first value, whereas TA-Lib
@@ -257,4 +323,13 @@ fn matches_talib_reference() {
     compare("adx14", &adx_o, &opt_col(&headers, &rows, "adx14"), CONVERGED_TOL, tail);
     compare("plus_di14", &plus_di_o, &opt_col(&headers, &rows, "plus_di14"), CONVERGED_TOL, tail);
     compare("minus_di14", &minus_di_o, &opt_col(&headers, &rows, "minus_di14"), CONVERGED_TOL, tail);
+    // Dmi is the standalone +DI/-DI core Adx embeds; same Wilder seeding, so it
+    // tracks TA-Lib's PLUS_DI/MINUS_DI over the converged tail.
+    compare("dmi_plus", &dmi_plus_o, &opt_col(&headers, &rows, "plus_di14"), CONVERGED_TOL, tail);
+    compare("dmi_minus", &dmi_minus_o, &opt_col(&headers, &rows, "minus_di14"), CONVERGED_TOL, tail);
+    // Keltner bands TA-Lib's EMA with its ATR; both seed recursively, so (like
+    // EMA/ATR) arcana and TA-Lib agree once the seed difference has decayed.
+    compare("kc_upper", &kc_u, &opt_col(&headers, &rows, "kc_upper"), CONVERGED_TOL, tail);
+    compare("kc_mid", &kc_m, &opt_col(&headers, &rows, "kc_mid"), CONVERGED_TOL, tail);
+    compare("kc_lower", &kc_l, &opt_col(&headers, &rows, "kc_lower"), CONVERGED_TOL, tail);
 }

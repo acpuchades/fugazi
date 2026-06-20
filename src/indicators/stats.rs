@@ -71,10 +71,81 @@ impl WindowStats {
         self.variance().sqrt()
     }
 
+    /// Mean absolute deviation about the window mean, `mean(|x - mean|)`. Unlike
+    /// `mean`/`variance` this scans the retained window (O(period)); used by
+    /// [`Cci`](super::Cci). Only meaningful once [`is_full`](Self::is_full).
+    pub fn mean_abs_dev(&self) -> Real {
+        let mean = self.mean();
+        let sum: Real = self.window.iter().map(|x| (x - mean).abs()).sum();
+        sum / self.period as Real
+    }
+
     pub fn reset(&mut self) {
         self.window.clear();
         self.sum = 0.0;
         self.sum_sq = 0.0;
+    }
+}
+
+/// Windowed weighted moving-average core: a linear-weight WMA over the last
+/// `period` samples (oldest weighted `1`, newest weighted `period`), updated in
+/// O(1) by carrying both the simple sum and the position-weighted sum. Operates
+/// on a plain `Real` stream (no source, no `Indicator` impl) so [`Wma`](super::Wma)
+/// can wrap a source while [`Hma`](super::Hma) reuses it to smooth a value it
+/// computes internally.
+#[derive(Debug, Clone)]
+pub(crate) struct WmaState {
+    period: usize,
+    window: VecDeque<Real>,
+    /// Simple sum of the window.
+    sum: Real,
+    /// Position-weighted sum, `Σ kᵢ·xᵢ` with `kᵢ ∈ 1..=period` oldest→newest.
+    weighted: Real,
+}
+
+impl WmaState {
+    pub fn new(period: usize) -> Self {
+        assert!(period > 0, "WMA period must be greater than zero");
+        Self {
+            period,
+            window: VecDeque::with_capacity(period),
+            sum: 0.0,
+            weighted: 0.0,
+        }
+    }
+
+    pub fn period(&self) -> usize {
+        self.period
+    }
+
+    /// Push a sample; returns the weighted average once the window is full
+    /// (`None` during warm-up).
+    pub fn update(&mut self, x: Real) -> Option<Real> {
+        if self.window.len() == self.period {
+            // Sliding the window down one step lowers every retained weight by 1
+            // (so `weighted` drops by the old simple sum) and the newcomer enters
+            // at the top weight; the evicted sample falls out of the simple sum.
+            let old = self.window.pop_front().expect("window is full");
+            self.weighted = self.weighted - self.sum + self.period as Real * x;
+            self.sum = self.sum - old + x;
+            self.window.push_back(x);
+        } else {
+            self.window.push_back(x);
+            self.weighted += self.window.len() as Real * x;
+            self.sum += x;
+        }
+        if self.window.len() == self.period {
+            let denom = (self.period * (self.period + 1) / 2) as Real;
+            Some(self.weighted / denom)
+        } else {
+            None
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.window.clear();
+        self.sum = 0.0;
+        self.weighted = 0.0;
     }
 }
 
@@ -109,6 +180,20 @@ impl<Op> WindowExtreme<Op> {
     pub fn reset(&mut self) {
         self.deque.clear();
         self.count = 0;
+    }
+
+    /// Number of steps since the current extremum was last seen (`0` if it is the
+    /// most recent sample), once `period` samples have been observed. Backs
+    /// [`Aroon`](super::Aroon), whose lines measure how recently the window high
+    /// / low occurred. On ties the *most recent* occurrence wins (the deque keeps
+    /// the newer of equal extrema), so `since` is the smallest such gap.
+    pub fn since(&self) -> Option<usize> {
+        if self.count >= self.period {
+            let current = self.count - 1;
+            self.deque.front().map(|&(idx, _)| current - idx)
+        } else {
+            None
+        }
     }
 }
 
