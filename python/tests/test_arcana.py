@@ -397,3 +397,71 @@ def test_keltner_rejects_identity_source():
 def test_donchian_rejects_mixed_domain_sources():
     with pytest.raises(TypeError):
         ta.donchian(ta.high(), ta.identity(), 3)
+
+
+# --- strategy layer: Wallet ------------------------------------------------
+
+
+def test_wallet_open_is_additive_and_books_funds():
+    w = ta.PaperWallet(1_000.0)
+    order = w.open("AAPL", "buy", 3.0, 100.0)  # bare number = units
+    assert order.symbol == "AAPL"
+    assert order.side == "buy"
+    assert order.quantity == pytest.approx(3.0)
+    w.open("AAPL", "buy", 2.0, 100.0)  # additive
+    assert w.position("AAPL") == pytest.approx(5.0)
+    assert w.funds == pytest.approx(1_000.0 - 5.0 * 100.0)
+
+
+def test_wallet_set_is_absolute_and_reverses():
+    w = ta.PaperWallet(10_000.0)
+    w.set("X", "buy", 4.0, 50.0)
+    assert w.set("X", "buy", 4.0, 50.0) is None  # idempotent
+    order = w.set("X", "sell", 4.0, 50.0)  # +4 -> -4 = sell 8
+    assert order.side == "sell"
+    assert order.quantity == pytest.approx(8.0)
+    assert w.position("X") == pytest.approx(-4.0)
+
+
+def test_wallet_relative_sizing():
+    w = ta.PaperWallet(1_000.0)
+    # 10% of funds / price 25 = 4 units
+    order = w.open("X", "buy", ta.Size.funds_frac(0.1), 25.0)
+    assert order.quantity == pytest.approx(4.0)
+    # set to 50% of the position -> sell 2
+    trimmed = w.set("X", "buy", ta.Size.position_frac(0.5), 25.0)
+    assert trimmed.side == "sell"
+    assert trimmed.quantity == pytest.approx(2.0)
+
+
+def test_wallet_close_and_equity():
+    w = ta.PaperWallet(1_000.0)
+    w.open("X", "buy", 4.0, 100.0)  # funds 600, +4 units
+    assert w.equity({"X": 120.0}) == pytest.approx(600.0 + 4.0 * 120.0)
+    w.close("X", 120.0)
+    assert w.is_flat()
+    assert w.funds == pytest.approx(1_080.0)
+    assert [o.side for o in w.orders()] == ["buy", "sell"]
+
+
+def test_wallet_drives_a_python_strategy():
+    """A 'strategy' is just Python code acting on the wallet each bar."""
+    fast = ta.sma(ta.close(), 2)
+    slow = ta.sma(ta.close(), 4)
+    enter = ta.sma(ta.close(), 2).crosses_above(ta.sma(ta.close(), 4))
+    exit_ = ta.sma(ta.close(), 2).crosses_below(ta.sma(ta.close(), 4))
+    del fast, slow
+
+    w = ta.PaperWallet(1_000.0)
+    for c in closes([10, 11, 12, 13, 14, 13, 11, 9, 8]):
+        if enter.update(c):
+            w.open("X", "buy", ta.Size.funds_frac(1.0), c.close)
+        elif exit_.update(c):
+            w.close("X", c.close)
+    assert len(w.orders()) >= 1
+
+
+def test_wallet_rejects_bad_side():
+    w = ta.PaperWallet(100.0)
+    with pytest.raises(ValueError):
+        w.open("X", "hodl", 1.0, 10.0)

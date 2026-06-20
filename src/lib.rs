@@ -6,7 +6,7 @@
 //! intermediate state to produce the next output in O(1) (or close to it).
 //! This makes the same code usable for live streaming and batch backtesting.
 //!
-//! The crate has two composable layers:
+//! The crate has three composable layers:
 //!
 //! * [`Indicator`] — the numeric *sources*. Each incrementally produces a
 //!   [`Real`] and **owns its own input source**, so composition is just nesting
@@ -21,6 +21,16 @@
 //!   built from two sources, so a condition like "RSI over 70" is a single
 //!   object; combine them further with the [`SignalExt`] combinators
 //!   (`and`/`or`/`xor`/`not`/`changed`).
+//! * [`Strategy`] — the *decision* layer. Unlike the pure layers below it, a
+//!   strategy *acts*: each bar its [`evaluate`](Strategy::evaluate) reads the
+//!   input and opens, scales, or closes positions on a [`Wallet`] handed to it
+//!   (`wallet.open`/`set`/`close`, with a [`Side`] and a [`Size`] that is
+//!   absolute or a fraction of funds/position). [`Wallet`] is a *trait*, so the
+//!   same strategy runs against a [`PaperWallet`] backtest or a live broker
+//!   wallet unchanged; the wallet owns the portfolio (funds, positions,
+//!   blotter). Acting on several symbols per bar makes it serve single- and
+//!   multi-asset strategies alike — direction, sizing, and short-selling are all
+//!   just what the strategy's code does.
 //!
 //! ```
 //! use arcana::prelude::*;
@@ -48,10 +58,12 @@ pub mod indicator;
 pub mod indicators;
 pub mod signal;
 pub mod signals;
+pub mod strategy;
 pub mod types;
 
 pub use indicator::Indicator;
 pub use signal::{Signal, SignalExt};
+pub use strategy::{Market, Order, PaperWallet, Side, Size, Strategy, Wallet};
 pub use types::{Candle, Real};
 
 /// Convenient glob-import of the core traits and types.
@@ -59,5 +71,6 @@ pub mod prelude {
     pub use crate::indicator::Indicator;
     pub use crate::signal::{Signal, SignalExt};
     pub use crate::signals::IndicatorExt;
+    pub use crate::strategy::{Market, Order, PaperWallet, Side, Size, Strategy, Wallet};
     pub use crate::types::{Candle, Real};
 }

@@ -19,7 +19,7 @@ arcana = "0.1"
 
 ## Concepts
 
-The crate has two composable layers:
+The crate has three composable layers:
 
 - **Indicators** are the numeric *sources*. Each produces a `Real` (`f64`) and
   **owns its own input source**, so composition is just nesting constructors:
@@ -30,9 +30,12 @@ The crate has two composable layers:
 - **Signals** are composable booleans. Comparisons are built from two sources, so
   a condition like "RSI over 70" is a single object. Combine signals with
   `and`/`or`/`xor`/`not`/`changed`.
+- **Strategies** are the decision layer. A strategy is *your own type*: each bar
+  it reads the input, advances its signals, and opens/closes positions on a
+  `Wallet` it's handed. See [Strategies](#strategies).
 
-Both share the same shape: state lives inside, `update(input)` advances one step,
-outputs are `None` until warmed up.
+The first two layers are *pure* value-producers sharing one shape: state lives
+inside, `update(input)` advances one step, outputs are `None` until warmed up.
 
 ## Quick start
 
@@ -114,6 +117,72 @@ just changed", i.e. `a.gt(b).and(a.gt(b).changed())`, which `crosses_above`
 builds for you. `changed()` is the single edge primitive (it fires on any
 toggle).
 
+## Strategies
+
+The decision layer turns signals into trades. A **strategy** is *your own type*
+implementing the `Strategy` trait: each bar it reads the input, advances its
+signals, and opens/scales/closes positions on a `Wallet` it is handed. The
+wallet — not the strategy — owns the portfolio (funds, positions, a trade
+blotter), so the *same* strategy runs against the in-memory `PaperWallet` for
+backtests or, because `Wallet` is a trait, a live broker / event-bus
+implementation living in a downstream crate.
+
+```rust
+use arcana::prelude::*;
+use arcana::indicators::{Current, Sma};
+
+// Own your signals; act on the wallet. `Size` is absolute units or a fraction of
+// funds / current position, and `Side` gives direction — so position sizing,
+// short-selling, and staying always-in-market are just what the code does.
+struct GoldenCross {
+    symbol: &'static str,
+    enter: Box<dyn Signal<Input = Candle>>,
+    exit: Box<dyn Signal<Input = Candle>>,
+}
+
+impl Strategy for GoldenCross {
+    type Input = Candle;
+    type Symbol = &'static str;
+
+    fn evaluate(&mut self, candle: Candle, wallet: &mut dyn Wallet<&'static str>) {
+        // Advance EVERY signal every bar (don't short-circuit, or a skipped one
+        // desyncs from the price stream), then act on the results.
+        let enter = self.enter.update(candle);
+        let exit = self.exit.update(candle);
+        if enter {
+            wallet.open(self.symbol, Side::Buy, Size::funds_frac(1.0), candle.close);
+        } else if exit {
+            wallet.close(self.symbol, candle.close);
+        }
+    }
+
+    fn reset(&mut self) {
+        self.enter.reset();
+        self.exit.reset();
+    }
+}
+
+let mut strat = GoldenCross {
+    symbol: "AAPL",
+    enter: Box::new(Sma::new(Current::close(), 3).crosses_above(Sma::new(Current::close(), 10))),
+    exit:  Box::new(Sma::new(Current::close(), 3).crosses_below(Sma::new(Current::close(), 10))),
+};
+let mut wallet = PaperWallet::new(10_000.0);
+
+# let feed: Vec<Candle> = Vec::new();
+for candle in feed {
+    strat.evaluate(candle, &mut wallet);
+}
+let _orders = wallet.orders();        // the trade blotter
+```
+
+`wallet.open` is additive (scale in), `set` targets an absolute position
+(an opposite-side `set` reverses), and `close` flattens. For **multi-asset**
+strategies, make `Input` a snapshot of several symbols (implementing `Market` so
+the wallet can price each) and act on more than one symbol per `evaluate` — see
+the `pairs` example. The trading/execution/event-bus machinery itself is out of
+scope for this crate; it belongs in a downstream project that implements `Wallet`.
+
 ## What's included
 
 - **Moving averages / smoothing:** `Sma`, `Ema`, `Rma` (Wilder/SMMA), `Wma`,
@@ -148,8 +217,12 @@ Runnable example programs live in [`examples/`](examples) — run any with
   as one object, fed one `Candle` per bar.
 - `multi_output` — reading multi-line indicators two ways: the `BollingerValue`
   struct and `Macd`'s per-component public fields.
-- `backtest` — a batch backtest over bundled monthly AAPL data: an SMA crossover
-  driving a long/flat equity curve versus buy-and-hold.
+- `backtest` — a batch backtest over bundled monthly AAPL data: a `GoldenCross`
+  strategy trading a `PaperWallet`, long/flat, versus a buy-and-hold benchmark.
+- `strategy` — a long/short, always-in-the-market reversal: one strategy type
+  using `wallet.set` and funds-fraction sizing.
+- `pairs` — a multi-asset strategy: two symbols traded from one wallet, driven by
+  a per-symbol snapshot input.
 
 A `cargo test` checks that every example still compiles.
 
@@ -171,6 +244,28 @@ for o, h, l, c, v in bars:
 
 # batch over a DataFrame (pandas or polars)
 df["ema20"] = ta.ema(ta.close(), 20).feed(df)
+```
+
+The strategy layer is exposed too: a `PaperWallet` you trade into with
+`open`/`set`/`close`, plus `Order` and `Size`. A "strategy" in Python is just
+your own code driving the wallet each bar:
+
+```python
+import arcana as ta
+
+enter = ta.sma(ta.close(), 3).crosses_above(ta.sma(ta.close(), 10))
+exit_ = ta.sma(ta.close(), 3).crosses_below(ta.sma(ta.close(), 10))
+wallet = ta.PaperWallet(10_000.0)
+
+for o, h, l, c, v in bars:
+    candle = ta.Candle(o, h, l, c, v)
+    went_long, went_flat = enter.update(candle), exit_.update(candle)  # advance both
+    if went_long:
+        wallet.open("AAPL", "buy", ta.Size.funds_frac(1.0), c)   # size: units / funds / position
+    elif went_flat:
+        wallet.close("AAPL", c)
+
+print(wallet.funds, wallet.position("AAPL"), wallet.orders())
 ```
 
 Build with `cd python && maturin develop --release`. See the

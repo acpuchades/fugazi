@@ -18,7 +18,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture
 
-Two composable layers. There is intentionally **no strategy/order layer** — it was prototyped then removed; do not reintroduce one without being asked.
+Three composable layers: indicators (numeric sources), signals (composable booleans), and strategies (the decision layer that trades into a wallet).
 
 ### Indicators = the numeric *sources* (`src/indicator.rs`, `src/indicators/`)
 
@@ -49,6 +49,18 @@ There is **no pipe/`then`/`Chain`** — chaining *is* construction.
 - `IndicatorExt` (blanket-impl'd for every `Real`-output indicator) is the fluent builder for **operators only** — comparisons (`gt`/`lt`/`ge`/`le`/`eq`/`ne`, `above`/`below`), arithmetic (`add`/`sub`/`mul`/`div`), lookback (`lag`/`diff`/`ratio`), rolling extremum (`rolling_max`/`rolling_min`), and the composed `crosses_above`/`crosses_below`. Named indicators (`Sma`, `Bollinger`, `StdDev`, `Stochastic`, …) are **not** exposed as builder methods; construct them via their own `::new`. Do not add `.sma()`/`.bollinger()`-style builders.
 - `SignalExt` (blanket-impl'd for every signal) composes signals: `and`/`or`/`xor`/`not` and the single edge primitive `changed` (a `Change` toggle detector).
 - **A crossover is not a primitive**: `crosses_above(a,b)` expands to `a.gt(b).and(a.gt(b).changed())` — "comparison is true *and* it just changed". (This clones the operands, so it builds two comparison instances; correct but ~2× the source work.)
+
+### Strategies = the decision layer (`src/strategy.rs`)
+
+Unlike the pure layers below it, a strategy **acts**: `Strategy` has `evaluate(&mut self, Input, &mut dyn Wallet<Symbol>)` and `reset()` (associated `Input`/`Symbol`). Each bar it reads the input and opens/scales/closes positions on the **wallet handed to it** — it returns nothing and holds no portfolio state. There is deliberately **no concrete strategy / rule engine / policy traits in the crate**: every strategy is the user's own type implementing the trait (a struct holding its signals; `evaluate` calls wallet methods). This evolved through several discarded designs (pure orders-out, policy objects, a `(signal, action)` `RuleStrategy`) — do not reintroduce those without being asked.
+
+All in `src/strategy.rs`:
+- **`Wallet<Sym>` is a trait** (the portfolio interface taken as `&mut dyn`) — the single **seam** between pure arcana and a downstream execution system. arcana stays pure (ships only the in-memory paper impl); a downstream crate implements `Wallet` with a type whose `trade` *publishes to an event bus / routes to a broker*. Implementors supply three primitives — `funds()`, `position(&Sym)`, and `trade(symbol, delta, price)` (execute a signed delta) — and inherit **default methods** `open` (additive — scale in), `set` (absolute target — opposite side reverses, same side idempotent), and `close` (flat). The defaults resolve `Size` and compute the delta, so additive/absolute/relative-sizing logic lives once; only execution is per-impl. Each returns `Option<Order>` (None = nothing to trade). NB: the trading/event-bus/market system itself is **not** in arcana — it's a separate project that imports arcana; keep market/IO code out of this crate.
+- **`PaperWallet<Sym>`** is the built-in **pure** `Wallet` impl: in-memory `funds` + `HashMap<Sym,Real>` positions + a blotter (`Vec<Order>`); its `trade` assumes the fill at the passed price and books it. Caller-owned; adds inherent `new`, `is_flat`, `positions()`, `equity(&impl Market)`, `orders()`, `clear_blotter()`.
+- **`Size`** (the magnitude vocabulary): `Units(n)` absolute, `FundsFraction(f)` (= `f·funds/price` units), `PositionFraction(f)` (= `f·|position|`). `resolve(price, position, funds) -> magnitude`. Direction comes from `Side` (`Buy`/`Sell`, `.sign()`), not the size.
+- `Order<Sym>` (`{ symbol, side, quantity }`); `Order::from_delta(symbol, delta)` builds the buy/sell for a position change (`None` within `DEFAULT_EPSILON`).
+- **`Market<Sym>` trait** (`price(&self, &Sym) -> Real`) is how `Input` prices each symbol: `Candle` impls it (every symbol = its close) for single-asset; a multi-asset snapshot returns a price per symbol. Several `wallet.*` calls in one `evaluate` ⇒ multi-asset/pairs in the same type.
+- Sizing/direction/short-selling/always-in-market are all just *what the strategy's code does* — no flags. Python (`python/src/lib.rs`) binds `PaperWallet`/`Order`/`Size` (sides as `"buy"`/`"sell"` strings, symbols as `str`); a Python "strategy" is plain Python code driving a `PaperWallet`.
 
 ### Generic transform ops (`src/indicators/ops.rs`)
 

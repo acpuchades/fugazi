@@ -208,3 +208,47 @@ for bar in stream:
 # batch: a boolean Series/array over the whole frame
 entries = golden().feed(df)
 ```
+
+## Trading: the wallet
+
+The strategy layer is exposed as a **wallet** you trade into. There is no
+strategy class to subclass — a "strategy" in Python is just your own code that,
+each bar, reads signals and calls wallet methods. `PaperWallet` is the built-in,
+in-memory book (funds + positions + a trade blotter); live execution belongs in
+your own code, not here.
+
+```python
+import arcana as ta
+
+wallet = ta.PaperWallet(10_000.0)          # seed with cash
+
+# open: additive (scale in) · set: absolute target (opposite side reverses) · close: flat
+wallet.open("AAPL", "buy", 10, 185.0)                    # 10 units @ 185 (a number = units)
+wallet.open("AAPL", "buy", ta.Size.funds_frac(0.25), 185.0)   # 25% of funds, sized at price
+wallet.set("AAPL", "buy", ta.Size.position_frac(0.5), 190.0)  # trim to 50% of the position
+wallet.close("AAPL", 190.0)                              # flatten
+
+wallet.funds                 # cash balance
+wallet.position("AAPL")      # signed position (negative = short)
+wallet.positions()           # {symbol: quantity}
+wallet.equity({"AAPL": 190.0})   # funds + positions marked at given prices
+wallet.orders()              # the blotter: list of Order(symbol, side, quantity)
+```
+
+Sizes are an absolute number of units, or `ta.Size.funds_frac(f)` /
+`ta.Size.position_frac(f)`; sides are `"buy"`/`"sell"`. A full strategy loop —
+advancing **every** signal each bar before acting:
+
+```python
+enter = ta.sma(ta.close(), 3).crosses_above(ta.sma(ta.close(), 10))
+exit_ = ta.sma(ta.close(), 3).crosses_below(ta.sma(ta.close(), 10))
+wallet = ta.PaperWallet(10_000.0)
+
+for o, h, l, c, v in bars:
+    candle = ta.Candle(o, h, l, c, v)
+    went_long, went_flat = enter.update(candle), exit_.update(candle)
+    if went_long:
+        wallet.open("AAPL", "buy", ta.Size.funds_frac(1.0), c)
+    elif went_flat:
+        wallet.close("AAPL", c)
+```
