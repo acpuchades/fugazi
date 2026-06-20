@@ -137,6 +137,22 @@ Multi-line indicators expose their components as fields and a value struct:
 Comparisons are tolerance-aware (default `1e-8`, overridable via
 `Gt::with_epsilon(..)`) so floating-point noise doesn't cause spurious flips.
 
+## Examples
+
+Runnable example programs live in [`examples/`](examples) — run any with
+`cargo run --example <name>`:
+
+- `streaming` — an indicator over a bare `f64` price feed (`Identity` source),
+  handling the `Option` warm-up.
+- `candle_signal` — a compound entry rule (EMA crossover gated by an RSI filter)
+  as one object, fed one `Candle` per bar.
+- `multi_output` — reading multi-line indicators two ways: the `BollingerValue`
+  struct and `Macd`'s per-component public fields.
+- `backtest` — a batch backtest over bundled monthly AAPL data: an SMA crossover
+  driving a long/flat equity curve versus buy-and-hold.
+
+A `cargo test` checks that every example still compiles.
+
 ## Python
 
 Python bindings are available in [`python/`](python). Same model — compose by
