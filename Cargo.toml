@@ -12,3 +12,10 @@ name = "arcana"
 path = "src/lib.rs"
 
 [dependencies]
+
+# The core crate stays dependency-free. The Python bindings live in their own
+# workspace member (`python/`), which is the only crate that pulls in PyO3 —
+# see that crate's README for build instructions.
+[workspace]
+members = ["python"]
+resolver = "2"

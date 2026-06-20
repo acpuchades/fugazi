@@ -137,6 +137,29 @@ Multi-line indicators expose their components as fields and a value struct:
 Comparisons are tolerance-aware (default `1e-8`, overridable via
 `Gt::with_epsilon(..)`) so floating-point noise doesn't cause spurious flips.
 
+## Python
+
+Python bindings are available in [`python/`](python). Same model — compose by
+nesting constructors, then either feed one `Candle` at a time or compute a whole
+series in one shot with `feed(df)`. The output mirrors the input (pandas in →
+pandas out, polars in → polars out, else a NumPy array):
+
+```python
+import arcana as ta
+
+# streaming
+signal = ta.close().crosses_above(ta.ema(ta.close(), 20))
+for o, h, l, c, v in bars:
+    if signal.update(ta.Candle(o, h, l, c, v)):
+        ...  # entry trigger
+
+# batch over a DataFrame (pandas or polars)
+df["ema20"] = ta.ema(ta.close(), 20).feed(df)
+```
+
+Build with `cd python && maturin develop --release`. See the
+[Python README](python/README.md) for the full API.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

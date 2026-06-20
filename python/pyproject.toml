@@ -1,0 +1,25 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "arcana"
+version = "0.1.0"
+description = "Python bindings for the arcana incremental technical-analysis library"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["trading", "technical-analysis", "indicators", "finance", "incremental"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "numpy", "pandas", "polars"]
+
+[tool.maturin]
+# The crate's `[lib] name = "arcana"` produces the importable module.
+module-name = "arcana"
+features = ["pyo3/extension-module"]

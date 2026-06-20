@@ -1,0 +1,18 @@
+[package]
+name = "arcana-python"
+version = "0.1.0"
+edition = "2024"
+description = "Python bindings for the arcana incremental technical-analysis library"
+license = "MIT"
+publish = false
+
+# The compiled extension module is imported as `arcana` from Python. The package
+# is named `arcana-python` so it does not collide with the core `arcana` crate it
+# depends on (renamed to `arcana_core` below to avoid an in-crate name clash).
+[lib]
+name = "arcana"
+crate-type = ["cdylib"]
+
+[dependencies]
+arcana_core = { package = "arcana", path = ".." }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39"] }
