@@ -49,7 +49,8 @@ let mut signal = Current::close().crosses_above(Ema::new(Current::close(), 20));
 
 # let feed: Vec<Candle> = Vec::new();
 for candle in feed {
-    if signal.update(candle) {
+    signal.update(candle);
+    if signal.is_true() {
         // entry trigger fires on the bar the close crosses above EMA-20
     }
 }
@@ -62,12 +63,13 @@ way you'd expect — RSI of the close, fed one `Candle` per bar:
 use arcana::prelude::*;
 use arcana::indicators::{Current, Rsi};
 
-// "RSI(14) of the close, over 70" as a single Signal<Input = Candle>.
+// "RSI(14) of the close, over 70" as a single `Signal` (a `Candle`-fed `bool`).
 let mut overbought = Rsi::new(Current::close(), 14).above(70.0);
 
 # let feed: Vec<Candle> = Vec::new();
 for candle in feed {
-    if overbought.update(candle) { /* ... */ }
+    overbought.update(candle);
+    if overbought.is_true() { /* ... */ }
 }
 ```
 
@@ -101,7 +103,7 @@ let _above = Current::close().gt(Ema::new(Current::close(), 50));
 let _cross = Ema::new(Current::close(), 10).crosses_above(Ema::new(Current::close(), 30));
 ```
 
-The `SignalExt` combinators compose signals:
+The `BoolIndicatorExt` combinators compose signals:
 
 ```rust
 use arcana::prelude::*;
@@ -159,8 +161,8 @@ use arcana::indicators::{Current, Sma};
 // short-selling, and staying always-in-market are just what the code does.
 struct GoldenCross {
     symbol: &'static str,
-    enter: Box<dyn Signal<Input = Candle>>,
-    exit: Box<dyn Signal<Input = Candle>>,
+    enter: Box<dyn Signal>,
+    exit: Box<dyn Signal>,
 }
 
 impl Strategy for GoldenCross {
@@ -176,9 +178,9 @@ impl Strategy for GoldenCross {
 
     fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
         // The wallet is priced from outside; `trade` just reads signals and acts.
-        if self.enter.value() {
+        if self.enter.is_true() {
             let _ = wallet.set(self.symbol, Side::Buy, Size::value_frac(1.0));
-        } else if self.exit.value() {
+        } else if self.exit.is_true() {
             let _ = wallet.close(self.symbol);
         }
     }

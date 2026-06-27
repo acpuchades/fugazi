@@ -2,7 +2,7 @@
 
 use arcana::indicators::{Current, Ema, Identity, Rsi, Sma, Value};
 use arcana::prelude::*;
-use arcana::signals::{Gt, Lt};
+use arcana::indicators::{Gt, Lt};
 
 #[test]
 fn rsi_threshold_is_a_single_signal() {
@@ -12,7 +12,10 @@ fn rsi_threshold_is_a_single_signal() {
     for step in 0..20 {
         overbought.update(10.0 + step as Real);
     }
-    assert!(overbought.value(), "monotonic rise should push RSI above 70");
+    assert!(
+        overbought.is_true(),
+        "monotonic rise should push RSI above 70"
+    );
 }
 
 #[test]
@@ -25,7 +28,7 @@ fn compound_signal_with_combinators() {
     for price in [101.0, 100.5, 101.2, 102.0] {
         sig.update(price);
     }
-    let _ = sig.value();
+    let _ = sig.is_true();
 }
 
 #[test]
@@ -35,7 +38,8 @@ fn moving_average_crossover() {
     let mut fired = false;
     // Dip then sharp rally so the fast MA crosses above the slow MA.
     for price in [10.0, 9.0, 8.0, 7.0, 12.0, 14.0, 16.0] {
-        fired |= cross.update(price);
+        cross.update(price);
+        fired |= cross.is_true();
     }
     assert!(fired, "fast MA should cross above slow MA on the rally");
 }
@@ -49,7 +53,8 @@ fn close_crosses_above_ema_from_candles() {
     let mut fired = false;
     // Flat (close == ema) then a jump so close crosses above its own EMA.
     for close in [10.0, 10.0, 10.0, 10.0, 20.0] {
-        fired |= sig.update(bar(close));
+        sig.update(bar(close));
+        fired |= sig.is_true();
     }
     assert!(fired, "close should cross above its EMA on the jump");
 }

@@ -17,10 +17,12 @@
 //!   constant, [`Identity`] for the raw input, `Current::*` for candle fields)
 //!   terminate the chain. Bar indicators ([`Atr`](crate::indicators::Atr),
 //!   [`Adx`](crate::indicators::Adx)) consume a [`Candle`] directly.
-//! * [`Signal`] — incremental, *composable* booleans. Comparison signals are
-//!   built from two sources, so a condition like "RSI over 70" is a single
-//!   object; combine them further with the [`SignalExt`] combinators
-//!   (`and`/`or`/`xor`/`not`/`changed`).
+//! * [`Signal`] — incremental, *composable* booleans, which are simply
+//!   [`Indicator`]s whose `Output` is `bool`. Comparison signals are built from
+//!   two sources, so a condition like "RSI over 70" is a single object; combine
+//!   them further with the [`BoolIndicatorExt`] combinators (`and`/`or`/`xor`/`not`/`changed`).
+//!   `Signal` itself names a `bool` indicator fed a [`Candle`] — what a strategy
+//!   stores behind `Box<dyn Signal>`.
 //! * [`Strategy`] — the *decision* layer. Unlike the pure layers below it, a
 //!   strategy *acts*, in two steps: [`update`](Strategy::update) advances its
 //!   signals (touching only itself), then [`trade`](Strategy::trade) reads that
@@ -38,13 +40,13 @@
 //! use arcana::prelude::*;
 //! use arcana::indicators::{Identity, Rsi};
 //!
-//! // "RSI(14) over 70" as a single Signal<Input = Real>. Indicators own their
-//! // source, so `Identity` feeds the raw price stream into the RSI.
+//! // "RSI(14) over 70" as a single bool-valued indicator over a raw price
+//! // stream. Indicators own their source, so `Identity` feeds it into the RSI.
 //! let mut overbought = Rsi::new(Identity::new(), 14).above(70.0);
 //! for price in [44.0, 44.3, 44.1, 43.6, 44.3, 44.8, 45.1, 45.6] {
 //!     overbought.update(price);
 //! }
-//! let _ = overbought.value();
+//! let _ = overbought.is_true();
 //! ```
 //!
 //! [`Value`]: crate::indicators::Value
@@ -59,13 +61,13 @@ struct ReadmeDoctests;
 pub mod indicator;
 pub mod indicators;
 pub mod signal;
-pub mod signals;
 pub mod strategies;
 pub mod strategy;
 pub mod types;
 
 pub use indicator::Indicator;
-pub use signal::{Signal, SignalExt};
+pub use indicators::BoolIndicatorExt;
+pub use signal::Signal;
 pub use strategy::{
     Order, PaperWallet, Quantity, Reference, Side, Size, Strategy, Wallet, WalletError,
 };
@@ -74,8 +76,8 @@ pub use types::{Candle, Real};
 /// Convenient glob-import of the core traits and types.
 pub mod prelude {
     pub use crate::indicator::Indicator;
-    pub use crate::signal::{Signal, SignalExt};
-    pub use crate::signals::IndicatorExt;
+    pub use crate::indicators::{BoolIndicatorExt, IndicatorExt};
+    pub use crate::signal::Signal;
     pub use crate::strategy::{
         Order, PaperWallet, Quantity, Reference, Side, Size, Strategy, Wallet, WalletError,
     };

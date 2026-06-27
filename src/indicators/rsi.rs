@@ -75,7 +75,7 @@ impl<S: Indicator<Output = Real>> Indicator for Rsi<S> {
         self.value
     }
 
-    fn current(&self) -> Option<Real> {
+    fn value(&self) -> Option<Real> {
         self.value
     }
 

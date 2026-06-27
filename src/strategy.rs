@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::hash::Hash;
 
-use crate::signals::DEFAULT_EPSILON;
+use crate::indicators::DEFAULT_EPSILON;
 use crate::types::Real;
 
 /// An incremental trading strategy — the *decision* layer above indicators and
@@ -434,9 +434,8 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::{Current, Sma};
+    use crate::indicators::{BoolIndicatorExt, Current, IndicatorExt, Sma};
     use crate::signal::Signal;
-    use crate::signals::IndicatorExt;
     use crate::types::Candle;
 
     fn bar(close: Real) -> Candle {
@@ -448,11 +447,18 @@ mod tests {
         let mut w: PaperWallet<&str> = PaperWallet::new(1_000.0);
         w.update("X", Reference(100.0));
         assert_eq!(
-            w.set_position(Quantity { symbol: "X", amount: 3.0 }),
+            w.set_position(Quantity {
+                symbol: "X",
+                amount: 3.0
+            }),
             Ok(Some(Order::new("X", Side::Buy, 3.0)))
         );
         // Setting a larger target buys the difference (scale in).
-        w.set_position(Quantity { symbol: "X", amount: 5.0 }).unwrap();
+        w.set_position(Quantity {
+            symbol: "X",
+            amount: 5.0,
+        })
+        .unwrap();
         assert_eq!(w.position(&"X").amount, 5.0);
         assert_eq!(w.funds().0, 1_000.0 - 5.0 * 100.0);
     }
@@ -533,7 +539,10 @@ mod tests {
             Err(WalletError::UnknownPrice)
         );
         assert_eq!(
-            w.set_position(Quantity { symbol: "X", amount: 1.0 }),
+            w.set_position(Quantity {
+                symbol: "X",
+                amount: 1.0
+            }),
             Err(WalletError::UnknownPrice)
         );
     }
@@ -560,7 +569,10 @@ mod tests {
             Err(WalletError::InvalidPrice)
         );
         assert_eq!(
-            w.set_position(Quantity { symbol: "X", amount: 1.0 }),
+            w.set_position(Quantity {
+                symbol: "X",
+                amount: 1.0
+            }),
             Err(WalletError::InvalidPrice)
         );
     }
@@ -570,18 +582,20 @@ mod tests {
     /// the wallet owns the portfolio.
     struct GoldenCross {
         symbol: &'static str,
-        enter: Box<dyn Signal<Input = Candle>>,
-        exit: Box<dyn Signal<Input = Candle>>,
+        enter: Box<dyn Signal>,
+        exit: Box<dyn Signal>,
     }
     impl GoldenCross {
         fn new(symbol: &'static str, fast: usize, slow: usize) -> Self {
             Self {
                 symbol,
                 enter: Box::new(
-                    Sma::new(Current::close(), fast).crosses_above(Sma::new(Current::close(), slow)),
+                    Sma::new(Current::close(), fast)
+                        .crosses_above(Sma::new(Current::close(), slow)),
                 ),
                 exit: Box::new(
-                    Sma::new(Current::close(), fast).crosses_below(Sma::new(Current::close(), slow)),
+                    Sma::new(Current::close(), fast)
+                        .crosses_below(Sma::new(Current::close(), slow)),
                 ),
             }
         }
@@ -596,9 +610,9 @@ mod tests {
         }
         fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
             let flat = wallet.position(&self.symbol).amount.abs() <= DEFAULT_EPSILON;
-            if self.enter.value() && flat {
+            if self.enter.is_true() && flat {
                 let _ = wallet.set(self.symbol, Side::Buy, Size::value_frac(1.0));
-            } else if self.exit.value() && !flat {
+            } else if self.exit.is_true() && !flat {
                 let _ = wallet.close(self.symbol);
             }
         }
@@ -612,8 +626,14 @@ mod tests {
     fn custom_strategy_trades_into_its_wallet() {
         let mut strat = GoldenCross::new("X", 2, 4);
         let mut w: PaperWallet<&'static str> = PaperWallet::new(1_000.0);
-        // Rising then falling closes to trigger a golden then death cross.
-        for px in [10.0, 11.0, 12.0, 13.0, 14.0, 13.0, 11.0, 9.0, 8.0] {
+        // Decline first so the fast/slow MAs warm up with fast *below* slow, then
+        // rally (a genuine golden cross) and fall again (a death cross). The
+        // initial decline matters: a comparison reads `None` until warmed, so an
+        // edge only registers once both MAs are ready — the cross must happen
+        // after warm-up, not coincide with it.
+        for px in [
+            14.0, 13.0, 12.0, 11.0, 10.0, 11.0, 13.0, 15.0, 17.0, 15.0, 12.0, 9.0, 7.0,
+        ] {
             w.update("X", Reference(px));
             strat.update(bar(px));
             strat.trade(&mut w);
@@ -640,8 +660,14 @@ mod tests {
         fn update(&mut self, _snap: Pair) {}
         fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
             if wallet.position(&"A").amount == 0.0 && wallet.position(&"B").amount == 0.0 {
-                let _ = wallet.set_position(Quantity { symbol: "A", amount: 3.0 });
-                let _ = wallet.set_position(Quantity { symbol: "B", amount: -2.0 });
+                let _ = wallet.set_position(Quantity {
+                    symbol: "A",
+                    amount: 3.0,
+                });
+                let _ = wallet.set_position(Quantity {
+                    symbol: "B",
+                    amount: -2.0,
+                });
             }
         }
         fn reset(&mut self) {}

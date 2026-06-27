@@ -36,7 +36,7 @@ impl Indicator for Vwap {
         self.value
     }
 
-    fn current(&self) -> Option<Real> {
+    fn value(&self) -> Option<Real> {
         self.value
     }
 
@@ -55,10 +55,16 @@ mod tests {
     fn weights_price_by_volume() {
         let mut vwap = Vwap::new();
         // typical = close here; VWAP of one bar is its typical price.
-        assert_eq!(vwap.update(Candle::new(10.0, 10.0, 10.0, 10.0, 100.0)), Some(10.0));
+        assert_eq!(
+            vwap.update(Candle::new(10.0, 10.0, 10.0, 10.0, 100.0)),
+            Some(10.0)
+        );
         // Second bar at typical 20 with 3x the volume pulls VWAP toward 20:
         // (10*100 + 20*300) / 400 = 17.5
-        assert_eq!(vwap.update(Candle::new(20.0, 20.0, 20.0, 20.0, 300.0)), Some(17.5));
+        assert_eq!(
+            vwap.update(Candle::new(20.0, 20.0, 20.0, 20.0, 300.0)),
+            Some(17.5)
+        );
     }
 
     #[test]

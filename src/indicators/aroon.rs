@@ -110,7 +110,7 @@ impl Indicator for Aroon {
         }
     }
 
-    fn current(&self) -> Option<AroonValue> {
+    fn value(&self) -> Option<AroonValue> {
         match (self.up, self.down, self.oscillator) {
             (Some(up), Some(down), Some(oscillator)) => Some(AroonValue {
                 up,

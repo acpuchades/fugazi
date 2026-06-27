@@ -37,16 +37,18 @@ impl Snapshot {
 struct DualSma {
     a: &'static str,
     b: &'static str,
-    a_enter: Box<dyn Signal<Input = Candle>>,
-    a_exit: Box<dyn Signal<Input = Candle>>,
-    b_enter: Box<dyn Signal<Input = Candle>>,
-    b_exit: Box<dyn Signal<Input = Candle>>,
+    a_enter: Box<dyn Signal>,
+    a_exit: Box<dyn Signal>,
+    b_enter: Box<dyn Signal>,
+    b_exit: Box<dyn Signal>,
 }
 
 impl DualSma {
     fn new(a: &'static str, b: &'static str, fast: usize, slow: usize) -> Self {
-        let cross_up = || Sma::new(Current::close(), fast).crosses_above(Sma::new(Current::close(), slow));
-        let cross_dn = || Sma::new(Current::close(), fast).crosses_below(Sma::new(Current::close(), slow));
+        let cross_up =
+            || Sma::new(Current::close(), fast).crosses_above(Sma::new(Current::close(), slow));
+        let cross_dn =
+            || Sma::new(Current::close(), fast).crosses_below(Sma::new(Current::close(), slow));
         Self {
             a,
             b,
@@ -72,14 +74,14 @@ impl Strategy for DualSma {
 
     fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
         // Split capital half to each name: `value_frac(0.5)` is 50% of equity.
-        if self.a_enter.value() {
+        if self.a_enter.is_true() {
             let _ = wallet.set(self.a, Side::Buy, Size::value_frac(0.5));
-        } else if self.a_exit.value() {
+        } else if self.a_exit.is_true() {
             let _ = wallet.close(self.a);
         }
-        if self.b_enter.value() {
+        if self.b_enter.is_true() {
             let _ = wallet.set(self.b, Side::Buy, Size::value_frac(0.5));
-        } else if self.b_exit.value() {
+        } else if self.b_exit.is_true() {
             let _ = wallet.close(self.b);
         }
     }

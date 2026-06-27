@@ -30,7 +30,7 @@ use crate::types::Real;
 /// instances — the same clone-the-operands tradeoff [`crosses_above`] already
 /// makes (correct, at roughly the source work per component).
 ///
-/// [`crosses_above`]: crate::signals::IndicatorExt::crosses_above
+/// [`crosses_above`]: crate::indicators::IndicatorExt::crosses_above
 #[derive(Debug, Clone)]
 pub struct Component<I: Indicator> {
     source: I,
@@ -62,7 +62,7 @@ impl<I: Indicator> Indicator for Component<I> {
         self.value
     }
 
-    fn current(&self) -> Option<Real> {
+    fn value(&self) -> Option<Real> {
         self.value
     }
 
@@ -76,8 +76,7 @@ impl<I: Indicator> Indicator for Component<I> {
 mod tests {
     use crate::indicator::Indicator;
     use crate::indicators::{Bollinger, Current, Macd};
-    use crate::signal::Signal;
-    use crate::signals::IndicatorExt;
+    use crate::indicators::{BoolIndicatorExt, IndicatorExt};
     use crate::types::{Candle, Real};
 
     fn bar(close: Real) -> Candle {
@@ -105,7 +104,8 @@ mod tests {
         for p in [
             20.0, 19.0, 18.0, 17.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0,
         ] {
-            fired |= bullish.update(bar(p));
+            bullish.update(bar(p));
+            fired |= bullish.is_true();
         }
         assert!(fired, "expected a bullish MACD crossover");
     }
@@ -118,7 +118,10 @@ mod tests {
         let mut lower = Bollinger::new(Current::close(), 5, 2.0).lower();
         let mut reference = Bollinger::new(Current::close(), 5, 2.0);
         for p in [10.0, 10.1, 9.9, 10.0, 10.05, 18.0, 12.0, 11.0, 9.0, 8.5] {
-            assert_eq!(lower.update(bar(p)), reference.update(bar(p)).map(|v| v.lower));
+            assert_eq!(
+                lower.update(bar(p)),
+                reference.update(bar(p)).map(|v| v.lower)
+            );
         }
     }
 }

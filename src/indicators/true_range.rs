@@ -38,7 +38,7 @@ impl Indicator for TrueRange {
         self.value
     }
 
-    fn current(&self) -> Option<Real> {
+    fn value(&self) -> Option<Real> {
         self.value
     }
 

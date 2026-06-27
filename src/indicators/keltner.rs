@@ -107,7 +107,7 @@ impl<S: Indicator<Input = Candle, Output = Real>> Indicator for Keltner<S> {
         }
     }
 
-    fn current(&self) -> Option<KeltnerValue> {
+    fn value(&self) -> Option<KeltnerValue> {
         match (self.upper, self.middle, self.lower) {
             (Some(upper), Some(middle), Some(lower)) => Some(KeltnerValue {
                 upper,

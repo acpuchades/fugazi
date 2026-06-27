@@ -36,7 +36,7 @@ def test_sma_warms_up_then_averages():
     assert out[2] == pytest.approx(2.0)  # mean(1,2,3)
     assert out[3] == pytest.approx(3.0)  # mean(2,3,4)
     assert sma.is_ready()
-    assert sma.current() == pytest.approx(3.0)
+    assert sma.value() == pytest.approx(3.0)
 
 
 def test_composition_ema_of_sma():
@@ -57,15 +57,15 @@ def test_source_is_reusable_after_composition():
     bars = closes([1.0, 2.0, 3.0, 4.0])
     feed(a, bars)
     feed(b, bars)
-    assert a.current() is not None
-    assert b.current() == pytest.approx(3.0)
+    assert a.value() is not None
+    assert b.value() == pytest.approx(3.0)
 
 
 def test_rsi_above_signal():
     sig = ta.rsi(ta.close(), 2).above(70.0)
     fired = any(feed(sig, closes([10.0, 11.0, 12.0, 13.0, 14.0])))
     assert fired
-    assert isinstance(sig.value(), bool)
+    assert isinstance(sig.is_true(), bool)
 
 
 def test_crosses_above_fires_once():
@@ -79,7 +79,7 @@ def test_signal_combination_operators():
     rising = ta.close().crosses_above(ta.value(13.5))
     combined = overbought.and_(rising)
     feed(combined, closes([10.0, 11.0, 12.0, 13.0, 14.0]))
-    assert isinstance(combined.value(), bool)
+    assert isinstance(combined.is_true(), bool)
 
 
 def test_not_inverts_each_step():
@@ -133,7 +133,7 @@ def test_reset_clears_state():
     assert sma.is_ready()
     sma.reset()
     assert not sma.is_ready()
-    assert sma.current() is None
+    assert sma.value() is None
 
 
 def test_feed_plain_input_returns_numpy_with_nan_warmup():

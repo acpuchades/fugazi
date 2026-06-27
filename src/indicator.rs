@@ -9,8 +9,9 @@
 ///
 /// Concrete indicators additionally expose their latest output(s) as **public
 /// fields** that are refreshed on every `update`. A single-output indicator
-/// exposes a field named `value` (mirroring [`current`](Indicator::current));
-/// multi-output indicators expose one named field per output and set
+/// exposes a field named `value` — the same `Option` the
+/// [`value`](Indicator::value) method returns; multi-output indicators expose one
+/// named field per output and set
 /// [`Output`](Indicator::Output) to a struct holding them all.
 pub trait Indicator {
     /// The per-sample input — commonly [`Real`](crate::Real) or
@@ -26,11 +27,11 @@ pub trait Indicator {
     fn update(&mut self, input: Self::Input) -> Option<Self::Output>;
 
     /// The most recent output, without advancing state.
-    fn current(&self) -> Option<Self::Output>;
+    fn value(&self) -> Option<Self::Output>;
 
     /// Whether enough samples have been observed to produce a valid output.
     fn is_ready(&self) -> bool {
-        self.current().is_some()
+        self.value().is_some()
     }
 
     /// Clear all state, returning the indicator to its freshly-constructed

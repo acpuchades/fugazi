@@ -41,7 +41,10 @@ impl Indicator for WilliamsR {
     type Output = Real;
 
     fn update(&mut self, candle: Candle) -> Option<Real> {
-        self.value = match (self.highest.update(candle.high), self.lowest.update(candle.low)) {
+        self.value = match (
+            self.highest.update(candle.high),
+            self.lowest.update(candle.low),
+        ) {
             (Some(hh), Some(ll)) => {
                 let range = hh - ll;
                 Some(if range == 0.0 {
@@ -55,7 +58,7 @@ impl Indicator for WilliamsR {
         self.value
     }
 
-    fn current(&self) -> Option<Real> {
+    fn value(&self) -> Option<Real> {
         self.value
     }
 

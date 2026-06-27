@@ -1,6 +1,6 @@
 use crate::indicator::Indicator;
-use crate::indicators::{Component, Dmi};
 use crate::indicators::smoothing::WilderState;
+use crate::indicators::{Component, Dmi};
 use crate::types::{Candle, Real};
 
 /// The directional outputs of [`Adx`].
@@ -22,7 +22,7 @@ pub struct AdxValue {
 ///
 /// `+DI` and `-DI` become available after `period` directional bars; `adx`
 /// follows after a further `period` bars. The directional fields are exposed
-/// individually; [`current`](Indicator::current) / [`update`](Indicator::update)
+/// individually; [`value`](Indicator::value) / [`update`](Indicator::update)
 /// only yield a value once `adx` itself is ready.
 #[derive(Debug, Clone)]
 pub struct Adx {
@@ -90,10 +90,10 @@ impl Indicator for Adx {
             self.adx = self.dx.update(dx);
         }
 
-        self.current()
+        self.value()
     }
 
-    fn current(&self) -> Option<AdxValue> {
+    fn value(&self) -> Option<AdxValue> {
         match (self.plus_di, self.minus_di, self.adx) {
             (Some(plus_di), Some(minus_di), Some(adx)) => Some(AdxValue {
                 plus_di,

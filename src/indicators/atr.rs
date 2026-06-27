@@ -42,7 +42,7 @@ impl Indicator for Atr {
         self.value
     }
 
-    fn current(&self) -> Option<Real> {
+    fn value(&self) -> Option<Real> {
         self.value
     }
 

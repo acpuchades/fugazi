@@ -111,10 +111,10 @@ impl Indicator for Dmi {
             self.minus_di = Some(minus_di);
         }
 
-        self.current()
+        self.value()
     }
 
-    fn current(&self) -> Option<DmiValue> {
+    fn value(&self) -> Option<DmiValue> {
         match (self.plus_di, self.minus_di) {
             (Some(plus_di), Some(minus_di)) => Some(DmiValue { plus_di, minus_di }),
             _ => None,

@@ -5,16 +5,21 @@
 //! small value struct). Leaf sources [`Value`] (a constant) and [`Identity`]
 //! (the raw input) let literals and prices take part in composition.
 //!
-//! Generic transform operators (arithmetic `Add`/`Sub`/`Mul`/`Div`, the
-//! lookback ops `Lag`/`Diff`/`Ratio`, and the rolling extremum
-//! `RollingMax`/`RollingMin`) live in [`ops`]; comparison operators, which yield
-//! signals, live in [`signals::compare`](crate::signals::compare).
+//! Generic transform operators live in [`ops`] (arithmetic `Add`/`Sub`/`Mul`/`Div`,
+//! the lookback ops `Lag`/`Diff`/`Ratio`, and the rolling extremum
+//! `RollingMax`/`RollingMin`), with the fluent [`IndicatorExt`] builder in
+//! [`ext`]. Boolean conditions are also indicators — those yielding `bool`:
+//! comparison operators live in [`compare`] and the boolean connectives /
+//! edge detectors in [`logic`].
 //!
 //! Shared lower-level cores keep the math in one place: [`smoothing`]'s
 //! `EmaState`/`WilderState` back [`Ema`]/[`Macd`] and [`Rma`]/[`Rsi`]/[`Atr`]/
 //! [`Adx`]; [`stats`]'s `WindowStats` backs [`Sma`]/[`StdDev`]/[`Bollinger`] and
 //! its `WindowExtreme` backs the rolling extremum and [`Stochastic`].
 
+pub mod compare;
+pub mod ext;
+pub mod logic;
 pub mod ops;
 
 mod ad;
@@ -53,23 +58,24 @@ pub use adx::{Adx, AdxValue};
 pub use aroon::{Aroon, AroonValue};
 pub use atr::Atr;
 pub use bollinger::{Bollinger, BollingerValue};
-pub use candle::{
-    CandleField, Close, Current, Field, High, Low, Median, Open, Typical, Volume,
-};
+pub use candle::{CandleField, Close, Current, Field, High, Low, Median, Open, Typical, Volume};
 pub use cci::Cci;
+pub use compare::{ComparisonOp, DEFAULT_EPSILON, Eq, Ge, Gt, Le, Lt, Ne};
 pub use component::Component;
 pub use dmi::{Dmi, DmiValue};
 pub use donchian::{Donchian, DonchianValue};
 pub use ema::Ema;
+pub use ext::{BoolIndicatorExt, IndicatorExt};
 pub use hma::Hma;
 pub use identity::Identity;
 pub use keltner::{Keltner, KeltnerValue};
+pub use logic::{And, Change, Const, Not, Or, Xor};
 pub use macd::{Macd, MacdValue};
 pub use mfi::Mfi;
 pub use obv::Obv;
 pub use ops::{
-    Add, BinaryOp, Combine, Diff, Div, Extreme, ExtremeOp, Lag, Lookback, LookbackOp, MaxOp,
-    MinOp, Mul, Ratio, Roc, RollingMax, RollingMin, Sub,
+    Add, BinaryOp, Combine, Diff, Div, Extreme, ExtremeOp, Lag, Lookback, LookbackOp, MaxOp, MinOp,
+    Mul, Ratio, Roc, RollingMax, RollingMin, Sub,
 };
 pub use rma::Rma;
 pub use rsi::Rsi;

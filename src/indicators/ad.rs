@@ -35,7 +35,7 @@ impl Indicator for Ad {
         self.value
     }
 
-    fn current(&self) -> Option<Real> {
+    fn value(&self) -> Option<Real> {
         self.value
     }
 
@@ -53,14 +53,23 @@ mod tests {
     fn close_at_high_accumulates_full_volume() {
         let mut ad = Ad::new();
         // close == high: CLV = +1, so the whole volume is accumulated.
-        assert_eq!(ad.update(Candle::new(10.0, 12.0, 8.0, 12.0, 100.0)), Some(100.0));
+        assert_eq!(
+            ad.update(Candle::new(10.0, 12.0, 8.0, 12.0, 100.0)),
+            Some(100.0)
+        );
         // close == low: CLV = -1, distributes the whole volume back.
-        assert_eq!(ad.update(Candle::new(12.0, 14.0, 10.0, 10.0, 50.0)), Some(50.0));
+        assert_eq!(
+            ad.update(Candle::new(12.0, 14.0, 10.0, 10.0, 50.0)),
+            Some(50.0)
+        );
     }
 
     #[test]
     fn flat_bar_contributes_nothing() {
         let mut ad = Ad::new();
-        assert_eq!(ad.update(Candle::new(10.0, 10.0, 10.0, 10.0, 100.0)), Some(0.0));
+        assert_eq!(
+            ad.update(Candle::new(10.0, 10.0, 10.0, 10.0, 100.0)),
+            Some(0.0)
+        );
     }
 }

@@ -14,7 +14,10 @@ use arcana::indicators::{Current, Sma};
 use arcana::prelude::*;
 
 // Embed the sample data at compile time so the example is self-contained.
-const CSV: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/aapl_monthly.csv"));
+const CSV: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/data/aapl_monthly.csv"
+));
 
 const SYMBOL: &str = "AAPL";
 const STARTING_FUNDS: Real = 10_000.0;
@@ -23,8 +26,8 @@ const STARTING_FUNDS: Real = 10_000.0;
 /// trades and its two signals; the portfolio lives in the wallet it is handed.
 struct GoldenCross {
     symbol: &'static str,
-    enter: Box<dyn Signal<Input = Candle>>,
-    exit: Box<dyn Signal<Input = Candle>>,
+    enter: Box<dyn Signal>,
+    exit: Box<dyn Signal>,
 }
 
 impl GoldenCross {
@@ -54,9 +57,9 @@ impl Strategy for GoldenCross {
 
     fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
         // Commit all equity long on the golden cross; flatten on the death cross.
-        if self.enter.value() {
+        if self.enter.is_true() {
             let _ = wallet.set(self.symbol, Side::Buy, Size::value_frac(1.0));
-        } else if self.exit.value() {
+        } else if self.exit.is_true() {
             let _ = wallet.close(self.symbol);
         }
     }
@@ -94,12 +97,18 @@ fn main() {
     let equity = wallet.equity().0;
     println!("\nfinal funds:     {:.2}", wallet.funds().0);
     println!("final equity:    {:.2}", equity);
-    println!("strategy growth: {:+.1}%", (equity / STARTING_FUNDS - 1.0) * 100.0);
+    println!(
+        "strategy growth: {:+.1}%",
+        (equity / STARTING_FUNDS - 1.0) * 100.0
+    );
 
     // Buy-and-hold benchmark over the same window.
     let last = candles.last().unwrap().1;
     let first = candles.first().unwrap().1.close;
-    println!("buy & hold:      {:+.1}%", (last.close / first - 1.0) * 100.0);
+    println!(
+        "buy & hold:      {:+.1}%",
+        (last.close / first - 1.0) * 100.0
+    );
 }
 
 /// Parse `date,open,high,low,close,volume` rows into `(date, Candle)` pairs.

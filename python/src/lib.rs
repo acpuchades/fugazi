@@ -26,20 +26,18 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+use arcana_core::Indicator;
+use arcana_core::indicators::compare::{EqOp, GeOp, GtOp, LeOp, LtOp, NeOp};
 use arcana_core::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Current, Dmi,
     DmiValue, Donchian, DonchianValue, Ema, Hma, Identity, Keltner, KeltnerValue, Macd, MacdValue,
     Mfi, Obv, Rma, Rsi, Sar, Sma, StdDev, Stochastic, TrueRange, Value, Vwap, WilliamsR, Wma,
 };
-use arcana_core::signals::IndicatorExt;
-use arcana_core::signals::compare::{
-    Compare, DEFAULT_EPSILON, EqOp, GeOp, GtOp, LeOp, LtOp, NeOp,
-};
+use arcana_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
 use arcana_core::strategy::{
     Order, PaperWallet, Quantity, Reference, Side, Size, Wallet, WalletError,
 };
 use arcana_core::types::{Candle, Real};
-use arcana_core::{Indicator, Signal, SignalExt};
 
 // ---------------------------------------------------------------------------
 // Type-erasing carriers
@@ -54,7 +52,7 @@ use arcana_core::{Indicator, Signal, SignalExt};
 /// Object-safe shim over an `I -> Real` indicator.
 trait DynIndicator<I>: Send + Sync {
     fn update(&mut self, input: I) -> Option<Real>;
-    fn current(&self) -> Option<Real>;
+    fn value(&self) -> Option<Real>;
     fn reset(&mut self);
     fn box_clone(&self) -> Box<dyn DynIndicator<I>>;
 }
@@ -66,8 +64,8 @@ where
     fn update(&mut self, input: I) -> Option<Real> {
         Indicator::update(self, input)
     }
-    fn current(&self) -> Option<Real> {
-        Indicator::current(self)
+    fn value(&self) -> Option<Real> {
+        Indicator::value(self)
     }
     fn reset(&mut self) {
         Indicator::reset(self)
@@ -102,47 +100,49 @@ impl<I> Indicator for Source<I> {
     fn update(&mut self, input: I) -> Option<Real> {
         self.0.update(input)
     }
-    fn current(&self) -> Option<Real> {
-        self.0.current()
+    fn value(&self) -> Option<Real> {
+        self.0.value()
     }
     fn reset(&mut self) {
         self.0.reset()
     }
 }
 
-/// Object-safe shim over an `I`-input boolean signal.
+/// Object-safe shim over an `I`-input boolean indicator (a signal). Exposes the
+/// warmed-up `bool` directly (`false` until ready), as the Python API expects.
 trait DynSignal<I>: Send + Sync {
     fn update(&mut self, input: I) -> bool;
-    fn value(&self) -> bool;
+    fn is_true(&self) -> bool;
     fn reset(&mut self);
     fn box_clone(&self) -> Box<dyn DynSignal<I>>;
 }
 
 impl<I, T> DynSignal<I> for T
 where
-    T: Signal<Input = I> + Clone + Send + Sync + 'static,
+    T: Indicator<Input = I, Output = bool> + Clone + Send + Sync + 'static,
 {
     fn update(&mut self, input: I) -> bool {
-        Signal::update(self, input)
+        Indicator::update(self, input).unwrap_or(false)
     }
-    fn value(&self) -> bool {
-        Signal::value(self)
+    fn is_true(&self) -> bool {
+        self.value().unwrap_or(false)
     }
     fn reset(&mut self) {
-        Signal::reset(self)
+        Indicator::reset(self)
     }
     fn box_clone(&self) -> Box<dyn DynSignal<I>> {
         Box::new(self.clone())
     }
 }
 
-/// A boxed `I`-input signal. Implements [`Signal`] so combinators nest.
+/// A boxed `I`-input signal. Implements `Indicator<Output = bool>` so the
+/// `BoolIndicatorExt` combinators nest.
 struct SignalBox<I>(Box<dyn DynSignal<I>>);
 
 impl<I> SignalBox<I> {
     fn new<T>(inner: T) -> Self
     where
-        T: Signal<Input = I> + Clone + Send + Sync + 'static,
+        T: Indicator<Input = I, Output = bool> + Clone + Send + Sync + 'static,
     {
         SignalBox(Box::new(inner))
     }
@@ -154,13 +154,14 @@ impl<I> Clone for SignalBox<I> {
     }
 }
 
-impl<I> Signal for SignalBox<I> {
+impl<I> Indicator for SignalBox<I> {
     type Input = I;
-    fn update(&mut self, input: I) -> bool {
-        self.0.update(input)
+    type Output = bool;
+    fn update(&mut self, input: I) -> Option<bool> {
+        Some(self.0.update(input))
     }
-    fn value(&self) -> bool {
-        self.0.value()
+    fn value(&self) -> Option<bool> {
+        Some(self.0.is_true())
     }
     fn reset(&mut self) {
         self.0.reset()
@@ -238,7 +239,7 @@ impl MultiOutput for AroonValue {
 trait DynMulti<I>: Send + Sync {
     fn names(&self) -> &'static [&'static str];
     fn update(&mut self, input: I) -> Option<Vec<Real>>;
-    fn current(&self) -> Option<Vec<Real>>;
+    fn value(&self) -> Option<Vec<Real>>;
     fn reset(&mut self);
 }
 
@@ -253,8 +254,8 @@ where
     fn update(&mut self, input: I) -> Option<Vec<Real>> {
         Indicator::update(self, input).map(|o| o.values())
     }
-    fn current(&self) -> Option<Vec<Real>> {
-        Indicator::current(self).map(|o| o.values())
+    fn value(&self) -> Option<Vec<Real>> {
+        Indicator::value(self).map(|o| o.values())
     }
     fn reset(&mut self) {
         Indicator::reset(self)
@@ -291,10 +292,10 @@ enum AnySource {
 }
 
 impl AnySource {
-    fn current(&self) -> Option<Real> {
+    fn value(&self) -> Option<Real> {
         match self {
-            AnySource::Candle(s) => Indicator::current(s),
-            AnySource::Real(s) => Indicator::current(s),
+            AnySource::Candle(s) => Indicator::value(s),
+            AnySource::Real(s) => Indicator::value(s),
             AnySource::Const(c) => Some(*c),
         }
     }
@@ -347,16 +348,16 @@ enum AnySignal {
 }
 
 impl AnySignal {
-    fn value(&self) -> bool {
+    fn is_true(&self) -> bool {
         match self {
-            AnySignal::Candle(s) => Signal::value(s),
-            AnySignal::Real(s) => Signal::value(s),
+            AnySignal::Candle(s) => BoolIndicatorExt::is_true(s),
+            AnySignal::Real(s) => BoolIndicatorExt::is_true(s),
         }
     }
     fn reset(&mut self) {
         match self {
-            AnySignal::Candle(s) => Signal::reset(s),
-            AnySignal::Real(s) => Signal::reset(s),
+            AnySignal::Candle(s) => Indicator::reset(s),
+            AnySignal::Real(s) => Indicator::reset(s),
         }
     }
 }
@@ -374,10 +375,10 @@ impl AnyMulti {
             AnyMulti::Real(m) => m.0.names(),
         }
     }
-    fn current(&self) -> Option<Vec<Real>> {
+    fn value(&self) -> Option<Vec<Real>> {
         match self {
-            AnyMulti::Candle(m) => m.0.current(),
-            AnyMulti::Real(m) => m.0.current(),
+            AnyMulti::Candle(m) => m.0.value(),
+            AnyMulti::Real(m) => m.0.value(),
         }
     }
     fn reset(&mut self) {
@@ -622,13 +623,13 @@ impl PyIndicator {
     }
 
     /// The most recent value, without advancing state.
-    fn current(&self) -> Option<f64> {
-        self.src.current()
+    fn value(&self) -> Option<f64> {
+        self.src.value()
     }
 
     /// Whether enough samples have been seen to produce a value.
     fn is_ready(&self) -> bool {
-        self.src.current().is_some()
+        self.src.value().is_some()
     }
 
     /// Reset all internal state to freshly-constructed.
@@ -644,7 +645,7 @@ impl PyIndicator {
         Ok(PySignal::wrap(sources_to_signal!(
             self.src.clone(),
             rhs,
-            |l, r| Compare::<_, _, GtOp>::with_epsilon(l, r, eps)
+            |l, r| Combine::<_, _, GtOp>::with_epsilon(l, r, eps)
         )?))
     }
 
@@ -655,7 +656,7 @@ impl PyIndicator {
         Ok(PySignal::wrap(sources_to_signal!(
             self.src.clone(),
             rhs,
-            |l, r| Compare::<_, _, LtOp>::with_epsilon(l, r, eps)
+            |l, r| Combine::<_, _, LtOp>::with_epsilon(l, r, eps)
         )?))
     }
 
@@ -666,7 +667,7 @@ impl PyIndicator {
         Ok(PySignal::wrap(sources_to_signal!(
             self.src.clone(),
             rhs,
-            |l, r| Compare::<_, _, GeOp>::with_epsilon(l, r, eps)
+            |l, r| Combine::<_, _, GeOp>::with_epsilon(l, r, eps)
         )?))
     }
 
@@ -677,7 +678,7 @@ impl PyIndicator {
         Ok(PySignal::wrap(sources_to_signal!(
             self.src.clone(),
             rhs,
-            |l, r| Compare::<_, _, LeOp>::with_epsilon(l, r, eps)
+            |l, r| Combine::<_, _, LeOp>::with_epsilon(l, r, eps)
         )?))
     }
 
@@ -688,7 +689,7 @@ impl PyIndicator {
         Ok(PySignal::wrap(sources_to_signal!(
             self.src.clone(),
             rhs,
-            |l, r| Compare::<_, _, EqOp>::with_epsilon(l, r, eps)
+            |l, r| Combine::<_, _, EqOp>::with_epsilon(l, r, eps)
         )?))
     }
 
@@ -699,7 +700,7 @@ impl PyIndicator {
         Ok(PySignal::wrap(sources_to_signal!(
             self.src.clone(),
             rhs,
-            |l, r| Compare::<_, _, NeOp>::with_epsilon(l, r, eps)
+            |l, r| Combine::<_, _, NeOp>::with_epsilon(l, r, eps)
         )?))
     }
 
@@ -836,20 +837,22 @@ impl PyIndicator {
     /// Rolling maximum over `period` steps.
     fn rolling_max(&self, period: usize) -> PyResult<PyIndicator> {
         ensure_period(period)?;
-        Ok(PyIndicator::wrap(map_source!(self.src.clone(), |s| s
-            .rolling_max(period))))
+        Ok(PyIndicator::wrap(
+            map_source!(self.src.clone(), |s| s.rolling_max(period))
+        ))
     }
     /// Rolling minimum over `period` steps.
     fn rolling_min(&self, period: usize) -> PyResult<PyIndicator> {
         ensure_period(period)?;
-        Ok(PyIndicator::wrap(map_source!(self.src.clone(), |s| s
-            .rolling_min(period))))
+        Ok(PyIndicator::wrap(
+            map_source!(self.src.clone(), |s| s.rolling_min(period))
+        ))
     }
 
     fn __repr__(&self) -> String {
-        match self.src.current() {
-            Some(v) => format!("Indicator(current={v})"),
-            None => "Indicator(current=None)".to_string(),
+        match self.src.value() {
+            Some(v) => format!("Indicator(value={v})"),
+            None => "Indicator(value=None)".to_string(),
         }
     }
 }
@@ -873,8 +876,10 @@ impl PySignal {
     /// for a candle-rooted signal, a `float` for an identity-rooted one.
     fn update(&mut self, sample: &Bound<'_, PyAny>) -> PyResult<bool> {
         match &mut self.sig {
-            AnySignal::Candle(s) => Ok(Signal::update(s, extract_candle(sample)?)),
-            AnySignal::Real(s) => Ok(Signal::update(s, extract_real(sample)?)),
+            AnySignal::Candle(s) => {
+                Ok(Indicator::update(s, extract_candle(sample)?).unwrap_or(false))
+            }
+            AnySignal::Real(s) => Ok(Indicator::update(s, extract_real(sample)?).unwrap_or(false)),
         }
     }
 
@@ -889,19 +894,19 @@ impl PySignal {
         let values: Vec<bool> = match &mut self.sig {
             AnySignal::Candle(s) => candles_from_frame(data)?
                 .into_iter()
-                .map(|c| Signal::update(s, c))
+                .map(|c| Indicator::update(s, c).unwrap_or(false))
                 .collect(),
             AnySignal::Real(s) => reals_from_series(data)?
                 .into_iter()
-                .map(|x| Signal::update(s, x))
+                .map(|x| Indicator::update(s, x).unwrap_or(false))
                 .collect(),
         };
         build_bools(py, &kind, values)
     }
 
     /// The most recent boolean state, without advancing.
-    fn value(&self) -> bool {
-        self.sig.value()
+    fn is_true(&self) -> bool {
+        self.sig.is_true()
     }
 
     /// Reset all internal state.
@@ -956,11 +961,11 @@ impl PySignal {
     }
 
     fn __repr__(&self) -> String {
-        format!("Signal(value={})", self.sig.value())
+        format!("Signal(value={})", self.sig.is_true())
     }
 }
 
-/// A multi-output indicator (MACD, Bollinger, ADX, …). `update`/`current`
+/// A multi-output indicator (MACD, Bollinger, ADX, …). `update`/`value`
 /// return a dict of the named output lines. Terminal: it cannot be used as a
 /// source for further composition.
 #[pyclass(name = "MultiIndicator")]
@@ -1014,9 +1019,9 @@ impl PyMulti {
     }
 
     /// The most recent output dict, without advancing.
-    fn current<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+    fn value<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
         let names = self.inner.names();
-        match self.inner.current() {
+        match self.inner.value() {
             Some(values) => Ok(Some(values_to_dict(py, names, &values)?)),
             None => Ok(None),
         }
@@ -1024,7 +1029,7 @@ impl PyMulti {
 
     /// Whether enough samples have been seen to produce a value.
     fn is_ready(&self) -> bool {
-        self.inner.current().is_some()
+        self.inner.value().is_some()
     }
 
     /// Reset all internal state.
@@ -1214,7 +1219,10 @@ impl PyWallet {
         side: &str,
         size: &Bound<'_, PyAny>,
     ) -> PyResult<Option<PyOrder>> {
-        wrap_order(self.inner.set(symbol, parse_side(side)?, coerce_size(size)?))
+        wrap_order(
+            self.inner
+                .set(symbol, parse_side(side)?, coerce_size(size)?),
+        )
     }
 
     /// Flatten `symbol`.
@@ -1286,9 +1294,9 @@ fn extract_candle(sample: &Bound<'_, PyAny>) -> PyResult<Candle> {
 
 /// Extract a `float` for an identity-rooted node's `update`.
 fn extract_real(sample: &Bound<'_, PyAny>) -> PyResult<Real> {
-    sample.extract::<f64>().map_err(|_| {
-        PyTypeError::new_err("this indicator consumes a value stream; pass a float")
-    })
+    sample
+        .extract::<f64>()
+        .map_err(|_| PyTypeError::new_err("this indicator consumes a value stream; pass a float"))
 }
 
 /// Collect any 1-D sequence of numbers (`list`, NumPy array, pandas `Series`,
@@ -1379,7 +1387,11 @@ fn frame_to_candles(frame: &Bound<'_, PyAny>) -> PyResult<Vec<Candle>> {
     let col = |name: &str| -> PyResult<Option<Vec<f64>>> {
         let cap = {
             let mut chars = name.chars();
-            chars.next().map(|c| c.to_ascii_uppercase()).into_iter().collect::<String>()
+            chars
+                .next()
+                .map(|c| c.to_ascii_uppercase())
+                .into_iter()
+                .collect::<String>()
                 + chars.as_str()
         };
         for key in [name.to_string(), cap, name.to_uppercase()] {
@@ -1392,7 +1404,13 @@ fn frame_to_candles(frame: &Bound<'_, PyAny>) -> PyResult<Vec<Candle>> {
     let close = col("close")?.ok_or_else(|| {
         PyValueError::new_err("a DataFrame/dict passed to feed() must have a 'close' column")
     })?;
-    assemble_candles(close, col("open")?, col("high")?, col("low")?, col("volume")?)
+    assemble_candles(
+        close,
+        col("open")?,
+        col("high")?,
+        col("low")?,
+        col("volume")?,
+    )
 }
 
 /// Turn a Python argument into an [`AnySource`] in the requested domain: either
@@ -1467,7 +1485,11 @@ fn module_root(obj: &Bound<'_, PyAny>) -> Option<String> {
 }
 
 /// Build a numeric output series. Warm-up `None`s become `NaN`.
-fn build_floats(py: Python<'_>, kind: &OutputKind, values: Vec<Option<f64>>) -> PyResult<Py<PyAny>> {
+fn build_floats(
+    py: Python<'_>,
+    kind: &OutputKind,
+    values: Vec<Option<f64>>,
+) -> PyResult<Py<PyAny>> {
     let nums: Vec<f64> = values.iter().map(|v| v.unwrap_or(f64::NAN)).collect();
     match kind {
         OutputKind::Pandas(index) => {
@@ -1633,14 +1655,42 @@ macro_rules! src_period {
 }
 
 src_period!(sma, Sma, "Simple moving average of `source` over `period`.");
-src_period!(ema, Ema, "Exponential moving average of `source` over `period`.");
-src_period!(rma, Rma, "Wilder (running) moving average of `source` over `period`.");
-src_period!(wma, Wma, "Weighted moving average of `source` over `period`.");
+src_period!(
+    ema,
+    Ema,
+    "Exponential moving average of `source` over `period`."
+);
+src_period!(
+    rma,
+    Rma,
+    "Wilder (running) moving average of `source` over `period`."
+);
+src_period!(
+    wma,
+    Wma,
+    "Weighted moving average of `source` over `period`."
+);
 src_period!(hma, Hma, "Hull moving average of `source` over `period`.");
-src_period!(rsi, Rsi, "Relative strength index of `source` over `period`.");
-src_period!(stddev, StdDev, "Rolling standard deviation of `source` over `period`.");
-src_period!(stochastic, Stochastic, "Stochastic %K of `source` over `period`.");
-src_period!(cci, Cci, "Commodity channel index of `source` over `period`.");
+src_period!(
+    rsi,
+    Rsi,
+    "Relative strength index of `source` over `period`."
+);
+src_period!(
+    stddev,
+    StdDev,
+    "Rolling standard deviation of `source` over `period`."
+);
+src_period!(
+    stochastic,
+    Stochastic,
+    "Stochastic %K of `source` over `period`."
+);
+src_period!(
+    cci,
+    Cci,
+    "Commodity channel index of `source` over `period`."
+);
 
 macro_rules! bar_period {
     ($name:ident, $ty:ty, $doc:literal) => {
@@ -1653,9 +1703,21 @@ macro_rules! bar_period {
     };
 }
 
-bar_period!(atr, Atr, "Average true range over `period` (consumes the full bar).");
-bar_period!(mfi, Mfi, "Money-flow index over `period` (consumes the full bar).");
-bar_period!(williams_r, WilliamsR, "Williams %R over `period` (consumes the full bar).");
+bar_period!(
+    atr,
+    Atr,
+    "Average true range over `period` (consumes the full bar)."
+);
+bar_period!(
+    mfi,
+    Mfi,
+    "Money-flow index over `period` (consumes the full bar)."
+);
+bar_period!(
+    williams_r,
+    WilliamsR,
+    "Williams %R over `period` (consumes the full bar)."
+);
 
 macro_rules! bar_noarg {
     ($name:ident, $ty:ty, $doc:literal) => {
@@ -1667,9 +1729,21 @@ macro_rules! bar_noarg {
     };
 }
 
-bar_noarg!(obv, Obv, "On-balance volume (cumulative; reset to re-anchor).");
-bar_noarg!(vwap, Vwap, "Volume-weighted average price (cumulative; reset at session boundaries).");
-bar_noarg!(ad, Ad, "Chaikin accumulation/distribution line (cumulative).");
+bar_noarg!(
+    obv,
+    Obv,
+    "On-balance volume (cumulative; reset to re-anchor)."
+);
+bar_noarg!(
+    vwap,
+    Vwap,
+    "Volume-weighted average price (cumulative; reset at session boundaries)."
+);
+bar_noarg!(
+    ad,
+    Ad,
+    "Chaikin accumulation/distribution line (cumulative)."
+);
 bar_noarg!(true_range, TrueRange, "True range of the current bar.");
 
 macro_rules! bar_period_multi {
@@ -1685,7 +1759,11 @@ macro_rules! bar_period_multi {
     };
 }
 
-bar_period_multi!(adx, Adx, "Average directional index: {plus_di, minus_di, adx}.");
+bar_period_multi!(
+    adx,
+    Adx,
+    "Average directional index: {plus_di, minus_di, adx}."
+);
 bar_period_multi!(dmi, Dmi, "Directional movement index: {plus_di, minus_di}.");
 bar_period_multi!(aroon, Aroon, "Aroon indicator: {up, down, oscillator}.");
 
@@ -1742,10 +1820,7 @@ fn keltner(
     let s = require_candle_source(source.src.clone())?;
     Ok(PyMulti {
         inner: AnyMulti::Candle(MultiBox::new(Keltner::new(
-            s,
-            ema_period,
-            atr_period,
-            multiplier,
+            s, ema_period, atr_period, multiplier,
         ))),
     })
 }

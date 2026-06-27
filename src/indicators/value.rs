@@ -37,7 +37,7 @@ impl<I> Indicator for Value<I> {
         Some(self.constant)
     }
 
-    fn current(&self) -> Option<Real> {
+    fn value(&self) -> Option<Real> {
         Some(self.constant)
     }
 

@@ -103,7 +103,7 @@ where
         }
     }
 
-    fn current(&self) -> Option<DonchianValue> {
+    fn value(&self) -> Option<DonchianValue> {
         match (self.upper, self.middle, self.lower) {
             (Some(upper), Some(middle), Some(lower)) => Some(DonchianValue {
                 upper,

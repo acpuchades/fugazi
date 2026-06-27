@@ -94,7 +94,10 @@ impl<S: Indicator<Output = Real>> Indicator for Macd<S> {
         let fast = self.fast.update(price).expect("EMA ready after update");
         let slow = self.slow.update(price).expect("EMA ready after update");
         let macd = fast - slow;
-        let signal = self.signal_ema.update(macd).expect("EMA ready after update");
+        let signal = self
+            .signal_ema
+            .update(macd)
+            .expect("EMA ready after update");
         let histogram = macd - signal;
 
         self.macd = Some(macd);
@@ -108,7 +111,7 @@ impl<S: Indicator<Output = Real>> Indicator for Macd<S> {
         })
     }
 
-    fn current(&self) -> Option<MacdValue> {
+    fn value(&self) -> Option<MacdValue> {
         match (self.macd, self.signal, self.histogram) {
             (Some(macd), Some(signal), Some(histogram)) => Some(MacdValue {
                 macd,

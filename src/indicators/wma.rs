@@ -45,7 +45,7 @@ impl<S: Indicator<Output = Real>> Indicator for Wma<S> {
         self.value
     }
 
-    fn current(&self) -> Option<Real> {
+    fn value(&self) -> Option<Real> {
         self.value
     }
 

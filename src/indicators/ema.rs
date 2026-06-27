@@ -54,7 +54,7 @@ impl<S: Indicator<Output = Real>> Indicator for Ema<S> {
         self.value
     }
 
-    fn current(&self) -> Option<Real> {
+    fn value(&self) -> Option<Real> {
         self.value
     }
 

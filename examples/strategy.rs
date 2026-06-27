@@ -12,15 +12,18 @@
 use arcana::indicators::{Current, Sma};
 use arcana::prelude::*;
 
-const CSV: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/aapl_monthly.csv"));
+const CSV: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/data/aapl_monthly.csv"
+));
 
 const SYMBOL: &str = "AAPL";
 const STARTING_FUNDS: Real = 10_000.0;
 
 struct Reversal {
     symbol: &'static str,
-    long: Box<dyn Signal<Input = Candle>>,
-    short: Box<dyn Signal<Input = Candle>>,
+    long: Box<dyn Signal>,
+    short: Box<dyn Signal>,
 }
 
 impl Reversal {
@@ -53,9 +56,9 @@ impl Strategy for Reversal {
         // is continuously in the market and reverses as the trend flips. Sizing
         // to 95% of equity (which survives a reversal) keeps a small cash buffer
         // while letting winners compound into the next position.
-        if self.long.value() {
+        if self.long.is_true() {
             let _ = wallet.set(self.symbol, Side::Buy, Size::value_frac(0.95));
-        } else if self.short.value() {
+        } else if self.short.is_true() {
             let _ = wallet.set(self.symbol, Side::Sell, Size::value_frac(0.95));
         }
     }
@@ -90,9 +93,15 @@ fn main() {
     }
 
     let equity = wallet.equity().0;
-    println!("\nfinal position:  {:+.4} units", wallet.position(&SYMBOL).amount);
+    println!(
+        "\nfinal position:  {:+.4} units",
+        wallet.position(&SYMBOL).amount
+    );
     println!("final equity:    {:.2}", equity);
-    println!("strategy growth: {:+.1}%", (equity / STARTING_FUNDS - 1.0) * 100.0);
+    println!(
+        "strategy growth: {:+.1}%",
+        (equity / STARTING_FUNDS - 1.0) * 100.0
+    );
 }
 
 /// Parse `date,open,high,low,close,volume` rows into `(date, Candle)` pairs.

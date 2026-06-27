@@ -1,18 +1,21 @@
 //! Composable indicator transform operators and their generic carriers.
 //!
-//! Two carriers, each driven by a zero-sized operator marker so new operators
-//! are a trait impl rather than a new type:
+//! Three carriers, each driven by an operator type so new operators are a trait
+//! impl rather than a new type:
 //!
-//! * [`Combine`] — a *binary* op over two sources ([`BinaryOp`]): `Add`, `Sub`,
-//!   `Mul`, `Div`.
+//! * [`Combine`] — a *binary* op over two sources ([`BinaryOp`]). The op carries
+//!   its own input/output types, so this one carrier serves arithmetic
+//!   (`Real, Real → Real`: `Add`/`Sub`/`Mul`/`Div`), comparison
+//!   (`Real, Real → bool`: the operators in [`compare`](super::compare)) and
+//!   boolean logic (`bool, bool → bool`: the operators in [`logic`](super::logic)).
 //! * [`Lookback`] — a *unary* op relating a source to its own value `period`
 //!   steps ago ([`LookbackOp`]): `Lag`, `Diff`, `Ratio`.
+//! * [`Extreme`] — a rolling extremum over a window ([`ExtremeOp`]).
 //!
-//! Candle field accessors live in [`candle`](super::candle); comparison
-//! operators (which yield signals) live in
-//! [`signals::compare`](crate::signals::compare).
+//! Candle field accessors live in [`candle`](super::candle).
 
 use std::collections::VecDeque;
+use std::fmt::Debug;
 use std::marker::PhantomData;
 
 use crate::indicator::Indicator;
@@ -23,61 +26,82 @@ use crate::types::Real;
 // Binary combination of two sources
 // ---------------------------------------------------------------------------
 
-/// A pointwise binary arithmetic operator over two warmed-up source outputs.
+/// A pointwise binary operator over two warmed-up source outputs.
+///
+/// Carried *by value* (so an operator can hold state, such as a comparison's
+/// tolerance) and generic over its input/output types via associated types, so
+/// the single [`Combine`] carrier serves arithmetic, comparison and boolean
+/// logic alike.
 pub trait BinaryOp {
+    /// The left source's output type.
+    type Lhs;
+    /// The right source's output type.
+    type Rhs;
+    /// The type this operator produces.
+    type Output: Clone + Debug;
     /// Combine `lhs` and `rhs`, or `None` when the result is undefined (e.g.
     /// division by zero).
-    fn apply(lhs: Real, rhs: Real) -> Option<Real>;
+    fn apply(&self, lhs: Self::Lhs, rhs: Self::Rhs) -> Option<Self::Output>;
 }
 
 /// Pointwise combination of two indicator sources, parameterised by operator.
 ///
-/// Use the aliases ([`Add`], [`Sub`], [`Mul`], [`Div`]) or the `IndicatorExt`
-/// builders (`a.div(b)`, …). Feeds the same input to both sources (hence
-/// `Input: Clone`) and yields `None` until both are warmed up.
+/// Use the aliases ([`Add`], [`Sub`], [`Mul`], [`Div`], the comparisons in
+/// [`compare`](super::compare), the logic ops in [`logic`](super::logic)) or the
+/// `IndicatorExt`/`BoolIndicatorExt` builders. Feeds the same input to both sources
+/// (hence `Input: Clone`) and yields `None` until both are warmed up.
 #[derive(Debug, Clone)]
-pub struct Combine<L, R, Op> {
+pub struct Combine<L, R, Op: BinaryOp> {
     lhs: L,
     rhs: R,
+    op: Op,
     /// Latest combined value; `None` until both sources are ready (and the
     /// operation is defined).
-    pub value: Option<Real>,
-    _op: PhantomData<fn() -> Op>,
+    pub value: Option<Op::Output>,
 }
 
-impl<L, R, Op> Combine<L, R, Op> {
+impl<L, R, Op: BinaryOp + Default> Combine<L, R, Op> {
+    /// Combine `lhs` and `rhs` with the operator's default configuration.
     pub fn new(lhs: L, rhs: R) -> Self {
+        Self::with_op(lhs, rhs, Op::default())
+    }
+}
+
+impl<L, R, Op: BinaryOp> Combine<L, R, Op> {
+    /// Combine `lhs` and `rhs` with an explicit operator value (e.g. a
+    /// comparison with a custom tolerance).
+    pub fn with_op(lhs: L, rhs: R, op: Op) -> Self {
         Self {
             lhs,
             rhs,
+            op,
             value: None,
-            _op: PhantomData,
         }
     }
 }
 
 impl<L, R, Op> Indicator for Combine<L, R, Op>
 where
-    L: Indicator<Output = Real>,
-    R: Indicator<Input = L::Input, Output = Real>,
-    L::Input: Clone,
     Op: BinaryOp,
+    L: Indicator<Output = Op::Lhs>,
+    R: Indicator<Input = L::Input, Output = Op::Rhs>,
+    L::Input: Clone,
 {
     type Input = L::Input;
-    type Output = Real;
+    type Output = Op::Output;
 
-    fn update(&mut self, input: Self::Input) -> Option<Real> {
+    fn update(&mut self, input: Self::Input) -> Option<Op::Output> {
         let lhs = self.lhs.update(input.clone());
         let rhs = self.rhs.update(input);
         self.value = match (lhs, rhs) {
-            (Some(l), Some(r)) => Op::apply(l, r),
+            (Some(l), Some(r)) => self.op.apply(l, r),
             _ => None,
         };
-        self.value
+        self.value.clone()
     }
 
-    fn current(&self) -> Option<Real> {
-        self.value
+    fn value(&self) -> Option<Op::Output> {
+        self.value.clone()
     }
 
     fn reset(&mut self) {
@@ -88,42 +112,50 @@ where
 }
 
 /// `lhs + rhs`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct AddOp;
 impl BinaryOp for AddOp {
-    fn apply(lhs: Real, rhs: Real) -> Option<Real> {
+    type Lhs = Real;
+    type Rhs = Real;
+    type Output = Real;
+    fn apply(&self, lhs: Real, rhs: Real) -> Option<Real> {
         Some(lhs + rhs)
     }
 }
 
 /// `lhs - rhs`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct SubOp;
 impl BinaryOp for SubOp {
-    fn apply(lhs: Real, rhs: Real) -> Option<Real> {
+    type Lhs = Real;
+    type Rhs = Real;
+    type Output = Real;
+    fn apply(&self, lhs: Real, rhs: Real) -> Option<Real> {
         Some(lhs - rhs)
     }
 }
 
 /// `lhs * rhs`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct MulOp;
 impl BinaryOp for MulOp {
-    fn apply(lhs: Real, rhs: Real) -> Option<Real> {
+    type Lhs = Real;
+    type Rhs = Real;
+    type Output = Real;
+    fn apply(&self, lhs: Real, rhs: Real) -> Option<Real> {
         Some(lhs * rhs)
     }
 }
 
 /// `lhs / rhs`, or `None` when `rhs == 0`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct DivOp;
 impl BinaryOp for DivOp {
-    fn apply(lhs: Real, rhs: Real) -> Option<Real> {
-        if rhs == 0.0 {
-            None
-        } else {
-            Some(lhs / rhs)
-        }
+    type Lhs = Real;
+    type Rhs = Real;
+    type Output = Real;
+    fn apply(&self, lhs: Real, rhs: Real) -> Option<Real> {
+        if rhs == 0.0 { None } else { Some(lhs / rhs) }
     }
 }
 
@@ -206,7 +238,7 @@ where
         self.value
     }
 
-    fn current(&self) -> Option<Real> {
+    fn value(&self) -> Option<Real> {
         self.value
     }
 
@@ -344,7 +376,7 @@ where
         self.value
     }
 
-    fn current(&self) -> Option<Real> {
+    fn value(&self) -> Option<Real> {
         self.value
     }
 

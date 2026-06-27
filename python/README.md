@@ -52,8 +52,8 @@ numbers**.
 ### Streaming API — one sample at a time
 
 Feed one sample to `update()`; it returns a `float`, or `None` until warmed up.
-This is the live/incremental path. Every node also has `current()`, `is_ready()`,
-and `reset()`.
+This is the live/incremental path. Every node also has `value()` (or `is_true()` for a boolean Signal),
+`is_ready()`, and `reset()`.
 
 ```python
 node = ta.ema(ta.sma(ta.close(), 10), 20)        # candle-rooted

@@ -107,7 +107,7 @@ impl<S: Indicator<Output = Real>> Indicator for Bollinger<S> {
         }
     }
 
-    fn current(&self) -> Option<BollingerValue> {
+    fn value(&self) -> Option<BollingerValue> {
         match (self.upper, self.middle, self.lower) {
             (Some(upper), Some(middle), Some(lower)) => Some(BollingerValue {
                 upper,
