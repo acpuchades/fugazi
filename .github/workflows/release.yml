@@ -16,13 +16,17 @@ jobs:
   wheels:
     name: wheels (${{ matrix.platform.runner }} ${{ matrix.platform.target }})
     runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         platform:
           - { runner: ubuntu-22.04, target: x86_64, manylinux: auto }
           - { runner: ubuntu-22.04, target: aarch64, manylinux: auto }
-          - { runner: macos-13, target: x86_64 }
+          # Both macOS arches build on the Apple-Silicon runner; the x86_64
+          # wheel is cross-compiled. The Intel macos-13 runner is scarce and
+          # being deprecated — it routinely queued 10+ min while this leg ran.
+          - { runner: macos-14, target: x86_64 }
           - { runner: macos-14, target: aarch64 }
           - { runner: windows-latest, target: x64 }
     steps:
