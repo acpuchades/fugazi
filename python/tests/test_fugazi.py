@@ -469,13 +469,19 @@ def test_wallet_drives_a_python_strategy():
     del fast, slow
 
     w = ta.PaperWallet(1_000.0)
-    for c in closes([10, 11, 12, 13, 14, 13, 11, 9, 8]):
+    # Decline (fast below slow), then a rally that up-crosses (buy), then a
+    # drop that down-crosses (close). A first-bar cross coinciding with warm-up
+    # is deliberately not signalled, so the data must cross *after* warm-up.
+    for c in closes([10, 9, 8, 7, 8, 10, 12, 13, 11, 9, 7]):
         w.update("X", c.close)  # price the wallet each bar
-        if enter.update(c):
+        # Advance both signals every bar; never short-circuit one with the other.
+        entered = enter.update(c)
+        exited = exit_.update(c)
+        if entered:
             w.set("X", "buy", ta.Size.value_frac(1.0))
-        elif exit_.update(c):
+        elif exited:
             w.close("X")
-    assert len(w.orders()) >= 1
+    assert [o.side for o in w.orders()] == ["buy", "sell"]
 
 
 def test_wallet_rejects_bad_side():
