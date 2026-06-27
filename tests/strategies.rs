@@ -3,17 +3,17 @@
 //! trends (up then down) and oscillates — so trend, breakout, mean-reversion,
 //! momentum, volume and composite strategies all find something to trade.
 
-use arcana::prelude::*;
-use arcana::strategies::composite::{adx_trend_filter, keltner_breakout, rsi_pullback};
-use arcana::strategies::mean_reversion::{
+use fugazi::prelude::*;
+use fugazi::strategies::composite::{adx_trend_filter, keltner_breakout, rsi_pullback};
+use fugazi::strategies::mean_reversion::{
     ZScoreReversion, bollinger_reversion, mfi_reversal, rsi_reversal, stoch_rsi_reversal,
     stochastic_reversal,
 };
-use arcana::strategies::momentum::{momentum_roc, rsi_midline};
-use arcana::strategies::trend::{
+use fugazi::strategies::momentum::{momentum_roc, rsi_midline};
+use fugazi::strategies::trend::{
     bollinger_breakout, donchian_breakout, ma_crossover, macd_crossover, macd_zero_cross, triple_ma,
 };
-use arcana::strategies::volume::{chaikin_ad_trend, obv_trend, vwap_reversion};
+use fugazi::strategies::volume::{chaikin_ad_trend, obv_trend, vwap_reversion};
 
 const SYMBOL: &str = "X";
 const FUNDS: Real = 10_000.0;

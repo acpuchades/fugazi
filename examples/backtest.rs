@@ -10,8 +10,8 @@
 //!
 //! Run with: `cargo run --example backtest`
 
-use arcana::indicators::{Current, Sma};
-use arcana::prelude::*;
+use fugazi::indicators::{Current, Sma};
+use fugazi::prelude::*;
 
 // Embed the sample data at compile time so the example is self-contained.
 const CSV: &str = include_str!(concat!(

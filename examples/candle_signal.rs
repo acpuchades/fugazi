@@ -7,8 +7,8 @@
 //!
 //! Run with: `cargo run --example candle_signal`
 
-use arcana::indicators::{Current, Ema, Rsi};
-use arcana::prelude::*;
+use fugazi::indicators::{Current, Ema, Rsi};
+use fugazi::prelude::*;
 
 fn main() {
     // Entry trigger: bullish EMA crossover, gated by an RSI filter.

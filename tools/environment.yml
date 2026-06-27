@@ -1,12 +1,12 @@
 # Conda environment for generating TA-Lib reference fixtures.
 #
 #   conda env create -f tools/environment.yml
-#   conda activate arcana-talib
+#   conda activate fugazi-talib
 #   python3 tools/gen_talib_fixtures.py
 #
 # conda-forge ships the TA-Lib C library together with the Python wrapper, so
 # no separate system install (brew/apt) is needed.
-name: arcana-talib
+name: fugazi-talib
 channels:
   - conda-forge
 dependencies:

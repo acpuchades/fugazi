@@ -10,8 +10,8 @@
 //!
 //! Run with: `cargo run --example pairs`
 
-use arcana::indicators::{Current, Sma};
-use arcana::prelude::*;
+use fugazi::indicators::{Current, Sma};
+use fugazi::prelude::*;
 
 /// One bar across both instruments.
 #[derive(Clone, Copy)]

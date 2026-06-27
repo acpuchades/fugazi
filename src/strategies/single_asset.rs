@@ -33,9 +33,9 @@ use super::{is_long, is_short};
 /// edge signal does.
 ///
 /// ```
-/// use arcana::prelude::*;
-/// use arcana::indicators::{Current, Sma};
-/// use arcana::strategies::SingleAssetStrategy;
+/// use fugazi::prelude::*;
+/// use fugazi::indicators::{Current, Sma};
+/// use fugazi::strategies::SingleAssetStrategy;
 ///
 /// // A golden/death-cross that reverses long↔short — what `ma_crossover` builds.
 /// let cross_up = || Sma::new(Current::close(), 5).crosses_above(Sma::new(Current::close(), 20));

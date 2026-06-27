@@ -3,9 +3,9 @@ requires = ["maturin>=1.7,<2"]
 build-backend = "maturin"
 
 [project]
-name = "arcana"
+name = "fugazi"
 version = "0.1.0"
-description = "Python bindings for the arcana incremental technical-analysis library"
+description = "Python bindings for the fugazi incremental technical-analysis library"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -16,10 +16,13 @@ classifiers = [
     "Topic :: Office/Business :: Financial :: Investment",
 ]
 
+[project.urls]
+Repository = "https://github.com/acpuchades/fugazi"
+
 [project.optional-dependencies]
 test = ["pytest", "numpy", "pandas", "polars"]
 
 [tool.maturin]
-# The crate's `[lib] name = "arcana"` produces the importable module.
-module-name = "arcana"
+# The crate's `[lib] name = "fugazi"` produces the importable module.
+module-name = "fugazi"
 features = ["pyo3/extension-module"]

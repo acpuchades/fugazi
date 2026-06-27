@@ -20,7 +20,7 @@ def make_env():
     """A fresh namespace seeded like a reader's session."""
     pd = pytest.importorskip("pandas")
     np = pytest.importorskip("numpy")
-    import arcana as ta
+    import fugazi as ta
 
     prices = [100.0 + i * 0.5 for i in range(40)]
     bars = [(p, p + 1.0, p - 1.0, p, 100.0) for p in prices]

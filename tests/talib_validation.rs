@@ -1,4 +1,4 @@
-//! Cross-validation of arcana's indicators against TA-Lib reference values.
+//! Cross-validation of fugazi's indicators against TA-Lib reference values.
 //!
 //! This test consumes two committed CSVs from `tests/data/`:
 //!   * `aapl_monthly.csv`   — offline OHLCV input (see tests/data/README.md).
@@ -6,18 +6,18 @@
 //!     `tools/gen_talib_fixtures.py` (run once, needs the TA-Lib library).
 //!
 //! If the expected file is absent the test **skips** (prints how to generate it)
-//! so `cargo test` stays green without TA-Lib installed. When present, arcana is
+//! so `cargo test` stays green without TA-Lib installed. When present, fugazi is
 //! run over the identical input and compared cell-by-cell.
 //!
 //! Parameters must match `tools/gen_talib_fixtures.py`.
 
 use std::path::PathBuf;
 
-use arcana::indicators::{
+use fugazi::indicators::{
     Ad, Adx, Aroon, Atr, Bollinger, Cci, Current, Dmi, Ema, Hma, Identity, Keltner, Macd, Mfi, Obv,
     RollingMax, RollingMin, Rsi, Sar, Sma, StdDev, Stochastic, TrueRange, WilliamsR, Wma,
 };
-use arcana::prelude::*;
+use fugazi::prelude::*;
 
 const SMA_P: usize = 10;
 const EMA_P: usize = 10;
@@ -92,28 +92,28 @@ fn rel_close(a: Real, b: Real, tol: Real) -> bool {
     (a - b).abs() <= tol * a.abs().max(b.abs()).max(1.0)
 }
 
-/// Compare arcana output against the expected column at `tol`, only over indices
+/// Compare fugazi output against the expected column at `tol`, only over indices
 /// `>= start`. Returns the number of cells actually compared.
 fn compare(
     label: &str,
-    arcana: &[Option<Real>],
+    fugazi: &[Option<Real>],
     expected: &[Option<Real>],
     tol: Real,
     start: usize,
 ) -> usize {
     let mut compared = 0;
     for i in start..expected.len() {
-        let (Some(exp), Some(got)) = (expected[i], arcana[i]) else {
+        let (Some(exp), Some(got)) = (expected[i], fugazi[i]) else {
             // For exact-convention indicators, warm-up must align: where TA-Lib
-            // has a value, arcana must too.
+            // has a value, fugazi must too.
             if expected[i].is_some() && tol == EXACT_TOL {
-                panic!("{label}[{i}]: TA-Lib has {:?} but arcana is None", expected[i]);
+                panic!("{label}[{i}]: TA-Lib has {:?} but fugazi is None", expected[i]);
             }
             continue;
         };
         assert!(
             rel_close(got, exp, tol),
-            "{label}[{i}]: arcana {got} vs TA-Lib {exp} (tol {tol})"
+            "{label}[{i}]: fugazi {got} vs TA-Lib {exp} (tol {tol})"
         );
         compared += 1;
     }
@@ -163,7 +163,7 @@ fn matches_talib_reference() {
     let n = close.len();
     assert_eq!(rows.len(), n, "fixture row counts differ");
 
-    // Run each arcana indicator over the identical input.
+    // Run each fugazi indicator over the identical input.
     let mut sma = Sma::new(Identity::new(), SMA_P);
     let mut ema = Ema::new(Identity::new(), EMA_P);
     let mut rsi = Rsi::new(Identity::new(), RSI_P);
@@ -250,7 +250,7 @@ fn matches_talib_reference() {
         plus_di_o.push(adx.plus_di);
         minus_di_o.push(adx.minus_di);
         tr_o.push(tr.update(candle));
-        // arcana yields the stochastic in [0, 1]; TA-Lib's %K is in [0, 100].
+        // fugazi yields the stochastic in [0, 1]; TA-Lib's %K is in [0, 100].
         stoch_o.push(stoch.update(close[i]).map(|v| v * 100.0));
         obv_o.push(obv.update(candle));
         ad_o.push(ad.update(candle));
@@ -305,14 +305,14 @@ fn matches_talib_reference() {
     total += compare("sar", &sar_o, &opt_col(&headers, &rows, "sar"), EXACT_TOL, 0);
     assert!(total > 0, "no cells were compared — check fixtures");
 
-    // EMA/ATR: arcana seeds the recurrence with the first value, whereas TA-Lib
+    // EMA/ATR: fugazi seeds the recurrence with the first value, whereas TA-Lib
     // seeds with an SMA of the first `period` samples. That difference decays
     // geometrically, so we only check the tail of the series (looser tolerance).
     //
     // The same applies to every other Wilder/EMA-seeded indicator:
     //   * MACD — fast/slow/signal are all EMAs.
     //   * ADX, +DI, -DI — TA-Lib seeds its Wilder sums differently; the gap
-    //     decays geometrically, so arcana and TA-Lib agree to ~5 figures by the
+    //     decays geometrically, so fugazi and TA-Lib agree to ~5 figures by the
     //     tail even though the first warmed bars differ by ~1%.
     let tail = n * 3 / 4;
     compare("ema10", &ema_o, &opt_col(&headers, &rows, "ema10"), CONVERGED_TOL, tail);
@@ -328,7 +328,7 @@ fn matches_talib_reference() {
     compare("dmi_plus", &dmi_plus_o, &opt_col(&headers, &rows, "plus_di14"), CONVERGED_TOL, tail);
     compare("dmi_minus", &dmi_minus_o, &opt_col(&headers, &rows, "minus_di14"), CONVERGED_TOL, tail);
     // Keltner bands TA-Lib's EMA with its ATR; both seed recursively, so (like
-    // EMA/ATR) arcana and TA-Lib agree once the seed difference has decayed.
+    // EMA/ATR) fugazi and TA-Lib agree once the seed difference has decayed.
     compare("kc_upper", &kc_u, &opt_col(&headers, &rows, "kc_upper"), CONVERGED_TOL, tail);
     compare("kc_mid", &kc_m, &opt_col(&headers, &rows, "kc_mid"), CONVERGED_TOL, tail);
     compare("kc_lower", &kc_l, &opt_col(&headers, &rows, "kc_lower"), CONVERGED_TOL, tail);

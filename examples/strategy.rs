@@ -9,8 +9,8 @@
 //!
 //! Run with: `cargo run --example strategy`
 
-use arcana::indicators::{Current, Sma};
-use arcana::prelude::*;
+use fugazi::indicators::{Current, Sma};
+use fugazi::prelude::*;
 
 const CSV: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),

@@ -1,6 +1,6 @@
-# arcana (Python)
+# fugazi (Python)
 
-Python bindings for [`arcana`](..), a library of **incremental**,
+Python bindings for [`fugazi`](..), a library of **incremental**,
 **composable** technical-analysis primitives.
 
 - **Incremental** — every indicator and signal carries its own state and is
@@ -19,7 +19,7 @@ pip install maturin
 maturin develop --release   # editable install into the active virtualenv
 ```
 
-Then `import arcana`.
+Then `import fugazi`.
 
 ## Quick start
 
@@ -27,7 +27,7 @@ You build indicators by **nesting constructors**. Every indicator is rooted at
 a leaf source — usually a candle field (`close()`, `high()`, `volume()`, ...):
 
 ```python
-import arcana as ta
+import fugazi as ta
 
 ema = ta.ema(ta.close(), 20)                  # EMA-20 of the close
 node = ta.ema(ta.sma(ta.close(), 10), 20)     # EMA-20 of an SMA-10 — just keep nesting
@@ -190,7 +190,7 @@ sig.update(candle)  # -> bool
 signal, usable either way:
 
 ```python
-import arcana as ta
+import fugazi as ta
 
 def golden():
     return (
@@ -218,7 +218,7 @@ in-memory book (funds + positions + a trade blotter); live execution belongs in
 your own code, not here.
 
 ```python
-import arcana as ta
+import fugazi as ta
 
 wallet = ta.PaperWallet(10_000.0)          # seed with cash
 

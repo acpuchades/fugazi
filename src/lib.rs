@@ -1,4 +1,4 @@
-//! # Arcana
+//! # Fugazi
 //!
 //! A library of technical-analysis (TA) building blocks designed around
 //! *incremental* computation. Every primitive owns its internal state and is
@@ -37,8 +37,8 @@
 //!   sizing, and short-selling are all just what the strategy's code does.
 //!
 //! ```
-//! use arcana::prelude::*;
-//! use arcana::indicators::{Identity, Rsi};
+//! use fugazi::prelude::*;
+//! use fugazi::indicators::{Identity, Rsi};
 //!
 //! // "RSI(14) over 70" as a single bool-valued indicator over a raw price
 //! // stream. Indicators own their source, so `Identity` feeds it into the RSI.

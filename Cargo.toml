@@ -1,14 +1,16 @@
 [package]
-name = "arcana"
+name = "fugazi"
 version = "0.1.0"
 edition = "2024"
 description = "A library of incremental technical-analysis indicators, signals and strategies"
 license = "MIT"
+repository = "https://github.com/acpuchades/fugazi"
+readme = "README.md"
 keywords = ["trading", "technical-analysis", "indicators", "finance", "incremental"]
 categories = ["finance", "mathematics"]
 
 [lib]
-name = "arcana"
+name = "fugazi"
 path = "src/lib.rs"
 
 [dependencies]

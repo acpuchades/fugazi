@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Generate TA-Lib reference values for arcana's cross-validation test.
+"""Generate TA-Lib reference values for fugazi's cross-validation test.
 
 Reads the offline price fixture and writes one column of expected output per
 indicator, aligned row-for-row with the input. Empty cells mark warm-up / NaN.
 
 Usage (conda, recommended — bundles the TA-Lib C library):
     conda env create -f tools/environment.yml
-    conda activate arcana-talib
+    conda activate fugazi-talib
     python3 tools/gen_talib_fixtures.py
 
 Usage (pip — needs the TA-Lib C library already installed, e.g.
@@ -71,7 +71,7 @@ def main() -> None:
     macd, macd_signal, macd_hist = talib.MACD(
         close, fastperiod=MACD_FAST, slowperiod=MACD_SLOW, signalperiod=MACD_SIGNAL
     )
-    # arcana's Stochastic over a single source positions that source within its
+    # fugazi's Stochastic over a single source positions that source within its
     # own rolling [min, max]. Feeding close as high/low/close makes TA-Lib's
     # fast %K compute the same thing (scaled to [0, 100]); we take %K only.
     stoch_k, _stoch_d = talib.STOCHF(
@@ -91,7 +91,7 @@ def main() -> None:
 
     # Keltner has no TA-Lib function either; band TA-Lib's EMA with its ATR. Both
     # are recursively seeded, so (like EMA/ATR themselves) this only agrees with
-    # arcana over the converged tail.
+    # fugazi over the converged tail.
     kc_ema = talib.EMA(close, KC_EMA_P)
     kc_atr = talib.ATR(high, low, close, KC_ATR_P)
 

@@ -235,16 +235,16 @@ impl std::error::Error for WalletError {}
 /// The portfolio interface a [`Strategy`] trades into: query funds, positions
 /// and prices, feed prices in, and move positions.
 ///
-/// `Wallet` is a trait so it is the single **seam** between pure arcana and a
-/// downstream execution system. arcana ships only the pure, in-memory
+/// `Wallet` is a trait so it is the single **seam** between pure fugazi and a
+/// downstream execution system. fugazi ships only the pure, in-memory
 /// [`PaperWallet`] (for backtests and dry runs); a downstream crate that imports
-/// arcana can implement `Wallet` with a type whose
+/// fugazi can implement `Wallet` with a type whose
 /// [`set_position`](Wallet::set_position) publishes a message onto an event bus /
 /// routes to a broker instead of booking in memory. All market-specific,
-/// side-effecting code stays out of arcana, behind this interface.
+/// side-effecting code stays out of fugazi, behind this interface.
 ///
 /// The wallet carries no view of the market on its own: it must be fed each
-/// symbol's worth every tick through [`update`](Wallet::update) (arcana is
+/// symbol's worth every tick through [`update`](Wallet::update) (fugazi is
 /// agnostic to where those prices come from). With prices in hand it can value
 /// equity, size relative orders, and flag infeasible movements. The single
 /// execution primitive is [`set_position`](Wallet::set_position) (drive a symbol

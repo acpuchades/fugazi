@@ -15,8 +15,8 @@ use crate::types::Real;
 /// `Indicator<Output = Real>`, so it composes like any other source:
 ///
 /// ```
-/// use arcana::prelude::*;
-/// use arcana::indicators::{Current, Macd};
+/// use fugazi::prelude::*;
+/// use fugazi::indicators::{Current, Macd};
 ///
 /// let macd = Macd::new(Current::close(), 12, 26, 9);
 /// // The MACD line crossing above its signal line — a single composed Signal.

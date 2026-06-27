@@ -16,8 +16,8 @@
 //!
 //! Run with: `cargo run --example multi_output`
 
-use arcana::indicators::{Bollinger, Current, Macd};
-use arcana::prelude::*;
+use fugazi::indicators::{Bollinger, Current, Macd};
+use fugazi::prelude::*;
 
 fn main() {
     // Bollinger(20, 2.0) and MACD(12, 26, 9), both over the candle close.

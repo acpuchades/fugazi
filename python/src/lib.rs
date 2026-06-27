@@ -1,4 +1,4 @@
-//! Python bindings for the `arcana` incremental technical-analysis library.
+//! Python bindings for the `fugazi` incremental technical-analysis library.
 //!
 //! The Rust library is built around "composition is construction": a
 //! price-series indicator owns its input source and is generic over it, so an
@@ -16,7 +16,7 @@
 //! literal lifts to whichever side it is combined with).
 //!
 //! ```python
-//! import arcana as ta
+//! import fugazi as ta
 //! ema_of_sma = ta.ema(ta.sma(ta.close(), 10), 20)   # candle-rooted
 //! rsi_of_prices = ta.rsi(ta.identity(), 14)         # value-rooted
 //! signal = ta.close().crosses_above(ta.ema(ta.close(), 20))
@@ -26,18 +26,18 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use arcana_core::Indicator;
-use arcana_core::indicators::compare::{EqOp, GeOp, GtOp, LeOp, LtOp, NeOp};
-use arcana_core::indicators::{
+use fugazi_core::Indicator;
+use fugazi_core::indicators::compare::{EqOp, GeOp, GtOp, LeOp, LtOp, NeOp};
+use fugazi_core::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Current, Dmi,
     DmiValue, Donchian, DonchianValue, Ema, Hma, Identity, Keltner, KeltnerValue, Macd, MacdValue,
     Mfi, Obv, Rma, Rsi, Sar, Sma, StdDev, Stochastic, TrueRange, Value, Vwap, WilliamsR, Wma,
 };
-use arcana_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
-use arcana_core::strategy::{
+use fugazi_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
+use fugazi_core::strategy::{
     Order, PaperWallet, Quantity, Reference, Side, Size, Wallet, WalletError,
 };
-use arcana_core::types::{Candle, Real};
+use fugazi_core::types::{Candle, Real};
 
 // ---------------------------------------------------------------------------
 // Type-erasing carriers
@@ -1436,7 +1436,7 @@ fn coerce_operand(obj: &Bound<'_, PyAny>) -> PyResult<AnySource> {
         Ok(AnySource::Const(x))
     } else {
         Err(PyTypeError::new_err(
-            "expected an arcana Indicator or a number",
+            "expected an fugazi Indicator or a number",
         ))
     }
 }
@@ -1862,7 +1862,7 @@ fn stoch_rsi(
 // ---------------------------------------------------------------------------
 
 #[pymodule]
-fn arcana(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCandle>()?;
     m.add_class::<PyIndicator>()?;
     m.add_class::<PySignal>()?;

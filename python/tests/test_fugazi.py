@@ -1,10 +1,10 @@
-"""Smoke tests for the arcana Python bindings."""
+"""Smoke tests for the fugazi Python bindings."""
 
 import math
 
 import pytest
 
-import arcana as ta
+import fugazi as ta
 
 
 def feed(node, bars):

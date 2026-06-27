@@ -15,8 +15,8 @@ use crate::types::Real;
 /// naturally:
 ///
 /// ```
-/// use arcana::prelude::*;
-/// use arcana::indicators::{Current, Ema};
+/// use fugazi::prelude::*;
+/// use fugazi::indicators::{Current, Ema};
 ///
 /// // "current close crosses above EMA20", consuming a Candle per bar:
 /// let _sig = Current::close().crosses_above(Ema::new(Current::close(), 20));

@@ -7,8 +7,8 @@
 //!
 //! Run with: `cargo run --example streaming`
 
-use arcana::indicators::{Ema, Identity, Rsi};
-use arcana::prelude::*;
+use fugazi::indicators::{Ema, Identity, Rsi};
+use fugazi::prelude::*;
 
 fn main() {
     // RSI(14) and EMA(5) of the same raw price stream, advanced in lock-step.

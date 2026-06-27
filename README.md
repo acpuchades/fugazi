@@ -1,4 +1,4 @@
-# arcana
+# fugazi
 
 A Rust library of **incremental** technical-analysis primitives. Every indicator
 and signal owns its internal state and is advanced one sample at a time via
@@ -14,7 +14,7 @@ and signal owns its internal state and is advanced one sample at a time via
 
 ```toml
 [dependencies]
-arcana = "0.1"
+fugazi = "0.1"
 ```
 
 ## Concepts
@@ -42,8 +42,8 @@ inside, `update(input)` advances one step, outputs are `None` until warmed up.
 "Current close crosses above its EMA‑20" — defined once, fed one `Candle` per bar:
 
 ```rust
-use arcana::prelude::*;
-use arcana::indicators::{Current, Ema};
+use fugazi::prelude::*;
+use fugazi::indicators::{Current, Ema};
 
 let mut signal = Current::close().crosses_above(Ema::new(Current::close(), 20));
 
@@ -60,8 +60,8 @@ Indicators name their source explicitly, so the standard definitions read the
 way you'd expect — RSI of the close, fed one `Candle` per bar:
 
 ```rust
-use arcana::prelude::*;
-use arcana::indicators::{Current, Rsi};
+use fugazi::prelude::*;
+use fugazi::indicators::{Current, Rsi};
 
 // "RSI(14) of the close, over 70" as a single `Signal` (a `Candle`-fed `bool`).
 let mut overbought = Rsi::new(Current::close(), 14).above(70.0);
@@ -82,7 +82,7 @@ directly — `Rsi::new(Identity::new(), 14)`.
 Indicators nest — composition *is* construction:
 
 ```rust
-use arcana::indicators::{Current, Ema, Sma};
+use fugazi::indicators::{Current, Ema, Sma};
 
 let _ema_of_sma = Ema::new(Sma::new(Current::close(), 10), 20); // EMA of an SMA
 ```
@@ -90,8 +90,8 @@ let _ema_of_sma = Ema::new(Sma::new(Current::close(), 10), 20); // EMA of an SMA
 The `IndicatorExt` fluent builders turn sources into other sources and signals:
 
 ```rust
-use arcana::prelude::*;
-use arcana::indicators::{Current, Ema};
+use fugazi::prelude::*;
+use fugazi::indicators::{Current, Ema};
 
 // arithmetic over two sources, and lookback ops (lag / diff / ratio)
 let _spread   = Ema::new(Current::close(), 10).sub(Ema::new(Current::close(), 30));
@@ -106,8 +106,8 @@ let _cross = Ema::new(Current::close(), 10).crosses_above(Ema::new(Current::clos
 The `BoolIndicatorExt` combinators compose signals:
 
 ```rust
-use arcana::prelude::*;
-use arcana::indicators::{Current, Ema, Rsi};
+use fugazi::prelude::*;
+use fugazi::indicators::{Current, Ema, Rsi};
 
 let _entry = Current::close()
     .crosses_above(Ema::new(Current::close(), 20))
@@ -125,8 +125,8 @@ field back into an ordinary `Indicator<Output = Real>` — so a single line of a
 multi-output indicator composes and compares exactly like any other source:
 
 ```rust
-use arcana::prelude::*;
-use arcana::indicators::{Bollinger, Current, Macd};
+use fugazi::prelude::*;
+use fugazi::indicators::{Bollinger, Current, Macd};
 
 // MACD line crossing its signal line, as one composed Signal:
 let macd = Macd::new(Current::close(), 12, 26, 9);
@@ -152,8 +152,8 @@ backtests or, because `Wallet` is a trait, a live broker / event-bus
 implementation living in a downstream crate.
 
 ```rust
-use arcana::prelude::*;
-use arcana::indicators::{Current, Sma};
+use fugazi::prelude::*;
+use fugazi::indicators::{Current, Sma};
 
 // Own your signals; act on the wallet. `update` advances the signals; `trade`
 // reads them and acts. `Size` is absolute units or a fraction of funds / equity /
@@ -272,7 +272,7 @@ series in one shot with `feed(df)`. The output mirrors the input (pandas in →
 pandas out, polars in → polars out, else a NumPy array):
 
 ```python
-import arcana as ta
+import fugazi as ta
 
 # streaming
 signal = ta.close().crosses_above(ta.ema(ta.close(), 20))
@@ -289,7 +289,7 @@ The strategy layer is exposed too: a `PaperWallet` you feed prices into
 A "strategy" in Python is just your own code driving the wallet each bar:
 
 ```python
-import arcana as ta
+import fugazi as ta
 
 enter = ta.sma(ta.close(), 3).crosses_above(ta.sma(ta.close(), 10))
 exit_ = ta.sma(ta.close(), 3).crosses_below(ta.sma(ta.close(), 10))
