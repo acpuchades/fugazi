@@ -26,6 +26,7 @@ path = "src/cli/main.rs"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_norway = "0.9"
+serde_json = "1"
 csv = "1"
 anyhow = "1"
 

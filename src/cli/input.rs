@@ -1,0 +1,106 @@
+//! Typed CLI inputs that follow fugazi's `@file` convention.
+//!
+//! Several flags take content that may be given either as a file to load or
+//! literally on the command line. [`Source`] captures that choice once — a clap
+//! value parser (via [`FromStr`]) turns `@path` into [`Source::File`] and anything
+//! else into [`Source::Inline`], so the rest of the CLI works with a decided type
+//! instead of re-detecting the `@` prefix at every use site.
+
+use std::path::PathBuf;
+use std::str::FromStr;
+
+use anyhow::{Context, Result};
+
+/// The serialization of a strategy/params document: YAML (`!tags`) or JSON
+/// (`{variant: …}` singleton maps).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Yaml,
+    Json,
+}
+
+/// Parse `text` (in `format`) into a [`serde_json::Value`] — the common shape the
+/// spec and params loaders both work on. YAML is normalized via
+/// [`crate::convert::yaml_to_json`] so `!tags` become serde_json's singleton-map
+/// external-tag form.
+pub fn parse_value(text: &str, format: Format) -> Result<serde_json::Value> {
+    Ok(match format {
+        Format::Json => serde_json::from_str(text)?,
+        Format::Yaml => crate::convert::yaml_to_json(serde_norway::from_str(text)?)?,
+    })
+}
+
+/// A text input given as either `@path` (load the file) or inline content
+/// (anything else) — the same `@` convention `--series` uses for its CSVs.
+#[derive(Debug, Clone)]
+pub enum Source {
+    /// `@path`: read the content from this file.
+    File(PathBuf),
+    /// Anything else: the content itself.
+    Inline(String),
+}
+
+impl Source {
+    /// The content: the file's text for [`File`](Self::File), the literal for
+    /// [`Inline`](Self::Inline).
+    pub fn read(&self) -> Result<String> {
+        match self {
+            Source::File(path) => std::fs::read_to_string(path)
+                .with_context(|| format!("reading file `{}`", path.display())),
+            Source::Inline(text) => Ok(text.clone()),
+        }
+    }
+
+    /// The document format: by file extension (`.json` → JSON, `.yml`/`.yaml` →
+    /// YAML, otherwise YAML), or for inline content by sniffing — valid JSON ⇒
+    /// JSON, else YAML (YAML is a superset, so anything else is fine as YAML).
+    pub fn format(&self) -> Format {
+        match self {
+            Source::File(path) => match path.extension().and_then(|e| e.to_str()) {
+                Some("json") => Format::Json,
+                _ => Format::Yaml,
+            },
+            Source::Inline(text) => {
+                if serde_json::from_str::<serde_json::Value>(text).is_ok() {
+                    Format::Json
+                } else {
+                    Format::Yaml
+                }
+            }
+        }
+    }
+
+    /// A short label for logs: the path for a file, `(inline)` for inline content.
+    pub fn label(&self) -> String {
+        match self {
+            Source::File(path) => path.display().to_string(),
+            Source::Inline(_) => "(inline)".to_string(),
+        }
+    }
+
+    /// If this is inline content that resembles an old-style bare file path
+    /// (single line ending in `.yml`/`.yaml`), the would-be path — used to hint at
+    /// the `@` form when such a value fails to parse.
+    pub fn misused_path(&self) -> Option<&str> {
+        match self {
+            Source::Inline(text)
+                if !text.contains('\n')
+                    && (text.ends_with(".yml") || text.ends_with(".yaml")) =>
+            {
+                Some(text)
+            }
+            _ => None,
+        }
+    }
+}
+
+impl FromStr for Source {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.strip_prefix('@') {
+            Some(path) => Source::File(PathBuf::from(path)),
+            None => Source::Inline(s.to_string()),
+        })
+    }
+}

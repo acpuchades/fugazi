@@ -649,20 +649,27 @@ pub struct StrategySpec {
 }
 
 impl StrategySpec {
-    /// Parse a `strategy.yml` document, resolving `!param` placeholders against
-    /// `params` first (see [`crate::params`]).
+    /// Parse a strategy document (YAML or JSON), resolving `param` placeholders
+    /// against `params` first (see [`crate::params`]).
     ///
-    /// Two passes: the document is read into an untyped [`serde_norway::Value`],
-    /// every `!param` node is rewritten to its resolved value, and only then is
-    /// the result deserialized into the typed spec — so a param can stand in for a
+    /// Two passes: the document is normalized to an untyped [`serde_json::Value`]
+    /// (YAML via [`crate::convert::yaml_to_json`], JSON straight in), every
+    /// placeholder node is rewritten to its resolved value, and only then is the
+    /// result deserialized into the typed spec — so a param can stand in for a
     /// number, a symbol, or any other field that is concretely typed here.
-    pub fn from_yaml_with_params(
-        yaml: &str,
-        params: &std::collections::HashMap<String, serde_norway::Value>,
+    pub fn from_text_with_params(
+        text: &str,
+        format: crate::input::Format,
+        params: &std::collections::HashMap<String, serde_json::Value>,
     ) -> anyhow::Result<Self> {
-        let value: serde_norway::Value = serde_norway::from_str(yaml)?;
+        let value = match format {
+            crate::input::Format::Json => serde_json::from_str(text)?,
+            crate::input::Format::Yaml => {
+                crate::convert::yaml_to_json(serde_norway::from_str(text)?)?
+            }
+        };
         let value = crate::params::substitute(value, params)?;
-        Ok(serde_norway::from_value(value)?)
+        Ok(serde_json::from_value(value)?)
     }
 
     /// Build the live [`SingleAssetStrategy`] this spec describes.
@@ -708,6 +715,23 @@ mod tests {
     }
 
     #[test]
+    fn probe_yaml_tags_survive_conversion_to_json() {
+        // A `!tag` YAML doc, converted to JSON (tags → singleton maps) and
+        // deserialized via serde_json, must yield the same spec as YAML would.
+        let yaml = r#"
+            symbol: BTC
+            long:
+              enter: !crosses_above { lhs: !sma { source: close, period: 3 }, rhs: !sma { period: 8 } }
+        "#;
+        let value: serde_norway::Value = serde_norway::from_str(yaml).unwrap();
+        let json = crate::convert::yaml_to_json(value).unwrap();
+        let spec: StrategySpec = serde_json::from_value(json).unwrap();
+        assert_eq!(spec.symbol, "BTC");
+        assert!(spec.long.is_some());
+        let _ = spec.build();
+    }
+
+    #[test]
     fn default_source_is_close() {
         // `period` only — source should default to the close.
         let spec: SourceSpec = serde_norway::from_str("!ema { period: 3 }").unwrap();
@@ -729,8 +753,27 @@ mod tests {
               enter: !crosses_below { lhs: !sma { period: 5 }, rhs: !sma { period: 20 } }
               exit:  !crosses_above { lhs: !sma { period: 5 }, rhs: !sma { period: 20 } }
         "#;
-        let spec = StrategySpec::from_yaml_with_params(yaml, &std::collections::HashMap::new()).unwrap();
+        let spec = StrategySpec::from_text_with_params(
+            yaml,
+            crate::input::Format::Yaml,
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
         assert_eq!(spec.symbol, "BTC");
+        let _strat = spec.build();
+    }
+
+    #[test]
+    fn parses_an_inline_json_strategy() {
+        let json = r#"{"symbol":"ETH","long":{"enter":{"crosses_above":
+            {"lhs":{"sma":{"period":5}},"rhs":{"sma":{"period":20}}}}}}"#;
+        let spec = StrategySpec::from_text_with_params(
+            json,
+            crate::input::Format::Json,
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(spec.symbol, "ETH");
         let _strat = spec.build();
     }
 }

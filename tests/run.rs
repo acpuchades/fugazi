@@ -1,21 +1,23 @@
-//! End-to-end test of the `fugazi run` backtester binary over the example
-//! strategy + candles, asserting it produces non-trivial result files.
+//! End-to-end tests of the `fugazi run` backtester binary over the example
+//! candles, asserting it produces non-trivial result files for both an `@file`
+//! strategy and an inline one.
 
 use std::process::Command;
 
-#[test]
-fn runs_the_example_backtest() {
+/// Run the binary with the given `--strategy` value into a fresh `out_name`
+/// scratch dir, asserting success, and return `(trades.csv, returns.csv)`.
+fn run_backtest(out_name: &str, strategy: &str) -> (String, String) {
     let manifest = env!("CARGO_MANIFEST_DIR");
-    let out = std::env::temp_dir().join("fugazi_e2e_out");
+    let out = std::env::temp_dir().join(out_name);
     let _ = std::fs::remove_dir_all(&out);
 
     let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
         .args([
             "run",
             "--strategy",
-            &format!("{manifest}/examples/strategy.yml"),
+            strategy,
             "--series",
-            &format!("symbol=BTC,@{manifest}/examples/candles.csv"),
+            &format!("@{manifest}/examples/candles.csv"),
             "--output-dir",
             out.to_str().unwrap(),
         ])
@@ -25,6 +27,16 @@ fn runs_the_example_backtest() {
 
     let trades = std::fs::read_to_string(out.join("trades.csv")).expect("trades.csv");
     let returns = std::fs::read_to_string(out.join("returns.csv")).expect("returns.csv");
+    (trades, returns)
+}
+
+#[test]
+fn runs_an_at_file_strategy() {
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let (trades, returns) = run_backtest(
+        "fugazi_e2e_file",
+        &format!("@{manifest}/examples/strategy.yml"),
+    );
 
     assert!(
         trades.starts_with("time;symbol;side;quantity;price"),
@@ -39,4 +51,25 @@ fn runs_the_example_backtest() {
         returns.lines().count() >= 2,
         "expected an equity curve, got:\n{returns}"
     );
+}
+
+#[test]
+fn runs_an_inline_strategy() {
+    // A bare (non-`@`) value is the strategy YAML itself.
+    let (trades, returns) = run_backtest(
+        "fugazi_e2e_inline",
+        "symbol: BTC\nbuy_and_hold: true\n",
+    );
+
+    assert!(
+        trades.starts_with("time;symbol;side;quantity;price"),
+        "unexpected trades.csv header: {trades}"
+    );
+    // Buy-and-hold opens exactly one position on the first bar.
+    assert_eq!(
+        trades.lines().count(),
+        2,
+        "expected a single buy-and-hold trade, got:\n{trades}"
+    );
+    assert!(returns.lines().count() >= 2, "expected an equity curve");
 }

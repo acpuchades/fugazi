@@ -9,14 +9,15 @@
 #   !param { key: SLOW, default: 8 }  # optional, falls back to 8
 #   !param SYM                        # bare-string shorthand for { key: SYM }
 #
-# Override with `--param NAME=value` (repeatable). Values are parsed as YAML
-# scalars, so `FAST=3` is a number and `SYM=BTC` a string.
+# Resolve params with `--params`, a `,`-separated list like --series (repeatable):
+# `NAME=value` sets one, `@file` loads a mapping (see params.yml). A `NAME=value`
+# is a JSON scalar, so `FAST=3` is a number and `SYM=BTC` a string.
 #
 # Run it (every param has a default, so all are optional). candles.csv carries
 # its own `symbol` column — if you override SYM here, point --series at a file
 # whose symbol matches:
-#   fugazi run --strategy examples/strategy.params.yml \
-#              --param FAST=5 --param SLOW=20 \
+#   fugazi run --strategy @examples/strategy.params.yml \
+#              --params @examples/params.yml,FAST=5 \
 #              --series @examples/candles.csv \
 #              --output-dir out/
 symbol: !param { key: SYM, default: BTC }

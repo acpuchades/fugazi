@@ -1,16 +1,16 @@
-//! `--param NAME=value` substitution for `strategy.yml`.
+//! `--params` substitution for a strategy spec.
 //!
 //! The strategy spec ([`crate::spec`]) deserializes into strongly-typed serde
 //! enums, where a `period` is a `usize`, a `k` is a `Real`, and so on — there is
-//! no room to drop a `!param` tag where a number is expected during typed
-//! parsing. So substitution happens in a **first pass over the untyped YAML
-//! tree**: parse the document into a [`serde_norway::Value`], rewrite every
-//! `!param` node into its resolved value here, then `from_value` the result into
-//! the typed spec. The injected value is an already-parsed YAML scalar, so the
-//! typed parse stays type-correct and every other tag (`!sma`, `!crosses_above`,
-//! …) still resolves to its enum variant.
+//! no room to drop a `param` placeholder where a number is expected during typed
+//! parsing. So substitution happens in a **first pass over the untyped value
+//! tree**: the document is normalized to a [`serde_json::Value`] (see
+//! [`crate::convert`]), every placeholder node is rewritten to its resolved value
+//! here, and only then is the result deserialized into the typed spec.
 //!
-//! A placeholder takes either form:
+//! A placeholder is a singleton object keyed `param` — written `!param { … }` in
+//! YAML (the tag becomes that object via [`crate::convert`]) or `{"param": { … }}`
+//! directly in JSON:
 //!
 //! ```yaml
 //! period: !param { key: FAST }                # required — must be passed
@@ -19,73 +19,130 @@
 //! ```
 
 use std::collections::HashMap;
+use std::str::FromStr;
 
 use anyhow::{Context, Result, anyhow, bail};
-use serde_norway::Value;
-use serde_norway::value::TaggedValue;
+use serde_json::{Map, Value};
 
-/// Parse `--param NAME=value` arguments into a name → value table.
-///
-/// The value side is parsed as a YAML scalar, so `FAST=3` is an integer,
-/// `K=2.0` a float and `SYM=BTC` a string — each lands in the spec with the
-/// type its target field expects.
-pub fn parse(args: &[String]) -> Result<HashMap<String, Value>> {
-    let mut map = HashMap::new();
-    for arg in args {
-        let (name, raw) = arg
-            .split_once('=')
-            .ok_or_else(|| anyhow!("invalid --param `{arg}`: expected NAME=value"))?;
-        let value: Value = serde_norway::from_str(raw)
-            .with_context(|| format!("parsing value of --param `{name}`"))?;
-        map.insert(name.to_string(), value);
-    }
-    Ok(map)
+use crate::input::{self, Source};
+
+/// One term of a `--params` spec: set a single value, or load a mapping file.
+#[derive(Debug, Clone)]
+enum ParamTerm {
+    /// `NAME=value` — the value parsed leniently as a JSON scalar (so `FAST=3` is a
+    /// number and `SYM=BTC` a string).
+    Set { name: String, value: Value },
+    /// `@file.yml` / `@file.json` — a whole `NAME: value` mapping.
+    Load(Source),
 }
 
-/// Rewrite every `!param` node in `value` to its resolved value, recursing
-/// through mappings, sequences and other tagged nodes.
+/// One `--params` argument: a `,`-separated list of terms, exactly like
+/// `--series` (e.g. `@base.yml,FAST=3,SLOW=8`). Terms apply left-to-right, and the
+/// flag is itself repeatable, so a later term/flag overrides an earlier one.
+#[derive(Debug, Clone)]
+pub struct ParamSpec(Vec<ParamTerm>);
+
+impl FromStr for ParamSpec {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut terms = Vec::new();
+        for term in s.split(',') {
+            let term = term.trim();
+            if term.is_empty() {
+                continue;
+            }
+            terms.push(parse_term(term)?);
+        }
+        Ok(ParamSpec(terms))
+    }
+}
+
+fn parse_term(term: &str) -> Result<ParamTerm, String> {
+    if term.starts_with('@') {
+        // `Source::from_str` is infallible; `@path` yields a `File`.
+        Ok(ParamTerm::Load(term.parse().expect("infallible")))
+    } else if let Some((name, raw)) = term.split_once('=') {
+        Ok(ParamTerm::Set {
+            name: name.to_string(),
+            value: scalar(raw),
+        })
+    } else {
+        Err(format!(
+            "invalid --params term `{term}`: expected NAME=value or @file"
+        ))
+    }
+}
+
+/// Parse a `NAME=value` param value: JSON if it parses (`3` → number, `true` →
+/// bool, `"x"` → string), otherwise a bare string (so `BTC` works without quotes).
+fn scalar(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
+}
+
+/// Fold all `--params` specs into a name → value table, applying every term
+/// left-to-right (so a later term wins).
+pub fn table(specs: &[ParamSpec]) -> Result<HashMap<String, Value>> {
+    let mut table = HashMap::new();
+    for spec in specs {
+        for term in &spec.0 {
+            match term {
+                ParamTerm::Set { name, value } => {
+                    table.insert(name.clone(), value.clone());
+                }
+                ParamTerm::Load(src) => {
+                    let text = src.read().context("reading params file")?;
+                    let value = input::parse_value(&text, src.format())
+                        .with_context(|| format!("parsing params {}", src.label()))?;
+                    match value {
+                        Value::Object(map) => table.extend(map),
+                        _ => bail!("params file {} must be a mapping of NAME: value", src.label()),
+                    }
+                }
+            }
+        }
+    }
+    Ok(table)
+}
+
+/// Rewrite every `param` placeholder in `value` to its resolved value, recursing
+/// through objects and arrays.
 pub fn substitute(value: Value, params: &HashMap<String, Value>) -> Result<Value> {
     match value {
-        Value::Tagged(tagged) if tagged.tag == "param" => resolve(&tagged.value, params),
-        Value::Tagged(tagged) => {
-            // A non-`param` tag (e.g. `!sma`): keep the tag, substitute inside it
-            // so a `!param` nested in its body is still resolved.
-            let value = substitute(tagged.value, params)?;
-            Ok(Value::Tagged(Box::new(TaggedValue {
-                tag: tagged.tag,
-                value,
-            })))
+        // A `{param: …}` singleton object is a placeholder (no spec enum has a
+        // `param` variant, so this is unambiguous).
+        Value::Object(map) if map.len() == 1 && map.contains_key("param") => {
+            resolve(&map["param"], params)
         }
-        Value::Sequence(seq) => seq
+        Value::Object(map) => {
+            let mut out = Map::new();
+            for (k, v) in map {
+                out.insert(k, substitute(v, params)?);
+            }
+            Ok(Value::Object(out))
+        }
+        Value::Array(seq) => seq
             .into_iter()
             .map(|v| substitute(v, params))
             .collect::<Result<Vec<_>>>()
-            .map(Value::Sequence),
-        Value::Mapping(map) => {
-            let mut out = serde_norway::Mapping::new();
-            for (k, v) in map {
-                // Keys are not templated, only values.
-                out.insert(k, substitute(v, params)?);
-            }
-            Ok(Value::Mapping(out))
-        }
+            .map(Value::Array),
         other => Ok(other),
     }
 }
 
-/// Resolve a single `!param` body (its `{ key, default }` mapping or bare key
+/// Resolve a single placeholder body (its `{ key, default }` object or bare key
 /// name) against the supplied params.
-fn resolve(spec: &Value, params: &HashMap<String, Value>) -> Result<Value> {
-    let (key, default) = match spec {
+fn resolve(body: &Value, params: &HashMap<String, Value>) -> Result<Value> {
+    let (key, default) = match body {
         Value::String(name) => (name.as_str(), None),
-        Value::Mapping(_) => {
-            let key = spec
+        Value::Object(o) => {
+            let key = o
                 .get("key")
                 .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("`!param` mapping needs a string `key`"))?;
-            (key, spec.get("default"))
+                .ok_or_else(|| anyhow!("`param` needs a string `key`"))?;
+            (key, o.get("default"))
         }
-        _ => bail!("`!param` expects a key name or a `{{ key: NAME }}` mapping"),
+        _ => bail!("`param` expects a key name or a `{{ key: NAME }}` object"),
     };
 
     if let Some(value) = params.get(key) {
@@ -93,35 +150,53 @@ fn resolve(spec: &Value, params: &HashMap<String, Value>) -> Result<Value> {
     } else if let Some(default) = default {
         Ok(default.clone())
     } else {
-        bail!("parameter `{key}` is not set (pass `--param {key}=…` or add a `default`)")
+        bail!("parameter `{key}` is not set (pass `--params {key}=…` or add a `default`)")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::convert::yaml_to_json;
     use crate::spec::StrategySpec;
 
-    fn params(pairs: &[&str]) -> HashMap<String, Value> {
-        parse(&pairs.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap()
+    fn table_of(specs: &[&str]) -> HashMap<String, Value> {
+        let specs: Vec<ParamSpec> = specs.iter().map(|s| s.parse().unwrap()).collect();
+        table(&specs).unwrap()
     }
 
     #[test]
-    fn parse_types_values_as_yaml_scalars() {
-        let map = params(&["FAST=3", "K=2.0", "SYM=BTC"]);
+    fn param_values_parse_as_json_scalars() {
+        let map = table_of(&["FAST=3", "K=2.0", "SYM=BTC"]);
         assert_eq!(map["FAST"], Value::from(3));
         assert_eq!(map["K"], Value::from(2.0));
         assert_eq!(map["SYM"], Value::from("BTC"));
     }
 
     #[test]
-    fn parse_rejects_missing_equals() {
-        assert!(parse(&["FAST".to_string()]).is_err());
+    fn one_spec_holds_comma_separated_terms() {
+        let map = table_of(&["FAST=3,SLOW=8,SYM=BTC"]);
+        assert_eq!(map["FAST"], Value::from(3));
+        assert_eq!(map["SLOW"], Value::from(8));
+        assert_eq!(map["SYM"], Value::from("BTC"));
     }
 
+    #[test]
+    fn later_terms_win() {
+        // Within one spec and across specs.
+        assert_eq!(table_of(&["FAST=3,FAST=9"])["FAST"], Value::from(9));
+        assert_eq!(table_of(&["FAST=3", "FAST=9"])["FAST"], Value::from(9));
+    }
+
+    #[test]
+    fn param_rejects_bare_token() {
+        assert!("FAST".parse::<ParamSpec>().is_err());
+    }
+
+    /// Substitute over a YAML doc (converted to JSON first, as the CLI does).
     fn sub(yaml: &str, pairs: &[&str]) -> Result<Value> {
-        let value: Value = serde_norway::from_str(yaml).unwrap();
-        substitute(value, &params(pairs))
+        let value = yaml_to_json(serde_norway::from_str(yaml).unwrap()).unwrap();
+        substitute(value, &table_of(pairs))
     }
 
     #[test]
@@ -149,24 +224,27 @@ mod tests {
     }
 
     #[test]
-    fn leaves_other_tags_intact_and_round_trips_into_a_strategy() {
-        // The key risk: after walking the Value tree, the surviving `!sma` /
-        // `!crosses_above` tags must still resolve to their enum variants when we
-        // re-`from_value` into the typed spec.
+    fn json_param_placeholder_resolves() {
+        // The `{"param": …}` form straight from JSON (no YAML tag involved).
+        let value: Value = serde_json::from_str(r#"{"period": {"param": {"key": "FAST"}}}"#).unwrap();
+        let out = substitute(value, &table_of(&["FAST=5"])).unwrap();
+        assert_eq!(out.get("period"), Some(&Value::from(5)));
+    }
+
+    #[test]
+    fn round_trips_into_a_strategy() {
+        // After substitution, the surviving `!sma`/`!crosses_above` tags (now
+        // singleton objects) must still resolve to their enum variants.
         let yaml = r#"
             symbol: !param { key: SYM, default: BTC }
             long:
               enter: !crosses_above
                 lhs: !sma { source: close, period: !param { key: FAST } }
                 rhs: !sma { source: close, period: !param { key: SLOW, default: 8 } }
-            short:
-              enter: !crosses_below
-                lhs: !sma { source: close, period: !param { key: FAST } }
-                rhs: !sma { source: close, period: !param { key: SLOW, default: 8 } }
         "#;
-        let value: Value = serde_norway::from_str(yaml).unwrap();
-        let value = substitute(value, &params(&["FAST=3"])).unwrap();
-        let spec: StrategySpec = serde_norway::from_value(value).unwrap();
+        let value = yaml_to_json(serde_norway::from_str(yaml).unwrap()).unwrap();
+        let value = substitute(value, &table_of(&["FAST=3"])).unwrap();
+        let spec: StrategySpec = serde_json::from_value(value).unwrap();
         assert_eq!(spec.symbol, "BTC");
         assert!(spec.long.is_some());
         let _strat = spec.build();

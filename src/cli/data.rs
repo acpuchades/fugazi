@@ -17,12 +17,87 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::str::FromStr;
 
 use anyhow::{Context, Result, anyhow, bail};
 use fugazi::prelude::*;
 
 /// A column-keyed row; column names are lowercased for case-insensitive lookup.
 type Row = HashMap<String, String>;
+
+/// One `--series` argument, parsed into its `key=value` literal columns and
+/// `@file` CSV loaders. (Clap parses each `--series` value through [`FromStr`].)
+#[derive(Debug, Clone)]
+pub struct SeriesSpec {
+    /// The raw flag value, kept for error messages.
+    raw: String,
+    /// Constant columns broadcast across every loaded row (lowercased keys).
+    literals: Vec<(String, String)>,
+    /// CSV files whose rows are concatenated.
+    files: Vec<String>,
+}
+
+impl FromStr for SeriesSpec {
+    type Err = String;
+
+    fn from_str(spec: &str) -> Result<Self, Self::Err> {
+        let mut literals = Vec::new();
+        let mut files = Vec::new();
+        for term in spec.split(',') {
+            let term = term.trim();
+            if term.is_empty() {
+                continue;
+            }
+            if let Some(path) = term.strip_prefix('@') {
+                files.push(path.to_string());
+            } else if let Some((key, value)) = term.split_once('=') {
+                let value = unquote(value.trim());
+                // A literal value should never contain '@' — that means an `@file`
+                // term got swallowed, usually because terms were joined with ';'
+                // (the CSV delimiter) instead of ','.
+                if value.contains('@') {
+                    return Err(format!(
+                        "series term `{term}`: a literal value can't contain '@'. Series terms \
+                         are separated by ',' — e.g. \"symbol=AAPL,@candles.csv\""
+                    ));
+                }
+                literals.push((key.trim().to_lowercase(), value.to_string()));
+            } else {
+                return Err(format!(
+                    "series term `{term}` is neither a `key=value` literal nor an `@file`"
+                ));
+            }
+        }
+        // Every series must load at least one CSV; literals only make sense
+        // broadcast over a file's rows (and a literals-only row has no `time`).
+        if files.is_empty() {
+            return Err(format!(
+                "series `{spec}` loads no CSV: every series needs at least one `@file.csv` term \
+                 (terms are separated by ',')"
+            ));
+        }
+        Ok(SeriesSpec {
+            raw: spec.to_string(),
+            literals,
+            files,
+        })
+    }
+}
+
+impl SeriesSpec {
+    /// Load this series' rows: each file's rows, with the literals broadcast onto
+    /// every one (a literal wins a name clash).
+    fn rows(&self) -> Result<Vec<Row>> {
+        let mut rows = Vec::new();
+        for path in &self.files {
+            for mut row in read_csv(path)? {
+                row.extend(self.literals.iter().map(|(k, v)| (k.clone(), v.clone())));
+                rows.push(row);
+            }
+        }
+        Ok(rows)
+    }
+}
 
 /// The merged long dataframe: rows keyed by `(symbol, time)`.
 #[derive(Debug, Default)]
@@ -31,13 +106,13 @@ pub struct DataFrame {
 }
 
 impl DataFrame {
-    /// Build the dataframe from the raw `--series` flag values. Each `@file`'s
-    /// column delimiter is autodetected from its header.
-    pub fn from_series(series: &[String]) -> Result<Self> {
+    /// Build the dataframe from the parsed `--series` specs. Each `@file`'s column
+    /// delimiter is autodetected from its header.
+    pub fn from_series(series: &[SeriesSpec]) -> Result<Self> {
         let mut frame = DataFrame::default();
         for spec in series {
-            for row in load_series(spec)? {
-                frame.insert(spec, row)?;
+            for row in spec.rows()? {
+                frame.insert(&spec.raw, row)?;
             }
         }
         Ok(frame)
@@ -87,58 +162,6 @@ impl DataFrame {
         }
         Ok(out)
     }
-}
-
-/// Expand one `--series` value into its rows.
-///
-/// `key=value` literals and `@file` loaders may appear in **any order** and in
-/// **any number**, as long as there is at least one file. All files' rows are
-/// concatenated and every literal is broadcast onto each of them.
-fn load_series(spec: &str) -> Result<Vec<Row>> {
-    let mut literals = Row::new();
-    let mut files: Vec<&str> = Vec::new();
-
-    for term in spec.split(',') {
-        let term = term.trim();
-        if term.is_empty() {
-            continue;
-        }
-        if let Some(path) = term.strip_prefix('@') {
-            files.push(path);
-        } else if let Some((key, value)) = term.split_once('=') {
-            let value = unquote(value.trim());
-            // A literal value should never contain '@' — that means an `@file`
-            // term got swallowed, usually because terms were joined with ';'
-            // (the CSV delimiter) instead of ','.
-            if value.contains('@') {
-                bail!(
-                    "series term `{term}`: a literal value can't contain '@'. Series terms are \
-                     separated by ',' — e.g. \"symbol=AAPL,@candles.csv\""
-                );
-            }
-            literals.insert(key.trim().to_lowercase(), value.to_string());
-        } else {
-            bail!("series term `{term}` is neither a `key=value` literal nor an `@file`");
-        }
-    }
-
-    // Every series must load at least one CSV; literals only make sense broadcast
-    // over a file's rows (and a literals-only row has no `time` to join on).
-    if files.is_empty() {
-        bail!(
-            "series `{spec}` loads no CSV: every series needs at least one `@file.csv` term \
-             (terms are separated by ',')"
-        );
-    }
-
-    let mut rows = Vec::new();
-    for path in files {
-        for mut row in read_csv(path)? {
-            row.extend(literals.iter().map(|(k, v)| (k.clone(), v.clone())));
-            rows.push(row);
-        }
-    }
-    Ok(rows)
 }
 
 /// Read a CSV file into lowercased-column rows, autodetecting its delimiter.
@@ -222,7 +245,7 @@ mod tests {
             "fugazi_data_test_a.csv",
             "time;open;high;low;close;volume\n1;10;11;9;10.5;100\n2;10.5;12;10;11;120\n",
         );
-        let frame = DataFrame::from_series(&[format!("symbol='BTC',@{path}")]).unwrap();
+        let frame = DataFrame::from_series(&[format!("symbol='BTC',@{path}").parse().unwrap()]).unwrap();
         let candles = frame.candles("BTC").unwrap();
         assert_eq!(candles.len(), 2);
         assert_eq!(candles[0].0, "1");
@@ -241,8 +264,8 @@ mod tests {
             "time;pe_ratio\n1;15.0\n2;16.0\n",
         );
         let frame = DataFrame::from_series(&[
-            format!("symbol=BTC,@{prices}"),
-            format!("symbol=BTC,@{fundamentals}"),
+            format!("symbol=BTC,@{prices}").parse().unwrap(),
+            format!("symbol=BTC,@{fundamentals}").parse().unwrap(),
         ])
         .unwrap();
         // The extra column rode along on the joined rows.
@@ -265,11 +288,17 @@ mod tests {
         );
         // Mixed order, two files and two literals in one series.
         let frame =
-            DataFrame::from_series(&[format!("symbol=BTC,@{p1},exchange=NYSE,@{p2}")]).unwrap();
+            DataFrame::from_series(&[format!("symbol=BTC,@{p1},exchange=NYSE,@{p2}").parse().unwrap()])
+                .unwrap();
         // Both files' rows concatenated.
         assert_eq!(frame.candles("BTC").unwrap().len(), 4);
         // Both literals broadcast onto rows from either file.
         assert_eq!(frame.rows[&("BTC".into(), "1".into())]["exchange"], "NYSE");
         assert_eq!(frame.rows[&("BTC".into(), "4".into())]["exchange"], "NYSE");
+    }
+
+    #[test]
+    fn series_without_a_file_is_rejected() {
+        assert!("symbol=BTC".parse::<SeriesSpec>().is_err());
     }
 }

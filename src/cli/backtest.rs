@@ -29,10 +29,12 @@ pub struct RunOptions<'a> {
     pub cash: Real,
     /// Directory to write `trades.csv` / `returns.csv` into.
     pub out_dir: &'a Path,
-    /// The strategy file, echoed in the run block.
-    pub strategy_path: &'a Path,
-    /// The raw `--param NAME=value` strings, echoed in the run block.
-    pub params: &'a [String],
+    /// A short label for the strategy source (file path or `(inline)`), echoed in
+    /// the run block.
+    pub strategy_label: &'a str,
+    /// A one-line view of the effective params (`NAME=value, …`), echoed in the
+    /// run block.
+    pub params: &'a str,
     /// The RNG seed, recorded for reproducibility. The backtest is currently
     /// deterministic so it has no functional effect yet; it is echoed in the run
     /// block so a run can be replayed (and will seed any future stochastic step —
@@ -147,17 +149,12 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
 /// the `-vv` trade stream and `trades.csv`), so this stays correct for a future
 /// multi-symbol strategy.
 fn print_run_block(opts: &RunOptions, start: &str, end: &str, bars: usize, started: SystemTime) {
-    let params = if opts.params.is_empty() {
-        "(defaults)".to_string()
-    } else {
-        opts.params.join(", ")
-    };
     println!("run");
-    field("strategy", &opts.strategy_path.display().to_string());
+    field("strategy", opts.strategy_label);
     field("output", &opts.out_dir.display().to_string());
     field("period", &format!("{start} → {end} ({bars} bars)"));
     field("capital", &format!("{:.2}", opts.cash));
-    field("params", &params);
+    field("params", opts.params);
     field("seed", &opts.seed.to_string());
     field("started", &format_utc(started));
 }

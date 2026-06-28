@@ -251,18 +251,25 @@ writes the result files:
 
 ```sh
 cargo run --bin fugazi -- run \
-  --strategy examples/strategy.yml \
+  --strategy @examples/strategy.yml \
   --series @examples/candles.csv \
   --output-dir out/
 # writes out/trades.csv (time;symbol;side;quantity;price)
 #    and out/returns.csv (time;equity;return)
 ```
 
-Flags: `--strategy <file.yml>`, `--series <spec>` (repeatable), `--output-dir
-<dir>`, `--cash <amount>` (default `10000`), `--param NAME=value` (repeatable —
-see below), `--seed <n>` (default `1234`; recorded for reproducibility — the
-backtest is deterministic today, so it only bites once a stochastic step consumes
-it). Output files are `;`-delimited for Excel.
+`--strategy` follows the same `@` convention as `--series`: `@file` loads a file,
+and anything else is treated as inline content — handy for quick one-offs, e.g.
+`--strategy 'symbol: BTC\nbuy_and_hold: true'`. The format is YAML or JSON, picked
+by file extension (`.json` ⇒ JSON) or, for inline, sniffed (valid JSON ⇒ JSON).
+Both express the same vocabulary: a YAML `!sma { … }` tag is written `{"sma": …}`
+in JSON, so a strategy with signals works in either.
+
+Flags: `--strategy <@file | inline>`, `--series <spec>` (repeatable),
+`--output-dir <dir>`, `--cash <amount>` (default `10000`), `--params <spec>`
+(repeatable — see below), `--seed <n>` (default `1234`; recorded for
+reproducibility — the backtest is deterministic today, so it only bites once a
+stochastic step consumes it). Output files are `;`-delimited for Excel.
 
 Console output is a `fugazi <version> · backtest` header followed by three blocks:
 a **run** block of the execution params (strategy file, output dir, candle period
@@ -309,9 +316,9 @@ to `close`. The vocabulary mirrors the library one-to-one:
   { lhs, rhs }`; `!and`/`!or`/`!xor { lhs, rhs }`, `!all [ … ]`, `!any [ … ]`,
   `!not <signal>`, `!changed <signal>`, `!const <bool>`.
 
-**Parameters — `!param`.** Any value in the YAML can be a placeholder resolved at
-run time with `--param NAME=value` (repeatable), so one file covers many
-variations of a strategy (periods, thresholds, the traded symbol):
+**Parameters — `!param`.** Any value in the strategy can be a placeholder resolved
+at run time with `--params` (repeatable), so one file covers many variations
+(periods, thresholds, the traded symbol):
 
 ```yaml
 symbol: !param { key: SYM, default: BTC }
@@ -321,16 +328,22 @@ long:
     rhs: !sma { source: close, period: !param { key: SLOW, default: 8 } }  # optional
 ```
 
+`--params` is a `,`-separated list of terms, exactly like `--series` (and itself
+repeatable): `NAME=value` sets one, and `@file.yml`/`@file.json` loads a whole
+`NAME: value` mapping (see [`examples/params.yml`](examples/params.yml)). Terms
+apply left-to-right, so a later one wins:
+
 ```sh
-cargo run --bin fugazi -- run --strategy examples/strategy.params.yml \
-  --param FAST=5 --param SLOW=20 --series @examples/candles.csv --output-dir out/
+cargo run --bin fugazi -- run --strategy @examples/strategy.params.yml \
+  --params @examples/params.yml,FAST=5 \
+  --series @examples/candles.csv --output-dir out/
 ```
 
 A `default` makes a param optional; without one, a missing value is an error.
-`!param NAME` is shorthand for `!param { key: NAME }`. Values are parsed as YAML
-scalars (so `FAST=5` is a number, `SYM=BTC` a string), then substituted before the
-strategy is typed — so a param can stand in anywhere, including where a number is
-required.
+`!param NAME` is shorthand for `!param { key: NAME }` (and `{"param": …}` in JSON).
+A `NAME=value` value is parsed as a JSON scalar (so `FAST=5` is a number, `SYM=BTC`
+a string), then substituted before the strategy is typed — so a param can stand in
+anywhere, including where a number is required.
 
 See [`examples/strategy.yml`](examples/strategy.yml) for a complete SMA-crossover
 strategy, and [`examples/strategy.params.yml`](examples/strategy.params.yml) for

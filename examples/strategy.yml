@@ -2,8 +2,8 @@
 # (fast SMA crosses above slow), reverse into a short on the death cross.
 #
 # Run it with (candles.csv carries its own `symbol` column, so no `symbol=`
-# literal is needed in --series):
-#   fugazi run --strategy examples/strategy.yml \
+# literal is needed in --series; `@` loads a file for both --strategy and --series):
+#   fugazi run --strategy @examples/strategy.yml \
 #              --series @examples/candles.csv \
 #              --output-dir out/
 #

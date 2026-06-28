@@ -5,21 +5,29 @@
 //! writing `trades.csv` and `returns.csv`:
 //!
 //! ```text
-//! fugazi run --strategy strategy.yml \
+//! fugazi run --strategy @strategy.yml \
 //!            --series @candles.csv \
 //!            --output-dir out/
 //! ```
+//!
+//! `--strategy` (like `--series`) takes `@file.yml` to load a file, or inline YAML
+//! for anything else.
 
 mod backtest;
+mod convert;
 mod data;
 mod dynd;
+mod input;
 mod params;
 mod spec;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
+
+use input::Source;
 
 /// Incremental technical-analysis backtester.
 #[derive(Parser)]
@@ -37,15 +45,15 @@ enum Command {
 
 #[derive(Args)]
 struct RunArgs {
-    /// Path to the strategy YAML file.
+    /// The strategy: `@file.yml` loads a file, anything else is inline YAML.
     #[arg(long)]
-    strategy: PathBuf,
+    strategy: Source,
 
     /// A data series: `,`-separated `key=value` literals and `@file.csv` loaders
     /// (repeatable; series full-join on `symbol` + `time`). Each file's column
     /// delimiter is autodetected.
     #[arg(long = "series", required = true)]
-    series: Vec<String>,
+    series: Vec<data::SeriesSpec>,
 
     /// Directory to write `trades.csv` and `returns.csv` into.
     #[arg(long = "output-dir")]
@@ -55,9 +63,11 @@ struct RunArgs {
     #[arg(long, default_value_t = 10_000.0)]
     cash: f64,
 
-    /// Override a `!param { key: NAME }` placeholder (repeatable): NAME=value.
-    #[arg(long = "param", value_name = "NAME=VALUE")]
-    param: Vec<String>,
+    /// Resolve the strategy's `param` placeholders. Like `--series`: a
+    /// `,`-separated list of `NAME=value` settings and `@file.yml` mapping loaders
+    /// (repeatable; later terms win), e.g. `@base.yml,FAST=3`.
+    #[arg(long = "params", value_name = "SPEC")]
+    params: Vec<params::ParamSpec>,
 
     /// RNG seed, recorded for reproducibility and echoed in the run block. The
     /// backtest is deterministic today, so this only matters once a stochastic
@@ -78,22 +88,50 @@ fn main() -> Result<()> {
 }
 
 fn run(args: RunArgs) -> Result<()> {
-    let yaml = std::fs::read_to_string(&args.strategy)
-        .with_context(|| format!("reading strategy `{}`", args.strategy.display()))?;
-    let params = params::parse(&args.param)?;
-    let spec = spec::StrategySpec::from_yaml_with_params(&yaml, &params)
-        .with_context(|| format!("parsing strategy `{}`", args.strategy.display()))?;
+    let param_table = params::table(&args.params)?;
+
+    let text = args.strategy.read().context("reading strategy")?;
+    let spec = spec::StrategySpec::from_text_with_params(&text, args.strategy.format(), &param_table)
+        .with_context(|| parse_error_context(&args.strategy))?;
 
     let frame = data::DataFrame::from_series(&args.series)?;
 
+    let strat_label = args.strategy.label();
+    let params_label = params_label(&param_table);
     let opts = backtest::RunOptions {
         cash: args.cash,
         out_dir: &args.output_dir,
-        strategy_path: &args.strategy,
-        params: &args.param,
+        strategy_label: &strat_label,
+        params: &params_label,
         seed: args.seed,
         quiet: args.quiet,
     };
     backtest::run(&spec, &frame, &opts)?;
     Ok(())
+}
+
+/// A one-line `NAME=value, …` view of the effective params for the run block.
+fn params_label(table: &HashMap<String, serde_json::Value>) -> String {
+    if table.is_empty() {
+        return "(defaults)".to_string();
+    }
+    let mut entries: Vec<String> = table
+        .iter()
+        .map(|(k, v)| match v {
+            serde_json::Value::String(s) => format!("{k}={s}"),
+            other => format!("{k}={other}"),
+        })
+        .collect();
+    entries.sort();
+    entries.join(", ")
+}
+
+/// Error context for a strategy parse failure. For an inline value that looks like
+/// an old-style bare file path, add a hint pointing at the new `@` form.
+fn parse_error_context(strategy: &Source) -> String {
+    let base = format!("parsing strategy {}", strategy.label());
+    match strategy.misused_path() {
+        Some(path) => format!("{base} (did you mean `--strategy @{path}`?)"),
+        None => base,
+    }
 }
