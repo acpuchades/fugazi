@@ -14,8 +14,7 @@ fn run_backtest(out_name: &str, strategy: &str) -> (String, String) {
     let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
         .args([
             "run",
-            "--strategy",
-            strategy,
+            strategy, // positional
             "--series",
             &format!("@{manifest}/examples/candles.csv"),
             "--output-dir",

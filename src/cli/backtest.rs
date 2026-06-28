@@ -7,15 +7,15 @@
 //! the running equity is emitted to `returns.csv`. Both result files are written
 //! `;`-delimited for Excel.
 //!
-//! Console output (silenced by [`RunOptions::quiet`]) is a one-line
-//! `fugazi <version> · backtest` header, then three blocks: **run** (the execution
-//! params — strategy, output, period, capital, params, seed, start time),
-//! **trades** (each fill, with its symbol, streamed as it happens), and **result**
-//! (bars, trades, capital change, finish time). A symbol is per-trade, never a
-//! run-level field.
+//! Console output (silenced by [`RunOptions::quiet`]) is a two-line banner (the
+//! constant tool identity, then the active command), then three blocks: **inputs**
+//! (strategy, params, seed, period, capital, output), **trades** (each fill, with
+//! its symbol, streamed as it happens), and **result** (bars, trades, capital
+//! change, then start/finish times with elapsed runtime). A symbol is per-trade,
+//! never a run-level field.
 
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use fugazi::prelude::*;
@@ -70,12 +70,8 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
     let start = candles.first().map_or("", |(t, _)| t.as_str());
     let end = candles.last().map_or("", |(t, _)| t.as_str());
     if !opts.quiet {
-        println!(
-            "{} {} · backtest\n",
-            env!("CARGO_PKG_NAME"),
-            env!("CARGO_PKG_VERSION")
-        );
-        print_run_block(opts, start, end, candles.len(), started);
+        print_header();
+        print_inputs_block(opts, start, end, candles.len());
         println!("\ntrades");
     }
 
@@ -138,37 +134,51 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
 
     let finished = SystemTime::now();
     if !opts.quiet {
-        print_result_block(opts, &summary, finished);
+        print_result_block(opts, &summary, started, finished);
     }
     Ok(summary)
 }
 
-/// The `-v` "run" block: the inputs this backtest ran with.
-///
-/// No `symbol` line: a symbol is a property of each trade, not of the run (see
-/// the `-vv` trade stream and `trades.csv`), so this stays correct for a future
-/// multi-symbol strategy.
-fn print_run_block(opts: &RunOptions, start: &str, end: &str, bars: usize, started: SystemTime) {
-    println!("run");
-    field("strategy", opts.strategy_label);
-    field("output", &opts.out_dir.display().to_string());
-    field("period", &format!("{start} → {end} ({bars} bars)"));
-    field("capital", &format!("{:.2}", opts.cash));
-    field("params", opts.params);
-    field("seed", &opts.seed.to_string());
-    field("started", &format_utc(started));
+/// The banner. Line 1 is the constant tool identity (the same for any
+/// subcommand); line 2 names the active command and what it does.
+fn print_header() {
+    println!(
+        "{} {} · {}",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION"),
+        env!("CARGO_PKG_REPOSITORY")
+    );
+    println!("run · backtest a strategy over CSV series");
+    println!();
 }
 
-/// The always-on "result" block: the run's outputs and wall-clock start/end.
+/// The "inputs" block: what this run was given. Timing (start/finish) lives in
+/// the result block, since it's not an input.
 ///
-/// No `symbol` line: a symbol is a property of each trade (see the `-vv` trade
-/// stream and `trades.csv`), not of the run as a whole — so this stays correct
-/// for a future multi-symbol strategy.
-fn print_result_block(opts: &RunOptions, s: &Summary, finished: SystemTime) {
+/// No `symbol` line: a symbol is a property of each trade, not of the run (see
+/// the trade stream and `trades.csv`), so this stays correct for a future
+/// multi-symbol strategy.
+fn print_inputs_block(opts: &RunOptions, start: &str, end: &str, bars: usize) {
+    println!("inputs");
+    print_field("strategy", opts.strategy_label);
+    print_field("params", opts.params);
+    print_field("seed", &opts.seed.to_string());
+    print_field("period", &format!("{start} → {end} ({bars} bars)"));
+    print_field("capital", &format!("{:.2}", opts.cash));
+    print_field("output", &opts.out_dir.display().to_string());
+}
+
+/// The always-on "result" block: the run's outputs, then its wall-clock timing
+/// (start, finish, and elapsed runtime).
+///
+/// No `symbol` line: a symbol is a property of each trade (see the trade stream
+/// and `trades.csv`), not of the run as a whole — so this stays correct for a
+/// future multi-symbol strategy.
+fn print_result_block(opts: &RunOptions, s: &Summary, started: SystemTime, finished: SystemTime) {
     println!("\nresult");
-    field("bars", &s.bars.to_string());
-    field("trades", &s.trades.to_string());
-    field(
+    print_field("bars", &s.bars.to_string());
+    print_field("trades", &s.trades.to_string());
+    print_field(
         "capital",
         &format!(
             "{:.2} → {:.2}  ({:+.2}, {:+.2}%)",
@@ -178,11 +188,28 @@ fn print_result_block(opts: &RunOptions, s: &Summary, finished: SystemTime) {
             s.return_pct
         ),
     );
-    field("finished", &format_utc(finished));
+    let elapsed = finished.duration_since(started).unwrap_or_default();
+    print_field("started", &format_utc(started));
+    print_field(
+        "finished",
+        &format!("{} ({})", format_utc(finished), format_elapsed(elapsed)),
+    );
+}
+
+/// A short human runtime: `12 ms`, `3.40 s`, or `1m 04s`.
+fn format_elapsed(d: Duration) -> String {
+    let secs = d.as_secs_f64();
+    if secs < 1.0 {
+        format!("{} ms", d.as_millis())
+    } else if secs < 60.0 {
+        format!("{secs:.2} s")
+    } else {
+        format!("{}m {:02}s", d.as_secs() / 60, d.as_secs() % 60)
+    }
 }
 
 /// Print one `  label   value` line with the label padded to a common width.
-fn field(label: &str, value: &str) {
+fn print_field(label: &str, value: &str) {
     println!("  {label:<9}{value}");
 }
 

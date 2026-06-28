@@ -5,13 +5,13 @@
 //! writing `trades.csv` and `returns.csv`:
 //!
 //! ```text
-//! fugazi run --strategy @strategy.yml \
+//! fugazi run @strategy.yml \
 //!            --series @candles.csv \
 //!            --output-dir out/
 //! ```
 //!
-//! `--strategy` (like `--series`) takes `@file.yml` to load a file, or inline YAML
-//! for anything else.
+//! The strategy (a positional) takes `@file` to load a file, or inline YAML/JSON
+//! for anything else — the same `@` convention `--series`/`--params` use.
 
 mod backtest;
 mod convert;
@@ -45,28 +45,29 @@ enum Command {
 
 #[derive(Args)]
 struct RunArgs {
-    /// The strategy: `@file.yml` loads a file, anything else is inline YAML.
-    #[arg(long)]
+    /// The strategy: `@file.yml`/`@file.json` loads a file, anything else is
+    /// inline YAML or JSON.
+    #[arg(value_name = "STRATEGY")]
     strategy: Source,
 
     /// A data series: `,`-separated `key=value` literals and `@file.csv` loaders
     /// (repeatable; series full-join on `symbol` + `time`). Each file's column
     /// delimiter is autodetected.
-    #[arg(long = "series", required = true)]
+    #[arg(short, long = "series", required = true)]
     series: Vec<data::SeriesSpec>,
 
     /// Directory to write `trades.csv` and `returns.csv` into.
-    #[arg(long = "output-dir")]
+    #[arg(short, long = "output-dir")]
     output_dir: PathBuf,
 
     /// Initial cash for the paper wallet.
-    #[arg(long, default_value_t = 10_000.0)]
+    #[arg(short, long, default_value_t = 10_000.0)]
     cash: f64,
 
     /// Resolve the strategy's `param` placeholders. Like `--series`: a
     /// `,`-separated list of `NAME=value` settings and `@file.yml` mapping loaders
     /// (repeatable; later terms win), e.g. `@base.yml,FAST=3`.
-    #[arg(long = "params", value_name = "SPEC")]
+    #[arg(short, long = "params", value_name = "SPEC")]
     params: Vec<params::ParamSpec>,
 
     /// RNG seed, recorded for reproducibility and echoed in the run block. The
@@ -127,11 +128,11 @@ fn params_label(table: &HashMap<String, serde_json::Value>) -> String {
 }
 
 /// Error context for a strategy parse failure. For an inline value that looks like
-/// an old-style bare file path, add a hint pointing at the new `@` form.
+/// a bare file path, add a hint pointing at the `@file` form.
 fn parse_error_context(strategy: &Source) -> String {
     let base = format!("parsing strategy {}", strategy.label());
     match strategy.misused_path() {
-        Some(path) => format!("{base} (did you mean `--strategy @{path}`?)"),
+        Some(path) => format!("{base} (did you mean `@{path}`?)"),
         None => base,
     }
 }

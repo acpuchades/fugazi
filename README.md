@@ -271,13 +271,14 @@ Flags: `--strategy <@file | inline>`, `--series <spec>` (repeatable),
 reproducibility — the backtest is deterministic today, so it only bites once a
 stochastic step consumes it). Output files are `;`-delimited for Excel.
 
-Console output is a `fugazi <version> · backtest` header followed by three blocks:
-a **run** block of the execution params (strategy file, output dir, candle period
-start→end, starting capital, params in effect, seed, start time), a **trades**
-block streaming each fill as it happens (time, symbol, side, quantity, price — a
-symbol is per-trade, never a run-level field), and a **result** block (bars, trade
-count, capital start→end with absolute and percent change, finish time). `-q`
-silences all of it (the result files are still written).
+Console output is a two-line banner (the constant tool identity, then the active
+command) followed by three blocks: an **inputs** block of the execution params
+(strategy, params in effect, seed, candle period start→end, starting capital, output
+dir), a **trades** block streaming each fill as it happens (time, symbol, side,
+quantity, price — a symbol is per-trade, never a run-level field), and a **result**
+block (bars, trade count, capital start→end with absolute and percent change, then
+the start/finish timestamps with elapsed runtime). `-q` silences all of it (the
+result files are still written).
 
 **Data — `--series`.** Each `--series` is a `,`-separated list of terms:
 `key=value` adds a constant column, `@file.csv` loads a CSV's columns and rows
