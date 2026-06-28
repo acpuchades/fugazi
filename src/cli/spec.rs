@@ -537,8 +537,9 @@ pub enum SignalSpec {
     Any(Vec<SignalSpec>),
     Not(Box<SignalSpec>),
     Changed(Box<SignalSpec>),
-    #[serde(rename = "const")]
-    Const(bool),
+    /// A constant boolean leaf. Spelled `!value` like [`SourceSpec::Value`] —
+    /// one tag for "a literal", typed by position (bool here, number there).
+    Value(bool),
 }
 
 /// Resolve an optional tolerance to its concrete value.
@@ -599,7 +600,7 @@ impl SignalSpec {
                 .unwrap_or_else(|| DynSignal::new(self::Const::<Candle>::new(false))),
             Not(inner) => DynSignal::new(inner.build().not()),
             Changed(inner) => DynSignal::new(inner.build().changed()),
-            Const(b) => DynSignal::new(self::Const::<Candle>::new(*b)),
+            Value(b) => DynSignal::new(self::Const::<Candle>::new(*b)),
         }
     }
 }
@@ -634,8 +635,7 @@ impl SideSpec {
     }
 }
 
-/// A whole `strategy.yml`: the traded symbol plus its long/short sides (or a
-/// `buy_and_hold` shortcut).
+/// A whole `strategy.yml`: the traded symbol plus its long/short sides.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StrategySpec {
@@ -644,8 +644,6 @@ pub struct StrategySpec {
     pub long: Option<SideSpec>,
     #[serde(default)]
     pub short: Option<SideSpec>,
-    #[serde(default)]
-    pub buy_and_hold: bool,
 }
 
 impl StrategySpec {
@@ -674,9 +672,6 @@ impl StrategySpec {
 
     /// Build the live [`SingleAssetStrategy`] this spec describes.
     pub fn build(&self) -> SingleAssetStrategy<String> {
-        if self.buy_and_hold {
-            return SingleAssetStrategy::buy_and_hold(self.symbol.clone());
-        }
         let mut strat = SingleAssetStrategy::new(self.symbol.clone());
         if let Some(long) = &self.long {
             strat = strat.long_on(long.enter.build(), long.exit());

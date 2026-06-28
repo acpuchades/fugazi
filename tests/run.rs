@@ -57,18 +57,16 @@ fn runs_an_inline_strategy() {
     // A bare (non-`@`) value is the strategy YAML itself.
     let (trades, returns) = run_backtest(
         "fugazi_e2e_inline",
-        "symbol: BTC\nbuy_and_hold: true\n",
+        "symbol: BTC\nlong:\n  enter: !crosses_above { lhs: !sma { source: close, period: 2 }, rhs: !sma { source: close, period: 4 } }\n",
     );
 
     assert!(
         trades.starts_with("time;symbol;side;units;price"),
         "unexpected trades.csv header: {trades}"
     );
-    // Buy-and-hold opens exactly one position on the first bar.
-    assert_eq!(
-        trades.lines().count(),
-        2,
-        "expected a single buy-and-hold trade, got:\n{trades}"
+    assert!(
+        trades.lines().count() >= 2,
+        "expected at least one trade, got:\n{trades}"
     );
     assert!(returns.lines().count() >= 2, "expected an equity curve");
 }

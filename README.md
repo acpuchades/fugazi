@@ -260,7 +260,7 @@ cargo run --bin fugazi -- run \
 
 `--strategy` follows the same `@` convention as `--series`: `@file` loads a file,
 and anything else is treated as inline content — handy for quick one-offs, e.g.
-`--strategy 'symbol: BTC\nbuy_and_hold: true'`. The format is YAML or JSON, picked
+`--strategy 'symbol: BTC\nlong: { enter: !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } } }'`. The format is YAML or JSON, picked
 by file extension (`.json` ⇒ JSON) or, for inline, sniffed (valid JSON ⇒ JSON).
 Both express the same vocabulary: a YAML `!sma { … }` tag is written `{"sma": …}`
 in JSON, so a strategy with signals works in either.
@@ -292,7 +292,7 @@ and `open`/`high`/`low`/`close` (`volume` optional); `time` is sorted as an
 opaque token (dates, epochs — anything sortable).
 
 **Strategy — `strategy.yml`.** A `symbol` plus `long`/`short` sides (each an
-`enter` signal and an optional `exit`), or `buy_and_hold: true`. A side's `exit`
+`enter` signal and an optional `exit`). A side's `exit`
 defaults to never-fire, which is exactly right for an always-in long/short
 reversal (the opposite side's `enter` reverses the position); give an `exit` only
 for a flat rest. Signals and sources are written
@@ -315,7 +315,7 @@ to `close`. The vocabulary mirrors the library one-to-one:
 - **Signals:** `!gt`/`!lt`/`!ge`/`!le`/`!eq`/`!ne { lhs, rhs, epsilon? }`,
   `!above`/`!below { source, level }`; `!crosses_above`/`!crosses_below
   { lhs, rhs }`; `!and`/`!or`/`!xor { lhs, rhs }`, `!all [ … ]`, `!any [ … ]`,
-  `!not <signal>`, `!changed <signal>`, `!const <bool>`.
+  `!not <signal>`, `!changed <signal>`, `!value <bool>`.
 
 **Parameters — `!param`.** Any value in the strategy can be a placeholder resolved
 at run time with `--params` (repeatable), so one file covers many variations
