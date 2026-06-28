@@ -58,6 +58,16 @@ struct RunArgs {
     /// Override a `!param { key: NAME }` placeholder (repeatable): NAME=value.
     #[arg(long = "param", value_name = "NAME=VALUE")]
     param: Vec<String>,
+
+    /// RNG seed, recorded for reproducibility and echoed in the run block. The
+    /// backtest is deterministic today, so this only matters once a stochastic
+    /// step (slippage, sampling, …) consumes it.
+    #[arg(long, default_value_t = 1234)]
+    seed: u64,
+
+    /// Suppress all console output (the result files are still written).
+    #[arg(short, long)]
+    quiet: bool,
 }
 
 fn main() -> Result<()> {
@@ -76,13 +86,14 @@ fn run(args: RunArgs) -> Result<()> {
 
     let frame = data::DataFrame::from_series(&args.series)?;
 
-    let summary = backtest::run(&spec, &frame, args.cash, &args.output_dir)?;
-
-    println!("symbol:       {}", spec.symbol);
-    println!("bars:         {}", summary.bars);
-    println!("final equity: {:.2}", summary.final_equity);
-    println!("return:       {:+.2}%", summary.return_pct);
-    println!("trades:       {}", summary.trades);
-    println!("output:       {}", args.output_dir.display());
+    let opts = backtest::RunOptions {
+        cash: args.cash,
+        out_dir: &args.output_dir,
+        strategy_path: &args.strategy,
+        params: &args.param,
+        seed: args.seed,
+        quiet: args.quiet,
+    };
+    backtest::run(&spec, &frame, &opts)?;
     Ok(())
 }

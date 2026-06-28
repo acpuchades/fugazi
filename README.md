@@ -260,7 +260,17 @@ cargo run --bin fugazi -- run \
 
 Flags: `--strategy <file.yml>`, `--series <spec>` (repeatable), `--output-dir
 <dir>`, `--cash <amount>` (default `10000`), `--param NAME=value` (repeatable —
-see below). Output files are `;`-delimited for Excel.
+see below), `--seed <n>` (default `1234`; recorded for reproducibility — the
+backtest is deterministic today, so it only bites once a stochastic step consumes
+it). Output files are `;`-delimited for Excel.
+
+Console output is a `fugazi <version> · backtest` header followed by three blocks:
+a **run** block of the execution params (strategy file, output dir, candle period
+start→end, starting capital, params in effect, seed, start time), a **trades**
+block streaming each fill as it happens (time, symbol, side, quantity, price — a
+symbol is per-trade, never a run-level field), and a **result** block (bars, trade
+count, capital start→end with absolute and percent change, finish time). `-q`
+silences all of it (the result files are still written).
 
 **Data — `--series`.** Each `--series` is a `,`-separated list of terms:
 `key=value` adds a constant column, `@file.csv` loads a CSV's columns and rows
