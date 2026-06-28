@@ -408,7 +408,7 @@ def test_wallet_set_position_is_absolute_and_books_funds():
     order = w.set_position("AAPL", 3.0)
     assert order.symbol == "AAPL"
     assert order.side == "buy"
-    assert order.quantity == pytest.approx(3.0)
+    assert order.units == pytest.approx(3.0)
     w.set_position("AAPL", 5.0)  # scale in to the new target
     assert w.position("AAPL") == pytest.approx(5.0)
     assert w.funds == pytest.approx(1_000.0 - 5.0 * 100.0)
@@ -421,7 +421,7 @@ def test_wallet_set_is_absolute_and_reverses():
     assert w.set("X", "buy", 4.0) is None  # idempotent
     order = w.set("X", "sell", 4.0)  # +4 -> -4 = sell 8
     assert order.side == "sell"
-    assert order.quantity == pytest.approx(8.0)
+    assert order.units == pytest.approx(8.0)
     assert w.position("X") == pytest.approx(-4.0)
 
 
@@ -430,11 +430,11 @@ def test_wallet_relative_sizing():
     w.update("X", 25.0)
     # 10% of funds / price 25 = 4 units
     order = w.set("X", "buy", ta.Size.funds_frac(0.1))
-    assert order.quantity == pytest.approx(4.0)
+    assert order.units == pytest.approx(4.0)
     # set to 50% of the position -> sell 2
     trimmed = w.set("X", "buy", ta.Size.position_frac(0.5))
     assert trimmed.side == "sell"
-    assert trimmed.quantity == pytest.approx(2.0)
+    assert trimmed.units == pytest.approx(2.0)
 
 
 def test_wallet_value_fraction_flips_all_in():
@@ -444,7 +444,7 @@ def test_wallet_value_fraction_flips_all_in():
     assert w.position("X") == pytest.approx(10.0)
     # equity is still 1000; one set flips all-in short -> -10 units
     order = w.set("X", "sell", ta.Size.value_frac(1.0))
-    assert order.quantity == pytest.approx(20.0)
+    assert order.units == pytest.approx(20.0)
     assert w.position("X") == pytest.approx(-10.0)
 
 

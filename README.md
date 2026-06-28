@@ -254,7 +254,7 @@ cargo run --bin fugazi -- run \
   --strategy @examples/strategy.yml \
   --series @examples/candles.csv \
   --output-dir out/
-# writes out/trades.csv (time;symbol;side;quantity;price)
+# writes out/trades.csv (time;symbol;side;units;price)
 #    and out/returns.csv (time;equity;return)
 ```
 

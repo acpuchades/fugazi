@@ -87,7 +87,7 @@ fn main() {
             println!(
                 "{date}  {:<4} {:8.2} @ {:7.2}",
                 format!("{:?}", order.side).to_uppercase(),
-                order.quantity,
+                order.units,
                 candle.close
             );
         }

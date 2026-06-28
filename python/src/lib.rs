@@ -1087,7 +1087,7 @@ impl PySize {
     }
 }
 
-/// A filled order: `symbol`, `side` ("buy"/"sell"), and a positive `quantity`.
+/// A filled order: `symbol`, `side` ("buy"/"sell"), and a positive `units`.
 #[pyclass(name = "Order", frozen, skip_from_py_object)]
 #[derive(Clone)]
 struct PyOrder {
@@ -1105,19 +1105,19 @@ impl PyOrder {
         side_str(self.inner.side)
     }
     #[getter]
-    fn quantity(&self) -> f64 {
-        self.inner.quantity
+    fn units(&self) -> f64 {
+        self.inner.units
     }
-    /// `+quantity` for a buy, `-quantity` for a sell.
-    fn signed_quantity(&self) -> f64 {
-        self.inner.signed_quantity()
+    /// `+units` for a buy, `-units` for a sell.
+    fn signed_units(&self) -> f64 {
+        self.inner.signed_units()
     }
     fn __repr__(&self) -> String {
         format!(
-            "Order(symbol='{}', side='{}', quantity={})",
+            "Order(symbol='{}', side='{}', units={})",
             self.inner.symbol,
             self.side(),
-            self.inner.quantity
+            self.inner.units
         )
     }
 }

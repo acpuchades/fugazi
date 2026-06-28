@@ -64,7 +64,7 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
     std::fs::create_dir_all(opts.out_dir)
         .with_context(|| format!("creating output dir `{}`", opts.out_dir.display()))?;
     let mut trades = writer(&opts.out_dir.join("trades.csv"))?;
-    trades.write_record(["time", "symbol", "side", "quantity", "price"])?;
+    trades.write_record(["time", "symbol", "side", "units", "price"])?;
     let mut returns = writer(&opts.out_dir.join("returns.csv"))?;
     returns.write_record(["time", "equity", "return"])?;
 
@@ -94,11 +94,11 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
                 time,
                 &order.symbol,
                 side,
-                &order.quantity.to_string(),
+                &order.units.to_string(),
                 &candle.close.to_string(),
             ])?;
             if !opts.quiet {
-                // Columns mirror trades.csv: time, symbol, side, quantity, price.
+                // Columns mirror trades.csv: time, symbol, side, units, price.
                 // Each trade carries its own symbol, so this stays correct for a
                 // future multi-symbol strategy. Pad the side to width before
                 // coloring it (escape codes would otherwise break the alignment).
@@ -111,7 +111,7 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
                     "  {}  {:<6}  {side} {:.4} @ {:.2}",
                     style::dim(time),
                     order.symbol,
-                    order.quantity,
+                    order.units,
                     candle.close
                 );
             }

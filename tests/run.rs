@@ -38,7 +38,7 @@ fn runs_an_at_file_strategy() {
     );
 
     assert!(
-        trades.starts_with("time;symbol;side;quantity;price"),
+        trades.starts_with("time;symbol;side;units;price"),
         "unexpected trades.csv header: {trades}"
     );
     assert!(
@@ -61,7 +61,7 @@ fn runs_an_inline_strategy() {
     );
 
     assert!(
-        trades.starts_with("time;symbol;side;quantity;price"),
+        trades.starts_with("time;symbol;side;units;price"),
         "unexpected trades.csv header: {trades}"
     );
     // Buy-and-hold opens exactly one position on the first bar.

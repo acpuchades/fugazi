@@ -241,9 +241,9 @@ wallet.close("AAPL")                                # flatten
 wallet.funds                 # cash balance
 wallet.position("AAPL")      # signed position (negative = short)
 wallet.price("AAPL")         # last fed price (or None)
-wallet.positions()           # {symbol: quantity}
+wallet.positions()           # {symbol: units}
 wallet.equity()              # funds + positions marked at the fed prices
-wallet.orders()              # the blotter: list of Order(symbol, side, quantity)
+wallet.orders()              # the blotter: list of Order(symbol, side, units)
 ```
 
 The wallet is fed each symbol's price with `update(symbol, price)` and is

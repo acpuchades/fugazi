@@ -85,7 +85,7 @@ fn main() {
             println!(
                 "{date}  {:<4} {:8.4} @ {:7.2}   position -> {:+.4}",
                 format!("{:?}", order.side).to_uppercase(),
-                order.quantity,
+                order.units,
                 candle.close,
                 wallet.position(&SYMBOL).amount
             );

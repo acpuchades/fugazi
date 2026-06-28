@@ -161,22 +161,22 @@ impl Size {
     }
 }
 
-/// A single order: a `symbol`, a [`Side`], and a strictly-positive quantity in
+/// A single order: a `symbol`, a [`Side`], and a strictly-positive number of
 /// instrument units.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Order<Sym> {
     pub symbol: Sym,
     pub side: Side,
-    pub quantity: Real,
+    pub units: Real,
 }
 
 impl<Sym> Order<Sym> {
-    /// A `side` order for `quantity` units of `symbol`.
-    pub fn new(symbol: Sym, side: Side, quantity: Real) -> Self {
+    /// A `side` order for `units` units of `symbol`.
+    pub fn new(symbol: Sym, side: Side, units: Real) -> Self {
         Self {
             symbol,
             side,
-            quantity,
+            units,
         }
     }
 
@@ -196,12 +196,12 @@ impl<Sym> Order<Sym> {
         }
     }
 
-    /// The signed quantity this order trades: `+quantity` for a buy,
-    /// `-quantity` for a sell.
-    pub fn signed_quantity(&self) -> Real {
+    /// The signed number of units this order trades: `+units` for a buy,
+    /// `-units` for a sell.
+    pub fn signed_units(&self) -> Real {
         match self.side {
-            Side::Buy => self.quantity,
-            Side::Sell => -self.quantity,
+            Side::Buy => self.units,
+            Side::Sell => -self.units,
         }
     }
 }
@@ -419,7 +419,7 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
         let order = Order::from_delta(symbol.clone(), delta)
             .expect("delta exceeds DEFAULT_EPSILON, so the order is non-empty");
         // Pay for a buy, receive for a sell.
-        self.funds -= order.signed_quantity() * price;
+        self.funds -= order.signed_units() * price;
         let new_position = current + delta;
         if new_position.abs() <= DEFAULT_EPSILON {
             self.positions.remove(&symbol);

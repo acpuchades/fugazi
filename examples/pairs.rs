@@ -115,7 +115,7 @@ fn main() {
                 "bar {i:>3}  {:<4} {:>3} {:8.3} @ {:7.2}",
                 format!("{:?}", order.side).to_uppercase(),
                 order.symbol,
-                order.quantity,
+                order.units,
                 price
             );
         }
