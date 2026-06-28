@@ -118,8 +118,10 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
         }
 
         let equity = wallet.equity().0;
+        // Fractional bar-to-bar return (0.05 = +5%), not percent: it feeds
+        // downstream math (compounding, volatility, Sharpe) cleanly.
         let ret = if prev_equity != 0.0 {
-            (equity - prev_equity) / prev_equity * 100.0
+            (equity - prev_equity) / prev_equity
         } else {
             0.0
         };
