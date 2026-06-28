@@ -1,13 +1,12 @@
 //! Bridge a parsed YAML document into a `serde_json::Value`.
 //!
-//! The strategy spec is parsed from one of two surfaces — YAML (using `!tags` for
-//! enum variants) or JSON (using the singleton-map `{variant: …}` form). To handle
-//! both with one substitution pass and one deserialize, everything is normalized to
-//! `serde_json::Value`: JSON parses straight into it, and YAML parses into a
-//! `serde_norway::Value` that [`yaml_to_json`] converts here. The one interesting
-//! case is a YAML tag, which becomes serde_json's external-tag spelling — the
-//! singleton object `{tag: value}` — so `serde_json::from_value` reads `!sma` and
-//! `{"sma": …}` identically.
+//! The strategy spec is parsed from YAML (using `!tags` for enum variants). To run
+//! the param-substitution pass and the final deserialize over an untyped tree, the
+//! `serde_norway::Value` is normalized to a `serde_json::Value` here. The one
+//! interesting case is a YAML tag, which becomes serde_json's external-tag spelling
+//! — the singleton object `{tag: value}` — so `serde_json::from_value` reads `!sma`
+//! and `{"sma": …}` identically. (JSON is a subset of YAML, so a JSON-shaped
+//! document parses through this same path with no special handling.)
 
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Map, Value as Json};

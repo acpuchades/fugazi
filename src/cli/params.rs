@@ -9,8 +9,8 @@
 //! here, and only then is the result deserialized into the typed spec.
 //!
 //! A placeholder is a singleton object keyed `param` — written `!param { … }` in
-//! YAML (the tag becomes that object via [`crate::convert`]) or `{"param": { … }}`
-//! directly in JSON:
+//! YAML (the tag becomes that object via [`crate::convert`]) or, in flow/map form,
+//! `{ param: { … } }`:
 //!
 //! ```yaml
 //! period: !param { key: FAST }                # required — must be passed
@@ -32,7 +32,7 @@ enum ParamTerm {
     /// `NAME=value` — the value parsed leniently as a JSON scalar (so `FAST=3` is a
     /// number and `SYM=BTC` a string).
     Set { name: String, value: Value },
-    /// `@file.yml` / `@file.json` — a whole `NAME: value` mapping.
+    /// `@file.yml` — a whole `NAME: value` mapping.
     Load(Source),
 }
 
@@ -92,7 +92,7 @@ pub fn table(specs: &[ParamSpec]) -> Result<HashMap<String, Value>> {
                 }
                 ParamTerm::Load(src) => {
                     let text = src.read().context("reading params file")?;
-                    let value = input::parse_value(&text, src.format())
+                    let value = input::parse_value(&text)
                         .with_context(|| format!("parsing params {}", src.label()))?;
                     match value {
                         Value::Object(map) => table.extend(map),

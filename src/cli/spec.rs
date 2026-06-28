@@ -647,25 +647,20 @@ pub struct StrategySpec {
 }
 
 impl StrategySpec {
-    /// Parse a strategy document (YAML or JSON), resolving `param` placeholders
-    /// against `params` first (see [`crate::params`]).
+    /// Parse a YAML strategy document, resolving `param` placeholders against
+    /// `params` first (see [`crate::params`]).
     ///
     /// Two passes: the document is normalized to an untyped [`serde_json::Value`]
-    /// (YAML via [`crate::convert::yaml_to_json`], JSON straight in), every
-    /// placeholder node is rewritten to its resolved value, and only then is the
-    /// result deserialized into the typed spec — so a param can stand in for a
-    /// number, a symbol, or any other field that is concretely typed here.
+    /// (via [`crate::convert::yaml_to_json`], so `!tags` become serde_json's
+    /// singleton-map external-tag form), every placeholder node is rewritten to its
+    /// resolved value, and only then is the result deserialized into the typed spec
+    /// — so a param can stand in for a number, a symbol, or any other field that is
+    /// concretely typed here.
     pub fn from_text_with_params(
         text: &str,
-        format: crate::input::Format,
         params: &std::collections::HashMap<String, serde_json::Value>,
     ) -> anyhow::Result<Self> {
-        let value = match format {
-            crate::input::Format::Json => serde_json::from_str(text)?,
-            crate::input::Format::Yaml => {
-                crate::convert::yaml_to_json(serde_norway::from_str(text)?)?
-            }
-        };
+        let value = crate::input::parse_value(text)?;
         let value = crate::params::substitute(value, params)?;
         Ok(serde_json::from_value(value)?)
     }
@@ -710,9 +705,9 @@ mod tests {
     }
 
     #[test]
-    fn probe_yaml_tags_survive_conversion_to_json() {
-        // A `!tag` YAML doc, converted to JSON (tags → singleton maps) and
-        // deserialized via serde_json, must yield the same spec as YAML would.
+    fn probe_yaml_tags_survive_conversion_to_value() {
+        // A `!tag` YAML doc, converted to a serde_json::Value (tags → singleton
+        // maps) and deserialized, must yield the spec the tags describe.
         let yaml = r#"
             symbol: BTC
             long:
@@ -748,26 +743,20 @@ mod tests {
               enter: !crosses_below { lhs: !sma { period: 5 }, rhs: !sma { period: 20 } }
               exit:  !crosses_above { lhs: !sma { period: 5 }, rhs: !sma { period: 20 } }
         "#;
-        let spec = StrategySpec::from_text_with_params(
-            yaml,
-            crate::input::Format::Yaml,
-            &std::collections::HashMap::new(),
-        )
-        .unwrap();
+        let spec = StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
+            .unwrap();
         assert_eq!(spec.symbol, "BTC");
         let _strat = spec.build();
     }
 
     #[test]
-    fn parses_an_inline_json_strategy() {
-        let json = r#"{"symbol":"ETH","long":{"enter":{"crosses_above":
+    fn parses_an_inline_flow_map_strategy() {
+        // Flow-style YAML (the map form, JSON being a subset) parses through the
+        // same single path — externally-tagged variants spelled as singleton maps.
+        let doc = r#"{"symbol":"ETH","long":{"enter":{"crosses_above":
             {"lhs":{"sma":{"period":5}},"rhs":{"sma":{"period":20}}}}}}"#;
-        let spec = StrategySpec::from_text_with_params(
-            json,
-            crate::input::Format::Json,
-            &std::collections::HashMap::new(),
-        )
-        .unwrap();
+        let spec = StrategySpec::from_text_with_params(doc, &std::collections::HashMap::new())
+            .unwrap();
         assert_eq!(spec.symbol, "ETH");
         let _strat = spec.build();
     }

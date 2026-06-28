@@ -260,10 +260,9 @@ cargo run --bin fugazi -- run \
 
 `--strategy` follows the same `@` convention as `--series`: `@file` loads a file,
 and anything else is treated as inline content — handy for quick one-offs, e.g.
-`--strategy 'symbol: BTC\nlong: { enter: !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } } }'`. The format is YAML or JSON, picked
-by file extension (`.json` ⇒ JSON) or, for inline, sniffed (valid JSON ⇒ JSON).
-Both express the same vocabulary: a YAML `!sma { … }` tag is written `{"sma": …}`
-in JSON, so a strategy with signals works in either.
+`--strategy '{ symbol: BTC, long: { enter: !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } } } }'`. The format is YAML — block or flow
+(inline) style, both fine. (JSON is a subset of YAML, so a JSON-shaped document
+still parses: a `!sma { … }` tag is just the singleton map `{"sma": …}`.)
 
 Flags: `--strategy <@file | inline>`, `--series <spec>` (repeatable),
 `--output-dir <dir>`, `--cash <amount>` (default `10000`), `--params <spec>`
@@ -330,7 +329,7 @@ long:
 ```
 
 `--params` is a `,`-separated list of terms, exactly like `--series` (and itself
-repeatable): `NAME=value` sets one, and `@file.yml`/`@file.json` loads a whole
+repeatable): `NAME=value` sets one, and `@file.yml` loads a whole
 `NAME: value` mapping (see [`examples/params.yml`](examples/params.yml)). Terms
 apply left-to-right, so a later one wins:
 
@@ -341,8 +340,8 @@ cargo run --bin fugazi -- run --strategy @examples/strategy.params.yml \
 ```
 
 A `default` makes a param optional; without one, a missing value is an error.
-`!param NAME` is shorthand for `!param { key: NAME }` (and `{"param": …}` in JSON).
-A `NAME=value` value is parsed as a JSON scalar (so `FAST=5` is a number, `SYM=BTC`
+`!param NAME` is shorthand for `!param { key: NAME }`.
+A `NAME=value` value is parsed as a scalar (so `FAST=5` is a number, `SYM=BTC`
 a string), then substituted before the strategy is typed — so a param can stand in
 anywhere, including where a number is required.
 

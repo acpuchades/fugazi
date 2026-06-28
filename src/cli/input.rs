@@ -11,23 +11,12 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result};
 
-/// The serialization of a strategy/params document: YAML (`!tags`) or JSON
-/// (`{variant: …}` singleton maps).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Format {
-    Yaml,
-    Json,
-}
-
-/// Parse `text` (in `format`) into a [`serde_json::Value`] — the common shape the
-/// spec and params loaders both work on. YAML is normalized via
+/// Parse `text` (YAML) into a [`serde_json::Value`] — the common shape the spec
+/// and params loaders both work on. The document is normalized via
 /// [`crate::convert::yaml_to_json`] so `!tags` become serde_json's singleton-map
-/// external-tag form.
-pub fn parse_value(text: &str, format: Format) -> Result<serde_json::Value> {
-    Ok(match format {
-        Format::Json => serde_json::from_str(text)?,
-        Format::Yaml => crate::convert::yaml_to_json(serde_norway::from_str(text)?)?,
-    })
+/// external-tag form. (JSON is a subset of YAML, so JSON-shaped text still parses.)
+pub fn parse_value(text: &str) -> Result<serde_json::Value> {
+    crate::convert::yaml_to_json(serde_norway::from_str(text)?)
 }
 
 /// A text input given as either `@path` (load the file) or inline content
@@ -48,25 +37,6 @@ impl Source {
             Source::File(path) => std::fs::read_to_string(path)
                 .with_context(|| format!("reading file `{}`", path.display())),
             Source::Inline(text) => Ok(text.clone()),
-        }
-    }
-
-    /// The document format: by file extension (`.json` → JSON, `.yml`/`.yaml` →
-    /// YAML, otherwise YAML), or for inline content by sniffing — valid JSON ⇒
-    /// JSON, else YAML (YAML is a superset, so anything else is fine as YAML).
-    pub fn format(&self) -> Format {
-        match self {
-            Source::File(path) => match path.extension().and_then(|e| e.to_str()) {
-                Some("json") => Format::Json,
-                _ => Format::Yaml,
-            },
-            Source::Inline(text) => {
-                if serde_json::from_str::<serde_json::Value>(text).is_ok() {
-                    Format::Json
-                } else {
-                    Format::Yaml
-                }
-            }
         }
     }
 

@@ -10,8 +10,8 @@
 //!            --output-dir out/
 //! ```
 //!
-//! The strategy (a positional) takes `@file` to load a file, or inline YAML/JSON
-//! for anything else — the same `@` convention `--series`/`--params` use.
+//! The strategy (a positional) takes `@file` to load a file, or inline YAML for
+//! anything else — the same `@` convention `--series`/`--params` use.
 
 mod backtest;
 mod convert;
@@ -46,8 +46,7 @@ enum Command {
 
 #[derive(Args)]
 struct RunArgs {
-    /// The strategy: `@file.yml`/`@file.json` loads a file, anything else is
-    /// inline YAML or JSON.
+    /// The strategy: `@file.yml` loads a file, anything else is inline YAML.
     #[arg(value_name = "STRATEGY")]
     strategy: Source,
 
@@ -93,7 +92,7 @@ fn run(args: RunArgs) -> Result<()> {
     let param_table = params::table(&args.params)?;
 
     let text = args.strategy.read().context("reading strategy")?;
-    let spec = spec::StrategySpec::from_text_with_params(&text, args.strategy.format(), &param_table)
+    let spec = spec::StrategySpec::from_text_with_params(&text, &param_table)
         .with_context(|| parse_error_context(&args.strategy))?;
 
     let frame = data::DataFrame::from_series(&args.series)?;
