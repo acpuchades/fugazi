@@ -22,6 +22,7 @@ use fugazi::prelude::*;
 
 use crate::data::DataFrame;
 use crate::spec::StrategySpec;
+use crate::style;
 
 /// Console-logging knobs plus the run's inputs, threaded in from the CLI args.
 pub struct RunOptions<'a> {
@@ -72,7 +73,7 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
     if !opts.quiet {
         print_header();
         print_inputs_block(opts, start, end, candles.len());
-        println!("\ntrades");
+        println!("\n{}", style::bold("trades"));
     }
 
     let mut wallet = PaperWallet::new(opts.cash);
@@ -99,10 +100,19 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
             if !opts.quiet {
                 // Columns mirror trades.csv: time, symbol, side, quantity, price.
                 // Each trade carries its own symbol, so this stays correct for a
-                // future multi-symbol strategy.
+                // future multi-symbol strategy. Pad the side to width before
+                // coloring it (escape codes would otherwise break the alignment).
+                let side = format!("{side:<4}");
+                let side = match order.side {
+                    Side::Buy => style::green(&side),
+                    Side::Sell => style::red(&side),
+                };
                 println!(
-                    "  {time}  {:<6}  {side:<4} {:.4} @ {:.2}",
-                    order.symbol, order.quantity, candle.close
+                    "  {}  {:<6}  {side} {:.4} @ {:.2}",
+                    style::dim(time),
+                    order.symbol,
+                    order.quantity,
+                    candle.close
                 );
             }
         }
@@ -143,12 +153,15 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
 /// subcommand); line 2 names the active command and what it does.
 fn print_header() {
     println!(
-        "{} {} · {}",
-        env!("CARGO_PKG_NAME"),
-        env!("CARGO_PKG_VERSION"),
-        env!("CARGO_PKG_REPOSITORY")
+        "{} · {}",
+        style::bold(&format!(
+            "{} {}",
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION")
+        )),
+        style::dim(env!("CARGO_PKG_REPOSITORY"))
     );
-    println!("run · backtest a strategy over CSV series");
+    println!("{}", style::dim("run · backtest a strategy over CSV series"));
     println!();
 }
 
@@ -159,7 +172,7 @@ fn print_header() {
 /// the trade stream and `trades.csv`), so this stays correct for a future
 /// multi-symbol strategy.
 fn print_inputs_block(opts: &RunOptions, start: &str, end: &str, bars: usize) {
-    println!("inputs");
+    println!("{}", style::bold("inputs"));
     print_field("strategy", opts.strategy_label);
     print_field("params", opts.params);
     print_field("seed", &opts.seed.to_string());
@@ -175,18 +188,20 @@ fn print_inputs_block(opts: &RunOptions, start: &str, end: &str, bars: usize) {
 /// and `trades.csv`), not of the run as a whole — so this stays correct for a
 /// future multi-symbol strategy.
 fn print_result_block(opts: &RunOptions, s: &Summary, started: SystemTime, finished: SystemTime) {
-    println!("\nresult");
+    println!("\n{}", style::bold("result"));
     print_field("bars", &s.bars.to_string());
     print_field("trades", &s.trades.to_string());
+    let delta = s.final_equity - opts.cash;
+    let change = format!("{delta:+.2}, {:+.2}%", s.return_pct);
+    // Green for a gain, red for a loss — the run's bottom line at a glance.
+    let change = if delta >= 0.0 {
+        style::green(&change)
+    } else {
+        style::red(&change)
+    };
     print_field(
         "capital",
-        &format!(
-            "{:.2} → {:.2}  ({:+.2}, {:+.2}%)",
-            opts.cash,
-            s.final_equity,
-            s.final_equity - opts.cash,
-            s.return_pct
-        ),
+        &format!("{:.2} → {:.2}  ({change})", opts.cash, s.final_equity),
     );
     let elapsed = finished.duration_since(started).unwrap_or_default();
     print_field("started", &format_utc(started));
@@ -210,7 +225,9 @@ fn format_elapsed(d: Duration) -> String {
 
 /// Print one `  label   value` line with the label padded to a common width.
 fn print_field(label: &str, value: &str) {
-    println!("  {label:<9}{value}");
+    // Pad to the common width first, then dim — the escape codes are invisible
+    // bytes that would otherwise throw off the `{:<9}` alignment.
+    println!("  {}{value}", style::dim(&format!("{label:<9}")));
 }
 
 /// Format a [`SystemTime`] as `YYYY-MM-DD HH:MM:SS UTC`, without pulling in a

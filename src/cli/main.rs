@@ -20,6 +20,7 @@ mod dynd;
 mod input;
 mod params;
 mod spec;
+mod style;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
