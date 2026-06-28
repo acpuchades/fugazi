@@ -13,11 +13,25 @@ categories = ["finance", "mathematics"]
 name = "fugazi"
 path = "src/lib.rs"
 
-[dependencies]
+# The `fugazi` binary is the command-line backtester: it loads a strategy.yml,
+# assembles candle data from one or more --series, and runs it through a paper
+# wallet (see `src/cli/`). Its modules are compiled into the binary, not the
+# library; the library crate itself uses none of these dependencies — they are
+# pulled in only to build the CLI binary.
+[[bin]]
+name = "fugazi"
+path = "src/cli/main.rs"
 
-# The core crate stays dependency-free. The Python bindings live in their own
-# workspace member (`python/`), which is the only crate that pulls in PyO3 —
-# see that crate's README for build instructions.
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_norway = "0.9"
+csv = "1"
+anyhow = "1"
+
+# The Python bindings live in their own workspace member (`python/`), which is
+# the only crate that pulls in PyO3 — see that crate's README for build
+# instructions.
 [workspace]
 members = ["python"]
 resolver = "2"

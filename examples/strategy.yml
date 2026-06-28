@@ -1,0 +1,17 @@
+# An always-in SMA(3)/SMA(8) crossover on BTC: go long on the golden cross
+# (fast SMA crosses above slow), reverse into a short on the death cross.
+#
+# Run it with:
+#   fugazi run --strategy examples/strategy.yml \
+#              --series symbol=BTC,@examples/candles.csv \
+#              --output-dir out/
+#
+# Signals are written with YAML tags: `!sma { ... }` is the SMA indicator, bare
+# words like `close` are candle-field leaves. See the README for the full vocab.
+symbol: BTC
+long:
+  enter: !crosses_above { lhs: !sma { source: close, period: 3 }, rhs: !sma { source: close, period: 8 } }
+  exit:  !crosses_below { lhs: !sma { source: close, period: 3 }, rhs: !sma { source: close, period: 8 } }
+short:
+  enter: !crosses_below { lhs: !sma { source: close, period: 3 }, rhs: !sma { source: close, period: 8 } }
+  exit:  !crosses_above { lhs: !sma { source: close, period: 3 }, rhs: !sma { source: close, period: 8 } }

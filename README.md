@@ -243,6 +243,62 @@ and arithmetic builders above (see [Composition](#composition)).
 Comparisons are tolerance-aware (default `1e-8`, overridable via
 `Gt::with_epsilon(..)`) so floating-point noise doesn't cause spurious flips.
 
+## Command-line backtester
+
+The crate ships a `fugazi` binary that loads a strategy from YAML, assembles
+candle data from one or more CSV series, runs it through a `PaperWallet`, and
+writes the result files:
+
+```sh
+cargo run --bin fugazi -- run \
+  --strategy examples/strategy.yml \
+  --series symbol=BTC,@examples/candles.csv \
+  --output-dir out/
+# writes out/trades.csv (time;symbol;side;quantity;price)
+#    and out/returns.csv (time;equity;return)
+```
+
+Flags: `--strategy <file.yml>`, `--series <spec>` (repeatable), `--output-dir
+<dir>`, `--cash <amount>` (default `10000`). Output files are `;`-delimited for
+Excel.
+
+**Data — `--series`.** Each `--series` is a `,`-separated list of terms:
+`key=value` adds a constant column, `@file.csv` loads a CSV's columns and rows
+(each file's column delimiter — `;`, `,`, tab or `|` — is autodetected from its
+header). Within a series the literals broadcast across the file's rows; across
+several `--series` the tables are full-outer-joined on `(symbol, time)` into one
+long frame. So a symbol-less OHLCV file gets `symbol=BTC,@candles.csv`, a file
+with its own `symbol` column loads as `@multi.csv`, and extra fields (e.g.
+fundamentals) ride along on a second series. Required columns: `time`, `symbol`,
+and `open`/`high`/`low`/`close` (`volume` optional); `time` is sorted as an
+opaque token (dates, epochs — anything sortable).
+
+**Strategy — `strategy.yml`.** A `symbol` plus `long`/`short` sides (each an
+`enter`/`exit` signal), or `buy_and_hold: true`. Signals and sources are written
+with YAML **tags** — `!sma { source: close, period: 5 }` — while candle-field
+leaves are bare words (`close`, `high`, `volume`, …). Omitted `source` defaults
+to `close`. The vocabulary mirrors the library one-to-one:
+
+- **Sources:** leaves `close`/`high`/`low`/`open`/`volume`/`typical`/`median`,
+  `!value <n>`; `!sma`/`!ema`/`!rma`/`!wma`/`!hma`/`!rsi`/`!stddev`/`!cci`/
+  `!stochastic { source, period }`, `!stoch_rsi { source, rsi_period,
+  stoch_period }`; `!macd_line`/`!macd_signal`/`!macd_histogram { source, fast,
+  slow, signal }`; `!bb_upper`/`!bb_middle`/`!bb_lower { source, period, k }`;
+  `!keltner_{upper,middle,lower} { source, ema_period, atr_period, multiplier }`;
+  `!donchian_{upper,middle,lower} { high, low, period }`; `!adx`/`!plus_di`/
+  `!minus_di`/`!dmi_plus_di`/`!dmi_minus_di`/`!aroon_{up,down,oscillator}
+  { period }`; bar indicators `!atr`/`!mfi`/`!williams_r { period }`, `!obv`/
+  `!vwap`/`!ad`/`!true_range`, `!sar { step, max }`; transforms `!add`/`!sub`/
+  `!mul`/`!div { lhs, rhs }`, `!lag`/`!diff`/`!ratio`/`!roc { source, periods }`,
+  `!rolling_max`/`!rolling_min { source, period }`.
+- **Signals:** `!gt`/`!lt`/`!ge`/`!le`/`!eq`/`!ne { lhs, rhs, epsilon? }`,
+  `!above`/`!below { source, level }`; `!crosses_above`/`!crosses_below
+  { lhs, rhs }`; `!and`/`!or`/`!xor { lhs, rhs }`, `!all [ … ]`, `!any [ … ]`,
+  `!not <signal>`, `!changed <signal>`, `!const <bool>`.
+
+See [`examples/strategy.yml`](examples/strategy.yml) for a complete SMA-crossover
+strategy.
+
 ## Examples
 
 Runnable example programs live in [`examples/`](examples) — run any with
