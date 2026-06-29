@@ -78,7 +78,7 @@ fn main() {
 
     for (date, candle) in &candles {
         let filled = wallet.orders().len();
-        wallet.update(SYMBOL, Reference(candle.close));
+        wallet.update(SYMBOL, *candle);
         strat.update(*candle);
         strat.trade(&mut wallet);
         for order in &wallet.orders()[filled..] {

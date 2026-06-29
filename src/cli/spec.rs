@@ -20,9 +20,9 @@ use serde::Deserialize;
 
 use fugazi::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Component, Current,
-    DEFAULT_EPSILON, Dmi, DmiValue, Donchian, DonchianValue, Ema, Hma, Keltner, KeltnerValue, Macd,
-    MacdValue, Mfi, Obv, Rma, Rsi, Sar, Sma, StdDev, StochRsi, Stochastic, TrueRange, Value, Vwap,
-    WilliamsR, Wma,
+    DEFAULT_EPSILON, Dmi, DmiValue, Donchian, DonchianValue, Ema, Entry, EntryAnchor, Hma, Keltner,
+    KeltnerValue, Macd, MacdValue, Mfi, Obv, PeakSinceEntry, Rma, Rsi, Sar, Sma, StdDev, StochRsi,
+    Stochastic, TroughSinceEntry, TrueRange, Value, Vwap, WilliamsR, Wma,
 };
 use fugazi::indicators::compare;
 use fugazi::indicators::logic::Const;
@@ -60,6 +60,13 @@ pub enum SourceSpec {
     Median,
     /// A constant value.
     Value(Real),
+    /// The current position's entry price — a [`SingleAssetStrategy`] anchor,
+    /// for building stop-loss / take-profit levels.
+    Entry,
+    /// The running high since entry (a long trailing-stop anchor).
+    Peak,
+    /// The running low since entry (a short trailing-stop anchor).
+    Trough,
 
     // --- price-series indicators (a source + parameters) ---
     Ema {
@@ -291,8 +298,10 @@ pub enum SourceSpec {
 }
 
 impl SourceSpec {
-    /// Construct the live, type-erased source this spec describes.
-    pub fn build(&self) -> DynValue {
+    /// Construct the live, type-erased source this spec describes. `anchor` is
+    /// the owning strategy's entry-price anchor, shared by any `entry` / `peak` /
+    /// `trough` leaves in the tree.
+    pub fn build(&self, anchor: &EntryAnchor) -> DynValue {
         use SourceSpec::*;
         match self {
             Close => DynValue::new(Current::close()),
@@ -303,24 +312,27 @@ impl SourceSpec {
             Typical => DynValue::new(Current::typical()),
             Median => DynValue::new(Current::median()),
             Value(x) => DynValue::new(self::Value::<Candle>::new(*x)),
+            Entry => DynValue::new(self::Entry::new(anchor.clone())),
+            Peak => DynValue::new(PeakSinceEntry::new(anchor.clone())),
+            Trough => DynValue::new(TroughSinceEntry::new(anchor.clone())),
 
-            Ema { source, period } => DynValue::new(self::Ema::new(source.build(), *period)),
-            Sma { source, period } => DynValue::new(self::Sma::new(source.build(), *period)),
-            Rma { source, period } => DynValue::new(self::Rma::new(source.build(), *period)),
-            Wma { source, period } => DynValue::new(self::Wma::new(source.build(), *period)),
-            Hma { source, period } => DynValue::new(self::Hma::new(source.build(), *period)),
-            Rsi { source, period } => DynValue::new(self::Rsi::new(source.build(), *period)),
-            StdDev { source, period } => DynValue::new(self::StdDev::new(source.build(), *period)),
-            Cci { source, period } => DynValue::new(self::Cci::new(source.build(), *period)),
+            Ema { source, period } => DynValue::new(self::Ema::new(source.build(anchor), *period)),
+            Sma { source, period } => DynValue::new(self::Sma::new(source.build(anchor), *period)),
+            Rma { source, period } => DynValue::new(self::Rma::new(source.build(anchor), *period)),
+            Wma { source, period } => DynValue::new(self::Wma::new(source.build(anchor), *period)),
+            Hma { source, period } => DynValue::new(self::Hma::new(source.build(anchor), *period)),
+            Rsi { source, period } => DynValue::new(self::Rsi::new(source.build(anchor), *period)),
+            StdDev { source, period } => DynValue::new(self::StdDev::new(source.build(anchor), *period)),
+            Cci { source, period } => DynValue::new(self::Cci::new(source.build(anchor), *period)),
             Stochastic { source, period } => {
-                DynValue::new(self::Stochastic::new(source.build(), *period))
+                DynValue::new(self::Stochastic::new(source.build(anchor), *period))
             }
             StochRsi {
                 source,
                 rsi_period,
                 stoch_period,
             } => DynValue::new(self::StochRsi::new(
-                self::Rsi::new(source.build(), *rsi_period),
+                self::Rsi::new(source.build(anchor), *rsi_period),
                 *stoch_period,
             )),
 
@@ -330,7 +342,7 @@ impl SourceSpec {
                 slow,
                 signal,
             } => DynValue::new(Component::new(
-                Macd::new(source.build(), *fast, *slow, *signal),
+                Macd::new(source.build(anchor), *fast, *slow, *signal),
                 |v: MacdValue| v.macd,
             )),
             MacdSignal {
@@ -339,7 +351,7 @@ impl SourceSpec {
                 slow,
                 signal,
             } => DynValue::new(Component::new(
-                Macd::new(source.build(), *fast, *slow, *signal),
+                Macd::new(source.build(anchor), *fast, *slow, *signal),
                 |v: MacdValue| v.signal,
             )),
             MacdHistogram {
@@ -348,20 +360,20 @@ impl SourceSpec {
                 slow,
                 signal,
             } => DynValue::new(Component::new(
-                Macd::new(source.build(), *fast, *slow, *signal),
+                Macd::new(source.build(anchor), *fast, *slow, *signal),
                 |v: MacdValue| v.histogram,
             )),
 
             BbUpper { source, period, k } => DynValue::new(Component::new(
-                Bollinger::new(source.build(), *period, *k),
+                Bollinger::new(source.build(anchor), *period, *k),
                 |v: BollingerValue| v.upper,
             )),
             BbMiddle { source, period, k } => DynValue::new(Component::new(
-                Bollinger::new(source.build(), *period, *k),
+                Bollinger::new(source.build(anchor), *period, *k),
                 |v: BollingerValue| v.middle,
             )),
             BbLower { source, period, k } => DynValue::new(Component::new(
-                Bollinger::new(source.build(), *period, *k),
+                Bollinger::new(source.build(anchor), *period, *k),
                 |v: BollingerValue| v.lower,
             )),
 
@@ -371,7 +383,7 @@ impl SourceSpec {
                 atr_period,
                 multiplier,
             } => DynValue::new(Component::new(
-                Keltner::new(source.build(), *ema_period, *atr_period, *multiplier),
+                Keltner::new(source.build(anchor), *ema_period, *atr_period, *multiplier),
                 |v: KeltnerValue| v.upper,
             )),
             KeltnerMiddle {
@@ -380,7 +392,7 @@ impl SourceSpec {
                 atr_period,
                 multiplier,
             } => DynValue::new(Component::new(
-                Keltner::new(source.build(), *ema_period, *atr_period, *multiplier),
+                Keltner::new(source.build(anchor), *ema_period, *atr_period, *multiplier),
                 |v: KeltnerValue| v.middle,
             )),
             KeltnerLower {
@@ -389,20 +401,20 @@ impl SourceSpec {
                 atr_period,
                 multiplier,
             } => DynValue::new(Component::new(
-                Keltner::new(source.build(), *ema_period, *atr_period, *multiplier),
+                Keltner::new(source.build(anchor), *ema_period, *atr_period, *multiplier),
                 |v: KeltnerValue| v.lower,
             )),
 
             DonchianUpper { high, low, period } => DynValue::new(Component::new(
-                Donchian::new(high.build(), low.build(), *period),
+                Donchian::new(high.build(anchor), low.build(anchor), *period),
                 |v: DonchianValue| v.upper,
             )),
             DonchianMiddle { high, low, period } => DynValue::new(Component::new(
-                Donchian::new(high.build(), low.build(), *period),
+                Donchian::new(high.build(anchor), low.build(anchor), *period),
                 |v: DonchianValue| v.middle,
             )),
             DonchianLower { high, low, period } => DynValue::new(Component::new(
-                Donchian::new(high.build(), low.build(), *period),
+                Donchian::new(high.build(anchor), low.build(anchor), *period),
                 |v: DonchianValue| v.lower,
             )),
 
@@ -442,16 +454,16 @@ impl SourceSpec {
             TrueRange => DynValue::new(self::TrueRange::new()),
             Sar { step, max } => DynValue::new(self::Sar::new(*step, *max)),
 
-            Add { lhs, rhs } => DynValue::new(lhs.build().add(rhs.build())),
-            Sub { lhs, rhs } => DynValue::new(lhs.build().sub(rhs.build())),
-            Mul { lhs, rhs } => DynValue::new(lhs.build().mul(rhs.build())),
-            Div { lhs, rhs } => DynValue::new(lhs.build().div(rhs.build())),
-            Lag { source, periods } => DynValue::new(source.build().lag(*periods)),
-            Diff { source, periods } => DynValue::new(source.build().diff(*periods)),
-            Ratio { source, periods } => DynValue::new(source.build().ratio(*periods)),
-            Roc { source, periods } => DynValue::new(source.build().roc(*periods)),
-            RollingMax { source, period } => DynValue::new(source.build().rolling_max(*period)),
-            RollingMin { source, period } => DynValue::new(source.build().rolling_min(*period)),
+            Add { lhs, rhs } => DynValue::new(lhs.build(anchor).add(rhs.build(anchor))),
+            Sub { lhs, rhs } => DynValue::new(lhs.build(anchor).sub(rhs.build(anchor))),
+            Mul { lhs, rhs } => DynValue::new(lhs.build(anchor).mul(rhs.build(anchor))),
+            Div { lhs, rhs } => DynValue::new(lhs.build(anchor).div(rhs.build(anchor))),
+            Lag { source, periods } => DynValue::new(source.build(anchor).lag(*periods)),
+            Diff { source, periods } => DynValue::new(source.build(anchor).diff(*periods)),
+            Ratio { source, periods } => DynValue::new(source.build(anchor).ratio(*periods)),
+            Roc { source, periods } => DynValue::new(source.build(anchor).roc(*periods)),
+            RollingMax { source, period } => DynValue::new(source.build(anchor).rolling_max(*period)),
+            RollingMin { source, period } => DynValue::new(source.build(anchor).rolling_min(*period)),
         }
     }
 }
@@ -548,58 +560,59 @@ fn eps(epsilon: &Option<Real>) -> Real {
 }
 
 impl SignalSpec {
-    /// Construct the live, type-erased signal this spec describes.
-    pub fn build(&self) -> DynSignal {
+    /// Construct the live, type-erased signal this spec describes. `anchor` is
+    /// threaded to any `entry` / `peak` / `trough` source leaf in the tree.
+    pub fn build(&self, anchor: &EntryAnchor) -> DynSignal {
         use SignalSpec::*;
         match self {
             Gt { lhs, rhs, epsilon } => {
-                DynSignal::new(compare::Gt::with_epsilon(lhs.build(), rhs.build(), eps(epsilon)))
+                DynSignal::new(compare::Gt::with_epsilon(lhs.build(anchor), rhs.build(anchor), eps(epsilon)))
             }
             Lt { lhs, rhs, epsilon } => {
-                DynSignal::new(compare::Lt::with_epsilon(lhs.build(), rhs.build(), eps(epsilon)))
+                DynSignal::new(compare::Lt::with_epsilon(lhs.build(anchor), rhs.build(anchor), eps(epsilon)))
             }
             Ge { lhs, rhs, epsilon } => {
-                DynSignal::new(compare::Ge::with_epsilon(lhs.build(), rhs.build(), eps(epsilon)))
+                DynSignal::new(compare::Ge::with_epsilon(lhs.build(anchor), rhs.build(anchor), eps(epsilon)))
             }
             Le { lhs, rhs, epsilon } => {
-                DynSignal::new(compare::Le::with_epsilon(lhs.build(), rhs.build(), eps(epsilon)))
+                DynSignal::new(compare::Le::with_epsilon(lhs.build(anchor), rhs.build(anchor), eps(epsilon)))
             }
             Eq { lhs, rhs, epsilon } => {
-                DynSignal::new(compare::Eq::with_epsilon(lhs.build(), rhs.build(), eps(epsilon)))
+                DynSignal::new(compare::Eq::with_epsilon(lhs.build(anchor), rhs.build(anchor), eps(epsilon)))
             }
             Ne { lhs, rhs, epsilon } => {
-                DynSignal::new(compare::Ne::with_epsilon(lhs.build(), rhs.build(), eps(epsilon)))
+                DynSignal::new(compare::Ne::with_epsilon(lhs.build(anchor), rhs.build(anchor), eps(epsilon)))
             }
-            Above { source, level } => DynSignal::new(source.build().above(*level)),
-            Below { source, level } => DynSignal::new(source.build().below(*level)),
+            Above { source, level } => DynSignal::new(source.build(anchor).above(*level)),
+            Below { source, level } => DynSignal::new(source.build(anchor).below(*level)),
 
             // A crossover clones its operands; the boxes here are not `Clone`, so
             // we rebuild each operand from the spec to get two independent
             // instances and assemble the expansion by hand.
             CrossesAbove { lhs, rhs } => {
-                let cmp = || lhs.build().gt(rhs.build());
+                let cmp = || lhs.build(anchor).gt(rhs.build(anchor));
                 DynSignal::new(cmp().and(cmp().changed()))
             }
             CrossesBelow { lhs, rhs } => {
-                let cmp = || lhs.build().lt(rhs.build());
+                let cmp = || lhs.build(anchor).lt(rhs.build(anchor));
                 DynSignal::new(cmp().and(cmp().changed()))
             }
 
-            And { lhs, rhs } => DynSignal::new(lhs.build().and(rhs.build())),
-            Or { lhs, rhs } => DynSignal::new(lhs.build().or(rhs.build())),
-            Xor { lhs, rhs } => DynSignal::new(lhs.build().xor(rhs.build())),
+            And { lhs, rhs } => DynSignal::new(lhs.build(anchor).and(rhs.build(anchor))),
+            Or { lhs, rhs } => DynSignal::new(lhs.build(anchor).or(rhs.build(anchor))),
+            Xor { lhs, rhs } => DynSignal::new(lhs.build(anchor).xor(rhs.build(anchor))),
             All(specs) => specs
                 .iter()
-                .map(SignalSpec::build)
+                .map(|s| s.build(anchor))
                 .reduce(|acc, s| DynSignal::new(acc.and(s)))
                 .unwrap_or_else(|| DynSignal::new(self::Const::<Candle>::new(true))),
             Any(specs) => specs
                 .iter()
-                .map(SignalSpec::build)
+                .map(|s| s.build(anchor))
                 .reduce(|acc, s| DynSignal::new(acc.or(s)))
                 .unwrap_or_else(|| DynSignal::new(self::Const::<Candle>::new(false))),
-            Not(inner) => DynSignal::new(inner.build().not()),
-            Changed(inner) => DynSignal::new(inner.build().changed()),
+            Not(inner) => DynSignal::new(inner.build(anchor).not()),
+            Changed(inner) => DynSignal::new(inner.build(anchor).changed()),
             Value(b) => DynSignal::new(self::Const::<Candle>::new(*b)),
         }
     }
@@ -622,15 +635,24 @@ pub struct SideSpec {
     pub enter: SignalSpec,
     #[serde(default)]
     pub exit: Option<SignalSpec>,
+    /// An optional stop-loss price level (a source). The side flattens when the
+    /// adverse extreme of the bar reaches it. A `peak` / `trough` source makes it
+    /// a trailing stop.
+    #[serde(default)]
+    pub stop_loss: Option<Box<SourceSpec>>,
+    /// An optional take-profit price level (a source). The side flattens when the
+    /// favourable extreme of the bar reaches it.
+    #[serde(default)]
+    pub take_profit: Option<Box<SourceSpec>>,
 }
 
 impl SideSpec {
     /// Build this side's exit signal, defaulting a missing one to constant-`false`
     /// (matching the unwired slots in [`SingleAssetStrategy::new`]).
-    fn exit(&self) -> DynSignal {
+    fn exit(&self, anchor: &EntryAnchor) -> DynSignal {
         self.exit
             .as_ref()
-            .map(SignalSpec::build)
+            .map(|s| s.build(anchor))
             .unwrap_or_else(|| DynSignal::new(Const::<Candle>::new(false)))
     }
 }
@@ -668,11 +690,26 @@ impl StrategySpec {
     /// Build the live [`SingleAssetStrategy`] this spec describes.
     pub fn build(&self) -> SingleAssetStrategy<String> {
         let mut strat = SingleAssetStrategy::new(self.symbol.clone());
+        // One anchor per strategy, shared by every `entry`/`peak`/`trough` leaf
+        // in the sides' signals and stop levels.
+        let anchor = strat.anchor();
         if let Some(long) = &self.long {
-            strat = strat.long_on(long.enter.build(), long.exit());
+            strat = strat.long_on(long.enter.build(&anchor), long.exit(&anchor));
+            if let Some(sl) = &long.stop_loss {
+                strat = strat.long_stop_loss(sl.build(&anchor));
+            }
+            if let Some(tp) = &long.take_profit {
+                strat = strat.long_take_profit(tp.build(&anchor));
+            }
         }
         if let Some(short) = &self.short {
-            strat = strat.short_on(short.enter.build(), short.exit());
+            strat = strat.short_on(short.enter.build(&anchor), short.exit(&anchor));
+            if let Some(sl) = &short.stop_loss {
+                strat = strat.short_stop_loss(sl.build(&anchor));
+            }
+            if let Some(tp) = &short.take_profit {
+                strat = strat.short_take_profit(tp.build(&anchor));
+            }
         }
         strat
     }
@@ -694,7 +731,7 @@ mod tests {
             rhs: !sma { source: close, period: 4 }
         "#;
         let spec: SignalSpec = serde_norway::from_str(yaml).unwrap();
-        let mut sig = spec.build();
+        let mut sig = spec.build(&EntryAnchor::new());
         // A dip then a rally drives the fast SMA up through the slow one.
         let mut fired = false;
         for p in [10.0, 9.0, 8.0, 7.0, 8.0, 10.0, 12.0, 14.0, 16.0] {
@@ -725,7 +762,7 @@ mod tests {
     fn default_source_is_close() {
         // `period` only — source should default to the close.
         let spec: SourceSpec = serde_norway::from_str("!ema { period: 3 }").unwrap();
-        let mut ema = spec.build();
+        let mut ema = spec.build(&EntryAnchor::new());
         let mut reference = Ema::new(Current::close(), 3);
         for p in [1.0, 2.0, 3.0, 4.0, 5.0] {
             assert_eq!(ema.update(bar(p)), reference.update(bar(p)));
@@ -747,6 +784,32 @@ mod tests {
             .unwrap();
         assert_eq!(spec.symbol, "BTC");
         let _strat = spec.build();
+    }
+
+    #[test]
+    fn stop_loss_with_entry_source_fires_at_the_level() {
+        // Enter on the first bar, with a stop at 90% of entry built from `entry`.
+        let yaml = r#"
+            symbol: BTC
+            long:
+              enter: !value true
+              stop_loss: !mul { lhs: entry, rhs: !value 0.9 }
+        "#;
+        let spec =
+            StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new()).unwrap();
+        let mut strat = spec.build();
+        let mut w = PaperWallet::new(1_000.0);
+        // Bar 1 enters at 100; bar 2 trades down through 90 (low 88).
+        for c in [
+            Candle::new(100.0, 100.0, 100.0, 100.0, 0.0),
+            Candle::new(95.0, 96.0, 88.0, 89.0, 0.0),
+        ] {
+            w.update("BTC".to_string(), c);
+            strat.update(c);
+            strat.trade(&mut w);
+        }
+        assert!(w.is_flat());
+        assert_eq!(w.orders().last().unwrap().price, 90.0);
     }
 
     #[test]

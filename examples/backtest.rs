@@ -79,7 +79,7 @@ fn main() {
 
     for (date, candle) in &candles {
         let filled = wallet.orders().len();
-        wallet.update(SYMBOL, Reference(candle.close));
+        wallet.update(SYMBOL, *candle);
         strategy.update(*candle);
         strategy.trade(&mut wallet);
         // Print whatever this bar appended to the blotter.

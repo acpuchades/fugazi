@@ -500,3 +500,31 @@ def test_wallet_flags_impossible_movements():
     w.update("X", 50.0)
     with pytest.raises(ValueError):
         w.set("X", "buy", 3.0)  # 150 > 100
+
+
+def test_order_carries_fill_price():
+    w = ta.PaperWallet(1_000.0)
+    w.update("X", 100.0)
+    order = w.set_position("X", 2.0)
+    assert order.price == pytest.approx(100.0)  # filled at the fed close
+
+
+def test_update_accepts_a_candle_and_fills_at_exact_price():
+    w = ta.PaperWallet(1_000.0)
+    # A bar that traded between 90 and 110.
+    w.update("X", ta.Candle(100.0, 110.0, 90.0, 105.0, 0.0))
+    # An exact stop fill at 95, inside the bar's range.
+    order = w.set_position_at("X", 5.0, 95.0)
+    assert order.price == pytest.approx(95.0)
+    assert w.funds == pytest.approx(1_000.0 - 5.0 * 95.0)
+    # Closing at an exact level inside the bar.
+    closed = w.close_at("X", 108.0)
+    assert closed.side == "sell"
+    assert closed.price == pytest.approx(108.0)
+
+
+def test_fill_outside_candle_range_is_rejected():
+    w = ta.PaperWallet(10_000.0)
+    w.update("X", ta.Candle(100.0, 110.0, 90.0, 105.0, 0.0))
+    with pytest.raises(ValueError):
+        w.set_position_at("X", 1.0, 120.0)  # above the bar's high

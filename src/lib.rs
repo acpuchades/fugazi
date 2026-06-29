@@ -29,7 +29,7 @@
 //!   state and sets or closes positions on a [`Wallet`] handed to it
 //!   (`wallet.set`/`close`, with a [`Side`] and a [`Size`] that is absolute or a
 //!   fraction of funds/equity/position). The wallet is priced from outside via
-//!   [`Wallet::update`] and returns unit-tagged [`Reference`] / [`Quantity`]
+//!   [`Wallet::update`] and returns unit-tagged [`Reference`] / [`Units`]
 //!   amounts. [`Wallet`] is a *trait*, so the same strategy runs against a
 //!   [`PaperWallet`] backtest or a live broker wallet unchanged; the wallet owns
 //!   the portfolio (funds, positions, blotter). Acting on several symbols per bar
@@ -69,7 +69,7 @@ pub use indicator::Indicator;
 pub use indicators::BoolIndicatorExt;
 pub use signal::Signal;
 pub use strategy::{
-    Order, PaperWallet, Quantity, Reference, Side, Size, Strategy, Wallet, WalletError,
+    Order, PaperWallet, Units, Reference, Side, Size, Strategy, Wallet, WalletError,
 };
 pub use types::{Candle, Real};
 
@@ -79,7 +79,7 @@ pub mod prelude {
     pub use crate::indicators::{BoolIndicatorExt, IndicatorExt};
     pub use crate::signal::Signal;
     pub use crate::strategy::{
-        Order, PaperWallet, Quantity, Reference, Side, Size, Strategy, Wallet, WalletError,
+        Order, PaperWallet, Units, Reference, Side, Size, Strategy, Wallet, WalletError,
     };
     pub use crate::types::{Candle, Real};
 }

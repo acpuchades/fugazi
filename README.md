@@ -200,17 +200,18 @@ let mut wallet = PaperWallet::new(10_000.0);
 
 # let feed: Vec<Candle> = Vec::new();
 for candle in feed {
-    wallet.update("AAPL", Reference(candle.close));  // price the wallet from outside
-    strat.update(candle);                            // advance signals
-    strat.trade(&mut wallet);                        // act
+    wallet.update("AAPL", candle);  // feed the wallet this bar from outside
+    strat.update(candle);           // advance signals
+    strat.trade(&mut wallet);       // act
 }
 let _orders = wallet.orders();        // the trade blotter
 ```
 
-The wallet is fed each symbol's price every bar via `wallet.update`; `set`
-targets an absolute position (an opposite-side `set` reverses, `value_frac(1.0)`
-is all-in), and `close` flattens. Queries return unit-tagged amounts
-(`Reference` cash/equity, `Quantity` of a symbol). For **multi-asset**
+The wallet is fed each symbol's bar every tick via `wallet.update` (its `close`
+marks to market, its `[low, high]` bounds fills); `set` targets an absolute
+position (an opposite-side `set` reverses, `value_frac(1.0)` is all-in), and
+`close` flattens. Queries return unit-tagged amounts
+(`Reference` cash/equity, `Units` of a symbol). For **multi-asset**
 strategies, make `Input` a snapshot of several symbols, feed the wallet each
 symbol's price, and act on more than one symbol per `trade` — see the `pairs`
 example. The trading/execution/event-bus machinery itself is out of
@@ -403,7 +404,7 @@ wallet = ta.PaperWallet(10_000.0)
 
 for o, h, l, c, v in bars:
     candle = ta.Candle(o, h, l, c, v)
-    wallet.update("AAPL", c)                                  # price the wallet
+    wallet.update("AAPL", candle)                             # feed the wallet this bar
     went_long, went_flat = enter.update(candle), exit_.update(candle)  # advance both
     if went_long:
         wallet.set("AAPL", "buy", ta.Size.value_frac(1.0))   # size: units / funds / equity / position

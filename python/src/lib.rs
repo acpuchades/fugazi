@@ -35,7 +35,7 @@ use fugazi_core::indicators::{
 };
 use fugazi_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
 use fugazi_core::strategy::{
-    Order, PaperWallet, Quantity, Reference, Side, Size, Wallet, WalletError,
+    Order, PaperWallet, Units, Reference, Side, Size, Wallet, WalletError,
 };
 use fugazi_core::types::{Candle, Real};
 
@@ -1108,16 +1108,22 @@ impl PyOrder {
     fn units(&self) -> f64 {
         self.inner.units
     }
+    /// The per-unit price this order filled at.
+    #[getter]
+    fn price(&self) -> f64 {
+        self.inner.price
+    }
     /// `+units` for a buy, `-units` for a sell.
     fn signed_units(&self) -> f64 {
         self.inner.signed_units()
     }
     fn __repr__(&self) -> String {
         format!(
-            "Order(symbol='{}', side='{}', units={})",
+            "Order(symbol='{}', side='{}', units={}, price={})",
             self.inner.symbol,
             self.side(),
-            self.inner.units
+            self.inner.units,
+            self.inner.price
         )
     }
 }
@@ -1126,13 +1132,15 @@ impl PyOrder {
 /// the prices fed to it, and a blotter of executed orders. (The live-broker
 /// counterpart would be a separate wallet type implementing the same interface.)
 ///
-/// Feed each symbol's price every tick with `update(symbol, price)`; the wallet
-/// is otherwise market-agnostic. `set(symbol, side, size)` targets an absolute
-/// position (an opposite-side `set` reverses; `Size.value_frac(1.0)` is all-in),
-/// `set_position(symbol, target)` drives to an absolute unit count, and `close`
-/// flattens. Each returns the resulting `Order`, or `None` if nothing traded,
-/// and raises `ValueError` if the movement is impossible (no/zero price, or a
-/// buy beyond available funds).
+/// Feed each symbol's bar every tick with `update(symbol, candle_or_price)`; the
+/// wallet is otherwise market-agnostic. `set(symbol, side, size)` targets an
+/// absolute position (an opposite-side `set` reverses; `Size.value_frac(1.0)` is
+/// all-in), `set_position(symbol, target)` drives to an absolute unit count, and
+/// `close` flattens — all filling at the bar's `close`. The `*_at(…, price)`
+/// variants fill at an explicit price within the bar's range (for exact stop /
+/// take-profit fills). Each returns the resulting `Order`, or `None` if nothing
+/// traded, and raises `ValueError` if the movement is impossible (no/zero price,
+/// a fill outside the bar's range, or a buy beyond available funds).
 #[pyclass(name = "PaperWallet")]
 struct PyWallet {
     inner: PaperWallet<String>,
@@ -1198,18 +1206,46 @@ impl PyWallet {
         self.inner.equity().0
     }
 
-    /// Feed `symbol`'s current price. Call this each tick before trading or
-    /// reading `equity`.
-    fn update(&mut self, symbol: String, price: f64) {
-        self.inner.update(symbol, Reference(price));
+    /// Feed `symbol`'s current bar. Accepts a `Candle` (whose `close` marks to
+    /// market and whose `[low, high]` bounds fills) or a bare price `float`
+    /// (a flat bar `open = high = low = close`). Call this each tick before
+    /// trading or reading `equity`.
+    fn update(&mut self, symbol: String, bar: &Bound<'_, PyAny>) -> PyResult<()> {
+        let candle = if let Ok(candle) = bar.cast::<PyCandle>() {
+            candle.borrow().inner
+        } else {
+            let price: f64 = bar.extract()?;
+            Candle::new(price, price, price, price, 0.0)
+        };
+        self.inner.update(symbol, candle);
+        Ok(())
     }
 
-    /// Drive the position in `symbol` to `target` signed units.
+    /// Drive the position in `symbol` to `target` signed units, filling at the
+    /// symbol's last-fed `close`.
     fn set_position(&mut self, symbol: String, target: f64) -> PyResult<Option<PyOrder>> {
-        wrap_order(self.inner.set_position(Quantity {
+        wrap_order(self.inner.set_position(Units {
             symbol,
             amount: target,
         }))
+    }
+
+    /// Drive the position in `symbol` to `target` signed units, filling at
+    /// `price` (which must lie within the current bar's `[low, high]`). Use it to
+    /// book an exact stop / take-profit fill.
+    fn set_position_at(
+        &mut self,
+        symbol: String,
+        target: f64,
+        price: f64,
+    ) -> PyResult<Option<PyOrder>> {
+        wrap_order(self.inner.set_position_at(
+            Units {
+                symbol,
+                amount: target,
+            },
+            Reference(price),
+        ))
     }
 
     /// Set the target position in `symbol` to `side` `size`.
@@ -1225,9 +1261,15 @@ impl PyWallet {
         )
     }
 
-    /// Flatten `symbol`.
+    /// Flatten `symbol`, filling at the last-fed `close`.
     fn close(&mut self, symbol: String) -> PyResult<Option<PyOrder>> {
         wrap_order(self.inner.close(symbol))
+    }
+
+    /// Flatten `symbol`, filling at `price` (within the current bar's range) —
+    /// an exact stop / take-profit exit.
+    fn close_at(&mut self, symbol: String, price: f64) -> PyResult<Option<PyOrder>> {
+        wrap_order(self.inner.close_at(symbol, Reference(price)))
     }
 }
 

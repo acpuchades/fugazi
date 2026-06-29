@@ -1,11 +1,11 @@
 //! The backtest driver: walk one symbol's candles through a strategy and a
 //! [`PaperWallet`], writing the result files and narrating the run.
 //!
-//! Each bar: price the wallet at the candle's `close`, `update` the strategy,
-//! then `trade` it; any orders the trade appended to the blotter are emitted to
-//! `trades.csv` stamped with this bar's `time` and fill price (the close), and
-//! the running equity is emitted to `returns.csv`. Both result files are written
-//! `;`-delimited for Excel.
+//! Each bar: feed the wallet the candle (it marks to `close` and bounds fills to
+//! the bar's range), `update` the strategy, then `trade` it; any orders the trade
+//! appended to the blotter are emitted to `trades.csv` stamped with this bar's
+//! `time` and the order's own fill price, and the running equity is emitted to
+//! `returns.csv`. Both result files are written `;`-delimited for Excel.
 //!
 //! Console output (silenced by [`RunOptions::quiet`]) is a two-line banner (the
 //! constant tool identity, then the active command), then three blocks: **inputs**
@@ -80,7 +80,7 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
     let mut prev_equity = opts.cash;
 
     for (time, candle) in &candles {
-        wallet.update(symbol.clone(), Reference(candle.close));
+        wallet.update(symbol.clone(), *candle);
         strategy.update(*candle);
 
         let before = wallet.orders().len();
@@ -95,7 +95,7 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
                 &order.symbol,
                 side,
                 &order.units.to_string(),
-                &candle.close.to_string(),
+                &order.price.to_string(),
             ])?;
             if !opts.quiet {
                 // Columns mirror trades.csv: time, symbol, side, units, price.
@@ -112,7 +112,7 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
                     style::dim(time),
                     order.symbol,
                     order.units,
-                    candle.close
+                    order.price
                 );
             }
         }

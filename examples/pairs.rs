@@ -2,7 +2,7 @@
 //! [`Wallet`].
 //!
 //! The per-bar input is a *snapshot* of both symbols (`Snapshot`). The driver
-//! feeds the wallet each symbol's price every bar; the strategy owns a separate
+//! feeds the wallet each symbol's bar every tick; the strategy owns a separate
 //! SMA-crossover entry/exit pair per symbol, feeds each its own sub-candle, and
 //! acts on both symbols against a shared wallet — so a single `trade` can emit
 //! orders for several instruments (the multi-asset / pairs shape). Prices here
@@ -105,8 +105,8 @@ fn main() {
 
     for (i, snap) in bars.iter().enumerate() {
         let filled = wallet.orders().len();
-        wallet.update("A", Reference(snap.a.close));
-        wallet.update("B", Reference(snap.b.close));
+        wallet.update("A", snap.a);
+        wallet.update("B", snap.b);
         strat.update(*snap);
         strat.trade(&mut wallet);
         for order in &wallet.orders()[filled..] {
