@@ -107,11 +107,13 @@ want a flat rest (long/flat, or long/short with a pause between trades).
 `stop_loss` and `take_profit` are **price levels** (sources), not signals. For a
 long, the `stop_loss` fires when the bar's `low` reaches it and the `take_profit`
 when the bar's `high` does (mirrored for a short); the position flattens, filled
-at the level (clamped into the bar's range when price gaps clean through). Build
-the level from the [position-anchored sources](#position-anchored-sources):
-`entry` is the entry price (a fixed stop), `peak` / `trough` the running
-extreme since entry (a **trailing** stop). They are checked every bar, so they
-fire intra-bar, independently of `enter`/`exit`.
+at the level — or at the bar's `open` when it gaps past the level (opens already
+beyond it). Build the level from the
+[position-anchored sources](#position-anchored-sources): `entry` is the entry
+price (a fixed stop), `peak` / `trough` the running extreme since entry (a
+**trailing** stop, which tracks completed bars and so reacts the bar after a new
+extreme). They are checked every bar, so they fire intra-bar, independently of
+`enter`/`exit`.
 
 ```yaml
 # Long on a breakout, with a 5% trailing stop and a fixed 15% take-profit.

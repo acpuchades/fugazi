@@ -114,16 +114,27 @@ impl SinceEntryOp for TroughOp {
     }
 }
 
-/// The extreme price reached since the current position opened (`None` while
-/// flat), seeded at the entry price and restarted whenever the anchor changes
-/// (a new entry, including a reversal).
+/// The extreme price reached over the **completed** bars since the current
+/// position opened (`None` while flat), seeded at the entry price and restarted
+/// whenever the anchor changes (a new entry, including a reversal).
+///
+/// It deliberately **excludes the bar in progress**: the value reported on a bar
+/// is the extreme through the *previous* one. For a trailing stop that means the
+/// level was already fixed at the bar's open (so a fill can tell a real gap from
+/// intra-bar movement), and the stop reacts on the bar after a new extreme — not
+/// the same bar, which would be intra-bar look-ahead.
 ///
 /// Use the aliases [`PeakSinceEntry`] (running high, for a long trailing stop)
 /// and [`TroughSinceEntry`] (running low, for a short trailing stop).
 #[derive(Debug, Clone)]
 pub struct SinceEntry<Op> {
     anchor: EntryAnchor,
-    extreme: Option<Real>,
+    /// The extreme over *completed* bars (what `value` reports) — excludes the
+    /// bar in progress, so a level built on it was already known at this bar's
+    /// open (which is what lets a stop tell a real gap from intra-bar movement).
+    reported: Option<Real>,
+    /// The extreme including the current bar, carried into the next one.
+    running: Option<Real>,
     last_entry: Option<Real>,
     _op: PhantomData<fn() -> Op>,
 }
@@ -133,7 +144,8 @@ impl<Op> SinceEntry<Op> {
     pub fn new(anchor: EntryAnchor) -> Self {
         Self {
             anchor,
-            extreme: None,
+            reported: None,
+            running: None,
             last_entry: None,
             _op: PhantomData,
         }
@@ -146,26 +158,30 @@ impl<Op: SinceEntryOp> Indicator for SinceEntry<Op> {
 
     fn update(&mut self, candle: Candle) -> Option<Real> {
         let entry = self.anchor.get();
-        // A changed anchor (open, close, or reversal) restarts the extreme at
-        // the new entry price — `None` when the change is a flatten.
+        // A changed anchor (open, close, or reversal) restarts at the new entry
+        // price — `None` when the change is a flatten.
         if entry != self.last_entry {
             self.last_entry = entry;
-            self.extreme = entry;
+            self.running = entry;
         }
+        // Report the extreme as of the *prior* bars (the running value before
+        // folding in this bar), then fold this bar in for next time.
+        self.reported = self.running;
         if entry.is_some() {
             let latest = Op::pick(&candle);
-            let running = self.extreme.unwrap_or(latest);
-            self.extreme = Some(Op::merge(running, latest));
+            let base = self.running.unwrap_or(latest);
+            self.running = Some(Op::merge(base, latest));
         }
-        self.extreme
+        self.reported
     }
 
     fn value(&self) -> Option<Real> {
-        self.extreme
+        self.reported
     }
 
     fn reset(&mut self) {
-        self.extreme = None;
+        self.reported = None;
+        self.running = None;
         self.last_entry = None;
     }
 }
@@ -197,27 +213,30 @@ mod tests {
     }
 
     #[test]
-    fn peak_tracks_high_and_restarts_on_new_entry() {
+    fn peak_tracks_high_over_completed_bars_and_restarts_on_new_entry() {
         let anchor = EntryAnchor::new();
         let mut peak = PeakSinceEntry::new(anchor.clone());
         // Flat: not ready.
         assert_eq!(peak.update(bar(10.0, 9.0)), None);
-        // Enter at 9.5; peak seeds at the entry then climbs with the highs.
+        // Enter at 9.5; the first armed bar reports the entry (no completed bar
+        // contributes a high yet).
         anchor.arm(9.5);
-        assert_eq!(peak.update(bar(11.0, 9.0)), Some(11.0));
-        assert_eq!(peak.update(bar(10.5, 9.5)), Some(11.0)); // holds the high
-        // Reverse into a new position at 10.0: the peak restarts.
+        assert_eq!(peak.update(bar(11.0, 9.0)), Some(9.5));
+        // Now the prior bar's high (11) is reflected; this bar's high is excluded.
+        assert_eq!(peak.update(bar(12.0, 9.5)), Some(11.0));
+        assert_eq!(peak.update(bar(10.5, 9.5)), Some(12.0)); // holds the prior peak
+        // Reverse into a new position at 10.0: the peak restarts at the entry.
         anchor.arm(10.0);
-        assert_eq!(peak.update(bar(10.2, 9.8)), Some(10.2));
+        assert_eq!(peak.update(bar(10.2, 9.8)), Some(10.0));
     }
 
     #[test]
-    fn trough_tracks_low() {
+    fn trough_tracks_low_over_completed_bars() {
         let anchor = EntryAnchor::new();
         let mut trough = TroughSinceEntry::new(anchor.clone());
         anchor.arm(20.0);
-        assert_eq!(trough.update(bar(21.0, 19.0)), Some(19.0));
-        assert_eq!(trough.update(bar(20.5, 19.5)), Some(19.0)); // holds the low
-        assert_eq!(trough.update(bar(20.0, 18.0)), Some(18.0));
+        assert_eq!(trough.update(bar(21.0, 19.0)), Some(20.0)); // entry only
+        assert_eq!(trough.update(bar(20.5, 18.0)), Some(19.0)); // prior bar's low
+        assert_eq!(trough.update(bar(20.0, 17.0)), Some(18.0)); // holds, excl current
     }
 }

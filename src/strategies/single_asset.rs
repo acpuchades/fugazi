@@ -59,8 +59,11 @@ fn level_value(level: &Option<Level>) -> Option<Real> {
 /// then attach it with [`long_stop_loss`](Self::long_stop_loss) /
 /// [`short_stop_loss`](Self::short_stop_loss) (and the `take_profit` twins).
 /// Stops are checked every bar against the candle's `high`/`low`, so they fire
-/// intra-bar, and they fill at the level itself — clamped into the bar's
-/// `[low, high]` when price gaps clean through it.
+/// intra-bar, and they fill at the level itself — or at the bar's `open` when it
+/// gaps past the level (opens already beyond it). A **trailing** stop reacts on
+/// the bar *after* a new extreme (it tracks completed bars, see
+/// [`PeakSinceEntry`]), so its level is always known at the open and a gap is
+/// unambiguous.
 ///
 /// ```
 /// use fugazi::prelude::*;
@@ -275,33 +278,35 @@ impl<Sym: Clone> Strategy for SingleAssetStrategy<Sym> {
             }
             return;
         }
-        // Protective stops on the active side. The fill is the level itself,
-        // clamped into the bar's `[low, high]` — so it is always a price the bar
-        // traded at (and a bar that gaps clean through fills at the near edge).
+        // Protective stops on the active side. The fill is the level itself —
+        // unless the bar opened already past it (a gap), in which case it fills
+        // at the open. `min`/`max` against the open expresses both: a downside
+        // exit (long stop, short target) can only fill at or below the open, an
+        // upside exit (long target, short stop) at or above it. The level vs the
+        // open is the gap test, and either way the fill stays within the bar.
         let Some(candle) = self.last_candle else {
             return;
         };
-        let fill_at = |level: Real| level.clamp(candle.low, candle.high);
         // Stop-loss takes precedence over take-profit within a bar.
         if is_long(pos) {
             if let Some(level) = level_value(&self.long_stop)
                 && candle.low <= level
             {
-                self.exit_at(wallet, fill_at(level));
+                self.exit_at(wallet, level.min(candle.open));
             } else if let Some(level) = level_value(&self.long_target)
                 && candle.high >= level
             {
-                self.exit_at(wallet, fill_at(level));
+                self.exit_at(wallet, level.max(candle.open));
             }
         } else if is_short(pos) {
             if let Some(level) = level_value(&self.short_stop)
                 && candle.high >= level
             {
-                self.exit_at(wallet, fill_at(level));
+                self.exit_at(wallet, level.max(candle.open));
             } else if let Some(level) = level_value(&self.short_target)
                 && candle.low <= level
             {
-                self.exit_at(wallet, fill_at(level));
+                self.exit_at(wallet, level.min(candle.open));
             }
         }
     }
@@ -364,31 +369,36 @@ mod tests {
     }
 
     #[test]
-    fn long_stop_clamps_into_bar_on_gap() {
-        // Same stop at 90, but bar 2 gaps clean through it: the whole bar trades
-        // below 90, so the fill clamps to the bar's high (its near edge).
+    fn long_stop_gaps_to_the_open() {
+        // Same stop at 90, but bar 2 gaps down opening at 85, already below it,
+        // so the fill is the open, not the (unreachable) stop level.
         let mut strat = SingleAssetStrategy::buy_and_hold("X").stop_loss_pct(0.10);
         let w = run(
             &mut strat,
             &[flat_bar(100.0), Candle::new(85.0, 86.0, 84.0, 84.0, 0.0)],
         );
         let exit = w.orders().last().unwrap();
-        assert_eq!(exit.price, 86.0);
+        assert_eq!(exit.price, 85.0);
         assert!(w.is_flat());
     }
 
     #[test]
     fn long_trailing_stop_ratchets_up() {
-        // 10% trailing stop. Enter at 100; the next bar rallies to a high of 130
-        // (lifting the stop to 117) and then trades down to 109, crossing it.
+        // 10% trailing stop. Enter at 100; bar 2 rallies to a high of 130 — which
+        // lifts the stop to 117 only from bar 3 (the trail tracks completed bars).
+        // Bar 3 trades down to 115, crossing 117, and exits there.
         let mut strat = SingleAssetStrategy::buy_and_hold("X").trailing_stop_pct(0.10);
         let w = run(
             &mut strat,
-            &[flat_bar(100.0), Candle::new(110.0, 130.0, 109.0, 128.0, 0.0)],
+            &[
+                flat_bar(100.0),
+                Candle::new(110.0, 130.0, 109.0, 128.0, 0.0), // sets the peak (130)
+                Candle::new(126.0, 127.0, 115.0, 116.0, 0.0), // stop now 117; low 115 hits it
+            ],
         );
         let exit = w.orders().last().unwrap();
         assert_eq!(exit.side, Side::Sell);
-        assert_eq!(exit.price, 117.0); // 130 * 0.9, inside the bar's range
+        assert_eq!(exit.price, 117.0); // 130 * 0.9, opened above so filled at the level
         assert!(w.is_flat());
     }
 
