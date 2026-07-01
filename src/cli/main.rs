@@ -15,6 +15,7 @@
 
 mod backtest;
 mod calendar;
+mod chart;
 mod convert;
 mod data;
 mod dynd;

@@ -26,6 +26,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use fugazi::prelude::*;
 
+use crate::chart;
 use crate::data::DataFrame;
 use crate::metrics;
 use crate::spec::StrategySpec;
@@ -221,6 +222,14 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
         opts.risk_free_rate,
     );
     metrics::write_yaml(&m, &opts.out_dir.join("metrics.yml"))?;
+
+    let times: Vec<String> = candles.iter().map(|(t, _)| t.clone()).collect();
+    chart::write_equity_curve(
+        &equity_curve,
+        &times,
+        opts.cash,
+        &opts.out_dir.join("equity.png"),
+    )?;
 
     let finished = SystemTime::now();
     if !opts.quiet {
