@@ -33,13 +33,13 @@ mod component;
 mod dmi;
 mod donchian;
 mod ema;
-mod entry;
 mod hma;
 mod identity;
 mod keltner;
 mod macd;
 mod mfi;
 mod obv;
+mod position;
 mod rma;
 mod rsi;
 mod sar;
@@ -66,7 +66,6 @@ pub use component::Component;
 pub use dmi::{Dmi, DmiValue};
 pub use donchian::{Donchian, DonchianValue};
 pub use ema::Ema;
-pub use entry::{Entry, EntryAnchor, PeakSinceEntry, SinceEntry, TroughSinceEntry};
 pub use ext::{BoolIndicatorExt, IndicatorExt};
 pub use hma::Hma;
 pub use identity::Identity;
@@ -79,6 +78,7 @@ pub use ops::{
     Add, BinaryOp, Combine, Diff, Div, Extreme, ExtremeOp, Lag, Lookback, LookbackOp, MaxOp, MinOp,
     Mul, Ratio, Roc, RollingMax, RollingMin, Sub,
 };
+pub use position::{Position, PositionField};
 pub use rma::Rma;
 pub use rsi::Rsi;
 pub use sar::Sar;

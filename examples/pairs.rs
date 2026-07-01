@@ -105,8 +105,12 @@ fn main() {
 
     for (i, snap) in bars.iter().enumerate() {
         let filled = wallet.orders().len();
-        wallet.update("A", snap.a);
-        wallet.update("B", snap.b);
+        for fill in wallet.update("A", snap.a) {
+            strat.on_fill(&fill);
+        }
+        for fill in wallet.update("B", snap.b) {
+            strat.on_fill(&fill);
+        }
         strat.update(*snap);
         strat.trade(&mut wallet);
         for order in &wallet.orders()[filled..] {

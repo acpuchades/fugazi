@@ -50,7 +50,9 @@ where
 {
     let mut wallet = PaperWallet::new(FUNDS);
     for &candle in candles {
-        wallet.update(SYMBOL, candle);
+        for fill in wallet.update(SYMBOL, candle) {
+            strat.on_fill(&fill);
+        }
         strat.update(candle);
         strat.trade(&mut wallet);
     }
@@ -187,7 +189,9 @@ fn reset_returns_a_strategy_to_its_initial_state() {
 
     let mut first = PaperWallet::new(FUNDS);
     for &candle in &c {
-        first.update(SYMBOL, candle);
+        for fill in first.update(SYMBOL, candle) {
+            strat.on_fill(&fill);
+        }
         strat.update(candle);
         strat.trade(&mut first);
     }
@@ -195,7 +199,9 @@ fn reset_returns_a_strategy_to_its_initial_state() {
     strat.reset();
     let mut second = PaperWallet::new(FUNDS);
     for &candle in &c {
-        second.update(SYMBOL, candle);
+        for fill in second.update(SYMBOL, candle) {
+            strat.on_fill(&fill);
+        }
         strat.update(candle);
         strat.trade(&mut second);
     }

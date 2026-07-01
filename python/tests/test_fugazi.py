@@ -515,19 +515,17 @@ def test_wallet_rejects_bad_side():
         w.set("X", "hodl", 1.0)
 
 
-def test_wallet_flags_impossible_movements():
+def test_impossible_market_orders_never_fill():
     w = ta.PaperWallet(100.0)
-    # The immediate primitive flags eagerly. No price fed yet -> can't book.
-    with pytest.raises(ValueError):
-        w.set_position_at("X", 1.0, 50.0)
-    # A buy beyond available funds, with no margin.
     w.update("X", 50.0)
-    with pytest.raises(ValueError):
-        w.set_position_at("X", 3.0, 50.0)  # 150 > 100
-    # A queued market buy beyond funds simply never fills (no exception).
+    # A queued market buy beyond funds (3 * 50 = 150 > 100) simply never fills.
     w.set("X", "buy", 3.0)
     w.update("X", 50.0)
     assert w.is_flat()
+    # A short sale credits cash, so selling is always feasible.
+    w.set("X", "sell", 3.0)
+    w.update("X", 50.0)
+    assert w.position("X") == pytest.approx(-3.0)
 
 
 def test_order_carries_fill_price():
@@ -538,22 +536,46 @@ def test_order_carries_fill_price():
     assert w.orders()[-1].price == pytest.approx(100.0)
 
 
-def test_update_accepts_a_candle_and_fills_at_exact_price():
+def test_update_returns_the_fill_stream():
     w = ta.PaperWallet(1_000.0)
-    # A bar that traded between 90 and 110.
-    w.update("X", ta.Candle(100.0, 110.0, 90.0, 105.0, 0.0))
-    # An exact stop fill at 95, inside the bar's range.
-    order = w.set_position_at("X", 5.0, 95.0)
-    assert order.price == pytest.approx(95.0)
-    assert w.funds == pytest.approx(1_000.0 - 5.0 * 95.0)
-    # Closing at an exact level inside the bar.
-    closed = w.close_at("X", 108.0)
-    assert closed.side == "sell"
-    assert closed.price == pytest.approx(108.0)
+    w.update("X", 100.0)
+    assert w.set("X", "buy", 2.0) is None  # queued (working)
+    fills = w.update("X", 100.0)  # fills at this bar's open
+    assert len(fills) == 1
+    assert fills[0].side == "buy"
+    assert fills[0].price == pytest.approx(100.0)
+    assert fills[0].kind == "market"
 
 
-def test_fill_outside_candle_range_is_rejected():
+def test_resting_stop_fills_at_the_level():
     w = ta.PaperWallet(10_000.0)
-    w.update("X", ta.Candle(100.0, 110.0, 90.0, 105.0, 0.0))
-    with pytest.raises(ValueError):
-        w.set_position_at("X", 1.0, 120.0)  # above the bar's high
+    w.update("X", 100.0)
+    w.set("X", "buy", 1.0)
+    w.update("X", 100.0)  # long 1 @ 100
+    w.set_stop("X", 90.0)
+    # A bar that trades down through 90 (opening above) fills at the level.
+    fills = w.update("X", ta.Candle(95.0, 96.0, 88.0, 89.0, 0.0))
+    assert len(fills) == 1
+    assert fills[0].side == "sell"
+    assert fills[0].price == pytest.approx(90.0)
+    assert fills[0].kind == "stop"
+    assert w.is_flat()
+
+
+def test_resting_stop_gaps_to_the_open():
+    w = ta.PaperWallet(10_000.0)
+    w.update("X", 100.0)
+    w.set("X", "buy", 1.0)
+    w.update("X", 100.0)
+    w.set_stop("X", 90.0)
+    # Gaps down opening at 85, already below the stop -> fills at the open.
+    fills = w.update("X", ta.Candle(85.0, 86.0, 84.0, 84.0, 0.0))
+    assert fills[0].price == pytest.approx(85.0)
+    assert fills[0].kind == "stop"
+    assert w.is_flat()
+    # A cancelled bracket no longer fires.
+    w.set("X", "buy", 1.0)
+    w.update("X", 100.0)
+    w.set_take_profit("X", 110.0)
+    w.cancel_protective("X")
+    assert w.update("X", ta.Candle(105.0, 115.0, 104.0, 108.0, 0.0)) == []

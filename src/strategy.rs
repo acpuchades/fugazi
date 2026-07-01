@@ -46,6 +46,15 @@ pub trait Strategy {
     /// [`update`](Strategy::update) — opening, adjusting, or closing positions.
     fn trade(&self, wallet: &mut dyn Wallet<Self::Symbol>);
 
+    /// Notify the strategy of an [`Order`] that filled on its wallet — the wallet's
+    /// fill stream (see [`Wallet::update`]). The driver calls this for each fill,
+    /// before the next [`update`](Strategy::update)/[`trade`](Strategy::trade), so a
+    /// strategy can track its own position from fills rather than polling the
+    /// wallet. Defaults to a no-op for strategies that don't need it.
+    fn on_fill(&mut self, order: &Order<Self::Symbol>) {
+        let _ = order;
+    }
+
     /// Clear the strategy's own state (its signals/indicators), returning it to
     /// its freshly-constructed condition. Does not touch any wallet.
     fn reset(&mut self);
@@ -161,8 +170,32 @@ impl Size {
     }
 }
 
-/// A single order: a `symbol`, a [`Side`], a strictly-positive number of
-/// instrument units, and the `price` it filled at.
+/// A wallet-minted identifier for a submitted order, handed back in an [`Ack`] so
+/// a later fill (carried on the resulting [`Order`]) can be correlated to the
+/// submission that caused it. Unique within one wallet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct OrderId(pub u64);
+
+/// What kind of order produced a fill: a plain **market** order, or one of the
+/// two resting protective legs — a **stop**-loss or a **take-profit** — that the
+/// wallet triggered against a bar's range.
+///
+/// Recorded on every [`Order`] so a backtest's blotter can tell an ordinary
+/// next-open market fill apart from a stop/take-profit trigger fill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderKind {
+    /// A market order (filled at the market — the next bar's `open` on a
+    /// [`PaperWallet`]).
+    Market,
+    /// A resting stop-loss, triggered when the bar traded through its level.
+    Stop,
+    /// A resting take-profit, triggered when the bar traded through its level.
+    TakeProfit,
+}
+
+/// A single filled order: a `symbol`, a [`Side`], a strictly-positive number of
+/// instrument units, the `price` it filled at, the [`OrderKind`] that produced
+/// it, and the [`OrderId`] of the submission it fills.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Order<Sym> {
     pub symbol: Sym,
@@ -170,32 +203,53 @@ pub struct Order<Sym> {
     pub units: Real,
     /// The per-unit price this order filled at (reference currency).
     pub price: Real,
+    /// Whether this fill came from a market order or a resting stop/take-profit.
+    pub kind: OrderKind,
+    /// The id of the submission this fill belongs to (see [`Ack`]).
+    pub id: OrderId,
 }
 
 impl<Sym> Order<Sym> {
-    /// A `side` order for `units` units of `symbol`, filled at `price`.
-    pub fn new(symbol: Sym, side: Side, units: Real, price: Real) -> Self {
+    /// A `side` order for `units` units of `symbol`, filled at `price` as `kind`,
+    /// belonging to submission `id`.
+    pub fn new(
+        symbol: Sym,
+        side: Side,
+        units: Real,
+        price: Real,
+        kind: OrderKind,
+        id: OrderId,
+    ) -> Self {
         Self {
             symbol,
             side,
             units,
             price,
+            kind,
+            id,
         }
     }
 
     /// The order that moves `symbol`'s position by `delta` units, filled at
-    /// `price` — [`Buy`] for a positive delta, [`Sell`] for a negative one — or
-    /// `None` when the delta is negligible (within [`DEFAULT_EPSILON`]).
+    /// `price` as `kind` for submission `id` — [`Buy`] for a positive delta,
+    /// [`Sell`] for a negative one — or `None` when the delta is negligible
+    /// (within [`DEFAULT_EPSILON`]).
     ///
     /// [`Buy`]: Side::Buy
     /// [`Sell`]: Side::Sell
-    pub fn from_delta(symbol: Sym, delta: Real, price: Real) -> Option<Self> {
+    pub fn from_delta(
+        symbol: Sym,
+        delta: Real,
+        price: Real,
+        kind: OrderKind,
+        id: OrderId,
+    ) -> Option<Self> {
         if delta.abs() <= DEFAULT_EPSILON {
             None
         } else if delta > 0.0 {
-            Some(Order::new(symbol, Side::Buy, delta, price))
+            Some(Order::new(symbol, Side::Buy, delta, price, kind, id))
         } else {
-            Some(Order::new(symbol, Side::Sell, -delta, price))
+            Some(Order::new(symbol, Side::Sell, -delta, price, kind, id))
         }
     }
 
@@ -207,6 +261,23 @@ impl<Sym> Order<Sym> {
             Side::Sell => -self.units,
         }
     }
+}
+
+/// The synchronous acknowledgment of a submitted order.
+///
+/// Submitting an order is *not* the same as filling it: a live venue accepts an
+/// order and works it, filling later (and a [`PaperWallet`] queues a market order
+/// to the next bar's `open`). So a submission returns either the fill, if one
+/// happened synchronously, or a handle to the working order whose fill will
+/// arrive later — as an [`Order`] in the wallet's fill stream (see
+/// [`Wallet::update`]), carrying the same [`OrderId`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Ack<Sym> {
+    /// The order filled immediately; here is the resulting [`Order`].
+    Filled(Order<Sym>),
+    /// The order was accepted and is working; its fill (if any) arrives later,
+    /// tagged with this [`OrderId`].
+    Working(OrderId),
 }
 
 /// Why a [`Wallet`] movement could not be carried out.
@@ -242,7 +313,7 @@ impl fmt::Display for WalletError {
 impl std::error::Error for WalletError {}
 
 /// The portfolio interface a [`Strategy`] trades into: query funds, positions
-/// and prices, feed prices in, and move positions.
+/// and prices, feed prices in, submit market orders, and rest protective orders.
 ///
 /// `Wallet` is a trait so it is the single **seam** between pure fugazi and a
 /// downstream execution system. fugazi ships only the pure, in-memory
@@ -255,20 +326,28 @@ impl std::error::Error for WalletError {}
 /// The wallet carries no view of the market on its own: it must be fed each
 /// symbol's worth every tick through [`update`](Wallet::update) (fugazi is
 /// agnostic to where those prices come from). With prices in hand it can value
-/// equity, size relative orders, and flag infeasible movements. The single
-/// execution primitive is [`set_position_at`](Wallet::set_position_at) (drive a
-/// symbol to an absolute target, filling at an explicit price). The *market*
-/// movements — [`set_position`](Wallet::set_position), [`set`](Wallet::set) (a
-/// [`Side`] + [`Size`]) and [`close`](Wallet::close) — are default methods over
-/// it; they carry no explicit price, so **when** they fill is the implementor's
-/// choice. The defaults here fill immediately at the last-fed `close` (the
-/// natural choice for a live broker, which executes on send); [`PaperWallet`]
-/// overrides them to **queue** the move and fill it at the *next* bar's `open`
-/// (see [`update`](Wallet::update)), so a backtest never fills on the same bar
-/// whose `close` produced the signal. The explicit-price
-/// [`set_position_at`](Wallet::set_position_at) / [`close_at`](Wallet::close_at)
-/// always fill immediately, at the given price (for exact stop / take-profit
-/// fills).
+/// equity and size relative orders.
+///
+/// **Submitting is not filling.** Every order-submitting method
+/// ([`set_position`](Wallet::set_position), [`set`](Wallet::set),
+/// [`close`](Wallet::close), and the resting [`set_stop`](Wallet::set_stop) /
+/// [`set_take_profit`](Wallet::set_take_profit)) returns an [`Ack`]
+/// synchronously, *not* a fill: [`Ack::Filled`] if a fill happened on the spot,
+/// otherwise [`Ack::Working`] with the [`OrderId`] whose fill arrives later.
+/// Fills are delivered as [`Order`]s out of [`update`](Wallet::update) — the
+/// wallet's fill stream — so a live fill arriving between bars and a paper fill at
+/// the next bar's `open` reach the strategy the same way (a driver hands each to
+/// [`Strategy::on_fill`]). The [`PaperWallet`] queues market orders and fills them
+/// at the next bar's `open`, so a backtest never fills on the bar whose `close`
+/// produced the signal; a live impl fills on the venue's schedule.
+///
+/// Protective exits are **resting orders the wallet owns**: a strategy rests a
+/// stop / take-profit *level* with [`set_stop`](Wallet::set_stop) /
+/// [`set_take_profit`](Wallet::set_take_profit) (idempotent, latest-wins per
+/// symbol — re-submit to trail), and the wallet triggers and prices them itself,
+/// filling when a bar trades through the level (or at the `open` on a gap). This
+/// keeps the strategy free of fill-pricing and a live impl free to relay the
+/// resting order to a broker.
 pub trait Wallet<Sym> {
     /// The available cash balance, in reference currency.
     fn funds(&self) -> Reference;
@@ -282,55 +361,32 @@ pub trait Wallet<Sym> {
     /// Total equity: funds plus every position marked to its fed price.
     fn equity(&self) -> Reference;
 
-    /// Feed `symbol`'s current bar. Call this — for every symbol to be traded or
+    /// Feed `symbol`'s current bar and return the [`Order`]s that filled on it —
+    /// the wallet's fill stream. Call this — for every symbol to be traded or
     /// held — each tick, before trading or reading [`equity`](Wallet::equity).
     /// The bar's `close` marks the position to market; its `[low, high]` range
-    /// bounds the prices a fill can occur at this tick (see
-    /// [`set_position_at`](Wallet::set_position_at)).
+    /// bounds the prices a fill can occur at this tick.
     ///
-    /// An implementor that defers market orders (as [`PaperWallet`] does) also
-    /// **fills any orders queued on a previous tick here**, at this bar's `open` —
-    /// so the fill happens a bar after the [`trade`](Strategy::trade) that
-    /// requested it.
-    fn update(&mut self, symbol: Sym, candle: Candle);
-
-    /// The single execution primitive: drive `target.symbol` to `target.amount`
-    /// signed units, filling at `price`. Implementors carry out the movement —
-    /// book it on a paper wallet, or route it to a broker / bus — and return the
-    /// resulting [`Order`], `Ok(None)` if the position is already there, or a
-    /// [`WalletError`] if it can't be done (notably [`PriceOutOfRange`] when
-    /// `price` lies outside the symbol's current candle `[low, high]`).
-    ///
-    /// [`PriceOutOfRange`]: WalletError::PriceOutOfRange
-    fn set_position_at(
-        &mut self,
-        target: Units<Sym>,
-        price: Reference,
-    ) -> Result<Option<Order<Sym>>, WalletError>;
+    /// This is where deferred work resolves: an implementor that queues market
+    /// orders (as [`PaperWallet`] does) fills them here at this bar's `open`, and
+    /// any resting stop / take-profit this bar triggers fills here too. Each
+    /// returned fill should be handed to [`Strategy::on_fill`] by the driver.
+    fn update(&mut self, symbol: Sym, candle: Candle) -> Vec<Order<Sym>>;
 
     /// Drive `target.symbol` to `target.amount` signed units as a **market
-    /// order**. The default fills immediately at the symbol's last-fed `close`
-    /// (a [`set_position_at`](Wallet::set_position_at) at the market price);
-    /// [`PaperWallet`] overrides it to queue the move and fill at the next bar's
-    /// `open`, returning `Ok(None)` (the [`Order`] is booked at the fill, not
-    /// here).
-    fn set_position(&mut self, target: Units<Sym>) -> Result<Option<Order<Sym>>, WalletError> {
-        let price = self.price(&target.symbol).ok_or(WalletError::UnknownPrice)?;
-        self.set_position_at(target, price)
-    }
+    /// order**, returning an [`Ack`]. [`PaperWallet`] queues the move and fills at
+    /// the next bar's `open` ([`Ack::Working`]); a live impl routes it to the
+    /// broker. This is the one required movement — [`set`](Wallet::set) and
+    /// [`close`](Wallet::close) build on it.
+    fn set_position(&mut self, target: Units<Sym>) -> Result<Ack<Sym>, WalletError>;
 
     /// Target `side · size` of `symbol` (absolute), as a **market order**. An
     /// opposite-side target reverses the position; the same side adjusts toward
-    /// it. ([`close`](Wallet::close) is this with a flat target.) Fill timing
-    /// follows [`set_position`](Wallet::set_position) — immediate at the `close`
-    /// by default, queued to the next `open` on [`PaperWallet`], which resolves
-    /// the [`Size`] at that fill price.
-    fn set(
-        &mut self,
-        symbol: Sym,
-        side: Side,
-        size: Size,
-    ) -> Result<Option<Order<Sym>>, WalletError> {
+    /// it. ([`close`](Wallet::close) is this with a flat target.) The default
+    /// resolves the [`Size`] against the last-fed `close` and forwards to
+    /// [`set_position`](Wallet::set_position); [`PaperWallet`] overrides it to
+    /// resolve the size at the fill `open` instead.
+    fn set(&mut self, symbol: Sym, side: Side, size: Size) -> Result<Ack<Sym>, WalletError> {
         let price = self.price(&symbol).ok_or(WalletError::UnknownPrice)?.0;
         if price <= 0.0 {
             return Err(WalletError::InvalidPrice);
@@ -345,26 +401,28 @@ pub trait Wallet<Sym> {
         })
     }
 
-    /// Flatten `symbol` at its last-fed `close`.
-    fn close(&mut self, symbol: Sym) -> Result<Option<Order<Sym>>, WalletError> {
+    /// Flatten `symbol` as a **market order**.
+    fn close(&mut self, symbol: Sym) -> Result<Ack<Sym>, WalletError> {
         self.set_position(Units {
             symbol,
             amount: 0.0,
         })
     }
 
-    /// Flatten `symbol`, filling at `price` (e.g. an exact stop / take-profit
-    /// level). Subject to the same `[low, high]` range check as
-    /// [`set_position_at`](Wallet::set_position_at).
-    fn close_at(&mut self, symbol: Sym, price: Reference) -> Result<Option<Order<Sym>>, WalletError> {
-        self.set_position_at(
-            Units {
-                symbol,
-                amount: 0.0,
-            },
-            price,
-        )
-    }
+    /// Rest a **stop-loss** on `symbol` at `trigger`: an adverse level the wallet
+    /// fills when a bar trades through it (a long fills when the bar trades down to
+    /// `trigger`, a short when it trades up). The side is read from the current
+    /// position. Idempotent and latest-wins per symbol — re-submit each bar to
+    /// trail. Returns the [`OrderId`] of the resting order in an [`Ack::Working`].
+    fn set_stop(&mut self, symbol: Sym, trigger: Reference) -> Result<Ack<Sym>, WalletError>;
+
+    /// Rest a **take-profit** on `symbol` at `trigger` — the favourable twin of
+    /// [`set_stop`](Wallet::set_stop). Idempotent and latest-wins per symbol.
+    fn set_take_profit(&mut self, symbol: Sym, trigger: Reference)
+    -> Result<Ack<Sym>, WalletError>;
+
+    /// Cancel both resting protective legs (stop and take-profit) on `symbol`.
+    fn cancel_protective(&mut self, symbol: &Sym) -> Result<(), WalletError>;
 }
 
 /// A market order queued on a [`PaperWallet`] to fill at the next bar's `open`.
@@ -373,35 +431,57 @@ pub trait Wallet<Sym> {
 /// absolute unit target is fixed at queue time, while a [`Side`] + [`Size`] is
 /// resolved against the fill (`open`) price — so an all-in
 /// [`value_frac(1.0)`](Size::value_frac) stays affordable even when the bar gaps.
+/// Each carries the [`OrderId`] minted when it was submitted.
 #[derive(Debug, Clone, Copy)]
 enum Pending {
     /// Drive to an absolute signed-unit target (from [`set_position`](Wallet::set_position)).
-    Target(Real),
+    Target(Real, OrderId),
     /// A side + size, resolved against the fill bar's `open` (from [`set`](Wallet::set)).
-    Sized(Side, Size),
+    Sized(Side, Size, OrderId),
+}
+
+/// One resting protective leg: the `trigger` level and the [`OrderId`] it fills
+/// under.
+#[derive(Debug, Clone, Copy)]
+struct Leg {
+    trigger: Real,
+    id: OrderId,
+}
+
+/// The resting protective bracket for a symbol — a stop-loss and/or take-profit
+/// leg. Holding both together makes them one-cancels-the-other: a fill on either
+/// (or a market exit/reversal) drops the whole record.
+#[derive(Debug, Clone, Copy, Default)]
+struct Protective {
+    stop: Option<Leg>,
+    take_profit: Option<Leg>,
 }
 
 /// The built-in **pure**, in-memory [`Wallet`]: a paper book of `funds`,
 /// per-symbol positions, the prices fed to it, a queue of market orders awaiting
-/// their next-open fill, and a blotter of executed [`Order`]s, with no IO.
+/// their next-open fill, the resting protective brackets, and a blotter of
+/// executed [`Order`]s, with no IO.
 ///
-/// The explicit-price [`set_position_at`](Wallet::set_position_at) books the fill
-/// at the requested price (within the current bar's range) — debiting a buy,
-/// crediting a sell — immediately. The **market** movements
-/// ([`set_position`](Wallet::set_position) / [`set`](Wallet::set) /
-/// [`close`](Wallet::close)) instead *queue*: they record the intended move and
-/// return `Ok(None)`, and the next [`update`](Wallet::update) fills it at that
-/// bar's `open` (one queued move per symbol, latest wins). That is what keeps a
-/// backtest from filling on the same bar whose `close` triggered the signal. Use
-/// it for backtests and dry runs; a downstream `Wallet` impl handles live
-/// execution / bus publishing.
+/// The **market** movements ([`set_position`](Wallet::set_position) /
+/// [`set`](Wallet::set) / [`close`](Wallet::close)) *queue*: they record the
+/// intended move, return [`Ack::Working`], and the next [`update`](Wallet::update)
+/// fills it at that bar's `open` (one queued move per symbol, latest wins) — which
+/// keeps a backtest from filling on the same bar whose `close` triggered the
+/// signal. The **resting** movements ([`set_stop`](Wallet::set_stop) /
+/// [`set_take_profit`](Wallet::set_take_profit)) register a trigger level (one
+/// bracket per symbol, latest wins); [`update`](Wallet::update) triggers and
+/// prices them itself, filling at the level or — when the bar gaps past it — at
+/// the `open`. Use it for backtests and dry runs; a downstream `Wallet` impl
+/// handles live execution / bus publishing.
 #[derive(Debug, Clone)]
 pub struct PaperWallet<Sym> {
     positions: HashMap<Sym, Real>,
     bars: HashMap<Sym, Candle>,
     pending: HashMap<Sym, Pending>,
+    protective: HashMap<Sym, Protective>,
     funds: Real,
     blotter: Vec<Order<Sym>>,
+    next_id: u64,
 }
 
 impl<Sym> PaperWallet<Sym> {
@@ -411,8 +491,10 @@ impl<Sym> PaperWallet<Sym> {
             positions: HashMap::new(),
             bars: HashMap::new(),
             pending: HashMap::new(),
+            protective: HashMap::new(),
             funds,
             blotter: Vec::new(),
+            next_id: 0,
         }
     }
 
@@ -430,6 +512,13 @@ impl<Sym> PaperWallet<Sym> {
     pub fn clear_blotter(&mut self) {
         self.blotter.clear();
     }
+
+    /// Mint the next unique [`OrderId`].
+    fn mint(&mut self) -> OrderId {
+        let id = OrderId(self.next_id);
+        self.next_id += 1;
+        id
+    }
 }
 
 impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
@@ -439,6 +528,102 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
             symbol: symbol.clone(),
             amount,
         })
+    }
+
+    /// Book a fill: drive `symbol` to `target` signed units at `price`, tagged
+    /// `kind`/`id`. The engine behind every fill — the queued market flush and the
+    /// resting-order triggers both route here. Returns the [`Order`] (also pushed
+    /// to the blotter), `Ok(None)` if already at `target`, or a [`WalletError`]
+    /// (`UnknownPrice`, `InvalidPrice`, `PriceOutOfRange`, `InsufficientFunds`).
+    fn fill_at(
+        &mut self,
+        symbol: Sym,
+        target: Real,
+        price: Real,
+        kind: OrderKind,
+        id: OrderId,
+    ) -> Result<Option<Order<Sym>>, WalletError> {
+        let current = self.positions.get(&symbol).copied().unwrap_or(0.0);
+        let delta = target - current;
+        if delta.abs() <= DEFAULT_EPSILON {
+            return Ok(None);
+        }
+        let bar = self.bars.get(&symbol).ok_or(WalletError::UnknownPrice)?;
+        if price <= 0.0 {
+            return Err(WalletError::InvalidPrice);
+        }
+        // A fill can only happen at a price the bar actually traded at.
+        if price < bar.low - DEFAULT_EPSILON || price > bar.high + DEFAULT_EPSILON {
+            return Err(WalletError::PriceOutOfRange);
+        }
+        // No margin: a net buy can't drive cash below zero (tolerant of the
+        // rounding in an all-in `value_frac(1.0)`, whose cost equals funds).
+        if delta > 0.0 {
+            let cost = delta * price;
+            let tolerance = DEFAULT_EPSILON * self.funds.abs().max(1.0);
+            if cost - self.funds > tolerance {
+                return Err(WalletError::InsufficientFunds);
+            }
+        }
+        let order = Order::from_delta(symbol.clone(), delta, price, kind, id)
+            .expect("delta exceeds DEFAULT_EPSILON, so the order is non-empty");
+        // Pay for a buy, receive for a sell.
+        self.funds -= order.signed_units() * price;
+        let new_position = current + delta;
+        if new_position.abs() <= DEFAULT_EPSILON {
+            self.positions.remove(&symbol);
+        } else {
+            self.positions.insert(symbol.clone(), new_position);
+        }
+        // A fill that flattens or flips the sign voids any resting bracket (so a
+        // bare market exit / reversal drops a now-stale stop even without an
+        // explicit cancel).
+        if new_position.abs() <= DEFAULT_EPSILON || current * new_position < 0.0 {
+            self.protective.remove(&symbol);
+        }
+        self.blotter.push(order.clone());
+        Ok(Some(order))
+    }
+
+    /// Trigger and fill a resting protective leg on `symbol` against `candle`, if
+    /// one is crossed. Stop-loss takes precedence over take-profit, and at most one
+    /// leg fills per bar (the fill flattens, which drops the whole bracket).
+    fn match_protective(&mut self, symbol: &Sym, candle: &Candle) -> Option<Order<Sym>> {
+        let pos = self.positions.get(symbol).copied().unwrap_or(0.0);
+        let prot = *self.protective.get(symbol)?;
+        // Downside exits (long stop, short target) fill at the level, or lower at
+        // the open on a gap: `min(level, open)`. Upside exits are `max`. Either way
+        // the fill stays within the bar's range.
+        let (leg, fill, kind) = if pos > DEFAULT_EPSILON {
+            if let Some(leg) = prot.stop
+                && candle.low <= leg.trigger + DEFAULT_EPSILON
+            {
+                (leg, leg.trigger.min(candle.open), OrderKind::Stop)
+            } else if let Some(leg) = prot.take_profit
+                && candle.high >= leg.trigger - DEFAULT_EPSILON
+            {
+                (leg, leg.trigger.max(candle.open), OrderKind::TakeProfit)
+            } else {
+                return None;
+            }
+        } else if pos < -DEFAULT_EPSILON {
+            if let Some(leg) = prot.stop
+                && candle.high >= leg.trigger - DEFAULT_EPSILON
+            {
+                (leg, leg.trigger.max(candle.open), OrderKind::Stop)
+            } else if let Some(leg) = prot.take_profit
+                && candle.low <= leg.trigger + DEFAULT_EPSILON
+            {
+                (leg, leg.trigger.min(candle.open), OrderKind::TakeProfit)
+            } else {
+                return None;
+            }
+        } else {
+            return None;
+        };
+        self.fill_at(symbol.clone(), 0.0, fill, kind, leg.id)
+            .ok()
+            .flatten()
     }
 }
 
@@ -467,93 +652,75 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
         Reference(self.funds + positions_value)
     }
 
-    fn update(&mut self, symbol: Sym, candle: Candle) {
+    fn update(&mut self, symbol: Sym, candle: Candle) -> Vec<Order<Sym>> {
         // Mark the new bar first so a queued fill validates against *this* bar's
-        // range (its `open` is trivially within it), then flush any move queued
-        // for this symbol at the open.
+        // range (its `open` is trivially within it), then flush any queued market
+        // order at the open, then test the resting protective legs.
         self.bars.insert(symbol.clone(), candle);
+        let mut fills = Vec::new();
         if let Some(pending) = self.pending.remove(&symbol) {
-            let target = match pending {
-                Pending::Target(amount) => amount,
+            let (target, id) = match pending {
+                Pending::Target(amount, id) => (amount, id),
                 // Resolve the size at the fill price, so an all-in stays exact.
-                Pending::Sized(side, size) => {
+                Pending::Sized(side, size, id) => {
                     let position = self.positions.get(&symbol).copied().unwrap_or(0.0);
                     let magnitude =
                         size.resolve(candle.open, position, self.funds, self.equity().0);
-                    side.sign() * magnitude
+                    (side.sign() * magnitude, id)
                 }
             };
-            let _ = self.set_position_at(
-                Units {
-                    symbol,
-                    amount: target,
-                },
-                Reference(candle.open),
-            );
-        }
-    }
-
-    fn set_position(&mut self, target: Units<Sym>) -> Result<Option<Order<Sym>>, WalletError> {
-        // Market order: queue the absolute target to fill at the next bar's open.
-        self.pending.insert(target.symbol, Pending::Target(target.amount));
-        Ok(None)
-    }
-
-    fn set(
-        &mut self,
-        symbol: Sym,
-        side: Side,
-        size: Size,
-    ) -> Result<Option<Order<Sym>>, WalletError> {
-        // Market order: queue the side+size and resolve it at the fill (open).
-        self.pending.insert(symbol, Pending::Sized(side, size));
-        Ok(None)
-    }
-
-    fn set_position_at(
-        &mut self,
-        target: Units<Sym>,
-        price: Reference,
-    ) -> Result<Option<Order<Sym>>, WalletError> {
-        let Units {
-            symbol,
-            amount: target,
-        } = target;
-        let current = self.positions.get(&symbol).copied().unwrap_or(0.0);
-        let delta = target - current;
-        if delta.abs() <= DEFAULT_EPSILON {
-            return Ok(None);
-        }
-        let bar = self.bars.get(&symbol).ok_or(WalletError::UnknownPrice)?;
-        let price = price.0;
-        if price <= 0.0 {
-            return Err(WalletError::InvalidPrice);
-        }
-        // A fill can only happen at a price the bar actually traded at.
-        if price < bar.low - DEFAULT_EPSILON || price > bar.high + DEFAULT_EPSILON {
-            return Err(WalletError::PriceOutOfRange);
-        }
-        // No margin: a net buy can't drive cash below zero (tolerant of the
-        // rounding in an all-in `value_frac(1.0)`, whose cost equals funds).
-        if delta > 0.0 {
-            let cost = delta * price;
-            let tolerance = DEFAULT_EPSILON * self.funds.abs().max(1.0);
-            if cost - self.funds > tolerance {
-                return Err(WalletError::InsufficientFunds);
+            if let Ok(Some(order)) =
+                self.fill_at(symbol.clone(), target, candle.open, OrderKind::Market, id)
+            {
+                fills.push(order);
             }
         }
-        let order = Order::from_delta(symbol.clone(), delta, price)
-            .expect("delta exceeds DEFAULT_EPSILON, so the order is non-empty");
-        // Pay for a buy, receive for a sell.
-        self.funds -= order.signed_units() * price;
-        let new_position = current + delta;
-        if new_position.abs() <= DEFAULT_EPSILON {
-            self.positions.remove(&symbol);
-        } else {
-            self.positions.insert(symbol, new_position);
+        if let Some(order) = self.match_protective(&symbol, &candle) {
+            fills.push(order);
         }
-        self.blotter.push(order.clone());
-        Ok(Some(order))
+        fills
+    }
+
+    fn set_position(&mut self, target: Units<Sym>) -> Result<Ack<Sym>, WalletError> {
+        // Market order: queue the absolute target to fill at the next bar's open.
+        let id = self.mint();
+        self.pending
+            .insert(target.symbol, Pending::Target(target.amount, id));
+        Ok(Ack::Working(id))
+    }
+
+    fn set(&mut self, symbol: Sym, side: Side, size: Size) -> Result<Ack<Sym>, WalletError> {
+        // Market order: queue the side+size and resolve it at the fill (open).
+        let id = self.mint();
+        self.pending.insert(symbol, Pending::Sized(side, size, id));
+        Ok(Ack::Working(id))
+    }
+
+    fn set_stop(&mut self, symbol: Sym, trigger: Reference) -> Result<Ack<Sym>, WalletError> {
+        let id = self.mint();
+        self.protective.entry(symbol).or_default().stop = Some(Leg {
+            trigger: trigger.0,
+            id,
+        });
+        Ok(Ack::Working(id))
+    }
+
+    fn set_take_profit(
+        &mut self,
+        symbol: Sym,
+        trigger: Reference,
+    ) -> Result<Ack<Sym>, WalletError> {
+        let id = self.mint();
+        self.protective.entry(symbol).or_default().take_profit = Some(Leg {
+            trigger: trigger.0,
+            id,
+        });
+        Ok(Ack::Working(id))
+    }
+
+    fn cancel_protective(&mut self, symbol: &Sym) -> Result<(), WalletError> {
+        self.protective.remove(symbol);
+        Ok(())
     }
 }
 
@@ -568,25 +735,34 @@ mod tests {
         Candle::new(close, close, close, close, 0.0)
     }
 
+    /// Assert an order's fields, ignoring its (wallet-minted) id.
+    fn assert_fill(o: &Order<&str>, side: Side, units: Real, price: Real, kind: OrderKind) {
+        assert_eq!(o.side, side, "side");
+        assert!((o.units - units).abs() < 1e-9, "units {} != {}", o.units, units);
+        assert!((o.price - price).abs() < 1e-9, "price {} != {}", o.price, price);
+        assert_eq!(o.kind, kind, "kind");
+    }
+
     #[test]
     fn set_position_queues_and_fills_at_next_open() {
         let mut w: PaperWallet<&str> = PaperWallet::new(1_000.0);
         w.update("X", bar(100.0));
-        // A market order only queues — nothing is booked yet.
-        assert_eq!(
+        // A market order only queues (Ack::Working) — nothing is booked yet.
+        assert!(matches!(
             w.set_position(Units {
                 symbol: "X",
                 amount: 3.0
             }),
-            Ok(None)
-        );
+            Ok(Ack::Working(_))
+        ));
         assert_eq!(w.position(&"X").amount, 0.0);
         assert!(w.orders().is_empty());
-        // The next bar fills it at that bar's open.
-        w.update("X", bar(100.0));
+        // The next bar fills it at that bar's open, returning it in the fill stream.
+        let fills = w.update("X", bar(100.0));
         assert_eq!(w.position(&"X").amount, 3.0);
         assert_eq!(w.funds().0, 1_000.0 - 3.0 * 100.0);
-        assert_eq!(w.orders().last(), Some(&Order::new("X", Side::Buy, 3.0, 100.0)));
+        assert_fill(&fills[0], Side::Buy, 3.0, 100.0, OrderKind::Market);
+        assert_fill(w.orders().last().unwrap(), Side::Buy, 3.0, 100.0, OrderKind::Market);
         // Setting a larger target buys the difference (scale in), again next open.
         w.set_position(Units {
             symbol: "X",
@@ -613,7 +789,7 @@ mod tests {
         // Opposite side reverses: +4 -> -4 is a sell of 8.
         w.set("X", Side::Sell, Size::units(4.0)).unwrap();
         w.update("X", bar(50.0));
-        assert_eq!(w.orders().last(), Some(&Order::new("X", Side::Sell, 8.0, 50.0)));
+        assert_fill(w.orders().last().unwrap(), Side::Sell, 8.0, 50.0, OrderKind::Market);
         assert_eq!(w.position(&"X").amount, -4.0);
     }
 
@@ -624,9 +800,9 @@ mod tests {
         w.set("X", Side::Buy, Size::units(10.0)).unwrap();
         w.update("X", bar(100.0)); // fill the buy at 100
         w.update("X", bar(110.0)); // mark to 110
-        assert_eq!(w.close("X"), Ok(None)); // queued
+        assert!(matches!(w.close("X"), Ok(Ack::Working(_)))); // queued
         w.update("X", bar(110.0)); // fills the close at the open 110
-        assert_eq!(w.orders().last(), Some(&Order::new("X", Side::Sell, 10.0, 110.0)));
+        assert_fill(w.orders().last().unwrap(), Side::Sell, 10.0, 110.0, OrderKind::Market);
         assert!(w.is_flat());
         assert_eq!(w.funds().0, 1_100.0);
     }
@@ -638,11 +814,11 @@ mod tests {
         // 10% of 1000 = 100 / price 25 = 4 units, resolved at the fill (open 25).
         w.set("X", Side::Buy, Size::funds_frac(0.1)).unwrap();
         w.update("X", bar(25.0));
-        assert_eq!(w.orders().last(), Some(&Order::new("X", Side::Buy, 4.0, 25.0)));
+        assert_fill(w.orders().last().unwrap(), Side::Buy, 4.0, 25.0, OrderKind::Market);
         // Set to 50% of the 4-unit position -> sell 2.
         w.set("X", Side::Buy, Size::position_frac(0.5)).unwrap();
         w.update("X", bar(25.0));
-        assert_eq!(w.orders().last(), Some(&Order::new("X", Side::Sell, 2.0, 25.0)));
+        assert_fill(w.orders().last().unwrap(), Side::Sell, 2.0, 25.0, OrderKind::Market);
         assert_eq!(w.position(&"X").amount, 2.0);
     }
 
@@ -658,7 +834,7 @@ mod tests {
         // Equity is still 1000; flip all-in short -> -10 units (a sell of 20).
         w.set("X", Side::Sell, Size::value_frac(1.0)).unwrap();
         w.update("X", bar(100.0));
-        assert_eq!(w.orders().last(), Some(&Order::new("X", Side::Sell, 20.0, 100.0)));
+        assert_fill(w.orders().last().unwrap(), Side::Sell, 20.0, 100.0, OrderKind::Market);
         assert_eq!(w.position(&"X").amount, -10.0);
     }
 
@@ -673,43 +849,30 @@ mod tests {
     }
 
     #[test]
-    fn unknown_price_is_flagged_on_the_immediate_primitive() {
+    fn unknown_price_is_flagged_on_a_fill() {
         let mut w: PaperWallet<&str> = PaperWallet::new(1_000.0);
-        // "X" was never fed a price. The explicit-price primitive flags it eagerly;
-        // a market order just queues (it resolves at the fill, which has a price).
+        // "X" was never fed a bar, so a fill can't be priced; a market order just
+        // queues (it resolves at the fill, which has a price).
         assert_eq!(
-            w.set_position_at(
-                Units {
-                    symbol: "X",
-                    amount: 1.0
-                },
-                Reference(50.0)
-            ),
+            w.fill_at("X", 1.0, 50.0, OrderKind::Market, OrderId(0)),
             Err(WalletError::UnknownPrice)
         );
-        assert_eq!(
+        assert!(matches!(
             w.set_position(Units {
                 symbol: "X",
                 amount: 1.0
             }),
-            Ok(None)
-        );
+            Ok(Ack::Working(_))
+        ));
     }
 
     #[test]
     fn insufficient_funds_is_flagged_but_shorts_are_free() {
         let mut w: PaperWallet<&str> = PaperWallet::new(100.0);
         w.update("X", bar(50.0));
-        // 3 units cost 150 > 100 funds, and there is no margin: the immediate
-        // primitive flags it.
+        // 3 units cost 150 > 100 funds, and there is no margin.
         assert_eq!(
-            w.set_position_at(
-                Units {
-                    symbol: "X",
-                    amount: 3.0
-                },
-                Reference(50.0)
-            ),
+            w.fill_at("X", 3.0, 50.0, OrderKind::Market, OrderId(0)),
             Err(WalletError::InsufficientFunds)
         );
         // A queued buy beyond funds simply never fills (the error is swallowed).
@@ -727,13 +890,7 @@ mod tests {
         let mut w: PaperWallet<&str> = PaperWallet::new(1_000.0);
         w.update("X", bar(0.0));
         assert_eq!(
-            w.set_position_at(
-                Units {
-                    symbol: "X",
-                    amount: 1.0
-                },
-                Reference(0.0)
-            ),
+            w.fill_at("X", 1.0, 0.0, OrderKind::Market, OrderId(0)),
             Err(WalletError::InvalidPrice)
         );
         // A queued order against a zero open likewise never fills.
@@ -743,57 +900,102 @@ mod tests {
     }
 
     #[test]
-    fn set_position_at_books_at_given_price_within_range() {
-        let mut w: PaperWallet<&str> = PaperWallet::new(1_000.0);
-        // A bar that traded between 90 and 110.
-        w.update("X", Candle::new(100.0, 110.0, 90.0, 105.0, 0.0));
-        // Fill a buy of 5 at exactly 95 (within [90, 110]).
-        assert_eq!(
-            w.set_position_at(
-                Units {
-                    symbol: "X",
-                    amount: 5.0
-                },
-                Reference(95.0)
-            ),
-            Ok(Some(Order::new("X", Side::Buy, 5.0, 95.0)))
-        );
-        assert_eq!(w.funds().0, 1_000.0 - 5.0 * 95.0);
-        // A plain (market) close queues and fills at the *next* bar's open.
-        w.update("X", Candle::new(105.0, 120.0, 100.0, 108.0, 0.0));
-        assert_eq!(w.close("X"), Ok(None));
-        w.update("X", Candle::new(108.0, 115.0, 104.0, 110.0, 0.0));
-        assert_eq!(w.orders().last(), Some(&Order::new("X", Side::Sell, 5.0, 108.0)));
-    }
-
-    #[test]
     fn fill_outside_candle_range_is_rejected() {
         let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
         w.update("X", Candle::new(100.0, 110.0, 90.0, 105.0, 0.0));
         // 120 is above the bar's high — it never traded there this bar.
         assert_eq!(
-            w.set_position_at(
-                Units {
-                    symbol: "X",
-                    amount: 1.0
-                },
-                Reference(120.0)
-            ),
+            w.fill_at("X", 1.0, 120.0, OrderKind::Stop, OrderId(0)),
             Err(WalletError::PriceOutOfRange)
         );
-        // Open a real position in range, then try to close below the bar's low.
-        w.set_position_at(
-            Units {
-                symbol: "X",
-                amount: 1.0,
-            },
-            Reference(100.0),
-        )
-        .unwrap();
-        assert_eq!(
-            w.close_at("X", Reference(80.0)),
-            Err(WalletError::PriceOutOfRange)
-        );
+    }
+
+    #[test]
+    fn resting_stop_fills_at_the_level() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::units(1.0)).unwrap();
+        w.update("X", bar(100.0)); // long 1 @ 100
+        w.set_stop("X", Reference(90.0)).unwrap();
+        // The bar trades down through 90 (low 88) but opens above it.
+        let fills = w.update("X", Candle::new(95.0, 96.0, 88.0, 89.0, 0.0));
+        assert_eq!(fills.len(), 1);
+        assert_fill(&fills[0], Side::Sell, 1.0, 90.0, OrderKind::Stop);
+        assert!(w.is_flat());
+    }
+
+    #[test]
+    fn resting_stop_gaps_to_the_open() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::units(1.0)).unwrap();
+        w.update("X", bar(100.0));
+        w.set_stop("X", Reference(90.0)).unwrap();
+        // Gaps down opening at 85, already below the stop -> fills at the open.
+        let fills = w.update("X", Candle::new(85.0, 86.0, 84.0, 84.0, 0.0));
+        assert_fill(&fills[0], Side::Sell, 1.0, 85.0, OrderKind::Stop);
+        assert!(w.is_flat());
+    }
+
+    #[test]
+    fn resting_take_profit_on_a_short_fills_at_the_level() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Sell, Size::units(1.0)).unwrap();
+        w.update("X", bar(100.0)); // short 1 @ 100
+        // A short take-profit sits below entry; the bar trades down to it.
+        w.set_take_profit("X", Reference(90.0)).unwrap();
+        let fills = w.update("X", Candle::new(95.0, 96.0, 88.0, 92.0, 0.0));
+        assert_fill(&fills[0], Side::Buy, 1.0, 90.0, OrderKind::TakeProfit);
+        assert!(w.is_flat());
+    }
+
+    #[test]
+    fn oco_stop_takes_precedence_and_cancels_the_target() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::units(1.0)).unwrap();
+        w.update("X", bar(100.0));
+        w.set_stop("X", Reference(90.0)).unwrap();
+        w.set_take_profit("X", Reference(110.0)).unwrap();
+        // A wide bar crosses both legs; the stop wins, and the fill flattens and
+        // drops the whole bracket.
+        let fills = w.update("X", Candle::new(100.0, 111.0, 89.0, 105.0, 0.0));
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].kind, OrderKind::Stop);
+        assert!(w.is_flat());
+        // No leftover leg: a later bar does nothing.
+        let more = w.update("X", Candle::new(105.0, 112.0, 88.0, 100.0, 0.0));
+        assert!(more.is_empty());
+    }
+
+    #[test]
+    fn market_exit_auto_cancels_the_bracket() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::units(1.0)).unwrap();
+        w.update("X", bar(100.0));
+        w.set_stop("X", Reference(90.0)).unwrap();
+        // Flatten with a market close; the fill drops the resting stop.
+        w.close("X").unwrap();
+        w.update("X", bar(100.0));
+        assert!(w.is_flat());
+        // The old stop no longer fires even if price revisits 90.
+        let fills = w.update("X", Candle::new(95.0, 96.0, 88.0, 89.0, 0.0));
+        assert!(fills.is_empty());
+    }
+
+    #[test]
+    fn cancel_protective_removes_both_legs() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::units(1.0)).unwrap();
+        w.update("X", bar(100.0));
+        w.set_stop("X", Reference(90.0)).unwrap();
+        w.cancel_protective(&"X").unwrap();
+        let fills = w.update("X", Candle::new(95.0, 96.0, 88.0, 89.0, 0.0));
+        assert!(fills.is_empty());
+        assert!(!w.is_flat());
     }
 
     /// A self-contained strategy type: long the golden cross, flat the death
@@ -906,13 +1108,9 @@ mod tests {
         // The legs fill on each symbol's next bar, at its open.
         w.update("A", bar(snap.a));
         w.update("B", bar(snap.b));
-        assert_eq!(
-            w.orders(),
-            &[
-                Order::new("A", Side::Buy, 3.0, 10.0),
-                Order::new("B", Side::Sell, 2.0, 20.0),
-            ]
-        );
+        assert_eq!(w.orders().len(), 2);
+        assert_fill(&w.orders()[0], Side::Buy, 3.0, 10.0, OrderKind::Market);
+        assert_fill(&w.orders()[1], Side::Sell, 2.0, 20.0, OrderKind::Market);
         assert_eq!(w.position(&"A").amount, 3.0);
         assert_eq!(w.position(&"B").amount, -2.0);
         // Bought 3@10 (-30), shorted 2@20 (+40): net +10 vs start.

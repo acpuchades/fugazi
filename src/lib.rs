@@ -69,7 +69,8 @@ pub use indicator::Indicator;
 pub use indicators::BoolIndicatorExt;
 pub use signal::Signal;
 pub use strategy::{
-    Order, PaperWallet, Units, Reference, Side, Size, Strategy, Wallet, WalletError,
+    Ack, Order, OrderId, OrderKind, PaperWallet, Units, Reference, Side, Size, Strategy, Wallet,
+    WalletError,
 };
 pub use types::{Candle, Real};
 
@@ -79,7 +80,8 @@ pub mod prelude {
     pub use crate::indicators::{BoolIndicatorExt, IndicatorExt};
     pub use crate::signal::Signal;
     pub use crate::strategy::{
-        Order, PaperWallet, Units, Reference, Side, Size, Strategy, Wallet, WalletError,
+        Ack, Order, OrderId, OrderKind, PaperWallet, Units, Reference, Side, Size, Strategy, Wallet,
+        WalletError,
     };
     pub use crate::types::{Candle, Real};
 }

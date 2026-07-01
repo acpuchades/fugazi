@@ -67,7 +67,7 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
     std::fs::create_dir_all(opts.out_dir)
         .with_context(|| format!("creating output dir `{}`", opts.out_dir.display()))?;
     let mut trades = writer(&opts.out_dir.join("trades.csv"))?;
-    trades.write_record(["time", "symbol", "side", "units", "price"])?;
+    trades.write_record(["time", "symbol", "side", "units", "price", "kind"])?;
     let mut returns = writer(&opts.out_dir.join("returns.csv"))?;
     returns.write_record(["time", "equity", "return"])?;
 
@@ -87,7 +87,9 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
         // queued on the previous bar here, at this bar's open, and the trade below
         // may book an immediate stop — both are this bar's fills, stamped its time.
         let before = wallet.orders().len();
-        wallet.update(symbol.clone(), *candle);
+        for fill in wallet.update(symbol.clone(), *candle) {
+            strategy.on_fill(&fill);
+        }
         strategy.update(*candle);
         strategy.trade(&mut wallet);
         for order in &wallet.orders()[before..] {
@@ -95,15 +97,23 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
                 Side::Buy => "buy",
                 Side::Sell => "sell",
             };
+            // Which order booked the fill — a market order, or a resting stop /
+            // take-profit the wallet triggered.
+            let kind = match order.kind {
+                OrderKind::Market => "market",
+                OrderKind::Stop => "stop",
+                OrderKind::TakeProfit => "take_profit",
+            };
             trades.write_record([
                 time,
                 &order.symbol,
                 side,
                 &order.units.to_string(),
                 &order.price.to_string(),
+                kind,
             ])?;
             if !opts.quiet {
-                // Columns mirror trades.csv: time, symbol, side, units, price.
+                // Columns mirror trades.csv: time, symbol, side, units, price, kind.
                 // Each trade carries its own symbol, so this stays correct for a
                 // future multi-symbol strategy. Pad the side to width before
                 // coloring it (escape codes would otherwise break the alignment).
@@ -113,11 +123,12 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
                     Side::Sell => style::red(&side),
                 };
                 println!(
-                    "  {}  {:<6}  {side} {:.4} @ {:.2}",
+                    "  {}  {:<6}  {side} {:.4} @ {:.2}  {}",
                     style::dim(time),
                     order.symbol,
                     order.units,
-                    order.price
+                    order.price,
+                    style::dim(kind),
                 );
             }
         }

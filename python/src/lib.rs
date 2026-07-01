@@ -35,7 +35,7 @@ use fugazi_core::indicators::{
 };
 use fugazi_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
 use fugazi_core::strategy::{
-    Order, PaperWallet, Units, Reference, Side, Size, Wallet, WalletError,
+    Ack, Order, OrderKind, PaperWallet, Units, Reference, Side, Size, Wallet, WalletError,
 };
 use fugazi_core::types::{Candle, Real};
 
@@ -1113,17 +1113,23 @@ impl PyOrder {
     fn price(&self) -> f64 {
         self.inner.price
     }
+    /// What produced this fill: `"market"`, `"stop"`, or `"take_profit"`.
+    #[getter]
+    fn kind(&self) -> &'static str {
+        kind_str(self.inner.kind)
+    }
     /// `+units` for a buy, `-units` for a sell.
     fn signed_units(&self) -> f64 {
         self.inner.signed_units()
     }
     fn __repr__(&self) -> String {
         format!(
-            "Order(symbol='{}', side='{}', units={}, price={})",
+            "Order(symbol='{}', side='{}', units={}, price={}, kind='{}')",
             self.inner.symbol,
             self.side(),
             self.inner.units,
-            self.inner.price
+            self.inner.price,
+            self.kind(),
         )
     }
 }
@@ -1132,18 +1138,20 @@ impl PyOrder {
 /// the prices fed to it, and a blotter of executed orders. (The live-broker
 /// counterpart would be a separate wallet type implementing the same interface.)
 ///
-/// Feed each symbol's bar every tick with `update(symbol, candle_or_price)`; the
-/// wallet is otherwise market-agnostic. `set(symbol, side, size)` targets an
-/// absolute position (an opposite-side `set` reverses; `Size.value_frac(1.0)` is
-/// all-in), `set_position(symbol, target)` drives to an absolute unit count, and
-/// `close` flattens. These are **market orders**: they queue and fill on the next
+/// Feed each symbol's bar every tick with `update(symbol, candle_or_price)`,
+/// which returns the orders that filled on it (the fill stream); the wallet is
+/// otherwise market-agnostic. `set(symbol, side, size)` targets an absolute
+/// position (an opposite-side `set` reverses; `Size.value_frac(1.0)` is all-in),
+/// `set_position(symbol, target)` drives to an absolute unit count, and `close`
+/// flattens. These are **market orders**: they queue and fill on the next
 /// `update`, at that bar's `open` (so a backtest never fills on the same bar whose
 /// `close` triggered the signal), returning `None` — the filled `Order` shows up
-/// in `orders()` once that next `update` runs. The `*_at(…, price)` variants fill
-/// immediately at an explicit price within the bar's range (for exact stop /
-/// take-profit fills), returning the resulting `Order` or `None` if nothing
-/// traded, and raise `ValueError` if that fill is impossible (no/zero price, a
-/// price outside the bar's range, or a buy beyond available funds).
+/// in that `update`'s return (and in `orders()`). Protective exits are **resting
+/// orders**: `set_stop(symbol, trigger)` and `set_take_profit(symbol, trigger)`
+/// register a level (idempotent, latest-wins per symbol; re-submit to trail) that
+/// the wallet triggers and prices itself — filling at the level, or the bar's
+/// `open` on a gap — and `cancel_protective(symbol)` drops both legs. Each `Order`
+/// carries a `kind` of `"market"`, `"stop"`, or `"take_profit"`.
 #[pyclass(name = "PaperWallet")]
 struct PyWallet {
     inner: PaperWallet<String>,
@@ -1209,81 +1217,86 @@ impl PyWallet {
         self.inner.equity().0
     }
 
-    /// Feed `symbol`'s current bar. Accepts a `Candle` (whose `close` marks to
-    /// market and whose `[low, high]` bounds fills) or a bare price `float`
-    /// (a flat bar `open = high = low = close`). Call this each tick before
+    /// Feed `symbol`'s current bar and return the orders that filled on it (the
+    /// fill stream — a queued market order at this bar's `open`, and any resting
+    /// stop / take-profit this bar triggers). Accepts a `Candle` (whose `close`
+    /// marks to market and whose `[low, high]` bounds fills) or a bare price
+    /// `float` (a flat bar `open = high = low = close`). Call this each tick before
     /// trading or reading `equity`.
-    fn update(&mut self, symbol: String, bar: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn update(&mut self, symbol: String, bar: &Bound<'_, PyAny>) -> PyResult<Vec<PyOrder>> {
         let candle = if let Ok(candle) = bar.cast::<PyCandle>() {
             candle.borrow().inner
         } else {
             let price: f64 = bar.extract()?;
             Candle::new(price, price, price, price, 0.0)
         };
-        self.inner.update(symbol, candle);
-        Ok(())
+        Ok(self
+            .inner
+            .update(symbol, candle)
+            .into_iter()
+            .map(|inner| PyOrder { inner })
+            .collect())
     }
 
     /// Queue a market order driving `symbol` to `target` signed units; it fills on
-    /// the next `update`, at that bar's `open`. Returns `None` (the fill is booked
-    /// then, not here).
+    /// the next `update`, at that bar's `open`. Returns `None` (working — the fill
+    /// shows up in that `update`'s return, not here).
     fn set_position(&mut self, symbol: String, target: f64) -> PyResult<Option<PyOrder>> {
-        wrap_order(self.inner.set_position(Units {
+        wrap_ack(self.inner.set_position(Units {
             symbol,
             amount: target,
         }))
     }
 
-    /// Drive the position in `symbol` to `target` signed units, filling at
-    /// `price` (which must lie within the current bar's `[low, high]`). Use it to
-    /// book an exact stop / take-profit fill.
-    fn set_position_at(
-        &mut self,
-        symbol: String,
-        target: f64,
-        price: f64,
-    ) -> PyResult<Option<PyOrder>> {
-        wrap_order(self.inner.set_position_at(
-            Units {
-                symbol,
-                amount: target,
-            },
-            Reference(price),
-        ))
-    }
-
     /// Queue a market order targeting `side` `size` of `symbol`; it fills on the
     /// next `update`, at that bar's `open` (where the `size` is resolved, so an
-    /// all-in stays exact). Returns `None` — the fill is booked then.
+    /// all-in stays exact). Returns `None` — working.
     fn set(
         &mut self,
         symbol: String,
         side: &str,
         size: &Bound<'_, PyAny>,
     ) -> PyResult<Option<PyOrder>> {
-        wrap_order(
+        wrap_ack(
             self.inner
                 .set(symbol, parse_side(side)?, coerce_size(size)?),
         )
     }
 
     /// Queue a market order flattening `symbol`; it fills on the next `update`, at
-    /// that bar's `open`. Returns `None` — the fill is booked then.
+    /// that bar's `open`. Returns `None` — working.
     fn close(&mut self, symbol: String) -> PyResult<Option<PyOrder>> {
-        wrap_order(self.inner.close(symbol))
+        wrap_ack(self.inner.close(symbol))
     }
 
-    /// Flatten `symbol`, filling at `price` (within the current bar's range) —
-    /// an exact stop / take-profit exit.
-    fn close_at(&mut self, symbol: String, price: f64) -> PyResult<Option<PyOrder>> {
-        wrap_order(self.inner.close_at(symbol, Reference(price)))
+    /// Rest a stop-loss on `symbol` at `trigger` — an adverse level the wallet
+    /// fills when a bar trades through it (the side is read from the current
+    /// position). Idempotent, latest-wins per symbol; re-submit to trail. Returns
+    /// `None` (the resting order is working until it triggers in some `update`).
+    fn set_stop(&mut self, symbol: String, trigger: f64) -> PyResult<Option<PyOrder>> {
+        wrap_ack(self.inner.set_stop(symbol, Reference(trigger)))
+    }
+
+    /// Rest a take-profit on `symbol` at `trigger` — the favourable twin of
+    /// `set_stop`. Idempotent, latest-wins per symbol. Returns `None` (working).
+    fn set_take_profit(&mut self, symbol: String, trigger: f64) -> PyResult<Option<PyOrder>> {
+        wrap_ack(self.inner.set_take_profit(symbol, Reference(trigger)))
+    }
+
+    /// Cancel both resting protective legs (stop and take-profit) on `symbol`.
+    fn cancel_protective(&mut self, symbol: String) -> PyResult<()> {
+        self.inner
+            .cancel_protective(&symbol)
+            .map_err(|error| PyValueError::new_err(error.to_string()))
     }
 }
 
-/// Map a wallet result to Python: an order, `None`, or a `ValueError`.
-fn wrap_order(result: Result<Option<Order<String>>, WalletError>) -> PyResult<Option<PyOrder>> {
+/// Map a wallet `Ack` to Python: the fill if it filled synchronously, `None` if it
+/// is merely working, or a `ValueError`.
+fn wrap_ack(result: Result<Ack<String>, WalletError>) -> PyResult<Option<PyOrder>> {
     match result {
-        Ok(order) => Ok(order.map(|inner| PyOrder { inner })),
+        Ok(Ack::Filled(inner)) => Ok(Some(PyOrder { inner })),
+        Ok(Ack::Working(_)) => Ok(None),
         Err(error) => Err(PyValueError::new_err(error.to_string())),
     }
 }
@@ -1315,6 +1328,15 @@ fn side_str(side: Side) -> &'static str {
     match side {
         Side::Buy => "buy",
         Side::Sell => "sell",
+    }
+}
+
+/// The `"market"`/`"stop"`/`"take_profit"` string for an [`OrderKind`].
+fn kind_str(kind: OrderKind) -> &'static str {
+    match kind {
+        OrderKind::Market => "market",
+        OrderKind::Stop => "stop",
+        OrderKind::TakeProfit => "take_profit",
     }
 }
 

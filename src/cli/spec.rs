@@ -20,9 +20,9 @@ use serde::Deserialize;
 
 use fugazi::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Component, Current,
-    DEFAULT_EPSILON, Dmi, DmiValue, Donchian, DonchianValue, Ema, Entry, EntryAnchor, Hma, Keltner,
-    KeltnerValue, Macd, MacdValue, Mfi, Obv, PeakSinceEntry, Rma, Rsi, Sar, Sma, StdDev, StochRsi,
-    Stochastic, TroughSinceEntry, TrueRange, Value, Vwap, WilliamsR, Wma,
+    DEFAULT_EPSILON, Dmi, DmiValue, Donchian, DonchianValue, Ema, Hma, Keltner, KeltnerValue, Macd,
+    MacdValue, Mfi, Obv, Position, Rma, Rsi, Sar, Sma, StdDev, StochRsi, Stochastic, TrueRange,
+    Value, Vwap, WilliamsR, Wma,
 };
 use fugazi::indicators::compare;
 use fugazi::indicators::logic::Const;
@@ -299,9 +299,9 @@ pub enum SourceSpec {
 
 impl SourceSpec {
     /// Construct the live, type-erased source this spec describes. `anchor` is
-    /// the owning strategy's entry-price anchor, shared by any `entry` / `peak` /
+    /// the owning strategy's [`Position`], shared by any `entry` / `peak` /
     /// `trough` leaves in the tree.
-    pub fn build(&self, anchor: &EntryAnchor) -> DynValue {
+    pub fn build(&self, anchor: &Position) -> DynValue {
         use SourceSpec::*;
         match self {
             Close => DynValue::new(Current::close()),
@@ -312,9 +312,9 @@ impl SourceSpec {
             Typical => DynValue::new(Current::typical()),
             Median => DynValue::new(Current::median()),
             Value(x) => DynValue::new(self::Value::<Candle>::new(*x)),
-            Entry => DynValue::new(self::Entry::new(anchor.clone())),
-            Peak => DynValue::new(PeakSinceEntry::new(anchor.clone())),
-            Trough => DynValue::new(TroughSinceEntry::new(anchor.clone())),
+            Entry => DynValue::new(anchor.entry()),
+            Peak => DynValue::new(anchor.peak()),
+            Trough => DynValue::new(anchor.trough()),
 
             Ema { source, period } => DynValue::new(self::Ema::new(source.build(anchor), *period)),
             Sma { source, period } => DynValue::new(self::Sma::new(source.build(anchor), *period)),
@@ -562,7 +562,7 @@ fn eps(epsilon: &Option<Real>) -> Real {
 impl SignalSpec {
     /// Construct the live, type-erased signal this spec describes. `anchor` is
     /// threaded to any `entry` / `peak` / `trough` source leaf in the tree.
-    pub fn build(&self, anchor: &EntryAnchor) -> DynSignal {
+    pub fn build(&self, anchor: &Position) -> DynSignal {
         use SignalSpec::*;
         match self {
             Gt { lhs, rhs, epsilon } => {
@@ -649,7 +649,7 @@ pub struct SideSpec {
 impl SideSpec {
     /// Build this side's exit signal, defaulting a missing one to constant-`false`
     /// (matching the unwired slots in [`SingleAssetStrategy::new`]).
-    fn exit(&self, anchor: &EntryAnchor) -> DynSignal {
+    fn exit(&self, anchor: &Position) -> DynSignal {
         self.exit
             .as_ref()
             .map(|s| s.build(anchor))
@@ -690,9 +690,9 @@ impl StrategySpec {
     /// Build the live [`SingleAssetStrategy`] this spec describes.
     pub fn build(&self) -> SingleAssetStrategy<String> {
         let mut strat = SingleAssetStrategy::new(self.symbol.clone());
-        // One anchor per strategy, shared by every `entry`/`peak`/`trough` leaf
+        // One position per strategy, shared by every `entry`/`peak`/`trough` leaf
         // in the sides' signals and stop levels.
-        let anchor = strat.anchor();
+        let anchor = strat.position();
         if let Some(long) = &self.long {
             strat = strat.long_on(long.enter.build(&anchor), long.exit(&anchor));
             if let Some(sl) = &long.stop_loss {
@@ -731,7 +731,7 @@ mod tests {
             rhs: !sma { source: close, period: 4 }
         "#;
         let spec: SignalSpec = serde_norway::from_str(yaml).unwrap();
-        let mut sig = spec.build(&EntryAnchor::new());
+        let mut sig = spec.build(&Position::new());
         // A dip then a rally drives the fast SMA up through the slow one.
         let mut fired = false;
         for p in [10.0, 9.0, 8.0, 7.0, 8.0, 10.0, 12.0, 14.0, 16.0] {
@@ -762,7 +762,7 @@ mod tests {
     fn default_source_is_close() {
         // `period` only — source should default to the close.
         let spec: SourceSpec = serde_norway::from_str("!ema { period: 3 }").unwrap();
-        let mut ema = spec.build(&EntryAnchor::new());
+        let mut ema = spec.build(&Position::new());
         let mut reference = Ema::new(Current::close(), 3);
         for p in [1.0, 2.0, 3.0, 4.0, 5.0] {
             assert_eq!(ema.update(bar(p)), reference.update(bar(p)));
@@ -806,7 +806,9 @@ mod tests {
             Candle::new(100.0, 100.0, 100.0, 100.0, 0.0),
             Candle::new(95.0, 96.0, 88.0, 89.0, 0.0),
         ] {
-            w.update("BTC".to_string(), c);
+            for fill in w.update("BTC".to_string(), c) {
+                strat.on_fill(&fill);
+            }
             strat.update(c);
             strat.trade(&mut w);
         }

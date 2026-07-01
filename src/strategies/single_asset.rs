@@ -1,14 +1,12 @@
 //! [`SingleAssetStrategy`]: the generic, all-in skeleton every other strategy in
 //! this catalogue specialises.
 
-use crate::indicators::{Const, Entry, EntryAnchor, PeakSinceEntry, TroughSinceEntry, Value};
+use crate::indicators::{Const, Position, Value};
 use crate::prelude::*;
 
-use super::{is_long, is_short};
-
 /// A boxed price-level source — the value a stop-loss / take-profit compares
-/// against. Built from the strategy's [`EntryAnchor`] (see [`Entry`],
-/// [`PeakSinceEntry`]).
+/// against. Built from the strategy's [`Position`] (see [`Position::entry`],
+/// [`Position::peak`]).
 type Level = Box<dyn Indicator<Input = Candle, Output = Real>>;
 
 /// The latest value of an optional level, if it is present and warmed up.
@@ -46,16 +44,16 @@ fn level_value(level: &Option<Level>) -> Option<Real> {
 /// Entries and signal exits are **market orders**: they fill a bar *after* the
 /// signal, at the next bar's `open` (the [`Wallet`](crate::Wallet) queues them —
 /// see [`PaperWallet`](crate::PaperWallet)), so the bar whose `close` triggered
-/// the signal is never also the bar it fills on. The strategy therefore records
-/// the entry price (its [`EntryAnchor`]) from that fill bar's open, not at the
-/// moment it signalled. Protective stops are the exception — they fill intra-bar
-/// at an explicit price (below).
+/// the signal is never also the bar it fills on. The strategy tracks its own
+/// [`Position`] from the wallet's fill stream (via [`on_fill`](Strategy::on_fill)),
+/// so its side, size and entry price are always the *actual* fills — it never
+/// polls the wallet, which is left as the pure execution venue.
 ///
 /// ## Protective stops
 ///
 /// A stop is a **price level** — an ordinary indicator expression over the
-/// strategy's [`EntryAnchor`] (the entry price) and the bar. The percentage sugar
-/// covers the common cases:
+/// strategy's [`Position`] (its entry price and the extremes since entry). The
+/// percentage sugar covers the common cases:
 ///
 /// * [`stop_loss_pct(0.05)`](Self::stop_loss_pct) — exit 5% adverse to entry;
 /// * [`take_profit_pct(0.10)`](Self::take_profit_pct) — exit 10% favourable;
@@ -63,15 +61,17 @@ fn level_value(level: &Option<Level>) -> Option<Real> {
 ///   price reached since entry.
 ///
 /// Each is symmetric (applies to long and short alike). For a custom level —
-/// e.g. an ATR stop — grab the [`anchor`](Self::anchor) and build the expression,
+/// e.g. an ATR stop — grab the [`position`](Self::position) and build the
+/// expression (`position.entry()` / `position.peak()` / `position.trough()`),
 /// then attach it with [`long_stop_loss`](Self::long_stop_loss) /
 /// [`short_stop_loss`](Self::short_stop_loss) (and the `take_profit` twins).
-/// Stops are checked every bar against the candle's `high`/`low`, so they fire
-/// intra-bar, and they fill at the level itself — or at the bar's `open` when it
-/// gaps past the level (opens already beyond it). A **trailing** stop reacts on
-/// the bar *after* a new extreme (it tracks completed bars, see
-/// [`PeakSinceEntry`]), so its level is always known at the open and a gap is
-/// unambiguous.
+/// These aren't intra-bar fills the strategy computes: each bar the strategy
+/// **rests the level as a stop / take-profit order** on the wallet
+/// ([`set_stop`](crate::Wallet::set_stop) / [`set_take_profit`](crate::Wallet::set_take_profit),
+/// re-submitted so a trailing level cancel/replaces), and the *wallet* triggers
+/// and prices it — filling at the level, or the bar's `open` on a gap. A
+/// **trailing** stop tracks completed bars (see [`Position::peak`]) and rests one
+/// bar after a new extreme, so it fills a bar later than a fixed stop would.
 ///
 /// ```
 /// use fugazi::prelude::*;
@@ -103,8 +103,7 @@ pub struct SingleAssetStrategy<Sym> {
     long_target: Option<Level>,
     short_stop: Option<Level>,
     short_target: Option<Level>,
-    anchor: EntryAnchor,
-    last_candle: Option<Candle>,
+    position: Position,
 }
 
 impl<Sym> SingleAssetStrategy<Sym> {
@@ -122,8 +121,7 @@ impl<Sym> SingleAssetStrategy<Sym> {
             long_target: None,
             short_stop: None,
             short_target: None,
-            anchor: EntryAnchor::new(),
-            last_candle: None,
+            position: Position::new(),
         }
     }
 
@@ -153,11 +151,11 @@ impl<Sym> SingleAssetStrategy<Sym> {
         self
     }
 
-    /// A clone of this strategy's [`EntryAnchor`], for building a custom stop
-    /// level: `Entry::new(strat.anchor())` is the entry price, advanced and armed
-    /// by the strategy as it trades.
-    pub fn anchor(&self) -> EntryAnchor {
-        self.anchor.clone()
+    /// A clone of this strategy's [`Position`], for building a custom stop level:
+    /// `strat.position().entry()` is the entry price, tracked by the strategy as it
+    /// fills.
+    pub fn position(&self) -> Position {
+        self.position.clone()
     }
 
     /// Set the long side's stop-loss level — the long flattens when the bar's
@@ -203,39 +201,30 @@ impl<Sym> SingleAssetStrategy<Sym> {
     /// A fixed stop-loss `frac` away from entry, both sides (long below entry,
     /// short above).
     pub fn stop_loss_pct(self, frac: Real) -> Self {
-        let anchor = self.anchor();
-        self.long_stop_loss(Entry::new(anchor.clone()).mul(Value::new(1.0 - frac)))
-            .short_stop_loss(Entry::new(anchor).mul(Value::new(1.0 + frac)))
+        let position = self.position();
+        self.long_stop_loss(position.entry().mul(Value::new(1.0 - frac)))
+            .short_stop_loss(position.entry().mul(Value::new(1.0 + frac)))
     }
 
     /// A fixed take-profit `frac` away from entry, both sides (long above entry,
     /// short below).
     pub fn take_profit_pct(self, frac: Real) -> Self {
-        let anchor = self.anchor();
-        self.long_take_profit(Entry::new(anchor.clone()).mul(Value::new(1.0 + frac)))
-            .short_take_profit(Entry::new(anchor).mul(Value::new(1.0 - frac)))
+        let position = self.position();
+        self.long_take_profit(position.entry().mul(Value::new(1.0 + frac)))
+            .short_take_profit(position.entry().mul(Value::new(1.0 - frac)))
     }
 
     /// A trailing stop `frac` off the best price reached since entry, both sides
     /// (off the running high for a long, the running low for a short). Replaces
     /// the side's stop-loss level.
     pub fn trailing_stop_pct(self, frac: Real) -> Self {
-        let anchor = self.anchor();
-        self.long_stop_loss(PeakSinceEntry::new(anchor.clone()).mul(Value::new(1.0 - frac)))
-            .short_stop_loss(TroughSinceEntry::new(anchor).mul(Value::new(1.0 + frac)))
+        let position = self.position();
+        self.long_stop_loss(position.peak().mul(Value::new(1.0 - frac)))
+            .short_stop_loss(position.trough().mul(Value::new(1.0 + frac)))
     }
 }
 
-impl<Sym: Clone> SingleAssetStrategy<Sym> {
-    /// Flatten the position, filling at `price`, and disarm the entry anchor.
-    fn exit_at(&self, wallet: &mut dyn Wallet<Sym>, price: Real) {
-        if wallet.close_at(self.symbol.clone(), Reference(price)).is_ok() {
-            self.anchor.clear();
-        }
-    }
-}
-
-impl<Sym: Clone> Strategy for SingleAssetStrategy<Sym> {
+impl<Sym: Clone + PartialEq> Strategy for SingleAssetStrategy<Sym> {
     type Input = Candle;
     type Symbol = Sym;
 
@@ -244,6 +233,9 @@ impl<Sym: Clone> Strategy for SingleAssetStrategy<Sym> {
         self.close_long.update(candle);
         self.short.update(candle);
         self.close_short.update(candle);
+        // Fold the bar into the position's extremes (a no-op while flat) before the
+        // levels read it.
+        self.position.update(candle);
         if let Some(l) = self.long_stop.as_mut() {
             l.update(candle);
         }
@@ -256,71 +248,55 @@ impl<Sym: Clone> Strategy for SingleAssetStrategy<Sym> {
         if let Some(l) = self.short_target.as_mut() {
             l.update(candle);
         }
-        self.last_candle = Some(candle);
+    }
+
+    fn on_fill(&mut self, order: &Order<Sym>) {
+        // Track our own position from the wallet's fills — sets the entry price on
+        // an open/reversal and clears it on a flatten (including a protective fill
+        // booked inside the wallet).
+        if order.symbol == self.symbol {
+            self.position.apply(order.side, order.units, order.price);
+        }
     }
 
     fn trade(&self, wallet: &mut dyn Wallet<Sym>) {
-        let pos = wallet.position(&self.symbol).amount;
-        // A queued market entry fills inside the wallet's `update`, at this bar's
-        // open — a bar *after* the signal — so `set` returned no order to read the
-        // fill price from. The first bar we observe a position whose anchor is
-        // unarmed, record the entry at the open, where the queued order filled.
-        if (is_long(pos) || is_short(pos))
-            && self.anchor.get().is_none()
-            && let Some(candle) = self.last_candle
-        {
-            self.anchor.arm(candle.open);
-        }
+        let long = self.position.is_long();
+        let short = self.position.is_short();
         // Entries first (all-in, reversal-capable). The fill lands next bar at the
-        // open; clear the anchor now so it re-arms there (a reversal voids the old
-        // entry, and a fresh entry is already flat-and-clear).
-        if self.long.is_true() && !is_long(pos) {
+        // open; cancel any resting bracket now (a reversal voids the old one).
+        if self.long.is_true() && !long {
             let _ = wallet.set(self.symbol.clone(), Side::Buy, Size::value_frac(1.0));
-            self.anchor.clear();
+            let _ = wallet.cancel_protective(&self.symbol);
             return;
         }
-        if self.short.is_true() && !is_short(pos) {
+        if self.short.is_true() && !short {
             let _ = wallet.set(self.symbol.clone(), Side::Sell, Size::value_frac(1.0));
-            self.anchor.clear();
+            let _ = wallet.cancel_protective(&self.symbol);
             return;
         }
         // Signal-driven flatten-to-flat exits (also fill next bar at the open).
-        if (self.close_long.is_true() && is_long(pos))
-            || (self.close_short.is_true() && is_short(pos))
-        {
+        if (self.close_long.is_true() && long) || (self.close_short.is_true() && short) {
             let _ = wallet.close(self.symbol.clone());
-            self.anchor.clear();
+            let _ = wallet.cancel_protective(&self.symbol);
             return;
         }
-        // Protective stops on the active side. The fill is the level itself —
-        // unless the bar opened already past it (a gap), in which case it fills
-        // at the open. `min`/`max` against the open expresses both: a downside
-        // exit (long stop, short target) can only fill at or below the open, an
-        // upside exit (long target, short stop) at or above it. The level vs the
-        // open is the gap test, and either way the fill stays within the bar.
-        let Some(candle) = self.last_candle else {
-            return;
-        };
-        // Stop-loss takes precedence over take-profit within a bar.
-        if is_long(pos) {
-            if let Some(level) = level_value(&self.long_stop)
-                && candle.low <= level
-            {
-                self.exit_at(wallet, level.min(candle.open));
-            } else if let Some(level) = level_value(&self.long_target)
-                && candle.high >= level
-            {
-                self.exit_at(wallet, level.max(candle.open));
+        // Rest the protective levels on the active side. Re-submitted every bar so
+        // a moving (trailing) level cancel/replaces; the wallet triggers and prices
+        // them. The wallet reads the side from the position, so a stop is always the
+        // adverse level and a take-profit the favourable one.
+        if long {
+            if let Some(level) = level_value(&self.long_stop) {
+                let _ = wallet.set_stop(self.symbol.clone(), Reference(level));
             }
-        } else if is_short(pos) {
-            if let Some(level) = level_value(&self.short_stop)
-                && candle.high >= level
-            {
-                self.exit_at(wallet, level.max(candle.open));
-            } else if let Some(level) = level_value(&self.short_target)
-                && candle.low <= level
-            {
-                self.exit_at(wallet, level.min(candle.open));
+            if let Some(level) = level_value(&self.long_target) {
+                let _ = wallet.set_take_profit(self.symbol.clone(), Reference(level));
+            }
+        } else if short {
+            if let Some(level) = level_value(&self.short_stop) {
+                let _ = wallet.set_stop(self.symbol.clone(), Reference(level));
+            }
+            if let Some(level) = level_value(&self.short_target) {
+                let _ = wallet.set_take_profit(self.symbol.clone(), Reference(level));
             }
         }
     }
@@ -342,8 +318,7 @@ impl<Sym: Clone> Strategy for SingleAssetStrategy<Sym> {
         if let Some(l) = self.short_target.as_mut() {
             l.reset();
         }
-        self.anchor.clear();
-        self.last_candle = None;
+        self.position.reset();
     }
 }
 
@@ -352,11 +327,17 @@ mod tests {
     use super::*;
     use crate::strategy::PaperWallet;
 
-    /// Drive `strat` over `candles`, feeding each bar to the wallet first.
-    fn run(strat: &mut SingleAssetStrategy<&'static str>, candles: &[Candle]) -> PaperWallet<&'static str> {
+    /// Drive `strat` over `candles`, feeding each bar to the wallet first and
+    /// delivering its fills to the strategy before it updates and trades.
+    fn run(
+        strat: &mut SingleAssetStrategy<&'static str>,
+        candles: &[Candle],
+    ) -> PaperWallet<&'static str> {
         let mut wallet = PaperWallet::new(1_000.0);
         for &c in candles {
-            wallet.update("X", c);
+            for fill in wallet.update("X", c) {
+                strat.on_fill(&fill);
+            }
             strat.update(c);
             strat.trade(&mut wallet);
         }
@@ -408,9 +389,11 @@ mod tests {
     #[test]
     fn long_trailing_stop_ratchets_up() {
         // 10% trailing stop. The entry fills at the second bar's open (100); the
-        // third bar rallies to a high of 130, which lifts the stop to 117 only from
-        // the fourth bar (the trail tracks completed bars). That bar trades down to
-        // 115, crossing 117, and exits there.
+        // third bar rallies to a high of 130, so the peak reflects 130 from the
+        // fourth bar's update, lifting the resting stop to 117. Because a resting
+        // order can only be *submitted* that bar and matched the *next* one, the
+        // stop fills a bar later (the accepted trailing lag): the fifth bar opens
+        // above 117 and trades down through it, filling at the level.
         let mut strat = SingleAssetStrategy::buy_and_hold("X").trailing_stop_pct(0.10);
         let w = run(
             &mut strat,
@@ -418,12 +401,14 @@ mod tests {
                 flat_bar(100.0),                              // queue the entry
                 flat_bar(100.0),                              // entry fills at 100
                 Candle::new(110.0, 130.0, 109.0, 128.0, 0.0), // sets the peak (130)
-                Candle::new(126.0, 127.0, 115.0, 116.0, 0.0), // stop now 117; low 115 hits it
+                Candle::new(126.0, 127.0, 115.0, 116.0, 0.0), // stop rests at 117 here
+                Candle::new(120.0, 121.0, 115.0, 116.0, 0.0), // opens above 117, hits it
             ],
         );
         let exit = w.orders().last().unwrap();
         assert_eq!(exit.side, Side::Sell);
         assert_eq!(exit.price, 117.0); // 130 * 0.9, opened above so filled at the level
+        assert_eq!(exit.kind, OrderKind::Stop);
         assert!(w.is_flat());
     }
 
