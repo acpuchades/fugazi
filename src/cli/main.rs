@@ -78,12 +78,6 @@ struct RunArgs {
     #[arg(short, long = "params", value_name = "SPEC")]
     params: Vec<params::ParamSpec>,
 
-    /// RNG seed, recorded for reproducibility and echoed in the run block. The
-    /// backtest is deterministic today, so this only matters once a stochastic
-    /// step (slippage, sampling, …) consumes it.
-    #[arg(long, default_value_t = 1234)]
-    seed: u64,
-
     /// US-equity trading calendar (252 trading days a year, 6.5-hour day).
     /// Combines with `--frequency` to derive `bars_per_year`; `--bars-per-year`
     /// overrides. Mutually exclusive with `--forex`/`--crypto`.
@@ -193,10 +187,6 @@ struct OptimizeArgs {
     #[arg(short, long, default_value_t = 10_000.0)]
     cash: f64,
 
-    /// RNG seed, mirrored from `run` for reproducibility.
-    #[arg(long, default_value_t = 1234)]
-    seed: u64,
-
     /// US-equity trading calendar. Same semantics as `run --stocks`.
     #[arg(long, group = "asset_class")]
     stocks: bool,
@@ -266,7 +256,6 @@ fn run(args: RunArgs) -> Result<()> {
         out_dir: &args.output_dir,
         strategy_label: &strat_label,
         params: &params_label,
-        seed: args.seed,
         bars_per_year,
         risk_free_rate: args.risk_free_rate,
         quiet: args.quiet,
@@ -295,7 +284,6 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         bars_per_year,
         risk_free_rate: args.risk_free_rate,
         jobs: args.jobs,
-        seed: args.seed,
         quiet: args.quiet,
     };
     optimize::run(&frame, opts).with_context(|| parse_error_context(&args.strategy))?;

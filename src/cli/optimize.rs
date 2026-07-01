@@ -64,7 +64,6 @@ pub struct OptimizeOptions<'a> {
     pub bars_per_year: Real,
     pub risk_free_rate: Real,
     pub jobs: Option<usize>,
-    pub seed: u64,
     pub quiet: bool,
 }
 
@@ -502,7 +501,6 @@ fn print_inputs_block(opts: &OptimizeOptions, axes: &[(String, Vec<Value>)], row
         .collect::<Vec<_>>()
         .join(", ");
     print_field("grid", &format!("{} points · {axes_label}", rows.len()));
-    print_field("seed", &opts.seed.to_string());
     print_field("capital", &format!("{:.2}", opts.cash));
     print_field("output", &opts.output.display().to_string());
     if let Some(name) = &opts.best_by {

@@ -15,7 +15,7 @@
 //!
 //! Console output (silenced by [`RunOptions::quiet`]) is a two-line banner (the
 //! constant tool identity, then the active command), then three blocks: **inputs**
-//! (strategy, params, seed, period, capital, output), **trades** (each fill, with
+//! (strategy, params, period, capital, output), **trades** (each fill, with
 //! its symbol, streamed as it happens), and **result** (bars, trades, capital
 //! change, then start/finish times with elapsed runtime). A symbol is per-trade,
 //! never a run-level field.
@@ -77,11 +77,6 @@ pub struct RunOptions<'a> {
     /// A one-line view of the effective params (`NAME=value, …`), echoed in the
     /// run block.
     pub params: &'a str,
-    /// The RNG seed, recorded for reproducibility. The backtest is currently
-    /// deterministic so it has no functional effect yet; it is echoed in the run
-    /// block so a run can be replayed (and will seed any future stochastic step —
-    /// slippage, sampling, …).
-    pub seed: u64,
     /// Bars per year used to annualize per-bar return moments in `metrics.yml`.
     pub bars_per_year: Real,
     /// Annualized risk-free rate as a fraction (e.g. `0.045` = 4.5% p.a.).
@@ -265,7 +260,6 @@ fn print_inputs_block(opts: &RunOptions, start: &str, end: &str, bars: usize) {
     println!("{}", style::bold("inputs"));
     print_field("strategy", opts.strategy_label);
     print_field("params", opts.params);
-    print_field("seed", &opts.seed.to_string());
     print_field("period", &format!("{start} → {end} ({bars} bars)"));
     print_field("capital", &format!("{:.2}", opts.cash));
     print_field("output", &opts.out_dir.display().to_string());
