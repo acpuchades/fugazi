@@ -44,6 +44,8 @@ struct Cli {
 enum Command {
     /// Run a `strategy.yml` backtest over CSV series.
     Run(RunArgs),
+    /// Parse a `strategy.yml` and report whether it is syntactically valid.
+    Check(CheckArgs),
 }
 
 #[derive(Args)]
@@ -120,11 +122,44 @@ struct RunArgs {
     quiet: bool,
 }
 
+#[derive(Args)]
+struct CheckArgs {
+    /// The strategy: `@file.yml` loads a file, anything else is inline YAML.
+    #[arg(value_name = "STRATEGY")]
+    strategy: Source,
+
+    /// Resolve the strategy's `param` placeholders. Same shape as `run --params`:
+    /// a `,`-separated list of `NAME=value` settings and `@file.yml` mapping
+    /// loaders (repeatable; later terms win). Omitting a required placeholder is
+    /// a check failure.
+    #[arg(short, long = "params", value_name = "SPEC")]
+    params: Vec<params::ParamSpec>,
+
+    /// Suppress the "ok" message on success. Errors still print, and the exit
+    /// code (0 ok, non-zero on failure) is unchanged.
+    #[arg(short, long)]
+    quiet: bool,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Run(args) => run(args),
+        Command::Check(args) => check(args),
     }
+}
+
+fn check(args: CheckArgs) -> Result<()> {
+    let param_table = params::table(&args.params)?;
+
+    let text = args.strategy.read().context("reading strategy")?;
+    let spec = spec::StrategySpec::from_text_with_params(&text, &param_table)
+        .with_context(|| parse_error_context(&args.strategy))?;
+
+    if !args.quiet {
+        println!("{}: ok (symbol {})", args.strategy.label(), spec.symbol);
+    }
+    Ok(())
 }
 
 fn run(args: RunArgs) -> Result<()> {

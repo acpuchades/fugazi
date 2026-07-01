@@ -631,6 +631,7 @@ impl SignalSpec {
 /// a side an `exit` only when you want a flat rest (long/flat, or long/short with
 /// a flat state between trades).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SideSpec {
     pub enter: SignalSpec,
     #[serde(default)]
