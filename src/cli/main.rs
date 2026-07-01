@@ -14,6 +14,7 @@
 //! anything else — the same `@` convention `--series`/`--params` use.
 
 mod backtest;
+mod calendar;
 mod convert;
 mod data;
 mod dynd;
@@ -77,11 +78,35 @@ struct RunArgs {
     #[arg(long, default_value_t = 1234)]
     seed: u64,
 
-    /// Bars per year used to annualize the per-bar return moments in
-    /// `metrics.yml` (Sharpe/Sortino/CAGR/annualized volatility). Default 252
-    /// (daily trading days); use ~52 for weekly, 8760 for hourly, etc.
-    #[arg(long, default_value_t = 252.0)]
-    bars_per_year: f64,
+    /// US-equity trading calendar (252 trading days a year, 6.5-hour day).
+    /// Combines with `--frequency` to derive `bars_per_year`; `--bars-per-year`
+    /// overrides. Mutually exclusive with `--forex`/`--crypto`.
+    #[arg(long, group = "asset_class")]
+    stocks: bool,
+
+    /// Forex trading calendar (~260 weekdays a year, 24-hour day). Combines
+    /// with `--frequency`; `--bars-per-year` overrides.
+    #[arg(long, group = "asset_class")]
+    forex: bool,
+
+    /// 24/7 trading calendar (365 days a year, 24-hour day; crypto). Combines
+    /// with `--frequency`; `--bars-per-year` overrides.
+    #[arg(long, group = "asset_class")]
+    crypto: bool,
+
+    /// Bar cadence for annualization: `1m`, `5m`, `15m`, `30m`, `1h`, `4h`,
+    /// `1d`, `1w`, `1M`, or any `N<unit>` in the same alphabet (unit ∈
+    /// `m`/`h`/`d`/`w`/`M`). Combined with `--stocks`/`--forex`/`--crypto`
+    /// to derive `bars_per_year` (see [`crate::calendar`]).
+    #[arg(short, long, value_name = "CODE")]
+    frequency: Option<calendar::Frequency>,
+
+    /// Explicit `bars_per_year` for the annualization step in `metrics.yml`
+    /// (Sharpe/Sortino/CAGR/annualized volatility). Overrides the value
+    /// derived from `--stocks`/`--forex`/`--crypto` + `--frequency`; defaults
+    /// to 252 (US-equity daily) when nothing else is set.
+    #[arg(long, value_name = "N")]
+    bars_per_year: Option<f64>,
 
     /// Suppress all console output (the result files are still written).
     #[arg(short, long)]
@@ -106,13 +131,15 @@ fn run(args: RunArgs) -> Result<()> {
 
     let strat_label = args.strategy.label();
     let params_label = params_label(&param_table);
+    let class = asset_class(&args);
+    let bars_per_year = calendar::resolve(args.bars_per_year, class, args.frequency);
     let opts = backtest::RunOptions {
         cash: args.cash,
         out_dir: &args.output_dir,
         strategy_label: &strat_label,
         params: &params_label,
         seed: args.seed,
-        bars_per_year: args.bars_per_year,
+        bars_per_year,
         quiet: args.quiet,
     };
     backtest::run(&spec, &frame, &opts)?;
@@ -133,6 +160,21 @@ fn params_label(table: &HashMap<String, serde_json::Value>) -> String {
         .collect();
     entries.sort();
     entries.join(", ")
+}
+
+/// Collapse the three mutually-exclusive asset-class booleans (clap enforces
+/// the "at most one" rule via the `asset_class` arg group) into the enum a
+/// downstream `Calendar` consumes. `None` means "unset — use the default".
+fn asset_class(args: &RunArgs) -> Option<calendar::AssetClass> {
+    if args.stocks {
+        Some(calendar::AssetClass::Stocks)
+    } else if args.forex {
+        Some(calendar::AssetClass::Forex)
+    } else if args.crypto {
+        Some(calendar::AssetClass::Crypto)
+    } else {
+        None
+    }
 }
 
 /// Error context for a strategy parse failure. For an inline value that looks like

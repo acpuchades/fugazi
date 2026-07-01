@@ -5,7 +5,12 @@
 # literal is needed in --series; `@` loads a file for both --strategy and --series):
 #   fugazi run --strategy @examples/strategy.yml \
 #              --series @examples/candles.csv \
-#              --output-dir out/
+#              --output-dir out/ \
+#              --crypto -f 1d
+#
+# `--crypto -f 1d` sets the annualization calendar in `metrics.yml` — BTC is
+# 24/7, so daily bars = 365/year (not 252 as for US equities). Substitute
+# `--stocks`/`--forex` for other markets, or `--bars-per-year N` to override.
 #
 # Signals are written with YAML tags: `!sma { ... }` is the SMA indicator, bare
 # words like `close` are candle-field leaves. See the README for the full vocab.
