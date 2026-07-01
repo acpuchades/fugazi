@@ -662,10 +662,25 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
             let (target, id) = match pending {
                 Pending::Target(amount, id) => (amount, id),
                 // Resolve the size at the fill price, so an all-in stays exact.
+                // Equity marks the fill symbol at `open` (the actual fill price),
+                // not the just-inserted `close` — otherwise a reversal sizes off
+                // information from later in this bar.
                 Pending::Sized(side, size, id) => {
                     let position = self.positions.get(&symbol).copied().unwrap_or(0.0);
-                    let magnitude =
-                        size.resolve(candle.open, position, self.funds, self.equity().0);
+                    let equity_at_open = self.funds
+                        + self
+                            .positions
+                            .iter()
+                            .map(|(s, &a)| {
+                                let mark = if *s == symbol {
+                                    candle.open
+                                } else {
+                                    self.bars.get(s).map_or(0.0, |c| c.close)
+                                };
+                                a * mark
+                            })
+                            .sum::<Real>();
+                    let magnitude = size.resolve(candle.open, position, self.funds, equity_at_open);
                     (side.sign() * magnitude, id)
                 }
             };
@@ -835,6 +850,24 @@ mod tests {
         w.set("X", Side::Sell, Size::value_frac(1.0)).unwrap();
         w.update("X", bar(100.0));
         assert_fill(w.orders().last().unwrap(), Side::Sell, 20.0, 100.0, OrderKind::Market);
+        assert_eq!(w.position(&"X").amount, -10.0);
+    }
+
+    #[test]
+    fn value_fraction_reversal_sizes_against_open_not_close() {
+        // Regression: on a reversal the sizing must mark the existing position at
+        // the fill (open) price, not this bar's close — otherwise a bar whose
+        // open ≠ close leaks close information into the size.
+        let mut w: PaperWallet<&str> = PaperWallet::new(1_000.0);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::value_frac(1.0)).unwrap();
+        w.update("X", bar(100.0)); // long 10 @ 100; funds 0
+        // Reverse all-in on a bar with open 95 (fill price) and close 105.
+        // Equity-at-open = 0 + 10*95 = 950, magnitude = 950/95 = 10 -> target -10,
+        // delta = -20. Using close (105) would give ~21.05 units sold — the bug.
+        w.set("X", Side::Sell, Size::value_frac(1.0)).unwrap();
+        w.update("X", Candle::new(95.0, 106.0, 94.0, 105.0, 0.0));
+        assert_fill(w.orders().last().unwrap(), Side::Sell, 20.0, 95.0, OrderKind::Market);
         assert_eq!(w.position(&"X").amount, -10.0);
     }
 
