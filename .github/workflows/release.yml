@@ -85,6 +85,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # System libs for plotters' `ttf` feature — the `fugazi` binary target
+      # (CLI) links them via font-kit → fontconfig + freetype during the
+      # publish-time verification build.
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype-dev
       - name: cargo publish
         run: cargo publish -p fugazi
         env:

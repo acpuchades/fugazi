@@ -23,6 +23,10 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # System libs for plotters' `ttf` feature (font-kit → fontconfig + freetype),
+      # which the CLI uses to render `equity.png` labels.
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype-dev
       # Scope to the core crate: the `fugazi-python` member links libpython via
       # pyo3's extension-module feature and can't be `cargo test`ed standalone.
       # Its Rust + Python surface is exercised by the `python` job below.
