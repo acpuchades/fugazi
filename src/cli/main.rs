@@ -94,10 +94,10 @@ struct RunArgs {
     #[arg(long, group = "asset_class")]
     crypto: bool,
 
-    /// Bar cadence for annualization: `1m`, `5m`, `15m`, `30m`, `1h`, `4h`,
-    /// `1d`, `1w`, `1M`, or any `N<unit>` in the same alphabet (unit ∈
-    /// `m`/`h`/`d`/`w`/`M`). Combined with `--stocks`/`--forex`/`--crypto`
-    /// to derive `bars_per_year` (see [`crate::calendar`]).
+    /// Bar cadence as `N<unit>` (e.g. `5m`, `4h`, `1d`, `1w`, `1M`). Unit is
+    /// one of `m` minute, `h` hour, `d` day, `w` week, `M` month; `N` is a
+    /// positive integer multiplier. Combined with `--stocks`/`--forex`/
+    /// `--crypto` to derive `bars_per_year`; `--bars-per-year` overrides.
     #[arg(short, long, value_name = "CODE")]
     frequency: Option<calendar::Frequency>,
 
