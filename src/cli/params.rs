@@ -47,7 +47,7 @@ impl FromStr for ParamSpec {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut terms = Vec::new();
-        for term in s.split(',') {
+        for term in split_terms(s) {
             let term = term.trim();
             if term.is_empty() {
                 continue;
@@ -56,6 +56,50 @@ impl FromStr for ParamSpec {
         }
         Ok(ParamSpec(terms))
     }
+}
+
+/// Split a `--params` spec by top-level `,` — commas inside `[...]` / `{...}`
+/// brackets or `"..."` quotes are kept, so a term like `FAST=[3,5,8]` (an
+/// `optimize` sweep list, JSON-shaped) stays one term rather than splitting into
+/// `FAST=[3`, `5`, `8]`.
+fn split_terms(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut buf = String::new();
+    let mut depth: i32 = 0;
+    let mut in_str = false;
+    let mut prev = '\0';
+    for c in s.chars() {
+        if in_str {
+            buf.push(c);
+            if c == '"' && prev != '\\' {
+                in_str = false;
+            }
+        } else {
+            match c {
+                '"' => {
+                    in_str = true;
+                    buf.push(c);
+                }
+                '[' | '{' => {
+                    depth += 1;
+                    buf.push(c);
+                }
+                ']' | '}' => {
+                    depth = depth.saturating_sub(1);
+                    buf.push(c);
+                }
+                ',' if depth == 0 => {
+                    out.push(std::mem::take(&mut buf));
+                }
+                _ => buf.push(c),
+            }
+        }
+        prev = c;
+    }
+    if !buf.is_empty() {
+        out.push(buf);
+    }
+    out
 }
 
 fn parse_term(term: &str) -> Result<ParamTerm, String> {
@@ -191,6 +235,18 @@ mod tests {
     #[test]
     fn param_rejects_bare_token() {
         assert!("FAST".parse::<ParamSpec>().is_err());
+    }
+
+    #[test]
+    fn splitter_respects_brackets_and_ranges() {
+        // `[3,5,8]` — inner commas belong to the array, not to term splitting.
+        let map = table_of(&["FAST=[3,5,8],SLOW=13"]);
+        assert_eq!(map["FAST"], serde_json::json!([3, 5, 8]));
+        assert_eq!(map["SLOW"], Value::from(13));
+        // Ranges have no commas, but coexisting with a list must still split cleanly.
+        let map = table_of(&["FAST=3..10:1,SLOW=[13,21]"]);
+        assert_eq!(map["FAST"], Value::from("3..10:1"));
+        assert_eq!(map["SLOW"], serde_json::json!([13, 21]));
     }
 
     /// Substitute over a YAML doc (converted to JSON first, as the CLI does).

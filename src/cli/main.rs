@@ -20,6 +20,7 @@ mod data;
 mod dynd;
 mod input;
 mod metrics;
+mod optimize;
 mod params;
 mod spec;
 mod style;
@@ -46,6 +47,8 @@ enum Command {
     Run(RunArgs),
     /// Parse a `strategy.yml` and report whether it is syntactically valid.
     Check(CheckArgs),
+    /// Sweep a strategy over a parameter grid and rank the combinations.
+    Optimize(OptimizeArgs),
 }
 
 #[derive(Args)]
@@ -141,11 +144,93 @@ struct CheckArgs {
     quiet: bool,
 }
 
+#[derive(Args)]
+struct OptimizeArgs {
+    /// The strategy: `@file.yml` loads a file, anything else is inline YAML.
+    #[arg(value_name = "STRATEGY")]
+    strategy: Source,
+
+    /// A data series — same shape as `run --series` (repeatable; series
+    /// full-join on `symbol` + `time`).
+    #[arg(short, long = "series", required = true)]
+    series: Vec<data::SeriesSpec>,
+
+    /// Resolve the strategy's `param` placeholders and declare the sweep axes.
+    /// Same shape as `run --params` with two new value forms:
+    /// `NAME=[v1,v2,v3]` — a discrete list (JSON array) — and
+    /// `NAME=start..end[:step]` — an inclusive numeric range. Every axis'
+    /// cartesian product is one grid point; scalar values stay fixed across
+    /// the sweep.
+    #[arg(short, long = "params", value_name = "SPEC")]
+    params: Vec<params::ParamSpec>,
+
+    /// The metrics to record for each grid point, as one CSV column each.
+    /// Names are short leaf keys when unambiguous (`sharpe`, `max_pct`,
+    /// `cagr_pct`) or dotted paths (`risk_adjusted.sharpe`,
+    /// `drawdown.max_pct`) — see `metrics.yml` for the full catalogue.
+    /// `,`-separated, repeatable.
+    #[arg(short = 'm', long = "metrics", value_delimiter = ',', required = true)]
+    metrics: Vec<String>,
+
+    /// Sort the output CSV (and print the winner) by this metric. Direction is
+    /// hardcoded per metric — higher is better for `sharpe`/`sortino`/`cagr_pct`
+    /// etc, lower is better for `max_pct`/`ulcer_index`/`annualized_volatility_pct`
+    /// etc. Omit to emit rows in cartesian order.
+    #[arg(long = "best-by", value_name = "METRIC")]
+    best_by: Option<String>,
+
+    /// Output CSV path. One row per grid point: axis columns then metric columns,
+    /// `;`-delimited. Parent directories are created if missing.
+    #[arg(short = 'o', long = "output", value_name = "FILE")]
+    output: PathBuf,
+
+    /// Rayon worker count for the grid. Defaults to one worker per logical CPU.
+    #[arg(short = 'j', long = "jobs", value_name = "N")]
+    jobs: Option<usize>,
+
+    /// Initial cash for each backtest (per grid point).
+    #[arg(short, long, default_value_t = 10_000.0)]
+    cash: f64,
+
+    /// RNG seed, mirrored from `run` for reproducibility.
+    #[arg(long, default_value_t = 1234)]
+    seed: u64,
+
+    /// US-equity trading calendar. Same semantics as `run --stocks`.
+    #[arg(long, group = "asset_class")]
+    stocks: bool,
+
+    /// Forex trading calendar. Same semantics as `run --forex`.
+    #[arg(long, group = "asset_class")]
+    forex: bool,
+
+    /// 24/7 trading calendar (crypto). Same semantics as `run --crypto`.
+    #[arg(long, group = "asset_class")]
+    crypto: bool,
+
+    /// Bar cadence, e.g. `1d` / `4h`. Same semantics as `run --frequency`.
+    #[arg(short, long, value_name = "CODE")]
+    frequency: Option<calendar::Frequency>,
+
+    /// Explicit `bars_per_year`. Same semantics as `run --bars-per-year`.
+    #[arg(long, value_name = "N")]
+    bars_per_year: Option<f64>,
+
+    /// Annualized risk-free rate. Same semantics as `run --risk-free-rate`.
+    #[arg(long, value_name = "RATE", default_value_t = 0.0)]
+    risk_free_rate: f64,
+
+    /// Suppress console output. The CSV is still written.
+    #[arg(short, long)]
+    quiet: bool,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Run(args) => run(args),
         Command::Check(args) => check(args),
+        Command::Optimize(args) => optimize(args),
     }
 }
 
@@ -173,7 +258,7 @@ fn run(args: RunArgs) -> Result<()> {
 
     let strat_label = args.strategy.label();
     let params_label = params_label(&param_table);
-    let class = asset_class(&args);
+    let class = asset_class(args.stocks, args.forex, args.crypto);
     let bars_per_year = calendar::resolve(args.bars_per_year, class, args.frequency);
     let opts = backtest::RunOptions {
         cash: args.cash,
@@ -186,6 +271,33 @@ fn run(args: RunArgs) -> Result<()> {
         quiet: args.quiet,
     };
     backtest::run(&spec, &frame, &opts)?;
+    Ok(())
+}
+
+fn optimize(args: OptimizeArgs) -> Result<()> {
+    let param_table = params::table(&args.params)?;
+    let text = args.strategy.read().context("reading strategy")?;
+    let frame = data::DataFrame::from_series(&args.series)?;
+
+    let strat_label = args.strategy.label();
+    let class = asset_class(args.stocks, args.forex, args.crypto);
+    let bars_per_year = calendar::resolve(args.bars_per_year, class, args.frequency);
+
+    let opts = optimize::OptimizeOptions {
+        cash: args.cash,
+        strategy_text: &text,
+        strategy_label: &strat_label,
+        params_table: param_table,
+        metrics: args.metrics,
+        best_by: args.best_by,
+        output: &args.output,
+        bars_per_year,
+        risk_free_rate: args.risk_free_rate,
+        jobs: args.jobs,
+        seed: args.seed,
+        quiet: args.quiet,
+    };
+    optimize::run(&frame, opts).with_context(|| parse_error_context(&args.strategy))?;
     Ok(())
 }
 
@@ -208,12 +320,12 @@ fn params_label(table: &HashMap<String, serde_json::Value>) -> String {
 /// Collapse the three mutually-exclusive asset-class booleans (clap enforces
 /// the "at most one" rule via the `asset_class` arg group) into the enum a
 /// downstream `Calendar` consumes. `None` means "unset — use the default".
-fn asset_class(args: &RunArgs) -> Option<calendar::AssetClass> {
-    if args.stocks {
+fn asset_class(stocks: bool, forex: bool, crypto: bool) -> Option<calendar::AssetClass> {
+    if stocks {
         Some(calendar::AssetClass::Stocks)
-    } else if args.forex {
+    } else if forex {
         Some(calendar::AssetClass::Forex)
-    } else if args.crypto {
+    } else if crypto {
         Some(calendar::AssetClass::Crypto)
     } else {
         None

@@ -31,6 +31,39 @@ use crate::metrics;
 use crate::spec::StrategySpec;
 use crate::style;
 
+/// Pure metrics-only evaluation: drive `spec` over `candles` through a paper
+/// wallet with `cash` starting funds and reduce the run to a [`metrics::Metrics`]
+/// document. No filesystem, no printing — the shape `optimize` calls per grid
+/// combination.
+pub fn evaluate(
+    spec: &StrategySpec,
+    candles: &[(String, Candle)],
+    cash: Real,
+    bars_per_year: Real,
+    risk_free_rate: Real,
+) -> metrics::Metrics {
+    let symbol = spec.symbol.clone();
+    let mut strategy = spec.build();
+    let mut wallet = PaperWallet::new(cash);
+    let mut equity_curve: Vec<Real> = Vec::with_capacity(candles.len());
+    let mut booked_fills: Vec<(usize, Order<String>)> = Vec::new();
+
+    for (bar_idx, (_time, candle)) in candles.iter().enumerate() {
+        let before = wallet.orders().len();
+        for fill in wallet.update(symbol.clone(), *candle) {
+            strategy.on_fill(&fill);
+        }
+        strategy.update(*candle);
+        strategy.trade(&mut wallet);
+        for order in &wallet.orders()[before..] {
+            booked_fills.push((bar_idx, order.clone()));
+        }
+        equity_curve.push(wallet.equity().0);
+    }
+
+    metrics::compute(&equity_curve, &booked_fills, cash, bars_per_year, risk_free_rate)
+}
+
 /// Console-logging knobs plus the run's inputs, threaded in from the CLI args.
 pub struct RunOptions<'a> {
     /// Initial cash for the paper wallet.

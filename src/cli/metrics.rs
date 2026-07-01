@@ -37,7 +37,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use fugazi::prelude::*;
 use serde::Serialize;
 
@@ -359,6 +359,106 @@ pub fn write_yaml(metrics: &Metrics, path: &Path) -> Result<()> {
     let yaml = serde_norway::to_string(metrics).context("serializing metrics")?;
     std::fs::write(path, yaml).with_context(|| format!("writing `{}`", path.display()))?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Name-based metric lookup (for the `optimize` subcommand)
+// ---------------------------------------------------------------------------
+
+/// Resolve a user-typed metric `name` against `metrics` — either a short leaf
+/// name (`sharpe`, `max_dd_pct`) when it's the only leaf with that key, or a
+/// dotted path (`risk_adjusted.sharpe`, `drawdown.max_pct`) otherwise.
+///
+/// Returns the canonical dotted path plus the numeric value. `Ok(None)` when
+/// the metric was omitted from the serialized document (a degenerate ratio,
+/// e.g. `sharpe` with zero variance): its column in the optimize CSV becomes
+/// an empty cell.
+pub fn resolve_metric(name: &str, metrics: &Metrics) -> Result<(String, Option<Real>)> {
+    let value = serde_json::to_value(metrics).context("serializing metrics")?;
+    let path = resolve_metric_path(&value, name)?;
+    let dotted = path.join(".");
+    Ok((dotted, lookup_number(&value, &path)))
+}
+
+/// Resolve one metric name to a canonical dotted path against the shape of `root`.
+/// A `.`-containing name is taken as a path verbatim; a short name walks the tree
+/// and errors if it matches zero (unknown) or several leaves (ambiguous).
+fn resolve_metric_path(root: &serde_json::Value, name: &str) -> Result<Vec<String>> {
+    if name.contains('.') {
+        // Verify the path exists at a numeric leaf, but tolerate a missing
+        // omitted-because-degenerate metric by only failing when the path's
+        // *intermediate* segments miss.
+        let path: Vec<String> = name.split('.').map(String::from).collect();
+        verify_path(root, &path).with_context(|| format!("unknown metric `{name}`"))?;
+        return Ok(path);
+    }
+    let mut hits: Vec<Vec<String>> = Vec::new();
+    walk_leaves(root, &mut Vec::new(), name, &mut hits);
+    match hits.len() {
+        0 => Err(anyhow!(
+            "unknown metric `{name}` (see `metrics.yml` for available names)"
+        )),
+        1 => Ok(hits.pop().unwrap()),
+        _ => {
+            let paths: Vec<String> = hits.iter().map(|p| p.join(".")).collect();
+            bail!(
+                "metric `{name}` is ambiguous ({} matches: {}). Use a dotted path.",
+                hits.len(),
+                paths.join(", ")
+            )
+        }
+    }
+}
+
+/// Walk `v`, recording each numeric leaf whose immediate key matches `target`.
+fn walk_leaves(
+    v: &serde_json::Value,
+    cur: &mut Vec<String>,
+    target: &str,
+    hits: &mut Vec<Vec<String>>,
+) {
+    if let serde_json::Value::Object(map) = v {
+        for (k, child) in map {
+            cur.push(k.clone());
+            if k == target && child.is_number() {
+                hits.push(cur.clone());
+            }
+            walk_leaves(child, cur, target, hits);
+            cur.pop();
+        }
+    }
+}
+
+/// Follow `path` through the object tree; return `Ok(())` if every non-final
+/// segment resolves to an object (the final segment is allowed to be missing,
+/// which is how an omitted `skip_serializing_if` metric reads).
+fn verify_path(root: &serde_json::Value, path: &[String]) -> Result<()> {
+    let mut cur = root;
+    for (i, key) in path.iter().enumerate() {
+        let obj = cur.as_object().ok_or_else(|| {
+            anyhow!(
+                "path segment `{}` at position {i} isn't an object",
+                path[..i].join(".")
+            )
+        })?;
+        match obj.get(key) {
+            Some(next) => cur = next,
+            None if i + 1 == path.len() => return Ok(()),
+            None => bail!("path segment `{key}` at position {i} doesn't exist"),
+        }
+    }
+    Ok(())
+}
+
+/// Look up a dotted path against `root` and return its numeric value if all
+/// segments exist and the leaf is a number; `None` when any segment is missing
+/// (an omitted metric) or the leaf isn't numeric.
+fn lookup_number(root: &serde_json::Value, path: &[String]) -> Option<Real> {
+    let mut cur = root;
+    for key in path {
+        cur = cur.as_object()?.get(key)?;
+    }
+    cur.as_f64()
 }
 
 // ---------------------------------------------------------------------------
@@ -1005,6 +1105,42 @@ mod tests {
             (7, order(Side::Sell, 1.0, 110.0)),
         ];
         assert_eq!(exposed_bars(&fills, 10), 4);
+    }
+
+    fn sample_metrics() -> Metrics {
+        // Two long round trips, +10 then -5, with a non-degenerate variance so
+        // Sharpe/Sortino are populated (not `None`).
+        let fills = tagged(vec![
+            order(Side::Buy, 1.0, 100.0),
+            order(Side::Sell, 1.0, 110.0),
+            order(Side::Buy, 1.0, 108.0),
+            order(Side::Sell, 1.0, 103.0),
+        ]);
+        let equity = vec![100.0, 105.0, 110.0, 108.0, 103.0];
+        compute(&equity, &fills, 100.0, 252.0, 0.0)
+    }
+
+    #[test]
+    fn resolve_metric_by_short_name() {
+        let m = sample_metrics();
+        let (path, value) = resolve_metric("sharpe", &m).unwrap();
+        assert_eq!(path, "risk_adjusted.sharpe");
+        assert!(value.is_some());
+    }
+
+    #[test]
+    fn resolve_metric_by_dotted_path() {
+        let m = sample_metrics();
+        let (path, value) = resolve_metric("drawdown.max_pct", &m).unwrap();
+        assert_eq!(path, "drawdown.max_pct");
+        assert!(value.is_some());
+    }
+
+    #[test]
+    fn resolve_metric_unknown_errors() {
+        let m = sample_metrics();
+        let err = resolve_metric("does_not_exist", &m).unwrap_err();
+        assert!(err.to_string().contains("unknown metric"));
     }
 
     #[test]
