@@ -2,7 +2,7 @@
 //!
 //! Load a strategy from a `strategy.yml`, feed it candle (and arbitrary extra)
 //! data assembled from one or more `--series`, and run it through a paper wallet,
-//! writing `trades.csv` and `returns.csv`:
+//! writing `trades.csv`, `returns.csv` and `metrics.yml`:
 //!
 //! ```text
 //! fugazi run @strategy.yml \
@@ -18,6 +18,7 @@ mod convert;
 mod data;
 mod dynd;
 mod input;
+mod metrics;
 mod params;
 mod spec;
 mod style;
@@ -76,6 +77,12 @@ struct RunArgs {
     #[arg(long, default_value_t = 1234)]
     seed: u64,
 
+    /// Bars per year used to annualize the per-bar return moments in
+    /// `metrics.yml` (Sharpe/Sortino/CAGR/annualized volatility). Default 252
+    /// (daily trading days); use ~52 for weekly, 8760 for hourly, etc.
+    #[arg(long, default_value_t = 252.0)]
+    bars_per_year: f64,
+
     /// Suppress all console output (the result files are still written).
     #[arg(short, long)]
     quiet: bool,
@@ -105,6 +112,7 @@ fn run(args: RunArgs) -> Result<()> {
         strategy_label: &strat_label,
         params: &params_label,
         seed: args.seed,
+        bars_per_year: args.bars_per_year,
         quiet: args.quiet,
     };
     backtest::run(&spec, &frame, &opts)?;

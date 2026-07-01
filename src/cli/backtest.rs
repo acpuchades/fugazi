@@ -8,7 +8,10 @@
 //! the previous bar's market fill and this bar's stops alike — is emitted to
 //! `trades.csv` stamped with this bar's `time` and the order's own fill price, and
 //! the running equity is emitted to `returns.csv`. Both result files are written
-//! `;`-delimited for Excel.
+//! `;`-delimited for Excel. After the loop, the recorded equity curve and fill
+//! blotter are reduced into `metrics.yml` — see [`crate::metrics`] for the
+//! catalogue (return moments, Sharpe/Sortino/Calmar, drawdown, round-trip
+//! trade statistics).
 //!
 //! Console output (silenced by [`RunOptions::quiet`]) is a two-line banner (the
 //! constant tool identity, then the active command), then three blocks: **inputs**
@@ -24,6 +27,7 @@ use anyhow::{Context, Result};
 use fugazi::prelude::*;
 
 use crate::data::DataFrame;
+use crate::metrics;
 use crate::spec::StrategySpec;
 use crate::style;
 
@@ -44,6 +48,8 @@ pub struct RunOptions<'a> {
     /// block so a run can be replayed (and will seed any future stochastic step —
     /// slippage, sampling, …).
     pub seed: u64,
+    /// Bars per year used to annualize per-bar return moments in `metrics.yml`.
+    pub bars_per_year: Real,
     /// Suppress all console output (the result files are still written).
     pub quiet: bool,
 }
@@ -81,8 +87,13 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
 
     let mut wallet = PaperWallet::new(opts.cash);
     let mut prev_equity = opts.cash;
+    // Two parallel per-bar records feed the post-run metrics: the equity curve
+    // (one entry per bar, post mark-to-market) and the fills booked *on* that
+    // bar (indexed against the same bar cursor).
+    let mut equity_curve: Vec<Real> = Vec::with_capacity(candles.len());
+    let mut booked_fills: Vec<(usize, Order<String>)> = Vec::new();
 
-    for (time, candle) in &candles {
+    for (bar_idx, (time, candle)) in candles.iter().enumerate() {
         // Snapshot the blotter *before* feeding the bar: the wallet fills any order
         // queued on the previous bar here, at this bar's open, and the trade below
         // may book an immediate stop — both are this bar's fills, stamped its time.
@@ -93,6 +104,7 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
         strategy.update(*candle);
         strategy.trade(&mut wallet);
         for order in &wallet.orders()[before..] {
+            booked_fills.push((bar_idx, order.clone()));
             let side = match order.side {
                 Side::Buy => "buy",
                 Side::Sell => "sell",
@@ -142,6 +154,7 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
             0.0
         };
         returns.write_record([time, &equity.to_string(), &ret.to_string()])?;
+        equity_curve.push(equity);
         prev_equity = equity;
     }
 
@@ -160,9 +173,16 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
         bars: candles.len(),
     };
 
+    // Reduce the recorded blotter + equity curve to a metrics document and
+    // persist it alongside the CSVs, then echo the top-line ratios in a
+    // dedicated console block.
+    let m = metrics::compute(&equity_curve, &booked_fills, opts.cash, opts.bars_per_year);
+    metrics::write_yaml(&m, &opts.out_dir.join("metrics.yml"))?;
+
     let finished = SystemTime::now();
     if !opts.quiet {
         print_result_block(opts, &summary, started, finished);
+        print_metrics_block(&m);
     }
     Ok(summary)
 }
@@ -227,6 +247,49 @@ fn print_result_block(opts: &RunOptions, s: &Summary, started: SystemTime, finis
         "finished",
         &format!("{} ({})", format_utc(finished), format_elapsed(elapsed)),
     );
+}
+
+/// The "metrics" block: a compact summary of `metrics.yml`'s headline figures.
+/// Only the most-referenced ones are surfaced here (annualized return + vol,
+/// Sharpe, Sortino, max drawdown, trade count + win rate + profit factor);
+/// the file itself carries the full set.
+fn print_metrics_block(m: &metrics::Metrics) {
+    println!("\n{}", style::bold("metrics"));
+    print_field(
+        "return",
+        &format!(
+            "{:+.2}% ann · vol {:.2}%",
+            m.returns.annualized_mean_pct, m.returns.annualized_volatility_pct
+        ),
+    );
+    print_field("sharpe", &format_ratio(m.risk_adjusted.sharpe));
+    print_field("sortino", &format_ratio(m.risk_adjusted.sortino));
+    print_field(
+        "max_dd",
+        &format!(
+            "{:.2}% ({} bars)",
+            m.drawdown.max_pct, m.drawdown.max_duration_bars
+        ),
+    );
+    print_field(
+        "trades",
+        &format!(
+            "{} · win {} · pf {}",
+            m.trades.total,
+            format_pct(m.trades.win_rate_pct),
+            format_ratio(m.trades.profit_factor),
+        ),
+    );
+}
+
+/// A ratio to two decimals, or `—` when its denominator was degenerate and the
+/// value is `None` (see the `skip_serializing_if` fields on the metrics types).
+fn format_ratio(v: Option<Real>) -> String {
+    v.map_or_else(|| "—".to_string(), |r| format!("{r:.2}"))
+}
+
+fn format_pct(v: Option<Real>) -> String {
+    v.map_or_else(|| "—".to_string(), |r| format!("{r:.1}%"))
 }
 
 /// A short human runtime: `12 ms`, `3.40 s`, or `1m 04s`.
