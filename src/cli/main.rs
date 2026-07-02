@@ -21,6 +21,7 @@ mod convert;
 mod data;
 mod dynd;
 mod input;
+mod list;
 mod metrics;
 mod optimize;
 mod params;
@@ -63,6 +64,9 @@ enum Command {
         /// Target shell (`bash`, `zsh`, `fish`, `elvish`, `powershell`).
         shell: Shell,
     },
+    /// Print the catalogue of YAML tags a strategy spec accepts (sources,
+    /// signals, and the `!param` placeholder), grouped by category.
+    List,
 }
 
 #[derive(Args)]
@@ -236,6 +240,7 @@ fn main() -> Result<()> {
         Command::Check(args) => check(args),
         Command::Optimize(args) => optimize(args),
         Command::Completions { shell } => completions::run(shell),
+        Command::List => list::run(),
     }
 }
 
