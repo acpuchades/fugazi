@@ -54,8 +54,7 @@ enum Command {
     Check(CheckArgs),
     /// Sweep a strategy over a parameter grid and rank the combinations.
     Optimize(OptimizeArgs),
-    /// Fetch OHLCV candles from a remote provider (e.g. Binance) and write
-    /// them to a `;`-delimited CSV in the same shape `run --series` reads.
+    /// Fetch OHLCV candles from a remote provider into a `run`-ready CSV.
     ///
     /// Spec grammar: `<provider>:<symbol>[<freq>,<freq>...](,<symbol>[<freq>...])*`.
     /// Example: `fugazi get binance:BTCUSDT[1d,1h],ETHUSDT[1d] --since 2020-01-01 --until today -o candles.csv`.
