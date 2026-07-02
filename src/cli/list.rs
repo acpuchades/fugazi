@@ -69,8 +69,8 @@ struct Section {
     groups: &'static [Group],
 }
 
-const SOURCES: Section = Section {
-    title: "SOURCES",
+const VALUES: Section = Section {
+    title: "VALUES",
     subtitle: "real-valued nodes (Indicator<Output = Real>)",
     groups: &[
         Group {
@@ -264,7 +264,7 @@ pub fn run(cmd: ListCmd) -> Result<()> {
     let mut out = out.lock();
     match cmd {
         ListCmd::Indicators => {
-            write_all(&mut out, &SOURCES)?;
+            write_all(&mut out, &VALUES)?;
             writeln!(out)?;
             write_all(&mut out, &SIGNALS)?;
             writeln!(out)?;
@@ -368,12 +368,12 @@ fn write_all<W: Write>(w: &mut W, section: &Section) -> io::Result<()> {
     Ok(())
 }
 
-/// Render an entry's YAML surface. Every entry is `!`-prefixed for a uniform
-/// column even where a bare word would also parse — matching the convention in
-/// CLI.md and the strategy examples.
+/// Render an entry's YAML surface. Parameterless leaves parse as bare strings
+/// (`close`, `obv`), so they render without the `!`; everything that takes
+/// arguments renders in its `!tag`-prefixed form.
 fn signature(e: &Entry) -> String {
     if e.args.is_empty() {
-        format!("!{}", e.tag)
+        e.tag.to_string()
     } else if e.args.starts_with('<') || e.args.starts_with('[') {
         format!("!{} {}", e.tag, e.args)
     } else {
@@ -387,7 +387,7 @@ mod tests {
 
     /// Collect every entry across every section and group.
     fn all_entries() -> Vec<&'static Entry> {
-        [&SOURCES, &SIGNALS, &PLACEHOLDERS]
+        [&VALUES, &SIGNALS, &PLACEHOLDERS]
             .into_iter()
             .flat_map(|s| s.groups.iter())
             .flat_map(|g| g.entries.iter())
@@ -407,12 +407,12 @@ mod tests {
         // Render into a buffer and spot-check the section headers plus a
         // handful of representative tags from different categories.
         let mut buf: Vec<u8> = Vec::new();
-        write_all(&mut buf, &SOURCES).unwrap();
+        write_all(&mut buf, &VALUES).unwrap();
         write_all(&mut buf, &SIGNALS).unwrap();
         write_all(&mut buf, &PLACEHOLDERS).unwrap();
         let text = String::from_utf8(buf).unwrap();
 
-        for header in ["SOURCES", "SIGNALS", "PLACEHOLDERS"] {
+        for header in ["VALUES", "SIGNALS", "PLACEHOLDERS"] {
             assert!(text.contains(header), "missing section `{header}`");
         }
         for tag in ["close", "!ema", "!macd_line", "!crosses_above", "!and", "!param"] {
