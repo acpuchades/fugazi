@@ -27,7 +27,21 @@ use time::format_description::well_known::Rfc3339;
 use time::{Date, Duration, Month, OffsetDateTime, Time};
 use tokio::runtime::Builder as RuntimeBuilder;
 
-use fugazi::sources::{Binance, CandleSource, Interval, TimedCandle, Timestamp};
+use fugazi::sources::{Binance, CandleSource, Interval, TimedCandle, Timestamp, Yahoo};
+
+/// The remote candle providers this CLI can fetch from. Kept as `(name,
+/// description)` so `fugazi list sources` and the "unknown provider" error
+/// message both render from the same table — no drift possible.
+pub(crate) const KNOWN_PROVIDERS: &[(&str, &str)] = &[
+    (
+        "binance",
+        "Binance spot klines endpoint (BTC/ETH/... vs. USDT/EUR/...)",
+    ),
+    (
+        "yfinance",
+        "Yahoo Finance chart endpoint (stocks, ETFs, indices, FX)",
+    ),
+];
 
 /// One `SYMBOL[freq,freq,...]` entry in the CLI spec.
 #[derive(Debug, Clone, PartialEq)]
@@ -169,7 +183,16 @@ async fn fetch(
         "binance" => Ok(Binance::new()
             .candles(symbol, interval, since, Some(until))
             .await?),
-        other => bail!("unknown provider {other:?}. Known providers: binance"),
+        "yfinance" => Ok(Yahoo::new()
+            .candles(symbol, interval, since, Some(until))
+            .await?),
+        other => {
+            let known: Vec<&str> = KNOWN_PROVIDERS.iter().map(|(n, _)| *n).collect();
+            bail!(
+                "unknown provider {other:?}. Known providers: {}",
+                known.join(", ")
+            )
+        }
     }
 }
 

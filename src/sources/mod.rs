@@ -38,6 +38,7 @@
 //! ```
 
 pub mod binance;
+pub mod yahoo;
 
 use std::fmt;
 use std::future::Future;
@@ -45,6 +46,7 @@ use std::future::Future;
 use crate::types::Candle;
 
 pub use binance::Binance;
+pub use yahoo::Yahoo;
 
 /// A UTC millisecond timestamp (Unix epoch).
 ///
