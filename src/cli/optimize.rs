@@ -164,7 +164,7 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
     write_csv(opts.output, &axes, &metric_columns, &rows)?;
 
     if !opts.quiet {
-        print_header();
+        style::print_header("optimize", "sweep a strategy over a parameter grid");
         print_inputs_block(&opts, &axes, &rows);
         // A "best" row only means something when the user gave us a metric to
         // rank by. Without one, the sweep has produced a CSV but no verdict.
@@ -474,23 +474,6 @@ fn format_number(v: Real) -> String {
 // ---------------------------------------------------------------------------
 // Console output
 // ---------------------------------------------------------------------------
-
-fn print_header() {
-    println!(
-        "{} · {}",
-        style::bold(&format!(
-            "{} {}",
-            env!("CARGO_PKG_NAME"),
-            env!("CARGO_PKG_VERSION")
-        )),
-        style::dim(env!("CARGO_PKG_REPOSITORY"))
-    );
-    println!(
-        "{}",
-        style::dim("optimize · sweep a strategy over a parameter grid")
-    );
-    println!();
-}
 
 fn print_inputs_block(opts: &OptimizeOptions, axes: &[(String, Vec<Value>)], rows: &[Row]) {
     println!("{}", style::bold("inputs"));

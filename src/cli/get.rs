@@ -32,6 +32,8 @@ use tokio::runtime::Builder as RuntimeBuilder;
 
 use fugazi::sources::{Binance, CandleSource, Interval, TimedCandle, Timestamp, Yahoo};
 
+use crate::style;
+
 /// The remote candle providers this CLI can fetch from. Kept as `(name,
 /// description)` so `fugazi list sources` and the "unknown provider" error
 /// message both render from the same table — no drift possible.
@@ -102,6 +104,10 @@ pub fn run(args: GetArgs) -> Result<()> {
     }
     let since_ts = Timestamp::from_datetime(since);
     let until_ts = Timestamp::from_datetime(until);
+
+    if !args.quiet {
+        style::print_header("get", "fetch OHLCV candles from a remote provider");
+    }
 
     if let Some(parent) = args.output.parent()
         && !parent.as_os_str().is_empty()

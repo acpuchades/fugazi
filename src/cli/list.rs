@@ -22,6 +22,7 @@ use clap::Subcommand;
 use tokio::runtime::Builder as RuntimeBuilder;
 
 use super::get::{KNOWN_PROVIDERS, tickers_of};
+use crate::style;
 
 /// Column separation, in spaces, between adjacent items in the TTY grid.
 const COLUMN_GAP: usize = 2;
@@ -232,6 +233,17 @@ const GROUPS: &[Group] = &[
 ];
 
 pub fn run(cmd: ListCmd) -> Result<()> {
+    // The banner goes to a human, not a pipe: the piped forms are
+    // machine-friendly (one ticker per line for `grep`/`wc -l`), so the header
+    // is gated on stdout being a terminal rather than a `--quiet` flag.
+    if io::stdout().is_terminal() {
+        let description = match &cmd {
+            ListCmd::Indicators => "the strategy-YAML tag vocabulary",
+            ListCmd::Sources => "the remote candle providers `get` fetches from",
+            ListCmd::Tickers { .. } => "every symbol the provider exposes",
+        };
+        style::print_header("list", description);
+    }
     let out = io::stdout();
     let mut out = out.lock();
     match cmd {

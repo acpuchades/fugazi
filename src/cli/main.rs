@@ -267,6 +267,7 @@ fn check(args: CheckArgs) -> Result<()> {
         .with_context(|| parse_error_context(&args.strategy))?;
 
     if !args.quiet {
+        style::print_header("check", "parse and validate a strategy spec");
         println!("{}: ok (symbol {})", args.strategy.label(), spec.symbol);
     }
     Ok(())

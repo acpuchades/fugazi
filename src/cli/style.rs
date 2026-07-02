@@ -43,3 +43,20 @@ pub fn green(s: &str) -> String {
 pub fn red(s: &str) -> String {
     paint("31", s)
 }
+
+/// The banner every subcommand prints at the top of its console output.
+/// Line 1 is the constant tool identity (the same for any subcommand);
+/// line 2 names the active command and what it does.
+pub fn print_header(command: &str, description: &str) {
+    println!(
+        "{} · {}",
+        bold(&format!(
+            "{} {}",
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION")
+        )),
+        dim(env!("CARGO_PKG_REPOSITORY"))
+    );
+    println!("{}", dim(&format!("{command} · {description}")));
+    println!();
+}

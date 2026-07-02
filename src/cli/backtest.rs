@@ -99,7 +99,7 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
     let start = candles.first().map_or("", |(t, _)| t.as_str());
     let end = candles.last().map_or("", |(t, _)| t.as_str());
     if !opts.quiet {
-        print_header();
+        style::print_header("run", "backtest a strategy over CSV series");
         print_inputs_block(opts, start, end, candles.len());
     }
 
@@ -208,22 +208,6 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
         print_metrics_block(&m);
     }
     Ok(summary)
-}
-
-/// The banner. Line 1 is the constant tool identity (the same for any
-/// subcommand); line 2 names the active command and what it does.
-fn print_header() {
-    println!(
-        "{} · {}",
-        style::bold(&format!(
-            "{} {}",
-            env!("CARGO_PKG_NAME"),
-            env!("CARGO_PKG_VERSION")
-        )),
-        style::dim(env!("CARGO_PKG_REPOSITORY"))
-    );
-    println!("{}", style::dim("run · backtest a strategy over CSV series"));
-    println!();
 }
 
 /// The "inputs" block: what this run was given. Timing (start/finish) lives in
