@@ -301,7 +301,8 @@ short:
 ```
 
 The same SMA crossover as a one-line inline (flow-style) spec — tags work inside
-flow mappings too, so this is handy as a `--strategy '…'` literal:
+flow mappings too, so this is handy as an inline `<STRATEGY>` positional literal
+(`fugazi run '…'`):
 
 ```yaml
 { symbol: ETH, long: { enter: !crosses_above { lhs: !sma { period: 5 }, rhs: !sma { period: 20 } } } }

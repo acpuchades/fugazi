@@ -70,6 +70,7 @@ pub mod types;
 pub use backtest::{Fill, RunReport};
 pub use indicator::Indicator;
 pub use indicators::BoolIndicatorExt;
+pub use metrics::{DrawdownSegment, Trade};
 pub use signal::Signal;
 pub use strategy::{
     Ack, Order, OrderId, OrderKind, PaperWallet, Units, Reference, Side, Size, Strategy, Wallet,

@@ -309,33 +309,37 @@ writes the result files:
 
 ```sh
 cargo run --bin fugazi -- run \
-  --strategy @examples/strategy.yml \
+  @examples/strategy.yml \
   --series @examples/candles.csv \
   --output-dir out/
-# writes out/trades.csv (time;symbol;side;units;price)
-#    and out/returns.csv (time;equity;return)
+# writes out/trades.csv (time;symbol;side;units;price;kind),
+#        out/returns.csv (time;equity;return),
+#        out/metrics.yml, and out/equity.png
 ```
 
-`--strategy` follows the same `@` convention as `--series`: `@file` loads a file,
-and anything else is treated as inline content — handy for quick one-offs, e.g.
-`--strategy '{ symbol: BTC, long: { enter: !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } } } }'`. The format is YAML — block or flow
+The strategy is a **positional** argument (not a flag) and follows the same `@`
+convention as `--series`: `@file` loads a file, anything else is treated as inline
+content — handy for quick one-offs, e.g.
+`'{ symbol: BTC, long: { enter: !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } } } }'`. The format is YAML — block or flow
 (inline) style, both fine. (JSON is a subset of YAML, so a JSON-shaped document
 still parses: a `!sma { … }` tag is just the singleton map `{"sma": …}`.)
 
-Flags: `--strategy <@file | inline>`, `--series <spec>` (repeatable),
-`--output-dir <dir>`, `--cash <amount>` (default `10000`), `--params <spec>`
-(repeatable — see below), `--seed <n>` (default `1234`; recorded for
-reproducibility — the backtest is deterministic today, so it only bites once a
-stochastic step consumes it). Output files are `;`-delimited for Excel.
+Flags: `<STRATEGY>` (positional, `@file` or inline), `--series <spec>`
+(repeatable), `--output-dir <dir>`, `--cash <amount>` (default `10000`),
+`--params <spec>` (repeatable — see below), calendar shortcuts
+(`--stocks`/`--forex`/`--crypto` + `--frequency`) or explicit `--bars-per-year`,
+and `--risk-free-rate <rate>` for the annualized rf. Output files are
+`;`-delimited for Excel.
 
 Console output is a two-line banner (the constant tool identity, then the active
-command) followed by three blocks: an **inputs** block of the execution params
-(strategy, params in effect, seed, candle period start→end, starting capital, output
-dir), a **trades** block streaming each fill as it happens (time, symbol, side,
-quantity, price — a symbol is per-trade, never a run-level field), and a **result**
-block (bars, trade count, capital start→end with absolute and percent change, then
-the start/finish timestamps with elapsed runtime). `-q` silences all of it (the
-result files are still written).
+command) followed by four blocks: an **inputs** block of the execution params
+(strategy, params in effect, candle period start→end, starting capital, output
+dir), a **trades** block listing each fill (time, symbol, side, quantity, price,
+kind — a symbol is per-trade, never a run-level field), a **result** block (bars,
+trade count, capital start→end with absolute and percent change, then start/finish
+timestamps with elapsed runtime), and a **metrics** block echoing the headline
+lines of `metrics.yml`. `-q` silences all of it (the result files are still
+written).
 
 **Data — `--series`.** Each `--series` is a `,`-separated list of terms:
 `key=value` adds a constant column, `@file.csv` loads a CSV's columns and rows
@@ -392,7 +396,7 @@ repeatable): `NAME=value` sets one, and `@file.yml` loads a whole
 apply left-to-right, so a later one wins:
 
 ```sh
-cargo run --bin fugazi -- run --strategy @examples/strategy.params.yml \
+cargo run --bin fugazi -- run @examples/strategy.params.yml \
   --params @examples/params.yml,FAST=5 \
   --series @examples/candles.csv --output-dir out/
 ```

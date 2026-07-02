@@ -13,8 +13,8 @@ Three subcommands:
 - [`optimize`](#optimize) — sweep a strategy over a parameter grid in
   parallel; write one CSV row per combination and rank by a metric.
 
-The subcommands share their input vocabulary — `--strategy`, `--series`,
-`--params`, the calendar shortcuts (`--stocks`/`--forex`/`--crypto`,
+The subcommands share their input vocabulary — the `<STRATEGY>` positional,
+`--series`, `--params`, the calendar shortcuts (`--stocks`/`--forex`/`--crypto`,
 `--frequency`, `--bars-per-year`) and `--risk-free-rate`. Everything that
 follows those flags is documented once, in [Common flags](#common-flags).
 
@@ -80,7 +80,7 @@ Backtest one strategy against one dataset and write the result files.
 
 ```
 fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
-          [--params <SPEC> …] [--cash <N>] [--seed <N>]
+          [--params <SPEC> …] [--cash <N>]
           [--stocks | --forex | --crypto] [-f <CODE>] [--bars-per-year <N>]
           [--risk-free-rate <RATE>] [-q]
 ```
@@ -92,7 +92,6 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
 | `-o`, `--output-dir <DIR>` | Directory to write `trades.csv`, `returns.csv`, and `metrics.yml` into. Created if missing. |
 | `-p`, `--params <SPEC>` | Placeholder substitution. Repeatable. See [--params](#--params). |
 | `-c`, `--cash <N>` | Initial funds for the paper wallet. Default `10000`. |
-| `--seed <N>` | RNG seed, recorded for reproducibility (the backtest is deterministic today; the seed only bites once a stochastic step consumes it). Default `1234`. |
 | `--stocks` / `--forex` / `--crypto` | Trading-calendar shortcut. See [Calendar](#calendar-and-annualization). Mutually exclusive. |
 | `-f`, `--frequency <CODE>` | Bar cadence (`1m`, `5m`, `1h`, `4h`, `1d`, `1w`, `1M`, …). Combines with the calendar to derive `bars_per_year`. |
 | `--bars-per-year <N>` | Explicit override for the annualization denominator. Wins over the calendar/frequency pair. |
@@ -107,8 +106,8 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
 - `metrics.yml` — the reduced backtest report.
 
 **Console output** (unless `-q`): a two-line banner, then blocks for
-**inputs** (strategy, params, seed, period, capital, output), **trades**
-(each fill streamed as it happens), **result** (bars, trades, capital
+**inputs** (strategy, params, period, capital, output), **trades**
+(each fill listed after the run completes), **result** (bars, trades, capital
 before → after, start/finish timestamps + elapsed), and **metrics**
 (the headline lines of `metrics.yml`).
 
@@ -142,7 +141,7 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
                --params <SPEC> [--params <SPEC> …]
                -m <METRIC>[,<METRIC>…] [-m <METRIC>…]
                -o <FILE> [--best-by <METRIC>] [-j <N>]
-               [--cash <N>] [--seed <N>]
+               [--cash <N>]
                [--stocks | --forex | --crypto] [-f <CODE>] [--bars-per-year <N>]
                [--risk-free-rate <RATE>] [-q]
 ```
@@ -157,7 +156,6 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
 | `--best-by <METRIC>` | Sort rows by this metric (direction hardcoded per metric — see [Best-by directions](#best-by-directions)). Omit to keep cartesian order and skip the "best" console block. |
 | `-j`, `--jobs <N>` | Rayon worker count. Default: one worker per logical CPU. |
 | `-c`, `--cash <N>` | Initial funds for each backtest. Default `10000`. |
-| `--seed <N>` | RNG seed. Default `1234`. |
 | `--stocks` / `--forex` / `--crypto` | Trading-calendar shortcut. See [Calendar](#calendar-and-annualization). |
 | `-f`, `--frequency <CODE>` | Bar cadence. |
 | `--bars-per-year <N>` | Explicit annualization override. |
@@ -218,9 +216,9 @@ The flags below have the same shape across every subcommand that accepts
 them (`run`, `optimize`, and — for `--params` and the strategy positional
 — `check`).
 
-### `--strategy`
+### `<STRATEGY>` (positional)
 
-The strategy is a **positional** argument, not a flag. It takes two forms:
+The strategy is the first positional argument, not a flag. It takes two forms:
 
 - `@path/to/file.yml` — load the file.
 - Anything else — inline YAML (block or flow style). Handy for one-offs:
