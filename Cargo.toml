@@ -45,6 +45,7 @@ serde_json = "1"
 csv = "1"
 anyhow = "1"
 indicatif = "0.17"
+console = "0.15"
 rayon = "1"
 plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "bitmap_encoder", "line_series", "area_series", "ttf"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"], optional = true }

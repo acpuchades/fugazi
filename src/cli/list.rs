@@ -16,13 +16,18 @@
 //!   retail equity APIs have no such endpoint and surface an "unsupported"
 //!   error).
 
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use tokio::runtime::Builder as RuntimeBuilder;
 
 use super::get::{KNOWN_PROVIDERS, tickers_of};
+
+/// Column separation, in spaces, between adjacent items in the TTY grid.
+const COLUMN_GAP: usize = 2;
+/// Fallback terminal width when `console` can't query the tty (e.g. no ioctl).
+const FALLBACK_WIDTH: usize = 80;
 
 /// What `fugazi list` should print. Nested-subcommand shape so the ticker form
 /// can carry its own required positional (`fugazi list tickers <provider>`)
@@ -271,8 +276,12 @@ pub fn run(cmd: ListCmd) -> Result<()> {
     Ok(())
 }
 
-/// Fetch and print the provider's ticker list, one symbol per line. Spins up a
-/// short-lived tokio runtime — like `fugazi get` — since the underlying
+/// Fetch and print the provider's ticker list. Layout follows the `ls`
+/// convention: **one symbol per line** when stdout is being piped or
+/// redirected (so `| grep`, `| wc -l`, `| sort -u` keep working), and a
+/// **column-major grid** sized to the terminal width when stdout is a TTY (so
+/// eyeballing 1000+ symbols isn't a scrollfest). Spins up a short-lived tokio
+/// runtime — like `fugazi get` — since the underlying
 /// [`crate::sources::CandleSource::tickers`] method is async.
 fn write_tickers<W: Write>(w: &mut W, provider: &str) -> Result<()> {
     let rt = RuntimeBuilder::new_current_thread()
@@ -282,8 +291,52 @@ fn write_tickers<W: Write>(w: &mut W, provider: &str) -> Result<()> {
     let tickers = rt
         .block_on(tickers_of(provider))
         .with_context(|| format!("listing tickers for {provider}"))?;
-    for t in &tickers {
-        writeln!(w, "{t}")?;
+
+    if std::io::stdout().is_terminal() {
+        let term_width = console::Term::stdout()
+            .size_checked()
+            .map(|(_, cols)| cols as usize)
+            .unwrap_or(FALLBACK_WIDTH);
+        write_grid(w, &tickers, term_width)?;
+    } else {
+        for t in &tickers {
+            writeln!(w, "{t}")?;
+        }
+    }
+    Ok(())
+}
+
+/// Render `items` as a column-major grid at most `term_width` characters wide.
+///
+/// Cells are all `max_item_width + COLUMN_GAP` chars — the same shape `ls`
+/// produces — so each row lines up. If a single item is wider than the
+/// terminal, we degenerate to one column (the item still wraps naturally at
+/// the terminal edge, which is what any downstream renderer expects).
+fn write_grid<W: Write>(w: &mut W, items: &[String], term_width: usize) -> io::Result<()> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let max_width = items.iter().map(|s| s.len()).max().unwrap_or(0);
+    let cell = max_width + COLUMN_GAP;
+    // N cells fit iff N*max_width + (N-1)*gap <= term_width  <=>  N <= (term_width + gap) / cell.
+    let cols = ((term_width + COLUMN_GAP) / cell.max(1)).max(1);
+    let rows = items.len().div_ceil(cols);
+
+    for r in 0..rows {
+        for c in 0..cols {
+            let idx = c * rows + r;
+            let Some(item) = items.get(idx) else { break };
+            // Pad only when a further cell exists on this row; the last cell
+            // in a row gets its natural width so trailing whitespace doesn't
+            // trigger terminal soft-wrap on narrow terminals.
+            let is_last_on_row = (c + 1) * rows + r >= items.len();
+            if is_last_on_row {
+                write!(w, "{item}")?;
+            } else {
+                write!(w, "{item:<cell$}")?;
+            }
+        }
+        writeln!(w)?;
     }
     Ok(())
 }
@@ -365,6 +418,51 @@ mod tests {
         for tag in ["close", "!ema", "!macd_line", "!crosses_above", "!and", "!param"] {
             assert!(text.contains(tag), "missing tag `{tag}` in output");
         }
+    }
+
+    fn render_grid(items: &[&str], width: usize) -> String {
+        let items: Vec<String> = items.iter().map(|s| s.to_string()).collect();
+        let mut buf: Vec<u8> = Vec::new();
+        write_grid(&mut buf, &items, width).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn grid_lays_out_column_major_like_ls() {
+        // Widest item is 2 chars, gap is 2, so each cell is 4 chars. Width 12
+        // fits (12 + 2) / 4 = 3 columns. 7 items → ceil(7/3) = 3 rows.
+        // Column-major means column 0 gets items[0..3], column 1 items[3..6],
+        // column 2 items[6..7]. Row 0 → "11", "44", "77"; row 1 → "22", "55";
+        // row 2 → "33", "66".
+        let out = render_grid(
+            &["11", "22", "33", "44", "55", "66", "77"],
+            12,
+        );
+        assert_eq!(out, "11  44  77\n22  55\n33  66\n");
+    }
+
+    #[test]
+    fn grid_degrades_to_single_column_on_narrow_terminals() {
+        // Widest item is 8 chars ("VERYLONG"), so a cell is 10 chars — a
+        // 6-char terminal can't fit even one padded cell but must still
+        // display something. We collapse to one column.
+        let out = render_grid(&["VERYLONG", "AB"], 6);
+        assert_eq!(out, "VERYLONG\nAB\n");
+    }
+
+    #[test]
+    fn grid_last_cell_in_row_has_no_trailing_padding() {
+        // 3 items, width 12: cell = 3+2 = 5, cols = (12+2)/5 = 2. Rows = 2.
+        // First row has both cells filled → column 0 is padded to 5, column 1
+        // is the final cell → no padding.
+        let out = render_grid(&["AAA", "BBB", "CCC"], 12);
+        assert_eq!(out, "AAA  CCC\nBBB\n");
+    }
+
+    #[test]
+    fn grid_handles_empty_input() {
+        let out = render_grid(&[], 80);
+        assert_eq!(out, "");
     }
 
     #[test]

@@ -580,6 +580,7 @@ dependencies = [
  "anyhow",
  "clap",
  "clap_complete",
+ "console",
  "csv",
  "indicatif",
  "plotters",
