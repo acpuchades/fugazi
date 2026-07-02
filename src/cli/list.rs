@@ -321,9 +321,9 @@ fn write_grid<W: Write>(w: &mut W, items: &[String], term_width: usize) -> io::R
 
 /// Render the `fugazi get` provider table. Column widths track the widest
 /// provider name so the descriptions line up regardless of how the list grows.
+/// No title line of its own — the banner printed by [`run`] already names the
+/// command.
 fn write_sources<W: Write>(w: &mut W, providers: &[(&str, &str)]) -> io::Result<()> {
-    writeln!(w, "SOURCES — remote candle providers (`fugazi get`)")?;
-    writeln!(w)?;
     writeln!(w, "  Spec grammar: <provider>:<symbol>[<freq>,...](,<symbol>[<freq>,...])*")?;
     writeln!(w)?;
     let name_width = providers.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
@@ -458,7 +458,7 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         write_sources(&mut buf, KNOWN_PROVIDERS).unwrap();
         let text = String::from_utf8(buf).unwrap();
-        assert!(text.contains("SOURCES"));
+        assert!(text.contains("Spec grammar"));
         for (name, doc) in KNOWN_PROVIDERS {
             assert!(text.contains(name), "missing provider `{name}` in output");
             assert!(text.contains(doc), "missing description for `{name}` in output");
