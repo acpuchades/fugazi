@@ -20,6 +20,7 @@ mod completions;
 mod convert;
 mod data;
 mod dynd;
+mod get;
 mod input;
 mod list;
 mod metrics;
@@ -53,6 +54,12 @@ enum Command {
     Check(CheckArgs),
     /// Sweep a strategy over a parameter grid and rank the combinations.
     Optimize(OptimizeArgs),
+    /// Fetch OHLCV candles from a remote provider (e.g. Binance) and write
+    /// them to a `;`-delimited CSV in the same shape `run --series` reads.
+    ///
+    /// Spec grammar: `<provider>:<symbol>[<freq>,<freq>...](,<symbol>[<freq>...])*`.
+    /// Example: `fugazi get binance:BTCUSDT[1d,1h],ETHUSDT[1d] --since 2020-01-01 --until today -o candles.csv`.
+    Get(get::GetArgs),
     /// Print a shell-completion script for the given shell to stdout.
     ///
     /// Install into zsh with e.g.:
@@ -239,6 +246,7 @@ fn main() -> Result<()> {
         Command::Run(args) => run(args),
         Command::Check(args) => check(args),
         Command::Optimize(args) => optimize(args),
+        Command::Get(args) => get::run(args),
         Command::Completions { shell } => completions::run(shell),
         Command::List => list::run(),
     }

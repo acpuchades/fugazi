@@ -15,9 +15,10 @@ path = "src/lib.rs"
 
 # The `fugazi` binary is the command-line backtester: it loads a strategy.yml,
 # assembles candle data from one or more --series, and runs it through a paper
-# wallet (see `src/cli/`). Its modules are compiled into the binary, not the
-# library; the library crate itself uses none of these dependencies — they are
-# pulled in only to build the CLI binary.
+# wallet (see `src/cli/`). Most of the dependencies below are pulled in only to
+# build the CLI binary; the exceptions are `reqwest`/`tokio`/`serde`/`serde_json`/
+# `time`/`thiserror`, which the library uses for the `sources` module (remote
+# candle providers such as Binance).
 [[bin]]
 name = "fugazi"
 path = "src/cli/main.rs"
@@ -32,6 +33,14 @@ csv = "1"
 anyhow = "1"
 rayon = "1"
 plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "bitmap_encoder", "line_series", "area_series", "ttf"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros"] }
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+thiserror = "1"
+
+[dev-dependencies]
+wiremock = "0.6"
+tokio-test = "0.4"
 
 # The Python bindings live in their own workspace member (`python/`), which is
 # the only crate that pulls in PyO3 — see that crate's README for build

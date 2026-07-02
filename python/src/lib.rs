@@ -34,6 +34,7 @@ use fugazi_core::indicators::{
     Mfi, Obv, Rma, Rsi, Sar, Sma, StdDev, Stochastic, TrueRange, Value, Vwap, WilliamsR, Wma,
 };
 use fugazi_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
+use fugazi_core::sources::{Binance, CandleSource, Interval, SourceError, Timestamp};
 use fugazi_core::strategy::{
     Ack, Order, OrderKind, PaperWallet, Units, Reference, Side, Size, Wallet, WalletError,
 };
@@ -1929,6 +1930,365 @@ fn stoch_rsi(
 }
 
 // ---------------------------------------------------------------------------
+// Remote candle sources
+//
+// The library-level `fugazi::sources` API takes only objects/enums; the string
+// parsing that maps user-facing kwargs (`freq="1d"`, `since="2024-01-01"`) to
+// those objects lives here.
+// ---------------------------------------------------------------------------
+
+/// Process-wide tokio runtime, lazily built on first use. Sharing one runtime
+/// across fetch calls avoids the ~10ms startup cost of building a fresh one
+/// per call and keeps the fetcher thread pool warm.
+static SOURCES_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+
+fn sources_runtime() -> &'static tokio::runtime::Runtime {
+    SOURCES_RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(2)
+            .thread_name("fugazi-sources")
+            .build()
+            .expect("build tokio runtime")
+    })
+}
+
+/// Map a fugazi [`SourceError`] to an appropriate Python exception type.
+fn source_error_to_py(e: SourceError) -> PyErr {
+    match e {
+        SourceError::UnknownSymbol(msg) => PyValueError::new_err(format!("unknown symbol: {msg}")),
+        SourceError::UnsupportedInterval(i) => {
+            PyValueError::new_err(format!("unsupported interval: {i:?}"))
+        }
+        other => PyValueError::new_err(other.to_string()),
+    }
+}
+
+/// Chosen DataFrame library for the return value of `Binance.candles()` /
+/// `fugazi.get()`.
+#[derive(Clone, Copy)]
+enum CandlesOutput {
+    Polars,
+    Pandas,
+    Numpy,
+}
+
+impl CandlesOutput {
+    fn from_kwarg(s: &str) -> PyResult<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "polars" => Ok(CandlesOutput::Polars),
+            "pandas" => Ok(CandlesOutput::Pandas),
+            "numpy" | "dict" => Ok(CandlesOutput::Numpy),
+            other => Err(PyValueError::new_err(format!(
+                "output must be 'polars', 'pandas', or 'numpy' (got {other:?})"
+            ))),
+        }
+    }
+}
+
+// -- Interval token parser (accepts `1m`, `4h`, `1d`, `1w`, `1M`) -----------
+
+fn parse_interval_token(s: &str) -> PyResult<Interval> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err(PyValueError::new_err("interval token is empty"));
+    }
+    let (num, unit) = s.split_at(s.len() - 1);
+    let n: u32 = if num.is_empty() {
+        1
+    } else {
+        num.parse()
+            .map_err(|_| PyValueError::new_err(format!("invalid interval {s:?}")))?
+    };
+    if n == 0 {
+        return Err(PyValueError::new_err(format!(
+            "interval {s:?}: multiplier must be positive"
+        )));
+    }
+    match unit {
+        "m" => Ok(Interval::Minute(n)),
+        "h" => Ok(Interval::Hour(n)),
+        "d" => Ok(Interval::Day(n)),
+        "w" => Ok(Interval::Week(n)),
+        "M" => Ok(Interval::Month(n)),
+        _ => Err(PyValueError::new_err(format!(
+            "interval {s:?}: unknown unit {unit:?}"
+        ))),
+    }
+}
+
+// -- Date parser (`today` / `yesterday` / `Nd ago` / ISO / EU) --------------
+
+fn parse_date_token(input: &str, now: time::OffsetDateTime) -> PyResult<time::OffsetDateTime> {
+    let raw = input.trim();
+    let lower = raw.to_ascii_lowercase();
+    if lower == "today" {
+        return Ok(midnight_utc(now.date()));
+    }
+    if lower == "yesterday" {
+        return Ok(midnight_utc(now.date() - time::Duration::days(1)));
+    }
+    if let Some((n, unit)) = parse_relative(&lower) {
+        let d = match unit {
+            'd' => time::Duration::days(n as i64),
+            'w' => time::Duration::weeks(n as i64),
+            _ => unreachable!(),
+        };
+        return Ok(midnight_utc(now.date() - d));
+    }
+    if let Some(date) = parse_absolute(raw) {
+        return Ok(midnight_utc(date));
+    }
+    Err(PyValueError::new_err(format!("invalid date {input:?}")))
+}
+
+fn midnight_utc(date: time::Date) -> time::OffsetDateTime {
+    date.with_time(time::Time::MIDNIGHT).assume_utc()
+}
+
+fn parse_relative(s: &str) -> Option<(u32, char)> {
+    let rest = s.strip_suffix("ago")?.trim_end();
+    let idx = rest.find(['d', 'w'])?;
+    let unit = rest.as_bytes()[idx] as char;
+    if !rest[idx + 1..].trim().is_empty() {
+        return None;
+    }
+    let n: u32 = rest[..idx].trim().parse().ok()?;
+    if n == 0 {
+        return None;
+    }
+    Some((n, unit))
+}
+
+fn parse_absolute(s: &str) -> Option<time::Date> {
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    if !parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) {
+        return None;
+    }
+    let first_len = parts[0].len();
+    let (year, month, day) = if first_len == 4 {
+        let y: i32 = parts[0].parse().ok()?;
+        let m: u32 = parts[1].parse().ok()?;
+        let d: u32 = parts[2].parse().ok()?;
+        (y, m, d)
+    } else if first_len == 1 || first_len == 2 {
+        if parts[2].len() != 4 {
+            return None;
+        }
+        let d: u32 = parts[0].parse().ok()?;
+        let m: u32 = parts[1].parse().ok()?;
+        let y: i32 = parts[2].parse().ok()?;
+        (y, m, d)
+    } else {
+        return None;
+    };
+    let month = time::Month::try_from(u8::try_from(month).ok()?).ok()?;
+    time::Date::from_calendar_date(year, month, u8::try_from(day).ok()?).ok()
+}
+
+fn resolve_since_until(
+    since: &str,
+    until: Option<&str>,
+) -> PyResult<(Timestamp, Option<Timestamp>)> {
+    let now = time::OffsetDateTime::now_utc();
+    let since_dt = parse_date_token(since, now)?;
+    let until_dt = match until {
+        Some(u) => Some(parse_date_token(u, now)?),
+        None => None,
+    };
+    if let Some(u) = until_dt
+        && u <= since_dt
+    {
+        return Err(PyValueError::new_err(format!(
+            "until ({}) must be strictly after since ({})",
+            until.unwrap_or(""),
+            since
+        )));
+    }
+    Ok((
+        Timestamp::from_datetime(since_dt),
+        until_dt.map(Timestamp::from_datetime),
+    ))
+}
+
+/// Format a UTC millisecond stamp as `YYYY-MM-DDTHH:MM:SSZ`.
+fn format_ts_iso(ms: i64) -> String {
+    let nanos = (ms as i128).saturating_mul(1_000_000);
+    match time::OffsetDateTime::from_unix_timestamp_nanos(nanos) {
+        Ok(dt) => dt
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_else(|_| ms.to_string()),
+        Err(_) => ms.to_string(),
+    }
+}
+
+/// Materialise a single-symbol/single-interval fetch into a DataFrame.
+///
+/// Columns: `time` (ISO 8601 UTC str), `open`/`high`/`low`/`close`/`volume` (f64).
+fn build_candles_frame(
+    py: Python<'_>,
+    output: CandlesOutput,
+    bars: Vec<fugazi_core::TimedCandle>,
+) -> PyResult<Py<PyAny>> {
+    let n = bars.len();
+    let mut times: Vec<String> = Vec::with_capacity(n);
+    let mut opens: Vec<f64> = Vec::with_capacity(n);
+    let mut highs: Vec<f64> = Vec::with_capacity(n);
+    let mut lows: Vec<f64> = Vec::with_capacity(n);
+    let mut closes: Vec<f64> = Vec::with_capacity(n);
+    let mut volumes: Vec<f64> = Vec::with_capacity(n);
+    for tc in bars {
+        times.push(format_ts_iso(tc.time.0));
+        opens.push(tc.candle.open);
+        highs.push(tc.candle.high);
+        lows.push(tc.candle.low);
+        closes.push(tc.candle.close);
+        volumes.push(tc.candle.volume);
+    }
+    let data = PyDict::new(py);
+    data.set_item("time", &times)?;
+    data.set_item("open", &opens)?;
+    data.set_item("high", &highs)?;
+    data.set_item("low", &lows)?;
+    data.set_item("close", &closes)?;
+    data.set_item("volume", &volumes)?;
+    match output {
+        CandlesOutput::Polars => {
+            let polars = py.import("polars").map_err(|_| {
+                PyValueError::new_err(
+                    "output='polars' requested but the polars package is not installed",
+                )
+            })?;
+            Ok(polars.getattr("DataFrame")?.call1((data,))?.unbind())
+        }
+        CandlesOutput::Pandas => {
+            let pandas = py.import("pandas").map_err(|_| {
+                PyValueError::new_err(
+                    "output='pandas' requested but the pandas package is not installed",
+                )
+            })?;
+            Ok(pandas.getattr("DataFrame")?.call1((data,))?.unbind())
+        }
+        CandlesOutput::Numpy => Ok(data.into_any().unbind()),
+    }
+}
+
+/// Fetch a single (symbol, interval) window through the shared runtime,
+/// releasing the GIL for the network I/O.
+fn fetch_bars(
+    py: Python<'_>,
+    binance: &Binance,
+    symbol: &str,
+    interval: Interval,
+    since: Timestamp,
+    until: Option<Timestamp>,
+) -> PyResult<Vec<fugazi_core::TimedCandle>> {
+    let client = binance.clone();
+    let symbol = symbol.to_string();
+    py.detach(|| {
+        sources_runtime()
+            .block_on(async move { client.candles(&symbol, interval, since, until).await })
+    })
+    .map_err(source_error_to_py)
+}
+
+/// A Binance klines client.
+///
+/// ```python
+/// b = fugazi.Binance()                  # public endpoint, defaults
+/// df = b.candles(symbol="BTCUSDT", freq="1d",
+///                since="2020-01-01", until="today")
+/// ```
+///
+/// One call = one (symbol, freq) fetch = one DataFrame. Batch multiple
+/// symbols or frequencies by looping in Python.
+#[pyclass(name = "Binance", frozen)]
+struct PyBinance {
+    inner: Binance,
+}
+
+#[pymethods]
+impl PyBinance {
+    /// Construct a client. `base_url` overrides the API endpoint (default
+    /// `https://api.binance.com`), useful for local test servers.
+    #[new]
+    #[pyo3(signature = (base_url = None))]
+    fn new(base_url: Option<String>) -> Self {
+        let mut inner = Binance::new();
+        if let Some(url) = base_url {
+            inner = inner.with_base_url(url);
+        }
+        Self { inner }
+    }
+
+    /// Fetch OHLCV candles for one `(symbol, freq)` window.
+    ///
+    /// * `symbol` — e.g. `"BTCUSDT"`, `"ETHEUR"`. Sent verbatim to Binance.
+    /// * `freq` — bar cadence: `"1m"`/`"5m"`/`"1h"`/`"4h"`/`"1d"`/`"1w"`/`"1M"`.
+    /// * `since` / `until` — dates. Formats: ISO `"YYYY-MM-DD"`, EU
+    ///   `"D-M-YYYY"`, or relative (`"today"`, `"yesterday"`, `"Nd ago"`,
+    ///   `"Nw ago"`). `until` is exclusive; `None` means "up to now".
+    /// * `output` — `"polars"` (default), `"pandas"`, or `"numpy"` (dict of arrays).
+    ///
+    /// Returned DataFrame columns: `time` (ISO 8601 UTC), `open`, `high`,
+    /// `low`, `close`, `volume` (all f64).
+    #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
+    fn candles(
+        &self,
+        py: Python<'_>,
+        symbol: &str,
+        freq: &str,
+        since: &str,
+        until: Option<&str>,
+        output: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let interval = parse_interval_token(freq)?;
+        let (since_ts, until_ts) = resolve_since_until(since, until)?;
+        let out = CandlesOutput::from_kwarg(output)?;
+        let bars = fetch_bars(py, &self.inner, symbol, interval, since_ts, until_ts)?;
+        build_candles_frame(py, out, bars)
+    }
+}
+
+/// Fetch OHLCV candles from a named provider and return a DataFrame.
+///
+/// ```python
+/// df = fugazi.get(provider="binance", symbol="BTCUSDT", freq="1d",
+///                 since="2020-01-01", until="today", output="polars")
+/// ```
+///
+/// Same shape as `Binance().candles(...)`; the extra `provider` argument
+/// dispatches to the right client (`"binance"` is currently the only value).
+#[pyfunction]
+#[pyo3(signature = (provider, symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
+fn get(
+    py: Python<'_>,
+    provider: &str,
+    symbol: &str,
+    freq: &str,
+    since: &str,
+    until: Option<&str>,
+    output: &str,
+) -> PyResult<Py<PyAny>> {
+    let interval = parse_interval_token(freq)?;
+    let (since_ts, until_ts) = resolve_since_until(since, until)?;
+    let out = CandlesOutput::from_kwarg(output)?;
+    let client = match provider {
+        "binance" => Binance::new(),
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown provider {other:?}. Known providers: binance"
+            )));
+        }
+    };
+    let bars = fetch_bars(py, &client, symbol, interval, since_ts, until_ts)?;
+    build_candles_frame(py, out, bars)
+}
+
+// ---------------------------------------------------------------------------
 // Module
 // ---------------------------------------------------------------------------
 
@@ -1941,6 +2301,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWallet>()?;
     m.add_class::<PyOrder>()?;
     m.add_class::<PySize>()?;
+    m.add_class::<PyBinance>()?;
 
     m.add("DEFAULT_EPSILON", DEFAULT_EPSILON)?;
 
@@ -1950,7 +2311,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     reg!(
         open, high, low, close, volume, typical, median, identity, value, sma, ema, rma, wma, hma,
         rsi, stddev, stochastic, cci, atr, mfi, williams_r, obv, vwap, ad, true_range, adx, dmi,
-        aroon, sar, macd, bollinger, keltner, donchian, stoch_rsi,
+        aroon, sar, macd, bollinger, keltner, donchian, stoch_rsi, get,
     );
     Ok(())
 }
