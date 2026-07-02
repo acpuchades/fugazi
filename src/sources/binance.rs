@@ -81,6 +81,31 @@ impl CandleSource for Binance {
         "binance"
     }
 
+    fn tickers(&self) -> impl Future<Output = Result<Vec<String>, SourceError>> + Send {
+        let client = self.client.clone();
+        let base_url = self.base_url.clone();
+        async move {
+            let url = format!("{}/api/v3/exchangeInfo", base_url.trim_end_matches('/'));
+            let resp = client.get(&url).send().await?;
+            let status = resp.status();
+            if !status.is_success() {
+                return Err(map_http_error(resp).await);
+            }
+            let body: ExchangeInfo = resp
+                .json()
+                .await
+                .map_err(|e| SourceError::Decode(format!("exchangeInfo JSON: {e}")))?;
+            let mut out: Vec<String> = body
+                .symbols
+                .into_iter()
+                .filter(|s| s.status == "TRADING")
+                .map(|s| s.symbol)
+                .collect();
+            out.sort();
+            Ok(out)
+        }
+    }
+
     fn candles(
         &self,
         symbol: &str,
@@ -253,6 +278,22 @@ async fn map_http_error(resp: reqwest::Response) -> SourceError {
 struct BinanceError {
     code: i64,
     msg: String,
+}
+
+/// The subset of `/api/v3/exchangeInfo` this crate reads. Everything else in
+/// the response (rate-limit config, per-symbol filters, precision fields) is
+/// ignored — we only need the symbol vocabulary.
+#[derive(Deserialize)]
+struct ExchangeInfo {
+    #[serde(default)]
+    symbols: Vec<ExchangeSymbol>,
+}
+
+#[derive(Deserialize)]
+struct ExchangeSymbol {
+    symbol: String,
+    #[serde(default)]
+    status: String,
 }
 
 #[cfg(test)]

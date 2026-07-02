@@ -390,6 +390,18 @@ mod tests {
         assert_eq!(out[1].time, Timestamp(1_704_240_000_000));
     }
 
+    #[tokio::test]
+    async fn tickers_reports_unsupported_by_default() {
+        let err = Yahoo::new().tickers().await.expect_err("expected Unsupported");
+        match err {
+            SourceError::Unsupported { operation, provider } => {
+                assert_eq!(provider, "yfinance");
+                assert_eq!(operation, "ticker enumeration");
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
     #[test]
     fn decode_result_rejects_length_mismatch() {
         let result = ChartResult {

@@ -160,6 +160,11 @@ pub enum SourceError {
     UnknownSymbol(String),
     #[error("unsupported interval: {0:?}")]
     UnsupportedInterval(Interval),
+    #[error("{provider} does not support {operation}")]
+    Unsupported {
+        operation: &'static str,
+        provider: &'static str,
+    },
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -187,4 +192,19 @@ pub trait CandleSource: Send + Sync {
         since: Timestamp,
         until: Option<Timestamp>,
     ) -> impl Future<Output = Result<Vec<TimedCandle>, SourceError>> + Send;
+
+    /// Enumerate every symbol this provider currently exposes. The default
+    /// implementation returns [`SourceError::Unsupported`], since a canonical
+    /// "list every symbol" endpoint is not universal — Binance advertises its
+    /// entire spot vocabulary through `/api/v3/exchangeInfo`, but Yahoo
+    /// Finance (and most retail equity APIs) offer no such call.
+    fn tickers(&self) -> impl Future<Output = Result<Vec<String>, SourceError>> + Send {
+        let provider = self.name();
+        async move {
+            Err(SourceError::Unsupported {
+                operation: "ticker enumeration",
+                provider,
+            })
+        }
+    }
 }

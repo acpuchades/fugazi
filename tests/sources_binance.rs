@@ -120,6 +120,32 @@ async fn maps_unknown_symbol_error() {
 }
 
 #[tokio::test]
+async fn tickers_filters_to_trading_and_sorts() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v3/exchangeInfo"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "timezone": "UTC",
+            "serverTime": 1_704_067_200_000_i64,
+            "symbols": [
+                { "symbol": "ETHUSDT",   "status": "TRADING" },
+                { "symbol": "BTCUSDT",   "status": "TRADING" },
+                { "symbol": "LEGACYBTC", "status": "BREAK" },
+                { "symbol": "ADAUSDT",   "status": "TRADING" },
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = fugazi::sources::Binance::new().with_base_url(server.uri());
+    let tickers = <fugazi::sources::Binance as fugazi::sources::CandleSource>::tickers(&client)
+        .await
+        .expect("fetch succeeds");
+    assert_eq!(tickers, vec!["ADAUSDT", "BTCUSDT", "ETHUSDT"]);
+}
+
+#[tokio::test]
 async fn maps_rate_limit_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
