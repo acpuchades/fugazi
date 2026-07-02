@@ -28,6 +28,26 @@ cargo build --release                 # target/release/fugazi
 cargo run --bin fugazi -- <subcommand> ...
 ```
 
+### Shell completion
+
+`fugazi completions <shell>` prints a completion script for `bash`, `zsh`,
+`fish`, `elvish` or `powershell` to stdout. The zsh script teaches the shell
+about the `@file` convention: `fugazi run @cand<TAB>` completes to
+`@candles.csv`, and so does `--series symbol=BTC,@cand<TAB>` (the `key=value,`
+and `@` prefixes are peeled before file completion runs). The other shells
+currently get subcommand/flag completion only.
+
+```sh
+# zsh (drop it on $fpath and restart the shell)
+fugazi completions zsh > "${fpath[1]}/_fugazi"
+
+# bash
+fugazi completions bash > /etc/bash_completion.d/fugazi   # or source per-session
+
+# fish
+fugazi completions fish > ~/.config/fish/completions/fugazi.fish
+```
+
 ## Quick start
 
 ```sh

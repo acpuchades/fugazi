@@ -16,6 +16,7 @@
 mod backtest;
 mod calendar;
 mod chart;
+mod completions;
 mod convert;
 mod data;
 mod dynd;
@@ -31,13 +32,14 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
+use clap_complete::Shell;
 
 use input::Source;
 
 /// Incremental technical-analysis backtester.
 #[derive(Parser)]
 #[command(name = "fugazi", version, about)]
-struct Cli {
+pub(crate) struct Cli {
     #[command(subcommand)]
     command: Command,
 }
@@ -50,6 +52,17 @@ enum Command {
     Check(CheckArgs),
     /// Sweep a strategy over a parameter grid and rank the combinations.
     Optimize(OptimizeArgs),
+    /// Print a shell-completion script for the given shell to stdout.
+    ///
+    /// Install into zsh with e.g.:
+    /// `fugazi completions zsh > "${fpath[1]}/_fugazi"` (then restart the shell).
+    /// The zsh output teaches the shell about the `@file` convention so
+    /// `fugazi run @cand<TAB>` completes to `candles.csv`; the other shells
+    /// currently get subcommand/flag completion only.
+    Completions {
+        /// Target shell (`bash`, `zsh`, `fish`, `elvish`, `powershell`).
+        shell: Shell,
+    },
 }
 
 #[derive(Args)]
@@ -222,6 +235,7 @@ fn main() -> Result<()> {
         Command::Run(args) => run(args),
         Command::Check(args) => check(args),
         Command::Optimize(args) => optimize(args),
+        Command::Completions { shell } => completions::run(shell),
     }
 }
 
