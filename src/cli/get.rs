@@ -115,8 +115,13 @@ pub fn run(args: GetArgs) -> Result<()> {
         .build()
         .context("building tokio runtime")?;
 
-    let n_pairs: usize = fetch_spec.symbols.iter().map(|s| s.intervals.len()).sum();
-    let progress = build_progress_bar(n_pairs as u64, args.quiet);
+    let n_chunks: usize = fetch_spec
+        .symbols
+        .iter()
+        .flat_map(|s| s.intervals.iter())
+        .map(|&i| chunk_bounds(since_ts, until_ts, i).len())
+        .sum();
+    let progress = build_progress_bar(n_chunks as u64, args.quiet);
 
     let rows = rt.block_on(async {
         fetch_all(
@@ -137,13 +142,12 @@ pub fn run(args: GetArgs) -> Result<()> {
         let n_symbols = fetch_spec.symbols.len();
         let n_pairs: usize = fetch_spec.symbols.iter().map(|s| s.intervals.len()).sum();
         println!(
-            "{}: wrote {} rows across {} symbol{}/{} interval fetch{}",
+            "{}: wrote {} rows across {} symbol{}/{} interval series",
             args.output.display(),
             rows.len(),
             n_symbols,
             if n_symbols == 1 { "" } else { "s" },
             n_pairs,
-            if n_pairs == 1 { "" } else { "es" }
         );
     }
     Ok(())
@@ -156,6 +160,31 @@ struct Row {
     candle: TimedCandle,
 }
 
+/// Bars per download chunk. Matches Binance's max klines per request, so on
+/// that provider one chunk is roughly one HTTP request; on providers that
+/// return the whole window in one call (Yahoo) it just bounds the request
+/// size the same way.
+const CHUNK_BARS: i64 = 1000;
+
+/// Split `[since, until)` into consecutive `[start, end)` windows of at most
+/// [`CHUNK_BARS`] bars each, so a long fetch advances the progress bar as it
+/// goes rather than in one jump per symbol/interval pair.
+fn chunk_bounds(since: Timestamp, until: Timestamp, interval: Interval) -> Vec<(Timestamp, Timestamp)> {
+    let step = interval.duration_ms().saturating_mul(CHUNK_BARS);
+    let mut chunks = Vec::new();
+    let mut cursor = since.0;
+    while cursor < until.0 {
+        let end = cursor.saturating_add(step).min(until.0);
+        chunks.push((Timestamp(cursor), Timestamp(end)));
+        cursor = end;
+    }
+    chunks
+}
+
+/// Delay between successive chunk requests, mirroring the politeness delay
+/// the providers apply between their own pagination pages.
+const CHUNK_DELAY: StdDuration = StdDuration::from_millis(100);
+
 async fn fetch_all(
     provider: &str,
     symbols: &[SymbolSpec],
@@ -164,21 +193,31 @@ async fn fetch_all(
     progress: &ProgressBar,
 ) -> Result<Vec<Row>> {
     let mut all: Vec<Row> = Vec::new();
+    let mut first = true;
     for sym in symbols {
         for &interval in &sym.intervals {
             let label = format!("{provider}:{}[{}]", sym.symbol, interval.as_token());
-            progress.set_message(label.clone());
-            let bars = fetch(provider, &sym.symbol, interval, since, until)
-                .await
-                .with_context(|| format!("fetching {label}"))?;
-            for tc in bars {
-                all.push(Row {
-                    symbol: sym.symbol.clone(),
-                    interval,
-                    candle: tc,
-                });
+            for (chunk_since, chunk_until) in chunk_bounds(since, until, interval) {
+                if !first {
+                    tokio::time::sleep(CHUNK_DELAY).await;
+                }
+                first = false;
+                progress.set_message(format!(
+                    "{label} {}",
+                    chunk_since.to_datetime().date()
+                ));
+                let bars = fetch(provider, &sym.symbol, interval, chunk_since, chunk_until)
+                    .await
+                    .with_context(|| format!("fetching {label}"))?;
+                for tc in bars {
+                    all.push(Row {
+                        symbol: sym.symbol.clone(),
+                        interval,
+                        candle: tc,
+                    });
+                }
+                progress.inc(1);
             }
-            progress.inc(1);
         }
     }
     all.sort_by(|a, b| {
@@ -188,21 +227,21 @@ async fn fetch_all(
     Ok(all)
 }
 
-/// Build the fetch-progress bar. Hidden — a no-op sink — when `--quiet` is
-/// set or when stderr is not a terminal, so the CLI stays silent when its
-/// output is being piped or redirected.
-fn build_progress_bar(total_pairs: u64, quiet: bool) -> ProgressBar {
+/// Build the fetch-progress bar, denominated in download *chunks* (see
+/// [`chunk_bounds`]). Hidden — a no-op sink — when `--quiet` is set or when
+/// stderr is not a terminal, so the CLI stays silent when its output is being
+/// piped or redirected.
+fn build_progress_bar(total_chunks: u64, quiet: bool) -> ProgressBar {
     if quiet || !std::io::stderr().is_terminal() {
         return ProgressBar::hidden();
     }
-    let bar = ProgressBar::new(total_pairs);
+    let bar = ProgressBar::new(total_chunks);
     bar.set_style(
         ProgressStyle::with_template("  fetching [{bar:20.cyan/blue}] {pos}/{len} {msg}")
             .expect("progress template compiles")
             .progress_chars("=> "),
     );
-    // Steady tick so the bar animates during a single slow fetch (no per-page
-    // callback from the underlying `CandleSource` to feed it manually).
+    // Steady tick so the bar animates while a single chunk is in flight.
     bar.enable_steady_tick(StdDuration::from_millis(120));
     bar
 }
@@ -572,6 +611,47 @@ mod tests {
         assert!(parse_date("2021-02-29", now()).is_err()); // non-leap
         assert!(parse_date("0d ago", now()).is_err());
         assert!(parse_date("7d agox", now()).is_err());
+    }
+
+    #[test]
+    fn chunk_bounds_splits_long_windows() {
+        // 3000 daily bars -> 3 full chunks of CHUNK_BARS days each.
+        let day = Interval::Day(1).duration_ms();
+        let since = Timestamp(0);
+        let until = Timestamp(3000 * day);
+        let chunks = chunk_bounds(since, until, Interval::Day(1));
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0], (Timestamp(0), Timestamp(1000 * day)));
+        assert_eq!(chunks[1], (Timestamp(1000 * day), Timestamp(2000 * day)));
+        assert_eq!(chunks[2], (Timestamp(2000 * day), Timestamp(3000 * day)));
+    }
+
+    #[test]
+    fn chunk_bounds_partitions_exactly_with_ragged_tail() {
+        let day = Interval::Day(1).duration_ms();
+        let since = Timestamp(5);
+        let until = Timestamp(1500 * day + 7);
+        let chunks = chunk_bounds(since, until, Interval::Day(1));
+        assert_eq!(chunks.len(), 2);
+        // Consecutive, gap-free, and covering [since, until) exactly.
+        assert_eq!(chunks.first().unwrap().0, since);
+        assert_eq!(chunks.last().unwrap().1, until);
+        for pair in chunks.windows(2) {
+            assert_eq!(pair[0].1, pair[1].0);
+        }
+    }
+
+    #[test]
+    fn chunk_bounds_short_window_is_one_chunk() {
+        let since = Timestamp(0);
+        let until = Timestamp(30 * Interval::Day(1).duration_ms());
+        let chunks = chunk_bounds(since, until, Interval::Day(1));
+        assert_eq!(chunks, vec![(since, until)]);
+    }
+
+    #[test]
+    fn chunk_bounds_empty_window_yields_no_chunks() {
+        assert!(chunk_bounds(Timestamp(100), Timestamp(100), Interval::Day(1)).is_empty());
     }
 
     #[test]
