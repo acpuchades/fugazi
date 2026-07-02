@@ -2,7 +2,7 @@
 //!
 //! Three things a user might want to enumerate:
 //!
-//! * `fugazi list indicators` (the default) — every `!tag` [`crate::spec`]
+//! * `fugazi list indicators` — every `!tag` [`crate::spec`]
 //!   accepts: real-valued sources, boolean signals, and the `!param`
 //!   placeholder that lets `--params` substitute values. Grouped by category,
 //!   mirroring the reference in CLI.md so a user does not have to leave the

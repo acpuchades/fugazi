@@ -73,14 +73,14 @@ enum Command {
     },
     /// Print a printed catalogue of what the CLI knows about.
     ///
-    /// `fugazi list indicators` (the default) enumerates the strategy-YAML tag
-    /// vocabulary (real-valued sources, boolean signals, the `!param`
-    /// placeholder); `fugazi list sources` enumerates the remote candle
-    /// providers the `get` subcommand can fetch from; `fugazi list tickers
-    /// <provider>` fetches and prints every symbol the given provider offers.
+    /// `fugazi list indicators` enumerates the strategy-YAML tag vocabulary
+    /// (real-valued sources, boolean signals, the `!param` placeholder);
+    /// `fugazi list sources` enumerates the remote candle providers the `get`
+    /// subcommand can fetch from; `fugazi list tickers <provider>` fetches and
+    /// prints every symbol the given provider offers.
     List {
         #[command(subcommand)]
-        cmd: Option<list::ListCmd>,
+        cmd: list::ListCmd,
     },
 }
 
@@ -256,7 +256,7 @@ fn main() -> Result<()> {
         Command::Optimize(args) => optimize(args),
         Command::Get(args) => get::run(args),
         Command::Completions { shell } => completions::run(shell),
-        Command::List { cmd } => list::run(cmd.unwrap_or(list::ListCmd::Indicators)),
+        Command::List { cmd } => list::run(cmd),
     }
 }
 
