@@ -58,13 +58,16 @@
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
+pub mod backtest;
 pub mod indicator;
 pub mod indicators;
+pub mod metrics;
 pub mod signal;
 pub mod strategies;
 pub mod strategy;
 pub mod types;
 
+pub use backtest::{Fill, RunReport};
 pub use indicator::Indicator;
 pub use indicators::BoolIndicatorExt;
 pub use signal::Signal;

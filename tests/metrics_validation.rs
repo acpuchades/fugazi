@@ -22,6 +22,7 @@ mod metrics;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use fugazi::backtest::RunReport;
 use fugazi::prelude::*;
 
 const INITIAL_CASH: Real = 10_000.0;
@@ -144,12 +145,17 @@ fn matches_empyrical_reference() {
         .collect();
 
     // Turn the returns into an equity curve (same shape a real backtest gives
-    // us), then feed compute() with the same annualization + rf the generator
-    // used. No fills — this test targets equity-curve-derived metrics only;
-    // trade-level metrics are covered by unit tests.
+    // us), then hand a synthetic RunReport to from_report() with the same
+    // annualization + rf the generator used. No fills — this test targets
+    // equity-curve-derived metrics only; trade-level metrics are covered by
+    // unit tests.
     let equity = synth_equity(&returns, INITIAL_CASH);
-    let fills: Vec<(usize, Order<String>)> = Vec::new();
-    let m = metrics::compute(&equity, &fills, INITIAL_CASH, BARS_PER_YEAR, RISK_FREE_RATE);
+    let report: RunReport<String> = RunReport {
+        equity_curve: equity,
+        fills: Vec::new(),
+        initial_equity: INITIAL_CASH,
+    };
+    let m = metrics::from_report(&report, BARS_PER_YEAR, RISK_FREE_RATE);
 
     let mut mismatches: Vec<String> = Vec::new();
     for (key, &exp) in &expected {

@@ -5,7 +5,7 @@ reference library isn't installed:
 
 - `tests/talib_validation.rs` — indicators vs [TA-Lib](https://ta-lib.org/)
 - `tests/metrics_validation.rs` — evaluation metrics
-  (`src/cli/metrics.rs`) vs [empyrical](https://github.com/quantopian/empyrical)
+  (`src/metrics.rs`) vs [empyrical](https://github.com/quantopian/empyrical)
 
 ## Files
 
@@ -70,7 +70,7 @@ Omega uses arithmetic per-bar rf as its threshold in both codebases (the
 generator reproduces this rather than calling `empyrical.omega_ratio`, which
 uses a geometric per-bar conversion). Trade-level metrics (payoff, streaks,
 exposure, …) aren't part of this cross-check — they're covered by unit tests
-inside `src/cli/metrics.rs`.
+inside `src/metrics.rs`.
 
 ### Indicators (`talib_validation.rs` vs TA-Lib)
 

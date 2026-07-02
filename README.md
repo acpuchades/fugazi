@@ -217,6 +217,63 @@ symbol's price, and act on more than one symbol per `trade` — see the `pairs`
 example. The trading/execution/event-bus machinery itself is out of
 scope for this crate; it belongs in a downstream project that implements `Wallet`.
 
+## Backtest & metrics
+
+The per-bar loop above (update the wallet, `on_fill`, `update` the strategy,
+`trade` it, record equity) is what `fugazi::backtest::run` does for you. It
+takes any `impl Wallet<Sym>`, so the same primitive drives a `PaperWallet`
+backtest or a downstream live-broker impl unchanged — it isn't backtest-only,
+hence the neutral `run` name — and returns a `RunReport` with the equity curve
+and every booked `Fill`:
+
+```rust
+use fugazi::prelude::*;
+use fugazi::backtest::run;
+
+# struct MyStrategy;
+# impl Strategy for MyStrategy {
+#     type Input = Candle;
+#     type Symbol = &'static str;
+#     fn update(&mut self, _: Candle) {}
+#     fn trade(&self, _: &mut dyn Wallet<&'static str>) {}
+#     fn reset(&mut self) {}
+# }
+# let mut strat = MyStrategy;
+# let candles: Vec<Candle> = vec![];
+let mut wallet = PaperWallet::new(10_000.0);
+let report = run(&mut strat, &mut wallet, "AAPL", candles);
+// report.equity_curve : Vec<Real>   — one mark-to-market point per bar
+// report.fills        : Vec<Fill<_>> — every booked order, bar-indexed
+```
+
+The `fugazi::metrics` module then reduces that report to numbers **one function
+per metric** — no aggregate `compute`. Three intermediate builders
+(`per_bar_returns`, `reconstruct_trades`, `drawdown_segments`) turn the raw
+artefacts into the shapes each metric family consumes; the metrics themselves
+are the classic catalogue (`sharpe`, `sortino`, `calmar`, `omega`,
+`ulcer_index` / `ulcer_performance_index`, `max_drawdown`, `win_rate`,
+`profit_factor`, `expectancy`, `value_at_risk` / `conditional_value_at_risk`,
+`skewness`, `kurtosis`, …). Call whichever you need:
+
+```rust
+use fugazi::backtest::RunReport;
+use fugazi::metrics::{per_bar_returns, drawdown_segments, sharpe, max_drawdown};
+
+# let report: RunReport<&'static str> = RunReport {
+#     equity_curve: vec![10_000.0, 10_100.0, 10_050.0],
+#     fills: vec![],
+#     initial_equity: 10_000.0,
+# };
+let returns  = per_bar_returns(&report.equity_curve, report.initial_equity);
+let segments = drawdown_segments(&report.equity_curve);
+
+let _sharpe = sharpe(&returns, /*rf=*/ 0.0, /*bars_per_year=*/ 252.0);
+let _max_dd = max_drawdown(&segments);
+```
+
+This is what the `fugazi` CLI backtester sits on top of — it drives `run`, then
+aggregates every metric into a YAML report.
+
 ## What's included
 
 - **Moving averages / smoothing:** `Sma`, `Ema`, `Rma` (Wilder/SMMA), `Wma`,

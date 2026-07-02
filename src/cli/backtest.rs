@@ -46,23 +46,13 @@ pub fn evaluate(
     let symbol = spec.symbol.clone();
     let mut strategy = spec.build();
     let mut wallet = PaperWallet::new(cash);
-    let mut equity_curve: Vec<Real> = Vec::with_capacity(candles.len());
-    let mut booked_fills: Vec<(usize, Order<String>)> = Vec::new();
-
-    for (bar_idx, (_time, candle)) in candles.iter().enumerate() {
-        let before = wallet.orders().len();
-        for fill in wallet.update(symbol.clone(), *candle) {
-            strategy.on_fill(&fill);
-        }
-        strategy.update(*candle);
-        strategy.trade(&mut wallet);
-        for order in &wallet.orders()[before..] {
-            booked_fills.push((bar_idx, order.clone()));
-        }
-        equity_curve.push(wallet.equity().0);
-    }
-
-    metrics::compute(&equity_curve, &booked_fills, cash, bars_per_year, risk_free_rate)
+    let report = fugazi::backtest::run(
+        &mut strategy,
+        &mut wallet,
+        symbol,
+        candles.iter().map(|(_, c)| *c),
+    );
+    metrics::from_report(&report, bars_per_year, risk_free_rate)
 }
 
 /// Console-logging knobs plus the run's inputs, threaded in from the CLI args.
@@ -105,96 +95,88 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
 
     std::fs::create_dir_all(opts.out_dir)
         .with_context(|| format!("creating output dir `{}`", opts.out_dir.display()))?;
-    let mut trades = writer(&opts.out_dir.join("trades.csv"))?;
-    trades.write_record(["time", "symbol", "side", "units", "price", "kind"])?;
-    let mut returns = writer(&opts.out_dir.join("returns.csv"))?;
-    returns.write_record(["time", "equity", "return"])?;
 
     let start = candles.first().map_or("", |(t, _)| t.as_str());
     let end = candles.last().map_or("", |(t, _)| t.as_str());
     if !opts.quiet {
         print_header();
         print_inputs_block(opts, start, end, candles.len());
+    }
+
+    // Delegate the per-bar loop to the library primitive. Fills and the equity
+    // curve come back as two parallel vectors, indexed by bar.
+    let mut wallet = PaperWallet::new(opts.cash);
+    let report = fugazi::backtest::run(
+        &mut strategy,
+        &mut wallet,
+        symbol,
+        candles.iter().map(|(_, c)| *c),
+    );
+
+    // Emit `trades.csv` and echo each fill in the same order the wallet booked
+    // them; the CSV is `;`-delimited for Excel.
+    let mut trades = writer(&opts.out_dir.join("trades.csv"))?;
+    trades.write_record(["time", "symbol", "side", "units", "price", "kind"])?;
+    if !opts.quiet {
         println!("\n{}", style::bold("trades"));
     }
-
-    let mut wallet = PaperWallet::new(opts.cash);
-    let mut prev_equity = opts.cash;
-    // Two parallel per-bar records feed the post-run metrics: the equity curve
-    // (one entry per bar, post mark-to-market) and the fills booked *on* that
-    // bar (indexed against the same bar cursor).
-    let mut equity_curve: Vec<Real> = Vec::with_capacity(candles.len());
-    let mut booked_fills: Vec<(usize, Order<String>)> = Vec::new();
-
-    for (bar_idx, (time, candle)) in candles.iter().enumerate() {
-        // Snapshot the blotter *before* feeding the bar: the wallet fills any order
-        // queued on the previous bar here, at this bar's open, and the trade below
-        // may book an immediate stop — both are this bar's fills, stamped its time.
-        let before = wallet.orders().len();
-        for fill in wallet.update(symbol.clone(), *candle) {
-            strategy.on_fill(&fill);
-        }
-        strategy.update(*candle);
-        strategy.trade(&mut wallet);
-        for order in &wallet.orders()[before..] {
-            booked_fills.push((bar_idx, order.clone()));
-            let side = match order.side {
-                Side::Buy => "buy",
-                Side::Sell => "sell",
-            };
-            // Which order booked the fill — a market order, or a resting stop /
-            // take-profit the wallet triggered.
-            let kind = match order.kind {
-                OrderKind::Market => "market",
-                OrderKind::Stop => "stop",
-                OrderKind::TakeProfit => "take_profit",
-            };
-            trades.write_record([
-                time,
-                &order.symbol,
-                side,
-                &order.units.to_string(),
-                &order.price.to_string(),
-                kind,
-            ])?;
-            if !opts.quiet {
-                // Columns mirror trades.csv: time, symbol, side, units, price, kind.
-                // Each trade carries its own symbol, so this stays correct for a
-                // future multi-symbol strategy. Pad the side to width before
-                // coloring it (escape codes would otherwise break the alignment).
-                let side = format!("{side:<4}");
-                let side = match order.side {
-                    Side::Buy => style::green(&side),
-                    Side::Sell => style::red(&side),
-                };
-                println!(
-                    "  {}  {:<6}  {side} {:.4} @ {:.2}  {}",
-                    style::dim(time),
-                    order.symbol,
-                    order.units,
-                    order.price,
-                    style::dim(kind),
-                );
-            }
-        }
-
-        let equity = wallet.equity().0;
-        // Fractional bar-to-bar return (0.05 = +5%), not percent: it feeds
-        // downstream math (compounding, volatility, Sharpe) cleanly.
-        let ret = if prev_equity != 0.0 {
-            (equity - prev_equity) / prev_equity
-        } else {
-            0.0
+    for fill in &report.fills {
+        let order = &fill.order;
+        let time = &candles[fill.bar].0;
+        let side = match order.side {
+            Side::Buy => "buy",
+            Side::Sell => "sell",
         };
-        returns.write_record([time, &equity.to_string(), &ret.to_string()])?;
-        equity_curve.push(equity);
-        prev_equity = equity;
+        // Which order booked the fill — a market order, or a resting stop /
+        // take-profit the wallet triggered.
+        let kind = match order.kind {
+            OrderKind::Market => "market",
+            OrderKind::Stop => "stop",
+            OrderKind::TakeProfit => "take_profit",
+        };
+        trades.write_record([
+            time,
+            &order.symbol,
+            side,
+            &order.units.to_string(),
+            &order.price.to_string(),
+            kind,
+        ])?;
+        if !opts.quiet {
+            // Columns mirror trades.csv: time, symbol, side, units, price, kind.
+            // Each trade carries its own symbol, so this stays correct for a
+            // future multi-symbol strategy. Pad the side to width before
+            // coloring it (escape codes would otherwise break the alignment).
+            let side_padded = format!("{side:<4}");
+            let side_colored = match order.side {
+                Side::Buy => style::green(&side_padded),
+                Side::Sell => style::red(&side_padded),
+            };
+            println!(
+                "  {}  {:<6}  {side_colored} {:.4} @ {:.2}  {}",
+                style::dim(time),
+                order.symbol,
+                order.units,
+                order.price,
+                style::dim(kind),
+            );
+        }
     }
-
     trades.flush()?;
+
+    // Emit `returns.csv` from the equity curve — fractional bar-to-bar return
+    // (0.05 = +5%), not percent, matching the metric math's convention.
+    let per_bar = fugazi::metrics::per_bar_returns(&report.equity_curve, report.initial_equity);
+    let mut returns = writer(&opts.out_dir.join("returns.csv"))?;
+    returns.write_record(["time", "equity", "return"])?;
+    for (i, (time, _)) in candles.iter().enumerate() {
+        let equity = report.equity_curve[i];
+        let ret = per_bar[i];
+        returns.write_record([time, &equity.to_string(), &ret.to_string()])?;
+    }
     returns.flush()?;
 
-    let final_equity = wallet.equity().0;
+    let final_equity = report.equity_curve.last().copied().unwrap_or(opts.cash);
     let summary = Summary {
         final_equity,
         return_pct: if opts.cash != 0.0 {
@@ -202,25 +184,19 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
         } else {
             0.0
         },
-        trades: wallet.orders().len(),
-        bars: candles.len(),
+        trades: report.fills.len(),
+        bars: report.equity_curve.len(),
     };
 
     // Reduce the recorded blotter + equity curve to a metrics document and
     // persist it alongside the CSVs, then echo the top-line ratios in a
     // dedicated console block.
-    let m = metrics::compute(
-        &equity_curve,
-        &booked_fills,
-        opts.cash,
-        opts.bars_per_year,
-        opts.risk_free_rate,
-    );
+    let m = metrics::from_report(&report, opts.bars_per_year, opts.risk_free_rate);
     metrics::write_yaml(&m, &opts.out_dir.join("metrics.yml"))?;
 
     let times: Vec<String> = candles.iter().map(|(t, _)| t.clone()).collect();
     chart::write_equity_curve(
-        &equity_curve,
+        &report.equity_curve,
         &times,
         opts.cash,
         &opts.out_dir.join("equity.png"),
