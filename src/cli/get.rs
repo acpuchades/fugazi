@@ -19,10 +19,13 @@
 //! CLI's user-facing strings (dates, intervals, the compound spec) into those
 //! objects before invoking the fetching machinery.
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::time::Duration as StdDuration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
+use indicatif::{ProgressBar, ProgressStyle};
 use time::format_description::well_known::Rfc3339;
 use time::{Date, Duration, Month, OffsetDateTime, Time};
 use tokio::runtime::Builder as RuntimeBuilder;
@@ -112,9 +115,21 @@ pub fn run(args: GetArgs) -> Result<()> {
         .build()
         .context("building tokio runtime")?;
 
+    let n_pairs: usize = fetch_spec.symbols.iter().map(|s| s.intervals.len()).sum();
+    let progress = build_progress_bar(n_pairs as u64, args.quiet);
+
     let rows = rt.block_on(async {
-        fetch_all(&fetch_spec.provider, &fetch_spec.symbols, since_ts, until_ts).await
+        fetch_all(
+            &fetch_spec.provider,
+            &fetch_spec.symbols,
+            since_ts,
+            until_ts,
+            &progress,
+        )
+        .await
     })?;
+
+    progress.finish_and_clear();
 
     write_csv(&args.output, &rows).with_context(|| format!("writing {}", args.output.display()))?;
 
@@ -146,15 +161,16 @@ async fn fetch_all(
     symbols: &[SymbolSpec],
     since: Timestamp,
     until: Timestamp,
+    progress: &ProgressBar,
 ) -> Result<Vec<Row>> {
     let mut all: Vec<Row> = Vec::new();
     for sym in symbols {
         for &interval in &sym.intervals {
+            let label = format!("{provider}:{}[{}]", sym.symbol, interval.as_token());
+            progress.set_message(label.clone());
             let bars = fetch(provider, &sym.symbol, interval, since, until)
                 .await
-                .with_context(|| {
-                    format!("fetching {}:{}[{}]", provider, sym.symbol, interval.as_token())
-                })?;
+                .with_context(|| format!("fetching {label}"))?;
             for tc in bars {
                 all.push(Row {
                     symbol: sym.symbol.clone(),
@@ -162,6 +178,7 @@ async fn fetch_all(
                     candle: tc,
                 });
             }
+            progress.inc(1);
         }
     }
     all.sort_by(|a, b| {
@@ -169,6 +186,25 @@ async fn fetch_all(
             .cmp(&(b.symbol.as_str(), b.interval.as_token(), b.candle.time))
     });
     Ok(all)
+}
+
+/// Build the fetch-progress bar. Hidden — a no-op sink — when `--quiet` is
+/// set or when stderr is not a terminal, so the CLI stays silent when its
+/// output is being piped or redirected.
+fn build_progress_bar(total_pairs: u64, quiet: bool) -> ProgressBar {
+    if quiet || !std::io::stderr().is_terminal() {
+        return ProgressBar::hidden();
+    }
+    let bar = ProgressBar::new(total_pairs);
+    bar.set_style(
+        ProgressStyle::with_template("  fetching [{bar:20.cyan/blue}] {pos}/{len} {msg}")
+            .expect("progress template compiles")
+            .progress_chars("=> "),
+    );
+    // Steady tick so the bar animates during a single slow fetch (no per-page
+    // callback from the underlying `CandleSource` to feed it manually).
+    bar.enable_steady_tick(StdDuration::from_millis(120));
+    bar
 }
 
 /// Dispatch on the provider name to a concrete [`CandleSource`] implementation.
