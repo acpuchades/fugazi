@@ -1,18 +1,20 @@
-//! The `fugazi get` subcommand: fetch OHLCV bars from a remote provider and
+//! The `fugazi get` subcommand: fetch OHLCV bars from remote providers and
 //! write them to a `;`-delimited CSV in the same shape `--series` reads back.
 //!
-//! Spec grammar: `<provider>:<symbol>[<freq>(,<freq>)*](,<symbol>[<freq>(,<freq>)*])*`
-//! — the brackets are required. Example:
+//! Takes one or more specs, each
+//! `<provider>:<symbol>[<freq>(,<freq>)*](,<symbol>[<freq>(,<freq>)*])*`
+//! — the brackets are required. Every symbol/interval series across all specs
+//! downloads concurrently, one progress bar per series. Example:
 //!
 //! ```text
-//! fugazi get binance:BTCUSDT[1d,1h],ETHUSDT[1d] \
+//! fugazi get binance:BTCUSDT[1d,1h],ETHUSDT[1d] yfinance:AAPL[1d] \
 //!            --since 2020-01-01 --until today \
 //!            -o candles.csv
 //! ```
 //!
 //! Output columns: `symbol;freq;time;open;high;low;close;volume`, sorted
-//! ascending by `(symbol, freq, time)`. `time` is ISO 8601 UTC
-//! (`YYYY-MM-DDTHH:MM:SSZ`).
+//! ascending by `time` (ties broken by symbol, then freq). `time` is ISO 8601
+//! UTC (`YYYY-MM-DDTHH:MM:SSZ`).
 //!
 //! **String parsing lives here, not in the library.** The library's
 //! [`fugazi::sources`] API is object/enum-only; this file translates the
@@ -25,10 +27,11 @@ use std::time::Duration as StdDuration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use time::format_description::well_known::Rfc3339;
 use time::{Date, Duration, Month, OffsetDateTime, Time};
 use tokio::runtime::Builder as RuntimeBuilder;
+use tokio::task::JoinSet;
 
 use fugazi::sources::{Binance, CandleSource, Interval, TimedCandle, Timestamp, Yahoo};
 
@@ -64,11 +67,12 @@ struct FetchSpec {
 
 #[derive(Args, Debug)]
 pub struct GetArgs {
-    /// The fetch spec: `<provider>:<symbol>[<freq>,<freq>,...](,<symbol>[<freq>,...])*`,
+    /// Fetch specs: `<provider>:<symbol>[<freq>,<freq>,...](,<symbol>[<freq>,...])*`,
     /// e.g. `binance:BTCUSDT[1d,1h],ETHUSDT[1d]`. Frequency tokens are the
-    /// familiar `1m`/`5m`/`1h`/`4h`/`1d`/`1w`/`1M`.
-    #[arg(value_name = "SPEC")]
-    spec: String,
+    /// familiar `1m`/`5m`/`1h`/`4h`/`1d`/`1w`/`1M`. All series download in
+    /// parallel.
+    #[arg(value_name = "SPEC", required = true, num_args = 1..)]
+    specs: Vec<String>,
 
     /// Start date (inclusive). Formats: ISO `YYYY-MM-DD`, EU `D-M-YYYY`,
     /// or relative (`today`, `yesterday`, `Nd ago`, `Nw ago`).
@@ -90,8 +94,11 @@ pub struct GetArgs {
 }
 
 pub fn run(args: GetArgs) -> Result<()> {
-    let fetch_spec =
-        parse_spec(&args.spec).with_context(|| format!("parsing spec {:?}", args.spec))?;
+    let fetch_specs: Vec<FetchSpec> = args
+        .specs
+        .iter()
+        .map(|s| parse_spec(s).with_context(|| format!("parsing spec {s:?}")))
+        .collect::<Result<_>>()?;
     let now = OffsetDateTime::now_utc();
     let since = parse_date(&args.since, now).with_context(|| format!("--since {:?}", args.since))?;
     let until = parse_date(&args.until, now).with_context(|| format!("--until {:?}", args.until))?;
@@ -106,7 +113,7 @@ pub fn run(args: GetArgs) -> Result<()> {
     let until_ts = Timestamp::from_datetime(until);
 
     if !args.quiet {
-        style::print_header("get", "fetch OHLCV candles from a remote provider");
+        style::print_header("get", "fetch OHLCV candles from remote providers");
     }
 
     if let Some(parent) = args.output.parent()
@@ -121,39 +128,36 @@ pub fn run(args: GetArgs) -> Result<()> {
         .build()
         .context("building tokio runtime")?;
 
-    let n_chunks: usize = fetch_spec
-        .symbols
+    let series: Vec<Series> = fetch_specs
         .iter()
-        .flat_map(|s| s.intervals.iter())
-        .map(|&i| chunk_bounds(since_ts, until_ts, i).len())
-        .sum();
-    let progress = build_progress_bar(n_chunks as u64, args.quiet);
+        .flat_map(|spec| {
+            spec.symbols.iter().flat_map(|sym| {
+                sym.intervals.iter().map(|&interval| Series {
+                    provider: spec.provider.clone(),
+                    symbol: sym.symbol.clone(),
+                    interval,
+                })
+            })
+        })
+        .collect();
 
-    let rows = rt.block_on(async {
-        fetch_all(
-            &fetch_spec.provider,
-            &fetch_spec.symbols,
-            since_ts,
-            until_ts,
-            &progress,
-        )
-        .await
-    })?;
+    let (multi, bars) = build_progress_bars(&series, since_ts, until_ts, args.quiet);
 
-    progress.finish_and_clear();
+    let result = rt.block_on(fetch_all(series.clone(), since_ts, until_ts, bars));
+    let _ = multi.clear();
+    let rows = result?;
 
     write_csv(&args.output, &rows).with_context(|| format!("writing {}", args.output.display()))?;
 
     if !args.quiet {
-        let n_symbols = fetch_spec.symbols.len();
-        let n_pairs: usize = fetch_spec.symbols.iter().map(|s| s.intervals.len()).sum();
+        let n_symbols: usize = fetch_specs.iter().map(|s| s.symbols.len()).sum();
         println!(
             "{}: wrote {} rows across {} symbol{}/{} interval series",
             args.output.display(),
             rows.len(),
             n_symbols,
             if n_symbols == 1 { "" } else { "s" },
-            n_pairs,
+            series.len(),
         );
     }
     Ok(())
@@ -164,6 +168,26 @@ struct Row {
     symbol: String,
     interval: Interval,
     candle: TimedCandle,
+}
+
+/// One downloadable series: a `(provider, symbol, interval)` triple. The unit
+/// of parallelism — each series gets its own fetch task and progress bar.
+#[derive(Clone)]
+struct Series {
+    provider: String,
+    symbol: String,
+    interval: Interval,
+}
+
+impl Series {
+    fn label(&self) -> String {
+        format!(
+            "{}:{}[{}]",
+            self.provider,
+            self.symbol,
+            self.interval.as_token()
+        )
+    }
 }
 
 /// Bars per download chunk. Matches Binance's max klines per request, so on
@@ -187,69 +211,104 @@ fn chunk_bounds(since: Timestamp, until: Timestamp, interval: Interval) -> Vec<(
     chunks
 }
 
-/// Delay between successive chunk requests, mirroring the politeness delay
-/// the providers apply between their own pagination pages.
+/// Delay between successive chunk requests *within one series*, mirroring the
+/// politeness delay the providers apply between their own pagination pages.
+/// Series run concurrently; the delay paces each series' own request stream.
 const CHUNK_DELAY: StdDuration = StdDuration::from_millis(100);
 
+/// Download every series concurrently (one task per series), merge the rows,
+/// and sort them ascending by time (ties broken by symbol, then freq).
 async fn fetch_all(
-    provider: &str,
-    symbols: &[SymbolSpec],
+    series: Vec<Series>,
     since: Timestamp,
     until: Timestamp,
-    progress: &ProgressBar,
+    bars: Vec<ProgressBar>,
 ) -> Result<Vec<Row>> {
+    let mut tasks = JoinSet::new();
+    for (s, bar) in series.into_iter().zip(bars) {
+        tasks.spawn(fetch_series(s, since, until, bar));
+    }
     let mut all: Vec<Row> = Vec::new();
-    let mut first = true;
-    for sym in symbols {
-        for &interval in &sym.intervals {
-            let label = format!("{provider}:{}[{}]", sym.symbol, interval.as_token());
-            for (chunk_since, chunk_until) in chunk_bounds(since, until, interval) {
-                if !first {
-                    tokio::time::sleep(CHUNK_DELAY).await;
-                }
-                first = false;
-                progress.set_message(format!(
-                    "{label} {}",
-                    chunk_since.to_datetime().date()
-                ));
-                let bars = fetch(provider, &sym.symbol, interval, chunk_since, chunk_until)
-                    .await
-                    .with_context(|| format!("fetching {label}"))?;
-                for tc in bars {
-                    all.push(Row {
-                        symbol: sym.symbol.clone(),
-                        interval,
-                        candle: tc,
-                    });
-                }
-                progress.inc(1);
-            }
-        }
+    while let Some(joined) = tasks.join_next().await {
+        all.extend(joined.context("fetch task panicked")??);
     }
     all.sort_by(|a, b| {
-        (a.symbol.as_str(), a.interval.as_token(), a.candle.time)
-            .cmp(&(b.symbol.as_str(), b.interval.as_token(), b.candle.time))
+        (a.candle.time, a.symbol.as_str(), a.interval.as_token())
+            .cmp(&(b.candle.time, b.symbol.as_str(), b.interval.as_token()))
     });
     Ok(all)
 }
 
-/// Build the fetch-progress bar, denominated in download *chunks* (see
-/// [`chunk_bounds`]). Hidden — a no-op sink — when `--quiet` is set or when
-/// stderr is not a terminal, so the CLI stays silent when its output is being
-/// piped or redirected.
-fn build_progress_bar(total_chunks: u64, quiet: bool) -> ProgressBar {
-    if quiet || !std::io::stderr().is_terminal() {
-        return ProgressBar::hidden();
+/// Fetch one series chunk-by-chunk (sequentially — the politeness delay is
+/// per series), advancing its own progress bar.
+async fn fetch_series(
+    series: Series,
+    since: Timestamp,
+    until: Timestamp,
+    bar: ProgressBar,
+) -> Result<Vec<Row>> {
+    let label = series.label();
+    let mut rows: Vec<Row> = Vec::new();
+    let mut first = true;
+    for (chunk_since, chunk_until) in chunk_bounds(since, until, series.interval) {
+        if !first {
+            tokio::time::sleep(CHUNK_DELAY).await;
+        }
+        first = false;
+        bar.set_message(chunk_since.to_datetime().date().to_string());
+        let candles = fetch(
+            &series.provider,
+            &series.symbol,
+            series.interval,
+            chunk_since,
+            chunk_until,
+        )
+        .await
+        .with_context(|| format!("fetching {label}"))?;
+        rows.extend(candles.into_iter().map(|tc| Row {
+            symbol: series.symbol.clone(),
+            interval: series.interval,
+            candle: tc,
+        }));
+        bar.inc(1);
     }
-    let bar = ProgressBar::new(total_chunks);
-    bar.set_style(
-        ProgressStyle::with_template("  fetching [{bar:20.cyan/blue}] {pos}/{len} {msg}")
-            .expect("progress template compiles")
-            .progress_chars("=> "),
-    );
-    // Steady tick so the bar animates while a single chunk is in flight.
-    bar.enable_steady_tick(StdDuration::from_millis(120));
-    bar
+    bar.finish_with_message("done");
+    Ok(rows)
+}
+
+/// Build one fetch-progress bar per series, denominated in download *chunks*
+/// (see [`chunk_bounds`]), grouped under a [`MultiProgress`] so they render
+/// stacked and update independently. Hidden — a no-op sink — when `--quiet`
+/// is set or when stderr is not a terminal, so the CLI stays silent when its
+/// output is being piped or redirected.
+fn build_progress_bars(
+    series: &[Series],
+    since: Timestamp,
+    until: Timestamp,
+    quiet: bool,
+) -> (MultiProgress, Vec<ProgressBar>) {
+    let multi = if quiet || !std::io::stderr().is_terminal() {
+        MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
+    } else {
+        MultiProgress::new()
+    };
+    let width = series.iter().map(|s| s.label().len()).max().unwrap_or(0);
+    let style = ProgressStyle::with_template("  {prefix} [{bar:20.cyan/blue}] {pos}/{len} {msg}")
+        .expect("progress template compiles")
+        .progress_chars("=> ");
+    let bars = series
+        .iter()
+        .map(|s| {
+            let n_chunks = chunk_bounds(since, until, s.interval).len();
+            let bar = multi.add(ProgressBar::new(n_chunks as u64));
+            bar.set_style(style.clone());
+            bar.set_prefix(format!("{:<width$}", s.label()));
+            // Steady tick so the bar animates while a single chunk is in flight.
+            bar.enable_steady_tick(StdDuration::from_millis(120));
+            bar
+        })
+        .collect();
+    (multi, bars)
 }
 
 /// Dispatch on the provider name to a concrete [`CandleSource`] implementation.

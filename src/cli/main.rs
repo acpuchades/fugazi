@@ -54,10 +54,11 @@ enum Command {
     Check(CheckArgs),
     /// Sweep a strategy over a parameter grid and rank the combinations.
     Optimize(OptimizeArgs),
-    /// Fetch OHLCV candles from a remote provider into a `run`-ready CSV.
+    /// Fetch OHLCV candles from remote providers into a `run`-ready CSV.
     ///
-    /// Spec grammar: `<provider>:<symbol>[<freq>,<freq>...](,<symbol>[<freq>...])*`.
-    /// Example: `fugazi get binance:BTCUSDT[1d,1h],ETHUSDT[1d] --since 2020-01-01 --until today -o candles.csv`.
+    /// Spec grammar: `<provider>:<symbol>[<freq>,<freq>...](,<symbol>[<freq>...])*`;
+    /// several specs may be given and all series download in parallel.
+    /// Example: `fugazi get binance:BTCUSDT[1d,1h],ETHUSDT[1d] yfinance:AAPL[1d] --since 2020-01-01 --until today -o candles.csv`.
     Get(get::GetArgs),
     /// Print a shell-completion script for the given shell to stdout.
     ///
