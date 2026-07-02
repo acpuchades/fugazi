@@ -61,10 +61,56 @@ struct Group {
     entries: &'static [Entry],
 }
 
-/// The full tag catalogue — one flat list of groups, rendered in alphabetical
-/// order of title (sorted at print time, so source order here is free to stay
-/// topical).
+/// The full tag catalogue — one flat list of groups, kept in alphabetical
+/// order of title (rendered as-is; a test asserts the order so a new group
+/// lands in the right place).
 const GROUPS: &[Group] = &[
+    Group {
+        title: "arithmetic operators",
+        entries: &[
+            Entry { tag: "add", args: "lhs, rhs", doc: "lhs + rhs" },
+            Entry { tag: "sub", args: "lhs, rhs", doc: "lhs − rhs" },
+            Entry { tag: "mul", args: "lhs, rhs", doc: "lhs × rhs" },
+            Entry { tag: "div", args: "lhs, rhs", doc: "lhs / rhs (None on divide-by-zero)" },
+        ],
+    },
+    Group {
+        title: "bands (one tag per component)",
+        entries: &[
+            Entry { tag: "bb_upper",       args: "source, period, k",                             doc: "Bollinger upper band" },
+            Entry { tag: "bb_middle",      args: "source, period, k",                             doc: "Bollinger middle band" },
+            Entry { tag: "bb_lower",       args: "source, period, k",                             doc: "Bollinger lower band" },
+            Entry { tag: "keltner_upper",  args: "source, ema_period, atr_period, multiplier",    doc: "Keltner upper band" },
+            Entry { tag: "keltner_middle", args: "source, ema_period, atr_period, multiplier",    doc: "Keltner middle band" },
+            Entry { tag: "keltner_lower",  args: "source, ema_period, atr_period, multiplier",    doc: "Keltner lower band" },
+            Entry { tag: "donchian_upper", args: "high, low, period",                             doc: "Donchian upper band" },
+            Entry { tag: "donchian_middle",args: "high, low, period",                             doc: "Donchian middle band" },
+            Entry { tag: "donchian_lower", args: "high, low, period",                             doc: "Donchian lower band" },
+        ],
+    },
+    Group {
+        title: "bar indicators (consume the whole Candle, no source)",
+        entries: &[
+            Entry { tag: "atr",         args: "period", doc: "average true range" },
+            Entry { tag: "mfi",         args: "period", doc: "money-flow index" },
+            Entry { tag: "true_range",  args: "",       doc: "true range of the current bar" },
+            Entry { tag: "obv",         args: "",       doc: "on-balance volume (cumulative)" },
+            Entry { tag: "vwap",        args: "",       doc: "volume-weighted average price (cumulative)" },
+            Entry { tag: "ad",          args: "",       doc: "Chaikin A/D line (cumulative)" },
+        ],
+    },
+    Group {
+        title: "boolean logic",
+        entries: &[
+            Entry { tag: "and",     args: "lhs, rhs",   doc: "lhs && rhs" },
+            Entry { tag: "or",      args: "lhs, rhs",   doc: "lhs || rhs" },
+            Entry { tag: "xor",     args: "lhs, rhs",   doc: "lhs ^ rhs" },
+            Entry { tag: "all",     args: "[s1, ...]",  doc: "AND-fold of a list (empty ⇒ true)" },
+            Entry { tag: "any",     args: "[s1, ...]",  doc: "OR-fold of a list (empty ⇒ false)" },
+            Entry { tag: "not",     args: "<signal>",   doc: "logical NOT" },
+            Entry { tag: "changed", args: "<signal>",   doc: "fires on any transition (0->1 or 1->0)" },
+        ],
+    },
     Group {
         title: "candle leaves",
         entries: &[
@@ -78,6 +124,17 @@ const GROUPS: &[Group] = &[
         ],
     },
     Group {
+        title: "comparisons (tolerance-aware; epsilon defaults to 1e-8)",
+        entries: &[
+            Entry { tag: "gt", args: "lhs, rhs, epsilon?", doc: "lhs > rhs" },
+            Entry { tag: "lt", args: "lhs, rhs, epsilon?", doc: "lhs < rhs" },
+            Entry { tag: "ge", args: "lhs, rhs, epsilon?", doc: "lhs >= rhs" },
+            Entry { tag: "le", args: "lhs, rhs, epsilon?", doc: "lhs <= rhs" },
+            Entry { tag: "eq", args: "lhs, rhs, epsilon?", doc: "lhs == rhs within epsilon" },
+            Entry { tag: "ne", args: "lhs, rhs, epsilon?", doc: "lhs != rhs beyond epsilon" },
+        ],
+    },
+    Group {
         title: "constants",
         entries: &[
             Entry { tag: "value", args: "<n>",    doc: "a constant scalar" },
@@ -85,11 +142,34 @@ const GROUPS: &[Group] = &[
         ],
     },
     Group {
-        title: "position anchors (only inside a strategy; read the live position)",
+        title: "crossovers (comparison + just-transitioned)",
         entries: &[
-            Entry { tag: "entry",  args: "", doc: "the position's fill price (None while flat)" },
-            Entry { tag: "peak",   args: "", doc: "running high since entry (long trailing-stop anchor)" },
-            Entry { tag: "trough", args: "", doc: "running low since entry (short trailing-stop anchor)" },
+            Entry { tag: "crosses_above", args: "lhs, rhs", doc: "lhs > rhs and the comparison just flipped" },
+            Entry { tag: "crosses_below", args: "lhs, rhs", doc: "lhs < rhs and the comparison just flipped" },
+        ],
+    },
+    Group {
+        title: "level comparisons (source vs. a constant)",
+        entries: &[
+            Entry { tag: "above", args: "source, level", doc: "source > level" },
+            Entry { tag: "below", args: "source, level", doc: "source < level" },
+        ],
+    },
+    Group {
+        title: "lookback operators",
+        entries: &[
+            Entry { tag: "lag",   args: "source, periods", doc: "value from `periods` bars ago" },
+            Entry { tag: "diff",  args: "source, periods", doc: "x[t] − x[t − periods]" },
+            Entry { tag: "ratio", args: "source, periods", doc: "x[t] / x[t − periods]" },
+            Entry { tag: "roc",   args: "source, periods", doc: "rate of change (100 × ratio − 100)" },
+        ],
+    },
+    Group {
+        title: "MACD (one tag per component)",
+        entries: &[
+            Entry { tag: "macd_line",      args: "source, fast, slow, signal", doc: "fast EMA − slow EMA" },
+            Entry { tag: "macd_signal",    args: "source, fast, slow, signal", doc: "signal-EMA of the MACD line" },
+            Entry { tag: "macd_histogram", args: "source, fast, slow, signal", doc: "line − signal" },
         ],
     },
     Group {
@@ -114,25 +194,25 @@ const GROUPS: &[Group] = &[
         ],
     },
     Group {
-        title: "MACD (one tag per component)",
+        title: "placeholders (resolved before typed parsing; see `fugazi run --params`)",
         entries: &[
-            Entry { tag: "macd_line",      args: "source, fast, slow, signal", doc: "fast EMA − slow EMA" },
-            Entry { tag: "macd_signal",    args: "source, fast, slow, signal", doc: "signal-EMA of the MACD line" },
-            Entry { tag: "macd_histogram", args: "source, fast, slow, signal", doc: "line − signal" },
+            Entry { tag: "param", args: "key, default?", doc: "substitute the value passed as --params key=..." },
+            Entry { tag: "param", args: "<key>",         doc: "bare-string shorthand for { key: <key> }" },
         ],
     },
     Group {
-        title: "bands (one tag per component)",
+        title: "position anchors (only inside a strategy; read the live position)",
         entries: &[
-            Entry { tag: "bb_upper",       args: "source, period, k",                             doc: "Bollinger upper band" },
-            Entry { tag: "bb_middle",      args: "source, period, k",                             doc: "Bollinger middle band" },
-            Entry { tag: "bb_lower",       args: "source, period, k",                             doc: "Bollinger lower band" },
-            Entry { tag: "keltner_upper",  args: "source, ema_period, atr_period, multiplier",    doc: "Keltner upper band" },
-            Entry { tag: "keltner_middle", args: "source, ema_period, atr_period, multiplier",    doc: "Keltner middle band" },
-            Entry { tag: "keltner_lower",  args: "source, ema_period, atr_period, multiplier",    doc: "Keltner lower band" },
-            Entry { tag: "donchian_upper", args: "high, low, period",                             doc: "Donchian upper band" },
-            Entry { tag: "donchian_middle",args: "high, low, period",                             doc: "Donchian middle band" },
-            Entry { tag: "donchian_lower", args: "high, low, period",                             doc: "Donchian lower band" },
+            Entry { tag: "entry",  args: "", doc: "the position's fill price (None while flat)" },
+            Entry { tag: "peak",   args: "", doc: "running high since entry (long trailing-stop anchor)" },
+            Entry { tag: "trough", args: "", doc: "running low since entry (short trailing-stop anchor)" },
+        ],
+    },
+    Group {
+        title: "rolling extrema",
+        entries: &[
+            Entry { tag: "rolling_max", args: "source, period", doc: "rolling maximum over the window" },
+            Entry { tag: "rolling_min", args: "source, period", doc: "rolling minimum over the window" },
         ],
     },
     Group {
@@ -147,86 +227,6 @@ const GROUPS: &[Group] = &[
             Entry { tag: "aroon_down",       args: "period",     doc: "Aroon Down" },
             Entry { tag: "aroon_oscillator", args: "period",     doc: "Aroon Up − Aroon Down" },
             Entry { tag: "sar",              args: "step, max",  doc: "parabolic SAR" },
-        ],
-    },
-    Group {
-        title: "bar indicators (consume the whole Candle, no source)",
-        entries: &[
-            Entry { tag: "atr",         args: "period", doc: "average true range" },
-            Entry { tag: "mfi",         args: "period", doc: "money-flow index" },
-            Entry { tag: "true_range",  args: "",       doc: "true range of the current bar" },
-            Entry { tag: "obv",         args: "",       doc: "on-balance volume (cumulative)" },
-            Entry { tag: "vwap",        args: "",       doc: "volume-weighted average price (cumulative)" },
-            Entry { tag: "ad",          args: "",       doc: "Chaikin A/D line (cumulative)" },
-        ],
-    },
-    Group {
-        title: "arithmetic operators",
-        entries: &[
-            Entry { tag: "add", args: "lhs, rhs", doc: "lhs + rhs" },
-            Entry { tag: "sub", args: "lhs, rhs", doc: "lhs − rhs" },
-            Entry { tag: "mul", args: "lhs, rhs", doc: "lhs × rhs" },
-            Entry { tag: "div", args: "lhs, rhs", doc: "lhs / rhs (None on divide-by-zero)" },
-        ],
-    },
-    Group {
-        title: "lookback operators",
-        entries: &[
-            Entry { tag: "lag",   args: "source, periods", doc: "value from `periods` bars ago" },
-            Entry { tag: "diff",  args: "source, periods", doc: "x[t] − x[t − periods]" },
-            Entry { tag: "ratio", args: "source, periods", doc: "x[t] / x[t − periods]" },
-            Entry { tag: "roc",   args: "source, periods", doc: "rate of change (100 × ratio − 100)" },
-        ],
-    },
-    Group {
-        title: "rolling extrema",
-        entries: &[
-            Entry { tag: "rolling_max", args: "source, period", doc: "rolling maximum over the window" },
-            Entry { tag: "rolling_min", args: "source, period", doc: "rolling minimum over the window" },
-        ],
-    },
-    Group {
-        title: "comparisons (tolerance-aware; epsilon defaults to 1e-8)",
-        entries: &[
-            Entry { tag: "gt", args: "lhs, rhs, epsilon?", doc: "lhs > rhs" },
-            Entry { tag: "lt", args: "lhs, rhs, epsilon?", doc: "lhs < rhs" },
-            Entry { tag: "ge", args: "lhs, rhs, epsilon?", doc: "lhs >= rhs" },
-            Entry { tag: "le", args: "lhs, rhs, epsilon?", doc: "lhs <= rhs" },
-            Entry { tag: "eq", args: "lhs, rhs, epsilon?", doc: "lhs == rhs within epsilon" },
-            Entry { tag: "ne", args: "lhs, rhs, epsilon?", doc: "lhs != rhs beyond epsilon" },
-        ],
-    },
-    Group {
-        title: "level comparisons (source vs. a constant)",
-        entries: &[
-            Entry { tag: "above", args: "source, level", doc: "source > level" },
-            Entry { tag: "below", args: "source, level", doc: "source < level" },
-        ],
-    },
-    Group {
-        title: "crossovers (comparison + just-transitioned)",
-        entries: &[
-            Entry { tag: "crosses_above", args: "lhs, rhs", doc: "lhs > rhs and the comparison just flipped" },
-            Entry { tag: "crosses_below", args: "lhs, rhs", doc: "lhs < rhs and the comparison just flipped" },
-        ],
-    },
-    Group {
-        title: "boolean logic",
-        entries: &[
-            Entry { tag: "and",     args: "lhs, rhs",   doc: "lhs && rhs" },
-            Entry { tag: "or",      args: "lhs, rhs",   doc: "lhs || rhs" },
-            Entry { tag: "xor",     args: "lhs, rhs",   doc: "lhs ^ rhs" },
-            Entry { tag: "all",     args: "[s1, ...]",  doc: "AND-fold of a list (empty ⇒ true)" },
-            Entry { tag: "any",     args: "[s1, ...]",  doc: "OR-fold of a list (empty ⇒ false)" },
-            Entry { tag: "not",     args: "<signal>",   doc: "logical NOT" },
-            Entry { tag: "changed", args: "<signal>",   doc: "fires on any transition (0->1 or 1->0)" },
-        ],
-    },
-    Group {
-        title: "placeholders (resolved before typed parsing; see `fugazi run --params`)",
-        entries: &[
-            Entry { tag: "param", args: "key, default?", doc: "substitute the value passed as --params key=..." },
-            Entry { tag: "param", args: "<key>",         doc: "bare-string shorthand for { key: <key> }" },
         ],
     },
 ];
@@ -321,12 +321,11 @@ fn write_sources<W: Write>(w: &mut W, providers: &[(&str, &str)]) -> io::Result<
     Ok(())
 }
 
-/// Render the full tag catalogue, groups in alphabetical order of title.
+/// Render the full tag catalogue. [`GROUPS`] is already alphabetical, so this
+/// just walks it in order.
 fn write_indicators<W: Write>(w: &mut W) -> io::Result<()> {
     writeln!(w, "INDICATORS — the strategy-YAML tag vocabulary")?;
-    let mut groups: Vec<&Group> = GROUPS.iter().collect();
-    groups.sort_by_key(|g| g.title.to_lowercase());
-    for group in groups {
+    for group in GROUPS {
         writeln!(w)?;
         writeln!(w, "  {}:", group.title)?;
         for e in group.entries {
@@ -385,21 +384,14 @@ mod tests {
         }
     }
 
+    /// [`GROUPS`] is rendered as-is, so the alphabetical order lives in the
+    /// source itself — this pins it so a new group lands in the right place.
     #[test]
-    fn the_output_sorts_groups_alphabetically() {
-        let mut buf: Vec<u8> = Vec::new();
-        write_indicators(&mut buf).unwrap();
-        let text = String::from_utf8(buf).unwrap();
-
-        // Group headers are the two-space-indented lines ending in a colon.
-        let titles: Vec<&str> = text
-            .lines()
-            .filter(|l| l.starts_with("  ") && !l.starts_with("    ") && l.ends_with(':'))
-            .collect();
-        assert_eq!(titles.len(), GROUPS.len());
+    fn groups_are_declared_in_alphabetical_order() {
+        let titles: Vec<String> = GROUPS.iter().map(|g| g.title.to_lowercase()).collect();
         let mut sorted = titles.clone();
-        sorted.sort_by_key(|t| t.to_lowercase());
-        assert_eq!(titles, sorted, "group headers are not in alphabetical order");
+        sorted.sort();
+        assert_eq!(titles, sorted, "GROUPS is not declared in alphabetical order of title");
     }
 
     fn render_grid(items: &[&str], width: usize) -> String {
