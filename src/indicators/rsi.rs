@@ -79,6 +79,16 @@ impl<S: Indicator<Output = Real>> Indicator for Rsi<S> {
         self.value
     }
 
+    fn warm_up_period(&self) -> usize {
+        // One source output to seed the diff, then a full period of deltas.
+        self.source.warm_up_period() + self.gain.period()
+    }
+
+    fn unstable_period(&self) -> usize {
+        // Both Wilder states share the period, so they settle together.
+        self.source.unstable_period() + self.gain.settle_period()
+    }
+
     fn reset(&mut self) {
         self.source.reset();
         self.prev = None;

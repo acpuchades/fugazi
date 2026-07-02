@@ -40,6 +40,12 @@ impl Indicator for Vwap {
         self.value
     }
 
+    /// `1`, assuming the bar carries volume (all-zero-volume bars delay
+    /// readiness); the anchored average itself is not unstable.
+    fn warm_up_period(&self) -> usize {
+        1
+    }
+
     fn reset(&mut self) {
         self.cum_pv = 0.0;
         self.cum_volume = 0.0;

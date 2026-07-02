@@ -179,6 +179,12 @@ impl Indicator for PositionField {
         (self.select)(&self.position.0.borrow())
     }
 
+    /// `0`: readiness tracks the live [`Position`] (open vs flat), not how many
+    /// samples this field has seen.
+    fn warm_up_period(&self) -> usize {
+        0
+    }
+
     fn reset(&mut self) {}
 }
 

@@ -48,6 +48,13 @@ impl Indicator for Obv {
         self.value
     }
 
+    /// `1`; the cumulative total is *anchored*, not unstable — where it starts
+    /// is part of its meaning, so [`unstable_period`](Indicator::unstable_period)
+    /// stays `0`.
+    fn warm_up_period(&self) -> usize {
+        1
+    }
+
     fn reset(&mut self) {
         self.prev_close = None;
         self.value = None;

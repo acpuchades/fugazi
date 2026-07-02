@@ -161,6 +161,14 @@ impl Indicator for Sar {
         self.value
     }
 
+    /// `2` — the first bar only seeds the trend direction. Following TA-Lib,
+    /// SAR reports no unstable period: each stop-and-reverse re-anchors the
+    /// recursion, so the seed's influence ends at the first reversal rather
+    /// than decaying gradually.
+    fn warm_up_period(&self) -> usize {
+        2
+    }
+
     fn reset(&mut self) {
         self.bars = 0;
         self.is_long = true;

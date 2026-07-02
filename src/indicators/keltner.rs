@@ -118,6 +118,14 @@ impl<S: Indicator<Input = Candle, Output = Real>> Indicator for Keltner<S> {
         }
     }
 
+    fn warm_up_period(&self) -> usize {
+        self.ema.warm_up_period().max(self.atr.warm_up_period())
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.ema.stable_period().max(self.atr.stable_period()) - self.warm_up_period()
+    }
+
     fn reset(&mut self) {
         self.ema.reset();
         self.atr.reset();

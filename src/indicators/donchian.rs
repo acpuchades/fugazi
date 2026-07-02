@@ -114,6 +114,14 @@ where
         }
     }
 
+    fn warm_up_period(&self) -> usize {
+        self.high.warm_up_period().max(self.low.warm_up_period())
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.high.stable_period().max(self.low.stable_period()) - self.warm_up_period()
+    }
+
     fn reset(&mut self) {
         self.high.reset();
         self.low.reset();

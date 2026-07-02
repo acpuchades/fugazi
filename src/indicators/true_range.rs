@@ -42,6 +42,10 @@ impl Indicator for TrueRange {
         self.value
     }
 
+    fn warm_up_period(&self) -> usize {
+        1
+    }
+
     fn reset(&mut self) {
         self.prev_close = None;
         self.value = None;

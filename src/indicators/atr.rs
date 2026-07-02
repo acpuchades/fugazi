@@ -46,6 +46,16 @@ impl Indicator for Atr {
         self.value
     }
 
+    fn warm_up_period(&self) -> usize {
+        // The true range is ready from the first bar; the Wilder seed then
+        // consumes a full period of them.
+        self.state.period()
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.state.settle_period()
+    }
+
     fn reset(&mut self) {
         self.true_range.reset();
         self.state.reset();

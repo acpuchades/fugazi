@@ -121,6 +121,11 @@ impl Indicator for Aroon {
         }
     }
 
+    fn warm_up_period(&self) -> usize {
+        // The lookback spans the current bar plus the `period` before it.
+        self.period + 1
+    }
+
     fn reset(&mut self) {
         self.highest.reset();
         self.lowest.reset();

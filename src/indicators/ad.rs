@@ -39,6 +39,12 @@ impl Indicator for Ad {
         self.value
     }
 
+    /// `1`; like [`Obv`](super::Obv), the cumulative line is anchored rather
+    /// than unstable.
+    fn warm_up_period(&self) -> usize {
+        1
+    }
+
     fn reset(&mut self) {
         self.cumulative = 0.0;
         self.value = None;

@@ -56,6 +56,10 @@ impl<F: CandleField> Indicator for Field<F> {
         self.value
     }
 
+    fn warm_up_period(&self) -> usize {
+        1
+    }
+
     fn reset(&mut self) {
         self.value = None;
     }

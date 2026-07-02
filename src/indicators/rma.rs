@@ -48,6 +48,15 @@ impl<S: Indicator<Output = Real>> Indicator for Rma<S> {
         self.value
     }
 
+    fn warm_up_period(&self) -> usize {
+        // The mean seed consumes a full period of source outputs.
+        self.source.warm_up_period() + self.state.period() - 1
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.source.unstable_period() + self.state.settle_period()
+    }
+
     fn reset(&mut self) {
         self.source.reset();
         self.state.reset();

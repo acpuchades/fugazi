@@ -104,6 +104,16 @@ where
         self.value.clone()
     }
 
+    fn warm_up_period(&self) -> usize {
+        self.lhs.warm_up_period().max(self.rhs.warm_up_period())
+    }
+
+    fn unstable_period(&self) -> usize {
+        // Settled once the later-settling side is, expressed relative to this
+        // indicator's own (max-of-both) warm-up.
+        self.lhs.stable_period().max(self.rhs.stable_period()) - self.warm_up_period()
+    }
+
     fn reset(&mut self) {
         self.lhs.reset();
         self.rhs.reset();
@@ -242,6 +252,16 @@ where
         self.value
     }
 
+    fn warm_up_period(&self) -> usize {
+        // The lagged operand needs a source output `period` steps before the
+        // current one.
+        self.source.warm_up_period() + self.period
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.source.unstable_period()
+    }
+
     fn reset(&mut self) {
         self.source.reset();
         self.buffer.clear();
@@ -378,6 +398,16 @@ where
 
     fn value(&self) -> Option<Real> {
         self.value
+    }
+
+    fn warm_up_period(&self) -> usize {
+        // A full window of source outputs, the first of which arrives at the
+        // source's own warm-up.
+        self.source.warm_up_period() + self.inner.period() - 1
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.source.unstable_period()
     }
 
     fn reset(&mut self) {

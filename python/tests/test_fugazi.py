@@ -579,3 +579,34 @@ def test_resting_stop_gaps_to_the_open():
     w.set_take_profit("X", 110.0)
     w.cancel_protective("X")
     assert w.update("X", ta.Candle(105.0, 115.0, 104.0, 108.0, 0.0)) == []
+
+
+def test_warm_up_and_unstable_periods():
+    # Windowed: exact warm-up, no unstable tail.
+    sma = ta.sma(ta.close(), 20)
+    assert sma.warm_up_period() == 20
+    assert sma.unstable_period() == 0
+    assert sma.stable_period() == 20
+    # Recursive: the EMA seeds immediately but takes time to converge.
+    ema = ta.ema(ta.close(), 20)
+    assert ema.warm_up_period() == 1
+    assert ema.unstable_period() > 0
+    assert ema.stable_period() == ema.warm_up_period() + ema.unstable_period()
+    # Composition accounts for the whole chain, through signals too.
+    chained = ta.ema(ta.sma(ta.close(), 10), 20)
+    assert chained.warm_up_period() == 10
+    sig = ta.close().crosses_above(ta.sma(ta.close(), 10))
+    assert sig.warm_up_period() == 11  # comparison plus its edge detector
+    assert sig.unstable_period() == 0
+    # Multi-output indicators report the slowest line.
+    macd = ta.macd(ta.close(), 12, 26, 9)
+    assert macd.warm_up_period() == 1
+    assert macd.unstable_period() > 0
+
+
+def test_warm_up_matches_first_output():
+    node = ta.rsi(ta.close(), 14)
+    w = node.warm_up_period()
+    out = feed(node, closes([100.0 + 0.5 * i + (i % 3) for i in range(w + 3)]))
+    assert all(v is None for v in out[: w - 1])
+    assert all(v is not None for v in out[w - 1 :])

@@ -86,6 +86,11 @@ impl Indicator for Mfi {
         self.value
     }
 
+    fn warm_up_period(&self) -> usize {
+        // One bar seeds the typical-price move, then a full window of flows.
+        self.positive.period() + 1
+    }
+
     fn reset(&mut self) {
         self.prev_typical = None;
         self.positive.reset();

@@ -49,6 +49,14 @@ impl<S: Indicator<Output = Real>> Indicator for Wma<S> {
         self.value
     }
 
+    fn warm_up_period(&self) -> usize {
+        self.source.warm_up_period() + self.state.period() - 1
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.source.unstable_period()
+    }
+
     fn reset(&mut self) {
         self.source.reset();
         self.state.reset();

@@ -54,6 +54,8 @@ use fugazi_core::types::{Candle, Real};
 trait DynIndicator<I>: Send + Sync {
     fn update(&mut self, input: I) -> Option<Real>;
     fn value(&self) -> Option<Real>;
+    fn warm_up_period(&self) -> usize;
+    fn unstable_period(&self) -> usize;
     fn reset(&mut self);
     fn box_clone(&self) -> Box<dyn DynIndicator<I>>;
 }
@@ -67,6 +69,12 @@ where
     }
     fn value(&self) -> Option<Real> {
         Indicator::value(self)
+    }
+    fn warm_up_period(&self) -> usize {
+        Indicator::warm_up_period(self)
+    }
+    fn unstable_period(&self) -> usize {
+        Indicator::unstable_period(self)
     }
     fn reset(&mut self) {
         Indicator::reset(self)
@@ -104,6 +112,12 @@ impl<I> Indicator for Source<I> {
     fn value(&self) -> Option<Real> {
         self.0.value()
     }
+    fn warm_up_period(&self) -> usize {
+        self.0.warm_up_period()
+    }
+    fn unstable_period(&self) -> usize {
+        self.0.unstable_period()
+    }
     fn reset(&mut self) {
         self.0.reset()
     }
@@ -114,6 +128,8 @@ impl<I> Indicator for Source<I> {
 trait DynSignal<I>: Send + Sync {
     fn update(&mut self, input: I) -> bool;
     fn is_true(&self) -> bool;
+    fn warm_up_period(&self) -> usize;
+    fn unstable_period(&self) -> usize;
     fn reset(&mut self);
     fn box_clone(&self) -> Box<dyn DynSignal<I>>;
 }
@@ -127,6 +143,12 @@ where
     }
     fn is_true(&self) -> bool {
         self.value().unwrap_or(false)
+    }
+    fn warm_up_period(&self) -> usize {
+        Indicator::warm_up_period(self)
+    }
+    fn unstable_period(&self) -> usize {
+        Indicator::unstable_period(self)
     }
     fn reset(&mut self) {
         Indicator::reset(self)
@@ -163,6 +185,12 @@ impl<I> Indicator for SignalBox<I> {
     }
     fn value(&self) -> Option<bool> {
         Some(self.0.is_true())
+    }
+    fn warm_up_period(&self) -> usize {
+        self.0.warm_up_period()
+    }
+    fn unstable_period(&self) -> usize {
+        self.0.unstable_period()
     }
     fn reset(&mut self) {
         self.0.reset()
@@ -241,6 +269,8 @@ trait DynMulti<I>: Send + Sync {
     fn names(&self) -> &'static [&'static str];
     fn update(&mut self, input: I) -> Option<Vec<Real>>;
     fn value(&self) -> Option<Vec<Real>>;
+    fn warm_up_period(&self) -> usize;
+    fn unstable_period(&self) -> usize;
     fn reset(&mut self);
 }
 
@@ -257,6 +287,12 @@ where
     }
     fn value(&self) -> Option<Vec<Real>> {
         Indicator::value(self).map(|o| o.values())
+    }
+    fn warm_up_period(&self) -> usize {
+        Indicator::warm_up_period(self)
+    }
+    fn unstable_period(&self) -> usize {
+        Indicator::unstable_period(self)
     }
     fn reset(&mut self) {
         Indicator::reset(self)
@@ -298,6 +334,20 @@ impl AnySource {
             AnySource::Candle(s) => Indicator::value(s),
             AnySource::Real(s) => Indicator::value(s),
             AnySource::Const(c) => Some(*c),
+        }
+    }
+    fn warm_up_period(&self) -> usize {
+        match self {
+            AnySource::Candle(s) => Indicator::warm_up_period(s),
+            AnySource::Real(s) => Indicator::warm_up_period(s),
+            AnySource::Const(_) => 0,
+        }
+    }
+    fn unstable_period(&self) -> usize {
+        match self {
+            AnySource::Candle(s) => Indicator::unstable_period(s),
+            AnySource::Real(s) => Indicator::unstable_period(s),
+            AnySource::Const(_) => 0,
         }
     }
     fn reset(&mut self) {
@@ -355,6 +405,18 @@ impl AnySignal {
             AnySignal::Real(s) => BoolIndicatorExt::is_true(s),
         }
     }
+    fn warm_up_period(&self) -> usize {
+        match self {
+            AnySignal::Candle(s) => Indicator::warm_up_period(s),
+            AnySignal::Real(s) => Indicator::warm_up_period(s),
+        }
+    }
+    fn unstable_period(&self) -> usize {
+        match self {
+            AnySignal::Candle(s) => Indicator::unstable_period(s),
+            AnySignal::Real(s) => Indicator::unstable_period(s),
+        }
+    }
     fn reset(&mut self) {
         match self {
             AnySignal::Candle(s) => Indicator::reset(s),
@@ -380,6 +442,18 @@ impl AnyMulti {
         match self {
             AnyMulti::Candle(m) => m.0.value(),
             AnyMulti::Real(m) => m.0.value(),
+        }
+    }
+    fn warm_up_period(&self) -> usize {
+        match self {
+            AnyMulti::Candle(m) => m.0.warm_up_period(),
+            AnyMulti::Real(m) => m.0.warm_up_period(),
+        }
+    }
+    fn unstable_period(&self) -> usize {
+        match self {
+            AnyMulti::Candle(m) => m.0.unstable_period(),
+            AnyMulti::Real(m) => m.0.unstable_period(),
         }
     }
     fn reset(&mut self) {
@@ -631,6 +705,23 @@ impl PyIndicator {
     /// Whether enough samples have been seen to produce a value.
     fn is_ready(&self) -> bool {
         self.src.value().is_some()
+    }
+
+    /// The number of samples needed before the first value can appear.
+    fn warm_up_period(&self) -> usize {
+        self.src.warm_up_period()
+    }
+
+    /// Extra samples after warm-up before a recursive indicator (EMA, RSI, …)
+    /// has effectively converged; `0` for windowed indicators.
+    fn unstable_period(&self) -> usize {
+        self.src.unstable_period()
+    }
+
+    /// `warm_up_period() + unstable_period()`: how much history to feed before
+    /// trusting the output.
+    fn stable_period(&self) -> usize {
+        self.src.warm_up_period() + self.src.unstable_period()
     }
 
     /// Reset all internal state to freshly-constructed.
@@ -910,6 +1001,24 @@ impl PySignal {
         self.sig.is_true()
     }
 
+    /// The number of samples needed before the signal can produce a real state
+    /// (it reads `False` while warming up).
+    fn warm_up_period(&self) -> usize {
+        self.sig.warm_up_period()
+    }
+
+    /// Extra samples after warm-up before any recursive sources inside the
+    /// signal have effectively converged; `0` for windowed ones.
+    fn unstable_period(&self) -> usize {
+        self.sig.unstable_period()
+    }
+
+    /// `warm_up_period() + unstable_period()`: how much history to feed before
+    /// trusting the signal.
+    fn stable_period(&self) -> usize {
+        self.sig.warm_up_period() + self.sig.unstable_period()
+    }
+
     /// Reset all internal state.
     fn reset(&mut self) {
         self.sig.reset()
@@ -1031,6 +1140,24 @@ impl PyMulti {
     /// Whether enough samples have been seen to produce a value.
     fn is_ready(&self) -> bool {
         self.inner.value().is_some()
+    }
+
+    /// The number of samples needed before the first value can appear (for the
+    /// slowest output line).
+    fn warm_up_period(&self) -> usize {
+        self.inner.warm_up_period()
+    }
+
+    /// Extra samples after warm-up before a recursive indicator (MACD, ADX, …)
+    /// has effectively converged; `0` for windowed indicators.
+    fn unstable_period(&self) -> usize {
+        self.inner.unstable_period()
+    }
+
+    /// `warm_up_period() + unstable_period()`: how much history to feed before
+    /// trusting the output.
+    fn stable_period(&self) -> usize {
+        self.inner.warm_up_period() + self.inner.unstable_period()
     }
 
     /// Reset all internal state.

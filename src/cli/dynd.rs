@@ -74,6 +74,14 @@ impl Indicator for DynValue {
         self.0.value()
     }
 
+    fn warm_up_period(&self) -> usize {
+        self.0.warm_up_period()
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.0.unstable_period()
+    }
+
     fn reset(&mut self) {
         self.0.reset();
     }
@@ -100,6 +108,14 @@ impl Indicator for DynSignal {
 
     fn value(&self) -> Option<bool> {
         self.0.value()
+    }
+
+    fn warm_up_period(&self) -> usize {
+        self.0.warm_up_period()
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.0.unstable_period()
     }
 
     fn reset(&mut self) {

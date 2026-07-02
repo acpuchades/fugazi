@@ -104,6 +104,17 @@ impl Indicator for Adx {
         }
     }
 
+    fn warm_up_period(&self) -> usize {
+        // DX values start with the DMI; the second Wilder pass then consumes a
+        // full period of them before `adx` is ready.
+        self.dmi.warm_up_period() + self.dx.period() - 1
+    }
+
+    fn unstable_period(&self) -> usize {
+        // The DI lines must settle, then the DX smoothing settles on top.
+        self.dmi.unstable_period() + self.dx.settle_period()
+    }
+
     fn reset(&mut self) {
         self.dmi.reset();
         self.dx.reset();

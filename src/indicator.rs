@@ -34,6 +34,52 @@ pub trait Indicator {
         self.value().is_some()
     }
 
+    /// The number of samples that must be fed through
+    /// [`update`](Indicator::update) before the first output can appear.
+    ///
+    /// The exact warm-up: `update` returns `None` for the first
+    /// `warm_up_period() - 1` samples and (data permitting) `Some` from sample
+    /// `warm_up_period()` onwards. Composed indicators account for their
+    /// sources, so `Ema::new(Sma::new(src, 10), 20)` reports the warm-up of the
+    /// whole chain. `0` means ready without any input (e.g.
+    /// [`Value`](crate::indicators::Value)).
+    ///
+    /// "Data permitting": a degenerate input can delay readiness beyond this —
+    /// e.g. a division by zero in a [`Div`](crate::indicators::Div), or
+    /// zero-volume bars into a [`Vwap`](crate::indicators::Vwap). And the
+    /// position-anchored sources ([`PositionField`](crate::indicators::PositionField))
+    /// report `0` because their readiness tracks the live position, not the
+    /// sample count.
+    fn warm_up_period(&self) -> usize;
+
+    /// The number of *additional* samples after
+    /// [`warm_up_period`](Indicator::warm_up_period) before the output has
+    /// effectively converged.
+    ///
+    /// Windowed (FIR) indicators — SMA, rolling extrema, Bollinger, Stochastic,
+    /// … — depend only on the last `period` samples, so they are exact as soon
+    /// as they are ready and report `0` (the default). Recursive (IIR)
+    /// indicators — EMA, RMA/Wilder and everything built on them (RSI, ATR,
+    /// ADX, MACD, …) — carry their seed forward forever, so early outputs
+    /// depend on *where the stream started*; they report the number of samples
+    /// until the seed's residual weight decays below 0.1%, after which the
+    /// output no longer meaningfully depends on the seeding (the same idea as
+    /// TA-Lib's "unstable period"). Composed indicators propagate their
+    /// sources' instability.
+    fn unstable_period(&self) -> usize {
+        0
+    }
+
+    /// Total samples before the output is both available and converged:
+    /// `warm_up_period() + unstable_period()`.
+    ///
+    /// The amount of history to feed before trusting the output — e.g. how many
+    /// bars to replay ahead of a live stream, or how many leading outputs of a
+    /// backtest to discard.
+    fn stable_period(&self) -> usize {
+        self.warm_up_period().saturating_add(self.unstable_period())
+    }
+
     /// Clear all state, returning the indicator to its freshly-constructed
     /// condition.
     fn reset(&mut self);

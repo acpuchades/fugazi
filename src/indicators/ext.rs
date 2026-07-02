@@ -275,6 +275,9 @@ mod tests {
         fn value(&self) -> Option<bool> {
             self.value
         }
+        fn warm_up_period(&self) -> usize {
+            1
+        }
         fn reset(&mut self) {
             self.idx = 0;
             self.value = None;

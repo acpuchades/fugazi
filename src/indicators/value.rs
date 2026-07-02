@@ -41,5 +41,9 @@ impl<I> Indicator for Value<I> {
         Some(self.constant)
     }
 
+    fn warm_up_period(&self) -> usize {
+        0
+    }
+
     fn reset(&mut self) {}
 }

@@ -121,6 +121,17 @@ impl Indicator for Dmi {
         }
     }
 
+    fn warm_up_period(&self) -> usize {
+        // The first bar only seeds the previous high/low/close, then the Wilder
+        // states consume a full period of directional bars.
+        self.plus_dm.period() + 1
+    }
+
+    fn unstable_period(&self) -> usize {
+        // All three Wilder states share the period, so they settle together.
+        self.plus_dm.settle_period()
+    }
+
     fn reset(&mut self) {
         self.prev = None;
         self.plus_dm.reset();

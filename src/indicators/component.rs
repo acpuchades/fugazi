@@ -66,6 +66,14 @@ impl<I: Indicator> Indicator for Component<I> {
         self.value
     }
 
+    fn warm_up_period(&self) -> usize {
+        self.source.warm_up_period()
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.source.unstable_period()
+    }
+
     fn reset(&mut self) {
         self.source.reset();
         self.value = None;

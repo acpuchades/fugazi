@@ -36,6 +36,12 @@ The crate has three composable layers:
 
 The first two layers are *pure* value-producers sharing one shape: state lives
 inside, `update(input)` advances one step, outputs are `None` until warmed up.
+Every indicator also reports its exact `warm_up_period()` (samples until the
+first output, accounting for the whole composed chain) and its
+`unstable_period()` — `0` for windowed indicators, and for the recursive ones
+(EMA, RSI, ATR, ADX, …) the extra samples until the seeding's influence has
+decayed below 0.1%. `stable_period()` is their sum: how much history to feed
+before trusting the output.
 
 ## Quick start
 

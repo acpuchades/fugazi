@@ -60,6 +60,16 @@ where
         self.value
     }
 
+    fn warm_up_period(&self) -> usize {
+        // The raw series starts when the longer inner WMA does, then the final
+        // √n window must fill.
+        self.full.warm_up_period().max(self.half.warm_up_period()) + self.smooth.period() - 1
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.full.unstable_period().max(self.half.unstable_period())
+    }
+
     fn reset(&mut self) {
         self.half.reset();
         self.full.reset();

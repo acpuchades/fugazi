@@ -62,6 +62,10 @@ impl Indicator for WilliamsR {
         self.value
     }
 
+    fn warm_up_period(&self) -> usize {
+        self.highest.period()
+    }
+
     fn reset(&mut self) {
         self.highest.reset();
         self.lowest.reset();

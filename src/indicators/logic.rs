@@ -84,6 +84,14 @@ impl<S: Indicator<Output = bool>> Indicator for Not<S> {
         self.value
     }
 
+    fn warm_up_period(&self) -> usize {
+        self.inner.warm_up_period()
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.inner.unstable_period()
+    }
+
     fn reset(&mut self) {
         self.inner.reset();
         self.value = None;
@@ -132,6 +140,15 @@ impl<S: Indicator<Output = bool>> Indicator for Change<S> {
         self.value
     }
 
+    fn warm_up_period(&self) -> usize {
+        // Two consecutive warmed source values: the first never fires.
+        self.inner.warm_up_period() + 1
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.inner.unstable_period()
+    }
+
     fn reset(&mut self) {
         self.inner.reset();
         self.prev = None;
@@ -173,6 +190,10 @@ impl<In> Indicator for Const<In> {
 
     fn value(&self) -> Option<bool> {
         Some(self.value)
+    }
+
+    fn warm_up_period(&self) -> usize {
+        0
     }
 
     fn reset(&mut self) {}

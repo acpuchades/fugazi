@@ -58,6 +58,17 @@ impl<S: Indicator<Output = Real>> Indicator for Ema<S> {
         self.value
     }
 
+    fn warm_up_period(&self) -> usize {
+        // Seeds on the source's first output.
+        self.source.warm_up_period()
+    }
+
+    fn unstable_period(&self) -> usize {
+        // Recursive: the seed's weight must decay, on top of any source
+        // instability.
+        self.source.unstable_period() + self.state.settle_period()
+    }
+
     fn reset(&mut self) {
         self.source.reset();
         self.state.reset();

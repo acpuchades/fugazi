@@ -22,7 +22,7 @@ Three composable layers: indicators (numeric sources), signals (boolean-valued i
 
 ### Indicators = the numeric *sources* (`src/indicator.rs`, `src/indicators/`)
 
-`Indicator` has associated `Input`/`Output`, `update(&mut self, Input) -> Option<Output>`, `value()` (the latest output, matching the public `value` field), `is_ready()`, `reset()`. Output is `Option` because most indicators need a warm-up (`None` until ready).
+`Indicator` has associated `Input`/`Output`, `update(&mut self, Input) -> Option<Output>`, `value()` (the latest output, matching the public `value` field), `is_ready()`, `reset()`, plus warm-up introspection: `warm_up_period()` (**required**, the *exact* number of samples before the first `Some`, accounting for the whole composed chain — wrappers add their window on top of `source.warm_up_period()`, binary carriers take the max of both sides) and `unstable_period()` (default `0`; recursive/IIR smoothers return the extra samples until the seed's residual weight decays below 0.1% — `EmaState`/`WilderState` expose `settle_period()` for this, and wrappers add it to `source.unstable_period()`); provided `stable_period()` = warm-up + unstable. `tests/warm_up.rs` asserts warm-up exactness for the whole catalogue — a new indicator should be added to that battery. Output is `Option` because most indicators need a warm-up (`None` until ready).
 
 The defining design choice: **price-series indicators own their input source** and are generic over it — `Ema<S>`, `Sma<S>`, `Rma<S>`, `Rsi<S>`, `Macd<S>` where `S: Indicator<Output = Real>`, with `Input = S::Input`. So composition is just nesting constructors:
 
@@ -101,5 +101,5 @@ Bare `Real -> Real` math with **no source and no `Indicator` impl**, so both sou
 - `Combine` (arithmetic, comparisons, and `And`/`Or`/`Xor`) feeds the *same* input to both sides, so it requires `Input: Clone`. Use `lhs`/`rhs` naming for binary operands.
 - `Combine` holds its op **by value** (so a comparison can carry epsilon); `Lookback`/`Extreme` hold a zero-sized op as `PhantomData<fn() -> Op>`. Input-ignoring leaves (`Value`, `Const`, `Field`) use `PhantomData<fn(I)>` / `fn() -> F` to satisfy the constraint rules (avoids E0207).
 - `Change` is a **bidirectional** toggle detector (fires on any transition); directional events come from pairing it with a comparison (see `crosses_above`).
-- Constructors `assert!(period > 0, ...)`; document warm-up length in the type's doc comment.
+- Constructors `assert!(period > 0, ...)`; document warm-up length in the type's doc comment, and implement `warm_up_period()` to match it exactly (plus `unstable_period()` when the indicator smooths recursively).
 - A comparison/edge is **`None` until** every source it depends on is warmed up (it reads `false` via `.is_true()`); a boolean op (`And`/`Or`/…) is likewise `None` until both sources are ready, so an edge that would coincide with warm-up is not detected (no spurious first-bar trade).
