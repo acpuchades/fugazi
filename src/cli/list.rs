@@ -334,11 +334,13 @@ fn write_sources<W: Write>(w: &mut W, providers: &[(&str, &str)]) -> io::Result<
 }
 
 /// Render the full tag catalogue. [`GROUPS`] is already alphabetical, so this
-/// just walks it in order.
+/// just walks it in order. No title line of its own — the banner printed by
+/// [`run`] already names the command.
 fn write_indicators<W: Write>(w: &mut W) -> io::Result<()> {
-    writeln!(w, "INDICATORS — the strategy-YAML tag vocabulary")?;
-    for group in GROUPS {
-        writeln!(w)?;
+    for (i, group) in GROUPS.iter().enumerate() {
+        if i > 0 {
+            writeln!(w)?;
+        }
         writeln!(w, "  {}:", group.title)?;
         for e in group.entries {
             let sig = signature(e);
