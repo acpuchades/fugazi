@@ -1,14 +1,35 @@
-//! `fugazi list` — enumerate the strategy-YAML tag vocabulary.
+//! `fugazi list` — printed catalogue of what the CLI knows about.
 //!
-//! A printed reference for every `!tag` [`crate::spec`] accepts: real-valued
-//! sources, boolean signals, and the `!param` placeholder that lets `--params`
-//! substitute values. Grouped by category, mirroring the reference in CLI.md
-//! so a user does not have to leave the terminal to remember an operator's
-//! name or arguments.
+//! Two things a user might want to enumerate:
+//!
+//! * `fugazi list indicators` (the default) — every `!tag` [`crate::spec`]
+//!   accepts: real-valued sources, boolean signals, and the `!param`
+//!   placeholder that lets `--params` substitute values. Grouped by category,
+//!   mirroring the reference in CLI.md so a user does not have to leave the
+//!   terminal to remember an operator's name or arguments.
+//! * `fugazi list sources` — every remote candle provider the `get` subcommand
+//!   can fetch from (`binance:BTCUSDT[1d]`, `yfinance:SPY[1d]`, …), rendered
+//!   from the same table `get` dispatches against.
 
 use std::io::{self, Write};
 
 use anyhow::Result;
+use clap::ValueEnum;
+
+use super::get::KNOWN_PROVIDERS;
+
+/// What `fugazi list` should print. Mirrors the CLI's positional argument;
+/// `Indicators` is the default so `fugazi list` (with no argument) keeps the
+/// original behaviour.
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[value(rename_all = "lower")]
+pub enum ListKind {
+    /// The strategy-YAML tag catalogue (sources, signals, `!param`).
+    #[default]
+    Indicators,
+    /// The remote candle providers the `get` subcommand can fetch from.
+    Sources,
+}
 
 /// One YAML tag: its name, argument shape and a one-line description.
 struct Entry {
@@ -222,14 +243,33 @@ const PLACEHOLDERS: Section = Section {
     ],
 };
 
-pub fn run() -> Result<()> {
+pub fn run(kind: ListKind) -> Result<()> {
     let out = io::stdout();
     let mut out = out.lock();
-    write_all(&mut out, &SOURCES)?;
-    writeln!(out)?;
-    write_all(&mut out, &SIGNALS)?;
-    writeln!(out)?;
-    write_all(&mut out, &PLACEHOLDERS)?;
+    match kind {
+        ListKind::Indicators => {
+            write_all(&mut out, &SOURCES)?;
+            writeln!(out)?;
+            write_all(&mut out, &SIGNALS)?;
+            writeln!(out)?;
+            write_all(&mut out, &PLACEHOLDERS)?;
+        }
+        ListKind::Sources => write_sources(&mut out, KNOWN_PROVIDERS)?,
+    }
+    Ok(())
+}
+
+/// Render the `fugazi get` provider table. Column widths track the widest
+/// provider name so the descriptions line up regardless of how the list grows.
+fn write_sources<W: Write>(w: &mut W, providers: &[(&str, &str)]) -> io::Result<()> {
+    writeln!(w, "SOURCES — remote candle providers (`fugazi get`)")?;
+    writeln!(w)?;
+    writeln!(w, "  Spec grammar: <provider>:<symbol>[<freq>,...](,<symbol>[<freq>,...])*")?;
+    writeln!(w)?;
+    let name_width = providers.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+    for (name, doc) in providers {
+        writeln!(w, "    {name:<name_width$}  {doc}")?;
+    }
     Ok(())
 }
 
@@ -296,5 +336,22 @@ mod tests {
         for tag in ["close", "!ema", "!macd_line", "!crosses_above", "!and", "!param"] {
             assert!(text.contains(tag), "missing tag `{tag}` in output");
         }
+    }
+
+    #[test]
+    fn sources_output_lists_every_registered_provider() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_sources(&mut buf, KNOWN_PROVIDERS).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(text.contains("SOURCES"));
+        for (name, doc) in KNOWN_PROVIDERS {
+            assert!(text.contains(name), "missing provider `{name}` in output");
+            assert!(text.contains(doc), "missing description for `{name}` in output");
+        }
+    }
+
+    #[test]
+    fn list_kind_defaults_to_indicators() {
+        assert_eq!(ListKind::default(), ListKind::Indicators);
     }
 }

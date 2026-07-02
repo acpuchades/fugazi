@@ -71,9 +71,17 @@ enum Command {
         /// Target shell (`bash`, `zsh`, `fish`, `elvish`, `powershell`).
         shell: Shell,
     },
-    /// Print the catalogue of YAML tags a strategy spec accepts (sources,
-    /// signals, and the `!param` placeholder), grouped by category.
-    List,
+    /// Print a printed catalogue of what the CLI knows about.
+    ///
+    /// `fugazi list indicators` (the default) enumerates the strategy-YAML tag
+    /// vocabulary (real-valued sources, boolean signals, the `!param`
+    /// placeholder); `fugazi list sources` enumerates the remote candle
+    /// providers the `get` subcommand can fetch from.
+    List {
+        /// What to list: `indicators` (default) or `sources`.
+        #[arg(value_enum, default_value_t = list::ListKind::Indicators)]
+        kind: list::ListKind,
+    },
 }
 
 #[derive(Args)]
@@ -248,7 +256,7 @@ fn main() -> Result<()> {
         Command::Optimize(args) => optimize(args),
         Command::Get(args) => get::run(args),
         Command::Completions { shell } => completions::run(shell),
-        Command::List => list::run(),
+        Command::List { kind } => list::run(kind),
     }
 }
 
