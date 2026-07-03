@@ -75,7 +75,8 @@ pub struct GetArgs {
     specs: Vec<String>,
 
     /// Start date (inclusive). Formats: ISO `YYYY-MM-DD`, EU `D-M-YYYY`,
-    /// or relative (`today`, `yesterday`, `Nd ago`, `Nw ago`).
+    /// relative (`today`, `yesterday`, `7d ago`, `3 weeks ago`, `last monday`),
+    /// or human-readable (`1 March 2020`, `Mar 1, 2020`, `01/03/2020`).
     #[arg(long, default_value = "2020-01-01")]
     since: String,
 
@@ -500,8 +501,10 @@ fn parse_interval(s: &str) -> Result<Interval> {
 ///
 /// * `today` / `yesterday`
 /// * `Nd ago` / `Nw ago`
-/// * `YYYY-MM-DD` (ISO 8601 calendar)
-/// * `D-M-YYYY` (EU day-month-year)
+/// * `YYYY-MM-DD` (ISO 8601 calendar; `/` works as separator too)
+/// * `D-M-YYYY` (EU day-month-year; `/` works as separator too)
+/// * anything [`interim`] understands (day-first dialect): `1 March 2020`,
+///   `Mar 1, 2020`, `3 weeks ago`, `last monday`, ...
 fn parse_date(input: &str, now: OffsetDateTime) -> Result<OffsetDateTime> {
     let raw = input.trim();
     let lower = raw.to_ascii_lowercase();
@@ -523,6 +526,12 @@ fn parse_date(input: &str, now: OffsetDateTime) -> Result<OffsetDateTime> {
     }
     if let Some(date) = parse_absolute(raw) {
         return Ok(midnight_utc(date));
+    }
+    // Everything else goes through `interim`'s human-date grammar. `Uk` keeps
+    // ambiguous numeric dates day-first, matching the EU form above. Whatever
+    // time-of-day it resolves is floored to keep the midnight invariant.
+    if let Ok(dt) = interim::parse_date_string(raw, now, interim::Dialect::Uk) {
+        return Ok(midnight_utc(dt.date()));
     }
     bail!("invalid date {input:?}")
 }
@@ -546,7 +555,7 @@ fn parse_relative(s: &str) -> Option<(u32, char)> {
 }
 
 fn parse_absolute(s: &str) -> Option<Date> {
-    let parts: Vec<&str> = s.split('-').collect();
+    let parts: Vec<&str> = s.split(['-', '/']).collect();
     if parts.len() != 3 {
         return None;
     }
@@ -670,11 +679,28 @@ mod tests {
     }
 
     #[test]
+    fn human_readable_dates() {
+        // Month names: day-first freely, month-first with a comma.
+        assert_eq!(parse_date("1 March 2020", now()).unwrap(), datetime!(2020-03-01 0:00 UTC));
+        assert_eq!(parse_date("Mar 1, 2020", now()).unwrap(), datetime!(2020-03-01 0:00 UTC));
+        // Slash dates follow the dashed rules: ISO year-first or EU day-first.
+        assert_eq!(parse_date("2020/03/01", now()).unwrap(), datetime!(2020-03-01 0:00 UTC));
+        assert_eq!(parse_date("01/03/2020", now()).unwrap(), datetime!(2020-03-01 0:00 UTC));
+        // Spelled-out relative offsets and weekday anchors, against a fixed
+        // `now` of Friday 2024-03-15.
+        assert_eq!(parse_date("3 weeks ago", now()).unwrap(), datetime!(2024-02-23 0:00 UTC));
+        assert_eq!(parse_date("2 months ago", now()).unwrap(), datetime!(2024-01-15 0:00 UTC));
+        assert_eq!(parse_date("1 year ago", now()).unwrap(), datetime!(2023-03-15 0:00 UTC));
+        assert_eq!(parse_date("last monday", now()).unwrap(), datetime!(2024-03-11 0:00 UTC));
+        // A time-of-day is accepted but floored to midnight.
+        assert_eq!(parse_date("2020-03-01 14:30", now()).unwrap(), datetime!(2020-03-01 0:00 UTC));
+    }
+
+    #[test]
     fn rejects_bad_dates() {
         assert!(parse_date("", now()).is_err());
         assert!(parse_date("not-a-date", now()).is_err());
         assert!(parse_date("2021-02-29", now()).is_err()); // non-leap
-        assert!(parse_date("0d ago", now()).is_err());
         assert!(parse_date("7d agox", now()).is_err());
     }
 
