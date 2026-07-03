@@ -186,8 +186,10 @@ struct RunArgs {
 enum CheckCmd {
     /// Validate a strategy spec (with `--params` substitution).
     Strategy(CheckStrategyArgs),
-    /// Validate one or more `get --overlay` specs — parses each and builds a
-    /// live indicator per column to confirm the whole tree resolves.
+    /// Parse `get --overlay` specs and build each column's indicator.
+    ///
+    /// Surfaces bad `!tag`s, missing parameters, and other tree-build errors
+    /// that a plain `get` run would only hit at fetch time.
     Overlay(CheckOverlayArgs),
 }
 
