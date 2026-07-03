@@ -15,44 +15,55 @@ path = "src/lib.rs"
 
 # The `fugazi` binary is the command-line backtester: it loads a strategy.yml,
 # assembles candle data from one or more --series, and runs it through a paper
-# wallet (see `src/cli/`). Most of the dependencies below are pulled in only to
-# build the CLI binary; the exceptions are `serde`/`serde_json` (library uses
-# them for indicator/signal serialisation in the CLI) and the deps gated behind
-# the `sources` feature (`reqwest`/`tokio`/`time`/`thiserror`), which the
-# library uses for the `sources` module (remote candle providers like Binance).
-# The CLI binary transitively uses `fugazi::sources` for its `get` subcommand,
-# so the binary is only built when the `sources` feature is enabled — which it
-# is by default.
+# wallet (see `src/cli/`). Its dependencies are gated behind the `cli` feature
+# below; the library proper uses only `serde`/`serde_json` (in the `sources`
+# module) and the deps gated behind the `sources` feature.
 [[bin]]
 name = "fugazi"
 path = "src/cli/main.rs"
-required-features = ["sources"]
+required-features = ["cli"]
 
-# The `sources` feature pulls in the async HTTP stack the remote candle
-# providers (`fugazi::sources`) rely on. Default-on so `cargo build` builds
-# the CLI unchanged; a library consumer that only wants the pure
-# indicator/backtest core can opt out with `default-features = false`.
+# `sources` pulls in the async HTTP stack the remote candle providers
+# (`fugazi::sources`) rely on. `cli` pulls in everything only the binary uses —
+# notably plotters' `ttf` feature, which links the fontconfig/freetype system
+# libs, so non-CLI consumers (e.g. the Python wheel, which builds inside
+# manylinux containers without those libs) depend with
+# `default-features = false, features = ["sources"]`. Both default-on so
+# `cargo build` builds the CLI unchanged.
 [features]
-default = ["sources"]
+default = ["sources", "cli"]
 sources = ["dep:reqwest", "dep:tokio", "dep:time", "dep:thiserror"]
+cli = [
+    "sources",
+    "dep:clap",
+    "dep:clap_complete",
+    "dep:serde_norway",
+    "dep:csv",
+    "dep:anyhow",
+    "dep:indicatif",
+    "dep:console",
+    "dep:rayon",
+    "dep:plotters",
+    "dep:interim",
+]
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
-clap_complete = "4"
+clap = { version = "4", features = ["derive"], optional = true }
+clap_complete = { version = "4", optional = true }
 serde = { version = "1", features = ["derive"] }
-serde_norway = "0.9"
+serde_norway = { version = "0.9", optional = true }
 serde_json = "1"
-csv = "1"
-anyhow = "1"
-indicatif = "0.17"
-console = "0.15"
-rayon = "1"
-plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "bitmap_encoder", "line_series", "area_series", "ttf"] }
+csv = { version = "1", optional = true }
+anyhow = { version = "1", optional = true }
+indicatif = { version = "0.17", optional = true }
+console = { version = "0.15", optional = true }
+rayon = { version = "1", optional = true }
+plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "bitmap_encoder", "line_series", "area_series", "ttf"], optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"], optional = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros"], optional = true }
 time = { version = "0.3", features = ["formatting", "parsing", "macros"], optional = true }
 thiserror = { version = "1", optional = true }
-interim = { version = "0.2.1", default-features = false, features = ["std", "time_0_3"] }
+interim = { version = "0.2.1", default-features = false, features = ["std", "time_0_3"], optional = true }
 
 [dev-dependencies]
 wiremock = "0.6"

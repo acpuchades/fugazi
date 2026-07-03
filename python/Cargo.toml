@@ -14,7 +14,10 @@ name = "fugazi"
 crate-type = ["cdylib"]
 
 [dependencies]
-fugazi_core = { package = "fugazi", path = ".." }
+# `sources` only — skipping the default `cli` feature keeps clap/plotters/etc.
+# out of the wheel; plotters' `ttf` feature in particular links fontconfig,
+# which the manylinux build containers don't ship.
+fugazi_core = { package = "fugazi", path = "..", default-features = false, features = ["sources"] }
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 time = { version = "0.3", features = ["formatting"] }

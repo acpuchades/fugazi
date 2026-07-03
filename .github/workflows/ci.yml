@@ -45,11 +45,10 @@ jobs:
           python-version: "3.13"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # The python workspace member depends on the `fugazi` crate, which pulls
-      # plotters (via the CLI's chart module) transitively — so this build also
-      # needs the fontconfig/freetype system libs.
-      - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype-dev
+      # No fontconfig/freetype here on purpose: the python member depends on
+      # the core crate with the `cli` feature off, so plotters (whose `ttf`
+      # feature links those libs) must stay out of the wheel build — this job
+      # failing to link would mean the feature gate regressed.
       - name: Build + install wheel
         working-directory: python
         run: |
