@@ -263,6 +263,61 @@ block prints the adjusted score next to the `mean ± std`. Caveat: a metric
 defined in only one window has `std = 0` and ranks on its raw mean off a
 single observation — check its `_std` column.
 
+#### Overfitting and the train/validate workflow
+
+**`optimize` on its own is a tuning aid, not a strategy validator.** It
+picks the grid point that scores best on the data you gave it — a
+metric-driven maximum-likelihood fit. Some of the "signal" it finds is
+genuine edge; some is the peculiar noise of that window. The winner's
+in-sample Sharpe is therefore a biased estimator of its out-of-sample
+Sharpe (upwards, always), and the gap grows with the grid size, the
+number of metrics you request, and the number of times you re-run the
+sweep. Sharpe 2 on the training slice can be Sharpe 0.3 on the next year.
+`-w`/`--windowed` + `-k`/`--risk-aversion` reduce the bias (they reward
+parameter sets that hold up across regimes rather than in one lucky
+stretch) but do not eliminate it — the grid is still ranked on the same
+data it was fit on.
+
+The recommended workflow is therefore an **explicit train / validate
+split**, with `get` and `file:` doing the plumbing:
+
+```sh
+# 1. Fetch the raw candles once, into a persistent CSV.
+fugazi get binance:BTCUSDT[1d] --since 2018-01-01 --until today -o btc.csv
+
+# 2. Split the CSV into a training slice (past) and a validation slice
+#    (recent) with `file:` + --since/--until. Nothing new is fetched.
+fugazi get file:./btc.csv --since 2018-01-01 --until 2023-01-01 -o btc_train.csv
+fugazi get file:./btc.csv --since 2023-01-01 --until today       -o btc_validate.csv
+
+# 3. Optimize on the training slice. Prefer `-w` (+ optional `-k`) so the
+#    ranking rewards parameter sets that held up across sub-windows of the
+#    training period, not one lucky stretch of it.
+fugazi optimize @strategy.params.yml \
+    --series @btc_train.csv \
+    --params 'FAST=3..20:2,SLOW=[20,50,100]' \
+    -m sharpe,cagr_pct,max_pct --best-by sharpe \
+    -w 252 -k 1.0 \
+    --crypto -f 1d \
+    -o grid_train.csv
+
+# 4. Read the winning parameters off `grid_train.csv` (top row) and
+#    `run` a single backtest with them on the *validation* slice —
+#    also with `-w` so its Sharpe is comparable to the training figure.
+fugazi run @strategy.params.yml \
+    --series @btc_validate.csv \
+    --params FAST=<top>,SLOW=<top> \
+    -w 252 \
+    --crypto -f 1d \
+    --output-dir out/validate/
+```
+
+If the validation-slice metrics track the training ones, the edge probably
+generalises; if they collapse (or flip sign), the tuning was fitting
+noise. Keep the split boundary fixed once you've chosen it — re-sweeping
+against different splits until one confirms the result is the same
+overfitting under a different name.
+
 ### `get`
 
 Fetch OHLCV bars into a `run`-ready `;`-delimited CSV. The header is

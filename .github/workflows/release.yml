@@ -22,7 +22,14 @@ jobs:
       matrix:
         platform:
           - { runner: ubuntu-22.04, target: x86_64, manylinux: auto }
-          - { runner: ubuntu-22.04, target: aarch64, manylinux: auto }
+          # aarch64 uses manylinux_2_28 (gcc 8.5+, kernel headers with
+          # `AT_HWCAP2`, ARMv8.4-a with sha3 support, C11 `stdatomic.h`) so
+          # `aws-lc-sys` — pulled in by reqwest 0.13 → rustls' aws-lc-rs
+          # default provider — cross-compiles cleanly. Trade-off: the
+          # aarch64 wheel now needs glibc ≥ 2.28 on the target host; the
+          # x86_64 leg stays at manylinux2014 so the far more common
+          # user-facing wheel keeps the older baseline.
+          - { runner: ubuntu-22.04, target: aarch64, manylinux: "2_28" }
           # Both macOS arches build on the Apple-Silicon runner; the x86_64
           # wheel is cross-compiled. The Intel macos-13 runner is scarce and
           # being deprecated — it routinely queued 10+ min while this leg ran.
@@ -33,12 +40,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build wheel
         uses: PyO3/maturin-action@v1
-        # `ring` (reqwest → rustls) builds ARMv8 assembly whose headers demand
-        # the ACLE `__ARM_ARCH` macro; the manylinux2014 cross gcc is too old
-        # to predefine it, so define it ourselves. Target-scoped, so this is
-        # inert on every other matrix leg.
-        env:
-          CFLAGS_aarch64_unknown_linux_gnu: -D__ARM_ARCH=8
         with:
           working-directory: python
           target: ${{ matrix.platform.target }}
