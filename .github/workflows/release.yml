@@ -87,6 +87,9 @@ jobs:
   publish-crates:
     name: Publish to crates.io
     runs-on: ubuntu-latest
+    # Gate on the builds so a broken wheel can't leave crates.io published
+    # while PyPI is not (which is how v0.7.0 half-released).
+    needs: [wheels, sdist]
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v4
