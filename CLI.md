@@ -8,15 +8,17 @@ single backtest, for a spec-validation pass, or for a parameter-grid sweep.
 Three subcommands:
 
 - [`run`](#run) — backtest one strategy over one dataset. Writes `trades.csv`,
-  `returns.csv`, and `metrics.yml`.
+  `returns.csv`, and `metrics.yml` (or, with
+  [`-w/--windowed`](#windowed-metrics), `metrics.csv`).
 - [`check`](#check) — parse and validate a `strategy.yml` without running it.
 - [`optimize`](#optimize) — sweep a strategy over a parameter grid in
   parallel; write one CSV row per combination and rank by a metric.
 
 The subcommands share their input vocabulary — the `<STRATEGY>` positional,
 `--series`, `--params`, the calendar shortcuts (`--stocks`/`--forex`/`--crypto`,
-`--frequency`, `--bars-per-year`) and `--risk-free-rate`. Everything that
-follows those flags is documented once, in [Common flags](#common-flags).
+`--frequency`, `--bars-per-year`), `--risk-free-rate`, and the measurement
+knobs (`-w/--windowed`, `--keep-unstable`). Everything that follows those
+flags is documented once, in [Common flags](#common-flags).
 
 ## Install
 
@@ -82,7 +84,7 @@ Backtest one strategy against one dataset and write the result files.
 fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
           [--params <SPEC> …] [--cash <N>]
           [--stocks | --forex | --crypto] [-f <CODE>] [--bars-per-year <N>]
-          [--risk-free-rate <RATE>] [-q]
+          [--risk-free-rate <RATE>] [-w <N>] [--keep-unstable] [-q]
 ```
 
 | Flag | Description |
@@ -96,6 +98,8 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
 | `-f`, `--frequency <CODE>` | Bar cadence (`1m`, `5m`, `1h`, `4h`, `1d`, `1w`, `1M`, …). Combines with the calendar to derive `bars_per_year`. |
 | `--bars-per-year <N>` | Explicit override for the annualization denominator. Wins over the calendar/frequency pair. |
 | `--risk-free-rate <RATE>` | Annualized risk-free rate as a fraction (`0.045` = 4.5% p.a.). Default `0`. See [Risk-free rate](#risk-free-rate). |
+| `-w`, `--windowed <N>` | Compute the metrics in non-overlapping windows of `N` bars, writing `metrics.csv` (one row per window) instead of `metrics.yml`. See [Windowed metrics](#windowed-metrics). |
+| `--keep-unstable` | Disable the default stability gating of entry signals and its metric anchor. See [Stability gating](#stability-gating). |
 | `-q`, `--quiet` | Silence the console output. Files still get written. |
 
 **Outputs.** Three files in `--output-dir`, all documented in
@@ -103,13 +107,16 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
 
 - `trades.csv` — one row per fill.
 - `returns.csv` — one row per bar (equity, per-bar return).
-- `metrics.yml` — the reduced backtest report.
+- `metrics.yml` — the reduced backtest report (with `-w/--windowed`,
+  `metrics.csv` — one row per window — replaces it).
 
 **Console output** (unless `-q`): a two-line banner, then blocks for
 **inputs** (strategy, params, period, capital, output), **trades**
 (each fill listed after the run completes), **result** (bars, trades, capital
 before → after, start/finish timestamps + elapsed), and **metrics**
-(the headline lines of `metrics.yml`).
+(the headline lines of `metrics.yml` — cross-window mean ± stddev under
+`-w/--windowed` — prefixed by a `measured` line whenever the
+[stability gate](#stability-gating) skipped leading bars).
 
 ### `check`
 
@@ -141,6 +148,7 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
                --params <SPEC> [--params <SPEC> …]
                -m <METRIC>[,<METRIC>…] [-m <METRIC>…]
                -o <FILE> [--best-by <METRIC>] [-j <N>]
+               [-w <N> [-k <K>]] [--keep-unstable]
                [--cash <N>]
                [--stocks | --forex | --crypto] [-f <CODE>] [--bars-per-year <N>]
                [--risk-free-rate <RATE>] [-q]
@@ -154,6 +162,9 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
 | `-m`, `--metrics <NAMES>` | Metric columns to record. Comma-separated, repeatable. Short leaf names (`sharpe`, `max_pct`) or dotted paths (`risk_adjusted.sharpe`) — see the [Metrics catalogue](#metrics-catalogue). |
 | `-o`, `--output <FILE>` | Output CSV path. Parent directories are created if missing. |
 | `--best-by <METRIC>` | Sort rows by this metric (direction hardcoded per metric — see [Best-by directions](#best-by-directions)). Omit to keep cartesian order and skip the "best" console block. |
+| `-w`, `--windowed <N>` | Evaluate each grid point in non-overlapping windows of `N` bars: every `-m` metric becomes two CSV columns (`<name>_mean` / `<name>_std`) and `--best-by` ranks by the windowed mean. See [Windowed metrics](#windowed-metrics). |
+| `-k`, `--risk-aversion <K>` | Rank `--best-by` conservatively: shift each grid point's cross-window mean *against* it by `K` standard deviations before sorting. Requires `-w` and `--best-by`; `K >= 0`. See [Best-by directions](#best-by-directions). |
+| `--keep-unstable` | Disable the default stability gating and its metric anchor for every grid point. See [Stability gating](#stability-gating). |
 | `-j`, `--jobs <N>` | Rayon worker count. Default: one worker per logical CPU. |
 | `-c`, `--cash <N>` | Initial funds for each backtest. Default `10000`. |
 | `--stocks` / `--forex` / `--crypto` | Trading-calendar shortcut. See [Calendar](#calendar-and-annualization). |
@@ -209,6 +220,17 @@ Metrics that don't appear in the direction table (`returns.skewness`,
 `returns.kurtosis`, all trade **counts**, distribution moments, calendar
 inputs, …) can still be requested with `-m` — they just can't be passed
 to `--best-by` because there's no unambiguous "better".
+
+Under [`-w/--windowed`](#windowed-metrics), `--best-by` ranks by the metric's
+**cross-window mean**, and `-k/--risk-aversion <K>` shifts that mean
+*against* each grid point by `K` standard deviations before sorting —
+`mean − K·std` for a maximize metric (a lower confidence bound),
+`mean + K·std` for a minimize one — so a large spread is always penalized,
+never rewarded, and `sharpe 2.0 ± 3.0` no longer outranks `1.8 ± 0.2`.
+`K = 0` (the default) is the plain mean; negative `K` is rejected. The best
+block prints the adjusted score next to the `mean ± std`. Caveat: a metric
+defined in only one window has `std = 0` and ranks on its raw mean off a
+single observation — check its `_std` column.
 
 ## Common flags
 
@@ -335,6 +357,60 @@ Explicit `--bars-per-year N` always overrides. Default: `252` (US-equity daily).
 
 `0` gives the pre-adjusted excess-return semantics of the original release.
 
+### Stability gating
+
+Recursive (IIR-seeded) indicators — EMA, RSI, ATR, and everything built on
+them — start emitting values at their warm-up but stay influenced by their
+seed for a while after (their *unstable period*). By default `run` and
+`optimize` therefore **stability-gate** every entry signal: it is wrapped in
+the library's `Stable` combinator, so no entry can fire until its whole
+indicator chain has settled, and the metrics are **measured from the first
+bar an entry could possibly fire on**. The gated prefix is provably flat
+(nothing was at risk), so skipping it removes warm-up dilution from the
+return moments without discarding any P&L. `trades.csv`, `returns.csv`, and
+`equity.png` still cover the full run, and the console prints a `measured`
+line showing the skip:
+
+```
+metrics
+  measured 2024-01-10 → 2024-01-30 (21 of 30 bars; 9 stability-gated bars skipped)
+```
+
+`--keep-unstable` (on `run` and `optimize`) disables both the gate and the
+skip, restoring the exact pre-gate behavior.
+
+Notes:
+
+- For purely windowed (FIR) strategies — SMA crossovers and the like — the
+  gate coincides with ordinary warm-up: trades are identical either way and
+  only the dead prefix leaves the metrics.
+- Exits and protective levels are not gated (no position can exist before the
+  first gated entry).
+- A signal already wrapped in [`!stable`](#signals) is unaffected —
+  double-gating is harmless.
+
+### Windowed metrics
+
+`-w/--windowed <N>` computes the metrics in **non-overlapping windows of `N`
+bars** over the measured range instead of one whole-run reduction. Each
+window is evaluated as a run of its own: its initial equity is the equity
+marked on the bar before it, and only the fills booked inside it count — a
+position carried across a window boundary shows up in the entering window as
+an unmatched fill, the usual windowed-analysis convention. Keep `N` well
+above the strategy's typical holding time if the trade statistics matter.
+
+- On `run`: writes [`metrics.csv`](#output-files) instead of `metrics.yml`,
+  and the console metrics block reports each figure's cross-window mean ±
+  population standard deviation (a metric degenerate in some windows averages
+  over the windows where it is defined; `—` when defined nowhere).
+- On `optimize`: every `-m` metric becomes two CSV columns
+  (`<name>_mean` / `<name>_std`) and `--best-by` ranks by the windowed mean,
+  optionally shifted by [`-k/--risk-aversion`](#best-by-directions).
+
+Annualized figures over short windows are noisy (a 10-bar window annualizes a
+tiny sample), so prefer raw per-window figures like `total_pct`, or pick `N`
+large enough that each window holds a meaningful number of bars.
+
 ## Strategy YAML reference
 
 A strategy is a `symbol` plus `long` and/or `short` sides. Each side has an
@@ -396,6 +472,9 @@ Real-valued indicators, one YAML tag per fugazi constructor:
 - **Arithmetic**: `!add`/`!sub`/`!mul`/`!div { lhs, rhs }`.
 - **Lookback**: `!lag`/`!diff`/`!ratio`/`!roc { source, periods }`.
 - **Rolling extremum**: `!rolling_max`/`!rolling_min { source, period }`.
+- **Stability gate**: `!stable { source }` — `None` until the source's whole
+  chain has settled (its `stable_period()`), then a pass-through. Converts
+  the soft unstable period into hard warm-up.
 
 ### Signals
 
@@ -410,6 +489,10 @@ Boolean-valued nodes:
 - **Logic**: `!and`/`!or`/`!xor { lhs, rhs }`, `!all [signal, …]`,
   `!any [signal, …]`, `!not <signal>`, `!changed <signal>` (fires on any
   transition).
+- **Stability gate**: `!stable <signal>` — masks the signal (read as `false`)
+  until its whole chain has settled, so nothing downstream acts on a
+  seed-contaminated value. Entry signals get this automatically — see
+  [Stability gating](#stability-gating).
 - **Constants**: `!value <bool>`.
 
 See [`examples/strategy.yml`](examples/strategy.yml) for a full SMA
@@ -447,7 +530,18 @@ One row per bar.
 ### `metrics.yml` (from `run`)
 
 Reduced backtest report, grouped by theme. See the [Metrics
-catalogue](#metrics-catalogue) for every field.
+catalogue](#metrics-catalogue) for every field. Measured from the
+[stability gate](#stability-gating)'s anchor onward.
+
+### `metrics.csv` (from `run -w`)
+
+One row per non-overlapping window of the measured range — replaces
+`metrics.yml` under [`-w/--windowed`](#windowed-metrics).
+
+| Column | Meaning |
+| --- | --- |
+| `window_start` / `window_end` | Times of the window's first and last bars (the last window may be shorter than `N`). |
+| *(the full catalogue)* | One column per metric, named by its dotted `metrics.yml` path (`run.bars`, `returns.total_pct`, `risk_adjusted.sharpe`, …). A metric degenerate in a window is an empty cell, so every row shares the same fixed column set. |
 
 ### Optimize CSV (from `optimize`)
 
@@ -455,7 +549,10 @@ One row per grid point:
 
 - **Axis columns** (sorted by axis name, in the order declared).
 - **Metric columns** (in `-m` declaration order — the header uses the
-  user-typed name, not the resolved dotted path).
+  user-typed name, not the resolved dotted path). Under
+  [`-w/--windowed`](#windowed-metrics), each metric becomes two columns —
+  `<name>_mean` and `<name>_std`, its cross-window mean and population
+  standard deviation over the windows where it is defined.
 
 Missing metric values (`sharpe` on a run with zero variance,
 `profit_factor` on a run with no losing trade, …) render as **empty
@@ -476,8 +573,8 @@ Non-metric inputs echoed at the top of the file.
 
 | Field | Meaning |
 | --- | --- |
-| `bars` | Bar count consumed by the run. |
-| `initial_equity` | Starting funds. |
+| `bars` | Bar count the metrics were measured over — the run minus the [stability-gated](#stability-gating) prefix (and, windowed, this window's length). |
+| `initial_equity` | Equity at the start of the measured range — the seed cash for a whole run, the prior bar's mark for a window. |
 | `final_equity` | Ending equity (marked to the last bar's close). |
 | `bars_per_year` | Annualization denominator used. |
 | `risk_free_rate` | The annualized risk-free rate as a fraction. |
@@ -576,6 +673,23 @@ fugazi optimize @examples/strategy.params.yml \
     --params 'FAST=3..10:1,SLOW=[20,50,100],SYM=BTC' \
     -m sharpe,sortino,cagr_pct,max_pct \
     --best-by sortino \
+    --crypto -f 1d \
+    -o grid.csv
+
+# Windowed run: per-window metrics.csv, console mean ± std across windows.
+fugazi run @examples/strategy.yml \
+    --series @examples/candles.csv \
+    --output-dir out/ \
+    --crypto -f 1d \
+    -w 10
+
+# Consistency-aware sweep: rank by windowed Sharpe, one sigma conservative.
+fugazi optimize @examples/strategy.params.yml \
+    --series @examples/candles.csv \
+    --params 'FAST=3..10:1,SLOW=[20,50,100],SYM=BTC' \
+    -m sharpe,max_pct \
+    --best-by sharpe \
+    -w 10 -k 1 \
     --crypto -f 1d \
     -o grid.csv
 
