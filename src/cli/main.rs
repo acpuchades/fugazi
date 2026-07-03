@@ -25,6 +25,7 @@ mod input;
 mod list;
 mod metrics;
 mod optimize;
+mod overlay;
 mod params;
 mod spec;
 mod style;

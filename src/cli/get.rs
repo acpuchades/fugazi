@@ -33,8 +33,12 @@ use time::{Date, Duration, Month, OffsetDateTime, Time};
 use tokio::runtime::Builder as RuntimeBuilder;
 use tokio::task::JoinSet;
 
+use fugazi::prelude::*;
 use fugazi::sources::{Binance, CandleSource, Interval, TimedCandle, Timestamp, Yahoo};
 
+use crate::dynd::DynValue;
+use crate::input::Source as InputSource;
+use crate::overlay::{self, Overlay};
 use crate::style;
 
 /// The remote candle providers this CLI can fetch from. Kept as `(name,
@@ -77,8 +81,14 @@ pub struct GetArgs {
     /// Start date (inclusive). Formats: ISO `YYYY-MM-DD`, EU `D-M-YYYY`,
     /// relative (`today`, `yesterday`, `7d ago`, `3 weeks ago`, `last monday`),
     /// or human-readable (`1 March 2020`, `Mar 1, 2020`, `01/03/2020`).
-    #[arg(long, default_value = "2020-01-01")]
-    since: String,
+    ///
+    /// If omitted, bars are fetched from the fugazi default (`2020-01-01`) and,
+    /// unless `--keep-unstable` is set, any leading rows where the overlays
+    /// have not yet warmed up are dropped from the output. When `--since` is
+    /// set, `stable_period` extra leading bars are fetched instead so the
+    /// first row emitted at `--since` already has the overlays stable.
+    #[arg(long, value_name = "DATE")]
+    since: Option<String>,
 
     /// End date (exclusive). Same grammar as `--since`; defaults to `today`.
     #[arg(long, default_value = "today")]
@@ -89,10 +99,41 @@ pub struct GetArgs {
     #[arg(short, long, value_name = "FILE")]
     output: PathBuf,
 
+    /// Overlay definition(s) — extra columns computed on top of the fetched
+    /// bars. Repeatable, and each argument takes an optional scope prefix plus
+    /// one of two body forms:
+    ///
+    /// * scope prefix (optional): `SYMBOL[FREQ]:`, `SYMBOL:`, or `[FREQ]:` —
+    ///   restricts the overlay to matching `(symbol, interval)` fetches. A
+    ///   missing component is a wildcard; no prefix at all applies to every
+    ///   fetch.
+    /// * body: inline `col=expr[,col=expr,...]`
+    ///   (`sma20=!sma { period: 20 },ema50=!ema { period: 50 }`), or
+    ///   `@file.yml` — a YAML mapping of column name → source expression.
+    ///
+    /// Each expression is the same YAML source spec `run` accepts (`close`,
+    /// `!sma { period: N }`, `!add { lhs, rhs }`, …). Unless `--keep-unstable`
+    /// is given, warm-up bars are handled per fetch: with `--since`, extra
+    /// leading bars are fetched so the first row at `--since` already has the
+    /// overlays stable; without `--since`, the leading rows are dropped until
+    /// every applicable overlay is warmed up.
+    #[arg(short = 'x', long = "overlay", value_name = "SPEC")]
+    overlay: Vec<InputSource>,
+
+    /// Emit the warm-up bars instead of dropping them. Overlay columns are
+    /// blank on rows where the applicable overlays have not yet warmed up.
+    #[arg(long = "keep-unstable")]
+    keep_unstable: bool,
+
     /// Suppress the summary line printed on success.
     #[arg(short, long)]
     quiet: bool,
 }
+
+/// Default `--since` when the flag is omitted — anchors the fetch far enough
+/// back that the free-form default covers most historical windows a user cares
+/// about, without dragging down the fetch when the flag *is* set.
+const DEFAULT_SINCE: &str = "2020-01-01";
 
 pub fn run(args: GetArgs) -> Result<()> {
     let fetch_specs: Vec<FetchSpec> = args
@@ -101,17 +142,21 @@ pub fn run(args: GetArgs) -> Result<()> {
         .map(|s| parse_spec(s).with_context(|| format!("parsing spec {s:?}")))
         .collect::<Result<_>>()?;
     let now = OffsetDateTime::now_utc();
-    let since = parse_date(&args.since, now).with_context(|| format!("--since {:?}", args.since))?;
+    let since_specified = args.since.is_some();
+    let since_raw = args.since.as_deref().unwrap_or(DEFAULT_SINCE);
+    let since = parse_date(since_raw, now).with_context(|| format!("--since {since_raw:?}"))?;
     let until = parse_date(&args.until, now).with_context(|| format!("--until {:?}", args.until))?;
     if until <= since {
         bail!(
-            "--until ({}) must be strictly after --since ({})",
+            "--until ({}) must be strictly after --since ({since_raw})",
             args.until,
-            args.since
         );
     }
     let since_ts = Timestamp::from_datetime(since);
     let until_ts = Timestamp::from_datetime(until);
+
+    let overlays = overlay::parse_specs(&args.overlay)?;
+    let overlay_columns = overlay::column_names(&overlays);
 
     if !args.quiet {
         style::print_header("get", "fetch OHLCV candles from remote providers");
@@ -129,26 +174,52 @@ pub fn run(args: GetArgs) -> Result<()> {
         .build()
         .context("building tokio runtime")?;
 
+    // One `Series` per (provider, symbol, interval) — the unit of parallelism.
+    // Per-series overlay warm-up is folded in here so `fetch_series` can push
+    // `since` back accordingly and each task builds its own indicator instances.
     let series: Vec<Series> = fetch_specs
         .iter()
         .flat_map(|spec| {
             spec.symbols.iter().flat_map(|sym| {
-                sym.intervals.iter().map(|&interval| Series {
-                    provider: spec.provider.clone(),
-                    symbol: sym.symbol.clone(),
-                    interval,
+                sym.intervals.iter().map(|&interval| {
+                    let stable = overlay::stable_period_for(
+                        &overlays,
+                        &overlay_columns,
+                        &sym.symbol,
+                        interval,
+                    );
+                    Series {
+                        provider: spec.provider.clone(),
+                        symbol: sym.symbol.clone(),
+                        interval,
+                        stable,
+                    }
                 })
             })
         })
         .collect();
 
-    let (multi, bars) = build_progress_bars(&series, since_ts, until_ts, args.quiet);
+    let (multi, bars) =
+        build_progress_bars(&series, since_ts, until_ts, since_specified, args.quiet);
 
-    let result = rt.block_on(fetch_all(series.clone(), since_ts, until_ts, bars));
+    // Async: download every series in parallel — no overlay state crosses task
+    // boundaries. Overlays are applied synchronously below, per (symbol,
+    // interval) group, so `DynValue`'s non-Send `Rc`-backed `Position` stub
+    // stays on one thread.
+    let result = rt.block_on(fetch_all(series.clone(), since_ts, until_ts, since_specified, bars));
     let _ = multi.clear();
-    let rows = result?;
+    let raw = result?;
+    let rows = apply_overlays(
+        raw,
+        since_ts,
+        since_specified,
+        args.keep_unstable,
+        &overlays,
+        &overlay_columns,
+    );
 
-    write_csv(&args.output, &rows).with_context(|| format!("writing {}", args.output.display()))?;
+    write_csv(&args.output, &rows, &overlay_columns)
+        .with_context(|| format!("writing {}", args.output.display()))?;
 
     if !args.quiet {
         let n_symbols: usize = fetch_specs.iter().map(|s| s.symbols.len()).sum();
@@ -164,20 +235,26 @@ pub fn run(args: GetArgs) -> Result<()> {
     Ok(())
 }
 
-/// One row of output: which symbol + interval it came from, plus the timed candle.
+/// One row of output: which symbol + interval it came from, the timed candle,
+/// and the per-column overlay values (aligned with the CLI's overlay column
+/// layout — `None` for a column no applicable overlay covers this row's group).
 struct Row {
     symbol: String,
     interval: Interval,
     candle: TimedCandle,
+    overlays: Vec<Option<Real>>,
 }
 
-/// One downloadable series: a `(provider, symbol, interval)` triple. The unit
-/// of parallelism — each series gets its own fetch task and progress bar.
+/// One downloadable series: a `(provider, symbol, interval)` triple plus the
+/// per-series overlay warm-up length (max `stable_period` across the overlays
+/// that apply to this `(symbol, interval)`). The unit of parallelism — each
+/// series gets its own fetch task and progress bar.
 #[derive(Clone)]
 struct Series {
     provider: String,
     symbol: String,
     interval: Interval,
+    stable: usize,
 }
 
 impl Series {
@@ -188,6 +265,23 @@ impl Series {
             self.symbol,
             self.interval.as_token()
         )
+    }
+
+    /// Where this series' fetch actually starts: `since` on the nose when the
+    /// user didn't pass `--since` (leading unready rows get dropped downstream);
+    /// pushed back by `stable` bars otherwise so the first row at `since` is
+    /// already warmed up. `Interval::Month`'s 30-day approximation is fine here
+    /// — over-fetching a handful of days is harmless.
+    fn fetch_since(&self, since: Timestamp, since_specified: bool) -> Timestamp {
+        if since_specified {
+            Timestamp(
+                since
+                    .0
+                    .saturating_sub((self.stable as i64).saturating_mul(self.interval.duration_ms())),
+            )
+        } else {
+            since
+        }
     }
 }
 
@@ -217,41 +311,51 @@ fn chunk_bounds(since: Timestamp, until: Timestamp, interval: Interval) -> Vec<(
 /// Series run concurrently; the delay paces each series' own request stream.
 const CHUNK_DELAY: StdDuration = StdDuration::from_millis(100);
 
-/// Download every series concurrently (one task per series), merge the rows,
-/// and sort them ascending by time (ties broken by symbol, then freq).
+/// One un-overlaid downloaded bar in the intermediate fetch result: which
+/// symbol + interval it came from and its timed candle. `apply_overlays` walks
+/// these grouped by `(symbol, interval)` to attach overlay columns before the
+/// final `Row` list is emitted.
+struct RawBar {
+    symbol: String,
+    interval: Interval,
+    candle: TimedCandle,
+}
+
+/// Download every series concurrently (one task per series) and return the
+/// merged raw bars. Overlay computation is deliberately kept synchronous
+/// (`apply_overlays`), since [`DynValue`]'s stub `Position` uses `Rc` and can't
+/// cross task boundaries.
 async fn fetch_all(
     series: Vec<Series>,
     since: Timestamp,
     until: Timestamp,
+    since_specified: bool,
     bars: Vec<ProgressBar>,
-) -> Result<Vec<Row>> {
+) -> Result<Vec<RawBar>> {
     let mut tasks = JoinSet::new();
     for (s, bar) in series.into_iter().zip(bars) {
-        tasks.spawn(fetch_series(s, since, until, bar));
+        let fetch_since = s.fetch_since(since, since_specified);
+        tasks.spawn(fetch_series(s, fetch_since, until, bar));
     }
-    let mut all: Vec<Row> = Vec::new();
+    let mut all: Vec<RawBar> = Vec::new();
     while let Some(joined) = tasks.join_next().await {
         all.extend(joined.context("fetch task panicked")??);
     }
-    all.sort_by(|a, b| {
-        (a.candle.time, a.symbol.as_str(), a.interval.as_token())
-            .cmp(&(b.candle.time, b.symbol.as_str(), b.interval.as_token()))
-    });
     Ok(all)
 }
 
 /// Fetch one series chunk-by-chunk (sequentially — the politeness delay is
-/// per series), advancing its own progress bar.
+/// per series), advancing its own progress bar. Overlay-agnostic.
 async fn fetch_series(
     series: Series,
-    since: Timestamp,
+    fetch_since: Timestamp,
     until: Timestamp,
     bar: ProgressBar,
-) -> Result<Vec<Row>> {
+) -> Result<Vec<RawBar>> {
     let label = series.label();
-    let mut rows: Vec<Row> = Vec::new();
+    let mut rows: Vec<RawBar> = Vec::new();
     let mut first = true;
-    for (chunk_since, chunk_until) in chunk_bounds(since, until, series.interval) {
+    for (chunk_since, chunk_until) in chunk_bounds(fetch_since, until, series.interval) {
         if !first {
             tokio::time::sleep(CHUNK_DELAY).await;
         }
@@ -266,7 +370,7 @@ async fn fetch_series(
         )
         .await
         .with_context(|| format!("fetching {label}"))?;
-        rows.extend(candles.into_iter().map(|tc| Row {
+        rows.extend(candles.into_iter().map(|tc| RawBar {
             symbol: series.symbol.clone(),
             interval: series.interval,
             candle: tc,
@@ -275,6 +379,91 @@ async fn fetch_series(
     }
     bar.finish_with_message("done");
     Ok(rows)
+}
+
+/// Group raw bars by `(symbol, interval)`, feed each group's bars through its
+/// per-group active overlays (last-defined applicable one wins per column;
+/// see [`overlay::active_for`]), and drop the leading warm-up rows unless the
+/// caller opted to keep them. Bars are then sorted ascending by time (ties
+/// broken by symbol, then freq) — the shape the previous overlay-less writer
+/// already committed to.
+fn apply_overlays(
+    raw: Vec<RawBar>,
+    since: Timestamp,
+    since_specified: bool,
+    keep_unstable: bool,
+    overlays: &[Overlay],
+    columns: &[String],
+) -> Vec<Row> {
+    // Bin the incoming stream by `(symbol, interval)` — order within each bin
+    // is preserved by the sort below and matches the order the provider paged
+    // the bars in (ascending time). The outer sort re-orders across groups.
+    let mut by_group: std::collections::HashMap<(String, Interval), Vec<RawBar>> =
+        std::collections::HashMap::new();
+    for bar in raw {
+        by_group
+            .entry((bar.symbol.clone(), bar.interval))
+            .or_default()
+            .push(bar);
+    }
+
+    let mut out: Vec<Row> = Vec::new();
+    for ((symbol, interval), mut bars) in by_group {
+        bars.sort_by_key(|b| b.candle.time);
+
+        let active: Vec<Option<&Overlay>> =
+            overlay::active_for(overlays, columns, &symbol, interval);
+        let mut instances: Vec<Option<DynValue>> = active
+            .iter()
+            .map(|slot| slot.as_ref().map(|o| o.build()))
+            .collect();
+        let has_applicable = instances.iter().any(Option::is_some);
+
+        let mut group_rows: Vec<Row> = bars
+            .into_iter()
+            .map(|b| {
+                let values: Vec<Option<Real>> = instances
+                    .iter_mut()
+                    .map(|slot| slot.as_mut().and_then(|inst| inst.update(b.candle.candle)))
+                    .collect();
+                Row {
+                    symbol: b.symbol,
+                    interval: b.interval,
+                    candle: b.candle,
+                    overlays: values,
+                }
+            })
+            .collect();
+
+        if !keep_unstable {
+            if since_specified {
+                // Extra leading bars covered the warm-up; trim to the window
+                // the user asked for.
+                group_rows.retain(|r| r.candle.time >= since);
+            } else if has_applicable {
+                // No `--since` — drop leading rows until every applicable
+                // overlay is warmed up.
+                if let Some(cut) = group_rows.iter().position(|r| {
+                    r.overlays
+                        .iter()
+                        .zip(active.iter())
+                        .all(|(v, slot)| slot.is_none() || v.is_some())
+                }) {
+                    group_rows.drain(..cut);
+                } else {
+                    group_rows.clear();
+                }
+            }
+        }
+
+        out.extend(group_rows);
+    }
+
+    out.sort_by(|a, b| {
+        (a.candle.time, a.symbol.as_str(), a.interval.as_token())
+            .cmp(&(b.candle.time, b.symbol.as_str(), b.interval.as_token()))
+    });
+    out
 }
 
 /// Build one fetch-progress bar per series, denominated in download *chunks*
@@ -286,6 +475,7 @@ fn build_progress_bars(
     series: &[Series],
     since: Timestamp,
     until: Timestamp,
+    since_specified: bool,
     quiet: bool,
 ) -> (MultiProgress, Vec<ProgressBar>) {
     let multi = if quiet || !std::io::stderr().is_terminal() {
@@ -300,7 +490,11 @@ fn build_progress_bars(
     let bars = series
         .iter()
         .map(|s| {
-            let n_chunks = chunk_bounds(since, until, s.interval).len();
+            // Per-series bar accounts for the overlay warm-up window pulled in
+            // ahead of `since` so the progress count matches what fetch_series
+            // actually chunks through.
+            let start = s.fetch_since(since, since_specified);
+            let n_chunks = chunk_bounds(start, until, s.interval).len();
             let bar = multi.add(ProgressBar::new(n_chunks as u64));
             bar.set_style(style.clone());
             bar.set_prefix(format!("{:<width$}", s.label()));
@@ -350,14 +544,22 @@ fn unknown_provider_error(other: &str) -> String {
     )
 }
 
-/// Write the row list to `path` as a `;`-delimited CSV. Header:
-/// `symbol;freq;time;open;high;low;close;volume`.
-fn write_csv(path: &Path, rows: &[Row]) -> Result<()> {
+/// Write the row list to `path` as a `;`-delimited CSV. Base header:
+/// `symbol;freq;time;open;high;low;close;volume`, followed by one column per
+/// overlay column name (unique, in first-appearance order across the
+/// `--overlay` args). A `None` overlay value — either the column's applicable
+/// overlay is still warming up or no overlay is scoped to this row's group —
+/// renders as an empty cell.
+fn write_csv(path: &Path, rows: &[Row], overlay_columns: &[String]) -> Result<()> {
     let mut wtr = csv::WriterBuilder::new()
         .delimiter(b';')
         .from_path(path)
         .with_context(|| format!("creating {}", path.display()))?;
-    wtr.write_record(["symbol", "freq", "time", "open", "high", "low", "close", "volume"])?;
+    let mut header: Vec<&str> = vec![
+        "symbol", "freq", "time", "open", "high", "low", "close", "volume",
+    ];
+    header.extend(overlay_columns.iter().map(String::as_str));
+    wtr.write_record(&header)?;
     for row in rows {
         let time = row
             .candle
@@ -365,16 +567,20 @@ fn write_csv(path: &Path, rows: &[Row]) -> Result<()> {
             .to_datetime()
             .format(&Rfc3339)
             .unwrap_or_else(|_| row.candle.time.0.to_string());
-        wtr.write_record([
-            row.symbol.as_str(),
-            &row.interval.as_token(),
-            &time,
-            &format_f64(row.candle.candle.open),
-            &format_f64(row.candle.candle.high),
-            &format_f64(row.candle.candle.low),
-            &format_f64(row.candle.candle.close),
-            &format_f64(row.candle.candle.volume),
-        ])?;
+        let mut record: Vec<String> = vec![
+            row.symbol.clone(),
+            row.interval.as_token(),
+            time,
+            format_f64(row.candle.candle.open),
+            format_f64(row.candle.candle.high),
+            format_f64(row.candle.candle.low),
+            format_f64(row.candle.candle.close),
+            format_f64(row.candle.candle.volume),
+        ];
+        for v in &row.overlays {
+            record.push(v.map(format_f64).unwrap_or_default());
+        }
+        wtr.write_record(&record)?;
     }
     wtr.flush()?;
     Ok(())
@@ -472,7 +678,7 @@ fn parse_symbol(s: &str) -> Result<SymbolSpec> {
 
 /// Parse a Binance-style interval token (`1m`, `5m`, `1h`, `4h`, `1d`, `1w`,
 /// `1M`). Case-sensitive on the unit letter: `m` = minute, `M` = month.
-fn parse_interval(s: &str) -> Result<Interval> {
+pub(crate) fn parse_interval(s: &str) -> Result<Interval> {
     let s = s.trim();
     if s.is_empty() {
         bail!("empty interval token");
