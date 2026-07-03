@@ -52,8 +52,16 @@ pub(crate) struct Cli {
 enum Command {
     /// Run a `strategy.yml` backtest over CSV series.
     Run(RunArgs),
-    /// Parse a `strategy.yml` and report whether it is syntactically valid.
-    Check(CheckArgs),
+    /// Parse a spec and report whether it is syntactically valid.
+    ///
+    /// `fugazi check strategy <STRATEGY>` validates a strategy spec (with
+    /// `--params` substitution); `fugazi check overlay <SPEC>...` validates
+    /// one or more `get --overlay` specs.
+    #[command(subcommand_required = true, arg_required_else_help = true)]
+    Check {
+        #[command(subcommand)]
+        cmd: CheckCmd,
+    },
     /// Sweep a strategy over a parameter grid and rank the combinations.
     Optimize(OptimizeArgs),
     /// Fetch OHLCV candles from remote providers into a `run`-ready CSV.
@@ -170,8 +178,20 @@ struct RunArgs {
     quiet: bool,
 }
 
+/// What kind of spec `fugazi check` is checking. Nested subcommand so each
+/// kind can carry its own positional shape without the top-level `check` args
+/// having to caveat "only applies when `kind = ...`".
+#[derive(Subcommand)]
+enum CheckCmd {
+    /// Validate a strategy spec (with `--params` substitution).
+    Strategy(CheckStrategyArgs),
+    /// Validate one or more `get --overlay` specs — parses each and builds a
+    /// live indicator per column to confirm the whole tree resolves.
+    Overlay(CheckOverlayArgs),
+}
+
 #[derive(Args)]
-struct CheckArgs {
+struct CheckStrategyArgs {
     /// The strategy: `@file.yml` loads a file, anything else is inline YAML.
     #[arg(value_name = "STRATEGY")]
     strategy: Source,
@@ -182,6 +202,20 @@ struct CheckArgs {
     /// a check failure.
     #[arg(short, long = "params", value_name = "SPEC")]
     params: Vec<params::ParamSpec>,
+
+    /// Suppress the "ok" message on success. Errors still print, and the exit
+    /// code (0 ok, non-zero on failure) is unchanged.
+    #[arg(short, long)]
+    quiet: bool,
+}
+
+#[derive(Args)]
+struct CheckOverlayArgs {
+    /// One or more overlay specs — same shape as `get --overlay`:
+    /// `[SCOPE:]col=expr[,col=expr,...]` inline or `[SCOPE:]@file.yml`, where
+    /// `SCOPE` is an optional `SYMBOL[FREQ]:`, `SYMBOL:`, or `[FREQ]:` prefix.
+    #[arg(value_name = "SPEC", required = true, num_args = 1..)]
+    overlays: Vec<Source>,
 
     /// Suppress the "ok" message on success. Errors still print, and the exit
     /// code (0 ok, non-zero on failure) is unchanged.
@@ -299,7 +333,10 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Run(args) => run(args),
-        Command::Check(args) => check(args),
+        Command::Check { cmd } => match cmd {
+            CheckCmd::Strategy(args) => check_strategy(args),
+            CheckCmd::Overlay(args) => check_overlay(args),
+        },
         Command::Optimize(args) => optimize(args),
         Command::Get(args) => get::run(args),
         Command::Completions { shell } => completions::run(shell),
@@ -307,7 +344,7 @@ fn main() -> Result<()> {
     }
 }
 
-fn check(args: CheckArgs) -> Result<()> {
+fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     let param_table = params::table(&args.params)?;
 
     let text = args.strategy.read().context("reading strategy")?;
@@ -317,6 +354,33 @@ fn check(args: CheckArgs) -> Result<()> {
     if !args.quiet {
         style::print_header("check", "parse and validate a strategy spec");
         println!("{}: ok (symbol {})", args.strategy.label(), spec.symbol);
+    }
+    Ok(())
+}
+
+fn check_overlay(args: CheckOverlayArgs) -> Result<()> {
+    // Parses the specs (including the `SYMBOL[FREQ]:` scope prefix) *and*
+    // builds one live indicator per column, so an unknown `!tag`, a missing
+    // `period`, or an `entry`-in-`get` misuse all surface here.
+    let overlays = overlay::parse_specs(&args.overlays)?;
+    for o in &overlays {
+        let _ = o.build();
+    }
+    let columns = overlay::column_names(&overlays);
+
+    if !args.quiet {
+        style::print_header("check", "parse and validate an overlay spec");
+        let labels: Vec<String> = args.overlays.iter().map(|s| s.label()).collect();
+        let n_cols = columns.len();
+        println!(
+            "{}: ok ({} overlay{} across {} column{}: {})",
+            labels.join(", "),
+            overlays.len(),
+            if overlays.len() == 1 { "" } else { "s" },
+            n_cols,
+            if n_cols == 1 { "" } else { "s" },
+            columns.join(", "),
+        );
     }
     Ok(())
 }
