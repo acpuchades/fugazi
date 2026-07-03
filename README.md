@@ -47,7 +47,10 @@ before trusting the output. The `Stable` wrapper — `.stable()` on any source
 converting the soft unstable period into hard warm-up
 (`gated.warm_up_period() == source.stable_period()`, `unstable_period() == 0`).
 Gate a strategy's entry signal with it and no trade can trigger off a
-seed-contaminated value.
+seed-contaminated value — which is what the CLI does **by default**: `fugazi
+run`/`optimize` wrap every entry signal in `Stable` and measure the metrics
+from the first bar an entry could fire on (`--keep-unstable` restores the
+ungated behavior).
 
 ## Quick start
 
@@ -347,6 +350,18 @@ then the full catalogue under dotted `metrics.yml` names — instead of
 `metrics.yml`, with the console metrics block reporting each figure's
 cross-window mean ± standard deviation. Output files are `;`-delimited for
 Excel.
+
+By default entry signals are **stability-gated**: each is wrapped in `Stable`,
+so no entry fires while its indicator chain is still seed-contaminated, and
+metrics (whole-run and windowed alike) are measured from the first bar an
+entry could possibly fire on — the gated prefix is provably flat, so skipping
+it removes warm-up dilution without discarding any P&L (the trades/returns
+files and the equity chart still cover the full run; a `measured` line in the
+console shows the skip). `--keep-unstable` (also on `optimize`) disables both
+the gate and the skip, restoring pre-gate behavior. For purely windowed (FIR)
+strategies — SMA crossovers and the like — the gate coincides with ordinary
+warm-up, so trades are identical either way and only the dead prefix leaves
+the metrics.
 
 Console output is a two-line banner (the constant tool identity, then the active
 command) followed by four blocks: an **inputs** block of the execution params

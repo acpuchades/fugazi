@@ -703,13 +703,37 @@ impl StrategySpec {
     }
 
     /// Build the live [`SingleAssetStrategy`] this spec describes.
-    pub fn build(&self) -> SingleAssetStrategy<String> {
+    ///
+    /// With `stable` set (the CLI default; `--keep-unstable` turns it off) each
+    /// side's **entry** signal is wrapped in
+    /// [`Stable`](fugazi::indicators::Stable), so no entry can fire while its
+    /// chain is still seed-contaminated. Exits and protective levels are not
+    /// gated — no position can exist before the first gated entry.
+    ///
+    /// The second value is the **measurement anchor**: the number of leading
+    /// bars during which no entry can possibly fire (the min over the
+    /// configured sides' gated-entry warm-ups — the min, because the earliest
+    /// possible fill is what bounds a safe crop; and only over *configured*
+    /// sides, since an unused slot's constant-false signal reports 0 but never
+    /// fires). Equity is provably flat there, so a caller can slice those bars
+    /// off the metric range losslessly. `0` when ungated or side-less.
+    pub fn build(&self, stable: bool) -> (SingleAssetStrategy<String>, usize) {
         let mut strat = SingleAssetStrategy::new(self.symbol.clone());
         // One position per strategy, shared by every `entry`/`peak`/`trough` leaf
         // in the sides' signals and stop levels.
         let anchor = strat.position();
+        let mut measure_from: Option<usize> = None;
+        let mut gate = |enter: DynSignal| -> DynSignal {
+            if !stable {
+                return enter;
+            }
+            let gated = enter.stable();
+            let opens_at = gated.warm_up_period();
+            measure_from = Some(measure_from.map_or(opens_at, |m| m.min(opens_at)));
+            DynSignal::new(gated)
+        };
         if let Some(long) = &self.long {
-            strat = strat.long_on(long.enter.build(&anchor), long.exit(&anchor));
+            strat = strat.long_on(gate(long.enter.build(&anchor)), long.exit(&anchor));
             if let Some(sl) = &long.stop_loss {
                 strat = strat.long_stop_loss(sl.build(&anchor));
             }
@@ -718,7 +742,7 @@ impl StrategySpec {
             }
         }
         if let Some(short) = &self.short {
-            strat = strat.short_on(short.enter.build(&anchor), short.exit(&anchor));
+            strat = strat.short_on(gate(short.enter.build(&anchor)), short.exit(&anchor));
             if let Some(sl) = &short.stop_loss {
                 strat = strat.short_stop_loss(sl.build(&anchor));
             }
@@ -726,7 +750,7 @@ impl StrategySpec {
                 strat = strat.short_take_profit(tp.build(&anchor));
             }
         }
-        strat
+        (strat, measure_from.unwrap_or(0))
     }
 }
 
@@ -770,7 +794,7 @@ mod tests {
         let spec: StrategySpec = serde_json::from_value(json).unwrap();
         assert_eq!(spec.symbol, "BTC");
         assert!(spec.long.is_some());
-        let _ = spec.build();
+        let _ = spec.build(true);
     }
 
     #[test]
@@ -798,7 +822,7 @@ mod tests {
         let spec = StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
             .unwrap();
         assert_eq!(spec.symbol, "BTC");
-        let _strat = spec.build();
+        let (_strat, _) = spec.build(true);
     }
 
     #[test]
@@ -812,7 +836,9 @@ mod tests {
         "#;
         let spec =
             StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new()).unwrap();
-        let mut strat = spec.build();
+        // Gating is a no-op here: the `!value true` entry has stable period 0.
+        let (mut strat, measure_from) = spec.build(true);
+        assert_eq!(measure_from, 0);
         let mut w = PaperWallet::new(1_000.0);
         // Bar 1 signals; the entry fills at bar 2's open (100), anchoring the stop
         // at 90; bar 3 trades down through 90 (low 88), opening above it.
@@ -869,6 +895,50 @@ mod tests {
         let spec = StrategySpec::from_text_with_params(doc, &std::collections::HashMap::new())
             .unwrap();
         assert_eq!(spec.symbol, "ETH");
-        let _strat = spec.build();
+        let (_strat, _) = spec.build(true);
+    }
+
+    #[test]
+    fn build_gates_entries_and_reports_the_anchor() {
+        // An EMA-crossover entry has a real unstable tail; gated, no entry can
+        // fire before the chain's stable period, and `build` reports that bar
+        // as the measurement anchor.
+        let yaml = r#"
+            symbol: BTC
+            long:
+              enter: !crosses_above { lhs: !ema { period: 3 }, rhs: !ema { period: 8 } }
+        "#;
+        let spec =
+            StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new()).unwrap();
+        let raw = spec.long.as_ref().unwrap().enter.build(&Position::new());
+        let expected = raw.stable_period();
+        assert!(expected > raw.warm_up_period(), "entry must have a soft tail");
+
+        let (_gated, anchor) = spec.build(true);
+        assert_eq!(anchor, expected);
+        let (_raw, anchor) = spec.build(false);
+        assert_eq!(anchor, 0, "--keep-unstable reports no anchor");
+    }
+
+    #[test]
+    fn anchor_is_the_min_over_configured_sides() {
+        // Long entry settles later than the short one; the earliest possible
+        // fill is bounded by the *short* side, so the anchor is the min.
+        let yaml = r#"
+            symbol: BTC
+            long:
+              enter: !above { source: !ema { period: 8 }, level: 100 }
+            short:
+              enter: !below { source: !ema { period: 3 }, level: 100 }
+        "#;
+        let spec =
+            StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new()).unwrap();
+        let anchor_pos = Position::new();
+        let long = spec.long.as_ref().unwrap().enter.build(&anchor_pos);
+        let short = spec.short.as_ref().unwrap().enter.build(&anchor_pos);
+        assert!(long.stable_period() > short.stable_period());
+
+        let (_strat, anchor) = spec.build(true);
+        assert_eq!(anchor, short.stable_period());
     }
 }

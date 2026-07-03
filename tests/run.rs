@@ -117,11 +117,15 @@ fn runs_windowed_metrics() {
             "metrics.csv header missing `{section}`: {header}"
         );
     }
-    // 30 example bars in 10-bar windows → exactly 3 rows.
-    assert_eq!(
-        lines.count(),
-        3,
-        "expected one row per window:\n{metrics}"
+    // The SMA(3)/SMA(8) crossover entry warms up in 9 bars (gt: 8, edge: +1;
+    // FIR, so stable = warm-up): the measured range starts at bar 9
+    // (2024-01-10) and its 21 bars split into 10 + 10 + 1 → 3 windows.
+    let rows: Vec<&str> = lines.collect();
+    assert_eq!(rows.len(), 3, "expected one row per window:\n{metrics}");
+    assert!(
+        rows[0].starts_with("2024-01-10;"),
+        "first window should start at the stability-gate anchor: {}",
+        rows[0]
     );
 }
 

@@ -156,6 +156,14 @@ struct RunArgs {
     #[arg(short = 'w', long = "windowed", value_name = "N")]
     windowed: Option<NonZeroUsize>,
 
+    /// Keep the pre-gate behavior: by default each entry signal is wrapped in
+    /// `Stable` (no entry fires while its indicator chain is still
+    /// seed-contaminated — its "unstable period") and the metrics are measured
+    /// from the first bar an entry could fire on, skipping the provably-flat
+    /// gated prefix. This flag disables both the gate and the skip.
+    #[arg(long)]
+    keep_unstable: bool,
+
     /// Suppress all console output (the result files are still written).
     #[arg(short, long)]
     quiet: bool,
@@ -252,6 +260,11 @@ struct OptimizeArgs {
     #[arg(long, value_name = "RATE", default_value_t = 0.0)]
     risk_free_rate: f64,
 
+    /// Disable stability gating and its metric anchor for every grid point.
+    /// Same semantics as `run --keep-unstable`.
+    #[arg(long)]
+    keep_unstable: bool,
+
     /// Suppress console output. The CSV is still written.
     #[arg(short, long)]
     quiet: bool,
@@ -304,6 +317,7 @@ fn run(args: RunArgs) -> Result<()> {
         bars_per_year,
         risk_free_rate: args.risk_free_rate,
         windowed: args.windowed,
+        keep_unstable: args.keep_unstable,
         quiet: args.quiet,
     };
     backtest::run(&spec, &frame, &opts)?;
@@ -329,6 +343,7 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         output: &args.output,
         bars_per_year,
         risk_free_rate: args.risk_free_rate,
+        keep_unstable: args.keep_unstable,
         jobs: args.jobs,
         quiet: args.quiet,
     };

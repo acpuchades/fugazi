@@ -11,8 +11,18 @@
 //! `;`-delimited for Excel. After the loop, the recorded equity curve and fill
 //! blotter are reduced into `metrics.yml` — see [`crate::metrics`] for the
 //! catalogue (return moments, Sharpe/Sortino/Calmar, drawdown, round-trip
-//! trade statistics). With [`RunOptions::windowed`] set, that reduction runs
-//! once per non-overlapping N-bar window instead and lands as `metrics.csv`
+//! trade statistics).
+//!
+//! By default the strategy's entry signals are **stability-gated** (wrapped in
+//! [`fugazi::indicators::Stable`] at build time — see [`StrategySpec::build`]),
+//! so no entry fires while its chain is still seed-contaminated, and the metric
+//! reduction **measures from the anchor the gate implies**: the leading bars on
+//! which no entry could possibly fire are provably flat (nothing was at risk)
+//! and are sliced off so they don't dilute the return moments. The result
+//! files still cover the full run. [`RunOptions::keep_unstable`]
+//! (`--keep-unstable`) disables both the gate and the crop. With
+//! [`RunOptions::windowed`] set, the reduction runs once per non-overlapping
+//! N-bar window of the measured range instead and lands as `metrics.csv`
 //! (one row per window, tagged with the window's start/end times), and the
 //! console metrics block reports each figure's cross-window mean ± stddev.
 //!
@@ -46,9 +56,10 @@ pub fn evaluate(
     cash: Real,
     bars_per_year: Real,
     risk_free_rate: Real,
+    keep_unstable: bool,
 ) -> metrics::Metrics {
     let symbol = spec.symbol.clone();
-    let mut strategy = spec.build();
+    let (mut strategy, measure_from) = spec.build(!keep_unstable);
     let mut wallet = PaperWallet::new(cash);
     let report = fugazi::backtest::run(
         &mut strategy,
@@ -56,7 +67,11 @@ pub fn evaluate(
         symbol,
         candles.iter().map(|(_, c)| *c),
     );
-    metrics::from_report(&report, bars_per_year, risk_free_rate)
+    // Same measurement anchor as `run`: the gated-entry prefix is provably
+    // flat, so slice it off the metric range.
+    let measure_from = measure_from.min(report.equity_curve.len());
+    let measured = metrics::report_slice(&report, measure_from..report.equity_curve.len());
+    metrics::from_report(&measured, bars_per_year, risk_free_rate)
 }
 
 /// Console-logging knobs plus the run's inputs, threaded in from the CLI args.
@@ -81,6 +96,11 @@ pub struct RunOptions<'a> {
     /// writing `metrics.csv` (one row per window) instead of `metrics.yml`.
     /// `None` = whole-run metrics to `metrics.yml`.
     pub windowed: Option<NonZeroUsize>,
+    /// Disable the default stability gating: entry signals are *not* wrapped
+    /// in `Stable` (so they may fire on seed-contaminated values, as in
+    /// releases before the gate) and the metric range is the full run rather
+    /// than starting at the gate's anchor.
+    pub keep_unstable: bool,
     /// Suppress all console output (the result files are still written).
     pub quiet: bool,
 }
@@ -98,7 +118,7 @@ pub struct Summary {
 pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<Summary> {
     let started = SystemTime::now();
     let symbol = spec.symbol.clone();
-    let mut strategy = spec.build();
+    let (mut strategy, measure_from) = spec.build(!opts.keep_unstable);
     let candles = frame.candles(&symbol)?;
 
     std::fs::create_dir_all(opts.out_dir)
@@ -201,19 +221,39 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
     // `metrics.yml`; windowed → one document per non-overlapping N-bar window,
     // one `metrics.csv` row each. The matching console block prints after the
     // result block below.
+    //
+    // Metrics measure from the stability gate's anchor: on the leading
+    // `measure_from` bars no entry could possibly fire, so equity is flat by
+    // construction (nothing was at risk) and including them would dilute the
+    // return moments and, windowed, seed the cross-window spread with
+    // artificial dead windows. The result files above and the equity chart
+    // still cover the full run. Zero under `--keep-unstable`.
+    let measure_from = measure_from.min(report.equity_curve.len());
+    let measured = metrics::report_slice(&report, measure_from..report.equity_curve.len());
+    let measured_label = (measure_from > 0).then(|| {
+        let bars = report.equity_curve.len();
+        match candles.get(measure_from) {
+            Some((t, _)) => format!(
+                "{t} → {end} ({} of {bars} bars; {measure_from} stability-gated bars skipped)",
+                bars - measure_from,
+            ),
+            // The whole series fits inside the gate — nothing to measure.
+            None => format!("(none — all {bars} bars inside the {measure_from}-bar stability gate)"),
+        }
+    });
     let (whole, windows) = match opts.windowed {
         Some(n) => {
             let ws = metrics::windowed_from_report(
-                &report,
+                &measured,
                 n.get(),
                 opts.bars_per_year,
                 opts.risk_free_rate,
             );
-            write_metrics_csv(&ws, &candles, &opts.out_dir.join("metrics.csv"))?;
+            write_metrics_csv(&ws, &candles[measure_from..], &opts.out_dir.join("metrics.csv"))?;
             (None, Some((n.get(), ws)))
         }
         None => {
-            let m = metrics::from_report(&report, opts.bars_per_year, opts.risk_free_rate);
+            let m = metrics::from_report(&measured, opts.bars_per_year, opts.risk_free_rate);
             metrics::write_yaml(&m, &opts.out_dir.join("metrics.yml"))?;
             (Some(m), None)
         }
@@ -231,10 +271,10 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
     if !opts.quiet {
         print_result_block(opts, &summary, started, finished);
         if let Some(m) = &whole {
-            print_metrics_block(m);
+            print_metrics_block(m, measured_label.as_deref());
         }
         if let Some((n, ws)) = &windows {
-            print_windowed_metrics_block(ws, *n);
+            print_windowed_metrics_block(ws, *n, measured_label.as_deref());
         }
     }
     Ok(summary)
@@ -326,8 +366,11 @@ fn print_result_block(opts: &RunOptions, s: &Summary, started: SystemTime, finis
 /// Only the most-referenced ones are surfaced here (annualized return + vol,
 /// Sharpe/Sortino/Omega, max drawdown, exposure, trade count + win rate +
 /// profit factor); the file itself carries the full set.
-fn print_metrics_block(m: &metrics::Metrics) {
+fn print_metrics_block(m: &metrics::Metrics, measured: Option<&str>) {
     println!("\n{}", style::bold("metrics"));
+    if let Some(measured) = measured {
+        print_field("measured", measured);
+    }
     print_field(
         "return",
         &format!(
@@ -362,8 +405,15 @@ fn print_metrics_block(m: &metrics::Metrics) {
 /// is degenerate in some windows averages over the windows where it is
 /// defined; one degenerate everywhere prints `—`. The full per-window values
 /// live in `metrics.csv`.
-fn print_windowed_metrics_block(windows: &[metrics::WindowMetrics], window: usize) {
+fn print_windowed_metrics_block(
+    windows: &[metrics::WindowMetrics],
+    window: usize,
+    measured: Option<&str>,
+) {
     println!("\n{}", style::bold("metrics"));
+    if let Some(measured) = measured {
+        print_field("measured", measured);
+    }
     let last_bars = windows.last().map_or(window, |w| w.metrics.run.bars);
     let shape = if last_bars == window {
         format!("{} × {window} bars", windows.len())

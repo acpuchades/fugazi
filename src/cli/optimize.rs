@@ -63,6 +63,9 @@ pub struct OptimizeOptions<'a> {
     pub output: &'a Path,
     pub bars_per_year: Real,
     pub risk_free_rate: Real,
+    /// Disable the default stability gating (and its metric anchor) for every
+    /// grid point — see `run --keep-unstable`.
+    pub keep_unstable: bool,
     pub jobs: Option<usize>,
     pub quiet: bool,
 }
@@ -95,6 +98,7 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
         opts.cash,
         opts.bars_per_year,
         opts.risk_free_rate,
+        opts.keep_unstable,
     );
 
     // Resolve column paths once — errors here catch typos before the sweep.
@@ -129,6 +133,7 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
     let cash = opts.cash;
     let bpy = opts.bars_per_year;
     let rf = opts.risk_free_rate;
+    let keep_unstable = opts.keep_unstable;
     let base = &base_value;
     let candles_ref = &candles;
     let axes_ref = &axes;
@@ -140,7 +145,7 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
             .map(|combo| {
                 let params = combine_params(fixed_ref, axes_ref, combo);
                 let spec = build_spec(base, &params)?;
-                let m = backtest::evaluate(&spec, candles_ref, cash, bpy, rf);
+                let m = backtest::evaluate(&spec, candles_ref, cash, bpy, rf, keep_unstable);
                 Ok::<_, anyhow::Error>(Row {
                     combo: combo.clone(),
                     metrics: m,

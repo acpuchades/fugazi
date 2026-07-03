@@ -315,13 +315,45 @@ pub struct WindowMetrics {
     pub metrics: Metrics,
 }
 
+/// The sub-run covering the half-open `bars` range of `report`: the equity
+/// slice, the fills booked inside it (rebased to the range's own bar axis, so
+/// bar-relative metrics read against it), and, as initial equity, the equity
+/// marked on the bar before the range (the run's own `initial_equity` when the
+/// range starts at bar 0).
+///
+/// This is the one measurement primitive the CLI's metric reductions share:
+/// the first-fill anchor slices off the flat warm-up prefix, and each
+/// `--windowed` window is a slice of its own.
+pub fn report_slice<Sym: Clone>(
+    report: &RunReport<Sym>,
+    bars: std::ops::Range<usize>,
+) -> RunReport<Sym> {
+    let fills: Vec<Fill<Sym>> = report
+        .fills
+        .iter()
+        .filter(|f| bars.contains(&f.bar))
+        .map(|f| Fill {
+            bar: f.bar - bars.start,
+            order: f.order.clone(),
+        })
+        .collect();
+    RunReport {
+        equity_curve: report.equity_curve[bars.clone()].to_vec(),
+        fills,
+        initial_equity: if bars.start == 0 {
+            report.initial_equity
+        } else {
+            report.equity_curve[bars.start - 1]
+        },
+    }
+}
+
 /// Reduce a [`RunReport`] to one [`Metrics`] document per non-overlapping
 /// `window`-bar span (the last window keeps whatever bars remain). Each window
-/// is evaluated as a run of its own: its initial equity is the equity marked on
-/// the bar before it (the run's `initial_equity` for the first), and only the
-/// fills booked inside it count — a position carried across a boundary shows up
-/// in the entering window as an unmatched closing fill, the usual windowed-
-/// analysis convention.
+/// is evaluated as a run of its own — a [`report_slice`]: its initial equity
+/// is the equity marked on the bar before it, and only the fills booked inside
+/// it count — a position carried across a boundary shows up in the entering
+/// window as an unmatched closing fill, the usual windowed-analysis convention.
 pub fn windowed_from_report<Sym: Clone>(
     report: &RunReport<Sym>,
     window: usize,
@@ -329,35 +361,19 @@ pub fn windowed_from_report<Sym: Clone>(
     risk_free_rate: Real,
 ) -> Vec<WindowMetrics> {
     assert!(window > 0, "window length must be positive");
-    let equity = report.equity_curve.as_slice();
+    let bars = report.equity_curve.len();
     let mut out = Vec::new();
     let mut start = 0;
-    while start < equity.len() {
-        let end = (start + window).min(equity.len());
-        // Rebase each fill's bar index to the window, so bar-relative metrics
-        // (exposure, bars held) read against the window's own axis.
-        let fills: Vec<Fill<Sym>> = report
-            .fills
-            .iter()
-            .filter(|f| (start..end).contains(&f.bar))
-            .map(|f| Fill {
-                bar: f.bar - start,
-                order: f.order.clone(),
-            })
-            .collect();
-        let window_report = RunReport {
-            equity_curve: equity[start..end].to_vec(),
-            fills,
-            initial_equity: if start == 0 {
-                report.initial_equity
-            } else {
-                equity[start - 1]
-            },
-        };
+    while start < bars {
+        let end = (start + window).min(bars);
         out.push(WindowMetrics {
             start_bar: start,
             end_bar: end - 1,
-            metrics: from_report(&window_report, bars_per_year, risk_free_rate),
+            metrics: from_report(
+                &report_slice(report, start..end),
+                bars_per_year,
+                risk_free_rate,
+            ),
         });
         start = end;
     }
