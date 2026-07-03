@@ -23,6 +23,7 @@
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -37,6 +38,7 @@ use fugazi::prelude::*;
 use fugazi::sources::{Binance, CandleSource, Interval, TimedCandle, Timestamp, Yahoo};
 
 use crate::dynd::DynValue;
+use crate::file::{FileBar, FileSource};
 use crate::input::Source as InputSource;
 use crate::overlay::{self, Overlay};
 use crate::style;
@@ -48,6 +50,10 @@ pub(crate) const KNOWN_PROVIDERS: &[(&str, &str)] = &[
     (
         "binance",
         "Binance spot klines endpoint (BTC/ETH/... vs. USDT/EUR/...)",
+    ),
+    (
+        "file",
+        "Local OHLCV CSV — spec is `file:PATH` (no `[freq]` bracket)",
     ),
     (
         "yfinance",
@@ -62,11 +68,20 @@ struct SymbolSpec {
     intervals: Vec<Interval>,
 }
 
-/// A parsed `<provider>:<symbol>[...],<symbol>[...]` spec.
+/// A parsed CLI `get` spec.
+///
+/// Remote providers share the same `<provider>:<symbol>[<freq>,...],<symbol>[<freq>,...]`
+/// grammar; `file:PATH` is its own variant, since the file already carries
+/// symbol+freq per row and the bracket doesn't apply.
 #[derive(Debug, Clone, PartialEq)]
-struct FetchSpec {
-    provider: String,
-    symbols: Vec<SymbolSpec>,
+enum FetchSpec {
+    Remote {
+        provider: String,
+        symbols: Vec<SymbolSpec>,
+    },
+    File {
+        path: PathBuf,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -174,30 +189,73 @@ pub fn run(args: GetArgs) -> Result<()> {
         .build()
         .context("building tokio runtime")?;
 
-    // One `Series` per (provider, symbol, interval) — the unit of parallelism.
-    // Per-series overlay warm-up is folded in here so `fetch_series` can push
-    // `since` back accordingly and each task builds its own indicator instances.
-    let series: Vec<Series> = fetch_specs
-        .iter()
-        .flat_map(|spec| {
-            spec.symbols.iter().flat_map(|sym| {
-                sym.intervals.iter().map(|&interval| {
+    // Expand each `FetchSpec` into one `Series` per `(symbol, interval)` — the
+    // unit of parallelism. Per-series overlay warm-up is folded in here so
+    // `fetch_series` can push `since` back accordingly and each task builds
+    // its own indicator instances. `file:` specs are read once up front and
+    // their bar list is shared into each derived Series' `file_bars` so the
+    // async pipeline can filter without re-reading.
+    let mut series: Vec<Series> = Vec::new();
+    let mut n_symbols: usize = 0;
+    for spec in &fetch_specs {
+        match spec {
+            FetchSpec::Remote { provider, symbols } => {
+                n_symbols += symbols.len();
+                for sym in symbols {
+                    for &interval in &sym.intervals {
+                        let stable = overlay::stable_period_for(
+                            &overlays,
+                            &overlay_columns,
+                            &sym.symbol,
+                            interval,
+                        );
+                        series.push(Series {
+                            provider: provider.clone(),
+                            symbol: sym.symbol.clone(),
+                            interval,
+                            stable,
+                            file_bars: None,
+                            file_path: None,
+                        });
+                    }
+                }
+            }
+            FetchSpec::File { path } => {
+                let bars = FileSource::new(path.clone())
+                    .read()
+                    .with_context(|| format!("reading {}", path.display()))?;
+                let shared = Arc::new(bars);
+                let mut pairs: Vec<(String, Interval)> = Vec::new();
+                for b in shared.iter() {
+                    let pair = (b.symbol.clone(), b.interval);
+                    if !pairs.contains(&pair) {
+                        pairs.push(pair);
+                    }
+                }
+                let mut seen_symbols: Vec<String> = Vec::new();
+                for (sym, interval) in pairs {
+                    if !seen_symbols.contains(&sym) {
+                        seen_symbols.push(sym.clone());
+                    }
                     let stable = overlay::stable_period_for(
                         &overlays,
                         &overlay_columns,
-                        &sym.symbol,
+                        &sym,
                         interval,
                     );
-                    Series {
-                        provider: spec.provider.clone(),
-                        symbol: sym.symbol.clone(),
+                    series.push(Series {
+                        provider: "file".into(),
+                        symbol: sym,
                         interval,
                         stable,
-                    }
-                })
-            })
-        })
-        .collect();
+                        file_bars: Some(shared.clone()),
+                        file_path: Some(path.clone()),
+                    });
+                }
+                n_symbols += seen_symbols.len();
+            }
+        }
+    }
 
     let (multi, bars) =
         build_progress_bars(&series, since_ts, until_ts, since_specified, args.quiet);
@@ -205,7 +263,7 @@ pub fn run(args: GetArgs) -> Result<()> {
     // Async: download every series in parallel — no overlay state crosses task
     // boundaries. Overlays are applied synchronously below, per (symbol,
     // interval) group, so `DynValue`'s non-Send `Rc`-backed `Position` stub
-    // stays on one thread.
+    // stays on one thread. `file:` series short-circuit inside `fetch_series`.
     let result = rt.block_on(fetch_all(series.clone(), since_ts, until_ts, since_specified, bars));
     let _ = multi.clear();
     let raw = result?;
@@ -222,7 +280,6 @@ pub fn run(args: GetArgs) -> Result<()> {
         .with_context(|| format!("writing {}", args.output.display()))?;
 
     if !args.quiet {
-        let n_symbols: usize = fetch_specs.iter().map(|s| s.symbols.len()).sum();
         println!(
             "{}: wrote {} rows across {} symbol{}/{} interval series",
             args.output.display(),
@@ -245,26 +302,44 @@ struct Row {
     overlays: Vec<Option<Real>>,
 }
 
-/// One downloadable series: a `(provider, symbol, interval)` triple plus the
-/// per-series overlay warm-up length (max `stable_period` across the overlays
-/// that apply to this `(symbol, interval)`). The unit of parallelism — each
-/// series gets its own fetch task and progress bar.
+/// One downloadable (or file-backed) series: a `(provider, symbol, interval)`
+/// triple plus the per-series overlay warm-up length (max `stable_period`
+/// across the overlays that apply to this `(symbol, interval)`). The unit of
+/// parallelism — each series gets its own fetch task and progress bar.
+///
+/// For `file:` specs, the pre-read bar list is threaded through as
+/// [`Series::file_bars`], and [`fetch_series`] short-circuits into an
+/// in-memory filter instead of an HTTP fetch.
 #[derive(Clone)]
 struct Series {
     provider: String,
     symbol: String,
     interval: Interval,
     stable: usize,
+    /// The file's pre-read bar list, shared between every series that reads
+    /// from the same file. `None` for remote-provider series.
+    file_bars: Option<Arc<Vec<FileBar>>>,
+    /// The originating path — kept for the progress-bar label (`file:./data.csv`).
+    file_path: Option<PathBuf>,
 }
 
 impl Series {
     fn label(&self) -> String {
-        format!(
-            "{}:{}[{}]",
-            self.provider,
-            self.symbol,
-            self.interval.as_token()
-        )
+        if let Some(path) = &self.file_path {
+            format!(
+                "file:{}[{}:{}]",
+                path.display(),
+                self.symbol,
+                self.interval.as_token()
+            )
+        } else {
+            format!(
+                "{}:{}[{}]",
+                self.provider,
+                self.symbol,
+                self.interval.as_token()
+            )
+        }
     }
 
     /// Where this series' fetch actually starts: `since` on the nose when the
@@ -346,12 +421,38 @@ async fn fetch_all(
 
 /// Fetch one series chunk-by-chunk (sequentially — the politeness delay is
 /// per series), advancing its own progress bar. Overlay-agnostic.
+///
+/// A `file:` series short-circuits: the file has already been read into
+/// [`Series::file_bars`] up front, so this is just an in-memory filter to the
+/// series' `(symbol, interval)` and the `[fetch_since, until)` window.
 async fn fetch_series(
     series: Series,
     fetch_since: Timestamp,
     until: Timestamp,
     bar: ProgressBar,
 ) -> Result<Vec<RawBar>> {
+    if let Some(file_bars) = series.file_bars.clone() {
+        let rows: Vec<RawBar> = file_bars
+            .iter()
+            .filter(|b| {
+                b.symbol == series.symbol
+                    && b.interval == series.interval
+                    && b.time.0 >= fetch_since.0
+                    && b.time.0 < until.0
+            })
+            .map(|b| RawBar {
+                symbol: b.symbol.clone(),
+                interval: b.interval,
+                candle: TimedCandle {
+                    time: b.time,
+                    candle: b.candle,
+                },
+            })
+            .collect();
+        bar.inc(1);
+        bar.finish_with_message("done");
+        return Ok(rows);
+    }
     let label = series.label();
     let mut rows: Vec<RawBar> = Vec::new();
     let mut first = true;
@@ -492,9 +593,14 @@ fn build_progress_bars(
         .map(|s| {
             // Per-series bar accounts for the overlay warm-up window pulled in
             // ahead of `since` so the progress count matches what fetch_series
-            // actually chunks through.
-            let start = s.fetch_since(since, since_specified);
-            let n_chunks = chunk_bounds(start, until, s.interval).len();
+            // actually chunks through. `file:` series are read once up front,
+            // so their bar is a single tick that flips straight to `done`.
+            let n_chunks = if s.file_bars.is_some() {
+                1
+            } else {
+                let start = s.fetch_since(since, since_specified);
+                chunk_bounds(start, until, s.interval).len()
+            };
             let bar = multi.add(ProgressBar::new(n_chunks as u64));
             bar.set_style(style.clone());
             bar.set_prefix(format!("{:<width$}", s.label()));
@@ -532,6 +638,11 @@ pub(crate) async fn tickers_of(provider: &str) -> Result<Vec<String>> {
     match provider {
         "binance" => Ok(Binance::new().tickers().await?),
         "yfinance" => Ok(Yahoo::new().tickers().await?),
+        "file" => bail!(
+            "`file:` reads a local CSV — the ticker list is whatever `symbol` \
+             values the file itself contains; there is no canonical enumeration \
+             endpoint"
+        ),
         other => bail!(unknown_provider_error(other)),
     }
 }
@@ -601,7 +712,9 @@ fn format_f64(v: f64) -> String {
 // only objects/enums; these translate the user-facing CLI strings into them.
 // ---------------------------------------------------------------------------
 
-/// Parse a `<provider>:<symbol>[<freq>,...](,<symbol>[<freq>,...])*` spec.
+/// Parse a `<provider>:<symbol>[<freq>,...](,<symbol>[<freq>,...])*` spec — or
+/// the `file:PATH` short form (no bracket; the file's own `symbol` + `freq`
+/// columns drive the output).
 fn parse_spec(spec: &str) -> Result<FetchSpec> {
     let (provider, rest) = spec
         .split_once(':')
@@ -609,6 +722,15 @@ fn parse_spec(spec: &str) -> Result<FetchSpec> {
     let provider = provider.trim();
     if provider.is_empty() {
         bail!("{spec:?}: empty provider");
+    }
+    if provider == "file" {
+        let path = rest.trim();
+        if path.is_empty() {
+            bail!("{spec:?}: `file:` needs a path (e.g. `file:./candles.csv`)");
+        }
+        return Ok(FetchSpec::File {
+            path: PathBuf::from(path),
+        });
     }
     let mut symbols: Vec<SymbolSpec> = Vec::new();
     let mut start = 0usize;
@@ -640,7 +762,7 @@ fn parse_spec(spec: &str) -> Result<FetchSpec> {
     if symbols.is_empty() {
         bail!("{spec:?}: no symbols specified");
     }
-    Ok(FetchSpec {
+    Ok(FetchSpec::Remote {
         provider: provider.to_string(),
         symbols,
     })
@@ -798,24 +920,57 @@ mod tests {
         datetime!(2024-03-15 12:34:56 UTC)
     }
 
+    /// Helper: unwrap the remote variant, panicking otherwise. All the
+    /// non-`file:` parse tests below use it.
+    fn remote(spec: &str) -> (String, Vec<SymbolSpec>) {
+        match parse_spec(spec).unwrap() {
+            FetchSpec::Remote { provider, symbols } => (provider, symbols),
+            FetchSpec::File { path } => panic!("expected Remote, got File({})", path.display()),
+        }
+    }
+
     #[test]
     fn parses_single_symbol_single_freq() {
-        let got = parse_spec("binance:BTCUSDT[1d]").unwrap();
-        assert_eq!(got.provider, "binance");
-        assert_eq!(got.symbols.len(), 1);
-        assert_eq!(got.symbols[0].symbol, "BTCUSDT");
-        assert_eq!(got.symbols[0].intervals, vec![Interval::Day(1)]);
+        let (provider, symbols) = remote("binance:BTCUSDT[1d]");
+        assert_eq!(provider, "binance");
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].symbol, "BTCUSDT");
+        assert_eq!(symbols[0].intervals, vec![Interval::Day(1)]);
     }
 
     #[test]
     fn parses_multi_symbol_multi_freq() {
-        let got = parse_spec("binance:BTCUSDT[1d,1h],ETHUSDT[1d]").unwrap();
-        assert_eq!(got.symbols.len(), 2);
+        let (_, symbols) = remote("binance:BTCUSDT[1d,1h],ETHUSDT[1d]");
+        assert_eq!(symbols.len(), 2);
         assert_eq!(
-            got.symbols[0].intervals,
+            symbols[0].intervals,
             vec![Interval::Day(1), Interval::Hour(1)]
         );
-        assert_eq!(got.symbols[1].intervals, vec![Interval::Day(1)]);
+        assert_eq!(symbols[1].intervals, vec![Interval::Day(1)]);
+    }
+
+    #[test]
+    fn parses_file_spec_without_bracket() {
+        let got = parse_spec("file:./candles.csv").unwrap();
+        match got {
+            FetchSpec::File { path } => assert_eq!(path, PathBuf::from("./candles.csv")),
+            other => panic!("expected File, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_file_spec_with_absolute_path() {
+        let got = parse_spec("file:/tmp/data.csv").unwrap();
+        match got {
+            FetchSpec::File { path } => assert_eq!(path, PathBuf::from("/tmp/data.csv")),
+            other => panic!("expected File, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_empty_file_path() {
+        assert!(parse_spec("file:").is_err());
+        assert!(parse_spec("file:   ").is_err());
     }
 
     #[test]
@@ -845,10 +1000,10 @@ mod tests {
 
     #[test]
     fn tolerates_whitespace() {
-        let got = parse_spec("binance: BTCUSDT [ 1d , 1h ] , ETHUSDT [1d]").unwrap();
-        assert_eq!(got.symbols.len(), 2);
+        let (_, symbols) = remote("binance: BTCUSDT [ 1d , 1h ] , ETHUSDT [1d]");
+        assert_eq!(symbols.len(), 2);
         assert_eq!(
-            got.symbols[0].intervals,
+            symbols[0].intervals,
             vec![Interval::Day(1), Interval::Hour(1)]
         );
     }

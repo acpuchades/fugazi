@@ -20,6 +20,7 @@ mod completions;
 mod convert;
 mod data;
 mod dynd;
+mod file;
 mod get;
 mod input;
 mod list;
