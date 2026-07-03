@@ -17,6 +17,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
+use fugazi::Fill;
 use fugazi::backtest::RunReport;
 use fugazi::prelude::*;
 use serde::Serialize;
@@ -303,6 +304,155 @@ pub fn from_report<Sym>(
     }
 }
 
+/// The [`Metrics`] document of one non-overlapping window of a run, tagged with
+/// the window's bar span so a caller can map it back to times.
+pub struct WindowMetrics {
+    /// Zero-based bar index of the window's first bar.
+    pub start_bar: usize,
+    /// Zero-based bar index of the window's last bar (inclusive; the last
+    /// window may be shorter than the requested length).
+    pub end_bar: usize,
+    pub metrics: Metrics,
+}
+
+/// Reduce a [`RunReport`] to one [`Metrics`] document per non-overlapping
+/// `window`-bar span (the last window keeps whatever bars remain). Each window
+/// is evaluated as a run of its own: its initial equity is the equity marked on
+/// the bar before it (the run's `initial_equity` for the first), and only the
+/// fills booked inside it count — a position carried across a boundary shows up
+/// in the entering window as an unmatched closing fill, the usual windowed-
+/// analysis convention.
+pub fn windowed_from_report<Sym: Clone>(
+    report: &RunReport<Sym>,
+    window: usize,
+    bars_per_year: Real,
+    risk_free_rate: Real,
+) -> Vec<WindowMetrics> {
+    assert!(window > 0, "window length must be positive");
+    let equity = report.equity_curve.as_slice();
+    let mut out = Vec::new();
+    let mut start = 0;
+    while start < equity.len() {
+        let end = (start + window).min(equity.len());
+        // Rebase each fill's bar index to the window, so bar-relative metrics
+        // (exposure, bars held) read against the window's own axis.
+        let fills: Vec<Fill<Sym>> = report
+            .fills
+            .iter()
+            .filter(|f| (start..end).contains(&f.bar))
+            .map(|f| Fill {
+                bar: f.bar - start,
+                order: f.order.clone(),
+            })
+            .collect();
+        let window_report = RunReport {
+            equity_curve: equity[start..end].to_vec(),
+            fills,
+            initial_equity: if start == 0 {
+                report.initial_equity
+            } else {
+                equity[start - 1]
+            },
+        };
+        out.push(WindowMetrics {
+            start_bar: start,
+            end_bar: end - 1,
+            metrics: from_report(&window_report, bars_per_year, risk_free_rate),
+        });
+        start = end;
+    }
+    out
+}
+
+/// Flatten a [`Metrics`] document into `(dotted name, value)` pairs — one entry
+/// per leaf, in document order, under the same dotted names [`resolve_metric`]
+/// accepts. Unlike the YAML serialization, degenerate metrics are *kept* (as
+/// `None`), so every document flattens to the same fixed column set — what a
+/// CSV with one row per window needs. Counts flatten to `Real`.
+pub fn flatten(m: &Metrics) -> Vec<(&'static str, Option<Real>)> {
+    let real = |v: Real| Some(v);
+    let count = |v: usize| Some(v as Real);
+    vec![
+        ("run.bars", count(m.run.bars)),
+        ("run.initial_equity", real(m.run.initial_equity)),
+        ("run.final_equity", real(m.run.final_equity)),
+        ("run.bars_per_year", real(m.run.bars_per_year)),
+        ("run.risk_free_rate", real(m.run.risk_free_rate)),
+        ("returns.total", real(m.returns.total)),
+        ("returns.total_pct", real(m.returns.total_pct)),
+        ("returns.cagr_pct", m.returns.cagr_pct),
+        ("returns.mean_bar", real(m.returns.mean_bar)),
+        ("returns.median_bar", real(m.returns.median_bar)),
+        ("returns.stddev_bar", real(m.returns.stddev_bar)),
+        ("returns.best_bar", real(m.returns.best_bar)),
+        ("returns.worst_bar", real(m.returns.worst_bar)),
+        ("returns.positive_bars_pct", real(m.returns.positive_bars_pct)),
+        ("returns.skewness", m.returns.skewness),
+        ("returns.kurtosis", m.returns.kurtosis),
+        ("returns.var_95", real(m.returns.var_95)),
+        ("returns.cvar_95", real(m.returns.cvar_95)),
+        ("returns.tail_ratio", m.returns.tail_ratio),
+        (
+            "returns.annualized_mean_pct",
+            real(m.returns.annualized_mean_pct),
+        ),
+        (
+            "returns.annualized_volatility_pct",
+            real(m.returns.annualized_volatility_pct),
+        ),
+        ("risk_adjusted.sharpe", m.risk_adjusted.sharpe),
+        ("risk_adjusted.sortino", m.risk_adjusted.sortino),
+        ("risk_adjusted.calmar", m.risk_adjusted.calmar),
+        ("risk_adjusted.omega", m.risk_adjusted.omega),
+        ("risk_adjusted.ulcer_index", real(m.risk_adjusted.ulcer_index)),
+        (
+            "risk_adjusted.ulcer_performance_index",
+            m.risk_adjusted.ulcer_performance_index,
+        ),
+        ("drawdown.max", real(m.drawdown.max)),
+        ("drawdown.max_pct", real(m.drawdown.max_pct)),
+        ("drawdown.max_duration_bars", count(m.drawdown.max_duration_bars)),
+        ("drawdown.avg", m.drawdown.avg),
+        ("drawdown.avg_pct", m.drawdown.avg_pct),
+        ("drawdown.avg_duration_bars", m.drawdown.avg_duration_bars),
+        ("drawdown.count", count(m.drawdown.count)),
+        (
+            "drawdown.time_in_drawdown_pct",
+            real(m.drawdown.time_in_drawdown_pct),
+        ),
+        ("drawdown.recovery_factor", m.drawdown.recovery_factor),
+        ("trades.total", count(m.trades.total)),
+        ("trades.wins", count(m.trades.wins)),
+        ("trades.losses", count(m.trades.losses)),
+        ("trades.flat", count(m.trades.flat)),
+        ("trades.long_trades", count(m.trades.long_trades)),
+        ("trades.short_trades", count(m.trades.short_trades)),
+        ("trades.total_fills", count(m.trades.total_fills)),
+        (
+            "trades.max_consecutive_wins",
+            count(m.trades.max_consecutive_wins),
+        ),
+        (
+            "trades.max_consecutive_losses",
+            count(m.trades.max_consecutive_losses),
+        ),
+        ("trades.exposure_pct", real(m.trades.exposure_pct)),
+        ("trades.win_rate_pct", m.trades.win_rate_pct),
+        ("trades.profit_factor", m.trades.profit_factor),
+        ("trades.payoff_ratio", m.trades.payoff_ratio),
+        ("trades.expectancy", m.trades.expectancy),
+        ("trades.kelly_fraction", m.trades.kelly_fraction),
+        ("trades.average_win", m.trades.average_win),
+        ("trades.average_loss", m.trades.average_loss),
+        ("trades.largest_win", m.trades.largest_win),
+        ("trades.largest_loss", m.trades.largest_loss),
+        ("trades.average_return_pct", m.trades.average_return_pct),
+        ("trades.average_bars", m.trades.average_bars),
+        ("trades.min_bars", m.trades.min_bars.map(|v| v as Real)),
+        ("trades.max_bars", m.trades.max_bars.map(|v| v as Real)),
+    ]
+}
+
 /// Serialize the metrics document to `path` as YAML.
 pub fn write_yaml(metrics: &Metrics, path: &Path) -> Result<()> {
     let yaml = serde_norway::to_string(metrics).context("serializing metrics")?;
@@ -469,5 +619,87 @@ mod tests {
         let m = sample_metrics();
         let err = resolve_metric("does_not_exist", &m).unwrap_err();
         assert!(err.to_string().contains("unknown metric"));
+    }
+
+    /// Record every numeric leaf of `v` as a dotted path, in document order.
+    fn numeric_leaves(v: &serde_json::Value, cur: &mut Vec<String>, out: &mut Vec<(String, Real)>) {
+        if let serde_json::Value::Object(map) = v {
+            for (k, child) in map {
+                cur.push(k.clone());
+                if let Some(n) = child.as_f64() {
+                    out.push((cur.join("."), n));
+                }
+                numeric_leaves(child, cur, out);
+                cur.pop();
+            }
+        }
+    }
+
+    /// `flatten` is the CSV's column catalogue; keep it in lock-step with the
+    /// serialized document both ways — every serialized leaf must appear in
+    /// `flatten` with the same value, and every populated `flatten` entry must
+    /// resolve in the document.
+    #[test]
+    fn flatten_matches_serialized_document() {
+        let m = sample_metrics();
+        let flat = flatten(&m);
+        let doc = serde_json::to_value(&m).unwrap();
+
+        let mut leaves = Vec::new();
+        numeric_leaves(&doc, &mut Vec::new(), &mut leaves);
+        for (path, value) in &leaves {
+            let (_, got) = flat
+                .iter()
+                .find(|(name, _)| name == path)
+                .unwrap_or_else(|| panic!("serialized leaf `{path}` missing from flatten"));
+            assert_eq!(got.unwrap(), *value, "value mismatch at `{path}`");
+        }
+        for (name, value) in &flat {
+            if value.is_some() {
+                assert!(
+                    leaves.iter().any(|(path, _)| path == name),
+                    "flatten entry `{name}` is populated but absent from the document"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn windowed_from_report_splits_and_rebases() {
+        // 5 bars, window 2 → windows [0,1], [2,3], [4,4]; one fill on bar 3.
+        let report = RunReport {
+            equity_curve: vec![100.0, 105.0, 110.0, 108.0, 103.0],
+            fills: vec![Fill {
+                bar: 3,
+                order: order(Side::Buy, 1.0, 108.0),
+            }],
+            initial_equity: 100.0,
+        };
+        let windows = windowed_from_report(&report, 2, 252.0, 0.0);
+        assert_eq!(windows.len(), 3);
+        assert_eq!(
+            windows
+                .iter()
+                .map(|w| (w.start_bar, w.end_bar))
+                .collect::<Vec<_>>(),
+            vec![(0, 1), (2, 3), (4, 4)]
+        );
+        // Each window's initial equity is the equity marked on the bar before it.
+        assert_eq!(windows[0].metrics.run.initial_equity, 100.0);
+        assert_eq!(windows[1].metrics.run.initial_equity, 105.0);
+        assert_eq!(windows[2].metrics.run.initial_equity, 108.0);
+        assert_eq!(windows[2].metrics.run.bars, 1); // partial last window
+        // The bar-3 fill lands in the second window only.
+        assert_eq!(windows[0].metrics.trades.total_fills, 0);
+        assert_eq!(windows[1].metrics.trades.total_fills, 1);
+        assert_eq!(windows[2].metrics.trades.total_fills, 0);
+        // Windowed total returns compound back to the whole-run total return.
+        let whole = from_report(&report, 252.0, 0.0).returns.total;
+        let compounded: Real = windows
+            .iter()
+            .map(|w| 1.0 + w.metrics.returns.total)
+            .product::<Real>()
+            - 1.0;
+        assert!((whole - compounded).abs() < 1e-12);
     }
 }

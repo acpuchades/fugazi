@@ -11,7 +11,10 @@
 //! `;`-delimited for Excel. After the loop, the recorded equity curve and fill
 //! blotter are reduced into `metrics.yml` — see [`crate::metrics`] for the
 //! catalogue (return moments, Sharpe/Sortino/Calmar, drawdown, round-trip
-//! trade statistics).
+//! trade statistics). With [`RunOptions::windowed`] set, that reduction runs
+//! once per non-overlapping N-bar window instead and lands as `metrics.csv`
+//! (one row per window, tagged with the window's start/end times), and the
+//! console metrics block reports each figure's cross-window mean ± stddev.
 //!
 //! Console output (silenced by [`RunOptions::quiet`]) is a two-line banner (the
 //! constant tool identity, then the active command), then three blocks: **inputs**
@@ -20,6 +23,7 @@
 //! change, then start/finish times with elapsed runtime). A symbol is per-trade,
 //! never a run-level field.
 
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -73,6 +77,10 @@ pub struct RunOptions<'a> {
     /// Subtracted from annualized returns before Sharpe/Sortino/UPI and used
     /// as the per-bar threshold for Omega.
     pub risk_free_rate: Real,
+    /// Compute the metrics in non-overlapping windows of this many bars,
+    /// writing `metrics.csv` (one row per window) instead of `metrics.yml`.
+    /// `None` = whole-run metrics to `metrics.yml`.
+    pub windowed: Option<NonZeroUsize>,
     /// Suppress all console output (the result files are still written).
     pub quiet: bool,
 }
@@ -188,11 +196,28 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
         bars: report.equity_curve.len(),
     };
 
-    // Reduce the recorded blotter + equity curve to a metrics document and
-    // persist it alongside the CSVs, then echo the top-line ratios in a
-    // dedicated console block.
-    let m = metrics::from_report(&report, opts.bars_per_year, opts.risk_free_rate);
-    metrics::write_yaml(&m, &opts.out_dir.join("metrics.yml"))?;
+    // Reduce the recorded blotter + equity curve to metric documents and
+    // persist them alongside the CSVs: whole-run → one document in
+    // `metrics.yml`; windowed → one document per non-overlapping N-bar window,
+    // one `metrics.csv` row each. The matching console block prints after the
+    // result block below.
+    let (whole, windows) = match opts.windowed {
+        Some(n) => {
+            let ws = metrics::windowed_from_report(
+                &report,
+                n.get(),
+                opts.bars_per_year,
+                opts.risk_free_rate,
+            );
+            write_metrics_csv(&ws, &candles, &opts.out_dir.join("metrics.csv"))?;
+            (None, Some((n.get(), ws)))
+        }
+        None => {
+            let m = metrics::from_report(&report, opts.bars_per_year, opts.risk_free_rate);
+            metrics::write_yaml(&m, &opts.out_dir.join("metrics.yml"))?;
+            (Some(m), None)
+        }
+    };
 
     let times: Vec<String> = candles.iter().map(|(t, _)| t.clone()).collect();
     chart::write_equity_curve(
@@ -205,9 +230,51 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
     let finished = SystemTime::now();
     if !opts.quiet {
         print_result_block(opts, &summary, started, finished);
-        print_metrics_block(&m);
+        if let Some(m) = &whole {
+            print_metrics_block(m);
+        }
+        if let Some((n, ws)) = &windows {
+            print_windowed_metrics_block(ws, *n);
+        }
     }
     Ok(summary)
+}
+
+/// Emit `metrics.csv`: one row per non-overlapping window — `window_start` /
+/// `window_end` (the times of the window's first and last bars) followed by the
+/// full metric catalogue, one column per dotted `metrics.yml` name. A metric
+/// that is degenerate in a window (no trades, zero variance, …) is an empty
+/// cell there, so every row shares the same fixed column set.
+fn write_metrics_csv(
+    windows: &[metrics::WindowMetrics],
+    candles: &[(String, Candle)],
+    path: &Path,
+) -> Result<()> {
+    let mut out = writer(path)?;
+    // The column names are the same fixed list for every document, so take
+    // them from the first window (an empty run gets a bar-columns-only header).
+    let names = windows
+        .first()
+        .map(|w| metrics::flatten(&w.metrics))
+        .unwrap_or_default();
+    let header = ["window_start", "window_end"]
+        .into_iter()
+        .chain(names.iter().map(|(name, _)| *name));
+    out.write_record(header)?;
+    for window in windows {
+        let mut record = vec![
+            candles[window.start_bar].0.clone(),
+            candles[window.end_bar].0.clone(),
+        ];
+        record.extend(
+            metrics::flatten(&window.metrics)
+                .into_iter()
+                .map(|(_, value)| value.map(|v| v.to_string()).unwrap_or_default()),
+        );
+        out.write_record(&record)?;
+    }
+    out.flush()?;
+    Ok(())
 }
 
 /// The "inputs" block: what this run was given. Timing (start/finish) lives in
@@ -288,6 +355,99 @@ fn print_metrics_block(m: &metrics::Metrics) {
             format_ratio(m.trades.profit_factor),
         ),
     );
+}
+
+/// The windowed twin of [`print_metrics_block`]: the same headline figures,
+/// each reported as its cross-window mean ± population stddev. A metric that
+/// is degenerate in some windows averages over the windows where it is
+/// defined; one degenerate everywhere prints `—`. The full per-window values
+/// live in `metrics.csv`.
+fn print_windowed_metrics_block(windows: &[metrics::WindowMetrics], window: usize) {
+    println!("\n{}", style::bold("metrics"));
+    let last_bars = windows.last().map_or(window, |w| w.metrics.run.bars);
+    let shape = if last_bars == window {
+        format!("{} × {window} bars", windows.len())
+    } else {
+        format!("{} × {window} bars (last has {last_bars})", windows.len())
+    };
+    print_field("windows", &shape);
+    let ms: Vec<&metrics::Metrics> = windows.iter().map(|w| &w.metrics).collect();
+    print_field(
+        "return",
+        &format!(
+            "{} ann · vol {}",
+            format_spread(
+                mean_std(ms.iter().map(|m| m.returns.annualized_mean_pct)),
+                "%",
+                true
+            ),
+            format_spread(
+                mean_std(ms.iter().map(|m| m.returns.annualized_volatility_pct)),
+                "%",
+                false
+            ),
+        ),
+    );
+    // Optional ratios (degenerate → `None` per window) as a `mean ± std` string.
+    fn ratio_spread(values: impl Iterator<Item = Option<Real>>) -> String {
+        format_spread(mean_std(values.flatten()), "", false)
+    }
+    print_field(
+        "sharpe",
+        &ratio_spread(ms.iter().map(|m| m.risk_adjusted.sharpe)),
+    );
+    print_field(
+        "sortino",
+        &ratio_spread(ms.iter().map(|m| m.risk_adjusted.sortino)),
+    );
+    print_field(
+        "omega",
+        &ratio_spread(ms.iter().map(|m| m.risk_adjusted.omega)),
+    );
+    print_field(
+        "max_dd",
+        &format_spread(mean_std(ms.iter().map(|m| m.drawdown.max_pct)), "%", false),
+    );
+    print_field(
+        "exposure",
+        &format_spread(mean_std(ms.iter().map(|m| m.trades.exposure_pct)), "%", false),
+    );
+    print_field(
+        "trades",
+        &format!(
+            "{} · win {} · pf {}",
+            format_spread(mean_std(ms.iter().map(|m| m.trades.total as Real)), "", false),
+            format_spread(
+                mean_std(ms.iter().filter_map(|m| m.trades.win_rate_pct)),
+                "%",
+                false
+            ),
+            ratio_spread(ms.iter().map(|m| m.trades.profit_factor)),
+        ),
+    );
+}
+
+/// Mean and population standard deviation of `values`, or `None` when empty.
+fn mean_std(values: impl Iterator<Item = Real>) -> Option<(Real, Real)> {
+    let v: Vec<Real> = values.collect();
+    if v.is_empty() {
+        return None;
+    }
+    let n = v.len() as Real;
+    let mean = v.iter().sum::<Real>() / n;
+    let variance = v.iter().map(|x| (x - mean) * (x - mean)).sum::<Real>() / n;
+    Some((mean, variance.sqrt()))
+}
+
+/// A `mean ± stddev` pair to two decimals with `unit` on both parts (`signed`
+/// puts an explicit `+` on a positive mean); `—` when there was no value in
+/// any window.
+fn format_spread(spread: Option<(Real, Real)>, unit: &str, signed: bool) -> String {
+    match spread {
+        Some((mean, std)) if signed => format!("{mean:+.2}{unit} ± {std:.2}{unit}"),
+        Some((mean, std)) => format!("{mean:.2}{unit} ± {std:.2}{unit}"),
+        None => "—".to_string(),
+    }
 }
 
 /// A ratio to two decimals, or `—` when its denominator was degenerate and the

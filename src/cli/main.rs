@@ -30,6 +30,7 @@ mod spec;
 mod style;
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -146,6 +147,14 @@ struct RunArgs {
     /// pre-adjusted excess-return semantics of the original release.
     #[arg(long, value_name = "RATE", default_value_t = 0.0)]
     risk_free_rate: f64,
+
+    /// Compute the metrics in non-overlapping windows of N bars instead of over
+    /// the whole run. Writes `metrics.csv` (one row per window: its start/end
+    /// times, then the full metric catalogue under dotted `metrics.yml` names)
+    /// instead of `metrics.yml`, and the console metrics block reports each
+    /// figure's cross-window mean ± standard deviation.
+    #[arg(short = 'w', long = "windowed", value_name = "N")]
+    windowed: Option<NonZeroUsize>,
 
     /// Suppress all console output (the result files are still written).
     #[arg(short, long)]
@@ -294,6 +303,7 @@ fn run(args: RunArgs) -> Result<()> {
         params: &params_label,
         bars_per_year,
         risk_free_rate: args.risk_free_rate,
+        windowed: args.windowed,
         quiet: args.quiet,
     };
     backtest::run(&spec, &frame, &opts)?;

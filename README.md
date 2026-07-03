@@ -334,8 +334,13 @@ Flags: `<STRATEGY>` (positional, `@file` or inline), `--series <spec>`
 (repeatable), `--output-dir <dir>`, `--cash <amount>` (default `10000`),
 `--params <spec>` (repeatable — see below), calendar shortcuts
 (`--stocks`/`--forex`/`--crypto` + `--frequency`) or explicit `--bars-per-year`,
-and `--risk-free-rate <rate>` for the annualized rf. Output files are
-`;`-delimited for Excel.
+and `--risk-free-rate <rate>` for the annualized rf. `-w/--windowed <N>`
+computes the metrics in non-overlapping windows of `N` bars instead of over the
+whole run, writing `metrics.csv` — one row per window: its start/end times,
+then the full catalogue under dotted `metrics.yml` names — instead of
+`metrics.yml`, with the console metrics block reporting each figure's
+cross-window mean ± standard deviation. Output files are `;`-delimited for
+Excel.
 
 Console output is a two-line banner (the constant tool identity, then the active
 command) followed by four blocks: an **inputs** block of the execution params

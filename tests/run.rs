@@ -77,6 +77,54 @@ fn runs_an_at_file_strategy() {
     assert_metrics_shape(&out.metrics);
 }
 
+/// `-w/--windowed N` writes `metrics.csv` (one row per non-overlapping N-bar
+/// window, tagged with the window's start/end times) instead of `metrics.yml`.
+#[test]
+fn runs_windowed_metrics() {
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let out = std::env::temp_dir().join("fugazi_e2e_windowed");
+    let _ = std::fs::remove_dir_all(&out);
+
+    let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
+        .args([
+            "run",
+            &format!("@{manifest}/examples/strategy.yml"),
+            "--series",
+            &format!("@{manifest}/examples/candles.csv"),
+            "--output-dir",
+            out.to_str().unwrap(),
+            "--windowed",
+            "10",
+        ])
+        .status()
+        .expect("failed to launch the fugazi binary");
+    assert!(status.success(), "fugazi run -w exited with failure");
+
+    assert!(
+        !out.join("metrics.yml").exists(),
+        "windowed run should not write metrics.yml"
+    );
+    let metrics = std::fs::read_to_string(out.join("metrics.csv")).expect("metrics.csv");
+    let mut lines = metrics.lines();
+    let header = lines.next().expect("metrics.csv header");
+    assert!(
+        header.starts_with("window_start;window_end;run.bars;"),
+        "unexpected metrics.csv header: {header}"
+    );
+    for section in ["returns.total_pct", "risk_adjusted.sharpe", "drawdown.max_pct"] {
+        assert!(
+            header.contains(section),
+            "metrics.csv header missing `{section}`: {header}"
+        );
+    }
+    // 30 example bars in 10-bar windows → exactly 3 rows.
+    assert_eq!(
+        lines.count(),
+        3,
+        "expected one row per window:\n{metrics}"
+    );
+}
+
 #[test]
 fn runs_an_inline_strategy() {
     // A bare (non-`@`) value is the strategy YAML itself.
