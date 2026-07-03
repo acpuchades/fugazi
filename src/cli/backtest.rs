@@ -46,6 +46,30 @@ use crate::metrics;
 use crate::spec::StrategySpec;
 use crate::style;
 
+/// Drive `spec` over `candles` through a fresh paper wallet with `cash`
+/// starting funds and return the **measured** sub-run: the stability-gate
+/// anchor applied unless `keep_unstable` (same semantics as `run` — the gated
+/// prefix is provably flat, so slicing it off is lossless). The shared core of
+/// [`evaluate`] / [`evaluate_windowed`].
+fn measured_report(
+    spec: &StrategySpec,
+    candles: &[(String, Candle)],
+    cash: Real,
+    keep_unstable: bool,
+) -> fugazi::RunReport<String> {
+    let symbol = spec.symbol.clone();
+    let (mut strategy, measure_from) = spec.build(!keep_unstable);
+    let mut wallet = PaperWallet::new(cash);
+    let report = fugazi::backtest::run(
+        &mut strategy,
+        &mut wallet,
+        symbol,
+        candles.iter().map(|(_, c)| *c),
+    );
+    let measure_from = measure_from.min(report.equity_curve.len());
+    metrics::report_slice(&report, measure_from..report.equity_curve.len())
+}
+
 /// Pure metrics-only evaluation: drive `spec` over `candles` through a paper
 /// wallet with `cash` starting funds and reduce the run to a [`metrics::Metrics`]
 /// document. No filesystem, no printing — the shape `optimize` calls per grid
@@ -58,20 +82,24 @@ pub fn evaluate(
     risk_free_rate: Real,
     keep_unstable: bool,
 ) -> metrics::Metrics {
-    let symbol = spec.symbol.clone();
-    let (mut strategy, measure_from) = spec.build(!keep_unstable);
-    let mut wallet = PaperWallet::new(cash);
-    let report = fugazi::backtest::run(
-        &mut strategy,
-        &mut wallet,
-        symbol,
-        candles.iter().map(|(_, c)| *c),
-    );
-    // Same measurement anchor as `run`: the gated-entry prefix is provably
-    // flat, so slice it off the metric range.
-    let measure_from = measure_from.min(report.equity_curve.len());
-    let measured = metrics::report_slice(&report, measure_from..report.equity_curve.len());
+    let measured = measured_report(spec, candles, cash, keep_unstable);
     metrics::from_report(&measured, bars_per_year, risk_free_rate)
+}
+
+/// The windowed twin of [`evaluate`]: reduce the same measured run to one
+/// [`metrics::Metrics`] per non-overlapping `window`-bar span — what
+/// `optimize -w/--windowed` calls per grid combination.
+pub fn evaluate_windowed(
+    spec: &StrategySpec,
+    candles: &[(String, Candle)],
+    cash: Real,
+    bars_per_year: Real,
+    risk_free_rate: Real,
+    keep_unstable: bool,
+    window: usize,
+) -> Vec<metrics::WindowMetrics> {
+    let measured = measured_report(spec, candles, cash, keep_unstable);
+    metrics::windowed_from_report(&measured, window, bars_per_year, risk_free_rate)
 }
 
 /// Console-logging knobs plus the run's inputs, threaded in from the CLI args.
@@ -427,12 +455,12 @@ fn print_windowed_metrics_block(
         &format!(
             "{} ann · vol {}",
             format_spread(
-                mean_std(ms.iter().map(|m| m.returns.annualized_mean_pct)),
+                metrics::mean_std(ms.iter().map(|m| m.returns.annualized_mean_pct)),
                 "%",
                 true
             ),
             format_spread(
-                mean_std(ms.iter().map(|m| m.returns.annualized_volatility_pct)),
+                metrics::mean_std(ms.iter().map(|m| m.returns.annualized_volatility_pct)),
                 "%",
                 false
             ),
@@ -440,7 +468,7 @@ fn print_windowed_metrics_block(
     );
     // Optional ratios (degenerate → `None` per window) as a `mean ± std` string.
     fn ratio_spread(values: impl Iterator<Item = Option<Real>>) -> String {
-        format_spread(mean_std(values.flatten()), "", false)
+        format_spread(metrics::mean_std(values.flatten()), "", false)
     }
     print_field(
         "sharpe",
@@ -456,37 +484,25 @@ fn print_windowed_metrics_block(
     );
     print_field(
         "max_dd",
-        &format_spread(mean_std(ms.iter().map(|m| m.drawdown.max_pct)), "%", false),
+        &format_spread(metrics::mean_std(ms.iter().map(|m| m.drawdown.max_pct)), "%", false),
     );
     print_field(
         "exposure",
-        &format_spread(mean_std(ms.iter().map(|m| m.trades.exposure_pct)), "%", false),
+        &format_spread(metrics::mean_std(ms.iter().map(|m| m.trades.exposure_pct)), "%", false),
     );
     print_field(
         "trades",
         &format!(
             "{} · win {} · pf {}",
-            format_spread(mean_std(ms.iter().map(|m| m.trades.total as Real)), "", false),
+            format_spread(metrics::mean_std(ms.iter().map(|m| m.trades.total as Real)), "", false),
             format_spread(
-                mean_std(ms.iter().filter_map(|m| m.trades.win_rate_pct)),
+                metrics::mean_std(ms.iter().filter_map(|m| m.trades.win_rate_pct)),
                 "%",
                 false
             ),
             ratio_spread(ms.iter().map(|m| m.trades.profit_factor)),
         ),
     );
-}
-
-/// Mean and population standard deviation of `values`, or `None` when empty.
-fn mean_std(values: impl Iterator<Item = Real>) -> Option<(Real, Real)> {
-    let v: Vec<Real> = values.collect();
-    if v.is_empty() {
-        return None;
-    }
-    let n = v.len() as Real;
-    let mean = v.iter().sum::<Real>() / n;
-    let variance = v.iter().map(|x| (x - mean) * (x - mean)).sum::<Real>() / n;
-    Some((mean, variance.sqrt()))
 }
 
 /// A `mean ± stddev` pair to two decimals with `unit` on both parts (`signed`

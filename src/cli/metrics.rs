@@ -380,6 +380,21 @@ pub fn windowed_from_report<Sym: Clone>(
     out
 }
 
+/// Mean and population standard deviation of `values`, or `None` when empty —
+/// the cross-window aggregation used by `run -w`'s console block and
+/// `optimize -w`'s `_mean`/`_std` columns (population, not sample: the windows
+/// are the whole set being described, not a draw from one).
+pub fn mean_std(values: impl Iterator<Item = Real>) -> Option<(Real, Real)> {
+    let v: Vec<Real> = values.collect();
+    if v.is_empty() {
+        return None;
+    }
+    let n = v.len() as Real;
+    let mean = v.iter().sum::<Real>() / n;
+    let variance = v.iter().map(|x| (x - mean) * (x - mean)).sum::<Real>() / n;
+    Some((mean, variance.sqrt()))
+}
+
 /// Flatten a [`Metrics`] document into `(dotted name, value)` pairs — one entry
 /// per leaf, in document order, under the same dotted names [`resolve_metric`]
 /// accepts. Unlike the YAML serialization, degenerate metrics are *kept* (as

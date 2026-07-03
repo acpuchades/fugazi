@@ -348,7 +348,11 @@ computes the metrics in non-overlapping windows of `N` bars instead of over the
 whole run, writing `metrics.csv` — one row per window: its start/end times,
 then the full catalogue under dotted `metrics.yml` names — instead of
 `metrics.yml`, with the console metrics block reporting each figure's
-cross-window mean ± standard deviation. Output files are `;`-delimited for
+cross-window mean ± standard deviation. The same `-w/--windowed <N>` exists on
+`optimize`: each grid point is evaluated in windows, every `-m` metric becomes
+two CSV columns (`<name>_mean` / `<name>_std`), and `--best-by` ranks by the
+windowed mean — rewarding parameter sets that perform consistently across
+regimes rather than in one lucky stretch. Output files are `;`-delimited for
 Excel.
 
 By default entry signals are **stability-gated**: each is wrapped in `Stable`,

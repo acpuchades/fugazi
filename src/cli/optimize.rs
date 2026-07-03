@@ -20,6 +20,7 @@
 //! evaluates — no shared mutable state, no locking on the hot path.
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -66,6 +67,11 @@ pub struct OptimizeOptions<'a> {
     /// Disable the default stability gating (and its metric anchor) for every
     /// grid point — see `run --keep-unstable`.
     pub keep_unstable: bool,
+    /// Evaluate each grid point in non-overlapping windows of this many bars
+    /// (same windowing as `run -w`): every `-m` metric becomes two CSV columns
+    /// (`<name>_mean` / `<name>_std`, cross-window over the windows where the
+    /// metric is defined) and `--best-by` ranks by the windowed mean.
+    pub windowed: Option<NonZeroUsize>,
     pub jobs: Option<usize>,
     pub quiet: bool,
 }
@@ -127,17 +133,41 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
         })
         .transpose()?;
 
-    // Run the grid. The `first_combo` result is already computed; the rest run
-    // on the pool in parallel.
+    // Run the grid. The `first_combo` result is already computed (windowed
+    // mode re-evaluates it windowed — one extra backtest, off the hot path);
+    // the rest run on the pool in parallel.
     let pool = build_pool(opts.jobs)?;
     let cash = opts.cash;
     let bpy = opts.bars_per_year;
     let rf = opts.risk_free_rate;
     let keep_unstable = opts.keep_unstable;
+    let windowed = opts.windowed.map(NonZeroUsize::get);
     let base = &base_value;
     let candles_ref = &candles;
     let axes_ref = &axes;
     let fixed_ref = &fixed;
+
+    let evaluate = |spec: &StrategySpec| -> Evaluation {
+        match windowed {
+            Some(w) => Evaluation::Windowed(backtest::evaluate_windowed(
+                spec,
+                candles_ref,
+                cash,
+                bpy,
+                rf,
+                keep_unstable,
+                w,
+            )),
+            None => Evaluation::Whole(Box::new(backtest::evaluate(
+                spec,
+                candles_ref,
+                cash,
+                bpy,
+                rf,
+                keep_unstable,
+            ))),
+        }
+    };
 
     let remaining: Vec<Row> = pool.install(|| {
         combos[1..]
@@ -145,10 +175,9 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
             .map(|combo| {
                 let params = combine_params(fixed_ref, axes_ref, combo);
                 let spec = build_spec(base, &params)?;
-                let m = backtest::evaluate(&spec, candles_ref, cash, bpy, rf, keep_unstable);
                 Ok::<_, anyhow::Error>(Row {
                     combo: combo.clone(),
-                    metrics: m,
+                    eval: evaluate(&spec),
                 })
             })
             .collect::<Result<Vec<_>>>()
@@ -157,7 +186,10 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
     let mut rows: Vec<Row> = Vec::with_capacity(combos.len());
     rows.push(Row {
         combo: first_combo.clone(),
-        metrics: first_metrics,
+        eval: match windowed {
+            Some(_) => evaluate(&first_spec),
+            None => Evaluation::Whole(Box::new(first_metrics)),
+        },
     });
     rows.extend(remaining);
 
@@ -166,7 +198,7 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
         sort_by_metric(&mut rows, path, direction);
     }
 
-    write_csv(opts.output, &axes, &metric_columns, &rows)?;
+    write_csv(opts.output, &axes, &metric_columns, windowed.is_some(), &rows)?;
 
     if !opts.quiet {
         style::print_header("optimize", "sweep a strategy over a parameter grid");
@@ -184,10 +216,19 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
 // Grid construction
 // ---------------------------------------------------------------------------
 
+/// One grid point's metric evaluation: the whole measured run reduced to a
+/// single document, or (`-w/--windowed`) one document per non-overlapping
+/// window, aggregated per metric as cross-window mean ± stddev.
+enum Evaluation {
+    /// Boxed: the document is ~50 fields, dwarfing the windowed variant's Vec.
+    Whole(Box<metrics::Metrics>),
+    Windowed(Vec<metrics::WindowMetrics>),
+}
+
 /// One row of the grid, keyed to its axes' order.
 struct Row {
     combo: Vec<Value>,
-    metrics: metrics::Metrics,
+    eval: Evaluation,
 }
 
 /// Partition the effective params table into fixed (scalar) entries and sweep
@@ -381,13 +422,14 @@ fn direction_for(path: &str) -> Option<Direction> {
     }
 }
 
-/// Sort `rows` by `path`'s value; direction is descending → largest first,
+/// Sort `rows` by `path`'s ranking value (the whole-run value, or the
+/// cross-window mean under `-w`); direction is descending → largest first,
 /// ascending → smallest first. Rows whose metric is `None` (an omitted
 /// degenerate ratio) always sort to the end.
 fn sort_by_metric(rows: &mut [Row], path: &str, direction: Direction) {
     rows.sort_by(|a, b| {
-        let av = lookup(&a.metrics, path);
-        let bv = lookup(&b.metrics, path);
+        let av = ranking_value(&a.eval, path);
+        let bv = ranking_value(&b.eval, path);
         match (av, bv) {
             (Some(x), Some(y)) => {
                 let cmp = x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal);
@@ -411,18 +453,36 @@ fn lookup(m: &metrics::Metrics, path: &str) -> Option<Real> {
     metrics::resolve_metric(path, m).ok().and_then(|(_, v)| v)
 }
 
+/// A windowed evaluation's cross-window `(mean, stddev)` for one metric path,
+/// over the windows where the metric is defined; `None` when it is degenerate
+/// in every window.
+fn lookup_windowed(windows: &[metrics::WindowMetrics], path: &str) -> Option<(Real, Real)> {
+    metrics::mean_std(windows.iter().filter_map(|w| lookup(&w.metrics, path)))
+}
+
+/// The single value a row is *ranked* by for a metric path: the whole-run
+/// value, or the cross-window mean.
+fn ranking_value(eval: &Evaluation, path: &str) -> Option<Real> {
+    match eval {
+        Evaluation::Whole(m) => lookup(m, path),
+        Evaluation::Windowed(ws) => lookup_windowed(ws, path).map(|(mean, _)| mean),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CSV output
 // ---------------------------------------------------------------------------
 
 /// Write the sweep CSV: axis columns first (declaration order), then one
-/// column per requested metric. `;`-delimited to match `trades.csv` /
-/// `returns.csv`. Missing (omitted) metric values are written as an empty
-/// cell.
+/// column per requested metric — or, under `-w/--windowed`, two columns per
+/// metric (`<name>_mean` / `<name>_std`, the cross-window aggregate).
+/// `;`-delimited to match `trades.csv` / `returns.csv`. Missing (omitted)
+/// metric values are written as an empty cell.
 fn write_csv(
     path: &Path,
     axes: &[(String, Vec<Value>)],
     metric_columns: &[(String, String)],
+    windowed: bool,
     rows: &[Row],
 ) -> Result<()> {
     if let Some(parent) = path.parent()
@@ -438,17 +498,27 @@ fn write_csv(
 
     let mut header: Vec<String> = axes.iter().map(|(name, _)| name.clone()).collect();
     for (name, _) in metric_columns {
-        header.push(name.clone());
+        if windowed {
+            header.push(format!("{name}_mean"));
+            header.push(format!("{name}_std"));
+        } else {
+            header.push(name.clone());
+        }
     }
     writer.write_record(&header)?;
 
+    let cell = |v: Option<Real>| v.map(format_number).unwrap_or_default();
     for row in rows {
         let mut record: Vec<String> = row.combo.iter().map(format_value).collect();
         for (_, path) in metric_columns {
-            record.push(match lookup(&row.metrics, path) {
-                Some(v) => format_number(v),
-                None => String::new(),
-            });
+            match &row.eval {
+                Evaluation::Whole(m) => record.push(cell(lookup(m, path))),
+                Evaluation::Windowed(ws) => {
+                    let spread = lookup_windowed(ws, path);
+                    record.push(cell(spread.map(|(mean, _)| mean)));
+                    record.push(cell(spread.map(|(_, std)| std)));
+                }
+            }
         }
         writer.write_record(&record)?;
     }
@@ -491,6 +561,9 @@ fn print_inputs_block(opts: &OptimizeOptions, axes: &[(String, Vec<Value>)], row
     print_field("grid", &format!("{} points · {axes_label}", rows.len()));
     print_field("capital", &format!("{:.2}", opts.cash));
     print_field("output", &opts.output.display().to_string());
+    if let Some(w) = opts.windowed {
+        print_field("windowed", &format!("{w}-bar windows (mean ± std per metric)"));
+    }
     if let Some(name) = &opts.best_by {
         print_field("best-by", name);
     }
@@ -517,41 +590,106 @@ fn print_best_block(
     print_field("params", &params_label);
 
     if let Some((name, path, _)) = best_by {
-        let value = lookup(&best.metrics, path);
-        print_field(
-            name,
-            &value.map_or_else(|| "—".to_string(), |v| format!("{v:.4}")),
-        );
+        print_field(name, &format_metric(&best.eval, path));
     }
     for (name, path) in metric_columns {
         // Skip a metric already printed as the best-by row.
         if best_by.map(|(_, p, _)| p.as_str()) == Some(path.as_str()) {
             continue;
         }
-        let value = lookup(&best.metrics, path);
-        print_field(
-            name,
-            &value.map_or_else(|| "—".to_string(), |v| format!("{v:.4}")),
-        );
+        print_field(name, &format_metric(&best.eval, path));
     }
-    // Best-row headline metrics from the run block for context.
-    print_field(
-        "return",
-        &format!(
+    // Best-row headline metrics from the run block for context — cross-window
+    // mean ± std under `-w`, matching the metric rows above.
+    let headline = match &best.eval {
+        Evaluation::Whole(m) => format!(
             "{:+.2}% ann · vol {:.2}%",
-            best.metrics.returns.annualized_mean_pct,
-            best.metrics.returns.annualized_volatility_pct
+            m.returns.annualized_mean_pct, m.returns.annualized_volatility_pct
         ),
-    );
+        Evaluation::Windowed(ws) => {
+            let fmt = |spread: Option<(Real, Real)>, signed: bool| {
+                spread.map_or_else(
+                    || "—".to_string(),
+                    |(mean, std)| {
+                        if signed {
+                            format!("{mean:+.2}% ± {std:.2}%")
+                        } else {
+                            format!("{mean:.2}% ± {std:.2}%")
+                        }
+                    },
+                )
+            };
+            format!(
+                "{} ann · vol {}",
+                fmt(
+                    metrics::mean_std(ws.iter().map(|w| w.metrics.returns.annualized_mean_pct)),
+                    true
+                ),
+                fmt(
+                    metrics::mean_std(
+                        ws.iter().map(|w| w.metrics.returns.annualized_volatility_pct)
+                    ),
+                    false
+                ),
+            )
+        }
+    };
+    print_field("return", &headline);
+}
+
+/// One metric value for the best block: `1.2345` for a whole-run evaluation,
+/// `1.2345 ± 0.6789` for a windowed one, `—` when degenerate (everywhere).
+fn format_metric(eval: &Evaluation, path: &str) -> String {
+    match eval {
+        Evaluation::Whole(m) => {
+            lookup(m, path).map_or_else(|| "—".to_string(), |v| format!("{v:.4}"))
+        }
+        Evaluation::Windowed(ws) => lookup_windowed(ws, path).map_or_else(
+            || "—".to_string(),
+            |(mean, std)| format!("{mean:.4} ± {std:.4}"),
+        ),
+    }
 }
 
 fn print_field(label: &str, value: &str) {
-    println!("  {}{value}", style::dim(&format!("{label:<9}")));
+    // Metric names can outgrow the 9-char label column (`total_pct`, dotted
+    // paths); keep at least one space between label and value.
+    let padded = if label.len() < 9 {
+        format!("{label:<9}")
+    } else {
+        format!("{label} ")
+    };
+    println!("  {}{value}", style::dim(&padded));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fugazi::backtest::RunReport;
+
+    /// The windowed lookup aggregates a metric across windows as
+    /// (mean, population std), and `ranking_value` sorts by the mean.
+    #[test]
+    fn windowed_lookup_aggregates_mean_and_std() {
+        // Two 2-bar windows: +10% (100 → 110) then +20% (110 → 132).
+        let report: RunReport<String> = RunReport {
+            equity_curve: vec![110.0, 110.0, 132.0, 132.0],
+            fills: vec![],
+            initial_equity: 100.0,
+        };
+        let windows = metrics::windowed_from_report(&report, 2, 252.0, 0.0);
+        assert_eq!(windows.len(), 2);
+
+        let (mean, std) = lookup_windowed(&windows, "returns.total_pct").unwrap();
+        assert!((mean - 15.0).abs() < 1e-9);
+        assert!((std - 5.0).abs() < 1e-9);
+
+        let eval = Evaluation::Windowed(windows);
+        assert!((ranking_value(&eval, "returns.total_pct").unwrap() - 15.0).abs() < 1e-9);
+        // A metric degenerate in every window (no trades → no win rate) reads
+        // None, so its row sorts last and its CSV cells stay empty.
+        assert_eq!(ranking_value(&eval, "trades.win_rate_pct"), None);
+    }
 
     #[test]
     fn range_int_inclusive_with_default_step() {

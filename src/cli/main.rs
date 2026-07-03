@@ -265,6 +265,15 @@ struct OptimizeArgs {
     #[arg(long)]
     keep_unstable: bool,
 
+    /// Evaluate each grid point in non-overlapping windows of N bars (the same
+    /// windowing as `run -w`). Every `-m` metric becomes two CSV columns —
+    /// `<name>_mean` and `<name>_std`, its cross-window mean and standard
+    /// deviation over the windows where it is defined — and `--best-by` ranks
+    /// by the windowed mean, rewarding consistency across regimes rather than
+    /// one lucky stretch.
+    #[arg(short = 'w', long = "windowed", value_name = "N")]
+    windowed: Option<NonZeroUsize>,
+
     /// Suppress console output. The CSV is still written.
     #[arg(short, long)]
     quiet: bool,
@@ -344,6 +353,7 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         bars_per_year,
         risk_free_rate: args.risk_free_rate,
         keep_unstable: args.keep_unstable,
+        windowed: args.windowed,
         jobs: args.jobs,
         quiet: args.quiet,
     };
