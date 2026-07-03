@@ -274,6 +274,21 @@ struct OptimizeArgs {
     #[arg(short = 'w', long = "windowed", value_name = "N")]
     windowed: Option<NonZeroUsize>,
 
+    /// Rank `--best-by` conservatively (needs `-w` and `--best-by`): shift each
+    /// grid point's cross-window mean *against* it by K standard deviations
+    /// before sorting — higher-is-better metrics rank by `mean − K·std`,
+    /// lower-is-better ones by `mean + K·std`. `K=0` is the plain windowed
+    /// mean (the default). A metric defined in only one window has std 0 and
+    /// ranks on its raw mean — check its `_std` CSV column.
+    #[arg(
+        short = 'k',
+        long = "risk-aversion",
+        value_name = "K",
+        requires = "windowed",
+        requires = "best_by"
+    )]
+    risk_aversion: Option<f64>,
+
     /// Suppress console output. The CSV is still written.
     #[arg(short, long)]
     quiet: bool,
@@ -354,6 +369,7 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         risk_free_rate: args.risk_free_rate,
         keep_unstable: args.keep_unstable,
         windowed: args.windowed,
+        risk_aversion: args.risk_aversion.unwrap_or(0.0),
         jobs: args.jobs,
         quiet: args.quiet,
     };

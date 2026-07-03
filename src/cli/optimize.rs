@@ -72,6 +72,11 @@ pub struct OptimizeOptions<'a> {
     /// (`<name>_mean` / `<name>_std`, cross-window over the windows where the
     /// metric is defined) and `--best-by` ranks by the windowed mean.
     pub windowed: Option<NonZeroUsize>,
+    /// `-k/--risk-aversion`: shift each grid point's `--best-by` cross-window
+    /// mean *against* it by this many standard deviations before ranking
+    /// (direction-aware: `mean − k·std` descending, `mean + k·std` ascending).
+    /// `0.0` = rank by the plain mean. Only meaningful with `windowed`.
+    pub risk_aversion: Real,
     pub jobs: Option<usize>,
     pub quiet: bool,
 }
@@ -84,6 +89,11 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
             "--params has no sweep axes: at least one value must be a `[...]` list \
              or a `start..end[:step]` range (use `run` for a single combination)"
         );
+    }
+    // A negative k would *reward* dispersion — the opposite of what the flag
+    // is for. (Presence alongside `-w`/`--best-by` is enforced by clap.)
+    if opts.risk_aversion < 0.0 {
+        bail!("--risk-aversion must be >= 0 (got {})", opts.risk_aversion);
     }
 
     let base_value = input::parse_value(opts.strategy_text).context("parsing strategy")?;
@@ -195,7 +205,7 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
 
     // Sort by --best-by, direction-aware; None cells sort last regardless.
     if let Some((_, ref path, direction)) = best_by {
-        sort_by_metric(&mut rows, path, direction);
+        sort_by_metric(&mut rows, path, direction, opts.risk_aversion);
     }
 
     write_csv(opts.output, &axes, &metric_columns, windowed.is_some(), &rows)?;
@@ -206,7 +216,13 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
         // A "best" row only means something when the user gave us a metric to
         // rank by. Without one, the sweep has produced a CSV but no verdict.
         if best_by.is_some() {
-            print_best_block(&axes, &metric_columns, best_by.as_ref(), &rows);
+            print_best_block(
+                &axes,
+                &metric_columns,
+                best_by.as_ref(),
+                opts.risk_aversion,
+                &rows,
+            );
         }
     }
     Ok(())
@@ -423,13 +439,14 @@ fn direction_for(path: &str) -> Option<Direction> {
 }
 
 /// Sort `rows` by `path`'s ranking value (the whole-run value, or the
-/// cross-window mean under `-w`); direction is descending → largest first,
-/// ascending → smallest first. Rows whose metric is `None` (an omitted
-/// degenerate ratio) always sort to the end.
-fn sort_by_metric(rows: &mut [Row], path: &str, direction: Direction) {
+/// cross-window mean shifted against the row by `k` stddevs under `-w` — see
+/// [`ranking_value`]); direction is descending → largest first, ascending →
+/// smallest first. Rows whose metric is `None` (an omitted degenerate ratio)
+/// always sort to the end.
+fn sort_by_metric(rows: &mut [Row], path: &str, direction: Direction, k: Real) {
     rows.sort_by(|a, b| {
-        let av = ranking_value(&a.eval, path);
-        let bv = ranking_value(&b.eval, path);
+        let av = ranking_value(&a.eval, path, direction, k);
+        let bv = ranking_value(&b.eval, path, direction, k);
         match (av, bv) {
             (Some(x), Some(y)) => {
                 let cmp = x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal);
@@ -461,11 +478,19 @@ fn lookup_windowed(windows: &[metrics::WindowMetrics], path: &str) -> Option<(Re
 }
 
 /// The single value a row is *ranked* by for a metric path: the whole-run
-/// value, or the cross-window mean.
-fn ranking_value(eval: &Evaluation, path: &str) -> Option<Real> {
+/// value, or the cross-window mean shifted **against** the row by `k`
+/// standard deviations — `mean − k·std` for a higher-is-better (descending)
+/// metric, `mean + k·std` for a lower-is-better (ascending) one, so a large
+/// spread is always penalized, never rewarded.
+fn ranking_value(eval: &Evaluation, path: &str, direction: Direction, k: Real) -> Option<Real> {
     match eval {
         Evaluation::Whole(m) => lookup(m, path),
-        Evaluation::Windowed(ws) => lookup_windowed(ws, path).map(|(mean, _)| mean),
+        Evaluation::Windowed(ws) => {
+            lookup_windowed(ws, path).map(|(mean, std)| match direction {
+                Direction::Descending => mean - k * std,
+                Direction::Ascending => mean + k * std,
+            })
+        }
     }
 }
 
@@ -565,7 +590,17 @@ fn print_inputs_block(opts: &OptimizeOptions, axes: &[(String, Vec<Value>)], row
         print_field("windowed", &format!("{w}-bar windows (mean ± std per metric)"));
     }
     if let Some(name) = &opts.best_by {
-        print_field("best-by", name);
+        if opts.risk_aversion > 0.0 {
+            print_field(
+                "best-by",
+                &format!(
+                    "{name} (risk-aversion k={}: mean shifted k·std against)",
+                    opts.risk_aversion
+                ),
+            );
+        } else {
+            print_field("best-by", name);
+        }
     }
 }
 
@@ -573,6 +608,7 @@ fn print_best_block(
     axes: &[(String, Vec<Value>)],
     metric_columns: &[(String, String)],
     best_by: Option<&(String, String, Direction)>,
+    k: Real,
     rows: &[Row],
 ) {
     println!("\n{}", style::bold("best"));
@@ -589,8 +625,17 @@ fn print_best_block(
         .join(", ");
     print_field("params", &params_label);
 
-    if let Some((name, path, _)) = best_by {
-        print_field(name, &format_metric(&best.eval, path));
+    if let Some((name, path, direction)) = best_by {
+        let mut value = format_metric(&best.eval, path);
+        // With a risk-aversion penalty the ranking key differs from the mean;
+        // show it so the ordering is explainable from the console alone.
+        if k > 0.0
+            && matches!(best.eval, Evaluation::Windowed(_))
+            && let Some(score) = ranking_value(&best.eval, path, *direction, k)
+        {
+            value = format!("{value} · score {score:.4}");
+        }
+        print_field(name, &value);
     }
     for (name, path) in metric_columns {
         // Skip a metric already printed as the best-by row.
@@ -685,10 +730,18 @@ mod tests {
         assert!((std - 5.0).abs() < 1e-9);
 
         let eval = Evaluation::Windowed(windows);
-        assert!((ranking_value(&eval, "returns.total_pct").unwrap() - 15.0).abs() < 1e-9);
+        let rank = |direction, k| ranking_value(&eval, "returns.total_pct", direction, k);
+        assert!((rank(Direction::Descending, 0.0).unwrap() - 15.0).abs() < 1e-9);
+        // Risk aversion shifts the mean *against* the row: minus k·std for a
+        // higher-is-better metric, plus k·std for a lower-is-better one.
+        assert!((rank(Direction::Descending, 1.0).unwrap() - 10.0).abs() < 1e-9);
+        assert!((rank(Direction::Ascending, 1.0).unwrap() - 20.0).abs() < 1e-9);
         // A metric degenerate in every window (no trades → no win rate) reads
         // None, so its row sorts last and its CSV cells stay empty.
-        assert_eq!(ranking_value(&eval, "trades.win_rate_pct"), None);
+        assert_eq!(
+            ranking_value(&eval, "trades.win_rate_pct", Direction::Descending, 1.0),
+            None
+        );
     }
 
     #[test]

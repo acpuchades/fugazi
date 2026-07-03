@@ -352,8 +352,11 @@ cross-window mean ± standard deviation. The same `-w/--windowed <N>` exists on
 `optimize`: each grid point is evaluated in windows, every `-m` metric becomes
 two CSV columns (`<name>_mean` / `<name>_std`), and `--best-by` ranks by the
 windowed mean — rewarding parameter sets that perform consistently across
-regimes rather than in one lucky stretch. Output files are `;`-delimited for
-Excel.
+regimes rather than in one lucky stretch. Add `-k/--risk-aversion <K>` to rank
+conservatively: the mean is shifted *against* each grid point by `K` standard
+deviations before sorting (`mean − K·std` for higher-is-better metrics,
+`mean + K·std` for lower-is-better ones), so `sharpe 2.0 ± 3.0` no longer
+outranks `1.8 ± 0.2`. Output files are `;`-delimited for Excel.
 
 By default entry signals are **stability-gated**: each is wrapped in `Stable`,
 so no entry fires while its indicator chain is still seed-contaminated, and
