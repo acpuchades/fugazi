@@ -5,14 +5,22 @@ YAML, one or more CSV data series, and drives them through the same
 [`PaperWallet`](README.md#strategies) the library exposes to Rust — for a
 single backtest, for a spec-validation pass, or for a parameter-grid sweep.
 
-Three subcommands:
+Six subcommands:
 
 - [`run`](#run) — backtest one strategy over one dataset. Writes `trades.csv`,
   `returns.csv`, and `metrics.yml` (or, with
   [`-w/--windowed`](#windowed-metrics), `metrics.csv`).
-- [`check`](#check) — parse and validate a `strategy.yml` without running it.
+- [`check`](#check) — parse and validate a `strategy.yml` or `get --overlay`
+  spec without running it. Nested: `check strategy` / `check overlay`.
 - [`optimize`](#optimize) — sweep a strategy over a parameter grid in
   parallel; write one CSV row per combination and rank by a metric.
+- [`get`](#get) — fetch OHLCV bars from a remote provider (`binance`,
+  `yfinance`) or re-process a local CSV (`file:PATH`) into a `run`-ready
+  file, optionally with `-x/--overlay` columns computed on top.
+- [`list`](#list) — printed catalogue of what the CLI knows about
+  (indicator/signal YAML tags, remote providers, and — via HTTP — a
+  provider's ticker vocabulary).
+- [`completions`](#shell-completion) — emit a shell-completion script.
 
 The subcommands share their input vocabulary — the `<STRATEGY>` positional,
 `--series`, `--params`, the calendar shortcuts (`--stocks`/`--forex`/`--crypto`,
@@ -61,7 +69,13 @@ cargo run --bin fugazi -- run \
     --crypto -f 1d
 
 # Validate a strategy spec (no data needed).
-cargo run --bin fugazi -- check @examples/strategy.yml
+cargo run --bin fugazi -- check strategy @examples/strategy.yml
+
+# Fetch BTC daily bars into a `run`-ready CSV, adding an SMA-20 column.
+cargo run --bin fugazi -- get binance:BTCUSDT[1d] \
+    --since 2020-01-01 \
+    -x 'sma20=!sma { period: 20 }' \
+    -o btc.csv
 
 # Sweep FAST / SLOW over a grid, rank by Sharpe.
 cargo run --bin fugazi -- optimize \
@@ -120,12 +134,21 @@ before → after, start/finish timestamps + elapsed), and **metrics**
 
 ### `check`
 
-Parse a strategy spec (with `--params` substitution) and report whether it
-is syntactically valid. No dataset, no wallet — a lint pass.
+Parse a spec and report whether it is syntactically valid — a lint pass, no
+dataset, no wallet. Nested subcommand so each kind of spec (strategy YAML vs.
+`get --overlay`) carries its own positional shape without leaking `only
+applies when …` caveats:
 
 ```
-fugazi check <STRATEGY> [--params <SPEC> …] [-q]
+fugazi check strategy <STRATEGY> [--params <SPEC> …] [-q]
+fugazi check overlay <SPEC>... [-q]
 ```
+
+Exit code is what a CI job cares about: `0` = the spec parsed and built
+cleanly, non-zero = something's off. In both forms `--quiet` suppresses the
+"ok" success message but leaves error output and the exit code unchanged.
+
+#### `check strategy`
 
 | Flag | Description |
 | --- | --- |
@@ -133,8 +156,16 @@ fugazi check <STRATEGY> [--params <SPEC> …] [-q]
 | `-p`, `--params <SPEC>` | Placeholder substitution. Repeatable. See [--params](#--params). Omitting a required placeholder is a check failure. |
 | `-q`, `--quiet` | Suppress the "ok" message on success. Errors still print; exit code is unchanged (`0` ok, non-zero on failure). |
 
-Exit code is what a CI job cares about: `0` = the strategy parsed and
-built cleanly against the given params, non-zero = something's off.
+#### `check overlay`
+
+Parses each `get --overlay` spec and builds a live indicator per column, so
+an unknown `!tag`, a missing `period`, or a mis-scoped position leaf all
+surface here — not at fetch time.
+
+| Flag | Description |
+| --- | --- |
+| `<SPEC>...` | One or more `get --overlay` specs. Same shape as [`get --overlay`](#-x----overlay), including the optional `SYMBOL[FREQ]:` scope prefix. |
+| `-q`, `--quiet` | Suppress the "ok" message on success. |
 
 ### `optimize`
 
@@ -232,11 +263,117 @@ block prints the adjusted score next to the `mean ± std`. Caveat: a metric
 defined in only one window has `std = 0` and ranks on its raw mean off a
 single observation — check its `_std` column.
 
+### `get`
+
+Fetch OHLCV bars into a `run`-ready `;`-delimited CSV. The header is
+`symbol;freq;time;open;high;low;close;volume`, followed by one column per
+`-x/--overlay` you request. `time` is ISO 8601 UTC.
+
+```
+fugazi get <SPEC> [<SPEC> …] -o <FILE>
+          [--since <DATE>] [--until <DATE>]
+          [-x <OVERLAY>]... [--keep-unstable] [-q]
+```
+
+| Flag | Description |
+| --- | --- |
+| `<SPEC>...` | One or more fetch specs. Repeatable positional. See [Fetch specs](#fetch-specs). |
+| `--since <DATE>` | Start date, inclusive. Grammar: `today`, `yesterday`, `Nd/Nw ago`, `YYYY-MM-DD`, `D-M-YYYY`, `3 weeks ago`, `last monday`, `Mar 1, 2020`, … Default `2020-01-01`. When set, extra leading bars are pulled ahead of `--since` so the overlays are already stable at the first output row. |
+| `--until <DATE>` | End date, exclusive. Same grammar as `--since`. Default `today`. |
+| `-o`, `--output <FILE>` | Output CSV path. Parent directories created if missing. |
+| `-x`, `--overlay <SPEC>` | Extra column(s) computed on top of the fetched bars. Repeatable. See [`-x`/`--overlay`](#-x----overlay). |
+| `--keep-unstable` | Emit the warm-up rows instead of dropping them. Overlay cells are blank where an applicable overlay has not yet warmed up. |
+| `-q`, `--quiet` | Suppress the summary line. Errors still print. |
+
+Every series across all specs downloads in parallel — one series is a
+`(provider, symbol, interval)` triple with its own progress bar.
+
+#### Fetch specs
+
+The common shape is `<provider>:<symbol>[<freq>,<freq>...](,<symbol>[<freq>,...])*`
+— several symbols and several frequencies per spec are one download. `file:`
+is the one exception; see below.
+
+| Provider | Grammar | Description |
+| --- | --- | --- |
+| `binance` | `binance:BTCUSDT[1d,1h],ETHUSDT[1d]` | Binance spot klines. Frequencies: `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d`, `1w`, `1M`. |
+| `yfinance` | `yfinance:SPY[1d],AAPL[1h]` | Yahoo Finance chart endpoint (stocks/ETFs/indices/FX). Rejects multiples the provider doesn't advertise (e.g. `Day(3)`). |
+| `file` | `file:./candles.csv` | **No `[freq]` bracket.** Reads a local OHLCV CSV (delimiter autodetected: `;`, `,`, `\t`, `|`) — typically a previous `fugazi get` output. Each row's `symbol` + `freq` columns drive the output; `--since` / `--until` filter by `time`; overlays apply the same way. `symbol`, `freq`, `time`, `open`, `high`, `low`, `close` are required, `volume` optional. |
+
+Frequency tokens are case-sensitive: `m` = minute, `M` = month. `fugazi list
+sources` prints the same table.
+
+#### `-x`/`--overlay`
+
+An overlay declares extra CSV columns computed by feeding the fetched candles
+through a live indicator built from the same YAML source vocabulary the
+strategy YAML uses (`close`, `!sma { period: N }`, `!crosses_above { … }`,
+…). Repeatable; later definitions override earlier ones per matching group.
+
+Each `-x` argument is `[SCOPE:]BODY`, where:
+
+- **Scope** (optional): `SYMBOL[FREQ]:`, `SYMBOL:`, or `[FREQ]:` — the
+  overlay only runs for matching `(symbol, interval)` fetches. A missing
+  component is a wildcard; no prefix is a global overlay covering every
+  fetch. Cells outside the scope render blank.
+- **Body**: either inline `col=expr[,col=expr,...]`
+  (`sma20=!sma { period: 20 },ema50=!ema { period: 50 }`) or `@file.yml` — a
+  YAML mapping of column name → source expression.
+
+The base OHLCV column names (`open`, `high`, `low`, `close`, `volume`,
+`symbol`, `freq`, `time`) are reserved.
+
+Warm-up handling matches `run`'s stability gate: unless `--keep-unstable` is
+set, each `(symbol, interval)` group's leading unready rows are dropped;
+when `--since` is set, extra leading bars are fetched (or read from the
+file) instead so the first row at `--since` already has the overlays stable.
+Validate an overlay spec without fetching via
+[`check overlay`](#check-overlay).
+
+**Examples**
+
+```sh
+# Fetch BTC daily bars and append SMA-20 / EMA-50 columns.
+fugazi get binance:BTCUSDT[1d] --since 2020-01-01 \
+    -x 'sma20=!sma { period: 20 },ema50=!ema { period: 50 }' \
+    -o btc.csv
+
+# Re-process an existing CSV to add an ATR column without re-downloading.
+fugazi get file:./btc.csv -x 'atr14=!atr { period: 14 }' -o btc_atr.csv
+
+# Different overlays per symbol (BTC gets an EMA, ETH gets an RSI).
+fugazi get binance:BTCUSDT[1d],ETHUSDT[1d] \
+    -x 'BTCUSDT:ema=!ema { period: 20 }' \
+    -x 'ETHUSDT:rsi=!rsi { period: 14 }' \
+    -o out.csv
+```
+
+### `list`
+
+Printed catalogue, three shapes:
+
+```
+fugazi list indicators   # every YAML tag `run --series` and `get --overlay` accept
+fugazi list sources      # every provider `get` fetches from (`binance`, `yfinance`, `file`)
+fugazi list tickers <PROVIDER>   # every symbol the provider currently exposes (HTTP)
+```
+
+`list indicators` groups the vocabulary alphabetically (arithmetic, bands,
+bar indicators, boolean logic, comparisons, MACD, moving averages,
+oscillators, placeholders, position anchors, rolling extrema, stability
+gate, trend/directional). `list tickers binance` calls
+`/api/v3/exchangeInfo` and prints its full spot vocabulary — piped into
+`grep`/`wc -l`/`sort -u` it's one ticker per line; interactive, it lays out
+as a column-major grid sized to the terminal (like `ls`). Yahoo has no such
+enumeration endpoint and returns an "unsupported" error; `file` needs a path
+per invocation, so the ticker list is whatever `symbol` values the file
+itself contains — enumerate it with `cut -d';' -f1 <path> | sort -u`.
+
 ## Common flags
 
 The flags below have the same shape across every subcommand that accepts
 them (`run`, `optimize`, and — for `--params` and the strategy positional
-— `check`).
+— `check strategy`).
 
 ### `<STRATEGY>` (positional)
 

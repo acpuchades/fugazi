@@ -453,6 +453,25 @@ See [`examples/strategy.yml`](examples/strategy.yml) for a complete SMA-crossove
 strategy, and [`examples/strategy.params.yml`](examples/strategy.params.yml) for
 the parameterised version.
 
+**Other subcommands.** Alongside `run` the binary carries a few utility
+subcommands — briefly listed here, fully documented in
+[CLI.md](CLI.md):
+
+- `fugazi check strategy <STRATEGY>` / `check overlay <SPEC>...` — a spec-only
+  lint pass (no data, no wallet). Fails a CI job if the strategy or overlay
+  doesn't parse and build.
+- `fugazi optimize <STRATEGY> --params NAME=<axis>...` — sweep the strategy
+  over a parameter grid and rank combinations by a metric.
+- `fugazi get <PROVIDER>:<SYMBOL>[<FREQ>] --since ... -o candles.csv` — fetch
+  OHLCV bars from `binance` or `yfinance` into a `run`-ready CSV, or
+  re-process an existing CSV with `file:PATH`. `-x/--overlay col=<source>`
+  appends indicator columns computed on the fetched bars.
+- `fugazi list indicators` / `list sources` / `list tickers <PROVIDER>` — the
+  YAML tag catalogue, the `get`-provider table, and (via HTTP) the
+  provider's ticker vocabulary.
+- `fugazi completions <shell>` — a shell-completion script (see
+  [CLI.md § Shell completion](CLI.md#shell-completion)).
+
 ## Examples
 
 Runnable example programs live in [`examples/`](examples) — run any with
