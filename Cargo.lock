@@ -575,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "fugazi"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -598,7 +598,7 @@ dependencies = [
 
 [[package]]
 name = "fugazi-python"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "fugazi",
  "pyo3",
