@@ -10,7 +10,8 @@
 
 use fugazi::indicators::{
     Adx, Aroon, Atr, Bollinger, Cci, Current, Dmi, Donchian, Ema, Hma, Identity, Keltner, Macd,
-    Mfi, Obv, Rma, Rsi, Sar, Sma, StdDev, Stochastic, TrueRange, Value, Vwap, WilliamsR, Wma,
+    Mfi, Obv, Rma, Rsi, Sar, Sma, Stable, StdDev, Stochastic, TrueRange, Value, Vwap, WilliamsR,
+    Wma,
 };
 use fugazi::prelude::*;
 use fugazi::types::{Candle, Real};
@@ -118,6 +119,15 @@ fn warm_up_is_exact_for_composition() {
     candle_case(Current::close().lag(3), "lag");
     candle_case(Current::close().roc(5), "roc");
     candle_case(Current::close().rolling_max(10), "rolling_max");
+    // The stability gate converts the source's soft tail into hard warm-up,
+    // for real sources and whole boolean signals alike.
+    candle_case(Ema::new(Current::close(), 20).stable(), "stable_ema");
+    candle_case(
+        Current::close()
+            .crosses_above(Ema::new(Current::close(), 20))
+            .stable(),
+        "stable_crosses_above",
+    );
     // Boolean layer: comparisons, edges and connectives.
     candle_case(Current::close().above(100.0), "above");
     candle_case(Current::close().above(100.0).changed(), "changed");
@@ -180,6 +190,14 @@ fn recursive_indicators_report_their_settling() {
         stacked.unstable_period(),
         Ema::new(Current::close(), 20).unstable_period()
     );
+    // The stability gate absorbs the settling into its warm-up: the gated
+    // chain reports the raw chain's stable period as warm-up, and 0 residual.
+    let gated = Stable::new(Ema::new(Current::close(), 20));
+    assert_eq!(
+        gated.warm_up_period(),
+        Ema::new(Current::close(), 20).stable_period()
+    );
+    assert_eq!(gated.unstable_period(), 0);
 }
 
 /// Replaying only the last `stable_period()` samples reproduces the

@@ -217,6 +217,13 @@ const GROUPS: &[Group] = &[
         ],
     },
     Group {
+        title: "stability gate (mask until the chain has settled)",
+        entries: &[
+            Entry { tag: "stable", args: "source",   doc: "None until the source's stable_period() has elapsed, then a pass-through" },
+            Entry { tag: "stable", args: "<signal>", doc: "same over a signal (false meanwhile) — no trades off seed-contaminated values" },
+        ],
+    },
+    Group {
         title: "trend / directional",
         entries: &[
             Entry { tag: "adx",              args: "period",     doc: "ADX from the Adx bundle" },

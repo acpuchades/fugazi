@@ -295,6 +295,13 @@ pub enum SourceSpec {
         source: Box<SourceSpec>,
         period: usize,
     },
+    /// Masks the source until its whole chain's `stable_period()` has elapsed,
+    /// converting the soft unstable period (EMA/RSI/ATR seeding) into hard
+    /// warm-up — see [`fugazi::indicators::Stable`].
+    Stable {
+        #[serde(default = "default_source")]
+        source: Box<SourceSpec>,
+    },
 }
 
 impl SourceSpec {
@@ -464,6 +471,7 @@ impl SourceSpec {
             Roc { source, periods } => DynValue::new(source.build(anchor).roc(*periods)),
             RollingMax { source, period } => DynValue::new(source.build(anchor).rolling_max(*period)),
             RollingMin { source, period } => DynValue::new(source.build(anchor).rolling_min(*period)),
+            Stable { source } => DynValue::new(source.build(anchor).stable()),
         }
     }
 }
@@ -549,6 +557,11 @@ pub enum SignalSpec {
     Any(Vec<SignalSpec>),
     Not(Box<SignalSpec>),
     Changed(Box<SignalSpec>),
+    /// Masks the signal until its whole chain's `stable_period()` has elapsed
+    /// (read as `false` meanwhile) — the boolean twin of
+    /// [`SourceSpec::Stable`]. Gate an entry with this and no trade can
+    /// trigger off a seed-contaminated indicator value.
+    Stable(Box<SignalSpec>),
     /// A constant boolean leaf. Spelled `!value` like [`SourceSpec::Value`] —
     /// one tag for "a literal", typed by position (bool here, number there).
     Value(bool),
@@ -613,6 +626,7 @@ impl SignalSpec {
                 .unwrap_or_else(|| DynSignal::new(self::Const::<Candle>::new(false))),
             Not(inner) => DynSignal::new(inner.build(anchor).not()),
             Changed(inner) => DynSignal::new(inner.build(anchor).changed()),
+            Stable(inner) => DynSignal::new(inner.build(anchor).stable()),
             Value(b) => DynSignal::new(self::Const::<Candle>::new(*b)),
         }
     }
@@ -815,6 +829,35 @@ mod tests {
         }
         assert!(w.positions().next().is_none());
         assert_eq!(w.orders().last().unwrap().price, 90.0);
+    }
+
+    #[test]
+    fn stable_gates_a_source_until_its_stable_period() {
+        // The gated EMA reports the raw EMA's stable period as hard warm-up
+        // and no residual instability.
+        let spec: SourceSpec =
+            serde_norway::from_str("!stable { source: !ema { period: 3 } }").unwrap();
+        let gated = spec.build(&Position::new());
+        let raw = Ema::new(Current::close(), 3);
+        assert_eq!(gated.warm_up_period(), raw.stable_period());
+        assert_eq!(gated.unstable_period(), 0);
+    }
+
+    #[test]
+    fn stable_gates_a_whole_signal() {
+        // The signal form wraps a boolean tree; the inner node is spelled in
+        // the singleton-map form tags normalize to.
+        let yaml = r#"
+            symbol: BTC
+            long:
+              enter: !stable { above: { source: { ema: { period: 3 } }, level: 100 } }
+        "#;
+        let spec =
+            StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new()).unwrap();
+        let gated = spec.long.as_ref().unwrap().enter.build(&Position::new());
+        let raw = Ema::new(Current::close(), 3).above(100.0);
+        assert_eq!(gated.warm_up_period(), raw.stable_period());
+        assert_eq!(gated.unstable_period(), 0);
     }
 
     #[test]

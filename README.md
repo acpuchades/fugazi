@@ -41,7 +41,13 @@ first output, accounting for the whole composed chain) and its
 `unstable_period()` — `0` for windowed indicators, and for the recursive ones
 (EMA, RSI, ATR, ADX, …) the extra samples until the seeding's influence has
 decayed below 0.1%. `stable_period()` is their sum: how much history to feed
-before trusting the output.
+before trusting the output. The `Stable` wrapper — `.stable()` on any source
+*or* signal — enforces that mechanically: it masks its source until
+`stable_period()` samples have elapsed (the source keeps advancing underneath),
+converting the soft unstable period into hard warm-up
+(`gated.warm_up_period() == source.stable_period()`, `unstable_period() == 0`).
+Gate a strategy's entry signal with it and no trade can trigger off a
+seed-contaminated value.
 
 ## Quick start
 
@@ -383,11 +389,14 @@ to `close`. The vocabulary mirrors the library one-to-one:
   { period }`; bar indicators `!atr`/`!mfi`/`!williams_r { period }`, `!obv`/
   `!vwap`/`!ad`/`!true_range`, `!sar { step, max }`; transforms `!add`/`!sub`/
   `!mul`/`!div { lhs, rhs }`, `!lag`/`!diff`/`!ratio`/`!roc { source, periods }`,
-  `!rolling_max`/`!rolling_min { source, period }`.
+  `!rolling_max`/`!rolling_min { source, period }`, `!stable { source }` (mask
+  the source until its `stable_period()` has elapsed).
 - **Signals:** `!gt`/`!lt`/`!ge`/`!le`/`!eq`/`!ne { lhs, rhs, epsilon? }`,
   `!above`/`!below { source, level }`; `!crosses_above`/`!crosses_below
   { lhs, rhs }`; `!and`/`!or`/`!xor { lhs, rhs }`, `!all [ … ]`, `!any [ … ]`,
-  `!not <signal>`, `!changed <signal>`, `!value <bool>`.
+  `!not <signal>`, `!changed <signal>`, `!stable <signal>` (mask the signal —
+  read as false — until its chain has settled, so no trade triggers off a
+  seed-contaminated value), `!value <bool>`.
 
 **Parameters — `!param`.** Any value in the strategy can be a placeholder resolved
 at run time with `--params` (repeatable), so one file covers many variations

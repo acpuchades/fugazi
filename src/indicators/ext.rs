@@ -5,6 +5,7 @@ use crate::indicator::Indicator;
 use crate::indicators::compare::{Eq, Ge, Gt, Le, Lt, Ne};
 use crate::indicators::logic::{And, Change, Not, Or, Xor};
 use crate::indicators::ops::{Add, Diff, Div, Lag, Mul, Ratio, Roc, RollingMax, RollingMin, Sub};
+use crate::indicators::stable::Stable;
 use crate::indicators::value::Value;
 use crate::types::Real;
 
@@ -149,6 +150,13 @@ pub trait IndicatorExt: Indicator<Output = Real> + Sized {
         RollingMin::new(self, period)
     }
 
+    /// Masks `self` until its whole chain has settled: `None` for the first
+    /// `self.stable_period()` samples, a pass-through afterwards — converting
+    /// the soft unstable period into hard warm-up (see [`Stable`]).
+    fn stable(self) -> Stable<Self> {
+        Stable::new(self)
+    }
+
     /// `self` rises above `rhs` on this step.
     ///
     /// Composes from primitives: the comparison is true *and* it just changed —
@@ -238,6 +246,17 @@ pub trait BoolIndicatorExt: Indicator<Output = bool> {
         Self: Sized,
     {
         Change::new(self)
+    }
+
+    /// Masks `self` until its whole chain has settled: `None` (read as `false`)
+    /// for the first `self.stable_period()` samples, a pass-through afterwards
+    /// (see [`Stable`]). Gate an entry signal with this and no trade can
+    /// trigger off a seed-contaminated indicator value.
+    fn stable(self) -> Stable<Self>
+    where
+        Self: Sized,
+    {
+        Stable::new(self)
     }
 }
 
