@@ -1,6 +1,6 @@
 [package]
 name = "fugazi"
-version = "0.10.2"
+version = "0.10.3"
 edition = "2024"
 description = "A library of incremental technical-analysis indicators, signals and strategies"
 license = "MIT"
@@ -59,7 +59,7 @@ indicatif = { version = "0.18", optional = true }
 console = { version = "0.16", optional = true }
 rayon = { version = "1", optional = true }
 plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "bitmap_encoder", "line_series", "area_series", "ttf"], optional = true }
-reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls", "gzip"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"], optional = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros"], optional = true }
 time = { version = "0.3", features = ["formatting", "parsing", "macros"], optional = true }
 thiserror = { version = "2", optional = true }
