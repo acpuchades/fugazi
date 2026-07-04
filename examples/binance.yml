@@ -1,0 +1,36 @@
+# Binance Spot — taker fee schedule (VIP 0 / retail default).
+#
+# As of 2026-07-04. Source: https://www.binance.com/en/fee/schedule
+#
+# The taker/maker split at VIP 0 is 0.100% / 0.100%. Binance also runs a
+# BNB fee discount that drops both to ~0.075%, but the schedule below models
+# the plain USDT-quote path for a strategy that doesn't pre-fund BNB. Bump
+# `commission.rate` (or supply `--costs @binance.yml,commission.rate=0.00075`)
+# to model the discount.
+#
+# Spread is modeled at 2 bps by default with 1 bp on the tightest majors —
+# these are ballpark figures for a typical top-of-book spread on 1m bars.
+# For lower-freq bars the tape's own noise dwarfs the quoted spread; for
+# sub-minute bars widen it. Slippage uses a square-root volume-participation
+# impact (Almgren-Chriss).
+#
+# These are pre-2026 retail defaults; verify against the current fee schedule
+# before running a live-money strategy.
+
+commission:
+  kind: percentage
+  rate: 0.001   # 10 bps taker
+
+spread:
+  default:
+    kind: bps
+    bps: 2
+  by_symbol:
+    BTCUSDT: { kind: bps, bps: 1 }
+    ETHUSDT: { kind: bps, bps: 1.5 }
+
+slippage:
+  kind: volume_participation
+  coefficient: 0.1
+  exponent: 0.5
+  stop_multiplier: 1.5

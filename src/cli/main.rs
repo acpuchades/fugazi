@@ -18,6 +18,7 @@ mod calendar;
 mod chart;
 mod completions;
 mod convert;
+mod costs;
 mod data;
 mod dynd;
 mod file;
@@ -57,7 +58,8 @@ enum Command {
     ///
     /// `fugazi check strategy <STRATEGY>` validates a strategy spec (with
     /// `--params` substitution); `fugazi check overlay <SPEC>...` validates
-    /// one or more `get --overlay` specs.
+    /// one or more `get --overlay` specs; `fugazi check costs <SPEC>...`
+    /// validates one or more `run --costs` specs.
     #[command(subcommand_required = true, arg_required_else_help = true)]
     Check {
         #[command(subcommand)]
@@ -174,6 +176,15 @@ struct RunArgs {
     #[arg(long)]
     keep_unstable: bool,
 
+    /// Configure trading costs (commission, spread, slippage). Same shape as
+    /// `--params`: `,`-separated terms `[SCOPE:]key=value` and `@file.yml`
+    /// preset loaders (repeatable; later terms win, more-specific scopes win
+    /// over less-specific). `--costs none` acknowledges the frictionless
+    /// default and silences the "no cost model set" warning. Omit for a
+    /// zero-cost backtest (matches the pre-costs release byte-for-byte).
+    #[arg(long = "costs", value_name = "SPEC")]
+    costs: Vec<costs::CostSpec>,
+
     /// Suppress all console output (the result files are still written).
     #[arg(short, long)]
     quiet: bool,
@@ -191,6 +202,11 @@ enum CheckCmd {
     /// Surfaces bad `!tag`s, missing parameters, and other tree-build errors
     /// that a plain `get` run would only hit at fetch time.
     Overlay(CheckOverlayArgs),
+    /// Parse `run --costs` specs and build each configured leg's model.
+    ///
+    /// Surfaces unknown `kind:` values, malformed scope prefixes, and other
+    /// tree-build errors that a plain `run` would only hit at startup.
+    Costs(CheckCostsArgs),
 }
 
 #[derive(Args)]
@@ -219,6 +235,21 @@ struct CheckOverlayArgs {
     /// `SCOPE` is an optional `SYMBOL[FREQ]:`, `SYMBOL:`, or `[FREQ]:` prefix.
     #[arg(value_name = "SPEC", required = true, num_args = 1..)]
     overlays: Vec<Source>,
+
+    /// Suppress the "ok" message on success. Errors still print, and the exit
+    /// code (0 ok, non-zero on failure) is unchanged.
+    #[arg(short, long)]
+    quiet: bool,
+}
+
+#[derive(Args)]
+struct CheckCostsArgs {
+    /// One or more `--costs` specs — same shape as `run --costs`:
+    /// `[SCOPE:]key=value[,key=value,...]` inline or `@file.yml`. `SCOPE` is
+    /// an optional `SYMBOL[FREQ]:`, `SYMBOL:`, or `[FREQ]:` prefix; `none` is
+    /// accepted as an explicit no-costs sentinel.
+    #[arg(value_name = "SPEC", required = true, num_args = 1..)]
+    specs: Vec<costs::CostSpec>,
 
     /// Suppress the "ok" message on success. Errors still print, and the exit
     /// code (0 ok, non-zero on failure) is unchanged.
@@ -303,6 +334,11 @@ struct OptimizeArgs {
     #[arg(long)]
     keep_unstable: bool,
 
+    /// Configure trading costs — same shape as `run --costs`. Applied
+    /// uniformly to every grid point.
+    #[arg(long = "costs", value_name = "SPEC")]
+    costs: Vec<costs::CostSpec>,
+
     /// Evaluate each grid point in non-overlapping windows of N bars (the same
     /// windowing as `run -w`). Every `-m` metric becomes two CSV columns —
     /// `<name>_mean` and `<name>_std`, its cross-window mean and standard
@@ -339,6 +375,7 @@ fn main() -> Result<()> {
         Command::Check { cmd } => match cmd {
             CheckCmd::Strategy(args) => check_strategy(args),
             CheckCmd::Overlay(args) => check_overlay(args),
+            CheckCmd::Costs(args) => check_costs(args),
         },
         Command::Optimize(args) => optimize(args),
         Command::Get(args) => get::run(args),
@@ -357,6 +394,44 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     if !args.quiet {
         style::print_header("check", "parse and validate a strategy spec");
         println!("{}: ok (symbol {})", args.strategy.label(), spec.symbol);
+    }
+    Ok(())
+}
+
+fn check_costs(args: CheckCostsArgs) -> Result<()> {
+    // Fold the specs and build every leg's model (through resolve on a probe
+    // symbol/freq) so an unknown `kind:`, a missing required field, or a
+    // malformed scope prefix all surface here rather than at run start.
+    let cfg = costs::config(&args.specs)?;
+    // Force materialization of each configured leg — resolve for a nonsense
+    // symbol+freq (won't match any scoped entry) so we hit the default; also
+    // resolve for each configured scope so `by_symbol`/`by_interval`/`scoped`
+    // entries build.
+    let _ = cfg.resolve("__probe__", None);
+    if !args.quiet {
+        style::print_header("check", "parse and validate a cost spec");
+        let n_scoped = cfg.scoped_count();
+        let default_note = if cfg.has_any_default() {
+            "with defaults"
+        } else if cfg.is_none() {
+            "no-op"
+        } else {
+            "no default (scoped-only)"
+        };
+        let scope_note = if n_scoped == 0 {
+            "no scoped overrides".to_string()
+        } else {
+            format!("{n_scoped} scoped override(s)")
+        };
+        let labels: Vec<String> = args
+            .specs
+            .iter()
+            .map(|_| "(spec)".to_string())
+            .collect();
+        println!(
+            "{}: ok ({default_note}; {scope_note})",
+            labels.join(", "),
+        );
     }
     Ok(())
 }
@@ -401,6 +476,8 @@ fn run(args: RunArgs) -> Result<()> {
     let params_label = params_label(&param_table);
     let class = asset_class(args.stocks, args.forex, args.crypto);
     let bars_per_year = calendar::resolve(args.bars_per_year, class, args.frequency);
+    let cost_config = costs::config(&args.costs)?;
+    let costs_were_supplied = !args.costs.is_empty();
     let opts = backtest::RunOptions {
         cash: args.cash,
         out_dir: &args.output_dir,
@@ -410,6 +487,9 @@ fn run(args: RunArgs) -> Result<()> {
         risk_free_rate: args.risk_free_rate,
         windowed: args.windowed,
         keep_unstable: args.keep_unstable,
+        cost_config: &cost_config,
+        frequency: args.frequency,
+        costs_supplied: costs_were_supplied,
         quiet: args.quiet,
     };
     backtest::run(&spec, &frame, &opts)?;
@@ -424,6 +504,8 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
     let strat_label = args.strategy.label();
     let class = asset_class(args.stocks, args.forex, args.crypto);
     let bars_per_year = calendar::resolve(args.bars_per_year, class, args.frequency);
+    let cost_config = costs::config(&args.costs)?;
+    let costs_were_supplied = !args.costs.is_empty();
 
     let opts = optimize::OptimizeOptions {
         cash: args.cash,
@@ -438,6 +520,9 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         keep_unstable: args.keep_unstable,
         windowed: args.windowed,
         risk_aversion: args.risk_aversion.unwrap_or(0.0),
+        cost_config: &cost_config,
+        frequency: args.frequency,
+        costs_supplied: costs_were_supplied,
         jobs: args.jobs,
         quiet: args.quiet,
     };

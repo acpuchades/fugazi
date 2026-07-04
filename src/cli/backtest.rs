@@ -40,26 +40,28 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use fugazi::prelude::*;
 
+use crate::calendar::Frequency;
 use crate::chart;
+use crate::costs::CostConfig;
 use crate::data::DataFrame;
 use crate::metrics;
 use crate::spec::StrategySpec;
 use crate::style;
 
 /// Drive `spec` over `candles` through a fresh paper wallet with `cash`
-/// starting funds and return the **measured** sub-run: the stability-gate
-/// anchor applied unless `keep_unstable` (same semantics as `run` — the gated
-/// prefix is provably flat, so slicing it off is lossless). The shared core of
-/// [`evaluate`] / [`evaluate_windowed`].
+/// starting funds and the given trading `costs`, returning the **measured**
+/// sub-run: the stability-gate anchor applied unless `keep_unstable`. The
+/// shared core of [`evaluate`] / [`evaluate_windowed`].
 fn measured_report(
     spec: &StrategySpec,
     candles: &[(String, Candle)],
     cash: Real,
     keep_unstable: bool,
+    costs: TradingCosts,
 ) -> fugazi::RunReport<String> {
     let symbol = spec.symbol.clone();
     let (mut strategy, measure_from) = spec.build(!keep_unstable);
-    let mut wallet = PaperWallet::new(cash);
+    let mut wallet = PaperWallet::with_costs(cash, costs);
     let report = fugazi::backtest::run(
         &mut strategy,
         &mut wallet,
@@ -71,7 +73,8 @@ fn measured_report(
 }
 
 /// Pure metrics-only evaluation: drive `spec` over `candles` through a paper
-/// wallet with `cash` starting funds and reduce the run to a [`metrics::Metrics`]
+/// wallet with `cash` starting funds, the given `cost_config` resolved for
+/// (spec's symbol, `frequency`), and reduce the run to a [`metrics::Metrics`]
 /// document. No filesystem, no printing — the shape `optimize` calls per grid
 /// combination.
 pub fn evaluate(
@@ -81,8 +84,11 @@ pub fn evaluate(
     bars_per_year: Real,
     risk_free_rate: Real,
     keep_unstable: bool,
+    cost_config: &CostConfig,
+    frequency: Option<Frequency>,
 ) -> metrics::Metrics {
-    let measured = measured_report(spec, candles, cash, keep_unstable);
+    let costs = cost_config.resolve(&spec.symbol, frequency);
+    let measured = measured_report(spec, candles, cash, keep_unstable, costs);
     metrics::from_report(&measured, bars_per_year, risk_free_rate)
 }
 
@@ -96,9 +102,12 @@ pub fn evaluate_windowed(
     bars_per_year: Real,
     risk_free_rate: Real,
     keep_unstable: bool,
+    cost_config: &CostConfig,
+    frequency: Option<Frequency>,
     window: usize,
 ) -> Vec<metrics::WindowMetrics> {
-    let measured = measured_report(spec, candles, cash, keep_unstable);
+    let costs = cost_config.resolve(&spec.symbol, frequency);
+    let measured = measured_report(spec, candles, cash, keep_unstable, costs);
     metrics::windowed_from_report(&measured, window, bars_per_year, risk_free_rate)
 }
 
@@ -129,6 +138,15 @@ pub struct RunOptions<'a> {
     /// releases before the gate) and the metric range is the full run rather
     /// than starting at the gate's anchor.
     pub keep_unstable: bool,
+    /// Configured cost models, resolved into a live [`TradingCosts`] per
+    /// (symbol, frequency) at run time. See [`crate::costs`].
+    pub cost_config: &'a CostConfig,
+    /// Bar frequency (from `-f/--frequency`), passed to
+    /// [`CostConfig::resolve`] so a freq-scoped cost entry can apply.
+    pub frequency: Option<Frequency>,
+    /// Whether the user passed at least one `--costs` flag (even `--costs
+    /// none`). Governs the "no cost model set" warning banner.
+    pub costs_supplied: bool,
     /// Suppress all console output (the result files are still written).
     pub quiet: bool,
 }
@@ -154,25 +172,40 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
 
     let start = candles.first().map_or("", |(t, _)| t.as_str());
     let end = candles.last().map_or("", |(t, _)| t.as_str());
+    // Resolve the cost config for (symbol, frequency) up front so we can share
+    // the same live TradingCosts between the priced backtest and the gross
+    // no-cost re-run below.
+    let costs = opts.cost_config.resolve(&symbol, opts.frequency);
+    let costs_active = !costs.is_none();
+    let no_cost_warning = !opts.costs_supplied;
     if !opts.quiet {
         style::print_header("run", "backtest a strategy over CSV series");
-        print_inputs_block(opts, start, end, candles.len());
+        print_inputs_block(opts, start, end, candles.len(), costs_active);
+        if no_cost_warning {
+            print_no_cost_warning();
+        }
     }
 
     // Delegate the per-bar loop to the library primitive. Fills and the equity
     // curve come back as two parallel vectors, indexed by bar.
-    let mut wallet = PaperWallet::new(opts.cash);
+    let mut wallet = PaperWallet::with_costs(opts.cash, costs);
     let report = fugazi::backtest::run(
         &mut strategy,
         &mut wallet,
-        symbol,
+        symbol.clone(),
         candles.iter().map(|(_, c)| *c),
     );
 
     // Emit `trades.csv` and echo each fill in the same order the wallet booked
-    // them; the CSV is `;`-delimited for Excel.
+    // them; the CSV is `;`-delimited for Excel. A `commission` column is added
+    // when a cost model is active — omitted otherwise so the pre-costs baseline
+    // stays byte-identical.
     let mut trades = writer(&opts.out_dir.join("trades.csv"))?;
-    trades.write_record(["time", "symbol", "side", "units", "price", "kind"])?;
+    if costs_active {
+        trades.write_record(["time", "symbol", "side", "units", "price", "kind", "commission"])?;
+    } else {
+        trades.write_record(["time", "symbol", "side", "units", "price", "kind"])?;
+    }
     if !opts.quiet {
         println!("\n{}", style::bold("trades"));
     }
@@ -190,32 +223,52 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
             OrderKind::Stop => "stop",
             OrderKind::TakeProfit => "take_profit",
         };
-        trades.write_record([
-            time,
-            &order.symbol,
-            side,
-            &order.units.to_string(),
-            &order.price.to_string(),
-            kind,
-        ])?;
+        if costs_active {
+            trades.write_record([
+                time,
+                &order.symbol,
+                side,
+                &order.units.to_string(),
+                &order.price.to_string(),
+                kind,
+                &order.commission.to_string(),
+            ])?;
+        } else {
+            trades.write_record([
+                time,
+                &order.symbol,
+                side,
+                &order.units.to_string(),
+                &order.price.to_string(),
+                kind,
+            ])?;
+        }
         if !opts.quiet {
-            // Columns mirror trades.csv: time, symbol, side, units, price, kind.
-            // Each trade carries its own symbol, so this stays correct for a
-            // future multi-symbol strategy. Pad the side to width before
-            // coloring it (escape codes would otherwise break the alignment).
             let side_padded = format!("{side:<4}");
             let side_colored = match order.side {
                 Side::Buy => style::green(&side_padded),
                 Side::Sell => style::red(&side_padded),
             };
-            println!(
-                "  {}  {:<6}  {side_colored} {:.4} @ {:.2}  {}",
-                style::dim(time),
-                order.symbol,
-                order.units,
-                order.price,
-                style::dim(kind),
-            );
+            if costs_active {
+                println!(
+                    "  {}  {:<6}  {side_colored} {:.4} @ {:.2}  {} · fee {:.4}",
+                    style::dim(time),
+                    order.symbol,
+                    order.units,
+                    order.price,
+                    style::dim(kind),
+                    order.commission,
+                );
+            } else {
+                println!(
+                    "  {}  {:<6}  {side_colored} {:.4} @ {:.2}  {}",
+                    style::dim(time),
+                    order.symbol,
+                    order.units,
+                    order.price,
+                    style::dim(kind),
+                );
+            }
         }
     }
     trades.flush()?;
@@ -269,6 +322,27 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
             None => format!("(none — all {bars} bars inside the {measure_from}-bar stability gate)"),
         }
     });
+    // When a cost model is active, also run the frictionless twin so metrics
+    // can report both gross (as if zero-cost) and net (what the costed run
+    // produced). Same strategy, same candles, same seed cash — only the
+    // wallet's cost config differs, so any difference is attributable to costs
+    // alone.
+    let gross_measured = if costs_active {
+        let (mut gross_strategy, _) = spec.build(!opts.keep_unstable);
+        let mut gross_wallet = PaperWallet::new(opts.cash);
+        let gross_report = fugazi::backtest::run(
+            &mut gross_strategy,
+            &mut gross_wallet,
+            symbol.clone(),
+            candles.iter().map(|(_, c)| *c),
+        );
+        Some(metrics::report_slice(
+            &gross_report,
+            measure_from..gross_report.equity_curve.len(),
+        ))
+    } else {
+        None
+    };
     let (whole, windows) = match opts.windowed {
         Some(n) => {
             let ws = metrics::windowed_from_report(
@@ -281,7 +355,14 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
             (None, Some((n.get(), ws)))
         }
         None => {
-            let m = metrics::from_report(&measured, opts.bars_per_year, opts.risk_free_rate);
+            let mut m = metrics::from_report(&measured, opts.bars_per_year, opts.risk_free_rate);
+            if costs_active {
+                m.costs = Some(metrics::costs_section(
+                    &measured,
+                    gross_measured.as_ref(),
+                    opts.bars_per_year,
+                ));
+            }
             metrics::write_yaml(&m, &opts.out_dir.join("metrics.yml"))?;
             (Some(m), None)
         }
@@ -299,7 +380,10 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
     if !opts.quiet {
         print_result_block(opts, &summary, started, finished);
         if let Some(m) = &whole {
-            print_metrics_block(m, measured_label.as_deref());
+            let gross = gross_measured.as_ref().map(|g| {
+                metrics::from_report(g, opts.bars_per_year, opts.risk_free_rate)
+            });
+            print_metrics_block(m, measured_label.as_deref(), gross.as_ref());
         }
         if let Some((n, ws)) = &windows {
             print_windowed_metrics_block(ws, *n, measured_label.as_deref());
@@ -351,13 +435,26 @@ fn write_metrics_csv(
 /// No `symbol` line: a symbol is a property of each trade, not of the run (see
 /// the trade stream and `trades.csv`), so this stays correct for a future
 /// multi-symbol strategy.
-fn print_inputs_block(opts: &RunOptions, start: &str, end: &str, bars: usize) {
+fn print_inputs_block(opts: &RunOptions, start: &str, end: &str, bars: usize, costs_active: bool) {
     println!("{}", style::bold("inputs"));
     print_field("strategy", opts.strategy_label);
     print_field("params", opts.params);
     print_field("period", &format!("{start} → {end} ({bars} bars)"));
     print_field("capital", &format!("{:.2}", opts.cash));
+    if costs_active {
+        print_field("costs", "active (commission/spread/slippage applied)");
+    } else if opts.costs_supplied {
+        print_field("costs", "none (explicit)");
+    }
     print_field("output", &opts.out_dir.display().to_string());
+}
+
+/// The default-cost warning banner: nothing was set, so every fill was
+/// frictionless. Printed once, right after the inputs block, unless `-q` or
+/// the user opted in with `--costs none`.
+fn print_no_cost_warning() {
+    let msg = "no cost model set — commission, spread, and slippage are zero; results are frictionless";
+    println!("  {} {msg}", style::yellow("warn"));
 }
 
 /// The always-on "result" block: the run's outputs, then its wall-clock timing
@@ -393,11 +490,19 @@ fn print_result_block(opts: &RunOptions, s: &Summary, started: SystemTime, finis
 /// The "metrics" block: a compact summary of `metrics.yml`'s headline figures.
 /// Only the most-referenced ones are surfaced here (annualized return + vol,
 /// Sharpe/Sortino/Omega, max drawdown, exposure, trade count + win rate +
-/// profit factor); the file itself carries the full set.
-fn print_metrics_block(m: &metrics::Metrics, measured: Option<&str>) {
+/// profit factor); the file itself carries the full set. When `gross` is set
+/// (a costed run), the decision-relevant rows (`sharpe`, `cagr`) also print
+/// their gross twin so the cost drag is one line away.
+fn print_metrics_block(m: &metrics::Metrics, measured: Option<&str>, gross: Option<&metrics::Metrics>) {
     println!("\n{}", style::bold("metrics"));
     if let Some(measured) = measured {
         print_field("measured", measured);
+    }
+    if let Some(g) = gross {
+        // Cagr is Option — print with an em-dash for a degenerate one.
+        let net = m.returns.cagr_pct.map_or("—".to_string(), |v| format!("{v:+.2}%"));
+        let gross = g.returns.cagr_pct.map_or("—".to_string(), |v| format!("{v:+.2}%"));
+        print_field("cagr", &format!("net {net} · gross {gross}"));
     }
     print_field(
         "return",
@@ -406,7 +511,13 @@ fn print_metrics_block(m: &metrics::Metrics, measured: Option<&str>) {
             m.returns.annualized_mean_pct, m.returns.annualized_volatility_pct
         ),
     );
-    print_field("sharpe", &format_ratio(m.risk_adjusted.sharpe));
+    if let Some(g) = gross {
+        let net = format_ratio(m.risk_adjusted.sharpe);
+        let gross = format_ratio(g.risk_adjusted.sharpe);
+        print_field("sharpe", &format!("net {net} · gross {gross}"));
+    } else {
+        print_field("sharpe", &format_ratio(m.risk_adjusted.sharpe));
+    }
     print_field("sortino", &format_ratio(m.risk_adjusted.sortino));
     print_field("omega", &format_ratio(m.risk_adjusted.omega));
     print_field(

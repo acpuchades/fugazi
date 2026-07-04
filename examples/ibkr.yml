@@ -1,0 +1,38 @@
+# Interactive Brokers — US equities, Tiered pricing (retail default).
+#
+# As of 2026-07-04. Source: https://www.interactivebrokers.com/en/pricing/commissions-home.php
+#
+# Tiered US equities:
+#   $0.0035 per share, $1.00 minimum per order, capped at 1.0% of trade value.
+# The `max(percentage_or_per_share, fixed_minimum)` shape is captured as a
+# `max` composite; the % cap is left out here — it only binds on very small
+# trades and the extra branch would obscure the common case. Add it (or
+# switch to Fixed pricing at $0.005/share, no minimum) with an inline
+# override if it matters for your book.
+#
+# Spread is modeled at 2 bps for large-cap US names (a typical NBBO half-spread
+# on a $50-100 stock is 1-3 cents; 2 bps = 1c on $50, 2c on $100). Slippage
+# is a square-root volume-participation impact — modest by default, since a
+# retail-scale order rarely moves a US-large-cap.
+#
+# Values are US-equity retail Tiered as of the date above; verify against
+# the current fee schedule before running a live-money strategy.
+
+commission:
+  kind: max
+  lhs:
+    kind: per_unit
+    rate: 0.0035   # $0.0035 per share, Tiered US equities
+  rhs:
+    kind: fixed
+    amount: 1.0    # $1.00 minimum per order
+
+spread:
+  kind: bps
+  bps: 2
+
+slippage:
+  kind: volume_participation
+  coefficient: 0.05
+  exponent: 0.5
+  stop_multiplier: 2.0

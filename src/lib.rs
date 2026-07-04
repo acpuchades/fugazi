@@ -59,6 +59,7 @@
 struct ReadmeDoctests;
 
 pub mod backtest;
+pub mod costs;
 pub mod indicator;
 pub mod indicators;
 pub mod metrics;
@@ -70,6 +71,7 @@ pub mod strategy;
 pub mod types;
 
 pub use backtest::{Fill, RunReport};
+pub use costs::{CommissionModel, FillKind, SlippageModel, SpreadModel, TradingCosts};
 pub use indicator::Indicator;
 pub use indicators::BoolIndicatorExt;
 pub use metrics::{DrawdownSegment, Trade};
@@ -84,6 +86,7 @@ pub use types::{Candle, Real};
 
 /// Convenient glob-import of the core traits and types.
 pub mod prelude {
+    pub use crate::costs::TradingCosts;
     pub use crate::indicator::Indicator;
     pub use crate::indicators::{BoolIndicatorExt, IndicatorExt};
     pub use crate::signal::Signal;

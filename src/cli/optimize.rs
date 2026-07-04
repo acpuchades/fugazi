@@ -29,6 +29,8 @@ use rayon::prelude::*;
 use serde_json::Value;
 
 use crate::backtest;
+use crate::calendar::Frequency;
+use crate::costs::CostConfig;
 use crate::data::DataFrame;
 use crate::input;
 use crate::metrics;
@@ -77,6 +79,15 @@ pub struct OptimizeOptions<'a> {
     /// (direction-aware: `mean − k·std` descending, `mean + k·std` ascending).
     /// `0.0` = rank by the plain mean. Only meaningful with `windowed`.
     pub risk_aversion: Real,
+    /// Cost model configured via `--costs`. Every grid point resolves against
+    /// the same config for its (strategy symbol, frequency) pair.
+    pub cost_config: &'a CostConfig,
+    /// Bar frequency (from `-f/--frequency`), forwarded to
+    /// [`CostConfig::resolve`] for each grid point.
+    pub frequency: Option<Frequency>,
+    /// Whether the user passed at least one `--costs` flag — governs the
+    /// warning banner.
+    pub costs_supplied: bool,
     pub jobs: Option<usize>,
     pub quiet: bool,
 }
@@ -115,6 +126,8 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
         opts.bars_per_year,
         opts.risk_free_rate,
         opts.keep_unstable,
+        opts.cost_config,
+        opts.frequency,
     );
 
     // Resolve column paths once — errors here catch typos before the sweep.
@@ -157,6 +170,8 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
     let axes_ref = &axes;
     let fixed_ref = &fixed;
 
+    let cost_config = opts.cost_config;
+    let frequency = opts.frequency;
     let evaluate = |spec: &StrategySpec| -> Evaluation {
         match windowed {
             Some(w) => Evaluation::Windowed(backtest::evaluate_windowed(
@@ -166,6 +181,8 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
                 bpy,
                 rf,
                 keep_unstable,
+                cost_config,
+                frequency,
                 w,
             )),
             None => Evaluation::Whole(Box::new(backtest::evaluate(
@@ -175,6 +192,8 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
                 bpy,
                 rf,
                 keep_unstable,
+                cost_config,
+                frequency,
             ))),
         }
     };
@@ -585,6 +604,20 @@ fn print_inputs_block(opts: &OptimizeOptions, axes: &[(String, Vec<Value>)], row
         .join(", ");
     print_field("grid", &format!("{} points · {axes_label}", rows.len()));
     print_field("capital", &format!("{:.2}", opts.cash));
+    // Costs summary — same treatment as `run`: name it explicitly if a model is
+    // set, note `none (explicit)` if the user opted in silently, and warn if no
+    // flag at all.
+    if !opts.cost_config.is_none() {
+        print_field("costs", "active (commission/spread/slippage applied)");
+    } else if opts.costs_supplied {
+        print_field("costs", "none (explicit)");
+    }
+    if !opts.costs_supplied {
+        println!(
+            "  {} no cost model set — commission, spread, and slippage are zero; grid results are frictionless",
+            style::yellow("warn")
+        );
+    }
     print_field("output", &opts.output.display().to_string());
     if let Some(w) = opts.windowed {
         print_field("windowed", &format!("{w}-bar windows (mean ± std per metric)"));

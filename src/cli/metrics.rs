@@ -34,6 +34,11 @@ pub struct Metrics {
     pub risk_adjusted: RiskAdjustedSection,
     pub drawdown: DrawdownSection,
     pub trades: TradeSection,
+    /// Trading-cost aggregates — populated only when the run was priced with a
+    /// non-trivial cost model (see `run --costs`); omitted otherwise so a
+    /// zero-cost `metrics.yml` matches the pre-costs schema byte-for-byte.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub costs: Option<CostSection>,
 }
 
 /// Non-metric context echoed at the top of `metrics.yml` so a numbers-only
@@ -138,6 +143,30 @@ pub struct DrawdownSection {
     /// `None` when `max_drawdown` is zero.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recovery_factor: Option<Real>,
+}
+
+/// Cost aggregates — total commission paid, total slippage cost (defined as
+/// the total absolute price adjustment across fills, times units), and the
+/// gap between the frictionless (gross) and priced (net) CAGR as a percentage
+/// point drag. Only populated when a cost model was active on the run;
+/// otherwise omitted entirely so a `metrics.yml` from a zero-cost backtest
+/// keeps its pre-costs shape.
+#[derive(Clone, Debug, Serialize)]
+pub struct CostSection {
+    /// Sum of every fill's `commission`, in reference currency.
+    pub total_commission: Real,
+    /// Sum of `|final_price − theoretical_price| × units` across every fill —
+    /// the aggregate spread + slippage the wallet took out of the run.
+    ///
+    /// The paper wallet doesn't preserve the theoretical price on the [`Order`]
+    /// (only the final one lands), so this is computed at write time by
+    /// re-running the same strategy zero-cost and matching fills by
+    /// `(bar, kind, side, units)` — see [`costs_section`].
+    pub total_slippage_cost: Real,
+    /// Gross CAGR minus net CAGR, in percentage points. `None` when either
+    /// endpoint's CAGR is degenerate (non-positive equity).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_drag_pct: Option<Real>,
 }
 
 /// Round-trip trade statistics. Averages/ratios are omitted when there are no
@@ -276,6 +305,7 @@ pub fn from_report<Sym>(
             time_in_drawdown_pct: fugazi::metrics::time_in_drawdown_ratio(&segments, bars) * 100.0,
             recovery_factor: fugazi::metrics::recovery_factor(equity, initial),
         },
+        costs: None,
         trades: TradeSection {
             total: fugazi::metrics::total_trades(&trades),
             wins: fugazi::metrics::winning_trades(&trades),
@@ -481,7 +511,84 @@ pub fn flatten(m: &Metrics) -> Vec<(&'static str, Option<Real>)> {
         ("trades.average_bars", m.trades.average_bars),
         ("trades.min_bars", m.trades.min_bars.map(|v| v as Real)),
         ("trades.max_bars", m.trades.max_bars.map(|v| v as Real)),
+        // Cost aggregates — populated only when a cost model was active on the
+        // run; None here for zero-cost runs so the CSV cell stays empty and
+        // the CSV column set stays fixed across cost-on / cost-off windows.
+        (
+            "costs.total_commission",
+            m.costs.as_ref().map(|c| c.total_commission),
+        ),
+        (
+            "costs.total_slippage_cost",
+            m.costs.as_ref().map(|c| c.total_slippage_cost),
+        ),
+        (
+            "costs.cost_drag_pct",
+            m.costs.as_ref().and_then(|c| c.cost_drag_pct),
+        ),
     ]
+}
+
+/// Build the [`CostSection`] for a costed run.
+///
+/// `net_report` is the priced run; `gross_report` (if given) is the same
+/// strategy over the same candles through a zero-cost wallet. Slippage cost is
+/// derived by pairing each net fill with the matching gross fill
+/// (`bar/kind/side/units` — the same order should book on both sides, since the
+/// only thing that differs is the wallet's cost pipeline) and summing
+/// `|net_price − gross_price| × units`. `cost_drag_pct` = gross CAGR − net CAGR.
+pub fn costs_section<Sym: Clone + PartialEq>(
+    net_report: &RunReport<Sym>,
+    gross_report: Option<&RunReport<Sym>>,
+    bars_per_year: Real,
+) -> CostSection {
+    let total_commission: Real = net_report.fills.iter().map(|f| f.order.commission).sum();
+    let (total_slippage_cost, cost_drag_pct) = if let Some(gross) = gross_report {
+        // Pair fills by (bar, kind, side, units) — with the same strategy on
+        // the same candles, the two runs book the same schedule until costs
+        // divert them. We greedily match the first unpaired gross fill sharing
+        // those keys with each net fill; unmatched fills contribute zero.
+        let mut used = vec![false; gross.fills.len()];
+        let mut slippage = 0.0;
+        for net in &net_report.fills {
+            for (i, g) in gross.fills.iter().enumerate() {
+                if used[i] {
+                    continue;
+                }
+                if g.bar == net.bar
+                    && g.order.kind == net.order.kind
+                    && g.order.side == net.order.side
+                    && (g.order.units - net.order.units).abs() < 1e-9
+                {
+                    slippage += (net.order.price - g.order.price).abs() * net.order.units;
+                    used[i] = true;
+                    break;
+                }
+            }
+        }
+        let net_cagr = fugazi::metrics::cagr(
+            &net_report.equity_curve,
+            net_report.initial_equity,
+            bars_per_year,
+        );
+        let gross_cagr = fugazi::metrics::cagr(
+            &gross.equity_curve,
+            gross.initial_equity,
+            bars_per_year,
+        );
+        let drag = match (gross_cagr, net_cagr) {
+            (Some(g), Some(n)) => Some((g - n) * 100.0),
+            _ => None,
+        };
+        (slippage, drag)
+    } else {
+        (0.0, None)
+    };
+    CostSection {
+        total_commission,
+        total_slippage_cost,
+        cost_drag_pct,
+    }
 }
 
 /// Serialize the metrics document to `path` as YAML.

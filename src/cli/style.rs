@@ -44,6 +44,10 @@ pub fn red(s: &str) -> String {
     paint("31", s)
 }
 
+pub fn yellow(s: &str) -> String {
+    paint("33", s)
+}
+
 /// The banner every subcommand prints at the top of its console output.
 /// Line 1 is the constant tool identity (the same for any subcommand);
 /// line 2 names the active command and what it does.

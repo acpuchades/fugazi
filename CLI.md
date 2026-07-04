@@ -96,7 +96,7 @@ Backtest one strategy against one dataset and write the result files.
 
 ```
 fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
-          [--params <SPEC> …] [--cash <N>]
+          [--params <SPEC> …] [--cash <N>] [--costs <SPEC> …]
           [--stocks | --forex | --crypto] [-f <CODE>] [--bars-per-year <N>]
           [--risk-free-rate <RATE>] [-w <N>] [--keep-unstable] [-q]
 ```
@@ -108,6 +108,7 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
 | `-o`, `--output-dir <DIR>` | Directory to write `trades.csv`, `returns.csv`, and `metrics.yml` into. Created if missing. |
 | `-p`, `--params <SPEC>` | Placeholder substitution. Repeatable. See [--params](#--params). |
 | `-c`, `--cash <N>` | Initial funds for the paper wallet. Default `10000`. |
+| `--costs <SPEC>` | Trading-cost model — commission, spread, slippage — applied to every fill. Repeatable. See [--costs](#--costs). Omit for a frictionless run (matches the pre-costs release byte-for-byte). |
 | `--stocks` / `--forex` / `--crypto` | Trading-calendar shortcut. See [Calendar](#calendar-and-annualization). Mutually exclusive. |
 | `-f`, `--frequency <CODE>` | Bar cadence (`1m`, `5m`, `1h`, `4h`, `1d`, `1w`, `1M`, …). Combines with the calendar to derive `bars_per_year`. |
 | `--bars-per-year <N>` | Explicit override for the annualization denominator. Wins over the calendar/frequency pair. |
@@ -142,6 +143,7 @@ applies when …` caveats:
 ```
 fugazi check strategy <STRATEGY> [--params <SPEC> …] [-q]
 fugazi check overlay <SPEC>... [-q]
+fugazi check costs <SPEC>... [-q]
 ```
 
 Exit code is what a CI job cares about: `0` = the spec parsed and built
@@ -165,6 +167,19 @@ surface here — not at fetch time.
 | Flag | Description |
 | --- | --- |
 | `<SPEC>...` | One or more `get --overlay` specs. Same shape as [`get --overlay`](#-x----overlay), including the optional `SYMBOL[FREQ]:` scope prefix. |
+| `-q`, `--quiet` | Suppress the "ok" message on success. |
+
+#### `check costs`
+
+Parses each `run --costs` spec, folds them into a single [`CostConfig`], and
+builds each configured leg's live model — so an unknown `kind:`, a missing
+required field, a malformed `SYMBOL[FREQ]:` scope prefix, or a nested
+`composite`/`max` with a bad child all surface here rather than at
+`run`/`optimize` startup.
+
+| Flag | Description |
+| --- | --- |
+| `<SPEC>...` | One or more `--costs` specs. Same shape as [`run --costs`](#--costs), including the optional `SYMBOL[FREQ]:` scope prefix and the `none` literal. |
 | `-q`, `--quiet` | Suppress the "ok" message on success. |
 
 ### `optimize`
@@ -196,6 +211,7 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
 | `-w`, `--windowed <N>` | Evaluate each grid point in non-overlapping windows of `N` bars: every `-m` metric becomes two CSV columns (`<name>_mean` / `<name>_std`) and `--best-by` ranks by the windowed mean. See [Windowed metrics](#windowed-metrics). |
 | `-k`, `--risk-aversion <K>` | Rank `--best-by` conservatively: shift each grid point's cross-window mean *against* it by `K` standard deviations before sorting. Requires `-w` and `--best-by`; `K >= 0`. See [Best-by directions](#best-by-directions). |
 | `--keep-unstable` | Disable the default stability gating and its metric anchor for every grid point. See [Stability gating](#stability-gating). |
+| `--costs <SPEC>` | Trading-cost model applied uniformly to every grid point. Repeatable. See [--costs](#--costs). |
 | `-j`, `--jobs <N>` | Rayon worker count. Default: one worker per logical CPU. |
 | `-c`, `--cash <N>` | Initial funds for each backtest. Default `10000`. |
 | `--stocks` / `--forex` / `--crypto` | Trading-calendar shortcut. See [Calendar](#calendar-and-annualization). |
@@ -514,6 +530,135 @@ makes the param optional; without one, a missing value is an error. Substitution
 happens over the untyped YAML/JSON tree before the strategy is typed, so a
 param can stand in for a number, a string, or any other field.
 
+### `--costs`
+
+`--costs` configures the trading-cost model applied to every fill: one
+**commission**, one **spread** and one **slippage** leg, resolved per
+`(symbol, frequency)` at run start. Omit the flag and the wallet is
+frictionless — output is byte-identical to the pre-costs release, and the
+console prints a one-line warning banner (`no cost model set — …`). Pass
+`--costs none` to acknowledge the frictionless default explicitly and
+silence the warning.
+
+It's a `,`-separated list of terms, itself repeatable — same grammar
+as [`--params`](#--params):
+
+- `[SCOPE:]key=value` — set one leg (or nudge one field of it) inline.
+  `key` starts with `commission` / `spread` / `slippage`; `value` is the
+  model expression (`!percentage { rate: 0.001 }`, `!bps { bps: 5 }`, …).
+- `@file.yml` — load a whole venue preset. Two ship in
+  [`examples/`](examples/): `binance.yml` (crypto taker fees) and
+  `ibkr.yml` (US-equities Tiered).
+- `none` — reset every leg to the no-op default and silence the warning
+  banner. Any later term re-establishes a real model.
+
+Terms apply left-to-right, later wins; the `SYMBOL[FREQ]:` scope prefix is
+the same as [`get --overlay`](#-x----overlay) — either half is optional
+(`BTC:`, `[1d]:`, `BTC[1d]:`).
+
+**Fill pipeline.** For every fill (market, stop, take-profit), the wallet
+applies **spread → slippage → commission** on top of the theoretical trigger
+price:
+
+1. Start from the theoretical price — bar `open` for a market fill, the
+   trigger level (or `open` on a gap) for a stop/take-profit.
+2. Apply the half-spread — buys pay it (`+`), sells receive it (`−`).
+3. Apply the slippage — always adverse to the *trading side* (buys slip
+   up, sells slip down), scaled by the `stop_multiplier` on
+   stop/take-profit fills (default `1.5×` for a triggered stop in a
+   fast market).
+4. The resulting price is what's stamped on the [`Order`](#output-files)
+   and recorded as `trades.csv`'s `price` column.
+5. Commission is computed from the *final* price × units and written to a
+   separate `commission` column — never netted into `price`.
+
+**Model catalogue** — each variant lands as a `kind:` value in a preset
+YAML and as a `!variant { … }` external tag on the inline CLI form:
+
+| Leg | Kind | Fields | Notes |
+| --- | --- | --- | --- |
+| commission | `fixed` | `amount` | Flat per-ticket. |
+| commission | `percentage` | `rate` | `rate × notional`. |
+| commission | `per_unit` | `rate` | `rate × units`. |
+| commission | `composite` | `parts: [Model,…]` | Sum. |
+| commission | `max` | `lhs`, `rhs` | `max(a, b)` — e.g. IBKR's per-order minimum. |
+| spread | `bps` | `bps` | Basis-point full spread; half applied per side. |
+| spread | `absolute` | `amount` | Absolute full spread; half per side. |
+| slippage | `bps` | `bps`, `stop_multiplier` (opt.) | Fixed bps adverse. |
+| slippage | `volume_participation` | `coefficient`, `exponent`, `stop_multiplier` (opt.) | Almgren-Chriss: `coef × (units/candle.volume)^exp × price`. `exponent` defaults to `0.5` (square-root). Zero-volume bars yield zero impact. |
+
+**Scope precedence.** For each leg, resolution picks the winning model in
+this order at run time:
+
+1. An entry in the leg's `scoped` list that matches both `symbol` and
+   `freq` (later-declared wins on same specificity).
+2. `by_symbol[symbol]` — set via a `SYMBOL:` inline term or a preset
+   `by_symbol` map.
+3. `by_interval[freq]` — set via a `[FREQ]:` inline term or a preset
+   `by_interval` map.
+4. `default` — the leg's fallback.
+5. Otherwise the no-op default (zero-cost).
+
+**Preset shape** ([`examples/binance.yml`](examples/binance.yml)):
+
+```yaml
+commission:                       # flat form ⇒ commission.default
+  kind: percentage
+  rate: 0.001
+
+spread:                           # structured: default + per-symbol overrides
+  default: { kind: bps, bps: 2 }
+  by_symbol:
+    BTCUSDT: { kind: bps, bps: 1 }
+    ETHUSDT: { kind: bps, bps: 1.5 }
+
+slippage:
+  kind: volume_participation
+  coefficient: 0.1
+  exponent: 0.5
+  stop_multiplier: 1.5
+```
+
+**Inline forms**:
+
+```sh
+# One-shot: 10 bps taker + 5 bps spread.
+fugazi run @strategy.yml -s @candles.csv -o out/ \
+    --costs 'commission=!percentage { rate: 0.001 },spread=!bps { bps: 5 }'
+
+# Load a preset, nudge one field.
+fugazi run @strategy.yml -s @candles.csv -o out/ \
+    --costs @examples/binance.yml,commission.rate=0.00075   # BNB discount
+
+# Scoped override — a tighter spread for BTC on daily bars.
+fugazi run @strategy.yml -s @candles.csv -o out/ \
+    --costs 'BTCUSDT[1d]:spread=!bps { bps: 3 }'
+
+# Silence the frictionless-run warning without setting a model.
+fugazi run @strategy.yml -s @candles.csv -o out/ --costs none
+```
+
+**Reporting.** When a cost model is active, `trades.csv` gains a
+`commission` column and `metrics.yml` a [`costs:` section](#costs-catalogue)
+with `total_commission`, `total_slippage_cost`, and `cost_drag_pct` (gross
+CAGR minus net CAGR). The console `metrics` block prints both the **gross**
+(frictionless) and **net** (priced) `sharpe`/`cagr` side by side so the
+cost drag is one line away.
+
+**Caveats.**
+
+- Sizing math is theoretical-price based: an all-in `value_frac(1.0)` fill
+  under a non-trivial cost model overshoots funds by the cost overhead and
+  is silently dropped (matching the wallet's queued-order semantics). Leave
+  headroom by sizing under `1.0`.
+- `volume_participation` is a **single-bar** approximation — the fill uses
+  only its own bar's volume, no participation cap carries across bars.
+  Not a full market-impact model. A stochastic / Monte Carlo variant is a
+  natural follow-up and not part of this release.
+- Bumping `stop_multiplier` above the default `1.5` widens the assumed
+  slippage on triggered stops/take-profits; leave it at `1.0` to model
+  stops as identical to market orders.
+
 ### Calendar and annualization
 
 `metrics.yml` reports annualized figures (Sharpe, Sortino, CAGR, annualized
@@ -706,8 +851,9 @@ resting protective triggers alike.
 | `symbol` | Instrument, per-fill (multi-symbol strategies stay correct). |
 | `side` | `buy` or `sell`. |
 | `units` | Fill size, in instrument units. |
-| `price` | Fill price. Market orders fill at the next bar's `open`; protective legs fill at their trigger level (or the bar's `open` on a gap). |
+| `price` | Fill price. Market orders fill at the next bar's `open`; protective legs fill at their trigger level (or the bar's `open` on a gap). With [`--costs`](#--costs) active, this is the *final* price — post-spread, post-slippage. |
 | `kind` | `market`, `stop`, or `take_profit`. |
+| `commission` | Commission paid on this fill, in reference currency (from the [`--costs`](#--costs) commission leg). **Only present when `--costs` is active.** Omitted otherwise so a zero-cost `trades.csv` matches the pre-costs schema byte-for-byte. |
 
 ### `returns.csv` (from `run`)
 
@@ -827,6 +973,19 @@ positions.
 | `win_rate_pct` / `profit_factor` / `payoff_ratio` / `expectancy` / `kelly_fraction` | Round-trip PnL ratios. |
 | `average_win` / `average_loss` / `largest_win` / `largest_loss` / `average_return_pct` | Per-trade PnL. |
 | `average_bars` / `min_bars` / `max_bars` | Per-trade duration. |
+
+### `costs` — cost aggregates
+
+Present **only when [`--costs`](#--costs) was active** on the run — omitted
+from the document (and read as an empty CSV cell in `optimize`'s window
+columns) otherwise, so a zero-cost `metrics.yml` matches the pre-costs
+schema byte-for-byte.
+
+| Field | Meaning |
+| --- | --- |
+| `total_commission` | Sum of every fill's `commission`, in reference currency. |
+| `total_slippage_cost` | Sum of `|final_price − theoretical_price| × units` across every fill — the aggregate spread + slippage the wallet took out of the run. Derived by re-running the same strategy zero-cost and diffing the fill prices. |
+| `cost_drag_pct` | Gross CAGR minus net CAGR, in percentage points. Omitted when either endpoint's CAGR is degenerate (non-positive equity). |
 
 ## Examples
 

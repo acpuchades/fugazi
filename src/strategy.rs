@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::hash::Hash;
 
+use crate::costs::TradingCosts;
 use crate::indicators::DEFAULT_EPSILON;
 use crate::types::{Candle, Real};
 
@@ -195,23 +196,33 @@ pub enum OrderKind {
 
 /// A single filled order: a `symbol`, a [`Side`], a strictly-positive number of
 /// instrument units, the `price` it filled at, the [`OrderKind`] that produced
-/// it, and the [`OrderId`] of the submission it fills.
+/// it, the [`OrderId`] of the submission it fills, and the per-fill
+/// `commission` paid on top of the notional (in reference currency; `0.0`
+/// unless a cost model set it).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Order<Sym> {
     pub symbol: Sym,
     pub side: Side,
     pub units: Real,
-    /// The per-unit price this order filled at (reference currency).
+    /// The per-unit price this order filled at (reference currency), post
+    /// spread and slippage.
     pub price: Real,
     /// Whether this fill came from a market order or a resting stop/take-profit.
     pub kind: OrderKind,
     /// The id of the submission this fill belongs to (see [`Ack`]).
     pub id: OrderId,
+    /// Commission paid on this fill, in reference currency. Zero on a wallet
+    /// built with [`PaperWallet::new`](crate::PaperWallet::new); populated on a
+    /// wallet built with [`PaperWallet::with_costs`](crate::PaperWallet::with_costs)
+    /// whose [`TradingCosts::commission`](crate::costs::TradingCosts::commission)
+    /// leg is non-trivial.
+    pub commission: Real,
 }
 
 impl<Sym> Order<Sym> {
     /// A `side` order for `units` units of `symbol`, filled at `price` as `kind`,
-    /// belonging to submission `id`.
+    /// belonging to submission `id`. `commission` defaults to `0.0`; set it
+    /// with [`with_commission`](Self::with_commission).
     pub fn new(
         symbol: Sym,
         side: Side,
@@ -227,13 +238,23 @@ impl<Sym> Order<Sym> {
             price,
             kind,
             id,
+            commission: 0.0,
         }
+    }
+
+    /// Set this order's `commission` (in reference currency) — the leg the
+    /// wallet stamps after applying its [`CommissionModel`](crate::costs::CommissionModel).
+    ///
+    /// [`CommissionModel`]: crate::costs::CommissionModel
+    pub fn with_commission(mut self, commission: Real) -> Self {
+        self.commission = commission;
+        self
     }
 
     /// The order that moves `symbol`'s position by `delta` units, filled at
     /// `price` as `kind` for submission `id` — [`Buy`] for a positive delta,
     /// [`Sell`] for a negative one — or `None` when the delta is negligible
-    /// (within [`DEFAULT_EPSILON`]).
+    /// (within [`DEFAULT_EPSILON`]). Commission defaults to `0.0`.
     ///
     /// [`Buy`]: Side::Buy
     /// [`Sell`]: Side::Sell
@@ -473,7 +494,7 @@ struct Protective {
 /// prices them itself, filling at the level or — when the bar gaps past it — at
 /// the `open`. Use it for backtests and dry runs; a downstream `Wallet` impl
 /// handles live execution / bus publishing.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PaperWallet<Sym> {
     positions: HashMap<Sym, Real>,
     bars: HashMap<Sym, Candle>,
@@ -483,11 +504,23 @@ pub struct PaperWallet<Sym> {
     initial_funds: Real,
     blotter: Vec<Order<Sym>>,
     next_id: u64,
+    costs: TradingCosts,
 }
 
 impl<Sym> PaperWallet<Sym> {
-    /// A wallet seeded with `funds` of cash, no positions and no prices.
+    /// A wallet seeded with `funds` of cash, no positions and no prices, and
+    /// **no trading costs** — every fill books at the theoretical price with
+    /// zero commission, matching the pre-costs release. Byte-identical to the
+    /// pre-costs behavior on any driver.
     pub fn new(funds: Real) -> Self {
+        Self::with_costs(funds, TradingCosts::none())
+    }
+
+    /// A wallet seeded with `funds` of cash and the given `costs` model — every
+    /// fill goes through the spread → slippage → commission pipeline
+    /// documented on [`crate::costs`]. Pass [`TradingCosts::none`] for a
+    /// zero-cost wallet (equivalent to [`new`](Self::new)).
+    pub fn with_costs(funds: Real, costs: TradingCosts) -> Self {
         Self {
             positions: HashMap::new(),
             bars: HashMap::new(),
@@ -497,6 +530,7 @@ impl<Sym> PaperWallet<Sym> {
             initial_funds: funds,
             blotter: Vec::new(),
             next_id: 0,
+            costs,
         }
     }
 
@@ -535,16 +569,23 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         })
     }
 
-    /// Book a fill: drive `symbol` to `target` signed units at `price`, tagged
-    /// `kind`/`id`. The engine behind every fill — the queued market flush and the
-    /// resting-order triggers both route here. Returns the [`Order`] (also pushed
-    /// to the blotter), `Ok(None)` if already at `target`, or a [`WalletError`]
-    /// (`UnknownPrice`, `InvalidPrice`, `PriceOutOfRange`, `InsufficientFunds`).
+    /// Book a fill: drive `symbol` to `target` signed units, using
+    /// `theoretical_price` as the pre-cost trigger price (bar `open` for a
+    /// market order, the trigger level — or the `open` on a gap — for a stop /
+    /// take-profit). The wallet's [`TradingCosts`] pipeline then applies
+    /// **spread → slippage → commission**, and the final price is what lands on
+    /// the [`Order`]. `kind`/`id` tag the resulting fill.
+    ///
+    /// The engine behind every fill — the queued market flush and the
+    /// resting-order triggers both route here. Returns the [`Order`] (also
+    /// pushed to the blotter), `Ok(None)` if already at `target`, or a
+    /// [`WalletError`] (`UnknownPrice`, `InvalidPrice`, `PriceOutOfRange`,
+    /// `InsufficientFunds`).
     fn fill_at(
         &mut self,
         symbol: Sym,
         target: Real,
-        price: Real,
+        theoretical_price: Real,
         kind: OrderKind,
         id: OrderId,
     ) -> Result<Option<Order<Sym>>, WalletError> {
@@ -553,27 +594,59 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         if delta.abs() <= DEFAULT_EPSILON {
             return Ok(None);
         }
-        let bar = self.bars.get(&symbol).ok_or(WalletError::UnknownPrice)?;
-        if price <= 0.0 {
+        let bar = *self.bars.get(&symbol).ok_or(WalletError::UnknownPrice)?;
+        if theoretical_price <= 0.0 {
             return Err(WalletError::InvalidPrice);
         }
-        // A fill can only happen at a price the bar actually traded at.
-        if price < bar.low - DEFAULT_EPSILON || price > bar.high + DEFAULT_EPSILON {
+        // The pre-cost price must be one the bar actually traded at; cost
+        // adjustments (spread, slippage) may push the *final* fill price
+        // outside the bar's range and that is fine — a real market fill can
+        // execute above the tape.
+        if theoretical_price < bar.low - DEFAULT_EPSILON
+            || theoretical_price > bar.high + DEFAULT_EPSILON
+        {
             return Err(WalletError::PriceOutOfRange);
         }
-        // No margin: a net buy can't drive cash below zero (tolerant of the
-        // rounding in an all-in `value_frac(1.0)`, whose cost equals funds).
+
+        // Apply the costs pipeline: spread → slippage → commission. Direction
+        // is derived from `delta`'s sign (buys pay the ask, sells receive the
+        // bid), and the fill kind threads through so a stop can slip further
+        // than a plain market fill.
+        let side = if delta > 0.0 { Side::Buy } else { Side::Sell };
+        let units = delta.abs();
+        let half_spread = self.costs.spread.half_spread(theoretical_price, &bar);
+        let post_spread = match side {
+            Side::Buy => theoretical_price + half_spread,
+            Side::Sell => theoretical_price - half_spread,
+        };
+        let final_price = self
+            .costs
+            .slippage
+            .adjust(side, post_spread, units, &bar, kind);
+        // A pathological cost config could drive the fill non-positive; refuse
+        // rather than book a negative-value trade.
+        if final_price <= 0.0 {
+            return Err(WalletError::InvalidPrice);
+        }
+        let notional = final_price * units;
+        let commission = self.costs.commission.commission(notional, units).max(0.0);
+
+        // No margin: a net buy plus its commission can't drive cash below zero
+        // (tolerant of the epsilon rounding in an all-in `value_frac(1.0)`,
+        // whose cost equals funds when zero-cost).
         if delta > 0.0 {
-            let cost = delta * price;
+            let cost = delta * final_price + commission;
             let tolerance = DEFAULT_EPSILON * self.funds.abs().max(1.0);
             if cost - self.funds > tolerance {
                 return Err(WalletError::InsufficientFunds);
             }
         }
-        let order = Order::from_delta(symbol.clone(), delta, price, kind, id)
-            .expect("delta exceeds DEFAULT_EPSILON, so the order is non-empty");
-        // Pay for a buy, receive for a sell.
-        self.funds -= order.signed_units() * price;
+        let order = Order::from_delta(symbol.clone(), delta, final_price, kind, id)
+            .expect("delta exceeds DEFAULT_EPSILON, so the order is non-empty")
+            .with_commission(commission);
+        // Pay for a buy, receive for a sell — and pay commission out of cash
+        // on both sides.
+        self.funds -= order.signed_units() * final_price + commission;
         let new_position = current + delta;
         if new_position.abs() <= DEFAULT_EPSILON {
             self.positions.remove(&symbol);

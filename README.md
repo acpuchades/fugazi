@@ -343,7 +343,12 @@ Flags: `<STRATEGY>` (positional, `@file` or inline), `--series <spec>`
 (repeatable), `--output-dir <dir>`, `--cash <amount>` (default `10000`),
 `--params <spec>` (repeatable — see below), calendar shortcuts
 (`--stocks`/`--forex`/`--crypto` + `--frequency`) or explicit `--bars-per-year`,
-and `--risk-free-rate <rate>` for the annualized rf. `-w/--windowed <N>`
+and `--risk-free-rate <rate>` for the annualized rf. `--costs <spec>`
+(repeatable, same `,`-separated `key=value` / `@file.yml` shape as `--params`)
+wires a commission/spread/slippage model into every fill — venue presets ship
+in [`examples/binance.yml`](examples/binance.yml) and
+[`examples/ibkr.yml`](examples/ibkr.yml); omit for a frictionless backtest
+identical to the pre-costs release. `-w/--windowed <N>`
 computes the metrics in non-overlapping windows of `N` bars instead of over the
 whole run, writing `metrics.csv` — one row per window: its start/end times,
 then the full catalogue under dotted `metrics.yml` names — instead of

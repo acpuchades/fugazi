@@ -141,6 +141,40 @@ long:
   exit:   !crosses_below { lhs: !sma { period: 50 }, rhs: !sma { period: 200 } }
 ```
 
+#### Trading costs
+
+Costs are configured on the command line — the strategy YAML doesn't spell
+them out — so the same strategy can be evaluated against several venue
+schedules without editing the spec. See [CLI § `--costs`](CLI.md#--costs)
+for the full grammar and the model catalogue; two things worth knowing when
+reading a costed `metrics.yml`:
+
+- **Fill pipeline: spread → slippage → commission.** Every fill starts
+  from the theoretical trigger price (bar `open` for a market order, the
+  trigger level — or the `open` on a gap — for a stop/take-profit), then:
+  1. Half-spread is applied — buys pay it, sells receive it.
+  2. Slippage is applied — always adverse to the *trading side* (buys slip
+     up, sells slip down), regardless of whether the trade opens a fresh
+     position or closes an existing one. So a stop-out on a losing short
+     doesn't get "free" slippage — the aggressor-side rule matches real
+     tape behaviour.
+  3. Commission is computed from the *final* price × units and recorded
+     separately (`trades.csv`'s `commission` column,
+     [`metrics.costs.total_commission`](CLI.md#costs--cost-aggregates)) —
+     never netted into `price`.
+
+- **Stop-slippage multiplier.** A triggered stop or take-profit in a fast,
+  gapping market realistically slips more than a planned market entry, so
+  the two shipped slippage models (`bps`, `volume_participation`) carry a
+  `stop_multiplier` field (default `1.5×`) applied on top of the market
+  figure when [`OrderKind`](#protective-stops) is `Stop` / `TakeProfit`.
+  Set it to `1.0` to model stops as identical to market fills; set it
+  higher (`2.0`–`3.0`) for a crypto book with recurrent gap risk.
+
+  This is why costed backtests will typically show a higher cost figure
+  for stop-out heavy strategies than a naïve "same slippage for every
+  fill" model would — the multiplier is doing its job.
+
 ## Sources
 
 A **source** produces a `Real` per bar (`Output = Real`). Any field named
