@@ -103,6 +103,11 @@ pub struct SingleAssetStrategy<Sym> {
     short_stop: Option<Level>,
     short_target: Option<Level>,
     position: Position,
+    /// Number of bars fed to [`update`](Strategy::update) since construction /
+    /// last [`reset`](Strategy::reset). Backs
+    /// [`is_active`](Strategy::is_active): the strategy is active once every
+    /// indicator it holds has seen at least `stable_period()` samples.
+    samples_seen: usize,
 }
 
 impl<Sym> SingleAssetStrategy<Sym> {
@@ -121,6 +126,7 @@ impl<Sym> SingleAssetStrategy<Sym> {
             short_stop: None,
             short_target: None,
             position: Position::new(),
+            samples_seen: 0,
         }
     }
 
@@ -204,6 +210,7 @@ impl<Sym: Clone + PartialEq> Strategy for SingleAssetStrategy<Sym> {
     type Symbol = Sym;
 
     fn update(&mut self, candle: Candle) {
+        self.samples_seen = self.samples_seen.saturating_add(1);
         self.long.update(candle);
         self.close_long.update(candle);
         self.short.update(candle);
@@ -276,6 +283,26 @@ impl<Sym: Clone + PartialEq> Strategy for SingleAssetStrategy<Sym> {
         }
     }
 
+    /// Every held indicator has seen at least `stable_period()` samples.
+    ///
+    /// The `max` over the four signal slots and every configured protective
+    /// level. Unconfigured signal slots hold [`Const`](crate::indicators::Const)
+    /// with `stable_period() == 0`, so they never gate. Unwired protective
+    /// levels are `None` and are skipped entirely.
+    fn is_active(&self) -> bool {
+        let bars = self.samples_seen;
+        let signal_ok = |s: &dyn Signal| bars >= s.stable_period();
+        let level_ok = |l: &Level| bars >= l.stable_period();
+        signal_ok(&*self.long)
+            && signal_ok(&*self.close_long)
+            && signal_ok(&*self.short)
+            && signal_ok(&*self.close_short)
+            && self.long_stop.as_ref().is_none_or(level_ok)
+            && self.long_target.as_ref().is_none_or(level_ok)
+            && self.short_stop.as_ref().is_none_or(level_ok)
+            && self.short_target.as_ref().is_none_or(level_ok)
+    }
+
     fn reset(&mut self) {
         self.long.reset();
         self.close_long.reset();
@@ -294,6 +321,7 @@ impl<Sym: Clone + PartialEq> Strategy for SingleAssetStrategy<Sym> {
             l.reset();
         }
         self.position.reset();
+        self.samples_seen = 0;
     }
 }
 

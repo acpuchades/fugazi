@@ -49,6 +49,7 @@ mod stable;
 mod stats;
 mod stddev;
 mod stochastic;
+mod timeframe;
 mod true_range;
 mod value;
 mod vwap;
@@ -60,7 +61,9 @@ pub use adx::{Adx, AdxValue};
 pub use aroon::{Aroon, AroonValue};
 pub use atr::Atr;
 pub use bollinger::{Bollinger, BollingerValue};
-pub use candle::{CandleField, Close, Current, Field, High, Low, Median, Open, Typical, Volume};
+pub use candle::{
+    CandleField, Close, Current, CurrentBar, Field, High, Low, Median, Open, Typical, Volume,
+};
 pub use cci::Cci;
 pub use compare::{ComparisonOp, DEFAULT_EPSILON, Eq, Ge, Gt, Le, Lt, Ne};
 pub use component::Component;
@@ -87,6 +90,7 @@ pub use sma::Sma;
 pub use stable::Stable;
 pub use stddev::StdDev;
 pub use stochastic::{StochRsi, Stochastic};
+pub use timeframe::{Latch, Resample};
 pub use true_range::TrueRange;
 pub use value::Value;
 pub use vwap::Vwap;

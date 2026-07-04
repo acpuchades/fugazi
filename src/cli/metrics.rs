@@ -370,6 +370,7 @@ pub fn report_slice<Sym: Clone>(
     RunReport {
         equity_curve: report.equity_curve[bars.clone()].to_vec(),
         fills,
+        active: report.active[bars.clone()].to_vec(),
         initial_equity: if bars.start == 0 {
             report.initial_equity
         } else {
@@ -731,6 +732,7 @@ mod tests {
         let report = RunReport {
             equity_curve: vec![100.0, 105.0, 110.0, 108.0, 103.0],
             fills,
+            active: vec![true; 5],
             initial_equity: 100.0,
         };
         from_report(&report, 252.0, 0.0)
@@ -811,6 +813,7 @@ mod tests {
                 bar: 3,
                 order: order(Side::Buy, 1.0, 108.0),
             }],
+            active: vec![true; 5],
             initial_equity: 100.0,
         };
         let windows = windowed_from_report(&report, 2, 252.0, 0.0);

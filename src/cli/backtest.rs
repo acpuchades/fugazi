@@ -60,7 +60,7 @@ fn measured_report(
     costs: TradingCosts,
 ) -> fugazi::RunReport<String> {
     let symbol = spec.symbol.clone();
-    let (mut strategy, measure_from) = spec.build(!keep_unstable);
+    let mut strategy = spec.build(!keep_unstable);
     let mut wallet = PaperWallet::with_costs(cash, costs);
     let report = fugazi::backtest::run(
         &mut strategy,
@@ -68,8 +68,25 @@ fn measured_report(
         symbol,
         candles.iter().map(|(_, c)| *c),
     );
-    let measure_from = measure_from.min(report.equity_curve.len());
+    let measure_from = activation_bar(&report, keep_unstable);
     metrics::report_slice(&report, measure_from..report.equity_curve.len())
+}
+
+/// The bar at which measurement starts: under `--keep-unstable`, zero (measure
+/// everything); otherwise the first bar the strategy declared itself
+/// [`is_active`](fugazi::Strategy::is_active), i.e. the first `true` in the
+/// report's `active` vector (or the length of the run if the strategy was
+/// never active).
+fn activation_bar<Sym>(report: &fugazi::RunReport<Sym>, keep_unstable: bool) -> usize {
+    if keep_unstable {
+        0
+    } else {
+        report
+            .active
+            .iter()
+            .position(|&a| a)
+            .unwrap_or(report.active.len())
+    }
 }
 
 /// Pure metrics-only evaluation: drive `spec` over `candles` through a paper
@@ -164,7 +181,7 @@ pub struct Summary {
 pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<Summary> {
     let started = SystemTime::now();
     let symbol = spec.symbol.clone();
-    let (mut strategy, measure_from) = spec.build(!opts.keep_unstable);
+    let mut strategy = spec.build(!opts.keep_unstable);
     let candles = frame.candles(&symbol)?;
 
     std::fs::create_dir_all(opts.out_dir)
@@ -303,23 +320,26 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
     // one `metrics.csv` row each. The matching console block prints after the
     // result block below.
     //
-    // Metrics measure from the stability gate's anchor: on the leading
-    // `measure_from` bars no entry could possibly fire, so equity is flat by
-    // construction (nothing was at risk) and including them would dilute the
-    // return moments and, windowed, seed the cross-window spread with
+    // Metrics measure from the **activation** point: the first bar the
+    // strategy declared itself `is_active` (all held indicators past their
+    // stable_period). On the leading skipped bars the strategy is still
+    // warming up — equity is flat by construction and including them would
+    // dilute return moments and, windowed, seed the cross-window spread with
     // artificial dead windows. The result files above and the equity chart
     // still cover the full run. Zero under `--keep-unstable`.
-    let measure_from = measure_from.min(report.equity_curve.len());
+    let measure_from = activation_bar(&report, opts.keep_unstable);
     let measured = metrics::report_slice(&report, measure_from..report.equity_curve.len());
     let measured_label = (measure_from > 0).then(|| {
         let bars = report.equity_curve.len();
         match candles.get(measure_from) {
             Some((t, _)) => format!(
-                "{t} → {end} ({} of {bars} bars; {measure_from} stability-gated bars skipped)",
+                "{t} → {end} ({} of {bars} bars; {measure_from} bars before strategy activation)",
                 bars - measure_from,
             ),
-            // The whole series fits inside the gate — nothing to measure.
-            None => format!("(none — all {bars} bars inside the {measure_from}-bar stability gate)"),
+            // The whole series fits inside the warm-up — nothing to measure.
+            None => format!(
+                "(none — the strategy never activated within {bars} bars)",
+            ),
         }
     });
     // When a cost model is active, also run the frictionless twin so metrics
@@ -328,7 +348,7 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
     // wallet's cost config differs, so any difference is attributable to costs
     // alone.
     let gross_measured = if costs_active {
-        let (mut gross_strategy, _) = spec.build(!opts.keep_unstable);
+        let mut gross_strategy = spec.build(!opts.keep_unstable);
         let mut gross_wallet = PaperWallet::new(opts.cash);
         let gross_report = fugazi::backtest::run(
             &mut gross_strategy,

@@ -20,7 +20,7 @@ mod completions;
 mod convert;
 mod costs;
 mod data;
-mod dynd;
+mod dyn_;
 mod file;
 mod get;
 mod input;

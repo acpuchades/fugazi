@@ -37,7 +37,7 @@ use tokio::task::JoinSet;
 use fugazi::prelude::*;
 use fugazi::sources::{Binance, CandleSource, Interval, TimedCandle, Timestamp, Yahoo};
 
-use crate::dynd::DynValue;
+use crate::dyn_::{DynIndicator, DynValue};
 use crate::file::{FileBar, FileSource};
 use crate::input::Source as InputSource;
 use crate::overlay::{self, Overlay};
@@ -514,7 +514,7 @@ fn apply_overlays(
 
         let active: Vec<Option<&Overlay>> =
             overlay::active_for(overlays, columns, &symbol, interval);
-        let mut instances: Vec<Option<DynValue>> = active
+        let mut instances: Vec<Option<Box<dyn DynIndicator>>> = active
             .iter()
             .map(|slot| slot.as_ref().map(|o| o.build()))
             .collect();
@@ -525,7 +525,16 @@ fn apply_overlays(
             .map(|b| {
                 let values: Vec<Option<Real>> = instances
                     .iter_mut()
-                    .map(|slot| slot.as_mut().and_then(|inst| inst.update(b.candle.candle)))
+                    .map(|slot| {
+                        slot.as_mut().and_then(|inst| {
+                            match inst.update(DynValue::Candle(b.candle.candle))? {
+                                DynValue::Real(x) => Some(x),
+                                other => unreachable!(
+                                    "overlay's DynIndicator was built for Real output, got {other:?}"
+                                ),
+                            }
+                        })
+                    })
                     .collect();
                 Row {
                     symbol: b.symbol,

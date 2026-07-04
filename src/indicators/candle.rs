@@ -12,6 +12,48 @@ use std::marker::PhantomData;
 use crate::indicator::Indicator;
 use crate::types::{Candle, Real};
 
+/// A pass-through source over the `Candle` stream: yields each bar unchanged.
+///
+/// The `Candle` twin of [`Identity`](super::Identity) — a leaf that terminates
+/// composition when the whole bar is what's being carried forward (rather than
+/// one of its scalar fields). Used to root cross-timeframe pipelines built with
+/// [`Resample`](super::Resample) / [`TimeframeExt::on_timeframe`](super::TimeframeExt::on_timeframe),
+/// where the outermost source is the base candle stream itself and the
+/// resample-then-project step happens further up the chain.
+#[derive(Debug, Clone, Default)]
+pub struct CurrentBar {
+    /// Latest bar seen; `None` before the first update.
+    pub value: Option<Candle>,
+}
+
+impl CurrentBar {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Indicator for CurrentBar {
+    type Input = Candle;
+    type Output = Candle;
+
+    fn update(&mut self, candle: Candle) -> Option<Candle> {
+        self.value = Some(candle);
+        self.value
+    }
+
+    fn value(&self) -> Option<Candle> {
+        self.value
+    }
+
+    fn warm_up_period(&self) -> usize {
+        1
+    }
+
+    fn reset(&mut self) {
+        self.value = None;
+    }
+}
+
 /// Selects a scalar field from a [`Candle`].
 pub trait CandleField {
     fn get(candle: &Candle) -> Real;
@@ -152,6 +194,12 @@ pub type Median = Field<MedianField>;
 pub struct Current;
 
 impl Current {
+    /// The current bar's whole [`Candle`]. The root leaf for cross-timeframe
+    /// pipelines: `Current::candle().on_timeframe(N, |htf| …)`.
+    pub fn candle() -> CurrentBar {
+        CurrentBar::new()
+    }
+
     /// The current bar's open.
     pub fn open() -> Open {
         Open::new()

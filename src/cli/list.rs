@@ -143,6 +143,21 @@ const GROUPS: &[Group] = &[
         ],
     },
     Group {
+        title: "cross-timeframe composition (resample and latch, composed directly)",
+        entries: &[
+            Entry {
+                tag: "resample",
+                args: "every, field",
+                doc: "project `field` (open/high/low/close/volume/typical/median) of every N-bar candle",
+            },
+            Entry {
+                tag: "latch",
+                args: "source",
+                doc: "hold the last Some output of `source` — wrap the outermost recursive smoother of a resampled chain",
+            },
+        ],
+    },
+    Group {
         title: "crossovers (comparison + just-transitioned)",
         entries: &[
             Entry { tag: "crosses_above", args: "lhs, rhs", doc: "lhs > rhs and the comparison just flipped" },

@@ -9,9 +9,9 @@
 //! an instance that saw the full history.
 
 use fugazi::indicators::{
-    Adx, Aroon, Atr, Bollinger, Cci, Current, Dmi, Donchian, Ema, Hma, Identity, Keltner, Macd,
-    Mfi, Obv, Rma, Rsi, Sar, Sma, Stable, StdDev, Stochastic, TrueRange, Value, Vwap, WilliamsR,
-    Wma,
+    Adx, Aroon, Atr, Bollinger, Cci, Current, Dmi, Donchian, Ema, Hma, Identity, Keltner, Latch,
+    Macd, Mfi, Obv, Resample, Rma, Rsi, Sar, Sma, Stable, StdDev, Stochastic, TrueRange, Value,
+    Vwap, WilliamsR, Wma,
 };
 use fugazi::prelude::*;
 use fugazi::types::{Candle, Real};
@@ -99,6 +99,14 @@ fn warm_up_is_exact_for_the_catalogue() {
     candle_case(
         Donchian::new(Current::high(), Current::low(), 20),
         "donchian",
+    );
+    // Cross-timeframe: `Resample` alone only emits on boundary ticks, so it
+    // doesn't fit the always-ready-after-warm-up shape this battery asserts;
+    // the [`Latch`] wrap converts it into a continuous-output source (holds
+    // the last emitted value between boundaries) that does.
+    candle_case(
+        Latch::new(Resample::new(Current::candle(), 4).close()),
+        "latched_resample_close",
     );
 }
 

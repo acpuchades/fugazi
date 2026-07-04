@@ -753,6 +753,7 @@ mod tests {
         let report: RunReport<String> = RunReport {
             equity_curve: vec![110.0, 110.0, 132.0, 132.0],
             fills: vec![],
+            active: vec![true; 4],
             initial_equity: 100.0,
         };
         let windows = metrics::windowed_from_report(&report, 2, 252.0, 0.0);

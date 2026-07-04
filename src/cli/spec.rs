@@ -20,16 +20,16 @@ use serde::Deserialize;
 
 use fugazi::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Component, Current,
-    DEFAULT_EPSILON, Dmi, DmiValue, Donchian, DonchianValue, Ema, Hma, Keltner, KeltnerValue, Macd,
-    MacdValue, Mfi, Obv, Position, Rma, Rsi, Sar, Sma, StdDev, StochRsi, Stochastic, TrueRange,
-    Value, Vwap, WilliamsR, Wma,
+    CurrentBar, DEFAULT_EPSILON, Dmi, DmiValue, Donchian, DonchianValue, Ema, Hma, Keltner,
+    KeltnerValue, Latch, Macd, MacdValue, Mfi, Obv, Position, Resample, Rma, Rsi, Sar, Sma, StdDev,
+    StochRsi, Stochastic, TrueRange, Value, Vwap, WilliamsR, Wma,
 };
 use fugazi::indicators::compare;
 use fugazi::indicators::logic::Const;
 use fugazi::prelude::*;
 use fugazi::strategies::SingleAssetStrategy;
 
-use crate::dynd::{DynSignal, DynValue};
+use crate::dyn_::{self, AsBool, AsReal, DynIndicator};
 
 fn default_source() -> Box<SourceSpec> {
     Box::new(SourceSpec::Close)
@@ -302,44 +302,79 @@ pub enum SourceSpec {
         #[serde(default = "default_source")]
         source: Box<SourceSpec>,
     },
+    /// Holds the most recent `Some` output of `source`, re-emitting it on
+    /// ticks where `source` returns `None`. Wrap the outermost recursive
+    /// smoother of a resampled pipeline so per-base-tick consumers see the
+    /// finished higher-timeframe value between boundaries — see
+    /// [`fugazi::indicators::Latch`].
+    Latch { source: Box<SourceSpec> },
+    /// Aggregates `every` base candles into one higher-timeframe candle and
+    /// projects `field` (one of `open`, `high`, `low`, `close`, `volume`,
+    /// `typical`, `median`) as its output. `field` is **required** —
+    /// cross-timeframe pipelines always mean "run *this specific* projection
+    /// on the resampled candle", so no implicit fallback. Wrap the whole
+    /// downstream chain in [`Latch`](SourceSpec::Latch) so per-base-tick reads
+    /// see the finished value.
+    Resample { every: usize, field: ResampleField },
+}
+
+/// Which field of a resampled candle a `!resample` spec projects. Mirrors the
+/// base-candle field accessors ([`SourceSpec::Close`] etc.) but for the
+/// higher-timeframe emission of a [`fugazi::indicators::Resample`].
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResampleField {
+    Open,
+    High,
+    Low,
+    Close,
+    Volume,
+    Typical,
+    Median,
 }
 
 impl SourceSpec {
-    /// Construct the live, type-erased source this spec describes. `anchor` is
-    /// the owning strategy's [`Position`], shared by any `entry` / `peak` /
+    /// Construct the live, runtime-typed source this spec describes as a
+    /// `Box<dyn DynIndicator>` with `output_type() == DynType::Real`. `anchor`
+    /// is the owning strategy's [`Position`], shared by any `entry` / `peak` /
     /// `trough` leaves in the tree.
-    pub fn build(&self, anchor: &Position) -> DynValue {
+    pub fn build(&self, anchor: &Position) -> Box<dyn DynIndicator> {
         use SourceSpec::*;
-        match self {
-            Close => DynValue::new(Current::close()),
-            High => DynValue::new(Current::high()),
-            Low => DynValue::new(Current::low()),
-            Open => DynValue::new(Current::open()),
-            Volume => DynValue::new(Current::volume()),
-            Typical => DynValue::new(Current::typical()),
-            Median => DynValue::new(Current::median()),
-            Value(x) => DynValue::new(self::Value::<Candle>::new(*x)),
-            Entry => DynValue::new(anchor.entry()),
-            Peak => DynValue::new(anchor.peak()),
-            Trough => DynValue::new(anchor.trough()),
+        // Recursive-build shorthand: build `s`, view it as a library-typed
+        // `Indicator<Input=Candle, Output=Real>` so it drops into a concrete
+        // library constructor.
+        let real = |s: &SourceSpec| AsReal::new(s.build(anchor));
 
-            Ema { source, period } => DynValue::new(self::Ema::new(source.build(anchor), *period)),
-            Sma { source, period } => DynValue::new(self::Sma::new(source.build(anchor), *period)),
-            Rma { source, period } => DynValue::new(self::Rma::new(source.build(anchor), *period)),
-            Wma { source, period } => DynValue::new(self::Wma::new(source.build(anchor), *period)),
-            Hma { source, period } => DynValue::new(self::Hma::new(source.build(anchor), *period)),
-            Rsi { source, period } => DynValue::new(self::Rsi::new(source.build(anchor), *period)),
-            StdDev { source, period } => DynValue::new(self::StdDev::new(source.build(anchor), *period)),
-            Cci { source, period } => DynValue::new(self::Cci::new(source.build(anchor), *period)),
+        match self {
+            Close => dyn_::wrap(Current::close()),
+            High => dyn_::wrap(Current::high()),
+            Low => dyn_::wrap(Current::low()),
+            Open => dyn_::wrap(Current::open()),
+            Volume => dyn_::wrap(Current::volume()),
+            Typical => dyn_::wrap(Current::typical()),
+            Median => dyn_::wrap(Current::median()),
+            Value(x) => dyn_::wrap(self::Value::<Candle>::new(*x)),
+            Entry => dyn_::wrap(anchor.entry()),
+            Peak => dyn_::wrap(anchor.peak()),
+            Trough => dyn_::wrap(anchor.trough()),
+
+            Ema { source, period } => dyn_::wrap(self::Ema::new(real(source), *period)),
+            Sma { source, period } => dyn_::wrap(self::Sma::new(real(source), *period)),
+            Rma { source, period } => dyn_::wrap(self::Rma::new(real(source), *period)),
+            Wma { source, period } => dyn_::wrap(self::Wma::new(real(source), *period)),
+            Hma { source, period } => dyn_::wrap(self::Hma::new(real(source), *period)),
+            Rsi { source, period } => dyn_::wrap(self::Rsi::new(real(source), *period)),
+            StdDev { source, period } => dyn_::wrap(self::StdDev::new(real(source), *period)),
+            Cci { source, period } => dyn_::wrap(self::Cci::new(real(source), *period)),
             Stochastic { source, period } => {
-                DynValue::new(self::Stochastic::new(source.build(anchor), *period))
+                dyn_::wrap(self::Stochastic::new(real(source), *period))
             }
             StochRsi {
                 source,
                 rsi_period,
                 stoch_period,
-            } => DynValue::new(self::StochRsi::new(
-                self::Rsi::new(source.build(anchor), *rsi_period),
+            } => dyn_::wrap(self::StochRsi::new(
+                self::Rsi::new(real(source), *rsi_period),
                 *stoch_period,
             )),
 
@@ -348,8 +383,8 @@ impl SourceSpec {
                 fast,
                 slow,
                 signal,
-            } => DynValue::new(Component::new(
-                Macd::new(source.build(anchor), *fast, *slow, *signal),
+            } => dyn_::wrap(Component::new(
+                Macd::new(real(source), *fast, *slow, *signal),
                 |v: MacdValue| v.macd,
             )),
             MacdSignal {
@@ -357,8 +392,8 @@ impl SourceSpec {
                 fast,
                 slow,
                 signal,
-            } => DynValue::new(Component::new(
-                Macd::new(source.build(anchor), *fast, *slow, *signal),
+            } => dyn_::wrap(Component::new(
+                Macd::new(real(source), *fast, *slow, *signal),
                 |v: MacdValue| v.signal,
             )),
             MacdHistogram {
@@ -366,21 +401,21 @@ impl SourceSpec {
                 fast,
                 slow,
                 signal,
-            } => DynValue::new(Component::new(
-                Macd::new(source.build(anchor), *fast, *slow, *signal),
+            } => dyn_::wrap(Component::new(
+                Macd::new(real(source), *fast, *slow, *signal),
                 |v: MacdValue| v.histogram,
             )),
 
-            BbUpper { source, period, k } => DynValue::new(Component::new(
-                Bollinger::new(source.build(anchor), *period, *k),
+            BbUpper { source, period, k } => dyn_::wrap(Component::new(
+                Bollinger::new(real(source), *period, *k),
                 |v: BollingerValue| v.upper,
             )),
-            BbMiddle { source, period, k } => DynValue::new(Component::new(
-                Bollinger::new(source.build(anchor), *period, *k),
+            BbMiddle { source, period, k } => dyn_::wrap(Component::new(
+                Bollinger::new(real(source), *period, *k),
                 |v: BollingerValue| v.middle,
             )),
-            BbLower { source, period, k } => DynValue::new(Component::new(
-                Bollinger::new(source.build(anchor), *period, *k),
+            BbLower { source, period, k } => dyn_::wrap(Component::new(
+                Bollinger::new(real(source), *period, *k),
                 |v: BollingerValue| v.lower,
             )),
 
@@ -389,8 +424,8 @@ impl SourceSpec {
                 ema_period,
                 atr_period,
                 multiplier,
-            } => DynValue::new(Component::new(
-                Keltner::new(source.build(anchor), *ema_period, *atr_period, *multiplier),
+            } => dyn_::wrap(Component::new(
+                Keltner::new(real(source), *ema_period, *atr_period, *multiplier),
                 |v: KeltnerValue| v.upper,
             )),
             KeltnerMiddle {
@@ -398,8 +433,8 @@ impl SourceSpec {
                 ema_period,
                 atr_period,
                 multiplier,
-            } => DynValue::new(Component::new(
-                Keltner::new(source.build(anchor), *ema_period, *atr_period, *multiplier),
+            } => dyn_::wrap(Component::new(
+                Keltner::new(real(source), *ema_period, *atr_period, *multiplier),
                 |v: KeltnerValue| v.middle,
             )),
             KeltnerLower {
@@ -407,71 +442,96 @@ impl SourceSpec {
                 ema_period,
                 atr_period,
                 multiplier,
-            } => DynValue::new(Component::new(
-                Keltner::new(source.build(anchor), *ema_period, *atr_period, *multiplier),
+            } => dyn_::wrap(Component::new(
+                Keltner::new(real(source), *ema_period, *atr_period, *multiplier),
                 |v: KeltnerValue| v.lower,
             )),
 
-            DonchianUpper { high, low, period } => DynValue::new(Component::new(
-                Donchian::new(high.build(anchor), low.build(anchor), *period),
+            DonchianUpper { high, low, period } => dyn_::wrap(Component::new(
+                Donchian::new(real(high), real(low), *period),
                 |v: DonchianValue| v.upper,
             )),
-            DonchianMiddle { high, low, period } => DynValue::new(Component::new(
-                Donchian::new(high.build(anchor), low.build(anchor), *period),
+            DonchianMiddle { high, low, period } => dyn_::wrap(Component::new(
+                Donchian::new(real(high), real(low), *period),
                 |v: DonchianValue| v.middle,
             )),
-            DonchianLower { high, low, period } => DynValue::new(Component::new(
-                Donchian::new(high.build(anchor), low.build(anchor), *period),
+            DonchianLower { high, low, period } => dyn_::wrap(Component::new(
+                Donchian::new(real(high), real(low), *period),
                 |v: DonchianValue| v.lower,
             )),
 
             Adx { period } => {
-                DynValue::new(Component::new(self::Adx::new(*period), |v: AdxValue| v.adx))
+                dyn_::wrap(Component::new(self::Adx::new(*period), |v: AdxValue| v.adx))
             }
-            PlusDi { period } => DynValue::new(Component::new(self::Adx::new(*period), |v: AdxValue| {
-                v.plus_di
-            })),
-            MinusDi { period } => DynValue::new(Component::new(self::Adx::new(*period), |v: AdxValue| {
-                v.minus_di
-            })),
-            DmiPlusDi { period } => DynValue::new(Component::new(self::Dmi::new(*period), |v: DmiValue| {
-                v.plus_di
-            })),
-            DmiMinusDi { period } => DynValue::new(Component::new(self::Dmi::new(*period), |v: DmiValue| {
-                v.minus_di
-            })),
+            PlusDi { period } => dyn_::wrap(Component::new(
+                self::Adx::new(*period),
+                |v: AdxValue| v.plus_di,
+            )),
+            MinusDi { period } => dyn_::wrap(Component::new(
+                self::Adx::new(*period),
+                |v: AdxValue| v.minus_di,
+            )),
+            DmiPlusDi { period } => dyn_::wrap(Component::new(
+                self::Dmi::new(*period),
+                |v: DmiValue| v.plus_di,
+            )),
+            DmiMinusDi { period } => dyn_::wrap(Component::new(
+                self::Dmi::new(*period),
+                |v: DmiValue| v.minus_di,
+            )),
 
-            AroonUp { period } => DynValue::new(Component::new(self::Aroon::new(*period), |v: AroonValue| {
-                v.up
-            })),
-            AroonDown { period } => DynValue::new(Component::new(self::Aroon::new(*period), |v: AroonValue| {
-                v.down
-            })),
-            AroonOscillator { period } => DynValue::new(Component::new(
+            AroonUp { period } => dyn_::wrap(Component::new(
+                self::Aroon::new(*period),
+                |v: AroonValue| v.up,
+            )),
+            AroonDown { period } => dyn_::wrap(Component::new(
+                self::Aroon::new(*period),
+                |v: AroonValue| v.down,
+            )),
+            AroonOscillator { period } => dyn_::wrap(Component::new(
                 self::Aroon::new(*period),
                 |v: AroonValue| v.oscillator,
             )),
 
-            Atr { period } => DynValue::new(self::Atr::new(*period)),
-            Mfi { period } => DynValue::new(self::Mfi::new(*period)),
-            WilliamsR { period } => DynValue::new(self::WilliamsR::new(*period)),
-            Obv => DynValue::new(self::Obv::new()),
-            Vwap => DynValue::new(self::Vwap::new()),
-            Ad => DynValue::new(self::Ad::new()),
-            TrueRange => DynValue::new(self::TrueRange::new()),
-            Sar { step, max } => DynValue::new(self::Sar::new(*step, *max)),
+            Atr { period } => dyn_::wrap(self::Atr::new(*period)),
+            Mfi { period } => dyn_::wrap(self::Mfi::new(*period)),
+            WilliamsR { period } => dyn_::wrap(self::WilliamsR::new(*period)),
+            Obv => dyn_::wrap(self::Obv::new()),
+            Vwap => dyn_::wrap(self::Vwap::new()),
+            Ad => dyn_::wrap(self::Ad::new()),
+            TrueRange => dyn_::wrap(self::TrueRange::new()),
+            Sar { step, max } => dyn_::wrap(self::Sar::new(*step, *max)),
 
-            Add { lhs, rhs } => DynValue::new(lhs.build(anchor).add(rhs.build(anchor))),
-            Sub { lhs, rhs } => DynValue::new(lhs.build(anchor).sub(rhs.build(anchor))),
-            Mul { lhs, rhs } => DynValue::new(lhs.build(anchor).mul(rhs.build(anchor))),
-            Div { lhs, rhs } => DynValue::new(lhs.build(anchor).div(rhs.build(anchor))),
-            Lag { source, periods } => DynValue::new(source.build(anchor).lag(*periods)),
-            Diff { source, periods } => DynValue::new(source.build(anchor).diff(*periods)),
-            Ratio { source, periods } => DynValue::new(source.build(anchor).ratio(*periods)),
-            Roc { source, periods } => DynValue::new(source.build(anchor).roc(*periods)),
-            RollingMax { source, period } => DynValue::new(source.build(anchor).rolling_max(*period)),
-            RollingMin { source, period } => DynValue::new(source.build(anchor).rolling_min(*period)),
-            Stable { source } => DynValue::new(source.build(anchor).stable()),
+            Add { lhs, rhs } => dyn_::wrap(real(lhs).add(real(rhs))),
+            Sub { lhs, rhs } => dyn_::wrap(real(lhs).sub(real(rhs))),
+            Mul { lhs, rhs } => dyn_::wrap(real(lhs).mul(real(rhs))),
+            Div { lhs, rhs } => dyn_::wrap(real(lhs).div(real(rhs))),
+            Lag { source, periods } => dyn_::wrap(real(source).lag(*periods)),
+            Diff { source, periods } => dyn_::wrap(real(source).diff(*periods)),
+            Ratio { source, periods } => dyn_::wrap(real(source).ratio(*periods)),
+            Roc { source, periods } => dyn_::wrap(real(source).roc(*periods)),
+            RollingMax { source, period } => dyn_::wrap(real(source).rolling_max(*period)),
+            RollingMin { source, period } => dyn_::wrap(real(source).rolling_min(*period)),
+            Stable { source } => dyn_::stable(source.build(anchor)),
+            Latch { source } => {
+                // Wrap the built source in the library's Latch — preserves
+                // Real output; warm-up / unstable pass through unchanged.
+                let inner = AsReal::new(source.build(anchor));
+                dyn_::wrap(self::Latch::new(inner))
+            }
+            Resample { every, field } => {
+                assert!(*every > 0, "resample every must be greater than zero");
+                let r = self::Resample::new(CurrentBar::new(), *every);
+                match field {
+                    ResampleField::Open => dyn_::wrap(r.open()),
+                    ResampleField::High => dyn_::wrap(r.high()),
+                    ResampleField::Low => dyn_::wrap(r.low()),
+                    ResampleField::Close => dyn_::wrap(r.close()),
+                    ResampleField::Volume => dyn_::wrap(r.volume()),
+                    ResampleField::Typical => dyn_::wrap(r.typical()),
+                    ResampleField::Median => dyn_::wrap(r.median()),
+                }
+            }
         }
     }
 }
@@ -573,61 +633,94 @@ fn eps(epsilon: &Option<Real>) -> Real {
 }
 
 impl SignalSpec {
-    /// Construct the live, type-erased signal this spec describes. `anchor` is
-    /// threaded to any `entry` / `peak` / `trough` source leaf in the tree.
-    pub fn build(&self, anchor: &Position) -> DynSignal {
+    /// Construct the live, runtime-typed signal this spec describes as a
+    /// `Box<dyn DynIndicator>` with `output_type() == DynType::Bool`. `anchor`
+    /// is threaded to any `entry` / `peak` / `trough` source leaf.
+    pub fn build(&self, anchor: &Position) -> Box<dyn DynIndicator> {
         use SignalSpec::*;
-        match self {
-            Gt { lhs, rhs, epsilon } => {
-                DynSignal::new(compare::Gt::with_epsilon(lhs.build(anchor), rhs.build(anchor), eps(epsilon)))
-            }
-            Lt { lhs, rhs, epsilon } => {
-                DynSignal::new(compare::Lt::with_epsilon(lhs.build(anchor), rhs.build(anchor), eps(epsilon)))
-            }
-            Ge { lhs, rhs, epsilon } => {
-                DynSignal::new(compare::Ge::with_epsilon(lhs.build(anchor), rhs.build(anchor), eps(epsilon)))
-            }
-            Le { lhs, rhs, epsilon } => {
-                DynSignal::new(compare::Le::with_epsilon(lhs.build(anchor), rhs.build(anchor), eps(epsilon)))
-            }
-            Eq { lhs, rhs, epsilon } => {
-                DynSignal::new(compare::Eq::with_epsilon(lhs.build(anchor), rhs.build(anchor), eps(epsilon)))
-            }
-            Ne { lhs, rhs, epsilon } => {
-                DynSignal::new(compare::Ne::with_epsilon(lhs.build(anchor), rhs.build(anchor), eps(epsilon)))
-            }
-            Above { source, level } => DynSignal::new(source.build(anchor).above(*level)),
-            Below { source, level } => DynSignal::new(source.build(anchor).below(*level)),
+        let real = |s: &SourceSpec| AsReal::new(s.build(anchor));
+        let boolean = |s: &SignalSpec| AsBool::new(s.build(anchor));
 
-            // A crossover clones its operands; the boxes here are not `Clone`, so
-            // we rebuild each operand from the spec to get two independent
-            // instances and assemble the expansion by hand.
+        match self {
+            Gt { lhs, rhs, epsilon } => dyn_::wrap(compare::Gt::with_epsilon(
+                real(lhs),
+                real(rhs),
+                eps(epsilon),
+            )),
+            Lt { lhs, rhs, epsilon } => dyn_::wrap(compare::Lt::with_epsilon(
+                real(lhs),
+                real(rhs),
+                eps(epsilon),
+            )),
+            Ge { lhs, rhs, epsilon } => dyn_::wrap(compare::Ge::with_epsilon(
+                real(lhs),
+                real(rhs),
+                eps(epsilon),
+            )),
+            Le { lhs, rhs, epsilon } => dyn_::wrap(compare::Le::with_epsilon(
+                real(lhs),
+                real(rhs),
+                eps(epsilon),
+            )),
+            Eq { lhs, rhs, epsilon } => dyn_::wrap(compare::Eq::with_epsilon(
+                real(lhs),
+                real(rhs),
+                eps(epsilon),
+            )),
+            Ne { lhs, rhs, epsilon } => dyn_::wrap(compare::Ne::with_epsilon(
+                real(lhs),
+                real(rhs),
+                eps(epsilon),
+            )),
+            Above { source, level } => dyn_::wrap(real(source).above(*level)),
+            Below { source, level } => dyn_::wrap(real(source).below(*level)),
+
+            // A crossover clones its operands (the `Change` half needs a fresh
+            // comparison state); rebuild each operand from the spec so we get
+            // two independently-advanced instances.
             CrossesAbove { lhs, rhs } => {
-                let cmp = || lhs.build(anchor).gt(rhs.build(anchor));
-                DynSignal::new(cmp().and(cmp().changed()))
+                let cmp = || real(lhs).gt(real(rhs));
+                dyn_::wrap(cmp().and(cmp().changed()))
             }
             CrossesBelow { lhs, rhs } => {
-                let cmp = || lhs.build(anchor).lt(rhs.build(anchor));
-                DynSignal::new(cmp().and(cmp().changed()))
+                let cmp = || real(lhs).lt(real(rhs));
+                dyn_::wrap(cmp().and(cmp().changed()))
             }
 
-            And { lhs, rhs } => DynSignal::new(lhs.build(anchor).and(rhs.build(anchor))),
-            Or { lhs, rhs } => DynSignal::new(lhs.build(anchor).or(rhs.build(anchor))),
-            Xor { lhs, rhs } => DynSignal::new(lhs.build(anchor).xor(rhs.build(anchor))),
-            All(specs) => specs
-                .iter()
-                .map(|s| s.build(anchor))
-                .reduce(|acc, s| DynSignal::new(acc.and(s)))
-                .unwrap_or_else(|| DynSignal::new(self::Const::<Candle>::new(true))),
-            Any(specs) => specs
-                .iter()
-                .map(|s| s.build(anchor))
-                .reduce(|acc, s| DynSignal::new(acc.or(s)))
-                .unwrap_or_else(|| DynSignal::new(self::Const::<Candle>::new(false))),
-            Not(inner) => DynSignal::new(inner.build(anchor).not()),
-            Changed(inner) => DynSignal::new(inner.build(anchor).changed()),
-            Stable(inner) => DynSignal::new(inner.build(anchor).stable()),
-            Value(b) => DynSignal::new(self::Const::<Candle>::new(*b)),
+            And { lhs, rhs } => dyn_::wrap(boolean(lhs).and(boolean(rhs))),
+            Or { lhs, rhs } => dyn_::wrap(boolean(lhs).or(boolean(rhs))),
+            Xor { lhs, rhs } => dyn_::wrap(boolean(lhs).xor(boolean(rhs))),
+            All(specs) => {
+                if specs.is_empty() {
+                    dyn_::wrap(self::Const::<Candle>::new(true))
+                } else {
+                    let mut acc = AsBool::new(specs[0].build(anchor));
+                    for s in &specs[1..] {
+                        let next = AsBool::new(s.build(anchor));
+                        // AsBool `and` AsBool → concrete Combine; wrap in AsBool
+                        // by round-tripping through the box so the fold's accumulator
+                        // stays a single library type.
+                        acc = AsBool::new(dyn_::wrap(acc.and(next)));
+                    }
+                    dyn_::wrap(acc)
+                }
+            }
+            Any(specs) => {
+                if specs.is_empty() {
+                    dyn_::wrap(self::Const::<Candle>::new(false))
+                } else {
+                    let mut acc = AsBool::new(specs[0].build(anchor));
+                    for s in &specs[1..] {
+                        let next = AsBool::new(s.build(anchor));
+                        acc = AsBool::new(dyn_::wrap(acc.or(next)));
+                    }
+                    dyn_::wrap(acc)
+                }
+            }
+            Not(inner) => dyn_::wrap(boolean(inner).not()),
+            Changed(inner) => dyn_::wrap(boolean(inner).changed()),
+            Stable(inner) => dyn_::stable(inner.build(anchor)),
+            Value(b) => dyn_::wrap(self::Const::<Candle>::new(*b)),
         }
     }
 }
@@ -664,11 +757,11 @@ pub struct SideSpec {
 impl SideSpec {
     /// Build this side's exit signal, defaulting a missing one to constant-`false`
     /// (matching the unwired slots in [`SingleAssetStrategy::new`]).
-    fn exit(&self, anchor: &Position) -> DynSignal {
+    fn exit(&self, anchor: &Position) -> Box<dyn DynIndicator> {
         self.exit
             .as_ref()
             .map(|s| s.build(anchor))
-            .unwrap_or_else(|| DynSignal::new(Const::<Candle>::new(false)))
+            .unwrap_or_else(|| dyn_::wrap(Const::<Candle>::new(false)))
     }
 }
 
@@ -702,64 +795,136 @@ impl StrategySpec {
         Ok(serde_json::from_value(value)?)
     }
 
-    /// Build the live [`SingleAssetStrategy`] this spec describes.
+    /// Build the live [`DynSingleStrategy`] this spec describes.
     ///
     /// With `stable` set (the CLI default; `--keep-unstable` turns it off) each
     /// side's **entry** signal is wrapped in
-    /// [`Stable`](fugazi::indicators::Stable), so no entry can fire while its
-    /// chain is still seed-contaminated. Exits and protective levels are not
-    /// gated — no position can exist before the first gated entry.
+    /// [`Stable`](fugazi::indicators::Stable) at the runtime-typed layer via
+    /// [`dyn_::stable`], so no entry can fire while its chain is still
+    /// seed-contaminated. Exits and protective levels are not gated — no
+    /// position can exist before the first gated entry.
     ///
-    /// The second value is the **measurement anchor**: the number of leading
-    /// bars during which no entry can possibly fire (the min over the
-    /// configured sides' gated-entry warm-ups — the min, because the earliest
-    /// possible fill is what bounds a safe crop; and only over *configured*
-    /// sides, since an unused slot's constant-false signal reports 0 but never
-    /// fires). Equity is provably flat there, so a caller can slice those bars
-    /// off the metric range losslessly. `0` when ungated or side-less.
-    pub fn build(&self, stable: bool) -> (SingleAssetStrategy<String>, usize) {
+    /// The **measurement crop point** for downstream metric slicing is *not*
+    /// computed here anymore; it's derived per-bar at run time from
+    /// [`Strategy::is_active`](fugazi::Strategy::is_active) via
+    /// [`RunReport::active`](fugazi::RunReport). The `.stable()` wrap on
+    /// entries stays for its safety role (no contaminated position opens); the
+    /// activation crop is a downstream reduction.
+    pub fn build(&self, stable: bool) -> DynSingleStrategy {
         let mut strat = SingleAssetStrategy::new(self.symbol.clone());
         // One position per strategy, shared by every `entry`/`peak`/`trough` leaf
         // in the sides' signals and stop levels.
         let anchor = strat.position();
-        let mut measure_from: Option<usize> = None;
-        let mut gate = |enter: DynSignal| -> DynSignal {
-            if !stable {
-                return enter;
-            }
-            let gated = enter.stable();
-            let opens_at = gated.warm_up_period();
-            measure_from = Some(measure_from.map_or(opens_at, |m| m.min(opens_at)));
-            DynSignal::new(gated)
+        let gate = |enter: Box<dyn DynIndicator>| -> Box<dyn DynIndicator> {
+            if stable { dyn_::stable(enter) } else { enter }
         };
         if let Some(long) = &self.long {
-            strat = strat.long_on(gate(long.enter.build(&anchor)), long.exit(&anchor));
+            strat = strat.long_on(
+                AsBool::new(gate(long.enter.build(&anchor))),
+                AsBool::new(long.exit(&anchor)),
+            );
             if let Some(sl) = &long.stop_loss {
-                strat = strat.long_stop_loss(sl.build(&anchor));
+                strat = strat.long_stop_loss(AsReal::new(sl.build(&anchor)));
             }
             if let Some(tp) = &long.take_profit {
-                strat = strat.long_take_profit(tp.build(&anchor));
+                strat = strat.long_take_profit(AsReal::new(tp.build(&anchor)));
             }
         }
         if let Some(short) = &self.short {
-            strat = strat.short_on(gate(short.enter.build(&anchor)), short.exit(&anchor));
+            strat = strat.short_on(
+                AsBool::new(gate(short.enter.build(&anchor))),
+                AsBool::new(short.exit(&anchor)),
+            );
             if let Some(sl) = &short.stop_loss {
-                strat = strat.short_stop_loss(sl.build(&anchor));
+                strat = strat.short_stop_loss(AsReal::new(sl.build(&anchor)));
             }
             if let Some(tp) = &short.take_profit {
-                strat = strat.short_take_profit(tp.build(&anchor));
+                strat = strat.short_take_profit(AsReal::new(tp.build(&anchor)));
             }
         }
-        (strat, measure_from.unwrap_or(0))
+        DynSingleStrategy { inner: strat }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DynSingleStrategy: CLI-owned wrapper around SingleAssetStrategy<String>
+// ---------------------------------------------------------------------------
+
+/// The CLI's built-strategy handle. Wraps a [`SingleAssetStrategy<String>`]
+/// whose entry/exit signals and protective levels came from runtime-typed
+/// [`DynIndicator`]s (bridged into typed [`Signal`](fugazi::Signal) / real
+/// levels by the private [`AsBool`] / [`AsReal`] adapters at construction).
+///
+/// Implements [`Strategy`](fugazi::Strategy) by delegation, so it drops into
+/// [`fugazi::backtest::run`] unchanged.
+pub struct DynSingleStrategy {
+    inner: SingleAssetStrategy<String>,
+}
+
+impl Strategy for DynSingleStrategy {
+    type Input = Candle;
+    type Symbol = String;
+
+    fn update(&mut self, candle: Candle) {
+        self.inner.update(candle);
+    }
+    fn on_fill(&mut self, order: &Order<String>) {
+        self.inner.on_fill(order);
+    }
+    fn trade(&self, wallet: &mut dyn Wallet<String>) {
+        self.inner.trade(wallet);
+    }
+    fn is_active(&self) -> bool {
+        self.inner.is_active()
+    }
+    fn reset(&mut self) {
+        self.inner.reset();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dyn_::DynValue as Payload;
 
     fn bar(close: Real) -> Candle {
         Candle::new(close, close, close, close, 0.0)
+    }
+
+    /// Feed a `Box<dyn DynIndicator>` a candle and unwrap the payload as `Real`.
+    fn feed_real(source: &mut Box<dyn DynIndicator>, c: Candle) -> Option<Real> {
+        match source.update(Payload::Candle(c))? {
+            Payload::Real(x) => Some(x),
+            other => panic!("expected Real payload, got {other:?}"),
+        }
+    }
+
+    /// Feed and unwrap as `bool` — for signal-side tests.
+    fn feed_bool(source: &mut Box<dyn DynIndicator>, c: Candle) -> Option<bool> {
+        match source.update(Payload::Candle(c))? {
+            Payload::Bool(b) => Some(b),
+            other => panic!("expected Bool payload, got {other:?}"),
+        }
+    }
+
+    /// The first bar a strategy would declare itself active, given a synthetic
+    /// well-formed candle stream — i.e. `activation_bar` on the report.active
+    /// vector after driving `n` candles.
+    fn first_active_bar(mut strat: DynSingleStrategy, n: usize) -> usize {
+        let mut w = PaperWallet::new(1_000.0);
+        let mut first: Option<usize> = None;
+        for i in 0..n {
+            let c = bar(100.0 + (i as Real) * 0.1);
+            for fill in w.update("BTC".to_string(), c) {
+                strat.on_fill(&fill);
+            }
+            strat.update(c);
+            strat.trade(&mut w);
+            if first.is_none() && strat.is_active() {
+                first = Some(i);
+            }
+        }
+        first.unwrap_or(n)
     }
 
     #[test]
@@ -771,19 +936,15 @@ mod tests {
         "#;
         let spec: SignalSpec = serde_norway::from_str(yaml).unwrap();
         let mut sig = spec.build(&Position::new());
-        // A dip then a rally drives the fast SMA up through the slow one.
         let mut fired = false;
         for p in [10.0, 9.0, 8.0, 7.0, 8.0, 10.0, 12.0, 14.0, 16.0] {
-            sig.update(bar(p));
-            fired |= sig.is_true();
+            fired |= feed_bool(&mut sig, bar(p)).unwrap_or(false);
         }
         assert!(fired, "expected the fast/slow SMA crossover to fire");
     }
 
     #[test]
     fn probe_yaml_tags_survive_conversion_to_value() {
-        // A `!tag` YAML doc, converted to a serde_json::Value (tags → singleton
-        // maps) and deserialized, must yield the spec the tags describe.
         let yaml = r#"
             symbol: BTC
             long:
@@ -799,12 +960,11 @@ mod tests {
 
     #[test]
     fn default_source_is_close() {
-        // `period` only — source should default to the close.
         let spec: SourceSpec = serde_norway::from_str("!ema { period: 3 }").unwrap();
         let mut ema = spec.build(&Position::new());
         let mut reference = Ema::new(Current::close(), 3);
         for p in [1.0, 2.0, 3.0, 4.0, 5.0] {
-            assert_eq!(ema.update(bar(p)), reference.update(bar(p)));
+            assert_eq!(feed_real(&mut ema, bar(p)), reference.update(bar(p)));
         }
     }
 
@@ -822,7 +982,7 @@ mod tests {
         let spec = StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
             .unwrap();
         assert_eq!(spec.symbol, "BTC");
-        let (_strat, _) = spec.build(true);
+        let _strat = spec.build(true);
     }
 
     #[test]
@@ -836,12 +996,11 @@ mod tests {
         "#;
         let spec =
             StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new()).unwrap();
-        // Gating is a no-op here: the `!value true` entry has stable period 0.
-        let (mut strat, measure_from) = spec.build(true);
-        assert_eq!(measure_from, 0);
+        let mut strat = spec.build(true);
+        // The `!value true` entry has stable_period 0; the stop-loss uses
+        // `entry` (position-anchored, warm_up 0). Strategy is active from bar 1.
+        assert!(strat.is_active());
         let mut w = PaperWallet::new(1_000.0);
-        // Bar 1 signals; the entry fills at bar 2's open (100), anchoring the stop
-        // at 90; bar 3 trades down through 90 (low 88), opening above it.
         for c in [
             Candle::new(100.0, 100.0, 100.0, 100.0, 0.0),
             Candle::new(100.0, 100.0, 100.0, 100.0, 0.0),
@@ -859,8 +1018,6 @@ mod tests {
 
     #[test]
     fn stable_gates_a_source_until_its_stable_period() {
-        // The gated EMA reports the raw EMA's stable period as hard warm-up
-        // and no residual instability.
         let spec: SourceSpec =
             serde_norway::from_str("!stable { source: !ema { period: 3 } }").unwrap();
         let gated = spec.build(&Position::new());
@@ -871,8 +1028,6 @@ mod tests {
 
     #[test]
     fn stable_gates_a_whole_signal() {
-        // The signal form wraps a boolean tree; the inner node is spelled in
-        // the singleton-map form tags normalize to.
         let yaml = r#"
             symbol: BTC
             long:
@@ -888,21 +1043,20 @@ mod tests {
 
     #[test]
     fn parses_an_inline_flow_map_strategy() {
-        // Flow-style YAML (the map form, JSON being a subset) parses through the
-        // same single path — externally-tagged variants spelled as singleton maps.
         let doc = r#"{"symbol":"ETH","long":{"enter":{"crosses_above":
             {"lhs":{"sma":{"period":5}},"rhs":{"sma":{"period":20}}}}}}"#;
         let spec = StrategySpec::from_text_with_params(doc, &std::collections::HashMap::new())
             .unwrap();
         assert_eq!(spec.symbol, "ETH");
-        let (_strat, _) = spec.build(true);
+        let _strat = spec.build(true);
     }
 
     #[test]
-    fn build_gates_entries_and_reports_the_anchor() {
+    fn build_gates_entries_and_is_active_after_stable_period() {
         // An EMA-crossover entry has a real unstable tail; gated, no entry can
-        // fire before the chain's stable period, and `build` reports that bar
-        // as the measurement anchor.
+        // fire before the chain's stable period. `is_active` reports true from
+        // the bar every held indicator has been fed at least `stable_period`
+        // samples — which for a single-side strategy = the entry's stable_period.
         let yaml = r#"
             symbol: BTC
             long:
@@ -914,31 +1068,65 @@ mod tests {
         let expected = raw.stable_period();
         assert!(expected > raw.warm_up_period(), "entry must have a soft tail");
 
-        let (_gated, anchor) = spec.build(true);
-        assert_eq!(anchor, expected);
-        let (_raw, anchor) = spec.build(false);
-        assert_eq!(anchor, 0, "--keep-unstable reports no anchor");
+        // Under `stable = true`, entries are wrapped in `Stable` at build time
+        // — same as today. The `is_active` bar the strategy first reports true
+        // matches the raw signal's stable_period (Stable's warm_up_period).
+        let strat = spec.build(true);
+        let first_active = first_active_bar(strat, expected + 5);
+        assert_eq!(first_active, expected - 1); // zero-based index of the stable_period-th bar
     }
 
     #[test]
-    fn anchor_is_the_min_over_configured_sides() {
-        // Long entry settles later than the short one; the earliest possible
-        // fill is bounded by the *short* side, so the anchor is the min.
-        let yaml = r#"
-            symbol: BTC
-            long:
-              enter: !above { source: !ema { period: 8 }, level: 100 }
-            short:
-              enter: !below { source: !ema { period: 3 }, level: 100 }
-        "#;
-        let spec =
-            StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new()).unwrap();
-        let anchor_pos = Position::new();
-        let long = spec.long.as_ref().unwrap().enter.build(&anchor_pos);
-        let short = spec.short.as_ref().unwrap().enter.build(&anchor_pos);
-        assert!(long.stable_period() > short.stable_period());
+    fn resample_tag_projects_the_field() {
+        // `!resample { every: N, field: close }` emits the resampled close on
+        // the Nth base tick, None between.
+        let spec: SourceSpec =
+            serde_norway::from_str("!resample { every: 4, field: close }").unwrap();
+        let mut built = spec.build(&Position::new());
+        for i in 1..=8 {
+            let out = feed_real(&mut built, bar(i as Real));
+            if i % 4 == 0 {
+                assert_eq!(out, Some(i as Real));
+            } else {
+                assert_eq!(out, None);
+            }
+        }
+    }
 
-        let (_strat, anchor) = spec.build(true);
-        assert_eq!(anchor, short.stable_period());
+    #[test]
+    fn latch_tag_holds_the_last_value() {
+        // `!latch { source: !resample { every: 3, field: close } }` — Some on
+        // the Nth bar, held on the two between.
+        let spec: SourceSpec = serde_norway::from_str(
+            "!latch { source: !resample { every: 3, field: close } }",
+        )
+        .unwrap();
+        let mut built = spec.build(&Position::new());
+        assert_eq!(feed_real(&mut built, bar(1.0)), None);
+        assert_eq!(feed_real(&mut built, bar(2.0)), None);
+        assert_eq!(feed_real(&mut built, bar(3.0)), Some(3.0));
+        assert_eq!(feed_real(&mut built, bar(4.0)), Some(3.0));
+        assert_eq!(feed_real(&mut built, bar(5.0)), Some(3.0));
+        assert_eq!(feed_real(&mut built, bar(6.0)), Some(6.0));
+    }
+
+    #[test]
+    fn latch_ema_of_resample_matches_reference_htf_ema() {
+        // The composition-order regression at the YAML surface: an EMA-3 fed
+        // by !resample close, wrapped in !latch, agrees numerically with
+        // Ema(Resample.close, 3) at every boundary.
+        let spec: SourceSpec = serde_norway::from_str(
+            "!latch { source: !ema { period: 3, source: !resample { every: 4, field: close } } }",
+        )
+        .unwrap();
+        let mut built = spec.build(&Position::new());
+        let mut reference = fugazi::indicators::Latch::new(Ema::new(
+            fugazi::indicators::Resample::new(fugazi::indicators::CurrentBar::new(), 4).close(),
+            3,
+        ));
+        for i in 1..=24 {
+            let c = bar(100.0 + i as Real * 0.5);
+            assert_eq!(feed_real(&mut built, c), reference.update(c));
+        }
     }
 }

@@ -34,10 +34,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value as Json;
 
 use fugazi::indicators::Position;
-use fugazi::prelude::*;
 use fugazi::sources::Interval;
 
-use crate::dynd::DynValue;
+use crate::dyn_::DynIndicator;
 use crate::get::parse_interval;
 use crate::input::{self, Source};
 use crate::spec::SourceSpec;
@@ -73,7 +72,7 @@ impl Overlay {
     /// `peak`, `trough`) read from a stub [`Position`] that never updates and
     /// stay `None` throughout the fetch — a user who wires one in just gets an
     /// empty column.
-    pub fn build(&self) -> DynValue {
+    pub fn build(&self) -> Box<dyn DynIndicator> {
         self.spec.build(&Position::new())
     }
 }

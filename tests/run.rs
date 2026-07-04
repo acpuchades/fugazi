@@ -117,15 +117,76 @@ fn runs_windowed_metrics() {
             "metrics.csv header missing `{section}`: {header}"
         );
     }
-    // The SMA(3)/SMA(8) crossover entry warms up in 9 bars (gt: 8, edge: +1;
-    // FIR, so stable = warm-up): the measured range starts at bar 9
-    // (2024-01-10) and its 21 bars split into 10 + 10 + 1 → 3 windows.
+    // The SMA(3)/SMA(8) crossover entry has `stable_period() = 9` (gt: 8, edge: +1;
+    // FIR, so stable = warm-up). Under the activation-based crop, the strategy
+    // reports itself active at bar 9 (0-based index 8, calendar 2024-01-09), so the
+    // measured range starts *at* the activation bar — 22 bars split into
+    // 10 + 10 + 2 → 3 windows.
     let rows: Vec<&str> = lines.collect();
     assert_eq!(rows.len(), 3, "expected one row per window:\n{metrics}");
     assert!(
-        rows[0].starts_with("2024-01-10;"),
-        "first window should start at the stability-gate anchor: {}",
+        rows[0].starts_with("2024-01-09;"),
+        "first window should start at the activation bar: {}",
         rows[0]
+    );
+}
+
+/// End-to-end wiring for the `!latch` + `!resample` tag pair — a
+/// cross-timeframe entry (EMA-3 over resampled 4-bar candles, latched) should
+/// build, run, and print the expected activation-crop line.
+///
+/// The pipeline's stable_period as composed: Resample.warm_up = 4,
+/// Ema-of-resample.warm_up = 4, unstable = 10 (in HTF-sample units — this is
+/// the raw composition arithmetic, not base-bar-scaled). Wrapped in `!latch`,
+/// `stable_period() = 14`, so `!stable`-gating puts the activation at bar 14
+/// (index 13 — 13 bars before activation).
+#[test]
+fn latch_resample_gate_activates_at_composed_stable_period() {
+    let mut csv = String::from("symbol;time;open;high;low;close;volume\n");
+    for i in 0..60 {
+        let day = (i % 28) + 1;
+        let month = (i / 28) + 1;
+        let close = 100.0 + i as f64 * 0.5;
+        csv.push_str(&format!(
+            "BTC;2024-{month:02}-{day:02};{c};{c};{c};{c};1000\n",
+            c = close
+        ));
+    }
+    let csv_path = std::env::temp_dir().join("fugazi_e2e_latch_resample_candles.csv");
+    std::fs::write(&csv_path, csv).expect("write synthetic candles");
+
+    let out_dir = std::env::temp_dir().join("fugazi_e2e_latch_resample");
+    let _ = std::fs::remove_dir_all(&out_dir);
+
+    let strategy = "symbol: BTC\n\
+                    long:\n  \
+                    enter: !gt\n    \
+                    lhs: !latch\n      \
+                    source: !ema\n        \
+                    period: 3\n        \
+                    source: !resample { every: 4, field: close }\n    \
+                    rhs: !value 0\n";
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fugazi"))
+        .args([
+            "run",
+            strategy,
+            "--series",
+            &format!("@{}", csv_path.to_str().unwrap()),
+            "--output-dir",
+            out_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to launch the fugazi binary");
+    assert!(
+        output.status.success(),
+        "fugazi run exited with failure:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("13 bars before strategy activation"),
+        "expected `13 bars before strategy activation` in the run output; got:\n{stdout}"
     );
 }
 

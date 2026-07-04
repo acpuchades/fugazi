@@ -430,9 +430,12 @@ fugazi list tickers <PROVIDER>   # every symbol the provider currently exposes (
 ```
 
 `list indicators` groups the vocabulary alphabetically (arithmetic, bands,
-bar indicators, boolean logic, comparisons, MACD, moving averages,
-oscillators, placeholders, position anchors, rolling extrema, stability
-gate, trend/directional). `list tickers binance` calls
+bar indicators, boolean logic, comparisons, constants, cross-timeframe
+composition — `!resample` + `!latch`, which `check overlay` also validates
+(missing `field`, `every: 0`, and unknown nested tags all fail there) —
+crossovers, MACD, moving averages, oscillators, placeholders, position
+anchors, rolling extrema, stability gate, trend/directional). `list tickers
+binance` calls
 `/api/v3/exchangeInfo` and prints its full spot vocabulary — piped into
 `grep`/`wc -l`/`sort -u` it's one ticker per line; interactive, it lays out
 as a column-major grid sized to the terminal (like `ls`). Yahoo has no such

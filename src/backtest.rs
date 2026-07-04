@@ -62,6 +62,8 @@ pub struct Fill<Sym> {
 ///   per input candle, in bar order.
 /// - [`fills`](Self::fills) holds every order the wallet booked over the run,
 ///   in fill order, each tagged with the bar index it filled on.
+/// - [`active`](Self::active) holds [`Strategy::is_active`] sampled after each
+///   bar, in bar order — one `bool` per equity-curve entry.
 /// - [`initial_equity`](Self::initial_equity) is the wallet's total equity
 ///   captured **before the first bar** — the seed value returns / CAGR compound
 ///   against.
@@ -71,6 +73,12 @@ pub struct RunReport<Sym> {
     pub equity_curve: Vec<Real>,
     /// Every booked fill, in the order the wallet produced them.
     pub fills: Vec<Fill<Sym>>,
+    /// Whether the strategy declared itself
+    /// [`is_active`](Strategy::is_active) after each bar's update — same
+    /// length and order as [`equity_curve`](Self::equity_curve). A downstream
+    /// metric reducer uses this to crop leading bars where the strategy was
+    /// still warming up.
+    pub active: Vec<bool>,
     /// Total wallet equity captured immediately before the first bar.
     pub initial_equity: Real,
 }
@@ -106,6 +114,7 @@ where
     let iter = candles.into_iter();
     let (lower, _) = iter.size_hint();
     let mut equity_curve = Vec::with_capacity(lower);
+    let mut active = Vec::with_capacity(lower);
     let mut fills: Vec<Fill<S::Symbol>> = Vec::new();
 
     for (bar, candle) in iter.enumerate() {
@@ -120,11 +129,13 @@ where
         strategy.update(candle);
         strategy.trade(wallet);
         equity_curve.push(wallet.equity().0);
+        active.push(strategy.is_active());
     }
 
     RunReport {
         equity_curve,
         fills,
+        active,
         initial_equity,
     }
 }

@@ -150,9 +150,11 @@ fn matches_empyrical_reference() {
     // equity-curve-derived metrics only; trade-level metrics are covered by
     // unit tests.
     let equity = synth_equity(&returns, INITIAL_CASH);
+    let active = vec![true; equity.len()];
     let report: RunReport<String> = RunReport {
         equity_curve: equity,
         fills: Vec::new(),
+        active,
         initial_equity: INITIAL_CASH,
     };
     let m = metrics::from_report(&report, BARS_PER_YEAR, RISK_FREE_RATE);

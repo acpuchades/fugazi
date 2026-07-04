@@ -238,6 +238,41 @@ Each line of a multi-output indicator is its own source tag:
 | `!add`, `!sub`, `!mul`, `!div` | `{ lhs, rhs }` | arithmetic over two sources (`div` → none on /0) |
 | `!lag`, `!diff`, `!ratio`, `!roc` | `{ source = close, periods }` | lookback vs. `periods` bars ago |
 | `!rolling_max`, `!rolling_min` | `{ source = close, period }` | rolling extremum over `period` bars |
+| `!resample` | `{ every, field }` | project `field` (`open`/`high`/`low`/`close`/`volume`/`typical`/`median`) of every N-bar candle. `field` is **required** — no default |
+| `!latch` | `{ source }` | hold the last `Some` output of `source`; `None` before the first arrives |
+
+#### Cross-timeframe composition — `!resample` + `!latch`
+
+There is no dedicated cross-timeframe tag; compose `!resample` and `!latch`
+directly. `!resample { every: N, field: close }` emits the resampled candle's
+`close` on the Nth base tick and `None` between. Wrap the outermost recursive
+smoother (`!ema`, `!rsi`, `!atr`, …) fed by that source in `!latch { source }`
+so per-base-tick reads see the finished higher-timeframe value between
+boundaries.
+
+The **only correct ordering** is resample → recursive smoother → latch:
+latching *before* the recursive smoother would feed it a held (repeated) value
+on every base tick, distorting the recurrence.
+
+```yaml
+# Base bars: 1h. Higher timeframe: 4h. Enter long when the 1h close crosses
+# above the EMA-20 computed on 4h candles.
+symbol: BTC
+long:
+  enter: !crosses_above
+    lhs: close
+    rhs: !latch
+      source: !ema
+        period: 20
+        source: !resample { every: 4, field: close }
+```
+
+Warm-up and unstable-period pass through as raw composition arithmetic —
+higher-timeframe sample counts, not base-bar-scaled. For an EMA-P over a
+resample-`every` chain, `stable_period() = every + settle_period(P)` (not
+`every * (1 + settle_period(P))`); if a strategy needs base-bar-correct
+stability accounting, it must feed the pipeline enough leading history for
+the recursive tail to decay in HTF-sample terms.
 
 ## Signals
 

@@ -56,6 +56,21 @@ pub trait Strategy {
         let _ = order;
     }
 
+    /// Whether this strategy's decisions on the current bar can be trusted —
+    /// i.e. whether every indicator it consults is past its
+    /// [`stable_period`](crate::Indicator::stable_period). A pure diagnostic:
+    /// the strategy still `trade`s while inactive (a caller that wants to
+    /// suppress that gates upstream), but downstream reducers (metric crops,
+    /// live-routing gates) use this to skip bars where the strategy was still
+    /// warming up.
+    ///
+    /// Default `true` — a strategy with no state-carrying indicators is
+    /// trivially always active. Implementations override to report their
+    /// warm-up completion.
+    fn is_active(&self) -> bool {
+        true
+    }
+
     /// Clear the strategy's own state (its signals/indicators), returning it to
     /// its freshly-constructed condition. Does not touch any wallet.
     fn reset(&mut self);

@@ -156,6 +156,33 @@ Each accessor clones its source, so the two operands above are independent,
 self-contained instances (the same clone-the-operands shape `crosses_above`
 already uses) — just feed each the same `Candle` per bar.
 
+### Cross-timeframe composition
+
+Two primitives compose directly for running an indicator on candles **coarser**
+than the base stream — no dedicated wrapper needed. `Resample<S>` buckets
+`every` base candles into a single higher-timeframe [`Candle`] (emits `Some`
+only on the completing tick, `None` between), and `Latch<S>` re-emits the last
+`Some` output on `None` ticks so a per-base-tick consumer sees the finished
+higher-timeframe value between boundaries.
+
+```rust
+use fugazi::prelude::*;
+use fugazi::indicators::{Current, Ema, Latch, Resample};
+
+// "1× base bar's close crosses above an EMA-20 computed on 4-bar candles."
+let _sig = Current::close().crosses_above(
+    Latch::new(Ema::new(Resample::new(Current::candle(), 4).close(), 20)),
+);
+```
+
+The **only correct ordering** is Resample → recursive smoother → Latch:
+latching *before* an EMA / RSI / ATR would feed it a held (repeated) value on
+every base tick, distorting the recurrence. Warm-up and unstable-period pass
+through as raw composition arithmetic (higher-timeframe sample counts, not
+base-bar scaled) — if a strategy needs base-bar-correct stability accounting,
+it must feed the pipeline enough leading history for the recursive tail to
+decay in HTF terms.
+
 ## Strategies
 
 The decision layer turns signals into trades. A **strategy** is *your own type*
@@ -277,6 +304,7 @@ use fugazi::metrics::{per_bar_returns, drawdown_segments, sharpe, max_drawdown};
 # let report: RunReport<&'static str> = RunReport {
 #     equity_curve: vec![10_000.0, 10_100.0, 10_050.0],
 #     fills: vec![],
+#     active: vec![true; 3],
 #     initial_equity: 10_000.0,
 # };
 let returns  = per_bar_returns(&report.equity_curve, report.initial_equity);
