@@ -94,6 +94,7 @@ fn activation_bar<Sym>(report: &fugazi::RunReport<Sym>, keep_unstable: bool) -> 
 /// (spec's symbol, `frequency`), and reduce the run to a [`metrics::Metrics`]
 /// document. No filesystem, no printing — the shape `optimize` calls per grid
 /// combination.
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate(
     spec: &StrategySpec,
     candles: &[(String, Candle)],
@@ -112,6 +113,7 @@ pub fn evaluate(
 /// The windowed twin of [`evaluate`]: reduce the same measured run to one
 /// [`metrics::Metrics`] per non-overlapping `window`-bar span — what
 /// `optimize -w/--windowed` calls per grid combination.
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate_windowed(
     spec: &StrategySpec,
     candles: &[(String, Candle)],
