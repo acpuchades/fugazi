@@ -1,6 +1,6 @@
 [package]
 name = "fugazi"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 description = "A library of incremental technical-analysis indicators, signals and strategies"
 license = "MIT"
@@ -24,12 +24,11 @@ path = "src/cli/main.rs"
 required-features = ["cli"]
 
 # `sources` pulls in the async HTTP stack the remote candle providers
-# (`fugazi::sources`) rely on. `cli` pulls in everything only the binary uses —
-# notably plotters' `ttf` feature, which links the fontconfig/freetype system
-# libs, so non-CLI consumers (e.g. the Python wheel, which builds inside
-# manylinux containers without those libs) depend with
-# `default-features = false, features = ["sources"]`. Both default-on so
-# `cargo build` builds the CLI unchanged.
+# (`fugazi::sources`) rely on. `cli` pulls in everything only the binary uses.
+# All CLI deps are pure Rust — no system libraries link in, so the Python wheel
+# (which still turns `cli` off via `default-features = false, features = ["sources"]`)
+# and the CLI build follow the same manylinux-friendly path. Both features are
+# default-on so `cargo build` builds the CLI unchanged.
 [features]
 default = ["sources", "cli"]
 sources = ["dep:reqwest", "dep:tokio", "dep:time", "dep:thiserror"]
@@ -43,7 +42,6 @@ cli = [
     "dep:indicatif",
     "dep:console",
     "dep:rayon",
-    "dep:plotters",
     "dep:interim",
 ]
 
@@ -58,7 +56,6 @@ anyhow = { version = "1", optional = true }
 indicatif = { version = "0.18", optional = true }
 console = { version = "0.16", optional = true }
 rayon = { version = "1", optional = true }
-plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "bitmap_encoder", "line_series", "area_series", "ttf"], optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls", "gzip"], optional = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros"], optional = true }
 time = { version = "0.3", features = ["formatting", "parsing", "macros"], optional = true }

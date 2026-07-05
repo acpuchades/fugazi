@@ -5,7 +5,7 @@
 //!
 //! This is the pure primitive. It does no I/O, no formatting, and takes no
 //! opinion on what to do with the report — a CLI backtester turns it into
-//! `trades.csv` / `equity.png` / `metrics.yml`, an optimizer runs it once per
+//! `trades.csv` / `returns.csv` / `metrics.yml`, an optimizer runs it once per
 //! parameter combination, a Python binding hands it to a notebook. The
 //! [`Wallet`] is generic (taken as `&mut impl Wallet<Sym>`) so the same
 //! primitive drives a [`PaperWallet`](crate::PaperWallet) backtest or a live

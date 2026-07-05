@@ -77,8 +77,11 @@ fn runs_an_at_file_strategy() {
     assert_metrics_shape(&out.metrics);
 }
 
-/// `-w/--windowed N` writes `metrics.csv` (one row per non-overlapping N-bar
-/// window, tagged with the window's start/end times) instead of `metrics.yml`.
+/// `-w/--windowed N` keeps writing `metrics.yml` (whole-run) and *also* emits
+/// `metrics.csv` (one row per non-overlapping N-bar window) and `rolling.csv`
+/// (one row per rolling N-bar window). Both CSVs share the same shape — same
+/// columns and same `window_start;window_end;<metrics…>` layout — so R can
+/// consume them interchangeably.
 #[test]
 fn runs_windowed_metrics() {
     let manifest = env!("CARGO_MANIFEST_DIR");
@@ -101,9 +104,10 @@ fn runs_windowed_metrics() {
     assert!(status.success(), "fugazi run -w exited with failure");
 
     assert!(
-        !out.join("metrics.yml").exists(),
-        "windowed run should not write metrics.yml"
+        out.join("metrics.yml").exists(),
+        "metrics.yml should always be written (whole-run summary)"
     );
+
     let metrics = std::fs::read_to_string(out.join("metrics.csv")).expect("metrics.csv");
     let mut lines = metrics.lines();
     let header = lines.next().expect("metrics.csv header");
@@ -117,14 +121,25 @@ fn runs_windowed_metrics() {
             "metrics.csv header missing `{section}`: {header}"
         );
     }
-    // 30 bars split into 10 + 10 + 10 → 3 windows over the full run.
+    // 30 bars split into 10 + 10 + 10 → 3 non-overlapping windows.
     let rows: Vec<&str> = lines.collect();
-    assert_eq!(rows.len(), 3, "expected one row per window:\n{metrics}");
+    assert_eq!(rows.len(), 3, "expected one row per non-overlapping window:\n{metrics}");
     assert!(
         rows[0].starts_with("2024-01-01;"),
         "first window should start at bar 1 of the run: {}",
         rows[0]
     );
+
+    let rolling = std::fs::read_to_string(out.join("rolling.csv")).expect("rolling.csv");
+    let mut rlines = rolling.lines();
+    let rheader = rlines.next().expect("rolling.csv header");
+    assert_eq!(
+        rheader, header,
+        "rolling.csv should share metrics.csv's column set"
+    );
+    // 30 bars, window 10 → 30 - 10 + 1 = 21 rolling windows.
+    let rrows: Vec<&str> = rlines.collect();
+    assert_eq!(rrows.len(), 21, "expected one row per rolling window:\n{rolling}");
 }
 
 /// End-to-end wiring for a cross-timeframe entry gated with `!stable`.

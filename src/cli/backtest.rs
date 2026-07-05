@@ -17,10 +17,12 @@
 //! stability. A strategy that wants entries held off until every source it
 //! consults has settled composes the check at the entry with `!stable`, i.e.
 //! `!all [<entry>, !stable { signal: <entry> }]`. With [`RunOptions::windowed`]
-//! set, the reduction runs once per non-overlapping N-bar window instead and
-//! lands as `metrics.csv` (one row per window, tagged with the window's
-//! start/end times), and the console metrics block reports each figure's
-//! cross-window mean ± stddev.
+//! set (`-w N`), the reduction *also* runs per N-bar window, twice — once
+//! non-overlapping (→ `metrics.csv`) and once rolling (→ `rolling.csv`), same
+//! N for both, each row tagged with its window's start/end times. Both files
+//! share the same column set as `metrics.yml`'s dotted names. No charts are
+//! produced — plotting is a post-hoc analysis on those CSVs (see the README's
+//! R workflow section).
 //!
 //! Console output (silenced by [`RunOptions::quiet`]) is a two-line banner (the
 //! constant tool identity, then the active command), then three blocks: **inputs**
@@ -37,7 +39,6 @@ use anyhow::{Context, Result};
 use fugazi::prelude::*;
 
 use crate::calendar::Frequency;
-use crate::chart;
 use crate::costs::CostConfig;
 use crate::data::DataFrame;
 use crate::metrics;
@@ -122,9 +123,10 @@ pub struct RunOptions<'a> {
     /// Subtracted from annualized returns before Sharpe/Sortino/UPI and used
     /// as the per-bar threshold for Omega.
     pub risk_free_rate: Real,
-    /// Compute the metrics in non-overlapping windows of this many bars,
-    /// writing `metrics.csv` (one row per window) instead of `metrics.yml`.
-    /// `None` = whole-run metrics to `metrics.yml`.
+    /// When set, also emit windowed reductions at this window length: one row
+    /// per non-overlapping window in `metrics.csv`, one row per rolling
+    /// (stride-1) window in `rolling.csv`. `metrics.yml` (whole-run) is
+    /// always written; `None` skips the CSVs.
     pub windowed: Option<NonZeroUsize>,
     /// Configured cost models, resolved into a live [`TradingCosts`] per
     /// (symbol, frequency) at run time. See [`crate::costs`].
@@ -286,10 +288,12 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
     };
 
     // Reduce the recorded blotter + equity curve to metric documents and
-    // persist them alongside the CSVs: whole-run → one document in
-    // `metrics.yml`; windowed → one document per non-overlapping N-bar window,
-    // one `metrics.csv` row each. The matching console block prints after the
-    // result block below.
+    // persist them alongside the trade/return CSVs:
+    //   • `metrics.yml` — whole-run summary, always written.
+    //   • `metrics.csv` — one row per non-overlapping N-bar window (opt-in via `-w N`).
+    //   • `rolling.csv` — one row per rolling N-bar window (same N, opt-in via `-w N`).
+    // Charts are deliberately not produced — the CSVs plus `returns.csv` are the
+    // handoff to whatever plots the run (R, Python, a notebook, …); see README.
     //
     // The full run is measured; stability gating (if any) is composed into
     // the strategy YAML by the caller via `!stable { … }` — see STRATEGIES.md.
@@ -311,61 +315,52 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
     } else {
         None
     };
-    let (whole, windows) = match opts.windowed {
-        Some(n) => {
-            let ws = metrics::windowed_from_report(
-                measured,
-                n.get(),
-                opts.bars_per_year,
-                opts.risk_free_rate,
-            );
-            write_metrics_csv(&ws, &candles, &opts.out_dir.join("metrics.csv"))?;
-            (None, Some((n.get(), ws)))
-        }
-        None => {
-            let mut m = metrics::from_report(measured, opts.bars_per_year, opts.risk_free_rate);
-            if costs_active {
-                m.costs = Some(metrics::costs_section(
-                    measured,
-                    gross_measured.as_ref(),
-                    opts.bars_per_year,
-                ));
-            }
-            metrics::write_yaml(&m, &opts.out_dir.join("metrics.yml"))?;
-            (Some(m), None)
-        }
-    };
+    let mut whole = metrics::from_report(measured, opts.bars_per_year, opts.risk_free_rate);
+    if costs_active {
+        whole.costs = Some(metrics::costs_section(
+            measured,
+            gross_measured.as_ref(),
+            opts.bars_per_year,
+        ));
+    }
+    metrics::write_yaml(&whole, &opts.out_dir.join("metrics.yml"))?;
 
-    let times: Vec<String> = candles.iter().map(|(t, _)| t.clone()).collect();
-    chart::write_equity_curve(
-        &report.equity_curve,
-        &times,
-        opts.cash,
-        &opts.out_dir.join("equity.png"),
-    )?;
+    if let Some(n) = opts.windowed {
+        let ws = metrics::windowed_from_report(
+            measured,
+            n.get(),
+            opts.bars_per_year,
+            opts.risk_free_rate,
+        );
+        write_windowed_csv(&ws, &candles, &opts.out_dir.join("metrics.csv"))?;
+        let rs = metrics::rolling_from_report(
+            measured,
+            n.get(),
+            opts.bars_per_year,
+            opts.risk_free_rate,
+        );
+        write_windowed_csv(&rs, &candles, &opts.out_dir.join("rolling.csv"))?;
+    }
 
     let finished = SystemTime::now();
     if !opts.quiet {
         print_result_block(opts, &summary, started, finished);
-        if let Some(m) = &whole {
-            let gross = gross_measured.as_ref().map(|g| {
-                metrics::from_report(g, opts.bars_per_year, opts.risk_free_rate)
-            });
-            print_metrics_block(m, None, gross.as_ref());
-        }
-        if let Some((n, ws)) = &windows {
-            print_windowed_metrics_block(ws, *n, None);
-        }
+        let gross = gross_measured.as_ref().map(|g| {
+            metrics::from_report(g, opts.bars_per_year, opts.risk_free_rate)
+        });
+        print_metrics_block(&whole, None, gross.as_ref());
     }
     Ok(summary)
 }
 
-/// Emit `metrics.csv`: one row per non-overlapping window — `window_start` /
-/// `window_end` (the times of the window's first and last bars) followed by the
-/// full metric catalogue, one column per dotted `metrics.yml` name. A metric
-/// that is degenerate in a window (no trades, zero variance, …) is an empty
-/// cell there, so every row shares the same fixed column set.
-fn write_metrics_csv(
+/// Emit a windowed-metrics CSV to `path`: one row per window —
+/// `window_start` / `window_end` (the times of the window's first and last
+/// bars) followed by the full metric catalogue, one column per dotted
+/// `metrics.yml` name. A metric that is degenerate in a window (no trades,
+/// zero variance, …) is an empty cell there, so every row shares the same
+/// fixed column set. Shared between the non-overlapping (`metrics.csv`) and
+/// rolling (`rolling.csv`) writes.
+fn write_windowed_csv(
     windows: &[metrics::WindowMetrics],
     candles: &[(String, Candle)],
     path: &Path,
@@ -505,94 +500,6 @@ fn print_metrics_block(m: &metrics::Metrics, measured: Option<&str>, gross: Opti
             format_ratio(m.trades.profit_factor),
         ),
     );
-}
-
-/// The windowed twin of [`print_metrics_block`]: the same headline figures,
-/// each reported as its cross-window mean ± population stddev. A metric that
-/// is degenerate in some windows averages over the windows where it is
-/// defined; one degenerate everywhere prints `—`. The full per-window values
-/// live in `metrics.csv`.
-fn print_windowed_metrics_block(
-    windows: &[metrics::WindowMetrics],
-    window: usize,
-    measured: Option<&str>,
-) {
-    println!("\n{}", style::bold("metrics"));
-    if let Some(measured) = measured {
-        print_field("measured", measured);
-    }
-    let last_bars = windows.last().map_or(window, |w| w.metrics.run.bars);
-    let shape = if last_bars == window {
-        format!("{} × {window} bars", windows.len())
-    } else {
-        format!("{} × {window} bars (last has {last_bars})", windows.len())
-    };
-    print_field("windows", &shape);
-    let ms: Vec<&metrics::Metrics> = windows.iter().map(|w| &w.metrics).collect();
-    print_field(
-        "return",
-        &format!(
-            "{} ann · vol {}",
-            format_spread(
-                metrics::mean_std(ms.iter().map(|m| m.returns.annualized_mean_pct)),
-                "%",
-                true
-            ),
-            format_spread(
-                metrics::mean_std(ms.iter().map(|m| m.returns.annualized_volatility_pct)),
-                "%",
-                false
-            ),
-        ),
-    );
-    // Optional ratios (degenerate → `None` per window) as a `mean ± std` string.
-    fn ratio_spread(values: impl Iterator<Item = Option<Real>>) -> String {
-        format_spread(metrics::mean_std(values.flatten()), "", false)
-    }
-    print_field(
-        "sharpe",
-        &ratio_spread(ms.iter().map(|m| m.risk_adjusted.sharpe)),
-    );
-    print_field(
-        "sortino",
-        &ratio_spread(ms.iter().map(|m| m.risk_adjusted.sortino)),
-    );
-    print_field(
-        "omega",
-        &ratio_spread(ms.iter().map(|m| m.risk_adjusted.omega)),
-    );
-    print_field(
-        "max_dd",
-        &format_spread(metrics::mean_std(ms.iter().map(|m| m.drawdown.max_pct)), "%", false),
-    );
-    print_field(
-        "exposure",
-        &format_spread(metrics::mean_std(ms.iter().map(|m| m.trades.exposure_pct)), "%", false),
-    );
-    print_field(
-        "trades",
-        &format!(
-            "{} · win {} · pf {}",
-            format_spread(metrics::mean_std(ms.iter().map(|m| m.trades.total as Real)), "", false),
-            format_spread(
-                metrics::mean_std(ms.iter().filter_map(|m| m.trades.win_rate_pct)),
-                "%",
-                false
-            ),
-            ratio_spread(ms.iter().map(|m| m.trades.profit_factor)),
-        ),
-    );
-}
-
-/// A `mean ± stddev` pair to two decimals with `unit` on both parts (`signed`
-/// puts an explicit `+` on a positive mean); `—` when there was no value in
-/// any window.
-fn format_spread(spread: Option<(Real, Real)>, unit: &str, signed: bool) -> String {
-    match spread {
-        Some((mean, std)) if signed => format!("{mean:+.2}{unit} ± {std:.2}{unit}"),
-        Some((mean, std)) => format!("{mean:.2}{unit} ± {std:.2}{unit}"),
-        None => "—".to_string(),
-    }
 }
 
 /// A ratio to two decimals, or `—` when its denominator was degenerate and the

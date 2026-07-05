@@ -1,6 +1,6 @@
 [package]
 name = "fugazi-python"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 description = "Python bindings for the fugazi incremental technical-analysis library"
 license = "MIT"
@@ -14,9 +14,9 @@ name = "fugazi"
 crate-type = ["cdylib"]
 
 [dependencies]
-# `sources` only — skipping the default `cli` feature keeps clap/plotters/etc.
-# out of the wheel; plotters' `ttf` feature in particular links fontconfig,
-# which the manylinux build containers don't ship.
+# `sources` only — skipping the default `cli` feature keeps clap/csv/interim/etc.
+# out of the wheel. Nothing in the CLI stack links system libs anymore, but the
+# wheel still doesn't want that surface area (no clap-parsed args, no console I/O).
 fugazi_core = { package = "fugazi", path = "..", default-features = false, features = ["sources"] }
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }

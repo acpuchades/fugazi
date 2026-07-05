@@ -410,6 +410,44 @@ pub fn windowed_from_report<Sym: Clone>(
     out
 }
 
+/// The rolling twin of [`windowed_from_report`]: one [`Metrics`] per
+/// `window`-bar span, advancing one bar at a time — `bars - window + 1`
+/// documents when `bars >= window`, empty otherwise. Only full-length windows
+/// are emitted (the last ends at the last bar). Each is evaluated as its own
+/// [`report_slice`].
+///
+/// Adjacent windows share `window - 1` bars, so the outputs are heavily
+/// autocorrelated. Meant for visualization (a continuous rolling-Sharpe curve,
+/// pyfolio-style), not cross-window statistics — use [`windowed_from_report`]
+/// when the outputs need to be independent (e.g. `optimize`'s `mean ± k·std`
+/// ranker).
+pub fn rolling_from_report<Sym: Clone>(
+    report: &RunReport<Sym>,
+    window: usize,
+    bars_per_year: Real,
+    risk_free_rate: Real,
+) -> Vec<WindowMetrics> {
+    assert!(window > 0, "window length must be positive");
+    let bars = report.equity_curve.len();
+    if bars < window {
+        return Vec::new();
+    }
+    (0..=(bars - window))
+        .map(|start| {
+            let end = start + window;
+            WindowMetrics {
+                start_bar: start,
+                end_bar: end - 1,
+                metrics: from_report(
+                    &report_slice(report, start..end),
+                    bars_per_year,
+                    risk_free_rate,
+                ),
+            }
+        })
+        .collect()
+}
+
 /// Mean and population standard deviation of `values`, or `None` when empty —
 /// the cross-window aggregation used by `run -w`'s console block and
 /// `optimize -w`'s `_mean`/`_std` columns (population, not sample: the windows
@@ -839,5 +877,48 @@ mod tests {
             .product::<Real>()
             - 1.0;
         assert!((whole - compounded).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rolling_from_report_slides_one_bar_at_a_time() {
+        // 5 bars, window 3 → windows [0,2], [1,3], [2,4] (three full-length).
+        let report = RunReport {
+            equity_curve: vec![100.0, 105.0, 110.0, 108.0, 103.0],
+            fills: vec![Fill {
+                bar: 3,
+                order: order(Side::Buy, 1.0, 108.0),
+            }],
+            initial_equity: 100.0,
+        };
+        let windows = rolling_from_report(&report, 3, 252.0, 0.0);
+        assert_eq!(
+            windows
+                .iter()
+                .map(|w| (w.start_bar, w.end_bar))
+                .collect::<Vec<_>>(),
+            vec![(0, 2), (1, 3), (2, 4)]
+        );
+        // Each window's initial equity is the equity marked on the bar before it.
+        assert_eq!(windows[0].metrics.run.initial_equity, 100.0);
+        assert_eq!(windows[1].metrics.run.initial_equity, 100.0);
+        assert_eq!(windows[2].metrics.run.initial_equity, 105.0);
+        // Every window is full-length.
+        for w in &windows {
+            assert_eq!(w.metrics.run.bars, 3);
+        }
+        // The bar-3 fill lands in the windows that contain bar 3 — [1,3] and [2,4].
+        assert_eq!(windows[0].metrics.trades.total_fills, 0);
+        assert_eq!(windows[1].metrics.trades.total_fills, 1);
+        assert_eq!(windows[2].metrics.trades.total_fills, 1);
+    }
+
+    #[test]
+    fn rolling_from_report_empty_when_window_exceeds_bars() {
+        let report: RunReport<String> = RunReport {
+            equity_curve: vec![100.0, 105.0],
+            fills: Vec::new(),
+            initial_equity: 100.0,
+        };
+        assert!(rolling_from_report(&report, 3, 252.0, 0.0).is_empty());
     }
 }

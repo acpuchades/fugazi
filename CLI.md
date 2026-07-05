@@ -8,8 +8,8 @@ single backtest, for a spec-validation pass, or for a parameter-grid sweep.
 Six subcommands:
 
 - [`run`](#run) — backtest one strategy over one dataset. Writes `trades.csv`,
-  `returns.csv`, and `metrics.yml` (or, with
-  [`-w/--windowed`](#windowed-metrics), `metrics.csv`).
+  `returns.csv`, and `metrics.yml`; adds `metrics.csv` + `rolling.csv` under
+  [`-w/--windowed`](#windowed-metrics). No charts — plot post-hoc.
 - [`check`](#check) — parse and validate a `strategy.yml` or `get --overlay`
   spec without running it. Nested: `check strategy` / `check overlay`.
 - [`optimize`](#optimize) — sweep a strategy over a parameter grid in
@@ -113,25 +113,28 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
 | `-f`, `--frequency <CODE>` | Bar cadence (`1m`, `5m`, `1h`, `4h`, `1d`, `1w`, `1M`, …). Combines with the calendar to derive `bars_per_year`. |
 | `--bars-per-year <N>` | Explicit override for the annualization denominator. Wins over the calendar/frequency pair. |
 | `--risk-free-rate <RATE>` | Annualized risk-free rate as a fraction (`0.045` = 4.5% p.a.). Default `0`. See [Risk-free rate](#risk-free-rate). |
-| `-w`, `--windowed <N>` | Compute the metrics in non-overlapping windows of `N` bars, writing `metrics.csv` (one row per window) instead of `metrics.yml`. See [Windowed metrics](#windowed-metrics). |
+| `-w`, `--windowed <N>` | Also reduce the run in `N`-bar windows: one row per non-overlapping window in `metrics.csv`, one row per rolling (stride-1) window in `rolling.csv`. `metrics.yml` (whole-run) is always written. See [Windowed metrics](#windowed-metrics). |
 | `-q`, `--quiet` | Silence the console output. Files still get written. |
 
-**Outputs.** Three files in `--output-dir`, all documented in
+**Outputs.** Files in `--output-dir`, all documented in
 [Output files](#output-files):
 
 - `trades.csv` — one row per fill.
 - `returns.csv` — one row per bar (equity, per-bar return).
-- `metrics.yml` — the reduced backtest report (with `-w/--windowed`,
-  `metrics.csv` — one row per window — replaces it).
+- `metrics.yml` — the whole-run backtest report; always written.
+- `metrics.csv` — one row per non-overlapping window (written only under `-w/--windowed <N>`).
+- `rolling.csv` — one row per rolling window (written only under `-w/--windowed <N>`).
+
+No charts are produced. Plotting is a post-hoc analysis on the CSVs —
+see the README's *Analyzing a run in R* section.
 
 **Console output** (unless `-q`): a two-line banner, then blocks for
 **inputs** (strategy, params, period, capital, output), **trades**
 (each fill listed after the run completes), **result** (bars, trades, capital
 before → after, start/finish timestamps + elapsed), and **metrics**
-(the headline lines of `metrics.yml` — cross-window mean ± stddev under
-`-w/--windowed`). Metrics cover the whole run; if a strategy needs to hold
-off entries until every source it consults is past its unstable tail, the
-[`!stable` signal](#signals) is composed at the entry.
+(the headline lines of `metrics.yml`). Metrics cover the whole run; if a
+strategy needs to hold off entries until every source it consults is past its
+unstable tail, the [`!stable` signal](#signals) is composed at the entry.
 
 ### `check`
 
@@ -727,19 +730,27 @@ CSV.
 
 ### Windowed metrics
 
-`-w/--windowed <N>` computes the metrics in **non-overlapping windows of `N`
-bars** over the measured range instead of one whole-run reduction. Each
-window is evaluated as a run of its own: its initial equity is the equity
-marked on the bar before it, and only the fills booked inside it count — a
-position carried across a window boundary shows up in the entering window as
-an unmatched fill, the usual windowed-analysis convention. Keep `N` well
-above the strategy's typical holding time if the trade statistics matter.
+`-w/--windowed <N>` reduces the run in **`N`-bar windows** on top of the
+whole-run summary. Each window is evaluated as a run of its own: its initial
+equity is the equity marked on the bar before it, and only the fills booked
+inside it count — a position carried across a window boundary shows up in the
+entering window as an unmatched fill, the usual windowed-analysis
+convention. Keep `N` well above the strategy's typical holding time if the
+trade statistics matter.
 
-- On `run`: writes [`metrics.csv`](#output-files) instead of `metrics.yml`,
-  and the console metrics block reports each figure's cross-window mean ±
-  population standard deviation (a metric degenerate in some windows averages
-  over the windows where it is defined; `—` when defined nowhere).
-- On `optimize`: every `-m` metric becomes two CSV columns
+- On `run`: `metrics.yml` (whole-run) is still written, and `-w N` adds
+  **both** [`metrics.csv`](#output-files) (one row per non-overlapping window)
+  and [`rolling.csv`](#output-files) (one row per rolling stride-1 window),
+  same `N` for both. The two files share the same columns, so R/Python can
+  consume them interchangeably — reach for `rolling.csv` when plotting a
+  continuous curve (pyfolio-style rolling Sharpe / drawdown), `metrics.csv`
+  when computing cross-window statistics (mean ± stddev, quantiles). Adjacent
+  rolling rows share `N-1` bars, so the sample stddev on `rolling.csv` is
+  meaningless as an uncertainty estimate — that's what non-overlapping
+  windows are for.
+- On `optimize`: only the non-overlapping variant is used — the
+  `mean − k·std` ranker needs independent samples to interpret the stddev as a
+  confidence adjustment. Every `-m` metric becomes two CSV columns
   (`<name>_mean` / `<name>_std`) and `--best-by` ranks by the windowed mean,
   optionally shifted by [`-k/--risk-aversion`](#best-by-directions).
 
@@ -891,19 +902,30 @@ One row per bar.
 
 ### `metrics.yml` (from `run`)
 
-Reduced backtest report, grouped by theme. See the [Metrics
-catalogue](#metrics-catalogue) for every field. Measured from the
-[stability gate](#stability-gating)'s anchor onward.
+Reduced backtest report, grouped by theme, over the whole measured range.
+Always written. See the [Metrics catalogue](#metrics-catalogue) for every
+field.
 
-### `metrics.csv` (from `run -w`)
+### `metrics.csv` (from `run -w N`)
 
-One row per non-overlapping window of the measured range — replaces
-`metrics.yml` under [`-w/--windowed`](#windowed-metrics).
+One row per **non-overlapping** window of `N` bars — written alongside
+`metrics.yml` under [`-w/--windowed`](#windowed-metrics). Reach for this file
+when computing cross-window statistics (mean ± stddev, quantiles): the
+windows are independent, so the sample stddev is meaningful.
 
 | Column | Meaning |
 | --- | --- |
 | `window_start` / `window_end` | Times of the window's first and last bars (the last window may be shorter than `N`). |
 | *(the full catalogue)* | One column per metric, named by its dotted `metrics.yml` path (`run.bars`, `returns.total_pct`, `risk_adjusted.sharpe`, …). A metric degenerate in a window is an empty cell, so every row shares the same fixed column set. |
+
+### `rolling.csv` (from `run -w N`)
+
+Same shape as `metrics.csv` (identical columns), but one row per **rolling
+stride-1** window of `N` bars: window `k` covers bars `[k, k+N)` for
+`k ∈ [0, bars − N]`. Reach for this file when plotting a continuous curve
+(pyfolio-style rolling Sharpe or drawdown). Adjacent rows share `N−1` bars,
+so the rolling series is heavily autocorrelated — its sample stddev is a
+plotting artefact, not an uncertainty estimate.
 
 ### Optimize CSV (from `optimize`)
 
@@ -1051,7 +1073,8 @@ fugazi optimize @examples/strategy.params.yml \
     --crypto -f 1d \
     -o grid.csv
 
-# Windowed run: per-window metrics.csv, console mean ± std across windows.
+# Windowed run: keeps metrics.yml and also writes metrics.csv (non-overlapping
+# 10-bar windows) + rolling.csv (rolling stride-1 10-bar windows) for R/Python.
 fugazi run @examples/strategy.yml \
     --series @examples/candles.csv \
     --output-dir out/ \

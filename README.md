@@ -352,8 +352,11 @@ cargo run --bin fugazi -- run \
   --output-dir out/
 # writes out/trades.csv (time;symbol;side;units;price;kind),
 #        out/returns.csv (time;equity;return),
-#        out/metrics.yml, and out/equity.png
+#        and out/metrics.yml (whole-run summary)
 ```
+
+**No plots.** `fugazi` deliberately emits data files only — plotting is a
+post-hoc analysis (see [Analyzing a run in R](#analyzing-a-run-in-r) below).
 
 The strategy is a **positional** argument (not a flag) and follows the same `@`
 convention as `--series`: `@file` loads a file, anything else is treated as inline
@@ -371,20 +374,26 @@ and `--risk-free-rate <rate>` for the annualized rf. `--costs <spec>`
 wires a commission/spread/slippage model into every fill — venue presets ship
 in [`examples/binance.yml`](examples/binance.yml) and
 [`examples/ibkr.yml`](examples/ibkr.yml); omit for a frictionless backtest
-identical to the pre-costs release. `-w/--windowed <N>`
-computes the metrics in non-overlapping windows of `N` bars instead of over the
-whole run, writing `metrics.csv` — one row per window: its start/end times,
-then the full catalogue under dotted `metrics.yml` names — instead of
-`metrics.yml`, with the console metrics block reporting each figure's
-cross-window mean ± standard deviation. The same `-w/--windowed <N>` exists on
-`optimize`: each grid point is evaluated in windows, every `-m` metric becomes
-two CSV columns (`<name>_mean` / `<name>_std`), and `--best-by` ranks by the
-windowed mean — rewarding parameter sets that perform consistently across
-regimes rather than in one lucky stretch. Add `-k/--risk-aversion <K>` to rank
-conservatively: the mean is shifted *against* each grid point by `K` standard
-deviations before sorting (`mean − K·std` for higher-is-better metrics,
-`mean + K·std` for lower-is-better ones), so `sharpe 2.0 ± 3.0` no longer
-outranks `1.8 ± 0.2`. Output files are `;`-delimited for Excel.
+identical to the pre-costs release. `-w/--windowed <N>` reduces the run in
+`N`-bar windows *for post-hoc analysis* — `metrics.yml` (whole-run) is still
+written, and adding `-w N` writes two extra CSVs at window length `N`:
+`metrics.csv` (non-overlapping windows, one row each) and `rolling.csv`
+(rolling stride-1 windows, one row each). Both share the same columns —
+`window_start;window_end;<full metric catalogue under dotted metrics.yml
+names>` — so R/Python can consume them interchangeably. Non-overlapping is
+right for cross-window aggregation (independent samples → the sample stddev is
+meaningful); rolling is right for continuous plotting (a smooth curve — the
+metrics.csv equivalent to pyfolio's rolling-Sharpe chart). The same
+`-w/--windowed <N>` exists on `optimize`: each grid point is evaluated in
+non-overlapping windows only (the ranker's mean±k·std needs the independence),
+every `-m` metric becomes two CSV columns (`<name>_mean` / `<name>_std`), and
+`--best-by` ranks by the windowed mean — rewarding parameter sets that perform
+consistently across regimes rather than in one lucky stretch. Add
+`-k/--risk-aversion <K>` to rank conservatively: the mean is shifted *against*
+each grid point by `K` standard deviations before sorting (`mean − K·std` for
+higher-is-better metrics, `mean + K·std` for lower-is-better ones), so
+`sharpe 2.0 ± 3.0` no longer outranks `1.8 ± 0.2`. Output files are
+`;`-delimited for Excel.
 
 `run` and `optimize` measure the whole run — the strategy layer is
 opinion-free about stability. A strategy that wants entries held off until
@@ -476,6 +485,56 @@ anywhere, including where a number is required.
 See [`examples/strategy.yml`](examples/strategy.yml) for a complete SMA-crossover
 strategy, and [`examples/strategy.params.yml`](examples/strategy.params.yml) for
 the parameterised version.
+
+### Analyzing a run in R
+
+`fugazi` writes the numbers; you plot them in whatever you already use for
+analysis. A minimal R session that produces pyfolio-style
+cumulative-returns / rolling-Sharpe / underwater plots from a `-w 126` run:
+
+```r
+library(readr)
+library(ggplot2)
+
+returns <- read_delim("out/returns.csv", delim = ";")
+rolling <- read_delim("out/rolling.csv", delim = ";")
+metrics <- read_delim("out/metrics.csv", delim = ";")   # non-overlapping — for cross-window stats
+
+# Cumulative returns: equity rebased to the seed cash.
+returns$cum <- returns$equity / returns$equity[1]
+ggplot(returns, aes(as.Date(time), cum)) + geom_line() +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  labs(x = NULL, y = "Cumulative returns (×)")
+
+# Rolling Sharpe: each row of rolling.csv is one window; window_end is the anchor.
+ggplot(rolling, aes(as.Date(window_end), risk_adjusted.sharpe)) + geom_line() +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = mean(rolling$risk_adjusted.sharpe, na.rm = TRUE),
+             linetype = "dashed", colour = "steelblue") +
+  labs(x = NULL, y = "Rolling Sharpe")
+
+# Underwater plot: drawdown from the running peak.
+returns$peak <- cummax(returns$equity)
+returns$dd   <- (returns$equity - returns$peak) / returns$peak
+ggplot(returns, aes(as.Date(time), dd)) + geom_area(alpha = 0.35, fill = "#c44e52") +
+  geom_line(colour = "#c44e52") + geom_hline(yintercept = 0) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = NULL, y = "Drawdown")
+
+# Cross-window Sharpe distribution — independent samples (non-overlapping),
+# so the sample stddev actually means something.
+mean(metrics$risk_adjusted.sharpe, na.rm = TRUE)
+sd  (metrics$risk_adjusted.sharpe, na.rm = TRUE)
+```
+
+**Which CSV do you want?** `rolling.csv` for plots (smooth, continuous
+curve); `metrics.csv` for cross-window statistics (mean ± stddev, quantiles,
+regime-conditioning). The rolling series is heavily autocorrelated —
+adjacent rows share `N-1` of `N` bars — so `sd()` on it drastically
+understates variability; treat it as a plotting artefact, not a sample.
+
+Both files share the same columns (dotted `metrics.yml` names), so the same
+plotting code works on either.
 
 **Other subcommands.** Alongside `run` the binary carries a few utility
 subcommands — briefly listed here, fully documented in

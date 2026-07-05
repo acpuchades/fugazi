@@ -15,7 +15,6 @@
 
 mod backtest;
 mod calendar;
-mod chart;
 mod completions;
 mod convert;
 mod costs;
@@ -160,11 +159,13 @@ struct RunArgs {
     #[arg(long, value_name = "RATE", default_value_t = 0.0)]
     risk_free_rate: f64,
 
-    /// Compute the metrics in non-overlapping windows of N bars instead of over
-    /// the whole run. Writes `metrics.csv` (one row per window: its start/end
-    /// times, then the full metric catalogue under dotted `metrics.yml` names)
-    /// instead of `metrics.yml`, and the console metrics block reports each
-    /// figure's cross-window mean ± standard deviation.
+    /// Also reduce the run in N-bar windows for post-hoc analysis. `metrics.yml`
+    /// (whole-run) is always written; adding `-w N` writes two extra CSVs at
+    /// window length N — `metrics.csv` (non-overlapping windows, one row each)
+    /// and `rolling.csv` (rolling stride-1 windows, one row each). Both share
+    /// the same columns as `metrics.yml` under their dotted names, with the
+    /// window's start/end times in the first two columns. Plot from R/Python;
+    /// no charts are produced.
     #[arg(short = 'w', long = "windowed", value_name = "N")]
     windowed: Option<NonZeroUsize>,
 
