@@ -41,13 +41,13 @@ use crate::style;
 /// Sort direction of a `--best-by` optimization: descending = higher is better
 /// (Sharpe, CAGR, …); ascending = lower is better (drawdown, volatility, VaR, …).
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Direction {
+pub(crate) enum Direction {
     Descending,
     Ascending,
 }
 
 /// One sweep axis: `NAME → values`, preserving the enumeration order.
-type Axis = (String, Vec<Value>);
+pub(crate) type Axis = (String, Vec<Value>);
 /// A fixed (scalar) params table + the sweep axes carved out of it.
 type Partition = (HashMap<String, Value>, Vec<Axis>);
 
@@ -89,7 +89,10 @@ pub struct OptimizeOptions<'a> {
     pub quiet: bool,
 }
 
-/// Run the sweep per `opts`, writing the CSV and printing the best row.
+/// CLI entry for the `optimize` command: marshal `opts` into inputs
+/// [`optimize`] can consume (parse the strategy text, split axes, resolve the
+/// candle slice for the strategy's symbol), invoke the sweep, then write
+/// `metrics.csv` / print the inputs + best blocks.
 pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
     let (fixed, axes) = split_axes(&opts.params_table)?;
     if axes.is_empty() {
@@ -98,37 +101,108 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
              or a `start..end[:step]` range (use `run` for a single combination)"
         );
     }
-    // A negative k would *reward* dispersion — the opposite of what the flag
-    // is for. (Presence alongside `-w`/`--best-by` is enforced by clap.)
-    if opts.risk_aversion < 0.0 {
-        bail!("--risk-aversion must be >= 0 (got {})", opts.risk_aversion);
-    }
 
     let base_value = input::parse_value(opts.strategy_text).context("parsing strategy")?;
-    let combos = cartesian(&axes);
 
-    // Probe the first combination once, up front: it validates the strategy YAML
-    // (early error), gives us the symbol so we can slice the candle stream once,
-    // and gives us a Metrics document to resolve `--metrics` and `--best-by`
-    // names against before spinning up the pool.
-    let first_combo = &combos[0];
-    let first_params = combine_params(&fixed, &axes, first_combo);
-    let first_spec = build_spec(&base_value, &first_params)?;
-    let symbol = first_spec.symbol.clone();
-    let candles = frame.candles(&symbol)?;
-    let first_metrics = backtest::evaluate(
-        &first_spec,
+    // Resolve the strategy's symbol from a probe spec built with the fixed
+    // params + first axis values, so we can slice the frame down to its
+    // candles once before entering the sweep.
+    let first_combo: Vec<Value> = axes.iter().map(|(_, v)| v[0].clone()).collect();
+    let probe_params = combine_params(&fixed, &axes, &first_combo);
+    let probe_spec = build_spec(&base_value, &probe_params)?;
+    let candles = frame.candles(&probe_spec.symbol)?;
+
+    let sweep = optimize(
+        &base_value,
+        fixed,
+        axes,
         &candles,
         opts.cash,
         opts.bars_per_year,
         opts.risk_free_rate,
         opts.cost_config,
         opts.frequency,
+        opts.windowed,
+        &opts.metrics,
+        opts.best_by.as_deref(),
+        opts.risk_aversion,
+        opts.jobs,
+    )?;
+
+    write_csv(
+        opts.output,
+        &sweep.axes,
+        &sweep.metric_columns,
+        sweep.windowed,
+        &sweep.rows,
+    )?;
+
+    if !opts.quiet {
+        style::print_header("optimize", "sweep a strategy over a parameter grid");
+        print_inputs_block(&opts, &sweep.axes, &sweep.rows);
+        // A "best" row only means something when the user gave us a metric to
+        // rank by. Without one, the sweep has produced a CSV but no verdict.
+        if sweep.best_by.is_some() {
+            print_best_block(
+                &sweep.axes,
+                &sweep.metric_columns,
+                sweep.best_by.as_ref(),
+                opts.risk_aversion,
+                &sweep.rows,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Enumerate the grid over `candles`, evaluate every combination (whole-run or
+/// windowed), and rank the rows by `best_by`'s ranking value — direction-aware,
+/// with `risk_aversion` shifting a windowed row's mean *against* it by k·std so
+/// dispersion is always penalized. Pure: no filesystem, no printing. The CLI's
+/// [`run`] wraps it with argument marshaling + CSV write + console output.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn optimize(
+    base_value: &Value,
+    fixed: HashMap<String, Value>,
+    axes: Vec<Axis>,
+    candles: &[(String, Candle)],
+    cash: Real,
+    bars_per_year: Real,
+    risk_free_rate: Real,
+    cost_config: &CostConfig,
+    frequency: Option<Frequency>,
+    windowed: Option<NonZeroUsize>,
+    metric_names: &[String],
+    best_by: Option<&str>,
+    risk_aversion: Real,
+    jobs: Option<usize>,
+) -> Result<Sweep> {
+    // A negative k would *reward* dispersion — the opposite of what the flag
+    // is for. (Presence alongside `-w`/`--best-by` is enforced by clap.)
+    if risk_aversion < 0.0 {
+        bail!("--risk-aversion must be >= 0 (got {risk_aversion})");
+    }
+
+    let combos = cartesian(&axes);
+
+    // Probe the first combination once, up front: it validates the strategy YAML
+    // (early error) and gives us a Metrics document to resolve `--metrics` and
+    // `--best-by` names against before spinning up the pool.
+    let first_combo = &combos[0];
+    let first_params = combine_params(&fixed, &axes, first_combo);
+    let first_spec = build_spec(base_value, &first_params)?;
+    let first_metrics = backtest::evaluate(
+        &first_spec,
+        candles,
+        cash,
+        bars_per_year,
+        risk_free_rate,
+        cost_config,
+        frequency,
     );
 
     // Resolve column paths once — errors here catch typos before the sweep.
-    let metric_columns: Vec<(String, String)> = opts
-        .metrics
+    let metric_columns: Vec<(String, String)> = metric_names
         .iter()
         .map(|name| {
             let (path, _) = metrics::resolve_metric(name, &first_metrics)?;
@@ -136,9 +210,7 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let best_by = opts
-        .best_by
-        .as_deref()
+    let best_by = best_by
         .map(|name| {
             let (path, _) = metrics::resolve_metric(name, &first_metrics)?;
             let direction = direction_for(&path).ok_or_else(|| {
@@ -155,36 +227,29 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
     // Run the grid. The `first_combo` result is already computed (windowed
     // mode re-evaluates it windowed — one extra backtest, off the hot path);
     // the rest run on the pool in parallel.
-    let pool = build_pool(opts.jobs)?;
-    let cash = opts.cash;
-    let bpy = opts.bars_per_year;
-    let rf = opts.risk_free_rate;
-    let windowed = opts.windowed.map(NonZeroUsize::get);
-    let base = &base_value;
-    let candles_ref = &candles;
+    let pool = build_pool(jobs)?;
+    let windowed_n = windowed.map(NonZeroUsize::get);
     let axes_ref = &axes;
     let fixed_ref = &fixed;
 
-    let cost_config = opts.cost_config;
-    let frequency = opts.frequency;
     let evaluate = |spec: &StrategySpec| -> Evaluation {
-        match windowed {
+        match windowed_n {
             Some(w) => Evaluation::Windowed(backtest::evaluate_windowed(
                 spec,
-                candles_ref,
+                candles,
                 cash,
-                bpy,
-                rf,
+                bars_per_year,
+                risk_free_rate,
                 cost_config,
                 frequency,
                 w,
             )),
             None => Evaluation::Whole(Box::new(backtest::evaluate(
                 spec,
-                candles_ref,
+                candles,
                 cash,
-                bpy,
-                rf,
+                bars_per_year,
+                risk_free_rate,
                 cost_config,
                 frequency,
             ))),
@@ -196,7 +261,7 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
             .par_iter()
             .map(|combo| {
                 let params = combine_params(fixed_ref, axes_ref, combo);
-                let spec = build_spec(base, &params)?;
+                let spec = build_spec(base_value, &params)?;
                 Ok::<_, anyhow::Error>(Row {
                     combo: combo.clone(),
                     eval: evaluate(&spec),
@@ -208,7 +273,7 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
     let mut rows: Vec<Row> = Vec::with_capacity(combos.len());
     rows.push(Row {
         combo: first_combo.clone(),
-        eval: match windowed {
+        eval: match windowed_n {
             Some(_) => evaluate(&first_spec),
             None => Evaluation::Whole(Box::new(first_metrics)),
         },
@@ -217,27 +282,16 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
 
     // Sort by --best-by, direction-aware; None cells sort last regardless.
     if let Some((_, ref path, direction)) = best_by {
-        sort_by_metric(&mut rows, path, direction, opts.risk_aversion);
+        sort_by_metric(&mut rows, path, direction, risk_aversion);
     }
 
-    write_csv(opts.output, &axes, &metric_columns, windowed.is_some(), &rows)?;
-
-    if !opts.quiet {
-        style::print_header("optimize", "sweep a strategy over a parameter grid");
-        print_inputs_block(&opts, &axes, &rows);
-        // A "best" row only means something when the user gave us a metric to
-        // rank by. Without one, the sweep has produced a CSV but no verdict.
-        if best_by.is_some() {
-            print_best_block(
-                &axes,
-                &metric_columns,
-                best_by.as_ref(),
-                opts.risk_aversion,
-                &rows,
-            );
-        }
-    }
-    Ok(())
+    Ok(Sweep {
+        axes,
+        metric_columns,
+        best_by,
+        rows,
+        windowed: windowed_n.is_some(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -247,16 +301,34 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
 /// One grid point's metric evaluation: the whole measured run reduced to a
 /// single document, or (`-w/--windowed`) one document per non-overlapping
 /// window, aggregated per metric as cross-window mean ± stddev.
-enum Evaluation {
+pub(crate) enum Evaluation {
     /// Boxed: the document is ~50 fields, dwarfing the windowed variant's Vec.
     Whole(Box<metrics::Metrics>),
     Windowed(Vec<metrics::WindowMetrics>),
 }
 
 /// One row of the grid, keyed to its axes' order.
-struct Row {
-    combo: Vec<Value>,
-    eval: Evaluation,
+pub(crate) struct Row {
+    pub(crate) combo: Vec<Value>,
+    pub(crate) eval: Evaluation,
+}
+
+/// Rows and metadata produced by [`optimize`], ready for the CLI to write out.
+/// `rows` is sorted by `best_by`'s ranking value when `best_by` is `Some`,
+/// otherwise it follows the cartesian enumeration order.
+pub(crate) struct Sweep {
+    /// The sweep axes, in declaration order (name-sorted by `split_axes`).
+    pub(crate) axes: Vec<Axis>,
+    /// Metric column paths resolved against the probe document (`name` → dotted
+    /// path). Errors out of [`optimize`] if any name doesn't resolve.
+    pub(crate) metric_columns: Vec<(String, String)>,
+    /// The `--best-by` name, its resolved dotted path, and its direction.
+    /// `None` when no `--best-by` was passed.
+    pub(crate) best_by: Option<(String, String, Direction)>,
+    pub(crate) rows: Vec<Row>,
+    /// True iff `windowed` was set — the CSV writer uses this to emit
+    /// `<name>_mean` / `<name>_std` columns per metric.
+    pub(crate) windowed: bool,
 }
 
 /// Partition the effective params table into fixed (scalar) entries and sweep
