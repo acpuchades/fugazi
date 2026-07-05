@@ -29,7 +29,7 @@ use rayon::prelude::*;
 use serde_json::Value;
 
 use crate::backtest;
-use crate::calendar::Frequency;
+use crate::calendar::{self, AssetClass, Frequency};
 use crate::costs::CostConfig;
 use crate::data::DataFrame;
 use crate::input;
@@ -64,7 +64,12 @@ pub struct OptimizeOptions<'a> {
     /// The `--best-by` metric name to sort by (empty = no sort).
     pub best_by: Option<String>,
     pub output: &'a Path,
-    pub bars_per_year: Real,
+    /// Explicit `--bars-per-year`; `None` triggers auto-detection from the
+    /// strategy's dominant `(symbol, freq)` series in the frame (see
+    /// [`crate::calendar::resolve_with_detection`]).
+    pub explicit_bars_per_year: Option<Real>,
+    /// Trading-calendar shortcut (`--stocks`/`--forex`/`--crypto`).
+    pub asset_class: Option<AssetClass>,
     pub risk_free_rate: Real,
     /// Evaluate each grid point in non-overlapping windows of this many bars
     /// (same windowing as `run -w`): every `-m` metric becomes two CSV columns
@@ -112,13 +117,24 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
     let probe_spec = build_spec(&base_value, &probe_params)?;
     let candles = frame.candles(&probe_spec.symbol)?;
 
+    // Resolve `bars_per_year` now that the strategy's symbol is known — an
+    // explicit `--bars-per-year` wins, otherwise combine `--<class>` with
+    // either `-f/--frequency` or a cadence auto-detected from the strategy's
+    // dominant `(symbol, freq)` series in the frame.
+    let bars_per_year = calendar::resolve_with_detection(
+        opts.explicit_bars_per_year,
+        opts.asset_class,
+        opts.frequency,
+        || frame.dominant_series_times(&probe_spec.symbol),
+    );
+
     let sweep = optimize(
         &base_value,
         fixed,
         axes,
         &candles,
         opts.cash,
-        opts.bars_per_year,
+        bars_per_year,
         opts.risk_free_rate,
         opts.cost_config,
         opts.frequency,

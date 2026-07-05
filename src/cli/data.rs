@@ -132,6 +132,35 @@ impl DataFrame {
         Ok(())
     }
 
+    /// Group the frame's rows by `(symbol, freq column value)` and return each
+    /// group's `time` list in ascending order. The `freq` key is `None` for
+    /// rows that carried no `freq` column, so a plain `time,open,high,low,close`
+    /// CSV still surfaces as one group per symbol. Used by the calendar
+    /// auto-detection ([`crate::calendar::detect_frequency`]) so different
+    /// cadences of the same symbol aren't averaged into one median.
+    pub fn series_times(&self) -> BTreeMap<(String, Option<String>), Vec<&str>> {
+        let mut out: BTreeMap<(String, Option<String>), Vec<&str>> = BTreeMap::new();
+        for ((sym, time), row) in &self.rows {
+            let freq = row.get("freq").filter(|s| !s.is_empty()).cloned();
+            out.entry((sym.clone(), freq)).or_default().push(time.as_str());
+        }
+        out
+    }
+
+    /// Return the ascending `time` list of the largest series matching
+    /// `symbol`. When a symbol has multiple `freq` groups (see
+    /// [`Self::series_times`]) — e.g. a 1d and a 1h stream in the same frame
+    /// — the one with the most rows wins, since it is almost always the
+    /// primary series the strategy is trading. Returns `None` when the frame
+    /// carries nothing for `symbol`.
+    pub fn dominant_series_times(&self, symbol: &str) -> Option<Vec<&str>> {
+        self.series_times()
+            .into_iter()
+            .filter(|((sym, _), _)| sym == symbol)
+            .max_by_key(|(_, times)| times.len())
+            .map(|(_, times)| times)
+    }
+
     /// The candle series for `symbol`, ascending by `time`.
     ///
     /// `open`/`high`/`low`/`close` are required; `volume` defaults to `0`.
@@ -300,5 +329,46 @@ mod tests {
     #[test]
     fn series_without_a_file_is_rejected() {
         assert!("symbol=BTC".parse::<SeriesSpec>().is_err());
+    }
+
+    #[test]
+    fn series_times_groups_by_symbol_and_freq() {
+        // Same symbol, two freqs → two groups. Different symbols also split.
+        let btc_1d = tmp_csv(
+            "fugazi_series_times_btc_1d.csv",
+            "time;freq;open;high;low;close\n2024-01-01;1d;10;11;9;10\n2024-01-02;1d;10;12;10;11\n",
+        );
+        let btc_1h = tmp_csv(
+            "fugazi_series_times_btc_1h.csv",
+            "time;freq;open;high;low;close\n2024-01-01T00:00:00Z;1h;10;11;9;10\n2024-01-01T01:00:00Z;1h;10;11;9;10\n",
+        );
+        let eth_1d = tmp_csv(
+            "fugazi_series_times_eth_1d.csv",
+            "time;freq;open;high;low;close\n2024-01-01;1d;20;21;19;20\n2024-01-02;1d;20;22;20;21\n",
+        );
+        let frame = DataFrame::from_series(&[
+            format!("symbol=BTC,@{btc_1d}").parse().unwrap(),
+            format!("symbol=BTC,@{btc_1h}").parse().unwrap(),
+            format!("symbol=ETH,@{eth_1d}").parse().unwrap(),
+        ])
+        .unwrap();
+        let groups = frame.series_times();
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[&("BTC".into(), Some("1d".into()))].len(), 2);
+        assert_eq!(groups[&("BTC".into(), Some("1h".into()))].len(), 2);
+        assert_eq!(groups[&("ETH".into(), Some("1d".into()))].len(), 2);
+    }
+
+    #[test]
+    fn series_times_defaults_missing_freq_to_none() {
+        // No `freq` column at all → the group key's freq slot is None.
+        let path = tmp_csv(
+            "fugazi_series_times_nofreq.csv",
+            "time;open;high;low;close\n2024-01-01;10;11;9;10\n2024-01-02;10;12;10;11\n",
+        );
+        let frame = DataFrame::from_series(&[format!("symbol=BTC,@{path}").parse().unwrap()]).unwrap();
+        let groups = frame.series_times();
+        assert_eq!(groups.len(), 1);
+        assert!(groups.contains_key(&("BTC".into(), None)));
     }
 }

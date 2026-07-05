@@ -147,8 +147,11 @@ struct RunArgs {
 
     /// Explicit `bars_per_year` for the annualization step in `metrics.yml`
     /// (Sharpe/Sortino/CAGR/annualized volatility). Overrides the value
-    /// derived from `--stocks`/`--forex`/`--crypto` + `--frequency`; defaults
-    /// to 252 (US-equity daily) when nothing else is set.
+    /// derived from `--stocks`/`--forex`/`--crypto` + `--frequency`. When
+    /// neither is set, the CLI auto-detects the bar cadence from the median
+    /// gap in the input `time` column (per `(symbol, freq)` series — see
+    /// `--series`); the calendar is `--stocks` (252 trading days a year)
+    /// unless overridden.
     #[arg(long, value_name = "N")]
     bars_per_year: Option<f64>,
 
@@ -463,7 +466,6 @@ fn run(args: RunArgs) -> Result<()> {
     let strat_label = args.strategy.label();
     let params_label = params_label(&param_table);
     let class = asset_class(args.stocks, args.forex, args.crypto);
-    let bars_per_year = calendar::resolve(args.bars_per_year, class, args.frequency);
     let cost_config = costs::config(&args.costs)?;
     let costs_were_supplied = !args.costs.is_empty();
     let opts = backtest::RunOptions {
@@ -471,7 +473,8 @@ fn run(args: RunArgs) -> Result<()> {
         out_dir: &args.output_dir,
         strategy_label: &strat_label,
         params: &params_label,
-        bars_per_year,
+        explicit_bars_per_year: args.bars_per_year,
+        asset_class: class,
         risk_free_rate: args.risk_free_rate,
         windowed: args.windowed,
         cost_config: &cost_config,
@@ -490,7 +493,6 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
 
     let strat_label = args.strategy.label();
     let class = asset_class(args.stocks, args.forex, args.crypto);
-    let bars_per_year = calendar::resolve(args.bars_per_year, class, args.frequency);
     let cost_config = costs::config(&args.costs)?;
     let costs_were_supplied = !args.costs.is_empty();
 
@@ -502,7 +504,8 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         metrics: args.metrics,
         best_by: args.best_by,
         output: &args.output,
-        bars_per_year,
+        explicit_bars_per_year: args.bars_per_year,
+        asset_class: class,
         risk_free_rate: args.risk_free_rate,
         windowed: args.windowed,
         risk_aversion: args.risk_aversion.unwrap_or(0.0),

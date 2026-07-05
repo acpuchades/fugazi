@@ -38,7 +38,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use fugazi::prelude::*;
 
-use crate::calendar::Frequency;
+use crate::calendar::{AssetClass, Frequency};
 use crate::costs::CostConfig;
 use crate::data::DataFrame;
 use crate::metrics;
@@ -117,8 +117,14 @@ pub struct RunOptions<'a> {
     /// A one-line view of the effective params (`NAME=value, …`), echoed in the
     /// run block.
     pub params: &'a str,
-    /// Bars per year used to annualize per-bar return moments in `metrics.yml`.
-    pub bars_per_year: Real,
+    /// Explicit `--bars-per-year` when the user set one. When `None` (and no
+    /// `--frequency` either), the annualization denominator is auto-detected
+    /// from the series' `time` column via
+    /// [`crate::calendar::resolve_with_detection`].
+    pub explicit_bars_per_year: Option<Real>,
+    /// Trading-calendar shortcut (`--stocks`/`--forex`/`--crypto`). `None`
+    /// falls back to [`AssetClass::Stocks`].
+    pub asset_class: Option<AssetClass>,
     /// Annualized risk-free rate as a fraction (e.g. `0.045` = 4.5% p.a.).
     /// Subtracted from annualized returns before Sharpe/Sortino/UPI and used
     /// as the per-bar threshold for Omega.
@@ -162,6 +168,16 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
 
     let start = candles.first().map_or("", |(t, _)| t.as_str());
     let end = candles.last().map_or("", |(t, _)| t.as_str());
+    // Resolve `bars_per_year` for the annualized metrics: an explicit
+    // `--bars-per-year` wins, otherwise combine `--<class>` with either the
+    // explicit `--frequency` or, failing that, a cadence auto-detected from the
+    // strategy's dominant `(symbol, freq)` series in the frame.
+    let bars_per_year = crate::calendar::resolve_with_detection(
+        opts.explicit_bars_per_year,
+        opts.asset_class,
+        opts.frequency,
+        || frame.dominant_series_times(&symbol),
+    );
     // Resolve the cost config for (symbol, frequency) up front so we can share
     // the same live TradingCosts between the priced backtest and the gross
     // no-cost re-run below.
@@ -315,12 +331,12 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
     } else {
         None
     };
-    let mut whole = metrics::from_report(measured, opts.bars_per_year, opts.risk_free_rate);
+    let mut whole = metrics::from_report(measured, bars_per_year, opts.risk_free_rate);
     if costs_active {
         whole.costs = Some(metrics::costs_section(
             measured,
             gross_measured.as_ref(),
-            opts.bars_per_year,
+            bars_per_year,
         ));
     }
     metrics::write_yaml(&whole, &opts.out_dir.join("metrics.yml"))?;
@@ -329,14 +345,14 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
         let ws = metrics::windowed_from_report(
             measured,
             n.get(),
-            opts.bars_per_year,
+            bars_per_year,
             opts.risk_free_rate,
         );
         write_windowed_csv(&ws, &candles, &opts.out_dir.join("metrics.csv"))?;
         let rs = metrics::rolling_from_report(
             measured,
             n.get(),
-            opts.bars_per_year,
+            bars_per_year,
             opts.risk_free_rate,
         );
         write_windowed_csv(&rs, &candles, &opts.out_dir.join("rolling.csv"))?;
@@ -346,7 +362,7 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
     if !opts.quiet {
         print_result_block(opts, &summary, started, finished);
         let gross = gross_measured.as_ref().map(|g| {
-            metrics::from_report(g, opts.bars_per_year, opts.risk_free_rate)
+            metrics::from_report(g, bars_per_year, opts.risk_free_rate)
         });
         print_metrics_block(&whole, None, gross.as_ref());
     }
