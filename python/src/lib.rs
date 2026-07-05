@@ -344,11 +344,18 @@ impl Indicator for ResampleThen {
     }
 
     fn warm_up_period(&self) -> usize {
-        self.resample.every() * Indicator::warm_up_period(&self.inner).max(1)
+        // Plain library-style composition: resample's own warm-up (`every`)
+        // plus `inner.warm_up_period() - 1` more HTF-emissions for the inner
+        // to be ready (one emission coincides with resample's first). The
+        // inner side is in HTF-sample units, not base-bar units — same
+        // arithmetic as `Ema::new(Resample.close(), P)` in pure Rust.
+        Indicator::warm_up_period(&self.resample)
+            .saturating_add(Indicator::warm_up_period(&self.inner).saturating_sub(1))
     }
 
     fn unstable_period(&self) -> usize {
-        Indicator::unstable_period(&self.inner) * self.resample.every()
+        Indicator::unstable_period(&self.resample)
+            .saturating_add(Indicator::unstable_period(&self.inner))
     }
 
     fn reset(&mut self) {

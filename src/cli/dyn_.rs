@@ -229,18 +229,100 @@ where
 // ---------------------------------------------------------------------------
 // chain: runtime-typed composition of two DynIndicators
 // ---------------------------------------------------------------------------
-// stable_gate: runtime-typed version of the library's Stable wrapper
+
+/// Compose two [`DynIndicator`]s so that `outer`'s output feeds `inner`'s
+/// input at runtime. The returned box has `input_type() =
+/// outer.input_type()` and `output_type() = inner.output_type()`. `inner`
+/// only advances on ticks where `outer` emits `Some`, so a slow `outer` (e.g.
+/// a [`Resample`](fugazi::indicators::Resample) that emits every N base bars)
+/// naturally sub-samples the `inner`.
+///
+/// The composed warm-up and unstable-period are the plain sum of the two —
+/// the same arithmetic the library uses when composing statically, in
+/// `outer`-emission units for `inner` — so `!stable { signal }` (or any
+/// downstream reader of `stable_period()`) is on the same convention as a
+/// pure-library composition and doesn't get base-bar-scaled for free.
+///
+/// # Panics
+/// If `outer.output_type() != inner.input_type()`, at construction — the
+/// recursive spec builder guarantees compatible types, so this is a hard bug
+/// if ever hit.
+pub fn chain(outer: Box<dyn DynIndicator>, inner: Box<dyn DynIndicator>) -> Box<dyn DynIndicator> {
+    assert_eq!(
+        outer.output_type(),
+        inner.input_type(),
+        "chain: outer output type ({}) doesn't match inner input type ({})",
+        outer.output_type(),
+        inner.input_type(),
+    );
+    Box::new(Chain {
+        outer,
+        inner,
+        value: None,
+    })
+}
+
+struct Chain {
+    outer: Box<dyn DynIndicator>,
+    inner: Box<dyn DynIndicator>,
+    value: Option<DynValue>,
+}
+
+impl DynIndicator for Chain {
+    fn input_type(&self) -> DynType {
+        self.outer.input_type()
+    }
+    fn output_type(&self) -> DynType {
+        self.inner.output_type()
+    }
+    fn update(&mut self, x: DynValue) -> Option<DynValue> {
+        self.value = match self.outer.update(x) {
+            Some(y) => self.inner.update(y),
+            None => None,
+        };
+        self.value
+    }
+    fn value(&self) -> Option<DynValue> {
+        self.value
+    }
+    fn warm_up_period(&self) -> usize {
+        // Plain library-style composition: outer needs its warm-up, then
+        // inner needs `inner.warm_up_period() - 1` more outer-emissions (one
+        // coincides with outer's first emit). The unit is outer-samples for
+        // outer's part and outer-emissions for inner's part, i.e. the same
+        // undifferentiated arithmetic as `Ema::new(Resample.close(), P)` in
+        // pure Rust.
+        self.outer
+            .warm_up_period()
+            .saturating_add(self.inner.warm_up_period().saturating_sub(1))
+    }
+    fn unstable_period(&self) -> usize {
+        self.outer
+            .unstable_period()
+            .saturating_add(self.inner.unstable_period())
+    }
+    fn reset(&mut self) {
+        self.outer.reset();
+        self.inner.reset();
+        self.value = None;
+    }
+    fn dyn_clone(&self) -> Box<dyn DynIndicator> {
+        Box::new(Chain {
+            outer: self.outer.dyn_clone(),
+            inner: self.inner.dyn_clone(),
+            value: self.value,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// stable_check: runtime-typed readiness probe (mirrors the library's Stable)
 // ---------------------------------------------------------------------------
 
-/// Wrap `inner` in the library's [`Stable`](fugazi::indicators::Stable)
-/// semantics at the runtime-typed layer: the returned `DynIndicator` reports
-/// `warm_up = inner.stable_period()`, `unstable = 0`, and masks the inner
-/// output until `stable_period` samples have elapsed. Same effect as
-/// `IndicatorExt::stable`, but on the boxed side.
 /// A `bool`-output [`DynIndicator`] that returns `Some(true)` from the
 /// `stable_period`-th `update` onwards, mirroring the library-level
-/// [`Stable`](fugazi::indicators::Stable). Doesn't hold any source — capture
-/// the source's `stable_period()` at construction and drop it.
+/// [`Stable`](fugazi::indicators::Stable). Doesn't hold any source — captures
+/// the source's `stable_period()` at construction and drops it.
 pub fn stable_check(stable_period: usize) -> Box<dyn DynIndicator> {
     Box::new(StableCheck {
         stable_period,

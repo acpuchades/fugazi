@@ -270,13 +270,15 @@ long:
         inner: !ema { period: 20, source: close }
 ```
 
-Warm-up and unstable-period are scaled to base-bar units: for
-`!resample { every, inner }`, `warm_up_period() = every * inner.warm_up_period()`
-and `unstable_period() = every * inner.unstable_period()` — so an EMA-P inside
-a resample-`every` reports a `stable_period()` of
-`every * (1 + settle_period(P))` base bars (EMA-P has `warm_up = 1`,
-`unstable = settle_period(P)`), and `!stable { signal }` fires at the correct
-base bar.
+**The resample's clock stays base-timeframe.** It's fed one base candle per
+tick and reports at that same cadence — the emitted `Option<Real>` marks
+*whether* the inner just produced a value on a completed bucket. Warm-up and
+unstable-period pass through as raw composition arithmetic — higher-timeframe
+sample counts, not base-bar-scaled. For an EMA-P over a resample-`every`
+chain, `stable_period() = every + settle_period(P)` (not
+`every * (1 + settle_period(P))`); if a strategy needs base-bar-correct
+stability accounting, it must feed the pipeline enough leading history for
+the recursive tail to decay in HTF-sample terms.
 
 ## Signals
 

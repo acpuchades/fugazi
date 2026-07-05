@@ -42,6 +42,18 @@ use crate::types::{Candle, Real};
 /// the running sum. Emits `Some(Candle)` only on the tick that completes the
 /// bucket and returns `None` otherwise.
 ///
+/// **The clock stays base-timeframe.** `Resample` is fed one base candle per
+/// `update()` call and reports results at that same base cadence — the
+/// emitted `Option<Candle>` marks *whether* a bucket has just completed. It
+/// carries no internal notion of "an HTF tick"; `warm_up_period()` is
+/// measured in **base samples**, not HTF ones, and matches the base index of
+/// the first emission (`inner.warm_up_period() + every - 1`). Any recursive
+/// downstream indicator (EMA/RSI/ATR/…) reasons in HTF-sample units of its
+/// own, so its `warm_up_period()` and `unstable_period()` composed with a
+/// `Resample` are also in HTF-sample units — feed the pipeline enough
+/// leading history for the recursive tail to decay if you need base-bar-
+/// correct stability accounting.
+///
 /// The output is a plain `Candle`, so use `.close()`/`.high()`/… (or the
 /// generic [`Component`] projection) to feed a scalar into an EMA / band /
 /// oscillator downstream. To hold the last emitted value between higher-

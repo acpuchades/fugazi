@@ -175,8 +175,11 @@ warming up).
 stream: `resample(N, inner)` aggregates every N base candles into one HTF
 candle and runs `inner` (any candle-rooted Real source — `close()`,
 `ema(close(), 20)`, …) over it, emitting `inner`'s output on the completing
-tick and `None` in between. Wrap the whole resample in `latch()` so
-per-base-tick reads see the finished value between boundaries.
+tick and `None` in between. **The resample's clock stays base-timeframe**:
+it's fed one base candle per `update()` and reports at that same cadence —
+the emitted output marks whether the inner produced a value on a completed
+bucket. Wrap the whole resample in `latch()` so per-base-tick reads see the
+finished value between boundaries.
 
 ```python
 # EMA-20 of the closes of every 4-bar candle, latched for per-base-tick reads.

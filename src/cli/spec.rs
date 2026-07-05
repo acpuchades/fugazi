@@ -307,9 +307,12 @@ pub enum SourceSpec {
     /// reads a candle (`close`/`high`/`typical`, `!ema { period: N, source:
     /// close }`, `!add { lhs, rhs }`, …); it advances only on emissions from
     /// the resample, so an `!ema` inside `!resample` recurses over the HTF
-    /// closes, not the base ones. Wrap the whole downstream chain in
-    /// [`Latch`](SourceSpec::Latch) so per-base-tick reads see the finished
-    /// value between boundaries.
+    /// closes, not the base ones. **The resample's clock stays
+    /// base-timeframe**: it's fed one base candle per tick and reports at
+    /// that same cadence; the emitted `Option<Real>` marks whether the inner
+    /// produced a value on a completed bucket. Wrap the whole downstream
+    /// chain in [`Latch`](SourceSpec::Latch) so per-base-tick reads see the
+    /// finished value between boundaries.
     Resample { every: usize, inner: Box<SourceSpec> },
 }
 
@@ -500,76 +503,15 @@ impl SourceSpec {
             }
             Resample { every, inner } => {
                 assert!(*every > 0, "resample every must be greater than zero");
-                let resample = self::Resample::new(CurrentBar::new(), *every);
-                let inner_typed = AsReal::new(inner.build(anchor));
-                dyn_::wrap(ResampleThen::new(resample, inner_typed))
+                // `Resample<CurrentBar>` is `Candle -> Candle`, and `DynValue`
+                // already carries `Candle` in its payload — so it wraps as a
+                // `DynIndicator` unchanged, and the runtime `chain` glues its
+                // Candle output into the inner source's Candle input.
+                let resample_dyn = dyn_::wrap(self::Resample::new(CurrentBar::new(), *every));
+                let inner_dyn = inner.build(anchor);
+                dyn_::chain(resample_dyn, inner_dyn)
             }
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ResampleThen: run an inner Candle→Real source over the higher-timeframe
-// candles emitted by a Resample. The inner advances only on Resample
-// emissions, so an Ema-P inside `!resample { every, inner }` recurses over
-// the HTF closes (not the base ones) and its warm-up / unstable-period scale
-// by `every` in base-bar terms.
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone)]
-struct ResampleThen<Inner> {
-    resample: Resample<CurrentBar>,
-    inner: Inner,
-    value: Option<Real>,
-}
-
-impl<Inner> ResampleThen<Inner> {
-    fn new(resample: Resample<CurrentBar>, inner: Inner) -> Self {
-        Self {
-            resample,
-            inner,
-            value: None,
-        }
-    }
-}
-
-impl<Inner> Indicator for ResampleThen<Inner>
-where
-    Inner: Indicator<Input = Candle, Output = Real>,
-{
-    type Input = Candle;
-    type Output = Real;
-
-    fn update(&mut self, c: Candle) -> Option<Real> {
-        self.value = match self.resample.update(c) {
-            Some(htf) => self.inner.update(htf),
-            None => None,
-        };
-        self.value
-    }
-
-    fn value(&self) -> Option<Real> {
-        self.value
-    }
-
-    fn warm_up_period(&self) -> usize {
-        // The k-th HTF candle arrives at base sample `every * k` (given
-        // Resample<CurrentBar>::warm_up_period() == every). The inner needs
-        // `inner.warm_up_period()` HTF samples to be ready, so its first
-        // `Some` arrives at base sample `every * inner.warm_up_period()`.
-        self.resample.every() * self.inner.warm_up_period().max(1)
-    }
-
-    fn unstable_period(&self) -> usize {
-        // Inner's unstable period is in HTF-sample units; convert to base
-        // bars by scaling with `every`.
-        self.inner.unstable_period() * self.resample.every()
-    }
-
-    fn reset(&mut self) {
-        self.resample.reset();
-        self.inner.reset();
-        self.value = None;
     }
 }
 
