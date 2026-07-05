@@ -14,6 +14,7 @@
 //! anything else — the same `@` convention `--series`/`--params` use.
 
 mod backtest;
+mod batch;
 mod calendar;
 mod completions;
 mod convert;
@@ -198,6 +199,27 @@ struct RunArgs {
     /// zero-cost backtest (matches the pre-costs release byte-for-byte).
     #[arg(long = "costs", value_name = "SPEC")]
     costs: Vec<costs::CostSpec>,
+
+    /// Use `SingleAssetStrategy` (the default). When the frame carries more
+    /// than one `(symbol, freq)` series, the strategy is iterated over each
+    /// group in parallel — output files aggregate across iterations under
+    /// `--output-dir`, with `%SYMBOL`/`%FREQ` sigils in that path (or in
+    /// `--params` values) filled per iteration. Mutually exclusive with
+    /// `--multiple`.
+    #[arg(long, group = "single_multiple")]
+    single: bool,
+
+    /// Reserved for a future `MultiAssetStrategy` (portfolio / pairs — one
+    /// strategy that sees all series at once). Not yet implemented; passing
+    /// this errors out. Mutually exclusive with `--single`.
+    #[arg(long, group = "single_multiple")]
+    multiple: bool,
+
+    /// Rayon worker count for batch iterations (multi-series frames only).
+    /// Defaults to one worker per logical CPU. No effect when the frame
+    /// has a single `(symbol, freq)` group.
+    #[arg(short = 'j', long = "jobs", value_name = "N")]
+    jobs: Option<usize>,
 
     /// Suppress all console output (the result files are still written).
     #[arg(short, long)]
@@ -475,35 +497,84 @@ fn check_overlay(args: CheckOverlayArgs) -> Result<()> {
 }
 
 fn run(args: RunArgs) -> Result<()> {
-    let param_table = params::table(&args.params)?;
+    // `--multiple` is reserved for a future `MultiAssetStrategy` — reject
+    // it up front so users don't wait for a run to start before finding out.
+    if args.multiple {
+        anyhow::bail!(
+            "--multiple is reserved for a future MultiAssetStrategy and is not yet implemented; \
+             pass --single (the default) to batch-iterate a SingleAssetStrategy over the frame's series"
+        );
+    }
 
     let text = args.strategy.read().context("reading strategy")?;
-    let spec = spec::StrategySpec::from_text_with_params(&text, &param_table)
-        .with_context(|| parse_error_context(&args.strategy))?;
-
     let frame = data::DataFrame::from_series(&args.series)?;
 
     let strat_label = args.strategy.label();
-    let params_label = params_label(&param_table);
     let class = asset_class(args.stocks, args.forex, args.crypto);
     let cost_config = costs::config(&args.costs)?;
     let costs_were_supplied = !args.costs.is_empty();
-    let opts = run::RunOptions {
-        cash: args.cash,
-        out_dir: &args.output_dir,
-        strategy_label: &strat_label,
-        params: &params_label,
-        bars_per_year: &args.bars_per_year,
-        asset_class: class,
-        risk_free_rate: args.risk_free_rate,
-        windowed: args.windowed,
-        cost_config: &cost_config,
-        frequency: &args.frequency,
-        costs_supplied: costs_were_supplied,
-        quiet: args.quiet,
-    };
-    run::run(&spec, &frame, &opts)?;
+
+    // Dispatch: if the frame carries more than one `(symbol, freq)` group,
+    // fan out over the rayon pool via `batch::run`; otherwise take the
+    // byte-identical single-run path via `run::run`. Enumerating groups
+    // is cheap (one BTreeMap pass); we do it here so a single-group frame
+    // avoids all batch machinery.
+    let groups = frame.groups()?;
+    if groups.len() > 1 {
+        let params_label_str = params_label_from_specs(&args.params);
+        let opts = batch::BatchOptions {
+            cash: args.cash,
+            out_dir: &args.output_dir,
+            strategy_text: &text,
+            strategy_label: &strat_label,
+            params_label: &params_label_str,
+            param_specs: &args.params,
+            bars_per_year: &args.bars_per_year,
+            asset_class: class,
+            risk_free_rate: args.risk_free_rate,
+            windowed: args.windowed,
+            cost_config: &cost_config,
+            frequency: &args.frequency,
+            costs_supplied: costs_were_supplied,
+            jobs: args.jobs,
+            quiet: args.quiet,
+        };
+        batch::run(&frame, &opts)?;
+    } else {
+        // Single-group frame: substitute params once and take the legacy
+        // write path. Byte-identical to the pre-batch release for a plain
+        // one-symbol CSV.
+        let param_table = params::table(&args.params)?;
+        let spec = spec::StrategySpec::from_text_with_params(&text, &param_table)
+            .with_context(|| parse_error_context(&args.strategy))?;
+        let params_label = params_label(&param_table);
+        let opts = run::RunOptions {
+            cash: args.cash,
+            out_dir: &args.output_dir,
+            strategy_label: &strat_label,
+            params: &params_label,
+            bars_per_year: &args.bars_per_year,
+            asset_class: class,
+            risk_free_rate: args.risk_free_rate,
+            windowed: args.windowed,
+            cost_config: &cost_config,
+            frequency: &args.frequency,
+            costs_supplied: costs_were_supplied,
+            quiet: args.quiet,
+        };
+        run::run(&spec, &frame, &opts)?;
+    }
     Ok(())
+}
+
+/// A one-line `%SIGIL, NAME=…` view of the params for the batch inputs
+/// block. Distinct from [`params_label`] because in batch mode the sigils
+/// aren't resolved yet — we show the specs verbatim.
+fn params_label_from_specs(specs: &[params::ParamSpec]) -> String {
+    if specs.is_empty() {
+        return "(defaults)".to_string();
+    }
+    format!("{} spec(s)", specs.len())
 }
 
 fn optimize(args: OptimizeArgs) -> Result<()> {

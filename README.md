@@ -486,6 +486,51 @@ See [`examples/strategy.yml`](examples/strategy.yml) for a complete SMA-crossove
 strategy, and [`examples/strategy.params.yml`](examples/strategy.params.yml) for
 the parameterised version.
 
+### Multi-series batch mode
+
+When the input frame carries more than one `(symbol, freq)` group — e.g.
+`fugazi get`'s output covering several tickers, or several vendor CSVs
+joined into one `--series` — `run` iterates the strategy across each
+group in parallel on a rayon pool. There's no separate subcommand; the
+trigger is the shape of the input.
+
+Two CLI-managed template variables get substituted per iteration:
+`%SYMBOL` (the iteration's symbol, path-normalized) and `%FREQ` (the
+iteration's effective bar cadence, or an empty string when detection
+fails and no `-f` was set). Reference them in `--params` values and
+`--output-dir`; the CLI folds them in per group. The `%`-prefixed name
+space is reserved — you cannot declare `--params %FOO=…` yourself.
+
+```sh
+cargo run --bin fugazi -- run @examples/strategy.params.yml \
+  --series @multi.csv \
+  --params SYMBOL=%SYMBOL \
+  --output-dir out/
+# writes out/{trades,returns,metrics}.csv with leading `symbol` / `freq`
+# columns (loose sigils become row-identifier columns).
+```
+
+The strategy carries `symbol: !param SYMBOL` and each iteration builds
+its own spec with the group's symbol substituted in. Output layout
+follows the fully-expanded `--output-dir`:
+
+- `--output-dir out/` — all iterations share `out/`; `symbol`/`freq`
+  columns appear on every CSV; `metrics.csv` has one row per iteration
+  (no `metrics.yml`, since the shape is now tabular).
+- `--output-dir out/%SYMBOL/` — each symbol's iterations land in
+  `out/<sym>/`; the bucket's shape decides whether that dir gets a
+  single-doc `metrics.yml` or a tabular `metrics.csv`.
+
+Row order across the aggregated CSVs is `(symbol, freq, time)`, with
+`freq` sorted by duration (`1h < 4h < 1d`). A rayon pool sized by
+`-j/--jobs` runs the iterations in parallel; a hardcoded-symbol strategy
+on a multi-symbol frame silently skips the mismatched groups.
+
+`--single` (the default) uses `SingleAssetStrategy` in the iteration
+loop. `--multiple` is reserved for a future `MultiAssetStrategy`
+(portfolio / pairs — one strategy that sees several symbols at once) and
+errors out today.
+
 ### Analyzing a run in R
 
 `fugazi` writes the numbers; you plot them in whatever you already use for
