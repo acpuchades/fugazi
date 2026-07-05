@@ -164,33 +164,87 @@ impl DataFrame {
     /// The candle series for `symbol`, ascending by `time`.
     ///
     /// `open`/`high`/`low`/`close` are required; `volume` defaults to `0`.
+    /// When the frame carries several `freq` groups for `symbol`, they are
+    /// concatenated in `time` order — that's the single-run legacy shape.
+    /// The batch driver ([`crate::batch`]) uses [`Self::groups`] instead, so
+    /// each `(symbol, freq)` stays isolated.
     pub fn candles(&self, symbol: &str) -> Result<Vec<(String, Candle)>> {
         let mut out = Vec::new();
         for ((sym, time), row) in &self.rows {
             if sym != symbol {
                 continue;
             }
-            let field = |name: &str| -> Result<Real> {
-                let raw = row
-                    .get(name)
-                    .ok_or_else(|| anyhow!("{symbol} @ {time}: missing required column `{name}`"))?;
-                raw.parse::<Real>()
-                    .with_context(|| format!("{symbol} @ {time}: column `{name}` = {raw:?}"))
-            };
-            let volume = match row.get("volume") {
-                Some(raw) if !raw.is_empty() => raw
-                    .parse::<Real>()
-                    .with_context(|| format!("{symbol} @ {time}: column `volume` = {raw:?}"))?,
-                _ => 0.0,
-            };
-            let candle = Candle::new(field("open")?, field("high")?, field("low")?, field("close")?, volume);
-            out.push((time.clone(), candle));
+            out.push((time.clone(), row_to_candle(sym, time, row)?));
         }
         if out.is_empty() {
             bail!("no rows found for symbol `{symbol}` across the given --series");
         }
         Ok(out)
     }
+
+    /// Enumerate the frame's `(symbol, freq)` groups, one [`Group`] each,
+    /// with the group's candles preassembled in ascending `time` order.
+    /// This is the batch driver's iteration source — one `run_iteration` call per
+    /// [`Group`]. Freq is `None` for rows that lacked a `freq` column, so a
+    /// plain `time,open,high,low,close` CSV still surfaces as one group per
+    /// symbol.
+    pub fn groups(&self) -> Result<Vec<Group>> {
+        type Bucket = Vec<(String, Candle)>;
+        let mut buckets: BTreeMap<(String, Option<String>), Bucket> = BTreeMap::new();
+        for ((sym, time), row) in &self.rows {
+            let freq = row.get("freq").filter(|s| !s.is_empty()).cloned();
+            let candle = row_to_candle(sym, time, row)?;
+            buckets
+                .entry((sym.clone(), freq))
+                .or_default()
+                .push((time.clone(), candle));
+        }
+        Ok(buckets
+            .into_iter()
+            .map(|((symbol, freq), candles)| Group {
+                symbol,
+                freq,
+                candles,
+            })
+            .collect())
+    }
+}
+
+/// One `(symbol, freq column value)` slice of the frame, ready to drive a
+/// per-iteration backtest. Produced by [`DataFrame::groups`].
+#[derive(Debug, Clone)]
+pub struct Group {
+    pub symbol: String,
+    /// The value from the row's `freq` column, or `None` when the frame had
+    /// no `freq` column (typical single-freq inputs).
+    pub freq: Option<String>,
+    /// Ascending by the row's `time` column.
+    pub candles: Vec<(String, Candle)>,
+}
+
+/// Build a [`Candle`] from one row's OHLCV columns. Shared by both
+/// [`DataFrame::candles`] and [`DataFrame::groups`].
+fn row_to_candle(sym: &str, time: &str, row: &Row) -> Result<Candle> {
+    let field = |name: &str| -> Result<Real> {
+        let raw = row
+            .get(name)
+            .ok_or_else(|| anyhow!("{sym} @ {time}: missing required column `{name}`"))?;
+        raw.parse::<Real>()
+            .with_context(|| format!("{sym} @ {time}: column `{name}` = {raw:?}"))
+    };
+    let volume = match row.get("volume") {
+        Some(raw) if !raw.is_empty() => raw
+            .parse::<Real>()
+            .with_context(|| format!("{sym} @ {time}: column `volume` = {raw:?}"))?,
+        _ => 0.0,
+    };
+    Ok(Candle::new(
+        field("open")?,
+        field("high")?,
+        field("low")?,
+        field("close")?,
+        volume,
+    ))
 }
 
 /// Read a CSV file into lowercased-column rows, autodetecting its delimiter.
@@ -357,6 +411,51 @@ mod tests {
         assert_eq!(groups[&("BTC".into(), Some("1d".into()))].len(), 2);
         assert_eq!(groups[&("BTC".into(), Some("1h".into()))].len(), 2);
         assert_eq!(groups[&("ETH".into(), Some("1d".into()))].len(), 2);
+    }
+
+    #[test]
+    fn groups_yields_one_group_per_symbol_freq_pair() {
+        let btc_1d = tmp_csv(
+            "fugazi_groups_btc_1d.csv",
+            "time;freq;open;high;low;close\n2024-01-01;1d;10;11;9;10\n2024-01-02;1d;10;12;10;11\n",
+        );
+        let btc_1h = tmp_csv(
+            "fugazi_groups_btc_1h.csv",
+            "time;freq;open;high;low;close\n2024-01-01T00:00:00Z;1h;10;11;9;10\n2024-01-01T01:00:00Z;1h;10;11;9;10\n",
+        );
+        let eth_1d = tmp_csv(
+            "fugazi_groups_eth_1d.csv",
+            "time;freq;open;high;low;close\n2024-01-01;1d;20;21;19;20\n2024-01-02;1d;20;22;20;21\n",
+        );
+        let frame = DataFrame::from_series(&[
+            format!("symbol=BTC,@{btc_1d}").parse().unwrap(),
+            format!("symbol=BTC,@{btc_1h}").parse().unwrap(),
+            format!("symbol=ETH,@{eth_1d}").parse().unwrap(),
+        ])
+        .unwrap();
+        let groups = frame.groups().unwrap();
+        assert_eq!(groups.len(), 3);
+        let by_key: std::collections::HashMap<_, _> = groups
+            .iter()
+            .map(|g| ((g.symbol.clone(), g.freq.clone()), g.candles.len()))
+            .collect();
+        assert_eq!(by_key[&("BTC".into(), Some("1d".into()))], 2);
+        assert_eq!(by_key[&("BTC".into(), Some("1h".into()))], 2);
+        assert_eq!(by_key[&("ETH".into(), Some("1d".into()))], 2);
+    }
+
+    #[test]
+    fn groups_defaults_missing_freq_to_none() {
+        let path = tmp_csv(
+            "fugazi_groups_nofreq.csv",
+            "time;open;high;low;close\n2024-01-01;10;11;9;10\n2024-01-02;10;12;10;11\n",
+        );
+        let frame = DataFrame::from_series(&[format!("symbol=BTC,@{path}").parse().unwrap()]).unwrap();
+        let groups = frame.groups().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].symbol, "BTC");
+        assert_eq!(groups[0].freq, None);
+        assert_eq!(groups[0].candles.len(), 2);
     }
 
     #[test]

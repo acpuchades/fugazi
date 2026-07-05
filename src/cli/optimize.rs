@@ -51,7 +51,7 @@ pub(crate) type Axis = (String, Vec<Value>);
 /// A fixed (scalar) params table + the sweep axes carved out of it.
 type Partition = (HashMap<String, Value>, Vec<Axis>);
 
-/// Threaded-in inputs, same shape as [`crate::backtest::RunOptions`].
+/// Threaded-in inputs, same shape as [`crate::run::RunOptions`].
 pub struct OptimizeOptions<'a> {
     pub cash: Real,
     pub strategy_text: &'a str,
@@ -251,7 +251,7 @@ pub(crate) fn optimize(
     // Run the grid. The `first_combo` result is already computed (windowed
     // mode re-evaluates it windowed — one extra backtest, off the hot path);
     // the rest run on the pool in parallel.
-    let pool = build_pool(jobs)?;
+    let pool = crate::pool::build_pool(jobs)?;
     let windowed_n = windowed.map(NonZeroUsize::get);
     let axes_ref = &axes;
     let fixed_ref = &fixed;
@@ -473,18 +473,6 @@ fn combine_params(
 fn build_spec(base: &Value, params: &HashMap<String, Value>) -> Result<StrategySpec> {
     let value = params::substitute(base.clone(), params)?;
     Ok(serde_json::from_value(value)?)
-}
-
-/// Build the rayon pool — an explicit `-j/--jobs` count, else rayon's default
-/// (one worker per logical CPU).
-fn build_pool(jobs: Option<usize>) -> Result<rayon::ThreadPool> {
-    let mut builder = rayon::ThreadPoolBuilder::new();
-    if let Some(n) = jobs {
-        builder = builder.num_threads(n);
-    }
-    builder
-        .build()
-        .context("building the rayon thread pool for --jobs")
 }
 
 // ---------------------------------------------------------------------------

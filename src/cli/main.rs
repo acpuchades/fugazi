@@ -28,6 +28,9 @@ mod metrics;
 mod optimize;
 mod overlay;
 mod params;
+mod pool;
+mod run;
+mod sigils;
 mod spec;
 mod style;
 
@@ -485,7 +488,7 @@ fn run(args: RunArgs) -> Result<()> {
     let class = asset_class(args.stocks, args.forex, args.crypto);
     let cost_config = costs::config(&args.costs)?;
     let costs_were_supplied = !args.costs.is_empty();
-    let opts = backtest::RunOptions {
+    let opts = run::RunOptions {
         cash: args.cash,
         out_dir: &args.output_dir,
         strategy_label: &strat_label,
@@ -499,7 +502,7 @@ fn run(args: RunArgs) -> Result<()> {
         costs_supplied: costs_were_supplied,
         quiet: args.quiet,
     };
-    backtest::run(&spec, &frame, &opts)?;
+    run::run(&spec, &frame, &opts)?;
     Ok(())
 }
 

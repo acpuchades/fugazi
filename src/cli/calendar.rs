@@ -106,6 +106,53 @@ pub enum Frequency {
     Month(u32),
 }
 
+impl Frequency {
+    /// The approximate seconds a bar of this cadence spans, using calendar
+    /// conventions (30-day month, 7-day week). Used as the primary total-
+    /// order key by [`Ord`] so cadences sort by duration regardless of
+    /// variant, which keeps `Frequency::Minute(120) > Frequency::Hour(1)` (a
+    /// derived `Ord` would order them lexicographically by variant tag and
+    /// get it wrong).
+    fn seconds_per_bar(self) -> u64 {
+        match self {
+            Frequency::Minute(n) => 60 * n as u64,
+            Frequency::Hour(n) => 3_600 * n as u64,
+            Frequency::Day(n) => 86_400 * n as u64,
+            Frequency::Week(n) => 604_800 * n as u64,
+            Frequency::Month(n) => 2_592_000 * n as u64,
+        }
+    }
+
+    /// A stable rank per variant, used as a tie-breaker when two cadences
+    /// have the same `seconds_per_bar` (`Hour(24)` and `Day(1)`, say). Finer
+    /// units rank lower so they sort first — the derived `PartialEq` keeps
+    /// the two cases distinct, and the `Ord` contract (equal iff `PartialEq`
+    /// says so) is preserved.
+    fn variant_rank(self) -> u8 {
+        match self {
+            Frequency::Minute(_) => 0,
+            Frequency::Hour(_) => 1,
+            Frequency::Day(_) => 2,
+            Frequency::Week(_) => 3,
+            Frequency::Month(_) => 4,
+        }
+    }
+}
+
+impl Ord for Frequency {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.seconds_per_bar()
+            .cmp(&other.seconds_per_bar())
+            .then_with(|| self.variant_rank().cmp(&other.variant_rank()))
+    }
+}
+
+impl PartialOrd for Frequency {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl FromStr for Frequency {
     type Err = String;
 
@@ -679,5 +726,48 @@ mod tests {
     fn pick_frequency_last_declared_wins_at_tie() {
         let specs = vec![fspec("BTC:1d"), fspec("BTC:4h")];
         assert_eq!(pick_frequency(&specs, "BTC"), Some(Frequency::Hour(4)));
+    }
+
+    #[test]
+    fn frequency_orders_by_duration() {
+        // Canonical cadences in ascending duration.
+        assert!(Frequency::Minute(1) < Frequency::Minute(5));
+        assert!(Frequency::Minute(30) < Frequency::Hour(1));
+        assert!(Frequency::Hour(1) < Frequency::Hour(4));
+        assert!(Frequency::Hour(4) < Frequency::Day(1));
+        assert!(Frequency::Day(1) < Frequency::Week(1));
+        assert!(Frequency::Week(1) < Frequency::Month(1));
+    }
+
+    #[test]
+    fn frequency_ord_handles_exotic_multipliers() {
+        // Exotic user input: 120m parses as Minute(120) and must rank *after*
+        // Hour(1), which derived Ord would get wrong (lexicographic).
+        assert!(Frequency::Minute(120) > Frequency::Hour(1));
+        // Same-duration pairs still stay distinct via derived `PartialEq`
+        // (Ord ties break by variant, so `Hour(24)` sorts before `Day(1)`).
+        assert!(Frequency::Hour(24) < Frequency::Day(1));
+        assert_ne!(Frequency::Hour(24), Frequency::Day(1));
+    }
+
+    #[test]
+    fn frequency_sort_produces_semantic_order() {
+        // Sortable in a Vec — verifies the Ord + PartialOrd impls compose.
+        let mut fs = vec![
+            Frequency::Day(1),
+            Frequency::Minute(5),
+            Frequency::Hour(1),
+            Frequency::Week(1),
+        ];
+        fs.sort();
+        assert_eq!(
+            fs,
+            vec![
+                Frequency::Minute(5),
+                Frequency::Hour(1),
+                Frequency::Day(1),
+                Frequency::Week(1),
+            ]
+        );
     }
 }

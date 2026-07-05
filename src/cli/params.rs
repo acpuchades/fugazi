@@ -24,7 +24,9 @@ use std::str::FromStr;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Map, Value};
 
+use crate::calendar::Frequency;
 use crate::input::{self, Source};
+use crate::sigils;
 
 /// One term of a `--params` spec: set a single value, or load a mapping file.
 #[derive(Debug, Clone)]
@@ -107,6 +109,18 @@ fn parse_term(term: &str) -> Result<ParamTerm, String> {
         // `Source::from_str` is infallible; `@path` yields a `File`.
         Ok(ParamTerm::Load(term.parse().expect("infallible")))
     } else if let Some((name, raw)) = term.split_once('=') {
+        let name = name.trim();
+        // The `%`-prefixed namespace is reserved for CLI-managed template
+        // variables (`%SYMBOL`, `%FREQ`) that the CLI substitutes into user
+        // param *values* per iteration in batch mode (see [`crate::sigils`]).
+        // A user declaring their own `%FOO` would shadow that namespace, so
+        // reject it up front with a message that points at how to use them.
+        if name.starts_with('%') {
+            return Err(format!(
+                "invalid --params term `{term}`: names starting with `%` are reserved for \
+                 CLI-managed sigils (`%SYMBOL`, `%FREQ`) — reference them in a value, not a name"
+            ));
+        }
         Ok(ParamTerm::Set {
             name: name.to_string(),
             value: scalar(raw),
@@ -147,6 +161,48 @@ pub fn table(specs: &[ParamSpec]) -> Result<HashMap<String, Value>> {
         }
     }
     Ok(table)
+}
+
+/// Per-iteration wrapper around [`table`]: fold all specs into a name →
+/// value table, then rewrite every `String` leaf through
+/// [`crate::sigils::expand`] so `--params SYMBOL=%SYMBOL` becomes the
+/// iteration's actual symbol before it reaches the strategy YAML's
+/// `!param` substitution.
+///
+/// Non-`String` leaves (numbers, booleans, nested objects/arrays)
+/// recurse; a JSON string embedded in an array or object gets substituted
+/// too, so a user can `--params PAIRS='["%SYMBOL","USDT"]'` and see the
+/// iteration's symbol slot into the array. `%`-prefixed *names* are
+/// already rejected in [`parse_term`], so no collision at this point.
+pub fn table_for(
+    specs: &[ParamSpec],
+    symbol: &str,
+    freq: Option<Frequency>,
+) -> Result<HashMap<String, Value>> {
+    let mut table = table(specs)?;
+    for value in table.values_mut() {
+        expand_sigils_in_value(value, symbol, freq);
+    }
+    Ok(table)
+}
+
+/// Recursively rewrite `String` leaves in `value` through
+/// [`crate::sigils::expand`]. Non-string leaves pass through untouched.
+fn expand_sigils_in_value(value: &mut Value, symbol: &str, freq: Option<Frequency>) {
+    match value {
+        Value::String(s) => *s = sigils::expand(s, symbol, freq),
+        Value::Array(seq) => {
+            for v in seq {
+                expand_sigils_in_value(v, symbol, freq);
+            }
+        }
+        Value::Object(map) => {
+            for v in map.values_mut() {
+                expand_sigils_in_value(v, symbol, freq);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Rewrite every `param` placeholder in `value` to its resolved value, recursing
@@ -285,6 +341,43 @@ mod tests {
         let value: Value = serde_json::from_str(r#"{"period": {"param": {"key": "FAST"}}}"#).unwrap();
         let out = substitute(value, &table_of(&["FAST=5"])).unwrap();
         assert_eq!(out.get("period"), Some(&Value::from(5)));
+    }
+
+    #[test]
+    fn percent_prefixed_names_are_rejected() {
+        // The `%SYMBOL` / `%FREQ` namespace is reserved; declaring your own
+        // `%FOO` param is an error at parse time so the CLI can trust the
+        // reserved names elsewhere.
+        assert!("%FOO=1".parse::<ParamSpec>().is_err());
+        assert!("%SYMBOL=BTC".parse::<ParamSpec>().is_err());
+        // Bare `%` inside a value is fine — it's a value, not a name.
+        let map = table_of(&["SYM=%SYMBOL"]);
+        assert_eq!(map["SYM"], Value::from("%SYMBOL"));
+    }
+
+    #[test]
+    fn table_for_expands_sigils_in_values() {
+        // `SYMBOL=%SYMBOL` starts as the literal string `%SYMBOL` and gets
+        // substituted per iteration through `table_for`.
+        let specs: Vec<ParamSpec> = ["SYM=%SYMBOL", "FQ=%FREQ"]
+            .iter()
+            .map(|s| s.parse().unwrap())
+            .collect();
+        let map = table_for(&specs, "BTC", Some(crate::calendar::Frequency::Hour(1))).unwrap();
+        assert_eq!(map["SYM"], Value::from("BTC"));
+        assert_eq!(map["FQ"], Value::from("1h"));
+    }
+
+    #[test]
+    fn table_for_recurses_through_arrays_and_objects() {
+        // JSON-shaped values with sigils inside nested strings still get
+        // expanded — an `optimize` sweep of `["%SYMBOL","USDT"]` would work.
+        let specs: Vec<ParamSpec> = ["PAIR=[\"%SYMBOL\",\"USDT\"]"]
+            .iter()
+            .map(|s| s.parse().unwrap())
+            .collect();
+        let map = table_for(&specs, "BTC", None).unwrap();
+        assert_eq!(map["PAIR"], serde_json::json!(["BTC", "USDT"]));
     }
 
     #[test]
