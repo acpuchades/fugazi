@@ -142,6 +142,43 @@ fn batch_symbol_in_output_dir_produces_per_symbol_subdirs() {
 }
 
 #[test]
+fn sigils_resolve_in_single_group_frame() {
+    // A one-symbol frame + `%SYMBOL` in --output-dir/--params should still
+    // interpolate. Sigil substitution is a `--single`-mode feature, not a
+    // batch-mode-only one — the strategy templated on `SYMBOL=%SYMBOL`
+    // must work whether the frame carries one series or many.
+    let tmp = tempdir();
+    let only_btc: String = two_symbol_daily_csv()
+        .lines()
+        .filter(|l| !l.starts_with("AAPL"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let candles = write_csv(&tmp, "candles.csv", &only_btc);
+    let strategy = write_csv(&tmp, "strategy.yml", CROSSOVER_STRATEGY);
+    let out_root = tmp.join("out");
+    let out_pattern = format!("{}/%SYMBOL/%FREQ", out_root.display());
+
+    let (ok, err) = cli(&[
+        "run",
+        &format!("@{}", strategy),
+        "--series",
+        &format!("@{}", candles),
+        "--params",
+        "SYMBOL=%SYMBOL",
+        "--output-dir",
+        &out_pattern,
+        "--quiet",
+    ]);
+    assert!(ok, "single-group run should succeed; stderr:\n{err}");
+
+    // %SYMBOL → BTC; %FREQ → 1d (auto-detected).
+    let expected = out_root.join("BTC").join("1d");
+    assert!(expected.join("metrics.yml").exists(), "metrics.yml at {}", expected.display());
+    assert!(expected.join("trades.csv").exists());
+    assert!(expected.join("returns.csv").exists());
+}
+
+#[test]
 fn multiple_flag_is_rejected() {
     // Reserved for a future MultiAssetStrategy — must fail cleanly.
     let tmp = tempdir();

@@ -494,12 +494,13 @@ joined into one `--series` — `run` iterates the strategy across each
 group in parallel on a rayon pool. There's no separate subcommand; the
 trigger is the shape of the input.
 
-Two CLI-managed template variables get substituted per iteration:
-`%SYMBOL` (the iteration's symbol, path-normalized) and `%FREQ` (the
-iteration's effective bar cadence, or an empty string when detection
-fails and no `-f` was set). Reference them in `--params` values and
-`--output-dir`; the CLI folds them in per group. The `%`-prefixed name
-space is reserved — you cannot declare `--params %FOO=…` yourself.
+Two CLI-managed template variables get substituted whenever `--single`
+is active (both single-group and multi-group frames): `%SYMBOL` (the
+symbol, path-normalized) and `%FREQ` (the effective bar cadence, or an
+empty string when detection fails and no `-f` was set). Reference them
+in `--params` values and `--output-dir`; the CLI folds them in per
+group. The `%`-prefixed namespace is reserved — you cannot declare
+`--params %FOO=…` yourself.
 
 ```sh
 cargo run --bin fugazi -- run @examples/strategy.params.yml \

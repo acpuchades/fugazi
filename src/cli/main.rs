@@ -38,6 +38,7 @@ mod style;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -541,16 +542,30 @@ fn run(args: RunArgs) -> Result<()> {
         };
         batch::run(&frame, &opts)?;
     } else {
-        // Single-group frame: substitute params once and take the legacy
-        // write path. Byte-identical to the pre-batch release for a plain
-        // one-symbol CSV.
-        let param_table = params::table(&args.params)?;
+        // Single-group frame: sigil substitution still applies (the group's
+        // `(symbol, freq)` fills `%SYMBOL` / `%FREQ` in `--params` values
+        // and `--output-dir`) so a strategy templated on `SYMBOL=%SYMBOL`
+        // works the same whether the frame is one series or many. With no
+        // sigils in play, the write path is byte-identical to pre-batch.
+        let group = &groups[0];
+        let effective_freq = calendar::pick_frequency(&args.frequency, &group.symbol)
+            .or_else(|| {
+                group
+                    .freq
+                    .as_deref()
+                    .and_then(|s| calendar::Frequency::from_str(s).ok())
+            })
+            .or_else(|| {
+                calendar::detect_frequency(group.candles.iter().map(|(t, _)| t.as_str()))
+            });
+        let param_table = params::table_for(&args.params, &group.symbol, effective_freq)?;
         let spec = spec::StrategySpec::from_text_with_params(&text, &param_table)
             .with_context(|| parse_error_context(&args.strategy))?;
         let params_label = params_label(&param_table);
+        let expanded_out_dir = sigils::expand_path(&args.output_dir, &group.symbol, effective_freq);
         let opts = run::RunOptions {
             cash: args.cash,
-            out_dir: &args.output_dir,
+            out_dir: &expanded_out_dir,
             strategy_label: &strat_label,
             params: &params_label,
             bars_per_year: &args.bars_per_year,

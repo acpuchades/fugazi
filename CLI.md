@@ -141,11 +141,14 @@ When the frame carries more than one `(symbol, freq)` group, `run --single`
 in parallel on a rayon pool sized by `-j/--jobs`. There's no separate
 subcommand — the trigger is the shape of the input.
 
-**Sigils.** Two CLI-managed template variables are substituted per iteration:
+**Sigils.** Two CLI-managed template variables are substituted whenever
+`--single` is active (both single-group and multi-group frames), so the
+same templated strategy works on a one-symbol CSV and a multi-symbol
+one without changes:
 
-- `%SYMBOL` — the iteration's symbol (path-hostile characters like `/`,
-  `\`, `:`, `?`, `*`, `"`, `<`, `>`, `|` are normalized to `_`, so a
-  Binance-style `BTC/USDT` reads as `BTC_USDT`).
+- `%SYMBOL` — the iteration's (or single group's) symbol (path-hostile
+  characters like `/`, `\`, `:`, `?`, `*`, `"`, `<`, `>`, `|` are
+  normalized to `_`, so a Binance-style `BTC/USDT` reads as `BTC_USDT`).
 - `%FREQ` — the iteration's effective bar cadence (`1d`, `4h`, …) or an
   empty string when detection failed and no `-f` was given.
 
