@@ -745,6 +745,14 @@ impl SideSpec {
 }
 
 /// A whole `strategy.yml`: the traded symbol plus its long/short sides.
+///
+/// A `defs:` field is accepted and ignored — it exists as a parking spot for
+/// YAML anchors (`&name`) so they can be defined up-front in whatever order
+/// and reused via `*name` from `long`/`short`, without an anchor being pinned
+/// to whichever field happens to come first. `serde_norway` resolves anchors
+/// before deserialization, so by the time this struct is built the anchored
+/// subtrees have already been inlined at every `*name` site — nothing needs
+/// to be read from `defs` itself.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StrategySpec {
@@ -753,6 +761,10 @@ pub struct StrategySpec {
     pub long: Option<SideSpec>,
     #[serde(default)]
     pub short: Option<SideSpec>,
+    /// Ignored — a parking spot for YAML anchors. See the type-level docs.
+    #[serde(default, rename = "defs")]
+    #[allow(dead_code)]
+    defs: serde::de::IgnoredAny,
 }
 
 impl StrategySpec {
@@ -976,6 +988,26 @@ mod tests {
             assert_eq!(feed_bool(&mut check, bar(i as Real)), Some(false));
         }
         assert_eq!(feed_bool(&mut check, bar(inner_stable as Real)), Some(true));
+    }
+
+    #[test]
+    fn defs_block_parks_yaml_anchors_reused_across_sides() {
+        // Anchors defined in an ignored `defs:` block are inlined by the YAML
+        // parser at each `*name` site, so a shared signal can be defined once
+        // and reused from both sides without repeating the tree.
+        let yaml = r#"
+            defs:
+              - &cross_up !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }
+              - &cross_dn !crosses_below { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }
+            symbol: BTC
+            long:  { enter: *cross_up, exit: *cross_dn }
+            short: { enter: *cross_dn, exit: *cross_up }
+        "#;
+        let spec = StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
+            .unwrap();
+        assert_eq!(spec.symbol, "BTC");
+        assert!(spec.long.is_some() && spec.short.is_some());
+        let _ = spec.build();
     }
 
     #[test]

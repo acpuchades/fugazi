@@ -832,6 +832,34 @@ See [`examples/strategy.yml`](examples/strategy.yml) for a full SMA
 crossover and [`examples/strategy.params.yml`](examples/strategy.params.yml)
 for the parameterized version.
 
+### Reusing signals (YAML anchors)
+
+A signal or level that appears in more than one place can be defined once
+with a YAML anchor (`&name`) and reused with an alias (`*name`). Anchors
+are a native YAML feature — the parser inlines each alias with the anchored
+subtree before typed deserialization, so the strategy sees exactly the same
+tree it would have without the anchors.
+
+The one YAML rule is that `*name` must appear **after** `&name` in the
+document. To keep the definitions in a consistent, up-front place — rather
+than pinned to whichever field happens to come first — `StrategySpec`
+accepts an ignored `defs:` field. Park your anchors there:
+
+```yaml
+defs:
+  - &cross_up !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }
+  - &cross_dn !crosses_below { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }
+
+symbol: BTC
+long:  { enter: *cross_up, exit: *cross_dn }
+short: { enter: *cross_dn, exit: *cross_up }
+```
+
+`defs:` is read and discarded — nothing about it feeds into `build()`.
+Anchors compose with `!param`: the parser inlines aliases first, so a
+`!param` inside an anchored subtree is substituted at every reuse site
+in the same pass.
+
 ## Output files
 
 All CSV files are `;`-delimited for Excel.
