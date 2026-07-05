@@ -155,22 +155,25 @@ fn check_costs_accepts_valid_and_rejects_invalid() {
 }
 
 /// The `SYMBOL[FREQ]:` scope on `--costs` applies to the resolution used by
-/// the run: a BTC[1d]-scoped commission fires for `symbol: BTC`+`--frequency
-/// 1d` but the run against the same series without `--frequency` falls back
-/// to the global default. Verified by comparing the `total_commission` cell
-/// across two configurations.
+/// the run, matching against the *effective* cadence — user-set
+/// `--frequency` or, absent that, the value auto-detected from the series'
+/// `time` column. A BTC[1d]-scoped commission fires for `symbol: BTC` on
+/// daily bars (either explicit `-f 1d` or auto-detected); forcing an
+/// unrelated `-f 4h` disqualifies the scope and the run falls back to the
+/// default. Verified by comparing the `total_commission` cell across the
+/// two configurations.
 #[test]
 fn scope_precedence_applies_at_run_time() {
     let manifest = env!("CARGO_MANIFEST_DIR");
-    // The strategy in examples/ trades BTC. Set a small default commission and
-    // a much larger BTC[1d]-scoped one; the frequency-aware run should take
-    // the scoped model (higher total commission).
+    // The strategy in examples/ trades BTC on daily bars. Set a small default
+    // commission and a much larger BTC[1d]-scoped one; only the run whose
+    // effective cadence is 1d takes the scoped model.
     let costs = "commission=!percentage { rate: 0.0001 },BTC[1d]:commission=!percentage { rate: 0.05 }";
 
-    // Without --frequency, the freq-agnostic resolution should fall through
-    // scoped and pick default = 0%.
-    let out_no_freq = std::env::temp_dir().join("fugazi_costs_scope_no_freq");
-    let _ = std::fs::remove_dir_all(&out_no_freq);
+    // With `-f 4h` the effective cadence is 4h → BTC[1d] doesn't match, so the
+    // default (0.01%) fires.
+    let out_mismatch = std::env::temp_dir().join("fugazi_costs_scope_mismatch");
+    let _ = std::fs::remove_dir_all(&out_mismatch);
     let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
         .args([
             "run",
@@ -178,7 +181,9 @@ fn scope_precedence_applies_at_run_time() {
             "--series",
             &format!("@{manifest}/examples/candles.csv"),
             "--output-dir",
-            out_no_freq.to_str().unwrap(),
+            out_mismatch.to_str().unwrap(),
+            "--frequency",
+            "4h",
             "--quiet",
             "--costs",
             costs,
@@ -186,10 +191,10 @@ fn scope_precedence_applies_at_run_time() {
         .status()
         .expect("failed to launch fugazi");
     assert!(status.success());
-    let no_freq_metrics =
-        std::fs::read_to_string(out_no_freq.join("metrics.yml")).expect("metrics.yml");
+    let mismatch_metrics =
+        std::fs::read_to_string(out_mismatch.join("metrics.yml")).expect("metrics.yml");
 
-    // With `--frequency 1d`, the BTC[1d] scoped model wins → commission > 0.
+    // With `-f 1d`, the BTC[1d] scoped model wins → commission > 0.
     let out_daily = std::env::temp_dir().join("fugazi_costs_scope_daily");
     let _ = std::fs::remove_dir_all(&out_daily);
     let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
@@ -212,18 +217,48 @@ fn scope_precedence_applies_at_run_time() {
     let daily_metrics =
         std::fs::read_to_string(out_daily.join("metrics.yml")).expect("metrics.yml");
 
-    // The daily run should record a strictly higher total commission than the
-    // no-freq run: same fill schedule, scoped rate 0.05 vs default 0.0001 —
-    // ~500× larger.
+    // Omitting `--frequency` altogether lets the detector pick 1d from the
+    // daily-cadence CSV — same total commission as the explicit 1d run.
+    let out_detected = std::env::temp_dir().join("fugazi_costs_scope_detected");
+    let _ = std::fs::remove_dir_all(&out_detected);
+    let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
+        .args([
+            "run",
+            &format!("@{manifest}/examples/strategy.yml"),
+            "--series",
+            &format!("@{manifest}/examples/candles.csv"),
+            "--output-dir",
+            out_detected.to_str().unwrap(),
+            "--quiet",
+            "--costs",
+            costs,
+        ])
+        .status()
+        .expect("failed to launch fugazi");
+    assert!(status.success());
+    let detected_metrics =
+        std::fs::read_to_string(out_detected.join("metrics.yml")).expect("metrics.yml");
+
     let extract = |m: &str| -> f64 {
         m.lines()
             .find_map(|l| l.trim_start().strip_prefix("total_commission:"))
             .and_then(|s| s.trim().parse::<f64>().ok())
             .unwrap_or_else(|| panic!("total_commission not found in:\n{m}"))
     };
-    let n = extract(&no_freq_metrics);
-    let d = extract(&daily_metrics);
-    assert!(d > n * 100.0, "daily ({d}) should dominate no-freq ({n})");
+    let mismatch = extract(&mismatch_metrics);
+    let daily = extract(&daily_metrics);
+    let detected = extract(&detected_metrics);
+    // Same fill schedule; scoped rate 0.05 vs default 0.0001 → ~500× larger.
+    assert!(
+        daily > mismatch * 100.0,
+        "daily ({daily}) should dominate mismatch ({mismatch})",
+    );
+    // Detection routes the same 1d into the cost resolver, so the omitted-freq
+    // run matches the explicit-`-f 1d` run cell-for-cell.
+    assert_eq!(
+        detected, daily,
+        "detected 1d should reproduce explicit `-f 1d` total commission",
+    );
 }
 
 /// When two `--costs` terms with the same scope are given, the later one wins

@@ -142,18 +142,33 @@ struct RunArgs {
     /// one of `m` minute, `h` hour, `d` day, `w` week, `M` month; `N` is a
     /// positive integer multiplier. Combined with `--stocks`/`--forex`/
     /// `--crypto` to derive `bars_per_year`; `--bars-per-year` overrides.
-    #[arg(short, long, value_name = "CODE")]
-    frequency: Option<calendar::Frequency>,
+    ///
+    /// Repeatable, and each entry may carry a `SYMBOL:` scope prefix —
+    /// `-f 1d -f BTC:4h` — so a preset can pre-declare per-symbol cadences.
+    /// At run time the symbol-scoped entry matching the strategy's symbol
+    /// wins; the unscoped default applies otherwise. Omit entirely and the
+    /// CLI auto-detects the cadence from the input series' `time` column
+    /// (median gap snapped to a named cadence). The effective cadence —
+    /// scope match, plain override, or detected — is used for both
+    /// annualization *and* freq-scoped `--costs` matching.
+    #[arg(short, long, value_name = "[SYM:]CODE")]
+    frequency: Vec<calendar::FrequencySpec>,
 
     /// Explicit `bars_per_year` for the annualization step in `metrics.yml`
     /// (Sharpe/Sortino/CAGR/annualized volatility). Overrides the value
-    /// derived from `--stocks`/`--forex`/`--crypto` + `--frequency`. When
-    /// neither is set, the CLI auto-detects the bar cadence from the median
-    /// gap in the input `time` column (per `(symbol, freq)` series — see
-    /// `--series`); the calendar is `--stocks` (252 trading days a year)
-    /// unless overridden.
-    #[arg(long, value_name = "N")]
-    bars_per_year: Option<f64>,
+    /// derived from `--stocks`/`--forex`/`--crypto` + `--frequency`.
+    ///
+    /// Repeatable, and each entry may carry a `SYMBOL[FREQ]:` scope prefix —
+    /// `--bars-per-year 252 --bars-per-year BTC[1h]:8760` — so a preset can
+    /// pre-declare per-series overrides. At run time the entry with the
+    /// highest scope specificity matching the strategy's (symbol, effective
+    /// freq) wins (`SYM[FREQ]` > `SYM` > `[FREQ]` > default, ties break to
+    /// the last-declared). When no entry matches, the CLI auto-detects the
+    /// bar cadence from the median gap in the input `time` column (per
+    /// `(symbol, freq)` series — see `--series`) and pairs it with the
+    /// calendar (default `--stocks`, 252 trading days a year).
+    #[arg(long, value_name = "[SYM[FREQ]:]N")]
+    bars_per_year: Vec<calendar::BarsPerYearSpec>,
 
     /// Annualized risk-free rate as a fraction (e.g. `0.045` = 4.5% p.a.).
     /// Subtracted from the annualized mean return before Sharpe/Sortino/UPI,
@@ -313,13 +328,15 @@ struct OptimizeArgs {
     #[arg(long, group = "asset_class")]
     crypto: bool,
 
-    /// Bar cadence, e.g. `1d` / `4h`. Same semantics as `run --frequency`.
-    #[arg(short, long, value_name = "CODE")]
-    frequency: Option<calendar::Frequency>,
+    /// Bar cadence, e.g. `1d` / `4h`. Same semantics as `run --frequency`,
+    /// including repeatable `SYMBOL:CODE` overrides.
+    #[arg(short, long, value_name = "[SYM:]CODE")]
+    frequency: Vec<calendar::FrequencySpec>,
 
-    /// Explicit `bars_per_year`. Same semantics as `run --bars-per-year`.
-    #[arg(long, value_name = "N")]
-    bars_per_year: Option<f64>,
+    /// Explicit `bars_per_year`. Same semantics as `run --bars-per-year`,
+    /// including repeatable `SYMBOL[FREQ]:N` overrides.
+    #[arg(long, value_name = "[SYM[FREQ]:]N")]
+    bars_per_year: Vec<calendar::BarsPerYearSpec>,
 
     /// Annualized risk-free rate. Same semantics as `run --risk-free-rate`.
     #[arg(long, value_name = "RATE", default_value_t = 0.0)]
@@ -473,12 +490,12 @@ fn run(args: RunArgs) -> Result<()> {
         out_dir: &args.output_dir,
         strategy_label: &strat_label,
         params: &params_label,
-        explicit_bars_per_year: args.bars_per_year,
+        bars_per_year: &args.bars_per_year,
         asset_class: class,
         risk_free_rate: args.risk_free_rate,
         windowed: args.windowed,
         cost_config: &cost_config,
-        frequency: args.frequency,
+        frequency: &args.frequency,
         costs_supplied: costs_were_supplied,
         quiet: args.quiet,
     };
@@ -504,13 +521,13 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         metrics: args.metrics,
         best_by: args.best_by,
         output: &args.output,
-        explicit_bars_per_year: args.bars_per_year,
+        bars_per_year: &args.bars_per_year,
         asset_class: class,
         risk_free_rate: args.risk_free_rate,
         windowed: args.windowed,
         risk_aversion: args.risk_aversion.unwrap_or(0.0),
         cost_config: &cost_config,
-        frequency: args.frequency,
+        frequency: &args.frequency,
         costs_supplied: costs_were_supplied,
         jobs: args.jobs,
         quiet: args.quiet,

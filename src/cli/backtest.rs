@@ -38,7 +38,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use fugazi::prelude::*;
 
-use crate::calendar::{AssetClass, Frequency};
+use crate::calendar::{self, AssetClass, BarsPerYearSpec, Frequency, FrequencySpec};
 use crate::costs::CostConfig;
 use crate::data::DataFrame;
 use crate::metrics;
@@ -117,11 +117,12 @@ pub struct RunOptions<'a> {
     /// A one-line view of the effective params (`NAME=value, …`), echoed in the
     /// run block.
     pub params: &'a str,
-    /// Explicit `--bars-per-year` when the user set one. When `None` (and no
-    /// `--frequency` either), the annualization denominator is auto-detected
-    /// from the series' `time` column via
-    /// [`crate::calendar::resolve_with_detection`].
-    pub explicit_bars_per_year: Option<Real>,
+    /// `--bars-per-year` entries: each is a plain `N` (the unscoped default)
+    /// or a `SYMBOL[FREQ]:N` override. At run time the entry matching the
+    /// strategy's `(symbol, effective_freq)` with the highest scope
+    /// specificity wins; no match falls through to the class × frequency
+    /// calendar (see [`crate::calendar::pick_bars_per_year`]).
+    pub bars_per_year: &'a [BarsPerYearSpec],
     /// Trading-calendar shortcut (`--stocks`/`--forex`/`--crypto`). `None`
     /// falls back to [`AssetClass::Stocks`].
     pub asset_class: Option<AssetClass>,
@@ -137,9 +138,14 @@ pub struct RunOptions<'a> {
     /// Configured cost models, resolved into a live [`TradingCosts`] per
     /// (symbol, frequency) at run time. See [`crate::costs`].
     pub cost_config: &'a CostConfig,
-    /// Bar frequency (from `-f/--frequency`), passed to
-    /// [`CostConfig::resolve`] so a freq-scoped cost entry can apply.
-    pub frequency: Option<Frequency>,
+    /// `-f/--frequency` entries: each is a plain `CODE` or a `SYMBOL:CODE`
+    /// override. The one matching the strategy's symbol wins (symbol-scoped
+    /// beats default); no match falls through to auto-detection from the
+    /// input `time` column (see [`crate::calendar::detect_frequency`]). The
+    /// resulting *effective* freq is used for both annualization
+    /// (`bars_per_year`) and cost resolution ([`CostConfig::resolve`]), so
+    /// an `-f` override propagates consistently to both.
+    pub frequency: &'a [FrequencySpec],
     /// Whether the user passed at least one `--costs` flag (even `--costs
     /// none`). Governs the "no cost model set" warning banner.
     pub costs_supplied: bool,
@@ -168,20 +174,25 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
 
     let start = candles.first().map_or("", |(t, _)| t.as_str());
     let end = candles.last().map_or("", |(t, _)| t.as_str());
-    // Resolve `bars_per_year` for the annualized metrics: an explicit
-    // `--bars-per-year` wins, otherwise combine `--<class>` with either the
-    // explicit `--frequency` or, failing that, a cadence auto-detected from the
-    // strategy's dominant `(symbol, freq)` series in the frame.
-    let bars_per_year = crate::calendar::resolve_with_detection(
-        opts.explicit_bars_per_year,
-        opts.asset_class,
-        opts.frequency,
-        || frame.dominant_series_times(&symbol),
-    );
-    // Resolve the cost config for (symbol, frequency) up front so we can share
-    // the same live TradingCosts between the priced backtest and the gross
-    // no-cost re-run below.
-    let costs = opts.cost_config.resolve(&symbol, opts.frequency);
+    // The effective bar cadence for both annualization and cost-scope
+    // matching: a symbol-matching `-f/--frequency` entry wins, else we
+    // auto-detect from the strategy's dominant `(symbol, freq)` series in
+    // the frame. Used to match a `--bars-per-year SYM[FREQ]:N` override
+    // *and* to resolve a freq-scoped `--costs [FREQ]:…` model, so both
+    // surfaces see the same freq the user (or the detector) intended.
+    let effective_freq = calendar::pick_frequency(opts.frequency, &symbol).or_else(|| {
+        frame
+            .dominant_series_times(&symbol)
+            .and_then(calendar::detect_frequency)
+    });
+    // Resolve `bars_per_year`: a scope-matching `--bars-per-year` entry wins,
+    // else fall through to the class × cadence calendar.
+    let bars_per_year = calendar::pick_bars_per_year(opts.bars_per_year, &symbol, effective_freq)
+        .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
+    // Resolve the cost config for (symbol, effective_freq) up front so we can
+    // share the same live TradingCosts between the priced backtest and the
+    // gross no-cost re-run below.
+    let costs = opts.cost_config.resolve(&symbol, effective_freq);
     let costs_active = !costs.is_none();
     let no_cost_warning = !opts.costs_supplied;
     if !opts.quiet {

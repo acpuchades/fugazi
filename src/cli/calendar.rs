@@ -28,6 +28,13 @@
 //! [`Frequency`] variant. The caller does the grouping (one detection per
 //! `(symbol, freq)` series in the frame) so different-cadence series aren't
 //! averaged together.
+//!
+//! `--bars-per-year` itself is repeatable and each entry may carry a
+//! `SYMBOL[FREQ]:` scope prefix — the `[`crate::costs`] grammar — so a
+//! preset file can pre-declare per-series overrides (e.g. `BTC[1h]:8760`
+//! alongside `AAPL[1d]:252`). [`pick_bars_per_year`] resolves which entry
+//! (if any) wins for a run's `(symbol, effective_freq)`; no match falls
+//! through to the class × frequency calendar (see [`resolve`]).
 
 use std::str::FromStr;
 
@@ -150,30 +157,6 @@ pub fn resolve(
     class.bars_per_year(freq)
 }
 
-/// The full resolution pipeline including auto-detection: pick the effective
-/// bar frequency (explicit `-f/--frequency` first, else auto-detect from the
-/// series' times when both `explicit` and `freq` are unset), then reduce to
-/// `bars_per_year` per [`resolve`]. The `times` closure is only evaluated on
-/// the detection path, so callers can defer any per-frame scan until it's
-/// actually needed.
-pub fn resolve_with_detection<'a, F, I>(
-    explicit: Option<Real>,
-    class: Option<AssetClass>,
-    freq: Option<Frequency>,
-    times: F,
-) -> Real
-where
-    F: FnOnce() -> Option<I>,
-    I: IntoIterator<Item = &'a str>,
-{
-    let effective_freq = if explicit.is_some() || freq.is_some() {
-        freq
-    } else {
-        times().and_then(detect_frequency)
-    };
-    resolve(explicit, class, effective_freq)
-}
-
 /// Best-effort auto-detection of a bar cadence from a series' `time` column.
 ///
 /// Parses each string with a small vocabulary of common shapes — RFC 3339
@@ -233,6 +216,183 @@ fn parse_time_to_seconds(raw: &str) -> Option<i64> {
         return Some(date.midnight().assume_utc().unix_timestamp());
     }
     None
+}
+
+/// A `SYMBOL[FREQ]:` scope prefix. Either half is optional; both empty is the
+/// unscoped "default" entry. Same grammar as the `--costs` and `--overlay`
+/// prefixes (see [`crate::costs`], [`crate::overlay`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Scope {
+    pub symbol: Option<String>,
+    pub freq: Option<Frequency>,
+}
+
+impl Scope {
+    /// True when both halves match the run's (symbol, effective freq). An
+    /// absent half matches anything; a present symbol matches by equality; a
+    /// present freq matches only when the run's freq is `Some(_)` and equal.
+    pub fn matches(&self, symbol: &str, freq: Option<Frequency>) -> bool {
+        let sym_ok = self.symbol.as_deref().is_none_or(|s| s == symbol);
+        let freq_ok = self.freq.is_none_or(|f| Some(f) == freq);
+        sym_ok && freq_ok
+    }
+
+    /// Scope specificity for picking the winning entry: full `SYM[FREQ]` > `SYM`
+    /// > `[FREQ]` > default. Higher number wins.
+    fn specificity(&self) -> u8 {
+        match (self.symbol.is_some(), self.freq.is_some()) {
+            (true, true) => 3,
+            (true, false) => 2,
+            (false, true) => 1,
+            (false, false) => 0,
+        }
+    }
+}
+
+/// Split off a leading `SYMBOL[FREQ]:` prefix from `text` at bracket depth
+/// zero. Returns the (possibly default) scope and the remainder; the caller
+/// parses the remainder into the value.
+fn split_scope(text: &str) -> Result<(Scope, &str), String> {
+    let mut depth: i32 = 0;
+    for (i, ch) in text.char_indices() {
+        match ch {
+            '[' | '{' => depth += 1,
+            ']' | '}' => depth -= 1,
+            ':' if depth == 0 => {
+                let (head, tail) = (text[..i].trim(), &text[i + 1..]);
+                return Ok((parse_scope(head)?, tail));
+            }
+            _ => {}
+        }
+    }
+    Ok((Scope::default(), text))
+}
+
+/// Parse a bare `SYMBOL[FREQ]` prefix (no trailing colon), or return the
+/// default scope for an empty string. At least one half must be present.
+fn parse_scope(text: &str) -> Result<Scope, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(Scope::default());
+    }
+    let (sym_part, freq_part) = match text.find('[') {
+        Some(open) => {
+            if !text.ends_with(']') {
+                return Err(format!("scope `{text}`: `[freq]` bracket must close at the end"));
+            }
+            (text[..open].trim(), Some(text[open + 1..text.len() - 1].trim()))
+        }
+        None => (text, None),
+    };
+    let symbol = (!sym_part.is_empty()).then(|| sym_part.to_string());
+    let freq = match freq_part {
+        Some("") => {
+            return Err(format!("scope `{text}`: empty `[freq]` bracket"));
+        }
+        Some(f) => Some(Frequency::from_str(f).map_err(|e| format!("scope `{text}`: {e}"))?),
+        None => None,
+    };
+    if symbol.is_none() && freq.is_none() {
+        return Err(format!("scope `{text}`: neither symbol nor freq present"));
+    }
+    Ok(Scope { symbol, freq })
+}
+
+/// One `--bars-per-year` argument, parsed as either a plain `N` (the
+/// unscoped default entry) or a `SYMBOL[FREQ]:N` override that only applies
+/// when the strategy's (symbol, effective freq) matches. See
+/// [`pick_bars_per_year`] for the resolution rules.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BarsPerYearSpec {
+    pub scope: Scope,
+    pub value: Real,
+}
+
+impl FromStr for BarsPerYearSpec {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (scope, body) = split_scope(s.trim())?;
+        let body = body.trim();
+        if body.is_empty() {
+            return Err(format!("`{s}`: missing bars-per-year value after scope"));
+        }
+        let value: Real = body
+            .parse()
+            .map_err(|_| format!("`{s}`: `{body}` is not a number"))?;
+        if !value.is_finite() || value <= 0.0 {
+            return Err(format!(
+                "`{s}`: bars-per-year must be a finite positive number (got {value})"
+            ));
+        }
+        Ok(BarsPerYearSpec { scope, value })
+    }
+}
+
+/// Pick the winning `bars_per_year` for a run from the (repeatable)
+/// `--bars-per-year` entries and the resolved `(symbol, effective_freq)`.
+/// Highest scope specificity wins (`SYM[FREQ]` > `SYM` > `[FREQ]` > default);
+/// ties break to the last-declared entry so later flags override earlier
+/// ones. Returns `None` when no entry matches — the caller then falls back
+/// to the class × frequency calendar (see [`resolve`]).
+pub fn pick_bars_per_year(
+    specs: &[BarsPerYearSpec],
+    symbol: &str,
+    freq: Option<Frequency>,
+) -> Option<Real> {
+    specs
+        .iter()
+        .filter(|s| s.scope.matches(symbol, freq))
+        .max_by_key(|s| s.scope.specificity())
+        .map(|s| s.value)
+}
+
+/// One `--frequency` argument, parsed as either a plain `CODE` (the
+/// unscoped default entry) or a `SYMBOL:CODE` override that only applies
+/// when the strategy's symbol matches. The `[FREQ]:` half of the general
+/// scope grammar is rejected here — pinning a cadence override to a
+/// specific cadence would be circular. See [`pick_frequency`] for the
+/// resolution rules.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrequencySpec {
+    pub symbol: Option<String>,
+    pub value: Frequency,
+}
+
+impl FromStr for FrequencySpec {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (scope, body) = split_scope(s.trim())?;
+        if scope.freq.is_some() {
+            return Err(format!(
+                "`{s}`: `[freq]` scope isn't meaningful on --frequency (the value is a freq)"
+            ));
+        }
+        let body = body.trim();
+        if body.is_empty() {
+            return Err(format!("`{s}`: missing frequency code after scope"));
+        }
+        let value =
+            Frequency::from_str(body).map_err(|e| format!("`{s}`: {e}"))?;
+        Ok(FrequencySpec {
+            symbol: scope.symbol,
+            value,
+        })
+    }
+}
+
+/// Pick the effective bar cadence for `symbol` from the (repeatable)
+/// `--frequency` entries. A symbol-scoped `SYM:CODE` wins over the
+/// unscoped default; ties break to the last-declared entry so later flags
+/// override earlier ones. Returns `None` when no entry matches — the
+/// caller then falls back to auto-detection (see [`detect_frequency`]).
+pub fn pick_frequency(specs: &[FrequencySpec], symbol: &str) -> Option<Frequency> {
+    specs
+        .iter()
+        .filter(|s| s.symbol.as_deref().is_none_or(|sym| sym == symbol))
+        .max_by_key(|s| u8::from(s.symbol.is_some()))
+        .map(|s| s.value)
 }
 
 /// Snap a per-bar delta in seconds to the closest named [`Frequency`]. The
@@ -391,5 +551,133 @@ mod tests {
     fn detect_frequency_needs_two_parseable_stamps() {
         // One time isn't enough to compute a gap.
         assert!(detect_frequency(["2024-01-01"]).is_none());
+    }
+
+    fn spec(s: &str) -> BarsPerYearSpec {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn bars_per_year_spec_parses_plain_number() {
+        let s = spec("252");
+        assert_eq!(s.scope, Scope::default());
+        assert_eq!(s.value, 252.0);
+    }
+
+    #[test]
+    fn bars_per_year_spec_parses_scoped_forms() {
+        assert_eq!(spec("BTC:8760").scope.symbol.as_deref(), Some("BTC"));
+        assert_eq!(spec("BTC:8760").scope.freq, None);
+        assert_eq!(spec("[1h]:8760").scope.symbol, None);
+        assert_eq!(spec("[1h]:8760").scope.freq, Some(Frequency::Hour(1)));
+        let s = spec("BTC[1h]:8760");
+        assert_eq!(s.scope.symbol.as_deref(), Some("BTC"));
+        assert_eq!(s.scope.freq, Some(Frequency::Hour(1)));
+        assert_eq!(s.value, 8760.0);
+    }
+
+    #[test]
+    fn bars_per_year_spec_rejects_bad_input() {
+        // Value missing entirely.
+        assert!("BTC:".parse::<BarsPerYearSpec>().is_err());
+        // Value not a number.
+        assert!("BTC:oops".parse::<BarsPerYearSpec>().is_err());
+        // Non-positive value.
+        assert!("0".parse::<BarsPerYearSpec>().is_err());
+        assert!("-1".parse::<BarsPerYearSpec>().is_err());
+        // Empty freq bracket.
+        assert!("BTC[]:8760".parse::<BarsPerYearSpec>().is_err());
+        // Bracket doesn't close at end.
+        assert!("BTC[1h:8760".parse::<BarsPerYearSpec>().is_err());
+    }
+
+    #[test]
+    fn pick_bars_per_year_prefers_specificity() {
+        // Full > symbol > freq > default; last-declared wins on a tie.
+        let specs: Vec<BarsPerYearSpec> = [
+            "500", // default
+            "BTC:1000",
+            "[1h]:2000",
+            "BTC[1h]:4000",
+            "ETH[1d]:9999",
+        ]
+        .iter()
+        .map(|s| spec(s))
+        .collect();
+        assert_eq!(
+            pick_bars_per_year(&specs, "BTC", Some(Frequency::Hour(1))),
+            Some(4000.0)
+        );
+        assert_eq!(
+            pick_bars_per_year(&specs, "BTC", Some(Frequency::Day(1))),
+            Some(1000.0)
+        );
+        assert_eq!(
+            pick_bars_per_year(&specs, "SOL", Some(Frequency::Hour(1))),
+            Some(2000.0)
+        );
+        assert_eq!(pick_bars_per_year(&specs, "SOL", None), Some(500.0));
+    }
+
+    #[test]
+    fn pick_bars_per_year_falls_through_when_nothing_matches() {
+        // Only a specific scope declared; the run's (symbol, freq) doesn't match.
+        let specs = vec![spec("BTC[1h]:8760")];
+        assert_eq!(
+            pick_bars_per_year(&specs, "AAPL", Some(Frequency::Day(1))),
+            None
+        );
+    }
+
+    #[test]
+    fn pick_bars_per_year_last_declared_wins_at_tie() {
+        // Two equally specific entries — later one wins.
+        let specs = vec![spec("BTC:100"), spec("BTC:200")];
+        assert_eq!(pick_bars_per_year(&specs, "BTC", None), Some(200.0));
+    }
+
+    fn fspec(s: &str) -> FrequencySpec {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn frequency_spec_parses_plain_and_symbol_scoped() {
+        assert_eq!(fspec("1d").symbol, None);
+        assert_eq!(fspec("1d").value, Frequency::Day(1));
+        assert_eq!(fspec("BTC:4h").symbol.as_deref(), Some("BTC"));
+        assert_eq!(fspec("BTC:4h").value, Frequency::Hour(4));
+    }
+
+    #[test]
+    fn frequency_spec_rejects_freq_scope() {
+        // `[FREQ]:` scope on a --frequency value is circular — rejected.
+        assert!("[1h]:4h".parse::<FrequencySpec>().is_err());
+        assert!("BTC[1h]:4h".parse::<FrequencySpec>().is_err());
+    }
+
+    #[test]
+    fn frequency_spec_rejects_bad_input() {
+        assert!("BTC:".parse::<FrequencySpec>().is_err());
+        assert!("BTC:oops".parse::<FrequencySpec>().is_err());
+    }
+
+    #[test]
+    fn pick_frequency_prefers_symbol_over_default() {
+        let specs = vec![fspec("1d"), fspec("BTC:4h"), fspec("ETH:1h")];
+        assert_eq!(pick_frequency(&specs, "BTC"), Some(Frequency::Hour(4)));
+        assert_eq!(pick_frequency(&specs, "ETH"), Some(Frequency::Hour(1)));
+        assert_eq!(pick_frequency(&specs, "SOL"), Some(Frequency::Day(1)));
+    }
+
+    #[test]
+    fn pick_frequency_returns_none_when_nothing_matches() {
+        let specs = vec![fspec("BTC:4h")];
+        assert_eq!(pick_frequency(&specs, "AAPL"), None);
+    }
+
+    #[test]
+    fn pick_frequency_last_declared_wins_at_tie() {
+        let specs = vec![fspec("BTC:1d"), fspec("BTC:4h")];
+        assert_eq!(pick_frequency(&specs, "BTC"), Some(Frequency::Hour(4)));
     }
 }
