@@ -66,9 +66,6 @@ pub struct OptimizeOptions<'a> {
     pub output: &'a Path,
     pub bars_per_year: Real,
     pub risk_free_rate: Real,
-    /// Disable the default stability gating (and its metric anchor) for every
-    /// grid point — see `run --keep-unstable`.
-    pub keep_unstable: bool,
     /// Evaluate each grid point in non-overlapping windows of this many bars
     /// (same windowing as `run -w`): every `-m` metric becomes two CSV columns
     /// (`<name>_mean` / `<name>_std`, cross-window over the windows where the
@@ -125,7 +122,6 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
         opts.cash,
         opts.bars_per_year,
         opts.risk_free_rate,
-        opts.keep_unstable,
         opts.cost_config,
         opts.frequency,
     );
@@ -163,7 +159,6 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
     let cash = opts.cash;
     let bpy = opts.bars_per_year;
     let rf = opts.risk_free_rate;
-    let keep_unstable = opts.keep_unstable;
     let windowed = opts.windowed.map(NonZeroUsize::get);
     let base = &base_value;
     let candles_ref = &candles;
@@ -180,7 +175,6 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
                 cash,
                 bpy,
                 rf,
-                keep_unstable,
                 cost_config,
                 frequency,
                 w,
@@ -191,7 +185,6 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
                 cash,
                 bpy,
                 rf,
-                keep_unstable,
                 cost_config,
                 frequency,
             ))),
@@ -753,7 +746,6 @@ mod tests {
         let report: RunReport<String> = RunReport {
             equity_curve: vec![110.0, 110.0, 132.0, 132.0],
             fills: vec![],
-            active: vec![true; 4],
             initial_equity: 100.0,
         };
         let windows = metrics::windowed_from_report(&report, 2, 252.0, 0.0);

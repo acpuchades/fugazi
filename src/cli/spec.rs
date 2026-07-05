@@ -295,13 +295,6 @@ pub enum SourceSpec {
         source: Box<SourceSpec>,
         period: usize,
     },
-    /// Masks the source until its whole chain's `stable_period()` has elapsed,
-    /// converting the soft unstable period (EMA/RSI/ATR seeding) into hard
-    /// warm-up — see [`fugazi::indicators::Stable`].
-    Stable {
-        #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
-    },
     /// Holds the most recent `Some` output of `source`, re-emitting it on
     /// ticks where `source` returns `None`. Wrap the outermost recursive
     /// smoother of a resampled pipeline so per-base-tick consumers see the
@@ -309,28 +302,15 @@ pub enum SourceSpec {
     /// [`fugazi::indicators::Latch`].
     Latch { source: Box<SourceSpec> },
     /// Aggregates `every` base candles into one higher-timeframe candle and
-    /// projects `field` (one of `open`, `high`, `low`, `close`, `volume`,
-    /// `typical`, `median`) as its output. `field` is **required** —
-    /// cross-timeframe pipelines always mean "run *this specific* projection
-    /// on the resampled candle", so no implicit fallback. Wrap the whole
-    /// downstream chain in [`Latch`](SourceSpec::Latch) so per-base-tick reads
-    /// see the finished value.
-    Resample { every: usize, field: ResampleField },
-}
-
-/// Which field of a resampled candle a `!resample` spec projects. Mirrors the
-/// base-candle field accessors ([`SourceSpec::Close`] etc.) but for the
-/// higher-timeframe emission of a [`fugazi::indicators::Resample`].
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ResampleField {
-    Open,
-    High,
-    Low,
-    Close,
-    Volume,
-    Typical,
-    Median,
+    /// runs the `inner` source over it, emitting `inner`'s output on each
+    /// completed bucket and `None` in between. `inner` is any source that
+    /// reads a candle (`close`/`high`/`typical`, `!ema { period: N, source:
+    /// close }`, `!add { lhs, rhs }`, …); it advances only on emissions from
+    /// the resample, so an `!ema` inside `!resample` recurses over the HTF
+    /// closes, not the base ones. Wrap the whole downstream chain in
+    /// [`Latch`](SourceSpec::Latch) so per-base-tick reads see the finished
+    /// value between boundaries.
+    Resample { every: usize, inner: Box<SourceSpec> },
 }
 
 impl SourceSpec {
@@ -512,27 +492,84 @@ impl SourceSpec {
             Roc { source, periods } => dyn_::wrap(real(source).roc(*periods)),
             RollingMax { source, period } => dyn_::wrap(real(source).rolling_max(*period)),
             RollingMin { source, period } => dyn_::wrap(real(source).rolling_min(*period)),
-            Stable { source } => dyn_::stable(source.build(anchor)),
             Latch { source } => {
                 // Wrap the built source in the library's Latch — preserves
                 // Real output; warm-up / unstable pass through unchanged.
                 let inner = AsReal::new(source.build(anchor));
                 dyn_::wrap(self::Latch::new(inner))
             }
-            Resample { every, field } => {
+            Resample { every, inner } => {
                 assert!(*every > 0, "resample every must be greater than zero");
-                let r = self::Resample::new(CurrentBar::new(), *every);
-                match field {
-                    ResampleField::Open => dyn_::wrap(r.open()),
-                    ResampleField::High => dyn_::wrap(r.high()),
-                    ResampleField::Low => dyn_::wrap(r.low()),
-                    ResampleField::Close => dyn_::wrap(r.close()),
-                    ResampleField::Volume => dyn_::wrap(r.volume()),
-                    ResampleField::Typical => dyn_::wrap(r.typical()),
-                    ResampleField::Median => dyn_::wrap(r.median()),
-                }
+                let resample = self::Resample::new(CurrentBar::new(), *every);
+                let inner_typed = AsReal::new(inner.build(anchor));
+                dyn_::wrap(ResampleThen::new(resample, inner_typed))
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ResampleThen: run an inner Candle→Real source over the higher-timeframe
+// candles emitted by a Resample. The inner advances only on Resample
+// emissions, so an Ema-P inside `!resample { every, inner }` recurses over
+// the HTF closes (not the base ones) and its warm-up / unstable-period scale
+// by `every` in base-bar terms.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct ResampleThen<Inner> {
+    resample: Resample<CurrentBar>,
+    inner: Inner,
+    value: Option<Real>,
+}
+
+impl<Inner> ResampleThen<Inner> {
+    fn new(resample: Resample<CurrentBar>, inner: Inner) -> Self {
+        Self {
+            resample,
+            inner,
+            value: None,
+        }
+    }
+}
+
+impl<Inner> Indicator for ResampleThen<Inner>
+where
+    Inner: Indicator<Input = Candle, Output = Real>,
+{
+    type Input = Candle;
+    type Output = Real;
+
+    fn update(&mut self, c: Candle) -> Option<Real> {
+        self.value = match self.resample.update(c) {
+            Some(htf) => self.inner.update(htf),
+            None => None,
+        };
+        self.value
+    }
+
+    fn value(&self) -> Option<Real> {
+        self.value
+    }
+
+    fn warm_up_period(&self) -> usize {
+        // The k-th HTF candle arrives at base sample `every * k` (given
+        // Resample<CurrentBar>::warm_up_period() == every). The inner needs
+        // `inner.warm_up_period()` HTF samples to be ready, so its first
+        // `Some` arrives at base sample `every * inner.warm_up_period()`.
+        self.resample.every() * self.inner.warm_up_period().max(1)
+    }
+
+    fn unstable_period(&self) -> usize {
+        // Inner's unstable period is in HTF-sample units; convert to base
+        // bars by scaling with `every`.
+        self.inner.unstable_period() * self.resample.every()
+    }
+
+    fn reset(&mut self) {
+        self.resample.reset();
+        self.inner.reset();
+        self.value = None;
     }
 }
 
@@ -617,11 +654,11 @@ pub enum SignalSpec {
     Any(Vec<SignalSpec>),
     Not(Box<SignalSpec>),
     Changed(Box<SignalSpec>),
-    /// Masks the signal until its whole chain's `stable_period()` has elapsed
-    /// (read as `false` meanwhile) — the boolean twin of
-    /// [`SourceSpec::Stable`]. Gate an entry with this and no trade can
-    /// trigger off a seed-contaminated indicator value.
-    Stable(Box<SignalSpec>),
+    /// Reports whether `signal`'s chain has been fed at least its
+    /// `stable_period()` samples. Compose in an `!and` with an entry signal to
+    /// gate the entry on stability (see
+    /// [`fugazi::indicators::Stable`]).
+    Stable { signal: Box<SignalSpec> },
     /// A constant boolean leaf. Spelled `!value` like [`SourceSpec::Value`] —
     /// one tag for "a literal", typed by position (bool here, number there).
     Value(bool),
@@ -719,7 +756,7 @@ impl SignalSpec {
             }
             Not(inner) => dyn_::wrap(boolean(inner).not()),
             Changed(inner) => dyn_::wrap(boolean(inner).changed()),
-            Stable(inner) => dyn_::stable(inner.build(anchor)),
+            Stable { signal } => dyn_::stable_check(signal.build(anchor).stable_period()),
             Value(b) => dyn_::wrap(self::Const::<Candle>::new(*b)),
         }
     }
@@ -797,30 +834,18 @@ impl StrategySpec {
 
     /// Build the live [`DynSingleStrategy`] this spec describes.
     ///
-    /// With `stable` set (the CLI default; `--keep-unstable` turns it off) each
-    /// side's **entry** signal is wrapped in
-    /// [`Stable`](fugazi::indicators::Stable) at the runtime-typed layer via
-    /// [`dyn_::stable`], so no entry can fire while its chain is still
-    /// seed-contaminated. Exits and protective levels are not gated — no
-    /// position can exist before the first gated entry.
-    ///
-    /// The **measurement crop point** for downstream metric slicing is *not*
-    /// computed here anymore; it's derived per-bar at run time from
-    /// [`Strategy::is_active`](fugazi::Strategy::is_active) via
-    /// [`RunReport::active`](fugazi::RunReport). The `.stable()` wrap on
-    /// entries stays for its safety role (no contaminated position opens); the
-    /// activation crop is a downstream reduction.
-    pub fn build(&self, stable: bool) -> DynSingleStrategy {
+    /// No automatic wrapping — every signal / level is built exactly as the
+    /// YAML describes it. If you want to gate an entry on stability, compose
+    /// [`Stable`](fugazi::indicators::Stable) explicitly at the signal level:
+    /// `enter: !and [<entry>, !stable { source: <source-of-interest> }]`.
+    pub fn build(&self) -> DynSingleStrategy {
         let mut strat = SingleAssetStrategy::new(self.symbol.clone());
         // One position per strategy, shared by every `entry`/`peak`/`trough` leaf
         // in the sides' signals and stop levels.
         let anchor = strat.position();
-        let gate = |enter: Box<dyn DynIndicator>| -> Box<dyn DynIndicator> {
-            if stable { dyn_::stable(enter) } else { enter }
-        };
         if let Some(long) = &self.long {
             strat = strat.long_on(
-                AsBool::new(gate(long.enter.build(&anchor))),
+                AsBool::new(long.enter.build(&anchor)),
                 AsBool::new(long.exit(&anchor)),
             );
             if let Some(sl) = &long.stop_loss {
@@ -832,7 +857,7 @@ impl StrategySpec {
         }
         if let Some(short) = &self.short {
             strat = strat.short_on(
-                AsBool::new(gate(short.enter.build(&anchor))),
+                AsBool::new(short.enter.build(&anchor)),
                 AsBool::new(short.exit(&anchor)),
             );
             if let Some(sl) = &short.stop_loss {
@@ -874,9 +899,6 @@ impl Strategy for DynSingleStrategy {
     fn trade(&self, wallet: &mut dyn Wallet<String>) {
         self.inner.trade(wallet);
     }
-    fn is_active(&self) -> bool {
-        self.inner.is_active()
-    }
     fn reset(&mut self) {
         self.inner.reset();
     }
@@ -907,26 +929,6 @@ mod tests {
         }
     }
 
-    /// The first bar a strategy would declare itself active, given a synthetic
-    /// well-formed candle stream — i.e. `activation_bar` on the report.active
-    /// vector after driving `n` candles.
-    fn first_active_bar(mut strat: DynSingleStrategy, n: usize) -> usize {
-        let mut w = PaperWallet::new(1_000.0);
-        let mut first: Option<usize> = None;
-        for i in 0..n {
-            let c = bar(100.0 + (i as Real) * 0.1);
-            for fill in w.update("BTC".to_string(), c) {
-                strat.on_fill(&fill);
-            }
-            strat.update(c);
-            strat.trade(&mut w);
-            if first.is_none() && strat.is_active() {
-                first = Some(i);
-            }
-        }
-        first.unwrap_or(n)
-    }
-
     #[test]
     fn builds_an_sma_crossover_signal_that_fires() {
         let yaml = r#"
@@ -955,7 +957,7 @@ mod tests {
         let spec: StrategySpec = serde_json::from_value(json).unwrap();
         assert_eq!(spec.symbol, "BTC");
         assert!(spec.long.is_some());
-        let _ = spec.build(true);
+        let _ = spec.build();
     }
 
     #[test]
@@ -982,7 +984,7 @@ mod tests {
         let spec = StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
             .unwrap();
         assert_eq!(spec.symbol, "BTC");
-        let _strat = spec.build(true);
+        let _strat = spec.build();
     }
 
     #[test]
@@ -996,10 +998,7 @@ mod tests {
         "#;
         let spec =
             StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new()).unwrap();
-        let mut strat = spec.build(true);
-        // The `!value true` entry has stable_period 0; the stop-loss uses
-        // `entry` (position-anchored, warm_up 0). Strategy is active from bar 1.
-        assert!(strat.is_active());
+        let mut strat = spec.build();
         let mut w = PaperWallet::new(1_000.0);
         for c in [
             Candle::new(100.0, 100.0, 100.0, 100.0, 0.0),
@@ -1017,28 +1016,24 @@ mod tests {
     }
 
     #[test]
-    fn stable_gates_a_source_until_its_stable_period() {
-        let spec: SourceSpec =
-            serde_norway::from_str("!stable { source: !ema { period: 3 } }").unwrap();
-        let gated = spec.build(&Position::new());
-        let raw = Ema::new(Current::close(), 3);
-        assert_eq!(gated.warm_up_period(), raw.stable_period());
-        assert_eq!(gated.unstable_period(), 0);
-    }
-
-    #[test]
-    fn stable_gates_a_whole_signal() {
+    fn stable_signal_flips_true_at_source_stable_period() {
+        // The new `!stable { signal }` returns a `bool` — false before the
+        // inner signal's `stable_period()` samples have arrived, true from
+        // that sample onwards. Warm-up = 0 (always emits Some).
         let yaml = r#"
-            symbol: BTC
-            long:
-              enter: !stable { above: { source: { ema: { period: 3 } }, level: 100 } }
+            !stable
+            signal: !above { source: !ema { period: 3 }, level: 0 }
         "#;
-        let spec =
-            StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new()).unwrap();
-        let gated = spec.long.as_ref().unwrap().enter.build(&Position::new());
-        let raw = Ema::new(Current::close(), 3).above(100.0);
-        assert_eq!(gated.warm_up_period(), raw.stable_period());
-        assert_eq!(gated.unstable_period(), 0);
+        let spec: SignalSpec = serde_norway::from_str(yaml).unwrap();
+        let mut check = spec.build(&Position::new());
+        assert_eq!(check.warm_up_period(), 0);
+
+        // Ema-3 over close: warm_up 1, unstable 10, stable_period 11.
+        let inner_stable = Ema::new(Current::close(), 3).above(0.0).stable_period();
+        for i in 1..inner_stable {
+            assert_eq!(feed_bool(&mut check, bar(i as Real)), Some(false));
+        }
+        assert_eq!(feed_bool(&mut check, bar(inner_stable as Real)), Some(true));
     }
 
     #[test]
@@ -1048,40 +1043,15 @@ mod tests {
         let spec = StrategySpec::from_text_with_params(doc, &std::collections::HashMap::new())
             .unwrap();
         assert_eq!(spec.symbol, "ETH");
-        let _strat = spec.build(true);
-    }
-
-    #[test]
-    fn build_gates_entries_and_is_active_after_stable_period() {
-        // An EMA-crossover entry has a real unstable tail; gated, no entry can
-        // fire before the chain's stable period. `is_active` reports true from
-        // the bar every held indicator has been fed at least `stable_period`
-        // samples — which for a single-side strategy = the entry's stable_period.
-        let yaml = r#"
-            symbol: BTC
-            long:
-              enter: !crosses_above { lhs: !ema { period: 3 }, rhs: !ema { period: 8 } }
-        "#;
-        let spec =
-            StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new()).unwrap();
-        let raw = spec.long.as_ref().unwrap().enter.build(&Position::new());
-        let expected = raw.stable_period();
-        assert!(expected > raw.warm_up_period(), "entry must have a soft tail");
-
-        // Under `stable = true`, entries are wrapped in `Stable` at build time
-        // — same as today. The `is_active` bar the strategy first reports true
-        // matches the raw signal's stable_period (Stable's warm_up_period).
-        let strat = spec.build(true);
-        let first_active = first_active_bar(strat, expected + 5);
-        assert_eq!(first_active, expected - 1); // zero-based index of the stable_period-th bar
+        let _strat = spec.build();
     }
 
     #[test]
     fn resample_tag_projects_the_field() {
-        // `!resample { every: N, field: close }` emits the resampled close on
+        // `!resample { every: N, inner: close }` emits the resampled close on
         // the Nth base tick, None between.
         let spec: SourceSpec =
-            serde_norway::from_str("!resample { every: 4, field: close }").unwrap();
+            serde_norway::from_str("!resample { every: 4, inner: close }").unwrap();
         let mut built = spec.build(&Position::new());
         for i in 1..=8 {
             let out = feed_real(&mut built, bar(i as Real));
@@ -1095,10 +1065,10 @@ mod tests {
 
     #[test]
     fn latch_tag_holds_the_last_value() {
-        // `!latch { source: !resample { every: 3, field: close } }` — Some on
+        // `!latch { source: !resample { every: 3, inner: close } }` — Some on
         // the Nth bar, held on the two between.
         let spec: SourceSpec = serde_norway::from_str(
-            "!latch { source: !resample { every: 3, field: close } }",
+            "!latch { source: !resample { every: 3, inner: close } }",
         )
         .unwrap();
         let mut built = spec.build(&Position::new());
@@ -1112,11 +1082,11 @@ mod tests {
 
     #[test]
     fn latch_ema_of_resample_matches_reference_htf_ema() {
-        // The composition-order regression at the YAML surface: an EMA-3 fed
-        // by !resample close, wrapped in !latch, agrees numerically with
-        // Ema(Resample.close, 3) at every boundary.
+        // The composition-order regression at the YAML surface: an EMA-3
+        // running inside !resample, wrapped in !latch, agrees numerically
+        // with Ema(Resample.close, 3) at every boundary.
         let spec: SourceSpec = serde_norway::from_str(
-            "!latch { source: !ema { period: 3, source: !resample { every: 4, field: close } } }",
+            "!latch { source: !resample { every: 4, inner: !ema { period: 3, source: close } } }",
         )
         .unwrap();
         let mut built = spec.build(&Position::new());

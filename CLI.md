@@ -25,8 +25,8 @@ Six subcommands:
 The subcommands share their input vocabulary — the `<STRATEGY>` positional,
 `--series`, `--params`, the calendar shortcuts (`--stocks`/`--forex`/`--crypto`,
 `--frequency`, `--bars-per-year`), `--risk-free-rate`, and the measurement
-knobs (`-w/--windowed`, `--keep-unstable`). Everything that follows those
-flags is documented once, in [Common flags](#common-flags).
+knob `-w/--windowed`. Everything that follows those flags is documented once,
+in [Common flags](#common-flags).
 
 ## Install
 
@@ -98,7 +98,7 @@ Backtest one strategy against one dataset and write the result files.
 fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
           [--params <SPEC> …] [--cash <N>] [--costs <SPEC> …]
           [--stocks | --forex | --crypto] [-f <CODE>] [--bars-per-year <N>]
-          [--risk-free-rate <RATE>] [-w <N>] [--keep-unstable] [-q]
+          [--risk-free-rate <RATE>] [-w <N>] [-q]
 ```
 
 | Flag | Description |
@@ -114,7 +114,6 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
 | `--bars-per-year <N>` | Explicit override for the annualization denominator. Wins over the calendar/frequency pair. |
 | `--risk-free-rate <RATE>` | Annualized risk-free rate as a fraction (`0.045` = 4.5% p.a.). Default `0`. See [Risk-free rate](#risk-free-rate). |
 | `-w`, `--windowed <N>` | Compute the metrics in non-overlapping windows of `N` bars, writing `metrics.csv` (one row per window) instead of `metrics.yml`. See [Windowed metrics](#windowed-metrics). |
-| `--keep-unstable` | Disable the default stability gating of entry signals and its metric anchor. See [Stability gating](#stability-gating). |
 | `-q`, `--quiet` | Silence the console output. Files still get written. |
 
 **Outputs.** Three files in `--output-dir`, all documented in
@@ -130,8 +129,9 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
 (each fill listed after the run completes), **result** (bars, trades, capital
 before → after, start/finish timestamps + elapsed), and **metrics**
 (the headline lines of `metrics.yml` — cross-window mean ± stddev under
-`-w/--windowed` — prefixed by a `measured` line whenever the
-[stability gate](#stability-gating) skipped leading bars).
+`-w/--windowed`). Metrics cover the whole run; if a strategy needs to hold
+off entries until every source it consults is past its unstable tail, the
+[`!stable` signal](#signals) is composed at the entry.
 
 ### `check`
 
@@ -194,7 +194,7 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
                --params <SPEC> [--params <SPEC> …]
                -m <METRIC>[,<METRIC>…] [-m <METRIC>…]
                -o <FILE> [--best-by <METRIC>] [-j <N>]
-               [-w <N> [-k <K>]] [--keep-unstable]
+               [-w <N> [-k <K>]]
                [--cash <N>]
                [--stocks | --forex | --crypto] [-f <CODE>] [--bars-per-year <N>]
                [--risk-free-rate <RATE>] [-q]
@@ -210,7 +210,6 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
 | `--best-by <METRIC>` | Sort rows by this metric (direction hardcoded per metric — see [Best-by directions](#best-by-directions)). Omit to keep cartesian order and skip the "best" console block. |
 | `-w`, `--windowed <N>` | Evaluate each grid point in non-overlapping windows of `N` bars: every `-m` metric becomes two CSV columns (`<name>_mean` / `<name>_std`) and `--best-by` ranks by the windowed mean. See [Windowed metrics](#windowed-metrics). |
 | `-k`, `--risk-aversion <K>` | Rank `--best-by` conservatively: shift each grid point's cross-window mean *against* it by `K` standard deviations before sorting. Requires `-w` and `--best-by`; `K >= 0`. See [Best-by directions](#best-by-directions). |
-| `--keep-unstable` | Disable the default stability gating and its metric anchor for every grid point. See [Stability gating](#stability-gating). |
 | `--costs <SPEC>` | Trading-cost model applied uniformly to every grid point. Repeatable. See [--costs](#--costs). |
 | `-j`, `--jobs <N>` | Rayon worker count. Default: one worker per logical CPU. |
 | `-c`, `--cash <N>` | Initial funds for each backtest. Default `10000`. |
@@ -394,10 +393,11 @@ Each `-x` argument is `[SCOPE:]BODY`, where:
 The base OHLCV column names (`open`, `high`, `low`, `close`, `volume`,
 `symbol`, `freq`, `time`) are reserved.
 
-Warm-up handling matches `run`'s stability gate: unless `--keep-unstable` is
-set, each `(symbol, interval)` group's leading unready rows are dropped;
-when `--since` is set, extra leading bars are fetched (or read from the
-file) instead so the first row at `--since` already has the overlays stable.
+Warm-up handling: unless `--keep-unstable` is set, each `(symbol, interval)`
+group's leading unready rows are dropped (each overlay reaches its
+`stable_period()` before its cell first prints a value); when `--since` is
+set, extra leading bars are fetched (or read from the file) instead so the
+first row at `--since` already has the overlays stable.
 Validate an overlay spec without fetching via
 [`check overlay`](#check-overlay).
 
@@ -432,7 +432,7 @@ fugazi list tickers <PROVIDER>   # every symbol the provider currently exposes (
 `list indicators` groups the vocabulary alphabetically (arithmetic, bands,
 bar indicators, boolean logic, comparisons, constants, cross-timeframe
 composition — `!resample` + `!latch`, which `check overlay` also validates
-(missing `field`, `every: 0`, and unknown nested tags all fail there) —
+(missing `inner`, `every: 0`, and unknown nested tags all fail there) —
 crossovers, MACD, moving averages, oscillators, placeholders, position
 anchors, rolling extrema, stability gate, trend/directional). `list tickers
 binance` calls
@@ -701,33 +701,29 @@ Explicit `--bars-per-year N` always overrides. Default: `252` (US-equity daily).
 
 Recursive (IIR-seeded) indicators — EMA, RSI, ATR, and everything built on
 them — start emitting values at their warm-up but stay influenced by their
-seed for a while after (their *unstable period*). By default `run` and
-`optimize` therefore **stability-gate** every entry signal: it is wrapped in
-the library's `Stable` combinator, so no entry can fire until its whole
-indicator chain has settled, and the metrics are **measured from the first
-bar an entry could possibly fire on**. The gated prefix is provably flat
-(nothing was at risk), so skipping it removes warm-up dilution from the
-return moments without discarding any P&L. `trades.csv`, `returns.csv`, and
-`equity.png` still cover the full run, and the console prints a `measured`
-line showing the skip:
+seed for a while after (their *unstable period*). `run` and `optimize`
+measure the whole run and never touch the strategy's signals; if you want an
+entry to hold off until every source it consults has settled, compose it at
+the entry with the [`!stable` signal](#signals):
 
-```
-metrics
-  measured 2024-01-10 → 2024-01-30 (21 of 30 bars; 9 stability-gated bars skipped)
+```yaml
+long:
+  enter: !all
+    - !crosses_above { lhs: !ema { period: 12 }, rhs: !ema { period: 26 } }
+    - !stable
+      signal: !crosses_above { lhs: !ema { period: 12 }, rhs: !ema { period: 26 } }
 ```
 
-`--keep-unstable` (on `run` and `optimize`) disables both the gate and the
-skip, restoring the exact pre-gate behavior.
+`!stable { signal: <s> }` reports whether `<s>`'s whole chain has advanced
+past its `stable_period()`, so the composed entry above only fires once the
+EMAs are past their unstable tail. Purely windowed (FIR) chains — SMA
+crossovers and the like — have `stable_period() == warm_up_period()`, so
+`!stable` just delays the first possible fire to the same bar the signal was
+first defined on; the gate is a no-op.
 
-Notes:
-
-- For purely windowed (FIR) strategies — SMA crossovers and the like — the
-  gate coincides with ordinary warm-up: trades are identical either way and
-  only the dead prefix leaves the metrics.
-- Exits and protective levels are not gated (no position can exist before the
-  first gated entry).
-- A signal already wrapped in [`!stable`](#signals) is unaffected —
-  double-gating is harmless.
+`fugazi get`'s `--keep-unstable` flag is unrelated — it disables the
+overlay-level trim that hides pre-`stable_period()` cells in the emitted
+CSV.
 
 ### Windowed metrics
 
@@ -812,9 +808,6 @@ Real-valued indicators, one YAML tag per fugazi constructor:
 - **Arithmetic**: `!add`/`!sub`/`!mul`/`!div { lhs, rhs }`.
 - **Lookback**: `!lag`/`!diff`/`!ratio`/`!roc { source, periods }`.
 - **Rolling extremum**: `!rolling_max`/`!rolling_min { source, period }`.
-- **Stability gate**: `!stable { source }` — `None` until the source's whole
-  chain has settled (its `stable_period()`), then a pass-through. Converts
-  the soft unstable period into hard warm-up.
 
 ### Signals
 
@@ -829,10 +822,10 @@ Boolean-valued nodes:
 - **Logic**: `!and`/`!or`/`!xor { lhs, rhs }`, `!all [signal, …]`,
   `!any [signal, …]`, `!not <signal>`, `!changed <signal>` (fires on any
   transition).
-- **Stability gate**: `!stable <signal>` — masks the signal (read as `false`)
-  until its whole chain has settled, so nothing downstream acts on a
-  seed-contaminated value. Entry signals get this automatically — see
-  [Stability gating](#stability-gating).
+- **Stability probe**: `!stable { signal: <signal> }` — `true` once the
+  inner signal has advanced past its `stable_period()`, `false` before. Use
+  it in an `!all` to gate an entry on its own sources being past their
+  unstable tail — see [Stability gating](#stability-gating).
 - **Constants**: `!value <bool>`.
 
 See [`examples/strategy.yml`](examples/strategy.yml) for a full SMA

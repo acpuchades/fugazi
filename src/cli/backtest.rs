@@ -13,18 +13,14 @@
 //! catalogue (return moments, Sharpe/Sortino/Calmar, drawdown, round-trip
 //! trade statistics).
 //!
-//! By default the strategy's entry signals are **stability-gated** (wrapped in
-//! [`fugazi::indicators::Stable`] at build time — see [`StrategySpec::build`]),
-//! so no entry fires while its chain is still seed-contaminated, and the metric
-//! reduction **measures from the anchor the gate implies**: the leading bars on
-//! which no entry could possibly fire are provably flat (nothing was at risk)
-//! and are sliced off so they don't dilute the return moments. The result
-//! files still cover the full run. [`RunOptions::keep_unstable`]
-//! (`--keep-unstable`) disables both the gate and the crop. With
-//! [`RunOptions::windowed`] set, the reduction runs once per non-overlapping
-//! N-bar window of the measured range instead and lands as `metrics.csv`
-//! (one row per window, tagged with the window's start/end times), and the
-//! console metrics block reports each figure's cross-window mean ± stddev.
+//! Metrics cover the whole run — the strategy layer is opinion-free about
+//! stability. A strategy that wants entries held off until every source it
+//! consults has settled composes the check at the entry with `!stable`, i.e.
+//! `!all [<entry>, !stable { signal: <entry> }]`. With [`RunOptions::windowed`]
+//! set, the reduction runs once per non-overlapping N-bar window instead and
+//! lands as `metrics.csv` (one row per window, tagged with the window's
+//! start/end times), and the console metrics block reports each figure's
+//! cross-window mean ± stddev.
 //!
 //! Console output (silenced by [`RunOptions::quiet`]) is a two-line banner (the
 //! constant tool identity, then the active command), then three blocks: **inputs**
@@ -49,44 +45,25 @@ use crate::spec::StrategySpec;
 use crate::style;
 
 /// Drive `spec` over `candles` through a fresh paper wallet with `cash`
-/// starting funds and the given trading `costs`, returning the **measured**
-/// sub-run: the stability-gate anchor applied unless `keep_unstable`. The
-/// shared core of [`evaluate`] / [`evaluate_windowed`].
+/// starting funds and the given trading `costs`, returning the full
+/// [`fugazi::RunReport`]. Metrics measure the whole run — stability gating,
+/// if any, is the caller's responsibility (`!stable` composed into the
+/// strategy YAML). The shared core of [`evaluate`] / [`evaluate_windowed`].
 fn measured_report(
     spec: &StrategySpec,
     candles: &[(String, Candle)],
     cash: Real,
-    keep_unstable: bool,
     costs: TradingCosts,
 ) -> fugazi::RunReport<String> {
     let symbol = spec.symbol.clone();
-    let mut strategy = spec.build(!keep_unstable);
+    let mut strategy = spec.build();
     let mut wallet = PaperWallet::with_costs(cash, costs);
-    let report = fugazi::backtest::run(
+    fugazi::backtest::run(
         &mut strategy,
         &mut wallet,
         symbol,
         candles.iter().map(|(_, c)| *c),
-    );
-    let measure_from = activation_bar(&report, keep_unstable);
-    metrics::report_slice(&report, measure_from..report.equity_curve.len())
-}
-
-/// The bar at which measurement starts: under `--keep-unstable`, zero (measure
-/// everything); otherwise the first bar the strategy declared itself
-/// [`is_active`](fugazi::Strategy::is_active), i.e. the first `true` in the
-/// report's `active` vector (or the length of the run if the strategy was
-/// never active).
-fn activation_bar<Sym>(report: &fugazi::RunReport<Sym>, keep_unstable: bool) -> usize {
-    if keep_unstable {
-        0
-    } else {
-        report
-            .active
-            .iter()
-            .position(|&a| a)
-            .unwrap_or(report.active.len())
-    }
+    )
 }
 
 /// Pure metrics-only evaluation: drive `spec` over `candles` through a paper
@@ -94,19 +71,17 @@ fn activation_bar<Sym>(report: &fugazi::RunReport<Sym>, keep_unstable: bool) -> 
 /// (spec's symbol, `frequency`), and reduce the run to a [`metrics::Metrics`]
 /// document. No filesystem, no printing — the shape `optimize` calls per grid
 /// combination.
-#[allow(clippy::too_many_arguments)]
 pub fn evaluate(
     spec: &StrategySpec,
     candles: &[(String, Candle)],
     cash: Real,
     bars_per_year: Real,
     risk_free_rate: Real,
-    keep_unstable: bool,
     cost_config: &CostConfig,
     frequency: Option<Frequency>,
 ) -> metrics::Metrics {
     let costs = cost_config.resolve(&spec.symbol, frequency);
-    let measured = measured_report(spec, candles, cash, keep_unstable, costs);
+    let measured = measured_report(spec, candles, cash, costs);
     metrics::from_report(&measured, bars_per_year, risk_free_rate)
 }
 
@@ -120,13 +95,12 @@ pub fn evaluate_windowed(
     cash: Real,
     bars_per_year: Real,
     risk_free_rate: Real,
-    keep_unstable: bool,
     cost_config: &CostConfig,
     frequency: Option<Frequency>,
     window: usize,
 ) -> Vec<metrics::WindowMetrics> {
     let costs = cost_config.resolve(&spec.symbol, frequency);
-    let measured = measured_report(spec, candles, cash, keep_unstable, costs);
+    let measured = measured_report(spec, candles, cash, costs);
     metrics::windowed_from_report(&measured, window, bars_per_year, risk_free_rate)
 }
 
@@ -152,11 +126,6 @@ pub struct RunOptions<'a> {
     /// writing `metrics.csv` (one row per window) instead of `metrics.yml`.
     /// `None` = whole-run metrics to `metrics.yml`.
     pub windowed: Option<NonZeroUsize>,
-    /// Disable the default stability gating: entry signals are *not* wrapped
-    /// in `Stable` (so they may fire on seed-contaminated values, as in
-    /// releases before the gate) and the metric range is the full run rather
-    /// than starting at the gate's anchor.
-    pub keep_unstable: bool,
     /// Configured cost models, resolved into a live [`TradingCosts`] per
     /// (symbol, frequency) at run time. See [`crate::costs`].
     pub cost_config: &'a CostConfig,
@@ -183,7 +152,7 @@ pub struct Summary {
 pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<Summary> {
     let started = SystemTime::now();
     let symbol = spec.symbol.clone();
-    let mut strategy = spec.build(!opts.keep_unstable);
+    let mut strategy = spec.build();
     let candles = frame.candles(&symbol)?;
 
     std::fs::create_dir_all(opts.out_dir)
@@ -322,45 +291,22 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
     // one `metrics.csv` row each. The matching console block prints after the
     // result block below.
     //
-    // Metrics measure from the **activation** point: the first bar the
-    // strategy declared itself `is_active` (all held indicators past their
-    // stable_period). On the leading skipped bars the strategy is still
-    // warming up — equity is flat by construction and including them would
-    // dilute return moments and, windowed, seed the cross-window spread with
-    // artificial dead windows. The result files above and the equity chart
-    // still cover the full run. Zero under `--keep-unstable`.
-    let measure_from = activation_bar(&report, opts.keep_unstable);
-    let measured = metrics::report_slice(&report, measure_from..report.equity_curve.len());
-    let measured_label = (measure_from > 0).then(|| {
-        let bars = report.equity_curve.len();
-        match candles.get(measure_from) {
-            Some((t, _)) => format!(
-                "{t} → {end} ({} of {bars} bars; {measure_from} bars before strategy activation)",
-                bars - measure_from,
-            ),
-            // The whole series fits inside the warm-up — nothing to measure.
-            None => format!(
-                "(none — the strategy never activated within {bars} bars)",
-            ),
-        }
-    });
+    // The full run is measured; stability gating (if any) is composed into
+    // the strategy YAML by the caller via `!stable { … }` — see STRATEGIES.md.
+    let measured = &report;
     // When a cost model is active, also run the frictionless twin so metrics
     // can report both gross (as if zero-cost) and net (what the costed run
     // produced). Same strategy, same candles, same seed cash — only the
     // wallet's cost config differs, so any difference is attributable to costs
     // alone.
     let gross_measured = if costs_active {
-        let mut gross_strategy = spec.build(!opts.keep_unstable);
+        let mut gross_strategy = spec.build();
         let mut gross_wallet = PaperWallet::new(opts.cash);
-        let gross_report = fugazi::backtest::run(
+        Some(fugazi::backtest::run(
             &mut gross_strategy,
             &mut gross_wallet,
             symbol.clone(),
             candles.iter().map(|(_, c)| *c),
-        );
-        Some(metrics::report_slice(
-            &gross_report,
-            measure_from..gross_report.equity_curve.len(),
         ))
     } else {
         None
@@ -368,19 +314,19 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
     let (whole, windows) = match opts.windowed {
         Some(n) => {
             let ws = metrics::windowed_from_report(
-                &measured,
+                measured,
                 n.get(),
                 opts.bars_per_year,
                 opts.risk_free_rate,
             );
-            write_metrics_csv(&ws, &candles[measure_from..], &opts.out_dir.join("metrics.csv"))?;
+            write_metrics_csv(&ws, &candles, &opts.out_dir.join("metrics.csv"))?;
             (None, Some((n.get(), ws)))
         }
         None => {
-            let mut m = metrics::from_report(&measured, opts.bars_per_year, opts.risk_free_rate);
+            let mut m = metrics::from_report(measured, opts.bars_per_year, opts.risk_free_rate);
             if costs_active {
                 m.costs = Some(metrics::costs_section(
-                    &measured,
+                    measured,
                     gross_measured.as_ref(),
                     opts.bars_per_year,
                 ));
@@ -405,10 +351,10 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
             let gross = gross_measured.as_ref().map(|g| {
                 metrics::from_report(g, opts.bars_per_year, opts.risk_free_rate)
             });
-            print_metrics_block(m, measured_label.as_deref(), gross.as_ref());
+            print_metrics_block(m, None, gross.as_ref());
         }
         if let Some((n, ws)) = &windows {
-            print_windowed_metrics_block(ws, *n, measured_label.as_deref());
+            print_windowed_metrics_block(ws, *n, None);
         }
     }
     Ok(summary)

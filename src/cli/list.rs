@@ -147,8 +147,8 @@ const GROUPS: &[Group] = &[
         entries: &[
             Entry {
                 tag: "resample",
-                args: "every, field",
-                doc: "project `field` (open/high/low/close/volume/typical/median) of every N-bar candle",
+                args: "every, inner",
+                doc: "run `inner` (any Real source over Candle) on every N-bar aggregated candle; None between",
             },
             Entry {
                 tag: "latch",

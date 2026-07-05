@@ -50,7 +50,7 @@ impl<S: Indicator<Output = Real>> Indicator for Wma<S> {
     }
 
     fn warm_up_period(&self) -> usize {
-        self.source.warm_up_period() + self.state.period() - 1
+        self.source.warm_up_period().max(1) + self.state.period() - 1
     }
 
     fn unstable_period(&self) -> usize {

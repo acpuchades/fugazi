@@ -117,31 +117,30 @@ fn runs_windowed_metrics() {
             "metrics.csv header missing `{section}`: {header}"
         );
     }
-    // The SMA(3)/SMA(8) crossover entry has `stable_period() = 9` (gt: 8, edge: +1;
-    // FIR, so stable = warm-up). Under the activation-based crop, the strategy
-    // reports itself active at bar 9 (0-based index 8, calendar 2024-01-09), so the
-    // measured range starts *at* the activation bar — 22 bars split into
-    // 10 + 10 + 2 → 3 windows.
+    // 30 bars split into 10 + 10 + 10 → 3 windows over the full run.
     let rows: Vec<&str> = lines.collect();
     assert_eq!(rows.len(), 3, "expected one row per window:\n{metrics}");
     assert!(
-        rows[0].starts_with("2024-01-09;"),
-        "first window should start at the activation bar: {}",
+        rows[0].starts_with("2024-01-01;"),
+        "first window should start at bar 1 of the run: {}",
         rows[0]
     );
 }
 
-/// End-to-end wiring for the `!latch` + `!resample` tag pair — a
-/// cross-timeframe entry (EMA-3 over resampled 4-bar candles, latched) should
-/// build, run, and print the expected activation-crop line.
+/// End-to-end wiring for a cross-timeframe entry gated with `!stable`.
 ///
-/// The pipeline's stable_period as composed: Resample.warm_up = 4,
-/// Ema-of-resample.warm_up = 4, unstable = 10 (in HTF-sample units — this is
-/// the raw composition arithmetic, not base-bar-scaled). Wrapped in `!latch`,
-/// `stable_period() = 14`, so `!stable`-gating puts the activation at bar 14
-/// (index 13 — 13 bars before activation).
+/// The user composes the gate explicitly at the signal layer:
+///
+/// ```yaml
+/// enter: !all
+///   - !gt { lhs: !latch { source: !resample { every, inner: !ema {…} } }, rhs: !value 0 }
+///   - !stable { signal: !gt { … same as above } }
+/// ```
+///
+/// Verifies that this runs end-to-end and the entry actually fires past its
+/// signalled stable_period.
 #[test]
-fn latch_resample_gate_activates_at_composed_stable_period() {
+fn latch_resample_entry_gated_with_stable_runs_end_to_end() {
     let mut csv = String::from("symbol;time;open;high;low;close;volume\n");
     for i in 0..60 {
         let day = (i % 28) + 1;
@@ -158,14 +157,17 @@ fn latch_resample_gate_activates_at_composed_stable_period() {
     let out_dir = std::env::temp_dir().join("fugazi_e2e_latch_resample");
     let _ = std::fs::remove_dir_all(&out_dir);
 
-    let strategy = "symbol: BTC\n\
-                    long:\n  \
-                    enter: !gt\n    \
-                    lhs: !latch\n      \
-                    source: !ema\n        \
-                    period: 3\n        \
-                    source: !resample { every: 4, field: close }\n    \
-                    rhs: !value 0\n";
+    let strategy = r#"symbol: BTC
+long:
+  enter: !all
+    - !gt
+      lhs: !latch { source: !resample { every: 4, inner: !ema { period: 3, source: close } } }
+      rhs: !value 0
+    - !stable
+      signal: !gt
+        lhs: !latch { source: !resample { every: 4, inner: !ema { period: 3, source: close } } }
+        rhs: !value 0
+"#;
 
     let output = Command::new(env!("CARGO_BIN_EXE_fugazi"))
         .args([
@@ -183,10 +185,11 @@ fn latch_resample_gate_activates_at_composed_stable_period() {
         "fugazi run exited with failure:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The trades.csv should show at least one buy after stability.
+    let trades = std::fs::read_to_string(out_dir.join("trades.csv")).expect("trades.csv");
     assert!(
-        stdout.contains("13 bars before strategy activation"),
-        "expected `13 bars before strategy activation` in the run output; got:\n{stdout}"
+        trades.lines().count() >= 2,
+        "expected at least one trade line beyond the header:\n{trades}"
     );
 }
 

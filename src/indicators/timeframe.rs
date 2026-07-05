@@ -256,7 +256,9 @@ impl<S: Indicator> Indicator for Latch<S> {
     }
 
     fn warm_up_period(&self) -> usize {
-        self.inner.warm_up_period()
+        // `max(1)` guards a `warm_up = 0` inner — Latch holds nothing before
+        // its first `update`, so its first `Some` is at update ≥ 1.
+        self.inner.warm_up_period().max(1)
     }
 
     fn unstable_period(&self) -> usize {

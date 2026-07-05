@@ -10,7 +10,7 @@
 
 use fugazi::indicators::{
     Adx, Aroon, Atr, Bollinger, Cci, Current, Dmi, Donchian, Ema, Hma, Identity, Keltner, Latch,
-    Macd, Mfi, Obv, Resample, Rma, Rsi, Sar, Sma, Stable, StdDev, Stochastic, TrueRange, Value,
+    Macd, Mfi, Obv, Resample, Rma, Rsi, Sar, Sma, StdDev, Stochastic, TrueRange, Value,
     Vwap, WilliamsR, Wma,
 };
 use fugazi::prelude::*;
@@ -127,15 +127,6 @@ fn warm_up_is_exact_for_composition() {
     candle_case(Current::close().lag(3), "lag");
     candle_case(Current::close().roc(5), "roc");
     candle_case(Current::close().rolling_max(10), "rolling_max");
-    // The stability gate converts the source's soft tail into hard warm-up,
-    // for real sources and whole boolean signals alike.
-    candle_case(Ema::new(Current::close(), 20).stable(), "stable_ema");
-    candle_case(
-        Current::close()
-            .crosses_above(Ema::new(Current::close(), 20))
-            .stable(),
-        "stable_crosses_above",
-    );
     // Boolean layer: comparisons, edges and connectives.
     candle_case(Current::close().above(100.0), "above");
     candle_case(Current::close().above(100.0).changed(), "changed");
@@ -154,6 +145,45 @@ fn warm_up_is_exact_for_composition() {
     real_case(Rsi::new(Identity::new(), 14), "rsi_of_identity");
     real_case(Identity::new().diff(4), "diff");
     assert_exact_warm_up(Value::<Real>::new(42.0), vec![1.0, 2.0, 3.0], "value");
+}
+
+/// The downstream `.max(1)` guard in every source-wrapping formula: a
+/// `warm_up = 0` leaf (`Value`) fed into a windowed / recursive / lookback
+/// indicator still requires the full number of `update` calls, not one fewer.
+///
+/// Previously the formulas read `source.warm_up + period - 1` verbatim, so
+/// `Sma::new(Value(1.0), N)` reported `N − 1` instead of the true `N`. The
+/// battery below pins the corrected formulas at N.
+#[test]
+fn warm_up_from_a_warm_up_zero_source_is_exact() {
+    // Sanity: Value itself is ready without input.
+    assert_eq!(Value::<Real>::new(1.0).warm_up_period(), 0);
+
+    // Windowed / lookback: source.warm_up.max(1) + period − 1 (or + period).
+    assert_eq!(Sma::new(Value::<Real>::new(1.0), 3).warm_up_period(), 3);
+    assert_eq!(Wma::new(Value::<Real>::new(1.0), 3).warm_up_period(), 3);
+    assert_eq!(StdDev::new(Value::<Real>::new(1.0), 3).warm_up_period(), 3);
+    assert_eq!(
+        Bollinger::new(Value::<Real>::new(1.0), 3, 2.0).warm_up_period(),
+        3
+    );
+    assert_eq!(
+        Stochastic::new(Value::<Real>::new(1.0), 3).warm_up_period(),
+        3
+    );
+    // Cci sources a real-valued indicator; project the typical price via a
+    // constant to exercise the same path.
+    assert_eq!(Cci::new(Value::<Real>::new(1.0), 3).warm_up_period(), 3);
+    assert_eq!(Value::<Real>::new(1.0).rolling_max(3).warm_up_period(), 3);
+    assert_eq!(Value::<Real>::new(1.0).rolling_min(3).warm_up_period(), 3);
+    assert_eq!(Value::<Real>::new(1.0).lag(3).warm_up_period(), 4);
+    assert_eq!(Value::<Real>::new(1.0).diff(3).warm_up_period(), 4);
+
+    // Recursive: source.warm_up.max(1) [+ …]. Ema/Macd need one update to
+    // seed; Rma needs a full period; Rsi one seed + a full period of deltas.
+    assert_eq!(Ema::new(Value::<Real>::new(1.0), 3).warm_up_period(), 1);
+    assert_eq!(Rma::new(Value::<Real>::new(1.0), 3).warm_up_period(), 3);
+    assert_eq!(Rsi::new(Value::<Real>::new(1.0), 3).warm_up_period(), 4);
 }
 
 #[test]
@@ -198,14 +228,6 @@ fn recursive_indicators_report_their_settling() {
         stacked.unstable_period(),
         Ema::new(Current::close(), 20).unstable_period()
     );
-    // The stability gate absorbs the settling into its warm-up: the gated
-    // chain reports the raw chain's stable period as warm-up, and 0 residual.
-    let gated = Stable::new(Ema::new(Current::close(), 20));
-    assert_eq!(
-        gated.warm_up_period(),
-        Ema::new(Current::close(), 20).stable_period()
-    );
-    assert_eq!(gated.unstable_period(), 0);
 }
 
 /// Replaying only the last `stable_period()` samples reproduces the

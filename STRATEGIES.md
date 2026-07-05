@@ -238,21 +238,24 @@ Each line of a multi-output indicator is its own source tag:
 | `!add`, `!sub`, `!mul`, `!div` | `{ lhs, rhs }` | arithmetic over two sources (`div` → none on /0) |
 | `!lag`, `!diff`, `!ratio`, `!roc` | `{ source = close, periods }` | lookback vs. `periods` bars ago |
 | `!rolling_max`, `!rolling_min` | `{ source = close, period }` | rolling extremum over `period` bars |
-| `!resample` | `{ every, field }` | project `field` (`open`/`high`/`low`/`close`/`volume`/`typical`/`median`) of every N-bar candle. `field` is **required** — no default |
+| `!resample` | `{ every, inner }` | aggregate every N base candles into one HTF candle and run `inner` (any Real source over `Candle`) over it; emits `inner`'s output on each completed bucket and `None` in between. `inner` is **required** — no default |
 | `!latch` | `{ source }` | hold the last `Some` output of `source`; `None` before the first arrives |
 
 #### Cross-timeframe composition — `!resample` + `!latch`
 
 There is no dedicated cross-timeframe tag; compose `!resample` and `!latch`
-directly. `!resample { every: N, field: close }` emits the resampled candle's
-`close` on the Nth base tick and `None` between. Wrap the outermost recursive
-smoother (`!ema`, `!rsi`, `!atr`, …) fed by that source in `!latch { source }`
-so per-base-tick reads see the finished higher-timeframe value between
+directly. `!resample { every: N, inner: <source> }` runs `inner` over the
+higher-timeframe candle emitted every N base bars — `inner: close` projects
+the HTF close, `inner: !ema { period: 20, source: close }` runs an EMA-20
+that recurses over HTF closes, and so on. On base ticks in between, the
+resample emits `None` and any recursive smoother inside `inner` naturally
+does not advance. Wrap the whole resample in `!latch { source }` so
+per-base-tick reads see the finished higher-timeframe value between
 boundaries.
 
-The **only correct ordering** is resample → recursive smoother → latch:
-latching *before* the recursive smoother would feed it a held (repeated) value
-on every base tick, distorting the recurrence.
+The **only correct ordering** is resample (with the recursive smoother as its
+`inner`) → latch: latching *before* the recursive smoother would feed it a
+held (repeated) value on every base tick, distorting the recurrence.
 
 ```yaml
 # Base bars: 1h. Higher timeframe: 4h. Enter long when the 1h close crosses
@@ -262,17 +265,18 @@ long:
   enter: !crosses_above
     lhs: close
     rhs: !latch
-      source: !ema
-        period: 20
-        source: !resample { every: 4, field: close }
+      source: !resample
+        every: 4
+        inner: !ema { period: 20, source: close }
 ```
 
-Warm-up and unstable-period pass through as raw composition arithmetic —
-higher-timeframe sample counts, not base-bar-scaled. For an EMA-P over a
-resample-`every` chain, `stable_period() = every + settle_period(P)` (not
-`every * (1 + settle_period(P))`); if a strategy needs base-bar-correct
-stability accounting, it must feed the pipeline enough leading history for
-the recursive tail to decay in HTF-sample terms.
+Warm-up and unstable-period are scaled to base-bar units: for
+`!resample { every, inner }`, `warm_up_period() = every * inner.warm_up_period()`
+and `unstable_period() = every * inner.unstable_period()` — so an EMA-P inside
+a resample-`every` reports a `stable_period()` of
+`every * (1 + settle_period(P))` base bars (EMA-P has `warm_up = 1`,
+`unstable = settle_period(P)`), and `!stable { signal }` fires at the correct
+base bar.
 
 ## Signals
 
@@ -305,6 +309,7 @@ against a constant, the common case of `!gt`/`!lt` against a number.
 | `!any` | `[ … ]` | OR-fold of a list of signals (empty ⇒ always false) |
 | `!not` | `<signal>` | negation (see the [nesting caveat](#nesting)) |
 | `!changed` | `<signal>` | fires on any transition of the inner signal (the edge primitive) |
+| `!stable` | `{ signal: <signal> }` | `true` once the inner signal is past its `stable_period()` — its "readiness probe". Compose with `!all` to gate an entry on all its sources being past their unstable tail: `!all [<entry>, !stable { signal: <entry> }]`. |
 | `!value` | `<bool>` | a constant boolean leaf — `!value true` / `!value false` (same tag as the numeric `!value`; typed by position) |
 
 ```yaml

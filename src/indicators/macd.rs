@@ -124,8 +124,9 @@ impl<S: Indicator<Output = Real>> Indicator for Macd<S> {
 
     fn warm_up_period(&self) -> usize {
         // All three EMAs seed on their first sample, so the whole triple is
-        // ready as soon as the source is.
-        self.source.warm_up_period()
+        // ready as soon as the source is. `max(1)` because seeding needs at
+        // least one `update` call.
+        self.source.warm_up_period().max(1)
     }
 
     fn unstable_period(&self) -> usize {

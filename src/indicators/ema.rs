@@ -59,8 +59,10 @@ impl<S: Indicator<Output = Real>> Indicator for Ema<S> {
     }
 
     fn warm_up_period(&self) -> usize {
-        // Seeds on the source's first output.
-        self.source.warm_up_period()
+        // Seeds on the source's first output. `max(1)` because we can't seed
+        // before the first `update` — even a `warm_up = 0` source has to be
+        // called once for the seed to happen.
+        self.source.warm_up_period().max(1)
     }
 
     fn unstable_period(&self) -> usize {

@@ -29,9 +29,10 @@ use pyo3::types::PyDict;
 use fugazi_core::Indicator;
 use fugazi_core::indicators::compare::{EqOp, GeOp, GtOp, LeOp, LtOp, NeOp};
 use fugazi_core::indicators::{
-    Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Current, Dmi,
-    DmiValue, Donchian, DonchianValue, Ema, Hma, Identity, Keltner, KeltnerValue, Macd, MacdValue,
-    Mfi, Obv, Rma, Rsi, Sar, Sma, StdDev, Stochastic, TrueRange, Value, Vwap, WilliamsR, Wma,
+    Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Current, CurrentBar,
+    Dmi, DmiValue, Donchian, DonchianValue, Ema, Hma, Identity, Keltner, KeltnerValue, Latch, Macd,
+    MacdValue, Mfi, Obv, Resample, Rma, Rsi, Sar, Sma, Stable, StdDev, Stochastic, TrueRange,
+    Value, Vwap, WilliamsR, Wma,
 };
 use fugazi_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
 use fugazi_core::sources::{Binance, CandleSource, Interval, SourceError, Timestamp};
@@ -296,6 +297,64 @@ where
     }
     fn reset(&mut self) {
         Indicator::reset(self)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-timeframe composition: a resample-then-project chain matching the
+// CLI's `!resample { every, inner }`. The library-level `Resample<S>` outputs
+// `Candle`; Python has no candle-source carrier, so we compose it inline with
+// a candle-rooted Real source and expose only the composed Real-output form.
+// ---------------------------------------------------------------------------
+
+/// `Resample<CurrentBar>` chained with a candle-consuming Real source: on the
+/// base tick that completes an `every`-bar bucket, feed the aggregated candle
+/// to `inner` and emit its output; on other ticks, emit `None`.
+#[derive(Clone)]
+struct ResampleThen {
+    resample: Resample<CurrentBar>,
+    inner: Source<Candle>,
+    value: Option<Real>,
+}
+
+impl ResampleThen {
+    fn new(every: usize, inner: Source<Candle>) -> Self {
+        Self {
+            resample: Resample::new(CurrentBar::new(), every),
+            inner,
+            value: None,
+        }
+    }
+}
+
+impl Indicator for ResampleThen {
+    type Input = Candle;
+    type Output = Real;
+
+    fn update(&mut self, c: Candle) -> Option<Real> {
+        self.value = match self.resample.update(c) {
+            Some(htf) => Indicator::update(&mut self.inner, htf),
+            None => None,
+        };
+        self.value
+    }
+
+    fn value(&self) -> Option<Real> {
+        self.value
+    }
+
+    fn warm_up_period(&self) -> usize {
+        self.resample.every() * Indicator::warm_up_period(&self.inner).max(1)
+    }
+
+    fn unstable_period(&self) -> usize {
+        Indicator::unstable_period(&self.inner) * self.resample.every()
+    }
+
+    fn reset(&mut self) {
+        Indicator::reset(&mut self.resample);
+        Indicator::reset(&mut self.inner);
+        self.value = None;
     }
 }
 
@@ -2054,6 +2113,88 @@ fn stoch_rsi(
 }
 
 // ---------------------------------------------------------------------------
+// Cross-timeframe primitives: resample + latch + stable
+// ---------------------------------------------------------------------------
+
+/// Aggregate every `every` base candles into one higher-timeframe candle and
+/// run `inner` (any candle-rooted Real source — `close()`, `ema(close(), 20)`,
+/// …) over that HTF stream. `inner` advances only on emissions from the
+/// resample, so an EMA inside `resample` recurses over the HTF closes (not
+/// the base ones); on the base ticks in between the composed source emits
+/// `None`. Wrap the outermost result in `latch()` if per-base-tick reads
+/// should see the finished value.
+///
+/// ```python
+/// import fugazi as ta
+/// # EMA-20 of the closes of every 4-bar candle, latched for per-base-tick reads.
+/// htf_ema = ta.latch(ta.resample(4, ta.ema(ta.close(), 20)))
+/// ```
+#[pyfunction]
+fn resample(every: usize, inner: PyRef<'_, PyIndicator>) -> PyResult<PyIndicator> {
+    if every == 0 {
+        return Err(PyValueError::new_err(
+            "resample every must be greater than zero",
+        ));
+    }
+    // The composition semantically feeds an HTF candle to `inner`, so `inner`
+    // must be candle-rooted (or a bare constant, which we lift into the candle
+    // domain — it will just ignore the bar and emit its constant on every
+    // HTF boundary).
+    let inner_candle = require_candle_source(inner.src.clone())?;
+    Ok(PyIndicator::wrap(AnySource::Candle(Source::new(
+        ResampleThen::new(every, inner_candle),
+    ))))
+}
+
+/// Hold the last `Some` output of an indicator or signal, re-emitting it on
+/// ticks where the source returns `None`. Domain-preserving: `latch()` of a
+/// candle-rooted source is candle-rooted, of an identity-rooted signal is
+/// identity-rooted, and so on. Pair with `resample()` so per-base-tick reads
+/// see the finished HTF value between boundaries.
+#[pyfunction]
+fn latch<'py>(py: Python<'py>, source: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+    if let Ok(ind) = source.cast::<PyIndicator>() {
+        let out = match ind.borrow().src.clone() {
+            AnySource::Candle(s) => AnySource::Candle(Source::new(Latch::new(s))),
+            AnySource::Real(s) => AnySource::Real(Source::new(Latch::new(s))),
+            // A latched constant is still that constant — the source never
+            // emits `None`, so the latch never fires. Return as-is.
+            other @ AnySource::Const(_) => other,
+        };
+        return Ok(PyIndicator::wrap(out).into_pyobject(py)?.into_any().unbind());
+    }
+    if let Ok(sig) = source.cast::<PySignal>() {
+        let out = match sig.borrow().sig.clone() {
+            AnySignal::Candle(s) => AnySignal::Candle(SignalBox::new(Latch::new(s))),
+            AnySignal::Real(s) => AnySignal::Real(SignalBox::new(Latch::new(s))),
+        };
+        return Ok(PySignal::wrap(out).into_pyobject(py)?.into_any().unbind());
+    }
+    Err(PyTypeError::new_err(
+        "latch() expects an fugazi Indicator or Signal",
+    ))
+}
+
+/// A bool signal that flips `True` once its argument has been fed at least its
+/// `stable_period()` samples — i.e. "the signal is past its unstable tail".
+/// The `Stable` check doesn't hold the signal (it snapshots `stable_period()`
+/// at construction and counts samples itself), so it composes cheaply into an
+/// `all()` / `and_()` alongside the same signal to gate a strategy on
+/// stability:
+///
+/// ```python
+/// entry = ta.close().crosses_above(ta.ema(ta.close(), 20))
+/// gated = entry.and_(ta.stable(entry))
+/// ```
+#[pyfunction]
+fn stable(signal: PyRef<'_, PySignal>) -> PySignal {
+    PySignal::wrap(match &signal.sig {
+        AnySignal::Candle(s) => AnySignal::Candle(SignalBox::new(Stable::<Candle>::from_source(s))),
+        AnySignal::Real(s) => AnySignal::Real(SignalBox::new(Stable::<Real>::from_source(s))),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Remote candle sources
 //
 // The library-level `fugazi::sources` API takes only objects/enums; the string
@@ -2435,7 +2576,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     reg!(
         open, high, low, close, volume, typical, median, identity, value, sma, ema, rma, wma, hma,
         rsi, stddev, stochastic, cci, atr, mfi, williams_r, obv, vwap, ad, true_range, adx, dmi,
-        aroon, sar, macd, bollinger, keltner, donchian, stoch_rsi, get,
+        aroon, sar, macd, bollinger, keltner, donchian, stoch_rsi, resample, latch, stable, get,
     );
     Ok(())
 }

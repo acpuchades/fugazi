@@ -85,7 +85,9 @@ impl<S: Indicator<Output = bool>> Indicator for Not<S> {
     }
 
     fn warm_up_period(&self) -> usize {
-        self.inner.warm_up_period()
+        // `max(1)` guards a `warm_up = 0` inner (e.g. `Const`) — negation
+        // still needs one `update` to observe the source.
+        self.inner.warm_up_period().max(1)
     }
 
     fn unstable_period(&self) -> usize {
@@ -142,7 +144,9 @@ impl<S: Indicator<Output = bool>> Indicator for Change<S> {
 
     fn warm_up_period(&self) -> usize {
         // Two consecutive warmed source values: the first never fires.
-        self.inner.warm_up_period() + 1
+        // `max(1)` so a `warm_up = 0` inner still needs a first update
+        // before a second can compare against it.
+        self.inner.warm_up_period().max(1) + 1
     }
 
     fn unstable_period(&self) -> usize {

@@ -237,52 +237,49 @@ where
 /// `warm_up = inner.stable_period()`, `unstable = 0`, and masks the inner
 /// output until `stable_period` samples have elapsed. Same effect as
 /// `IndicatorExt::stable`, but on the boxed side.
-pub fn stable(inner: Box<dyn DynIndicator>) -> Box<dyn DynIndicator> {
-    Box::new(StableGate { inner, seen: 0 })
+/// A `bool`-output [`DynIndicator`] that returns `Some(true)` from the
+/// `stable_period`-th `update` onwards, mirroring the library-level
+/// [`Stable`](fugazi::indicators::Stable). Doesn't hold any source — capture
+/// the source's `stable_period()` at construction and drop it.
+pub fn stable_check(stable_period: usize) -> Box<dyn DynIndicator> {
+    Box::new(StableCheck {
+        stable_period,
+        samples: 0,
+    })
 }
 
-struct StableGate {
-    inner: Box<dyn DynIndicator>,
-    seen: usize,
+struct StableCheck {
+    stable_period: usize,
+    samples: usize,
 }
 
-impl DynIndicator for StableGate {
+impl DynIndicator for StableCheck {
     fn input_type(&self) -> DynType {
-        self.inner.input_type()
+        DynType::Candle
     }
     fn output_type(&self) -> DynType {
-        self.inner.output_type()
+        DynType::Bool
     }
-    fn update(&mut self, x: DynValue) -> Option<DynValue> {
-        let out = self.inner.update(x);
-        self.seen = self.seen.saturating_add(1);
-        if self.seen >= self.inner.stable_period() {
-            out
-        } else {
-            None
-        }
+    fn update(&mut self, _x: DynValue) -> Option<DynValue> {
+        self.samples = self.samples.saturating_add(1);
+        Some(DynValue::Bool(self.samples >= self.stable_period))
     }
     fn value(&self) -> Option<DynValue> {
-        if self.seen >= self.inner.stable_period() {
-            self.inner.value()
-        } else {
-            None
-        }
+        Some(DynValue::Bool(self.samples >= self.stable_period))
     }
     fn warm_up_period(&self) -> usize {
-        self.inner.stable_period()
+        0
     }
     fn unstable_period(&self) -> usize {
         0
     }
     fn reset(&mut self) {
-        self.inner.reset();
-        self.seen = 0;
+        self.samples = 0;
     }
     fn dyn_clone(&self) -> Box<dyn DynIndicator> {
-        Box::new(StableGate {
-            inner: self.inner.dyn_clone(),
-            seen: self.seen,
+        Box::new(StableCheck {
+            stable_period: self.stable_period,
+            samples: self.samples,
         })
     }
 }
@@ -402,7 +399,7 @@ impl Indicator for AsBool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fugazi::indicators::{Current, Ema, Sma, Stable};
+    use fugazi::indicators::{Current, Ema, Sma};
 
     fn bar(v: Real) -> Candle {
         Candle::new(v, v, v, v, 0.0)
@@ -437,12 +434,21 @@ mod tests {
     }
 
     #[test]
-    fn stable_gate_matches_library_stable() {
+    fn stable_check_reports_bool_after_threshold() {
         let raw = Ema::new(Current::close(), 3);
-        let ref_gated = Stable::new(raw.clone());
-        let dyn_gated = stable(wrap(raw));
-        assert_eq!(dyn_gated.warm_up_period(), ref_gated.warm_up_period());
-        assert_eq!(dyn_gated.unstable_period(), ref_gated.unstable_period());
+        let mut check = stable_check(raw.stable_period());
+        assert_eq!(check.input_type(), DynType::Candle);
+        assert_eq!(check.output_type(), DynType::Bool);
+        // Feed stable_period - 1 candles; still Some(false).
+        let bar = |v: Real| DynValue::Candle(Candle::new(v, v, v, v, 0.0));
+        for i in 1..raw.stable_period() {
+            assert_eq!(check.update(bar(i as Real)), Some(DynValue::Bool(false)));
+        }
+        // The stable_period-th update flips to Some(true).
+        assert_eq!(
+            check.update(bar(raw.stable_period() as Real)),
+            Some(DynValue::Bool(true))
+        );
     }
 
     #[test]

@@ -610,3 +610,82 @@ def test_warm_up_matches_first_output():
     out = feed(node, closes([100.0 + 0.5 * i + (i % 3) for i in range(w + 3)]))
     assert all(v is None for v in out[: w - 1])
     assert all(v is not None for v in out[w - 1 :])
+
+
+def test_resample_emits_on_the_nth_bar_only():
+    node = ta.resample(4, ta.close())
+    out = feed(node, closes([float(i) for i in range(1, 9)]))
+    # None on 1..3 and 5..7; Some(close) at 4 and 8.
+    for i, v in enumerate(out, start=1):
+        if i % 4 == 0:
+            assert v == pytest.approx(float(i))
+        else:
+            assert v is None
+
+
+def test_resample_ema_recurses_over_htf_closes():
+    """`ema(close(), 3)` inside `resample(4, ...)` should agree with the same
+    EMA fed only the resampled closes."""
+    node = ta.resample(4, ta.ema(ta.close(), 3))
+    reference = ta.ema(ta.identity(), 3)
+    prices = [100.0 + 0.5 * i for i in range(24)]
+    got_at_boundary = []
+    ref_at_boundary = []
+    for i, p in enumerate(prices, start=1):
+        v = node.update(ta.Candle(p, p, p, p, 0.0))
+        if i % 4 == 0:
+            got_at_boundary.append(v)
+            ref_at_boundary.append(reference.update(p))
+    assert len(got_at_boundary) == 6
+    for got, ref in zip(got_at_boundary, ref_at_boundary):
+        # Warm-up bars are None on both sides; matched values elsewhere.
+        assert (got is None and ref is None) or got == pytest.approx(ref)
+
+
+def test_resample_zero_rejects():
+    with pytest.raises(ValueError, match="greater than zero"):
+        ta.resample(0, ta.close())
+
+
+def test_latch_holds_last_source_value_between_none_ticks():
+    node = ta.latch(ta.resample(3, ta.close()))
+    prices = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    out = [node.update(ta.Candle(p, p, p, p, 0.0)) for p in prices]
+    assert out[0] is None
+    assert out[1] is None
+    assert out[2] == pytest.approx(3.0)
+    assert out[3] == pytest.approx(3.0)
+    assert out[4] == pytest.approx(3.0)
+    assert out[5] == pytest.approx(6.0)
+
+
+def test_latch_of_signal_returns_signal():
+    entry = ta.close().crosses_above(ta.value(2.0))
+    latched = ta.latch(entry)
+    assert isinstance(latched, ta.Signal)
+
+
+def test_stable_flips_true_after_stable_period_samples():
+    entry = ta.close().crosses_above(ta.ema(ta.close(), 3))
+    check = ta.stable(entry)
+    period = entry.stable_period()
+    assert period > 1
+    # Fewer than `period` samples: still unstable.
+    for i in range(1, period):
+        check.update(ta.Candle(i, i, i, i, 0.0))
+        assert check.is_true() is False
+    # The `period`-th update flips it.
+    check.update(ta.Candle(period, period, period, period, 0.0))
+    assert check.is_true() is True
+
+
+def test_stable_and_composes_into_gated_entry():
+    """The canonical readiness-gated entry: `entry & stable(entry)`."""
+    entry = ta.close().crosses_above(ta.ema(ta.close(), 3))
+    gated = entry.and_(ta.stable(entry))
+    # Feed enough bars to get past the stable period.
+    bars = closes([100.0 + 0.5 * i + (i % 5) for i in range(entry.stable_period() * 2)])
+    fired = any(v for v in feed(gated, bars))
+    # The composed signal is a Signal and can be evaluated.
+    assert isinstance(gated, ta.Signal)
+    assert isinstance(fired, bool)

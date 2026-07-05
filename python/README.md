@@ -162,9 +162,39 @@ node.reset()                   # call reset() to start a fresh, independent pass
 | `adx(period)` | dict `{plus_di, minus_di, adx}` |
 | `dmi(period)` | dict `{plus_di, minus_di}` |
 | `aroon(period)` | dict `{up, down, oscillator}` |
+| `resample(every, inner)` | `inner`'s output every `every` bars (aggregated HTF candle fed to `inner`), `None` between |
+| `latch(source)` | `source`'s last `Some` output, held across `None` ticks (works on indicators and signals) |
+| `stable(signal)` | `True` once `signal` has been fed at least its `stable_period()` samples |
 
 Multi-line indicators return a `dict` of their named lines (or `None` while
 warming up).
+
+### Cross-timeframe composition
+
+`resample` + `latch` compose a higher-timeframe pipeline over a base candle
+stream: `resample(N, inner)` aggregates every N base candles into one HTF
+candle and runs `inner` (any candle-rooted Real source — `close()`,
+`ema(close(), 20)`, …) over it, emitting `inner`'s output on the completing
+tick and `None` in between. Wrap the whole resample in `latch()` so
+per-base-tick reads see the finished value between boundaries.
+
+```python
+# EMA-20 of the closes of every 4-bar candle, latched for per-base-tick reads.
+htf_ema = ta.latch(ta.resample(4, ta.ema(ta.close(), 20)))
+```
+
+The **only correct ordering** is `resample(N, ema(...))` — with the recursive
+smoother as the resample's `inner` — then `latch` on the outside; latching
+*before* the recursive smoother would feed it a held (repeated) value on every
+base tick, distorting the recurrence.
+
+`stable(signal)` composes with the same signal in an `and_` to gate a
+strategy's entry on its own sources being past their unstable tail:
+
+```python
+entry = ta.close().crosses_above(ta.ema(ta.close(), 20))
+gated = entry.and_(ta.stable(entry))   # fires only once the EMA has settled
+```
 
 ## Operators
 

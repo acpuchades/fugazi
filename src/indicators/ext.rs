@@ -150,11 +150,12 @@ pub trait IndicatorExt: Indicator<Output = Real> + Sized {
         RollingMin::new(self, period)
     }
 
-    /// Masks `self` until its whole chain has settled: `None` for the first
-    /// `self.stable_period()` samples, a pass-through afterwards — converting
-    /// the soft unstable period into hard warm-up (see [`Stable`]).
-    fn stable(self) -> Stable<Self> {
-        Stable::new(self)
+    /// A `bool`-output signal that flips `true` once `self.stable_period()`
+    /// samples have been seen — see [`Stable`]. `self` is only consulted for
+    /// its `stable_period()` and then dropped, so the caller is free to
+    /// continue using a clone of `self` in the same tree.
+    fn stable(self) -> Stable<Self::Input> {
+        Stable::from_source(&self)
     }
 
     /// `self` rises above `rhs` on this step.
@@ -248,15 +249,16 @@ pub trait BoolIndicatorExt: Indicator<Output = bool> {
         Change::new(self)
     }
 
-    /// Masks `self` until its whole chain has settled: `None` (read as `false`)
-    /// for the first `self.stable_period()` samples, a pass-through afterwards
-    /// (see [`Stable`]). Gate an entry signal with this and no trade can
-    /// trigger off a seed-contaminated indicator value.
-    fn stable(self) -> Stable<Self>
+    /// A `bool`-output signal that flips `true` once `self.stable_period()`
+    /// samples have been seen — see [`Stable`]. Compose with `.and(self)` to
+    /// gate an entry signal on both its firing and its stability:
+    /// `entry.clone().and(entry.stable())` (clone because `.stable()`
+    /// consumes `self` — only its stable_period is read, so a clone is fine).
+    fn stable(self) -> Stable<Self::Input>
     where
         Self: Sized,
     {
-        Stable::new(self)
+        Stable::from_source(&self)
     }
 }
 

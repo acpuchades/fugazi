@@ -67,7 +67,9 @@ impl<I: Indicator> Indicator for Component<I> {
     }
 
     fn warm_up_period(&self) -> usize {
-        self.source.warm_up_period()
+        // `max(1)` guards a `warm_up = 0` inner (e.g. `Value`) — projection
+        // still needs one `update` to advance the source.
+        self.source.warm_up_period().max(1)
     }
 
     fn unstable_period(&self) -> usize {

@@ -56,7 +56,7 @@ impl<S: Indicator<Output = Real>> Indicator for Stochastic<S> {
     }
 
     fn warm_up_period(&self) -> usize {
-        self.source.warm_up_period() + self.min.period() - 1
+        self.source.warm_up_period().max(1) + self.min.period() - 1
     }
 
     fn unstable_period(&self) -> usize {

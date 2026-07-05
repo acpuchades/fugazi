@@ -41,16 +41,12 @@ first output, accounting for the whole composed chain) and its
 `unstable_period()` — `0` for windowed indicators, and for the recursive ones
 (EMA, RSI, ATR, ADX, …) the extra samples until the seeding's influence has
 decayed below 0.1%. `stable_period()` is their sum: how much history to feed
-before trusting the output. The `Stable` wrapper — `.stable()` on any source
-*or* signal — enforces that mechanically: it masks its source until
-`stable_period()` samples have elapsed (the source keeps advancing underneath),
-converting the soft unstable period into hard warm-up
-(`gated.warm_up_period() == source.stable_period()`, `unstable_period() == 0`).
-Gate a strategy's entry signal with it and no trade can trigger off a
-seed-contaminated value — which is what the CLI does **by default**: `fugazi
-run`/`optimize` wrap every entry signal in `Stable` and measure the metrics
-from the first bar an entry could fire on (`--keep-unstable` restores the
-ungated behavior).
+before trusting the output. The `Stable` **bool signal** — `.stable()` on any
+source *or* signal — reports whether that pipeline is past its
+`stable_period()`, so composing an entry as
+`entry.and(entry.clone().stable())` (or, in YAML, `!all [<entry>, !stable {
+signal: <entry> }]`) prevents any trade from firing on a seed-contaminated
+value.
 
 ## Quick start
 
@@ -304,7 +300,6 @@ use fugazi::metrics::{per_bar_returns, drawdown_segments, sharpe, max_drawdown};
 # let report: RunReport<&'static str> = RunReport {
 #     equity_curve: vec![10_000.0, 10_100.0, 10_050.0],
 #     fills: vec![],
-#     active: vec![true; 3],
 #     initial_equity: 10_000.0,
 # };
 let returns  = per_bar_returns(&report.equity_curve, report.initial_equity);
@@ -391,17 +386,15 @@ deviations before sorting (`mean − K·std` for higher-is-better metrics,
 `mean + K·std` for lower-is-better ones), so `sharpe 2.0 ± 3.0` no longer
 outranks `1.8 ± 0.2`. Output files are `;`-delimited for Excel.
 
-By default entry signals are **stability-gated**: each is wrapped in `Stable`,
-so no entry fires while its indicator chain is still seed-contaminated, and
-metrics (whole-run and windowed alike) are measured from the first bar an
-entry could possibly fire on — the gated prefix is provably flat, so skipping
-it removes warm-up dilution without discarding any P&L (the trades/returns
-files and the equity chart still cover the full run; a `measured` line in the
-console shows the skip). `--keep-unstable` (also on `optimize`) disables both
-the gate and the skip, restoring pre-gate behavior. For purely windowed (FIR)
-strategies — SMA crossovers and the like — the gate coincides with ordinary
-warm-up, so trades are identical either way and only the dead prefix leaves
-the metrics.
+`run` and `optimize` measure the whole run — the strategy layer is
+opinion-free about stability. A strategy that wants entries held off until
+every source it consults has settled composes the check at the entry with
+`!stable`: `enter: !all [<entry>, !stable { signal: <entry> }]` fires the
+inner `<entry>` only once its whole chain is past its `stable_period()`. For
+purely windowed (FIR) strategies — SMA crossovers and the like — `!stable`
+delays to the same bar the signal first defines, so it is a no-op.
+(`fugazi get`'s `--keep-unstable` is unrelated — it disables the per-overlay
+trim of pre-`stable_period()` cells in the emitted CSV.)
 
 Console output is a two-line banner (the constant tool identity, then the active
 command) followed by four blocks: an **inputs** block of the execution params
@@ -444,14 +437,12 @@ to `close`. The vocabulary mirrors the library one-to-one:
   { period }`; bar indicators `!atr`/`!mfi`/`!williams_r { period }`, `!obv`/
   `!vwap`/`!ad`/`!true_range`, `!sar { step, max }`; transforms `!add`/`!sub`/
   `!mul`/`!div { lhs, rhs }`, `!lag`/`!diff`/`!ratio`/`!roc { source, periods }`,
-  `!rolling_max`/`!rolling_min { source, period }`, `!stable { source }` (mask
-  the source until its `stable_period()` has elapsed).
+  `!rolling_max`/`!rolling_min { source, period }`.
 - **Signals:** `!gt`/`!lt`/`!ge`/`!le`/`!eq`/`!ne { lhs, rhs, epsilon? }`,
   `!above`/`!below { source, level }`; `!crosses_above`/`!crosses_below
   { lhs, rhs }`; `!and`/`!or`/`!xor { lhs, rhs }`, `!all [ … ]`, `!any [ … ]`,
-  `!not <signal>`, `!changed <signal>`, `!stable <signal>` (mask the signal —
-  read as false — until its chain has settled, so no trade triggers off a
-  seed-contaminated value), `!value <bool>`.
+  `!not <signal>`, `!changed <signal>`, `!stable { signal: <signal> }` (`true`
+  once the inner signal is past its `stable_period()`), `!value <bool>`.
 
 **Parameters — `!param`.** Any value in the strategy can be a placeholder resolved
 at run time with `--params` (repeatable), so one file covers many variations

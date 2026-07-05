@@ -254,8 +254,9 @@ where
 
     fn warm_up_period(&self) -> usize {
         // The lagged operand needs a source output `period` steps before the
-        // current one.
-        self.source.warm_up_period() + self.period
+        // current one. `max(1)` so a `warm_up = 0` source (e.g. `Value`) still
+        // requires the full period of updates.
+        self.source.warm_up_period().max(1) + self.period
     }
 
     fn unstable_period(&self) -> usize {
@@ -402,8 +403,9 @@ where
 
     fn warm_up_period(&self) -> usize {
         // A full window of source outputs, the first of which arrives at the
-        // source's own warm-up.
-        self.source.warm_up_period() + self.inner.period() - 1
+        // source's own warm-up. `max(1)` so a `warm_up = 0` source (e.g.
+        // `Value`) still requires the full window of updates.
+        self.source.warm_up_period().max(1) + self.inner.period() - 1
     }
 
     fn unstable_period(&self) -> usize {

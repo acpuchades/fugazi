@@ -49,8 +49,9 @@ impl<S: Indicator<Output = Real>> Indicator for Rma<S> {
     }
 
     fn warm_up_period(&self) -> usize {
-        // The mean seed consumes a full period of source outputs.
-        self.source.warm_up_period() + self.state.period() - 1
+        // The mean seed consumes a full period of source outputs. `max(1)`
+        // so a `warm_up = 0` source still requires the full period of updates.
+        self.source.warm_up_period().max(1) + self.state.period() - 1
     }
 
     fn unstable_period(&self) -> usize {

@@ -81,7 +81,8 @@ impl<S: Indicator<Output = Real>> Indicator for Rsi<S> {
 
     fn warm_up_period(&self) -> usize {
         // One source output to seed the diff, then a full period of deltas.
-        self.source.warm_up_period() + self.gain.period()
+        // `max(1)` so a `warm_up = 0` source still needs the seed update.
+        self.source.warm_up_period().max(1) + self.gain.period()
     }
 
     fn unstable_period(&self) -> usize {
