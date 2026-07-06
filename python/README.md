@@ -164,7 +164,7 @@ node.reset()                   # call reset() to start a fresh, independent pass
 | `aroon(period)` | dict `{up, down, oscillator}` |
 | `resample(every, inner)` | `inner`'s output every `every` bars (aggregated HTF candle fed to `inner`), `None` between |
 | `latch(source)` | `source`'s last `Some` output, held across `None` ticks (works on indicators and signals) |
-| `stable(signal)` | `True` once `signal` has been fed at least its `stable_period()` samples |
+| `stable(signal)` | `True` once `signal` has been fed at least its `stable_period()` samples (also `.stable()` on any Indicator or Signal) |
 
 Multi-line indicators return a `dict` of their named lines (or `None` while
 warming up).
@@ -192,11 +192,14 @@ smoother as the resample's `inner` — then `latch` on the outside; latching
 base tick, distorting the recurrence.
 
 `stable(signal)` composes with the same signal in an `and_` to gate a
-strategy's entry on its own sources being past their unstable tail:
+strategy's entry on its own sources being past their unstable tail. It's also
+available as a method on any Indicator or Signal:
 
 ```python
 entry = ta.close().crosses_above(ta.ema(ta.close(), 20))
-gated = entry.and_(ta.stable(entry))   # fires only once the EMA has settled
+gated = entry.and_(entry.stable())          # method form
+gated = entry.and_(ta.stable(entry))        # equivalent free-function form
+warm = ta.ema(ta.close(), 20).stable()      # Indicator.stable() -> Signal
 ```
 
 ## Operators
@@ -300,6 +303,56 @@ for o, h, l, c, v in bars:
         wallet.set("AAPL", "buy", ta.Size.value_frac(1.0))   # all-in long
     elif went_flat:
         wallet.close("AAPL")
+```
+
+## Metrics
+
+`fugazi.metrics` is the standalone reporting surface — one function per metric
+so you pick only what you need. Return moments (`mean_return`, `stddev_return`,
+`skewness`, `value_at_risk`, …), risk-adjusted ratios (`sharpe`, `sortino`,
+`calmar`, `omega`, `ulcer_performance_index`), drawdown analytics
+(`max_drawdown`, `average_drawdown`, `time_in_drawdown_ratio`,
+`recovery_factor`), and round-trip trade statistics (`win_rate`,
+`profit_factor`, `expectancy`, `kelly_fraction`, `average_bars_held`, …) are all
+there. Values are in **natural units** — `0.15` is +15%, not `15.0` — and
+ratios that can vanish (zero variance for Sharpe, no losing trade for a profit
+factor, non-positive endpoints for CAGR) return `None` rather than `NaN`.
+
+Three intermediate builders — `per_bar_returns`, `reconstruct_trades`,
+`drawdown_segments` — turn the equity curve and fill blotter into what the
+metric functions consume, so a caller computing several metrics builds each
+intermediate once:
+
+```python
+from fugazi import metrics
+
+equity = [10_000.0, 10_050.0, 10_100.0, 9_900.0, 10_200.0, 10_300.0]
+returns = metrics.per_bar_returns(equity, initial_equity=10_000.0)
+
+metrics.sharpe(returns, risk_free_rate=0.0, bars_per_year=252)   # ratio | None
+metrics.total_return(equity, initial_equity=10_000.0)            # 0.03
+metrics.max_drawdown(metrics.drawdown_segments(equity))          # fraction
+```
+
+`reconstruct_trades` walks a bar-tagged fill blotter with a signed position and
+a volume-weighted entry, producing one `Trade` per closed leg. Since
+`PaperWallet.update()` returns bare `Order`s (no bar), tag each with the bar
+you're on using `fugazi.Fill(bar, order)` as you drive the loop:
+
+```python
+from fugazi import metrics
+
+fills = []
+wallet = ta.PaperWallet(10_000.0)
+wallet.set_position("AAPL", 100.0)         # queued market buy
+for i, c in enumerate(candles):
+    for order in wallet.update("AAPL", c):
+        fills.append(ta.Fill(bar=i, order=order))
+
+trades = metrics.reconstruct_trades(fills)
+metrics.win_rate(trades)                   # win fraction | None
+metrics.profit_factor(trades)              # Σwins / |Σlosses| | None
+metrics.exposure_ratio(fills, total_bars=len(candles))
 ```
 
 ## Fetching data

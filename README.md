@@ -634,6 +634,18 @@ for o, h, l, c, v in bars:
 print(wallet.funds, wallet.position("AAPL"), wallet.orders())
 ```
 
+`fugazi.metrics` is the reporting surface — the same one-function-per-metric
+catalogue as [`fugazi::metrics`](src/metrics.rs), for computing Sharpe / Sortino
+/ Calmar, drawdown analytics, and trade statistics from an equity curve and a
+bar-tagged fill blotter (built with `fugazi.Fill(bar, order)`):
+
+```python
+from fugazi import metrics
+equity = [10_000.0, 10_050.0, 10_100.0, 9_900.0, 10_200.0, 10_300.0]
+returns = metrics.per_bar_returns(equity, initial_equity=10_000.0)
+metrics.sharpe(returns, risk_free_rate=0.0, bars_per_year=252)   # ratio | None
+```
+
 Install with `pip install fugazi` (prebuilt wheels for Linux, macOS and
 Windows), or build from a checkout with `cd python && maturin develop --release`.
 See the [Python README](python/README.md) for the full API.
