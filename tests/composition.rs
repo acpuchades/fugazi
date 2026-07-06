@@ -53,7 +53,7 @@ fn close_crosses_above_ema_from_candles() {
     let mut fired = false;
     // Flat (close == ema) then a jump so close crosses above its own EMA.
     for close in [10.0, 10.0, 10.0, 10.0, 20.0] {
-        sig.update(bar(close));
+        sig.update(bar(close).into());
         fired |= sig.is_true();
     }
     assert!(fired, "close should cross above its EMA on the jump");

@@ -46,11 +46,11 @@ fn main() {
         let candle = Candle::new(price, price, price, price, 0.0);
 
         // Way 1: consume the whole-struct output...
-        let bb = bands.update(candle);
-        macd.update(candle);
+        let bb = bands.update(candle.into());
+        macd.update(candle.into());
         // Way 3: advance the composed signals (one bar each, like any signal).
-        let crossed = bullish_cross.update(candle).unwrap_or(false);
-        let crossed_mid = above_mid.update(candle).unwrap_or(false);
+        let crossed = bullish_cross.update(candle.into()).unwrap_or(false);
+        let crossed_mid = above_mid.update(candle.into()).unwrap_or(false);
 
         let fmt = |v: Option<Real>| v.map_or_else(|| "  --  ".to_string(), |x| format!("{x:8.3}"));
         let flag = |b: bool| if b { "✓" } else { "·" };

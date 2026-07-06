@@ -10,7 +10,7 @@
 use std::marker::PhantomData;
 
 use crate::indicator::Indicator;
-use crate::types::{Candle, Real};
+use crate::types::{Atom, Candle, Real};
 
 /// A pass-through source over the `Candle` stream: yields each bar unchanged.
 ///
@@ -32,11 +32,11 @@ impl CurrentBar {
 }
 
 impl Indicator for CurrentBar {
-    type Input = Candle;
+    type Input = Atom;
     type Output = Candle;
 
-    fn update(&mut self, candle: Candle) -> Option<Candle> {
-        self.value = Some(candle);
+    fn update(&mut self, atom: Atom) -> Option<Candle> {
+        self.value = Some(atom.candle);
         self.value
     }
 
@@ -85,11 +85,11 @@ impl<F> Default for Field<F> {
 }
 
 impl<F: CandleField> Indicator for Field<F> {
-    type Input = Candle;
+    type Input = Atom;
     type Output = Real;
 
-    fn update(&mut self, candle: Candle) -> Option<Real> {
-        self.value = Some(F::get(&candle));
+    fn update(&mut self, atom: Atom) -> Option<Real> {
+        self.value = Some(F::get(&atom.candle));
         self.value
     }
 
@@ -242,8 +242,8 @@ mod tests {
     #[test]
     fn accessors_extract_fields() {
         let bar = Candle::new(1.0, 4.0, 0.5, 3.0, 1000.0);
-        assert_eq!(Current::close().update(bar), Some(3.0));
-        assert_eq!(Current::volume().update(bar), Some(1000.0));
-        assert_eq!(Current::high().update(bar), Some(4.0));
+        assert_eq!(Current::close().update(bar.into()), Some(3.0));
+        assert_eq!(Current::volume().update(bar.into()), Some(1000.0));
+        assert_eq!(Current::high().update(bar.into()), Some(4.0));
     }
 }

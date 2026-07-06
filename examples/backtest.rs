@@ -45,14 +45,14 @@ impl GoldenCross {
 }
 
 impl Strategy for GoldenCross {
-    type Input = Candle;
+    type Input = Atom;
     type Symbol = &'static str;
 
-    fn update(&mut self, candle: Candle) {
+    fn update(&mut self, atom: Atom) {
         // Advance BOTH signals every bar (never short-circuit, or the skipped
         // one desyncs from the price stream).
-        self.enter.update(candle);
-        self.exit.update(candle);
+        self.enter.update(atom.clone());
+        self.exit.update(atom);
     }
 
     fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
@@ -82,7 +82,7 @@ fn main() {
         for fill in wallet.update(SYMBOL, *candle) {
             strategy.on_fill(&fill);
         }
-        strategy.update(*candle);
+        strategy.update((*candle).into());
         strategy.trade(&mut wallet);
         // Print whatever this bar appended to the blotter.
         for order in &wallet.orders()[filled..] {

@@ -10,15 +10,15 @@
 //! [`DynIndicator`] is that common type — a **runtime-typed** trait object
 //! carrying its own [`input_type`](DynIndicator::input_type) /
 //! [`output_type`](DynIndicator::output_type) descriptors, exchanging
-//! [`DynValue`] payloads (`Real | Bool | Candle`) on every `update`. Concrete
-//! library indicators are wrapped once by [`Adapter`] to appear as
+//! [`DynValue`] payloads (`Real | Bool | Atom | Candle`) on every `update`.
+//! Concrete library indicators are wrapped once by [`Adapter`] to appear as
 //! `DynIndicator`s; the [`AsReal`] / [`AsBool`] typed views cross back the
 //! other way so a boxed handle can drop into a library constructor.
 
 use std::fmt;
 
 use fugazi::Indicator;
-use fugazi::types::{Candle, Real};
+use fugazi::types::{Atom, Candle, Real};
 
 // ---------------------------------------------------------------------------
 // Payload enum + type descriptor
@@ -27,12 +27,30 @@ use fugazi::types::{Candle, Real};
 /// The runtime-typed payload a [`DynIndicator`] exchanges. One variant per
 /// concrete carrier the CLI's indicator vocabulary produces / consumes.
 ///
-/// All three variants are [`Copy`], so passing `DynValue` by value stays cheap.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// `Real` and `Bool` are `Copy`; `Atom` and `Candle` are not, so `DynValue`
+/// itself is only `Clone`.
+#[derive(Debug, Clone)]
 pub enum DynValue {
     Real(Real),
     Bool(bool),
+    Atom(Atom),
     Candle(Candle),
+}
+
+// `Atom` doesn't implement `PartialEq` (the overlay `Arc`s aren't compared by
+// the library), but the CLI's test helpers still need to assert on `DynValue`.
+// Compare the scalar variants exactly, and reduce `Atom`/`Candle` payloads to
+// their candle-field equality (dropping overlays for the atom case).
+impl PartialEq for DynValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (DynValue::Real(a), DynValue::Real(b)) => a == b,
+            (DynValue::Bool(a), DynValue::Bool(b)) => a == b,
+            (DynValue::Candle(a), DynValue::Candle(b)) => a == b,
+            (DynValue::Atom(a), DynValue::Atom(b)) => a.candle == b.candle,
+            _ => false,
+        }
+    }
 }
 
 /// The runtime tag on a [`DynValue`] — used to check
@@ -42,6 +60,7 @@ pub enum DynValue {
 pub enum DynType {
     Real,
     Bool,
+    Atom,
     Candle,
 }
 
@@ -50,6 +69,7 @@ impl fmt::Display for DynType {
         match self {
             DynType::Real => f.write_str("Real"),
             DynType::Bool => f.write_str("Bool"),
+            DynType::Atom => f.write_str("Atom"),
             DynType::Candle => f.write_str("Candle"),
         }
     }
@@ -65,6 +85,11 @@ impl From<bool> for DynValue {
         DynValue::Bool(v)
     }
 }
+impl From<Atom> for DynValue {
+    fn from(v: Atom) -> Self {
+        DynValue::Atom(v)
+    }
+}
 impl From<Candle> for DynValue {
     fn from(v: Candle) -> Self {
         DynValue::Candle(v)
@@ -77,6 +102,7 @@ impl TryFrom<DynValue> for Real {
         match v {
             DynValue::Real(x) => Ok(x),
             DynValue::Bool(_) => Err(DynType::Bool),
+            DynValue::Atom(_) => Err(DynType::Atom),
             DynValue::Candle(_) => Err(DynType::Candle),
         }
     }
@@ -87,7 +113,22 @@ impl TryFrom<DynValue> for bool {
         match v {
             DynValue::Bool(x) => Ok(x),
             DynValue::Real(_) => Err(DynType::Real),
+            DynValue::Atom(_) => Err(DynType::Atom),
             DynValue::Candle(_) => Err(DynType::Candle),
+        }
+    }
+}
+impl TryFrom<DynValue> for Atom {
+    type Error = DynType;
+    fn try_from(v: DynValue) -> Result<Atom, DynType> {
+        match v {
+            DynValue::Atom(x) => Ok(x),
+            // A raw Candle lifts trivially into an Atom with no overlays —
+            // this is the key that lets a Resample's Candle output feed a
+            // downstream Atom-input source without an explicit lift adapter.
+            DynValue::Candle(c) => Ok(c.into()),
+            DynValue::Real(_) => Err(DynType::Real),
+            DynValue::Bool(_) => Err(DynType::Bool),
         }
     }
 }
@@ -98,11 +139,12 @@ impl TryFrom<DynValue> for Candle {
             DynValue::Candle(x) => Ok(x),
             DynValue::Real(_) => Err(DynType::Real),
             DynValue::Bool(_) => Err(DynType::Bool),
+            DynValue::Atom(_) => Err(DynType::Atom),
         }
     }
 }
 
-/// Maps a concrete carrier type (`Real`, `bool`, `Candle`) back to its
+/// Maps a concrete carrier type (`Real`, `bool`, `Atom`, `Candle`) back to its
 /// [`DynType`] tag — the compile-time counterpart of the runtime descriptor
 /// the [`Adapter`] blanket uses to fill in `input_type()` / `output_type()`.
 pub trait TypeOf {
@@ -113,6 +155,9 @@ impl TypeOf for Real {
 }
 impl TypeOf for bool {
     const TYPE: DynType = DynType::Bool;
+}
+impl TypeOf for Atom {
+    const TYPE: DynType = DynType::Atom;
 }
 impl TypeOf for Candle {
     const TYPE: DynType = DynType::Candle;
@@ -164,8 +209,8 @@ impl Clone for Box<dyn DynIndicator> {
 ///
 /// One blanket impl over every `I: Indicator<Input = X, Output = Y>` where
 /// `X: TryFrom<DynValue, Error = DynType> + TypeOf` and
-/// `Y: Into<DynValue> + Copy + TypeOf`. The `Copy` on `Y` matches the current
-/// carrier surface (`Real`, `bool`, `Candle` are all `Copy`).
+/// `Y: Into<DynValue> + Clone + TypeOf`. `Y` is `Clone` (not `Copy`) because
+/// `Atom` carries `Option<OverlayInfo>` and is not `Copy`.
 #[derive(Debug, Clone)]
 pub struct Adapter<I> {
     inner: I,
@@ -181,7 +226,7 @@ impl<I, X, Y> DynIndicator for Adapter<I>
 where
     I: Indicator<Input = X, Output = Y> + Clone + 'static,
     X: TryFrom<DynValue, Error = DynType> + TypeOf,
-    Y: Into<DynValue> + Copy + TypeOf,
+    Y: Into<DynValue> + Clone + TypeOf,
 {
     fn input_type(&self) -> DynType {
         X::TYPE
@@ -221,7 +266,7 @@ pub fn wrap<I, X, Y>(inner: I) -> Box<dyn DynIndicator>
 where
     I: Indicator<Input = X, Output = Y> + Clone + 'static,
     X: TryFrom<DynValue, Error = DynType> + TypeOf,
-    Y: Into<DynValue> + Copy + TypeOf,
+    Y: Into<DynValue> + Clone + TypeOf,
 {
     Box::new(Adapter::new(inner))
 }
@@ -248,9 +293,10 @@ where
 /// recursive spec builder guarantees compatible types, so this is a hard bug
 /// if ever hit.
 pub fn chain(outer: Box<dyn DynIndicator>, inner: Box<dyn DynIndicator>) -> Box<dyn DynIndicator> {
-    assert_eq!(
-        outer.output_type(),
-        inner.input_type(),
+    let ok = outer.output_type() == inner.input_type()
+        || (outer.output_type() == DynType::Candle && inner.input_type() == DynType::Atom);
+    assert!(
+        ok,
         "chain: outer output type ({}) doesn't match inner input type ({})",
         outer.output_type(),
         inner.input_type(),
@@ -280,10 +326,10 @@ impl DynIndicator for Chain {
             Some(y) => self.inner.update(y),
             None => None,
         };
-        self.value
+        self.value.clone()
     }
     fn value(&self) -> Option<DynValue> {
-        self.value
+        self.value.clone()
     }
     fn warm_up_period(&self) -> usize {
         // Plain library-style composition: outer needs its warm-up, then
@@ -310,7 +356,7 @@ impl DynIndicator for Chain {
         Box::new(Chain {
             outer: self.outer.dyn_clone(),
             inner: self.inner.dyn_clone(),
-            value: self.value,
+            value: self.value.clone(),
         })
     }
 }
@@ -337,7 +383,7 @@ struct StableCheck {
 
 impl DynIndicator for StableCheck {
     fn input_type(&self) -> DynType {
-        DynType::Candle
+        DynType::Atom
     }
     fn output_type(&self) -> DynType {
         DynType::Bool
@@ -368,16 +414,16 @@ impl DynIndicator for StableCheck {
 
 // ---------------------------------------------------------------------------
 // Typed views: reconstitute a Box<dyn DynIndicator> as a library-typed
-// Indicator<Input=Candle, Output=X> so it can drop into library constructors
+// Indicator<Input=Atom, Output=X> so it can drop into library constructors
 // (Ema::new(source, period), IndicatorExt::gt(...), SingleAssetStrategy slots).
 // ---------------------------------------------------------------------------
 
 /// Views a `Box<dyn DynIndicator>` with `output_type == Real` as a library
-/// `Indicator<Input = Candle, Output = Real>` — the shape every source-side
+/// `Indicator<Input = Atom, Output = Real>` — the shape every source-side
 /// library constructor (Ema, Sma, arithmetic ops, comparisons, …) expects.
 ///
 /// # Panics
-/// [`new`](Self::new) panics if `inner.input_type() != Candle` or
+/// [`new`](Self::new) panics if `inner.input_type() != Atom` or
 /// `inner.output_type() != Real`; the recursive spec builder enforces both at
 /// construction, so the unwrap arms in `update`/`value` are unreachable in
 /// practice.
@@ -388,8 +434,8 @@ impl AsReal {
     pub fn new(inner: Box<dyn DynIndicator>) -> Self {
         assert_eq!(
             inner.input_type(),
-            DynType::Candle,
-            "AsReal requires a Candle-input DynIndicator"
+            DynType::Atom,
+            "AsReal requires an Atom-input DynIndicator"
         );
         assert_eq!(
             inner.output_type(),
@@ -401,10 +447,10 @@ impl AsReal {
 }
 
 impl Indicator for AsReal {
-    type Input = Candle;
+    type Input = Atom;
     type Output = Real;
-    fn update(&mut self, c: Candle) -> Option<Real> {
-        match self.0.update(DynValue::Candle(c))? {
+    fn update(&mut self, atom: Atom) -> Option<Real> {
+        match self.0.update(DynValue::Atom(atom))? {
             DynValue::Real(x) => Some(x),
             other => unreachable!("AsReal received {other:?} but was built for Real output"),
         }
@@ -427,11 +473,11 @@ impl Indicator for AsReal {
 }
 
 /// Views a `Box<dyn DynIndicator>` with `output_type == Bool` as a library
-/// `Indicator<Input = Candle, Output = bool>` — i.e. a
+/// `Indicator<Input = Atom, Output = bool>` — i.e. a
 /// [`Signal`](fugazi::Signal).
 ///
 /// # Panics
-/// [`new`](Self::new) panics if `inner.input_type() != Candle` or
+/// [`new`](Self::new) panics if `inner.input_type() != Atom` or
 /// `inner.output_type() != Bool`.
 #[derive(Clone)]
 pub struct AsBool(Box<dyn DynIndicator>);
@@ -440,8 +486,8 @@ impl AsBool {
     pub fn new(inner: Box<dyn DynIndicator>) -> Self {
         assert_eq!(
             inner.input_type(),
-            DynType::Candle,
-            "AsBool requires a Candle-input DynIndicator"
+            DynType::Atom,
+            "AsBool requires an Atom-input DynIndicator"
         );
         assert_eq!(
             inner.output_type(),
@@ -453,10 +499,10 @@ impl AsBool {
 }
 
 impl Indicator for AsBool {
-    type Input = Candle;
+    type Input = Atom;
     type Output = bool;
-    fn update(&mut self, c: Candle) -> Option<bool> {
-        match self.0.update(DynValue::Candle(c))? {
+    fn update(&mut self, atom: Atom) -> Option<bool> {
+        match self.0.update(DynValue::Atom(atom))? {
             DynValue::Bool(b) => Some(b),
             other => unreachable!("AsBool received {other:?} but was built for Bool output"),
         }
@@ -465,6 +511,59 @@ impl Indicator for AsBool {
         match self.0.value()? {
             DynValue::Bool(b) => Some(b),
             other => unreachable!("AsBool held {other:?} but was built for Bool output"),
+        }
+    }
+    fn warm_up_period(&self) -> usize {
+        self.0.warm_up_period()
+    }
+    fn unstable_period(&self) -> usize {
+        self.0.unstable_period()
+    }
+    fn reset(&mut self) {
+        self.0.reset();
+    }
+}
+
+/// Views a `Box<dyn DynIndicator>` with `output_type == Candle` as a library
+/// `Indicator<Input = Atom, Output = Candle>` — the shape a bar indicator
+/// (`Atr`, `Adx`, `Obv`, …) expects as its `source` after the source-generic
+/// refactor.
+///
+/// # Panics
+/// [`new`](Self::new) panics if `inner.input_type() != Atom` or
+/// `inner.output_type() != Candle`.
+#[derive(Clone)]
+pub struct AsCandle(Box<dyn DynIndicator>);
+
+impl AsCandle {
+    pub fn new(inner: Box<dyn DynIndicator>) -> Self {
+        assert_eq!(
+            inner.input_type(),
+            DynType::Atom,
+            "AsCandle requires an Atom-input DynIndicator"
+        );
+        assert_eq!(
+            inner.output_type(),
+            DynType::Candle,
+            "AsCandle requires a Candle-output DynIndicator"
+        );
+        Self(inner)
+    }
+}
+
+impl Indicator for AsCandle {
+    type Input = Atom;
+    type Output = Candle;
+    fn update(&mut self, atom: Atom) -> Option<Candle> {
+        match self.0.update(DynValue::Atom(atom))? {
+            DynValue::Candle(c) => Some(c),
+            other => unreachable!("AsCandle received {other:?} but was built for Candle output"),
+        }
+    }
+    fn value(&self) -> Option<Candle> {
+        match self.0.value()? {
+            DynValue::Candle(c) => Some(c),
+            other => unreachable!("AsCandle held {other:?} but was built for Candle output"),
         }
     }
     fn warm_up_period(&self) -> usize {
@@ -504,13 +603,13 @@ mod tests {
     #[test]
     fn adapter_reports_types_and_forwards_payload() {
         let mut sma = wrap(Sma::new(Current::close(), 3));
-        assert_eq!(sma.input_type(), DynType::Candle);
+        assert_eq!(sma.input_type(), DynType::Atom);
         assert_eq!(sma.output_type(), DynType::Real);
 
-        assert_eq!(sma.update(DynValue::Candle(bar(1.0))), None);
-        assert_eq!(sma.update(DynValue::Candle(bar(2.0))), None);
+        assert_eq!(sma.update(DynValue::Atom(bar(1.0).into())), None);
+        assert_eq!(sma.update(DynValue::Atom(bar(2.0).into())), None);
         assert_eq!(
-            sma.update(DynValue::Candle(bar(3.0))),
+            sma.update(DynValue::Atom(bar(3.0).into())),
             Some(DynValue::Real(2.0))
         );
     }
@@ -519,10 +618,10 @@ mod tests {
     fn stable_check_reports_bool_after_threshold() {
         let raw = Ema::new(Current::close(), 3);
         let mut check = stable_check(raw.stable_period());
-        assert_eq!(check.input_type(), DynType::Candle);
+        assert_eq!(check.input_type(), DynType::Atom);
         assert_eq!(check.output_type(), DynType::Bool);
         // Feed stable_period - 1 candles; still Some(false).
-        let bar = |v: Real| DynValue::Candle(Candle::new(v, v, v, v, 0.0));
+        let bar = |v: Real| DynValue::Atom(Candle::new(v, v, v, v, 0.0).into());
         for i in 1..raw.stable_period() {
             assert_eq!(check.update(bar(i as Real)), Some(DynValue::Bool(false)));
         }

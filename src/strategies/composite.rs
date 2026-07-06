@@ -20,7 +20,7 @@ pub fn adx_trend_filter<Sym>(
 ) -> SingleAssetStrategy<Sym> {
     let cross_up = Sma::new(Current::close(), fast).crosses_above(Sma::new(Current::close(), slow));
     SingleAssetStrategy::new(symbol).long_on(
-        cross_up.and(Adx::new(adx_period).adx().above(adx_min)),
+        cross_up.and(Adx::new(Current::candle(), adx_period).adx().above(adx_min)),
         Sma::new(Current::close(), fast).crosses_below(Sma::new(Current::close(), slow)),
     )
 }
@@ -56,7 +56,8 @@ pub fn keltner_breakout<Sym>(
     atr_period: usize,
     multiplier: Real,
 ) -> SingleAssetStrategy<Sym> {
-    let channel = || Keltner::new(Current::close(), ema_period, atr_period, multiplier);
+    let channel =
+        || Keltner::new(Current::close(), Current::candle(), ema_period, atr_period, multiplier);
     let up = || Current::close().gt(channel().upper());
     let down = || Current::close().lt(channel().lower());
     SingleAssetStrategy::new(symbol)

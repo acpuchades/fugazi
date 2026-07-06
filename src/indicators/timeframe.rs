@@ -311,7 +311,7 @@ mod tests {
     fn resample_every_1_is_identity_passthrough() {
         let mut r = Resample::new(Current::candle(), 1);
         for c in bars() {
-            assert_eq!(r.update(c).unwrap(), c);
+            assert_eq!(r.update(c.into()).unwrap(), c);
         }
     }
 
@@ -320,18 +320,18 @@ mod tests {
         let mut r = Resample::new(Current::candle(), 4);
         let bars = bars();
         for c in &bars[..3] {
-            assert!(r.update(*c).is_none());
+            assert!(r.update((*c).into()).is_none());
         }
-        let htf1 = r.update(bars[3]).unwrap();
+        let htf1 = r.update(bars[3].into()).unwrap();
         assert_eq!(htf1.open, 10.0);
         assert_eq!(htf1.close, 14.0);
         assert_eq!(htf1.high, 15.0);
         assert_eq!(htf1.low, 9.0);
         assert_eq!(htf1.volume, 100.0 + 200.0 + 150.0 + 50.0);
         for c in &bars[4..7] {
-            assert!(r.update(*c).is_none());
+            assert!(r.update((*c).into()).is_none());
         }
-        let htf2 = r.update(bars[7]).unwrap();
+        let htf2 = r.update(bars[7].into()).unwrap();
         assert_eq!(htf2.open, 14.0);
         assert_eq!(htf2.close, 18.5);
         assert_eq!(htf2.high, 19.0);
@@ -345,7 +345,7 @@ mod tests {
         assert_eq!(r.warm_up_period(), 4);
         for (i, c) in bars().into_iter().enumerate() {
             let sample = i + 1;
-            let ready = r.update(c).is_some();
+            let ready = r.update(c.into()).is_some();
             assert_eq!(
                 ready,
                 sample % 4 == 0,
@@ -358,13 +358,13 @@ mod tests {
     fn resample_reset_clears_the_accumulator() {
         let mut r = Resample::new(Current::candle(), 3);
         for c in bars().into_iter().take(2) {
-            r.update(c);
+            r.update(c.into());
         }
         r.reset();
         let bars = bars();
-        assert!(r.update(bars[0]).is_none());
-        assert!(r.update(bars[1]).is_none());
-        let out = r.update(bars[2]).unwrap();
+        assert!(r.update(bars[0].into()).is_none());
+        assert!(r.update(bars[1].into()).is_none());
+        let out = r.update(bars[2].into()).unwrap();
         assert_eq!(out.open, bars[0].open);
         assert_eq!(out.close, bars[2].close);
     }
@@ -380,20 +380,20 @@ mod tests {
     #[test]
     fn latch_holds_the_last_emitted_value_across_none_ticks() {
         let mut latch = Latch::new(Resample::new(Current::candle(), 3));
-        assert_eq!(latch.update(bar(1.0)), None);
-        assert_eq!(latch.update(bar(2.0)), None);
-        let first = latch.update(bar(3.0)).unwrap();
+        assert_eq!(latch.update(bar(1.0).into()), None);
+        assert_eq!(latch.update(bar(2.0).into()), None);
+        let first = latch.update(bar(3.0).into()).unwrap();
         assert_eq!(first.close, 3.0);
-        assert_eq!(latch.update(bar(4.0)).unwrap().close, 3.0);
-        assert_eq!(latch.update(bar(5.0)).unwrap().close, 3.0);
-        assert_eq!(latch.update(bar(6.0)).unwrap().close, 6.0);
+        assert_eq!(latch.update(bar(4.0).into()).unwrap().close, 3.0);
+        assert_eq!(latch.update(bar(5.0).into()).unwrap().close, 3.0);
+        assert_eq!(latch.update(bar(6.0).into()).unwrap().close, 6.0);
     }
 
     #[test]
     fn latch_returns_none_before_the_source_has_ever_emitted() {
         let mut latch = Latch::new(Resample::new(Current::candle(), 4));
         for close in [1.0, 2.0, 3.0] {
-            assert_eq!(latch.update(bar(close)), None);
+            assert_eq!(latch.update(bar(close).into()), None);
             assert_eq!(latch.value, None);
         }
     }
@@ -409,12 +409,12 @@ mod tests {
     #[test]
     fn latch_reset_clears_the_held_value() {
         let mut latch = Latch::new(Resample::new(Current::candle(), 2));
-        latch.update(bar(1.0));
-        latch.update(bar(2.0));
+        latch.update(bar(1.0).into());
+        latch.update(bar(2.0).into());
         assert!(latch.value.is_some());
         latch.reset();
         assert!(latch.value.is_none());
-        assert!(latch.update(bar(3.0)).is_none());
+        assert!(latch.update(bar(3.0).into()).is_none());
     }
 
     // ---- Composition-order regression ----
@@ -449,7 +449,7 @@ mod tests {
             let close = chunk.last().unwrap().close;
             expected_at_boundary.push(
                 reference
-                    .update(Candle::new(close, close, close, close, 0.0))
+                    .update(Candle::new(close, close, close, close, 0.0).into())
                     .unwrap(),
             );
         }
@@ -462,8 +462,8 @@ mod tests {
         let mut correct_at_boundary: Vec<Real> = Vec::new();
         let mut wrong_at_boundary: Vec<Real> = Vec::new();
         for (i, bar) in bars.iter().enumerate() {
-            let c = correct.update(*bar);
-            let w = wrong.update(*bar);
+            let c = correct.update((*bar).into());
+            let w = wrong.update((*bar).into());
             let sample = i + 1;
             if sample % 4 == 0 {
                 correct_at_boundary.push(c.expect("correct value at boundary"));

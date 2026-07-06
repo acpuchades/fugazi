@@ -41,14 +41,14 @@ impl Reversal {
 }
 
 impl Strategy for Reversal {
-    type Input = Candle;
+    type Input = Atom;
     type Symbol = &'static str;
 
-    fn update(&mut self, candle: Candle) {
+    fn update(&mut self, atom: Atom) {
         // Advance both signals every bar (never short-circuit, or the skipped
         // one desyncs from the price stream).
-        self.long.update(candle);
-        self.short.update(candle);
+        self.long.update(atom.clone());
+        self.short.update(atom);
     }
 
     fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
@@ -81,7 +81,7 @@ fn main() {
         for fill in wallet.update(SYMBOL, *candle) {
             strat.on_fill(&fill);
         }
-        strat.update(*candle);
+        strat.update((*candle).into());
         strat.trade(&mut wallet);
         for order in &wallet.orders()[filled..] {
             println!(

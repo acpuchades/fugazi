@@ -20,16 +20,16 @@ use serde::Deserialize;
 
 use fugazi::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Component, Current,
-    CurrentBar, DEFAULT_EPSILON, Dmi, DmiValue, Donchian, DonchianValue, Ema, Hma, Keltner,
-    KeltnerValue, Latch, Macd, MacdValue, Mfi, Obv, Position, Resample, Rma, Rsi, Sar, Sma, StdDev,
-    StochRsi, Stochastic, TrueRange, Value, Vwap, WilliamsR, Wma,
+    DEFAULT_EPSILON, Dmi, DmiValue, Donchian, DonchianValue, Ema, Hma, Keltner, KeltnerValue,
+    Latch, Macd, MacdValue, Mfi, Obv, Position, Resample, Rma, Rsi, Sar, Sma, StdDev, StochRsi,
+    Stochastic, TrueRange, Value, Vwap, WilliamsR, Wma,
 };
 use fugazi::indicators::compare;
 use fugazi::indicators::logic::Const;
 use fugazi::prelude::*;
 use fugazi::strategies::SingleAssetStrategy;
 
-use crate::dyn_::{self, AsBool, AsReal, DynIndicator};
+use crate::dyn_::{self, AsBool, AsCandle, AsReal, DynIndicator};
 
 fn default_source() -> Box<SourceSpec> {
     Box::new(SourceSpec::Close)
@@ -39,6 +39,10 @@ fn default_high() -> Box<SourceSpec> {
 }
 fn default_low() -> Box<SourceSpec> {
     Box::new(SourceSpec::Low)
+}
+/// Default candle source for bar indicators — the current bar itself.
+fn default_bar_source() -> Box<SourceSpec> {
+    Box::new(SourceSpec::Current)
 }
 
 // ---------------------------------------------------------------------------
@@ -58,6 +62,11 @@ pub enum SourceSpec {
     Volume,
     Typical,
     Median,
+    /// The current bar itself — the whole [`Candle`], not a scalar. The default
+    /// bar source of every bar-consuming indicator (`!atr`, `!obv`, `!adx`, …);
+    /// wrap in [`SourceSpec::Resample`] to lift a downstream bar indicator onto
+    /// a higher timeframe.
+    Current,
     /// A constant value.
     Value(Real),
     /// The current position's entry price — a [`SingleAssetStrategy`] anchor,
@@ -165,6 +174,8 @@ pub enum SourceSpec {
     KeltnerUpper {
         #[serde(default = "default_source")]
         source: Box<SourceSpec>,
+        #[serde(default = "default_bar_source")]
+        candle_source: Box<SourceSpec>,
         ema_period: usize,
         atr_period: usize,
         multiplier: Real,
@@ -172,6 +183,8 @@ pub enum SourceSpec {
     KeltnerMiddle {
         #[serde(default = "default_source")]
         source: Box<SourceSpec>,
+        #[serde(default = "default_bar_source")]
+        candle_source: Box<SourceSpec>,
         ema_period: usize,
         atr_period: usize,
         multiplier: Real,
@@ -179,6 +192,8 @@ pub enum SourceSpec {
     KeltnerLower {
         #[serde(default = "default_source")]
         source: Box<SourceSpec>,
+        #[serde(default = "default_bar_source")]
+        candle_source: Box<SourceSpec>,
         ema_period: usize,
         atr_period: usize,
         multiplier: Real,
@@ -205,45 +220,81 @@ pub enum SourceSpec {
         period: usize,
     },
     Adx {
+        #[serde(default = "default_bar_source")]
+        source: Box<SourceSpec>,
         period: usize,
     },
     PlusDi {
+        #[serde(default = "default_bar_source")]
+        source: Box<SourceSpec>,
         period: usize,
     },
     MinusDi {
+        #[serde(default = "default_bar_source")]
+        source: Box<SourceSpec>,
         period: usize,
     },
     DmiPlusDi {
+        #[serde(default = "default_bar_source")]
+        source: Box<SourceSpec>,
         period: usize,
     },
     DmiMinusDi {
+        #[serde(default = "default_bar_source")]
+        source: Box<SourceSpec>,
         period: usize,
     },
     AroonUp {
+        #[serde(default = "default_bar_source")]
+        source: Box<SourceSpec>,
         period: usize,
     },
     AroonDown {
+        #[serde(default = "default_bar_source")]
+        source: Box<SourceSpec>,
         period: usize,
     },
     AroonOscillator {
+        #[serde(default = "default_bar_source")]
+        source: Box<SourceSpec>,
         period: usize,
     },
 
     // --- single-output bar indicators ---
     Atr {
+        #[serde(default = "default_bar_source")]
+        source: Box<SourceSpec>,
         period: usize,
     },
     Mfi {
+        #[serde(default = "default_bar_source")]
+        source: Box<SourceSpec>,
         period: usize,
     },
     WilliamsR {
+        #[serde(default = "default_bar_source")]
+        source: Box<SourceSpec>,
         period: usize,
     },
-    Obv,
-    Vwap,
-    Ad,
-    TrueRange,
+    Obv {
+        #[serde(default = "default_bar_source")]
+        source: Box<SourceSpec>,
+    },
+    Vwap {
+        #[serde(default = "default_bar_source")]
+        source: Box<SourceSpec>,
+    },
+    Ad {
+        #[serde(default = "default_bar_source")]
+        source: Box<SourceSpec>,
+    },
+    TrueRange {
+        #[serde(default = "default_bar_source")]
+        source: Box<SourceSpec>,
+    },
     Sar {
+        #[serde(default = "default_bar_source")]
+        source: Box<SourceSpec>,
         step: Real,
         max: Real,
     },
@@ -313,7 +364,12 @@ pub enum SourceSpec {
     /// produced a value on a completed bucket. Wrap the whole downstream
     /// chain in [`Latch`](SourceSpec::Latch) so per-base-tick reads see the
     /// finished value between boundaries.
-    Resample { every: usize, inner: Box<SourceSpec> },
+    Resample {
+        every: usize,
+        inner: Box<SourceSpec>,
+        #[serde(default = "default_bar_source")]
+        source: Box<SourceSpec>,
+    },
 }
 
 impl SourceSpec {
@@ -324,19 +380,22 @@ impl SourceSpec {
     pub fn build(&self, anchor: &Position) -> Box<dyn DynIndicator> {
         use SourceSpec::*;
         // Recursive-build shorthand: build `s`, view it as a library-typed
-        // `Indicator<Input=Candle, Output=Real>` so it drops into a concrete
+        // `Indicator<Input=Atom, Output=Real>` so it drops into a concrete
         // library constructor.
         let real = |s: &SourceSpec| AsReal::new(s.build(anchor));
+        // Same for a candle-output source (the input of every bar indicator).
+        let candle = |s: &SourceSpec| AsCandle::new(s.build(anchor));
 
         match self {
-            Close => dyn_::wrap(Current::close()),
-            High => dyn_::wrap(Current::high()),
-            Low => dyn_::wrap(Current::low()),
-            Open => dyn_::wrap(Current::open()),
-            Volume => dyn_::wrap(Current::volume()),
-            Typical => dyn_::wrap(Current::typical()),
-            Median => dyn_::wrap(Current::median()),
-            Value(x) => dyn_::wrap(self::Value::<Candle>::new(*x)),
+            Close => dyn_::wrap(self::Current::close()),
+            High => dyn_::wrap(self::Current::high()),
+            Low => dyn_::wrap(self::Current::low()),
+            Open => dyn_::wrap(self::Current::open()),
+            Volume => dyn_::wrap(self::Current::volume()),
+            Typical => dyn_::wrap(self::Current::typical()),
+            Median => dyn_::wrap(self::Current::median()),
+            Current => dyn_::wrap(self::Current::candle()),
+            Value(x) => dyn_::wrap(self::Value::<Atom>::new(*x)),
             Entry => dyn_::wrap(anchor.entry()),
             Peak => dyn_::wrap(anchor.peak()),
             Trough => dyn_::wrap(anchor.trough()),
@@ -404,29 +463,50 @@ impl SourceSpec {
 
             KeltnerUpper {
                 source,
+                candle_source,
                 ema_period,
                 atr_period,
                 multiplier,
             } => dyn_::wrap(Component::new(
-                Keltner::new(real(source), *ema_period, *atr_period, *multiplier),
+                Keltner::new(
+                    real(source),
+                    candle(candle_source),
+                    *ema_period,
+                    *atr_period,
+                    *multiplier,
+                ),
                 |v: KeltnerValue| v.upper,
             )),
             KeltnerMiddle {
                 source,
+                candle_source,
                 ema_period,
                 atr_period,
                 multiplier,
             } => dyn_::wrap(Component::new(
-                Keltner::new(real(source), *ema_period, *atr_period, *multiplier),
+                Keltner::new(
+                    real(source),
+                    candle(candle_source),
+                    *ema_period,
+                    *atr_period,
+                    *multiplier,
+                ),
                 |v: KeltnerValue| v.middle,
             )),
             KeltnerLower {
                 source,
+                candle_source,
                 ema_period,
                 atr_period,
                 multiplier,
             } => dyn_::wrap(Component::new(
-                Keltner::new(real(source), *ema_period, *atr_period, *multiplier),
+                Keltner::new(
+                    real(source),
+                    candle(candle_source),
+                    *ema_period,
+                    *atr_period,
+                    *multiplier,
+                ),
                 |v: KeltnerValue| v.lower,
             )),
 
@@ -443,47 +523,50 @@ impl SourceSpec {
                 |v: DonchianValue| v.lower,
             )),
 
-            Adx { period } => {
-                dyn_::wrap(Component::new(self::Adx::new(*period), |v: AdxValue| v.adx))
-            }
-            PlusDi { period } => dyn_::wrap(Component::new(
-                self::Adx::new(*period),
+            Adx { source, period } => dyn_::wrap(Component::new(
+                self::Adx::new(candle(source), *period),
+                |v: AdxValue| v.adx,
+            )),
+            PlusDi { source, period } => dyn_::wrap(Component::new(
+                self::Adx::new(candle(source), *period),
                 |v: AdxValue| v.plus_di,
             )),
-            MinusDi { period } => dyn_::wrap(Component::new(
-                self::Adx::new(*period),
+            MinusDi { source, period } => dyn_::wrap(Component::new(
+                self::Adx::new(candle(source), *period),
                 |v: AdxValue| v.minus_di,
             )),
-            DmiPlusDi { period } => dyn_::wrap(Component::new(
-                self::Dmi::new(*period),
+            DmiPlusDi { source, period } => dyn_::wrap(Component::new(
+                self::Dmi::new(candle(source), *period),
                 |v: DmiValue| v.plus_di,
             )),
-            DmiMinusDi { period } => dyn_::wrap(Component::new(
-                self::Dmi::new(*period),
+            DmiMinusDi { source, period } => dyn_::wrap(Component::new(
+                self::Dmi::new(candle(source), *period),
                 |v: DmiValue| v.minus_di,
             )),
 
-            AroonUp { period } => dyn_::wrap(Component::new(
-                self::Aroon::new(*period),
+            AroonUp { source, period } => dyn_::wrap(Component::new(
+                self::Aroon::new(candle(source), *period),
                 |v: AroonValue| v.up,
             )),
-            AroonDown { period } => dyn_::wrap(Component::new(
-                self::Aroon::new(*period),
+            AroonDown { source, period } => dyn_::wrap(Component::new(
+                self::Aroon::new(candle(source), *period),
                 |v: AroonValue| v.down,
             )),
-            AroonOscillator { period } => dyn_::wrap(Component::new(
-                self::Aroon::new(*period),
+            AroonOscillator { source, period } => dyn_::wrap(Component::new(
+                self::Aroon::new(candle(source), *period),
                 |v: AroonValue| v.oscillator,
             )),
 
-            Atr { period } => dyn_::wrap(self::Atr::new(*period)),
-            Mfi { period } => dyn_::wrap(self::Mfi::new(*period)),
-            WilliamsR { period } => dyn_::wrap(self::WilliamsR::new(*period)),
-            Obv => dyn_::wrap(self::Obv::new()),
-            Vwap => dyn_::wrap(self::Vwap::new()),
-            Ad => dyn_::wrap(self::Ad::new()),
-            TrueRange => dyn_::wrap(self::TrueRange::new()),
-            Sar { step, max } => dyn_::wrap(self::Sar::new(*step, *max)),
+            Atr { source, period } => dyn_::wrap(self::Atr::new(candle(source), *period)),
+            Mfi { source, period } => dyn_::wrap(self::Mfi::new(candle(source), *period)),
+            WilliamsR { source, period } => {
+                dyn_::wrap(self::WilliamsR::new(candle(source), *period))
+            }
+            Obv { source } => dyn_::wrap(self::Obv::new(candle(source))),
+            Vwap { source } => dyn_::wrap(self::Vwap::new(candle(source))),
+            Ad { source } => dyn_::wrap(self::Ad::new(candle(source))),
+            TrueRange { source } => dyn_::wrap(self::TrueRange::new(candle(source))),
+            Sar { source, step, max } => dyn_::wrap(self::Sar::new(candle(source), *step, *max)),
 
             Add { lhs, rhs } => dyn_::wrap(real(lhs).add(real(rhs))),
             Sub { lhs, rhs } => dyn_::wrap(real(lhs).sub(real(rhs))),
@@ -501,13 +584,20 @@ impl SourceSpec {
                 let inner = AsReal::new(source.build(anchor));
                 dyn_::wrap(self::Latch::new(inner))
             }
-            Resample { every, inner } => {
+            Resample {
+                every,
+                inner,
+                source,
+            } => {
                 assert!(*every > 0, "resample every must be greater than zero");
-                // `Resample<CurrentBar>` is `Candle -> Candle`, and `DynValue`
-                // already carries `Candle` in its payload — so it wraps as a
-                // `DynIndicator` unchanged, and the runtime `chain` glues its
-                // Candle output into the inner source's Candle input.
-                let resample_dyn = dyn_::wrap(self::Resample::new(CurrentBar::new(), *every));
+                // `Resample<S>` is `S::Input -> Candle`, and `DynValue` carries
+                // both `Atom` and `Candle`. The runtime `chain` glues the
+                // Candle output into the inner source's Atom input via the
+                // `Candle -> Atom` lift in `TryFrom<DynValue> for Atom` — so a
+                // downstream Atom-consuming source (`close`, `!ema`, …) sees
+                // the resampled candle as an atom with no overlays.
+                let candle_src = candle(source);
+                let resample_dyn = dyn_::wrap(self::Resample::new(candle_src, *every));
                 let inner_dyn = inner.build(anchor);
                 dyn_::chain(resample_dyn, inner_dyn)
             }
@@ -671,7 +761,7 @@ impl SignalSpec {
             Xor { lhs, rhs } => dyn_::wrap(boolean(lhs).xor(boolean(rhs))),
             All(specs) => {
                 if specs.is_empty() {
-                    dyn_::wrap(self::Const::<Candle>::new(true))
+                    dyn_::wrap(self::Const::<Atom>::new(true))
                 } else {
                     let mut acc = AsBool::new(specs[0].build(anchor));
                     for s in &specs[1..] {
@@ -686,7 +776,7 @@ impl SignalSpec {
             }
             Any(specs) => {
                 if specs.is_empty() {
-                    dyn_::wrap(self::Const::<Candle>::new(false))
+                    dyn_::wrap(self::Const::<Atom>::new(false))
                 } else {
                     let mut acc = AsBool::new(specs[0].build(anchor));
                     for s in &specs[1..] {
@@ -699,7 +789,7 @@ impl SignalSpec {
             Not(inner) => dyn_::wrap(boolean(inner).not()),
             Changed(inner) => dyn_::wrap(boolean(inner).changed()),
             Stable { signal } => dyn_::stable_check(signal.build(anchor).stable_period()),
-            Value(b) => dyn_::wrap(self::Const::<Candle>::new(*b)),
+            Value(b) => dyn_::wrap(self::Const::<Atom>::new(*b)),
         }
     }
 }
@@ -740,7 +830,7 @@ impl SideSpec {
         self.exit
             .as_ref()
             .map(|s| s.build(anchor))
-            .unwrap_or_else(|| dyn_::wrap(Const::<Candle>::new(false)))
+            .unwrap_or_else(|| dyn_::wrap(Const::<Atom>::new(false)))
     }
 }
 
@@ -841,11 +931,11 @@ pub struct DynSingleStrategy {
 }
 
 impl Strategy for DynSingleStrategy {
-    type Input = Candle;
+    type Input = Atom;
     type Symbol = String;
 
-    fn update(&mut self, candle: Candle) {
-        self.inner.update(candle);
+    fn update(&mut self, atom: Atom) {
+        self.inner.update(atom);
     }
     fn on_fill(&mut self, order: &Order<String>) {
         self.inner.on_fill(order);
@@ -869,7 +959,7 @@ mod tests {
 
     /// Feed a `Box<dyn DynIndicator>` a candle and unwrap the payload as `Real`.
     fn feed_real(source: &mut Box<dyn DynIndicator>, c: Candle) -> Option<Real> {
-        match source.update(Payload::Candle(c))? {
+        match source.update(Payload::Atom(c.into()))? {
             Payload::Real(x) => Some(x),
             other => panic!("expected Real payload, got {other:?}"),
         }
@@ -877,7 +967,7 @@ mod tests {
 
     /// Feed and unwrap as `bool` — for signal-side tests.
     fn feed_bool(source: &mut Box<dyn DynIndicator>, c: Candle) -> Option<bool> {
-        match source.update(Payload::Candle(c))? {
+        match source.update(Payload::Atom(c.into()))? {
             Payload::Bool(b) => Some(b),
             other => panic!("expected Bool payload, got {other:?}"),
         }
@@ -920,7 +1010,7 @@ mod tests {
         let mut ema = spec.build(&Position::new());
         let mut reference = Ema::new(Current::close(), 3);
         for p in [1.0, 2.0, 3.0, 4.0, 5.0] {
-            assert_eq!(feed_real(&mut ema, bar(p)), reference.update(bar(p)));
+            assert_eq!(feed_real(&mut ema, bar(p)), reference.update(bar(p).into()));
         }
     }
 
@@ -962,7 +1052,7 @@ mod tests {
             for fill in w.update("BTC".to_string(), c) {
                 strat.on_fill(&fill);
             }
-            strat.update(c);
+            strat.update(c.into());
             strat.trade(&mut w);
         }
         assert!(w.positions().next().is_none());
@@ -1055,6 +1145,45 @@ mod tests {
     }
 
     #[test]
+    fn bar_indicator_tags_parse_bare_with_default_source() {
+        // Every bar-indicator variant carries a defaulted `source` field
+        // pointing to `!current`, so a bare `!obv` / `!vwap` / … tag with no
+        // map still deserializes and drives the base bar stream.
+        let obv: SourceSpec = serde_norway::from_str("!obv").unwrap();
+        let mut built = obv.build(&Position::new());
+        // OBV seeds at first bar's volume.
+        assert_eq!(
+            feed_real(&mut built, Candle::new(1.0, 1.0, 1.0, 1.0, 100.0)),
+            Some(100.0)
+        );
+
+        // And still parses with an explicit source override.
+        let obv_htf: SourceSpec =
+            serde_norway::from_str("!obv { source: !resample { every: 2, inner: current } }")
+                .unwrap();
+        let _ = obv_htf.build(&Position::new());
+    }
+
+    #[test]
+    fn atr_tag_parses_with_default_current_source() {
+        // `!atr { period: 3 }` without a source keeps its historical form.
+        let spec: SourceSpec = serde_norway::from_str("!atr { period: 3 }").unwrap();
+        let _ = spec.build(&Position::new());
+    }
+
+    #[test]
+    fn keltner_tag_parses_with_default_sources() {
+        // Keltner's price source defaults to `close`, its candle source to
+        // `current` — so a bare `!keltner_upper { ema_period, atr_period,
+        // multiplier }` still parses.
+        let spec: SourceSpec = serde_norway::from_str(
+            "!keltner_upper { ema_period: 3, atr_period: 3, multiplier: 2.0 }",
+        )
+        .unwrap();
+        let _ = spec.build(&Position::new());
+    }
+
+    #[test]
     fn latch_ema_of_resample_matches_reference_htf_ema() {
         // The composition-order regression at the YAML surface: an EMA-3
         // running inside !resample, wrapped in !latch, agrees numerically
@@ -1070,7 +1199,7 @@ mod tests {
         ));
         for i in 1..=24 {
             let c = bar(100.0 + i as Real * 0.5);
-            assert_eq!(feed_real(&mut built, c), reference.update(c));
+            assert_eq!(feed_real(&mut built, c), reference.update(c.into()));
         }
     }
 }

@@ -16,17 +16,18 @@ pub struct AdxValue {
 
 /// Average Directional Index (Wilder).
 ///
-/// A bar indicator (consumes the full [`Candle`]). Built on a [`Dmi`] core: the
-/// `+DI` / `-DI` pair come straight from it, and their normalised spread
-/// `DX = 100·|+DI − −DI|/(+DI + −DI)` is Wilder-smoothed again to produce `ADX`.
+/// A bar indicator (consumes candles from an owned source). Built on a [`Dmi`]
+/// core: the `+DI` / `-DI` pair come straight from it, and their normalised
+/// spread `DX = 100·|+DI − −DI|/(+DI + −DI)` is Wilder-smoothed again to
+/// produce `ADX`.
 ///
 /// `+DI` and `-DI` become available after `period` directional bars; `adx`
 /// follows after a further `period` bars. The directional fields are exposed
 /// individually; [`value`](Indicator::value) / [`update`](Indicator::update)
 /// only yield a value once `adx` itself is ready.
 #[derive(Debug, Clone)]
-pub struct Adx {
-    dmi: Dmi,
+pub struct Adx<S> {
+    dmi: Dmi<S>,
     dx: WilderState,
     /// Latest `+DI`.
     pub plus_di: Option<Real>,
@@ -36,14 +37,14 @@ pub struct Adx {
     pub adx: Option<Real>,
 }
 
-impl Adx {
-    /// Create a new ADX over the given period.
+impl<S> Adx<S> {
+    /// Create a new ADX over `source` and `period`.
     ///
     /// # Panics
     /// Panics if `period` is zero.
-    pub fn new(period: usize) -> Self {
+    pub fn new(source: S, period: usize) -> Self {
         Self {
-            dmi: Dmi::new(period),
+            dmi: Dmi::new(source, period),
             dx: WilderState::new(period),
             plus_di: None,
             minus_di: None,
@@ -55,7 +56,10 @@ impl Adx {
 /// Component accessors: each output as a standalone `Indicator<Output = Real>`,
 /// so e.g. a trend filter reads `adx.adx().above(25.0)` or
 /// `adx.plus_di().crosses_above(adx.minus_di())`.
-impl Adx {
+impl<S: Clone> Adx<S>
+where
+    Adx<S>: Indicator<Output = AdxValue>,
+{
     /// `+DI` as a standalone source.
     pub fn plus_di(&self) -> Component<Self> {
         Component::new(self.clone(), |v| v.plus_di)
@@ -72,12 +76,12 @@ impl Adx {
     }
 }
 
-impl Indicator for Adx {
-    type Input = Candle;
+impl<S: Indicator<Output = Candle>> Indicator for Adx<S> {
+    type Input = S::Input;
     type Output = AdxValue;
 
-    fn update(&mut self, candle: Candle) -> Option<AdxValue> {
-        if let Some(di) = self.dmi.update(candle) {
+    fn update(&mut self, input: S::Input) -> Option<AdxValue> {
+        if let Some(di) = self.dmi.update(input) {
             self.plus_di = Some(di.plus_di);
             self.minus_di = Some(di.minus_di);
 
@@ -127,15 +131,17 @@ impl Indicator for Adx {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::indicators::Current;
+    use crate::types::Candle;
 
     #[test]
     fn strong_uptrend_has_plus_di_above_minus_di() {
-        let mut adx = Adx::new(3);
+        let mut adx = Adx::new(Current::candle(), 3);
         let mut last = None;
         // Steadily rising bars: +DI should dominate -DI.
         for i in 0..12 {
             let base = 10.0 + i as Real;
-            last = adx.update(Candle::new(base, base + 1.0, base - 0.5, base + 0.5, 0.0));
+            last = adx.update(Candle::new(base, base + 1.0, base - 0.5, base + 0.5, 0.0).into());
         }
         let out = last.expect("adx should be ready");
         assert!(out.plus_di > out.minus_di);

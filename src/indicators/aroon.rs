@@ -17,14 +17,15 @@ pub struct AroonValue {
 
 /// Aroon indicator (Chande): how recently the window's high and low occurred.
 ///
-/// A bar indicator (consumes the full [`Candle`]). Each line measures the bars
-/// elapsed since the extreme of the trailing `period + 1` bars: a fresh high
-/// pins Aroon Up at `100`, decaying by `100/period` per bar until a newer high
-/// appears (and symmetrically for Aroon Down on lows). Their difference is the
-/// Aroon Oscillator. Both rolling extrema reuse the shared [`WindowExtreme`]
-/// core via its `since` query. Ready after `period + 1` bars.
+/// A bar indicator (consumes candles from an owned source). Each line measures
+/// the bars elapsed since the extreme of the trailing `period + 1` bars: a
+/// fresh high pins Aroon Up at `100`, decaying by `100/period` per bar until a
+/// newer high appears (and symmetrically for Aroon Down on lows). Their
+/// difference is the Aroon Oscillator. Both rolling extrema reuse the shared
+/// [`WindowExtreme`] core via its `since` query. Ready after `period + 1` bars.
 #[derive(Debug, Clone)]
-pub struct Aroon {
+pub struct Aroon<S> {
+    source: S,
     period: usize,
     highest: WindowExtreme<MaxOp>,
     lowest: WindowExtreme<MinOp>,
@@ -36,12 +37,13 @@ pub struct Aroon {
     pub oscillator: Option<Real>,
 }
 
-impl Aroon {
+impl<S> Aroon<S> {
     /// # Panics
     /// Panics if `period` is zero.
-    pub fn new(period: usize) -> Self {
+    pub fn new(source: S, period: usize) -> Self {
         assert!(period > 0, "Aroon period must be greater than zero");
         Self {
+            source,
             period,
             // The lookback spans `period + 1` bars (the current bar and the
             // `period` before it), so a brand-new extreme reads `since == 0`.
@@ -61,7 +63,10 @@ impl Aroon {
 /// Component accessors: each output as a standalone `Indicator<Output = Real>`,
 /// so e.g. `aroon.up().crosses_above(aroon.down())` or
 /// `aroon.oscillator().above(0.0)`.
-impl Aroon {
+impl<S: Clone> Aroon<S>
+where
+    Aroon<S>: Indicator<Output = AroonValue>,
+{
     /// Aroon Up as a standalone source.
     pub fn up(&self) -> Component<Self> {
         Component::new(self.clone(), |v| v.up)
@@ -78,11 +83,12 @@ impl Aroon {
     }
 }
 
-impl Indicator for Aroon {
-    type Input = Candle;
+impl<S: Indicator<Output = Candle>> Indicator for Aroon<S> {
+    type Input = S::Input;
     type Output = AroonValue;
 
-    fn update(&mut self, candle: Candle) -> Option<AroonValue> {
+    fn update(&mut self, input: S::Input) -> Option<AroonValue> {
+        let candle = self.source.update(input)?;
         self.highest.update(candle.high);
         self.lowest.update(candle.low);
 
@@ -123,10 +129,15 @@ impl Indicator for Aroon {
 
     fn warm_up_period(&self) -> usize {
         // The lookback spans the current bar plus the `period` before it.
-        self.period + 1
+        self.source.warm_up_period().max(1) + self.period
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.source.unstable_period()
     }
 
     fn reset(&mut self) {
+        self.source.reset();
         self.highest.reset();
         self.lowest.reset();
         self.up = None;
@@ -138,6 +149,8 @@ impl Indicator for Aroon {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::indicators::Current;
+    use crate::types::Candle;
 
     fn bar(high: Real, low: Real) -> Candle {
         Candle::new(low, high, low, low, 0.0)
@@ -145,19 +158,19 @@ mod tests {
 
     #[test]
     fn fresh_high_pins_up_and_decays() {
-        let mut aroon = Aroon::new(3); // lookback of 4 bars
-        assert_eq!(aroon.update(bar(5.0, 4.0)), None);
-        assert_eq!(aroon.update(bar(6.0, 3.0)), None);
-        assert_eq!(aroon.update(bar(7.0, 2.0)), None);
+        let mut aroon = Aroon::new(Current::candle(), 3); // lookback of 4 bars
+        assert_eq!(aroon.update(bar(5.0, 4.0).into()), None);
+        assert_eq!(aroon.update(bar(6.0, 3.0).into()), None);
+        assert_eq!(aroon.update(bar(7.0, 2.0).into()), None);
         // 4 bars seen: highest high is this bar (since 0) -> up 100; lowest low is
         // this bar too (since 0) -> down 100.
-        let a = aroon.update(bar(8.0, 1.0)).unwrap();
+        let a = aroon.update(bar(8.0, 1.0).into()).unwrap();
         assert_eq!(a.up, 100.0);
         assert_eq!(a.down, 100.0);
         assert_eq!(a.oscillator, 0.0);
         // New bar with neither new high nor low: both extremes are now 1 bar old.
         // up = down = 100*(3-1)/3 = 66.67.
-        let b = aroon.update(bar(7.5, 1.5)).unwrap();
+        let b = aroon.update(bar(7.5, 1.5).into()).unwrap();
         assert!((b.up - 200.0 / 3.0).abs() < 1e-12);
         assert!((b.down - 200.0 / 3.0).abs() < 1e-12);
     }

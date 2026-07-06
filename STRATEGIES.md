@@ -185,6 +185,9 @@ field it **defaults to `close`** (and `donchian_*`'s `high`/`low` default to the
 ### Candle-field leaves (bare words)
 
 `close`, `high`, `low`, `open`, `volume`, `typical` (HLC/3), `median` (HL/2).
+The whole current bar is `!current` — the default `source:` for every
+bar-consuming tag below, and the leaf you name explicitly when composing
+cross-timeframe pipelines (`!resample { every: 4, source: !current }`).
 
 ### Constant
 
@@ -219,7 +222,7 @@ Each line of a multi-output indicator is its own source tag:
 | --- | --- |
 | `!macd_line`, `!macd_signal`, `!macd_histogram` | `{ source, fast, slow, signal }` |
 | `!bb_upper`, `!bb_middle`, `!bb_lower` | `{ source, period, k }` |
-| `!keltner_upper`, `!keltner_middle`, `!keltner_lower` | `{ source, ema_period, atr_period, multiplier }` |
+| `!keltner_upper`, `!keltner_middle`, `!keltner_lower` | `{ source, candle_source = !current, ema_period, atr_period, multiplier }` |
 | `!donchian_upper`, `!donchian_middle`, `!donchian_lower` | `{ high = high, low = low, period }` |
 | `!adx`, `!plus_di`, `!minus_di` | `{ period }` (the ADX/DI components) |
 | `!dmi_plus_di`, `!dmi_minus_di` | `{ period }` (raw +DI/−DI, no ADX smoothing) |
@@ -229,7 +232,11 @@ Each line of a multi-output indicator is its own source tag:
 
 `!atr { period }`, `!mfi { period }`, `!williams_r { period }`,
 `!sar { step, max }`; and the parameterless `!obv`, `!vwap`, `!ad`,
-`!true_range` (usable as bare words).
+`!true_range` (usable as bare words). Each accepts an optional `source:`
+field for the underlying candle stream, defaulting to `!current` — set it
+when composing across timeframes (e.g. `!atr { period: 14, source:
+!resample { every: 4 } }`). The `!keltner_*` tags likewise take an
+optional `candle_source:` for the ATR leg (also defaults to `!current`).
 
 ### Transforms
 
@@ -238,7 +245,7 @@ Each line of a multi-output indicator is its own source tag:
 | `!add`, `!sub`, `!mul`, `!div` | `{ lhs, rhs }` | arithmetic over two sources (`div` → none on /0) |
 | `!lag`, `!diff`, `!ratio`, `!roc` | `{ source = close, periods }` | lookback vs. `periods` bars ago |
 | `!rolling_max`, `!rolling_min` | `{ source = close, period }` | rolling extremum over `period` bars |
-| `!resample` | `{ every, inner }` | aggregate every N base candles into one HTF candle and run `inner` (any Real source over `Candle`) over it; emits `inner`'s output on each completed bucket and `None` in between. `inner` is **required** — no default |
+| `!resample` | `{ every, inner, source = !current }` | aggregate every N candles of `source` (a `Candle`-output stream, defaulting to `!current`) into one higher-timeframe candle and run `inner` (any Real source) over that HTF candle; emits `inner`'s output on each completed bucket and `None` in between. `inner` is **required** — no default |
 | `!latch` | `{ source }` | hold the last `Some` output of `source`; `None` before the first arrives |
 
 #### Cross-timeframe composition — `!resample` + `!latch`
@@ -247,11 +254,12 @@ There is no dedicated cross-timeframe tag; compose `!resample` and `!latch`
 directly. `!resample { every: N, inner: <source> }` runs `inner` over the
 higher-timeframe candle emitted every N base bars — `inner: close` projects
 the HTF close, `inner: !ema { period: 20, source: close }` runs an EMA-20
-that recurses over HTF closes, and so on. On base ticks in between, the
-resample emits `None` and any recursive smoother inside `inner` naturally
-does not advance. Wrap the whole resample in `!latch { source }` so
-per-base-tick reads see the finished higher-timeframe value between
-boundaries.
+that recurses over HTF closes, and so on. The optional `source:` field
+selects the base `Candle` stream `every` reads from (defaults to
+`!current`). On base ticks in between, the resample emits `None` and any
+recursive smoother inside `inner` naturally does not advance. Wrap the
+whole resample in `!latch { source }` so per-base-tick reads see the
+finished higher-timeframe value between boundaries.
 
 The **only correct ordering** is resample (with the recursive smoother as its
 `inner`) → latch: latching *before* the recursive smoother would feed it a

@@ -81,8 +81,8 @@ pub fn mfi_reversal<Sym>(
     overbought: Real,
 ) -> SingleAssetStrategy<Sym> {
     SingleAssetStrategy::new(symbol).long_on(
-        Mfi::new(period).crosses_below(Value::new(oversold)),
-        Mfi::new(period).crosses_above(Value::new(overbought)),
+        Mfi::new(Current::candle(), period).crosses_below(Value::new(oversold)),
+        Mfi::new(Current::candle(), period).crosses_above(Value::new(overbought)),
     )
 }
 
@@ -99,7 +99,7 @@ pub fn mfi_reversal<Sym>(
 /// out its own [`Strategy`] impl.
 pub struct ZScoreReversion<Sym> {
     symbol: Sym,
-    z: Box<dyn Indicator<Input = Candle, Output = Real>>,
+    z: Box<dyn Indicator<Input = Atom, Output = Real>>,
     entry: Real,
 }
 
@@ -118,11 +118,11 @@ impl<Sym> ZScoreReversion<Sym> {
 }
 
 impl<Sym: Clone> Strategy for ZScoreReversion<Sym> {
-    type Input = Candle;
+    type Input = Atom;
     type Symbol = Sym;
 
-    fn update(&mut self, candle: Candle) {
-        self.z.update(candle);
+    fn update(&mut self, atom: Atom) {
+        self.z.update(atom);
     }
 
     fn trade(&self, wallet: &mut dyn Wallet<Sym>) {

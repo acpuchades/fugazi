@@ -822,7 +822,7 @@ mod tests {
     use super::*;
     use crate::indicators::{BoolIndicatorExt, Current, IndicatorExt, Sma};
     use crate::signal::Signal;
-    use crate::types::Candle;
+    use crate::types::{Atom, Candle};
 
     fn bar(close: Real) -> Candle {
         Candle::new(close, close, close, close, 0.0)
@@ -1133,12 +1133,12 @@ mod tests {
         }
     }
     impl Strategy for GoldenCross {
-        type Input = Candle;
+        type Input = Atom;
         type Symbol = &'static str;
-        fn update(&mut self, candle: Candle) {
+        fn update(&mut self, atom: Atom) {
             // Advance both signals every bar.
-            self.enter.update(candle);
-            self.exit.update(candle);
+            self.enter.update(atom.clone());
+            self.exit.update(atom);
         }
         fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
             let flat = wallet.position(&self.symbol).amount.abs() <= DEFAULT_EPSILON;
@@ -1167,7 +1167,7 @@ mod tests {
             14.0, 13.0, 12.0, 11.0, 10.0, 11.0, 13.0, 15.0, 17.0, 15.0, 12.0, 9.0, 7.0,
         ] {
             w.update("X", bar(px));
-            strat.update(bar(px));
+            strat.update(bar(px).into());
             strat.trade(&mut w);
         }
         // Market orders fill a bar late, so settle any order the last bar queued.

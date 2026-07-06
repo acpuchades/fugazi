@@ -10,7 +10,7 @@ use super::SingleAssetStrategy;
 /// Treats OBV crossing its own moving average as confirmation that volume is
 /// backing the move: long while OBV is above its SMA, flat below it.
 pub fn obv_trend<Sym>(symbol: Sym, ma_period: usize) -> SingleAssetStrategy<Sym> {
-    let bullish = || Obv::new().gt(Sma::new(Obv::new(), ma_period));
+    let bullish = || Obv::new(Current::candle()).gt(Sma::new(Obv::new(Current::candle()), ma_period));
     SingleAssetStrategy::new(symbol).long_on(bullish(), bullish().not())
 }
 
@@ -21,8 +21,8 @@ pub fn obv_trend<Sym>(symbol: Sym, ma_period: usize) -> SingleAssetStrategy<Sym>
 /// [`reset`](Strategy::reset) at each session boundary to re-anchor the VWAP.
 pub fn vwap_reversion<Sym>(symbol: Sym) -> SingleAssetStrategy<Sym> {
     SingleAssetStrategy::new(symbol).long_on(
-        Current::close().crosses_below(Vwap::new()),
-        Current::close().crosses_above(Vwap::new()),
+        Current::close().crosses_below(Vwap::new(Current::candle())),
+        Current::close().crosses_above(Vwap::new(Current::candle())),
     )
 }
 
@@ -32,6 +32,6 @@ pub fn vwap_reversion<Sym>(symbol: Sym) -> SingleAssetStrategy<Sym> {
 /// volume by where the close fell within its range: long while the A/D line is
 /// above its moving average, flat below.
 pub fn chaikin_ad_trend<Sym>(symbol: Sym, ma_period: usize) -> SingleAssetStrategy<Sym> {
-    let bullish = || Ad::new().gt(Sma::new(Ad::new(), ma_period));
+    let bullish = || Ad::new(Current::candle()).gt(Sma::new(Ad::new(Current::candle()), ma_period));
     SingleAssetStrategy::new(symbol).long_on(bullish(), bullish().not())
 }

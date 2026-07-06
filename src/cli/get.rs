@@ -527,7 +527,7 @@ fn apply_overlays(
                     .iter_mut()
                     .map(|slot| {
                         slot.as_mut().and_then(|inst| {
-                            match inst.update(DynValue::Candle(b.candle.candle))? {
+                            match inst.update(DynValue::Atom(b.candle.candle.into()))? {
                                 DynValue::Real(x) => Some(x),
                                 other => unreachable!(
                                     "overlay's DynIndicator was built for Real output, got {other:?}"

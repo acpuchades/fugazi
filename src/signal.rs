@@ -1,8 +1,8 @@
 //! The [`Signal`] marker trait.
 //!
-//! A *signal* is a boolean condition over a market [`Candle`] — an
-//! [`Indicator`]`<Input = Candle, Output = bool>`. `Signal` is a thin marker over
-//! exactly that (blanket-implemented), so every candle-fed comparison, boolean
+//! A *signal* is a boolean condition over a market [`Atom`] — an
+//! [`Indicator`]`<Input = Atom, Output = bool>`. `Signal` is a thin marker over
+//! exactly that (blanket-implemented), so every atom-fed comparison, boolean
 //! combinator and `bool` leaf is a `Signal` automatically and a strategy can hold
 //! one as a plain `Box<dyn Signal>`.
 //!
@@ -13,15 +13,15 @@
 //! [`IndicatorExt`](crate::indicators::IndicatorExt).
 
 use crate::indicator::Indicator;
-use crate::types::Candle;
+use crate::types::Atom;
 
-/// A boolean condition over a [`Candle`]: an
-/// [`Indicator`]`<Input = Candle, Output = bool>`.
+/// A boolean condition over an [`Atom`]: an
+/// [`Indicator`]`<Input = Atom, Output = bool>`.
 ///
 /// This is a marker trait, blanket-implemented for every such indicator, so the
-/// candle-fed comparison/logic carriers are `Signal`s for free and a strategy can
+/// atom-fed comparison/logic carriers are `Signal`s for free and a strategy can
 /// hold them behind `Box<dyn Signal>`. Like any indicator a signal is `None`
 /// until warmed up; read it as a plain `bool` (false until ready) with
 /// [`BoolIndicatorExt::is_true`](crate::indicators::BoolIndicatorExt::is_true).
-pub trait Signal: Indicator<Input = Candle, Output = bool> {}
-impl<I: Indicator<Input = Candle, Output = bool> + ?Sized> Signal for I {}
+pub trait Signal: Indicator<Input = Atom, Output = bool> {}
+impl<I: Indicator<Input = Atom, Output = bool> + ?Sized> Signal for I {}

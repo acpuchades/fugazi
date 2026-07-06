@@ -98,8 +98,8 @@ mod tests {
         let mut line = Macd::new(Current::close(), 3, 6, 4).line();
         let mut reference = Macd::new(Current::close(), 3, 6, 4);
         for p in [10.0, 11.0, 12.0, 11.5, 13.0, 14.0, 13.5, 15.0, 16.0, 15.0] {
-            let projected = line.update(bar(p));
-            let whole = reference.update(bar(p));
+            let projected = line.update(bar(p).into());
+            let whole = reference.update(bar(p).into());
             assert_eq!(projected, whole.map(|v| v.macd));
         }
     }
@@ -114,7 +114,7 @@ mod tests {
         for p in [
             20.0, 19.0, 18.0, 17.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0,
         ] {
-            bullish.update(bar(p));
+            bullish.update(bar(p).into());
             fired |= bullish.is_true();
         }
         assert!(fired, "expected a bullish MACD crossover");
@@ -129,8 +129,8 @@ mod tests {
         let mut reference = Bollinger::new(Current::close(), 5, 2.0);
         for p in [10.0, 10.1, 9.9, 10.0, 10.05, 18.0, 12.0, 11.0, 9.0, 8.5] {
             assert_eq!(
-                lower.update(bar(p)),
-                reference.update(bar(p)).map(|v| v.lower)
+                lower.update(bar(p).into()),
+                reference.update(bar(p).into()).map(|v| v.lower)
             );
         }
     }

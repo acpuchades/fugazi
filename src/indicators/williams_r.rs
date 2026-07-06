@@ -5,26 +5,28 @@ use crate::types::{Candle, Real};
 
 /// Williams %R over a fixed window.
 ///
-/// A bar indicator (consumes the full [`Candle`]): it relates the close to the
-/// high/low range of the last `period` bars,
+/// A bar indicator (consumes candles from an owned source): it relates the
+/// close to the high/low range of the last `period` bars,
 /// `-100·(highest_high − close)/(highest_high − lowest_low)`, in `[-100, 0]`.
 /// It is the stochastic %K mirrored onto a downward scale, so the highest high
 /// and lowest low share the same rolling-extremum core as
 /// [`Stochastic`](super::Stochastic). When the window is flat
 /// (`highest_high == lowest_low`) it yields `0.0`. Ready after `period` bars.
 #[derive(Debug, Clone)]
-pub struct WilliamsR {
+pub struct WilliamsR<S> {
+    source: S,
     highest: WindowExtreme<MaxOp>,
     lowest: WindowExtreme<MinOp>,
     /// Latest %R value in `[-100, 0]`; `None` until the window is full.
     pub value: Option<Real>,
 }
 
-impl WilliamsR {
+impl<S> WilliamsR<S> {
     /// # Panics
     /// Panics if `period` is zero.
-    pub fn new(period: usize) -> Self {
+    pub fn new(source: S, period: usize) -> Self {
         Self {
+            source,
             highest: WindowExtreme::new(period),
             lowest: WindowExtreme::new(period),
             value: None,
@@ -36,11 +38,12 @@ impl WilliamsR {
     }
 }
 
-impl Indicator for WilliamsR {
-    type Input = Candle;
+impl<S: Indicator<Output = Candle>> Indicator for WilliamsR<S> {
+    type Input = S::Input;
     type Output = Real;
 
-    fn update(&mut self, candle: Candle) -> Option<Real> {
+    fn update(&mut self, input: S::Input) -> Option<Real> {
+        let candle = self.source.update(input)?;
         self.value = match (
             self.highest.update(candle.high),
             self.lowest.update(candle.low),
@@ -63,10 +66,15 @@ impl Indicator for WilliamsR {
     }
 
     fn warm_up_period(&self) -> usize {
-        self.highest.period()
+        self.source.warm_up_period().max(1) + self.highest.period() - 1
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.source.unstable_period()
     }
 
     fn reset(&mut self) {
+        self.source.reset();
         self.highest.reset();
         self.lowest.reset();
         self.value = None;
@@ -76,6 +84,8 @@ impl Indicator for WilliamsR {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::indicators::Current;
+    use crate::types::Candle;
 
     fn bar(high: Real, low: Real, close: Real) -> Candle {
         Candle::new(low, high, low, close, 0.0)
@@ -83,12 +93,12 @@ mod tests {
 
     #[test]
     fn positions_close_within_recent_range() {
-        let mut wr = WilliamsR::new(3);
-        assert_eq!(wr.update(bar(10.0, 8.0, 9.0)), None);
-        assert_eq!(wr.update(bar(11.0, 9.0, 10.0)), None);
+        let mut wr = WilliamsR::new(Current::candle(), 3);
+        assert_eq!(wr.update(bar(10.0, 8.0, 9.0).into()), None);
+        assert_eq!(wr.update(bar(11.0, 9.0, 10.0).into()), None);
         // window highs [10,11,12], lows [8,9,10]; hh=12, ll=8, close=12 -> 0.
-        assert_eq!(wr.update(bar(12.0, 10.0, 12.0)), Some(0.0));
+        assert_eq!(wr.update(bar(12.0, 10.0, 12.0).into()), Some(0.0));
         // hh=12, ll=8, close=8 -> -100*(12-8)/(12-8) = -100.
-        assert_eq!(wr.update(bar(11.0, 8.0, 8.0)), Some(-100.0));
+        assert_eq!(wr.update(bar(11.0, 8.0, 8.0).into()), Some(-100.0));
     }
 }

@@ -14,7 +14,7 @@ use fugazi::indicators::{
     Vwap, WilliamsR, Wma,
 };
 use fugazi::prelude::*;
-use fugazi::types::{Candle, Real};
+use fugazi::types::{Atom, Candle, Real};
 
 /// Synthetic wiggly-but-trending bars: well-formed OHLC, positive volume, no
 /// degenerate (flat / zero-volume) stretches.
@@ -55,9 +55,10 @@ fn assert_exact_warm_up<I: Indicator>(mut ind: I, inputs: Vec<I::Input>, name: &
     }
 }
 
-fn candle_case(ind: impl Indicator<Input = Candle>, name: &str) {
+fn candle_case(ind: impl Indicator<Input = Atom>, name: &str) {
     let n = ind.warm_up_period() + 5;
-    assert_exact_warm_up(ind, bars(n), name);
+    let atoms: Vec<Atom> = bars(n).into_iter().map(Atom::from).collect();
+    assert_exact_warm_up(ind, atoms, name);
 }
 
 fn real_case(ind: impl Indicator<Input = Real>, name: &str) {
@@ -69,17 +70,17 @@ fn real_case(ind: impl Indicator<Input = Real>, name: &str) {
 #[test]
 fn warm_up_is_exact_for_the_catalogue() {
     candle_case(Current::close(), "close");
-    candle_case(TrueRange::new(), "true_range");
-    candle_case(Obv::new(), "obv");
-    candle_case(fugazi::indicators::Ad::new(), "ad");
-    candle_case(Vwap::new(), "vwap");
-    candle_case(Sar::default(), "sar");
-    candle_case(Atr::new(14), "atr");
-    candle_case(Mfi::new(14), "mfi");
-    candle_case(Dmi::new(14), "dmi");
-    candle_case(Adx::new(14), "adx");
-    candle_case(Aroon::new(25), "aroon");
-    candle_case(WilliamsR::new(14), "williams_r");
+    candle_case(TrueRange::new(Current::candle()), "true_range");
+    candle_case(Obv::new(Current::candle()), "obv");
+    candle_case(fugazi::indicators::Ad::new(Current::candle()), "ad");
+    candle_case(Vwap::new(Current::candle()), "vwap");
+    candle_case(Sar::with_defaults(Current::candle()), "sar");
+    candle_case(Atr::new(Current::candle(), 14), "atr");
+    candle_case(Mfi::new(Current::candle(), 14), "mfi");
+    candle_case(Dmi::new(Current::candle(), 14), "dmi");
+    candle_case(Adx::new(Current::candle(), 14), "adx");
+    candle_case(Aroon::new(Current::candle(), 25), "aroon");
+    candle_case(WilliamsR::new(Current::candle(), 14), "williams_r");
     candle_case(Sma::new(Current::close(), 20), "sma");
     candle_case(Ema::new(Current::close(), 20), "ema");
     candle_case(Rma::new(Current::close(), 14), "rma");
@@ -95,7 +96,10 @@ fn warm_up_is_exact_for_the_catalogue() {
         Stochastic::new(Rsi::new(Current::close(), 14), 14),
         "stoch_rsi",
     );
-    candle_case(Keltner::new(Current::close(), 20, 10, 2.0), "keltner");
+    candle_case(
+        Keltner::new(Current::close(), Current::candle(), 20, 10, 2.0),
+        "keltner",
+    );
     candle_case(
         Donchian::new(Current::high(), Current::low(), 20),
         "donchian",
@@ -192,9 +196,9 @@ fn windowed_indicators_are_stable_once_ready() {
     assert_eq!(Wma::new(Current::close(), 20).unstable_period(), 0);
     assert_eq!(Bollinger::new(Current::close(), 20, 2.0).unstable_period(), 0);
     assert_eq!(Stochastic::new(Current::close(), 14).unstable_period(), 0);
-    assert_eq!(Aroon::new(25).unstable_period(), 0);
-    assert_eq!(WilliamsR::new(14).unstable_period(), 0);
-    assert_eq!(Mfi::new(14).unstable_period(), 0);
+    assert_eq!(Aroon::new(Current::candle(), 25).unstable_period(), 0);
+    assert_eq!(WilliamsR::new(Current::candle(), 14).unstable_period(), 0);
+    assert_eq!(Mfi::new(Current::candle(), 14).unstable_period(), 0);
     assert_eq!(Current::close().rolling_max(10).unstable_period(), 0);
     assert_eq!(
         Donchian::new(Current::high(), Current::low(), 20).unstable_period(),
@@ -209,9 +213,9 @@ fn recursive_indicators_report_their_settling() {
     // Wilder period 14 decays by 13/14 per sample: settles at 94.
     assert_eq!(Rma::new(Identity::new(), 14).unstable_period(), 94);
     assert_eq!(Rsi::new(Identity::new(), 14).unstable_period(), 94);
-    assert_eq!(Atr::new(14).unstable_period(), 94);
+    assert_eq!(Atr::new(Current::candle(), 14).unstable_period(), 94);
     // ADX stacks a second Wilder pass on the DI lines.
-    assert_eq!(Adx::new(14).unstable_period(), 188);
+    assert_eq!(Adx::new(Current::candle(), 14).unstable_period(), 188);
     // Instability propagates through composition and operators.
     let sig = Current::close().crosses_above(Ema::new(Current::close(), 20));
     assert_eq!(
@@ -238,13 +242,13 @@ fn stable_period_bounds_the_seeding_error() {
 
     fn converged_output<I>(mut full: I, mut tail_only: I, history: &[Candle]) -> (Real, Real)
     where
-        I: Indicator<Input = Candle, Output = Real>,
+        I: Indicator<Input = Atom, Output = Real>,
     {
         let tail = history.len() - tail_only.stable_period();
         for (i, bar) in history.iter().enumerate() {
-            full.update(*bar);
+            full.update((*bar).into());
             if i >= tail {
-                tail_only.update(*bar);
+                tail_only.update((*bar).into());
             }
         }
         (full.value().unwrap(), tail_only.value().unwrap())

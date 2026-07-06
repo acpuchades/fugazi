@@ -7,20 +7,21 @@ const DEFAULT_MAX: Real = 0.2;
 
 /// Parabolic SAR (Wilder's stop-and-reverse).
 ///
-/// A bar indicator (consumes the full [`Candle`]) and a genuinely recursive one:
-/// it trails price by a stop that accelerates toward the running extreme point
-/// (`EP`) of the current trend. Each step the stop moves
-/// `SAR += AF·(EP − SAR)`; the acceleration factor `AF` ramps by `step` (capped
-/// at `max`) every time the trend posts a new extreme. When price crosses the
-/// stop the position flips: the stop jumps to the prior `EP`, `AF` resets, and a
-/// fresh trend begins.
+/// A bar indicator (consumes candles from an owned source) and a genuinely
+/// recursive one: it trails price by a stop that accelerates toward the
+/// running extreme point (`EP`) of the current trend. Each step the stop moves
+/// `SAR += AF·(EP − SAR)`; the acceleration factor `AF` ramps by `step`
+/// (capped at `max`) every time the trend posts a new extreme. When price
+/// crosses the stop the position flips: the stop jumps to the prior `EP`, `AF`
+/// resets, and a fresh trend begins.
 ///
 /// Matches TA-Lib's `SAR`: the initial trend direction is taken from the first
 /// two bars' directional movement, the stop is clamped within the prior two
 /// bars' range so it never lands inside them, and the first value is produced on
 /// the **second** bar.
 #[derive(Debug, Clone)]
-pub struct Sar {
+pub struct Sar<S> {
+    source: S,
     step: Real,
     max: Real,
     bars: usize,
@@ -37,16 +38,17 @@ pub struct Sar {
     pub value: Option<Real>,
 }
 
-impl Sar {
+impl<S> Sar<S> {
     /// Construct with an explicit acceleration `step` and `max` cap (TA-Lib's
-    /// defaults are `0.02` and `0.2` — see [`Sar::default`]).
+    /// defaults are `0.02` and `0.2` — see [`Sar::with_defaults`]).
     ///
     /// # Panics
     /// Panics unless `0 < step <= max`.
-    pub fn new(step: Real, max: Real) -> Self {
+    pub fn new(source: S, step: Real, max: Real) -> Self {
         assert!(step > 0.0, "SAR acceleration step must be positive");
         assert!(max >= step, "SAR maximum must be at least the step");
         Self {
+            source,
             step,
             max,
             bars: 0,
@@ -58,6 +60,11 @@ impl Sar {
             prev_low: 0.0,
             value: None,
         }
+    }
+
+    /// TA-Lib's default parameters (`step = 0.02`, `max = 0.2`).
+    pub fn with_defaults(source: S) -> Self {
+        Self::new(source, DEFAULT_STEP, DEFAULT_MAX)
     }
 
     /// SAR to apply on the next bar: accelerate toward the extreme, then clamp so
@@ -73,17 +80,12 @@ impl Sar {
     }
 }
 
-impl Default for Sar {
-    fn default() -> Self {
-        Self::new(DEFAULT_STEP, DEFAULT_MAX)
-    }
-}
-
-impl Indicator for Sar {
-    type Input = Candle;
+impl<S: Indicator<Output = Candle>> Indicator for Sar<S> {
+    type Input = S::Input;
     type Output = Real;
 
-    fn update(&mut self, candle: Candle) -> Option<Real> {
+    fn update(&mut self, input: S::Input) -> Option<Real> {
+        let candle = self.source.update(input)?;
         let (high, low) = (candle.high, candle.low);
 
         let out = match self.bars {
@@ -161,15 +163,20 @@ impl Indicator for Sar {
         self.value
     }
 
-    /// `2` — the first bar only seeds the trend direction. Following TA-Lib,
-    /// SAR reports no unstable period: each stop-and-reverse re-anchors the
+    /// The first bar only seeds the trend direction. Following TA-Lib, SAR
+    /// reports no unstable period: each stop-and-reverse re-anchors the
     /// recursion, so the seed's influence ends at the first reversal rather
     /// than decaying gradually.
     fn warm_up_period(&self) -> usize {
-        2
+        self.source.warm_up_period().max(1) + 1
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.source.unstable_period()
     }
 
     fn reset(&mut self) {
+        self.source.reset();
         self.bars = 0;
         self.is_long = true;
         self.af = self.step;
@@ -184,6 +191,8 @@ impl Indicator for Sar {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::indicators::Current;
+    use crate::types::Candle;
 
     fn bar(high: Real, low: Real) -> Candle {
         Candle::new(low, high, low, low, 0.0)
@@ -205,9 +214,9 @@ mod tests {
             Some(8.0),
             Some(8.08),
         ];
-        let mut sar = Sar::default();
+        let mut sar = Sar::with_defaults(Current::candle());
         for (h, exp) in highs.iter().zip(expected) {
-            let got = sar.update(bar(*h, h - 1.0));
+            let got = sar.update(bar(*h, h - 1.0).into());
             match (got, exp) {
                 (Some(g), Some(e)) => assert!((g - e).abs() < 1e-6, "got {g}, expected {e}"),
                 (None, None) => {}

@@ -7,7 +7,7 @@ use crate::prelude::*;
 /// A boxed price-level source — the value a stop-loss / take-profit compares
 /// against. Built from the strategy's [`Position`] (see [`Position::entry`],
 /// [`Position::peak`]).
-type Level = Box<dyn Indicator<Input = Candle, Output = Real>>;
+type Level = Box<dyn Indicator<Input = Atom, Output = Real>>;
 
 /// The latest value of an optional level, if it is present and warmed up.
 fn level_value(level: &Option<Level>) -> Option<Real> {
@@ -161,7 +161,7 @@ impl<Sym> SingleAssetStrategy<Sym> {
     /// `low` reaches it.
     pub fn long_stop_loss(
         mut self,
-        level: impl Indicator<Input = Candle, Output = Real> + 'static,
+        level: impl Indicator<Input = Atom, Output = Real> + 'static,
     ) -> Self {
         self.long_stop = Some(Box::new(level));
         self
@@ -171,7 +171,7 @@ impl<Sym> SingleAssetStrategy<Sym> {
     /// `high` reaches it.
     pub fn long_take_profit(
         mut self,
-        level: impl Indicator<Input = Candle, Output = Real> + 'static,
+        level: impl Indicator<Input = Atom, Output = Real> + 'static,
     ) -> Self {
         self.long_target = Some(Box::new(level));
         self
@@ -181,7 +181,7 @@ impl<Sym> SingleAssetStrategy<Sym> {
     /// `high` reaches it.
     pub fn short_stop_loss(
         mut self,
-        level: impl Indicator<Input = Candle, Output = Real> + 'static,
+        level: impl Indicator<Input = Atom, Output = Real> + 'static,
     ) -> Self {
         self.short_stop = Some(Box::new(level));
         self
@@ -191,7 +191,7 @@ impl<Sym> SingleAssetStrategy<Sym> {
     /// `low` reaches it.
     pub fn short_take_profit(
         mut self,
-        level: impl Indicator<Input = Candle, Output = Real> + 'static,
+        level: impl Indicator<Input = Atom, Output = Real> + 'static,
     ) -> Self {
         self.short_target = Some(Box::new(level));
         self
@@ -200,28 +200,28 @@ impl<Sym> SingleAssetStrategy<Sym> {
 }
 
 impl<Sym: Clone + PartialEq> Strategy for SingleAssetStrategy<Sym> {
-    type Input = Candle;
+    type Input = Atom;
     type Symbol = Sym;
 
-    fn update(&mut self, candle: Candle) {
-        self.long.update(candle);
-        self.close_long.update(candle);
-        self.short.update(candle);
-        self.close_short.update(candle);
+    fn update(&mut self, atom: Atom) {
+        self.long.update(atom.clone());
+        self.close_long.update(atom.clone());
+        self.short.update(atom.clone());
+        self.close_short.update(atom.clone());
         // Fold the bar into the position's extremes (a no-op while flat) before the
         // levels read it.
-        self.position.update(candle);
+        self.position.update(atom.candle);
         if let Some(l) = self.long_stop.as_mut() {
-            l.update(candle);
+            l.update(atom.clone());
         }
         if let Some(l) = self.long_target.as_mut() {
-            l.update(candle);
+            l.update(atom.clone());
         }
         if let Some(l) = self.short_stop.as_mut() {
-            l.update(candle);
+            l.update(atom.clone());
         }
         if let Some(l) = self.short_target.as_mut() {
-            l.update(candle);
+            l.update(atom);
         }
     }
 
@@ -314,7 +314,7 @@ mod tests {
             for fill in wallet.update("X", c) {
                 strat.on_fill(&fill);
             }
-            strat.update(c);
+            strat.update(c.into());
             strat.trade(&mut wallet);
         }
         wallet

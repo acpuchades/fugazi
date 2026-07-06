@@ -46,14 +46,14 @@ fn series() -> Vec<Candle> {
 /// Drive `strat` over `candles` into a fresh wallet and hand it back.
 fn run<S>(mut strat: S, candles: &[Candle]) -> PaperWallet<&'static str>
 where
-    S: Strategy<Input = Candle, Symbol = &'static str>,
+    S: Strategy<Input = Atom, Symbol = &'static str>,
 {
     let mut wallet = PaperWallet::new(FUNDS);
     for &candle in candles {
         for fill in wallet.update(SYMBOL, candle) {
             strat.on_fill(&fill);
         }
-        strat.update(candle);
+        strat.update(candle.into());
         strat.trade(&mut wallet);
     }
     wallet
@@ -62,7 +62,7 @@ where
 /// Assert a strategy actually traded, and left the wallet in a finite state.
 fn assert_trades<S>(name: &str, strat: S, candles: &[Candle])
 where
-    S: Strategy<Input = Candle, Symbol = &'static str>,
+    S: Strategy<Input = Atom, Symbol = &'static str>,
 {
     let wallet = run(strat, candles);
     assert!(!wallet.orders().is_empty(), "{name} never traded");
@@ -195,7 +195,7 @@ fn reset_returns_a_strategy_to_its_initial_state() {
         for fill in first.update(SYMBOL, candle) {
             strat.on_fill(&fill);
         }
-        strat.update(candle);
+        strat.update(candle.into());
         strat.trade(&mut first);
     }
 
@@ -205,7 +205,7 @@ fn reset_returns_a_strategy_to_its_initial_state() {
         for fill in second.update(SYMBOL, candle) {
             strat.on_fill(&fill);
         }
-        strat.update(candle);
+        strat.update(candle.into());
         strat.trade(&mut second);
     }
 

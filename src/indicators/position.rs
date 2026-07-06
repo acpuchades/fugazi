@@ -19,7 +19,7 @@ use std::rc::Rc;
 use crate::indicator::Indicator;
 use crate::indicators::DEFAULT_EPSILON;
 use crate::strategy::Side;
-use crate::types::{Candle, Real};
+use crate::types::{Atom, Candle, Real};
 
 /// The running state a [`Position`] shares.
 #[derive(Debug, Default)]
@@ -147,7 +147,7 @@ impl Position {
 }
 
 /// One field of a shared [`Position`], projected into an
-/// `Indicator<Input = Candle, Output = Real>` so a stop / take-profit level
+/// `Indicator<Input = Atom, Output = Real>` so a stop / take-profit level
 /// composes like any other source. Returned by [`Position::entry`] /
 /// [`peak`](Position::peak) / [`trough`](Position::trough); reads live state and
 /// ignores its input (the owning [`Position`] is advanced by the strategy).
@@ -168,10 +168,10 @@ impl PositionField {
 }
 
 impl Indicator for PositionField {
-    type Input = Candle;
+    type Input = Atom;
     type Output = Real;
 
-    fn update(&mut self, _candle: Candle) -> Option<Real> {
+    fn update(&mut self, _atom: Atom) -> Option<Real> {
         self.value()
     }
 
@@ -200,12 +200,12 @@ mod tests {
     fn entry_is_none_until_a_fill_opens_the_position() {
         let pos = Position::new();
         let mut e = pos.entry();
-        assert_eq!(e.update(bar(10.0, 9.0)), None);
+        assert_eq!(e.update(bar(10.0, 9.0).into()), None);
         pos.apply(Side::Buy, 1.0, 9.5);
-        assert_eq!(e.update(bar(10.0, 9.0)), Some(9.5));
+        assert_eq!(e.update(bar(10.0, 9.0).into()), Some(9.5));
         // Selling it back to flat clears the entry.
         pos.apply(Side::Sell, 1.0, 10.0);
-        assert_eq!(e.update(bar(10.0, 9.0)), None);
+        assert_eq!(e.update(bar(10.0, 9.0).into()), None);
     }
 
     #[test]

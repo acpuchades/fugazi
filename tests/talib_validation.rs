@@ -167,27 +167,27 @@ fn matches_talib_reference() {
     let mut sma = Sma::new(Identity::new(), SMA_P);
     let mut ema = Ema::new(Identity::new(), EMA_P);
     let mut rsi = Rsi::new(Identity::new(), RSI_P);
-    let mut atr = Atr::new(ATR_P);
+    let mut atr = Atr::new(Current::candle(), ATR_P);
     let mut sd = StdDev::new(Identity::new(), STDDEV_P);
     let mut bb = Bollinger::new(Identity::new(), BB_P, BB_K);
     let mut rmax = RollingMax::new(Identity::new(), DONCHIAN_P);
     let mut rmin = RollingMin::new(Identity::new(), DONCHIAN_P);
     let mut macd = Macd::new(Identity::new(), MACD_FAST, MACD_SLOW, MACD_SIGNAL);
-    let mut adx = Adx::new(ADX_P);
-    let mut tr = TrueRange::new();
+    let mut adx = Adx::new(Current::candle(), ADX_P);
+    let mut tr = TrueRange::new(Current::candle());
     let mut stoch = Stochastic::new(Identity::new(), STOCH_P);
-    let mut obv = Obv::new();
-    let mut ad = Ad::new();
-    let mut mfi = Mfi::new(MFI_P);
+    let mut obv = Obv::new(Current::candle());
+    let mut ad = Ad::new(Current::candle());
+    let mut mfi = Mfi::new(Current::candle(), MFI_P);
     let mut wma = Wma::new(Identity::new(), WMA_P);
     let mut hma = Hma::new(Identity::new(), HMA_P);
     let mut roc = Identity::new().roc(ROC_P);
-    let mut willr = WilliamsR::new(WILLR_P);
+    let mut willr = WilliamsR::new(Current::candle(), WILLR_P);
     let mut cci = Cci::new(Current::typical(), CCI_P);
-    let mut aroon = Aroon::new(AROON_P);
-    let mut dmi = Dmi::new(DMI_P);
-    let mut kc = Keltner::new(Current::close(), KC_EMA_P, KC_ATR_P, KC_MULT);
-    let mut sar = Sar::new(SAR_STEP, SAR_MAX);
+    let mut aroon = Aroon::new(Current::candle(), AROON_P);
+    let mut dmi = Dmi::new(Current::candle(), DMI_P);
+    let mut kc = Keltner::new(Current::close(), Current::candle(), KC_EMA_P, KC_ATR_P, KC_MULT);
+    let mut sar = Sar::new(Current::candle(), SAR_STEP, SAR_MAX);
 
     let mut sma_o = Vec::with_capacity(n);
     let mut ema_o = Vec::with_capacity(n);
@@ -227,10 +227,11 @@ fn matches_talib_reference() {
 
     for i in 0..n {
         let candle = Candle::new(close[i], high[i], low[i], close[i], volume[i]);
+        let atom: Atom = candle.into();
         sma_o.push(sma.update(close[i]));
         ema_o.push(ema.update(close[i]));
         rsi_o.push(rsi.update(close[i]));
-        atr_o.push(atr.update(candle));
+        atr_o.push(atr.update(atom.clone()));
         sd_o.push(sd.update(close[i]));
         let b = bb.update(close[i]);
         bb_u.push(b.map(|v| v.upper));
@@ -245,33 +246,33 @@ fn matches_talib_reference() {
         // +DI/-DI populate (and TA-Lib emits them) `period` bars before `adx`
         // is ready, so read the public fields directly rather than the combined
         // `AdxValue`, which only surfaces once `adx` itself exists.
-        adx.update(candle);
+        adx.update(atom.clone());
         adx_o.push(adx.adx);
         plus_di_o.push(adx.plus_di);
         minus_di_o.push(adx.minus_di);
-        tr_o.push(tr.update(candle));
+        tr_o.push(tr.update(atom.clone()));
         // fugazi yields the stochastic in [0, 1]; TA-Lib's %K is in [0, 100].
         stoch_o.push(stoch.update(close[i]).map(|v| v * 100.0));
-        obv_o.push(obv.update(candle));
-        ad_o.push(ad.update(candle));
-        mfi_o.push(mfi.update(candle));
+        obv_o.push(obv.update(atom.clone()));
+        ad_o.push(ad.update(atom.clone()));
+        mfi_o.push(mfi.update(atom.clone()));
         wma_o.push(wma.update(close[i]));
         hma_o.push(hma.update(close[i]));
         roc_o.push(roc.update(close[i]));
-        willr_o.push(willr.update(candle));
-        cci_o.push(cci.update(candle));
-        let ar = aroon.update(candle);
+        willr_o.push(willr.update(atom.clone()));
+        cci_o.push(cci.update(atom.clone()));
+        let ar = aroon.update(atom.clone());
         aroon_up_o.push(ar.map(|v| v.up));
         aroon_dn_o.push(ar.map(|v| v.down));
         aroon_osc_o.push(ar.map(|v| v.oscillator));
-        dmi.update(candle);
+        dmi.update(atom.clone());
         dmi_plus_o.push(dmi.plus_di);
         dmi_minus_o.push(dmi.minus_di);
-        let k = kc.update(candle);
+        let k = kc.update(atom.clone());
         kc_u.push(k.map(|v| v.upper));
         kc_m.push(k.map(|v| v.middle));
         kc_l.push(k.map(|v| v.lower));
-        sar_o.push(sar.update(candle));
+        sar_o.push(sar.update(atom));
     }
 
     // Exact-convention indicators: must match to EXACT_TOL across all warmed bars.

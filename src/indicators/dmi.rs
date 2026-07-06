@@ -14,16 +14,19 @@ pub struct DmiValue {
 
 /// Directional Movement Index (Wilder): the `+DI` / `-DI` pair.
 ///
-/// A bar indicator (consumes the full [`Candle`]). Up-moves and down-moves are
-/// reduced to `+DM` / `-DM`, each Wilder-smoothed alongside the true range; the
-/// directional indicators are then `100·smoothed_DM / smoothed_TR`. This is the
-/// directional core [`Adx`](super::Adx) builds on — `Adx` embeds a `Dmi` and
-/// smooths the spread of these two lines into the trend-strength index.
+/// A bar indicator — consumes candles from an owned source, so
+/// `Dmi::new(Current::candle(), 14)` reads the base bar stream. Up-moves and
+/// down-moves are reduced to `+DM` / `-DM`, each Wilder-smoothed alongside the
+/// true range; the directional indicators are then
+/// `100·smoothed_DM / smoothed_TR`. This is the directional core
+/// [`Adx`](super::Adx) builds on — `Adx` embeds a `Dmi` and smooths the spread
+/// of these two lines into the trend-strength index.
 ///
 /// The first bar only seeds the previous high/low/close, so `+DI` / `-DI` become
 /// available after `period` further (directional) bars.
 #[derive(Debug, Clone)]
-pub struct Dmi {
+pub struct Dmi<S> {
+    source: S,
     // Previous bar's high, low and close.
     prev: Option<(Real, Real, Real)>,
     plus_dm: WilderState,
@@ -35,11 +38,12 @@ pub struct Dmi {
     pub minus_di: Option<Real>,
 }
 
-impl Dmi {
+impl<S> Dmi<S> {
     /// # Panics
     /// Panics if `period` is zero.
-    pub fn new(period: usize) -> Self {
+    pub fn new(source: S, period: usize) -> Self {
         Self {
+            source,
             prev: None,
             plus_dm: WilderState::new(period),
             minus_dm: WilderState::new(period),
@@ -53,7 +57,10 @@ impl Dmi {
 /// Component accessors: each directional line as a standalone
 /// `Indicator<Output = Real>`, so e.g.
 /// `dmi.plus_di().crosses_above(dmi.minus_di())`.
-impl Dmi {
+impl<S: Clone> Dmi<S>
+where
+    Dmi<S>: Indicator<Output = DmiValue>,
+{
     /// `+DI` as a standalone source.
     pub fn plus_di(&self) -> Component<Self> {
         Component::new(self.clone(), |v| v.plus_di)
@@ -65,11 +72,12 @@ impl Dmi {
     }
 }
 
-impl Indicator for Dmi {
-    type Input = Candle;
+impl<S: Indicator<Output = Candle>> Indicator for Dmi<S> {
+    type Input = S::Input;
     type Output = DmiValue;
 
-    fn update(&mut self, candle: Candle) -> Option<DmiValue> {
+    fn update(&mut self, input: S::Input) -> Option<DmiValue> {
+        let candle = self.source.update(input)?;
         let (prev_high, prev_low, prev_close) = match self.prev {
             Some(prev) => prev,
             None => {
@@ -124,15 +132,16 @@ impl Indicator for Dmi {
     fn warm_up_period(&self) -> usize {
         // The first bar only seeds the previous high/low/close, then the Wilder
         // states consume a full period of directional bars.
-        self.plus_dm.period() + 1
+        self.source.warm_up_period().max(1) + self.plus_dm.period()
     }
 
     fn unstable_period(&self) -> usize {
         // All three Wilder states share the period, so they settle together.
-        self.plus_dm.settle_period()
+        self.source.unstable_period() + self.plus_dm.settle_period()
     }
 
     fn reset(&mut self) {
+        self.source.reset();
         self.prev = None;
         self.plus_dm.reset();
         self.minus_dm.reset();
@@ -145,14 +154,16 @@ impl Indicator for Dmi {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::indicators::Current;
+    use crate::types::Candle;
 
     #[test]
     fn uptrend_has_plus_di_above_minus_di() {
-        let mut dmi = Dmi::new(3);
+        let mut dmi = Dmi::new(Current::candle(), 3);
         let mut last = None;
         for i in 0..8 {
             let base = 10.0 + i as Real;
-            last = dmi.update(Candle::new(base, base + 1.0, base - 0.5, base + 0.5, 0.0));
+            last = dmi.update(Candle::new(base, base + 1.0, base - 0.5, base + 0.5, 0.0).into());
         }
         let out = last.expect("dmi should be ready");
         assert!(out.plus_di > out.minus_di);

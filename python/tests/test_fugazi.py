@@ -689,3 +689,93 @@ def test_stable_and_composes_into_gated_entry():
     # The composed signal is a Signal and can be evaluated.
     assert isinstance(gated, ta.Signal)
     assert isinstance(fired, bool)
+
+
+# ---------------------------------------------------------------------------
+# Schema / OverlayInfo / Atom / Get indicator
+# ---------------------------------------------------------------------------
+
+def _schema(*keys):
+    b = ta.SchemaBuilder()
+    for k in keys:
+        b.add(k)
+    return b.finish()
+
+
+def test_schema_builder_registers_columns_and_freezes():
+    b = ta.SchemaBuilder()
+    assert b.add("vol_20") == 0
+    assert b.add("regime") == 1
+    assert b.add("vol_20") == 0  # idempotent
+    assert len(b) == 2
+    schema = b.finish()
+    assert len(schema) == 2
+    assert schema.index_of("vol_20") == 0
+    assert schema.index_of("missing") is None
+    assert "regime" in schema
+    assert "missing" not in schema
+    # The builder is spent after finish.
+    with pytest.raises(ValueError):
+        b.add("late")
+
+
+def test_overlay_info_length_mismatch_raises():
+    schema = _schema("a", "b")
+    with pytest.raises(ValueError):
+        ta.OverlayInfo(schema, [1.0])
+    ov = ta.OverlayInfo(schema, [0.1, 0.2])
+    assert ov.get(0) == pytest.approx(0.1)
+    assert ov.get_by_key("b") == pytest.approx(0.2)
+    assert ov.get_by_key("missing") is None
+
+
+def test_atom_carries_overlays_or_is_bare():
+    schema = _schema("regime")
+    candle = ta.Candle(100.0, 101.0, 99.0, 100.5, 1_000.0)
+    bare = ta.Atom(candle)
+    assert bare.overlays is None
+    assert bare.candle.close == pytest.approx(100.5)
+    overlays = ta.OverlayInfo(schema, [1.0])
+    with_ov = ta.Atom(candle, overlays)
+    assert with_ov.overlays is not None
+    assert with_ov.overlays.get(0) == pytest.approx(1.0)
+
+
+def test_get_indicator_reads_overlay_by_key():
+    schema = _schema("vol_20")
+    node = ta.get(schema, "vol_20")
+    candle = ta.Candle(100.0, 101.0, 99.0, 100.5, 1_000.0)
+    # Bare candle: no overlays → reader stays None.
+    assert node.update(candle) is None
+    # Atom with matching-schema overlays: reads the value.
+    ov = ta.OverlayInfo(schema, [0.12])
+    assert node.update(ta.Atom(candle, ov)) == pytest.approx(0.12)
+
+
+def test_get_indicator_returns_none_on_schema_mismatch():
+    schema_a = _schema("vol_20", "regime")
+    schema_b = _schema("regime", "vol_20")  # same keys, different order
+    node = ta.get(schema_a, "vol_20")  # index 0 in A
+    candle = ta.Candle(100.0, 101.0, 99.0, 100.5, 1_000.0)
+    ov_b = ta.OverlayInfo(schema_b, [1.0, 0.12])  # 0.12 lives at index 1 here
+    # Mismatched schema: refuse the read rather than return 1.0 (index 0 of B).
+    assert node.update(ta.Atom(candle, ov_b)) is None
+
+
+def test_get_indicator_composes_with_scalar_ops():
+    """Overlay values compose with the rest of the fluent operator surface."""
+    schema = _schema("regime")
+    signal = ta.get(schema, "regime").above(0.5)
+    candle = ta.Candle(100.0, 101.0, 99.0, 100.5, 0.0)
+    ov_on = ta.OverlayInfo(schema, [1.0])
+    ov_off = ta.OverlayInfo(schema, [0.0])
+    signal.update(ta.Atom(candle, ov_on))
+    assert signal.is_true() is True
+    signal.update(ta.Atom(candle, ov_off))
+    assert signal.is_true() is False
+
+
+def test_get_unknown_key_raises_at_construction():
+    schema = _schema("vol_20")
+    with pytest.raises(ValueError):
+        ta.get(schema, "missing")

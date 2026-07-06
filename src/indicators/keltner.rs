@@ -15,17 +15,17 @@ pub struct KeltnerValue {
 
 /// Keltner Channels around an EMA, banded by the Average True Range.
 ///
-/// Pure composition of existing pieces: the middle line is an [`Ema`] of the
-/// source, and the bands sit `multiplier` [`Atr`]s above and below it. Because
-/// the ATR is a bar indicator, the source must also consume a [`Candle`] — so
-/// the classic channel around the close is
-/// `Keltner::new(Current::close(), 20, 10, 2.0)`. The same bar feeds both the
-/// EMA source and the ATR each step. Ready once the ATR has warmed up (after
-/// `atr_period` bars); the EMA seeds on the first bar.
+/// Pure composition of existing pieces: the middle line is an [`Ema`] of a
+/// price source, and the bands sit `multiplier` [`Atr`]s above and below it,
+/// with the ATR reading its own candle source. The two sources must share an
+/// `Input` — the classic channel around the close from the base bar stream is
+/// `Keltner::new(Current::close(), Current::candle(), 20, 10, 2.0)`. Ready once
+/// the ATR has warmed up (after `atr_period` bars); the EMA seeds on the first
+/// bar.
 #[derive(Debug, Clone)]
-pub struct Keltner<S> {
-    ema: Ema<S>,
-    atr: Atr,
+pub struct Keltner<P, C> {
+    ema: Ema<P>,
+    atr: Atr<C>,
     multiplier: Real,
     /// Latest upper channel.
     pub upper: Option<Real>,
@@ -35,16 +35,22 @@ pub struct Keltner<S> {
     pub lower: Option<Real>,
 }
 
-impl<S> Keltner<S> {
-    /// EMA of `source` over `ema_period` as the middle line, banded by
-    /// `multiplier` times the [`Atr`] over `atr_period`.
+impl<P, C> Keltner<P, C> {
+    /// EMA of `price_source` over `ema_period` as the middle line, banded by
+    /// `multiplier` times the [`Atr`] of `candle_source` over `atr_period`.
     ///
     /// # Panics
     /// Panics if either period is zero.
-    pub fn new(source: S, ema_period: usize, atr_period: usize, multiplier: Real) -> Self {
+    pub fn new(
+        price_source: P,
+        candle_source: C,
+        ema_period: usize,
+        atr_period: usize,
+        multiplier: Real,
+    ) -> Self {
         Self {
-            ema: Ema::new(source, ema_period),
-            atr: Atr::new(atr_period),
+            ema: Ema::new(price_source, ema_period),
+            atr: Atr::new(candle_source, atr_period),
             multiplier,
             upper: None,
             middle: None,
@@ -56,9 +62,9 @@ impl<S> Keltner<S> {
 /// Component accessors: each channel line as a standalone
 /// `Indicator<Output = Real>`, so a line composes and compares like any other
 /// source — e.g. `Current::close().crosses_above(channel.upper())`.
-impl<S> Keltner<S>
+impl<P, C> Keltner<P, C>
 where
-    Keltner<S>: Indicator<Output = KeltnerValue> + Clone,
+    Keltner<P, C>: Indicator<Output = KeltnerValue> + Clone,
 {
     /// The upper channel (`middle + multiplier·ATR`) as a standalone source.
     pub fn upper(&self) -> Component<Self> {
@@ -76,13 +82,18 @@ where
     }
 }
 
-impl<S: Indicator<Input = Candle, Output = Real>> Indicator for Keltner<S> {
-    type Input = Candle;
+impl<P, C> Indicator for Keltner<P, C>
+where
+    P: Indicator<Output = Real>,
+    C: Indicator<Input = P::Input, Output = Candle>,
+    P::Input: Clone,
+{
+    type Input = P::Input;
     type Output = KeltnerValue;
 
-    fn update(&mut self, candle: Candle) -> Option<KeltnerValue> {
-        let middle = self.ema.update(candle);
-        let atr = self.atr.update(candle);
+    fn update(&mut self, input: Self::Input) -> Option<KeltnerValue> {
+        let middle = self.ema.update(input.clone());
+        let atr = self.atr.update(input);
 
         match (middle, atr) {
             (Some(middle), Some(atr)) => {
@@ -139,6 +150,7 @@ impl<S: Indicator<Input = Candle, Output = Real>> Indicator for Keltner<S> {
 mod tests {
     use super::*;
     use crate::indicators::Current;
+    use crate::types::Candle;
 
     fn bar(high: Real, low: Real, close: Real) -> Candle {
         Candle::new(low, high, low, close, 0.0)
@@ -146,10 +158,10 @@ mod tests {
 
     #[test]
     fn bands_straddle_the_ema() {
-        let mut kc = Keltner::new(Current::close(), 3, 3, 2.0);
-        assert_eq!(kc.update(bar(10.0, 9.0, 9.5)), None);
-        assert_eq!(kc.update(bar(11.0, 10.0, 10.5)), None);
-        let out = kc.update(bar(12.0, 11.0, 11.5)).unwrap();
+        let mut kc = Keltner::new(Current::close(), Current::candle(), 3, 3, 2.0);
+        assert_eq!(kc.update(bar(10.0, 9.0, 9.5).into()), None);
+        assert_eq!(kc.update(bar(11.0, 10.0, 10.5).into()), None);
+        let out = kc.update(bar(12.0, 11.0, 11.5).into()).unwrap();
         assert!(out.upper > out.middle);
         assert!(out.middle > out.lower);
         // Symmetric around the middle.

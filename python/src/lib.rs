@@ -9,8 +9,11 @@
 //!
 //! Erasing a trait object throws away its associated `Input` type, so we keep
 //! the one bit that matters — the input *domain* — as an explicit runtime tag.
-//! An indicator is rooted either at a candle accessor ([`Current`], `Input =
-//! Candle`) or at [`Identity`] (a raw value stream, `Input = Real`); the
+//! An indicator is rooted either at a candle accessor ([`Current`]) — the
+//! Python surface exposes those as `Candle`-consuming, but the library feeds
+//! them `Atom`s internally (an `Atom` is a `Candle` plus an optional overlay
+//! bundle; the Python side lifts each `Candle` to a bare `Atom` at the
+//! boundary) — or at [`Identity`] (a raw value stream, `Input = Real`); the
 //! [`AnySource`]/[`AnySignal`]/[`AnyMulti`] enums record which, and `feed()` /
 //! `update()` dispatch on it. The two domains never mix within one chain (a
 //! literal lifts to whichever side it is combined with).
@@ -26,12 +29,14 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+use std::sync::Arc;
+
 use fugazi_core::Indicator;
 use fugazi_core::indicators::compare::{EqOp, GeOp, GtOp, LeOp, LtOp, NeOp};
 use fugazi_core::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Current, CurrentBar,
-    Dmi, DmiValue, Donchian, DonchianValue, Ema, Hma, Identity, Keltner, KeltnerValue, Latch, Macd,
-    MacdValue, Mfi, Obv, Resample, Rma, Rsi, Sar, Sma, Stable, StdDev, Stochastic, TrueRange,
+    Dmi, DmiValue, Donchian, DonchianValue, Ema, Get, Hma, Identity, Keltner, KeltnerValue, Latch,
+    Macd, MacdValue, Mfi, Obv, Resample, Rma, Rsi, Sar, Sma, Stable, StdDev, Stochastic, TrueRange,
     Value, Vwap, WilliamsR, Wma,
 };
 use fugazi_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
@@ -39,7 +44,7 @@ use fugazi_core::sources::{Binance, CandleSource, Interval, SourceError, Timesta
 use fugazi_core::strategy::{
     Ack, Order, OrderKind, PaperWallet, Units, Reference, Side, Size, Wallet, WalletError,
 };
-use fugazi_core::types::{Candle, Real};
+use fugazi_core::types::{Atom, Candle, OverlayInfo, Real, Schema, SchemaBuilder};
 
 // ---------------------------------------------------------------------------
 // Type-erasing carriers
@@ -309,16 +314,17 @@ where
 
 /// `Resample<CurrentBar>` chained with a candle-consuming Real source: on the
 /// base tick that completes an `every`-bar bucket, feed the aggregated candle
-/// to `inner` and emit its output; on other ticks, emit `None`.
+/// to `inner` (lifted to an `Atom`) and emit its output; on other ticks, emit
+/// `None`.
 #[derive(Clone)]
 struct ResampleThen {
     resample: Resample<CurrentBar>,
-    inner: Source<Candle>,
+    inner: Source<Atom>,
     value: Option<Real>,
 }
 
 impl ResampleThen {
-    fn new(every: usize, inner: Source<Candle>) -> Self {
+    fn new(every: usize, inner: Source<Atom>) -> Self {
         Self {
             resample: Resample::new(CurrentBar::new(), every),
             inner,
@@ -328,12 +334,12 @@ impl ResampleThen {
 }
 
 impl Indicator for ResampleThen {
-    type Input = Candle;
+    type Input = Atom;
     type Output = Real;
 
-    fn update(&mut self, c: Candle) -> Option<Real> {
-        self.value = match self.resample.update(c) {
-            Some(htf) => Indicator::update(&mut self.inner, htf),
+    fn update(&mut self, atom: Atom) -> Option<Real> {
+        self.value = match self.resample.update(atom) {
+            Some(htf) => Indicator::update(&mut self.inner, htf.into()),
             None => None,
         };
         self.value
@@ -389,7 +395,7 @@ impl<I> MultiBox<I> {
 /// entirely on its own it behaves as candle-rooted.
 #[derive(Clone)]
 enum AnySource {
-    Candle(Source<Candle>),
+    Candle(Source<Atom>),
     Real(Source<Real>),
     Const(Real),
 }
@@ -428,7 +434,7 @@ impl AnySource {
 /// Two sources resolved to a common concrete domain, with any neutral constant
 /// materialised to match its partner.
 enum Pair {
-    Candle(Source<Candle>, Source<Candle>),
+    Candle(Source<Atom>, Source<Atom>),
     Real(Source<Real>, Source<Real>),
 }
 
@@ -437,8 +443,8 @@ enum Pair {
 /// error. Two constants default to the candle domain (either is equivalent —
 /// they ignore input).
 fn pair(lhs: AnySource, rhs: AnySource) -> PyResult<Pair> {
-    fn cval(c: Real) -> Source<Candle> {
-        Source::new(Value::<Candle>::new(c))
+    fn cval(c: Real) -> Source<Atom> {
+        Source::new(Value::<Atom>::new(c))
     }
     fn rval(c: Real) -> Source<Real> {
         Source::new(Value::<Real>::new(c))
@@ -460,7 +466,7 @@ fn pair(lhs: AnySource, rhs: AnySource) -> PyResult<Pair> {
 /// A boolean signal erased to one of the two input domains.
 #[derive(Clone)]
 enum AnySignal {
-    Candle(SignalBox<Candle>),
+    Candle(SignalBox<Atom>),
     Real(SignalBox<Real>),
 }
 
@@ -493,7 +499,7 @@ impl AnySignal {
 
 /// A multi-output indicator erased to one of the two input domains.
 enum AnyMulti {
-    Candle(MultiBox<Candle>),
+    Candle(MultiBox<Atom>),
     Real(MultiBox<Real>),
 }
 
@@ -545,7 +551,7 @@ macro_rules! map_source {
             AnySource::Candle($s) => AnySource::Candle(Source::new($build)),
             AnySource::Real($s) => AnySource::Real(Source::new($build)),
             AnySource::Const(c) => {
-                let $s = Source::<Candle>::new(Value::<Candle>::new(c));
+                let $s = Source::<Atom>::new(Value::<Atom>::new(c));
                 AnySource::Candle(Source::new($build))
             }
         }
@@ -571,7 +577,7 @@ macro_rules! source_to_signal {
             AnySource::Candle($s) => AnySignal::Candle(SignalBox::new($build)),
             AnySource::Real($s) => AnySignal::Real(SignalBox::new($build)),
             AnySource::Const(c) => {
-                let $s = Source::<Candle>::new(Value::<Candle>::new(c));
+                let $s = Source::<Atom>::new(Value::<Atom>::new(c));
                 AnySignal::Candle(SignalBox::new($build))
             }
         }
@@ -622,7 +628,7 @@ macro_rules! map_multi {
             AnySource::Candle($s) => AnyMulti::Candle(MultiBox::new($build)),
             AnySource::Real($s) => AnyMulti::Real(MultiBox::new($build)),
             AnySource::Const(c) => {
-                let $s = Source::<Candle>::new(Value::<Candle>::new(c));
+                let $s = Source::<Atom>::new(Value::<Atom>::new(c));
                 AnyMulti::Candle(MultiBox::new($build))
             }
         }
@@ -700,6 +706,206 @@ impl PyCandle {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Overlay-side types: Schema (name→index), SchemaBuilder, OverlayInfo, Atom
+// ---------------------------------------------------------------------------
+
+/// An immutable name→index registry that binds an [`OverlayInfo`]'s values
+/// array to the columns a `get()` indicator references. Built with
+/// `SchemaBuilder().add("key").finish()` — the frozen handle is what
+/// indicators and overlays share.
+#[pyclass(name = "Schema", frozen, skip_from_py_object)]
+#[derive(Clone)]
+struct PySchema {
+    inner: Arc<Schema>,
+}
+
+#[pymethods]
+impl PySchema {
+    fn __len__(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn __contains__(&self, key: &str) -> bool {
+        self.inner.contains(key)
+    }
+
+    /// The zero-based column index of `key`, or `None` if unregistered.
+    fn index_of(&self, key: &str) -> Option<usize> {
+        self.inner.index_of(key)
+    }
+
+    /// All registered column names, unordered.
+    fn keys(&self) -> Vec<String> {
+        self.inner.keys().map(str::to_string).collect()
+    }
+
+    fn __repr__(&self) -> String {
+        let mut keys: Vec<String> = self.inner.keys().map(str::to_string).collect();
+        keys.sort();
+        format!("Schema(keys={keys:?})")
+    }
+}
+
+/// Mutable builder for a [`Schema`]. Add columns with `add()` (idempotent —
+/// a repeated key returns the existing index), then freeze into an immutable
+/// [`Schema`] with `finish()`.
+#[pyclass(name = "SchemaBuilder")]
+struct PySchemaBuilder {
+    inner: Option<SchemaBuilder>,
+}
+
+#[pymethods]
+impl PySchemaBuilder {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: Some(SchemaBuilder::default()),
+        }
+    }
+
+    /// Register `key`. Returns the assigned column index; a repeated key
+    /// returns the previously-assigned index without adding a slot.
+    fn add(&mut self, key: &str) -> PyResult<usize> {
+        self.inner
+            .as_mut()
+            .ok_or_else(|| {
+                PyValueError::new_err("SchemaBuilder has already been finished")
+            })
+            .map(|b| b.add(key.to_string()))
+    }
+
+    fn __len__(&self) -> PyResult<usize> {
+        self.inner
+            .as_ref()
+            .ok_or_else(|| {
+                PyValueError::new_err("SchemaBuilder has already been finished")
+            })
+            .map(|b| b.len())
+    }
+
+    /// Freeze into an immutable [`Schema`]. The builder is consumed — further
+    /// calls raise `ValueError`.
+    fn finish(&mut self) -> PyResult<PySchema> {
+        let builder = self.inner.take().ok_or_else(|| {
+            PyValueError::new_err("SchemaBuilder has already been finished")
+        })?;
+        Ok(PySchema {
+            inner: builder.finish(),
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        match &self.inner {
+            Some(b) => format!("SchemaBuilder(len={})", b.len()),
+            None => "SchemaBuilder(finished)".to_string(),
+        }
+    }
+}
+
+/// Per-atom overlay values, bound to a shared [`Schema`]. Construct as
+/// `OverlayInfo(schema, values)` where `values` is a list of floats whose
+/// length matches `len(schema)`.
+///
+/// The internal `Rc<[Real]>` (per-atom, non-atomic refcount) makes this
+/// class `unsendable` — it's confined to the Python thread that created it.
+/// This is fine under the GIL and keeps overlay clones cheap in the hot
+/// per-bar loop.
+#[pyclass(name = "OverlayInfo", frozen, unsendable, skip_from_py_object)]
+#[derive(Clone)]
+struct PyOverlayInfo {
+    inner: OverlayInfo,
+}
+
+#[pymethods]
+impl PyOverlayInfo {
+    #[new]
+    fn new(schema: &PySchema, values: Vec<Real>) -> PyResult<Self> {
+        if values.len() != schema.inner.len() {
+            return Err(PyValueError::new_err(format!(
+                "values length ({}) must match schema length ({})",
+                values.len(),
+                schema.inner.len(),
+            )));
+        }
+        Ok(Self {
+            inner: OverlayInfo::new(schema.inner.clone(), values),
+        })
+    }
+
+    fn __len__(&self) -> usize {
+        self.inner.values().len()
+    }
+
+    /// Read the value at a resolved column index (`None` if out of bounds).
+    fn get(&self, index: usize) -> Option<Real> {
+        self.inner.get(index)
+    }
+
+    /// Read the value by column name (`None` if the key isn't registered).
+    fn get_by_key(&self, key: &str) -> Option<Real> {
+        self.inner.get_by_key(key)
+    }
+
+    fn __repr__(&self) -> String {
+        format!("OverlayInfo(values={:?})", self.inner.values())
+    }
+}
+
+/// A single bar's full input to the indicator chain: an OHLCV [`Candle`] and,
+/// optionally, per-bar overlay values keyed by a shared [`Schema`]. Every
+/// candle-rooted indicator's `update()` accepts either a bare `Candle` (lifted
+/// to an atom with no overlays) or an `Atom` — pass an `Atom` when the chain
+/// includes a `get()` indicator that needs overlay context.
+///
+/// `unsendable` because the inner [`OverlayInfo`] holds an `Rc<[Real]>` for
+/// per-atom overlay values. The Python GIL confines it to one thread anyway.
+#[pyclass(name = "Atom", frozen, unsendable, skip_from_py_object)]
+#[derive(Clone)]
+struct PyAtom {
+    inner: Atom,
+}
+
+#[pymethods]
+impl PyAtom {
+    #[new]
+    #[pyo3(signature = (candle, overlays = None))]
+    fn new(candle: &PyCandle, overlays: Option<&PyOverlayInfo>) -> Self {
+        let atom = match overlays {
+            Some(ov) => Atom::with_overlays(candle.inner, ov.inner.clone()),
+            None => Atom::new(candle.inner),
+        };
+        Self { inner: atom }
+    }
+
+    #[getter]
+    fn candle(&self) -> PyCandle {
+        PyCandle {
+            inner: self.inner.candle,
+        }
+    }
+
+    #[getter]
+    fn overlays(&self) -> Option<PyOverlayInfo> {
+        self.inner
+            .overlays
+            .as_ref()
+            .cloned()
+            .map(|ov| PyOverlayInfo { inner: ov })
+    }
+
+    fn __repr__(&self) -> String {
+        match &self.inner.overlays {
+            Some(ov) => format!(
+                "Atom(candle={:?}, overlays={:?})",
+                self.inner.candle,
+                ov.values(),
+            ),
+            None => format!("Atom(candle={:?})", self.inner.candle),
+        }
+    }
+}
+
 /// A scalar (`-> float`) indicator. Compose it with the fluent operator methods;
 /// build named indicators with the module-level constructors.
 ///
@@ -724,11 +930,11 @@ impl PyIndicator {
     /// identity-rooted one.
     fn update(&mut self, sample: &Bound<'_, PyAny>) -> PyResult<Option<f64>> {
         match &mut self.src {
-            AnySource::Candle(s) => Ok(Indicator::update(s, extract_candle(sample)?)),
+            AnySource::Candle(s) => Ok(Indicator::update(s, extract_atom(sample)?)),
             AnySource::Real(s) => Ok(Indicator::update(s, extract_real(sample)?)),
             // A bare constant defaults to candle-rooted; it ignores the bar.
             AnySource::Const(c) => {
-                extract_candle(sample)?;
+                extract_atom(sample)?;
                 Ok(Some(*c))
             }
         }
@@ -751,7 +957,7 @@ impl PyIndicator {
         let values: Vec<Option<f64>> = match &mut self.src {
             AnySource::Candle(s) => candles_from_frame(data)?
                 .into_iter()
-                .map(|c| Indicator::update(s, c))
+                .map(|c| Indicator::update(s, c.into()))
                 .collect(),
             AnySource::Real(s) => reals_from_series(data)?
                 .into_iter()
@@ -1035,7 +1241,7 @@ impl PySignal {
     fn update(&mut self, sample: &Bound<'_, PyAny>) -> PyResult<bool> {
         match &mut self.sig {
             AnySignal::Candle(s) => {
-                Ok(Indicator::update(s, extract_candle(sample)?).unwrap_or(false))
+                Ok(Indicator::update(s, extract_atom(sample)?).unwrap_or(false))
             }
             AnySignal::Real(s) => Ok(Indicator::update(s, extract_real(sample)?).unwrap_or(false)),
         }
@@ -1052,7 +1258,7 @@ impl PySignal {
         let values: Vec<bool> = match &mut self.sig {
             AnySignal::Candle(s) => candles_from_frame(data)?
                 .into_iter()
-                .map(|c| Indicator::update(s, c).unwrap_or(false))
+                .map(|c| Indicator::update(s, c.into()).unwrap_or(false))
                 .collect(),
             AnySignal::Real(s) => reals_from_series(data)?
                 .into_iter()
@@ -1161,7 +1367,7 @@ impl PyMulti {
     ) -> PyResult<Option<Bound<'py, PyDict>>> {
         let names = self.inner.names();
         let out = match &mut self.inner {
-            AnyMulti::Candle(m) => m.0.update(extract_candle(sample)?),
+            AnyMulti::Candle(m) => m.0.update(extract_atom(sample)?),
             AnyMulti::Real(m) => m.0.update(extract_real(sample)?),
         };
         match out {
@@ -1184,7 +1390,7 @@ impl PyMulti {
         let rows: Vec<Option<Vec<f64>>> = match &mut self.inner {
             AnyMulti::Candle(m) => candles_from_frame(data)?
                 .into_iter()
-                .map(|c| m.0.update(c))
+                .map(|c| m.0.update(c.into()))
                 .collect(),
             AnyMulti::Real(m) => reals_from_series(data)?
                 .into_iter()
@@ -1554,6 +1760,18 @@ fn extract_candle(sample: &Bound<'_, PyAny>) -> PyResult<Candle> {
     Ok(candle.borrow().inner)
 }
 
+/// Extract an [`Atom`] for a candle-rooted node's `update`. Accepts either a
+/// bare `Candle` (lifted via `From<Candle>`, with no overlays) or an `Atom`
+/// carrying an [`OverlayInfo`] side-channel. This is the input for every
+/// bar-consuming indicator/signal on the Python side.
+fn extract_atom(sample: &Bound<'_, PyAny>) -> PyResult<Atom> {
+    if let Ok(atom) = sample.cast::<PyAtom>() {
+        return Ok(atom.borrow().inner.clone());
+    }
+    let candle = extract_candle(sample)?;
+    Ok(candle.into())
+}
+
 /// Extract a `float` for an identity-rooted node's `update`.
 fn extract_real(sample: &Bound<'_, PyAny>) -> PyResult<Real> {
     sample
@@ -1680,10 +1898,10 @@ fn frame_to_candles(frame: &Bound<'_, PyAny>) -> PyResult<Vec<Candle>> {
 /// lifted to a constant of that domain.
 /// Require a candle-rooted source. Some indicators (e.g. Keltner) read OHLC
 /// bars internally, so their source must consume `Candle`s too.
-fn require_candle_source(src: AnySource) -> PyResult<Source<Candle>> {
+fn require_candle_source(src: AnySource) -> PyResult<Source<Atom>> {
     match src {
         AnySource::Candle(s) => Ok(s),
-        AnySource::Const(c) => Ok(Source::new(Value::<Candle>::new(c))),
+        AnySource::Const(c) => Ok(Source::new(Value::<Atom>::new(c))),
         AnySource::Real(_) => Err(PyTypeError::new_err(
             "this indicator reads OHLC bars internally, so its source must be \
              candle-rooted (e.g. close()), not identity-rooted",
@@ -1851,10 +2069,10 @@ fn build_multi(
 // Constructors
 // ---------------------------------------------------------------------------
 
-/// Wrap a candle-consuming indicator as a candle-rooted source.
+/// Wrap a candle-consuming indicator (`Input = Atom`) as a candle-rooted source.
 fn candle_source<T>(inner: T) -> PyIndicator
 where
-    T: Indicator<Input = Candle, Output = Real> + Clone + Send + Sync + 'static,
+    T: Indicator<Input = Atom, Output = Real> + Clone + Send + Sync + 'static,
 {
     PyIndicator::wrap(AnySource::Candle(Source::new(inner)))
 }
@@ -1955,12 +2173,12 @@ src_period!(
 );
 
 macro_rules! bar_period {
-    ($name:ident, $ty:ty, $doc:literal) => {
+    ($name:ident, $ty:ident, $doc:literal) => {
         #[doc = $doc]
         #[pyfunction]
         fn $name(period: usize) -> PyResult<PyIndicator> {
             ensure_period(period)?;
-            Ok(candle_source(<$ty>::new(period)))
+            Ok(candle_source($ty::new(CurrentBar::new(), period)))
         }
     };
 }
@@ -1982,11 +2200,11 @@ bar_period!(
 );
 
 macro_rules! bar_noarg {
-    ($name:ident, $ty:ty, $doc:literal) => {
+    ($name:ident, $ty:ident, $doc:literal) => {
         #[doc = $doc]
         #[pyfunction]
         fn $name() -> PyIndicator {
-            candle_source(<$ty>::new())
+            candle_source($ty::new(CurrentBar::new()))
         }
     };
 }
@@ -2009,13 +2227,13 @@ bar_noarg!(
 bar_noarg!(true_range, TrueRange, "True range of the current bar.");
 
 macro_rules! bar_period_multi {
-    ($name:ident, $ty:ty, $doc:literal) => {
+    ($name:ident, $ty:ident, $doc:literal) => {
         #[doc = $doc]
         #[pyfunction]
         fn $name(period: usize) -> PyResult<PyMulti> {
             ensure_period(period)?;
             Ok(PyMulti {
-                inner: AnyMulti::Candle(MultiBox::new(<$ty>::new(period))),
+                inner: AnyMulti::Candle(MultiBox::new($ty::new(CurrentBar::new(), period))),
             })
         }
     };
@@ -2033,7 +2251,7 @@ bar_period_multi!(aroon, Aroon, "Aroon indicator: {up, down, oscillator}.");
 #[pyfunction]
 #[pyo3(signature = (step = 0.02, max = 0.2))]
 fn sar(step: f64, max: f64) -> PyIndicator {
-    candle_source(Sar::new(step, max))
+    candle_source(Sar::new(CurrentBar::new(), step, max))
 }
 
 /// MACD of `source`: {macd, signal, histogram}.
@@ -2082,7 +2300,11 @@ fn keltner(
     let s = require_candle_source(source.src.clone())?;
     Ok(PyMulti {
         inner: AnyMulti::Candle(MultiBox::new(Keltner::new(
-            s, ema_period, atr_period, multiplier,
+            s,
+            CurrentBar::new(),
+            ema_period,
+            atr_period,
+            multiplier,
         ))),
     })
 }
@@ -2196,9 +2418,22 @@ fn latch<'py>(py: Python<'py>, source: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>
 #[pyfunction]
 fn stable(signal: PyRef<'_, PySignal>) -> PySignal {
     PySignal::wrap(match &signal.sig {
-        AnySignal::Candle(s) => AnySignal::Candle(SignalBox::new(Stable::<Candle>::from_source(s))),
+        AnySignal::Candle(s) => AnySignal::Candle(SignalBox::new(Stable::<Atom>::from_source(s))),
         AnySignal::Real(s) => AnySignal::Real(SignalBox::new(Stable::<Real>::from_source(s))),
     })
+}
+
+/// Read a per-atom overlay column by its `key` in `schema`. Rooted at the
+/// atom stream, so it slots into the same candle-rooted pipelines as
+/// `close()`/`atr()`/etc. When fed a bare `Candle` (no overlays), the reader
+/// yields `None` — pass an `Atom` carrying an `OverlayInfo` bound to the same
+/// schema to see values.
+///
+/// Raises `ValueError` if `key` isn't registered in `schema`.
+#[pyfunction]
+fn get(schema: &PySchema, key: &str) -> PyResult<PyIndicator> {
+    let source = Get::try_new(&schema.inner, key).map_err(|e| PyValueError::new_err(e.key))?;
+    Ok(PyIndicator::wrap(AnySource::Candle(Source::new(source))))
 }
 
 // ---------------------------------------------------------------------------
@@ -2536,7 +2771,7 @@ impl PyBinance {
 /// dispatches to the right client (`"binance"` is currently the only value).
 #[pyfunction]
 #[pyo3(signature = (provider, symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
-fn get(
+fn fetch(
     py: Python<'_>,
     provider: &str,
     symbol: &str,
@@ -2567,6 +2802,10 @@ fn get(
 #[pymodule]
 fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCandle>()?;
+    m.add_class::<PySchema>()?;
+    m.add_class::<PySchemaBuilder>()?;
+    m.add_class::<PyOverlayInfo>()?;
+    m.add_class::<PyAtom>()?;
     m.add_class::<PyIndicator>()?;
     m.add_class::<PySignal>()?;
     m.add_class::<PyMulti>()?;
@@ -2584,6 +2823,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         open, high, low, close, volume, typical, median, identity, value, sma, ema, rma, wma, hma,
         rsi, stddev, stochastic, cci, atr, mfi, williams_r, obv, vwap, ad, true_range, adx, dmi,
         aroon, sar, macd, bollinger, keltner, donchian, stoch_rsi, resample, latch, stable, get,
+        fetch,
     );
     Ok(())
 }

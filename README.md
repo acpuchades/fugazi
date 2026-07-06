@@ -14,7 +14,7 @@ and signal owns its internal state and is advanced one sample at a time via
 
 ```toml
 [dependencies]
-fugazi = "0.11"
+fugazi = "0.13"
 ```
 
 ## Concepts
@@ -26,7 +26,12 @@ The crate has three composable layers:
   `Ema::new(Current::close(), 20)` is the EMA‑20 of the close. Leaf sources
   terminate the chain — `Identity` (raw value stream), `Value` (a constant), and
   the candle accessors under `Current` (`Current::close()`, `Current::volume()`,
-  …). Bar indicators (`Atr`, `Adx`, `TrueRange`) consume a whole `Candle`.
+  …). Bar indicators (`Atr`, `Adx`, `TrueRange`, …) read the whole bar, so they
+  take a `Candle`-output source too — `Atr::new(Current::candle(), 14)`,
+  `Obv::new(Current::candle())`, etc. Every indicator is fed one `Atom` per bar
+  (`Atom { candle, overlays }` — a `Candle` plus an optional overlay bundle);
+  a bare `Candle` lifts to an `Atom` via `From<Candle> for Atom`, so
+  `signal.update(candle.into())` is the streaming pattern.
 - **Signals** are composable booleans. Comparisons are built from two sources, so
   a condition like "RSI over 70" is a single object. Combine signals with
   `and`/`or`/`xor`/`not`/`changed`.
@@ -60,7 +65,7 @@ let mut signal = Current::close().crosses_above(Ema::new(Current::close(), 20));
 
 # let feed: Vec<Candle> = Vec::new();
 for candle in feed {
-    signal.update(candle);
+    signal.update(candle.into());
     if signal.is_true() {
         // entry trigger fires on the bar the close crosses above EMA-20
     }
@@ -79,7 +84,7 @@ let mut overbought = Rsi::new(Current::close(), 14).above(70.0);
 
 # let feed: Vec<Candle> = Vec::new();
 for candle in feed {
-    overbought.update(candle);
+    overbought.update(candle.into());
     if overbought.is_true() { /* ... */ }
 }
 ```
@@ -204,14 +209,14 @@ struct GoldenCross {
 }
 
 impl Strategy for GoldenCross {
-    type Input = Candle;
+    type Input = Atom;
     type Symbol = &'static str;
 
-    fn update(&mut self, candle: Candle) {
+    fn update(&mut self, atom: Atom) {
         // Advance EVERY signal every bar (don't short-circuit, or a skipped one
         // desyncs from the price stream).
-        self.enter.update(candle);
-        self.exit.update(candle);
+        self.enter.update(atom.clone());
+        self.exit.update(atom);
     }
 
     fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
@@ -239,7 +244,7 @@ let mut wallet = PaperWallet::new(10_000.0);
 # let feed: Vec<Candle> = Vec::new();
 for candle in feed {
     wallet.update("AAPL", candle);  // feed the wallet this bar from outside
-    strat.update(candle);           // advance signals
+    strat.update(candle.into());    // advance signals
     strat.trade(&mut wallet);       // act
 }
 let _orders = wallet.orders();        // the trade blotter
@@ -270,9 +275,9 @@ use fugazi::backtest::run;
 
 # struct MyStrategy;
 # impl Strategy for MyStrategy {
-#     type Input = Candle;
+#     type Input = Atom;
 #     type Symbol = &'static str;
-#     fn update(&mut self, _: Candle) {}
+#     fn update(&mut self, _: Atom) {}
 #     fn trade(&self, _: &mut dyn Wallet<&'static str>) {}
 #     fn reset(&mut self) {}
 # }

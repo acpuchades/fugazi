@@ -13,7 +13,7 @@
 //!
 //! Every strategy:
 //!
-//! * is generic over the symbol type `Sym: Clone` and takes `Input = Candle`;
+//! * is generic over the symbol type `Sym: Clone` and takes `Input = Atom`;
 //! * in [`update`](crate::Strategy::update) advances **all** of its
 //!   signals/indicators every bar (never short-circuiting, or a skipped source
 //!   desyncs from the price stream), then decides in [`trade`](crate::Strategy::trade);

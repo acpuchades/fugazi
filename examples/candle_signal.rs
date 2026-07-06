@@ -32,7 +32,7 @@ fn main() {
     for (bar, &close) in closes.iter().enumerate() {
         // Build a flat candle from the close for this illustrative feed.
         let candle = Candle::new(close, close, close, close, 1_000.0);
-        entry.update(candle);
+        entry.update(candle.into());
         if entry.is_true() {
             println!("bar {bar:>2}: ENTRY  (close = {close:.2})");
         }

@@ -800,8 +800,16 @@ short:
 
 Sources and signals are written with YAML **tags** (`!sma { … }` is the SMA
 indicator); candle-field leaves are bare words (`close`, `high`, `volume`,
-`typical`, `median`, `open`, `low`). An omitted `source` defaults to
-`close`. Unknown fields on a side are a hard error (catches typos like
+`typical`, `median`, `open`, `low`). An omitted `source` on a
+scalar-consuming indicator (`!sma`, `!ema`, `!rsi`, …) defaults to `close`.
+Every **bar-consuming** tag (`!atr`, `!obv`, `!vwap`, `!ad`, `!mfi`, `!sar`,
+`!adx`, `!plus_di`, `!minus_di`, `!dmi_plus_di`, `!dmi_minus_di`,
+`!aroon_up`/`!aroon_down`/`!aroon_oscillator`, `!williams_r`,
+`!keltner_upper`/`!keltner_middle`/`!keltner_lower`, `!true_range`,
+`!resample`) accepts an optional `source:` field for the underlying candle
+stream, defaulting to `!current` (the current bar); `!keltner_*` additionally
+accepts an optional `candle_source:` for its ATR leg (also defaults to
+`!current`). Unknown fields on a side are a hard error (catches typos like
 `take_profitt`).
 
 ### Sources
@@ -809,7 +817,9 @@ indicator); candle-field leaves are bare words (`close`, `high`, `volume`,
 Real-valued indicators, one YAML tag per fugazi constructor:
 
 - **Candle leaves** (bare words): `close`, `high`, `low`, `open`, `volume`,
-  `typical`, `median`.
+  `typical`, `median`. The whole current bar is `!current` (the default
+  `source:` for every bar-consuming tag; name it explicitly to feed a
+  higher-timeframe candle in via `!resample`).
 - **Constants**: `!value <n>`.
 - **Position anchors** (only inside a strategy — read the live position):
   `!entry`, `!peak`, `!trough`.

@@ -66,10 +66,10 @@ impl Strategy for DualSma {
 
     fn update(&mut self, snap: Snapshot) {
         // Advance every signal every bar, each fed its own symbol's candle.
-        self.a_enter.update(snap.a);
-        self.a_exit.update(snap.a);
-        self.b_enter.update(snap.b);
-        self.b_exit.update(snap.b);
+        self.a_enter.update(snap.a.into());
+        self.a_exit.update(snap.a.into());
+        self.b_enter.update(snap.b.into());
+        self.b_exit.update(snap.b.into());
     }
 
     fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {

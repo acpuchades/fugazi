@@ -144,12 +144,12 @@ mod tests {
     #[test]
     fn tracks_window_high_and_low() {
         let mut dc = Donchian::new(Current::high(), Current::low(), 2);
-        assert_eq!(dc.update(bar(10.0, 8.0)), None); // warming up
-        let a = dc.update(bar(12.0, 9.0)).unwrap(); // highs [10,12], lows [8,9]
+        assert_eq!(dc.update(bar(10.0, 8.0).into()), None); // warming up
+        let a = dc.update(bar(12.0, 9.0).into()).unwrap(); // highs [10,12], lows [8,9]
         assert_eq!(a.upper, 12.0);
         assert_eq!(a.lower, 8.0);
         assert_eq!(a.middle, 10.0);
-        let b = dc.update(bar(11.0, 7.0)).unwrap(); // highs [12,11], lows [9,7]
+        let b = dc.update(bar(11.0, 7.0).into()).unwrap(); // highs [12,11], lows [9,7]
         assert_eq!(b.upper, 12.0);
         assert_eq!(b.lower, 7.0);
     }
