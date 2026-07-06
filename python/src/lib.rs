@@ -45,6 +45,9 @@ use fugazi_core::strategy::{
     Ack, Order, OrderKind, PaperWallet, Units, Reference, Side, Size, Wallet, WalletError,
 };
 use fugazi_core::types::{Atom, Candle, OverlayInfo, Real, Schema, SchemaBuilder};
+use fugazi_core::backtest::Fill;
+use fugazi_core::metrics as core_metrics;
+use fugazi_core::metrics::{DrawdownSegment, Trade};
 
 // ---------------------------------------------------------------------------
 // Type-erasing carriers
@@ -1213,6 +1216,22 @@ impl PyIndicator {
         ))
     }
 
+    /// A bool signal that flips to `True` once this indicator has been fed at
+    /// least its `stable_period()` samples — i.e. it is past its unstable tail.
+    /// Snapshots the period at construction, so it is cheap to compose alongside
+    /// the indicator itself as a readiness gate.
+    fn stable(&self) -> PySignal {
+        PySignal::wrap(match &self.src {
+            AnySource::Candle(s) => AnySignal::Candle(SignalBox::new(Stable::<Atom>::from_source(s))),
+            AnySource::Real(s) => AnySignal::Real(SignalBox::new(Stable::<Real>::from_source(s))),
+            // A bare constant has zero stable_period; the resulting signal fires
+            // immediately. Domain defaults to candle-rooted, matching value().
+            AnySource::Const(_) => {
+                AnySignal::Candle(SignalBox::new(Stable::<Atom>::from_period(0)))
+            }
+        })
+    }
+
     fn __repr__(&self) -> String {
         match self.src.value() {
             Some(v) => format!("Indicator(value={v})"),
@@ -1327,6 +1346,17 @@ impl PySignal {
     /// Fires on the single step where this signal toggles (either direction).
     fn changed(&self) -> PySignal {
         PySignal::wrap(map_signal!(self.sig.clone(), |s| s.changed()))
+    }
+
+    /// A bool signal that flips to `True` once this signal has been fed at
+    /// least its `stable_period()` samples — its unstable tail is behind us.
+    /// Mirrors the free `stable(sig)` function; provided as a method for the
+    /// fluent chain `sig.and_(sig.stable())`.
+    fn stable(&self) -> PySignal {
+        PySignal::wrap(match &self.sig {
+            AnySignal::Candle(s) => AnySignal::Candle(SignalBox::new(Stable::<Atom>::from_source(s))),
+            AnySignal::Real(s) => AnySignal::Real(SignalBox::new(Stable::<Real>::from_source(s))),
+        })
     }
 
     fn __and__(&self, other: PyRef<'_, PySignal>) -> PyResult<PySignal> {
@@ -2863,6 +2893,647 @@ fn fetch(
 }
 
 // ---------------------------------------------------------------------------
+// Metrics: mirror `fugazi::metrics::*` as the `fugazi.metrics` submodule
+//
+// One `#[pyfunction]` per library metric, plus lightweight pyclasses over the
+// public `Fill`, `Trade`, `DrawdownSegment` intermediates. Ratios that return
+// `Option<Real>` in Rust map to `Optional[float]` in Python (`None` on the
+// degenerate case); metrics that always return a `Real` map to plain `float`.
+// Bar counts stay `int` (`usize` in Rust). Values are natural units — `0.15`
+// is +15%, not `15.0`.
+// ---------------------------------------------------------------------------
+
+/// A bar-tagged order: an [`Order`] paired with the bar index at which it
+/// filled. `PaperWallet.update()` returns bare `Order`s (no bar); a user
+/// driving the loop tags each with its bar index to build the list that
+/// `metrics.reconstruct_trades` / `metrics.exposure_ratio` consume:
+///
+/// ```python
+/// fills = []
+/// for i, candle in enumerate(candles):
+///     for order in wallet.update("BTC", candle):
+///         fills.append(fugazi.Fill(bar=i, order=order))
+/// ```
+#[pyclass(name = "Fill", frozen, from_py_object)]
+#[derive(Clone)]
+struct PyFill {
+    inner: Fill<String>,
+}
+
+#[pymethods]
+impl PyFill {
+    #[new]
+    fn new(bar: usize, order: &PyOrder) -> Self {
+        PyFill {
+            inner: Fill {
+                bar,
+                order: order.inner.clone(),
+            },
+        }
+    }
+
+    /// The bar index at which this order filled.
+    #[getter]
+    fn bar(&self) -> usize {
+        self.inner.bar
+    }
+
+    /// The filled [`Order`].
+    #[getter]
+    fn order(&self) -> PyOrder {
+        PyOrder {
+            inner: self.inner.order.clone(),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Fill(bar={}, order=Order(symbol='{}', side='{}', units={}, price={}, kind='{}'))",
+            self.inner.bar,
+            self.inner.order.symbol,
+            side_str(self.inner.order.side),
+            self.inner.order.units,
+            self.inner.order.price,
+            kind_str(self.inner.order.kind),
+        )
+    }
+}
+
+/// A closed round-trip trade reconstructed from the fill blotter by
+/// [`reconstruct_trades`](core_metrics::reconstruct_trades). Frozen; all fields
+/// are read-only.
+#[pyclass(name = "Trade", frozen, from_py_object)]
+#[derive(Clone, Copy)]
+struct PyTrade {
+    inner: Trade,
+}
+
+#[pymethods]
+impl PyTrade {
+    /// Bar index at which the leg was opened (or last re-averaged).
+    #[getter]
+    fn entry_bar(&self) -> usize {
+        self.inner.entry_bar
+    }
+    /// Bar index at which the leg was closed.
+    #[getter]
+    fn exit_bar(&self) -> usize {
+        self.inner.exit_bar
+    }
+    /// `"buy"` (long) or `"sell"` (short).
+    #[getter]
+    fn side(&self) -> &'static str {
+        side_str(self.inner.side)
+    }
+    /// The magnitude of the closed leg, in instrument units.
+    #[getter]
+    fn units(&self) -> f64 {
+        self.inner.units
+    }
+    /// Volume-weighted average price of the opening leg.
+    #[getter]
+    fn entry_price(&self) -> f64 {
+        self.inner.entry_price
+    }
+    /// Fill price of the closing leg.
+    #[getter]
+    fn exit_price(&self) -> f64 {
+        self.inner.exit_price
+    }
+    /// Realized PnL in reference (quote) currency.
+    #[getter]
+    fn pnl(&self) -> f64 {
+        self.inner.pnl
+    }
+    /// PnL as a fraction of the entry notional (`pnl / (entry_price * units)`).
+    #[getter]
+    fn return_ratio(&self) -> f64 {
+        self.inner.return_ratio
+    }
+    /// Bar count from entry to exit — `exit_bar - entry_bar`.
+    fn bars_held(&self) -> usize {
+        self.inner.bars_held()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Trade(entry_bar={}, exit_bar={}, side='{}', units={}, entry_price={}, \
+             exit_price={}, pnl={}, return_ratio={})",
+            self.inner.entry_bar,
+            self.inner.exit_bar,
+            side_str(self.inner.side),
+            self.inner.units,
+            self.inner.entry_price,
+            self.inner.exit_price,
+            self.inner.pnl,
+            self.inner.return_ratio,
+        )
+    }
+}
+
+/// One drawdown segment: a peak → trough → recovery-or-end stretch where the
+/// equity curve was below a prior peak. Built by
+/// [`drawdown_segments`](core_metrics::drawdown_segments). Frozen.
+#[pyclass(name = "DrawdownSegment", frozen, from_py_object)]
+#[derive(Clone, Copy)]
+struct PyDrawdownSegment {
+    inner: DrawdownSegment,
+}
+
+#[pymethods]
+impl PyDrawdownSegment {
+    /// Bar index of the pre-drawdown peak.
+    #[getter]
+    fn peak_bar(&self) -> usize {
+        self.inner.peak_bar
+    }
+    /// Bar index of the deepest point.
+    #[getter]
+    fn trough_bar(&self) -> usize {
+        self.inner.trough_bar
+    }
+    /// `(peak - trough) / peak`, in fractional form; always non-negative.
+    #[getter]
+    fn depth_ratio(&self) -> f64 {
+        self.inner.depth_ratio
+    }
+    /// Peak-to-trough distance in bars.
+    #[getter]
+    fn duration_bars(&self) -> usize {
+        self.inner.duration_bars
+    }
+    /// Bars strictly below the peak in this segment.
+    #[getter]
+    fn underwater_bars(&self) -> usize {
+        self.inner.underwater_bars
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "DrawdownSegment(peak_bar={}, trough_bar={}, depth_ratio={}, \
+             duration_bars={}, underwater_bars={})",
+            self.inner.peak_bar,
+            self.inner.trough_bar,
+            self.inner.depth_ratio,
+            self.inner.duration_bars,
+            self.inner.underwater_bars,
+        )
+    }
+}
+
+// -- Intermediate builders --------------------------------------------------
+
+/// Per-bar fractional return series: `(equity[i] - prev) / prev`, seeded from
+/// `initial_equity`. Zero-denominator bars contribute `0.0`. The returned list
+/// has the same length as `equity_curve`.
+#[pyfunction]
+fn per_bar_returns(equity_curve: Vec<Real>, initial_equity: Real) -> Vec<Real> {
+    core_metrics::per_bar_returns(&equity_curve, initial_equity)
+}
+
+/// Walk `fills` with a signed position and a volume-weighted entry price,
+/// producing one `Trade` per closed leg. A reversal fill closes the current
+/// leg and reopens the remainder at the same fill price as a fresh trade.
+#[pyfunction]
+fn reconstruct_trades(fills: Vec<PyFill>) -> Vec<PyTrade> {
+    let native: Vec<Fill<String>> = fills.into_iter().map(|f| f.inner).collect();
+    core_metrics::reconstruct_trades(&native)
+        .into_iter()
+        .map(|inner| PyTrade { inner })
+        .collect()
+}
+
+/// Build the drawdown segments of `equity_curve` — one entry per peak →
+/// trough → recovery-or-end stretch. A monotone-non-decreasing curve produces
+/// an empty list.
+#[pyfunction]
+fn drawdown_segments(equity_curve: Vec<Real>) -> Vec<PyDrawdownSegment> {
+    core_metrics::drawdown_segments(&equity_curve)
+        .into_iter()
+        .map(|inner| PyDrawdownSegment { inner })
+        .collect()
+}
+
+// -- Return moments and distribution shape ----------------------------------
+
+/// Arithmetic mean of `returns`. `0.0` on empty input.
+#[pyfunction]
+fn mean_return(returns: Vec<Real>) -> Real {
+    core_metrics::mean_return(&returns)
+}
+
+/// Median of `returns`. `0.0` on empty input; the mean of the two middle
+/// values on even-length input.
+#[pyfunction]
+fn median_return(returns: Vec<Real>) -> Real {
+    core_metrics::median_return(&returns)
+}
+
+/// Sample (Bessel-corrected, `ddof=1`) standard deviation of `returns`. `0.0`
+/// on empty or single-sample input.
+#[pyfunction]
+fn stddev_return(returns: Vec<Real>) -> Real {
+    core_metrics::stddev_return(&returns)
+}
+
+/// Largest single-bar return, or `0.0` on empty input.
+#[pyfunction]
+fn best_return(returns: Vec<Real>) -> Real {
+    core_metrics::best_return(&returns)
+}
+
+/// Smallest single-bar return, or `0.0` on empty input.
+#[pyfunction]
+fn worst_return(returns: Vec<Real>) -> Real {
+    core_metrics::worst_return(&returns)
+}
+
+/// Fraction of bars with a strictly positive return. `0.0` on empty input.
+#[pyfunction]
+fn positive_bars_ratio(returns: Vec<Real>) -> Real {
+    core_metrics::positive_bars_ratio(&returns)
+}
+
+/// Biased (population) skewness `g1 = m3 / m2^(3/2)`. Matches
+/// `scipy.stats.skew(bias=True)`. `None` when the second moment is zero.
+#[pyfunction]
+fn skewness(returns: Vec<Real>) -> Option<Real> {
+    core_metrics::skewness(&returns)
+}
+
+/// Biased excess kurtosis `g2 = m4 / m2^2 − 3`. Matches
+/// `scipy.stats.kurtosis(bias=True, fisher=True)`. `None` when the second
+/// moment is zero.
+#[pyfunction]
+fn kurtosis(returns: Vec<Real>) -> Option<Real> {
+    core_metrics::kurtosis(&returns)
+}
+
+/// Historical VaR at `confidence` (e.g. `0.95`) as a positive loss fraction.
+#[pyfunction]
+fn value_at_risk(returns: Vec<Real>, confidence: Real) -> Real {
+    core_metrics::value_at_risk(&returns, confidence)
+}
+
+/// Historical Conditional VaR (Expected Shortfall) at `confidence` as a
+/// positive loss fraction.
+#[pyfunction]
+fn conditional_value_at_risk(returns: Vec<Real>, confidence: Real) -> Real {
+    core_metrics::conditional_value_at_risk(&returns, confidence)
+}
+
+/// `|P95| / |P5|` — a coarse symmetry check on the tails. `None` when the
+/// P5-magnitude is zero.
+#[pyfunction]
+fn tail_ratio(returns: Vec<Real>) -> Option<Real> {
+    core_metrics::tail_ratio(&returns)
+}
+
+// -- Compound-return metrics ------------------------------------------------
+
+/// Total return as a fraction: `(final - initial) / initial`. `0.0` when the
+/// initial equity is zero.
+#[pyfunction]
+fn total_return(equity_curve: Vec<Real>, initial_equity: Real) -> Real {
+    core_metrics::total_return(&equity_curve, initial_equity)
+}
+
+/// Compound annual growth rate as a fraction. `None` when the equity path is
+/// non-positive at either endpoint, the run is empty, or `bars_per_year <= 0`.
+#[pyfunction]
+fn cagr(equity_curve: Vec<Real>, initial_equity: Real, bars_per_year: Real) -> Option<Real> {
+    core_metrics::cagr(&equity_curve, initial_equity, bars_per_year)
+}
+
+/// Arithmetic mean of `returns` scaled by `bars_per_year`.
+#[pyfunction]
+fn annualized_return(returns: Vec<Real>, bars_per_year: Real) -> Real {
+    core_metrics::annualized_return(&returns, bars_per_year)
+}
+
+/// Sample stddev of `returns` scaled by `sqrt(bars_per_year)`.
+#[pyfunction]
+fn annualized_volatility(returns: Vec<Real>, bars_per_year: Real) -> Real {
+    core_metrics::annualized_volatility(&returns, bars_per_year)
+}
+
+// -- Risk-adjusted ratios ---------------------------------------------------
+
+/// Annualized Sharpe ratio. `risk_free_rate` is the annualized rf as a
+/// fraction. `None` when the annualized volatility is zero.
+#[pyfunction]
+fn sharpe(returns: Vec<Real>, risk_free_rate: Real, bars_per_year: Real) -> Option<Real> {
+    core_metrics::sharpe(&returns, risk_free_rate, bars_per_year)
+}
+
+/// Annualized Sortino ratio (downside deviation, `n` divisor). `None` when
+/// every bar clears the threshold or `returns` is empty.
+#[pyfunction]
+fn sortino(returns: Vec<Real>, risk_free_rate: Real, bars_per_year: Real) -> Option<Real> {
+    core_metrics::sortino(&returns, risk_free_rate, bars_per_year)
+}
+
+/// Calmar ratio: `cagr / max_drawdown`. `None` when either is undefined.
+#[pyfunction]
+fn calmar(equity_curve: Vec<Real>, initial_equity: Real, bars_per_year: Real) -> Option<Real> {
+    core_metrics::calmar(&equity_curve, initial_equity, bars_per_year)
+}
+
+/// Omega ratio at `threshold`. For an annualized rf comparison, pass the
+/// per-bar rate (`rf / bars_per_year`) as `threshold`. `None` when every
+/// return clears the threshold (no downside).
+#[pyfunction]
+fn omega(returns: Vec<Real>, threshold: Real) -> Option<Real> {
+    core_metrics::omega(&returns, threshold)
+}
+
+/// Peter Martin's Ulcer Index, in fractional form. `0.0` on a monotone-
+/// non-decreasing curve.
+#[pyfunction]
+fn ulcer_index(equity_curve: Vec<Real>) -> Real {
+    core_metrics::ulcer_index(&equity_curve)
+}
+
+/// Ulcer Performance Index: `(cagr − risk_free_rate) / ulcer_index`. `None`
+/// when either input is degenerate.
+#[pyfunction]
+fn ulcer_performance_index(
+    equity_curve: Vec<Real>,
+    initial_equity: Real,
+    risk_free_rate: Real,
+    bars_per_year: Real,
+) -> Option<Real> {
+    core_metrics::ulcer_performance_index(
+        &equity_curve,
+        initial_equity,
+        risk_free_rate,
+        bars_per_year,
+    )
+}
+
+// -- Drawdown metrics -------------------------------------------------------
+
+/// Deepest drawdown in `segments`, as a fraction. `0.0` on empty input.
+#[pyfunction]
+fn max_drawdown(segments: Vec<PyDrawdownSegment>) -> Real {
+    let native: Vec<DrawdownSegment> = segments.iter().map(|s| s.inner).collect();
+    core_metrics::max_drawdown(&native)
+}
+
+/// Peak-to-trough duration of the **deepest** drawdown segment (not the
+/// longest duration overall). `0` on empty input.
+#[pyfunction]
+fn max_drawdown_duration(segments: Vec<PyDrawdownSegment>) -> usize {
+    let native: Vec<DrawdownSegment> = segments.iter().map(|s| s.inner).collect();
+    core_metrics::max_drawdown_duration(&native)
+}
+
+/// Mean drawdown depth across all segments; `None` on empty input.
+#[pyfunction]
+fn average_drawdown(segments: Vec<PyDrawdownSegment>) -> Option<Real> {
+    let native: Vec<DrawdownSegment> = segments.iter().map(|s| s.inner).collect();
+    core_metrics::average_drawdown(&native)
+}
+
+/// Mean peak-to-trough duration across all segments; `None` on empty input.
+#[pyfunction]
+fn average_drawdown_duration(segments: Vec<PyDrawdownSegment>) -> Option<Real> {
+    let native: Vec<DrawdownSegment> = segments.iter().map(|s| s.inner).collect();
+    core_metrics::average_drawdown_duration(&native)
+}
+
+/// Number of drawdown segments.
+#[pyfunction]
+fn drawdown_count(segments: Vec<PyDrawdownSegment>) -> usize {
+    let native: Vec<DrawdownSegment> = segments.iter().map(|s| s.inner).collect();
+    core_metrics::drawdown_count(&native)
+}
+
+/// Fraction of bars spent below a prior peak. `0.0` when `total_bars == 0`.
+#[pyfunction]
+fn time_in_drawdown_ratio(segments: Vec<PyDrawdownSegment>, total_bars: usize) -> Real {
+    let native: Vec<DrawdownSegment> = segments.iter().map(|s| s.inner).collect();
+    core_metrics::time_in_drawdown_ratio(&native, total_bars)
+}
+
+/// `total_return / max_drawdown` — the non-annualized cousin of Calmar.
+/// `None` when the max drawdown is zero.
+#[pyfunction]
+fn recovery_factor(equity_curve: Vec<Real>, initial_equity: Real) -> Option<Real> {
+    core_metrics::recovery_factor(&equity_curve, initial_equity)
+}
+
+// -- Trade metrics ----------------------------------------------------------
+
+fn to_native_trades(trades: Vec<PyTrade>) -> Vec<Trade> {
+    trades.into_iter().map(|t| t.inner).collect()
+}
+
+/// Count of closed round-trip trades.
+#[pyfunction]
+fn total_trades(trades: Vec<PyTrade>) -> usize {
+    core_metrics::total_trades(&to_native_trades(trades))
+}
+
+/// Count of trades with strictly positive PnL.
+#[pyfunction]
+fn winning_trades(trades: Vec<PyTrade>) -> usize {
+    core_metrics::winning_trades(&to_native_trades(trades))
+}
+
+/// Count of trades with strictly negative PnL.
+#[pyfunction]
+fn losing_trades(trades: Vec<PyTrade>) -> usize {
+    core_metrics::losing_trades(&to_native_trades(trades))
+}
+
+/// Count of trades with exactly zero PnL.
+#[pyfunction]
+fn flat_trades(trades: Vec<PyTrade>) -> usize {
+    core_metrics::flat_trades(&to_native_trades(trades))
+}
+
+/// Count of trades entered on the long side.
+#[pyfunction]
+fn long_trades(trades: Vec<PyTrade>) -> usize {
+    core_metrics::long_trades(&to_native_trades(trades))
+}
+
+/// Count of trades entered on the short side.
+#[pyfunction]
+fn short_trades(trades: Vec<PyTrade>) -> usize {
+    core_metrics::short_trades(&to_native_trades(trades))
+}
+
+/// Longest consecutive run of winning trades. `0` on empty input.
+#[pyfunction]
+fn max_consecutive_wins(trades: Vec<PyTrade>) -> usize {
+    core_metrics::max_consecutive_wins(&to_native_trades(trades))
+}
+
+/// Longest consecutive run of losing trades. `0` on empty input.
+#[pyfunction]
+fn max_consecutive_losses(trades: Vec<PyTrade>) -> usize {
+    core_metrics::max_consecutive_losses(&to_native_trades(trades))
+}
+
+/// Fraction of trades with strictly positive PnL. `None` on empty input.
+#[pyfunction]
+fn win_rate(trades: Vec<PyTrade>) -> Option<Real> {
+    core_metrics::win_rate(&to_native_trades(trades))
+}
+
+/// `Σ winning_pnl / |Σ losing_pnl|`. `None` when there are no losing trades.
+#[pyfunction]
+fn profit_factor(trades: Vec<PyTrade>) -> Option<Real> {
+    core_metrics::profit_factor(&to_native_trades(trades))
+}
+
+/// `average_win / |average_loss|`. `None` when either input is undefined.
+#[pyfunction]
+fn payoff_ratio(trades: Vec<PyTrade>) -> Option<Real> {
+    core_metrics::payoff_ratio(&to_native_trades(trades))
+}
+
+/// Mean PnL per trade. `None` on empty input.
+#[pyfunction]
+fn expectancy(trades: Vec<PyTrade>) -> Option<Real> {
+    core_metrics::expectancy(&to_native_trades(trades))
+}
+
+/// Kelly-optimal fraction of bankroll per trade under the current win rate
+/// and payoff ratio (`p − (1 − p)/b`). Can be negative. `None` when either
+/// input is undefined or the payoff ratio is non-positive.
+#[pyfunction]
+fn kelly_fraction(trades: Vec<PyTrade>) -> Option<Real> {
+    core_metrics::kelly_fraction(&to_native_trades(trades))
+}
+
+/// Mean PnL across winning trades. `None` when there are no winners.
+#[pyfunction]
+fn average_win(trades: Vec<PyTrade>) -> Option<Real> {
+    core_metrics::average_win(&to_native_trades(trades))
+}
+
+/// Mean PnL across losing trades (a negative number). `None` when there are
+/// no losers.
+#[pyfunction]
+fn average_loss(trades: Vec<PyTrade>) -> Option<Real> {
+    core_metrics::average_loss(&to_native_trades(trades))
+}
+
+/// Largest single-trade PnL. `None` on empty input.
+#[pyfunction]
+fn largest_win(trades: Vec<PyTrade>) -> Option<Real> {
+    core_metrics::largest_win(&to_native_trades(trades))
+}
+
+/// Most-negative single-trade PnL. `None` on empty input.
+#[pyfunction]
+fn largest_loss(trades: Vec<PyTrade>) -> Option<Real> {
+    core_metrics::largest_loss(&to_native_trades(trades))
+}
+
+/// Mean per-trade return as a fraction of the entry notional. `None` on empty
+/// input.
+#[pyfunction]
+fn average_trade_return(trades: Vec<PyTrade>) -> Option<Real> {
+    core_metrics::average_trade_return(&to_native_trades(trades))
+}
+
+/// Mean bars-held across trades. `None` on empty input.
+#[pyfunction]
+fn average_bars_held(trades: Vec<PyTrade>) -> Option<Real> {
+    core_metrics::average_bars_held(&to_native_trades(trades))
+}
+
+/// Shortest bars-held across trades. `None` on empty input.
+#[pyfunction]
+fn min_bars_held(trades: Vec<PyTrade>) -> Option<usize> {
+    core_metrics::min_bars_held(&to_native_trades(trades))
+}
+
+/// Longest bars-held across trades. `None` on empty input.
+#[pyfunction]
+fn max_bars_held(trades: Vec<PyTrade>) -> Option<usize> {
+    core_metrics::max_bars_held(&to_native_trades(trades))
+}
+
+/// Fraction of bars during which the wallet held a non-zero position. `0.0`
+/// when `total_bars == 0`.
+#[pyfunction]
+fn exposure_ratio(fills: Vec<PyFill>, total_bars: usize) -> Real {
+    let native: Vec<Fill<String>> = fills.into_iter().map(|f| f.inner).collect();
+    core_metrics::exposure_ratio(&native, total_bars)
+}
+
+/// Register every metric function on the `fugazi.metrics` submodule.
+fn register_metrics_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyTrade>()?;
+    m.add_class::<PyDrawdownSegment>()?;
+
+    macro_rules! reg {
+        ($($f:ident),* $(,)?) => { $( m.add_function(wrap_pyfunction!($f, m)?)?; )* };
+    }
+    reg!(
+        per_bar_returns,
+        reconstruct_trades,
+        drawdown_segments,
+        mean_return,
+        median_return,
+        stddev_return,
+        best_return,
+        worst_return,
+        positive_bars_ratio,
+        skewness,
+        kurtosis,
+        value_at_risk,
+        conditional_value_at_risk,
+        tail_ratio,
+        total_return,
+        cagr,
+        annualized_return,
+        annualized_volatility,
+        sharpe,
+        sortino,
+        calmar,
+        omega,
+        ulcer_index,
+        ulcer_performance_index,
+        max_drawdown,
+        max_drawdown_duration,
+        average_drawdown,
+        average_drawdown_duration,
+        drawdown_count,
+        time_in_drawdown_ratio,
+        recovery_factor,
+        total_trades,
+        winning_trades,
+        losing_trades,
+        flat_trades,
+        long_trades,
+        short_trades,
+        max_consecutive_wins,
+        max_consecutive_losses,
+        win_rate,
+        profit_factor,
+        payoff_ratio,
+        expectancy,
+        kelly_fraction,
+        average_win,
+        average_loss,
+        largest_win,
+        largest_loss,
+        average_trade_return,
+        average_bars_held,
+        min_bars_held,
+        max_bars_held,
+        exposure_ratio,
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Module
 // ---------------------------------------------------------------------------
 
@@ -2879,6 +3550,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWallet>()?;
     m.add_class::<PyOrder>()?;
     m.add_class::<PySize>()?;
+    m.add_class::<PyFill>()?;
     m.add_class::<PyBinance>()?;
     m.add_class::<PyYahoo>()?;
 
@@ -2893,5 +3565,18 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         aroon, sar, macd, bollinger, keltner, donchian, stoch_rsi, resample, latch, stable, get,
         fetch,
     );
+
+    // `fugazi.metrics` — mirror of `fugazi::metrics::*`. Registered as a
+    // submodule *and* injected into `sys.modules` so `from fugazi.metrics
+    // import sharpe` works (pyo3 submodules aren't visible to Python's import
+    // machinery by default).
+    let metrics = PyModule::new(m.py(), "metrics")?;
+    register_metrics_module(&metrics)?;
+    m.add_submodule(&metrics)?;
+    m.py()
+        .import("sys")?
+        .getattr("modules")?
+        .set_item("fugazi.metrics", &metrics)?;
+
     Ok(())
 }

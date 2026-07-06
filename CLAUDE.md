@@ -130,6 +130,50 @@ The CLI is one binary (`fugazi`) with several subcommands; layout by concern:
 - **`input.rs`** — the `@file`-or-inline `Source` type used by every text-taking flag (`--params`, `--overlay`, `--costs`, the strategy positional).
 - **`params.rs`, `convert.rs`, `list.rs`, `completions.rs`, `pool.rs`, `style.rs`** — auxiliary: `!param` substitution, YAML→JSON normalization, `fugazi list`, shell completions, rayon pool builder, terminal styling. None are entry points; touch on demand.
 
+## Python bindings (`python/src/lib.rs`)
+
+The Python surface is a **type-erased mirror** of the Rust library, packaged as one pyo3 cdylib (`fugazi-python` crate → `fugazi` importable module). The core library is compile-time-monomorphised over its source generics (`Ema<S>` etc.); Python can't carry those generics across the FFI boundary, so the whole file is one big erase-then-dispatch: every `I -> Real` indicator becomes a `Source<I>` (boxed `DynIndicator`), every `I`-input bool becomes a `SignalBox<I>`, multi-output ones become a `MultiBox<I>`. The `AnySource` / `AnySignal` / `AnyMulti` enums record which of the two input domains — candle-rooted (`Input = Atom`) or value-rooted (`Input = Real`) — an erased chain lives in, and the `map_source!` / `combine_sources!` / `source_to_signal!` / `sources_to_signal!` / `map_signal!` / `combine_signals!` / `map_multi!` / `combine_multi!` macros dispatch on those tags. **The rule is: a Python constructor that mirrors a Rust one uses those macros; it does not name a concrete `Ema<Sma<Current, …>, …>` type.**
+
+### Parity discipline: keep Python in sync when the library grows
+
+The Python bindings ship the same primitives as the Rust core, with three deliberate omissions (see below). **When a Rust API is added, extended, or renamed, mirror it in `python/src/lib.rs` in the same PR** — Python drift is otherwise silent (the Rust build still passes) and only surfaces when a user reports missing bindings.
+
+The mirror rules by layer:
+
+- **New indicator / signal / operator on the pure layer** → add a `#[pyfunction]` in `python/src/lib.rs`, register it in the `#[pymodule] fn fugazi` reg list, and add a smoke test in `python/tests/test_fugazi.py`. Single-output real-source constructors use `src_period!`; bar-only constructors use `bar_period!`/`bar_noarg!`; multi-output ones use `bar_period_multi!` or a hand-written `map_multi!`/`combine_multi!` body. If it's a new fluent method on `IndicatorExt` / `BoolIndicatorExt`, add a `#[pymethods]` entry on `PyIndicator` / `PySignal` alongside the existing ones (and update the `__add__`/`__and__` etc. dunders if it composes with operators).
+- **New metric function in `src/metrics.rs`** → add a `#[pyfunction]` in the metrics section, add its name to the `register_metrics_module` reg list. Signature is mechanical: `Vec<Real>` for slice inputs, `Vec<PyTrade>` / `Vec<PyDrawdownSegment>` / `Vec<PyFill>` for the intermediate types (converted to the native `Vec<Trade>` etc. inside the body). Ratios returning `Option<Real>` stay `Option<Real>` on the Python side (materialises as `None`); metrics returning `Real` stay `f64`; bar counts stay `usize`.
+- **New field on `Trade` / `DrawdownSegment` / `Order` / etc.** → add a `#[getter]` on the corresponding `PyTrade` / `PyDrawdownSegment` / `PyOrder` and update its `__repr__`.
+- **New remote provider under `src/sources/`** → add a `Py*` client class mirroring `PyBinance` / `PyYahoo`, register it, and add a branch in the `fetch(provider=…)` dispatcher.
+- **New leaf source / component accessor** → add a `#[pyfunction]` using `leaf!` or a `candle_source(...)` body, register it.
+- **Changes to `Candle` / `Atom` / `OverlayInfo` / `Schema` / `SchemaBuilder`** → update `PyCandle` / `PyAtom` / `PyOverlayInfo` / `PySchema` / `PySchemaBuilder` field-for-field.
+
+**Intentionally not bound** (do not mirror without being asked):
+
+- The `Strategy` trait, `SingleAssetStrategy`, and the `src/strategies/` catalogue. Python is imperative: a Python "strategy" is a plain-Python loop that reads indicators/signals and drives a `PaperWallet`. Re-shipping the 19 Rust recipes as Python constructors would double the surface without matching how Python users actually assemble strategies.
+- `fugazi::backtest::run`, `RunReport`, and the whole `run_iteration` / `evaluate*` pipeline. No Python-facing strategy handle → no primitive to hand to `run`. The bar loop is user-owned Python.
+- The CLI (`src/cli/`). It's a separate binary; no Python analogue is intended.
+- The `Wallet` trait itself. Python only exposes `PaperWallet` — a live wallet would live in a downstream Rust crate implementing `Wallet` and be re-bound separately.
+- Rust-internal types that only make sense inside the strategy layer (`Position`, `PositionField`, `Ack`, `OrderId`, `Reference`, `Units`). Python takes `float`s for prices and unit counts and returns `PyOrder` (with `bar` tagging done via `PyFill` when the user drives a metrics workflow).
+
+Layout inside `python/src/lib.rs` (single file, ~3400 lines — grep by section header):
+
+- **Type-erasing carriers** — `DynIndicator` / `DynSignal` / `DynMulti` traits, `Source` / `SignalBox` / `MultiBox` boxes, the `MultiOutput` shim, `ResampleThen`.
+- **Input domain** — `AnySource` / `AnySignal` / `AnyMulti` enums, `pair()` resolver, `domain_mismatch()`, and the `map_*` / `combine_*` macros. **All new binding bodies use these macros.**
+- **Python classes** — `PyCandle`, `PySchema`, `PySchemaBuilder`, `PyOverlayInfo`, `PyAtom`, `PyIndicator`, `PySignal`, `PyMulti`, `PyWallet`, `PyOrder`, `PySize`.
+- **Strategy layer** — `PyWallet` with `set` / `set_position` / `close` / `set_stop` / `set_take_profit` / `cancel_protective` / `update` (returns `Vec<PyOrder>` — a bar-loop that later hands orders to metrics wraps them in `PyFill(bar, order)`).
+- **Metrics** — `PyFill`, `PyTrade`, `PyDrawdownSegment` + one `#[pyfunction]` per `src/metrics.rs` `pub fn`, plus `register_metrics_module`. The submodule is registered on `fugazi.metrics` **and** injected into `sys.modules["fugazi.metrics"]` so `from fugazi.metrics import sharpe` works.
+- **Constructors** — leaf sources (`open`, `high`, …, `identity`, `value`), `src_period!` / `bar_period!` / `bar_noarg!` / `bar_period_multi!` macro invocations, hand-written `macd` / `bollinger` / `keltner` / `donchian` / `stoch_rsi`, cross-timeframe (`resample`, `latch`, `stable`), overlay (`get`).
+- **Remote candle sources** — `SOURCES_RUNTIME`, `parse_interval_token`, `parse_date_token`, `PyBinance`, `PyYahoo`, `fetch`.
+- **`#[pymodule] fn fugazi`** — one `m.add_class` per pyclass, one `reg!` line for every `#[pyfunction]`, then the metrics submodule registration.
+
+Cargo layout: `python/Cargo.toml` depends on `fugazi_core = { package = "fugazi", … default-features = false, features = ["sources"] }` — the wheel gets the async HTTP stack but not the `cli` feature. `pyo3 = "0.29"` with `abi3-py39`.
+
+Build/test the bindings:
+
+- `cargo build` (from `python/` or the workspace root; the top-level `cargo test` also compiles this crate).
+- `cargo clippy --all-targets` — keep clean.
+- `maturin develop` inside a venv, then `pytest python/tests/` — smoke + README tests. `python/tests/test_readme.py` runs the code blocks in `python/README.md`, so any new binding worth mentioning gets a README example that doubles as a test.
+
 ## Existing helpers — check before writing new code
 
 The refactor's whole point is that these are *already shared*. Before you write new parsing/formatting/plumbing, grep for the utility first — most of the boring bits are done.
@@ -156,5 +200,9 @@ The refactor's whole point is that these are *already shared*. Before you write 
 | Per-bar returns from an equity curve | `fugazi::metrics::per_bar_returns(equity, initial_equity)` | `src/metrics.rs` |
 | Reconstruct trades from a fill blotter | `fugazi::metrics::reconstruct_trades(&fills)` | `src/metrics.rs` |
 | Drawdown segments from an equity curve | `fugazi::metrics::drawdown_segments(equity)` | `src/metrics.rs` |
+| Domain-preserving one-source wrap in the Python bindings | `map_source!(src, |s| build_expr)` | `python/src/lib.rs` |
+| Two-source combine in the Python bindings (candle-vs-real domain check) | `combine_sources!(lhs, rhs, |l, r| build_expr)` (analogous: `sources_to_signal!` / `combine_signals!` / `combine_multi!`) | `python/src/lib.rs` |
+| One-source signal build (bool output) in the Python bindings | `source_to_signal!(src, |s| build_expr)` | `python/src/lib.rs` |
+| Register a metric function on the `fugazi.metrics` submodule | Add to the `reg!(...)` list inside `register_metrics_module` | `python/src/lib.rs` |
 
 **Rule:** if you're about to write a private helper whose name looks like something already on that table, grep first. If a helper is missing from the table but you've written it more than once, add it to the table when you extract it.

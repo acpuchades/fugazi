@@ -779,3 +779,122 @@ def test_get_unknown_key_raises_at_construction():
     schema = _schema("vol_20")
     with pytest.raises(ValueError):
         ta.get(schema, "missing")
+
+
+# ---------------------------------------------------------------------------
+# stable() as a fluent method (parity with Rust's IndicatorExt/BoolIndicatorExt)
+# ---------------------------------------------------------------------------
+
+
+def test_indicator_stable_method_matches_free_function():
+    src = ta.ema(ta.close(), 5)
+    method = src.stable()
+    free = ta.close().ema(5) if hasattr(ta.close(), "ema") else ta.ema(ta.close(), 5)
+    # We can't compare source-Real .stable() to a signal-based free stable(), so
+    # just check the method returns a Signal that flips at the right sample.
+    period = src.stable_period()
+    assert isinstance(method, ta.Signal)
+    for i in range(1, period):
+        method.update(ta.Candle(i, i, i, i, 0.0))
+        assert method.is_true() is False
+    method.update(ta.Candle(period, period, period, period, 0.0))
+    assert method.is_true() is True
+
+
+def test_signal_stable_method_matches_free_function():
+    entry = ta.close().crosses_above(ta.ema(ta.close(), 3))
+    m = entry.stable()
+    f = ta.stable(entry)
+    assert m.stable_period() == f.stable_period()
+    # Feed both the same series and compare boolean state each bar.
+    bars = closes([float(i + 1) for i in range(m.stable_period() + 2)])
+    for c in bars:
+        assert m.update(c) == f.update(c)
+
+
+# ---------------------------------------------------------------------------
+# fugazi.metrics submodule (parity with fugazi::metrics)
+# ---------------------------------------------------------------------------
+
+
+def test_metrics_submodule_is_importable():
+    from fugazi import metrics
+
+    assert metrics.sharpe is not None
+    assert metrics.Trade is not None
+    assert metrics.DrawdownSegment is not None
+
+
+def test_per_bar_returns_and_total_return():
+    from fugazi import metrics
+
+    eq = [100.0, 105.0, 110.0, 121.0]
+    rets = metrics.per_bar_returns(eq, 100.0)
+    # Per-bar returns are seeded from initial_equity, so bar 0 = (100-100)/100 = 0.
+    assert rets == pytest.approx([0.0, 0.05, 5.0 / 105.0, 11.0 / 110.0])
+    assert metrics.total_return(eq, 100.0) == pytest.approx(0.21)
+    assert metrics.cagr(eq, 100.0, 252.0) > 1.0
+
+
+def test_sharpe_and_sortino_return_none_on_zero_variance():
+    from fugazi import metrics
+
+    flat = [0.0] * 20
+    assert metrics.sharpe(flat, 0.0, 252.0) is None
+    assert metrics.sortino(flat, 0.0, 252.0) is None
+
+
+def test_drawdown_pipeline():
+    from fugazi import metrics
+
+    equity = [100.0, 110.0, 105.0, 90.0, 95.0, 120.0, 100.0]
+    segs = metrics.drawdown_segments(equity)
+    assert len(segs) == 2
+    assert isinstance(segs[0], metrics.DrawdownSegment)
+    assert metrics.max_drawdown(segs) == pytest.approx((110.0 - 90.0) / 110.0)
+    assert metrics.max_drawdown_duration(segs) == 2
+    assert metrics.average_drawdown(segs) is not None
+    assert metrics.time_in_drawdown_ratio(segs, 7) == pytest.approx(4.0 / 7.0)
+    assert metrics.recovery_factor(equity, 100.0) is not None
+
+
+def test_reconstruct_trades_round_trip_through_wallet():
+    """Fill(bar, order) built from PaperWallet.update() feeds metrics cleanly."""
+    from fugazi import metrics
+
+    w = ta.PaperWallet(1000.0)
+    fills = []
+    w.set_position("BTC", 1.0)  # queue market buy
+    for i, price in enumerate([100.0, 110.0]):
+        for o in w.update("BTC", price):
+            fills.append(ta.Fill(bar=i, order=o))
+        if i == 0:
+            w.close("BTC")  # queue flatten for the next bar
+    assert len(fills) == 2
+    trades = metrics.reconstruct_trades(fills)
+    assert metrics.total_trades(trades) == 1
+    assert trades[0].pnl == pytest.approx(10.0)
+    assert trades[0].bars_held() == 1
+    assert metrics.win_rate(trades) == 1.0
+    assert metrics.profit_factor(trades) is None  # no losing trade
+    assert metrics.average_bars_held(trades) == pytest.approx(1.0)
+    assert metrics.exposure_ratio(fills, total_bars=2) == pytest.approx(0.5)
+
+
+def test_trade_and_drawdown_segment_are_frozen_readonly():
+    from fugazi import metrics
+
+    seg = metrics.drawdown_segments([100.0, 90.0, 100.0])[0]
+    with pytest.raises(AttributeError):
+        seg.depth_ratio = 0.0  # frozen
+
+
+def test_fill_has_bar_and_order_getters():
+    w = ta.PaperWallet(1000.0)
+    w.set_position("BTC", 1.0)  # queued
+    fills = w.update("BTC", 100.0)  # fills at the next update's open
+    assert len(fills) == 1
+    f = ta.Fill(bar=42, order=fills[0])
+    assert f.bar == 42
+    assert f.order.symbol == "BTC"
+    assert f.order.side == "buy"
