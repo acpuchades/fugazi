@@ -1,12 +1,10 @@
 //! Pure per-iteration evaluation. No IO, no console output, no clock.
 //!
 //! This module owns the "run one backtest, reduce it to a metrics
-//! document" work — the piece that has to run identically whether it's
-//! called once for a single-run ([`crate::run::run`]) or many times in
-//! parallel by the batch driver ([`crate::batch`]). Writing the results
-//! (CSV files, YAML summaries, console banners) is deliberately kept out
-//! of here; that's a concern of the `run` subcommand driver, and this
-//! module never returns a `Path`, opens a file, or calls `println!`.
+//! document" work — [`crate::run::run`] wraps it with IO. Writing the
+//! results (CSV files, YAML summaries, console banners) is deliberately
+//! kept out of here; that's a concern of the `run` subcommand driver, and
+//! this module never returns a `Path`, opens a file, or calls `println!`.
 //!
 //! ## The three pure entry points
 //!
@@ -93,19 +91,12 @@ pub fn evaluate_windowed(
     metrics::windowed_from_report(&measured, window, bars_per_year, risk_free_rate)
 }
 
-/// Everything one iteration of a backtest produces — used by both the
-/// single-run driver ([`crate::run`]) and the parallel batch driver
-/// ([`crate::batch`]). Deliberately owns no IO — the driver decides how
+/// Everything one iteration of a backtest produces — consumed by
+/// [`crate::run::run`]. Deliberately owns no IO — the driver decides how
 /// (and whether) to persist the payload.
 pub struct IterationResult {
-    /// The strategy's symbol for this iteration (already post-param
-    /// substitution). Under batch mode this matches the iteration's group.
-    pub symbol: String,
-    /// The effective bar cadence for this iteration (user's `-f` or
-    /// auto-detected). `None` when neither was available.
-    pub freq: Option<Frequency>,
     /// One time label per bar, borrowed from the input candles column and
-    /// cloned so the result is `Send + 'static` for rayon workers.
+    /// cloned so the result is `Send + 'static`.
     pub bars: Vec<String>,
     /// The priced (net) run report from `fugazi::backtest::run`.
     pub report: fugazi::RunReport<String>,
@@ -133,10 +124,9 @@ pub struct SummaryRow {
 }
 
 /// The resolved-once inputs [`run_iteration`] consumes. Kept separate from
-/// the driver's option struct (see [`crate::run::RunOptions`]) so a batch
-/// worker can build one per iteration without carrying `out_dir`,
-/// `strategy_label`, etc. — the per-run knobs that don't vary per
-/// iteration and belong in the IO layer.
+/// the driver's option struct (see [`crate::run::RunOptions`]) so the
+/// pure-work layer doesn't carry `out_dir`, `strategy_label`, etc. — the
+/// knobs that only make sense to the IO layer.
 pub struct IterationInputs<'a> {
     pub cash: Real,
     pub bars_per_year: Real,
@@ -148,9 +138,7 @@ pub struct IterationInputs<'a> {
 
 /// The pure-work half of a run: drive the strategy over `candles`, reduce
 /// the report to `Metrics`, and hand back an [`IterationResult`]. Does no
-/// IO and no console printing — that's the driver's responsibility, and
-/// the batch driver ([`crate::batch`]) calls this in parallel across
-/// iterations.
+/// IO and no console printing — that's the driver's responsibility.
 pub fn run_iteration(
     spec: &StrategySpec,
     candles: &[(String, Candle)],
@@ -218,8 +206,6 @@ pub fn run_iteration(
         bars: report.equity_curve.len(),
     };
     IterationResult {
-        symbol,
-        freq: inputs.effective_freq,
         bars,
         report,
         metrics: whole,

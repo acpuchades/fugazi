@@ -93,33 +93,30 @@ cargo run --bin fugazi -- optimize \
 ### `run`
 
 Backtest one strategy against one dataset and write the result files.
-When the input frame carries more than one `(symbol, freq)` group, `run`
-iterates the strategy across each group in parallel — see
-[Batch mode](#batch-mode).
+Every candle in the input series is fed to the strategy in `time` order;
+the strategy's `symbol` (from its YAML spec) is what the driver filters
+on when the frame carries several symbols.
 
 ```
 fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
           [--params <SPEC> …] [--cash <N>] [--costs <SPEC> …]
           [--stocks | --forex | --crypto] [-f <CODE>] [--bars-per-year <N>]
-          [--risk-free-rate <RATE>] [-w <N>]
-          [--single | --multiple] [-j <N>] [-q]
+          [--risk-free-rate <RATE>] [-w <N>] [-q]
 ```
 
 | Flag | Description |
 | --- | --- |
-| `<STRATEGY>` | Positional. `@file.yml` loads a file; anything else is inline YAML. |
+| `<STRATEGY>` | Positional. `@file.yml` loads a file; anything else is inline YAML. An optional `single:` shape prefix is accepted (`single:@strategy.yml` ≡ `@strategy.yml`) — reserved for a future `multiple:` sibling, see [Strategy shape prefix](#strategy-shape-prefix). |
 | `-s`, `--series <SPEC>` | Data series. Repeatable. See [--series](#--series). |
-| `-o`, `--output-dir <DIR>` | Directory to write `trades.csv`, `returns.csv`, and `metrics.yml` into. Created if missing. May contain `%SYMBOL` / `%FREQ` sigils under batch mode — see [Batch mode](#batch-mode). |
-| `-p`, `--params <SPEC>` | Placeholder substitution. Repeatable. See [--params](#--params). Values may reference `%SYMBOL` / `%FREQ`. |
+| `-o`, `--output-dir <DIR>` | Directory to write `trades.csv`, `returns.csv`, and `metrics.yml` into. Created if missing. Plain path — no interpolation. |
+| `-p`, `--params <SPEC>` | Placeholder substitution. Repeatable. See [--params](#--params). |
 | `-c`, `--cash <N>` | Initial funds for the paper wallet. Default `10000`. |
 | `--costs <SPEC>` | Trading-cost model — commission, spread, slippage — applied to every fill. Repeatable. See [--costs](#--costs). Omit for a frictionless run (matches the pre-costs release byte-for-byte). |
 | `--stocks` / `--forex` / `--crypto` | Trading-calendar shortcut. See [Calendar](#calendar-and-annualization). Mutually exclusive. |
 | `-f`, `--frequency <[SYM:]CODE>` | Bar cadence (`1m`, `5m`, `1h`, `4h`, `1d`, `1w`, `1M`, …). Repeatable; may carry a `SYMBOL:` scope prefix. When omitted, the CLI auto-detects the cadence from the `time` column. Combines with the calendar to derive `bars_per_year`. |
 | `--bars-per-year <[SYM[FREQ]:]N>` | Explicit override for the annualization denominator. Repeatable; each entry may carry a `SYMBOL[FREQ]:` scope prefix. Wins over the calendar/frequency pair when a scope matches. |
 | `--risk-free-rate <RATE>` | Annualized risk-free rate as a fraction (`0.045` = 4.5% p.a.). Default `0`. See [Risk-free rate](#risk-free-rate). |
-| `-w`, `--windowed <N>` | Also reduce the run in `N`-bar windows: one row per non-overlapping window in `metrics.csv`, one row per rolling (stride-1) window in `rolling.csv`. `metrics.yml` (whole-run) is written for a single iteration. See [Windowed metrics](#windowed-metrics). |
-| `--single` / `--multiple` | Strategy kind. `--single` (default) uses `SingleAssetStrategy` — iterated per `(symbol, freq)` group under batch mode. `--multiple` is reserved for a future `MultiAssetStrategy` and errors out for now. Mutually exclusive. |
-| `-j`, `--jobs <N>` | Rayon worker count for batch iterations. Default: one worker per logical CPU. |
+| `-w`, `--windowed <N>` | Also reduce the run in `N`-bar windows: one row per non-overlapping window in `metrics.csv`, one row per rolling (stride-1) window in `rolling.csv`. `metrics.yml` (whole-run) is always written. See [Windowed metrics](#windowed-metrics). |
 | `-q`, `--quiet` | Silence the console output. Files still get written. |
 
 **Outputs.** Files in `--output-dir`, all documented in
@@ -134,70 +131,14 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
 No charts are produced. Plotting is a post-hoc analysis on the CSVs —
 see the README's *Analyzing a run in R* section.
 
-#### Batch mode
+#### Strategy shape prefix
 
-When the frame carries more than one `(symbol, freq)` group, `run --single`
-(the default) auto-batches: one full `SingleAssetStrategy` run per group,
-in parallel on a rayon pool sized by `-j/--jobs`. There's no separate
-subcommand — the trigger is the shape of the input.
-
-**Sigils.** Two CLI-managed template variables are substituted whenever
-`--single` is active (both single-group and multi-group frames), so the
-same templated strategy works on a one-symbol CSV and a multi-symbol
-one without changes:
-
-- `%SYMBOL` — the iteration's (or single group's) symbol (path-hostile
-  characters like `/`, `\`, `:`, `?`, `*`, `"`, `<`, `>`, `|` are
-  normalized to `_`, so a Binance-style `BTC/USDT` reads as `BTC_USDT`).
-- `%FREQ` — the iteration's effective bar cadence (`1d`, `4h`, …) or an
-  empty string when detection failed and no `-f` was given.
-
-You may reference sigils inside `--params` values and inside `--output-dir`;
-you **cannot** declare param *names* starting with `%` (that namespace is
-reserved). A typical templated setup:
-
-```
-fugazi run @strategy.yml \
-      --series @candles.csv \
-      --params SYMBOL=%SYMBOL \
-      --output-dir out/
-```
-
-The strategy carries `symbol: !param SYMBOL` and the CLI folds the
-iteration's symbol in per group.
-
-**Output shape.** Iterations bucket by their fully-expanded `--output-dir`
-path. Within a bucket, sigils whose values *vary across the bucket* become
-leading columns on every CSV (`symbol` then `freq`, ordered `symbol` before
-`freq` on rows). The whole-run summary file follows the row count:
-
-| Bucket has… | Not windowed | Windowed (`-w N`) |
-| --- | --- | --- |
-| **1 iteration** | `metrics.yml` | `metrics.yml` + `metrics.csv` + `rolling.csv` |
-| **>1 iteration** | `metrics.csv` (one row per iteration) | `metrics.csv` (`iterations × windows` rows) + `rolling.csv` |
-
-Row order is `(symbol, freq, time)` for `trades.csv` / `returns.csv`,
-`(symbol, freq, window_start)` for `metrics.csv` / `rolling.csv`,
-`(symbol, freq)` for the flat-summary `metrics.csv`. Freq compares by
-duration, not variant tag, so `1h < 1d < 1w` reads naturally.
-
-Examples:
-
-- `--output-dir out/` on `BTC[1h] + BTC[4h] + AAPL[1d]` → shared
-  `out/{trades,returns,metrics}.csv` with leading `symbol`/`freq` columns.
-- `--output-dir out/%SYMBOL/` on the same frame → `out/BTC/{…}.csv` (with
-  a `freq` column, since two BTC cadences share the dir) and
-  `out/AAPL/metrics.yml` (single-iteration bucket, YAML shape).
-
-**Silent skip.** A strategy with a hardcoded symbol (no `!param SYMBOL`,
-or with `--params SYMBOL=BTC` pinned) on a multi-symbol frame runs only
-the matching groups — the mismatched iterations are skipped without
-warning. (Rebuild the spec per iteration; if `spec.symbol` differs from
-the group's, that iteration is dropped.)
-
-**`--multiple` is reserved** for a future `MultiAssetStrategy` (portfolio /
-pairs — one strategy that sees several symbols at once). Passing it today
-errors out.
+The strategy positional accepts an optional `single:` prefix —
+`single:@strategy.yml` is equivalent to `@strategy.yml` today. It is a
+shape hint reserved for a future `multiple:` sibling (a portfolio /
+pairs `MultiAssetStrategy` that sees several series at once). Any other
+prefix, including `multiple:`, is rejected at parse time with a
+"reserved" message.
 
 **Console output** (unless `-q`): a two-line banner, then blocks for
 **inputs** (strategy, params, period, capital, output), **trades**
@@ -960,12 +901,6 @@ resting protective triggers alike.
 | `price` | Fill price. Market orders fill at the next bar's `open`; protective legs fill at their trigger level (or the bar's `open` on a gap). With [`--costs`](#--costs) active, this is the *final* price — post-spread, post-slippage. |
 | `kind` | `market`, `stop`, or `take_profit`. |
 | `commission` | Commission paid on this fill, in reference currency (from the [`--costs`](#--costs) commission leg). **Only present when `--costs` is active.** Omitted otherwise so a zero-cost `trades.csv` matches the pre-costs schema byte-for-byte. |
-
-Under [batch mode](#batch-mode), a bucket with multiple iterations
-prepends a `symbol` (and, if freqs vary within the bucket, `freq`)
-leading column with the iteration's normalized values, and drops the
-intra-CSV `symbol` column (it's always equal to the leading one for a
-`SingleAssetStrategy`). Rows are sorted `(symbol, freq, time)`.
 
 ### `returns.csv` (from `run`)
 

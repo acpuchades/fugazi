@@ -1,10 +1,8 @@
 //! Shared rayon thread-pool constructor for parallel commands.
 //!
-//! `optimize` and `run --multiple`/batch-mode `run` both fan out work across
-//! independent iterations (grid points, or `(symbol, freq)` groups) via
-//! rayon. Both accept an optional `-j/--jobs N` — a nonzero `N` sizes the
-//! pool, `None` falls back to rayon's default (one worker per logical CPU).
-//! Keeping the constructor here keeps the two callers in lockstep.
+//! `optimize` fans out grid points across a rayon pool sized by `-j/--jobs`.
+//! A nonzero `N` sizes the pool; `None` falls back to rayon's default (one
+//! worker per logical CPU).
 
 use anyhow::{Context, Result};
 

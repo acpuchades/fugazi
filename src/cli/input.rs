@@ -74,3 +74,43 @@ impl FromStr for Source {
         })
     }
 }
+
+/// A strategy positional: a [`Source`] with an optional leading `single:`
+/// shape prefix. The prefix is a hint reserved for a future `multiple:`
+/// sibling (a portfolio/pairs strategy that sees several series at once);
+/// for now only `single:` is accepted, and the CLI ignores it since a run
+/// is always single-asset.
+#[derive(Debug, Clone)]
+pub struct StrategySource(pub Source);
+
+impl StrategySource {
+    pub fn read(&self) -> anyhow::Result<String> {
+        self.0.read()
+    }
+
+    pub fn label(&self) -> String {
+        self.0.label()
+    }
+
+    pub fn misused_path(&self) -> Option<&str> {
+        self.0.misused_path()
+    }
+}
+
+impl FromStr for StrategySource {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some(rest) = s.strip_prefix("single:") {
+            return Ok(StrategySource(rest.parse().expect("infallible")));
+        }
+        if s.strip_prefix("multiple:").is_some() {
+            return Err(
+                "`multiple:` is reserved for a future MultiAssetStrategy and is not yet \
+                 implemented; use `single:` (or omit the prefix)"
+                    .to_string(),
+            );
+        }
+        Ok(StrategySource(s.parse().expect("infallible")))
+    }
+}

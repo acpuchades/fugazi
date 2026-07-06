@@ -1,15 +1,12 @@
 //! The `run` subcommand's IO driver.
 //!
-//! Owns everything user-facing: `--single`-mode file writes (`trades.csv`,
-//! `returns.csv`, `metrics.yml`, and the optional `metrics.csv`/`rolling.csv`
-//! under `-w N`), the tiered console banners (**inputs** / **trades** /
-//! **result** / **metrics**), and the wall-clock timing. Evaluation is
-//! delegated to [`crate::backtest::run_iteration`] — this module never
-//! touches the per-bar loop or the metrics reduction itself; it just wraps
-//! the pure payload with IO.
-//!
-//! [`crate::batch`] shares the CSV writer helpers here so the same row
-//! layout is used across `--single` and multi-iteration runs.
+//! Owns everything user-facing: file writes (`trades.csv`, `returns.csv`,
+//! `metrics.yml`, and the optional `metrics.csv`/`rolling.csv` under `-w N`),
+//! the tiered console banners (**inputs** / **trades** / **result** /
+//! **metrics**), and the wall-clock timing. Evaluation is delegated to
+//! [`crate::backtest::run_iteration`] — this module never touches the
+//! per-bar loop or the metrics reduction itself; it just wraps the pure
+//! payload with IO.
 //!
 //! ## Output shape
 //!
@@ -92,13 +89,9 @@ pub struct Summary {
     pub bars: usize,
 }
 
-/// Run `spec` over `frame` per `opts` — resolve per-iteration inputs,
-/// delegate the pure work to [`backtest::run_iteration`], and write the
-/// result files + narrate the tiered run/trade/result/metrics logs.
-///
-/// This is the `--single`-mode IO driver. The batch driver ([`crate::batch`])
-/// is a sibling with its own aggregation logic; both share the writer
-/// helpers below.
+/// Run `spec` over `frame` per `opts` — resolve inputs, delegate the pure
+/// work to [`backtest::run_iteration`], and write the result files +
+/// narrate the tiered run/trade/result/metrics logs.
 pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<Summary> {
     let started = SystemTime::now();
     let symbol = spec.symbol.clone();
@@ -146,13 +139,13 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
 
     // Emit `trades.csv` and echo each fill in the same order the wallet booked
     // them. The console stream matches the CSV row-for-row.
-    write_trades_csv(&iter, &opts.out_dir.join("trades.csv"), None)?;
+    write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
     if !opts.quiet {
         println!("\n{}", style::bold("trades"));
         stream_trades(&iter);
     }
 
-    write_returns_csv(&iter, &opts.out_dir.join("returns.csv"), None)?;
+    write_returns_csv(&iter, &opts.out_dir.join("returns.csv"))?;
 
     metrics::write_yaml(&iter.metrics, &opts.out_dir.join("metrics.yml"))?;
 
@@ -183,74 +176,22 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
 }
 
 // ---------------------------------------------------------------------------
-// CSV writers (shared with the batch driver)
+// CSV writers
 // ---------------------------------------------------------------------------
 
-/// Write `trades.csv` from an [`IterationResult`]. When `extra_cols` is
-/// non-empty, its `(name, value)` pairs are prepended as leading columns —
-/// the batch driver uses this to stamp `symbol`/`freq` on every row.
-pub fn write_trades_csv(
-    iter: &IterationResult,
-    path: &Path,
-    extra_cols: Option<&[(&str, &str)]>,
-) -> Result<()> {
+/// Write `trades.csv` from an [`IterationResult`]. `commission` is only
+/// present when the iteration's costs were active.
+fn write_trades_csv(iter: &IterationResult, path: &Path) -> Result<()> {
     let mut w = writer(path)?;
-    let extras: &[(&str, &str)] = extra_cols.unwrap_or(&[]);
-    let header: Vec<&str> = extras
-        .iter()
-        .map(|(n, _)| *n)
-        .chain(base_trade_columns(iter.costs_active).iter().copied())
-        .collect();
-    w.write_record(&header)?;
-    for row in trade_rows(iter, extras) {
-        w.write_record(&row)?;
-    }
-    w.flush()?;
-    Ok(())
-}
-
-/// Write `returns.csv` from an [`IterationResult`]. Same `extra_cols`
-/// convention as [`write_trades_csv`].
-pub fn write_returns_csv(
-    iter: &IterationResult,
-    path: &Path,
-    extra_cols: Option<&[(&str, &str)]>,
-) -> Result<()> {
-    let mut w = writer(path)?;
-    let extras: &[(&str, &str)] = extra_cols.unwrap_or(&[]);
-    let header: Vec<&str> = extras
-        .iter()
-        .map(|(n, _)| *n)
-        .chain(["time", "equity", "return"].iter().copied())
-        .collect();
-    w.write_record(&header)?;
-    for row in return_rows(iter, extras) {
-        w.write_record(&row)?;
-    }
-    w.flush()?;
-    Ok(())
-}
-
-/// The base column set for `trades.csv`, before any batch-mode extras are
-/// prepended. `commission` is only present when the iteration's costs were
-/// active — matches the single-run pre-costs baseline.
-fn base_trade_columns(costs_active: bool) -> &'static [&'static str] {
-    if costs_active {
+    let header: &[&str] = if iter.costs_active {
         &["time", "symbol", "side", "units", "price", "kind", "commission"]
     } else {
         &["time", "symbol", "side", "units", "price", "kind"]
-    }
-}
-
-/// Produce one CSV row per fill in `iter`. The `extras` slice is prepended
-/// verbatim to each row — the same values, repeated once per fill.
-pub fn trade_rows<'a>(
-    iter: &'a IterationResult,
-    extras: &'a [(&'a str, &'a str)],
-) -> impl Iterator<Item = Vec<String>> + 'a {
-    iter.report.fills.iter().map(move |fill| {
+    };
+    w.write_record(header)?;
+    for fill in &iter.report.fills {
         let order = &fill.order;
-        let time = iter.bars[fill.bar].clone();
+        let time = &iter.bars[fill.bar];
         let side = match order.side {
             Side::Buy => "buy",
             Side::Sell => "sell",
@@ -260,36 +201,36 @@ pub fn trade_rows<'a>(
             OrderKind::Stop => "stop",
             OrderKind::TakeProfit => "take_profit",
         };
-        let mut row: Vec<String> = extras.iter().map(|(_, v)| (*v).to_string()).collect();
-        row.push(time);
-        row.push(order.symbol.clone());
-        row.push(side.to_string());
-        row.push(order.units.to_string());
-        row.push(order.price.to_string());
-        row.push(kind.to_string());
+        let mut row: Vec<String> = vec![
+            time.clone(),
+            order.symbol.clone(),
+            side.to_string(),
+            order.units.to_string(),
+            order.price.to_string(),
+            kind.to_string(),
+        ];
         if iter.costs_active {
             row.push(order.commission.to_string());
         }
-        row
-    })
+        w.write_record(&row)?;
+    }
+    w.flush()?;
+    Ok(())
 }
 
-/// Produce one CSV row per bar in `iter`. `extras` prepended to every row.
-pub fn return_rows<'a>(
-    iter: &'a IterationResult,
-    extras: &'a [(&'a str, &'a str)],
-) -> impl Iterator<Item = Vec<String>> + 'a {
+/// Write `returns.csv` from an [`IterationResult`].
+fn write_returns_csv(iter: &IterationResult, path: &Path) -> Result<()> {
+    let mut w = writer(path)?;
+    w.write_record(["time", "equity", "return"])?;
     let per_bar =
         fugazi::metrics::per_bar_returns(&iter.report.equity_curve, iter.report.initial_equity);
-    iter.bars.iter().enumerate().map(move |(i, time)| {
+    for (i, time) in iter.bars.iter().enumerate() {
         let equity = iter.report.equity_curve[i];
         let ret = per_bar[i];
-        let mut row: Vec<String> = extras.iter().map(|(_, v)| (*v).to_string()).collect();
-        row.push(time.clone());
-        row.push(equity.to_string());
-        row.push(ret.to_string());
-        row
-    })
+        w.write_record([time.as_str(), &equity.to_string(), &ret.to_string()])?;
+    }
+    w.flush()?;
+    Ok(())
 }
 
 /// Echo each fill of `iter` to the console — one line per row, matching
@@ -341,7 +282,7 @@ fn stream_trades(iter: &IterationResult) {
 /// `metrics.yml` name. A metric that is degenerate in a window (no trades,
 /// zero variance, …) is an empty cell there. Shared between the
 /// non-overlapping (`metrics.csv`) and rolling (`rolling.csv`) writes.
-pub fn write_windowed_csv(
+fn write_windowed_csv(
     windows: &[metrics::WindowMetrics],
     bars: &[String],
     path: &Path,
@@ -368,8 +309,8 @@ pub fn write_windowed_csv(
     Ok(())
 }
 
-/// A `;`-delimited CSV writer at `path`. Shared with [`crate::batch`].
-pub fn writer(path: &Path) -> Result<csv::Writer<std::fs::File>> {
+/// A `;`-delimited CSV writer at `path`.
+fn writer(path: &Path) -> Result<csv::Writer<std::fs::File>> {
     csv::WriterBuilder::new()
         .delimiter(b';')
         .from_path(path)

@@ -14,7 +14,6 @@
 //! anything else — the same `@` convention `--series`/`--params` use.
 
 mod backtest;
-mod batch;
 mod calendar;
 mod completions;
 mod convert;
@@ -31,20 +30,18 @@ mod overlay;
 mod params;
 mod pool;
 mod run;
-mod sigils;
 mod spec;
 mod style;
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
-use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use clap_complete::Shell;
 
-use input::Source;
+use input::{Source, StrategySource};
 
 /// Incremental technical-analysis backtester.
 #[derive(Parser)]
@@ -104,8 +101,11 @@ enum Command {
 #[derive(Args)]
 struct RunArgs {
     /// The strategy: `@file.yml` loads a file, anything else is inline YAML.
+    /// May carry a leading `single:` shape prefix (reserved for a future
+    /// `multiple:` sibling) — `single:@strategy.yml` is equivalent to
+    /// `@strategy.yml` today.
     #[arg(value_name = "STRATEGY")]
-    strategy: Source,
+    strategy: StrategySource,
 
     /// A data series: `,`-separated `key=value` literals and `@file.csv` loaders
     /// (repeatable; series full-join on `symbol` + `time`). Each file's column
@@ -113,7 +113,7 @@ struct RunArgs {
     #[arg(short, long = "series", required = true)]
     series: Vec<data::SeriesSpec>,
 
-    /// Directory to write `trades.csv` and `returns.csv` into.
+    /// Directory to write `trades.csv`, `returns.csv`, and `metrics.yml` into.
     #[arg(short, long = "output-dir")]
     output_dir: PathBuf,
 
@@ -169,9 +169,8 @@ struct RunArgs {
     /// highest scope specificity matching the strategy's (symbol, effective
     /// freq) wins (`SYM[FREQ]` > `SYM` > `[FREQ]` > default, ties break to
     /// the last-declared). When no entry matches, the CLI auto-detects the
-    /// bar cadence from the median gap in the input `time` column (per
-    /// `(symbol, freq)` series — see `--series`) and pairs it with the
-    /// calendar (default `--stocks`, 252 trading days a year).
+    /// bar cadence from the median gap in the input `time` column and pairs
+    /// it with the calendar (default `--stocks`, 252 trading days a year).
     #[arg(long, value_name = "[SYM[FREQ]:]N")]
     bars_per_year: Vec<calendar::BarsPerYearSpec>,
 
@@ -201,27 +200,6 @@ struct RunArgs {
     #[arg(long = "costs", value_name = "SPEC")]
     costs: Vec<costs::CostSpec>,
 
-    /// Use `SingleAssetStrategy` (the default). When the frame carries more
-    /// than one `(symbol, freq)` series, the strategy is iterated over each
-    /// group in parallel — output files aggregate across iterations under
-    /// `--output-dir`, with `%SYMBOL`/`%FREQ` sigils in that path (or in
-    /// `--params` values) filled per iteration. Mutually exclusive with
-    /// `--multiple`.
-    #[arg(long, group = "single_multiple")]
-    single: bool,
-
-    /// Reserved for a future `MultiAssetStrategy` (portfolio / pairs — one
-    /// strategy that sees all series at once). Not yet implemented; passing
-    /// this errors out. Mutually exclusive with `--single`.
-    #[arg(long, group = "single_multiple")]
-    multiple: bool,
-
-    /// Rayon worker count for batch iterations (multi-series frames only).
-    /// Defaults to one worker per logical CPU. No effect when the frame
-    /// has a single `(symbol, freq)` group.
-    #[arg(short = 'j', long = "jobs", value_name = "N")]
-    jobs: Option<usize>,
-
     /// Suppress all console output (the result files are still written).
     #[arg(short, long)]
     quiet: bool,
@@ -249,8 +227,10 @@ enum CheckCmd {
 #[derive(Args)]
 struct CheckStrategyArgs {
     /// The strategy: `@file.yml` loads a file, anything else is inline YAML.
+    /// May carry a leading `single:` shape prefix (reserved for a future
+    /// `multiple:` sibling).
     #[arg(value_name = "STRATEGY")]
-    strategy: Source,
+    strategy: StrategySource,
 
     /// Resolve the strategy's `param` placeholders. Same shape as `run --params`:
     /// a `,`-separated list of `NAME=value` settings and `@file.yml` mapping
@@ -297,8 +277,10 @@ struct CheckCostsArgs {
 #[derive(Args)]
 struct OptimizeArgs {
     /// The strategy: `@file.yml` loads a file, anything else is inline YAML.
+    /// May carry a leading `single:` shape prefix (reserved for a future
+    /// `multiple:` sibling).
     #[arg(value_name = "STRATEGY")]
-    strategy: Source,
+    strategy: StrategySource,
 
     /// A data series — same shape as `run --series` (repeatable; series
     /// full-join on `symbol` + `time`).
@@ -498,15 +480,6 @@ fn check_overlay(args: CheckOverlayArgs) -> Result<()> {
 }
 
 fn run(args: RunArgs) -> Result<()> {
-    // `--multiple` is reserved for a future `MultiAssetStrategy` — reject
-    // it up front so users don't wait for a run to start before finding out.
-    if args.multiple {
-        anyhow::bail!(
-            "--multiple is reserved for a future MultiAssetStrategy and is not yet implemented; \
-             pass --single (the default) to batch-iterate a SingleAssetStrategy over the frame's series"
-        );
-    }
-
     let text = args.strategy.read().context("reading strategy")?;
     let frame = data::DataFrame::from_series(&args.series)?;
 
@@ -515,81 +488,26 @@ fn run(args: RunArgs) -> Result<()> {
     let cost_config = costs::config(&args.costs)?;
     let costs_were_supplied = !args.costs.is_empty();
 
-    // Dispatch: if the frame carries more than one `(symbol, freq)` group,
-    // fan out over the rayon pool via `batch::run`; otherwise take the
-    // byte-identical single-run path via `run::run`. Enumerating groups
-    // is cheap (one BTreeMap pass); we do it here so a single-group frame
-    // avoids all batch machinery.
-    let groups = frame.groups()?;
-    if groups.len() > 1 {
-        let params_label_str = params_label_from_specs(&args.params);
-        let opts = batch::BatchOptions {
-            cash: args.cash,
-            out_dir: &args.output_dir,
-            strategy_text: &text,
-            strategy_label: &strat_label,
-            params_label: &params_label_str,
-            param_specs: &args.params,
-            bars_per_year: &args.bars_per_year,
-            asset_class: class,
-            risk_free_rate: args.risk_free_rate,
-            windowed: args.windowed,
-            cost_config: &cost_config,
-            frequency: &args.frequency,
-            costs_supplied: costs_were_supplied,
-            jobs: args.jobs,
-            quiet: args.quiet,
-        };
-        batch::run(&frame, &opts)?;
-    } else {
-        // Single-group frame: sigil substitution still applies (the group's
-        // `(symbol, freq)` fills `%SYMBOL` / `%FREQ` in `--params` values
-        // and `--output-dir`) so a strategy templated on `SYMBOL=%SYMBOL`
-        // works the same whether the frame is one series or many. With no
-        // sigils in play, the write path is byte-identical to pre-batch.
-        let group = &groups[0];
-        let effective_freq = calendar::pick_frequency(&args.frequency, &group.symbol)
-            .or_else(|| {
-                group
-                    .freq
-                    .as_deref()
-                    .and_then(|s| calendar::Frequency::from_str(s).ok())
-            })
-            .or_else(|| {
-                calendar::detect_frequency(group.candles.iter().map(|(t, _)| t.as_str()))
-            });
-        let param_table = params::table_for(&args.params, &group.symbol, effective_freq)?;
-        let spec = spec::StrategySpec::from_text_with_params(&text, &param_table)
-            .with_context(|| parse_error_context(&args.strategy))?;
-        let params_label = params_label(&param_table);
-        let expanded_out_dir = sigils::expand_path(&args.output_dir, &group.symbol, effective_freq);
-        let opts = run::RunOptions {
-            cash: args.cash,
-            out_dir: &expanded_out_dir,
-            strategy_label: &strat_label,
-            params: &params_label,
-            bars_per_year: &args.bars_per_year,
-            asset_class: class,
-            risk_free_rate: args.risk_free_rate,
-            windowed: args.windowed,
-            cost_config: &cost_config,
-            frequency: &args.frequency,
-            costs_supplied: costs_were_supplied,
-            quiet: args.quiet,
-        };
-        run::run(&spec, &frame, &opts)?;
-    }
+    let param_table = params::table(&args.params)?;
+    let spec = spec::StrategySpec::from_text_with_params(&text, &param_table)
+        .with_context(|| parse_error_context(&args.strategy))?;
+    let params_label = params_label(&param_table);
+    let opts = run::RunOptions {
+        cash: args.cash,
+        out_dir: &args.output_dir,
+        strategy_label: &strat_label,
+        params: &params_label,
+        bars_per_year: &args.bars_per_year,
+        asset_class: class,
+        risk_free_rate: args.risk_free_rate,
+        windowed: args.windowed,
+        cost_config: &cost_config,
+        frequency: &args.frequency,
+        costs_supplied: costs_were_supplied,
+        quiet: args.quiet,
+    };
+    run::run(&spec, &frame, &opts)?;
     Ok(())
-}
-
-/// A one-line `%SIGIL, NAME=…` view of the params for the batch inputs
-/// block. Distinct from [`params_label`] because in batch mode the sigils
-/// aren't resolved yet — we show the specs verbatim.
-fn params_label_from_specs(specs: &[params::ParamSpec]) -> String {
-    if specs.is_empty() {
-        return "(defaults)".to_string();
-    }
-    format!("{} spec(s)", specs.len())
 }
 
 fn optimize(args: OptimizeArgs) -> Result<()> {
@@ -658,7 +576,7 @@ fn asset_class(stocks: bool, forex: bool, crypto: bool) -> Option<calendar::Asse
 
 /// Error context for a strategy parse failure. For an inline value that looks like
 /// a bare file path, add a hint pointing at the `@file` form.
-fn parse_error_context(strategy: &Source) -> String {
+fn parse_error_context(strategy: &StrategySource) -> String {
     let base = format!("parsing strategy {}", strategy.label());
     match strategy.misused_path() {
         Some(path) => format!("{base} (did you mean `@{path}`?)"),
