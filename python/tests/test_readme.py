@@ -3,6 +3,11 @@
 Each block runs in a fresh namespace pre-seeded with the illustrative names the
 snippets use (``df``, ``bars``, ``stream``, ``fast``/``slow``, ...), mirroring
 what a reader would have in scope.
+
+Blocks that hit a remote candle provider (``Binance``, ``Yahoo``, ``ta.fetch``)
+are skipped rather than failed when the provider returns an HTTP 4xx/5xx —
+GitHub Actions runners are geo-blocked by Binance (HTTP 451) and rate-limited
+by Yahoo, but the code shape is still validated by compile + start-of-exec.
 """
 
 import pathlib
@@ -82,5 +87,12 @@ def test_readme_python_block_runs(block):
     env = make_env()
     try:
         exec(compile(block, "<readme>", "exec"), env)
+    except ValueError as exc:
+        # Remote candle providers: skip on HTTP 4xx/5xx (Binance geo-blocks
+        # GitHub Actions IPs with 451; Yahoo rate-limits with 429). The Rust
+        # binding raises `ValueError("http NNN: ...")` for both.
+        if re.match(r"^http [45]\d\d\b", str(exc)):
+            pytest.skip(f"remote provider unreachable: {str(exc).splitlines()[0]}")
+        pytest.fail(f"README example failed: {type(exc).__name__}: {exc}\n---\n{block}")
     except Exception as exc:  # pragma: no cover - failure detail
         pytest.fail(f"README example failed: {type(exc).__name__}: {exc}\n---\n{block}")
