@@ -55,7 +55,7 @@ impl<S: Indicator<Output = Real>> Indicator for Rma<S> {
     }
 
     fn unstable_period(&self) -> usize {
-        self.source.unstable_period() + self.state.settle_period()
+        self.source.unstable_period() + self.state.unstable_period()
     }
 
     fn reset(&mut self) {

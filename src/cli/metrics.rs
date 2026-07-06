@@ -648,11 +648,55 @@ pub fn write_yaml(metrics: &Metrics, path: &Path) -> Result<()> {
 /// the metric was omitted from the serialized document (a degenerate ratio,
 /// e.g. `sharpe` with zero variance): its column in the optimize CSV becomes
 /// an empty cell.
+///
+/// Thin wrapper around [`MetricKey`] — resolve once, then look up. Prefer
+/// `MetricKey::from_name` when the same name is looked up more than once.
 pub fn resolve_metric(name: &str, metrics: &Metrics) -> Result<(String, Option<Real>)> {
-    let value = serde_json::to_value(metrics).context("serializing metrics")?;
-    let path = resolve_metric_path(&value, name)?;
-    let dotted = path.join(".");
-    Ok((dotted, lookup_number(&value, &path)))
+    let key = MetricKey::from_name(name, metrics)?;
+    let value = key.resolve(metrics)?;
+    Ok((key.into_dotted(), value))
+}
+
+/// A validated metric handle: owns the canonical dotted path resolved from a
+/// user-typed short name once, then walks it against any [`Metrics`] document
+/// without re-searching. Constructed against a sample document via
+/// [`MetricKey::from_name`], which is where typos / ambiguity are caught.
+///
+/// A `MetricKey` is bound only to a metric *name* — it does not borrow the
+/// sample document past the construction call, so the caller can hold and
+/// reuse the key across many grid points without lifetime friction.
+#[derive(Debug, Clone)]
+pub struct MetricKey {
+    path: Vec<String>,
+}
+
+impl MetricKey {
+    /// Resolve `name` against `sample` — a validation pass that also captures
+    /// the canonical dotted path. Errors on unknown or ambiguous names.
+    pub fn from_name(name: &str, sample: &Metrics) -> Result<Self> {
+        let value = serde_json::to_value(sample).context("serializing metrics")?;
+        let path = resolve_metric_path(&value, name)?;
+        Ok(Self { path })
+    }
+
+    /// The canonical dotted path (e.g. `risk_adjusted.sharpe`).
+    #[allow(dead_code)]
+    pub fn dotted(&self) -> String {
+        self.path.join(".")
+    }
+
+    /// Move-out variant of [`dotted`](Self::dotted) — avoids one clone when the
+    /// key is being discarded after the path is extracted.
+    pub fn into_dotted(self) -> String {
+        self.path.join(".")
+    }
+
+    /// Look this metric up against `metrics`. `Ok(None)` when the metric was
+    /// omitted (a degenerate ratio); `Err` on a serialization failure.
+    pub fn resolve(&self, metrics: &Metrics) -> Result<Option<Real>> {
+        let value = serde_json::to_value(metrics).context("serializing metrics")?;
+        Ok(lookup_number(&value, &self.path))
+    }
 }
 
 /// Resolve one metric name to a canonical dotted path against the shape of `root`.

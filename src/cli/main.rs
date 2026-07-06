@@ -19,8 +19,8 @@ mod completions;
 mod convert;
 mod costs;
 mod data;
-mod dyn_;
-mod file;
+mod csv_source;
+mod dyn_indicator;
 mod get;
 mod input;
 mod list;
@@ -157,7 +157,7 @@ struct RunArgs {
     /// scope match, plain override, or detected — is used for both
     /// annualization *and* freq-scoped `--costs` matching.
     #[arg(short, long, value_name = "[SYM:]CODE")]
-    frequency: Vec<calendar::FrequencySpec>,
+    frequency: Vec<calendar::ScopedFrequency>,
 
     /// Explicit `bars_per_year` for the annualization step in `metrics.yml`
     /// (Sharpe/Sortino/CAGR/annualized volatility). Overrides the value
@@ -339,7 +339,7 @@ struct OptimizeArgs {
     /// Bar cadence, e.g. `1d` / `4h`. Same semantics as `run --frequency`,
     /// including repeatable `SYMBOL:CODE` overrides.
     #[arg(short, long, value_name = "[SYM:]CODE")]
-    frequency: Vec<calendar::FrequencySpec>,
+    frequency: Vec<calendar::ScopedFrequency>,
 
     /// Explicit `bars_per_year`. Same semantics as `run --bars-per-year`,
     /// including repeatable `SYMBOL[FREQ]:N` overrides.

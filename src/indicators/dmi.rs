@@ -1,5 +1,4 @@
 use crate::indicator::Indicator;
-use crate::indicators::Component;
 use crate::indicators::smoothing::WilderState;
 use crate::types::{Candle, Real};
 
@@ -54,23 +53,16 @@ impl<S> Dmi<S> {
     }
 }
 
-/// Component accessors: each directional line as a standalone
-/// `Indicator<Output = Real>`, so e.g.
-/// `dmi.plus_di().crosses_above(dmi.minus_di())`.
-impl<S: Clone> Dmi<S>
-where
-    Dmi<S>: Indicator<Output = DmiValue>,
-{
+// Component accessors: each directional line as a standalone
+// `Indicator<Output = Real>`, so e.g.
+// `dmi.plus_di().crosses_above(dmi.minus_di())`.
+crate::indicators::component::component_accessors!(
+    Dmi<S>, DmiValue;
     /// `+DI` as a standalone source.
-    pub fn plus_di(&self) -> Component<Self> {
-        Component::new(self.clone(), |v| v.plus_di)
-    }
-
+    plus_di => plus_di,
     /// `-DI` as a standalone source.
-    pub fn minus_di(&self) -> Component<Self> {
-        Component::new(self.clone(), |v| v.minus_di)
-    }
-}
+    minus_di => minus_di,
+);
 
 impl<S: Indicator<Output = Candle>> Indicator for Dmi<S> {
     type Input = S::Input;
@@ -137,7 +129,7 @@ impl<S: Indicator<Output = Candle>> Indicator for Dmi<S> {
 
     fn unstable_period(&self) -> usize {
         // All three Wilder states share the period, so they settle together.
-        self.source.unstable_period() + self.plus_dm.settle_period()
+        self.source.unstable_period() + self.plus_dm.unstable_period()
     }
 
     fn reset(&mut self) {

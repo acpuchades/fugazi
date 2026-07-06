@@ -317,7 +317,7 @@ fn row_to_candle(sym: &str, time: &str, row: &Row) -> Result<Candle> {
 /// Read a CSV file into lowercased-column rows, autodetecting its delimiter.
 fn read_csv(path: &str) -> Result<Vec<Row>> {
     let mut reader = csv::ReaderBuilder::new()
-        .delimiter(detect_delimiter(path)?)
+        .delimiter(crate::csv_source::detect_delimiter(std::path::Path::new(path))?)
         .from_path(path)
         .with_context(|| format!("opening CSV `{path}`"))?;
     let headers: Vec<String> = reader
@@ -337,29 +337,6 @@ fn read_csv(path: &str) -> Result<Vec<Row>> {
         rows.push(row);
     }
     Ok(rows)
-}
-
-/// Guess a CSV's column delimiter from its header line: whichever of `; , \t |`
-/// occurs most often wins (ties favour earlier in that list); a single-column
-/// file with none of them falls back to `,`.
-fn detect_delimiter(path: &str) -> Result<u8> {
-    use std::io::BufRead;
-
-    const CANDIDATES: [u8; 4] = [b';', b',', b'\t', b'|'];
-    let file = std::fs::File::open(path).with_context(|| format!("opening CSV `{path}`"))?;
-    let mut header = String::new();
-    std::io::BufReader::new(file)
-        .read_line(&mut header)
-        .with_context(|| format!("reading header of `{path}`"))?;
-
-    let mut best = (b',', 0usize);
-    for d in CANDIDATES {
-        let n = header.bytes().filter(|&b| b == d).count();
-        if n > best.1 {
-            best = (d, n);
-        }
-    }
-    Ok(best.0)
 }
 
 /// Strip a single matching pair of surrounding quotes (shells pass `'BTC'`

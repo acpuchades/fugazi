@@ -71,7 +71,7 @@ pub mod strategy;
 pub mod types;
 
 pub use backtest::{Fill, RunReport};
-pub use costs::{CommissionModel, FillKind, SlippageModel, SpreadModel, TradingCosts};
+pub use costs::{CommissionModel, SlippageModel, SpreadModel, TradingCosts};
 pub use indicator::Indicator;
 pub use indicators::BoolIndicatorExt;
 pub use metrics::{DrawdownSegment, Trade};

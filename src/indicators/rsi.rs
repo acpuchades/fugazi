@@ -87,7 +87,7 @@ impl<S: Indicator<Output = Real>> Indicator for Rsi<S> {
 
     fn unstable_period(&self) -> usize {
         // Both Wilder states share the period, so they settle together.
-        self.source.unstable_period() + self.gain.settle_period()
+        self.source.unstable_period() + self.gain.unstable_period()
     }
 
     fn reset(&mut self) {

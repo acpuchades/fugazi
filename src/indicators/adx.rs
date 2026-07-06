@@ -1,6 +1,6 @@
 use crate::indicator::Indicator;
 use crate::indicators::smoothing::WilderState;
-use crate::indicators::{Component, Dmi};
+use crate::indicators::Dmi;
 use crate::types::{Candle, Real};
 
 /// The directional outputs of [`Adx`].
@@ -53,28 +53,18 @@ impl<S> Adx<S> {
     }
 }
 
-/// Component accessors: each output as a standalone `Indicator<Output = Real>`,
-/// so e.g. a trend filter reads `adx.adx().above(25.0)` or
-/// `adx.plus_di().crosses_above(adx.minus_di())`.
-impl<S: Clone> Adx<S>
-where
-    Adx<S>: Indicator<Output = AdxValue>,
-{
+// Component accessors: each output as a standalone `Indicator<Output = Real>`,
+// so e.g. a trend filter reads `adx.adx().above(25.0)` or
+// `adx.plus_di().crosses_above(adx.minus_di())`.
+crate::indicators::component::component_accessors!(
+    Adx<S>, AdxValue;
     /// `+DI` as a standalone source.
-    pub fn plus_di(&self) -> Component<Self> {
-        Component::new(self.clone(), |v| v.plus_di)
-    }
-
+    plus_di => plus_di,
     /// `-DI` as a standalone source.
-    pub fn minus_di(&self) -> Component<Self> {
-        Component::new(self.clone(), |v| v.minus_di)
-    }
-
+    minus_di => minus_di,
     /// `ADX` (trend strength) as a standalone source.
-    pub fn adx(&self) -> Component<Self> {
-        Component::new(self.clone(), |v| v.adx)
-    }
-}
+    adx => adx,
+);
 
 impl<S: Indicator<Output = Candle>> Indicator for Adx<S> {
     type Input = S::Input;
@@ -116,7 +106,7 @@ impl<S: Indicator<Output = Candle>> Indicator for Adx<S> {
 
     fn unstable_period(&self) -> usize {
         // The DI lines must settle, then the DX smoothing settles on top.
-        self.dmi.unstable_period() + self.dx.settle_period()
+        self.dmi.unstable_period() + self.dx.unstable_period()
     }
 
     fn reset(&mut self) {

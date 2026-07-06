@@ -92,6 +92,10 @@ fn level_value(level: &Option<Level>) -> Option<Real> {
 /// the price stream) and decides in [`trade`](Strategy::trade). A signal reads
 /// `false` and a level reads `None` until their sources warm up, and the position
 /// guards keep that warm-up from firing a spurious trade.
+// The protective-level fields use the terse `_stop`/`_target` names, while
+// their builder methods use the longer `_stop_loss`/`_take_profit` forms for
+// discoverability at construction. The pair is intentional — keep them
+// asymmetric.
 pub struct SingleAssetStrategy<Sym> {
     symbol: Sym,
     long: Box<dyn Signal>,

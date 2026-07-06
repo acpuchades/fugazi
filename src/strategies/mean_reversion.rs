@@ -1,9 +1,17 @@
 //! Mean-reversion strategies: fade an extreme, exit as price returns to normal.
 
-use crate::indicators::{Bollinger, Current, Mfi, Rsi, Sma, StdDev, Stochastic, Value};
+use crate::indicators::{Bollinger, Current, DEFAULT_EPSILON, Mfi, Rsi, Sma, StdDev, Stochastic, Value};
 use crate::prelude::*;
 
-use super::{SingleAssetStrategy, is_long, is_short};
+use super::SingleAssetStrategy;
+
+fn is_long(position: Real) -> bool {
+    position > DEFAULT_EPSILON
+}
+
+fn is_short(position: Real) -> bool {
+    position < -DEFAULT_EPSILON
+}
 
 /// RSI oversold-bounce, long/flat.
 ///

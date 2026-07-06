@@ -21,7 +21,7 @@ use fugazi::sources::{Interval, Timestamp};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use super::get::parse_interval;
+use super::calendar::parse_interval;
 
 /// A local CSV file of OHLCV bars, in the shape [`fugazi get`] itself writes.
 pub struct FileSource {
@@ -142,9 +142,10 @@ fn parse_time(s: &str) -> Result<Timestamp> {
 
 /// Guess a CSV's column delimiter from its header line: whichever of `; , \t |`
 /// occurs most often wins (ties favour earlier in that list); a single-column
-/// file with none of them falls back to `,`. Mirrors [`crate::data`]'s rule so
-/// both `--series` and `file:` read the same files identically.
-fn detect_delimiter(path: &Path) -> Result<u8> {
+/// file with none of them falls back to `,`. Used by both the `file:` source
+/// here and the `--series` path in [`crate::data`], so both read the same
+/// files identically.
+pub(crate) fn detect_delimiter(path: &Path) -> Result<u8> {
     const CANDIDATES: [u8; 4] = [b';', b',', b'\t', b'|'];
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut header = String::new();

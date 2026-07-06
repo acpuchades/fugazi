@@ -51,7 +51,7 @@ impl<S: Indicator<Output = Candle>> Indicator for Atr<S> {
     }
 
     fn unstable_period(&self) -> usize {
-        self.true_range.unstable_period() + self.state.settle_period()
+        self.true_range.unstable_period() + self.state.unstable_period()
     }
 
     fn reset(&mut self) {

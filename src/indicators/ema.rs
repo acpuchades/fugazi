@@ -68,7 +68,7 @@ impl<S: Indicator<Output = Real>> Indicator for Ema<S> {
     fn unstable_period(&self) -> usize {
         // Recursive: the seed's weight must decay, on top of any source
         // instability.
-        self.source.unstable_period() + self.state.settle_period()
+        self.source.unstable_period() + self.state.unstable_period()
     }
 
     fn reset(&mut self) {

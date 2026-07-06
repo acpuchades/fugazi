@@ -32,7 +32,7 @@ use anyhow::{Context, Result};
 use fugazi::prelude::*;
 
 use crate::backtest::{self, IterationInputs, IterationResult};
-use crate::calendar::{self, AssetClass, BarsPerYearSpec, FrequencySpec};
+use crate::calendar::{self, AssetClass, BarsPerYearSpec, ScopedFrequency};
 use crate::costs::CostConfig;
 use crate::data::DataFrame;
 use crate::metrics;
@@ -73,7 +73,7 @@ pub struct RunOptions<'a> {
     /// `-f/--frequency` entries: plain `CODE` or `SYMBOL:CODE`. Resolved per
     /// iteration via [`crate::calendar::pick_frequency`]; falls through to
     /// detection when no entry matches.
-    pub frequency: &'a [FrequencySpec],
+    pub frequency: &'a [ScopedFrequency],
     /// Whether the user passed at least one `--costs` flag (even `--costs
     /// none`). Governs the "no cost model set" warning banner.
     pub costs_supplied: bool,

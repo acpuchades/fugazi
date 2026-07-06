@@ -1,5 +1,5 @@
 use crate::indicator::Indicator;
-use crate::indicators::{Component, RollingMax, RollingMin};
+use crate::indicators::{RollingMax, RollingMin};
 use crate::types::Real;
 
 /// The three lines of a [`Donchian`] channel.
@@ -46,28 +46,18 @@ impl<H, L> Donchian<H, L> {
     }
 }
 
-/// Component accessors: each channel line as a standalone
-/// `Indicator<Output = Real>`, so a line composes and compares like any other
-/// source — e.g. `Current::close().crosses_above(channel.upper())`.
-impl<H, L> Donchian<H, L>
-where
-    Donchian<H, L>: Indicator<Output = DonchianValue> + Clone,
-{
+// Component accessors: each channel line as a standalone
+// `Indicator<Output = Real>`, so a line composes and compares like any other
+// source — e.g. `Current::close().crosses_above(channel.upper())`.
+crate::indicators::component::component_accessors!(
+    Donchian<H, L>, DonchianValue;
     /// The upper channel (highest high over the window) as a standalone source.
-    pub fn upper(&self) -> Component<Self> {
-        Component::new(self.clone(), |v| v.upper)
-    }
-
+    upper => upper,
     /// The middle channel (`(upper + lower)/2`) as a standalone source.
-    pub fn middle(&self) -> Component<Self> {
-        Component::new(self.clone(), |v| v.middle)
-    }
-
+    middle => middle,
     /// The lower channel (lowest low over the window) as a standalone source.
-    pub fn lower(&self) -> Component<Self> {
-        Component::new(self.clone(), |v| v.lower)
-    }
-}
+    lower => lower,
+);
 
 impl<H, L> Indicator for Donchian<H, L>
 where

@@ -36,8 +36,8 @@ use serde_json::Value as Json;
 use fugazi::indicators::Position;
 use fugazi::sources::Interval;
 
-use crate::dyn_::DynIndicator;
-use crate::get::parse_interval;
+use crate::dyn_indicator::DynIndicator;
+use crate::calendar::{parse_interval, parse_scope_parts};
 use crate::input::{self, Source};
 use crate::spec::SourceSpec;
 
@@ -217,40 +217,18 @@ fn split_scope(text: &str) -> Result<(OverlayScope, &str)> {
 }
 
 /// Parse a scope prefix — `SYMBOL`, `[FREQ]`, `SYMBOL[FREQ]`, or empty.
+/// Delegates the bracket-splitting to [`parse_scope_parts`]; only the freq→
+/// [`Interval`] conversion is overlay-specific (calendar/costs use
+/// [`crate::calendar::Frequency`] instead).
 fn parse_scope(text: &str) -> Result<OverlayScope> {
-    let text = text.trim();
-    if text.is_empty() {
-        return Ok(OverlayScope::default());
-    }
-    let (symbol_part, freq_part) = match text.find('[') {
-        Some(open) => {
-            if !text.ends_with(']') {
-                bail!("overlay scope {text:?}: `[freq]` bracket must close at the end");
-            }
-            let symbol = text[..open].trim();
-            let freq = &text[open + 1..text.len() - 1];
-            (symbol, Some(freq))
-        }
-        None => (text, None),
-    };
-    let symbol = if symbol_part.is_empty() {
-        None
-    } else {
-        Some(symbol_part.to_string())
-    };
-    let interval = match freq_part {
+    let (symbol, freq_str) =
+        parse_scope_parts(text).map_err(|e| anyhow!("overlay scope: {e}"))?;
+    let interval = match freq_str {
         Some(freq) => {
-            let freq = freq.trim();
-            if freq.is_empty() {
-                bail!("overlay scope {text:?}: empty `[freq]` bracket");
-            }
             Some(parse_interval(freq).with_context(|| format!("overlay scope {text:?}"))?)
         }
         None => None,
     };
-    if symbol.is_none() && interval.is_none() {
-        bail!("overlay scope {text:?}: neither symbol nor freq present");
-    }
     Ok(OverlayScope { symbol, interval })
 }
 

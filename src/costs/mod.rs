@@ -20,7 +20,7 @@
 //!    the trigger level — or `open` on a gap — for a stop / take-profit).
 //! 2. Apply the spread: buys pay `+half_spread`, sells receive `−half_spread`.
 //! 3. Apply the slippage: adverse to the *trading side* (buys slip up, sells
-//!    slip down). The [`FillKind`] threads through so a stop can be given an
+//!    slip down). The [`OrderKind`] threads through so a stop can be given an
 //!    extra multiplier over a market fill.
 //! 4. The resulting price is what's stamped on the [`Order`](crate::Order) and
 //!    recorded as `trades.csv`'s `price` column. Commission is computed from
@@ -35,12 +35,6 @@
 
 use crate::strategy::{OrderKind, Side};
 use crate::types::{Candle, Real};
-
-/// The kind of fill a cost model is pricing — currently a re-export of
-/// [`OrderKind`], so `market` / `stop` / `take_profit` distinctions plumb through
-/// unchanged. Named separately so a future model can special-case (e.g.) stop
-/// fills without hard-coding the enum.
-pub type FillKind = OrderKind;
 
 /// A per-fill commission charge, in the wallet's reference currency.
 ///
@@ -65,7 +59,7 @@ pub trait SpreadModel: Send + Sync {
 ///
 /// Called with the [`Side`] (buys always slip up; sells always slip down), the
 /// spread-adjusted `price`, the fill's `units` magnitude, the bar it fills on
-/// (for size / volume relative models), and the [`FillKind`] (a stop or
+/// (for size / volume relative models), and the [`OrderKind`] (a stop or
 /// take-profit may be multiplied over a market fill). Returns the **final** fill
 /// price the wallet stamps on the order.
 pub trait SlippageModel: Send + Sync {
@@ -75,7 +69,7 @@ pub trait SlippageModel: Send + Sync {
         price: Real,
         units: Real,
         candle: &Candle,
-        kind: FillKind,
+        kind: OrderKind,
     ) -> Real;
 }
 
@@ -171,7 +165,7 @@ impl SlippageModel for NoSlippage {
         price: Real,
         _units: Real,
         _candle: &Candle,
-        _kind: FillKind,
+        _kind: OrderKind,
     ) -> Real {
         price
     }
@@ -374,7 +368,7 @@ impl SlippageModel for FixedBpsSlippage {
         price: Real,
         _units: Real,
         _candle: &Candle,
-        kind: FillKind,
+        kind: OrderKind,
     ) -> Real {
         let mult = kind_multiplier(kind, self.stop_multiplier);
         let move_frac = self.bps.abs() * 1e-4 * mult;
@@ -429,7 +423,7 @@ impl SlippageModel for VolumeParticipationSlippage {
         price: Real,
         units: Real,
         candle: &Candle,
-        kind: FillKind,
+        kind: OrderKind,
     ) -> Real {
         if candle.volume <= 0.0 {
             return price;
@@ -450,12 +444,12 @@ impl SlippageModel for VolumeParticipationSlippage {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// The slippage multiplier for a [`FillKind`]: `1.0` on a market fill,
+/// The slippage multiplier for a [`OrderKind`]: `1.0` on a market fill,
 /// `stop_multiplier` on a stop or take-profit.
-fn kind_multiplier(kind: FillKind, stop_multiplier: Real) -> Real {
+fn kind_multiplier(kind: OrderKind, stop_multiplier: Real) -> Real {
     match kind {
-        FillKind::Market => 1.0,
-        FillKind::Stop | FillKind::TakeProfit => stop_multiplier.max(0.0),
+        OrderKind::Market => 1.0,
+        OrderKind::Stop | OrderKind::TakeProfit => stop_multiplier.max(0.0),
     }
 }
 
@@ -502,7 +496,7 @@ impl IsNoOp for dyn SlippageModel {
         let bar = Candle::new(100.0, 100.0, 100.0, 100.0, 1.0);
         // A no-op passes the price through unchanged on both sides and both
         // kinds; anything else adjusts at least one probe away from the input.
-        for kind in [FillKind::Market, FillKind::Stop, FillKind::TakeProfit] {
+        for kind in [OrderKind::Market, OrderKind::Stop, OrderKind::TakeProfit] {
             for side in [Side::Buy, Side::Sell] {
                 if self.adjust(side, 100.0, 1.0, &bar, kind) != 100.0 {
                     return false;
@@ -529,13 +523,13 @@ mod tests {
         assert_eq!(costs.commission.commission(1_000.0, 1.0), 0.0);
         assert_eq!(costs.spread.half_spread(100.0, &b), 0.0);
         assert_eq!(
-            costs.slippage.adjust(Side::Buy, 100.0, 1.0, &b, FillKind::Market),
+            costs.slippage.adjust(Side::Buy, 100.0, 1.0, &b, OrderKind::Market),
             100.0
         );
         assert_eq!(
             costs
                 .slippage
-                .adjust(Side::Sell, 100.0, 1.0, &b, FillKind::Stop),
+                .adjust(Side::Sell, 100.0, 1.0, &b, OrderKind::Stop),
             100.0
         );
     }
@@ -601,11 +595,11 @@ mod tests {
         let s = FixedBpsSlippage::new(10.0); // 10 bps = 0.1% impact
         let b = bar(100.0, 0.0);
         // Buy on a market fill: +0.1% -> 100.1
-        assert!((s.adjust(Side::Buy, 100.0, 1.0, &b, FillKind::Market) - 100.1).abs() < 1e-9);
+        assert!((s.adjust(Side::Buy, 100.0, 1.0, &b, OrderKind::Market) - 100.1).abs() < 1e-9);
         // Sell on a market fill: -0.1% -> 99.9
-        assert!((s.adjust(Side::Sell, 100.0, 1.0, &b, FillKind::Market) - 99.9).abs() < 1e-9);
+        assert!((s.adjust(Side::Sell, 100.0, 1.0, &b, OrderKind::Market) - 99.9).abs() < 1e-9);
         // Stop fill: multiplied by 1.5 by default -> 100.15
-        assert!((s.adjust(Side::Buy, 100.0, 1.0, &b, FillKind::Stop) - 100.15).abs() < 1e-9);
+        assert!((s.adjust(Side::Buy, 100.0, 1.0, &b, OrderKind::Stop) - 100.15).abs() < 1e-9);
     }
 
     #[test]
@@ -614,7 +608,7 @@ mod tests {
         // impact_frac = sqrt(0.01) = 0.1 -> 10% adverse.
         let s = VolumeParticipationSlippage::new(1.0);
         let b = bar(100.0, 10_000.0);
-        assert!((s.adjust(Side::Buy, 100.0, 100.0, &b, FillKind::Market) - 110.0).abs() < 1e-9);
+        assert!((s.adjust(Side::Buy, 100.0, 100.0, &b, OrderKind::Market) - 110.0).abs() < 1e-9);
     }
 
     #[test]
@@ -623,7 +617,7 @@ mod tests {
         // NaN/Infinity but a no-slippage fill.
         let s = VolumeParticipationSlippage::new(1.0);
         let b = bar(100.0, 0.0);
-        assert_eq!(s.adjust(Side::Buy, 100.0, 1.0, &b, FillKind::Market), 100.0);
+        assert_eq!(s.adjust(Side::Buy, 100.0, 1.0, &b, OrderKind::Market), 100.0);
     }
 
     #[test]
@@ -631,9 +625,9 @@ mod tests {
         let s = VolumeParticipationSlippage::new(1.0).with_stop_multiplier(2.0);
         let b = bar(100.0, 10_000.0);
         // Market fill: 10% adverse -> 110.
-        assert!((s.adjust(Side::Buy, 100.0, 100.0, &b, FillKind::Market) - 110.0).abs() < 1e-9);
+        assert!((s.adjust(Side::Buy, 100.0, 100.0, &b, OrderKind::Market) - 110.0).abs() < 1e-9);
         // Stop fill: 20% adverse (2x multiplier) -> 120.
-        assert!((s.adjust(Side::Buy, 100.0, 100.0, &b, FillKind::Stop) - 120.0).abs() < 1e-9);
+        assert!((s.adjust(Side::Buy, 100.0, 100.0, &b, OrderKind::Stop) - 120.0).abs() < 1e-9);
     }
 
     #[test]

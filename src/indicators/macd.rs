@@ -1,5 +1,4 @@
 use crate::indicator::Indicator;
-use crate::indicators::Component;
 use crate::indicators::smoothing::EmaState;
 use crate::types::Real;
 
@@ -52,28 +51,18 @@ impl<S> Macd<S> {
     }
 }
 
-/// Component accessors: each yields one output line as a standalone
-/// `Indicator<Output = Real>`, so MACD's components compose and compare like any
-/// other source — e.g. `macd.line().crosses_above(macd.signal())`.
-impl<S> Macd<S>
-where
-    Macd<S>: Indicator<Output = MacdValue> + Clone,
-{
+// Component accessors: each yields one output line as a standalone
+// `Indicator<Output = Real>`, so MACD's components compose and compare like any
+// other source — e.g. `macd.line().crosses_above(macd.signal())`.
+crate::indicators::component::component_accessors!(
+    Macd<S>, MacdValue;
     /// The MACD line (fast EMA − slow EMA) as a standalone source.
-    pub fn line(&self) -> Component<Self> {
-        Component::new(self.clone(), |v| v.macd)
-    }
-
+    line => macd,
     /// The signal line (EMA of the MACD line) as a standalone source.
-    pub fn signal(&self) -> Component<Self> {
-        Component::new(self.clone(), |v| v.signal)
-    }
-
+    signal => signal,
     /// The histogram (MACD line − signal line) as a standalone source.
-    pub fn histogram(&self) -> Component<Self> {
-        Component::new(self.clone(), |v| v.histogram)
-    }
-}
+    histogram => histogram,
+);
 
 impl<S: Indicator<Output = Real>> Indicator for Macd<S> {
     type Input = S::Input;
@@ -133,8 +122,8 @@ impl<S: Indicator<Output = Real>> Indicator for Macd<S> {
         // The MACD line settles once the slower-settling of the two price EMAs
         // has; the signal EMA then re-smooths it, adding its own settling.
         self.source.unstable_period()
-            + self.fast.settle_period().max(self.slow.settle_period())
-            + self.signal_ema.settle_period()
+            + self.fast.unstable_period().max(self.slow.unstable_period())
+            + self.signal_ema.unstable_period()
     }
 
     fn reset(&mut self) {

@@ -1,5 +1,4 @@
 use crate::indicator::Indicator;
-use crate::indicators::Component;
 use crate::indicators::ops::{MaxOp, MinOp};
 use crate::indicators::stats::WindowExtreme;
 use crate::types::{Candle, Real};
@@ -60,28 +59,18 @@ impl<S> Aroon<S> {
     }
 }
 
-/// Component accessors: each output as a standalone `Indicator<Output = Real>`,
-/// so e.g. `aroon.up().crosses_above(aroon.down())` or
-/// `aroon.oscillator().above(0.0)`.
-impl<S: Clone> Aroon<S>
-where
-    Aroon<S>: Indicator<Output = AroonValue>,
-{
+// Component accessors: each output as a standalone `Indicator<Output = Real>`,
+// so e.g. `aroon.up().crosses_above(aroon.down())` or
+// `aroon.oscillator().above(0.0)`.
+crate::indicators::component::component_accessors!(
+    Aroon<S>, AroonValue;
     /// Aroon Up as a standalone source.
-    pub fn up(&self) -> Component<Self> {
-        Component::new(self.clone(), |v| v.up)
-    }
-
+    up => up,
     /// Aroon Down as a standalone source.
-    pub fn down(&self) -> Component<Self> {
-        Component::new(self.clone(), |v| v.down)
-    }
-
+    down => down,
     /// The Aroon Oscillator (`up − down`) as a standalone source.
-    pub fn oscillator(&self) -> Component<Self> {
-        Component::new(self.clone(), |v| v.oscillator)
-    }
-}
+    oscillator => oscillator,
+);
 
 impl<S: Indicator<Output = Candle>> Indicator for Aroon<S> {
     type Input = S::Input;

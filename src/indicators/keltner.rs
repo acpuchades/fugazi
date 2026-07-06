@@ -1,5 +1,5 @@
 use crate::indicator::Indicator;
-use crate::indicators::{Atr, Component, Ema};
+use crate::indicators::{Atr, Ema};
 use crate::types::{Candle, Real};
 
 /// The three lines of a [`Keltner`] channel.
@@ -59,28 +59,18 @@ impl<P, C> Keltner<P, C> {
     }
 }
 
-/// Component accessors: each channel line as a standalone
-/// `Indicator<Output = Real>`, so a line composes and compares like any other
-/// source — e.g. `Current::close().crosses_above(channel.upper())`.
-impl<P, C> Keltner<P, C>
-where
-    Keltner<P, C>: Indicator<Output = KeltnerValue> + Clone,
-{
+// Component accessors: each channel line as a standalone
+// `Indicator<Output = Real>`, so a line composes and compares like any other
+// source — e.g. `Current::close().crosses_above(channel.upper())`.
+crate::indicators::component::component_accessors!(
+    Keltner<P, C>, KeltnerValue;
     /// The upper channel (`middle + multiplier·ATR`) as a standalone source.
-    pub fn upper(&self) -> Component<Self> {
-        Component::new(self.clone(), |v| v.upper)
-    }
-
+    upper => upper,
     /// The middle channel (the EMA) as a standalone source.
-    pub fn middle(&self) -> Component<Self> {
-        Component::new(self.clone(), |v| v.middle)
-    }
-
+    middle => middle,
     /// The lower channel (`middle − multiplier·ATR`) as a standalone source.
-    pub fn lower(&self) -> Component<Self> {
-        Component::new(self.clone(), |v| v.lower)
-    }
-}
+    lower => lower,
+);
 
 impl<P, C> Indicator for Keltner<P, C>
 where

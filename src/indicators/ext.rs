@@ -61,16 +61,20 @@ pub trait IndicatorExt: Indicator<Output = Real> + Sized {
         Le::new(self, rhs)
     }
 
-    /// `self ≈ rhs` (within tolerance).
-    fn eq<R>(self, rhs: R) -> Eq<Self, R>
+    /// `self ≈ rhs` (within tolerance). Named `eq_to` (not `eq`) to avoid
+    /// colliding with [`PartialEq::eq`] when a source type happens to
+    /// implement it.
+    fn eq_to<R>(self, rhs: R) -> Eq<Self, R>
     where
         R: Indicator<Input = Self::Input, Output = Real>,
     {
         Eq::new(self, rhs)
     }
 
-    /// `self != rhs` (beyond tolerance).
-    fn ne<R>(self, rhs: R) -> Ne<Self, R>
+    /// `self != rhs` (beyond tolerance). Named `ne_to` (not `ne`) to avoid
+    /// colliding with [`PartialEq::ne`] when a source type happens to
+    /// implement it.
+    fn ne_to<R>(self, rhs: R) -> Ne<Self, R>
     where
         R: Indicator<Input = Self::Input, Output = Real>,
     {

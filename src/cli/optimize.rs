@@ -29,7 +29,7 @@ use rayon::prelude::*;
 use serde_json::Value;
 
 use crate::backtest;
-use crate::calendar::{self, AssetClass, BarsPerYearSpec, Frequency, FrequencySpec};
+use crate::calendar::{self, AssetClass, BarsPerYearSpec, Frequency, ScopedFrequency};
 use crate::costs::CostConfig;
 use crate::data::DataFrame;
 use crate::input;
@@ -89,7 +89,7 @@ pub struct OptimizeOptions<'a> {
     /// dominant series in the frame. The resulting effective freq is
     /// forwarded to [`CostConfig::resolve`] per grid point, so freq-scoped
     /// cost entries also see the detected value.
-    pub frequency: &'a [FrequencySpec],
+    pub frequency: &'a [ScopedFrequency],
     /// Whether the user passed at least one `--costs` flag — governs the
     /// warning banner.
     pub costs_supplied: bool,
@@ -155,7 +155,7 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
         opts.jobs,
     )?;
 
-    write_csv(
+    write_grid_csv(
         opts.output,
         &sweep.axes,
         &sweep.metric_columns,
@@ -602,7 +602,7 @@ fn ranking_value(eval: &Evaluation, path: &str, direction: Direction, k: Real) -
 /// metric (`<name>_mean` / `<name>_std`, the cross-window aggregate).
 /// `;`-delimited to match `trades.csv` / `returns.csv`. Missing (omitted)
 /// metric values are written as an empty cell.
-fn write_csv(
+fn write_grid_csv(
     path: &Path,
     axes: &[(String, Vec<Value>)],
     metric_columns: &[(String, String)],

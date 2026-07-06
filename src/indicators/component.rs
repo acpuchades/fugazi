@@ -3,6 +3,54 @@
 use crate::indicator::Indicator;
 use crate::types::Real;
 
+/// Declare the standard component accessors on a multi-output indicator: one
+/// `pub fn <method>(&self) -> Component<Self>` per output field, each a clone
+/// + [`Component::new`] with a selector to that field.
+///
+/// Removes the one-line boilerplate the multi-output indicators would
+/// otherwise repeat.
+///
+/// Style: `component_accessors!(Type<G, ...>, ValueType; method => field, ...)`.
+/// The `impl` bound is `Type<G, ...>: Indicator<Output = ValueType> + Clone`.
+///
+/// ```ignore
+/// component_accessors!(
+///     Bollinger<S>, BollingerValue;
+///     /// Upper band.
+///     upper => upper,
+///     /// Middle band.
+///     middle => middle,
+///     /// Lower band.
+///     lower => lower,
+/// );
+/// ```
+macro_rules! component_accessors {
+    (
+        $parent:ident<$($gen:ident),+>, $value:ty;
+        $(
+            $(#[$doc:meta])*
+            $method:ident => $field:ident
+        ),+ $(,)?
+    ) => {
+        impl<$($gen),+> $parent<$($gen),+>
+        where
+            $parent<$($gen),+>: $crate::indicator::Indicator<Output = $value> + Clone,
+        {
+            $(
+                $(#[$doc])*
+                pub fn $method(&self) -> $crate::indicators::component::Component<Self> {
+                    $crate::indicators::component::Component::new(
+                        self.clone(),
+                        |v| v.$field,
+                    )
+                }
+            )+
+        }
+    };
+}
+
+pub(crate) use component_accessors;
+
 /// Adapts a multi-output indicator into a single-output [`Indicator`] that
 /// yields just one of its component fields.
 ///

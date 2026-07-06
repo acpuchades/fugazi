@@ -38,7 +38,9 @@
 
 use std::str::FromStr;
 
+use anyhow::{Result, bail};
 use fugazi::prelude::*;
+use fugazi::sources::Interval;
 use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 
@@ -184,6 +186,34 @@ impl FromStr for Frequency {
     }
 }
 
+/// Parse a Binance-style interval token (`1m`, `5m`, `1h`, `4h`, `1d`, `1w`,
+/// `1M`) into an [`Interval`]. Case-sensitive on the unit letter: `m` = minute,
+/// `M` = month. The same `N<unit>` alphabet as [`Frequency::from_str`], but
+/// yields the sources-layer [`Interval`] used by the remote candle providers.
+pub(crate) fn parse_interval(s: &str) -> Result<Interval> {
+    let s = s.trim();
+    if s.is_empty() {
+        bail!("empty interval token");
+    }
+    let (num, unit) = s.split_at(s.len() - 1);
+    let n: u32 = if num.is_empty() {
+        1
+    } else {
+        num.parse().map_err(|_| anyhow::anyhow!("bad interval {s:?}"))?
+    };
+    if n == 0 {
+        bail!("interval {s:?}: multiplier must be positive");
+    }
+    match unit {
+        "m" => Ok(Interval::Minute(n)),
+        "h" => Ok(Interval::Hour(n)),
+        "d" => Ok(Interval::Day(n)),
+        "w" => Ok(Interval::Week(n)),
+        "M" => Ok(Interval::Month(n)),
+        _ => bail!("interval {s:?}: unknown unit letter {unit:?}"),
+    }
+}
+
 /// Resolve `bars_per_year` from the CLI's three inputs in priority order:
 ///
 /// 1. an explicit `--bars-per-year <N>` — always wins;
@@ -284,6 +314,11 @@ impl Scope {
         sym_ok && freq_ok
     }
 
+    /// The default (unscoped) entry — neither half set.
+    pub fn is_default(&self) -> bool {
+        self.symbol.is_none() && self.freq.is_none()
+    }
+
     /// Scope specificity for picking the winning entry: full `SYM[FREQ]` > `SYM`
     /// > `[FREQ]` > default. Higher number wins.
     fn specificity(&self) -> u8 {
@@ -315,12 +350,17 @@ fn split_scope(text: &str) -> Result<(Scope, &str), String> {
     Ok((Scope::default(), text))
 }
 
-/// Parse a bare `SYMBOL[FREQ]` prefix (no trailing colon), or return the
-/// default scope for an empty string. At least one half must be present.
-fn parse_scope(text: &str) -> Result<Scope, String> {
+/// Split a `SYMBOL[FREQ]` token into its two raw parts (symbol as owned string,
+/// freq as a borrowed slice for the caller to parse into whatever concrete type
+/// it uses — [`Frequency`] on this side, [`Interval`] on the overlay side).
+/// Rejects `SYMBOL[]`, an unclosed bracket, and the empty-both case.
+///
+/// The raw shared bracket grammar behind [`parse_scope`] and
+/// [`crate::overlay::OverlayScope`]'s parser.
+pub(crate) fn parse_scope_parts(text: &str) -> Result<(Option<String>, Option<&str>), String> {
     let text = text.trim();
     if text.is_empty() {
-        return Ok(Scope::default());
+        return Ok((None, None));
     }
     let (sym_part, freq_part) = match text.find('[') {
         Some(open) => {
@@ -333,15 +373,27 @@ fn parse_scope(text: &str) -> Result<Scope, String> {
     };
     let symbol = (!sym_part.is_empty()).then(|| sym_part.to_string());
     let freq = match freq_part {
-        Some("") => {
-            return Err(format!("scope `{text}`: empty `[freq]` bracket"));
-        }
-        Some(f) => Some(Frequency::from_str(f).map_err(|e| format!("scope `{text}`: {e}"))?),
+        Some("") => return Err(format!("scope `{text}`: empty `[freq]` bracket")),
+        Some(f) => Some(f),
         None => None,
     };
     if symbol.is_none() && freq.is_none() {
         return Err(format!("scope `{text}`: neither symbol nor freq present"));
     }
+    Ok((symbol, freq))
+}
+
+/// Parse a bare `SYMBOL[FREQ]` prefix (no trailing colon), or return the
+/// default scope for an empty string. At least one half must be present.
+///
+/// Shared by [`crate::costs`] (`--costs` argument parsing) and this module's
+/// `--bars-per-year` / `-f/--frequency` prefixes.
+pub(crate) fn parse_scope(text: &str) -> Result<Scope, String> {
+    let (symbol, freq_str) = parse_scope_parts(text)?;
+    let freq = match freq_str {
+        Some(f) => Some(Frequency::from_str(f).map_err(|e| format!("scope `{text}`: {e}"))?),
+        None => None,
+    };
     Ok(Scope { symbol, freq })
 }
 
@@ -401,12 +453,12 @@ pub fn pick_bars_per_year(
 /// specific cadence would be circular. See [`pick_frequency`] for the
 /// resolution rules.
 #[derive(Debug, Clone, PartialEq)]
-pub struct FrequencySpec {
+pub struct ScopedFrequency {
     pub symbol: Option<String>,
     pub value: Frequency,
 }
 
-impl FromStr for FrequencySpec {
+impl FromStr for ScopedFrequency {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -422,7 +474,7 @@ impl FromStr for FrequencySpec {
         }
         let value =
             Frequency::from_str(body).map_err(|e| format!("`{s}`: {e}"))?;
-        Ok(FrequencySpec {
+        Ok(ScopedFrequency {
             symbol: scope.symbol,
             value,
         })
@@ -434,7 +486,7 @@ impl FromStr for FrequencySpec {
 /// unscoped default; ties break to the last-declared entry so later flags
 /// override earlier ones. Returns `None` when no entry matches — the
 /// caller then falls back to auto-detection (see [`detect_frequency`]).
-pub fn pick_frequency(specs: &[FrequencySpec], symbol: &str) -> Option<Frequency> {
+pub fn pick_frequency(specs: &[ScopedFrequency], symbol: &str) -> Option<Frequency> {
     specs
         .iter()
         .filter(|s| s.symbol.as_deref().is_none_or(|sym| sym == symbol))
@@ -480,6 +532,20 @@ mod tests {
         assert!(Frequency::from_str("1x").is_err()); // unknown unit
         assert!(Frequency::from_str("0d").is_err()); // zero multiplier
         assert!(Frequency::from_str("abc").is_err());
+    }
+
+    #[test]
+    fn parse_interval_parses_all_units() {
+        assert_eq!(parse_interval("5m").unwrap(), Interval::Minute(5));
+        assert_eq!(parse_interval("4h").unwrap(), Interval::Hour(4));
+        assert_eq!(parse_interval("1d").unwrap(), Interval::Day(1));
+        assert_eq!(parse_interval("1w").unwrap(), Interval::Week(1));
+        assert_eq!(parse_interval("1M").unwrap(), Interval::Month(1));
+    }
+
+    #[test]
+    fn parse_interval_rejects_zero_multiplier() {
+        assert!(parse_interval("0d").is_err());
     }
 
     #[test]
@@ -683,7 +749,7 @@ mod tests {
         assert_eq!(pick_bars_per_year(&specs, "BTC", None), Some(200.0));
     }
 
-    fn fspec(s: &str) -> FrequencySpec {
+    fn fspec(s: &str) -> ScopedFrequency {
         s.parse().unwrap()
     }
 
@@ -698,14 +764,14 @@ mod tests {
     #[test]
     fn frequency_spec_rejects_freq_scope() {
         // `[FREQ]:` scope on a --frequency value is circular — rejected.
-        assert!("[1h]:4h".parse::<FrequencySpec>().is_err());
-        assert!("BTC[1h]:4h".parse::<FrequencySpec>().is_err());
+        assert!("[1h]:4h".parse::<ScopedFrequency>().is_err());
+        assert!("BTC[1h]:4h".parse::<ScopedFrequency>().is_err());
     }
 
     #[test]
     fn frequency_spec_rejects_bad_input() {
-        assert!("BTC:".parse::<FrequencySpec>().is_err());
-        assert!("BTC:oops".parse::<FrequencySpec>().is_err());
+        assert!("BTC:".parse::<ScopedFrequency>().is_err());
+        assert!("BTC:oops".parse::<ScopedFrequency>().is_err());
     }
 
     #[test]

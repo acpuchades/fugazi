@@ -44,16 +44,3 @@ pub mod trend;
 pub mod volume;
 
 pub use single_asset::SingleAssetStrategy;
-
-use crate::indicators::DEFAULT_EPSILON;
-use crate::types::Real;
-
-/// Whether `position` is meaningfully long.
-pub(crate) fn is_long(position: Real) -> bool {
-    position > DEFAULT_EPSILON
-}
-
-/// Whether `position` is meaningfully short.
-pub(crate) fn is_short(position: Real) -> bool {
-    position < -DEFAULT_EPSILON
-}

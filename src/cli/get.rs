@@ -37,8 +37,8 @@ use tokio::task::JoinSet;
 use fugazi::prelude::*;
 use fugazi::sources::{Binance, CandleSource, Interval, TimedCandle, Timestamp, Yahoo};
 
-use crate::dyn_::{DynIndicator, DynValue};
-use crate::file::{FileBar, FileSource};
+use crate::dyn_indicator::{DynIndicator, DynValue};
+use crate::csv_source::{FileBar, FileSource};
 use crate::input::Source as InputSource;
 use crate::overlay::{self, Overlay};
 use crate::style;
@@ -276,7 +276,7 @@ pub fn run(args: GetArgs) -> Result<()> {
         &overlay_columns,
     );
 
-    write_csv(&args.output, &rows, &overlay_columns)
+    write_candles_csv(&args.output, &rows, &overlay_columns)
         .with_context(|| format!("writing {}", args.output.display()))?;
 
     if !args.quiet {
@@ -670,7 +670,7 @@ fn unknown_provider_error(other: &str) -> String {
 /// `--overlay` args). A `None` overlay value — either the column's applicable
 /// overlay is still warming up or no overlay is scoped to this row's group —
 /// renders as an empty cell.
-fn write_csv(path: &Path, rows: &[Row], overlay_columns: &[String]) -> Result<()> {
+fn write_candles_csv(path: &Path, rows: &[Row], overlay_columns: &[String]) -> Result<()> {
     let mut wtr = csv::WriterBuilder::new()
         .delimiter(b';')
         .from_path(path)
@@ -796,7 +796,10 @@ fn parse_symbol(s: &str) -> Result<SymbolSpec> {
         if tok.is_empty() {
             bail!("{s:?}: empty frequency token in bracket");
         }
-        intervals.push(parse_interval(tok).with_context(|| format!("{s:?}: freq {tok:?}"))?);
+        intervals.push(
+            crate::calendar::parse_interval(tok)
+                .with_context(|| format!("{s:?}: freq {tok:?}"))?,
+        );
     }
     if intervals.is_empty() {
         bail!("{s:?}: empty frequency list");
@@ -805,32 +808,6 @@ fn parse_symbol(s: &str) -> Result<SymbolSpec> {
         symbol: symbol.to_string(),
         intervals,
     })
-}
-
-/// Parse a Binance-style interval token (`1m`, `5m`, `1h`, `4h`, `1d`, `1w`,
-/// `1M`). Case-sensitive on the unit letter: `m` = minute, `M` = month.
-pub(crate) fn parse_interval(s: &str) -> Result<Interval> {
-    let s = s.trim();
-    if s.is_empty() {
-        bail!("empty interval token");
-    }
-    let (num, unit) = s.split_at(s.len() - 1);
-    let n: u32 = if num.is_empty() {
-        1
-    } else {
-        num.parse().with_context(|| format!("bad interval {s:?}"))?
-    };
-    if n == 0 {
-        bail!("interval {s:?}: multiplier must be positive");
-    }
-    match unit {
-        "m" => Ok(Interval::Minute(n)),
-        "h" => Ok(Interval::Hour(n)),
-        "d" => Ok(Interval::Day(n)),
-        "w" => Ok(Interval::Week(n)),
-        "M" => Ok(Interval::Month(n)),
-        _ => bail!("interval {s:?}: unknown unit letter {unit:?}"),
-    }
 }
 
 /// Parse a date string against `now`, returning an [`OffsetDateTime`] at UTC
@@ -1015,20 +992,6 @@ mod tests {
             symbols[0].intervals,
             vec![Interval::Day(1), Interval::Hour(1)]
         );
-    }
-
-    #[test]
-    fn parses_all_interval_units() {
-        assert_eq!(parse_interval("5m").unwrap(), Interval::Minute(5));
-        assert_eq!(parse_interval("4h").unwrap(), Interval::Hour(4));
-        assert_eq!(parse_interval("1d").unwrap(), Interval::Day(1));
-        assert_eq!(parse_interval("1w").unwrap(), Interval::Week(1));
-        assert_eq!(parse_interval("1M").unwrap(), Interval::Month(1));
-    }
-
-    #[test]
-    fn rejects_zero_multiplier() {
-        assert!(parse_interval("0d").is_err());
     }
 
     #[test]
