@@ -16,6 +16,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Lint (keep clean): `cargo clippy --all-targets`
 - API docs: `cargo doc --open`
 
+### Bumping the package version
+
+The version is duplicated in **four** places that must stay in lockstep — a `cargo build` catches a Rust/Rust drift but not a Python or README one, so it's worth a checklist:
+
+1. **`Cargo.toml`** — `[package] version = "X.Y.Z"` (the workspace root).
+2. **`python/Cargo.toml`** — `[package] version = "X.Y.Z"` (the pyo3 cdylib crate).
+3. **`python/pyproject.toml`** — `[project] version = "X.Y.Z"` (the wheel metadata; this is the version `pip install fugazi` sees).
+4. **`README.md`** — the `[dependencies]` snippet under `## Install` (`fugazi = "X.Y"` — track the major.minor there, not the patch).
+
+Then `cargo build --workspace` (updates `Cargo.lock`), commit all five files (`Cargo.toml`, `python/Cargo.toml`, `python/pyproject.toml`, `README.md`, `Cargo.lock`), tag `vX.Y.Z`, push both `main` and the tag. The Python README (`python/README.md`) intentionally has no version string — `pip install fugazi` gets the latest, and the wheels tell users which pyo3/Python versions they need.
+
 ## Architecture
 
 Three composable layers: indicators (numeric sources), signals (boolean-valued indicators — `Indicator<Output = bool>`), and strategies (the decision layer that trades into a wallet).
