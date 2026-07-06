@@ -95,13 +95,15 @@ pub struct Summary {
 pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<Summary> {
     let started = SystemTime::now();
     let symbol = spec.symbol.clone();
-    let candles = frame.candles(&symbol)?;
+    let series = frame.atoms(&symbol)?;
+    let atoms = series.atoms;
+    let skipped_overlay_columns = series.skipped_columns;
 
     std::fs::create_dir_all(opts.out_dir)
         .with_context(|| format!("creating output dir `{}`", opts.out_dir.display()))?;
 
-    let start = candles.first().map_or("", |(t, _)| t.as_str());
-    let end = candles.last().map_or("", |(t, _)| t.as_str());
+    let start = atoms.first().map_or("", |(t, _)| t.as_str());
+    let end = atoms.last().map_or("", |(t, _)| t.as_str());
     // The effective bar cadence for both annualization and cost-scope
     // matching: a symbol-matching `-f/--frequency` entry wins, else we
     // auto-detect from the strategy's dominant `(symbol, freq)` series in
@@ -129,13 +131,14 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
     if !opts.quiet {
         let costs_active = !opts.cost_config.resolve(&symbol, effective_freq).is_none();
         style::print_header("run", "backtest a strategy over CSV series");
-        print_inputs_block(opts, start, end, candles.len(), costs_active);
+        print_skipped_overlay_warning(&skipped_overlay_columns);
+        print_inputs_block(opts, start, end, atoms.len(), costs_active);
         if no_cost_warning {
             print_no_cost_warning();
         }
     }
 
-    let iter = backtest::run_iteration(spec, &candles, &inputs);
+    let iter = backtest::run_iteration(spec, &atoms, &inputs);
 
     // Emit `trades.csv` and echo each fill in the same order the wallet booked
     // them. The console stream matches the CSV row-for-row.
@@ -341,6 +344,22 @@ fn print_inputs_block(opts: &RunOptions, start: &str, end: &str, bars: usize, co
 /// frictionless.
 fn print_no_cost_warning() {
     let msg = "no cost model set — commission, spread, and slippage are zero; results are frictionless";
+    println!("  {} {msg}", style::yellow("warn"));
+}
+
+/// The "skipped overlay columns" banner: non-numeric CSV columns that were
+/// dropped from the overlay [`Schema`] because at least one value failed to
+/// parse as [`Real`]. Silent when nothing was skipped.
+fn print_skipped_overlay_warning(skipped: &[String]) {
+    if skipped.is_empty() {
+        return;
+    }
+    let msg = format!(
+        "skipped non-numeric overlay column{}: {} \
+         — not accessible via `!get`",
+        if skipped.len() == 1 { "" } else { "s" },
+        skipped.join(", "),
+    );
     println!("  {} {msg}", style::yellow("warn"));
 }
 

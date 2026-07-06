@@ -9,7 +9,7 @@
 //! ## The three pure entry points
 //!
 //! * [`run_iteration`] — the "full" pure evaluation: drives one backtest
-//!   over `candles` through a paper wallet, produces the whole-run
+//!   over `atoms` through a paper wallet, produces the whole-run
 //!   [`metrics::Metrics`] document, optionally the gross twin under active
 //!   costs, and (when `-w N` is set) the windowed + rolling reductions.
 //!   Returns everything the driver needs to write files and print
@@ -33,13 +33,13 @@ use crate::costs::CostConfig;
 use crate::metrics;
 use crate::spec::StrategySpec;
 
-/// Drive `spec` over `candles` through a fresh paper wallet with `cash`
+/// Drive `spec` over `atoms` through a fresh paper wallet with `cash`
 /// starting funds and the given trading `costs`, returning the full
 /// [`fugazi::RunReport`]. The shared core of [`evaluate`] and
 /// [`evaluate_windowed`].
 fn measured_report(
     spec: &StrategySpec,
-    candles: &[(String, Candle)],
+    atoms: &[(String, Atom)],
     cash: Real,
     costs: TradingCosts,
 ) -> fugazi::RunReport<String> {
@@ -50,17 +50,17 @@ fn measured_report(
         &mut strategy,
         &mut wallet,
         symbol,
-        candles.iter().map(|(_, c)| *c),
+        atoms.iter().map(|(_, a)| a.clone()),
     )
 }
 
-/// Pure metrics-only evaluation: drive `spec` over `candles` through a paper
+/// Pure metrics-only evaluation: drive `spec` over `atoms` through a paper
 /// wallet with `cash` starting funds, the given `cost_config` resolved for
 /// (spec's symbol, `frequency`), and reduce the run to a [`metrics::Metrics`]
 /// document. The shape `optimize` calls per grid combination.
 pub fn evaluate(
     spec: &StrategySpec,
-    candles: &[(String, Candle)],
+    atoms: &[(String, Atom)],
     cash: Real,
     bars_per_year: Real,
     risk_free_rate: Real,
@@ -68,7 +68,7 @@ pub fn evaluate(
     frequency: Option<Frequency>,
 ) -> metrics::Metrics {
     let costs = cost_config.resolve(&spec.symbol, frequency);
-    let measured = measured_report(spec, candles, cash, costs);
+    let measured = measured_report(spec, atoms, cash, costs);
     metrics::from_report(&measured, bars_per_year, risk_free_rate)
 }
 
@@ -78,7 +78,7 @@ pub fn evaluate(
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_windowed(
     spec: &StrategySpec,
-    candles: &[(String, Candle)],
+    atoms: &[(String, Atom)],
     cash: Real,
     bars_per_year: Real,
     risk_free_rate: Real,
@@ -87,7 +87,7 @@ pub fn evaluate_windowed(
     window: usize,
 ) -> Vec<metrics::WindowMetrics> {
     let costs = cost_config.resolve(&spec.symbol, frequency);
-    let measured = measured_report(spec, candles, cash, costs);
+    let measured = measured_report(spec, atoms, cash, costs);
     metrics::windowed_from_report(&measured, window, bars_per_year, risk_free_rate)
 }
 
@@ -95,8 +95,8 @@ pub fn evaluate_windowed(
 /// [`crate::run::run`]. Deliberately owns no IO — the driver decides how
 /// (and whether) to persist the payload.
 pub struct IterationResult {
-    /// One time label per bar, borrowed from the input candles column and
-    /// cloned so the result is `Send + 'static`.
+    /// One time label per bar, borrowed from the input atoms' time column
+    /// and cloned so the result is `Send + 'static`.
     pub bars: Vec<String>,
     /// The priced (net) run report from `fugazi::backtest::run`.
     pub report: fugazi::RunReport<String>,
@@ -136,12 +136,12 @@ pub struct IterationInputs<'a> {
     pub windowed: Option<NonZeroUsize>,
 }
 
-/// The pure-work half of a run: drive the strategy over `candles`, reduce
+/// The pure-work half of a run: drive the strategy over `atoms`, reduce
 /// the report to `Metrics`, and hand back an [`IterationResult`]. Does no
 /// IO and no console printing — that's the driver's responsibility.
 pub fn run_iteration(
     spec: &StrategySpec,
-    candles: &[(String, Candle)],
+    atoms: &[(String, Atom)],
     inputs: &IterationInputs,
 ) -> IterationResult {
     let symbol = spec.symbol.clone();
@@ -153,9 +153,9 @@ pub fn run_iteration(
         &mut strategy,
         &mut wallet,
         symbol.clone(),
-        candles.iter().map(|(_, c)| *c),
+        atoms.iter().map(|(_, a)| a.clone()),
     );
-    // Gross twin under active costs: same strategy/candles/cash, no cost
+    // Gross twin under active costs: same strategy/atoms/cash, no cost
     // model, so any difference is attributable to costs alone.
     let gross_report = if costs_active {
         let mut gs = spec.build();
@@ -164,7 +164,7 @@ pub fn run_iteration(
             &mut gs,
             &mut gw,
             symbol.clone(),
-            candles.iter().map(|(_, c)| *c),
+            atoms.iter().map(|(_, a)| a.clone()),
         ))
     } else {
         None
@@ -198,7 +198,7 @@ pub fn run_iteration(
         }
         None => (None, None),
     };
-    let bars: Vec<String> = candles.iter().map(|(t, _)| t.clone()).collect();
+    let bars: Vec<String> = atoms.iter().map(|(t, _)| t.clone()).collect();
     let final_equity = report.equity_curve.last().copied().unwrap_or(inputs.cash);
     let summary = SummaryRow {
         final_equity,

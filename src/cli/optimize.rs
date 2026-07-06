@@ -114,11 +114,13 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
 
     // Resolve the strategy's symbol from a probe spec built with the fixed
     // params + first axis values, so we can slice the frame down to its
-    // candles once before entering the sweep.
+    // atoms once before entering the sweep.
     let first_combo: Vec<Value> = axes.iter().map(|(_, v)| v[0].clone()).collect();
     let probe_params = combine_params(&fixed, &axes, &first_combo);
     let probe_spec = build_spec(&base_value, &probe_params)?;
-    let candles = frame.candles(&probe_spec.symbol)?;
+    let series = frame.atoms(&probe_spec.symbol)?;
+    let atoms = series.atoms;
+    let skipped_overlay_columns = series.skipped_columns;
 
     // The effective bar cadence, now that the strategy's symbol is known:
     // a symbol-matching `-f/--frequency` entry wins, else auto-detect from
@@ -140,7 +142,7 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
         &base_value,
         fixed,
         axes,
-        &candles,
+        &atoms,
         opts.cash,
         bars_per_year,
         opts.risk_free_rate,
@@ -163,6 +165,7 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
 
     if !opts.quiet {
         style::print_header("optimize", "sweep a strategy over a parameter grid");
+        print_skipped_overlay_warning(&skipped_overlay_columns);
         print_inputs_block(&opts, &sweep.axes, &sweep.rows);
         // A "best" row only means something when the user gave us a metric to
         // rank by. Without one, the sweep has produced a CSV but no verdict.
@@ -179,7 +182,7 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
     Ok(())
 }
 
-/// Enumerate the grid over `candles`, evaluate every combination (whole-run or
+/// Enumerate the grid over `atoms`, evaluate every combination (whole-run or
 /// windowed), and rank the rows by `best_by`'s ranking value — direction-aware,
 /// with `risk_aversion` shifting a windowed row's mean *against* it by k·std so
 /// dispersion is always penalized. Pure: no filesystem, no printing. The CLI's
@@ -189,7 +192,7 @@ pub(crate) fn optimize(
     base_value: &Value,
     fixed: HashMap<String, Value>,
     axes: Vec<Axis>,
-    candles: &[(String, Candle)],
+    atoms: &[(String, Atom)],
     cash: Real,
     bars_per_year: Real,
     risk_free_rate: Real,
@@ -217,7 +220,7 @@ pub(crate) fn optimize(
     let first_spec = build_spec(base_value, &first_params)?;
     let first_metrics = backtest::evaluate(
         &first_spec,
-        candles,
+        atoms,
         cash,
         bars_per_year,
         risk_free_rate,
@@ -260,7 +263,7 @@ pub(crate) fn optimize(
         match windowed_n {
             Some(w) => Evaluation::Windowed(backtest::evaluate_windowed(
                 spec,
-                candles,
+                atoms,
                 cash,
                 bars_per_year,
                 risk_free_rate,
@@ -270,7 +273,7 @@ pub(crate) fn optimize(
             )),
             None => Evaluation::Whole(Box::new(backtest::evaluate(
                 spec,
-                candles,
+                atoms,
                 cash,
                 bars_per_year,
                 risk_free_rate,
@@ -712,6 +715,22 @@ fn print_inputs_block(opts: &OptimizeOptions, axes: &[(String, Vec<Value>)], row
             print_field("best-by", name);
         }
     }
+}
+
+/// The "skipped overlay columns" banner: non-numeric CSV columns that were
+/// dropped from the overlay [`Schema`] because at least one value failed to
+/// parse as [`Real`]. Silent when nothing was skipped.
+fn print_skipped_overlay_warning(skipped: &[String]) {
+    if skipped.is_empty() {
+        return;
+    }
+    let msg = format!(
+        "skipped non-numeric overlay column{}: {} \
+         — not accessible via `!get`",
+        if skipped.len() == 1 { "" } else { "s" },
+        skipped.join(", "),
+    );
+    println!("  {} {msg}", style::yellow("warn"));
 }
 
 fn print_best_block(

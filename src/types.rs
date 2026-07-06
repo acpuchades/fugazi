@@ -1,7 +1,6 @@
 //! Core scalar and market-data types shared across the crate.
 
 use std::collections::HashMap;
-use std::rc::Rc;
 use std::sync::Arc;
 
 /// The scalar type used throughout the crate for prices and indicator outputs.
@@ -137,14 +136,15 @@ impl SchemaBuilder {
 /// Per-bar overlay data attached to an [`Atom`]: a shared [`Schema`] plus that
 /// bar's values in schema order.
 ///
-/// Cheap to clone (one atomic bump for the shared `Arc<Schema>` and one
-/// non-atomic bump for the per-atom `Rc<[Real]>`, no allocation), which is what
+/// Cheap to clone (two atomic bumps: the shared `Arc<Schema>` and the per-atom
+/// `Arc<[Real]>`, no allocation), which is what
 /// [`Combine`](crate::indicators::Combine) needs when it feeds the same
-/// [`Atom`] to both sides.
+/// [`Atom`] to both sides. Both fields are `Arc` so an atom slice can also be
+/// shared across worker threads (used by the CLI's `optimize` sweep).
 #[derive(Debug, Clone)]
 pub struct OverlayInfo {
     schema: Arc<Schema>,
-    values: Rc<[Real]>,
+    values: Arc<[Real]>,
 }
 
 impl OverlayInfo {
@@ -153,7 +153,7 @@ impl OverlayInfo {
     ///
     /// # Panics
     /// Panics if `values.len() != schema.len()`.
-    pub fn new(schema: Arc<Schema>, values: impl Into<Rc<[Real]>>) -> Self {
+    pub fn new(schema: Arc<Schema>, values: impl Into<Arc<[Real]>>) -> Self {
         let values = values.into();
         assert_eq!(
             values.len(),
@@ -194,8 +194,8 @@ impl OverlayInfo {
 /// reads bar-shaped data. OHLCV access stays a direct field read
 /// (`atom.candle.close`); overlay access goes through an index resolved once at
 /// construction against the schema. Cheap to clone — a `Candle` memcpy plus,
-/// when present, one atomic bump for the shared schema `Arc` and one
-/// non-atomic bump for the per-atom `Rc<[Real]>` values.
+/// when present, two atomic bumps (the shared schema `Arc` and the per-atom
+/// `Arc<[Real]>` values); both are `Arc`, so an atom is `Send + Sync`.
 #[derive(Debug, Clone)]
 pub struct Atom {
     /// The OHLCV bar for this tick.
