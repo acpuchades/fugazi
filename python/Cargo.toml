@@ -1,6 +1,6 @@
 [package]
 name = "fugazi-python"
-version = "0.13.1"
+version = "0.14.0"
 edition = "2024"
 description = "Python bindings for the fugazi incremental technical-analysis library"
 license = "MIT"
