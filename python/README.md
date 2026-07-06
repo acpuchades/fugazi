@@ -301,3 +301,34 @@ for o, h, l, c, v in bars:
     elif went_flat:
         wallet.close("AAPL")
 ```
+
+## Fetching data
+
+Two remote candle providers ship built in — `Binance` (crypto spot klines) and
+`Yahoo` (stocks, ETFs, indices, FX). Each is a client class with one method,
+`candles(...)`, returning a `polars`/`pandas` `DataFrame` (or a `dict` of lists
+with `output="numpy"`):
+
+```python
+import fugazi as ta
+
+binance = ta.Binance()                     # public endpoint, defaults
+df = binance.candles(symbol="BTCUSDT", freq="1d",
+                     since="2020-01-01", until="today")
+
+yahoo = ta.Yahoo()
+df = yahoo.candles(symbol="AAPL", freq="1d", since="2020-01-01")
+```
+
+`freq` is a bar-cadence token (`"1m"`/`"5m"`/`"1h"`/`"4h"`/`"1d"`/`"1w"`/`"1M"`);
+`since`/`until` accept ISO (`"YYYY-MM-DD"`), EU (`"D-M-YYYY"`), or relative
+(`"today"`, `"yesterday"`, `"Nd ago"`, `"Nw ago"`) dates, `until` is exclusive
+and defaults to now. The returned frame has `time` (ISO 8601 UTC), `open`,
+`high`, `low`, `close`, `volume` columns.
+
+`fugazi.fetch(provider=..., symbol=..., ...)` is the provider-generic form of
+the same call — handy when the provider name is itself a variable:
+
+```python
+df = ta.fetch(provider="yfinance", symbol="AAPL", freq="1d", since="2020-01-01")
+```

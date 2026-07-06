@@ -40,7 +40,7 @@ use fugazi_core::indicators::{
     Value, Vwap, WilliamsR, Wma,
 };
 use fugazi_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
-use fugazi_core::sources::{Binance, CandleSource, Interval, SourceError, Timestamp};
+use fugazi_core::sources::{Binance, CandleSource, Interval, SourceError, Timestamp, Yahoo};
 use fugazi_core::strategy::{
     Ack, Order, OrderKind, PaperWallet, Units, Reference, Side, Size, Wallet, WalletError,
 };
@@ -2685,15 +2685,18 @@ fn build_candles_frame(
 
 /// Fetch a single (symbol, interval) window through the shared runtime,
 /// releasing the GIL for the network I/O.
-fn fetch_bars(
+fn fetch_bars<C>(
     py: Python<'_>,
-    binance: &Binance,
+    source: &C,
     symbol: &str,
     interval: Interval,
     since: Timestamp,
     until: Option<Timestamp>,
-) -> PyResult<Vec<fugazi_core::TimedCandle>> {
-    let client = binance.clone();
+) -> PyResult<Vec<fugazi_core::TimedCandle>>
+where
+    C: CandleSource + Clone,
+{
+    let client = source.clone();
     let symbol = symbol.to_string();
     py.detach(|| {
         sources_runtime()
@@ -2760,15 +2763,79 @@ impl PyBinance {
     }
 }
 
+/// A Yahoo Finance chart-API client (stocks, ETFs, indices, FX).
+///
+/// ```python
+/// y = fugazi.Yahoo()                     # public endpoint, defaults
+/// df = y.candles(symbol="AAPL", freq="1d",
+///                since="2020-01-01", until="today")
+/// ```
+///
+/// One call = one (symbol, freq) fetch = one DataFrame. Batch multiple
+/// symbols or frequencies by looping in Python.
+#[pyclass(name = "Yahoo", frozen)]
+struct PyYahoo {
+    inner: Yahoo,
+}
+
+#[pymethods]
+impl PyYahoo {
+    /// Construct a client. `base_url` overrides the API endpoint (default
+    /// `https://query1.finance.yahoo.com`), useful for local test servers;
+    /// `user_agent` overrides the default `User-Agent` header Yahoo's chart
+    /// endpoint requires.
+    #[new]
+    #[pyo3(signature = (base_url = None, user_agent = None))]
+    fn new(base_url: Option<String>, user_agent: Option<String>) -> Self {
+        let mut inner = Yahoo::new();
+        if let Some(url) = base_url {
+            inner = inner.with_base_url(url);
+        }
+        if let Some(ua) = user_agent {
+            inner = inner.with_user_agent(ua);
+        }
+        Self { inner }
+    }
+
+    /// Fetch OHLCV candles for one `(symbol, freq)` window.
+    ///
+    /// * `symbol` — e.g. `"AAPL"`, `"^GSPC"`, `"EURUSD=X"`. Sent verbatim to Yahoo.
+    /// * `freq` — bar cadence: `"1m"`/`"5m"`/`"1h"`/`"4h"`/`"1d"`/`"1w"`/`"1M"`.
+    /// * `since` / `until` — dates. Formats: ISO `"YYYY-MM-DD"`, EU
+    ///   `"D-M-YYYY"`, or relative (`"today"`, `"yesterday"`, `"Nd ago"`,
+    ///   `"Nw ago"`). `until` is exclusive; `None` means "up to now".
+    /// * `output` — `"polars"` (default), `"pandas"`, or `"numpy"` (dict of arrays).
+    ///
+    /// Returned DataFrame columns: `time` (ISO 8601 UTC), `open`, `high`,
+    /// `low`, `close`, `volume` (all f64).
+    #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
+    fn candles(
+        &self,
+        py: Python<'_>,
+        symbol: &str,
+        freq: &str,
+        since: &str,
+        until: Option<&str>,
+        output: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let interval = parse_interval_token(freq)?;
+        let (since_ts, until_ts) = resolve_since_until(since, until)?;
+        let out = CandlesOutput::from_kwarg(output)?;
+        let bars = fetch_bars(py, &self.inner, symbol, interval, since_ts, until_ts)?;
+        build_candles_frame(py, out, bars)
+    }
+}
+
 /// Fetch OHLCV candles from a named provider and return a DataFrame.
 ///
 /// ```python
-/// df = fugazi.get(provider="binance", symbol="BTCUSDT", freq="1d",
-///                 since="2020-01-01", until="today", output="polars")
+/// df = fugazi.fetch(provider="binance", symbol="BTCUSDT", freq="1d",
+///                   since="2020-01-01", until="today", output="polars")
 /// ```
 ///
-/// Same shape as `Binance().candles(...)`; the extra `provider` argument
-/// dispatches to the right client (`"binance"` is currently the only value).
+/// Same shape as `Binance().candles(...)` / `Yahoo().candles(...)`; the extra
+/// `provider` argument dispatches to the right client (`"binance"` or
+/// `"yfinance"`).
 #[pyfunction]
 #[pyo3(signature = (provider, symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
 fn fetch(
@@ -2783,15 +2850,15 @@ fn fetch(
     let interval = parse_interval_token(freq)?;
     let (since_ts, until_ts) = resolve_since_until(since, until)?;
     let out = CandlesOutput::from_kwarg(output)?;
-    let client = match provider {
-        "binance" => Binance::new(),
+    let bars = match provider {
+        "binance" => fetch_bars(py, &Binance::new(), symbol, interval, since_ts, until_ts)?,
+        "yfinance" => fetch_bars(py, &Yahoo::new(), symbol, interval, since_ts, until_ts)?,
         other => {
             return Err(PyValueError::new_err(format!(
-                "unknown provider {other:?}. Known providers: binance"
+                "unknown provider {other:?}. Known providers: binance, yfinance"
             )));
         }
     };
-    let bars = fetch_bars(py, &client, symbol, interval, since_ts, until_ts)?;
     build_candles_frame(py, out, bars)
 }
 
@@ -2813,6 +2880,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyOrder>()?;
     m.add_class::<PySize>()?;
     m.add_class::<PyBinance>()?;
+    m.add_class::<PyYahoo>()?;
 
     m.add("DEFAULT_EPSILON", DEFAULT_EPSILON)?;
 
