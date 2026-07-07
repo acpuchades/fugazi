@@ -32,19 +32,21 @@ use pyo3::types::PyDict;
 use std::sync::{Arc, Mutex};
 
 use fugazi_core::Indicator;
-use fugazi_core::indicators::compare::{EqOp, GeOp, GtOp, LeOp, LtOp, NeOp};
+use fugazi_core::indicators::compare::{EqOp, GeOp, GtOp, LeOp, LtOp, NeOp, StrEqOp, StrNeOp};
 use fugazi_core::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Current, CurrentBar,
-    Dmi, DmiValue, Donchian, DonchianValue, Ema, Get, Hma, Identity, Keltner, KeltnerValue, Latch,
-    Macd, MacdValue, Mfi, Obv, Resample, Rma, Rsi, Sar, Sma, StdDev, Stochastic, TrueRange, Value,
-    Vwap, WilliamsR, Wma,
+    Dmi, DmiValue, Donchian, DonchianValue, Ema, GetBool, GetReal, GetStr, Hma, Identity, Keltner,
+    KeltnerValue, Latch, Macd, MacdValue, Mfi, Obv, Resample, Rma, Rsi, Sar, Sma, StdDev,
+    Stochastic, TrueRange, Value, ValueStr, Vwap, WilliamsR, Wma,
 };
 use fugazi_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
 use fugazi_core::sources::{Binance, CandleSource, Interval, SourceError, Timestamp, Yahoo};
 use fugazi_core::strategy::{
     Ack, Order, OrderKind, PaperWallet, Units, Reference, Side, Size, Wallet, WalletError,
 };
-use fugazi_core::types::{Atom, Candle, OverlayInfo, Real, Schema, SchemaBuilder};
+use fugazi_core::types::{
+    Atom, Candle, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder,
+};
 use fugazi_core::backtest::Fill;
 use fugazi_core::metrics as core_metrics;
 use fugazi_core::metrics::{DrawdownSegment, Trade};
@@ -194,6 +196,83 @@ impl<I> Indicator for SignalBox<I> {
     }
     fn value(&self) -> Option<bool> {
         Some(self.0.is_true())
+    }
+    fn warm_up_period(&self) -> usize {
+        self.0.warm_up_period()
+    }
+    fn unstable_period(&self) -> usize {
+        self.0.unstable_period()
+    }
+    fn reset(&mut self) {
+        self.0.reset()
+    }
+}
+
+/// Object-safe shim over an `I -> Arc<str>` indicator — the string twin of
+/// [`DynIndicator`]. Backs the `GetStr` overlay-column reader and the
+/// `ValueStr` string constant leaf, which compose into `str_eq` / `str_ne`
+/// signals.
+trait DynStr<I>: Send + Sync {
+    fn update(&mut self, input: I) -> Option<Arc<str>>;
+    fn value(&self) -> Option<Arc<str>>;
+    fn warm_up_period(&self) -> usize;
+    fn unstable_period(&self) -> usize;
+    fn reset(&mut self);
+    fn box_clone(&self) -> Box<dyn DynStr<I>>;
+}
+
+impl<I, T> DynStr<I> for T
+where
+    T: Indicator<Input = I, Output = Arc<str>> + Clone + Send + Sync + 'static,
+{
+    fn update(&mut self, input: I) -> Option<Arc<str>> {
+        Indicator::update(self, input)
+    }
+    fn value(&self) -> Option<Arc<str>> {
+        Indicator::value(self)
+    }
+    fn warm_up_period(&self) -> usize {
+        Indicator::warm_up_period(self)
+    }
+    fn unstable_period(&self) -> usize {
+        Indicator::unstable_period(self)
+    }
+    fn reset(&mut self) {
+        Indicator::reset(self)
+    }
+    fn box_clone(&self) -> Box<dyn DynStr<I>> {
+        Box::new(self.clone())
+    }
+}
+
+/// A boxed `I -> Arc<str>` indicator. Implements [`Indicator`] itself, so it
+/// can be fed back into any string-consuming constructor (e.g. `StrEq` over
+/// two `Arc<str>` sources).
+struct StrSource<I>(Box<dyn DynStr<I>>);
+
+impl<I> StrSource<I> {
+    fn new<T>(inner: T) -> Self
+    where
+        T: Indicator<Input = I, Output = Arc<str>> + Clone + Send + Sync + 'static,
+    {
+        StrSource(Box::new(inner))
+    }
+}
+
+impl<I> Clone for StrSource<I> {
+    fn clone(&self) -> Self {
+        StrSource(self.0.box_clone())
+    }
+}
+
+impl<I> Indicator for StrSource<I> {
+    type Input = I;
+    type Output = Arc<str>;
+    fn update(&mut self, input: I) -> Option<Arc<str>> {
+        self.0.update(input)
+    }
+    fn value(&self) -> Option<Arc<str>> {
+        self.0.value()
     }
     fn warm_up_period(&self) -> usize {
         self.0.warm_up_period()
@@ -655,6 +734,66 @@ impl AnySignal {
     }
 }
 
+/// A string-valued source (`Arc<str>` output) erased to a candle-rooted box or
+/// a domain-neutral constant. There is no value-rooted (`Real`-input) string
+/// source in the library — every string overlay leaf reads an atom's overlay
+/// side channel — so the `Real` variant present on [`AnySource`] has no twin
+/// here.
+#[derive(Clone)]
+enum AnyStrSource {
+    Candle(StrSource<Atom>),
+    /// A constant string (the `ValueStr` leaf), domain-neutral. Adopts a
+    /// candle-rooted partner when composed against one (see [`str_pair`]).
+    Const(Arc<str>),
+}
+
+impl AnyStrSource {
+    fn value(&self) -> Option<Arc<str>> {
+        match self {
+            AnyStrSource::Candle(s) => Indicator::value(s),
+            AnyStrSource::Const(c) => Some(c.clone()),
+        }
+    }
+    fn warm_up_period(&self) -> usize {
+        match self {
+            AnyStrSource::Candle(s) => Indicator::warm_up_period(s),
+            AnyStrSource::Const(_) => 0,
+        }
+    }
+    fn unstable_period(&self) -> usize {
+        match self {
+            AnyStrSource::Candle(s) => Indicator::unstable_period(s),
+            AnyStrSource::Const(_) => 0,
+        }
+    }
+    fn reset(&mut self) {
+        match self {
+            AnyStrSource::Candle(s) => Indicator::reset(s),
+            AnyStrSource::Const(_) => {}
+        }
+    }
+}
+
+/// Two string sources resolved to the candle domain, with any neutral constant
+/// materialised via [`ValueStr`]. Both sides end up as `StrSource<Atom>`.
+fn str_pair(
+    lhs: AnyStrSource,
+    rhs: AnyStrSource,
+) -> (StrSource<Atom>, StrSource<Atom>) {
+    fn lift(c: Arc<str>) -> StrSource<Atom> {
+        StrSource::new(ValueStr::<Atom>::new(c))
+    }
+    let l = match lhs {
+        AnyStrSource::Candle(s) => s,
+        AnyStrSource::Const(c) => lift(c),
+    };
+    let r = match rhs {
+        AnyStrSource::Candle(s) => s,
+        AnyStrSource::Const(c) => lift(c),
+    };
+    (l, r)
+}
+
 /// A multi-output indicator erased to one of the two input domains.
 enum AnyMulti {
     Candle(MultiBox<Atom>),
@@ -868,10 +1007,11 @@ impl PyCandle {
 // Overlay-side types: Schema (name→index), SchemaBuilder, OverlayInfo, Atom
 // ---------------------------------------------------------------------------
 
-/// An immutable name→index registry that binds an [`OverlayInfo`]'s values
-/// array to the columns a `get()` indicator references. Built with
-/// `SchemaBuilder().add("key").finish()` — the frozen handle is what
-/// indicators and overlays share.
+/// An immutable name→(index, type) registry that binds an [`OverlayInfo`]'s
+/// values array to the columns a `get()` indicator references. Built with a
+/// `SchemaBuilder` and frozen once — every column carries its declared type
+/// (`"real"` / `"bool"` / `"str"`), which `get()` reads to pick the right typed
+/// leaf.
 #[pyclass(name = "Schema", frozen, skip_from_py_object)]
 #[derive(Clone)]
 struct PySchema {
@@ -893,21 +1033,48 @@ impl PySchema {
         self.inner.index_of(key)
     }
 
-    /// All registered column names, unordered.
+    /// The declared type of the column at `index` — one of `"real"`,
+    /// `"bool"`, `"str"` — or `None` if the index is out of range.
+    fn type_of(&self, index: usize) -> Option<&'static str> {
+        self.inner.type_of(index).map(overlay_type_name)
+    }
+
+    /// The declared type of column `key` — one of `"real"`, `"bool"`, `"str"`
+    /// — or `None` if `key` is not registered.
+    fn type_of_key(&self, key: &str) -> Option<&'static str> {
+        self.inner.type_of_key(key).map(overlay_type_name)
+    }
+
+    /// All registered column names, in insertion order.
     fn keys(&self) -> Vec<String> {
         self.inner.keys().map(str::to_string).collect()
     }
 
     fn __repr__(&self) -> String {
-        let mut keys: Vec<String> = self.inner.keys().map(str::to_string).collect();
-        keys.sort();
-        format!("Schema(keys={keys:?})")
+        let cols: Vec<String> = self
+            .inner
+            .keys()
+            .map(|k| {
+                let ty = self.inner.type_of_key(k).map(overlay_type_name).unwrap_or("?");
+                format!("{k}:{ty}")
+            })
+            .collect();
+        format!("Schema(columns={cols:?})")
     }
 }
 
-/// Mutable builder for a [`Schema`]. Add columns with `add()` (idempotent —
-/// a repeated key returns the existing index), then freeze into an immutable
-/// [`Schema`] with `finish()`.
+fn overlay_type_name(ty: OverlayType) -> &'static str {
+    match ty {
+        OverlayType::Real => "real",
+        OverlayType::Bool => "bool",
+        OverlayType::Str => "str",
+    }
+}
+
+/// Mutable builder for a [`Schema`]. Add typed columns with `add_real()` /
+/// `add_bool()` / `add_str()` (each idempotent per key), then freeze into an
+/// immutable [`Schema`] with `finish()`. `add()` remains for the pre-typed
+/// callers as an alias for `add_real()`.
 #[pyclass(name = "SchemaBuilder")]
 struct PySchemaBuilder {
     inner: Option<SchemaBuilder>,
@@ -922,15 +1089,29 @@ impl PySchemaBuilder {
         }
     }
 
-    /// Register `key`. Returns the assigned column index; a repeated key
-    /// returns the previously-assigned index without adding a slot.
+    /// Register `key` as a `Real` column. Returns the assigned column index; a
+    /// repeated key returns the previously-assigned index without adding a slot.
+    /// Re-registering with a different type raises `ValueError`.
+    fn add_real(&mut self, key: &str) -> PyResult<usize> {
+        self.with_builder(|b| b.add_real(key.to_string()))
+    }
+
+    /// Register `key` as a `Bool` column. A `Bool` overlay reads as a signal
+    /// directly — no `str_eq true` needed.
+    fn add_bool(&mut self, key: &str) -> PyResult<usize> {
+        self.with_builder(|b| b.add_bool(key.to_string()))
+    }
+
+    /// Register `key` as a `Str` column. Consumed via `get_str(...).eq("...")`
+    /// (or the underlying `str_eq(...)`).
+    fn add_str(&mut self, key: &str) -> PyResult<usize> {
+        self.with_builder(|b| b.add_str(key.to_string()))
+    }
+
+    /// Back-compat alias for [`add_real`](Self::add_real). Prefer the typed
+    /// method in new code.
     fn add(&mut self, key: &str) -> PyResult<usize> {
-        self.inner
-            .as_mut()
-            .ok_or_else(|| {
-                PyValueError::new_err("SchemaBuilder has already been finished")
-            })
-            .map(|b| b.add(key.to_string()))
+        self.add_real(key)
     }
 
     fn __len__(&self) -> PyResult<usize> {
@@ -961,13 +1142,51 @@ impl PySchemaBuilder {
     }
 }
 
+impl PySchemaBuilder {
+    /// Common wrapper around a `SchemaBuilder` call: unwraps the option,
+    /// runs the closure, catches the library's `assert!` panic on a
+    /// type-mismatch re-registration and turns it into a Python `ValueError`.
+    fn with_builder<F>(&mut self, f: F) -> PyResult<usize>
+    where
+        F: FnOnce(&mut SchemaBuilder) -> usize + std::panic::UnwindSafe,
+    {
+        let builder = self.inner.as_mut().ok_or_else(|| {
+            PyValueError::new_err("SchemaBuilder has already been finished")
+        })?;
+        // The library asserts on a type-mismatch re-registration; catch it so
+        // Python sees a normal ValueError instead of a hard abort.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(builder))) {
+            Ok(idx) => Ok(idx),
+            Err(payload) => {
+                let msg = panic_message(&payload);
+                Err(PyValueError::new_err(msg))
+            }
+        }
+    }
+}
+
+/// Best-effort recovery of a panic payload's message. `String` and `&str`
+/// payloads are the two common shapes for `assert!(cond, "…")` panics.
+fn panic_message(payload: &Box<dyn std::any::Any + Send + 'static>) -> String {
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        return (*s).to_string();
+    }
+    "unknown error".to_string()
+}
+
 /// Per-atom overlay values, bound to a shared [`Schema`]. Construct as
-/// `OverlayInfo(schema, values)` where `values` is a list of floats whose
-/// length matches `len(schema)`.
+/// `OverlayInfo(schema, values)` — `values` is a list whose length matches
+/// `len(schema)`, with each entry a Python `float` / `bool` / `str` matching
+/// the column's declared type. Reading a value with `get()` returns the
+/// native Python type; the typed accessors (`get_real` / `get_bool` /
+/// `get_str`) return `None` on a type mismatch.
 ///
-/// The internal `Rc<[Real]>` (per-atom, non-atomic refcount) makes this
-/// class `unsendable` — it's confined to the Python thread that created it.
-/// This is fine under the GIL and keeps overlay clones cheap in the hot
+/// The internal `Rc<[OverlayValue]>` (per-atom, non-atomic refcount) makes
+/// this class `unsendable` — it's confined to the Python thread that created
+/// it. This is fine under the GIL and keeps overlay clones cheap in the hot
 /// per-bar loop.
 #[pyclass(name = "OverlayInfo", frozen, unsendable, skip_from_py_object)]
 #[derive(Clone)]
@@ -978,7 +1197,7 @@ struct PyOverlayInfo {
 #[pymethods]
 impl PyOverlayInfo {
     #[new]
-    fn new(schema: &PySchema, values: Vec<Real>) -> PyResult<Self> {
+    fn new(schema: &PySchema, values: Vec<Py<PyAny>>, py: Python<'_>) -> PyResult<Self> {
         if values.len() != schema.inner.len() {
             return Err(PyValueError::new_err(format!(
                 "values length ({}) must match schema length ({})",
@@ -986,8 +1205,14 @@ impl PyOverlayInfo {
                 schema.inner.len(),
             )));
         }
+        let mut typed: Vec<OverlayValue> = Vec::with_capacity(values.len());
+        for (i, v) in values.into_iter().enumerate() {
+            let declared = schema.inner.type_of(i).expect("schema index in range");
+            let bound = v.bind(py);
+            typed.push(python_to_overlay_value(bound, declared, i)?);
+        }
         Ok(Self {
-            inner: OverlayInfo::new(schema.inner.clone(), values),
+            inner: OverlayInfo::new(schema.inner.clone(), typed),
         })
     }
 
@@ -995,19 +1220,108 @@ impl PyOverlayInfo {
         self.inner.values().len()
     }
 
-    /// Read the value at a resolved column index (`None` if out of bounds).
-    fn get(&self, index: usize) -> Option<Real> {
-        self.inner.get(index)
+    /// Read the value at a resolved column index as its native Python type
+    /// (`float` for `Real`, `bool` for `Bool`, `str` for `Str`), or `None` if
+    /// the index is out of bounds.
+    fn get(&self, py: Python<'_>, index: usize) -> Option<Py<PyAny>> {
+        self.inner.get(index).and_then(|v| overlay_to_python(py, v).ok())
     }
 
     /// Read the value by column name (`None` if the key isn't registered).
-    fn get_by_key(&self, key: &str) -> Option<Real> {
-        self.inner.get_by_key(key)
+    fn get_by_key(&self, py: Python<'_>, key: &str) -> Option<Py<PyAny>> {
+        self.inner
+            .schema()
+            .index_of(key)
+            .and_then(|i| self.get(py, i))
+    }
+
+    /// Typed reader: `Real` value at `index`, or `None` on out-of-bounds or a
+    /// type mismatch (the schema declares a different type at this index).
+    fn get_real(&self, index: usize) -> Option<Real> {
+        self.inner.get_real(index)
+    }
+
+    /// Typed reader: `Bool` value at `index`, or `None` on out-of-bounds or a
+    /// type mismatch.
+    fn get_bool(&self, index: usize) -> Option<bool> {
+        self.inner.get_bool(index)
+    }
+
+    /// Typed reader: `Str` value at `index`, or `None` on out-of-bounds or a
+    /// type mismatch.
+    fn get_str(&self, index: usize) -> Option<String> {
+        self.inner.get_str(index).map(|s| s.to_string())
     }
 
     fn __repr__(&self) -> String {
         format!("OverlayInfo(values={:?})", self.inner.values())
     }
+}
+
+/// Convert one Python value into an [`OverlayValue`] of the declared type. On
+/// mismatch, raises a `ValueError` mentioning the slot index + expected type
+/// so a caller can locate the bad value in a large list.
+fn python_to_overlay_value(
+    bound: &Bound<'_, PyAny>,
+    declared: OverlayType,
+    slot: usize,
+) -> PyResult<OverlayValue> {
+    match declared {
+        // Bool has to be tested first: `bool` extracts as `f64` too under
+        // pyo3's numeric coercion, so a naive Real match would swallow it.
+        OverlayType::Bool => bound
+            .extract::<bool>()
+            .map(OverlayValue::Bool)
+            .map_err(|_| slot_type_error(slot, declared, bound)),
+        OverlayType::Real => {
+            // A stray `True`/`False` in a Real slot — reject rather than
+            // silently coerce to 1.0 / 0.0.
+            if bound.extract::<bool>().is_ok() && is_python_bool(bound) {
+                return Err(slot_type_error(slot, declared, bound));
+            }
+            bound
+                .extract::<Real>()
+                .map(OverlayValue::Real)
+                .map_err(|_| slot_type_error(slot, declared, bound))
+        }
+        OverlayType::Str => bound
+            .extract::<String>()
+            .map(|s| OverlayValue::Str(Arc::from(s.as_str())))
+            .map_err(|_| slot_type_error(slot, declared, bound)),
+    }
+}
+
+/// Whether `bound` is a Python `bool` (distinguishes `True`/`False` from
+/// numeric `1`/`0`). PyO3 coerces `bool` to `f64`, so distinguishing them
+/// requires an explicit type check on the Python side.
+fn is_python_bool(bound: &Bound<'_, PyAny>) -> bool {
+    bound
+        .get_type()
+        .name()
+        .ok()
+        .map(|n| n == "bool")
+        .unwrap_or(false)
+}
+
+fn slot_type_error(slot: usize, declared: OverlayType, bound: &Bound<'_, PyAny>) -> PyErr {
+    let got = bound
+        .get_type()
+        .name()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|_| "<unknown>".to_string());
+    PyValueError::new_err(format!(
+        "overlay value at index {slot}: schema declared {declared}, got Python {got:?}",
+    ))
+}
+
+/// Convert an [`OverlayValue`] to its native Python object counterpart.
+fn overlay_to_python(py: Python<'_>, v: &OverlayValue) -> PyResult<Py<PyAny>> {
+    use pyo3::IntoPyObject;
+    Ok(match v {
+        OverlayValue::Real(x) => x.into_pyobject(py)?.into_any().unbind(),
+        OverlayValue::Bool(b) => b.into_pyobject(py)?.to_owned().into_any().unbind(),
+        OverlayValue::Str(s) => s.as_ref().into_pyobject(py)?.into_any().unbind(),
+    })
 }
 
 /// A single bar's full input to the indicator chain: an OHLCV [`Candle`] and,
@@ -1521,6 +1835,108 @@ impl PySignal {
     fn __repr__(&self) -> String {
         format!("Signal(value={})", self.sig.is_true())
     }
+}
+
+/// A string-valued source (`Arc<str>` output). Produced by `get_str()` for a
+/// `Str`-typed overlay column and `value_str()` for a string literal;
+/// consumed by `str_eq()` / `str_ne()` to build a boolean signal.
+///
+/// Distinct from `Indicator` because a real-valued signal chain has no notion
+/// of a string output — the only thing you can do with a `StrSource` is
+/// compare it (against another `StrSource` or a Python `str`). All string
+/// sources are atom-rooted: `get_str()` reads an overlay slot, and
+/// `value_str()`'s constant ignores its input.
+#[pyclass(name = "StrSource")]
+struct PyStrSource {
+    src: AnyStrSource,
+}
+
+impl PyStrSource {
+    fn wrap(src: AnyStrSource) -> Self {
+        PyStrSource { src }
+    }
+}
+
+#[pymethods]
+impl PyStrSource {
+    /// Feed the next sample; returns the current string, or `None` while
+    /// warming up. Always accepts an `Atom` (or a `Candle`, lifted to an
+    /// overlay-free atom — which makes an overlay-reading source yield
+    /// `None`).
+    fn update(&mut self, sample: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+        let atom = extract_atom(sample)?;
+        let out = match &mut self.src {
+            AnyStrSource::Candle(s) => Indicator::update(s, atom),
+            AnyStrSource::Const(c) => Some(c.clone()),
+        };
+        Ok(out.map(|s| s.to_string()))
+    }
+
+    /// The most recent value, without advancing state.
+    fn value(&self) -> Option<String> {
+        self.src.value().map(|s| s.to_string())
+    }
+
+    fn is_ready(&self) -> bool {
+        self.src.value().is_some()
+    }
+
+    fn warm_up_period(&self) -> usize {
+        self.src.warm_up_period()
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.src.unstable_period()
+    }
+
+    fn stable_period(&self) -> usize {
+        self.src.warm_up_period() + self.src.unstable_period()
+    }
+
+    fn reset(&mut self) {
+        self.src.reset()
+    }
+
+    /// `self == other` — build a boolean signal that fires when both string
+    /// sources agree. `other` may be another `StrSource` or a Python `str`
+    /// (lifted to a `ValueStr` constant).
+    fn eq(&self, other: &Bound<'_, PyAny>) -> PyResult<PySignal> {
+        let rhs = coerce_str_operand(other)?;
+        let (l, r) = str_pair(self.src.clone(), rhs);
+        Ok(PySignal::wrap(AnySignal::Candle(SignalBox::new(
+            Combine::<_, _, StrEqOp>::new(l, r),
+        ))))
+    }
+
+    /// `self != other` — the string counterpart to [`eq`](Self::eq).
+    fn ne(&self, other: &Bound<'_, PyAny>) -> PyResult<PySignal> {
+        let rhs = coerce_str_operand(other)?;
+        let (l, r) = str_pair(self.src.clone(), rhs);
+        Ok(PySignal::wrap(AnySignal::Candle(SignalBox::new(
+            Combine::<_, _, StrNeOp>::new(l, r),
+        ))))
+    }
+
+    fn __repr__(&self) -> String {
+        match self.src.value() {
+            Some(v) => format!("StrSource(value={v:?})"),
+            None => "StrSource(value=None)".to_string(),
+        }
+    }
+}
+
+/// Coerce a Python operand for a string-comparison RHS: accepts either a
+/// `PyStrSource` or a Python `str` (lifted to `AnyStrSource::Const`).
+fn coerce_str_operand(other: &Bound<'_, PyAny>) -> PyResult<AnyStrSource> {
+    if let Ok(src) = other.cast::<PyStrSource>() {
+        return Ok(src.borrow().src.clone());
+    }
+    if let Ok(s) = other.extract::<String>() {
+        return Ok(AnyStrSource::Const(Arc::from(s.as_str())));
+    }
+    Err(PyTypeError::new_err(
+        "expected a StrSource or a str for string comparison",
+    ))
 }
 
 /// A multi-output indicator (MACD, Bollinger, ADX, …). `update`/`value`
@@ -2736,11 +3152,122 @@ fn unstable(py: Python<'_>, arg: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
 /// yields `None` — pass an `Atom` carrying an `OverlayInfo` bound to the same
 /// schema to see values.
 ///
+/// **Polymorphic on the column's declared type**: a `Real` column yields an
+/// `Indicator`, a `Bool` column yields a `Signal`, and a `Str` column yields
+/// a `StrSource`. Use `get_real()` / `get_bool()` / `get_str()` if you want
+/// to assert the returned type at the call site.
+///
 /// Raises `ValueError` if `key` isn't registered in `schema`.
 #[pyfunction]
-fn get(schema: &PySchema, key: &str) -> PyResult<PyIndicator> {
-    let source = Get::try_new(&schema.inner, key).map_err(|e| PyValueError::new_err(e.key))?;
-    Ok(PyIndicator::wrap(AnySource::Candle(Source::new(source))))
+fn get<'py>(py: Python<'py>, schema: &PySchema, key: &str) -> PyResult<Py<PyAny>> {
+    match schema.inner.type_of_key(key) {
+        Some(OverlayType::Real) => {
+            let ind = build_get_real(schema, key)?;
+            Ok(ind.into_pyobject(py)?.into_any().unbind())
+        }
+        Some(OverlayType::Bool) => {
+            let sig = build_get_bool(schema, key)?;
+            Ok(sig.into_pyobject(py)?.into_any().unbind())
+        }
+        Some(OverlayType::Str) => {
+            let src = build_get_str(schema, key)?;
+            Ok(src.into_pyobject(py)?.into_any().unbind())
+        }
+        None => Err(unknown_key_error(schema, key)),
+    }
+}
+
+/// Read a `Real`-typed overlay column. Always returns an `Indicator`; raises
+/// `ValueError` if the column is missing or its declared type isn't `Real`.
+#[pyfunction]
+fn get_real(schema: &PySchema, key: &str) -> PyResult<PyIndicator> {
+    if !schema.inner.contains(key) {
+        return Err(unknown_key_error(schema, key));
+    }
+    build_get_real(schema, key)
+}
+
+/// Read a `Bool`-typed overlay column. Always returns a `Signal`; raises
+/// `ValueError` if the column is missing or its declared type isn't `Bool`.
+#[pyfunction]
+fn get_bool(schema: &PySchema, key: &str) -> PyResult<PySignal> {
+    if !schema.inner.contains(key) {
+        return Err(unknown_key_error(schema, key));
+    }
+    build_get_bool(schema, key)
+}
+
+/// Read a `Str`-typed overlay column. Always returns a `StrSource`; raises
+/// `ValueError` if the column is missing or its declared type isn't `Str`.
+#[pyfunction]
+fn get_str(schema: &PySchema, key: &str) -> PyResult<PyStrSource> {
+    if !schema.inner.contains(key) {
+        return Err(unknown_key_error(schema, key));
+    }
+    build_get_str(schema, key)
+}
+
+fn build_get_real(schema: &PySchema, key: &str) -> PyResult<PyIndicator> {
+    let src = GetReal::try_new(&schema.inner, key).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(PyIndicator::wrap(AnySource::Candle(Source::new(src))))
+}
+
+fn build_get_bool(schema: &PySchema, key: &str) -> PyResult<PySignal> {
+    let src = GetBool::try_new(&schema.inner, key).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(PySignal::wrap(AnySignal::Candle(SignalBox::new(src))))
+}
+
+fn build_get_str(schema: &PySchema, key: &str) -> PyResult<PyStrSource> {
+    let src = GetStr::try_new(&schema.inner, key).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(PyStrSource::wrap(AnyStrSource::Candle(StrSource::new(src))))
+}
+
+/// The "unknown overlay key" error message used by `get*()` — lists the
+/// registered keys so a typo is easy to spot, or hints that the caller
+/// forgot to bind a schema.
+fn unknown_key_error(schema: &PySchema, key: &str) -> PyErr {
+    let registered: Vec<String> = schema.inner.keys().map(str::to_string).collect();
+    if registered.is_empty() {
+        PyValueError::new_err(format!(
+            "unknown overlay key {key:?}: no columns registered on this schema"
+        ))
+    } else {
+        PyValueError::new_err(format!(
+            "unknown overlay key {key:?}. Registered columns: {}",
+            registered.join(", "),
+        ))
+    }
+}
+
+/// A constant string source — the string twin of `value(x)`. Feeds a
+/// [`ValueStr`] leaf as a `StrSource` that ignores its input and always emits
+/// `s`. Usually you don't need to build one explicitly: `StrSource.eq("foo")`
+/// accepts a raw Python `str` on the right-hand side and lifts internally.
+#[pyfunction]
+fn value_str(s: &str) -> PyStrSource {
+    PyStrSource::wrap(AnyStrSource::Const(Arc::from(s)))
+}
+
+/// `lhs == rhs` on two string sources. `lhs` is a `StrSource`; `rhs` may be
+/// another `StrSource` or a Python `str` (lifted to a `ValueStr` constant).
+/// Returns a `Signal`.
+#[pyfunction]
+fn str_eq(lhs: &PyStrSource, rhs: &Bound<'_, PyAny>) -> PyResult<PySignal> {
+    let rhs = coerce_str_operand(rhs)?;
+    let (l, r) = str_pair(lhs.src.clone(), rhs);
+    Ok(PySignal::wrap(AnySignal::Candle(SignalBox::new(
+        Combine::<_, _, StrEqOp>::new(l, r),
+    ))))
+}
+
+/// `lhs != rhs` on two string sources. The complement of [`str_eq`].
+#[pyfunction]
+fn str_ne(lhs: &PyStrSource, rhs: &Bound<'_, PyAny>) -> PyResult<PySignal> {
+    let rhs = coerce_str_operand(rhs)?;
+    let (l, r) = str_pair(lhs.src.clone(), rhs);
+    Ok(PySignal::wrap(AnySignal::Candle(SignalBox::new(
+        Combine::<_, _, StrNeOp>::new(l, r),
+    ))))
 }
 
 // ---------------------------------------------------------------------------
@@ -3823,6 +4350,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyAtom>()?;
     m.add_class::<PyIndicator>()?;
     m.add_class::<PySignal>()?;
+    m.add_class::<PyStrSource>()?;
     m.add_class::<PyMulti>()?;
     m.add_class::<PySharedMulti>()?;
     m.add_class::<PyWallet>()?;
@@ -3838,10 +4366,10 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         ($($f:ident),* $(,)?) => { $( m.add_function(wrap_pyfunction!($f, m)?)?; )* };
     }
     reg!(
-        open, high, low, close, volume, typical, median, identity, value, sma, ema, rma, wma, hma,
-        rsi, stddev, stochastic, cci, atr, mfi, williams_r, obv, vwap, ad, true_range, adx, dmi,
-        aroon, sar, macd, bollinger, keltner, donchian, stoch_rsi, resample, latch, unstable, get,
-        fetch,
+        open, high, low, close, volume, typical, median, identity, value, value_str, sma, ema, rma,
+        wma, hma, rsi, stddev, stochastic, cci, atr, mfi, williams_r, obv, vwap, ad, true_range,
+        adx, dmi, aroon, sar, macd, bollinger, keltner, donchian, stoch_rsi, resample, latch,
+        unstable, get, get_real, get_bool, get_str, str_eq, str_ne, fetch,
     );
 
     // `fugazi.metrics` — mirror of `fugazi::metrics::*`. Registered as a

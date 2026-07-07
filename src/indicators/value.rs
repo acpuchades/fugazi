@@ -1,4 +1,5 @@
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use crate::indicator::Indicator;
 use crate::types::Real;
@@ -39,6 +40,50 @@ impl<I> Indicator for Value<I> {
 
     fn value(&self) -> Option<Real> {
         Some(self.constant)
+    }
+
+    fn warm_up_period(&self) -> usize {
+        0
+    }
+
+    fn reset(&mut self) {}
+}
+
+/// The string twin of [`Value`]: a constant `Arc<str>` source that ignores its
+/// input.
+///
+/// Lets a string literal take part in string-typed composition — e.g. the
+/// right-hand side of a [`StrEq`](super::compare::StrEq) against a
+/// [`GetStr`](super::GetStr) column read.
+#[derive(Debug, Clone)]
+pub struct ValueStr<I> {
+    constant: Arc<str>,
+    _input: PhantomData<fn(I)>,
+}
+
+impl<I> ValueStr<I> {
+    pub fn new(constant: impl Into<Arc<str>>) -> Self {
+        Self {
+            constant: constant.into(),
+            _input: PhantomData,
+        }
+    }
+
+    pub fn constant(&self) -> &Arc<str> {
+        &self.constant
+    }
+}
+
+impl<I> Indicator for ValueStr<I> {
+    type Input = I;
+    type Output = Arc<str>;
+
+    fn update(&mut self, _input: I) -> Option<Arc<str>> {
+        Some(self.constant.clone())
+    }
+
+    fn value(&self) -> Option<Arc<str>> {
+        Some(self.constant.clone())
     }
 
     fn warm_up_period(&self) -> usize {

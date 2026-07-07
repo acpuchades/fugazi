@@ -3,6 +3,8 @@
 //! Split out of `spec/mod.rs`; kept in `crate::spec::strategy` so paths like
 //! `crate::spec::StrategySpec` still resolve via the `pub use` in `mod.rs`.
 
+use std::sync::Arc;
+
 use serde::Deserialize;
 
 use fugazi::indicators::Position;
@@ -46,10 +48,10 @@ pub struct SideSpec {
 impl SideSpec {
     /// Build this side's exit signal, defaulting a missing one to constant-`false`
     /// (matching the unwired slots in [`SingleAssetStrategy::new`]).
-    fn exit(&self, anchor: &Position) -> Box<dyn DynIndicator> {
+    fn exit(&self, anchor: &Position, schema: &Arc<Schema>) -> Box<dyn DynIndicator> {
         self.exit
             .as_ref()
-            .map(|s| s.build(anchor))
+            .map(|s| s.build(anchor, schema))
             .unwrap_or_else(|| dyn_indicator::wrap(Const::<Atom>::new(false)))
     }
 }
@@ -98,37 +100,43 @@ impl StrategySpec {
 
     /// Build the live [`DynSingleStrategy`] this spec describes.
     ///
+    /// `schema` is the overlay [`Schema`] the atom stream carries — the
+    /// `!get`-shaped leaves resolve their column names + types against it at
+    /// build time. Pass [`Schema::empty()`] when there is no overlay side
+    /// channel; `!get` will then panic with an "unknown key" that mentions
+    /// the empty registered-keys list.
+    ///
     /// No automatic wrapping — every signal / level is built exactly as the
     /// YAML describes it. If you want to gate an entry on stability, compose
-    /// [`Stable`](fugazi::indicators::Stable) explicitly at the signal level:
-    /// `enter: !and [<entry>, !stable { source: <source-of-interest> }]`.
-    pub fn build(&self) -> DynSingleStrategy {
+    /// [`Unstable`](fugazi::indicators::Unstable) at the signal level to opt a
+    /// subtree out of the strategy-readiness wait.
+    pub fn build(&self, schema: &Arc<Schema>) -> DynSingleStrategy {
         let mut strat = SingleAssetStrategy::new(self.symbol.clone());
         // One position per strategy, shared by every `entry`/`peak`/`trough` leaf
         // in the sides' signals and stop levels.
         let anchor = strat.position();
         if let Some(long) = &self.long {
             strat = strat.long_on(
-                AsBool::new(long.enter.build(&anchor)),
-                AsBool::new(long.exit(&anchor)),
+                AsBool::new(long.enter.build(&anchor, schema)),
+                AsBool::new(long.exit(&anchor, schema)),
             );
             if let Some(sl) = &long.stop_loss {
-                strat = strat.long_stop_loss(AsReal::new(sl.build(&anchor)));
+                strat = strat.long_stop_loss(AsReal::new(sl.build(&anchor, schema)));
             }
             if let Some(tp) = &long.take_profit {
-                strat = strat.long_take_profit(AsReal::new(tp.build(&anchor)));
+                strat = strat.long_take_profit(AsReal::new(tp.build(&anchor, schema)));
             }
         }
         if let Some(short) = &self.short {
             strat = strat.short_on(
-                AsBool::new(short.enter.build(&anchor)),
-                AsBool::new(short.exit(&anchor)),
+                AsBool::new(short.enter.build(&anchor, schema)),
+                AsBool::new(short.exit(&anchor, schema)),
             );
             if let Some(sl) = &short.stop_loss {
-                strat = strat.short_stop_loss(AsReal::new(sl.build(&anchor)));
+                strat = strat.short_stop_loss(AsReal::new(sl.build(&anchor, schema)));
             }
             if let Some(tp) = &short.take_profit {
-                strat = strat.short_take_profit(AsReal::new(tp.build(&anchor)));
+                strat = strat.short_take_profit(AsReal::new(tp.build(&anchor, schema)));
             }
         }
         DynSingleStrategy { inner: strat }

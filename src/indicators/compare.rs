@@ -12,6 +12,8 @@
 //! sources are warmed up (it reads `false` through
 //! [`BoolIndicatorExt::is_true`](crate::indicators::BoolIndicatorExt::is_true)).
 
+use std::sync::Arc;
+
 use crate::indicators::ops::{BinaryOp, Combine};
 use crate::types::Real;
 
@@ -207,3 +209,73 @@ pub type Le<L, R> = Combine<L, R, LeOp>;
 pub type Eq<L, R> = Combine<L, R, EqOp>;
 /// Fires while `lhs` and `rhs` differ by more than `epsilon`.
 pub type Ne<L, R> = Combine<L, R, NeOp>;
+
+// ---------------------------------------------------------------------------
+// String equality
+// ---------------------------------------------------------------------------
+
+/// `lhs == rhs` on two `Arc<str>` sources. No epsilon — equality is bytewise.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StrEqOp;
+
+impl BinaryOp for StrEqOp {
+    type Lhs = Arc<str>;
+    type Rhs = Arc<str>;
+    type Output = bool;
+    fn apply(&self, lhs: Arc<str>, rhs: Arc<str>) -> Option<bool> {
+        Some(lhs.as_ref() == rhs.as_ref())
+    }
+}
+
+/// `lhs != rhs` on two `Arc<str>` sources. No epsilon — equality is bytewise.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StrNeOp;
+
+impl BinaryOp for StrNeOp {
+    type Lhs = Arc<str>;
+    type Rhs = Arc<str>;
+    type Output = bool;
+    fn apply(&self, lhs: Arc<str>, rhs: Arc<str>) -> Option<bool> {
+        Some(lhs.as_ref() != rhs.as_ref())
+    }
+}
+
+/// Fires while `lhs` and `rhs` (both `Arc<str>` sources) are byte-equal.
+pub type StrEq<L, R> = Combine<L, R, StrEqOp>;
+/// Fires while `lhs` and `rhs` (both `Arc<str>` sources) differ.
+pub type StrNe<L, R> = Combine<L, R, StrNeOp>;
+
+#[cfg(test)]
+mod str_tests {
+    use super::*;
+    use crate::indicator::Indicator;
+    use crate::indicators::value::ValueStr;
+    use crate::types::Atom;
+
+    #[test]
+    fn str_eq_fires_on_match() {
+        let atom = Atom::new(crate::types::Candle::new(1.0, 2.0, 0.5, 1.5, 10.0));
+        let lhs: ValueStr<Atom> = ValueStr::new("bull");
+        let rhs: ValueStr<Atom> = ValueStr::new("bull");
+        let mut cmp: StrEq<ValueStr<Atom>, ValueStr<Atom>> = Combine::new(lhs, rhs);
+        assert_eq!(cmp.update(atom), Some(true));
+    }
+
+    #[test]
+    fn str_eq_false_on_mismatch() {
+        let atom = Atom::new(crate::types::Candle::new(1.0, 2.0, 0.5, 1.5, 10.0));
+        let lhs: ValueStr<Atom> = ValueStr::new("bull");
+        let rhs: ValueStr<Atom> = ValueStr::new("bear");
+        let mut cmp: StrEq<ValueStr<Atom>, ValueStr<Atom>> = Combine::new(lhs, rhs);
+        assert_eq!(cmp.update(atom), Some(false));
+    }
+
+    #[test]
+    fn str_ne_inverts_str_eq() {
+        let atom = Atom::new(crate::types::Candle::new(1.0, 2.0, 0.5, 1.5, 10.0));
+        let lhs: ValueStr<Atom> = ValueStr::new("bear");
+        let rhs: ValueStr<Atom> = ValueStr::new("bull");
+        let mut cmp: StrNe<ValueStr<Atom>, ValueStr<Atom>> = Combine::new(lhs, rhs);
+        assert_eq!(cmp.update(atom), Some(true));
+    }
+}

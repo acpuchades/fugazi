@@ -31,28 +31,88 @@ const RESERVED_COLUMNS: &[&str] = &[
     "symbol", "time", "freq", "open", "high", "low", "close", "volume",
 ];
 
-/// Classification of a candidate overlay column across a symbol's rows: whether
-/// its observed values are all numeric, mixed with a non-numeric one, or never
-/// present at all. Sticky — once `NonNumeric`, it stays that way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ColumnState {
-    /// No non-empty value observed yet.
-    Empty,
-    /// Every non-empty value observed parses as [`Real`].
-    Numeric,
-    /// At least one non-empty value failed to parse.
-    NonNumeric,
+/// Classification state for one candidate overlay column, accumulated across
+/// a symbol's rows. Two flags start `true` and monotonically flip to `false`
+/// on the first observation that violates them; after the pass the type is
+/// picked in priority order **Bool > Real > Str** (both `_ok` → Bool, only
+/// `real_ok` → Real, otherwise → Str).
+///
+/// This is what lets a `true`/`false` column drop straight into a `!get`
+/// signal position without a `!str_eq` gymnastics — CSV makes those tokens
+/// unambiguously not-numeric-and-not-general-strings.
+#[derive(Debug, Clone, Copy)]
+struct ColumnState {
+    /// Every non-empty value observed so far is a case-insensitive
+    /// `true`/`false`.
+    bool_ok: bool,
+    /// Every non-empty value observed so far parses as [`Real`].
+    real_ok: bool,
+    /// Whether any non-empty value has been observed. An all-empty column has
+    /// no evidence for either type; we register it as `Str` (harmless — the
+    /// atoms will carry empty strings, which read as `""` back out).
+    seen_any: bool,
 }
 
-/// The atom series for one symbol: per-bar `(time, atom)` pairs plus the list
-/// of non-numeric overlay columns dropped from the shared [`Schema`] (which
-/// callers surface as a warning).
+impl ColumnState {
+    fn new() -> Self {
+        Self {
+            bool_ok: true,
+            real_ok: true,
+            seen_any: false,
+        }
+    }
+
+    fn observe(&mut self, value: &str) {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return; // missing carries no signal about the column type
+        }
+        self.seen_any = true;
+        if !is_bool_token(trimmed) {
+            self.bool_ok = false;
+        }
+        if trimmed.parse::<Real>().is_err() {
+            self.real_ok = false;
+        }
+    }
+
+    /// Resolve to the declared [`OverlayType`] after all rows are observed.
+    fn resolve(&self) -> OverlayType {
+        if self.seen_any && self.bool_ok {
+            OverlayType::Bool
+        } else if self.seen_any && self.real_ok {
+            OverlayType::Real
+        } else {
+            OverlayType::Str
+        }
+    }
+}
+
+/// Case-insensitive `true` / `false` recognizer. Deliberately narrow: no
+/// `yes`/`no`/`1`/`0` — those overlap with `Real` and would break the
+/// priority ordering.
+fn is_bool_token(s: &str) -> bool {
+    s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("false")
+}
+
+/// Parse a `true`/`false` token to bool. Caller must have already accepted it
+/// via [`is_bool_token`]; anything else is a defensive `false`.
+fn parse_bool_token(s: &str) -> bool {
+    s.eq_ignore_ascii_case("true")
+}
+
+/// The atom series for one symbol: per-bar `(time, atom)` pairs plus a
+/// vestigial "skipped columns" list (always empty in the current
+/// implementation — retained so the existing warning banners in
+/// [`crate::run`] / [`crate::optimize`] compile unchanged; follow-up cleanup
+/// will remove both the field and the banners).
 #[derive(Debug)]
 pub struct AtomSeries {
     /// One `(time, atom)` per bar, ascending by `time`.
     pub atoms: Vec<(String, Atom)>,
-    /// Non-reserved columns that carried at least one non-numeric value and
-    /// were therefore excluded from the schema. Alphabetical.
+    /// **Deprecated.** Non-reserved columns that used to be dropped from the
+    /// schema for carrying a non-numeric value; the loader now preserves
+    /// those as `Str` overlays and returns an empty list here.
     pub skipped_columns: Vec<String>,
 }
 
@@ -189,12 +249,12 @@ impl DataFrame {
     /// per-bar overlay values keyed by a shared [`Schema`] built from every
     /// non-reserved column found in the symbol's rows.
     ///
-    /// A candidate overlay column is included in the schema iff every non-empty
-    /// value for it parses as [`Real`]; columns with at least one non-numeric
-    /// value are dropped from the schema and returned in
-    /// [`AtomSeries::skipped_columns`] so the caller can warn. Missing values
-    /// (row lacks the column, or the cell is empty) become [`Real::NAN`].
-    /// Schema columns are ordered alphabetically for determinism.
+    /// Each candidate overlay column is auto-classified across its observed
+    /// values by the **Bool > Real > Str** priority classifier
+    /// ([`ColumnState`]) — every column survives, whatever its cell shape.
+    /// A missing cell reads as `Real::NAN` for a `Real` column, `false` for a
+    /// `Bool` column, and `""` for a `Str` column. Schema columns are ordered
+    /// alphabetically for determinism.
     pub fn atoms(&self, symbol: &str) -> Result<AtomSeries> {
         // Single pass over the symbol's rows to (a) confirm the symbol has
         // rows at all and (b) classify each non-reserved column by
@@ -210,21 +270,10 @@ impl DataFrame {
                 if RESERVED_COLUMNS.contains(&name.as_str()) {
                     continue;
                 }
-                let state = classification
+                classification
                     .entry(name.clone())
-                    .or_insert(ColumnState::Empty);
-                if *state == ColumnState::NonNumeric {
-                    continue; // sticky — one bad value is enough
-                }
-                let trimmed = value.trim();
-                if trimmed.is_empty() {
-                    continue; // missing carries no signal about the column type
-                }
-                *state = if trimmed.parse::<Real>().is_ok() {
-                    ColumnState::Numeric
-                } else {
-                    ColumnState::NonNumeric
-                };
+                    .or_insert_with(ColumnState::new)
+                    .observe(value);
             }
         }
 
@@ -232,25 +281,22 @@ impl DataFrame {
             bail!("no rows found for symbol `{symbol}` across the given --series");
         }
 
-        // BTreeMap iterates alphabetically, so numeric_columns and
-        // skipped_columns come out sorted for free.
-        let numeric_columns: Vec<String> = classification
+        // BTreeMap iterates alphabetically, so column_types stays sorted.
+        let column_types: Vec<(String, OverlayType)> = classification
             .iter()
-            .filter(|(_, s)| **s == ColumnState::Numeric)
-            .map(|(k, _)| k.clone())
-            .collect();
-        let skipped_columns: Vec<String> = classification
-            .iter()
-            .filter(|(_, s)| **s == ColumnState::NonNumeric)
-            .map(|(k, _)| k.clone())
+            .map(|(k, s)| (k.clone(), s.resolve()))
             .collect();
 
-        let schema = if numeric_columns.is_empty() {
+        let schema = if column_types.is_empty() {
             None
         } else {
             let mut b = Schema::builder();
-            for name in &numeric_columns {
-                b.add(name.clone());
+            for (name, ty) in &column_types {
+                match ty {
+                    OverlayType::Real => b.add_real(name.clone()),
+                    OverlayType::Bool => b.add_bool(name.clone()),
+                    OverlayType::Str => b.add_str(name.clone()),
+                };
             }
             Some(b.finish())
         };
@@ -266,14 +312,11 @@ impl DataFrame {
             let atom = match &schema {
                 None => Atom::new(candle),
                 Some(schema) => {
-                    let values: Vec<Real> = numeric_columns
+                    let values: Vec<OverlayValue> = column_types
                         .iter()
-                        .map(|name| {
-                            row.get(name)
-                                .map(|v| v.trim())
-                                .filter(|v| !v.is_empty())
-                                .and_then(|v| v.parse::<Real>().ok())
-                                .unwrap_or(Real::NAN)
+                        .map(|(name, ty)| {
+                            let raw = row.get(name).map(|s| s.trim()).unwrap_or("");
+                            cell_to_overlay(raw, *ty)
                         })
                         .collect();
                     let overlays = OverlayInfo::new(schema.clone(), values);
@@ -285,8 +328,32 @@ impl DataFrame {
 
         Ok(AtomSeries {
             atoms,
-            skipped_columns,
+            skipped_columns: Vec::new(),
         })
+    }
+}
+
+/// Convert a raw CSV cell to an [`OverlayValue`] of the declared type.
+/// Missing / empty cells fall through to type-appropriate defaults
+/// (`Real::NAN`, `false`, `""`) — matching the pre-widening behaviour of the
+/// old `Real::NAN` fallback for numeric columns.
+fn cell_to_overlay(raw: &str, ty: OverlayType) -> OverlayValue {
+    match ty {
+        OverlayType::Real => {
+            if raw.is_empty() {
+                OverlayValue::Real(Real::NAN)
+            } else {
+                OverlayValue::Real(raw.parse::<Real>().unwrap_or(Real::NAN))
+            }
+        }
+        OverlayType::Bool => {
+            if raw.is_empty() {
+                OverlayValue::Bool(false)
+            } else {
+                OverlayValue::Bool(parse_bool_token(raw))
+            }
+        }
+        OverlayType::Str => OverlayValue::Str(std::sync::Arc::from(raw)),
     }
 }
 
@@ -483,27 +550,87 @@ mod tests {
         // Alphabetical order: regime_score, vol_20.
         assert_eq!(schema.index_of("regime_score"), Some(0));
         assert_eq!(schema.index_of("vol_20"), Some(1));
-        assert_eq!(overlays.get_by_key("vol_20"), Some(0.12));
-        assert_eq!(overlays.get_by_key("regime_score"), Some(1.0));
+        assert_eq!(overlays.get_real(schema.index_of("vol_20").unwrap()), Some(0.12));
+        assert_eq!(overlays.get_real(schema.index_of("regime_score").unwrap()), Some(1.0));
     }
 
     #[test]
-    fn atoms_skip_non_numeric_columns_and_report_them() {
+    fn atoms_preserve_non_numeric_columns_as_str_overlays() {
         let path = tmp_csv(
             "fugazi_atoms_nonnumeric.csv",
             "time;open;high;low;close;exchange;vol_20\n\
              1;10;11;9;10;NYSE;0.12\n\
-             2;10;12;10;11;NYSE;0.15\n",
+             2;10;12;10;11;NASDAQ;0.15\n",
         );
         let frame =
             DataFrame::from_series(&[format!("symbol=BTC,@{path}").parse().unwrap()]).unwrap();
         let series = frame.atoms("BTC").unwrap();
-        // `exchange` is non-numeric — dropped from the schema and reported.
-        assert_eq!(series.skipped_columns, vec!["exchange".to_string()]);
-        let overlays = series.atoms[0].1.overlays.as_ref().expect("vol_20 survives");
+        // `exchange` is non-numeric — preserved as a Str overlay, not dropped.
+        assert!(series.skipped_columns.is_empty());
+        let overlays = series.atoms[0].1.overlays.as_ref().expect("overlays attached");
         let schema = overlays.schema();
-        assert!(!schema.contains("exchange"));
-        assert_eq!(schema.index_of("vol_20"), Some(0));
+        assert_eq!(schema.type_of_key("exchange"), Some(OverlayType::Str));
+        assert_eq!(schema.type_of_key("vol_20"), Some(OverlayType::Real));
+        let ex_idx = schema.index_of("exchange").unwrap();
+        assert_eq!(
+            overlays.get_str(ex_idx).map(|s| s.as_ref()),
+            Some("NYSE"),
+        );
+        assert_eq!(
+            series.atoms[1].1.overlays.as_ref().unwrap().get_str(ex_idx).map(|s| s.as_ref()),
+            Some("NASDAQ"),
+        );
+    }
+
+    #[test]
+    fn atoms_classify_true_false_column_as_bool() {
+        let path = tmp_csv(
+            "fugazi_atoms_bool.csv",
+            "time;open;high;low;close;risk_on\n\
+             1;10;11;9;10;true\n\
+             2;10;12;10;11;FALSE\n\
+             3;10;12;10;11;True\n",
+        );
+        let frame =
+            DataFrame::from_series(&[format!("symbol=BTC,@{path}").parse().unwrap()]).unwrap();
+        let series = frame.atoms("BTC").unwrap();
+        let overlays = series.atoms[0].1.overlays.as_ref().expect("overlays attached");
+        let schema = overlays.schema();
+        // Bool wins over Real because `true`/`false` don't parse as Real.
+        assert_eq!(schema.type_of_key("risk_on"), Some(OverlayType::Bool));
+        let idx = schema.index_of("risk_on").unwrap();
+        assert_eq!(overlays.get_bool(idx), Some(true));
+        assert_eq!(
+            series.atoms[1].1.overlays.as_ref().unwrap().get_bool(idx),
+            Some(false),
+        );
+        assert_eq!(
+            series.atoms[2].1.overlays.as_ref().unwrap().get_bool(idx),
+            Some(true),
+        );
+    }
+
+    #[test]
+    fn atoms_single_stray_string_downgrades_a_real_column_to_str() {
+        // One non-numeric cell is enough to move a column from Real to Str;
+        // subsequent numeric-looking cells then read as their string form.
+        let path = tmp_csv(
+            "fugazi_atoms_mixed.csv",
+            "time;open;high;low;close;label\n\
+             1;10;11;9;10;0.12\n\
+             2;10;12;10;11;n/a\n\
+             3;10;12;10;11;0.15\n",
+        );
+        let frame =
+            DataFrame::from_series(&[format!("symbol=BTC,@{path}").parse().unwrap()]).unwrap();
+        let series = frame.atoms("BTC").unwrap();
+        let schema = series.atoms[0].1.overlays.as_ref().unwrap().schema().clone();
+        assert_eq!(schema.type_of_key("label"), Some(OverlayType::Str));
+        let idx = schema.index_of("label").unwrap();
+        assert_eq!(
+            series.atoms[2].1.overlays.as_ref().unwrap().get_str(idx).map(|s| s.as_ref()),
+            Some("0.15"),
+        );
     }
 
     #[test]
@@ -527,26 +654,27 @@ mod tests {
         let overlays0 = series.atoms[0].1.overlays.as_ref().unwrap();
         let idx = overlays0.schema().index_of("pe_ratio").unwrap();
 
-        let v0 = overlays0.get(idx).unwrap();
-        let v1 = series.atoms[1].1.overlays.as_ref().unwrap().get(idx).unwrap();
+        let v0 = overlays0.get_real(idx).unwrap();
+        let v1 = series.atoms[1].1.overlays.as_ref().unwrap().get_real(idx).unwrap();
         assert_eq!(v0, 15.0);
         assert!(v1.is_nan(), "missing overlay value should be NaN, got {v1}");
     }
 
     #[test]
-    fn atoms_carry_no_overlays_when_no_numeric_column_survives() {
-        // Only OHLCV + a non-numeric metadata column — no schema, no
-        // OverlayInfo attached.
+    fn atoms_attach_str_overlay_even_when_no_numeric_column_survives() {
+        // Only OHLCV + a non-numeric metadata column. In the new world the
+        // metadata column *is* preserved as a Str overlay — an OverlayInfo
+        // gets attached rather than being suppressed.
         let path = tmp_csv(
-            "fugazi_atoms_empty_schema.csv",
+            "fugazi_atoms_str_only.csv",
             "time;open;high;low;close;exchange\n1;10;11;9;10;NYSE\n",
         );
         let frame =
             DataFrame::from_series(&[format!("symbol=BTC,@{path}").parse().unwrap()]).unwrap();
         let series = frame.atoms("BTC").unwrap();
-        assert_eq!(series.skipped_columns, vec!["exchange".to_string()]);
-        // No numeric overlay column survived — the atom carries no overlay info.
-        assert!(series.atoms[0].1.overlays.is_none());
+        assert!(series.skipped_columns.is_empty());
+        let overlays = series.atoms[0].1.overlays.as_ref().expect("Str overlay attached");
+        assert_eq!(overlays.schema().type_of_key("exchange"), Some(OverlayType::Str));
     }
 
     #[test]

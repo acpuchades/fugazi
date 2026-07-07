@@ -1,15 +1,22 @@
-//! [`Get`]: a leaf source that pulls one overlay column out of each [`Atom`] by
-//! key. Complements the [`Field`](super::Field) accessors, which project one of
-//! the built-in OHLCV fields of the [`Candle`](crate::Candle) — `Get` reads the
+//! [`GetReal`], [`GetBool`], [`GetStr`]: three leaf sources that each pull one
+//! overlay column out of each [`Atom`] by key. Complement the
+//! [`Field`](super::Field) accessors, which project one of the built-in OHLCV
+//! fields of the [`Candle`](crate::Candle) — the `Get*` leaves read the
 //! optional side-channel data an [`OverlayInfo`] carries.
+//!
+//! One typed leaf per [`OverlayType`]: `GetReal` produces `Real`, `GetBool`
+//! produces `bool` (a signal leaf), `GetStr` produces `Arc<str>`. The
+//! constructor resolves both the column *index* and the column *type* against
+//! the shared [`Schema`] at build time, so per-bar access is one array read
+//! plus a variant match (which the compiler can hoist).
 
 use std::sync::Arc;
 
 use crate::indicator::Indicator;
-use crate::types::{Atom, OverlayInfo, Real, Schema};
+use crate::types::{Atom, OverlayInfo, OverlayType, Real, Schema};
 
-/// Returned by [`Get::try_new`] when the requested key is not registered in the
-/// schema.
+/// Returned by [`GetReal::try_new`] (and the other typed constructors) when the
+/// requested key is not registered in the schema.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownKey {
     pub key: String,
@@ -23,37 +30,122 @@ impl std::fmt::Display for UnknownKey {
 
 impl std::error::Error for UnknownKey {}
 
-/// Extracts one overlay column from each [`Atom`], selected by its schema
-/// index.
+/// Returned by [`GetReal::try_new`] / [`GetBool::try_new`] / [`GetStr::try_new`]
+/// when the key exists but its declared [`OverlayType`] doesn't match the leaf
+/// being constructed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeMismatch {
+    pub key: String,
+    pub expected: OverlayType,
+    pub actual: OverlayType,
+}
+
+impl std::fmt::Display for TypeMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "overlay column {:?} has type {}, expected {}",
+            self.key, self.actual, self.expected,
+        )
+    }
+}
+
+impl std::error::Error for TypeMismatch {}
+
+/// A `Get*` leaf's construction failure: either the key is missing or its
+/// declared type doesn't match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GetError {
+    UnknownKey(UnknownKey),
+    TypeMismatch(TypeMismatch),
+}
+
+impl std::fmt::Display for GetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GetError::UnknownKey(e) => e.fmt(f),
+            GetError::TypeMismatch(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for GetError {}
+
+impl From<UnknownKey> for GetError {
+    fn from(e: UnknownKey) -> Self {
+        GetError::UnknownKey(e)
+    }
+}
+
+impl From<TypeMismatch> for GetError {
+    fn from(e: TypeMismatch) -> Self {
+        GetError::TypeMismatch(e)
+    }
+}
+
+/// Resolve `key` against `schema`, checking the declared column type matches
+/// `expected`. Shared by every `Get*::try_new`.
+fn resolve(schema: &Arc<Schema>, key: &str, expected: OverlayType) -> Result<usize, GetError> {
+    let index = schema.index_of(key).ok_or_else(|| UnknownKey {
+        key: key.to_string(),
+    })?;
+    let actual = schema.type_of(index).expect("index in range");
+    if actual != expected {
+        return Err(TypeMismatch {
+            key: key.to_string(),
+            expected,
+            actual,
+        }
+        .into());
+    }
+    Ok(index)
+}
+
+/// Read from `overlays` if it is bound to the same schema `Arc` this leaf was
+/// resolved against — a cheap pointer-equality check that catches a strategy
+/// fed atoms built from a different schema (indexes would silently mis-align).
+fn read_slot<'a>(
+    schema: &Arc<Schema>,
+    overlays: Option<&'a OverlayInfo>,
+) -> Option<&'a OverlayInfo> {
+    let ov = overlays?;
+    if !Arc::ptr_eq(schema, ov.schema()) {
+        return None;
+    }
+    Some(ov)
+}
+
+// ---------------------------------------------------------------------------
+// GetReal
+// ---------------------------------------------------------------------------
+
+/// Extracts one `Real` overlay column from each [`Atom`], selected by its
+/// schema index.
 ///
-/// Built with [`Get::new`] (panics on an unknown key) or [`Get::try_new`]
-/// (returns [`UnknownKey`]). The key is resolved against the shared
+/// Built with [`GetReal::new`] (panics on error) or [`GetReal::try_new`]
+/// (returns [`GetError`]). The key + type are resolved against the shared
 /// [`Schema`] *at construction* — the runtime object holds only the resolved
-/// `usize` index, so per-bar access is one array read.
+/// `usize` index, so per-bar access is one array read plus a variant match.
 ///
-/// Reads `None` before the first bar. Once fed, reads `Some(v)` when the
-/// atom's [`overlays`](Atom::overlays) is bound to the schema this `Get` was
-/// built against and carries a value at the resolved index, `None` on any
-/// atom whose `overlays` is `None` (so a signal composed with a `Get` reads
-/// `false` on overlay-free bars via [`is_true`](crate::indicators::BoolIndicatorExt::is_true)).
+/// Reads `None` before the first bar and `None` on any atom whose
+/// [`overlays`](Atom::overlays) is absent or bound to a different schema.
 ///
 /// ```
 /// use fugazi::prelude::*;
-/// use fugazi::indicators::Get;
+/// use fugazi::indicators::GetReal;
 ///
 /// let mut b = Schema::builder();
-/// b.add("vol_20");
+/// b.add_real("vol_20");
 /// let schema = b.finish();
 ///
-/// let mut vol = Get::new(&schema, "vol_20");
+/// let mut vol = GetReal::new(&schema, "vol_20");
 /// let candle = Candle::new(100.0, 101.0, 99.0, 100.5, 1_000.0);
-/// let overlays = OverlayInfo::new(schema.clone(), vec![0.12]);
+/// let overlays = OverlayInfo::new(schema.clone(), vec![OverlayValue::Real(0.12)]);
 /// let atom = Atom::with_overlays(candle, overlays);
 /// assert_eq!(vol.update(atom), Some(0.12));
 /// ```
 #[derive(Debug, Clone)]
-pub struct Get {
-    /// Kept for a debug-time schema-mismatch check and for diagnostic use.
+pub struct GetReal {
     schema: Arc<Schema>,
     index: usize,
     /// Latest extracted value; `None` before the first bar (and `None` on any
@@ -61,23 +153,20 @@ pub struct Get {
     pub value: Option<Real>,
 }
 
-impl Get {
-    /// Build a `Get` that reads the overlay column `key` from every input
-    /// [`Atom`]. Resolves the key against `schema` once at construction.
+impl GetReal {
+    /// Build a `GetReal` for `key`. Resolves the key + type against `schema`
+    /// once at construction.
     ///
     /// # Panics
-    /// Panics if `key` is not registered in `schema`. Use [`try_new`](Self::try_new)
-    /// for a fallible constructor.
+    /// Panics if `key` is not registered or its declared type is not `Real`.
+    /// Use [`try_new`](Self::try_new) for a fallible constructor.
     pub fn new(schema: &Arc<Schema>, key: &str) -> Self {
         Self::try_new(schema, key).unwrap_or_else(|e| panic!("{e}"))
     }
 
-    /// Fallible constructor: returns [`UnknownKey`] if `key` is not registered
-    /// in `schema`.
-    pub fn try_new(schema: &Arc<Schema>, key: &str) -> Result<Self, UnknownKey> {
-        let index = schema.index_of(key).ok_or_else(|| UnknownKey {
-            key: key.to_string(),
-        })?;
+    /// Fallible constructor.
+    pub fn try_new(schema: &Arc<Schema>, key: &str) -> Result<Self, GetError> {
+        let index = resolve(schema, key, OverlayType::Real)?;
         Ok(Self {
             schema: schema.clone(),
             index,
@@ -85,36 +174,24 @@ impl Get {
         })
     }
 
-    /// The resolved column index this `Get` reads.
+    /// The resolved column index this leaf reads.
     pub fn index(&self) -> usize {
         self.index
     }
 
-    /// The schema this `Get` was resolved against.
+    /// The schema this leaf was resolved against.
     pub fn schema(&self) -> &Arc<Schema> {
         &self.schema
     }
 }
 
-/// Read from `overlays` if it is bound to the same schema `Arc` we resolved
-/// against — a cheap pointer-equality check that catches a strategy fed
-/// atoms built from a different schema (indexes would silently mis-align).
-fn read(schema: &Arc<Schema>, index: usize, overlays: Option<&OverlayInfo>) -> Option<Real> {
-    let ov = overlays?;
-    if !Arc::ptr_eq(schema, ov.schema()) {
-        // Schema mismatch: index would refer to a different column. Prefer
-        // `None` over a silent wrong read.
-        return None;
-    }
-    ov.get(index)
-}
-
-impl Indicator for Get {
+impl Indicator for GetReal {
     type Input = Atom;
     type Output = Real;
 
     fn update(&mut self, atom: Atom) -> Option<Real> {
-        self.value = read(&self.schema, self.index, atom.overlays.as_ref());
+        self.value = read_slot(&self.schema, atom.overlays.as_ref())
+            .and_then(|ov| ov.get_real(self.index));
         self.value
     }
 
@@ -122,8 +199,138 @@ impl Indicator for Get {
         self.value
     }
 
-    /// `1` — one bar to receive the first overlay value. Ready as soon as an
-    /// [`Atom`] with matching-schema overlays arrives.
+    /// `1` — one bar to receive the first overlay value.
+    fn warm_up_period(&self) -> usize {
+        1
+    }
+
+    fn reset(&mut self) {
+        self.value = None;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GetBool
+// ---------------------------------------------------------------------------
+
+/// Extracts one `Bool` overlay column from each [`Atom`]. A signal leaf.
+///
+/// The bool twin of [`GetReal`]; see that type's docs for the construction and
+/// error semantics.
+#[derive(Debug, Clone)]
+pub struct GetBool {
+    schema: Arc<Schema>,
+    index: usize,
+    /// Latest extracted value; `None` before the first bar (and `None` on any
+    /// atom whose `overlays` is absent or bound to a different schema).
+    pub value: Option<bool>,
+}
+
+impl GetBool {
+    /// Build a `GetBool` for `key`. Panics on unknown key or type mismatch.
+    pub fn new(schema: &Arc<Schema>, key: &str) -> Self {
+        Self::try_new(schema, key).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible constructor.
+    pub fn try_new(schema: &Arc<Schema>, key: &str) -> Result<Self, GetError> {
+        let index = resolve(schema, key, OverlayType::Bool)?;
+        Ok(Self {
+            schema: schema.clone(),
+            index,
+            value: None,
+        })
+    }
+
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    pub fn schema(&self) -> &Arc<Schema> {
+        &self.schema
+    }
+}
+
+impl Indicator for GetBool {
+    type Input = Atom;
+    type Output = bool;
+
+    fn update(&mut self, atom: Atom) -> Option<bool> {
+        self.value = read_slot(&self.schema, atom.overlays.as_ref())
+            .and_then(|ov| ov.get_bool(self.index));
+        self.value
+    }
+
+    fn value(&self) -> Option<bool> {
+        self.value
+    }
+
+    fn warm_up_period(&self) -> usize {
+        1
+    }
+
+    fn reset(&mut self) {
+        self.value = None;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GetStr
+// ---------------------------------------------------------------------------
+
+/// Extracts one `Str` overlay column from each [`Atom`].
+///
+/// The string twin of [`GetReal`]; see that type's docs for the construction
+/// and error semantics. Outputs `Arc<str>` so the shared backing storage of
+/// the underlying overlay value is preserved (no allocation per bar).
+#[derive(Debug, Clone)]
+pub struct GetStr {
+    schema: Arc<Schema>,
+    index: usize,
+    /// Latest extracted value; `None` before the first bar (and `None` on any
+    /// atom whose `overlays` is absent or bound to a different schema).
+    pub value: Option<Arc<str>>,
+}
+
+impl GetStr {
+    /// Build a `GetStr` for `key`. Panics on unknown key or type mismatch.
+    pub fn new(schema: &Arc<Schema>, key: &str) -> Self {
+        Self::try_new(schema, key).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible constructor.
+    pub fn try_new(schema: &Arc<Schema>, key: &str) -> Result<Self, GetError> {
+        let index = resolve(schema, key, OverlayType::Str)?;
+        Ok(Self {
+            schema: schema.clone(),
+            index,
+            value: None,
+        })
+    }
+
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    pub fn schema(&self) -> &Arc<Schema> {
+        &self.schema
+    }
+}
+
+impl Indicator for GetStr {
+    type Input = Atom;
+    type Output = Arc<str>;
+
+    fn update(&mut self, atom: Atom) -> Option<Arc<str>> {
+        self.value = read_slot(&self.schema, atom.overlays.as_ref())
+            .and_then(|ov| ov.get_str(self.index).cloned());
+        self.value.clone()
+    }
+
+    fn value(&self) -> Option<Arc<str>> {
+        self.value.clone()
+    }
+
     fn warm_up_period(&self) -> usize {
         1
     }
@@ -136,13 +343,13 @@ impl Indicator for Get {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Candle;
+    use crate::types::{Candle, OverlayValue};
 
-    fn schema_with(keys: &[&str]) -> Arc<Schema> {
+    fn schema_v3() -> Arc<Schema> {
         let mut b = Schema::builder();
-        for k in keys {
-            b.add(*k);
-        }
+        b.add_real("vol_20");
+        b.add_bool("risk_on");
+        b.add_str("regime");
         b.finish()
     }
 
@@ -150,46 +357,84 @@ mod tests {
         Candle::new(100.0, 101.0, 99.0, 100.5, 1_000.0)
     }
 
-    #[test]
-    fn resolves_index_at_construction_and_reads_values() {
-        let schema = schema_with(&["vol_20", "regime"]);
-        let mut vol = Get::new(&schema, "vol_20");
-        assert_eq!(vol.index(), 0);
-
-        let overlays = OverlayInfo::new(schema.clone(), vec![0.12, 1.0]);
-        let atom = Atom::with_overlays(candle(), overlays);
-        assert_eq!(vol.update(atom), Some(0.12));
+    fn overlays(schema: &Arc<Schema>) -> OverlayInfo {
+        OverlayInfo::new(
+            schema.clone(),
+            vec![
+                OverlayValue::Real(0.12),
+                OverlayValue::Bool(true),
+                OverlayValue::Str(Arc::from("bull")),
+            ],
+        )
     }
 
     #[test]
-    fn none_when_atom_has_no_overlays() {
-        let schema = schema_with(&["vol_20"]);
-        let mut vol = Get::new(&schema, "vol_20");
-        assert_eq!(vol.update(Atom::new(candle())), None);
+    fn typed_leaves_read_their_own_column() {
+        let schema = schema_v3();
+        let atom = Atom::with_overlays(candle(), overlays(&schema));
+
+        let mut r = GetReal::new(&schema, "vol_20");
+        assert_eq!(r.update(atom.clone()), Some(0.12));
+
+        let mut b = GetBool::new(&schema, "risk_on");
+        assert_eq!(b.update(atom.clone()), Some(true));
+
+        let mut s = GetStr::new(&schema, "regime");
+        assert_eq!(s.update(atom).as_deref(), Some("bull"));
     }
 
     #[test]
-    fn none_when_atom_bound_to_different_schema() {
-        let schema_a = schema_with(&["vol_20", "regime"]);
-        let schema_b = schema_with(&["regime", "vol_20"]);
-        let mut vol = Get::new(&schema_a, "vol_20"); // index 0 in A
-        let overlays_b = OverlayInfo::new(schema_b, vec![1.0, 0.12]); // 0.12 lives at index 1 here
-        let atom = Atom::with_overlays(candle(), overlays_b);
-        // Mismatched schema Arc: refuse the read rather than return 1.0.
-        assert_eq!(vol.update(atom), None);
+    fn typed_try_new_rejects_type_mismatch() {
+        let schema = schema_v3();
+        let err = GetReal::try_new(&schema, "risk_on").unwrap_err();
+        assert!(matches!(err, GetError::TypeMismatch(_)));
+        let err = GetBool::try_new(&schema, "regime").unwrap_err();
+        assert!(matches!(err, GetError::TypeMismatch(_)));
+        let err = GetStr::try_new(&schema, "vol_20").unwrap_err();
+        assert!(matches!(err, GetError::TypeMismatch(_)));
     }
 
     #[test]
     fn try_new_reports_unknown_key() {
-        let schema = schema_with(&["vol_20"]);
-        let err = Get::try_new(&schema, "missing").unwrap_err();
-        assert_eq!(err.key, "missing");
+        let schema = schema_v3();
+        let err = GetReal::try_new(&schema, "missing").unwrap_err();
+        assert!(matches!(err, GetError::UnknownKey(_)));
     }
 
     #[test]
     #[should_panic(expected = "unknown overlay key: missing")]
     fn new_panics_on_unknown_key() {
-        let schema = schema_with(&["vol_20"]);
-        let _ = Get::new(&schema, "missing");
+        let schema = schema_v3();
+        let _ = GetReal::new(&schema, "missing");
+    }
+
+    #[test]
+    fn none_when_atom_has_no_overlays() {
+        let schema = schema_v3();
+        let mut r = GetReal::new(&schema, "vol_20");
+        assert_eq!(r.update(Atom::new(candle())), None);
+        let mut b = GetBool::new(&schema, "risk_on");
+        assert_eq!(b.update(Atom::new(candle())), None);
+        let mut s = GetStr::new(&schema, "regime");
+        assert_eq!(s.update(Atom::new(candle())), None);
+    }
+
+    #[test]
+    fn none_when_atom_bound_to_different_schema() {
+        // Two structurally-identical schemas — the Arc identity differs, so the
+        // read must refuse rather than silently return the value at the same
+        // index in the other schema.
+        let a = schema_v3();
+        let b = schema_v3();
+        let mut r = GetReal::new(&a, "vol_20");
+        let ov_b = OverlayInfo::new(
+            b,
+            vec![
+                OverlayValue::Real(9.99),
+                OverlayValue::Bool(false),
+                OverlayValue::Str(Arc::from("bear")),
+            ],
+        );
+        assert_eq!(r.update(Atom::with_overlays(candle(), ov_b)), None);
     }
 }

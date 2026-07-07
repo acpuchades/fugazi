@@ -3,15 +3,17 @@
 //! Split out of `spec/mod.rs`; kept in `crate::spec::signal` so paths like
 //! `crate::spec::SignalSpec` still resolve via the `pub use` in `mod.rs`.
 
+use std::sync::Arc;
+
 use serde::Deserialize;
 
 use fugazi::indicators::compare;
 use fugazi::indicators::logic::Const;
-use fugazi::indicators::{DEFAULT_EPSILON, Position};
+use fugazi::indicators::{DEFAULT_EPSILON, GetBool, Position, ValueStr};
 use fugazi::prelude::*;
 
 use super::source::{SourceSpec, default_source};
-use crate::dyn_indicator::{self, AsBool, AsReal, DynIndicator};
+use crate::dyn_indicator::{self, AsBool, AsReal, AsStr, DynIndicator};
 
 // ---------------------------------------------------------------------------
 // Boolean signals
@@ -94,6 +96,31 @@ pub enum SignalSpec {
     Any(Vec<SignalSpec>),
     Not(Box<SignalSpec>),
     Changed(Box<SignalSpec>),
+
+    /// Read a `Bool` overlay column as a signal. The column's declared type
+    /// in the atom stream's schema must be `Bool`; a `Real` or `Str` column
+    /// with the same name is a build-time error, since only a bool value
+    /// can act as a signal directly. For a `Str` column, wrap in
+    /// [`SignalSpec::StrEq`] against a constant; for a `Real` column, use a
+    /// comparison from the `!gt` / `!lt` / etc. family with a `!get` in the
+    /// source position.
+    Get {
+        key: String,
+    },
+    /// `lhs == rhs` on a `Str`-typed source and a string literal. `lhs` must
+    /// build to a `Str`-output source (typically `!get { key: c }` where `c`
+    /// is a `Str` column, or a nested string-producing expression); `rhs` is
+    /// the string literal to match against.
+    StrEq {
+        lhs: Box<SourceSpec>,
+        rhs: String,
+    },
+    /// `lhs != rhs` on a `Str`-typed source and a string literal. The
+    /// complement of [`SignalSpec::StrEq`].
+    StrNe {
+        lhs: Box<SourceSpec>,
+        rhs: String,
+    },
     /// Passthrough wrapper that reports `unstable_period() = 0`. The output
     /// and warm-up of `signal` are unchanged; the strategy-readiness gate
     /// (which counts up to `stable_period()`) no longer waits for this
@@ -114,11 +141,13 @@ fn eps(epsilon: &Option<Real>) -> Real {
 impl SignalSpec {
     /// Construct the live, runtime-typed signal this spec describes as a
     /// `Box<dyn DynIndicator>` with `output_type() == DynType::Bool`. `anchor`
-    /// is threaded to any `entry` / `peak` / `trough` source leaf.
-    pub fn build(&self, anchor: &Position) -> Box<dyn DynIndicator> {
+    /// is threaded to any `entry` / `peak` / `trough` source leaf; `schema` is
+    /// the overlay [`Schema`] the atom stream carries, used by `!get`-shaped
+    /// leaves for type-directed dispatch.
+    pub fn build(&self, anchor: &Position, schema: &Arc<Schema>) -> Box<dyn DynIndicator> {
         use SignalSpec::*;
-        let real = |s: &SourceSpec| AsReal::new(s.build(anchor));
-        let boolean = |s: &SignalSpec| AsBool::new(s.build(anchor));
+        let real = |s: &SourceSpec| AsReal::new(s.build(anchor, schema));
+        let boolean = |s: &SignalSpec| AsBool::new(s.build(anchor, schema));
 
         match self {
             Gt { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Gt::with_epsilon(
@@ -173,9 +202,9 @@ impl SignalSpec {
                 if specs.is_empty() {
                     dyn_indicator::wrap(self::Const::<Atom>::new(true))
                 } else {
-                    let mut acc = AsBool::new(specs[0].build(anchor));
+                    let mut acc = AsBool::new(specs[0].build(anchor, schema));
                     for s in &specs[1..] {
-                        let next = AsBool::new(s.build(anchor));
+                        let next = AsBool::new(s.build(anchor, schema));
                         // AsBool `and` AsBool → concrete Combine; wrap in AsBool
                         // by round-tripping through the box so the fold's accumulator
                         // stays a single library type.
@@ -188,9 +217,9 @@ impl SignalSpec {
                 if specs.is_empty() {
                     dyn_indicator::wrap(self::Const::<Atom>::new(false))
                 } else {
-                    let mut acc = AsBool::new(specs[0].build(anchor));
+                    let mut acc = AsBool::new(specs[0].build(anchor, schema));
                     for s in &specs[1..] {
-                        let next = AsBool::new(s.build(anchor));
+                        let next = AsBool::new(s.build(anchor, schema));
                         acc = AsBool::new(dyn_indicator::wrap(acc.or(next)));
                     }
                     dyn_indicator::wrap(acc)
@@ -198,8 +227,57 @@ impl SignalSpec {
             }
             Not(inner) => dyn_indicator::wrap(boolean(inner).not()),
             Changed(inner) => dyn_indicator::wrap(boolean(inner).changed()),
-            Unstable { signal } => dyn_indicator::unstable_wrap(signal.build(anchor)),
+            Unstable { signal } => dyn_indicator::unstable_wrap(signal.build(anchor, schema)),
             Value(b) => dyn_indicator::wrap(self::Const::<Atom>::new(*b)),
+            Get { key } => build_signal_get(schema, key),
+            StrEq { lhs, rhs } => {
+                let lhs = AsStr::new(lhs.build(anchor, schema));
+                let rhs: ValueStr<Atom> = ValueStr::new(rhs.as_str());
+                dyn_indicator::wrap(compare::StrEq::new(lhs, rhs))
+            }
+            StrNe { lhs, rhs } => {
+                let lhs = AsStr::new(lhs.build(anchor, schema));
+                let rhs: ValueStr<Atom> = ValueStr::new(rhs.as_str());
+                dyn_indicator::wrap(compare::StrNe::new(lhs, rhs))
+            }
+        }
+    }
+}
+
+/// Build the signal-side `!get { key }` variant: only a `Bool` column is a
+/// valid signal source. A `Real` column can't stand alone as a signal (it's
+/// numeric — pair it with a comparison in a `!gt` / `!lt` position instead);
+/// a `Str` column likewise can't (wrap it in `!str_eq { lhs: !get { key }, rhs:
+/// "value" }`). Missing keys produce the same registered-keys-listing message
+/// as the source-side `!get`.
+fn build_signal_get(schema: &Arc<Schema>, key: &str) -> Box<dyn DynIndicator> {
+    match schema.type_of_key(key) {
+        Some(OverlayType::Bool) => dyn_indicator::wrap(GetBool::new(schema, key)),
+        Some(OverlayType::Real) => panic!(
+            "!get {{ key: {key:?} }} in signal position: column is Real, but a signal must be \
+             Bool. Use a comparison like `!gt {{ lhs: !get {{ key: {key:?} }}, rhs: ... }}` \
+             instead.",
+        ),
+        Some(OverlayType::Str) => panic!(
+            "!get {{ key: {key:?} }} in signal position: column is Str, but a signal must be \
+             Bool. Wrap it in `!str_eq {{ lhs: !get {{ key: {key:?} }}, rhs: \"value\" }}` \
+             (or `!str_ne`) instead.",
+        ),
+        None => {
+            let registered: Vec<&str> = schema.keys().collect();
+            if registered.is_empty() {
+                panic!(
+                    "!get {{ key: {key:?} }} in signal position: no overlay side channel is \
+                     bound — feed `--series` data that carries additional (non-OHLCV) columns \
+                     to attach overlays",
+                );
+            } else {
+                panic!(
+                    "!get {{ key: {key:?} }} in signal position: overlay column not registered. \
+                     Registered columns: {}",
+                    registered.join(", "),
+                );
+            }
         }
     }
 }

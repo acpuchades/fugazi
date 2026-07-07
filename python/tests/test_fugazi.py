@@ -848,6 +848,224 @@ def test_get_unknown_key_raises_at_construction():
 
 
 # ---------------------------------------------------------------------------
+# Typed overlays: Real | Bool | Str
+# ---------------------------------------------------------------------------
+
+
+def _typed_schema():
+    """A schema with one column of each supported type."""
+    b = ta.SchemaBuilder()
+    b.add_real("vol_20")
+    b.add_bool("risk_on")
+    b.add_str("regime")
+    return b.finish()
+
+
+def _typed_candle():
+    return ta.Candle(100.0, 101.0, 99.0, 100.5, 1_000.0)
+
+
+def test_schema_builder_typed_adds_and_type_of():
+    schema = _typed_schema()
+    assert schema.type_of_key("vol_20") == "real"
+    assert schema.type_of_key("risk_on") == "bool"
+    assert schema.type_of_key("regime") == "str"
+    assert schema.type_of_key("missing") is None
+    # By-index lookup mirrors by-key.
+    assert schema.type_of(0) == "real"
+    assert schema.type_of(1) == "bool"
+    assert schema.type_of(2) == "str"
+    assert schema.type_of(99) is None
+    # `add()` is a back-compat alias for `add_real()`.
+    b = ta.SchemaBuilder()
+    b.add("x")
+    assert b.finish().type_of_key("x") == "real"
+
+
+def test_schema_builder_rejects_type_mismatch_on_reregister():
+    b = ta.SchemaBuilder()
+    b.add_real("x")
+    with pytest.raises(ValueError):
+        b.add_bool("x")
+
+
+def test_overlay_info_heterogeneous_values_and_typed_accessors():
+    schema = _typed_schema()
+    ov = ta.OverlayInfo(schema, [0.12, True, "bull"])
+    # Polymorphic `get` returns the native Python type per slot.
+    assert ov.get(0) == pytest.approx(0.12)
+    assert ov.get(1) is True
+    assert ov.get(2) == "bull"
+    # By-key polymorphic.
+    assert ov.get_by_key("regime") == "bull"
+    # Typed accessors return None on a type mismatch.
+    assert ov.get_real(0) == pytest.approx(0.12)
+    assert ov.get_real(1) is None
+    assert ov.get_bool(1) is True
+    assert ov.get_bool(0) is None
+    assert ov.get_str(2) == "bull"
+    assert ov.get_str(0) is None
+
+
+def test_overlay_info_rejects_wrong_python_types_at_construction():
+    schema = _typed_schema()
+    # str in the Real slot.
+    with pytest.raises(ValueError):
+        ta.OverlayInfo(schema, ["oops", True, "bull"])
+    # True/False in the Real slot: rejected (would otherwise silently coerce to 1/0).
+    with pytest.raises(ValueError):
+        ta.OverlayInfo(schema, [True, True, "bull"])
+    # float in the Str slot.
+    with pytest.raises(ValueError):
+        ta.OverlayInfo(schema, [0.12, True, 0.5])
+
+
+def test_get_polymorphic_dispatches_on_declared_column_type():
+    schema = _typed_schema()
+    real_node = ta.get(schema, "vol_20")
+    bool_node = ta.get(schema, "risk_on")
+    str_node = ta.get(schema, "regime")
+    assert isinstance(real_node, ta.Indicator)
+    assert isinstance(bool_node, ta.Signal)
+    assert isinstance(str_node, ta.StrSource)
+
+
+def test_get_typed_constructors_reject_type_mismatches():
+    schema = _typed_schema()
+    # get_real requires a Real column.
+    with pytest.raises(ValueError):
+        ta.get_real(schema, "risk_on")
+    # get_bool requires a Bool column.
+    with pytest.raises(ValueError):
+        ta.get_bool(schema, "vol_20")
+    # get_str requires a Str column.
+    with pytest.raises(ValueError):
+        ta.get_str(schema, "vol_20")
+
+
+def test_get_typed_constructors_read_matching_columns():
+    schema = _typed_schema()
+    candle = _typed_candle()
+
+    real_node = ta.get_real(schema, "vol_20")
+    bool_node = ta.get_bool(schema, "risk_on")
+    str_node = ta.get_str(schema, "regime")
+
+    ov = ta.OverlayInfo(schema, [0.15, True, "bull"])
+    atom = ta.Atom(candle, ov)
+    assert real_node.update(atom) == pytest.approx(0.15)
+    assert bool_node.update(atom) is True
+    assert str_node.update(atom) == "bull"
+
+
+def test_str_source_eq_signal_fires_on_match():
+    schema = _typed_schema()
+    candle = _typed_candle()
+    signal = ta.get_str(schema, "regime").eq("bull")
+
+    on = ta.Atom(candle, ta.OverlayInfo(schema, [0.0, False, "bull"]))
+    off = ta.Atom(candle, ta.OverlayInfo(schema, [0.0, False, "bear"]))
+    signal.update(on)
+    assert signal.is_true() is True
+    signal.update(off)
+    assert signal.is_true() is False
+
+
+def test_str_source_ne_signal_is_inverse_of_eq():
+    schema = _typed_schema()
+    candle = _typed_candle()
+    ne = ta.get_str(schema, "regime").ne("bull")
+
+    on = ta.Atom(candle, ta.OverlayInfo(schema, [0.0, False, "bull"]))
+    off = ta.Atom(candle, ta.OverlayInfo(schema, [0.0, False, "bear"]))
+    ne.update(on)
+    assert ne.is_true() is False
+    ne.update(off)
+    assert ne.is_true() is True
+
+
+def test_str_eq_free_function_matches_the_fluent_method():
+    schema = _typed_schema()
+    candle = _typed_candle()
+    fluent = ta.get_str(schema, "regime").eq("bull")
+    free = ta.str_eq(ta.get_str(schema, "regime"), "bull")
+
+    atom = ta.Atom(candle, ta.OverlayInfo(schema, [0.0, False, "bull"]))
+    fluent.update(atom)
+    free.update(atom)
+    assert fluent.is_true() == free.is_true() is True
+
+
+def test_value_str_is_a_constant_str_source():
+    c = ta.value_str("bull")
+    assert isinstance(c, ta.StrSource)
+    candle = _typed_candle()
+    # A constant reads from any atom (or a bare candle); its value is the literal.
+    assert c.update(candle) == "bull"
+    assert c.value() == "bull"
+
+
+def test_str_eq_accepts_two_str_sources():
+    # Two StrSource operands compose the same way a StrSource + literal does.
+    schema = _typed_schema()
+    candle = _typed_candle()
+    lhs = ta.get_str(schema, "regime")
+    rhs = ta.value_str("bull")
+    sig = ta.str_eq(lhs, rhs)
+
+    atom = ta.Atom(candle, ta.OverlayInfo(schema, [0.0, False, "bull"]))
+    sig.update(atom)
+    assert sig.is_true() is True
+
+
+def test_all_three_types_compose_into_one_and_signal():
+    """The end-to-end shape a strategy would use: gate an entry on one
+    overlay of each type — Real threshold, Bool flag, Str regime match."""
+    schema = _typed_schema()
+    candle = _typed_candle()
+    gate = (
+        ta.get_bool(schema, "risk_on")
+        .and_(ta.get_str(schema, "regime").eq("bull"))
+        .and_(ta.get_real(schema, "vol_20").gt(0.15))
+    )
+
+    def atom(vol, risk_on, regime):
+        return ta.Atom(candle, ta.OverlayInfo(schema, [vol, risk_on, regime]))
+
+    # All three conditions align — fires.
+    gate.update(atom(0.20, True, "bull"))
+    assert gate.is_true() is True
+    # risk_on off — doesn't fire.
+    gate.update(atom(0.20, False, "bull"))
+    assert gate.is_true() is False
+    # Regime is bear — doesn't fire.
+    gate.update(atom(0.20, True, "bear"))
+    assert gate.is_true() is False
+    # vol below threshold — doesn't fire.
+    gate.update(atom(0.10, True, "bull"))
+    assert gate.is_true() is False
+
+
+def test_get_bool_reads_bool_overlay_as_a_signal_directly():
+    schema = _typed_schema()
+    candle = _typed_candle()
+    signal = ta.get_bool(schema, "risk_on")
+
+    signal.update(ta.Atom(candle, ta.OverlayInfo(schema, [0.0, True, "bull"])))
+    assert signal.is_true() is True
+    signal.update(ta.Atom(candle, ta.OverlayInfo(schema, [0.0, False, "bull"])))
+    assert signal.is_true() is False
+
+
+def test_str_source_returns_none_on_bare_candle():
+    """A `Str`-typed reader has nothing to yield when the atom has no
+    overlays — matches the Real/Bool readers' behaviour."""
+    schema = _typed_schema()
+    src = ta.get_str(schema, "regime")
+    assert src.update(_typed_candle()) is None
+
+
+# ---------------------------------------------------------------------------
 # unstable() as a fluent method (parity with Rust's IndicatorExt/BoolIndicatorExt)
 # ---------------------------------------------------------------------------
 

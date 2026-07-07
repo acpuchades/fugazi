@@ -212,10 +212,15 @@ struct RunArgs {
 enum CheckCmd {
     /// Validate a strategy spec (with `--params` substitution).
     Strategy(CheckStrategyArgs),
-    /// Parse `get --overlay` specs and build each column's indicator.
+    /// Parse `get --overlay` specs — validates spec structure, the
+    /// `SYMBOL[FREQ]:` scope prefix, column names, and reserved-name
+    /// collisions.
     ///
-    /// Surfaces bad `!tag`s, missing parameters, and other tree-build errors
-    /// that a plain `get` run would only hit at fetch time.
+    /// Deliberately parse-only: overlay specs are built with an empty schema
+    /// (they're output-side, so no overlay side channel is bound), so a
+    /// build-time check would panic on any `!get { key }` reference. Fully-
+    /// typed validation (`!get` key resolution, typed-position mismatches, …)
+    /// is a `fugazi get` concern where the atom stream's schema exists.
     Overlay(CheckOverlayArgs),
     /// Parse `run --costs` specs and build each configured leg's model.
     ///
@@ -453,13 +458,15 @@ fn check_costs(args: CheckCostsArgs) -> Result<()> {
 }
 
 fn check_overlay(args: CheckOverlayArgs) -> Result<()> {
-    // Parses the specs (including the `SYMBOL[FREQ]:` scope prefix) *and*
-    // builds one live indicator per column, so an unknown `!tag`, a missing
-    // `period`, or an `entry`-in-`get` misuse all surface here.
+    // Parse-only: the spec structure, scope prefix, column names, and reserved-
+    // name collisions all surface here. We deliberately *don't* call
+    // `Overlay::build` — that would panic on any `!get { key }` because
+    // `Overlay::build` uses an empty schema (overlays are output-side; the
+    // schema doesn't exist yet). Fully-typed validation (unknown `!get` keys,
+    // typed-position mismatches, `period: 0` in a constructor's `assert!`, …)
+    // is a `fugazi get` / `fugazi run` concern, where the atom stream's real
+    // schema is available.
     let overlays = overlay::parse_specs(&args.overlays)?;
-    for o in &overlays {
-        let _ = o.build();
-    }
     let columns = overlay::column_names(&overlays);
 
     if !args.quiet {

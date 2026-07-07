@@ -29,13 +29,25 @@ pub struct FileSource {
 }
 
 /// One row from the file, with `symbol` and `freq` promoted out of the CSV's
-/// columns so the caller can group / filter without re-parsing.
+/// columns so the caller can group / filter without re-parsing. Non-OHLCV
+/// extra columns are preserved as [`OverlayValue`]s in `extras`, so an input
+/// CSV's `regime` / `risk_on` / … columns survive a `fugazi get file:in.csv
+/// --output out.csv` roundtrip.
+///
+/// Per-row classification is intentionally simple — `Bool` if the cell is
+/// `true`/`false` (case-insensitive), else `Real` if it parses as [`Real`],
+/// else `Str`. Cross-row consistency isn't enforced here (unlike
+/// [`crate::data::DataFrame::atoms`], which classifies a *column* across every
+/// row); a `fugazi get` writer just streams whatever it reads out.
 #[derive(Debug, Clone)]
 pub struct FileBar {
     pub symbol: String,
     pub interval: Interval,
     pub time: Timestamp,
     pub candle: Candle,
+    /// Preserved non-OHLCV columns from the input row, in file column order.
+    /// Empty cells become `OverlayValue::Str("")`.
+    pub extras: Vec<(String, OverlayValue)>,
 }
 
 impl FileSource {
@@ -73,6 +85,19 @@ impl FileSource {
         let i_low = idx("low")?;
         let i_close = idx("close")?;
         let i_volume = headers.iter().position(|h| h == "volume");
+
+        // Non-OHLCV column indexes, in header order — these become each
+        // FileBar's `extras`.
+        let reserved: std::collections::HashSet<&str> =
+            ["symbol", "freq", "time", "open", "high", "low", "close", "volume"]
+                .into_iter()
+                .collect();
+        let extra_columns: Vec<(usize, String)> = headers
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| !reserved.contains(name.as_str()))
+            .map(|(i, name)| (i, name.clone()))
+            .collect();
 
         let mut out = Vec::new();
         for (line_no, record) in reader.records().enumerate() {
@@ -113,11 +138,16 @@ impl FileSource {
             if symbol.is_empty() {
                 return Err(anyhow!("{path}: row {line}: column `symbol` is empty"));
             }
+            let extras: Vec<(String, OverlayValue)> = extra_columns
+                .iter()
+                .map(|(i, name)| (name.clone(), classify_cell(field(*i))))
+                .collect();
             out.push(FileBar {
                 symbol,
                 interval,
                 time,
                 candle,
+                extras,
             });
         }
         Ok(out)
@@ -138,6 +168,33 @@ fn parse_time(s: &str) -> Result<Timestamp> {
     Err(anyhow!(
         "expected RFC3339 timestamp or millisecond epoch, got {s:?}"
     ))
+}
+
+/// Per-cell classifier for a non-OHLCV column: **Bool > Real > Str** priority.
+/// `true`/`false` (case-insensitive) → [`OverlayValue::Bool`]; else if the
+/// cell parses as [`Real`] → [`OverlayValue::Real`]; else → [`OverlayValue::Str`].
+///
+/// Deliberately per-row rather than per-column: the `file:` source streams
+/// rows out one at a time, and its consumer is the CLI writer, which just
+/// formats each cell back to text. If a downstream needs consistent column
+/// typing across rows (like [`crate::data`] does for atoms fed to a
+/// strategy), it should run its own column-level classifier — see
+/// [`crate::data::DataFrame::atoms`].
+fn classify_cell(raw: &str) -> OverlayValue {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return OverlayValue::Str(std::sync::Arc::from(""));
+    }
+    if trimmed.eq_ignore_ascii_case("true") {
+        return OverlayValue::Bool(true);
+    }
+    if trimmed.eq_ignore_ascii_case("false") {
+        return OverlayValue::Bool(false);
+    }
+    if let Ok(x) = trimmed.parse::<Real>() {
+        return OverlayValue::Real(x);
+    }
+    OverlayValue::Str(std::sync::Arc::from(trimmed))
 }
 
 /// Guess a CSV's column delimiter from its header line: whichever of `; , \t |`
@@ -236,15 +293,24 @@ mod tests {
     }
 
     #[test]
-    fn ignores_extra_overlay_columns() {
+    fn preserves_extra_columns_as_typed_overlays() {
         let path = tmp_csv(
             "fugazi_file_source_test_f.csv",
-            "symbol;freq;time;open;high;low;close;volume;sma20;ema50\n\
-             AAA;1d;2024-01-01T00:00:00Z;1;2;0.5;1.5;10;1.4;1.3\n",
+            "symbol;freq;time;open;high;low;close;volume;sma20;risk_on;regime\n\
+             AAA;1d;2024-01-01T00:00:00Z;1;2;0.5;1.5;10;1.4;true;bull\n",
         );
         let bars = FileSource::new(path).read().unwrap();
         assert_eq!(bars.len(), 1);
         assert_eq!(bars[0].candle.close, 1.5);
+        // Non-OHLCV columns survive in header order.
+        assert_eq!(
+            bars[0].extras.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["sma20", "risk_on", "regime"],
+        );
+        // And each cell is auto-classified per the Bool > Real > Str priority.
+        assert_eq!(bars[0].extras[0].1, OverlayValue::Real(1.4));
+        assert_eq!(bars[0].extras[1].1, OverlayValue::Bool(true));
+        assert!(matches!(&bars[0].extras[2].1, OverlayValue::Str(s) if s.as_ref() == "bull"));
     }
 
     #[test]

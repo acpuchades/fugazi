@@ -82,7 +82,9 @@ pub use strategy::{
     Ack, Order, OrderId, OrderKind, PaperWallet, Units, Reference, Side, Size, Strategy, Wallet,
     WalletError,
 };
-pub use types::{Atom, Candle, OverlayInfo, Real, Schema, SchemaBuilder};
+pub use types::{
+    Atom, Candle, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder,
+};
 
 /// Convenient glob-import of the core traits and types.
 pub mod prelude {
@@ -94,5 +96,7 @@ pub mod prelude {
         Ack, Order, OrderId, OrderKind, PaperWallet, Units, Reference, Side, Size, Strategy, Wallet,
         WalletError,
     };
-    pub use crate::types::{Atom, Candle, OverlayInfo, Real, Schema, SchemaBuilder};
+    pub use crate::types::{
+        Atom, Candle, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder,
+    };
 }

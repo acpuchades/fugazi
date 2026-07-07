@@ -293,13 +293,19 @@ pub fn run(args: GetArgs) -> Result<()> {
 }
 
 /// One row of output: which symbol + interval it came from, the timed candle,
-/// and the per-column overlay values (aligned with the CLI's overlay column
-/// layout — `None` for a column no applicable overlay covers this row's group).
+/// the per-`-x`-column overlay values (aligned with the CLI's overlay column
+/// layout — `None` for a column no applicable overlay covers this row's
+/// group), and the pass-through extras from a `file:` source (per-row
+/// non-OHLCV cells classified as `Real`/`Bool`/`Str`).
 struct Row {
     symbol: String,
     interval: Interval,
     candle: TimedCandle,
-    overlays: Vec<Option<Real>>,
+    overlays: Vec<Option<OverlayValue>>,
+    /// Non-OHLCV columns preserved verbatim from a `file:` source row. Empty
+    /// for remote-provider sources. Column names are exactly as they appeared
+    /// in the input file's header (case-normalised to lowercase).
+    file_extras: Vec<(String, OverlayValue)>,
 }
 
 /// One downloadable (or file-backed) series: a `(provider, symbol, interval)`
@@ -387,13 +393,16 @@ fn chunk_bounds(since: Timestamp, until: Timestamp, interval: Interval) -> Vec<(
 const CHUNK_DELAY: StdDuration = StdDuration::from_millis(100);
 
 /// One un-overlaid downloaded bar in the intermediate fetch result: which
-/// symbol + interval it came from and its timed candle. `apply_overlays` walks
-/// these grouped by `(symbol, interval)` to attach overlay columns before the
-/// final `Row` list is emitted.
+/// symbol + interval it came from, its timed candle, and (for `file:` sources
+/// only) the pass-through non-OHLCV columns from the input row.
+/// `apply_overlays` walks these grouped by `(symbol, interval)` to attach
+/// `-x` overlay columns before the final `Row` list is emitted; the extras
+/// pass through unchanged.
 struct RawBar {
     symbol: String,
     interval: Interval,
     candle: TimedCandle,
+    extras: Vec<(String, OverlayValue)>,
 }
 
 /// Download every series concurrently (one task per series) and return the
@@ -447,6 +456,7 @@ async fn fetch_series(
                     time: b.time,
                     candle: b.candle,
                 },
+                extras: b.extras.clone(),
             })
             .collect();
         bar.inc(1);
@@ -475,6 +485,7 @@ async fn fetch_series(
             symbol: series.symbol.clone(),
             interval: series.interval,
             candle: tc,
+            extras: Vec::new(),
         }));
         bar.inc(1);
     }
@@ -523,16 +534,13 @@ fn apply_overlays(
         let mut group_rows: Vec<Row> = bars
             .into_iter()
             .map(|b| {
-                let values: Vec<Option<Real>> = instances
+                let values: Vec<Option<OverlayValue>> = instances
                     .iter_mut()
                     .map(|slot| {
                         slot.as_mut().and_then(|inst| {
-                            match inst.update(DynValue::Atom(b.candle.candle.into()))? {
-                                DynValue::Real(x) => Some(x),
-                                other => unreachable!(
-                                    "overlay's DynIndicator was built for Real output, got {other:?}"
-                                ),
-                            }
+                            dyn_value_to_overlay(
+                                inst.update(DynValue::Atom(b.candle.candle.into()))?,
+                            )
                         })
                     })
                     .collect();
@@ -541,6 +549,7 @@ fn apply_overlays(
                     interval: b.interval,
                     candle: b.candle,
                     overlays: values,
+                    file_extras: b.extras,
                 }
             })
             .collect();
@@ -667,18 +676,28 @@ fn unknown_provider_error(other: &str) -> String {
 /// Write the row list to `path` as a `;`-delimited CSV. Base header:
 /// `symbol;freq;time;open;high;low;close;volume`, followed by one column per
 /// overlay column name (unique, in first-appearance order across the
-/// `--overlay` args). A `None` overlay value — either the column's applicable
-/// overlay is still warming up or no overlay is scoped to this row's group —
-/// renders as an empty cell.
+/// `--overlay` args) and — for `file:`-sourced rows — one column per
+/// pass-through extra column from the input file (also unique + insertion
+/// order across every row that carries it). A `None` overlay value or a
+/// missing pass-through cell renders as blank; other cells render per their
+/// runtime type: `Real` via [`format_f64`], `Bool` as `true`/`false`, `Str`
+/// verbatim.
 fn write_candles_csv(path: &Path, rows: &[Row], overlay_columns: &[String]) -> Result<()> {
     let mut wtr = csv::WriterBuilder::new()
         .delimiter(b';')
         .from_path(path)
         .with_context(|| format!("creating {}", path.display()))?;
+
+    // File-sourced extras: union of column names across every row, in
+    // first-appearance order. Deterministic even when only some rows carry a
+    // given column (e.g. when a run mixes `file:` and remote series).
+    let extra_columns = collect_extra_columns(rows);
+
     let mut header: Vec<&str> = vec![
         "symbol", "freq", "time", "open", "high", "low", "close", "volume",
     ];
     header.extend(overlay_columns.iter().map(String::as_str));
+    header.extend(extra_columns.iter().map(String::as_str));
     wtr.write_record(&header)?;
     for row in rows {
         let time = row
@@ -698,12 +717,62 @@ fn write_candles_csv(path: &Path, rows: &[Row], overlay_columns: &[String]) -> R
             format_f64(row.candle.candle.volume),
         ];
         for v in &row.overlays {
-            record.push(v.map(format_f64).unwrap_or_default());
+            record.push(v.as_ref().map(format_overlay_value).unwrap_or_default());
+        }
+        for name in &extra_columns {
+            let cell = row
+                .file_extras
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| format_overlay_value(v))
+                .unwrap_or_default();
+            record.push(cell);
         }
         wtr.write_record(&record)?;
     }
     wtr.flush()?;
     Ok(())
+}
+
+/// Union of `file_extras` column names across `rows`, in first-appearance
+/// order. Preserves the order the input file's header used, since each
+/// FileBar's extras are already header-ordered.
+fn collect_extra_columns(rows: &[Row]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for r in rows {
+        for (name, _) in &r.file_extras {
+            if !out.iter().any(|n| n == name) {
+                out.push(name.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Convert a `DynIndicator`'s emitted `DynValue` (an overlay-spec output) into
+/// the widened cell type. Overlay chains that produce an unspottable `Atom` or
+/// `Candle` reach the `unreachable!` arm — they can't be a CSV cell.
+fn dyn_value_to_overlay(v: DynValue) -> Option<OverlayValue> {
+    match v {
+        DynValue::Real(x) => Some(OverlayValue::Real(x)),
+        DynValue::Bool(b) => Some(OverlayValue::Bool(b)),
+        DynValue::Str(s) => Some(OverlayValue::Str(s)),
+        other => unreachable!(
+            "overlay's DynIndicator produced a non-scalar payload {other:?} — the spec should \
+             never build one that isn't Real/Bool/Str",
+        ),
+    }
+}
+
+/// Format one overlay cell for CSV output. `Real` → [`format_f64`]; `Bool` →
+/// `true` / `false`; `Str` → the verbatim string (the CSV writer handles any
+/// quoting).
+fn format_overlay_value(v: &OverlayValue) -> String {
+    match v {
+        OverlayValue::Real(x) => format_f64(*x),
+        OverlayValue::Bool(b) => (if *b { "true" } else { "false" }).to_string(),
+        OverlayValue::Str(s) => s.to_string(),
+    }
 }
 
 /// Format a float without trailing `.0` for integers, and without exponent

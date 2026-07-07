@@ -46,7 +46,79 @@ impl Candle {
     }
 }
 
-/// Read-only column name → index registry for the values array of an
+/// The declared type of one overlay column — recorded in the [`Schema`] so a
+/// `!get` (or the library-side `GetReal`/`GetBool`/`GetStr`) dispatches to the
+/// right typed leaf at build time. `Real` is a `f64`; `Bool` is a native bool
+/// (a signal leaf); `Str` is a shared `Arc<str>` (used for categorical
+/// side-channels like a regime label).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayType {
+    Real,
+    Bool,
+    Str,
+}
+
+impl std::fmt::Display for OverlayType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OverlayType::Real => f.write_str("Real"),
+            OverlayType::Bool => f.write_str("Bool"),
+            OverlayType::Str => f.write_str("Str"),
+        }
+    }
+}
+
+/// One overlay column's per-bar value: a `Real`, a `Bool`, or a `Str`. The
+/// runtime carrier for the schema's declared per-column [`OverlayType`].
+///
+/// `Str` shares its backing storage via `Arc<str>` so a column of repeated
+/// labels (a regime tag, a session marker) doesn't allocate per bar for the
+/// same value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OverlayValue {
+    Real(Real),
+    Bool(bool),
+    Str(Arc<str>),
+}
+
+impl OverlayValue {
+    /// The [`OverlayType`] this value carries.
+    pub fn type_of(&self) -> OverlayType {
+        match self {
+            OverlayValue::Real(_) => OverlayType::Real,
+            OverlayValue::Bool(_) => OverlayType::Bool,
+            OverlayValue::Str(_) => OverlayType::Str,
+        }
+    }
+}
+
+impl From<Real> for OverlayValue {
+    fn from(v: Real) -> Self {
+        OverlayValue::Real(v)
+    }
+}
+impl From<bool> for OverlayValue {
+    fn from(v: bool) -> Self {
+        OverlayValue::Bool(v)
+    }
+}
+impl From<Arc<str>> for OverlayValue {
+    fn from(v: Arc<str>) -> Self {
+        OverlayValue::Str(v)
+    }
+}
+impl From<&str> for OverlayValue {
+    fn from(v: &str) -> Self {
+        OverlayValue::Str(Arc::from(v))
+    }
+}
+impl From<String> for OverlayValue {
+    fn from(v: String) -> Self {
+        OverlayValue::Str(Arc::from(v.as_str()))
+    }
+}
+
+/// Read-only column name → (index, type) registry for the values array of an
 /// [`OverlayInfo`].
 ///
 /// A schema is built with [`Schema::builder`] and frozen by
@@ -54,10 +126,15 @@ impl Candle {
 /// run. The `Arc` guarantees the schema can't change after any `OverlayInfo`
 /// has bound values against it, so an index resolved once at indicator
 /// construction stays valid for the whole run.
+///
+/// Column type is recorded alongside the index so a `!get`-shaped builder can
+/// dispatch to the right typed leaf without a `type:` tag on the caller side.
 #[derive(Debug, Default)]
 pub struct Schema {
     indexes: HashMap<String, usize>,
-    len: usize,
+    /// One entry per registered column, in insertion order. `columns[i]` is
+    /// the `(name, type)` pair at index `i`.
+    columns: Vec<(String, OverlayType)>,
 }
 
 impl Schema {
@@ -68,15 +145,22 @@ impl Schema {
         }
     }
 
+    /// A shared empty schema — the "no overlay side-channel" sentinel used by
+    /// specs that build without an overlay context (`fugazi get`'s overlay
+    /// pipeline, unit tests, doctests).
+    pub fn empty() -> Arc<Schema> {
+        Arc::new(Schema::default())
+    }
+
     /// Number of registered columns — the required length of an
     /// [`OverlayInfo`] values array bound to this schema.
     pub fn len(&self) -> usize {
-        self.len
+        self.columns.len()
     }
 
     /// Whether no columns are registered.
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.columns.is_empty()
     }
 
     /// Resolve a column name to its index, `None` if not registered.
@@ -84,47 +168,82 @@ impl Schema {
         self.indexes.get(key).copied()
     }
 
+    /// Read a column's declared type by index. `None` if out of bounds.
+    pub fn type_of(&self, index: usize) -> Option<OverlayType> {
+        self.columns.get(index).map(|(_, t)| *t)
+    }
+
+    /// Read a column's declared type by name. `None` if not registered.
+    pub fn type_of_key(&self, key: &str) -> Option<OverlayType> {
+        self.index_of(key).and_then(|i| self.type_of(i))
+    }
+
     /// Whether `key` is a registered column.
     pub fn contains(&self, key: &str) -> bool {
         self.indexes.contains_key(key)
     }
 
-    /// Iterate the registered column names, in arbitrary order.
+    /// Iterate the registered column names in insertion order.
     pub fn keys(&self) -> impl Iterator<Item = &str> {
-        self.indexes.keys().map(String::as_str)
+        self.columns.iter().map(|(name, _)| name.as_str())
     }
 }
 
-/// Mutable builder for a [`Schema`]. Register columns with [`add`](Self::add),
-/// then freeze into an `Arc<Schema>` with [`finish`](Self::finish); the frozen
-/// schema is read-only so the indexes it hands out are stable for the run.
+/// Mutable builder for a [`Schema`]. Register columns with
+/// [`add_real`](Self::add_real) / [`add_bool`](Self::add_bool) /
+/// [`add_str`](Self::add_str), then freeze into an `Arc<Schema>` with
+/// [`finish`](Self::finish); the frozen schema is read-only so the indexes it
+/// hands out are stable for the run.
 #[derive(Debug, Default)]
 pub struct SchemaBuilder {
     schema: Schema,
 }
 
 impl SchemaBuilder {
-    /// Register a column and return its index. Idempotent — a repeated `key`
-    /// returns the previously-assigned index without adding a new slot.
-    pub fn add(&mut self, key: impl Into<String>) -> usize {
+    /// Register a `Real` column and return its index. Idempotent — a repeated
+    /// `key` returns the previously-assigned index without adding a new slot,
+    /// provided the type matches; a type mismatch panics.
+    pub fn add_real(&mut self, key: impl Into<String>) -> usize {
+        self.add_typed(key, OverlayType::Real)
+    }
+
+    /// Register a `Bool` column and return its index. See
+    /// [`add_real`](Self::add_real) for the idempotency + type-mismatch rules.
+    pub fn add_bool(&mut self, key: impl Into<String>) -> usize {
+        self.add_typed(key, OverlayType::Bool)
+    }
+
+    /// Register a `Str` column and return its index. See
+    /// [`add_real`](Self::add_real) for the idempotency + type-mismatch rules.
+    pub fn add_str(&mut self, key: impl Into<String>) -> usize {
+        self.add_typed(key, OverlayType::Str)
+    }
+
+    fn add_typed(&mut self, key: impl Into<String>, ty: OverlayType) -> usize {
         let key = key.into();
         if let Some(&i) = self.schema.indexes.get(&key) {
+            let existing = self.schema.columns[i].1;
+            assert_eq!(
+                existing, ty,
+                "column {key:?} was already registered as {existing}; \
+                 cannot re-register as {ty}",
+            );
             return i;
         }
-        let i = self.schema.len;
-        self.schema.indexes.insert(key, i);
-        self.schema.len += 1;
+        let i = self.schema.columns.len();
+        self.schema.indexes.insert(key.clone(), i);
+        self.schema.columns.push((key, ty));
         i
     }
 
     /// Number of columns registered so far.
     pub fn len(&self) -> usize {
-        self.schema.len
+        self.schema.len()
     }
 
     /// Whether no columns have been registered yet.
     pub fn is_empty(&self) -> bool {
-        self.schema.len == 0
+        self.schema.is_empty()
     }
 
     /// Freeze into a shareable, read-only schema.
@@ -137,23 +256,24 @@ impl SchemaBuilder {
 /// bar's values in schema order.
 ///
 /// Cheap to clone (two atomic bumps: the shared `Arc<Schema>` and the per-atom
-/// `Arc<[Real]>`, no allocation), which is what
+/// `Arc<[OverlayValue]>`, no allocation), which is what
 /// [`Combine`](crate::indicators::Combine) needs when it feeds the same
 /// [`Atom`] to both sides. Both fields are `Arc` so an atom slice can also be
 /// shared across worker threads (used by the CLI's `optimize` sweep).
 #[derive(Debug, Clone)]
 pub struct OverlayInfo {
     schema: Arc<Schema>,
-    values: Arc<[Real]>,
+    values: Arc<[OverlayValue]>,
 }
 
 impl OverlayInfo {
     /// Bind `values` to a fixed `schema`. `values.len()` must equal
-    /// `schema.len()`.
+    /// `schema.len()`, and each `values[i]`'s runtime type must match
+    /// `schema.type_of(i)`.
     ///
     /// # Panics
-    /// Panics if `values.len() != schema.len()`.
-    pub fn new(schema: Arc<Schema>, values: impl Into<Arc<[Real]>>) -> Self {
+    /// Panics on length mismatch or on any per-slot type mismatch.
+    pub fn new(schema: Arc<Schema>, values: impl Into<Arc<[OverlayValue]>>) -> Self {
         let values = values.into();
         assert_eq!(
             values.len(),
@@ -162,6 +282,15 @@ impl OverlayInfo {
             values.len(),
             schema.len(),
         );
+        for (i, v) in values.iter().enumerate() {
+            let declared = schema.type_of(i).expect("index in range");
+            let actual = v.type_of();
+            assert_eq!(
+                declared, actual,
+                "overlay value at index {i} has type {actual}, \
+                 schema declared {declared}",
+            );
+        }
         Self { schema, values }
     }
 
@@ -171,19 +300,49 @@ impl OverlayInfo {
     }
 
     /// The values array, in schema order.
-    pub fn values(&self) -> &[Real] {
+    pub fn values(&self) -> &[OverlayValue] {
         &self.values
     }
 
     /// Read the value at a resolved column index, `None` if out of bounds.
-    pub fn get(&self, index: usize) -> Option<Real> {
-        self.values.get(index).copied()
+    pub fn get(&self, index: usize) -> Option<&OverlayValue> {
+        self.values.get(index)
     }
 
-    /// Look up a column by name (a one-time convenience — hot-path readers
-    /// resolve the index at construction and read [`get`](Self::get)).
-    pub fn get_by_key(&self, key: &str) -> Option<Real> {
+    /// Look up a value by column name (a one-time convenience — hot-path
+    /// readers resolve the index at construction and read [`get`](Self::get)).
+    pub fn get_by_key(&self, key: &str) -> Option<&OverlayValue> {
         self.schema.index_of(key).and_then(|i| self.get(i))
+    }
+
+    /// Read the `Real` at a resolved index. `None` if the index is out of
+    /// bounds *or* the slot's runtime type isn't `Real`. Defensive — a
+    /// well-constructed [`OverlayInfo`] never sees a type mismatch here, but
+    /// the check keeps the typed leaves ([`GetReal`](crate::indicators::GetReal))
+    /// honest.
+    pub fn get_real(&self, index: usize) -> Option<Real> {
+        match self.get(index)? {
+            OverlayValue::Real(x) => Some(*x),
+            _ => None,
+        }
+    }
+
+    /// Read the `Bool` at a resolved index. `None` on out-of-bounds or type
+    /// mismatch.
+    pub fn get_bool(&self, index: usize) -> Option<bool> {
+        match self.get(index)? {
+            OverlayValue::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// Read the `Str` at a resolved index. `None` on out-of-bounds or type
+    /// mismatch.
+    pub fn get_str(&self, index: usize) -> Option<&Arc<str>> {
+        match self.get(index)? {
+            OverlayValue::Str(s) => Some(s),
+            _ => None,
+        }
     }
 }
 
@@ -235,9 +394,9 @@ mod tests {
     #[test]
     fn schema_indexes_are_stable_and_idempotent() {
         let mut b = Schema::builder();
-        assert_eq!(b.add("a"), 0);
-        assert_eq!(b.add("b"), 1);
-        assert_eq!(b.add("a"), 0); // idempotent
+        assert_eq!(b.add_real("a"), 0);
+        assert_eq!(b.add_real("b"), 1);
+        assert_eq!(b.add_real("a"), 0); // idempotent
         assert_eq!(b.len(), 2);
         let s = b.finish();
         assert_eq!(s.index_of("a"), Some(0));
@@ -246,14 +405,58 @@ mod tests {
     }
 
     #[test]
-    fn overlay_info_binds_values_to_schema() {
+    fn schema_records_per_column_type() {
         let mut b = Schema::builder();
-        b.add("vol_20");
-        b.add("regime");
+        b.add_real("vol_20");
+        b.add_bool("risk_on");
+        b.add_str("regime");
         let s = b.finish();
-        let overlays = OverlayInfo::new(s.clone(), vec![0.12, 1.0]);
-        assert_eq!(overlays.get(0), Some(0.12));
-        assert_eq!(overlays.get_by_key("regime"), Some(1.0));
+        assert_eq!(s.type_of_key("vol_20"), Some(OverlayType::Real));
+        assert_eq!(s.type_of_key("risk_on"), Some(OverlayType::Bool));
+        assert_eq!(s.type_of_key("regime"), Some(OverlayType::Str));
+        assert_eq!(s.type_of_key("missing"), None);
+        // Insertion order is preserved for keys().
+        let keys: Vec<&str> = s.keys().collect();
+        assert_eq!(keys, vec!["vol_20", "risk_on", "regime"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot re-register")]
+    fn schema_rejects_type_mismatch_on_reregister() {
+        let mut b = Schema::builder();
+        b.add_real("x");
+        b.add_bool("x");
+    }
+
+    #[test]
+    fn overlay_info_binds_heterogeneous_values() {
+        let mut b = Schema::builder();
+        b.add_real("vol_20");
+        b.add_bool("risk_on");
+        b.add_str("regime");
+        let s = b.finish();
+        let overlays = OverlayInfo::new(
+            s.clone(),
+            vec![
+                OverlayValue::Real(0.12),
+                OverlayValue::Bool(true),
+                OverlayValue::Str(Arc::from("bull")),
+            ],
+        );
+        assert_eq!(overlays.get_real(0), Some(0.12));
+        assert_eq!(overlays.get_bool(1), Some(true));
+        assert_eq!(overlays.get_str(2).map(|s| s.as_ref()), Some("bull"));
+
+        // Typed accessors return None on a type mismatch (defensive).
+        assert_eq!(overlays.get_bool(0), None);
+        assert_eq!(overlays.get_real(1), None);
+        assert_eq!(overlays.get_str(0), None);
+
+        // get_by_key resolves the type-tagged value.
+        assert!(matches!(
+            overlays.get_by_key("regime"),
+            Some(OverlayValue::Str(_))
+        ));
         assert_eq!(overlays.get_by_key("missing"), None);
     }
 
@@ -261,10 +464,26 @@ mod tests {
     #[should_panic(expected = "overlay values length")]
     fn overlay_info_rejects_length_mismatch() {
         let mut b = Schema::builder();
-        b.add("a");
-        b.add("b");
+        b.add_real("a");
+        b.add_real("b");
         let s = b.finish();
-        let _ = OverlayInfo::new(s, vec![0.0]); // 1 value for a 2-column schema
+        let _ = OverlayInfo::new(s, vec![OverlayValue::Real(0.0)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "has type")]
+    fn overlay_info_rejects_type_mismatch_per_slot() {
+        let mut b = Schema::builder();
+        b.add_real("a");
+        let s = b.finish();
+        let _ = OverlayInfo::new(s, vec![OverlayValue::Bool(true)]);
+    }
+
+    #[test]
+    fn schema_empty_is_zero_length() {
+        let s = Schema::empty();
+        assert!(s.is_empty());
+        assert_eq!(s.len(), 0);
     }
 
     #[test]

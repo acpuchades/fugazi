@@ -44,7 +44,8 @@ fn measured_report(
     costs: TradingCosts,
 ) -> fugazi::RunReport<String> {
     let symbol = spec.symbol.clone();
-    let mut strategy = spec.build();
+    let schema = schema_from_atoms(atoms);
+    let mut strategy = spec.build(&schema);
     let mut wallet = PaperWallet::with_costs(cash, costs);
     fugazi::backtest::run(
         &mut strategy,
@@ -52,6 +53,20 @@ fn measured_report(
         symbol,
         atoms.iter().map(|(_, a)| a.clone()),
     )
+}
+
+/// Extract the shared overlay schema from an atom stream — every atom is built
+/// against the same [`Schema`] `Arc` in the loader ([`crate::data`]), so any
+/// atom that carries `overlays` gives us it. Falls back to
+/// [`Schema::empty()`] when the stream is empty or none of the atoms are
+/// overlay-bearing (i.e. no side channel), so a `!get { key }` in the spec
+/// panics with a helpful "unknown key" against the empty registered-keys list.
+fn schema_from_atoms(atoms: &[(String, Atom)]) -> std::sync::Arc<Schema> {
+    atoms
+        .iter()
+        .find_map(|(_, a)| a.overlays.as_ref())
+        .map(|ov| ov.schema().clone())
+        .unwrap_or_else(Schema::empty)
 }
 
 /// Pure metrics-only evaluation: drive `spec` over `atoms` through a paper
@@ -147,7 +162,8 @@ pub fn run_iteration(
     let symbol = spec.symbol.clone();
     let costs = inputs.cost_config.resolve(&symbol, inputs.effective_freq);
     let costs_active = !costs.is_none();
-    let mut strategy = spec.build();
+    let schema = schema_from_atoms(atoms);
+    let mut strategy = spec.build(&schema);
     let mut wallet = PaperWallet::with_costs(inputs.cash, costs);
     let report = fugazi::backtest::run(
         &mut strategy,
@@ -158,7 +174,7 @@ pub fn run_iteration(
     // Gross twin under active costs: same strategy/atoms/cash, no cost
     // model, so any difference is attributable to costs alone.
     let gross_report = if costs_active {
-        let mut gs = spec.build();
+        let mut gs = spec.build(&schema);
         let mut gw = PaperWallet::new(inputs.cash);
         Some(fugazi::backtest::run(
             &mut gs,

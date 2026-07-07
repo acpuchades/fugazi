@@ -33,6 +33,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value as Json;
 
+use fugazi::Schema;
 use fugazi::indicators::Position;
 use fugazi::sources::Interval;
 
@@ -71,9 +72,12 @@ impl Overlay {
     /// A `get` command runs no strategy, so position-anchored leaves (`entry`,
     /// `peak`, `trough`) read from a stub [`Position`] that never updates and
     /// stay `None` throughout the fetch — a user who wires one in just gets an
-    /// empty column.
+    /// empty column. Likewise `!get` isn't meaningful here: `fugazi get`'s
+    /// atom stream carries no overlay side channel, so the schema is empty
+    /// and a `!get { key }` in the spec panics at build time with an unknown
+    /// key against an empty registered-keys list.
     pub fn build(&self) -> Box<dyn DynIndicator> {
-        self.spec.build(&Position::new())
+        self.spec.build(&Position::new(), &Schema::empty())
     }
 }
 

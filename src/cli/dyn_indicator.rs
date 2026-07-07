@@ -16,6 +16,7 @@
 //! other way so a boxed handle can drop into a library constructor.
 
 use std::fmt;
+use std::sync::Arc;
 
 use fugazi::Indicator;
 use fugazi::types::{Atom, Candle, Real};
@@ -27,20 +28,22 @@ use fugazi::types::{Atom, Candle, Real};
 /// The runtime-typed payload a [`DynIndicator`] exchanges. One variant per
 /// concrete carrier the CLI's indicator vocabulary produces / consumes.
 ///
-/// `Real` and `Bool` are `Copy`; `Atom` and `Candle` are not, so `DynValue`
-/// itself is only `Clone`.
+/// `Real` and `Bool` are `Copy`; `Atom`, `Candle`, and `Str` are not, so
+/// `DynValue` itself is only `Clone`.
 #[derive(Debug, Clone)]
 pub enum DynValue {
     Real(Real),
     Bool(bool),
     Atom(Atom),
     Candle(Candle),
+    Str(Arc<str>),
 }
 
 // `Atom` doesn't implement `PartialEq` (the overlay `Arc`s aren't compared by
 // the library), but the CLI's test helpers still need to assert on `DynValue`.
-// Compare the scalar variants exactly, and reduce `Atom`/`Candle` payloads to
-// their candle-field equality (dropping overlays for the atom case).
+// Compare the scalar variants exactly, reduce `Atom`/`Candle` payloads to
+// their candle-field equality (dropping overlays for the atom case), and
+// compare `Str` payloads by their string contents.
 impl PartialEq for DynValue {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -48,6 +51,7 @@ impl PartialEq for DynValue {
             (DynValue::Bool(a), DynValue::Bool(b)) => a == b,
             (DynValue::Candle(a), DynValue::Candle(b)) => a == b,
             (DynValue::Atom(a), DynValue::Atom(b)) => a.candle == b.candle,
+            (DynValue::Str(a), DynValue::Str(b)) => a.as_ref() == b.as_ref(),
             _ => false,
         }
     }
@@ -62,6 +66,7 @@ pub enum DynType {
     Bool,
     Atom,
     Candle,
+    Str,
 }
 
 impl fmt::Display for DynType {
@@ -71,6 +76,7 @@ impl fmt::Display for DynType {
             DynType::Bool => f.write_str("Bool"),
             DynType::Atom => f.write_str("Atom"),
             DynType::Candle => f.write_str("Candle"),
+            DynType::Str => f.write_str("Str"),
         }
     }
 }
@@ -95,6 +101,11 @@ impl From<Candle> for DynValue {
         DynValue::Candle(v)
     }
 }
+impl From<Arc<str>> for DynValue {
+    fn from(v: Arc<str>) -> Self {
+        DynValue::Str(v)
+    }
+}
 
 impl TryFrom<DynValue> for Real {
     type Error = DynType;
@@ -104,6 +115,7 @@ impl TryFrom<DynValue> for Real {
             DynValue::Bool(_) => Err(DynType::Bool),
             DynValue::Atom(_) => Err(DynType::Atom),
             DynValue::Candle(_) => Err(DynType::Candle),
+            DynValue::Str(_) => Err(DynType::Str),
         }
     }
 }
@@ -115,6 +127,7 @@ impl TryFrom<DynValue> for bool {
             DynValue::Real(_) => Err(DynType::Real),
             DynValue::Atom(_) => Err(DynType::Atom),
             DynValue::Candle(_) => Err(DynType::Candle),
+            DynValue::Str(_) => Err(DynType::Str),
         }
     }
 }
@@ -129,6 +142,7 @@ impl TryFrom<DynValue> for Atom {
             DynValue::Candle(c) => Ok(c.into()),
             DynValue::Real(_) => Err(DynType::Real),
             DynValue::Bool(_) => Err(DynType::Bool),
+            DynValue::Str(_) => Err(DynType::Str),
         }
     }
 }
@@ -140,13 +154,27 @@ impl TryFrom<DynValue> for Candle {
             DynValue::Real(_) => Err(DynType::Real),
             DynValue::Bool(_) => Err(DynType::Bool),
             DynValue::Atom(_) => Err(DynType::Atom),
+            DynValue::Str(_) => Err(DynType::Str),
+        }
+    }
+}
+impl TryFrom<DynValue> for Arc<str> {
+    type Error = DynType;
+    fn try_from(v: DynValue) -> Result<Arc<str>, DynType> {
+        match v {
+            DynValue::Str(s) => Ok(s),
+            DynValue::Real(_) => Err(DynType::Real),
+            DynValue::Bool(_) => Err(DynType::Bool),
+            DynValue::Atom(_) => Err(DynType::Atom),
+            DynValue::Candle(_) => Err(DynType::Candle),
         }
     }
 }
 
-/// Maps a concrete carrier type (`Real`, `bool`, `Atom`, `Candle`) back to its
-/// [`DynType`] tag — the compile-time counterpart of the runtime descriptor
-/// the [`Adapter`] blanket uses to fill in `input_type()` / `output_type()`.
+/// Maps a concrete carrier type (`Real`, `bool`, `Atom`, `Candle`, `Arc<str>`)
+/// back to its [`DynType`] tag — the compile-time counterpart of the runtime
+/// descriptor the [`Adapter`] blanket uses to fill in `input_type()` /
+/// `output_type()`.
 pub trait TypeOf {
     const TYPE: DynType;
 }
@@ -161,6 +189,9 @@ impl TypeOf for Atom {
 }
 impl TypeOf for Candle {
     const TYPE: DynType = DynType::Candle;
+}
+impl TypeOf for Arc<str> {
+    const TYPE: DynType = DynType::Str;
 }
 
 // ---------------------------------------------------------------------------
@@ -572,6 +603,59 @@ impl Indicator for AsCandle {
     }
 }
 
+/// Views a `Box<dyn DynIndicator>` with `output_type == Str` as a library
+/// `Indicator<Input = Atom, Output = Arc<str>>` — the shape a
+/// [`StrEq`](fugazi::indicators::StrEq) or any other string-consuming
+/// combinator expects for its sources.
+///
+/// # Panics
+/// [`new`](Self::new) panics if `inner.input_type() != Atom` or
+/// `inner.output_type() != Str`.
+#[derive(Clone)]
+pub struct AsStr(Box<dyn DynIndicator>);
+
+impl AsStr {
+    pub fn new(inner: Box<dyn DynIndicator>) -> Self {
+        assert_eq!(
+            inner.input_type(),
+            DynType::Atom,
+            "AsStr requires an Atom-input DynIndicator"
+        );
+        assert_eq!(
+            inner.output_type(),
+            DynType::Str,
+            "AsStr requires a Str-output DynIndicator"
+        );
+        Self(inner)
+    }
+}
+
+impl Indicator for AsStr {
+    type Input = Atom;
+    type Output = Arc<str>;
+    fn update(&mut self, atom: Atom) -> Option<Arc<str>> {
+        match self.0.update(DynValue::Atom(atom))? {
+            DynValue::Str(s) => Some(s),
+            other => unreachable!("AsStr received {other:?} but was built for Str output"),
+        }
+    }
+    fn value(&self) -> Option<Arc<str>> {
+        match self.0.value()? {
+            DynValue::Str(s) => Some(s),
+            other => unreachable!("AsStr held {other:?} but was built for Str output"),
+        }
+    }
+    fn warm_up_period(&self) -> usize {
+        self.0.warm_up_period()
+    }
+    fn unstable_period(&self) -> usize {
+        self.0.unstable_period()
+    }
+    fn reset(&mut self) {
+        self.0.reset();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,6 +720,20 @@ mod tests {
         assert_eq!(
             ema.stable_period(),
             ema.warm_up_period() + ema.unstable_period()
+        );
+    }
+
+    #[test]
+    fn str_payload_roundtrips_through_dynvalue() {
+        let s: Arc<str> = Arc::from("bull");
+        let v: DynValue = s.clone().into();
+        assert_eq!(v, DynValue::Str(Arc::from("bull")));
+        let back: Arc<str> = v.try_into().unwrap();
+        assert_eq!(back.as_ref(), "bull");
+        // Mismatch surfaces the actual variant tag.
+        assert_eq!(
+            Arc::<str>::try_from(DynValue::from(1.0_f64)).unwrap_err(),
+            DynType::Real,
         );
     }
 }

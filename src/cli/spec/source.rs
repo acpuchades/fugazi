@@ -3,13 +3,15 @@
 //! Split out of `spec/mod.rs`; kept in `crate::spec::source` so paths like
 //! `crate::spec::SourceSpec` still resolve via the `pub use` in `mod.rs`.
 
+use std::sync::Arc;
+
 use serde::Deserialize;
 
 use fugazi::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Component, Current,
-    Dmi, DmiValue, Donchian, DonchianValue, Ema, Hma, Keltner, KeltnerValue, Latch, Macd, MacdValue,
-    Mfi, Obv, Position, Resample, Rma, Rsi, Sar, Sma, StdDev, StochRsi, Stochastic, TrueRange,
-    Value, Vwap, WilliamsR, Wma,
+    Dmi, DmiValue, Donchian, DonchianValue, Ema, GetBool, GetReal, GetStr, Hma, Keltner,
+    KeltnerValue, Latch, Macd, MacdValue, Mfi, Obv, Position, Resample, Rma, Rsi, Sar, Sma, StdDev,
+    StochRsi, Stochastic, TrueRange, Value, Vwap, WilliamsR, Wma,
 };
 use fugazi::prelude::*;
 
@@ -60,6 +62,23 @@ pub enum SourceSpec {
     Peak,
     /// The running low since entry (a short trailing-stop anchor).
     Trough,
+    /// Read one overlay column by name from each atom's side-channel data.
+    ///
+    /// The column's declared [`OverlayType`] in the atom stream's schema
+    /// picks the output type at build time: a `Real` column yields a
+    /// `Real`-output source (fits everywhere a numeric source does), a
+    /// `Bool` column yields a `Bool`-output source (fits in any signal
+    /// position — `!get` reads as a signal directly), a `Str` column yields
+    /// a `Str`-output source (feeds into `!str_eq` / `!str_ne` on the
+    /// signal side).
+    ///
+    /// Builds panic on an unknown key or a type mismatch — a `Str` column
+    /// in a Real-typed source position is caught downstream at `AsReal::new`
+    /// with the "expected Real" panic, the same failure mode as any other
+    /// type-clashed spec.
+    Get {
+        key: String,
+    },
 
     // --- price-series indicators (a source + parameters) ---
     Ema {
@@ -365,17 +384,23 @@ pub enum SourceSpec {
 
 impl SourceSpec {
     /// Construct the live, runtime-typed source this spec describes as a
-    /// `Box<dyn DynIndicator>` with `output_type() == DynType::Real`. `anchor`
-    /// is the owning strategy's [`Position`], shared by any `entry` / `peak` /
-    /// `trough` leaves in the tree.
-    pub fn build(&self, anchor: &Position) -> Box<dyn DynIndicator> {
+    /// `Box<dyn DynIndicator>`. `anchor` is the owning strategy's
+    /// [`Position`], shared by any `entry` / `peak` / `trough` leaves in the
+    /// tree; `schema` is the overlay [`Schema`] the atom stream carries, used
+    /// by `!get { key }` to look up the column's declared [`OverlayType`] and
+    /// dispatch to the right typed leaf.
+    ///
+    /// Most variants produce `output_type() == DynType::Real`; the exceptions
+    /// are `Get`-shaped ones (whose output type follows the schema), and the
+    /// `Current` candle passthrough which produces `Candle`.
+    pub fn build(&self, anchor: &Position, schema: &Arc<Schema>) -> Box<dyn DynIndicator> {
         use SourceSpec::*;
         // Recursive-build shorthand: build `s`, view it as a library-typed
         // `Indicator<Input=Atom, Output=Real>` so it drops into a concrete
         // library constructor.
-        let real = |s: &SourceSpec| AsReal::new(s.build(anchor));
+        let real = |s: &SourceSpec| AsReal::new(s.build(anchor, schema));
         // Same for a candle-output source (the input of every bar indicator).
-        let candle = |s: &SourceSpec| AsCandle::new(s.build(anchor));
+        let candle = |s: &SourceSpec| AsCandle::new(s.build(anchor, schema));
 
         match self {
             Close => dyn_indicator::wrap(self::Current::close()),
@@ -390,6 +415,7 @@ impl SourceSpec {
             Entry => dyn_indicator::wrap(anchor.entry()),
             Peak => dyn_indicator::wrap(anchor.peak()),
             Trough => dyn_indicator::wrap(anchor.trough()),
+            Get { key } => build_get(schema, key),
 
             Ema { source, period } => dyn_indicator::wrap(self::Ema::new(real(source), *period)),
             Sma { source, period } => dyn_indicator::wrap(self::Sma::new(real(source), *period)),
@@ -572,7 +598,7 @@ impl SourceSpec {
             Latch { source } => {
                 // Wrap the built source in the library's Latch — preserves
                 // Real output; warm-up / unstable pass through unchanged.
-                let inner = AsReal::new(source.build(anchor));
+                let inner = AsReal::new(source.build(anchor, schema));
                 dyn_indicator::wrap(self::Latch::new(inner))
             }
             Resample {
@@ -589,10 +615,43 @@ impl SourceSpec {
                 // the resampled candle as an atom with no overlays.
                 let candle_src = candle(source);
                 let resample_dyn = dyn_indicator::wrap(self::Resample::new(candle_src, *every));
-                let inner_dyn = inner.build(anchor);
+                let inner_dyn = inner.build(anchor, schema);
                 dyn_indicator::chain(resample_dyn, inner_dyn)
             }
-            Unstable { source } => dyn_indicator::unstable_wrap(source.build(anchor)),
+            Unstable { source } => dyn_indicator::unstable_wrap(source.build(anchor, schema)),
+        }
+    }
+}
+
+/// Build a `!get { key }` leaf: look up the column's declared [`OverlayType`]
+/// in `schema` and dispatch to the matching typed [`GetReal`] / [`GetBool`] /
+/// [`GetStr`] leaf.
+///
+/// Panics with a helpful message if `key` isn't registered — the message
+/// lists the schema's registered keys so a typo is easy to spot. The message
+/// distinguishes the empty-schema case ("no overlay side channel — feed
+/// `--series` or `file:` data with additional columns to attach overlays")
+/// from the non-empty case ("registered: a, b, c").
+fn build_get(schema: &Arc<Schema>, key: &str) -> Box<dyn DynIndicator> {
+    match schema.type_of_key(key) {
+        Some(OverlayType::Real) => dyn_indicator::wrap(GetReal::new(schema, key)),
+        Some(OverlayType::Bool) => dyn_indicator::wrap(GetBool::new(schema, key)),
+        Some(OverlayType::Str) => dyn_indicator::wrap(GetStr::new(schema, key)),
+        None => {
+            let registered: Vec<&str> = schema.keys().collect();
+            if registered.is_empty() {
+                panic!(
+                    "!get {{ key: {key:?} }}: no overlay side channel is bound \
+                     — feed `--series` data or a `file:` source that carries \
+                     additional (non-OHLCV) columns to attach overlays",
+                );
+            } else {
+                panic!(
+                    "!get {{ key: {key:?} }}: overlay column not registered. \
+                     Registered columns: {}",
+                    registered.join(", "),
+                );
+            }
         }
     }
 }

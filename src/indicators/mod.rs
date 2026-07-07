@@ -66,13 +66,15 @@ pub use candle::{
     CandleField, Close, Current, CurrentBar, Field, High, Low, Median, Open, Typical, Volume,
 };
 pub use cci::Cci;
-pub use compare::{ComparisonOp, DEFAULT_EPSILON, Eq, Ge, Gt, Le, Lt, Ne};
+pub use compare::{
+    ComparisonOp, DEFAULT_EPSILON, Eq, Ge, Gt, Le, Lt, Ne, StrEq, StrEqOp, StrNe, StrNeOp,
+};
 pub use component::{Component, Shared, SharedComponent, SharedHandle};
 pub use dmi::{Dmi, DmiValue};
 pub use donchian::{Donchian, DonchianValue};
 pub use ema::Ema;
 pub use ext::{BoolIndicatorExt, IndicatorExt};
-pub use get::{Get, UnknownKey};
+pub use get::{GetBool, GetError, GetReal, GetStr, TypeMismatch, UnknownKey};
 pub use hma::Hma;
 pub use identity::Identity;
 pub use keltner::{Keltner, KeltnerValue};
@@ -94,7 +96,7 @@ pub use stochastic::{StochRsi, Stochastic};
 pub use timeframe::{Latch, Resample};
 pub use true_range::TrueRange;
 pub use unstable::Unstable;
-pub use value::Value;
+pub use value::{Value, ValueStr};
 pub use vwap::Vwap;
 pub use williams_r::WilliamsR;
 pub use wma::Wma;
