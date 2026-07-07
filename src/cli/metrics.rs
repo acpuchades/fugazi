@@ -117,6 +117,17 @@ pub struct RiskAdjustedSection {
     /// or CAGR is degenerate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ulcer_performance_index: Option<Real>,
+    /// Probabilistic Sharpe Ratio against a zero-Sharpe benchmark — the
+    /// probability that the true Sharpe is > 0 given the observed higher-moment
+    /// shape of the return distribution (Bailey & López de Prado, 2012). A
+    /// probability in `[0, 1]`; `None` when Sharpe/skew/kurtosis is undefined.
+    ///
+    /// This is the whole-run PSR; the selection-bias-corrected DSR is only
+    /// meaningful when a *choice* has been made from many candidates, so it
+    /// surfaces on the `optimize` results table rather than here — see
+    /// [`fugazi::metrics::deflated_sharpe`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probabilistic_sharpe: Option<Real>,
 }
 
 /// Drawdown analytics: the worst peak-to-trough drop, the shape of the full
@@ -292,6 +303,12 @@ pub fn from_report<Sym>(
                 initial,
                 risk_free_rate,
                 bars_per_year,
+            ),
+            probabilistic_sharpe: fugazi::metrics::probabilistic_sharpe(
+                &returns,
+                risk_free_rate,
+                bars_per_year,
+                0.0,
             ),
         },
         drawdown: DrawdownSection {
@@ -516,6 +533,10 @@ pub fn flatten(m: &Metrics) -> Vec<(&'static str, Option<Real>)> {
         (
             "risk_adjusted.ulcer_performance_index",
             m.risk_adjusted.ulcer_performance_index,
+        ),
+        (
+            "risk_adjusted.probabilistic_sharpe",
+            m.risk_adjusted.probabilistic_sharpe,
         ),
         ("drawdown.max", real(m.drawdown.max)),
         ("drawdown.max_pct", real(m.drawdown.max_pct)),

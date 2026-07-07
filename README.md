@@ -8,13 +8,13 @@ and signal owns its internal state and is advanced one sample at a time via
 - **Incremental** — feed one bar at a time; no full-history recomputation.
 - **Composable** — indicators own their input source, so you build complex
   signals by nesting constructors. No glue, no remembering what to feed where.
-- **Zero dependencies**, `edition = "2024"`.
+- **Minimal dependencies**, `edition = "2024"`.
 
 ## Install
 
 ```toml
 [dependencies]
-fugazi = "0.17"
+fugazi = "0.18"
 ```
 
 ## Concepts

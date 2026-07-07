@@ -512,6 +512,194 @@ pub fn ulcer_performance_index(
 }
 
 // ---------------------------------------------------------------------------
+// Higher-moment / multiple-testing Sharpe corrections
+// ---------------------------------------------------------------------------
+
+/// Euler–Mascheroni constant, used in [`deflated_sharpe`]'s max-Sharpe
+/// expectation.
+const EULER_MASCHERONI: Real = 0.577_215_664_901_532_9;
+
+/// Probabilistic Sharpe Ratio (Bailey & López de Prado, 2012): the probability
+/// that the true per-bar Sharpe of the return-generating process exceeds
+/// `benchmark_sharpe`, given the observed Sharpe over `returns` and the
+/// higher-moment shape (skewness + kurtosis) of the empirical distribution.
+///
+/// Answers *"is my whole-run Sharpe reliably above the benchmark given `T`
+/// bars and fat tails?"* — the natural companion to a raw [`sharpe`] read.
+///
+/// # Arguments
+///
+/// * `returns` — the per-bar return series (built once by [`per_bar_returns`]).
+/// * `risk_free_rate`, `bars_per_year` — as in [`sharpe`]; determine the
+///   annualization used for both the observed Sharpe and `benchmark_sharpe`.
+/// * `benchmark_sharpe` — the reference **annualized** Sharpe to test against.
+///   `0.0` is the classical "is it above zero?" test.
+///
+/// Returns `Some(p)` in `[0.0, 1.0]`; `None` when `returns.len() < 2`, when
+/// [`sharpe`] / [`skewness`] / [`kurtosis`] are undefined, or when the
+/// higher-moment adjustment denominator vanishes.
+///
+/// If your caller already has the observed Sharpe, skewness, and kurtosis
+/// pre-aggregated (e.g. the `optimize` grid where every row's [`Metrics`]
+/// carries them), use [`probabilistic_sharpe_from_stats`] to skip re-scanning
+/// the returns vector.
+pub fn probabilistic_sharpe(
+    returns: &[Real],
+    risk_free_rate: Real,
+    bars_per_year: Real,
+    benchmark_sharpe: Real,
+) -> Option<Real> {
+    let n = returns.len();
+    if n < 2 || bars_per_year <= 0.0 {
+        return None;
+    }
+    probabilistic_sharpe_from_stats(
+        sharpe(returns, risk_free_rate, bars_per_year),
+        skewness(returns),
+        kurtosis(returns),
+        n,
+        bars_per_year,
+        benchmark_sharpe,
+    )
+}
+
+/// The Probabilistic Sharpe test statistic computed from pre-aggregated
+/// inputs — the same formula [`probabilistic_sharpe`] evaluates, but a caller
+/// that already has the per-run Sharpe / skewness / excess kurtosis (say, from
+/// a [`Metrics`](crate::metrics)-shaped summary) can skip the per-bar rescan.
+///
+/// All three `_annualized`/moment inputs are `Option`-typed to mirror the
+/// upstream `sharpe`/`skewness`/`kurtosis` fns (each is `None` on degenerate
+/// input); this fn propagates that: any `None` in → `None` out.
+///
+/// # Arguments
+///
+/// * `sharpe_annualized` — the observed annualized Sharpe, as returned by
+///   [`sharpe`].
+/// * `skewness_biased`, `excess_kurtosis` — biased skewness (`g1`) and *excess*
+///   kurtosis (`g2 = γ₄ − 3`), matching [`skewness`] / [`kurtosis`].
+/// * `n_returns` — the number of return observations behind those statistics.
+/// * `bars_per_year`, `benchmark_sharpe` — as in [`probabilistic_sharpe`].
+pub fn probabilistic_sharpe_from_stats(
+    sharpe_annualized: Option<Real>,
+    skewness_biased: Option<Real>,
+    excess_kurtosis: Option<Real>,
+    n_returns: usize,
+    bars_per_year: Real,
+    benchmark_sharpe: Real,
+) -> Option<Real> {
+    use statrs::distribution::{ContinuousCDF, Normal};
+
+    if n_returns < 2 || bars_per_year <= 0.0 {
+        return None;
+    }
+    let sr_ann = sharpe_annualized?;
+    let skew = skewness_biased?;
+    let excess_kurt = excess_kurtosis?;
+
+    // The PSR test statistic is in per-bar Sharpe units; un-annualize both
+    // sides by √bars_per_year (matches `annualized_volatility`'s convention).
+    let scale = bars_per_year.sqrt();
+    let sr = sr_ann / scale;
+    let bench = benchmark_sharpe / scale;
+
+    // Higher-moment adjustment: 1 − γ₃·SR + (γ₄ − 1)/4 · SR², where γ₄ is raw
+    // (Pearson) kurtosis. `kurtosis` returns *excess* kurtosis (γ₄ − 3), so
+    // (γ₄ − 1)/4 = (excess_kurt + 2)/4.
+    let denom_sq = 1.0 - skew * sr + (excess_kurt + 2.0) / 4.0 * sr * sr;
+    if !(denom_sq > 0.0 && denom_sq.is_finite()) {
+        return None;
+    }
+    let z = (sr - bench) * ((n_returns - 1) as Real).sqrt() / denom_sq.sqrt();
+    if !z.is_finite() {
+        return None;
+    }
+    Some(Normal::standard().cdf(z))
+}
+
+/// Deflated Sharpe Ratio (Bailey & López de Prado, 2014): the probability
+/// that the true per-bar Sharpe exceeds the expected maximum Sharpe under a
+/// normal null across `n_trials` independent trials — i.e. PSR against the
+/// selection-bias-adjusted benchmark `E[max SR]`.
+///
+/// Answers *"I picked the best of `n_trials` (parameter cells, windows, …);
+/// is the winner's Sharpe real or just the peak of the null distribution?"*
+///
+/// # Arguments
+///
+/// * `returns` — the **selected** trial's per-bar returns.
+/// * `risk_free_rate`, `bars_per_year` — as in [`sharpe`]; the annualization
+///   applied to both the observed Sharpe and `trial_sharpe_variance`.
+/// * `n_trials` — number of candidate trials the winner was selected from
+///   (e.g. size of the parameter grid). Must be `≥ 2`.
+/// * `trial_sharpe_variance` — variance of the **annualized** Sharpe estimates
+///   across those trials.
+///
+/// Returns `None` when `n_trials < 2`, the trial variance is non-positive, or
+/// the underlying PSR is undefined.
+///
+/// If the observed Sharpe / skew / kurt are already known, use
+/// [`deflated_sharpe_from_stats`] to skip re-scanning `returns`.
+pub fn deflated_sharpe(
+    returns: &[Real],
+    risk_free_rate: Real,
+    bars_per_year: Real,
+    n_trials: usize,
+    trial_sharpe_variance: Real,
+) -> Option<Real> {
+    let n = returns.len();
+    if n < 2 {
+        return None;
+    }
+    deflated_sharpe_from_stats(
+        sharpe(returns, risk_free_rate, bars_per_year),
+        skewness(returns),
+        kurtosis(returns),
+        n,
+        bars_per_year,
+        n_trials,
+        trial_sharpe_variance,
+    )
+}
+
+/// The Deflated Sharpe Ratio from pre-aggregated statistics — the stats-only
+/// twin of [`deflated_sharpe`], matching [`probabilistic_sharpe_from_stats`]'s
+/// input shape. The expected max Sharpe under the null is approximated by the
+/// standard closed form `√V[SR] · [(1 − γ)·Φ⁻¹(1 − 1/N) + γ·Φ⁻¹(1 − 1/(N·e))]`
+/// (with `γ` = Euler–Mascheroni) and passed as the benchmark to
+/// [`probabilistic_sharpe_from_stats`].
+#[allow(clippy::too_many_arguments)]
+pub fn deflated_sharpe_from_stats(
+    sharpe_annualized: Option<Real>,
+    skewness_biased: Option<Real>,
+    excess_kurtosis: Option<Real>,
+    n_returns: usize,
+    bars_per_year: Real,
+    n_trials: usize,
+    trial_sharpe_variance: Real,
+) -> Option<Real> {
+    use statrs::distribution::{ContinuousCDF, Normal};
+
+    if n_trials < 2 || !(trial_sharpe_variance > 0.0 && trial_sharpe_variance.is_finite()) {
+        return None;
+    }
+    let normal = Normal::standard();
+    let n = n_trials as Real;
+    let q1 = normal.inverse_cdf(1.0 - 1.0 / n);
+    let q2 = normal.inverse_cdf(1.0 - 1.0 / (n * std::f64::consts::E));
+    let sr0_annualized = trial_sharpe_variance.sqrt()
+        * ((1.0 - EULER_MASCHERONI) * q1 + EULER_MASCHERONI * q2);
+    probabilistic_sharpe_from_stats(
+        sharpe_annualized,
+        skewness_biased,
+        excess_kurtosis,
+        n_returns,
+        bars_per_year,
+        sr0_annualized,
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Drawdown metrics
 // ---------------------------------------------------------------------------
 
@@ -1074,4 +1262,85 @@ mod tests {
         assert!(cagr(&equity, 100.0, 252.0).unwrap() > 1.0);
     }
 
+    // Deterministic return series with a modest positive mean and low
+    // dispersion — SR should register as clearly positive, and the higher-moment
+    // correction should behave.
+    fn psr_test_returns() -> Vec<Real> {
+        // 200 bars alternating tiny positive with a slightly smaller negative
+        // → mean > 0, plenty of samples for T-1 to matter.
+        (0..200u32)
+            .map(|i| if i.is_multiple_of(2) { 0.010 } else { -0.008 })
+            .collect()
+    }
+
+    #[test]
+    fn psr_returns_probability_in_unit_interval() {
+        let ret = psr_test_returns();
+        let p = probabilistic_sharpe(&ret, 0.0, 252.0, 0.0).unwrap();
+        assert!((0.0..=1.0).contains(&p), "PSR must be a probability, got {p}");
+    }
+
+    #[test]
+    fn psr_at_observed_sharpe_is_one_half() {
+        // Passing benchmark = observed annualized Sharpe should put the test
+        // statistic at zero → Φ(0) = 0.5.
+        let ret = psr_test_returns();
+        let observed = sharpe(&ret, 0.0, 252.0).unwrap();
+        let p = probabilistic_sharpe(&ret, 0.0, 252.0, observed).unwrap();
+        assert!((p - 0.5).abs() < 1e-9, "expected 0.5, got {p}");
+    }
+
+    #[test]
+    fn psr_monotone_in_benchmark() {
+        // A stricter benchmark can only lower the probability of exceeding it.
+        let ret = psr_test_returns();
+        let p_at_zero = probabilistic_sharpe(&ret, 0.0, 252.0, 0.0).unwrap();
+        let p_at_one = probabilistic_sharpe(&ret, 0.0, 252.0, 1.0).unwrap();
+        assert!(p_at_zero > p_at_one);
+    }
+
+    #[test]
+    fn psr_none_on_short_input() {
+        assert!(probabilistic_sharpe(&[], 0.0, 252.0, 0.0).is_none());
+        assert!(probabilistic_sharpe(&[0.01], 0.0, 252.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn psr_none_on_zero_variance() {
+        // Exact zeros — mean is 0.0, every centered term is 0.0, stddev is
+        // 0.0, so [`sharpe`] bails via `safe_div` and PSR inherits the `None`.
+        let flat = vec![0.0; 100];
+        assert!(probabilistic_sharpe(&flat, 0.0, 252.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn dsr_deflates_psr_when_selection_matters() {
+        // With n_trials > 1 and positive trial variance, SR₀ > 0, so DSR must
+        // read strictly below PSR against 0.
+        let ret = psr_test_returns();
+        let psr0 = probabilistic_sharpe(&ret, 0.0, 252.0, 0.0).unwrap();
+        let dsr = deflated_sharpe(&ret, 0.0, 252.0, 50, 0.25).unwrap();
+        assert!(dsr < psr0, "DSR ({dsr}) should be < PSR ({psr0})");
+        assert!((0.0..=1.0).contains(&dsr));
+    }
+
+    #[test]
+    fn dsr_none_on_degenerate_inputs() {
+        let ret = psr_test_returns();
+        // n_trials < 2: no selection, DSR is undefined.
+        assert!(deflated_sharpe(&ret, 0.0, 252.0, 1, 0.25).is_none());
+        // Non-positive trial variance: SR₀ is undefined.
+        assert!(deflated_sharpe(&ret, 0.0, 252.0, 50, 0.0).is_none());
+        assert!(deflated_sharpe(&ret, 0.0, 252.0, 50, -0.1).is_none());
+    }
+
+    #[test]
+    fn dsr_monotone_in_n_trials() {
+        // More trials → higher expected max under the null → harder to beat →
+        // strictly lower DSR (for a fixed observed Sharpe and trial variance).
+        let ret = psr_test_returns();
+        let dsr_small = deflated_sharpe(&ret, 0.0, 252.0, 10, 0.25).unwrap();
+        let dsr_large = deflated_sharpe(&ret, 0.0, 252.0, 1000, 0.25).unwrap();
+        assert!(dsr_large < dsr_small, "{dsr_large} vs {dsr_small}");
+    }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "fugazi"
-version = "0.17.0"
+version = "0.18.0"
 edition = "2024"
 description = "A library of incremental technical-analysis indicators, signals and strategies"
 license = "MIT"
@@ -16,8 +16,12 @@ path = "src/lib.rs"
 # The `fugazi` binary is the command-line backtester: it loads a strategy.yml,
 # assembles candle data from one or more --series, and runs it through a paper
 # wallet (see `src/cli/`). Its dependencies are gated behind the `cli` feature
-# below; the library proper uses only `serde`/`serde_json` (in the `sources`
-# module) and the deps gated behind the `sources` feature.
+# below; the library proper keeps its dependency footprint minimal — `serde` +
+# `serde_json` (used in the `sources` module and by the CLI's YAML/JSON plumbing),
+# `time` (for the calendar sources' `Timestamp` decomposition), and `statrs` (for
+# the standard-normal CDF/inverse-CDF that back the higher-moment Sharpe
+# corrections in `fugazi::metrics`). Everything else is behind the `sources` /
+# `cli` features.
 [[bin]]
 name = "fugazi"
 path = "src/cli/main.rs"
@@ -59,6 +63,7 @@ rayon = { version = "1", optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls", "gzip"], optional = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros"], optional = true }
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+statrs = { version = "0.18", default-features = false }
 thiserror = { version = "2", optional = true }
 interim = { version = "0.2.1", default-features = false, features = ["std", "time_0_3"], optional = true }
 

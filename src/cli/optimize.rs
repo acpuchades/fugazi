@@ -160,6 +160,7 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
         &sweep.axes,
         &sweep.metric_columns,
         sweep.windowed,
+        sweep.deflated_sharpe_context,
         &sweep.rows,
     )?;
 
@@ -312,13 +313,88 @@ pub(crate) fn optimize(
         sort_by_metric(&mut rows, path, direction, risk_aversion);
     }
 
+    // Grid-wide DSR context — computed the same way for whole-run and windowed
+    // sweeps; see the field's rustdoc for the windowed-mode aggregation.
+    let deflated_sharpe_context = compute_dsr_context(&rows);
+
     Ok(Sweep {
         axes,
         metric_columns,
         best_by,
         rows,
         windowed: windowed_n.is_some(),
+        deflated_sharpe_context,
     })
+}
+
+/// Grid-wide inputs to the per-row DSR: `(n_trials, sample_variance_of_sharpe)`.
+/// `None` when fewer than two rows have a defined Sharpe or the variance is
+/// zero — DSR is meaningless in either case (no null distribution, no
+/// dispersion to correct against). In windowed mode a row's Sharpe is the
+/// cross-window mean of window Sharpes (see the [`Sweep`] field's rustdoc).
+fn compute_dsr_context(rows: &[Row]) -> Option<(usize, Real)> {
+    let sharpes: Vec<Real> = rows.iter().filter_map(row_summary_sharpe).collect();
+    if sharpes.len() < 2 {
+        return None;
+    }
+    let n = sharpes.len() as Real;
+    let mean = sharpes.iter().sum::<Real>() / n;
+    // Sample variance (ddof=1) — matches the reference variance-of-estimators
+    // used across the Bailey/LdP DSR literature.
+    let var = sharpes.iter().map(|s| (s - mean).powi(2)).sum::<Real>() / (n - 1.0);
+    if !(var > 0.0 && var.is_finite()) {
+        return None;
+    }
+    Some((sharpes.len(), var))
+}
+
+/// A row's summary Sharpe: the whole-run value in [`Evaluation::Whole`], the
+/// cross-window arithmetic mean in [`Evaluation::Windowed`]. `None` when no
+/// window has a defined Sharpe (all had zero variance, for instance).
+fn row_summary_sharpe(row: &Row) -> Option<Real> {
+    match &row.eval {
+        Evaluation::Whole(m) => m.risk_adjusted.sharpe,
+        Evaluation::Windowed(ws) => mean_of(ws.iter().map(|w| w.metrics.risk_adjusted.sharpe)),
+    }
+}
+
+/// Arithmetic mean of the defined entries, or `None` when none are defined.
+fn mean_of(iter: impl IntoIterator<Item = Option<Real>>) -> Option<Real> {
+    let (sum, n) = iter
+        .into_iter()
+        .flatten()
+        .fold((0.0_f64, 0_usize), |(s, k), v| (s + v, k + 1));
+    if n == 0 { None } else { Some(sum / n as Real) }
+}
+
+/// The `(sharpe, skew, kurt, n_returns, bars_per_year)` tuple the per-row DSR
+/// consumes. For a windowed row, skew / kurt are cross-window means and
+/// `n_returns` is the summed window bar counts — the same aggregation the
+/// windowed `_mean` columns already use, so this cell is comparable to them.
+fn row_dsr_inputs(row: &Row) -> (Option<Real>, Option<Real>, Option<Real>, usize, Real) {
+    match &row.eval {
+        Evaluation::Whole(m) => (
+            m.risk_adjusted.sharpe,
+            m.returns.skewness,
+            m.returns.kurtosis,
+            m.run.bars,
+            m.run.bars_per_year,
+        ),
+        Evaluation::Windowed(ws) => {
+            let sharpe = mean_of(ws.iter().map(|w| w.metrics.risk_adjusted.sharpe));
+            let skew = mean_of(ws.iter().map(|w| w.metrics.returns.skewness));
+            let kurt = mean_of(ws.iter().map(|w| w.metrics.returns.kurtosis));
+            let n_returns: usize = ws.iter().map(|w| w.metrics.run.bars).sum();
+            // Every window under one row shares the same bars_per_year, so any
+            // one is representative; `0.0` guards against an empty windowed
+            // row (which will fail the `> 0.0` check downstream anyway).
+            let bpy = ws
+                .first()
+                .map(|w| w.metrics.run.bars_per_year)
+                .unwrap_or(0.0);
+            (sharpe, skew, kurt, n_returns, bpy)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -356,6 +432,22 @@ pub(crate) struct Sweep {
     /// True iff `windowed` was set — the CSV writer uses this to emit
     /// `<name>_mean` / `<name>_std` columns per metric.
     pub(crate) windowed: bool,
+    /// `(n_trials, Var[SR])` collected across the sweep, or `None` when the
+    /// grid has fewer than two rows with a defined Sharpe or when the trial
+    /// variance is zero — DSR is meaningless in either case. Consumed by the
+    /// CSV writer to emit the `deflated_sharpe` column: the per-row DSR
+    /// against the grid-wide null (Bailey & López de Prado, 2014).
+    ///
+    /// Windowing regularizes but does not eliminate multiple-testing bias: the
+    /// user still picked *this* cell out of `N`, and its cross-window mean
+    /// Sharpe is still a max-of-many statistic. So DSR is also emitted in
+    /// windowed mode, using each cell's cross-window mean Sharpe / skewness /
+    /// kurtosis as its summary, and the sum of the cell's window bar counts as
+    /// `n_returns`. Aggregating higher moments by cross-window mean is
+    /// imperfect (it isn't the pooled-returns skewness), but it matches how the
+    /// windowed CSV columns already summarize their metrics, so the number
+    /// stays comparable to the other `_mean` cells.
+    pub(crate) deflated_sharpe_context: Option<(usize, Real)>,
 }
 
 /// Partition the effective params table into fixed (scalar) entries and sweep
@@ -632,7 +724,9 @@ fn ranking_value(eval: &Evaluation, path: &str, direction: Direction, k: Real) -
 
 /// Write the sweep CSV: axis columns first (declaration order), then one
 /// column per requested metric — or, under `-w/--windowed`, two columns per
-/// metric (`<name>_mean` / `<name>_std`, the cross-window aggregate).
+/// metric (`<name>_mean` / `<name>_std`, the cross-window aggregate). Whole-run
+/// sweeps also get a trailing `deflated_sharpe` column when the grid has
+/// enough spread in Sharpes for the multiple-testing correction to be defined.
 /// `;`-delimited to match `trades.csv` / `returns.csv`. Missing (omitted)
 /// metric values are written as an empty cell.
 fn write_grid_csv(
@@ -640,6 +734,7 @@ fn write_grid_csv(
     axes: &[(String, Vec<Value>)],
     metric_columns: &[(String, String)],
     windowed: bool,
+    deflated_sharpe_context: Option<(usize, Real)>,
     rows: &[Row],
 ) -> Result<()> {
     if let Some(parent) = path.parent()
@@ -661,6 +756,9 @@ fn write_grid_csv(
         } else {
             header.push(name.clone());
         }
+    }
+    if deflated_sharpe_context.is_some() {
+        header.push("deflated_sharpe".to_string());
     }
     writer.write_record(&header)?;
 
@@ -718,6 +816,22 @@ fn write_grid_csv(
                     record.push(cell(spread.map(|(_, std)| std)));
                 }
             }
+        }
+        // Trailing `deflated_sharpe` cell — uses per-row summary stats extracted
+        // via `row_dsr_inputs` (whole-run passthrough or windowed cross-window
+        // means; see [`row_dsr_inputs`] and the [`Sweep`] field's rustdoc).
+        if let Some((n_trials, trial_var)) = deflated_sharpe_context {
+            let (sharpe, skew, kurt, n_returns, bpy) = row_dsr_inputs(row);
+            let dsr = fugazi::metrics::deflated_sharpe_from_stats(
+                sharpe,
+                skew,
+                kurt,
+                n_returns,
+                bpy,
+                n_trials,
+                trial_var,
+            );
+            record.push(cell(dsr));
         }
         writer.write_record(&record)?;
     }

@@ -1224,6 +1224,29 @@ def test_sharpe_and_sortino_return_none_on_zero_variance():
     assert metrics.sortino(flat, 0.0, 252.0) is None
 
 
+def test_probabilistic_and_deflated_sharpe():
+    from fugazi import metrics
+
+    returns = [0.010 if i % 2 == 0 else -0.008 for i in range(200)]
+    observed = metrics.sharpe(returns, 0.0, 252.0)
+    assert observed is not None
+
+    # PSR at benchmark == observed Sharpe puts the z-stat at 0 → 0.5.
+    psr_at_observed = metrics.probabilistic_sharpe(returns, 0.0, 252.0, observed)
+    assert psr_at_observed == pytest.approx(0.5, abs=1e-9)
+
+    psr_at_zero = metrics.probabilistic_sharpe(returns, 0.0, 252.0, 0.0)
+    assert 0.0 <= psr_at_zero <= 1.0
+    # Selecting from many candidates → higher benchmark → strictly lower DSR.
+    dsr = metrics.deflated_sharpe(returns, 0.0, 252.0, 50, 0.25)
+    assert dsr is not None and dsr < psr_at_zero
+
+    # Degenerate: no selection, or non-positive trial variance.
+    assert metrics.deflated_sharpe(returns, 0.0, 252.0, 1, 0.25) is None
+    assert metrics.deflated_sharpe(returns, 0.0, 252.0, 50, 0.0) is None
+    assert metrics.probabilistic_sharpe([0.0] * 20, 0.0, 252.0, 0.0) is None
+
+
 def test_drawdown_pipeline():
     from fugazi import metrics
 

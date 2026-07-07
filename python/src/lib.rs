@@ -4185,6 +4185,93 @@ fn ulcer_performance_index(
     )
 }
 
+// -- Higher-moment / multiple-testing Sharpe corrections --------------------
+
+/// Probabilistic Sharpe Ratio (Bailey & López de Prado, 2012): probability
+/// that the true Sharpe of the return-generating process exceeds
+/// `benchmark_sharpe` (annualized), given the observed Sharpe over `returns`
+/// and the empirical skewness + kurtosis. `None` when the underlying Sharpe /
+/// skew / kurtosis is undefined.
+#[pyfunction]
+fn probabilistic_sharpe(
+    returns: Vec<Real>,
+    risk_free_rate: Real,
+    bars_per_year: Real,
+    benchmark_sharpe: Real,
+) -> Option<Real> {
+    core_metrics::probabilistic_sharpe(&returns, risk_free_rate, bars_per_year, benchmark_sharpe)
+}
+
+/// The Probabilistic Sharpe Ratio computed from pre-aggregated statistics —
+/// use when the Sharpe / skew / kurtosis are already known (e.g. a summary
+/// row from a grid) and re-scanning the returns vector would be wasted work.
+/// `None` propagates from any `None` input.
+#[pyfunction]
+fn probabilistic_sharpe_from_stats(
+    sharpe_annualized: Option<Real>,
+    skewness_biased: Option<Real>,
+    excess_kurtosis: Option<Real>,
+    n_returns: usize,
+    bars_per_year: Real,
+    benchmark_sharpe: Real,
+) -> Option<Real> {
+    core_metrics::probabilistic_sharpe_from_stats(
+        sharpe_annualized,
+        skewness_biased,
+        excess_kurtosis,
+        n_returns,
+        bars_per_year,
+        benchmark_sharpe,
+    )
+}
+
+/// Deflated Sharpe Ratio (Bailey & López de Prado, 2014): PSR against the
+/// selection-bias-adjusted benchmark `E[max SR]` across `n_trials` candidates.
+/// `trial_sharpe_variance` is the variance of the annualized Sharpe estimates
+/// across the trials. `None` when `n_trials < 2`, the trial variance is not
+/// strictly positive, or the underlying PSR is undefined.
+#[pyfunction]
+fn deflated_sharpe(
+    returns: Vec<Real>,
+    risk_free_rate: Real,
+    bars_per_year: Real,
+    n_trials: usize,
+    trial_sharpe_variance: Real,
+) -> Option<Real> {
+    core_metrics::deflated_sharpe(
+        &returns,
+        risk_free_rate,
+        bars_per_year,
+        n_trials,
+        trial_sharpe_variance,
+    )
+}
+
+/// The Deflated Sharpe Ratio computed from pre-aggregated statistics — the
+/// stats-only twin of `deflated_sharpe`. `None` when `n_trials < 2`, the trial
+/// variance is not strictly positive, or the underlying PSR is undefined.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn deflated_sharpe_from_stats(
+    sharpe_annualized: Option<Real>,
+    skewness_biased: Option<Real>,
+    excess_kurtosis: Option<Real>,
+    n_returns: usize,
+    bars_per_year: Real,
+    n_trials: usize,
+    trial_sharpe_variance: Real,
+) -> Option<Real> {
+    core_metrics::deflated_sharpe_from_stats(
+        sharpe_annualized,
+        skewness_biased,
+        excess_kurtosis,
+        n_returns,
+        bars_per_year,
+        n_trials,
+        trial_sharpe_variance,
+    )
+}
+
 // -- Drawdown metrics -------------------------------------------------------
 
 /// Deepest drawdown in `segments`, as a fraction. `0.0` on empty input.
@@ -4414,6 +4501,10 @@ fn register_metrics_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
         omega,
         ulcer_index,
         ulcer_performance_index,
+        probabilistic_sharpe,
+        probabilistic_sharpe_from_stats,
+        deflated_sharpe,
+        deflated_sharpe_from_stats,
         max_drawdown,
         max_drawdown_duration,
         average_drawdown,
