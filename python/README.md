@@ -412,7 +412,9 @@ df = yahoo.candles(symbol="AAPL", freq="1d", since="2020-01-01")
 `since`/`until` accept ISO (`"YYYY-MM-DD"`), EU (`"D-M-YYYY"`), or relative
 (`"today"`, `"yesterday"`, `"Nd ago"`, `"Nw ago"`) dates, `until` is exclusive
 and defaults to now. The returned frame has `time` (ISO 8601 UTC), `open`,
-`high`, `low`, `close`, `volume` columns.
+`high`, `low`, `close`, `volume`, and — carried through from each provider's
+own API — Binance's `quote_volume`, `n_trades`, `taker_buy_base_volume`,
+`taker_buy_quote_volume`; Yahoo's `adj_close` (split- and dividend-adjusted).
 
 `fugazi.fetch(provider=..., symbol=..., ...)` is the provider-generic form of
 the same call — handy when the provider name is itself a variable:

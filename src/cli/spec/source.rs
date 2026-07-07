@@ -677,7 +677,7 @@ impl SourceSpec {
 /// Panics with a helpful message if `key` isn't registered — the message
 /// lists the schema's registered keys so a typo is easy to spot. The message
 /// distinguishes the empty-schema case ("no overlay side channel — feed
-/// `--series` or `file:` data with additional columns to attach overlays")
+/// `--series` or `csv:` data with additional columns to attach overlays")
 /// from the non-empty case ("registered: a, b, c").
 fn build_get(schema: &Arc<Schema>, key: &str) -> Box<dyn DynIndicator> {
     match schema.type_of_key(key) {
@@ -689,7 +689,7 @@ fn build_get(schema: &Arc<Schema>, key: &str) -> Box<dyn DynIndicator> {
             if registered.is_empty() {
                 panic!(
                     "!get {{ key: {key:?} }}: no overlay side channel is bound \
-                     — feed `--series` data or a `file:` source that carries \
+                     — feed `--series` data or a `csv:` source that carries \
                      additional (non-OHLCV) columns to attach overlays",
                 );
             } else {

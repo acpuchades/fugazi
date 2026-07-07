@@ -6,19 +6,22 @@
 //!
 //! The pieces are:
 //!
-//! * [`CandleSource`] — the async trait every provider implements.
+//! * [`CandleSource`] — the async trait every provider implements. Fetches
+//!   yield **`Vec<Atom>`**: every returned atom carries `time: Some(_)` and,
+//!   for providers that expose them, per-bar overlay values behind a
+//!   provider-defined [`Schema`]. Downstream consumers (calendar indicators,
+//!   the `!get { key }` overlay reference) then compose naturally.
 //! * [`Timestamp`] — re-exported from [`crate::types`]; a flat i64-millis UTC
 //!   epoch stamp, `Copy`, with `time`-crate helpers on the pure core.
-//! * [`TimedCandle`] — a [`crate::Candle`] paired with its open time; the
-//!   value type providers return. The equivalent `Atom` (`candle` +
-//!   `Option<Timestamp>`) is what the indicator layer consumes, so bar-stream
-//!   drivers can lift a `TimedCandle` into a timed `Atom` via
-//!   [`Atom::with_time`](crate::types::Atom::with_time).
 //! * [`Interval`] — the bar cadence, an enum because providers advertise a
 //!   discrete vocabulary of tokens. Constructed directly (`Interval::Day(1)`,
 //!   `Interval::Hour(4)`, …); string parsing is a caller-side concern.
 //! * [`SourceError`] — a single unified enum, so a caller that fans errors in
 //!   from several providers doesn't need per-impl error plumbing.
+//! * [`schema_of`] — the "which side channel is this atom stream carrying?"
+//!   helper. Every atom in a fetch shares one `Arc<Schema>`; this picks it
+//!   off the first atom that has overlays and defaults to [`Schema::empty()`]
+//!   for a stream that carries none.
 //!
 //! **Everything here takes objects/enums, not strings.** The CLI's `get`
 //! subcommand and the Python bindings do their own string parsing before
@@ -32,7 +35,7 @@
 //! # async fn demo() -> Result<(), fugazi::sources::SourceError> {
 //! let b = Binance::new();
 //! let since = Timestamp(1_704_067_200_000); // 2024-01-01 UTC
-//! let rows = b.candles("BTCEUR", Interval::Day(1), since, None).await?;
+//! let rows = b.atoms("BTCEUR", Interval::Day(1), since, None).await?;
 //! for row in &rows {
 //!     println!("{:?} {}", row.time, row.candle.close);
 //! }
@@ -44,24 +47,28 @@ pub mod yahoo;
 
 use std::fmt;
 use std::future::Future;
+use std::sync::Arc;
 
-use crate::types::Candle;
+use crate::types::{Atom, Schema};
 pub use crate::types::Timestamp;
 
 pub use binance::Binance;
 pub use yahoo::Yahoo;
 
-/// A [`Candle`] paired with its bar-open [`Timestamp`].
+/// The shared [`Schema`] carried by an atom stream, or [`Schema::empty()`] if
+/// none of the atoms bind an [`OverlayInfo`](crate::OverlayInfo).
 ///
-/// This is deliberately *not* a `Candle` field: keeping the pure `Candle`
-/// timeless lets the incremental indicator core stay unchanged, and lets a
-/// bar-stream driver decide for itself whether to persist times.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct TimedCandle {
-    /// Bar-open time, UTC millis.
-    pub time: Timestamp,
-    /// The candle.
-    pub candle: Candle,
+/// Every atom in one fetch shares the same `Arc<Schema>` (the provider builds
+/// it once and clones the pointer into each atom's overlay side channel), so
+/// a consumer only needs to peek at any timestamped atom to know what fields
+/// the batch carries. Consumed by [`crate::cli::backtest::schema_from_atoms`]
+/// and by the `fugazi get` overlay pipeline to decide the vocabulary
+/// available to `!get { key }` references.
+pub fn schema_of(atoms: &[Atom]) -> Arc<Schema> {
+    atoms
+        .iter()
+        .find_map(|a| a.overlays.as_ref().map(|o| o.schema().clone()))
+        .unwrap_or_else(Schema::empty)
 }
 
 /// Bar cadence advertised by a provider.
@@ -147,8 +154,13 @@ pub enum SourceError {
 ///
 /// Implementations fetch OHLCV bars for `symbol` in the given `interval`,
 /// covering `[since, until)` (where `until = None` means "up to now"), and
-/// return them ascending by [`TimedCandle::time`]. Pagination, rate-limiting,
-/// and API-specific errors are the implementation's concern.
+/// return them as [`Atom`]s ascending by [`Atom::time`] — every returned
+/// atom carries `time: Some(_)` and, when the provider exposes them, per-bar
+/// overlay values behind a provider-defined [`Schema`] (Binance's
+/// `quote_volume` / `n_trades` / …; Yahoo's `adj_close`). One `Arc<Schema>`
+/// is shared across every atom in a fetch; use [`schema_of`] to pick it off
+/// the returned slice. Pagination, rate-limiting, and API-specific errors
+/// are the implementation's concern.
 ///
 /// The trait uses an edition-2024 explicit-return-position `impl Future`
 /// signature (rather than `async fn`) so callers can name the future's bounds
@@ -157,15 +169,15 @@ pub trait CandleSource: Send + Sync {
     /// The provider's short, lowercase name (e.g. `"binance"`).
     fn name(&self) -> &'static str;
 
-    /// Fetch candles for `symbol` in `[since, until)` — `since` inclusive,
+    /// Fetch atoms for `symbol` in `[since, until)` — `since` inclusive,
     /// `until` exclusive; `until = None` means "up to now".
-    fn candles(
+    fn atoms(
         &self,
         symbol: &str,
         interval: Interval,
         since: Timestamp,
         until: Option<Timestamp>,
-    ) -> impl Future<Output = Result<Vec<TimedCandle>, SourceError>> + Send;
+    ) -> impl Future<Output = Result<Vec<Atom>, SourceError>> + Send;
 
     /// Enumerate every symbol this provider currently exposes. The default
     /// implementation returns [`SourceError::Unsupported`], since a canonical

@@ -14,7 +14,7 @@ and signal owns its internal state and is advanced one sample at a time via
 
 ```toml
 [dependencies]
-fugazi = "0.18"
+fugazi = "0.19"
 ```
 
 ## Concepts
@@ -638,7 +638,7 @@ subcommands — briefly listed here, fully documented in
   over a parameter grid and rank combinations by a metric.
 - `fugazi get <PROVIDER>:<SYMBOL>[<FREQ>] --since ... -o candles.csv` — fetch
   OHLCV bars from `binance` or `yfinance` into a `run`-ready CSV, or
-  re-process an existing CSV with `file:PATH`. `-x/--overlay col=<source>`
+  re-process an existing CSV with `csv:PATH`. `-x/--overlay col=<source>`
   appends indicator columns computed on the fetched bars.
 - `fugazi list indicators` / `list sources` / `list tickers <PROVIDER>` — the
   YAML tag catalogue, the `get`-provider table, and (via HTTP) the

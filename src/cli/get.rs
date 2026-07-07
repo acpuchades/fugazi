@@ -35,10 +35,13 @@ use tokio::runtime::Builder as RuntimeBuilder;
 use tokio::task::JoinSet;
 
 use fugazi::prelude::*;
-use fugazi::sources::{Binance, CandleSource, Interval, TimedCandle, Timestamp, Yahoo};
+use fugazi::sources::{
+    self, Binance, CandleSource, Interval, Timestamp, Yahoo, binance::binance_schema,
+    yahoo::yahoo_schema,
+};
 
 use crate::dyn_indicator::{DynIndicator, DynValue};
-use crate::csv_source::{FileBar, FileSource};
+use crate::csv_source::{CsvBar, CsvSource};
 use crate::input::Source as InputSource;
 use crate::overlay::{self, Overlay};
 use crate::style;
@@ -52,8 +55,8 @@ pub(crate) const KNOWN_PROVIDERS: &[(&str, &str)] = &[
         "Binance spot klines endpoint (BTC/ETH/... vs. USDT/EUR/...)",
     ),
     (
-        "file",
-        "Local OHLCV CSV — spec is `file:PATH` (no `[freq]` bracket)",
+        "csv",
+        "Local OHLCV CSV — spec is `csv:PATH` (no `[freq]` bracket)",
     ),
     (
         "yfinance",
@@ -71,7 +74,7 @@ struct SymbolSpec {
 /// A parsed CLI `get` spec.
 ///
 /// Remote providers share the same `<provider>:<symbol>[<freq>,...],<symbol>[<freq>,...]`
-/// grammar; `file:PATH` is its own variant, since the file already carries
+/// grammar; `csv:PATH` is its own variant, since the file already carries
 /// symbol+freq per row and the bracket doesn't apply.
 #[derive(Debug, Clone, PartialEq)]
 enum FetchSpec {
@@ -79,7 +82,7 @@ enum FetchSpec {
         provider: String,
         symbols: Vec<SymbolSpec>,
     },
-    File {
+    Csv {
         path: PathBuf,
     },
 }
@@ -192,8 +195,8 @@ pub fn run(args: GetArgs) -> Result<()> {
     // Expand each `FetchSpec` into one `Series` per `(symbol, interval)` — the
     // unit of parallelism. Per-series overlay warm-up is folded in here so
     // `fetch_series` can push `since` back accordingly and each task builds
-    // its own indicator instances. `file:` specs are read once up front and
-    // their bar list is shared into each derived Series' `file_bars` so the
+    // its own indicator instances. `csv:` specs are read once up front and
+    // their bar list is shared into each derived Series' `csv_bars` so the
     // async pipeline can filter without re-reading.
     let mut series: Vec<Series> = Vec::new();
     let mut n_symbols: usize = 0;
@@ -201,6 +204,14 @@ pub fn run(args: GetArgs) -> Result<()> {
         match spec {
             FetchSpec::Remote { provider, symbols } => {
                 n_symbols += symbols.len();
+                // The remote provider's canonical Schema — Binance's four
+                // kline extras, Yahoo's `adj_close`. Every atom in a fetch
+                // will bind to this via `OverlayInfo::new(schema, ...)`.
+                let schema = match provider.as_str() {
+                    "binance" => binance_schema().clone(),
+                    "yfinance" => yahoo_schema().clone(),
+                    _ => Schema::empty(),
+                };
                 for sym in symbols {
                     for &interval in &sym.intervals {
                         let stable = overlay::stable_period_for(
@@ -208,23 +219,29 @@ pub fn run(args: GetArgs) -> Result<()> {
                             &overlay_columns,
                             &sym.symbol,
                             interval,
+                            &schema,
                         );
                         series.push(Series {
                             provider: provider.clone(),
                             symbol: sym.symbol.clone(),
                             interval,
                             stable,
-                            file_bars: None,
-                            file_path: None,
+                            csv_bars: None,
+                            csv_path: None,
                         });
                     }
                 }
             }
-            FetchSpec::File { path } => {
-                let bars = FileSource::new(path.clone())
+            FetchSpec::Csv { path } => {
+                let bars = CsvSource::new(path.clone())
                     .read()
                     .with_context(|| format!("reading {}", path.display()))?;
                 let shared = Arc::new(bars);
+                // The CSV loader classified every non-OHLCV column into a
+                // shared `Arc<Schema>` — pluck it off any atom.
+                let file_schema = sources::schema_of(
+                    &shared.iter().map(|b| b.atom.clone()).collect::<Vec<_>>(),
+                );
                 let mut pairs: Vec<(String, Interval)> = Vec::new();
                 for b in shared.iter() {
                     let pair = (b.symbol.clone(), b.interval);
@@ -242,14 +259,15 @@ pub fn run(args: GetArgs) -> Result<()> {
                         &overlay_columns,
                         &sym,
                         interval,
+                        &file_schema,
                     );
                     series.push(Series {
-                        provider: "file".into(),
+                        provider: "csv".into(),
                         symbol: sym,
                         interval,
                         stable,
-                        file_bars: Some(shared.clone()),
-                        file_path: Some(path.clone()),
+                        csv_bars: Some(shared.clone()),
+                        csv_path: Some(path.clone()),
                     });
                 }
                 n_symbols += seen_symbols.len();
@@ -263,7 +281,7 @@ pub fn run(args: GetArgs) -> Result<()> {
     // Async: download every series in parallel — no overlay state crosses task
     // boundaries. Overlays are applied synchronously below, per (symbol,
     // interval) group, so `DynValue`'s non-Send `Rc`-backed `Position` stub
-    // stays on one thread. `file:` series short-circuit inside `fetch_series`.
+    // stays on one thread. `csv:` series short-circuit inside `fetch_series`.
     let result = rt.block_on(fetch_all(series.clone(), since_ts, until_ts, since_specified, bars));
     let _ = multi.clear();
     let raw = result?;
@@ -295,17 +313,18 @@ pub fn run(args: GetArgs) -> Result<()> {
 /// One row of output: which symbol + interval it came from, the timed candle,
 /// the per-`-x`-column overlay values (aligned with the CLI's overlay column
 /// layout — `None` for a column no applicable overlay covers this row's
-/// group), and the pass-through extras from a `file:` source (per-row
+/// group), and the pass-through extras from a `csv:` source (per-row
 /// non-OHLCV cells classified as `Real`/`Bool`/`Str`).
 struct Row {
     symbol: String,
     interval: Interval,
-    candle: TimedCandle,
+    /// Fully-populated bar: OHLCV, bar-open `time`, and the source-provided
+    /// overlay side channel (Binance's `quote_volume` / `n_trades` / …;
+    /// Yahoo's `adj_close`; or the CSV file's non-OHLCV columns).
+    atom: Atom,
+    /// Computed `--overlay` outputs, aligned with the CLI's requested column
+    /// name list. `None` for a column whose overlay hasn't warmed up yet.
     overlays: Vec<Option<OverlayValue>>,
-    /// Non-OHLCV columns preserved verbatim from a `file:` source row. Empty
-    /// for remote-provider sources. Column names are exactly as they appeared
-    /// in the input file's header (case-normalised to lowercase).
-    file_extras: Vec<(String, OverlayValue)>,
 }
 
 /// One downloadable (or file-backed) series: a `(provider, symbol, interval)`
@@ -313,8 +332,8 @@ struct Row {
 /// across the overlays that apply to this `(symbol, interval)`). The unit of
 /// parallelism — each series gets its own fetch task and progress bar.
 ///
-/// For `file:` specs, the pre-read bar list is threaded through as
-/// [`Series::file_bars`], and [`fetch_series`] short-circuits into an
+/// For `csv:` specs, the pre-read bar list is threaded through as
+/// [`Series::csv_bars`], and [`fetch_series`] short-circuits into an
 /// in-memory filter instead of an HTTP fetch.
 #[derive(Clone)]
 struct Series {
@@ -324,16 +343,16 @@ struct Series {
     stable: usize,
     /// The file's pre-read bar list, shared between every series that reads
     /// from the same file. `None` for remote-provider series.
-    file_bars: Option<Arc<Vec<FileBar>>>,
-    /// The originating path — kept for the progress-bar label (`file:./data.csv`).
-    file_path: Option<PathBuf>,
+    csv_bars: Option<Arc<Vec<CsvBar>>>,
+    /// The originating path — kept for the progress-bar label (`csv:./data.csv`).
+    csv_path: Option<PathBuf>,
 }
 
 impl Series {
     fn label(&self) -> String {
-        if let Some(path) = &self.file_path {
+        if let Some(path) = &self.csv_path {
             format!(
-                "file:{}[{}:{}]",
+                "csv:{}[{}:{}]",
                 path.display(),
                 self.symbol,
                 self.interval.as_token()
@@ -393,16 +412,16 @@ fn chunk_bounds(since: Timestamp, until: Timestamp, interval: Interval) -> Vec<(
 const CHUNK_DELAY: StdDuration = StdDuration::from_millis(100);
 
 /// One un-overlaid downloaded bar in the intermediate fetch result: which
-/// symbol + interval it came from, its timed candle, and (for `file:` sources
-/// only) the pass-through non-OHLCV columns from the input row.
-/// `apply_overlays` walks these grouped by `(symbol, interval)` to attach
-/// `-x` overlay columns before the final `Row` list is emitted; the extras
-/// pass through unchanged.
+/// symbol + interval it came from, and the fully-populated [`Atom`] the
+/// source produced. The atom already carries its bar-open [`Timestamp`] and
+/// (for a source that exposes them) a per-bar overlay side channel behind a
+/// provider-defined [`Schema`]. `apply_overlays` walks these grouped by
+/// `(symbol, interval)` to compute `-x` overlay columns before the final
+/// `Row` list is emitted.
 struct RawBar {
     symbol: String,
     interval: Interval,
-    candle: TimedCandle,
-    extras: Vec<(String, OverlayValue)>,
+    atom: Atom,
 }
 
 /// Download every series concurrently (one task per series) and return the
@@ -431,8 +450,8 @@ async fn fetch_all(
 /// Fetch one series chunk-by-chunk (sequentially — the politeness delay is
 /// per series), advancing its own progress bar. Overlay-agnostic.
 ///
-/// A `file:` series short-circuits: the file has already been read into
-/// [`Series::file_bars`] up front, so this is just an in-memory filter to the
+/// A `csv:` series short-circuits: the file has already been read into
+/// [`Series::csv_bars`] up front, so this is just an in-memory filter to the
 /// series' `(symbol, interval)` and the `[fetch_since, until)` window.
 async fn fetch_series(
     series: Series,
@@ -440,23 +459,18 @@ async fn fetch_series(
     until: Timestamp,
     bar: ProgressBar,
 ) -> Result<Vec<RawBar>> {
-    if let Some(file_bars) = series.file_bars.clone() {
-        let rows: Vec<RawBar> = file_bars
+    if let Some(csv_bars) = series.csv_bars.clone() {
+        let rows: Vec<RawBar> = csv_bars
             .iter()
             .filter(|b| {
                 b.symbol == series.symbol
                     && b.interval == series.interval
-                    && b.time.0 >= fetch_since.0
-                    && b.time.0 < until.0
+                    && b.atom.time.map(|t| t.0 >= fetch_since.0 && t.0 < until.0).unwrap_or(false)
             })
             .map(|b| RawBar {
                 symbol: b.symbol.clone(),
                 interval: b.interval,
-                candle: TimedCandle {
-                    time: b.time,
-                    candle: b.candle,
-                },
-                extras: b.extras.clone(),
+                atom: b.atom.clone(),
             })
             .collect();
         bar.inc(1);
@@ -472,7 +486,7 @@ async fn fetch_series(
         }
         first = false;
         bar.set_message(chunk_since.to_datetime().date().to_string());
-        let candles = fetch(
+        let atoms = fetch(
             &series.provider,
             &series.symbol,
             series.interval,
@@ -481,11 +495,10 @@ async fn fetch_series(
         )
         .await
         .with_context(|| format!("fetching {label}"))?;
-        rows.extend(candles.into_iter().map(|tc| RawBar {
+        rows.extend(atoms.into_iter().map(|atom| RawBar {
             symbol: series.symbol.clone(),
             interval: series.interval,
-            candle: tc,
-            extras: Vec::new(),
+            atom,
         }));
         bar.inc(1);
     }
@@ -521,13 +534,21 @@ fn apply_overlays(
 
     let mut out: Vec<Row> = Vec::new();
     for ((symbol, interval), mut bars) in by_group {
-        bars.sort_by_key(|b| b.candle.time);
+        bars.sort_by_key(|b| b.atom.time);
+
+        // Every atom in a group shares the same source-provided schema (one
+        // `Arc<Schema>`); pluck it off the first atom that carries overlays.
+        // Falls back to `Schema::empty()` for a source that exposes no
+        // extras — `!get { key }` then panics at build with an unknown key,
+        // matching the pre-refactor behaviour.
+        let group_atoms: Vec<Atom> = bars.iter().map(|b| b.atom.clone()).collect();
+        let schema = sources::schema_of(&group_atoms);
 
         let active: Vec<Option<&Overlay>> =
             overlay::active_for(overlays, columns, &symbol, interval);
         let mut instances: Vec<Option<Box<dyn DynIndicator>>> = active
             .iter()
-            .map(|slot| slot.as_ref().map(|o| o.build()))
+            .map(|slot| slot.as_ref().map(|o| o.build(&schema)))
             .collect();
         let has_applicable = instances.iter().any(Option::is_some);
 
@@ -538,18 +559,15 @@ fn apply_overlays(
                     .iter_mut()
                     .map(|slot| {
                         slot.as_mut().and_then(|inst| {
-                            dyn_value_to_overlay(
-                                inst.update(DynValue::Atom(b.candle.candle.into()))?,
-                            )
+                            dyn_value_to_overlay(inst.update(DynValue::Atom(b.atom.clone()))?)
                         })
                     })
                     .collect();
                 Row {
                     symbol: b.symbol,
                     interval: b.interval,
-                    candle: b.candle,
+                    atom: b.atom,
                     overlays: values,
-                    file_extras: b.extras,
                 }
             })
             .collect();
@@ -558,7 +576,7 @@ fn apply_overlays(
             if since_specified {
                 // Extra leading bars covered the warm-up; trim to the window
                 // the user asked for.
-                group_rows.retain(|r| r.candle.time >= since);
+                group_rows.retain(|r| r.atom.time.map(|t| t >= since).unwrap_or(false));
             } else if has_applicable {
                 // No `--since` — drop leading rows until every applicable
                 // overlay is warmed up.
@@ -579,8 +597,8 @@ fn apply_overlays(
     }
 
     out.sort_by(|a, b| {
-        (a.candle.time, a.symbol.as_str(), a.interval.as_token())
-            .cmp(&(b.candle.time, b.symbol.as_str(), b.interval.as_token()))
+        (a.atom.time, a.symbol.as_str(), a.interval.as_token())
+            .cmp(&(b.atom.time, b.symbol.as_str(), b.interval.as_token()))
     });
     out
 }
@@ -611,9 +629,9 @@ fn build_progress_bars(
         .map(|s| {
             // Per-series bar accounts for the overlay warm-up window pulled in
             // ahead of `since` so the progress count matches what fetch_series
-            // actually chunks through. `file:` series are read once up front,
+            // actually chunks through. `csv:` series are read once up front,
             // so their bar is a single tick that flips straight to `done`.
-            let n_chunks = if s.file_bars.is_some() {
+            let n_chunks = if s.csv_bars.is_some() {
                 1
             } else {
                 let start = s.fetch_since(since, since_specified);
@@ -637,13 +655,13 @@ async fn fetch(
     interval: Interval,
     since: Timestamp,
     until: Timestamp,
-) -> Result<Vec<TimedCandle>> {
+) -> Result<Vec<Atom>> {
     match provider {
         "binance" => Ok(Binance::new()
-            .candles(symbol, interval, since, Some(until))
+            .atoms(symbol, interval, since, Some(until))
             .await?),
         "yfinance" => Ok(Yahoo::new()
-            .candles(symbol, interval, since, Some(until))
+            .atoms(symbol, interval, since, Some(until))
             .await?),
         other => bail!(unknown_provider_error(other)),
     }
@@ -656,8 +674,8 @@ pub(crate) async fn tickers_of(provider: &str) -> Result<Vec<String>> {
     match provider {
         "binance" => Ok(Binance::new().tickers().await?),
         "yfinance" => Ok(Yahoo::new().tickers().await?),
-        "file" => bail!(
-            "`file:` reads a local CSV — the ticker list is whatever `symbol` \
+        "csv" => bail!(
+            "`csv:` reads a local CSV — the ticker list is whatever `symbol` \
              values the file itself contains; there is no canonical enumeration \
              endpoint"
         ),
@@ -676,22 +694,23 @@ fn unknown_provider_error(other: &str) -> String {
 /// Write the row list to `path` as a `;`-delimited CSV. Base header:
 /// `symbol;freq;time;open;high;low;close;volume`, followed by one column per
 /// overlay column name (unique, in first-appearance order across the
-/// `--overlay` args) and — for `file:`-sourced rows — one column per
-/// pass-through extra column from the input file (also unique + insertion
-/// order across every row that carries it). A `None` overlay value or a
-/// missing pass-through cell renders as blank; other cells render per their
-/// runtime type: `Real` via [`format_f64`], `Bool` as `true`/`false`, `Str`
-/// verbatim.
+/// `--overlay` args) and one column per source-provided extra (`n_trades`,
+/// `adj_close`, or a `csv:` file's own non-OHLCV columns — union across all
+/// rows, first-appearance order). Extras whose names clash with a requested
+/// `--overlay` column are skipped: the computed overlay wins that slot.
+/// A `None` overlay value or a missing extra cell renders as blank; other
+/// cells render per their runtime type: `Real` via [`format_f64`], `Bool` as
+/// `true`/`false`, `Str` verbatim.
 fn write_candles_csv(path: &Path, rows: &[Row], overlay_columns: &[String]) -> Result<()> {
     let mut wtr = csv::WriterBuilder::new()
         .delimiter(b';')
         .from_path(path)
         .with_context(|| format!("creating {}", path.display()))?;
 
-    // File-sourced extras: union of column names across every row, in
-    // first-appearance order. Deterministic even when only some rows carry a
-    // given column (e.g. when a run mixes `file:` and remote series).
-    let extra_columns = collect_extra_columns(rows);
+    // Source-provided extras: union of column names across every row's
+    // `atom.overlays`. Skips anything already emitted as a computed
+    // `--overlay` (name collision — the computed one wins its slot).
+    let extra_columns = collect_extra_columns(rows, overlay_columns);
 
     let mut header: Vec<&str> = vec![
         "symbol", "freq", "time", "open", "high", "low", "close", "volume",
@@ -700,31 +719,34 @@ fn write_candles_csv(path: &Path, rows: &[Row], overlay_columns: &[String]) -> R
     header.extend(extra_columns.iter().map(String::as_str));
     wtr.write_record(&header)?;
     for row in rows {
-        let time = row
-            .candle
+        let time_ts = row
+            .atom
             .time
+            .expect("get.rs atoms always carry a bar-open time");
+        let time = time_ts
             .to_datetime()
             .format(&Rfc3339)
-            .unwrap_or_else(|_| row.candle.time.0.to_string());
+            .unwrap_or_else(|_| time_ts.0.to_string());
         let mut record: Vec<String> = vec![
             row.symbol.clone(),
             row.interval.as_token(),
             time,
-            format_f64(row.candle.candle.open),
-            format_f64(row.candle.candle.high),
-            format_f64(row.candle.candle.low),
-            format_f64(row.candle.candle.close),
-            format_f64(row.candle.candle.volume),
+            format_f64(row.atom.candle.open),
+            format_f64(row.atom.candle.high),
+            format_f64(row.atom.candle.low),
+            format_f64(row.atom.candle.close),
+            format_f64(row.atom.candle.volume),
         ];
         for v in &row.overlays {
             record.push(v.as_ref().map(format_overlay_value).unwrap_or_default());
         }
         for name in &extra_columns {
             let cell = row
-                .file_extras
-                .iter()
-                .find(|(n, _)| n == name)
-                .map(|(_, v)| format_overlay_value(v))
+                .atom
+                .overlays
+                .as_ref()
+                .and_then(|ov| ov.get_by_key(name))
+                .map(format_overlay_value)
                 .unwrap_or_default();
             record.push(cell);
         }
@@ -734,15 +756,23 @@ fn write_candles_csv(path: &Path, rows: &[Row], overlay_columns: &[String]) -> R
     Ok(())
 }
 
-/// Union of `file_extras` column names across `rows`, in first-appearance
-/// order. Preserves the order the input file's header used, since each
-/// FileBar's extras are already header-ordered.
-fn collect_extra_columns(rows: &[Row]) -> Vec<String> {
+/// Union of source-provided overlay column names across `rows`, in
+/// first-appearance order. Preserves the input file's header order (each
+/// atom's schema retains it). Skips names already appearing in
+/// `overlay_columns` — a computed `--overlay` column with the same name
+/// shadows the source-provided one in the output.
+fn collect_extra_columns(rows: &[Row], overlay_columns: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for r in rows {
-        for (name, _) in &r.file_extras {
+        let Some(ov) = r.atom.overlays.as_ref() else {
+            continue;
+        };
+        for name in ov.schema().keys() {
+            if overlay_columns.iter().any(|c| c == name) {
+                continue;
+            }
             if !out.iter().any(|n| n == name) {
-                out.push(name.clone());
+                out.push(name.to_string());
             }
         }
     }
@@ -791,7 +821,7 @@ fn format_f64(v: f64) -> String {
 // ---------------------------------------------------------------------------
 
 /// Parse a `<provider>:<symbol>[<freq>,...](,<symbol>[<freq>,...])*` spec — or
-/// the `file:PATH` short form (no bracket; the file's own `symbol` + `freq`
+/// the `csv:PATH` short form (no bracket; the file's own `symbol` + `freq`
 /// columns drive the output).
 fn parse_spec(spec: &str) -> Result<FetchSpec> {
     let (provider, rest) = spec
@@ -801,12 +831,12 @@ fn parse_spec(spec: &str) -> Result<FetchSpec> {
     if provider.is_empty() {
         bail!("{spec:?}: empty provider");
     }
-    if provider == "file" {
+    if provider == "csv" {
         let path = rest.trim();
         if path.is_empty() {
-            bail!("{spec:?}: `file:` needs a path (e.g. `file:./candles.csv`)");
+            bail!("{spec:?}: `csv:` needs a path (e.g. `csv:./candles.csv`)");
         }
-        return Ok(FetchSpec::File {
+        return Ok(FetchSpec::Csv {
             path: PathBuf::from(path),
         });
     }
@@ -976,11 +1006,11 @@ mod tests {
     }
 
     /// Helper: unwrap the remote variant, panicking otherwise. All the
-    /// non-`file:` parse tests below use it.
+    /// non-`csv:` parse tests below use it.
     fn remote(spec: &str) -> (String, Vec<SymbolSpec>) {
         match parse_spec(spec).unwrap() {
             FetchSpec::Remote { provider, symbols } => (provider, symbols),
-            FetchSpec::File { path } => panic!("expected Remote, got File({})", path.display()),
+            FetchSpec::Csv { path } => panic!("expected Remote, got Csv({})", path.display()),
         }
     }
 
@@ -1005,27 +1035,27 @@ mod tests {
     }
 
     #[test]
-    fn parses_file_spec_without_bracket() {
-        let got = parse_spec("file:./candles.csv").unwrap();
+    fn parses_csv_spec_without_bracket() {
+        let got = parse_spec("csv:./candles.csv").unwrap();
         match got {
-            FetchSpec::File { path } => assert_eq!(path, PathBuf::from("./candles.csv")),
-            other => panic!("expected File, got {other:?}"),
+            FetchSpec::Csv { path } => assert_eq!(path, PathBuf::from("./candles.csv")),
+            other => panic!("expected Csv, got {other:?}"),
         }
     }
 
     #[test]
-    fn parses_file_spec_with_absolute_path() {
-        let got = parse_spec("file:/tmp/data.csv").unwrap();
+    fn parses_csv_spec_with_absolute_path() {
+        let got = parse_spec("csv:/tmp/data.csv").unwrap();
         match got {
-            FetchSpec::File { path } => assert_eq!(path, PathBuf::from("/tmp/data.csv")),
-            other => panic!("expected File, got {other:?}"),
+            FetchSpec::Csv { path } => assert_eq!(path, PathBuf::from("/tmp/data.csv")),
+            other => panic!("expected Csv, got {other:?}"),
         }
     }
 
     #[test]
-    fn rejects_empty_file_path() {
-        assert!(parse_spec("file:").is_err());
-        assert!(parse_spec("file:   ").is_err());
+    fn rejects_empty_csv_path() {
+        assert!(parse_spec("csv:").is_err());
+        assert!(parse_spec("csv:   ").is_err());
     }
 
     #[test]

@@ -15,7 +15,7 @@ Six subcommands:
 - [`optimize`](#optimize) — sweep a strategy over a parameter grid in
   parallel; write one CSV row per combination and rank by a metric.
 - [`get`](#get) — fetch OHLCV bars from a remote provider (`binance`,
-  `yfinance`) or re-process a local CSV (`file:PATH`) into a `run`-ready
+  `yfinance`) or re-process a local CSV (`csv:PATH`) into a `run`-ready
   file, optionally with `-x/--overlay` columns computed on top.
 - [`list`](#list) — printed catalogue of what the CLI knows about
   (indicator/signal YAML tags, remote providers, and — via HTTP — a
@@ -101,7 +101,7 @@ on when the frame carries several symbols.
 fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
           [--params <SPEC> …] [--cash <N>] [--costs <SPEC> …]
           [--stocks | --forex | --crypto] [-f <CODE>] [--bars-per-year <N>]
-          [--risk-free-rate <RATE>] [-w <N>] [-q]
+          [--risk-free-rate <RATE>] [-w <LEN>] [-q]
 ```
 
 | Flag | Description |
@@ -116,7 +116,7 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
 | `-f`, `--frequency <[SYM:]CODE>` | Bar cadence (`1m`, `5m`, `1h`, `4h`, `1d`, `1w`, `1M`, …). Repeatable; may carry a `SYMBOL:` scope prefix. When omitted, the CLI auto-detects the cadence from the `time` column. Combines with the calendar to derive `bars_per_year`. |
 | `--bars-per-year <[SYM[FREQ]:]N>` | Explicit override for the annualization denominator. Repeatable; each entry may carry a `SYMBOL[FREQ]:` scope prefix. Wins over the calendar/frequency pair when a scope matches. |
 | `--risk-free-rate <RATE>` | Annualized risk-free rate as a fraction (`0.045` = 4.5% p.a.). Default `0`. See [Risk-free rate](#risk-free-rate). |
-| `-w`, `--windowed <N>` | Also reduce the run in `N`-bar windows: one row per non-overlapping window in `metrics.csv`, one row per rolling (stride-1) window in `rolling.csv`. `metrics.yml` (whole-run) is always written. See [Windowed metrics](#windowed-metrics). |
+| `-w`, `--windowed <LEN>` | Also reduce the run in `LEN`-sized windows: one row per non-overlapping window in `metrics.csv`, one row per rolling (stride-1) window in `rolling.csv`. `metrics.yml` (whole-run) is always written. `LEN` is a plain bar count (`10`, `252`) or a duration in the [`-f`](#-f----frequency) alphabet (`1d`, `1w`, `1M`, `4h`) that resolves to a bar count against the run's effective cadence. See [Windowed metrics](#windowed-metrics). |
 | `-q`, `--quiet` | Silence the console output. Files still get written. |
 
 **Outputs.** Files in `--output-dir`, all documented in
@@ -210,7 +210,7 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
                --params <SPEC> [--params <SPEC> …]
                -m <METRIC>[,<METRIC>…] [-m <METRIC>…]
                -o <FILE> [--best-by <METRIC>] [-j <N>]
-               [-w <N> [-k <K>]]
+               [-w <LEN> [-k <K>]]
                [--cash <N>]
                [--stocks | --forex | --crypto] [-f <CODE>] [--bars-per-year <N>]
                [--risk-free-rate <RATE>] [-q]
@@ -224,7 +224,7 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
 | `-m`, `--metrics <NAMES>` | Metric columns to record. Comma-separated, repeatable. Short leaf names (`sharpe`, `max_pct`) or dotted paths (`risk_adjusted.sharpe`) — see the [Metrics catalogue](#metrics-catalogue). |
 | `-o`, `--output <FILE>` | Output CSV path. Parent directories are created if missing. |
 | `--best-by <METRIC>` | Sort rows by this metric (direction hardcoded per metric — see [Best-by directions](#best-by-directions)). Omit to keep cartesian order and skip the "best" console block. |
-| `-w`, `--windowed <N>` | Evaluate each grid point in non-overlapping windows of `N` bars: every `-m` metric becomes two CSV columns (`<name>_mean` / `<name>_std`) and `--best-by` ranks by the windowed mean. See [Windowed metrics](#windowed-metrics). |
+| `-w`, `--windowed <LEN>` | Evaluate each grid point in non-overlapping windows of `LEN`: every `-m` metric becomes two CSV columns (`<name>_mean` / `<name>_std`) and `--best-by` ranks by the windowed mean. Same `LEN` shape as `run -w` — a bar count (`10`, `252`) or a duration (`1d`, `1w`, `1M`). See [Windowed metrics](#windowed-metrics). |
 | `-k`, `--risk-aversion <K>` | Rank `--best-by` conservatively: shift each grid point's cross-window mean *against* it by `K` standard deviations before sorting. Requires `-w` and `--best-by`; `K >= 0`. See [Best-by directions](#best-by-directions). |
 | `--costs <SPEC>` | Trading-cost model applied uniformly to every grid point. Repeatable. See [--costs](#--costs). |
 | `-j`, `--jobs <N>` | Rayon worker count. Default: one worker per logical CPU. |
@@ -310,16 +310,16 @@ stretch) but do not eliminate it — the grid is still ranked on the same
 data it was fit on.
 
 The recommended workflow is therefore an **explicit train / validate
-split**, with `get` and `file:` doing the plumbing:
+split**, with `get` and `csv:` doing the plumbing:
 
 ```sh
 # 1. Fetch the raw candles once, into a persistent CSV.
 fugazi get binance:BTCUSDT[1d] --since 2018-01-01 --until today -o btc.csv
 
 # 2. Split the CSV into a training slice (past) and a validation slice
-#    (recent) with `file:` + --since/--until. Nothing new is fetched.
-fugazi get file:./btc.csv --since 2018-01-01 --until 2023-01-01 -o btc_train.csv
-fugazi get file:./btc.csv --since 2023-01-01 --until today       -o btc_validate.csv
+#    (recent) with `csv:` + --since/--until. Nothing new is fetched.
+fugazi get csv:./btc.csv --since 2018-01-01 --until 2023-01-01 -o btc_train.csv
+fugazi get csv:./btc.csv --since 2023-01-01 --until today       -o btc_validate.csv
 
 # 3. Optimize on the training slice. Prefer `-w` (+ optional `-k`) so the
 #    ranking rewards parameter sets that held up across sub-windows of the
@@ -377,14 +377,14 @@ Every series across all specs downloads in parallel — one series is a
 #### Fetch specs
 
 The common shape is `<provider>:<symbol>[<freq>,<freq>...](,<symbol>[<freq>,...])*`
-— several symbols and several frequencies per spec are one download. `file:`
+— several symbols and several frequencies per spec are one download. `csv:`
 is the one exception; see below.
 
 | Provider | Grammar | Description |
 | --- | --- | --- |
 | `binance` | `binance:BTCUSDT[1d,1h],ETHUSDT[1d]` | Binance spot klines. Frequencies: `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d`, `1w`, `1M`. |
 | `yfinance` | `yfinance:SPY[1d],AAPL[1h]` | Yahoo Finance chart endpoint (stocks/ETFs/indices/FX). Rejects multiples the provider doesn't advertise (e.g. `Day(3)`). |
-| `file` | `file:./candles.csv` | **No `[freq]` bracket.** Reads a local OHLCV CSV (delimiter autodetected: `;`, `,`, `\t`, `|`) — typically a previous `fugazi get` output. Each row's `symbol` + `freq` columns drive the output; `--since` / `--until` filter by `time`; overlays apply the same way. `symbol`, `freq`, `time`, `open`, `high`, `low`, `close` are required, `volume` optional. |
+| `csv` | `csv:./candles.csv` | **No `[freq]` bracket.** Reads a local OHLCV CSV (delimiter autodetected: `;`, `,`, `\t`, `|`) — typically a previous `fugazi get` output. Each row's `symbol` + `freq` columns drive the output; `--since` / `--until` filter by `time`; overlays apply the same way. `symbol`, `freq`, `time`, `open`, `high`, `low`, `close` are required, `volume` optional. |
 
 Frequency tokens are case-sensitive: `m` = minute, `M` = month. `fugazi list
 sources` prints the same table.
@@ -426,7 +426,7 @@ fugazi get binance:BTCUSDT[1d] --since 2020-01-01 \
     -o btc.csv
 
 # Re-process an existing CSV to add an ATR column without re-downloading.
-fugazi get file:./btc.csv -x 'atr14=!atr { period: 14 }' -o btc_atr.csv
+fugazi get csv:./btc.csv -x 'atr14=!atr { period: 14 }' -o btc_atr.csv
 
 # Different overlays per symbol (BTC gets an EMA, ETH gets an RSI).
 fugazi get binance:BTCUSDT[1d],ETHUSDT[1d] \
@@ -441,7 +441,7 @@ Printed catalogue, three shapes:
 
 ```
 fugazi list indicators   # every YAML tag `run --series` and `get --overlay` accept
-fugazi list sources      # every provider `get` fetches from (`binance`, `yfinance`, `file`)
+fugazi list sources      # every provider `get` fetches from (`binance`, `yfinance`, `csv`)
 fugazi list tickers <PROVIDER>   # every symbol the provider currently exposes (HTTP)
 ```
 
@@ -455,7 +455,7 @@ binance` calls
 `/api/v3/exchangeInfo` and prints its full spot vocabulary — piped into
 `grep`/`wc -l`/`sort -u` it's one ticker per line; interactive, it lays out
 as a column-major grid sized to the terminal (like `ls`). Yahoo has no such
-enumeration endpoint and returns an "unsupported" error; `file` needs a path
+enumeration endpoint and returns an "unsupported" error; `csv` needs a path
 per invocation, so the ticker list is whatever `symbol` values the file
 itself contains — enumerate it with `cut -d';' -f1 <path> | sort -u`.
 
@@ -757,13 +757,19 @@ flag opts out. See the library's [safe-defaults][safe-defaults] note.
 
 ### Windowed metrics
 
-`-w/--windowed <N>` reduces the run in **`N`-bar windows** on top of the
-whole-run summary. Each window is evaluated as a run of its own: its initial
-equity is the equity marked on the bar before it, and only the fills booked
-inside it count — a position carried across a window boundary shows up in the
-entering window as an unmatched fill, the usual windowed-analysis
-convention. Keep `N` well above the strategy's typical holding time if the
-trade statistics matter.
+`-w/--windowed <LEN>` reduces the run in **windows of `LEN`** on top of the
+whole-run summary. `LEN` is either a plain bar count (`10`, `252`) or a
+duration in the [`-f`](#-f----frequency) alphabet (`1d`, `1w`, `1M`, `4h`); a
+duration resolves to a bar count against the run's effective cadence — `-w
+1w` picks 7 bars on daily data, 168 on hourly, 1 on weekly. The duration form
+lets a shared preset work across timeframes without recomputing the bar
+count; a bar cadence larger than the requested duration is a hard error
+(would round to zero bars). Each window is evaluated as a run of its own:
+its initial equity is the equity marked on the bar before it, and only the
+fills booked inside it count — a position carried across a window boundary
+shows up in the entering window as an unmatched fill, the usual
+windowed-analysis convention. Keep the resolved bar count well above the
+strategy's typical holding time if the trade statistics matter.
 
 - On `run`: `metrics.yml` (whole-run) is still written, and `-w N` adds
   **both** [`metrics.csv`](#output-files) (one row per non-overlapping window)

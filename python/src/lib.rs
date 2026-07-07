@@ -3578,26 +3578,65 @@ fn format_ts_iso(ms: i64) -> String {
 
 /// Materialise a single-symbol/single-interval fetch into a DataFrame.
 ///
-/// Columns: `time` (ISO 8601 UTC str), `open`/`high`/`low`/`close`/`volume` (f64).
+/// Columns: `time` (ISO 8601 UTC str), `open`/`high`/`low`/`close`/`volume`
+/// (f64), then one column per source-provided overlay (Binance's
+/// `quote_volume` / `n_trades` / `taker_buy_base_volume` /
+/// `taker_buy_quote_volume`; Yahoo's `adj_close`) — same names as the atom
+/// schema's keys. Bool / Str overlay columns land as Python-native lists;
+/// Real ones as `f64` lists.
 fn build_candles_frame(
     py: Python<'_>,
     output: CandlesOutput,
-    bars: Vec<fugazi_core::TimedCandle>,
+    atoms: Vec<Atom>,
 ) -> PyResult<Py<PyAny>> {
-    let n = bars.len();
+    let n = atoms.len();
     let mut times: Vec<String> = Vec::with_capacity(n);
     let mut opens: Vec<f64> = Vec::with_capacity(n);
     let mut highs: Vec<f64> = Vec::with_capacity(n);
     let mut lows: Vec<f64> = Vec::with_capacity(n);
     let mut closes: Vec<f64> = Vec::with_capacity(n);
     let mut volumes: Vec<f64> = Vec::with_capacity(n);
-    for tc in bars {
-        times.push(format_ts_iso(tc.time.0));
-        opens.push(tc.candle.open);
-        highs.push(tc.candle.high);
-        lows.push(tc.candle.low);
-        closes.push(tc.candle.close);
-        volumes.push(tc.candle.volume);
+    // Overlay column order comes from any atom's schema (all atoms in one
+    // fetch share the same `Arc<Schema>`).
+    let schema = fugazi_core::sources::schema_of(&atoms);
+    let n_over = schema.len();
+    let mut over_real: Vec<Vec<f64>> = (0..n_over).map(|_| Vec::with_capacity(n)).collect();
+    let mut over_bool: Vec<Vec<bool>> = (0..n_over).map(|_| Vec::with_capacity(n)).collect();
+    let mut over_str: Vec<Vec<String>> = (0..n_over).map(|_| Vec::with_capacity(n)).collect();
+    for atom in atoms {
+        let time = atom
+            .time
+            .expect("candle source atoms always carry a time")
+            .0;
+        times.push(format_ts_iso(time));
+        opens.push(atom.candle.open);
+        highs.push(atom.candle.high);
+        lows.push(atom.candle.low);
+        closes.push(atom.candle.close);
+        volumes.push(atom.candle.volume);
+        for i in 0..n_over {
+            let cell = atom.overlays.as_ref().and_then(|ov| ov.get(i));
+            match schema.type_of(i).expect("schema has N columns") {
+                fugazi_core::OverlayType::Real => {
+                    over_real[i].push(match cell {
+                        Some(OverlayValue::Real(x)) => *x,
+                        _ => f64::NAN,
+                    });
+                }
+                fugazi_core::OverlayType::Bool => {
+                    over_bool[i].push(match cell {
+                        Some(OverlayValue::Bool(b)) => *b,
+                        _ => false,
+                    });
+                }
+                fugazi_core::OverlayType::Str => {
+                    over_str[i].push(match cell {
+                        Some(OverlayValue::Str(s)) => s.to_string(),
+                        _ => String::new(),
+                    });
+                }
+            }
+        }
     }
     let data = PyDict::new(py);
     data.set_item("time", &times)?;
@@ -3606,6 +3645,13 @@ fn build_candles_frame(
     data.set_item("low", &lows)?;
     data.set_item("close", &closes)?;
     data.set_item("volume", &volumes)?;
+    for (i, name) in schema.keys().enumerate() {
+        match schema.type_of(i).expect("schema has N columns") {
+            fugazi_core::OverlayType::Real => data.set_item(name, &over_real[i])?,
+            fugazi_core::OverlayType::Bool => data.set_item(name, &over_bool[i])?,
+            fugazi_core::OverlayType::Str => data.set_item(name, &over_str[i])?,
+        }
+    }
     match output {
         CandlesOutput::Polars => {
             let polars = py.import("polars").map_err(|_| {
@@ -3636,7 +3682,7 @@ fn fetch_bars<C>(
     interval: Interval,
     since: Timestamp,
     until: Option<Timestamp>,
-) -> PyResult<Vec<fugazi_core::TimedCandle>>
+) -> PyResult<Vec<Atom>>
 where
     C: CandleSource + Clone,
 {
@@ -3644,7 +3690,7 @@ where
     let symbol = symbol.to_string();
     py.detach(|| {
         sources_runtime()
-            .block_on(async move { client.candles(&symbol, interval, since, until).await })
+            .block_on(async move { client.atoms(&symbol, interval, since, until).await })
     })
     .map_err(source_error_to_py)
 }
@@ -3688,7 +3734,9 @@ impl PyBinance {
     /// * `output` — `"polars"` (default), `"pandas"`, or `"numpy"` (dict of arrays).
     ///
     /// Returned DataFrame columns: `time` (ISO 8601 UTC), `open`, `high`,
-    /// `low`, `close`, `volume` (all f64).
+    /// `low`, `close`, `volume`, plus the Binance kline extras
+    /// `quote_volume`, `n_trades`, `taker_buy_base_volume`,
+    /// `taker_buy_quote_volume` (all f64).
     #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
     fn candles(
         &self,
@@ -3702,8 +3750,8 @@ impl PyBinance {
         let interval = parse_interval_token(freq)?;
         let (since_ts, until_ts) = resolve_since_until(since, until)?;
         let out = CandlesOutput::from_kwarg(output)?;
-        let bars = fetch_bars(py, &self.inner, symbol, interval, since_ts, until_ts)?;
-        build_candles_frame(py, out, bars)
+        let atoms = fetch_bars(py, &self.inner, symbol, interval, since_ts, until_ts)?;
+        build_candles_frame(py, out, atoms)
     }
 }
 
@@ -3751,7 +3799,8 @@ impl PyYahoo {
     /// * `output` — `"polars"` (default), `"pandas"`, or `"numpy"` (dict of arrays).
     ///
     /// Returned DataFrame columns: `time` (ISO 8601 UTC), `open`, `high`,
-    /// `low`, `close`, `volume` (all f64).
+    /// `low`, `close`, `volume`, plus the Yahoo extra `adj_close` — the
+    /// split- and dividend-adjusted close (all f64).
     #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
     fn candles(
         &self,
@@ -3765,8 +3814,8 @@ impl PyYahoo {
         let interval = parse_interval_token(freq)?;
         let (since_ts, until_ts) = resolve_since_until(since, until)?;
         let out = CandlesOutput::from_kwarg(output)?;
-        let bars = fetch_bars(py, &self.inner, symbol, interval, since_ts, until_ts)?;
-        build_candles_frame(py, out, bars)
+        let atoms = fetch_bars(py, &self.inner, symbol, interval, since_ts, until_ts)?;
+        build_candles_frame(py, out, atoms)
     }
 }
 

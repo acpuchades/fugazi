@@ -19,15 +19,29 @@
 //! [`Yahoo::with_user_agent`]).
 
 use std::future::Future;
+use std::sync::{Arc, OnceLock};
 
 use serde::Deserialize;
 
-use crate::types::Candle;
+use crate::types::{Atom, Candle, OverlayInfo, OverlayValue, Real, Schema};
 
-use super::{CandleSource, Interval, SourceError, TimedCandle, Timestamp};
+use super::{CandleSource, Interval, SourceError, Timestamp};
 
 const DEFAULT_BASE_URL: &str = "https://query1.finance.yahoo.com";
 const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (compatible; fugazi)";
+
+/// Yahoo exposes one useful extra beyond raw OHLCV: the split- and dividend-
+/// adjusted close (`indicators.adjclose[0].adjclose[i]` in the API response).
+/// Every returned atom carries this as a `Real` overlay under the key
+/// `adj_close`; missing / nulled bars read `Real::NAN` there.
+pub fn yahoo_schema() -> &'static Arc<Schema> {
+    static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        let mut b = Schema::builder();
+        b.add_real("adj_close");
+        b.finish()
+    })
+}
 
 /// A Yahoo Finance chart-API client.
 ///
@@ -75,13 +89,13 @@ impl CandleSource for Yahoo {
         "yfinance"
     }
 
-    fn candles(
+    fn atoms(
         &self,
         symbol: &str,
         interval: Interval,
         since: Timestamp,
         until: Option<Timestamp>,
-    ) -> impl Future<Output = Result<Vec<TimedCandle>, SourceError>> + Send {
+    ) -> impl Future<Output = Result<Vec<Atom>, SourceError>> + Send {
         // Own the strings so the returned future doesn't borrow the caller.
         let symbol = symbol.to_string();
         let client = self.client.clone();
@@ -165,17 +179,27 @@ fn interval_to_token(interval: Interval) -> Result<&'static str, SourceError> {
     Ok(token)
 }
 
-/// Decode the single-element `chart.result` payload into a list of
-/// [`TimedCandle`]s. Skips bars where any of `open`/`high`/`low`/`close`/`volume`
-/// is null (Yahoo emits nulls for scheduled bars that never printed, e.g. a
-/// mid-session halt).
-fn decode_result(result: ChartResult) -> Result<Vec<TimedCandle>, SourceError> {
+/// Decode the single-element `chart.result` payload into a list of [`Atom`]s.
+/// Skips bars where any of `open`/`high`/`low`/`close`/`volume` is null (Yahoo
+/// emits nulls for scheduled bars that never printed, e.g. a mid-session halt).
+///
+/// Populates each atom's overlay side channel with the adjusted-close value
+/// from `indicators.adjclose[0].adjclose[i]`, or `Real::NAN` when the array is
+/// absent / short / null on that bar.
+fn decode_result(result: ChartResult) -> Result<Vec<Atom>, SourceError> {
     let quote = result
         .indicators
         .quote
         .into_iter()
         .next()
         .ok_or_else(|| SourceError::Decode("indicators.quote empty".into()))?;
+    let adjclose: Vec<Option<f64>> = result
+        .indicators
+        .adjclose
+        .into_iter()
+        .next()
+        .map(|a| a.adjclose)
+        .unwrap_or_default();
     let times = result.timestamp;
     let n = times.len();
     if quote.open.len() != n
@@ -193,6 +217,7 @@ fn decode_result(result: ChartResult) -> Result<Vec<TimedCandle>, SourceError> {
             quote.volume.len(),
         )));
     }
+    let schema = yahoo_schema().clone();
     let mut out = Vec::with_capacity(n);
     for (i, &t) in times.iter().enumerate() {
         let (Some(o), Some(h), Some(l), Some(c), Some(v)) = (
@@ -204,10 +229,13 @@ fn decode_result(result: ChartResult) -> Result<Vec<TimedCandle>, SourceError> {
         ) else {
             continue;
         };
-        out.push(TimedCandle {
-            time: Timestamp(t.saturating_mul(1_000)),
-            candle: Candle::new(o, h, l, c, v),
-        });
+        let adj = adjclose.get(i).copied().flatten().unwrap_or(Real::NAN);
+        let overlays = OverlayInfo::new(schema.clone(), vec![OverlayValue::Real(adj)]);
+        out.push(Atom::with_overlays_and_time(
+            Candle::new(o, h, l, c, v),
+            overlays,
+            Timestamp(t.saturating_mul(1_000)),
+        ));
     }
     Ok(out)
 }
@@ -286,6 +314,14 @@ struct ChartResult {
 #[derive(Deserialize)]
 struct ChartIndicators {
     quote: Vec<ChartQuote>,
+    #[serde(default)]
+    adjclose: Vec<ChartAdjclose>,
+}
+
+#[derive(Deserialize)]
+struct ChartAdjclose {
+    #[serde(default)]
+    adjclose: Vec<Option<f64>>,
 }
 
 #[derive(Deserialize)]
@@ -348,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_result_builds_candles_and_scales_seconds_to_millis() {
+    fn decode_result_builds_atoms_with_adj_close_and_scales_seconds_to_millis() {
         let result = ChartResult {
             timestamp: vec![1_704_067_200, 1_704_153_600],
             indicators: ChartIndicators {
@@ -359,15 +395,20 @@ mod tests {
                     close: vec![Some(101.5), Some(102.5)],
                     volume: vec![Some(1_000.0), Some(1_200.0)],
                 }],
+                adjclose: vec![ChartAdjclose {
+                    adjclose: vec![Some(90.0), Some(91.0)],
+                }],
             },
         };
         let out = decode_result(result).unwrap();
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0].time, Timestamp(1_704_067_200_000));
+        assert_eq!(out[0].time, Some(Timestamp(1_704_067_200_000)));
         assert_eq!(out[0].candle.open, 100.0);
         assert_eq!(out[0].candle.close, 101.5);
-        assert_eq!(out[1].time, Timestamp(1_704_153_600_000));
+        assert_eq!(out[1].time, Some(Timestamp(1_704_153_600_000)));
         assert_eq!(out[1].candle.volume, 1_200.0);
+        let ov0 = out[0].overlays.as_ref().expect("adj_close overlay");
+        assert_eq!(ov0.get_by_key("adj_close"), Some(&OverlayValue::Real(90.0)));
     }
 
     #[test]
@@ -382,12 +423,13 @@ mod tests {
                     close: vec![Some(101.5), Some(102.5), Some(103.5)],
                     volume: vec![Some(1_000.0), Some(1_200.0), Some(1_100.0)],
                 }],
+                adjclose: vec![],
             },
         };
         let out = decode_result(result).unwrap();
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0].time, Timestamp(1_704_067_200_000));
-        assert_eq!(out[1].time, Timestamp(1_704_240_000_000));
+        assert_eq!(out[0].time, Some(Timestamp(1_704_067_200_000)));
+        assert_eq!(out[1].time, Some(Timestamp(1_704_240_000_000)));
     }
 
     #[tokio::test]
@@ -414,6 +456,7 @@ mod tests {
                     close: vec![Some(101.5), Some(102.5)],
                     volume: vec![Some(1_000.0), Some(1_200.0)],
                 }],
+                adjclose: vec![],
             },
         };
         assert!(matches!(

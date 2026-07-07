@@ -67,7 +67,7 @@ async fn paginates_and_decodes_klines() {
         .with_max_per_request(3);
 
     let bars = client
-        .candles(
+        .atoms(
             "BTCEUR",
             Interval::Day(1),
             Timestamp(1_704_067_200_000),
@@ -77,16 +77,23 @@ async fn paginates_and_decodes_klines() {
         .expect("fetch succeeds");
 
     assert_eq!(bars.len(), 5);
-    assert_eq!(bars[0].time, Timestamp(1_704_067_200_000));
+    assert_eq!(bars[0].time, Some(Timestamp(1_704_067_200_000)));
     assert_eq!(bars[0].candle.open, 42000.0);
     assert_eq!(bars[0].candle.close, 42100.0);
-    assert_eq!(bars[4].time, Timestamp(1_704_412_800_000));
+    assert_eq!(bars[4].time, Some(Timestamp(1_704_412_800_000)));
     assert_eq!(bars[4].candle.close, 42550.0);
 
     // Times are strictly ascending.
     for w in bars.windows(2) {
         assert!(w[0].time < w[1].time, "times must be ascending");
     }
+
+    // Provider extras made it onto every atom's overlay side channel.
+    let ov = bars[0].overlays.as_ref().expect("Binance atoms carry overlays");
+    assert!(ov.get_by_key("quote_volume").is_some());
+    assert!(ov.get_by_key("n_trades").is_some());
+    assert!(ov.get_by_key("taker_buy_base_volume").is_some());
+    assert!(ov.get_by_key("taker_buy_quote_volume").is_some());
 }
 
 #[tokio::test]
@@ -105,7 +112,7 @@ async fn maps_unknown_symbol_error() {
 
     let client = Binance::new().with_base_url(server.uri());
     let err = client
-        .candles(
+        .atoms(
             "NOTASYMBOL",
             Interval::Day(1),
             Timestamp(1_704_067_200_000),
@@ -160,7 +167,7 @@ async fn maps_rate_limit_error() {
 
     let client = Binance::new().with_base_url(server.uri());
     let err = client
-        .candles(
+        .atoms(
             "BTCEUR",
             Interval::Day(1),
             Timestamp(1_704_067_200_000),

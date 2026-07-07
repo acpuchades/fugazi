@@ -29,7 +29,7 @@ use rayon::prelude::*;
 use serde_json::Value;
 
 use crate::backtest;
-use crate::calendar::{self, AssetClass, BarsPerYearSpec, Frequency, ScopedFrequency};
+use crate::calendar::{self, AssetClass, BarsPerYearSpec, Frequency, ScopedFrequency, WindowSpec};
 use crate::costs::CostConfig;
 use crate::data::DataFrame;
 use crate::input;
@@ -71,11 +71,13 @@ pub struct OptimizeOptions<'a> {
     /// Trading-calendar shortcut (`--stocks`/`--forex`/`--crypto`).
     pub asset_class: Option<AssetClass>,
     pub risk_free_rate: Real,
-    /// Evaluate each grid point in non-overlapping windows of this many bars
-    /// (same windowing as `run -w`): every `-m` metric becomes two CSV columns
+    /// Evaluate each grid point in non-overlapping windows of this size (same
+    /// windowing as `run -w`): every `-m` metric becomes two CSV columns
     /// (`<name>_mean` / `<name>_std`, cross-window over the windows where the
-    /// metric is defined) and `--best-by` ranks by the windowed mean.
-    pub windowed: Option<NonZeroUsize>,
+    /// metric is defined) and `--best-by` ranks by the windowed mean. The raw
+    /// CLI spec — a bar count or a duration; resolved to a bar count against
+    /// the effective cadence inside [`run`].
+    pub windowed: Option<WindowSpec>,
     /// `-k/--risk-aversion`: shift each grid point's `--best-by` cross-window
     /// mean *against* it by this many standard deviations before ranking
     /// (direction-aware: `mean − k·std` descending, `mean + k·std` ascending).
@@ -124,19 +126,24 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
 
     // The effective bar cadence, now that the strategy's symbol is known:
     // a symbol-matching `-f/--frequency` entry wins, else auto-detect from
-    // the strategy's dominant `(symbol, freq)` series in the frame.
-    // Threaded into both the annualization (`bars_per_year`) and the
-    // per-grid-point cost resolution so freq-scoped `--costs` entries also
-    // see the detected cadence.
-    let effective_freq =
-        calendar::pick_frequency(opts.frequency, &probe_spec.symbol).or_else(|| {
-            frame
-                .dominant_series_times(&probe_spec.symbol)
-                .and_then(calendar::detect_frequency)
-        });
+    // the atoms' `time` field (populated by the loader). Threaded into both
+    // the annualization (`bars_per_year`) and the per-grid-point cost
+    // resolution so freq-scoped `--costs` entries also see the detected cadence.
+    let effective_freq = calendar::pick_frequency(opts.frequency, &probe_spec.symbol)
+        .or_else(|| calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a)));
     let bars_per_year =
         calendar::pick_bars_per_year(opts.bars_per_year, &probe_spec.symbol, effective_freq)
             .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
+
+    let span_secs = calendar::total_span_seconds(atoms.iter().map(|(_, a)| a));
+    let windowed_bars = opts
+        .windowed
+        .map(|w| {
+            w.resolve(effective_freq, span_secs, atoms.len())
+                .map_err(anyhow::Error::msg)
+        })
+        .transpose()
+        .context("resolving `-w/--windowed`")?;
 
     let sweep = optimize(
         &base_value,
@@ -148,7 +155,7 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
         opts.risk_free_rate,
         opts.cost_config,
         effective_freq,
-        opts.windowed,
+        windowed_bars,
         &opts.metrics,
         opts.best_by.as_deref(),
         opts.risk_aversion,
@@ -167,7 +174,7 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
     if !opts.quiet {
         style::print_header("optimize", "sweep a strategy over a parameter grid");
         print_skipped_overlay_warning(&skipped_overlay_columns);
-        print_inputs_block(&opts, &sweep.axes, &sweep.rows);
+        print_inputs_block(&opts, windowed_bars, &sweep.axes, &sweep.rows);
         // A "best" row only means something when the user gave us a metric to
         // rank by. Without one, the sweep has produced a CSV but no verdict.
         if sweep.best_by.is_some() {
@@ -863,7 +870,12 @@ fn format_number(v: Real) -> String {
 // Console output
 // ---------------------------------------------------------------------------
 
-fn print_inputs_block(opts: &OptimizeOptions, axes: &[(String, Vec<Value>)], rows: &[Row]) {
+fn print_inputs_block(
+    opts: &OptimizeOptions,
+    windowed_bars: Option<NonZeroUsize>,
+    axes: &[(String, Vec<Value>)],
+    rows: &[Row],
+) {
     println!("{}", style::bold("inputs"));
     print_field("strategy", opts.strategy_label);
     let axes_label: String = axes
@@ -888,8 +900,14 @@ fn print_inputs_block(opts: &OptimizeOptions, axes: &[(String, Vec<Value>)], row
         );
     }
     print_field("output", &opts.output.display().to_string());
-    if let Some(w) = opts.windowed {
-        print_field("windowed", &format!("{w}-bar windows (mean ± std per metric)"));
+    if let (Some(spec), Some(bars)) = (opts.windowed, windowed_bars) {
+        let msg = match spec {
+            WindowSpec::Bars(_) => format!("{bars}-bar windows (mean ± std per metric)"),
+            WindowSpec::Duration(_) => {
+                format!("{spec} → {bars}-bar windows (mean ± std per metric)")
+            }
+        };
+        print_field("windowed", &msg);
     }
     if let Some(name) = &opts.best_by {
         if opts.risk_aversion > 0.0 {

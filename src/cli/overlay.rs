@@ -67,17 +67,24 @@ pub struct Overlay {
 }
 
 impl Overlay {
-    /// Build a fresh, live indicator for this overlay.
+    /// Build a fresh, live indicator for this overlay against `schema` —
+    /// the overlay side channel visible to `!get { key }` references in the
+    /// spec. A `get` command runs no strategy, so position-anchored leaves
+    /// (`entry`, `peak`, `trough`) read from a stub [`Position`] that never
+    /// updates and stay `None` throughout the fetch — a user who wires one
+    /// in just gets an empty column.
     ///
-    /// A `get` command runs no strategy, so position-anchored leaves (`entry`,
-    /// `peak`, `trough`) read from a stub [`Position`] that never updates and
-    /// stay `None` throughout the fetch — a user who wires one in just gets an
-    /// empty column. Likewise `!get` isn't meaningful here: `fugazi get`'s
-    /// atom stream carries no overlay side channel, so the schema is empty
-    /// and a `!get { key }` in the spec panics at build time with an unknown
-    /// key against an empty registered-keys list.
-    pub fn build(&self) -> Box<dyn DynIndicator> {
-        self.spec.build(&Position::new(), &Schema::empty())
+    /// `schema` is derived from the source-provided atom stream. For a
+    /// `csv:` source it holds the input's non-OHLCV columns (column-typed
+    /// by [`crate::csv_source`]); for a remote provider it holds whatever
+    /// extras that provider exposes (Binance's `quote_volume`, `n_trades`,
+    /// …; Yahoo's `adj_close`) — see each `sources/*.rs` for the specific
+    /// vocabulary. An overlay can then reference an existing column
+    /// (`!ema { source: !get { key: adj_close } }`); a `!get { key }` on an
+    /// unknown key panics at build time with the schema's registered-keys
+    /// list.
+    pub fn build(&self, schema: &std::sync::Arc<Schema>) -> Box<dyn DynIndicator> {
+        self.spec.build(&Position::new(), schema)
     }
 }
 
@@ -149,11 +156,12 @@ pub fn stable_period_for(
     columns: &[String],
     symbol: &str,
     interval: Interval,
+    schema: &std::sync::Arc<Schema>,
 ) -> usize {
     active_for(overlays, columns, symbol, interval)
         .into_iter()
         .flatten()
-        .map(|o| o.build().stable_period())
+        .map(|o| o.build(schema).stable_period())
         .max()
         .unwrap_or(0)
 }
@@ -487,8 +495,8 @@ mod tests {
             },
         ];
         let cols = column_names(&overlays);
-        assert_eq!(stable_period_for(&overlays, &cols, "BTC", Interval::Day(1)), 200);
-        assert_eq!(stable_period_for(&overlays, &cols, "ETH", Interval::Day(1)), 20);
+        assert_eq!(stable_period_for(&overlays, &cols, "BTC", Interval::Day(1), &Schema::empty()), 200);
+        assert_eq!(stable_period_for(&overlays, &cols, "ETH", Interval::Day(1), &Schema::empty()), 20);
     }
 
     #[test]
@@ -499,8 +507,8 @@ mod tests {
         let b = Source::Inline("BTC:ma=!sma { period: 30 }".to_string());
         let overlays = parse_specs(&[a, b]).unwrap();
         let cols = column_names(&overlays);
-        assert_eq!(stable_period_for(&overlays, &cols, "BTC", Interval::Day(1)), 30);
-        assert_eq!(stable_period_for(&overlays, &cols, "ETH", Interval::Day(1)), 200);
+        assert_eq!(stable_period_for(&overlays, &cols, "BTC", Interval::Day(1), &Schema::empty()), 30);
+        assert_eq!(stable_period_for(&overlays, &cols, "ETH", Interval::Day(1), &Schema::empty()), 200);
     }
 
     #[test]
@@ -510,6 +518,6 @@ mod tests {
         let src = Source::Inline("s=!sma { period: 14 }".to_string());
         let overlays = parse_specs(std::slice::from_ref(&src)).unwrap();
         let cols = column_names(&overlays);
-        assert_eq!(stable_period_for(&overlays, &cols, "X", Interval::Day(1)), 14);
+        assert_eq!(stable_period_for(&overlays, &cols, "X", Interval::Day(1), &Schema::empty()), 14);
     }
 }

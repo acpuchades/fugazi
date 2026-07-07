@@ -76,8 +76,6 @@ pub use indicator::Indicator;
 pub use indicators::BoolIndicatorExt;
 pub use metrics::{DrawdownSegment, Trade};
 pub use signal::Signal;
-#[cfg(feature = "sources")]
-pub use sources::TimedCandle;
 pub use strategy::{
     Ack, Order, OrderId, OrderKind, PaperWallet, Units, Reference, Side, Size, Strategy, Wallet,
     WalletError,

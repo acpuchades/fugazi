@@ -34,7 +34,6 @@ mod spec;
 mod style;
 
 use std::collections::HashMap;
-use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -181,15 +180,20 @@ struct RunArgs {
     #[arg(long, value_name = "RATE", default_value_t = 0.0)]
     risk_free_rate: f64,
 
-    /// Also reduce the run in N-bar windows for post-hoc analysis. `metrics.yml`
-    /// (whole-run) is always written; adding `-w N` writes two extra CSVs at
-    /// window length N — `metrics.csv` (non-overlapping windows, one row each)
-    /// and `rolling.csv` (rolling stride-1 windows, one row each). Both share
-    /// the same columns as `metrics.yml` under their dotted names, with the
-    /// window's start/end times in the first two columns. Plot from R/Python;
-    /// no charts are produced.
-    #[arg(short = 'w', long = "windowed", value_name = "N")]
-    windowed: Option<NonZeroUsize>,
+    /// Also reduce the run in windows for post-hoc analysis. `metrics.yml`
+    /// (whole-run) is always written; adding `-w LEN` writes two extra CSVs
+    /// at window length `LEN` — `metrics.csv` (non-overlapping windows, one
+    /// row each) and `rolling.csv` (rolling stride-1 windows, one row each).
+    /// Both share the same columns as `metrics.yml` under their dotted names,
+    /// with the window's start/end times in the first two columns. Plot from
+    /// R/Python; no charts are produced.
+    ///
+    /// `LEN` is either a plain bar count (`10`, `252`) or a duration in the
+    /// `-f/--frequency` alphabet (`1d`, `1w`, `1M`, `4h`) that resolves to a
+    /// bar count against the run's effective cadence — so `-w 1w` picks 7
+    /// bars on daily data or 168 on hourly.
+    #[arg(short = 'w', long = "windowed", value_name = "LEN")]
+    windowed: Option<calendar::WindowSpec>,
 
     /// Configure trading costs (commission, spread, slippage). Same shape as
     /// `--params`: `,`-separated terms `[SCOPE:]key=value` and `@file.yml`
@@ -360,14 +364,18 @@ struct OptimizeArgs {
     #[arg(long = "costs", value_name = "SPEC")]
     costs: Vec<costs::CostSpec>,
 
-    /// Evaluate each grid point in non-overlapping windows of N bars (the same
-    /// windowing as `run -w`). Every `-m` metric becomes two CSV columns —
-    /// `<name>_mean` and `<name>_std`, its cross-window mean and standard
-    /// deviation over the windows where it is defined — and `--best-by` ranks
-    /// by the windowed mean, rewarding consistency across regimes rather than
-    /// one lucky stretch.
-    #[arg(short = 'w', long = "windowed", value_name = "N")]
-    windowed: Option<NonZeroUsize>,
+    /// Evaluate each grid point in non-overlapping windows (the same windowing
+    /// as `run -w`). Every `-m` metric becomes two CSV columns — `<name>_mean`
+    /// and `<name>_std`, its cross-window mean and standard deviation over the
+    /// windows where it is defined — and `--best-by` ranks by the windowed
+    /// mean, rewarding consistency across regimes rather than one lucky
+    /// stretch.
+    ///
+    /// `LEN` is either a plain bar count (`10`, `252`) or a duration in the
+    /// `-f/--frequency` alphabet (`1d`, `1w`, `1M`, `4h`) — see `run -w` for
+    /// the resolution rules.
+    #[arg(short = 'w', long = "windowed", value_name = "LEN")]
+    windowed: Option<calendar::WindowSpec>,
 
     /// Rank `--best-by` conservatively (needs `-w` and `--best-by`): shift each
     /// grid point's cross-window mean *against* it by K standard deviations

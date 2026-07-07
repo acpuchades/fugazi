@@ -24,7 +24,6 @@
 //! consults has settled composes the check at the entry with `!stable`, i.e.
 //! `!all [<entry>, !stable { signal: <entry> }]`.
 
-use std::num::NonZeroUsize;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -32,7 +31,7 @@ use anyhow::{Context, Result};
 use fugazi::prelude::*;
 
 use crate::backtest::{self, IterationInputs, IterationResult};
-use crate::calendar::{self, AssetClass, BarsPerYearSpec, ScopedFrequency};
+use crate::calendar::{self, AssetClass, BarsPerYearSpec, ScopedFrequency, WindowSpec};
 use crate::costs::CostConfig;
 use crate::data::DataFrame;
 use crate::metrics;
@@ -65,8 +64,10 @@ pub struct RunOptions<'a> {
     /// When set, also emit windowed reductions at this window length: one row
     /// per non-overlapping window in `metrics.csv`, one row per rolling
     /// (stride-1) window in `rolling.csv`. `metrics.yml` (whole-run) is
-    /// always written; `None` skips the CSVs.
-    pub windowed: Option<NonZeroUsize>,
+    /// always written; `None` skips the CSVs. The raw CLI spec — a bar count
+    /// or a duration; resolved to a bar count against the effective cadence
+    /// inside [`run`].
+    pub windowed: Option<WindowSpec>,
     /// Configured cost models, resolved into a live [`TradingCosts`] per
     /// (symbol, frequency) at run time. See [`crate::costs`].
     pub cost_config: &'a CostConfig,
@@ -106,25 +107,30 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
     let end = atoms.last().map_or("", |(t, _)| t.as_str());
     // The effective bar cadence for both annualization and cost-scope
     // matching: a symbol-matching `-f/--frequency` entry wins, else we
-    // auto-detect from the strategy's dominant `(symbol, freq)` series in
-    // the frame.
-    let effective_freq = calendar::pick_frequency(opts.frequency, &symbol).or_else(|| {
-        frame
-            .dominant_series_times(&symbol)
-            .and_then(calendar::detect_frequency)
-    });
+    // auto-detect from the atoms' `time` field (populated by the loader).
+    let effective_freq = calendar::pick_frequency(opts.frequency, &symbol)
+        .or_else(|| calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a)));
     // Resolve `bars_per_year`: a scope-matching `--bars-per-year` entry wins,
     // else fall through to the class × cadence calendar.
     let bars_per_year = calendar::pick_bars_per_year(opts.bars_per_year, &symbol, effective_freq)
         .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
     let no_cost_warning = !opts.costs_supplied;
+    let span_secs = calendar::total_span_seconds(atoms.iter().map(|(_, a)| a));
+    let windowed_bars = opts
+        .windowed
+        .map(|w| {
+            w.resolve(effective_freq, span_secs, atoms.len())
+                .map_err(anyhow::Error::msg)
+        })
+        .transpose()
+        .context("resolving `-w/--windowed`")?;
     let inputs = IterationInputs {
         cash: opts.cash,
         bars_per_year,
         risk_free_rate: opts.risk_free_rate,
         cost_config: opts.cost_config,
         effective_freq,
-        windowed: opts.windowed,
+        windowed: windowed_bars,
     };
     // Print the inputs block up front so a long-running run still shows the
     // user what they asked for while it's working.

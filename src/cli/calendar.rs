@@ -23,11 +23,11 @@
 //! shortcut group stays the single place a "market" is described.
 //!
 //! When neither `--bars-per-year` nor `-f/--frequency` is given, callers can
-//! call [`detect_frequency`] on the input series' `time` column to guess the
+//! call [`detect_frequency_from_atoms`] on the loaded atoms to guess the
 //! cadence from the median inter-bar gap — snapped to the nearest well-known
-//! [`Frequency`] variant. The caller does the grouping (one detection per
-//! `(symbol, freq)` series in the frame) so different-cadence series aren't
-//! averaged together.
+//! [`Frequency`] variant. The atoms' `time` field is populated at load by the
+//! [`--series` loader](crate::data), so no re-parse of the time-column
+//! strings is needed.
 //!
 //! `--bars-per-year` itself is repeatable and each entry may carry a
 //! `SYMBOL[FREQ]:` scope prefix — the `[`crate::costs`] grammar — so a
@@ -36,6 +36,7 @@
 //! (if any) wins for a run's `(symbol, effective_freq)`; no match falls
 //! through to the class × frequency calendar (see [`resolve`]).
 
+use std::num::NonZeroUsize;
 use std::str::FromStr;
 
 use anyhow::{Result, bail};
@@ -214,6 +215,141 @@ pub(crate) fn parse_interval(s: &str) -> Result<Interval> {
     }
 }
 
+/// A `-w/--windowed` value: either an explicit bar count (`10`, `252`) or a
+/// duration in the [`Frequency`] alphabet (`1d`, `1w`, `1M`, `4h`) that
+/// resolves to a bar count against the run's actual data. The duration form
+/// frees a preset from recomputing a bar count for every timeframe.
+///
+/// Resolution prefers the run's real timeline over a calendar-based estimate:
+/// when the input's `time` column parses, the resolver uses the actual span
+/// between the first and last bars and divides by the count. That naturally
+/// accounts for weekend and holiday gaps — `-w 1w` on daily equities picks
+/// ~5 bars (M-F only), on continuous crypto 7. When no times parse (a purely
+/// synthetic run), it falls back to the effective bar cadence's calendar
+/// seconds — accurate for 24/7 data, an over-estimate for markets with
+/// non-trading periods. Rounded to the nearest positive integer; a window
+/// shorter than one bar of the effective cadence, or a duration form with
+/// neither a span nor a cadence known, is a hard error.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WindowSpec {
+    /// An explicit bar count — the classic `-w N` shape.
+    Bars(NonZeroUsize),
+    /// A duration whose bar count is derived from the effective cadence.
+    Duration(Frequency),
+}
+
+impl std::fmt::Display for WindowSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WindowSpec::Bars(n) => write!(f, "{n}"),
+            WindowSpec::Duration(freq) => f.write_str(&format_freq(*freq)),
+        }
+    }
+}
+
+impl FromStr for WindowSpec {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        if s.is_empty() {
+            return Err("empty `--windowed` value".to_string());
+        }
+        // Trailing alphabetic byte → duration form (same alphabet as
+        // `Frequency::from_str`). Otherwise plain bar count.
+        let last = s.as_bytes()[s.len() - 1];
+        if last.is_ascii_alphabetic() {
+            let freq = Frequency::from_str(s)
+                .map_err(|e| format!("`{s}`: {e} (or pass a plain bar count)"))?;
+            Ok(WindowSpec::Duration(freq))
+        } else {
+            let n: NonZeroUsize = s.parse().map_err(|_| {
+                format!(
+                    "`{s}`: expected a positive bar count or a duration like `1d`/`1w`/`1M`"
+                )
+            })?;
+            Ok(WindowSpec::Bars(n))
+        }
+    }
+}
+
+impl WindowSpec {
+    /// Resolve to a concrete bar count.
+    ///
+    /// [`Bars`](Self::Bars) is the identity. [`Duration`](Self::Duration)
+    /// prefers `span_secs` (actual first-to-last bar span from the input's
+    /// `time` column, paired with `n_bars`) — `bars_in_window = win.seconds
+    /// · (n_bars - 1) / span_secs`, so weekend/holiday gaps in the timeline
+    /// are baked in. When no span parses, it falls back to
+    /// `win.seconds / bar_freq.seconds` (calendar-based, accurate for
+    /// continuous 24/7 data).
+    ///
+    /// Errors:
+    /// * `Duration` with neither `span_secs` nor `bar_freq` — nothing to
+    ///   convert against.
+    /// * `Duration` shorter than one bar — would round to zero.
+    pub fn resolve(
+        &self,
+        bar_freq: Option<Frequency>,
+        span_secs: Option<f64>,
+        n_bars: usize,
+    ) -> Result<NonZeroUsize, String> {
+        match *self {
+            WindowSpec::Bars(n) => Ok(n),
+            WindowSpec::Duration(win) => {
+                let win_secs = win.seconds_per_bar() as f64;
+                let bars = match (span_secs, n_bars, bar_freq) {
+                    // Real timeline: bars per second from actual span.
+                    (Some(secs), n, _) if secs > 0.0 && n >= 2 => {
+                        win_secs * (n - 1) as f64 / secs
+                    }
+                    // Calendar fallback from the effective cadence.
+                    (_, _, Some(bar)) => win_secs / bar.seconds_per_bar() as f64,
+                    (_, _, None) => {
+                        return Err(format!(
+                            "`-w {}`: no bar timeline or cadence known — pass `-f/--frequency` or use a plain bar count",
+                            format_freq(win),
+                        ));
+                    }
+                };
+                let n = bars.round() as usize;
+                NonZeroUsize::new(n).ok_or_else(|| {
+                    format!(
+                        "`-w {}`: window shorter than one bar of the input's cadence",
+                        format_freq(win),
+                    )
+                })
+            }
+        }
+    }
+}
+
+/// Total span in seconds between the first and last atoms carrying a
+/// [`Timestamp`]. Uses `Atom::time` — populated at load by the `--series`
+/// loader — so no re-parsing is needed. Returns `None` when fewer than two
+/// atoms have a time, or the span is non-positive. Consumed by
+/// [`WindowSpec::resolve`] to derive bars-per-second from the real timeline,
+/// so weekend/holiday gaps in equity data are honored.
+pub fn total_span_seconds<'a>(atoms: impl IntoIterator<Item = &'a Atom>) -> Option<f64> {
+    let mut stamps = atoms.into_iter().filter_map(|a| a.time.map(|t| t.0));
+    let first = stamps.next()?;
+    let last = stamps.last().unwrap_or(first);
+    let span_ms = last - first;
+    (span_ms > 0).then_some(span_ms as f64 / 1000.0)
+}
+
+/// Render a [`Frequency`] as its canonical CLI code (`1m`, `4h`, `1d`, `1w`,
+/// `1M`) — the inverse of [`Frequency::from_str`].
+fn format_freq(f: Frequency) -> String {
+    match f {
+        Frequency::Minute(n) => format!("{n}m"),
+        Frequency::Hour(n) => format!("{n}h"),
+        Frequency::Day(n) => format!("{n}d"),
+        Frequency::Week(n) => format!("{n}w"),
+        Frequency::Month(n) => format!("{n}M"),
+    }
+}
+
 /// Resolve `bars_per_year` from the CLI's three inputs in priority order:
 ///
 /// 1. an explicit `--bars-per-year <N>` — always wins;
@@ -249,8 +385,20 @@ pub fn resolve(
 /// The caller is expected to partition its input by `(symbol, freq column
 /// value)` and detect *per group*, so a frame mixing several cadences of the
 /// same symbol doesn't average their gaps into a nonsense median.
-pub fn detect_frequency<'a>(times: impl IntoIterator<Item = &'a str>) -> Option<Frequency> {
-    let stamps: Vec<i64> = times.into_iter().filter_map(parse_time_to_seconds).collect();
+pub fn detect_frequency_from_atoms<'a>(
+    atoms: impl IntoIterator<Item = &'a Atom>,
+) -> Option<Frequency> {
+    detect_frequency_from_millis(atoms.into_iter().filter_map(|a| a.time.map(|t| t.0)))
+}
+
+/// Snap the median gap to the nearest named [`Frequency`]. Shared core of
+/// [`detect_frequency_from_atoms`]; also directly consumed by tests that want
+/// to exercise the string-parse vocabulary via [`parse_time_to_millis`]
+/// without constructing atoms.
+pub(crate) fn detect_frequency_from_millis(
+    stamps: impl IntoIterator<Item = i64>,
+) -> Option<Frequency> {
+    let stamps: Vec<i64> = stamps.into_iter().collect();
     if stamps.len() < 2 {
         return None;
     }
@@ -263,15 +411,20 @@ pub fn detect_frequency<'a>(times: impl IntoIterator<Item = &'a str>) -> Option<
         return None;
     }
     gaps.sort_unstable();
-    let median = gaps[gaps.len() / 2];
-    Some(snap_seconds_to_frequency(median))
+    let median_ms = gaps[gaps.len() / 2];
+    Some(snap_seconds_to_frequency(median_ms / 1000))
 }
 
-/// Parse one time-column value into a Unix-epoch seconds stamp, or `None` if
-/// no supported shape matches. Ordering the parse attempts by falling
+/// Parse one time-column value into a UTC-millisecond epoch stamp, or `None`
+/// if no supported shape matches. Ordering the parse attempts by falling
 /// specificity keeps the ambiguous cases sensible: an integer is treated as
 /// an epoch first (so `1_704_067_200` doesn't try to parse as a date).
-fn parse_time_to_seconds(raw: &str) -> Option<i64> {
+///
+/// The `--series` loader (`crate::data`) calls this to populate `Atom::time`
+/// at load, so the calendar indicators (`!year`, `!month`, …) and the
+/// duration-form `-w/--windowed` resolver both work on the real timeline
+/// without re-parsing.
+pub(crate) fn parse_time_to_millis(raw: &str) -> Option<i64> {
     let s = raw.trim();
     if s.is_empty() {
         return None;
@@ -279,18 +432,18 @@ fn parse_time_to_seconds(raw: &str) -> Option<i64> {
     if let Ok(n) = s.parse::<i64>() {
         // A stamp much larger than "seconds since epoch could plausibly be" is
         // almost certainly milliseconds — 10^11 seconds is ~year 5138.
-        return Some(if n.abs() > 100_000_000_000 { n / 1000 } else { n });
+        return Some(if n.abs() > 100_000_000_000 { n } else { n * 1000 });
     }
     if let Ok(dt) = time::OffsetDateTime::parse(s, &Rfc3339) {
-        return Some(dt.unix_timestamp());
+        return Some(dt.unix_timestamp() * 1000);
     }
     let dt_fmt = format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
     if let Ok(dt) = time::PrimitiveDateTime::parse(s, dt_fmt) {
-        return Some(dt.assume_utc().unix_timestamp());
+        return Some(dt.assume_utc().unix_timestamp() * 1000);
     }
     let date_fmt = format_description!("[year]-[month]-[day]");
     if let Ok(date) = time::Date::parse(s, date_fmt) {
-        return Some(date.midnight().assume_utc().unix_timestamp());
+        return Some(date.midnight().assume_utc().unix_timestamp() * 1000);
     }
     None
 }
@@ -591,10 +744,17 @@ mod tests {
         assert_eq!(resolve(None, None, None), 252.0);
     }
 
+    /// Snap millisecond stamps from parsed time strings — mirrors what
+    /// [`crate::data::DataFrame::atoms`] does at load: parse each label into
+    /// milliseconds and let the shared snap-to-cadence core do the work.
+    fn detect_from_strs<'a>(times: impl IntoIterator<Item = &'a str>) -> Option<Frequency> {
+        detect_frequency_from_millis(times.into_iter().filter_map(parse_time_to_millis))
+    }
+
     #[test]
     fn detect_frequency_from_iso_dates() {
         let times = ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"];
-        assert_eq!(detect_frequency(times), Some(Frequency::Day(1)));
+        assert_eq!(detect_from_strs(times), Some(Frequency::Day(1)));
     }
 
     #[test]
@@ -604,7 +764,7 @@ mod tests {
             "2024-01-01T01:00:00Z",
             "2024-01-01T02:00:00Z",
         ];
-        assert_eq!(detect_frequency(times), Some(Frequency::Hour(1)));
+        assert_eq!(detect_from_strs(times), Some(Frequency::Hour(1)));
     }
 
     #[test]
@@ -613,7 +773,7 @@ mod tests {
         let times = ["1_704_067_200", "1_704_067_500", "1_704_067_800"]
             .map(|s| s.replace('_', ""));
         assert_eq!(
-            detect_frequency(times.iter().map(String::as_str)),
+            detect_from_strs(times.iter().map(String::as_str)),
             Some(Frequency::Minute(5))
         );
     }
@@ -624,7 +784,7 @@ mod tests {
         let times = ["1_704_067_200_000", "1_704_081_600_000", "1_704_096_000_000"]
             .map(|s| s.replace('_', ""));
         assert_eq!(
-            detect_frequency(times.iter().map(String::as_str)),
+            detect_from_strs(times.iter().map(String::as_str)),
             Some(Frequency::Hour(4))
         );
     }
@@ -637,7 +797,7 @@ mod tests {
             "2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05",
             "2024-01-08", "2024-01-09", "2024-01-10", "2024-01-11", "2024-01-12",
         ];
-        assert_eq!(detect_frequency(times), Some(Frequency::Day(1)));
+        assert_eq!(detect_from_strs(times), Some(Frequency::Day(1)));
     }
 
     #[test]
@@ -650,20 +810,36 @@ mod tests {
             "2024-01-01T00:06:00Z",
             "2024-01-01T00:09:00Z",
         ];
-        assert_eq!(detect_frequency(times), Some(Frequency::Minute(5)));
+        assert_eq!(detect_from_strs(times), Some(Frequency::Minute(5)));
     }
 
     #[test]
     fn detect_frequency_gives_up_on_unparseable() {
         // Opaque, non-time strings — no median → no detection.
         let times = ["alpha", "beta", "gamma"];
-        assert!(detect_frequency(times).is_none());
+        assert!(detect_from_strs(times).is_none());
     }
 
     #[test]
     fn detect_frequency_needs_two_parseable_stamps() {
         // One time isn't enough to compute a gap.
-        assert!(detect_frequency(["2024-01-01"]).is_none());
+        assert!(detect_from_strs(["2024-01-01"]).is_none());
+    }
+
+    #[test]
+    fn detect_frequency_from_atoms_reads_atom_time() {
+        // Same as detect_frequency_from_rfc3339 but reading Atom.time directly
+        // — the real code path exercised by run.rs / optimize.rs.
+        let candle = Candle::new(1.0, 1.0, 1.0, 1.0, 0.0);
+        let atoms = [
+            Atom::with_time(candle, Timestamp(0)),
+            Atom::with_time(candle, Timestamp(3_600_000)),
+            Atom::with_time(candle, Timestamp(7_200_000)),
+        ];
+        assert_eq!(
+            detect_frequency_from_atoms(atoms.iter()),
+            Some(Frequency::Hour(1))
+        );
     }
 
     fn spec(s: &str) -> BarsPerYearSpec {
@@ -814,6 +990,133 @@ mod tests {
         // (Ord ties break by variant, so `Hour(24)` sorts before `Day(1)`).
         assert!(Frequency::Hour(24) < Frequency::Day(1));
         assert_ne!(Frequency::Hour(24), Frequency::Day(1));
+    }
+
+    #[test]
+    fn window_spec_parses_bar_count_and_durations() {
+        assert_eq!(
+            "10".parse::<WindowSpec>().unwrap(),
+            WindowSpec::Bars(NonZeroUsize::new(10).unwrap())
+        );
+        assert_eq!(
+            "252".parse::<WindowSpec>().unwrap(),
+            WindowSpec::Bars(NonZeroUsize::new(252).unwrap())
+        );
+        assert_eq!(
+            "1d".parse::<WindowSpec>().unwrap(),
+            WindowSpec::Duration(Frequency::Day(1))
+        );
+        assert_eq!(
+            "4h".parse::<WindowSpec>().unwrap(),
+            WindowSpec::Duration(Frequency::Hour(4))
+        );
+        assert_eq!(
+            "1M".parse::<WindowSpec>().unwrap(),
+            WindowSpec::Duration(Frequency::Month(1))
+        );
+    }
+
+    #[test]
+    fn window_spec_rejects_bad_input() {
+        assert!("".parse::<WindowSpec>().is_err()); // empty
+        assert!("0".parse::<WindowSpec>().is_err()); // zero bars
+        assert!("0d".parse::<WindowSpec>().is_err()); // zero duration
+        assert!("1x".parse::<WindowSpec>().is_err()); // unknown unit
+        assert!("abc".parse::<WindowSpec>().is_err());
+    }
+
+    #[test]
+    fn window_spec_uses_actual_span_when_available() {
+        // 22 daily M-F bars spanning ~30 calendar days (1 month, weekends
+        // gapped). `-w 1w` should pick ~5 bars, not 7 (the calendar
+        // over-estimate) — the actual timeline's density wins.
+        let span_secs = Some(30.0 * 86400.0);
+        let n = WindowSpec::Duration(Frequency::Week(1))
+            .resolve(Some(Frequency::Day(1)), span_secs, 22)
+            .unwrap();
+        assert_eq!(n.get(), 5);
+
+        // Continuous crypto: 7 daily bars over 7 calendar days → 1w = 7 bars.
+        let n = WindowSpec::Duration(Frequency::Week(1))
+            .resolve(Some(Frequency::Day(1)), Some(7.0 * 86400.0), 8)
+            .unwrap();
+        assert_eq!(n.get(), 7);
+
+        // Plain bar count is the identity — ignores span/cadence.
+        let n = WindowSpec::Bars(NonZeroUsize::new(42).unwrap())
+            .resolve(None, None, 0)
+            .unwrap();
+        assert_eq!(n.get(), 42);
+    }
+
+    #[test]
+    fn window_spec_falls_back_to_calendar_when_no_span() {
+        // No parseable timeline — the only signal is the effective cadence,
+        // so calendar seconds apply (accurate for continuous data).
+        let n = WindowSpec::Duration(Frequency::Day(1))
+            .resolve(Some(Frequency::Hour(1)), None, 0)
+            .unwrap();
+        assert_eq!(n.get(), 24);
+        let n = WindowSpec::Duration(Frequency::Month(1))
+            .resolve(Some(Frequency::Day(1)), None, 0)
+            .unwrap();
+        assert_eq!(n.get(), 30);
+    }
+
+    #[test]
+    fn window_spec_duration_errors_without_span_or_cadence() {
+        let err = WindowSpec::Duration(Frequency::Day(1))
+            .resolve(None, None, 0)
+            .unwrap_err();
+        assert!(err.contains("no bar timeline or cadence"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn window_spec_duration_errors_when_shorter_than_bar() {
+        // 1d on 1w bars would round to 0 bars — rejected.
+        let err = WindowSpec::Duration(Frequency::Day(1))
+            .resolve(Some(Frequency::Week(1)), None, 0)
+            .unwrap_err();
+        assert!(err.contains("shorter than one bar"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn total_span_seconds_uses_first_and_last_timestamped_atom() {
+        let candle = Candle::new(1.0, 1.0, 1.0, 1.0, 0.0);
+        let atoms = [
+            Atom::with_time(candle, Timestamp(0)),
+            Atom::with_time(candle, Timestamp(86_400_000)),
+            Atom::with_time(candle, Timestamp(7 * 86_400_000)),
+        ];
+        assert_eq!(total_span_seconds(atoms.iter()), Some(7.0 * 86400.0));
+    }
+
+    #[test]
+    fn total_span_seconds_none_without_timestamps_or_singleton() {
+        let candle = Candle::new(1.0, 1.0, 1.0, 1.0, 0.0);
+        // No atom has a time — nothing to span.
+        let bare = [Atom::new(candle), Atom::new(candle)];
+        assert_eq!(total_span_seconds(bare.iter()), None);
+        // Only one atom with a time — no span.
+        let one = [Atom::with_time(candle, Timestamp(0))];
+        assert_eq!(total_span_seconds(one.iter()), None);
+    }
+
+    #[test]
+    fn window_spec_display_roundtrips() {
+        // The Display impl mirrors what the parser accepts.
+        assert_eq!(
+            format!("{}", "10".parse::<WindowSpec>().unwrap()),
+            "10"
+        );
+        assert_eq!(
+            format!("{}", "1w".parse::<WindowSpec>().unwrap()),
+            "1w"
+        );
+        assert_eq!(
+            format!("{}", "1M".parse::<WindowSpec>().unwrap()),
+            "1M"
+        );
     }
 
     #[test]

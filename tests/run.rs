@@ -146,6 +146,48 @@ fn runs_windowed_metrics() {
     assert_eq!(rrows.len(), 21, "expected one row per rolling window:\n{rolling}");
 }
 
+/// `-w/--windowed` accepts a time suffix (`1w`, `1M`, `4h`, …) — it resolves
+/// against the run's effective bar cadence. On the example daily fixture, `-w
+/// 1w` picks 7 bars per window, so 30 bars split into 4 non-overlapping ones
+/// (7+7+7+7, one short trailing chunk dropped by the non-overlapping reducer).
+#[test]
+fn runs_windowed_metrics_with_time_suffix() {
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let out = std::env::temp_dir().join("fugazi_e2e_windowed_time");
+    let _ = std::fs::remove_dir_all(&out);
+
+    let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
+        .args([
+            "run",
+            &format!("@{manifest}/examples/strategy.yml"),
+            "--series",
+            &format!("@{manifest}/examples/candles.csv"),
+            "--output-dir",
+            out.to_str().unwrap(),
+            "--windowed",
+            "1w",
+        ])
+        .status()
+        .expect("failed to launch the fugazi binary");
+    assert!(status.success(), "fugazi run -w 1w exited with failure");
+
+    let metrics = std::fs::read_to_string(out.join("metrics.csv")).expect("metrics.csv");
+    // 30 daily bars, window = 1w = 7 bars → 4 full windows + 1 trailing
+    // stub of 2 bars (the reducer keeps the tail).
+    let rows: Vec<&str> = metrics.lines().skip(1).collect();
+    assert_eq!(rows.len(), 5, "expected 4 full 7-bar windows + a 2-bar tail:\n{metrics}");
+    assert!(
+        rows[0].starts_with("2024-01-01;2024-01-07;"),
+        "first window should span Jan 1-7: {}",
+        rows[0]
+    );
+    assert!(
+        rows[4].starts_with("2024-01-29;2024-01-30;"),
+        "last (stub) window should span Jan 29-30: {}",
+        rows[4]
+    );
+}
+
 /// End-to-end wiring for a cross-timeframe entry.
 ///
 /// The user relies on the safe-by-default strategy-readiness gate to hold the

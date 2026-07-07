@@ -22,6 +22,8 @@ use std::str::FromStr;
 use anyhow::{Context, Result, anyhow, bail};
 use fugazi::prelude::*;
 
+use crate::calendar;
+
 /// A column-keyed row; column names are lowercased for case-insensitive lookup.
 type Row = HashMap<String, String>;
 
@@ -223,28 +225,6 @@ impl DataFrame {
         Ok(())
     }
 
-    /// Return the ascending `time` list of the largest `(symbol, freq)`
-    /// series matching `symbol`. When a symbol has multiple `freq` groups
-    /// — e.g. a 1d and a 1h stream in the same frame — the one with the
-    /// most rows wins, since it is almost always the primary series the
-    /// strategy is trading. Rows with no `freq` column bucket together
-    /// under `None`. Returns `None` when the frame carries nothing for
-    /// `symbol`. Used by the calendar auto-detection so different cadences
-    /// of the same symbol aren't averaged into one median.
-    pub fn dominant_series_times(&self, symbol: &str) -> Option<Vec<&str>> {
-        let mut buckets: BTreeMap<Option<String>, Vec<&str>> = BTreeMap::new();
-        for ((sym, time), row) in &self.rows {
-            if sym != symbol {
-                continue;
-            }
-            let freq = row.get("freq").filter(|s| !s.is_empty()).cloned();
-            buckets.entry(freq).or_default().push(time.as_str());
-        }
-        buckets
-            .into_values()
-            .max_by_key(|times| times.len())
-    }
-
     /// The atom series for `symbol`, ascending by `time`: OHLCV candles plus
     /// per-bar overlay values keyed by a shared [`Schema`] built from every
     /// non-reserved column found in the symbol's rows.
@@ -309,9 +289,17 @@ impl DataFrame {
                 continue;
             }
             let candle = row_to_candle(sym, time, row)?;
-            let atom = match &schema {
-                None => Atom::new(candle),
-                Some(schema) => {
+            // Parse the row's `time` label into a UTC-ms `Timestamp` when it
+            // matches a known shape (RFC3339, `YYYY-MM-DD [HH:MM:SS]`, epoch
+            // s/ms) — so `Atom::time` carries the real bar-open time and the
+            // calendar indicators / duration-form `-w` don't have to re-parse.
+            // An unparseable label leaves `time` as `None`; the strings still
+            // sort the frame the way the user typed them.
+            let ts = calendar::parse_time_to_millis(time).map(Timestamp);
+            let atom = match (&schema, ts) {
+                (None, None) => Atom::new(candle),
+                (None, Some(t)) => Atom::with_time(candle, t),
+                (Some(schema), _) => {
                     let values: Vec<OverlayValue> = column_types
                         .iter()
                         .map(|(name, ty)| {
@@ -320,7 +308,10 @@ impl DataFrame {
                         })
                         .collect();
                     let overlays = OverlayInfo::new(schema.clone(), values);
-                    Atom::with_overlays(candle, overlays)
+                    match ts {
+                        Some(t) => Atom::with_overlays_and_time(candle, overlays, t),
+                        None => Atom::with_overlays(candle, overlays),
+                    }
                 }
             };
             atoms.push((time.clone(), atom));
@@ -495,40 +486,6 @@ mod tests {
     #[test]
     fn series_without_a_file_is_rejected() {
         assert!("symbol=BTC".parse::<SeriesSpec>().is_err());
-    }
-
-    #[test]
-    fn dominant_series_times_picks_the_largest_freq_group_for_a_symbol() {
-        // Same symbol, two freqs — the larger bucket wins for auto-detection.
-        let btc_1d = tmp_csv(
-            "fugazi_dominant_btc_1d.csv",
-            "time;freq;open;high;low;close\n2024-01-01;1d;10;11;9;10\n2024-01-02;1d;10;12;10;11\n",
-        );
-        let btc_1h = tmp_csv(
-            "fugazi_dominant_btc_1h.csv",
-            "time;freq;open;high;low;close\n\
-             2024-01-01T00:00:00Z;1h;10;11;9;10\n\
-             2024-01-01T01:00:00Z;1h;10;11;9;10\n\
-             2024-01-01T02:00:00Z;1h;10;11;9;10\n",
-        );
-        let frame = DataFrame::from_series(&[
-            format!("symbol=BTC,@{btc_1d}").parse().unwrap(),
-            format!("symbol=BTC,@{btc_1h}").parse().unwrap(),
-        ])
-        .unwrap();
-        let times = frame.dominant_series_times("BTC").unwrap();
-        assert_eq!(times.len(), 3);
-        assert!(times[0].starts_with("2024-01-01T"));
-    }
-
-    #[test]
-    fn dominant_series_times_returns_none_for_unknown_symbol() {
-        let path = tmp_csv(
-            "fugazi_dominant_none.csv",
-            "time;open;high;low;close\n2024-01-01;10;11;9;10\n",
-        );
-        let frame = DataFrame::from_series(&[format!("symbol=BTC,@{path}").parse().unwrap()]).unwrap();
-        assert!(frame.dominant_series_times("ETH").is_none());
     }
 
     #[test]

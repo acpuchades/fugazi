@@ -27,6 +27,9 @@ async fn decodes_chart_response() {
                         "low":    [469.5, 470.5, 472.0],
                         "close":  [471.5, 471.8, 473.5],
                         "volume": [1_000_000, 900_000, 850_000]
+                    }],
+                    "adjclose": [{
+                        "adjclose": [468.0, 468.3, 470.1]
                     }]
                 }
             }],
@@ -44,7 +47,7 @@ async fn decodes_chart_response() {
     let client = Yahoo::new().with_base_url(server.uri());
 
     let bars = client
-        .candles(
+        .atoms(
             "SPY",
             Interval::Day(1),
             Timestamp(1_704_067_200_000),
@@ -54,14 +57,21 @@ async fn decodes_chart_response() {
         .expect("fetch succeeds");
 
     assert_eq!(bars.len(), 3);
-    assert_eq!(bars[0].time, Timestamp(1_704_067_200_000));
+    assert_eq!(bars[0].time, Some(Timestamp(1_704_067_200_000)));
     assert_eq!(bars[0].candle.open, 470.0);
     assert_eq!(bars[0].candle.close, 471.5);
-    assert_eq!(bars[2].time, Timestamp(1_704_240_000_000));
+    assert_eq!(bars[2].time, Some(Timestamp(1_704_240_000_000)));
     assert_eq!(bars[2].candle.close, 473.5);
     for w in bars.windows(2) {
         assert!(w[0].time < w[1].time, "times must be ascending");
     }
+
+    // adj_close made it onto every atom's overlay side channel.
+    let ov = bars[0].overlays.as_ref().expect("Yahoo atoms carry overlays");
+    assert_eq!(
+        ov.get_by_key("adj_close"),
+        Some(&fugazi::OverlayValue::Real(468.0))
+    );
 }
 
 #[tokio::test]
@@ -95,7 +105,7 @@ async fn skips_bars_with_null_fields() {
 
     let client = Yahoo::new().with_base_url(server.uri());
     let bars = client
-        .candles(
+        .atoms(
             "SPY",
             Interval::Day(1),
             Timestamp(1_704_067_200_000),
@@ -105,8 +115,8 @@ async fn skips_bars_with_null_fields() {
         .expect("fetch succeeds");
 
     assert_eq!(bars.len(), 2);
-    assert_eq!(bars[0].time, Timestamp(1_704_067_200_000));
-    assert_eq!(bars[1].time, Timestamp(1_704_240_000_000));
+    assert_eq!(bars[0].time, Some(Timestamp(1_704_067_200_000)));
+    assert_eq!(bars[1].time, Some(Timestamp(1_704_240_000_000)));
 }
 
 #[tokio::test]
@@ -130,7 +140,7 @@ async fn maps_unknown_symbol_error() {
 
     let client = Yahoo::new().with_base_url(server.uri());
     let err = client
-        .candles(
+        .atoms(
             "NOTASYMBOL",
             Interval::Day(1),
             Timestamp(1_704_067_200_000),
@@ -161,7 +171,7 @@ async fn maps_rate_limit_error() {
 
     let client = Yahoo::new().with_base_url(server.uri());
     let err = client
-        .candles(
+        .atoms(
             "SPY",
             Interval::Day(1),
             Timestamp(1_704_067_200_000),
@@ -199,7 +209,7 @@ async fn maps_inline_error_on_success_status() {
 
     let client = Yahoo::new().with_base_url(server.uri());
     let err = client
-        .candles(
+        .atoms(
             "NOTASYMBOL",
             Interval::Day(1),
             Timestamp(1_704_067_200_000),
