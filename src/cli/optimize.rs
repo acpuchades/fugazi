@@ -76,7 +76,8 @@ pub struct OptimizeOptions<'a> {
     /// (`<name>_mean` / `<name>_std`, cross-window over the windows where the
     /// metric is defined) and `--best-by` ranks by the windowed mean. The raw
     /// CLI spec — a bar count or a duration; resolved to a bar count against
-    /// the effective cadence inside [`run`].
+    /// the trading calendar inside [`run`] (duration form requires
+    /// `asset_class` and a resolvable bar cadence).
     pub windowed: Option<WindowSpec>,
     /// `-k/--risk-aversion`: shift each grid point's `--best-by` cross-window
     /// mean *against* it by this many standard deviations before ranking
@@ -135,11 +136,10 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
         calendar::pick_bars_per_year(opts.bars_per_year, &probe_spec.symbol, effective_freq)
             .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
 
-    let span_secs = calendar::total_span_seconds(atoms.iter().map(|(_, a)| a));
     let windowed_bars = opts
         .windowed
         .map(|w| {
-            w.resolve(effective_freq, span_secs, atoms.len())
+            w.resolve(effective_freq, opts.asset_class)
                 .map_err(anyhow::Error::msg)
         })
         .transpose()

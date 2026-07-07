@@ -65,8 +65,10 @@ pub struct RunOptions<'a> {
     /// per non-overlapping window in `metrics.csv`, one row per rolling
     /// (stride-1) window in `rolling.csv`. `metrics.yml` (whole-run) is
     /// always written; `None` skips the CSVs. The raw CLI spec — a bar count
-    /// or a duration; resolved to a bar count against the effective cadence
-    /// inside [`run`].
+    /// or a duration; resolved to a bar count against the trading calendar
+    /// inside [`run`]. The duration form requires `asset_class` and a
+    /// resolvable bar cadence (`frequency` or auto-detection from
+    /// `Atom::time`).
     pub windowed: Option<WindowSpec>,
     /// Configured cost models, resolved into a live [`TradingCosts`] per
     /// (symbol, frequency) at run time. See [`crate::costs`].
@@ -115,11 +117,10 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
     let bars_per_year = calendar::pick_bars_per_year(opts.bars_per_year, &symbol, effective_freq)
         .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
     let no_cost_warning = !opts.costs_supplied;
-    let span_secs = calendar::total_span_seconds(atoms.iter().map(|(_, a)| a));
     let windowed_bars = opts
         .windowed
         .map(|w| {
-            w.resolve(effective_freq, span_secs, atoms.len())
+            w.resolve(effective_freq, opts.asset_class)
                 .map_err(anyhow::Error::msg)
         })
         .transpose()

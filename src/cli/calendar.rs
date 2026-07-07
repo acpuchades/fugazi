@@ -82,6 +82,28 @@ impl AssetClass {
         self.trading_days_per_year() * self.trading_hours_per_day()
     }
 
+    /// Trading seconds a bar of `freq` spans on this calendar. Sub-daily
+    /// cadences (`Minute`, `Hour`) are already in trading time because bars
+    /// only exist during trading hours — the calendar `seconds_per_bar` is
+    /// exact. Daily and longer cadences scale to trading time: `Day(n)` is
+    /// `n · trading_hours_per_day · 3600`, `Week(n)` is
+    /// `n · trading_seconds_per_year / 52`, `Month(n)` is
+    /// `n · trading_seconds_per_year / 12`. Consumed by
+    /// [`WindowSpec::resolve`] to convert a duration and a bar cadence into a
+    /// bar count without averaging trading and closed periods into one
+    /// calendar rate.
+    pub fn trading_seconds_per_bar(self, freq: Frequency) -> Real {
+        let trading_secs_per_year =
+            self.trading_days_per_year() * self.trading_hours_per_day() * 3_600.0;
+        match freq {
+            Frequency::Minute(n) => n as Real * 60.0,
+            Frequency::Hour(n) => n as Real * 3_600.0,
+            Frequency::Day(n) => n as Real * self.trading_hours_per_day() * 3_600.0,
+            Frequency::Week(n) => n as Real * trading_secs_per_year / 52.0,
+            Frequency::Month(n) => n as Real * trading_secs_per_year / 12.0,
+        }
+    }
+
     /// The `bars_per_year` figure for this calendar with bars of `freq` each.
     /// Sub-daily bars scale by trading *hours* per year, day-and-up bars scale
     /// by trading *days*. Weekly/monthly clamp to the calendar rather than
@@ -217,24 +239,29 @@ pub(crate) fn parse_interval(s: &str) -> Result<Interval> {
 
 /// A `-w/--windowed` value: either an explicit bar count (`10`, `252`) or a
 /// duration in the [`Frequency`] alphabet (`1d`, `1w`, `1M`, `4h`) that
-/// resolves to a bar count against the run's actual data. The duration form
-/// frees a preset from recomputing a bar count for every timeframe.
+/// resolves to a bar count against the run's trading calendar. The duration
+/// form frees a preset from recomputing a bar count for every timeframe.
 ///
-/// Resolution prefers the run's real timeline over a calendar-based estimate:
-/// when the input's `time` column parses, the resolver uses the actual span
-/// between the first and last bars and divides by the count. That naturally
-/// accounts for weekend and holiday gaps — `-w 1w` on daily equities picks
-/// ~5 bars (M-F only), on continuous crypto 7. When no times parse (a purely
-/// synthetic run), it falls back to the effective bar cadence's calendar
-/// seconds — accurate for 24/7 data, an over-estimate for markets with
-/// non-trading periods. Rounded to the nearest positive integer; a window
-/// shorter than one bar of the effective cadence, or a duration form with
-/// neither a span nor a cadence known, is a hard error.
+/// Resolution is a closed-form ratio in trading time (see
+/// [`AssetClass::trading_seconds_per_bar`]):
+/// `bars = win.trading_seconds / bar_freq.trading_seconds`. That naturally
+/// accounts for closed sessions — `-w 1d` on hourly equities picks 7 bars
+/// (one 6.5-hour trading day, not 24), `-w 1w` on daily equities picks 5
+/// (M-F), on continuous crypto 7. Rounded to the nearest positive integer.
+///
+/// The duration form is deliberately strict: it demands both an
+/// [`AssetClass`] (`--stocks` / `--forex` / `--crypto`) and a bar cadence
+/// (`-f/--frequency`, or auto-detected from the input's `time` column). A
+/// silent default in either dimension would change the resolved bar count in
+/// a way that's hard to notice — passing hourly BTC as if it were 6.5h/day
+/// equities, or hourly equities as if they ran 24/7. Missing either is a
+/// hard error; a window shorter than one bar of the effective cadence is
+/// also a hard error.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WindowSpec {
     /// An explicit bar count — the classic `-w N` shape.
     Bars(NonZeroUsize),
-    /// A duration whose bar count is derived from the effective cadence.
+    /// A duration whose bar count is derived from the trading calendar.
     Duration(Frequency),
 }
 
@@ -276,42 +303,42 @@ impl FromStr for WindowSpec {
 impl WindowSpec {
     /// Resolve to a concrete bar count.
     ///
-    /// [`Bars`](Self::Bars) is the identity. [`Duration`](Self::Duration)
-    /// prefers `span_secs` (actual first-to-last bar span from the input's
-    /// `time` column, paired with `n_bars`) — `bars_in_window = win.seconds
-    /// · (n_bars - 1) / span_secs`, so weekend/holiday gaps in the timeline
-    /// are baked in. When no span parses, it falls back to
-    /// `win.seconds / bar_freq.seconds` (calendar-based, accurate for
-    /// continuous 24/7 data).
+    /// [`Bars`](Self::Bars) is the identity (needs neither `bar_freq` nor
+    /// `class`). [`Duration`](Self::Duration) computes the closed-form ratio
+    /// `bars = win.trading_seconds(class) / bar_freq.trading_seconds(class)`
+    /// via [`AssetClass::trading_seconds_per_bar`], rounded to the nearest
+    /// positive integer.
     ///
     /// Errors:
-    /// * `Duration` with neither `span_secs` nor `bar_freq` — nothing to
-    ///   convert against.
+    /// * `Duration` without a `class` — silent default would mis-interpret
+    ///   sub-daily durations on markets whose trading day isn't 24 hours;
+    ///   emitted before checking `bar_freq` so the fix is surfaced first.
+    /// * `Duration` without a `bar_freq` — the caller must pass
+    ///   `-f/--frequency` or supply an input with a parseable `time`
+    ///   column so the cadence can be auto-detected.
     /// * `Duration` shorter than one bar — would round to zero.
     pub fn resolve(
         &self,
         bar_freq: Option<Frequency>,
-        span_secs: Option<f64>,
-        n_bars: usize,
+        class: Option<AssetClass>,
     ) -> Result<NonZeroUsize, String> {
         match *self {
             WindowSpec::Bars(n) => Ok(n),
             WindowSpec::Duration(win) => {
-                let win_secs = win.seconds_per_bar() as f64;
-                let bars = match (span_secs, n_bars, bar_freq) {
-                    // Real timeline: bars per second from actual span.
-                    (Some(secs), n, _) if secs > 0.0 && n >= 2 => {
-                        win_secs * (n - 1) as f64 / secs
-                    }
-                    // Calendar fallback from the effective cadence.
-                    (_, _, Some(bar)) => win_secs / bar.seconds_per_bar() as f64,
-                    (_, _, None) => {
-                        return Err(format!(
-                            "`-w {}`: no bar timeline or cadence known — pass `-f/--frequency` or use a plain bar count",
-                            format_freq(win),
-                        ));
-                    }
-                };
+                let class = class.ok_or_else(|| {
+                    format!(
+                        "`-w {}`: duration form requires an explicit trading calendar — pass `--stocks`, `--forex`, or `--crypto`",
+                        format_freq(win),
+                    )
+                })?;
+                let bar_freq = bar_freq.ok_or_else(|| {
+                    format!(
+                        "`-w {}`: no bar cadence known — pass `-f/--frequency` or provide input with a parseable `time` column",
+                        format_freq(win),
+                    )
+                })?;
+                let bars = class.trading_seconds_per_bar(win)
+                    / class.trading_seconds_per_bar(bar_freq);
                 let n = bars.round() as usize;
                 NonZeroUsize::new(n).ok_or_else(|| {
                     format!(
@@ -322,20 +349,6 @@ impl WindowSpec {
             }
         }
     }
-}
-
-/// Total span in seconds between the first and last atoms carrying a
-/// [`Timestamp`]. Uses `Atom::time` — populated at load by the `--series`
-/// loader — so no re-parsing is needed. Returns `None` when fewer than two
-/// atoms have a time, or the span is non-positive. Consumed by
-/// [`WindowSpec::resolve`] to derive bars-per-second from the real timeline,
-/// so weekend/holiday gaps in equity data are honored.
-pub fn total_span_seconds<'a>(atoms: impl IntoIterator<Item = &'a Atom>) -> Option<f64> {
-    let mut stamps = atoms.into_iter().filter_map(|a| a.time.map(|t| t.0));
-    let first = stamps.next()?;
-    let last = stamps.last().unwrap_or(first);
-    let span_ms = last - first;
-    (span_ms > 0).then_some(span_ms as f64 / 1000.0)
 }
 
 /// Render a [`Frequency`] as its canonical CLI code (`1m`, `4h`, `1d`, `1w`,
@@ -1026,80 +1039,95 @@ mod tests {
     }
 
     #[test]
-    fn window_spec_uses_actual_span_when_available() {
-        // 22 daily M-F bars spanning ~30 calendar days (1 month, weekends
-        // gapped). `-w 1w` should pick ~5 bars, not 7 (the calendar
-        // over-estimate) — the actual timeline's density wins.
-        let span_secs = Some(30.0 * 86400.0);
-        let n = WindowSpec::Duration(Frequency::Week(1))
-            .resolve(Some(Frequency::Day(1)), span_secs, 22)
-            .unwrap();
-        assert_eq!(n.get(), 5);
-
-        // Continuous crypto: 7 daily bars over 7 calendar days → 1w = 7 bars.
-        let n = WindowSpec::Duration(Frequency::Week(1))
-            .resolve(Some(Frequency::Day(1)), Some(7.0 * 86400.0), 8)
-            .unwrap();
-        assert_eq!(n.get(), 7);
-
-        // Plain bar count is the identity — ignores span/cadence.
+    fn window_spec_bars_form_is_identity() {
+        // Plain bar count needs neither cadence nor class.
         let n = WindowSpec::Bars(NonZeroUsize::new(42).unwrap())
-            .resolve(None, None, 0)
+            .resolve(None, None)
             .unwrap();
         assert_eq!(n.get(), 42);
     }
 
     #[test]
-    fn window_spec_falls_back_to_calendar_when_no_span() {
-        // No parseable timeline — the only signal is the effective cadence,
-        // so calendar seconds apply (accurate for continuous data).
-        let n = WindowSpec::Duration(Frequency::Day(1))
-            .resolve(Some(Frequency::Hour(1)), None, 0)
+    fn window_spec_duration_stocks_daily_windows() {
+        // `-w 1w` on daily stocks → 5 M-F bars.
+        let n = WindowSpec::Duration(Frequency::Week(1))
+            .resolve(Some(Frequency::Day(1)), Some(AssetClass::Stocks))
             .unwrap();
-        assert_eq!(n.get(), 24);
+        assert_eq!(n.get(), 5);
+        // `-w 1M` on daily stocks → 21 trading days (252/12).
         let n = WindowSpec::Duration(Frequency::Month(1))
-            .resolve(Some(Frequency::Day(1)), None, 0)
+            .resolve(Some(Frequency::Day(1)), Some(AssetClass::Stocks))
             .unwrap();
-        assert_eq!(n.get(), 30);
+        assert_eq!(n.get(), 21);
     }
 
     #[test]
-    fn window_spec_duration_errors_without_span_or_cadence() {
+    fn window_spec_duration_stocks_intraday_windows() {
+        // `-w 1d` on hourly stocks is one 6.5-hour trading day, not 24 —
+        // rounds to 7 hourly bars.
+        let n = WindowSpec::Duration(Frequency::Day(1))
+            .resolve(Some(Frequency::Hour(1)), Some(AssetClass::Stocks))
+            .unwrap();
+        assert_eq!(n.get(), 7);
+        // `-w 4h` on hourly bars is 4 bars regardless of class.
+        let n = WindowSpec::Duration(Frequency::Hour(4))
+            .resolve(Some(Frequency::Hour(1)), Some(AssetClass::Stocks))
+            .unwrap();
+        assert_eq!(n.get(), 4);
+        // `-w 1w` on hourly stocks: 252 trading days ÷ 52 weeks × 6.5 h ≈
+        // 31.5 hourly bars → 32. The 252/52 formulation is annualization-
+        // consistent (52 weeks × ⁿ = 12 months × ⁿ = 252 days) — a caller
+        // who prefers the calendar-week convention of exactly 5×6.5 = 32.5
+        // hourly bars per week can pass `-w 33`.
+        let n = WindowSpec::Duration(Frequency::Week(1))
+            .resolve(Some(Frequency::Hour(1)), Some(AssetClass::Stocks))
+            .unwrap();
+        assert_eq!(n.get(), 32);
+    }
+
+    #[test]
+    fn window_spec_duration_crypto_is_24_7() {
+        // Continuous crypto: `-w 1d` = 24 hourly bars, `-w 1w` on daily = 7.
+        let n = WindowSpec::Duration(Frequency::Day(1))
+            .resolve(Some(Frequency::Hour(1)), Some(AssetClass::Crypto))
+            .unwrap();
+        assert_eq!(n.get(), 24);
+        let n = WindowSpec::Duration(Frequency::Week(1))
+            .resolve(Some(Frequency::Day(1)), Some(AssetClass::Crypto))
+            .unwrap();
+        assert_eq!(n.get(), 7);
+    }
+
+    #[test]
+    fn window_spec_duration_errors_without_class() {
+        // Missing class — silent Stocks would mis-interpret intraday
+        // durations on 24h markets; the CLI must surface the omission.
         let err = WindowSpec::Duration(Frequency::Day(1))
-            .resolve(None, None, 0)
+            .resolve(Some(Frequency::Hour(1)), None)
             .unwrap_err();
-        assert!(err.contains("no bar timeline or cadence"), "unexpected error: {err}");
+        assert!(
+            err.contains("trading calendar"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn window_spec_duration_errors_without_frequency() {
+        // Class is fine, cadence is missing — the caller must pass
+        // `-f/--frequency` or provide input with parseable timestamps.
+        let err = WindowSpec::Duration(Frequency::Day(1))
+            .resolve(None, Some(AssetClass::Stocks))
+            .unwrap_err();
+        assert!(err.contains("no bar cadence"), "unexpected error: {err}");
     }
 
     #[test]
     fn window_spec_duration_errors_when_shorter_than_bar() {
-        // 1d on 1w bars would round to 0 bars — rejected.
+        // `-w 1d` on 1w bars would round to 0 bars — rejected.
         let err = WindowSpec::Duration(Frequency::Day(1))
-            .resolve(Some(Frequency::Week(1)), None, 0)
+            .resolve(Some(Frequency::Week(1)), Some(AssetClass::Stocks))
             .unwrap_err();
         assert!(err.contains("shorter than one bar"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn total_span_seconds_uses_first_and_last_timestamped_atom() {
-        let candle = Candle::new(1.0, 1.0, 1.0, 1.0, 0.0);
-        let atoms = [
-            Atom::with_time(candle, Timestamp(0)),
-            Atom::with_time(candle, Timestamp(86_400_000)),
-            Atom::with_time(candle, Timestamp(7 * 86_400_000)),
-        ];
-        assert_eq!(total_span_seconds(atoms.iter()), Some(7.0 * 86400.0));
-    }
-
-    #[test]
-    fn total_span_seconds_none_without_timestamps_or_singleton() {
-        let candle = Candle::new(1.0, 1.0, 1.0, 1.0, 0.0);
-        // No atom has a time — nothing to span.
-        let bare = [Atom::new(candle), Atom::new(candle)];
-        assert_eq!(total_span_seconds(bare.iter()), None);
-        // Only one atom with a time — no span.
-        let one = [Atom::with_time(candle, Timestamp(0))];
-        assert_eq!(total_span_seconds(one.iter()), None);
     }
 
     #[test]

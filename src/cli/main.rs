@@ -190,8 +190,12 @@ struct RunArgs {
     ///
     /// `LEN` is either a plain bar count (`10`, `252`) or a duration in the
     /// `-f/--frequency` alphabet (`1d`, `1w`, `1M`, `4h`) that resolves to a
-    /// bar count against the run's effective cadence — so `-w 1w` picks 7
-    /// bars on daily data or 168 on hourly.
+    /// bar count against the trading calendar — `-w 1w` picks 5 bars on daily
+    /// equities, 7 on continuous crypto; `-w 1d` picks 7 bars on hourly
+    /// equities (one 6.5-hour trading day) and 24 on hourly crypto. The
+    /// duration form requires `--stocks`/`--forex`/`--crypto` and a
+    /// resolvable bar cadence (`-f/--frequency`, or a `time` column so the
+    /// cadence can be auto-detected).
     #[arg(short = 'w', long = "windowed", value_name = "LEN")]
     windowed: Option<calendar::WindowSpec>,
 

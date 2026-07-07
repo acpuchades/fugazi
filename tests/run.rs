@@ -147,9 +147,10 @@ fn runs_windowed_metrics() {
 }
 
 /// `-w/--windowed` accepts a time suffix (`1w`, `1M`, `4h`, …) — it resolves
-/// against the run's effective bar cadence. On the example daily fixture, `-w
-/// 1w` picks 7 bars per window, so 30 bars split into 4 non-overlapping ones
-/// (7+7+7+7, one short trailing chunk dropped by the non-overlapping reducer).
+/// against the run's trading calendar. On the example daily crypto fixture
+/// with `--crypto`, `-w 1w` picks 7 bars per window, so 30 bars split into 4
+/// non-overlapping ones (7+7+7+7, one short trailing chunk kept by the
+/// non-overlapping reducer).
 #[test]
 fn runs_windowed_metrics_with_time_suffix() {
     let manifest = env!("CARGO_MANIFEST_DIR");
@@ -164,6 +165,7 @@ fn runs_windowed_metrics_with_time_suffix() {
             &format!("@{manifest}/examples/candles.csv"),
             "--output-dir",
             out.to_str().unwrap(),
+            "--crypto",
             "--windowed",
             "1w",
         ])

@@ -116,7 +116,7 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
 | `-f`, `--frequency <[SYM:]CODE>` | Bar cadence (`1m`, `5m`, `1h`, `4h`, `1d`, `1w`, `1M`, …). Repeatable; may carry a `SYMBOL:` scope prefix. When omitted, the CLI auto-detects the cadence from the `time` column. Combines with the calendar to derive `bars_per_year`. |
 | `--bars-per-year <[SYM[FREQ]:]N>` | Explicit override for the annualization denominator. Repeatable; each entry may carry a `SYMBOL[FREQ]:` scope prefix. Wins over the calendar/frequency pair when a scope matches. |
 | `--risk-free-rate <RATE>` | Annualized risk-free rate as a fraction (`0.045` = 4.5% p.a.). Default `0`. See [Risk-free rate](#risk-free-rate). |
-| `-w`, `--windowed <LEN>` | Also reduce the run in `LEN`-sized windows: one row per non-overlapping window in `metrics.csv`, one row per rolling (stride-1) window in `rolling.csv`. `metrics.yml` (whole-run) is always written. `LEN` is a plain bar count (`10`, `252`) or a duration in the [`-f`](#-f----frequency) alphabet (`1d`, `1w`, `1M`, `4h`) that resolves to a bar count against the run's effective cadence. See [Windowed metrics](#windowed-metrics). |
+| `-w`, `--windowed <LEN>` | Also reduce the run in `LEN`-sized windows: one row per non-overlapping window in `metrics.csv`, one row per rolling (stride-1) window in `rolling.csv`. `metrics.yml` (whole-run) is always written. `LEN` is a plain bar count (`10`, `252`) or a duration in the [`-f`](#-f----frequency) alphabet (`1d`, `1w`, `1M`, `4h`) that resolves to a bar count against the trading calendar. The duration form is strict — it requires an explicit `--stocks`/`--forex`/`--crypto` and a resolvable bar cadence (`-f/--frequency`, or a `time` column so the cadence can be auto-detected). See [Windowed metrics](#windowed-metrics). |
 | `-q`, `--quiet` | Silence the console output. Files still get written. |
 
 **Outputs.** Files in `--output-dir`, all documented in
@@ -224,7 +224,7 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
 | `-m`, `--metrics <NAMES>` | Metric columns to record. Comma-separated, repeatable. Short leaf names (`sharpe`, `max_pct`) or dotted paths (`risk_adjusted.sharpe`) — see the [Metrics catalogue](#metrics-catalogue). |
 | `-o`, `--output <FILE>` | Output CSV path. Parent directories are created if missing. |
 | `--best-by <METRIC>` | Sort rows by this metric (direction hardcoded per metric — see [Best-by directions](#best-by-directions)). Omit to keep cartesian order and skip the "best" console block. |
-| `-w`, `--windowed <LEN>` | Evaluate each grid point in non-overlapping windows of `LEN`: every `-m` metric becomes two CSV columns (`<name>_mean` / `<name>_std`) and `--best-by` ranks by the windowed mean. Same `LEN` shape as `run -w` — a bar count (`10`, `252`) or a duration (`1d`, `1w`, `1M`). See [Windowed metrics](#windowed-metrics). |
+| `-w`, `--windowed <LEN>` | Evaluate each grid point in non-overlapping windows of `LEN`: every `-m` metric becomes two CSV columns (`<name>_mean` / `<name>_std`) and `--best-by` ranks by the windowed mean. Same `LEN` shape as `run -w` — a bar count (`10`, `252`) or a duration (`1d`, `1w`, `1M`); the duration form requires `--stocks`/`--forex`/`--crypto` and a resolvable bar cadence. See [Windowed metrics](#windowed-metrics). |
 | `-k`, `--risk-aversion <K>` | Rank `--best-by` conservatively: shift each grid point's cross-window mean *against* it by `K` standard deviations before sorting. Requires `-w` and `--best-by`; `K >= 0`. See [Best-by directions](#best-by-directions). |
 | `--costs <SPEC>` | Trading-cost model applied uniformly to every grid point. Repeatable. See [--costs](#--costs). |
 | `-j`, `--jobs <N>` | Rayon worker count. Default: one worker per logical CPU. |
@@ -760,11 +760,17 @@ flag opts out. See the library's [safe-defaults][safe-defaults] note.
 `-w/--windowed <LEN>` reduces the run in **windows of `LEN`** on top of the
 whole-run summary. `LEN` is either a plain bar count (`10`, `252`) or a
 duration in the [`-f`](#-f----frequency) alphabet (`1d`, `1w`, `1M`, `4h`); a
-duration resolves to a bar count against the run's effective cadence — `-w
-1w` picks 7 bars on daily data, 168 on hourly, 1 on weekly. The duration form
-lets a shared preset work across timeframes without recomputing the bar
-count; a bar cadence larger than the requested duration is a hard error
-(would round to zero bars). Each window is evaluated as a run of its own:
+duration resolves to a bar count against the trading calendar as
+`win.trading_seconds / bar_freq.trading_seconds` — so `-w 1w` picks 5 bars
+on daily equities and 7 on continuous crypto, `-w 1d` picks 7 bars on hourly
+equities (one 6.5-hour trading day, not 24) and 24 on hourly crypto. The
+duration form is deliberately strict: it requires an explicit
+`--stocks`/`--forex`/`--crypto` (no silent Stocks default — a wrong calendar
+here changes the window's bar count in ways that are hard to notice) and a
+resolvable bar cadence (`-f/--frequency`, or a `time` column so the cadence
+can be auto-detected). A bar cadence larger than the requested duration is
+a hard error (would round to zero bars). Each window is evaluated as a run
+of its own:
 its initial equity is the equity marked on the bar before it, and only the
 fills booked inside it count — a position carried across a window boundary
 shows up in the entering window as an unmatched fill, the usual
