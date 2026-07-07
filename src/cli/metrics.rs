@@ -122,10 +122,13 @@ pub struct RiskAdjustedSection {
     /// shape of the return distribution (Bailey & López de Prado, 2012). A
     /// probability in `[0, 1]`; `None` when Sharpe/skew/kurtosis is undefined.
     ///
-    /// This is the whole-run PSR; the selection-bias-corrected DSR is only
-    /// meaningful when a *choice* has been made from many candidates, so it
-    /// surfaces on the `optimize` results table rather than here — see
-    /// [`fugazi::metrics::deflated_sharpe`].
+    /// This is the whole-run PSR — a single-trial statistic. The selection-
+    /// bias-corrected DSR is only meaningful when a *choice* has been made
+    /// from many candidates, so it doesn't belong on the whole-run summary:
+    /// it surfaces as a trailing `deflated_sharpe` column on `optimize`'s
+    /// grid CSV (per grid cell, against the grid-wide null) and on `run -w`'s
+    /// `metrics.csv` (per non-overlapping window, against the window
+    /// population — see [`windows_dsr_context`] for the caveats).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub probabilistic_sharpe: Option<Real>,
 }
@@ -487,6 +490,37 @@ pub fn mean_std(values: impl Iterator<Item = Real>) -> Option<(Real, Real)> {
     let mean = v.iter().sum::<Real>() / n;
     let variance = v.iter().map(|x| (x - mean) * (x - mean)).sum::<Real>() / n;
     Some((mean, variance.sqrt()))
+}
+
+/// `(n_trials, sample_variance_of_annualized_Sharpe)` across `windows` — the
+/// trial-context tuple [`fugazi::metrics::deflated_sharpe_from_stats`] takes.
+/// `None` when fewer than two windows have a defined Sharpe or the variance is
+/// zero (DSR is undefined in either case). Sample variance (ddof = 1) matches
+/// the reference variance-of-estimators used across the Bailey/LdP literature.
+///
+/// This treats the windows as the trial population, so a per-row DSR against
+/// this context answers "does *this* window's SR survive correction for the
+/// fact that N windows were inspected?" — a multiple-testing correction for
+/// per-window cherry-picking. It's an approximation: the windows don't share a
+/// null the way an `optimize` grid does (regimes have distinct true SRs), and
+/// on overlapping (rolling) windows the trial variance is understated, so the
+/// DSR is optimistic. Meaningful on non-overlapping (`metrics.csv`) windows;
+/// don't compute this against `rolling.csv`.
+pub fn windows_dsr_context(windows: &[WindowMetrics]) -> Option<(usize, Real)> {
+    let sharpes: Vec<Real> = windows
+        .iter()
+        .filter_map(|w| w.metrics.risk_adjusted.sharpe)
+        .collect();
+    if sharpes.len() < 2 {
+        return None;
+    }
+    let n = sharpes.len() as Real;
+    let mean = sharpes.iter().sum::<Real>() / n;
+    let var = sharpes.iter().map(|s| (s - mean).powi(2)).sum::<Real>() / (n - 1.0);
+    if !(var > 0.0 && var.is_finite()) {
+        return None;
+    }
+    Some((sharpes.len(), var))
 }
 
 /// Flatten a [`Metrics`] document into `(dotted name, value)` pairs — one entry

@@ -153,10 +153,11 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
     metrics::write_yaml(&iter.metrics, &opts.out_dir.join("metrics.yml"))?;
 
     if let Some(ws) = iter.windowed.as_deref() {
-        write_windowed_csv(ws, &iter.bars, &opts.out_dir.join("metrics.csv"))?;
+        let dsr_context = metrics::windows_dsr_context(ws);
+        write_windowed_csv(ws, &iter.bars, dsr_context, &opts.out_dir.join("metrics.csv"))?;
     }
     if let Some(rs) = iter.rolling.as_deref() {
-        write_windowed_csv(rs, &iter.bars, &opts.out_dir.join("rolling.csv"))?;
+        write_windowed_csv(rs, &iter.bars, None, &opts.out_dir.join("rolling.csv"))?;
     }
 
     let summary = Summary {
@@ -285,9 +286,16 @@ fn stream_trades(iter: &IterationResult) {
 /// `metrics.yml` name. A metric that is degenerate in a window (no trades,
 /// zero variance, …) is an empty cell there. Shared between the
 /// non-overlapping (`metrics.csv`) and rolling (`rolling.csv`) writes.
+///
+/// `dsr_context = Some((n_trials, trial_variance))` appends a trailing
+/// `deflated_sharpe` column — the per-window DSR against the windows treated
+/// as the trial population (see [`metrics::windows_dsr_context`] for the
+/// caveats). Wired for `metrics.csv` only; `rolling.csv` passes `None`
+/// because its heavy autocorrelation makes the trial-variance model unsound.
 fn write_windowed_csv(
     windows: &[metrics::WindowMetrics],
     bars: &[String],
+    dsr_context: Option<(usize, Real)>,
     path: &Path,
 ) -> Result<()> {
     let mut out = writer(path)?;
@@ -295,10 +303,15 @@ fn write_windowed_csv(
         .first()
         .map(|w| metrics::flatten(&w.metrics))
         .unwrap_or_default();
-    let header = ["window_start", "window_end"]
+    let mut header: Vec<String> = ["window_start", "window_end"]
         .into_iter()
-        .chain(names.iter().map(|(name, _)| *name));
-    out.write_record(header)?;
+        .map(String::from)
+        .chain(names.iter().map(|(name, _)| (*name).to_string()))
+        .collect();
+    if dsr_context.is_some() {
+        header.push("deflated_sharpe".to_string());
+    }
+    out.write_record(&header)?;
     for window in windows {
         let mut record = vec![bars[window.start_bar].clone(), bars[window.end_bar].clone()];
         record.extend(
@@ -306,6 +319,19 @@ fn write_windowed_csv(
                 .into_iter()
                 .map(|(_, value)| value.map(|v| v.to_string()).unwrap_or_default()),
         );
+        if let Some((n_trials, trial_var)) = dsr_context {
+            let m = &window.metrics;
+            let dsr = fugazi::metrics::deflated_sharpe_from_stats(
+                m.risk_adjusted.sharpe,
+                m.returns.skewness,
+                m.returns.kurtosis,
+                m.run.bars,
+                m.run.bars_per_year,
+                n_trials,
+                trial_var,
+            );
+            record.push(dsr.map(|v| v.to_string()).unwrap_or_default());
+        }
         out.write_record(&record)?;
     }
     out.flush()?;
