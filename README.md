@@ -157,6 +157,36 @@ Each accessor clones its source, so the two operands above are independent,
 self-contained instances (the same clone-the-operands shape `crosses_above`
 already uses) — just feed each the same `Candle` per bar.
 
+### Sharing one multi-output indicator across many accessors
+
+Two accessors on the same `Bollinger` (or `Macd`, …) mean two full copies of
+the indicator running independently — cheap by itself, but a crossover clones
+its operands, and a strategy with a `long_on(up, down)` and `short_on(down,
+up)` ends up asking the compiler to run the same multi-output indicator 8 or
+16 times per bar. When the accessors all target one instance, wrap it in a
+[`Shared`](https://docs.rs/fugazi/latest/fugazi/indicators/struct.Shared.html)
+handle with `.shared()` and use the same accessor methods off the handle:
+
+```rust
+use fugazi::prelude::*;
+use fugazi::indicators::{Current, Macd};
+
+// One MACD, driven exactly once per bar however many accessors read out of it.
+let macd = Macd::new(Current::close(), 12, 26, 9).shared();
+let up = || macd.line().crosses_above(macd.signal());
+let down = || macd.line().crosses_below(macd.signal());
+```
+
+Each `.line()` / `.signal()` off `macd` returns a `SharedComponent` that
+borrows the same source through an `Rc<RefCell<_>>`; whichever accessor is
+updated first each bar drives the underlying MACD, the rest read the cached
+outputs. Behaviour is identical to the independent-clones form
+(component-level tests assert it bit-for-bit); only the per-bar cost goes
+down — the classical strategies (`macd_crossover`, `donchian_breakout`,
+`bollinger_breakout`, `bollinger_reversion`, `keltner_breakout`) opt into
+this by default, and any new strategy that stacks several accessors on one
+indicator should too.
+
 ### Cross-timeframe composition
 
 Two primitives compose directly for running an indicator on candles **coarser**
