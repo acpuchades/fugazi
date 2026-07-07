@@ -421,18 +421,27 @@ pub fn windowed_from_report<Sym: Clone>(
 /// pyfolio-style), not cross-window statistics — use [`windowed_from_report`]
 /// when the outputs need to be independent (e.g. `optimize`'s `mean ± k·std`
 /// ranker).
-pub fn rolling_from_report<Sym: Clone>(
+///
+/// The per-window reductions are pure and independent, so this uses
+/// [`rayon::prelude::IntoParallelIterator`] to farm them out to whatever pool
+/// the caller has installed (`run -w` on the default pool, `optimize` on its
+/// grid pool). The non-overlapping [`windowed_from_report`] stays serial: on
+/// `optimize` it runs *inside* the grid's `par_iter`, so an inner par_iter
+/// would just fight for the same threads without wall-clock benefit.
+pub fn rolling_from_report<Sym: Clone + Send + Sync>(
     report: &RunReport<Sym>,
     window: usize,
     bars_per_year: Real,
     risk_free_rate: Real,
 ) -> Vec<WindowMetrics> {
+    use rayon::prelude::*;
     assert!(window > 0, "window length must be positive");
     let bars = report.equity_curve.len();
     if bars < window {
         return Vec::new();
     }
     (0..=(bars - window))
+        .into_par_iter()
         .map(|start| {
             let end = start + window;
             WindowMetrics {
@@ -964,5 +973,67 @@ mod tests {
             initial_equity: 100.0,
         };
         assert!(rolling_from_report(&report, 3, 252.0, 0.0).is_empty());
+    }
+
+    // Perf probe — run with:
+    //   cargo test --release metrics::tests::bench_rolling -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_rolling_from_report_serial_vs_parallel() {
+        use rayon::prelude::*;
+        use std::time::Instant;
+
+        // Synthetic 100k-bar equity curve (deterministic random walk).
+        let n = 100_000_usize;
+        let mut equity = Vec::with_capacity(n);
+        let mut e = 100.0_f64;
+        let mut s: u64 = 0xabad_beef_ca55_e77e;
+        for _ in 0..n {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let noise = ((s >> 33) as f64 / u32::MAX as f64) - 0.5;
+            e *= 1.0 + 0.0002 + 0.01 * noise;
+            equity.push(e);
+        }
+        let report: RunReport<String> = RunReport {
+            equity_curve: equity,
+            fills: vec![],
+            initial_equity: 100.0,
+        };
+
+        let threads = rayon::current_num_threads();
+        eprintln!("bars={n} rayon threads={threads}");
+
+        for &window in &[63_usize, 252, 504] {
+            // Serial baseline: current rolling_from_report.
+            let t = Instant::now();
+            let out_serial = rolling_from_report(&report, window, 252.0, 0.0);
+            let serial = t.elapsed().as_secs_f64();
+
+            // Parallelized equivalent: same body via par_iter.
+            let t = Instant::now();
+            let out_par: Vec<WindowMetrics> = (0..=(n - window))
+                .into_par_iter()
+                .map(|start| {
+                    let end = start + window;
+                    WindowMetrics {
+                        start_bar: start,
+                        end_bar: end - 1,
+                        metrics: from_report(&report_slice(&report, start..end), 252.0, 0.0),
+                    }
+                })
+                .collect();
+            let parallel = t.elapsed().as_secs_f64();
+
+            assert_eq!(out_serial.len(), out_par.len());
+
+            eprintln!(
+                "window={:>4}  windows={:>7}  serial = {:.3}s  parallel = {:.3}s  speedup = {:.1}x",
+                window,
+                out_serial.len(),
+                serial,
+                parallel,
+                serial / parallel,
+            );
+        }
     }
 }
