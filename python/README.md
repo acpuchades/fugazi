@@ -164,7 +164,7 @@ node.reset()                   # call reset() to start a fresh, independent pass
 | `aroon(period)` | dict `{up, down, oscillator}` |
 | `resample(every, inner)` | `inner`'s output every `every` bars (aggregated HTF candle fed to `inner`), `None` between |
 | `latch(source)` | `source`'s last `Some` output, held across `None` ticks (works on indicators and signals) |
-| `stable(signal)` | `True` once `signal` has been fed at least its `stable_period()` samples (also `.stable()` on any Indicator or Signal) |
+| `unstable(x)` | Passthrough that reports `unstable_period() = 0` for its subtree (also `.unstable()` on any Indicator or Signal) |
 
 Multi-line indicators return a `dict` of their named lines (or `None` while
 warming up).
@@ -219,16 +219,23 @@ smoother as the resample's `inner` — then `latch` on the outside; latching
 *before* the recursive smoother would feed it a held (repeated) value on every
 base tick, distorting the recurrence.
 
-`stable(signal)` composes with the same signal in an `and_` to gate a
-strategy's entry on its own sources being past their unstable tail. It's also
-available as a method on any Indicator or Signal:
+`unstable(x)` wraps an indicator or signal as a passthrough that reports
+`unstable_period() = 0`, telling a downstream reader of `stable_period()`
+(a strategy-readiness gate, an overlay trim) "trade through this subtree's
+IIR settling tail". Available as a free function and as a method on any
+Indicator or Signal — same output, same warm-up, only the reported unstable
+tail changes:
 
 ```python
-entry = ta.close().crosses_above(ta.ema(ta.close(), 20))
-gated = entry.and_(entry.stable())          # method form
-gated = entry.and_(ta.stable(entry))        # equivalent free-function form
-warm = ta.ema(ta.close(), 20).stable()      # Indicator.stable() -> Signal
+raw = ta.ema(ta.close(), 20)
+fast = raw.unstable()           # method form; unstable_period() -> 0
+fast = ta.unstable(raw)         # equivalent free-function form
 ```
+
+Safe by default, override per subtree: fugazi's readiness machinery waits for
+`stable_period()` by default (`SingleAssetStrategy::is_ready` in Rust; the
+CLI's per-overlay CSV trim in `fugazi get`) — `unstable(...)` is the single
+opt-out.
 
 ## Operators
 

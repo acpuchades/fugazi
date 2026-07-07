@@ -319,7 +319,7 @@ against a constant, the common case of `!gt`/`!lt` against a number.
 | `!any` | `[ … ]` | OR-fold of a list of signals (empty ⇒ always false) |
 | `!not` | `<signal>` | negation (see the [nesting caveat](#nesting)) |
 | `!changed` | `<signal>` | fires on any transition of the inner signal (the edge primitive) |
-| `!stable` | `{ signal: <signal> }` | `true` once the inner signal is past its `stable_period()` — its "readiness probe". Compose with `!all` to gate an entry on all its sources being past their unstable tail: `!all [<entry>, !stable { signal: <entry> }]`. |
+| `!unstable` | `{ signal: <signal> }` | passthrough wrapper that forces the reported `unstable_period()` to `0` for the wrapped subtree. Opt-in override of the safe-by-default strategy-readiness gate (which waits for every source's `stable_period()` before allowing a trade). A source-side twin `!unstable { source: <source> }` does the same for real-valued sources. |
 | `!value` | `<bool>` | a constant boolean leaf — `!value true` / `!value false` (same tag as the numeric `!value`; typed by position) |
 
 ```yaml

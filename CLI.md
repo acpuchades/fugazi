@@ -144,9 +144,10 @@ prefix, including `multiple:`, is rejected at parse time with a
 **inputs** (strategy, params, period, capital, output), **trades**
 (each fill listed after the run completes), **result** (bars, trades, capital
 before → after, start/finish timestamps + elapsed), and **metrics**
-(the headline lines of `metrics.yml`). Metrics cover the whole run; if a
-strategy needs to hold off entries until every source it consults is past its
-unstable tail, the [`!stable` signal](#signals) is composed at the entry.
+(the headline lines of `metrics.yml`). Metrics cover the whole run; the
+strategy layer's readiness default (see [Stability gating](#stability-gating))
+holds the first trade until every source it consults is past its unstable
+tail — no explicit gate on the entry is needed.
 
 ### `check`
 
@@ -716,29 +717,43 @@ Explicit `--bars-per-year N` always overrides. Default: `252` (US-equity daily).
 
 Recursive (IIR-seeded) indicators — EMA, RSI, ATR, and everything built on
 them — start emitting values at their warm-up but stay influenced by their
-seed for a while after (their *unstable period*). `run` and `optimize`
-measure the whole run and never touch the strategy's signals; if you want an
-entry to hold off until every source it consults has settled, compose it at
-the entry with the [`!stable` signal](#signals):
+seed for a while after (their *unstable period*).
+
+The default is **safe**: `SingleAssetStrategy::is_ready()` reports `true`
+only once the strategy has been fed at least the largest `stable_period()`
+across every wired signal (`enter` / `exit` on each side) *and* every
+attached protective level, and `fugazi::backtest::run` skips `trade()` until
+then. So the plain form —
 
 ```yaml
 long:
-  enter: !all
-    - !crosses_above { lhs: !ema { period: 12 }, rhs: !ema { period: 26 } }
-    - !stable
-      signal: !crosses_above { lhs: !ema { period: 12 }, rhs: !ema { period: 26 } }
+  enter: !crosses_above { lhs: !ema { period: 12 }, rhs: !ema { period: 26 } }
 ```
 
-`!stable { signal: <s> }` reports whether `<s>`'s whole chain has advanced
-past its `stable_period()`, so the composed entry above only fires once the
-EMAs are past their unstable tail. Purely windowed (FIR) chains — SMA
-crossovers and the like — have `stable_period() == warm_up_period()`, so
-`!stable` just delays the first possible fire to the same bar the signal was
-first defined on; the gate is a no-op.
+— fires its first entry only once both EMAs are past their unstable tail; no
+explicit gate on the signal is needed. Purely windowed (FIR) chains — SMA
+crossovers and the like — have `unstable_period() = 0`, so the gate elapses
+on the last warm-up bar and never lags them.
 
-`fugazi get`'s `--keep-unstable` flag is unrelated — it disables the
-overlay-level trim that hides pre-`stable_period()` cells in the emitted
-CSV.
+To **opt out** on a subtree, wrap it in `!unstable`: `!unstable { source: <s> }`
+(real source) or `!unstable { signal: <s> }` (boolean signal) is a
+passthrough that reports `unstable_period() = 0` for the wrapped subtree
+while forwarding the underlying output. The readiness gate then only waits
+for the wrapped chain's `warm_up_period()`. Use it when you're comfortable
+trading through that subtree's IIR settling tail:
+
+```yaml
+long:
+  enter: !crosses_above
+    lhs: !unstable { source: !ema { period: 12 } }
+    rhs: !unstable { source: !ema { period: 26 } }
+```
+
+`fugazi get`'s `--keep-unstable` flag is the same pattern one level up — the
+overlay CSV trims each column's pre-`stable_period()` cells by default; the
+flag opts out. See the library's [safe-defaults][safe-defaults] note.
+
+[safe-defaults]: README.md#safe-defaults-opt-in-overrides
 
 ### Windowed metrics
 
@@ -855,10 +870,11 @@ Boolean-valued nodes:
 - **Logic**: `!and`/`!or`/`!xor { lhs, rhs }`, `!all [signal, …]`,
   `!any [signal, …]`, `!not <signal>`, `!changed <signal>` (fires on any
   transition).
-- **Stability probe**: `!stable { signal: <signal> }` — `true` once the
-  inner signal has advanced past its `stable_period()`, `false` before. Use
-  it in an `!all` to gate an entry on its own sources being past their
-  unstable tail — see [Stability gating](#stability-gating).
+- **Unstable-tail override**: `!unstable { signal: <signal> }` — passthrough
+  that reports `unstable_period() = 0` for the wrapped subtree while
+  forwarding its output. The explicit opt-out to the safe-by-default
+  strategy-readiness gate; see [Stability gating](#stability-gating).
+  (`!unstable { source: <source> }` is the source-side twin.)
 - **Constants**: `!value <bool>`.
 
 See [`examples/strategy.yml`](examples/strategy.yml) for a full SMA

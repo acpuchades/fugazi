@@ -362,52 +362,47 @@ impl DynIndicator for Chain {
 }
 
 // ---------------------------------------------------------------------------
-// stable_check: runtime-typed readiness probe (mirrors the library's Stable)
+// unstable_wrap: runtime-typed passthrough that zeroes unstable_period()
+// (mirrors the library's Unstable)
 // ---------------------------------------------------------------------------
 
-/// A `bool`-output [`DynIndicator`] that returns `Some(true)` from the
-/// `stable_period`-th `update` onwards, mirroring the library-level
-/// [`Stable`](fugazi::indicators::Stable). Doesn't hold any source — captures
-/// the source's `stable_period()` at construction and drops it.
-pub fn stable_check(stable_period: usize) -> Box<dyn DynIndicator> {
-    Box::new(StableCheck {
-        stable_period,
-        samples: 0,
-    })
+/// A [`DynIndicator`] wrapper that forwards every method to `inner` *except*
+/// [`unstable_period`](DynIndicator::unstable_period), which it forces to `0` —
+/// the runtime twin of [`Unstable`](fugazi::indicators::Unstable). Use to opt a
+/// subtree out of the strategy-readiness wait for its IIR settling tail.
+pub fn unstable_wrap(inner: Box<dyn DynIndicator>) -> Box<dyn DynIndicator> {
+    Box::new(UnstableWrap { inner })
 }
 
-struct StableCheck {
-    stable_period: usize,
-    samples: usize,
+struct UnstableWrap {
+    inner: Box<dyn DynIndicator>,
 }
 
-impl DynIndicator for StableCheck {
+impl DynIndicator for UnstableWrap {
     fn input_type(&self) -> DynType {
-        DynType::Atom
+        self.inner.input_type()
     }
     fn output_type(&self) -> DynType {
-        DynType::Bool
+        self.inner.output_type()
     }
-    fn update(&mut self, _x: DynValue) -> Option<DynValue> {
-        self.samples = self.samples.saturating_add(1);
-        Some(DynValue::Bool(self.samples >= self.stable_period))
+    fn update(&mut self, x: DynValue) -> Option<DynValue> {
+        self.inner.update(x)
     }
     fn value(&self) -> Option<DynValue> {
-        Some(DynValue::Bool(self.samples >= self.stable_period))
+        self.inner.value()
     }
     fn warm_up_period(&self) -> usize {
-        0
+        self.inner.warm_up_period()
     }
     fn unstable_period(&self) -> usize {
         0
     }
     fn reset(&mut self) {
-        self.samples = 0;
+        self.inner.reset();
     }
     fn dyn_clone(&self) -> Box<dyn DynIndicator> {
-        Box::new(StableCheck {
-            stable_period: self.stable_period,
-            samples: self.samples,
+        Box::new(UnstableWrap {
+            inner: self.inner.dyn_clone(),
         })
     }
 }
@@ -615,21 +610,24 @@ mod tests {
     }
 
     #[test]
-    fn stable_check_reports_bool_after_threshold() {
+    fn unstable_wrap_zeroes_unstable_but_forwards_output() {
         let raw = Ema::new(Current::close(), 3);
-        let mut check = stable_check(raw.stable_period());
-        assert_eq!(check.input_type(), DynType::Atom);
-        assert_eq!(check.output_type(), DynType::Bool);
-        // Feed stable_period - 1 candles; still Some(false).
+        let warm = raw.warm_up_period();
+        let settle = raw.unstable_period();
+        assert!(settle > 0, "Ema-3 should have a real unstable tail");
+
+        let mut wrapped = unstable_wrap(wrap(Ema::new(Current::close(), 3)));
+        let mut plain = wrap(Ema::new(Current::close(), 3));
+        assert_eq!(wrapped.input_type(), DynType::Atom);
+        assert_eq!(wrapped.output_type(), DynType::Real);
+        assert_eq!(wrapped.warm_up_period(), warm);
+        assert_eq!(wrapped.unstable_period(), 0);
+        assert_eq!(wrapped.stable_period(), warm);
+
         let bar = |v: Real| DynValue::Atom(Candle::new(v, v, v, v, 0.0).into());
-        for i in 1..raw.stable_period() {
-            assert_eq!(check.update(bar(i as Real)), Some(DynValue::Bool(false)));
+        for i in 1..=5 {
+            assert_eq!(wrapped.update(bar(i as Real)), plain.update(bar(i as Real)));
         }
-        // The stable_period-th update flips to Some(true).
-        assert_eq!(
-            check.update(bar(raw.stable_period() as Real)),
-            Some(DynValue::Bool(true))
-        );
     }
 
     #[test]

@@ -160,6 +160,9 @@ impl Strategy for DynSingleStrategy {
     fn on_fill(&mut self, order: &Order<String>) {
         self.inner.on_fill(order);
     }
+    fn is_ready(&self) -> bool {
+        self.inner.is_ready()
+    }
     fn trade(&self, wallet: &mut dyn Wallet<String>) {
         self.inner.trade(wallet);
     }

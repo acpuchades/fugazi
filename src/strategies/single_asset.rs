@@ -89,9 +89,20 @@ fn level_value(level: &Option<Level>) -> Option<Real> {
 ///
 /// Like the rest of the catalogue it advances **all** of its signals and levels
 /// every bar in [`update`](Strategy::update) (a skipped source would desync from
-/// the price stream) and decides in [`trade`](Strategy::trade). A signal reads
-/// `false` and a level reads `None` until their sources warm up, and the position
-/// guards keep that warm-up from firing a spurious trade.
+/// the price stream) and decides in [`trade`](Strategy::trade).
+///
+/// ## Readiness
+///
+/// [`is_ready`](Strategy::is_ready) returns `true` only once `bars_seen` reaches
+/// the largest `stable_period()` across every wired signal (`long`,
+/// `close_long`, `short`, `close_short`) and every attached protective level —
+/// so the driver skips [`trade`](Strategy::trade) until every source a decision
+/// could consult is past both its warm-up **and** its IIR settling tail. This
+/// is a safe default: a strategy built from EMAs, RSIs or ATRs won't trade off
+/// their seed-dependent early output. A caller who is happy to trade through a
+/// subtree's unstable tail opts out explicitly by wrapping it in
+/// [`Unstable`](crate::indicators::Unstable) (which zeroes that subtree's
+/// `unstable_period()`).
 // The protective-level fields use the terse `_stop`/`_target` names, while
 // their builder methods use the longer `_stop_loss`/`_take_profit` forms for
 // discoverability at construction. The pair is intentional — keep them
@@ -107,6 +118,7 @@ pub struct SingleAssetStrategy<Sym> {
     short_stop: Option<Level>,
     short_target: Option<Level>,
     position: Position,
+    bars_seen: usize,
 }
 
 impl<Sym> SingleAssetStrategy<Sym> {
@@ -125,6 +137,7 @@ impl<Sym> SingleAssetStrategy<Sym> {
             short_stop: None,
             short_target: None,
             position: Position::new(),
+            bars_seen: 0,
         }
     }
 
@@ -201,6 +214,32 @@ impl<Sym> SingleAssetStrategy<Sym> {
         self
     }
 
+    /// The number of bars that must be fed before [`is_ready`](Strategy::is_ready)
+    /// reports `true`: the largest `stable_period()` across every wired signal
+    /// (`long`, `close_long`, `short`, `close_short`) and every attached
+    /// protective level. Unwired slots contribute `0`
+    /// ([`Const::<Atom>::new(false)`](crate::indicators::Const) has zero
+    /// stable-period). Wrap a subtree in [`Unstable`](crate::indicators::Unstable)
+    /// to zero out its IIR settling contribution and only wait for the
+    /// warm-up.
+    fn readiness_threshold(&self) -> usize {
+        let mut needed = self.long.stable_period();
+        needed = needed.max(self.close_long.stable_period());
+        needed = needed.max(self.short.stable_period());
+        needed = needed.max(self.close_short.stable_period());
+        for level in [
+            &self.long_stop,
+            &self.long_target,
+            &self.short_stop,
+            &self.short_target,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            needed = needed.max(level.stable_period());
+        }
+        needed
+    }
 }
 
 impl<Sym: Clone + PartialEq> Strategy for SingleAssetStrategy<Sym> {
@@ -227,6 +266,11 @@ impl<Sym: Clone + PartialEq> Strategy for SingleAssetStrategy<Sym> {
         if let Some(l) = self.short_target.as_mut() {
             l.update(atom);
         }
+        self.bars_seen = self.bars_seen.saturating_add(1);
+    }
+
+    fn is_ready(&self) -> bool {
+        self.bars_seen >= self.readiness_threshold()
     }
 
     fn on_fill(&mut self, order: &Order<Sym>) {
@@ -298,6 +342,7 @@ impl<Sym: Clone + PartialEq> Strategy for SingleAssetStrategy<Sym> {
             l.reset();
         }
         self.position.reset();
+        self.bars_seen = 0;
     }
 }
 

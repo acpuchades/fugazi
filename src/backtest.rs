@@ -125,7 +125,12 @@ where
             fills.push(Fill { bar, order: fill });
         }
         strategy.update(atom);
-        strategy.trade(wallet);
+        // update()/on_fill() always run so warm-up progresses; trade() only
+        // runs once the strategy reports ready. is_ready() defaults to true,
+        // so this is a no-op for strategies that don't override it.
+        if strategy.is_ready() {
+            strategy.trade(wallet);
+        }
         equity_curve.push(wallet.equity().0);
     }
 

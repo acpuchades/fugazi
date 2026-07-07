@@ -5,7 +5,7 @@ use crate::indicator::Indicator;
 use crate::indicators::compare::{Eq, Ge, Gt, Le, Lt, Ne};
 use crate::indicators::logic::{And, Change, Not, Or, Xor};
 use crate::indicators::ops::{Add, Diff, Div, Lag, Mul, Ratio, Roc, RollingMax, RollingMin, Sub};
-use crate::indicators::stable::Stable;
+use crate::indicators::unstable::Unstable;
 use crate::indicators::value::Value;
 use crate::types::Real;
 
@@ -154,12 +154,14 @@ pub trait IndicatorExt: Indicator<Output = Real> + Sized {
         RollingMin::new(self, period)
     }
 
-    /// A `bool`-output signal that flips `true` once `self.stable_period()`
-    /// samples have been seen — see [`Stable`]. `self` is only consulted for
-    /// its `stable_period()` and then dropped, so the caller is free to
-    /// continue using a clone of `self` in the same tree.
-    fn stable(self) -> Stable<Self::Input> {
-        Stable::from_source(&self)
+    /// Wrap `self` so its [`unstable_period`](Indicator::unstable_period)
+    /// reports `0` — see [`Unstable`]. The output and warm-up are unchanged; a
+    /// caller counting off `stable_period()` samples (e.g. a strategy's
+    /// [`is_ready`](crate::Strategy::is_ready)) treats the IIR settling tail as
+    /// already converged. Use when you're comfortable trading through this
+    /// subtree's unstable tail (the safe default is to wait for it).
+    fn unstable(self) -> Unstable<Self> {
+        Unstable::new(self)
     }
 
     /// `self` rises above `rhs` on this step.
@@ -253,16 +255,17 @@ pub trait BoolIndicatorExt: Indicator<Output = bool> {
         Change::new(self)
     }
 
-    /// A `bool`-output signal that flips `true` once `self.stable_period()`
-    /// samples have been seen — see [`Stable`]. Compose with `.and(self)` to
-    /// gate an entry signal on both its firing and its stability:
-    /// `entry.clone().and(entry.stable())` (clone because `.stable()`
-    /// consumes `self` — only its stable_period is read, so a clone is fine).
-    fn stable(self) -> Stable<Self::Input>
+    /// Wrap `self` so its [`unstable_period`](Indicator::unstable_period)
+    /// reports `0` — see [`Unstable`]. The output and warm-up are unchanged; a
+    /// caller counting off `stable_period()` samples (e.g. a strategy's
+    /// [`is_ready`](crate::Strategy::is_ready)) treats the IIR settling tail as
+    /// already converged. The safe default is to wait for it — this is the
+    /// explicit opt-out.
+    fn unstable(self) -> Unstable<Self>
     where
         Self: Sized,
     {
-        Stable::from_source(&self)
+        Unstable::new(self)
     }
 }
 

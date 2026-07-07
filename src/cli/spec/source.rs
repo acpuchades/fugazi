@@ -354,6 +354,13 @@ pub enum SourceSpec {
         #[serde(default = "default_bar_source")]
         source: Box<SourceSpec>,
     },
+    /// Passthrough wrapper that reports `unstable_period() = 0`. The output
+    /// and warm-up of `source` are unchanged; the strategy-readiness gate
+    /// (which counts up to `stable_period()`) no longer waits for this
+    /// subtree's IIR settling tail. The explicit opt-out to the "wait for
+    /// every source to be past its unstable tail" safe default; see
+    /// [`fugazi::indicators::Unstable`].
+    Unstable { source: Box<SourceSpec> },
 }
 
 impl SourceSpec {
@@ -585,6 +592,7 @@ impl SourceSpec {
                 let inner_dyn = inner.build(anchor);
                 dyn_indicator::chain(resample_dyn, inner_dyn)
             }
+            Unstable { source } => dyn_indicator::unstable_wrap(source.build(anchor)),
         }
     }
 }

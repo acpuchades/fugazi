@@ -94,11 +94,13 @@ pub enum SignalSpec {
     Any(Vec<SignalSpec>),
     Not(Box<SignalSpec>),
     Changed(Box<SignalSpec>),
-    /// Reports whether `signal`'s chain has been fed at least its
-    /// `stable_period()` samples. Compose in an `!and` with an entry signal to
-    /// gate the entry on stability (see
-    /// [`fugazi::indicators::Stable`]).
-    Stable { signal: Box<SignalSpec> },
+    /// Passthrough wrapper that reports `unstable_period() = 0`. The output
+    /// and warm-up of `signal` are unchanged; the strategy-readiness gate
+    /// (which counts up to `stable_period()`) no longer waits for this
+    /// subtree's IIR settling tail. The explicit opt-out to the "wait for
+    /// every source to be past its unstable tail" safe default; see
+    /// [`fugazi::indicators::Unstable`].
+    Unstable { signal: Box<SignalSpec> },
     /// A constant boolean leaf. Spelled `!value` like [`SourceSpec::Value`] —
     /// one tag for "a literal", typed by position (bool here, number there).
     Value(bool),
@@ -196,7 +198,7 @@ impl SignalSpec {
             }
             Not(inner) => dyn_indicator::wrap(boolean(inner).not()),
             Changed(inner) => dyn_indicator::wrap(boolean(inner).changed()),
-            Stable { signal } => dyn_indicator::stable_check(signal.build(anchor).stable_period()),
+            Unstable { signal } => dyn_indicator::unstable_wrap(signal.build(anchor)),
             Value(b) => dyn_indicator::wrap(self::Const::<Atom>::new(*b)),
         }
     }

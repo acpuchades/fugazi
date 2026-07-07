@@ -143,24 +143,32 @@ mod tests {
     }
 
     #[test]
-    fn stable_signal_flips_true_at_source_stable_period() {
-        // The new `!stable { signal }` returns a `bool` — false before the
-        // inner signal's `stable_period()` samples have arrived, true from
-        // that sample onwards. Warm-up = 0 (always emits Some).
+    fn unstable_signal_zeroes_unstable_period_but_forwards_output() {
+        // `!unstable { signal }` is a passthrough — same output, same warm-up,
+        // but `unstable_period()` reports 0 so a strategy's readiness gate
+        // stops waiting for the IIR settling tail underneath.
         let yaml = r#"
-            !stable
+            !unstable
             signal: !above { source: !ema { period: 3 }, level: 0 }
         "#;
         let spec: SignalSpec = serde_norway::from_str(yaml).unwrap();
-        let mut check = spec.build(&Position::new());
-        assert_eq!(check.warm_up_period(), 0);
+        let wrapped = spec.build(&Position::new());
+        let inner_raw = Ema::new(Current::close(), 3).above(0.0);
+        assert_eq!(wrapped.warm_up_period(), inner_raw.warm_up_period());
+        assert_eq!(wrapped.unstable_period(), 0);
+        assert_eq!(wrapped.stable_period(), inner_raw.warm_up_period());
+        assert!(inner_raw.stable_period() > inner_raw.warm_up_period());
+    }
 
-        // Ema-3 over close: warm_up 1, unstable 10, stable_period 11.
-        let inner_stable = Ema::new(Current::close(), 3).above(0.0).stable_period();
-        for i in 1..inner_stable {
-            assert_eq!(feed_bool(&mut check, bar(i as Real)), Some(false));
-        }
-        assert_eq!(feed_bool(&mut check, bar(inner_stable as Real)), Some(true));
+    #[test]
+    fn unstable_source_zeroes_unstable_period_but_forwards_output() {
+        let yaml = r#"!unstable { source: !ema { period: 5 } }"#;
+        let spec: SourceSpec = serde_norway::from_str(yaml).unwrap();
+        let wrapped = spec.build(&Position::new());
+        let inner_raw = Ema::new(Current::close(), 5);
+        assert_eq!(wrapped.warm_up_period(), inner_raw.warm_up_period());
+        assert_eq!(wrapped.unstable_period(), 0);
+        assert_eq!(wrapped.stable_period(), inner_raw.warm_up_period());
     }
 
     #[test]

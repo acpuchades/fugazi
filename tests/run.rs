@@ -142,20 +142,20 @@ fn runs_windowed_metrics() {
     assert_eq!(rrows.len(), 21, "expected one row per rolling window:\n{rolling}");
 }
 
-/// End-to-end wiring for a cross-timeframe entry gated with `!stable`.
+/// End-to-end wiring for a cross-timeframe entry.
 ///
-/// The user composes the gate explicitly at the signal layer:
+/// The user relies on the safe-by-default strategy-readiness gate to hold the
+/// entry until the composed latch/resample/ema chain is past its stable_period,
+/// so the entry signal is just the plain comparison:
 ///
 /// ```yaml
-/// enter: !all
-///   - !gt { lhs: !latch { source: !resample { every, inner: !ema {…} } }, rhs: !value 0 }
-///   - !stable { signal: !gt { … same as above } }
+/// enter: !gt { lhs: !latch { source: !resample { every, inner: !ema {…} } }, rhs: !value 0 }
 /// ```
 ///
-/// Verifies that this runs end-to-end and the entry actually fires past its
-/// signalled stable_period.
+/// Verifies that this runs end-to-end and the entry actually fires once
+/// readiness elapses.
 #[test]
-fn latch_resample_entry_gated_with_stable_runs_end_to_end() {
+fn latch_resample_entry_gated_by_readiness_runs_end_to_end() {
     let mut csv = String::from("symbol;time;open;high;low;close;volume\n");
     for i in 0..60 {
         let day = (i % 28) + 1;
@@ -174,14 +174,9 @@ fn latch_resample_entry_gated_with_stable_runs_end_to_end() {
 
     let strategy = r#"symbol: BTC
 long:
-  enter: !all
-    - !gt
-      lhs: !latch { source: !resample { every: 4, inner: !ema { period: 3, source: close } } }
-      rhs: !value 0
-    - !stable
-      signal: !gt
-        lhs: !latch { source: !resample { every: 4, inner: !ema { period: 3, source: close } } }
-        rhs: !value 0
+  enter: !gt
+    lhs: !latch { source: !resample { every: 4, inner: !ema { period: 3, source: close } } }
+    rhs: !value 0
 "#;
 
     let output = Command::new(env!("CARGO_BIN_EXE_fugazi"))

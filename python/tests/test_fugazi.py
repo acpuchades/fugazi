@@ -739,30 +739,22 @@ def test_latch_of_signal_returns_signal():
     assert isinstance(latched, ta.Signal)
 
 
-def test_stable_flips_true_after_stable_period_samples():
+def test_unstable_signal_zeroes_unstable_period_but_forwards_output():
     entry = ta.close().crosses_above(ta.ema(ta.close(), 3))
-    check = ta.stable(entry)
-    period = entry.stable_period()
-    assert period > 1
-    # Fewer than `period` samples: still unstable.
-    for i in range(1, period):
-        check.update(ta.Candle(i, i, i, i, 0.0))
-        assert check.is_true() is False
-    # The `period`-th update flips it.
-    check.update(ta.Candle(period, period, period, period, 0.0))
-    assert check.is_true() is True
+    raw_stable = entry.stable_period()
+    raw_warm = entry.warm_up_period()
+    assert raw_stable > raw_warm  # ema has a real IIR tail
+    wrapped = ta.unstable(entry)
+    assert isinstance(wrapped, ta.Signal)
+    assert wrapped.warm_up_period() == raw_warm
+    assert wrapped.unstable_period() == 0
+    assert wrapped.stable_period() == raw_warm
 
-
-def test_stable_and_composes_into_gated_entry():
-    """The canonical readiness-gated entry: `entry & stable(entry)`."""
-    entry = ta.close().crosses_above(ta.ema(ta.close(), 3))
-    gated = entry.and_(ta.stable(entry))
-    # Feed enough bars to get past the stable period.
-    bars = closes([100.0 + 0.5 * i + (i % 5) for i in range(entry.stable_period() * 2)])
-    fired = any(v for v in feed(gated, bars))
-    # The composed signal is a Signal and can be evaluated.
-    assert isinstance(gated, ta.Signal)
-    assert isinstance(fired, bool)
+    # The wrapper is a passthrough — same boolean state per bar as the raw.
+    bars = closes([100.0 + 0.5 * i + (i % 5) for i in range(raw_stable * 2)])
+    plain = ta.close().crosses_above(ta.ema(ta.close(), 3))
+    for c in bars:
+        assert wrapped.update(c) == plain.update(c)
 
 
 # ---------------------------------------------------------------------------
@@ -856,34 +848,41 @@ def test_get_unknown_key_raises_at_construction():
 
 
 # ---------------------------------------------------------------------------
-# stable() as a fluent method (parity with Rust's IndicatorExt/BoolIndicatorExt)
+# unstable() as a fluent method (parity with Rust's IndicatorExt/BoolIndicatorExt)
 # ---------------------------------------------------------------------------
 
 
-def test_indicator_stable_method_matches_free_function():
+def test_indicator_unstable_method_matches_free_function():
     src = ta.ema(ta.close(), 5)
-    method = src.stable()
-    free = ta.close().ema(5) if hasattr(ta.close(), "ema") else ta.ema(ta.close(), 5)
-    # We can't compare source-Real .stable() to a signal-based free stable(), so
-    # just check the method returns a Signal that flips at the right sample.
-    period = src.stable_period()
-    assert isinstance(method, ta.Signal)
-    for i in range(1, period):
-        method.update(ta.Candle(i, i, i, i, 0.0))
-        assert method.is_true() is False
-    method.update(ta.Candle(period, period, period, period, 0.0))
-    assert method.is_true() is True
+    warm = src.warm_up_period()
+    settle = src.unstable_period()
+    assert settle > 0
+    m = src.unstable()
+    f = ta.unstable(ta.ema(ta.close(), 5))
+    assert isinstance(m, ta.Indicator)
+    assert isinstance(f, ta.Indicator)
+    assert m.warm_up_period() == warm
+    assert m.unstable_period() == 0
+    assert m.stable_period() == warm
+    # Method and free-function forms are the same wrapper.
+    assert f.warm_up_period() == warm
+    assert f.unstable_period() == 0
 
 
-def test_signal_stable_method_matches_free_function():
+def test_signal_unstable_method_matches_free_function():
     entry = ta.close().crosses_above(ta.ema(ta.close(), 3))
-    m = entry.stable()
-    f = ta.stable(entry)
-    assert m.stable_period() == f.stable_period()
-    # Feed both the same series and compare boolean state each bar.
-    bars = closes([float(i + 1) for i in range(m.stable_period() + 2)])
+    warm = entry.warm_up_period()
+    m = entry.unstable()
+    f = ta.unstable(ta.close().crosses_above(ta.ema(ta.close(), 3)))
+    assert m.warm_up_period() == warm
+    assert m.unstable_period() == 0
+    assert f.warm_up_period() == warm
+    assert f.unstable_period() == 0
+    # The wrappers pass through — same boolean state per bar as the plain entry.
+    plain = ta.close().crosses_above(ta.ema(ta.close(), 3))
+    bars = closes([float(i + 1) for i in range(warm + 5)])
     for c in bars:
-        assert m.update(c) == f.update(c)
+        assert m.update(c) == plain.update(c)
 
 
 # ---------------------------------------------------------------------------

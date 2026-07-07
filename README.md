@@ -46,12 +46,18 @@ first output, accounting for the whole composed chain) and its
 `unstable_period()` — `0` for windowed indicators, and for the recursive ones
 (EMA, RSI, ATR, ADX, …) the extra samples until the seeding's influence has
 decayed below 0.1%. `stable_period()` is their sum: how much history to feed
-before trusting the output. The `Stable` **bool signal** — `.stable()` on any
-source *or* signal — reports whether that pipeline is past its
-`stable_period()`, so composing an entry as
-`entry.and(entry.clone().stable())` (or, in YAML, `!all [<entry>, !stable {
-signal: <entry> }]`) prevents any trade from firing on a seed-contaminated
-value.
+before trusting the output. The **default is safe**: a
+`SingleAssetStrategy`'s `is_ready()` compares its bar count against the
+largest `stable_period()` across every wired signal and every attached
+protective level, and the run driver skips its `trade()` until that clears —
+so no trade fires on a seed-contaminated value. The explicit opt-out is
+[`Unstable`](https://docs.rs/fugazi/latest/fugazi/indicators/struct.Unstable.html):
+`.unstable()` on any source *or* signal (in YAML, `!unstable { source: <s> }`
+/ `!unstable { signal: <s> }`) is a passthrough that reports
+`unstable_period() = 0`, telling the readiness gate "I'm happy to trade
+through this subtree's IIR settling tail". Safe by default, overridable per
+subtree — the same shape as `fugazi get`'s `--keep-unstable` flag (default
+trims each overlay's pre-`stable_period()` cells; the flag opts out).
 
 ## Quick start
 
@@ -290,6 +296,38 @@ symbol's price, and act on more than one symbol per `trade` — see the `pairs`
 example. The trading/execution/event-bus machinery itself is out of
 scope for this crate; it belongs in a downstream project that implements `Wallet`.
 
+## Safe defaults, opt-in overrides
+
+Numbers this library produces during a source's warm-up or IIR settling tail
+are *unsettled*: they exist, but their value depends on the seed, on the
+segment the window happens to start on, or on both. Every knob that could
+paper over an unsettled bar is therefore biased toward **waiting**, with a
+single-name **flag / wrapper / period** for the caller who has considered the
+tradeoff and would rather trade through it.
+
+- **Strategy readiness.** `SingleAssetStrategy::is_ready()` returns `true`
+  only once `bars_seen` reaches the largest `stable_period()` across every
+  wired signal and every attached protective level, and
+  `fugazi::backtest::run` skips `trade()` until then. Wrap a subtree in
+  [`Unstable`](https://docs.rs/fugazi/latest/fugazi/indicators/struct.Unstable.html)
+  (`.unstable()` in Rust/Python, `!unstable { source }` / `!unstable { signal
+  }` in YAML) to zero its reported `unstable_period()` and skip the wait for
+  its IIR tail. `update()` and `on_fill()` still run every bar so the warm-up
+  progresses; a custom `Strategy` inherits the default `is_ready() = true` and
+  can override for the same effect.
+- **`fugazi get` overlays.** By default the CLI trims each overlay column's
+  pre-`stable_period()` cells before writing the CSV, so no downstream reader
+  sees an unsettled value. `--keep-unstable` emits every sample from bar 1 —
+  useful when you want the full trace for debugging or plotting.
+- **Explicit periods.** Every windowed indicator takes a `period` argument
+  and asserts it is strictly positive at construction; there is no "sensible
+  default" that would hide the choice. Similarly `sharpe(..., rf, bpy)` takes
+  an explicit risk-free rate and bars-per-year — an omission would silently
+  pick numbers.
+
+The rule when adding a new knob: pick the value that is safest when the user
+forgets to think about it, and provide *one* mechanism to opt out.
+
 ## Backtest & metrics
 
 The per-bar loop above (update the wallet, `on_fill`, `update` the strategy,
@@ -430,15 +468,20 @@ higher-is-better metrics, `mean + K·std` for lower-is-better ones), so
 `sharpe 2.0 ± 3.0` no longer outranks `1.8 ± 0.2`. Output files are
 `;`-delimited for Excel.
 
-`run` and `optimize` measure the whole run — the strategy layer is
-opinion-free about stability. A strategy that wants entries held off until
-every source it consults has settled composes the check at the entry with
-`!stable`: `enter: !all [<entry>, !stable { signal: <entry> }]` fires the
-inner `<entry>` only once its whole chain is past its `stable_period()`. For
-purely windowed (FIR) strategies — SMA crossovers and the like — `!stable`
-delays to the same bar the signal first defines, so it is a no-op.
-(`fugazi get`'s `--keep-unstable` is unrelated — it disables the per-overlay
-trim of pre-`stable_period()` cells in the emitted CSV.)
+`run` and `optimize` measure the whole run. The strategy layer's readiness
+default holds entries until every wired signal *and* every attached
+protective level is past its `stable_period()` (see
+[`SingleAssetStrategy::is_ready`](https://docs.rs/fugazi/latest/fugazi/strategies/struct.SingleAssetStrategy.html)),
+so a seed-contaminated bar never fires a trade. Purely windowed (FIR)
+strategies — SMA crossovers and the like — have `unstable_period() = 0`
+throughout, so the gate elapses on the last warm-up bar and never lags them.
+Users who explicitly accept the IIR settling tail on a subtree opt out by
+wrapping it in `!unstable`: `!unstable { source: !ema { … } }` /
+`!unstable { signal: !crosses_above { … } }` reports `unstable_period() = 0`
+for that subtree while forwarding the underlying output. Same shape as
+`fugazi get`'s `--keep-unstable` (default trims pre-`stable_period()` cells
+from each overlay CSV column; the flag opts out) — see [Safe defaults, opt-in
+overrides](#safe-defaults-opt-in-overrides).
 
 Console output is a two-line banner (the constant tool identity, then the active
 command) followed by four blocks: an **inputs** block of the execution params
@@ -485,8 +528,11 @@ to `close`. The vocabulary mirrors the library one-to-one:
 - **Signals:** `!gt`/`!lt`/`!ge`/`!le`/`!eq`/`!ne { lhs, rhs, epsilon? }`,
   `!above`/`!below { source, level }`; `!crosses_above`/`!crosses_below
   { lhs, rhs }`; `!and`/`!or`/`!xor { lhs, rhs }`, `!all [ … ]`, `!any [ … ]`,
-  `!not <signal>`, `!changed <signal>`, `!stable { signal: <signal> }` (`true`
-  once the inner signal is past its `stable_period()`), `!value <bool>`.
+  `!not <signal>`, `!changed <signal>`, `!unstable { signal: <signal> }`
+  (passthrough that reports `unstable_period() = 0` for the wrapped subtree —
+  opt-in override of the "wait for the IIR tail" readiness default; there is
+  also a `!unstable { source: <source> }` twin on the source side),
+  `!value <bool>`.
 
 **Parameters — `!param`.** Any value in the strategy can be a placeholder resolved
 at run time with `--params` (repeatable), so one file covers many variations

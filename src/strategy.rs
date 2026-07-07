@@ -56,6 +56,26 @@ pub trait Strategy {
         let _ = order;
     }
 
+    /// Whether the strategy has seen enough history that its
+    /// [`trade`](Strategy::trade) decisions are safe to act on. A driver skips
+    /// [`trade`](Strategy::trade) while this returns `false` — but still calls
+    /// [`update`](Strategy::update) and [`on_fill`](Strategy::on_fill), so the
+    /// warm-up runs to completion.
+    ///
+    /// Defaults to `true` — a strategy with no warm-up (or one that doesn't
+    /// care to gate on it) is ready from the first bar. A strategy built from
+    /// sources with unstable tails (EMA, RSI, ATR, …) should override it to
+    /// hold entries until those tails have settled; see
+    /// [`SingleAssetStrategy::is_ready`](crate::strategies::SingleAssetStrategy)
+    /// for a concrete implementation gated on the `stable_period()` of every
+    /// entry signal and protective level. Users who explicitly accept the
+    /// unstable output on a particular subtree wrap it in
+    /// [`Unstable`](crate::indicators::Unstable) — the safe default is to wait,
+    /// and opting out is an explicit act.
+    fn is_ready(&self) -> bool {
+        true
+    }
+
     /// Clear the strategy's own state (its signals/indicators), returning it to
     /// its freshly-constructed condition. Does not touch any wallet.
     fn reset(&mut self);

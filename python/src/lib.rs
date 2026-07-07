@@ -36,8 +36,8 @@ use fugazi_core::indicators::compare::{EqOp, GeOp, GtOp, LeOp, LtOp, NeOp};
 use fugazi_core::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Current, CurrentBar,
     Dmi, DmiValue, Donchian, DonchianValue, Ema, Get, Hma, Identity, Keltner, KeltnerValue, Latch,
-    Macd, MacdValue, Mfi, Obv, Resample, Rma, Rsi, Sar, Sma, Stable, StdDev, Stochastic, TrueRange,
-    Value, Vwap, WilliamsR, Wma,
+    Macd, MacdValue, Mfi, Obv, Resample, Rma, Rsi, Sar, Sma, StdDev, Stochastic, TrueRange, Value,
+    Vwap, WilliamsR, Wma,
 };
 use fugazi_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
 use fugazi_core::sources::{Binance, CandleSource, Interval, SourceError, Timestamp, Yahoo};
@@ -1371,20 +1371,13 @@ impl PyIndicator {
         ))
     }
 
-    /// A bool signal that flips to `True` once this indicator has been fed at
-    /// least its `stable_period()` samples — i.e. it is past its unstable tail.
-    /// Snapshots the period at construction, so it is cheap to compose alongside
-    /// the indicator itself as a readiness gate.
-    fn stable(&self) -> PySignal {
-        PySignal::wrap(match &self.src {
-            AnySource::Candle(s) => AnySignal::Candle(SignalBox::new(Stable::<Atom>::from_source(s))),
-            AnySource::Real(s) => AnySignal::Real(SignalBox::new(Stable::<Real>::from_source(s))),
-            // A bare constant has zero stable_period; the resulting signal fires
-            // immediately. Domain defaults to candle-rooted, matching value().
-            AnySource::Const(_) => {
-                AnySignal::Candle(SignalBox::new(Stable::<Atom>::from_period(0)))
-            }
-        })
+    /// Passthrough that forces this indicator's reported `unstable_period()` to
+    /// `0`. Output and `warm_up_period()` are unchanged; a downstream reader of
+    /// `stable_period()` (a strategy readiness gate, an overlay trim) no longer
+    /// waits for this subtree's IIR settling tail. Use to explicitly opt out of
+    /// the safe default that waits for it.
+    fn unstable(&self) -> PyIndicator {
+        PyIndicator::wrap(map_source!(self.src.clone(), |s| s.unstable()))
     }
 
     fn __repr__(&self) -> String {
@@ -1503,15 +1496,13 @@ impl PySignal {
         PySignal::wrap(map_signal!(self.sig.clone(), |s| s.changed()))
     }
 
-    /// A bool signal that flips to `True` once this signal has been fed at
-    /// least its `stable_period()` samples — its unstable tail is behind us.
-    /// Mirrors the free `stable(sig)` function; provided as a method for the
-    /// fluent chain `sig.and_(sig.stable())`.
-    fn stable(&self) -> PySignal {
-        PySignal::wrap(match &self.sig {
-            AnySignal::Candle(s) => AnySignal::Candle(SignalBox::new(Stable::<Atom>::from_source(s))),
-            AnySignal::Real(s) => AnySignal::Real(SignalBox::new(Stable::<Real>::from_source(s))),
-        })
+    /// Passthrough that forces this signal's reported `unstable_period()` to
+    /// `0`. Output and `warm_up_period()` are unchanged; a downstream reader of
+    /// `stable_period()` (a strategy readiness gate) no longer waits for this
+    /// subtree's IIR settling tail. Mirrors the free `unstable(x)` function; use
+    /// to explicitly opt out of the safe default that waits for the tail.
+    fn unstable(&self) -> PySignal {
+        PySignal::wrap(map_signal!(self.sig.clone(), |s| s.unstable()))
     }
 
     fn __and__(&self, other: PyRef<'_, PySignal>) -> PyResult<PySignal> {
@@ -2714,23 +2705,29 @@ fn latch<'py>(py: Python<'py>, source: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>
     ))
 }
 
-/// A bool signal that flips `True` once its argument has been fed at least its
-/// `stable_period()` samples — i.e. "the signal is past its unstable tail".
-/// The `Stable` check doesn't hold the signal (it snapshots `stable_period()`
-/// at construction and counts samples itself), so it composes cheaply into an
-/// `all()` / `and_()` alongside the same signal to gate a strategy on
-/// stability:
+/// Passthrough wrapper that forces the argument's reported `unstable_period()`
+/// to `0`. Same output, same `warm_up_period()`; a downstream reader of
+/// `stable_period()` no longer waits for this subtree's IIR settling tail.
+/// Accepts either an `Indicator` or a `Signal` and returns the same kind. The
+/// explicit opt-out of the safe default that waits for the tail:
 ///
 /// ```python
-/// entry = ta.close().crosses_above(ta.ema(ta.close(), 20))
-/// gated = entry.and_(ta.stable(entry))
+/// # Skip the Ema's unstable tail when computing readiness.
+/// src = ta.unstable(ta.ema(ta.close(), 20))
 /// ```
 #[pyfunction]
-fn stable(signal: PyRef<'_, PySignal>) -> PySignal {
-    PySignal::wrap(match &signal.sig {
-        AnySignal::Candle(s) => AnySignal::Candle(SignalBox::new(Stable::<Atom>::from_source(s))),
-        AnySignal::Real(s) => AnySignal::Real(SignalBox::new(Stable::<Real>::from_source(s))),
-    })
+fn unstable(py: Python<'_>, arg: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    if let Ok(ind) = arg.cast::<PyIndicator>() {
+        let out = ind.borrow().unstable();
+        return Ok(out.into_pyobject(py)?.into_any().unbind());
+    }
+    if let Ok(sig) = arg.cast::<PySignal>() {
+        let out = sig.borrow().unstable();
+        return Ok(out.into_pyobject(py)?.into_any().unbind());
+    }
+    Err(PyTypeError::new_err(
+        "unstable() expects an fugazi Indicator or Signal",
+    ))
 }
 
 /// Read a per-atom overlay column by its `key` in `schema`. Rooted at the
@@ -3843,7 +3840,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     reg!(
         open, high, low, close, volume, typical, median, identity, value, sma, ema, rma, wma, hma,
         rsi, stddev, stochastic, cci, atr, mfi, williams_r, obv, vwap, ad, true_range, adx, dmi,
-        aroon, sar, macd, bollinger, keltner, donchian, stoch_rsi, resample, latch, stable, get,
+        aroon, sar, macd, bollinger, keltner, donchian, stoch_rsi, resample, latch, unstable, get,
         fetch,
     );
 
