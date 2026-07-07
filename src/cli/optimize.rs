@@ -572,8 +572,7 @@ fn sort_by_metric(rows: &mut Vec<Row>, path: &str, direction: Direction, k: Real
     });
     // Apply the permutation in-place with an `Option` scratch buffer — cheap
     // and avoids cloning the (~50-field) Metrics documents held in each Row.
-    let taken: Vec<Row> = rows.drain(..).collect();
-    let mut slots: Vec<Option<Row>> = taken.into_iter().map(Some).collect();
+    let mut slots: Vec<Option<Row>> = std::mem::take(rows).into_iter().map(Some).collect();
     for i in order {
         rows.push(slots[i].take().expect("permutation visits each row exactly once"));
     }
