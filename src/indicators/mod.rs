@@ -67,7 +67,7 @@ pub use candle::{
 };
 pub use cci::Cci;
 pub use compare::{ComparisonOp, DEFAULT_EPSILON, Eq, Ge, Gt, Le, Lt, Ne};
-pub use component::Component;
+pub use component::{Component, Shared, SharedComponent, SharedHandle};
 pub use dmi::{Dmi, DmiValue};
 pub use donchian::{Donchian, DonchianValue};
 pub use ema::Ema;

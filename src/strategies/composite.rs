@@ -57,9 +57,10 @@ pub fn keltner_breakout<Sym>(
     multiplier: Real,
 ) -> SingleAssetStrategy<Sym> {
     let channel =
-        || Keltner::new(Current::close(), Current::candle(), ema_period, atr_period, multiplier);
-    let up = || Current::close().gt(channel().upper());
-    let down = || Current::close().lt(channel().lower());
+        Keltner::new(Current::close(), Current::candle(), ema_period, atr_period, multiplier)
+            .shared();
+    let up = || Current::close().gt(channel.upper());
+    let down = || Current::close().lt(channel.lower());
     SingleAssetStrategy::new(symbol)
         .long_on(up(), down())
         .short_on(down(), up())

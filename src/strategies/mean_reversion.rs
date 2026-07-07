@@ -35,7 +35,7 @@ pub fn rsi_reversal<Sym>(
 /// back above the middle band (the moving average). Fades the bands rather than
 /// chasing the breakout.
 pub fn bollinger_reversion<Sym>(symbol: Sym, period: usize, k: Real) -> SingleAssetStrategy<Sym> {
-    let bands = Bollinger::new(Current::close(), period, k);
+    let bands = Bollinger::new(Current::close(), period, k).shared();
     SingleAssetStrategy::new(symbol).long_on(
         Current::close().crosses_below(bands.lower()),
         Current::close().crosses_above(bands.middle()),

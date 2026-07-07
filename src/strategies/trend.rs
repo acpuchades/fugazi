@@ -27,7 +27,7 @@ pub fn macd_crossover<Sym>(
     slow: usize,
     signal: usize,
 ) -> SingleAssetStrategy<Sym> {
-    let macd = Macd::new(Current::close(), fast, slow, signal);
+    let macd = Macd::new(Current::close(), fast, slow, signal).shared();
     let up = || macd.line().crosses_above(macd.signal());
     let down = || macd.line().crosses_below(macd.signal());
     SingleAssetStrategy::new(symbol)
@@ -45,7 +45,7 @@ pub fn macd_zero_cross<Sym>(
     slow: usize,
     signal: usize,
 ) -> SingleAssetStrategy<Sym> {
-    let macd = Macd::new(Current::close(), fast, slow, signal);
+    let macd = Macd::new(Current::close(), fast, slow, signal).shared();
     let up = || macd.line().crosses_above(Value::new(0.0));
     let down = || macd.line().crosses_below(Value::new(0.0));
     SingleAssetStrategy::new(symbol)
@@ -60,9 +60,9 @@ pub fn macd_zero_cross<Sym>(
 /// one bar so the breakout is measured against the *prior* channel, not one that
 /// already contains the breakout bar.
 pub fn donchian_breakout<Sym>(symbol: Sym, period: usize) -> SingleAssetStrategy<Sym> {
-    let channel = || Donchian::new(Current::high(), Current::low(), period);
-    let up = || Current::close().gt(channel().upper().lag(1));
-    let down = || Current::close().lt(channel().lower().lag(1));
+    let channel = Donchian::new(Current::high(), Current::low(), period).shared();
+    let up = || Current::close().gt(channel.upper().lag(1));
+    let down = || Current::close().lt(channel.lower().lag(1));
     SingleAssetStrategy::new(symbol)
         .long_on(up(), down())
         .short_on(down(), up())
@@ -92,7 +92,7 @@ pub fn triple_ma<Sym>(
 /// below the lower one. (Contrast [`bollinger_reversion`](super::mean_reversion::bollinger_reversion),
 /// which fades the same bands.)
 pub fn bollinger_breakout<Sym>(symbol: Sym, period: usize, k: Real) -> SingleAssetStrategy<Sym> {
-    let bands = Bollinger::new(Current::close(), period, k);
+    let bands = Bollinger::new(Current::close(), period, k).shared();
     let up = || Current::close().gt(bands.upper());
     let down = || Current::close().lt(bands.lower());
     SingleAssetStrategy::new(symbol)
