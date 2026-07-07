@@ -113,6 +113,26 @@ const GROUPS: &[Group] = &[
         ],
     },
     Group {
+        title: "calendar (read atom.time; None on an untimed bar)",
+        entries: &[
+            Entry { tag: "year",         args: "", doc: "Gregorian year (e.g. 2024)" },
+            Entry { tag: "month",        args: "", doc: "month of year, 1 (Jan) .. 12 (Dec)" },
+            Entry { tag: "day",          args: "", doc: "day of the month, 1 .. 31" },
+            Entry { tag: "hour",         args: "", doc: "hour of the day (UTC), 0 .. 23" },
+            Entry { tag: "minute",       args: "", doc: "minute of the hour, 0 .. 59" },
+            Entry { tag: "second",       args: "", doc: "second of the minute, 0 .. 59" },
+            Entry { tag: "day_of_week",  args: "", doc: "ISO 8601 weekday, 1 (Mon) .. 7 (Sun)" },
+            Entry { tag: "day_of_year",  args: "", doc: "day of the year, 1 .. 366" },
+            Entry { tag: "week_of_year", args: "", doc: "ISO 8601 week of the year, 1 .. 53" },
+            Entry { tag: "quarter",      args: "", doc: "calendar quarter, 1 .. 4" },
+            Entry { tag: "unix_seconds", args: "", doc: "Unix seconds since the epoch" },
+            Entry { tag: "unix_millis",  args: "", doc: "Unix milliseconds since the epoch" },
+            Entry { tag: "time",         args: "", doc: "the raw Timestamp payload (not a scalar)" },
+            Entry { tag: "is_weekday",   args: "", doc: "true on Mon–Fri (bool signal)" },
+            Entry { tag: "is_weekend",   args: "", doc: "true on Sat/Sun (bool signal)" },
+        ],
+    },
+    Group {
         title: "candle leaves",
         entries: &[
             Entry { tag: "close",   args: "", doc: "the bar's close price" },
@@ -232,13 +252,6 @@ const GROUPS: &[Group] = &[
         ],
     },
     Group {
-        title: "stability gate (mask until the chain has settled)",
-        entries: &[
-            Entry { tag: "stable", args: "source",   doc: "None until the source's stable_period() has elapsed, then a pass-through" },
-            Entry { tag: "stable", args: "<signal>", doc: "same over a signal (false meanwhile) — no trades off seed-contaminated values" },
-        ],
-    },
-    Group {
         title: "trend / directional",
         entries: &[
             Entry { tag: "adx",              args: "period",     doc: "ADX from the Adx bundle" },
@@ -250,6 +263,13 @@ const GROUPS: &[Group] = &[
             Entry { tag: "aroon_down",       args: "period",     doc: "Aroon Down" },
             Entry { tag: "aroon_oscillator", args: "period",     doc: "Aroon Up − Aroon Down" },
             Entry { tag: "sar",              args: "step, max",  doc: "parabolic SAR" },
+        ],
+    },
+    Group {
+        title: "unstable pass-through (opt out of the readiness gate)",
+        entries: &[
+            Entry { tag: "unstable", args: "source", doc: "pass through `source` but report unstable_period() = 0" },
+            Entry { tag: "unstable", args: "signal", doc: "pass through `signal` but report unstable_period() = 0" },
         ],
     },
 ];

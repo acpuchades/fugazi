@@ -844,6 +844,7 @@ def test_calendar_sources_decompose_atom_time():
         (ta.second(), 56.0),
         (ta.day_of_week(), 5.0),  # Friday
         (ta.day_of_year(), 75.0),
+        (ta.week_of_year(), 11.0),  # ISO 8601 week
         (ta.quarter(), 1.0),
         (ta.unix_seconds(), 1_710_506_096.0),
         (ta.unix_millis(), 1_710_506_096_000.0),
