@@ -116,6 +116,80 @@ def test_bollinger_bands_ordered():
     assert band["lower"] <= band["middle"] <= band["upper"]
 
 
+def test_shared_multi_projects_named_components():
+    """`.shared()` returns a handle whose per-line accessors project the
+    underlying multi as ordinary Real-output indicators."""
+    macd = ta.macd(ta.close(), 2, 4, 2).shared()
+    assert set(macd.names()) == {"macd", "signal", "histogram"}
+    line = macd.line()
+    signal = macd.signal()
+    histogram = macd.histogram()
+    # Composable — same operators every other Real source supports.
+    _cross = line.crosses_above(signal)
+    # Value equivalence against a bare MultiIndicator on the same input.
+    reference = ta.macd(ta.close(), 2, 4, 2)
+    bars = closes([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    for c in bars:
+        got_line = line.update(c)
+        got_signal = signal.update(c)
+        got_hist = histogram.update(c)
+        ref = reference.update(c)
+        if ref is None:
+            assert got_line is None
+            continue
+        assert got_line == pytest.approx(ref["macd"])
+        assert got_signal == pytest.approx(ref["signal"])
+        assert got_hist == pytest.approx(ref["histogram"])
+
+
+def test_shared_multi_advances_source_once_per_bar():
+    """The whole point of `.shared()`: three accessors that project the same
+    underlying MACD produce the *same* output as one that fed a single
+    reference. A bare-clone pattern would drift because each accessor would
+    independently advance its own MACD copy — the shared handle prevents
+    that."""
+    macd = ta.macd(ta.close(), 2, 4, 2).shared()
+    line, signal, histogram = macd.line(), macd.signal(), macd.histogram()
+
+    reference = ta.macd(ta.close(), 2, 4, 2)
+    for c in closes([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]):
+        # Deliberately update in a nonobvious order to catch any hidden
+        # coupling between the first-updated accessor and the source advance.
+        got_signal = signal.update(c)
+        got_hist = histogram.update(c)
+        got_line = line.update(c)
+        ref = reference.update(c)
+        if ref is None:
+            assert got_line is got_signal is got_hist is None
+        else:
+            assert got_line == pytest.approx(ref["macd"])
+            assert got_signal == pytest.approx(ref["signal"])
+            assert got_hist == pytest.approx(ref["histogram"])
+
+
+def test_shared_bollinger_bands_project_correctly():
+    bands = ta.bollinger(ta.close(), 3, 2.0).shared()
+    upper, middle, lower = bands.upper(), bands.middle(), bands.lower()
+    reference = ta.bollinger(ta.close(), 3, 2.0)
+    for c in closes([1.0, 2.0, 3.0, 4.0, 5.0]):
+        u, m, l = upper.update(c), middle.update(c), lower.update(c)
+        ref = reference.update(c)
+        if ref is None:
+            assert u is None
+        else:
+            assert u == pytest.approx(ref["upper"])
+            assert m == pytest.approx(ref["middle"])
+            assert l == pytest.approx(ref["lower"])
+
+
+def test_shared_unknown_component_errors():
+    macd = ta.macd(ta.close(), 2, 4, 2).shared()
+    with pytest.raises(ValueError):
+        macd.component("nonexistent_field")
+    with pytest.raises(ValueError):
+        macd.upper()  # not a MACD field
+
+
 def test_bar_indicator_atr():
     atr = ta.atr(2)
     bars = [

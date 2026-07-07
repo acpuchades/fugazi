@@ -169,6 +169,34 @@ node.reset()                   # call reset() to start a fresh, independent pass
 Multi-line indicators return a `dict` of their named lines (or `None` while
 warming up).
 
+### Projecting one line of a multi-output indicator: `shared()`
+
+Call `.shared()` on any multi-output indicator (`macd`, `bollinger`, `adx`,
+`donchian`, `keltner`, `dmi`, `aroon`) to get a handle whose per-line accessors
+return ordinary `Indicator`s that compose with the usual operators (`gt`,
+`crosses_above`, `add`, …). Every accessor built off one `.shared()` handle
+projects into the **same** underlying source — the multi advances at most once
+per bar however many accessors read out of it, exactly like Rust's
+`Macd::new(...).shared()`:
+
+```python
+# MACD line crossing its signal line, as a single composed Signal:
+macd = ta.macd(ta.close(), 12, 26, 9).shared()
+bullish = macd.line().crosses_above(macd.signal())
+
+# Close pierces the Bollinger upper band:
+bands = ta.bollinger(ta.close(), 20, 2.0).shared()
+breakout = ta.close().gt(bands.upper())
+```
+
+The accessor names mirror the Rust API: `line()`/`signal()`/`histogram()` on a
+MACD, `upper()`/`middle()`/`lower()` on Bollinger/Keltner/Donchian,
+`plus_di()`/`minus_di()`/`adx()` on ADX/DMI, `up()`/`down()`/`oscillator()` on
+Aroon. `component(name)` is a programmatic fallback, `names()` lists what's
+available for a given handle. Calling `.shared()` returns a fresh handle owning
+its own copy of the source, so the original `MultiIndicator` (with its dict-
+returning `.update()` / `.feed()` API) stays usable in parallel.
+
 ### Cross-timeframe composition
 
 `resample` + `latch` compose a higher-timeframe pipeline over a base candle

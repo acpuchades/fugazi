@@ -29,7 +29,7 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use fugazi_core::Indicator;
 use fugazi_core::indicators::compare::{EqOp, GeOp, GtOp, LeOp, LtOp, NeOp};
@@ -281,11 +281,15 @@ trait DynMulti<I>: Send + Sync {
     fn warm_up_period(&self) -> usize;
     fn unstable_period(&self) -> usize;
     fn reset(&mut self);
+    /// Deep-clone the erased indicator into a fresh box. Used by [`PyMulti::shared`]
+    /// to hand its concrete multi off to a shared-cell carrier without losing
+    /// the type (the original `PyMulti` keeps its own independent copy).
+    fn clone_box(&self) -> Box<dyn DynMulti<I>>;
 }
 
 impl<I, T> DynMulti<I> for T
 where
-    T: Indicator<Input = I> + Send + Sync + 'static,
+    T: Indicator<Input = I> + Clone + Send + Sync + 'static,
     T::Output: MultiOutput,
 {
     fn names(&self) -> &'static [&'static str] {
@@ -305,6 +309,9 @@ where
     }
     fn reset(&mut self) {
         Indicator::reset(self)
+    }
+    fn clone_box(&self) -> Box<dyn DynMulti<I>> {
+        Box::new(self.clone())
     }
 }
 
@@ -380,10 +387,158 @@ struct MultiBox<I>(Box<dyn DynMulti<I>>);
 impl<I> MultiBox<I> {
     fn new<T>(inner: T) -> Self
     where
-        T: Indicator<Input = I> + Send + Sync + 'static,
+        T: Indicator<Input = I> + Clone + Send + Sync + 'static,
         T::Output: MultiOutput,
     {
         MultiBox(Box::new(inner))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared multi-output source: the Python analogue of Rust's
+// `fugazi::indicators::Shared` / `SharedComponent` pair, so per-line
+// projections (`macd.line()`, `macd.signal()`, `bands.upper()`, …) built off
+// one handle all advance the underlying multi at most once per bar — the
+// classic-strategy optimisation, ported.
+// ---------------------------------------------------------------------------
+
+/// The cell every [`SharedProjector`] built from one shared handle borrows
+/// into. `generation` ticks on every source `update`; each projector remembers
+/// the last `generation` it observed as `local_gen`, so whichever projector is
+/// called first each bar advances the multi (its `local_gen` equals the shared
+/// counter) and the rest read the cached output.
+struct SharedMultiCell<I> {
+    multi: Box<dyn DynMulti<I>>,
+    generation: u64,
+    last_output: Option<Vec<Real>>,
+    names: &'static [&'static str],
+}
+
+/// One projected component out of a shared multi. Implements the
+/// `Real`-output [`Indicator`] shim so it can be boxed into a [`Source`] and
+/// composed like any other indicator.
+struct SharedProjector<I> {
+    cell: Arc<Mutex<SharedMultiCell<I>>>,
+    field_index: usize,
+    local_gen: u64,
+    last_value: Option<Real>,
+}
+
+impl<I> Clone for SharedProjector<I> {
+    fn clone(&self) -> Self {
+        Self {
+            cell: Arc::clone(&self.cell),
+            field_index: self.field_index,
+            // Preserve the current sync state on clone: an operand cloned by
+            // `crosses_above` etc. shouldn't spuriously re-trigger the advance.
+            local_gen: self.local_gen,
+            last_value: self.last_value,
+        }
+    }
+}
+
+impl<I: Clone + Send + Sync + 'static> Indicator for SharedProjector<I> {
+    type Input = I;
+    type Output = Real;
+
+    fn update(&mut self, input: I) -> Option<Real> {
+        let mut cell = self
+            .cell
+            .lock()
+            .expect("shared multi-output cell mutex poisoned");
+        if self.local_gen == cell.generation {
+            // First projector-of-this-bar drives the underlying multi.
+            let out = cell.multi.update(input);
+            cell.last_output = out;
+            cell.generation = cell.generation.wrapping_add(1);
+        }
+        self.local_gen = cell.generation;
+        self.last_value = cell.last_output.as_ref().map(|v| v[self.field_index]);
+        self.last_value
+    }
+
+    fn value(&self) -> Option<Real> {
+        self.last_value
+    }
+
+    fn warm_up_period(&self) -> usize {
+        // Match `SharedComponent::warm_up_period`: the projection still needs
+        // one update to advance the source when the inner reports 0.
+        self.cell
+            .lock()
+            .expect("shared multi-output cell mutex poisoned")
+            .multi
+            .warm_up_period()
+            .max(1)
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.cell
+            .lock()
+            .expect("shared multi-output cell mutex poisoned")
+            .multi
+            .unstable_period()
+    }
+
+    fn reset(&mut self) {
+        let mut cell = self
+            .cell
+            .lock()
+            .expect("shared multi-output cell mutex poisoned");
+        cell.multi.reset();
+        cell.last_output = None;
+        // Leave `generation` alone; all sibling projectors will re-sync via
+        // the usual `local_gen < generation → read cached` path.
+        self.local_gen = cell.generation;
+        self.last_value = None;
+    }
+}
+
+/// A shared multi-output handle erased over the two input domains — the
+/// Python analogue of `Shared<M>` in Rust. Component accessors return
+/// [`PyIndicator`]s that borrow into the same underlying multi.
+enum AnySharedMulti {
+    Candle(Arc<Mutex<SharedMultiCell<Atom>>>),
+    Real(Arc<Mutex<SharedMultiCell<Real>>>),
+}
+
+impl AnySharedMulti {
+    fn names(&self) -> &'static [&'static str] {
+        match self {
+            AnySharedMulti::Candle(c) => c.lock().expect("mutex poisoned").names,
+            AnySharedMulti::Real(c) => c.lock().expect("mutex poisoned").names,
+        }
+    }
+
+    fn field_index(&self, name: &str) -> PyResult<usize> {
+        let names = self.names();
+        names.iter().position(|n| *n == name).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "component `{name}` not found on this multi-output (available: {names:?})"
+            ))
+        })
+    }
+
+    fn project(&self, name: &str) -> PyResult<PyIndicator> {
+        let idx = self.field_index(name)?;
+        Ok(match self {
+            AnySharedMulti::Candle(cell) => PyIndicator {
+                src: AnySource::Candle(Source::new(SharedProjector::<Atom> {
+                    cell: Arc::clone(cell),
+                    field_index: idx,
+                    local_gen: cell.lock().expect("mutex poisoned").generation,
+                    last_value: None,
+                })),
+            },
+            AnySharedMulti::Real(cell) => PyIndicator {
+                src: AnySource::Real(Source::new(SharedProjector::<Real> {
+                    cell: Arc::clone(cell),
+                    field_index: idx,
+                    local_gen: cell.lock().expect("mutex poisoned").generation,
+                    last_value: None,
+                })),
+            },
+        })
     }
 }
 
@@ -1465,6 +1620,131 @@ impl PyMulti {
     /// Reset all internal state.
     fn reset(&mut self) {
         self.inner.reset()
+    }
+
+    /// Wrap this multi in a [`SharedMultiIndicator`](PySharedMulti) handle so
+    /// per-line component accessors (`.line()`, `.upper()`, …) built off the
+    /// handle project into the **same** underlying source and advance it at
+    /// most once per bar — the analogue of Rust's `.shared()`. The original
+    /// `MultiIndicator` is left untouched (it keeps a deep-cloned copy of the
+    /// source), so both handles can coexist.
+    ///
+    /// ```python
+    /// macd = ta.macd(ta.close(), 12, 26, 9).shared()
+    /// # Both accessors project the same MACD; the full MACD math runs once
+    /// # per bar however many accessors read out of it.
+    /// bullish = macd.line().crosses_above(macd.signal())
+    /// ```
+    fn shared(&self) -> PySharedMulti {
+        let cloned = match &self.inner {
+            AnyMulti::Candle(m) => AnySharedMulti::Candle(Arc::new(Mutex::new(SharedMultiCell {
+                names: m.0.names(),
+                multi: m.0.clone_box(),
+                generation: 0,
+                last_output: None,
+            }))),
+            AnyMulti::Real(m) => AnySharedMulti::Real(Arc::new(Mutex::new(SharedMultiCell {
+                names: m.0.names(),
+                multi: m.0.clone_box(),
+                generation: 0,
+                last_output: None,
+            }))),
+        };
+        PySharedMulti { inner: cloned }
+    }
+}
+
+/// A shared handle over a multi-output indicator: per-line accessors
+/// (`.line()`, `.signal()`, `.histogram()`, `.upper()`, `.middle()`,
+/// `.lower()`, `.plus_di()`, `.minus_di()`, `.adx()`, `.up()`, `.down()`,
+/// `.oscillator()`) all project into the same underlying source, so the
+/// multi advances **once per bar** regardless of how many accessors the
+/// surrounding expression tree contains.
+///
+/// Construct via [`MultiIndicator.shared()`](PyMulti::shared). Every accessor
+/// returns a plain [`Indicator`](PyIndicator) — the returned handle is
+/// composable with the same operators (`gt`, `crosses_above`, `add`, …) any
+/// other `Real`-output source is.
+#[pyclass(name = "SharedMultiIndicator")]
+struct PySharedMulti {
+    inner: AnySharedMulti,
+}
+
+/// Emit the accessor list on `PySharedMulti`. Each generated method resolves
+/// the name against the underlying multi's field list (declared once per
+/// concrete `MultiOutput` impl); an accessor whose name doesn't match a field
+/// of *this* particular multi errors clearly at call time.
+#[pymethods]
+impl PySharedMulti {
+    /// MACD line (fast EMA − slow EMA) as a standalone indicator.
+    fn macd(&self) -> PyResult<PyIndicator> {
+        self.inner.project("macd")
+    }
+    /// MACD line — alias for [`macd`](Self::macd), matching Rust's
+    /// `Macd::line()` accessor.
+    fn line(&self) -> PyResult<PyIndicator> {
+        self.inner.project("macd")
+    }
+    /// MACD signal line (EMA of the MACD line).
+    fn signal(&self) -> PyResult<PyIndicator> {
+        self.inner.project("signal")
+    }
+    /// MACD histogram (line − signal).
+    fn histogram(&self) -> PyResult<PyIndicator> {
+        self.inner.project("histogram")
+    }
+    /// Bollinger / Keltner / Donchian upper band.
+    fn upper(&self) -> PyResult<PyIndicator> {
+        self.inner.project("upper")
+    }
+    /// Bollinger / Keltner / Donchian middle band.
+    fn middle(&self) -> PyResult<PyIndicator> {
+        self.inner.project("middle")
+    }
+    /// Bollinger / Keltner / Donchian lower band.
+    fn lower(&self) -> PyResult<PyIndicator> {
+        self.inner.project("lower")
+    }
+    /// ADX / DMI positive directional indicator, `+DI`.
+    fn plus_di(&self) -> PyResult<PyIndicator> {
+        self.inner.project("plus_di")
+    }
+    /// ADX / DMI negative directional indicator, `−DI`.
+    fn minus_di(&self) -> PyResult<PyIndicator> {
+        self.inner.project("minus_di")
+    }
+    /// ADX line (the trend-strength value).
+    fn adx(&self) -> PyResult<PyIndicator> {
+        self.inner.project("adx")
+    }
+    /// Aroon Up.
+    fn up(&self) -> PyResult<PyIndicator> {
+        self.inner.project("up")
+    }
+    /// Aroon Down.
+    fn down(&self) -> PyResult<PyIndicator> {
+        self.inner.project("down")
+    }
+    /// Aroon oscillator (up − down).
+    fn oscillator(&self) -> PyResult<PyIndicator> {
+        self.inner.project("oscillator")
+    }
+
+    /// The output field names available on the underlying multi.
+    fn names(&self) -> Vec<String> {
+        self.inner.names().iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Project the component named `name` (one of [`names`](Self::names)) as a
+    /// standalone [`Indicator`]. Prefer the named accessors when one matches;
+    /// this is the fallback for programmatic lookup.
+    fn component(&self, name: &str) -> PyResult<PyIndicator> {
+        self.inner.project(name)
+    }
+
+    fn __repr__(&self) -> String {
+        let names = self.inner.names();
+        format!("SharedMultiIndicator(fields={names:?})")
     }
 }
 
@@ -3547,6 +3827,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyIndicator>()?;
     m.add_class::<PySignal>()?;
     m.add_class::<PyMulti>()?;
+    m.add_class::<PySharedMulti>()?;
     m.add_class::<PyWallet>()?;
     m.add_class::<PyOrder>()?;
     m.add_class::<PySize>()?;
