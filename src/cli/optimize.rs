@@ -17,7 +17,10 @@
 //! The grid runs on a rayon thread pool (`-j/--jobs` picks the size; default is
 //! rayon's own default — one worker per logical CPU). Each combination
 //! independently clones the parsed strategy tree, applies substitution, and
-//! evaluates — no shared mutable state, no locking on the hot path.
+//! evaluates — no shared mutable state, no locking on the hot path. The outer
+//! par_iter carries a `with_min_len` sized to roughly 16 chunks per worker, so
+//! a huge grid of cheap combos amortizes task overhead while a small grid still
+//! spreads one combo per worker.
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -267,6 +270,15 @@ pub(crate) fn optimize(
     let axes_ref = &axes;
     let fixed_ref = &fixed;
 
+    // Chunk the outer par_iter so a huge grid doesn't drown rayon in one task
+    // per combo (task overhead dominates when combos are cheap), while a small
+    // grid still gets one combo per worker. Target ~16 chunks per worker so
+    // work-stealing still balances tail imbalance from combo-to-combo cost
+    // variance. `combos[1..]` skips the already-computed first combo.
+    let workers = pool.current_num_threads().max(1);
+    let remaining_len = combos.len().saturating_sub(1);
+    let min_len = remaining_len.div_ceil(workers * 16).max(1);
+
     let evaluate = |spec: &StrategySpec| -> Evaluation {
         match windowed_n {
             Some(w) => Evaluation::Windowed(backtest::evaluate_windowed(
@@ -294,6 +306,7 @@ pub(crate) fn optimize(
     let remaining: Vec<Row> = pool.install(|| {
         combos[1..]
             .par_iter()
+            .with_min_len(min_len)
             .map(|combo| {
                 let params = combine_params(fixed_ref, axes_ref, combo);
                 let spec = build_spec(base_value, &params)?;
