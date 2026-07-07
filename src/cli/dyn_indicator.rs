@@ -19,7 +19,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use fugazi::Indicator;
-use fugazi::types::{Atom, Candle, Real};
+use fugazi::types::{Atom, Candle, Real, Timestamp};
 
 // ---------------------------------------------------------------------------
 // Payload enum + type descriptor
@@ -28,8 +28,8 @@ use fugazi::types::{Atom, Candle, Real};
 /// The runtime-typed payload a [`DynIndicator`] exchanges. One variant per
 /// concrete carrier the CLI's indicator vocabulary produces / consumes.
 ///
-/// `Real` and `Bool` are `Copy`; `Atom`, `Candle`, and `Str` are not, so
-/// `DynValue` itself is only `Clone`.
+/// `Real`, `Bool` and `Time` are `Copy`; `Atom`, `Candle`, and `Str` are not,
+/// so `DynValue` itself is only `Clone`.
 #[derive(Debug, Clone)]
 pub enum DynValue {
     Real(Real),
@@ -37,6 +37,7 @@ pub enum DynValue {
     Atom(Atom),
     Candle(Candle),
     Str(Arc<str>),
+    Time(Timestamp),
 }
 
 // `Atom` doesn't implement `PartialEq` (the overlay `Arc`s aren't compared by
@@ -52,6 +53,7 @@ impl PartialEq for DynValue {
             (DynValue::Candle(a), DynValue::Candle(b)) => a == b,
             (DynValue::Atom(a), DynValue::Atom(b)) => a.candle == b.candle,
             (DynValue::Str(a), DynValue::Str(b)) => a.as_ref() == b.as_ref(),
+            (DynValue::Time(a), DynValue::Time(b)) => a == b,
             _ => false,
         }
     }
@@ -67,6 +69,7 @@ pub enum DynType {
     Atom,
     Candle,
     Str,
+    Time,
 }
 
 impl fmt::Display for DynType {
@@ -77,6 +80,7 @@ impl fmt::Display for DynType {
             DynType::Atom => f.write_str("Atom"),
             DynType::Candle => f.write_str("Candle"),
             DynType::Str => f.write_str("Str"),
+            DynType::Time => f.write_str("Time"),
         }
     }
 }
@@ -106,6 +110,11 @@ impl From<Arc<str>> for DynValue {
         DynValue::Str(v)
     }
 }
+impl From<Timestamp> for DynValue {
+    fn from(v: Timestamp) -> Self {
+        DynValue::Time(v)
+    }
+}
 
 impl TryFrom<DynValue> for Real {
     type Error = DynType;
@@ -116,6 +125,7 @@ impl TryFrom<DynValue> for Real {
             DynValue::Atom(_) => Err(DynType::Atom),
             DynValue::Candle(_) => Err(DynType::Candle),
             DynValue::Str(_) => Err(DynType::Str),
+            DynValue::Time(_) => Err(DynType::Time),
         }
     }
 }
@@ -128,6 +138,7 @@ impl TryFrom<DynValue> for bool {
             DynValue::Atom(_) => Err(DynType::Atom),
             DynValue::Candle(_) => Err(DynType::Candle),
             DynValue::Str(_) => Err(DynType::Str),
+            DynValue::Time(_) => Err(DynType::Time),
         }
     }
 }
@@ -143,6 +154,7 @@ impl TryFrom<DynValue> for Atom {
             DynValue::Real(_) => Err(DynType::Real),
             DynValue::Bool(_) => Err(DynType::Bool),
             DynValue::Str(_) => Err(DynType::Str),
+            DynValue::Time(_) => Err(DynType::Time),
         }
     }
 }
@@ -155,6 +167,7 @@ impl TryFrom<DynValue> for Candle {
             DynValue::Bool(_) => Err(DynType::Bool),
             DynValue::Atom(_) => Err(DynType::Atom),
             DynValue::Str(_) => Err(DynType::Str),
+            DynValue::Time(_) => Err(DynType::Time),
         }
     }
 }
@@ -167,6 +180,20 @@ impl TryFrom<DynValue> for Arc<str> {
             DynValue::Bool(_) => Err(DynType::Bool),
             DynValue::Atom(_) => Err(DynType::Atom),
             DynValue::Candle(_) => Err(DynType::Candle),
+            DynValue::Time(_) => Err(DynType::Time),
+        }
+    }
+}
+impl TryFrom<DynValue> for Timestamp {
+    type Error = DynType;
+    fn try_from(v: DynValue) -> Result<Timestamp, DynType> {
+        match v {
+            DynValue::Time(t) => Ok(t),
+            DynValue::Real(_) => Err(DynType::Real),
+            DynValue::Bool(_) => Err(DynType::Bool),
+            DynValue::Atom(_) => Err(DynType::Atom),
+            DynValue::Candle(_) => Err(DynType::Candle),
+            DynValue::Str(_) => Err(DynType::Str),
         }
     }
 }
@@ -192,6 +219,9 @@ impl TypeOf for Candle {
 }
 impl TypeOf for Arc<str> {
     const TYPE: DynType = DynType::Str;
+}
+impl TypeOf for Timestamp {
+    const TYPE: DynType = DynType::Time;
 }
 
 // ---------------------------------------------------------------------------

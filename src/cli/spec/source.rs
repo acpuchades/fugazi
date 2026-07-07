@@ -9,9 +9,10 @@ use serde::Deserialize;
 
 use fugazi::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Component, Current,
-    Dmi, DmiValue, Donchian, DonchianValue, Ema, GetBool, GetReal, GetStr, Hma, Keltner,
-    KeltnerValue, Latch, Macd, MacdValue, Mfi, Obv, Position, Resample, Rma, Rsi, Sar, Sma, StdDev,
-    StochRsi, Stochastic, TrueRange, Value, Vwap, WilliamsR, Wma,
+    CurrentTime, Day, DayOfWeek, DayOfYear, Dmi, DmiValue, Donchian, DonchianValue, Ema, GetBool,
+    GetReal, GetStr, Hma, Hour, Keltner, KeltnerValue, Latch, Macd, MacdValue, Mfi, Minute, Month,
+    Obv, Position, Quarter, Resample, Rma, Rsi, Sar, Second, Sma, StdDev, StochRsi, Stochastic,
+    TrueRange, UnixMillis, UnixSeconds, Value, Vwap, WeekOfYear, WilliamsR, Wma, Year,
 };
 use fugazi::prelude::*;
 
@@ -380,6 +381,38 @@ pub enum SourceSpec {
     /// every source to be past its unstable tail" safe default; see
     /// [`fugazi::indicators::Unstable`].
     Unstable { source: Box<SourceSpec> },
+
+    // --- calendar accessors (read `atom.time`, emit Real; None when time is
+    // absent). See [`fugazi::indicators::calendar`] for the underlying
+    // primitives.
+    /// The Gregorian year (e.g. `2024.0`).
+    Year,
+    /// The Gregorian month, `1.0` (Jan) through `12.0` (Dec).
+    Month,
+    /// The day of the month, `1.0` through `31.0`.
+    Day,
+    /// The hour of the day (UTC), `0.0` through `23.0`.
+    Hour,
+    /// The minute of the hour, `0.0` through `59.0`.
+    Minute,
+    /// The second of the minute, `0.0` through `59.0`.
+    Second,
+    /// ISO 8601 weekday, `1.0` (Monday) through `7.0` (Sunday).
+    DayOfWeek,
+    /// Day of the year, `1.0` through `366.0`.
+    DayOfYear,
+    /// ISO 8601 week of the year, `1.0` through `53.0`.
+    WeekOfYear,
+    /// Calendar quarter, `1.0` through `4.0`.
+    Quarter,
+    /// Unix seconds since the epoch (as a Real).
+    UnixSeconds,
+    /// Unix milliseconds since the epoch (as a Real).
+    UnixMillis,
+    /// The raw bar-open [`Timestamp`] payload (yields
+    /// `DynType::Time`, not a scalar). The `Timestamp` twin of
+    /// [`SourceSpec::Current`].
+    Time,
 }
 
 impl SourceSpec {
@@ -619,6 +652,20 @@ impl SourceSpec {
                 dyn_indicator::chain(resample_dyn, inner_dyn)
             }
             Unstable { source } => dyn_indicator::unstable_wrap(source.build(anchor, schema)),
+
+            Year => dyn_indicator::wrap(self::Year::new()),
+            Month => dyn_indicator::wrap(self::Month::new()),
+            Day => dyn_indicator::wrap(self::Day::new()),
+            Hour => dyn_indicator::wrap(self::Hour::new()),
+            Minute => dyn_indicator::wrap(self::Minute::new()),
+            Second => dyn_indicator::wrap(self::Second::new()),
+            DayOfWeek => dyn_indicator::wrap(self::DayOfWeek::new()),
+            DayOfYear => dyn_indicator::wrap(self::DayOfYear::new()),
+            WeekOfYear => dyn_indicator::wrap(self::WeekOfYear::new()),
+            Quarter => dyn_indicator::wrap(self::Quarter::new()),
+            UnixSeconds => dyn_indicator::wrap(self::UnixSeconds::new()),
+            UnixMillis => dyn_indicator::wrap(self::UnixMillis::new()),
+            Time => dyn_indicator::wrap(self::CurrentTime::new()),
         }
     }
 }

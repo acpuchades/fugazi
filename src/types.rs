@@ -9,6 +9,34 @@ use std::sync::Arc;
 /// floating-point width (or a fixed-point type) in one place.
 pub type Real = f64;
 
+/// A UTC millisecond timestamp (Unix epoch).
+///
+/// Kept as a flat `i64` on purpose: it matches Binance's native representation,
+/// stays `Copy`, and keeps `time::OffsetDateTime` out of the pure core's ABI —
+/// callers that want a datetime go through [`Timestamp::to_datetime`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Timestamp(pub i64);
+
+impl Timestamp {
+    /// The current UTC time, in milliseconds since the Unix epoch.
+    pub fn now() -> Self {
+        Self::from_datetime(::time::OffsetDateTime::now_utc())
+    }
+
+    /// Convert a `time::OffsetDateTime` to a millisecond epoch stamp.
+    pub fn from_datetime(dt: ::time::OffsetDateTime) -> Self {
+        let nanos = dt.unix_timestamp_nanos();
+        Self((nanos / 1_000_000) as i64)
+    }
+
+    /// Reconstruct a `time::OffsetDateTime` at UTC from this millisecond stamp.
+    pub fn to_datetime(self) -> ::time::OffsetDateTime {
+        let nanos = (self.0 as i128) * 1_000_000;
+        ::time::OffsetDateTime::from_unix_timestamp_nanos(nanos)
+            .expect("i64 millis fits in OffsetDateTime range")
+    }
+}
+
 /// A single OHLCV bar.
 ///
 /// The numeric spine of every input [`Atom`]. Indicators that only need a price
@@ -346,28 +374,53 @@ impl OverlayInfo {
     }
 }
 
-/// A single bar's input to the indicator chain: an OHLCV [`Candle`] and,
-/// optionally, per-bar overlay values keyed by a shared [`Schema`].
+/// A single bar's input to the indicator chain: an OHLCV [`Candle`], an
+/// optional bar-open [`Timestamp`], and, optionally, per-bar overlay values
+/// keyed by a shared [`Schema`].
 ///
 /// The `Input` associated type of every [`Indicator`](crate::Indicator) that
 /// reads bar-shaped data. OHLCV access stays a direct field read
 /// (`atom.candle.close`); overlay access goes through an index resolved once at
-/// construction against the schema. Cheap to clone — a `Candle` memcpy plus,
-/// when present, two atomic bumps (the shared schema `Arc` and the per-atom
-/// `Arc<[Real]>` values); both are `Arc`, so an atom is `Send + Sync`.
+/// construction against the schema; time is read directly via
+/// [`atom.time`](Atom::time) by calendar indicators
+/// (`Year`/`Month`/`Day`/…, in [`crate::indicators::calendar`]). Cheap to
+/// clone — a `Candle` memcpy, an `Option<Timestamp>` (also `Copy`), plus, when
+/// overlays are present, two atomic bumps (the shared schema `Arc` and the
+/// per-atom `Arc<[Real]>` values); the overlay pointers are `Arc`, so an atom
+/// is `Send + Sync`.
+///
+/// `time` is deliberately `Option`: a bare backtest fed a raw candle stream
+/// has no notion of wall-clock time, and the calendar indicators return `None`
+/// on such input. A `Candle`-only construction path leaves it `None`; feed a
+/// [`Timestamp`] via [`Atom::with_time`] (or
+/// [`Atom::with_overlays_and_time`]) when the bar's open time is known.
 #[derive(Debug, Clone)]
 pub struct Atom {
     /// The OHLCV bar for this tick.
     pub candle: Candle,
+    /// The bar's open time as a UTC millisecond epoch, if known. `None` for
+    /// synthetic / time-agnostic bars; the calendar indicators read this and
+    /// emit `None` when it is absent.
+    pub time: Option<Timestamp>,
     /// Optional per-bar overlay values (external series keyed by name).
     pub overlays: Option<OverlayInfo>,
 }
 
 impl Atom {
-    /// An atom carrying only a candle (no overlays).
+    /// An atom carrying only a candle (no time, no overlays).
     pub fn new(candle: Candle) -> Self {
         Self {
             candle,
+            time: None,
+            overlays: None,
+        }
+    }
+
+    /// An atom with a candle and a bar-open [`Timestamp`] (no overlays).
+    pub fn with_time(candle: Candle, time: Timestamp) -> Self {
+        Self {
+            candle,
+            time: Some(time),
             overlays: None,
         }
     }
@@ -376,6 +429,21 @@ impl Atom {
     pub fn with_overlays(candle: Candle, overlays: OverlayInfo) -> Self {
         Self {
             candle,
+            time: None,
+            overlays: Some(overlays),
+        }
+    }
+
+    /// An atom carrying a candle, a bar-open [`Timestamp`], and bound overlay
+    /// values.
+    pub fn with_overlays_and_time(
+        candle: Candle,
+        overlays: OverlayInfo,
+        time: Timestamp,
+    ) -> Self {
+        Self {
+            candle,
+            time: Some(time),
             overlays: Some(overlays),
         }
     }

@@ -800,11 +800,100 @@ def test_atom_carries_overlays_or_is_bare():
     candle = ta.Candle(100.0, 101.0, 99.0, 100.5, 1_000.0)
     bare = ta.Atom(candle)
     assert bare.overlays is None
+    assert bare.time is None
     assert bare.candle.close == pytest.approx(100.5)
     overlays = ta.OverlayInfo(schema, [1.0])
     with_ov = ta.Atom(candle, overlays)
     assert with_ov.overlays is not None
     assert with_ov.overlays.get(0) == pytest.approx(1.0)
+
+
+def test_atom_carries_optional_time():
+    """`ta.Atom(candle, time=<UTC ms>)` and `.time` round-trip."""
+    candle = ta.Candle(100.0, 101.0, 99.0, 100.5, 1_000.0)
+    # 2024-03-15 12:34:56 UTC
+    stamped = ta.Atom(candle, time=1_710_506_096_000)
+    assert stamped.time == 1_710_506_096_000
+    assert stamped.overlays is None
+    # Overlays + time together.
+    schema = _schema("regime")
+    overlays = ta.OverlayInfo(schema, [1.0])
+    both = ta.Atom(candle, overlays, time=1_710_506_096_000)
+    assert both.time == 1_710_506_096_000
+    assert both.overlays is not None
+
+
+# 2024-03-15 12:34:56 UTC — a Friday, Q1, DOY 75.
+_TS_2024_03_15 = 1_710_506_096_000
+
+
+def _timed(candle_kwargs, time_ms=_TS_2024_03_15):
+    c = ta.Candle(**candle_kwargs)
+    return ta.Atom(c, time=time_ms)
+
+
+def test_calendar_sources_decompose_atom_time():
+    bar_kwargs = dict(open=1.0, high=1.0, low=1.0, close=1.0, volume=0.0)
+    atom = _timed(bar_kwargs)
+    checks = [
+        (ta.year(), 2024.0),
+        (ta.month(), 3.0),
+        (ta.day(), 15.0),
+        (ta.hour(), 12.0),
+        (ta.minute(), 34.0),
+        (ta.second(), 56.0),
+        (ta.day_of_week(), 5.0),  # Friday
+        (ta.day_of_year(), 75.0),
+        (ta.quarter(), 1.0),
+        (ta.unix_seconds(), 1_710_506_096.0),
+        (ta.unix_millis(), 1_710_506_096_000.0),
+    ]
+    for source, want in checks:
+        assert source.update(atom) == pytest.approx(want)
+
+
+def test_calendar_source_none_on_untimed_atom():
+    """A bare Candle → Atom has no time; calendar reads stay `None`."""
+    candle = ta.Candle(1.0, 1.0, 1.0, 1.0, 0.0)
+    assert ta.year().update(candle) is None
+    assert ta.day_of_week().update(candle) is None
+
+
+def test_calendar_sources_compose_with_operators():
+    """`day_of_week().eq(1)` = Monday. Composes like any other source."""
+    fri = _timed(dict(open=1.0, high=1.0, low=1.0, close=1.0, volume=0.0))
+    mon = _timed(
+        dict(open=1.0, high=1.0, low=1.0, close=1.0, volume=0.0),
+        time_ms=_TS_2024_03_15 + 3 * 86_400_000,  # 2024-03-18 (Mon)
+    )
+    is_monday = ta.day_of_week().eq(1)
+    is_monday.update(fri)
+    assert is_monday.is_true() is False
+    is_monday.update(mon)
+    assert is_monday.is_true() is True
+
+
+def test_is_weekday_and_is_weekend_signals():
+    bar_kwargs = dict(open=1.0, high=1.0, low=1.0, close=1.0, volume=0.0)
+    fri = _timed(bar_kwargs)  # 2024-03-15 Fri
+    sat = _timed(bar_kwargs, time_ms=_TS_2024_03_15 + 86_400_000)
+
+    wd = ta.is_weekday()
+    wd.update(fri)
+    assert wd.is_true() is True
+    wd.update(sat)
+    assert wd.is_true() is False
+
+    we = ta.is_weekend()
+    we.update(fri)
+    assert we.is_true() is False
+    we.update(sat)
+    assert we.is_true() is True
+
+    # No `atom.time` → both read False (signals-are-False-while-warming).
+    bare = ta.Candle(1.0, 1.0, 1.0, 1.0, 0.0)
+    assert ta.is_weekday().update(bare) is False
+    assert ta.is_weekend().update(bare) is False
 
 
 def test_get_indicator_reads_overlay_by_key():

@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use fugazi::indicators::compare;
 use fugazi::indicators::logic::Const;
-use fugazi::indicators::{DEFAULT_EPSILON, GetBool, Position, ValueStr};
+use fugazi::indicators::{DEFAULT_EPSILON, GetBool, IsWeekday, IsWeekend, Position, ValueStr};
 use fugazi::prelude::*;
 
 use super::source::{SourceSpec, default_source};
@@ -131,6 +131,16 @@ pub enum SignalSpec {
     /// A constant boolean leaf. Spelled `!value` like [`SourceSpec::Value`] —
     /// one tag for "a literal", typed by position (bool here, number there).
     Value(bool),
+
+    // --- calendar signals (read `atom.time`, emit bool; None when time is
+    // absent). Anything else (`is_monday`, "hour < 9", "trading window") is a
+    // composition against the numeric calendar sources: e.g. `!eq { lhs:
+    // !day_of_week, rhs: !value 1 }` for Monday.
+    /// True on Monday through Friday, false on Sat/Sun. `None` when
+    /// `atom.time` is absent.
+    IsWeekday,
+    /// True on Sat/Sun, false on Mon–Fri. `None` when `atom.time` is absent.
+    IsWeekend,
 }
 
 /// Resolve an optional tolerance to its concrete value.
@@ -240,6 +250,9 @@ impl SignalSpec {
                 let rhs: ValueStr<Atom> = ValueStr::new(rhs.as_str());
                 dyn_indicator::wrap(compare::StrNe::new(lhs, rhs))
             }
+
+            IsWeekday => dyn_indicator::wrap(self::IsWeekday::new()),
+            IsWeekend => dyn_indicator::wrap(self::IsWeekend::new()),
         }
     }
 }

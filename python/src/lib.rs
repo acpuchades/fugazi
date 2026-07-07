@@ -35,9 +35,11 @@ use fugazi_core::Indicator;
 use fugazi_core::indicators::compare::{EqOp, GeOp, GtOp, LeOp, LtOp, NeOp, StrEqOp, StrNeOp};
 use fugazi_core::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Current, CurrentBar,
-    Dmi, DmiValue, Donchian, DonchianValue, Ema, GetBool, GetReal, GetStr, Hma, Identity, Keltner,
-    KeltnerValue, Latch, Macd, MacdValue, Mfi, Obv, Resample, Rma, Rsi, Sar, Sma, StdDev,
-    Stochastic, TrueRange, Value, ValueStr, Vwap, WilliamsR, Wma,
+    Day, DayOfWeek, DayOfYear, Dmi, DmiValue, Donchian, DonchianValue, Ema, GetBool, GetReal,
+    GetStr, Hma, Hour, Identity, IsWeekday, IsWeekend, Keltner, KeltnerValue, Latch, Macd,
+    MacdValue, Mfi, Minute, Month, Obv, Quarter, Resample, Rma, Rsi, Sar, Second, Sma, StdDev,
+    Stochastic, TrueRange, UnixMillis, UnixSeconds, Value, ValueStr, Vwap, WeekOfYear, WilliamsR,
+    Wma, Year,
 };
 use fugazi_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
 use fugazi_core::sources::{Binance, CandleSource, Interval, SourceError, Timestamp, Yahoo};
@@ -1340,12 +1342,25 @@ struct PyAtom {
 
 #[pymethods]
 impl PyAtom {
+    /// `time` is the bar-open UTC millisecond stamp (an `int`) — passed through
+    /// to any calendar indicator (`year()`, `month()`, `day_of_week()`, …) in
+    /// the chain. `None` on synthetic bars leaves those calendar reads at
+    /// `None` (matching a not-yet-warm result).
     #[new]
-    #[pyo3(signature = (candle, overlays = None))]
-    fn new(candle: &PyCandle, overlays: Option<&PyOverlayInfo>) -> Self {
-        let atom = match overlays {
-            Some(ov) => Atom::with_overlays(candle.inner, ov.inner.clone()),
-            None => Atom::new(candle.inner),
+    #[pyo3(signature = (candle, overlays = None, time = None))]
+    fn new(
+        candle: &PyCandle,
+        overlays: Option<&PyOverlayInfo>,
+        time: Option<i64>,
+    ) -> Self {
+        let time = time.map(Timestamp);
+        let atom = match (overlays, time) {
+            (Some(ov), Some(t)) => {
+                Atom::with_overlays_and_time(candle.inner, ov.inner.clone(), t)
+            }
+            (Some(ov), None) => Atom::with_overlays(candle.inner, ov.inner.clone()),
+            (None, Some(t)) => Atom::with_time(candle.inner, t),
+            (None, None) => Atom::new(candle.inner),
         };
         Self { inner: atom }
     }
@@ -1366,14 +1381,30 @@ impl PyAtom {
             .map(|ov| PyOverlayInfo { inner: ov })
     }
 
+    /// The bar-open time as a UTC millisecond epoch (an `int`), or `None`
+    /// if the atom was constructed without one.
+    #[getter]
+    fn time(&self) -> Option<i64> {
+        self.inner.time.map(|t| t.0)
+    }
+
     fn __repr__(&self) -> String {
-        match &self.inner.overlays {
-            Some(ov) => format!(
+        let candle = &self.inner.candle;
+        let time = self.inner.time.map(|t| t.0);
+        match (&self.inner.overlays, time) {
+            (Some(ov), Some(t)) => format!(
+                "Atom(candle={:?}, overlays={:?}, time={})",
+                candle,
+                ov.values(),
+                t,
+            ),
+            (Some(ov), None) => format!(
                 "Atom(candle={:?}, overlays={:?})",
-                self.inner.candle,
+                candle,
                 ov.values(),
             ),
-            None => format!("Atom(candle={:?})", self.inner.candle),
+            (None, Some(t)) => format!("Atom(candle={:?}, time={})", candle, t),
+            (None, None) => format!("Atom(candle={:?})", candle),
         }
     }
 }
@@ -2819,6 +2850,85 @@ leaf!(
     Current::median(),
     "Source: the bar's median price, (high + low) / 2."
 );
+
+// Calendar accessors: each reads `atom.time` and emits the decomposed field
+// (year, month, …) as a Real. `None` on bars whose `time` is `None`. Anything
+// else — day-of-month == 15, hour < 9, "trading window" — is a composition
+// against these numeric sources.
+leaf!(
+    year,
+    Year::new(),
+    "Source: the Gregorian year of `atom.time` (UTC), or `None` if unset."
+);
+leaf!(
+    month,
+    Month::new(),
+    "Source: the Gregorian month, 1 (Jan) through 12 (Dec)."
+);
+leaf!(
+    day,
+    Day::new(),
+    "Source: the day of the month, 1 through 31."
+);
+leaf!(
+    hour,
+    Hour::new(),
+    "Source: the hour of the day (UTC), 0 through 23."
+);
+leaf!(
+    minute,
+    Minute::new(),
+    "Source: the minute of the hour, 0 through 59."
+);
+leaf!(
+    second,
+    Second::new(),
+    "Source: the second of the minute, 0 through 59."
+);
+leaf!(
+    day_of_week,
+    DayOfWeek::new(),
+    "Source: ISO 8601 weekday, 1 (Monday) through 7 (Sunday)."
+);
+leaf!(
+    day_of_year,
+    DayOfYear::new(),
+    "Source: day of the year, 1 through 366."
+);
+leaf!(
+    week_of_year,
+    WeekOfYear::new(),
+    "Source: ISO 8601 week of the year, 1 through 53."
+);
+leaf!(
+    quarter,
+    Quarter::new(),
+    "Source: calendar quarter, 1 through 4."
+);
+leaf!(
+    unix_seconds,
+    UnixSeconds::new(),
+    "Source: Unix seconds since the epoch (as a float)."
+);
+leaf!(
+    unix_millis,
+    UnixMillis::new(),
+    "Source: Unix milliseconds since the epoch (as a float)."
+);
+
+/// Signal: true on Monday through Friday, false on Saturday/Sunday. `False`
+/// on bars whose `atom.time` is `None`.
+#[pyfunction]
+fn is_weekday() -> PySignal {
+    PySignal::wrap(AnySignal::Candle(SignalBox::new(IsWeekday::new())))
+}
+
+/// Signal: true on Saturday/Sunday, false Monday through Friday. `False` on
+/// bars whose `atom.time` is `None`.
+#[pyfunction]
+fn is_weekend() -> PySignal {
+    PySignal::wrap(AnySignal::Candle(SignalBox::new(IsWeekend::new())))
+}
 
 /// Source: the raw value stream, passed straight through. Root an indicator
 /// here (instead of a candle accessor) to consume a bare 1-D series of numbers
@@ -4370,6 +4480,9 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wma, hma, rsi, stddev, stochastic, cci, atr, mfi, williams_r, obv, vwap, ad, true_range,
         adx, dmi, aroon, sar, macd, bollinger, keltner, donchian, stoch_rsi, resample, latch,
         unstable, get, get_real, get_bool, get_str, str_eq, str_ne, fetch,
+        // Calendar accessors + weekday/weekend signals; consume `atom.time`.
+        year, month, day, hour, minute, second, day_of_week, day_of_year, week_of_year, quarter,
+        unix_seconds, unix_millis, is_weekday, is_weekend,
     );
 
     // `fugazi.metrics` — mirror of `fugazi::metrics::*`. Registered as a

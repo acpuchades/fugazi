@@ -27,6 +27,7 @@ mod adx;
 mod aroon;
 mod atr;
 mod bollinger;
+mod calendar;
 mod candle;
 mod cci;
 mod component;
@@ -62,6 +63,12 @@ pub use adx::{Adx, AdxValue};
 pub use aroon::{Aroon, AroonValue};
 pub use atr::Atr;
 pub use bollinger::{Bollinger, BollingerValue};
+pub use calendar::{
+    Calendar, CalendarField, CurrentTime, Day, DayOfMonth, DayOfMonthField, DayOfWeek,
+    DayOfWeekField, DayOfYear, DayOfYearField, Hour, HourField, IsWeekday, IsWeekend, Minute,
+    MinuteField, Month, MonthField, Quarter, QuarterField, Second, SecondField, UnixMillis,
+    UnixMillisField, UnixSeconds, UnixSecondsField, WeekOfYear, WeekOfYearField, Year, YearField,
+};
 pub use candle::{
     CandleField, Close, Current, CurrentBar, Field, High, Low, Median, Open, Typical, Volume,
 };

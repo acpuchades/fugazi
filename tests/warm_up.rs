@@ -9,12 +9,13 @@
 //! an instance that saw the full history.
 
 use fugazi::indicators::{
-    Adx, Aroon, Atr, Bollinger, Cci, Current, Dmi, Donchian, Ema, Hma, Identity, Keltner, Latch,
-    Macd, Mfi, Obv, Resample, Rma, Rsi, Sar, Sma, StdDev, Stochastic, TrueRange, Value,
-    Vwap, WilliamsR, Wma,
+    Adx, Aroon, Atr, Bollinger, Cci, CurrentTime, Current, Day, DayOfWeek, DayOfYear, Dmi,
+    Donchian, Ema, Hma, Hour, Identity, IsWeekday, IsWeekend, Keltner, Latch, Macd, Mfi, Minute,
+    Month, Obv, Quarter, Resample, Rma, Rsi, Sar, Second, Sma, StdDev, Stochastic, TrueRange,
+    UnixMillis, UnixSeconds, Value, Vwap, WeekOfYear, WilliamsR, Wma, Year,
 };
 use fugazi::prelude::*;
-use fugazi::types::{Atom, Candle, Real};
+use fugazi::types::{Atom, Candle, Real, Timestamp};
 
 /// Synthetic wiggly-but-trending bars: well-formed OHLC, positive volume, no
 /// degenerate (flat / zero-volume) stretches.
@@ -58,6 +59,20 @@ fn assert_exact_warm_up<I: Indicator>(mut ind: I, inputs: Vec<I::Input>, name: &
 fn candle_case(ind: impl Indicator<Input = Atom>, name: &str) {
     let n = ind.warm_up_period() + 5;
     let atoms: Vec<Atom> = bars(n).into_iter().map(Atom::from).collect();
+    assert_exact_warm_up(ind, atoms, name);
+}
+
+/// Feed timed atoms (one-minute cadence starting 2024-01-01 UTC) so calendar
+/// indicators, which return `None` on `atom.time == None`, get a bar-open
+/// timestamp to decompose.
+fn timed_candle_case(ind: impl Indicator<Input = Atom>, name: &str) {
+    let base = 1_704_067_200_000i64; // 2024-01-01 00:00:00 UTC in ms
+    let n = ind.warm_up_period() + 5;
+    let atoms: Vec<Atom> = bars(n)
+        .into_iter()
+        .enumerate()
+        .map(|(i, c)| Atom::with_time(c, Timestamp(base + (i as i64) * 60_000)))
+        .collect();
     assert_exact_warm_up(ind, atoms, name);
 }
 
@@ -112,6 +127,25 @@ fn warm_up_is_exact_for_the_catalogue() {
         Latch::new(Resample::new(Current::candle(), 4).close()),
         "latched_resample_close",
     );
+
+    // Calendar accessors: warm-up 1, emit only when `atom.time` is `Some`.
+    // The `timed_candle_case` helper stamps each bar with a synthetic time so
+    // these decompose deterministically.
+    timed_candle_case(Year::new(), "year");
+    timed_candle_case(Month::new(), "month");
+    timed_candle_case(Day::new(), "day");
+    timed_candle_case(Hour::new(), "hour");
+    timed_candle_case(Minute::new(), "minute");
+    timed_candle_case(Second::new(), "second");
+    timed_candle_case(DayOfWeek::new(), "day_of_week");
+    timed_candle_case(DayOfYear::new(), "day_of_year");
+    timed_candle_case(WeekOfYear::new(), "week_of_year");
+    timed_candle_case(Quarter::new(), "quarter");
+    timed_candle_case(UnixSeconds::new(), "unix_seconds");
+    timed_candle_case(UnixMillis::new(), "unix_millis");
+    timed_candle_case(CurrentTime::new(), "current_time");
+    timed_candle_case(IsWeekday::new(), "is_weekday");
+    timed_candle_case(IsWeekend::new(), "is_weekend");
 }
 
 #[test]

@@ -378,6 +378,85 @@ mod tests {
     }
 
     #[test]
+    fn calendar_source_tags_decompose_atom_time() {
+        // Each bare calendar tag parses, builds, and emits the expected
+        // component on a timed atom.
+        use crate::dyn_indicator::DynType;
+        use fugazi::types::Timestamp;
+
+        // 2024-03-15 12:34:56 UTC — Friday, Q1, DOY 75.
+        let atom = Atom::with_time(bar(1.0), Timestamp(1_710_506_096_000));
+
+        for (yaml, want) in [
+            ("year", 2024.0),
+            ("month", 3.0),
+            ("day", 15.0),
+            ("hour", 12.0),
+            ("minute", 34.0),
+            ("second", 56.0),
+            ("day_of_week", 5.0),
+            ("day_of_year", 75.0),
+            ("quarter", 1.0),
+            ("unix_seconds", 1_710_506_096.0),
+            ("unix_millis", 1_710_506_096_000.0),
+        ] {
+            let spec: SourceSpec = serde_norway::from_str(yaml).unwrap();
+            let mut built = spec.build(&Position::new(), &Schema::empty());
+            assert_eq!(built.output_type(), DynType::Real, "{yaml}: output type");
+            assert_eq!(
+                built.update(Payload::Atom(atom.clone())),
+                Some(Payload::Real(want)),
+                "{yaml}: value on 2024-03-15 12:34:56 UTC",
+            );
+        }
+
+        // `!time` is the raw Timestamp payload, not a scalar.
+        let spec: SourceSpec = serde_norway::from_str("time").unwrap();
+        let mut built = spec.build(&Position::new(), &Schema::empty());
+        assert_eq!(built.output_type(), DynType::Time);
+        assert_eq!(
+            built.update(Payload::Atom(atom.clone())),
+            Some(Payload::Time(Timestamp(1_710_506_096_000))),
+        );
+    }
+
+    #[test]
+    fn calendar_signal_tags_gate_by_weekday() {
+        use fugazi::types::Timestamp;
+
+        // 2024-03-15 (Fri) vs 2024-03-16 (Sat).
+        let fri = Atom::with_time(bar(1.0), Timestamp(1_710_506_096_000));
+        let sat = Atom::with_time(bar(1.0), Timestamp(1_710_506_096_000 + 86_400_000));
+
+        let mut wd = serde_norway::from_str::<SignalSpec>("is_weekday")
+            .unwrap()
+            .build(&Position::new(), &Schema::empty());
+        assert_eq!(
+            wd.update(Payload::Atom(fri.clone())),
+            Some(Payload::Bool(true)),
+        );
+        assert_eq!(
+            wd.update(Payload::Atom(sat.clone())),
+            Some(Payload::Bool(false)),
+        );
+
+        let mut we = serde_norway::from_str::<SignalSpec>("is_weekend")
+            .unwrap()
+            .build(&Position::new(), &Schema::empty());
+        assert_eq!(we.update(Payload::Atom(fri)), Some(Payload::Bool(false)));
+        assert_eq!(we.update(Payload::Atom(sat)), Some(Payload::Bool(true)));
+    }
+
+    #[test]
+    fn calendar_source_none_on_untimed_atom() {
+        // A calendar accessor over a bare Atom (time=None) yields None — same
+        // shape as a not-yet-warm indicator.
+        let spec: SourceSpec = serde_norway::from_str("year").unwrap();
+        let mut built = spec.build(&Position::new(), &Schema::empty());
+        assert_eq!(built.update(Payload::Atom(bar(1.0).into())), None);
+    }
+
+    #[test]
     fn latch_ema_of_resample_matches_reference_htf_ema() {
         // The composition-order regression at the YAML surface: an EMA-3
         // running inside !resample, wrapped in !latch, agrees numerically

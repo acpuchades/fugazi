@@ -1,6 +1,6 @@
 [package]
 name = "fugazi"
-version = "0.16.0"
+version = "0.17.0"
 edition = "2024"
 description = "A library of incremental technical-analysis indicators, signals and strategies"
 license = "MIT"
@@ -31,7 +31,7 @@ required-features = ["cli"]
 # default-on so `cargo build` builds the CLI unchanged.
 [features]
 default = ["sources", "cli"]
-sources = ["dep:reqwest", "dep:tokio", "dep:time", "dep:thiserror"]
+sources = ["dep:reqwest", "dep:tokio", "dep:thiserror"]
 cli = [
     "sources",
     "dep:clap",
@@ -58,7 +58,7 @@ console = { version = "0.16", optional = true }
 rayon = { version = "1", optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls", "gzip"], optional = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros"], optional = true }
-time = { version = "0.3", features = ["formatting", "parsing", "macros"], optional = true }
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 thiserror = { version = "2", optional = true }
 interim = { version = "0.2.1", default-features = false, features = ["std", "time_0_3"], optional = true }
 

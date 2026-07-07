@@ -7,11 +7,13 @@
 //! The pieces are:
 //!
 //! * [`CandleSource`] — the async trait every provider implements.
-//! * [`Timestamp`] — a flat i64-millis UTC epoch stamp. Kept `Copy` and free of
-//!   the `time` crate in its ABI so the trait signature stays simple.
+//! * [`Timestamp`] — re-exported from [`crate::types`]; a flat i64-millis UTC
+//!   epoch stamp, `Copy`, with `time`-crate helpers on the pure core.
 //! * [`TimedCandle`] — a [`crate::Candle`] paired with its open time; the
-//!   value type providers return. The pure `Candle` stays timeless so the
-//!   indicator layer is unaffected.
+//!   value type providers return. The equivalent `Atom` (`candle` +
+//!   `Option<Timestamp>`) is what the indicator layer consumes, so bar-stream
+//!   drivers can lift a `TimedCandle` into a timed `Atom` via
+//!   [`Atom::with_time`](crate::types::Atom::with_time).
 //! * [`Interval`] — the bar cadence, an enum because providers advertise a
 //!   discrete vocabulary of tokens. Constructed directly (`Interval::Day(1)`,
 //!   `Interval::Hour(4)`, …); string parsing is a caller-side concern.
@@ -44,38 +46,10 @@ use std::fmt;
 use std::future::Future;
 
 use crate::types::Candle;
+pub use crate::types::Timestamp;
 
 pub use binance::Binance;
 pub use yahoo::Yahoo;
-
-/// A UTC millisecond timestamp (Unix epoch).
-///
-/// Kept as a flat `i64` on purpose: it matches Binance's native representation,
-/// stays `Copy`, and keeps `time::OffsetDateTime` out of the [`CandleSource`]
-/// trait's public ABI (callers that want a datetime can call
-/// [`Timestamp::to_datetime`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Timestamp(pub i64);
-
-impl Timestamp {
-    /// The current UTC time, in milliseconds since the Unix epoch.
-    pub fn now() -> Self {
-        Self::from_datetime(time::OffsetDateTime::now_utc())
-    }
-
-    /// Convert a `time::OffsetDateTime` to a millisecond epoch stamp.
-    pub fn from_datetime(dt: time::OffsetDateTime) -> Self {
-        let nanos = dt.unix_timestamp_nanos();
-        Self((nanos / 1_000_000) as i64)
-    }
-
-    /// Reconstruct a `time::OffsetDateTime` at UTC from this millisecond stamp.
-    pub fn to_datetime(self) -> time::OffsetDateTime {
-        let nanos = (self.0 as i128) * 1_000_000;
-        time::OffsetDateTime::from_unix_timestamp_nanos(nanos)
-            .expect("i64 millis fits in OffsetDateTime range")
-    }
-}
 
 /// A [`Candle`] paired with its bar-open [`Timestamp`].
 ///
