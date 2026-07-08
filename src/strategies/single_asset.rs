@@ -1,7 +1,7 @@
 //! [`SingleAssetStrategy`]: the generic, all-in skeleton every other strategy in
 //! this catalogue specialises.
 
-use crate::indicators::{Const, Position, Value};
+use crate::indicators::{Book, Const, Position, Value};
 use crate::prelude::*;
 use crate::types::{Selector, Snapshot};
 
@@ -162,6 +162,7 @@ pub struct SingleAssetStrategy<Sym> {
     short_target: Option<Level<Sym>>,
     sizing: Level<Sym>,
     position: Position,
+    book: Book,
     bars_seen: usize,
 }
 
@@ -169,7 +170,25 @@ impl<Sym: Clone + 'static> SingleAssetStrategy<Sym> {
     /// A strategy on `symbol` with no transitions wired — every slot a
     /// constant-`false` signal and no stops. Add sides with
     /// [`long_on`](Self::long_on) / [`short_on`](Self::short_on).
+    ///
+    /// The strategy's [`Book`] is seeded at `1.0`. This is fine for a toy
+    /// [`PaperWallet::new(1.0)`](crate::PaperWallet::new), but any real
+    /// backtest needs to match the wallet's initial capital via
+    /// [`with_initial_equity`](Self::with_initial_equity) for the
+    /// book-anchored sizing recipes (drawdown throttle, realized-vol
+    /// target, fractional Kelly) to read meaningful numbers.
     pub fn new(symbol: Sym) -> Self {
+        Self::with_initial_equity(symbol, 1.0)
+    }
+
+    /// A strategy on `symbol` whose [`Book`] is seeded at `initial_equity`
+    /// — the assumed starting capital, which should match the wallet's
+    /// seed for equity / drawdown numbers to be meaningful. Otherwise
+    /// identical to [`new`](Self::new).
+    ///
+    /// # Panics
+    /// Panics if `initial_equity` is not strictly positive.
+    pub fn with_initial_equity(symbol: Sym, initial_equity: Real) -> Self {
         Self {
             symbol,
             long: Box::new(Const::<Snapshot<Sym>>::new(false)),
@@ -182,6 +201,7 @@ impl<Sym: Clone + 'static> SingleAssetStrategy<Sym> {
             short_target: None,
             sizing: Box::new(Value::<Snapshot<Sym>>::new(1.0)),
             position: Position::new(),
+            book: Book::new(initial_equity),
             bars_seen: 0,
         }
     }
@@ -228,6 +248,17 @@ impl<Sym: Clone + 'static> SingleAssetStrategy<Sym> {
     /// fills.
     pub fn position(&self) -> Position {
         self.position.clone()
+    }
+
+    /// A clone of this strategy's [`Book`], for building a custom sizing
+    /// expression against the equity curve or closed-trade history:
+    /// `strat.book().drawdown()` for a drawdown-throttled multiplier,
+    /// `strat.book().return_per_bar()` for realized-vol targeting,
+    /// `strat.book().trade_return()` for a Kelly-style fractional sizer.
+    /// See [`Book`] for the full accessor set and the initial-equity
+    /// requirement.
+    pub fn book(&self) -> Book {
+        self.book.clone()
     }
 
     /// Set the long side's stop-loss level — the long flattens when the bar's
@@ -333,6 +364,7 @@ impl<Sym: Clone + PartialEq + 'static> Strategy for SingleAssetStrategy<Sym> {
         let self_atom = extract_self_atom(&snap, &self.symbol);
         if let Some(atom) = &self_atom {
             self.position.update(atom.candle);
+            self.book.update(atom.candle);
         }
 
         self.long.update(snap.clone());
@@ -360,11 +392,13 @@ impl<Sym: Clone + PartialEq + 'static> Strategy for SingleAssetStrategy<Sym> {
     }
 
     fn on_fill(&mut self, order: &Order<Sym>) {
-        // Track our own position from the wallet's fills — sets the entry price on
-        // an open/reversal and clears it on a flatten (including a protective fill
-        // booked inside the wallet).
+        // Track our own position + book from the wallet's fills — sets the entry
+        // price on an open/reversal, clears it on a flatten (including a
+        // protective fill booked inside the wallet), and updates the book's
+        // cash / units / trade lifecycle in lockstep.
         if order.symbol == self.symbol {
             self.position.apply(order.side, order.units, order.price);
+            self.book.apply_fill(order.side, order.units, order.price);
         }
     }
 
@@ -436,6 +470,7 @@ impl<Sym: Clone + PartialEq + 'static> Strategy for SingleAssetStrategy<Sym> {
         }
         self.sizing.reset();
         self.position.reset();
+        self.book.reset();
         self.bars_seen = 0;
     }
 }
@@ -611,5 +646,108 @@ mod tests {
         assert!(!strat.is_ready());
         strat.update(Snapshot::of_atom(flat_bar(100.0).into()));
         assert!(strat.is_ready());
+    }
+
+    /// Drive `strat` over `candles` with a wallet seeded at `initial_cash`
+    /// (so the book's seed can be matched).
+    fn run_with_capital(
+        strat: &mut SingleAssetStrategy<&'static str>,
+        candles: &[Candle],
+        initial_cash: Real,
+    ) -> PaperWallet<&'static str> {
+        let mut wallet = PaperWallet::new(initial_cash);
+        for &c in candles {
+            for fill in wallet.update("X", c) {
+                strat.on_fill(&fill);
+            }
+            strat.update(Snapshot::of_atom(c.into()));
+            strat.trade(&mut wallet);
+        }
+        wallet
+    }
+
+    #[test]
+    fn book_tracks_buy_and_hold_equity_curve() {
+        // Seed both wallet and book at 1000. Buy-and-hold at 100 fills on bar
+        // 2 (queued bar 1). Bar 3: mark to 120 → equity should be 1200.
+        let mut strat = SingleAssetStrategy::with_initial_equity("X", 1_000.0)
+            .long_on(
+                Const::<Snapshot<&'static str>>::new(true),
+                Const::<Snapshot<&'static str>>::new(false),
+            );
+        let book = strat.book();
+        let _ = run_with_capital(
+            &mut strat,
+            &[flat_bar(100.0), flat_bar(100.0), flat_bar(120.0)],
+            1_000.0,
+        );
+        assert!(
+            (book.equity_value() - 1_200.0).abs() < 1e-9,
+            "book equity {}",
+            book.equity_value()
+        );
+        assert!((book.equity_peak_value() - 1_200.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn book_records_trade_close_on_exit() {
+        // Long/flat: enter bar 0, exit bar 2. Entry queues bar 0, fills bar 1
+        // at 100. Exit queues bar 2, fills bar 3 at 120 — trade P&L =
+        // 10 * (120 − 100) = 200, return 0.20 relative to seed equity 1000.
+        struct At {
+            bar: usize,
+            fire: usize,
+            last: Option<bool>,
+        }
+        impl Indicator for At {
+            type Input = Snapshot<&'static str>;
+            type Output = bool;
+            fn update(&mut self, _s: Snapshot<&'static str>) -> Option<bool> {
+                let out = self.bar == self.fire;
+                self.bar += 1;
+                self.last = Some(out);
+                Some(out)
+            }
+            fn value(&self) -> Option<bool> {
+                self.last
+            }
+            fn warm_up_period(&self) -> usize {
+                0
+            }
+            fn reset(&mut self) {
+                self.bar = 0;
+                self.last = None;
+            }
+        }
+        let mut strat = SingleAssetStrategy::with_initial_equity("X", 1_000.0).long_on(
+            At {
+                bar: 0,
+                fire: 0,
+                last: None,
+            },
+            At {
+                bar: 0,
+                fire: 2,
+                last: None,
+            },
+        );
+        let book = strat.book();
+        let _ = run_with_capital(
+            &mut strat,
+            &[
+                flat_bar(100.0), // bar 0: enter signals; queue Buy
+                flat_bar(100.0), // bar 1: entry fills at 100 (10 units)
+                flat_bar(110.0), // bar 2: exit signals; queue close
+                flat_bar(120.0), // bar 3: exit fills at 120; book records close
+            ],
+            1_000.0,
+        );
+        // After the run, the book's active_trade_close should reflect the
+        // close (it was set on bar 3's update, no bar after to drain it).
+        let ret = book.trade_return::<Snapshot<&'static str>>().value();
+        let pnl = book.trade_pnl::<Snapshot<&'static str>>().value();
+        assert!(ret.is_some() && pnl.is_some(), "no trade close recorded");
+        assert!((pnl.unwrap() - 200.0).abs() < 1e-9);
+        assert!((ret.unwrap() - 0.20).abs() < 1e-9);
     }
 }
