@@ -376,6 +376,32 @@ fugazi run @strategy.params.yml \
   --series @candles.csv --output-dir out/
 ```
 
+## Reusing signals — YAML anchors
+
+A signal or level that appears in more than one place can be defined once with
+a YAML anchor (`&name`) and reused elsewhere with an alias (`*name`). Anchors
+are a native YAML feature — the parser inlines each alias with the anchored
+subtree before typed deserialization, so the strategy sees exactly the same
+tree it would have without the anchors.
+
+The one YAML rule is that `*name` must appear **after** `&name` in the
+document. The natural pattern is to attach the anchor at the first use site —
+the earliest field that references the subtree — and alias it from every
+later site:
+
+```yaml
+symbol: BTC
+long:
+  enter: &cross_up !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }
+  exit:  &cross_dn !crosses_below { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }
+short:
+  enter: *cross_dn
+  exit:  *cross_up
+```
+
+Anchors compose with `!param`: the parser inlines aliases first, so a `!param`
+inside an anchored subtree is substituted at every reuse site in the same pass.
+
 ## Complete examples
 
 An RSI mean-reversion, long/flat:

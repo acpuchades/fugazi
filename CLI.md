@@ -906,21 +906,20 @@ subtree before typed deserialization, so the strategy sees exactly the same
 tree it would have without the anchors.
 
 The one YAML rule is that `*name` must appear **after** `&name` in the
-document. To keep the definitions in a consistent, up-front place — rather
-than pinned to whichever field happens to come first — `StrategySpec`
-accepts an ignored `defs:` field. Park your anchors there:
+document. The natural pattern is to attach the anchor at the first use
+site — the earliest field that references the subtree — and alias it from
+every later site:
 
 ```yaml
-defs:
-  - &cross_up !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }
-  - &cross_dn !crosses_below { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }
-
 symbol: BTC
-long:  { enter: *cross_up, exit: *cross_dn }
-short: { enter: *cross_dn, exit: *cross_up }
+long:
+  enter: &cross_up !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }
+  exit:  &cross_dn !crosses_below { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }
+short:
+  enter: *cross_dn
+  exit:  *cross_up
 ```
 
-`defs:` is read and discarded — nothing about it feeds into `build()`.
 Anchors compose with `!param`: the parser inlines aliases first, so a
 `!param` inside an anchored subtree is substituted at every reuse site
 in the same pass.

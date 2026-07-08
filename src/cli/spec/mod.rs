@@ -180,17 +180,18 @@ mod tests {
     }
 
     #[test]
-    fn defs_block_parks_yaml_anchors_reused_across_sides() {
-        // Anchors defined in an ignored `defs:` block are inlined by the YAML
-        // parser at each `*name` site, so a shared signal can be defined once
-        // and reused from both sides without repeating the tree.
+    fn inline_yaml_anchors_reused_across_sides() {
+        // Anchors defined inline at their first use site are inlined by the
+        // YAML parser at each `*name` alias, so a shared signal can be defined
+        // once on `long` and reused on `short` without repeating the tree.
         let yaml = r#"
-            defs:
-              - &cross_up !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }
-              - &cross_dn !crosses_below { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }
             symbol: BTC
-            long:  { enter: *cross_up, exit: *cross_dn }
-            short: { enter: *cross_dn, exit: *cross_up }
+            long:
+              enter: &cross_up !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }
+              exit:  &cross_dn !crosses_below { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }
+            short:
+              enter: *cross_dn
+              exit:  *cross_up
         "#;
         let spec = StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
             .unwrap();

@@ -60,13 +60,10 @@ impl SideSpec {
 
 /// A whole `strategy.yml`: the traded symbol plus its long/short sides.
 ///
-/// A `defs:` field is accepted and ignored — it exists as a parking spot for
-/// YAML anchors (`&name`) so they can be defined up-front in whatever order
-/// and reused via `*name` from `long`/`short`, without an anchor being pinned
-/// to whichever field happens to come first. `serde_norway` resolves anchors
-/// before deserialization, so by the time this struct is built the anchored
-/// subtrees have already been inlined at every `*name` site — nothing needs
-/// to be read from `defs` itself.
+/// Sharing a subtree across sides is a plain YAML anchor: define `&name` at
+/// the first use site and reference it with `*name` from every other site.
+/// `serde_norway` resolves aliases before deserialization, so the typed spec
+/// only ever sees the fully inlined tree.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StrategySpec {
@@ -75,10 +72,6 @@ pub struct StrategySpec {
     pub long: Option<SideSpec>,
     #[serde(default)]
     pub short: Option<SideSpec>,
-    /// Ignored — a parking spot for YAML anchors. See the type-level docs.
-    #[serde(default, rename = "defs")]
-    #[allow(dead_code)]
-    defs: serde::de::IgnoredAny,
 }
 
 impl StrategySpec {
