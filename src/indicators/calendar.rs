@@ -5,11 +5,11 @@
 //! [`Field`](super::Field) for candle scalars), so a new accessor is a trait
 //! impl rather than a new type.
 //!
-//! Every accessor's `Input` is [`Atom`] and `Output` is [`Real`]. When
-//! `atom.time` is `None` (e.g. a synthetic candle fed without wall-clock
-//! metadata), `update` returns `None` — same shape as a not-yet-warm indicator
-//! result, so downstream comparisons/signals stay `None` until times are
-//! provided.
+//! Every accessor is generic over an atom-emitting source `S` (default
+//! [`Identity<Atom>`], i.e. the raw bar stream). When `atom.time` is `None`
+//! (e.g. a synthetic candle fed without wall-clock metadata), `update` returns
+//! `None` — same shape as a not-yet-warm indicator result, so downstream
+//! comparisons/signals stay `None` until times are provided.
 //!
 //! Two boolean signals ([`IsWeekday`], [`IsWeekend`]) sit alongside the numeric
 //! decompositions; the rest can be expressed with the existing comparison
@@ -38,6 +38,7 @@ use std::marker::PhantomData;
 use time::OffsetDateTime;
 
 use crate::indicator::Indicator;
+use crate::indicators::Identity;
 use crate::types::{Atom, Real, Timestamp};
 
 /// Selects a scalar calendar field from a [`Timestamp`], projected via
@@ -56,35 +57,49 @@ pub trait CalendarField {
 /// ([`Year`], [`Month`], [`Day`], [`Hour`], [`Minute`], [`Second`],
 /// [`DayOfWeek`], [`DayOfYear`], [`DayOfMonth`], [`WeekOfYear`], [`Quarter`],
 /// [`UnixSeconds`], [`UnixMillis`]).
+///
+/// Generic over the atom-emitting source `S` (default [`Identity<Atom>`]).
 #[derive(Debug, Clone)]
-pub struct Calendar<F> {
+pub struct Calendar<F, S = Identity<Atom>> {
+    source: S,
     /// Latest extracted value; `None` before the first bar or if the last
     /// bar's `time` was absent.
     pub value: Option<Real>,
     _field: PhantomData<fn() -> F>,
 }
 
-impl<F> Calendar<F> {
+impl<F> Calendar<F, Identity<Atom>> {
     pub fn new() -> Self {
+        Self::of(Identity::new())
+    }
+}
+
+impl<F, S> Calendar<F, S> {
+    /// Constructs a [`Calendar`] rooted on a custom atom-emitting source.
+    pub fn of(source: S) -> Self {
         Self {
+            source,
             value: None,
             _field: PhantomData,
         }
     }
 }
 
-impl<F> Default for Calendar<F> {
+impl<F> Default for Calendar<F, Identity<Atom>> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<F: CalendarField> Indicator for Calendar<F> {
-    type Input = Atom;
+impl<F: CalendarField, S: Indicator<Output = Atom>> Indicator for Calendar<F, S> {
+    type Input = S::Input;
     type Output = Real;
 
-    fn update(&mut self, atom: Atom) -> Option<Real> {
-        self.value = atom.time.map(|t| F::get(t.to_datetime()));
+    fn update(&mut self, input: S::Input) -> Option<Real> {
+        self.value = self
+            .source
+            .update(input)
+            .and_then(|a| a.time.map(|t| F::get(t.to_datetime())));
         self.value
     }
 
@@ -93,10 +108,15 @@ impl<F: CalendarField> Indicator for Calendar<F> {
     }
 
     fn warm_up_period(&self) -> usize {
-        1
+        self.source.warm_up_period().max(1)
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.source.unstable_period()
     }
 
     fn reset(&mut self) {
+        self.source.reset();
         self.value = None;
     }
 }
@@ -222,31 +242,31 @@ impl CalendarField for UnixMillisField {
 }
 
 /// The Gregorian year (e.g. `2024.0`).
-pub type Year = Calendar<YearField>;
+pub type Year<S = Identity<Atom>> = Calendar<YearField, S>;
 /// The Gregorian month, `1.0` (January) through `12.0` (December).
-pub type Month = Calendar<MonthField>;
+pub type Month<S = Identity<Atom>> = Calendar<MonthField, S>;
 /// The day of the month, `1.0` through `31.0`.
-pub type DayOfMonth = Calendar<DayOfMonthField>;
+pub type DayOfMonth<S = Identity<Atom>> = Calendar<DayOfMonthField, S>;
 /// Alias for [`DayOfMonth`].
-pub type Day = DayOfMonth;
+pub type Day<S = Identity<Atom>> = DayOfMonth<S>;
 /// The hour of the day (UTC), `0.0` through `23.0`.
-pub type Hour = Calendar<HourField>;
+pub type Hour<S = Identity<Atom>> = Calendar<HourField, S>;
 /// The minute of the hour, `0.0` through `59.0`.
-pub type Minute = Calendar<MinuteField>;
+pub type Minute<S = Identity<Atom>> = Calendar<MinuteField, S>;
 /// The second of the minute, `0.0` through `59.0`.
-pub type Second = Calendar<SecondField>;
+pub type Second<S = Identity<Atom>> = Calendar<SecondField, S>;
 /// ISO 8601 weekday, `1.0` (Monday) through `7.0` (Sunday).
-pub type DayOfWeek = Calendar<DayOfWeekField>;
+pub type DayOfWeek<S = Identity<Atom>> = Calendar<DayOfWeekField, S>;
 /// Day of the year, `1.0` through `366.0`.
-pub type DayOfYear = Calendar<DayOfYearField>;
+pub type DayOfYear<S = Identity<Atom>> = Calendar<DayOfYearField, S>;
 /// ISO 8601 week of the year, `1.0` through `53.0`.
-pub type WeekOfYear = Calendar<WeekOfYearField>;
+pub type WeekOfYear<S = Identity<Atom>> = Calendar<WeekOfYearField, S>;
 /// Calendar quarter, `1.0` through `4.0`.
-pub type Quarter = Calendar<QuarterField>;
+pub type Quarter<S = Identity<Atom>> = Calendar<QuarterField, S>;
 /// Unix seconds since the epoch.
-pub type UnixSeconds = Calendar<UnixSecondsField>;
+pub type UnixSeconds<S = Identity<Atom>> = Calendar<UnixSecondsField, S>;
 /// Unix milliseconds since the epoch.
-pub type UnixMillis = Calendar<UnixMillisField>;
+pub type UnixMillis<S = Identity<Atom>> = Calendar<UnixMillisField, S>;
 
 // ---------------------------------------------------------------------------
 // Timestamp leaf (yields the raw Timestamp payload)
@@ -259,25 +279,44 @@ pub type UnixMillis = Calendar<UnixMillisField>;
 /// carries the bar-open time forward into a chain that expects a `Timestamp`.
 /// Emits `None` on bars whose `time` is `None`; otherwise emits the same
 /// `Timestamp` every read.
-#[derive(Debug, Clone, Default)]
-pub struct CurrentTime {
+///
+/// Generic over the atom-emitting source `S` (default [`Identity<Atom>`]).
+#[derive(Debug, Clone)]
+pub struct CurrentTime<S = Identity<Atom>> {
+    source: S,
     /// Latest [`Timestamp`] seen; `None` before the first bar or if the last
     /// bar's `time` was absent.
     pub value: Option<Timestamp>,
 }
 
-impl CurrentTime {
+impl CurrentTime<Identity<Atom>> {
     pub fn new() -> Self {
-        Self::default()
+        Self::of(Identity::new())
     }
 }
 
-impl Indicator for CurrentTime {
-    type Input = Atom;
+impl<S> CurrentTime<S> {
+    /// Constructs a [`CurrentTime`] rooted on a custom atom-emitting source.
+    pub fn of(source: S) -> Self {
+        Self {
+            source,
+            value: None,
+        }
+    }
+}
+
+impl Default for CurrentTime<Identity<Atom>> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<S: Indicator<Output = Atom>> Indicator for CurrentTime<S> {
+    type Input = S::Input;
     type Output = Timestamp;
 
-    fn update(&mut self, atom: Atom) -> Option<Timestamp> {
-        self.value = atom.time;
+    fn update(&mut self, input: S::Input) -> Option<Timestamp> {
+        self.value = self.source.update(input).and_then(|a| a.time);
         self.value
     }
 
@@ -286,10 +325,15 @@ impl Indicator for CurrentTime {
     }
 
     fn warm_up_period(&self) -> usize {
-        1
+        self.source.warm_up_period().max(1)
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.source.unstable_period()
     }
 
     fn reset(&mut self) {
+        self.source.reset();
         self.value = None;
     }
 }
@@ -300,25 +344,46 @@ impl Indicator for CurrentTime {
 
 /// True on Monday through Friday, false on Saturday or Sunday. `None` on
 /// bars whose `time` is `None` (matching the `None`-until-warm convention).
-#[derive(Debug, Clone, Default)]
-pub struct IsWeekday {
+///
+/// Generic over the atom-emitting source `S` (default [`Identity<Atom>`]).
+#[derive(Debug, Clone)]
+pub struct IsWeekday<S = Identity<Atom>> {
+    source: S,
     pub value: Option<bool>,
 }
 
-impl IsWeekday {
+impl IsWeekday<Identity<Atom>> {
     pub fn new() -> Self {
-        Self::default()
+        Self::of(Identity::new())
     }
 }
 
-impl Indicator for IsWeekday {
-    type Input = Atom;
+impl<S> IsWeekday<S> {
+    /// Constructs an [`IsWeekday`] rooted on a custom atom-emitting source.
+    pub fn of(source: S) -> Self {
+        Self {
+            source,
+            value: None,
+        }
+    }
+}
+
+impl Default for IsWeekday<Identity<Atom>> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<S: Indicator<Output = Atom>> Indicator for IsWeekday<S> {
+    type Input = S::Input;
     type Output = bool;
 
-    fn update(&mut self, atom: Atom) -> Option<bool> {
-        self.value = atom.time.map(|t| {
-            let d = t.to_datetime().weekday().number_from_monday();
-            d <= 5
+    fn update(&mut self, input: S::Input) -> Option<bool> {
+        self.value = self.source.update(input).and_then(|a| {
+            a.time.map(|t| {
+                let d = t.to_datetime().weekday().number_from_monday();
+                d <= 5
+            })
         });
         self.value
     }
@@ -328,35 +393,61 @@ impl Indicator for IsWeekday {
     }
 
     fn warm_up_period(&self) -> usize {
-        1
+        self.source.warm_up_period().max(1)
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.source.unstable_period()
     }
 
     fn reset(&mut self) {
+        self.source.reset();
         self.value = None;
     }
 }
 
 /// True on Saturday or Sunday, false Monday through Friday. `None` on bars
 /// whose `time` is `None`.
-#[derive(Debug, Clone, Default)]
-pub struct IsWeekend {
+///
+/// Generic over the atom-emitting source `S` (default [`Identity<Atom>`]).
+#[derive(Debug, Clone)]
+pub struct IsWeekend<S = Identity<Atom>> {
+    source: S,
     pub value: Option<bool>,
 }
 
-impl IsWeekend {
+impl IsWeekend<Identity<Atom>> {
     pub fn new() -> Self {
-        Self::default()
+        Self::of(Identity::new())
     }
 }
 
-impl Indicator for IsWeekend {
-    type Input = Atom;
+impl<S> IsWeekend<S> {
+    /// Constructs an [`IsWeekend`] rooted on a custom atom-emitting source.
+    pub fn of(source: S) -> Self {
+        Self {
+            source,
+            value: None,
+        }
+    }
+}
+
+impl Default for IsWeekend<Identity<Atom>> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<S: Indicator<Output = Atom>> Indicator for IsWeekend<S> {
+    type Input = S::Input;
     type Output = bool;
 
-    fn update(&mut self, atom: Atom) -> Option<bool> {
-        self.value = atom.time.map(|t| {
-            let d = t.to_datetime().weekday().number_from_monday();
-            d >= 6
+    fn update(&mut self, input: S::Input) -> Option<bool> {
+        self.value = self.source.update(input).and_then(|a| {
+            a.time.map(|t| {
+                let d = t.to_datetime().weekday().number_from_monday();
+                d >= 6
+            })
         });
         self.value
     }
@@ -366,10 +457,15 @@ impl Indicator for IsWeekend {
     }
 
     fn warm_up_period(&self) -> usize {
-        1
+        self.source.warm_up_period().max(1)
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.source.unstable_period()
     }
 
     fn reset(&mut self) {
+        self.source.reset();
         self.value = None;
     }
 }

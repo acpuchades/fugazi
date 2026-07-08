@@ -1,34 +1,50 @@
+use std::marker::PhantomData;
+
 use crate::indicator::Indicator;
 use crate::types::Real;
 
 /// A pass-through source: yields each input unchanged.
 ///
-/// Useful as a leaf in composition so a raw price stream can be compared
-/// directly, e.g. `Gt::new(Identity::new(), Value::new(100.0))` expresses
-/// "price above 100".
-#[derive(Debug, Clone, Default)]
-pub struct Identity {
+/// Generic over the input type, defaulting to [`Real`] for the classic
+/// raw-scalar case. `Identity::<Atom>::new()` is the atom passthrough used
+/// as the default source for the candle- and calendar-input leaves
+/// ([`Field`](super::Field), [`Calendar`](super::Calendar), …), so those
+/// leaves can be re-rooted onto a different `Atom`-emitting source (a
+/// cross-asset `!pick`, say) without changing their existing zero-arg
+/// constructor.
+#[derive(Debug, Clone)]
+pub struct Identity<I = Real> {
     /// Latest input seen; `None` before the first update.
-    pub value: Option<Real>,
+    pub value: Option<I>,
+    _phantom: PhantomData<fn(I) -> I>,
 }
 
-impl Identity {
+impl<I> Identity<I> {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            value: None,
+            _phantom: PhantomData,
+        }
     }
 }
 
-impl Indicator for Identity {
-    type Input = Real;
-    type Output = Real;
+impl<I> Default for Identity<I> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-    fn update(&mut self, input: Real) -> Option<Real> {
+impl<I: Clone> Indicator for Identity<I> {
+    type Input = I;
+    type Output = I;
+
+    fn update(&mut self, input: I) -> Option<I> {
         self.value = Some(input);
-        self.value
+        self.value.clone()
     }
 
-    fn value(&self) -> Option<Real> {
-        self.value
+    fn value(&self) -> Option<I> {
+        self.value.clone()
     }
 
     fn warm_up_period(&self) -> usize {

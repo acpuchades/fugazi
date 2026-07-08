@@ -3,40 +3,69 @@
 //!
 //! All share the [`Field`] carrier, specialised by a [`CandleField`] marker, so
 //! a new accessor is a trait impl rather than a new type. These make OHLCV data
-//! composable with a *uniform* `Candle` input: define a whole signal in terms of
+//! composable with a *uniform* [`Atom`] input: define a whole signal in terms of
 //! accessors and just feed each bar, e.g.
 //! `Close::new().crosses_above(Close::new().then(Ema::new(20)))`.
+//!
+//! # Generic over the atom-emitting source
+//!
+//! Every accessor here is generic over an `S: Indicator<Output = Atom>` source
+//! (default [`Identity<Atom>`], i.e. the raw bar stream), so the same primitives
+//! double as the projection layer on top of a cross-asset source like a future
+//! `!pick`. `Field::new()` still constructs the classic `Input = Atom` shape;
+//! `Field::of(source)` builds a variant rooted on `source`.
 
 use std::marker::PhantomData;
 
 use crate::indicator::Indicator;
+use crate::indicators::Identity;
 use crate::types::{Atom, Candle, Real};
 
-/// A pass-through source over the `Candle` stream: yields each bar unchanged.
+/// A pass-through source over the [`Atom`] stream that yields each bar's
+/// [`Candle`].
 ///
-/// The `Candle` twin of [`Identity`](super::Identity) — a leaf that terminates
-/// composition when the whole bar is what's being carried forward (rather than
-/// one of its scalar fields). Used to root cross-timeframe pipelines built with
-/// [`Resample`](super::Resample), where the outermost source is the base candle
+/// The `Candle` twin of [`Identity`] — a leaf that terminates composition when
+/// the whole bar is what's being carried forward (rather than one of its scalar
+/// fields). Used to root cross-timeframe pipelines built with
+/// [`Resample`](super::Resample), where the outermost source is the base atom
 /// stream itself and the resample-then-project step happens further up the chain.
-#[derive(Debug, Clone, Default)]
-pub struct CurrentBar {
+///
+/// Generic over the atom-emitting source `S` (default [`Identity<Atom>`]).
+#[derive(Debug, Clone)]
+pub struct CurrentBar<S = Identity<Atom>> {
+    source: S,
     /// Latest bar seen; `None` before the first update.
     pub value: Option<Candle>,
 }
 
-impl CurrentBar {
+impl CurrentBar<Identity<Atom>> {
     pub fn new() -> Self {
-        Self::default()
+        Self::of(Identity::new())
     }
 }
 
-impl Indicator for CurrentBar {
-    type Input = Atom;
+impl<S> CurrentBar<S> {
+    /// Constructs a [`CurrentBar`] rooted on a custom atom-emitting source.
+    pub fn of(source: S) -> Self {
+        Self {
+            source,
+            value: None,
+        }
+    }
+}
+
+impl Default for CurrentBar<Identity<Atom>> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<S: Indicator<Output = Atom>> Indicator for CurrentBar<S> {
+    type Input = S::Input;
     type Output = Candle;
 
-    fn update(&mut self, atom: Atom) -> Option<Candle> {
-        self.value = Some(atom.candle);
+    fn update(&mut self, input: S::Input) -> Option<Candle> {
+        self.value = self.source.update(input).map(|a| a.candle);
         self.value
     }
 
@@ -45,10 +74,15 @@ impl Indicator for CurrentBar {
     }
 
     fn warm_up_period(&self) -> usize {
-        1
+        self.source.warm_up_period().max(1)
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.source.unstable_period()
     }
 
     fn reset(&mut self) {
+        self.source.reset();
         self.value = None;
     }
 }
@@ -62,34 +96,46 @@ pub trait CandleField {
 ///
 /// Use the aliases ([`Open`], [`High`], [`Low`], [`Close`], [`Volume`],
 /// [`Typical`], [`Median`]).
+///
+/// Generic over the atom-emitting source `S` (default [`Identity<Atom>`]),
+/// so a `Field<CloseField, Pick<K>>` reads a close from a cross-asset frame.
 #[derive(Debug, Clone)]
-pub struct Field<F> {
+pub struct Field<F, S = Identity<Atom>> {
+    source: S,
     /// Latest extracted value; `None` before the first bar.
     pub value: Option<Real>,
     _field: PhantomData<fn() -> F>,
 }
 
-impl<F> Field<F> {
+impl<F> Field<F, Identity<Atom>> {
     pub fn new() -> Self {
+        Self::of(Identity::new())
+    }
+}
+
+impl<F, S> Field<F, S> {
+    /// Constructs a [`Field`] rooted on a custom atom-emitting source.
+    pub fn of(source: S) -> Self {
         Self {
+            source,
             value: None,
             _field: PhantomData,
         }
     }
 }
 
-impl<F> Default for Field<F> {
+impl<F> Default for Field<F, Identity<Atom>> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<F: CandleField> Indicator for Field<F> {
-    type Input = Atom;
+impl<F: CandleField, S: Indicator<Output = Atom>> Indicator for Field<F, S> {
+    type Input = S::Input;
     type Output = Real;
 
-    fn update(&mut self, atom: Atom) -> Option<Real> {
-        self.value = Some(F::get(&atom.candle));
+    fn update(&mut self, input: S::Input) -> Option<Real> {
+        self.value = self.source.update(input).map(|a| F::get(&a.candle));
         self.value
     }
 
@@ -98,10 +144,15 @@ impl<F: CandleField> Indicator for Field<F> {
     }
 
     fn warm_up_period(&self) -> usize {
-        1
+        self.source.warm_up_period().max(1)
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.source.unstable_period()
     }
 
     fn reset(&mut self) {
+        self.source.reset();
         self.value = None;
     }
 }
@@ -170,21 +221,21 @@ impl CandleField for MedianField {
 }
 
 /// The bar's `open`.
-pub type Open = Field<OpenField>;
+pub type Open<S = Identity<Atom>> = Field<OpenField, S>;
 /// The bar's `high`.
-pub type High = Field<HighField>;
+pub type High<S = Identity<Atom>> = Field<HighField, S>;
 /// The bar's `low`.
-pub type Low = Field<LowField>;
+pub type Low<S = Identity<Atom>> = Field<LowField, S>;
 /// The bar's `close`.
-pub type Close = Field<CloseField>;
+pub type Close<S = Identity<Atom>> = Field<CloseField, S>;
 /// The bar's `volume`.
-pub type Volume = Field<VolumeField>;
+pub type Volume<S = Identity<Atom>> = Field<VolumeField, S>;
 /// The bar's typical price, `(high + low + close) / 3`.
-pub type Typical = Field<TypicalField>;
+pub type Typical<S = Identity<Atom>> = Field<TypicalField, S>;
 /// The bar's median price, `(high + low) / 2`.
-pub type Median = Field<MedianField>;
+pub type Median<S = Identity<Atom>> = Field<MedianField, S>;
 
-/// Namespace for building [`Candle`]-input accessor sources.
+/// Namespace for building [`Atom`]-input accessor sources.
 ///
 /// Reads as "the current bar's `<field>`":
 /// `Current::close().crosses_above(Current::close().then(Ema::new(20)))`.
