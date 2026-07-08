@@ -840,9 +840,9 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::{BoolIndicatorExt, Current, IndicatorExt, Sma};
+    use crate::indicators::{BoolIndicatorExt, IndicatorExt, Sma};
     use crate::signal::Signal;
-    use crate::types::{Atom, Candle};
+    use crate::types::Candle;
 
     fn bar(close: Real) -> Candle {
         Candle::new(close, close, close, close, 0.0)

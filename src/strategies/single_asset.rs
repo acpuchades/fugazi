@@ -96,13 +96,17 @@ fn extract_self_atom<Sym: PartialEq + Clone>(snap: &Snapshot<Sym>, symbol: &Sym)
 ///
 /// ```
 /// use fugazi::prelude::*;
-/// use fugazi::indicators::{Current, Sma, Value};
+/// use fugazi::indicators::{Close, Pick, Sma, Value};
 /// use fugazi::strategies::SingleAssetStrategy;
 ///
 /// // A golden/death-cross that reverses long↔short, with a 5% trailing stop
-/// // on each side (long trails the peak, short trails the trough).
-/// let cross_up = || Sma::new(Current::close(), 5).crosses_above(Sma::new(Current::close(), 20));
-/// let cross_dn = || Sma::new(Current::close(), 5).crosses_below(Sma::new(Current::close(), 20));
+/// // on each side (long trails the peak, short trails the trough). The
+/// // strategy's `Input` is `Snapshot<&'static str>`; every atom-input leaf
+/// // (`Close`, `Sma`, …) sits on `Pick::<Sym>::new()` — an empty-selector
+/// // single-entry unpack — so a single-series driver still Just Works.
+/// let close = || Close::of(Pick::<&'static str>::new());
+/// let cross_up = || Sma::new(close(), 5).crosses_above(Sma::new(close(), 20));
+/// let cross_dn = || Sma::new(close(), 5).crosses_below(Sma::new(close(), 20));
 /// let strat = SingleAssetStrategy::new("BTC")
 ///     .long_on(cross_up(), cross_dn())
 ///     .short_on(cross_dn(), cross_up());

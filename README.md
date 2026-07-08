@@ -232,27 +232,33 @@ implementation living in a downstream crate.
 
 ```rust
 use fugazi::prelude::*;
-use fugazi::indicators::{Current, Sma};
+use fugazi::indicators::{Close, Pick, Sma};
+use fugazi::Snapshot;
 
 // Own your signals; act on the wallet. `update` advances the signals; `trade`
 // reads them and acts. `Size` is absolute units or a fraction of funds / equity /
 // current position, and `Side` gives direction — so position sizing,
 // short-selling, and staying always-in-market are just what the code does.
+//
+// `Input = Snapshot<Sym>` — the multi-asset input frame. For a single-series
+// backtest the driver feeds size-1 snapshots (`Snapshot::of_atom(atom)`) and
+// the empty-selector `Pick::<Sym>::new()` inside every leaf unpacks the
+// sole atom.
 struct GoldenCross {
     symbol: &'static str,
-    enter: Box<dyn Signal>,
-    exit: Box<dyn Signal>,
+    enter: Box<dyn Signal<Snapshot<&'static str>>>,
+    exit: Box<dyn Signal<Snapshot<&'static str>>>,
 }
 
 impl Strategy for GoldenCross {
-    type Input = Atom;
+    type Input = Snapshot<&'static str>;
     type Symbol = &'static str;
 
-    fn update(&mut self, atom: Atom) {
+    fn update(&mut self, snap: Snapshot<&'static str>) {
         // Advance EVERY signal every bar (don't short-circuit, or a skipped one
         // desyncs from the price stream).
-        self.enter.update(atom.clone());
-        self.exit.update(atom);
+        self.enter.update(snap.clone());
+        self.exit.update(snap);
     }
 
     fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
@@ -270,18 +276,19 @@ impl Strategy for GoldenCross {
     }
 }
 
+let close = || Close::of(Pick::<&'static str>::new());
 let mut strat = GoldenCross {
     symbol: "AAPL",
-    enter: Box::new(Sma::new(Current::close(), 3).crosses_above(Sma::new(Current::close(), 10))),
-    exit:  Box::new(Sma::new(Current::close(), 3).crosses_below(Sma::new(Current::close(), 10))),
+    enter: Box::new(Sma::new(close(), 3).crosses_above(Sma::new(close(), 10))),
+    exit:  Box::new(Sma::new(close(), 3).crosses_below(Sma::new(close(), 10))),
 };
 let mut wallet = PaperWallet::new(10_000.0);
 
 # let feed: Vec<Candle> = Vec::new();
 for candle in feed {
-    wallet.update("AAPL", candle);  // feed the wallet this bar from outside
-    strat.update(candle.into());    // advance signals
-    strat.trade(&mut wallet);       // act
+    wallet.update("AAPL", candle);                          // feed the wallet
+    strat.update(Snapshot::of_atom(candle.into()));         // advance signals
+    strat.trade(&mut wallet);                                // act
 }
 let _orders = wallet.orders();        // the trade blotter
 ```
@@ -340,18 +347,22 @@ and every booked `Fill`:
 ```rust
 use fugazi::prelude::*;
 use fugazi::backtest::run;
+use fugazi::Snapshot;
 
 # struct MyStrategy;
 # impl Strategy for MyStrategy {
-#     type Input = Atom;
+#     type Input = Snapshot<&'static str>;
 #     type Symbol = &'static str;
-#     fn update(&mut self, _: Atom) {}
+#     fn update(&mut self, _: Snapshot<&'static str>) {}
 #     fn trade(&self, _: &mut dyn Wallet<&'static str>) {}
 #     fn reset(&mut self) {}
 # }
 # let mut strat = MyStrategy;
 # let candles: Vec<Candle> = vec![];
 let mut wallet = PaperWallet::new(10_000.0);
+// `run` accepts `Vec<Candle>` / `Vec<Atom>` too via the blanket
+// `From<Candle> for Snapshot<Sym>` / `From<Atom> for Snapshot<Sym>` lifts —
+// each bar becomes an untagged size-1 snapshot for the strategy to unpack.
 let report = run(&mut strat, &mut wallet, "AAPL", candles);
 // report.equity_curve : Vec<Real>   — one mark-to-market point per bar
 // report.fills        : Vec<Fill<_>> — every booked order, bar-indexed

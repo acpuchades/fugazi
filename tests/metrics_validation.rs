@@ -1,3 +1,7 @@
+// The whole test consumes `src/cli/metrics.rs` directly, so it only makes
+// sense when the CLI feature is on.
+#![cfg(feature = "cli")]
+
 //! Cross-validation of fugazi's evaluation metrics against empyrical (with a
 //! few manual numpy formulas for fields empyrical doesn't cover).
 //!

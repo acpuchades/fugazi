@@ -141,7 +141,7 @@ mod tests {
     use super::*;
     use crate::types::{Candle, Frequency, Real};
 
-    fn snap<'a>(
+    fn snap(
         pairs: impl IntoIterator<Item = (Option<String>, Option<Frequency>, Real)>,
     ) -> Snapshot<String> {
         let mut s = Snapshot::new();

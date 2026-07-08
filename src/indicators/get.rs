@@ -13,6 +13,7 @@
 use std::sync::Arc;
 
 use crate::indicator::Indicator;
+use crate::indicators::Identity;
 use crate::types::{Atom, OverlayInfo, OverlayType, Real, Schema};
 
 /// Returned by [`GetReal::try_new`] (and the other typed constructors) when the
@@ -145,17 +146,18 @@ fn read_slot<'a>(
 /// assert_eq!(vol.update(atom), Some(0.12));
 /// ```
 #[derive(Debug, Clone)]
-pub struct GetReal {
+pub struct GetReal<S = Identity<Atom>> {
     schema: Arc<Schema>,
     index: usize,
+    source: S,
     /// Latest extracted value; `None` before the first bar (and `None` on any
     /// atom whose `overlays` is absent or bound to a different schema).
     pub value: Option<Real>,
 }
 
-impl GetReal {
-    /// Build a `GetReal` for `key`. Resolves the key + type against `schema`
-    /// once at construction.
+impl GetReal<Identity<Atom>> {
+    /// Build a `GetReal` for `key` rooted on the raw [`Atom`] input stream.
+    /// Resolves the key + type against `schema` once at construction.
     ///
     /// # Panics
     /// Panics if `key` is not registered or its declared type is not `Real`.
@@ -164,12 +166,27 @@ impl GetReal {
         Self::try_new(schema, key).unwrap_or_else(|e| panic!("{e}"))
     }
 
-    /// Fallible constructor.
+    /// Fallible constructor for the default atom-rooted leaf.
     pub fn try_new(schema: &Arc<Schema>, key: &str) -> Result<Self, GetError> {
+        Self::try_of(schema, key, Identity::new())
+    }
+}
+
+impl<S> GetReal<S> {
+    /// Build a `GetReal` for `key` rooted on a custom atom-emitting source.
+    /// Panics on unknown key or type mismatch — use [`try_of`](Self::try_of)
+    /// for the fallible form.
+    pub fn of(schema: &Arc<Schema>, key: &str, source: S) -> Self {
+        Self::try_of(schema, key, source).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible constructor rooted on a custom atom-emitting source.
+    pub fn try_of(schema: &Arc<Schema>, key: &str, source: S) -> Result<Self, GetError> {
         let index = resolve(schema, key, OverlayType::Real)?;
         Ok(Self {
             schema: schema.clone(),
             index,
+            source,
             value: None,
         })
     }
@@ -185,13 +202,15 @@ impl GetReal {
     }
 }
 
-impl Indicator for GetReal {
-    type Input = Atom;
+impl<S: Indicator<Output = Atom>> Indicator for GetReal<S> {
+    type Input = S::Input;
     type Output = Real;
 
-    fn update(&mut self, atom: Atom) -> Option<Real> {
-        self.value = read_slot(&self.schema, atom.overlays.as_ref())
-            .and_then(|ov| ov.get_real(self.index));
+    fn update(&mut self, input: S::Input) -> Option<Real> {
+        self.value = self.source.update(input).and_then(|atom| {
+            read_slot(&self.schema, atom.overlays.as_ref())
+                .and_then(|ov| ov.get_real(self.index))
+        });
         self.value
     }
 
@@ -199,12 +218,18 @@ impl Indicator for GetReal {
         self.value
     }
 
-    /// `1` — one bar to receive the first overlay value.
+    /// `1` — one bar to receive the first overlay value (plus any warm-up
+    /// the source contributes, per the standard source-generic pattern).
     fn warm_up_period(&self) -> usize {
-        1
+        self.source.warm_up_period().max(1)
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.source.unstable_period()
     }
 
     fn reset(&mut self) {
+        self.source.reset();
         self.value = None;
     }
 }
@@ -218,26 +243,42 @@ impl Indicator for GetReal {
 /// The bool twin of [`GetReal`]; see that type's docs for the construction and
 /// error semantics.
 #[derive(Debug, Clone)]
-pub struct GetBool {
+pub struct GetBool<S = Identity<Atom>> {
     schema: Arc<Schema>,
     index: usize,
+    source: S,
     /// Latest extracted value; `None` before the first bar (and `None` on any
     /// atom whose `overlays` is absent or bound to a different schema).
     pub value: Option<bool>,
 }
 
-impl GetBool {
-    /// Build a `GetBool` for `key`. Panics on unknown key or type mismatch.
+impl GetBool<Identity<Atom>> {
+    /// Build a `GetBool` for `key` rooted on the raw [`Atom`] input stream.
+    /// Panics on unknown key or type mismatch.
     pub fn new(schema: &Arc<Schema>, key: &str) -> Self {
         Self::try_new(schema, key).unwrap_or_else(|e| panic!("{e}"))
     }
 
-    /// Fallible constructor.
+    /// Fallible constructor for the default atom-rooted leaf.
     pub fn try_new(schema: &Arc<Schema>, key: &str) -> Result<Self, GetError> {
+        Self::try_of(schema, key, Identity::new())
+    }
+}
+
+impl<S> GetBool<S> {
+    /// Build a `GetBool` for `key` rooted on a custom atom-emitting source.
+    /// Panics on unknown key or type mismatch — use [`try_of`](Self::try_of).
+    pub fn of(schema: &Arc<Schema>, key: &str, source: S) -> Self {
+        Self::try_of(schema, key, source).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible constructor rooted on a custom atom-emitting source.
+    pub fn try_of(schema: &Arc<Schema>, key: &str, source: S) -> Result<Self, GetError> {
         let index = resolve(schema, key, OverlayType::Bool)?;
         Ok(Self {
             schema: schema.clone(),
             index,
+            source,
             value: None,
         })
     }
@@ -251,13 +292,15 @@ impl GetBool {
     }
 }
 
-impl Indicator for GetBool {
-    type Input = Atom;
+impl<S: Indicator<Output = Atom>> Indicator for GetBool<S> {
+    type Input = S::Input;
     type Output = bool;
 
-    fn update(&mut self, atom: Atom) -> Option<bool> {
-        self.value = read_slot(&self.schema, atom.overlays.as_ref())
-            .and_then(|ov| ov.get_bool(self.index));
+    fn update(&mut self, input: S::Input) -> Option<bool> {
+        self.value = self.source.update(input).and_then(|atom| {
+            read_slot(&self.schema, atom.overlays.as_ref())
+                .and_then(|ov| ov.get_bool(self.index))
+        });
         self.value
     }
 
@@ -266,10 +309,15 @@ impl Indicator for GetBool {
     }
 
     fn warm_up_period(&self) -> usize {
-        1
+        self.source.warm_up_period().max(1)
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.source.unstable_period()
     }
 
     fn reset(&mut self) {
+        self.source.reset();
         self.value = None;
     }
 }
@@ -284,26 +332,42 @@ impl Indicator for GetBool {
 /// and error semantics. Outputs `Arc<str>` so the shared backing storage of
 /// the underlying overlay value is preserved (no allocation per bar).
 #[derive(Debug, Clone)]
-pub struct GetStr {
+pub struct GetStr<S = Identity<Atom>> {
     schema: Arc<Schema>,
     index: usize,
+    source: S,
     /// Latest extracted value; `None` before the first bar (and `None` on any
     /// atom whose `overlays` is absent or bound to a different schema).
     pub value: Option<Arc<str>>,
 }
 
-impl GetStr {
-    /// Build a `GetStr` for `key`. Panics on unknown key or type mismatch.
+impl GetStr<Identity<Atom>> {
+    /// Build a `GetStr` for `key` rooted on the raw [`Atom`] input stream.
+    /// Panics on unknown key or type mismatch.
     pub fn new(schema: &Arc<Schema>, key: &str) -> Self {
         Self::try_new(schema, key).unwrap_or_else(|e| panic!("{e}"))
     }
 
-    /// Fallible constructor.
+    /// Fallible constructor for the default atom-rooted leaf.
     pub fn try_new(schema: &Arc<Schema>, key: &str) -> Result<Self, GetError> {
+        Self::try_of(schema, key, Identity::new())
+    }
+}
+
+impl<S> GetStr<S> {
+    /// Build a `GetStr` for `key` rooted on a custom atom-emitting source.
+    /// Panics on unknown key or type mismatch — use [`try_of`](Self::try_of).
+    pub fn of(schema: &Arc<Schema>, key: &str, source: S) -> Self {
+        Self::try_of(schema, key, source).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible constructor rooted on a custom atom-emitting source.
+    pub fn try_of(schema: &Arc<Schema>, key: &str, source: S) -> Result<Self, GetError> {
         let index = resolve(schema, key, OverlayType::Str)?;
         Ok(Self {
             schema: schema.clone(),
             index,
+            source,
             value: None,
         })
     }
@@ -317,13 +381,15 @@ impl GetStr {
     }
 }
 
-impl Indicator for GetStr {
-    type Input = Atom;
+impl<S: Indicator<Output = Atom>> Indicator for GetStr<S> {
+    type Input = S::Input;
     type Output = Arc<str>;
 
-    fn update(&mut self, atom: Atom) -> Option<Arc<str>> {
-        self.value = read_slot(&self.schema, atom.overlays.as_ref())
-            .and_then(|ov| ov.get_str(self.index).cloned());
+    fn update(&mut self, input: S::Input) -> Option<Arc<str>> {
+        self.value = self.source.update(input).and_then(|atom| {
+            read_slot(&self.schema, atom.overlays.as_ref())
+                .and_then(|ov| ov.get_str(self.index).cloned())
+        });
         self.value.clone()
     }
 
@@ -332,10 +398,15 @@ impl Indicator for GetStr {
     }
 
     fn warm_up_period(&self) -> usize {
-        1
+        self.source.warm_up_period().max(1)
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.source.unstable_period()
     }
 
     fn reset(&mut self) {
+        self.source.reset();
         self.value = None;
     }
 }

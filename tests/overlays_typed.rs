@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use fugazi::indicators::{Combine, GetBool, GetReal, GetStr, StrEqOp, Value, ValueStr};
 use fugazi::prelude::*;
+use fugazi::Snapshot;
 
 /// Build the shared schema: one column of each type.
 fn schema() -> Arc<Schema> {
@@ -143,32 +144,36 @@ fn signal_is_none_before_overlays_arrive() {
 /// composes through the strategy layer as expected — the trip that the
 /// standalone signal tests don't cover.
 ///
-/// TODO: The overlay `Get*` leaves are still `Input = Atom` and don't
-/// compose with the new `SingleAssetStrategy<Sym>::Input = Snapshot<Sym>`
-/// shape. Extend the leaves to be source-generic (mirroring `Field`/`Calendar`)
-/// then re-enable.
-#[cfg(any())] // TODO: re-enable once overlay Get* leaves are source-generic
-              //       and can consume the new Snapshot-input strategies.
+/// The signal chain is snapshot-rooted through `Pick::<String>::new()`
+/// (the empty-selector single-entry unpack), so the strategy's own atom is
+/// projected out of every incoming size-1 snapshot before the overlay
+/// readers see it.
 #[test]
 fn overlay_signal_drives_a_backtest_end_to_end() {
+    use fugazi::indicators::Pick;
     use fugazi::strategies::SingleAssetStrategy;
 
     let schema = schema();
+    // Every overlay leaf sits on top of `Pick::<String>::new()` — the same
+    // single-entry unpack the source-generic Field/Calendar leaves use, so
+    // GetReal/GetBool/GetStr become `Input = Snapshot<String>` instead of
+    // `Input = Atom` and the whole signal chain composes into the
+    // Snapshot-input strategy.
     let make_enter = || {
-        let regime_bull = Combine::<GetStr, ValueStr<Atom>, StrEqOp>::new(
-            GetStr::new(&schema, "regime"),
-            ValueStr::new("bull"),
+        let regime_bull = Combine::<_, _, StrEqOp>::new(
+            GetStr::of(&schema, "regime", Pick::<String>::new()),
+            ValueStr::<Snapshot<String>>::new("bull"),
         );
-        let vol_high = GetReal::new(&schema, "vol_20").gt(Value::new(0.15));
-        GetBool::new(&schema, "risk_on")
+        let vol_high = GetReal::of(&schema, "vol_20", Pick::<String>::new())
+            .gt(Value::new(0.15));
+        GetBool::of(&schema, "risk_on", Pick::<String>::new())
             .and(regime_bull)
             .and(vol_high)
     };
     let make_exit = || {
-        // Flat-out when the regime turns bear.
-        Combine::<GetStr, ValueStr<Atom>, StrEqOp>::new(
-            GetStr::new(&schema, "regime"),
-            ValueStr::new("bear"),
+        Combine::<_, _, StrEqOp>::new(
+            GetStr::of(&schema, "regime", Pick::<String>::new()),
+            ValueStr::<Snapshot<String>>::new("bear"),
         )
     };
 
@@ -177,21 +182,22 @@ fn overlay_signal_drives_a_backtest_end_to_end() {
         .long_on(make_enter(), make_exit());
 
     let bars: Vec<Fixture> = vec![
-        // Setup — enter signal off; no fill.
         Fixture { close: 100.0, vol: 0.10, risk_on: true, regime: "bull" },
-        // Enter fires — set() queues; fills at next bar's open.
         Fixture { close: 105.0, vol: 0.20, risk_on: true, regime: "bull" },
-        // Fill bar (open=105).
         Fixture { close: 108.0, vol: 0.20, risk_on: true, regime: "bull" },
-        // Regime flips → exit queued; fills next bar's open.
         Fixture { close: 112.0, vol: 0.20, risk_on: true, regime: "bear" },
-        // Flatten fill bar.
         Fixture { close: 110.0, vol: 0.20, risk_on: true, regime: "bear" },
     ];
 
-    let atoms: Vec<Atom> = bars.iter().map(|f| atom(&schema, f)).collect();
+    // The strategy consumes `Snapshot<String>`; wrap each atom in a size-1
+    // snapshot (the driver also accepts `Vec<Atom>` via the `From<Atom>` lift,
+    // but writing it out makes the shape explicit for this test).
+    let snapshots: Vec<Snapshot<String>> = bars
+        .iter()
+        .map(|f| Snapshot::<String>::of_atom(atom(&schema, f)))
+        .collect();
     let mut wallet: PaperWallet<String> = PaperWallet::new(10_000.0);
-    let report = fugazi::backtest::run(&mut strategy, &mut wallet, symbol.clone(), atoms);
+    let report = fugazi::backtest::run(&mut strategy, &mut wallet, symbol.clone(), snapshots);
 
     // Expect two fills: a Buy (the entry) then a Sell (the regime-flip exit).
     assert_eq!(
