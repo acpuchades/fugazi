@@ -54,7 +54,7 @@ fn no_costs_flag_preserves_pre_costs_schema() {
     let out = run_with(&[], "fugazi_costs_absent");
     let header = out.trades.lines().next().expect("trades.csv header");
     assert_eq!(
-        header, "time;symbol;side;units;price;kind",
+        header, "time,symbol,side,units,price,kind",
         "trades.csv header should not include `commission` when no cost flag was passed"
     );
     assert!(
@@ -84,7 +84,7 @@ fn costs_flag_populates_commission_and_costs_section() {
     );
     let header = out.trades.lines().next().expect("trades.csv header");
     assert_eq!(
-        header, "time;symbol;side;units;price;kind;commission",
+        header, "time,symbol,side,units,price,kind,commission",
         "trades.csv header should include `commission` when a cost model is set"
     );
     // At least one trade row should record a positive commission.
@@ -92,7 +92,7 @@ fn costs_flag_populates_commission_and_costs_section() {
         .trades
         .lines()
         .skip(1)
-        .filter_map(|l| l.rsplit(';').next())
+        .filter_map(|l| l.rsplit(',').next())
         .filter_map(|c| c.parse::<f64>().ok())
         .any(|v| v > 0.0);
     assert!(
@@ -125,7 +125,7 @@ fn binance_preset_end_to_end() {
         "fugazi_costs_binance_preset",
     );
     assert!(
-        out.trades.lines().next().unwrap().ends_with(";commission"),
+        out.trades.lines().next().unwrap().ends_with(",commission"),
         "binance preset should populate the commission column"
     );
     assert!(

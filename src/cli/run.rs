@@ -13,8 +13,8 @@
 //! Per bar: feed the wallet the candle (in [`run_iteration`]); the priced
 //! blotter comes back sorted by fill index. Every order is written to
 //! `trades.csv` with its bar's `time` and its own fill price. The running
-//! equity is emitted to `returns.csv`. Both files are `;`-delimited for
-//! Excel. After the loop the equity curve + blotter reduce to `metrics.yml`
+//! equity is emitted to `returns.csv`. Both files are `,`-delimited.
+//! After the loop the equity curve + blotter reduce to `metrics.yml`
 //! (whole-run summary — see [`crate::metrics`]) and, under `-w N`, to
 //! `metrics.csv` (non-overlapping N-bar windows) and `rolling.csv` (rolling
 //! stride-1 windows). The console prints the whole-run headline block first;
@@ -362,10 +362,10 @@ fn write_windowed_csv(
     Ok(())
 }
 
-/// A `;`-delimited CSV writer at `path`.
+/// A `,`-delimited CSV writer at `path`.
 fn writer(path: &Path) -> Result<csv::Writer<std::fs::File>> {
     csv::WriterBuilder::new()
-        .delimiter(b';')
+        .delimiter(b',')
         .from_path(path)
         .with_context(|| format!("creating `{}`", path.display()))
 }

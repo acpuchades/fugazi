@@ -1,5 +1,5 @@
 //! The `fugazi get` subcommand: fetch OHLCV bars from remote providers and
-//! write them to a `;`-delimited CSV in the same shape `--series` reads back.
+//! write them to a `,`-delimited CSV in the same shape `--series` reads back.
 //!
 //! Takes one or more specs, each
 //! `<provider>:<symbol>[<freq>(,<freq>)*](,<symbol>[<freq>(,<freq>)*])*`
@@ -12,7 +12,7 @@
 //!            -o candles.csv
 //! ```
 //!
-//! Output columns: `symbol;freq;time;open;high;low;close;volume`, sorted
+//! Output columns: `symbol,freq,time,open,high,low,close,volume`, sorted
 //! ascending by `time` (ties broken by symbol, then freq). `time` is ISO 8601
 //! UTC (`YYYY-MM-DDTHH:MM:SSZ`).
 //!
@@ -112,7 +112,7 @@ pub struct GetArgs {
     #[arg(long, default_value = "today")]
     until: String,
 
-    /// Output CSV path. Header: `symbol;freq;time;open;high;low;close;volume`.
+    /// Output CSV path. Header: `symbol,freq,time,open,high,low,close,volume`.
     /// Parent directories are created if missing.
     #[arg(short, long, value_name = "FILE")]
     output: PathBuf,
@@ -691,8 +691,8 @@ fn unknown_provider_error(other: &str) -> String {
     )
 }
 
-/// Write the row list to `path` as a `;`-delimited CSV. Base header:
-/// `symbol;freq;time;open;high;low;close;volume`, followed by one column per
+/// Write the row list to `path` as a `,`-delimited CSV. Base header:
+/// `symbol,freq,time,open,high,low,close,volume`, followed by one column per
 /// overlay column name (unique, in first-appearance order across the
 /// `--overlay` args) and one column per source-provided extra (`n_trades`,
 /// `adj_close`, or a `csv:` file's own non-OHLCV columns — union across all
@@ -703,7 +703,7 @@ fn unknown_provider_error(other: &str) -> String {
 /// `true`/`false`, `Str` verbatim.
 fn write_candles_csv(path: &Path, rows: &[Row], overlay_columns: &[String]) -> Result<()> {
     let mut wtr = csv::WriterBuilder::new()
-        .delimiter(b';')
+        .delimiter(b',')
         .from_path(path)
         .with_context(|| format!("creating {}", path.display()))?;
 

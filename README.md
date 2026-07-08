@@ -485,8 +485,8 @@ cargo run --bin fugazi -- run \
   @examples/strategy.yml \
   --series @examples/candles.csv \
   --output-dir out/
-# writes out/trades.csv (time;symbol;side;units;price;kind),
-#        out/returns.csv (time;equity;return),
+# writes out/trades.csv (time,symbol,side,units,price,kind),
+#        out/returns.csv (time,equity,return),
 #        and out/metrics.yml (whole-run summary)
 ```
 
@@ -514,7 +514,7 @@ identical to the pre-costs release. `-w/--windowed <N>` reduces the run in
 written, and adding `-w N` writes two extra CSVs at window length `N`:
 `metrics.csv` (non-overlapping windows, one row each) and `rolling.csv`
 (rolling stride-1 windows, one row each). Both share the same columns —
-`window_start;window_end;<full metric catalogue under dotted metrics.yml
+`window_start,window_end,<full metric catalogue under dotted metrics.yml
 names>` — so R/Python can consume them interchangeably. The console prints
 an extra **windowed metrics** block under `-w` showing `mean ± std` across
 the non-overlapping rows, right after the whole-run block — so the single
@@ -531,7 +531,7 @@ consistently across regimes rather than in one lucky stretch. Add
 each grid point by `K` standard deviations before sorting (`mean − K·std` for
 higher-is-better metrics, `mean + K·std` for lower-is-better ones), so
 `sharpe 2.0 ± 3.0` no longer outranks `1.8 ± 0.2`. Output files are
-`;`-delimited for Excel.
+`,`-delimited.
 
 `run` and `optimize` measure the whole run. The strategy layer's readiness
 default holds entries until every wired signal *and* every attached

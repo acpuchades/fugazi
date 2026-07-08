@@ -59,7 +59,7 @@ fn runs_an_at_file_strategy() {
     );
 
     assert!(
-        out.trades.starts_with("time;symbol;side;units;price"),
+        out.trades.starts_with("time,symbol,side,units,price"),
         "unexpected trades.csv header: {}",
         out.trades
     );
@@ -80,7 +80,7 @@ fn runs_an_at_file_strategy() {
 /// `-w/--windowed N` keeps writing `metrics.yml` (whole-run) and *also* emits
 /// `metrics.csv` (one row per non-overlapping N-bar window) and `rolling.csv`
 /// (one row per rolling N-bar window). Both CSVs share the same shape — same
-/// columns and same `window_start;window_end;<metrics…>` layout — so R can
+/// columns and same `window_start,window_end,<metrics…>` layout — so R can
 /// consume them interchangeably.
 #[test]
 fn runs_windowed_metrics() {
@@ -112,7 +112,7 @@ fn runs_windowed_metrics() {
     let mut lines = metrics.lines();
     let header = lines.next().expect("metrics.csv header");
     assert!(
-        header.starts_with("window_start;window_end;run.bars;"),
+        header.starts_with("window_start,window_end,run.bars,"),
         "unexpected metrics.csv header: {header}"
     );
     for section in ["returns.total_pct", "risk_adjusted.sharpe", "drawdown.max_pct"] {
@@ -125,7 +125,7 @@ fn runs_windowed_metrics() {
     let rows: Vec<&str> = lines.collect();
     assert_eq!(rows.len(), 3, "expected one row per non-overlapping window:\n{metrics}");
     assert!(
-        rows[0].starts_with("2024-01-01;"),
+        rows[0].starts_with("2024-01-01,"),
         "first window should start at bar 1 of the run: {}",
         rows[0]
     );
@@ -138,7 +138,7 @@ fn runs_windowed_metrics() {
     // overlapping bars break the trial-variance model. See `run.rs` writer.
     assert_eq!(
         header,
-        format!("{rheader};selection.deflated_sharpe"),
+        format!("{rheader},selection.deflated_sharpe"),
         "metrics.csv should be rolling.csv's columns plus the trailing selection.deflated_sharpe"
     );
     // 30 bars, window 10 → 30 - 10 + 1 = 21 rolling windows.
@@ -179,12 +179,12 @@ fn runs_windowed_metrics_with_time_suffix() {
     let rows: Vec<&str> = metrics.lines().skip(1).collect();
     assert_eq!(rows.len(), 5, "expected 4 full 7-bar windows + a 2-bar tail:\n{metrics}");
     assert!(
-        rows[0].starts_with("2024-01-01;2024-01-07;"),
+        rows[0].starts_with("2024-01-01,2024-01-07,"),
         "first window should span Jan 1-7: {}",
         rows[0]
     );
     assert!(
-        rows[4].starts_with("2024-01-29;2024-01-30;"),
+        rows[4].starts_with("2024-01-29,2024-01-30,"),
         "last (stub) window should span Jan 29-30: {}",
         rows[4]
     );
@@ -260,7 +260,7 @@ fn runs_an_inline_strategy() {
     );
 
     assert!(
-        out.trades.starts_with("time;symbol;side;units;price"),
+        out.trades.starts_with("time,symbol,side,units,price"),
         "unexpected trades.csv header: {}",
         out.trades
     );

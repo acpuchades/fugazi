@@ -8,7 +8,7 @@
 //! we drive [`crate::backtest::evaluate`] and record its [`crate::metrics`]
 //! document.
 //!
-//! Output is one `;`-delimited CSV file (`-o/--output`) with one row per grid
+//! Output is one `,`-delimited CSV file (`-o/--output`) with one row per grid
 //! point: axis columns first (in declaration order), then one column per
 //! `-m/--metrics` name — or, when `-m` is omitted, one column per metric in the
 //! whole catalogue. Column headers are the canonical dotted path (`sharpe` on
@@ -771,7 +771,7 @@ fn ranking_value(eval: &Evaluation, path: &str, direction: Direction, k: Real) -
 /// metric (`<name>_mean` / `<name>_std`, the cross-window aggregate). Whole-run
 /// sweeps also get a trailing `selection.deflated_sharpe` column when the grid has
 /// enough spread in Sharpes for the multiple-testing correction to be defined.
-/// `;`-delimited to match `trades.csv` / `returns.csv`. Missing (omitted)
+/// `,`-delimited to match `trades.csv` / `returns.csv`. Missing (omitted)
 /// metric values are written as an empty cell.
 fn write_grid_csv(
     path: &Path,
@@ -788,7 +788,7 @@ fn write_grid_csv(
             .with_context(|| format!("creating output dir `{}`", parent.display()))?;
     }
     let mut writer = csv::WriterBuilder::new()
-        .delimiter(b';')
+        .delimiter(b',')
         .from_path(path)
         .with_context(|| format!("creating `{}`", path.display()))?;
 

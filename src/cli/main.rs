@@ -326,7 +326,7 @@ struct OptimizeArgs {
     best_by: Option<String>,
 
     /// Output CSV path. One row per grid point: axis columns then metric columns,
-    /// `;`-delimited. Parent directories are created if missing.
+    /// `,`-delimited. Parent directories are created if missing.
     #[arg(short = 'o', long = "output", value_name = "FILE")]
     output: PathBuf,
 

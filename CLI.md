@@ -355,8 +355,8 @@ overfitting under a different name.
 
 ### `get`
 
-Fetch OHLCV bars into a `run`-ready `;`-delimited CSV. The header is
-`symbol;freq;time;open;high;low;close;volume`, followed by one column per
+Fetch OHLCV bars into a `run`-ready `,`-delimited CSV. The header is
+`symbol,freq,time,open,high,low,close,volume`, followed by one column per
 `-x/--overlay` you request. `time` is ISO 8601 UTC.
 
 ```
@@ -926,7 +926,7 @@ in the same pass.
 
 ## Output files
 
-All CSV files are `;`-delimited for Excel.
+All CSV files are `,`-delimited.
 
 ### `trades.csv` (from `run`)
 
