@@ -101,7 +101,7 @@ pub struct PairsStrategy<Sym> {
     bars_seen: usize,
 }
 
-impl<Sym: Clone + PartialEq + 'static> PairsStrategy<Sym> {
+impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> PairsStrategy<Sym> {
     /// A pairs strategy over `left`/`right` with no transitions wired — both
     /// signal slots are constant-`false` and neither spread level is set. Add
     /// the signals with [`on`](Self::on); attach a level with
@@ -213,7 +213,7 @@ impl<Sym: Clone + PartialEq + 'static> PairsStrategy<Sym> {
     }
 }
 
-impl<Sym: Clone + PartialEq + 'static> Strategy for PairsStrategy<Sym> {
+impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> Strategy for PairsStrategy<Sym> {
     type Input = Snapshot<Sym>;
     type Symbol = Sym;
 

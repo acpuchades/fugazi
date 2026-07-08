@@ -9,7 +9,7 @@ use super::SingleAssetStrategy;
 ///
 /// Long while the `period`-bar percentage change of the close is positive, short
 /// while it is negative — the simplest time-series momentum rule.
-pub fn momentum_roc<Sym: Clone + PartialEq + 'static>(symbol: Sym, period: usize) -> SingleAssetStrategy<Sym> {
+pub fn momentum_roc<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>(symbol: Sym, period: usize) -> SingleAssetStrategy<Sym> {
     let up = || super::self_close::<Sym>().roc(period).above(0.0);
     let down = || super::self_close::<Sym>().roc(period).below(0.0);
     SingleAssetStrategy::new(symbol)
@@ -21,7 +21,7 @@ pub fn momentum_roc<Sym: Clone + PartialEq + 'static>(symbol: Sym, period: usize
 ///
 /// Reads RSI as a trend gauge rather than a reversion one: long while RSI is
 /// above 50, short while below — flipping as it crosses the midline.
-pub fn rsi_midline<Sym: Clone + PartialEq + 'static>(symbol: Sym, period: usize) -> SingleAssetStrategy<Sym> {
+pub fn rsi_midline<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>(symbol: Sym, period: usize) -> SingleAssetStrategy<Sym> {
     let up = || Rsi::new(super::self_close::<Sym>(), period).above(50.0);
     let down = || Rsi::new(super::self_close::<Sym>(), period).below(50.0);
     SingleAssetStrategy::new(symbol)

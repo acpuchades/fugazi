@@ -1,6 +1,8 @@
 //! [`SingleAssetStrategy`]: the generic, all-in skeleton every other strategy in
 //! this catalogue specialises.
 
+use std::hash::Hash;
+
 use crate::indicators::{Book, Const, Position, Value};
 use crate::prelude::*;
 use crate::types::{Selector, Snapshot};
@@ -162,11 +164,11 @@ pub struct SingleAssetStrategy<Sym> {
     short_target: Option<Level<Sym>>,
     sizing: Level<Sym>,
     position: Position,
-    book: Book,
+    book: Book<Sym>,
     bars_seen: usize,
 }
 
-impl<Sym: Clone + 'static> SingleAssetStrategy<Sym> {
+impl<Sym: Clone + Hash + Eq + 'static> SingleAssetStrategy<Sym> {
     /// A strategy on `symbol` with no transitions wired — every slot a
     /// constant-`false` signal and no stops. Add sides with
     /// [`long_on`](Self::long_on) / [`short_on`](Self::short_on).
@@ -257,7 +259,7 @@ impl<Sym: Clone + 'static> SingleAssetStrategy<Sym> {
     /// `strat.book().trade_return()` for a Kelly-style fractional sizer.
     /// See [`Book`] for the full accessor set and the initial-equity
     /// requirement.
-    pub fn book(&self) -> Book {
+    pub fn book(&self) -> Book<Sym> {
         self.book.clone()
     }
 
@@ -351,7 +353,7 @@ impl<Sym: Clone + 'static> SingleAssetStrategy<Sym> {
     }
 }
 
-impl<Sym: Clone + PartialEq + 'static> Strategy for SingleAssetStrategy<Sym> {
+impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Strategy for SingleAssetStrategy<Sym> {
     type Input = Snapshot<Sym>;
     type Symbol = Sym;
 
@@ -364,7 +366,7 @@ impl<Sym: Clone + PartialEq + 'static> Strategy for SingleAssetStrategy<Sym> {
         let self_atom = extract_self_atom(&snap, &self.symbol);
         if let Some(atom) = &self_atom {
             self.position.update(atom.candle);
-            self.book.update(atom.candle);
+            self.book.update([(self.symbol.clone(), atom.candle)]);
         }
 
         self.long.update(snap.clone());
@@ -398,7 +400,8 @@ impl<Sym: Clone + PartialEq + 'static> Strategy for SingleAssetStrategy<Sym> {
         // cash / units / trade lifecycle in lockstep.
         if order.symbol == self.symbol {
             self.position.apply(order.side, order.units, order.price);
-            self.book.apply_fill(order.side, order.units, order.price);
+            self.book
+                .apply_fill(&self.symbol, order.side, order.units, order.price);
         }
     }
 

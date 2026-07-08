@@ -125,8 +125,8 @@ pub fn atr_risk<Sym: Clone + PartialEq + 'static>(
 ///
 /// # Panics
 /// Panics if `max_drawdown <= 0`.
-pub fn drawdown_throttle<Sym: Clone + PartialEq + 'static>(
-    book: &Book,
+pub fn drawdown_throttle<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>(
+    book: &Book<Sym>,
     max_drawdown: Real,
 ) -> impl Indicator<Input = Snapshot<Sym>, Output = Real> + Clone + 'static {
     assert!(max_drawdown > 0.0, "max_drawdown must be > 0");
@@ -152,8 +152,8 @@ pub fn drawdown_throttle<Sym: Clone + PartialEq + 'static>(
 /// # Panics
 /// Panics if `target_annualized_vol <= 0`, `window == 0`, or
 /// `bars_per_year <= 0`.
-pub fn equity_vol_target<Sym: Clone + PartialEq + 'static>(
-    book: &Book,
+pub fn equity_vol_target<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>(
+    book: &Book<Sym>,
     target_annualized_vol: Real,
     window: usize,
     bars_per_year: Real,
@@ -190,8 +190,8 @@ pub fn equity_vol_target<Sym: Clone + PartialEq + 'static>(
 /// # Panics
 /// Panics if `kelly_fraction <= 0` or `window < 2` (variance is
 /// meaningless with fewer than two samples).
-pub fn fractional_kelly<Sym: Clone + PartialEq + 'static>(
-    book: &Book,
+pub fn fractional_kelly<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>(
+    book: &Book<Sym>,
     kelly_fraction: Real,
     window: usize,
 ) -> impl Indicator<Input = Snapshot<Sym>, Output = Real> + Clone + 'static {
@@ -210,14 +210,23 @@ pub fn fractional_kelly<Sym: Clone + PartialEq + 'static>(
 // Private to this module; the recipes expose them as `impl Indicator + Clone`.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
-struct DrawdownThrottle<In> {
-    book: Book,
+struct DrawdownThrottle<Sym, In> {
+    book: Book<Sym>,
     max_drawdown: Real,
     _phantom: PhantomData<fn(In)>,
 }
 
-impl<In> Indicator for DrawdownThrottle<In> {
+impl<Sym, In> Clone for DrawdownThrottle<Sym, In> {
+    fn clone(&self) -> Self {
+        Self {
+            book: self.book.clone(),
+            max_drawdown: self.max_drawdown,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<Sym: std::hash::Hash + Eq + Clone, In> Indicator for DrawdownThrottle<Sym, In> {
     type Input = In;
     type Output = Real;
 
@@ -231,8 +240,8 @@ impl<In> Indicator for DrawdownThrottle<In> {
         if peak.abs() < f64::EPSILON {
             return None;
         }
-        let drawdown = (equity - peak) / peak; // <= 0
-        let raw = 1.0 + drawdown / self.max_drawdown;
+        let drawdown: Real = (equity - peak) / peak; // <= 0
+        let raw: Real = 1.0 + drawdown / self.max_drawdown;
         Some(raw.clamp(0.0, 1.0))
     }
 
@@ -405,18 +414,18 @@ mod tests {
 
     #[test]
     fn drawdown_throttle_starts_at_one_and_scales_linearly() {
-        let book = Book::new(1_000.0);
+        let book: Book<&'static str> = Book::new(1_000.0);
         let mut ind = drawdown_throttle::<&'static str>(&book, 0.20);
         // At the peak: multiplier = 1.
         assert!((feed_bar(&mut ind, 100.0).unwrap() - 1.0).abs() < 1e-12);
         // Simulate a 10% drawdown: seed 1000 → equity 900, peak 1000.
-        book.apply_fill(Side::Buy, 10.0, 100.0);
-        book.update(Candle::new(100.0, 100.0, 100.0, 100.0, 0.0));
-        book.update(Candle::new(90.0, 90.0, 90.0, 90.0, 0.0));
+        book.apply_fill(&"X", Side::Buy, 10.0, 100.0);
+        book.update([("X", Candle::new(100.0, 100.0, 100.0, 100.0, 0.0))]);
+        book.update([("X", Candle::new(90.0, 90.0, 90.0, 90.0, 0.0))]);
         // Drawdown = -0.1, max_drawdown = 0.2, throttle = 1 + (-0.1)/0.2 = 0.5.
         assert!((ind.update(Snapshot::of_atom(Candle::new(90.0, 90.0, 90.0, 90.0, 0.0).into())).unwrap() - 0.5).abs() < 1e-12);
         // A deeper 30% drawdown clamps to 0.
-        book.update(Candle::new(70.0, 70.0, 70.0, 70.0, 0.0));
+        book.update([("X", Candle::new(70.0, 70.0, 70.0, 70.0, 0.0))]);
         assert_eq!(
             ind.update(Snapshot::of_atom(Candle::new(70.0, 70.0, 70.0, 70.0, 0.0).into())),
             Some(0.0)
@@ -426,13 +435,13 @@ mod tests {
     #[test]
     #[should_panic]
     fn drawdown_throttle_rejects_zero_max_drawdown() {
-        let book = Book::new(1_000.0);
+        let book: Book<&'static str> = Book::new(1_000.0);
         let _ = drawdown_throttle::<&'static str>(&book, 0.0);
     }
 
     #[test]
     fn equity_vol_target_matches_closed_form_on_steady_returns() {
-        let book = Book::new(1_000.0);
+        let book: Book<&'static str> = Book::new(1_000.0);
         let target = 0.20;
         let bpy = 252.0;
         let window = 4;
@@ -441,11 +450,11 @@ mod tests {
         // Seed a buy-and-hold at 100 units cost, then price oscillates:
         // 100 → 101 → 100 → 101 → 100 → 101, giving a return series of
         // alternating +1% and -1% (approximately — depends on prev equity).
-        book.apply_fill(Side::Buy, 10.0, 100.0);
-        book.update(Candle::new(100.0, 100.0, 100.0, 100.0, 0.0));
+        book.apply_fill(&"X", Side::Buy, 10.0, 100.0);
+        book.update([("X", Candle::new(100.0, 100.0, 100.0, 100.0, 0.0))]);
         ind.update(Snapshot::of_atom(Candle::new(100.0, 100.0, 100.0, 100.0, 0.0).into()));
         for close in [101.0, 100.0, 101.0, 100.0, 101.0].iter().copied() {
-            book.update(Candle::new(close, close, close, close, 0.0));
+            book.update([("X", Candle::new(close, close, close, close, 0.0))]);
             ind.update(Snapshot::of_atom(Candle::new(close, close, close, close, 0.0).into()));
         }
         // Once the window has enough per-bar returns, the multiplier is well-defined.
@@ -456,10 +465,10 @@ mod tests {
 
     #[test]
     fn equity_vol_target_is_none_until_window_fills() {
-        let book = Book::new(1_000.0);
+        let book: Book<&'static str> = Book::new(1_000.0);
         let mut ind = equity_vol_target::<&'static str>(&book, 0.20, 10, 252.0);
         for _ in 0..5 {
-            book.update(Candle::new(100.0, 100.0, 100.0, 100.0, 0.0));
+            book.update([("X", Candle::new(100.0, 100.0, 100.0, 100.0, 0.0))]);
             ind.update(Snapshot::of_atom(Candle::new(100.0, 100.0, 100.0, 100.0, 0.0).into()));
         }
         assert_eq!(ind.value(), None, "vol target should be None during warm-up");
@@ -467,7 +476,7 @@ mod tests {
 
     #[test]
     fn fractional_kelly_produces_multiplier_after_enough_trades() {
-        let book = Book::new(1_000.0);
+        let book: Book<&'static str> = Book::new(1_000.0);
         let mut ind = fractional_kelly::<&'static str>(&book, 0.5, 3);
         // Simulate three closed trades with a stream of trade returns.
         // Bars roll like: enter → update → close → update → enter → ...
@@ -477,15 +486,15 @@ mod tests {
             (Side::Buy, 10.0, 100.0, 120.0), // +200 pnl, +20% return
         ];
         for (side, units, entry, exit) in trades {
-            book.apply_fill(side, units, entry);
-            book.update(Candle::new(entry, entry, entry, entry, 0.0));
+            book.apply_fill(&"X", side, units, entry);
+            book.update([("X", Candle::new(entry, entry, entry, entry, 0.0))]);
             ind.update(Snapshot::of_atom(Candle::new(entry, entry, entry, entry, 0.0).into()));
             let opp = if side == Side::Buy { Side::Sell } else { Side::Buy };
-            book.apply_fill(opp, units, exit);
-            book.update(Candle::new(exit, exit, exit, exit, 0.0));
+            book.apply_fill(&"X", opp, units, exit);
+            book.update([("X", Candle::new(exit, exit, exit, exit, 0.0))]);
             ind.update(Snapshot::of_atom(Candle::new(exit, exit, exit, exit, 0.0).into()));
             // Next bar drains the trade-close accessor.
-            book.update(Candle::new(exit, exit, exit, exit, 0.0));
+            book.update([("X", Candle::new(exit, exit, exit, exit, 0.0))]);
             ind.update(Snapshot::of_atom(Candle::new(exit, exit, exit, exit, 0.0).into()));
         }
         // After 3 closed trades, Kelly should be Some and non-negative.
@@ -495,11 +504,11 @@ mod tests {
 
     #[test]
     fn fractional_kelly_is_none_until_window_of_trades_closes() {
-        let book = Book::new(1_000.0);
+        let book: Book<&'static str> = Book::new(1_000.0);
         let mut ind = fractional_kelly::<&'static str>(&book, 0.5, 5);
         // No trades yet.
         for _ in 0..10 {
-            book.update(Candle::new(100.0, 100.0, 100.0, 100.0, 0.0));
+            book.update([("X", Candle::new(100.0, 100.0, 100.0, 100.0, 0.0))]);
             ind.update(Snapshot::of_atom(Candle::new(100.0, 100.0, 100.0, 100.0, 0.0).into()));
         }
         assert_eq!(ind.value(), None);
@@ -508,7 +517,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn fractional_kelly_rejects_window_below_two() {
-        let book = Book::new(1_000.0);
+        let book: Book<&'static str> = Book::new(1_000.0);
         let _ = fractional_kelly::<&'static str>(&book, 0.5, 1);
     }
 }
