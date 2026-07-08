@@ -455,6 +455,149 @@ impl From<Candle> for Atom {
     }
 }
 
+/// Equality by bar-open [`Timestamp`]. An atom is identified by *when* it is,
+/// not by the OHLCV numbers or overlays that decorate that instant, so two
+/// atoms are equal iff their `time` fields match. Atoms with `time = None`
+/// compare equal to each other (the `None`-until-timed convention).
+impl PartialEq for Atom {
+    fn eq(&self, other: &Self) -> bool {
+        self.time == other.time
+    }
+}
+
+impl Eq for Atom {}
+
+/// Chronological ordering: atoms sort by their bar-open [`Timestamp`]. `None`
+/// times sort *before* any `Some` (consistent with `Option`'s derived
+/// ordering) so a batch of undated synthetic bars stays clustered at the head
+/// of a sorted list.
+impl PartialOrd for Atom {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Atom {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.time.cmp(&other.time)
+    }
+}
+
+/// A per-bar snapshot of several assets — a keyed collection of [`Atom`]s.
+///
+/// The multi-asset input frame that lets a strategy or an indicator reason
+/// about more than one instrument at a time. Each key names one asset (e.g.
+/// `"BTC"`, `"ETH"`), each value is that asset's [`Atom`] for the current
+/// bar. The [`Pick`](crate::indicators::Pick) leaf projects one asset out of
+/// the snapshot as an `Indicator<Output = Atom>`, so cross-asset expressions
+/// compose from the same primitives as single-asset ones:
+///
+/// ```ignore
+/// use fugazi::indicators::{Close, Pick};
+/// use fugazi::prelude::*;
+/// // BTC/ETH close spread as a first-class Real-output indicator.
+/// let spread = Close::of(Pick::new("BTC"))
+///     .sub(Close::of(Pick::new("ETH")));
+/// ```
+///
+/// Generic over the key type `K`. `K: Eq + Hash` is required to look values
+/// up; `K: Clone` is required to move the snapshot through the indicator
+/// pipeline (each `update` clones the emitted snapshot into downstream
+/// consumers). Semantics mirror the underlying [`HashMap`] — no order
+/// guarantees, no automatic time alignment; the driver that builds each
+/// bar's snapshot is responsible for feeding a consistent key set.
+#[derive(Debug, Clone)]
+pub struct Snapshot<K> {
+    atoms: HashMap<K, Atom>,
+}
+
+impl<K: Eq + std::hash::Hash> PartialEq for Snapshot<K> {
+    fn eq(&self, other: &Self) -> bool {
+        self.atoms == other.atoms
+    }
+}
+
+impl<K> Snapshot<K> {
+    /// An empty snapshot with no assets.
+    pub fn new() -> Self {
+        Self {
+            atoms: HashMap::new(),
+        }
+    }
+
+    /// Number of assets in this snapshot.
+    pub fn len(&self) -> usize {
+        self.atoms.len()
+    }
+
+    /// True if this snapshot carries no assets.
+    pub fn is_empty(&self) -> bool {
+        self.atoms.is_empty()
+    }
+
+    /// Iterate over `(key, atom)` pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &Atom)> {
+        self.atoms.iter()
+    }
+
+    /// Iterate over the keys.
+    pub fn keys(&self) -> impl Iterator<Item = &K> {
+        self.atoms.keys()
+    }
+}
+
+impl<K: Eq + std::hash::Hash> Snapshot<K> {
+    /// Look up an asset by key. `None` if the key is not present in this bar.
+    pub fn get<Q>(&self, key: &Q) -> Option<&Atom>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: Eq + std::hash::Hash + ?Sized,
+    {
+        self.atoms.get(key)
+    }
+
+    /// Insert or replace an asset's atom for this bar, returning the previous
+    /// atom if any.
+    pub fn insert(&mut self, key: K, atom: Atom) -> Option<Atom> {
+        self.atoms.insert(key, atom)
+    }
+
+    /// True if this snapshot has an atom for the given key.
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: Eq + std::hash::Hash + ?Sized,
+    {
+        self.atoms.contains_key(key)
+    }
+}
+
+impl<K> Default for Snapshot<K> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K: Eq + std::hash::Hash> FromIterator<(K, Atom)> for Snapshot<K> {
+    fn from_iter<I: IntoIterator<Item = (K, Atom)>>(iter: I) -> Self {
+        Self {
+            atoms: iter.into_iter().collect(),
+        }
+    }
+}
+
+impl<K: Eq + std::hash::Hash> From<HashMap<K, Atom>> for Snapshot<K> {
+    fn from(atoms: HashMap<K, Atom>) -> Self {
+        Self { atoms }
+    }
+}
+
+impl<K> From<Snapshot<K>> for HashMap<K, Atom> {
+    fn from(snap: Snapshot<K>) -> Self {
+        snap.atoms
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

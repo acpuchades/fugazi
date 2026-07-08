@@ -41,6 +41,7 @@ mod keltner;
 mod macd;
 mod mfi;
 mod obv;
+mod pick;
 mod position;
 mod rma;
 mod rsi;
@@ -89,6 +90,7 @@ pub use logic::{And, Change, Const, Not, Or, Xor};
 pub use macd::{Macd, MacdValue};
 pub use mfi::Mfi;
 pub use obv::Obv;
+pub use pick::Pick;
 pub use ops::{
     Add, BinaryOp, Combine, Diff, Div, Extreme, ExtremeOp, Lag, Lookback, LookbackOp, MaxOp, MinOp,
     Mul, Ratio, Roc, RollingMax, RollingMin, Sub,
