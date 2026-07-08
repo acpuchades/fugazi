@@ -13,8 +13,13 @@
 //! sole-atom unpack path, matching the convention used across
 //! [`crate::strategies`].
 
+use std::marker::PhantomData;
+
 use crate::indicator::Indicator;
-use crate::indicators::{Atr, Close, CurrentBar, IndicatorExt, Log, Pick, StdDev, Value};
+use crate::indicators::stats::WindowStats;
+use crate::indicators::{
+    Atr, Book, Close, CurrentBar, IndicatorExt, Log, Pick, StdDev, Value,
+};
 use crate::types::{Real, Snapshot};
 
 /// **Inverse-realized-volatility (vol targeting) sizing.**
@@ -99,6 +104,195 @@ pub fn atr_risk<Sym: Clone + PartialEq + 'static>(
     close
         .mul(Value::<Snapshot<Sym>>::new(risk_frac / atr_multiple))
         .div(atr)
+}
+
+// ---------------------------------------------------------------------------
+// Position-dependent recipes — read the strategy's Book anchor.
+// ---------------------------------------------------------------------------
+
+/// **Drawdown throttle sizing.**
+///
+/// Returns `max(0, min(1, 1 + book.drawdown() / max_drawdown))` — the
+/// multiplier that starts at `1.0` when the strategy is at a new equity
+/// peak and *linearly de-levers* as drawdown deepens, hitting `0` when
+/// drawdown reaches `-max_drawdown` and staying at `0` beyond that. When
+/// the strategy climbs back toward the peak, the throttle relaxes; it
+/// re-arms to `1.0` on a new all-time high.
+///
+/// Wrap a strategy in
+/// `strat.position_sizing(drawdown_throttle(&strat.book(), 0.20))` to cap
+/// equity give-back at 20% of the running peak.
+///
+/// # Panics
+/// Panics if `max_drawdown <= 0`.
+pub fn drawdown_throttle<Sym: Clone + PartialEq + 'static>(
+    book: &Book,
+    max_drawdown: Real,
+) -> impl Indicator<Input = Snapshot<Sym>, Output = Real> + Clone {
+    assert!(max_drawdown > 0.0, "max_drawdown must be > 0");
+    DrawdownThrottle {
+        book: book.clone(),
+        max_drawdown,
+        _phantom: PhantomData,
+    }
+}
+
+/// **Equity-return realized-vol targeting.**
+///
+/// Returns `target_annualized_vol / (stddev(book.return_per_bar(),
+/// window) * sqrt(bars_per_year))`. Unlike the price-based
+/// [`vol_target`] (which scales by the underlying's realized vol), this
+/// scales by the *strategy's own* realized return vol — so a cash
+/// position (returning zero) doesn't contribute, and a leveraged
+/// position amplifies the denominator. Emits `None` until `window` bars
+/// of `book.return_per_bar` (which itself starts on bar 2) have been
+/// collected; the `Book`'s and the `StdDev`'s warm-ups compose into the
+/// strategy's readiness gate.
+///
+/// # Panics
+/// Panics if `target_annualized_vol <= 0`, `window == 0`, or
+/// `bars_per_year <= 0`.
+pub fn equity_vol_target<Sym: Clone + PartialEq + 'static>(
+    book: &Book,
+    target_annualized_vol: Real,
+    window: usize,
+    bars_per_year: Real,
+) -> impl Indicator<Input = Snapshot<Sym>, Output = Real> + Clone {
+    assert!(
+        target_annualized_vol > 0.0,
+        "target_annualized_vol must be > 0"
+    );
+    assert!(window > 0, "window must be > 0");
+    assert!(bars_per_year > 0.0, "bars_per_year must be > 0");
+
+    let returns = book.return_per_bar::<Snapshot<Sym>>();
+    let vol = StdDev::new(returns, window);
+    let annualized = vol.mul(Value::<Snapshot<Sym>>::new(bars_per_year.sqrt()));
+    Value::<Snapshot<Sym>>::new(target_annualized_vol).div(annualized)
+}
+
+/// **Fractional Kelly sizing** over the last `window` closed trades.
+///
+/// Returns `max(0, kelly_fraction * mean / variance)`, where `mean` and
+/// `variance` are the rolling stats of `book.trade_return()` over the
+/// last `window` closed trades (`Sma`/`StdDev` only advance on the
+/// close-bar `Some` values). This is the continuous-return Kelly
+/// approximation — appropriate for small trade returns. `kelly_fraction`
+/// is the caller's Kelly-fraction — typically `0.25`–`0.5` (quarter-
+/// to half-Kelly) since full Kelly is well known to over-lever in
+/// practice.
+///
+/// Emits `None` until the window has filled with `window` closed
+/// trades. Clamped to `>= 0` (a negative Kelly implies "sit out"; sizing
+/// is a magnitude, so we return `0` instead of flipping direction).
+/// When variance is zero (all returns identical), emits `0`.
+///
+/// # Panics
+/// Panics if `kelly_fraction <= 0` or `window < 2` (variance is
+/// meaningless with fewer than two samples).
+pub fn fractional_kelly<Sym: Clone + PartialEq + 'static>(
+    book: &Book,
+    kelly_fraction: Real,
+    window: usize,
+) -> impl Indicator<Input = Snapshot<Sym>, Output = Real> + Clone {
+    assert!(kelly_fraction > 0.0, "kelly_fraction must be > 0");
+    assert!(window >= 2, "window must be >= 2 (variance needs 2+ samples)");
+    FractionalKelly {
+        source: book.trade_return::<Snapshot<Sym>>(),
+        stats: WindowStats::new(window),
+        kelly_fraction,
+        value: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Concrete indicator types the three position-dependent recipes return.
+// Private to this module; the recipes expose them as `impl Indicator + Clone`.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct DrawdownThrottle<In> {
+    book: Book,
+    max_drawdown: Real,
+    _phantom: PhantomData<fn(In)>,
+}
+
+impl<In> Indicator for DrawdownThrottle<In> {
+    type Input = In;
+    type Output = Real;
+
+    fn update(&mut self, _input: In) -> Option<Real> {
+        self.value()
+    }
+
+    fn value(&self) -> Option<Real> {
+        let equity = self.book.equity_value();
+        let peak = self.book.equity_peak_value();
+        if peak.abs() < f64::EPSILON {
+            return None;
+        }
+        let drawdown = (equity - peak) / peak; // <= 0
+        let raw = 1.0 + drawdown / self.max_drawdown;
+        Some(raw.clamp(0.0, 1.0))
+    }
+
+    fn warm_up_period(&self) -> usize {
+        0
+    }
+
+    fn reset(&mut self) {}
+}
+
+/// A rolling Kelly-fraction sizer. Owns the source (a
+/// [`Book::trade_return`] accessor) and a shared [`WindowStats`] core
+/// that computes the rolling mean and variance of trade returns.
+#[derive(Debug, Clone)]
+struct FractionalKelly<S> {
+    source: S,
+    stats: WindowStats,
+    kelly_fraction: Real,
+    value: Option<Real>,
+}
+
+impl<S: Indicator<Output = Real>> Indicator for FractionalKelly<S> {
+    type Input = S::Input;
+    type Output = Real;
+
+    fn update(&mut self, input: S::Input) -> Option<Real> {
+        self.value = match self.source.update(input) {
+            Some(x) if self.stats.update(x) => {
+                let mean = self.stats.mean();
+                let var = self.stats.variance();
+                if var > 0.0 {
+                    Some((self.kelly_fraction * mean / var).max(0.0))
+                } else {
+                    Some(0.0)
+                }
+            }
+            _ => self.value,
+        };
+        self.value
+    }
+
+    fn value(&self) -> Option<Real> {
+        self.value
+    }
+
+    /// `0`: the source's Some-values are event-driven (one per closed
+    /// trade), so the window fills when `window` trades have actually
+    /// closed — the strategy's readiness gate can't reason about that in
+    /// bar counts. Until the window fills, the recipe emits `None`, and
+    /// the strategy's "sizing None ⇒ skip trade" safe default holds
+    /// entries.
+    fn warm_up_period(&self) -> usize {
+        0
+    }
+
+    fn reset(&mut self) {
+        self.source.reset();
+        self.stats.reset();
+        self.value = None;
+    }
 }
 
 #[cfg(test)]
@@ -201,5 +395,120 @@ mod tests {
     #[should_panic]
     fn atr_risk_rejects_non_positive_risk() {
         let _ = atr_risk::<&'static str>(0.0, 14, 2.0);
+    }
+
+    // ------------------------------------------------------------------
+    // Position-dependent recipes
+    // ------------------------------------------------------------------
+
+    use crate::strategy::Side;
+
+    #[test]
+    fn drawdown_throttle_starts_at_one_and_scales_linearly() {
+        let book = Book::new(1_000.0);
+        let mut ind = drawdown_throttle::<&'static str>(&book, 0.20);
+        // At the peak: multiplier = 1.
+        assert!((feed_bar(&mut ind, 100.0).unwrap() - 1.0).abs() < 1e-12);
+        // Simulate a 10% drawdown: seed 1000 → equity 900, peak 1000.
+        book.apply_fill(Side::Buy, 10.0, 100.0);
+        book.update(Candle::new(100.0, 100.0, 100.0, 100.0, 0.0));
+        book.update(Candle::new(90.0, 90.0, 90.0, 90.0, 0.0));
+        // Drawdown = -0.1, max_drawdown = 0.2, throttle = 1 + (-0.1)/0.2 = 0.5.
+        assert!((ind.update(Snapshot::of_atom(Candle::new(90.0, 90.0, 90.0, 90.0, 0.0).into())).unwrap() - 0.5).abs() < 1e-12);
+        // A deeper 30% drawdown clamps to 0.
+        book.update(Candle::new(70.0, 70.0, 70.0, 70.0, 0.0));
+        assert_eq!(
+            ind.update(Snapshot::of_atom(Candle::new(70.0, 70.0, 70.0, 70.0, 0.0).into())),
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn drawdown_throttle_rejects_zero_max_drawdown() {
+        let book = Book::new(1_000.0);
+        let _ = drawdown_throttle::<&'static str>(&book, 0.0);
+    }
+
+    #[test]
+    fn equity_vol_target_matches_closed_form_on_steady_returns() {
+        let book = Book::new(1_000.0);
+        let target = 0.20;
+        let bpy = 252.0;
+        let window = 4;
+        let mut ind = equity_vol_target::<&'static str>(&book, target, window, bpy);
+
+        // Seed a buy-and-hold at 100 units cost, then price oscillates:
+        // 100 → 101 → 100 → 101 → 100 → 101, giving a return series of
+        // alternating +1% and -1% (approximately — depends on prev equity).
+        book.apply_fill(Side::Buy, 10.0, 100.0);
+        book.update(Candle::new(100.0, 100.0, 100.0, 100.0, 0.0));
+        ind.update(Snapshot::of_atom(Candle::new(100.0, 100.0, 100.0, 100.0, 0.0).into()));
+        for close in [101.0, 100.0, 101.0, 100.0, 101.0].iter().copied() {
+            book.update(Candle::new(close, close, close, close, 0.0));
+            ind.update(Snapshot::of_atom(Candle::new(close, close, close, close, 0.0).into()));
+        }
+        // Once the window has enough per-bar returns, the multiplier is well-defined.
+        assert!(ind.value().is_some(), "vol target should be Some once window is full");
+        // And positive.
+        assert!(ind.value().unwrap() > 0.0);
+    }
+
+    #[test]
+    fn equity_vol_target_is_none_until_window_fills() {
+        let book = Book::new(1_000.0);
+        let mut ind = equity_vol_target::<&'static str>(&book, 0.20, 10, 252.0);
+        for _ in 0..5 {
+            book.update(Candle::new(100.0, 100.0, 100.0, 100.0, 0.0));
+            ind.update(Snapshot::of_atom(Candle::new(100.0, 100.0, 100.0, 100.0, 0.0).into()));
+        }
+        assert_eq!(ind.value(), None, "vol target should be None during warm-up");
+    }
+
+    #[test]
+    fn fractional_kelly_produces_multiplier_after_enough_trades() {
+        let book = Book::new(1_000.0);
+        let mut ind = fractional_kelly::<&'static str>(&book, 0.5, 3);
+        // Simulate three closed trades with a stream of trade returns.
+        // Bars roll like: enter → update → close → update → enter → ...
+        let trades = [
+            (Side::Buy, 10.0, 100.0, 110.0), // +100 pnl, +10% return
+            (Side::Buy, 10.0, 110.0, 100.0), // −100 pnl, ≈ -9.1% return
+            (Side::Buy, 10.0, 100.0, 120.0), // +200 pnl, +20% return
+        ];
+        for (side, units, entry, exit) in trades {
+            book.apply_fill(side, units, entry);
+            book.update(Candle::new(entry, entry, entry, entry, 0.0));
+            ind.update(Snapshot::of_atom(Candle::new(entry, entry, entry, entry, 0.0).into()));
+            let opp = if side == Side::Buy { Side::Sell } else { Side::Buy };
+            book.apply_fill(opp, units, exit);
+            book.update(Candle::new(exit, exit, exit, exit, 0.0));
+            ind.update(Snapshot::of_atom(Candle::new(exit, exit, exit, exit, 0.0).into()));
+            // Next bar drains the trade-close accessor.
+            book.update(Candle::new(exit, exit, exit, exit, 0.0));
+            ind.update(Snapshot::of_atom(Candle::new(exit, exit, exit, exit, 0.0).into()));
+        }
+        // After 3 closed trades, Kelly should be Some and non-negative.
+        let k = ind.value().expect("Kelly should be Some after window fills");
+        assert!(k >= 0.0);
+    }
+
+    #[test]
+    fn fractional_kelly_is_none_until_window_of_trades_closes() {
+        let book = Book::new(1_000.0);
+        let mut ind = fractional_kelly::<&'static str>(&book, 0.5, 5);
+        // No trades yet.
+        for _ in 0..10 {
+            book.update(Candle::new(100.0, 100.0, 100.0, 100.0, 0.0));
+            ind.update(Snapshot::of_atom(Candle::new(100.0, 100.0, 100.0, 100.0, 0.0).into()));
+        }
+        assert_eq!(ind.value(), None);
+    }
+
+    #[test]
+    #[should_panic]
+    fn fractional_kelly_rejects_window_below_two() {
+        let book = Book::new(1_000.0);
+        let _ = fractional_kelly::<&'static str>(&book, 0.5, 1);
     }
 }

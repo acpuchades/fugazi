@@ -286,24 +286,25 @@ impl Book {
     /// The book's [equity level](Self::equity_value) as a real-valued
     /// [`Indicator`] — a leaf a drawdown-throttle expression or an
     /// equity-vol target composes against. Always [`Some`] (seeded at
-    /// `initial_equity`).
+    /// `initial_equity`), so `warm_up_period() = 0`.
     pub fn equity<In>(&self) -> BookField<In> {
-        BookField::new(self.clone(), |s| Some(s.equity))
+        BookField::new(self.clone(), 0, |s| Some(s.equity))
     }
 
     /// The book's [running-peak equity](Self::equity_peak_value) as a
     /// real-valued [`Indicator`]. Always [`Some`] (seeded at
-    /// `initial_equity`).
+    /// `initial_equity`); `warm_up_period() = 0`.
     pub fn equity_peak<In>(&self) -> BookField<In> {
-        BookField::new(self.clone(), |s| Some(s.equity_peak))
+        BookField::new(self.clone(), 0, |s| Some(s.equity_peak))
     }
 
     /// The book's current drawdown — `(equity - peak) / peak`, always
     /// `<= 0` (and `0` at a new peak). The leaf the drawdown-throttle
-    /// sizing recipe reads. [`None`] only if the peak has somehow drifted
-    /// to zero (should be unreachable in practice).
+    /// sizing recipe reads. Always [`Some`] in practice (only reads
+    /// [`None`] if the peak has somehow drifted to zero); `warm_up_period()
+    /// = 0`.
     pub fn drawdown<In>(&self) -> BookField<In> {
-        BookField::new(self.clone(), |s| {
+        BookField::new(self.clone(), 0, |s| {
             if s.equity_peak.abs() > DEFAULT_EPSILON {
                 Some((s.equity - s.equity_peak) / s.equity_peak)
             } else {
@@ -313,27 +314,35 @@ impl Book {
     }
 
     /// The just-completed bar's equity return —
-    /// `(equity - prev_equity) / prev_equity`. [`None`] on the first bar.
-    /// The leaf a rolling realized-vol target composes over via
+    /// `(equity - prev_equity) / prev_equity`. [`None`] on the first bar
+    /// (there's no prior equity to compare against), so
+    /// `warm_up_period() = 2` — the first `Some` lands on the second
+    /// [`Book::update`] call. The leaf a rolling realized-vol target
+    /// composes over via
     /// [`StdDev::new(book.return_per_bar(), N)`](crate::indicators::StdDev).
     pub fn return_per_bar<In>(&self) -> BookField<In> {
-        BookField::new(self.clone(), |s| s.active_return)
+        BookField::new(self.clone(), 2, |s| s.active_return)
     }
 
     /// Realized P&L of the just-closed trade in reference-currency
     /// terms (same units as `initial_equity`). [`Some`] only on the bar
-    /// whose fill closed the trade, [`None`] otherwise.
+    /// whose fill closed the trade, [`None`] otherwise. Warm-up is
+    /// reported as `0` because a trade-close event is event-driven, not
+    /// bar-count driven — a rolling stat over this source (via `Sma` /
+    /// `StdDev`) advances only on the `Some` bars, so the caller's
+    /// window fills when N trades have actually closed.
     pub fn trade_pnl<In>(&self) -> BookField<In> {
-        BookField::new(self.clone(), |s| s.active_trade_close.map(|t| t.pnl))
+        BookField::new(self.clone(), 0, |s| s.active_trade_close.map(|t| t.pnl))
     }
 
     /// The just-closed trade's return as a fraction of the equity at
     /// trade open. [`Some`] only on the close bar, [`None`] otherwise —
-    /// so rolling stats (`Sma`/`StdDev`) over this source produce the
+    /// so rolling stats (`Sma` / `StdDev`) over this source produce the
     /// "over the last N closed trades" summaries the Kelly sizing recipe
-    /// wants.
+    /// wants. Warm-up reported as `0` (event-driven; see
+    /// [`trade_pnl`](Book::trade_pnl)).
     pub fn trade_return<In>(&self) -> BookField<In> {
-        BookField::new(self.clone(), |s| s.active_trade_close.map(|t| t.return_ratio))
+        BookField::new(self.clone(), 0, |s| s.active_trade_close.map(|t| t.return_ratio))
     }
 }
 
@@ -347,14 +356,16 @@ impl Book {
 #[derive(Debug, Clone)]
 pub struct BookField<In = Atom> {
     book: Book,
+    warm_up: usize,
     select: fn(&BookState) -> Option<Real>,
     _phantom: PhantomData<fn(In)>,
 }
 
 impl<In> BookField<In> {
-    fn new(book: Book, select: fn(&BookState) -> Option<Real>) -> Self {
+    fn new(book: Book, warm_up: usize, select: fn(&BookState) -> Option<Real>) -> Self {
         Self {
             book,
+            warm_up,
             select,
             _phantom: PhantomData,
         }
@@ -373,13 +384,15 @@ impl<In> Indicator for BookField<In> {
         (self.select)(&self.book.0.borrow())
     }
 
-    /// `0`: readiness tracks the live [`Book`], not how many samples this
-    /// field has seen. The Book itself starts marked-at-`initial_equity`,
-    /// so equity / equity_peak / drawdown read `Some` from bar 0;
-    /// return_per_bar and the trade-close accessors read `None` when
-    /// they have nothing to report.
+    /// Per-accessor: `0` for equity / equity_peak / drawdown (seeded to
+    /// `initial_equity`, always `Some`), `2` for
+    /// [`Book::return_per_bar`] (needs a prior equity to compute
+    /// `(equity - prev_equity) / prev_equity`), and `0` for
+    /// [`Book::trade_pnl`] / [`Book::trade_return`] (event-driven; the
+    /// caller's rolling window fills when trades actually close, not on
+    /// a fixed bar count).
     fn warm_up_period(&self) -> usize {
-        0
+        self.warm_up
     }
 
     fn reset(&mut self) {}
