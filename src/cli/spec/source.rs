@@ -398,6 +398,27 @@ pub enum SourceSpec {
         max: Real,
     },
 
+    // --- sizing helpers (real-valued, single-series; read the strategy's
+    // own asset via the implicit empty-selector `Pick`). Meant for the
+    // `sizing:` slot on `StrategySpec` / `PairsStrategySpec`, but usable
+    // anywhere a real-valued source fits.
+    /// Inverse realized-vol sizing —
+    /// `target / (stddev(log_returns(close), window) * sqrt(bars_per_year))`.
+    /// See [`fugazi::indicators::sizing::vol_target`].
+    VolTarget {
+        target: Real,
+        window: usize,
+        bars_per_year: Real,
+    },
+    /// Fixed per-trade risk sized by ATR —
+    /// `risk_frac * close / (atr_multiple * ATR(period))`. See
+    /// [`fugazi::indicators::sizing::atr_risk`].
+    AtrRisk {
+        risk_frac: Real,
+        period: usize,
+        atr_multiple: Real,
+    },
+
     // --- transform operators ---
     Add {
         lhs: Box<SourceSpec>,
@@ -873,6 +894,27 @@ enum SourceSpecRaw {
         max: Real,
     },
 
+    // --- sizing helpers (real-valued, single-series; read the strategy's
+    // own asset via the implicit empty-selector `Pick`). Meant for the
+    // `sizing:` slot on `StrategySpec` / `PairsStrategySpec`, but usable
+    // anywhere a real-valued source fits.
+    /// Inverse realized-vol sizing —
+    /// `target / (stddev(log_returns(close), window) * sqrt(bars_per_year))`.
+    /// See [`fugazi::indicators::sizing::vol_target`].
+    VolTarget {
+        target: Real,
+        window: usize,
+        bars_per_year: Real,
+    },
+    /// Fixed per-trade risk sized by ATR —
+    /// `risk_frac * close / (atr_multiple * ATR(period))`. See
+    /// [`fugazi::indicators::sizing::atr_risk`].
+    AtrRisk {
+        risk_frac: Real,
+        period: usize,
+        atr_multiple: Real,
+    },
+
     // --- transform operators ---
     Add {
         lhs: Box<SourceSpec>,
@@ -1088,6 +1130,8 @@ impl From<SourceSpecRaw> for SourceSpec {
             SourceSpecRaw::Ad { source } => SourceSpec::Ad { source },
             SourceSpecRaw::TrueRange { source } => SourceSpec::TrueRange { source },
             SourceSpecRaw::Sar { source, step, max } => SourceSpec::Sar { source, step, max },
+            SourceSpecRaw::VolTarget { target, window, bars_per_year } => SourceSpec::VolTarget { target, window, bars_per_year },
+            SourceSpecRaw::AtrRisk { risk_frac, period, atr_multiple } => SourceSpec::AtrRisk { risk_frac, period, atr_multiple },
             SourceSpecRaw::Add { lhs, rhs } => SourceSpec::Add { lhs, rhs },
             SourceSpecRaw::Sub { lhs, rhs } => SourceSpec::Sub { lhs, rhs },
             SourceSpecRaw::Mul { lhs, rhs } => SourceSpec::Mul { lhs, rhs },
@@ -1465,6 +1509,25 @@ impl SourceSpec {
             Sar { source, step, max } => {
                 dyn_indicator::wrap(self::Sar::new(candle(source), *step, *max))
             }
+
+            VolTarget {
+                target,
+                window,
+                bars_per_year,
+            } => dyn_indicator::wrap(fugazi::indicators::sizing::vol_target::<String>(
+                *target,
+                *window,
+                *bars_per_year,
+            )),
+            AtrRisk {
+                risk_frac,
+                period,
+                atr_multiple,
+            } => dyn_indicator::wrap(fugazi::indicators::sizing::atr_risk::<String>(
+                *risk_frac,
+                *period,
+                *atr_multiple,
+            )),
 
             Add { lhs, rhs } => dyn_indicator::wrap(real(lhs).add(real(rhs))),
             Sub { lhs, rhs } => dyn_indicator::wrap(real(lhs).sub(real(rhs))),

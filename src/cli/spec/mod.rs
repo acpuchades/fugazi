@@ -225,6 +225,37 @@ mod tests {
     }
 
     #[test]
+    fn parses_strategy_with_vol_target_sizing() {
+        // The `sizing:` field wires a real-valued source into the
+        // strategy's position_sizing slot. Verify parse + build for the
+        // vol-target helper.
+        let yaml = r#"
+            symbol: BTC
+            long:
+              enter: !value true
+            sizing: !vol_target { target: 0.20, window: 20, bars_per_year: 252 }
+        "#;
+        let spec = StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
+            .unwrap();
+        assert!(spec.sizing.is_some());
+        let _built = spec.build(&Schema::empty());
+    }
+
+    #[test]
+    fn parses_strategy_with_atr_risk_sizing() {
+        let yaml = r#"
+            symbol: BTC
+            long:
+              enter: !value true
+            sizing: !atr_risk { risk_frac: 0.01, period: 14, atr_multiple: 2.0 }
+        "#;
+        let spec = StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
+            .unwrap();
+        assert!(spec.sizing.is_some());
+        let _built = spec.build(&Schema::empty());
+    }
+
+    #[test]
     fn parses_an_inline_flow_map_strategy() {
         let doc = r#"{"symbol":"ETH","long":{"enter":{"crosses_above":
             {"lhs":{"sma":{"period":5}},"rhs":{"sma":{"period":20}}}}}}"#;

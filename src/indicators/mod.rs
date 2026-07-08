@@ -21,6 +21,7 @@ pub mod compare;
 pub mod ext;
 pub mod logic;
 pub mod ops;
+pub mod sizing;
 
 mod ad;
 mod adx;

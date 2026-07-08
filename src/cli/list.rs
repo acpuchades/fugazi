@@ -252,6 +252,13 @@ const GROUPS: &[Group] = &[
         ],
     },
     Group {
+        title: "sizing helpers (for `sizing:` on StrategySpec / PairsStrategySpec)",
+        entries: &[
+            Entry { tag: "vol_target", args: "target, window, bars_per_year", doc: "inverse realized-vol multiplier" },
+            Entry { tag: "atr_risk",   args: "risk_frac, period, atr_multiple", doc: "fixed per-trade risk sized by ATR" },
+        ],
+    },
+    Group {
         title: "trend / directional",
         entries: &[
             Entry { tag: "adx",              args: "period",     doc: "ADX from the Adx bundle" },
