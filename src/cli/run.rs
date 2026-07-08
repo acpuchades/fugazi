@@ -39,7 +39,7 @@ use crate::calendar::{self, AssetClass, BarsPerYearSpec, ScopedFrequency, Window
 use crate::costs::CostConfig;
 use crate::data::DataFrame;
 use crate::metrics;
-use crate::spec::StrategySpec;
+use crate::spec::{PairsStrategySpec, StrategySpec};
 use crate::style;
 
 /// Console-logging knobs plus the run's inputs, threaded in from the CLI args.
@@ -201,6 +201,177 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
         }
     }
     Ok(summary)
+}
+
+/// The pairs twin of [`run`]: drive a
+/// [`PairsStrategy`](fugazi::strategies::PairsStrategy) over the two legs'
+/// aligned atom streams. Same output shape (`trades.csv`, `returns.csv`,
+/// `metrics.yml`, and the windowed CSVs under `-w`), so the caller's downstream
+/// analysis pipeline is unchanged.
+///
+/// Time-alignment is an **inner join** on the `time` column: only bars where
+/// both symbols have data are fed to the strategy. A mismatched pair produces
+/// a run over the intersecting bars, with the count echoed in the run's
+/// `period` line.
+pub fn run_pairs(
+    spec: &PairsStrategySpec,
+    frame: &DataFrame,
+    opts: &RunOptions,
+) -> Result<Summary> {
+    let started = SystemTime::now();
+    let left_series = frame.atoms(&spec.left)?;
+    let right_series = frame.atoms(&spec.right)?;
+    let (bars, left_atoms, right_atoms) = join_pair_by_time(&left_series.atoms, &right_series.atoms);
+
+    std::fs::create_dir_all(opts.out_dir)
+        .with_context(|| format!("creating output dir `{}`", opts.out_dir.display()))?;
+
+    let start = bars.first().map_or("", |t| t.as_str());
+    let end = bars.last().map_or("", |t| t.as_str());
+    // Pick the effective cadence off the left leg (both legs are expected to
+    // share one cadence — the inner-join filters to the shared timeline).
+    let effective_freq = calendar::pick_frequency(opts.frequency, &spec.left)
+        .or_else(|| calendar::pick_frequency(opts.frequency, &spec.right))
+        .or_else(|| {
+            calendar::detect_frequency_from_atoms(left_series.atoms.iter().map(|(_, a)| a))
+        });
+    let bars_per_year =
+        calendar::pick_bars_per_year(opts.bars_per_year, &spec.left, effective_freq)
+            .or_else(|| calendar::pick_bars_per_year(opts.bars_per_year, &spec.right, effective_freq))
+            .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
+    let no_cost_warning = !opts.costs_supplied;
+    let windowed_bars = opts
+        .windowed
+        .map(|w| {
+            w.resolve(effective_freq, opts.asset_class)
+                .map_err(anyhow::Error::msg)
+        })
+        .transpose()
+        .context("resolving `-w/--windowed`")?;
+    let seconds_per_bar = opts
+        .asset_class
+        .zip(effective_freq)
+        .map(|(class, freq)| class.trading_seconds_per_bar(freq));
+    let inputs = IterationInputs {
+        cash: opts.cash,
+        bars_per_year,
+        risk_free_rate: opts.risk_free_rate,
+        cost_config: opts.cost_config,
+        effective_freq,
+        windowed: windowed_bars,
+        seconds_per_bar,
+    };
+    if !opts.quiet {
+        let costs_active = !opts
+            .cost_config
+            .resolve(&spec.left, effective_freq)
+            .is_none()
+            || !opts
+                .cost_config
+                .resolve(&spec.right, effective_freq)
+                .is_none();
+        style::print_header("run", "pair-trade a two-leg strategy over CSV series");
+        print_pairs_inputs_block(opts, spec, start, end, bars.len(), costs_active);
+        if no_cost_warning {
+            print_no_cost_warning();
+        }
+    }
+
+    let iter =
+        backtest::run_iteration_pairs(spec, &bars, &left_atoms, &right_atoms, &inputs);
+
+    write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
+    if !opts.quiet {
+        println!("\n{}", style::bold("trades"));
+        stream_trades(&iter);
+    }
+
+    write_returns_csv(&iter, &opts.out_dir.join("returns.csv"))?;
+
+    metrics::write_yaml(&iter.metrics, &opts.out_dir.join("metrics.yml"))?;
+
+    if let Some(ws) = iter.windowed.as_deref() {
+        let dsr_context = metrics::windows_dsr_context(ws);
+        write_windowed_csv(ws, &iter.bars, dsr_context, &opts.out_dir.join("metrics.csv"))?;
+    }
+    if let Some(rs) = iter.rolling.as_deref() {
+        write_windowed_csv(rs, &iter.bars, None, &opts.out_dir.join("rolling.csv"))?;
+    }
+
+    let summary = Summary {
+        final_equity: iter.summary.final_equity,
+        return_pct: if opts.cash != 0.0 {
+            (iter.summary.final_equity - opts.cash) / opts.cash * 100.0
+        } else {
+            0.0
+        },
+        trades: iter.summary.trades,
+        bars: iter.summary.bars,
+    };
+
+    let finished = SystemTime::now();
+    if !opts.quiet {
+        print_result_block(opts, &summary, started, finished);
+        print_metrics_block(
+            &iter.metrics,
+            None,
+            iter.gross_metrics.as_ref(),
+            effective_freq,
+        );
+        if let Some(windows) = iter.windowed.as_deref() {
+            print_windowed_metrics_block(windows);
+        }
+    }
+    Ok(summary)
+}
+
+/// Inner-join the two legs' atom streams on their `time` label. Returns
+/// `(times, left_atoms, right_atoms)` where index `i` corresponds to a bar
+/// present in both legs. Each `atoms(...)` slice is sorted ascending by
+/// `time` (by construction — `DataFrame::atoms` walks a `BTreeMap`), so a
+/// simple two-cursor merge suffices.
+fn join_pair_by_time(
+    left: &[(String, Atom)],
+    right: &[(String, Atom)],
+) -> (Vec<String>, Vec<Atom>, Vec<Atom>) {
+    let (mut times, mut ls, mut rs) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut i, mut j) = (0, 0);
+    while i < left.len() && j < right.len() {
+        match left[i].0.cmp(&right[j].0) {
+            std::cmp::Ordering::Equal => {
+                times.push(left[i].0.clone());
+                ls.push(left[i].1.clone());
+                rs.push(right[j].1.clone());
+                i += 1;
+                j += 1;
+            }
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+        }
+    }
+    (times, ls, rs)
+}
+
+fn print_pairs_inputs_block(
+    opts: &RunOptions,
+    spec: &PairsStrategySpec,
+    start: &str,
+    end: &str,
+    bars: usize,
+    costs_active: bool,
+) {
+    println!("{}", style::bold("inputs"));
+    print_field("strategy", opts.strategy_label);
+    print_field("pair", &format!("{} / {}", spec.left, spec.right));
+    print_field("params", opts.params);
+    print_field("period", &format!("{start} → {end} ({bars} bars)"));
+    print_field("capital", &format!("{:.2}", opts.cash));
+    if costs_active {
+        print_field("costs", "active (commission/spread/slippage applied)");
+    } else if opts.costs_supplied {
+        print_field("costs", "none (explicit)");
+    }
+    print_field("output", &opts.out_dir.display().to_string());
 }
 
 // ---------------------------------------------------------------------------

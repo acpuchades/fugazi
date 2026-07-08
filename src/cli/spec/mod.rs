@@ -18,14 +18,19 @@
 //! a single-key map — `{ema: {source: close, period: 20}}` — and a parameterless
 //! leaf or bar indicator reads as a bare string — `close`, `obv`.
 
+mod pairs;
 mod signal;
 mod source;
 mod strategy;
 
 #[allow(unused_imports)]
+pub use pairs::PairsStrategySpec;
+#[allow(unused_imports)]
 pub use signal::SignalSpec;
 pub use source::SourceSpec;
 pub use strategy::StrategySpec;
+#[allow(unused_imports)]
+pub(crate) use pairs::DynPairsStrategy;
 #[allow(unused_imports)]
 pub(crate) use strategy::{DynSingleStrategy, SideSpec};
 

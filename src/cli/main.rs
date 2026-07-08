@@ -40,7 +40,7 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use clap_complete::Shell;
 
-use input::{Source, StrategySource};
+use input::{Source, StrategyKind, StrategySource};
 
 /// Incremental technical-analysis backtester.
 #[derive(Parser)]
@@ -422,12 +422,28 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     let param_table = params::table(&args.params)?;
 
     let text = args.strategy.read().context("reading strategy")?;
-    let spec = spec::StrategySpec::from_text_with_params(&text, &param_table)
-        .with_context(|| parse_error_context(&args.strategy))?;
-
-    if !args.quiet {
-        style::print_header("check", "parse and validate a strategy spec");
-        println!("{}: ok (symbol {})", args.strategy.label(), spec.symbol);
+    match args.strategy.kind {
+        StrategyKind::Single => {
+            let spec = spec::StrategySpec::from_text_with_params(&text, &param_table)
+                .with_context(|| parse_error_context(&args.strategy))?;
+            if !args.quiet {
+                style::print_header("check", "parse and validate a strategy spec");
+                println!("{}: ok (symbol {})", args.strategy.label(), spec.symbol);
+            }
+        }
+        StrategyKind::Pairs => {
+            let spec = spec::PairsStrategySpec::from_text_with_params(&text, &param_table)
+                .with_context(|| parse_error_context(&args.strategy))?;
+            if !args.quiet {
+                style::print_header("check", "parse and validate a pairs strategy spec");
+                println!(
+                    "{}: ok (pair {} / {})",
+                    args.strategy.label(),
+                    spec.left,
+                    spec.right,
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -509,8 +525,6 @@ fn run(args: RunArgs) -> Result<()> {
     let costs_were_supplied = !args.costs.is_empty();
 
     let param_table = params::table(&args.params)?;
-    let spec = spec::StrategySpec::from_text_with_params(&text, &param_table)
-        .with_context(|| parse_error_context(&args.strategy))?;
     let params_label = params_label(&param_table);
     let opts = run::RunOptions {
         cash: args.cash,
@@ -526,11 +540,27 @@ fn run(args: RunArgs) -> Result<()> {
         costs_supplied: costs_were_supplied,
         quiet: args.quiet,
     };
-    run::run(&spec, &frame, &opts)?;
+    match args.strategy.kind {
+        StrategyKind::Single => {
+            let spec = spec::StrategySpec::from_text_with_params(&text, &param_table)
+                .with_context(|| parse_error_context(&args.strategy))?;
+            run::run(&spec, &frame, &opts)?;
+        }
+        StrategyKind::Pairs => {
+            let spec = spec::PairsStrategySpec::from_text_with_params(&text, &param_table)
+                .with_context(|| parse_error_context(&args.strategy))?;
+            run::run_pairs(&spec, &frame, &opts)?;
+        }
+    }
     Ok(())
 }
 
 fn optimize(args: OptimizeArgs) -> Result<()> {
+    if args.strategy.kind == StrategyKind::Pairs {
+        anyhow::bail!(
+            "`fugazi optimize` doesn't yet support `pairs:` strategies; use `fugazi run` for now"
+        );
+    }
     let param_table = params::table(&args.params)?;
     let text = args.strategy.read().context("reading strategy")?;
     let frame = data::DataFrame::from_series(&args.series)?;

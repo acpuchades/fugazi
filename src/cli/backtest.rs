@@ -31,7 +31,7 @@ use fugazi::prelude::*;
 use crate::calendar::Frequency;
 use crate::costs::CostConfig;
 use crate::metrics;
-use crate::spec::StrategySpec;
+use crate::spec::{PairsStrategySpec, StrategySpec};
 
 /// Drive `spec` over `atoms` through a fresh paper wallet with `cash`
 /// starting funds and the given trading `costs`, returning the full
@@ -175,24 +175,102 @@ pub fn run_iteration(
     atoms: &[(String, Atom)],
     inputs: &IterationInputs,
 ) -> IterationResult {
-    let symbol = spec.symbol.clone();
-    let costs = inputs.cost_config.resolve(&symbol, inputs.effective_freq);
-    let costs_active = !costs.is_none();
+    let costs = inputs.cost_config.resolve(&spec.symbol, inputs.effective_freq);
     let schema = schema_from_atoms(atoms);
-    let mut strategy = spec.build(&schema);
+    let bars: Vec<String> = atoms.iter().map(|(t, _)| t.clone()).collect();
+    let snapshots: Vec<fugazi::types::Snapshot<String>> = atoms
+        .iter()
+        .map(|(_, a)| fugazi::types::Snapshot::single(spec.symbol.clone(), a.clone()))
+        .collect();
+    run_iteration_core(|| spec.build(&schema), &snapshots, bars, costs, inputs)
+}
+
+/// The pairs twin of [`run_iteration`]. Drives a
+/// [`PairsStrategy`](fugazi::strategies::PairsStrategy) over a time-aligned
+/// pair of atom streams (both symbols packed into one
+/// [`Snapshot<String>`](fugazi::types::Snapshot) per bar).
+///
+/// `left`/`right` are the parallel atom streams — the caller is responsible
+/// for joining them on `time`; each index corresponds to the same time
+/// label in `bars`. The wallet is priced for both legs per bar so both
+/// mark to market and can produce fills. Per-leg divergent cost models
+/// aren't wired: the single [`TradingCosts`] bundle is resolved against
+/// the left leg's symbol (follow-up).
+pub fn run_iteration_pairs(
+    spec: &PairsStrategySpec,
+    bars: &[String],
+    left: &[Atom],
+    right: &[Atom],
+    inputs: &IterationInputs,
+) -> IterationResult {
+    assert_eq!(
+        left.len(),
+        right.len(),
+        "pairs run: `left`/`right` streams must be time-aligned"
+    );
+    assert_eq!(
+        bars.len(),
+        left.len(),
+        "pairs run: `bars` labels must match the aligned stream length"
+    );
+    let costs = inputs.cost_config.resolve(&spec.left, inputs.effective_freq);
+    let schema = left
+        .iter()
+        .chain(right.iter())
+        .find_map(|a| a.overlays.as_ref())
+        .map(|ov| ov.schema().clone())
+        .unwrap_or_else(Schema::empty);
+    let snapshots: Vec<fugazi::types::Snapshot<String>> = left
+        .iter()
+        .zip(right.iter())
+        .map(|(l, r)| {
+            let mut s = fugazi::types::Snapshot::<String>::new();
+            s.push(Some(spec.left.clone()), None, l.clone());
+            s.push(Some(spec.right.clone()), None, r.clone());
+            s
+        })
+        .collect();
+    run_iteration_core(
+        || spec.build(&schema),
+        &snapshots,
+        bars.to_vec(),
+        costs,
+        inputs,
+    )
+}
+
+/// The shared reduction from "pre-built strategy + snapshot stream" to a
+/// full [`IterationResult`]. Runs the strategy through a paper wallet,
+/// optionally re-runs it against a zero-cost twin for the gross diff, and
+/// assembles the whole-run / windowed / rolling metrics.
+///
+/// `build_strategy` is called at most twice (once for the priced run, once
+/// for the gross twin when costs are active), so any per-leaf state a spec
+/// carries reads freshly on each call.
+fn run_iteration_core<S>(
+    mut build_strategy: impl FnMut() -> S,
+    snapshots: &[fugazi::types::Snapshot<String>],
+    bars: Vec<String>,
+    costs: TradingCosts,
+    inputs: &IterationInputs,
+) -> IterationResult
+where
+    S: fugazi::Strategy<Input = fugazi::types::Snapshot<String>, Symbol = String>,
+{
+    let costs_active = !costs.is_none();
+    let mut strategy = build_strategy();
     let mut wallet = PaperWallet::with_costs(inputs.cash, costs);
-    let snapshots = || {
-        atoms
-            .iter()
-            .map(|(_, a)| fugazi::types::Snapshot::single(symbol.clone(), a.clone()))
-    };
-    let report = fugazi::backtest::run(&mut strategy, &mut wallet, snapshots());
-    // Gross twin under active costs: same strategy/atoms/cash, no cost
+    let report = fugazi::backtest::run(&mut strategy, &mut wallet, snapshots.iter().cloned());
+    // Gross twin under active costs: same strategy/snapshots/cash, no cost
     // model, so any difference is attributable to costs alone.
     let gross_report = if costs_active {
-        let mut gs = spec.build(&schema);
+        let mut gs = build_strategy();
         let mut gw = PaperWallet::new(inputs.cash);
-        Some(fugazi::backtest::run(&mut gs, &mut gw, snapshots()))
+        Some(fugazi::backtest::run(
+            &mut gs,
+            &mut gw,
+            snapshots.iter().cloned(),
+        ))
     } else {
         None
     };
@@ -237,7 +315,6 @@ pub fn run_iteration(
         }
         None => (None, None),
     };
-    let bars: Vec<String> = atoms.iter().map(|(t, _)| t.clone()).collect();
     let final_equity = report.equity_curve.last().copied().unwrap_or(inputs.cash);
     let summary = SummaryRow {
         final_equity,

@@ -47,10 +47,12 @@
 pub mod composite;
 pub mod mean_reversion;
 pub mod momentum;
+pub mod pairs;
 pub mod single_asset;
 pub mod trend;
 pub mod volume;
 
+pub use pairs::PairsStrategy;
 pub use single_asset::SingleAssetStrategy;
 
 use crate::indicators::{Close, CurrentBar, High, Low, Pick, Volume};

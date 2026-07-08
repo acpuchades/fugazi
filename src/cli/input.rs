@@ -75,25 +75,41 @@ impl FromStr for Source {
     }
 }
 
-/// A strategy positional: a [`Source`] with an optional leading `single:`
-/// shape prefix. The prefix is a hint reserved for a future `multiple:`
-/// sibling (a portfolio/pairs strategy that sees several series at once);
-/// for now only `single:` is accepted, and the CLI ignores it since a run
-/// is always single-asset.
+/// Which strategy shape a [`StrategySource`] resolves to.
+///
+/// The default (no prefix, or `single:`) is a
+/// [`SingleAssetStrategy`](fugazi::strategies::SingleAssetStrategy). Prefixing
+/// with `pairs:` (e.g. `pairs:@spread.yml`) declares a two-symbol pair-trading
+/// spec that resolves to a
+/// [`PairsStrategy`](fugazi::strategies::PairsStrategy).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrategyKind {
+    /// A single-asset strategy (default; matches `@file.yml` and `single:@file.yml`).
+    Single,
+    /// A two-symbol pair-trading strategy (`pairs:@file.yml`).
+    Pairs,
+}
+
+/// A strategy positional: a [`Source`] plus a decided [`StrategyKind`] from
+/// the optional leading shape prefix. `single:` and no-prefix both resolve to
+/// [`StrategyKind::Single`]; `pairs:` resolves to [`StrategyKind::Pairs`].
 #[derive(Debug, Clone)]
-pub struct StrategySource(pub Source);
+pub struct StrategySource {
+    pub kind: StrategyKind,
+    pub source: Source,
+}
 
 impl StrategySource {
     pub fn read(&self) -> anyhow::Result<String> {
-        self.0.read()
+        self.source.read()
     }
 
     pub fn label(&self) -> String {
-        self.0.label()
+        self.source.label()
     }
 
     pub fn misused_path(&self) -> Option<&str> {
-        self.0.misused_path()
+        self.source.misused_path()
     }
 }
 
@@ -102,15 +118,28 @@ impl FromStr for StrategySource {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if let Some(rest) = s.strip_prefix("single:") {
-            return Ok(StrategySource(rest.parse().expect("infallible")));
+            return Ok(StrategySource {
+                kind: StrategyKind::Single,
+                source: rest.parse().expect("infallible"),
+            });
+        }
+        if let Some(rest) = s.strip_prefix("pairs:") {
+            return Ok(StrategySource {
+                kind: StrategyKind::Pairs,
+                source: rest.parse().expect("infallible"),
+            });
         }
         if s.strip_prefix("multiple:").is_some() {
             return Err(
                 "`multiple:` is reserved for a future MultiAssetStrategy and is not yet \
-                 implemented; use `single:` (or omit the prefix)"
+                 implemented; use `single:` (or omit the prefix), or `pairs:` for a pair-trading \
+                 spec"
                     .to_string(),
             );
         }
-        Ok(StrategySource(s.parse().expect("infallible")))
+        Ok(StrategySource {
+            kind: StrategyKind::Single,
+            source: s.parse().expect("infallible"),
+        })
     }
 }
