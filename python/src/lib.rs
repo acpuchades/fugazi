@@ -582,7 +582,7 @@ impl<I: Clone + Send + Sync + 'static> Indicator for SharedProjector<I> {
 enum AnySharedMulti {
     Candle(Arc<Mutex<SharedMultiCell<Atom>>>),
     Real(Arc<Mutex<SharedMultiCell<Real>>>),
-    Snapshot(Arc<Mutex<SharedMultiCell<Snapshot<Selector>>>>),
+    Snapshot(Arc<Mutex<SharedMultiCell<Snapshot<String>>>>),
 }
 
 impl AnySharedMulti {
@@ -623,7 +623,7 @@ impl AnySharedMulti {
                 })),
             },
             AnySharedMulti::Snapshot(cell) => PyIndicator {
-                src: AnySource::Snapshot(Source::new(SharedProjector::<Snapshot<Selector>> {
+                src: AnySource::Snapshot(Source::new(SharedProjector::<Snapshot<String>> {
                     cell: Arc::clone(cell),
                     field_index: idx,
                     local_gen: cell.lock().expect("mutex poisoned").generation,
@@ -647,7 +647,7 @@ impl AnySharedMulti {
 enum AnySource {
     Candle(Source<Atom>),
     Real(Source<Real>),
-    Snapshot(Source<Snapshot<Selector>>),
+    Snapshot(Source<Snapshot<String>>),
     Const(Real),
 }
 
@@ -691,7 +691,7 @@ impl AnySource {
 enum Pair {
     Candle(Source<Atom>, Source<Atom>),
     Real(Source<Real>, Source<Real>),
-    Snapshot(Source<Snapshot<Selector>>, Source<Snapshot<Selector>>),
+    Snapshot(Source<Snapshot<String>>, Source<Snapshot<String>>),
 }
 
 /// Resolve two sources to a shared domain so they can be combined. A neutral
@@ -705,8 +705,8 @@ fn pair(lhs: AnySource, rhs: AnySource) -> PyResult<Pair> {
     fn rval(c: Real) -> Source<Real> {
         Source::new(Value::<Real>::new(c))
     }
-    fn sval(c: Real) -> Source<Snapshot<Selector>> {
-        Source::new(Value::<Snapshot<Selector>>::new(c))
+    fn sval(c: Real) -> Source<Snapshot<String>> {
+        Source::new(Value::<Snapshot<String>>::new(c))
     }
     match (lhs, rhs) {
         (AnySource::Candle(a), AnySource::Candle(b)) => Ok(Pair::Candle(a, b)),
@@ -733,7 +733,7 @@ fn pair(lhs: AnySource, rhs: AnySource) -> PyResult<Pair> {
 enum AnySignal {
     Candle(SignalBox<Atom>),
     Real(SignalBox<Real>),
-    Snapshot(SignalBox<Snapshot<Selector>>),
+    Snapshot(SignalBox<Snapshot<String>>),
 }
 
 impl AnySignal {
@@ -831,7 +831,7 @@ fn str_pair(
 enum AnyMulti {
     Candle(MultiBox<Atom>),
     Real(MultiBox<Real>),
-    Snapshot(MultiBox<Snapshot<Selector>>),
+    Snapshot(MultiBox<Snapshot<String>>),
 }
 
 impl AnyMulti {
@@ -1574,7 +1574,7 @@ impl PyFrequency {
 #[pyclass(name = "Selector", frozen, skip_from_py_object)]
 #[derive(Clone)]
 struct PySelector {
-    inner: Selector,
+    inner: Selector<String>,
 }
 
 #[pymethods]
@@ -1587,7 +1587,7 @@ impl PySelector {
     fn new(symbol: Option<String>, freq: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
         let freq = freq.map(coerce_frequency).transpose()?;
         Ok(Self {
-            inner: Selector::new(symbol, freq),
+            inner: Selector::<String>::new(symbol, freq),
         })
     }
 
@@ -1606,17 +1606,28 @@ impl PySelector {
         self.inner.is_empty()
     }
 
-    /// Match this selector as a **query** against `storage`: each `None`
-    /// field on the query is a wildcard; a `Some` field must equal storage.
-    fn matches(&self, storage: PyRef<'_, PySelector>) -> bool {
-        self.inner.matches(&storage.inner)
+    /// Match this selector as a **query** against a `(symbol, freq)` entry
+    /// tag: each `None` field on the query is a wildcard; a `Some` field
+    /// must equal the entry's value. `entry` accepts a `Selector` (its
+    /// fields are used as the tag) or a `(str | None, Frequency | str |
+    /// None)` tuple.
+    fn matches(&self, entry: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let entry_sel = coerce_selector(entry)?;
+        Ok(self
+            .inner
+            .matches(entry_sel.symbol.as_ref(), entry_sel.freq))
     }
 
     fn __hash__(&self) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut h = DefaultHasher::new();
-        self.inner.hash(&mut h);
+        // Hash the two fields directly — `Selector` itself no longer derives
+        // `Hash` (it's a query predicate, not a HashMap key), but a Python-
+        // side stable hash based on its fields is still useful for `in`
+        // checks / set membership.
+        self.inner.symbol.hash(&mut h);
+        self.inner.freq.hash(&mut h);
         h.finish()
     }
 
@@ -1661,7 +1672,7 @@ fn coerce_frequency(obj: &Bound<'_, PyAny>) -> PyResult<Frequency> {
 /// - `str` — parsed as a symbol (`Selector::by_symbol`).
 /// - `PyFrequency` — parsed as a frequency (`Selector::by_freq`).
 /// - `(str, Frequency | str | None)` tuple — a `(symbol, freq)` pair.
-fn coerce_selector(obj: &Bound<'_, PyAny>) -> PyResult<Selector> {
+fn coerce_selector(obj: &Bound<'_, PyAny>) -> PyResult<Selector<String>> {
     if let Ok(sel) = obj.cast::<PySelector>() {
         return Ok(sel.borrow().inner.clone());
     }
@@ -1693,7 +1704,7 @@ fn coerce_selector(obj: &Bound<'_, PyAny>) -> PyResult<Selector> {
 #[pyclass(name = "Snapshot", unsendable, skip_from_py_object)]
 #[derive(Clone)]
 struct PySnapshot {
-    inner: Snapshot<Selector>,
+    inner: Snapshot<String>,
 }
 
 #[pymethods]
@@ -1702,32 +1713,42 @@ impl PySnapshot {
     #[pyo3(signature = (mapping = None))]
     fn new(mapping: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
         let inner = match mapping {
-            None => Snapshot::<Selector>::new(),
+            None => Snapshot::<String>::new(),
             Some(m) => extract_snapshot(m)?,
         };
         Ok(Self { inner })
     }
 
-    /// Read the atom for `key`; raises `KeyError` if absent (dict semantics).
+    /// Read the atom matching `key`; raises `KeyError` if no entry matches
+    /// (dict semantics). `key` is coerced to a [`Selector`] and matched
+    /// wildcard-aware via [`Snapshot::find`] — a symbol-only key finds any
+    /// entry with that symbol regardless of frequency.
     fn __getitem__(&self, key: &Bound<'_, PyAny>) -> PyResult<PyAtom> {
         let sel = coerce_selector(key)?;
         self.inner
-            .get(&sel)
+            .find(&sel)
             .cloned()
             .map(|inner| PyAtom { inner })
             .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(format!("{sel:?}")))
     }
 
-    /// Insert or replace the atom for `key`.
+    /// Insert-or-overwrite: any entry whose tag matches `key` (under
+    /// [`Selector::matches`]) is removed first, then a new entry is pushed
+    /// with `key`'s `(symbol, freq)` tag and `atom` as the value. Matches
+    /// Python's expectation that assignment overwrites the entry rather
+    /// than accumulating duplicates.
     fn __setitem__(&mut self, key: &Bound<'_, PyAny>, atom: PyRef<'_, PyAtom>) -> PyResult<()> {
         let sel = coerce_selector(key)?;
-        self.inner.insert(sel, atom.inner.clone());
+        // Remove exact matches on the key's tag pattern, then push.
+        self.inner.remove_matching(&sel);
+        self.inner
+            .push(sel.symbol, sel.freq, atom.inner.clone());
         Ok(())
     }
 
     fn __contains__(&self, key: &Bound<'_, PyAny>) -> PyResult<bool> {
         let sel = coerce_selector(key)?;
-        Ok(self.inner.contains_key(&sel))
+        Ok(self.inner.find(&sel).is_some())
     }
 
     fn __len__(&self) -> usize {
@@ -1737,43 +1758,55 @@ impl PySnapshot {
     /// Non-raising variant of `snap[key]` — returns `None` on a miss.
     fn get(&self, key: &Bound<'_, PyAny>) -> PyResult<Option<PyAtom>> {
         let sel = coerce_selector(key)?;
-        Ok(self.inner.get(&sel).cloned().map(|inner| PyAtom { inner }))
-    }
-
-    /// Insert or replace; returns the previous atom if any.
-    fn insert(
-        &mut self,
-        key: &Bound<'_, PyAny>,
-        atom: PyRef<'_, PyAtom>,
-    ) -> PyResult<Option<PyAtom>> {
-        let sel = coerce_selector(key)?;
         Ok(self
             .inner
-            .insert(sel, atom.inner.clone())
+            .find(&sel)
+            .cloned()
             .map(|inner| PyAtom { inner }))
     }
 
-    /// The list of [`Selector`] keys present in this snapshot (arbitrary order).
+    /// Append a tagged atom to the snapshot. `key` supplies the `(symbol,
+    /// freq)` tag (any [`Selector`]-coercible value); duplicates are
+    /// allowed and future `snap[query]` reads return the first-inserted
+    /// match. Rust's `push` semantics — for the dedup-on-write behaviour
+    /// use `__setitem__` (i.e. `snap[key] = atom`).
+    fn push(
+        &mut self,
+        key: &Bound<'_, PyAny>,
+        atom: PyRef<'_, PyAtom>,
+    ) -> PyResult<()> {
+        let sel = coerce_selector(key)?;
+        self.inner
+            .push(sel.symbol, sel.freq, atom.inner.clone());
+        Ok(())
+    }
+
+    /// Non-raising find: returns the first atom whose tag matches `query`,
+    /// or `None`.
+    fn find(&self, query: &Bound<'_, PyAny>) -> PyResult<Option<PyAtom>> {
+        let sel = coerce_selector(query)?;
+        Ok(self
+            .inner
+            .find(&sel)
+            .cloned()
+            .map(|inner| PyAtom { inner }))
+    }
+
+    /// The list of `(symbol, freq)` selectors present in this snapshot, in
+    /// insertion order. Duplicates on the same tag surface as multiple
+    /// selectors with the same fields.
     fn keys(&self) -> Vec<PySelector> {
         self.inner
-            .keys()
-            .cloned()
-            .map(|inner| PySelector { inner })
+            .iter()
+            .map(|(sym, freq, _)| PySelector {
+                inner: Selector::new(sym.cloned(), freq),
+            })
             .collect()
     }
 
     /// True if this snapshot carries no assets.
     fn is_empty(&self) -> bool {
         self.inner.is_empty()
-    }
-
-    /// Structural lookup: returns the first atom whose stored [`Selector`]
-    /// matches `query` (`None` fields on the query are wildcards). If a
-    /// query could match more than one key, iteration order is arbitrary;
-    /// disambiguate by supplying both `symbol` and `freq`.
-    fn find(&self, query: &Bound<'_, PyAny>) -> PyResult<Option<PyAtom>> {
-        let sel = coerce_selector(query)?;
-        Ok(self.inner.find(&sel).cloned().map(|inner| PyAtom { inner }))
     }
 
     /// The sole atom in a single-entry snapshot, if there is exactly one.
@@ -1787,8 +1820,13 @@ impl PySnapshot {
     fn __repr__(&self) -> String {
         let keys: Vec<String> = self
             .inner
-            .keys()
-            .map(|k| PySelector { inner: k.clone() }.__repr__())
+            .iter()
+            .map(|(sym, freq, _)| {
+                PySelector {
+                    inner: Selector::new(sym.cloned(), freq),
+                }
+                .__repr__()
+            })
             .collect();
         format!("Snapshot(keys=[{}])", keys.join(", "))
     }
@@ -1874,7 +1912,7 @@ impl<I> Indicator for AtomBox<I> {
 
 /// An atom-emitting source erased to one of the two input domains it can be
 /// rooted in on the Python side: `Atom` (the identity passthrough) or
-/// `Snapshot<Selector>` (a `Pick`). Feeds the optional `source=` argument every
+/// `Snapshot<String>` (a `Pick`). Feeds the optional `source=` argument every
 /// atom-input leaf pyfunction accepts (`close(source=...)`, `year(source=...)`, …).
 #[derive(Clone)]
 enum AnyAtomSource {
@@ -1885,7 +1923,7 @@ enum AnyAtomSource {
     /// returns).
     #[allow(dead_code)]
     Atom(AtomBox<Atom>),
-    Snapshot(AtomBox<Snapshot<Selector>>),
+    Snapshot(AtomBox<Snapshot<String>>),
 }
 
 /// A source that emits `Atom`s per bar — the intermediate between a raw
@@ -3105,8 +3143,8 @@ fn extract_real(sample: &Bound<'_, PyAny>) -> PyResult<Real> {
 }
 
 /// Iterate a Python sequence of snapshots (`list[Snapshot]` or `list[dict]`)
-/// into a native `Vec<Snapshot<Selector>>` for a snapshot-rooted node's `feed`.
-fn snapshots_from_sequence(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Snapshot<Selector>>> {
+/// into a native `Vec<Snapshot<String>>` for a snapshot-rooted node's `feed`.
+fn snapshots_from_sequence(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Snapshot<String>>> {
     let mut out = Vec::new();
     let iter = obj.try_iter().map_err(|_| {
         PyTypeError::new_err(
@@ -3119,20 +3157,20 @@ fn snapshots_from_sequence(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Snapshot<Sele
     Ok(out)
 }
 
-/// Extract a `Snapshot<Selector>` for a snapshot-rooted node's `update`.
+/// Extract a `Snapshot<String>` for a snapshot-rooted node's `update`.
 /// Accepts a `PySnapshot` directly, or a Python `dict` whose keys are coerced
 /// via [`coerce_selector`] (str → symbol, Frequency → freq, Selector as-is,
 /// (str, freq) tuple → both fields).
-fn extract_snapshot(sample: &Bound<'_, PyAny>) -> PyResult<Snapshot<Selector>> {
+fn extract_snapshot(sample: &Bound<'_, PyAny>) -> PyResult<Snapshot<String>> {
     if let Ok(snap) = sample.cast::<PySnapshot>() {
         return Ok(snap.borrow().inner.clone());
     }
     if let Ok(dict) = sample.cast::<pyo3::types::PyDict>() {
-        let mut out = Snapshot::<Selector>::new();
+        let mut out = Snapshot::<String>::new();
         for (k, v) in dict.iter() {
             let key = coerce_selector(&k)?;
             let atom = extract_atom(&v)?;
-            out.insert(key, atom);
+            out.push(key.symbol, key.freq, atom);
         }
         return Ok(out);
     }
