@@ -45,7 +45,7 @@ fn measured_report(
 ) -> fugazi::RunReport<String> {
     let symbol = spec.symbol.clone();
     let schema = schema_from_atoms(atoms);
-    let mut strategy = spec.build(&schema);
+    let mut strategy = spec.build(cash, &schema);
     let mut wallet = PaperWallet::with_costs(cash, costs);
     fugazi::backtest::run(
         &mut strategy,
@@ -182,7 +182,13 @@ pub fn run_iteration(
         .iter()
         .map(|(_, a)| fugazi::types::Snapshot::single(spec.symbol.clone(), a.clone()))
         .collect();
-    run_iteration_core(|| spec.build(&schema), &snapshots, bars, costs, inputs)
+    run_iteration_core(
+        || spec.build(inputs.cash, &schema),
+        &snapshots,
+        bars,
+        costs,
+        inputs,
+    )
 }
 
 /// The pairs twin of [`run_iteration`]. Drives a

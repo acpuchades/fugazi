@@ -128,7 +128,7 @@ pub fn atr_risk<Sym: Clone + PartialEq + 'static>(
 pub fn drawdown_throttle<Sym: Clone + PartialEq + 'static>(
     book: &Book,
     max_drawdown: Real,
-) -> impl Indicator<Input = Snapshot<Sym>, Output = Real> + Clone {
+) -> impl Indicator<Input = Snapshot<Sym>, Output = Real> + Clone + 'static {
     assert!(max_drawdown > 0.0, "max_drawdown must be > 0");
     DrawdownThrottle {
         book: book.clone(),
@@ -157,7 +157,7 @@ pub fn equity_vol_target<Sym: Clone + PartialEq + 'static>(
     target_annualized_vol: Real,
     window: usize,
     bars_per_year: Real,
-) -> impl Indicator<Input = Snapshot<Sym>, Output = Real> + Clone {
+) -> impl Indicator<Input = Snapshot<Sym>, Output = Real> + Clone + 'static {
     assert!(
         target_annualized_vol > 0.0,
         "target_annualized_vol must be > 0"
@@ -194,7 +194,7 @@ pub fn fractional_kelly<Sym: Clone + PartialEq + 'static>(
     book: &Book,
     kelly_fraction: Real,
     window: usize,
-) -> impl Indicator<Input = Snapshot<Sym>, Output = Real> + Clone {
+) -> impl Indicator<Input = Snapshot<Sym>, Output = Real> + Clone + 'static {
     assert!(kelly_fraction > 0.0, "kelly_fraction must be > 0");
     assert!(window >= 2, "window must be >= 2 (variance needs 2+ samples)");
     FractionalKelly {

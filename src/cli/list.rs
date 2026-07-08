@@ -254,8 +254,11 @@ const GROUPS: &[Group] = &[
     Group {
         title: "sizing helpers (for `sizing:` on StrategySpec / PairsStrategySpec)",
         entries: &[
-            Entry { tag: "vol_target", args: "target, window, bars_per_year", doc: "inverse realized-vol multiplier" },
-            Entry { tag: "atr_risk",   args: "risk_frac, period, atr_multiple", doc: "fixed per-trade risk sized by ATR" },
+            Entry { tag: "vol_target",        args: "target, window, bars_per_year",       doc: "inverse realized-vol multiplier (price series)" },
+            Entry { tag: "atr_risk",          args: "risk_frac, period, atr_multiple",     doc: "fixed per-trade risk sized by ATR" },
+            Entry { tag: "drawdown_throttle", args: "max_drawdown",                        doc: "linear de-lever as book drawdown deepens (0..1)" },
+            Entry { tag: "equity_vol_target", args: "target, window, bars_per_year",       doc: "vol targeting on the strategy's own equity returns" },
+            Entry { tag: "fractional_kelly",  args: "kelly_fraction, window",              doc: "kelly_fraction * mean/variance of the last N trade returns" },
         ],
     },
     Group {

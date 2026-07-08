@@ -10,7 +10,7 @@ use serde::Deserialize;
 use fugazi::indicators::compare;
 use fugazi::indicators::logic::Const;
 use fugazi::indicators::{
-    DEFAULT_EPSILON, GetBool, IsWeekday, IsWeekend, Pick, Position, ValueStr,
+    Book, DEFAULT_EPSILON, GetBool, IsWeekday, IsWeekend, Pick, Position, ValueStr,
 };
 use fugazi::prelude::*;
 
@@ -164,10 +164,15 @@ impl SignalSpec {
     /// is threaded to any `entry` / `peak` / `trough` source leaf; `schema` is
     /// the overlay [`Schema`] the atom stream carries, used by `!get`-shaped
     /// leaves for type-directed dispatch.
-    pub fn build(&self, anchor: &Position, schema: &Arc<Schema>) -> Box<dyn DynIndicator> {
+    pub fn build(
+        &self,
+        anchor: &Position,
+        book: &Book,
+        schema: &Arc<Schema>,
+    ) -> Box<dyn DynIndicator> {
         use SignalSpec::*;
-        let real = |s: &SourceSpec| AsReal::new(s.build(anchor, schema));
-        let boolean = |s: &SignalSpec| AsBool::new(s.build(anchor, schema));
+        let real = |s: &SourceSpec| AsReal::new(s.build(anchor, book, schema));
+        let boolean = |s: &SignalSpec| AsBool::new(s.build(anchor, book, schema));
 
         match self {
             Gt { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Gt::with_epsilon(
@@ -222,9 +227,9 @@ impl SignalSpec {
                 if specs.is_empty() {
                     dyn_indicator::wrap(self::Const::<fugazi::types::Snapshot<String>>::new(true))
                 } else {
-                    let mut acc = AsBool::new(specs[0].build(anchor, schema));
+                    let mut acc = AsBool::new(specs[0].build(anchor, book, schema));
                     for s in &specs[1..] {
-                        let next = AsBool::new(s.build(anchor, schema));
+                        let next = AsBool::new(s.build(anchor, book, schema));
                         // AsBool `and` AsBool → concrete Combine; wrap in AsBool
                         // by round-tripping through the box so the fold's accumulator
                         // stays a single library type.
@@ -237,9 +242,9 @@ impl SignalSpec {
                 if specs.is_empty() {
                     dyn_indicator::wrap(self::Const::<fugazi::types::Snapshot<String>>::new(false))
                 } else {
-                    let mut acc = AsBool::new(specs[0].build(anchor, schema));
+                    let mut acc = AsBool::new(specs[0].build(anchor, book, schema));
                     for s in &specs[1..] {
-                        let next = AsBool::new(s.build(anchor, schema));
+                        let next = AsBool::new(s.build(anchor, book, schema));
                         acc = AsBool::new(dyn_indicator::wrap(acc.or(next)));
                     }
                     dyn_indicator::wrap(acc)
@@ -247,18 +252,18 @@ impl SignalSpec {
             }
             Not(inner) => dyn_indicator::wrap(boolean(inner).not()),
             Changed(inner) => dyn_indicator::wrap(boolean(inner).changed()),
-            Unstable { signal } => dyn_indicator::unstable_wrap(signal.build(anchor, schema)),
+            Unstable { signal } => dyn_indicator::unstable_wrap(signal.build(anchor, book, schema)),
             Value(b) => {
                 dyn_indicator::wrap(self::Const::<fugazi::types::Snapshot<String>>::new(*b))
             }
             Get { key } => build_signal_get(schema, key),
             StrEq { lhs, rhs } => {
-                let lhs = AsStr::new(lhs.build(anchor, schema));
+                let lhs = AsStr::new(lhs.build(anchor, book, schema));
                 let rhs: ValueStr<fugazi::types::Snapshot<String>> = ValueStr::new(rhs.as_str());
                 dyn_indicator::wrap(compare::StrEq::new(lhs, rhs))
             }
             StrNe { lhs, rhs } => {
-                let lhs = AsStr::new(lhs.build(anchor, schema));
+                let lhs = AsStr::new(lhs.build(anchor, book, schema));
                 let rhs: ValueStr<fugazi::types::Snapshot<String>> = ValueStr::new(rhs.as_str());
                 dyn_indicator::wrap(compare::StrNe::new(lhs, rhs))
             }

@@ -34,7 +34,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value as Json;
 
 use fugazi::Schema;
-use fugazi::indicators::Position;
+use fugazi::indicators::{Book, Position};
 use fugazi::sources::Interval;
 
 use crate::dyn_indicator::DynIndicator;
@@ -84,7 +84,10 @@ impl Overlay {
     /// unknown key panics at build time with the schema's registered-keys
     /// list.
     pub fn build(&self, schema: &std::sync::Arc<Schema>) -> Box<dyn DynIndicator> {
-        self.spec.build(&Position::new(), schema)
+        // Overlays don't run inside a strategy, so there's no live Position
+        // or Book — using them here (`entry`, `peak`, book-anchored sizing)
+        // never fires. Pass fresh anchors for signature compatibility.
+        self.spec.build(&Position::new(), &Book::new(1.0), schema)
     }
 }
 

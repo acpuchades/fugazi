@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
-use fugazi::indicators::Position;
+use fugazi::indicators::{Book, Position};
 use fugazi::indicators::logic::Const;
 use fugazi::prelude::*;
 use fugazi::strategies::SingleAssetStrategy;
@@ -48,10 +48,15 @@ pub struct SideSpec {
 impl SideSpec {
     /// Build this side's exit signal, defaulting a missing one to constant-`false`
     /// (matching the unwired slots in [`SingleAssetStrategy::new`]).
-    fn exit(&self, anchor: &Position, schema: &Arc<Schema>) -> Box<dyn DynIndicator> {
+    fn exit(
+        &self,
+        anchor: &Position,
+        book: &Book,
+        schema: &Arc<Schema>,
+    ) -> Box<dyn DynIndicator> {
         self.exit
             .as_ref()
-            .map(|s| s.build(anchor, schema))
+            .map(|s| s.build(anchor, book, schema))
             .unwrap_or_else(|| {
                 dyn_indicator::wrap(Const::<fugazi::types::Snapshot<String>>::new(false))
             })
@@ -103,6 +108,12 @@ impl StrategySpec {
 
     /// Build the live [`DynSingleStrategy`] this spec describes.
     ///
+    /// `initial_equity` seeds the strategy's [`Book`] anchor — it should
+    /// match the wallet's starting cash for the book-anchored sizing
+    /// recipes (`!drawdown_throttle`, `!equity_vol_target`,
+    /// `!fractional_kelly`) to read meaningful numbers. The CLI threads
+    /// `--cash` through to this parameter.
+    ///
     /// `schema` is the overlay [`Schema`] the atom stream carries — the
     /// `!get`-shaped leaves resolve their column names + types against it at
     /// build time. Pass [`Schema::empty()`] when there is no overlay side
@@ -113,37 +124,39 @@ impl StrategySpec {
     /// YAML describes it. If you want to gate an entry on stability, compose
     /// [`Unstable`](fugazi::indicators::Unstable) at the signal level to opt a
     /// subtree out of the strategy-readiness wait.
-    pub fn build(&self, schema: &Arc<Schema>) -> DynSingleStrategy {
-        let mut strat = SingleAssetStrategy::new(self.symbol.clone());
-        // One position per strategy, shared by every `entry`/`peak`/`trough` leaf
-        // in the sides' signals and stop levels.
+    pub fn build(&self, initial_equity: Real, schema: &Arc<Schema>) -> DynSingleStrategy {
+        let mut strat =
+            SingleAssetStrategy::with_initial_equity(self.symbol.clone(), initial_equity);
+        // One position + book per strategy, shared by every `entry`/`peak`/`trough`
+        // leaf (position) and every book-anchored sizing recipe (book).
         let anchor = strat.position();
+        let book = strat.book();
         if let Some(long) = &self.long {
             strat = strat.long_on(
-                AsBool::new(long.enter.build(&anchor, schema)),
-                AsBool::new(long.exit(&anchor, schema)),
+                AsBool::new(long.enter.build(&anchor, &book, schema)),
+                AsBool::new(long.exit(&anchor, &book, schema)),
             );
             if let Some(sl) = &long.stop_loss {
-                strat = strat.long_stop_loss(AsReal::new(sl.build(&anchor, schema)));
+                strat = strat.long_stop_loss(AsReal::new(sl.build(&anchor, &book, schema)));
             }
             if let Some(tp) = &long.take_profit {
-                strat = strat.long_take_profit(AsReal::new(tp.build(&anchor, schema)));
+                strat = strat.long_take_profit(AsReal::new(tp.build(&anchor, &book, schema)));
             }
         }
         if let Some(short) = &self.short {
             strat = strat.short_on(
-                AsBool::new(short.enter.build(&anchor, schema)),
-                AsBool::new(short.exit(&anchor, schema)),
+                AsBool::new(short.enter.build(&anchor, &book, schema)),
+                AsBool::new(short.exit(&anchor, &book, schema)),
             );
             if let Some(sl) = &short.stop_loss {
-                strat = strat.short_stop_loss(AsReal::new(sl.build(&anchor, schema)));
+                strat = strat.short_stop_loss(AsReal::new(sl.build(&anchor, &book, schema)));
             }
             if let Some(tp) = &short.take_profit {
-                strat = strat.short_take_profit(AsReal::new(tp.build(&anchor, schema)));
+                strat = strat.short_take_profit(AsReal::new(tp.build(&anchor, &book, schema)));
             }
         }
         if let Some(sizing) = &self.sizing {
-            strat = strat.position_sizing(AsReal::new(sizing.build(&anchor, schema)));
+            strat = strat.position_sizing(AsReal::new(sizing.build(&anchor, &book, schema)));
         }
         DynSingleStrategy { inner: strat }
     }

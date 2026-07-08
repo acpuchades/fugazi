@@ -303,6 +303,6 @@ mod tests {
         let spec: StrategySpec = serde_json::from_value(value).unwrap();
         assert_eq!(spec.symbol, "BTC");
         assert!(spec.long.is_some());
-        let _strat = spec.build(&fugazi::Schema::empty());
+        let _strat = spec.build(1_000.0, &fugazi::Schema::empty());
     }
 }

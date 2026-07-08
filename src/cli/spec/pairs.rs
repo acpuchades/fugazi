@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
-use fugazi::indicators::Position;
+use fugazi::indicators::{Book, Position};
 use fugazi::indicators::logic::Const;
 use fugazi::prelude::*;
 use fugazi::strategies::PairsStrategy;
@@ -88,10 +88,15 @@ impl PairsStrategySpec {
 
     /// Build a spec's exit signal, defaulting a missing one to constant-`false`
     /// (matching the unwired slot in [`PairsStrategy::new`]).
-    fn exit(&self, anchor: &Position, schema: &Arc<Schema>) -> Box<dyn DynIndicator> {
+    fn exit(
+        &self,
+        anchor: &Position,
+        book: &Book,
+        schema: &Arc<Schema>,
+    ) -> Box<dyn DynIndicator> {
         self.exit
             .as_ref()
-            .map(|s| s.build(anchor, schema))
+            .map(|s| s.build(anchor, book, schema))
             .unwrap_or_else(|| {
                 crate::dyn_indicator::wrap(Const::<fugazi::types::Snapshot<String>>::new(false))
             })
@@ -105,21 +110,32 @@ impl PairsStrategySpec {
     /// (`entry` / `peak` / `trough`) anchor on the **left** leg — a rare choice
     /// since a spread-based level typically doesn't need the per-leg entry
     /// price, but present for symmetry with [`super::StrategySpec`].
+    ///
+    /// [`PairsStrategy`] does not own a [`Book`] anchor. Book-anchored
+    /// sizing tags (`!drawdown_throttle`, `!equity_vol_target`,
+    /// `!fractional_kelly`) build against a *dummy* book that never
+    /// updates — every recipe on it either sits at its neutral value
+    /// (drawdown_throttle stays at `1.0`) or emits `None` forever
+    /// (equity_vol_target / fractional_kelly). Use the pair's price-based
+    /// sizing helpers (`!vol_target`, `!atr_risk`) instead.
     pub fn build(&self, schema: &Arc<Schema>) -> DynPairsStrategy {
         let strat = PairsStrategy::new(self.left.clone(), self.right.clone());
         // Anchor level expressions on the left leg's position (see doc note).
         let anchor = strat.left_position();
-        let enter = AsBool::new(self.enter.build(&anchor, schema));
-        let exit = AsBool::new(self.exit(&anchor, schema));
+        // Dummy Book — never updated; book-anchored recipes on a pair are
+        // effectively no-ops (see doc note).
+        let book = Book::new(1.0);
+        let enter = AsBool::new(self.enter.build(&anchor, &book, schema));
+        let exit = AsBool::new(self.exit(&anchor, &book, schema));
         let mut strat = strat.on(enter, exit);
         if let Some(sl) = &self.stop_loss {
-            strat = strat.spread_stop_loss(AsReal::new(sl.build(&anchor, schema)));
+            strat = strat.spread_stop_loss(AsReal::new(sl.build(&anchor, &book, schema)));
         }
         if let Some(tp) = &self.take_profit {
-            strat = strat.spread_take_profit(AsReal::new(tp.build(&anchor, schema)));
+            strat = strat.spread_take_profit(AsReal::new(tp.build(&anchor, &book, schema)));
         }
         if let Some(sizing) = &self.sizing {
-            strat = strat.position_sizing(AsReal::new(sizing.build(&anchor, schema)));
+            strat = strat.position_sizing(AsReal::new(sizing.build(&anchor, &book, schema)));
         }
         DynPairsStrategy { inner: strat }
     }

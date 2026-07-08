@@ -14,7 +14,7 @@ use serde::Deserialize;
 // resolve on the enum variant. The `Pick` root is the one exception because
 // it isn't a `SourceSpec` variant.
 use fugazi::indicators::{
-    Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Component, Dmi,
+    Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Book, Cci, Component, Dmi,
     DmiValue, Donchian, DonchianValue, Ema, GetBool, GetReal, GetStr, Hma, Keltner, KeltnerValue,
     Latch, Log, Macd, MacdValue, Mfi, Obv, Pick, Position, Resample, Rma, Rsi, Sar, Sma, StdDev,
     StochRsi, Stochastic, TrueRange, Value, Vwap, WilliamsR, Wma,
@@ -401,7 +401,10 @@ pub enum SourceSpec {
     // --- sizing helpers (real-valued, single-series; read the strategy's
     // own asset via the implicit empty-selector `Pick`). Meant for the
     // `sizing:` slot on `StrategySpec` / `PairsStrategySpec`, but usable
-    // anywhere a real-valued source fits.
+    // anywhere a real-valued source fits. The book-anchored ones
+    // (`DrawdownThrottle`, `EquityVolTarget`, `FractionalKelly`) additionally
+    // require the strategy to own a `Book` — `StrategySpec` does;
+    // `PairsStrategySpec` does not (they'll emit `None` there).
     /// Inverse realized-vol sizing —
     /// `target / (stddev(log_returns(close), window) * sqrt(bars_per_year))`.
     /// See [`fugazi::indicators::sizing::vol_target`].
@@ -417,6 +420,27 @@ pub enum SourceSpec {
         risk_frac: Real,
         period: usize,
         atr_multiple: Real,
+    },
+    /// Drawdown-throttled sizing — `max(0, min(1, 1 + book.drawdown() /
+    /// max_drawdown))`. Reads the strategy's [`Book`] anchor. See
+    /// [`fugazi::indicators::sizing::drawdown_throttle`].
+    DrawdownThrottle { max_drawdown: Real },
+    /// Realized-vol targeting on the strategy's own equity return series
+    /// — `target / (stddev(book.return_per_bar, window) *
+    /// sqrt(bars_per_year))`. Reads the strategy's [`Book`] anchor. See
+    /// [`fugazi::indicators::sizing::equity_vol_target`].
+    EquityVolTarget {
+        target: Real,
+        window: usize,
+        bars_per_year: Real,
+    },
+    /// Fractional Kelly over the last `window` closed-trade returns —
+    /// `kelly_fraction * mean / variance`, clamped to `>= 0`. Reads the
+    /// strategy's [`Book`] anchor. See
+    /// [`fugazi::indicators::sizing::fractional_kelly`].
+    FractionalKelly {
+        kelly_fraction: Real,
+        window: usize,
     },
 
     // --- transform operators ---
@@ -897,7 +921,10 @@ enum SourceSpecRaw {
     // --- sizing helpers (real-valued, single-series; read the strategy's
     // own asset via the implicit empty-selector `Pick`). Meant for the
     // `sizing:` slot on `StrategySpec` / `PairsStrategySpec`, but usable
-    // anywhere a real-valued source fits.
+    // anywhere a real-valued source fits. The book-anchored ones
+    // (`DrawdownThrottle`, `EquityVolTarget`, `FractionalKelly`) additionally
+    // require the strategy to own a `Book` — `StrategySpec` does;
+    // `PairsStrategySpec` does not (they'll emit `None` there).
     /// Inverse realized-vol sizing —
     /// `target / (stddev(log_returns(close), window) * sqrt(bars_per_year))`.
     /// See [`fugazi::indicators::sizing::vol_target`].
@@ -913,6 +940,27 @@ enum SourceSpecRaw {
         risk_frac: Real,
         period: usize,
         atr_multiple: Real,
+    },
+    /// Drawdown-throttled sizing — `max(0, min(1, 1 + book.drawdown() /
+    /// max_drawdown))`. Reads the strategy's [`Book`] anchor. See
+    /// [`fugazi::indicators::sizing::drawdown_throttle`].
+    DrawdownThrottle { max_drawdown: Real },
+    /// Realized-vol targeting on the strategy's own equity return series
+    /// — `target / (stddev(book.return_per_bar, window) *
+    /// sqrt(bars_per_year))`. Reads the strategy's [`Book`] anchor. See
+    /// [`fugazi::indicators::sizing::equity_vol_target`].
+    EquityVolTarget {
+        target: Real,
+        window: usize,
+        bars_per_year: Real,
+    },
+    /// Fractional Kelly over the last `window` closed-trade returns —
+    /// `kelly_fraction * mean / variance`, clamped to `>= 0`. Reads the
+    /// strategy's [`Book`] anchor. See
+    /// [`fugazi::indicators::sizing::fractional_kelly`].
+    FractionalKelly {
+        kelly_fraction: Real,
+        window: usize,
     },
 
     // --- transform operators ---
@@ -1132,6 +1180,9 @@ impl From<SourceSpecRaw> for SourceSpec {
             SourceSpecRaw::Sar { source, step, max } => SourceSpec::Sar { source, step, max },
             SourceSpecRaw::VolTarget { target, window, bars_per_year } => SourceSpec::VolTarget { target, window, bars_per_year },
             SourceSpecRaw::AtrRisk { risk_frac, period, atr_multiple } => SourceSpec::AtrRisk { risk_frac, period, atr_multiple },
+            SourceSpecRaw::DrawdownThrottle { max_drawdown } => SourceSpec::DrawdownThrottle { max_drawdown },
+            SourceSpecRaw::EquityVolTarget { target, window, bars_per_year } => SourceSpec::EquityVolTarget { target, window, bars_per_year },
+            SourceSpecRaw::FractionalKelly { kelly_fraction, window } => SourceSpec::FractionalKelly { kelly_fraction, window },
             SourceSpecRaw::Add { lhs, rhs } => SourceSpec::Add { lhs, rhs },
             SourceSpecRaw::Sub { lhs, rhs } => SourceSpec::Sub { lhs, rhs },
             SourceSpecRaw::Mul { lhs, rhs } => SourceSpec::Mul { lhs, rhs },
@@ -1264,11 +1315,12 @@ impl TryFrom<serde_norway::Value> for SourceSpec {
 fn atom_source_of(
     source: Option<&SourceSpec>,
     anchor: &Position,
+    book: &Book,
     schema: &Arc<Schema>,
 ) -> AsAtom {
     match source {
         None => AsAtom::new(dyn_indicator::wrap(pick_root())),
-        Some(s) => AsAtom::new(s.build(anchor, schema)),
+        Some(s) => AsAtom::new(s.build(anchor, book, schema)),
     }
 }
 
@@ -1276,19 +1328,26 @@ impl SourceSpec {
     /// Construct the live, runtime-typed source this spec describes as a
     /// `Box<dyn DynIndicator>`. `anchor` is the owning strategy's
     /// [`Position`], shared by any `entry` / `peak` / `trough` leaves in the
-    /// tree; `schema` is the overlay [`Schema`] the atom stream carries, used
-    /// by `!get { key }` to look up the column's declared [`OverlayType`] and
-    /// dispatch to the right typed leaf.
-    pub fn build(&self, anchor: &Position, schema: &Arc<Schema>) -> Box<dyn DynIndicator> {
+    /// tree; `book` is the owning strategy's [`Book`], shared by any
+    /// book-anchored sizing recipe (`!drawdown_throttle`, `!equity_vol_target`,
+    /// `!fractional_kelly`); `schema` is the overlay [`Schema`] the atom
+    /// stream carries, used by `!get { key }` to look up the column's
+    /// declared [`OverlayType`] and dispatch to the right typed leaf.
+    pub fn build(
+        &self,
+        anchor: &Position,
+        book: &Book,
+        schema: &Arc<Schema>,
+    ) -> Box<dyn DynIndicator> {
         use SourceSpec::*;
         // Recursive-build shorthands: build `s`, view it as a library-typed
         // `Indicator<Input=Snapshot, Output=Real>` (or Candle) so it drops
         // into a concrete library constructor.
-        let real = |s: &SourceSpec| AsReal::new(s.build(anchor, schema));
-        let candle = |s: &SourceSpec| AsCandle::new(s.build(anchor, schema));
+        let real = |s: &SourceSpec| AsReal::new(s.build(anchor, book, schema));
+        let candle = |s: &SourceSpec| AsCandle::new(s.build(anchor, book, schema));
         // The `Pick`-shaped `source:` field on every atom-input leaf.
         let atom_src = |source: Option<&Box<SourceSpec>>| {
-            atom_source_of(source.map(|b| &**b), anchor, schema)
+            atom_source_of(source.map(|b| &**b), anchor, book, schema)
         };
 
         match self {
@@ -1528,6 +1587,32 @@ impl SourceSpec {
                 *period,
                 *atr_multiple,
             )),
+            DrawdownThrottle { max_drawdown } => {
+                dyn_indicator::wrap(fugazi::indicators::sizing::drawdown_throttle::<String>(
+                    book,
+                    *max_drawdown,
+                ))
+            }
+            EquityVolTarget {
+                target,
+                window,
+                bars_per_year,
+            } => dyn_indicator::wrap(
+                fugazi::indicators::sizing::equity_vol_target::<String>(
+                    book,
+                    *target,
+                    *window,
+                    *bars_per_year,
+                ),
+            ),
+            FractionalKelly {
+                kelly_fraction,
+                window,
+            } => dyn_indicator::wrap(fugazi::indicators::sizing::fractional_kelly::<String>(
+                book,
+                *kelly_fraction,
+                *window,
+            )),
 
             Add { lhs, rhs } => dyn_indicator::wrap(real(lhs).add(real(rhs))),
             Sub { lhs, rhs } => dyn_indicator::wrap(real(lhs).sub(real(rhs))),
@@ -1545,7 +1630,7 @@ impl SourceSpec {
             }
             Log { source, base } => dyn_indicator::wrap(self::Log::new(real(source), *base)),
             Latch { source } => {
-                let inner = AsReal::new(source.build(anchor, schema));
+                let inner = AsReal::new(source.build(anchor, book, schema));
                 dyn_indicator::wrap(self::Latch::new(inner))
             }
             Resample {
@@ -1556,10 +1641,10 @@ impl SourceSpec {
                 assert!(*every > 0, "resample every must be greater than zero");
                 let candle_src = candle(source);
                 let resample_dyn = dyn_indicator::wrap(self::Resample::new(candle_src, *every));
-                let inner_dyn = inner.build(anchor, schema);
+                let inner_dyn = inner.build(anchor, book, schema);
                 dyn_indicator::chain(resample_dyn, inner_dyn)
             }
-            Unstable { source } => dyn_indicator::unstable_wrap(source.build(anchor, schema)),
+            Unstable { source } => dyn_indicator::unstable_wrap(source.build(anchor, book, schema)),
 
             Year { source } => {
                 let s = atom_src(source.as_ref());
