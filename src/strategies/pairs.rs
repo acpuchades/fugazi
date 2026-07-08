@@ -16,7 +16,7 @@
 //! Levels are ordinary indicator expressions built off the strategy's
 //! [`Position`] anchor, exactly like [`SingleAssetStrategy`]'s per-leg levels.
 
-use crate::indicators::{Close, Const, Pick, Position, Value};
+use crate::indicators::{Book, Close, Const, Pick, Position, Value};
 use crate::prelude::*;
 use crate::types::{Selector, Snapshot};
 
@@ -66,6 +66,18 @@ fn level_value<Sym>(level: &Option<Level<Sym>>) -> Option<Real> {
 /// expression). The multiplier is read on transitions only; a mid-position
 /// change doesn't resize.
 ///
+/// ## Book anchor
+///
+/// Alongside its two [`Position`] anchors (per-leg) the pair also owns a
+/// [`Book`] tracking the *aggregate* equity curve: both legs' fills feed one
+/// cash balance, both legs' closes mark the book to market each bar, and a
+/// trade closes only when both legs are back to flat. `strat.book()` returns
+/// the shared handle so the position-dependent sizing recipes — `drawdown_throttle`,
+/// `equity_vol_target`, `fractional_kelly` — work on a pair the same as on a
+/// single-asset strategy. Seed the book with
+/// [`with_initial_equity`](Self::with_initial_equity) to match the wallet's
+/// starting cash for meaningful drawdown/return numbers.
+///
 /// ## Readiness
 ///
 /// [`is_ready`](Strategy::is_ready) returns `true` once `bars_seen` reaches the
@@ -98,6 +110,7 @@ pub struct PairsStrategy<Sym> {
     sizing: Level<Sym>,
     left_position: Position,
     right_position: Position,
+    book: Book<Sym>,
     bars_seen: usize,
 }
 
@@ -108,6 +121,18 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> PairsStrategy<Sym>
     /// [`spread_stop_loss`](Self::spread_stop_loss) /
     /// [`spread_take_profit`](Self::spread_take_profit).
     pub fn new(left: Sym, right: Sym) -> Self {
+        Self::with_initial_equity(left, right, 1.0)
+    }
+
+    /// A pairs strategy seeded with a specific `initial_equity` for its
+    /// [`Book`] anchor — match the wallet's starting cash for the
+    /// book-anchored sizing recipes (`drawdown_throttle`,
+    /// `equity_vol_target`, `fractional_kelly`) to read meaningful
+    /// numbers. Otherwise identical to [`new`](Self::new).
+    ///
+    /// # Panics
+    /// Panics if `initial_equity` is not strictly positive.
+    pub fn with_initial_equity(left: Sym, right: Sym, initial_equity: Real) -> Self {
         let spread: Spread<Sym> = Box::new(
             Close::of(Pick::matching(Selector::by_symbol(left.clone())))
                 .sub(Close::of(Pick::matching(Selector::by_symbol(right.clone())))),
@@ -123,6 +148,7 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> PairsStrategy<Sym>
             sizing: Box::new(Value::<Snapshot<Sym>>::new(1.0)),
             left_position: Position::new(),
             right_position: Position::new(),
+            book: Book::new(initial_equity),
             bars_seen: 0,
         }
     }
@@ -195,6 +221,15 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> PairsStrategy<Sym>
         self.right_position.clone()
     }
 
+    /// A clone of this strategy's [`Book`], for building book-anchored
+    /// sizing expressions against the pair's *aggregate* equity curve.
+    /// The book tracks both legs' fills and marks each leg to market
+    /// per bar; per-trade P&L is summed across both legs at pair
+    /// close.
+    pub fn book(&self) -> Book<Sym> {
+        self.book.clone()
+    }
+
     /// The number of bars that must be fed before [`is_ready`](Strategy::is_ready)
     /// reports `true`: the largest `stable_period()` across `enter`, `exit`, and
     /// any attached spread level.
@@ -218,11 +253,26 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> Strategy for Pairs
     type Symbol = Sym;
 
     fn update(&mut self, snap: Snapshot<Sym>) {
-        if let Some(atom) = find_atom(&snap, &self.left) {
+        // Collect per-leg atoms for both positions AND the book.
+        let left_atom = find_atom(&snap, &self.left);
+        let right_atom = find_atom(&snap, &self.right);
+        if let Some(atom) = &left_atom {
             self.left_position.update(atom.candle);
         }
-        if let Some(atom) = find_atom(&snap, &self.right) {
+        if let Some(atom) = &right_atom {
             self.right_position.update(atom.candle);
+        }
+        // Feed the book both legs' closes in one call so aggregate
+        // mark-to-market and per-bar return are computed correctly.
+        let marks: Vec<(Sym, Candle)> = [
+            left_atom.as_ref().map(|a| (self.left.clone(), a.candle)),
+            right_atom.as_ref().map(|a| (self.right.clone(), a.candle)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if !marks.is_empty() {
+            self.book.update(marks);
         }
 
         self.enter.update(snap.clone());
@@ -243,13 +293,17 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> Strategy for Pairs
     }
 
     fn on_fill(&mut self, order: &Order<Sym>) {
-        // Track each leg's position independently from the fill stream.
+        // Track each leg's position + the aggregate book from the fill stream.
         if order.symbol == self.left {
             self.left_position
                 .apply(order.side, order.units, order.price);
+            self.book
+                .apply_fill(&self.left, order.side, order.units, order.price);
         } else if order.symbol == self.right {
             self.right_position
                 .apply(order.side, order.units, order.price);
+            self.book
+                .apply_fill(&self.right, order.side, order.units, order.price);
         }
     }
 
@@ -311,6 +365,7 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> Strategy for Pairs
         self.sizing.reset();
         self.left_position.reset();
         self.right_position.reset();
+        self.book.reset();
         self.bars_seen = 0;
     }
 }
@@ -563,5 +618,122 @@ mod tests {
         );
         assert_eq!(w.orders().len(), 4);
         assert!(w.positions().next().is_none());
+    }
+
+    /// Drive the pair with an explicit initial-equity book seed.
+    fn run_with_capital(
+        strat: &mut PairsStrategy<&'static str>,
+        bars: &[(Real, Real)],
+        initial_cash: Real,
+    ) -> PaperWallet<&'static str> {
+        let mut wallet = PaperWallet::new(initial_cash);
+        for &(lp, rp) in bars {
+            let s = snap(lp, rp);
+            let l_candle = Candle::new(lp, lp, lp, lp, 0.0);
+            let r_candle = Candle::new(rp, rp, rp, rp, 0.0);
+            for fill in wallet.update("L", l_candle) {
+                strat.on_fill(&fill);
+            }
+            for fill in wallet.update("R", r_candle) {
+                strat.on_fill(&fill);
+            }
+            strat.update(s);
+            strat.trade(&mut wallet);
+        }
+        wallet
+    }
+
+    #[test]
+    fn book_marks_the_pair_equity_curve() {
+        // Enter bar 0, hold. Book equity should track cash + L*close_L +
+        // R_units*close_R (short right → negative units).
+        let mut strat = PairsStrategy::with_initial_equity("L", "R", 10_000.0).on(
+            Const::<Snapshot<&'static str>>::new(true),
+            Const::<Snapshot<&'static str>>::new(false),
+        );
+        let book = strat.book();
+        let _ = run_with_capital(
+            &mut strat,
+            &[
+                (100.0, 50.0), // enter signals, queued
+                (100.0, 50.0), // fill: L Buy, R Sell — 0.5*equity/price each
+                (110.0, 50.0), // L up 10%, R unchanged
+            ],
+            10_000.0,
+        );
+        // At bar 2 fill: value_frac(0.5) at price 100 for L → 50 units.
+        //                  value_frac(0.5) at price  50 for R → 100 units short.
+        // Cash after fills = 10000 - 5000 (bought L) + 5000 (sold R) = 10000.
+        // Equity at bar 2 close (fill bar) = 10000 + 50*100 + (-100)*50 = 10000. ✓
+        // Equity at bar 3 close = 10000 + 50*110 + (-100)*50 = 10500.
+        assert!(
+            (book.equity_value() - 10_500.0).abs() < 1e-6,
+            "book equity {}",
+            book.equity_value()
+        );
+    }
+
+    #[test]
+    fn book_reports_pair_trade_close_pnl() {
+        // Enter bar 0, exit bar 2. Bar 3 both legs close at the fill.
+        // Aggregate trade P&L should sum both legs' contributions.
+        struct At {
+            bar: usize,
+            fire: usize,
+            last: Option<bool>,
+        }
+        impl Indicator for At {
+            type Input = Snapshot<&'static str>;
+            type Output = bool;
+            fn update(&mut self, _s: Snapshot<&'static str>) -> Option<bool> {
+                let out = self.bar == self.fire;
+                self.bar += 1;
+                self.last = Some(out);
+                Some(out)
+            }
+            fn value(&self) -> Option<bool> {
+                self.last
+            }
+            fn warm_up_period(&self) -> usize {
+                0
+            }
+            fn reset(&mut self) {
+                self.bar = 0;
+                self.last = None;
+            }
+        }
+        let mut strat = PairsStrategy::with_initial_equity("L", "R", 10_000.0).on(
+            At {
+                bar: 0,
+                fire: 0,
+                last: None,
+            },
+            At {
+                bar: 0,
+                fire: 2,
+                last: None,
+            },
+        );
+        let book = strat.book();
+        let _ = run_with_capital(
+            &mut strat,
+            &[
+                (100.0, 50.0), // enter signals; queued
+                (100.0, 50.0), // fill open: L Buy 50u @100, R Sell 100u @50
+                (110.0, 45.0), // exit signals; queued; L rose, R fell
+                (110.0, 45.0), // fill close: L Sell 50u @110, R Buy 100u @45
+            ],
+            10_000.0,
+        );
+        // L P&L: 50 * (110 - 100) = 500.
+        // R P&L: -100 * (45 - 50) = 500.
+        // Aggregate = 1000.
+        let pnl = book.trade_pnl::<Snapshot<&'static str>>().value();
+        assert!(pnl.is_some(), "no trade close event booked");
+        assert!(
+            (pnl.unwrap() - 1_000.0).abs() < 1e-6,
+            "expected 1000, got {}",
+            pnl.unwrap()
+        );
     }
 }
