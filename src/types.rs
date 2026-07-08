@@ -780,10 +780,17 @@ impl<Sym> Snapshot<Sym> {
             0 => None,
             1 => Some(&self.entries[0].2),
             n => panic!(
-                "Snapshot::sole_atom: expected a single-entry snapshot, got {n} entries — \
-                 the surrounding chain used a no-argument `Pick::new()`, which requires a \
-                 single-series driver; specify a Selector (`Pick::matching(...)`) for \
-                 multi-asset input"
+                "Snapshot::sole_atom: expected a single-entry snapshot, got {n} entries. \
+                 This usually means a strategy authored for single-series input was fed a \
+                 multi-asset snapshot, and the implicit no-arg `Pick::new()` on one of its \
+                 leaves could not choose an asset. \n\
+                 \n\
+                 To fix: pick which asset each leaf reads.\n\
+                 \n\
+                 - In YAML, add a `!pick {{ symbol, freq }}` source to each affected \
+                 leaf — e.g. `!close {{ source: !pick {{ symbol: BTC }} }}`. \n\
+                 - In Rust, replace `Pick::new()` with `Pick::matching(Selector::by_symbol(...))` \
+                 (or `by_freq(...)` / `exact(...)`)."
             ),
         }
     }

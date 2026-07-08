@@ -28,10 +28,15 @@ The crate has three composable layers:
   the candle accessors under `Current` (`Current::close()`, `Current::volume()`,
   …). Bar indicators (`Atr`, `Adx`, `TrueRange`, …) read the whole bar, so they
   take a `Candle`-output source too — `Atr::new(Current::candle(), 14)`,
-  `Obv::new(Current::candle())`, etc. Every indicator is fed one `Atom` per bar
-  (`Atom { candle, overlays }` — a `Candle` plus an optional overlay bundle);
-  a bare `Candle` lifts to an `Atom` via `From<Candle> for Atom`, so
-  `signal.update(candle.into())` is the streaming pattern.
+  `Obv::new(Current::candle())`, etc. Every atom-input leaf (candle field,
+  calendar accessor, overlay `Get*` reader) is **generic over an atom-emitting
+  source `S` with default `Identity<Atom>`**, so the same primitives serve both
+  the single-series hot path and the cross-asset case — see
+  [Cross-asset composition](#cross-asset-composition) below. Every indicator
+  is fed one `Atom` per bar (`Atom { candle, overlays }` — a `Candle` plus an
+  optional overlay bundle); a bare `Candle` lifts to an `Atom` via
+  `From<Candle> for Atom`, so `signal.update(candle.into())` is the streaming
+  pattern.
 - **Signals** are composable booleans. Comparisons are built from two sources, so
   a condition like "RSI over 70" is a single object. Combine signals with
   `and`/`or`/`xor`/`not`/`changed`.
@@ -220,6 +225,41 @@ base-bar scaled) — if a strategy needs base-bar-correct stability accounting,
 it must feed the pipeline enough leading history for the recursive tail to
 decay in HTF terms.
 
+### Cross-asset composition
+
+For strategies that reason about more than one instrument per bar, feed a
+**`Snapshot<Sym>`** — a series of `(Option<Sym>, Option<Frequency>, Atom)`
+entries — and use `Pick<Sym, S>` to project one asset out. Every atom-input
+leaf composes on top verbatim through its `T::of(source)` constructor:
+
+```rust
+use fugazi::prelude::*;
+use fugazi::indicators::{Close, Pick};
+use fugazi::{Frequency, Selector, Snapshot};
+
+// BTC/ETH close spread as a first-class Real-output indicator whose Input is
+// Snapshot<String>. Two symbol-matching `Pick`s + arithmetic — no
+// per-strategy machinery.
+let mut spread = Close::of(Pick::<String>::matching(Selector::by_symbol("BTC")))
+    .sub(Close::of(Pick::<String>::matching(Selector::by_symbol("ETH"))));
+
+// Feed one snapshot per bar.
+let mut snap = Snapshot::<String>::new();
+snap.push(Some("BTC".into()), None, Atom::new(Candle::new(100.0, 101.0, 99.0, 100.0, 1.0)));
+snap.push(Some("ETH".into()), None, Atom::new(Candle::new(60.0,  61.0, 59.0, 60.0,  1.0)));
+assert_eq!(spread.update(snap), Some(40.0));
+```
+
+`Selector<Sym>` is a **partial-key predicate**, not a snapshot key:
+`by_symbol("BTC")` matches every BTC entry regardless of frequency,
+`by_freq(Frequency::Hour(1))` matches every hourly entry regardless of
+symbol, `exact("BTC", Frequency::Hour(1))` matches a single tagged entry.
+Empty selector (`Selector::default()`, both fields `None`) is the "no query"
+sentinel — [`Pick::new()`](https://docs.rs/fugazi/latest/fugazi/indicators/struct.Pick.html)
+uses it to trigger `Snapshot::sole_atom` (single-entry unpack, panics on 2+),
+so a strategy authored around cross-asset primitives still runs cleanly on a
+single-series driver that feeds size-1 snapshots via `Snapshot::of_atom`.
+
 ## Strategies
 
 The decision layer turns signals into trades. A **strategy** is *your own type*
@@ -406,10 +446,18 @@ aggregates every metric into a YAML report.
   `Donchian`, `Keltner`, `Sar` (Parabolic SAR)
 - **Volume:** `Obv`, `Vwap`, `Ad` (Chaikin A/D), `Mfi`
 - **Sources & transforms:** `Identity`, `Value`, `Current::*` candle accessors,
-  `TrueRange`; `Add`/`Sub`/`Mul`/`Div`, `Lag`/`Diff`/`Ratio`/`Roc`,
+  calendar accessors (`Year`/`Month`/`Day`/`Hour`/…/`DayOfWeek`/`WeekOfYear`),
+  overlay readers (`GetReal`/`GetBool`/`GetStr`), `TrueRange`;
+  `Add`/`Sub`/`Mul`/`Div`, `Lag`/`Diff`/`Ratio`/`Roc`,
   `RollingMax`/`RollingMin`
 - **Signals:** `Gt`/`Lt`/`Ge`/`Le`/`Eq`/`Ne` comparisons, `and`/`or`/`xor`/`not`,
   `changed`, `crosses_above`/`crosses_below`
+- **Cross-asset primitives:** `Snapshot<Sym>` (per-bar tagged-atom series),
+  `Selector<Sym>` (partial-key matcher), `Pick<Sym, S>` (project one asset out
+  of a snapshot), `Frequency` (bar cadence — `Minute(u32)`/`Hour(u32)`/…). The
+  same atom-input leaves (`Close::of(source)`, `Year::of(source)`, `Atr` on
+  `CurrentBar::of(source)`, `GetReal::of(schema, key, source)`) drop straight
+  on top of a `Pick` for cross-asset composition.
 
 Multi-line indicators expose their components as fields and a value struct:
 `Bollinger`/`Donchian`/`Keltner` → `upper`/`middle`/`lower`, `Macd` →

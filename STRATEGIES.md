@@ -20,6 +20,19 @@ inline content (handy for one-offs, e.g. `'{ symbol: BTC, long: { enter: !crosse
 > [Command-line backtester](README.md#command-line-backtester) section of the
 > README. For the library API the vocabulary mirrors, see the rest of the README.
 
+> **Single-series and cross-asset.** Every existing strategy YAML keeps
+> working unchanged. Under the hood the CLI now feeds each strategy a
+> per-bar `Snapshot<String>` (a `(symbol, freq, atom)` series) instead of a
+> raw `Atom`; when a strategy is run against a single-series driver it
+> receives a size-1 snapshot per bar and every atom-input leaf (`close`,
+> `!ema { source: close, ... }`, `!year`, `!is_weekday`, …) is rooted
+> through an implicit empty-selector `Pick` that unpacks the sole atom.
+> **Cross-asset composition through YAML** (an explicit
+> `!pick { symbol, freq }` source tag, letting a strategy read different
+> symbols out of the same snapshot) is the deliberate follow-up — the
+> library and CLI plumbing are already Snapshot-input end-to-end; only the
+> YAML surface is pending.
+
 ## Format: tags, maps, and bare words
 
 The document deserializes into a tree of **externally-tagged enums**: a source,

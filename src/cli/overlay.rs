@@ -372,7 +372,7 @@ mod tests {
         let src = Source::Inline("c=close".to_string());
         let overlays = parse_specs(std::slice::from_ref(&src)).unwrap();
         assert_eq!(overlays.len(), 1);
-        assert!(matches!(overlays[0].spec, SourceSpec::Close));
+        assert!(matches!(overlays[0].spec, SourceSpec::Close { .. }));
     }
 
     #[test]
@@ -477,7 +477,7 @@ mod tests {
             Overlay {
                 name: "a".to_string(),
                 spec: SourceSpec::Sma {
-                    source: Box::new(SourceSpec::Close),
+                    source: Box::new(SourceSpec::Close { source: None }),
                     period: 200,
                 },
                 scope: OverlayScope {
@@ -488,7 +488,7 @@ mod tests {
             Overlay {
                 name: "b".to_string(),
                 spec: SourceSpec::Sma {
-                    source: Box::new(SourceSpec::Close),
+                    source: Box::new(SourceSpec::Close { source: None }),
                     period: 20,
                 },
                 scope: OverlayScope::default(),

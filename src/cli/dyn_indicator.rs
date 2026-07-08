@@ -710,10 +710,8 @@ impl Indicator for AsCandle {
 /// [`new`](Self::new) panics if `inner.input_type() != Snapshot` or
 /// `inner.output_type() != Atom`.
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct AsAtom(Box<dyn DynIndicator>);
 
-#[allow(dead_code)]
 impl AsAtom {
     pub fn new(inner: Box<dyn DynIndicator>) -> Self {
         assert_eq!(
