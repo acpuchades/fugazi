@@ -61,6 +61,12 @@ pub struct PairsStrategySpec {
     /// spread reads at or above this level.
     #[serde(default)]
     pub take_profit: Option<Box<SourceSpec>>,
+    /// Optional **position-sizing multiplier** — a real-valued source scaling
+    /// the pair's gross exposure. Each leg entries at `value_frac(0.5 * m)`.
+    /// Defaults to a constant `1.0` (1.0 gross, dollar-neutral); a `None`
+    /// reading skips the trade for that bar.
+    #[serde(default)]
+    pub sizing: Option<Box<SourceSpec>>,
 }
 
 impl PairsStrategySpec {
@@ -111,6 +117,9 @@ impl PairsStrategySpec {
         }
         if let Some(tp) = &self.take_profit {
             strat = strat.spread_take_profit(AsReal::new(tp.build(&anchor, schema)));
+        }
+        if let Some(sizing) = &self.sizing {
+            strat = strat.position_sizing(AsReal::new(sizing.build(&anchor, schema)));
         }
         DynPairsStrategy { inner: strat }
     }

@@ -16,7 +16,7 @@
 //! Levels are ordinary indicator expressions built off the strategy's
 //! [`Position`] anchor, exactly like [`SingleAssetStrategy`]'s per-leg levels.
 
-use crate::indicators::{Close, Const, Pick, Position};
+use crate::indicators::{Close, Const, Pick, Position, Value};
 use crate::prelude::*;
 use crate::types::{Selector, Snapshot};
 
@@ -40,8 +40,9 @@ fn level_value<Sym>(level: &Option<Level<Sym>>) -> Option<Real> {
 }
 
 /// A two-symbol, spread-driven pair-trading strategy. On **enter**, go long
-/// `left` and short `right` at `value_frac(0.5)` each — 1.0 gross exposure,
-/// dollar-neutral by construction. On **exit**, flatten both legs. Optional
+/// `left` and short `right` at `value_frac(0.5 * m)` each — a 1.0 gross exposure
+/// dollar-neutral pair by default (`m = 1.0`), scaled by the strategy's
+/// **position-sizing indicator** `m`. On **exit**, flatten both legs. Optional
 /// **spread** stop-loss / take-profit levels are compared against the running
 /// `close_left − close_right`; either firing flattens the whole pair.
 ///
@@ -52,13 +53,26 @@ fn level_value<Sym>(level: &Option<Level<Sym>>) -> Option<Real> {
 /// long/short swapped and can be obtained by swapping `left`/`right` at
 /// construction rather than doubling the signal surface.
 ///
+/// ## Position sizing
+///
+/// The gross exposure of the pair is scaled by a caller-supplied real-valued
+/// indicator, set via [`position_sizing`](Self::position_sizing) and defaulting
+/// to `Value::new(1.0)` (the classical 1.0-gross, 0.5-per-leg dollar-neutral
+/// pair). Each leg entries at `value_frac(0.5 * m)`. `m` is a *magnitude only*
+/// (the long-left/short-right structure is fixed), and a `None` reading — while
+/// the sizing indicator is warming, or on a division by zero — causes the
+/// whole [`trade`](Strategy::trade) call to be skipped for that bar (safe
+/// default; opt out by composing a well-defined fallback into the sizing
+/// expression). The multiplier is read on transitions only; a mid-position
+/// change doesn't resize.
+///
 /// ## Readiness
 ///
 /// [`is_ready`](Strategy::is_ready) returns `true` once `bars_seen` reaches the
-/// largest `stable_period()` across the wired `enter`/`exit` signals and any
-/// attached spread level. Because the internal spread is a raw close-of-left −
-/// close-of-right expression, its own `stable_period()` is `0` and it never
-/// dominates.
+/// largest `stable_period()` across the wired `enter`/`exit` signals, any
+/// attached spread level, and the sizing indicator. Because the internal spread
+/// is a raw close-of-left − close-of-right expression, its own
+/// `stable_period()` is `0` and it never dominates.
 ///
 /// ```
 /// use fugazi::prelude::*;
@@ -81,6 +95,7 @@ pub struct PairsStrategy<Sym> {
     spread: Spread<Sym>,
     stop: Option<Level<Sym>>,
     target: Option<Level<Sym>>,
+    sizing: Level<Sym>,
     left_position: Position,
     right_position: Position,
     bars_seen: usize,
@@ -105,6 +120,7 @@ impl<Sym: Clone + PartialEq + 'static> PairsStrategy<Sym> {
             spread,
             stop: None,
             target: None,
+            sizing: Box::new(Value::<Snapshot<Sym>>::new(1.0)),
             left_position: Position::new(),
             right_position: Position::new(),
             bars_seen: 0,
@@ -146,6 +162,27 @@ impl<Sym: Clone + PartialEq + 'static> PairsStrategy<Sym> {
         self
     }
 
+    /// Set the **position-sizing multiplier** — a real-valued source read on
+    /// every entry and scaled into both legs'
+    /// [`value_frac`](crate::Size::value_frac) magnitude (each leg entries at
+    /// `value_frac(0.5 * m)` for a gross of `m`). The default is a constant
+    /// `1.0` (1.0 gross, dollar-neutral). A `None` reading — still warming, or
+    /// on a division by zero — causes [`trade`](Strategy::trade) to skip that
+    /// bar entirely; wrap with a well-defined fallback at the composition
+    /// level to opt out. The multiplier is a magnitude only; direction is
+    /// fixed (long left / short right — swap `left` and `right` at construction
+    /// for the other side).
+    ///
+    /// Typical usage: `Value::new(0.5)` for a 0.5-gross pair,
+    /// `target_vol.div(spread_realized_vol)` for spread-vol targeting.
+    pub fn position_sizing(
+        mut self,
+        sizing: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+    ) -> Self {
+        self.sizing = Box::new(sizing);
+        self
+    }
+
     /// A clone of the left leg's [`Position`], for building a custom spread
     /// level off its entry price / peak / trough. Note the level is compared
     /// against the *spread*, not the leg's own price.
@@ -166,6 +203,7 @@ impl<Sym: Clone + PartialEq + 'static> PairsStrategy<Sym> {
         for level in [&self.stop, &self.target].into_iter().flatten() {
             needed = needed.max(level.stable_period());
         }
+        needed = needed.max(self.sizing.stable_period());
         needed
     }
 
@@ -194,8 +232,9 @@ impl<Sym: Clone + PartialEq + 'static> Strategy for PairsStrategy<Sym> {
             l.update(snap.clone());
         }
         if let Some(l) = self.target.as_mut() {
-            l.update(snap);
+            l.update(snap.clone());
         }
+        self.sizing.update(snap);
         self.bars_seen = self.bars_seen.saturating_add(1);
     }
 
@@ -215,6 +254,12 @@ impl<Sym: Clone + PartialEq + 'static> Strategy for PairsStrategy<Sym> {
     }
 
     fn trade(&self, wallet: &mut dyn Wallet<Sym>) {
+        // Sizing is read once per bar and skips the whole `trade` call when
+        // the indicator can't produce a number (safe default per the
+        // "unsettled data ⇒ wait" convention).
+        let Some(size) = self.sizing.value() else {
+            return;
+        };
         let open = self.is_open();
         // Signal-driven exit takes precedence: an exit fires even on the same
         // bar as an entry re-fires (idempotent open → close → open would be
@@ -241,14 +286,15 @@ impl<Sym: Clone + PartialEq + 'static> Strategy for PairsStrategy<Sym> {
                 return;
             }
         }
-        // Entry: open both legs at `value_frac(0.5)` for a dollar-neutral
-        // 1.0 gross exposure. Each leg's size resolves against the same
+        // Entry: open both legs at `value_frac(0.5 * m)` for a dollar-neutral
+        // pair with gross `m`. Each leg's size resolves against the same
         // shared equity at the *next* bar's open (each leg is a queued
-        // market order in `PaperWallet`), so the two legs' notionals match
-        // at the fill.
+        // market order in `PaperWallet`), so the two legs' notionals match at
+        // the fill.
         if !open && self.enter.is_true() {
-            let _ = wallet.set(self.left.clone(), Side::Buy, Size::value_frac(0.5));
-            let _ = wallet.set(self.right.clone(), Side::Sell, Size::value_frac(0.5));
+            let leg_frac = 0.5 * size;
+            let _ = wallet.set(self.left.clone(), Side::Buy, Size::value_frac(leg_frac));
+            let _ = wallet.set(self.right.clone(), Side::Sell, Size::value_frac(leg_frac));
         }
     }
 
@@ -262,6 +308,7 @@ impl<Sym: Clone + PartialEq + 'static> Strategy for PairsStrategy<Sym> {
         if let Some(l) = self.target.as_mut() {
             l.reset();
         }
+        self.sizing.reset();
         self.left_position.reset();
         self.right_position.reset();
         self.bars_seen = 0;
@@ -416,6 +463,85 @@ mod tests {
         // 2 opens + 2 closes = 4 orders; flat at the end.
         assert_eq!(w.orders().len(), 4);
         assert!(w.positions().next().is_none());
+    }
+
+    #[test]
+    fn position_sizing_scales_each_leg() {
+        // Half gross (m = 0.5): each leg entries at value_frac(0.25). Seed
+        // equity 1000, entry fills at L=100 → L units = 0.25 * 1000 / 100 = 2.5;
+        // R=50 → R units = 0.25 * 1000 / 50 = 5.0.
+        let mut strat = PairsStrategy::new("L", "R")
+            .on(
+                Const::<Snapshot<&'static str>>::new(true),
+                Const::<Snapshot<&'static str>>::new(false),
+            )
+            .position_sizing(Value::<Snapshot<&'static str>>::new(0.5));
+        let w = run(&mut strat, &[(100.0, 50.0), (100.0, 50.0)]);
+        assert_eq!(w.orders().len(), 2);
+        for order in w.orders() {
+            match order.symbol {
+                "L" => {
+                    assert_eq!(order.side, Side::Buy);
+                    assert_eq!(order.units, 2.5);
+                }
+                "R" => {
+                    assert_eq!(order.side, Side::Sell);
+                    assert_eq!(order.units, 5.0);
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn position_sizing_none_skips_trade() {
+        use crate::indicators::Sma;
+        // SMA-5 over a constant 0.5 — sizing indicator reads `None` for the
+        // first four bars, then `Some(0.5)`. The buy signal is level-true from
+        // bar 1, but the entry queues only on bar 5 (first `Some`) and fills at
+        // bar 6's open. One entry pair, sized half-gross.
+        let sizing = Sma::new(Value::<Snapshot<&'static str>>::new(0.5), 5);
+        let mut strat = PairsStrategy::new("L", "R")
+            .on(
+                Const::<Snapshot<&'static str>>::new(true),
+                Const::<Snapshot<&'static str>>::new(false),
+            )
+            .position_sizing(sizing);
+        let w = run(
+            &mut strat,
+            &[
+                (100.0, 50.0),
+                (100.0, 50.0),
+                (100.0, 50.0),
+                (100.0, 50.0),
+                (100.0, 50.0),
+                (100.0, 50.0),
+            ],
+        );
+        // Exactly 2 fills (L + R entry on bar 6). Every earlier `trade` call
+        // returned early because sizing read `None`.
+        assert_eq!(w.orders().len(), 2);
+    }
+
+    #[test]
+    fn position_sizing_warm_up_gates_is_ready() {
+        use crate::indicators::Sma;
+        // Pair with an SMA-5 sizing indicator: readiness must hold until the
+        // SMA has fed five samples.
+        let sizing = Sma::new(Value::<Snapshot<&'static str>>::new(0.5), 5);
+        let mut strat = PairsStrategy::new("L", "R")
+            .on(
+                Const::<Snapshot<&'static str>>::new(true),
+                Const::<Snapshot<&'static str>>::new(false),
+            )
+            .position_sizing(sizing);
+        assert!(!strat.is_ready());
+        for _ in 0..4 {
+            strat.update(snap(100.0, 50.0));
+        }
+        assert!(!strat.is_ready());
+        strat.update(snap(100.0, 50.0));
+        assert!(strat.is_ready());
     }
 
     #[test]
