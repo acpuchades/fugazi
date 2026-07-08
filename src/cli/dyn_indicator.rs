@@ -19,7 +19,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use fugazi::Indicator;
-use fugazi::types::{Atom, Candle, Real, Timestamp};
+use fugazi::types::{Atom, Candle, Real, Snapshot, Timestamp};
 
 // ---------------------------------------------------------------------------
 // Payload enum + type descriptor
@@ -28,8 +28,11 @@ use fugazi::types::{Atom, Candle, Real, Timestamp};
 /// The runtime-typed payload a [`DynIndicator`] exchanges. One variant per
 /// concrete carrier the CLI's indicator vocabulary produces / consumes.
 ///
-/// `Real`, `Bool` and `Time` are `Copy`; `Atom`, `Candle`, and `Str` are not,
-/// so `DynValue` itself is only `Clone`.
+/// `Real`, `Bool` and `Time` are `Copy`; `Atom`, `Candle`, `Str` and
+/// `Snapshot` are not, so `DynValue` itself is only `Clone`.
+///
+/// The `Snapshot` variant is always keyed by `String` on the CLI side — the
+/// symbol space YAML strategies produce is `String`-typed end-to-end.
 #[derive(Debug, Clone)]
 pub enum DynValue {
     Real(Real),
@@ -38,13 +41,16 @@ pub enum DynValue {
     Candle(Candle),
     Str(Arc<str>),
     Time(Timestamp),
+    Snapshot(Snapshot<String>),
 }
 
 // `Atom` doesn't implement `PartialEq` (the overlay `Arc`s aren't compared by
 // the library), but the CLI's test helpers still need to assert on `DynValue`.
 // Compare the scalar variants exactly, reduce `Atom`/`Candle` payloads to
 // their candle-field equality (dropping overlays for the atom case), and
-// compare `Str` payloads by their string contents.
+// compare `Str` payloads by their string contents. Snapshots are compared by
+// their `(sym, freq, atom.candle)` tuples — the same "atoms by candle-fields"
+// reduction as the standalone Atom case.
 impl PartialEq for DynValue {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -54,6 +60,12 @@ impl PartialEq for DynValue {
             (DynValue::Atom(a), DynValue::Atom(b)) => a.candle == b.candle,
             (DynValue::Str(a), DynValue::Str(b)) => a.as_ref() == b.as_ref(),
             (DynValue::Time(a), DynValue::Time(b)) => a == b,
+            (DynValue::Snapshot(a), DynValue::Snapshot(b)) => {
+                a.len() == b.len()
+                    && a.iter().zip(b.iter()).all(|((sa, fa, aa), (sb, fb, ab))| {
+                        sa == sb && fa == fb && aa.candle == ab.candle
+                    })
+            }
             _ => false,
         }
     }
@@ -70,6 +82,7 @@ pub enum DynType {
     Candle,
     Str,
     Time,
+    Snapshot,
 }
 
 impl fmt::Display for DynType {
@@ -81,6 +94,7 @@ impl fmt::Display for DynType {
             DynType::Candle => f.write_str("Candle"),
             DynType::Str => f.write_str("Str"),
             DynType::Time => f.write_str("Time"),
+            DynType::Snapshot => f.write_str("Snapshot"),
         }
     }
 }
@@ -115,6 +129,11 @@ impl From<Timestamp> for DynValue {
         DynValue::Time(v)
     }
 }
+impl From<Snapshot<String>> for DynValue {
+    fn from(v: Snapshot<String>) -> Self {
+        DynValue::Snapshot(v)
+    }
+}
 
 impl TryFrom<DynValue> for Real {
     type Error = DynType;
@@ -126,6 +145,7 @@ impl TryFrom<DynValue> for Real {
             DynValue::Candle(_) => Err(DynType::Candle),
             DynValue::Str(_) => Err(DynType::Str),
             DynValue::Time(_) => Err(DynType::Time),
+            DynValue::Snapshot(_) => Err(DynType::Snapshot),
         }
     }
 }
@@ -139,6 +159,7 @@ impl TryFrom<DynValue> for bool {
             DynValue::Candle(_) => Err(DynType::Candle),
             DynValue::Str(_) => Err(DynType::Str),
             DynValue::Time(_) => Err(DynType::Time),
+            DynValue::Snapshot(_) => Err(DynType::Snapshot),
         }
     }
 }
@@ -155,6 +176,7 @@ impl TryFrom<DynValue> for Atom {
             DynValue::Bool(_) => Err(DynType::Bool),
             DynValue::Str(_) => Err(DynType::Str),
             DynValue::Time(_) => Err(DynType::Time),
+            DynValue::Snapshot(_) => Err(DynType::Snapshot),
         }
     }
 }
@@ -168,6 +190,7 @@ impl TryFrom<DynValue> for Candle {
             DynValue::Atom(_) => Err(DynType::Atom),
             DynValue::Str(_) => Err(DynType::Str),
             DynValue::Time(_) => Err(DynType::Time),
+            DynValue::Snapshot(_) => Err(DynType::Snapshot),
         }
     }
 }
@@ -181,6 +204,7 @@ impl TryFrom<DynValue> for Arc<str> {
             DynValue::Atom(_) => Err(DynType::Atom),
             DynValue::Candle(_) => Err(DynType::Candle),
             DynValue::Time(_) => Err(DynType::Time),
+            DynValue::Snapshot(_) => Err(DynType::Snapshot),
         }
     }
 }
@@ -194,6 +218,25 @@ impl TryFrom<DynValue> for Timestamp {
             DynValue::Atom(_) => Err(DynType::Atom),
             DynValue::Candle(_) => Err(DynType::Candle),
             DynValue::Str(_) => Err(DynType::Str),
+            DynValue::Snapshot(_) => Err(DynType::Snapshot),
+        }
+    }
+}
+impl TryFrom<DynValue> for Snapshot<String> {
+    type Error = DynType;
+    fn try_from(v: DynValue) -> Result<Snapshot<String>, DynType> {
+        match v {
+            DynValue::Snapshot(s) => Ok(s),
+            // A Candle or Atom lifts into an untagged size-1 snapshot — the
+            // key that lets a Resample's Candle output (or any Atom-emitting
+            // source's output) feed a downstream Snapshot-rooted chain via
+            // the sole-atom unpack that empty-selector `!pick` uses.
+            DynValue::Candle(c) => Ok(Snapshot::<String>::of_atom(c.into())),
+            DynValue::Atom(a) => Ok(Snapshot::<String>::of_atom(a)),
+            DynValue::Real(_) => Err(DynType::Real),
+            DynValue::Bool(_) => Err(DynType::Bool),
+            DynValue::Str(_) => Err(DynType::Str),
+            DynValue::Time(_) => Err(DynType::Time),
         }
     }
 }
@@ -222,6 +265,9 @@ impl TypeOf for Arc<str> {
 }
 impl TypeOf for Timestamp {
     const TYPE: DynType = DynType::Time;
+}
+impl TypeOf for Snapshot<String> {
+    const TYPE: DynType = DynType::Snapshot;
 }
 
 // ---------------------------------------------------------------------------
@@ -354,8 +400,15 @@ where
 /// recursive spec builder guarantees compatible types, so this is a hard bug
 /// if ever hit.
 pub fn chain(outer: Box<dyn DynIndicator>, inner: Box<dyn DynIndicator>) -> Box<dyn DynIndicator> {
+    // Compatible if the type tags match, or if we're crossing a well-defined
+    // lift boundary handled by `TryFrom<DynValue>`: `Candle → Atom` (raw
+    // candle to atom-with-no-overlays), `Atom → Snapshot` (single-entry
+    // untagged snapshot), or `Candle → Snapshot` (via the intermediate
+    // Atom lift, both encoded on `TryFrom<DynValue> for Snapshot<String>`).
     let ok = outer.output_type() == inner.input_type()
-        || (outer.output_type() == DynType::Candle && inner.input_type() == DynType::Atom);
+        || (outer.output_type() == DynType::Candle && inner.input_type() == DynType::Atom)
+        || (outer.output_type() == DynType::Atom && inner.input_type() == DynType::Snapshot)
+        || (outer.output_type() == DynType::Candle && inner.input_type() == DynType::Snapshot);
     assert!(
         ok,
         "chain: outer output type ({}) doesn't match inner input type ({})",
@@ -470,16 +523,20 @@ impl DynIndicator for UnstableWrap {
 
 // ---------------------------------------------------------------------------
 // Typed views: reconstitute a Box<dyn DynIndicator> as a library-typed
-// Indicator<Input=Atom, Output=X> so it can drop into library constructors
-// (Ema::new(source, period), IndicatorExt::gt(...), SingleAssetStrategy slots).
+// Indicator<Input=Snapshot<String>, Output=X> so it can drop into library
+// constructors (Ema::new(source, period), IndicatorExt::gt(...),
+// SingleAssetStrategy slots). The CLI's whole indicator chain is
+// snapshot-rooted — every atom-input leaf is wrapped in a `!pick` on parse,
+// so every DynIndicator in the tree consumes `Snapshot<String>`.
 // ---------------------------------------------------------------------------
 
 /// Views a `Box<dyn DynIndicator>` with `output_type == Real` as a library
-/// `Indicator<Input = Atom, Output = Real>` — the shape every source-side
-/// library constructor (Ema, Sma, arithmetic ops, comparisons, …) expects.
+/// `Indicator<Input = Snapshot<String>, Output = Real>` — the shape every
+/// source-side library constructor (Ema, Sma, arithmetic ops, comparisons, …)
+/// expects once the CLI's leaves have been rooted through `Pick`.
 ///
 /// # Panics
-/// [`new`](Self::new) panics if `inner.input_type() != Atom` or
+/// [`new`](Self::new) panics if `inner.input_type() != Snapshot` or
 /// `inner.output_type() != Real`; the recursive spec builder enforces both at
 /// construction, so the unwrap arms in `update`/`value` are unreachable in
 /// practice.
@@ -490,8 +547,8 @@ impl AsReal {
     pub fn new(inner: Box<dyn DynIndicator>) -> Self {
         assert_eq!(
             inner.input_type(),
-            DynType::Atom,
-            "AsReal requires an Atom-input DynIndicator"
+            DynType::Snapshot,
+            "AsReal requires a Snapshot-input DynIndicator"
         );
         assert_eq!(
             inner.output_type(),
@@ -503,10 +560,10 @@ impl AsReal {
 }
 
 impl Indicator for AsReal {
-    type Input = Atom;
+    type Input = Snapshot<String>;
     type Output = Real;
-    fn update(&mut self, atom: Atom) -> Option<Real> {
-        match self.0.update(DynValue::Atom(atom))? {
+    fn update(&mut self, snap: Snapshot<String>) -> Option<Real> {
+        match self.0.update(DynValue::Snapshot(snap))? {
             DynValue::Real(x) => Some(x),
             other => unreachable!("AsReal received {other:?} but was built for Real output"),
         }
@@ -529,11 +586,11 @@ impl Indicator for AsReal {
 }
 
 /// Views a `Box<dyn DynIndicator>` with `output_type == Bool` as a library
-/// `Indicator<Input = Atom, Output = bool>` — i.e. a
-/// [`Signal`](fugazi::Signal).
+/// `Indicator<Input = Snapshot<String>, Output = bool>` — i.e. a
+/// [`Signal<Snapshot<String>>`](fugazi::Signal).
 ///
 /// # Panics
-/// [`new`](Self::new) panics if `inner.input_type() != Atom` or
+/// [`new`](Self::new) panics if `inner.input_type() != Snapshot` or
 /// `inner.output_type() != Bool`.
 #[derive(Clone)]
 pub struct AsBool(Box<dyn DynIndicator>);
@@ -542,8 +599,8 @@ impl AsBool {
     pub fn new(inner: Box<dyn DynIndicator>) -> Self {
         assert_eq!(
             inner.input_type(),
-            DynType::Atom,
-            "AsBool requires an Atom-input DynIndicator"
+            DynType::Snapshot,
+            "AsBool requires a Snapshot-input DynIndicator"
         );
         assert_eq!(
             inner.output_type(),
@@ -555,10 +612,10 @@ impl AsBool {
 }
 
 impl Indicator for AsBool {
-    type Input = Atom;
+    type Input = Snapshot<String>;
     type Output = bool;
-    fn update(&mut self, atom: Atom) -> Option<bool> {
-        match self.0.update(DynValue::Atom(atom))? {
+    fn update(&mut self, snap: Snapshot<String>) -> Option<bool> {
+        match self.0.update(DynValue::Snapshot(snap))? {
             DynValue::Bool(b) => Some(b),
             other => unreachable!("AsBool received {other:?} but was built for Bool output"),
         }
@@ -581,12 +638,12 @@ impl Indicator for AsBool {
 }
 
 /// Views a `Box<dyn DynIndicator>` with `output_type == Candle` as a library
-/// `Indicator<Input = Atom, Output = Candle>` — the shape a bar indicator
-/// (`Atr`, `Adx`, `Obv`, …) expects as its `source` after the source-generic
-/// refactor.
+/// `Indicator<Input = Snapshot<String>, Output = Candle>` — the shape a bar
+/// indicator (`Atr`, `Adx`, `Obv`, …) expects as its `source` after the
+/// source-generic refactor.
 ///
 /// # Panics
-/// [`new`](Self::new) panics if `inner.input_type() != Atom` or
+/// [`new`](Self::new) panics if `inner.input_type() != Snapshot` or
 /// `inner.output_type() != Candle`.
 #[derive(Clone)]
 pub struct AsCandle(Box<dyn DynIndicator>);
@@ -595,8 +652,8 @@ impl AsCandle {
     pub fn new(inner: Box<dyn DynIndicator>) -> Self {
         assert_eq!(
             inner.input_type(),
-            DynType::Atom,
-            "AsCandle requires an Atom-input DynIndicator"
+            DynType::Snapshot,
+            "AsCandle requires a Snapshot-input DynIndicator"
         );
         assert_eq!(
             inner.output_type(),
@@ -608,10 +665,10 @@ impl AsCandle {
 }
 
 impl Indicator for AsCandle {
-    type Input = Atom;
+    type Input = Snapshot<String>;
     type Output = Candle;
-    fn update(&mut self, atom: Atom) -> Option<Candle> {
-        match self.0.update(DynValue::Atom(atom))? {
+    fn update(&mut self, snap: Snapshot<String>) -> Option<Candle> {
+        match self.0.update(DynValue::Snapshot(snap))? {
             DynValue::Candle(c) => Some(c),
             other => unreachable!("AsCandle received {other:?} but was built for Candle output"),
         }
@@ -633,13 +690,79 @@ impl Indicator for AsCandle {
     }
 }
 
+/// Views a `Box<dyn DynIndicator>` with `output_type == Atom` as a library
+/// `Indicator<Input = Snapshot<String>, Output = Atom>` — the atom-emitting
+/// bridge every source-generic atom-input leaf (`Close::of(source)`,
+/// `Year::of(source)`, `Atr::new(CurrentBar::of(source), period)`, …) uses.
+/// The typical concrete source is `Pick::<String>::new()` — the empty
+/// selector's `Snapshot::sole_atom` unpack — but any snapshot-rooted
+/// atom-emitting chain works.
+///
+/// Not currently constructed by the spec builder — every leaf that would
+/// want it (`!close`, `!year`, `!current`, …) already builds itself with
+/// `Pick::<String>::new()` baked in, so no intermediate `AsAtom` is
+/// needed. Kept for completeness so a future `!pick { symbol, freq }`
+/// SourceSpec variant can produce an atom-emitting DynIndicator and drop
+/// it into a downstream atom-consuming source via the same
+/// `AsX`-typed-view pattern the other three use.
+///
+/// # Panics
+/// [`new`](Self::new) panics if `inner.input_type() != Snapshot` or
+/// `inner.output_type() != Atom`.
+#[derive(Clone)]
+#[allow(dead_code)]
+pub struct AsAtom(Box<dyn DynIndicator>);
+
+#[allow(dead_code)]
+impl AsAtom {
+    pub fn new(inner: Box<dyn DynIndicator>) -> Self {
+        assert_eq!(
+            inner.input_type(),
+            DynType::Snapshot,
+            "AsAtom requires a Snapshot-input DynIndicator"
+        );
+        assert_eq!(
+            inner.output_type(),
+            DynType::Atom,
+            "AsAtom requires an Atom-output DynIndicator"
+        );
+        Self(inner)
+    }
+}
+
+impl Indicator for AsAtom {
+    type Input = Snapshot<String>;
+    type Output = Atom;
+    fn update(&mut self, snap: Snapshot<String>) -> Option<Atom> {
+        match self.0.update(DynValue::Snapshot(snap))? {
+            DynValue::Atom(a) => Some(a),
+            other => unreachable!("AsAtom received {other:?} but was built for Atom output"),
+        }
+    }
+    fn value(&self) -> Option<Atom> {
+        match self.0.value()? {
+            DynValue::Atom(a) => Some(a),
+            other => unreachable!("AsAtom held {other:?} but was built for Atom output"),
+        }
+    }
+    fn warm_up_period(&self) -> usize {
+        self.0.warm_up_period()
+    }
+    fn unstable_period(&self) -> usize {
+        self.0.unstable_period()
+    }
+    fn reset(&mut self) {
+        self.0.reset();
+    }
+}
+
 /// Views a `Box<dyn DynIndicator>` with `output_type == Str` as a library
-/// `Indicator<Input = Atom, Output = Arc<str>>` — the shape a
+/// `Indicator<Input = Snapshot<String>, Output = Arc<str>>` — the shape a
 /// [`StrEq`](fugazi::indicators::StrEq) or any other string-consuming
 /// combinator expects for its sources.
 ///
 /// # Panics
-/// [`new`](Self::new) panics if `inner.input_type() != Atom` or
+/// [`new`](Self::new) panics if `inner.input_type() != Snapshot` or
 /// `inner.output_type() != Str`.
 #[derive(Clone)]
 pub struct AsStr(Box<dyn DynIndicator>);
@@ -648,8 +771,8 @@ impl AsStr {
     pub fn new(inner: Box<dyn DynIndicator>) -> Self {
         assert_eq!(
             inner.input_type(),
-            DynType::Atom,
-            "AsStr requires an Atom-input DynIndicator"
+            DynType::Snapshot,
+            "AsStr requires a Snapshot-input DynIndicator"
         );
         assert_eq!(
             inner.output_type(),
@@ -661,10 +784,10 @@ impl AsStr {
 }
 
 impl Indicator for AsStr {
-    type Input = Atom;
+    type Input = Snapshot<String>;
     type Output = Arc<str>;
-    fn update(&mut self, atom: Atom) -> Option<Arc<str>> {
-        match self.0.update(DynValue::Atom(atom))? {
+    fn update(&mut self, snap: Snapshot<String>) -> Option<Arc<str>> {
+        match self.0.update(DynValue::Snapshot(snap))? {
             DynValue::Str(s) => Some(s),
             other => unreachable!("AsStr received {other:?} but was built for Str output"),
         }

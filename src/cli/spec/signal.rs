@@ -9,11 +9,21 @@ use serde::Deserialize;
 
 use fugazi::indicators::compare;
 use fugazi::indicators::logic::Const;
-use fugazi::indicators::{DEFAULT_EPSILON, GetBool, IsWeekday, IsWeekend, Position, ValueStr};
+use fugazi::indicators::{
+    DEFAULT_EPSILON, GetBool, IsWeekday, IsWeekend, Pick, Position, ValueStr,
+};
 use fugazi::prelude::*;
 
 use super::source::{SourceSpec, default_source};
 use crate::dyn_indicator::{self, AsBool, AsReal, AsStr, DynIndicator};
+
+/// Every atom-input leaf on the YAML side is built rooted through an
+/// empty-selector `Pick::<String>` — the single-entry snapshot unpack that
+/// makes existing single-series strategies keep working while multi-asset
+/// strategies opt in with an explicit `!pick { symbol: ... }` selector.
+fn pick_root() -> Pick<String> {
+    Pick::<String>::new()
+}
 
 // ---------------------------------------------------------------------------
 // Boolean signals
@@ -210,7 +220,7 @@ impl SignalSpec {
             Xor { lhs, rhs } => dyn_indicator::wrap(boolean(lhs).xor(boolean(rhs))),
             All(specs) => {
                 if specs.is_empty() {
-                    dyn_indicator::wrap(self::Const::<Atom>::new(true))
+                    dyn_indicator::wrap(self::Const::<fugazi::types::Snapshot<String>>::new(true))
                 } else {
                     let mut acc = AsBool::new(specs[0].build(anchor, schema));
                     for s in &specs[1..] {
@@ -225,7 +235,7 @@ impl SignalSpec {
             }
             Any(specs) => {
                 if specs.is_empty() {
-                    dyn_indicator::wrap(self::Const::<Atom>::new(false))
+                    dyn_indicator::wrap(self::Const::<fugazi::types::Snapshot<String>>::new(false))
                 } else {
                     let mut acc = AsBool::new(specs[0].build(anchor, schema));
                     for s in &specs[1..] {
@@ -238,21 +248,23 @@ impl SignalSpec {
             Not(inner) => dyn_indicator::wrap(boolean(inner).not()),
             Changed(inner) => dyn_indicator::wrap(boolean(inner).changed()),
             Unstable { signal } => dyn_indicator::unstable_wrap(signal.build(anchor, schema)),
-            Value(b) => dyn_indicator::wrap(self::Const::<Atom>::new(*b)),
+            Value(b) => {
+                dyn_indicator::wrap(self::Const::<fugazi::types::Snapshot<String>>::new(*b))
+            }
             Get { key } => build_signal_get(schema, key),
             StrEq { lhs, rhs } => {
                 let lhs = AsStr::new(lhs.build(anchor, schema));
-                let rhs: ValueStr<Atom> = ValueStr::new(rhs.as_str());
+                let rhs: ValueStr<fugazi::types::Snapshot<String>> = ValueStr::new(rhs.as_str());
                 dyn_indicator::wrap(compare::StrEq::new(lhs, rhs))
             }
             StrNe { lhs, rhs } => {
                 let lhs = AsStr::new(lhs.build(anchor, schema));
-                let rhs: ValueStr<Atom> = ValueStr::new(rhs.as_str());
+                let rhs: ValueStr<fugazi::types::Snapshot<String>> = ValueStr::new(rhs.as_str());
                 dyn_indicator::wrap(compare::StrNe::new(lhs, rhs))
             }
 
-            IsWeekday => dyn_indicator::wrap(self::IsWeekday::new()),
-            IsWeekend => dyn_indicator::wrap(self::IsWeekend::new()),
+            IsWeekday => dyn_indicator::wrap(self::IsWeekday::of(pick_root())),
+            IsWeekend => dyn_indicator::wrap(self::IsWeekend::of(pick_root())),
         }
     }
 }
@@ -265,7 +277,7 @@ impl SignalSpec {
 /// as the source-side `!get`.
 fn build_signal_get(schema: &Arc<Schema>, key: &str) -> Box<dyn DynIndicator> {
     match schema.type_of_key(key) {
-        Some(OverlayType::Bool) => dyn_indicator::wrap(GetBool::new(schema, key)),
+        Some(OverlayType::Bool) => dyn_indicator::wrap(GetBool::of(schema, key, pick_root())),
         Some(OverlayType::Real) => panic!(
             "!get {{ key: {key:?} }} in signal position: column is Real, but a signal must be \
              Bool. Use a comparison like `!gt {{ lhs: !get {{ key: {key:?} }}, rhs: ... }}` \

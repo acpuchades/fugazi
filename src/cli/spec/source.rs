@@ -7,16 +7,30 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
+// Field / calendar / current-bar / current-time leaves are referenced through
+// their full `fugazi::indicators::` paths inside the `SourceSpec::build`
+// match arms — the source-spec variants share those names (Close, High, Year,
+// …) as enum-variant identifiers, so a bare `Close::of(...)` would try to
+// resolve on the enum variant. The `Pick` root is the one exception because
+// it isn't a `SourceSpec` variant.
 use fugazi::indicators::{
-    Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Component, Current,
-    CurrentTime, Day, DayOfWeek, DayOfYear, Dmi, DmiValue, Donchian, DonchianValue, Ema, GetBool,
-    GetReal, GetStr, Hma, Hour, Keltner, KeltnerValue, Latch, Macd, MacdValue, Mfi, Minute, Month,
-    Obv, Position, Quarter, Resample, Rma, Rsi, Sar, Second, Sma, StdDev, StochRsi, Stochastic,
-    TrueRange, UnixMillis, UnixSeconds, Value, Vwap, WeekOfYear, WilliamsR, Wma, Year,
+    Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Component, Dmi,
+    DmiValue, Donchian, DonchianValue, Ema, GetBool, GetReal, GetStr, Hma, Keltner, KeltnerValue,
+    Latch, Macd, MacdValue, Mfi, Obv, Pick, Position, Resample, Rma, Rsi, Sar, Sma, StdDev,
+    StochRsi, Stochastic, TrueRange, Value, Vwap, WilliamsR, Wma,
 };
 use fugazi::prelude::*;
+use fugazi::types::Snapshot;
 
 use crate::dyn_indicator::{self, AsCandle, AsReal, DynIndicator};
+
+/// Every atom-input leaf on the YAML side is built rooted through an
+/// empty-selector `Pick::<String>` — the single-entry snapshot unpack that
+/// keeps existing single-series strategies working while multi-asset ones opt
+/// in with an explicit `!pick { symbol: ... }`.
+fn pick_root() -> Pick<String> {
+    Pick::<String>::new()
+}
 
 pub(super) fn default_source() -> Box<SourceSpec> {
     Box::new(SourceSpec::Close)
@@ -436,18 +450,18 @@ impl SourceSpec {
         let candle = |s: &SourceSpec| AsCandle::new(s.build(anchor, schema));
 
         match self {
-            Close => dyn_indicator::wrap(self::Current::close()),
-            High => dyn_indicator::wrap(self::Current::high()),
-            Low => dyn_indicator::wrap(self::Current::low()),
-            Open => dyn_indicator::wrap(self::Current::open()),
-            Volume => dyn_indicator::wrap(self::Current::volume()),
-            Typical => dyn_indicator::wrap(self::Current::typical()),
-            Median => dyn_indicator::wrap(self::Current::median()),
-            Current => dyn_indicator::wrap(self::Current::candle()),
-            Value(x) => dyn_indicator::wrap(self::Value::<Atom>::new(*x)),
-            Entry => dyn_indicator::wrap(anchor.entry()),
-            Peak => dyn_indicator::wrap(anchor.peak()),
-            Trough => dyn_indicator::wrap(anchor.trough()),
+            Close => dyn_indicator::wrap(fugazi::indicators::Close::of(pick_root())),
+            High => dyn_indicator::wrap(fugazi::indicators::High::of(pick_root())),
+            Low => dyn_indicator::wrap(fugazi::indicators::Low::of(pick_root())),
+            Open => dyn_indicator::wrap(fugazi::indicators::Open::of(pick_root())),
+            Volume => dyn_indicator::wrap(fugazi::indicators::Volume::of(pick_root())),
+            Typical => dyn_indicator::wrap(fugazi::indicators::Typical::of(pick_root())),
+            Median => dyn_indicator::wrap(fugazi::indicators::Median::of(pick_root())),
+            Current => dyn_indicator::wrap(fugazi::indicators::CurrentBar::of(pick_root())),
+            Value(x) => dyn_indicator::wrap(self::Value::<Snapshot<String>>::new(*x)),
+            Entry => dyn_indicator::wrap(anchor.entry::<Snapshot<String>>()),
+            Peak => dyn_indicator::wrap(anchor.peak::<Snapshot<String>>()),
+            Trough => dyn_indicator::wrap(anchor.trough::<Snapshot<String>>()),
             Get { key } => build_get(schema, key),
 
             Ema { source, period } => dyn_indicator::wrap(self::Ema::new(real(source), *period)),
@@ -653,19 +667,19 @@ impl SourceSpec {
             }
             Unstable { source } => dyn_indicator::unstable_wrap(source.build(anchor, schema)),
 
-            Year => dyn_indicator::wrap(self::Year::new()),
-            Month => dyn_indicator::wrap(self::Month::new()),
-            Day => dyn_indicator::wrap(self::Day::new()),
-            Hour => dyn_indicator::wrap(self::Hour::new()),
-            Minute => dyn_indicator::wrap(self::Minute::new()),
-            Second => dyn_indicator::wrap(self::Second::new()),
-            DayOfWeek => dyn_indicator::wrap(self::DayOfWeek::new()),
-            DayOfYear => dyn_indicator::wrap(self::DayOfYear::new()),
-            WeekOfYear => dyn_indicator::wrap(self::WeekOfYear::new()),
-            Quarter => dyn_indicator::wrap(self::Quarter::new()),
-            UnixSeconds => dyn_indicator::wrap(self::UnixSeconds::new()),
-            UnixMillis => dyn_indicator::wrap(self::UnixMillis::new()),
-            Time => dyn_indicator::wrap(self::CurrentTime::new()),
+            Year => dyn_indicator::wrap(fugazi::indicators::Year::of(pick_root())),
+            Month => dyn_indicator::wrap(fugazi::indicators::Month::of(pick_root())),
+            Day => dyn_indicator::wrap(fugazi::indicators::Day::of(pick_root())),
+            Hour => dyn_indicator::wrap(fugazi::indicators::Hour::of(pick_root())),
+            Minute => dyn_indicator::wrap(fugazi::indicators::Minute::of(pick_root())),
+            Second => dyn_indicator::wrap(fugazi::indicators::Second::of(pick_root())),
+            DayOfWeek => dyn_indicator::wrap(fugazi::indicators::DayOfWeek::of(pick_root())),
+            DayOfYear => dyn_indicator::wrap(fugazi::indicators::DayOfYear::of(pick_root())),
+            WeekOfYear => dyn_indicator::wrap(fugazi::indicators::WeekOfYear::of(pick_root())),
+            Quarter => dyn_indicator::wrap(fugazi::indicators::Quarter::of(pick_root())),
+            UnixSeconds => dyn_indicator::wrap(fugazi::indicators::UnixSeconds::of(pick_root())),
+            UnixMillis => dyn_indicator::wrap(fugazi::indicators::UnixMillis::of(pick_root())),
+            Time => dyn_indicator::wrap(fugazi::indicators::CurrentTime::of(pick_root())),
         }
     }
 }
@@ -681,9 +695,9 @@ impl SourceSpec {
 /// from the non-empty case ("registered: a, b, c").
 fn build_get(schema: &Arc<Schema>, key: &str) -> Box<dyn DynIndicator> {
     match schema.type_of_key(key) {
-        Some(OverlayType::Real) => dyn_indicator::wrap(GetReal::new(schema, key)),
-        Some(OverlayType::Bool) => dyn_indicator::wrap(GetBool::new(schema, key)),
-        Some(OverlayType::Str) => dyn_indicator::wrap(GetStr::new(schema, key)),
+        Some(OverlayType::Real) => dyn_indicator::wrap(GetReal::of(schema, key, pick_root())),
+        Some(OverlayType::Bool) => dyn_indicator::wrap(GetBool::of(schema, key, pick_root())),
+        Some(OverlayType::Str) => dyn_indicator::wrap(GetStr::of(schema, key, pick_root())),
         None => {
             let registered: Vec<&str> = schema.keys().collect();
             if registered.is_empty() {

@@ -35,14 +35,22 @@ mod tests {
     use crate::dyn_indicator::{DynIndicator, DynValue as Payload};
     use fugazi::indicators::{Current, Ema, Position};
     use fugazi::prelude::*;
+    use fugazi::types::Snapshot;
 
     fn bar(close: Real) -> Candle {
         Candle::new(close, close, close, close, 0.0)
     }
 
+    /// Wrap a candle into the single-entry `Snapshot<String>` the CLI's
+    /// built DynIndicators consume — the same shape the CLI driver feeds
+    /// end-to-end via `!pick`-rooted leaves.
+    fn snap(c: Candle) -> Snapshot<String> {
+        Snapshot::<String>::of_atom(c.into())
+    }
+
     /// Feed a `Box<dyn DynIndicator>` a candle and unwrap the payload as `Real`.
     fn feed_real(source: &mut Box<dyn DynIndicator>, c: Candle) -> Option<Real> {
-        match source.update(Payload::Atom(c.into()))? {
+        match source.update(Payload::Snapshot(snap(c)))? {
             Payload::Real(x) => Some(x),
             other => panic!("expected Real payload, got {other:?}"),
         }
@@ -50,7 +58,7 @@ mod tests {
 
     /// Feed and unwrap as `bool` — for signal-side tests.
     fn feed_bool(source: &mut Box<dyn DynIndicator>, c: Candle) -> Option<bool> {
-        match source.update(Payload::Atom(c.into()))? {
+        match source.update(Payload::Snapshot(snap(c)))? {
             Payload::Bool(b) => Some(b),
             other => panic!("expected Bool payload, got {other:?}"),
         }
@@ -135,7 +143,7 @@ mod tests {
             for fill in w.update("BTC".to_string(), c) {
                 strat.on_fill(&fill);
             }
-            strat.update(c.into());
+            strat.update(snap(c));
             strat.trade(&mut w);
         }
         assert!(w.positions().next().is_none());
@@ -287,7 +295,7 @@ mod tests {
 
         let ov = OverlayInfo::new(schema.clone(), vec![OverlayValue::Real(0.42)]);
         let atom = Atom::with_overlays(bar(100.0), ov);
-        assert_eq!(built.update(Payload::Atom(atom)), Some(Payload::Real(0.42)));
+        assert_eq!(built.update(Payload::Snapshot(Snapshot::of_atom(atom.clone()))), Some(Payload::Real(0.42)));
     }
 
     #[test]
@@ -304,7 +312,7 @@ mod tests {
 
         let ov = OverlayInfo::new(schema.clone(), vec![OverlayValue::Bool(true)]);
         let atom = Atom::with_overlays(bar(100.0), ov);
-        assert_eq!(built.update(Payload::Atom(atom)), Some(Payload::Bool(true)));
+        assert_eq!(built.update(Payload::Snapshot(Snapshot::of_atom(atom.clone()))), Some(Payload::Bool(true)));
     }
 
     #[test]
@@ -331,11 +339,11 @@ mod tests {
             vec![OverlayValue::Str(std::sync::Arc::from("bear"))],
         );
         assert_eq!(
-            built.update(Payload::Atom(Atom::with_overlays(bar(100.0), bull))),
+            built.update(Payload::Snapshot(Snapshot::of_atom(Atom::with_overlays(bar(100.0), bull)))),
             Some(Payload::Bool(true)),
         );
         assert_eq!(
-            built.update(Payload::Atom(Atom::with_overlays(bar(100.0), bear))),
+            built.update(Payload::Snapshot(Snapshot::of_atom(Atom::with_overlays(bar(100.0), bear)))),
             Some(Payload::Bool(false)),
         );
     }
@@ -404,7 +412,7 @@ mod tests {
             let mut built = spec.build(&Position::new(), &Schema::empty());
             assert_eq!(built.output_type(), DynType::Real, "{yaml}: output type");
             assert_eq!(
-                built.update(Payload::Atom(atom.clone())),
+                built.update(Payload::Snapshot(Snapshot::of_atom(atom.clone()))),
                 Some(Payload::Real(want)),
                 "{yaml}: value on 2024-03-15 12:34:56 UTC",
             );
@@ -415,7 +423,7 @@ mod tests {
         let mut built = spec.build(&Position::new(), &Schema::empty());
         assert_eq!(built.output_type(), DynType::Time);
         assert_eq!(
-            built.update(Payload::Atom(atom.clone())),
+            built.update(Payload::Snapshot(Snapshot::of_atom(atom.clone()))),
             Some(Payload::Time(Timestamp(1_710_506_096_000))),
         );
     }
@@ -432,19 +440,19 @@ mod tests {
             .unwrap()
             .build(&Position::new(), &Schema::empty());
         assert_eq!(
-            wd.update(Payload::Atom(fri.clone())),
+            wd.update(Payload::Snapshot(Snapshot::of_atom(fri.clone()))),
             Some(Payload::Bool(true)),
         );
         assert_eq!(
-            wd.update(Payload::Atom(sat.clone())),
+            wd.update(Payload::Snapshot(Snapshot::of_atom(sat.clone()))),
             Some(Payload::Bool(false)),
         );
 
         let mut we = serde_norway::from_str::<SignalSpec>("is_weekend")
             .unwrap()
             .build(&Position::new(), &Schema::empty());
-        assert_eq!(we.update(Payload::Atom(fri)), Some(Payload::Bool(false)));
-        assert_eq!(we.update(Payload::Atom(sat)), Some(Payload::Bool(true)));
+        assert_eq!(we.update(Payload::Snapshot(Snapshot::of_atom(fri.clone()))), Some(Payload::Bool(false)));
+        assert_eq!(we.update(Payload::Snapshot(Snapshot::of_atom(sat.clone()))), Some(Payload::Bool(true)));
     }
 
     #[test]
@@ -453,7 +461,7 @@ mod tests {
         // shape as a not-yet-warm indicator.
         let spec: SourceSpec = serde_norway::from_str("year").unwrap();
         let mut built = spec.build(&Position::new(), &Schema::empty());
-        assert_eq!(built.update(Payload::Atom(bar(1.0).into())), None);
+        assert_eq!(built.update(Payload::Snapshot(Snapshot::of_atom(bar(1.0).into()))), None);
     }
 
     #[test]

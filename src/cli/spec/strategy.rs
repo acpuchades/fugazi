@@ -52,7 +52,9 @@ impl SideSpec {
         self.exit
             .as_ref()
             .map(|s| s.build(anchor, schema))
-            .unwrap_or_else(|| dyn_indicator::wrap(Const::<Atom>::new(false)))
+            .unwrap_or_else(|| {
+                dyn_indicator::wrap(Const::<fugazi::types::Snapshot<String>>::new(false))
+            })
     }
 }
 
@@ -159,11 +161,11 @@ pub struct DynSingleStrategy {
 }
 
 impl Strategy for DynSingleStrategy {
-    type Input = Atom;
+    type Input = fugazi::types::Snapshot<String>;
     type Symbol = String;
 
-    fn update(&mut self, atom: Atom) {
-        self.inner.update(atom);
+    fn update(&mut self, snap: fugazi::types::Snapshot<String>) {
+        self.inner.update(snap);
     }
     fn on_fill(&mut self, order: &Order<String>) {
         self.inner.on_fill(order);
