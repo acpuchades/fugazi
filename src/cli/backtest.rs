@@ -237,7 +237,7 @@ pub fn run_iteration_pairs(
         })
         .collect();
     run_iteration_core(
-        || spec.build(&schema),
+        || spec.build(inputs.cash, &schema),
         &snapshots,
         bars.to_vec(),
         costs,

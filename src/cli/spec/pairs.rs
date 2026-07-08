@@ -104,27 +104,30 @@ impl PairsStrategySpec {
 
     /// Build the live [`DynPairsStrategy`] this spec describes.
     ///
+    /// `initial_equity` seeds the pair's [`Book`] anchor — match the
+    /// wallet's starting cash for the book-anchored sizing recipes
+    /// (`!drawdown_throttle`, `!equity_vol_target`, `!fractional_kelly`)
+    /// to read meaningful numbers. The CLI threads `--cash` through to
+    /// this parameter.
+    ///
     /// `schema` is the overlay [`Schema`] the atom stream carries — the
     /// `!get`-shaped leaves resolve their column names + types against it at
     /// build time. Level expressions that reference the strategy's `Position`
     /// (`entry` / `peak` / `trough`) anchor on the **left** leg — a rare choice
     /// since a spread-based level typically doesn't need the per-leg entry
     /// price, but present for symmetry with [`super::StrategySpec`].
-    ///
-    /// [`PairsStrategy`] does not own a [`Book`] anchor. Book-anchored
-    /// sizing tags (`!drawdown_throttle`, `!equity_vol_target`,
-    /// `!fractional_kelly`) build against a *dummy* book that never
-    /// updates — every recipe on it either sits at its neutral value
-    /// (drawdown_throttle stays at `1.0`) or emits `None` forever
-    /// (equity_vol_target / fractional_kelly). Use the pair's price-based
-    /// sizing helpers (`!vol_target`, `!atr_risk`) instead.
-    pub fn build(&self, schema: &Arc<Schema>) -> DynPairsStrategy {
-        let strat = PairsStrategy::new(self.left.clone(), self.right.clone());
+    pub fn build(&self, initial_equity: Real, schema: &Arc<Schema>) -> DynPairsStrategy {
+        let strat = PairsStrategy::with_initial_equity(
+            self.left.clone(),
+            self.right.clone(),
+            initial_equity,
+        );
         // Anchor level expressions on the left leg's position (see doc note).
         let anchor = strat.left_position();
-        // Dummy Book — never updated; book-anchored recipes on a pair are
-        // effectively no-ops (see doc note).
-        let book = Book::new(1.0);
+        // Real Book shared with the strategy — book-anchored sizing tags
+        // (`!drawdown_throttle`, `!equity_vol_target`, `!fractional_kelly`)
+        // read the pair's aggregate equity curve.
+        let book = strat.book();
         let enter = AsBool::new(self.enter.build(&anchor, &book, schema));
         let exit = AsBool::new(self.exit(&anchor, &book, schema));
         let mut strat = strat.on(enter, exit);
@@ -203,7 +206,7 @@ mod tests {
         assert_eq!(spec.right, "ETH");
         assert!(spec.stop_loss.is_some());
         assert!(spec.take_profit.is_some());
-        let _built = spec.build(&Schema::empty());
+        let _built = spec.build(1_000.0, &Schema::empty());
     }
 
     #[test]
@@ -219,6 +222,25 @@ mod tests {
         )
         .unwrap();
         assert!(spec.exit.is_none() && spec.stop_loss.is_none() && spec.take_profit.is_none());
-        let _built = spec.build(&Schema::empty());
+        let _built = spec.build(1_000.0, &Schema::empty());
+    }
+
+    #[test]
+    fn parses_pairs_spec_with_book_anchored_sizing() {
+        // Verify that a book-anchored recipe (drawdown_throttle) parses and
+        // builds against a real pair Book (not the dummy that used to be there).
+        let yaml = r#"
+            left: BTC
+            right: ETH
+            enter: !value true
+            sizing: !drawdown_throttle { max_drawdown: 0.20 }
+        "#;
+        let spec = PairsStrategySpec::from_text_with_params(
+            yaml,
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
+        assert!(spec.sizing.is_some());
+        let _built = spec.build(10_000.0, &Schema::empty());
     }
 }
