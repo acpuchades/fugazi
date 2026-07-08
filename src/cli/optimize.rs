@@ -10,7 +10,10 @@
 //!
 //! Output is one `;`-delimited CSV file (`-o/--output`) with one row per grid
 //! point: axis columns first (in declaration order), then one column per
-//! `-m/--metrics` name. Rows are sorted by `--best-by` when it's set (descending
+//! `-m/--metrics` name — or, when `-m` is omitted, one column per metric in the
+//! whole catalogue. Column headers are the canonical dotted path (`sharpe` on
+//! the command line still lands under `risk_adjusted.sharpe`). Rows are sorted
+//! by `--best-by` when it's set (descending
 //! for max-oriented metrics like `sharpe`, ascending for min-oriented ones like
 //! `max_pct`); otherwise the row order follows the cartesian enumeration.
 //!
@@ -148,6 +151,11 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
         .transpose()
         .context("resolving `-w/--windowed`")?;
 
+    let seconds_per_bar = opts
+        .asset_class
+        .zip(effective_freq)
+        .map(|(class, freq)| class.trading_seconds_per_bar(freq));
+
     let sweep = optimize(
         &base_value,
         fixed,
@@ -159,6 +167,7 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
         opts.cost_config,
         effective_freq,
         windowed_bars,
+        seconds_per_bar,
         &opts.metrics,
         opts.best_by.as_deref(),
         opts.risk_aversion,
@@ -210,6 +219,7 @@ pub(crate) fn optimize(
     cost_config: &CostConfig,
     frequency: Option<Frequency>,
     windowed: Option<NonZeroUsize>,
+    seconds_per_bar: Option<Real>,
     metric_names: &[String],
     best_by: Option<&str>,
     risk_aversion: Real,
@@ -237,16 +247,28 @@ pub(crate) fn optimize(
         risk_free_rate,
         cost_config,
         frequency,
+        seconds_per_bar,
     );
 
     // Resolve column paths once — errors here catch typos before the sweep.
-    let metric_columns: Vec<(String, String)> = metric_names
-        .iter()
-        .map(|name| {
-            let (path, _) = metrics::resolve_metric(name, &first_metrics)?;
-            Ok::<_, anyhow::Error>((name.clone(), path))
-        })
-        .collect::<Result<Vec<_>>>()?;
+    // An empty `-m/--metrics` defaults to the whole catalogue (one column per
+    // `metrics::flatten` leaf). Columns are always the canonical dotted path, so
+    // the header carries the section prefix even when the user matched a metric
+    // by its short leaf name (`-m sharpe` → column `risk_adjusted.sharpe`).
+    let metric_columns: Vec<(String, String)> = if metric_names.is_empty() {
+        metrics::flatten(&first_metrics)
+            .into_iter()
+            .map(|(path, _)| (path.to_string(), path.to_string()))
+            .collect()
+    } else {
+        metric_names
+            .iter()
+            .map(|name| {
+                let (path, _) = metrics::resolve_metric(name, &first_metrics)?;
+                Ok::<_, anyhow::Error>((path.clone(), path))
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
 
     let best_by = best_by
         .map(|name| {
@@ -258,7 +280,7 @@ pub(crate) fn optimize(
                      ulcer_index, annualized_volatility_pct)"
                 )
             })?;
-            Ok::<_, anyhow::Error>((name.to_string(), path, direction))
+            Ok::<_, anyhow::Error>((path.clone(), path, direction))
         })
         .transpose()?;
 
@@ -290,6 +312,7 @@ pub(crate) fn optimize(
                 cost_config,
                 frequency,
                 w,
+                seconds_per_bar,
             )),
             None => Evaluation::Whole(Box::new(backtest::evaluate(
                 spec,
@@ -299,6 +322,7 @@ pub(crate) fn optimize(
                 risk_free_rate,
                 cost_config,
                 frequency,
+                seconds_per_bar,
             ))),
         }
     };
@@ -1071,7 +1095,7 @@ mod tests {
             fills: vec![],
             initial_equity: 100.0,
         };
-        let windows = metrics::windowed_from_report(&report, 2, 252.0, 0.0);
+        let windows = metrics::windowed_from_report(&report, 2, 252.0, 0.0, None);
         assert_eq!(windows.len(), 2);
 
         let (mean, std) = lookup_windowed(&windows, "returns.total_pct").unwrap();
@@ -1191,7 +1215,7 @@ mod tests {
             fills: vec![],
             initial_equity: 100.0,
         };
-        let base = metrics::from_report(&report, 252.0, 0.0);
+        let base = metrics::from_report(&report, 252.0, 0.0, None);
 
         for &n in &[1_000_usize, 10_000, 50_000] {
             let make_rows = || -> Vec<Row> {
@@ -1271,7 +1295,7 @@ mod tests {
             fills: vec![],
             initial_equity: 100.0,
         };
-        let base = metrics::from_report(&report, 252.0, 0.0);
+        let base = metrics::from_report(&report, 252.0, 0.0, None);
 
         let cols = [
             "risk_adjusted.sharpe",

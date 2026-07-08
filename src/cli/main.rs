@@ -312,9 +312,10 @@ struct OptimizeArgs {
     /// The metrics to record for each grid point, as one CSV column each.
     /// Names are short leaf keys when unambiguous (`sharpe`, `max_pct`,
     /// `cagr_pct`) or dotted paths (`risk_adjusted.sharpe`,
-    /// `drawdown.max_pct`) — see `metrics.yml` for the full catalogue.
-    /// `,`-separated, repeatable.
-    #[arg(short = 'm', long = "metrics", value_delimiter = ',', required = true)]
+    /// `drawdown.max_pct`) — see `metrics.yml` for the full catalogue. Column
+    /// headers are always the canonical dotted path. Omit to emit every metric
+    /// in the catalogue as its own column. `,`-separated, repeatable.
+    #[arg(short = 'm', long = "metrics", value_delimiter = ',')]
     metrics: Vec<String>,
 
     /// Sort the output CSV (and print the winner) by this metric. Direction is

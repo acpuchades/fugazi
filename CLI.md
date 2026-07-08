@@ -225,7 +225,7 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
 | `<STRATEGY>` | Positional. `@file.yml` or inline YAML. Same shape as `run`. |
 | `-s`, `--series <SPEC>` | Data series. Repeatable. See [--series](#--series). |
 | `-p`, `--params <SPEC>` | Baseline params **and** sweep-axis declarations. See [Sweep axes](#sweep-axes). Repeatable. |
-| `-m`, `--metrics <NAMES>` | Metric columns to record. Comma-separated, repeatable. Short leaf names (`sharpe`, `max_pct`) or dotted paths (`risk_adjusted.sharpe`) — see the [Metrics catalogue](#metrics-catalogue). |
+| `-m`, `--metrics <NAMES>` | Metric columns to record. Comma-separated, repeatable. Short leaf names (`sharpe`, `max_pct`) or dotted paths (`risk_adjusted.sharpe`) — see the [Metrics catalogue](#metrics-catalogue). Column headers are always the canonical dotted path. **Optional** — omit to emit every catalogue metric as its own column. |
 | `-o`, `--output <FILE>` | Output CSV path. Parent directories are created if missing. |
 | `--best-by <METRIC>` | Sort rows by this metric (direction hardcoded per metric — see [Best-by directions](#best-by-directions)). Omit to keep cartesian order and skip the "best" console block. |
 | `-w`, `--windowed <LEN>` | Evaluate each grid point in non-overlapping windows of `LEN`: every `-m` metric becomes two CSV columns (`<name>_mean` / `<name>_std`) and `--best-by` ranks by the windowed mean. Same `LEN` shape as `run -w` — a bar count (`10`, `252`) or a duration (`1d`, `1w`, `1M`); the duration form requires `--stocks`/`--forex`/`--crypto` and a resolvable bar cadence. See [Windowed metrics](#windowed-metrics). |
@@ -986,8 +986,9 @@ plotting artefact, not an uncertainty estimate.
 One row per grid point:
 
 - **Axis columns** (sorted by axis name, in the order declared).
-- **Metric columns** (in `-m` declaration order — the header uses the
-  user-typed name, not the resolved dotted path). Under
+- **Metric columns** (in `-m` declaration order, or catalogue order when
+  `-m` is omitted — the header is always the canonical dotted path, so
+  `-m sharpe` lands under `risk_adjusted.sharpe`). Under
   [`-w/--windowed`](#windowed-metrics), each metric becomes two columns —
   `<name>_mean` and `<name>_std`, its cross-window mean and population
   standard deviation over the windows where it is defined.
@@ -1072,7 +1073,8 @@ positions.
 | `exposure_pct` | Percentage of bars a non-zero position was held. |
 | `win_rate_pct` / `profit_factor` / `payoff_ratio` / `expectancy` / `kelly_fraction` | Round-trip PnL ratios. |
 | `average_win` / `average_loss` / `largest_win` / `largest_loss` / `average_return_pct` | Per-trade PnL. |
-| `average_bars` / `min_bars` / `max_bars` | Per-trade duration. |
+| `average_bars` / `min_bars` / `max_bars` | Per-trade duration in bar counts. |
+| `average_seconds` / `min_seconds` / `max_seconds` | Same in trading seconds — the `_bars` figures scaled by `trading_seconds_per_bar(class, freq)`. Populated only when both an asset-class shortcut (`--stocks`/`--forex`/`--crypto`) and a bar cadence are known; omitted otherwise. Divide by 3600 for hours, 86400 for days. |
 
 ### `costs` — cost aggregates
 

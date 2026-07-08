@@ -129,6 +129,10 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
         })
         .transpose()
         .context("resolving `-w/--windowed`")?;
+    let seconds_per_bar = opts
+        .asset_class
+        .zip(effective_freq)
+        .map(|(class, freq)| class.trading_seconds_per_bar(freq));
     let inputs = IterationInputs {
         cash: opts.cash,
         bars_per_year,
@@ -136,6 +140,7 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
         cost_config: opts.cost_config,
         effective_freq,
         windowed: windowed_bars,
+        seconds_per_bar,
     };
     // Print the inputs block up front so a long-running run still shows the
     // user what they asked for while it's working.
@@ -185,7 +190,12 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
     let finished = SystemTime::now();
     if !opts.quiet {
         print_result_block(opts, &summary, started, finished);
-        print_metrics_block(&iter.metrics, None, iter.gross_metrics.as_ref());
+        print_metrics_block(
+            &iter.metrics,
+            None,
+            iter.gross_metrics.as_ref(),
+            effective_freq,
+        );
         if let Some(windows) = iter.windowed.as_deref() {
             print_windowed_metrics_block(windows);
         }
@@ -429,11 +439,14 @@ fn print_result_block(opts: &RunOptions, s: &Summary, started: SystemTime, finis
 
 /// The "metrics" block: a compact summary of `metrics.yml`'s headline
 /// figures. When `gross` is set (a costed run), decision-relevant rows also
-/// print their gross twin so the cost drag is one line away.
+/// print their gross twin so the cost drag is one line away. When
+/// `bar_freq` is known, the `holding` line prints each bar count with a
+/// duration twin in the bar cadence's own unit alphabet (`21d`, `4h`).
 fn print_metrics_block(
     m: &metrics::Metrics,
     measured: Option<&str>,
     gross: Option<&metrics::Metrics>,
+    bar_freq: Option<Frequency>,
 ) {
     println!("\n{}", style::bold("metrics"));
     if let Some(measured) = measured {
@@ -477,6 +490,52 @@ fn print_metrics_block(
             format_ratio(m.trades.profit_factor),
         ),
     );
+    if let Some(text) = format_holding_line(m, bar_freq) {
+        print_field("holding", &text);
+    }
+}
+
+/// Compose the `holding` line: `avg N bars (~Xu) · min N (~Xu) · max N (~Xu)`,
+/// the duration twin dropped when `bar_freq` is unknown. `None` when the run
+/// booked no trades (all three legs are absent).
+fn format_holding_line(m: &metrics::Metrics, bar_freq: Option<Frequency>) -> Option<String> {
+    let avg = m.trades.average_bars;
+    let min = m.trades.min_bars.map(|n| n as Real);
+    let max = m.trades.max_bars.map(|n| n as Real);
+    if avg.is_none() && min.is_none() && max.is_none() {
+        return None;
+    }
+    let leg = |label: &str, bars: Option<Real>, precision: usize| -> Option<String> {
+        let bars = bars?;
+        let dur = bar_freq
+            .map(|f| format!(" (~{})", format_bars_as_duration(bars, f)))
+            .unwrap_or_default();
+        Some(format!("{label} {bars:.*} bars{dur}", precision))
+    };
+    let parts: Vec<String> = [leg("avg", avg, 1), leg("min", min, 0), leg("max", max, 0)]
+        .into_iter()
+        .flatten()
+        .collect();
+    Some(parts.join(" · "))
+}
+
+/// Render `bars` bars of `freq` cadence as a duration in the cadence's own
+/// unit alphabet (`21d`, `4h`, `26h` — `Frequency::from_str`-compatible for
+/// integer counts). Fractional averages carry one decimal.
+fn format_bars_as_duration(bars: Real, freq: Frequency) -> String {
+    let (mult, letter) = match freq {
+        Frequency::Minute(n) => (n, "m"),
+        Frequency::Hour(n) => (n, "h"),
+        Frequency::Day(n) => (n, "d"),
+        Frequency::Week(n) => (n, "w"),
+        Frequency::Month(n) => (n, "M"),
+    };
+    let total = bars * mult as Real;
+    if (total - total.round()).abs() < 1e-6 {
+        format!("{total:.0}{letter}")
+    } else {
+        format!("{total:.1}{letter}")
+    }
 }
 
 fn format_ratio(v: Option<Real>) -> String {

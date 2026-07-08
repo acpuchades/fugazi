@@ -74,6 +74,7 @@ fn schema_from_atoms(atoms: &[(String, Atom)]) -> std::sync::Arc<Schema> {
 /// wallet with `cash` starting funds, the given `cost_config` resolved for
 /// (spec's symbol, `frequency`), and reduce the run to a [`metrics::Metrics`]
 /// document. The shape `optimize` calls per grid combination.
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate(
     spec: &StrategySpec,
     atoms: &[(String, Atom)],
@@ -82,10 +83,11 @@ pub fn evaluate(
     risk_free_rate: Real,
     cost_config: &CostConfig,
     frequency: Option<Frequency>,
+    seconds_per_bar: Option<Real>,
 ) -> metrics::Metrics {
     let costs = cost_config.resolve(&spec.symbol, frequency);
     let measured = measured_report(spec, atoms, cash, costs);
-    metrics::from_report(&measured, bars_per_year, risk_free_rate)
+    metrics::from_report(&measured, bars_per_year, risk_free_rate, seconds_per_bar)
 }
 
 /// The windowed twin of [`evaluate`]: reduce the same measured run to one
@@ -101,10 +103,17 @@ pub fn evaluate_windowed(
     cost_config: &CostConfig,
     frequency: Option<Frequency>,
     window: usize,
+    seconds_per_bar: Option<Real>,
 ) -> Vec<metrics::WindowMetrics> {
     let costs = cost_config.resolve(&spec.symbol, frequency);
     let measured = measured_report(spec, atoms, cash, costs);
-    metrics::windowed_from_report(&measured, window, bars_per_year, risk_free_rate)
+    metrics::windowed_from_report(
+        &measured,
+        window,
+        bars_per_year,
+        risk_free_rate,
+        seconds_per_bar,
+    )
 }
 
 /// Everything one iteration of a backtest produces — consumed by
@@ -150,6 +159,12 @@ pub struct IterationInputs<'a> {
     pub cost_config: &'a CostConfig,
     pub effective_freq: Option<Frequency>,
     pub windowed: Option<NonZeroUsize>,
+    /// Trading seconds a bar of `effective_freq` spans on the run's calendar
+    /// — populates the `trades.*_seconds` fields on the metrics document.
+    /// `None` when the caller doesn't know both the asset class and the bar
+    /// cadence; the fields are omitted from the YAML then and stay empty in
+    /// the windowed CSV.
+    pub seconds_per_bar: Option<Real>,
 }
 
 /// The pure-work half of a run: drive the strategy over `atoms`, reduce
@@ -181,7 +196,12 @@ pub fn run_iteration(
     } else {
         None
     };
-    let mut whole = metrics::from_report(&report, inputs.bars_per_year, inputs.risk_free_rate);
+    let mut whole = metrics::from_report(
+        &report,
+        inputs.bars_per_year,
+        inputs.risk_free_rate,
+        inputs.seconds_per_bar,
+    );
     if costs_active {
         whole.costs = Some(metrics::costs_section(
             &report,
@@ -189,9 +209,14 @@ pub fn run_iteration(
             inputs.bars_per_year,
         ));
     }
-    let gross_metrics = gross_report
-        .as_ref()
-        .map(|g| metrics::from_report(g, inputs.bars_per_year, inputs.risk_free_rate));
+    let gross_metrics = gross_report.as_ref().map(|g| {
+        metrics::from_report(
+            g,
+            inputs.bars_per_year,
+            inputs.risk_free_rate,
+            inputs.seconds_per_bar,
+        )
+    });
     let (windowed, rolling) = match inputs.windowed {
         Some(n) => {
             let w = metrics::windowed_from_report(
@@ -199,12 +224,14 @@ pub fn run_iteration(
                 n.get(),
                 inputs.bars_per_year,
                 inputs.risk_free_rate,
+                inputs.seconds_per_bar,
             );
             let r = metrics::rolling_from_report(
                 &report,
                 n.get(),
                 inputs.bars_per_year,
                 inputs.risk_free_rate,
+                inputs.seconds_per_bar,
             );
             (Some(w), Some(r))
         }

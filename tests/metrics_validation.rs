@@ -159,7 +159,7 @@ fn matches_empyrical_reference() {
         fills: Vec::new(),
         initial_equity: INITIAL_CASH,
     };
-    let m = metrics::from_report(&report, BARS_PER_YEAR, RISK_FREE_RATE);
+    let m = metrics::from_report(&report, BARS_PER_YEAR, RISK_FREE_RATE, None);
 
     let mut mismatches: Vec<String> = Vec::new();
     for (key, &exp) in &expected {

@@ -230,17 +230,36 @@ pub struct TradeSection {
     pub min_bars: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_bars: Option<usize>,
+    /// Holding duration in trading seconds — the `_bars` siblings scaled by
+    /// [`AssetClass::trading_seconds_per_bar`](crate::calendar::AssetClass::trading_seconds_per_bar).
+    /// A machine-readable twin of the console's `holding` line: downstream
+    /// tools divide by 3600 for hours, 86400 for days, etc., without having to
+    /// know the bar cadence or trading calendar. Populated only when both an
+    /// [`AssetClass`](crate::calendar::AssetClass) and a resolvable bar cadence
+    /// are known; omitted otherwise so a CSV column that isn't well-defined
+    /// stays empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub average_seconds: Option<Real>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_seconds: Option<Real>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_seconds: Option<Real>,
 }
 
 /// Reduce a [`RunReport`] to a [`Metrics`] document by calling one library
 /// function per field. `bars_per_year` scales per-bar return moments to annual
 /// figures; `risk_free_rate` is the annualized rf as a fraction (`0.045` =
 /// 4.5% p.a.) subtracted from annualized returns before Sharpe/Sortino/UPI and
-/// used as the per-bar threshold for Omega.
+/// used as the per-bar threshold for Omega. `seconds_per_bar` (when `Some`) is
+/// the trading-time span of one bar, used to populate the trades'
+/// `average_seconds` / `min_seconds` / `max_seconds` twins of the `_bars`
+/// fields; typically derived via
+/// [`AssetClass::trading_seconds_per_bar`](crate::calendar::AssetClass::trading_seconds_per_bar).
 pub fn from_report<Sym>(
     report: &RunReport<Sym>,
     bars_per_year: Real,
     risk_free_rate: Real,
+    seconds_per_bar: Option<Real>,
 ) -> Metrics {
     let equity = report.equity_curve.as_slice();
     let bars = equity.len();
@@ -350,6 +369,12 @@ pub fn from_report<Sym>(
             average_bars: fugazi::metrics::average_bars_held(&trades),
             min_bars: fugazi::metrics::min_bars_held(&trades),
             max_bars: fugazi::metrics::max_bars_held(&trades),
+            average_seconds: seconds_per_bar
+                .and_then(|s| fugazi::metrics::average_bars_held(&trades).map(|b| b * s)),
+            min_seconds: seconds_per_bar
+                .and_then(|s| fugazi::metrics::min_bars_held(&trades).map(|b| b as Real * s)),
+            max_seconds: seconds_per_bar
+                .and_then(|s| fugazi::metrics::max_bars_held(&trades).map(|b| b as Real * s)),
         },
     }
 }
@@ -409,6 +434,7 @@ pub fn windowed_from_report<Sym: Clone>(
     window: usize,
     bars_per_year: Real,
     risk_free_rate: Real,
+    seconds_per_bar: Option<Real>,
 ) -> Vec<WindowMetrics> {
     assert!(window > 0, "window length must be positive");
     let bars = report.equity_curve.len();
@@ -423,6 +449,7 @@ pub fn windowed_from_report<Sym: Clone>(
                 &report_slice(report, start..end),
                 bars_per_year,
                 risk_free_rate,
+                seconds_per_bar,
             ),
         });
         start = end;
@@ -453,6 +480,7 @@ pub fn rolling_from_report<Sym: Clone + Send + Sync>(
     window: usize,
     bars_per_year: Real,
     risk_free_rate: Real,
+    seconds_per_bar: Option<Real>,
 ) -> Vec<WindowMetrics> {
     use rayon::prelude::*;
     assert!(window > 0, "window length must be positive");
@@ -471,6 +499,7 @@ pub fn rolling_from_report<Sym: Clone + Send + Sync>(
                     &report_slice(report, start..end),
                     bars_per_year,
                     risk_free_rate,
+                    seconds_per_bar,
                 ),
             }
         })
@@ -613,6 +642,9 @@ pub fn flatten(m: &Metrics) -> Vec<(&'static str, Option<Real>)> {
         ("trades.average_bars", m.trades.average_bars),
         ("trades.min_bars", m.trades.min_bars.map(|v| v as Real)),
         ("trades.max_bars", m.trades.max_bars.map(|v| v as Real)),
+        ("trades.average_seconds", m.trades.average_seconds),
+        ("trades.min_seconds", m.trades.min_seconds),
+        ("trades.max_seconds", m.trades.max_seconds),
         // Cost aggregates — populated only when a cost model was active on the
         // run; None here for zero-cost runs so the CSV cell stays empty and
         // the CSV column set stays fixed across cost-on / cost-off windows.
@@ -879,7 +911,7 @@ mod tests {
             fills,
             initial_equity: 100.0,
         };
-        from_report(&report, 252.0, 0.0)
+        from_report(&report, 252.0, 0.0, None)
     }
 
     #[test]
@@ -959,7 +991,7 @@ mod tests {
             }],
             initial_equity: 100.0,
         };
-        let windows = windowed_from_report(&report, 2, 252.0, 0.0);
+        let windows = windowed_from_report(&report, 2, 252.0, 0.0, None);
         assert_eq!(windows.len(), 3);
         assert_eq!(
             windows
@@ -978,7 +1010,7 @@ mod tests {
         assert_eq!(windows[1].metrics.trades.total_fills, 1);
         assert_eq!(windows[2].metrics.trades.total_fills, 0);
         // Windowed total returns compound back to the whole-run total return.
-        let whole = from_report(&report, 252.0, 0.0).returns.total;
+        let whole = from_report(&report, 252.0, 0.0, None).returns.total;
         let compounded: Real = windows
             .iter()
             .map(|w| 1.0 + w.metrics.returns.total)
@@ -998,7 +1030,7 @@ mod tests {
             }],
             initial_equity: 100.0,
         };
-        let windows = rolling_from_report(&report, 3, 252.0, 0.0);
+        let windows = rolling_from_report(&report, 3, 252.0, 0.0, None);
         assert_eq!(
             windows
                 .iter()
@@ -1027,7 +1059,7 @@ mod tests {
             fills: Vec::new(),
             initial_equity: 100.0,
         };
-        assert!(rolling_from_report(&report, 3, 252.0, 0.0).is_empty());
+        assert!(rolling_from_report(&report, 3, 252.0, 0.0, None).is_empty());
     }
 
     // Perf probe — run with:
@@ -1061,7 +1093,7 @@ mod tests {
         for &window in &[63_usize, 252, 504] {
             // Serial baseline: current rolling_from_report.
             let t = Instant::now();
-            let out_serial = rolling_from_report(&report, window, 252.0, 0.0);
+            let out_serial = rolling_from_report(&report, window, 252.0, 0.0, None);
             let serial = t.elapsed().as_secs_f64();
 
             // Parallelized equivalent: same body via par_iter.
@@ -1073,7 +1105,7 @@ mod tests {
                     WindowMetrics {
                         start_bar: start,
                         end_bar: end - 1,
-                        metrics: from_report(&report_slice(&report, start..end), 252.0, 0.0),
+                        metrics: from_report(&report_slice(&report, start..end), 252.0, 0.0, None),
                     }
                 })
                 .collect();
