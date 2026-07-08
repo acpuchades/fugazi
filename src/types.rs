@@ -1,6 +1,8 @@
 //! Core scalar and market-data types shared across the crate.
 
 use std::collections::HashMap;
+use std::fmt;
+use std::str::FromStr;
 use std::sync::Arc;
 
 /// The scalar type used throughout the crate for prices and indicator outputs.
@@ -34,6 +36,116 @@ impl Timestamp {
         let nanos = (self.0 as i128) * 1_000_000;
         ::time::OffsetDateTime::from_unix_timestamp_nanos(nanos)
             .expect("i64 millis fits in OffsetDateTime range")
+    }
+}
+
+/// A bar cadence as an integer multiplier and unit — `5m`, `4h`, `1d`, `1w`,
+/// `1M`. `M` for month is uppercase to keep `m` unambiguously "minute".
+///
+/// Ordered by *duration* rather than by variant tag, so
+/// `Frequency::Minute(120) > Frequency::Hour(1)` behaves the way a reader
+/// would expect. `Hash + Eq` — usable as a HashMap key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Frequency {
+    Minute(u32),
+    Hour(u32),
+    Day(u32),
+    Week(u32),
+    Month(u32),
+}
+
+impl Frequency {
+    /// The approximate seconds a bar of this cadence spans, using calendar
+    /// conventions (30-day month, 7-day week). Used as the primary total-
+    /// order key by [`Ord`] so cadences sort by duration regardless of
+    /// variant, which keeps `Frequency::Minute(120) > Frequency::Hour(1)` (a
+    /// derived `Ord` would order them lexicographically by variant tag and
+    /// get it wrong).
+    fn seconds_per_bar(self) -> u64 {
+        match self {
+            Frequency::Minute(n) => 60 * n as u64,
+            Frequency::Hour(n) => 3_600 * n as u64,
+            Frequency::Day(n) => 86_400 * n as u64,
+            Frequency::Week(n) => 604_800 * n as u64,
+            Frequency::Month(n) => 2_592_000 * n as u64,
+        }
+    }
+
+    /// A stable rank per variant, used as a tie-breaker when two cadences
+    /// have the same `seconds_per_bar` (`Hour(24)` and `Day(1)`, say). Finer
+    /// units rank lower so they sort first — the derived `PartialEq` keeps
+    /// the two cases distinct, and the `Ord` contract (equal iff `PartialEq`
+    /// says so) is preserved.
+    fn variant_rank(self) -> u8 {
+        match self {
+            Frequency::Minute(_) => 0,
+            Frequency::Hour(_) => 1,
+            Frequency::Day(_) => 2,
+            Frequency::Week(_) => 3,
+            Frequency::Month(_) => 4,
+        }
+    }
+
+    /// The canonical `N<unit>` token — the round-trip of [`FromStr`].
+    pub fn as_token(self) -> String {
+        match self {
+            Frequency::Minute(n) => format!("{n}m"),
+            Frequency::Hour(n) => format!("{n}h"),
+            Frequency::Day(n) => format!("{n}d"),
+            Frequency::Week(n) => format!("{n}w"),
+            Frequency::Month(n) => format!("{n}M"),
+        }
+    }
+}
+
+impl Ord for Frequency {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.seconds_per_bar()
+            .cmp(&other.seconds_per_bar())
+            .then_with(|| self.variant_rank().cmp(&other.variant_rank()))
+    }
+}
+
+impl PartialOrd for Frequency {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl fmt::Display for Frequency {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.as_token())
+    }
+}
+
+impl FromStr for Frequency {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        // Split at the first alphabetic byte: the numeric prefix is the
+        // multiplier, the suffix is the unit. Reject anything else (empty
+        // number, missing unit, extra tail).
+        let split = s
+            .find(|c: char| c.is_alphabetic())
+            .ok_or_else(|| format!("`{s}`: expected `N<unit>` (unit m/h/d/w/M)"))?;
+        let (num, unit) = s.split_at(split);
+        let n: u32 = num
+            .parse()
+            .map_err(|_| format!("`{s}`: `{num}` is not a positive integer multiplier"))?;
+        if n == 0 {
+            return Err(format!("`{s}`: multiplier must be > 0"));
+        }
+        match unit {
+            "m" => Ok(Frequency::Minute(n)),
+            "h" => Ok(Frequency::Hour(n)),
+            "d" => Ok(Frequency::Day(n)),
+            "w" => Ok(Frequency::Week(n)),
+            "M" => Ok(Frequency::Month(n)),
+            other => Err(format!(
+                "`{s}`: unknown unit `{other}`, expected one of m/h/d/w/M"
+            )),
+        }
     }
 }
 
@@ -483,21 +595,102 @@ impl Ord for Atom {
     }
 }
 
+/// A **selector**: a partial key naming *which* asset in a [`Snapshot`] a
+/// [`Pick`](crate::indicators::Pick) should read.
+///
+/// Both fields are `Option` so a caller can specify only the ones they need:
+/// `Selector::by_symbol("BTC")` matches every BTC entry regardless of
+/// frequency, `Selector::by_freq(Frequency::Hour(1))` matches every hourly
+/// entry regardless of symbol, `Selector::exact(sym, freq)` matches a single
+/// storage key. A fully-empty selector (both fields `None`, the [`Default`])
+/// is legal too — it stands for "no query at all" and drives [`Pick`] onto
+/// the [`Snapshot::sole_atom`] path (see [`Selector::is_empty`]) rather than
+/// a structural match.
+///
+/// # Matching semantics ([`Selector::matches`])
+///
+/// A query selector matches a storage selector when each field either has no
+/// query (`None`, a wildcard) or agrees with storage. That means
+/// `pick(symbol=BTC)` finds a stored `{symbol=BTC, freq=Some(1h)}` even
+/// though the query is silent on `freq`. Symmetric: a query
+/// `pick(freq=1h)` matches `{symbol=Some(BTC), freq=1h}` without knowing
+/// the symbol. An empty selector matches every entry; but a *fully-empty*
+/// query is semantically "no query" — the caller almost certainly meant
+/// "single-entry unpack", so [`Pick`] dispatches on [`is_empty`](Self::is_empty)
+/// and never runs [`find`](Snapshot::find) on an empty query.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct Selector {
+    pub symbol: Option<String>,
+    pub freq: Option<Frequency>,
+}
+
+impl Selector {
+    /// Build a selector. Both fields may be `None` — the empty selector is a
+    /// legal value and stands for the [`Pick`] single-entry-unpack path (see
+    /// [`Selector::is_empty`]).
+    pub fn new(symbol: Option<String>, freq: Option<Frequency>) -> Self {
+        Self { symbol, freq }
+    }
+
+    /// Selector matching every entry whose `symbol` equals `sym`, regardless
+    /// of frequency.
+    pub fn by_symbol(sym: impl Into<String>) -> Self {
+        Self {
+            symbol: Some(sym.into()),
+            freq: None,
+        }
+    }
+
+    /// Selector matching every entry whose `freq` equals `freq`, regardless
+    /// of symbol.
+    pub fn by_freq(freq: Frequency) -> Self {
+        Self {
+            symbol: None,
+            freq: Some(freq),
+        }
+    }
+
+    /// Selector matching a single `(symbol, freq)` pair exactly.
+    pub fn exact(sym: impl Into<String>, freq: Frequency) -> Self {
+        Self {
+            symbol: Some(sym.into()),
+            freq: Some(freq),
+        }
+    }
+
+    /// True when both fields are `None` — the "no query" case that [`Pick`]
+    /// treats as a single-entry unpack ([`Snapshot::sole_atom`]) rather than
+    /// a structural match.
+    pub fn is_empty(&self) -> bool {
+        self.symbol.is_none() && self.freq.is_none()
+    }
+
+    /// Match this selector as a **query** against a storage selector: each
+    /// `None` field on the query is a wildcard (matches any storage value); a
+    /// `Some` field must equal storage. See the type-level doc for the full
+    /// semantics.
+    pub fn matches(&self, storage: &Selector) -> bool {
+        (self.symbol.is_none() || self.symbol == storage.symbol)
+            && (self.freq.is_none() || self.freq == storage.freq)
+    }
+}
+
 /// A per-bar snapshot of several assets — a keyed collection of [`Atom`]s.
 ///
 /// The multi-asset input frame that lets a strategy or an indicator reason
-/// about more than one instrument at a time. Each key names one asset (e.g.
-/// `"BTC"`, `"ETH"`), each value is that asset's [`Atom`] for the current
-/// bar. The [`Pick`](crate::indicators::Pick) leaf projects one asset out of
-/// the snapshot as an `Indicator<Output = Atom>`, so cross-asset expressions
-/// compose from the same primitives as single-asset ones:
+/// about more than one instrument at a time. Each key names one asset (a
+/// [`Selector`] when working at the CLI/YAML layer, an arbitrary `K` when
+/// composing directly in Rust), each value is that asset's [`Atom`] for the
+/// current bar. The [`Pick`](crate::indicators::Pick) leaf projects one asset
+/// out of the snapshot as an `Indicator<Output = Atom>`, so cross-asset
+/// expressions compose from the same primitives as single-asset ones:
 ///
 /// ```ignore
 /// use fugazi::indicators::{Close, Pick};
 /// use fugazi::prelude::*;
 /// // BTC/ETH close spread as a first-class Real-output indicator.
-/// let spread = Close::of(Pick::new("BTC"))
-///     .sub(Close::of(Pick::new("ETH")));
+/// let spread = Close::of(Pick::matching(Selector::by_symbol("BTC")))
+///     .sub(Close::of(Pick::matching(Selector::by_symbol("ETH"))));
 /// ```
 ///
 /// Generic over the key type `K`. `K: Eq + Hash` is required to look values
@@ -506,6 +699,10 @@ impl Ord for Atom {
 /// consumers). Semantics mirror the underlying [`HashMap`] — no order
 /// guarantees, no automatic time alignment; the driver that builds each
 /// bar's snapshot is responsible for feeding a consistent key set.
+///
+/// [`Snapshot<Selector>`] additionally exposes [`Snapshot::find`] for
+/// wildcard-aware lookup with [`Selector::matches`]; that's the shape
+/// `Pick<S>` uses.
 #[derive(Debug, Clone)]
 pub struct Snapshot<K> {
     atoms: HashMap<K, Atom>,
@@ -569,6 +766,42 @@ impl<K: Eq + std::hash::Hash> Snapshot<K> {
         Q: Eq + std::hash::Hash + ?Sized,
     {
         self.atoms.contains_key(key)
+    }
+}
+
+impl<K> Snapshot<K> {
+    /// The sole atom in a single-entry snapshot, if there is exactly one.
+    /// Returns `None` for empty snapshots; **panics** with a diagnostic
+    /// message when the snapshot has 2+ entries. This is the primitive
+    /// [`Pick::new`] uses for its "no query — this is a single-series run"
+    /// path: a single-series driver always feeds a size-1 snapshot, so a
+    /// 2+ read means the run was accidentally hooked up to multi-asset
+    /// input and the loud failure is preferable to silently returning an
+    /// arbitrary asset.
+    pub fn sole_atom(&self) -> Option<&Atom> {
+        match self.atoms.len() {
+            0 => None,
+            1 => self.atoms.values().next(),
+            n => panic!(
+                "Snapshot::sole_atom: expected a single-entry snapshot, got {n} entries — \
+                 the surrounding chain used a no-argument `Pick::new()`, which requires a \
+                 single-series driver; specify a Selector (`Pick::matching(...)`) for \
+                 multi-asset input"
+            ),
+        }
+    }
+}
+
+impl Snapshot<Selector> {
+    /// Structural lookup: return the first stored atom whose [`Selector`]
+    /// matches `query` under [`Selector::matches`] (each `None` field on the
+    /// query is a wildcard). Iteration order is [`HashMap`]-arbitrary; if a
+    /// query could match more than one stored key, the caller is expected to
+    /// disambiguate (typically by supplying both `symbol` and `freq`).
+    pub fn find(&self, query: &Selector) -> Option<&Atom> {
+        self.atoms
+            .iter()
+            .find_map(|(k, v)| if query.matches(k) { Some(v) } else { None })
     }
 }
 

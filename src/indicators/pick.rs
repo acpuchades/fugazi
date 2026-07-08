@@ -1,80 +1,116 @@
 //! Cross-asset projection: pick one asset's [`Atom`] out of a
-//! [`Snapshot`] by key.
+//! [`Snapshot<Selector>`] by a partial-key query.
 //!
-//! The [`Pick`] leaf turns a multi-asset [`Snapshot`] input into a single-asset
-//! [`Atom`] output, so every existing source-generic candle-input leaf
-//! ([`Close`](super::Close), [`Atr`](super::Atr), [`Year`](super::Year), …)
-//! composes on top of it without any type gymnastics.
+//! [`Pick`] holds a [`Selector`] (the query) and reads from any indicator
+//! whose output is a `Snapshot<Selector>`. Two paths:
+//!
+//! - **Empty selector** (`Selector::default()` / `Pick::new()`) — the
+//!   *no-query* path: the snapshot must contain exactly one entry, whose atom
+//!   is returned. This is the single-series ergonomic shortcut for strategies
+//!   fed a multi-asset-shaped input by a driver that only ever populates one
+//!   key; a snapshot of size 2+ **panics** rather than silently picking an
+//!   arbitrary asset (see [`Snapshot::sole_atom`]).
+//! - **Non-empty selector** — the *structural-match* path: forwards to
+//!   [`Snapshot::find`], which returns the first stored atom whose stored
+//!   selector matches the query (`None` fields on the query are wildcards).
+//!
+//! Cross-asset expressions then compose from the same primitives as
+//! single-asset ones — every source-generic candle leaf ([`Close`](super::Close),
+//! [`Atr`](super::Atr), [`Year`](super::Year), …) drops on top:
 //!
 //! ```ignore
 //! use fugazi::indicators::{Close, Pick};
 //! use fugazi::prelude::*;
 //! // BTC/ETH close spread as a plain `Real`-output indicator over Snapshot.
-//! let spread = Close::of(Pick::new("BTC"))
-//!     .sub(Close::of(Pick::new("ETH")));
+//! let spread = Close::of(Pick::matching(Selector::by_symbol("BTC")))
+//!     .sub(Close::of(Pick::matching(Selector::by_symbol("ETH"))));
 //! ```
-
-use std::hash::Hash;
 
 use crate::indicator::Indicator;
 use crate::indicators::Identity;
-use crate::types::{Atom, Snapshot};
+use crate::types::{Atom, Selector, Snapshot};
 
-/// Projects one asset's [`Atom`] out of a [`Snapshot`] by key.
+/// Projects one asset's [`Atom`] out of a [`Snapshot<Selector>`], either by a
+/// wildcard-aware structural [`Selector`] match or, when the selector is
+/// empty, by the [`Snapshot::sole_atom`] single-entry unpack.
 ///
-/// `Input = S::Input`, `Output = Atom`. The default source `Identity<Snapshot<K>>`
-/// makes `Pick::new(key)` a leaf that consumes a [`Snapshot`] directly;
-/// `Pick::of(key, source)` re-roots it onto any indicator that emits a
-/// `Snapshot<K>` (a resampler, a latch, an outer pick chain, …).
+/// `Input = S::Input`, `Output = Atom`. The default source
+/// `Identity<Snapshot<Selector>>` makes `Pick::new()` a leaf that consumes a
+/// [`Snapshot`] directly; `Pick::of(selector, source)` re-roots it onto any
+/// indicator that emits a `Snapshot<Selector>` (a resampler, a latch, an
+/// outer pick chain, …).
 ///
-/// Emits `None` on bars where the key isn't present in the snapshot — the same
+/// Emits `None` on bars where the query matches no entry — the same
 /// `None`-until-warm convention every other leaf uses, so a downstream
 /// comparison stays `None` until the projected asset first appears.
 #[derive(Debug, Clone)]
-pub struct Pick<K, S = Identity<Snapshot<K>>> {
-    key: K,
+pub struct Pick<S = Identity<Snapshot<Selector>>> {
+    selector: Selector,
     source: S,
     /// The last atom projected out; `None` before the first bar or if the last
-    /// snapshot lacked the key.
+    /// snapshot had no matching entry.
     pub value: Option<Atom>,
 }
 
-impl<K> Pick<K, Identity<Snapshot<K>>> {
-    /// A [`Pick`] rooted on the raw [`Snapshot`] input stream.
-    pub fn new(key: K) -> Self {
-        Self::of(key, Identity::new())
+impl Pick<Identity<Snapshot<Selector>>> {
+    /// A [`Pick`] with an *empty* selector (both fields `None`) rooted on the
+    /// raw [`Snapshot`] input stream. Every `update` runs the
+    /// [`Snapshot::sole_atom`] single-entry unpack: the snapshot must contain
+    /// exactly one atom, otherwise the call **panics**.
+    pub fn new() -> Self {
+        Self::of(Selector::default(), Identity::new())
+    }
+
+    /// A [`Pick`] with the given [`Selector`] rooted on the raw [`Snapshot`]
+    /// input stream — the workhorse "structural query" constructor.
+    ///
+    /// `Selector::default()` (empty) is legal here too; if you know that's
+    /// what you want, prefer the explicit [`Pick::new`] alias.
+    pub fn matching(selector: Selector) -> Self {
+        Self::of(selector, Identity::new())
     }
 }
 
-impl<K, S> Pick<K, S> {
-    /// A [`Pick`] rooted on a custom snapshot-emitting source.
-    pub fn of(key: K, source: S) -> Self {
+impl<S> Pick<S> {
+    /// A [`Pick`] with the given [`Selector`] rooted on a custom
+    /// snapshot-emitting source. Empty selector still dispatches to
+    /// [`Snapshot::sole_atom`].
+    pub fn of(selector: Selector, source: S) -> Self {
         Self {
-            key,
+            selector,
             source,
             value: None,
         }
     }
 
-    /// The key this pick reads out of every snapshot.
-    pub fn key(&self) -> &K {
-        &self.key
+    /// The [`Selector`] this pick queries with. See [`Selector::is_empty`]
+    /// for the "no query" case.
+    pub fn selector(&self) -> &Selector {
+        &self.selector
     }
 }
 
-impl<K, S> Indicator for Pick<K, S>
+impl Default for Pick<Identity<Snapshot<Selector>>> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<S> Indicator for Pick<S>
 where
-    K: Clone + Eq + Hash,
-    S: Indicator<Output = Snapshot<K>>,
+    S: Indicator<Output = Snapshot<Selector>>,
 {
     type Input = S::Input;
     type Output = Atom;
 
     fn update(&mut self, input: S::Input) -> Option<Atom> {
-        self.value = self
-            .source
-            .update(input)
-            .and_then(|s| s.get(&self.key).cloned());
+        self.value = self.source.update(input).and_then(|snap| {
+            if self.selector.is_empty() {
+                snap.sole_atom().cloned()
+            } else {
+                snap.find(&self.selector).cloned()
+            }
+        });
         self.value.clone()
     }
 
@@ -99,48 +135,81 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Candle;
+    use crate::types::{Candle, Frequency, Real};
 
-    fn snap(pairs: &[(&str, Real)]) -> Snapshot<String> {
+    fn snap<'a>(pairs: impl IntoIterator<Item = (Selector, Real)>) -> Snapshot<Selector> {
         pairs
-            .iter()
-            .map(|(k, close)| {
-                (
-                    (*k).to_string(),
-                    Atom::new(Candle::new(1.0, 1.0, 1.0, *close, 1.0)),
-                )
-            })
+            .into_iter()
+            .map(|(sel, close)| (sel, Atom::new(Candle::new(1.0, 1.0, 1.0, close, 1.0))))
             .collect()
     }
 
-    use crate::types::Real;
-
     #[test]
-    fn picks_present_asset() {
-        let mut p = Pick::<String>::new("BTC".into());
-        let out = p.update(snap(&[("BTC", 10.0), ("ETH", 20.0)]));
+    fn matching_picks_by_symbol() {
+        let mut p = Pick::matching(Selector::by_symbol("BTC"));
+        let out = p.update(snap([
+            (Selector::by_symbol("BTC"), 10.0),
+            (Selector::by_symbol("ETH"), 20.0),
+        ]));
         assert_eq!(out.map(|a| a.candle.close), Some(10.0));
     }
 
     #[test]
-    fn missing_key_yields_none() {
-        let mut p = Pick::<String>::new("SOL".into());
-        let out = p.update(snap(&[("BTC", 10.0), ("ETH", 20.0)]));
+    fn matching_picks_wildcards_over_freq() {
+        // Query on symbol only; storage has an extra freq field.
+        let mut p = Pick::matching(Selector::by_symbol("BTC"));
+        let out = p.update(snap([
+            (Selector::exact("BTC", Frequency::Hour(1)), 42.0),
+            (Selector::exact("ETH", Frequency::Hour(1)), 100.0),
+        ]));
+        assert_eq!(out.map(|a| a.candle.close), Some(42.0));
+    }
+
+    #[test]
+    fn matching_missing_yields_none() {
+        let mut p = Pick::matching(Selector::by_symbol("SOL"));
+        let out = p.update(snap([
+            (Selector::by_symbol("BTC"), 10.0),
+            (Selector::by_symbol("ETH"), 20.0),
+        ]));
         assert_eq!(out, None);
         assert_eq!(p.value(), None);
     }
 
     #[test]
+    fn new_no_query_unpacks_single_entry_snapshot() {
+        let mut p = Pick::new();
+        let out = p.update(snap([(Selector::by_symbol("BTC"), 99.0)]));
+        assert_eq!(out.map(|a| a.candle.close), Some(99.0));
+    }
+
+    #[test]
+    fn new_no_query_returns_none_on_empty_snapshot() {
+        let mut p = Pick::new();
+        let out = p.update(snap([]));
+        assert_eq!(out, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "Snapshot::sole_atom: expected a single-entry snapshot")]
+    fn new_no_query_panics_on_multi_entry_snapshot() {
+        let mut p = Pick::new();
+        p.update(snap([
+            (Selector::by_symbol("BTC"), 10.0),
+            (Selector::by_symbol("ETH"), 20.0),
+        ]));
+    }
+
+    #[test]
     fn warm_up_delegates_to_source() {
-        let p = Pick::<String>::new("BTC".into());
-        // Identity<Snapshot<K>>::warm_up_period == 1, so Pick::new reports 1.
-        assert_eq!(p.warm_up_period(), 1);
+        assert_eq!(Pick::new().warm_up_period(), 1);
+        assert_eq!(Pick::matching(Selector::by_symbol("BTC")).warm_up_period(), 1);
     }
 
     #[test]
     fn reset_clears_cached_value() {
-        let mut p = Pick::<String>::new("BTC".into());
-        p.update(snap(&[("BTC", 42.0)]));
+        let mut p = Pick::matching(Selector::by_symbol("BTC"));
+        p.update(snap([(Selector::by_symbol("BTC"), 42.0)]));
         assert_eq!(p.value().map(|a| a.candle.close), Some(42.0));
         p.reset();
         assert_eq!(p.value(), None);

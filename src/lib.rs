@@ -81,8 +81,8 @@ pub use strategy::{
     WalletError,
 };
 pub use types::{
-    Atom, Candle, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder, Snapshot,
-    Timestamp,
+    Atom, Candle, Frequency, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder,
+    Selector, Snapshot, Timestamp,
 };
 
 /// Convenient glob-import of the core traits and types.
@@ -96,7 +96,7 @@ pub mod prelude {
         WalletError,
     };
     pub use crate::types::{
-        Atom, Candle, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder,
-        Snapshot, Timestamp,
+        Atom, Candle, Frequency, OverlayInfo, OverlayType, OverlayValue, Real, Schema,
+        SchemaBuilder, Selector, Snapshot, Timestamp,
     };
 }

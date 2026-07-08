@@ -47,7 +47,8 @@ use fugazi_core::strategy::{
     Ack, Order, OrderKind, PaperWallet, Units, Reference, Side, Size, Wallet, WalletError,
 };
 use fugazi_core::types::{
-    Atom, Candle, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder, Snapshot,
+    Atom, Candle, Frequency, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder,
+    Selector, Snapshot,
 };
 use fugazi_core::backtest::Fill;
 use fugazi_core::metrics as core_metrics;
@@ -581,7 +582,7 @@ impl<I: Clone + Send + Sync + 'static> Indicator for SharedProjector<I> {
 enum AnySharedMulti {
     Candle(Arc<Mutex<SharedMultiCell<Atom>>>),
     Real(Arc<Mutex<SharedMultiCell<Real>>>),
-    Snapshot(Arc<Mutex<SharedMultiCell<Snapshot<String>>>>),
+    Snapshot(Arc<Mutex<SharedMultiCell<Snapshot<Selector>>>>),
 }
 
 impl AnySharedMulti {
@@ -622,7 +623,7 @@ impl AnySharedMulti {
                 })),
             },
             AnySharedMulti::Snapshot(cell) => PyIndicator {
-                src: AnySource::Snapshot(Source::new(SharedProjector::<Snapshot<String>> {
+                src: AnySource::Snapshot(Source::new(SharedProjector::<Snapshot<Selector>> {
                     cell: Arc::clone(cell),
                     field_index: idx,
                     local_gen: cell.lock().expect("mutex poisoned").generation,
@@ -646,7 +647,7 @@ impl AnySharedMulti {
 enum AnySource {
     Candle(Source<Atom>),
     Real(Source<Real>),
-    Snapshot(Source<Snapshot<String>>),
+    Snapshot(Source<Snapshot<Selector>>),
     Const(Real),
 }
 
@@ -690,7 +691,7 @@ impl AnySource {
 enum Pair {
     Candle(Source<Atom>, Source<Atom>),
     Real(Source<Real>, Source<Real>),
-    Snapshot(Source<Snapshot<String>>, Source<Snapshot<String>>),
+    Snapshot(Source<Snapshot<Selector>>, Source<Snapshot<Selector>>),
 }
 
 /// Resolve two sources to a shared domain so they can be combined. A neutral
@@ -704,8 +705,8 @@ fn pair(lhs: AnySource, rhs: AnySource) -> PyResult<Pair> {
     fn rval(c: Real) -> Source<Real> {
         Source::new(Value::<Real>::new(c))
     }
-    fn sval(c: Real) -> Source<Snapshot<String>> {
-        Source::new(Value::<Snapshot<String>>::new(c))
+    fn sval(c: Real) -> Source<Snapshot<Selector>> {
+        Source::new(Value::<Snapshot<Selector>>::new(c))
     }
     match (lhs, rhs) {
         (AnySource::Candle(a), AnySource::Candle(b)) => Ok(Pair::Candle(a, b)),
@@ -732,7 +733,7 @@ fn pair(lhs: AnySource, rhs: AnySource) -> PyResult<Pair> {
 enum AnySignal {
     Candle(SignalBox<Atom>),
     Real(SignalBox<Real>),
-    Snapshot(SignalBox<Snapshot<String>>),
+    Snapshot(SignalBox<Snapshot<Selector>>),
 }
 
 impl AnySignal {
@@ -830,7 +831,7 @@ fn str_pair(
 enum AnyMulti {
     Candle(MultiBox<Atom>),
     Real(MultiBox<Real>),
-    Snapshot(MultiBox<Snapshot<String>>),
+    Snapshot(MultiBox<Snapshot<Selector>>),
 }
 
 impl AnyMulti {
@@ -1492,19 +1493,207 @@ impl PyAtom {
 }
 
 // ---------------------------------------------------------------------------
-// Snapshot + Pick — the cross-asset input frame and its projection leaf
+// Frequency, Selector, Snapshot + Pick — the cross-asset input frame
 // ---------------------------------------------------------------------------
+
+/// A bar cadence: `1m`, `4h`, `1d`, `1w`, `1M`.
+///
+/// Parsed from the canonical `N<unit>` token where `m` is minute, `h` hour,
+/// `d` day, `w` week, `M` month (uppercase, so lowercase `m` stays unambiguously
+/// "minute"). Round-trips through `str()` and `repr()`. Hashable and total-order
+/// sortable by duration (so `Frequency("120m") > Frequency("1h")` behaves the
+/// way you expect regardless of variant tag).
+#[pyclass(name = "Frequency", frozen, skip_from_py_object)]
+#[derive(Clone, Copy)]
+struct PyFrequency {
+    inner: Frequency,
+}
+
+#[pymethods]
+impl PyFrequency {
+    /// Parse an `N<unit>` token (`"1m"`, `"5m"`, `"1h"`, `"4h"`, `"1d"`,
+    /// `"1w"`, `"1M"`, …). Raises `ValueError` on any other shape.
+    #[new]
+    fn new(token: &str) -> PyResult<Self> {
+        use std::str::FromStr;
+        let inner = Frequency::from_str(token).map_err(PyValueError::new_err)?;
+        Ok(Self { inner })
+    }
+
+    /// The canonical token — the round-trip of the constructor.
+    fn __str__(&self) -> String {
+        self.inner.as_token()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Frequency({:?})", self.inner.as_token())
+    }
+
+    fn __hash__(&self) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        self.inner.hash(&mut h);
+        h.finish()
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        match other.cast::<PyFrequency>() {
+            Ok(o) => self.inner == o.borrow().inner,
+            Err(_) => false,
+        }
+    }
+
+    fn __ne__(&self, other: &Bound<'_, PyAny>) -> bool {
+        !self.__eq__(other)
+    }
+
+    fn __lt__(&self, other: PyRef<'_, PyFrequency>) -> bool {
+        self.inner < other.inner
+    }
+    fn __le__(&self, other: PyRef<'_, PyFrequency>) -> bool {
+        self.inner <= other.inner
+    }
+    fn __gt__(&self, other: PyRef<'_, PyFrequency>) -> bool {
+        self.inner > other.inner
+    }
+    fn __ge__(&self, other: PyRef<'_, PyFrequency>) -> bool {
+        self.inner >= other.inner
+    }
+}
+
+/// A **selector**: a partial key naming *which* asset in a [`Snapshot`] a
+/// [`Pick`](fugazi.pick) should read. Symbol and frequency are both optional;
+/// an empty selector is legal and stands for the [`Pick`] no-query,
+/// single-entry-unpack path.
+///
+/// Coerced automatically from a Python `str` (symbol only), from a
+/// `Frequency` (freq only), from a `(str, Frequency | str | None)` tuple, and
+/// from a `dict` — so `ta.Snapshot({"BTC": ...})` and
+/// `ta.Snapshot({ta.Selector(symbol="BTC", freq="1h"): ...})` both work.
+#[pyclass(name = "Selector", frozen, skip_from_py_object)]
+#[derive(Clone)]
+struct PySelector {
+    inner: Selector,
+}
+
+#[pymethods]
+impl PySelector {
+    /// Build a selector. Both fields are optional and default to `None`; an
+    /// empty selector is legal and drives the [`Pick`] single-entry-unpack path.
+    /// `freq` accepts a `Frequency` instance or a token string (`"1h"`, `"1d"`).
+    #[new]
+    #[pyo3(signature = (symbol = None, freq = None))]
+    fn new(symbol: Option<String>, freq: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let freq = freq.map(coerce_frequency).transpose()?;
+        Ok(Self {
+            inner: Selector::new(symbol, freq),
+        })
+    }
+
+    #[getter]
+    fn symbol(&self) -> Option<String> {
+        self.inner.symbol.clone()
+    }
+
+    #[getter]
+    fn freq(&self) -> Option<PyFrequency> {
+        self.inner.freq.map(|inner| PyFrequency { inner })
+    }
+
+    /// True when both fields are `None` — the `Pick` no-query case.
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Match this selector as a **query** against `storage`: each `None`
+    /// field on the query is a wildcard; a `Some` field must equal storage.
+    fn matches(&self, storage: PyRef<'_, PySelector>) -> bool {
+        self.inner.matches(&storage.inner)
+    }
+
+    fn __hash__(&self) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        self.inner.hash(&mut h);
+        h.finish()
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        match coerce_selector(other) {
+            Ok(sel) => self.inner == sel,
+            Err(_) => false,
+        }
+    }
+
+    fn __ne__(&self, other: &Bound<'_, PyAny>) -> bool {
+        !self.__eq__(other)
+    }
+
+    fn __repr__(&self) -> String {
+        match (&self.inner.symbol, &self.inner.freq) {
+            (Some(s), Some(f)) => format!("Selector(symbol={:?}, freq={:?})", s, f.as_token()),
+            (Some(s), None) => format!("Selector(symbol={s:?})"),
+            (None, Some(f)) => format!("Selector(freq={:?})", f.as_token()),
+            (None, None) => "Selector()".to_string(),
+        }
+    }
+}
+
+/// Extract a [`Frequency`] from a Python `PyFrequency` or a token `str`.
+fn coerce_frequency(obj: &Bound<'_, PyAny>) -> PyResult<Frequency> {
+    if let Ok(f) = obj.cast::<PyFrequency>() {
+        return Ok(f.borrow().inner);
+    }
+    if let Ok(s) = obj.extract::<String>() {
+        use std::str::FromStr;
+        return Frequency::from_str(&s).map_err(PyValueError::new_err);
+    }
+    Err(PyTypeError::new_err(
+        "expected a Frequency or a str token (e.g. \"1h\", \"1d\")",
+    ))
+}
+
+/// Coerce a Python key into a [`Selector`]. Accepts:
+///
+/// - `PySelector` directly.
+/// - `str` — parsed as a symbol (`Selector::by_symbol`).
+/// - `PyFrequency` — parsed as a frequency (`Selector::by_freq`).
+/// - `(str, Frequency | str | None)` tuple — a `(symbol, freq)` pair.
+fn coerce_selector(obj: &Bound<'_, PyAny>) -> PyResult<Selector> {
+    if let Ok(sel) = obj.cast::<PySelector>() {
+        return Ok(sel.borrow().inner.clone());
+    }
+    if let Ok(f) = obj.cast::<PyFrequency>() {
+        return Ok(Selector::by_freq(f.borrow().inner));
+    }
+    if let Ok(s) = obj.extract::<String>() {
+        return Ok(Selector::by_symbol(s));
+    }
+    if let Ok((sym, freq)) = obj.extract::<(String, Option<Py<PyAny>>)>() {
+        let freq = match freq {
+            None => None,
+            Some(f) => Some(coerce_frequency(f.bind(obj.py()))?),
+        };
+        return Ok(Selector::new(Some(sym), freq));
+    }
+    Err(PyTypeError::new_err(
+        "Snapshot keys must be a Selector, a str (symbol), a Frequency, or a (symbol, freq) tuple",
+    ))
+}
 
 /// A per-bar snapshot of several assets: keyed collection of [`PyAtom`]s.
 ///
-/// The multi-asset input frame — a strategy or cross-asset indicator's `update`
-/// is fed one `Snapshot` per bar and the [`Pick`] leaf projects one asset out
-/// by key. Dict-like: `snap[key]` reads, `snap[key] = atom` writes, `key in
-/// snap` tests membership, `len(snap)` counts assets.
+/// The multi-asset input frame — a strategy or cross-asset indicator's
+/// `update` is fed one `Snapshot` per bar and the [`Pick`] leaf projects one
+/// asset out by [`Selector`]. Dict-like: `snap[selector]` reads,
+/// `snap[selector] = atom` writes, `selector in snap` tests membership,
+/// `len(snap)` counts assets.
 #[pyclass(name = "Snapshot", unsendable, skip_from_py_object)]
 #[derive(Clone)]
 struct PySnapshot {
-    inner: Snapshot<String>,
+    inner: Snapshot<Selector>,
 }
 
 #[pymethods]
@@ -1513,28 +1702,32 @@ impl PySnapshot {
     #[pyo3(signature = (mapping = None))]
     fn new(mapping: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
         let inner = match mapping {
-            None => Snapshot::<String>::new(),
+            None => Snapshot::<Selector>::new(),
             Some(m) => extract_snapshot(m)?,
         };
         Ok(Self { inner })
     }
 
     /// Read the atom for `key`; raises `KeyError` if absent (dict semantics).
-    fn __getitem__(&self, key: &str) -> PyResult<PyAtom> {
+    fn __getitem__(&self, key: &Bound<'_, PyAny>) -> PyResult<PyAtom> {
+        let sel = coerce_selector(key)?;
         self.inner
-            .get(key)
+            .get(&sel)
             .cloned()
             .map(|inner| PyAtom { inner })
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(key.to_string()))
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(format!("{sel:?}")))
     }
 
     /// Insert or replace the atom for `key`.
-    fn __setitem__(&mut self, key: String, atom: PyRef<'_, PyAtom>) {
-        self.inner.insert(key, atom.inner.clone());
+    fn __setitem__(&mut self, key: &Bound<'_, PyAny>, atom: PyRef<'_, PyAtom>) -> PyResult<()> {
+        let sel = coerce_selector(key)?;
+        self.inner.insert(sel, atom.inner.clone());
+        Ok(())
     }
 
-    fn __contains__(&self, key: &str) -> bool {
-        self.inner.contains_key(key)
+    fn __contains__(&self, key: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let sel = coerce_selector(key)?;
+        Ok(self.inner.contains_key(&sel))
     }
 
     fn __len__(&self) -> usize {
@@ -1542,20 +1735,31 @@ impl PySnapshot {
     }
 
     /// Non-raising variant of `snap[key]` — returns `None` on a miss.
-    fn get(&self, key: &str) -> Option<PyAtom> {
-        self.inner.get(key).cloned().map(|inner| PyAtom { inner })
+    fn get(&self, key: &Bound<'_, PyAny>) -> PyResult<Option<PyAtom>> {
+        let sel = coerce_selector(key)?;
+        Ok(self.inner.get(&sel).cloned().map(|inner| PyAtom { inner }))
     }
 
     /// Insert or replace; returns the previous atom if any.
-    fn insert(&mut self, key: String, atom: PyRef<'_, PyAtom>) -> Option<PyAtom> {
-        self.inner
-            .insert(key, atom.inner.clone())
-            .map(|inner| PyAtom { inner })
+    fn insert(
+        &mut self,
+        key: &Bound<'_, PyAny>,
+        atom: PyRef<'_, PyAtom>,
+    ) -> PyResult<Option<PyAtom>> {
+        let sel = coerce_selector(key)?;
+        Ok(self
+            .inner
+            .insert(sel, atom.inner.clone())
+            .map(|inner| PyAtom { inner }))
     }
 
-    /// The list of keys present in this snapshot (arbitrary order).
-    fn keys(&self) -> Vec<String> {
-        self.inner.keys().cloned().collect()
+    /// The list of [`Selector`] keys present in this snapshot (arbitrary order).
+    fn keys(&self) -> Vec<PySelector> {
+        self.inner
+            .keys()
+            .cloned()
+            .map(|inner| PySelector { inner })
+            .collect()
     }
 
     /// True if this snapshot carries no assets.
@@ -1563,8 +1767,30 @@ impl PySnapshot {
         self.inner.is_empty()
     }
 
+    /// Structural lookup: returns the first atom whose stored [`Selector`]
+    /// matches `query` (`None` fields on the query are wildcards). If a
+    /// query could match more than one key, iteration order is arbitrary;
+    /// disambiguate by supplying both `symbol` and `freq`.
+    fn find(&self, query: &Bound<'_, PyAny>) -> PyResult<Option<PyAtom>> {
+        let sel = coerce_selector(query)?;
+        Ok(self.inner.find(&sel).cloned().map(|inner| PyAtom { inner }))
+    }
+
+    /// The sole atom in a single-entry snapshot, if there is exactly one.
+    /// Returns `None` on an empty snapshot; raises `RuntimeError` (translated
+    /// from a Rust panic) on 2+ entries — the same loud failure the no-query
+    /// `pick()` uses.
+    fn sole_atom(&self) -> Option<PyAtom> {
+        self.inner.sole_atom().cloned().map(|inner| PyAtom { inner })
+    }
+
     fn __repr__(&self) -> String {
-        format!("Snapshot(keys={:?})", self.keys())
+        let keys: Vec<String> = self
+            .inner
+            .keys()
+            .map(|k| PySelector { inner: k.clone() }.__repr__())
+            .collect();
+        format!("Snapshot(keys=[{}])", keys.join(", "))
     }
 }
 
@@ -1648,7 +1874,7 @@ impl<I> Indicator for AtomBox<I> {
 
 /// An atom-emitting source erased to one of the two input domains it can be
 /// rooted in on the Python side: `Atom` (the identity passthrough) or
-/// `Snapshot<String>` (a `Pick`). Feeds the optional `source=` argument every
+/// `Snapshot<Selector>` (a `Pick`). Feeds the optional `source=` argument every
 /// atom-input leaf pyfunction accepts (`close(source=...)`, `year(source=...)`, …).
 #[derive(Clone)]
 enum AnyAtomSource {
@@ -1659,7 +1885,7 @@ enum AnyAtomSource {
     /// returns).
     #[allow(dead_code)]
     Atom(AtomBox<Atom>),
-    Snapshot(AtomBox<Snapshot<String>>),
+    Snapshot(AtomBox<Snapshot<Selector>>),
 }
 
 /// A source that emits `Atom`s per bar — the intermediate between a raw
@@ -2879,8 +3105,8 @@ fn extract_real(sample: &Bound<'_, PyAny>) -> PyResult<Real> {
 }
 
 /// Iterate a Python sequence of snapshots (`list[Snapshot]` or `list[dict]`)
-/// into a native `Vec<Snapshot<String>>` for a snapshot-rooted node's `feed`.
-fn snapshots_from_sequence(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Snapshot<String>>> {
+/// into a native `Vec<Snapshot<Selector>>` for a snapshot-rooted node's `feed`.
+fn snapshots_from_sequence(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Snapshot<Selector>>> {
     let mut out = Vec::new();
     let iter = obj.try_iter().map_err(|_| {
         PyTypeError::new_err(
@@ -2893,19 +3119,18 @@ fn snapshots_from_sequence(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Snapshot<Stri
     Ok(out)
 }
 
-/// Extract a `Snapshot<String>` for a snapshot-rooted node's `update`. Accepts
-/// a `PySnapshot` directly, or a Python `dict` mapping symbol names to
-/// `PyAtom`/`PyCandle` values.
-fn extract_snapshot(sample: &Bound<'_, PyAny>) -> PyResult<Snapshot<String>> {
+/// Extract a `Snapshot<Selector>` for a snapshot-rooted node's `update`.
+/// Accepts a `PySnapshot` directly, or a Python `dict` whose keys are coerced
+/// via [`coerce_selector`] (str → symbol, Frequency → freq, Selector as-is,
+/// (str, freq) tuple → both fields).
+fn extract_snapshot(sample: &Bound<'_, PyAny>) -> PyResult<Snapshot<Selector>> {
     if let Ok(snap) = sample.cast::<PySnapshot>() {
         return Ok(snap.borrow().inner.clone());
     }
     if let Ok(dict) = sample.cast::<pyo3::types::PyDict>() {
-        let mut out = Snapshot::<String>::new();
+        let mut out = Snapshot::<Selector>::new();
         for (k, v) in dict.iter() {
-            let key = k.extract::<String>().map_err(|_| {
-                PyTypeError::new_err("Snapshot dict keys must be str")
-            })?;
+            let key = coerce_selector(&k)?;
             let atom = extract_atom(&v)?;
             out.insert(key, atom);
         }
@@ -3377,20 +3602,62 @@ atom_leaf_signal!(
     "Signal: true on Saturday/Sunday, false Monday through Friday. `False` on bars whose `atom.time` is `None`."
 );
 
-/// Source (atom-emitting): project one asset's `Atom` out of a `Snapshot` by
-/// key. Compose with any atom-input leaf by passing the returned `AtomSource`
-/// as its `source=` argument.
+///// Source (atom-emitting): project one asset's `Atom` out of a `Snapshot` by
+/// [`Selector`]. Compose with any atom-input leaf by passing the returned
+/// `AtomSource` as its `source=` argument.
+///
+/// `symbol` and `freq` are the two [`Selector`] fields; both optional. Legal
+/// forms:
+///
+/// - `pick("BTC")` / `pick(symbol="BTC")` — match by symbol, any frequency.
+/// - `pick(freq="1h")` — match by frequency, any symbol.
+/// - `pick(symbol="BTC", freq="1h")` — exact match.
+/// - `pick()` — *no query*. Every `update` runs the [`Snapshot`] sole-atom
+///   unpack: the snapshot must contain exactly one entry, otherwise the call
+///   panics (translated to a Python `RuntimeError`). This is the
+///   single-series ergonomic shortcut — writes cleanly for a strategy that
+///   was authored assuming one asset but fed through a `Snapshot`-shaped
+///   driver.
 ///
 /// ```python
 /// import fugazi as ta
 /// btc_close = ta.close(source=ta.pick("BTC"))
 /// spread = ta.close(ta.pick("BTC")) - ta.close(ta.pick("ETH"))
+/// # Cross-frequency:
+/// hourly   = ta.close(ta.pick(freq="1h"))
+/// # Single-series:
+/// close    = ta.close(source=ta.pick())
 /// ```
 #[pyfunction]
-fn pick(key: String) -> PyAtomSource {
-    PyAtomSource {
-        inner: AnyAtomSource::Snapshot(AtomBox::new(Pick::<String>::new(key))),
-    }
+#[pyo3(signature = (symbol = None, freq = None))]
+fn pick(symbol: Option<&Bound<'_, PyAny>>, freq: Option<&Bound<'_, PyAny>>) -> PyResult<PyAtomSource> {
+    // Allow `pick("BTC")` alongside `pick(symbol="BTC")`: the first positional
+    // arg accepts either a plain str (→ symbol) or a Selector.
+    let selector = match (symbol, freq) {
+        (None, None) => Selector::default(),
+        (Some(s), None) => {
+            // If the first arg is already a full Selector / Frequency /
+            // tuple, honor it verbatim. Otherwise treat it as a symbol str.
+            coerce_selector(s)?
+        }
+        (None, Some(f)) => Selector::by_freq(coerce_frequency(f)?),
+        (Some(s), Some(f)) => {
+            let sym = s.extract::<String>().map_err(|_| {
+                PyTypeError::new_err(
+                    "when both `symbol` and `freq` are given, `symbol` must be a str",
+                )
+            })?;
+            Selector::exact(sym, coerce_frequency(f)?)
+        }
+    };
+    let pick = if selector.is_empty() {
+        Pick::new()
+    } else {
+        Pick::matching(selector)
+    };
+    Ok(PyAtomSource {
+        inner: AnyAtomSource::Snapshot(AtomBox::new(pick)),
+    })
 }
 
 /// Source: the raw value stream, passed straight through. Root an indicator
@@ -5063,6 +5330,8 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySchemaBuilder>()?;
     m.add_class::<PyOverlayInfo>()?;
     m.add_class::<PyAtom>()?;
+    m.add_class::<PyFrequency>()?;
+    m.add_class::<PySelector>()?;
     m.add_class::<PySnapshot>()?;
     m.add_class::<PyAtomSource>()?;
     m.add_class::<PyIndicator>()?;

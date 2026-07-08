@@ -237,14 +237,14 @@ Safe by default, override per subtree: fugazi's readiness machinery waits for
 CLI's per-overlay CSV trim in `fugazi get`) — `unstable(...)` is the single
 opt-out.
 
-### Cross-asset composition — `Snapshot` and `pick(key)`
+### Cross-asset composition — `Snapshot`, `Selector`, and `pick(...)`
 
 To reason about more than one asset per bar, feed a **Snapshot** — a keyed
-collection of `Atom`s (one per asset for the current bar) — and use `pick(key)`
+collection of `Atom`s (one per asset for the current bar) — and use `pick(...)`
 to project one asset out of it. Every atom-input leaf (`close()`, `high()`,
 `atr()`, `year()`, `is_weekday()`, ...) takes an optional `source=` argument
-that re-roots it onto a `pick()`, so cross-asset expressions compose from the
-same primitives as single-asset ones:
+that re-roots it onto a `pick(...)`, so cross-asset expressions compose from
+the same primitives as single-asset ones:
 
 ```python
 import fugazi as ta
@@ -263,17 +263,36 @@ snap = ta.Snapshot({
 print(spread.update(snap))          # -> 40.0
 ```
 
-A snapshot behaves like a dict of atoms: `snap[key]`, `snap[key] = atom`,
-`key in snap`, `len(snap)`, `snap.keys()`. Constructors accept a plain
-Python mapping, and `update()` accepts either a `Snapshot` or a bare
-`dict[str, Atom | Candle]` (lifted on the fly), so the surface fits both
-"build the frame once" and "hand a fresh dict per bar" styles.
+Snapshot keys are **Selectors** — a `(symbol?, freq?)` pair. A `Selector`
+matches structurally: a `None` field on the query wildcards the corresponding
+storage field, so `pick(symbol="BTC")` finds every BTC entry regardless of
+frequency. A bare Python `str` is coerced to `Selector.by_symbol(...)`, a
+`(str, Frequency|str)` tuple to a full `(symbol, freq)` pair, so most call
+sites don't need to reach for `Selector` explicitly. Cross-frequency indexes
+disambiguate by giving both fields:
 
-A `pick()` is *atom-emitting*, not real-emitting: it feeds any atom-input leaf
-via `source=`. Compositions preserve the input domain — the arithmetic below
-still consumes snapshots — and mixing a snapshot-rooted indicator with a
-candle-rooted one is a `TypeError` (a candle-input and a snapshot-input can't
-share a bar).
+```python
+snap = ta.Snapshot({
+    ("BTC", "1h"): ta.Atom(ta.Candle(100, 101, 99, 100, 1), time=1_710_504_000_000),
+    ("BTC", "1d"): ta.Atom(ta.Candle(90, 105, 88, 102, 1),  time=1_710_504_000_000),
+    ("ETH", "1h"): ta.Atom(ta.Candle(60, 61, 59, 60, 1),    time=1_710_504_000_000),
+})
+btc_hourly = ta.close(ta.pick(symbol="BTC", freq="1h"))
+any_hourly = ta.close(ta.pick(freq="1h"))              # wildcard on symbol
+assert btc_hourly.update(snap) == 100.0
+```
+
+**Snapshot behaves like a dict of atoms**: `snap[selector]`, `snap[selector] =
+atom`, `selector in snap`, `len(snap)`, `snap.keys()`. Constructors accept a
+plain Python mapping, and `update()` accepts either a `Snapshot` or a bare
+dict (lifted on the fly), so the surface fits both "build the frame once" and
+"hand a fresh dict per bar" styles.
+
+A `pick(...)` is *atom-emitting*, not real-emitting: it feeds any atom-input
+leaf via `source=`. Compositions preserve the input domain — the arithmetic
+below still consumes snapshots — and mixing a snapshot-rooted indicator with
+a candle-rooted one is a `TypeError` (a candle-input and a snapshot-input
+can't share a bar).
 
 ```python
 # Any atom-input leaf takes source=: the price accessors and every calendar
@@ -281,6 +300,21 @@ share a bar).
 btc_close = ta.close(source=ta.pick("BTC"))
 btc_year  = ta.year(source=ta.pick("BTC"))
 ratio     = ta.close(ta.pick("BTC")) / ta.close(ta.pick("ETH"))
+```
+
+**The zero-arg `pick()` is the single-series shortcut.** With no query it
+runs `Snapshot.sole_atom` on every bar: the snapshot must contain exactly one
+entry (its atom is what the pick emits), otherwise the call **panics loudly**
+(a Python `RuntimeError` translated from the Rust panic). That's the
+"strategy authored for one asset but fed a `Snapshot`-shaped driver" case —
+the loud failure catches multi-asset input that would otherwise silently pick
+whichever entry the HashMap iterator happened to hand back.
+
+```python
+# Single-series strategy, snapshot-shaped input:
+close = ta.close(source=ta.pick())
+snap  = ta.Snapshot({"BTC": ta.Atom(ta.Candle(1, 1, 1, 42, 1))})
+assert close.update(snap) == 42.0
 ```
 
 **Atom equality is by `time`.** Two atoms compare equal iff their bar-open

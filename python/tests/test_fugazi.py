@@ -1359,7 +1359,8 @@ def test_snapshot_dict_like_operations():
     assert not snap.is_empty()
     assert "BTC" in snap
     assert "SOL" not in snap
-    assert set(snap.keys()) == {"BTC", "ETH"}
+    # Keys are Selectors now; a bare str is coerced to Selector.by_symbol.
+    assert set(snap.keys()) == {ta.Selector(symbol="BTC"), ta.Selector(symbol="ETH")}
     assert snap["BTC"].candle.close == 100.0
     assert snap.get("SOL") is None
 
@@ -1453,3 +1454,132 @@ def test_atom_source_metadata():
     assert src.value().candle.close == 100.0
     src.reset()
     assert src.value() is None
+
+
+# ---------------------------------------------------------------------------
+# Frequency + Selector construction and coercion.
+# ---------------------------------------------------------------------------
+
+
+def test_frequency_roundtrip():
+    assert str(ta.Frequency("1h")) == "1h"
+    assert str(ta.Frequency("15m")) == "15m"
+    assert str(ta.Frequency("1M")) == "1M"
+
+
+def test_frequency_orders_by_duration_not_variant():
+    # 120 minutes > 1 hour — total order is by seconds-per-bar, not variant tag.
+    assert ta.Frequency("120m") > ta.Frequency("1h")
+    assert ta.Frequency("1d") > ta.Frequency("24h") or ta.Frequency("1d") == ta.Frequency("24h")
+
+
+def test_frequency_rejects_bad_tokens():
+    with pytest.raises(ValueError):
+        ta.Frequency("garbage")
+    with pytest.raises(ValueError):
+        ta.Frequency("0h")
+
+
+def test_selector_construction_forms():
+    # Everything's optional; the empty selector is legal and stands for the
+    # no-query single-entry unpack.
+    assert ta.Selector().is_empty()
+    assert ta.Selector(symbol="BTC").symbol == "BTC"
+    assert ta.Selector(symbol="BTC").freq is None
+    assert ta.Selector(freq="1h").symbol is None
+    assert str(ta.Selector(freq="1h").freq) == "1h"
+    assert ta.Selector(symbol="BTC", freq="1h").symbol == "BTC"
+    # `freq` accepts a Frequency instance too, not just a str.
+    assert ta.Selector(freq=ta.Frequency("1h")).freq == ta.Frequency("1h")
+
+
+def test_selector_matches_wildcard_semantics():
+    query = ta.Selector(symbol="BTC")  # freq is a wildcard
+    assert query.matches(ta.Selector(symbol="BTC", freq="1h"))
+    assert query.matches(ta.Selector(symbol="BTC"))
+    assert not query.matches(ta.Selector(symbol="ETH", freq="1h"))
+    # An empty query matches every storage entry.
+    empty = ta.Selector()
+    assert empty.matches(ta.Selector(symbol="BTC"))
+    assert empty.matches(ta.Selector(symbol="ETH", freq="1d"))
+
+
+def test_snapshot_accepts_selector_keys():
+    snap = ta.Snapshot(
+        {
+            ta.Selector(symbol="BTC", freq="1h"): _atom(ms=1, close=100.0),
+            ta.Selector(symbol="BTC", freq="1d"): _atom(ms=1, close=300.0),
+        }
+    )
+    # Exact lookup disambiguates.
+    exact = snap[ta.Selector(symbol="BTC", freq="1h")]
+    assert exact.candle.close == 100.0
+
+
+def test_snapshot_find_wildcards_over_freq():
+    snap = ta.Snapshot(
+        {
+            ta.Selector(symbol="BTC", freq="1h"): _atom(ms=1, close=100.0),
+            ta.Selector(symbol="ETH", freq="1h"): _atom(ms=1, close=50.0),
+        }
+    )
+    # A symbol-only query wildcards freq — finds the BTC entry.
+    hit = snap.find(ta.Selector(symbol="BTC"))
+    assert hit is not None
+    assert hit.candle.close == 100.0
+
+
+def test_snapshot_tuple_key_coerces_to_selector():
+    snap = ta.Snapshot()
+    snap[("BTC", "1h")] = _atom(ms=1, close=100.0)
+    # Round-tripped through Selector::exact.
+    assert snap[ta.Selector(symbol="BTC", freq="1h")].candle.close == 100.0
+
+
+def test_pick_no_query_unpacks_single_entry_snapshot():
+    # Single-series ergonomics: `ta.pick()` with no args reads the sole atom.
+    close = ta.close(source=ta.pick())
+    snap = ta.Snapshot({"BTC": _atom(ms=1, close=42.0)})
+    assert close.update(snap) == pytest.approx(42.0)
+
+
+def test_pick_no_query_none_on_empty_snapshot():
+    close = ta.close(source=ta.pick())
+    assert close.update(ta.Snapshot()) is None
+
+
+def test_pick_no_query_raises_on_multi_entry_snapshot():
+    # A no-query pick fed a multi-asset snapshot is a wiring bug: loud failure
+    # (Rust panic surfaced as a Python RuntimeError from PyO3).
+    close = ta.close(source=ta.pick())
+    snap = ta.Snapshot(
+        {"BTC": _atom(ms=1, close=100.0), "ETH": _atom(ms=1, close=60.0)}
+    )
+    with pytest.raises(BaseException):  # pyo3 panic surfaces as PanicException
+        close.update(snap)
+
+
+def test_pick_by_freq_wildcards_symbol():
+    # A snapshot keyed by (symbol, freq); a freq-only pick reads the first
+    # matching entry irrespective of symbol.
+    snap = ta.Snapshot(
+        {
+            ("BTC", "1h"): _atom(ms=1, close=100.0),
+            ("ETH", "1d"): _atom(ms=1, close=50.0),
+        }
+    )
+    hourly = ta.close(source=ta.pick(freq="1h"))
+    assert hourly.update(snap) == pytest.approx(100.0)
+
+
+def test_pick_exact_disambiguates_between_frequencies():
+    snap = ta.Snapshot(
+        {
+            ("BTC", "1h"): _atom(ms=1, close=100.0),
+            ("BTC", "1d"): _atom(ms=1, close=300.0),
+        }
+    )
+    hourly = ta.close(source=ta.pick(symbol="BTC", freq="1h"))
+    daily = ta.close(source=ta.pick(symbol="BTC", freq="1d"))
+    assert hourly.update(snap) == pytest.approx(100.0)
+    assert daily.update(snap) == pytest.approx(300.0)
