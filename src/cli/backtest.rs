@@ -50,8 +50,9 @@ fn measured_report(
     fugazi::backtest::run(
         &mut strategy,
         &mut wallet,
-        symbol,
-        atoms.iter().map(|(_, a)| a.clone()),
+        atoms
+            .iter()
+            .map(|(_, a)| fugazi::types::Snapshot::single(symbol.clone(), a.clone())),
     )
 }
 
@@ -165,23 +166,18 @@ pub fn run_iteration(
     let schema = schema_from_atoms(atoms);
     let mut strategy = spec.build(&schema);
     let mut wallet = PaperWallet::with_costs(inputs.cash, costs);
-    let report = fugazi::backtest::run(
-        &mut strategy,
-        &mut wallet,
-        symbol.clone(),
-        atoms.iter().map(|(_, a)| a.clone()),
-    );
+    let snapshots = || {
+        atoms
+            .iter()
+            .map(|(_, a)| fugazi::types::Snapshot::single(symbol.clone(), a.clone()))
+    };
+    let report = fugazi::backtest::run(&mut strategy, &mut wallet, snapshots());
     // Gross twin under active costs: same strategy/atoms/cash, no cost
     // model, so any difference is attributable to costs alone.
     let gross_report = if costs_active {
         let mut gs = spec.build(&schema);
         let mut gw = PaperWallet::new(inputs.cash);
-        Some(fugazi::backtest::run(
-            &mut gs,
-            &mut gw,
-            symbol.clone(),
-            atoms.iter().map(|(_, a)| a.clone()),
-        ))
+        Some(fugazi::backtest::run(&mut gs, &mut gw, snapshots()))
     } else {
         None
     };

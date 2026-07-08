@@ -117,7 +117,13 @@ fn bench_macd_crossover_components() {
         let mut strat = macd_crossover("X", 12, 26, 9);
         let mut w: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
         let t = Instant::now();
-        let rep = run(&mut strat, &mut w, "X", candles.clone());
+        let rep = run(
+            &mut strat,
+            &mut w,
+            candles
+                .iter()
+                .map(|c| fugazi::types::Snapshot::single("X", (*c).into())),
+        );
         let el = t.elapsed().as_secs_f64();
         baseline.push(el);
         let _ = std::hint::black_box(rep.equity_curve.len());
@@ -128,7 +134,13 @@ fn bench_macd_crossover_components() {
         let mut strat = MacdCrossoverManual::new("X", 12, 26, 9);
         let mut w: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
         let t = Instant::now();
-        let rep = run(&mut strat, &mut w, "X", candles.clone());
+        let rep = run(
+            &mut strat,
+            &mut w,
+            candles
+                .iter()
+                .map(|c| fugazi::types::Snapshot::single("X", (*c).into())),
+        );
         let el = t.elapsed().as_secs_f64();
         manual.push(el);
         let _ = std::hint::black_box(rep.equity_curve.len());

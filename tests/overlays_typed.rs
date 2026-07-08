@@ -189,15 +189,15 @@ fn overlay_signal_drives_a_backtest_end_to_end() {
         Fixture { close: 110.0, vol: 0.20, risk_on: true, regime: "bear" },
     ];
 
-    // The strategy consumes `Snapshot<String>`; wrap each atom in a size-1
-    // snapshot (the driver also accepts `Vec<Atom>` via the `From<Atom>` lift,
-    // but writing it out makes the shape explicit for this test).
+    // The strategy consumes `Snapshot<String>`; wrap each atom in a
+    // symbol-tagged size-1 snapshot so `fugazi::backtest::run` prices the
+    // wallet each bar.
     let snapshots: Vec<Snapshot<String>> = bars
         .iter()
-        .map(|f| Snapshot::<String>::of_atom(atom(&schema, f)))
+        .map(|f| Snapshot::<String>::single(symbol.clone(), atom(&schema, f)))
         .collect();
     let mut wallet: PaperWallet<String> = PaperWallet::new(10_000.0);
-    let report = fugazi::backtest::run(&mut strategy, &mut wallet, symbol.clone(), snapshots);
+    let report = fugazi::backtest::run(&mut strategy, &mut wallet, snapshots);
 
     // Expect two fills: a Buy (the entry) then a Sell (the regime-flip exit).
     assert_eq!(

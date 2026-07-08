@@ -737,9 +737,25 @@ impl<Sym> Snapshot<Sym> {
     /// freq)` tag. Convenient for the single-series driver hot path — an
     /// empty [`Selector`] on [`Pick::new`](crate::indicators::Pick::new) will
     /// unpack the sole atom without inspecting the tag.
+    ///
+    /// Note: an untagged entry is skipped by
+    /// [`fugazi::backtest::run`](crate::backtest::run)'s wallet-pricing
+    /// loop — there's no symbol to price against — so a single-series run
+    /// that expects the wallet to be marked to market and book fills should
+    /// use [`single`](Self::single) instead.
     pub fn of_atom(atom: Atom) -> Self {
         Self {
             entries: vec![(None, None, atom)],
+        }
+    }
+
+    /// A single-entry snapshot tagged with `symbol` and no `freq`. The
+    /// single-series shortcut for building a driver-ready snapshot:
+    /// [`fugazi::backtest::run`](crate::backtest::run) prices the wallet on
+    /// this entry's `symbol` each bar.
+    pub fn single(symbol: Sym, atom: Atom) -> Self {
+        Self {
+            entries: vec![(Some(symbol), None, atom)],
         }
     }
 

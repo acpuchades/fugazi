@@ -400,10 +400,13 @@ use fugazi::Snapshot;
 # let mut strat = MyStrategy;
 # let candles: Vec<Candle> = vec![];
 let mut wallet = PaperWallet::new(10_000.0);
-// `run` accepts `Vec<Candle>` / `Vec<Atom>` too via the blanket
-// `From<Candle> for Snapshot<Sym>` / `From<Atom> for Snapshot<Sym>` lifts —
-// each bar becomes an untagged size-1 snapshot for the strategy to unpack.
-let report = run(&mut strat, &mut wallet, "AAPL", candles);
+// Each bar is a `Snapshot<Sym>` — a keyed collection of tagged atoms. For a
+// single-series run, `Snapshot::single(sym, atom)` tags the sole entry with
+// the trading symbol so `run` prices the wallet each bar.
+let snapshots = candles
+    .into_iter()
+    .map(|c| Snapshot::single("AAPL", c.into()));
+let report = run(&mut strat, &mut wallet, snapshots);
 // report.equity_curve : Vec<Real>   — one mark-to-market point per bar
 // report.fills        : Vec<Fill<_>> — every booked order, bar-indexed
 ```
