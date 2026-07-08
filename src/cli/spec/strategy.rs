@@ -72,6 +72,14 @@ pub struct StrategySpec {
     pub long: Option<SideSpec>,
     #[serde(default)]
     pub short: Option<SideSpec>,
+    /// Optional **position-sizing multiplier** — a real-valued source read on
+    /// every entry (or reversal) and multiplied into the value-fraction
+    /// magnitude. Defaults to a constant `1.0` (all-in). Direction comes from
+    /// the entry side; a negative reading is not meaningful, and a `None`
+    /// reading skips the trade for that bar (safe default — build a well-defined
+    /// fallback into the spec if that isn't what you want).
+    #[serde(default)]
+    pub sizing: Option<Box<SourceSpec>>,
 }
 
 impl StrategySpec {
@@ -133,6 +141,9 @@ impl StrategySpec {
             if let Some(tp) = &short.take_profit {
                 strat = strat.short_take_profit(AsReal::new(tp.build(&anchor, schema)));
             }
+        }
+        if let Some(sizing) = &self.sizing {
+            strat = strat.position_sizing(AsReal::new(sizing.build(&anchor, schema)));
         }
         DynSingleStrategy { inner: strat }
     }

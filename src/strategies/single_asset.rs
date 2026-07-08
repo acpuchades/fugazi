@@ -1,7 +1,7 @@
 //! [`SingleAssetStrategy`]: the generic, all-in skeleton every other strategy in
 //! this catalogue specialises.
 
-use crate::indicators::{Const, Position};
+use crate::indicators::{Const, Position, Value};
 use crate::prelude::*;
 use crate::types::{Selector, Snapshot};
 
@@ -58,13 +58,26 @@ fn extract_self_atom<Sym: PartialEq + Clone>(snap: &Snapshot<Sym>, symbol: &Sym)
 ///   flips with no flat state;
 /// * **long/short with a flat rest** — give each side a distinct `exit`.
 ///
-/// Positions are always sized all-in against equity with
-/// [`value_frac(1.0)`](crate::Size::value_frac), so an entry on the opposite side
-/// *reverses* (equity survives a flip, unlike cash) — a single
-/// [`set`](crate::Wallet::set) re-sizes all-in exactly. Each transition is guarded
-/// by the current position, so an entry while already on that side is a no-op and
-/// a level-valued signal (e.g. `roc > 0`) drives the same idempotent behaviour an
-/// edge signal does.
+/// Positions are sized against equity with
+/// [`value_frac(m)`](crate::Size::value_frac), where `m` is the current value of
+/// the strategy's **position-sizing indicator** — a magnitude multiplier that
+/// defaults to a constant `1.0` (all-in). Set it with
+/// [`position_sizing`](Self::position_sizing) to plug in Kelly-scaled,
+/// vol-targeted, or fixed-fractional sizing (e.g.
+/// `.position_sizing(Value::new(0.5))` for half-position, or a
+/// `target_vol.div(realized_vol)` expression for vol targeting). The multiplier
+/// is a *magnitude only* — direction still comes from the entry's [`Side`], so a
+/// negative reading has no meaning; if the sizing indicator emits `None`
+/// (still warming, or a division-by-zero), the strategy simply skips the whole
+/// [`trade`](Strategy::trade) call for that bar (safe default; opt-out is an
+/// explicit `.or(Value::new(1.0))` at the composition level). Entries and
+/// reversals use whatever the sizing indicator reads at that bar — a single
+/// [`set`](crate::Wallet::set) at the resulting `value_frac` re-sizes exactly
+/// (equity survives a flip, unlike cash). Each transition is guarded by the
+/// current position, so an entry while already on that side is a no-op and a
+/// level-valued signal (e.g. `roc > 0`) drives the same idempotent behaviour an
+/// edge signal does — the sizing multiplier only takes effect on the *next*
+/// transition, not mid-position.
 ///
 /// Entries and signal exits are **market orders**: they fill a bar *after* the
 /// signal, at the next bar's `open` (the [`Wallet`](crate::Wallet) queues them —
@@ -124,9 +137,10 @@ fn extract_self_atom<Sym: PartialEq + Clone>(snap: &Snapshot<Sym>, symbol: &Sym)
 ///
 /// [`is_ready`](Strategy::is_ready) returns `true` only once `bars_seen` reaches
 /// the largest `stable_period()` across every wired signal (`long`,
-/// `close_long`, `short`, `close_short`) and every attached protective level —
-/// so the driver skips [`trade`](Strategy::trade) until every source a decision
-/// could consult is past both its warm-up **and** its IIR settling tail. This
+/// `close_long`, `short`, `close_short`), every attached protective level, and
+/// the sizing indicator — so the driver skips [`trade`](Strategy::trade) until
+/// every source a decision could consult is past both its warm-up **and** its
+/// IIR settling tail. This
 /// is a safe default: a strategy built from EMAs, RSIs or ATRs won't trade off
 /// their seed-dependent early output. A caller who is happy to trade through a
 /// subtree's unstable tail opts out explicitly by wrapping it in
@@ -146,6 +160,7 @@ pub struct SingleAssetStrategy<Sym> {
     long_target: Option<Level<Sym>>,
     short_stop: Option<Level<Sym>>,
     short_target: Option<Level<Sym>>,
+    sizing: Level<Sym>,
     position: Position,
     bars_seen: usize,
 }
@@ -165,6 +180,7 @@ impl<Sym: Clone + 'static> SingleAssetStrategy<Sym> {
             long_target: None,
             short_stop: None,
             short_target: None,
+            sizing: Box::new(Value::<Snapshot<Sym>>::new(1.0)),
             position: Position::new(),
             bars_seen: 0,
         }
@@ -254,6 +270,27 @@ impl<Sym: Clone + 'static> SingleAssetStrategy<Sym> {
         self
     }
 
+    /// Set the **position-sizing multiplier** — a real-valued source read on
+    /// every entry (or reversal) and multiplied into the
+    /// [`value_frac`](crate::Size::value_frac) magnitude. The default is a
+    /// constant `1.0` (all-in). A negative reading is not meaningful — direction
+    /// comes from the entry [`Side`] — and a `None` reading (still warming, or a
+    /// division by zero on a vol denominator, say) causes the strategy to *skip*
+    /// [`trade`](Strategy::trade) that bar entirely. This is the safe default;
+    /// wrap with `.or(Value::new(1.0))` at the composition level to opt out.
+    ///
+    /// Typical usage: `Value::new(0.5)` for a fixed half-position, a Kelly
+    /// fraction indicator for Kelly sizing, or `target_vol.div(realized_vol)` for
+    /// vol targeting. The multiplier is read on transitions only — a change
+    /// mid-position does not resize.
+    pub fn position_sizing(
+        mut self,
+        sizing: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+    ) -> Self {
+        self.sizing = Box::new(sizing);
+        self
+    }
+
     /// The number of bars that must be fed before [`is_ready`](Strategy::is_ready)
     /// reports `true`: the largest `stable_period()` across every wired signal
     /// (`long`, `close_long`, `short`, `close_short`) and every attached
@@ -278,6 +315,7 @@ impl<Sym: Clone + 'static> SingleAssetStrategy<Sym> {
         {
             needed = needed.max(level.stable_period());
         }
+        needed = needed.max(self.sizing.stable_period());
         needed
     }
 }
@@ -311,8 +349,9 @@ impl<Sym: Clone + PartialEq + 'static> Strategy for SingleAssetStrategy<Sym> {
             l.update(snap.clone());
         }
         if let Some(l) = self.short_target.as_mut() {
-            l.update(snap);
+            l.update(snap.clone());
         }
+        self.sizing.update(snap);
         self.bars_seen = self.bars_seen.saturating_add(1);
     }
 
@@ -330,17 +369,24 @@ impl<Sym: Clone + PartialEq + 'static> Strategy for SingleAssetStrategy<Sym> {
     }
 
     fn trade(&self, wallet: &mut dyn Wallet<Sym>) {
+        // Sizing is read once per bar and skips the whole `trade` call if the
+        // indicator can't produce a number — the safe default per the
+        // "unsettled data ⇒ wait" convention.
+        let Some(size) = self.sizing.value() else {
+            return;
+        };
         let long = self.position.is_long();
         let short = self.position.is_short();
-        // Entries first (all-in, reversal-capable). The fill lands next bar at the
-        // open; cancel any resting bracket now (a reversal voids the old one).
+        // Entries first (magnitude = sizing, reversal-capable). The fill lands next
+        // bar at the open; cancel any resting bracket now (a reversal voids the old
+        // one).
         if self.long.is_true() && !long {
-            let _ = wallet.set(self.symbol.clone(), Side::Buy, Size::value_frac(1.0));
+            let _ = wallet.set(self.symbol.clone(), Side::Buy, Size::value_frac(size));
             let _ = wallet.cancel_protective(&self.symbol);
             return;
         }
         if self.short.is_true() && !short {
-            let _ = wallet.set(self.symbol.clone(), Side::Sell, Size::value_frac(1.0));
+            let _ = wallet.set(self.symbol.clone(), Side::Sell, Size::value_frac(size));
             let _ = wallet.cancel_protective(&self.symbol);
             return;
         }
@@ -388,6 +434,7 @@ impl<Sym: Clone + PartialEq + 'static> Strategy for SingleAssetStrategy<Sym> {
         if let Some(l) = self.short_target.as_mut() {
             l.reset();
         }
+        self.sizing.reset();
         self.position.reset();
         self.bars_seen = 0;
     }
@@ -396,7 +443,7 @@ impl<Sym: Clone + PartialEq + 'static> Strategy for SingleAssetStrategy<Sym> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::Value;
+    use crate::indicators::{Sma, Value};
     use crate::strategy::PaperWallet;
 
     /// Drive `strat` over `candles`, feeding each bar to the wallet first and
@@ -506,5 +553,63 @@ mod tests {
         );
         assert_eq!(w.orders().len(), 1); // only the entry
         assert!(w.positions().next().is_some());
+    }
+
+    #[test]
+    fn position_sizing_scales_entry_magnitude() {
+        // Half-position: `value_frac(0.5) * equity / price` at entry. Seed
+        // equity is 1000 and the entry fills at 100, so units = 5 (vs. 10 for
+        // the default all-in).
+        let mut strat =
+            SingleAssetStrategy::buy_and_hold("X").position_sizing(Value::new(0.5));
+        let w = run(&mut strat, &[flat_bar(100.0), flat_bar(100.0)]);
+        let entry = w.orders().last().unwrap();
+        assert_eq!(entry.side, Side::Buy);
+        assert_eq!(entry.price, 100.0);
+        assert_eq!(entry.units, 5.0);
+    }
+
+    #[test]
+    fn position_sizing_none_skips_trade() {
+        // A sizing indicator with a 5-bar warm-up (SMA-5 over a constant 0.5) —
+        // until it produces a number, `trade()` must be a no-op even though the
+        // entry signal is level-true from bar 1. The SMA emits `Some(0.5)` on
+        // bar 5, queueing the entry; it fills at bar 6's open (100), sized
+        // half: `0.5 * 1000 / 100 = 5` units.
+        let sizing = Sma::new(Value::<Snapshot<&'static str>>::new(0.5), 5);
+        let mut strat = SingleAssetStrategy::buy_and_hold("X").position_sizing(sizing);
+        let w = run(
+            &mut strat,
+            &[
+                flat_bar(100.0),
+                flat_bar(100.0),
+                flat_bar(100.0),
+                flat_bar(100.0),
+                flat_bar(100.0),
+                flat_bar(100.0),
+            ],
+        );
+        // Exactly one fill (the bar-6 entry) — every earlier bar's `trade`
+        // returned early because the sizing indicator read `None`.
+        assert_eq!(w.orders().len(), 1);
+        let entry = w.orders().last().unwrap();
+        assert_eq!(entry.side, Side::Buy);
+        assert_eq!(entry.units, 5.0);
+    }
+
+    #[test]
+    fn position_sizing_warm_up_gates_is_ready() {
+        // With no other warming sources on a buy-and-hold, the strategy is
+        // ready from bar 0. Attaching an SMA-5 sizing indicator must push
+        // readiness to bar 5.
+        let sizing = Sma::new(crate::strategies::self_close::<&'static str>(), 5);
+        let mut strat = SingleAssetStrategy::buy_and_hold("X").position_sizing(sizing);
+        assert!(!strat.is_ready());
+        for _ in 0..4 {
+            strat.update(Snapshot::of_atom(flat_bar(100.0).into()));
+        }
+        assert!(!strat.is_ready());
+        strat.update(Snapshot::of_atom(flat_bar(100.0).into()));
+        assert!(strat.is_ready());
     }
 }
