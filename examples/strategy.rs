@@ -9,8 +9,9 @@
 //!
 //! Run with: `cargo run --example strategy`
 
-use fugazi::indicators::{Current, Sma};
+use fugazi::indicators::{Close, Pick, Sma};
 use fugazi::prelude::*;
+use fugazi::types::Snapshot;
 
 const CSV: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -22,33 +23,34 @@ const STARTING_FUNDS: Real = 10_000.0;
 
 struct Reversal {
     symbol: &'static str,
-    long: Box<dyn Signal>,
-    short: Box<dyn Signal>,
+    long: Box<dyn Signal<Snapshot<&'static str>>>,
+    short: Box<dyn Signal<Snapshot<&'static str>>>,
 }
 
 impl Reversal {
     fn new(symbol: &'static str, fast: usize, slow: usize) -> Self {
+        let close = || Close::of(Pick::<&'static str>::new());
         Self {
             symbol,
             long: Box::new(
-                Sma::new(Current::close(), fast).crosses_above(Sma::new(Current::close(), slow)),
+                Sma::new(close(), fast).crosses_above(Sma::new(close(), slow)),
             ),
             short: Box::new(
-                Sma::new(Current::close(), fast).crosses_below(Sma::new(Current::close(), slow)),
+                Sma::new(close(), fast).crosses_below(Sma::new(close(), slow)),
             ),
         }
     }
 }
 
 impl Strategy for Reversal {
-    type Input = Atom;
+    type Input = Snapshot<&'static str>;
     type Symbol = &'static str;
 
-    fn update(&mut self, atom: Atom) {
+    fn update(&mut self, snap: Snapshot<&'static str>) {
         // Advance both signals every bar (never short-circuit, or the skipped
         // one desyncs from the price stream).
-        self.long.update(atom.clone());
-        self.short.update(atom);
+        self.long.update(snap.clone());
+        self.short.update(snap);
     }
 
     fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
@@ -81,7 +83,7 @@ fn main() {
         for fill in wallet.update(SYMBOL, *candle) {
             strat.on_fill(&fill);
         }
-        strat.update((*candle).into());
+        strat.update(Snapshot::<&'static str>::from(*candle));
         strat.trade(&mut wallet);
         for order in &wallet.orders()[filled..] {
             println!(

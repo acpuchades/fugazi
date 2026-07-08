@@ -7,7 +7,7 @@
 use std::time::Instant;
 
 use fugazi::backtest::run;
-use fugazi::indicators::{Close, Current, Macd};
+use fugazi::indicators::Macd;
 use fugazi::prelude::*;
 use fugazi::strategies::trend::macd_crossover;
 
@@ -49,29 +49,30 @@ fn synth_candles(n: usize) -> Vec<Candle> {
 
 struct MacdCrossoverManual<Sym> {
     symbol: Sym,
-    macd: Macd<Close>,
+    macd: Macd<fugazi::indicators::Close<fugazi::indicators::Pick<Sym>>>,
     /// Sign of the previous (line - signal), None until first warm bar.
     prev_sign: Option<i8>,
     /// The crossover event to trade on the next bar's `trade` call.
     event: Option<Side>,
 }
 
-impl<Sym: Clone> MacdCrossoverManual<Sym> {
+impl<Sym: Clone + PartialEq + 'static> MacdCrossoverManual<Sym> {
     fn new(symbol: Sym, fast: usize, slow: usize, signal: usize) -> Self {
+        use fugazi::indicators::{Close, Pick};
         Self {
             symbol,
-            macd: Macd::new(Current::close(), fast, slow, signal),
+            macd: Macd::new(Close::of(Pick::<Sym>::new()), fast, slow, signal),
             prev_sign: None,
             event: None,
         }
     }
 }
 
-impl<Sym: Clone + PartialEq> Strategy for MacdCrossoverManual<Sym> {
-    type Input = Atom;
+impl<Sym: Clone + PartialEq + 'static> Strategy for MacdCrossoverManual<Sym> {
+    type Input = fugazi::types::Snapshot<Sym>;
     type Symbol = Sym;
-    fn update(&mut self, atom: Atom) {
-        let v = self.macd.update(atom);
+    fn update(&mut self, snap: fugazi::types::Snapshot<Sym>) {
+        let v = self.macd.update(snap);
         self.event = None;
         if let Some(mv) = v {
             let diff = mv.macd - mv.signal;

@@ -14,6 +14,7 @@
 //! (not ready) while flat.
 
 use std::cell::RefCell;
+use std::marker::PhantomData;
 use std::rc::Rc;
 
 use crate::indicator::Indicator;
@@ -129,49 +130,65 @@ impl Position {
 
     /// The entry price as an [`Indicator`] — the leaf of a fixed stop / take-profit
     /// level. `None` while flat.
-    pub fn entry(&self) -> PositionField {
+    ///
+    /// Generic over the input type `In` because the field never reads its
+    /// input — the owning [`Position`] is advanced by the strategy via
+    /// [`Position::update`], and `PositionField::update` just re-reads the
+    /// shared state. `In` almost always resolves via inference to the
+    /// strategy's own `Input` (typically
+    /// [`Snapshot<Sym>`](crate::types::Snapshot)); a turbofish is only
+    /// needed when composing a bare level with no operand to unify against.
+    pub fn entry<In>(&self) -> PositionField<In> {
         PositionField::new(self.clone(), |s| s.entry)
     }
 
     /// The running high since entry (completed bars) as an [`Indicator`] — the leaf
     /// of a long trailing stop. `None` while flat.
-    pub fn peak(&self) -> PositionField {
+    pub fn peak<In>(&self) -> PositionField<In> {
         PositionField::new(self.clone(), |s| s.peak)
     }
 
     /// The running low since entry (completed bars) as an [`Indicator`] — the leaf
     /// of a short trailing stop. `None` while flat.
-    pub fn trough(&self) -> PositionField {
+    pub fn trough<In>(&self) -> PositionField<In> {
         PositionField::new(self.clone(), |s| s.trough)
     }
 }
 
 /// One field of a shared [`Position`], projected into an
-/// `Indicator<Input = Atom, Output = Real>` so a stop / take-profit level
+/// `Indicator<Input = In, Output = Real>` so a stop / take-profit level
 /// composes like any other source. Returned by [`Position::entry`] /
-/// [`peak`](Position::peak) / [`trough`](Position::trough); reads live state and
-/// ignores its input (the owning [`Position`] is advanced by the strategy).
+/// [`peak`](Position::peak) / [`trough`](Position::trough); reads live state
+/// and ignores its input (the owning [`Position`] is advanced by the
+/// strategy). Generic over `In` so a strategy fed
+/// [`Snapshot<Sym>`](crate::types::Snapshot)s builds levels whose `Input`
+/// matches the rest of its signal chain.
 #[derive(Debug, Clone)]
-pub struct PositionField {
+pub struct PositionField<In = Atom> {
     position: Position,
     select: fn(&PositionStateRef) -> Option<Real>,
+    _phantom: PhantomData<fn(In)>,
 }
 
 /// The borrow a [`PositionField`] selector reads from (a private alias so the
 /// selector `fn` can name the state type without exposing it).
 type PositionStateRef = PositionState;
 
-impl PositionField {
+impl<In> PositionField<In> {
     fn new(position: Position, select: fn(&PositionStateRef) -> Option<Real>) -> Self {
-        Self { position, select }
+        Self {
+            position,
+            select,
+            _phantom: PhantomData,
+        }
     }
 }
 
-impl Indicator for PositionField {
-    type Input = Atom;
+impl<In> Indicator for PositionField<In> {
+    type Input = In;
     type Output = Real;
 
-    fn update(&mut self, _atom: Atom) -> Option<Real> {
+    fn update(&mut self, _input: In) -> Option<Real> {
         self.value()
     }
 
@@ -199,7 +216,7 @@ mod tests {
     #[test]
     fn entry_is_none_until_a_fill_opens_the_position() {
         let pos = Position::new();
-        let mut e = pos.entry();
+        let mut e = pos.entry::<Atom>();
         assert_eq!(e.update(bar(10.0, 9.0).into()), None);
         pos.apply(Side::Buy, 1.0, 9.5);
         assert_eq!(e.update(bar(10.0, 9.0).into()), Some(9.5));
@@ -211,7 +228,7 @@ mod tests {
     #[test]
     fn peak_tracks_high_over_completed_bars_and_restarts_on_reversal() {
         let pos = Position::new();
-        let peak = pos.peak();
+        let peak = pos.peak::<Atom>();
         // Flat: not ready.
         assert_eq!(peak.value(), None);
         // Enter long at 9.5; the first bar reports the entry (no completed bar yet).
@@ -232,7 +249,7 @@ mod tests {
     #[test]
     fn trough_tracks_low_over_completed_bars() {
         let pos = Position::new();
-        let trough = pos.trough();
+        let trough = pos.trough::<Atom>();
         pos.apply(Side::Sell, 1.0, 20.0);
         pos.update(bar(21.0, 19.0));
         assert_eq!(trough.value(), Some(20.0)); // entry only

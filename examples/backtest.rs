@@ -10,8 +10,9 @@
 //!
 //! Run with: `cargo run --example backtest`
 
-use fugazi::indicators::{Current, Sma};
+use fugazi::indicators::{Close, Pick, Sma};
 use fugazi::prelude::*;
+use fugazi::types::Snapshot;
 
 // Embed the sample data at compile time so the example is self-contained.
 const CSV: &str = include_str!(concat!(
@@ -26,33 +27,34 @@ const STARTING_FUNDS: Real = 10_000.0;
 /// trades and its two signals; the portfolio lives in the wallet it is handed.
 struct GoldenCross {
     symbol: &'static str,
-    enter: Box<dyn Signal>,
-    exit: Box<dyn Signal>,
+    enter: Box<dyn Signal<Snapshot<&'static str>>>,
+    exit: Box<dyn Signal<Snapshot<&'static str>>>,
 }
 
 impl GoldenCross {
     fn new(symbol: &'static str, fast: usize, slow: usize) -> Self {
+        let close = || Close::of(Pick::<&'static str>::new());
         Self {
             symbol,
             enter: Box::new(
-                Sma::new(Current::close(), fast).crosses_above(Sma::new(Current::close(), slow)),
+                Sma::new(close(), fast).crosses_above(Sma::new(close(), slow)),
             ),
             exit: Box::new(
-                Sma::new(Current::close(), fast).crosses_below(Sma::new(Current::close(), slow)),
+                Sma::new(close(), fast).crosses_below(Sma::new(close(), slow)),
             ),
         }
     }
 }
 
 impl Strategy for GoldenCross {
-    type Input = Atom;
+    type Input = Snapshot<&'static str>;
     type Symbol = &'static str;
 
-    fn update(&mut self, atom: Atom) {
+    fn update(&mut self, snap: Snapshot<&'static str>) {
         // Advance BOTH signals every bar (never short-circuit, or the skipped
         // one desyncs from the price stream).
-        self.enter.update(atom.clone());
-        self.exit.update(atom);
+        self.enter.update(snap.clone());
+        self.exit.update(snap);
     }
 
     fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
@@ -82,7 +84,7 @@ fn main() {
         for fill in wallet.update(SYMBOL, *candle) {
             strategy.on_fill(&fill);
         }
-        strategy.update((*candle).into());
+        strategy.update(Snapshot::<&'static str>::from(*candle));
         strategy.trade(&mut wallet);
         // Print whatever this bar appended to the blotter.
         for order in &wallet.orders()[filled..] {

@@ -13,7 +13,15 @@
 //!
 //! Every strategy:
 //!
-//! * is generic over the symbol type `Sym: Clone` and takes `Input = Atom`;
+//! * is generic over the symbol type `Sym: Clone + PartialEq + 'static` and
+//!   takes `Input = Snapshot<Sym>` (the multi-asset input frame). The
+//!   catalogue's specialisations wire their leaves through
+//!   [`Pick::<Sym>::new()`](crate::indicators::Pick::new) — the empty-selector
+//!   single-entry unpack — so a single-series driver feeding size-1
+//!   snapshots gets the same behaviour as a raw atom stream, and a
+//!   cross-asset driver can layer explicit
+//!   [`Pick::matching(Selector::by_symbol(...))`](crate::indicators::Pick::matching)
+//!   composition on top.
 //! * in [`update`](crate::Strategy::update) advances **all** of its
 //!   signals/indicators every bar (never short-circuiting, or a skipped source
 //!   desyncs from the price stream), then decides in [`trade`](crate::Strategy::trade);
@@ -44,3 +52,36 @@ pub mod trend;
 pub mod volume;
 
 pub use single_asset::SingleAssetStrategy;
+
+use crate::indicators::{Close, CurrentBar, High, Low, Pick, Volume};
+
+/// Shorthand for `Close::of(Pick::<Sym>::new())` — read the strategy's own
+/// asset's close out of the incoming [`Snapshot`](crate::types::Snapshot).
+/// The empty-selector [`Pick`] unpacks a size-1 snapshot on the single-series
+/// hot path and matches by symbol at the strategy layer otherwise.
+pub(crate) fn self_close<Sym: Clone + PartialEq + 'static>() -> Close<Pick<Sym>> {
+    Close::of(Pick::<Sym>::new())
+}
+
+/// Shorthand for `High::of(Pick::<Sym>::new())` — see [`self_close`].
+pub(crate) fn self_high<Sym: Clone + PartialEq + 'static>() -> High<Pick<Sym>> {
+    High::of(Pick::<Sym>::new())
+}
+
+/// Shorthand for `Low::of(Pick::<Sym>::new())` — see [`self_close`].
+pub(crate) fn self_low<Sym: Clone + PartialEq + 'static>() -> Low<Pick<Sym>> {
+    Low::of(Pick::<Sym>::new())
+}
+
+/// Shorthand for `Volume::of(Pick::<Sym>::new())` — see [`self_close`].
+#[allow(dead_code)]
+pub(crate) fn self_volume<Sym: Clone + PartialEq + 'static>() -> Volume<Pick<Sym>> {
+    Volume::of(Pick::<Sym>::new())
+}
+
+/// Shorthand for `CurrentBar::of(Pick::<Sym>::new())` — read the strategy's
+/// own asset's whole [`Candle`](crate::types::Candle) out of the snapshot;
+/// used to root the bar indicators (`Atr`, `Adx`, `Obv`, …).
+pub(crate) fn self_bar<Sym: Clone + PartialEq + 'static>() -> CurrentBar<Pick<Sym>> {
+    CurrentBar::of(Pick::<Sym>::new())
+}

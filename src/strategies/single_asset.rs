@@ -3,15 +3,40 @@
 
 use crate::indicators::{Const, Position};
 use crate::prelude::*;
+use crate::types::{Selector, Snapshot};
 
 /// A boxed price-level source — the value a stop-loss / take-profit compares
 /// against. Built from the strategy's [`Position`] (see [`Position::entry`],
 /// [`Position::peak`]).
-type Level = Box<dyn Indicator<Input = Atom, Output = Real>>;
+///
+/// Levels consume the strategy's `Input = Snapshot<Sym>`; a level built from
+/// `position.entry()` (etc.) is already
+/// [`Input = Snapshot<Sym>`](crate::types::Snapshot) via the [`Position`]
+/// carriers.
+type Level<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real>>;
 
 /// The latest value of an optional level, if it is present and warmed up.
-fn level_value(level: &Option<Level>) -> Option<Real> {
+fn level_value<Sym>(level: &Option<Level<Sym>>) -> Option<Real> {
     level.as_ref().and_then(|l| l.value())
+}
+
+/// Route the strategy's *own* asset out of a per-bar [`Snapshot`] for the
+/// [`Position`] tracker. Prefers a symbol-matching entry (any frequency); if
+/// none match — the common single-series case where the driver pushes an
+/// untagged size-1 snapshot via [`Snapshot::of_atom`] — falls back to the
+/// [`Snapshot::sole_atom`] unpack. Returns `None` on an empty snapshot; the
+/// caller (`SingleAssetStrategy::update`) then simply skips the position
+/// fold for that bar.
+///
+/// Panics with the [`Snapshot::sole_atom`] message if the fallback is
+/// triggered on a multi-entry untagged snapshot — that's the same loud
+/// failure the empty-selector [`Pick`](crate::indicators::Pick) uses,
+/// preserved end-to-end.
+fn extract_self_atom<Sym: PartialEq + Clone>(snap: &Snapshot<Sym>, symbol: &Sym) -> Option<Atom> {
+    let by_symbol = Selector::by_symbol(symbol.clone());
+    snap.find(&by_symbol)
+        .cloned()
+        .or_else(|| snap.sole_atom().cloned())
 }
 
 /// A single-asset, all-in strategy driven by boolean [`Signal`]s — one per state
@@ -109,29 +134,29 @@ fn level_value(level: &Option<Level>) -> Option<Real> {
 // asymmetric.
 pub struct SingleAssetStrategy<Sym> {
     symbol: Sym,
-    long: Box<dyn Signal>,
-    close_long: Box<dyn Signal>,
-    short: Box<dyn Signal>,
-    close_short: Box<dyn Signal>,
-    long_stop: Option<Level>,
-    long_target: Option<Level>,
-    short_stop: Option<Level>,
-    short_target: Option<Level>,
+    long: Box<dyn Signal<Snapshot<Sym>>>,
+    close_long: Box<dyn Signal<Snapshot<Sym>>>,
+    short: Box<dyn Signal<Snapshot<Sym>>>,
+    close_short: Box<dyn Signal<Snapshot<Sym>>>,
+    long_stop: Option<Level<Sym>>,
+    long_target: Option<Level<Sym>>,
+    short_stop: Option<Level<Sym>>,
+    short_target: Option<Level<Sym>>,
     position: Position,
     bars_seen: usize,
 }
 
-impl<Sym> SingleAssetStrategy<Sym> {
+impl<Sym: Clone + 'static> SingleAssetStrategy<Sym> {
     /// A strategy on `symbol` with no transitions wired — every slot a
     /// constant-`false` signal and no stops. Add sides with
     /// [`long_on`](Self::long_on) / [`short_on`](Self::short_on).
     pub fn new(symbol: Sym) -> Self {
         Self {
             symbol,
-            long: Box::new(Const::new(false)),
-            close_long: Box::new(Const::new(false)),
-            short: Box::new(Const::new(false)),
-            close_short: Box::new(Const::new(false)),
+            long: Box::new(Const::<Snapshot<Sym>>::new(false)),
+            close_long: Box::new(Const::<Snapshot<Sym>>::new(false)),
+            short: Box::new(Const::<Snapshot<Sym>>::new(false)),
+            close_short: Box::new(Const::<Snapshot<Sym>>::new(false)),
             long_stop: None,
             long_target: None,
             short_stop: None,
@@ -143,7 +168,10 @@ impl<Sym> SingleAssetStrategy<Sym> {
 
     /// Go all-in long on the first bar and hold — a long entry that never exits.
     pub fn buy_and_hold(symbol: Sym) -> Self {
-        Self::new(symbol).long_on(Const::new(true), Const::new(false))
+        Self::new(symbol).long_on(
+            Const::<Snapshot<Sym>>::new(true),
+            Const::<Snapshot<Sym>>::new(false),
+        )
     }
 
     /// Enter (or reverse into) an all-in long on `enter`; flatten the long on
@@ -153,7 +181,11 @@ impl<Sym> SingleAssetStrategy<Sym> {
     /// because opening a short closes an open long (and vice versa), an always-in
     /// reversal reads as `long_on(up, down).short_on(down, up)`, while a long/flat
     /// strategy uses `long_on` alone.
-    pub fn long_on(mut self, enter: impl Signal + 'static, exit: impl Signal + 'static) -> Self {
+    pub fn long_on(
+        mut self,
+        enter: impl Signal<Snapshot<Sym>> + 'static,
+        exit: impl Signal<Snapshot<Sym>> + 'static,
+    ) -> Self {
         self.long = Box::new(enter);
         self.close_long = Box::new(exit);
         self
@@ -161,7 +193,11 @@ impl<Sym> SingleAssetStrategy<Sym> {
 
     /// Enter (or reverse into) an all-in short on `enter`; flatten the short on
     /// `exit`. Opening the short closes any open long, and vice versa.
-    pub fn short_on(mut self, enter: impl Signal + 'static, exit: impl Signal + 'static) -> Self {
+    pub fn short_on(
+        mut self,
+        enter: impl Signal<Snapshot<Sym>> + 'static,
+        exit: impl Signal<Snapshot<Sym>> + 'static,
+    ) -> Self {
         self.short = Box::new(enter);
         self.close_short = Box::new(exit);
         self
@@ -178,7 +214,7 @@ impl<Sym> SingleAssetStrategy<Sym> {
     /// `low` reaches it.
     pub fn long_stop_loss(
         mut self,
-        level: impl Indicator<Input = Atom, Output = Real> + 'static,
+        level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
     ) -> Self {
         self.long_stop = Some(Box::new(level));
         self
@@ -188,7 +224,7 @@ impl<Sym> SingleAssetStrategy<Sym> {
     /// `high` reaches it.
     pub fn long_take_profit(
         mut self,
-        level: impl Indicator<Input = Atom, Output = Real> + 'static,
+        level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
     ) -> Self {
         self.long_target = Some(Box::new(level));
         self
@@ -198,7 +234,7 @@ impl<Sym> SingleAssetStrategy<Sym> {
     /// `high` reaches it.
     pub fn short_stop_loss(
         mut self,
-        level: impl Indicator<Input = Atom, Output = Real> + 'static,
+        level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
     ) -> Self {
         self.short_stop = Some(Box::new(level));
         self
@@ -208,7 +244,7 @@ impl<Sym> SingleAssetStrategy<Sym> {
     /// `low` reaches it.
     pub fn short_take_profit(
         mut self,
-        level: impl Indicator<Input = Atom, Output = Real> + 'static,
+        level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
     ) -> Self {
         self.short_target = Some(Box::new(level));
         self
@@ -242,29 +278,36 @@ impl<Sym> SingleAssetStrategy<Sym> {
     }
 }
 
-impl<Sym: Clone + PartialEq> Strategy for SingleAssetStrategy<Sym> {
-    type Input = Atom;
+impl<Sym: Clone + PartialEq + 'static> Strategy for SingleAssetStrategy<Sym> {
+    type Input = Snapshot<Sym>;
     type Symbol = Sym;
 
-    fn update(&mut self, atom: Atom) {
-        self.long.update(atom.clone());
-        self.close_long.update(atom.clone());
-        self.short.update(atom.clone());
-        self.close_short.update(atom.clone());
-        // Fold the bar into the position's extremes (a no-op while flat) before the
-        // levels read it.
-        self.position.update(atom.candle);
+    fn update(&mut self, snap: Snapshot<Sym>) {
+        // Fold this bar into the position's extremes (a no-op while flat).
+        // We route the strategy's *own* asset out of the snapshot for the
+        // position — the leaves themselves already know how to project via
+        // `!pick`, but Position tracks a plain Candle, so we need to extract
+        // one asset's atom here.
+        let self_atom = extract_self_atom(&snap, &self.symbol);
+        if let Some(atom) = &self_atom {
+            self.position.update(atom.candle);
+        }
+
+        self.long.update(snap.clone());
+        self.close_long.update(snap.clone());
+        self.short.update(snap.clone());
+        self.close_short.update(snap.clone());
         if let Some(l) = self.long_stop.as_mut() {
-            l.update(atom.clone());
+            l.update(snap.clone());
         }
         if let Some(l) = self.long_target.as_mut() {
-            l.update(atom.clone());
+            l.update(snap.clone());
         }
         if let Some(l) = self.short_stop.as_mut() {
-            l.update(atom.clone());
+            l.update(snap.clone());
         }
         if let Some(l) = self.short_target.as_mut() {
-            l.update(atom);
+            l.update(snap);
         }
         self.bars_seen = self.bars_seen.saturating_add(1);
     }
@@ -363,7 +406,7 @@ mod tests {
             for fill in wallet.update("X", c) {
                 strat.on_fill(&fill);
             }
-            strat.update(c.into());
+            strat.update(Snapshot::of_atom(c.into()));
             strat.trade(&mut wallet);
         }
         wallet

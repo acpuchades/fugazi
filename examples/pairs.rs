@@ -1,75 +1,66 @@
 //! A multi-asset [`Strategy`]: two instruments traded independently from one
 //! [`Wallet`].
 //!
-//! The per-bar input is a *snapshot* of both symbols (`Snapshot`). The driver
-//! feeds the wallet each symbol's bar every tick; the strategy owns a separate
-//! SMA-crossover entry/exit pair per symbol, feeds each its own sub-candle, and
-//! acts on both symbols against a shared wallet — so a single `trade` can emit
-//! orders for several instruments (the multi-asset / pairs shape). Prices here
-//! are synthetic so the example is self-contained.
+//! The per-bar input is the library's own multi-asset frame,
+//! [`Snapshot<Sym>`](fugazi::types::Snapshot) — a series of tagged atoms. The
+//! strategy owns a separate SMA-crossover entry/exit pair per symbol, each
+//! rooted on
+//! [`Pick::matching(Selector::by_symbol(...))`](fugazi::indicators::Pick::matching)
+//! to project that specific asset out of the snapshot. Prices are synthetic
+//! so the example is self-contained.
 //!
 //! Run with: `cargo run --example pairs`
 
-use fugazi::indicators::{Current, Sma};
+use fugazi::indicators::{Close, Pick, Sma};
 use fugazi::prelude::*;
-
-/// One bar across both instruments.
-#[derive(Clone, Copy)]
-struct Snapshot {
-    a: Candle,
-    b: Candle,
-}
-
-impl Snapshot {
-    /// This bar's price for `symbol` — used to feed the wallet and to print fills.
-    fn price(&self, symbol: &str) -> Real {
-        match symbol {
-            "A" => self.a.close,
-            "B" => self.b.close,
-            _ => 0.0,
-        }
-    }
-}
+use fugazi::types::{Selector, Snapshot};
 
 /// Long/flat SMA crossover on each of two configurable symbols. Owns the two
-/// symbols plus four signals — an entry/exit pair per symbol — each consuming
-/// that symbol's candle.
+/// symbols plus four signals — an entry/exit pair per symbol — each rooted on
+/// a symbol-matching [`Pick`] to project that asset out of every incoming
+/// [`Snapshot`].
 struct DualSma {
     a: &'static str,
     b: &'static str,
-    a_enter: Box<dyn Signal>,
-    a_exit: Box<dyn Signal>,
-    b_enter: Box<dyn Signal>,
-    b_exit: Box<dyn Signal>,
+    a_enter: Box<dyn Signal<Snapshot<&'static str>>>,
+    a_exit: Box<dyn Signal<Snapshot<&'static str>>>,
+    b_enter: Box<dyn Signal<Snapshot<&'static str>>>,
+    b_exit: Box<dyn Signal<Snapshot<&'static str>>>,
 }
 
 impl DualSma {
     fn new(a: &'static str, b: &'static str, fast: usize, slow: usize) -> Self {
-        let cross_up =
-            || Sma::new(Current::close(), fast).crosses_above(Sma::new(Current::close(), slow));
-        let cross_dn =
-            || Sma::new(Current::close(), fast).crosses_below(Sma::new(Current::close(), slow));
+        let close_of = |sym: &'static str| {
+            Close::of(Pick::<&'static str>::matching(Selector::by_symbol(sym)))
+        };
+        let cross_up = |sym: &'static str| {
+            Sma::new(close_of(sym), fast).crosses_above(Sma::new(close_of(sym), slow))
+        };
+        let cross_dn = |sym: &'static str| {
+            Sma::new(close_of(sym), fast).crosses_below(Sma::new(close_of(sym), slow))
+        };
         Self {
             a,
             b,
-            a_enter: Box::new(cross_up()),
-            a_exit: Box::new(cross_dn()),
-            b_enter: Box::new(cross_up()),
-            b_exit: Box::new(cross_dn()),
+            a_enter: Box::new(cross_up(a)),
+            a_exit: Box::new(cross_dn(a)),
+            b_enter: Box::new(cross_up(b)),
+            b_exit: Box::new(cross_dn(b)),
         }
     }
 }
 
 impl Strategy for DualSma {
-    type Input = Snapshot;
+    type Input = Snapshot<&'static str>;
     type Symbol = &'static str;
 
-    fn update(&mut self, snap: Snapshot) {
-        // Advance every signal every bar, each fed its own symbol's candle.
-        self.a_enter.update(snap.a.into());
-        self.a_exit.update(snap.a.into());
-        self.b_enter.update(snap.b.into());
-        self.b_exit.update(snap.b.into());
+    fn update(&mut self, snap: Snapshot<&'static str>) {
+        // Advance every signal every bar; each projects its own symbol out of
+        // the snapshot via its embedded `Pick`.
+        self.a_enter.update(snap.clone());
+        self.a_exit.update(snap.clone());
+        self.b_enter.update(snap.clone());
+        self.b_exit.update(snap);
     }
 
     fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
@@ -97,7 +88,7 @@ impl Strategy for DualSma {
 const STARTING_FUNDS: Real = 10_000.0;
 
 fn main() {
-    let bars = synthetic_snapshots(120);
+    let bars = synthetic_snapshots(120, "A", "B");
     println!("running DualSma over {} two-symbol bars\n", bars.len());
 
     let mut strat = DualSma::new("A", "B", 3, 10);
@@ -105,16 +96,23 @@ fn main() {
 
     for (i, snap) in bars.iter().enumerate() {
         let filled = wallet.orders().len();
-        for fill in wallet.update("A", snap.a) {
-            strat.on_fill(&fill);
+        // Feed each symbol's candle to the wallet for mark-to-market and fill
+        // matching (they're separate wallet updates because Wallet::update is
+        // per-symbol).
+        for (sym, _, atom) in snap.iter() {
+            if let Some(sym) = sym {
+                for fill in wallet.update(*sym, atom.candle) {
+                    strat.on_fill(&fill);
+                }
+            }
         }
-        for fill in wallet.update("B", snap.b) {
-            strat.on_fill(&fill);
-        }
-        strat.update(*snap);
+        strat.update(snap.clone());
         strat.trade(&mut wallet);
         for order in &wallet.orders()[filled..] {
-            let price = snap.price(order.symbol);
+            let price = snap
+                .find(&Selector::by_symbol(order.symbol))
+                .map(|a| a.candle.close)
+                .unwrap_or(0.0);
             println!(
                 "bar {i:>3}  {:<4} {:>3} {:8.3} @ {:7.2}",
                 format!("{:?}", order.side).to_uppercase(),
@@ -135,19 +133,23 @@ fn main() {
     );
 }
 
-/// Two deterministic price series (trend + oscillation), so the example needs no
-/// data files. A flat OHLC bar is built from each close.
-fn synthetic_snapshots(n: usize) -> Vec<Snapshot> {
+/// Two deterministic price series (trend + oscillation) packed into per-bar
+/// [`Snapshot`]s tagged by symbol. A flat OHLC bar is built from each close.
+fn synthetic_snapshots(
+    n: usize,
+    a: &'static str,
+    b: &'static str,
+) -> Vec<Snapshot<&'static str>> {
     let candle = |close: Real| Candle::new(close, close, close, close, 1_000.0);
     (0..n)
         .map(|i| {
             let t = i as Real;
-            let a = 100.0 + 0.3 * t + 12.0 * (t / 6.0).sin();
-            let b = 50.0 + 0.5 * t + 9.0 * (t / 9.0).cos();
-            Snapshot {
-                a: candle(a),
-                b: candle(b),
-            }
+            let a_close = 100.0 + 0.3 * t + 12.0 * (t / 6.0).sin();
+            let b_close = 50.0 + 0.5 * t + 9.0 * (t / 9.0).cos();
+            let mut snap = Snapshot::<&'static str>::new();
+            snap.push(Some(a), None, candle(a_close).into());
+            snap.push(Some(b), None, candle(b_close).into());
+            snap
         })
         .collect()
 }

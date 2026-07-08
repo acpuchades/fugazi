@@ -1134,31 +1134,31 @@ mod tests {
     /// the wallet owns the portfolio.
     struct GoldenCross {
         symbol: &'static str,
-        enter: Box<dyn Signal>,
-        exit: Box<dyn Signal>,
+        enter: Box<dyn Signal<crate::types::Snapshot<&'static str>>>,
+        exit: Box<dyn Signal<crate::types::Snapshot<&'static str>>>,
     }
     impl GoldenCross {
         fn new(symbol: &'static str, fast: usize, slow: usize) -> Self {
+            use crate::indicators::{Close, Pick};
+            let close = || Close::of(Pick::<&'static str>::new());
             Self {
                 symbol,
                 enter: Box::new(
-                    Sma::new(Current::close(), fast)
-                        .crosses_above(Sma::new(Current::close(), slow)),
+                    Sma::new(close(), fast).crosses_above(Sma::new(close(), slow)),
                 ),
                 exit: Box::new(
-                    Sma::new(Current::close(), fast)
-                        .crosses_below(Sma::new(Current::close(), slow)),
+                    Sma::new(close(), fast).crosses_below(Sma::new(close(), slow)),
                 ),
             }
         }
     }
     impl Strategy for GoldenCross {
-        type Input = Atom;
+        type Input = crate::types::Snapshot<&'static str>;
         type Symbol = &'static str;
-        fn update(&mut self, atom: Atom) {
+        fn update(&mut self, snap: crate::types::Snapshot<&'static str>) {
             // Advance both signals every bar.
-            self.enter.update(atom.clone());
-            self.exit.update(atom);
+            self.enter.update(snap.clone());
+            self.exit.update(snap);
         }
         fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
             let flat = wallet.position(&self.symbol).amount.abs() <= DEFAULT_EPSILON;
@@ -1187,7 +1187,7 @@ mod tests {
             14.0, 13.0, 12.0, 11.0, 10.0, 11.0, 13.0, 15.0, 17.0, 15.0, 12.0, 9.0, 7.0,
         ] {
             w.update("X", bar(px));
-            strat.update(bar(px).into());
+            strat.update(crate::types::Snapshot::<&'static str>::of_atom(bar(px).into()));
             strat.trade(&mut w);
         }
         // Market orders fill a bar late, so settle any order the last bar queued.

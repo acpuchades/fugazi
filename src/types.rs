@@ -595,46 +595,64 @@ impl Ord for Atom {
     }
 }
 
-/// A **selector**: a partial key naming *which* asset in a [`Snapshot`] a
-/// [`Pick`](crate::indicators::Pick) should read.
+/// A **selector**: a matching predicate naming *which* asset in a [`Snapshot`]
+/// a [`Pick`](crate::indicators::Pick) should read.
 ///
 /// Both fields are `Option` so a caller can specify only the ones they need:
 /// `Selector::by_symbol("BTC")` matches every BTC entry regardless of
 /// frequency, `Selector::by_freq(Frequency::Hour(1))` matches every hourly
 /// entry regardless of symbol, `Selector::exact(sym, freq)` matches a single
-/// storage key. A fully-empty selector (both fields `None`, the [`Default`])
-/// is legal too — it stands for "no query at all" and drives [`Pick`] onto
-/// the [`Snapshot::sole_atom`] path (see [`Selector::is_empty`]) rather than
-/// a structural match.
+/// tagged entry. A fully-empty selector (both fields `None`, the [`Default`])
+/// is legal — it stands for "no query at all" and drives [`Pick`] onto the
+/// [`Snapshot::sole_atom`] path (see [`Selector::is_empty`]) rather than a
+/// structural match.
 ///
 /// # Matching semantics ([`Selector::matches`])
 ///
-/// A query selector matches a storage selector when each field either has no
-/// query (`None`, a wildcard) or agrees with storage. That means
-/// `pick(symbol=BTC)` finds a stored `{symbol=BTC, freq=Some(1h)}` even
-/// though the query is silent on `freq`. Symmetric: a query
+/// A query selector matches a snapshot entry when each field either has no
+/// query (`None`, a wildcard) or agrees with the entry's tag. That means
+/// `pick(symbol=BTC)` finds an entry tagged `{symbol=BTC, freq=Some(1h)}`
+/// even though the query is silent on `freq`. Symmetric: a query
 /// `pick(freq=1h)` matches `{symbol=Some(BTC), freq=1h}` without knowing
-/// the symbol. An empty selector matches every entry; but a *fully-empty*
+/// the symbol. An empty selector matches every entry; a *fully-empty*
 /// query is semantically "no query" — the caller almost certainly meant
 /// "single-entry unpack", so [`Pick`] dispatches on [`is_empty`](Self::is_empty)
-/// and never runs [`find`](Snapshot::find) on an empty query.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub struct Selector {
-    pub symbol: Option<String>,
+/// and never runs [`Snapshot::find`] on an empty query.
+///
+/// # Selector as a matcher, not a key
+///
+/// A selector is a **predicate**, not the [`Snapshot`] entry key. [`Snapshot`]
+/// entries carry raw `(Option<Sym>, Option<Frequency>, Atom)` tuples; a
+/// selector only decides whether it *matches* an entry. That means a
+/// snapshot never needs `Sym: Eq + Hash` (just `PartialEq` for the match
+/// predicate) and duplicates at push time are allowed — the first-match rule
+/// on [`Snapshot::find`] disambiguates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Selector<Sym> {
+    pub symbol: Option<Sym>,
     pub freq: Option<Frequency>,
 }
 
-impl Selector {
-    /// Build a selector. Both fields may be `None` — the empty selector is a
-    /// legal value and stands for the [`Pick`] single-entry-unpack path (see
+impl<Sym> Default for Selector<Sym> {
+    fn default() -> Self {
+        Self {
+            symbol: None,
+            freq: None,
+        }
+    }
+}
+
+impl<Sym> Selector<Sym> {
+    /// Build a selector. Both fields may be `None` — the empty selector is
+    /// legal and stands for the [`Pick`] single-entry-unpack path (see
     /// [`Selector::is_empty`]).
-    pub fn new(symbol: Option<String>, freq: Option<Frequency>) -> Self {
+    pub fn new(symbol: Option<Sym>, freq: Option<Frequency>) -> Self {
         Self { symbol, freq }
     }
 
     /// Selector matching every entry whose `symbol` equals `sym`, regardless
     /// of frequency.
-    pub fn by_symbol(sym: impl Into<String>) -> Self {
+    pub fn by_symbol(sym: impl Into<Sym>) -> Self {
         Self {
             symbol: Some(sym.into()),
             freq: None,
@@ -651,7 +669,7 @@ impl Selector {
     }
 
     /// Selector matching a single `(symbol, freq)` pair exactly.
-    pub fn exact(sym: impl Into<String>, freq: Frequency) -> Self {
+    pub fn exact(sym: impl Into<Sym>, freq: Frequency) -> Self {
         Self {
             symbol: Some(sym.into()),
             freq: Some(freq),
@@ -664,124 +682,103 @@ impl Selector {
     pub fn is_empty(&self) -> bool {
         self.symbol.is_none() && self.freq.is_none()
     }
+}
 
-    /// Match this selector as a **query** against a storage selector: each
-    /// `None` field on the query is a wildcard (matches any storage value); a
-    /// `Some` field must equal storage. See the type-level doc for the full
-    /// semantics.
-    pub fn matches(&self, storage: &Selector) -> bool {
-        (self.symbol.is_none() || self.symbol == storage.symbol)
-            && (self.freq.is_none() || self.freq == storage.freq)
+impl<Sym: PartialEq> Selector<Sym> {
+    /// Match this selector as a query against a snapshot entry's `(symbol,
+    /// freq)` tags: each `None` field on the query is a wildcard (matches any
+    /// entry value); a `Some` field must equal the entry's field.
+    pub fn matches(&self, symbol: Option<&Sym>, freq: Option<Frequency>) -> bool {
+        (self.symbol.is_none() || self.symbol.as_ref() == symbol)
+            && (self.freq.is_none() || self.freq == freq)
     }
 }
 
-/// A per-bar snapshot of several assets — a keyed collection of [`Atom`]s.
+/// A per-bar snapshot of several assets — a **series** of tagged [`Atom`]s.
 ///
 /// The multi-asset input frame that lets a strategy or an indicator reason
-/// about more than one instrument at a time. Each key names one asset (a
-/// [`Selector`] when working at the CLI/YAML layer, an arbitrary `K` when
-/// composing directly in Rust), each value is that asset's [`Atom`] for the
-/// current bar. The [`Pick`](crate::indicators::Pick) leaf projects one asset
-/// out of the snapshot as an `Indicator<Output = Atom>`, so cross-asset
-/// expressions compose from the same primitives as single-asset ones:
+/// about more than one instrument at a time. Each entry is a
+/// `(Option<Sym>, Option<Frequency>, Atom)` tuple: the tag is what a
+/// [`Selector`] matches against; the atom is what a [`Pick`](crate::indicators::Pick)
+/// projects out.
+///
+/// The storage is deliberately a `Vec` rather than a hashmap: [`Selector`]
+/// is a predicate, not a key, so entries never dedup by tag (`Sym: PartialEq`
+/// is enough — no `Eq + Hash` bound) and duplicates at push time are legal
+/// with first-match-wins on [`Snapshot::find`]. Iteration order is insertion
+/// order, so a driver that pushes entries deterministically gets a
+/// deterministic scan for free.
+///
+/// Cross-asset expressions compose from the same primitives as single-asset
+/// ones:
 ///
 /// ```ignore
 /// use fugazi::indicators::{Close, Pick};
 /// use fugazi::prelude::*;
-/// // BTC/ETH close spread as a first-class Real-output indicator.
+/// // BTC/ETH close spread as a first-class Real-output indicator over a
+/// // Snapshot<String>.
 /// let spread = Close::of(Pick::matching(Selector::by_symbol("BTC")))
 ///     .sub(Close::of(Pick::matching(Selector::by_symbol("ETH"))));
 /// ```
-///
-/// Generic over the key type `K`. `K: Eq + Hash` is required to look values
-/// up; `K: Clone` is required to move the snapshot through the indicator
-/// pipeline (each `update` clones the emitted snapshot into downstream
-/// consumers). Semantics mirror the underlying [`HashMap`] — no order
-/// guarantees, no automatic time alignment; the driver that builds each
-/// bar's snapshot is responsible for feeding a consistent key set.
-///
-/// [`Snapshot<Selector>`] additionally exposes [`Snapshot::find`] for
-/// wildcard-aware lookup with [`Selector::matches`]; that's the shape
-/// `Pick<S>` uses.
 #[derive(Debug, Clone)]
-pub struct Snapshot<K> {
-    atoms: HashMap<K, Atom>,
+pub struct Snapshot<Sym> {
+    entries: Vec<(Option<Sym>, Option<Frequency>, Atom)>,
 }
 
-impl<K: Eq + std::hash::Hash> PartialEq for Snapshot<K> {
-    fn eq(&self, other: &Self) -> bool {
-        self.atoms == other.atoms
-    }
-}
-
-impl<K> Snapshot<K> {
+impl<Sym> Snapshot<Sym> {
     /// An empty snapshot with no assets.
     pub fn new() -> Self {
         Self {
-            atoms: HashMap::new(),
+            entries: Vec::new(),
         }
     }
 
-    /// Number of assets in this snapshot.
+    /// A single-entry snapshot carrying just this atom with no `(symbol,
+    /// freq)` tag. Convenient for the single-series driver hot path — an
+    /// empty [`Selector`] on [`Pick::new`](crate::indicators::Pick::new) will
+    /// unpack the sole atom without inspecting the tag.
+    pub fn of_atom(atom: Atom) -> Self {
+        Self {
+            entries: vec![(None, None, atom)],
+        }
+    }
+
+    /// Append a tagged atom to the snapshot. Duplicates are allowed —
+    /// [`Snapshot::find`] returns the first match on a query, so
+    /// insertion order determines precedence.
+    pub fn push(&mut self, symbol: Option<Sym>, freq: Option<Frequency>, atom: Atom) {
+        self.entries.push((symbol, freq, atom));
+    }
+
+    /// Number of tagged atoms in this snapshot.
     pub fn len(&self) -> usize {
-        self.atoms.len()
+        self.entries.len()
     }
 
-    /// True if this snapshot carries no assets.
+    /// True if this snapshot carries no atoms.
     pub fn is_empty(&self) -> bool {
-        self.atoms.is_empty()
+        self.entries.is_empty()
     }
 
-    /// Iterate over `(key, atom)` pairs.
-    pub fn iter(&self) -> impl Iterator<Item = (&K, &Atom)> {
-        self.atoms.iter()
+    /// Iterate over `(symbol, freq, atom)` triples in insertion order.
+    pub fn iter(&self) -> impl Iterator<Item = (Option<&Sym>, Option<Frequency>, &Atom)> {
+        self.entries
+            .iter()
+            .map(|(s, f, a)| (s.as_ref(), *f, a))
     }
 
-    /// Iterate over the keys.
-    pub fn keys(&self) -> impl Iterator<Item = &K> {
-        self.atoms.keys()
-    }
-}
-
-impl<K: Eq + std::hash::Hash> Snapshot<K> {
-    /// Look up an asset by key. `None` if the key is not present in this bar.
-    pub fn get<Q>(&self, key: &Q) -> Option<&Atom>
-    where
-        K: std::borrow::Borrow<Q>,
-        Q: Eq + std::hash::Hash + ?Sized,
-    {
-        self.atoms.get(key)
-    }
-
-    /// Insert or replace an asset's atom for this bar, returning the previous
-    /// atom if any.
-    pub fn insert(&mut self, key: K, atom: Atom) -> Option<Atom> {
-        self.atoms.insert(key, atom)
-    }
-
-    /// True if this snapshot has an atom for the given key.
-    pub fn contains_key<Q>(&self, key: &Q) -> bool
-    where
-        K: std::borrow::Borrow<Q>,
-        Q: Eq + std::hash::Hash + ?Sized,
-    {
-        self.atoms.contains_key(key)
-    }
-}
-
-impl<K> Snapshot<K> {
     /// The sole atom in a single-entry snapshot, if there is exactly one.
     /// Returns `None` for empty snapshots; **panics** with a diagnostic
     /// message when the snapshot has 2+ entries. This is the primitive
-    /// [`Pick::new`] uses for its "no query — this is a single-series run"
-    /// path: a single-series driver always feeds a size-1 snapshot, so a
-    /// 2+ read means the run was accidentally hooked up to multi-asset
-    /// input and the loud failure is preferable to silently returning an
-    /// arbitrary asset.
+    /// [`Pick::new`](crate::indicators::Pick::new) uses for its "no query —
+    /// this is a single-series run" path: a single-series driver always
+    /// feeds a size-1 snapshot, so a 2+ read means the run was accidentally
+    /// hooked up to multi-asset input and the loud failure is preferable to
+    /// silently returning an arbitrary asset.
     pub fn sole_atom(&self) -> Option<&Atom> {
-        match self.atoms.len() {
+        match self.entries.len() {
             0 => None,
-            1 => self.atoms.values().next(),
+            1 => Some(&self.entries[0].2),
             n => panic!(
                 "Snapshot::sole_atom: expected a single-entry snapshot, got {n} entries — \
                  the surrounding chain used a no-argument `Pick::new()`, which requires a \
@@ -792,42 +789,61 @@ impl<K> Snapshot<K> {
     }
 }
 
-impl Snapshot<Selector> {
-    /// Structural lookup: return the first stored atom whose [`Selector`]
-    /// matches `query` under [`Selector::matches`] (each `None` field on the
-    /// query is a wildcard). Iteration order is [`HashMap`]-arbitrary; if a
-    /// query could match more than one stored key, the caller is expected to
-    /// disambiguate (typically by supplying both `symbol` and `freq`).
-    pub fn find(&self, query: &Selector) -> Option<&Atom> {
-        self.atoms
-            .iter()
-            .find_map(|(k, v)| if query.matches(k) { Some(v) } else { None })
+impl<Sym: PartialEq> Snapshot<Sym> {
+    /// Structural lookup: return the first stored atom whose tag matches
+    /// `query` under [`Selector::matches`] (each `None` field on the query
+    /// is a wildcard). Scans entries in insertion order — the caller's push
+    /// sequence is the precedence when a query could match more than one
+    /// entry; disambiguate by supplying both `symbol` and `freq`.
+    pub fn find(&self, query: &Selector<Sym>) -> Option<&Atom> {
+        self.entries.iter().find_map(|(s, f, a)| {
+            if query.matches(s.as_ref(), *f) {
+                Some(a)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Remove every entry whose tag matches `query`. Used by the Python
+    /// bindings' `__setitem__` to implement "assignment overwrites" — Rust
+    /// callers who want raw list semantics should use [`push`](Self::push)
+    /// directly.
+    pub fn remove_matching(&mut self, query: &Selector<Sym>) {
+        self.entries
+            .retain(|(s, f, _)| !query.matches(s.as_ref(), *f));
     }
 }
 
-impl<K> Default for Snapshot<K> {
+impl<Sym: PartialEq> PartialEq for Snapshot<Sym> {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries
+    }
+}
+
+impl<Sym> Default for Snapshot<Sym> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<K: Eq + std::hash::Hash> FromIterator<(K, Atom)> for Snapshot<K> {
-    fn from_iter<I: IntoIterator<Item = (K, Atom)>>(iter: I) -> Self {
+impl<Sym> FromIterator<(Option<Sym>, Option<Frequency>, Atom)> for Snapshot<Sym> {
+    fn from_iter<I: IntoIterator<Item = (Option<Sym>, Option<Frequency>, Atom)>>(iter: I) -> Self {
         Self {
-            atoms: iter.into_iter().collect(),
+            entries: iter.into_iter().collect(),
         }
     }
 }
 
-impl<K: Eq + std::hash::Hash> From<HashMap<K, Atom>> for Snapshot<K> {
-    fn from(atoms: HashMap<K, Atom>) -> Self {
-        Self { atoms }
+impl<Sym> From<Atom> for Snapshot<Sym> {
+    fn from(atom: Atom) -> Self {
+        Self::of_atom(atom)
     }
 }
 
-impl<K> From<Snapshot<K>> for HashMap<K, Atom> {
-    fn from(snap: Snapshot<K>) -> Self {
-        snap.atoms
+impl<Sym> From<Candle> for Snapshot<Sym> {
+    fn from(candle: Candle) -> Self {
+        Self::of_atom(Atom::new(candle))
     }
 }
 

@@ -12,47 +12,32 @@
 //! broker-backed impl unchanged — it's not backtest-only, hence the neutral
 //! [`run`] name.
 //!
-//! Bars enter as [`Atom`]s — an OHLCV [`Candle`] plus optional overlay data. A
-//! `Vec<Candle>` still works: [`Atom: From<Candle>`](crate::Atom) lifts each
-//! candle to an atom with no overlays. Per bar, in order: feed the wallet the
-//! candle (the fill stream it returns is routed to [`Strategy::on_fill`] and
-//! collected into the blotter), [`Strategy::update`] the strategy with the
-//! atom, then [`Strategy::trade`] it (queuing this bar's market orders —
+//! Bars enter as [`Snapshot<Sym>`](crate::types::Snapshot)s — a per-bar
+//! keyed collection of tagged [`Atom`]s. Single-series callers can lift a
+//! `Vec<Candle>` or `Vec<Atom>` via the shorthand
+//! [`Snapshot::of_atom`](crate::types::Snapshot::of_atom) (or the
+//! [`Atom → Snapshot<Sym>`](crate::types::Snapshot#impl-From%3CAtom%3E-for-Snapshot%3CSym%3E)
+//! `From` — untagged, size-1). Per bar, in order: extract the strategy's own
+//! asset out of the snapshot for the wallet mark-to-market, feed the wallet
+//! that candle (the fill stream it returns is routed to
+//! [`Strategy::on_fill`] and collected into the blotter),
+//! [`Strategy::update`] the strategy with the whole snapshot, then
+//! [`Strategy::trade`] it (queuing this bar's market orders —
 //! [`PaperWallet`](crate::PaperWallet) fills them at the next bar's `open`).
 //! The bar's mark-to-market equity is appended last.
-//!
-//! ```no_run
-//! use fugazi::prelude::*;
-//! use fugazi::backtest::run;
-//!
-//! # struct MyStrategy;
-//! # impl Strategy for MyStrategy {
-//! #     type Input = Atom;
-//! #     type Symbol = String;
-//! #     fn update(&mut self, _: Atom) {}
-//! #     fn trade(&self, _: &mut dyn Wallet<String>) {}
-//! #     fn reset(&mut self) {}
-//! # }
-//! # let mut strategy = MyStrategy;
-//! # let candles: Vec<Candle> = vec![];
-//! let mut wallet = PaperWallet::new(10_000.0);
-//! let report = run(&mut strategy, &mut wallet, "BTC".to_string(), candles);
-//! let bars = report.equity_curve.len();
-//! let filled = report.fills.len();
-//! # let _ = (bars, filled);
-//! ```
 
-use crate::{Atom, Order, Real, Strategy, Wallet};
+use crate::types::{Selector, Snapshot};
+use crate::{Order, Real, Strategy, Wallet};
 
 /// One booked order stamped with the bar index it filled on.
 ///
 /// Held in [`RunReport::fills`] in fill order — the same order the wallet
-/// booked them. `bar` is the zero-based position in the input candle stream at
-/// which the fill occurred (which, for [`PaperWallet`](crate::PaperWallet), is
-/// the bar whose `open` the fill traded at, i.e. one bar after the signal).
+/// booked them. `bar` is the zero-based position in the input snapshot stream
+/// at which the fill occurred (which, for [`PaperWallet`](crate::PaperWallet),
+/// is the bar whose `open` the fill traded at, i.e. one bar after the signal).
 #[derive(Debug, Clone)]
 pub struct Fill<Sym> {
-    /// Zero-based index into the input candle stream.
+    /// Zero-based index into the input snapshot stream.
     pub bar: usize,
     /// The order that filled, as booked by the wallet (side, units, price, kind,
     /// id — see [`Order`]).
@@ -62,7 +47,7 @@ pub struct Fill<Sym> {
 /// Everything a post-run analytic needs to reduce one run to numbers.
 ///
 /// - [`equity_curve`](Self::equity_curve) holds one mark-to-market equity value
-///   per input candle, in bar order.
+///   per input snapshot, in bar order.
 /// - [`fills`](Self::fills) holds every order the wallet booked over the run,
 ///   in fill order, each tagged with the bar index it filled on.
 /// - [`initial_equity`](Self::initial_equity) is the wallet's total equity
@@ -70,7 +55,7 @@ pub struct Fill<Sym> {
 ///   against.
 #[derive(Debug, Clone)]
 pub struct RunReport<Sym> {
-    /// One entry per input candle, in bar order (post mark-to-market).
+    /// One entry per input snapshot, in bar order (post mark-to-market).
     pub equity_curve: Vec<Real>,
     /// Every booked fill, in the order the wallet produced them.
     pub fills: Vec<Fill<Sym>>,
@@ -78,8 +63,9 @@ pub struct RunReport<Sym> {
     pub initial_equity: Real,
 }
 
-/// Drive `strategy` over `atoms`, executing against `wallet` (which is fed one
-/// `(symbol, candle)` pair per bar), and return the [`RunReport`].
+/// Drive `strategy` over `snapshots`, executing against `wallet` (which is fed
+/// one `(symbol, candle)` pair per bar, extracted from each snapshot), and
+/// return the [`RunReport`].
 ///
 /// The reported [`equity_curve`](RunReport::equity_curve) has one entry per
 /// bar (post mark-to-market for that bar). The reported
@@ -88,43 +74,60 @@ pub struct RunReport<Sym> {
 /// filling at this bar's `open`, plus any resting protective legs this bar
 /// triggered.
 ///
+/// Per bar, the strategy's own asset is located inside the incoming
+/// [`Snapshot`] via `snap.find(&Selector::by_symbol(symbol.clone()))`; when
+/// no tag matches (the single-series driver hot path — untagged size-1
+/// snapshot via [`Snapshot::of_atom`]), it falls back to
+/// [`Snapshot::sole_atom`]. That atom's candle is what the wallet marks to
+/// market; the whole snapshot is what the strategy sees, so its leaves can
+/// [`Pick`](crate::indicators::Pick) any asset out of the frame.
+///
 /// The wallet is passed in so the caller controls initial cash, wallet
 /// implementation (paper vs. downstream broker-backed), and any pre-warming.
-/// Pass the intended trading symbol as `symbol`; it is cloned once per bar to
-/// feed [`Wallet::update`]. `atoms` is any iterable over anything convertible
-/// to [`Atom`] — pass `Vec<Atom>` directly, or `Vec<Candle>` for the no-overlay
-/// case (the [`From<Candle>`] lift is free). The size hint (when available)
-/// pre-sizes the equity curve.
-pub fn run<S, W, I, A>(
+/// Pass the intended trading symbol as `symbol`; it's cloned once per bar to
+/// feed [`Wallet::update`]. `snapshots` is any iterable over anything
+/// convertible to [`Snapshot<S::Symbol>`] — pass `Vec<Snapshot<Sym>>`
+/// directly, or `Vec<Candle>` / `Vec<Atom>` and each entry lifts into an
+/// untagged size-1 snapshot via [`Atom::from`]. The size hint (when
+/// available) pre-sizes the equity curve.
+pub fn run<Sym, S, W, I, A>(
     strategy: &mut S,
     wallet: &mut W,
-    symbol: S::Symbol,
-    atoms: I,
-) -> RunReport<S::Symbol>
+    symbol: Sym,
+    snapshots: I,
+) -> RunReport<Sym>
 where
-    S: Strategy<Input = Atom>,
-    W: Wallet<S::Symbol>,
-    S::Symbol: Clone,
+    Sym: Clone + PartialEq,
+    S: Strategy<Symbol = Sym, Input = Snapshot<Sym>>,
+    W: Wallet<Sym>,
     I: IntoIterator<Item = A>,
-    A: Into<Atom>,
+    A: Into<Snapshot<Sym>>,
 {
     let initial_equity = wallet.equity().0;
-    let iter = atoms.into_iter();
+    let iter = snapshots.into_iter();
     let (lower, _) = iter.size_hint();
     let mut equity_curve = Vec::with_capacity(lower);
-    let mut fills: Vec<Fill<S::Symbol>> = Vec::new();
+    let mut fills: Vec<Fill<Sym>> = Vec::new();
 
-    for (bar, atom) in iter.enumerate() {
-        let atom: Atom = atom.into();
-        // The wallet's fill stream: any queued market order filling this bar
-        // at its open, plus any resting protective leg triggered. Route each
-        // fill through the strategy first (so its on_fill can update internal
-        // state), then record it.
-        for fill in wallet.update(symbol.clone(), atom.candle) {
-            strategy.on_fill(&fill);
-            fills.push(Fill { bar, order: fill });
+    let query = Selector::by_symbol(symbol.clone());
+    for (bar, snap) in iter.enumerate() {
+        let snap: Snapshot<S::Symbol> = snap.into();
+        // Route the strategy's own asset out of the snapshot for the wallet's
+        // mark-to-market. Prefer the symbol-matching entry (single- and
+        // cross-asset); fall back to the sole atom for the untagged
+        // single-series shortcut (`Snapshot::of_atom(atom)`).
+        let self_atom = snap.find(&query).or_else(|| snap.sole_atom());
+        if let Some(atom) = self_atom.cloned() {
+            // The wallet's fill stream: any queued market order filling this
+            // bar at its open, plus any resting protective leg triggered.
+            // Route each fill through the strategy first (so its on_fill can
+            // update internal state), then record it.
+            for fill in wallet.update(symbol.clone(), atom.candle) {
+                strategy.on_fill(&fill);
+                fills.push(Fill { bar, order: fill });
+            }
         }
-        strategy.update(atom);
+        strategy.update(snap);
         // update()/on_fill() always run so warm-up progresses; trade() only
         // runs once the strategy reports ready. is_ready() defaults to true,
         // so this is a no-op for strategies that don't override it.
