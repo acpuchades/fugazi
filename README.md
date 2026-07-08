@@ -515,7 +515,10 @@ written, and adding `-w N` writes two extra CSVs at window length `N`:
 `metrics.csv` (non-overlapping windows, one row each) and `rolling.csv`
 (rolling stride-1 windows, one row each). Both share the same columns —
 `window_start;window_end;<full metric catalogue under dotted metrics.yml
-names>` — so R/Python can consume them interchangeably. Non-overlapping is
+names>` — so R/Python can consume them interchangeably. The console prints
+an extra **windowed metrics** block under `-w` showing `mean ± std` across
+the non-overlapping rows, right after the whole-run block — so the single
+estimate and the cross-window dispersion sit side-by-side. Non-overlapping is
 right for cross-window aggregation (independent samples → the sample stddev is
 meaningful); rolling is right for continuous plotting (a smooth curve — the
 metrics.csv equivalent to pyfolio's rolling-Sharpe chart). The same

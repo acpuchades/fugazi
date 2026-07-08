@@ -17,7 +17,11 @@
 //! Excel. After the loop the equity curve + blotter reduce to `metrics.yml`
 //! (whole-run summary — see [`crate::metrics`]) and, under `-w N`, to
 //! `metrics.csv` (non-overlapping N-bar windows) and `rolling.csv` (rolling
-//! stride-1 windows).
+//! stride-1 windows). The console prints the whole-run headline block first;
+//! under `-w` a second **windowed metrics** block follows it, showing
+//! `mean ± std` across the non-overlapping windows for the same headline
+//! stats — so the caller sees both the whole-run point estimate and its
+//! cross-window dispersion side-by-side.
 //!
 //! Metrics cover the whole run — the strategy layer is opinion-free about
 //! stability. A strategy that wants entries held off until every source it
@@ -182,6 +186,9 @@ pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<
     if !opts.quiet {
         print_result_block(opts, &summary, started, finished);
         print_metrics_block(&iter.metrics, None, iter.gross_metrics.as_ref());
+        if let Some(windows) = iter.windowed.as_deref() {
+            print_windowed_metrics_block(windows);
+        }
     }
     Ok(summary)
 }
@@ -478,6 +485,116 @@ fn format_ratio(v: Option<Real>) -> String {
 
 fn format_pct(v: Option<Real>) -> String {
     v.map_or_else(|| "—".to_string(), |r| format!("{r:.1}%"))
+}
+
+/// Printed right after [`print_metrics_block`] under `-w`: each headline stat
+/// becomes the cross-window `mean ± std` over the non-overlapping N-bar rows
+/// in `metrics.csv`, so the caller sees both the whole-run single estimate
+/// and the windowed dispersion around it side-by-side. Same field set and
+/// layout as the whole-run block. Windows where a ratio is degenerate (no
+/// losing trade for a profit factor, zero variance for Sharpe, …) are dropped
+/// from that stat's aggregation via the `Option` filter — a stat with fewer
+/// than one defined window prints as `—`.
+///
+/// No net-vs-gross split under `-w`: the pipeline currently only windows the
+/// priced run, and printing whole-run gross next to windowed-net numbers would
+/// mix aggregation scopes.
+fn print_windowed_metrics_block(windows: &[metrics::WindowMetrics]) {
+    println!("\n{}", style::bold("windowed metrics"));
+    print_field(
+        "windows",
+        &format!(
+            "{} × {} bars (non-overlapping)",
+            windows.len(),
+            windows.first().map_or(0, |w| w.metrics.run.bars),
+        ),
+    );
+    let ann_mean = mean_std_of(windows, |m| Some(m.returns.annualized_mean_pct));
+    let ann_vol = mean_std_of(windows, |m| Some(m.returns.annualized_volatility_pct));
+    print_field(
+        "return",
+        &format!(
+            "{} ann · vol {}",
+            format_ms_signed_pct(ann_mean),
+            format_ms_unsigned_pct(ann_vol),
+        ),
+    );
+    print_field(
+        "sharpe",
+        &format_ms_ratio(mean_std_of(windows, |m| m.risk_adjusted.sharpe)),
+    );
+    print_field(
+        "sortino",
+        &format_ms_ratio(mean_std_of(windows, |m| m.risk_adjusted.sortino)),
+    );
+    print_field(
+        "omega",
+        &format_ms_ratio(mean_std_of(windows, |m| m.risk_adjusted.omega)),
+    );
+    let max_dd = mean_std_of(windows, |m| Some(m.drawdown.max_pct));
+    let max_dur = mean_std_of(windows, |m| Some(m.drawdown.max_duration_bars as Real));
+    print_field(
+        "max_dd",
+        &format!(
+            "{} ({} bars)",
+            format_ms_unsigned_pct(max_dd),
+            format_ms_count(max_dur, 0),
+        ),
+    );
+    print_field(
+        "exposure",
+        &format_ms_unsigned_pct(mean_std_of(windows, |m| Some(m.trades.exposure_pct))),
+    );
+    let trades = mean_std_of(windows, |m| Some(m.trades.total as Real));
+    let win_rate = mean_std_of(windows, |m| m.trades.win_rate_pct);
+    let pf = mean_std_of(windows, |m| m.trades.profit_factor);
+    print_field(
+        "trades",
+        &format!(
+            "{} · win {} · pf {}",
+            format_ms_count(trades, 1),
+            format_ms_unsigned_pct(win_rate),
+            format_ms_ratio(pf),
+        ),
+    );
+}
+
+/// Project `f` across each window's `Metrics`, drop `None`s, and reduce to
+/// `(mean, population_std)` via [`metrics::mean_std`]. `None` when no window
+/// defines the stat.
+fn mean_std_of<F>(windows: &[metrics::WindowMetrics], f: F) -> Option<(Real, Real)>
+where
+    F: Fn(&metrics::Metrics) -> Option<Real>,
+{
+    metrics::mean_std(windows.iter().filter_map(|w| f(&w.metrics)))
+}
+
+/// `+M.MM ± S.SS%` — signed mean (returns can be negative), unsigned stddev,
+/// unit suffix once at the end.
+fn format_ms_signed_pct(pair: Option<(Real, Real)>) -> String {
+    pair.map_or_else(
+        || "—".to_string(),
+        |(m, s)| format!("{m:+.2} ± {s:.2}%"),
+    )
+}
+
+/// `M.MM ± S.SS%` — unsigned mean (magnitudes, ratios in percent form).
+fn format_ms_unsigned_pct(pair: Option<(Real, Real)>) -> String {
+    pair.map_or_else(|| "—".to_string(), |(m, s)| format!("{m:.2} ± {s:.2}%"))
+}
+
+/// `M.MM ± S.SS` — unitless ratio (Sharpe, Sortino, Omega, profit factor).
+fn format_ms_ratio(pair: Option<(Real, Real)>) -> String {
+    pair.map_or_else(|| "—".to_string(), |(m, s)| format!("{m:.2} ± {s:.2}"))
+}
+
+/// `M ± S` at `precision` decimals — for counts (trades, drawdown duration
+/// bars) treated as floats so a fractional mean survives the format.
+fn format_ms_count(pair: Option<(Real, Real)>, precision: usize) -> String {
+    pair.map_or_else(
+        || "—".to_string(),
+        |(m, s)| format!("{m:.*} ± {s:.*}", precision, precision),
+    )
 }
 
 fn format_elapsed(d: Duration) -> String {

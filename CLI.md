@@ -108,7 +108,7 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
 | --- | --- |
 | `<STRATEGY>` | Positional. `@file.yml` loads a file; anything else is inline YAML. An optional `single:` shape prefix is accepted (`single:@strategy.yml` ≡ `@strategy.yml`) — reserved for a future `multiple:` sibling, see [Strategy shape prefix](#strategy-shape-prefix). |
 | `-s`, `--series <SPEC>` | Data series. Repeatable. See [--series](#--series). |
-| `-o`, `--output-dir <DIR>` | Directory to write `trades.csv`, `returns.csv`, and `metrics.yml` into. Created if missing. Plain path — no interpolation. |
+| `-o`, `--output-dir <DIR>` | Directory to write `trades.csv`, `returns.csv`, and `metrics.yml` into (plus `metrics.csv` + `rolling.csv` under `-w`). Created if missing. Plain path — no interpolation. |
 | `-p`, `--params <SPEC>` | Placeholder substitution. Repeatable. See [--params](#--params). |
 | `-c`, `--cash <N>` | Initial funds for the paper wallet. Default `10000`. |
 | `--costs <SPEC>` | Trading-cost model — commission, spread, slippage — applied to every fill. Repeatable. See [--costs](#--costs). Omit for a frictionless run (matches the pre-costs release byte-for-byte). |
@@ -116,7 +116,7 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
 | `-f`, `--frequency <[SYM:]CODE>` | Bar cadence (`1m`, `5m`, `1h`, `4h`, `1d`, `1w`, `1M`, …). Repeatable; may carry a `SYMBOL:` scope prefix. When omitted, the CLI auto-detects the cadence from the `time` column. Combines with the calendar to derive `bars_per_year`. |
 | `--bars-per-year <[SYM[FREQ]:]N>` | Explicit override for the annualization denominator. Repeatable; each entry may carry a `SYMBOL[FREQ]:` scope prefix. Wins over the calendar/frequency pair when a scope matches. |
 | `--risk-free-rate <RATE>` | Annualized risk-free rate as a fraction (`0.045` = 4.5% p.a.). Default `0`. See [Risk-free rate](#risk-free-rate). |
-| `-w`, `--windowed <LEN>` | Also reduce the run in `LEN`-sized windows: one row per non-overlapping window in `metrics.csv`, one row per rolling (stride-1) window in `rolling.csv`. `metrics.yml` (whole-run) is always written. `LEN` is a plain bar count (`10`, `252`) or a duration in the [`-f`](#-f----frequency) alphabet (`1d`, `1w`, `1M`, `4h`) that resolves to a bar count against the trading calendar. The duration form is strict — it requires an explicit `--stocks`/`--forex`/`--crypto` and a resolvable bar cadence (`-f/--frequency`, or a `time` column so the cadence can be auto-detected). See [Windowed metrics](#windowed-metrics). |
+| `-w`, `--windowed <LEN>` | Also reduce the run in `LEN`-sized windows: one row per non-overlapping window in `metrics.csv`, one row per rolling (stride-1) window in `rolling.csv`. `metrics.yml` (whole-run) is always written; the console prints an extra **windowed metrics** block right after the whole-run one, showing `mean ± std` over the non-overlapping rows for the same headline stats. `LEN` is a plain bar count (`10`, `252`) or a duration in the [`-f`](#-f----frequency) alphabet (`1d`, `1w`, `1M`, `4h`) that resolves to a bar count against the trading calendar. The duration form is strict — it requires an explicit `--stocks`/`--forex`/`--crypto` and a resolvable bar cadence (`-f/--frequency`, or a `time` column so the cadence can be auto-detected). See [Windowed metrics](#windowed-metrics). |
 | `-q`, `--quiet` | Silence the console output. Files still get written. |
 
 **Outputs.** Files in `--output-dir`, all documented in
@@ -144,10 +144,14 @@ prefix, including `multiple:`, is rejected at parse time with a
 **inputs** (strategy, params, period, capital, output), **trades**
 (each fill listed after the run completes), **result** (bars, trades, capital
 before → after, start/finish timestamps + elapsed), and **metrics**
-(the headline lines of `metrics.yml`). Metrics cover the whole run; the
-strategy layer's readiness default (see [Stability gating](#stability-gating))
-holds the first trade until every source it consults is past its unstable
-tail — no explicit gate on the entry is needed.
+(the headline lines of `metrics.yml`). Under `-w/--windowed` a further
+**windowed metrics** block prints right after **metrics**, showing
+`mean ± std` over the non-overlapping windows of `metrics.csv` for the same
+headline stats — so the whole-run point estimate and its cross-window
+dispersion sit side-by-side. Metrics cover the whole run; the strategy
+layer's readiness default (see [Stability gating](#stability-gating)) holds
+the first trade until every source it consults is past its unstable tail —
+no explicit gate on the entry is needed.
 
 ### `check`
 
