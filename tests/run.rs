@@ -134,12 +134,12 @@ fn runs_windowed_metrics() {
     let mut rlines = rolling.lines();
     let rheader = rlines.next().expect("rolling.csv header");
     // rolling.csv shares every column of metrics.csv *except* the trailing
-    // `deflated_sharpe` — DSR isn't emitted for rolling windows because their
+    // `selection.deflated_sharpe` — DSR isn't emitted for rolling windows because their
     // overlapping bars break the trial-variance model. See `run.rs` writer.
     assert_eq!(
         header,
-        format!("{rheader};deflated_sharpe"),
-        "metrics.csv should be rolling.csv's columns plus the trailing deflated_sharpe"
+        format!("{rheader};selection.deflated_sharpe"),
+        "metrics.csv should be rolling.csv's columns plus the trailing selection.deflated_sharpe"
     );
     // 30 bars, window 10 → 30 - 10 + 1 = 21 rolling windows.
     let rrows: Vec<&str> = rlines.collect();

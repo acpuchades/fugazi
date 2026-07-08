@@ -312,7 +312,7 @@ fn stream_trades(iter: &IterationResult) {
 /// non-overlapping (`metrics.csv`) and rolling (`rolling.csv`) writes.
 ///
 /// `dsr_context = Some((n_trials, trial_variance))` appends a trailing
-/// `deflated_sharpe` column — the per-window DSR against the windows treated
+/// `selection.deflated_sharpe` column — the per-window DSR against the windows treated
 /// as the trial population (see [`metrics::windows_dsr_context`] for the
 /// caveats). Wired for `metrics.csv` only; `rolling.csv` passes `None`
 /// because its heavy autocorrelation makes the trial-variance model unsound.
@@ -333,7 +333,7 @@ fn write_windowed_csv(
         .chain(names.iter().map(|(name, _)| (*name).to_string()))
         .collect();
     if dsr_context.is_some() {
-        header.push("deflated_sharpe".to_string());
+        header.push("selection.deflated_sharpe".to_string());
     }
     out.write_record(&header)?;
     for window in windows {

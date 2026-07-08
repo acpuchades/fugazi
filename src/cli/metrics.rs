@@ -125,7 +125,7 @@ pub struct RiskAdjustedSection {
     /// This is the whole-run PSR — a single-trial statistic. The selection-
     /// bias-corrected DSR is only meaningful when a *choice* has been made
     /// from many candidates, so it doesn't belong on the whole-run summary:
-    /// it surfaces as a trailing `deflated_sharpe` column on `optimize`'s
+    /// it surfaces as a trailing `selection.deflated_sharpe` column on `optimize`'s
     /// grid CSV (per grid cell, against the grid-wide null) and on `run -w`'s
     /// `metrics.csv` (per non-overlapping window, against the window
     /// population — see [`windows_dsr_context`] for the caveats).

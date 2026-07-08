@@ -479,7 +479,7 @@ pub(crate) struct Sweep {
     /// `(n_trials, Var[SR])` collected across the sweep, or `None` when the
     /// grid has fewer than two rows with a defined Sharpe or when the trial
     /// variance is zero — DSR is meaningless in either case. Consumed by the
-    /// CSV writer to emit the `deflated_sharpe` column: the per-row DSR
+    /// CSV writer to emit the `selection.deflated_sharpe` column: the per-row DSR
     /// against the grid-wide null (Bailey & López de Prado, 2014).
     ///
     /// Windowing regularizes but does not eliminate multiple-testing bias: the
@@ -769,7 +769,7 @@ fn ranking_value(eval: &Evaluation, path: &str, direction: Direction, k: Real) -
 /// Write the sweep CSV: axis columns first (declaration order), then one
 /// column per requested metric — or, under `-w/--windowed`, two columns per
 /// metric (`<name>_mean` / `<name>_std`, the cross-window aggregate). Whole-run
-/// sweeps also get a trailing `deflated_sharpe` column when the grid has
+/// sweeps also get a trailing `selection.deflated_sharpe` column when the grid has
 /// enough spread in Sharpes for the multiple-testing correction to be defined.
 /// `;`-delimited to match `trades.csv` / `returns.csv`. Missing (omitted)
 /// metric values are written as an empty cell.
@@ -802,7 +802,7 @@ fn write_grid_csv(
         }
     }
     if deflated_sharpe_context.is_some() {
-        header.push("deflated_sharpe".to_string());
+        header.push("selection.deflated_sharpe".to_string());
     }
     writer.write_record(&header)?;
 
@@ -861,7 +861,7 @@ fn write_grid_csv(
                 }
             }
         }
-        // Trailing `deflated_sharpe` cell — uses per-row summary stats extracted
+        // Trailing `selection.deflated_sharpe` cell — uses per-row summary stats extracted
         // via `row_dsr_inputs` (whole-run passthrough or windowed cross-window
         // means; see [`row_dsr_inputs`] and the [`Sweep`] field's rustdoc).
         if let Some((n_trials, trial_var)) = deflated_sharpe_context {
