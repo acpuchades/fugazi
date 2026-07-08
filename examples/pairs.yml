@@ -1,0 +1,70 @@
+# A BTC/ETH pairs strategy driven by the running spread's z-score.
+#
+# Enter (long BTC / short ETH, sized 50/50 against equity — 1.0× gross,
+# dollar-neutral) when the 60-bar z-score of the raw close spread
+# `close(BTC) − close(ETH)` drops at or below −2σ. Exit when the z-score
+# reverts back through 0. Two spread-level brackets close the pair early on
+# the tails:
+#
+#   * stop_loss   = mean_spread − 4·σ   (the cointegration relationship broke)
+#   * take_profit = mean_spread + 1·σ   (favourable overshoot — lock it in)
+#
+# The internal spread indicator in `PairsStrategy` is always the raw
+# `close(left) − close(right)` diff, so *level* expressions must land in
+# raw-spread units. The recipe below writes each level as
+# `spread_ma ± k·spread_sd`, which is raw-spread by construction.
+#
+# Reusable subtrees are wired via YAML anchors: `&name` at the first use site,
+# `*name` everywhere else. `serde_norway` inlines each alias before the spec
+# is deserialized, so the whole graph reads as if the subtrees were repeated
+# verbatim, without paying to build them more than once at load time.
+#
+# Run with (both legs join on `time` from separate `--series`; `--crypto -f 1d`
+# sets the annualization to 365 bars/year for 24/7 markets):
+#
+#   fugazi run pairs:@examples/pairs.yml \
+#              --series @btc.csv \
+#              --series @eth.csv \
+#              --output-dir out/ \
+#              --crypto -f 1d
+#
+# Signal / level tags:
+#   !close { source: !pick { symbol: <SYM> } } — the close of one asset in the pair.
+#   !sub / !add / !mul / !div                  — arithmetic combinators.
+#   !sma / !stddev { period, source }          — the windowed statistics.
+#   !above / !below { source, level }          — compare a source against a scalar.
+
+left: BTC
+right: ETH
+
+# 60-bar z-score of the raw BTC−ETH spread. Named subtrees:
+#   *spread     — close(BTC) − close(ETH)
+#   *spread_ma  — 60-bar SMA of the spread (the mean-reversion anchor)
+#   *spread_sd  — 60-bar rolling stddev of the spread
+#   *z_score    — (spread − mean) / stddev, the entry/exit signal.
+enter: !below
+  source: &z_score !div
+    lhs: !sub
+      lhs: &spread !sub
+        lhs: !close { source: !pick { symbol: BTC } }
+        rhs: !close { source: !pick { symbol: ETH } }
+      rhs: &spread_ma !sma { period: 60, source: *spread }
+    rhs: &spread_sd !stddev { period: 60, source: *spread }
+  level: -2.0
+
+exit: !above
+  source: *z_score
+  level: 0.0
+
+# Spread-level stop-loss at mean − 4σ. In raw-spread units, so it's directly
+# comparable to the internal spread indicator the strategy computes each bar.
+stop_loss: !sub
+  lhs: *spread_ma
+  rhs: !mul { lhs: *spread_sd, rhs: !value 4.0 }
+
+# Spread-level take-profit at mean + 1σ. Asymmetric with the stop by design:
+# pairs-trading blowups are one-sided (the relationship breaks), so cut wider
+# there and take profits on the more common healthy reversion.
+take_profit: !add
+  lhs: *spread_ma
+  rhs: !mul { lhs: *spread_sd, rhs: !value 1.0 }
