@@ -237,6 +237,65 @@ Safe by default, override per subtree: fugazi's readiness machinery waits for
 CLI's per-overlay CSV trim in `fugazi get`) — `unstable(...)` is the single
 opt-out.
 
+### Cross-asset composition — `Snapshot` and `pick(key)`
+
+To reason about more than one asset per bar, feed a **Snapshot** — a keyed
+collection of `Atom`s (one per asset for the current bar) — and use `pick(key)`
+to project one asset out of it. Every atom-input leaf (`close()`, `high()`,
+`atr()`, `year()`, `is_weekday()`, ...) takes an optional `source=` argument
+that re-roots it onto a `pick()`, so cross-asset expressions compose from the
+same primitives as single-asset ones:
+
+```python
+import fugazi as ta
+
+# BTC's close as a first-class indicator over Snapshot input.
+btc_close = ta.close(source=ta.pick("BTC"))
+
+# BTC/ETH close spread — arithmetic between two picks is just an indicator.
+spread = ta.close(ta.pick("BTC")) - ta.close(ta.pick("ETH"))
+
+# Feed one snapshot per bar.
+snap = ta.Snapshot({
+    "BTC": ta.Atom(ta.Candle(100, 101, 99, 100, 1), time=1_710_504_000_000),
+    "ETH": ta.Atom(ta.Candle(60, 61, 59, 60, 1),   time=1_710_504_000_000),
+})
+print(spread.update(snap))          # -> 40.0
+```
+
+A snapshot behaves like a dict of atoms: `snap[key]`, `snap[key] = atom`,
+`key in snap`, `len(snap)`, `snap.keys()`. Constructors accept a plain
+Python mapping, and `update()` accepts either a `Snapshot` or a bare
+`dict[str, Atom | Candle]` (lifted on the fly), so the surface fits both
+"build the frame once" and "hand a fresh dict per bar" styles.
+
+A `pick()` is *atom-emitting*, not real-emitting: it feeds any atom-input leaf
+via `source=`. Compositions preserve the input domain — the arithmetic below
+still consumes snapshots — and mixing a snapshot-rooted indicator with a
+candle-rooted one is a `TypeError` (a candle-input and a snapshot-input can't
+share a bar).
+
+```python
+# Any atom-input leaf takes source=: the price accessors and every calendar
+# reader, wired to the same picked atom stream.
+btc_close = ta.close(source=ta.pick("BTC"))
+btc_year  = ta.year(source=ta.pick("BTC"))
+ratio     = ta.close(ta.pick("BTC")) / ta.close(ta.pick("ETH"))
+```
+
+**Atom equality is by `time`.** Two atoms compare equal iff their bar-open
+`Timestamp`s match — the OHLCV numbers and overlays are payload, not identity —
+and atoms sort chronologically (`None` first), so mixed streams can be
+deduplicated by time and sorted into run order without a custom key:
+
+```python
+a1 = ta.Atom(ta.Candle(1, 1, 1, 1, 0), time=1_000)
+a2 = ta.Atom(ta.Candle(1, 1, 1, 99, 0), time=1_000)   # different price
+a3 = ta.Atom(ta.Candle(1, 1, 1, 1, 0), time=2_000)
+assert a1 == a2 and a1 < a3
+assert len({a1, a2, a3}) == 2                          # a1 == a2, distinct from a3
+```
+
 ## Operators
 
 Combine value indicators into **other indicators**:

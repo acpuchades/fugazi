@@ -34,12 +34,12 @@ use std::sync::{Arc, Mutex};
 use fugazi_core::Indicator;
 use fugazi_core::indicators::compare::{EqOp, GeOp, GtOp, LeOp, LtOp, NeOp, StrEqOp, StrNeOp};
 use fugazi_core::indicators::{
-    Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Current, CurrentBar,
+    Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Close, CurrentBar,
     Day, DayOfWeek, DayOfYear, Dmi, DmiValue, Donchian, DonchianValue, Ema, GetBool, GetReal,
-    GetStr, Hma, Hour, Identity, IsWeekday, IsWeekend, Keltner, KeltnerValue, Latch, Macd,
-    MacdValue, Mfi, Minute, Month, Obv, Quarter, Resample, Rma, Rsi, Sar, Second, Sma, StdDev,
-    Stochastic, TrueRange, UnixMillis, UnixSeconds, Value, ValueStr, Vwap, WeekOfYear, WilliamsR,
-    Wma, Year,
+    GetStr, High, Hma, Hour, Identity, IsWeekday, IsWeekend, Keltner, KeltnerValue, Latch, Low,
+    Macd, MacdValue, Median, Mfi, Minute, Month, Obv, Open, Pick, Quarter, Resample, Rma, Rsi,
+    Sar, Second, Sma, StdDev, Stochastic, TrueRange, Typical, UnixMillis, UnixSeconds, Value,
+    ValueStr, Volume, Vwap, WeekOfYear, WilliamsR, Wma, Year,
 };
 use fugazi_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
 use fugazi_core::sources::{Binance, CandleSource, Interval, SourceError, Timestamp, Yahoo};
@@ -47,7 +47,7 @@ use fugazi_core::strategy::{
     Ack, Order, OrderKind, PaperWallet, Units, Reference, Side, Size, Wallet, WalletError,
 };
 use fugazi_core::types::{
-    Atom, Candle, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder,
+    Atom, Candle, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder, Snapshot,
 };
 use fugazi_core::backtest::Fill;
 use fugazi_core::metrics as core_metrics;
@@ -581,6 +581,7 @@ impl<I: Clone + Send + Sync + 'static> Indicator for SharedProjector<I> {
 enum AnySharedMulti {
     Candle(Arc<Mutex<SharedMultiCell<Atom>>>),
     Real(Arc<Mutex<SharedMultiCell<Real>>>),
+    Snapshot(Arc<Mutex<SharedMultiCell<Snapshot<String>>>>),
 }
 
 impl AnySharedMulti {
@@ -588,6 +589,7 @@ impl AnySharedMulti {
         match self {
             AnySharedMulti::Candle(c) => c.lock().expect("mutex poisoned").names,
             AnySharedMulti::Real(c) => c.lock().expect("mutex poisoned").names,
+            AnySharedMulti::Snapshot(c) => c.lock().expect("mutex poisoned").names,
         }
     }
 
@@ -619,6 +621,14 @@ impl AnySharedMulti {
                     last_value: None,
                 })),
             },
+            AnySharedMulti::Snapshot(cell) => PyIndicator {
+                src: AnySource::Snapshot(Source::new(SharedProjector::<Snapshot<String>> {
+                    cell: Arc::clone(cell),
+                    field_index: idx,
+                    local_gen: cell.lock().expect("mutex poisoned").generation,
+                    last_value: None,
+                })),
+            },
         })
     }
 }
@@ -627,7 +637,7 @@ impl AnySharedMulti {
 // Input domain: the runtime tag recovering the erased `Input` type
 // ---------------------------------------------------------------------------
 
-/// A scalar source erased to one of the two input domains, plus a third
+/// A scalar source erased to one of the three input domains, plus a fourth
 /// domain-**neutral** case for a constant. A constant reads no input (it mirrors
 /// Rust's `Value<I>`, generic over the input), so it carries no domain of its
 /// own and instead adopts its partner's when composed — see [`pair`]. Used
@@ -636,6 +646,7 @@ impl AnySharedMulti {
 enum AnySource {
     Candle(Source<Atom>),
     Real(Source<Real>),
+    Snapshot(Source<Snapshot<String>>),
     Const(Real),
 }
 
@@ -644,6 +655,7 @@ impl AnySource {
         match self {
             AnySource::Candle(s) => Indicator::value(s),
             AnySource::Real(s) => Indicator::value(s),
+            AnySource::Snapshot(s) => Indicator::value(s),
             AnySource::Const(c) => Some(*c),
         }
     }
@@ -651,6 +663,7 @@ impl AnySource {
         match self {
             AnySource::Candle(s) => Indicator::warm_up_period(s),
             AnySource::Real(s) => Indicator::warm_up_period(s),
+            AnySource::Snapshot(s) => Indicator::warm_up_period(s),
             AnySource::Const(_) => 0,
         }
     }
@@ -658,6 +671,7 @@ impl AnySource {
         match self {
             AnySource::Candle(s) => Indicator::unstable_period(s),
             AnySource::Real(s) => Indicator::unstable_period(s),
+            AnySource::Snapshot(s) => Indicator::unstable_period(s),
             AnySource::Const(_) => 0,
         }
     }
@@ -665,6 +679,7 @@ impl AnySource {
         match self {
             AnySource::Candle(s) => Indicator::reset(s),
             AnySource::Real(s) => Indicator::reset(s),
+            AnySource::Snapshot(s) => Indicator::reset(s),
             AnySource::Const(_) => {}
         }
     }
@@ -675,12 +690,13 @@ impl AnySource {
 enum Pair {
     Candle(Source<Atom>, Source<Atom>),
     Real(Source<Real>, Source<Real>),
+    Snapshot(Source<Snapshot<String>>, Source<Snapshot<String>>),
 }
 
 /// Resolve two sources to a shared domain so they can be combined. A neutral
-/// constant adopts its partner's domain; a genuine candle-vs-value clash is an
-/// error. Two constants default to the candle domain (either is equivalent —
-/// they ignore input).
+/// constant adopts its partner's domain; a genuine candle-vs-value-vs-snapshot
+/// clash is an error. Two constants default to the candle domain (either is
+/// equivalent — they ignore input).
 fn pair(lhs: AnySource, rhs: AnySource) -> PyResult<Pair> {
     fn cval(c: Real) -> Source<Atom> {
         Source::new(Value::<Atom>::new(c))
@@ -688,25 +704,35 @@ fn pair(lhs: AnySource, rhs: AnySource) -> PyResult<Pair> {
     fn rval(c: Real) -> Source<Real> {
         Source::new(Value::<Real>::new(c))
     }
+    fn sval(c: Real) -> Source<Snapshot<String>> {
+        Source::new(Value::<Snapshot<String>>::new(c))
+    }
     match (lhs, rhs) {
         (AnySource::Candle(a), AnySource::Candle(b)) => Ok(Pair::Candle(a, b)),
         (AnySource::Real(a), AnySource::Real(b)) => Ok(Pair::Real(a, b)),
+        (AnySource::Snapshot(a), AnySource::Snapshot(b)) => Ok(Pair::Snapshot(a, b)),
         (AnySource::Const(a), AnySource::Candle(b)) => Ok(Pair::Candle(cval(a), b)),
         (AnySource::Candle(a), AnySource::Const(b)) => Ok(Pair::Candle(a, cval(b))),
         (AnySource::Const(a), AnySource::Real(b)) => Ok(Pair::Real(rval(a), b)),
         (AnySource::Real(a), AnySource::Const(b)) => Ok(Pair::Real(a, rval(b))),
+        (AnySource::Const(a), AnySource::Snapshot(b)) => Ok(Pair::Snapshot(sval(a), b)),
+        (AnySource::Snapshot(a), AnySource::Const(b)) => Ok(Pair::Snapshot(a, sval(b))),
         (AnySource::Const(a), AnySource::Const(b)) => Ok(Pair::Candle(cval(a), cval(b))),
-        (AnySource::Candle(_), AnySource::Real(_)) | (AnySource::Real(_), AnySource::Candle(_)) => {
-            Err(domain_mismatch())
-        }
+        (AnySource::Candle(_), AnySource::Real(_))
+        | (AnySource::Real(_), AnySource::Candle(_))
+        | (AnySource::Candle(_), AnySource::Snapshot(_))
+        | (AnySource::Snapshot(_), AnySource::Candle(_))
+        | (AnySource::Real(_), AnySource::Snapshot(_))
+        | (AnySource::Snapshot(_), AnySource::Real(_)) => Err(domain_mismatch()),
     }
 }
 
-/// A boolean signal erased to one of the two input domains.
+/// A boolean signal erased to one of the three input domains.
 #[derive(Clone)]
 enum AnySignal {
     Candle(SignalBox<Atom>),
     Real(SignalBox<Real>),
+    Snapshot(SignalBox<Snapshot<String>>),
 }
 
 impl AnySignal {
@@ -714,24 +740,28 @@ impl AnySignal {
         match self {
             AnySignal::Candle(s) => BoolIndicatorExt::is_true(s),
             AnySignal::Real(s) => BoolIndicatorExt::is_true(s),
+            AnySignal::Snapshot(s) => BoolIndicatorExt::is_true(s),
         }
     }
     fn warm_up_period(&self) -> usize {
         match self {
             AnySignal::Candle(s) => Indicator::warm_up_period(s),
             AnySignal::Real(s) => Indicator::warm_up_period(s),
+            AnySignal::Snapshot(s) => Indicator::warm_up_period(s),
         }
     }
     fn unstable_period(&self) -> usize {
         match self {
             AnySignal::Candle(s) => Indicator::unstable_period(s),
             AnySignal::Real(s) => Indicator::unstable_period(s),
+            AnySignal::Snapshot(s) => Indicator::unstable_period(s),
         }
     }
     fn reset(&mut self) {
         match self {
             AnySignal::Candle(s) => Indicator::reset(s),
             AnySignal::Real(s) => Indicator::reset(s),
+            AnySignal::Snapshot(s) => Indicator::reset(s),
         }
     }
 }
@@ -796,10 +826,11 @@ fn str_pair(
     (l, r)
 }
 
-/// A multi-output indicator erased to one of the two input domains.
+/// A multi-output indicator erased to one of the three input domains.
 enum AnyMulti {
     Candle(MultiBox<Atom>),
     Real(MultiBox<Real>),
+    Snapshot(MultiBox<Snapshot<String>>),
 }
 
 impl AnyMulti {
@@ -807,38 +838,43 @@ impl AnyMulti {
         match self {
             AnyMulti::Candle(m) => m.0.names(),
             AnyMulti::Real(m) => m.0.names(),
+            AnyMulti::Snapshot(m) => m.0.names(),
         }
     }
     fn value(&self) -> Option<Vec<Real>> {
         match self {
             AnyMulti::Candle(m) => m.0.value(),
             AnyMulti::Real(m) => m.0.value(),
+            AnyMulti::Snapshot(m) => m.0.value(),
         }
     }
     fn warm_up_period(&self) -> usize {
         match self {
             AnyMulti::Candle(m) => m.0.warm_up_period(),
             AnyMulti::Real(m) => m.0.warm_up_period(),
+            AnyMulti::Snapshot(m) => m.0.warm_up_period(),
         }
     }
     fn unstable_period(&self) -> usize {
         match self {
             AnyMulti::Candle(m) => m.0.unstable_period(),
             AnyMulti::Real(m) => m.0.unstable_period(),
+            AnyMulti::Snapshot(m) => m.0.unstable_period(),
         }
     }
     fn reset(&mut self) {
         match self {
             AnyMulti::Candle(m) => m.0.reset(),
             AnyMulti::Real(m) => m.0.reset(),
+            AnyMulti::Snapshot(m) => m.0.reset(),
         }
     }
 }
 
 fn domain_mismatch() -> PyErr {
     PyTypeError::new_err(
-        "cannot combine a candle-rooted indicator with a value-rooted (identity) one; \
-         both operands must be rooted in the same domain",
+        "cannot combine indicators rooted in different domains — both operands \
+         must be rooted in the same domain (candle / identity / snapshot)",
     )
 }
 
@@ -849,6 +885,7 @@ macro_rules! map_source {
         match $src {
             AnySource::Candle($s) => AnySource::Candle(Source::new($build)),
             AnySource::Real($s) => AnySource::Real(Source::new($build)),
+            AnySource::Snapshot($s) => AnySource::Snapshot(Source::new($build)),
             AnySource::Const(c) => {
                 let $s = Source::<Atom>::new(Value::<Atom>::new(c));
                 AnySource::Candle(Source::new($build))
@@ -858,12 +895,13 @@ macro_rules! map_source {
 }
 
 /// Combine two sources into a new source; resolves a constant against its
-/// partner, errors on a genuine candle-vs-value clash.
+/// partner, errors on a genuine domain clash.
 macro_rules! combine_sources {
     ($lhs:expr, $rhs:expr, |$l:ident, $r:ident| $build:expr) => {
         pair($lhs, $rhs).map(|p| match p {
             Pair::Candle($l, $r) => AnySource::Candle(Source::new($build)),
             Pair::Real($l, $r) => AnySource::Real(Source::new($build)),
+            Pair::Snapshot($l, $r) => AnySource::Snapshot(Source::new($build)),
         })
     };
 }
@@ -875,6 +913,7 @@ macro_rules! source_to_signal {
         match $src {
             AnySource::Candle($s) => AnySignal::Candle(SignalBox::new($build)),
             AnySource::Real($s) => AnySignal::Real(SignalBox::new($build)),
+            AnySource::Snapshot($s) => AnySignal::Snapshot(SignalBox::new($build)),
             AnySource::Const(c) => {
                 let $s = Source::<Atom>::new(Value::<Atom>::new(c));
                 AnySignal::Candle(SignalBox::new($build))
@@ -884,12 +923,13 @@ macro_rules! source_to_signal {
 }
 
 /// Turn two sources into a signal; resolves a constant against its partner,
-/// errors on a genuine candle-vs-value clash.
+/// errors on a genuine domain clash.
 macro_rules! sources_to_signal {
     ($lhs:expr, $rhs:expr, |$l:ident, $r:ident| $build:expr) => {
         pair($lhs, $rhs).map(|p| match p {
             Pair::Candle($l, $r) => AnySignal::Candle(SignalBox::new($build)),
             Pair::Real($l, $r) => AnySignal::Real(SignalBox::new($build)),
+            Pair::Snapshot($l, $r) => AnySignal::Snapshot(SignalBox::new($build)),
         })
     };
 }
@@ -900,6 +940,7 @@ macro_rules! map_signal {
         match $sig {
             AnySignal::Candle($s) => AnySignal::Candle(SignalBox::new($build)),
             AnySignal::Real($s) => AnySignal::Real(SignalBox::new($build)),
+            AnySignal::Snapshot($s) => AnySignal::Snapshot(SignalBox::new($build)),
         }
     };
 }
@@ -914,6 +955,9 @@ macro_rules! combine_signals {
             (AnySignal::Real($l), AnySignal::Real($r)) => {
                 Ok(AnySignal::Real(SignalBox::new($build)))
             }
+            (AnySignal::Snapshot($l), AnySignal::Snapshot($r)) => {
+                Ok(AnySignal::Snapshot(SignalBox::new($build)))
+            }
             _ => Err(domain_mismatch()),
         }
     };
@@ -926,6 +970,7 @@ macro_rules! map_multi {
         match $src {
             AnySource::Candle($s) => AnyMulti::Candle(MultiBox::new($build)),
             AnySource::Real($s) => AnyMulti::Real(MultiBox::new($build)),
+            AnySource::Snapshot($s) => AnyMulti::Snapshot(MultiBox::new($build)),
             AnySource::Const(c) => {
                 let $s = Source::<Atom>::new(Value::<Atom>::new(c));
                 AnyMulti::Candle(MultiBox::new($build))
@@ -935,12 +980,13 @@ macro_rules! map_multi {
 }
 
 /// Wrap two sources in a multi-output constructor; resolves a constant against
-/// its partner, errors on a genuine candle-vs-value clash.
+/// its partner, errors on a genuine domain clash.
 macro_rules! combine_multi {
     ($lhs:expr, $rhs:expr, |$l:ident, $r:ident| $build:expr) => {
         pair($lhs, $rhs).map(|p| match p {
             Pair::Candle($l, $r) => AnyMulti::Candle(MultiBox::new($build)),
             Pair::Real($l, $r) => AnyMulti::Real(MultiBox::new($build)),
+            Pair::Snapshot($l, $r) => AnyMulti::Snapshot(MultiBox::new($build)),
         })
     };
 }
@@ -1407,6 +1453,283 @@ impl PyAtom {
             (None, None) => format!("Atom(candle={:?})", candle),
         }
     }
+
+    // --- comparison / hashing by bar-open time --------------------------------
+    // Mirrors the Rust `impl PartialEq / Eq / Ord for Atom` — identity is the
+    // bar-open Timestamp; OHLCV numbers and overlays are payload, not identity.
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        match other.cast::<PyAtom>() {
+            Ok(o) => Ok(self.inner == o.borrow().inner),
+            Err(_) => Ok(false),
+        }
+    }
+
+    fn __ne__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        Ok(!self.__eq__(other)?)
+    }
+
+    fn __hash__(&self) -> u64 {
+        // `Timestamp: Hash` already; `None` hashes to a distinct sentinel.
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        self.inner.time.map(|t| t.0).hash(&mut h);
+        h.finish()
+    }
+
+    fn __lt__(&self, other: PyRef<'_, PyAtom>) -> bool {
+        self.inner < other.inner
+    }
+    fn __le__(&self, other: PyRef<'_, PyAtom>) -> bool {
+        self.inner <= other.inner
+    }
+    fn __gt__(&self, other: PyRef<'_, PyAtom>) -> bool {
+        self.inner > other.inner
+    }
+    fn __ge__(&self, other: PyRef<'_, PyAtom>) -> bool {
+        self.inner >= other.inner
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot + Pick — the cross-asset input frame and its projection leaf
+// ---------------------------------------------------------------------------
+
+/// A per-bar snapshot of several assets: keyed collection of [`PyAtom`]s.
+///
+/// The multi-asset input frame — a strategy or cross-asset indicator's `update`
+/// is fed one `Snapshot` per bar and the [`Pick`] leaf projects one asset out
+/// by key. Dict-like: `snap[key]` reads, `snap[key] = atom` writes, `key in
+/// snap` tests membership, `len(snap)` counts assets.
+#[pyclass(name = "Snapshot", unsendable, skip_from_py_object)]
+#[derive(Clone)]
+struct PySnapshot {
+    inner: Snapshot<String>,
+}
+
+#[pymethods]
+impl PySnapshot {
+    #[new]
+    #[pyo3(signature = (mapping = None))]
+    fn new(mapping: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let inner = match mapping {
+            None => Snapshot::<String>::new(),
+            Some(m) => extract_snapshot(m)?,
+        };
+        Ok(Self { inner })
+    }
+
+    /// Read the atom for `key`; raises `KeyError` if absent (dict semantics).
+    fn __getitem__(&self, key: &str) -> PyResult<PyAtom> {
+        self.inner
+            .get(key)
+            .cloned()
+            .map(|inner| PyAtom { inner })
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(key.to_string()))
+    }
+
+    /// Insert or replace the atom for `key`.
+    fn __setitem__(&mut self, key: String, atom: PyRef<'_, PyAtom>) {
+        self.inner.insert(key, atom.inner.clone());
+    }
+
+    fn __contains__(&self, key: &str) -> bool {
+        self.inner.contains_key(key)
+    }
+
+    fn __len__(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Non-raising variant of `snap[key]` — returns `None` on a miss.
+    fn get(&self, key: &str) -> Option<PyAtom> {
+        self.inner.get(key).cloned().map(|inner| PyAtom { inner })
+    }
+
+    /// Insert or replace; returns the previous atom if any.
+    fn insert(&mut self, key: String, atom: PyRef<'_, PyAtom>) -> Option<PyAtom> {
+        self.inner
+            .insert(key, atom.inner.clone())
+            .map(|inner| PyAtom { inner })
+    }
+
+    /// The list of keys present in this snapshot (arbitrary order).
+    fn keys(&self) -> Vec<String> {
+        self.inner.keys().cloned().collect()
+    }
+
+    /// True if this snapshot carries no assets.
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Snapshot(keys={:?})", self.keys())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Atom-emitting source — the box behind the `pick()` leaf and the `.of(source)`
+// method on every atom-input leaf constructor (close, high, year, ...).
+// ---------------------------------------------------------------------------
+
+/// Object-safe shim over an `I -> Atom` indicator.
+trait DynAtomIndicator<I>: Send + Sync {
+    fn update(&mut self, input: I) -> Option<Atom>;
+    fn value(&self) -> Option<Atom>;
+    fn warm_up_period(&self) -> usize;
+    fn unstable_period(&self) -> usize;
+    fn reset(&mut self);
+    fn box_clone(&self) -> Box<dyn DynAtomIndicator<I>>;
+}
+
+impl<I, T> DynAtomIndicator<I> for T
+where
+    T: Indicator<Input = I, Output = Atom> + Clone + Send + Sync + 'static,
+{
+    fn update(&mut self, input: I) -> Option<Atom> {
+        Indicator::update(self, input)
+    }
+    fn value(&self) -> Option<Atom> {
+        Indicator::value(self)
+    }
+    fn warm_up_period(&self) -> usize {
+        Indicator::warm_up_period(self)
+    }
+    fn unstable_period(&self) -> usize {
+        Indicator::unstable_period(self)
+    }
+    fn reset(&mut self) {
+        Indicator::reset(self)
+    }
+    fn box_clone(&self) -> Box<dyn DynAtomIndicator<I>> {
+        Box::new(self.clone())
+    }
+}
+
+/// A boxed `I -> Atom` indicator. Implements [`Indicator`] itself so it can be
+/// fed back into any `Output = Atom` source constructor.
+struct AtomBox<I>(Box<dyn DynAtomIndicator<I>>);
+
+impl<I> AtomBox<I> {
+    fn new<T>(inner: T) -> Self
+    where
+        T: Indicator<Input = I, Output = Atom> + Clone + Send + Sync + 'static,
+    {
+        AtomBox(Box::new(inner))
+    }
+}
+
+impl<I> Clone for AtomBox<I> {
+    fn clone(&self) -> Self {
+        AtomBox(self.0.box_clone())
+    }
+}
+
+impl<I> Indicator for AtomBox<I> {
+    type Input = I;
+    type Output = Atom;
+    fn update(&mut self, input: I) -> Option<Atom> {
+        self.0.update(input)
+    }
+    fn value(&self) -> Option<Atom> {
+        self.0.value()
+    }
+    fn warm_up_period(&self) -> usize {
+        self.0.warm_up_period()
+    }
+    fn unstable_period(&self) -> usize {
+        self.0.unstable_period()
+    }
+    fn reset(&mut self) {
+        self.0.reset()
+    }
+}
+
+/// An atom-emitting source erased to one of the two input domains it can be
+/// rooted in on the Python side: `Atom` (the identity passthrough) or
+/// `Snapshot<String>` (a `Pick`). Feeds the optional `source=` argument every
+/// atom-input leaf pyfunction accepts (`close(source=...)`, `year(source=...)`, …).
+#[derive(Clone)]
+enum AnyAtomSource {
+    /// The trivial atom passthrough — `Identity<Atom>`, so the caller can build
+    /// an atom-input leaf explicitly rooted on the atom stream itself. Kept in
+    /// the enum for surface completeness; not currently produced by any leaf
+    /// pyfunction (the raw-atom shape is already what a zero-arg `close()`
+    /// returns).
+    #[allow(dead_code)]
+    Atom(AtomBox<Atom>),
+    Snapshot(AtomBox<Snapshot<String>>),
+}
+
+/// A source that emits `Atom`s per bar — the intermediate between a raw
+/// `Snapshot` and a scalar leaf like `close()`.
+///
+/// Produced by `pick(key)` (rooted on a `Snapshot`) and used as the optional
+/// `source=` argument of every atom-input leaf constructor:
+///
+/// ```python
+/// btc_close = ta.close(ta.pick("BTC"))
+/// spread = ta.close(ta.pick("BTC")) - ta.close(ta.pick("ETH"))
+/// ```
+#[pyclass(name = "AtomSource", skip_from_py_object)]
+#[derive(Clone)]
+struct PyAtomSource {
+    inner: AnyAtomSource,
+}
+
+#[pymethods]
+impl PyAtomSource {
+    /// The most recent atom, without advancing state.
+    fn value(&self) -> Option<PyAtom> {
+        let out = match &self.inner {
+            AnyAtomSource::Atom(s) => Indicator::value(s),
+            AnyAtomSource::Snapshot(s) => Indicator::value(s),
+        };
+        out.map(|inner| PyAtom { inner })
+    }
+
+    /// Feed the next sample. Pass an `Atom` for an atom-rooted source (the
+    /// trivial identity), a `Snapshot` for a `pick()`-rooted one.
+    fn update(&mut self, sample: &Bound<'_, PyAny>) -> PyResult<Option<PyAtom>> {
+        let out = match &mut self.inner {
+            AnyAtomSource::Atom(s) => Indicator::update(s, extract_atom(sample)?),
+            AnyAtomSource::Snapshot(s) => Indicator::update(s, extract_snapshot(sample)?),
+        };
+        Ok(out.map(|inner| PyAtom { inner }))
+    }
+
+    fn warm_up_period(&self) -> usize {
+        match &self.inner {
+            AnyAtomSource::Atom(s) => Indicator::warm_up_period(s),
+            AnyAtomSource::Snapshot(s) => Indicator::warm_up_period(s),
+        }
+    }
+
+    fn unstable_period(&self) -> usize {
+        match &self.inner {
+            AnyAtomSource::Atom(s) => Indicator::unstable_period(s),
+            AnyAtomSource::Snapshot(s) => Indicator::unstable_period(s),
+        }
+    }
+
+    fn stable_period(&self) -> usize {
+        self.warm_up_period() + self.unstable_period()
+    }
+
+    fn reset(&mut self) {
+        match &mut self.inner {
+            AnyAtomSource::Atom(s) => Indicator::reset(s),
+            AnyAtomSource::Snapshot(s) => Indicator::reset(s),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        match &self.inner {
+            AnyAtomSource::Atom(_) => "AtomSource(root=atom)".to_string(),
+            AnyAtomSource::Snapshot(_) => "AtomSource(root=snapshot)".to_string(),
+        }
+    }
 }
 
 /// A scalar (`-> float`) indicator. Compose it with the fluent operator methods;
@@ -1435,6 +1758,7 @@ impl PyIndicator {
         match &mut self.src {
             AnySource::Candle(s) => Ok(Indicator::update(s, extract_atom(sample)?)),
             AnySource::Real(s) => Ok(Indicator::update(s, extract_real(sample)?)),
+            AnySource::Snapshot(s) => Ok(Indicator::update(s, extract_snapshot(sample)?)),
             // A bare constant defaults to candle-rooted; it ignores the bar.
             AnySource::Const(c) => {
                 extract_atom(sample)?;
@@ -1450,6 +1774,8 @@ impl PyIndicator {
     /// with `open`/`high`/`low`/`close`/`volume` columns — only those present
     /// are used, and `close` is required. An identity-rooted indicator takes a
     /// plain 1-D sequence (`list`, NumPy array, or pandas/polars `Series`).
+    /// A snapshot-rooted indicator (built through `pick()`) takes a Python
+    /// sequence of `Snapshot`s (or dicts of the same shape).
     ///
     /// The output mirrors the input: a pandas/polars `Series` (index preserved
     /// for pandas) when given that library's frame/series, otherwise a NumPy
@@ -1465,6 +1791,10 @@ impl PyIndicator {
             AnySource::Real(s) => reals_from_series(data)?
                 .into_iter()
                 .map(|x| Indicator::update(s, x))
+                .collect(),
+            AnySource::Snapshot(s) => snapshots_from_sequence(data)?
+                .into_iter()
+                .map(|snap| Indicator::update(s, snap))
                 .collect(),
             // A bare constant defaults to candle-rooted; emit it for every bar.
             AnySource::Const(c) => candles_from_frame(data)?.iter().map(|_| Some(*c)).collect(),
@@ -1756,14 +2086,18 @@ impl PySignal {
                 Ok(Indicator::update(s, extract_atom(sample)?).unwrap_or(false))
             }
             AnySignal::Real(s) => Ok(Indicator::update(s, extract_real(sample)?).unwrap_or(false)),
+            AnySignal::Snapshot(s) => Ok(
+                Indicator::update(s, extract_snapshot(sample)?).unwrap_or(false),
+            ),
         }
     }
 
     /// Compute the signal over a whole series at once, returning one boolean per
     /// bar. `data` is the same as for [`Indicator.feed`](PyIndicator): a
     /// DataFrame/dict of OHLCV columns for a candle-rooted signal, or a 1-D
-    /// series for an identity-rooted one. The output mirrors the input: a
-    /// boolean pandas/polars `Series`, otherwise a boolean NumPy `ndarray`. Fed
+    /// series for an identity-rooted one, or a sequence of `Snapshot`s for a
+    /// snapshot-rooted one. The output mirrors the input: a boolean
+    /// pandas/polars `Series`, otherwise a boolean NumPy `ndarray`. Fed
     /// through the current state — call `reset()` first for a clean pass.
     fn feed(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let kind = OutputKind::detect(data)?;
@@ -1775,6 +2109,10 @@ impl PySignal {
             AnySignal::Real(s) => reals_from_series(data)?
                 .into_iter()
                 .map(|x| Indicator::update(s, x).unwrap_or(false))
+                .collect(),
+            AnySignal::Snapshot(s) => snapshots_from_sequence(data)?
+                .into_iter()
+                .map(|snap| Indicator::update(s, snap).unwrap_or(false))
                 .collect(),
         };
         build_bools(py, &kind, values)
@@ -1992,6 +2330,7 @@ impl PyMulti {
         let out = match &mut self.inner {
             AnyMulti::Candle(m) => m.0.update(extract_atom(sample)?),
             AnyMulti::Real(m) => m.0.update(extract_real(sample)?),
+            AnyMulti::Snapshot(m) => m.0.update(extract_snapshot(sample)?),
         };
         match out {
             Some(values) => Ok(Some(values_to_dict(py, names, &values)?)),
@@ -2018,6 +2357,10 @@ impl PyMulti {
             AnyMulti::Real(m) => reals_from_series(data)?
                 .into_iter()
                 .map(|x| m.0.update(x))
+                .collect(),
+            AnyMulti::Snapshot(m) => snapshots_from_sequence(data)?
+                .into_iter()
+                .map(|snap| m.0.update(snap))
                 .collect(),
         };
         build_multi(py, &kind, names, rows)
@@ -2087,6 +2430,14 @@ impl PyMulti {
                 generation: 0,
                 last_output: None,
             }))),
+            AnyMulti::Snapshot(m) => {
+                AnySharedMulti::Snapshot(Arc::new(Mutex::new(SharedMultiCell {
+                    names: m.0.names(),
+                    multi: m.0.clone_box(),
+                    generation: 0,
+                    last_output: None,
+                })))
+            }
         };
         PySharedMulti { inner: cloned }
     }
@@ -2527,6 +2878,44 @@ fn extract_real(sample: &Bound<'_, PyAny>) -> PyResult<Real> {
         .map_err(|_| PyTypeError::new_err("this indicator consumes a value stream; pass a float"))
 }
 
+/// Iterate a Python sequence of snapshots (`list[Snapshot]` or `list[dict]`)
+/// into a native `Vec<Snapshot<String>>` for a snapshot-rooted node's `feed`.
+fn snapshots_from_sequence(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Snapshot<String>>> {
+    let mut out = Vec::new();
+    let iter = obj.try_iter().map_err(|_| {
+        PyTypeError::new_err(
+            "snapshot-rooted feed(): expected an iterable of Snapshot (or dict) values",
+        )
+    })?;
+    for item in iter {
+        out.push(extract_snapshot(&item?)?);
+    }
+    Ok(out)
+}
+
+/// Extract a `Snapshot<String>` for a snapshot-rooted node's `update`. Accepts
+/// a `PySnapshot` directly, or a Python `dict` mapping symbol names to
+/// `PyAtom`/`PyCandle` values.
+fn extract_snapshot(sample: &Bound<'_, PyAny>) -> PyResult<Snapshot<String>> {
+    if let Ok(snap) = sample.cast::<PySnapshot>() {
+        return Ok(snap.borrow().inner.clone());
+    }
+    if let Ok(dict) = sample.cast::<pyo3::types::PyDict>() {
+        let mut out = Snapshot::<String>::new();
+        for (k, v) in dict.iter() {
+            let key = k.extract::<String>().map_err(|_| {
+                PyTypeError::new_err("Snapshot dict keys must be str")
+            })?;
+            let atom = extract_atom(&v)?;
+            out.insert(key, atom);
+        }
+        return Ok(out);
+    }
+    Err(PyTypeError::new_err(
+        "this indicator consumes a Snapshot; pass a Snapshot or a dict[str, Atom|Candle]",
+    ))
+}
+
 /// Collect any 1-D sequence of numbers (`list`, NumPy array, pandas `Series`,
 /// …) into a `Vec<f64>`, attributing failures to the named column.
 fn column_to_vec(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<f64>> {
@@ -2650,9 +3039,9 @@ fn require_candle_source(src: AnySource) -> PyResult<Source<Atom>> {
     match src {
         AnySource::Candle(s) => Ok(s),
         AnySource::Const(c) => Ok(Source::new(Value::<Atom>::new(c))),
-        AnySource::Real(_) => Err(PyTypeError::new_err(
+        AnySource::Real(_) | AnySource::Snapshot(_) => Err(PyTypeError::new_err(
             "this indicator reads OHLC bars internally, so its source must be \
-             candle-rooted (e.g. close()), not identity-rooted",
+             candle-rooted (e.g. close()), not identity- or snapshot-rooted",
         )),
     }
 }
@@ -2825,29 +3214,76 @@ where
     PyIndicator::wrap(AnySource::Candle(Source::new(inner)))
 }
 
-macro_rules! leaf {
-    ($name:ident, $ctor:expr, $doc:literal) => {
+/// Every atom-input source leaf on the Python side follows the same shape:
+/// zero-arg default (candle-rooted `Identity<Atom>`) or optional `source=`
+/// for re-rooting onto a `PyAtomSource` (a `pick()`, typically). The result's
+/// domain follows the source: an atom-rooted source stays candle-rooted, a
+/// snapshot-rooted source produces a snapshot-rooted [`PyIndicator`].
+macro_rules! atom_leaf_source {
+    ($name:ident, $default_ctor:expr, $of_ctor:path, $doc:literal) => {
         #[doc = $doc]
         #[pyfunction]
-        fn $name() -> PyIndicator {
-            candle_source($ctor)
+        #[pyo3(signature = (source = None))]
+        fn $name(source: Option<PyRef<'_, PyAtomSource>>) -> PyIndicator {
+            match source.map(|s| s.inner.clone()) {
+                None => PyIndicator::wrap(AnySource::Candle(Source::new($default_ctor))),
+                Some(AnyAtomSource::Atom(s)) => {
+                    PyIndicator::wrap(AnySource::Candle(Source::new($of_ctor(s))))
+                }
+                Some(AnyAtomSource::Snapshot(s)) => {
+                    PyIndicator::wrap(AnySource::Snapshot(Source::new($of_ctor(s))))
+                }
+            }
         }
     };
 }
 
-leaf!(open, Current::open(), "Source: the bar's open price.");
-leaf!(high, Current::high(), "Source: the bar's high price.");
-leaf!(low, Current::low(), "Source: the bar's low price.");
-leaf!(close, Current::close(), "Source: the bar's close price.");
-leaf!(volume, Current::volume(), "Source: the bar's volume.");
-leaf!(
+/// Twin of [`atom_leaf_source!`] for the boolean signal leaves (`is_weekday`,
+/// `is_weekend`).
+macro_rules! atom_leaf_signal {
+    ($name:ident, $default_ctor:expr, $of_ctor:path, $doc:literal) => {
+        #[doc = $doc]
+        #[pyfunction]
+        #[pyo3(signature = (source = None))]
+        fn $name(source: Option<PyRef<'_, PyAtomSource>>) -> PySignal {
+            match source.map(|s| s.inner.clone()) {
+                None => PySignal::wrap(AnySignal::Candle(SignalBox::new($default_ctor))),
+                Some(AnyAtomSource::Atom(s)) => {
+                    PySignal::wrap(AnySignal::Candle(SignalBox::new($of_ctor(s))))
+                }
+                Some(AnyAtomSource::Snapshot(s)) => {
+                    PySignal::wrap(AnySignal::Snapshot(SignalBox::new($of_ctor(s))))
+                }
+            }
+        }
+    };
+}
+
+atom_leaf_source!(open, Open::new(), Open::of, "Source: the bar's open price.");
+atom_leaf_source!(high, High::new(), High::of, "Source: the bar's high price.");
+atom_leaf_source!(low, Low::new(), Low::of, "Source: the bar's low price.");
+atom_leaf_source!(
+    close,
+    Close::new(),
+    Close::of,
+    "Source: the bar's close price. Pass `source=ta.pick(key)` to read a specific asset's close out of a `Snapshot`."
+);
+atom_leaf_source!(
+    volume,
+    Volume::new(),
+    Volume::of,
+    "Source: the bar's volume."
+);
+atom_leaf_source!(
     typical,
-    Current::typical(),
+    Typical::new(),
+    Typical::of,
     "Source: the bar's typical price, (high + low + close) / 3."
 );
-leaf!(
+atom_leaf_source!(
     median,
-    Current::median(),
+    Median::new(),
+    Median::of,
     "Source: the bar's median price, (high + low) / 2."
 );
 
@@ -2855,79 +3291,106 @@ leaf!(
 // (year, month, …) as a Real. `None` on bars whose `time` is `None`. Anything
 // else — day-of-month == 15, hour < 9, "trading window" — is a composition
 // against these numeric sources.
-leaf!(
+atom_leaf_source!(
     year,
     Year::new(),
+    Year::of,
     "Source: the Gregorian year of `atom.time` (UTC), or `None` if unset."
 );
-leaf!(
+atom_leaf_source!(
     month,
     Month::new(),
+    Month::of,
     "Source: the Gregorian month, 1 (Jan) through 12 (Dec)."
 );
-leaf!(
+atom_leaf_source!(
     day,
     Day::new(),
+    Day::of,
     "Source: the day of the month, 1 through 31."
 );
-leaf!(
+atom_leaf_source!(
     hour,
     Hour::new(),
+    Hour::of,
     "Source: the hour of the day (UTC), 0 through 23."
 );
-leaf!(
+atom_leaf_source!(
     minute,
     Minute::new(),
+    Minute::of,
     "Source: the minute of the hour, 0 through 59."
 );
-leaf!(
+atom_leaf_source!(
     second,
     Second::new(),
+    Second::of,
     "Source: the second of the minute, 0 through 59."
 );
-leaf!(
+atom_leaf_source!(
     day_of_week,
     DayOfWeek::new(),
+    DayOfWeek::of,
     "Source: ISO 8601 weekday, 1 (Monday) through 7 (Sunday)."
 );
-leaf!(
+atom_leaf_source!(
     day_of_year,
     DayOfYear::new(),
+    DayOfYear::of,
     "Source: day of the year, 1 through 366."
 );
-leaf!(
+atom_leaf_source!(
     week_of_year,
     WeekOfYear::new(),
+    WeekOfYear::of,
     "Source: ISO 8601 week of the year, 1 through 53."
 );
-leaf!(
+atom_leaf_source!(
     quarter,
     Quarter::new(),
+    Quarter::of,
     "Source: calendar quarter, 1 through 4."
 );
-leaf!(
+atom_leaf_source!(
     unix_seconds,
     UnixSeconds::new(),
+    UnixSeconds::of,
     "Source: Unix seconds since the epoch (as a float)."
 );
-leaf!(
+atom_leaf_source!(
     unix_millis,
     UnixMillis::new(),
+    UnixMillis::of,
     "Source: Unix milliseconds since the epoch (as a float)."
 );
 
-/// Signal: true on Monday through Friday, false on Saturday/Sunday. `False`
-/// on bars whose `atom.time` is `None`.
-#[pyfunction]
-fn is_weekday() -> PySignal {
-    PySignal::wrap(AnySignal::Candle(SignalBox::new(IsWeekday::new())))
-}
+atom_leaf_signal!(
+    is_weekday,
+    IsWeekday::new(),
+    IsWeekday::of,
+    "Signal: true on Monday through Friday, false on Saturday/Sunday. `False` on bars whose `atom.time` is `None`."
+);
+atom_leaf_signal!(
+    is_weekend,
+    IsWeekend::new(),
+    IsWeekend::of,
+    "Signal: true on Saturday/Sunday, false Monday through Friday. `False` on bars whose `atom.time` is `None`."
+);
 
-/// Signal: true on Saturday/Sunday, false Monday through Friday. `False` on
-/// bars whose `atom.time` is `None`.
+/// Source (atom-emitting): project one asset's `Atom` out of a `Snapshot` by
+/// key. Compose with any atom-input leaf by passing the returned `AtomSource`
+/// as its `source=` argument.
+///
+/// ```python
+/// import fugazi as ta
+/// btc_close = ta.close(source=ta.pick("BTC"))
+/// spread = ta.close(ta.pick("BTC")) - ta.close(ta.pick("ETH"))
+/// ```
 #[pyfunction]
-fn is_weekend() -> PySignal {
-    PySignal::wrap(AnySignal::Candle(SignalBox::new(IsWeekend::new())))
+fn pick(key: String) -> PyAtomSource {
+    PyAtomSource {
+        inner: AnyAtomSource::Snapshot(AtomBox::new(Pick::<String>::new(key))),
+    }
 }
 
 /// Source: the raw value stream, passed straight through. Root an indicator
@@ -3213,6 +3676,7 @@ fn latch<'py>(py: Python<'py>, source: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>
         let out = match ind.borrow().src.clone() {
             AnySource::Candle(s) => AnySource::Candle(Source::new(Latch::new(s))),
             AnySource::Real(s) => AnySource::Real(Source::new(Latch::new(s))),
+            AnySource::Snapshot(s) => AnySource::Snapshot(Source::new(Latch::new(s))),
             // A latched constant is still that constant — the source never
             // emits `None`, so the latch never fires. Return as-is.
             other @ AnySource::Const(_) => other,
@@ -3223,6 +3687,7 @@ fn latch<'py>(py: Python<'py>, source: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>
         let out = match sig.borrow().sig.clone() {
             AnySignal::Candle(s) => AnySignal::Candle(SignalBox::new(Latch::new(s))),
             AnySignal::Real(s) => AnySignal::Real(SignalBox::new(Latch::new(s))),
+            AnySignal::Snapshot(s) => AnySignal::Snapshot(SignalBox::new(Latch::new(s))),
         };
         return Ok(PySignal::wrap(out).into_pyobject(py)?.into_any().unbind());
     }
@@ -4598,6 +5063,8 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySchemaBuilder>()?;
     m.add_class::<PyOverlayInfo>()?;
     m.add_class::<PyAtom>()?;
+    m.add_class::<PySnapshot>()?;
+    m.add_class::<PyAtomSource>()?;
     m.add_class::<PyIndicator>()?;
     m.add_class::<PySignal>()?;
     m.add_class::<PyStrSource>()?;
@@ -4623,6 +5090,8 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // Calendar accessors + weekday/weekend signals; consume `atom.time`.
         year, month, day, hour, minute, second, day_of_week, day_of_year, week_of_year, quarter,
         unix_seconds, unix_millis, is_weekday, is_weekend,
+        // Cross-asset: project one asset's Atom out of a Snapshot by key.
+        pick,
     );
 
     // `fugazi.metrics` — mirror of `fugazi::metrics::*`. Registered as a

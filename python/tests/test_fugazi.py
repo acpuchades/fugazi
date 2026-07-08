@@ -1302,3 +1302,154 @@ def test_fill_has_bar_and_order_getters():
     assert f.bar == 42
     assert f.order.symbol == "BTC"
     assert f.order.side == "buy"
+
+
+# ---------------------------------------------------------------------------
+# Atom equality-by-time and ordering.
+# ---------------------------------------------------------------------------
+
+
+def _atom(ms=None, close=1.0):
+    return ta.Atom(ta.Candle(1.0, 2.0, 0.5, close, 100.0), time=ms)
+
+
+def test_atom_equality_is_by_time():
+    # Two atoms with the same bar-open time are equal regardless of prices.
+    assert _atom(ms=1_000_000, close=1.0) == _atom(ms=1_000_000, close=9999.0)
+    # Different times → not equal.
+    assert _atom(ms=1_000_000) != _atom(ms=1_000_001)
+    # Undated atoms compare equal to each other (None == None convention).
+    assert _atom(ms=None) == _atom(ms=None, close=42.0)
+    # An atom compared to any non-Atom is not-equal (no crash).
+    assert (_atom(ms=1) == "not an atom") is False
+
+
+def test_atom_orders_chronologically():
+    unsorted = [
+        _atom(ms=200),
+        _atom(ms=None),  # None sorts first (like Option's derived order)
+        _atom(ms=100),
+        _atom(ms=300),
+    ]
+    times = [a.time for a in sorted(unsorted)]
+    assert times == [None, 100, 200, 300]
+
+
+def test_atom_is_hashable_by_time():
+    # Hashable → usable in sets/dicts; two atoms at the same time collide.
+    s = {_atom(ms=1), _atom(ms=2), _atom(ms=1, close=99.0)}
+    assert len(s) == 2
+
+
+# ---------------------------------------------------------------------------
+# Snapshot dict-like surface.
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_dict_like_operations():
+    snap = ta.Snapshot()
+    assert len(snap) == 0
+    assert snap.is_empty()
+
+    btc = _atom(ms=1_000, close=100.0)
+    eth = _atom(ms=1_000, close=50.0)
+    snap["BTC"] = btc
+    snap["ETH"] = eth
+    assert len(snap) == 2
+    assert not snap.is_empty()
+    assert "BTC" in snap
+    assert "SOL" not in snap
+    assert set(snap.keys()) == {"BTC", "ETH"}
+    assert snap["BTC"].candle.close == 100.0
+    assert snap.get("SOL") is None
+
+
+def test_snapshot_construct_from_mapping():
+    # Both a dict of Atom and a dict of Candle work (candle → atom lifted).
+    snap = ta.Snapshot({"BTC": _atom(ms=1, close=100.0), "ETH": ta.Candle(1, 2, 0.5, 50, 1)})
+    assert snap["BTC"].candle.close == 100.0
+    assert snap["ETH"].candle.close == 50.0
+
+
+def test_snapshot_missing_key_raises():
+    snap = ta.Snapshot({"BTC": _atom(ms=1)})
+    with pytest.raises(KeyError):
+        _ = snap["ETH"]
+
+
+# ---------------------------------------------------------------------------
+# Pick + cross-asset composition.
+# ---------------------------------------------------------------------------
+
+
+def _snap(pairs, ms=None):
+    return ta.Snapshot({k: _atom(ms=ms, close=v) for k, v in pairs.items()})
+
+
+def test_pick_projects_named_asset():
+    btc_close = ta.close(source=ta.pick("BTC"))
+    out = btc_close.update(_snap({"BTC": 100.0, "ETH": 50.0}))
+    assert out == pytest.approx(100.0)
+
+
+def test_pick_dict_input_works_like_snapshot():
+    # A plain dict[str, Atom|Candle] is auto-lifted into a Snapshot on the fly.
+    btc_close = ta.close(source=ta.pick("BTC"))
+    out = btc_close.update({"BTC": _atom(ms=1, close=42.0), "ETH": _atom(ms=1, close=0.0)})
+    assert out == pytest.approx(42.0)
+
+
+def test_btc_eth_close_spread():
+    # The headline expression: BTC/ETH close spread as a first-class indicator.
+    spread = ta.close(ta.pick("BTC")) - ta.close(ta.pick("ETH"))
+    out = spread.update(_snap({"BTC": 100.0, "ETH": 60.0}))
+    assert out == pytest.approx(40.0)
+
+
+def test_missing_asset_yields_none():
+    spread = ta.close(ta.pick("BTC")) - ta.close(ta.pick("ETH"))
+    # BTC missing → both sides can't unify → None.
+    assert spread.update(_snap({"ETH": 60.0})) is None
+
+
+def test_ema_over_pick_composes():
+    # An EMA over BTC's close reads the projected close each bar.
+    node = ta.ema(ta.close(source=ta.pick("BTC")), 2)
+    snaps = [_snap({"BTC": v, "ETH": 100.0}) for v in [10.0, 11.0, 12.0, 13.0]]
+    outs = [node.update(s) for s in snaps]
+    # EMA seeds on the first bar the source emits Some (source's warm-up = 1),
+    # so every output is Some(finite float) — but the value drifts from the
+    # naive close toward the smoothed one over subsequent bars.
+    assert all(o is not None and math.isfinite(o) for o in outs)
+    assert outs[0] == pytest.approx(10.0)
+    # By bar 4 the smoothed value has moved past the seed toward the newer bars.
+    assert outs[-1] > outs[0]
+
+
+def test_calendar_over_pick_reads_projected_time():
+    year_of_btc = ta.year(source=ta.pick("BTC"))
+    # 2024-03-15 12:00 UTC.
+    ms = 1_710_504_000_000
+    out = year_of_btc.update(_snap({"BTC": 100.0}, ms=ms))
+    assert out == pytest.approx(2024.0)
+
+
+def test_cross_domain_mismatch_is_typeerror():
+    # Snapshot-rooted + candle-rooted can't be combined; the domain seams error.
+    snap_side = ta.close(ta.pick("BTC"))
+    candle_side = ta.close()
+    with pytest.raises(TypeError):
+        _ = snap_side + candle_side
+
+
+def test_atom_source_metadata():
+    src = ta.pick("BTC")
+    assert src.warm_up_period() == 1
+    assert src.unstable_period() == 0
+    assert src.stable_period() == 1
+    assert src.value() is None
+    src.update(_snap({"BTC": 100.0}))
+    assert src.value() is not None
+    assert src.value().candle.close == 100.0
+    src.reset()
+    assert src.value() is None
