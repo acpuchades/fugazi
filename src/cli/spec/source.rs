@@ -16,7 +16,7 @@ use serde::Deserialize;
 use fugazi::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Component, Dmi,
     DmiValue, Donchian, DonchianValue, Ema, GetBool, GetReal, GetStr, Hma, Keltner, KeltnerValue,
-    Latch, Macd, MacdValue, Mfi, Obv, Pick, Position, Resample, Rma, Rsi, Sar, Sma, StdDev,
+    Latch, Log, Macd, MacdValue, Mfi, Obv, Pick, Position, Resample, Rma, Rsi, Sar, Sma, StdDev,
     StochRsi, Stochastic, TrueRange, Value, Vwap, WilliamsR, Wma,
 };
 use fugazi::prelude::*;
@@ -48,6 +48,11 @@ pub(super) fn default_low() -> Box<SourceSpec> {
 /// Default candle source for bar indicators — the current bar itself.
 pub(super) fn default_bar_source() -> Box<SourceSpec> {
     Box::new(SourceSpec::Current { source: None })
+}
+
+/// Default base for `!log`: natural log (`e`).
+pub(super) fn default_log_base() -> Real {
+    std::f64::consts::E
 }
 
 // ---------------------------------------------------------------------------
@@ -439,6 +444,14 @@ pub enum SourceSpec {
         #[serde(default = "default_source")]
         source: Box<SourceSpec>,
         period: usize,
+    },
+    /// Logarithm of `source` in `base` (defaults to natural log, `e`).
+    /// Emits `None` on samples where the source's output is non-positive.
+    Log {
+        #[serde(default = "default_source")]
+        source: Box<SourceSpec>,
+        #[serde(default = "default_log_base")]
+        base: Real,
     },
     /// Holds the most recent `Some` output of `source`, re-emitting it on
     /// ticks where `source` returns `None`. Wrap the outermost recursive
@@ -907,6 +920,14 @@ enum SourceSpecRaw {
         source: Box<SourceSpec>,
         period: usize,
     },
+    /// Logarithm of `source` in `base` (defaults to natural log, `e`).
+    /// Emits `None` on samples where the source's output is non-positive.
+    Log {
+        #[serde(default = "default_source")]
+        source: Box<SourceSpec>,
+        #[serde(default = "default_log_base")]
+        base: Real,
+    },
     /// Holds the most recent `Some` output of `source`, re-emitting it on
     /// ticks where `source` returns `None`. Wrap the outermost recursive
     /// smoother of a resampled pipeline so per-base-tick consumers see the
@@ -1077,6 +1098,7 @@ impl From<SourceSpecRaw> for SourceSpec {
             SourceSpecRaw::Roc { source, periods } => SourceSpec::Roc { source, periods },
             SourceSpecRaw::RollingMax { source, period } => SourceSpec::RollingMax { source, period },
             SourceSpecRaw::RollingMin { source, period } => SourceSpec::RollingMin { source, period },
+            SourceSpecRaw::Log { source, base } => SourceSpec::Log { source, base },
             SourceSpecRaw::Latch { source } => SourceSpec::Latch { source },
             SourceSpecRaw::Resample { every, inner, source } => SourceSpec::Resample { every, inner, source },
             SourceSpecRaw::Unstable { source } => SourceSpec::Unstable { source },
@@ -1458,6 +1480,7 @@ impl SourceSpec {
             RollingMin { source, period } => {
                 dyn_indicator::wrap(real(source).rolling_min(*period))
             }
+            Log { source, base } => dyn_indicator::wrap(self::Log::new(real(source), *base)),
             Latch { source } => {
                 let inner = AsReal::new(source.build(anchor, schema));
                 dyn_indicator::wrap(self::Latch::new(inner))

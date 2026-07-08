@@ -39,6 +39,34 @@ def test_sma_warms_up_then_averages():
     assert sma.value() == pytest.approx(3.0)
 
 
+def test_log_defaults_to_natural_and_accepts_base():
+    # Default base: natural log.
+    ln = ta.log(ta.close())
+    out = feed(ln, closes([1.0, math.e, 10.0, 100.0]))
+    assert out[0] == pytest.approx(0.0)
+    assert out[1] == pytest.approx(1.0)
+    assert out[2] == pytest.approx(math.log(10.0))
+    assert out[3] == pytest.approx(math.log(100.0))
+
+    # Explicit base via the fluent method.
+    log10 = ta.close().log(10.0)
+    out = feed(log10, closes([1.0, 10.0, 1000.0]))
+    assert out == [pytest.approx(0.0), pytest.approx(1.0), pytest.approx(3.0)]
+
+    # Non-positive inputs yield None (log undefined).
+    ln2 = ta.log(ta.close())
+    assert feed(ln2, closes([-1.0, 0.0, 1.0])) == [None, None, pytest.approx(0.0)]
+
+
+def test_log_rejects_invalid_base():
+    with pytest.raises(ValueError):
+        ta.log(ta.close(), base=0.0)
+    with pytest.raises(ValueError):
+        ta.log(ta.close(), base=1.0)
+    with pytest.raises(ValueError):
+        ta.close().log(-2.0)
+
+
 def test_composition_ema_of_sma():
     """Composition is construction: an EMA of an SMA of the close."""
     node = ta.ema(ta.sma(ta.close(), 3), 2)

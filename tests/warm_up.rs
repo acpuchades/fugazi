@@ -10,9 +10,9 @@
 
 use fugazi::indicators::{
     Adx, Aroon, Atr, Bollinger, Cci, CurrentTime, Current, Day, DayOfWeek, DayOfYear, Dmi,
-    Donchian, Ema, Hma, Hour, Identity, IsWeekday, IsWeekend, Keltner, Latch, Macd, Mfi, Minute,
-    Month, Obv, Quarter, Resample, Rma, Rsi, Sar, Second, Sma, StdDev, Stochastic, TrueRange,
-    UnixMillis, UnixSeconds, Value, Vwap, WeekOfYear, WilliamsR, Wma, Year,
+    Donchian, Ema, Hma, Hour, Identity, IsWeekday, IsWeekend, Keltner, Latch, Log, Macd, Mfi,
+    Minute, Month, Obv, Quarter, Resample, Rma, Rsi, Sar, Second, Sma, StdDev, Stochastic,
+    TrueRange, UnixMillis, UnixSeconds, Value, Vwap, WeekOfYear, WilliamsR, Wma, Year,
 };
 use fugazi::prelude::*;
 use fugazi::types::{Atom, Candle, Real, Timestamp};
@@ -85,6 +85,7 @@ fn real_case(ind: impl Indicator<Input = Real>, name: &str) {
 #[test]
 fn warm_up_is_exact_for_the_catalogue() {
     candle_case(Current::close(), "close");
+    candle_case(Log::natural(Current::close()), "log");
     candle_case(TrueRange::new(Current::candle()), "true_range");
     candle_case(Obv::new(Current::candle()), "obv");
     candle_case(fugazi::indicators::Ad::new(Current::candle()), "ad");

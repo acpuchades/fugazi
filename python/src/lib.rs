@@ -36,9 +36,9 @@ use fugazi_core::indicators::compare::{EqOp, GeOp, GtOp, LeOp, LtOp, NeOp, StrEq
 use fugazi_core::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Close, CurrentBar,
     Day, DayOfWeek, DayOfYear, Dmi, DmiValue, Donchian, DonchianValue, Ema, GetBool, GetReal,
-    GetStr, High, Hma, Hour, Identity, IsWeekday, IsWeekend, Keltner, KeltnerValue, Latch, Low,
-    Macd, MacdValue, Median, Mfi, Minute, Month, Obv, Open, Pick, Quarter, Resample, Rma, Rsi,
-    Sar, Second, Sma, StdDev, Stochastic, TrueRange, Typical, UnixMillis, UnixSeconds, Value,
+    GetStr, High, Hma, Hour, Identity, IsWeekday, IsWeekend, Keltner, KeltnerValue, Latch, Log,
+    Low, Macd, MacdValue, Median, Mfi, Minute, Month, Obv, Open, Pick, Quarter, Resample, Rma,
+    Rsi, Sar, Second, Sma, StdDev, Stochastic, TrueRange, Typical, UnixMillis, UnixSeconds, Value,
     ValueStr, Volume, Vwap, WeekOfYear, WilliamsR, Wma, Year,
 };
 use fugazi_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
@@ -2310,6 +2310,16 @@ impl PyIndicator {
         ))
     }
 
+    /// Logarithm of `self` in `base` (default: natural log, `e`). Emits `None`
+    /// on samples where the input is non-positive.
+    #[pyo3(signature = (base = std::f64::consts::E))]
+    fn log(&self, base: f64) -> PyResult<PyIndicator> {
+        ensure_log_base(base)?;
+        Ok(PyIndicator::wrap(
+            map_source!(self.src.clone(), |s| Log::new(s, base))
+        ))
+    }
+
     /// Passthrough that forces this indicator's reported `unstable_period()` to
     /// `0`. Output and `warm_up_period()` are unchanged; a downstream reader of
     /// `stable_period()` (a strategy readiness gate, an overlay trim) no longer
@@ -3766,6 +3776,28 @@ src_period!(
     Cci,
     "Commodity channel index of `source` over `period`."
 );
+
+/// Logarithm of `source` in `base` (defaults to natural log, `e`). Emits
+/// `None` on samples where the source's output is non-positive. Raises
+/// `ValueError` if `base` is not a finite positive number distinct from `1.0`.
+#[pyfunction]
+#[pyo3(signature = (source, base = std::f64::consts::E))]
+fn log(source: PyRef<'_, PyIndicator>, base: f64) -> PyResult<PyIndicator> {
+    ensure_log_base(base)?;
+    Ok(PyIndicator::wrap(map_source!(source.src.clone(), |s| {
+        Log::new(s, base)
+    })))
+}
+
+fn ensure_log_base(base: f64) -> PyResult<()> {
+    if base.is_finite() && base > 0.0 && base != 1.0 {
+        Ok(())
+    } else {
+        Err(PyValueError::new_err(format!(
+            "log base must be a finite positive number distinct from 1.0, got {base}"
+        )))
+    }
+}
 
 macro_rules! bar_period {
     ($name:ident, $ty:ident, $doc:literal) => {
@@ -5391,9 +5423,9 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     reg!(
         open, high, low, close, volume, typical, median, identity, value, value_str, sma, ema, rma,
-        wma, hma, rsi, stddev, stochastic, cci, atr, mfi, williams_r, obv, vwap, ad, true_range,
-        adx, dmi, aroon, sar, macd, bollinger, keltner, donchian, stoch_rsi, resample, latch,
-        unstable, get, get_real, get_bool, get_str, str_eq, str_ne, fetch,
+        wma, hma, rsi, stddev, stochastic, cci, log, atr, mfi, williams_r, obv, vwap, ad,
+        true_range, adx, dmi, aroon, sar, macd, bollinger, keltner, donchian, stoch_rsi, resample,
+        latch, unstable, get, get_real, get_bool, get_str, str_eq, str_ne, fetch,
         // Calendar accessors + weekday/weekend signals; consume `atom.time`.
         year, month, day, hour, minute, second, day_of_week, day_of_year, week_of_year, quarter,
         unix_seconds, unix_millis, is_weekday, is_weekend,

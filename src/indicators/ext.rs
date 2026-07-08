@@ -3,6 +3,7 @@
 
 use crate::indicator::Indicator;
 use crate::indicators::compare::{Eq, Ge, Gt, Le, Lt, Ne};
+use crate::indicators::log::Log;
 use crate::indicators::logic::{And, Change, Not, Or, Xor};
 use crate::indicators::ops::{Add, Diff, Div, Lag, Mul, Ratio, Roc, RollingMax, RollingMin, Sub};
 use crate::indicators::unstable::Unstable;
@@ -142,6 +143,13 @@ pub trait IndicatorExt: Indicator<Output = Real> + Sized {
     /// (`100·(x[t] − x[t-n]) / x[t-n]`).
     fn roc(self, periods: usize) -> Roc<Self> {
         Roc::new(self, periods)
+    }
+
+    /// Logarithm of `self` in `base` (emits `None` on samples where the input
+    /// is non-positive). Panics if `base` is not a finite positive number
+    /// distinct from `1.0`.
+    fn log(self, base: Real) -> Log<Self> {
+        Log::new(self, base)
     }
 
     /// Rolling maximum of `self` over `period` steps.

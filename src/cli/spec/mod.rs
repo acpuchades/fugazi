@@ -111,6 +111,25 @@ mod tests {
     }
 
     #[test]
+    fn log_defaults_to_natural_and_accepts_explicit_base() {
+        // Default base: natural log (`e`).
+        let bare: SourceSpec = serde_norway::from_str("!log").unwrap();
+        let mut ln = bare.build(&Position::new(), &Schema::empty());
+        for p in [1.0, std::f64::consts::E, 10.0, 100.0] {
+            let got = feed_real(&mut ln, bar(p)).unwrap();
+            assert!((got - p.ln()).abs() < 1e-12, "ln({p})");
+        }
+
+        // Explicit base: 10.
+        let spec: SourceSpec = serde_norway::from_str("!log { base: 10.0 }").unwrap();
+        let mut log10 = spec.build(&Position::new(), &Schema::empty());
+        for p in [1.0, 10.0, 1000.0] {
+            let got = feed_real(&mut log10, bar(p)).unwrap();
+            assert!((got - p.log10()).abs() < 1e-12, "log10({p})");
+        }
+    }
+
+    #[test]
     fn parses_full_strategy_with_long_and_short() {
         let yaml = r#"
             symbol: BTC
