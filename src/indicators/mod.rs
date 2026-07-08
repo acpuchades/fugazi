@@ -28,6 +28,7 @@ mod adx;
 mod aroon;
 mod atr;
 mod bollinger;
+mod book;
 mod calendar;
 mod candle;
 mod cci;
@@ -66,6 +67,7 @@ pub use adx::{Adx, AdxValue};
 pub use aroon::{Aroon, AroonValue};
 pub use atr::Atr;
 pub use bollinger::{Bollinger, BollingerValue};
+pub use book::{Book, BookField};
 pub use calendar::{
     Calendar, CalendarField, CurrentTime, Day, DayOfMonth, DayOfMonthField, DayOfWeek,
     DayOfWeekField, DayOfYear, DayOfYearField, Hour, HourField, IsWeekday, IsWeekend, Minute,
