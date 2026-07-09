@@ -300,14 +300,26 @@ struct OptimizeArgs {
     #[arg(short, long = "series", required = true)]
     series: Vec<data::SeriesSpec>,
 
-    /// Resolve the strategy's `param` placeholders and declare the sweep axes.
-    /// Same shape as `run --params` with two new value forms:
-    /// `NAME=[v1,v2,v3]` — a discrete list (JSON array) — and
-    /// `NAME=start..end[:step]` — an inclusive numeric range. Every axis'
-    /// cartesian product is one grid point; scalar values stay fixed across
-    /// the sweep.
+    /// Resolve the strategy's `param` placeholders — same syntax and semantics
+    /// as `run --params`. Values that look like sweep axes (a JSON list
+    /// `[v1,v2,v3]` or a range `start..end[:step]`) are rejected here — use
+    /// `--grid` for sweep axes. The scalars set by `--params` form the shared
+    /// baseline applied under every `--grid` subgrid.
     #[arg(short, long = "params", value_name = "SPEC")]
     params: Vec<params::ParamSpec>,
+
+    /// Declare one sweep subgrid. Same term grammar as `--params` — comma-
+    /// separated `NAME=value` settings and `@file.yml` mapping loaders — with
+    /// two extra value forms only allowed here: `NAME=[v1,v2,v3]` (a discrete
+    /// list) and `NAME=start..end[:step]` (an inclusive numeric range). Every
+    /// axis' cartesian product within one `--grid` flag is that subgrid's
+    /// point set; scalars stay fixed across the subgrid. Repeat the flag to
+    /// stack subgrids (a *union* of Cartesian products): e.g.
+    /// `--grid X=A,Y=1..10 --grid X=B,Z=10..100:10`, useful when a parameter
+    /// only makes sense conditionally on another. Each subgrid layers over
+    /// `--params`; total grid = sum of subgrid point counts.
+    #[arg(short = 'g', long = "grid", value_name = "SPEC", required = true)]
+    grid: Vec<params::ParamSpec>,
 
     /// The metrics to record for each grid point, as one CSV column each.
     /// Names are short leaf keys when unambiguous (`sharpe`, `max_pct`,
@@ -562,6 +574,12 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         );
     }
     let param_table = params::table(&args.params)?;
+    optimize::reject_axes_in_params(&param_table)?;
+    let grid_tables: Vec<HashMap<String, serde_json::Value>> = args
+        .grid
+        .iter()
+        .map(|spec| params::table(std::slice::from_ref(spec)))
+        .collect::<Result<_>>()?;
     let text = args.strategy.read().context("reading strategy")?;
     let frame = data::DataFrame::from_series(&args.series)?;
 
@@ -575,6 +593,7 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         strategy_text: &text,
         strategy_label: &strat_label,
         params_table: param_table,
+        grid_tables,
         metrics: args.metrics,
         best_by: args.best_by,
         output: &args.output,

@@ -1,21 +1,31 @@
 //! `optimize` — parameter-grid sweep over a strategy.
 //!
 //! Same shape as `run`: one strategy YAML + `--series` bars + calendar/rf +
-//! `--params` for baseline placeholders. What's new is that a `--params` value
-//! may be a **sweep axis** rather than a fixed scalar — either a JSON array
-//! (`[3,5,8]`) or an inclusive numeric range (`3..20:1`, with an optional
-//! `:step`). Every combination of the axes is a **grid point**: for each one
-//! we drive [`crate::backtest::evaluate`] and record its [`crate::metrics`]
-//! document.
+//! `--params` for **baseline** placeholder scalars — shared across every grid
+//! point and rejected here if they look like axes (a JSON list or a range).
+//! The sweep dimensions live in `--grid` (repeatable): each `-g/--grid` flag
+//! declares one **subgrid**, with the same term grammar as `--params` plus two
+//! extra value forms — `NAME=[v1,v2,v3]` (a discrete list) and
+//! `NAME=start..end[:step]` (an inclusive numeric range). Each subgrid layers
+//! over `--params` and takes the Cartesian product of its axes; the full grid
+//! is the disjoint **union** of the subgrids' point sets, useful when a
+//! parameter only makes sense conditionally on another (e.g. one subgrid
+//! sweeps `slow` around a slow entry, another sweeps `atr_mult` around a stop).
+//! For each grid point we drive [`crate::backtest::evaluate`] and record its
+//! [`crate::metrics`] document.
 //!
 //! Output is one `,`-delimited CSV file (`-o/--output`) with one row per grid
-//! point: axis columns first (in declaration order), then one column per
-//! `-m/--metrics` name — or, when `-m` is omitted, one column per metric in the
-//! whole catalogue. Column headers are the canonical dotted path (`sharpe` on
-//! the command line still lands under `risk_adjusted.sharpe`). Rows are sorted
-//! by `--best-by` when it's set (descending
-//! for max-oriented metrics like `sharpe`, ascending for min-oriented ones like
-//! `max_pct`); otherwise the row order follows the cartesian enumeration.
+//! point: axis columns first, then one column per `-m/--metrics` name — or,
+//! when `-m` is omitted, one column per metric in the whole catalogue. The
+//! axis column set is the **union** of every subgrid's axis names plus any
+//! scalar that takes different values across subgrids (name-sorted), and cells
+//! are left empty for rows whose subgrid doesn't touch that name — so a
+//! stacked sweep produces a sparse but rectangular CSV. Column headers are the
+//! canonical dotted path (`sharpe` on the command line still lands under
+//! `risk_adjusted.sharpe`). Rows are sorted by `--best-by` when it's set
+//! (descending for max-oriented metrics like `sharpe`, ascending for
+//! min-oriented ones like `max_pct`); otherwise the row order follows the
+//! subgrid-then-Cartesian enumeration.
 //!
 //! The grid runs on a rayon thread pool (`-j/--jobs` picks the size; default is
 //! rayon's own default — one worker per logical CPU). Each combination
@@ -62,9 +72,16 @@ pub struct OptimizeOptions<'a> {
     pub cash: Real,
     pub strategy_text: &'a str,
     pub strategy_label: &'a str,
-    /// Effective `--params` table: sweep axes stay as `Value::Array` /
-    /// range-shaped strings, fixed scalars stay as scalars.
+    /// `--params` baseline: shared scalars applied under every subgrid. Axes
+    /// are rejected upstream via [`reject_axes_in_params`] — this table is
+    /// scalar-only by the time it reaches [`run`].
     pub params_table: HashMap<String, Value>,
+    /// One folded table per `--grid` flag, in flag order. Each may hold both
+    /// scalars (fixed within the subgrid) and axis-shaped values (JSON arrays
+    /// or `a..b[:c]` range strings). Layered over `params_table` per subgrid
+    /// — a subgrid entry with the same name as a `--params` scalar overrides
+    /// it for that subgrid's points.
+    pub grid_tables: Vec<HashMap<String, Value>>,
     /// The `-m/--metrics` names to emit as CSV columns.
     pub metrics: Vec<String>,
     /// The `--best-by` metric name to sort by (empty = no sort).
@@ -107,27 +124,67 @@ pub struct OptimizeOptions<'a> {
 }
 
 /// CLI entry for the `optimize` command: marshal `opts` into inputs
-/// [`optimize`] can consume (parse the strategy text, split axes, resolve the
-/// candle slice for the strategy's symbol), invoke the sweep, then write
+/// [`optimize`] can consume (parse the strategy text, fold subgrids, resolve
+/// the candle slice for the strategy's symbol), invoke the sweep, then write
 /// `metrics.csv` / print the inputs + best blocks.
 pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
-    let (fixed, axes) = split_axes(&opts.params_table)?;
-    if axes.is_empty() {
+    if opts.grid_tables.is_empty() {
         bail!(
-            "--params has no sweep axes: at least one value must be a `[...]` list \
-             or a `start..end[:step]` range (use `run` for a single combination)"
+            "no --grid flag passed: at least one is required (use `run` for a single combination)"
+        );
+    }
+    // Build one Subgrid per --grid flag by layering baseline scalars under each
+    // flag's own scalars/axes. Keep grid entries taking precedence — if a
+    // subgrid names the same key as --params, the subgrid wins for that
+    // subgrid's rows.
+    let subgrids: Vec<Subgrid> = opts
+        .grid_tables
+        .iter()
+        .enumerate()
+        .map(|(idx, grid)| {
+            let mut merged = opts.params_table.clone();
+            for (k, v) in grid {
+                merged.insert(k.clone(), v.clone());
+            }
+            let (fixed, axes) = split_axes(&merged)
+                .with_context(|| format!("--grid #{}", idx + 1))?;
+            let combos = cartesian(&axes);
+            Ok::<_, anyhow::Error>(Subgrid { fixed, axes, combos })
+        })
+        .collect::<Result<_>>()?;
+
+    let total_points: usize = subgrids.iter().map(Subgrid::points).sum();
+    if total_points < 2 {
+        bail!(
+            "the stacked grid has only {total_points} point(s): pass a `[...]` list, a \
+             `start..end[:step]` range, or multiple `--grid` flags with distinct values \
+             (use `run` for a single combination)"
         );
     }
 
     let base_value = input::parse_value(opts.strategy_text).context("parsing strategy")?;
 
-    // Resolve the strategy's symbol from a probe spec built with the fixed
-    // params + first axis values, so we can slice the frame down to its
-    // atoms once before entering the sweep.
-    let first_combo: Vec<Value> = axes.iter().map(|(_, v)| v[0].clone()).collect();
-    let probe_params = combine_params(&fixed, &axes, &first_combo);
-    let probe_spec = build_spec(&base_value, &probe_params)?;
-    let series = frame.atoms(&probe_spec.symbol)?;
+    // Resolve the strategy's symbol from a probe built with the first subgrid's
+    // first combo. Every other subgrid must resolve to the same symbol —
+    // otherwise the atoms slice we're about to fetch is only valid for one of
+    // them and the others silently backtest against the wrong data. Cheaper to
+    // validate here than debug later.
+    let probe_spec = build_spec(&base_value, &probe_params(&subgrids[0]))?;
+    let probe_symbol = probe_spec.symbol.clone();
+    for (idx, subgrid) in subgrids.iter().enumerate().skip(1) {
+        let other = build_spec(&base_value, &probe_params(subgrid))?;
+        if other.symbol != probe_symbol {
+            bail!(
+                "--grid #{} resolves to symbol `{}`, but --grid #1 resolves to `{}` — every \
+                 subgrid must trade the same symbol (loading multiple symbol slices from one \
+                 frame is not supported)",
+                idx + 1,
+                other.symbol,
+                probe_symbol,
+            );
+        }
+    }
+    let series = frame.atoms(&probe_symbol)?;
     let atoms = series.atoms;
     let skipped_overlay_columns = series.skipped_columns;
 
@@ -136,10 +193,10 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
     // the atoms' `time` field (populated by the loader). Threaded into both
     // the annualization (`bars_per_year`) and the per-grid-point cost
     // resolution so freq-scoped `--costs` entries also see the detected cadence.
-    let effective_freq = calendar::pick_frequency(opts.frequency, &probe_spec.symbol)
+    let effective_freq = calendar::pick_frequency(opts.frequency, &probe_symbol)
         .or_else(|| calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a)));
     let bars_per_year =
-        calendar::pick_bars_per_year(opts.bars_per_year, &probe_spec.symbol, effective_freq)
+        calendar::pick_bars_per_year(opts.bars_per_year, &probe_symbol, effective_freq)
             .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
 
     let windowed_bars = opts
@@ -158,8 +215,7 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
 
     let sweep = optimize(
         &base_value,
-        fixed,
-        axes,
+        subgrids,
         &atoms,
         opts.cash,
         bars_per_year,
@@ -176,7 +232,7 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
 
     write_grid_csv(
         opts.output,
-        &sweep.axes,
+        &sweep.union_columns,
         &sweep.metric_columns,
         sweep.windowed,
         sweep.deflated_sharpe_context,
@@ -186,12 +242,12 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
     if !opts.quiet {
         style::print_header("optimize", "sweep a strategy over a parameter grid");
         print_skipped_overlay_warning(&skipped_overlay_columns);
-        print_inputs_block(&opts, windowed_bars, &sweep.axes, &sweep.rows);
+        print_inputs_block(&opts, windowed_bars, &sweep.subgrid_summaries, &sweep.rows);
         // A "best" row only means something when the user gave us a metric to
         // rank by. Without one, the sweep has produced a CSV but no verdict.
         if sweep.best_by.is_some() {
             print_best_block(
-                &sweep.axes,
+                &sweep.union_columns,
                 &sweep.metric_columns,
                 sweep.best_by.as_ref(),
                 opts.risk_aversion,
@@ -202,16 +258,24 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
     Ok(())
 }
 
-/// Enumerate the grid over `atoms`, evaluate every combination (whole-run or
-/// windowed), and rank the rows by `best_by`'s ranking value — direction-aware,
-/// with `risk_aversion` shifting a windowed row's mean *against* it by k·std so
-/// dispersion is always penalized. Pure: no filesystem, no printing. The CLI's
-/// [`run`] wraps it with argument marshaling + CSV write + console output.
+/// Params for the probe spec: subgrid's fixed scalars + the first value of each
+/// of its axes. When the subgrid has no axes this is just the fixed map.
+fn probe_params(subgrid: &Subgrid) -> HashMap<String, Value> {
+    let combo: Vec<Value> = subgrid.axes.iter().map(|(_, v)| v[0].clone()).collect();
+    combine_params(&subgrid.fixed, &subgrid.axes, &combo)
+}
+
+/// Enumerate every subgrid's Cartesian product over `atoms`, evaluate every
+/// combination (whole-run or windowed), project each result onto the union of
+/// axis-column names, and rank the rows by `best_by`'s ranking value —
+/// direction-aware, with `risk_aversion` shifting a windowed row's mean
+/// *against* it by k·std so dispersion is always penalized. Pure: no
+/// filesystem, no printing. The CLI's [`run`] wraps it with argument
+/// marshaling + CSV write + console output.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn optimize(
     base_value: &Value,
-    fixed: HashMap<String, Value>,
-    axes: Vec<Axis>,
+    subgrids: Vec<Subgrid>,
     atoms: &[(String, Atom)],
     cash: Real,
     bars_per_year: Real,
@@ -230,14 +294,33 @@ pub(crate) fn optimize(
     if risk_aversion < 0.0 {
         bail!("--risk-aversion must be >= 0 (got {risk_aversion})");
     }
+    // `run` has already validated the subgrid list; `optimize` still asserts
+    // the invariants it relies on (non-empty list, non-empty combos in each).
+    assert!(!subgrids.is_empty(), "optimize: called with zero subgrids");
 
-    let combos = cartesian(&axes);
+    let union_columns = compute_union_columns(&subgrids);
+    let subgrid_summaries = subgrids
+        .iter()
+        .map(|s| (subgrid_label(s, &union_columns), s.points()))
+        .collect();
 
-    // Probe the first combination once, up front: it validates the strategy YAML
+    // Flat enumeration of (subgrid_idx, combo_idx) so we can process the whole
+    // stacked grid on one par_iter without nested rayon.
+    let plan: Vec<(usize, usize)> = subgrids
+        .iter()
+        .enumerate()
+        .flat_map(|(si, s)| (0..s.combos.len()).map(move |ci| (si, ci)))
+        .collect();
+
+    // Probe the first grid point once, up front: it validates the strategy YAML
     // (early error) and gives us a Metrics document to resolve `--metrics` and
     // `--best-by` names against before spinning up the pool.
-    let first_combo = &combos[0];
-    let first_params = combine_params(&fixed, &axes, first_combo);
+    let (first_si, first_ci) = plan[0];
+    let first_params = combine_params(
+        &subgrids[first_si].fixed,
+        &subgrids[first_si].axes,
+        &subgrids[first_si].combos[first_ci],
+    );
     let first_spec = build_spec(base_value, &first_params)?;
     let first_metrics = backtest::evaluate(
         &first_spec,
@@ -284,21 +367,19 @@ pub(crate) fn optimize(
         })
         .transpose()?;
 
-    // Run the grid. The `first_combo` result is already computed (windowed
-    // mode re-evaluates it windowed — one extra backtest, off the hot path);
-    // the rest run on the pool in parallel.
+    // Run the grid. The first plan entry's result is already computed
+    // (windowed mode re-evaluates it windowed — one extra backtest, off the
+    // hot path); the rest run on the pool in parallel.
     let pool = crate::pool::build_pool(jobs)?;
     let windowed_n = windowed.map(NonZeroUsize::get);
-    let axes_ref = &axes;
-    let fixed_ref = &fixed;
 
     // Chunk the outer par_iter so a huge grid doesn't drown rayon in one task
     // per combo (task overhead dominates when combos are cheap), while a small
     // grid still gets one combo per worker. Target ~16 chunks per worker so
     // work-stealing still balances tail imbalance from combo-to-combo cost
-    // variance. `combos[1..]` skips the already-computed first combo.
+    // variance. `plan[1..]` skips the already-computed first entry.
     let workers = pool.current_num_threads().max(1);
-    let remaining_len = combos.len().saturating_sub(1);
+    let remaining_len = plan.len().saturating_sub(1);
     let min_len = remaining_len.div_ceil(workers * 16).max(1);
 
     let evaluate = |spec: &StrategySpec| -> Evaluation {
@@ -327,24 +408,32 @@ pub(crate) fn optimize(
         }
     };
 
+    let subgrids_ref = &subgrids;
+    let union_ref = &union_columns;
     let remaining: Vec<Row> = pool.install(|| {
-        combos[1..]
+        plan[1..]
             .par_iter()
             .with_min_len(min_len)
-            .map(|combo| {
-                let params = combine_params(fixed_ref, axes_ref, combo);
+            .map(|&(si, ci)| {
+                let subgrid = &subgrids_ref[si];
+                let combo = &subgrid.combos[ci];
+                let params = combine_params(&subgrid.fixed, &subgrid.axes, combo);
                 let spec = build_spec(base_value, &params)?;
                 Ok::<_, anyhow::Error>(Row {
-                    combo: combo.clone(),
+                    values: project_row(subgrid, combo, union_ref),
                     eval: evaluate(&spec),
                 })
             })
             .collect::<Result<Vec<_>>>()
     })?;
 
-    let mut rows: Vec<Row> = Vec::with_capacity(combos.len());
+    let mut rows: Vec<Row> = Vec::with_capacity(plan.len());
     rows.push(Row {
-        combo: first_combo.clone(),
+        values: project_row(
+            &subgrids[first_si],
+            &subgrids[first_si].combos[first_ci],
+            &union_columns,
+        ),
         eval: match windowed_n {
             Some(_) => evaluate(&first_spec),
             None => Evaluation::Whole(Box::new(first_metrics)),
@@ -362,13 +451,104 @@ pub(crate) fn optimize(
     let deflated_sharpe_context = compute_dsr_context(&rows);
 
     Ok(Sweep {
-        axes,
+        union_columns,
+        subgrid_summaries,
         metric_columns,
         best_by,
         rows,
         windowed: windowed_n.is_some(),
         deflated_sharpe_context,
     })
+}
+
+/// The union of axis-column names across every subgrid: every axis name, plus
+/// every scalar name whose effective value differs across subgrids (or is
+/// absent in at least one). Name-sorted so the header is stable regardless of
+/// flag order.
+fn compute_union_columns(subgrids: &[Subgrid]) -> Vec<String> {
+    use std::collections::BTreeSet;
+    let mut columns: BTreeSet<String> = BTreeSet::new();
+    // Every axis name — an axis is by definition varying.
+    for s in subgrids {
+        for (name, _) in &s.axes {
+            columns.insert(name.clone());
+        }
+    }
+    // Scalar names that either take different values or aren't present
+    // everywhere. `effective_scalar` returns `None` when the subgrid doesn't
+    // touch the name at all — that counts as a distinct "value" for the union
+    // check (so a name present in one subgrid and missing from another still
+    // becomes a column with sparse cells).
+    let scalar_names: BTreeSet<String> = subgrids
+        .iter()
+        .flat_map(|s| s.fixed.keys().cloned())
+        .collect();
+    for name in scalar_names {
+        if columns.contains(&name) {
+            continue;
+        }
+        let first = subgrids[0].fixed.get(&name);
+        if subgrids.iter().skip(1).any(|s| s.fixed.get(&name) != first) {
+            columns.insert(name);
+        }
+    }
+    columns.into_iter().collect()
+}
+
+/// Project a subgrid's (fixed scalars, axis combo) onto the union columns
+/// index. Populated from the axis first (per-combo value) then the fixed map;
+/// `None` when the subgrid doesn't touch the name.
+fn project_row(subgrid: &Subgrid, combo: &[Value], union_columns: &[String]) -> Vec<Option<Value>> {
+    let axis_lookup: HashMap<&str, &Value> = subgrid
+        .axes
+        .iter()
+        .zip(combo)
+        .map(|((name, _), v)| (name.as_str(), v))
+        .collect();
+    union_columns
+        .iter()
+        .map(|name| {
+            if let Some(v) = axis_lookup.get(name.as_str()) {
+                Some((*v).clone())
+            } else {
+                subgrid.fixed.get(name).cloned()
+            }
+        })
+        .collect()
+}
+
+/// A one-line summary of a subgrid for the inputs block, e.g.
+/// `X="A", Y(10)`. Only names that appear in `union_columns` are surfaced —
+/// so baseline scalars shared across every subgrid stay silent, and the label
+/// carries only what makes this subgrid different. Axes appear as `NAME(N)`
+/// (with `N` the point count on that axis); scalars as `NAME=value`. A
+/// subgrid that neither overrides nor sweeps any union column reads
+/// `"(baseline)"`.
+fn subgrid_label(subgrid: &Subgrid, union_columns: &[String]) -> String {
+    use std::collections::BTreeSet;
+    let union: BTreeSet<&str> = union_columns.iter().map(String::as_str).collect();
+    let axis_names: BTreeSet<&str> = subgrid.axes.iter().map(|(n, _)| n.as_str()).collect();
+    let mut parts: Vec<String> = Vec::new();
+    // Scalar entries that vary across subgrids. Name-sorted (BTreeSet).
+    let mut scalars: Vec<(&str, &Value)> = subgrid
+        .fixed
+        .iter()
+        .filter(|(k, _)| union.contains(k.as_str()) && !axis_names.contains(k.as_str()))
+        .map(|(k, v)| (k.as_str(), v))
+        .collect();
+    scalars.sort_by_key(|(k, _)| *k);
+    for (name, value) in scalars {
+        parts.push(format!("{name}={}", format_value(value)));
+    }
+    // Axes in this subgrid's declaration order (already name-sorted by `split_axes`).
+    for (name, values) in &subgrid.axes {
+        parts.push(format!("{name}({})", values.len()));
+    }
+    if parts.is_empty() {
+        "(baseline)".to_string()
+    } else {
+        parts.join(", ")
+    }
 }
 
 /// Grid-wide inputs to the per-row DSR: `(n_trials, sample_variance_of_sharpe)`.
@@ -454,18 +634,44 @@ pub(crate) enum Evaluation {
     Windowed(Vec<metrics::WindowMetrics>),
 }
 
-/// One row of the grid, keyed to its axes' order.
+/// One folded subgrid: its scalar map (baseline layered under this subgrid's
+/// `--grid` scalars, minus any name carved out as an axis) plus its axes
+/// (name-sorted) and cartesian combos over those axes. A `--grid` flag with
+/// only scalars yields one combo (the empty tuple) — a single grid point.
+pub(crate) struct Subgrid {
+    pub(crate) fixed: HashMap<String, Value>,
+    pub(crate) axes: Vec<Axis>,
+    pub(crate) combos: Vec<Vec<Value>>,
+}
+
+impl Subgrid {
+    fn points(&self) -> usize {
+        self.combos.len()
+    }
+}
+
+/// One row of the grid, sparse across the union of every subgrid's axis
+/// columns. `values[i]` is the value for `Sweep::union_columns[i]` — `None`
+/// when this row's subgrid doesn't reference that name (the CSV writes the
+/// empty cell; the best block skips it).
 pub(crate) struct Row {
-    pub(crate) combo: Vec<Value>,
+    pub(crate) values: Vec<Option<Value>>,
     pub(crate) eval: Evaluation,
 }
 
 /// Rows and metadata produced by [`optimize`], ready for the CLI to write out.
 /// `rows` is sorted by `best_by`'s ranking value when `best_by` is `Some`,
-/// otherwise it follows the cartesian enumeration order.
+/// otherwise it follows the subgrid-then-cartesian enumeration order.
 pub(crate) struct Sweep {
-    /// The sweep axes, in declaration order (name-sorted by `split_axes`).
-    pub(crate) axes: Vec<Axis>,
+    /// The union of every subgrid's axis names, plus every scalar name whose
+    /// effective value differs across subgrids — name-sorted. This is exactly
+    /// the CSV axis-column header, and it indexes each [`Row::values`].
+    pub(crate) union_columns: Vec<String>,
+    /// One entry per `--grid` flag, in flag order — for the inputs block
+    /// breakdown. Each entry is `(axes label, point count)` where the label is
+    /// e.g. `"X=\"A\", Y(10)"` (scalars inline, axes as `NAME(N)`); when the
+    /// subgrid has neither a scalar override nor an axis it reads `"(baseline)"`.
+    pub(crate) subgrid_summaries: Vec<(String, usize)>,
     /// Metric column paths resolved against the probe document (`name` → dotted
     /// path). Errors out of [`optimize`] if any name doesn't resolve.
     pub(crate) metric_columns: Vec<(String, String)>,
@@ -492,6 +698,36 @@ pub(crate) struct Sweep {
     /// windowed CSV columns already summarize their metrics, so the number
     /// stays comparable to the other `_mean` cells.
     pub(crate) deflated_sharpe_context: Option<(usize, Real)>,
+}
+
+/// True iff `v` is axis-shaped — a JSON array or a `start..end[:step]`
+/// range-shaped string. Used both to carve axes out of a subgrid table
+/// (`split_axes`) and to reject axes in the `--params` baseline
+/// (`reject_axes_in_params`) — one detector, one meaning.
+fn is_axis_value(v: &Value) -> bool {
+    match v {
+        Value::Array(items) => !items.is_empty(),
+        Value::String(s) => try_parse_range(s).is_some(),
+        _ => false,
+    }
+}
+
+/// Error if any `--params` value looks like a sweep axis — those must go
+/// through `--grid`. The error names every offender so a user with several
+/// mistakes fixes them all in one edit rather than one at a time.
+pub(crate) fn reject_axes_in_params(params: &HashMap<String, Value>) -> Result<()> {
+    let mut offenders: Vec<&str> = params
+        .iter()
+        .filter_map(|(k, v)| is_axis_value(v).then_some(k.as_str()))
+        .collect();
+    if offenders.is_empty() {
+        return Ok(());
+    }
+    offenders.sort();
+    bail!(
+        "--params only accepts scalar values; move axis-shaped values to `--grid`: {}",
+        offenders.join(", "),
+    );
 }
 
 /// Partition the effective params table into fixed (scalar) entries and sweep
@@ -766,16 +1002,17 @@ fn ranking_value(eval: &Evaluation, path: &str, direction: Direction, k: Real) -
 // CSV output
 // ---------------------------------------------------------------------------
 
-/// Write the sweep CSV: axis columns first (declaration order), then one
+/// Write the sweep CSV: the union axis columns (name-sorted) first, then one
 /// column per requested metric — or, under `-w/--windowed`, two columns per
 /// metric (`<name>_mean` / `<name>_std`, the cross-window aggregate). Whole-run
 /// sweeps also get a trailing `selection.deflated_sharpe` column when the grid has
 /// enough spread in Sharpes for the multiple-testing correction to be defined.
-/// `,`-delimited to match `trades.csv` / `returns.csv`. Missing (omitted)
-/// metric values are written as an empty cell.
+/// `,`-delimited to match `trades.csv` / `returns.csv`. Axis cells that the
+/// row's subgrid doesn't touch, and missing (omitted) metric values, are both
+/// written as an empty cell.
 fn write_grid_csv(
     path: &Path,
-    axes: &[(String, Vec<Value>)],
+    union_columns: &[String],
     metric_columns: &[(String, String)],
     windowed: bool,
     deflated_sharpe_context: Option<(usize, Real)>,
@@ -792,7 +1029,7 @@ fn write_grid_csv(
         .from_path(path)
         .with_context(|| format!("creating `{}`", path.display()))?;
 
-    let mut header: Vec<String> = axes.iter().map(|(name, _)| name.clone()).collect();
+    let mut header: Vec<String> = union_columns.to_vec();
     for (name, _) in metric_columns {
         if windowed {
             header.push(format!("{name}_mean"));
@@ -831,7 +1068,11 @@ fn write_grid_csv(
 
     let cell = |v: Option<Real>| v.map(format_number).unwrap_or_default();
     for row in rows {
-        let mut record: Vec<String> = row.combo.iter().map(format_value).collect();
+        let mut record: Vec<String> = row
+            .values
+            .iter()
+            .map(|v| v.as_ref().map(format_value).unwrap_or_default())
+            .collect();
         match &row.eval {
             Evaluation::Whole(m) => {
                 // Flatten once, then index each requested column.
@@ -910,17 +1151,31 @@ fn format_number(v: Real) -> String {
 fn print_inputs_block(
     opts: &OptimizeOptions,
     windowed_bars: Option<NonZeroUsize>,
-    axes: &[(String, Vec<Value>)],
+    subgrid_summaries: &[(String, usize)],
     rows: &[Row],
 ) {
     println!("{}", style::bold("inputs"));
     print_field("strategy", opts.strategy_label);
-    let axes_label: String = axes
-        .iter()
-        .map(|(name, values)| format!("{name}({})", values.len()))
-        .collect::<Vec<_>>()
-        .join(", ");
-    print_field("grid", &format!("{} points · {axes_label}", rows.len()));
+    if subgrid_summaries.len() == 1 {
+        // Compact form when there's only one subgrid — matches the pre-stack
+        // shape, so a single-`--grid` invocation reads the same as before.
+        print_field(
+            "grid",
+            &format!("{} points · {}", rows.len(), subgrid_summaries[0].0),
+        );
+    } else {
+        print_field(
+            "grid",
+            &format!(
+                "{} points across {} subgrids",
+                rows.len(),
+                subgrid_summaries.len()
+            ),
+        );
+        for (i, (label, n)) in subgrid_summaries.iter().enumerate() {
+            print_indented(&format!("[{}] {n} pts · {label}", i + 1));
+        }
+    }
     print_field("capital", &format!("{:.2}", opts.cash));
     // Costs summary — same treatment as `run`: name it explicitly if a model is
     // set, note `none (explicit)` if the user opted in silently, and warn if no
@@ -978,7 +1233,7 @@ fn print_skipped_overlay_warning(skipped: &[String]) {
 }
 
 fn print_best_block(
-    axes: &[(String, Vec<Value>)],
+    union_columns: &[String],
     metric_columns: &[(String, String)],
     best_by: Option<&(String, String, Direction)>,
     k: Real,
@@ -990,10 +1245,13 @@ fn print_best_block(
         return;
     };
 
-    let params_label: String = axes
+    // Skip axis columns the winning row's subgrid doesn't touch — the params
+    // line names only what actually took a value, so a stacked sweep's
+    // conditional axes don't show as `Z=<empty>`.
+    let params_label: String = union_columns
         .iter()
-        .zip(best.combo.iter())
-        .map(|((name, _), v)| format!("{name}={}", format_value(v)))
+        .zip(best.values.iter())
+        .filter_map(|(name, v)| v.as_ref().map(|v| format!("{name}={}", format_value(v))))
         .collect::<Vec<_>>()
         .join(", ");
     print_field("params", &params_label);
@@ -1078,6 +1336,12 @@ fn print_field(label: &str, value: &str) {
         format!("{label} ")
     };
     println!("  {}{value}", style::dim(&padded));
+}
+
+/// A trailing hangover line under a `print_field` — indented to sit under the
+/// value column (2 leading spaces + 9-char label column = 11 spaces).
+fn print_indented(text: &str) {
+    println!("           {text}");
 }
 
 #[cfg(test)]
@@ -1191,6 +1455,106 @@ mod tests {
         assert_eq!(direction_for("trades.total"), None);
     }
 
+    #[test]
+    fn reject_axes_in_params_flags_lists_and_ranges() {
+        let mut params = HashMap::new();
+        params.insert("SYM".into(), Value::from("BTC"));
+        params.insert("FAST".into(), serde_json::json!([3, 5, 8]));
+        params.insert("SLOW".into(), Value::from("10..20:2"));
+        let err = reject_axes_in_params(&params).unwrap_err().to_string();
+        // Both offenders named, alphabetized for a stable message.
+        assert!(err.contains("FAST"), "err = {err}");
+        assert!(err.contains("SLOW"), "err = {err}");
+        assert!(!err.contains("SYM"), "err = {err}");
+        // Bare-string scalars that don't look like ranges pass through.
+        params.remove("FAST");
+        params.remove("SLOW");
+        assert!(reject_axes_in_params(&params).is_ok());
+        // Empty arrays are treated as scalars (they're rejected downstream by
+        // `split_axes` with a clearer message).
+        params.insert("EMPTY".into(), Value::Array(vec![]));
+        assert!(reject_axes_in_params(&params).is_ok());
+    }
+
+    /// A subgrid with `fixed` from a merged (baseline + grid) map, `axes`
+    /// sorted by name, and cartesian combos over those axes.
+    fn subgrid(fixed: &[(&str, Value)], axes: &[(&str, Vec<Value>)]) -> Subgrid {
+        let fixed: HashMap<String, Value> =
+            fixed.iter().map(|(k, v)| ((*k).to_string(), v.clone())).collect();
+        let mut axes: Vec<Axis> = axes
+            .iter()
+            .map(|(name, values)| ((*name).to_string(), values.clone()))
+            .collect();
+        axes.sort_by(|a, b| a.0.cmp(&b.0));
+        let combos = cartesian(&axes);
+        Subgrid { fixed, axes, combos }
+    }
+
+    #[test]
+    fn union_columns_include_axes_and_varying_scalars() {
+        // Subgrid 1: X="A" fixed, Y axis (1..3). Subgrid 2: X="B" fixed, Z axis (10, 20).
+        // Baseline SYM=BTC would be merged into both `fixed`s — same value across
+        // subgrids, so it must *not* become a column.
+        let a = subgrid(
+            &[("SYM", Value::from("BTC")), ("X", Value::from("A"))],
+            &[("Y", vec![Value::from(1), Value::from(2), Value::from(3)])],
+        );
+        let b = subgrid(
+            &[("SYM", Value::from("BTC")), ("X", Value::from("B"))],
+            &[("Z", vec![Value::from(10), Value::from(20)])],
+        );
+        let cols = compute_union_columns(&[a, b]);
+        // Name-sorted: X (differing scalar), Y (axis in 1), Z (axis in 2).
+        // SYM shared across both → not a column.
+        assert_eq!(cols, vec!["X".to_string(), "Y".to_string(), "Z".to_string()]);
+    }
+
+    #[test]
+    fn union_columns_pick_up_absent_scalars() {
+        // Subgrid 1 has M=1 fixed, subgrid 2 doesn't touch M at all — that
+        // asymmetry alone makes M a column so its rows expose which subgrid
+        // set it (the "conditional-presence" case).
+        let a = subgrid(&[("M", Value::from(1))], &[("Y", vec![Value::from(1)])]);
+        let b = subgrid(&[], &[("Z", vec![Value::from(10)])]);
+        let cols = compute_union_columns(&[a, b]);
+        assert_eq!(cols, vec!["M".to_string(), "Y".to_string(), "Z".to_string()]);
+    }
+
+    #[test]
+    fn project_row_populates_axis_and_fixed_and_leaves_absent_empty() {
+        let a = subgrid(
+            &[("SYM", Value::from("BTC")), ("X", Value::from("A"))],
+            &[("Y", vec![Value::from(1), Value::from(2)])],
+        );
+        let cols = vec!["X".to_string(), "Y".to_string(), "Z".to_string()];
+        // Combo picks Y=2 (second axis value); Z is absent → empty cell.
+        let combo = vec![Value::from(2)];
+        let row = project_row(&a, &combo, &cols);
+        assert_eq!(row, vec![Some(Value::from("A")), Some(Value::from(2)), None]);
+    }
+
+    #[test]
+    fn subgrid_label_omits_baseline_scalars() {
+        // With union_columns = [X, Y, Z] (baseline SYM shared), the label
+        // names X (varying scalar in this subgrid) and Y (its axis) — SYM
+        // stays silent even though it's in `fixed`.
+        let a = subgrid(
+            &[("SYM", Value::from("BTC")), ("X", Value::from("A"))],
+            &[("Y", vec![Value::from(1), Value::from(2), Value::from(3)])],
+        );
+        let cols = vec!["X".to_string(), "Y".to_string(), "Z".to_string()];
+        assert_eq!(subgrid_label(&a, &cols), "X=A, Y(3)");
+    }
+
+    #[test]
+    fn subgrid_label_falls_back_to_baseline_when_nothing_varies() {
+        // A subgrid with no axes and no union-column scalars — reads as
+        // `(baseline)` in the summary line.
+        let a = subgrid(&[("SYM", Value::from("BTC"))], &[]);
+        let cols: Vec<String> = vec![];
+        assert_eq!(subgrid_label(&a, &cols), "(baseline)");
+    }
+
     // Perf probe — run with:
     //   cargo test --release optimize::tests::bench_sort -- --ignored --nocapture
     #[test]
@@ -1227,7 +1591,7 @@ mod tests {
                             *sh += (i as f64) * 1e-6;
                         }
                         Row {
-                            combo: vec![],
+                            values: vec![],
                             eval: Evaluation::Whole(Box::new(m)),
                         }
                     })
