@@ -191,4 +191,56 @@ mod tests {
             "unexpected error: {msg}"
         );
     }
+
+    #[test]
+    fn leading_scope_distributes_over_later_unscoped_terms() {
+        // `--costs 'BTC:commission=…,spread=…'` should scope BOTH terms to BTC.
+        let cfg = config_of(&[
+            "BTC:commission=!percentage { rate: 0.001 },spread=!bps { bps: 3 }",
+        ]);
+        // Both live under by_symbol["BTC"], not the default leg.
+        assert!(cfg.commission.default.is_none());
+        assert!(cfg.spread.default.is_none());
+        let b = fugazi::types::Candle::new(100.0, 100.0, 100.0, 100.0, 0.0);
+        let btc = cfg.resolve("BTC", None);
+        let eth = cfg.resolve("ETH", None);
+        assert!((btc.commission.commission(1_000.0, 10.0) - 1.0).abs() < 1e-9);
+        assert!((btc.spread.half_spread(100.0, &b) - 0.015).abs() < 1e-9);
+        // ETH falls back to no-op on both legs.
+        assert_eq!(eth.commission.commission(1_000.0, 10.0), 0.0);
+        assert_eq!(eth.spread.half_spread(100.0, &b), 0.0);
+    }
+
+    #[test]
+    fn per_term_scope_overrides_leading_distributive_scope() {
+        // `BTC:X=…,ETH:Y=…` — the per-term ETH scope wins over the outer BTC.
+        let cfg = config_of(&[
+            "BTC:commission=!percentage { rate: 0.001 },ETH:spread=!bps { bps: 3 }",
+        ]);
+        let b = fugazi::types::Candle::new(100.0, 100.0, 100.0, 100.0, 0.0);
+        // BTC has the commission, no spread.
+        let btc = cfg.resolve("BTC", None);
+        assert!((btc.commission.commission(1_000.0, 10.0) - 1.0).abs() < 1e-9);
+        assert_eq!(btc.spread.half_spread(100.0, &b), 0.0);
+        // ETH has the spread, no commission.
+        let eth = cfg.resolve("ETH", None);
+        assert_eq!(eth.commission.commission(1_000.0, 10.0), 0.0);
+        assert!((eth.spread.half_spread(100.0, &b) - 0.015).abs() < 1e-9);
+    }
+
+    #[test]
+    fn separate_flags_do_not_inherit_scope_across_boundaries() {
+        // Splitting into two flags is the escape hatch when a caller wants
+        // some terms scoped and others on the default leg.
+        let cfg = config_of(&[
+            "BTC:commission=!percentage { rate: 0.001 }",
+            "spread=!bps { bps: 3 }",
+        ]);
+        // The spread is on the DEFAULT leg — a fresh flag = a fresh scope context.
+        assert!(cfg.spread.default.is_some());
+        assert!(cfg.commission.default.is_none());
+        let b = fugazi::types::Candle::new(100.0, 100.0, 100.0, 100.0, 0.0);
+        let eth = cfg.resolve("ETH", None);
+        assert!((eth.spread.half_spread(100.0, &b) - 0.015).abs() < 1e-9);
+    }
 }

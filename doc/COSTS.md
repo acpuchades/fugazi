@@ -91,6 +91,16 @@ Terms fold left-to-right; later terms deep-merge into earlier ones and
 override at the same specificity. Multiple `--costs` flags on one command
 line concatenate the same way as multiple `,`-separated terms in one flag.
 
+**A leading scope distributes over the whole flag.** A `SCOPE:` on the
+first inline term of a `--costs` value applies to every later inline term
+in the same flag that doesn't carry its own scope — so
+`--costs 'BTC:commission=…,spread=…'` sets *both* legs for BTC, not
+`commission` for BTC and `spread` on the default leg. A per-term scope
+still overrides (`BTC:commission=…,ETH:spread=…` keeps `spread` on ETH),
+and `@file` / `none` terms are unaffected. When you actually want one
+scoped term and one default-leg term, split them into two flags:
+`--costs BTC:commission=… --costs spread=…`.
+
 Validating the config without running the backtest:
 
 ```sh

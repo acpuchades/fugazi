@@ -579,6 +579,13 @@ Terms apply left-to-right, later wins; the `SYMBOL[FREQ]:` scope prefix is
 the same as [`get --overlay`](#-x----overlay) — either half is optional
 (`BTC:`, `[1d]:`, `BTC[1d]:`).
 
+A leading scope on the first inline term of one `--costs` flag distributes
+over every later inline term in the same flag that doesn't carry its own
+scope — `--costs 'BTC:commission=…,spread=…'` sets both legs for BTC.
+Per-term scopes still override, and `@file` / `none` terms are unaffected.
+To leave a term on the default leg while another is scoped, use two flags:
+`--costs BTC:commission=… --costs spread=…`.
+
 **Fill pipeline.** For every fill (market, stop, take-profit), the wallet
 applies **spread → slippage → commission** on top of the theoretical trigger
 price:

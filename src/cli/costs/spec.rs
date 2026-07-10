@@ -40,13 +40,36 @@ impl FromStr for CostSpec {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // A leading `SCOPE:` on the flag's first inline setter distributes over
+        // every later inline setter in the same flag that doesn't carry its own
+        // scope — so `--costs 'FOO:X=1,Y=2'` applies both X and Y to FOO. A
+        // per-term scope still wins (`FOO:X=1,BAR:Y=2` keeps Y on BAR), and
+        // `@file` / `none` terms are unaffected (scoping them is meaningless).
+        // The escape hatch for "one BTC term, one default term" is two flags:
+        // `--costs BTC:X=1 --costs Y=2`.
         let mut terms = Vec::new();
+        let mut outer_scope: Option<Scope> = None;
         for chunk in split_top_commas(s).map_err(|e| e.to_string())? {
             let chunk = chunk.trim();
             if chunk.is_empty() {
                 continue;
             }
-            terms.push(parse_term(chunk).map_err(|e| e.to_string())?);
+            let term = parse_term(chunk).map_err(|e| e.to_string())?;
+            let term = match term {
+                CostTerm::Set { scope, key, value } if !scope.is_default() => {
+                    if outer_scope.is_none() {
+                        outer_scope = Some(scope.clone());
+                    }
+                    CostTerm::Set { scope, key, value }
+                }
+                CostTerm::Set { scope, key, value } => {
+                    // No per-term scope — inherit the flag's outer scope if any.
+                    let scope = outer_scope.clone().unwrap_or(scope);
+                    CostTerm::Set { scope, key, value }
+                }
+                other => other,
+            };
+            terms.push(term);
         }
         Ok(CostSpec(terms))
     }
