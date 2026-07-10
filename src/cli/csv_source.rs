@@ -306,7 +306,7 @@ fn classified_types(bars: &[CsvBar]) -> Vec<(String, OverlayType)> {
 /// here and the `--series` path in [`crate::data`], so both read the same
 /// files identically.
 pub(crate) fn detect_delimiter(path: &Path) -> Result<u8> {
-    const CANDIDATES: [u8; 4] = [b';', b',', b'\t', b'|'];
+    const CANDIDATES: &[u8; 4] = b";,\t|";
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut header = String::new();
     BufReader::new(file)
@@ -314,7 +314,7 @@ pub(crate) fn detect_delimiter(path: &Path) -> Result<u8> {
         .with_context(|| format!("reading header of {}", path.display()))?;
 
     let mut best = (b',', 0usize);
-    for d in CANDIDATES {
+    for &d in CANDIDATES {
         let n = header.bytes().filter(|&b| b == d).count();
         if n > best.1 {
             best = (d, n);
