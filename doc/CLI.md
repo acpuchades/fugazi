@@ -527,7 +527,7 @@ It's a `,`-separated list of terms, itself repeatable:
   `optimize`, `NAME=[v1,v2,…]` or `NAME=start..end[:step]` declares a
   [sweep axis](#sweep-axes).
 - `@file.yml` — load a whole `NAME: value` mapping. See
-  [`examples/params.yml`](examples/params.yml).
+  [`examples/params.yml`](../examples/params.yml).
 
 Terms apply left-to-right, and later `--params` flags win over earlier
 ones — so a base file + one override is a clean recipe:
@@ -570,7 +570,7 @@ as [`--params`](#--params):
   `key` starts with `commission` / `spread` / `slippage`; `value` is the
   model expression (`!percentage { rate: 0.001 }`, `!bps { bps: 5 }`, …).
 - `@file.yml` — load a whole venue preset. Two ship in
-  [`examples/`](examples/): `binance.yml` (crypto taker fees) and
+  [`examples/`](../examples/): `binance.yml` (crypto taker fees) and
   `ibkr.yml` (US-equities Tiered).
 - `none` — reset every leg to the no-op default and silence the warning
   banner. Any later term re-establishes a real model.
@@ -622,7 +622,7 @@ this order at run time:
 4. `default` — the leg's fallback.
 5. Otherwise the no-op default (zero-cost).
 
-**Preset shape** ([`examples/binance.yml`](examples/binance.yml)):
+**Preset shape** ([`examples/binance.yml`](../examples/binance.yml)):
 
 ```yaml
 commission:                       # flat form ⇒ commission.default
@@ -893,8 +893,8 @@ Boolean-valued nodes:
   (`!unstable { source: <source> }` is the source-side twin.)
 - **Constants**: `!value <bool>`.
 
-See [`examples/strategy.yml`](examples/strategy.yml) for a full SMA
-crossover and [`examples/strategy.params.yml`](examples/strategy.params.yml)
+See [`examples/strategy.yml`](../examples/strategy.yml) for a full SMA
+crossover and [`examples/strategy.params.yml`](../examples/strategy.params.yml)
 for the parameterized version.
 
 ### Reusing signals (YAML anchors)
@@ -1093,13 +1093,13 @@ schema byte-for-byte.
 The `examples/` directory ships runnable strategy specs paired with the
 data files that drive them:
 
-- [`examples/strategy.yml`](examples/strategy.yml) — a complete
+- [`examples/strategy.yml`](../examples/strategy.yml) — a complete
   SMA-crossover strategy, always-in-market long/short.
-- [`examples/strategy.params.yml`](examples/strategy.params.yml) — the
+- [`examples/strategy.params.yml`](../examples/strategy.params.yml) — the
   same strategy parameterized on `FAST`/`SLOW`/`SYM`.
-- [`examples/params.yml`](examples/params.yml) — a `NAME: value` mapping
+- [`examples/params.yml`](../examples/params.yml) — a `NAME: value` mapping
   loadable with `--params @examples/params.yml`.
-- [`examples/candles.csv`](examples/candles.csv) — sample BTC candles
+- [`examples/candles.csv`](../examples/candles.csv) — sample BTC candles
   with a `symbol` column.
 
 **Common recipes**

@@ -694,7 +694,7 @@ plotting code works on either.
 
 **Other subcommands.** Alongside `run` the binary carries a few utility
 subcommands — briefly listed here, fully documented in
-[CLI.md](CLI.md):
+[doc/CLI.md](doc/CLI.md):
 
 - `fugazi check strategy <STRATEGY>` / `check overlay <SPEC>...` — a spec-only
   lint pass (no data, no wallet). Fails a CI job if the strategy or overlay
@@ -709,7 +709,7 @@ subcommands — briefly listed here, fully documented in
   YAML tag catalogue, the `get`-provider table, and (via HTTP) the
   provider's ticker vocabulary.
 - `fugazi completions <shell>` — a shell-completion script (see
-  [CLI.md § Shell completion](CLI.md#shell-completion)).
+  [doc/CLI.md § Shell completion](doc/CLI.md#shell-completion)).
 
 ## Examples
 
@@ -789,7 +789,7 @@ metrics.sharpe(returns, risk_free_rate=0.0, bars_per_year=252)   # ratio | None
 
 Install with `pip install fugazi` (prebuilt wheels for Linux, macOS and
 Windows), or build from a checkout with `cd python && maturin develop --release`.
-See the [Python README](python/README.md) for the full API.
+See the [Python README](doc/PYTHON.md) for the full API.
 
 ## License
 

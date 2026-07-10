@@ -1,7 +1,7 @@
 # Strategy files
 
 A **strategy file** is the declarative input to the `fugazi run` backtester. It
-describes one [`SingleAssetStrategy`](src/strategies/single_asset.rs): a traded
+describes one [`SingleAssetStrategy`](../src/strategies/single_asset.rs): a traded
 symbol plus the boolean signals that open and close its long/short positions. The
 file is a YAML mirror of the library's composition API — every tag maps
 one-to-one to a fugazi constructor — so a strategy you can write in Rust by
@@ -431,6 +431,6 @@ flow mappings too, so this is handy as an inline `<STRATEGY>` positional literal
 { symbol: ETH, long: { enter: !crosses_above { lhs: !sma { period: 5 }, rhs: !sma { period: 20 } } } }
 ```
 
-See [`examples/strategy.yml`](examples/strategy.yml) for an annotated
-SMA-crossover strategy and [`examples/strategy.params.yml`](examples/strategy.params.yml)
+See [`examples/strategy.yml`](../examples/strategy.yml) for an annotated
+SMA-crossover strategy and [`examples/strategy.params.yml`](../examples/strategy.params.yml)
 for its parameterised version.
