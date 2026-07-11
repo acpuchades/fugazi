@@ -54,6 +54,131 @@ use fugazi_core::types::{
 use fugazi_core::backtest::Fill;
 use fugazi_core::metrics as core_metrics;
 use fugazi_core::metrics::{DrawdownSegment, Trade};
+use fugazi_core::runtime::{self, Adapter, DynType, DynValue, TypeOf};
+
+// ---------------------------------------------------------------------------
+// Shared type-erasure vocabulary (fugazi::runtime) + Python's Send+Sync
+// supertrait
+//
+// The core library's `runtime::DynIndicator` is not `Send + Sync` (a pyo3
+// requirement), so Python defines a supertrait `DynSS` that adds those two
+// autotraits plus a `Send + Sync`-preserving deep clone. Every wrapper in
+// Python that used to hold its own erased trait object (Source<I> for Real,
+// SignalBox<I> for bool, StrSource<I> for Arc<str>, AtomBox<I> for Atom)
+// now collapses to a single generic `TypedSource<In, Out>` that carries the
+// runtime handle and compile-time markers for the input and output types.
+// The unification is phased: this pass introduces the machinery and folds
+// `StrSource<I>` into it; the other three traits stay for now and follow
+// in later phases.
+// ---------------------------------------------------------------------------
+
+/// Python-local `Send + Sync` supertrait over the runtime's [`DynIndicator`],
+/// with a `Send + Sync`-preserving deep clone. Pyo3 pyclasses need
+/// `Send + Sync` on every field, and `runtime::DynIndicator::dyn_clone`
+/// returns `Box<dyn runtime::DynIndicator>` (no auto-traits), so we route the
+/// clone through a Python-local trait that does preserve them.
+trait DynSS: runtime::DynIndicator + Send + Sync {
+    fn clone_ss(&self) -> Box<dyn DynSS>;
+}
+
+impl<T> DynSS for T
+where
+    T: runtime::DynIndicator + Clone + Send + Sync + 'static,
+{
+    fn clone_ss(&self) -> Box<dyn DynSS> {
+        Box::new(self.clone())
+    }
+}
+
+impl Clone for Box<dyn DynSS> {
+    fn clone(&self) -> Box<dyn DynSS> {
+        (**self).clone_ss()
+    }
+}
+
+/// A runtime-typed handle carrying compile-time `In`/`Out` markers so it
+/// implements `Indicator<Input = In, Output = Out>` cleanly. The single
+/// carrier that replaces Python's per-input-domain / per-output-type boxes.
+///
+/// Construction takes a concrete `T: Indicator<Input = In, Output = Out> +
+/// Clone + Send + Sync + 'static` and wraps it through
+/// [`runtime::Adapter`]; every subsequent method call routes through the
+/// runtime's `DynValue` payload but the surface `Indicator` impl below keeps
+/// `In`/`Out` typed at every call site.
+struct TypedSource<In, Out>(
+    Box<dyn DynSS>,
+    std::marker::PhantomData<fn(In) -> Out>,
+);
+
+impl<In, Out> TypedSource<In, Out>
+where
+    In: TryFrom<DynValue, Error = DynType>
+        + TypeOf
+        + Into<DynValue>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    Out: TryFrom<DynValue, Error = DynType>
+        + TypeOf
+        + Into<DynValue>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
+    fn new<T>(inner: T) -> Self
+    where
+        T: Indicator<Input = In, Output = Out> + Clone + Send + Sync + 'static,
+    {
+        let boxed: Box<dyn DynSS> = Box::new(Adapter::new(inner));
+        Self(boxed, std::marker::PhantomData)
+    }
+}
+
+impl<In, Out> Clone for TypedSource<In, Out> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone(), std::marker::PhantomData)
+    }
+}
+
+impl<In, Out> Indicator for TypedSource<In, Out>
+where
+    In: Into<DynValue>,
+    Out: TryFrom<DynValue> + Clone,
+{
+    type Input = In;
+    type Output = Out;
+
+    fn update(&mut self, input: In) -> Option<Out> {
+        let payload = self.0.update(input.into())?;
+        // Out's compile-time TypeOf matches the runtime output_type() by
+        // construction (Adapter blanket + TypedSource::new bounds), so the
+        // TryFrom back is always Ok.
+        Some(Out::try_from(payload).ok().expect(
+            "TypedSource: runtime output type doesn't match compile-time Out",
+        ))
+    }
+
+    fn value(&self) -> Option<Out> {
+        let payload = self.0.value()?;
+        Some(Out::try_from(payload).ok().expect(
+            "TypedSource: runtime output type doesn't match compile-time Out",
+        ))
+    }
+
+    fn warm_up_period(&self) -> usize {
+        self.0.warm_up_period()
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.0.unstable_period()
+    }
+
+    fn reset(&mut self) {
+        self.0.reset()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Type-erasing carriers
@@ -212,82 +337,14 @@ impl<I> Indicator for SignalBox<I> {
     }
 }
 
-/// Object-safe shim over an `I -> Arc<str>` indicator — the string twin of
-/// [`DynIndicator`]. Backs the `GetStr` overlay-column reader and the
-/// `ValueStr` string constant leaf, which compose into `str_eq` / `str_ne`
-/// signals.
-trait DynStr<I>: Send + Sync {
-    fn update(&mut self, input: I) -> Option<Arc<str>>;
-    fn value(&self) -> Option<Arc<str>>;
-    fn warm_up_period(&self) -> usize;
-    fn unstable_period(&self) -> usize;
-    fn reset(&mut self);
-    fn box_clone(&self) -> Box<dyn DynStr<I>>;
-}
-
-impl<I, T> DynStr<I> for T
-where
-    T: Indicator<Input = I, Output = Arc<str>> + Clone + Send + Sync + 'static,
-{
-    fn update(&mut self, input: I) -> Option<Arc<str>> {
-        Indicator::update(self, input)
-    }
-    fn value(&self) -> Option<Arc<str>> {
-        Indicator::value(self)
-    }
-    fn warm_up_period(&self) -> usize {
-        Indicator::warm_up_period(self)
-    }
-    fn unstable_period(&self) -> usize {
-        Indicator::unstable_period(self)
-    }
-    fn reset(&mut self) {
-        Indicator::reset(self)
-    }
-    fn box_clone(&self) -> Box<dyn DynStr<I>> {
-        Box::new(self.clone())
-    }
-}
-
-/// A boxed `I -> Arc<str>` indicator. Implements [`Indicator`] itself, so it
-/// can be fed back into any string-consuming constructor (e.g. `StrEq` over
-/// two `Arc<str>` sources).
-struct StrSource<I>(Box<dyn DynStr<I>>);
-
-impl<I> StrSource<I> {
-    fn new<T>(inner: T) -> Self
-    where
-        T: Indicator<Input = I, Output = Arc<str>> + Clone + Send + Sync + 'static,
-    {
-        StrSource(Box::new(inner))
-    }
-}
-
-impl<I> Clone for StrSource<I> {
-    fn clone(&self) -> Self {
-        StrSource(self.0.box_clone())
-    }
-}
-
-impl<I> Indicator for StrSource<I> {
-    type Input = I;
-    type Output = Arc<str>;
-    fn update(&mut self, input: I) -> Option<Arc<str>> {
-        self.0.update(input)
-    }
-    fn value(&self) -> Option<Arc<str>> {
-        self.0.value()
-    }
-    fn warm_up_period(&self) -> usize {
-        self.0.warm_up_period()
-    }
-    fn unstable_period(&self) -> usize {
-        self.0.unstable_period()
-    }
-    fn reset(&mut self) {
-        self.0.reset()
-    }
-}
+/// A boxed `I -> Arc<str>` indicator — the string twin of `Source<I>`. Now a
+/// type alias over the shared [`TypedSource`] carrier; the dedicated
+/// `DynStr<I>` trait + blanket impl it used to have collapsed into
+/// [`runtime::Adapter`]'s coverage.
+///
+/// Backs the `GetStr` overlay-column reader and the `ValueStr` string
+/// constant leaf, which compose into `str_eq` / `str_ne` signals.
+type StrSource<I> = TypedSource<I, Arc<str>>;
 
 /// Maps a multi-output value struct to its line names and their values (in the
 /// same order). The names are available without an instance so warm-up rows can

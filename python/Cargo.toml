@@ -14,10 +14,12 @@ name = "fugazi"
 crate-type = ["cdylib"]
 
 [dependencies]
-# `sources` only — skipping the default `cli` feature keeps clap/csv/interim/etc.
+# `sources` for the remote candle providers, `runtime` for the shared
+# type-erasure vocabulary (fugazi::runtime — DynIndicator + DynValue + Adapter +
+# typed views). Skipping the default `cli` feature keeps clap/csv/interim/etc.
 # out of the wheel. Nothing in the CLI stack links system libs anymore, but the
 # wheel still doesn't want that surface area (no clap-parsed args, no console I/O).
-fugazi_core = { package = "fugazi", path = "..", default-features = false, features = ["sources"] }
+fugazi_core = { package = "fugazi", path = "..", default-features = false, features = ["sources", "runtime"] }
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 time = { version = "0.3", features = ["formatting"] }
