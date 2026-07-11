@@ -166,6 +166,14 @@ fn warm_up_is_exact_for_composition() {
     candle_case(Current::close().lag(3), "lag");
     candle_case(Current::close().roc(5), "roc");
     candle_case(Current::close().rolling_max(10), "rolling_max");
+    // NB: `IfElse` is deliberately not part of the exact-warm-up battery.
+    // Its `warm_up_period()` reports the max of the three sources (safe
+    // upper bound for downstream stability gates), but the actual first
+    // `Some` can arrive earlier — as soon as the condition and the
+    // *selected* branch are both settled. That's the natural semantics
+    // (see the type-level doc) but breaks the "first Some at exactly
+    // sample N" contract this battery asserts. `IfElse` is covered by
+    // the unit tests in `src/indicators/if_else.rs`.
     // Boolean layer: comparisons, edges and connectives.
     candle_case(Current::close().above(100.0), "above");
     candle_case(Current::close().above(100.0).changed(), "changed");

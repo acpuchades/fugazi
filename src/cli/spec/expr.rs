@@ -23,14 +23,15 @@ use serde::Deserialize;
 // it isn't a `ExprSpec` variant.
 use fugazi::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Book, Cci, Component, Dmi,
-    DmiValue, Donchian, DonchianValue, Ema, GetBool, GetReal, GetStr, Hma, Keltner, KeltnerValue,
-    Latch, Log, Macd, MacdValue, Mfi, Obv, Pick, Position, Resample, Rma, Rsi, Sar, Sma, StdDev,
-    StochRsi, Stochastic, TrueRange, Value, Vwap, WilliamsR, Wma,
+    DmiValue, Donchian, DonchianValue, Ema, GetBool, GetReal, GetStr, Hma, IfElse, Keltner,
+    KeltnerValue, Latch, Log, Macd, MacdValue, Mfi, Obv, Pick, Position, Resample, Rma, Rsi, Sar,
+    Sma, StdDev, StochRsi, Stochastic, TrueRange, Value, Vwap, WilliamsR, Wma,
 };
 use fugazi::prelude::*;
 use fugazi::types::Snapshot;
 
-use crate::dyn_indicator::{self, AsAtom, AsCandle, AsReal, DynIndicator};
+use super::signal::SignalSpec;
+use crate::dyn_indicator::{self, AsAtom, AsBool, AsCandle, AsReal, DynIndicator};
 
 use fugazi::{Frequency, Selector};
 use std::str::FromStr;
@@ -467,6 +468,18 @@ pub enum ExprSpec {
     Div {
         lhs: Box<ExprSpec>,
         rhs: Box<ExprSpec>,
+    },
+    /// Three-source ternary: reads `cond` (a bool signal), emits
+    /// `if_true`'s value when `cond` is true, `if_false`'s when false, and
+    /// `None` when `cond` is `None`. All three sources are advanced every
+    /// bar so a branch that doesn't fire this bar keeps warming up in the
+    /// background. Warm-up is the max of the three; the ternary reports
+    /// `None` until every source has warmed. See
+    /// [`fugazi::indicators::IfElse`].
+    IfElse {
+        cond: Box<SignalSpec>,
+        if_true: Box<ExprSpec>,
+        if_false: Box<ExprSpec>,
     },
     Lag {
         #[serde(default = "default_source")]
@@ -988,6 +1001,18 @@ enum ExprSpecRaw {
         lhs: Box<ExprSpec>,
         rhs: Box<ExprSpec>,
     },
+    /// Three-source ternary: reads `cond` (a bool signal), emits
+    /// `if_true`'s value when `cond` is true, `if_false`'s when false, and
+    /// `None` when `cond` is `None`. All three sources are advanced every
+    /// bar so a branch that doesn't fire this bar keeps warming up in the
+    /// background. Warm-up is the max of the three; the ternary reports
+    /// `None` until every source has warmed. See
+    /// [`fugazi::indicators::IfElse`].
+    IfElse {
+        cond: Box<SignalSpec>,
+        if_true: Box<ExprSpec>,
+        if_false: Box<ExprSpec>,
+    },
     Lag {
         #[serde(default = "default_source")]
         source: Box<ExprSpec>,
@@ -1195,6 +1220,15 @@ impl From<ExprSpecRaw> for ExprSpec {
             ExprSpecRaw::Sub { lhs, rhs } => ExprSpec::Sub { lhs, rhs },
             ExprSpecRaw::Mul { lhs, rhs } => ExprSpec::Mul { lhs, rhs },
             ExprSpecRaw::Div { lhs, rhs } => ExprSpec::Div { lhs, rhs },
+            ExprSpecRaw::IfElse {
+                cond,
+                if_true,
+                if_false,
+            } => ExprSpec::IfElse {
+                cond,
+                if_true,
+                if_false,
+            },
             ExprSpecRaw::Lag { source, periods } => ExprSpec::Lag { source, periods },
             ExprSpecRaw::Diff { source, periods } => ExprSpec::Diff { source, periods },
             ExprSpecRaw::Ratio { source, periods } => ExprSpec::Ratio { source, periods },
@@ -1626,6 +1660,16 @@ impl ExprSpec {
             Sub { lhs, rhs } => dyn_indicator::wrap(real(lhs).sub(real(rhs))),
             Mul { lhs, rhs } => dyn_indicator::wrap(real(lhs).mul(real(rhs))),
             Div { lhs, rhs } => dyn_indicator::wrap(real(lhs).div(real(rhs))),
+            IfElse {
+                cond,
+                if_true,
+                if_false,
+            } => {
+                let cond_ind = AsBool::new(cond.build(anchor, book, schema));
+                let t_ind = real(if_true);
+                let f_ind = real(if_false);
+                dyn_indicator::wrap(self::IfElse::new(cond_ind, t_ind, f_ind))
+            }
             Lag { source, periods } => dyn_indicator::wrap(real(source).lag(*periods)),
             Diff { source, periods } => dyn_indicator::wrap(real(source).diff(*periods)),
             Ratio { source, periods } => dyn_indicator::wrap(real(source).ratio(*periods)),

@@ -565,6 +565,72 @@ mod tests {
     }
 
     #[test]
+    fn if_else_selects_by_condition() {
+        // `!if_else { cond, if_true, if_false }`: an ADX-gated momentum
+        // score shape without the ADX (which would need many bars to
+        // warm) — use a level comparison as the condition so we can
+        // trigger both branches on adjacent bars.
+        let yaml = r#"
+            !if_else
+            cond: !above { source: close, level: 100.0 }
+            if_true: !value 1.0
+            if_false: !value -1.0
+        "#;
+        let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        // close = 99 → cond false → -1; close = 101 → cond true → 1.
+        assert_eq!(feed_real(&mut built, bar(99.0)), Some(-1.0));
+        assert_eq!(feed_real(&mut built, bar(101.0)), Some(1.0));
+        assert_eq!(feed_real(&mut built, bar(100.5)), Some(1.0));
+    }
+
+    #[test]
+    fn if_else_holds_none_while_selected_branch_warms() {
+        // The condition is always true (close > 0) and picks `if_true`
+        // (SMA-5, warm-up 5). The ternary reads None for the first four
+        // bars while the SELECTED branch is still warming; on bar 5 it
+        // reports the SMA's first value.
+        let yaml = r#"
+            !if_else
+            cond: !above { source: close, level: 0.0 }
+            if_true: !sma { source: close, period: 5 }
+            if_false: !value 99.0
+        "#;
+        let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        for _ in 0..4 {
+            assert_eq!(feed_real(&mut built, bar(100.0)), None);
+        }
+        // Fifth bar: SMA-5 has warmed and the condition is true.
+        assert_eq!(feed_real(&mut built, bar(100.0)), Some(100.0));
+    }
+
+    #[test]
+    fn if_else_publishes_early_when_selected_branch_warms_fast() {
+        // Same shape but with the condition inverted: close < 0 is always
+        // false, so the ternary picks `if_false` — a Value with warm-up 0,
+        // so a `Some` shows up on the very first bar even though the
+        // *unselected* branch (SMA-5) has a warm-up of 5. Reported
+        // `stable_period()` is still the max, so a downstream consumer
+        // that waits on it still waits long enough.
+        let yaml = r#"
+            !if_else
+            cond: !below { source: close, level: 0.0 }
+            if_true: !sma { source: close, period: 5 }
+            if_false: !value -1.0
+        "#;
+        let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        // First bar: cond is Some(false), if_false is Some(-1.0).
+        assert_eq!(feed_real(&mut built, bar(100.0)), Some(-1.0));
+        // The reported stability window still covers the slowest source
+        // (SMA-5 → warm-up 5), so callers waiting on `stable_period()`
+        // don't act on this early Some until the whole tree could
+        // theoretically be ready.
+        assert!(built.stable_period() >= 5);
+    }
+
+    #[test]
     fn latch_ema_of_resample_matches_reference_htf_ema() {
         // The composition-order regression at the YAML surface: an EMA-3
         // running inside !resample, wrapped in !latch, agrees numerically

@@ -36,7 +36,8 @@ use fugazi_core::indicators::compare::{EqOp, GeOp, GtOp, LeOp, LtOp, NeOp, StrEq
 use fugazi_core::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Close, CurrentBar,
     Day, DayOfWeek, DayOfYear, Dmi, DmiValue, Donchian, DonchianValue, Ema, GetBool, GetReal,
-    GetStr, High, Hma, Hour, Identity, IsWeekday, IsWeekend, Keltner, KeltnerValue, Latch, Log,
+    GetStr, High, Hma, Hour, Identity, IfElse, IsWeekday, IsWeekend, Keltner, KeltnerValue, Latch,
+    Log,
     Low, Macd, MacdValue, Median, Mfi, Minute, Month, Obv, Open, Pick, Quarter, Resample, Rma,
     Rsi, Sar, Second, Sma, StdDev, Stochastic, TrueRange, Typical, UnixMillis, UnixSeconds, Value,
     ValueStr, Volume, Vwap, WeekOfYear, WilliamsR, Wma, Year,
@@ -4058,6 +4059,45 @@ fn unstable(py: Python<'_>, arg: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     ))
 }
 
+/// Three-source ternary: reads `cond` each bar and returns `if_true`'s value
+/// when the condition is true, `if_false`'s when false. Returns `None` while
+/// `cond` reads `None` or any of the three sources is still warming.
+///
+/// All three sources are advanced every bar (never short-circuited), so a
+/// branch that doesn't fire this bar keeps its warm-up progressing. Reads
+/// naturally as an English sentence:
+///
+/// ```python
+/// # ADX-gated momentum: 20-bar ROC when ADX > 25, else 0.
+/// cond = ta.adx(ta.current_bar(), 14).adx().gt(25.0)
+/// score = ta.if_else(cond, ta.close().roc(20), ta.value(0.0))
+/// ```
+///
+/// All three inputs must share the same input domain (candle / real /
+/// snapshot). A neutral constant (`ta.value(...)`) adopts its partner's
+/// domain, so a bare `if_false=ta.value(0.0)` composes with a candle-rooted
+/// condition without extra ceremony.
+#[pyfunction]
+fn if_else(cond: PyRef<'_, PySignal>, if_true: PyRef<'_, PyIndicator>, if_false: PyRef<'_, PyIndicator>) -> PyResult<PyIndicator> {
+    // Resolve constants against each other first (via `pair`), then match
+    // the pair's domain against the condition's.
+    let branches = pair(if_true.src.clone(), if_false.src.clone())?;
+    let cond_sig = cond.sig.clone();
+    let out = match (cond_sig, branches) {
+        (AnySignal::Candle(c), Pair::Candle(t, f)) => {
+            AnySource::Candle(Source::new(IfElse::new(c, t, f)))
+        }
+        (AnySignal::Real(c), Pair::Real(t, f)) => {
+            AnySource::Real(Source::new(IfElse::new(c, t, f)))
+        }
+        (AnySignal::Snapshot(c), Pair::Snapshot(t, f)) => {
+            AnySource::Snapshot(Source::new(IfElse::new(c, t, f)))
+        }
+        _ => return Err(domain_mismatch()),
+    };
+    Ok(PyIndicator::wrap(out))
+}
+
 /// Read a per-atom overlay column by its `key` in `schema`. Rooted at the
 /// atom stream, so it slots into the same candle-rooted pipelines as
 /// `close()`/`atr()`/etc. When fed a bare `Candle` (no overlays), the reader
@@ -5425,7 +5465,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         open, high, low, close, volume, typical, median, identity, value, value_str, sma, ema, rma,
         wma, hma, rsi, stddev, stochastic, cci, log, atr, mfi, williams_r, obv, vwap, ad,
         true_range, adx, dmi, aroon, sar, macd, bollinger, keltner, donchian, stoch_rsi, resample,
-        latch, unstable, get, get_real, get_bool, get_str, str_eq, str_ne, fetch,
+        latch, unstable, if_else, get, get_real, get_bool, get_str, str_eq, str_ne, fetch,
         // Calendar accessors + weekday/weekend signals; consume `atom.time`.
         year, month, day, hour, minute, second, day_of_week, day_of_year, week_of_year, quarter,
         unix_seconds, unix_millis, is_weekday, is_weekend,

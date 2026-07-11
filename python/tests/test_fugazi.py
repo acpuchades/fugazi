@@ -767,6 +767,47 @@ def test_latch_of_signal_returns_signal():
     assert isinstance(latched, ta.Signal)
 
 
+def test_if_else_selects_by_condition():
+    # Trend-gated: return the close when close > 100, else the constant 0.
+    cond = ta.close().gt(ta.value(100.0))
+    branch = ta.if_else(cond, ta.close(), ta.value(0.0))
+    assert isinstance(branch, ta.Indicator)
+    # Below the gate → 0; above → the close itself.
+    assert branch.update(ta.Candle(99.0, 99.0, 99.0, 99.0, 0.0)) == 0.0
+    assert branch.update(ta.Candle(101.0, 101.0, 101.0, 101.0, 0.0)) == 101.0
+    assert branch.update(ta.Candle(105.0, 105.0, 105.0, 105.0, 0.0)) == 105.0
+
+
+def test_if_else_waits_for_the_selected_branch_to_warm():
+    # The condition (close > 0) is always true, so we pick if_true
+    # (SMA-5, warm-up 5). Ternary reads None for the first four bars while
+    # the SELECTED branch is warming, publishes on bar 5.
+    branch = ta.if_else(
+        ta.close().gt(ta.value(0.0)),
+        ta.sma(ta.close(), 5),
+        ta.value(99.0),
+    )
+    for _ in range(4):
+        assert branch.update(ta.Candle(100.0, 100.0, 100.0, 100.0, 0.0)) is None
+    # Fifth bar: the SMA-5 has warmed; the ternary can publish.
+    assert branch.update(ta.Candle(100.0, 100.0, 100.0, 100.0, 0.0)) == 100.0
+
+
+def test_if_else_publishes_early_when_selected_branch_is_fast():
+    # Same shape but the condition picks the fast branch: close < 0 is
+    # always false, so we pick if_false (a constant). The ternary reads
+    # Some on bar 1 even though the UNSELECTED SMA-5 hasn't warmed —
+    # `warm_up_period()` is still 5 (upper bound for downstream stability
+    # gates), but the actual first Some can arrive earlier.
+    branch = ta.if_else(
+        ta.close().lt(ta.value(0.0)),
+        ta.sma(ta.close(), 5),
+        ta.value(-1.0),
+    )
+    assert branch.warm_up_period() == 5
+    assert branch.update(ta.Candle(100.0, 100.0, 100.0, 100.0, 0.0)) == -1.0
+
+
 def test_unstable_signal_zeroes_unstable_period_but_forwards_output():
     entry = ta.close().crosses_above(ta.ema(ta.close(), 3))
     raw_stable = entry.stable_period()

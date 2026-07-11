@@ -3,6 +3,7 @@
 
 use crate::indicator::Indicator;
 use crate::indicators::compare::{Eq, Ge, Gt, Le, Lt, Ne};
+use crate::indicators::if_else::IfElse;
 use crate::indicators::log::Log;
 use crate::indicators::logic::{And, Change, Not, Or, Xor};
 use crate::indicators::ops::{Add, Diff, Div, Lag, Mul, Ratio, Roc, RollingMax, RollingMin, Sub};
@@ -274,6 +275,27 @@ pub trait BoolIndicatorExt: Indicator<Output = bool> {
         Self: Sized,
     {
         Unstable::new(self)
+    }
+
+    /// Ternary: reads `self` each bar and yields `if_true`'s value on
+    /// [`true`], `if_false`'s on [`false`], `None` when `self` reads `None`.
+    /// All three sources are advanced every bar (a branch that doesn't fire
+    /// this bar still warms up in the background), matching how
+    /// [`Combine`](crate::indicators::Combine) treats its two operands.
+    ///
+    /// Reads left-to-right: `adx.gt(25.0).if_else(roc, Value::new(0.0))`
+    /// is "ADX above 25 → return the ROC value, else 0" — an ADX-gated
+    /// momentum score in one expression.
+    ///
+    /// See [`IfElse`] for the full semantics.
+    fn if_else<T, F>(self, if_true: T, if_false: F) -> IfElse<Self, T, F>
+    where
+        Self: Sized,
+        T: Indicator<Input = Self::Input, Output = Real>,
+        F: Indicator<Input = Self::Input, Output = Real>,
+        Self::Input: Clone,
+    {
+        IfElse::new(self, if_true, if_false)
     }
 }
 
