@@ -465,7 +465,7 @@ checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 
 [[package]]
 name = "fugazi"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -489,7 +489,7 @@ dependencies = [
 
 [[package]]
 name = "fugazi-python"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "fugazi",
  "pyo3",
