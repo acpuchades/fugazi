@@ -13,7 +13,7 @@ use fugazi::prelude::*;
 use fugazi::strategies::SingleAssetStrategy;
 
 use super::signal::SignalSpec;
-use super::source::SourceSpec;
+use super::expr::ExprSpec;
 use crate::dyn_indicator::{self, AsBool, AsReal, DynIndicator};
 
 // ---------------------------------------------------------------------------
@@ -38,11 +38,11 @@ pub struct SideSpec {
     /// adverse extreme of the bar reaches it. A `peak` / `trough` source makes it
     /// a trailing stop.
     #[serde(default)]
-    pub stop_loss: Option<Box<SourceSpec>>,
+    pub stop_loss: Option<Box<ExprSpec>>,
     /// An optional take-profit price level (a source). The side flattens when the
     /// favourable extreme of the bar reaches it.
     #[serde(default)]
-    pub take_profit: Option<Box<SourceSpec>>,
+    pub take_profit: Option<Box<ExprSpec>>,
 }
 
 impl SideSpec {
@@ -84,7 +84,7 @@ pub struct StrategySpec {
     /// reading skips the trade for that bar (safe default — build a well-defined
     /// fallback into the spec if that isn't what you want).
     #[serde(default)]
-    pub sizing: Option<Box<SourceSpec>>,
+    pub sizing: Option<Box<ExprSpec>>,
 }
 
 impl StrategySpec {

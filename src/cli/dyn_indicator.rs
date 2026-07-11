@@ -702,7 +702,7 @@ impl Indicator for AsCandle {
 /// want it (`!close`, `!year`, `!current`, …) already builds itself with
 /// `Pick::<String>::new()` baked in, so no intermediate `AsAtom` is
 /// needed. Kept for completeness so a future `!pick { symbol, freq }`
-/// SourceSpec variant can produce an atom-emitting DynIndicator and drop
+/// ExprSpec variant can produce an atom-emitting DynIndicator and drop
 /// it into a downstream atom-consuming source via the same
 /// `AsX`-typed-view pattern the other three use.
 ///

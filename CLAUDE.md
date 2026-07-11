@@ -147,7 +147,7 @@ The CLI is one binary (`fugazi`) with several subcommands; layout by concern:
 - **`run.rs`, `optimize.rs`, `backtest.rs`** — the two user-facing subcommand drivers (`run`, `optimize`) sit on the pure `backtest` module (`run_iteration`, `evaluate`, `evaluate_windowed`). `backtest.rs` deliberately owns no IO; `run.rs` / `optimize.rs` do the CSV writing, console output, and file paths.
 - **`get.rs`** — the `fugazi get` subcommand (fetch OHLCV from remote providers). Its private helpers include `write_candles_csv` (formerly `write_csv`) and `parse_spec` for `provider:symbol[freq]` grammar.
 - **`spec/`** (directory) — YAML-deserializable mirror of the fugazi composition API, one file per layer:
-  - `spec/source.rs` — `SourceSpec` (real-valued source enum + `default_source`/`default_high`/`default_low`/`default_bar_source` helpers, all `pub(super)`).
+  - `spec/expr.rs` — `ExprSpec` (the value-producing expression enum — nominally `Real`, polymorphic over `DynType` for `!current`/`!pick`/`!time`/`!get`; renamed from the earlier `SourceSpec` because "source" only reads naturally *inside* an indicator's composition tree, not at the top level of a spec type). Includes the `default_source`/`default_high`/`default_low`/`default_bar_source` helpers (all `pub(super)`) — those keep the "source" naming since they name what plugs into an indicator's source slot.
   - `spec/signal.rs` — `SignalSpec` (boolean condition enum + `eps` tolerance helper).
   - `spec/strategy.rs` — `SideSpec`, `StrategySpec`, `DynSingleStrategy` (the built strategy wrapper).
   - `spec/mod.rs` — module doc, `pub use` re-exports, and the tests for all three layers.

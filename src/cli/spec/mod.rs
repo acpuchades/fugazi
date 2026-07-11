@@ -8,8 +8,10 @@
 //!
 //! Three layers, mirroring the crate; one per submodule:
 //!
-//! * [`SourceSpec`] (see [`source`]) → [`crate::dyn_indicator::DynValue`] — a
-//!   real-valued source (`Output = Real`).
+//! * [`ExprSpec`] (see [`expr`]) → [`crate::dyn_indicator::DynValue`] — a
+//!   value-producing expression (nominally `Output = Real`, but polymorphic
+//!   over the runtime [`DynType`](crate::dyn_indicator::DynType) — some
+//!   variants yield `Atom` / `Candle` / `Str` / `Time`).
 //! * [`SignalSpec`] (see [`signal`]) → boolean condition (a `Signal`).
 //! * [`StrategySpec`] (see [`strategy`]) → [`fugazi::strategies::SingleAssetStrategy`] —
 //!   the decision layer.
@@ -18,16 +20,16 @@
 //! a single-key map — `{ema: {source: close, period: 20}}` — and a parameterless
 //! leaf or bar indicator reads as a bare string — `close`, `obv`.
 
+mod expr;
 mod pairs;
 mod signal;
-mod source;
 mod strategy;
 
+pub use expr::ExprSpec;
 #[allow(unused_imports)]
 pub use pairs::PairsStrategySpec;
 #[allow(unused_imports)]
 pub use signal::SignalSpec;
-pub use source::SourceSpec;
 pub use strategy::StrategySpec;
 #[allow(unused_imports)]
 pub(crate) use pairs::DynPairsStrategy;
@@ -102,7 +104,7 @@ mod tests {
 
     #[test]
     fn default_source_is_close() {
-        let spec: SourceSpec = serde_norway::from_str("!ema { period: 3 }").unwrap();
+        let spec: ExprSpec = serde_norway::from_str("!ema { period: 3 }").unwrap();
         let mut ema = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
         let mut reference = Ema::new(Current::close(), 3);
         for p in [1.0, 2.0, 3.0, 4.0, 5.0] {
@@ -113,7 +115,7 @@ mod tests {
     #[test]
     fn log_defaults_to_natural_and_accepts_explicit_base() {
         // Default base: natural log (`e`).
-        let bare: SourceSpec = serde_norway::from_str("!log").unwrap();
+        let bare: ExprSpec = serde_norway::from_str("!log").unwrap();
         let mut ln = bare.build(&Position::new(), &Book::new(1.0), &Schema::empty());
         for p in [1.0, std::f64::consts::E, 10.0, 100.0] {
             let got = feed_real(&mut ln, bar(p)).unwrap();
@@ -121,7 +123,7 @@ mod tests {
         }
 
         // Explicit base: 10.
-        let spec: SourceSpec = serde_norway::from_str("!log { base: 10.0 }").unwrap();
+        let spec: ExprSpec = serde_norway::from_str("!log { base: 10.0 }").unwrap();
         let mut log10 = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
         for p in [1.0, 10.0, 1000.0] {
             let got = feed_real(&mut log10, bar(p)).unwrap();
@@ -195,7 +197,7 @@ mod tests {
     #[test]
     fn unstable_source_zeroes_unstable_period_but_forwards_output() {
         let yaml = r#"!unstable { source: !ema { period: 5 } }"#;
-        let spec: SourceSpec = serde_norway::from_str(yaml).unwrap();
+        let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
         let wrapped = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
         let inner_raw = Ema::new(Current::close(), 5);
         assert_eq!(wrapped.warm_up_period(), inner_raw.warm_up_period());
@@ -311,7 +313,7 @@ mod tests {
     fn resample_tag_projects_the_field() {
         // `!resample { every: N, inner: close }` emits the resampled close on
         // the Nth base tick, None between.
-        let spec: SourceSpec =
+        let spec: ExprSpec =
             serde_norway::from_str("!resample { every: 4, inner: close }").unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
         for i in 1..=8 {
@@ -328,7 +330,7 @@ mod tests {
     fn latch_tag_holds_the_last_value() {
         // `!latch { source: !resample { every: 3, inner: close } }` — Some on
         // the Nth bar, held on the two between.
-        let spec: SourceSpec = serde_norway::from_str(
+        let spec: ExprSpec = serde_norway::from_str(
             "!latch { source: !resample { every: 3, inner: close } }",
         )
         .unwrap();
@@ -346,7 +348,7 @@ mod tests {
         // Every bar-indicator variant carries a defaulted `source` field
         // pointing to `!current`, so a bare `!obv` / `!vwap` / … tag with no
         // map still deserializes and drives the base bar stream.
-        let obv: SourceSpec = serde_norway::from_str("!obv").unwrap();
+        let obv: ExprSpec = serde_norway::from_str("!obv").unwrap();
         let mut built = obv.build(&Position::new(), &Book::new(1.0), &Schema::empty());
         // OBV seeds at first bar's volume.
         assert_eq!(
@@ -355,7 +357,7 @@ mod tests {
         );
 
         // And still parses with an explicit source override.
-        let obv_htf: SourceSpec =
+        let obv_htf: ExprSpec =
             serde_norway::from_str("!obv { source: !resample { every: 2, inner: current } }")
                 .unwrap();
         let _ = obv_htf.build(&Position::new(), &Book::new(1.0), &Schema::empty());
@@ -364,7 +366,7 @@ mod tests {
     #[test]
     fn atr_tag_parses_with_default_current_source() {
         // `!atr { period: 3 }` without a source keeps its historical form.
-        let spec: SourceSpec = serde_norway::from_str("!atr { period: 3 }").unwrap();
+        let spec: ExprSpec = serde_norway::from_str("!atr { period: 3 }").unwrap();
         let _ = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
     }
 
@@ -373,7 +375,7 @@ mod tests {
         // Keltner's price source defaults to `close`, its candle source to
         // `current` — so a bare `!keltner_upper { ema_period, atr_period,
         // multiplier }` still parses.
-        let spec: SourceSpec = serde_norway::from_str(
+        let spec: ExprSpec = serde_norway::from_str(
             "!keltner_upper { ema_period: 3, atr_period: 3, multiplier: 2.0 }",
         )
         .unwrap();
@@ -387,7 +389,7 @@ mod tests {
         b.add_real("vol_20");
         let schema = b.finish();
 
-        let spec: SourceSpec = serde_norway::from_str("!get { key: vol_20 }").unwrap();
+        let spec: ExprSpec = serde_norway::from_str("!get { key: vol_20 }").unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), &schema);
         assert_eq!(built.output_type(), crate::dyn_indicator::DynType::Real);
 
@@ -452,14 +454,14 @@ mod tests {
         let mut b = Schema::builder();
         b.add_real("vol_20");
         let schema = b.finish();
-        let spec: SourceSpec = serde_norway::from_str("!get { key: missing }").unwrap();
+        let spec: ExprSpec = serde_norway::from_str("!get { key: missing }").unwrap();
         let _ = spec.build(&Position::new(), &Book::new(1.0), &schema);
     }
 
     #[test]
     #[should_panic(expected = "no overlay side channel is bound")]
     fn get_panics_on_empty_schema_with_hint() {
-        let spec: SourceSpec = serde_norway::from_str("!get { key: anything }").unwrap();
+        let spec: ExprSpec = serde_norway::from_str("!get { key: anything }").unwrap();
         let _ = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
     }
 
@@ -506,7 +508,7 @@ mod tests {
             ("unix_seconds", 1_710_506_096.0),
             ("unix_millis", 1_710_506_096_000.0),
         ] {
-            let spec: SourceSpec = serde_norway::from_str(yaml).unwrap();
+            let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
             let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
             assert_eq!(built.output_type(), DynType::Real, "{yaml}: output type");
             assert_eq!(
@@ -517,7 +519,7 @@ mod tests {
         }
 
         // `!time` is the raw Timestamp payload, not a scalar.
-        let spec: SourceSpec = serde_norway::from_str("time").unwrap();
+        let spec: ExprSpec = serde_norway::from_str("time").unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
         assert_eq!(built.output_type(), DynType::Time);
         assert_eq!(
@@ -557,7 +559,7 @@ mod tests {
     fn calendar_source_none_on_untimed_atom() {
         // A calendar accessor over a bare Atom (time=None) yields None — same
         // shape as a not-yet-warm indicator.
-        let spec: SourceSpec = serde_norway::from_str("year").unwrap();
+        let spec: ExprSpec = serde_norway::from_str("year").unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
         assert_eq!(built.update(Payload::Snapshot(Snapshot::of_atom(bar(1.0).into()))), None);
     }
@@ -567,7 +569,7 @@ mod tests {
         // The composition-order regression at the YAML surface: an EMA-3
         // running inside !resample, wrapped in !latch, agrees numerically
         // with Ema(Resample.close, 3) at every boundary.
-        let spec: SourceSpec = serde_norway::from_str(
+        let spec: ExprSpec = serde_norway::from_str(
             "!latch { source: !resample { every: 4, inner: !ema { period: 3, source: close } } }",
         )
         .unwrap();

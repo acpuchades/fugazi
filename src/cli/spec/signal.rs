@@ -14,7 +14,7 @@ use fugazi::indicators::{
 };
 use fugazi::prelude::*;
 
-use super::source::{SourceSpec, default_source};
+use super::expr::{ExprSpec, default_source};
 use crate::dyn_indicator::{self, AsBool, AsReal, AsStr, DynIndicator};
 
 /// Every atom-input leaf on the YAML side is built rooted through an
@@ -35,56 +35,56 @@ fn pick_root() -> Pick<String> {
 pub enum SignalSpec {
     // --- comparisons ---
     Gt {
-        lhs: Box<SourceSpec>,
-        rhs: Box<SourceSpec>,
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
         epsilon: Option<Real>,
     },
     Lt {
-        lhs: Box<SourceSpec>,
-        rhs: Box<SourceSpec>,
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
         epsilon: Option<Real>,
     },
     Ge {
-        lhs: Box<SourceSpec>,
-        rhs: Box<SourceSpec>,
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
         epsilon: Option<Real>,
     },
     Le {
-        lhs: Box<SourceSpec>,
-        rhs: Box<SourceSpec>,
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
         epsilon: Option<Real>,
     },
     Eq {
-        lhs: Box<SourceSpec>,
-        rhs: Box<SourceSpec>,
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
         epsilon: Option<Real>,
     },
     Ne {
-        lhs: Box<SourceSpec>,
-        rhs: Box<SourceSpec>,
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
         epsilon: Option<Real>,
     },
     /// `source > level` against a constant.
     Above {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         level: Real,
     },
     /// `source < level` against a constant.
     Below {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         level: Real,
     },
 
     // --- crossovers ---
     CrossesAbove {
-        lhs: Box<SourceSpec>,
-        rhs: Box<SourceSpec>,
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
     },
     CrossesBelow {
-        lhs: Box<SourceSpec>,
-        rhs: Box<SourceSpec>,
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
     },
 
     // --- boolean logic ---
@@ -122,13 +122,13 @@ pub enum SignalSpec {
     /// is a `Str` column, or a nested string-producing expression); `rhs` is
     /// the string literal to match against.
     StrEq {
-        lhs: Box<SourceSpec>,
+        lhs: Box<ExprSpec>,
         rhs: String,
     },
     /// `lhs != rhs` on a `Str`-typed source and a string literal. The
     /// complement of [`SignalSpec::StrEq`].
     StrNe {
-        lhs: Box<SourceSpec>,
+        lhs: Box<ExprSpec>,
         rhs: String,
     },
     /// Passthrough wrapper that reports `unstable_period() = 0`. The output
@@ -138,7 +138,7 @@ pub enum SignalSpec {
     /// every source to be past its unstable tail" safe default; see
     /// [`fugazi::indicators::Unstable`].
     Unstable { signal: Box<SignalSpec> },
-    /// A constant boolean leaf. Spelled `!value` like [`SourceSpec::Value`] —
+    /// A constant boolean leaf. Spelled `!value` like [`ExprSpec::Value`] —
     /// one tag for "a literal", typed by position (bool here, number there).
     Value(bool),
 
@@ -171,7 +171,7 @@ impl SignalSpec {
         schema: &Arc<Schema>,
     ) -> Box<dyn DynIndicator> {
         use SignalSpec::*;
-        let real = |s: &SourceSpec| AsReal::new(s.build(anchor, book, schema));
+        let real = |s: &ExprSpec| AsReal::new(s.build(anchor, book, schema));
         let boolean = |s: &SignalSpec| AsBool::new(s.build(anchor, book, schema));
 
         match self {

@@ -15,7 +15,7 @@ use fugazi::prelude::*;
 use fugazi::strategies::PairsStrategy;
 
 use super::signal::SignalSpec;
-use super::source::SourceSpec;
+use super::expr::ExprSpec;
 use crate::dyn_indicator::{AsBool, AsReal, DynIndicator};
 
 /// A whole `pairs.yml`: the two traded symbols plus one enter/exit signal pair
@@ -56,17 +56,17 @@ pub struct PairsStrategySpec {
     /// Optional spread stop-loss level — the pair flattens when the running
     /// spread reads at or below this level.
     #[serde(default)]
-    pub stop_loss: Option<Box<SourceSpec>>,
+    pub stop_loss: Option<Box<ExprSpec>>,
     /// Optional spread take-profit level — the pair flattens when the running
     /// spread reads at or above this level.
     #[serde(default)]
-    pub take_profit: Option<Box<SourceSpec>>,
+    pub take_profit: Option<Box<ExprSpec>>,
     /// Optional **position-sizing multiplier** — a real-valued source scaling
     /// the pair's gross exposure. Each leg entries at `value_frac(0.5 * m)`.
     /// Defaults to a constant `1.0` (1.0 gross, dollar-neutral); a `None`
     /// reading skips the trade for that bar.
     #[serde(default)]
-    pub sizing: Option<Box<SourceSpec>>,
+    pub sizing: Option<Box<ExprSpec>>,
 }
 
 impl PairsStrategySpec {

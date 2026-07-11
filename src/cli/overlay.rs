@@ -18,7 +18,7 @@
 //!
 //! With a scope, the overlay only runs for matching `(symbol, interval)` fetches;
 //! rows produced by other groups render blanks in that column. Each source
-//! expression is the same [`SourceSpec`] YAML surface the strategy parser
+//! expression is the same [`ExprSpec`] YAML surface the strategy parser
 //! accepts (`close`, `!sma { period: N }`, `!add { lhs, rhs }`, …) — no separate
 //! grammar.
 //!
@@ -40,7 +40,7 @@ use fugazi::sources::Interval;
 use crate::dyn_indicator::DynIndicator;
 use crate::calendar::{parse_interval, parse_scope_parts};
 use crate::input::{self, Source};
-use crate::spec::SourceSpec;
+use crate::spec::ExprSpec;
 
 /// Which `(symbol, interval)` fetches an overlay applies to. `None` on either
 /// side means "any" — no scope filter at all is `OverlayScope::default()`.
@@ -62,7 +62,7 @@ impl OverlayScope {
 #[derive(Debug, Clone)]
 pub struct Overlay {
     pub name: String,
-    pub spec: SourceSpec,
+    pub spec: ExprSpec,
     pub scope: OverlayScope,
 }
 
@@ -288,7 +288,7 @@ fn parse_file(text: &str, scope: OverlayScope) -> Result<Vec<Overlay>> {
         if name.is_empty() {
             bail!("overlay file has an empty column name");
         }
-        let spec: SourceSpec = serde_json::from_value(expr_value)
+        let spec: ExprSpec = serde_json::from_value(expr_value)
             .with_context(|| format!("overlay {name:?}"))?;
         out.push(Overlay {
             name,
@@ -302,8 +302,8 @@ fn parse_file(text: &str, scope: OverlayScope) -> Result<Vec<Overlay>> {
     Ok(out)
 }
 
-/// Parse a bare source expression (the RHS of `col=expr`) into a [`SourceSpec`].
-fn parse_expr(text: &str) -> Result<SourceSpec> {
+/// Parse a bare source expression (the RHS of `col=expr`) into a [`ExprSpec`].
+fn parse_expr(text: &str) -> Result<ExprSpec> {
     let expr = text.trim();
     if expr.is_empty() {
         bail!("empty source expression");
@@ -375,7 +375,7 @@ mod tests {
         let src = Source::Inline("c=close".to_string());
         let overlays = parse_specs(std::slice::from_ref(&src)).unwrap();
         assert_eq!(overlays.len(), 1);
-        assert!(matches!(overlays[0].spec, SourceSpec::Close { .. }));
+        assert!(matches!(overlays[0].spec, ExprSpec::Close { .. }));
     }
 
     #[test]
@@ -481,9 +481,9 @@ mod tests {
         let overlays = parse_specs(&[a, b]).unwrap();
         let cols = column_names(&overlays);
         let btc = active_for(&overlays, &cols, "BTC", Interval::Day(1));
-        assert!(matches!(btc[0].map(|o| &o.spec), Some(SourceSpec::Ema { .. })));
+        assert!(matches!(btc[0].map(|o| &o.spec), Some(ExprSpec::Ema { .. })));
         let eth = active_for(&overlays, &cols, "ETH", Interval::Day(1));
-        assert!(matches!(eth[0].map(|o| &o.spec), Some(SourceSpec::Sma { .. })));
+        assert!(matches!(eth[0].map(|o| &o.spec), Some(ExprSpec::Sma { .. })));
     }
 
     #[test]
@@ -514,8 +514,8 @@ mod tests {
         let overlays = vec![
             Overlay {
                 name: "a".to_string(),
-                spec: SourceSpec::Sma {
-                    source: Box::new(SourceSpec::Close { source: None }),
+                spec: ExprSpec::Sma {
+                    source: Box::new(ExprSpec::Close { source: None }),
                     period: 200,
                 },
                 scope: OverlayScope {
@@ -525,8 +525,8 @@ mod tests {
             },
             Overlay {
                 name: "b".to_string(),
-                spec: SourceSpec::Sma {
-                    source: Box::new(SourceSpec::Close { source: None }),
+                spec: ExprSpec::Sma {
+                    source: Box::new(ExprSpec::Close { source: None }),
                     period: 20,
                 },
                 scope: OverlayScope::default(),

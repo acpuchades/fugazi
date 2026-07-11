@@ -1,18 +1,26 @@
-//! YAML-deserializable [`SourceSpec`] — the real-valued source layer.
+//! YAML-deserializable [`ExprSpec`] — the value-producing expression layer.
 //!
-//! Split out of `spec/mod.rs`; kept in `crate::spec::source` so paths like
-//! `crate::spec::SourceSpec` still resolve via the `pub use` in `mod.rs`.
+//! Every YAML tag that produces a value (numeric or otherwise —
+//! `!close`/`!ema`/`!current`/`!pick`/`!time`/`!get` etc.) is a variant of
+//! this enum. The twin [`SignalSpec`](super::signal::SignalSpec) covers the
+//! bool-valued predicates. Together they form the CLI's composable
+//! expression surface: a `SideSpec::stop_loss` is an `ExprSpec` (an
+//! expression producing a Real level); a `SideSpec::enter` is a
+//! `SignalSpec` (an expression producing a Bool signal).
+//!
+//! Split out of `spec/mod.rs`; the module lives at `crate::spec::expr` and
+//! the type is re-exported at `crate::spec::ExprSpec` via `mod.rs`.
 
 use std::sync::Arc;
 
 use serde::Deserialize;
 
 // Field / calendar / current-bar / current-time leaves are referenced through
-// their full `fugazi::indicators::` paths inside the `SourceSpec::build`
+// their full `fugazi::indicators::` paths inside the `ExprSpec::build`
 // match arms — the source-spec variants share those names (Close, High, Year,
 // …) as enum-variant identifiers, so a bare `Close::of(...)` would try to
 // resolve on the enum variant. The `Pick` root is the one exception because
-// it isn't a `SourceSpec` variant.
+// it isn't a `ExprSpec` variant.
 use fugazi::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Book, Cci, Component, Dmi,
     DmiValue, Donchian, DonchianValue, Ema, GetBool, GetReal, GetStr, Hma, Keltner, KeltnerValue,
@@ -36,18 +44,18 @@ fn pick_root() -> Pick<String> {
     Pick::<String>::new()
 }
 
-pub(super) fn default_source() -> Box<SourceSpec> {
-    Box::new(SourceSpec::Close { source: None })
+pub(super) fn default_source() -> Box<ExprSpec> {
+    Box::new(ExprSpec::Close { source: None })
 }
-pub(super) fn default_high() -> Box<SourceSpec> {
-    Box::new(SourceSpec::High { source: None })
+pub(super) fn default_high() -> Box<ExprSpec> {
+    Box::new(ExprSpec::High { source: None })
 }
-pub(super) fn default_low() -> Box<SourceSpec> {
-    Box::new(SourceSpec::Low { source: None })
+pub(super) fn default_low() -> Box<ExprSpec> {
+    Box::new(ExprSpec::Low { source: None })
 }
 /// Default candle source for bar indicators — the current bar itself.
-pub(super) fn default_bar_source() -> Box<SourceSpec> {
-    Box::new(SourceSpec::Current { source: None })
+pub(super) fn default_bar_source() -> Box<ExprSpec> {
+    Box::new(ExprSpec::Current { source: None })
 }
 
 /// Default base for `!log`: natural log (`e`).
@@ -63,7 +71,7 @@ pub(super) fn default_log_base() -> Real {
 /// `Indicator<Input = Candle, Output = Real>`.
 ///
 /// Every atom-input leaf (`!close`, `!high`, …, all calendar accessors, and
-/// `!get`) carries a **defaulted optional `source: Option<Box<SourceSpec>>`**
+/// `!get`) carries a **defaulted optional `source: Option<Box<ExprSpec>>`**
 /// field. When omitted, the leaf reads its atom from the implicit
 /// empty-selector [`Pick::<String>::new()`] — the single-entry snapshot
 /// unpack that keeps single-series strategies working. When provided
@@ -85,48 +93,48 @@ pub(super) fn default_log_base() -> Real {
 /// The bare-word / bare-tag forms use the implicit `Pick` root; the tagged
 /// map form threads the given atom source through the leaf. The custom
 /// [`TryFrom<serde_norway::Value>`] impl below normalises the string and
-/// tagged shapes into the map shape [`SourceSpecRaw`] expects, and
-/// [`SourceSpecRaw`] carries the derived externally-tagged deserialization
+/// tagged shapes into the map shape [`ExprSpecRaw`] expects, and
+/// [`ExprSpecRaw`] carries the derived externally-tagged deserialization
 /// logic.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(try_from = "serde_norway::Value")]
-pub enum SourceSpec {
+pub enum ExprSpec {
     // --- atom-input leaves (candle fields) ---
     Close {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     High {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     Low {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     Open {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     Volume {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     Typical {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     Median {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// The current bar itself — the whole [`Candle`], not a scalar. The default
     /// bar source of every bar-consuming indicator (`!atr`, `!obv`, `!adx`, …);
-    /// wrap in [`SourceSpec::Resample`] to lift a downstream bar indicator
+    /// wrap in [`ExprSpec::Resample`] to lift a downstream bar indicator
     /// onto a higher timeframe.
     Current {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
 
     /// Cross-asset projection: project one asset's [`Atom`] out of the
@@ -173,59 +181,59 @@ pub enum SourceSpec {
     Get {
         key: String,
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
 
     // --- price-series indicators (a source + parameters) ---
     Ema {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     Sma {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     Rma {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     Wma {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     Hma {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     Rsi {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     #[serde(rename = "stddev")]
     StdDev {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     Cci {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     Stochastic {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     StochRsi {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         rsi_period: usize,
         stoch_period: usize,
     },
@@ -233,167 +241,167 @@ pub enum SourceSpec {
     // --- multi-output indicators, one variant per component ---
     MacdLine {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         fast: usize,
         slow: usize,
         signal: usize,
     },
     MacdSignal {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         fast: usize,
         slow: usize,
         signal: usize,
     },
     MacdHistogram {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         fast: usize,
         slow: usize,
         signal: usize,
     },
     BbUpper {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
         k: Real,
     },
     BbMiddle {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
         k: Real,
     },
     BbLower {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
         k: Real,
     },
     KeltnerUpper {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         #[serde(default = "default_bar_source")]
-        candle_source: Box<SourceSpec>,
+        candle_source: Box<ExprSpec>,
         ema_period: usize,
         atr_period: usize,
         multiplier: Real,
     },
     KeltnerMiddle {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         #[serde(default = "default_bar_source")]
-        candle_source: Box<SourceSpec>,
+        candle_source: Box<ExprSpec>,
         ema_period: usize,
         atr_period: usize,
         multiplier: Real,
     },
     KeltnerLower {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         #[serde(default = "default_bar_source")]
-        candle_source: Box<SourceSpec>,
+        candle_source: Box<ExprSpec>,
         ema_period: usize,
         atr_period: usize,
         multiplier: Real,
     },
     DonchianUpper {
         #[serde(default = "default_high")]
-        high: Box<SourceSpec>,
+        high: Box<ExprSpec>,
         #[serde(default = "default_low")]
-        low: Box<SourceSpec>,
+        low: Box<ExprSpec>,
         period: usize,
     },
     DonchianMiddle {
         #[serde(default = "default_high")]
-        high: Box<SourceSpec>,
+        high: Box<ExprSpec>,
         #[serde(default = "default_low")]
-        low: Box<SourceSpec>,
+        low: Box<ExprSpec>,
         period: usize,
     },
     DonchianLower {
         #[serde(default = "default_high")]
-        high: Box<SourceSpec>,
+        high: Box<ExprSpec>,
         #[serde(default = "default_low")]
-        low: Box<SourceSpec>,
+        low: Box<ExprSpec>,
         period: usize,
     },
     Adx {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     PlusDi {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     MinusDi {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     DmiPlusDi {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     DmiMinusDi {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     AroonUp {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     AroonDown {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     AroonOscillator {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
 
     // --- single-output bar indicators ---
     Atr {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     Mfi {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     WilliamsR {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     Obv {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
     },
     Vwap {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
     },
     Ad {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
     },
     TrueRange {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
     },
     Sar {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         step: Real,
         max: Real,
     },
@@ -445,56 +453,56 @@ pub enum SourceSpec {
 
     // --- transform operators ---
     Add {
-        lhs: Box<SourceSpec>,
-        rhs: Box<SourceSpec>,
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
     },
     Sub {
-        lhs: Box<SourceSpec>,
-        rhs: Box<SourceSpec>,
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
     },
     Mul {
-        lhs: Box<SourceSpec>,
-        rhs: Box<SourceSpec>,
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
     },
     Div {
-        lhs: Box<SourceSpec>,
-        rhs: Box<SourceSpec>,
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
     },
     Lag {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         periods: usize,
     },
     Diff {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         periods: usize,
     },
     Ratio {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         periods: usize,
     },
     Roc {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         periods: usize,
     },
     RollingMax {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     RollingMin {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     /// Logarithm of `source` in `base` (defaults to natural log, `e`).
     /// Emits `None` on samples where the source's output is non-positive.
     Log {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         #[serde(default = "default_log_base")]
         base: Real,
     },
@@ -503,7 +511,7 @@ pub enum SourceSpec {
     /// smoother of a resampled pipeline so per-base-tick consumers see the
     /// finished higher-timeframe value between boundaries — see
     /// [`fugazi::indicators::Latch`].
-    Latch { source: Box<SourceSpec> },
+    Latch { source: Box<ExprSpec> },
     /// Aggregates `every` base candles into one higher-timeframe candle and
     /// runs the `inner` source over it, emitting `inner`'s output on each
     /// completed bucket and `None` in between. `inner` is any source that
@@ -514,13 +522,13 @@ pub enum SourceSpec {
     /// base-timeframe**: it's fed one base candle per tick and reports at
     /// that same cadence; the emitted `Option<Real>` marks whether the inner
     /// produced a value on a completed bucket. Wrap the whole downstream
-    /// chain in [`Latch`](SourceSpec::Latch) so per-base-tick reads see the
+    /// chain in [`Latch`](ExprSpec::Latch) so per-base-tick reads see the
     /// finished value between boundaries.
     Resample {
         every: usize,
-        inner: Box<SourceSpec>,
+        inner: Box<ExprSpec>,
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
     },
     /// Passthrough wrapper that reports `unstable_period() = 0`. The output
     /// and warm-up of `source` are unchanged; the strategy-readiness gate
@@ -528,7 +536,7 @@ pub enum SourceSpec {
     /// subtree's IIR settling tail. The explicit opt-out to the "wait for
     /// every source to be past its unstable tail" safe default; see
     /// [`fugazi::indicators::Unstable`].
-    Unstable { source: Box<SourceSpec> },
+    Unstable { source: Box<ExprSpec> },
 
     // --- calendar accessors (read `atom.time`, emit Real; None when time is
     // absent). Each takes an optional `source` for cross-asset use — the
@@ -537,116 +545,116 @@ pub enum SourceSpec {
     /// The Gregorian year (e.g. `2024.0`).
     Year {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// The Gregorian month, `1.0` (Jan) through `12.0` (Dec).
     Month {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// The day of the month, `1.0` through `31.0`.
     Day {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// The hour of the day (UTC), `0.0` through `23.0`.
     Hour {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// The minute of the hour, `0.0` through `59.0`.
     Minute {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// The second of the minute, `0.0` through `59.0`.
     Second {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// ISO 8601 weekday, `1.0` (Monday) through `7.0` (Sunday).
     DayOfWeek {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// Day of the year, `1.0` through `366.0`.
     DayOfYear {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// ISO 8601 week of the year, `1.0` through `53.0`.
     WeekOfYear {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// Calendar quarter, `1.0` through `4.0`.
     Quarter {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// Unix seconds since the epoch (as a Real).
     UnixSeconds {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// Unix milliseconds since the epoch (as a Real).
     UnixMillis {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// The raw bar-open [`Timestamp`] payload (yields
     /// `DynType::Time`, not a scalar). The `Timestamp` twin of
-    /// [`SourceSpec::Current`].
+    /// [`ExprSpec::Current`].
     Time {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
 }
 
-// Mirror enum: identical shape as SourceSpec but with derived Deserialize —
+// Mirror enum: identical shape as ExprSpec but with derived Deserialize —
 // used inside TryFrom<serde_norway::Value> to run the standard externally-
 // tagged deserialization once bare-string / tagged shapes are normalised.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]
-enum SourceSpecRaw {
+enum ExprSpecRaw {
 
     // --- atom-input leaves (candle fields) ---
     Close {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     High {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     Low {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     Open {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     Volume {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     Typical {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     Median {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// The current bar itself — the whole [`Candle`], not a scalar. The default
     /// bar source of every bar-consuming indicator (`!atr`, `!obv`, `!adx`, …);
-    /// wrap in [`SourceSpec::Resample`] to lift a downstream bar indicator
+    /// wrap in [`ExprSpec::Resample`] to lift a downstream bar indicator
     /// onto a higher timeframe.
     Current {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
 
     /// Cross-asset projection: project one asset's [`Atom`] out of the
@@ -693,59 +701,59 @@ enum SourceSpecRaw {
     Get {
         key: String,
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
 
     // --- price-series indicators (a source + parameters) ---
     Ema {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     Sma {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     Rma {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     Wma {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     Hma {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     Rsi {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     #[serde(rename = "stddev")]
     StdDev {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     Cci {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     Stochastic {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     StochRsi {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         rsi_period: usize,
         stoch_period: usize,
     },
@@ -753,167 +761,167 @@ enum SourceSpecRaw {
     // --- multi-output indicators, one variant per component ---
     MacdLine {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         fast: usize,
         slow: usize,
         signal: usize,
     },
     MacdSignal {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         fast: usize,
         slow: usize,
         signal: usize,
     },
     MacdHistogram {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         fast: usize,
         slow: usize,
         signal: usize,
     },
     BbUpper {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
         k: Real,
     },
     BbMiddle {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
         k: Real,
     },
     BbLower {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
         k: Real,
     },
     KeltnerUpper {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         #[serde(default = "default_bar_source")]
-        candle_source: Box<SourceSpec>,
+        candle_source: Box<ExprSpec>,
         ema_period: usize,
         atr_period: usize,
         multiplier: Real,
     },
     KeltnerMiddle {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         #[serde(default = "default_bar_source")]
-        candle_source: Box<SourceSpec>,
+        candle_source: Box<ExprSpec>,
         ema_period: usize,
         atr_period: usize,
         multiplier: Real,
     },
     KeltnerLower {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         #[serde(default = "default_bar_source")]
-        candle_source: Box<SourceSpec>,
+        candle_source: Box<ExprSpec>,
         ema_period: usize,
         atr_period: usize,
         multiplier: Real,
     },
     DonchianUpper {
         #[serde(default = "default_high")]
-        high: Box<SourceSpec>,
+        high: Box<ExprSpec>,
         #[serde(default = "default_low")]
-        low: Box<SourceSpec>,
+        low: Box<ExprSpec>,
         period: usize,
     },
     DonchianMiddle {
         #[serde(default = "default_high")]
-        high: Box<SourceSpec>,
+        high: Box<ExprSpec>,
         #[serde(default = "default_low")]
-        low: Box<SourceSpec>,
+        low: Box<ExprSpec>,
         period: usize,
     },
     DonchianLower {
         #[serde(default = "default_high")]
-        high: Box<SourceSpec>,
+        high: Box<ExprSpec>,
         #[serde(default = "default_low")]
-        low: Box<SourceSpec>,
+        low: Box<ExprSpec>,
         period: usize,
     },
     Adx {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     PlusDi {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     MinusDi {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     DmiPlusDi {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     DmiMinusDi {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     AroonUp {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     AroonDown {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     AroonOscillator {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
 
     // --- single-output bar indicators ---
     Atr {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     Mfi {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     WilliamsR {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     Obv {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
     },
     Vwap {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
     },
     Ad {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
     },
     TrueRange {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
     },
     Sar {
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         step: Real,
         max: Real,
     },
@@ -965,56 +973,56 @@ enum SourceSpecRaw {
 
     // --- transform operators ---
     Add {
-        lhs: Box<SourceSpec>,
-        rhs: Box<SourceSpec>,
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
     },
     Sub {
-        lhs: Box<SourceSpec>,
-        rhs: Box<SourceSpec>,
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
     },
     Mul {
-        lhs: Box<SourceSpec>,
-        rhs: Box<SourceSpec>,
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
     },
     Div {
-        lhs: Box<SourceSpec>,
-        rhs: Box<SourceSpec>,
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
     },
     Lag {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         periods: usize,
     },
     Diff {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         periods: usize,
     },
     Ratio {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         periods: usize,
     },
     Roc {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         periods: usize,
     },
     RollingMax {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     RollingMin {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         period: usize,
     },
     /// Logarithm of `source` in `base` (defaults to natural log, `e`).
     /// Emits `None` on samples where the source's output is non-positive.
     Log {
         #[serde(default = "default_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
         #[serde(default = "default_log_base")]
         base: Real,
     },
@@ -1023,7 +1031,7 @@ enum SourceSpecRaw {
     /// smoother of a resampled pipeline so per-base-tick consumers see the
     /// finished higher-timeframe value between boundaries — see
     /// [`fugazi::indicators::Latch`].
-    Latch { source: Box<SourceSpec> },
+    Latch { source: Box<ExprSpec> },
     /// Aggregates `every` base candles into one higher-timeframe candle and
     /// runs the `inner` source over it, emitting `inner`'s output on each
     /// completed bucket and `None` in between. `inner` is any source that
@@ -1034,13 +1042,13 @@ enum SourceSpecRaw {
     /// base-timeframe**: it's fed one base candle per tick and reports at
     /// that same cadence; the emitted `Option<Real>` marks whether the inner
     /// produced a value on a completed bucket. Wrap the whole downstream
-    /// chain in [`Latch`](SourceSpec::Latch) so per-base-tick reads see the
+    /// chain in [`Latch`](ExprSpec::Latch) so per-base-tick reads see the
     /// finished value between boundaries.
     Resample {
         every: usize,
-        inner: Box<SourceSpec>,
+        inner: Box<ExprSpec>,
         #[serde(default = "default_bar_source")]
-        source: Box<SourceSpec>,
+        source: Box<ExprSpec>,
     },
     /// Passthrough wrapper that reports `unstable_period() = 0`. The output
     /// and warm-up of `source` are unchanged; the strategy-readiness gate
@@ -1048,7 +1056,7 @@ enum SourceSpecRaw {
     /// subtree's IIR settling tail. The explicit opt-out to the "wait for
     /// every source to be past its unstable tail" safe default; see
     /// [`fugazi::indicators::Unstable`].
-    Unstable { source: Box<SourceSpec> },
+    Unstable { source: Box<ExprSpec> },
 
     // --- calendar accessors (read `atom.time`, emit Real; None when time is
     // absent). Each takes an optional `source` for cross-asset use — the
@@ -1057,168 +1065,168 @@ enum SourceSpecRaw {
     /// The Gregorian year (e.g. `2024.0`).
     Year {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// The Gregorian month, `1.0` (Jan) through `12.0` (Dec).
     Month {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// The day of the month, `1.0` through `31.0`.
     Day {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// The hour of the day (UTC), `0.0` through `23.0`.
     Hour {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// The minute of the hour, `0.0` through `59.0`.
     Minute {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// The second of the minute, `0.0` through `59.0`.
     Second {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// ISO 8601 weekday, `1.0` (Monday) through `7.0` (Sunday).
     DayOfWeek {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// Day of the year, `1.0` through `366.0`.
     DayOfYear {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// ISO 8601 week of the year, `1.0` through `53.0`.
     WeekOfYear {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// Calendar quarter, `1.0` through `4.0`.
     Quarter {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// Unix seconds since the epoch (as a Real).
     UnixSeconds {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// Unix milliseconds since the epoch (as a Real).
     UnixMillis {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
     /// The raw bar-open [`Timestamp`] payload (yields
     /// `DynType::Time`, not a scalar). The `Timestamp` twin of
-    /// [`SourceSpec::Current`].
+    /// [`ExprSpec::Current`].
     Time {
         #[serde(default)]
-        source: Option<Box<SourceSpec>>,
+        source: Option<Box<ExprSpec>>,
     },
 }
 
-impl From<SourceSpecRaw> for SourceSpec {
-    fn from(v: SourceSpecRaw) -> Self {
+impl From<ExprSpecRaw> for ExprSpec {
+    fn from(v: ExprSpecRaw) -> Self {
         match v {
-            SourceSpecRaw::Close { source } => SourceSpec::Close { source },
-            SourceSpecRaw::High { source } => SourceSpec::High { source },
-            SourceSpecRaw::Low { source } => SourceSpec::Low { source },
-            SourceSpecRaw::Open { source } => SourceSpec::Open { source },
-            SourceSpecRaw::Volume { source } => SourceSpec::Volume { source },
-            SourceSpecRaw::Typical { source } => SourceSpec::Typical { source },
-            SourceSpecRaw::Median { source } => SourceSpec::Median { source },
-            SourceSpecRaw::Current { source } => SourceSpec::Current { source },
-            SourceSpecRaw::Pick { symbol, freq } => SourceSpec::Pick { symbol, freq },
-            SourceSpecRaw::Value(x) => SourceSpec::Value(x),
-            SourceSpecRaw::Entry => SourceSpec::Entry,
-            SourceSpecRaw::Peak => SourceSpec::Peak,
-            SourceSpecRaw::Trough => SourceSpec::Trough,
-            SourceSpecRaw::Get { key, source } => SourceSpec::Get { key, source },
-            SourceSpecRaw::Ema { source, period } => SourceSpec::Ema { source, period },
-            SourceSpecRaw::Sma { source, period } => SourceSpec::Sma { source, period },
-            SourceSpecRaw::Rma { source, period } => SourceSpec::Rma { source, period },
-            SourceSpecRaw::Wma { source, period } => SourceSpec::Wma { source, period },
-            SourceSpecRaw::Hma { source, period } => SourceSpec::Hma { source, period },
-            SourceSpecRaw::Rsi { source, period } => SourceSpec::Rsi { source, period },
-            SourceSpecRaw::StdDev { source, period } => SourceSpec::StdDev { source, period },
-            SourceSpecRaw::Cci { source, period } => SourceSpec::Cci { source, period },
-            SourceSpecRaw::Stochastic { source, period } => SourceSpec::Stochastic { source, period },
-            SourceSpecRaw::StochRsi { source, rsi_period, stoch_period } => SourceSpec::StochRsi { source, rsi_period, stoch_period },
-            SourceSpecRaw::MacdLine { source, fast, slow, signal } => SourceSpec::MacdLine { source, fast, slow, signal },
-            SourceSpecRaw::MacdSignal { source, fast, slow, signal } => SourceSpec::MacdSignal { source, fast, slow, signal },
-            SourceSpecRaw::MacdHistogram { source, fast, slow, signal } => SourceSpec::MacdHistogram { source, fast, slow, signal },
-            SourceSpecRaw::BbUpper { source, period, k } => SourceSpec::BbUpper { source, period, k },
-            SourceSpecRaw::BbMiddle { source, period, k } => SourceSpec::BbMiddle { source, period, k },
-            SourceSpecRaw::BbLower { source, period, k } => SourceSpec::BbLower { source, period, k },
-            SourceSpecRaw::KeltnerUpper { source, candle_source, ema_period, atr_period, multiplier } => SourceSpec::KeltnerUpper { source, candle_source, ema_period, atr_period, multiplier },
-            SourceSpecRaw::KeltnerMiddle { source, candle_source, ema_period, atr_period, multiplier } => SourceSpec::KeltnerMiddle { source, candle_source, ema_period, atr_period, multiplier },
-            SourceSpecRaw::KeltnerLower { source, candle_source, ema_period, atr_period, multiplier } => SourceSpec::KeltnerLower { source, candle_source, ema_period, atr_period, multiplier },
-            SourceSpecRaw::DonchianUpper { high, low, period } => SourceSpec::DonchianUpper { high, low, period },
-            SourceSpecRaw::DonchianMiddle { high, low, period } => SourceSpec::DonchianMiddle { high, low, period },
-            SourceSpecRaw::DonchianLower { high, low, period } => SourceSpec::DonchianLower { high, low, period },
-            SourceSpecRaw::Adx { source, period } => SourceSpec::Adx { source, period },
-            SourceSpecRaw::PlusDi { source, period } => SourceSpec::PlusDi { source, period },
-            SourceSpecRaw::MinusDi { source, period } => SourceSpec::MinusDi { source, period },
-            SourceSpecRaw::DmiPlusDi { source, period } => SourceSpec::DmiPlusDi { source, period },
-            SourceSpecRaw::DmiMinusDi { source, period } => SourceSpec::DmiMinusDi { source, period },
-            SourceSpecRaw::AroonUp { source, period } => SourceSpec::AroonUp { source, period },
-            SourceSpecRaw::AroonDown { source, period } => SourceSpec::AroonDown { source, period },
-            SourceSpecRaw::AroonOscillator { source, period } => SourceSpec::AroonOscillator { source, period },
-            SourceSpecRaw::Atr { source, period } => SourceSpec::Atr { source, period },
-            SourceSpecRaw::Mfi { source, period } => SourceSpec::Mfi { source, period },
-            SourceSpecRaw::WilliamsR { source, period } => SourceSpec::WilliamsR { source, period },
-            SourceSpecRaw::Obv { source } => SourceSpec::Obv { source },
-            SourceSpecRaw::Vwap { source } => SourceSpec::Vwap { source },
-            SourceSpecRaw::Ad { source } => SourceSpec::Ad { source },
-            SourceSpecRaw::TrueRange { source } => SourceSpec::TrueRange { source },
-            SourceSpecRaw::Sar { source, step, max } => SourceSpec::Sar { source, step, max },
-            SourceSpecRaw::VolTarget { target, window, bars_per_year } => SourceSpec::VolTarget { target, window, bars_per_year },
-            SourceSpecRaw::AtrRisk { risk_frac, period, atr_multiple } => SourceSpec::AtrRisk { risk_frac, period, atr_multiple },
-            SourceSpecRaw::DrawdownThrottle { max_drawdown } => SourceSpec::DrawdownThrottle { max_drawdown },
-            SourceSpecRaw::EquityVolTarget { target, window, bars_per_year } => SourceSpec::EquityVolTarget { target, window, bars_per_year },
-            SourceSpecRaw::FractionalKelly { kelly_fraction, window } => SourceSpec::FractionalKelly { kelly_fraction, window },
-            SourceSpecRaw::Add { lhs, rhs } => SourceSpec::Add { lhs, rhs },
-            SourceSpecRaw::Sub { lhs, rhs } => SourceSpec::Sub { lhs, rhs },
-            SourceSpecRaw::Mul { lhs, rhs } => SourceSpec::Mul { lhs, rhs },
-            SourceSpecRaw::Div { lhs, rhs } => SourceSpec::Div { lhs, rhs },
-            SourceSpecRaw::Lag { source, periods } => SourceSpec::Lag { source, periods },
-            SourceSpecRaw::Diff { source, periods } => SourceSpec::Diff { source, periods },
-            SourceSpecRaw::Ratio { source, periods } => SourceSpec::Ratio { source, periods },
-            SourceSpecRaw::Roc { source, periods } => SourceSpec::Roc { source, periods },
-            SourceSpecRaw::RollingMax { source, period } => SourceSpec::RollingMax { source, period },
-            SourceSpecRaw::RollingMin { source, period } => SourceSpec::RollingMin { source, period },
-            SourceSpecRaw::Log { source, base } => SourceSpec::Log { source, base },
-            SourceSpecRaw::Latch { source } => SourceSpec::Latch { source },
-            SourceSpecRaw::Resample { every, inner, source } => SourceSpec::Resample { every, inner, source },
-            SourceSpecRaw::Unstable { source } => SourceSpec::Unstable { source },
-            SourceSpecRaw::Year { source } => SourceSpec::Year { source },
-            SourceSpecRaw::Month { source } => SourceSpec::Month { source },
-            SourceSpecRaw::Day { source } => SourceSpec::Day { source },
-            SourceSpecRaw::Hour { source } => SourceSpec::Hour { source },
-            SourceSpecRaw::Minute { source } => SourceSpec::Minute { source },
-            SourceSpecRaw::Second { source } => SourceSpec::Second { source },
-            SourceSpecRaw::DayOfWeek { source } => SourceSpec::DayOfWeek { source },
-            SourceSpecRaw::DayOfYear { source } => SourceSpec::DayOfYear { source },
-            SourceSpecRaw::WeekOfYear { source } => SourceSpec::WeekOfYear { source },
-            SourceSpecRaw::Quarter { source } => SourceSpec::Quarter { source },
-            SourceSpecRaw::UnixSeconds { source } => SourceSpec::UnixSeconds { source },
-            SourceSpecRaw::UnixMillis { source } => SourceSpec::UnixMillis { source },
-            SourceSpecRaw::Time { source } => SourceSpec::Time { source },
+            ExprSpecRaw::Close { source } => ExprSpec::Close { source },
+            ExprSpecRaw::High { source } => ExprSpec::High { source },
+            ExprSpecRaw::Low { source } => ExprSpec::Low { source },
+            ExprSpecRaw::Open { source } => ExprSpec::Open { source },
+            ExprSpecRaw::Volume { source } => ExprSpec::Volume { source },
+            ExprSpecRaw::Typical { source } => ExprSpec::Typical { source },
+            ExprSpecRaw::Median { source } => ExprSpec::Median { source },
+            ExprSpecRaw::Current { source } => ExprSpec::Current { source },
+            ExprSpecRaw::Pick { symbol, freq } => ExprSpec::Pick { symbol, freq },
+            ExprSpecRaw::Value(x) => ExprSpec::Value(x),
+            ExprSpecRaw::Entry => ExprSpec::Entry,
+            ExprSpecRaw::Peak => ExprSpec::Peak,
+            ExprSpecRaw::Trough => ExprSpec::Trough,
+            ExprSpecRaw::Get { key, source } => ExprSpec::Get { key, source },
+            ExprSpecRaw::Ema { source, period } => ExprSpec::Ema { source, period },
+            ExprSpecRaw::Sma { source, period } => ExprSpec::Sma { source, period },
+            ExprSpecRaw::Rma { source, period } => ExprSpec::Rma { source, period },
+            ExprSpecRaw::Wma { source, period } => ExprSpec::Wma { source, period },
+            ExprSpecRaw::Hma { source, period } => ExprSpec::Hma { source, period },
+            ExprSpecRaw::Rsi { source, period } => ExprSpec::Rsi { source, period },
+            ExprSpecRaw::StdDev { source, period } => ExprSpec::StdDev { source, period },
+            ExprSpecRaw::Cci { source, period } => ExprSpec::Cci { source, period },
+            ExprSpecRaw::Stochastic { source, period } => ExprSpec::Stochastic { source, period },
+            ExprSpecRaw::StochRsi { source, rsi_period, stoch_period } => ExprSpec::StochRsi { source, rsi_period, stoch_period },
+            ExprSpecRaw::MacdLine { source, fast, slow, signal } => ExprSpec::MacdLine { source, fast, slow, signal },
+            ExprSpecRaw::MacdSignal { source, fast, slow, signal } => ExprSpec::MacdSignal { source, fast, slow, signal },
+            ExprSpecRaw::MacdHistogram { source, fast, slow, signal } => ExprSpec::MacdHistogram { source, fast, slow, signal },
+            ExprSpecRaw::BbUpper { source, period, k } => ExprSpec::BbUpper { source, period, k },
+            ExprSpecRaw::BbMiddle { source, period, k } => ExprSpec::BbMiddle { source, period, k },
+            ExprSpecRaw::BbLower { source, period, k } => ExprSpec::BbLower { source, period, k },
+            ExprSpecRaw::KeltnerUpper { source, candle_source, ema_period, atr_period, multiplier } => ExprSpec::KeltnerUpper { source, candle_source, ema_period, atr_period, multiplier },
+            ExprSpecRaw::KeltnerMiddle { source, candle_source, ema_period, atr_period, multiplier } => ExprSpec::KeltnerMiddle { source, candle_source, ema_period, atr_period, multiplier },
+            ExprSpecRaw::KeltnerLower { source, candle_source, ema_period, atr_period, multiplier } => ExprSpec::KeltnerLower { source, candle_source, ema_period, atr_period, multiplier },
+            ExprSpecRaw::DonchianUpper { high, low, period } => ExprSpec::DonchianUpper { high, low, period },
+            ExprSpecRaw::DonchianMiddle { high, low, period } => ExprSpec::DonchianMiddle { high, low, period },
+            ExprSpecRaw::DonchianLower { high, low, period } => ExprSpec::DonchianLower { high, low, period },
+            ExprSpecRaw::Adx { source, period } => ExprSpec::Adx { source, period },
+            ExprSpecRaw::PlusDi { source, period } => ExprSpec::PlusDi { source, period },
+            ExprSpecRaw::MinusDi { source, period } => ExprSpec::MinusDi { source, period },
+            ExprSpecRaw::DmiPlusDi { source, period } => ExprSpec::DmiPlusDi { source, period },
+            ExprSpecRaw::DmiMinusDi { source, period } => ExprSpec::DmiMinusDi { source, period },
+            ExprSpecRaw::AroonUp { source, period } => ExprSpec::AroonUp { source, period },
+            ExprSpecRaw::AroonDown { source, period } => ExprSpec::AroonDown { source, period },
+            ExprSpecRaw::AroonOscillator { source, period } => ExprSpec::AroonOscillator { source, period },
+            ExprSpecRaw::Atr { source, period } => ExprSpec::Atr { source, period },
+            ExprSpecRaw::Mfi { source, period } => ExprSpec::Mfi { source, period },
+            ExprSpecRaw::WilliamsR { source, period } => ExprSpec::WilliamsR { source, period },
+            ExprSpecRaw::Obv { source } => ExprSpec::Obv { source },
+            ExprSpecRaw::Vwap { source } => ExprSpec::Vwap { source },
+            ExprSpecRaw::Ad { source } => ExprSpec::Ad { source },
+            ExprSpecRaw::TrueRange { source } => ExprSpec::TrueRange { source },
+            ExprSpecRaw::Sar { source, step, max } => ExprSpec::Sar { source, step, max },
+            ExprSpecRaw::VolTarget { target, window, bars_per_year } => ExprSpec::VolTarget { target, window, bars_per_year },
+            ExprSpecRaw::AtrRisk { risk_frac, period, atr_multiple } => ExprSpec::AtrRisk { risk_frac, period, atr_multiple },
+            ExprSpecRaw::DrawdownThrottle { max_drawdown } => ExprSpec::DrawdownThrottle { max_drawdown },
+            ExprSpecRaw::EquityVolTarget { target, window, bars_per_year } => ExprSpec::EquityVolTarget { target, window, bars_per_year },
+            ExprSpecRaw::FractionalKelly { kelly_fraction, window } => ExprSpec::FractionalKelly { kelly_fraction, window },
+            ExprSpecRaw::Add { lhs, rhs } => ExprSpec::Add { lhs, rhs },
+            ExprSpecRaw::Sub { lhs, rhs } => ExprSpec::Sub { lhs, rhs },
+            ExprSpecRaw::Mul { lhs, rhs } => ExprSpec::Mul { lhs, rhs },
+            ExprSpecRaw::Div { lhs, rhs } => ExprSpec::Div { lhs, rhs },
+            ExprSpecRaw::Lag { source, periods } => ExprSpec::Lag { source, periods },
+            ExprSpecRaw::Diff { source, periods } => ExprSpec::Diff { source, periods },
+            ExprSpecRaw::Ratio { source, periods } => ExprSpec::Ratio { source, periods },
+            ExprSpecRaw::Roc { source, periods } => ExprSpec::Roc { source, periods },
+            ExprSpecRaw::RollingMax { source, period } => ExprSpec::RollingMax { source, period },
+            ExprSpecRaw::RollingMin { source, period } => ExprSpec::RollingMin { source, period },
+            ExprSpecRaw::Log { source, base } => ExprSpec::Log { source, base },
+            ExprSpecRaw::Latch { source } => ExprSpec::Latch { source },
+            ExprSpecRaw::Resample { every, inner, source } => ExprSpec::Resample { every, inner, source },
+            ExprSpecRaw::Unstable { source } => ExprSpec::Unstable { source },
+            ExprSpecRaw::Year { source } => ExprSpec::Year { source },
+            ExprSpecRaw::Month { source } => ExprSpec::Month { source },
+            ExprSpecRaw::Day { source } => ExprSpec::Day { source },
+            ExprSpecRaw::Hour { source } => ExprSpec::Hour { source },
+            ExprSpecRaw::Minute { source } => ExprSpec::Minute { source },
+            ExprSpecRaw::Second { source } => ExprSpec::Second { source },
+            ExprSpecRaw::DayOfWeek { source } => ExprSpec::DayOfWeek { source },
+            ExprSpecRaw::DayOfYear { source } => ExprSpec::DayOfYear { source },
+            ExprSpecRaw::WeekOfYear { source } => ExprSpec::WeekOfYear { source },
+            ExprSpecRaw::Quarter { source } => ExprSpec::Quarter { source },
+            ExprSpecRaw::UnixSeconds { source } => ExprSpec::UnixSeconds { source },
+            ExprSpecRaw::UnixMillis { source } => ExprSpec::UnixMillis { source },
+            ExprSpecRaw::Time { source } => ExprSpec::Time { source },
         }
     }
 }
 
-impl TryFrom<serde_norway::Value> for SourceSpec {
+impl TryFrom<serde_norway::Value> for ExprSpec {
     type Error = String;
 
     /// Normalise the incoming YAML value into a [`serde_norway::Value::Tagged`],
-    /// then deserialize into [`SourceSpecRaw`].
+    /// then deserialize into [`ExprSpecRaw`].
     ///
     /// `serde_norway`'s `Value` deserializer only routes an *enum* input
     /// through its `Value::Tagged` variant — a plain single-key `Mapping`
@@ -1237,7 +1245,7 @@ impl TryFrom<serde_norway::Value> for SourceSpec {
     /// - Anything else (a `Number` for `Value(x)`, etc.) is forwarded verbatim
     ///   and serde_norway will report a helpful "unexpected type" error.
     ///
-    /// Recursion into `Box<SourceSpec>` fields re-enters this same
+    /// Recursion into `Box<ExprSpec>` fields re-enters this same
     /// `TryFrom` — so a nested bare-word inside a tagged form is normalised
     /// on the way down.
     fn try_from(v: serde_norway::Value) -> Result<Self, Self::Error> {
@@ -1300,7 +1308,7 @@ impl TryFrom<serde_norway::Value> for SourceSpec {
             }
             other => other,
         };
-        let raw: SourceSpecRaw =
+        let raw: ExprSpecRaw =
             serde_norway::from_value(normalised).map_err(|e| e.to_string())?;
         Ok(raw.into())
     }
@@ -1313,7 +1321,7 @@ impl TryFrom<serde_norway::Value> for SourceSpec {
 /// user's subtree (typically a `!pick { symbol, freq }`) and wraps as an
 /// [`AsAtom`] view for the leaf's `T::of(source)` constructor.
 fn atom_source_of(
-    source: Option<&SourceSpec>,
+    source: Option<&ExprSpec>,
     anchor: &Position,
     book: &Book,
     schema: &Arc<Schema>,
@@ -1324,7 +1332,7 @@ fn atom_source_of(
     }
 }
 
-impl SourceSpec {
+impl ExprSpec {
     /// Construct the live, runtime-typed source this spec describes as a
     /// `Box<dyn DynIndicator>`. `anchor` is the owning strategy's
     /// [`Position`], shared by any `entry` / `peak` / `trough` leaves in the
@@ -1339,14 +1347,14 @@ impl SourceSpec {
         book: &Book,
         schema: &Arc<Schema>,
     ) -> Box<dyn DynIndicator> {
-        use SourceSpec::*;
+        use ExprSpec::*;
         // Recursive-build shorthands: build `s`, view it as a library-typed
         // `Indicator<Input=Snapshot, Output=Real>` (or Candle) so it drops
         // into a concrete library constructor.
-        let real = |s: &SourceSpec| AsReal::new(s.build(anchor, book, schema));
-        let candle = |s: &SourceSpec| AsCandle::new(s.build(anchor, book, schema));
+        let real = |s: &ExprSpec| AsReal::new(s.build(anchor, book, schema));
+        let candle = |s: &ExprSpec| AsCandle::new(s.build(anchor, book, schema));
         // The `Pick`-shaped `source:` field on every atom-input leaf.
-        let atom_src = |source: Option<&Box<SourceSpec>>| {
+        let atom_src = |source: Option<&Box<ExprSpec>>| {
             atom_source_of(source.map(|b| &**b), anchor, book, schema)
         };
 
