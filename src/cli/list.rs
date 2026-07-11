@@ -90,6 +90,14 @@ const GROUPS: &[Group] = &[
         ],
     },
     Group {
+        title: "basket selection rules (for `selection:` on BasketStrategySpec)",
+        entries: &[
+            Entry { tag: "top_bottom", args: "longs, shorts",       doc: "top `longs` symbols by score → long, bottom `shorts` → short (never overlapping)" },
+            Entry { tag: "threshold",  args: "long_min, short_max", doc: "long at/above long_min; short at/below short_max" },
+            Entry { tag: "quantile",   args: "long_q, short_q",     doc: "long the top long_q fraction; short the bottom short_q — counts are ceil(q * n)" },
+        ],
+    },
+    Group {
         title: "bar indicators (consume the whole Candle, no source)",
         entries: &[
             Entry { tag: "atr",         args: "period", doc: "average true range" },
@@ -153,6 +161,16 @@ const GROUPS: &[Group] = &[
             Entry { tag: "le", args: "lhs, rhs, epsilon?", doc: "lhs <= rhs" },
             Entry { tag: "eq", args: "lhs, rhs, epsilon?", doc: "lhs == rhs within epsilon" },
             Entry { tag: "ne", args: "lhs, rhs, epsilon?", doc: "lhs != rhs beyond epsilon" },
+        ],
+    },
+    Group {
+        title: "conditional (three-source ternary)",
+        entries: &[
+            Entry {
+                tag: "if_else",
+                args: "cond, if_true, if_false",
+                doc: "cond ? if_true : if_false — cond is a signal, both branches are real sources; None on cond ⇒ None; warm-up = max across the three (see IfElse docs)",
+            },
         ],
     },
     Group {
@@ -232,8 +250,10 @@ const GROUPS: &[Group] = &[
     Group {
         title: "placeholders (resolved before typed parsing; see `fugazi run --params`)",
         entries: &[
-            Entry { tag: "param", args: "key, default?", doc: "substitute the value passed as --params key=..." },
+            Entry { tag: "param", args: "key, default?", doc: "load-time: substitute the value passed as --params key=..." },
             Entry { tag: "param", args: "<key>",         doc: "bare-string shorthand for { key: <key> }" },
+            Entry { tag: "arg",   args: "key, default?", doc: "build-time: substitute a driver-supplied arg (e.g. SYM per-symbol in a basket score/sizing template)" },
+            Entry { tag: "arg",   args: "<key>",         doc: "bare-string shorthand for { key: <key> }" },
         ],
     },
     Group {
@@ -252,8 +272,9 @@ const GROUPS: &[Group] = &[
         ],
     },
     Group {
-        title: "sizing helpers (for `sizing:` on StrategySpec / PairsStrategySpec)",
+        title: "sizing helpers (for `sizing:` on SingleStrategySpec / PairsStrategySpec / BasketStrategySpec)",
         entries: &[
+            Entry { tag: "equal_weight",      args: "<n_legs>",                            doc: "1/n_legs — the basket sugar for 100% gross across n_legs selected symbols" },
             Entry { tag: "vol_target",        args: "target, window, bars_per_year",       doc: "inverse realized-vol multiplier (price series)" },
             Entry { tag: "atr_risk",          args: "risk_frac, period, atr_multiple",     doc: "fixed per-trade risk sized by ATR" },
             Entry { tag: "drawdown_throttle", args: "max_drawdown",                        doc: "linear de-lever as book drawdown deepens (0..1)" },
