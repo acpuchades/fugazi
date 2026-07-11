@@ -404,6 +404,41 @@ mod tests {
     }
 
     #[test]
+    fn leading_scope_distributes_over_every_inline_column() {
+        // `-x 'BTC[1h]:a=…,b=…,c=…'` — the leading scope covers every column
+        // in the same flag. The `PREFIX applies to all Opt1, Opt2, …` invariant
+        // this file shares with `--costs` (see costs::tests).
+        let src = Source::Inline(
+            "BTC[1h]:sma20=!sma { period: 20 },ema50=!ema { period: 50 },c=close".to_string(),
+        );
+        let overlays = parse_specs(std::slice::from_ref(&src)).unwrap();
+        assert_eq!(overlays.len(), 3);
+        for o in &overlays {
+            assert_eq!(o.scope.symbol.as_deref(), Some("BTC"));
+            assert_eq!(o.scope.interval, Some(Interval::Hour(1)));
+        }
+    }
+
+    #[test]
+    fn leading_scope_distributes_over_every_file_entry() {
+        // Same invariant for the `@file.yml` body form — every mapping entry
+        // inherits the flag's leading scope.
+        let path = std::env::temp_dir().join("fugazi_overlay_scope_test.yml");
+        std::fs::write(
+            &path,
+            "sma20: !sma { period: 20 }\nema50: !ema { period: 50 }\n",
+        )
+        .unwrap();
+        let src = Source::Inline(format!("BTC[1h]:@{}", path.display()));
+        let overlays = parse_specs(std::slice::from_ref(&src)).unwrap();
+        assert_eq!(overlays.len(), 2);
+        for o in &overlays {
+            assert_eq!(o.scope.symbol.as_deref(), Some("BTC"));
+            assert_eq!(o.scope.interval, Some(Interval::Hour(1)));
+        }
+    }
+
+    #[test]
     fn overlay_scope_matches_wildcards() {
         let scope = OverlayScope {
             symbol: Some("BTC".to_string()),
