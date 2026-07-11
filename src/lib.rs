@@ -62,12 +62,15 @@ pub mod backtest;
 pub mod costs;
 pub mod indicator;
 pub mod indicators;
+pub mod market;
 pub mod metrics;
 pub mod signal;
+pub mod snapshot;
 #[cfg(feature = "sources")]
 pub mod sources;
 pub mod strategies;
 pub mod strategy;
+pub mod time;
 pub mod types;
 pub mod wallet;
 
@@ -75,13 +78,12 @@ pub use backtest::{Fill, RunReport};
 pub use costs::{CommissionModel, SlippageModel, SpreadModel, TradingCosts};
 pub use indicator::Indicator;
 pub use indicators::BoolIndicatorExt;
+pub use market::{Atom, Candle, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder};
 pub use metrics::{DrawdownSegment, Trade};
 pub use signal::Signal;
+pub use snapshot::{Selector, Snapshot};
 pub use strategy::Strategy;
-pub use types::{
-    Atom, Candle, Frequency, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder,
-    Selector, Snapshot, Timestamp,
-};
+pub use time::{Frequency, Timestamp};
 pub use wallet::{
     Ack, Order, OrderId, OrderKind, PaperWallet, Reference, Side, Size, Units, Wallet, WalletError,
 };
@@ -91,12 +93,13 @@ pub mod prelude {
     pub use crate::costs::TradingCosts;
     pub use crate::indicator::Indicator;
     pub use crate::indicators::{BoolIndicatorExt, IndicatorExt};
-    pub use crate::signal::Signal;
-    pub use crate::strategy::Strategy;
-    pub use crate::types::{
-        Atom, Candle, Frequency, OverlayInfo, OverlayType, OverlayValue, Real, Schema,
-        SchemaBuilder, Selector, Snapshot, Timestamp,
+    pub use crate::market::{
+        Atom, Candle, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder,
     };
+    pub use crate::signal::Signal;
+    pub use crate::snapshot::{Selector, Snapshot};
+    pub use crate::strategy::Strategy;
+    pub use crate::time::{Frequency, Timestamp};
     pub use crate::wallet::{
         Ack, Order, OrderId, OrderKind, PaperWallet, Reference, Side, Size, Units, Wallet,
         WalletError,
