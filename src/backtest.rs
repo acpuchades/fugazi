@@ -149,3 +149,170 @@ where
         initial_equity,
     }
 }
+
+/// Drive N `(strategy, wallet)` pairs over the same `snapshots` in parallel
+/// and return one [`RunReport`] per pair, in the input's order.
+///
+/// The natural primitive for cross-strategy comparison, ensemble backtests,
+/// walk-forward evaluation, and any other setting where the caller has a
+/// slice of independent `(strategy, wallet)` runs to evaluate against the
+/// same bar stream. Each pair owns its own wallet, so runs are fully
+/// independent — no shared mutable state across workers, no locking.
+///
+/// The parallel iteration uses rayon; each worker picks a `(strategy,
+/// wallet)` pair from `runs` and calls the plain [`run`] driver against a
+/// cheap-cloning iterator over `snapshots`. Result order matches `runs`'
+/// input order.
+///
+/// Gated behind the `parallel` Cargo feature (default-on; implied by `cli`).
+/// A caller who only wants the sequential [`run`] primitive doesn't need
+/// rayon and can disable the feature (`default-features = false`).
+#[cfg(feature = "parallel")]
+pub fn run_many<Sym, S, W>(
+    runs: &mut [(S, W)],
+    snapshots: &[Snapshot<Sym>],
+) -> Vec<RunReport<Sym>>
+where
+    Sym: Clone + PartialEq + Send + Sync,
+    S: Strategy<Symbol = Sym, Input = Snapshot<Sym>> + Send,
+    W: Wallet<Sym> + Send,
+    Order<Sym>: Send,
+{
+    use rayon::prelude::*;
+    runs.par_iter_mut()
+        .map(|(strategy, wallet)| run(strategy, wallet, snapshots.iter().cloned()))
+        .collect()
+}
+
+#[cfg(all(test, feature = "parallel"))]
+mod parallel_tests {
+    use super::*;
+    use crate::indicators::{BoolIndicatorExt, IndicatorExt, Sma};
+    use crate::signal::Signal;
+    use crate::types::{Atom, Candle};
+    use crate::wallet::{PaperWallet, Side, Size};
+
+    fn bar(close: Real) -> Candle {
+        Candle::new(close, close, close, close, 0.0)
+    }
+
+    /// A minimal SMA-crossover strategy: long on fast > slow, flat when it
+    /// reverses. Same shape as `PairsTrade` in the wallet tests, but on a
+    /// single asset with a real signal.
+    ///
+    /// The `Box<dyn Signal + Send>` bound is what makes the strategy usable
+    /// with the parallel [`super::run_many`] driver — `Box<dyn Signal>` by
+    /// itself is not `Send`, so the crate's own `SingleAssetStrategy` (which
+    /// uses that plain form) can't cross thread boundaries yet. That's a
+    /// follow-up: relaxing the signal trait bound to require `Send` on the
+    /// four wired signal slots would be a one-liner per slot but a public
+    /// API refinement.
+    struct MaCross {
+        symbol: &'static str,
+        long: Box<dyn Signal<Snapshot<&'static str>> + Send>,
+        exit: Box<dyn Signal<Snapshot<&'static str>> + Send>,
+    }
+
+    impl MaCross {
+        fn new(fast: usize, slow: usize) -> Self {
+            use crate::indicators::{Close, Pick};
+            let close = || Close::of(Pick::<&'static str>::new());
+            Self {
+                symbol: "X",
+                long: Box::new(Sma::new(close(), fast).crosses_above(Sma::new(close(), slow))),
+                exit: Box::new(Sma::new(close(), fast).crosses_below(Sma::new(close(), slow))),
+            }
+        }
+    }
+
+    impl Strategy for MaCross {
+        type Input = Snapshot<&'static str>;
+        type Symbol = &'static str;
+        fn update(&mut self, snap: Snapshot<&'static str>) {
+            self.long.update(snap.clone());
+            self.exit.update(snap);
+        }
+        fn trade(&self, wallet: &mut dyn crate::Wallet<&'static str>) {
+            let flat = wallet.position(&self.symbol).amount.abs() < 1e-9;
+            if self.long.is_true() && flat {
+                let _ = wallet.set(self.symbol, Side::Buy, Size::value_frac(1.0));
+            } else if self.exit.is_true() && !flat {
+                let _ = wallet.close(self.symbol);
+            }
+        }
+        fn reset(&mut self) {
+            self.long.reset();
+            self.exit.reset();
+        }
+    }
+
+    fn make_snapshots(prices: &[Real]) -> Vec<Snapshot<&'static str>> {
+        prices
+            .iter()
+            .map(|&px| Snapshot::single("X", Atom::new(bar(px))))
+            .collect()
+    }
+
+    #[test]
+    fn run_many_matches_sequential_run_per_pair() {
+        // Prices that produce a golden-then-death crossover.
+        let prices = [
+            14.0, 13.0, 12.0, 11.0, 10.0, 11.0, 13.0, 15.0, 17.0, 15.0, 12.0, 9.0, 7.0,
+        ];
+        let snaps = make_snapshots(&prices);
+
+        // Sequential baseline: three independent runs.
+        let mut baseline: Vec<RunReport<&'static str>> = Vec::new();
+        for _ in 0..3 {
+            let mut strat = MaCross::new(2, 4);
+            let mut wallet: PaperWallet<&'static str> = PaperWallet::new(1_000.0);
+            baseline.push(run(&mut strat, &mut wallet, snaps.iter().cloned()));
+        }
+
+        // Parallel run: three (strategy, wallet) pairs.
+        let mut runs: Vec<(MaCross, PaperWallet<&'static str>)> = (0..3)
+            .map(|_| (MaCross::new(2, 4), PaperWallet::new(1_000.0)))
+            .collect();
+        let parallel = run_many(&mut runs, &snaps);
+
+        assert_eq!(parallel.len(), 3);
+        for (b, p) in baseline.iter().zip(parallel.iter()) {
+            assert_eq!(b.equity_curve, p.equity_curve);
+            assert_eq!(b.initial_equity, p.initial_equity);
+            assert_eq!(b.fills.len(), p.fills.len());
+            for (bf, pf) in b.fills.iter().zip(p.fills.iter()) {
+                assert_eq!(bf.bar, pf.bar);
+                assert_eq!(bf.order.side, pf.order.side);
+                assert!((bf.order.units - pf.order.units).abs() < 1e-9);
+                assert!((bf.order.price - pf.order.price).abs() < 1e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn run_many_preserves_input_order() {
+        // Two runs with different fast/slow — verify results come back in
+        // the same slot the pair was placed in.
+        let prices = [
+            14.0, 13.0, 12.0, 11.0, 10.0, 11.0, 13.0, 15.0, 17.0, 15.0, 12.0, 9.0, 7.0,
+        ];
+        let snaps = make_snapshots(&prices);
+
+        let mut runs: Vec<(MaCross, PaperWallet<&'static str>)> = vec![
+            (MaCross::new(2, 4), PaperWallet::new(1_000.0)),
+            (MaCross::new(3, 5), PaperWallet::new(1_000.0)),
+        ];
+        let reports = run_many(&mut runs, &snaps);
+        assert_eq!(reports.len(), 2);
+        // Each report matches what a sequential run would have produced for
+        // its slot.
+        let mut s0 = MaCross::new(2, 4);
+        let mut w0: PaperWallet<&'static str> = PaperWallet::new(1_000.0);
+        let seq0 = run(&mut s0, &mut w0, snaps.iter().cloned());
+        let mut s1 = MaCross::new(3, 5);
+        let mut w1: PaperWallet<&'static str> = PaperWallet::new(1_000.0);
+        let seq1 = run(&mut s1, &mut w1, snaps.iter().cloned());
+        assert_eq!(reports[0].equity_curve, seq0.equity_curve);
+        assert_eq!(reports[1].equity_curve, seq1.equity_curve);
+    }
+}

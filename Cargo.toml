@@ -42,9 +42,16 @@ sources = ["dep:reqwest", "dep:tokio", "dep:thiserror"]
 # feature implies it; a caller who only wants that vocabulary can enable it
 # on its own (`default-features = false, features = ["runtime"]`).
 runtime = []
+# `parallel` exposes `fugazi::backtest::run_many` — a rayon-backed ensemble
+# driver that par-iters over `(strategy, wallet)` pairs against a shared
+# snapshot stream. The `cli` feature implies it (rayon is already in the
+# CLI's own dep list); a caller who wants the ensemble primitive without
+# the CLI enables it on its own (`features = ["parallel"]`).
+parallel = ["dep:rayon"]
 cli = [
     "sources",
     "runtime",
+    "parallel",
     "dep:clap",
     "dep:clap_complete",
     "dep:serde_norway",
@@ -52,7 +59,6 @@ cli = [
     "dep:anyhow",
     "dep:indicatif",
     "dep:console",
-    "dep:rayon",
     "dep:interim",
 ]
 
