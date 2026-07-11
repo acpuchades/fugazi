@@ -1895,78 +1895,11 @@ impl PySnapshot {
 // method on every atom-input leaf constructor (close, high, year, ...).
 // ---------------------------------------------------------------------------
 
-/// Object-safe shim over an `I -> Atom` indicator.
-trait DynAtomIndicator<I>: Send + Sync {
-    fn update(&mut self, input: I) -> Option<Atom>;
-    fn value(&self) -> Option<Atom>;
-    fn warm_up_period(&self) -> usize;
-    fn unstable_period(&self) -> usize;
-    fn reset(&mut self);
-    fn box_clone(&self) -> Box<dyn DynAtomIndicator<I>>;
-}
-
-impl<I, T> DynAtomIndicator<I> for T
-where
-    T: Indicator<Input = I, Output = Atom> + Clone + Send + Sync + 'static,
-{
-    fn update(&mut self, input: I) -> Option<Atom> {
-        Indicator::update(self, input)
-    }
-    fn value(&self) -> Option<Atom> {
-        Indicator::value(self)
-    }
-    fn warm_up_period(&self) -> usize {
-        Indicator::warm_up_period(self)
-    }
-    fn unstable_period(&self) -> usize {
-        Indicator::unstable_period(self)
-    }
-    fn reset(&mut self) {
-        Indicator::reset(self)
-    }
-    fn box_clone(&self) -> Box<dyn DynAtomIndicator<I>> {
-        Box::new(self.clone())
-    }
-}
-
-/// A boxed `I -> Atom` indicator. Implements [`Indicator`] itself so it can be
-/// fed back into any `Output = Atom` source constructor.
-struct AtomBox<I>(Box<dyn DynAtomIndicator<I>>);
-
-impl<I> AtomBox<I> {
-    fn new<T>(inner: T) -> Self
-    where
-        T: Indicator<Input = I, Output = Atom> + Clone + Send + Sync + 'static,
-    {
-        AtomBox(Box::new(inner))
-    }
-}
-
-impl<I> Clone for AtomBox<I> {
-    fn clone(&self) -> Self {
-        AtomBox(self.0.box_clone())
-    }
-}
-
-impl<I> Indicator for AtomBox<I> {
-    type Input = I;
-    type Output = Atom;
-    fn update(&mut self, input: I) -> Option<Atom> {
-        self.0.update(input)
-    }
-    fn value(&self) -> Option<Atom> {
-        self.0.value()
-    }
-    fn warm_up_period(&self) -> usize {
-        self.0.warm_up_period()
-    }
-    fn unstable_period(&self) -> usize {
-        self.0.unstable_period()
-    }
-    fn reset(&mut self) {
-        self.0.reset()
-    }
-}
+/// A boxed `I -> Atom` indicator — the atom-emitting twin of `Source<I>`.
+/// Now a type alias over the shared [`TypedSource`] carrier; the dedicated
+/// `DynAtomIndicator<I>` trait + blanket impl it used to have collapsed
+/// into [`runtime::Adapter`]'s coverage.
+type AtomBox<I> = TypedSource<I, Atom>;
 
 /// An atom-emitting source erased to one of the two input domains it can be
 /// rooted in on the Python side: `Atom` (the identity passthrough) or
