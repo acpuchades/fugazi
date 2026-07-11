@@ -90,14 +90,6 @@ const GROUPS: &[Group] = &[
         ],
     },
     Group {
-        title: "basket selection rules (for `selection:` on BasketStrategySpec)",
-        entries: &[
-            Entry { tag: "top_bottom", args: "longs, shorts",       doc: "top `longs` symbols by score → long, bottom `shorts` → short (never overlapping)" },
-            Entry { tag: "threshold",  args: "long_min, short_max", doc: "long at/above long_min; short at/below short_max" },
-            Entry { tag: "quantile",   args: "long_q, short_q",     doc: "long the top long_q fraction; short the bottom short_q — counts are ceil(q * n)" },
-        ],
-    },
-    Group {
         title: "bar indicators (consume the whole Candle, no source)",
         entries: &[
             Entry { tag: "atr",         args: "period", doc: "average true range" },
@@ -106,6 +98,14 @@ const GROUPS: &[Group] = &[
             Entry { tag: "obv",         args: "",       doc: "on-balance volume (cumulative)" },
             Entry { tag: "vwap",        args: "",       doc: "volume-weighted average price (cumulative)" },
             Entry { tag: "ad",          args: "",       doc: "Chaikin A/D line (cumulative)" },
+        ],
+    },
+    Group {
+        title: "basket selection rules (for `selection:` on BasketStrategySpec)",
+        entries: &[
+            Entry { tag: "top_bottom", args: "longs, shorts",       doc: "top `longs` symbols by score → long, bottom `shorts` → short (never overlapping)" },
+            Entry { tag: "threshold",  args: "long_min, short_max", doc: "long at/above long_min; short at/below short_max" },
+            Entry { tag: "quantile",   args: "long_q, short_q",     doc: "long the top long_q fraction; short the bottom short_q — counts are ceil(q * n)" },
         ],
     },
     Group {
