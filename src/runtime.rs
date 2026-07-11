@@ -532,56 +532,81 @@ impl DynIndicator for UnstableWrap {
 
 // ---------------------------------------------------------------------------
 // Typed views: reconstitute a Box<dyn DynIndicator> as a library-typed
-// Indicator<Input=Snapshot<String>, Output=X> so it can drop into library
+// Indicator<Input=Snapshot<String>, Output=Out> so it can drop into library
 // constructors (Ema::new(source, period), IndicatorExt::gt(...),
 // SingleAssetStrategy slots). Callers whose whole indicator chain is
 // snapshot-rooted — every atom-input leaf is wrapped in a `!pick` on parse,
 // so every DynIndicator in the tree consumes `Snapshot<String>` — use these.
+//
+// One generic [`As<Out>`] carrier covers every supported output type; the
+// per-type names ([`AsReal`], [`AsBool`], [`AsCandle`], [`AsAtom`], [`AsStr`])
+// are type aliases over it.
 // ---------------------------------------------------------------------------
 
-/// Views a `Box<dyn DynIndicator>` with `output_type == Real` as a library
-/// `Indicator<Input = Snapshot<String>, Output = Real>` — the shape every
-/// source-side library constructor (Ema, Sma, arithmetic ops, comparisons, …)
-/// expects once the caller's leaves have been rooted through `Pick`.
+/// Views a `Box<dyn DynIndicator>` with `output_type == Out::TYPE` as a
+/// library-typed `Indicator<Input = Snapshot<String>, Output = Out>` so it
+/// drops into any source-wrapping library constructor (Ema, Sma, arithmetic
+/// ops, comparisons, `SingleAssetStrategy` slots).
 ///
 /// # Panics
 /// [`new`](Self::new) panics if `inner.input_type() != Snapshot` or
-/// `inner.output_type() != Real`; the recursive spec builder enforces both at
-/// construction, so the unwrap arms in `update`/`value` are unreachable in
-/// practice.
-#[derive(Clone)]
-pub struct AsReal(Box<dyn DynIndicator>);
+/// `inner.output_type() != Out::TYPE`; the recursive spec builder enforces
+/// both at construction, so the unwrap arms in `update`/`value` are
+/// unreachable in practice.
+pub struct As<Out>(Box<dyn DynIndicator>, std::marker::PhantomData<fn() -> Out>);
 
-impl AsReal {
+impl<Out: TypeOf> As<Out> {
     pub fn new(inner: Box<dyn DynIndicator>) -> Self {
         assert_eq!(
             inner.input_type(),
             DynType::Snapshot,
-            "AsReal requires a Snapshot-input DynIndicator"
+            "As<{}> requires a Snapshot-input DynIndicator",
+            Out::TYPE,
         );
         assert_eq!(
             inner.output_type(),
-            DynType::Real,
-            "AsReal requires a Real-output DynIndicator"
+            Out::TYPE,
+            "As<{}> requires a {}-output DynIndicator",
+            Out::TYPE,
+            Out::TYPE,
         );
-        Self(inner)
+        Self(inner, std::marker::PhantomData)
     }
 }
 
-impl Indicator for AsReal {
-    type Input = Snapshot<String>;
-    type Output = Real;
-    fn update(&mut self, snap: Snapshot<String>) -> Option<Real> {
-        match self.0.update(DynValue::Snapshot(snap))? {
-            DynValue::Real(x) => Some(x),
-            other => unreachable!("AsReal received {other:?} but was built for Real output"),
-        }
+impl<Out> Clone for As<Out> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone(), std::marker::PhantomData)
     }
-    fn value(&self) -> Option<Real> {
-        match self.0.value()? {
-            DynValue::Real(x) => Some(x),
-            other => unreachable!("AsReal held {other:?} but was built for Real output"),
-        }
+}
+
+impl<Out> Indicator for As<Out>
+where
+    Out: TypeOf + TryFrom<DynValue, Error = DynType> + Clone,
+{
+    type Input = Snapshot<String>;
+    type Output = Out;
+    fn update(&mut self, snap: Snapshot<String>) -> Option<Out> {
+        let payload = self.0.update(DynValue::Snapshot(snap))?;
+        Some(Out::try_from(payload).unwrap_or_else(|got| {
+            unreachable!(
+                "As<{}> received {} but was built for {} output",
+                Out::TYPE,
+                got,
+                Out::TYPE,
+            )
+        }))
+    }
+    fn value(&self) -> Option<Out> {
+        let payload = self.0.value()?;
+        Some(Out::try_from(payload).unwrap_or_else(|got| {
+            unreachable!(
+                "As<{}> held {} but was built for {} output",
+                Out::TYPE,
+                got,
+                Out::TYPE,
+            )
+        }))
     }
     fn warm_up_period(&self) -> usize {
         self.0.warm_up_period()
@@ -594,227 +619,38 @@ impl Indicator for AsReal {
     }
 }
 
-/// Views a `Box<dyn DynIndicator>` with `output_type == Bool` as a library
-/// `Indicator<Input = Snapshot<String>, Output = bool>` — i.e. a
+/// `Real`-output typed view — the shape every source-side library constructor
+/// (Ema, Sma, arithmetic ops, comparisons, …) expects once the caller's
+/// leaves have been rooted through `Pick`.
+pub type AsReal = As<Real>;
+
+/// `bool`-output typed view — i.e. a
 /// [`Signal<Snapshot<String>>`](crate::Signal).
-///
-/// # Panics
-/// [`new`](Self::new) panics if `inner.input_type() != Snapshot` or
-/// `inner.output_type() != Bool`.
-#[derive(Clone)]
-pub struct AsBool(Box<dyn DynIndicator>);
+pub type AsBool = As<bool>;
 
-impl AsBool {
-    pub fn new(inner: Box<dyn DynIndicator>) -> Self {
-        assert_eq!(
-            inner.input_type(),
-            DynType::Snapshot,
-            "AsBool requires a Snapshot-input DynIndicator"
-        );
-        assert_eq!(
-            inner.output_type(),
-            DynType::Bool,
-            "AsBool requires a Bool-output DynIndicator"
-        );
-        Self(inner)
-    }
-}
+/// `Candle`-output typed view — the shape a bar indicator (`Atr`, `Adx`,
+/// `Obv`, …) expects as its `source` after the source-generic refactor.
+pub type AsCandle = As<Candle>;
 
-impl Indicator for AsBool {
-    type Input = Snapshot<String>;
-    type Output = bool;
-    fn update(&mut self, snap: Snapshot<String>) -> Option<bool> {
-        match self.0.update(DynValue::Snapshot(snap))? {
-            DynValue::Bool(b) => Some(b),
-            other => unreachable!("AsBool received {other:?} but was built for Bool output"),
-        }
-    }
-    fn value(&self) -> Option<bool> {
-        match self.0.value()? {
-            DynValue::Bool(b) => Some(b),
-            other => unreachable!("AsBool held {other:?} but was built for Bool output"),
-        }
-    }
-    fn warm_up_period(&self) -> usize {
-        self.0.warm_up_period()
-    }
-    fn unstable_period(&self) -> usize {
-        self.0.unstable_period()
-    }
-    fn reset(&mut self) {
-        self.0.reset();
-    }
-}
-
-/// Views a `Box<dyn DynIndicator>` with `output_type == Candle` as a library
-/// `Indicator<Input = Snapshot<String>, Output = Candle>` — the shape a bar
-/// indicator (`Atr`, `Adx`, `Obv`, …) expects as its `source` after the
-/// source-generic refactor.
-///
-/// # Panics
-/// [`new`](Self::new) panics if `inner.input_type() != Snapshot` or
-/// `inner.output_type() != Candle`.
-#[derive(Clone)]
-pub struct AsCandle(Box<dyn DynIndicator>);
-
-impl AsCandle {
-    pub fn new(inner: Box<dyn DynIndicator>) -> Self {
-        assert_eq!(
-            inner.input_type(),
-            DynType::Snapshot,
-            "AsCandle requires a Snapshot-input DynIndicator"
-        );
-        assert_eq!(
-            inner.output_type(),
-            DynType::Candle,
-            "AsCandle requires a Candle-output DynIndicator"
-        );
-        Self(inner)
-    }
-}
-
-impl Indicator for AsCandle {
-    type Input = Snapshot<String>;
-    type Output = Candle;
-    fn update(&mut self, snap: Snapshot<String>) -> Option<Candle> {
-        match self.0.update(DynValue::Snapshot(snap))? {
-            DynValue::Candle(c) => Some(c),
-            other => unreachable!("AsCandle received {other:?} but was built for Candle output"),
-        }
-    }
-    fn value(&self) -> Option<Candle> {
-        match self.0.value()? {
-            DynValue::Candle(c) => Some(c),
-            other => unreachable!("AsCandle held {other:?} but was built for Candle output"),
-        }
-    }
-    fn warm_up_period(&self) -> usize {
-        self.0.warm_up_period()
-    }
-    fn unstable_period(&self) -> usize {
-        self.0.unstable_period()
-    }
-    fn reset(&mut self) {
-        self.0.reset();
-    }
-}
-
-/// Views a `Box<dyn DynIndicator>` with `output_type == Atom` as a library
-/// `Indicator<Input = Snapshot<String>, Output = Atom>` — the atom-emitting
-/// bridge every source-generic atom-input leaf (`Close::of(source)`,
-/// `Year::of(source)`, `Atr::new(CurrentBar::of(source), period)`, …) uses.
-/// The typical concrete source is `Pick::<String>::new()` — the empty
-/// selector's `Snapshot::sole_atom` unpack — but any snapshot-rooted
-/// atom-emitting chain works.
+/// `Atom`-output typed view — the atom-emitting bridge every source-generic
+/// atom-input leaf (`Close::of(source)`, `Year::of(source)`,
+/// `Atr::new(CurrentBar::of(source), period)`, …) uses. The typical concrete
+/// source is `Pick::<String>::new()` — the empty selector's
+/// `Snapshot::sole_atom` unpack — but any snapshot-rooted atom-emitting
+/// chain works.
 ///
 /// Not currently constructed by the CLI spec builder — every leaf that would
 /// want it (`!close`, `!year`, `!current`, …) already builds itself with
 /// `Pick::<String>::new()` baked in, so no intermediate `AsAtom` is
 /// needed. Kept for completeness so a future `!pick { symbol, freq }`
 /// ExprSpec variant can produce an atom-emitting DynIndicator and drop
-/// it into a downstream atom-consuming source via the same
-/// `AsX`-typed-view pattern the other three use.
-///
-/// # Panics
-/// [`new`](Self::new) panics if `inner.input_type() != Snapshot` or
-/// `inner.output_type() != Atom`.
-#[derive(Clone)]
-pub struct AsAtom(Box<dyn DynIndicator>);
+/// it into a downstream atom-consuming source.
+pub type AsAtom = As<Atom>;
 
-impl AsAtom {
-    pub fn new(inner: Box<dyn DynIndicator>) -> Self {
-        assert_eq!(
-            inner.input_type(),
-            DynType::Snapshot,
-            "AsAtom requires a Snapshot-input DynIndicator"
-        );
-        assert_eq!(
-            inner.output_type(),
-            DynType::Atom,
-            "AsAtom requires an Atom-output DynIndicator"
-        );
-        Self(inner)
-    }
-}
-
-impl Indicator for AsAtom {
-    type Input = Snapshot<String>;
-    type Output = Atom;
-    fn update(&mut self, snap: Snapshot<String>) -> Option<Atom> {
-        match self.0.update(DynValue::Snapshot(snap))? {
-            DynValue::Atom(a) => Some(a),
-            other => unreachable!("AsAtom received {other:?} but was built for Atom output"),
-        }
-    }
-    fn value(&self) -> Option<Atom> {
-        match self.0.value()? {
-            DynValue::Atom(a) => Some(a),
-            other => unreachable!("AsAtom held {other:?} but was built for Atom output"),
-        }
-    }
-    fn warm_up_period(&self) -> usize {
-        self.0.warm_up_period()
-    }
-    fn unstable_period(&self) -> usize {
-        self.0.unstable_period()
-    }
-    fn reset(&mut self) {
-        self.0.reset();
-    }
-}
-
-/// Views a `Box<dyn DynIndicator>` with `output_type == Str` as a library
-/// `Indicator<Input = Snapshot<String>, Output = Arc<str>>` — the shape a
+/// `Arc<str>`-output typed view — the shape a
 /// [`StrEq`](crate::indicators::StrEq) or any other string-consuming
 /// combinator expects for its sources.
-///
-/// # Panics
-/// [`new`](Self::new) panics if `inner.input_type() != Snapshot` or
-/// `inner.output_type() != Str`.
-#[derive(Clone)]
-pub struct AsStr(Box<dyn DynIndicator>);
-
-impl AsStr {
-    pub fn new(inner: Box<dyn DynIndicator>) -> Self {
-        assert_eq!(
-            inner.input_type(),
-            DynType::Snapshot,
-            "AsStr requires a Snapshot-input DynIndicator"
-        );
-        assert_eq!(
-            inner.output_type(),
-            DynType::Str,
-            "AsStr requires a Str-output DynIndicator"
-        );
-        Self(inner)
-    }
-}
-
-impl Indicator for AsStr {
-    type Input = Snapshot<String>;
-    type Output = Arc<str>;
-    fn update(&mut self, snap: Snapshot<String>) -> Option<Arc<str>> {
-        match self.0.update(DynValue::Snapshot(snap))? {
-            DynValue::Str(s) => Some(s),
-            other => unreachable!("AsStr received {other:?} but was built for Str output"),
-        }
-    }
-    fn value(&self) -> Option<Arc<str>> {
-        match self.0.value()? {
-            DynValue::Str(s) => Some(s),
-            other => unreachable!("AsStr held {other:?} but was built for Str output"),
-        }
-    }
-    fn warm_up_period(&self) -> usize {
-        self.0.warm_up_period()
-    }
-    fn unstable_period(&self) -> usize {
-        self.0.unstable_period()
-    }
-    fn reset(&mut self) {
-        self.0.reset();
-    }
-}
+pub type AsStr = As<Arc<str>>;
 
 #[cfg(test)]
 mod tests {
