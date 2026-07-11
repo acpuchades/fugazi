@@ -482,7 +482,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Strategy for SingleAssetStrat
 mod tests {
     use super::*;
     use crate::indicators::{Sma, Value};
-    use crate::strategy::PaperWallet;
+    use crate::wallet::PaperWallet;
 
     /// Drive `strat` over `candles`, feeding each bar to the wallet first and
     /// delivering its fills to the strategy before it updates and trades.

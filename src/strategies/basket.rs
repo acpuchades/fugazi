@@ -529,7 +529,7 @@ mod tests {
     use super::*;
     use crate::indicators::sizing::equal_weight;
     use crate::indicators::{Close, IndicatorExt, Pick};
-    use crate::strategy::PaperWallet;
+    use crate::wallet::PaperWallet;
     use crate::types::{Atom, Selector};
 
     /// Build a snapshot from per-symbol closes. Insertion order is the

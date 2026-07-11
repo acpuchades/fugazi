@@ -44,8 +44,8 @@ use fugazi_core::indicators::{
 };
 use fugazi_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
 use fugazi_core::sources::{Binance, CandleSource, Interval, SourceError, Timestamp, Yahoo};
-use fugazi_core::strategy::{
-    Ack, Order, OrderKind, PaperWallet, Units, Reference, Side, Size, Wallet, WalletError,
+use fugazi_core::wallet::{
+    Ack, Order, OrderKind, PaperWallet, Reference, Side, Size, Units, Wallet, WalletError,
 };
 use fugazi_core::types::{
     Atom, Candle, Frequency, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder,

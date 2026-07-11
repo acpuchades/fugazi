@@ -374,7 +374,7 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> Strategy for Pairs
 mod tests {
     use super::*;
     use crate::indicators::Value;
-    use crate::strategy::PaperWallet;
+    use crate::wallet::PaperWallet;
     use crate::types::Snapshot;
 
     /// Build a size-2 snapshot with left/right atoms tagged by symbol.

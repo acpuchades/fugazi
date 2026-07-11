@@ -33,7 +33,7 @@
 //! byte-identical to the pre-costs release (zero deductions, `Order::commission
 //! == 0.0`, and `Order::price` equal to the theoretical price).
 
-use crate::strategy::{OrderKind, Side};
+use crate::wallet::{OrderKind, Side};
 use crate::types::{Candle, Real};
 
 /// A per-fill commission charge, in the wallet's reference currency.

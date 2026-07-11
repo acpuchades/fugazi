@@ -71,7 +71,7 @@ use std::rc::Rc;
 
 use crate::indicator::Indicator;
 use crate::indicators::DEFAULT_EPSILON;
-use crate::strategy::Side;
+use crate::wallet::Side;
 use crate::types::{Atom, Candle, Real};
 
 /// Per-leg tracked state.

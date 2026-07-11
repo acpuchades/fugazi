@@ -452,7 +452,7 @@ mod tests {
     // Position-dependent recipes
     // ------------------------------------------------------------------
 
-    use crate::strategy::Side;
+    use crate::wallet::Side;
 
     #[test]
     fn drawdown_throttle_starts_at_one_and_scales_linearly() {

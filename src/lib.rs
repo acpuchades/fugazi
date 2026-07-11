@@ -69,6 +69,7 @@ pub mod sources;
 pub mod strategies;
 pub mod strategy;
 pub mod types;
+pub mod wallet;
 
 pub use backtest::{Fill, RunReport};
 pub use costs::{CommissionModel, SlippageModel, SpreadModel, TradingCosts};
@@ -76,13 +77,13 @@ pub use indicator::Indicator;
 pub use indicators::BoolIndicatorExt;
 pub use metrics::{DrawdownSegment, Trade};
 pub use signal::Signal;
-pub use strategy::{
-    Ack, Order, OrderId, OrderKind, PaperWallet, Units, Reference, Side, Size, Strategy, Wallet,
-    WalletError,
-};
+pub use strategy::Strategy;
 pub use types::{
     Atom, Candle, Frequency, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder,
     Selector, Snapshot, Timestamp,
+};
+pub use wallet::{
+    Ack, Order, OrderId, OrderKind, PaperWallet, Reference, Side, Size, Units, Wallet, WalletError,
 };
 
 /// Convenient glob-import of the core traits and types.
@@ -91,12 +92,13 @@ pub mod prelude {
     pub use crate::indicator::Indicator;
     pub use crate::indicators::{BoolIndicatorExt, IndicatorExt};
     pub use crate::signal::Signal;
-    pub use crate::strategy::{
-        Ack, Order, OrderId, OrderKind, PaperWallet, Units, Reference, Side, Size, Strategy, Wallet,
-        WalletError,
-    };
+    pub use crate::strategy::Strategy;
     pub use crate::types::{
         Atom, Candle, Frequency, OverlayInfo, OverlayType, OverlayValue, Real, Schema,
         SchemaBuilder, Selector, Snapshot, Timestamp,
+    };
+    pub use crate::wallet::{
+        Ack, Order, OrderId, OrderKind, PaperWallet, Reference, Side, Size, Units, Wallet,
+        WalletError,
     };
 }
