@@ -1,6 +1,6 @@
 //! YAML-deserializable [`PairsStrategySpec`] — a two-symbol pair-trading spec.
 //!
-//! Mirrors [`super::StrategySpec`] for a two-leg strategy: two symbols (`left`,
+//! Mirrors [`super::SingleStrategySpec`] for a two-leg strategy: two symbols (`left`,
 //! `right`), one enter/exit signal pair, and optional spread stop-loss /
 //! take-profit levels. Compared against the running `close_left − close_right`
 //! spread the wallet-facing strategy computes internally.
@@ -43,7 +43,7 @@ use crate::dyn_indicator::{AsBool, AsReal, DynIndicator};
 /// take_profit: !value  50.0
 /// ```
 ///
-/// As with [`super::StrategySpec`], a subtree is shared across sites via a
+/// As with [`super::SingleStrategySpec`], a subtree is shared across sites via a
 /// plain YAML anchor (`&name` / `*name`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -73,7 +73,7 @@ impl PairsStrategySpec {
     /// Parse a YAML pairs-strategy document, resolving `param` placeholders
     /// against `params` first (see [`crate::params`]).
     ///
-    /// Same two-pass shape as [`super::StrategySpec::from_text_with_params`]:
+    /// Same two-pass shape as [`super::SingleStrategySpec::from_text_with_params`]:
     /// the document is normalized to an untyped [`serde_json::Value`], every
     /// placeholder node is rewritten to its resolved value, and only then is
     /// the result deserialized into the typed spec.
@@ -115,7 +115,7 @@ impl PairsStrategySpec {
     /// build time. Level expressions that reference the strategy's `Position`
     /// (`entry` / `peak` / `trough`) anchor on the **left** leg — a rare choice
     /// since a spread-based level typically doesn't need the per-leg entry
-    /// price, but present for symmetry with [`super::StrategySpec`].
+    /// price, but present for symmetry with [`super::SingleStrategySpec`].
     pub fn build(&self, initial_equity: Real, schema: &Arc<Schema>) -> DynPairsStrategy {
         let strat = PairsStrategy::with_initial_equity(
             self.left.clone(),

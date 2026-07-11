@@ -51,7 +51,7 @@ use crate::data::DataFrame;
 use crate::input;
 use crate::metrics;
 use crate::params;
-use crate::spec::StrategySpec;
+use crate::spec::SingleStrategySpec;
 use crate::style;
 
 /// Sort direction of a `--best-by` optimization: descending = higher is better
@@ -382,7 +382,7 @@ pub(crate) fn optimize(
     let remaining_len = plan.len().saturating_sub(1);
     let min_len = remaining_len.div_ceil(workers * 16).max(1);
 
-    let evaluate = |spec: &StrategySpec| -> Evaluation {
+    let evaluate = |spec: &SingleStrategySpec| -> Evaluation {
         match windowed_n {
             Some(w) => Evaluation::Windowed(backtest::evaluate_windowed(
                 spec,
@@ -845,7 +845,7 @@ fn combine_params(
 }
 
 /// Substitute a params table into the base strategy value, then typed-parse.
-fn build_spec(base: &Value, params: &HashMap<String, Value>) -> Result<StrategySpec> {
+fn build_spec(base: &Value, params: &HashMap<String, Value>) -> Result<SingleStrategySpec> {
     let value = params::substitute(base.clone(), params)?;
     Ok(serde_json::from_value(value)?)
 }

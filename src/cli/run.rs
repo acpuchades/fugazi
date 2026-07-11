@@ -39,7 +39,7 @@ use crate::calendar::{self, AssetClass, BarsPerYearSpec, ScopedFrequency, Window
 use crate::costs::CostConfig;
 use crate::data::DataFrame;
 use crate::metrics;
-use crate::spec::{PairsStrategySpec, StrategySpec};
+use crate::spec::{PairsStrategySpec, SingleStrategySpec};
 use crate::style;
 
 /// Console-logging knobs plus the run's inputs, threaded in from the CLI args.
@@ -99,7 +99,7 @@ pub struct Summary {
 /// Run `spec` over `frame` per `opts` — resolve inputs, delegate the pure
 /// work to [`backtest::run_iteration`], and write the result files +
 /// narrate the tiered run/trade/result/metrics logs.
-pub fn run(spec: &StrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<Summary> {
+pub fn run(spec: &SingleStrategySpec, frame: &DataFrame, opts: &RunOptions) -> Result<Summary> {
     let started = SystemTime::now();
     let symbol = spec.symbol.clone();
     let series = frame.atoms(&symbol)?;

@@ -1,7 +1,7 @@
-//! YAML-deserializable [`StrategySpec`] — the whole strategy document.
+//! YAML-deserializable [`SingleStrategySpec`] — the whole strategy document.
 //!
 //! Split out of `spec/mod.rs`; kept in `crate::spec::strategy` so paths like
-//! `crate::spec::StrategySpec` still resolve via the `pub use` in `mod.rs`.
+//! `crate::spec::SingleStrategySpec` still resolve via the `pub use` in `mod.rs`.
 
 use std::sync::Arc;
 
@@ -71,7 +71,7 @@ impl SideSpec {
 /// only ever sees the fully inlined tree.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct StrategySpec {
+pub struct SingleStrategySpec {
     pub symbol: String,
     #[serde(default)]
     pub long: Option<SideSpec>,
@@ -87,7 +87,7 @@ pub struct StrategySpec {
     pub sizing: Option<Box<ExprSpec>>,
 }
 
-impl StrategySpec {
+impl SingleStrategySpec {
     /// Parse a YAML strategy document, resolving `param` placeholders against
     /// `params` first (see [`crate::params`]).
     ///

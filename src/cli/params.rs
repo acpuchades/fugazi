@@ -202,7 +202,7 @@ fn resolve(body: &Value, params: &HashMap<String, Value>) -> Result<Value> {
 mod tests {
     use super::*;
     use crate::convert::yaml_to_json;
-    use crate::spec::StrategySpec;
+    use crate::spec::SingleStrategySpec;
 
     fn table_of(specs: &[&str]) -> HashMap<String, Value> {
         let specs: Vec<ParamSpec> = specs.iter().map(|s| s.parse().unwrap()).collect();
@@ -300,7 +300,7 @@ mod tests {
         "#;
         let value = yaml_to_json(serde_norway::from_str(yaml).unwrap()).unwrap();
         let value = substitute(value, &table_of(&["FAST=3"])).unwrap();
-        let spec: StrategySpec = serde_json::from_value(value).unwrap();
+        let spec: SingleStrategySpec = serde_json::from_value(value).unwrap();
         assert_eq!(spec.symbol, "BTC");
         assert!(spec.long.is_some());
         let _strat = spec.build(1_000.0, &fugazi::Schema::empty());

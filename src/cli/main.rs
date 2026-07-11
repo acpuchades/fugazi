@@ -436,7 +436,7 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     let text = args.strategy.read().context("reading strategy")?;
     match args.strategy.kind {
         StrategyKind::Single => {
-            let spec = spec::StrategySpec::from_text_with_params(&text, &param_table)
+            let spec = spec::SingleStrategySpec::from_text_with_params(&text, &param_table)
                 .with_context(|| parse_error_context(&args.strategy))?;
             if !args.quiet {
                 style::print_header("check", "parse and validate a strategy spec");
@@ -554,7 +554,7 @@ fn run(args: RunArgs) -> Result<()> {
     };
     match args.strategy.kind {
         StrategyKind::Single => {
-            let spec = spec::StrategySpec::from_text_with_params(&text, &param_table)
+            let spec = spec::SingleStrategySpec::from_text_with_params(&text, &param_table)
                 .with_context(|| parse_error_context(&args.strategy))?;
             run::run(&spec, &frame, &opts)?;
         }

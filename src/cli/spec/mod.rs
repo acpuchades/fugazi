@@ -13,7 +13,7 @@
 //!   over the runtime [`DynType`](crate::dyn_indicator::DynType) — some
 //!   variants yield `Atom` / `Candle` / `Str` / `Time`).
 //! * [`SignalSpec`] (see [`signal`]) → boolean condition (a `Signal`).
-//! * [`StrategySpec`] (see [`strategy`]) → [`fugazi::strategies::SingleAssetStrategy`] —
+//! * [`SingleStrategySpec`] (see [`strategy`]) → [`fugazi::strategies::SingleAssetStrategy`] —
 //!   the decision layer.
 //!
 //! The enums are *externally tagged* (serde's default), so an indicator reads as
@@ -34,7 +34,7 @@ pub use expr::ExprSpec;
 pub use pairs::PairsStrategySpec;
 #[allow(unused_imports)]
 pub use signal::SignalSpec;
-pub use strategy::StrategySpec;
+pub use strategy::SingleStrategySpec;
 #[allow(unused_imports)]
 pub use template::SpecTemplate;
 #[allow(unused_imports)]
@@ -102,7 +102,7 @@ mod tests {
         "#;
         let value: serde_norway::Value = serde_norway::from_str(yaml).unwrap();
         let json = crate::convert::yaml_to_json(value).unwrap();
-        let spec: StrategySpec = serde_json::from_value(json).unwrap();
+        let spec: SingleStrategySpec = serde_json::from_value(json).unwrap();
         assert_eq!(spec.symbol, "BTC");
         assert!(spec.long.is_some());
         let _ = spec.build(1_000.0, &Schema::empty());
@@ -148,7 +148,7 @@ mod tests {
               enter: !crosses_below { lhs: !sma { period: 5 }, rhs: !sma { period: 20 } }
               exit:  !crosses_above { lhs: !sma { period: 5 }, rhs: !sma { period: 20 } }
         "#;
-        let spec = StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
+        let spec = SingleStrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
             .unwrap();
         assert_eq!(spec.symbol, "BTC");
         let _strat = spec.build(1_000.0, &Schema::empty());
@@ -164,7 +164,7 @@ mod tests {
               stop_loss: !mul { lhs: entry, rhs: !value 0.9 }
         "#;
         let spec =
-            StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new()).unwrap();
+            SingleStrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new()).unwrap();
         let mut strat = spec.build(1_000.0, &Schema::empty());
         let mut w = PaperWallet::new(1_000.0);
         for c in [
@@ -225,7 +225,7 @@ mod tests {
               enter: *cross_dn
               exit:  *cross_up
         "#;
-        let spec = StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
+        let spec = SingleStrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
             .unwrap();
         assert_eq!(spec.symbol, "BTC");
         assert!(spec.long.is_some() && spec.short.is_some());
@@ -243,7 +243,7 @@ mod tests {
               enter: !value true
             sizing: !vol_target { target: 0.20, window: 20, bars_per_year: 252 }
         "#;
-        let spec = StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
+        let spec = SingleStrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
             .unwrap();
         assert!(spec.sizing.is_some());
         let _built = spec.build(1_000.0, &Schema::empty());
@@ -257,7 +257,7 @@ mod tests {
               enter: !value true
             sizing: !atr_risk { risk_frac: 0.01, period: 14, atr_multiple: 2.0 }
         "#;
-        let spec = StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
+        let spec = SingleStrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
             .unwrap();
         assert!(spec.sizing.is_some());
         let _built = spec.build(1_000.0, &Schema::empty());
@@ -271,7 +271,7 @@ mod tests {
               enter: !value true
             sizing: !drawdown_throttle { max_drawdown: 0.20 }
         "#;
-        let spec = StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
+        let spec = SingleStrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
             .unwrap();
         assert!(spec.sizing.is_some());
         let _built = spec.build(1_000.0, &Schema::empty());
@@ -285,7 +285,7 @@ mod tests {
               enter: !value true
             sizing: !equity_vol_target { target: 0.15, window: 60, bars_per_year: 252 }
         "#;
-        let spec = StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
+        let spec = SingleStrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
             .unwrap();
         assert!(spec.sizing.is_some());
         let _built = spec.build(1_000.0, &Schema::empty());
@@ -299,7 +299,7 @@ mod tests {
               enter: !value true
             sizing: !fractional_kelly { kelly_fraction: 0.5, window: 30 }
         "#;
-        let spec = StrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
+        let spec = SingleStrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
             .unwrap();
         assert!(spec.sizing.is_some());
         let _built = spec.build(1_000.0, &Schema::empty());
@@ -309,7 +309,7 @@ mod tests {
     fn parses_an_inline_flow_map_strategy() {
         let doc = r#"{"symbol":"ETH","long":{"enter":{"crosses_above":
             {"lhs":{"sma":{"period":5}},"rhs":{"sma":{"period":20}}}}}}"#;
-        let spec = StrategySpec::from_text_with_params(doc, &std::collections::HashMap::new())
+        let spec = SingleStrategySpec::from_text_with_params(doc, &std::collections::HashMap::new())
             .unwrap();
         assert_eq!(spec.symbol, "ETH");
         let _strat = spec.build(1_000.0, &Schema::empty());

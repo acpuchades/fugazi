@@ -31,14 +31,14 @@ use fugazi::prelude::*;
 use crate::calendar::Frequency;
 use crate::costs::CostConfig;
 use crate::metrics;
-use crate::spec::{PairsStrategySpec, StrategySpec};
+use crate::spec::{PairsStrategySpec, SingleStrategySpec};
 
 /// Drive `spec` over `atoms` through a fresh paper wallet with `cash`
 /// starting funds and the given trading `costs`, returning the full
 /// [`fugazi::RunReport`]. The shared core of [`evaluate`] and
 /// [`evaluate_windowed`].
 fn measured_report(
-    spec: &StrategySpec,
+    spec: &SingleStrategySpec,
     atoms: &[(String, Atom)],
     cash: Real,
     costs: TradingCosts,
@@ -76,7 +76,7 @@ fn schema_from_atoms(atoms: &[(String, Atom)]) -> std::sync::Arc<Schema> {
 /// document. The shape `optimize` calls per grid combination.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate(
-    spec: &StrategySpec,
+    spec: &SingleStrategySpec,
     atoms: &[(String, Atom)],
     cash: Real,
     bars_per_year: Real,
@@ -95,7 +95,7 @@ pub fn evaluate(
 /// `optimize -w/--windowed` calls per grid combination.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_windowed(
-    spec: &StrategySpec,
+    spec: &SingleStrategySpec,
     atoms: &[(String, Atom)],
     cash: Real,
     bars_per_year: Real,
@@ -171,7 +171,7 @@ pub struct IterationInputs<'a> {
 /// the report to `Metrics`, and hand back an [`IterationResult`]. Does no
 /// IO and no console printing — that's the driver's responsibility.
 pub fn run_iteration(
-    spec: &StrategySpec,
+    spec: &SingleStrategySpec,
     atoms: &[(String, Atom)],
     inputs: &IterationInputs,
 ) -> IterationResult {

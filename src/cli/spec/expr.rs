@@ -409,10 +409,10 @@ pub enum ExprSpec {
 
     // --- sizing helpers (real-valued, single-series; read the strategy's
     // own asset via the implicit empty-selector `Pick`). Meant for the
-    // `sizing:` slot on `StrategySpec` / `PairsStrategySpec`, but usable
+    // `sizing:` slot on `SingleStrategySpec` / `PairsStrategySpec`, but usable
     // anywhere a real-valued source fits. The book-anchored ones
     // (`DrawdownThrottle`, `EquityVolTarget`, `FractionalKelly`) additionally
-    // require the strategy to own a `Book` — `StrategySpec` does;
+    // require the strategy to own a `Book` — `SingleStrategySpec` does;
     // `PairsStrategySpec` does not (they'll emit `None` there).
     /// Inverse realized-vol sizing —
     /// `target / (stddev(log_returns(close), window) * sqrt(bars_per_year))`.
@@ -941,10 +941,10 @@ enum ExprSpecRaw {
 
     // --- sizing helpers (real-valued, single-series; read the strategy's
     // own asset via the implicit empty-selector `Pick`). Meant for the
-    // `sizing:` slot on `StrategySpec` / `PairsStrategySpec`, but usable
+    // `sizing:` slot on `SingleStrategySpec` / `PairsStrategySpec`, but usable
     // anywhere a real-valued source fits. The book-anchored ones
     // (`DrawdownThrottle`, `EquityVolTarget`, `FractionalKelly`) additionally
-    // require the strategy to own a `Book` — `StrategySpec` does;
+    // require the strategy to own a `Book` — `SingleStrategySpec` does;
     // `PairsStrategySpec` does not (they'll emit `None` there).
     /// Inverse realized-vol sizing —
     /// `target / (stddev(log_returns(close), window) * sqrt(bars_per_year))`.
