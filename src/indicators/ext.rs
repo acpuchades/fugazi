@@ -3,6 +3,7 @@
 
 use crate::indicator::Indicator;
 use crate::indicators::compare::{Eq, Ge, Gt, Le, Lt, Ne};
+use crate::indicators::crosses::{CrossesAbove, CrossesBelow};
 use crate::indicators::if_else::IfElse;
 use crate::indicators::log::Log;
 use crate::indicators::logic::{And, Change, Not, Or, Xor};
@@ -175,25 +176,29 @@ pub trait IndicatorExt: Indicator<Output = Real> + Sized {
 
     /// `self` rises above `rhs` on this step.
     ///
-    /// Composes from primitives: the comparison is true *and* it just changed —
-    /// `self.gt(rhs).and(self.gt(rhs).changed())`.
-    fn crosses_above<R>(self, rhs: R) -> And<Gt<Self, R>, Change<Gt<Self, R>>>
+    /// Returns a native [`CrossesAbove`] primitive: one comparison state plus
+    /// one previous-value slot, so every operand is advanced once per bar
+    /// (the historical composed form `self.gt(rhs).and(self.gt(rhs).changed())`
+    /// doubled the work of the underlying source chain).
+    fn crosses_above<R>(self, rhs: R) -> CrossesAbove<Self, R>
     where
-        Self: Clone,
-        R: Indicator<Input = Self::Input, Output = Real> + Clone,
+        R: Indicator<Input = Self::Input, Output = Real>,
         Self::Input: Clone,
     {
-        self.clone().gt(rhs.clone()).and(self.gt(rhs).changed())
+        CrossesAbove::new(self, rhs)
     }
 
     /// `self` falls below `rhs` on this step.
-    fn crosses_below<R>(self, rhs: R) -> And<Lt<Self, R>, Change<Lt<Self, R>>>
+    ///
+    /// Native primitive twin of [`crosses_above`](Self::crosses_above);
+    /// same one-update-per-operand advantage over the historical
+    /// `self.lt(rhs).and(self.lt(rhs).changed())` composition.
+    fn crosses_below<R>(self, rhs: R) -> CrossesBelow<Self, R>
     where
-        Self: Clone,
-        R: Indicator<Input = Self::Input, Output = Real> + Clone,
+        R: Indicator<Input = Self::Input, Output = Real>,
         Self::Input: Clone,
     {
-        self.clone().lt(rhs.clone()).and(self.lt(rhs).changed())
+        CrossesBelow::new(self, rhs)
     }
 }
 

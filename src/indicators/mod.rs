@@ -33,6 +33,7 @@ mod calendar;
 mod candle;
 mod cci;
 mod component;
+mod crosses;
 mod dmi;
 mod donchian;
 mod ema;
@@ -83,6 +84,7 @@ pub use compare::{
     ComparisonOp, DEFAULT_EPSILON, Eq, Ge, Gt, Le, Lt, Ne, StrEq, StrEqOp, StrNe, StrNeOp,
 };
 pub use component::{Component, Shared, SharedComponent, SharedHandle};
+pub use crosses::{CrossesAbove, CrossesBelow};
 pub use dmi::{Dmi, DmiValue};
 pub use donchian::{Donchian, DonchianValue};
 pub use ema::Ema;
