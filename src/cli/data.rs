@@ -211,6 +211,21 @@ impl DataFrame {
         Ok(frame)
     }
 
+    /// Every unique `symbol` present in the frame, in ascending order.
+    /// Consumed by the basket driver to discover the tradeable universe
+    /// without an explicit up-front declaration.
+    pub fn symbols(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .rows
+            .keys()
+            .map(|(sym, _)| sym.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        out.sort();
+        out
+    }
+
     /// Merge one row into the frame, joining on `(symbol, time)`.
     fn insert(&mut self, spec: &str, row: Row) -> Result<()> {
         let symbol = row

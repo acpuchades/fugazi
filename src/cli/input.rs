@@ -81,18 +81,24 @@ impl FromStr for Source {
 /// [`SingleAssetStrategy`](fugazi::strategies::SingleAssetStrategy). Prefixing
 /// with `pairs:` (e.g. `pairs:@spread.yml`) declares a two-symbol pair-trading
 /// spec that resolves to a
-/// [`PairsStrategy`](fugazi::strategies::PairsStrategy).
+/// [`PairsStrategy`](fugazi::strategies::PairsStrategy). Prefixing with
+/// `basket:` (e.g. `basket:@basket.yml`) declares an N-symbol cross-sectional
+/// basket that resolves to a
+/// [`BasketStrategy`](fugazi::strategies::BasketStrategy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StrategyKind {
     /// A single-asset strategy (default; matches `@file.yml` and `single:@file.yml`).
     Single,
     /// A two-symbol pair-trading strategy (`pairs:@file.yml`).
     Pairs,
+    /// An N-symbol cross-sectional basket strategy (`basket:@file.yml`).
+    Basket,
 }
 
 /// A strategy positional: a [`Source`] plus a decided [`StrategyKind`] from
 /// the optional leading shape prefix. `single:` and no-prefix both resolve to
-/// [`StrategyKind::Single`]; `pairs:` resolves to [`StrategyKind::Pairs`].
+/// [`StrategyKind::Single`]; `pairs:` resolves to [`StrategyKind::Pairs`];
+/// `basket:` resolves to [`StrategyKind::Basket`].
 #[derive(Debug, Clone)]
 pub struct StrategySource {
     pub kind: StrategyKind,
@@ -126,6 +132,12 @@ impl FromStr for StrategySource {
         if let Some(rest) = s.strip_prefix("pairs:") {
             return Ok(StrategySource {
                 kind: StrategyKind::Pairs,
+                source: rest.parse().expect("infallible"),
+            });
+        }
+        if let Some(rest) = s.strip_prefix("basket:") {
+            return Ok(StrategySource {
+                kind: StrategyKind::Basket,
                 source: rest.parse().expect("infallible"),
             });
         }

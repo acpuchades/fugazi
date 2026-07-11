@@ -31,7 +31,7 @@ use fugazi::prelude::*;
 use crate::calendar::Frequency;
 use crate::costs::CostConfig;
 use crate::metrics;
-use crate::spec::{PairsStrategySpec, SingleStrategySpec};
+use crate::spec::{BasketStrategySpec, PairsStrategySpec, SingleStrategySpec};
 
 /// Drive `spec` over `atoms` through a fresh paper wallet with `cash`
 /// starting funds and the given trading `costs`, returning the full
@@ -255,6 +255,68 @@ pub fn run_iteration_pairs(
     run_iteration_core(
         || spec.build(inputs.cash, &schema),
         &snapshots,
+        bars.to_vec(),
+        per_symbol_costs,
+        inputs,
+    )
+}
+
+/// The basket twin of [`run_iteration`] / [`run_iteration_pairs`]. Drives a
+/// [`BasketStrategy`](fugazi::strategies::BasketStrategy) over pre-aligned
+/// snapshots — each snapshot carries the symbol-tagged atoms for one bar of
+/// the shared timeline, ordered by `bars` (each `snapshots[i]` corresponds
+/// to `bars[i]`).
+///
+/// The caller (`crate::run::run_basket`) is responsible for the multi-way
+/// time alignment: unioning per-symbol atom streams into a shared bar
+/// sequence and packing the atoms present at each bar into a
+/// [`Snapshot<String>`](fugazi::types::Snapshot). Symbols that are missing
+/// on a bar simply don't appear in that snapshot — the strategy's inner
+/// `Pick`s read `None` and the score/sizing chains propagate that up.
+///
+/// Cost models are resolved **per symbol** and installed as per-symbol
+/// overrides on the wallet (via [`PaperWallet::set_costs_for`]), same as
+/// the pairs case scaled to N. `universe` names every symbol the strategy
+/// could trade — one per-symbol cost bundle is resolved from
+/// `inputs.cost_config` for each — and the wallet's fallback is
+/// [`TradingCosts::none`], so a symbol the strategy trades that isn't in
+/// `universe` fills at zero cost (a minor safety net; the driver passes
+/// the full symbol set discovered in the frame).
+///
+/// [`PaperWallet::set_costs_for`]: fugazi::PaperWallet::set_costs_for
+/// [`TradingCosts::none`]: fugazi::TradingCosts::none
+pub fn run_iteration_basket(
+    spec: &BasketStrategySpec,
+    bars: &[String],
+    snapshots: &[fugazi::types::Snapshot<String>],
+    universe: &[String],
+    inputs: &IterationInputs,
+) -> IterationResult {
+    assert_eq!(
+        bars.len(),
+        snapshots.len(),
+        "basket run: `bars` and `snapshots` must be the same length"
+    );
+    let per_symbol_costs: Vec<(String, TradingCosts)> = universe
+        .iter()
+        .map(|s| {
+            (
+                s.clone(),
+                inputs.cost_config.resolve(s, inputs.effective_freq),
+            )
+        })
+        .collect();
+    // The shared overlay schema — first atom carrying an OverlayInfo wins;
+    // if none of them do, `Schema::empty` (matches the single-asset path).
+    let schema = snapshots
+        .iter()
+        .flat_map(|s| s.iter())
+        .find_map(|(_sym, _freq, a)| a.overlays.as_ref())
+        .map(|ov| ov.schema().clone())
+        .unwrap_or_else(Schema::empty);
+    run_iteration_core(
+        || spec.build(inputs.cash, &schema),
+        snapshots,
         bars.to_vec(),
         per_symbol_costs,
         inputs,

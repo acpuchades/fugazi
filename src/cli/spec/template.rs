@@ -79,7 +79,9 @@ impl<T> SpecTemplate<T> {
     }
 
     /// Access the raw tree — useful for diagnostics or non-`T` consumers
-    /// (e.g. a config dump).
+    /// (e.g. a config dump), and by unit tests that want to inspect
+    /// substitution state.
+    #[allow(dead_code)]
     pub fn tree(&self) -> &Value {
         &self.tree
     }

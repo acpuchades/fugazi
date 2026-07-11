@@ -39,7 +39,7 @@ use crate::calendar::{self, AssetClass, BarsPerYearSpec, ScopedFrequency, Window
 use crate::costs::CostConfig;
 use crate::data::DataFrame;
 use crate::metrics;
-use crate::spec::{PairsStrategySpec, SingleStrategySpec};
+use crate::spec::{BasketStrategySpec, PairsStrategySpec, SingleStrategySpec};
 use crate::style;
 
 /// Console-logging knobs plus the run's inputs, threaded in from the CLI args.
@@ -323,6 +323,214 @@ pub fn run_pairs(
         }
     }
     Ok(summary)
+}
+
+/// The basket runner: drive a [`BasketStrategy`](fugazi::strategies::BasketStrategy)
+/// over every symbol discovered in `frame`, time-aligning per-symbol atom
+/// streams by outer-joining on `time` (a symbol without a bar at some
+/// time simply doesn't appear in that bar's snapshot — the strategy's
+/// per-symbol `Pick` reads `None` and its score chain propagates it up).
+///
+/// The tradeable **universe is the set of symbols in the frame** — no
+/// explicit declaration in the YAML; the basket rebuilds its
+/// score/sizing chains lazily as symbols appear (see
+/// [`BasketStrategySpec`] for the `!arg SYM` substitution model). A
+/// per-symbol cost bundle is resolved from `--costs` for each symbol
+/// (via [`fugazi::PaperWallet::set_costs_for`]) so a scoped rule like
+/// `BTC:0.001,ETH:0.0005` applies per leg; symbols not scoped fall back
+/// to the wallet's zero-cost default.
+pub fn run_basket(
+    spec: &BasketStrategySpec,
+    frame: &DataFrame,
+    opts: &RunOptions,
+) -> Result<Summary> {
+    let started = SystemTime::now();
+    let universe = frame.symbols();
+    if universe.is_empty() {
+        anyhow::bail!(
+            "no symbols found in the input series — a basket needs at least one traded asset"
+        );
+    }
+    // Per-symbol atom streams, sorted by time (DataFrame::atoms walks a
+    // BTreeMap so ascending order is guaranteed by construction).
+    let per_symbol: Vec<(String, Vec<(String, Atom)>)> = universe
+        .iter()
+        .map(|sym| Ok::<_, anyhow::Error>((sym.clone(), frame.atoms(sym)?.atoms)))
+        .collect::<Result<_>>()?;
+    let (bars, snapshots) = join_universe_by_time(&per_symbol);
+    if bars.is_empty() {
+        anyhow::bail!(
+            "no bars found in the input series across the {} discovered symbol(s)",
+            universe.len()
+        );
+    }
+
+    std::fs::create_dir_all(opts.out_dir)
+        .with_context(|| format!("creating output dir `{}`", opts.out_dir.display()))?;
+
+    let start = bars.first().map_or("", |t| t.as_str());
+    let end = bars.last().map_or("", |t| t.as_str());
+    // Cadence: try the first symbol's --frequency scope, then fall back to
+    // detection from that symbol's timestamps. Basket YAML doesn't declare
+    // per-symbol cadences (that's a follow-up if mixed cadences become a
+    // real need); typical baskets are homogeneous.
+    let representative = &universe[0];
+    let effective_freq = calendar::pick_frequency(opts.frequency, representative).or_else(|| {
+        per_symbol
+            .iter()
+            .find(|(s, _)| s == representative)
+            .and_then(|(_, atoms)| {
+                calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a))
+            })
+    });
+    let bars_per_year = calendar::pick_bars_per_year(
+        opts.bars_per_year,
+        representative,
+        effective_freq,
+    )
+    .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
+    let no_cost_warning = !opts.costs_supplied;
+    let windowed_bars = opts
+        .windowed
+        .map(|w| {
+            w.resolve(effective_freq, opts.asset_class)
+                .map_err(anyhow::Error::msg)
+        })
+        .transpose()
+        .context("resolving `-w/--windowed`")?;
+    let seconds_per_bar = opts
+        .asset_class
+        .zip(effective_freq)
+        .map(|(class, freq)| class.trading_seconds_per_bar(freq));
+    let inputs = IterationInputs {
+        cash: opts.cash,
+        bars_per_year,
+        risk_free_rate: opts.risk_free_rate,
+        cost_config: opts.cost_config,
+        effective_freq,
+        windowed: windowed_bars,
+        seconds_per_bar,
+    };
+    if !opts.quiet {
+        let costs_active = universe
+            .iter()
+            .any(|s| !opts.cost_config.resolve(s, effective_freq).is_none());
+        style::print_header("run", "trade a basket across an N-symbol universe");
+        print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active);
+        if no_cost_warning {
+            print_no_cost_warning();
+        }
+    }
+
+    let iter =
+        backtest::run_iteration_basket(spec, &bars, &snapshots, &universe, &inputs);
+
+    write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
+    if !opts.quiet {
+        println!("\n{}", style::bold("trades"));
+        stream_trades(&iter);
+    }
+
+    write_returns_csv(&iter, &opts.out_dir.join("returns.csv"))?;
+
+    metrics::write_yaml(&iter.metrics, &opts.out_dir.join("metrics.yml"))?;
+
+    if let Some(ws) = iter.windowed.as_deref() {
+        let dsr_context = metrics::windows_dsr_context(ws);
+        write_windowed_csv(ws, &iter.bars, dsr_context, &opts.out_dir.join("metrics.csv"))?;
+    }
+    if let Some(rs) = iter.rolling.as_deref() {
+        write_windowed_csv(rs, &iter.bars, None, &opts.out_dir.join("rolling.csv"))?;
+    }
+
+    let summary = Summary {
+        final_equity: iter.summary.final_equity,
+        return_pct: if opts.cash != 0.0 {
+            (iter.summary.final_equity - opts.cash) / opts.cash * 100.0
+        } else {
+            0.0
+        },
+        trades: iter.summary.trades,
+        bars: iter.summary.bars,
+    };
+
+    let finished = SystemTime::now();
+    if !opts.quiet {
+        print_result_block(opts, &summary, started, finished);
+        print_metrics_block(
+            &iter.metrics,
+            None,
+            iter.gross_metrics.as_ref(),
+            effective_freq,
+        );
+        if let Some(windows) = iter.windowed.as_deref() {
+            print_windowed_metrics_block(windows);
+        }
+    }
+    Ok(summary)
+}
+
+/// Outer-join every symbol's atom stream on `time`. Returns `(times,
+/// snapshots)` where each snapshot carries only the symbols with a bar at
+/// that time — sparse per bar is normal. Each per-symbol series is already
+/// sorted (BTreeMap invariant), so a single N-way merge over cursors
+/// suffices.
+fn join_universe_by_time(
+    per_symbol: &[(String, Vec<(String, Atom)>)],
+) -> (Vec<String>, Vec<fugazi::types::Snapshot<String>>) {
+    // Cursor per symbol.
+    let mut cursors = vec![0usize; per_symbol.len()];
+    let mut times: Vec<String> = Vec::new();
+    let mut snaps: Vec<fugazi::types::Snapshot<String>> = Vec::new();
+    loop {
+        // Find the smallest time head across all live cursors.
+        let next_time: Option<&str> = per_symbol
+            .iter()
+            .zip(cursors.iter())
+            .filter_map(|((_sym, atoms), &i)| atoms.get(i).map(|(t, _)| t.as_str()))
+            .min();
+        let Some(next) = next_time else {
+            break;
+        };
+        let next_owned = next.to_string();
+        let mut snap = fugazi::types::Snapshot::<String>::new();
+        for ((sym, atoms), cursor) in per_symbol.iter().zip(cursors.iter_mut()) {
+            if let Some((t, atom)) = atoms.get(*cursor)
+                && t == &next_owned
+            {
+                snap.push(Some(sym.clone()), None, atom.clone());
+                *cursor += 1;
+            }
+        }
+        times.push(next_owned);
+        snaps.push(snap);
+    }
+    (times, snaps)
+}
+
+fn print_basket_inputs_block(
+    opts: &RunOptions,
+    universe: &[String],
+    start: &str,
+    end: &str,
+    bars: usize,
+    costs_active: bool,
+) {
+    println!("{}", style::bold("inputs"));
+    print_field("strategy", opts.strategy_label);
+    print_field(
+        "universe",
+        &format!("{} symbols ({})", universe.len(), universe.join(", ")),
+    );
+    print_field("params", opts.params);
+    print_field("period", &format!("{start} → {end} ({bars} bars)"));
+    print_field("capital", &format!("{:.2}", opts.cash));
+    if costs_active {
+        print_field("costs", "active (commission/spread/slippage applied)");
+    } else if opts.costs_supplied {
+        print_field("costs", "none (explicit)");
+    }
+    print_field("output", &opts.out_dir.display().to_string());
 }
 
 /// Inner-join the two legs' atom streams on their `time` label. Returns

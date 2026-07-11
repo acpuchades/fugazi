@@ -456,6 +456,22 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
                 );
             }
         }
+        StrategyKind::Basket => {
+            // Basket parses eagerly: the top-level enum + templates
+            // deserialize, but the templates only typed-parse per-symbol
+            // at run time (against `!arg SYM`). So `check` here just
+            // confirms the outer spec + selection dispatch.
+            let spec = spec::BasketStrategySpec::from_text_with_params(&text, &param_table)
+                .with_context(|| parse_error_context(&args.strategy))?;
+            if !args.quiet {
+                style::print_header("check", "parse and validate a basket strategy spec");
+                println!(
+                    "{}: ok (selection {:?})",
+                    args.strategy.label(),
+                    spec.selection,
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -563,6 +579,11 @@ fn run(args: RunArgs) -> Result<()> {
                 .with_context(|| parse_error_context(&args.strategy))?;
             run::run_pairs(&spec, &frame, &opts)?;
         }
+        StrategyKind::Basket => {
+            let spec = spec::BasketStrategySpec::from_text_with_params(&text, &param_table)
+                .with_context(|| parse_error_context(&args.strategy))?;
+            run::run_basket(&spec, &frame, &opts)?;
+        }
     }
     Ok(())
 }
@@ -571,6 +592,11 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
     if args.strategy.kind == StrategyKind::Pairs {
         anyhow::bail!(
             "`fugazi optimize` doesn't yet support `pairs:` strategies; use `fugazi run` for now"
+        );
+    }
+    if args.strategy.kind == StrategyKind::Basket {
+        anyhow::bail!(
+            "`fugazi optimize` doesn't yet support `basket:` strategies; use `fugazi run` for now"
         );
     }
     let param_table = params::table(&args.params)?;
