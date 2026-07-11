@@ -129,14 +129,6 @@ impl FromStr for StrategySource {
                 source: rest.parse().expect("infallible"),
             });
         }
-        if s.strip_prefix("multiple:").is_some() {
-            return Err(
-                "`multiple:` is reserved for a future MultiAssetStrategy and is not yet \
-                 implemented; use `single:` (or omit the prefix), or `pairs:` for a pair-trading \
-                 spec"
-                    .to_string(),
-            );
-        }
         Ok(StrategySource {
             kind: StrategyKind::Single,
             source: s.parse().expect("infallible"),

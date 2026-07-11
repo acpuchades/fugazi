@@ -261,6 +261,263 @@ fn scope_precedence_applies_at_run_time() {
     );
 }
 
+/// Per-leg costs for a `pairs:` strategy: `--costs 'A:...,B:...'` scopes each
+/// symbol on its own commission model, so the pairs backtest applies each
+/// leg's model to its own fills.
+#[test]
+fn pairs_run_applies_per_leg_costs() {
+    let out = std::env::temp_dir().join("fugazi_pairs_per_leg_costs");
+    let _ = std::fs::remove_dir_all(&out);
+
+    // Two-symbol series: A stays flat at 100, B mean-reverts around 90.
+    // The strategy trades whenever the spread crosses ±3, so both legs fill.
+    let csv = out.parent().unwrap().join("pairs_per_leg_costs.csv");
+    let mut rows = String::from("symbol;time;open;high;low;close;volume\n");
+    let a_series = [100.0; 20];
+    let b_series = [
+        90.0, 96.0, 88.0, 96.0, 88.0, 96.0, 88.0, 96.0, 88.0, 96.0, 88.0, 96.0, 88.0, 96.0, 88.0,
+        96.0, 88.0, 96.0, 88.0, 96.0,
+    ];
+    for (i, &p) in a_series.iter().enumerate() {
+        rows.push_str(&format!(
+            "A;2024-01-{:02};{p};{p};{p};{p};1000\n",
+            i + 1
+        ));
+    }
+    for (i, &p) in b_series.iter().enumerate() {
+        rows.push_str(&format!(
+            "B;2024-01-{:02};{p};{p};{p};{p};1000\n",
+            i + 1
+        ));
+    }
+    std::fs::write(&csv, rows).expect("write pairs csv");
+
+    // A pairs spec that enters when spread crosses out and exits when it
+    // reverts. Signals rooted through `!pick { symbol: <SYM> }`.
+    let pairs_yaml = out.parent().unwrap().join("pairs_per_leg_costs.yml");
+    std::fs::write(
+        &pairs_yaml,
+        r#"
+left: A
+right: B
+enter: !above
+  source: !sub
+    lhs: !close { source: !pick { symbol: A } }
+    rhs: !close { source: !pick { symbol: B } }
+  level: 8.0
+exit: !below
+  source: !sub
+    lhs: !close { source: !pick { symbol: A } }
+    rhs: !close { source: !pick { symbol: B } }
+  level: 2.0
+"#,
+    )
+    .expect("write pairs yaml");
+
+    // Per-leg commissions: A on a 10% rate, B on a 1% rate. If the CLI applied
+    // one bundle to both legs (the pre-refactor behavior) both would carry the
+    // same commission.
+    let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
+        .arg("run")
+        .arg(format!("pairs:@{}", pairs_yaml.to_str().unwrap()))
+        .arg("--series")
+        .arg(format!("@{}", csv.to_str().unwrap()))
+        .args([
+            "--output-dir",
+            out.to_str().unwrap(),
+            "--crypto",
+            "-f",
+            "1d",
+            "--quiet",
+            "--costs",
+            "A:commission=!percentage { rate: 0.10 },B:commission=!percentage { rate: 0.01 }",
+        ])
+        .status()
+        .expect("failed to launch fugazi");
+    let _ = std::fs::remove_file(&csv);
+    let _ = std::fs::remove_file(&pairs_yaml);
+    assert!(status.success(), "fugazi pairs run exited with failure");
+
+    let trades = std::fs::read_to_string(out.join("trades.csv")).expect("trades.csv");
+    let header = trades.lines().next().unwrap();
+    assert_eq!(header, "time,symbol,side,units,price,kind,commission");
+
+    // Collect commission rates (commission / notional) per leg.
+    let mut a_rates = Vec::new();
+    let mut b_rates = Vec::new();
+    for row in trades.lines().skip(1) {
+        let cols: Vec<&str> = row.split(',').collect();
+        assert_eq!(cols.len(), 7);
+        let sym = cols[1];
+        let units: f64 = cols[3].parse().unwrap();
+        let price: f64 = cols[4].parse().unwrap();
+        let commission: f64 = cols[6].parse().unwrap();
+        let notional = units * price;
+        let rate = commission / notional;
+        if sym == "A" {
+            a_rates.push(rate);
+        } else if sym == "B" {
+            b_rates.push(rate);
+        }
+    }
+    assert!(!a_rates.is_empty(), "expected A fills:\n{trades}");
+    assert!(!b_rates.is_empty(), "expected B fills:\n{trades}");
+    for r in &a_rates {
+        assert!((r - 0.10).abs() < 1e-6, "A leg should pay 10%: got {r}");
+    }
+    for r in &b_rates {
+        assert!((r - 0.01).abs() < 1e-6, "B leg should pay 1%: got {r}");
+    }
+}
+
+/// A pairs runtime driver that lets us reuse one CSV fixture across
+/// unscoped / frequency-scoped / symbol-scoped tests. Runs the strategy
+/// with `costs` (verbatim), parses `trades.csv`, returns the per-leg
+/// commission rates (`commission / notional`) as a `(Vec<f64>, Vec<f64>)`
+/// keyed on `A`/`B`.
+fn run_pairs_with_costs(out_name: &str, costs: &str) -> (Vec<f64>, Vec<f64>) {
+    let out = std::env::temp_dir().join(out_name);
+    let _ = std::fs::remove_dir_all(&out);
+    // Same fixture as `pairs_run_applies_per_leg_costs`: A flat, B mean-reverts.
+    let csv = out
+        .parent()
+        .unwrap()
+        .join(format!("{out_name}_series.csv"));
+    let mut rows = String::from("symbol;time;open;high;low;close;volume\n");
+    let a_series = [100.0; 20];
+    let b_series = [
+        90.0, 96.0, 88.0, 96.0, 88.0, 96.0, 88.0, 96.0, 88.0, 96.0, 88.0, 96.0, 88.0, 96.0, 88.0,
+        96.0, 88.0, 96.0, 88.0, 96.0,
+    ];
+    for (i, &p) in a_series.iter().enumerate() {
+        rows.push_str(&format!(
+            "A;2024-01-{:02};{p};{p};{p};{p};1000\n",
+            i + 1
+        ));
+    }
+    for (i, &p) in b_series.iter().enumerate() {
+        rows.push_str(&format!(
+            "B;2024-01-{:02};{p};{p};{p};{p};1000\n",
+            i + 1
+        ));
+    }
+    std::fs::write(&csv, rows).expect("write pairs csv");
+
+    let pairs_yaml = out
+        .parent()
+        .unwrap()
+        .join(format!("{out_name}_strategy.yml"));
+    std::fs::write(
+        &pairs_yaml,
+        r#"
+left: A
+right: B
+enter: !above
+  source: !sub
+    lhs: !close { source: !pick { symbol: A } }
+    rhs: !close { source: !pick { symbol: B } }
+  level: 8.0
+exit: !below
+  source: !sub
+    lhs: !close { source: !pick { symbol: A } }
+    rhs: !close { source: !pick { symbol: B } }
+  level: 2.0
+"#,
+    )
+    .expect("write pairs yaml");
+
+    let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
+        .arg("run")
+        .arg(format!("pairs:@{}", pairs_yaml.to_str().unwrap()))
+        .arg("--series")
+        .arg(format!("@{}", csv.to_str().unwrap()))
+        .args([
+            "--output-dir",
+            out.to_str().unwrap(),
+            "--crypto",
+            "-f",
+            "1d",
+            "--quiet",
+            "--costs",
+            costs,
+        ])
+        .status()
+        .expect("failed to launch fugazi");
+    let trades = std::fs::read_to_string(out.join("trades.csv")).expect("trades.csv");
+    let _ = std::fs::remove_file(&csv);
+    let _ = std::fs::remove_file(&pairs_yaml);
+    assert!(status.success(), "fugazi pairs run exited with failure");
+
+    let mut a = Vec::new();
+    let mut b = Vec::new();
+    for row in trades.lines().skip(1) {
+        let cols: Vec<&str> = row.split(',').collect();
+        let sym = cols[1];
+        let units: f64 = cols[3].parse().unwrap();
+        let price: f64 = cols[4].parse().unwrap();
+        let commission: f64 = cols[6].parse().unwrap();
+        let rate = commission / (units * price);
+        if sym == "A" {
+            a.push(rate);
+        } else if sym == "B" {
+            b.push(rate);
+        }
+    }
+    (a, b)
+}
+
+/// An **unscoped** (global) commission applies to *every* traded symbol in a
+/// pairs run — the CLI resolves the cost config per leg, and each leg falls
+/// through to the default when no scope matches.
+#[test]
+fn pairs_run_applies_global_default_costs_to_every_leg() {
+    let (a_rates, b_rates) = run_pairs_with_costs(
+        "fugazi_pairs_global_default",
+        "commission=!percentage { rate: 0.03 }",
+    );
+    assert!(!a_rates.is_empty() && !b_rates.is_empty());
+    for r in a_rates.iter().chain(b_rates.iter()) {
+        assert!((r - 0.03).abs() < 1e-6, "expected 3% everywhere, got {r}");
+    }
+}
+
+/// A **frequency-scoped** commission (`[1d]:commission=...`) fires for every
+/// symbol that trades on 1d bars — the CLI resolves per-leg with the
+/// effective bar cadence, so a `by_interval[1d]` scope catches both legs of
+/// a pairs run on daily data.
+#[test]
+fn pairs_run_applies_frequency_scoped_costs_to_every_leg() {
+    let (a_rates, b_rates) = run_pairs_with_costs(
+        "fugazi_pairs_freq_scope",
+        "[1d]:commission=!percentage { rate: 0.05 }",
+    );
+    assert!(!a_rates.is_empty() && !b_rates.is_empty());
+    for r in a_rates.iter().chain(b_rates.iter()) {
+        assert!((r - 0.05).abs() < 1e-6, "expected 5% on both legs, got {r}");
+    }
+}
+
+/// **Mixed**: an unscoped default plus a symbol-scoped override for one leg
+/// only. The scoped leg picks the override (specificity wins), the other
+/// leg falls back to the global default.
+#[test]
+fn pairs_run_mixes_global_default_with_symbol_override() {
+    let (a_rates, b_rates) = run_pairs_with_costs(
+        "fugazi_pairs_mixed_default",
+        "commission=!percentage { rate: 0.001 },A:commission=!percentage { rate: 0.05 }",
+    );
+    assert!(!a_rates.is_empty() && !b_rates.is_empty());
+    for r in &a_rates {
+        assert!((r - 0.05).abs() < 1e-6, "A: symbol scope should win, got {r}");
+    }
+    for r in &b_rates {
+        assert!(
+            (r - 0.001).abs() < 1e-6,
+            "B: unscoped default should apply, got {r}"
+        );
+    }
+}
+
 /// When two `--costs` terms with the same scope are given, the later one wins
 /// (matching `--params`'s left-to-right override rule).
 #[test]

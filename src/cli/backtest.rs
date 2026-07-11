@@ -186,7 +186,7 @@ pub fn run_iteration(
         || spec.build(inputs.cash, &schema),
         &snapshots,
         bars,
-        costs,
+        vec![(spec.symbol.clone(), costs)],
         inputs,
     )
 }
@@ -199,9 +199,16 @@ pub fn run_iteration(
 /// `left`/`right` are the parallel atom streams — the caller is responsible
 /// for joining them on `time`; each index corresponds to the same time
 /// label in `bars`. The wallet is priced for both legs per bar so both
-/// mark to market and can produce fills. Per-leg divergent cost models
-/// aren't wired: the single [`TradingCosts`] bundle is resolved against
-/// the left leg's symbol (follow-up).
+/// mark to market and can produce fills. Cost models are resolved **per
+/// leg** and installed as per-symbol overrides on the wallet: the
+/// `--costs` spec is asked for `(left, freq)` and `(right, freq)`
+/// independently, so a scoped entry like `BTC: 0.001, ETH: 0.0005` prices
+/// each side on its own commission / spread / slippage model, and an
+/// unscoped default applies uniformly to both. The two symbols are treated
+/// symmetrically — the wallet's fallback is zero-cost and every traded leg
+/// enters via [`PaperWallet::set_costs_for`], so this shape lifts
+/// unchanged to a future N-symbol `BasketStrategy` (loop over basket
+/// symbols instead of `[left, right]`).
 pub fn run_iteration_pairs(
     spec: &PairsStrategySpec,
     bars: &[String],
@@ -219,7 +226,16 @@ pub fn run_iteration_pairs(
         left.len(),
         "pairs run: `bars` labels must match the aligned stream length"
     );
-    let costs = inputs.cost_config.resolve(&spec.left, inputs.effective_freq);
+    let per_symbol_costs = vec![
+        (
+            spec.left.clone(),
+            inputs.cost_config.resolve(&spec.left, inputs.effective_freq),
+        ),
+        (
+            spec.right.clone(),
+            inputs.cost_config.resolve(&spec.right, inputs.effective_freq),
+        ),
+    ];
     let schema = left
         .iter()
         .chain(right.iter())
@@ -240,7 +256,7 @@ pub fn run_iteration_pairs(
         || spec.build(inputs.cash, &schema),
         &snapshots,
         bars.to_vec(),
-        costs,
+        per_symbol_costs,
         inputs,
     )
 }
@@ -250,6 +266,17 @@ pub fn run_iteration_pairs(
 /// optionally re-runs it against a zero-cost twin for the gross diff, and
 /// assembles the whole-run / windowed / rolling metrics.
 ///
+/// `per_symbol_costs` is the flat list of per-symbol cost bundles the
+/// wallet is primed with — installed via
+/// [`PaperWallet::set_costs_for`](fugazi::PaperWallet::set_costs_for) so
+/// each traded symbol carries its own commission / spread / slippage
+/// pipeline. The wallet's fallback is always [`TradingCosts::none`], so a
+/// symbol the strategy trades that isn't in the list fills at zero cost.
+/// Single-asset callers pass one entry; pairs pass two; a future N-symbol
+/// basket driver passes N — no other reshuffling needed. The gross twin
+/// (built only when the priced run has non-none costs) uses a plain
+/// zero-cost wallet.
+///
 /// `build_strategy` is called at most twice (once for the priced run, once
 /// for the gross twin when costs are active), so any per-leaf state a spec
 /// carries reads freshly on each call.
@@ -257,15 +284,18 @@ fn run_iteration_core<S>(
     mut build_strategy: impl FnMut() -> S,
     snapshots: &[fugazi::types::Snapshot<String>],
     bars: Vec<String>,
-    costs: TradingCosts,
+    per_symbol_costs: Vec<(String, TradingCosts)>,
     inputs: &IterationInputs,
 ) -> IterationResult
 where
     S: fugazi::Strategy<Input = fugazi::types::Snapshot<String>, Symbol = String>,
 {
-    let costs_active = !costs.is_none();
+    let costs_active = per_symbol_costs.iter().any(|(_, c)| !c.is_none());
     let mut strategy = build_strategy();
-    let mut wallet = PaperWallet::with_costs(inputs.cash, costs);
+    let mut wallet = PaperWallet::new(inputs.cash);
+    for (sym, c) in per_symbol_costs {
+        wallet.set_costs_for(sym, c);
+    }
     let report = fugazi::backtest::run(&mut strategy, &mut wallet, snapshots.iter().cloned());
     // Gross twin under active costs: same strategy/snapshots/cash, no cost
     // model, so any difference is attributable to costs alone.

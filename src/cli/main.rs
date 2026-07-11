@@ -100,9 +100,8 @@ enum Command {
 #[derive(Args)]
 struct RunArgs {
     /// The strategy: `@file.yml` loads a file, anything else is inline YAML.
-    /// May carry a leading `single:` shape prefix (reserved for a future
-    /// `multiple:` sibling) — `single:@strategy.yml` is equivalent to
-    /// `@strategy.yml` today.
+    /// May carry a leading shape prefix: `single:` (or none) for a
+    /// `SingleAssetStrategy`, `pairs:` for a two-leg `PairsStrategy`.
     #[arg(value_name = "STRATEGY")]
     strategy: StrategySource,
 
@@ -240,8 +239,8 @@ enum CheckCmd {
 #[derive(Args)]
 struct CheckStrategyArgs {
     /// The strategy: `@file.yml` loads a file, anything else is inline YAML.
-    /// May carry a leading `single:` shape prefix (reserved for a future
-    /// `multiple:` sibling).
+    /// May carry a leading shape prefix: `single:` (or none) for a
+    /// `SingleAssetStrategy`, `pairs:` for a two-leg `PairsStrategy`.
     #[arg(value_name = "STRATEGY")]
     strategy: StrategySource,
 
@@ -290,8 +289,8 @@ struct CheckCostsArgs {
 #[derive(Args)]
 struct OptimizeArgs {
     /// The strategy: `@file.yml` loads a file, anything else is inline YAML.
-    /// May carry a leading `single:` shape prefix (reserved for a future
-    /// `multiple:` sibling).
+    /// May carry a leading shape prefix: `single:` (or none) for a
+    /// `SingleAssetStrategy`, `pairs:` for a two-leg `PairsStrategy`.
     #[arg(value_name = "STRATEGY")]
     strategy: StrategySource,
 

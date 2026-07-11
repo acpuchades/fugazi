@@ -525,6 +525,7 @@ pub struct PaperWallet<Sym> {
     blotter: Vec<Order<Sym>>,
     next_id: u64,
     costs: TradingCosts,
+    per_symbol_costs: HashMap<Sym, TradingCosts>,
 }
 
 impl<Sym> PaperWallet<Sym> {
@@ -551,6 +552,7 @@ impl<Sym> PaperWallet<Sym> {
             blotter: Vec::new(),
             next_id: 0,
             costs,
+            per_symbol_costs: HashMap::new(),
         }
     }
 
@@ -581,6 +583,22 @@ impl<Sym> PaperWallet<Sym> {
 }
 
 impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
+    /// Install a per-symbol [`TradingCosts`] override. Every fill on `symbol`
+    /// thereafter routes through the given bundle instead of the default set
+    /// by [`with_costs`](Self::with_costs); fills on other symbols still see
+    /// the default. Latest-wins per symbol.
+    ///
+    /// Scales to any number of symbols — a multi-asset driver just calls this
+    /// once per traded symbol (the pairs CLI does it for `left`/`right`; a
+    /// future N-symbol basket driver would loop over its universe). The
+    /// wallet's fallback default doubles as the "unscoped" model for symbols
+    /// the caller doesn't explicitly configure; using [`Self::new`]
+    /// (zero-cost default) plus per-symbol installs gives a fully symmetric,
+    /// N-way cost model where every priced leg is a per-symbol entry.
+    pub fn set_costs_for(&mut self, symbol: Sym, costs: TradingCosts) {
+        self.per_symbol_costs.insert(symbol, costs);
+    }
+
     /// Iterate the held positions.
     pub fn positions(&self) -> impl Iterator<Item = Units<Sym>> + '_ {
         self.positions.iter().map(|(symbol, &amount)| Units {
@@ -631,25 +649,27 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         // Apply the costs pipeline: spread → slippage → commission. Direction
         // is derived from `delta`'s sign (buys pay the ask, sells receive the
         // bid), and the fill kind threads through so a stop can slip further
-        // than a plain market fill.
+        // than a plain market fill. Per-symbol overrides installed via
+        // [`set_costs_for`](Self::set_costs_for) win over the default bundle.
         let side = if delta > 0.0 { Side::Buy } else { Side::Sell };
         let units = delta.abs();
-        let half_spread = self.costs.spread.half_spread(theoretical_price, &bar);
+        let costs = self
+            .per_symbol_costs
+            .get(&symbol)
+            .unwrap_or(&self.costs);
+        let half_spread = costs.spread.half_spread(theoretical_price, &bar);
         let post_spread = match side {
             Side::Buy => theoretical_price + half_spread,
             Side::Sell => theoretical_price - half_spread,
         };
-        let final_price = self
-            .costs
-            .slippage
-            .adjust(side, post_spread, units, &bar, kind);
+        let final_price = costs.slippage.adjust(side, post_spread, units, &bar, kind);
         // A pathological cost config could drive the fill non-positive; refuse
         // rather than book a negative-value trade.
         if final_price <= 0.0 {
             return Err(WalletError::InvalidPrice);
         }
         let notional = final_price * units;
-        let commission = self.costs.commission.commission(notional, units).max(0.0);
+        let commission = costs.commission.commission(notional, units).max(0.0);
 
         // No margin: a net buy plus its commission can't drive cash below zero
         // (tolerant of the epsilon rounding in an all-in `value_frac(1.0)`,
@@ -1246,5 +1266,109 @@ mod tests {
         assert_eq!(w.position(&"B").amount, -2.0);
         // Bought 3@10 (-30), shorted 2@20 (+40): net +10 vs start.
         assert_eq!(w.funds().0, 100_000.0 + 10.0);
+    }
+
+    /// A basket-shaped setup: no wallet default, every traded symbol enters
+    /// via [`PaperWallet::set_costs_for`], and each pays its own commission.
+    /// The shape a future N-symbol `BasketStrategy` would use.
+    #[test]
+    fn per_symbol_costs_scale_to_many_symbols() {
+        use crate::costs::{FixedCommission, NoSlippage, NoSpread};
+        let mut w: PaperWallet<&'static str> = PaperWallet::new(100_000.0);
+        // Universe of five symbols, each on its own commission model.
+        let universe = [("A", 1.0), ("B", 2.0), ("C", 3.0), ("D", 4.0), ("E", 5.0)];
+        for &(sym, fee) in &universe {
+            w.set_costs_for(
+                sym,
+                TradingCosts::new(
+                    Box::new(FixedCommission::new(fee)),
+                    Box::new(NoSpread),
+                    Box::new(NoSlippage),
+                ),
+            );
+        }
+        // Prime every symbol, then queue and fill one buy per symbol.
+        for &(sym, _) in &universe {
+            w.update(sym, bar(10.0));
+        }
+        for &(sym, _) in &universe {
+            w.set_position(Units { symbol: sym, amount: 1.0 }).unwrap();
+        }
+        for &(sym, _) in &universe {
+            w.update(sym, bar(10.0));
+        }
+        for &(sym, expected) in &universe {
+            let fill = w
+                .orders()
+                .iter()
+                .find(|o| o.symbol == sym)
+                .expect("fill");
+            assert!(
+                (fill.commission - expected).abs() < 1e-9,
+                "{sym}: expected {expected}, got {}",
+                fill.commission
+            );
+        }
+    }
+
+    /// A symbol with no per-symbol installation falls back to the wallet's
+    /// default bundle — the safe zero-cost default when the wallet is built
+    /// via [`PaperWallet::new`].
+    #[test]
+    fn fill_on_unconfigured_symbol_uses_default_costs() {
+        use crate::costs::{FixedCommission, NoSlippage, NoSpread};
+        let mut w: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
+        // Only "A" gets a custom model; "B" trades on the (zero-cost) fallback.
+        w.set_costs_for(
+            "A",
+            TradingCosts::new(
+                Box::new(FixedCommission::new(7.0)),
+                Box::new(NoSpread),
+                Box::new(NoSlippage),
+            ),
+        );
+        w.update("A", bar(10.0));
+        w.update("B", bar(20.0));
+        w.set_position(Units { symbol: "A", amount: 1.0 }).unwrap();
+        w.set_position(Units { symbol: "B", amount: 1.0 }).unwrap();
+        w.update("A", bar(10.0));
+        w.update("B", bar(20.0));
+        let a = w.orders().iter().find(|o| o.symbol == "A").unwrap();
+        let b = w.orders().iter().find(|o| o.symbol == "B").unwrap();
+        assert!((a.commission - 7.0).abs() < 1e-9, "A: {}", a.commission);
+        assert!(b.commission.abs() < 1e-9, "B (default): {}", b.commission);
+    }
+
+    #[test]
+    fn per_symbol_costs_override_the_default_bundle() {
+        use crate::costs::{FixedCommission, NoSlippage, NoSpread};
+        // Default: $1 per fill. A leg gets its own override: $5 per fill.
+        let default = TradingCosts::new(
+            Box::new(FixedCommission::new(1.0)),
+            Box::new(NoSpread),
+            Box::new(NoSlippage),
+        );
+        let leg_override = TradingCosts::new(
+            Box::new(FixedCommission::new(5.0)),
+            Box::new(NoSpread),
+            Box::new(NoSlippage),
+        );
+        let mut w: PaperWallet<&'static str> = PaperWallet::with_costs(100_000.0, default);
+        w.set_costs_for("B", leg_override);
+        // Prime both symbols and queue a buy on each.
+        w.update("A", bar(10.0));
+        w.update("B", bar(20.0));
+        w.set_position(Units { symbol: "A", amount: 3.0 }).unwrap();
+        w.set_position(Units { symbol: "B", amount: 2.0 }).unwrap();
+        // Fill both at the next open.
+        w.update("A", bar(10.0));
+        w.update("B", bar(20.0));
+        // A uses the default: $1 commission. B uses the override: $5.
+        let a_fill = w.orders().iter().find(|o| o.symbol == "A").unwrap();
+        let b_fill = w.orders().iter().find(|o| o.symbol == "B").unwrap();
+        assert!((a_fill.commission - 1.0).abs() < 1e-9, "A: got {}", a_fill.commission);
+        assert!((b_fill.commission - 5.0).abs() < 1e-9, "B: got {}", b_fill.commission);
+        // Cash out: 100000 − (3·10 + 1) − (2·20 + 5) = 100000 − 31 − 45 = 99924.
+        assert!((w.funds().0 - 99_924.0).abs() < 1e-6, "funds: {}", w.funds().0);
     }
 }

@@ -634,13 +634,19 @@ the parameterised version.
 
 ### Strategy shape prefix
 
-The strategy positional accepts an optional `single:` prefix:
-`single:@strategy.yml` is equivalent to `@strategy.yml` today. It is a
-shape hint reserved for a future `multiple:` sibling (a portfolio / pairs
-`MultiAssetStrategy` that sees several series at once); `multiple:@…` is
-rejected with a "reserved" message until then. A run always feeds every
-candle in the input series to the (single-asset) strategy in `time`
-order.
+The strategy positional accepts an optional shape prefix:
+
+- `single:` (or no prefix) — a `SingleAssetStrategy` file
+  (`single:@strategy.yml` ≡ `@strategy.yml`).
+- `pairs:` — a two-symbol `PairsStrategy` file (`pairs:@spread.yml`);
+  the document declares `left`/`right` symbols and cross-asset
+  signal / level expressions rooted through `!pick { symbol, freq }`.
+
+Any other prefix is rejected as an unknown shape. A single-asset run
+feeds every candle in the input series to the strategy in `time` order.
+A pairs run feeds the paired `(left, right)` atoms as one snapshot per
+bar; each leg is priced and can fill independently, and the strategy
+sees both symbols in the same snapshot.
 
 ### Analyzing a run in R
 

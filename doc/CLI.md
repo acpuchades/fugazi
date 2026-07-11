@@ -106,7 +106,7 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
 
 | Flag | Description |
 | --- | --- |
-| `<STRATEGY>` | Positional. `@file.yml` loads a file; anything else is inline YAML. An optional `single:` shape prefix is accepted (`single:@strategy.yml` ≡ `@strategy.yml`) — reserved for a future `multiple:` sibling, see [Strategy shape prefix](#strategy-shape-prefix). |
+| `<STRATEGY>` | Positional. `@file.yml` loads a file; anything else is inline YAML. An optional shape prefix picks the strategy shape: `single:` (or no prefix) for a `SingleAssetStrategy`, `pairs:` for a two-leg `PairsStrategy`. See [Strategy shape prefix](#strategy-shape-prefix). |
 | `-s`, `--series <SPEC>` | Data series. Repeatable. See [--series](#--series). |
 | `-o`, `--output-dir <DIR>` | Directory to write `trades.csv`, `returns.csv`, and `metrics.yml` into (plus `metrics.csv` + `rolling.csv` under `-w`). Created if missing. Plain path — no interpolation. |
 | `-p`, `--params <SPEC>` | Placeholder substitution. Repeatable. See [--params](#--params). |
@@ -133,12 +133,17 @@ see the README's *Analyzing a run in R* section.
 
 #### Strategy shape prefix
 
-The strategy positional accepts an optional `single:` prefix —
-`single:@strategy.yml` is equivalent to `@strategy.yml` today. It is a
-shape hint reserved for a future `multiple:` sibling (a portfolio /
-pairs `MultiAssetStrategy` that sees several series at once). Any other
-prefix, including `multiple:`, is rejected at parse time with a
-"reserved" message.
+The strategy positional accepts an optional shape prefix:
+
+- `single:` (or no prefix) — a `SingleAssetStrategy` file
+  (`single:@strategy.yml` ≡ `@strategy.yml`).
+- `pairs:` — a two-symbol `PairsStrategy` file
+  (`pairs:@spread.yml`); the document declares `left`/`right` symbols
+  and cross-asset signal / level expressions rooted through
+  `!pick { symbol, freq }` — see the [Pairs strategy files](STRATEGIES.md)
+  section.
+
+Any other prefix is rejected as an unknown shape.
 
 **Console output** (unless `-q`): a two-line banner, then blocks for
 **inputs** (strategy, params, period, capital, output), **trades**
