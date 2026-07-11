@@ -4,8 +4,15 @@
 //! price-series indicator owns its input source and is generic over it, so an
 //! "EMA of an SMA of the close" is just `Ema::new(Sma::new(Current::close(),
 //! 10), 20)`. Those generics are monomorphised at compile time and cannot cross
-//! the Python boundary directly, so this crate erases them behind boxed trait
-//! objects ([`Source`], [`SignalBox`], [`MultiBox`]).
+//! the Python boundary directly, so this crate erases them behind the shared
+//! [`fugazi::runtime`](fugazi_core::runtime) vocabulary — a single
+//! `DynIndicator` trait exchanging `DynValue` payloads — plus a Python-local
+//! `TypedSource<In, Out>` newtype that carries compile-time `In`/`Out` markers
+//! so the Rust API's per-input, per-output typing survives across the boundary.
+//! `Source<I>` / `SignalBox<I>` / `StrSource<I>` / `AtomBox<I>` are the
+//! output-specialised faces of that one carrier; only [`MultiBox`] keeps its
+//! own trait, because its `Vec<Real>` + `&'static [&'static str]` shape
+//! doesn't fit the runtime's payload enum.
 //!
 //! Erasing a trait object throws away its associated `Input` type, so we keep
 //! the one bit that matters — the input *domain* — as an explicit runtime tag.
@@ -65,11 +72,15 @@ use fugazi_core::runtime::{self, Adapter, DynType, DynValue, TypeOf};
 // autotraits plus a `Send + Sync`-preserving deep clone. Every wrapper in
 // Python that used to hold its own erased trait object (Source<I> for Real,
 // SignalBox<I> for bool, StrSource<I> for Arc<str>, AtomBox<I> for Atom)
-// now collapses to a single generic `TypedSource<In, Out>` that carries the
+// collapses to a single generic `TypedSource<In, Out>` that carries the
 // runtime handle and compile-time markers for the input and output types.
-// The unification is phased: this pass introduces the machinery and folds
-// `StrSource<I>` into it; the other three traits stay for now and follow
-// in later phases.
+// The one exception is `MultiBox<I>` / `DynMulti<I>`: multi-output
+// indicators emit a value struct (MacdValue, BollingerValue, …) that maps
+// to `Vec<Real>` + `&'static [&'static str]` at the Python boundary, a
+// shape that doesn't fit the runtime's `DynValue` payload enum. Unifying
+// it would need a `Multi` variant on `DynValue` plus a `multi_names()`
+// method on the trait — a library API expansion for negligible savings,
+// so `DynMulti` intentionally stays local.
 // ---------------------------------------------------------------------------
 
 /// Python-local `Send + Sync` supertrait over the runtime's [`DynIndicator`],
