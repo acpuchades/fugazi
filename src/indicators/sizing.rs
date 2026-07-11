@@ -22,6 +22,31 @@ use crate::indicators::{
 };
 use crate::types::{Real, Snapshot};
 
+/// **Equal-weight sizing.**
+///
+/// Returns a constant multiplier of `1.0 / n_legs` — the per-leg
+/// [`ValueFraction`](crate::Size::ValueFraction) that yields 100% gross
+/// exposure across a basket of `n_legs` symbols with no leverage.
+///
+/// The intended pairing is
+/// [`BasketStrategy`](crate::strategies::BasketStrategy) with a
+/// [`SelectionRule::TopBottom`](crate::strategies::SelectionRule) of the
+/// same count: `sized_by(|_| equal_weight(10)).top_bottom(5, 5)` fills a
+/// 5-long / 5-short basket at 10% of equity each, totalling 100% gross.
+/// The helper is deliberately trivial — the crate never auto-normalizes
+/// sizing across a basket, so an explicit call communicates the intent
+/// and any deviation (a caller wanting 50% gross, say) reads as a
+/// different literal.
+///
+/// # Panics
+/// Panics if `n_legs == 0` (division by zero).
+pub fn equal_weight<Sym: Clone + PartialEq + 'static>(
+    n_legs: usize,
+) -> Value<Snapshot<Sym>> {
+    assert!(n_legs > 0, "n_legs must be > 0");
+    Value::<Snapshot<Sym>>::new(1.0 / n_legs as Real)
+}
+
 /// **Inverse-realized-volatility (vol targeting) sizing.**
 ///
 /// Returns the multiplier
@@ -315,6 +340,23 @@ mod tests {
     ) -> Option<Real> {
         let candle = Candle::new(price, price, price, price, 0.0);
         ind.update(Snapshot::of_atom(Atom::new(candle)))
+    }
+
+    #[test]
+    fn equal_weight_returns_reciprocal_of_leg_count() {
+        let mut ind = equal_weight::<&'static str>(10);
+        // Constant multiplier: reads Some on the first bar and never changes.
+        assert!((feed_bar(&mut ind, 100.0).unwrap() - 0.1).abs() < 1e-12);
+        assert!((feed_bar(&mut ind, 200.0).unwrap() - 0.1).abs() < 1e-12);
+        // Different leg counts read exactly 1/N.
+        let mut five = equal_weight::<&'static str>(5);
+        assert!((feed_bar(&mut five, 100.0).unwrap() - 0.2).abs() < 1e-12);
+    }
+
+    #[test]
+    #[should_panic]
+    fn equal_weight_rejects_zero_legs() {
+        let _ = equal_weight::<&'static str>(0);
     }
 
     #[test]

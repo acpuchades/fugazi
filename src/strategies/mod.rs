@@ -44,6 +44,7 @@
 //! * [`volume`] — volume- and flow-based.
 //! * [`composite`] — multi-condition (trend gated by strength, dip-in-uptrend).
 
+pub mod basket;
 pub mod composite;
 pub mod mean_reversion;
 pub mod momentum;
@@ -52,6 +53,7 @@ pub mod single_asset;
 pub mod trend;
 pub mod volume;
 
+pub use basket::BasketStrategy;
 pub use pairs::PairsStrategy;
 pub use single_asset::SingleAssetStrategy;
 
