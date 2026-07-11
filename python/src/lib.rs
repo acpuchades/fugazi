@@ -263,68 +263,47 @@ impl<I> Indicator for Source<I> {
     }
 }
 
-/// Object-safe shim over an `I`-input boolean indicator (a signal). Exposes the
-/// warmed-up `bool` directly (`false` until ready), as the Python API expects.
-trait DynSignal<I>: Send + Sync {
-    fn update(&mut self, input: I) -> bool;
-    fn is_true(&self) -> bool;
-    fn warm_up_period(&self) -> usize;
-    fn unstable_period(&self) -> usize;
-    fn reset(&mut self);
-    fn box_clone(&self) -> Box<dyn DynSignal<I>>;
-}
+/// A boxed `I`-input signal (bool-out). Wraps the shared [`TypedSource`]
+/// carrier and adds the "always-Some" semantics Python's bool combinators
+/// depend on: warm-up `None` on the underlying source is flattened to
+/// `Some(false)` at every update/value read, so a `.not_()` of a warming-up
+/// signal reads as `true` (matching the Python API's promise that a signal
+/// has a definite `bool` at every step).
+///
+/// The dedicated `DynSignal<I>` trait + blanket impl it used to have
+/// collapsed into [`runtime::Adapter`]'s coverage; only the flattening
+/// wrapper survives here.
+struct SignalBox<I>(TypedSource<I, bool>);
 
-impl<I, T> DynSignal<I> for T
+impl<I> SignalBox<I>
 where
-    T: Indicator<Input = I, Output = bool> + Clone + Send + Sync + 'static,
+    I: TryFrom<DynValue, Error = DynType> + TypeOf + Into<DynValue> + Clone + Send + Sync + 'static,
 {
-    fn update(&mut self, input: I) -> bool {
-        Indicator::update(self, input).unwrap_or(false)
-    }
-    fn is_true(&self) -> bool {
-        self.value().unwrap_or(false)
-    }
-    fn warm_up_period(&self) -> usize {
-        Indicator::warm_up_period(self)
-    }
-    fn unstable_period(&self) -> usize {
-        Indicator::unstable_period(self)
-    }
-    fn reset(&mut self) {
-        Indicator::reset(self)
-    }
-    fn box_clone(&self) -> Box<dyn DynSignal<I>> {
-        Box::new(self.clone())
-    }
-}
-
-/// A boxed `I`-input signal. Implements `Indicator<Output = bool>` so the
-/// `BoolIndicatorExt` combinators nest.
-struct SignalBox<I>(Box<dyn DynSignal<I>>);
-
-impl<I> SignalBox<I> {
     fn new<T>(inner: T) -> Self
     where
         T: Indicator<Input = I, Output = bool> + Clone + Send + Sync + 'static,
     {
-        SignalBox(Box::new(inner))
+        Self(TypedSource::new(inner))
     }
 }
 
 impl<I> Clone for SignalBox<I> {
     fn clone(&self) -> Self {
-        SignalBox(self.0.box_clone())
+        Self(self.0.clone())
     }
 }
 
-impl<I> Indicator for SignalBox<I> {
+impl<I> Indicator for SignalBox<I>
+where
+    I: Into<DynValue>,
+{
     type Input = I;
     type Output = bool;
     fn update(&mut self, input: I) -> Option<bool> {
-        Some(self.0.update(input))
+        Some(self.0.update(input).unwrap_or(false))
     }
     fn value(&self) -> Option<bool> {
-        Some(self.0.is_true())
+        Some(self.0.value().unwrap_or(false))
     }
     fn warm_up_period(&self) -> usize {
         self.0.warm_up_period()
