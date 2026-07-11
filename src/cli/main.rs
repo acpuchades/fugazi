@@ -13,6 +13,7 @@
 //! The strategy (a positional) takes `@file` to load a file, or inline YAML for
 //! anything else — the same `@` convention `--series`/`--params` use.
 
+mod args;
 mod backtest;
 mod calendar;
 mod completions;

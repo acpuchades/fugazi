@@ -20,17 +20,23 @@
 //! a single-key map — `{ema: {source: close, period: 20}}` — and a parameterless
 //! leaf or bar indicator reads as a bare string — `close`, `obv`.
 
+mod basket;
 mod expr;
 mod pairs;
 mod signal;
 mod strategy;
+mod template;
 
+#[allow(unused_imports)]
+pub use basket::{BasketStrategySpec, SelectionRuleSpec};
 pub use expr::ExprSpec;
 #[allow(unused_imports)]
 pub use pairs::PairsStrategySpec;
 #[allow(unused_imports)]
 pub use signal::SignalSpec;
 pub use strategy::StrategySpec;
+#[allow(unused_imports)]
+pub use template::SpecTemplate;
 #[allow(unused_imports)]
 pub(crate) use pairs::DynPairsStrategy;
 #[allow(unused_imports)]
