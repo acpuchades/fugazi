@@ -180,88 +180,12 @@ where
     }
 }
 
-// ---------------------------------------------------------------------------
-// Type-erasing carriers
-//
-// The library is generic over both its input and its source; Python is not. We
-// box every `I -> Real` indicator behind a local newtype so we can (a) satisfy
-// the orphan rules and re-implement `Indicator` for the box, and (b) nest
-// dynamically the way the Rust API nests statically. `I` is monomorphic per box
-// (`Candle` or `Real`); the `Any*` enums below pick between the two at runtime.
-// ---------------------------------------------------------------------------
-
-/// Object-safe shim over an `I -> Real` indicator.
-trait DynIndicator<I>: Send + Sync {
-    fn update(&mut self, input: I) -> Option<Real>;
-    fn value(&self) -> Option<Real>;
-    fn warm_up_period(&self) -> usize;
-    fn unstable_period(&self) -> usize;
-    fn reset(&mut self);
-    fn box_clone(&self) -> Box<dyn DynIndicator<I>>;
-}
-
-impl<I, T> DynIndicator<I> for T
-where
-    T: Indicator<Input = I, Output = Real> + Clone + Send + Sync + 'static,
-{
-    fn update(&mut self, input: I) -> Option<Real> {
-        Indicator::update(self, input)
-    }
-    fn value(&self) -> Option<Real> {
-        Indicator::value(self)
-    }
-    fn warm_up_period(&self) -> usize {
-        Indicator::warm_up_period(self)
-    }
-    fn unstable_period(&self) -> usize {
-        Indicator::unstable_period(self)
-    }
-    fn reset(&mut self) {
-        Indicator::reset(self)
-    }
-    fn box_clone(&self) -> Box<dyn DynIndicator<I>> {
-        Box::new(self.clone())
-    }
-}
-
-/// A boxed `I -> Real` indicator. Implements [`Indicator`] itself, so it can be
-/// fed straight back into any source-wrapping constructor.
-struct Source<I>(Box<dyn DynIndicator<I>>);
-
-impl<I> Source<I> {
-    fn new<T>(inner: T) -> Self
-    where
-        T: Indicator<Input = I, Output = Real> + Clone + Send + Sync + 'static,
-    {
-        Source(Box::new(inner))
-    }
-}
-
-impl<I> Clone for Source<I> {
-    fn clone(&self) -> Self {
-        Source(self.0.box_clone())
-    }
-}
-
-impl<I> Indicator for Source<I> {
-    type Input = I;
-    type Output = Real;
-    fn update(&mut self, input: I) -> Option<Real> {
-        self.0.update(input)
-    }
-    fn value(&self) -> Option<Real> {
-        self.0.value()
-    }
-    fn warm_up_period(&self) -> usize {
-        self.0.warm_up_period()
-    }
-    fn unstable_period(&self) -> usize {
-        self.0.unstable_period()
-    }
-    fn reset(&mut self) {
-        self.0.reset()
-    }
-}
+/// A boxed `I -> Real` indicator — a type alias over the shared
+/// [`TypedSource`] carrier. The dedicated `DynIndicator<I>` trait +
+/// blanket impl it used to have collapsed into [`runtime::Adapter`]'s
+/// coverage. Semantics match the library: `None` until warm, `Some(Real)`
+/// afterwards — no bool-signal-style flattening.
+type Source<I> = TypedSource<I, Real>;
 
 /// A boxed `I`-input signal (bool-out). Wraps the shared [`TypedSource`]
 /// carrier and adds the "always-Some" semantics Python's bool combinators
