@@ -64,56 +64,6 @@ pub(super) fn default_log_base() -> Real {
     std::f64::consts::E
 }
 
-/// Field-level deserializer that normalizes a `SignalSpec` value out of
-/// the shape a serde_json → serde_norway::Value bridge produces
-/// (`Value::Mapping({"gt": {...}})`) into the form `SignalSpec`'s derived
-/// externally-tagged enum expects (`Value::Tagged("gt", ...)`). Needed
-/// on any `Box<SignalSpec>` field of an [`ExprSpecRaw`] variant because
-/// [`ExprSpec`]'s outer `try_from = "serde_norway::Value"` bridge leaves
-/// nested single-key mappings unnormalized when it hands them to
-/// serde_norway's derive, and `SignalSpec` (which doesn't have its own
-/// try_from bridge yet) refuses those mappings.
-///
-/// Not needed on nested `Box<ExprSpec>` fields — those re-enter
-/// [`ExprSpec`]'s own `TryFrom` which normalizes at each level.
-fn signal_via_norway_normalize<'de, D>(deserializer: D) -> Result<Box<SignalSpec>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de::Error;
-    use serde_norway::value::{Tag, TaggedValue};
-
-    let value = serde_norway::Value::deserialize(deserializer)?;
-    let normalised = match value {
-        serde_norway::Value::Mapping(m) if m.len() == 1 => {
-            let (k, v) = m.into_iter().next().unwrap();
-            match k {
-                serde_norway::Value::String(name) => {
-                    serde_norway::Value::Tagged(Box::new(TaggedValue {
-                        tag: Tag::new(name),
-                        value: v,
-                    }))
-                }
-                other => {
-                    // Non-string key — put it back and let the derive
-                    // report the failure.
-                    let mut m = serde_norway::Mapping::new();
-                    m.insert(other, v);
-                    serde_norway::Value::Mapping(m)
-                }
-            }
-        }
-        serde_norway::Value::String(s) => serde_norway::Value::Tagged(Box::new(TaggedValue {
-            tag: Tag::new(s),
-            value: serde_norway::Value::Null,
-        })),
-        other => other,
-    };
-    serde_norway::from_value(normalised)
-        .map(Box::new)
-        .map_err(D::Error::custom)
-}
-
 // ---------------------------------------------------------------------------
 // Real-valued sources
 // ---------------------------------------------------------------------------
@@ -464,6 +414,12 @@ pub enum ExprSpec {
     // (`DrawdownThrottle`, `EquityVolTarget`, `FractionalKelly`) additionally
     // require the strategy to own a `Book` — `SingleStrategySpec` does;
     // `PairsStrategySpec` does not (they'll emit `None` there).
+    /// Equal-weight sizing — a constant `1.0 / n_legs`. The one-line
+    /// helper the common basket case reaches for: `sizing: !equal_weight
+    /// 6` on a 3-long / 3-short basket yields 1/6 per leg = 100% gross
+    /// exposure. Doesn't depend on the symbol, so no `!arg SYM` needed.
+    /// See [`fugazi::indicators::sizing::equal_weight`].
+    EqualWeight(usize),
     /// Inverse realized-vol sizing —
     /// `target / (stddev(log_returns(close), window) * sqrt(bars_per_year))`.
     /// See [`fugazi::indicators::sizing::vol_target`].
@@ -527,7 +483,6 @@ pub enum ExprSpec {
     /// `None` until every source has warmed. See
     /// [`fugazi::indicators::IfElse`].
     IfElse {
-        #[serde(deserialize_with = "signal_via_norway_normalize")]
         cond: Box<SignalSpec>,
         if_true: Box<ExprSpec>,
         if_false: Box<ExprSpec>,
@@ -997,6 +952,12 @@ enum ExprSpecRaw {
     // (`DrawdownThrottle`, `EquityVolTarget`, `FractionalKelly`) additionally
     // require the strategy to own a `Book` — `SingleStrategySpec` does;
     // `PairsStrategySpec` does not (they'll emit `None` there).
+    /// Equal-weight sizing — a constant `1.0 / n_legs`. The one-line
+    /// helper the common basket case reaches for: `sizing: !equal_weight
+    /// 6` on a 3-long / 3-short basket yields 1/6 per leg = 100% gross
+    /// exposure. Doesn't depend on the symbol, so no `!arg SYM` needed.
+    /// See [`fugazi::indicators::sizing::equal_weight`].
+    EqualWeight(usize),
     /// Inverse realized-vol sizing —
     /// `target / (stddev(log_returns(close), window) * sqrt(bars_per_year))`.
     /// See [`fugazi::indicators::sizing::vol_target`].
@@ -1060,7 +1021,6 @@ enum ExprSpecRaw {
     /// `None` until every source has warmed. See
     /// [`fugazi::indicators::IfElse`].
     IfElse {
-        #[serde(deserialize_with = "signal_via_norway_normalize")]
         cond: Box<SignalSpec>,
         if_true: Box<ExprSpec>,
         if_false: Box<ExprSpec>,
@@ -1263,6 +1223,7 @@ impl From<ExprSpecRaw> for ExprSpec {
             ExprSpecRaw::Ad { source } => ExprSpec::Ad { source },
             ExprSpecRaw::TrueRange { source } => ExprSpec::TrueRange { source },
             ExprSpecRaw::Sar { source, step, max } => ExprSpec::Sar { source, step, max },
+            ExprSpecRaw::EqualWeight(n) => ExprSpec::EqualWeight(n),
             ExprSpecRaw::VolTarget { target, window, bars_per_year } => ExprSpec::VolTarget { target, window, bars_per_year },
             ExprSpecRaw::AtrRisk { risk_frac, period, atr_multiple } => ExprSpec::AtrRisk { risk_frac, period, atr_multiple },
             ExprSpecRaw::DrawdownThrottle { max_drawdown } => ExprSpec::DrawdownThrottle { max_drawdown },
@@ -1663,6 +1624,9 @@ impl ExprSpec {
                 dyn_indicator::wrap(self::Sar::new(candle(source), *step, *max))
             }
 
+            EqualWeight(n_legs) => dyn_indicator::wrap(
+                fugazi::indicators::sizing::equal_weight::<String>(*n_legs),
+            ),
             VolTarget {
                 target,
                 window,

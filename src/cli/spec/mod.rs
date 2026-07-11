@@ -571,6 +571,46 @@ mod tests {
     }
 
     #[test]
+    fn if_else_survives_nested_signals_via_json_bridge() {
+        // Regression: nested `SignalSpec` inside `ExprSpec::IfElse`'s cond
+        // used to fail when the outer document went through the CLI's
+        // serde_json → serde_norway::Value bridge (because SignalSpec had
+        // no matching `try_from` normaliser). This test hits that path
+        // explicitly: build a spec through `SingleStrategySpec::from_text_with_params`
+        // (which routes via serde_json) and assert that a nested
+        // `!if_else { cond: !and { ... } }` reaches build without erroring.
+        let yaml = r#"
+            symbol: BTC
+            long:
+              enter: !value true
+            sizing:
+              !if_else
+                cond:
+                  !and
+                    lhs: !above { source: close, level: 0.0 }
+                    rhs: !below { source: close, level: 1000000.0 }
+                if_true: !value 0.5
+                if_false: !value 0.0
+        "#;
+        let spec = SingleStrategySpec::from_text_with_params(
+            yaml,
+            &std::collections::HashMap::new(),
+        )
+        .expect("nested !and inside !if_else cond must parse via the JSON bridge");
+        let _ = spec.build(1_000.0, &Schema::empty());
+    }
+
+    #[test]
+    fn equal_weight_yields_the_constant_reciprocal() {
+        // `!equal_weight 4` is the sugar for the 1/4 = 0.25 constant per
+        // leg — the common basket case for a 4-leg balanced strategy.
+        let spec: ExprSpec = serde_norway::from_str("!equal_weight 4").unwrap();
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        assert_eq!(feed_real(&mut built, bar(100.0)), Some(0.25));
+        assert_eq!(feed_real(&mut built, bar(50.0)), Some(0.25));
+    }
+
+    #[test]
     fn if_else_selects_by_condition() {
         // `!if_else { cond, if_true, if_false }`: an ADX-gated momentum
         // score shape without the ADX (which would need many bars to

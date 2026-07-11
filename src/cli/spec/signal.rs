@@ -30,8 +30,18 @@ fn pick_root() -> Pick<String> {
 // ---------------------------------------------------------------------------
 
 /// A boolean condition over a candle stream — the YAML form of a `Signal`.
+///
+/// Deserializes via a [`serde_norway::Value`] bridge, symmetric with
+/// [`ExprSpec`]'s: an incoming [`serde_norway::Value::Mapping`] with a
+/// single string key (the shape a serde_json → serde_norway::Value bridge
+/// produces for an externally-tagged enum) is normalised into a
+/// [`serde_norway::Value::Tagged`] before deserialization proceeds. This
+/// keeps `!and { lhs: !gt { ... }, rhs: !lt { ... } }` and every other
+/// nesting depth working uniformly whether the top-level spec was parsed
+/// via serde_norway directly (native YAML) or via the CLI's
+/// `input::parse_value → serde_json::Value` normalising bridge.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(try_from = "serde_norway::Value")]
 pub enum SignalSpec {
     // --- comparisons ---
     Gt {
@@ -151,6 +161,186 @@ pub enum SignalSpec {
     IsWeekday,
     /// True on Sat/Sun, false on Mon–Fri. `None` when `atom.time` is absent.
     IsWeekend,
+}
+
+/// Private mirror of [`SignalSpec`] with derived externally-tagged
+/// deserialization. The public [`SignalSpec`] routes through
+/// [`serde_norway::Value`] via `try_from` and normalises single-key
+/// mappings into tagged values before deserializing into this mirror.
+/// Kept in lock-step with the public enum variant-for-variant.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SignalSpecRaw {
+    Gt {
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
+        epsilon: Option<Real>,
+    },
+    Lt {
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
+        epsilon: Option<Real>,
+    },
+    Ge {
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
+        epsilon: Option<Real>,
+    },
+    Le {
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
+        epsilon: Option<Real>,
+    },
+    Eq {
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
+        epsilon: Option<Real>,
+    },
+    Ne {
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
+        epsilon: Option<Real>,
+    },
+    Above {
+        #[serde(default = "default_source")]
+        source: Box<ExprSpec>,
+        level: Real,
+    },
+    Below {
+        #[serde(default = "default_source")]
+        source: Box<ExprSpec>,
+        level: Real,
+    },
+    CrossesAbove {
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
+    },
+    CrossesBelow {
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
+    },
+    And {
+        lhs: Box<SignalSpec>,
+        rhs: Box<SignalSpec>,
+    },
+    Or {
+        lhs: Box<SignalSpec>,
+        rhs: Box<SignalSpec>,
+    },
+    Xor {
+        lhs: Box<SignalSpec>,
+        rhs: Box<SignalSpec>,
+    },
+    All(Vec<SignalSpec>),
+    Any(Vec<SignalSpec>),
+    Not(Box<SignalSpec>),
+    Changed(Box<SignalSpec>),
+    Get { key: String },
+    StrEq {
+        lhs: Box<ExprSpec>,
+        rhs: String,
+    },
+    StrNe {
+        lhs: Box<ExprSpec>,
+        rhs: String,
+    },
+    Unstable { signal: Box<SignalSpec> },
+    Value(bool),
+    IsWeekday,
+    IsWeekend,
+}
+
+impl From<SignalSpecRaw> for SignalSpec {
+    fn from(v: SignalSpecRaw) -> Self {
+        match v {
+            SignalSpecRaw::Gt { lhs, rhs, epsilon } => SignalSpec::Gt { lhs, rhs, epsilon },
+            SignalSpecRaw::Lt { lhs, rhs, epsilon } => SignalSpec::Lt { lhs, rhs, epsilon },
+            SignalSpecRaw::Ge { lhs, rhs, epsilon } => SignalSpec::Ge { lhs, rhs, epsilon },
+            SignalSpecRaw::Le { lhs, rhs, epsilon } => SignalSpec::Le { lhs, rhs, epsilon },
+            SignalSpecRaw::Eq { lhs, rhs, epsilon } => SignalSpec::Eq { lhs, rhs, epsilon },
+            SignalSpecRaw::Ne { lhs, rhs, epsilon } => SignalSpec::Ne { lhs, rhs, epsilon },
+            SignalSpecRaw::Above { source, level } => SignalSpec::Above { source, level },
+            SignalSpecRaw::Below { source, level } => SignalSpec::Below { source, level },
+            SignalSpecRaw::CrossesAbove { lhs, rhs } => SignalSpec::CrossesAbove { lhs, rhs },
+            SignalSpecRaw::CrossesBelow { lhs, rhs } => SignalSpec::CrossesBelow { lhs, rhs },
+            SignalSpecRaw::And { lhs, rhs } => SignalSpec::And { lhs, rhs },
+            SignalSpecRaw::Or { lhs, rhs } => SignalSpec::Or { lhs, rhs },
+            SignalSpecRaw::Xor { lhs, rhs } => SignalSpec::Xor { lhs, rhs },
+            SignalSpecRaw::All(v) => SignalSpec::All(v),
+            SignalSpecRaw::Any(v) => SignalSpec::Any(v),
+            SignalSpecRaw::Not(inner) => SignalSpec::Not(inner),
+            SignalSpecRaw::Changed(inner) => SignalSpec::Changed(inner),
+            SignalSpecRaw::Get { key } => SignalSpec::Get { key },
+            SignalSpecRaw::StrEq { lhs, rhs } => SignalSpec::StrEq { lhs, rhs },
+            SignalSpecRaw::StrNe { lhs, rhs } => SignalSpec::StrNe { lhs, rhs },
+            SignalSpecRaw::Unstable { signal } => SignalSpec::Unstable { signal },
+            SignalSpecRaw::Value(b) => SignalSpec::Value(b),
+            SignalSpecRaw::IsWeekday => SignalSpec::IsWeekday,
+            SignalSpecRaw::IsWeekend => SignalSpec::IsWeekend,
+        }
+    }
+}
+
+impl TryFrom<serde_norway::Value> for SignalSpec {
+    type Error = String;
+
+    /// Normalise the incoming value into a [`serde_norway::Value::Tagged`],
+    /// then deserialize into [`SignalSpecRaw`]. See the module-level doc
+    /// for the shape rationale — identical to
+    /// [`ExprSpec`](super::expr::ExprSpec)'s TryFrom, kept in lock-step so
+    /// the two spec surfaces normalise the same way.
+    fn try_from(v: serde_norway::Value) -> Result<Self, Self::Error> {
+        use serde_norway::value::{Tag, TaggedValue};
+
+        // Unit-variant tags: their content stays as `Value::Null`
+        // (see the mirror `ExprSpec::TryFrom` for the "why").
+        const UNIT_VARIANTS: &[&str] = &["is_weekday", "is_weekend"];
+
+        let promote_null_for = |tag: &str, v: serde_norway::Value| match v {
+            serde_norway::Value::Null if !UNIT_VARIANTS.contains(&tag) => {
+                serde_norway::Value::Mapping(serde_norway::Mapping::new())
+            }
+            other => other,
+        };
+
+        let normalised = match v {
+            serde_norway::Value::String(s) => {
+                let value = promote_null_for(&s, serde_norway::Value::Null);
+                serde_norway::Value::Tagged(Box::new(TaggedValue {
+                    tag: Tag::new(s),
+                    value,
+                }))
+            }
+            serde_norway::Value::Tagged(tagged) => {
+                let TaggedValue { tag, value } = *tagged;
+                let tag_name = tag.to_string();
+                let name = tag_name.strip_prefix('!').unwrap_or(&tag_name);
+                let value = promote_null_for(name, value);
+                serde_norway::Value::Tagged(Box::new(TaggedValue { tag, value }))
+            }
+            serde_norway::Value::Mapping(m) if m.len() == 1 => {
+                let (k, v) = m.into_iter().next().unwrap();
+                match k {
+                    serde_norway::Value::String(name) => {
+                        let value = promote_null_for(&name, v);
+                        serde_norway::Value::Tagged(Box::new(TaggedValue {
+                            tag: Tag::new(name),
+                            value,
+                        }))
+                    }
+                    other => {
+                        let mut m = serde_norway::Mapping::new();
+                        m.insert(other, v);
+                        serde_norway::Value::Mapping(m)
+                    }
+                }
+            }
+            other => other,
+        };
+        let raw: SignalSpecRaw =
+            serde_norway::from_value(normalised).map_err(|e| e.to_string())?;
+        Ok(raw.into())
+    }
 }
 
 /// Resolve an optional tolerance to its concrete value.
