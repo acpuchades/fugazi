@@ -64,6 +64,8 @@ pub mod indicator;
 pub mod indicators;
 pub mod market;
 pub mod metrics;
+#[cfg(feature = "runtime")]
+pub mod runtime;
 pub mod signal;
 pub mod snapshot;
 #[cfg(feature = "sources")]

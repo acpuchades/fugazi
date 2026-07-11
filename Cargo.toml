@@ -36,8 +36,15 @@ required-features = ["cli"]
 [features]
 default = ["sources", "cli"]
 sources = ["dep:reqwest", "dep:tokio", "dep:thiserror"]
+# `runtime` compiles the pure, no-extra-deps type-erasure vocabulary
+# (`fugazi::runtime`) that YAML/JSON-driven builders and the Python bindings
+# use to nest indicators whose types are only known at runtime. The `cli`
+# feature implies it; a caller who only wants that vocabulary can enable it
+# on its own (`default-features = false, features = ["runtime"]`).
+runtime = []
 cli = [
     "sources",
+    "runtime",
     "dep:clap",
     "dep:clap_complete",
     "dep:serde_norway",
