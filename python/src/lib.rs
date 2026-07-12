@@ -61,51 +61,27 @@ use fugazi_core::types::{
 use fugazi_core::backtest::Fill;
 use fugazi_core::metrics as core_metrics;
 use fugazi_core::metrics::{DrawdownSegment, Trade};
-use fugazi_core::runtime::{self, Adapter, DynType, DynValue, TypeOf};
+use fugazi_core::runtime::{self, DynType, DynValue, TypeOf};
 
 // ---------------------------------------------------------------------------
-// Shared type-erasure vocabulary (fugazi::runtime) + Python's Send+Sync
-// supertrait
+// Shared type-erasure vocabulary (fugazi::runtime)
 //
-// The core library's `runtime::DynIndicator` is not `Send + Sync` (a pyo3
-// requirement), so Python defines a supertrait `DynSS` that adds those two
-// autotraits plus a `Send + Sync`-preserving deep clone. Every wrapper in
-// Python that used to hold its own erased trait object (Source<I> for Real,
-// SignalBox<I> for bool, StrSource<I> for Arc<str>, AtomBox<I> for Atom)
-// collapses to a single generic `TypedSource<In, Out>` that carries the
-// runtime handle and compile-time markers for the input and output types.
-// The one exception is `MultiBox<I>` / `DynMulti<I>`: multi-output
-// indicators emit a value struct (MacdValue, BollingerValue, …) that maps
-// to `Vec<Real>` + `&'static [&'static str]` at the Python boundary, a
-// shape that doesn't fit the runtime's `DynValue` payload enum. Unifying
-// it would need a `Multi` variant on `DynValue` plus a `multi_names()`
-// method on the trait — a library API expansion for negligible savings,
-// so `DynMulti` intentionally stays local.
+// The core library's `runtime::DynIndicatorSync` adds `Send + Sync` and an
+// autotrait-preserving deep clone on top of `DynIndicator` — exactly what pyo3
+// pyclasses need on every field. Every wrapper in Python that used to hold its
+// own erased trait object (Source<I> for Real, SignalBox<I> for bool,
+// StrSource<I> for Arc<str>, AtomBox<I> for Atom) collapses to a single
+// generic `TypedSource<In, Out>` that carries the runtime handle and
+// compile-time markers for the input and output types.
+//
+// The one exception is `MultiBox<I>` / `DynMulti<I>`: multi-output indicators
+// emit a value struct (MacdValue, BollingerValue, …) that maps to `Vec<Real>`
+// + `&'static [&'static str]` at the Python boundary, a shape that doesn't
+// fit the runtime's `DynValue` payload enum. Unifying it would need a `Multi`
+// variant on `DynValue` plus a `multi_names()` method on the trait — a
+// library API expansion for negligible savings, so `DynMulti` intentionally
+// stays local.
 // ---------------------------------------------------------------------------
-
-/// Python-local `Send + Sync` supertrait over the runtime's [`DynIndicator`],
-/// with a `Send + Sync`-preserving deep clone. Pyo3 pyclasses need
-/// `Send + Sync` on every field, and `runtime::DynIndicator::dyn_clone`
-/// returns `Box<dyn runtime::DynIndicator>` (no auto-traits), so we route the
-/// clone through a Python-local trait that does preserve them.
-trait DynSS: runtime::DynIndicator + Send + Sync {
-    fn clone_ss(&self) -> Box<dyn DynSS>;
-}
-
-impl<T> DynSS for T
-where
-    T: runtime::DynIndicator + Clone + Send + Sync + 'static,
-{
-    fn clone_ss(&self) -> Box<dyn DynSS> {
-        Box::new(self.clone())
-    }
-}
-
-impl Clone for Box<dyn DynSS> {
-    fn clone(&self) -> Box<dyn DynSS> {
-        (**self).clone_ss()
-    }
-}
 
 /// A runtime-typed handle carrying compile-time `In`/`Out` markers so it
 /// implements `Indicator<Input = In, Output = Out>` cleanly. The single
@@ -113,11 +89,11 @@ impl Clone for Box<dyn DynSS> {
 ///
 /// Construction takes a concrete `T: Indicator<Input = In, Output = Out> +
 /// Clone + Send + Sync + 'static` and wraps it through
-/// [`runtime::Adapter`]; every subsequent method call routes through the
+/// [`runtime::wrap_sync`]; every subsequent method call routes through the
 /// runtime's `DynValue` payload but the surface `Indicator` impl below keeps
 /// `In`/`Out` typed at every call site.
 struct TypedSource<In, Out>(
-    Box<dyn DynSS>,
+    Box<dyn runtime::DynIndicatorSync>,
     std::marker::PhantomData<fn(In) -> Out>,
 );
 
@@ -142,8 +118,7 @@ where
     where
         T: Indicator<Input = In, Output = Out> + Clone + Send + Sync + 'static,
     {
-        let boxed: Box<dyn DynSS> = Box::new(Adapter::new(inner));
-        Self(boxed, std::marker::PhantomData)
+        Self(runtime::wrap_sync(inner), std::marker::PhantomData)
     }
 }
 
@@ -656,6 +631,29 @@ impl AnySource {
             AnySource::Const(_) => {}
         }
     }
+
+    /// Dispatch a frame of samples through the domain the source lives in,
+    /// producing one `Option<Real>` per bar. Extracts the correct input type
+    /// from `data` (OHLCV frame / 1-D series / snapshot sequence) and folds it
+    /// through `Indicator::update`. A `Const` source re-emits its value for
+    /// every bar and reads the frame as candles (its neutral default domain).
+    fn feed_rows(&mut self, data: &Bound<'_, PyAny>) -> PyResult<Vec<Option<Real>>> {
+        Ok(match self {
+            AnySource::Candle(s) => candles_from_frame(data)?
+                .into_iter()
+                .map(|c| Indicator::update(s, c.into()))
+                .collect(),
+            AnySource::Real(s) => reals_from_series(data)?
+                .into_iter()
+                .map(|x| Indicator::update(s, x))
+                .collect(),
+            AnySource::Snapshot(s) => snapshots_from_sequence(data)?
+                .into_iter()
+                .map(|snap| Indicator::update(s, snap))
+                .collect(),
+            AnySource::Const(c) => candles_from_frame(data)?.iter().map(|_| Some(*c)).collect(),
+        })
+    }
 }
 
 /// Two sources resolved to a common concrete domain, with any neutral constant
@@ -671,9 +669,6 @@ enum Pair {
 /// clash is an error. Two constants default to the candle domain (either is
 /// equivalent — they ignore input).
 fn pair(lhs: AnySource, rhs: AnySource) -> PyResult<Pair> {
-    fn cval(c: Real) -> Source<Atom> {
-        Source::new(Value::<Atom>::new(c))
-    }
     fn rval(c: Real) -> Source<Real> {
         Source::new(Value::<Real>::new(c))
     }
@@ -684,13 +679,15 @@ fn pair(lhs: AnySource, rhs: AnySource) -> PyResult<Pair> {
         (AnySource::Candle(a), AnySource::Candle(b)) => Ok(Pair::Candle(a, b)),
         (AnySource::Real(a), AnySource::Real(b)) => Ok(Pair::Real(a, b)),
         (AnySource::Snapshot(a), AnySource::Snapshot(b)) => Ok(Pair::Snapshot(a, b)),
-        (AnySource::Const(a), AnySource::Candle(b)) => Ok(Pair::Candle(cval(a), b)),
-        (AnySource::Candle(a), AnySource::Const(b)) => Ok(Pair::Candle(a, cval(b))),
+        (AnySource::Const(a), AnySource::Candle(b)) => Ok(Pair::Candle(const_to_candle_source(a), b)),
+        (AnySource::Candle(a), AnySource::Const(b)) => Ok(Pair::Candle(a, const_to_candle_source(b))),
         (AnySource::Const(a), AnySource::Real(b)) => Ok(Pair::Real(rval(a), b)),
         (AnySource::Real(a), AnySource::Const(b)) => Ok(Pair::Real(a, rval(b))),
         (AnySource::Const(a), AnySource::Snapshot(b)) => Ok(Pair::Snapshot(sval(a), b)),
         (AnySource::Snapshot(a), AnySource::Const(b)) => Ok(Pair::Snapshot(a, sval(b))),
-        (AnySource::Const(a), AnySource::Const(b)) => Ok(Pair::Candle(cval(a), cval(b))),
+        (AnySource::Const(a), AnySource::Const(b)) => {
+            Ok(Pair::Candle(const_to_candle_source(a), const_to_candle_source(b)))
+        }
         (AnySource::Candle(_), AnySource::Real(_))
         | (AnySource::Real(_), AnySource::Candle(_))
         | (AnySource::Candle(_), AnySource::Snapshot(_))
@@ -736,6 +733,27 @@ impl AnySignal {
             AnySignal::Real(s) => Indicator::reset(s),
             AnySignal::Snapshot(s) => Indicator::reset(s),
         }
+    }
+
+    /// Dispatch a frame of samples through the domain the signal lives in,
+    /// producing one `bool` per bar. `SignalBox` flattens the warm-up `None`
+    /// to `false` at the source, so an unwrap-or-`false` in the loop mirrors
+    /// what the runtime already guarantees for individual updates.
+    fn feed_rows(&mut self, data: &Bound<'_, PyAny>) -> PyResult<Vec<bool>> {
+        Ok(match self {
+            AnySignal::Candle(s) => candles_from_frame(data)?
+                .into_iter()
+                .map(|c| Indicator::update(s, c.into()).unwrap_or(false))
+                .collect(),
+            AnySignal::Real(s) => reals_from_series(data)?
+                .into_iter()
+                .map(|x| Indicator::update(s, x).unwrap_or(false))
+                .collect(),
+            AnySignal::Snapshot(s) => snapshots_from_sequence(data)?
+                .into_iter()
+                .map(|snap| Indicator::update(s, snap).unwrap_or(false))
+                .collect(),
+        })
     }
 }
 
@@ -842,6 +860,25 @@ impl AnyMulti {
             AnyMulti::Snapshot(m) => m.0.reset(),
         }
     }
+
+    /// Dispatch a frame of samples through the domain the multi lives in,
+    /// producing one `Option<Vec<Real>>` per bar (`None` while warming up).
+    fn feed_rows(&mut self, data: &Bound<'_, PyAny>) -> PyResult<Vec<Option<Vec<Real>>>> {
+        Ok(match self {
+            AnyMulti::Candle(m) => candles_from_frame(data)?
+                .into_iter()
+                .map(|c| m.0.update(c.into()))
+                .collect(),
+            AnyMulti::Real(m) => reals_from_series(data)?
+                .into_iter()
+                .map(|x| m.0.update(x))
+                .collect(),
+            AnyMulti::Snapshot(m) => snapshots_from_sequence(data)?
+                .into_iter()
+                .map(|snap| m.0.update(snap))
+                .collect(),
+        })
+    }
 }
 
 fn domain_mismatch() -> PyErr {
@@ -849,6 +886,14 @@ fn domain_mismatch() -> PyErr {
         "cannot combine indicators rooted in different domains — both operands \
          must be rooted in the same domain (candle / identity / snapshot)",
     )
+}
+
+/// Materialise a `Const` source's payload as a candle-rooted `Source<Atom>` so
+/// the single-source dispatch macros can feed it into a source-slot builder.
+/// The candle domain is neutral (matches the enum's own default), so a bare
+/// constant used on its own reads as a per-bar constant candle stream.
+fn const_to_candle_source(c: Real) -> Source<Atom> {
+    Source::new(Value::<Atom>::new(c))
 }
 
 /// Apply a source-wrapping constructor to a source, preserving its domain. A
@@ -860,7 +905,7 @@ macro_rules! map_source {
             AnySource::Real($s) => AnySource::Real(Source::new($build)),
             AnySource::Snapshot($s) => AnySource::Snapshot(Source::new($build)),
             AnySource::Const(c) => {
-                let $s = Source::<Atom>::new(Value::<Atom>::new(c));
+                let $s = const_to_candle_source(c);
                 AnySource::Candle(Source::new($build))
             }
         }
@@ -888,7 +933,7 @@ macro_rules! source_to_signal {
             AnySource::Real($s) => AnySignal::Real(SignalBox::new($build)),
             AnySource::Snapshot($s) => AnySignal::Snapshot(SignalBox::new($build)),
             AnySource::Const(c) => {
-                let $s = Source::<Atom>::new(Value::<Atom>::new(c));
+                let $s = const_to_candle_source(c);
                 AnySignal::Candle(SignalBox::new($build))
             }
         }
@@ -945,7 +990,7 @@ macro_rules! map_multi {
             AnySource::Real($s) => AnyMulti::Real(MultiBox::new($build)),
             AnySource::Snapshot($s) => AnyMulti::Snapshot(MultiBox::new($build)),
             AnySource::Const(c) => {
-                let $s = Source::<Atom>::new(Value::<Atom>::new(c));
+                let $s = const_to_candle_source(c);
                 AnyMulti::Candle(MultiBox::new($build))
             }
         }
@@ -1952,22 +1997,7 @@ impl PyIndicator {
     /// state — call `reset()` first for a clean pass.
     fn feed(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let kind = OutputKind::detect(data)?;
-        let values: Vec<Option<f64>> = match &mut self.src {
-            AnySource::Candle(s) => candles_from_frame(data)?
-                .into_iter()
-                .map(|c| Indicator::update(s, c.into()))
-                .collect(),
-            AnySource::Real(s) => reals_from_series(data)?
-                .into_iter()
-                .map(|x| Indicator::update(s, x))
-                .collect(),
-            AnySource::Snapshot(s) => snapshots_from_sequence(data)?
-                .into_iter()
-                .map(|snap| Indicator::update(s, snap))
-                .collect(),
-            // A bare constant defaults to candle-rooted; emit it for every bar.
-            AnySource::Const(c) => candles_from_frame(data)?.iter().map(|_| Some(*c)).collect(),
-        };
+        let values = self.src.feed_rows(data)?;
         build_floats(py, &kind, values)
     }
 
@@ -2280,20 +2310,7 @@ impl PySignal {
     /// through the current state — call `reset()` first for a clean pass.
     fn feed(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let kind = OutputKind::detect(data)?;
-        let values: Vec<bool> = match &mut self.sig {
-            AnySignal::Candle(s) => candles_from_frame(data)?
-                .into_iter()
-                .map(|c| Indicator::update(s, c.into()).unwrap_or(false))
-                .collect(),
-            AnySignal::Real(s) => reals_from_series(data)?
-                .into_iter()
-                .map(|x| Indicator::update(s, x).unwrap_or(false))
-                .collect(),
-            AnySignal::Snapshot(s) => snapshots_from_sequence(data)?
-                .into_iter()
-                .map(|snap| Indicator::update(s, snap).unwrap_or(false))
-                .collect(),
-        };
+        let values = self.sig.feed_rows(data)?;
         build_bools(py, &kind, values)
     }
 
@@ -2528,20 +2545,7 @@ impl PyMulti {
     fn feed(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let kind = OutputKind::detect(data)?;
         let names = self.inner.names();
-        let rows: Vec<Option<Vec<f64>>> = match &mut self.inner {
-            AnyMulti::Candle(m) => candles_from_frame(data)?
-                .into_iter()
-                .map(|c| m.0.update(c.into()))
-                .collect(),
-            AnyMulti::Real(m) => reals_from_series(data)?
-                .into_iter()
-                .map(|x| m.0.update(x))
-                .collect(),
-            AnyMulti::Snapshot(m) => snapshots_from_sequence(data)?
-                .into_iter()
-                .map(|snap| m.0.update(snap))
-                .collect(),
-        };
+        let rows = self.inner.feed_rows(data)?;
         build_multi(py, &kind, names, rows)
     }
 

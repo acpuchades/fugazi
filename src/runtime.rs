@@ -93,6 +93,24 @@ pub enum DynType {
     Snapshot,
 }
 
+impl DynValue {
+    /// The runtime [`DynType`] tag of the payload actually carried. The
+    /// inverse of the compile-time `<T as TypeOf>::TYPE`; centralising it here
+    /// means the [`TryFrom<DynValue>`] impls can spell their error arm as one
+    /// catch-all instead of listing every non-matching variant.
+    pub fn dyn_type(&self) -> DynType {
+        match self {
+            DynValue::Real(_) => DynType::Real,
+            DynValue::Bool(_) => DynType::Bool,
+            DynValue::Atom(_) => DynType::Atom,
+            DynValue::Candle(_) => DynType::Candle,
+            DynValue::Str(_) => DynType::Str,
+            DynValue::Time(_) => DynType::Time,
+            DynValue::Snapshot(_) => DynType::Snapshot,
+        }
+    }
+}
+
 impl fmt::Display for DynType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -105,6 +123,31 @@ impl fmt::Display for DynType {
             DynType::Snapshot => f.write_str("Snapshot"),
         }
     }
+}
+
+/// Report whether a [`DynValue`] tagged `from` can be consumed by a
+/// [`DynIndicator`] with `input_type() == into`. Returns `true` when the tags
+/// match exactly, or when a well-defined [`TryFrom<DynValue>`] lift bridges
+/// them (`Candle → Atom`, `Atom → Snapshot`, `Candle → Snapshot`).
+///
+/// **Single source of truth for coercion compatibility.** Both this table
+/// *and* the corresponding lift arms on the `TryFrom<DynValue>` impls (for
+/// `Atom` and `Snapshot<String>`) list the same three lifts, and a lift-parity
+/// test in this module holds them in sync — adding a new lift on either side
+/// without the other fails that test.
+///
+/// A probing implementation (build a sentinel `DynValue` of `from`'s variant
+/// and check whether the appropriate `TryFrom` returns `Ok`) would be more
+/// self-consistent, but that would require default constructors for `Atom`
+/// and `Candle` that don't exist and shouldn't be added just for this.
+pub fn can_lift(from: DynType, into: DynType) -> bool {
+    from == into
+        || matches!(
+            (from, into),
+            (DynType::Candle, DynType::Atom)
+                | (DynType::Atom, DynType::Snapshot)
+                | (DynType::Candle, DynType::Snapshot)
+        )
 }
 
 impl From<Real> for DynValue {
@@ -148,12 +191,7 @@ impl TryFrom<DynValue> for Real {
     fn try_from(v: DynValue) -> Result<Real, DynType> {
         match v {
             DynValue::Real(x) => Ok(x),
-            DynValue::Bool(_) => Err(DynType::Bool),
-            DynValue::Atom(_) => Err(DynType::Atom),
-            DynValue::Candle(_) => Err(DynType::Candle),
-            DynValue::Str(_) => Err(DynType::Str),
-            DynValue::Time(_) => Err(DynType::Time),
-            DynValue::Snapshot(_) => Err(DynType::Snapshot),
+            other => Err(other.dyn_type()),
         }
     }
 }
@@ -162,12 +200,7 @@ impl TryFrom<DynValue> for bool {
     fn try_from(v: DynValue) -> Result<bool, DynType> {
         match v {
             DynValue::Bool(x) => Ok(x),
-            DynValue::Real(_) => Err(DynType::Real),
-            DynValue::Atom(_) => Err(DynType::Atom),
-            DynValue::Candle(_) => Err(DynType::Candle),
-            DynValue::Str(_) => Err(DynType::Str),
-            DynValue::Time(_) => Err(DynType::Time),
-            DynValue::Snapshot(_) => Err(DynType::Snapshot),
+            other => Err(other.dyn_type()),
         }
     }
 }
@@ -180,11 +213,7 @@ impl TryFrom<DynValue> for Atom {
             // this is the key that lets a Resample's Candle output feed a
             // downstream Atom-input source without an explicit lift adapter.
             DynValue::Candle(c) => Ok(c.into()),
-            DynValue::Real(_) => Err(DynType::Real),
-            DynValue::Bool(_) => Err(DynType::Bool),
-            DynValue::Str(_) => Err(DynType::Str),
-            DynValue::Time(_) => Err(DynType::Time),
-            DynValue::Snapshot(_) => Err(DynType::Snapshot),
+            other => Err(other.dyn_type()),
         }
     }
 }
@@ -193,12 +222,7 @@ impl TryFrom<DynValue> for Candle {
     fn try_from(v: DynValue) -> Result<Candle, DynType> {
         match v {
             DynValue::Candle(x) => Ok(x),
-            DynValue::Real(_) => Err(DynType::Real),
-            DynValue::Bool(_) => Err(DynType::Bool),
-            DynValue::Atom(_) => Err(DynType::Atom),
-            DynValue::Str(_) => Err(DynType::Str),
-            DynValue::Time(_) => Err(DynType::Time),
-            DynValue::Snapshot(_) => Err(DynType::Snapshot),
+            other => Err(other.dyn_type()),
         }
     }
 }
@@ -207,12 +231,7 @@ impl TryFrom<DynValue> for Arc<str> {
     fn try_from(v: DynValue) -> Result<Arc<str>, DynType> {
         match v {
             DynValue::Str(s) => Ok(s),
-            DynValue::Real(_) => Err(DynType::Real),
-            DynValue::Bool(_) => Err(DynType::Bool),
-            DynValue::Atom(_) => Err(DynType::Atom),
-            DynValue::Candle(_) => Err(DynType::Candle),
-            DynValue::Time(_) => Err(DynType::Time),
-            DynValue::Snapshot(_) => Err(DynType::Snapshot),
+            other => Err(other.dyn_type()),
         }
     }
 }
@@ -221,12 +240,7 @@ impl TryFrom<DynValue> for Timestamp {
     fn try_from(v: DynValue) -> Result<Timestamp, DynType> {
         match v {
             DynValue::Time(t) => Ok(t),
-            DynValue::Real(_) => Err(DynType::Real),
-            DynValue::Bool(_) => Err(DynType::Bool),
-            DynValue::Atom(_) => Err(DynType::Atom),
-            DynValue::Candle(_) => Err(DynType::Candle),
-            DynValue::Str(_) => Err(DynType::Str),
-            DynValue::Snapshot(_) => Err(DynType::Snapshot),
+            other => Err(other.dyn_type()),
         }
     }
 }
@@ -241,10 +255,7 @@ impl TryFrom<DynValue> for Snapshot<String> {
             // the sole-atom unpack that empty-selector `!pick` uses.
             DynValue::Candle(c) => Ok(Snapshot::<String>::of_atom(c.into())),
             DynValue::Atom(a) => Ok(Snapshot::<String>::of_atom(a)),
-            DynValue::Real(_) => Err(DynType::Real),
-            DynValue::Bool(_) => Err(DynType::Bool),
-            DynValue::Str(_) => Err(DynType::Str),
-            DynValue::Time(_) => Err(DynType::Time),
+            other => Err(other.dyn_type()),
         }
     }
 }
@@ -314,6 +325,37 @@ pub trait DynIndicator {
 impl Clone for Box<dyn DynIndicator> {
     fn clone(&self) -> Box<dyn DynIndicator> {
         (**self).dyn_clone()
+    }
+}
+
+/// [`DynIndicator`] plus `Send + Sync` and a `Send + Sync`-preserving deep
+/// clone. The base [`DynIndicator`] trait deliberately doesn't require these
+/// autotraits — some concrete library indicators (`PositionField`, `BookField`)
+/// hold `Rc<RefCell<…>>` state and can't satisfy them, and the CLI's spec
+/// builder wraps those alongside the rest. Downstream callers that *do* need
+/// autotrait-preserving type erasure (pyo3 pyclasses require `Send + Sync` on
+/// every field) reach for this subtrait via [`wrap_sync`] instead of [`wrap`].
+///
+/// The blanket impl fires for every `T: DynIndicator + Clone + Send + Sync +
+/// 'static`, so `Adapter<I>` picks it up automatically when `I` is itself
+/// `Send + Sync` — which every stateless indicator (`Ema`, `Sma`, `Rsi`,
+/// `Combine`, …) is trivially.
+pub trait DynIndicatorSync: DynIndicator + Send + Sync {
+    fn dyn_clone_sync(&self) -> Box<dyn DynIndicatorSync>;
+}
+
+impl<T> DynIndicatorSync for T
+where
+    T: DynIndicator + Clone + Send + Sync + 'static,
+{
+    fn dyn_clone_sync(&self) -> Box<dyn DynIndicatorSync> {
+        Box::new(self.clone())
+    }
+}
+
+impl Clone for Box<dyn DynIndicatorSync> {
+    fn clone(&self) -> Box<dyn DynIndicatorSync> {
+        (**self).dyn_clone_sync()
     }
 }
 
@@ -387,6 +429,18 @@ where
     Box::new(Adapter::new(inner))
 }
 
+/// Wrap a concrete indicator into a boxed [`DynIndicatorSync`] — the
+/// autotrait-preserving twin of [`wrap`] for callers that need `Send + Sync`
+/// (pyo3 pyclasses, thread-crossing state).
+pub fn wrap_sync<I, X, Y>(inner: I) -> Box<dyn DynIndicatorSync>
+where
+    I: Indicator<Input = X, Output = Y> + Clone + Send + Sync + 'static,
+    X: TryFrom<DynValue, Error = DynType> + TypeOf,
+    Y: Into<DynValue> + Clone + TypeOf,
+{
+    Box::new(Adapter::new(inner))
+}
+
 // ---------------------------------------------------------------------------
 // chain: runtime-typed composition of two DynIndicators
 // ---------------------------------------------------------------------------
@@ -409,17 +463,8 @@ where
 /// recursive spec builder guarantees compatible types, so this is a hard bug
 /// if ever hit.
 pub fn chain(outer: Box<dyn DynIndicator>, inner: Box<dyn DynIndicator>) -> Box<dyn DynIndicator> {
-    // Compatible if the type tags match, or if we're crossing a well-defined
-    // lift boundary handled by `TryFrom<DynValue>`: `Candle → Atom` (raw
-    // candle to atom-with-no-overlays), `Atom → Snapshot` (single-entry
-    // untagged snapshot), or `Candle → Snapshot` (via the intermediate
-    // Atom lift, both encoded on `TryFrom<DynValue> for Snapshot<String>`).
-    let ok = outer.output_type() == inner.input_type()
-        || (outer.output_type() == DynType::Candle && inner.input_type() == DynType::Atom)
-        || (outer.output_type() == DynType::Atom && inner.input_type() == DynType::Snapshot)
-        || (outer.output_type() == DynType::Candle && inner.input_type() == DynType::Snapshot);
     assert!(
-        ok,
+        can_lift(outer.output_type(), inner.input_type()),
         "chain: outer output type ({}) doesn't match inner input type ({})",
         outer.output_type(),
         inner.input_type(),
@@ -716,6 +761,84 @@ mod tests {
         assert_eq!(
             ema.stable_period(),
             ema.warm_up_period() + ema.unstable_period()
+        );
+    }
+
+    #[test]
+    fn can_lift_matches_try_from_impls() {
+        // For every (from, into) pair, verify `can_lift` agrees with what the
+        // `TryFrom<DynValue>` impls actually accept. `can_lift` is the table
+        // `chain()` consults at construction; a drift between the table and the
+        // real lift semantics would either accept a chain that panics on the
+        // first tick (if `can_lift` said yes but `TryFrom` says no) or refuse a
+        // chain that would have worked (if the reverse).
+        //
+        // The sample values here are the sentinels the `TryFrom` impls actually
+        // exercise. `Snapshot`, `Str`, `Time` are self-only, `Real`/`Bool` are
+        // self-only, `Candle` lifts to `Atom` and `Snapshot`, `Atom` lifts to
+        // `Snapshot`.
+        let sample = |t: DynType| -> DynValue {
+            match t {
+                DynType::Real => DynValue::Real(1.0),
+                DynType::Bool => DynValue::Bool(true),
+                DynType::Candle => DynValue::Candle(bar(1.0)),
+                DynType::Atom => DynValue::Atom(bar(1.0).into()),
+                DynType::Str => DynValue::Str(Arc::from("x")),
+                DynType::Time => DynValue::Time(Timestamp(0)),
+                DynType::Snapshot => DynValue::Snapshot(crate::snapshot::Snapshot::new()),
+            }
+        };
+        let try_into_ok = |v: DynValue, into: DynType| -> bool {
+            match into {
+                DynType::Real => Real::try_from(v).is_ok(),
+                DynType::Bool => bool::try_from(v).is_ok(),
+                DynType::Atom => Atom::try_from(v).is_ok(),
+                DynType::Candle => Candle::try_from(v).is_ok(),
+                DynType::Str => Arc::<str>::try_from(v).is_ok(),
+                DynType::Time => Timestamp::try_from(v).is_ok(),
+                DynType::Snapshot => crate::snapshot::Snapshot::<String>::try_from(v).is_ok(),
+            }
+        };
+        let all = [
+            DynType::Real,
+            DynType::Bool,
+            DynType::Candle,
+            DynType::Atom,
+            DynType::Str,
+            DynType::Time,
+            DynType::Snapshot,
+        ];
+        for from in all {
+            for into in all {
+                let expected = try_into_ok(sample(from), into);
+                assert_eq!(
+                    can_lift(from, into),
+                    expected,
+                    "can_lift({from}, {into}) drift: TryFrom says {expected}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wrap_sync_yields_send_sync_handle_and_clones_deeply() {
+        fn assert_send_sync<T: Send + Sync>(_: &T) {}
+        let mut sma = wrap_sync(Sma::new(Current::close(), 2));
+        assert_send_sync(&sma);
+        // Clone survives with autotraits preserved (this is what pyo3 needs).
+        let mut clone = sma.clone();
+        assert_send_sync(&clone);
+
+        // Both boxes advance independently after the clone.
+        assert_eq!(sma.update(DynValue::Atom(bar(1.0).into())), None);
+        assert_eq!(clone.update(DynValue::Atom(bar(10.0).into())), None);
+        assert_eq!(
+            sma.update(DynValue::Atom(bar(3.0).into())),
+            Some(DynValue::Real(2.0))
+        );
+        assert_eq!(
+            clone.update(DynValue::Atom(bar(20.0).into())),
+            Some(DynValue::Real(15.0))
         );
     }
 
