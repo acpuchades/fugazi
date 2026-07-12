@@ -13,7 +13,7 @@
 //! score:
 //!   !mul
 //!     lhs: !roc { source: !close { source: !pick { symbol: !arg SYM } }, periods: 20 }
-//!     rhs: !adx { source: !current_bar { source: !pick { symbol: !arg SYM } }, period: 14 }
+//!     rhs: !adx { source: !current { source: !pick { symbol: !arg SYM } }, period: 14 }
 //! sizing: !equal_weight 6
 //! ```
 //!

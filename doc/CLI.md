@@ -140,8 +140,14 @@ The strategy positional accepts an optional shape prefix:
 - `pairs:` — a two-symbol `PairsStrategy` file
   (`pairs:@spread.yml`); the document declares `left`/`right` symbols
   and cross-asset signal / level expressions rooted through
-  `!pick { symbol, freq }` — see the [Pairs strategy files](STRATEGIES.md)
-  section.
+  `!pick { symbol, freq }` — see
+  [Pairs documents](STRATEGIES.md#pairs-documents).
+- `basket:` — an N-symbol cross-sectional `BasketStrategy` file
+  (`basket:@basket.yml`); the document declares a `selection` rule plus
+  per-symbol `score` / `sizing` templates, and the traded universe is
+  whatever symbols the `--series` inputs carry — see
+  [Basket documents](STRATEGIES.md#basket-documents). `fugazi optimize`
+  doesn't support this shape yet.
 
 Any other prefix is rejected as an unknown shape.
 

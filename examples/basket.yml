@@ -1,0 +1,43 @@
+# A cross-sectional momentum basket: rank every symbol in the input universe
+# by its 20-bar rate of change, go long the two strongest and short the two
+# weakest, and rebalance whenever the ranking changes.
+#
+# The universe is **not declared here** — it is whatever symbols the input
+# series carry. The basket builds a fresh score/sizing chain for each symbol
+# it sees, substituting the symbol's name into every `!arg SYM` placeholder,
+# so this one document works for a 4-symbol universe or a 40-symbol one.
+#
+# Run it with (one --series per symbol, joined on `time`; `basket:` is the
+# shape prefix that picks the N-symbol runner):
+#
+#   fugazi run basket:@examples/basket.yml \
+#              --series @btc.csv --series @eth.csv \
+#              --series @sol.csv --series @ada.csv \
+#              --output-dir out/ \
+#              --crypto -f 1d
+#
+# Tags used below:
+#   !arg SYM      — the current symbol, substituted once per symbol at build time.
+#   !pick         — project one asset's bar out of the multi-symbol snapshot.
+#   !roc          — rate of change over `periods` bars (the momentum score).
+#   !top_bottom   — take the N highest-scoring symbols long, the N lowest short.
+#   !equal_weight — constant `1 / n_legs` per leg: 4 legs ⇒ 25% each ⇒ 100% gross.
+
+# How the ranked scores turn into per-symbol sides. The alternatives are
+# `!threshold { long_min, short_max }` (absolute score cutoffs) and
+# `!quantile { long_q, short_q }` (distribution fractions).
+selection: !top_bottom { longs: 2, shorts: 2 }
+
+# The per-symbol score: 20-bar rate of change of that symbol's close. Every
+# atom-input leaf in a basket must be rooted through `!pick { symbol: !arg SYM }`
+# — a bare `close` would try the sole-atom unpack and panic on a multi-symbol
+# snapshot.
+score: !roc
+  source: !close { source: !pick { symbol: !arg SYM } }
+  periods: 20
+
+# The per-leg position size, as a fraction of equity. 2 longs + 2 shorts = 4
+# legs, so `!equal_weight 4` is 25% per leg and 100% gross exposure. Any
+# real-valued expression fits here instead — e.g. `!vol_target` for inverse-vol
+# weighting, or `!drawdown_throttle` to de-lever the whole basket in a drawdown.
+sizing: !equal_weight 4

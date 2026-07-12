@@ -1,8 +1,7 @@
 # Strategy files
 
 A **strategy file** is the declarative input to the `fugazi run` backtester. It
-describes one [`SingleAssetStrategy`](../src/strategies/single_asset.rs): a traded
-symbol plus the boolean signals that open and close its long/short positions. The
+describes what to trade and the signals that open and close the positions. The
 file is a YAML mirror of the library's composition API — every tag maps
 one-to-one to a fugazi constructor — so a strategy you can write in Rust by
 nesting constructors you can also write in a file, and vice versa.
@@ -14,6 +13,30 @@ fugazi run @strategy.yml --series @candles.csv --output-dir out/
 The strategy is the positional argument and follows the `@` convention the data
 flags use: `@file.yml` loads a file, anything else is treated as
 inline content (handy for one-offs, e.g. `'{ symbol: BTC, long: { enter: !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } } } }'`).
+
+## The three strategy shapes
+
+There are three document shapes, picked by an optional **prefix** on the
+positional. The prefix decides which document type the YAML is deserialized
+into — the expression vocabulary ([Sources](#sources) / [Signals](#signals)) is
+identical across all three.
+
+| Prefix | Shape | Document | Traded symbols |
+| --- | --- | --- | --- |
+| none, or `single:` | [`SingleAssetStrategy`](../src/strategies/single_asset.rs) | [Single-asset](#single-asset-documents) | one, named by `symbol` |
+| `pairs:` | [`PairsStrategy`](../src/strategies/pairs.rs) | [Pairs](#pairs-documents) | two, named by `left` / `right` |
+| `basket:` | [`BasketStrategy`](../src/strategies/basket.rs) | [Basket](#basket-documents) | N — **whatever the input series carry** |
+
+```sh
+fugazi run @strategy.yml         --series @btc.csv --output-dir out/           # single
+fugazi run pairs:@spread.yml     --series @btc.csv --series @eth.csv -o out/   # pairs
+fugazi run basket:@basket.yml    --series @btc.csv --series @eth.csv \
+                                 --series @sol.csv --series @ada.csv -o out/   # basket
+```
+
+`fugazi optimize` currently supports the single-asset shape only; `pairs:` and
+`basket:` documents run under `fugazi run` (and validate under
+`fugazi check strategy`).
 
 > This document is the syntax reference. For the surrounding CLI (`--series`,
 > `--params`, output files, console output) see the
@@ -85,15 +108,17 @@ enter: !not
 enter: !not !below { source: !rsi { period: 14 }, level: 30 }
 ```
 
-## Top-level structure
+## Single-asset documents
 
-A strategy document is a mapping with these fields (unknown fields are rejected):
+The default shape (no prefix, or `single:`). A mapping with these fields
+(unknown fields are rejected):
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `symbol` | string | — (**required**) | the instrument to trade |
 | `long` | side | none | the long entry/exit (see [Sides](#sides)) |
 | `short` | side | none | the short entry/exit |
+| `sizing` | source | `!value 1.0` | position-size multiplier (see [Sizing](#sizing)) |
 
 The strategy wires up whichever of `long`/`short` you provide; omitting both
 yields a strategy that never trades.
@@ -188,6 +213,201 @@ reading a costed `metrics.yml`:
   for stop-out heavy strategies than a naïve "same slippage for every
   fill" model would — the multiplier is doing its job.
 
+## Sizing
+
+Every shape takes a top-level `sizing:` field — a **source** whose current value
+scales the position each entry (or reversal) is opened at. The position is sized
+as a fraction of *equity*, and `sizing` is the multiplier on that fraction:
+`!value 1.0` (the default) is all-in, `!value 0.5` a fixed half position, and any
+real-valued expression makes the size dynamic.
+
+```yaml
+symbol: BTC
+long:
+  enter: !crosses_above { lhs: !sma { period: 5 }, rhs: !sma { period: 20 } }
+sizing: !vol_target { target: 0.20, window: 30, bars_per_year: 365 }
+```
+
+Sizing is a **magnitude only** — direction comes from the side that entered. It
+is read on transitions (not rebalanced mid-position), and it is folded into the
+readiness gate, so a strategy waits for its sizing chain to warm up like any
+other source. A `None` reading (a source still warming, a division by zero)
+**skips the whole trade for that bar** — the safe default. Compose a fallback
+into the expression if you'd rather trade through it.
+
+On a pair, both legs are scaled together — each leg enters at half the sized
+fraction, so `!value 1.0` is 1.0× gross and dollar-neutral. On a basket, `sizing`
+is *per leg* and **not normalized**: an N-leg basket at 100% gross wants
+`!equal_weight N`.
+
+### Sizing recipes
+
+Six ready-made tags, usable anywhere a source fits but meant for `sizing:`.
+`!equal_weight` is a constant; `!vol_target` and `!atr_risk` read prices; the
+last three read the strategy's own equity curve and closed-trade history (its
+*book*), so they work on single, pairs, and basket documents alike — on a pair or
+basket the book tracks the aggregate equity across all legs.
+
+| Tag | Fields | Meaning |
+| --- | --- | --- |
+| `!equal_weight` | `<n_legs>` (scalar) | constant `1 / n_legs` — the balanced-basket one-liner |
+| `!vol_target` | `{ target, window, bars_per_year }` | inverse realized vol: `target / annualized_stddev(log returns, window)` |
+| `!atr_risk` | `{ risk_frac, period, atr_multiple }` | fixed per-trade risk: `risk_frac · close / (atr_multiple · ATR(period))` |
+| `!drawdown_throttle` | `{ max_drawdown }` | de-lever linearly as the drawdown deepens; `0` at `max_drawdown`, clamped to `[0, 1]` |
+| `!equity_vol_target` | `{ target, window, bars_per_year }` | vol targeting on the strategy's **own** per-bar returns |
+| `!fractional_kelly` | `{ kelly_fraction, window }` | Kelly over the last `window` closed-trade returns, scaled by `kelly_fraction`, clamped `>= 0` |
+
+The book-anchored three (`!drawdown_throttle`, `!equity_vol_target`,
+`!fractional_kelly`) measure against the book's starting equity — pass
+`--cash` to match it to the wallet's starting funds, or their numbers are
+meaningless.
+
+## Pairs documents
+
+`pairs:@file.yml` builds a two-leg [`PairsStrategy`](../src/strategies/pairs.rs):
+one enter/exit signal pair driving both legs at once. Entering goes **long
+`left` / short `right`**, each leg sized at half the [sized](#sizing) fraction of
+equity; exiting flattens both.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `left` | string | — (**required**) | the long leg on entry |
+| `right` | string | — (**required**) | the short leg on entry |
+| `enter` | signal | — (**required**) | open the pair when this fires |
+| `exit` | signal | never fires | flatten both legs |
+| `stop_loss` | source | none | a **spread level**; flatten when the spread falls to it |
+| `take_profit` | source | none | a **spread level**; flatten when the spread rises to it |
+| `sizing` | source | `!value 1.0` | gross-exposure multiplier (see [Sizing](#sizing)) |
+
+Two things distinguish a pairs document from a single-asset one:
+
+- **Every atom-input leaf must be rooted through `!pick`.** A bare `close` uses
+  the implicit sole-atom unpack, which panics on a multi-symbol snapshot. Write
+  `!close { source: !pick { symbol: BTC } }` — see [Cross-asset sources](#cross-asset-sources).
+- **`stop_loss` / `take_profit` are levels on the *spread*, not on a price.** The
+  strategy's internal spread is always the raw `close(left) − close(right)` diff,
+  so a level expression has to land in those units (`spread_ma − 4·spread_sd`,
+  say — not a percentage of an entry price).
+
+```yaml
+# Long the BTC−ETH spread when its 60-bar z-score drops below −2σ; close on
+# reversion through 0, or on a spread level far outside the band.
+left: BTC
+right: ETH
+
+enter: !below
+  source: &z !div
+    lhs: !sub
+      lhs: &spread !sub
+        lhs: !close { source: !pick { symbol: BTC } }
+        rhs: !close { source: !pick { symbol: ETH } }
+      rhs: &spread_ma !sma { period: 60, source: *spread }
+    rhs: &spread_sd !stddev { period: 60, source: *spread }
+  level: -2.0
+
+exit: !above { source: *z, level: 0.0 }
+
+stop_loss: !sub { lhs: *spread_ma, rhs: !mul { lhs: *spread_sd, rhs: !value 4.0 } }
+```
+
+See [`examples/pairs.yml`](../examples/pairs.yml) for the annotated version.
+
+## Basket documents
+
+`basket:@file.yml` builds an N-symbol cross-sectional
+[`BasketStrategy`](../src/strategies/basket.rs). Each bar it **scores every
+symbol**, ranks them, and turns that ranking into a long/short/flat side per
+symbol — the classic cross-sectional momentum / value / carry shape.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `selection` | selection rule | — (**required**) | how ranked scores become sides |
+| `score` | source *(template)* | — (**required**) | the per-symbol ranking value |
+| `sizing` | source *(template)* | — (**required**) | the per-leg size, as a fraction of equity |
+
+**The universe is not declared in the file** — it is exactly the set of symbols
+the `--series` inputs carry. The basket builds a fresh score and sizing chain for
+each symbol the first time it appears, so one document covers a 4-symbol universe
+and a 40-symbol one unchanged. Symbols missing a bar at some timestamp simply
+don't appear in that bar's snapshot, drop out of the ranking, and rejoin when
+they resume.
+
+### `!arg SYM` — the per-symbol placeholder
+
+`score` and `sizing` are **templates**: their tree is captured verbatim at load
+and rebuilt once per symbol, with `!arg SYM` resolving to that symbol's name. So
+this score…
+
+```yaml
+score: !roc
+  source: !close { source: !pick { symbol: !arg SYM } }
+  periods: 20
+```
+
+…becomes `!pick { symbol: BTC }` on BTC's chain, `!pick { symbol: ETH }` on ETH's,
+and so on. As in a pair, every atom-input leaf inside `score` / `sizing` must be
+rooted through a `!pick` — there's no implicit single-asset root in a multi-symbol
+snapshot.
+
+The `!arg` grammar mirrors [`!param`](#parameters--param), and the two are
+resolved in different passes (`!param` once at load from `--params`, `!arg` per
+symbol at build), so they compose freely inside one tree:
+
+- `!arg SYM` — bare-string shorthand;
+- `!arg { key: SYM }` — the same, explicit;
+- `!arg { key: SYM, default: BTC }` — with a fallback.
+
+`SYM` is the only argument the basket driver supplies.
+
+### Selection rules
+
+| Tag | Fields | Meaning |
+| --- | --- | --- |
+| `!top_bottom` | `{ longs, shorts }` | long the `longs` highest scorers, short the `shorts` lowest |
+| `!threshold` | `{ long_min, short_max }` | long every score `>= long_min`, short every score `<= short_max` |
+| `!quantile` | `{ long_q, short_q }` | long the top `long_q` fraction of the distribution, short the bottom `short_q` |
+
+`!top_bottom` gives a fixed leg count (so `!equal_weight` is exact);
+`!threshold` and `!quantile` let the leg count float with the data, so the gross
+exposure floats with it too unless the sizing expression compensates.
+
+Symbols that aren't selected are flattened. A symbol keeps its side across bars
+if the ranking doesn't change — transitions only fire when the target side
+actually differs, so an unchanged selection doesn't churn the wallet.
+
+### A complete basket
+
+```yaml
+# Cross-sectional momentum: long the 2 strongest, short the 2 weakest,
+# equal-weighted at 25% per leg (4 legs = 100% gross).
+selection: !top_bottom { longs: 2, shorts: 2 }
+
+score: !roc
+  source: !close { source: !pick { symbol: !arg SYM } }
+  periods: 20
+
+sizing: !equal_weight 4
+```
+
+```sh
+fugazi run basket:@basket.yml \
+  --series @btc.csv --series @eth.csv --series @sol.csv --series @ada.csv \
+  --output-dir out/ --crypto -f 1d
+```
+
+Costs stay on the command line and are resolved per symbol, so a scoped
+`--costs 'BTC:0.001,ETH:0.0005'` applies per leg — see
+[CLI § `--costs`](CLI.md#--costs).
+
+**Not yet wired:** per-side protective levels (a basket has no `stop_loss` /
+`take_profit` slot, and the `entry` / `peak` / `trough`
+[position sources](#position-anchored-sources-bare-words) always read `None`
+inside a `score` / `sizing` expression), and `fugazi optimize` on a basket
+document. The [book-anchored sizing recipes](#sizing-recipes) *are* wired, and
+read the basket's aggregate equity curve.
+
+See [`examples/basket.yml`](../examples/basket.yml) for the annotated version.
+
 ## Sources
 
 A **source** produces a `Real` per bar (`Output = Real`). Any field named
@@ -201,6 +421,38 @@ field it **defaults to `close`** (and `donchian_*`'s `high`/`low` default to the
 The whole current bar is `!current` — the default `source:` for every
 bar-consuming tag below, and the leaf you name explicitly when composing
 cross-timeframe pipelines (`!resample { every: 4, source: !current }`).
+
+Each of them also takes an optional `source:` — the *atom* it reads its fields
+out of, which is how a leaf is re-rooted onto another asset
+(`!close { source: !pick { symbol: BTC } }`) or another timeframe. Omitted, it
+reads the bar of the strategy's own symbol. The same applies to every
+calendar leaf and to `!get`.
+
+### Cross-asset sources
+
+`!pick { symbol, freq }` projects one asset's bar out of the multi-symbol
+snapshot the CLI feeds each bar. It is the `source:` of an atom-input leaf, not a
+source on its own:
+
+```yaml
+# The BTC/ETH close spread — the same shape a pairs or basket document uses.
+!sub
+  lhs: !close { source: !pick { symbol: BTC } }
+  rhs: !close { source: !pick { symbol: ETH } }
+```
+
+Both fields are optional: `symbol` names the asset, `freq` disambiguates a
+cross-frequency snapshot (`!pick { symbol: BTC, freq: 1h }`, the same `N<unit>`
+alphabet `--frequency` uses). An empty `!pick {}` — and every leaf that omits
+`source:` — unpacks the *sole* entry of the snapshot, which is why single-asset
+documents never mention `!pick` at all. That implicit unpack **panics on a
+multi-symbol snapshot**, which is the tripwire for a single-asset spec
+accidentally pointed at multi-asset input; pairs and basket documents must root
+every leaf through an explicit `!pick`.
+
+Anything source-generic composes on top of a pick, not just the candle fields:
+`!atr { period: 14, source: !current { source: !pick { symbol: BTC } } }` is
+BTC's ATR, `!year { source: !pick { symbol: BTC } }` reads BTC's bar time.
 
 ### Constant
 
@@ -251,15 +503,72 @@ when composing across timeframes (e.g. `!atr { period: 14, source:
 !resample { every: 4 } }`). The `!keltner_*` tags likewise take an
 optional `candle_source:` for the ATR leg (also defaults to `!current`).
 
+### Calendar sources
+
+Every calendar leaf decomposes the bar's timestamp and emits a `Real`; each takes
+the same optional `source:` (an atom source — a `!pick`, typically) as the
+candle-field leaves, so bare `!year` reads the strategy's own bar:
+
+`!year`, `!month` (1–12), `!day` (1–31), `!hour` (0–23), `!minute`, `!second`,
+`!day_of_week` (ISO: 1 = Monday … 7 = Sunday), `!day_of_year`, `!week_of_year`
+(ISO), `!quarter` (1–4), `!unix_seconds`, `!unix_millis`. The raw timestamp
+itself is `!time`.
+
+They read `None` when the bar carries no time — synthetic bars, or an
+unparseable time label. CSV-loaded and remotely-fetched bars always carry one.
+Daily-and-higher bars conventionally sit at 00:00 UTC, so `!hour` / `!minute` /
+`!second` are identically `0` there.
+
+Anything beyond a raw field is a composition: "is it Monday" is
+`!eq { lhs: !day_of_week, rhs: !value 1 }`, "before the open" is
+`!lt { lhs: !hour, rhs: !value 9 }`. The two ready-made calendar *signals* are
+`!is_weekday` / `!is_weekend` (see [Signals](#signals)).
+
+### Overlay columns — `!get`
+
+`!get { key, source }` reads one **overlay column** — a non-OHLCV column carried
+alongside the bar (an `--series` CSV's extra columns, or a provider's extras like
+Binance's `quote_volume` or Yahoo's `adj_close`). The column's declared type in
+the stream's schema decides what `!get` builds into:
+
+- a numeric column → a source, usable anywhere a source is (`!sma { source: !get { key: funding_rate }, period: 7 }`);
+- a boolean column → a signal, usable directly as an `enter` / `exit` (see [Signals](#signals));
+- a string column → a `Str` source, comparable with `!str_eq` / `!str_ne`.
+
+An unknown key, or a type that doesn't fit the position it's used in, is a
+build-time error. `source:` re-roots the read on another asset, exactly as on the
+candle-field leaves.
+
 ### Transforms
 
 | Tags | Fields | Meaning |
 | --- | --- | --- |
 | `!add`, `!sub`, `!mul`, `!div` | `{ lhs, rhs }` | arithmetic over two sources (`div` → none on /0) |
+| `!log` | `{ source = close, base = e }` | logarithm of `source`; `None` on non-positive samples |
 | `!lag`, `!diff`, `!ratio`, `!roc` | `{ source = close, periods }` | lookback vs. `periods` bars ago |
 | `!rolling_max`, `!rolling_min` | `{ source = close, period }` | rolling extremum over `period` bars |
+| `!if_else` | `{ cond, if_true, if_false }` | ternary: `cond` is a **signal**, the branches are sources — see below |
+| `!unstable` | `{ source }` | passthrough that reports no unstable period, so the readiness gate stops waiting for this subtree's IIR tail (the signal-side twin is `!unstable { signal }`) |
 | `!resample` | `{ every, inner, source = !current }` | aggregate every N candles of `source` (a `Candle`-output stream, defaulting to `!current`) into one higher-timeframe candle and run `inner` (any Real source) over that HTF candle; emits `inner`'s output on each completed bucket and `None` in between. `inner` is **required** — no default |
 | `!latch` | `{ source }` | hold the last `Some` output of `source`; `None` before the first arrives |
+
+#### Branching — `!if_else`
+
+The ternary is how a source becomes conditional. `cond` picks between two real
+sources:
+
+```yaml
+# An ADX-gated momentum score: the ROC when the trend is strong, 0 otherwise.
+!if_else
+  cond:     !above { source: !adx { period: 14 }, level: 25 }
+  if_true:  !roc   { source: close, periods: 20 }
+  if_false: !value 0
+```
+
+All three sources advance every bar — the branch that didn't fire keeps warming
+up rather than stalling. The ternary reads `None` while the condition or the
+branch it selects is still warming up (its reported warm-up length is the max
+across all three, a safe upper bound for the readiness gate).
 
 #### Cross-timeframe composition — `!resample` + `!latch`
 
@@ -323,6 +632,26 @@ against a constant, the common case of `!gt`/`!lt` against a number.
 `!crosses_above`, `!crosses_below` — fire on the bar `lhs` crosses over/under
 `rhs` (the comparison is true *and* it just changed). Operands are sources.
 
+### String comparisons — `{ lhs, rhs }`
+
+`!str_eq`, `!str_ne` — compare a string-typed source (in practice a
+`!get { key: … }` on a string [overlay column](#overlay-columns--get)) against a
+string literal: `!str_eq { lhs: !get { key: session }, rhs: US }`.
+
+### Calendar signals (bare words)
+
+`!is_weekday` (Mon–Fri), `!is_weekend` (Sat/Sun). Both read `false` when the bar
+carries no timestamp. Every other calendar predicate is a comparison against a
+[calendar source](#calendar-sources) — `!eq { lhs: !day_of_week, rhs: !value 1 }`
+for Monday, `!lt { lhs: !hour, rhs: !value 9 }` for a pre-open window.
+
+### Boolean overlay columns
+
+`!get { key }` used in a signal position reads a **boolean** overlay column
+directly as a signal (a `Real` or `Str` column there is a build-time error — put
+those behind a comparison or `!str_eq` instead). The signal-side form takes only
+`key`; it reads the strategy's own asset.
+
 ### Boolean logic
 
 | Tag | Form | Meaning |
@@ -375,6 +704,11 @@ fugazi run @strategy.params.yml \
   --params @params.yml,FAST=5 \
   --series @candles.csv --output-dir out/
 ```
+
+`!param`'s sibling is [`!arg`](#arg-sym--the-per-symbol-placeholder), which a
+basket document uses to stamp the current symbol into its per-symbol score and
+sizing chains. The two resolve in different passes — `!param` once at load, `!arg`
+once per symbol at build — so one tree can carry both.
 
 ## Reusing signals — YAML anchors
 
@@ -431,6 +765,21 @@ flow mappings too, so this is handy as an inline `<STRATEGY>` positional literal
 { symbol: ETH, long: { enter: !crosses_above { lhs: !sma { period: 5 }, rhs: !sma { period: 20 } } } }
 ```
 
-See [`examples/strategy.yml`](../examples/strategy.yml) for an annotated
-SMA-crossover strategy and [`examples/strategy.params.yml`](../examples/strategy.params.yml)
-for its parameterised version.
+A quantile basket over whatever universe the series carry — long the top decile
+by 60-bar momentum, short the bottom decile, de-levering as the drawdown deepens
+(`basket:@…`):
+
+```yaml
+selection: !quantile { long_q: 0.1, short_q: 0.1 }
+score:  !roc { source: !close { source: !pick { symbol: !arg SYM } }, periods: 60 }
+sizing: !drawdown_throttle { max_drawdown: 0.25 }
+```
+
+The shipped examples:
+
+| File | Shape | What it shows |
+| --- | --- | --- |
+| [`examples/strategy.yml`](../examples/strategy.yml) | single | an annotated SMA-crossover, always-in |
+| [`examples/strategy.params.yml`](../examples/strategy.params.yml) | single | the same, parameterised with `!param` |
+| [`examples/pairs.yml`](../examples/pairs.yml) | pairs | a BTC/ETH spread z-score with spread-level brackets |
+| [`examples/basket.yml`](../examples/basket.yml) | basket | cross-sectional momentum, top/bottom-2, equal-weighted |
