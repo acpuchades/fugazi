@@ -183,6 +183,27 @@ Bare `Real -> Real` math with **no source and no `Indicator` impl**, so both sou
 - `smoothing.rs`: `EmaState` (EMA recurrence) and `WilderState` (Wilder/RMA, mean-seed). `Ema`/`Macd` use `EmaState`; `Rma` uses `WilderState`; `Rsi` uses two (gain/loss); `Atr` = `TrueRange` + `WilderState`; `Adx` uses four.
 - `stats.rs`: `WindowStats` (windowed sum + sum-of-squares → `mean`/`variance`/`stddev`) backs `Sma`/`StdDev`/`Bollinger`; `WindowExtreme<Op>` (monotonic-deque rolling extremum) backs `Extreme`/`RollingMax`/`RollingMin` and `Stochastic`.
 
+<a id="the-two-provider-traits"></a>### Remote providers = two traits, by shape (`src/sources/`)
+
+Behind the `sources` feature. Both traits are `Send + Sync`, use edition-2024 RPITIT (`impl Future`, not `async fn`) so callers can name the `Send` bound, take **objects/enums, not strings** (the CLI and Python parse user text before calling in), and share one `SourceError` and one `Interval` cadence enum.
+
+- **`CandleSource`** — `atoms(symbol, interval, since, until) -> Vec<Atom>`, ascending by `Atom::time`. Impls: `Binance` (`binance_schema()`: `quote_volume` / `n_trades` / `taker_buy_base_volume` / `taker_buy_quote_volume`), `Yahoo` (`yahoo_schema()`: `adj_close`). Every atom in one fetch shares one `Arc<Schema>` — pick it off a returned slice with `schema_of`.
+- **`OverlaySource`** — `overlays(symbol, interval, since, until) -> Vec<OverlayRow>`, plus a `schema()` that is stable before any fetch. For providers of **per-bar side-channel data with no OHLCV**: market cap, supply, open interest, funding, sentiment. One impl: `CoinGecko` (`coingecko_schema()`: `price` / `market_cap` / `total_volume` / `circulating_supply`, the last derived as `market_cap / price`).
+
+**Why two traits and not a capability flag.** `Atom::candle` is not `Option`, and `Wallet::update` marks a symbol's price from the bar it is fed — so an overlay provider forced through `CandleSource` would have to synthesise a candle, and that fake OHLCV would flow into `Current::close()` and into mark-to-market. `OverlayRow { time, overlays }` has no candle *field*, which makes the mistake unrepresentable rather than merely discouraged. A provider that genuinely has both is free to impl both traits. `OverlayRow`'s equality/ordering is **by `time` alone**, exactly like `Atom`'s (the payload is a bag of `f64`s that may hold `NaN`, so comparing it would be neither reflexive nor useful).
+
+**How overlay data reaches a strategy.** An `OverlaySource` yields columns, not a tradeable series — so you fetch it to its own CSV and let the `--series` dataframe join it onto a price series by `(symbol, time)` (`DataFrame::insert`, `src/cli/data.rs`). The joined columns land in the run's `Schema` and are read with `!get { key: market_cap }`:
+
+```text
+fugazi get binance:BTCUSDT[1d]                       -o prices.csv
+fugazi get coingecko:BTCUSDT=bitcoin[1d]             -o caps.csv
+fugazi run @strategy.yml -s @prices.csv -s @caps.csv -o out/
+```
+
+The `OUT=QUERY` remap is what makes the join key line up (see [`get.rs`](#cli-internals-srccli)). Cross-sectional `BasketStrategy` scores are the natural consumer — market-cap rank, supply-adjusted momentum, and dominance filters are not derivable from OHLCV at all.
+
+**CoinGecko specifics worth knowing before reaching for it.** `market_chart/range` has no interval parameter — CoinGecko picks the sampling granularity from the *window length* (~5-minutely ≤1d, hourly ≤90d, daily beyond). So the client rejects sub-hourly `Interval`s outright, paginates hourly requests in 80-day windows to stay inside that tier, and buckets whatever samples arrive onto the requested cadence's bar-open boundaries keeping the **first** sample per bucket (the value as of the open — never a later reading a strategy couldn't have seen). Weekly buckets floor to Monday and monthly to the 1st via the calendar, not epoch modulo (epoch day 0 was a Thursday, which would silently fail to join against a Monday-opening weekly candle). A descriptive `User-Agent` is **mandatory** (they 403 without one), and the public tier serves only the **last 365 days** — a wider `--since` surfaces as an `Http` error rather than being silently truncated. `COINGECKO_API_KEY` is picked up as a demo key.
+
 ## Safe defaults, opt-in overrides
 
 Numbers this crate produces during a source's warm-up or IIR settling tail are *unsettled*: they exist, but they depend on the seed, on where the window happens to start, or on both. Every knob that could paper over an unsettled bar therefore biases toward **waiting**, with a single-name **flag / wrapper / period** for the caller who's considered the tradeoff and wants to trade through it. Current instances of the pattern:
@@ -212,7 +233,10 @@ The CLI is one binary (`fugazi`) with several subcommands; layout by concern:
 
 - **`main.rs`** — clap definitions, subcommand dispatch. Owns the `mod` declarations and the top-level `Cli` type.
 - **`run.rs`, `optimize.rs`, `backtest.rs`** — the two user-facing subcommand drivers (`run`, `optimize`) sit on the pure `backtest` module (`run_iteration`, `evaluate`, `evaluate_windowed`). `backtest.rs` deliberately owns no IO; `run.rs` / `optimize.rs` do the CSV writing, console output, and file paths.
-- **`get.rs`** — the `fugazi get` subcommand (fetch OHLCV from remote providers). Private helpers: `write_candles_csv` and `parse_spec` for `provider:symbol[freq]` grammar.
+- **`get.rs`** — the `fugazi get` subcommand (fetch bars or overlay columns from remote providers). Grammar: `<provider>:[OUT=]<symbol>[[OFREQ=]<freq>,...]` (`parse_spec` / `parse_symbol`). Both remaps read **left = emitted, right = fetched**, and both are optional (absent ⇒ the two are the same):
+  - `OUT=` decouples the `symbol` cell from the identifier sent to the provider (`coingecko:BTCUSDT=bitcoin[1d]` fetches the coin id `bitcoin`, writes `BTCUSDT`). This is what makes a `--series` join line up, since that join is an exact string match on `(symbol, time)`.
+  - `OFREQ=` decouples the `freq` cell from the fetched cadence (`[1d=24h]`, `[FOO=1d]`). It **relabels, it does not resample** — every fetched row is emitted, only the `freq` cell is rewritten, so mapping across *different* durations (`[4h=1h]`) produces rows no price bar can join and `run` rejects them. The emitted label is an **opaque string** (only the fetched side is parsed into an `Interval`), which is safe because `data.rs` treats `freq` as a reserved passthrough column and never parses it. `csv_source.rs` *does* parse it, so a file labelled `FOO` can't be re-read through `get csv:PATH`.
+  - Two pipelines, picked by `resolve_mode` and **never mixed in one invocation**: `run_candles` (OHLCV + `-x` overlays → `write_candles_csv`) and `run_overlay_columns` (an [`OverlaySource`](#the-two-provider-traits) → `write_overlays_csv`, which emits `symbol,freq,time,<columns>` and **no OHLCV block**). Mixing is a hard error because the `--series` join lets the later file win each column, so a synthetic zero-OHLCV block would silently overwrite real prices. `-x` is likewise rejected in overlay mode — a computed overlay is an indicator chain over `Atom`s and there are no candles to build one from.
 - **`spec/`** (directory) — YAML-deserializable mirror of the fugazi composition API, one file per layer. Three composable expression types and three top-level strategy documents:
   - `spec/expr.rs` — `ExprSpec` (value-producing expression enum; nominally `Real`, polymorphic over `DynType` for `!current`/`!pick`/`!time`/`!get`/`!if_else`). Includes the `default_source`/`default_high`/`default_low`/`default_bar_source` helpers (all `pub(super)`).
   - `spec/signal.rs` — `SignalSpec` (boolean condition enum + `eps` tolerance helper).
@@ -293,8 +317,12 @@ The refactor's whole point is that these are *already shared*. Before you write 
 | Parse `-w/--windowed` bar count or duration | `WindowSpec::from_str` + `WindowSpec::resolve(bar_freq, class)` (duration form requires both) | `src/cli/calendar.rs` |
 | Trading seconds a bar of `freq` spans on a calendar | `class.trading_seconds_per_bar(freq)` | `src/cli/calendar.rs` |
 | Get the shared overlay schema of an atom stream | `fugazi::sources::schema_of(&atoms)` | `src/sources/mod.rs` |
+| Fetch OHLCV bars from a remote provider | `fugazi::sources::CandleSource::atoms(...)` — impls `Binance`, `Yahoo` | `src/sources/mod.rs` |
+| Fetch per-bar columns with **no OHLCV** (market cap, supply, open interest, funding, …) | `fugazi::sources::OverlaySource::overlays(...) -> Vec<OverlayRow>` — impl `CoinGecko`. Do **not** bolt these onto `CandleSource`; see [the two provider traits](#the-two-provider-traits) | `src/sources/mod.rs` |
 | Binance's provider-side overlay schema (`quote_volume` / `n_trades` / `taker_buy_base_volume` / `taker_buy_quote_volume`) | `fugazi::sources::binance::binance_schema()` (`OnceLock`-cached) | `src/sources/binance.rs` |
 | Yahoo's provider-side overlay schema (`adj_close`) | `fugazi::sources::yahoo::yahoo_schema()` (`OnceLock`-cached) | `src/sources/yahoo.rs` |
+| CoinGecko's provider-side overlay schema (`price` / `market_cap` / `total_volume` / `circulating_supply`) | `fugazi::sources::coingecko::coingecko_schema()` (`OnceLock`-cached) | `src/sources/coingecko.rs` |
+| Join a fetched overlay CSV onto a price CSV | Two `get` calls → two `-s/--series` flags; `DataFrame::insert` full-joins on `(symbol, time)` | `src/cli/data.rs` |
 | CSV delimiter probe (`; , \t \|`) from a header line | `csv_source::detect_delimiter(path)` | `src/cli/csv_source.rs` |
 | Load `@file` or take inline text | `input::Source::{File, Inline}` + `.read()` | `src/cli/input.rs` |
 | YAML text → `serde_json::Value` (with `!tag` normalization) | `input::parse_value(text)` | `src/cli/input.rs` |
