@@ -1,3 +1,5 @@
+/.claude
+
 /target
 /tests/data/talib_expected.csv
 
