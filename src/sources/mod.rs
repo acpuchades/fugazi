@@ -1,16 +1,25 @@
-//! Remote candle providers.
+//! Remote data providers.
 //!
 //! This module is fugazi's first step outside the pure indicator/backtest core:
-//! it introduces a generic [`CandleSource`] trait and one built-in
-//! implementation ([`Binance`]) that fetches OHLCV bars from a live HTTP API.
+//! it introduces the provider traits and their built-in implementations, which
+//! fetch from live HTTP APIs.
+//!
+//! **There are two provider traits, split by the shape of what they return** —
+//! not one trait with a capability flag. See [`OverlaySource`] for why that
+//! split is load-bearing rather than cosmetic.
 //!
 //! The pieces are:
 //!
-//! * [`CandleSource`] — the async trait every provider implements. Fetches
-//!   yield **`Vec<Atom>`**: every returned atom carries `time: Some(_)` and,
-//!   for providers that expose them, per-bar overlay values behind a
+//! * [`CandleSource`] — providers of OHLCV bars ([`Binance`], [`Yahoo`]).
+//!   Fetches yield **`Vec<Atom>`**: every returned atom carries `time: Some(_)`
+//!   and, for providers that expose them, per-bar overlay values behind a
 //!   provider-defined [`Schema`]. Downstream consumers (calendar indicators,
 //!   the `!get { key }` overlay reference) then compose naturally.
+//! * [`OverlaySource`] — providers of per-bar side-channel columns with **no
+//!   OHLCV** (market capitalisation, supply, open interest, funding rates).
+//!   Fetches yield **`Vec<OverlayRow>`**: a timestamp plus that bar's values,
+//!   and deliberately no candle. Joined onto a price series by `(symbol, time)`
+//!   downstream.
 //! * [`Timestamp`] — re-exported from [`crate::types`]; a flat i64-millis UTC
 //!   epoch stamp, `Copy`, with `time`-crate helpers on the pure core.
 //! * [`Interval`] — the bar cadence, an enum because providers advertise a
@@ -49,7 +58,7 @@ use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 
-use crate::types::{Atom, Schema};
+use crate::types::{Atom, OverlayInfo, Schema};
 pub use crate::types::Timestamp;
 
 pub use binance::Binance;
@@ -192,5 +201,147 @@ pub trait CandleSource: Send + Sync {
                 provider,
             })
         }
+    }
+}
+
+/// One timestamped row from an [`OverlaySource`]: a bar-open [`Timestamp`] and
+/// that bar's overlay values bound to the provider's [`Schema`].
+///
+/// Deliberately **not** an [`Atom`]. An `Atom` carries a non-optional
+/// [`Candle`](crate::Candle), and the whole point of an `OverlaySource` is that
+/// it has no OHLCV to put there — a synthesised zero/NaN candle would flow
+/// straight into `Current::close()` and into the wallet's mark-to-market
+/// (`Wallet::update` prices a symbol from the bar it is fed). Keeping the row
+/// candle-less makes that mistake unrepresentable rather than merely
+/// discouraged.
+/// Rows carry no symbol: like [`CandleSource::atoms`], [`OverlaySource::overlays`]
+/// is a per-symbol call, so the symbol is the *argument*, not a field. A caller
+/// fetching several symbols tags the rows on its own side (the CLI's `get`
+/// pipeline does exactly this, then sorts by `(time, symbol, freq)`).
+#[derive(Debug, Clone)]
+pub struct OverlayRow {
+    /// Bar-open timestamp, aligned to the requested [`Interval`]'s boundary.
+    pub time: Timestamp,
+    /// This bar's values, in the provider [`Schema`]'s column order.
+    pub overlays: OverlayInfo,
+}
+
+/// Equality is **by `time`**, exactly as it is for [`Atom`] — two rows are the
+/// same row iff they describe the same bar. The overlay payload is deliberately
+/// not compared: it is a bag of `f64`s that may contain `NaN` (a missing cell),
+/// which would make equality neither reflexive nor useful.
+impl PartialEq for OverlayRow {
+    fn eq(&self, other: &Self) -> bool {
+        self.time == other.time
+    }
+}
+
+impl Eq for OverlayRow {}
+
+/// Chronological ordering, matching [`Atom`]'s: rows sort by bar-open
+/// [`Timestamp`], so a merged slice of rows from several fetches sorts into run
+/// order and dedups by bar without a custom key.
+impl PartialOrd for OverlayRow {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OverlayRow {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.time.cmp(&other.time)
+    }
+}
+
+/// A remote provider of **per-bar side-channel data with no OHLCV** — market
+/// capitalisation, circulating supply, open interest, funding rates, sentiment
+/// scores, and anything else that is a property of an instrument at a point in
+/// time rather than a price bar.
+///
+/// The sibling of [`CandleSource`], and deliberately a separate trait rather
+/// than a capability flag on it: the two return different shapes ([`OverlayRow`]
+/// versus [`Atom`]), and a provider that implements both is free to do so.
+///
+/// **How the data is consumed.** An `OverlaySource` produces columns, not a
+/// tradeable series. The intended flow is to fetch the overlays into their own
+/// CSV, and join them onto a price series from a [`CandleSource`] by
+/// `(symbol, time)` — which is exactly what the CLI's `--series` dataframe does:
+///
+/// ```text
+/// fugazi get binance:BTCUSDT[1d]                      -o prices.csv
+/// fugazi get coingecko:BTCUSDT=bitcoin[1d]            -o caps.csv
+/// fugazi run @strategy.yml -s @prices.csv -s @caps.csv -o out/
+/// ```
+///
+/// The joined columns land in the run's [`Schema`] and are read from a strategy
+/// spec with `!get { key: market_cap }`. The `OUTPUT=QUERY` form above is what
+/// makes the join key line up: the row is *fetched* under the provider's own
+/// identifier (CoinGecko's `bitcoin`) and *emitted* under the symbol the price
+/// series uses (`BTCUSDT`).
+pub trait OverlaySource: Send + Sync {
+    /// The provider's short, lowercase name (e.g. `"coingecko"`).
+    fn name(&self) -> &'static str;
+
+    /// The overlay [`Schema`] every row from this provider binds to. Stable for
+    /// the provider's lifetime, so a caller can build its output columns before
+    /// fetching anything.
+    fn schema(&self) -> Arc<Schema>;
+
+    /// Fetch overlay rows for `symbol` in `[since, until)` — `since` inclusive,
+    /// `until` exclusive; `until = None` means "up to now". Rows come back
+    /// ascending by [`OverlayRow::time`], each timestamp aligned to the
+    /// requested `interval`'s bar-open boundary so they join cleanly against a
+    /// [`CandleSource`] stream of the same cadence.
+    fn overlays(
+        &self,
+        symbol: &str,
+        interval: Interval,
+        since: Timestamp,
+        until: Option<Timestamp>,
+    ) -> impl Future<Output = Result<Vec<OverlayRow>, SourceError>> + Send;
+
+    /// Enumerate every symbol this provider exposes. Same contract (and same
+    /// [`SourceError::Unsupported`] default) as [`CandleSource::tickers`].
+    fn tickers(&self) -> impl Future<Output = Result<Vec<String>, SourceError>> + Send {
+        let provider = self.name();
+        async move {
+            Err(SourceError::Unsupported {
+                operation: "ticker enumeration",
+                provider,
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{OverlayValue, Real};
+
+    fn row(time: i64, price: Real) -> OverlayRow {
+        let schema = {
+            let mut b = Schema::builder();
+            b.add_real("price");
+            b.finish()
+        };
+        OverlayRow {
+            time: Timestamp(time),
+            overlays: OverlayInfo::new(schema, vec![OverlayValue::Real(price)]),
+        }
+    }
+
+    #[test]
+    fn overlay_rows_compare_and_sort_by_time_only() {
+        // Same bar, different payload — still the same row, exactly as for `Atom`.
+        assert_eq!(row(100, 1.0), row(100, 999.0));
+        assert_ne!(row(100, 1.0), row(200, 1.0));
+
+        // A payload carrying a missing cell (NaN) must not poison equality.
+        assert_eq!(row(100, Real::NAN), row(100, Real::NAN));
+
+        let mut rows = [row(300, 3.0), row(100, 1.0), row(200, 2.0)];
+        rows.sort();
+        let times: Vec<i64> = rows.iter().map(|r| r.time.0).collect();
+        assert_eq!(times, vec![100, 200, 300]);
     }
 }
