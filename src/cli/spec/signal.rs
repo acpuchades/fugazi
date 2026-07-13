@@ -25,6 +25,54 @@ fn pick_root() -> Pick<String> {
     Pick::<String>::new()
 }
 
+/// The right-hand operand of `!str_eq` / `!str_ne`.
+///
+/// A bare YAML string is the literal to match (`rhs: bull`) — the common case,
+/// and the only shape the tag used to take. Anything else deserializes as an
+/// [`ExprSpec`], so both sides of the comparison are symmetric: the same
+/// constant written the long way (`rhs: !value bull`) or a second `Str` column
+/// read (`rhs: !get { key: prev_regime }`) both build to a `Str`-output source.
+///
+/// Deserializes through a [`serde_norway::Value`] bridge rather than
+/// `#[serde(untagged)]` because [`ExprSpec`] carries its own `TryFrom`
+/// normalisation (bare word / tag / single-key map → tagged), which serde's
+/// untagged content buffering would bypass.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(try_from = "serde_norway::Value")]
+pub enum StrOperand {
+    Literal(String),
+    Expr(Box<ExprSpec>),
+}
+
+impl TryFrom<serde_norway::Value> for StrOperand {
+    type Error = String;
+
+    fn try_from(v: serde_norway::Value) -> Result<Self, Self::Error> {
+        match v {
+            serde_norway::Value::String(s) => Ok(StrOperand::Literal(s)),
+            other => ExprSpec::try_from(other).map(|e| StrOperand::Expr(Box::new(e))),
+        }
+    }
+}
+
+impl StrOperand {
+    /// Build as a `Str`-output source. A literal materialises the same
+    /// [`ValueStr`] constant the `!value <string>` expression form builds.
+    fn build(
+        &self,
+        anchor: &Position,
+        book: &Book,
+        schema: &Arc<Schema>,
+    ) -> Box<dyn DynIndicator> {
+        match self {
+            StrOperand::Literal(s) => {
+                dyn_indicator::wrap(ValueStr::<fugazi::types::Snapshot<String>>::new(s.as_str()))
+            }
+            StrOperand::Expr(e) => e.build(anchor, book, schema),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Boolean signals
 // ---------------------------------------------------------------------------
@@ -127,19 +175,20 @@ pub enum SignalSpec {
     Get {
         key: String,
     },
-    /// `lhs == rhs` on a `Str`-typed source and a string literal. `lhs` must
-    /// build to a `Str`-output source (typically `!get { key: c }` where `c`
-    /// is a `Str` column, or a nested string-producing expression); `rhs` is
-    /// the string literal to match against.
+    /// `lhs == rhs` on two `Str`-typed operands. `lhs` must build to a
+    /// `Str`-output source (typically `!get { key: c }` where `c` is a `Str`
+    /// column, or a nested string-producing expression); `rhs` is a
+    /// [`StrOperand`] — a bare string literal (`rhs: bull`) or any
+    /// `Str`-output expression (`rhs: !value bull`, `rhs: !get { key: d }`).
     StrEq {
         lhs: Box<ExprSpec>,
-        rhs: String,
+        rhs: StrOperand,
     },
-    /// `lhs != rhs` on a `Str`-typed source and a string literal. The
-    /// complement of [`SignalSpec::StrEq`].
+    /// `lhs != rhs` on two `Str`-typed operands. The complement of
+    /// [`SignalSpec::StrEq`].
     StrNe {
         lhs: Box<ExprSpec>,
-        rhs: String,
+        rhs: StrOperand,
     },
     /// Passthrough wrapper that reports `unstable_period() = 0`. The output
     /// and warm-up of `signal` are unchanged; the strategy-readiness gate
@@ -238,11 +287,11 @@ enum SignalSpecRaw {
     Get { key: String },
     StrEq {
         lhs: Box<ExprSpec>,
-        rhs: String,
+        rhs: StrOperand,
     },
     StrNe {
         lhs: Box<ExprSpec>,
-        rhs: String,
+        rhs: StrOperand,
     },
     Unstable { signal: Box<SignalSpec> },
     Value(bool),
@@ -449,12 +498,12 @@ impl SignalSpec {
             Get { key } => build_signal_get(schema, key),
             StrEq { lhs, rhs } => {
                 let lhs = AsStr::new(lhs.build(anchor, book, schema));
-                let rhs: ValueStr<fugazi::types::Snapshot<String>> = ValueStr::new(rhs.as_str());
+                let rhs = AsStr::new(rhs.build(anchor, book, schema));
                 dyn_indicator::wrap(compare::StrEq::new(lhs, rhs))
             }
             StrNe { lhs, rhs } => {
                 let lhs = AsStr::new(lhs.build(anchor, book, schema));
-                let rhs: ValueStr<fugazi::types::Snapshot<String>> = ValueStr::new(rhs.as_str());
+                let rhs = AsStr::new(rhs.build(anchor, book, schema));
                 dyn_indicator::wrap(compare::StrNe::new(lhs, rhs))
             }
 

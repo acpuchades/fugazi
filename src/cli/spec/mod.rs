@@ -31,9 +31,13 @@ mod template;
 pub use basket::{BasketStrategySpec, SelectionRuleSpec};
 pub use expr::ExprSpec;
 #[allow(unused_imports)]
+pub use expr::ValueLit;
+#[allow(unused_imports)]
 pub use pairs::PairsStrategySpec;
 #[allow(unused_imports)]
 pub use signal::SignalSpec;
+#[allow(unused_imports)]
+pub use signal::StrOperand;
 pub use strategy::SingleStrategySpec;
 #[allow(unused_imports)]
 pub use template::SpecTemplate;
@@ -452,6 +456,98 @@ mod tests {
             built.update(Payload::Snapshot(Snapshot::of_atom(Atom::with_overlays(bar(100.0), bear)))),
             Some(Payload::Bool(false)),
         );
+    }
+
+    #[test]
+    fn value_builds_a_real_or_a_str_constant_from_the_literal_type() {
+        // `!value 70` is the scalar constant; `!value bull` the string one.
+        // Quoting decides when the two would collide: `!value "70"` is a string.
+        let cases = [
+            ("!value 70", crate::dyn_indicator::DynType::Real),
+            ("!value bull", crate::dyn_indicator::DynType::Str),
+            ("!value \"70\"", crate::dyn_indicator::DynType::Str),
+        ];
+        for (yaml, want) in cases {
+            let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
+            let built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+            assert_eq!(built.output_type(), want, "{yaml}");
+        }
+
+        let spec: ExprSpec = serde_norway::from_str("!value bull").unwrap();
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        assert_eq!(
+            built.update(Payload::Snapshot(snap(bar(100.0)))),
+            Some(Payload::Str(std::sync::Arc::from("bull"))),
+        );
+    }
+
+    #[test]
+    fn value_rejects_a_literal_that_is_neither_number_nor_string() {
+        // A bool in a source position isn't a `!value` — it's the signal-side
+        // `!value <bool>` leaf, a different (SignalSpec) tag.
+        let err = serde_norway::from_str::<ExprSpec>("!value true")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("!value takes a number"), "{err}");
+    }
+
+    #[test]
+    fn str_eq_takes_a_literal_a_value_string_or_a_second_column_as_rhs() {
+        let mut b = Schema::builder();
+        b.add_str("regime");
+        b.add_str("prev_regime");
+        let schema = b.finish();
+
+        let build = |yaml: &str| {
+            let spec: SignalSpec = serde_norway::from_str(yaml).unwrap();
+            spec.build(&Position::new(), &Book::new(1.0), &schema)
+        };
+        // The bare literal (the original shape), the same constant written the
+        // long way, and a second Str column — "the regime is unchanged".
+        let mut literal = build("!str_eq { lhs: !get { key: regime }, rhs: bull }");
+        let mut constant = build("!str_eq { lhs: !get { key: regime }, rhs: !value bull }");
+        let mut cross = build("!str_eq { lhs: !get { key: regime }, rhs: !get { key: prev_regime } }");
+
+        let row = |regime: &str, prev: &str| {
+            let ov = OverlayInfo::new(
+                schema.clone(),
+                vec![
+                    OverlayValue::Str(std::sync::Arc::from(regime)),
+                    OverlayValue::Str(std::sync::Arc::from(prev)),
+                ],
+            );
+            Payload::Snapshot(Snapshot::of_atom(Atom::with_overlays(bar(100.0), ov)))
+        };
+
+        assert_eq!(literal.update(row("bull", "bear")), Some(Payload::Bool(true)));
+        assert_eq!(literal.update(row("bear", "bear")), Some(Payload::Bool(false)));
+
+        assert_eq!(constant.update(row("bull", "bear")), Some(Payload::Bool(true)));
+        assert_eq!(constant.update(row("bear", "bear")), Some(Payload::Bool(false)));
+
+        assert_eq!(cross.update(row("bull", "bull")), Some(Payload::Bool(true)));
+        assert_eq!(cross.update(row("bull", "bear")), Some(Payload::Bool(false)));
+    }
+
+    #[test]
+    fn value_string_survives_the_yaml_to_json_path() {
+        // The CLI deserializes through `yaml_to_json` (for `!param`
+        // substitution), not straight from YAML — so the string literal and
+        // the `!str_eq` rhs operand have to normalise on that path too.
+        let yaml = r#"
+            symbol: BTC
+            long:
+              enter: !str_eq { lhs: !get { key: regime }, rhs: !value bull }
+              exit: !str_ne { lhs: !get { key: regime }, rhs: bull }
+        "#;
+        let value: serde_norway::Value = serde_norway::from_str(yaml).unwrap();
+        let json = crate::convert::yaml_to_json(value).unwrap();
+        let spec: SingleStrategySpec = serde_json::from_value(json).unwrap();
+
+        let mut b = Schema::builder();
+        b.add_str("regime");
+        let schema = b.finish();
+        let _ = spec.build(1.0, &schema);
     }
 
     #[test]

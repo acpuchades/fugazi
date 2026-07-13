@@ -177,6 +177,7 @@ const GROUPS: &[Group] = &[
         title: "constants",
         entries: &[
             Entry { tag: "value", args: "<n>",    doc: "a constant scalar" },
+            Entry { tag: "value", args: "<str>",  doc: "a constant string — the operand of !str_eq / !str_ne (quote a numeric-looking one: !value \"70\")" },
             Entry { tag: "value", args: "<bool>", doc: "a constant boolean leaf" },
         ],
     },

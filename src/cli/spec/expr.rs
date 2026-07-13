@@ -25,7 +25,7 @@ use fugazi::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Book, Cci, Component, Dmi,
     DmiValue, Donchian, DonchianValue, Ema, GetBool, GetReal, GetStr, Hma, IfElse, Keltner,
     KeltnerValue, Latch, Log, Macd, MacdValue, Mfi, Obv, Pick, Position, Resample, Rma, Rsi, Sar,
-    Sma, StdDev, StochRsi, Stochastic, TrueRange, Value, Vwap, WilliamsR, Wma,
+    Sma, StdDev, StochRsi, Stochastic, TrueRange, Value, ValueStr, Vwap, WilliamsR, Wma,
 };
 use fugazi::prelude::*;
 use fugazi::types::Snapshot;
@@ -62,6 +62,49 @@ pub(super) fn default_bar_source() -> Box<ExprSpec> {
 /// Default base for `!log`: natural log (`e`).
 pub(super) fn default_log_base() -> Real {
     std::f64::consts::E
+}
+
+/// The payload of [`ExprSpec::Value`] — a constant leaf, either numeric or
+/// string-valued.
+///
+/// A YAML number builds a [`Value`] (`Real` output, the operand of every
+/// arithmetic op and comparison); a YAML string builds a
+/// [`ValueStr`] (`Arc<str>` output, the operand of `!str_eq` / `!str_ne`
+/// against a `Str` overlay column read by `!get`):
+///
+/// ```yaml
+/// !gt      { lhs: !rsi { period: 14 }, rhs: !value 70 }        # Real
+/// !str_ne  { lhs: !get { key: regime }, rhs: !value bear }     # Str
+/// ```
+///
+/// Quoting decides the type when the two would collide: `!value 70` is the
+/// number, `!value "70"` the string. Deserializes through a
+/// [`serde_norway::Value`] bridge (rather than `#[serde(untagged)]`) so a
+/// wrong-typed literal reports what `!value` accepts instead of the
+/// "did not match any variant" untagged error.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(try_from = "serde_norway::Value")]
+pub enum ValueLit {
+    Real(Real),
+    Str(String),
+}
+
+impl TryFrom<serde_norway::Value> for ValueLit {
+    type Error = String;
+
+    fn try_from(v: serde_norway::Value) -> Result<Self, Self::Error> {
+        match v {
+            serde_norway::Value::Number(n) => n
+                .as_f64()
+                .map(ValueLit::Real)
+                .ok_or_else(|| format!("!value: {n} is not a finite number")),
+            serde_norway::Value::String(s) => Ok(ValueLit::Str(s)),
+            other => Err(format!(
+                "!value takes a number (a constant scalar) or a string (a \
+                 constant string, for !str_eq / !str_ne), got {other:?}"
+            )),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -154,8 +197,10 @@ pub enum ExprSpec {
         freq: Option<String>,
     },
 
-    /// A constant value.
-    Value(Real),
+    /// A constant value — a number (`!value 70`, a `Real` source) or a string
+    /// (`!value bull`, a `Str` source for `!str_eq` / `!str_ne`). See
+    /// [`ValueLit`].
+    Value(ValueLit),
 
     /// The current position's entry price — a [`SingleAssetStrategy`] anchor,
     /// for building stop-loss / take-profit levels.
@@ -692,8 +737,10 @@ enum ExprSpecRaw {
         freq: Option<String>,
     },
 
-    /// A constant value.
-    Value(Real),
+    /// A constant value — a number (`!value 70`, a `Real` source) or a string
+    /// (`!value bull`, a `Str` source for `!str_eq` / `!str_ne`). See
+    /// [`ValueLit`].
+    Value(ValueLit),
 
     /// The current position's entry price — a [`SingleAssetStrategy`] anchor,
     /// for building stop-loss / take-profit levels.
@@ -1442,7 +1489,10 @@ impl ExprSpec {
 
             Pick { symbol, freq } => build_pick(symbol.as_deref(), freq.as_deref()),
 
-            Value(x) => dyn_indicator::wrap(self::Value::<Snapshot<String>>::new(*x)),
+            Value(ValueLit::Real(x)) => dyn_indicator::wrap(self::Value::<Snapshot<String>>::new(*x)),
+            Value(ValueLit::Str(s)) => {
+                dyn_indicator::wrap(ValueStr::<Snapshot<String>>::new(s.as_str()))
+            }
             Entry => dyn_indicator::wrap(anchor.entry::<Snapshot<String>>()),
             Peak => dyn_indicator::wrap(anchor.peak::<Snapshot<String>>()),
             Trough => dyn_indicator::wrap(anchor.trough::<Snapshot<String>>()),

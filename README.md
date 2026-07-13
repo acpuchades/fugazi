@@ -579,7 +579,10 @@ leaves are bare words (`close`, `high`, `volume`, …). Omitted `source` default
 to `close`. The vocabulary mirrors the library one-to-one:
 
 - **Sources:** leaves `close`/`high`/`low`/`open`/`volume`/`typical`/`median`,
-  `!value <n>`; `!sma`/`!ema`/`!rma`/`!wma`/`!hma`/`!rsi`/`!stddev`/`!cci`/
+  `!value <n>` (and its string twin `!value <str>` — a constant string source,
+  the operand of `!str_eq` / `!str_ne`; quote a numeric-looking one, `!value
+  "70"`, to get the string rather than the scalar);
+  `!sma`/`!ema`/`!rma`/`!wma`/`!hma`/`!rsi`/`!stddev`/`!cci`/
   `!stochastic { source, period }`, `!stoch_rsi { source, rsi_period,
   stoch_period }`; `!macd_line`/`!macd_signal`/`!macd_histogram { source, fast,
   slow, signal }`; `!bb_upper`/`!bb_middle`/`!bb_lower { source, period, k }`;
@@ -597,7 +600,10 @@ to `close`. The vocabulary mirrors the library one-to-one:
   (passthrough that reports `unstable_period() = 0` for the wrapped subtree —
   opt-in override of the "wait for the IIR tail" readiness default; there is
   also a `!unstable { source: <source> }` twin on the source side),
-  `!value <bool>`.
+  `!value <bool>`; `!str_eq`/`!str_ne { lhs, rhs }` compare a `Str` overlay
+  column (`lhs: !get { key: regime }`) against a string — `rhs` takes a bare
+  literal (`rhs: bull`), the same constant as a source (`rhs: !value bull`), or
+  a second `Str` column (`rhs: !get { key: prev_regime }`).
 
 **Parameters — `!param`.** Any value in the strategy can be a placeholder resolved
 at run time with `--params` (repeatable), so one file covers many variations
