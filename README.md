@@ -589,7 +589,9 @@ to `close`. The vocabulary mirrors the library one-to-one:
   `!keltner_{upper,middle,lower} { source, ema_period, atr_period, multiplier }`;
   `!donchian_{upper,middle,lower} { high, low, period }`; `!adx`/`!plus_di`/
   `!minus_di`/`!dmi_plus_di`/`!dmi_minus_di`/`!aroon_{up,down,oscillator}
-  { period }`; bar indicators `!atr`/`!mfi`/`!williams_r { period }`, `!obv`/
+  { period }`; bar indicators `!atr`/`!mfi`/`!williams_r { period }`,
+  range-based volatility `!parkinson`/`!garman_klass`/`!rogers_satchell
+  { period }`, `!obv`/
   `!vwap`/`!ad`/`!true_range`, `!sar { step, max }`; transforms `!add`/`!sub`/
   `!mul`/`!div { lhs, rhs }`, `!lag`/`!diff`/`!ratio`/`!roc { source, periods }`,
   `!rolling_max`/`!rolling_min { source, period }`.
