@@ -10,7 +10,7 @@
 //!
 //! ```text
 //! --costs @binance.yml
-//! --costs @binance.yml,commission.rate=0.0004
+//! --costs @binance.yml,commission.percentage.rate=0.0004
 //! --costs 'commission=!percentage { rate: 0.001 },spread=!bps { bps: 5 }'
 //! --costs 'BTCUSDT[1m]:slippage=!volume_participation { coefficient: 0.3 }'
 //! --costs none
@@ -23,6 +23,12 @@
 //! [`CostConfig`] via serde. [`CostConfig::resolve`] then picks the winning
 //! model per leg for a given `(symbol, frequency)` and returns a live
 //! [`TradingCosts`] the wallet consumes.
+//!
+//! Models are **externally tagged** — a variant is spelled `!percentage { rate:
+//! 0.001 }`, the same YAML tag vocabulary the strategy spec uses. A dotted
+//! setter is therefore a literal address into that tree, variant level included:
+//! `commission.percentage.rate=0.0004` nudges one field of a loaded preset,
+//! while `commission=!percentage { rate: 0.0004 }` replaces the whole model.
 //!
 //! Split across two submodules:
 //!
@@ -78,13 +84,42 @@ mod tests {
     #[test]
     fn dotted_key_targets_default_leaf() {
         // The first term establishes the default; the second nudges its `rate`.
+        // The dotted path names the variant — it addresses the tree literally.
         let cfg = config_of(&[
             "commission=!percentage { rate: 0.001 }",
-            "commission.rate=0.0004",
+            "commission.percentage.rate=0.0004",
         ]);
         assert!(matches!(
             cfg.commission.default,
             Some(CommissionSpec::Percentage { rate }) if (rate - 0.0004).abs() < 1e-12
+        ));
+    }
+
+    #[test]
+    fn dotted_key_naming_the_wrong_variant_is_an_error() {
+        // Nudging `percentage.rate` on a `!fixed` model would plant a second key
+        // at the model position; the externally-tagged enum rejects that rather
+        // than half-applying the setter.
+        let err = config(&[
+            parse("commission=!fixed { amount: 1.0 }"),
+            parse("commission.percentage.rate=0.0004"),
+        ])
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("commission"),
+            "expected a typed error naming the leg, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn dotted_key_builds_a_model_from_scratch() {
+        // With no preset loaded the same path is just a longhand spelling of
+        // `commission=!percentage { rate: … }`.
+        let cfg = config_of(&["commission.percentage.rate=0.001"]);
+        assert!(matches!(
+            cfg.commission.default,
+            Some(CommissionSpec::Percentage { rate }) if (rate - 0.001).abs() < 1e-12
         ));
     }
 
@@ -133,11 +168,9 @@ mod tests {
     #[test]
     fn preset_flat_leg_normalizes_to_default() {
         let yaml = r#"
-            commission:
-              kind: percentage
+            commission: !percentage
               rate: 0.001
-            spread:
-              kind: bps
+            spread: !bps
               bps: 5
         "#;
         let cfg = config(&[CostSpec(vec![CostTerm::Load(Source::Inline(yaml.to_string()))])])
@@ -153,10 +186,10 @@ mod tests {
     fn preset_structured_by_symbol_populates_map() {
         let yaml = r#"
             spread:
-              default: { kind: bps, bps: 2 }
+              default: !bps { bps: 2 }
               by_symbol:
-                BTC: { kind: bps, bps: 1 }
-                ETH: { kind: bps, bps: 1.5 }
+                BTC: !bps { bps: 1 }
+                ETH: !bps { bps: 1.5 }
         "#;
         let cfg = config(&[CostSpec(vec![CostTerm::Load(Source::Inline(yaml.to_string()))])])
             .unwrap();
@@ -182,14 +215,28 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_model_kind() {
+    fn rejects_unknown_model_variant() {
         // The build path is where the typed deserialize runs; check we hit it.
         let err = config(&[parse("commission=!martian { rate: 0.001 }")]).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("kind") || msg.contains("commission") || msg.contains("martian"),
+            msg.contains("commission") || msg.contains("martian"),
             "unexpected error: {msg}"
         );
+    }
+
+    #[test]
+    fn later_model_replaces_earlier_wholesale() {
+        // A `!max` layered over a `!percentage` must replace it, not merge into
+        // a two-variant object no externally-tagged enum can read.
+        let cfg = config_of(&[
+            "commission=!percentage { rate: 0.001 }",
+            "commission=!max { lhs: !per_unit { rate: 0.0035 }, rhs: !fixed { amount: 1.0 } }",
+        ]);
+        assert!(matches!(
+            cfg.commission.default,
+            Some(CommissionSpec::Max { .. })
+        ));
     }
 
     #[test]

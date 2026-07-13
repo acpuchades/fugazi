@@ -18,21 +18,16 @@
 # Values are US-equity retail Tiered as of the date above; verify against
 # the current fee schedule before running a live-money strategy.
 
-commission:
-  kind: max
-  lhs:
-    kind: per_unit
+commission: !max
+  lhs: !per_unit
     rate: 0.0035   # $0.0035 per share, Tiered US equities
-  rhs:
-    kind: fixed
+  rhs: !fixed
     amount: 1.0    # $1.00 minimum per order
 
-spread:
-  kind: bps
+spread: !bps
   bps: 2
 
-slippage:
-  kind: volume_participation
+slippage: !volume_participation
   coefficient: 0.05
   exponent: 0.5
   stop_multiplier: 2.0

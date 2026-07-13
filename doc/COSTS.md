@@ -74,9 +74,10 @@ Repeatable, `,`-separated. Each term is one of:
 fugazi run @strategy.yml -s @candles.csv -o out/ \
     --costs 'commission=!percentage { rate: 0.001 },spread=!bps { bps: 5 }'
 
-# Load a venue preset, then nudge one field.
+# Load a venue preset, then nudge one field. The dotted path addresses the
+# spec tree literally, so it names the model's variant (`!percentage`) too.
 fugazi run @strategy.yml -s @candles.csv -o out/ \
-    --costs @examples/binance.yml,commission.rate=0.00075   # BNB discount
+    --costs @examples/binance.yml,commission.percentage.rate=0.00075   # BNB discount
 
 # Tighter spread for BTC on daily bars only; every other (symbol, freq)
 # falls back to the default leg.
@@ -134,7 +135,7 @@ Cash paid on top of the fill's cash flow, deducted from the wallet's
 funds, and recorded on `Order::commission`. All models saturate at zero
 (a negative-parameter model still charges `0.0`, never a rebate).
 
-| Kind | Formula | Fields | Use |
+| Variant | Formula | Fields | Use |
 |---|---|---|---|
 | `none` | `0` | — | Explicit zero (same as the default). |
 | `fixed` | `amount` | `amount` | Flat per-ticket. |
@@ -151,23 +152,21 @@ Examples:
 
 ```yaml
 # Binance-style: 10 bps taker, percentage of trade value.
-commission: { kind: percentage, rate: 0.001 }
+commission: !percentage { rate: 0.001 }
 
 # US equities: half a cent per share.
-commission: { kind: per_unit, rate: 0.005 }
+commission: !per_unit { rate: 0.005 }
 
 # IBKR Tiered US equities: max($1.00, $0.0035/share).
-commission:
-  kind: max
-  lhs: { kind: per_unit, rate: 0.0035 }
-  rhs: { kind: fixed, amount: 1.0 }
+commission: !max
+  lhs: !per_unit { rate: 0.0035 }
+  rhs: !fixed { amount: 1.0 }
 
 # Exchange fee plus a regulatory pass-through.
-commission:
-  kind: composite
+commission: !composite
   parts:
-    - { kind: percentage, rate: 0.0003 }
-    - { kind: fixed, amount: 0.02 }
+    - !percentage { rate: 0.0003 }
+    - !fixed { amount: 0.02 }
 ```
 
 ## Spread
@@ -177,7 +176,7 @@ The half-spread applied per side. Buys pay it (`+`); sells receive it
 round-trip, 5 bps per side — because that's how a quoted market maker's
 book advertises it (top-of-book = mid ± half-spread).
 
-| Kind | Formula (half-spread) | Fields | Use |
+| Variant | Formula (half-spread) | Fields | Use |
 |---|---|---|---|
 | `none` | `0` | — | Explicit zero. |
 | `bps` | `bps · 1e-4 · price / 2` | `bps` | Basis-point full spread; the standard shape for anything quoted in bps. |
@@ -187,10 +186,10 @@ Examples:
 
 ```yaml
 # 5 bps round-trip (2.5 bps per side) on a $100 tape = 2.5c per side.
-spread: { kind: bps, bps: 5 }
+spread: !bps { bps: 5 }
 
 # 1c full spread (0.5c per side) on a dollar-tick stock.
-spread: { kind: absolute, amount: 0.01 }
+spread: !absolute { amount: 0.01 }
 ```
 
 ## Slippage
@@ -202,7 +201,7 @@ stop in a fast market typically slips more than a planned entry. Default
 `1.5×` (see [`DEFAULT_STOP_MULTIPLIER`](../src/costs/mod.rs)); set it to
 `1.0` to model resting fills as identical to market orders.
 
-| Kind | Formula (adverse fraction of price) | Fields | Use |
+| Variant | Formula (adverse fraction of price) | Fields | Use |
 |---|---|---|---|
 | `none` | `0` | — | Explicit zero. |
 | `bps` | `bps · 1e-4 · stop_mult` | `bps`, `stop_multiplier` (opt.) | Constant bps impact regardless of order size. |
@@ -212,18 +211,17 @@ Examples:
 
 ```yaml
 # 2 bps flat impact, 3 bps on stops (1.5× default).
-slippage: { kind: bps, bps: 2 }
+slippage: !bps { bps: 2 }
 
 # Square-root impact: a fill of 1% of the bar's volume shifts the tape by
 # coef · sqrt(0.01) = 0.1 · 0.1 = 1% adverse.
-slippage:
-  kind: volume_participation
+slippage: !volume_participation
   coefficient: 0.1
   exponent: 0.5
   stop_multiplier: 1.5
 
 # Linear impact (exp = 1) — impact grows in lockstep with participation.
-slippage: { kind: volume_participation, coefficient: 0.05, exponent: 1.0 }
+slippage: !volume_participation { coefficient: 0.05, exponent: 1.0 }
 ```
 
 `volume_participation` is a *single-bar* approximation: a fill uses only
@@ -258,18 +256,16 @@ the current fee schedule before running live money.
 ### `examples/binance.yml` — crypto spot (Binance taker)
 
 ```yaml
-commission:                       # flat model → commission.default
-  kind: percentage
+commission: !percentage           # flat model → commission.default
   rate: 0.001                     # 10 bps taker (VIP 0)
 
 spread:                           # structured: default + per-symbol overrides
-  default: { kind: bps, bps: 2 }
+  default: !bps { bps: 2 }
   by_symbol:
-    BTCUSDT: { kind: bps, bps: 1 }
-    ETHUSDT: { kind: bps, bps: 1.5 }
+    BTCUSDT: !bps { bps: 1 }
+    ETHUSDT: !bps { bps: 1.5 }
 
-slippage:
-  kind: volume_participation
+slippage: !volume_participation
   coefficient: 0.1
   exponent: 0.5
   stop_multiplier: 1.5
@@ -278,15 +274,13 @@ slippage:
 ### `examples/ibkr.yml` — US equities (IBKR Tiered)
 
 ```yaml
-commission:                       # max($1.00, $0.0035/share)
-  kind: max
-  lhs: { kind: per_unit, rate: 0.0035 }
-  rhs: { kind: fixed, amount: 1.0 }
+commission: !max                  # max($1.00, $0.0035/share)
+  lhs: !per_unit { rate: 0.0035 }
+  rhs: !fixed { amount: 1.0 }
 
-spread: { kind: bps, bps: 2 }
+spread: !bps { bps: 2 }
 
-slippage:
-  kind: volume_participation
+slippage: !volume_participation
   coefficient: 0.05
   exponent: 0.5
   stop_multiplier: 2.0

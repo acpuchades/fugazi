@@ -203,10 +203,10 @@ surface here — not at fetch time.
 #### `check costs`
 
 Parses each `run --costs` spec, folds them into a single [`CostConfig`], and
-builds each configured leg's live model — so an unknown `kind:`, a missing
-required field, a malformed `SYMBOL[FREQ]:` scope prefix, or a nested
-`composite`/`max` with a bad child all surface here rather than at
-`run`/`optimize` startup.
+builds each configured leg's live model — so an unknown `!variant`, a missing
+required field, a dotted setter naming the wrong variant, a malformed
+`SYMBOL[FREQ]:` scope prefix, or a nested `composite`/`max` with a bad child
+all surface here rather than at `run`/`optimize` startup.
 
 | Flag | Description |
 | --- | --- |
@@ -612,6 +612,9 @@ as [`--params`](#--params):
 - `[SCOPE:]key=value` — set one leg (or nudge one field of it) inline.
   `key` starts with `commission` / `spread` / `slippage`; `value` is the
   model expression (`!percentage { rate: 0.001 }`, `!bps { bps: 5 }`, …).
+  A `key` that reaches *into* a model addresses the spec tree literally, so
+  it names the variant too — `commission.percentage.rate=0.00075`. See
+  [Nudging one field](#nudging-one-field-of-a-preset).
 - `@file.yml` — load a whole venue preset. Two ship in
   [`examples/`](../examples/): `binance.yml` (crypto taker fees) and
   `ibkr.yml` (US-equities Tiered).
@@ -645,10 +648,11 @@ price:
 5. Commission is computed from the *final* price × units and written to a
    separate `commission` column — never netted into `price`.
 
-**Model catalogue** — each variant lands as a `kind:` value in a preset
-YAML and as a `!variant { … }` external tag on the inline CLI form:
+**Model catalogue** — a model is spelled as a `!variant { … }` YAML tag, in
+a preset file and on the inline CLI form alike (the same tag vocabulary the
+[strategy YAML](#strategy-yaml-reference) uses):
 
-| Leg | Kind | Fields | Notes |
+| Leg | Variant | Fields | Notes |
 | --- | --- | --- | --- |
 | commission | `fixed` | `amount` | Flat per-ticket. |
 | commission | `percentage` | `rate` | `rate × notional`. |
@@ -675,21 +679,41 @@ this order at run time:
 **Preset shape** ([`examples/binance.yml`](../examples/binance.yml)):
 
 ```yaml
-commission:                       # flat form ⇒ commission.default
-  kind: percentage
+commission: !percentage           # flat form ⇒ commission.default
   rate: 0.001
 
 spread:                           # structured: default + per-symbol overrides
-  default: { kind: bps, bps: 2 }
+  default: !bps { bps: 2 }
   by_symbol:
-    BTCUSDT: { kind: bps, bps: 1 }
-    ETHUSDT: { kind: bps, bps: 1.5 }
+    BTCUSDT: !bps { bps: 1 }
+    ETHUSDT: !bps { bps: 1.5 }
 
-slippage:
-  kind: volume_participation
+slippage: !volume_participation
   coefficient: 0.1
   exponent: 0.5
   stop_multiplier: 1.5
+```
+
+<a id="nudging-one-field-of-a-preset"></a>**Nudging one field of a preset.**
+A dotted `key` is a literal address into that tree, and the model's variant
+is a level of it — so nudging one field names the variant:
+
+```sh
+--costs @examples/binance.yml,commission.percentage.rate=0.00075
+#                             └── leg ──┘└─ variant ─┘└ field ┘
+```
+
+You already have to know the variant to nudge it (`rate` exists on
+`percentage` and `per_unit`, `amount` on `fixed`, …), so naming it costs
+nothing and keeps the path honest. Point the wrong variant at a preset and
+it's a hard error naming the model that's actually there, not a silent
+half-application:
+
+```console
+$ fugazi check costs '@examples/ibkr.yml,commission.percentage.rate=0.001'
+Error: cost setter `commission.percentage.rate`: the commission model is
+`!max`, not `!percentage` — nudge a field `!max` actually has, or replace the
+model outright with `commission=!percentage { … }`
 ```
 
 **Inline forms**:
@@ -701,7 +725,7 @@ fugazi run @strategy.yml -s @candles.csv -o out/ \
 
 # Load a preset, nudge one field.
 fugazi run @strategy.yml -s @candles.csv -o out/ \
-    --costs @examples/binance.yml,commission.rate=0.00075   # BNB discount
+    --costs @examples/binance.yml,commission.percentage.rate=0.00075   # BNB discount
 
 # Scoped override — a tighter spread for BTC on daily bars.
 fugazi run @strategy.yml -s @candles.csv -o out/ \

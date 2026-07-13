@@ -134,8 +134,8 @@ fn binance_preset_end_to_end() {
     );
 }
 
-/// `check costs` accepts a well-formed spec and rejects an unknown `kind:` with
-/// a non-zero exit code (linting a bad spec at CI time, before a real run).
+/// `check costs` accepts a well-formed spec and rejects an unknown model variant
+/// with a non-zero exit code (linting a bad spec at CI time, before a real run).
 #[test]
 fn check_costs_accepts_valid_and_rejects_invalid() {
     let ok = Command::new(env!("CARGO_BIN_EXE_fugazi"))
@@ -150,7 +150,26 @@ fn check_costs_accepts_valid_and_rejects_invalid() {
         .expect("failed to launch fugazi");
     assert!(
         !bad.status.success(),
-        "unknown `kind:` should fail check with non-zero exit"
+        "unknown model variant should fail check with non-zero exit"
+    );
+}
+
+/// The `ibkr` preset exercises the nested-model path (`!max` over a `!per_unit`
+/// and a `!fixed`), which the binance preset doesn't reach.
+#[test]
+fn ibkr_preset_end_to_end() {
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let out = run_with(
+        &[&format!("@{manifest}/examples/ibkr.yml")],
+        "fugazi_costs_ibkr_preset",
+    );
+    assert!(
+        out.trades.lines().next().unwrap().ends_with(",commission"),
+        "ibkr preset should populate the commission column"
+    );
+    assert!(
+        out.metrics.contains("total_commission:"),
+        "ibkr preset should populate the costs section"
     );
 }
 

@@ -29,19 +29,17 @@ pub fn config(specs: &[CostSpec]) -> Result<CostConfig> {
             apply_term(&mut tree, term)?;
         }
     }
-    // The typed enums are internally-tagged (`kind: percentage`), but the
-    // inline YAML form uses external tagging (`!percentage {…}` → singleton
-    // object). Normalize every model-position node in the tree before typed
-    // deserialization so both shapes reach the same variant.
-    let normalized = Value::Object(normalize_tree_to_internal_tags(tree));
-    let config: CostConfig = serde_json::from_value(normalized)
+    let config: CostConfig = serde_json::from_value(Value::Object(tree))
         .context("interpreting the resolved --costs tree")?;
     Ok(config)
 }
 
-/// Names the model enums recognize as `kind:` values — for detecting when a
-/// singleton-object node is an external-tag form we should rewrite.
-const KNOWN_KINDS: &[&str] = &[
+/// The model enums' variant names. A YAML `!percentage { rate: X }` parses to
+/// the singleton object `{percentage: {rate: X}}` — serde's external-tag form,
+/// which the enums below deserialize natively. This list is what lets the
+/// *untyped* passes (leg normalization, deep merge) recognize such a node as a
+/// fully-formed model rather than a bag of fields.
+const MODEL_VARIANTS: &[&str] = &[
     // Commission
     "none",
     "fixed",
@@ -56,112 +54,14 @@ const KNOWN_KINDS: &[&str] = &[
     "volume_participation",
 ];
 
-/// Rewrite every model-position node inside `tree` from external-tag form
-/// (`{percentage: {rate: X}}`) to internal-tag form (`{kind: percentage, rate:
-/// X}`), so serde's internally-tagged Deserialize accepts both shapes.
-fn normalize_tree_to_internal_tags(mut tree: Map<String, Value>) -> Map<String, Value> {
-    for leg in ["commission", "spread", "slippage"] {
-        if let Some(Value::Object(leg_map)) = tree.get_mut(leg) {
-            if let Some(v) = leg_map.get_mut("default") {
-                *v = normalize_model_value(v.take());
-            }
-            for key in ["by_symbol", "by_interval"] {
-                if let Some(Value::Object(map)) = leg_map.get_mut(key) {
-                    for v in map.values_mut() {
-                        *v = normalize_model_value(v.take());
-                    }
-                }
-            }
-            if let Some(Value::Array(entries)) = leg_map.get_mut("scoped") {
-                for e in entries {
-                    if let Value::Object(obj) = e
-                        && let Some(m) = obj.get_mut("model")
-                    {
-                        *m = normalize_model_value(m.take());
-                    }
-                }
-            }
-        }
-    }
-    tree
-}
-
-/// Normalize a single model node. External-tag form (`{percentage: {rate: X}}`,
-/// or the parameterless `"percentage"` string) becomes `{kind: percentage, ...}`;
-/// an already-internally-tagged object passes through; anything else is left
-/// alone (typed deserialization will emit a clear error).
-fn normalize_model_value(value: Value) -> Value {
-    match value {
-        Value::String(ref name) if KNOWN_KINDS.contains(&name.as_str()) => {
-            let mut m = Map::new();
-            m.insert("kind".to_string(), Value::String(name.clone()));
-            Value::Object(m)
-        }
-        Value::Object(obj) => {
-            // Already internally tagged.
-            if obj.contains_key("kind") {
-                // Recursively normalize nested model fields (composite parts,
-                // max legs) so a nested `!fixed { amount: 1.0 }` also normalizes.
-                let mut obj = obj;
-                if let Some(parts) = obj.get_mut("parts")
-                    && let Value::Array(entries) = parts
-                {
-                    for v in entries.iter_mut() {
-                        *v = normalize_model_value(v.take());
-                    }
-                }
-                for k in ["lhs", "rhs"] {
-                    if let Some(v) = obj.get_mut(k) {
-                        *v = normalize_model_value(v.take());
-                    }
-                }
-                return Value::Object(obj);
-            }
-            // Single-key form: rewrite `{name: {...}}` → `{kind: name, ...}`.
-            if obj.len() == 1 {
-                let (name, inner) = obj.into_iter().next().unwrap();
-                if KNOWN_KINDS.contains(&name.as_str()) {
-                    let mut m = Map::new();
-                    m.insert("kind".to_string(), Value::String(name));
-                    match inner {
-                        Value::Object(fields) => {
-                            for (k, v) in fields {
-                                m.insert(k, normalize_model_value(v));
-                            }
-                        }
-                        Value::Null => {}
-                        other => {
-                            // A scalar body for an external tag (e.g. `!fixed 1.0`)
-                            // would collapse the single field — we don't support
-                            // this for models. Rebuild as-was so the typed error
-                            // is clear.
-                            m.insert("value".to_string(), other);
-                        }
-                    }
-                    // Also normalize nested composite/max fields.
-                    if let Some(parts) = m.get_mut("parts")
-                        && let Value::Array(entries) = parts
-                    {
-                        for v in entries.iter_mut() {
-                            *v = normalize_model_value(v.take());
-                        }
-                    }
-                    for k in ["lhs", "rhs"] {
-                        if let Some(v) = m.get_mut(k) {
-                            *v = normalize_model_value(v.take());
-                        }
-                    }
-                    return Value::Object(m);
-                }
-                // Restore the map.
-                let mut restored = Map::new();
-                restored.insert(name, inner);
-                return Value::Object(restored);
-            }
-            Value::Object(obj)
-        }
-        other => other,
-    }
+/// Whether `obj` is a model in external-tag form — the `{percentage: {…}}`
+/// singleton a `!percentage { … }` tag parses to.
+fn is_model(obj: &Map<String, Value>) -> bool {
+    obj.len() == 1
+        && obj
+            .keys()
+            .next()
+            .is_some_and(|k| MODEL_VARIANTS.contains(&k.as_str()))
 }
 
 /// The empty accumulator: `{commission: {}, spread: {}, slippage: {}}`.
@@ -192,18 +92,12 @@ fn apply_term(tree: &mut Map<String, Value>, term: &CostTerm) -> Result<()> {
             set_scoped(tree, scope, key, value.clone())?;
         }
     }
-    // Fold external-tag models into internal-tag form after every term so a
-    // later dotted-key setter (`commission.rate=…`) targets a `kind:`-shaped
-    // parent rather than an untouched `{percentage: {…}}` singleton.
-    let taken = std::mem::replace(tree, Map::new());
-    *tree = normalize_tree_to_internal_tags(taken);
     Ok(())
 }
 
 /// Turn a user-facing preset into the canonical structured form. A leg whose
-/// value carries a `kind:` discriminator is a flat model — hoist it into
-/// `default:`. A leg whose value already has `default:`/`by_symbol:`/`by_interval:`
-/// stays as-is.
+/// value is a flat model (`!percentage { … }`) is hoisted into `default:`. A
+/// leg that already has `default:`/`by_symbol:`/`by_interval:` stays as-is.
 fn normalize_preset(value: Value) -> Result<Map<String, Value>> {
     let Value::Object(map) = value else {
         bail!("cost preset must be a mapping (got {})", value_kind(&value));
@@ -221,31 +115,20 @@ fn normalize_preset(value: Value) -> Result<Map<String, Value>> {
 }
 
 /// A leg node is one of:
-/// * a flat model — `{kind: ...}` (internal-tag form) or `{percentage: {...}}`
-///   (external-tag / YAML-`!tag` form) — becomes `{default: <it>}`.
+/// * a flat model — `{percentage: {...}}`, i.e. what `!percentage { ... }`
+///   parses to — becomes `{default: <it>}`.
 /// * a `{default: ..., by_symbol: {...}, by_interval: {...}}` structured shape —
 ///   pass through.
 fn normalize_leg(node: Value) -> Result<Value> {
     let Value::Object(obj) = node else {
         return Ok(node);
     };
-    let has_kind = obj.contains_key("kind");
     let has_structured = obj.contains_key("default")
         || obj.contains_key("by_symbol")
         || obj.contains_key("by_interval")
         || obj.contains_key("scoped");
-    let is_external_tag = obj.len() == 1
-        && obj
-            .keys()
-            .next()
-            .is_some_and(|k| KNOWN_KINDS.contains(&k.as_str()));
 
-    if has_kind && has_structured {
-        bail!(
-            "cost leg cannot mix flat (`kind: …`) and structured (`default`/`by_symbol`/…) shapes"
-        );
-    }
-    if has_kind || is_external_tag {
+    if is_model(&obj) {
         let mut wrapper = Map::new();
         wrapper.insert("default".to_string(), Value::Object(obj));
         return Ok(Value::Object(wrapper));
@@ -254,7 +137,7 @@ fn normalize_leg(node: Value) -> Result<Value> {
         // Neither flat nor structured — refuse rather than silently accept an
         // empty leg the user thought they were configuring.
         bail!(
-            "cost leg must be either a flat model (`kind: …` or `!variant {{…}}`) \
+            "cost leg must be either a flat model (`!variant {{…}}`) \
              or a structured `{{default, by_symbol, by_interval}}` mapping"
         );
     }
@@ -262,19 +145,16 @@ fn normalize_leg(node: Value) -> Result<Value> {
 }
 
 /// Deep-merge `src` into `dest`: object keys recurse (later overrides), scalars
-/// and arrays are replaced wholesale. A `{kind: ...}` value on either side
-/// short-circuits recursion — a full model replaces the previous one wholesale
-/// so a `commission: {kind: percentage}` layer isn't left with an orphan
-/// `rate` field when a later `commission: {kind: max, lhs, rhs}` overwrites it.
+/// and arrays are replaced wholesale. A fully-formed model on either side
+/// short-circuits recursion and replaces the previous one wholesale — otherwise
+/// a `commission: !percentage { rate }` layer overwritten by a later
+/// `commission: !max { lhs, rhs }` would merge into a two-variant object that no
+/// externally-tagged enum can read.
 fn deep_merge_into(dest: &mut Map<String, Value>, src: Map<String, Value>) {
     for (k, v) in src {
         match (dest.get_mut(&k), v) {
             (Some(Value::Object(inner_dest)), Value::Object(inner_src)) => {
-                // If either side already looks like a fully-formed model
-                // (`kind:` present), replacing the whole subtree is the right
-                // semantic — deep-merging risks leaving orphan fields from the
-                // previous variant.
-                if inner_dest.contains_key("kind") || inner_src.contains_key("kind") {
+                if is_model(inner_dest) || is_model(&inner_src) {
                     *inner_dest = inner_src;
                 } else {
                     deep_merge_into(inner_dest, inner_src);
@@ -290,9 +170,14 @@ fn deep_merge_into(dest: &mut Map<String, Value>, src: Map<String, Value>) {
 /// Apply a `Set` term with the given `scope` and dotted `key` to `tree`.
 ///
 /// A scope-less `commission=EXPR` is sugar for `commission.default=EXPR`; a
-/// scope-less `commission.rate=…` writes into `commission.default.rate` when the
-/// first segment after the leg is a leaf name (i.e. not one of `default`,
-/// `by_symbol`, `by_interval`, `scoped`).
+/// scope-less `commission.percentage.rate=…` writes into
+/// `commission.default.percentage.rate` when the first segment after the leg is
+/// a leaf name (i.e. not one of `default`, `by_symbol`, `by_interval`,
+/// `scoped`). Note that the dotted path is a literal address into the tree —
+/// the model's variant is a level of it, so nudging one field of a loaded
+/// preset names the variant (`commission.percentage.rate=0.00075`). Naming the
+/// wrong variant plants a second key at the model position, which the
+/// externally-tagged enum rejects rather than silently half-applying.
 ///
 /// A symbol-scoped `S:commission=EXPR` writes to `commission.by_symbol.S`; a
 /// freq-scoped `[F]:commission=EXPR` writes to `commission.by_interval.<F>`; a
@@ -333,6 +218,9 @@ fn set_scoped(
         } else {
             vec!["default".to_string()]
         };
+        if path[0] == "default" {
+            check_variant(leg, target_leg.get("default"), &path[1..])?;
+        }
         assign_path(target_leg, &path, value);
         return Ok(());
     }
@@ -344,6 +232,7 @@ fn set_scoped(
             if rest.is_empty() {
                 *existing = value;
             } else {
+                check_variant(leg, Some(&*existing), rest)?;
                 if !existing.is_object() {
                     *existing = Value::Object(Map::new());
                 }
@@ -358,6 +247,7 @@ fn set_scoped(
             if rest.is_empty() {
                 *existing = value;
             } else {
+                check_variant(leg, Some(&*existing), rest)?;
                 if !existing.is_object() {
                     *existing = Value::Object(Map::new());
                 }
@@ -387,6 +277,40 @@ fn set_scoped(
             list.push(Value::Object(entry));
         }
         (None, None) => unreachable!("scope.is_default() covered above"),
+    }
+    Ok(())
+}
+
+/// A dotted setter that reaches *into* a model — `commission.percentage.rate` —
+/// names the variant as a path segment, because the path is a literal address
+/// into the spec tree. Check that name against the model already sitting there,
+/// so aiming the wrong variant at a loaded preset says so plainly instead of
+/// surfacing later as serde's "expected map with a single key".
+///
+/// `path` is the remainder *inside* the model position (so `["percentage",
+/// "rate"]`); an absent or empty `existing` means nothing is loaded yet and the
+/// setter is building the model from scratch, which is fine.
+fn check_variant(leg: &str, existing: Option<&Value>, path: &[String]) -> Result<()> {
+    let Some(named) = path.first() else {
+        return Ok(());
+    };
+    if !MODEL_VARIANTS.contains(&named.as_str()) {
+        return Ok(());
+    }
+    let Some(Value::Object(obj)) = existing else {
+        return Ok(());
+    };
+    if !is_model(obj) {
+        return Ok(());
+    }
+    let current = obj.keys().next().expect("is_model checked len == 1");
+    if current != named {
+        bail!(
+            "cost setter `{leg}.{}`: the {leg} model is `!{current}`, not `!{named}` — \
+             nudge a field `!{current}` actually has, or replace the model outright \
+             with `{leg}=!{named} {{ … }}`",
+            path.join("."),
+        );
     }
     Ok(())
 }
@@ -524,11 +448,13 @@ impl<T> LegConfig<T> {
 }
 
 // ---------------------------------------------------------------------------
-// Model enums (tagged by `kind:`) with a build → live-model method.
+// Model enums with a build → live-model method. Externally tagged, so a variant
+// is spelled `!percentage { rate: 0.001 }` — the same YAML tag vocabulary the
+// strategy spec (`ExprSpec` / `SignalSpec`) uses.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum CommissionSpec {
     None,
     Fixed { amount: Real },
@@ -556,7 +482,7 @@ impl CommissionSpec {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum SpreadSpec {
     None,
     Bps { bps: Real },
@@ -574,7 +500,7 @@ impl SpreadSpec {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum SlippageSpec {
     None,
     Bps {
