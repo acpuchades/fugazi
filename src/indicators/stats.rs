@@ -71,6 +71,38 @@ impl WindowStats {
         self.variance().sqrt()
     }
 
+    /// **Sample** (`n − 1` divisor) standard deviation over the window — the
+    /// form [`metrics::stddev_return`](crate::metrics::stddev_return) uses,
+    /// whereas [`stddev`](Self::stddev) is the population (`n` divisor) form
+    /// backing [`StdDev`](super::StdDev)/[`Bollinger`](super::Bollinger). The
+    /// trailing risk indicators ([`Sharpe`](super::Sharpe) /
+    /// [`Volatility`](super::Volatility)) use this so a full-window reading
+    /// equals the whole-run [`metrics`](crate::metrics) number. Returns `0.0`
+    /// for `period < 2` (sample variance is undefined with one sample). Only
+    /// meaningful once [`is_full`](Self::is_full).
+    pub fn sample_stddev(&self) -> Real {
+        if self.period < 2 {
+            return 0.0;
+        }
+        let n = self.period as Real;
+        (self.variance() * n / (n - 1.0)).sqrt()
+    }
+
+    /// Downside deviation about `threshold`: `sqrt(mean(min(x − threshold, 0)²))`
+    /// with an `n` divisor, scanning the retained window (O(period), like
+    /// [`mean_abs_dev`](Self::mean_abs_dev)). Matches
+    /// [`metrics`](crate::metrics)' `downside_stddev` (empyrical's
+    /// `downside_risk`), so it backs the rolling [`Sortino`](super::Sortino).
+    /// Only meaningful once [`is_full`](Self::is_full).
+    pub fn downside_dev(&self, threshold: Real) -> Real {
+        let sum_sq: Real = self
+            .window
+            .iter()
+            .map(|x| (x - threshold).min(0.0).powi(2))
+            .sum();
+        (sum_sq / self.period as Real).sqrt()
+    }
+
     /// Mean absolute deviation about the window mean, `mean(|x - mean|)`. Unlike
     /// `mean`/`variance` this scans the retained window (O(period)); used by
     /// [`Cci`](super::Cci). Only meaningful once [`is_full`](Self::is_full).

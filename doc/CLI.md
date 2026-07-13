@@ -450,7 +450,28 @@ fugazi get binance:BTCUSDT[1d],ETHUSDT[1d] \
     -x 'BTCUSDT:ema=!ema { period: 20 }' \
     -x 'ETHUSDT:rsi=!rsi { period: 14 }' \
     -o out.csv
+
+# Trailing strategy risk as an overlay column: the rolling 60-bar Sharpe of a
+# strategy's own equity curve, computed inline. `!sharpe` embeds a whole
+# single-asset strategy (here `!import`ed), drives it against a private paper
+# wallet each bar, and reduces the equity curve to the rolling metric — no
+# separate run + returns.csv + re-join.
+fugazi get binance:BTCUSDT[1d] --since 2020-01-01 \
+    -x 'sharpe60=!sharpe { strategy: !import ma_cross.yml, period: 60, bars_per_year: 365 }' \
+    -o btc_regime.csv
 ```
+
+**Trailing risk tags.** `!sharpe` / `!sortino` / `!volatility` / `!max_drawdown`
+/ `!calmar` each take `{ strategy: <single-asset strategy document>, period,
+bars_per_year }` (plus an optional `risk_free_rate`, default `0`, on Sharpe /
+Sortino; `!max_drawdown` needs neither `bars_per_year` nor `risk_free_rate`).
+The `strategy:` field is an ordinary single-asset strategy document — inline or
+`!import`ed — and the `symbol:` inside it names the instrument the embedded
+wallet prices, so it should match the series being fetched. A full-window
+`period` reproduces the whole-run [`metrics.yml`](#metricsyml-from-run) number
+for Sharpe / Sortino / volatility. These read a live equity curve, so they are
+CLI/Rust-only — there is no Python binding (the strategy layer is not bound;
+see [python/README.md](../python/README.md)).
 
 ### `list`
 

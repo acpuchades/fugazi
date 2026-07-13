@@ -32,6 +32,8 @@ use fugazi::prelude::*;
 use fugazi::types::Snapshot;
 
 use super::signal::SignalSpec;
+use super::strategy::SingleStrategySpec;
+use super::trailing::{self, TrailingMetric};
 use crate::dyn_indicator::{self, AsAtom, AsBool, AsCandle, AsReal, DynIndicator};
 
 use fugazi::{Frequency, Selector};
@@ -63,6 +65,11 @@ pub(super) fn default_bar_source() -> Box<ExprSpec> {
 /// Default base for `!log`: natural log (`e`).
 pub(super) fn default_log_base() -> Real {
     std::f64::consts::E
+}
+
+/// Default annualized risk-free rate for `!sharpe` / `!sortino`: `0.0`.
+pub(super) fn default_risk_free_rate() -> Real {
+    0.0
 }
 
 /// The payload of [`ExprSpec::Value`] — a constant leaf, either numeric or
@@ -551,6 +558,53 @@ pub enum ExprSpec {
     FractionalKelly {
         kelly_fraction: Real,
         window: usize,
+    },
+
+    // --- trailing risk indicators (own an embedded single-asset strategy,
+    // drive it against a private paper wallet, and reduce its equity curve to
+    // a rolling risk metric over the last `period` bars). Unlike every other
+    // source these do not wrap a price — the `strategy` field is a whole
+    // single-asset strategy document (inline or `!import`ed), and `symbol`
+    // inside it names the instrument the embedded wallet prices. The natural
+    // home is a `fugazi get -x` overlay column (a live regime feature), which
+    // removes the "run a strategy → dump returns.csv → re-join" round-trip.
+    /// Trailing annualized Sharpe of `strategy`'s equity curve over the last
+    /// `period` bars. See [`fugazi::indicators::Sharpe`].
+    Sharpe {
+        strategy: Box<SingleStrategySpec>,
+        period: usize,
+        bars_per_year: Real,
+        #[serde(default = "default_risk_free_rate")]
+        risk_free_rate: Real,
+    },
+    /// Trailing annualized Sortino of `strategy`'s equity curve. See
+    /// [`fugazi::indicators::Sortino`].
+    Sortino {
+        strategy: Box<SingleStrategySpec>,
+        period: usize,
+        bars_per_year: Real,
+        #[serde(default = "default_risk_free_rate")]
+        risk_free_rate: Real,
+    },
+    /// Trailing annualized volatility of `strategy`'s equity return stream.
+    /// See [`fugazi::indicators::Volatility`].
+    Volatility {
+        strategy: Box<SingleStrategySpec>,
+        period: usize,
+        bars_per_year: Real,
+    },
+    /// Trailing maximum drawdown of `strategy`'s equity curve, as a
+    /// non-negative fraction. See [`fugazi::indicators::MaxDrawdown`].
+    MaxDrawdown {
+        strategy: Box<SingleStrategySpec>,
+        period: usize,
+    },
+    /// Trailing Calmar (windowed CAGR / max drawdown) of `strategy`'s equity
+    /// curve. See [`fugazi::indicators::Calmar`].
+    Calmar {
+        strategy: Box<SingleStrategySpec>,
+        period: usize,
+        bars_per_year: Real,
     },
 
     // --- transform operators ---
@@ -1142,6 +1196,53 @@ enum ExprSpecRaw {
         window: usize,
     },
 
+    // --- trailing risk indicators (own an embedded single-asset strategy,
+    // drive it against a private paper wallet, and reduce its equity curve to
+    // a rolling risk metric over the last `period` bars). Unlike every other
+    // source these do not wrap a price — the `strategy` field is a whole
+    // single-asset strategy document (inline or `!import`ed), and `symbol`
+    // inside it names the instrument the embedded wallet prices. The natural
+    // home is a `fugazi get -x` overlay column (a live regime feature), which
+    // removes the "run a strategy → dump returns.csv → re-join" round-trip.
+    /// Trailing annualized Sharpe of `strategy`'s equity curve over the last
+    /// `period` bars. See [`fugazi::indicators::Sharpe`].
+    Sharpe {
+        strategy: Box<SingleStrategySpec>,
+        period: usize,
+        bars_per_year: Real,
+        #[serde(default = "default_risk_free_rate")]
+        risk_free_rate: Real,
+    },
+    /// Trailing annualized Sortino of `strategy`'s equity curve. See
+    /// [`fugazi::indicators::Sortino`].
+    Sortino {
+        strategy: Box<SingleStrategySpec>,
+        period: usize,
+        bars_per_year: Real,
+        #[serde(default = "default_risk_free_rate")]
+        risk_free_rate: Real,
+    },
+    /// Trailing annualized volatility of `strategy`'s equity return stream.
+    /// See [`fugazi::indicators::Volatility`].
+    Volatility {
+        strategy: Box<SingleStrategySpec>,
+        period: usize,
+        bars_per_year: Real,
+    },
+    /// Trailing maximum drawdown of `strategy`'s equity curve, as a
+    /// non-negative fraction. See [`fugazi::indicators::MaxDrawdown`].
+    MaxDrawdown {
+        strategy: Box<SingleStrategySpec>,
+        period: usize,
+    },
+    /// Trailing Calmar (windowed CAGR / max drawdown) of `strategy`'s equity
+    /// curve. See [`fugazi::indicators::Calmar`].
+    Calmar {
+        strategy: Box<SingleStrategySpec>,
+        period: usize,
+        bars_per_year: Real,
+    },
+
     // --- transform operators ---
     Add {
         lhs: Box<ExprSpec>,
@@ -1393,6 +1494,11 @@ impl From<ExprSpecRaw> for ExprSpec {
             ExprSpecRaw::DrawdownThrottle { max_drawdown } => ExprSpec::DrawdownThrottle { max_drawdown },
             ExprSpecRaw::EquityVolTarget { target, window, bars_per_year } => ExprSpec::EquityVolTarget { target, window, bars_per_year },
             ExprSpecRaw::FractionalKelly { kelly_fraction, window } => ExprSpec::FractionalKelly { kelly_fraction, window },
+            ExprSpecRaw::Sharpe { strategy, period, bars_per_year, risk_free_rate } => ExprSpec::Sharpe { strategy, period, bars_per_year, risk_free_rate },
+            ExprSpecRaw::Sortino { strategy, period, bars_per_year, risk_free_rate } => ExprSpec::Sortino { strategy, period, bars_per_year, risk_free_rate },
+            ExprSpecRaw::Volatility { strategy, period, bars_per_year } => ExprSpec::Volatility { strategy, period, bars_per_year },
+            ExprSpecRaw::MaxDrawdown { strategy, period } => ExprSpec::MaxDrawdown { strategy, period },
+            ExprSpecRaw::Calmar { strategy, period, bars_per_year } => ExprSpec::Calmar { strategy, period, bars_per_year },
             ExprSpecRaw::Add { lhs, rhs } => ExprSpec::Add { lhs, rhs },
             ExprSpecRaw::Sub { lhs, rhs } => ExprSpec::Sub { lhs, rhs },
             ExprSpecRaw::Mul { lhs, rhs } => ExprSpec::Mul { lhs, rhs },
@@ -1864,6 +1970,68 @@ impl ExprSpec {
                 *kelly_fraction,
                 *window,
             )),
+
+            // Trailing risk indicators own an embedded strategy; they ignore
+            // the enclosing `anchor`/`book` (the embedded strategy builds its
+            // own) and delegate to the rebuild-on-clone wrapper.
+            Sharpe {
+                strategy,
+                period,
+                bars_per_year,
+                risk_free_rate,
+            } => trailing::build(
+                TrailingMetric::Sharpe,
+                strategy,
+                *period,
+                *risk_free_rate,
+                *bars_per_year,
+                schema,
+            ),
+            Sortino {
+                strategy,
+                period,
+                bars_per_year,
+                risk_free_rate,
+            } => trailing::build(
+                TrailingMetric::Sortino,
+                strategy,
+                *period,
+                *risk_free_rate,
+                *bars_per_year,
+                schema,
+            ),
+            Volatility {
+                strategy,
+                period,
+                bars_per_year,
+            } => trailing::build(
+                TrailingMetric::Volatility,
+                strategy,
+                *period,
+                0.0,
+                *bars_per_year,
+                schema,
+            ),
+            MaxDrawdown { strategy, period } => trailing::build(
+                TrailingMetric::MaxDrawdown,
+                strategy,
+                *period,
+                0.0,
+                0.0,
+                schema,
+            ),
+            Calmar {
+                strategy,
+                period,
+                bars_per_year,
+            } => trailing::build(
+                TrailingMetric::Calmar,
+                strategy,
+                *period,
+                0.0,
+                *bars_per_year,
+                schema,
+            ),
 
             Add { lhs, rhs } => dyn_indicator::wrap(real(lhs).add(real(rhs))),
             Sub { lhs, rhs } => dyn_indicator::wrap(real(lhs).sub(real(rhs))),

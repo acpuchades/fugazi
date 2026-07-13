@@ -189,6 +189,14 @@ fn warm_up_is_exact_for_composition() {
     // (see the type-level doc) but breaks the "first Some at exactly
     // sample N" contract this battery asserts. `IfElse` is covered by
     // the unit tests in `src/indicators/if_else.rs`.
+    //
+    // The trailing risk indicators (`Sharpe` / `Sortino` / `Volatility` /
+    // `MaxDrawdown` / `Calmar`) are excluded on the same footing: they own an
+    // embedded strategy whose equity is flat (zero-variance → `None` for the
+    // ratio metrics) until its own readiness gate elapses, so `warm_up_period()`
+    // (= `period`) is a lower bound on the first `Some`, not exact — and they
+    // need a `Strategy`, not the plain atom/ramp inputs this battery feeds.
+    // Covered by the unit tests in `src/indicators/trailing.rs`.
     // Boolean layer: comparisons, edges and connectives.
     candle_case(Current::close().above(100.0), "above");
     candle_case(Current::close().above(100.0).changed(), "changed");

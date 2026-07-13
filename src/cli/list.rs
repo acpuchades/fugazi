@@ -314,6 +314,16 @@ const GROUPS: &[Group] = &[
         ],
     },
     Group {
+        title: "trailing strategy risk (embed a single-asset `strategy:`, reduce its equity curve to a rolling metric)",
+        entries: &[
+            Entry { tag: "sharpe",       args: "strategy, period, bars_per_year, [risk_free_rate]", doc: "rolling annualized Sharpe of the strategy's equity curve" },
+            Entry { tag: "sortino",      args: "strategy, period, bars_per_year, [risk_free_rate]", doc: "rolling annualized Sortino (downside-deviation denominator)" },
+            Entry { tag: "volatility",   args: "strategy, period, bars_per_year",                   doc: "rolling annualized volatility of the equity return stream" },
+            Entry { tag: "max_drawdown", args: "strategy, period",                                  doc: "rolling max drawdown of the equity curve (non-negative fraction)" },
+            Entry { tag: "calmar",       args: "strategy, period, bars_per_year",                   doc: "rolling Calmar — windowed CAGR / max drawdown" },
+        ],
+    },
+    Group {
         title: "trend / directional",
         entries: &[
             Entry { tag: "adx",              args: "period",     doc: "ADX from the Adx bundle" },

@@ -26,6 +26,7 @@ mod pairs;
 mod signal;
 mod strategy;
 mod template;
+mod trailing;
 
 /// The load-time passes every strategy document goes through before typed
 /// deserialization, in order: parse the YAML into an untyped tree, splice in
@@ -496,6 +497,65 @@ mod tests {
             "!keltner_upper { ema_period: 3, atr_period: 3, multiplier: 2.0 }",
         )
         .unwrap();
+        let _ = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+    }
+
+    #[test]
+    fn sharpe_tag_builds_and_reads_over_rising_equity() {
+        // `!sharpe` embeds a whole single-asset strategy (here an always-long
+        // buy-and-hold on X), drives it against a private wallet, and reads a
+        // rolling Sharpe over the resulting equity curve. A strictly rising
+        // price → a fully-invested rising equity → a positive trailing Sharpe.
+        let spec: ExprSpec = serde_norway::from_str(
+            "!sharpe { strategy: { symbol: X, long: { enter: !gt { lhs: !close, rhs: !value 0.0 } } }, \
+             period: 4, bars_per_year: 252 }",
+        )
+        .unwrap();
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        assert_eq!(built.output_type(), crate::dyn_indicator::DynType::Real);
+
+        let mut last = None;
+        for p in [100.0, 102.0, 105.0, 108.0, 112.0, 116.0, 121.0, 127.0] {
+            last = built.update(Payload::Snapshot(snap(bar(p))));
+        }
+        match last {
+            Some(Payload::Real(s)) => {
+                assert!(s > 0.0, "rising equity should give a positive Sharpe, got {s}")
+            }
+            other => panic!("expected Some(Real), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn max_drawdown_tag_defaults_and_builds() {
+        // `!max_drawdown` needs no rf/bpy. Over a rise-then-dip path the
+        // trailing drawdown is a defined non-negative fraction.
+        let spec: ExprSpec = serde_norway::from_str(
+            "!max_drawdown { strategy: { symbol: X, long: { enter: !gt { lhs: !close, rhs: !value 0.0 } } }, \
+             period: 3 }",
+        )
+        .unwrap();
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut last = None;
+        for p in [100.0, 110.0, 120.0, 108.0, 96.0] {
+            last = built.update(Payload::Snapshot(snap(bar(p))));
+        }
+        match last {
+            Some(Payload::Real(dd)) => assert!(dd >= 0.0, "drawdown is a non-negative fraction"),
+            other => panic!("expected Some(Real), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sortino_tag_defaults_risk_free_rate_to_zero() {
+        // `risk_free_rate` is optional (defaults to 0), so a bare
+        // `!sortino { strategy, period, bars_per_year }` parses and builds.
+        let spec: ExprSpec = serde_norway::from_str(
+            "!sortino { strategy: { symbol: X, long: { enter: !gt { lhs: !close, rhs: !value 0.0 } } }, \
+             period: 4, bars_per_year: 365 }",
+        )
+        .unwrap();
+        assert!(matches!(spec, ExprSpec::Sortino { risk_free_rate, .. } if risk_free_rate == 0.0));
         let _ = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
     }
 

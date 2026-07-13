@@ -282,6 +282,7 @@ The mirror rules by layer:
 
 - The `Strategy` trait, `SingleAssetStrategy`, and the `src/strategies/` catalogue. Python is imperative: a Python "strategy" is a plain-Python loop that reads indicators/signals and drives a `PaperWallet`. Re-shipping the 19 Rust recipes as Python constructors would double the surface without matching how Python users actually assemble strategies.
 - `fugazi::backtest::run`, `RunReport`, and the whole `run_iteration` / `evaluate*` pipeline. No Python-facing strategy handle → no primitive to hand to `run`. The bar loop is user-owned Python.
+- The **trailing strategy-risk indicators** `Sharpe` / `Sortino` / `Volatility` / `MaxDrawdown` / `Calmar` (`src/indicators/trailing.rs`; YAML `!sharpe`/`!sortino`/`!volatility`/`!max_drawdown`/`!calmar`). Each *owns a `Strategy`* and drives it internally, so binding them would require binding the strategy layer — same rationale as `backtest::run`. CLI/Rust-only by design.
 - The CLI (`src/cli/`). It's a separate binary; no Python analogue is intended.
 - The `Wallet` trait itself. Python only exposes `PaperWallet` — a live wallet would live in a downstream Rust crate implementing `Wallet` and be re-bound separately.
 - Rust-internal types that only make sense inside the strategy layer (`Position`, `PositionField`, `Ack`, `OrderId`, `Reference`, `Units`). Python takes `float`s for prices and unit counts and returns `PyOrder` (with `bar` tagging done via `PyFill` when the user drives a metrics workflow).

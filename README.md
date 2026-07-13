@@ -448,6 +448,12 @@ aggregates every metric into a YAML report.
 - **Trend / volatility:** `Atr`, `Adx`, `Dmi` (+DI/−DI), `Aroon`, `Bollinger`,
   `Donchian`, `Keltner`, `Sar` (Parabolic SAR)
 - **Volume:** `Obv`, `Vwap`, `Ad` (Chaikin A/D), `Mfi`
+- **Trailing strategy risk** (own an embedded `Strategy`, reduce its live
+  equity curve to a rolling metric over the last `period` bars): `Sharpe`,
+  `Sortino`, `Volatility`, `MaxDrawdown`, `Calmar`. A trailing risk-adjusted
+  estimate becomes a first-class source — read it as an overlay column
+  (`fugazi get -x`) or compose it into another strategy — instead of the
+  "run a strategy → dump `returns.csv` → re-join it" round-trip.
 - **Sources & transforms:** `Identity`, `Value`, `Current::*` candle accessors,
   calendar accessors (`Year`/`Month`/`Day`/`Hour`/…/`DayOfWeek`/`WeekOfYear`),
   overlay readers (`GetReal`/`GetBool`/`GetStr`), `TrueRange`;
