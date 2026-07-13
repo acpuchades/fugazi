@@ -538,5 +538,22 @@ whole reason the provider exists.
 Two limits of the public tier: it serves only the **last 365 days** (a wider
 `since` raises `ValueError`), and sub-hourly frequencies are rejected, because
 CoinGecko only samples that finely over windows too short to backtest on.
-`ta.fetch(provider="coingecko", ...)` deliberately raises rather than returning a
+`ta.fetch(provider="cg", ...)` deliberately raises rather than returning a
 candle-less frame from a function named `fetch`.
+
+`CoinMarketCap` is the same overlay shape, backed by CMC's historical-quotes
+endpoint — **a paid-tier feature**, so it needs an API key from a paid plan
+(`CMC_PRO_API_KEY`, or `api_key=`); without one the API answers `402`/`401`:
+
+```python
+cmc = ta.CoinMarketCap()                    # api_key= or CMC_PRO_API_KEY
+caps = cmc.overlays(symbol="BTC", freq="1d", since="30d ago")
+# columns: time, price, volume_24h, market_cap, circulating_supply, total_supply
+```
+
+`symbol` is a CMC **ticker** (`"BTC"`) or a **numeric id** (`"1"`); `cmc.ids()`
+lists the tickers. Unlike CoinGecko, CMC honours an explicit `interval`, so it
+fetches the requested cadence directly; `circulating_supply` falls back to
+`market_cap / price` on any bar CMC doesn't report it. As with CoinGecko,
+`ta.fetch(provider="cmc", ...)` raises rather than returning a
+candle-less frame.

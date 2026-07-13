@@ -1671,7 +1671,7 @@ def test_fetch_redirects_coingecko_to_overlays():
     # back a candle-less frame from a function named `fetch` would be a trap —
     # it must redirect instead.
     with pytest.raises(ValueError, match="overlay provider"):
-        ta.fetch(provider="coingecko", symbol="bitcoin")
+        ta.fetch(provider="cg", symbol="bitcoin")
 
 
 def test_coingecko_rejects_sub_hourly():
@@ -1680,3 +1680,28 @@ def test_coingecko_rejects_sub_hourly():
     # guard exists to prevent.
     with pytest.raises(ValueError, match="unsupported interval"):
         ta.CoinGecko().overlays(symbol="bitcoin", freq="5m", since="2026-07-08")
+
+
+# --- CoinMarketCap (overlay source) ---------------------------------------
+#
+# Historical data is a paid-tier endpoint, so there is no live README block.
+# Everything here is offline: each guard rejects the call before any request.
+
+
+def test_coinmarketcap_constructs():
+    assert ta.CoinMarketCap() is not None
+    assert ta.CoinMarketCap(api_key="paid-key", convert="EUR") is not None
+
+
+def test_fetch_redirects_coinmarketcap_to_overlays():
+    # Same trap as CoinGecko: `fetch()` returns candle frames, CMC has none.
+    with pytest.raises(ValueError, match="overlay provider"):
+        ta.fetch(provider="cmc", symbol="BTC")
+
+
+def test_coinmarketcap_rejects_sub_hourly():
+    # CMC serves 5m data but it lacks a clean bar-open anchor to join against.
+    with pytest.raises(ValueError, match="unsupported interval"):
+        ta.CoinMarketCap(api_key="k").overlays(
+            symbol="BTC", freq="5m", since="2026-07-08"
+        )

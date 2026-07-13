@@ -659,7 +659,7 @@ mod tests {
 
     #[test]
     fn grid_sizes_each_column_independently_so_one_outlier_cannot_collapse_it() {
-        // The `fugazi list tickers coingecko` pathology in miniature: mostly
+        // The `fugazi list tickers cg` pathology in miniature: mostly
         // short ids plus a long one (here still inside MAX_CELL_WIDTH, so the
         // cap isn't what's being tested). A uniform cell width — every column as
         // wide as the longest item, 20 + 2 gap = 22 — fits only one column in

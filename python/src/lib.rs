@@ -51,8 +51,8 @@ use fugazi_core::indicators::{
 };
 use fugazi_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
 use fugazi_core::sources::{
-    Binance, CandleSource, CoinGecko, Interval, OverlayRow, OverlaySource, SourceError, Timestamp,
-    Yahoo,
+    Binance, CandleSource, CoinGecko, CoinMarketCap, Interval, OverlayRow, OverlaySource,
+    SourceError, Timestamp, Yahoo,
 };
 use fugazi_core::wallet::{
     Ack, Order, OrderKind, PaperWallet, Reference, Side, Size, Units, Wallet, WalletError,
@@ -4752,6 +4752,95 @@ impl PyCoinGecko {
     }
 }
 
+/// A CoinMarketCap client — price / volume / market cap / supply columns, **no
+/// OHLCV**.
+///
+/// ```python
+/// cmc = fugazi.CoinMarketCap(api_key="...")       # paid tier required
+/// df = cmc.overlays(symbol="BTC", freq="1d",
+///                   since="30d ago", until="today")
+/// ```
+///
+/// Like `CoinGecko`, this is an overlay provider, not a candle provider: the
+/// frame has `time` plus `price`, `volume_24h`, `market_cap`,
+/// `circulating_supply` and `total_supply` — and no `open`/`high`/`low`/`close`.
+/// Join it onto a price frame on `time` to use both.
+///
+/// `symbol` is a CoinMarketCap **ticker** (`"BTC"`, `"ETH"`) or a **numeric id**
+/// (`"1"` for Bitcoin). Ids are unambiguous; a ticker CMC maps to several assets
+/// resolves to the primary one. Use `.ids()` for the ticker vocabulary.
+///
+/// Historical data is a **paid-tier** feature — set `CMC_PRO_API_KEY` (or pass
+/// `api_key=`) with a key from a paid plan, or the API answers `402`. Accepted
+/// `freq` values are `1h`/`2h`/`3h`/`4h`/`6h`/`12h`/`1d`/`1w`/`1M`; others are
+/// rejected.
+#[pyclass(name = "CoinMarketCap", frozen)]
+struct PyCoinMarketCap {
+    inner: CoinMarketCap,
+}
+
+#[pymethods]
+impl PyCoinMarketCap {
+    /// Construct a client. `api_key` is a CoinMarketCap Pro key (defaults to the
+    /// `CMC_PRO_API_KEY` / `COINMARKETCAP_API_KEY` environment variables);
+    /// `convert` is the quote currency (default `"USD"`); `base_url` overrides
+    /// the API endpoint, useful for local test servers or the sandbox host.
+    #[new]
+    #[pyo3(signature = (api_key = None, convert = None, base_url = None))]
+    fn new(api_key: Option<String>, convert: Option<String>, base_url: Option<String>) -> Self {
+        let mut inner = CoinMarketCap::new();
+        if let Some(key) = api_key {
+            inner = inner.with_api_key(key);
+        }
+        if let Some(cur) = convert {
+            inner = inner.with_convert(cur);
+        }
+        if let Some(url) = base_url {
+            inner = inner.with_base_url(url);
+        }
+        Self { inner }
+    }
+
+    /// Fetch overlay columns for one `(symbol, freq)` window.
+    ///
+    /// * `symbol` — a CoinMarketCap ticker (`"BTC"`) or numeric id (`"1"`).
+    /// * `freq` — bar cadence: `"1h"`/`"2h"`/`"3h"`/`"4h"`/`"6h"`/`"12h"`/`"1d"`/
+    ///   `"1w"`/`"1M"`; others are rejected.
+    /// * `since` / `until` — dates, same grammar as the candle providers.
+    ///   `until` is exclusive; `None` means "up to now".
+    /// * `output` — `"polars"` (default), `"pandas"`, or `"numpy"` (dict of arrays).
+    ///
+    /// Returned DataFrame columns: `time` (ISO 8601 UTC), `price`, `volume_24h`,
+    /// `market_cap`, `circulating_supply`, `total_supply` (all f64).
+    /// **No OHLCV columns** — see the class docs.
+    #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
+    fn overlays(
+        &self,
+        py: Python<'_>,
+        symbol: &str,
+        freq: &str,
+        since: &str,
+        until: Option<&str>,
+        output: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let interval = parse_interval_token(freq)?;
+        let (since_ts, until_ts) = resolve_since_until(since, until)?;
+        let out = CandlesOutput::from_kwarg(output)?;
+        let rows = fetch_overlay_rows(py, &self.inner, symbol, interval, since_ts, until_ts)?;
+        build_overlays_frame(py, out, self.inner.schema(), rows)
+    }
+
+    /// Every ticker CoinMarketCap exposes, sorted — the vocabulary `symbol`
+    /// accepts (alongside numeric ids).
+    fn ids(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        let client = self.inner.clone();
+        py.detach(|| {
+            sources_runtime().block_on(async move { OverlaySource::tickers(&client).await })
+        })
+        .map_err(source_error_to_py)
+    }
+}
+
 /// Fetch OHLCV candles from a named provider and return a DataFrame.
 ///
 /// ```python
@@ -4763,10 +4852,11 @@ impl PyCoinGecko {
 /// `provider` argument dispatches to the right client (`"binance"` or
 /// `"yfinance"`).
 ///
-/// `"coingecko"` is deliberately **not** dispatchable here: it is not a candle
-/// provider, and returning a frame with no OHLCV from a function named `fetch`
-/// would be a trap. Call `CoinGecko().overlays(...)` instead — the error message
-/// says so.
+/// `"cg"` (CoinGecko) and `"cmc"` (CoinMarketCap) are deliberately **not**
+/// dispatchable here: they are not candle providers, and returning a frame with
+/// no OHLCV from a function named `fetch` would be a trap. Call
+/// `CoinGecko().overlays(...)` / `CoinMarketCap().overlays(...)` instead — the
+/// error message says so.
 #[pyfunction]
 #[pyo3(signature = (provider, symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
 fn fetch(
@@ -4784,12 +4874,20 @@ fn fetch(
     let bars = match provider {
         "binance" => fetch_bars(py, &Binance::new(), symbol, interval, since_ts, until_ts)?,
         "yfinance" => fetch_bars(py, &Yahoo::new(), symbol, interval, since_ts, until_ts)?,
-        "coingecko" => {
+        "cg" => {
             return Err(PyValueError::new_err(
-                "coingecko is an overlay provider, not a candle provider — it returns market cap \
-                 / volume / supply columns and no OHLCV, so it cannot be fetched through \
+                "cg (CoinGecko) is an overlay provider, not a candle provider — it returns market \
+                 cap / volume / supply columns and no OHLCV, so it cannot be fetched through \
                  `fetch()`. Use `CoinGecko().overlays(symbol=..., freq=...)` instead, and join \
                  the result onto a price frame on `time`.",
+            ));
+        }
+        "cmc" => {
+            return Err(PyValueError::new_err(
+                "cmc (CoinMarketCap) is an overlay provider, not a candle provider — it returns \
+                 price / volume / market cap / supply columns and no OHLCV, so it cannot be \
+                 fetched through `fetch()`. Use `CoinMarketCap().overlays(symbol=..., freq=...)` \
+                 instead, and join the result onto a price frame on `time`.",
             ));
         }
         other => {
@@ -5560,6 +5658,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBinance>()?;
     m.add_class::<PyYahoo>()?;
     m.add_class::<PyCoinGecko>()?;
+    m.add_class::<PyCoinMarketCap>()?;
 
     m.add("DEFAULT_EPSILON", DEFAULT_EPSILON)?;
 

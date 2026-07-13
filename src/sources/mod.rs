@@ -53,6 +53,7 @@
 
 pub mod binance;
 pub mod coingecko;
+pub mod coinmarketcap;
 pub mod yahoo;
 
 use std::fmt;
@@ -64,6 +65,7 @@ pub use crate::types::Timestamp;
 
 pub use binance::Binance;
 pub use coingecko::CoinGecko;
+pub use coinmarketcap::CoinMarketCap;
 pub use yahoo::Yahoo;
 
 /// The shared [`Schema`] carried by an atom stream, or [`Schema::empty()`] if
@@ -281,7 +283,7 @@ impl Ord for OverlayRow {
 /// identifier (CoinGecko's `bitcoin`) and *emitted* under the symbol the price
 /// series uses (`BTCUSDT`).
 pub trait OverlaySource: Send + Sync {
-    /// The provider's short, lowercase name (e.g. `"coingecko"`).
+    /// The provider's short, lowercase name (e.g. `"cg"`).
     fn name(&self) -> &'static str;
 
     /// The overlay [`Schema`] every row from this provider binds to. Stable for

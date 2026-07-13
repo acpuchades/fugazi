@@ -399,6 +399,8 @@ is the one exception; see below.
 | --- | --- | --- |
 | `binance` | `binance:BTCUSDT[1d,1h],ETHUSDT[1d]` | Binance spot klines. Frequencies: `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d`, `1w`, `1M`. |
 | `yfinance` | `yfinance:SPY[1d],AAPL[1h]` | Yahoo Finance chart endpoint (stocks/ETFs/indices/FX). Rejects multiples the provider doesn't advertise (e.g. `Day(3)`). |
+| `cg` | `cg:BTCUSDT=bitcoin[1d]` | **CoinGecko — overlay-only, no OHLCV.** Market cap / volume / supply columns; symbols are coin ids (`bitcoin`, not `BTC`). Join onto a price series via `--series`. Frequencies: `1h`…`12h`, `1d`, `1w`, `1M`. |
+| `cmc` | `cmc:BTCUSDT=BTC[1d]` | **CoinMarketCap — overlay-only, no OHLCV.** Price / `volume_24h` / market cap / circulating & total supply; symbols are tickers (`BTC`) or numeric ids (`1`). **Paid tier required** (set `CMC_PRO_API_KEY`). Frequencies: `1h`/`2h`/`3h`/`4h`/`6h`/`12h`, `1d`, `1w`, `1M`. |
 | `csv` | `csv:./candles.csv` | **No `[freq]` bracket.** Reads a local OHLCV CSV (delimiter autodetected: `;`, `,`, `\t`, `|`) — typically a previous `fugazi get` output. Each row's `symbol` + `freq` columns drive the output; `--since` / `--until` filter by `time`; overlays apply the same way. `symbol`, `freq`, `time`, `open`, `high`, `low`, `close` are required, `volume` optional. |
 
 Frequency tokens are case-sensitive: `m` = minute, `M` = month. `fugazi list
@@ -485,7 +487,7 @@ fugazi list tickers binance 'b*'        # starts with b       (96 of 1357)
 fugazi list tickers binance '*b*'       # contains b          (247 of 1357)
 fugazi list tickers binance 'b*usd*t'   # b… then usd… then …t
 fugazi list tickers binance '[a-c]*'    # starts with a, b or c
-fugazi list tickers coingecko 'bitcoin-c*'
+fugazi list tickers cg 'bitcoin-c*'
 ```
 
 The alphabet is the familiar one: `*` any run of characters (including none),

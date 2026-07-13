@@ -110,7 +110,7 @@ pub fn coingecko_schema() -> &'static Arc<Schema> {
 ///
 /// The `symbol` this provider takes is a CoinGecko **coin id** (`bitcoin`,
 /// `ethereum`, `solana`) — not a ticker and not an exchange pair. Fetch the
-/// vocabulary with [`OverlaySource::tickers`] (`fugazi list tickers coingecko`).
+/// vocabulary with [`OverlaySource::tickers`] (`fugazi list tickers cg`).
 #[derive(Debug, Clone)]
 pub struct CoinGecko {
     client: reqwest::Client,
@@ -183,7 +183,7 @@ impl CoinGecko {
 
 impl OverlaySource for CoinGecko {
     fn name(&self) -> &'static str {
-        "coingecko"
+        "cg"
     }
 
     fn schema(&self) -> Arc<Schema> {
@@ -468,7 +468,7 @@ async fn map_http_error(resp: reqwest::Response) -> SourceError {
         },
         404 => SourceError::UnknownSymbol(format!(
             "CoinGecko has no such coin id (ids look like `bitcoin`, not `BTC` — \
-             see `fugazi list tickers coingecko`): {body}"
+             see `fugazi list tickers cg`): {body}"
         )),
         _ => SourceError::Http { status: code, body },
     }

@@ -36,8 +36,8 @@ use tokio::task::JoinSet;
 
 use fugazi::prelude::*;
 use fugazi::sources::{
-    self, Binance, CandleSource, CoinGecko, Interval, OverlayRow, OverlaySource, Timestamp, Yahoo,
-    binance::binance_schema, yahoo::yahoo_schema,
+    self, Binance, CandleSource, CoinGecko, CoinMarketCap, Interval, OverlayRow, OverlaySource,
+    Timestamp, Yahoo, binance::binance_schema, yahoo::yahoo_schema,
 };
 
 use crate::dyn_indicator::{DynIndicator, DynValue};
@@ -55,9 +55,14 @@ pub(crate) const KNOWN_PROVIDERS: &[(&str, &str)] = &[
         "Binance spot klines endpoint (BTC/ETH/... vs. USDT/EUR/...)",
     ),
     (
-        "coingecko",
+        "cg",
         "CoinGecko market cap / volume / supply — overlay columns only, no OHLCV \
          (symbols are coin ids: `bitcoin`, not `BTC`)",
+    ),
+    (
+        "cmc",
+        "CoinMarketCap price / volume / market cap / supply — overlay columns only, \
+         no OHLCV (symbols are tickers `BTC` or numeric ids; paid tier required)",
     ),
     (
         "csv",
@@ -89,7 +94,7 @@ enum ProviderKind {
 
 fn provider_kind(provider: &str) -> ProviderKind {
     match provider {
-        "coingecko" => ProviderKind::Overlays,
+        "cg" | "cmc" => ProviderKind::Overlays,
         _ => ProviderKind::Candles,
     }
 }
@@ -101,7 +106,7 @@ fn provider_kind(provider: &str) -> ProviderKind {
 /// provider's vocabulary differs from the one your price series uses —
 /// CoinGecko keys on coin ids (`bitcoin`) while a Binance series is keyed on
 /// pairs (`BTCUSDT`), and the `--series` join is an exact string match on
-/// `symbol`. `coingecko:BTCUSDT=bitcoin[1d]` fetches `bitcoin` and writes
+/// `symbol`. `cg:BTCUSDT=bitcoin[1d]` fetches `bitcoin` and writes
 /// `BTCUSDT`, so the two files line up.
 ///
 /// With no `=`, output and query are the same string (the previous behaviour).
@@ -194,7 +199,7 @@ fn resolve_mode(specs: &[FetchSpec]) -> Result<ProviderKind> {
              zero out your real prices when the files are joined.\n\n\
              Fetch them separately and let `run` join the two on (symbol, time):\n\
              \x20 fugazi get binance:BTCUSDT[1d]           -o prices.csv\n\
-             \x20 fugazi get coingecko:BTCUSDT=bitcoin[1d] -o caps.csv\n\
+             \x20 fugazi get cg:BTCUSDT=bitcoin[1d] -o caps.csv\n\
              \x20 fugazi run @strategy.yml -s @prices.csv -s @caps.csv -o out/"
         );
     }
@@ -218,7 +223,7 @@ pub struct GetArgs {
     /// price series you intend to join against, since `run` joins on an exact
     /// `(symbol, time)` match:
     ///
-    /// * `coingecko:BTCUSDT=bitcoin[1d]` — fetch the coin id `bitcoin`, emit
+    /// * `cg:BTCUSDT=bitcoin[1d]` — fetch the coin id `bitcoin`, emit
     ///   `symbol=BTCUSDT`.
     /// * `binance:BTCUSDT[1d=24h]` — fetch 24-hour bars, tag them `freq=1d`.
     ///
@@ -634,7 +639,10 @@ async fn fetch_overlays(
     until: Timestamp,
 ) -> Result<Vec<OverlayRow>> {
     match provider {
-        "coingecko" => Ok(CoinGecko::new()
+        "cg" => Ok(CoinGecko::new()
+            .overlays(symbol, interval, since, Some(until))
+            .await?),
+        "cmc" => Ok(CoinMarketCap::new()
             .overlays(symbol, interval, since, Some(until))
             .await?),
         other => bail!(unknown_provider_error(other)),
@@ -1088,7 +1096,8 @@ async fn fetch(
 pub(crate) async fn tickers_of(provider: &str) -> Result<Vec<String>> {
     match provider {
         "binance" => Ok(Binance::new().tickers().await?),
-        "coingecko" => Ok(OverlaySource::tickers(&CoinGecko::new()).await?),
+        "cg" => Ok(OverlaySource::tickers(&CoinGecko::new()).await?),
+        "cmc" => Ok(OverlaySource::tickers(&CoinMarketCap::new()).await?),
         "yfinance" => Ok(Yahoo::new().tickers().await?),
         "csv" => bail!(
             "`csv:` reads a local CSV — the ticker list is whatever `symbol` \
@@ -1502,7 +1511,7 @@ mod tests {
     fn the_emitted_freq_label_is_an_opaque_string() {
         // Only the fetched side has to be an interval; the label is written to
         // the CSV verbatim and never parsed back by the `--series` loader.
-        let (_, symbols) = remote("coingecko:BTCUSDT=bitcoin[FOO=1d]");
+        let (_, symbols) = remote("cg:BTCUSDT=bitcoin[FOO=1d]");
         assert_eq!(
             symbols[0].freqs[0],
             FreqSpec {
@@ -1514,17 +1523,17 @@ mod tests {
 
     #[test]
     fn rejects_malformed_freq_mapping() {
-        assert!(parse_spec("coingecko:BTCUSDT=bitcoin[=1h]").is_err());
-        assert!(parse_spec("coingecko:BTCUSDT=bitcoin[4h=]").is_err());
+        assert!(parse_spec("cg:BTCUSDT=bitcoin[=1h]").is_err());
+        assert!(parse_spec("cg:BTCUSDT=bitcoin[4h=]").is_err());
         // The *fetched* side must be a real interval token — it is what gets
         // sent to the provider. (The emitted label is free-form.)
-        assert!(parse_spec("coingecko:BTCUSDT=bitcoin[4h=1x]").is_err());
+        assert!(parse_spec("cg:BTCUSDT=bitcoin[4h=1x]").is_err());
     }
 
     #[test]
     fn output_prefix_remaps_the_emitted_symbol() {
-        let (provider, symbols) = remote("coingecko:BTCUSDT=bitcoin[1d],ETHUSDT=ethereum[1d]");
-        assert_eq!(provider, "coingecko");
+        let (provider, symbols) = remote("cg:BTCUSDT=bitcoin[1d],ETHUSDT=ethereum[1d]");
+        assert_eq!(provider, "cg");
         assert_eq!(symbols.len(), 2);
         // Fetch under the provider's id, emit under the price series' key.
         assert_eq!(symbols[0].query, "bitcoin");
@@ -1545,14 +1554,14 @@ mod tests {
 
     #[test]
     fn rejects_half_empty_output_mapping() {
-        assert!(parse_spec("coingecko:=bitcoin[1d]").is_err());
-        assert!(parse_spec("coingecko:BTCUSDT=[1d]").is_err());
+        assert!(parse_spec("cg:=bitcoin[1d]").is_err());
+        assert!(parse_spec("cg:BTCUSDT=[1d]").is_err());
     }
 
     #[test]
     fn label_shows_each_mapping_only_when_there_is_one() {
         let mapped = Series {
-            provider: "coingecko".into(),
+            provider: "cg".into(),
             output: "BTCUSDT".into(),
             query: "bitcoin".into(),
             interval: Interval::Day(1),
@@ -1562,7 +1571,7 @@ mod tests {
             csv_path: None,
         };
         // Symbol remapped, freq not.
-        assert_eq!(mapped.label(), "coingecko:BTCUSDT=bitcoin[1d]");
+        assert_eq!(mapped.label(), "cg:BTCUSDT=bitcoin[1d]");
 
         // Both remapped.
         let both = Series {
@@ -1570,7 +1579,7 @@ mod tests {
             out_freq: "FOO".to_string(),
             ..mapped.clone()
         };
-        assert_eq!(both.label(), "coingecko:BTCUSDT=bitcoin[FOO=1d]");
+        assert_eq!(both.label(), "cg:BTCUSDT=bitcoin[FOO=1d]");
 
         // Neither: the plain form is unchanged from before this grammar existed.
         let plain = Series {
@@ -1585,7 +1594,7 @@ mod tests {
     #[test]
     fn overlay_and_candle_providers_cannot_be_mixed() {
         let candles = parse_spec("binance:BTCUSDT[1d]").unwrap();
-        let overlays = parse_spec("coingecko:BTCUSDT=bitcoin[1d]").unwrap();
+        let overlays = parse_spec("cg:BTCUSDT=bitcoin[1d]").unwrap();
         let csv = parse_spec("csv:./x.csv").unwrap();
 
         assert_eq!(
