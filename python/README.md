@@ -515,3 +515,28 @@ the same call — handy when the provider name is itself a variable:
 ```python
 df = ta.fetch(provider="yfinance", symbol="AAPL", freq="1d", since="2020-01-01")
 ```
+
+### Overlay data (no OHLCV)
+
+`CoinGecko` is a different shape of provider: it returns data that is a property
+of an asset at a point in time — market capitalisation, traded volume, supply —
+rather than a price bar. So it has `overlays(...)` instead of `candles(...)`, and
+the frame it returns has **no `open`/`high`/`low`/`close`**:
+
+```python
+cg = ta.CoinGecko()                        # public endpoint; COINGECKO_API_KEY if set
+caps = cg.overlays(symbol="bitcoin", freq="1d", since="30d ago")
+# columns: time, price, market_cap, total_volume, circulating_supply
+```
+
+`symbol` is a CoinGecko **coin id** (`"bitcoin"`, not `"BTC"` and not `"BTCUSDT"`);
+`cg.ids()` lists the vocabulary. `circulating_supply` is derived as
+`market_cap / price`. To use these alongside prices, join the two frames on
+`time` — market cap and supply are not derivable from OHLCV at all, which is the
+whole reason the provider exists.
+
+Two limits of the public tier: it serves only the **last 365 days** (a wider
+`since` raises `ValueError`), and sub-hourly frequencies are rejected, because
+CoinGecko only samples that finely over windows too short to backtest on.
+`ta.fetch(provider="coingecko", ...)` deliberately raises rather than returning a
+candle-less frame from a function named `fetch`.

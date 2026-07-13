@@ -50,7 +50,10 @@ use fugazi_core::indicators::{
     ValueStr, Volume, Vwap, WeekOfYear, WilliamsR, Wma, Year,
 };
 use fugazi_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
-use fugazi_core::sources::{Binance, CandleSource, Interval, SourceError, Timestamp, Yahoo};
+use fugazi_core::sources::{
+    Binance, CandleSource, CoinGecko, Interval, OverlayRow, OverlaySource, SourceError, Timestamp,
+    Yahoo,
+};
 use fugazi_core::wallet::{
     Ack, Order, OrderKind, PaperWallet, Reference, Side, Size, Units, Wallet, WalletError,
 };
@@ -4349,10 +4352,7 @@ fn build_candles_frame(
     // Overlay column order comes from any atom's schema (all atoms in one
     // fetch share the same `Arc<Schema>`).
     let schema = fugazi_core::sources::schema_of(&atoms);
-    let n_over = schema.len();
-    let mut over_real: Vec<Vec<f64>> = (0..n_over).map(|_| Vec::with_capacity(n)).collect();
-    let mut over_bool: Vec<Vec<bool>> = (0..n_over).map(|_| Vec::with_capacity(n)).collect();
-    let mut over_str: Vec<Vec<String>> = (0..n_over).map(|_| Vec::with_capacity(n)).collect();
+    let mut overlays: Vec<Option<OverlayInfo>> = Vec::with_capacity(n);
     for atom in atoms {
         let time = atom
             .time
@@ -4364,29 +4364,7 @@ fn build_candles_frame(
         lows.push(atom.candle.low);
         closes.push(atom.candle.close);
         volumes.push(atom.candle.volume);
-        for i in 0..n_over {
-            let cell = atom.overlays.as_ref().and_then(|ov| ov.get(i));
-            match schema.type_of(i).expect("schema has N columns") {
-                fugazi_core::OverlayType::Real => {
-                    over_real[i].push(match cell {
-                        Some(OverlayValue::Real(x)) => *x,
-                        _ => f64::NAN,
-                    });
-                }
-                fugazi_core::OverlayType::Bool => {
-                    over_bool[i].push(match cell {
-                        Some(OverlayValue::Bool(b)) => *b,
-                        _ => false,
-                    });
-                }
-                fugazi_core::OverlayType::Str => {
-                    over_str[i].push(match cell {
-                        Some(OverlayValue::Str(s)) => s.to_string(),
-                        _ => String::new(),
-                    });
-                }
-            }
-        }
+        overlays.push(atom.overlays);
     }
     let data = PyDict::new(py);
     data.set_item("time", &times)?;
@@ -4395,13 +4373,7 @@ fn build_candles_frame(
     data.set_item("low", &lows)?;
     data.set_item("close", &closes)?;
     data.set_item("volume", &volumes)?;
-    for (i, name) in schema.keys().enumerate() {
-        match schema.type_of(i).expect("schema has N columns") {
-            fugazi_core::OverlayType::Real => data.set_item(name, &over_real[i])?,
-            fugazi_core::OverlayType::Bool => data.set_item(name, &over_bool[i])?,
-            fugazi_core::OverlayType::Str => data.set_item(name, &over_str[i])?,
-        }
-    }
+    set_overlay_columns(&data, &schema, overlays)?;
     match output {
         CandlesOutput::Polars => {
             let polars = py.import("polars").map_err(|_| {
@@ -4421,6 +4393,120 @@ fn build_candles_frame(
         }
         CandlesOutput::Numpy => Ok(data.into_any().unbind()),
     }
+}
+
+/// Set one DataFrame column per [`Schema`] key, from a per-row overlay list.
+///
+/// Shared by the candle frame (a provider's OHLCV extras) and the overlay frame
+/// (an `OverlaySource`'s whole payload) — both are "a schema plus one
+/// `OverlayInfo` per row", so the Real/Bool/Str dispatch lives here once.
+///
+/// A row missing a cell reads as `NaN` / `false` / `""` by column type, matching
+/// how the CLI's CSV loader fills a missing cell.
+fn set_overlay_columns(
+    data: &Bound<'_, PyDict>,
+    schema: &std::sync::Arc<fugazi_core::Schema>,
+    rows: Vec<Option<OverlayInfo>>,
+) -> PyResult<()> {
+    let n = rows.len();
+    let n_over = schema.len();
+    let mut over_real: Vec<Vec<f64>> = (0..n_over).map(|_| Vec::with_capacity(n)).collect();
+    let mut over_bool: Vec<Vec<bool>> = (0..n_over).map(|_| Vec::with_capacity(n)).collect();
+    let mut over_str: Vec<Vec<String>> = (0..n_over).map(|_| Vec::with_capacity(n)).collect();
+    for row in &rows {
+        for i in 0..n_over {
+            let cell = row.as_ref().and_then(|ov| ov.get(i));
+            match schema.type_of(i).expect("schema has N columns") {
+                fugazi_core::OverlayType::Real => over_real[i].push(match cell {
+                    Some(OverlayValue::Real(x)) => *x,
+                    _ => f64::NAN,
+                }),
+                fugazi_core::OverlayType::Bool => over_bool[i].push(match cell {
+                    Some(OverlayValue::Bool(b)) => *b,
+                    _ => false,
+                }),
+                fugazi_core::OverlayType::Str => over_str[i].push(match cell {
+                    Some(OverlayValue::Str(s)) => s.to_string(),
+                    _ => String::new(),
+                }),
+            }
+        }
+    }
+    for (i, name) in schema.keys().enumerate() {
+        match schema.type_of(i).expect("schema has N columns") {
+            fugazi_core::OverlayType::Real => data.set_item(name, &over_real[i])?,
+            fugazi_core::OverlayType::Bool => data.set_item(name, &over_bool[i])?,
+            fugazi_core::OverlayType::Str => data.set_item(name, &over_str[i])?,
+        }
+    }
+    Ok(())
+}
+
+/// Materialise an [`OverlaySource`] fetch into a DataFrame.
+///
+/// Columns: `time` (ISO 8601 UTC str), then one per provider schema key —
+/// **and no OHLCV**, because an overlay source has none. That is the point of
+/// the type: these rows describe a property of an instrument at a point in
+/// time, not a price bar, and are meant to be joined onto a price frame on
+/// `time` (see the class docs on `CoinGecko`).
+fn build_overlays_frame(
+    py: Python<'_>,
+    output: CandlesOutput,
+    schema: std::sync::Arc<fugazi_core::Schema>,
+    rows: Vec<OverlayRow>,
+) -> PyResult<Py<PyAny>> {
+    let n = rows.len();
+    let mut times: Vec<String> = Vec::with_capacity(n);
+    let mut overlays: Vec<Option<OverlayInfo>> = Vec::with_capacity(n);
+    for row in rows {
+        times.push(format_ts_iso(row.time.0));
+        overlays.push(Some(row.overlays));
+    }
+    let data = PyDict::new(py);
+    data.set_item("time", &times)?;
+    set_overlay_columns(&data, &schema, overlays)?;
+    match output {
+        CandlesOutput::Polars => {
+            let polars = py.import("polars").map_err(|_| {
+                PyValueError::new_err(
+                    "output='polars' requested but the polars package is not installed",
+                )
+            })?;
+            Ok(polars.getattr("DataFrame")?.call1((data,))?.unbind())
+        }
+        CandlesOutput::Pandas => {
+            let pandas = py.import("pandas").map_err(|_| {
+                PyValueError::new_err(
+                    "output='pandas' requested but the pandas package is not installed",
+                )
+            })?;
+            Ok(pandas.getattr("DataFrame")?.call1((data,))?.unbind())
+        }
+        CandlesOutput::Numpy => Ok(data.into_any().unbind()),
+    }
+}
+
+/// Fetch a single (symbol, interval) window of overlay rows through the shared
+/// runtime, releasing the GIL for the network I/O. The [`OverlaySource`] twin of
+/// [`fetch_bars`].
+fn fetch_overlay_rows<O>(
+    py: Python<'_>,
+    source: &O,
+    symbol: &str,
+    interval: Interval,
+    since: Timestamp,
+    until: Option<Timestamp>,
+) -> PyResult<Vec<OverlayRow>>
+where
+    O: OverlaySource + Clone,
+{
+    let client = source.clone();
+    let symbol = symbol.to_string();
+    py.detach(|| {
+        sources_runtime()
+            .block_on(async move { client.overlays(&symbol, interval, since, until).await })
+    })
+    .map_err(source_error_to_py)
 }
 
 /// Fetch a single (symbol, interval) window through the shared runtime,
@@ -4569,6 +4655,103 @@ impl PyYahoo {
     }
 }
 
+/// A CoinGecko client — market-cap / volume / supply columns, **no OHLCV**.
+///
+/// ```python
+/// cg = fugazi.CoinGecko()                        # public endpoint, defaults
+/// df = cg.overlays(symbol="bitcoin", freq="1d",
+///                  since="30d ago", until="today")
+/// ```
+///
+/// Unlike `Binance` / `Yahoo`, this is not a candle provider: it returns data
+/// that is a property of an asset at a point in time rather than a price bar,
+/// so the frame has `time` plus `price`, `market_cap`, `total_volume` and
+/// `circulating_supply` — and no `open`/`high`/`low`/`close`. Join it onto a
+/// price frame on `time` to use both.
+///
+/// `symbol` is a CoinGecko **coin id** (`"bitcoin"`, `"ethereum"`), not a
+/// ticker and not an exchange pair.
+///
+/// Two limits of the public tier worth knowing: it serves only the **last 365
+/// days** (a wider `since` raises `ValueError`), and CoinGecko picks the
+/// sampling granularity from the window length, so sub-hourly `freq` values are
+/// rejected. Set `COINGECKO_API_KEY` (or pass `api_key=`) for a demo key.
+#[pyclass(name = "CoinGecko", frozen)]
+struct PyCoinGecko {
+    inner: CoinGecko,
+}
+
+#[pymethods]
+impl PyCoinGecko {
+    /// Construct a client. `api_key` is a CoinGecko demo key (defaults to the
+    /// `COINGECKO_API_KEY` environment variable); `vs_currency` is the quote
+    /// currency (default `"usd"`); `base_url` overrides the API endpoint,
+    /// useful for local test servers; `user_agent` overrides the descriptive
+    /// `User-Agent` CoinGecko requires (it rejects requests without one).
+    #[new]
+    #[pyo3(signature = (api_key = None, vs_currency = None, base_url = None, user_agent = None))]
+    fn new(
+        api_key: Option<String>,
+        vs_currency: Option<String>,
+        base_url: Option<String>,
+        user_agent: Option<String>,
+    ) -> Self {
+        let mut inner = CoinGecko::new();
+        if let Some(key) = api_key {
+            inner = inner.with_api_key(key);
+        }
+        if let Some(cur) = vs_currency {
+            inner = inner.with_vs_currency(cur);
+        }
+        if let Some(url) = base_url {
+            inner = inner.with_base_url(url);
+        }
+        if let Some(ua) = user_agent {
+            inner = inner.with_user_agent(ua);
+        }
+        Self { inner }
+    }
+
+    /// Fetch overlay columns for one `(symbol, freq)` window.
+    ///
+    /// * `symbol` — a CoinGecko coin id: `"bitcoin"`, `"ethereum"`, `"solana"`.
+    ///   Use `.ids()` for the full vocabulary.
+    /// * `freq` — bar cadence. `"1h"`/`"4h"`/`"1d"`/`"1w"`/`"1M"`; sub-hourly is
+    ///   rejected (CoinGecko only samples that finely over windows too short to
+    ///   backtest on).
+    /// * `since` / `until` — dates, same grammar as the candle providers.
+    ///   `until` is exclusive; `None` means "up to now".
+    /// * `output` — `"polars"` (default), `"pandas"`, or `"numpy"` (dict of arrays).
+    ///
+    /// Returned DataFrame columns: `time` (ISO 8601 UTC), `price`,
+    /// `market_cap`, `total_volume`, `circulating_supply` (all f64). The last is
+    /// derived as `market_cap / price`, and is `NaN` on any bar where either
+    /// input is missing. **No OHLCV columns** — see the class docs.
+    #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
+    fn overlays(
+        &self,
+        py: Python<'_>,
+        symbol: &str,
+        freq: &str,
+        since: &str,
+        until: Option<&str>,
+        output: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let interval = parse_interval_token(freq)?;
+        let (since_ts, until_ts) = resolve_since_until(since, until)?;
+        let out = CandlesOutput::from_kwarg(output)?;
+        let rows = fetch_overlay_rows(py, &self.inner, symbol, interval, since_ts, until_ts)?;
+        build_overlays_frame(py, out, self.inner.schema(), rows)
+    }
+
+    /// Every coin id CoinGecko exposes, sorted — the vocabulary `symbol` accepts.
+    fn ids(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        let client = self.inner.clone();
+        py.detach(|| sources_runtime().block_on(async move { client.tickers().await }))
+            .map_err(source_error_to_py)
+    }
+}
+
 /// Fetch OHLCV candles from a named provider and return a DataFrame.
 ///
 /// ```python
@@ -4579,6 +4762,11 @@ impl PyYahoo {
 /// Same shape as `Binance().candles(...)` / `Yahoo().candles(...)`; the extra
 /// `provider` argument dispatches to the right client (`"binance"` or
 /// `"yfinance"`).
+///
+/// `"coingecko"` is deliberately **not** dispatchable here: it is not a candle
+/// provider, and returning a frame with no OHLCV from a function named `fetch`
+/// would be a trap. Call `CoinGecko().overlays(...)` instead — the error message
+/// says so.
 #[pyfunction]
 #[pyo3(signature = (provider, symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
 fn fetch(
@@ -4596,6 +4784,14 @@ fn fetch(
     let bars = match provider {
         "binance" => fetch_bars(py, &Binance::new(), symbol, interval, since_ts, until_ts)?,
         "yfinance" => fetch_bars(py, &Yahoo::new(), symbol, interval, since_ts, until_ts)?,
+        "coingecko" => {
+            return Err(PyValueError::new_err(
+                "coingecko is an overlay provider, not a candle provider — it returns market cap \
+                 / volume / supply columns and no OHLCV, so it cannot be fetched through \
+                 `fetch()`. Use `CoinGecko().overlays(symbol=..., freq=...)` instead, and join \
+                 the result onto a price frame on `time`.",
+            ));
+        }
         other => {
             return Err(PyValueError::new_err(format!(
                 "unknown provider {other:?}. Known providers: binance, yfinance"
@@ -5363,6 +5559,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyFill>()?;
     m.add_class::<PyBinance>()?;
     m.add_class::<PyYahoo>()?;
+    m.add_class::<PyCoinGecko>()?;
 
     m.add("DEFAULT_EPSILON", DEFAULT_EPSILON)?;
 

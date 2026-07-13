@@ -1652,3 +1652,31 @@ def test_pick_exact_disambiguates_between_frequencies():
     daily = ta.close(source=ta.pick(symbol="BTC", freq="1d"))
     assert hourly.update(snap) == pytest.approx(100.0)
     assert daily.update(snap) == pytest.approx(300.0)
+
+
+# --- CoinGecko (overlay source) -------------------------------------------
+#
+# The live fetch is exercised by the README block (test_readme.py, which skips
+# on an HTTP error). Everything here is offline: each guard rejects the call
+# before any request goes out.
+
+
+def test_coingecko_constructs():
+    assert ta.CoinGecko() is not None
+    assert ta.CoinGecko(api_key="demo", vs_currency="eur") is not None
+
+
+def test_fetch_redirects_coingecko_to_overlays():
+    # `fetch()` returns candle frames. CoinGecko has no OHLCV, so handing it
+    # back a candle-less frame from a function named `fetch` would be a trap —
+    # it must redirect instead.
+    with pytest.raises(ValueError, match="overlay provider"):
+        ta.fetch(provider="coingecko", symbol="bitcoin")
+
+
+def test_coingecko_rejects_sub_hourly():
+    # CoinGecko only samples that finely over windows too short to backtest on;
+    # silently serving daily data for a "5m" request is the failure mode this
+    # guard exists to prevent.
+    with pytest.raises(ValueError, match="unsupported interval"):
+        ta.CoinGecko().overlays(symbol="bitcoin", freq="5m", since="2026-07-08")
