@@ -155,6 +155,7 @@ node.reset()                   # call reset() to start a fresh, independent pass
 | `correlation(lhs, rhs, period)` | rolling Pearson correlation in `[-1, 1]` (autocorrelation: `correlation(x, x.lag(n), period)`) |
 | `stoch_rsi(source, rsi_period=14, stoch_period=14)` | a value |
 | `atr mfi williams_r (period)` | a value |
+| `parkinson garman_klass rogers_satchell (period)` | range-based volatility estimate (uses the full candle; more efficient than close-to-close stddev) |
 | `obv() vwap() ad() true_range()` | a value |
 | `sar(step=0.02, max=0.2)` | a value |
 | `macd(source, fast=12, slow=26, signal=9)` | dict `{macd, signal, histogram}` |

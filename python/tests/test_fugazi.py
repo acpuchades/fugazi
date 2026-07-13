@@ -229,6 +229,23 @@ def test_bar_indicator_atr():
     assert out[-1] is not None and out[-1] > 0
 
 
+def test_range_volatility_estimators():
+    bars = [
+        ta.Candle(10, 11, 9, 10, 1),
+        ta.Candle(10, 12, 8, 11, 1),
+        ta.Candle(11, 13, 10, 12, 1),
+    ]
+    for ctor in (ta.parkinson, ta.garman_klass, ta.rogers_satchell):
+        out = feed(ctor(2), bars)
+        assert out[-1] is not None and out[-1] > 0, ctor.__name__
+
+    # Flat OHLC bars → zero range → zero volatility.
+    flat = [ta.Candle(10, 10, 10, 10, 1)] * 3
+    for ctor in (ta.parkinson, ta.garman_klass, ta.rogers_satchell):
+        out = feed(ctor(2), flat)
+        assert out[-1] == 0.0, ctor.__name__
+
+
 def test_reset_clears_state():
     sma = ta.sma(ta.close(), 2)
     feed(sma, closes([1.0, 2.0]))

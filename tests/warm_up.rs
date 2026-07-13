@@ -10,10 +10,10 @@
 
 use fugazi::indicators::{
     Adx, Aroon, Atr, Bollinger, Cci, Correlation, CurrentTime, Current, Day, DayOfWeek, DayOfYear,
-    Dmi, Donchian, Ema, Hma, Hour, Identity, IsWeekday, IsWeekend, Keltner, Kurtosis, Latch, Log,
-    Macd, Mfi, Minute, Month, Obv, Quarter, Resample, Rma, Rsi, Sar, Second, Skewness, Sma, StdDev,
-    Stochastic, TrueRange, UnixMillis, UnixSeconds, Value, Vwap, WeekOfYear, WilliamsR, Wma, Year,
-    ZScore,
+    Dmi, Donchian, Ema, GarmanKlass, Hma, Hour, Identity, IsWeekday, IsWeekend, Keltner, Kurtosis,
+    Latch, Log, Macd, Mfi, Minute, Month, Obv, Parkinson, Quarter, Resample, Rma, RogersSatchell,
+    Rsi, Sar, Second, Skewness, Sma, StdDev, Stochastic, TrueRange, UnixMillis, UnixSeconds, Value,
+    Vwap, WeekOfYear, WilliamsR, Wma, Year, ZScore,
 };
 use fugazi::prelude::*;
 use fugazi::types::{Atom, Candle, Real, Timestamp};
@@ -93,6 +93,9 @@ fn warm_up_is_exact_for_the_catalogue() {
     candle_case(Vwap::new(Current::candle()), "vwap");
     candle_case(Sar::with_defaults(Current::candle()), "sar");
     candle_case(Atr::new(Current::candle(), 14), "atr");
+    candle_case(Parkinson::new(Current::candle(), 20), "parkinson");
+    candle_case(GarmanKlass::new(Current::candle(), 20), "garman_klass");
+    candle_case(RogersSatchell::new(Current::candle(), 20), "rogers_satchell");
     candle_case(Mfi::new(Current::candle(), 14), "mfi");
     candle_case(Dmi::new(Current::candle(), 14), "dmi");
     candle_case(Adx::new(Current::candle(), 14), "adx");
@@ -264,6 +267,12 @@ fn windowed_indicators_are_stable_once_ready() {
     assert_eq!(Aroon::new(Current::candle(), 25).unstable_period(), 0);
     assert_eq!(WilliamsR::new(Current::candle(), 14).unstable_period(), 0);
     assert_eq!(Mfi::new(Current::candle(), 14).unstable_period(), 0);
+    assert_eq!(Parkinson::new(Current::candle(), 20).unstable_period(), 0);
+    assert_eq!(GarmanKlass::new(Current::candle(), 20).unstable_period(), 0);
+    assert_eq!(
+        RogersSatchell::new(Current::candle(), 20).unstable_period(),
+        0
+    );
     assert_eq!(Current::close().rolling_max(10).unstable_period(), 0);
     assert_eq!(
         Donchian::new(Current::high(), Current::low(), 20).unstable_period(),

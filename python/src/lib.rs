@@ -42,11 +42,12 @@ use fugazi_core::Indicator;
 use fugazi_core::indicators::compare::{EqOp, GeOp, GtOp, LeOp, LtOp, NeOp, StrEqOp, StrNeOp};
 use fugazi_core::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Close, Correlation,
-    CurrentBar, Day, DayOfWeek, DayOfYear, Dmi, DmiValue, Donchian, DonchianValue, Ema, GetBool,
-    GetReal, GetStr, High, Hma, Hour, Identity, IfElse, IsWeekday, IsWeekend, Keltner, KeltnerValue,
-    Kurtosis, Latch, Log, Low, Macd, MacdValue, Median, Mfi, Minute, Month, Obv, Open, Pick, Quarter,
-    Resample, Rma, Rsi, Sar, Second, Skewness, Sma, StdDev, Stochastic, TrueRange, Typical,
-    UnixMillis, UnixSeconds, Value, ValueStr, Volume, Vwap, WeekOfYear, WilliamsR, Wma, Year, ZScore,
+    CurrentBar, Day, DayOfWeek, DayOfYear, Dmi, DmiValue, Donchian, DonchianValue, Ema, GarmanKlass,
+    GetBool, GetReal, GetStr, High, Hma, Hour, Identity, IfElse, IsWeekday, IsWeekend, Keltner,
+    KeltnerValue, Kurtosis, Latch, Log, Low, Macd, MacdValue, Median, Mfi, Minute, Month, Obv, Open,
+    Parkinson, Pick, Quarter, Resample, Rma, RogersSatchell, Rsi, Sar, Second, Skewness, Sma, StdDev,
+    Stochastic, TrueRange, Typical, UnixMillis, UnixSeconds, Value, ValueStr, Volume, Vwap,
+    WeekOfYear, WilliamsR, Wma, Year, ZScore,
 };
 use fugazi_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
 use fugazi_core::sources::{
@@ -3772,6 +3773,21 @@ bar_period!(
     "Average true range over `period` (consumes the full bar)."
 );
 bar_period!(
+    parkinson,
+    Parkinson,
+    "Parkinson high/low range volatility estimator over `period`."
+);
+bar_period!(
+    garman_klass,
+    GarmanKlass,
+    "Garman-Klass OHLC volatility estimator over `period`."
+);
+bar_period!(
+    rogers_satchell,
+    RogersSatchell,
+    "Rogers-Satchell drift-independent OHLC volatility estimator over `period`."
+);
+bar_period!(
     mfi,
     Mfi,
     "Money-flow index over `period` (consumes the full bar)."
@@ -5712,7 +5728,8 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     reg!(
         open, high, low, close, volume, typical, median, identity, value, value_str, sma, ema, rma,
         wma, hma, rsi, stddev, skewness_indicator, kurtosis_indicator, zscore, correlation,
-        stochastic, cci, log, atr, mfi, williams_r, obv, vwap, ad,
+        stochastic, cci, log, atr, parkinson, garman_klass, rogers_satchell, mfi, williams_r, obv,
+        vwap, ad,
         true_range, adx, dmi, aroon, sar, macd, bollinger, keltner, donchian, stoch_rsi, resample,
         latch, unstable, if_else, get, get_real, get_bool, get_str, str_eq, str_ne, fetch,
         // Calendar accessors + weekday/weekend signals; consume `atom.time`.

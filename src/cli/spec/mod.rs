@@ -72,7 +72,8 @@ mod tests {
     use super::*;
     use crate::dyn_indicator::{DynIndicator, DynValue as Payload};
     use fugazi::indicators::{
-        Book, Correlation, Current, Ema, Kurtosis, Position, Skewness, ZScore,
+        Book, Correlation, Current, Ema, GarmanKlass, Kurtosis, Parkinson, Position, RogersSatchell,
+        Skewness, ZScore,
     };
     use fugazi::prelude::*;
     use fugazi::types::Snapshot;
@@ -439,6 +440,38 @@ mod tests {
         // `!atr { period: 3 }` without a source keeps its historical form.
         let spec: ExprSpec = serde_norway::from_str("!atr { period: 3 }").unwrap();
         let _ = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+    }
+
+    #[test]
+    fn range_volatility_tags_match_reference() {
+        // `!parkinson` / `!garman_klass` / `!rogers_satchell` default their
+        // candle source to `current` and build to the library indicator,
+        // matching a hand-wired reference over varied OHLC bars.
+        let ohlc = [
+            Candle::new(10.0, 11.0, 9.0, 10.5, 1.0),
+            Candle::new(10.5, 12.0, 8.0, 11.0, 1.0),
+            Candle::new(11.0, 13.0, 10.0, 12.0, 1.0),
+            Candle::new(12.0, 12.5, 11.0, 11.5, 1.0),
+            Candle::new(11.5, 14.0, 11.0, 13.0, 1.0),
+        ];
+
+        let pk: ExprSpec = serde_norway::from_str("!parkinson { period: 3 }").unwrap();
+        let mut pk = pk.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut pk_ref = Parkinson::new(Current::candle(), 3);
+
+        let gk: ExprSpec = serde_norway::from_str("!garman_klass { period: 3 }").unwrap();
+        let mut gk = gk.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut gk_ref = GarmanKlass::new(Current::candle(), 3);
+
+        let rs: ExprSpec = serde_norway::from_str("!rogers_satchell { period: 3 }").unwrap();
+        let mut rs = rs.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut rs_ref = RogersSatchell::new(Current::candle(), 3);
+
+        for c in ohlc {
+            assert_eq!(feed_real(&mut pk, c), pk_ref.update(c.into()));
+            assert_eq!(feed_real(&mut gk, c), gk_ref.update(c.into()));
+            assert_eq!(feed_real(&mut rs, c), rs_ref.update(c.into()));
+        }
     }
 
     #[test]

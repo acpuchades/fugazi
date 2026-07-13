@@ -23,10 +23,10 @@ use serde::Deserialize;
 // it isn't a `ExprSpec` variant.
 use fugazi::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Book, Cci, Component,
-    Correlation, Dmi, DmiValue, Donchian, DonchianValue, Ema, GetBool, GetReal, GetStr, Hma, IfElse,
-    Keltner, KeltnerValue, Kurtosis, Latch, Log, Macd, MacdValue, Mfi, Obv, Pick, Position, Resample,
-    Rma, Rsi, Sar, Skewness, Sma, StdDev, StochRsi, Stochastic, TrueRange, Value, ValueStr, Vwap,
-    WilliamsR, Wma, ZScore,
+    Correlation, Dmi, DmiValue, Donchian, DonchianValue, Ema, GarmanKlass, GetBool, GetReal, GetStr,
+    Hma, IfElse, Keltner, KeltnerValue, Kurtosis, Latch, Log, Macd, MacdValue, Mfi, Obv, Parkinson,
+    Pick, Position, Resample, Rma, RogersSatchell, Rsi, Sar, Skewness, Sma, StdDev, StochRsi,
+    Stochastic, TrueRange, Value, ValueStr, Vwap, WilliamsR, Wma, ZScore,
 };
 use fugazi::prelude::*;
 use fugazi::types::Snapshot;
@@ -439,6 +439,24 @@ pub enum ExprSpec {
 
     // --- single-output bar indicators ---
     Atr {
+        #[serde(default = "default_bar_source")]
+        source: Box<ExprSpec>,
+        period: usize,
+    },
+    /// Parkinson high/low range volatility estimator over `period`.
+    Parkinson {
+        #[serde(default = "default_bar_source")]
+        source: Box<ExprSpec>,
+        period: usize,
+    },
+    /// Garman–Klass OHLC volatility estimator over `period`.
+    GarmanKlass {
+        #[serde(default = "default_bar_source")]
+        source: Box<ExprSpec>,
+        period: usize,
+    },
+    /// Rogers–Satchell drift-independent OHLC volatility estimator over `period`.
+    RogersSatchell {
         #[serde(default = "default_bar_source")]
         source: Box<ExprSpec>,
         period: usize,
@@ -1006,6 +1024,24 @@ enum ExprSpecRaw {
         source: Box<ExprSpec>,
         period: usize,
     },
+    /// Parkinson high/low range volatility estimator over `period`.
+    Parkinson {
+        #[serde(default = "default_bar_source")]
+        source: Box<ExprSpec>,
+        period: usize,
+    },
+    /// Garman–Klass OHLC volatility estimator over `period`.
+    GarmanKlass {
+        #[serde(default = "default_bar_source")]
+        source: Box<ExprSpec>,
+        period: usize,
+    },
+    /// Rogers–Satchell drift-independent OHLC volatility estimator over `period`.
+    RogersSatchell {
+        #[serde(default = "default_bar_source")]
+        source: Box<ExprSpec>,
+        period: usize,
+    },
     Mfi {
         #[serde(default = "default_bar_source")]
         source: Box<ExprSpec>,
@@ -1314,6 +1350,11 @@ impl From<ExprSpecRaw> for ExprSpec {
             ExprSpecRaw::AroonDown { source, period } => ExprSpec::AroonDown { source, period },
             ExprSpecRaw::AroonOscillator { source, period } => ExprSpec::AroonOscillator { source, period },
             ExprSpecRaw::Atr { source, period } => ExprSpec::Atr { source, period },
+            ExprSpecRaw::Parkinson { source, period } => ExprSpec::Parkinson { source, period },
+            ExprSpecRaw::GarmanKlass { source, period } => ExprSpec::GarmanKlass { source, period },
+            ExprSpecRaw::RogersSatchell { source, period } => {
+                ExprSpec::RogersSatchell { source, period }
+            }
             ExprSpecRaw::Mfi { source, period } => ExprSpec::Mfi { source, period },
             ExprSpecRaw::WilliamsR { source, period } => ExprSpec::WilliamsR { source, period },
             ExprSpecRaw::Obv { source } => ExprSpec::Obv { source },
@@ -1725,6 +1766,15 @@ impl ExprSpec {
             )),
 
             Atr { source, period } => dyn_indicator::wrap(self::Atr::new(candle(source), *period)),
+            Parkinson { source, period } => {
+                dyn_indicator::wrap(self::Parkinson::new(candle(source), *period))
+            }
+            GarmanKlass { source, period } => {
+                dyn_indicator::wrap(self::GarmanKlass::new(candle(source), *period))
+            }
+            RogersSatchell { source, period } => {
+                dyn_indicator::wrap(self::RogersSatchell::new(candle(source), *period))
+            }
             Mfi { source, period } => dyn_indicator::wrap(self::Mfi::new(candle(source), *period)),
             WilliamsR { source, period } => {
                 dyn_indicator::wrap(self::WilliamsR::new(candle(source), *period))
