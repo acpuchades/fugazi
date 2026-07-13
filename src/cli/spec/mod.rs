@@ -27,6 +27,27 @@ mod signal;
 mod strategy;
 mod template;
 
+/// The load-time passes every strategy document goes through before typed
+/// deserialization, in order: parse the YAML into an untyped tree, splice in
+/// every `!import`ed document, then resolve every `!param` placeholder against
+/// `params`. (`!arg` is deliberately *not* resolved here — it belongs to a
+/// [`SpecTemplate`] and resolves per-instance at build time.)
+///
+/// Imports run before params so an imported fragment is a first-class part of
+/// the document: it may carry its own `!param` placeholders, resolved from the
+/// same table as the importer. `base` is the directory relative import paths
+/// resolve against — the importing document's own directory (see
+/// [`crate::imports`] and [`crate::input::Source::base_dir`]).
+fn load_value(
+    text: &str,
+    params: &std::collections::HashMap<String, serde_json::Value>,
+    base: &std::path::Path,
+) -> anyhow::Result<serde_json::Value> {
+    let value = crate::input::parse_value(text)?;
+    let value = crate::imports::resolve(value, base)?;
+    crate::params::substitute(value, params)
+}
+
 #[allow(unused_imports)]
 pub use basket::{BasketStrategySpec, SelectionRuleSpec};
 pub use expr::ExprSpec;
@@ -456,6 +477,43 @@ mod tests {
             built.update(Payload::Snapshot(Snapshot::of_atom(Atom::with_overlays(bar(100.0), bear)))),
             Some(Payload::Bool(false)),
         );
+    }
+
+    #[test]
+    fn import_splices_a_fragment_that_still_sees_the_param_table() {
+        // The load order is `parse -> !import -> !param -> typed parse`, so an
+        // imported fragment is a first-class part of the document: its own
+        // `!param` placeholders resolve from the importing run's --params table.
+        let dir = std::env::temp_dir().join("fugazi_spec_import");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("enter.yml"),
+            "!crosses_above { lhs: !sma { period: !param FAST }, rhs: !sma { period: 8 } }\n",
+        )
+        .unwrap();
+
+        let params = std::collections::HashMap::from([(
+            "FAST".to_string(),
+            serde_json::Value::from(3),
+        )]);
+        let spec = SingleStrategySpec::from_text_with_params_in(
+            "symbol: BTC\nlong:\n  enter: !import enter.yml\n  exit: !value false\n",
+            &params,
+            &dir,
+        )
+        .unwrap();
+
+        assert_eq!(spec.symbol, "BTC");
+        // The spliced signal fires like a hand-written one: a fast SMA(3)
+        // crossing up through a slow SMA(8).
+        let mut strat = spec.build(1_000.0, &Schema::empty());
+        let mut fired = false;
+        for p in [10.0, 9.0, 8.0, 7.0, 6.0, 7.0, 9.0, 12.0, 15.0, 18.0, 21.0] {
+            strat.update(snap(bar(p)));
+            fired |= strat.is_ready();
+        }
+        assert!(fired, "expected the imported crossover signal to build and warm up");
     }
 
     #[test]

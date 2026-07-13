@@ -88,22 +88,39 @@ pub struct SingleStrategySpec {
 }
 
 impl SingleStrategySpec {
-    /// Parse a YAML strategy document, resolving `param` placeholders against
-    /// `params` first (see [`crate::params`]).
+    /// Parse a YAML strategy document, splicing in every `!import`ed file and
+    /// resolving `!param` placeholders against `params` first (see
+    /// [`super::load_value`], [`crate::imports`], [`crate::params`]).
     ///
-    /// Two passes: the document is normalized to an untyped [`serde_json::Value`]
+    /// Untyped-first: the document is normalized to a [`serde_json::Value`]
     /// (via [`crate::convert::yaml_to_json`], so `!tags` become serde_json's
-    /// singleton-map external-tag form), every placeholder node is rewritten to its
-    /// resolved value, and only then is the result deserialized into the typed spec
-    /// — so a param can stand in for a number, a symbol, or any other field that is
-    /// concretely typed here.
+    /// singleton-map external-tag form), every import and placeholder node is
+    /// rewritten to its resolved value, and only then is the result deserialized
+    /// into the typed spec — so a param can stand in for a number, a symbol, or
+    /// any other concretely-typed field, and an import for any subtree.
+    ///
+    /// Import paths resolve against `base`, the importing document's own
+    /// directory ([`crate::input::Source::base_dir`]).
+    pub fn from_text_with_params_in(
+        text: &str,
+        params: &std::collections::HashMap<String, serde_json::Value>,
+        base: &std::path::Path,
+    ) -> anyhow::Result<Self> {
+        Ok(serde_json::from_value(super::load_value(
+            text, params, base,
+        )?)?)
+    }
+
+    /// [`from_text_with_params_in`](Self::from_text_with_params_in) with imports
+    /// resolved against the working directory. A test convenience: every CLI
+    /// call site has a [`Source`](crate::input::Source) and passes its
+    /// `base_dir()` (which is already `.` for inline text).
+    #[cfg(test)]
     pub fn from_text_with_params(
         text: &str,
         params: &std::collections::HashMap<String, serde_json::Value>,
     ) -> anyhow::Result<Self> {
-        let value = crate::input::parse_value(text)?;
-        let value = crate::params::substitute(value, params)?;
-        Ok(serde_json::from_value(value)?)
+        Self::from_text_with_params_in(text, params, std::path::Path::new("."))
     }
 
     /// Build the live [`DynSingleStrategy`] this spec describes.

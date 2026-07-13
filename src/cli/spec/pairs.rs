@@ -77,13 +77,25 @@ impl PairsStrategySpec {
     /// the document is normalized to an untyped [`serde_json::Value`], every
     /// placeholder node is rewritten to its resolved value, and only then is
     /// the result deserialized into the typed spec.
+    pub fn from_text_with_params_in(
+        text: &str,
+        params: &std::collections::HashMap<String, serde_json::Value>,
+        base: &std::path::Path,
+    ) -> anyhow::Result<Self> {
+        Ok(serde_json::from_value(super::load_value(
+            text, params, base,
+        )?)?)
+    }
+
+    /// [`from_text_with_params_in`](Self::from_text_with_params_in) with imports
+    /// resolved against the working directory — a test convenience (the CLI
+    /// passes the strategy source's `base_dir()`).
+    #[cfg(test)]
     pub fn from_text_with_params(
         text: &str,
         params: &std::collections::HashMap<String, serde_json::Value>,
     ) -> anyhow::Result<Self> {
-        let value = crate::input::parse_value(text)?;
-        let value = crate::params::substitute(value, params)?;
-        Ok(serde_json::from_value(value)?)
+        Self::from_text_with_params_in(text, params, std::path::Path::new("."))
     }
 
     /// Build a spec's exit signal, defaulting a missing one to constant-`false`

@@ -23,6 +23,7 @@ mod data;
 mod csv_source;
 mod dyn_indicator;
 mod get;
+mod imports;
 mod input;
 mod list;
 mod metrics;
@@ -436,7 +437,7 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     let text = args.strategy.read().context("reading strategy")?;
     match args.strategy.kind {
         StrategyKind::Single => {
-            let spec = spec::SingleStrategySpec::from_text_with_params(&text, &param_table)
+            let spec = spec::SingleStrategySpec::from_text_with_params_in(&text, &param_table, &args.strategy.base_dir())
                 .with_context(|| parse_error_context(&args.strategy))?;
             if !args.quiet {
                 style::print_header("check", "parse and validate a strategy spec");
@@ -444,7 +445,7 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             }
         }
         StrategyKind::Pairs => {
-            let spec = spec::PairsStrategySpec::from_text_with_params(&text, &param_table)
+            let spec = spec::PairsStrategySpec::from_text_with_params_in(&text, &param_table, &args.strategy.base_dir())
                 .with_context(|| parse_error_context(&args.strategy))?;
             if !args.quiet {
                 style::print_header("check", "parse and validate a pairs strategy spec");
@@ -461,7 +462,7 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             // deserialize, but the templates only typed-parse per-symbol
             // at run time (against `!arg SYM`). So `check` here just
             // confirms the outer spec + selection dispatch.
-            let spec = spec::BasketStrategySpec::from_text_with_params(&text, &param_table)
+            let spec = spec::BasketStrategySpec::from_text_with_params_in(&text, &param_table, &args.strategy.base_dir())
                 .with_context(|| parse_error_context(&args.strategy))?;
             if !args.quiet {
                 style::print_header("check", "parse and validate a basket strategy spec");
@@ -570,17 +571,17 @@ fn run(args: RunArgs) -> Result<()> {
     };
     match args.strategy.kind {
         StrategyKind::Single => {
-            let spec = spec::SingleStrategySpec::from_text_with_params(&text, &param_table)
+            let spec = spec::SingleStrategySpec::from_text_with_params_in(&text, &param_table, &args.strategy.base_dir())
                 .with_context(|| parse_error_context(&args.strategy))?;
             run::run(&spec, &frame, &opts)?;
         }
         StrategyKind::Pairs => {
-            let spec = spec::PairsStrategySpec::from_text_with_params(&text, &param_table)
+            let spec = spec::PairsStrategySpec::from_text_with_params_in(&text, &param_table, &args.strategy.base_dir())
                 .with_context(|| parse_error_context(&args.strategy))?;
             run::run_pairs(&spec, &frame, &opts)?;
         }
         StrategyKind::Basket => {
-            let spec = spec::BasketStrategySpec::from_text_with_params(&text, &param_table)
+            let spec = spec::BasketStrategySpec::from_text_with_params_in(&text, &param_table, &args.strategy.base_dir())
                 .with_context(|| parse_error_context(&args.strategy))?;
             run::run_basket(&spec, &frame, &opts)?;
         }
@@ -617,6 +618,7 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
     let opts = optimize::OptimizeOptions {
         cash: args.cash,
         strategy_text: &text,
+        strategy_dir: &args.strategy.base_dir(),
         strategy_label: &strat_label,
         params_table: param_table,
         grid_tables,

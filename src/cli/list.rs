@@ -255,6 +255,7 @@ const GROUPS: &[Group] = &[
             Entry { tag: "param", args: "<key>",         doc: "bare-string shorthand for { key: <key> }" },
             Entry { tag: "arg",   args: "key, default?", doc: "build-time: substitute a driver-supplied arg (e.g. SYM per-symbol in a basket score/sizing template)" },
             Entry { tag: "arg",   args: "<key>",         doc: "bare-string shorthand for { key: <key> }" },
+            Entry { tag: "import", args: "<path>",       doc: "load-time: splice in another YAML file as this value; path is relative to the importing file (imports resolve before !param, so a fragment sees the same --params table)" },
         ],
     },
     Group {

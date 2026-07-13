@@ -48,6 +48,21 @@ impl Source {
         }
     }
 
+    /// The directory a relative `!import` path inside this input resolves
+    /// against: the file's own directory for `@path` (so a strategy's imports
+    /// are relative to the strategy, not to wherever `fugazi` was invoked
+    /// from), and the working directory for inline text, which has no
+    /// directory of its own. See [`crate::imports`].
+    pub fn base_dir(&self) -> PathBuf {
+        match self {
+            Source::File(path) => match path.parent() {
+                Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
+                _ => PathBuf::from("."),
+            },
+            Source::Inline(_) => PathBuf::from("."),
+        }
+    }
+
     /// If this is inline content that resembles an old-style bare file path
     /// (single line ending in `.yml`/`.yaml`), the would-be path — used to hint at
     /// the `@` form when such a value fails to parse.
@@ -112,6 +127,12 @@ impl StrategySource {
 
     pub fn label(&self) -> String {
         self.source.label()
+    }
+
+    /// The directory this strategy's `!import` paths resolve against — see
+    /// [`Source::base_dir`].
+    pub fn base_dir(&self) -> PathBuf {
+        self.source.base_dir()
     }
 
     pub fn misused_path(&self) -> Option<&str> {

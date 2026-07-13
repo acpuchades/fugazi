@@ -95,13 +95,22 @@ impl BasketStrategySpec {
     /// Parse a YAML basket document, applying `!param` substitutions
     /// against `params` before typed deserialization. `!arg` placeholders
     /// (which resolve per-symbol at build time) are left alone.
-    pub fn from_text_with_params(
+    pub fn from_text_with_params_in(
         text: &str,
         params: &HashMap<String, Value>,
+        base: &std::path::Path,
     ) -> Result<Self> {
-        let value = crate::input::parse_value(text)?;
-        let value = crate::params::substitute(value, params)?;
-        Ok(serde_json::from_value(value)?)
+        Ok(serde_json::from_value(super::load_value(
+            text, params, base,
+        )?)?)
+    }
+
+    /// [`from_text_with_params_in`](Self::from_text_with_params_in) with imports
+    /// resolved against the working directory — a test convenience (the CLI
+    /// passes the strategy source's `base_dir()`).
+    #[cfg(test)]
+    pub fn from_text_with_params(text: &str, params: &HashMap<String, Value>) -> Result<Self> {
+        Self::from_text_with_params_in(text, params, std::path::Path::new("."))
     }
 
     /// Build the live [`DynBasketStrategy`] this spec describes.

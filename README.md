@@ -634,6 +634,28 @@ A `NAME=value` value is parsed as a scalar (so `FAST=5` is a number, `SYM=BTC`
 a string), then substituted before the strategy is typed — so a param can stand in
 anywhere, including where a number is required.
 
+**Imports — `!import`.** Any value in the strategy can instead be loaded from
+another YAML file, so a shared entry rule, a sizing recipe, or a whole side
+lives in one place and is reused across strategies:
+
+```yaml
+symbol: BTC
+long:
+  enter: !import signals/breakout.yml     # the file's value takes this slot
+  exit: !crosses_below { lhs: close, rhs: !sma { period: 20 } }
+sizing: !import sizing/half-kelly.yml
+```
+
+**Paths are relative to the importing file**, not to where `fugazi` was invoked
+— `strategies/btc.yml` importing `signals/breakout.yml` finds
+`strategies/signals/breakout.yml` from any working directory. (Inline strategy
+text has no directory of its own, so its imports resolve against the working
+directory.) An imported file is an ordinary spec fragment: it may contain its
+own `!import`s — resolved relative to *itself* — and its own `!param`
+placeholders, because the load order is **parse → `!import` → `!param` → typed
+parse**, so one `--params` table parameterises the whole imported tree. An
+import cycle is an error naming the chain rather than a hang.
+
 See [`examples/strategy.yml`](examples/strategy.yml) for a complete SMA-crossover
 strategy, and [`examples/strategy.params.yml`](examples/strategy.params.yml) for
 the parameterised version.

@@ -48,6 +48,7 @@ use crate::backtest;
 use crate::calendar::{self, AssetClass, BarsPerYearSpec, Frequency, ScopedFrequency, WindowSpec};
 use crate::costs::CostConfig;
 use crate::data::DataFrame;
+use crate::imports;
 use crate::input;
 use crate::metrics;
 use crate::params;
@@ -71,6 +72,11 @@ type Partition = (HashMap<String, Value>, Vec<Axis>);
 pub struct OptimizeOptions<'a> {
     pub cash: Real,
     pub strategy_text: &'a str,
+    /// The directory the strategy's `!import` paths resolve against — its own
+    /// directory when loaded from `@file`, the working directory for inline
+    /// text (see [`crate::input::Source::base_dir`]). Imports are spliced once,
+    /// into the base value every grid point is then `!param`-substituted from.
+    pub strategy_dir: &'a Path,
     pub strategy_label: &'a str,
     /// `--params` baseline: shared scalars applied under every subgrid. Axes
     /// are rejected upstream via [`reject_axes_in_params`] — this table is
@@ -162,7 +168,12 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
         );
     }
 
+    // Imports splice once, up front: the resulting base value is what every
+    // grid point's `!param` substitution runs over, so a shared fragment costs
+    // one read no matter how large the sweep.
     let base_value = input::parse_value(opts.strategy_text).context("parsing strategy")?;
+    let base_value =
+        imports::resolve(base_value, opts.strategy_dir).context("resolving strategy imports")?;
 
     // Resolve the strategy's symbol from a probe built with the first subgrid's
     // first combo. Every other subgrid must resolve to the same symbol —
