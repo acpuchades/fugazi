@@ -46,8 +46,8 @@ use fugazi_core::indicators::{
     GetBool, GetReal, GetStr, High, Hma, Hour, Identity, IfElse, IsWeekday, IsWeekend, Keltner,
     KeltnerValue, Kurtosis, Latch, Log, Low, Macd, MacdValue, Median, Mfi, Minute, Month, Obv, Open,
     Parkinson, Pick, Quarter, Resample, Rma, RogersSatchell, Rsi, Sar, Second, Skewness, Sma, StdDev,
-    Stochastic, TrueRange, Typical, UnixMillis, UnixSeconds, Value, ValueStr, Volume, Vwap,
-    WeekOfYear, WilliamsR, Wma, Year, ZScore,
+    Stochastic, TrueRange, Typical, UnixMillis, UnixSeconds, Value, ValueStr, VarianceRatio, Volume,
+    Vwap, WeekOfYear, WilliamsR, Wma, Year, ZScore,
 };
 use fugazi_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
 use fugazi_core::sources::{
@@ -3723,6 +3723,33 @@ fn correlation(
         |l, r| Correlation::new(l, r, period)
     )?))
 }
+/// Lo-MacKinlay variance-ratio regime classifier over `source`'s first
+/// differences: reads `1.0` under the random-walk null, `> 1.0` in a trending
+/// (positively autocorrelated) regime and `< 1.0` in a mean-reverting one.
+///
+/// `period` is the retained window and `lag` the aggregation horizon; `lag`
+/// must be at least 2 and `period` at least `lag + 2`. Unlike the other
+/// indicators this recomputes over the whole window each bar (O(`period`), not
+/// O(1)) — see the Rust docs. A dispersion-free window (constant one-period
+/// returns) reads `1.0`.
+#[pyfunction]
+fn variance_ratio(
+    source: PyRef<'_, PyIndicator>,
+    period: usize,
+    lag: usize,
+) -> PyResult<PyIndicator> {
+    if lag < 2 {
+        return Err(PyValueError::new_err("lag must be at least 2"));
+    }
+    if period < lag + 2 {
+        return Err(PyValueError::new_err(
+            "period must be at least lag + 2 (need >1 overlapping block)",
+        ));
+    }
+    Ok(PyIndicator::wrap(map_source!(source.src.clone(), |s| {
+        VarianceRatio::new(s, period, lag)
+    })))
+}
 src_period!(
     stochastic,
     Stochastic,
@@ -5728,8 +5755,8 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     reg!(
         open, high, low, close, volume, typical, median, identity, value, value_str, sma, ema, rma,
         wma, hma, rsi, stddev, skewness_indicator, kurtosis_indicator, zscore, correlation,
-        stochastic, cci, log, atr, parkinson, garman_klass, rogers_satchell, mfi, williams_r, obv,
-        vwap, ad,
+        variance_ratio, stochastic, cci, log, atr, parkinson, garman_klass, rogers_satchell, mfi,
+        williams_r, obv, vwap, ad,
         true_range, adx, dmi, aroon, sar, macd, bollinger, keltner, donchian, stoch_rsi, resample,
         latch, unstable, if_else, get, get_real, get_bool, get_str, str_eq, str_ne, fetch,
         // Calendar accessors + weekday/weekend signals; consume `atom.time`.

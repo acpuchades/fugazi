@@ -26,7 +26,7 @@ use fugazi::indicators::{
     Correlation, Dmi, DmiValue, Donchian, DonchianValue, Ema, GarmanKlass, GetBool, GetReal, GetStr,
     Hma, IfElse, Keltner, KeltnerValue, Kurtosis, Latch, Log, Macd, MacdValue, Mfi, Obv, Parkinson,
     Pick, Position, Resample, Rma, RogersSatchell, Rsi, Sar, Skewness, Sma, StdDev, StochRsi,
-    Stochastic, TrueRange, Value, ValueStr, Vwap, WilliamsR, Wma, ZScore,
+    Stochastic, TrueRange, Value, ValueStr, VarianceRatio, Vwap, WilliamsR, Wma, ZScore,
 };
 use fugazi::prelude::*;
 use fugazi::types::Snapshot;
@@ -290,6 +290,14 @@ pub enum ExprSpec {
         lhs: Box<ExprSpec>,
         rhs: Box<ExprSpec>,
         period: usize,
+    },
+    /// Lo-MacKinlay variance-ratio regime classifier (`> 1` trending, `< 1`
+    /// mean-reverting) over the source's first differences.
+    VarianceRatio {
+        #[serde(default = "default_source")]
+        source: Box<ExprSpec>,
+        period: usize,
+        lag: usize,
     },
     Cci {
         #[serde(default = "default_source")]
@@ -872,6 +880,14 @@ enum ExprSpecRaw {
         rhs: Box<ExprSpec>,
         period: usize,
     },
+    /// Lo-MacKinlay variance-ratio regime classifier (`> 1` trending, `< 1`
+    /// mean-reverting) over the source's first differences.
+    VarianceRatio {
+        #[serde(default = "default_source")]
+        source: Box<ExprSpec>,
+        period: usize,
+        lag: usize,
+    },
     Cci {
         #[serde(default = "default_source")]
         source: Box<ExprSpec>,
@@ -1326,6 +1342,15 @@ impl From<ExprSpecRaw> for ExprSpec {
             ExprSpecRaw::Kurtosis { source, period } => ExprSpec::Kurtosis { source, period },
             ExprSpecRaw::ZScore { source, period } => ExprSpec::ZScore { source, period },
             ExprSpecRaw::Correlation { lhs, rhs, period } => ExprSpec::Correlation { lhs, rhs, period },
+            ExprSpecRaw::VarianceRatio {
+                source,
+                period,
+                lag,
+            } => ExprSpec::VarianceRatio {
+                source,
+                period,
+                lag,
+            },
             ExprSpecRaw::Cci { source, period } => ExprSpec::Cci { source, period },
             ExprSpecRaw::Stochastic { source, period } => ExprSpec::Stochastic { source, period },
             ExprSpecRaw::StochRsi { source, rsi_period, stoch_period } => ExprSpec::StochRsi { source, rsi_period, stoch_period },
@@ -1615,6 +1640,11 @@ impl ExprSpec {
             Correlation { lhs, rhs, period } => {
                 dyn_indicator::wrap(self::Correlation::new(real(lhs), real(rhs), *period))
             }
+            VarianceRatio {
+                source,
+                period,
+                lag,
+            } => dyn_indicator::wrap(self::VarianceRatio::new(real(source), *period, *lag)),
             Cci { source, period } => dyn_indicator::wrap(self::Cci::new(real(source), *period)),
             Stochastic { source, period } => {
                 dyn_indicator::wrap(self::Stochastic::new(real(source), *period))

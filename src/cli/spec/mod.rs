@@ -73,7 +73,7 @@ mod tests {
     use crate::dyn_indicator::{DynIndicator, DynValue as Payload};
     use fugazi::indicators::{
         Book, Correlation, Current, Ema, GarmanKlass, Kurtosis, Parkinson, Position, RogersSatchell,
-        Skewness, ZScore,
+        Skewness, VarianceRatio, ZScore,
     };
     use fugazi::prelude::*;
     use fugazi::types::Snapshot;
@@ -180,6 +180,19 @@ mod tests {
         let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
         let mut reference = Correlation::new(Current::close(), Current::close().lag(1), 3);
         for p in [10.0, 12.0, 9.0, 14.0, 8.0, 15.0] {
+            assert_eq!(feed_real(&mut built, bar(p)), reference.update(bar(p).into()));
+        }
+    }
+
+    #[test]
+    fn variance_ratio_tag_matches_reference() {
+        // `!variance_ratio` defaults its source to close and builds to the
+        // library indicator (`> 1` trending, `< 1` mean-reverting).
+        let spec: ExprSpec =
+            serde_norway::from_str("!variance_ratio { period: 5, lag: 2 }").unwrap();
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut reference = VarianceRatio::new(Current::close(), 5, 2);
+        for p in [10.0, 12.0, 9.0, 14.0, 8.0, 15.0, 11.0] {
             assert_eq!(feed_real(&mut built, bar(p)), reference.update(bar(p).into()));
         }
     }

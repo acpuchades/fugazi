@@ -13,7 +13,7 @@ use fugazi::indicators::{
     Dmi, Donchian, Ema, GarmanKlass, Hma, Hour, Identity, IsWeekday, IsWeekend, Keltner, Kurtosis,
     Latch, Log, Macd, Mfi, Minute, Month, Obv, Parkinson, Quarter, Resample, Rma, RogersSatchell,
     Rsi, Sar, Second, Skewness, Sma, StdDev, Stochastic, TrueRange, UnixMillis, UnixSeconds, Value,
-    Vwap, WeekOfYear, WilliamsR, Wma, Year, ZScore,
+    VarianceRatio, Vwap, WeekOfYear, WilliamsR, Wma, Year, ZScore,
 };
 use fugazi::prelude::*;
 use fugazi::types::{Atom, Candle, Real, Timestamp};
@@ -115,6 +115,10 @@ fn warm_up_is_exact_for_the_catalogue() {
     candle_case(
         Correlation::new(Current::close(), Current::open(), 20),
         "correlation",
+    );
+    candle_case(
+        VarianceRatio::new(Current::close(), 20, 2),
+        "variance_ratio",
     );
     candle_case(Cci::new(Current::typical(), 20), "cci");
     candle_case(Bollinger::new(Current::close(), 20, 2.0), "bollinger");
@@ -229,6 +233,10 @@ fn warm_up_from_a_warm_up_zero_source_is_exact() {
         3
     );
     assert_eq!(
+        VarianceRatio::new(Value::<Real>::new(1.0), 4, 2).warm_up_period(),
+        4
+    );
+    assert_eq!(
         Bollinger::new(Value::<Real>::new(1.0), 3, 2.0).warm_up_period(),
         3
     );
@@ -260,6 +268,10 @@ fn windowed_indicators_are_stable_once_ready() {
     assert_eq!(ZScore::new(Current::close(), 20).unstable_period(), 0);
     assert_eq!(
         Correlation::new(Current::close(), Current::open(), 20).unstable_period(),
+        0
+    );
+    assert_eq!(
+        VarianceRatio::new(Current::close(), 20, 2).unstable_period(),
         0
     );
     assert_eq!(Bollinger::new(Current::close(), 20, 2.0).unstable_period(), 0);

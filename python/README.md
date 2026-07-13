@@ -153,6 +153,7 @@ node.reset()                   # call reset() to start a fresh, independent pass
 | `sma ema rma wma hma rsi stddev stochastic cci (source, period)` | a value |
 | `skewness kurtosis zscore (source, period)` | a value (distribution shape / normalization; `kurtosis` is raw, ~3 for normal) |
 | `correlation(lhs, rhs, period)` | rolling Pearson correlation in `[-1, 1]` (autocorrelation: `correlation(x, x.lag(n), period)`) |
+| `variance_ratio(source, period, lag)` | Lo-MacKinlay regime classifier (`>1` trending, `<1` mean-reverting); O(period)/bar recompute |
 | `stoch_rsi(source, rsi_period=14, stoch_period=14)` | a value |
 | `atr mfi williams_r (period)` | a value |
 | `parkinson garman_klass rogers_satchell (period)` | range-based volatility estimate (uses the full candle; more efficient than close-to-close stddev) |

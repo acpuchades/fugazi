@@ -563,6 +563,22 @@ def test_correlation_bounds_and_domain_check():
         ta.correlation(ta.close(), ta.identity(), 3)
 
 
+def test_variance_ratio_classifies_regime():
+    vr = ta.variance_ratio(ta.close(), 5, 2)
+    # Prices {0,1,3,6,10}: accelerating returns → trending → VR = 32/15 > 1.
+    out = feed(vr, closes([0.0, 1.0, 3.0, 6.0, 10.0]))
+    assert out[3] is None
+    assert out[4] == pytest.approx(32.0 / 15.0)
+    # Prices {0,1,3,4,6}: constant 2-period returns → mean reversion → VR = 0.
+    mr = feed(ta.variance_ratio(ta.close(), 5, 2), closes([0.0, 1.0, 3.0, 4.0, 6.0]))
+    assert mr[4] == pytest.approx(0.0)
+    # Constraints surface as ValueError, not a Rust panic.
+    with pytest.raises(ValueError):
+        ta.variance_ratio(ta.close(), 10, 1)
+    with pytest.raises(ValueError):
+        ta.variance_ratio(ta.close(), 3, 2)
+
+
 # --- strategy layer: Wallet ------------------------------------------------
 
 
