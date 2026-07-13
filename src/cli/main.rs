@@ -23,6 +23,7 @@ mod data;
 mod csv_source;
 mod dyn_indicator;
 mod get;
+mod glob;
 mod imports;
 mod input;
 mod list;
@@ -91,8 +92,11 @@ enum Command {
     /// `fugazi list indicators` enumerates the strategy-YAML tag vocabulary
     /// (real-valued sources, boolean signals, the `!param` placeholder);
     /// `fugazi list sources` enumerates the remote candle providers the `get`
-    /// subcommand can fetch from; `fugazi list tickers <provider>` fetches and
-    /// prints every symbol the given provider offers.
+    /// subcommand can fetch from; `fugazi list tickers <provider> [PATTERN]`
+    /// fetches and prints every symbol the given provider offers, optionally
+    /// filtered by a shell-style glob — `fugazi list tickers binance 'b*'`
+    /// (starts with `b`), `'*b*'` (contains `b`). Quote the pattern so the
+    /// shell doesn't expand it against your files first.
     List {
         #[command(subcommand)]
         cmd: list::ListCmd,

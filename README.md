@@ -739,9 +739,13 @@ subcommands — briefly listed here, fully documented in
   OHLCV bars from `binance` or `yfinance` into a `run`-ready CSV, or
   re-process an existing CSV with `csv:PATH`. `-x/--overlay col=<source>`
   appends indicator columns computed on the fetched bars.
-- `fugazi list indicators` / `list sources` / `list tickers <PROVIDER>` — the
-  YAML tag catalogue, the `get`-provider table, and (via HTTP) the
-  provider's ticker vocabulary.
+- `fugazi list indicators` / `list sources` / `list tickers <PROVIDER> [PATTERN]`
+  — the YAML tag catalogue, the `get`-provider table, and (via HTTP) the
+  provider's ticker vocabulary. A provider lists thousands of symbols, so
+  `tickers` takes an optional shell-style glob: `fugazi list tickers binance
+  'b*'` (starts with `b`), `'*b*'` (contains `b`), `'b*usd*t'`, `'[a-c]*'`.
+  Matching is case-insensitive and whole-symbol; quote the pattern so your
+  shell doesn't try to expand it against your files.
 - `fugazi completions <shell>` — a shell-completion script (see
   [doc/CLI.md § Shell completion](doc/CLI.md#shell-completion)).
 

@@ -9,11 +9,14 @@
 //! * `fugazi list sources` — every remote candle provider the `get` subcommand
 //!   can fetch from (`binance:BTCUSDT[1d]`, `yfinance:SPY[1d]`, …), rendered
 //!   from the same table `get` dispatches against.
-//! * `fugazi list tickers <provider>` — every symbol the given provider
-//!   currently exposes (backed by a real HTTP call — Binance advertises its
-//!   spot vocabulary through `/api/v3/exchangeInfo`; Yahoo Finance and most
-//!   retail equity APIs have no such endpoint and surface an "unsupported"
-//!   error).
+//! * `fugazi list tickers <provider> [PATTERN]` — every symbol the given
+//!   provider currently exposes (backed by a real HTTP call — Binance
+//!   advertises its spot vocabulary through `/api/v3/exchangeInfo`; Yahoo
+//!   Finance and most retail equity APIs have no such endpoint and surface an
+//!   "unsupported" error), optionally filtered by a shell-style glob
+//!   ([`crate::glob`]): `fugazi list tickers binance 'b*'` starts-with,
+//!   `'*b*'` contains. A provider's vocabulary runs to thousands of symbols, so
+//!   the filter is what makes the command usable without a pipe.
 
 use std::borrow::Cow;
 use std::io::{self, IsTerminal, Write};
@@ -23,6 +26,7 @@ use clap::Subcommand;
 use tokio::runtime::Builder as RuntimeBuilder;
 
 use super::get::{KNOWN_PROVIDERS, tickers_of};
+use crate::glob;
 use crate::style;
 
 /// Column separation, in spaces, between adjacent items in the TTY grid.
@@ -58,6 +62,17 @@ pub enum ListCmd {
         /// The provider (e.g. `binance`). See `fugazi list sources`.
         #[arg(value_name = "PROVIDER")]
         provider: String,
+
+        /// Keep only the symbols matching this shell-style glob:
+        /// `*` any run of characters, `?` one character, `[abc]` / `[a-z]` a
+        /// set or range, `[!abc]` its complement, `\*` a literal `*`.
+        ///
+        /// Matching is case-insensitive and whole-symbol — `b*` is "starts with
+        /// b", `*b*` is "contains b", and `btc` on its own means the symbol
+        /// `BTC` exactly. Quote the pattern ('b*'), or the shell will try to
+        /// expand it against your files first.
+        #[arg(value_name = "PATTERN")]
+        pattern: Option<glob::Pattern>,
     },
 }
 
@@ -338,7 +353,9 @@ pub fn run(cmd: ListCmd) -> Result<()> {
     match cmd {
         ListCmd::Indicators => write_indicators(&mut out)?,
         ListCmd::Sources => write_sources(&mut out, KNOWN_PROVIDERS)?,
-        ListCmd::Tickers { provider } => write_tickers(&mut out, &provider)?,
+        ListCmd::Tickers { provider, pattern } => {
+            write_tickers(&mut out, &provider, pattern.as_ref())?
+        }
     }
     Ok(())
 }
@@ -353,18 +370,46 @@ pub fn run(cmd: ListCmd) -> Result<()> {
 ///
 /// The two branches differ in one more way, and it matters: the grid elides an
 /// overlong symbol at [`MAX_CELL_WIDTH`], while the piped branch **never
-/// filters or shortens anything**. Machine-read output stays exact and
-/// complete; only the human-facing grid trades a few characters for density.
-/// Both branches are provider-agnostic — nothing here knows a Binance ticker
-/// from a CoinGecko coin id.
-fn write_tickers<W: Write>(w: &mut W, provider: &str) -> Result<()> {
+/// shortens anything**. Machine-read output stays exact and complete; only the
+/// human-facing grid trades a few characters for density. Both branches are
+/// provider-agnostic — nothing here knows a Binance ticker from a CoinGecko
+/// coin id.
+///
+/// An optional [`glob::Pattern`] filters the list *before* either branch, so
+/// `list tickers binance 'b*' | wc -l` counts what the grid would have shown.
+/// Filtering happens here, over the provider's returned vocabulary, rather than
+/// being pushed into the source trait: no provider's endpoint offers a
+/// server-side filter, so a `pattern` parameter there would be a lie that every
+/// impl re-implements identically.
+fn write_tickers<W: Write>(w: &mut W, provider: &str, pattern: Option<&glob::Pattern>) -> Result<()> {
     let rt = RuntimeBuilder::new_current_thread()
         .enable_all()
         .build()
         .context("building tokio runtime")?;
-    let tickers = rt
+    let mut tickers = rt
         .block_on(tickers_of(provider))
         .with_context(|| format!("listing tickers for {provider}"))?;
+
+    if let Some(pattern) = pattern {
+        let total = tickers.len();
+        tickers.retain(|t| pattern.matches(t));
+        // Zero matches is a legitimate answer (an empty list to a pipe), but on
+        // a terminal a silent blank screen reads like a bug — say which pattern
+        // matched nothing, and out of how many. The "did you mean a substring?"
+        // hint is only offered when it would actually say something different:
+        // suggesting `*b**` to someone who typed `b*` is noise.
+        if tickers.is_empty() && std::io::stdout().is_terminal() {
+            let hint = if pattern.is_anchored() {
+                format!(
+                    " (matching is whole-symbol — `*{pattern}*` searches for a substring)"
+                )
+            } else {
+                String::new()
+            };
+            writeln!(w, "  no symbol out of {total} matches `{pattern}`{hint}")?;
+            return Ok(());
+        }
+    }
 
     if std::io::stdout().is_terminal() {
         let term_width = console::Term::stdout()

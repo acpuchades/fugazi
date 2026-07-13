@@ -457,7 +457,7 @@ Printed catalogue, three shapes:
 ```
 fugazi list indicators   # every YAML tag `run --series` and `get --overlay` accept
 fugazi list sources      # every provider `get` fetches from (`binance`, `yfinance`, `csv`)
-fugazi list tickers <PROVIDER>   # every symbol the provider currently exposes (HTTP)
+fugazi list tickers <PROVIDER> [PATTERN]   # every symbol the provider exposes (HTTP)
 ```
 
 `list indicators` groups the vocabulary alphabetically (arithmetic, bands,
@@ -473,6 +473,36 @@ as a column-major grid sized to the terminal (like `ls`). Yahoo has no such
 enumeration endpoint and returns an "unsupported" error; `csv` needs a path
 per invocation, so the ticker list is whatever `symbol` values the file
 itself contains — enumerate it with `cut -d';' -f1 <path> | sort -u`.
+
+#### Filtering the ticker list
+
+A provider's vocabulary runs to thousands of symbols (Binance ~1.4k, CoinGecko
+~17.5k), so `list tickers` takes an optional **shell-style glob** and prints
+only the symbols it matches:
+
+```sh
+fugazi list tickers binance 'b*'        # starts with b       (96 of 1357)
+fugazi list tickers binance '*b*'       # contains b          (247 of 1357)
+fugazi list tickers binance 'b*usd*t'   # b… then usd… then …t
+fugazi list tickers binance '[a-c]*'    # starts with a, b or c
+fugazi list tickers coingecko 'bitcoin-c*'
+```
+
+The alphabet is the familiar one: `*` any run of characters (including none),
+`?` exactly one, `[abc]` / `[a-z]` a set or range, `[!abc]` / `[^abc]` its
+complement, and `\*` a literal `*`. Matching is **case-insensitive** (the
+provider picks the casing — Binance shouts `BTCUSDT`, CoinGecko whispers
+`bitcoin` — and `b*` should mean the same to both) and **whole-symbol**, as a
+glob does everywhere else: a bare `btc` matches the symbol `BTC` and nothing
+else, and "contains" is spelled `*btc*`.
+
+**Quote the pattern.** Unquoted, your shell expands it against your files first
+— zsh will refuse outright with `no matches found: b*`.
+
+The filter applies before the output split, so `list tickers binance 'b*' |
+wc -l` counts exactly what the grid would have shown. On a terminal, a pattern
+that matches nothing says so (and, when the pattern is anchored at both ends,
+points at the `*…*` substring form) instead of printing a blank screen.
 
 ## Common flags
 
