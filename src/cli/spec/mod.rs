@@ -71,7 +71,9 @@ pub(crate) use strategy::{DynSingleStrategy, SideSpec};
 mod tests {
     use super::*;
     use crate::dyn_indicator::{DynIndicator, DynValue as Payload};
-    use fugazi::indicators::{Book, Current, Ema, Position};
+    use fugazi::indicators::{
+        Book, Correlation, Current, Ema, Kurtosis, Position, Skewness, ZScore,
+    };
     use fugazi::prelude::*;
     use fugazi::types::Snapshot;
 
@@ -140,6 +142,44 @@ mod tests {
         let mut reference = Ema::new(Current::close(), 3);
         for p in [1.0, 2.0, 3.0, 4.0, 5.0] {
             assert_eq!(feed_real(&mut ema, bar(p)), reference.update(bar(p).into()));
+        }
+    }
+
+    #[test]
+    fn distribution_shape_tags_match_reference() {
+        // `!skewness` / `!kurtosis` / `!zscore` default their source to close and
+        // build to the library indicator, matching a hand-wired reference.
+        let closes = [10.0, 12.0, 9.0, 14.0, 8.0, 15.0, 11.0];
+
+        let sk: ExprSpec = serde_norway::from_str("!skewness { period: 4 }").unwrap();
+        let mut sk = sk.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut sk_ref = Skewness::new(Current::close(), 4);
+
+        let ku: ExprSpec = serde_norway::from_str("!kurtosis { period: 4 }").unwrap();
+        let mut ku = ku.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut ku_ref = Kurtosis::new(Current::close(), 4);
+
+        let z: ExprSpec = serde_norway::from_str("!zscore { period: 4 }").unwrap();
+        let mut z = z.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut z_ref = ZScore::new(Current::close(), 4);
+
+        for p in closes {
+            assert_eq!(feed_real(&mut sk, bar(p)), sk_ref.update(bar(p).into()));
+            assert_eq!(feed_real(&mut ku, bar(p)), ku_ref.update(bar(p).into()));
+            assert_eq!(feed_real(&mut z, bar(p)), z_ref.update(bar(p).into()));
+        }
+    }
+
+    #[test]
+    fn correlation_tag_matches_reference() {
+        // Lag-1 autocorrelation: lhs close vs. its own previous value.
+        let spec: ExprSpec =
+            serde_norway::from_str("!correlation { lhs: close, rhs: !lag { periods: 1 }, period: 3 }")
+                .unwrap();
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut reference = Correlation::new(Current::close(), Current::close().lag(1), 3);
+        for p in [10.0, 12.0, 9.0, 14.0, 8.0, 15.0] {
+            assert_eq!(feed_real(&mut built, bar(p)), reference.update(bar(p).into()));
         }
     }
 

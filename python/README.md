@@ -151,6 +151,8 @@ node.reset()                   # call reset() to start a fresh, independent pass
 | `identity()` | the raw value stream (root for a bare numeric series) |
 | `value(x)` | a constant |
 | `sma ema rma wma hma rsi stddev stochastic cci (source, period)` | a value |
+| `skewness kurtosis zscore (source, period)` | a value (distribution shape / normalization; `kurtosis` is raw, ~3 for normal) |
+| `correlation(lhs, rhs, period)` | rolling Pearson correlation in `[-1, 1]` (autocorrelation: `correlation(x, x.lag(n), period)`) |
 | `stoch_rsi(source, rsi_period=14, stoch_period=14)` | a value |
 | `atr mfi williams_r (period)` | a value |
 | `obv() vwap() ad() true_range()` | a value |

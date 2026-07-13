@@ -9,10 +9,11 @@
 //! an instance that saw the full history.
 
 use fugazi::indicators::{
-    Adx, Aroon, Atr, Bollinger, Cci, CurrentTime, Current, Day, DayOfWeek, DayOfYear, Dmi,
-    Donchian, Ema, Hma, Hour, Identity, IsWeekday, IsWeekend, Keltner, Latch, Log, Macd, Mfi,
-    Minute, Month, Obv, Quarter, Resample, Rma, Rsi, Sar, Second, Sma, StdDev, Stochastic,
-    TrueRange, UnixMillis, UnixSeconds, Value, Vwap, WeekOfYear, WilliamsR, Wma, Year,
+    Adx, Aroon, Atr, Bollinger, Cci, Correlation, CurrentTime, Current, Day, DayOfWeek, DayOfYear,
+    Dmi, Donchian, Ema, Hma, Hour, Identity, IsWeekday, IsWeekend, Keltner, Kurtosis, Latch, Log,
+    Macd, Mfi, Minute, Month, Obv, Quarter, Resample, Rma, Rsi, Sar, Second, Skewness, Sma, StdDev,
+    Stochastic, TrueRange, UnixMillis, UnixSeconds, Value, Vwap, WeekOfYear, WilliamsR, Wma, Year,
+    ZScore,
 };
 use fugazi::prelude::*;
 use fugazi::types::{Atom, Candle, Real, Timestamp};
@@ -105,6 +106,13 @@ fn warm_up_is_exact_for_the_catalogue() {
     candle_case(Rsi::new(Current::close(), 14), "rsi");
     candle_case(Macd::new(Current::close(), 12, 26, 9), "macd");
     candle_case(StdDev::new(Current::close(), 20), "stddev");
+    candle_case(Skewness::new(Current::close(), 20), "skewness");
+    candle_case(Kurtosis::new(Current::close(), 20), "kurtosis");
+    candle_case(ZScore::new(Current::close(), 20), "zscore");
+    candle_case(
+        Correlation::new(Current::close(), Current::open(), 20),
+        "correlation",
+    );
     candle_case(Cci::new(Current::typical(), 20), "cci");
     candle_case(Bollinger::new(Current::close(), 20, 2.0), "bollinger");
     candle_case(Stochastic::new(Current::close(), 14), "stochastic");
@@ -210,6 +218,13 @@ fn warm_up_from_a_warm_up_zero_source_is_exact() {
     assert_eq!(Sma::new(Value::<Real>::new(1.0), 3).warm_up_period(), 3);
     assert_eq!(Wma::new(Value::<Real>::new(1.0), 3).warm_up_period(), 3);
     assert_eq!(StdDev::new(Value::<Real>::new(1.0), 3).warm_up_period(), 3);
+    assert_eq!(Skewness::new(Value::<Real>::new(1.0), 3).warm_up_period(), 3);
+    assert_eq!(Kurtosis::new(Value::<Real>::new(1.0), 3).warm_up_period(), 3);
+    assert_eq!(ZScore::new(Value::<Real>::new(1.0), 3).warm_up_period(), 3);
+    assert_eq!(
+        Correlation::new(Value::<Real>::new(1.0), Value::<Real>::new(2.0), 3).warm_up_period(),
+        3
+    );
     assert_eq!(
         Bollinger::new(Value::<Real>::new(1.0), 3, 2.0).warm_up_period(),
         3
@@ -237,6 +252,13 @@ fn warm_up_from_a_warm_up_zero_source_is_exact() {
 fn windowed_indicators_are_stable_once_ready() {
     assert_eq!(Sma::new(Current::close(), 20).unstable_period(), 0);
     assert_eq!(Wma::new(Current::close(), 20).unstable_period(), 0);
+    assert_eq!(Skewness::new(Current::close(), 20).unstable_period(), 0);
+    assert_eq!(Kurtosis::new(Current::close(), 20).unstable_period(), 0);
+    assert_eq!(ZScore::new(Current::close(), 20).unstable_period(), 0);
+    assert_eq!(
+        Correlation::new(Current::close(), Current::open(), 20).unstable_period(),
+        0
+    );
     assert_eq!(Bollinger::new(Current::close(), 20, 2.0).unstable_period(), 0);
     assert_eq!(Stochastic::new(Current::close(), 14).unstable_period(), 0);
     assert_eq!(Aroon::new(Current::candle(), 25).unstable_period(), 0);

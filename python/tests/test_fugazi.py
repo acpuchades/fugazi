@@ -501,6 +501,51 @@ def test_donchian_rejects_mixed_domain_sources():
         ta.donchian(ta.high(), ta.identity(), 3)
 
 
+# --- distribution-shape + normalization indicators -------------------------
+
+
+def test_skewness_warms_up_and_signs_the_tail():
+    sk = ta.skewness(ta.close(), 3)
+    out = feed(sk, closes([0.0, 0.0, 3.0]))
+    assert out[0] is None and out[1] is None
+    # Window {0, 0, 3}: m2=2, m3=2, skew = 2 / 2**1.5.
+    assert out[2] == pytest.approx(2.0 / 2.0**1.5)
+    # A constant window has no dispersion → 0.0, not NaN.
+    assert feed(ta.skewness(ta.close(), 3), closes([5.0, 5.0, 5.0]))[2] == 0.0
+
+
+def test_kurtosis_is_raw_not_excess():
+    ku = ta.kurtosis(ta.close(), 3)
+    out = feed(ku, closes([-1.0, 0.0, 1.0]))
+    assert out[0] is None and out[1] is None
+    # Window {-1, 0, 1}: m2=2/3, m4=2/3, kurtosis = (2/3)/(2/3)**2 = 1.5 (raw).
+    assert out[2] == pytest.approx(1.5)
+    # `fugazi.metrics.kurtosis` is the separate, excess metric over returns.
+    assert ta.metrics.kurtosis([0.01, -0.02, 0.03, -0.01]) is not None
+
+
+def test_zscore_measures_distance_from_windowed_mean():
+    z = ta.zscore(ta.close(), 3)
+    out = feed(z, closes([2.0, 4.0, 6.0]))
+    assert out[0] is None and out[1] is None
+    # Latest 6 vs. mean 4, population stddev sqrt(8/3).
+    assert out[2] == pytest.approx(2.0 / math.sqrt(8.0 / 3.0))
+
+
+def test_correlation_bounds_and_domain_check():
+    # y = x fed to both legs → perfect positive correlation.
+    c = ta.correlation(ta.close(), ta.close(), 3)
+    out = feed(c, closes([1.0, 2.0, 3.0]))
+    assert out[0] is None and out[1] is None
+    assert out[2] == pytest.approx(1.0)
+    # Two Real sources correlate one against its own lag (autocorrelation).
+    ac = ta.correlation(ta.close(), ta.close().lag(1), 3)
+    assert feed(ac, closes([1.0, 2.0, 3.0, 4.0]))[-1] == pytest.approx(1.0)
+    # Mixing domains (candle-rooted vs. value-rooted) is a TypeError.
+    with pytest.raises(TypeError):
+        ta.correlation(ta.close(), ta.identity(), 3)
+
+
 # --- strategy layer: Wallet ------------------------------------------------
 
 

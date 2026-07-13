@@ -80,10 +80,144 @@ impl WindowStats {
         sum / self.period as Real
     }
 
+    /// Population skewness: the standardized third central moment
+    /// `mean((x - mean)^3) / stddev^3`. Like [`mean_abs_dev`](Self::mean_abs_dev)
+    /// this scans the retained window (O(period)) from the window mean, so the
+    /// three moments share one exact pass rather than a running approximation.
+    /// Returns `0.0` for a dispersion-free window (variance below
+    /// [`MOMENT_EPS`]), matching how [`variance`](Self::variance)/[`stddev`](Self::stddev)
+    /// degrade gracefully. Only meaningful once [`is_full`](Self::is_full).
+    pub fn skewness(&self) -> Real {
+        let (m2, m3, _m4) = self.central_moments();
+        if m2 < MOMENT_EPS {
+            return 0.0;
+        }
+        m3 / m2.powf(1.5)
+    }
+
+    /// Population kurtosis: the **raw** standardized fourth central moment
+    /// `mean((x - mean)^4) / variance^2` — `3.0` for a normal window, *not*
+    /// excess (a caller subtracts `3` for excess kurtosis). Same single-pass
+    /// window scan as [`skewness`](Self::skewness); returns `0.0` for a
+    /// dispersion-free window. Only meaningful once [`is_full`](Self::is_full).
+    pub fn kurtosis(&self) -> Real {
+        let (m2, _m3, m4) = self.central_moments();
+        if m2 < MOMENT_EPS {
+            return 0.0;
+        }
+        m4 / (m2 * m2)
+    }
+
+    /// The 2nd/3rd/4th central moments over the window in one pass:
+    /// `(mean((x-μ)^2), mean((x-μ)^3), mean((x-μ)^4))`.
+    fn central_moments(&self) -> (Real, Real, Real) {
+        let mean = self.mean();
+        let n = self.period as Real;
+        let (mut m2, mut m3, mut m4) = (0.0, 0.0, 0.0);
+        for x in &self.window {
+            let d = x - mean;
+            let d2 = d * d;
+            m2 += d2;
+            m3 += d2 * d;
+            m4 += d2 * d2;
+        }
+        (m2 / n, m3 / n, m4 / n)
+    }
+
     pub fn reset(&mut self) {
         self.window.clear();
         self.sum = 0.0;
         self.sum_sq = 0.0;
+    }
+}
+
+/// Variance floor below which a standardized moment (skewness, kurtosis) or a
+/// correlation is reported as `0.0` rather than dividing by a vanishing spread.
+pub(crate) const MOMENT_EPS: Real = 1e-12;
+
+/// Two-variable rolling-window statistics: keeps the last `period` `(x, y)`
+/// pairs plus running sums (`Σx`, `Σy`, `Σx²`, `Σy²`, `Σxy`), so Pearson
+/// correlation over the window is O(1) per update. Backs
+/// [`Correlation`](super::Correlation); the shared covariance machinery also
+/// makes rolling beta a one-line composition (`corr · σ_y / σ_x`) without a
+/// second core.
+#[derive(Debug, Clone)]
+pub(crate) struct WindowCovariance {
+    period: usize,
+    window: VecDeque<(Real, Real)>,
+    sum_x: Real,
+    sum_y: Real,
+    sum_xx: Real,
+    sum_yy: Real,
+    sum_xy: Real,
+}
+
+impl WindowCovariance {
+    pub fn new(period: usize) -> Self {
+        assert!(period > 0, "window period must be greater than zero");
+        Self {
+            period,
+            window: VecDeque::with_capacity(period),
+            sum_x: 0.0,
+            sum_y: 0.0,
+            sum_xx: 0.0,
+            sum_yy: 0.0,
+            sum_xy: 0.0,
+        }
+    }
+
+    pub fn period(&self) -> usize {
+        self.period
+    }
+
+    /// Push a paired sample, evicting the oldest once the window is full.
+    /// Returns whether the window is now full (statistics valid).
+    pub fn update(&mut self, x: Real, y: Real) -> bool {
+        self.window.push_back((x, y));
+        self.sum_x += x;
+        self.sum_y += y;
+        self.sum_xx += x * x;
+        self.sum_yy += y * y;
+        self.sum_xy += x * y;
+        if self.window.len() > self.period {
+            let (ox, oy) = self.window.pop_front().expect("window is non-empty");
+            self.sum_x -= ox;
+            self.sum_y -= oy;
+            self.sum_xx -= ox * ox;
+            self.sum_yy -= oy * oy;
+            self.sum_xy -= ox * oy;
+        }
+        self.is_full()
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.window.len() == self.period
+    }
+
+    /// Pearson correlation over the window, clamped to `[-1, 1]`. Returns `0.0`
+    /// when either series is dispersion-free (variance below [`MOMENT_EPS`]) —
+    /// correlation is undefined there. Only meaningful once
+    /// [`is_full`](Self::is_full).
+    pub fn correlation(&self) -> Real {
+        let n = self.period as Real;
+        let mean_x = self.sum_x / n;
+        let mean_y = self.sum_y / n;
+        let var_x = (self.sum_xx / n - mean_x * mean_x).max(0.0);
+        let var_y = (self.sum_yy / n - mean_y * mean_y).max(0.0);
+        if var_x < MOMENT_EPS || var_y < MOMENT_EPS {
+            return 0.0;
+        }
+        let cov = self.sum_xy / n - mean_x * mean_y;
+        (cov / (var_x * var_y).sqrt()).clamp(-1.0, 1.0)
+    }
+
+    pub fn reset(&mut self) {
+        self.window.clear();
+        self.sum_x = 0.0;
+        self.sum_y = 0.0;
+        self.sum_xx = 0.0;
+        self.sum_yy = 0.0;
+        self.sum_xy = 0.0;
     }
 }
 

@@ -22,10 +22,11 @@ use serde::Deserialize;
 // resolve on the enum variant. The `Pick` root is the one exception because
 // it isn't a `ExprSpec` variant.
 use fugazi::indicators::{
-    Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Book, Cci, Component, Dmi,
-    DmiValue, Donchian, DonchianValue, Ema, GetBool, GetReal, GetStr, Hma, IfElse, Keltner,
-    KeltnerValue, Latch, Log, Macd, MacdValue, Mfi, Obv, Pick, Position, Resample, Rma, Rsi, Sar,
-    Sma, StdDev, StochRsi, Stochastic, TrueRange, Value, ValueStr, Vwap, WilliamsR, Wma,
+    Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Book, Cci, Component,
+    Correlation, Dmi, DmiValue, Donchian, DonchianValue, Ema, GetBool, GetReal, GetStr, Hma, IfElse,
+    Keltner, KeltnerValue, Kurtosis, Latch, Log, Macd, MacdValue, Mfi, Obv, Pick, Position, Resample,
+    Rma, Rsi, Sar, Skewness, Sma, StdDev, StochRsi, Stochastic, TrueRange, Value, ValueStr, Vwap,
+    WilliamsR, Wma, ZScore,
 };
 use fugazi::prelude::*;
 use fugazi::types::Snapshot;
@@ -265,6 +266,29 @@ pub enum ExprSpec {
     StdDev {
         #[serde(default = "default_source")]
         source: Box<ExprSpec>,
+        period: usize,
+    },
+    Skewness {
+        #[serde(default = "default_source")]
+        source: Box<ExprSpec>,
+        period: usize,
+    },
+    Kurtosis {
+        #[serde(default = "default_source")]
+        source: Box<ExprSpec>,
+        period: usize,
+    },
+    #[serde(rename = "zscore")]
+    ZScore {
+        #[serde(default = "default_source")]
+        source: Box<ExprSpec>,
+        period: usize,
+    },
+    /// Rolling Pearson correlation between two Real sources. Both operands are
+    /// required — there is no single natural default for a two-source stat.
+    Correlation {
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
         period: usize,
     },
     Cci {
@@ -807,6 +831,29 @@ enum ExprSpecRaw {
         source: Box<ExprSpec>,
         period: usize,
     },
+    Skewness {
+        #[serde(default = "default_source")]
+        source: Box<ExprSpec>,
+        period: usize,
+    },
+    Kurtosis {
+        #[serde(default = "default_source")]
+        source: Box<ExprSpec>,
+        period: usize,
+    },
+    #[serde(rename = "zscore")]
+    ZScore {
+        #[serde(default = "default_source")]
+        source: Box<ExprSpec>,
+        period: usize,
+    },
+    /// Rolling Pearson correlation between two Real sources. Both operands are
+    /// required — there is no single natural default for a two-source stat.
+    Correlation {
+        lhs: Box<ExprSpec>,
+        rhs: Box<ExprSpec>,
+        period: usize,
+    },
     Cci {
         #[serde(default = "default_source")]
         source: Box<ExprSpec>,
@@ -1239,6 +1286,10 @@ impl From<ExprSpecRaw> for ExprSpec {
             ExprSpecRaw::Hma { source, period } => ExprSpec::Hma { source, period },
             ExprSpecRaw::Rsi { source, period } => ExprSpec::Rsi { source, period },
             ExprSpecRaw::StdDev { source, period } => ExprSpec::StdDev { source, period },
+            ExprSpecRaw::Skewness { source, period } => ExprSpec::Skewness { source, period },
+            ExprSpecRaw::Kurtosis { source, period } => ExprSpec::Kurtosis { source, period },
+            ExprSpecRaw::ZScore { source, period } => ExprSpec::ZScore { source, period },
+            ExprSpecRaw::Correlation { lhs, rhs, period } => ExprSpec::Correlation { lhs, rhs, period },
             ExprSpecRaw::Cci { source, period } => ExprSpec::Cci { source, period },
             ExprSpecRaw::Stochastic { source, period } => ExprSpec::Stochastic { source, period },
             ExprSpecRaw::StochRsi { source, rsi_period, stoch_period } => ExprSpec::StochRsi { source, rsi_period, stoch_period },
@@ -1510,6 +1561,18 @@ impl ExprSpec {
             Rsi { source, period } => dyn_indicator::wrap(self::Rsi::new(real(source), *period)),
             StdDev { source, period } => {
                 dyn_indicator::wrap(self::StdDev::new(real(source), *period))
+            }
+            Skewness { source, period } => {
+                dyn_indicator::wrap(self::Skewness::new(real(source), *period))
+            }
+            Kurtosis { source, period } => {
+                dyn_indicator::wrap(self::Kurtosis::new(real(source), *period))
+            }
+            ZScore { source, period } => {
+                dyn_indicator::wrap(self::ZScore::new(real(source), *period))
+            }
+            Correlation { lhs, rhs, period } => {
+                dyn_indicator::wrap(self::Correlation::new(real(lhs), real(rhs), *period))
             }
             Cci { source, period } => dyn_indicator::wrap(self::Cci::new(real(source), *period)),
             Stochastic { source, period } => {

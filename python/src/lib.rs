@@ -41,13 +41,12 @@ use std::sync::{Arc, Mutex};
 use fugazi_core::Indicator;
 use fugazi_core::indicators::compare::{EqOp, GeOp, GtOp, LeOp, LtOp, NeOp, StrEqOp, StrNeOp};
 use fugazi_core::indicators::{
-    Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Close, CurrentBar,
-    Day, DayOfWeek, DayOfYear, Dmi, DmiValue, Donchian, DonchianValue, Ema, GetBool, GetReal,
-    GetStr, High, Hma, Hour, Identity, IfElse, IsWeekday, IsWeekend, Keltner, KeltnerValue, Latch,
-    Log,
-    Low, Macd, MacdValue, Median, Mfi, Minute, Month, Obv, Open, Pick, Quarter, Resample, Rma,
-    Rsi, Sar, Second, Sma, StdDev, Stochastic, TrueRange, Typical, UnixMillis, UnixSeconds, Value,
-    ValueStr, Volume, Vwap, WeekOfYear, WilliamsR, Wma, Year,
+    Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Close, Correlation,
+    CurrentBar, Day, DayOfWeek, DayOfYear, Dmi, DmiValue, Donchian, DonchianValue, Ema, GetBool,
+    GetReal, GetStr, High, Hma, Hour, Identity, IfElse, IsWeekday, IsWeekend, Keltner, KeltnerValue,
+    Kurtosis, Latch, Log, Low, Macd, MacdValue, Median, Mfi, Minute, Month, Obv, Open, Pick, Quarter,
+    Resample, Rma, Rsi, Sar, Second, Skewness, Sma, StdDev, Stochastic, TrueRange, Typical,
+    UnixMillis, UnixSeconds, Value, ValueStr, Volume, Vwap, WeekOfYear, WilliamsR, Wma, Year, ZScore,
 };
 use fugazi_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
 use fugazi_core::sources::{
@@ -3678,6 +3677,51 @@ src_period!(
     StdDev,
     "Rolling standard deviation of `source` over `period`."
 );
+// `skewness`/`kurtosis` name-collide with the `fugazi.metrics` functions of the
+// same name (which take a returns vector). These are the *indicator* forms
+// (a source + window); the Rust idents are suffixed to disambiguate, but the
+// Python names stay `skewness`/`kurtosis` — the metric twins live under
+// `fugazi.metrics.*`, so the two never clash from Python.
+/// Rolling population skewness (standardized 3rd moment) of `source` over `period`.
+#[pyfunction(name = "skewness")]
+fn skewness_indicator(source: PyRef<'_, PyIndicator>, period: usize) -> PyResult<PyIndicator> {
+    ensure_period(period)?;
+    Ok(PyIndicator::wrap(map_source!(source.src.clone(), |s| {
+        Skewness::new(s, period)
+    })))
+}
+/// Rolling population kurtosis (raw standardized 4th moment; ~3 for normal, not
+/// excess) of `source` over `period`.
+#[pyfunction(name = "kurtosis")]
+fn kurtosis_indicator(source: PyRef<'_, PyIndicator>, period: usize) -> PyResult<PyIndicator> {
+    ensure_period(period)?;
+    Ok(PyIndicator::wrap(map_source!(source.src.clone(), |s| {
+        Kurtosis::new(s, period)
+    })))
+}
+src_period!(
+    zscore,
+    ZScore,
+    "Rolling z-score of `source` over `period`: `(x - mean) / stddev`."
+);
+
+/// Rolling Pearson correlation between two Real sources over `period`, in
+/// `[-1, 1]`. Both operands must share an input domain (both candle-rooted,
+/// both value-rooted, or both snapshot-rooted). A dispersion-free window on
+/// either leg reads `0.0`.
+#[pyfunction]
+fn correlation(
+    lhs: PyRef<'_, PyIndicator>,
+    rhs: PyRef<'_, PyIndicator>,
+    period: usize,
+) -> PyResult<PyIndicator> {
+    ensure_period(period)?;
+    Ok(PyIndicator::wrap(combine_sources!(
+        lhs.src.clone(),
+        rhs.src.clone(),
+        |l, r| Correlation::new(l, r, period)
+    )?))
+}
 src_period!(
     stochastic,
     Stochastic,
@@ -5667,7 +5711,8 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     reg!(
         open, high, low, close, volume, typical, median, identity, value, value_str, sma, ema, rma,
-        wma, hma, rsi, stddev, stochastic, cci, log, atr, mfi, williams_r, obv, vwap, ad,
+        wma, hma, rsi, stddev, skewness_indicator, kurtosis_indicator, zscore, correlation,
+        stochastic, cci, log, atr, mfi, williams_r, obv, vwap, ad,
         true_range, adx, dmi, aroon, sar, macd, bollinger, keltner, donchian, stoch_rsi, resample,
         latch, unstable, if_else, get, get_real, get_bool, get_str, str_eq, str_ne, fetch,
         // Calendar accessors + weekday/weekend signals; consume `atom.time`.
