@@ -271,6 +271,11 @@ struct CheckOverlayArgs {
     #[arg(value_name = "SPEC", required = true, num_args = 1..)]
     overlays: Vec<Source>,
 
+    /// Resolve `!param` placeholders inside the overlay expressions, same as
+    /// `get --params`: `,`-separated `NAME=value` terms and `@file.yml`.
+    #[arg(short, long = "params", value_name = "SPEC")]
+    params: Vec<params::ParamSpec>,
+
     /// Suppress the "ok" message on success. Errors still print, and the exit
     /// code (0 ok, non-zero on failure) is unchanged.
     #[arg(short, long)]
@@ -528,7 +533,8 @@ fn check_overlay(args: CheckOverlayArgs) -> Result<()> {
     // typed-position mismatches, `period: 0` in a constructor's `assert!`, …)
     // is a `fugazi get` / `fugazi run` concern, where the atom stream's real
     // schema is available.
-    let overlays = overlay::parse_specs(&args.overlays)?;
+    let param_table = params::table(&args.params)?;
+    let overlays = overlay::parse_specs(&args.overlays, &param_table)?;
     let columns = overlay::column_names(&overlays);
 
     if !args.quiet {

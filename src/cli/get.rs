@@ -44,6 +44,7 @@ use crate::dyn_indicator::{DynIndicator, DynValue};
 use crate::csv_source::{CsvBar, CsvSource};
 use crate::input::Source as InputSource;
 use crate::overlay::{self, Overlay};
+use crate::params;
 use crate::style;
 
 /// The remote candle providers this CLI can fetch from. Kept as `(name,
@@ -280,6 +281,15 @@ pub struct GetArgs {
     #[arg(short = 'x', long = "overlay", value_name = "SPEC")]
     overlay: Vec<InputSource>,
 
+    /// Resolve `!param` placeholders inside `--overlay` expressions. Same shape
+    /// as `run --params`: `,`-separated `NAME=value` terms and `@file.yml`
+    /// mappings, repeatable, later terms winning. So
+    /// `--params FAST=20 -x 'ma=!sma { period: !param FAST }'` parameterizes an
+    /// overlay exactly as it does a strategy document. Ignored by candle
+    /// providers that define no overlays.
+    #[arg(short, long = "params", value_name = "SPEC")]
+    params: Vec<params::ParamSpec>,
+
     /// Emit the warm-up bars instead of dropping them. Overlay columns are
     /// blank on rows where the applicable overlays have not yet warmed up.
     #[arg(long = "keep-unstable")]
@@ -344,7 +354,8 @@ fn run_candles(
     since_specified: bool,
     rt: &tokio::runtime::Runtime,
 ) -> Result<()> {
-    let overlays = overlay::parse_specs(&args.overlay)?;
+    let param_table = params::table(&args.params)?;
+    let overlays = overlay::parse_specs(&args.overlay, &param_table)?;
     let overlay_columns = overlay::column_names(&overlays);
 
     if !args.quiet {

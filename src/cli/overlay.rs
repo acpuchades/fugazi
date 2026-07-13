@@ -20,7 +20,9 @@
 //! rows produced by other groups render blanks in that column. Each source
 //! expression is the same [`ExprSpec`] YAML surface the strategy parser
 //! accepts (`close`, `!sma { period: N }`, `!add { lhs, rhs }`, …) — no separate
-//! grammar.
+//! grammar. `!param { key }` placeholders are resolved from `get --params`
+//! before the typed parse, so `--params FAST=20 -x 'ma=!sma { period: !param FAST }'`
+//! parameterizes an overlay just like a strategy document.
 //!
 //! To keep the first output bar's overlays already warmed up, `fugazi get` fetches
 //! [`stable_period_for`] extra leading bars before `--since` for each
@@ -29,6 +31,8 @@
 //! `--keep-unstable` is set). The bound comes straight from
 //! [`Indicator::stable_period`](fugazi::Indicator::stable_period), so it stays
 //! correct as new indicators enter the library.
+
+use std::collections::HashMap;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value as Json;
@@ -40,6 +44,7 @@ use fugazi::sources::Interval;
 use crate::dyn_indicator::DynIndicator;
 use crate::calendar::{parse_interval, parse_scope_parts};
 use crate::input::{self, Source};
+use crate::params;
 use crate::spec::ExprSpec;
 
 /// Which `(symbol, interval)` fetches an overlay applies to. `None` on either
@@ -97,10 +102,16 @@ impl Overlay {
 /// so a later scoped overlay can override an earlier global one for its matching
 /// groups while other groups keep the global fallback (see [`active_for`]).
 /// The base OHLCV column names are reserved.
-pub fn parse_specs(sources: &[Source]) -> Result<Vec<Overlay>> {
+///
+/// `params` resolves `!param { key }` placeholders inside each overlay
+/// expression — the same substitution pass the strategy spec applies (see
+/// [`crate::params`]) — so `get --params FAST=20 -x 'ma=!sma { period: !param FAST }'`
+/// works exactly like it does on a strategy document. The pass runs on the
+/// untyped value tree before it deserializes into an [`ExprSpec`].
+pub fn parse_specs(sources: &[Source], params: &HashMap<String, Json>) -> Result<Vec<Overlay>> {
     let mut out: Vec<Overlay> = Vec::new();
     for src in sources {
-        let batch = parse_one(src).with_context(|| format!("--overlay {}", src.label()))?;
+        let batch = parse_one(src, params).with_context(|| format!("--overlay {}", src.label()))?;
         for overlay in batch {
             reject_reserved_name(&overlay.name)?;
             out.push(overlay);
@@ -173,7 +184,7 @@ pub fn stable_period_for(
 // Parsing
 // ---------------------------------------------------------------------------
 
-fn parse_one(source: &Source) -> Result<Vec<Overlay>> {
+fn parse_one(source: &Source, params: &HashMap<String, Json>) -> Result<Vec<Overlay>> {
     let text = source.read()?;
     match source {
         Source::File(_) => {
@@ -182,15 +193,15 @@ fn parse_one(source: &Source) -> Result<Vec<Overlay>> {
             // enum has already collapsed `@path` into a file, so a file source
             // arrives here with no prefix. Scope, if any, is handled in
             // `parse_argument` before the `Source` is built.
-            parse_file(&text, OverlayScope::default())
+            parse_file(&text, OverlayScope::default(), params)
         }
-        Source::Inline(text) => parse_argument(text),
+        Source::Inline(text) => parse_argument(text, params),
     }
 }
 
 /// Parse one whole `--overlay` argument: optional `SYMBOL[FREQ]:` scope prefix
 /// followed by either inline pairs or `@file.yml`.
-fn parse_argument(text: &str) -> Result<Vec<Overlay>> {
+fn parse_argument(text: &str, params: &HashMap<String, Json>) -> Result<Vec<Overlay>> {
     let (scope, body) = split_scope(text)?;
     let body = body.trim();
     if body.is_empty() {
@@ -203,9 +214,9 @@ fn parse_argument(text: &str) -> Result<Vec<Overlay>> {
         }
         let file_text = std::fs::read_to_string(path)
             .with_context(|| format!("reading overlay file {path:?}"))?;
-        parse_file(&file_text, scope)
+        parse_file(&file_text, scope, params)
     } else {
-        parse_inline(body, scope)
+        parse_inline(body, scope, params)
     }
 }
 
@@ -249,7 +260,11 @@ fn parse_scope(text: &str) -> Result<OverlayScope> {
 
 /// Parse the inline body: `col=expr[,col=expr,...]`. All overlays parsed here
 /// share the same (possibly-empty) scope.
-fn parse_inline(text: &str, scope: OverlayScope) -> Result<Vec<Overlay>> {
+fn parse_inline(
+    text: &str,
+    scope: OverlayScope,
+    params: &HashMap<String, Json>,
+) -> Result<Vec<Overlay>> {
     let mut out = Vec::new();
     for term in split_top_commas(text)? {
         let term = term.trim();
@@ -263,7 +278,7 @@ fn parse_inline(text: &str, scope: OverlayScope) -> Result<Vec<Overlay>> {
         if name.is_empty() {
             bail!("overlay term {term:?}: empty column name");
         }
-        let spec = parse_expr(expr).with_context(|| format!("overlay {name:?}"))?;
+        let spec = parse_expr(expr, params).with_context(|| format!("overlay {name:?}"))?;
         out.push(Overlay {
             name: name.to_string(),
             spec,
@@ -278,8 +293,13 @@ fn parse_inline(text: &str, scope: OverlayScope) -> Result<Vec<Overlay>> {
 
 /// Parse the file form: a YAML mapping of column name → source expression. All
 /// entries share the argument's scope.
-fn parse_file(text: &str, scope: OverlayScope) -> Result<Vec<Overlay>> {
+fn parse_file(
+    text: &str,
+    scope: OverlayScope,
+    params: &HashMap<String, Json>,
+) -> Result<Vec<Overlay>> {
     let value = input::parse_value(text).context("parsing overlay YAML")?;
+    let value = params::substitute(value, params).context("overlay `!param` substitution")?;
     let Json::Object(map) = value else {
         bail!("overlay file must be a mapping of column names to source expressions");
     };
@@ -303,12 +323,13 @@ fn parse_file(text: &str, scope: OverlayScope) -> Result<Vec<Overlay>> {
 }
 
 /// Parse a bare source expression (the RHS of `col=expr`) into a [`ExprSpec`].
-fn parse_expr(text: &str) -> Result<ExprSpec> {
+fn parse_expr(text: &str, params: &HashMap<String, Json>) -> Result<ExprSpec> {
     let expr = text.trim();
     if expr.is_empty() {
         bail!("empty source expression");
     }
     let value = input::parse_value(expr)?;
+    let value = params::substitute(value, params).context("overlay `!param` substitution")?;
     Ok(serde_json::from_value(value)?)
 }
 
@@ -356,6 +377,12 @@ fn reject_reserved_name(name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Most tests don't exercise `!param`, so wrap the two-arg `parse_specs`
+    /// with an empty table — the bare name shadows the `super::*` glob import.
+    fn parse_specs(sources: &[Source]) -> Result<Vec<Overlay>> {
+        super::parse_specs(sources, &HashMap::new())
+    }
 
     #[test]
     fn parses_inline_multiple_columns_no_scope() {
@@ -557,5 +584,50 @@ mod tests {
         let overlays = parse_specs(std::slice::from_ref(&src)).unwrap();
         let cols = column_names(&overlays);
         assert_eq!(stable_period_for(&overlays, &cols, "X", Interval::Day(1), &Schema::empty()), 14);
+    }
+
+    #[test]
+    fn param_substitutes_in_inline_overlay() {
+        // `!param FAST` inside an inline overlay expression resolves from the
+        // `--params` table before the typed `ExprSpec` parse, exactly as it
+        // does in a strategy document.
+        let src = Source::Inline("ma=!sma { period: !param FAST }".to_string());
+        let table = HashMap::from([("FAST".to_string(), Json::from(20))]);
+        let overlays = super::parse_specs(std::slice::from_ref(&src), &table).unwrap();
+        assert_eq!(overlays.len(), 1);
+        assert!(matches!(
+            overlays[0].spec,
+            ExprSpec::Sma { period: 20, .. }
+        ));
+    }
+
+    #[test]
+    fn param_default_applies_when_unset() {
+        let src = Source::Inline("ma=!sma { period: !param { key: FAST, default: 14 } }".to_string());
+        let overlays = super::parse_specs(std::slice::from_ref(&src), &HashMap::new()).unwrap();
+        assert!(matches!(
+            overlays[0].spec,
+            ExprSpec::Sma { period: 14, .. }
+        ));
+    }
+
+    #[test]
+    fn missing_param_without_default_errors() {
+        let src = Source::Inline("ma=!sma { period: !param FAST }".to_string());
+        let err = super::parse_specs(std::slice::from_ref(&src), &HashMap::new()).unwrap_err();
+        assert!(format!("{err:#}").contains("FAST"));
+    }
+
+    #[test]
+    fn param_substitutes_in_file_overlay() {
+        let path = std::env::temp_dir().join("fugazi_overlay_param_test.yml");
+        std::fs::write(&path, "ma: !sma { period: !param FAST }\n").unwrap();
+        let src = Source::Inline(format!("@{}", path.display()));
+        let table = HashMap::from([("FAST".to_string(), Json::from(30))]);
+        let overlays = super::parse_specs(std::slice::from_ref(&src), &table).unwrap();
+        assert!(matches!(
+            overlays[0].spec,
+            ExprSpec::Sma { period: 30, .. }
+        ));
     }
 }
