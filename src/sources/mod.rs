@@ -52,6 +52,7 @@
 //! ```
 
 pub mod binance;
+pub mod coingecko;
 pub mod yahoo;
 
 use std::fmt;
@@ -62,6 +63,7 @@ use crate::types::{Atom, OverlayInfo, Schema};
 pub use crate::types::Timestamp;
 
 pub use binance::Binance;
+pub use coingecko::CoinGecko;
 pub use yahoo::Yahoo;
 
 /// The shared [`Schema`] carried by an atom stream, or [`Schema::empty()`] if
