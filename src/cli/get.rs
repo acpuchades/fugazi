@@ -36,8 +36,8 @@ use tokio::task::JoinSet;
 
 use fugazi::prelude::*;
 use fugazi::sources::{
-    self, Binance, CandleSource, Interval, Timestamp, Yahoo, binance::binance_schema,
-    yahoo::yahoo_schema,
+    self, Binance, CandleSource, CoinGecko, Interval, OverlayRow, OverlaySource, Timestamp, Yahoo,
+    binance::binance_schema, yahoo::yahoo_schema,
 };
 
 use crate::dyn_indicator::{DynIndicator, DynValue};
@@ -55,6 +55,11 @@ pub(crate) const KNOWN_PROVIDERS: &[(&str, &str)] = &[
         "Binance spot klines endpoint (BTC/ETH/... vs. USDT/EUR/...)",
     ),
     (
+        "coingecko",
+        "CoinGecko market cap / volume / supply — overlay columns only, no OHLCV \
+         (symbols are coin ids: `bitcoin`, not `BTC`)",
+    ),
+    (
         "csv",
         "Local OHLCV CSV — spec is `csv:PATH` (no `[freq]` bracket)",
     ),
@@ -64,16 +69,93 @@ pub(crate) const KNOWN_PROVIDERS: &[(&str, &str)] = &[
     ),
 ];
 
-/// One `SYMBOL[freq,freq,...]` entry in the CLI spec.
+/// What a provider yields — the two [`fugazi::sources`] traits, as seen by the
+/// CLI.
+///
+/// The distinction is load-bearing rather than cosmetic. An overlay provider has
+/// no OHLCV, so its rows must not be written through the candle CSV writer:
+/// that writer emits a fixed `open,high,low,close,volume` block, and a
+/// synthesised zero-candle in those columns would silently *overwrite* the real
+/// prices when the file is later joined into a `--series` dataframe (which
+/// merges on `(symbol, time)` and lets the later file win each column). Hence
+/// [`resolve_mode`] refuses to mix the two kinds in one invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderKind {
+    /// Implements `CandleSource` — yields OHLCV bars. Also covers `csv:`.
+    Candles,
+    /// Implements `OverlaySource` — yields timestamped side-channel columns.
+    Overlays,
+}
+
+fn provider_kind(provider: &str) -> ProviderKind {
+    match provider {
+        "coingecko" => ProviderKind::Overlays,
+        _ => ProviderKind::Candles,
+    }
+}
+
+/// One `[OUTPUT=]QUERY[freq,freq,...]` entry in the CLI spec.
+///
+/// The optional `OUTPUT=` prefix decouples the name a row is *emitted* under
+/// from the identifier the provider is *queried* with. That matters whenever a
+/// provider's vocabulary differs from the one your price series uses —
+/// CoinGecko keys on coin ids (`bitcoin`) while a Binance series is keyed on
+/// pairs (`BTCUSDT`), and the `--series` join is an exact string match on
+/// `symbol`. `coingecko:BTCUSDT=bitcoin[1d]` fetches `bitcoin` and writes
+/// `BTCUSDT`, so the two files line up.
+///
+/// With no `=`, output and query are the same string (the previous behaviour).
 #[derive(Debug, Clone, PartialEq)]
 struct SymbolSpec {
-    symbol: String,
-    intervals: Vec<Interval>,
+    /// The value written to the `symbol` column — the `--series` join key.
+    output: String,
+    /// The identifier sent to the provider.
+    query: String,
+    freqs: Vec<FreqSpec>,
+}
+
+/// One `[OFREQ=]FREQ` entry inside a symbol's bracket — the cadence twin of
+/// [`SymbolSpec`]'s `OUTPUT=QUERY`, and the same left-is-emitted /
+/// right-is-fetched rule.
+///
+/// The remap is for **relabelling a cadence, not changing one**: the two sides
+/// normally denote the same duration under a different name, so that the `freq`
+/// column agrees with whatever the series you intend to join against uses.
+/// `binance:BTCUSDT[1d=24h]` fetches 24-hour bars and tags them `1d`;
+/// `[1h=60m]` is the same idea.
+///
+/// The **output side is an opaque label, not an interval** — `[FOO=1d]` is
+/// legal and writes `freq=FOO`. Only the fetched side has to be a real interval
+/// token, because only it is sent to a provider. This is safe for the workflow
+/// that matters: the `--series` loader treats `freq` as a reserved passthrough
+/// column and never parses it, so an arbitrary label joins fine. (The one
+/// consumer that *does* parse it back is `get csv:PATH`, which reads a file's
+/// `freq` cells into `Interval`s — a file labelled `FOO` cannot be re-read
+/// through that path.)
+///
+/// **It relabels; it does not resample.** Every fetched row is emitted with only
+/// its `freq` cell rewritten. So if the two sides denote *different* durations
+/// (`[4h=1h]`), the extra rows land on timestamps no 4-hour bar-open covers,
+/// they find no price bar in the join, and `run` rejects them outright
+/// (`missing required column 'open'`). That is the intended failure — this is
+/// not a downsampler.
+///
+/// A provider's *own* token spelling (Binance's `1M`, a hypothetical `1hr`) is
+/// not this mechanism's job either — that mapping lives inside each provider,
+/// which translates an [`Interval`] into its native vocabulary.
+#[derive(Debug, Clone, PartialEq)]
+struct FreqSpec {
+    /// Written verbatim to the `freq` column. Any string.
+    output: String,
+    /// The cadence actually fetched (and chunked, and paginated). Also what `-x`
+    /// scope prefixes match against, since a scope names a real cadence.
+    query: Interval,
 }
 
 /// A parsed CLI `get` spec.
 ///
-/// Remote providers share the same `<provider>:<symbol>[<freq>,...],<symbol>[<freq>,...]`
+/// Remote providers share the same
+/// `<provider>:[OUTPUT=]<query>[<freq>,...],[OUTPUT=]<query>[<freq>,...]`
 /// grammar; `csv:PATH` is its own variant, since the file already carries
 /// symbol+freq per row and the bracket doesn't apply.
 #[derive(Debug, Clone, PartialEq)]
@@ -87,12 +169,67 @@ enum FetchSpec {
     },
 }
 
+impl FetchSpec {
+    fn kind(&self) -> ProviderKind {
+        match self {
+            FetchSpec::Remote { provider, .. } => provider_kind(provider),
+            FetchSpec::Csv { .. } => ProviderKind::Candles,
+        }
+    }
+}
+
+/// Decide which pipeline this invocation runs, rejecting a mix.
+///
+/// Candle and overlay providers write different CSV shapes into the single
+/// `-o` file, and merging them there would mean inventing OHLCV for the overlay
+/// rows — see [`ProviderKind`]. Two `get` calls and two `--series` flags do the
+/// job correctly, so that is what the error tells the user to do.
+fn resolve_mode(specs: &[FetchSpec]) -> Result<ProviderKind> {
+    let overlay = specs.iter().any(|s| s.kind() == ProviderKind::Overlays);
+    let candle = specs.iter().any(|s| s.kind() == ProviderKind::Candles);
+    if overlay && candle {
+        bail!(
+            "cannot mix candle providers and overlay-only providers in one `get` — they write \
+             different CSV shapes, and giving the overlay rows a synthetic OHLCV block would \
+             zero out your real prices when the files are joined.\n\n\
+             Fetch them separately and let `run` join the two on (symbol, time):\n\
+             \x20 fugazi get binance:BTCUSDT[1d]           -o prices.csv\n\
+             \x20 fugazi get coingecko:BTCUSDT=bitcoin[1d] -o caps.csv\n\
+             \x20 fugazi run @strategy.yml -s @prices.csv -s @caps.csv -o out/"
+        );
+    }
+    Ok(if overlay {
+        ProviderKind::Overlays
+    } else {
+        ProviderKind::Candles
+    })
+}
+
 #[derive(Args, Debug)]
 pub struct GetArgs {
-    /// Fetch specs: `<provider>:<symbol>[<freq>,<freq>,...](,<symbol>[<freq>,...])*`,
-    /// e.g. `binance:BTCUSDT[1d,1h],ETHUSDT[1d]`. Frequency tokens are the
-    /// familiar `1m`/`5m`/`1h`/`4h`/`1d`/`1w`/`1M`. All series download in
-    /// parallel.
+    /// Fetch specs: `<provider>:[OUT=]<symbol>[[OFREQ=]<freq>,...](,...)*`, e.g.
+    /// `binance:BTCUSDT[1d,1h],ETHUSDT[1d]`. Frequency tokens are the familiar
+    /// `1m`/`5m`/`1h`/`4h`/`1d`/`1w`/`1M`. All series download in parallel.
+    ///
+    /// Both the symbol and each freq accept an optional `EMITTED=FETCHED`
+    /// remap — the left side is what gets written to the CSV, the right side is
+    /// what the provider is asked for. Omit it and the two are the same (the
+    /// plain form above). Use it when a provider's vocabulary differs from the
+    /// price series you intend to join against, since `run` joins on an exact
+    /// `(symbol, time)` match:
+    ///
+    /// * `coingecko:BTCUSDT=bitcoin[1d]` — fetch the coin id `bitcoin`, emit
+    ///   `symbol=BTCUSDT`.
+    /// * `binance:BTCUSDT[1d=24h]` — fetch 24-hour bars, tag them `freq=1d`.
+    ///
+    /// The freq form *relabels* a cadence; it does not resample one, so the two
+    /// sides should denote the same duration under a different name (`1d=24h`).
+    /// Only the fetched side must be a real interval token — the emitted label
+    /// is free-form (`[FOO=1d]` writes `freq=FOO`).
+    ///
+    /// Overlay-only providers (`coingecko`) emit side-channel columns and no
+    /// OHLCV, and cannot be mixed with candle providers in one invocation —
+    /// fetch each to its own file and pass both to `run -s`.
     #[arg(value_name = "SPEC", required = true, num_args = 1..)]
     specs: Vec<String>,
 
@@ -159,6 +296,7 @@ pub fn run(args: GetArgs) -> Result<()> {
         .iter()
         .map(|s| parse_spec(s).with_context(|| format!("parsing spec {s:?}")))
         .collect::<Result<_>>()?;
+    let mode = resolve_mode(&fetch_specs)?;
     let now = OffsetDateTime::now_utc();
     let since_specified = args.since.is_some();
     let since_raw = args.since.as_deref().unwrap_or(DEFAULT_SINCE);
@@ -173,13 +311,6 @@ pub fn run(args: GetArgs) -> Result<()> {
     let since_ts = Timestamp::from_datetime(since);
     let until_ts = Timestamp::from_datetime(until);
 
-    let overlays = overlay::parse_specs(&args.overlay)?;
-    let overlay_columns = overlay::column_names(&overlays);
-
-    if !args.quiet {
-        style::print_header("get", "fetch OHLCV candles from remote providers");
-    }
-
     if let Some(parent) = args.output.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -191,6 +322,29 @@ pub fn run(args: GetArgs) -> Result<()> {
         .enable_all()
         .build()
         .context("building tokio runtime")?;
+
+    match mode {
+        ProviderKind::Candles => run_candles(args, fetch_specs, since_ts, until_ts, since_specified, &rt),
+        ProviderKind::Overlays => run_overlay_columns(args, fetch_specs, since_ts, until_ts, &rt),
+    }
+}
+
+/// The OHLCV pipeline: fetch candles, compute `-x` overlays over them, write
+/// `symbol,freq,time,open,high,low,close,volume,...`.
+fn run_candles(
+    args: GetArgs,
+    fetch_specs: Vec<FetchSpec>,
+    since_ts: Timestamp,
+    until_ts: Timestamp,
+    since_specified: bool,
+    rt: &tokio::runtime::Runtime,
+) -> Result<()> {
+    let overlays = overlay::parse_specs(&args.overlay)?;
+    let overlay_columns = overlay::column_names(&overlays);
+
+    if !args.quiet {
+        style::print_header("get", "fetch OHLCV candles from remote providers");
+    }
 
     // Expand each `FetchSpec` into one `Series` per `(symbol, interval)` — the
     // unit of parallelism. Per-series overlay warm-up is folded in here so
@@ -213,18 +367,23 @@ pub fn run(args: GetArgs) -> Result<()> {
                     _ => Schema::empty(),
                 };
                 for sym in symbols {
-                    for &interval in &sym.intervals {
+                    for freq in &sym.freqs {
+                        // `-x` scopes match the symbol the user sees, but the
+                        // *fetched* cadence: a scope's `[FREQ]` names a real
+                        // interval, and the emitted label may not be one.
                         let stable = overlay::stable_period_for(
                             &overlays,
                             &overlay_columns,
-                            &sym.symbol,
-                            interval,
+                            &sym.output,
+                            freq.query,
                             &schema,
                         );
                         series.push(Series {
                             provider: provider.clone(),
-                            symbol: sym.symbol.clone(),
-                            interval,
+                            output: sym.output.clone(),
+                            query: sym.query.clone(),
+                            interval: freq.query,
+                            out_freq: freq.output.clone(),
                             stable,
                             csv_bars: None,
                             csv_path: None,
@@ -261,10 +420,14 @@ pub fn run(args: GetArgs) -> Result<()> {
                         interval,
                         &file_schema,
                     );
+                    // A `csv:` file already carries its own `symbol` and `freq`
+                    // columns, so there is nothing to remap: emitted == fetched.
                     series.push(Series {
                         provider: "csv".into(),
-                        symbol: sym,
+                        output: sym.clone(),
+                        query: sym,
                         interval,
+                        out_freq: interval.as_token(),
                         stable,
                         csv_bars: Some(shared.clone()),
                         csv_path: Some(path.clone()),
@@ -310,6 +473,227 @@ pub fn run(args: GetArgs) -> Result<()> {
     Ok(())
 }
 
+/// The overlay-only pipeline: fetch side-channel columns from an
+/// [`OverlaySource`](fugazi::sources::OverlaySource) and write
+/// `symbol,freq,time,<provider columns>` — **no OHLCV block**, so the file is
+/// safe to `--series`-join on top of a price series without clobbering it (see
+/// [`ProviderKind`]).
+///
+/// `-x/--overlay` is rejected here rather than supported: a computed overlay is
+/// an indicator chain over `Atom`s, and there is no candle to build one from.
+/// Compute derived columns downstream, in the strategy spec, where the two
+/// files have been joined and the price bars actually exist.
+fn run_overlay_columns(
+    args: GetArgs,
+    fetch_specs: Vec<FetchSpec>,
+    since_ts: Timestamp,
+    until_ts: Timestamp,
+    rt: &tokio::runtime::Runtime,
+) -> Result<()> {
+    if !args.overlay.is_empty() {
+        bail!(
+            "`-x/--overlay` computes indicator columns over OHLCV bars, and an overlay-only \
+             provider has none. Fetch the columns here, then compute derived values in the \
+             strategy spec (`!get {{ key: market_cap }}`) once `run` has joined this file onto \
+             a price series."
+        );
+    }
+
+    if !args.quiet {
+        style::print_header("get", "fetch overlay columns from remote providers");
+    }
+
+    // One `Series` per (symbol, interval). `stable` is 0: there are no computed
+    // overlays to warm up, so no leading bars need pulling in ahead of `since`.
+    let mut series: Vec<Series> = Vec::new();
+    let mut n_symbols: usize = 0;
+    for spec in &fetch_specs {
+        let FetchSpec::Remote { provider, symbols } = spec else {
+            unreachable!("resolve_mode routes `csv:` specs to the candle pipeline");
+        };
+        n_symbols += symbols.len();
+        for sym in symbols {
+            for freq in &sym.freqs {
+                series.push(Series {
+                    provider: provider.clone(),
+                    output: sym.output.clone(),
+                    query: sym.query.clone(),
+                    interval: freq.query,
+                    out_freq: freq.output.clone(),
+                    stable: 0,
+                    csv_bars: None,
+                    csv_path: None,
+                });
+            }
+        }
+    }
+
+    let (multi, bars) = build_progress_bars(&series, since_ts, until_ts, false, args.quiet);
+    let result = rt.block_on(fetch_all_overlays(series.clone(), since_ts, until_ts, bars));
+    let _ = multi.clear();
+    let mut rows = result?;
+
+    // Same output ordering as the candle writer: ascending by time, ties broken
+    // by symbol then freq.
+    rows.sort_by(|a, b| {
+        (a.time, a.symbol.as_str(), a.freq.as_str())
+            .cmp(&(b.time, b.symbol.as_str(), b.freq.as_str()))
+    });
+
+    write_overlays_csv(&args.output, &rows)
+        .with_context(|| format!("writing {}", args.output.display()))?;
+
+    if !args.quiet {
+        println!(
+            "{}: wrote {} rows across {} symbol{}/{} interval series",
+            args.output.display(),
+            rows.len(),
+            n_symbols,
+            if n_symbols == 1 { "" } else { "s" },
+            series.len(),
+        );
+    }
+    Ok(())
+}
+
+/// One overlay row of output: the emitted symbol + interval it belongs to, its
+/// bar-open time, and the provider's per-bar values. The candle-less twin of
+/// [`Row`].
+struct OverlayOut {
+    symbol: String,
+    /// The `freq` cell, verbatim — an opaque label, not necessarily an interval
+    /// token. See [`FreqSpec`].
+    freq: String,
+    time: Timestamp,
+    overlays: OverlayInfo,
+}
+
+/// Download every overlay series concurrently, one task per series.
+async fn fetch_all_overlays(
+    series: Vec<Series>,
+    since: Timestamp,
+    until: Timestamp,
+    bars: Vec<ProgressBar>,
+) -> Result<Vec<OverlayOut>> {
+    let mut tasks = JoinSet::new();
+    for (s, bar) in series.into_iter().zip(bars) {
+        tasks.spawn(fetch_overlay_series(s, since, until, bar));
+    }
+    let mut all: Vec<OverlayOut> = Vec::new();
+    while let Some(joined) = tasks.join_next().await {
+        all.extend(joined.context("fetch task panicked")??);
+    }
+    Ok(all)
+}
+
+/// Fetch one overlay series chunk-by-chunk, advancing its progress bar. Rows are
+/// tagged with the series' *output* symbol — the `--series` join key.
+async fn fetch_overlay_series(
+    series: Series,
+    since: Timestamp,
+    until: Timestamp,
+    bar: ProgressBar,
+) -> Result<Vec<OverlayOut>> {
+    let label = series.label();
+    let mut rows: Vec<OverlayOut> = Vec::new();
+    let mut first = true;
+    for (chunk_since, chunk_until) in chunk_bounds(since, until, series.interval) {
+        if !first {
+            tokio::time::sleep(CHUNK_DELAY).await;
+        }
+        first = false;
+        bar.set_message(chunk_since.to_datetime().date().to_string());
+        let fetched = fetch_overlays(
+            &series.provider,
+            &series.query,
+            series.interval,
+            chunk_since,
+            chunk_until,
+        )
+        .await
+        .with_context(|| format!("fetching {label}"))?;
+        rows.extend(fetched.into_iter().map(|r| OverlayOut {
+            symbol: series.output.clone(),
+            freq: series.out_freq.clone(),
+            time: r.time,
+            overlays: r.overlays,
+        }));
+        bar.inc(1);
+    }
+    bar.finish_with_message("done");
+    Ok(rows)
+}
+
+/// Dispatch on the provider name to a concrete [`OverlaySource`](fugazi::sources::OverlaySource)
+/// implementation. The overlay-side twin of [`fetch`].
+async fn fetch_overlays(
+    provider: &str,
+    symbol: &str,
+    interval: Interval,
+    since: Timestamp,
+    until: Timestamp,
+) -> Result<Vec<OverlayRow>> {
+    match provider {
+        "coingecko" => Ok(CoinGecko::new()
+            .overlays(symbol, interval, since, Some(until))
+            .await?),
+        other => bail!(unknown_provider_error(other)),
+    }
+}
+
+/// Write overlay rows as `symbol,freq,time,<column>...`, `,`-delimited.
+///
+/// Columns are the union of every row's schema keys in first-appearance order
+/// (all rows from one provider share one schema, so in practice this is just
+/// that provider's column list). **There is deliberately no OHLCV block**: this
+/// file is meant to be `--series`-joined on top of a price series, and the join
+/// lets the later file win each column it carries — an `open,high,low,close`
+/// block full of synthesised zeroes here would silently overwrite the real
+/// prices there. A missing cell renders blank, matching the candle writer.
+fn write_overlays_csv(path: &Path, rows: &[OverlayOut]) -> Result<()> {
+    let mut wtr = csv::WriterBuilder::new()
+        .delimiter(b',')
+        .from_path(path)
+        .with_context(|| format!("creating {}", path.display()))?;
+
+    let mut columns: Vec<String> = Vec::new();
+    for r in rows {
+        for name in r.overlays.schema().keys() {
+            if !columns.iter().any(|c| c == name) {
+                columns.push(name.to_string());
+            }
+        }
+    }
+
+    let mut header: Vec<&str> = vec!["symbol", "freq", "time"];
+    header.extend(columns.iter().map(String::as_str));
+    wtr.write_record(&header)?;
+
+    for row in rows {
+        let time = row
+            .time
+            .to_datetime()
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| row.time.0.to_string());
+        let mut record: Vec<String> = vec![row.symbol.clone(), row.freq.clone(), time];
+        for name in &columns {
+            let cell = row
+                .overlays
+                .get_by_key(name)
+                .map(format_overlay_value)
+                // A `Real` cell can be NaN (the provider had no value for this
+                // bar); render it blank rather than as the literal "NaN", so the
+                // `--series` loader reads it back as a missing cell.
+                .filter(|s| s != "NaN")
+                .unwrap_or_default();
+            record.push(cell);
+        }
+        wtr.write_record(&record)?;
+    }
+    wtr.flush()?;
+    Ok(())
+}
+
 /// One row of output: which symbol + interval it came from, the timed candle,
 /// the per-`-x`-column overlay values (aligned with the CLI's overlay column
 /// layout — `None` for a column no applicable overlay covers this row's
@@ -317,7 +701,8 @@ pub fn run(args: GetArgs) -> Result<()> {
 /// non-OHLCV cells classified as `Real`/`Bool`/`Str`).
 struct Row {
     symbol: String,
-    interval: Interval,
+    /// The `freq` cell, verbatim. See [`FreqSpec`].
+    freq: String,
     /// Fully-populated bar: OHLCV, bar-open `time`, and the source-provided
     /// overlay side channel (Binance's `quote_volume` / `n_trades` / …;
     /// Yahoo's `adj_close`; or the CSV file's non-OHLCV columns).
@@ -338,8 +723,19 @@ struct Row {
 #[derive(Clone)]
 struct Series {
     provider: String,
-    symbol: String,
+    /// The symbol this series' rows are *written* under — the `--series` join
+    /// key. Equal to `query` unless the spec used the `OUTPUT=QUERY` form.
+    output: String,
+    /// The identifier this series is *fetched* with (a CoinGecko coin id, a
+    /// Binance pair, …). See [`SymbolSpec`].
+    query: String,
+    /// The cadence actually fetched — what chunking, pagination, the provider
+    /// call, and `-x` scope matching all use.
     interval: Interval,
+    /// The label written to the `freq` column, verbatim. Equal to
+    /// `interval.as_token()` unless the spec used the `OFREQ=FREQ` form; may be
+    /// any string. See [`FreqSpec`].
+    out_freq: String,
     stable: usize,
     /// The file's pre-read bar list, shared between every series that reads
     /// from the same file. `None` for remote-provider series.
@@ -351,20 +747,27 @@ struct Series {
 impl Series {
     fn label(&self) -> String {
         if let Some(path) = &self.csv_path {
-            format!(
+            return format!(
                 "csv:{}[{}:{}]",
                 path.display(),
-                self.symbol,
+                self.output,
                 self.interval.as_token()
-            )
-        } else {
-            format!(
-                "{}:{}[{}]",
-                self.provider,
-                self.symbol,
-                self.interval.as_token()
-            )
+            );
         }
+        // Echo each mapping when there is one, so the progress line makes the
+        // fetched-vs-emitted distinction visible while it runs.
+        let symbol = if self.output == self.query {
+            self.query.clone()
+        } else {
+            format!("{}={}", self.output, self.query)
+        };
+        let token = self.interval.as_token();
+        let freq = if self.out_freq == token {
+            token
+        } else {
+            format!("{}={}", self.out_freq, token)
+        };
+        format!("{}:{}[{}]", self.provider, symbol, freq)
     }
 
     /// Where this series' fetch actually starts: `since` on the nose when the
@@ -420,7 +823,10 @@ const CHUNK_DELAY: StdDuration = StdDuration::from_millis(100);
 /// `Row` list is emitted.
 struct RawBar {
     symbol: String,
+    /// The cadence actually fetched — what `-x` scopes match against.
     interval: Interval,
+    /// The `freq` cell, verbatim. See [`FreqSpec`].
+    freq: String,
     atom: Atom,
 }
 
@@ -463,13 +869,14 @@ async fn fetch_series(
         let rows: Vec<RawBar> = csv_bars
             .iter()
             .filter(|b| {
-                b.symbol == series.symbol
+                b.symbol == series.query
                     && b.interval == series.interval
                     && b.atom.time.map(|t| t.0 >= fetch_since.0 && t.0 < until.0).unwrap_or(false)
             })
             .map(|b| RawBar {
-                symbol: b.symbol.clone(),
+                symbol: series.output.clone(),
                 interval: b.interval,
+                freq: series.out_freq.clone(),
                 atom: b.atom.clone(),
             })
             .collect();
@@ -488,16 +895,18 @@ async fn fetch_series(
         bar.set_message(chunk_since.to_datetime().date().to_string());
         let atoms = fetch(
             &series.provider,
-            &series.symbol,
+            &series.query,
             series.interval,
             chunk_since,
             chunk_until,
         )
         .await
         .with_context(|| format!("fetching {label}"))?;
+        // Rows are tagged with the *emitted* symbol and freq — the join keys.
         rows.extend(atoms.into_iter().map(|atom| RawBar {
-            symbol: series.symbol.clone(),
+            symbol: series.output.clone(),
             interval: series.interval,
+            freq: series.out_freq.clone(),
             atom,
         }));
         bar.inc(1);
@@ -520,20 +929,26 @@ fn apply_overlays(
     overlays: &[Overlay],
     columns: &[String],
 ) -> Vec<Row> {
-    // Bin the incoming stream by `(symbol, interval)` — order within each bin
-    // is preserved by the sort below and matches the order the provider paged
-    // the bars in (ascending time). The outer sort re-orders across groups.
-    let mut by_group: std::collections::HashMap<(String, Interval), Vec<RawBar>> =
+    // Bin the incoming stream by `(symbol, freq-label, interval)` — order within
+    // each bin is preserved by the sort below and matches the order the provider
+    // paged the bars in (ascending time). The outer sort re-orders across groups.
+    //
+    // The key carries both the emitted label and the fetched interval: the label
+    // identifies the output series, and the interval is what `-x` scopes match
+    // on. Keying on only one of them would let two series with the same label
+    // but different cadences (or vice versa) share one set of overlay
+    // instances.
+    let mut by_group: std::collections::HashMap<(String, String, Interval), Vec<RawBar>> =
         std::collections::HashMap::new();
     for bar in raw {
         by_group
-            .entry((bar.symbol.clone(), bar.interval))
+            .entry((bar.symbol.clone(), bar.freq.clone(), bar.interval))
             .or_default()
             .push(bar);
     }
 
     let mut out: Vec<Row> = Vec::new();
-    for ((symbol, interval), mut bars) in by_group {
+    for ((symbol, _freq, interval), mut bars) in by_group {
         bars.sort_by_key(|b| b.atom.time);
 
         // Every atom in a group shares the same source-provided schema (one
@@ -565,7 +980,7 @@ fn apply_overlays(
                     .collect();
                 Row {
                     symbol: b.symbol,
-                    interval: b.interval,
+                    freq: b.freq,
                     atom: b.atom,
                     overlays: values,
                 }
@@ -597,8 +1012,8 @@ fn apply_overlays(
     }
 
     out.sort_by(|a, b| {
-        (a.atom.time, a.symbol.as_str(), a.interval.as_token())
-            .cmp(&(b.atom.time, b.symbol.as_str(), b.interval.as_token()))
+        (a.atom.time, a.symbol.as_str(), a.freq.as_str())
+            .cmp(&(b.atom.time, b.symbol.as_str(), b.freq.as_str()))
     });
     out
 }
@@ -673,6 +1088,7 @@ async fn fetch(
 pub(crate) async fn tickers_of(provider: &str) -> Result<Vec<String>> {
     match provider {
         "binance" => Ok(Binance::new().tickers().await?),
+        "coingecko" => Ok(OverlaySource::tickers(&CoinGecko::new()).await?),
         "yfinance" => Ok(Yahoo::new().tickers().await?),
         "csv" => bail!(
             "`csv:` reads a local CSV — the ticker list is whatever `symbol` \
@@ -729,7 +1145,7 @@ fn write_candles_csv(path: &Path, rows: &[Row], overlay_columns: &[String]) -> R
             .unwrap_or_else(|_| time_ts.0.to_string());
         let mut record: Vec<String> = vec![
             row.symbol.clone(),
-            row.interval.as_token(),
+            row.freq.clone(),
             time,
             format_f64(row.atom.candle.open),
             format_f64(row.atom.candle.high),
@@ -876,6 +1292,8 @@ fn parse_spec(spec: &str) -> Result<FetchSpec> {
     })
 }
 
+/// Parse one `[OUTPUT=]QUERY[freq,...]` entry. See [`SymbolSpec`] for what the
+/// `OUTPUT=` prefix is for.
 fn parse_symbol(s: &str) -> Result<SymbolSpec> {
     let s = s.trim();
     let open = s
@@ -884,28 +1302,54 @@ fn parse_symbol(s: &str) -> Result<SymbolSpec> {
     if !s.ends_with(']') {
         bail!("{s:?}: bracket must close at end of the symbol entry");
     }
-    let symbol = s[..open].trim();
-    if symbol.is_empty() {
+    let head = s[..open].trim();
+    if head.is_empty() {
         bail!("{s:?}: empty symbol name");
     }
+    // `OUTPUT=QUERY` — emit under the left, fetch under the right. Split on the
+    // first `=` only: a provider id is free to contain one, an output symbol
+    // (which has to match a CSV `symbol` cell) is not going to.
+    let (output, query) = match head.split_once('=') {
+        Some((out, q)) => (out.trim(), q.trim()),
+        None => (head, head),
+    };
+    if output.is_empty() {
+        bail!("{s:?}: empty output symbol on the left of `=`");
+    }
+    if query.is_empty() {
+        bail!("{s:?}: empty provider query on the right of `=`");
+    }
     let inner = &s[open + 1..s.len() - 1];
-    let mut intervals = Vec::new();
+    let mut freqs = Vec::new();
     for tok in inner.split(',') {
         let tok = tok.trim();
         if tok.is_empty() {
             bail!("{s:?}: empty frequency token in bracket");
         }
-        intervals.push(
-            crate::calendar::parse_interval(tok)
-                .with_context(|| format!("{s:?}: freq {tok:?}"))?,
-        );
+        // `OFREQ=FREQ` — tag rows with the left, fetch at the right. Same rule
+        // as the symbol's `OUTPUT=QUERY`; absent, the label is the fetched
+        // cadence's own token. Only the fetched side is parsed: the label is
+        // written to the CSV verbatim and never interpreted.
+        let (out_label, query_tok) = match tok.split_once('=') {
+            Some((out, q)) => (out.trim(), q.trim()),
+            None => (tok, tok),
+        };
+        if out_label.is_empty() || query_tok.is_empty() {
+            bail!("{s:?}: freq {tok:?} has an empty side around `=`");
+        }
+        freqs.push(FreqSpec {
+            output: out_label.to_string(),
+            query: crate::calendar::parse_interval(query_tok)
+                .with_context(|| format!("{s:?}: freq {query_tok:?}"))?,
+        });
     }
-    if intervals.is_empty() {
+    if freqs.is_empty() {
         bail!("{s:?}: empty frequency list");
     }
     Ok(SymbolSpec {
-        symbol: symbol.to_string(),
-        intervals,
+        output: output.to_string(),
+        query: query.to_string(),
+        freqs,
     })
 }
 
@@ -1005,6 +1449,18 @@ mod tests {
         datetime!(2024-03-15 12:34:56 UTC)
     }
 
+    /// Helper: the `FreqSpec` list an unmapped bracket (`[1d,1h]`) produces —
+    /// the label is just the fetched cadence's own token.
+    fn plain(freqs: &[Interval]) -> Vec<FreqSpec> {
+        freqs
+            .iter()
+            .map(|&f| FreqSpec {
+                output: f.as_token(),
+                query: f,
+            })
+            .collect()
+    }
+
     /// Helper: unwrap the remote variant, panicking otherwise. All the
     /// non-`csv:` parse tests below use it.
     fn remote(spec: &str) -> (String, Vec<SymbolSpec>) {
@@ -1019,8 +1475,130 @@ mod tests {
         let (provider, symbols) = remote("binance:BTCUSDT[1d]");
         assert_eq!(provider, "binance");
         assert_eq!(symbols.len(), 1);
-        assert_eq!(symbols[0].symbol, "BTCUSDT");
-        assert_eq!(symbols[0].intervals, vec![Interval::Day(1)]);
+        // No `=`: the fetched symbol is also the emitted one.
+        assert_eq!(symbols[0].output, "BTCUSDT");
+        assert_eq!(symbols[0].query, "BTCUSDT");
+        assert_eq!(symbols[0].freqs, plain(&[Interval::Day(1)]));
+    }
+
+    #[test]
+    fn freq_prefix_relabels_the_emitted_cadence() {
+        // The intended use: same duration under a different name. Fetch 24h
+        // bars, tag them `1d` so the `freq` column agrees with the series being
+        // joined against.
+        let (_, symbols) = remote("binance:BTCUSDT[1d=24h,1d]");
+        assert_eq!(
+            symbols[0].freqs[0],
+            FreqSpec {
+                output: "1d".to_string(),
+                query: Interval::Hour(24),
+            }
+        );
+        // A plain entry in the same bracket stays unmapped.
+        assert_eq!(symbols[0].freqs[1], plain(&[Interval::Day(1)])[0]);
+    }
+
+    #[test]
+    fn the_emitted_freq_label_is_an_opaque_string() {
+        // Only the fetched side has to be an interval; the label is written to
+        // the CSV verbatim and never parsed back by the `--series` loader.
+        let (_, symbols) = remote("coingecko:BTCUSDT=bitcoin[FOO=1d]");
+        assert_eq!(
+            symbols[0].freqs[0],
+            FreqSpec {
+                output: "FOO".to_string(),
+                query: Interval::Day(1),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_freq_mapping() {
+        assert!(parse_spec("coingecko:BTCUSDT=bitcoin[=1h]").is_err());
+        assert!(parse_spec("coingecko:BTCUSDT=bitcoin[4h=]").is_err());
+        // The *fetched* side must be a real interval token — it is what gets
+        // sent to the provider. (The emitted label is free-form.)
+        assert!(parse_spec("coingecko:BTCUSDT=bitcoin[4h=1x]").is_err());
+    }
+
+    #[test]
+    fn output_prefix_remaps_the_emitted_symbol() {
+        let (provider, symbols) = remote("coingecko:BTCUSDT=bitcoin[1d],ETHUSDT=ethereum[1d]");
+        assert_eq!(provider, "coingecko");
+        assert_eq!(symbols.len(), 2);
+        // Fetch under the provider's id, emit under the price series' key.
+        assert_eq!(symbols[0].query, "bitcoin");
+        assert_eq!(symbols[0].output, "BTCUSDT");
+        assert_eq!(symbols[1].query, "ethereum");
+        assert_eq!(symbols[1].output, "ETHUSDT");
+    }
+
+    #[test]
+    fn output_prefix_tolerates_whitespace_and_mixes_with_plain_entries() {
+        let (_, symbols) = remote("binance: BTCEUR = BTCUSDT [1d] , ETHEUR[1d]");
+        assert_eq!(symbols[0].output, "BTCEUR");
+        assert_eq!(symbols[0].query, "BTCUSDT");
+        // A plain entry alongside a mapped one still defaults output = query.
+        assert_eq!(symbols[1].output, "ETHEUR");
+        assert_eq!(symbols[1].query, "ETHEUR");
+    }
+
+    #[test]
+    fn rejects_half_empty_output_mapping() {
+        assert!(parse_spec("coingecko:=bitcoin[1d]").is_err());
+        assert!(parse_spec("coingecko:BTCUSDT=[1d]").is_err());
+    }
+
+    #[test]
+    fn label_shows_each_mapping_only_when_there_is_one() {
+        let mapped = Series {
+            provider: "coingecko".into(),
+            output: "BTCUSDT".into(),
+            query: "bitcoin".into(),
+            interval: Interval::Day(1),
+            out_freq: "1d".to_string(),
+            stable: 0,
+            csv_bars: None,
+            csv_path: None,
+        };
+        // Symbol remapped, freq not.
+        assert_eq!(mapped.label(), "coingecko:BTCUSDT=bitcoin[1d]");
+
+        // Both remapped.
+        let both = Series {
+            interval: Interval::Day(1),
+            out_freq: "FOO".to_string(),
+            ..mapped.clone()
+        };
+        assert_eq!(both.label(), "coingecko:BTCUSDT=bitcoin[FOO=1d]");
+
+        // Neither: the plain form is unchanged from before this grammar existed.
+        let plain = Series {
+            query: "BTCUSDT".into(),
+            output: "BTCUSDT".into(),
+            provider: "binance".into(),
+            ..mapped
+        };
+        assert_eq!(plain.label(), "binance:BTCUSDT[1d]");
+    }
+
+    #[test]
+    fn overlay_and_candle_providers_cannot_be_mixed() {
+        let candles = parse_spec("binance:BTCUSDT[1d]").unwrap();
+        let overlays = parse_spec("coingecko:BTCUSDT=bitcoin[1d]").unwrap();
+        let csv = parse_spec("csv:./x.csv").unwrap();
+
+        assert_eq!(
+            resolve_mode(std::slice::from_ref(&candles)).unwrap(),
+            ProviderKind::Candles
+        );
+        assert_eq!(
+            resolve_mode(std::slice::from_ref(&overlays)).unwrap(),
+            ProviderKind::Overlays
+        );
+        // `csv:` is a candle source, so it clashes with an overlay provider too.
+        assert!(resolve_mode(&[candles, overlays.clone()]).is_err());
+        assert!(resolve_mode(&[csv, overlays]).is_err());
     }
 
     #[test]
@@ -1028,10 +1606,10 @@ mod tests {
         let (_, symbols) = remote("binance:BTCUSDT[1d,1h],ETHUSDT[1d]");
         assert_eq!(symbols.len(), 2);
         assert_eq!(
-            symbols[0].intervals,
-            vec![Interval::Day(1), Interval::Hour(1)]
+            symbols[0].freqs,
+            plain(&[Interval::Day(1), Interval::Hour(1)])
         );
-        assert_eq!(symbols[1].intervals, vec![Interval::Day(1)]);
+        assert_eq!(symbols[1].freqs, plain(&[Interval::Day(1)]));
     }
 
     #[test]
@@ -1088,8 +1666,8 @@ mod tests {
         let (_, symbols) = remote("binance: BTCUSDT [ 1d , 1h ] , ETHUSDT [1d]");
         assert_eq!(symbols.len(), 2);
         assert_eq!(
-            symbols[0].intervals,
-            vec![Interval::Day(1), Interval::Hour(1)]
+            symbols[0].freqs,
+            plain(&[Interval::Day(1), Interval::Hour(1)])
         );
     }
 
