@@ -584,7 +584,11 @@ to `close`. The vocabulary mirrors the library one-to-one:
   "70"`, to get the string rather than the scalar);
   `!sma`/`!ema`/`!rma`/`!wma`/`!hma`/`!rsi`/`!stddev`/`!cci`/
   `!stochastic { source, period }`, `!stoch_rsi { source, rsi_period,
-  stoch_period }`; `!macd_line`/`!macd_signal`/`!macd_histogram { source, fast,
+  stoch_period }`; windowed statistics `!skewness`/`!kurtosis`/`!zscore
+  { source, period }`, `!correlation { lhs, rhs, period }`, and the
+  Lo-MacKinlay regime classifier `!variance_ratio { source, period, lag }`
+  (`> 1` trending, `< 1` mean-reverting; recomputes O(period)/bar, unlike the
+  incremental rest); `!macd_line`/`!macd_signal`/`!macd_histogram { source, fast,
   slow, signal }`; `!bb_upper`/`!bb_middle`/`!bb_lower { source, period, k }`;
   `!keltner_{upper,middle,lower} { source, ema_period, atr_period, multiplier }`;
   `!donchian_{upper,middle,lower} { high, low, period }`; `!adx`/`!plus_di`/
