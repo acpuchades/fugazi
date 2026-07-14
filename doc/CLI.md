@@ -905,6 +905,37 @@ is exactly right for an always-in long/short reversal (the opposite side's
 `enter` reverses the position). Give an `exit` only for a flat rest
 (long/flat, or long/short with a pause).
 
+### Strategy presets
+
+Anywhere a single-asset strategy document is accepted — a top-level
+`fugazi run @strat.yml`, or the `strategy:` field of a
+[trailing risk tag](#-x----overlay) — you can name a ready-made recipe instead
+of spelling out the sides. A preset builds the exact same strategy as its
+`fugazi::strategies` Rust twin:
+
+| Tag | Fields | Recipe |
+|---|---|---|
+| `!buy_and_hold` | `symbol` | all-in long on bar 1, hold |
+| `!ma_crossover` | `symbol, fast, slow` | always-in SMA fast/slow crossover |
+| `!rsi_reversal` | `symbol, period, oversold, exit` | RSI dip-buy, long/flat |
+| `!donchian_breakout` | `symbol, period` | always-in Donchian channel breakout |
+| `!keltner_breakout` | `symbol, ema_period, atr_period, multiplier` | always-in Keltner breakout |
+
+```yaml
+# strat.yml — a whole document is just the preset tag:
+!ma_crossover { symbol: BTC, fast: 3, slow: 8 }
+```
+
+```sh
+fugazi run @strat.yml -s @btc.csv -o out/ --crypto -f 1d
+# or inline as a trailing tag's strategy:
+fugazi get binance:BTCUSDT[1d] \
+  -x 'sharpe=!sharpe { strategy: !buy_and_hold { symbol: BTCUSDT }, period: 60, bars_per_year: 365 }'
+```
+
+Presets are single-asset only, and are not swept by `optimize` (they carry no
+`!param` axes — use a full spec for grids).
+
 ```yaml
 symbol: BTC
 long:

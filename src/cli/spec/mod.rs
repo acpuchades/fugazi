@@ -23,6 +23,7 @@
 mod basket;
 mod expr;
 mod pairs;
+mod preset;
 mod signal;
 mod strategy;
 mod template;
@@ -56,6 +57,8 @@ pub use expr::ExprSpec;
 pub use expr::ValueLit;
 #[allow(unused_imports)]
 pub use pairs::PairsStrategySpec;
+#[allow(unused_imports)]
+pub use preset::{StrategyPreset, StrategyRef};
 #[allow(unused_imports)]
 pub use signal::SignalSpec;
 #[allow(unused_imports)]
@@ -524,6 +527,26 @@ mod tests {
             }
             other => panic!("expected Some(Real), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn sharpe_accepts_a_preset_strategy() {
+        // The `strategy:` field takes a catalogue preset tag as well as a full
+        // spec — `!ma_crossover { … }` builds the same strategy the Rust
+        // `trend::ma_crossover` recipe does.
+        let spec: ExprSpec = serde_norway::from_str(
+            "!sharpe { strategy: !ma_crossover { symbol: X, fast: 2, slow: 4 }, \
+             period: 4, bars_per_year: 252 }",
+        )
+        .unwrap();
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        assert_eq!(built.output_type(), crate::dyn_indicator::DynType::Real);
+        // Drives a golden-then-death cross without panicking; reads Some once warm.
+        let mut last = None;
+        for p in [14.0, 13.0, 12.0, 11.0, 12.0, 14.0, 16.0, 18.0, 15.0, 12.0] {
+            last = built.update(Payload::Snapshot(snap(bar(p))));
+        }
+        assert!(last.is_some(), "trailing Sharpe over a preset should read once warm");
     }
 
     #[test]

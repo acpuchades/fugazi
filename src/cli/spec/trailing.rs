@@ -24,7 +24,7 @@ use fugazi::indicators::{Calmar, MaxDrawdown, Sharpe, Sortino, Volatility};
 use fugazi::prelude::*;
 use fugazi::types::{Real, Snapshot};
 
-use super::strategy::SingleStrategySpec;
+use super::preset::StrategyRef;
 use crate::dyn_indicator::{self, DynIndicator};
 
 /// The wallet / book seed for every embedded strategy. Arbitrary and positive
@@ -97,15 +97,15 @@ impl Indicator for RebuildIndicator {
 /// the overlay schema the embedded strategy's `!get` leaves resolve against.
 pub(super) fn build(
     metric: TrailingMetric,
-    spec: &SingleStrategySpec,
+    strategy: &StrategyRef,
     period: usize,
     risk_free_rate: Real,
     bars_per_year: Real,
     schema: &Arc<Schema>,
 ) -> Box<dyn DynIndicator> {
-    let spec = Arc::new(spec.clone());
+    let spec = Arc::new(strategy.clone());
     let schema = Arc::clone(schema);
-    let symbol = spec.symbol.clone();
+    let symbol = strategy.symbol().to_string();
 
     let build_fn: Rc<dyn Fn() -> BoxedReal> = Rc::new(move || {
         let strat = spec.build(SEED, &schema);

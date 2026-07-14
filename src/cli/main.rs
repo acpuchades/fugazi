@@ -446,11 +446,11 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     let text = args.strategy.read().context("reading strategy")?;
     match args.strategy.kind {
         StrategyKind::Single => {
-            let spec = spec::SingleStrategySpec::from_text_with_params_in(&text, &param_table, &args.strategy.base_dir())
+            let strategy = spec::StrategyRef::from_text_with_params_in(&text, &param_table, &args.strategy.base_dir())
                 .with_context(|| parse_error_context(&args.strategy))?;
             if !args.quiet {
                 style::print_header("check", "parse and validate a strategy spec");
-                println!("{}: ok (symbol {})", args.strategy.label(), spec.symbol);
+                println!("{}: ok (symbol {})", args.strategy.label(), strategy.symbol());
             }
         }
         StrategyKind::Pairs => {
@@ -581,9 +581,9 @@ fn run(args: RunArgs) -> Result<()> {
     };
     match args.strategy.kind {
         StrategyKind::Single => {
-            let spec = spec::SingleStrategySpec::from_text_with_params_in(&text, &param_table, &args.strategy.base_dir())
+            let strategy = spec::StrategyRef::from_text_with_params_in(&text, &param_table, &args.strategy.base_dir())
                 .with_context(|| parse_error_context(&args.strategy))?;
-            run::run(&spec, &frame, &opts)?;
+            run::run(&strategy, &frame, &opts)?;
         }
         StrategyKind::Pairs => {
             let spec = spec::PairsStrategySpec::from_text_with_params_in(&text, &param_table, &args.strategy.base_dir())

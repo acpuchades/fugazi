@@ -101,6 +101,12 @@ impl SingleStrategySpec {
     ///
     /// Import paths resolve against `base`, the importing document's own
     /// directory ([`crate::input::Source::base_dir`]).
+    ///
+    /// The CLI's top-level Single-strategy load goes through
+    /// [`StrategyRef::from_text_with_params_in`](super::preset::StrategyRef::from_text_with_params_in)
+    /// (which also accepts a preset tag) rather than this directly; kept as
+    /// the typed single-spec loader the spec tests use.
+    #[allow(dead_code)]
     pub fn from_text_with_params_in(
         text: &str,
         params: &std::collections::HashMap<String, serde_json::Value>,
@@ -192,6 +198,17 @@ impl SingleStrategySpec {
 /// [`fugazi::backtest::run`] unchanged.
 pub struct DynSingleStrategy {
     inner: SingleAssetStrategy<String>,
+}
+
+impl DynSingleStrategy {
+    /// Wrap an already-built [`SingleAssetStrategy<String>`] — the seam the
+    /// [`StrategyPreset`](super::preset::StrategyPreset) catalogue tags use to
+    /// hand a ready-made strategy (built by the `fugazi::strategies` free
+    /// functions) into the same `DynSingleStrategy` the YAML `SingleStrategySpec`
+    /// path produces.
+    pub(crate) fn from_single(inner: SingleAssetStrategy<String>) -> Self {
+        Self { inner }
+    }
 }
 
 impl Strategy for DynSingleStrategy {

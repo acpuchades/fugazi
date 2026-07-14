@@ -31,7 +31,7 @@ use fugazi::prelude::*;
 use crate::calendar::Frequency;
 use crate::costs::CostConfig;
 use crate::metrics;
-use crate::spec::{BasketStrategySpec, PairsStrategySpec, SingleStrategySpec};
+use crate::spec::{BasketStrategySpec, PairsStrategySpec, SingleStrategySpec, StrategyRef};
 
 /// Drive `spec` over `atoms` through a fresh paper wallet with `cash`
 /// starting funds and the given trading `costs`, returning the full
@@ -171,22 +171,23 @@ pub struct IterationInputs<'a> {
 /// the report to `Metrics`, and hand back an [`IterationResult`]. Does no
 /// IO and no console printing — that's the driver's responsibility.
 pub fn run_iteration(
-    spec: &SingleStrategySpec,
+    strategy: &StrategyRef,
     atoms: &[(String, Atom)],
     inputs: &IterationInputs,
 ) -> IterationResult {
-    let costs = inputs.cost_config.resolve(&spec.symbol, inputs.effective_freq);
+    let symbol = strategy.symbol();
+    let costs = inputs.cost_config.resolve(symbol, inputs.effective_freq);
     let schema = schema_from_atoms(atoms);
     let bars: Vec<String> = atoms.iter().map(|(t, _)| t.clone()).collect();
     let snapshots: Vec<fugazi::types::Snapshot<String>> = atoms
         .iter()
-        .map(|(_, a)| fugazi::types::Snapshot::single(spec.symbol.clone(), a.clone()))
+        .map(|(_, a)| fugazi::types::Snapshot::single(symbol.to_string(), a.clone()))
         .collect();
     run_iteration_core(
-        || spec.build(inputs.cash, &schema),
+        || strategy.build(inputs.cash, &schema),
         &snapshots,
         bars,
-        vec![(spec.symbol.clone(), costs)],
+        vec![(symbol.to_string(), costs)],
         inputs,
     )
 }
