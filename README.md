@@ -491,7 +491,8 @@ cargo run --bin fugazi -- run \
   @examples/strategy.yml \
   --series @examples/candles.csv \
   --output-dir out/
-# writes out/trades.csv (time,symbol,side,units,price,kind),
+# writes out/fills.csv  (time,symbol,side,units,price,kind — one row per booked order),
+#        out/trades.csv (entry_time,exit_time,side,units,entry_price,exit_price,pnl,return,bars_held — one row per closed round-trip),
 #        out/returns.csv (time,equity,return),
 #        and out/metrics.yml (whole-run summary)
 ```

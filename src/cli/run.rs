@@ -1,27 +1,35 @@
 //! The `run` subcommand's IO driver.
 //!
-//! Owns everything user-facing: file writes (`trades.csv`, `returns.csv`,
-//! `metrics.yml`, and the optional `metrics.csv`/`rolling.csv` under `-w N`),
-//! the tiered console banners (**inputs** / **trades** / **result** /
-//! **metrics**), and the wall-clock timing. Evaluation is delegated to
-//! [`crate::backtest::run_iteration`] — this module never touches the
-//! per-bar loop or the metrics reduction itself; it just wraps the pure
+//! Owns everything user-facing: file writes (`fills.csv`, `trades.csv`,
+//! `returns.csv`, `metrics.yml`, and the optional `metrics.csv`/`rolling.csv`
+//! under `-w N`), the tiered console banners (**inputs** / **fills** /
+//! **result** / **metrics**), and the wall-clock timing. Evaluation is
+//! delegated to [`crate::backtest::run_iteration`] — this module never touches
+//! the per-bar loop or the metrics reduction itself; it just wraps the pure
 //! payload with IO.
 //!
 //! ## Output shape
 //!
 //! Per bar: feed the wallet the candle (in [`run_iteration`]); the priced
 //! blotter comes back sorted by fill index. Every order is written to
-//! `trades.csv` with its bar's `time` and its own fill price. The running
-//! equity is emitted to `returns.csv`. Both files are `,`-delimited.
-//! After the loop the equity curve + blotter reduce to `metrics.yml`
-//! (whole-run summary — see [`crate::metrics`]) and, under `-w N`, to
-//! `metrics.csv` (non-overlapping N-bar windows) and `rolling.csv` (rolling
-//! stride-1 windows). The console prints the whole-run headline block first;
-//! under `-w` a second **windowed metrics** block follows it, showing
-//! `mean ± std` across the non-overlapping windows for the same headline
-//! stats — so the caller sees both the whole-run point estimate and its
-//! cross-window dispersion side-by-side.
+//! `fills.csv` with its bar's `time` and its own fill price — the per-order
+//! log of what the wallet actually booked. Closed round-trip legs are
+//! reduced from the same blotter by [`fugazi::metrics::reconstruct_trades`]
+//! and written to `trades.csv`: one row per closed leg with entry/exit bar,
+//! side, units, entry/exit price, realized `pnl`, `return`, and
+//! `bars_held`. A buy-and-hold strategy (nothing ever closes) produces a
+//! header-only `trades.csv` — matches the metrics layer, which also only
+//! counts closed legs.
+//!
+//! The running equity is emitted to `returns.csv`. Every CSV is
+//! `,`-delimited. After the loop the equity curve + blotter reduce to
+//! `metrics.yml` (whole-run summary — see [`crate::metrics`]) and, under
+//! `-w N`, to `metrics.csv` (non-overlapping N-bar windows) and
+//! `rolling.csv` (rolling stride-1 windows). The console prints the
+//! whole-run headline block first; under `-w` a second **windowed metrics**
+//! block follows it, showing `mean ± std` across the non-overlapping
+//! windows for the same headline stats — so the caller sees both the
+//! whole-run point estimate and its cross-window dispersion side-by-side.
 //!
 //! Metrics cover the whole run — the strategy layer is opinion-free about
 //! stability. A strategy that wants entries held off until every source it
@@ -48,7 +56,7 @@ use crate::style;
 pub struct RunOptions<'a> {
     /// Initial cash for the paper wallet.
     pub cash: Real,
-    /// Directory to write `trades.csv` / `returns.csv` into.
+    /// Directory to write `fills.csv` / `trades.csv` / `returns.csv` into.
     pub out_dir: &'a Path,
     /// A short label for the strategy source (file path or `(inline)`), echoed
     /// in the run block.
@@ -92,7 +100,9 @@ pub struct RunOptions<'a> {
 pub struct Summary {
     pub final_equity: Real,
     pub return_pct: Real,
-    pub trades: usize,
+    /// Number of booked fills. Distinct from the round-trip trade count in
+    /// [`crate::metrics::Metrics::trades`]`.total`, which counts closed legs.
+    pub fills: usize,
     pub bars: usize,
 }
 
@@ -156,13 +166,14 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
 
     let iter = backtest::run_iteration(strategy, &atoms, &inputs);
 
-    // Emit `trades.csv` and echo each fill in the same order the wallet booked
+    // Emit `fills.csv` and echo each fill in the same order the wallet booked
     // them. The console stream matches the CSV row-for-row.
-    write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
+    write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
     if !opts.quiet {
-        println!("\n{}", style::bold("trades"));
-        stream_trades(&iter);
+        println!("\n{}", style::bold("fills"));
+        stream_fills(&iter);
     }
+    write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
 
     write_returns_csv(&iter, &opts.out_dir.join("returns.csv"))?;
 
@@ -183,7 +194,7 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
         } else {
             0.0
         },
-        trades: iter.summary.trades,
+        fills: iter.summary.fills,
         bars: iter.summary.bars,
     };
 
@@ -205,9 +216,9 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
 
 /// The pairs twin of [`run`]: drive a
 /// [`PairsStrategy`](fugazi::strategies::PairsStrategy) over the two legs'
-/// aligned atom streams. Same output shape (`trades.csv`, `returns.csv`,
-/// `metrics.yml`, and the windowed CSVs under `-w`), so the caller's downstream
-/// analysis pipeline is unchanged.
+/// aligned atom streams. Same output shape (`fills.csv`, `trades.csv`,
+/// `returns.csv`, `metrics.yml`, and the windowed CSVs under `-w`), so the
+/// caller's downstream analysis pipeline is unchanged.
 ///
 /// Time-alignment is an **inner join** on the `time` column: only bars where
 /// both symbols have data are fed to the strategy. A mismatched pair produces
@@ -280,11 +291,12 @@ pub fn run_pairs(
     let iter =
         backtest::run_iteration_pairs(spec, &bars, &left_atoms, &right_atoms, &inputs);
 
-    write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
+    write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
     if !opts.quiet {
-        println!("\n{}", style::bold("trades"));
-        stream_trades(&iter);
+        println!("\n{}", style::bold("fills"));
+        stream_fills(&iter);
     }
+    write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
 
     write_returns_csv(&iter, &opts.out_dir.join("returns.csv"))?;
 
@@ -305,7 +317,7 @@ pub fn run_pairs(
         } else {
             0.0
         },
-        trades: iter.summary.trades,
+        fills: iter.summary.fills,
         bars: iter.summary.bars,
     };
 
@@ -425,11 +437,12 @@ pub fn run_basket(
     let iter =
         backtest::run_iteration_basket(spec, &bars, &snapshots, &universe, &inputs);
 
-    write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
+    write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
     if !opts.quiet {
-        println!("\n{}", style::bold("trades"));
-        stream_trades(&iter);
+        println!("\n{}", style::bold("fills"));
+        stream_fills(&iter);
     }
+    write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
 
     write_returns_csv(&iter, &opts.out_dir.join("returns.csv"))?;
 
@@ -450,7 +463,7 @@ pub fn run_basket(
         } else {
             0.0
         },
-        trades: iter.summary.trades,
+        fills: iter.summary.fills,
         bars: iter.summary.bars,
     };
 
@@ -586,9 +599,10 @@ fn print_pairs_inputs_block(
 // CSV writers
 // ---------------------------------------------------------------------------
 
-/// Write `trades.csv` from an [`IterationResult`]. `commission` is only
-/// present when the iteration's costs were active.
-fn write_trades_csv(iter: &IterationResult, path: &Path) -> Result<()> {
+/// Write `fills.csv` from an [`IterationResult`]: one row per wallet-booked
+/// fill in the order the wallet booked them. `commission` is only present
+/// when the iteration's costs were active.
+fn write_fills_csv(iter: &IterationResult, path: &Path) -> Result<()> {
     let mut w = writer(path)?;
     let header: &[&str] = if iter.costs_active {
         &["time", "symbol", "side", "units", "price", "kind", "commission"]
@@ -625,6 +639,45 @@ fn write_trades_csv(iter: &IterationResult, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Write `trades.csv` from an [`IterationResult`]: one row per closed
+/// round-trip leg reconstructed from the fill blotter by
+/// [`fugazi::metrics::reconstruct_trades`] (same reduction the metrics
+/// document uses, so row count matches `trades.total`). A run that never
+/// closes a position (e.g. buy-and-hold) produces a header-only file.
+fn write_trades_csv(iter: &IterationResult, path: &Path) -> Result<()> {
+    let mut w = writer(path)?;
+    w.write_record([
+        "entry_time",
+        "exit_time",
+        "side",
+        "units",
+        "entry_price",
+        "exit_price",
+        "pnl",
+        "return",
+        "bars_held",
+    ])?;
+    for trade in fugazi::metrics::reconstruct_trades(&iter.report.fills) {
+        let side = match trade.side {
+            Side::Buy => "long",
+            Side::Sell => "short",
+        };
+        w.write_record([
+            iter.bars[trade.entry_bar].as_str(),
+            iter.bars[trade.exit_bar].as_str(),
+            side,
+            &trade.units.to_string(),
+            &trade.entry_price.to_string(),
+            &trade.exit_price.to_string(),
+            &trade.pnl.to_string(),
+            &trade.return_ratio.to_string(),
+            &trade.bars_held().to_string(),
+        ])?;
+    }
+    w.flush()?;
+    Ok(())
+}
+
 /// Write `returns.csv` from an [`IterationResult`].
 fn write_returns_csv(iter: &IterationResult, path: &Path) -> Result<()> {
     let mut w = writer(path)?;
@@ -641,8 +694,8 @@ fn write_returns_csv(iter: &IterationResult, path: &Path) -> Result<()> {
 }
 
 /// Echo each fill of `iter` to the console — one line per row, matching
-/// the CSV order.
-fn stream_trades(iter: &IterationResult) {
+/// the `fills.csv` order.
+fn stream_fills(iter: &IterationResult) {
     for fill in &iter.report.fills {
         let order = &fill.order;
         let time = &iter.bars[fill.bar];
@@ -796,7 +849,7 @@ fn print_skipped_overlay_warning(skipped: &[String]) {
 fn print_result_block(opts: &RunOptions, s: &Summary, started: SystemTime, finished: SystemTime) {
     println!("\n{}", style::bold("result"));
     print_field("bars", &s.bars.to_string());
-    print_field("trades", &s.trades.to_string());
+    print_field("fills", &s.fills.to_string());
     let delta = s.final_equity - opts.cash;
     let change = format!("{delta:+.2}, {:+.2}%", s.return_pct);
     let change = if delta >= 0.0 {

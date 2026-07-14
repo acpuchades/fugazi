@@ -1018,7 +1018,7 @@ fn ranking_value(eval: &Evaluation, path: &str, direction: Direction, k: Real) -
 /// metric (`<name>_mean` / `<name>_std`, the cross-window aggregate). Whole-run
 /// sweeps also get a trailing `selection.deflated_sharpe` column when the grid has
 /// enough spread in Sharpes for the multiple-testing correction to be defined.
-/// `,`-delimited to match `trades.csv` / `returns.csv`. Axis cells that the
+/// `,`-delimited to match `fills.csv` / `trades.csv` / `returns.csv`. Axis cells that the
 /// row's subgrid doesn't touch, and missing (omitted) metric values, are both
 /// written as an empty cell.
 fn write_grid_csv(

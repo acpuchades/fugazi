@@ -197,7 +197,7 @@ reading a costed `metrics.yml`:
      doesn't get "free" slippage — the aggressor-side rule matches real
      tape behaviour.
   3. Commission is computed from the *final* price × units and recorded
-     separately (`trades.csv`'s `commission` column,
+     separately (`fills.csv`'s `commission` column,
      [`metrics.costs.total_commission`](CLI.md#costs--cost-aggregates)) —
      never netted into `price`.
 

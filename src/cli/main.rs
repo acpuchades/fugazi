@@ -2,7 +2,7 @@
 //!
 //! Load a strategy from a `strategy.yml`, feed it candle (and arbitrary extra)
 //! data assembled from one or more `--series`, and run it through a paper wallet,
-//! writing `trades.csv`, `returns.csv` and `metrics.yml`:
+//! writing `fills.csv`, `trades.csv`, `returns.csv` and `metrics.yml`:
 //!
 //! ```text
 //! fugazi run @strategy.yml \
@@ -117,7 +117,8 @@ struct RunArgs {
     #[arg(short, long = "series", required = true)]
     series: Vec<data::SeriesSpec>,
 
-    /// Directory to write `trades.csv`, `returns.csv`, and `metrics.yml` into.
+    /// Directory to write `fills.csv`, `trades.csv`, `returns.csv`, and
+    /// `metrics.yml` into.
     #[arg(short, long = "output-dir")]
     output_dir: PathBuf,
 

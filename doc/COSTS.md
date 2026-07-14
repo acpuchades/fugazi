@@ -47,8 +47,8 @@ bar's `open` on a gap through the trigger):
    deduct it from the wallet's cash **separately**. It never nets into
    `P₂`.
 
-`P₂` is what lands on `Order::price` and in `trades.csv`'s `price` column.
-The commission lands on `Order::commission` and in `trades.csv`'s
+`P₂` is what lands on `Order::price` and in `fills.csv`'s `price` column.
+The commission lands on `Order::commission` and in `fills.csv`'s
 `commission` column — a distinct axis so cost accounting is unambiguous.
 
 Everything is under [`src/costs/`](../src/costs/) as three tiny traits, one
@@ -291,8 +291,9 @@ slippage: !volume_participation
 Turning `--costs` on changes the run output in three places (and only
 those — omit `--costs` and every output byte is unchanged):
 
-- **`trades.csv`** gains a `commission` column. `price` is now the
-  *post-spread, post-slippage* price. Both are per-fill.
+- **`fills.csv`** gains a `commission` column. `price` is now the
+  *post-spread, post-slippage* price. Both are per-fill. (`trades.csv`,
+  the closed-round-trip file, is unaffected.)
 - **`metrics.yml`** gains a `costs:` section:
 
   | Field | Meaning |
@@ -349,7 +350,7 @@ Where fugazi lands:
   the assumed slippage on the two resting order kinds by a
   configurable multiplier. Default `1.5×` — set it to `1.0` to opt out.
 - **The default is byte-identical to zero costs.** No configuration →
-  no fee, no spread, no slippage, and `metrics.yml` / `trades.csv` have
+  no fee, no spread, no slippage, and `metrics.yml` / `fills.csv` have
   the same schema as the pre-costs release. That's harder to say about
   tools where the cost model is baked into the fill engine —
   backtesting.py's `commission=0` is a supported value, but there's no

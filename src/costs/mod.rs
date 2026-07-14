@@ -23,7 +23,7 @@
 //!    slip down). The [`OrderKind`] threads through so a stop can be given an
 //!    extra multiplier over a market fill.
 //! 4. The resulting price is what's stamped on the [`Order`](crate::Order) and
-//!    recorded as `trades.csv`'s `price` column. Commission is computed from
+//!    recorded as `fills.csv`'s `price` column. Commission is computed from
 //!    the *final* price × units and lands on
 //!    [`Order::commission`](crate::Order::commission) as a separate figure —
 //!    never netted into the price.

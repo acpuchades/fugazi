@@ -7,9 +7,10 @@ single backtest, for a spec-validation pass, or for a parameter-grid sweep.
 
 Six subcommands:
 
-- [`run`](#run) — backtest one strategy over one dataset. Writes `trades.csv`,
-  `returns.csv`, and `metrics.yml`; adds `metrics.csv` + `rolling.csv` under
-  [`-w/--windowed`](#windowed-metrics). No charts — plot post-hoc.
+- [`run`](#run) — backtest one strategy over one dataset. Writes `fills.csv`,
+  `trades.csv`, `returns.csv`, and `metrics.yml`; adds `metrics.csv` +
+  `rolling.csv` under [`-w/--windowed`](#windowed-metrics). No charts — plot
+  post-hoc.
 - [`check`](#check) — parse and validate a `strategy.yml` or `get --overlay`
   spec without running it. Nested: `check strategy` / `check overlay`.
 - [`optimize`](#optimize) — sweep a strategy over a parameter grid in
@@ -108,7 +109,7 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
 | --- | --- |
 | `<STRATEGY>` | Positional. `@file.yml` loads a file; anything else is inline YAML. An optional shape prefix picks the strategy shape: `single:` (or no prefix) for a `SingleAssetStrategy`, `pairs:` for a two-leg `PairsStrategy`. See [Strategy shape prefix](#strategy-shape-prefix). |
 | `-s`, `--series <SPEC>` | Data series. Repeatable. See [--series](#--series). |
-| `-o`, `--output-dir <DIR>` | Directory to write `trades.csv`, `returns.csv`, and `metrics.yml` into (plus `metrics.csv` + `rolling.csv` under `-w`). Created if missing. Plain path — no interpolation. |
+| `-o`, `--output-dir <DIR>` | Directory to write `fills.csv`, `trades.csv`, `returns.csv`, and `metrics.yml` into (plus `metrics.csv` + `rolling.csv` under `-w`). Created if missing. Plain path — no interpolation. |
 | `-p`, `--params <SPEC>` | Placeholder substitution. Repeatable. See [--params](#--params). |
 | `-c`, `--cash <N>` | Initial funds for the paper wallet. Default `10000`. |
 | `--costs <SPEC>` | Trading-cost model — commission, spread, slippage — applied to every fill. Repeatable. See [--costs](#--costs). Omit for a frictionless run (matches the pre-costs release byte-for-byte). |
@@ -122,7 +123,8 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
 **Outputs.** Files in `--output-dir`, all documented in
 [Output files](#output-files):
 
-- `trades.csv` — one row per fill.
+- `fills.csv` — one row per booked order (wallet's operation log).
+- `trades.csv` — one row per closed round-trip trade (entry → exit, realized P&L, holding period). Empty (header-only) for a run that never closes a position (e.g. buy-and-hold).
 - `returns.csv` — one row per bar (equity, per-bar return).
 - `metrics.yml` — the whole-run backtest report; always written.
 - `metrics.csv` — one row per non-overlapping window (written only under `-w/--windowed <N>`).
@@ -152,12 +154,14 @@ The strategy positional accepts an optional shape prefix:
 Any other prefix is rejected as an unknown shape.
 
 **Console output** (unless `-q`): a two-line banner, then blocks for
-**inputs** (strategy, params, period, capital, output), **trades**
-(each fill listed after the run completes), **result** (bars, trades, capital
+**inputs** (strategy, params, period, capital, output), **fills**
+(each fill listed after the run completes), **result** (bars, fills, capital
 before → after, start/finish timestamps + elapsed), and **metrics**
-(the headline lines of `metrics.yml`). Under `-w/--windowed` a further
-**windowed metrics** block prints right after **metrics**, showing
-`mean ± std` over the non-overlapping windows of `metrics.csv` for the same
+(the headline lines of `metrics.yml` — note the metrics block's `trades:`
+line counts *closed round-trips*, matching `trades.csv`). Under
+`-w/--windowed` a further **windowed metrics** block prints right after
+**metrics**, showing `mean ± std` over the non-overlapping windows of
+`metrics.csv` for the same
 headline stats — so the whole-run point estimate and its cross-window
 dispersion sit side-by-side. Metrics cover the whole run; the strategy
 layer's readiness default (see [Stability gating](#stability-gating)) holds
@@ -672,7 +676,7 @@ price:
    stop/take-profit fills (default `1.5×` for a triggered stop in a
    fast market).
 4. The resulting price is what's stamped on the [`Order`](#output-files)
-   and recorded as `trades.csv`'s `price` column.
+   and recorded as `fills.csv`'s `price` column.
 5. Commission is computed from the *final* price × units and written to a
    separate `commission` column — never netted into `price`.
 
@@ -763,7 +767,7 @@ fugazi run @strategy.yml -s @candles.csv -o out/ \
 fugazi run @strategy.yml -s @candles.csv -o out/ --costs none
 ```
 
-**Reporting.** When a cost model is active, `trades.csv` gains a
+**Reporting.** When a cost model is active, `fills.csv` gains a
 `commission` column and `metrics.yml` a [`costs:` section](#costs-catalogue)
 with `total_commission`, `total_slippage_cost`, and `cost_drag_pct` (gross
 CAGR minus net CAGR). The console `metrics` block prints both the **gross**
@@ -1061,10 +1065,11 @@ in the same pass.
 
 All CSV files are `,`-delimited.
 
-### `trades.csv` (from `run`)
+### `fills.csv` (from `run`)
 
-One row per fill booked by the wallet — market entries, market exits, and
-resting protective triggers alike.
+One row per booked order — market entries, market exits, and resting
+protective triggers alike. The wallet's raw operation log; each row is one
+`Order` the strategy translated into.
 
 | Column | Meaning |
 | --- | --- |
@@ -1074,7 +1079,32 @@ resting protective triggers alike.
 | `units` | Fill size, in instrument units. |
 | `price` | Fill price. Market orders fill at the next bar's `open`; protective legs fill at their trigger level (or the bar's `open` on a gap). With [`--costs`](#--costs) active, this is the *final* price — post-spread, post-slippage. |
 | `kind` | `market`, `stop`, or `take_profit`. |
-| `commission` | Commission paid on this fill, in reference currency (from the [`--costs`](#--costs) commission leg). **Only present when `--costs` is active.** Omitted otherwise so a zero-cost `trades.csv` matches the pre-costs schema byte-for-byte. |
+| `commission` | Commission paid on this fill, in reference currency (from the [`--costs`](#--costs) commission leg). **Only present when `--costs` is active.** Omitted otherwise so a zero-cost `fills.csv` matches the pre-costs schema byte-for-byte. |
+
+### `trades.csv` (from `run`)
+
+One row per **closed round-trip trade** — the same reduction the metrics
+document uses ([`fugazi::metrics::reconstruct_trades`](../src/metrics.rs)),
+so `trades.csv`'s row count matches `metrics.yml`'s `trades.total`.
+Same-side fills roll into the open leg with a volume-weighted entry;
+opposite-side fills close it (and, on a cross-zero reversal, re-open the
+remainder as a fresh trade).
+
+An open position at end of run has no exit and does not appear here — so a
+strategy that never closes (e.g. buy-and-hold) produces a header-only
+`trades.csv`. Use `fills.csv` for the full operation log.
+
+| Column | Meaning |
+| --- | --- |
+| `entry_time` | Bar timestamp of the leg's opening (or last re-averaging) fill. |
+| `exit_time` | Bar timestamp of the closing fill. |
+| `side` | `long` (opened via a buy) or `short` (opened via a sell). |
+| `units` | Leg magnitude, in instrument units. |
+| `entry_price` | Volume-weighted average price of the opening leg. |
+| `exit_price` | Fill price of the closing leg. |
+| `pnl` | Realized P&L in reference (quote) currency. |
+| `return` | P&L as a fraction of entry notional (`entry_price × units`); `0` when that notional is degenerate. |
+| `bars_held` | `exit_bar − entry_bar` (`0` for a same-bar open+close). |
 
 ### `returns.csv` (from `run`)
 

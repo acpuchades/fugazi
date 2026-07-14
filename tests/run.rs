@@ -4,8 +4,9 @@
 
 use std::process::Command;
 
-/// The three result artefacts a run writes into its `--output-dir`.
+/// The result artefacts a run writes into its `--output-dir`.
 struct Artefacts {
+    fills: String,
     trades: String,
     returns: String,
     metrics: String,
@@ -32,6 +33,7 @@ fn run_backtest(out_name: &str, strategy: &str) -> Artefacts {
     assert!(status.success(), "fugazi run exited with failure");
 
     Artefacts {
+        fills: std::fs::read_to_string(out.join("fills.csv")).expect("fills.csv"),
         trades: std::fs::read_to_string(out.join("trades.csv")).expect("trades.csv"),
         returns: std::fs::read_to_string(out.join("returns.csv")).expect("returns.csv"),
         metrics: std::fs::read_to_string(out.join("metrics.yml")).expect("metrics.yml"),
@@ -59,13 +61,19 @@ fn runs_an_at_file_strategy() {
     );
 
     assert!(
-        out.trades.starts_with("time,symbol,side,units,price"),
-        "unexpected trades.csv header: {}",
-        out.trades
+        out.fills.starts_with("time,symbol,side,units,price"),
+        "unexpected fills.csv header: {}",
+        out.fills
     );
     assert!(
-        out.trades.lines().count() >= 2,
-        "expected at least one trade, got:\n{}",
+        out.fills.lines().count() >= 2,
+        "expected at least one fill, got:\n{}",
+        out.fills
+    );
+    assert!(
+        out.trades
+            .starts_with("entry_time,exit_time,side,units,entry_price,exit_price,pnl,return,bars_held"),
+        "unexpected trades.csv header: {}",
         out.trades
     );
     // Header + one row per candle (30 bars in the example).
@@ -243,11 +251,11 @@ long:
         "fugazi run exited with failure:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    // The trades.csv should show at least one buy after stability.
-    let trades = std::fs::read_to_string(out_dir.join("trades.csv")).expect("trades.csv");
+    // The fills.csv should show at least one buy after stability.
+    let fills = std::fs::read_to_string(out_dir.join("fills.csv")).expect("fills.csv");
     assert!(
-        trades.lines().count() >= 2,
-        "expected at least one trade line beyond the header:\n{trades}"
+        fills.lines().count() >= 2,
+        "expected at least one fill line beyond the header:\n{fills}"
     );
 }
 
@@ -260,13 +268,19 @@ fn runs_an_inline_strategy() {
     );
 
     assert!(
-        out.trades.starts_with("time,symbol,side,units,price"),
-        "unexpected trades.csv header: {}",
-        out.trades
+        out.fills.starts_with("time,symbol,side,units,price"),
+        "unexpected fills.csv header: {}",
+        out.fills
     );
     assert!(
-        out.trades.lines().count() >= 2,
-        "expected at least one trade, got:\n{}",
+        out.fills.lines().count() >= 2,
+        "expected at least one fill, got:\n{}",
+        out.fills
+    );
+    assert!(
+        out.trades
+            .starts_with("entry_time,exit_time,side,units,entry_price,exit_price,pnl,return,bars_held"),
+        "unexpected trades.csv header: {}",
         out.trades
     );
     assert!(

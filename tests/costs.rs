@@ -1,19 +1,19 @@
 //! End-to-end tests of the `fugazi run` / `fugazi optimize` / `fugazi check`
 //! subcommands' `--costs` flag over the example candles.
 //!
-//! Backward-compat: a run without `--costs` produces the pre-costs `trades.csv`
+//! Backward-compat: a run without `--costs` produces the pre-costs `fills.csv`
 //! header shape (no `commission` column) and a `metrics.yml` that omits the
 //! `costs:` section — so an existing pipeline reads it unchanged.
 //!
 //! With `--costs`, the wallet applies the spread → slippage → commission
-//! pipeline; `trades.csv` gains a populated `commission` column and
+//! pipeline; `fills.csv` gains a populated `commission` column and
 //! `metrics.yml` gains a `costs:` block with `total_commission`,
 //! `total_slippage_cost`, and `cost_drag_pct`.
 
 use std::process::Command;
 
 struct Artefacts {
-    trades: String,
+    fills: String,
     metrics: String,
 }
 
@@ -42,20 +42,20 @@ fn run_with(costs_flags: &[&str], out_name: &str) -> Artefacts {
     assert!(status.success(), "fugazi run exited with failure");
 
     Artefacts {
-        trades: std::fs::read_to_string(out.join("trades.csv")).expect("trades.csv"),
+        fills: std::fs::read_to_string(out.join("fills.csv")).expect("fills.csv"),
         metrics: std::fs::read_to_string(out.join("metrics.yml")).expect("metrics.yml"),
     }
 }
 
 /// A run without `--costs` matches the pre-costs schema byte-for-byte: no
-/// `commission` column on `trades.csv`, no `costs:` section on `metrics.yml`.
+/// `commission` column on `fills.csv`, no `costs:` section on `metrics.yml`.
 #[test]
 fn no_costs_flag_preserves_pre_costs_schema() {
     let out = run_with(&[], "fugazi_costs_absent");
-    let header = out.trades.lines().next().expect("trades.csv header");
+    let header = out.fills.lines().next().expect("fills.csv header");
     assert_eq!(
         header, "time,symbol,side,units,price,kind",
-        "trades.csv header should not include `commission` when no cost flag was passed"
+        "fills.csv header should not include `commission` when no cost flag was passed"
     );
     assert!(
         !out.metrics.contains("costs:"),
@@ -70,7 +70,7 @@ fn no_costs_flag_preserves_pre_costs_schema() {
 fn costs_none_matches_no_costs_schema() {
     let a = run_with(&[], "fugazi_costs_none_a");
     let b = run_with(&["none"], "fugazi_costs_none_b");
-    assert_eq!(a.trades, b.trades, "trades.csv should be identical");
+    assert_eq!(a.fills, b.fills, "fills.csv should be identical");
     assert_eq!(a.metrics, b.metrics, "metrics.yml should be identical");
 }
 
@@ -82,14 +82,14 @@ fn costs_flag_populates_commission_and_costs_section() {
         &["commission=!percentage { rate: 0.001 },spread=!bps { bps: 5 }"],
         "fugazi_costs_binance_like",
     );
-    let header = out.trades.lines().next().expect("trades.csv header");
+    let header = out.fills.lines().next().expect("fills.csv header");
     assert_eq!(
         header, "time,symbol,side,units,price,kind,commission",
-        "trades.csv header should include `commission` when a cost model is set"
+        "fills.csv header should include `commission` when a cost model is set"
     );
-    // At least one trade row should record a positive commission.
+    // At least one fill row should record a positive commission.
     let has_commission = out
-        .trades
+        .fills
         .lines()
         .skip(1)
         .filter_map(|l| l.rsplit(',').next())
@@ -98,7 +98,7 @@ fn costs_flag_populates_commission_and_costs_section() {
     assert!(
         has_commission,
         "expected at least one non-zero commission cell:\n{}",
-        out.trades
+        out.fills
     );
     // metrics.yml should carry a populated costs section.
     assert!(
@@ -125,7 +125,7 @@ fn binance_preset_end_to_end() {
         "fugazi_costs_binance_preset",
     );
     assert!(
-        out.trades.lines().next().unwrap().ends_with(",commission"),
+        out.fills.lines().next().unwrap().ends_with(",commission"),
         "binance preset should populate the commission column"
     );
     assert!(
@@ -164,7 +164,7 @@ fn ibkr_preset_end_to_end() {
         "fugazi_costs_ibkr_preset",
     );
     assert!(
-        out.trades.lines().next().unwrap().ends_with(",commission"),
+        out.fills.lines().next().unwrap().ends_with(",commission"),
         "ibkr preset should populate the commission column"
     );
     assert!(
@@ -357,14 +357,14 @@ exit: !below
     let _ = std::fs::remove_file(&pairs_yaml);
     assert!(status.success(), "fugazi pairs run exited with failure");
 
-    let trades = std::fs::read_to_string(out.join("trades.csv")).expect("trades.csv");
-    let header = trades.lines().next().unwrap();
+    let fills = std::fs::read_to_string(out.join("fills.csv")).expect("fills.csv");
+    let header = fills.lines().next().unwrap();
     assert_eq!(header, "time,symbol,side,units,price,kind,commission");
 
     // Collect commission rates (commission / notional) per leg.
     let mut a_rates = Vec::new();
     let mut b_rates = Vec::new();
-    for row in trades.lines().skip(1) {
+    for row in fills.lines().skip(1) {
         let cols: Vec<&str> = row.split(',').collect();
         assert_eq!(cols.len(), 7);
         let sym = cols[1];
@@ -379,8 +379,8 @@ exit: !below
             b_rates.push(rate);
         }
     }
-    assert!(!a_rates.is_empty(), "expected A fills:\n{trades}");
-    assert!(!b_rates.is_empty(), "expected B fills:\n{trades}");
+    assert!(!a_rates.is_empty(), "expected A fills:\n{fills}");
+    assert!(!b_rates.is_empty(), "expected B fills:\n{fills}");
     for r in &a_rates {
         assert!((r - 0.10).abs() < 1e-6, "A leg should pay 10%: got {r}");
     }
@@ -391,7 +391,7 @@ exit: !below
 
 /// A pairs runtime driver that lets us reuse one CSV fixture across
 /// unscoped / frequency-scoped / symbol-scoped tests. Runs the strategy
-/// with `costs` (verbatim), parses `trades.csv`, returns the per-leg
+/// with `costs` (verbatim), parses `fills.csv`, returns the per-leg
 /// commission rates (`commission / notional`) as a `(Vec<f64>, Vec<f64>)`
 /// keyed on `A`/`B`.
 fn run_pairs_with_costs(out_name: &str, costs: &str) -> (Vec<f64>, Vec<f64>) {
@@ -462,14 +462,14 @@ exit: !below
         ])
         .status()
         .expect("failed to launch fugazi");
-    let trades = std::fs::read_to_string(out.join("trades.csv")).expect("trades.csv");
+    let fills = std::fs::read_to_string(out.join("fills.csv")).expect("fills.csv");
     let _ = std::fs::remove_file(&csv);
     let _ = std::fs::remove_file(&pairs_yaml);
     assert!(status.success(), "fugazi pairs run exited with failure");
 
     let mut a = Vec::new();
     let mut b = Vec::new();
-    for row in trades.lines().skip(1) {
+    for row in fills.lines().skip(1) {
         let cols: Vec<&str> = row.split(',').collect();
         let sym = cols[1];
         let units: f64 = cols[3].parse().unwrap();

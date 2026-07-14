@@ -136,7 +136,7 @@ pub struct IterationResult {
     /// Precomputed summary numbers so callers don't reduce the report twice.
     pub summary: SummaryRow,
     /// True when a cost model was active — governs `commission` column
-    /// emission in the trade CSV and gross/net console rows.
+    /// emission in `fills.csv` and gross/net console rows.
     pub costs_active: bool,
 }
 
@@ -144,7 +144,10 @@ pub struct IterationResult {
 /// report to these numbers twice.
 pub struct SummaryRow {
     pub final_equity: Real,
-    pub trades: usize,
+    /// Count of booked fills (`report.fills.len()`). One per wallet order.
+    /// Distinct from the round-trip trade count in
+    /// [`metrics::Metrics::trades`]`.total`, which counts closed legs.
+    pub fills: usize,
     pub bars: usize,
 }
 
@@ -417,7 +420,7 @@ where
     let final_equity = report.equity_curve.last().copied().unwrap_or(inputs.cash);
     let summary = SummaryRow {
         final_equity,
-        trades: report.fills.len(),
+        fills: report.fills.len(),
         bars: report.equity_curve.len(),
     };
     IterationResult {
