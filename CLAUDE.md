@@ -1,24 +1,23 @@
 # CLAUDE.md
 
-Guidance for Claude Code when working in this repo.
+Guidance for Claude Code in this repo.
 
 ## What this is
 
 `fugazi` is a Rust library (edition 2024) of **incremental** technical-analysis primitives. Every primitive owns its state and advances one sample at a time via `update()` in ~O(1) — same code for live streaming and batch backtesting.
 
-Unconditional deps: `serde`+`serde_json`, `time`, `statrs` (Φ/Φ⁻¹ for PSR/DSR). Default-on features: **`sources`** (remote providers, async HTTP), **`runtime`** (type-erasure vocabulary in `fugazi::runtime`), **`cli`** (binary; implies both). New unconditional deps are judgment calls — reach for closed-form first.
+Unconditional deps: `serde`+`serde_json`, `time`, `statrs` (Φ/Φ⁻¹ for PSR/DSR). Default-on features: **`sources`** (remote providers), **`runtime`** (type-erasure vocabulary in `fugazi::runtime`), **`cli`** (binary; implies both). New unconditional deps are judgment calls — reach for closed-form first.
 
 ## Commands
 
-- Build: `cargo build`; Test: `cargo test` (single: `cargo test <name>`; one integration: `cargo test --test composition`)
-- Lint: `cargo clippy --all-targets` (keep clean); Docs: `cargo doc --open`
+- Build: `cargo build`; Test: `cargo test`; Lint: `cargo clippy --all-targets` (keep clean); Docs: `cargo doc --open`
 
 ### Bumping the version — sync **four** places (`cargo build` only catches Rust drift)
 
 1. `Cargo.toml` (workspace root, `X.Y.Z`)
 2. `python/Cargo.toml` (pyo3 cdylib, `X.Y.Z`)
 3. `python/pyproject.toml` (wheel metadata, `X.Y.Z` — what `pip install fugazi` sees)
-4. `README.md` — `## Install` snippet, `fugazi = "X.Y"` (major.minor only)
+4. `README.md` — `## Install` snippet, `fugazi = "X.Y"` (major.minor)
 
 Then `cargo build --workspace` (updates `Cargo.lock`), commit five files (three manifests + README + Lock), tag `vX.Y.Z`, push. `python/README.md` has no version string.
 
@@ -31,20 +30,12 @@ Three composable layers: indicators (numeric sources), signals (`Indicator<Outpu
 `Indicator` has `Input`/`Output`, `update(&mut self, Input) -> Option<Output>`, `value()`, `is_ready()`, `reset()`, plus:
 
 - **`warm_up_period()`** — *exact* samples before first `Some`. Wrappers add on top; binary carriers take max. `tests/warm_up.rs` asserts exactness — add new indicators to that battery.
-- **`unstable_period()`** (default `0`) — extra samples IIR smoothers need for seed's residual to decay below `SETTLE_TOLERANCE = 1e-3` (`smoothing.rs`). Wrappers sum into source's.
+- **`unstable_period()`** (default `0`) — extra samples IIR smoothers need for seed's residual to decay below `SETTLE_TOLERANCE = 1e-3`. Wrappers sum into source's.
 - **`stable_period()`** = warm-up + unstable.
 
 Output is `Option` (warm-up → `None`).
 
-**Defining choice: price-series indicators own their source, generic over it** — `Ema<S>`, `Sma<S>`, `Rma<S>`, `Rsi<S>`, `Macd<S>` where `S: Indicator<Output = Real>`, `Input = S::Input`. Composition = nesting constructors:
-
-```rust
-Ema::new(Current::close(), 20)          // EMA-20 of close
-Ema::new(Sma::new(src, 10), 20)         // EMA of SMA
-Rsi::new(Identity::new(), 14)           // RSI of raw Real stream
-```
-
-**No pipe/`then`/`Chain`** — chaining *is* construction.
+**Defining choice: price-series indicators own their source, generic over it** — `Ema<S>`, `Sma<S>`, `Rma<S>`, `Rsi<S>`, `Macd<S>` where `S: Indicator<Output = Real>`, `Input = S::Input`. Composition = nesting constructors: `Ema::new(Current::close(), 20)`, `Ema::new(Sma::new(src, 10), 20)`, `Rsi::new(Identity::new(), 14)`. **No pipe/`then`/`Chain`** — chaining *is* construction.
 
 - **Leaf sources**: `Value<I>` (constant), `Identity<I = Real>` (passthrough; `Identity::<Atom>::new()` = default atom source), `Current` candle accessors (`Current::close()`/`Current::volume()`; via `Field<F, S>`/`CandleField`). Every source-generic leaf — `Field<F, S>` (`Close`/`High`/`Low`/`Open`/`Volume`/`Typical`/`Median`), `CurrentBar<S>`, `Calendar<F, S>`, `CurrentTime<S>`, `IsWeekday<S>`, `IsWeekend<S>` — is generic over `S: Indicator<Output = Atom>` (default `Identity<Atom>`). `T::new()` uses default, `T::of(source)` re-roots on custom.
 
@@ -74,7 +65,7 @@ Rsi::new(Identity::new(), 14)           // RSI of raw Real stream
 
 ### Signals — boolean indicators (`src/signal.rs`, `src/indicators/{compare,logic,ext}.rs`)
 
-**A signal is just `Indicator<Output = bool>`** — no second trait hierarchy. `Signal` is thin marker `trait Signal: Indicator<Input = Candle, Output = bool>` (blanket-impl'd, `?Sized`) so strategies hold `Box<dyn Signal>`. `None` until warmed; read as `bool` (false until ready) via `BoolIndicatorExt::is_true`. No `src/signals/` — under `indicators/`.
+**A signal is just `Indicator<Output = bool>`** — no second trait hierarchy. `Signal` is thin marker `trait Signal: Indicator<Input = Candle, Output = bool>` (blanket, `?Sized`) so strategies hold `Box<dyn Signal>`. `None` until warmed; read as `bool` (false until ready) via `BoolIndicatorExt::is_true`.
 
 - **Comparisons**: aliases `Gt`/`Lt`/`Ge`/`Le`/`Eq`/`Ne` for `Combine<L, R, GtOp>` etc. Op carries absolute `epsilon` (default `1e-8`); `Gt::with_epsilon(a, b, eps)` overrides.
 - **Boolean logic**: `And`/`Or`/`Xor` are `Combine<...>`; `Not` and `Change` are dedicated unary carriers; `Const<In>` is constant-bool leaf.
@@ -119,27 +110,23 @@ Each bar the driver: feed each symbol to wallet, route each fill to every strate
 `src/strategy.rs` carries only the `Strategy` trait. `Wallet` vocabulary lives in **`src/wallet.rs`** so downstream broker crates don't drag `Strategy` machinery.
 
 - **`Wallet<Sym>`** (`&mut dyn`) — single **seam** to downstream execution. Priced **from outside**: `update(symbol, candle) -> Vec<Order>` feeds bar per tick (`close` marks, `[low, high]` bounds fills), returns fills booked. Query: `funds()`/`position(&Sym)`/`price(&Sym)`/`equity()`.
-- **Submitting ≠ filling.** Market moves — `set_position` (absolute units), `set` (Side + Size, absolute target; opposite reverses), `close` — return `Ack::Filled(Order)` or `Ack::Working(OrderId)`. Resting protective — `set_stop`/`set_take_profit` (idempotent, latest-wins; wallet reads side from position) + `cancel_protective(&sym)` — wallet-triggered and priced.
+- **Submitting ≠ filling.** Market moves (`set_position`, `set` (Side + Size, opposite reverses), `close`) return `Ack::Filled(Order)` or `Ack::Working(OrderId)`. Resting protective: `set_stop`/`set_take_profit` (idempotent, latest-wins; wallet reads side from position) + `cancel_protective(&sym)`.
 - **`PaperWallet` timing.** Queues market moves, fills at *next* bar's `open`; protective fill when bar trades through trigger (at level, or `open` on gap). Backtest never fills on signal's own bar.
 - **Errors.** `WalletError` (`UnknownPrice`, `InvalidPrice`, `PriceOutOfRange`, `InsufficientFunds`) returned by live impl; `PaperWallet` silently drops infeasible queued fills.
 - **No explicit-price primitive on trait, no `trade(delta)`** — scale-in is `set_position(position + delta)`.
 - **Unit-tagged amounts.** `Reference(Real)` (quote/funds), `Units<Sym> { symbol, amount }`. `Order<Sym>` = `{ symbol, side, units, price, kind, id }`; `OrderKind` = `Market`/`Stop`/`TakeProfit`. `Order::from_delta(...)` returns `None` within `DEFAULT_EPSILON`.
-- **`PaperWallet<Sym>`** — in-memory: market moves queue one per symbol (latest wins) → `Ack::Working`; resting stops register one bracket (latest wins). `update` marks bar, flushes queued at `open`, matches resting against `[low, high]` (stop precedence; fill flattens+OCO-cancels bracket). Resting fill price provably in `[low, high]` so `PriceOutOfRange` unreachable.
+- **`PaperWallet<Sym>`** — in-memory: market moves queue one per symbol (latest wins); resting stops register one bracket. `update` marks bar, flushes queued at `open`, matches resting against `[low, high]` (stop precedence; fill flattens+OCO-cancels bracket). Resting fill price provably in `[low, high]` so `PriceOutOfRange` unreachable.
 - **`Ack<Sym>`** (`Filled(Order) | Working(OrderId)`), **`OrderId(u64)`** wallet-minted. Execution **synchronous**; live fills between bars reach strategy via `on_fill`.
 - **`Size`**: `Units(n)`, `FundsFraction(f)` (`f·funds/price`), `ValueFraction(f)` (`f·equity/price`; `1.0` flips cleanly on reversal), `PositionFraction(f)` (`f·|position|`, adjust-only). Direction from `Side`.
-- **No `Market` trait**: wallet holds prices. Python binds `PaperWallet`/`Order`/`Size` (sides `"buy"`/`"sell"`; `WalletError` → `ValueError`).
+- No `Market` trait: wallet holds prices. Python binds `PaperWallet`/`Order`/`Size` (sides `"buy"`/`"sell"`; `WalletError` → `ValueError`).
 
-### Run driver — pure per-bar loop (`src/backtest.rs`)
+### Run driver (`src/backtest.rs`)
 
-**`fugazi::backtest::run(&mut strategy, &mut wallet, snapshots) -> RunReport<Sym>`** walks a `Strategy` over a snapshot stream through any `impl Wallet<Sym>` (live too, hence neutral name).
+**`fugazi::backtest::run(&mut strategy, &mut wallet, snapshots) -> RunReport<Sym>`** walks a `Strategy` over a snapshot stream through any `impl Wallet<Sym>` (live too).
 
-**Per-bar.** For each tagged entry in `Snapshot<Sym>` (`(symbol, freq, atom)` where `symbol: Some`): `wallet.update(symbol, atom.candle)`, route fills to `on_fill`, append bar-tagged to blotter. Untagged entries (`Snapshot::of_atom` or `From<Atom>`/`From<Candle>` lifts) skipped for wallet pricing but visible to strategy. Then `strategy.update(snap)` → `strategy.trade(wallet)` **iff `is_ready()`** → push `wallet.equity().0` to curve.
+**Per-bar.** For each tagged entry in `Snapshot<Sym>` (`(symbol, freq, atom)` where `symbol: Some`): `wallet.update(symbol, atom.candle)`, route fills to `on_fill`, append bar-tagged to blotter. Untagged entries skipped for wallet pricing but visible to strategy. Then `strategy.update(snap)` → `strategy.trade(wallet)` iff `is_ready()` → push `wallet.equity().0` to curve.
 
-**Signature.** `run<Sym, S, W, I, A>` with `S: Strategy<Symbol = Sym, Input = Snapshot<Sym>>`, `W: Wallet<Sym>`, `A: Into<Snapshot<Sym>>`. `Vec<Atom>`/`Vec<Candle>` produce untagged size-1 snapshots. Single-series callers use `Snapshot::single(sym, atom)`.
-
-**Report.** `RunReport<Sym> { equity_curve, fills, initial_equity }` — one equity per snapshot; `fills` = booked `Order`s as `Fill<Sym> { bar, order }`; `initial_equity` = wallet equity before first bar.
-
-CLI's `run()`/`evaluate()` sits on this. `Fill`/`RunReport` re-exported; `run` namespaced.
+`run<Sym, S, W, I, A>` where `A: Into<Snapshot<Sym>>`. `Vec<Atom>`/`Vec<Candle>` produce untagged size-1 snapshots; single-series callers use `Snapshot::single(sym, atom)`. `RunReport<Sym> { equity_curve, fills, initial_equity }` — `fills` are `Fill<Sym> { bar, order }`. `Fill`/`RunReport` re-exported at crate root; `run` namespaced.
 
 ### Metrics — one function per metric (`src/metrics.rs`)
 
@@ -201,7 +188,7 @@ fugazi run @strategy.yml -s @prices.csv -s @caps.csv -o out/
 
 `OUT=QUERY` remap lines up join key. Cross-sectional `BasketStrategy` is the natural consumer.
 
-**CoinGecko specifics.** `market_chart/range` picks granularity from window length (~5-min ≤1d, hourly ≤90d, daily beyond). Client rejects sub-hourly, paginates hourly in 80-day windows, buckets onto requested cadence's bar-open keeping **first** sample per bucket. Weekly floors to Monday, monthly to 1st via calendar (epoch day 0 was Thursday, silent Monday-join failure otherwise). Descriptive `User-Agent` **mandatory**. Public tier serves **last 365 days** only. `COINGECKO_API_KEY` picked up as demo key.
+**CoinGecko specifics.** `market_chart/range` picks granularity from window length (~5-min ≤1d, hourly ≤90d, daily beyond). Client rejects sub-hourly, paginates hourly in 80-day windows, buckets onto requested cadence keeping **first** sample per bucket. Weekly floors to Monday, monthly to 1st via calendar (epoch day 0 = Thursday would silently break Monday joins). `User-Agent` **mandatory**. Public tier serves **last 365 days** only. `COINGECKO_API_KEY` = demo key.
 
 ## Safe defaults, opt-in overrides
 
@@ -231,16 +218,16 @@ One binary (`fugazi`); layout by concern:
 
 - **`main.rs`** — clap defs, subcommand dispatch.
 - **`run.rs`, `optimize.rs`, `backtest.rs`** — user-facing drivers sit on pure `backtest` (`run_iteration`, `evaluate`, `evaluate_windowed`). `backtest.rs` owns no IO.
-- **`get.rs`** — `fugazi get`. Grammar: `<provider>:[OUT=]<symbol>[[OFREQ=]<freq>,...]`. Remaps read **left = emitted, right = fetched**. `OUT=` decouples emitted `symbol` from provider id (`cg:BTCUSDT=bitcoin[1d]`) — makes `--series` join line up. `OFREQ=` decouples emitted `freq` from fetched cadence; **relabels, doesn't resample** — mapping across *different* durations produces rows no price bar can join. Two pipelines by `resolve_mode`, **never mixed**: `run_candles` (OHLCV + `-x`) and `run_overlay_columns` (`OverlaySource`, no OHLCV; `-x` rejected). `get --params` resolves `!param` inside `-x/--overlay` via `overlay::parse_specs(specs, &param_table)`.
+- **`get.rs`** — `fugazi get`. Grammar: `<provider>:[OUT=]<symbol>[[OFREQ=]<freq>,...]`. **Left = emitted, right = fetched.** `OUT=` decouples emitted `symbol` from provider id (`cg:BTCUSDT=bitcoin[1d]`) — makes `--series` join line up. `OFREQ=` decouples emitted `freq` from fetched cadence; **relabels, doesn't resample**. Two pipelines by `resolve_mode`, **never mixed**: `run_candles` (OHLCV + `-x`) and `run_overlay_columns` (`OverlaySource`, no OHLCV; `-x` rejected). `get --params` resolves `!param` inside `-x/--overlay`.
 - **`spec/`** — YAML mirror of composition API:
-  - `expr.rs` — `ExprSpec` (value-producing enum; polymorphic over `DynType` for `!current`/`!pick`/`!time`/`!get`/`!if_else`/`!value`); `default_source`/`default_high`/`default_low`/`default_bar_source` helpers; **`ValueLit`** — `!value` payload, number (→ `Value`, `Real`) or string (→ `ValueStr`, `Str`; quoting picks type). Deserializes via `serde_norway::Value` bridge (`#[serde(untagged)]` buffering can't see YAML tags).
-  - `signal.rs` — `SignalSpec` + **`StrOperand`** (rhs of `!str_eq`/`!str_ne`).
-  - `template.rs` — **`SpecTemplate<T>`**: captures raw `serde_json::Value`; `.build(&args)` runs `!arg` then typed-parses. **Untagged in YAML**. Two-pass: `!param` at load, `!arg` each `.build()`. Keyed on distinct singleton-object keys.
+  - `expr.rs` — `ExprSpec` (value-producing enum; polymorphic over `DynType` for `!current`/`!pick`/`!time`/`!get`/`!if_else`/`!value`); `default_source`/`default_high`/`default_low`/`default_bar_source` helpers; **`ValueLit`** — `!value` payload, number (→ `Value`, `Real`) or string (→ `ValueStr`, `Str`; quoting picks type). Uses `serde_norway::Value` bridge (`#[serde(untagged)]` buffering can't see YAML tags).
+  - `signal.rs` — `SignalSpec` + `StrOperand` (rhs of `!str_eq`/`!str_ne`).
+  - `template.rs` — `SpecTemplate<T>`: captures raw `serde_json::Value`; `.build(&args)` runs `!arg` then typed-parses. Untagged in YAML. Two-pass: `!param` at load, `!arg` each `.build()`. Keyed on distinct singleton-object keys.
   - `strategy.rs` — `SideSpec`, `SingleStrategySpec`, `DynSingleStrategy`.
-  - `preset.rs` — `StrategyPreset` (externally-tagged: `!buy_and_hold`/`!ma_crossover`/`!rsi_reversal`/`!donchian_breakout`/`!keltner_breakout`) and `StrategyRef` (`Spec | Preset`, bridge). `optimize` stays `SingleStrategySpec`-only.
-  - `trailing.rs` — trailing risk tags (`!sharpe`/`!sortino`/`!volatility`/`!max_drawdown`/`!calmar`). Wraps non-`Clone` `Sharpe<S>` etc. in `RebuildIndicator` rebuilding strategy on clone. `strategy:` is `AnyStrategyRef` (`Single | Pairs | Basket`); bridge routes by distinctive key (`left`+`right` → pairs, `selection` → basket).
+  - `preset.rs` — `StrategyPreset` (externally-tagged: `!buy_and_hold`/`!ma_crossover`/`!rsi_reversal`/`!donchian_breakout`/`!keltner_breakout`) and `StrategyRef` (`Spec | Preset` bridge). `optimize` = `SingleStrategySpec`-only.
+  - `trailing.rs` — `!sharpe`/`!sortino`/`!volatility`/`!max_drawdown`/`!calmar`. Wraps non-`Clone` `Sharpe<S>` etc. in `RebuildIndicator` rebuilding on clone. `strategy:` is `AnyStrategyRef` (`Single | Pairs | Basket`); bridge routes by distinctive key.
   - `pairs.rs` — `PairsStrategySpec`, `DynPairsStrategy`.
-  - `basket.rs` — `BasketStrategySpec` + `SelectionRuleSpec` (externally-tagged: `!top_bottom`/`!threshold`/`!quantile`). Fields: `selection`, `score: SpecTemplate<ExprSpec>`, `sizing: SpecTemplate<ExprSpec>`. `.build(initial_equity, schema)` clones templates into per-symbol factories resolving `!arg SYM`. `!entry`/`!peak`/`!trough` read dummy `Position` in score/sizing (always `None`). Shared `Book` wired: `!drawdown_throttle`/`!equity_vol_target`/`!fractional_kelly` work per-symbol against aggregate. `!equal_weight <N>` = sugar. Wired into `run.rs` (`basket:@basket.yml` → `run::run_basket`); `optimize` bails on baskets.
+  - `basket.rs` — `BasketStrategySpec` + `SelectionRuleSpec` (`!top_bottom`/`!threshold`/`!quantile`). Fields: `selection`, `score: SpecTemplate<ExprSpec>`, `sizing: SpecTemplate<ExprSpec>`. `.build(initial_equity, schema)` clones templates into per-symbol factories resolving `!arg SYM`. `!entry`/`!peak`/`!trough` read dummy `Position` in score/sizing (always `None`). Shared `Book` wired: book-anchored sizing recipes work per-symbol against aggregate. `!equal_weight <N>` = sugar. Wired into `run.rs`; `optimize` bails on baskets.
   - `mod.rs` — shared `load_value(text, params, base)` (`parse → !import → !param → typed parse`).
 - **`costs/`** — `--costs`:
   - `spec.rs` — CLI-arg parsing into `CostSpec`; `CostTerm` + `split_top_commas`/`parse_term`.
@@ -258,7 +245,7 @@ One binary (`fugazi`); layout by concern:
 
 ## Python bindings (`python/src/lib.rs`)
 
-**Type-erased mirror** of Rust library, pyo3 cdylib (`fugazi-python` → `fugazi`). Python can't carry source generics across FFI, so everything is erase-then-dispatch via **`fugazi::runtime`** (`DynIndicator`+`DynValue`, plus `DynIndicatorSync` subtrait adding `Send + Sync` and autotrait-preserving deep clone via `runtime::wrap_sync`). Output-typed carriers are generic **`TypedSource<In, Out>`** newtypes: `Source<I>`, `StrSource<I>`, `AtomBox<I>`, `SignalBox<I>` (flattens warm-up `None` to `Some(false)`). Multi-output stays local as `DynMulti<I>`/`MultiBox<I>`. `AnySource`/`AnySignal`/`AnyMulti` record input domain (candle/value/snapshot-rooted); `map_source!`/`combine_sources!`/`source_to_signal!`/`sources_to_signal!`/`map_signal!`/`combine_signals!`/`map_multi!`/`combine_multi!` macros dispatch. **Rule: mirror constructors use those macros; never name concrete `Ema<Sma<Current, …>, …>`.**
+**Type-erased mirror** of Rust library (pyo3 cdylib, `fugazi-python` → `fugazi`). Python can't carry source generics across FFI, so everything is erase-then-dispatch via **`fugazi::runtime`** (`DynIndicator`+`DynValue`, plus `DynIndicatorSync` subtrait adding `Send + Sync` and deep clone via `runtime::wrap_sync`). Output-typed carriers = `TypedSource<In, Out>` newtypes: `Source<I>`, `StrSource<I>`, `AtomBox<I>`, `SignalBox<I>` (flattens warm-up `None` to `Some(false)`). Multi-output stays local as `DynMulti<I>`/`MultiBox<I>`. `AnySource`/`AnySignal`/`AnyMulti` record input domain (candle/value/snapshot-rooted); `map_source!`/`combine_sources!`/`source_to_signal!`/`sources_to_signal!`/`map_signal!`/`combine_signals!`/`map_multi!`/`combine_multi!` macros dispatch. **Rule: mirror constructors use those macros; never name concrete `Ema<Sma<Current, …>, …>`.**
 
 ### Parity discipline
 
