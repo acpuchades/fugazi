@@ -17,14 +17,23 @@
 //!
 //! # Input, tagging, and the embedded wallet
 //!
-//! `Input = Snapshot<Sym>`, `Output = Real`. Each bar the indicator pulls the
-//! [sole atom](Snapshot::sole_atom) out of the incoming snapshot and **re-tags
-//! it** with the strategy's own `symbol` before driving the embedded wallet, so
-//! the wallet marks to market and books fills even when the snapshot arrives
-//! untagged (the CLI overlay path feeds a `DynValue::Atom` that lifts to an
-//! untagged size-1 snapshot). This is a single-asset construct: a 2+-entry
-//! snapshot trips [`Snapshot::sole_atom`]'s panic, the same tripwire the
-//! implicit [`Pick::new`](crate::indicators::Pick::new) uses.
+//! `Input = Snapshot<Sym>`, `Output = Real`. Each bar the indicator forwards the
+//! **whole** incoming snapshot to the embedded strategy and prices the embedded
+//! wallet from every entry — the same per-bar loop as
+//! [`backtest::run`](crate::backtest::run). Already-tagged entries flow through
+//! untouched, so a **multi-asset** strategy (pairs, basket, or any strategy that
+//! names its own symbols via
+//! [`Pick::matching`](crate::indicators::Pick::matching)) prices and trades every
+//! leg. Any **untagged** entry is first tagged with the strategy's own `symbol`,
+//! so a single-asset strategy fed the untagged size-1 snapshot of the CLI
+//! overlay path (a `DynValue::Atom` lift) prices its wallet and reads its
+//! sole-atom leaves exactly as before — the symbol demotes from a forced re-tag
+//! to a fallback for untagged input.
+//!
+//! The single-vs-multi tripwire is no longer here: a single-asset strategy
+//! accidentally fed a 2+-entry snapshot trips the implicit
+//! [`Pick::new`](crate::indicators::Pick::new) panic inside the strategy, the one
+//! place it already lives.
 //!
 //! # Formulas and parity with [`metrics`](crate::metrics)
 //!
@@ -53,7 +62,7 @@ use std::hash::Hash;
 use crate::indicator::Indicator;
 use crate::indicators::stats::WindowStats;
 use crate::strategy::Strategy;
-use crate::types::{Atom, Real, Snapshot};
+use crate::types::{Real, Snapshot};
 use crate::wallet::{PaperWallet, Wallet};
 
 /// `Some(num / denom)` when `denom` is a positive finite number, else `None` —
@@ -104,15 +113,25 @@ fn cagr(initial: Real, final_equity: Real, bars: usize, bars_per_year: Real) -> 
 // Shared engine: drive an owned Strategy against a private PaperWallet.
 // ---------------------------------------------------------------------------
 
-/// Drives an owned [`Strategy`] over a private [`PaperWallet`], one bar per
+/// Drives an owned [`Strategy`] over a private [`PaperWallet`], one snapshot per
 /// [`step`](Self::step), exposing the marked-to-market equity and the per-bar
 /// equity return. Replicates the per-bar loop of
-/// [`backtest::run`](crate::backtest::run) so an embedded strategy produces the
-/// same equity curve a standalone backtest would.
+/// [`backtest::run`](crate::backtest::run) verbatim, so an embedded strategy
+/// produces the same equity curve a standalone backtest would — including a
+/// **multi-asset** one (pairs, basket, or any strategy that names its own
+/// symbols).
+///
+/// The incoming snapshot is forwarded to the strategy *whole*: already-tagged
+/// entries flow through untouched (the multi-asset path), and any **untagged**
+/// entry is tagged with `fallback_symbol` first — so a single-asset strategy fed
+/// the untagged size-1 snapshot of the CLI overlay path still prices its wallet
+/// and reads its sole-atom leaves exactly as the old forced re-tag did.
 struct StrategyEngine<S: Strategy> {
     strategy: S,
     wallet: PaperWallet<S::Symbol>,
-    symbol: S::Symbol,
+    /// The tag applied to untagged snapshot entries. Demoted from a forced
+    /// re-tag to a fallback: tagged entries keep their own symbol.
+    fallback_symbol: S::Symbol,
     seed: Real,
     prev_equity: Real,
 }
@@ -122,27 +141,43 @@ where
     Sym: Clone + Eq + Hash,
     S: Strategy<Symbol = Sym, Input = Snapshot<Sym>>,
 {
-    fn new(strategy: S, symbol: Sym, seed: Real) -> Self {
+    fn new(strategy: S, fallback_symbol: Sym, seed: Real) -> Self {
         Self {
             strategy,
             wallet: PaperWallet::new(seed),
-            symbol,
+            fallback_symbol,
             seed,
             prev_equity: seed,
         }
     }
 
+    /// Tag every untagged entry with `fallback_symbol`; leave tagged entries as
+    /// they are. The result is what both the wallet-pricing loop and the
+    /// strategy see, so a single-asset strategy on untagged input behaves
+    /// exactly as the old forced re-tag did, while a tagged multi-asset snapshot
+    /// passes through so each leg prices and trades.
+    fn tagged(&self, snap: Snapshot<Sym>) -> Snapshot<Sym> {
+        snap.iter()
+            .map(|(sym, freq, atom)| {
+                let sym = sym.cloned().or_else(|| Some(self.fallback_symbol.clone()));
+                (sym, freq, atom.clone())
+            })
+            .collect()
+    }
+
     /// Advance one bar; return `(equity, per-bar return)`. Prices the wallet on
-    /// the (re-tagged) atom, routes the fills to `on_fill`, updates the
-    /// strategy, `trade`s it iff ready, then marks to market.
-    fn step(&mut self, atom: Atom) -> (Real, Real) {
-        let candle = atom.candle;
-        let fills = self.wallet.update(self.symbol.clone(), candle);
-        for fill in &fills {
-            self.strategy.on_fill(fill);
+    /// every (fallback-tagged) entry, routes the fills to `on_fill`, updates the
+    /// strategy with the whole snapshot, `trade`s it iff ready, then marks to
+    /// market — the per-bar loop of [`backtest::run`](crate::backtest::run).
+    fn step(&mut self, snap: Snapshot<Sym>) -> (Real, Real) {
+        let snap = self.tagged(snap);
+        for (sym, _freq, atom) in snap.iter() {
+            let Some(sym) = sym else { continue };
+            for fill in self.wallet.update(sym.clone(), atom.candle) {
+                self.strategy.on_fill(&fill);
+            }
         }
-        self.strategy
-            .update(Snapshot::single(self.symbol.clone(), atom));
+        self.strategy.update(snap);
         if self.strategy.is_ready() {
             self.strategy.trade(&mut self.wallet);
         }
@@ -161,13 +196,6 @@ where
         self.wallet.reset();
         self.prev_equity = self.seed;
     }
-}
-
-/// Pull the sole atom out of the incoming snapshot. Returns `None` on an empty
-/// snapshot (nothing to advance); panics on 2+ entries via
-/// [`Snapshot::sole_atom`] (single-asset tripwire).
-fn sole(snap: &Snapshot<impl Clone + Eq + Hash>) -> Option<Atom> {
-    snap.sole_atom().cloned()
 }
 
 // ---------------------------------------------------------------------------
@@ -191,9 +219,10 @@ where
     Sym: Clone + Eq + Hash,
     S: Strategy<Symbol = Sym, Input = Snapshot<Sym>>,
 {
-    /// `symbol` is the instrument the embedded wallet prices (re-tagged onto
-    /// every bar); `seed` the wallet's starting cash (scale-invariant for the
-    /// ratio); `risk_free_rate` the annualized rf as a fraction.
+    /// `symbol` is the fallback tag applied to untagged snapshot entries (the
+    /// instrument a single-asset embedded strategy prices); a tagged multi-asset
+    /// snapshot ignores it. `seed` is the wallet's starting cash (scale-invariant
+    /// for the ratio); `risk_free_rate` the annualized rf as a fraction.
     ///
     /// # Panics
     /// Panics if `period == 0`.
@@ -224,10 +253,10 @@ where
     type Output = Real;
 
     fn update(&mut self, snap: Snapshot<Sym>) -> Option<Real> {
-        let Some(atom) = sole(&snap) else {
+        if snap.is_empty() {
             return self.value;
-        };
-        let (_equity, ret) = self.engine.step(atom);
+        }
+        let (_equity, ret) = self.engine.step(snap);
         if self.stats.update(ret) {
             let excess = self.stats.mean() * self.bars_per_year - self.risk_free_rate;
             let vol = self.stats.sample_stddev() * self.bars_per_year.max(0.0).sqrt();
@@ -298,10 +327,10 @@ where
     type Output = Real;
 
     fn update(&mut self, snap: Snapshot<Sym>) -> Option<Real> {
-        let Some(atom) = sole(&snap) else {
+        if snap.is_empty() {
             return self.value;
-        };
-        let (_equity, ret) = self.engine.step(atom);
+        }
+        let (_equity, ret) = self.engine.step(snap);
         if self.stats.update(ret) {
             let rf_per_bar = if self.bars_per_year > 0.0 {
                 self.risk_free_rate / self.bars_per_year
@@ -366,10 +395,10 @@ where
     type Output = Real;
 
     fn update(&mut self, snap: Snapshot<Sym>) -> Option<Real> {
-        let Some(atom) = sole(&snap) else {
+        if snap.is_empty() {
             return self.value;
-        };
-        let (_equity, ret) = self.engine.step(atom);
+        }
+        let (_equity, ret) = self.engine.step(snap);
         if self.stats.update(ret) {
             self.value = Some(self.stats.sample_stddev() * self.bars_per_year.max(0.0).sqrt());
         }
@@ -438,10 +467,10 @@ where
     type Output = Real;
 
     fn update(&mut self, snap: Snapshot<Sym>) -> Option<Real> {
-        let Some(atom) = sole(&snap) else {
+        if snap.is_empty() {
             return self.value;
-        };
-        let (equity, _ret) = self.engine.step(atom);
+        }
+        let (equity, _ret) = self.engine.step(snap);
         self.equity.push_back(equity);
         if self.equity.len() > self.period + 1 {
             self.equity.pop_front();
@@ -510,10 +539,10 @@ where
     type Output = Real;
 
     fn update(&mut self, snap: Snapshot<Sym>) -> Option<Real> {
-        let Some(atom) = sole(&snap) else {
+        if snap.is_empty() {
             return self.value;
-        };
-        let (equity, _ret) = self.engine.step(atom);
+        }
+        let (equity, _ret) = self.engine.step(snap);
         self.equity.push_back(equity);
         if self.equity.len() > self.period + 1 {
             self.equity.pop_front();
@@ -553,7 +582,7 @@ mod tests {
     use crate::backtest;
     use crate::metrics;
     use crate::strategies::SingleAssetStrategy;
-    use crate::types::Candle;
+    use crate::types::{Atom, Candle};
 
     const SYM: &str = "X";
     const SEED: Real = 1_000.0;
@@ -693,5 +722,73 @@ mod tests {
             assert_eq!(s.update(snap(p)), None);
         }
         assert!(s.update(snap(prices()[3])).is_some());
+    }
+
+    // --- multi-asset engine path --------------------------------------------
+
+    use crate::wallet::{Side, Size, Wallet};
+
+    /// A minimal two-symbol strategy: once ready it goes long `A` and short `B`,
+    /// each half the equity, and holds. Reads its positions from the wallet
+    /// (like `MaCross` in `backtest.rs`) so it needs no signals. Used to prove
+    /// the trailing engine prices *both* legs from a 2-entry snapshot.
+    struct LongShortPair {
+        a: &'static str,
+        b: &'static str,
+    }
+
+    impl Strategy for LongShortPair {
+        type Input = Snapshot<&'static str>;
+        type Symbol = &'static str;
+        fn update(&mut self, _snap: Snapshot<&'static str>) {}
+        fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
+            if wallet.position(&self.a).amount.abs() < 1e-9 {
+                let _ = wallet.set(self.a, Side::Buy, Size::value_frac(0.5));
+            }
+            if wallet.position(&self.b).amount.abs() < 1e-9 {
+                let _ = wallet.set(self.b, Side::Sell, Size::value_frac(0.5));
+            }
+        }
+        fn reset(&mut self) {}
+    }
+
+    /// A 2-entry snapshot tagging both legs — the shape the old `sole_atom`
+    /// path would panic on.
+    fn pair_snap(a_px: Real, b_px: Real) -> Snapshot<&'static str> {
+        let mut s = Snapshot::new();
+        s.push(Some("A"), None, Atom::new(bar(a_px)));
+        s.push(Some("B"), None, Atom::new(bar(b_px)));
+        s
+    }
+
+    #[test]
+    fn drives_a_multi_asset_strategy_from_tagged_snapshots() {
+        // A drifts up, B drifts down: a long-A / short-B pair earns on both
+        // legs, so the engine must price *both* entries each bar. Under the old
+        // sole-atom collapse this 2-entry snapshot would have panicked.
+        let a = [100.0, 102.0, 101.0, 104.0, 106.0, 105.0, 108.0, 110.0];
+        let b = [100.0, 99.0, 100.0, 97.0, 96.0, 97.0, 95.0, 93.0];
+
+        let mut vol = Volatility::new(LongShortPair { a: "A", b: "B" }, "A", SEED, 5, BPY);
+        let mut sharpe = Sharpe::new(LongShortPair { a: "A", b: "B" }, "A", SEED, 5, 0.0, BPY);
+
+        let mut last_vol = None;
+        let mut last_sharpe = None;
+        for i in 0..a.len() {
+            last_vol = vol.update(pair_snap(a[i], b[i]));
+            last_sharpe = sharpe.update(pair_snap(a[i], b[i]));
+        }
+
+        // Both legs traded and marked to market → the equity curve has real
+        // variance, so volatility is defined and strictly positive, and the
+        // net-profitable pair yields a positive Sharpe.
+        assert!(
+            last_vol.expect("volatility defined once the window fills") > 0.0,
+            "expected positive equity-curve volatility from the traded pair"
+        );
+        assert!(
+            last_sharpe.expect("sharpe defined on the pair") > 0.0,
+            "long-A/short-B on diverging legs should be net profitable"
+        );
     }
 }

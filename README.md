@@ -616,6 +616,35 @@ to `close`. The vocabulary mirrors the library one-to-one:
   column (`lhs: !get { key: regime }`) against a string — `rhs` takes a bare
   literal (`rhs: bull`), the same constant as a source (`rhs: !value bull`), or
   a second `Str` column (`rhs: !get { key: prev_regime }`).
+- **Trailing strategy risk:** `!sharpe` / `!sortino` / `!volatility` /
+  `!max_drawdown` / `!calmar { strategy, period, bars_per_year, risk_free_rate? }`
+  — own an embedded strategy, drive it against a private wallet, and read a
+  rolling risk metric over its live equity curve (see the source list under
+  [What's included](#whats-included)). `strategy:` takes a **single-asset** spec,
+  a catalogue **preset** (`!ma_crossover { symbol, fast, slow }`, …), a **pairs**
+  spec (`left`/`right`), or a **basket** spec (`selection`/`score`/`sizing`) — the
+  embedded engine forwards the whole snapshot, so it runs whichever. A pairs /
+  basket strategy only produces meaningful numbers when the run feeds a tagged
+  multi-asset snapshot each bar (a `pairs:` / `basket:` run, or a multi-symbol
+  `--series` frame).
+
+For example, the trailing Sharpe of a BTC/ETH spread pair — a live "is this
+pair working lately" regime score, readable as an overlay column or composed
+into another strategy:
+
+```yaml
+!sharpe
+strategy:                      # a pairs body: same shape as a pairs: strategy file
+  left: BTC
+  right: ETH
+  enter: !crosses_below
+    lhs: !sub
+      lhs: !close { source: !pick { symbol: BTC } }
+      rhs: !close { source: !pick { symbol: ETH } }
+    rhs: !value 0.0
+period: 60
+bars_per_year: 8760
+```
 
 **Parameters — `!param`.** Any value in the strategy can be a placeholder resolved
 at run time with `--params` (repeatable), so one file covers many variations
@@ -681,12 +710,18 @@ The strategy positional accepts an optional shape prefix:
 - `pairs:` — a two-symbol `PairsStrategy` file (`pairs:@spread.yml`);
   the document declares `left`/`right` symbols and cross-asset
   signal / level expressions rooted through `!pick { symbol, freq }`.
+- `basket:` — an N-symbol cross-sectional `BasketStrategy` file
+  (`basket:@basket.yml`); the document declares a `selection` rule plus
+  per-symbol `score`/`sizing` templates (`!arg SYM` picks the current
+  symbol). `fugazi run` only — `optimize` doesn't sweep baskets yet.
 
 Any other prefix is rejected as an unknown shape. A single-asset run
 feeds every candle in the input series to the strategy in `time` order.
 A pairs run feeds the paired `(left, right)` atoms as one snapshot per
 bar; each leg is priced and can fill independently, and the strategy
-sees both symbols in the same snapshot.
+sees both symbols in the same snapshot. A basket run feeds every
+symbol's atom for that bar as one snapshot, ranks them by `score`, and
+trades the selected legs.
 
 ### Analyzing a run in R
 

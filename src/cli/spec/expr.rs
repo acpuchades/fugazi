@@ -31,9 +31,8 @@ use fugazi::indicators::{
 use fugazi::prelude::*;
 use fugazi::types::Snapshot;
 
-use super::preset::StrategyRef;
 use super::signal::SignalSpec;
-use super::trailing::{self, TrailingMetric};
+use super::trailing::{self, AnyStrategyRef, TrailingMetric};
 use crate::dyn_indicator::{self, AsAtom, AsBool, AsCandle, AsReal, DynIndicator};
 
 use fugazi::{Frequency, Selector};
@@ -571,7 +570,7 @@ pub enum ExprSpec {
     /// Trailing annualized Sharpe of `strategy`'s equity curve over the last
     /// `period` bars. See [`fugazi::indicators::Sharpe`].
     Sharpe {
-        strategy: Box<StrategyRef>,
+        strategy: Box<AnyStrategyRef>,
         period: usize,
         bars_per_year: Real,
         #[serde(default = "default_risk_free_rate")]
@@ -580,7 +579,7 @@ pub enum ExprSpec {
     /// Trailing annualized Sortino of `strategy`'s equity curve. See
     /// [`fugazi::indicators::Sortino`].
     Sortino {
-        strategy: Box<StrategyRef>,
+        strategy: Box<AnyStrategyRef>,
         period: usize,
         bars_per_year: Real,
         #[serde(default = "default_risk_free_rate")]
@@ -589,20 +588,20 @@ pub enum ExprSpec {
     /// Trailing annualized volatility of `strategy`'s equity return stream.
     /// See [`fugazi::indicators::Volatility`].
     Volatility {
-        strategy: Box<StrategyRef>,
+        strategy: Box<AnyStrategyRef>,
         period: usize,
         bars_per_year: Real,
     },
     /// Trailing maximum drawdown of `strategy`'s equity curve, as a
     /// non-negative fraction. See [`fugazi::indicators::MaxDrawdown`].
     MaxDrawdown {
-        strategy: Box<StrategyRef>,
+        strategy: Box<AnyStrategyRef>,
         period: usize,
     },
     /// Trailing Calmar (windowed CAGR / max drawdown) of `strategy`'s equity
     /// curve. See [`fugazi::indicators::Calmar`].
     Calmar {
-        strategy: Box<StrategyRef>,
+        strategy: Box<AnyStrategyRef>,
         period: usize,
         bars_per_year: Real,
     },
@@ -1207,7 +1206,7 @@ enum ExprSpecRaw {
     /// Trailing annualized Sharpe of `strategy`'s equity curve over the last
     /// `period` bars. See [`fugazi::indicators::Sharpe`].
     Sharpe {
-        strategy: Box<StrategyRef>,
+        strategy: Box<AnyStrategyRef>,
         period: usize,
         bars_per_year: Real,
         #[serde(default = "default_risk_free_rate")]
@@ -1216,7 +1215,7 @@ enum ExprSpecRaw {
     /// Trailing annualized Sortino of `strategy`'s equity curve. See
     /// [`fugazi::indicators::Sortino`].
     Sortino {
-        strategy: Box<StrategyRef>,
+        strategy: Box<AnyStrategyRef>,
         period: usize,
         bars_per_year: Real,
         #[serde(default = "default_risk_free_rate")]
@@ -1225,20 +1224,20 @@ enum ExprSpecRaw {
     /// Trailing annualized volatility of `strategy`'s equity return stream.
     /// See [`fugazi::indicators::Volatility`].
     Volatility {
-        strategy: Box<StrategyRef>,
+        strategy: Box<AnyStrategyRef>,
         period: usize,
         bars_per_year: Real,
     },
     /// Trailing maximum drawdown of `strategy`'s equity curve, as a
     /// non-negative fraction. See [`fugazi::indicators::MaxDrawdown`].
     MaxDrawdown {
-        strategy: Box<StrategyRef>,
+        strategy: Box<AnyStrategyRef>,
         period: usize,
     },
     /// Trailing Calmar (windowed CAGR / max drawdown) of `strategy`'s equity
     /// curve. See [`fugazi::indicators::Calmar`].
     Calmar {
-        strategy: Box<StrategyRef>,
+        strategy: Box<AnyStrategyRef>,
         period: usize,
         bars_per_year: Real,
     },

@@ -93,6 +93,17 @@ mod tests {
         Snapshot::<String>::of_atom(c.into())
     }
 
+    /// A multi-asset snapshot tagging each `(symbol, close)` — the shape a
+    /// pairs / basket strategy reads (and the shape the widened trailing tags
+    /// forward whole to their embedded strategy).
+    fn multi_snap(entries: &[(&str, Real)]) -> Snapshot<String> {
+        let mut s = Snapshot::<String>::new();
+        for (sym, px) in entries {
+            s.push(Some((*sym).to_string()), None, bar(*px).into());
+        }
+        s
+    }
+
     /// Feed a `Box<dyn DynIndicator>` a candle and unwrap the payload as `Real`.
     fn feed_real(source: &mut Box<dyn DynIndicator>, c: Candle) -> Option<Real> {
         match source.update(Payload::Snapshot(snap(c)))? {
@@ -547,6 +558,92 @@ mod tests {
             last = built.update(Payload::Snapshot(snap(bar(p))));
         }
         assert!(last.is_some(), "trailing Sharpe over a preset should read once warm");
+    }
+
+    #[test]
+    fn sharpe_accepts_a_pairs_strategy() {
+        // The widened `strategy:` field routes a `left`/`right` map to a pairs
+        // strategy. Fed tagged 2-entry snapshots (the shape the old single-asset
+        // engine would panic on), the embedded pair prices both legs and the
+        // trailing Sharpe reads over its aggregate equity curve.
+        use super::trailing::AnyStrategyRef;
+        let yaml = r#"
+            !sharpe
+            strategy:
+              left: BTC
+              right: ETH
+              enter: !value true
+            period: 4
+            bars_per_year: 252
+        "#;
+        let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
+        // The `strategy:` field routed to the pairs arm.
+        match &spec {
+            ExprSpec::Sharpe { strategy, .. } => {
+                assert!(matches!(**strategy, AnyStrategyRef::Pairs(_)))
+            }
+            other => panic!("expected a Sharpe spec, got {other:?}"),
+        }
+
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        assert_eq!(built.output_type(), crate::dyn_indicator::DynType::Real);
+
+        // BTC drifts up, ETH drifts down: long-BTC / short-ETH earns on both
+        // legs → a rising, variable equity curve → a positive trailing Sharpe.
+        let btc = [100.0, 102.0, 101.0, 104.0, 106.0, 108.0, 110.0, 113.0];
+        let eth = [100.0, 99.0, 100.0, 97.0, 96.0, 95.0, 94.0, 92.0];
+        let mut last = None;
+        for i in 0..btc.len() {
+            last = built.update(Payload::Snapshot(multi_snap(&[
+                ("BTC", btc[i]),
+                ("ETH", eth[i]),
+            ])));
+        }
+        match last {
+            Some(Payload::Real(s)) => {
+                assert!(s > 0.0, "net-profitable pair should give a positive Sharpe, got {s}")
+            }
+            other => panic!("expected Some(Real), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sharpe_accepts_a_basket_strategy() {
+        // A `selection` map routes to a basket strategy. Basket score/sizing are
+        // `SpecTemplate`s that capture normalised JSON, so this must go through
+        // the CLI's `parse_value` (YAML→JSON tag normalisation) path — the raw
+        // `serde_norway::from_str` path can't capture `!tag` into a template.
+        use super::trailing::AnyStrategyRef;
+        let yaml = r#"
+            !sharpe
+            strategy:
+              selection: !top_bottom { longs: 1, shorts: 1 }
+              score: !roc { source: !close { source: !pick { symbol: !arg SYM } }, periods: 2 }
+              sizing: !equal_weight 2
+            period: 3
+            bars_per_year: 252
+        "#;
+        let json = crate::input::parse_value(yaml).unwrap();
+        let spec: ExprSpec = serde_json::from_value(json).unwrap();
+        match &spec {
+            ExprSpec::Sharpe { strategy, .. } => {
+                assert!(matches!(**strategy, AnyStrategyRef::Basket(_)))
+            }
+            other => panic!("expected a Sharpe spec, got {other:?}"),
+        }
+
+        // Builds and drives a 3-symbol universe without panicking (the embedded
+        // basket ranks per-symbol ROC, longs the top / shorts the bottom).
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        assert_eq!(built.output_type(), crate::dyn_indicator::DynType::Real);
+        for i in 0..8 {
+            let f = i as Real;
+            let _ = built.update(Payload::Snapshot(multi_snap(&[
+                ("A", 100.0 + f * 2.0),
+                ("B", 100.0 - f),
+                ("C", 100.0 + f * 0.5),
+            ])));
+        }
     }
 
     #[test]

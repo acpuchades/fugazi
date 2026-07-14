@@ -2,14 +2,20 @@
 //! `!volatility` / `!max_drawdown` / `!calmar`).
 //!
 //! The library indicators ([`fugazi::indicators::Sharpe`] and friends) each own
-//! a [`Strategy`](fugazi::Strategy) and drive it internally. The runtime
-//! type-erasure layer ([`DynIndicator`]) requires the wrapped indicator to be
-//! [`Clone`], but a built [`DynSingleStrategy`](super::strategy::DynSingleStrategy)
-//! is **not** `Clone` (it holds `Box<dyn Signal>` slots). So this module wraps
-//! the trailing indicator in a [`RebuildIndicator`] that carries the strategy
-//! *spec* plus a rebuild closure and mints a **fresh** indicator instance on
-//! every clone — matching the "clone = an independently-advanced instance"
-//! convention the component accessors already use.
+//! a [`Strategy`](fugazi::Strategy) and drive it internally. Since the embedded
+//! engine forwards the whole snapshot to its strategy, that strategy can be a
+//! single-asset, **pairs**, or **basket** one — the [`AnyStrategyRef`] the
+//! `strategy:` field deserializes to picks which.
+//!
+//! The runtime type-erasure layer ([`DynIndicator`]) requires the wrapped
+//! indicator to be [`Clone`], but a built strategy
+//! ([`DynSingleStrategy`](super::strategy::DynSingleStrategy) and its pairs /
+//! basket twins) is **not** `Clone` (it holds `Box<dyn Signal>` slots and
+//! `Rc`-shared `Position`/`Book` state). So this module wraps the trailing
+//! indicator in a [`RebuildIndicator`] that carries the strategy *spec* plus a
+//! rebuild closure and mints a **fresh** indicator instance on every clone —
+//! matching the "clone = an independently-advanced instance" convention the
+//! component accessors already use.
 //!
 //! The wallet seed is a fixed [`SEED`]: every metric here is a ratio of
 //! equity-curve returns, and the returns are scale-invariant in the seed, so
@@ -20,10 +26,14 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
+use serde::Deserialize;
+
 use fugazi::indicators::{Calmar, MaxDrawdown, Sharpe, Sortino, Volatility};
 use fugazi::prelude::*;
 use fugazi::types::{Real, Snapshot};
 
+use super::basket::BasketStrategySpec;
+use super::pairs::PairsStrategySpec;
 use super::preset::StrategyRef;
 use crate::dyn_indicator::{self, DynIndicator};
 
@@ -39,6 +49,90 @@ pub(super) enum TrailingMetric {
     Volatility,
     MaxDrawdown,
     Calmar,
+}
+
+/// A strategy reference the trailing risk tags accept — widened beyond the
+/// single-asset [`StrategyRef`] to also name a **pairs** or **basket** strategy.
+///
+/// The embedded engine forwards the whole snapshot to its strategy, so any
+/// [`Strategy`](fugazi::Strategy) over a `Snapshot<String>` drives it:
+/// `!sharpe { strategy: <single | pairs | basket> }` reads the trailing risk of
+/// whichever one. (A pairs / basket strategy only produces meaningful numbers
+/// when the surrounding run feeds it a tagged multi-asset snapshot each bar —
+/// inside a pairs / basket run or a multi-symbol `--series` frame — since a
+/// single-asset run feeds one leg per bar.)
+///
+/// Deserialized through the same [`serde_norway::Value`] bridge as
+/// [`StrategyRef`], routing by a distinctive top-level key: `left` + `right` →
+/// pairs, `selection` → basket, otherwise a single-asset spec map or a preset
+/// tag (delegated to [`StrategyRef`]).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(try_from = "serde_norway::Value")]
+pub enum AnyStrategyRef {
+    Single(StrategyRef),
+    Pairs(Box<PairsStrategySpec>),
+    Basket(Box<BasketStrategySpec>),
+}
+
+impl AnyStrategyRef {
+    /// The tag applied to *untagged* snapshot entries the embedded engine prices
+    /// (see the [engine docs](fugazi::indicators::Sharpe)). For a single asset
+    /// it's the traded symbol; for a pair, the left leg. A basket names no
+    /// symbol upfront (its universe floats), so it has none — but a basket is
+    /// only ever fed tagged multi-asset snapshots, where the fallback is never
+    /// consulted.
+    fn fallback_symbol(&self) -> String {
+        match self {
+            AnyStrategyRef::Single(s) => s.symbol().to_string(),
+            AnyStrategyRef::Pairs(p) => p.left.clone(),
+            AnyStrategyRef::Basket(_) => String::new(),
+        }
+    }
+}
+
+impl TryFrom<serde_norway::Value> for AnyStrategyRef {
+    type Error = String;
+
+    fn try_from(v: serde_norway::Value) -> Result<Self, Self::Error> {
+        use serde_norway::Value;
+
+        // Detect pairs / basket by a distinctive top-level key. Works through
+        // both the direct YAML path and the serde_json load path (where tags are
+        // already normalised to `{tag: value}` maps) — both land here as a
+        // `Value::Mapping`.
+        let (is_pairs, is_basket) = match &v {
+            Value::Mapping(m) => {
+                let has = |key: &str| {
+                    m.iter()
+                        .any(|(k, _)| matches!(k, Value::String(s) if s == key))
+                };
+                (has("left") && has("right"), has("selection"))
+            }
+            _ => (false, false),
+        };
+
+        // Deserialize pairs / basket through the *serde_json* path (normalising
+        // `!tag`s to `{tag: value}` maps first): it's the same path their
+        // `from_text_with_params_in` loaders use, and it's required for two
+        // reasons the serde_norway `Value` path can't satisfy — a basket's
+        // `SpecTemplate` score/sizing capture `serde_json::Value`, and its
+        // `SelectionRuleSpec` is a bare externally-tagged enum serde_norway
+        // reads only from a `Value::Tagged`, not a plain single-key map.
+        if is_pairs || is_basket {
+            let json = crate::convert::yaml_to_json(v).map_err(|e| e.to_string())?;
+            return if is_pairs {
+                serde_json::from_value::<PairsStrategySpec>(json)
+                    .map(|p| AnyStrategyRef::Pairs(Box::new(p)))
+                    .map_err(|e| e.to_string())
+            } else {
+                serde_json::from_value::<BasketStrategySpec>(json)
+                    .map(|b| AnyStrategyRef::Basket(Box::new(b)))
+                    .map_err(|e| e.to_string())
+            };
+        }
+
+        StrategyRef::try_from(v).map(AnyStrategyRef::Single)
+    }
 }
 
 /// A boxed real-valued source over the single-asset snapshot stream — the
@@ -88,8 +182,61 @@ impl Indicator for RebuildIndicator {
     }
 }
 
+/// Wrap a freshly-built strategy in the trailing indicator `metric` selects,
+/// erased to [`BoxedReal`]. Generic over the strategy type so the single / pairs
+/// / basket arms share one body. `fallback_symbol` is the tag the embedded
+/// engine applies to untagged snapshot entries.
+fn make<S>(
+    metric: TrailingMetric,
+    strat: S,
+    fallback_symbol: String,
+    period: usize,
+    risk_free_rate: Real,
+    bars_per_year: Real,
+) -> BoxedReal
+where
+    S: fugazi::Strategy<Symbol = String, Input = Snapshot<String>> + 'static,
+{
+    match metric {
+        TrailingMetric::Sharpe => Box::new(Sharpe::new(
+            strat,
+            fallback_symbol,
+            SEED,
+            period,
+            risk_free_rate,
+            bars_per_year,
+        )),
+        TrailingMetric::Sortino => Box::new(Sortino::new(
+            strat,
+            fallback_symbol,
+            SEED,
+            period,
+            risk_free_rate,
+            bars_per_year,
+        )),
+        TrailingMetric::Volatility => Box::new(Volatility::new(
+            strat,
+            fallback_symbol,
+            SEED,
+            period,
+            bars_per_year,
+        )),
+        TrailingMetric::MaxDrawdown => {
+            Box::new(MaxDrawdown::new(strat, fallback_symbol, SEED, period))
+        }
+        TrailingMetric::Calmar => Box::new(Calmar::new(
+            strat,
+            fallback_symbol,
+            SEED,
+            period,
+            bars_per_year,
+        )),
+    }
+}
+
 /// Build the runtime-typed trailing indicator `metric` over the strategy
-/// `spec` describes, reading a rolling `period`-bar window.
+/// `strategy` describes (single, pairs, or basket), reading a rolling
+/// `period`-bar window.
 ///
 /// `risk_free_rate` (annualized fraction) is consumed only by
 /// [`TrailingMetric::Sharpe`] / [`TrailingMetric::Sortino`]; `bars_per_year`
@@ -97,7 +244,7 @@ impl Indicator for RebuildIndicator {
 /// the overlay schema the embedded strategy's `!get` leaves resolve against.
 pub(super) fn build(
     metric: TrailingMetric,
-    strategy: &StrategyRef,
+    strategy: &AnyStrategyRef,
     period: usize,
     risk_free_rate: Real,
     bars_per_year: Real,
@@ -105,35 +252,35 @@ pub(super) fn build(
 ) -> Box<dyn DynIndicator> {
     let spec = Arc::new(strategy.clone());
     let schema = Arc::clone(schema);
-    let symbol = strategy.symbol().to_string();
+    let fallback = strategy.fallback_symbol();
 
     let build_fn: Rc<dyn Fn() -> BoxedReal> = Rc::new(move || {
-        let strat = spec.build(SEED, &schema);
-        let sym = symbol.clone();
-        match metric {
-            TrailingMetric::Sharpe => Box::new(Sharpe::new(
-                strat,
+        let sym = fallback.clone();
+        match &*spec {
+            AnyStrategyRef::Single(s) => make(
+                metric,
+                s.build(SEED, &schema),
                 sym,
-                SEED,
                 period,
                 risk_free_rate,
                 bars_per_year,
-            )),
-            TrailingMetric::Sortino => Box::new(Sortino::new(
-                strat,
+            ),
+            AnyStrategyRef::Pairs(p) => make(
+                metric,
+                p.build(SEED, &schema),
                 sym,
-                SEED,
                 period,
                 risk_free_rate,
                 bars_per_year,
-            )),
-            TrailingMetric::Volatility => {
-                Box::new(Volatility::new(strat, sym, SEED, period, bars_per_year))
-            }
-            TrailingMetric::MaxDrawdown => Box::new(MaxDrawdown::new(strat, sym, SEED, period)),
-            TrailingMetric::Calmar => {
-                Box::new(Calmar::new(strat, sym, SEED, period, bars_per_year))
-            }
+            ),
+            AnyStrategyRef::Basket(b) => make(
+                metric,
+                b.build(SEED, &schema),
+                sym,
+                period,
+                risk_free_rate,
+                bars_per_year,
+            ),
         }
     });
 
