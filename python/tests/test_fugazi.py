@@ -688,6 +688,67 @@ def test_wallet_drives_a_python_strategy():
     assert [o.side for o in w.orders()] == ["buy", "sell"]
 
 
+def _ohlcv(prices):
+    """A flat-OHLC OHLCV dict from a list of close prices."""
+    return {
+        "open": list(prices),
+        "high": [p + 0.5 for p in prices],
+        "low": [p - 0.5 for p in prices],
+        "close": list(prices),
+        "volume": [1000.0] * len(prices),
+    }
+
+
+def test_strategy_builder_runs_and_reports():
+    # Declarative twin of the imperative loop above: an always-in SMA(2)/SMA(4)
+    # crossover reversal, driven by Strategy.run.
+    enter = ta.sma(ta.close(), 2).crosses_above(ta.sma(ta.close(), 4))
+    down = ta.sma(ta.close(), 2).crosses_below(ta.sma(ta.close(), 4))
+    strat = ta.Strategy("BTC").long_on(enter, down).short_on(down, enter)
+
+    prices = [14, 13, 12, 11, 10, 11, 13, 15, 17, 15, 12, 9, 7, 9, 12, 15]
+    wallet = ta.PaperWallet(10_000.0)
+    rep = strat.run(wallet, _ohlcv(prices))
+
+    assert len(rep.equity_curve) == len(prices)
+    assert rep.initial_equity == pytest.approx(10_000.0)
+    assert len(rep.fills) >= 1
+    # The report's blotter matches the wallet's (run mutates the wallet).
+    assert len(rep.fills) == len(wallet.orders())
+    assert rep.fills[0].bar >= 1  # never fills on the signal's own bar
+    assert rep.fills[0].order.side in ("buy", "sell")
+
+
+def test_strategy_sizing_and_metrics_pipeline():
+    from fugazi.metrics import per_bar_returns, total_return
+
+    enter = ta.sma(ta.close(), 2).crosses_above(ta.sma(ta.close(), 4))
+    down = ta.sma(ta.close(), 2).crosses_below(ta.sma(ta.close(), 4))
+    prices = [10, 11, 12, 11, 10, 12, 14, 16, 15, 13, 15, 17]
+
+    # Half-position sizing scales the value-fraction magnitude.
+    strat = (
+        ta.Strategy("BTC")
+        .long_on(enter, down)
+        .position_sizing(ta.value(0.5))
+    )
+    wallet = ta.PaperWallet(10_000.0)
+    rep = strat.run(wallet, _ohlcv(prices))
+
+    rets = per_bar_returns(rep.equity_curve, rep.initial_equity)
+    assert len(rets) == len(prices)
+    # The report feeds the metrics functions directly (the whole point).
+    tr = total_return(rep.equity_curve, rep.initial_equity)
+    assert isinstance(tr, float)
+
+
+def test_strategy_rejects_a_real_rooted_signal():
+    # A strategy trades over candles; a bare-value (Real) signal has no market
+    # context and is rejected.
+    with pytest.raises(ValueError):
+        ta.Strategy("BTC").long_on(ta.identity().above(5.0))
+
+
 def test_wallet_rejects_bad_side():
     w = ta.PaperWallet(100.0)
     w.update("X", 10.0)

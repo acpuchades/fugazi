@@ -61,7 +61,9 @@ use fugazi_core::types::{
     Atom, Candle, Frequency, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder,
     Selector, Snapshot,
 };
-use fugazi_core::backtest::Fill;
+use fugazi_core::backtest::{Fill, RunReport};
+use fugazi_core::indicators::Const;
+use fugazi_core::strategies::SingleAssetStrategy;
 use fugazi_core::metrics as core_metrics;
 use fugazi_core::metrics::{DrawdownSegment, Trade};
 use fugazi_core::runtime::{self, DynType, DynValue, TypeOf};
@@ -3023,6 +3025,225 @@ fn kind_str(kind: OrderKind) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// Strategy builder + run
+//
+// The declarative `SingleAssetStrategy` builder, mirrored for Python: a
+// `Strategy("BTC").long_on(enter, exit).short_on(down, up).run(wallet, candles)`
+// pipeline over a `PaperWallet`, returning a `RunReport` (equity curve + fill
+// blotter) the metrics functions consume. The strategy layer is snapshot-rooted;
+// the everyday Python leaves are candle-rooted, so `AtomLift` bridges them.
+//
+// Deliberately omitted this pass (see python parity notes): position-anchored
+// protective levels (`Position` uses `Rc`, which isn't `Send + Sync`, so the
+// `entry()`/`peak()`/`trough()` accessors can't be type-erased for pyo3),
+// pairs/basket strategies, and the `src/strategies` recipe catalogue.
+// ---------------------------------------------------------------------------
+
+/// Lift a candle-rooted (`Input = Atom`) source/signal into a snapshot-rooted
+/// one by projecting the single-entry snapshot's sole atom. `SingleAssetStrategy`
+/// is snapshot-rooted, but `ta.close()` & friends are candle-rooted; this bridges
+/// them, the same size-1 unpack a CLI `Pick` performs.
+#[derive(Clone)]
+struct AtomLift<S>(S);
+
+impl<S: Indicator<Input = Atom>> Indicator for AtomLift<S> {
+    type Input = Snapshot<String>;
+    type Output = S::Output;
+    fn update(&mut self, snap: Snapshot<String>) -> Option<S::Output> {
+        snap.sole_atom().cloned().and_then(|a| self.0.update(a))
+    }
+    fn value(&self) -> Option<S::Output> {
+        self.0.value()
+    }
+    fn warm_up_period(&self) -> usize {
+        self.0.warm_up_period()
+    }
+    fn unstable_period(&self) -> usize {
+        self.0.unstable_period()
+    }
+    fn reset(&mut self) {
+        self.0.reset()
+    }
+}
+
+/// Project a Python signal (candle- or snapshot-rooted) into the snapshot-rooted
+/// form a strategy consumes. A bare-value (Real) signal is a domain error.
+fn snapshot_signal(sig: &PySignal) -> PyResult<SignalBox<Snapshot<String>>> {
+    match &sig.sig {
+        AnySignal::Candle(s) => Ok(SignalBox::new(AtomLift(s.clone()))),
+        AnySignal::Snapshot(s) => Ok(s.clone()),
+        AnySignal::Real(_) => Err(PyValueError::new_err(
+            "a strategy signal must be candle- or snapshot-rooted, not a bare value (Real) signal",
+        )),
+    }
+}
+
+/// Project a Python real source (candle-rooted, snapshot-rooted, or a constant)
+/// into the snapshot-rooted sizing multiplier a strategy consumes.
+fn snapshot_source(ind: &PyIndicator) -> PyResult<Source<Snapshot<String>>> {
+    match &ind.src {
+        AnySource::Candle(s) => Ok(Source::new(AtomLift(s.clone()))),
+        AnySource::Snapshot(s) => Ok(s.clone()),
+        AnySource::Const(c) => Ok(Source::new(Value::<Snapshot<String>>::new(*c))),
+        AnySource::Real(_) => Err(PyValueError::new_err(
+            "a sizing source must be candle- or snapshot-rooted (or a constant), not a bare value (Real) source",
+        )),
+    }
+}
+
+fn const_false_signal() -> SignalBox<Snapshot<String>> {
+    SignalBox::new(Const::<Snapshot<String>>::new(false))
+}
+
+/// A declarative single-asset strategy: long/short entry & exit signals plus an
+/// optional sizing multiplier, driven over a `PaperWallet` by [`run`](Self::run).
+///
+/// A missing `exit` never fires — right for an always-in long/short reversal
+/// (the opposite side's `enter` reverses the position); give an `exit` only for
+/// a flat rest. Builder methods return a new `Strategy`, so they chain.
+#[pyclass(name = "Strategy", skip_from_py_object)]
+#[derive(Clone)]
+struct PyStrategy {
+    symbol: String,
+    long_enter: Option<SignalBox<Snapshot<String>>>,
+    long_exit: Option<SignalBox<Snapshot<String>>>,
+    short_enter: Option<SignalBox<Snapshot<String>>>,
+    short_exit: Option<SignalBox<Snapshot<String>>>,
+    sizing: Option<Source<Snapshot<String>>>,
+}
+
+#[pymethods]
+impl PyStrategy {
+    /// A fresh strategy trading `symbol`, with no sides wired.
+    #[new]
+    fn new(symbol: String) -> Self {
+        PyStrategy {
+            symbol,
+            long_enter: None,
+            long_exit: None,
+            short_enter: None,
+            short_exit: None,
+            sizing: None,
+        }
+    }
+
+    /// Enter (or reverse into) a long on `enter`; flatten it on `exit`
+    /// (defaults to never).
+    #[pyo3(signature = (enter, exit=None))]
+    fn long_on(&self, enter: &PySignal, exit: Option<&PySignal>) -> PyResult<PyStrategy> {
+        let mut s = self.clone();
+        s.long_enter = Some(snapshot_signal(enter)?);
+        s.long_exit = exit.map(snapshot_signal).transpose()?;
+        Ok(s)
+    }
+
+    /// Enter (or reverse into) a short on `enter`; flatten it on `exit`
+    /// (defaults to never).
+    #[pyo3(signature = (enter, exit=None))]
+    fn short_on(&self, enter: &PySignal, exit: Option<&PySignal>) -> PyResult<PyStrategy> {
+        let mut s = self.clone();
+        s.short_enter = Some(snapshot_signal(enter)?);
+        s.short_exit = exit.map(snapshot_signal).transpose()?;
+        Ok(s)
+    }
+
+    /// Scale every entry's value-fraction magnitude by this real source (Kelly,
+    /// vol targeting, fixed-fraction, …). Defaults to all-in (`1.0`). A `None`
+    /// reading skips that bar's trade (safe default).
+    fn position_sizing(&self, source: &PyIndicator) -> PyResult<PyStrategy> {
+        let mut s = self.clone();
+        s.sizing = Some(snapshot_source(source)?);
+        Ok(s)
+    }
+
+    /// Drive the strategy over `candles` against `wallet`, returning the
+    /// [`RunReport`](PyRunReport). `candles` is a DataFrame / dict of OHLCV
+    /// columns (same shape as `Indicator.feed`). The strategy's book is seeded
+    /// to the wallet's opening equity, so book-anchored sizing reads meaningful
+    /// numbers. The wallet is mutated in place (positions, blotter).
+    fn run(
+        &self,
+        mut wallet: PyRefMut<'_, PyWallet>,
+        candles: &Bound<'_, PyAny>,
+    ) -> PyResult<PyRunReport> {
+        let snaps: Vec<Snapshot<String>> = candles_from_frame(candles)?
+            .into_iter()
+            .map(|c| Snapshot::single(self.symbol.clone(), Atom::from(c)))
+            .collect();
+
+        let seed = Wallet::equity(&wallet.inner).0;
+        let mut strat =
+            SingleAssetStrategy::<String>::with_initial_equity(self.symbol.clone(), seed);
+        if let Some(enter) = &self.long_enter {
+            strat = strat.long_on(
+                enter.clone(),
+                self.long_exit.clone().unwrap_or_else(const_false_signal),
+            );
+        }
+        if let Some(enter) = &self.short_enter {
+            strat = strat.short_on(
+                enter.clone(),
+                self.short_exit.clone().unwrap_or_else(const_false_signal),
+            );
+        }
+        if let Some(sizing) = &self.sizing {
+            strat = strat.position_sizing(sizing.clone());
+        }
+
+        let report = fugazi_core::backtest::run(&mut strat, &mut wallet.inner, snaps);
+        Ok(PyRunReport { inner: report })
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Strategy(symbol='{}')", self.symbol)
+    }
+}
+
+/// The result of [`Strategy.run`](PyStrategy::run): the per-bar equity curve, the
+/// fill blotter, and the pre-run seed equity — everything the `fugazi.metrics`
+/// functions reduce to numbers.
+#[pyclass(name = "RunReport", frozen)]
+struct PyRunReport {
+    inner: RunReport<String>,
+}
+
+#[pymethods]
+impl PyRunReport {
+    /// One marked-to-market equity value per input bar.
+    #[getter]
+    fn equity_curve(&self) -> Vec<f64> {
+        self.inner.equity_curve.clone()
+    }
+
+    /// Every booked fill (a [`Fill`](PyFill)), in fill order.
+    #[getter]
+    fn fills(&self) -> Vec<PyFill> {
+        self.inner
+            .fills
+            .iter()
+            .cloned()
+            .map(|inner| PyFill { inner })
+            .collect()
+    }
+
+    /// The wallet's equity captured immediately before the first bar — the seed
+    /// returns / CAGR compound against.
+    #[getter]
+    fn initial_equity(&self) -> f64 {
+        self.inner.initial_equity
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "RunReport(bars={}, fills={}, initial_equity={})",
+            self.inner.equity_curve.len(),
+            self.inner.fills.len(),
+            self.inner.initial_equity,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -5741,6 +5962,8 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWallet>()?;
     m.add_class::<PyOrder>()?;
     m.add_class::<PySize>()?;
+    m.add_class::<PyStrategy>()?;
+    m.add_class::<PyRunReport>()?;
     m.add_class::<PyFill>()?;
     m.add_class::<PyBinance>()?;
     m.add_class::<PyYahoo>()?;

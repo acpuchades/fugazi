@@ -386,9 +386,10 @@ entries = golden().feed(df)
 
 ## Trading: the wallet
 
-The strategy layer is exposed as a **wallet** you trade into. There is no
-strategy class to subclass — a "strategy" in Python is just your own code that,
-each bar, reads signals and calls wallet methods. `PaperWallet` is the built-in,
+The strategy layer is exposed two ways. For the classic single-asset shape
+there's a declarative **`Strategy`** builder you `run` over a wallet (below);
+for anything else, the **wallet** is a market-agnostic venue you trade into with
+your own per-bar Python — no class to subclass. `PaperWallet` is the built-in,
 in-memory book (funds + positions + a trade blotter); live execution belongs in
 your own code, not here.
 
@@ -436,6 +437,53 @@ for o, h, l, c, v in bars:
     elif went_flat:
         wallet.close("AAPL")
 ```
+
+### The declarative `Strategy` builder
+
+For the classic long/flat/short shape, skip the hand-written loop: wire
+entry/exit signals (and an optional sizing multiplier) onto a `Strategy` and
+`run` it over a `PaperWallet`. You get back a `RunReport` — the per-bar equity
+curve and the fill blotter — that the [metrics](#metrics) functions reduce to
+numbers.
+
+```python
+import fugazi as ta
+from fugazi.metrics import per_bar_returns, sharpe
+
+enter = ta.sma(ta.close(), 3).crosses_above(ta.sma(ta.close(), 10))
+exit_ = ta.sma(ta.close(), 3).crosses_below(ta.sma(ta.close(), 10))
+
+strat = (
+    ta.Strategy("AAPL")
+    .long_on(enter, exit_)             # long/flat; add .short_on(down, up) for always-in
+    .position_sizing(ta.value(0.5))    # optional: half-position (Kelly / vol-target fit here too)
+)
+
+prices = [10, 11, 12, 11, 10, 12, 14, 16, 15, 13, 15, 17, 19, 18]
+ohlcv = {
+    "open": prices,
+    "high": [p + 1 for p in prices],
+    "low": [p - 1 for p in prices],
+    "close": prices,
+    "volume": [1000.0] * len(prices),
+}
+
+wallet = ta.PaperWallet(10_000.0)
+report = strat.run(wallet, ohlcv)      # a pandas/polars DataFrame or an OHLCV dict
+
+report.equity_curve                    # one marked-to-market value per bar
+report.fills                           # list[Fill] — the blotter, in fill order
+rets = per_bar_returns(report.equity_curve, report.initial_equity)
+sharpe(rets, 0.0, 252.0)
+```
+
+The builder mirrors Rust's `SingleAssetStrategy`: `long_on` / `short_on` (a
+missing `exit` never fires — right for an always-in reversal), `position_sizing`
+(scales the value-fraction magnitude; a `None` reading skips that bar's trade),
+and the strategy's book is seeded to the wallet's opening equity. Signals must be
+candle- or snapshot-rooted (a bare-value signal is rejected). Not bound yet:
+position-anchored protective stops, pairs / basket strategies, and the Rust
+recipe catalogue — drop to the wallet loop above for those.
 
 ## Metrics
 
