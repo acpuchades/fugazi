@@ -9,14 +9,43 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 /// Parse `text` (YAML) into a [`serde_json::Value`] — the common shape the spec
 /// and params loaders both work on. The document is normalized via
 /// [`crate::convert::yaml_to_json`] so `!tags` become serde_json's singleton-map
 /// external-tag form. (JSON is a subset of YAML, so JSON-shaped text still parses.)
+///
+/// Errors carry only the inner YAML message (with the serde_norway `, line: N,
+/// column: M` suffix); callers that know a filename should reach for
+/// [`parse_value_at`] instead so the origin lands in the message. Kept for the
+/// spec / imports / template tests that pass literal YAML with no meaningful
+/// origin — the bin never calls it, which is why the `dead_code` allow is here.
+#[allow(dead_code)]
 pub fn parse_value(text: &str) -> Result<serde_json::Value> {
-    crate::convert::yaml_to_json(serde_norway::from_str(text)?)
+    parse_value_at(text, "(input)")
+}
+
+/// [`parse_value`] with a source label — a file path, `(inline)`, or another
+/// short origin string — folded into the error prefix as `<label>:<line>:<col>:`
+/// when the underlying YAML parse reports a location.
+pub fn parse_value_at(text: &str, label: &str) -> Result<serde_json::Value> {
+    let value: serde_norway::Value = serde_norway::from_str(text)
+        .map_err(|e| yaml_parse_error(e, label))?;
+    crate::convert::yaml_to_json(value)
+        .with_context(|| format!("normalising YAML tags in {label}"))
+}
+
+/// Prefix a serde_norway parse error with the source label and (when the parser
+/// reports one) the offending line/column. The raw error already trails a
+/// `, line: N, column: M`, so a caller reading the full chain sees the location
+/// once at the front and once in the body — the front prefix is what makes it
+/// grep-friendly.
+fn yaml_parse_error(err: serde_norway::Error, label: &str) -> anyhow::Error {
+    match err.location() {
+        Some(loc) => anyhow!("{label}:{}:{}: {err}", loc.line(), loc.column()),
+        None => anyhow!("{label}: {err}"),
+    }
 }
 
 /// A text input given as either `@path` (load the file) or inline content

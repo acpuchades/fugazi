@@ -193,7 +193,7 @@ fn parse_one(source: &Source, params: &HashMap<String, Json>) -> Result<Vec<Over
             // enum has already collapsed `@path` into a file, so a file source
             // arrives here with no prefix. Scope, if any, is handled in
             // `parse_argument` before the `Source` is built.
-            parse_file(&text, OverlayScope::default(), params)
+            parse_file(&text, OverlayScope::default(), params, &source.label())
         }
         Source::Inline(text) => parse_argument(text, params),
     }
@@ -214,7 +214,7 @@ fn parse_argument(text: &str, params: &HashMap<String, Json>) -> Result<Vec<Over
         }
         let file_text = std::fs::read_to_string(path)
             .with_context(|| format!("reading overlay file {path:?}"))?;
-        parse_file(&file_text, scope, params)
+        parse_file(&file_text, scope, params, path)
     } else {
         parse_inline(body, scope, params)
     }
@@ -297,19 +297,21 @@ fn parse_file(
     text: &str,
     scope: OverlayScope,
     params: &HashMap<String, Json>,
+    label: &str,
 ) -> Result<Vec<Overlay>> {
-    let value = input::parse_value(text).context("parsing overlay YAML")?;
-    let value = params::substitute(value, params).context("overlay `!param` substitution")?;
+    let value = input::parse_value_at(text, label)?;
+    let value = params::substitute(value, params)
+        .with_context(|| format!("resolving `!param` in overlay {label}"))?;
     let Json::Object(map) = value else {
-        bail!("overlay file must be a mapping of column names to source expressions");
+        bail!("overlay file {label} must be a mapping of column names to source expressions");
     };
     let mut out = Vec::with_capacity(map.len());
     for (name, expr_value) in map {
         if name.is_empty() {
-            bail!("overlay file has an empty column name");
+            bail!("overlay file {label} has an empty column name");
         }
         let spec: ExprSpec = serde_json::from_value(expr_value)
-            .with_context(|| format!("overlay {name:?}"))?;
+            .with_context(|| format!("building overlay {name:?} from {label}"))?;
         out.push(Overlay {
             name,
             spec,
@@ -317,7 +319,7 @@ fn parse_file(
         });
     }
     if out.is_empty() {
-        bail!("overlay file has no entries");
+        bail!("overlay file {label} has no entries");
     }
     Ok(out)
 }
@@ -328,7 +330,7 @@ fn parse_expr(text: &str, params: &HashMap<String, Json>) -> Result<ExprSpec> {
     if expr.is_empty() {
         bail!("empty source expression");
     }
-    let value = input::parse_value(expr)?;
+    let value = input::parse_value_at(expr, "(inline overlay)")?;
     let value = params::substitute(value, params).context("overlay `!param` substitution")?;
     Ok(serde_json::from_value(value)?)
 }

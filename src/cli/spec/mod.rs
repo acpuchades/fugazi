@@ -40,12 +40,18 @@ mod trailing;
 /// same table as the importer. `base` is the directory relative import paths
 /// resolve against — the importing document's own directory (see
 /// [`crate::imports`] and [`crate::input::Source::base_dir`]).
+///
+/// `label` is a short origin string (a file path, `(inline)`, …) folded into
+/// the parse-error prefix so a user reading the error sees which document
+/// failed. Import splices carry their own file label; the passed `label` names
+/// only the *importing* document.
 fn load_value(
     text: &str,
     params: &std::collections::HashMap<String, serde_json::Value>,
     base: &std::path::Path,
+    label: &str,
 ) -> anyhow::Result<serde_json::Value> {
-    let value = crate::input::parse_value(text)?;
+    let value = crate::input::parse_value_at(text, label)?;
     let value = crate::imports::resolve(value, base)?;
     crate::params::substitute(value, params)
 }
@@ -767,6 +773,7 @@ mod tests {
             "symbol: BTC\nlong:\n  enter: !import enter.yml\n  exit: !value false\n",
             &params,
             &dir,
+            "(inline)",
         )
         .unwrap();
 

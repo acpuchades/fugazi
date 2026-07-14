@@ -109,7 +109,7 @@ fn parse_term(text: &str) -> Result<CostTerm> {
             key[0]
         );
     }
-    let value = input::parse_value(value_str.trim())
+    let value = input::parse_value_at(value_str.trim(), &format!("--costs {key_str}"))
         .with_context(|| format!("parsing cost value for `{key_str}`"))?;
     Ok(CostTerm::Set { scope, key, value })
 }

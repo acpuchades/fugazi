@@ -152,8 +152,12 @@ impl StrategyRef {
         text: &str,
         params: &std::collections::HashMap<String, serde_json::Value>,
         base: &std::path::Path,
+        label: &str,
     ) -> anyhow::Result<Self> {
-        Ok(serde_json::from_value(super::load_value(text, params, base)?)?)
+        use anyhow::Context;
+        let value = super::load_value(text, params, base, label)?;
+        serde_json::from_value(value)
+            .with_context(|| format!("building strategy from {label}"))
     }
 }
 

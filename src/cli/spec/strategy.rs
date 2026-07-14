@@ -111,22 +111,25 @@ impl SingleStrategySpec {
         text: &str,
         params: &std::collections::HashMap<String, serde_json::Value>,
         base: &std::path::Path,
+        label: &str,
     ) -> anyhow::Result<Self> {
-        Ok(serde_json::from_value(super::load_value(
-            text, params, base,
-        )?)?)
+        use anyhow::Context;
+        let value = super::load_value(text, params, base, label)?;
+        serde_json::from_value(value)
+            .with_context(|| format!("building single-asset strategy from {label}"))
     }
 
     /// [`from_text_with_params_in`](Self::from_text_with_params_in) with imports
-    /// resolved against the working directory. A test convenience: every CLI
-    /// call site has a [`Source`](crate::input::Source) and passes its
-    /// `base_dir()` (which is already `.` for inline text).
+    /// resolved against the working directory and an `(inline)` source label.
+    /// A test convenience: every CLI call site has a
+    /// [`Source`](crate::input::Source) and passes its `base_dir()` (already `.`
+    /// for inline text) and its `label()`.
     #[cfg(test)]
     pub fn from_text_with_params(
         text: &str,
         params: &std::collections::HashMap<String, serde_json::Value>,
     ) -> anyhow::Result<Self> {
-        Self::from_text_with_params_in(text, params, std::path::Path::new("."))
+        Self::from_text_with_params_in(text, params, std::path::Path::new("."), "(inline)")
     }
 
     /// Build the live [`DynSingleStrategy`] this spec describes.

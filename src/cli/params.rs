@@ -136,8 +136,7 @@ pub fn table(specs: &[ParamSpec]) -> Result<HashMap<String, Value>> {
                 }
                 ParamTerm::Load(src) => {
                     let text = src.read().context("reading params file")?;
-                    let value = input::parse_value(&text)
-                        .with_context(|| format!("parsing params {}", src.label()))?;
+                    let value = input::parse_value_at(&text, &src.label())?;
                     match value {
                         Value::Object(map) => table.extend(map),
                         _ => bail!("params file {} must be a mapping of NAME: value", src.label()),

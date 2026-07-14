@@ -110,7 +110,7 @@ fn load(path: &str, base: &Path, stack: &mut Vec<PathBuf>) -> Result<Value> {
 
     let text = std::fs::read_to_string(&canonical)
         .with_context(|| format!("!import {path}: reading `{}`", canonical.display()))?;
-    let value = crate::input::parse_value(&text)
+    let value = crate::input::parse_value_at(&text, &canonical.display().to_string())
         .with_context(|| format!("!import {path}: parsing `{}`", canonical.display()))?;
 
     let dir = canonical

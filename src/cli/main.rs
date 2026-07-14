@@ -444,25 +444,25 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     let param_table = params::table(&args.params)?;
 
     let text = args.strategy.read().context("reading strategy")?;
+    let label = args.strategy.label();
+    let base = args.strategy.base_dir();
     match args.strategy.kind {
         StrategyKind::Single => {
-            let strategy = spec::StrategyRef::from_text_with_params_in(&text, &param_table, &args.strategy.base_dir())
-                .with_context(|| parse_error_context(&args.strategy))?;
+            let strategy = spec::StrategyRef::from_text_with_params_in(&text, &param_table, &base, &label)
+                .with_context(|| parse_error_hint(&args.strategy))?;
             if !args.quiet {
                 style::print_header("check", "parse and validate a strategy spec");
-                println!("{}: ok (symbol {})", args.strategy.label(), strategy.symbol());
+                println!("{}: ok (symbol {})", label, strategy.symbol());
             }
         }
         StrategyKind::Pairs => {
-            let spec = spec::PairsStrategySpec::from_text_with_params_in(&text, &param_table, &args.strategy.base_dir())
-                .with_context(|| parse_error_context(&args.strategy))?;
+            let spec = spec::PairsStrategySpec::from_text_with_params_in(&text, &param_table, &base, &label)
+                .with_context(|| parse_error_hint(&args.strategy))?;
             if !args.quiet {
                 style::print_header("check", "parse and validate a pairs strategy spec");
                 println!(
                     "{}: ok (pair {} / {})",
-                    args.strategy.label(),
-                    spec.left,
-                    spec.right,
+                    label, spec.left, spec.right,
                 );
             }
         }
@@ -471,14 +471,13 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             // deserialize, but the templates only typed-parse per-symbol
             // at run time (against `!arg SYM`). So `check` here just
             // confirms the outer spec + selection dispatch.
-            let spec = spec::BasketStrategySpec::from_text_with_params_in(&text, &param_table, &args.strategy.base_dir())
-                .with_context(|| parse_error_context(&args.strategy))?;
+            let spec = spec::BasketStrategySpec::from_text_with_params_in(&text, &param_table, &base, &label)
+                .with_context(|| parse_error_hint(&args.strategy))?;
             if !args.quiet {
                 style::print_header("check", "parse and validate a basket strategy spec");
                 println!(
                     "{}: ok (selection {:?})",
-                    args.strategy.label(),
-                    spec.selection,
+                    label, spec.selection,
                 );
             }
         }
@@ -579,20 +578,21 @@ fn run(args: RunArgs) -> Result<()> {
         costs_supplied: costs_were_supplied,
         quiet: args.quiet,
     };
+    let base = args.strategy.base_dir();
     match args.strategy.kind {
         StrategyKind::Single => {
-            let strategy = spec::StrategyRef::from_text_with_params_in(&text, &param_table, &args.strategy.base_dir())
-                .with_context(|| parse_error_context(&args.strategy))?;
+            let strategy = spec::StrategyRef::from_text_with_params_in(&text, &param_table, &base, &strat_label)
+                .with_context(|| parse_error_hint(&args.strategy))?;
             run::run(&strategy, &frame, &opts)?;
         }
         StrategyKind::Pairs => {
-            let spec = spec::PairsStrategySpec::from_text_with_params_in(&text, &param_table, &args.strategy.base_dir())
-                .with_context(|| parse_error_context(&args.strategy))?;
+            let spec = spec::PairsStrategySpec::from_text_with_params_in(&text, &param_table, &base, &strat_label)
+                .with_context(|| parse_error_hint(&args.strategy))?;
             run::run_pairs(&spec, &frame, &opts)?;
         }
         StrategyKind::Basket => {
-            let spec = spec::BasketStrategySpec::from_text_with_params_in(&text, &param_table, &args.strategy.base_dir())
-                .with_context(|| parse_error_context(&args.strategy))?;
+            let spec = spec::BasketStrategySpec::from_text_with_params_in(&text, &param_table, &base, &strat_label)
+                .with_context(|| parse_error_hint(&args.strategy))?;
             run::run_basket(&spec, &frame, &opts)?;
         }
     }
@@ -646,7 +646,7 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         jobs: args.jobs,
         quiet: args.quiet,
     };
-    optimize::run(&frame, opts).with_context(|| parse_error_context(&args.strategy))?;
+    optimize::run(&frame, opts).with_context(|| parse_error_hint(&args.strategy))?;
     Ok(())
 }
 
@@ -681,12 +681,13 @@ fn asset_class(stocks: bool, forex: bool, crypto: bool) -> Option<calendar::Asse
     }
 }
 
-/// Error context for a strategy parse failure. For an inline value that looks like
-/// a bare file path, add a hint pointing at the `@file` form.
-fn parse_error_context(strategy: &StrategySource) -> String {
-    let base = format!("parsing strategy {}", strategy.label());
+/// Extra context on a strategy parse failure — the label is already baked in
+/// by the loaders (via [`spec::load_value`] and the `from_text_with_params_in`
+/// typed-parse wrap), so this only surfaces the `@file` hint when the caller
+/// passed an inline value that looks like a bare file path.
+fn parse_error_hint(strategy: &StrategySource) -> String {
     match strategy.misused_path() {
-        Some(path) => format!("{base} (did you mean `@{path}`?)"),
-        None => base,
+        Some(path) => format!("strategy `{path}` looks like a file path — did you mean `@{path}`?"),
+        None => format!("loading strategy {}", strategy.label()),
     }
 }

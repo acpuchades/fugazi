@@ -82,8 +82,7 @@ fn apply_term(tree: &mut Map<String, Value>, term: &CostTerm) -> Result<()> {
         }
         CostTerm::Load(source) => {
             let text = source.read().context("reading --costs file")?;
-            let value = input::parse_value(&text)
-                .with_context(|| format!("parsing --costs file {}", source.label()))?;
+            let value = input::parse_value_at(&text, &source.label())?;
             let normalized = normalize_preset(value)
                 .with_context(|| format!("normalizing --costs preset {}", source.label()))?;
             deep_merge_into(tree, normalized);

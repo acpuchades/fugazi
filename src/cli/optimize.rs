@@ -171,7 +171,7 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
     // Imports splice once, up front: the resulting base value is what every
     // grid point's `!param` substitution runs over, so a shared fragment costs
     // one read no matter how large the sweep.
-    let base_value = input::parse_value(opts.strategy_text).context("parsing strategy")?;
+    let base_value = input::parse_value_at(opts.strategy_text, opts.strategy_label)?;
     let base_value =
         imports::resolve(base_value, opts.strategy_dir).context("resolving strategy imports")?;
 

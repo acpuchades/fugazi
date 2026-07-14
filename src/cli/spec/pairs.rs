@@ -81,21 +81,24 @@ impl PairsStrategySpec {
         text: &str,
         params: &std::collections::HashMap<String, serde_json::Value>,
         base: &std::path::Path,
+        label: &str,
     ) -> anyhow::Result<Self> {
-        Ok(serde_json::from_value(super::load_value(
-            text, params, base,
-        )?)?)
+        use anyhow::Context;
+        let value = super::load_value(text, params, base, label)?;
+        serde_json::from_value(value)
+            .with_context(|| format!("building pairs strategy from {label}"))
     }
 
     /// [`from_text_with_params_in`](Self::from_text_with_params_in) with imports
-    /// resolved against the working directory — a test convenience (the CLI
-    /// passes the strategy source's `base_dir()`).
+    /// resolved against the working directory and an `(inline)` source label —
+    /// a test convenience (the CLI passes the strategy source's `base_dir()`
+    /// and `label()`).
     #[cfg(test)]
     pub fn from_text_with_params(
         text: &str,
         params: &std::collections::HashMap<String, serde_json::Value>,
     ) -> anyhow::Result<Self> {
-        Self::from_text_with_params_in(text, params, std::path::Path::new("."))
+        Self::from_text_with_params_in(text, params, std::path::Path::new("."), "(inline)")
     }
 
     /// Build a spec's exit signal, defaulting a missing one to constant-`false`
