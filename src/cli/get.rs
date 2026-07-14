@@ -464,6 +464,7 @@ fn run_candles(
     let result = rt.block_on(fetch_all(series.clone(), since_ts, until_ts, since_specified, bars));
     let _ = multi.clear();
     let raw = result?;
+    warn_short_history(&series, &raw, since_ts, since_specified, args.keep_unstable);
     let rows = apply_overlays(
         raw,
         since_ts,
@@ -1035,6 +1036,82 @@ fn apply_overlays(
             .cmp(&(b.atom.time, b.symbol.as_str(), b.freq.as_str()))
     });
     out
+}
+
+/// Warn (to stderr) about any series whose fetched history falls short of the
+/// requested `--since`. Two failure modes hide here, and both are silent
+/// otherwise:
+///
+/// * **Earliest bar later than `--since`.** The provider simply has no history
+///   that far back, so the output begins wherever the data actually starts —
+///   not at the date the user asked for.
+/// * **Incomplete warm-up preroll.** With `--since` set, [`Series::fetch_since`]
+///   pulls `stable` extra bars *before* `since` so the first emitted row is
+///   already settled, then `apply_overlays` trims back to `>= since` trusting
+///   that preroll was there. When the provider's history doesn't reach back far
+///   enough to supply it, the leading rows that survive the trim are still
+///   inside their warm-up window — unstable / pre-warm overlay values rather
+///   than settled ones.
+///
+/// Only meaningful when the user actually passed `--since` (an omitted flag uses
+/// the default anchor and drops leading unstable rows on its own), and only when
+/// warm-up bars aren't being kept deliberately. Prints regardless of `--quiet`,
+/// which governs the success summary, not correctness warnings.
+fn warn_short_history(
+    series: &[Series],
+    raw: &[RawBar],
+    since: Timestamp,
+    since_specified: bool,
+    keep_unstable: bool,
+) {
+    if !since_specified {
+        return;
+    }
+    for s in series {
+        let Some(earliest) = raw
+            .iter()
+            .filter(|b| b.symbol == s.output && b.interval == s.interval && b.freq == s.out_freq)
+            .filter_map(|b| b.atom.time)
+            .min()
+        else {
+            // An empty series returned no bars at all — a fetch problem, not a
+            // short-history one; leave it to the (zero-row) summary to surface.
+            continue;
+        };
+        // Preroll is incomplete when the earliest available bar lands after the
+        // warm-up start `fetch_since` pushed back to. `earliest > since` implies
+        // this (there are then no bars before `since` at all), but it also
+        // catches the subtler case where *some* pre-`since` history exists but
+        // not the full `stable` bars the trim assumes.
+        let warm_incomplete =
+            !keep_unstable && s.stable > 0 && earliest > s.fetch_since(since, since_specified);
+        let earliest_date = earliest.to_datetime().date();
+        let since_date = since.to_datetime().date();
+
+        if earliest > since {
+            let mut msg = format!(
+                "{}: earliest available candle is {earliest_date}, later than --since \
+                 {since_date} — output starts there instead.",
+                s.label(),
+            );
+            if warm_incomplete {
+                msg.push_str(&format!(
+                    " No warm-up history precedes it, so the first ~{} row(s) may be \
+                     unstable/pre-warm; pass --keep-unstable to inspect them.",
+                    s.stable,
+                ));
+            }
+            eprintln!("  {} {msg}", style::yellow("warn"));
+        } else if warm_incomplete {
+            eprintln!(
+                "  {} {}: only partial warm-up history precedes --since {since_date} \
+                 (provider starts {earliest_date}), so the first rows at --since may be \
+                 unstable/pre-warm; pass --keep-unstable to inspect them.",
+                style::yellow("warn"),
+                s.label(),
+            );
+        }
+    }
 }
 
 /// Build one fetch-progress bar per series, denominated in download *chunks*
