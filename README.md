@@ -750,7 +750,8 @@ subcommands — briefly listed here, fully documented in
 - `fugazi get <PROVIDER>:<SYMBOL>[<FREQ>] --since ... -o candles.csv` — fetch
   OHLCV bars from `binance` or `yfinance` into a `run`-ready CSV, or
   re-process an existing CSV with `csv:PATH`. `-x/--overlay col=<source>`
-  appends indicator columns computed on the fetched bars.
+  appends indicator columns computed on the fetched bars; `--params` resolves
+  `!param` placeholders inside those overlay expressions.
 - `fugazi list indicators` / `list sources` / `list tickers <PROVIDER> [PATTERN]`
   — the YAML tag catalogue, the `get`-provider table, and (via HTTP) the
   provider's ticker vocabulary. A provider lists thousands of symbols, so

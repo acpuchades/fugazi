@@ -373,7 +373,7 @@ Fetch OHLCV bars into a `run`-ready `,`-delimited CSV. The header is
 ```
 fugazi get <SPEC> [<SPEC> …] -o <FILE>
           [--since <DATE>] [--until <DATE>]
-          [-x <OVERLAY>]... [--keep-unstable] [-q]
+          [-x <OVERLAY>]... [--params <SPEC> …] [--keep-unstable] [-q]
 ```
 
 | Flag | Description |
@@ -383,6 +383,7 @@ fugazi get <SPEC> [<SPEC> …] -o <FILE>
 | `--until <DATE>` | End date, exclusive. Same grammar as `--since`. Default `today`. |
 | `-o`, `--output <FILE>` | Output CSV path. Parent directories created if missing. |
 | `-x`, `--overlay <SPEC>` | Extra column(s) computed on top of the fetched bars. Repeatable. See [`-x`/`--overlay`](#-x----overlay). |
+| `-p`, `--params <SPEC>` | Resolve `!param` placeholders inside the `-x/--overlay` expressions. Repeatable. See [--params](#--params). Applies only to overlays — a fetch with no `-x` has nothing to substitute. |
 | `--keep-unstable` | Emit the warm-up rows instead of dropping them. Overlay cells are blank where an applicable overlay has not yet warmed up. |
 | `-q`, `--quiet` | Suppress the summary line. Errors still print. |
 
@@ -425,6 +426,11 @@ Each `-x` argument is `[SCOPE:]BODY`, where:
 
 The base OHLCV column names (`open`, `high`, `low`, `close`, `volume`,
 `symbol`, `freq`, `time`) are reserved.
+
+An overlay body may carry `!param` placeholders resolved from `--params`,
+exactly like a strategy document — so `--params FAST=20 -x 'ma=!sma { period:
+!param FAST }'` parameterizes an overlay the same way it parameterizes a
+strategy. See [--params](#--params).
 
 Warm-up handling: unless `--keep-unstable` is set, each `(symbol, interval)`
 group's leading unready rows are dropped (each overlay reaches its
@@ -581,8 +587,9 @@ Required columns after the join: `symbol`, `time`, `open`, `high`, `low`,
 
 ### `--params`
 
-`--params` resolves `!param` placeholders in the strategy YAML, and — on
-`optimize` — also declares the sweep axes.
+`--params` resolves `!param` placeholders in the strategy YAML (and, on `get`,
+in the `-x/--overlay` expressions), and — on `optimize` — also declares the
+sweep axes.
 
 It's a `,`-separated list of terms, itself repeatable:
 
