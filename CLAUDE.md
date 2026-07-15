@@ -148,6 +148,7 @@ Each bar the driver: feed each symbol to wallet, route each fill to every strate
 - **`report_slice`** — sub-run over bar range; shared measurement primitive.
 - **`windowed_from_report`** / **`rolling_from_report`** — twin reductions (non-overlapping vs rolling stride-1). Under `-w LEN`, `run` emits both.
 - **`optimize -w`** uses only non-overlapping: each `-m` becomes `_mean`/`_std` columns; `--best-by` ranks by mean shifted by `-k/--risk-aversion` stddevs, direction-aware.
+- **`optimize --walkforward IS,OS[,Embargo]`** — rolling WFO, mutex with `-w`. Grammar per `WindowSpec` × 3. Grid-wide `max(stable_period)` skipped at head (opt-out `--keep-unstable`); fixed IS, stride OS, last fold's OOS absorbs trailing bars. One backtest/row, `report_slice`/fold → IS/OOS metrics; `--best-by` picks winner; composite OOS = stitched winners' OOS slices, running-total scaled. Emits `-o out/wf.csv` + sibling `.composite_oos_equity.csv` + `.composite_oos_metrics.yml`. Embargo drops OOS-metric bars only (state rolls). Pairs/basket rejected.
 - **`selection.deflated_sharpe` on `optimize`** — per-row DSR against grid-wide null (`N` = trials, `Var[SR]` = sample variance of grid's annualized Sharpes). Omitted if <2 rows have defined Sharpe or trial variance is zero.
 
 `Trade`/`DrawdownSegment` re-exported at crate root.
@@ -272,7 +273,8 @@ Cargo: `python/Cargo.toml` depends on `fugazi_core = { package = "fugazi", … d
 | Bracket-split `SYMBOL[FREQ]:` / full scope | `calendar::parse_scope_parts(text)` / `parse_scope(text)` | `src/cli/calendar.rs` |
 | Interval token / Frequency / time-column ms | `calendar::parse_interval` / `Frequency::from_str` / `parse_time_to_millis` | `src/cli/calendar.rs` |
 | Auto-detect bar cadence | `calendar::detect_frequency_from_atoms(...)` | `src/cli/calendar.rs` |
-| Parse `-w` bar count or duration | `WindowSpec::from_str` + `.resolve(bar_freq, class)` | `src/cli/calendar.rs` |
+| Parse `-w` / `--walkforward` | `WindowSpec::from_str` + `.resolve(bar_freq, class)`; `WalkForwardSpec::from_str` + `.resolve(...) -> (is,oos,emb)` | `src/cli/calendar.rs` |
+| Built-strategy readiness + full `RunReport` | `DynSingleStrategy::{stable_period, warm_up_period}` (→ `SingleAssetStrategy`); `backtest::measured_report(spec, atoms, cash, costs)` | `src/cli/spec/strategy.rs`, `src/cli/backtest.rs` |
 | Trading seconds a bar of `freq` spans | `class.trading_seconds_per_bar(freq)` | `src/cli/calendar.rs` |
 | Shared overlay schema of atom stream | `fugazi::sources::schema_of(&atoms)` | `src/sources/mod.rs` |
 | Fetch OHLCV | `CandleSource::atoms(...)` — `Binance`, `Yahoo` | `src/sources/mod.rs` |

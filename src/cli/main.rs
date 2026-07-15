@@ -402,8 +402,31 @@ struct OptimizeArgs {
     /// `LEN` is either a plain bar count (`10`, `252`) or a duration in the
     /// `-f/--frequency` alphabet (`1d`, `1w`, `1M`, `4h`) — see `run -w` for
     /// the resolution rules.
-    #[arg(short = 'w', long = "windowed", value_name = "LEN")]
+    #[arg(short = 'w', long = "windowed", value_name = "LEN", group = "sweep_shape")]
     windowed: Option<calendar::WindowSpec>,
+
+    /// Rolling walk-forward optimization. `IS,OS[,Embargo]` — each component is
+    /// a `-w`-style bar count or duration. For each fold the grid is scored on
+    /// the in-sample window, the winner (by `--best-by`) is applied on the
+    /// out-of-sample window, and results are emitted per fold plus a composite
+    /// OOS artifact.
+    ///
+    /// Skips grid-wide `max(stable_period)` at the head of the series before
+    /// laying out folds; pass `--keep-unstable` to skip only `max(warm_up)`
+    /// (letting the IIR settling tail bleed into the first IS window). Embargo
+    /// defaults to 0 bars — it removes the first N bars of each fold's OOS
+    /// from the metric evaluation only (state still rolls through).
+    ///
+    /// Mutually exclusive with `-w/--windowed`.
+    #[arg(long = "walkforward", value_name = "IS,OS[,E]", group = "sweep_shape")]
+    walkforward: Option<calendar::WalkForwardSpec>,
+
+    /// Under `--walkforward`, skip only `max(warm_up)` at the head of the
+    /// series (not `max(stable_period)`), including the IIR settling tail in
+    /// the first IS window. Opt-out for the safe default. No-op without
+    /// `--walkforward`.
+    #[arg(long = "keep-unstable", requires = "walkforward")]
+    keep_unstable: bool,
 
     /// Rank `--best-by` conservatively (needs `-w` and `--best-by`): shift each
     /// grid point's cross-window mean *against* it by K standard deviations
@@ -640,6 +663,8 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         asset_class: class,
         risk_free_rate: args.risk_free_rate,
         windowed: args.windowed,
+        walkforward: args.walkforward,
+        keep_unstable: args.keep_unstable,
         risk_aversion: args.risk_aversion.unwrap_or(0.0),
         cost_config: &cost_config,
         frequency: &args.frequency,

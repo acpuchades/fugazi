@@ -36,8 +36,10 @@ use crate::spec::{BasketStrategySpec, PairsStrategySpec, SingleStrategySpec, Str
 /// Drive `spec` over `atoms` through a fresh paper wallet with `cash`
 /// starting funds and the given trading `costs`, returning the full
 /// [`fugazi::RunReport`]. The shared core of [`evaluate`] and
-/// [`evaluate_windowed`].
-fn measured_report(
+/// [`evaluate_windowed`], and the seam
+/// [`optimize --walkforward`](crate::optimize) reaches through so it can slice
+/// one report per row into many fold-scoped sub-reports rather than re-running.
+pub fn measured_report(
     spec: &SingleStrategySpec,
     atoms: &[(String, Atom)],
     cash: Real,
@@ -62,7 +64,7 @@ fn measured_report(
 /// [`Schema::empty()`] when the stream is empty or none of the atoms are
 /// overlay-bearing (i.e. no side channel), so a `!get { key }` in the spec
 /// panics with a helpful "unknown key" against the empty registered-keys list.
-fn schema_from_atoms(atoms: &[(String, Atom)]) -> std::sync::Arc<Schema> {
+pub fn schema_from_atoms(atoms: &[(String, Atom)]) -> std::sync::Arc<Schema> {
     atoms
         .iter()
         .find_map(|(_, a)| a.overlays.as_ref())

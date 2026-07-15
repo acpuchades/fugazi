@@ -278,6 +278,72 @@ fn format_freq(f: Frequency) -> String {
     }
 }
 
+/// A `--walkforward` value: `IS,OS[,Embargo]` — three [`WindowSpec`] components
+/// separated by commas. Each component uses the same `-w` grammar (bar count or
+/// duration). Embargo is optional and defaults to zero bars — it drops the first
+/// N bars of each fold's out-of-sample window from OOS metrics (state still
+/// flows through; only metric evaluation is deferred).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WalkForwardSpec {
+    pub is: WindowSpec,
+    pub oos: WindowSpec,
+    pub embargo: Option<WindowSpec>,
+}
+
+impl std::fmt::Display for WalkForwardSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.embargo {
+            Some(e) => write!(f, "{},{},{}", self.is, self.oos, e),
+            None => write!(f, "{},{}", self.is, self.oos),
+        }
+    }
+}
+
+impl FromStr for WalkForwardSpec {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<&str> = s.split(',').map(str::trim).collect();
+        if !(2..=3).contains(&parts.len()) {
+            return Err(format!(
+                "`{s}`: expected `IS,OS` or `IS,OS,Embargo` (got {} field{})",
+                parts.len(),
+                if parts.len() == 1 { "" } else { "s" },
+            ));
+        }
+        let is = WindowSpec::from_str(parts[0])
+            .map_err(|e| format!("`--walkforward` IS: {e}"))?;
+        let oos = WindowSpec::from_str(parts[1])
+            .map_err(|e| format!("`--walkforward` OS: {e}"))?;
+        let embargo = match parts.get(2) {
+            Some(t) => Some(
+                WindowSpec::from_str(t).map_err(|e| format!("`--walkforward` Embargo: {e}"))?,
+            ),
+            None => None,
+        };
+        Ok(Self { is, oos, embargo })
+    }
+}
+
+impl WalkForwardSpec {
+    /// Resolve every component to a concrete bar count against the run's
+    /// trading calendar (using [`WindowSpec::resolve`]). Embargo defaults to
+    /// zero bars when omitted.
+    pub fn resolve(
+        &self,
+        bar_freq: Option<Frequency>,
+        class: Option<AssetClass>,
+    ) -> Result<(usize, usize, usize), String> {
+        let is = self.is.resolve(bar_freq, class)?.get();
+        let oos = self.oos.resolve(bar_freq, class)?.get();
+        let embargo = match self.embargo {
+            Some(e) => e.resolve(bar_freq, class)?.get(),
+            None => 0,
+        };
+        Ok((is, oos, embargo))
+    }
+}
+
 /// Resolve `bars_per_year` from the CLI's three inputs in priority order:
 ///
 /// 1. an explicit `--bars-per-year <N>` — always wins;
@@ -1081,5 +1147,48 @@ mod tests {
                 Frequency::Week(1),
             ]
         );
+    }
+
+    #[test]
+    fn walkforward_parses_bar_count_pair() {
+        let spec = WalkForwardSpec::from_str("100,20").unwrap();
+        assert_eq!(spec.is, WindowSpec::Bars(NonZeroUsize::new(100).unwrap()));
+        assert_eq!(spec.oos, WindowSpec::Bars(NonZeroUsize::new(20).unwrap()));
+        assert_eq!(spec.embargo, None);
+        assert_eq!(spec.resolve(None, None).unwrap(), (100, 20, 0));
+    }
+
+    #[test]
+    fn walkforward_parses_duration_triple() {
+        let spec = WalkForwardSpec::from_str("6M, 1M, 2d").unwrap();
+        assert_eq!(spec.is, WindowSpec::Duration(Frequency::Month(6)));
+        assert_eq!(spec.oos, WindowSpec::Duration(Frequency::Month(1)));
+        assert_eq!(spec.embargo, Some(WindowSpec::Duration(Frequency::Day(2))));
+    }
+
+    #[test]
+    fn walkforward_resolves_durations_against_calendar() {
+        let spec = WalkForwardSpec::from_str("6M,1M,2d").unwrap();
+        let (is, oos, embargo) = spec
+            .resolve(Some(Frequency::Day(1)), Some(AssetClass::Crypto))
+            .unwrap();
+        // 6M/1d ≈ 182 days on crypto; 1M ≈ 30; 2d = 2.
+        assert!((178..=185).contains(&is));
+        assert!((28..=32).contains(&oos));
+        assert_eq!(embargo, 2);
+    }
+
+    #[test]
+    fn walkforward_rejects_wrong_arity() {
+        assert!(WalkForwardSpec::from_str("").is_err());
+        assert!(WalkForwardSpec::from_str("10").is_err());
+        assert!(WalkForwardSpec::from_str("10,20,30,40").is_err());
+    }
+
+    #[test]
+    fn walkforward_rejects_bad_component() {
+        assert!(WalkForwardSpec::from_str("10,abc").is_err());
+        assert!(WalkForwardSpec::from_str("10x,20").is_err());
+        assert!(WalkForwardSpec::from_str("0,20").is_err()); // zero-bar
     }
 }

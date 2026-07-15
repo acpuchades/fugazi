@@ -229,7 +229,7 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
                --params <SPEC> [--params <SPEC> …]
                -m <METRIC>[,<METRIC>…] [-m <METRIC>…]
                -o <FILE> [--best-by <METRIC>] [-j <N>]
-               [-w <LEN> [-k <K>]]
+               [-w <LEN> [-k <K>] | --walkforward <IS,OS[,E]> [--keep-unstable]]
                [--cash <N>]
                [--stocks | --forex | --crypto] [-f <CODE>] [--bars-per-year <N>]
                [--risk-free-rate <RATE>] [-q]
@@ -241,9 +241,11 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
 | `-s`, `--series <SPEC>` | Data series. Repeatable. See [--series](#--series). |
 | `-p`, `--params <SPEC>` | Baseline params **and** sweep-axis declarations. See [Sweep axes](#sweep-axes). Repeatable. |
 | `-m`, `--metrics <NAMES>` | Metric columns to record. Comma-separated, repeatable. Short leaf names (`sharpe`, `max_pct`) or dotted paths (`risk_adjusted.sharpe`) — see the [Metrics catalogue](#metrics-catalogue). Column headers are always the canonical dotted path. **Optional** — omit to emit every catalogue metric as its own column. |
-| `-o`, `--output <FILE>` | Output CSV path. Parent directories are created if missing. |
+| `-o`, `--output <FILE>` | Output CSV path. Parent directories are created if missing. Under `--walkforward`, also emits two sibling files (`<stem>.composite_oos_equity.csv` and `<stem>.composite_oos_metrics.yml`). |
 | `--best-by <METRIC>` | Sort rows by this metric (direction hardcoded per metric — see [Best-by directions](#best-by-directions)). Omit to keep cartesian order and skip the "best" console block. |
-| `-w`, `--windowed <LEN>` | Evaluate each grid point in non-overlapping windows of `LEN`: every `-m` metric becomes two CSV columns (`<name>_mean` / `<name>_std`) and `--best-by` ranks by the windowed mean. Same `LEN` shape as `run -w` — a bar count (`10`, `252`) or a duration (`1d`, `1w`, `1M`); the duration form requires `--stocks`/`--forex`/`--crypto` and a resolvable bar cadence. See [Windowed metrics](#windowed-metrics). |
+| `-w`, `--windowed <LEN>` | Evaluate each grid point in non-overlapping windows of `LEN`: every `-m` metric becomes two CSV columns (`<name>_mean` / `<name>_std`) and `--best-by` ranks by the windowed mean. Same `LEN` shape as `run -w` — a bar count (`10`, `252`) or a duration (`1d`, `1w`, `1M`); the duration form requires `--stocks`/`--forex`/`--crypto` and a resolvable bar cadence. See [Windowed metrics](#windowed-metrics). Mutually exclusive with `--walkforward`. |
+| `--walkforward <IS,OS[,E]>` | Rolling **walk-forward optimization**: for each fold the grid is scored on the IS window, the `--best-by` winner is applied on the OOS window, and results are written as one row per fold (with `_is`/`_oos`/`_wfe` triples per `-m` metric) plus a composite OOS artifact stitched from every fold's winner. Each component uses the `-w` grammar (bar count or duration). Embargo defaults to `0` bars and only affects OOS metric evaluation (state still flows through). See [Walk-forward optimization](#walk-forward-optimization). Mutually exclusive with `-w`. |
+| `--keep-unstable` | Under `--walkforward`, skip only the grid-wide `max(warm_up_period)` at the head of the series — letting the IIR settling tail bleed into the first IS window — instead of the safe default `max(stable_period)`. Opt-out; no-op without `--walkforward`. |
 | `-k`, `--risk-aversion <K>` | Rank `--best-by` conservatively: shift each grid point's cross-window mean *against* it by `K` standard deviations before sorting. Requires `-w` and `--best-by`; `K >= 0`. See [Best-by directions](#best-by-directions). |
 | `--costs <SPEC>` | Trading-cost model applied uniformly to every grid point. Repeatable. See [--costs](#--costs). |
 | `-j`, `--jobs <N>` | Rayon worker count. Default: one worker per logical CPU. |
@@ -367,6 +369,65 @@ generalises; if they collapse (or flip sign), the tuning was fitting
 noise. Keep the split boundary fixed once you've chosen it — re-sweeping
 against different splits until one confirms the result is the same
 overfitting under a different name.
+
+#### Walk-forward optimization
+
+`--walkforward IS,OS[,Embargo]` collapses that manual train/validate loop
+into a single sweep that rolls forward through the series. On each fold
+the grid is scored on an in-sample window, the `--best-by` winner is
+recorded together with what it *actually* did on the following
+out-of-sample window, and (across folds) a composite OOS equity curve is
+stitched together from every fold's winner — a run that is genuinely
+out-of-sample at every bar.
+
+Every component uses the same grammar as `-w`: a bar count (`50`, `252`)
+or a duration (`6M`, `1w`, `4h`). Embargo is optional and defaults to
+`0`; it removes the first `E` bars of each fold's OOS window from metric
+evaluation only (state still flows through — this isn't a state reset,
+just a metric-side purity knob for statistical independence, and unused
+outside ML-style backtests where feature/label leakage is a real
+concern).
+
+**Fold layout.** Fixed-width IS, rolling by `OS` bars, non-overlapping
+OOS tiling:
+
+```
+| prefix | IS0 | OOS0 | IS1 | OOS1 | ... | ISN | OOSN |
+                       └── IS starts at prefix + k·OS, ends at + IS
+                                    └── OOS at IS end + Embargo … IS end + OS
+```
+
+The prefix is the grid-wide `max(stable_period)` of every combination's
+built strategy — computed once, before the fold layout, so every row's
+IS/OOS ranges are identical and directly comparable. `--keep-unstable`
+switches this to the grid-wide `max(warm_up_period)` instead (letting
+the IIR settling tail leak into the first IS window). The final fold's
+OOS extends to the end of the input, so trailing bars aren't dropped
+(the IS/OOS sizes are minimums, not exact widths).
+
+**Selection.** `--best-by` picks each fold's winner by its IS metric,
+using the same direction table as the plain grid sweep. Without
+`--best-by` the "winner" is just the first grid point in enumeration
+order — sensible for exploration, not for production.
+
+**Outputs.** Given `-o out/wf.csv`, three sibling files are written:
+
+- `out/wf.csv` — one row per fold. Columns: `fold`, `is_start`, `is_end`,
+  `oos_start`, `oos_end`, one axis column per grid axis (winner's params),
+  then three columns per `-m` metric — `<name>_is`, `<name>_oos`, and
+  `<name>_wfe` (the ratio OOS/IS, blank when IS is zero or missing).
+  `_wfe > 0.7` is the loose robustness benchmark.
+- `out/wf.composite_oos_equity.csv` — two columns (`bar`, `equity`) — the
+  running-total equity you would have realized by switching to each
+  fold's winner. Every bar is genuinely out-of-sample.
+- `out/wf.composite_oos_metrics.yml` — the full `Metrics` document
+  computed on the composite OOS curve. This is the closest thing `fugazi`
+  produces to an honest generalization estimate: Sharpe, drawdown, and
+  trade stats measured on a run that never saw the parameters it
+  executed.
+
+**Pairs / basket strategies** are not supported (yet); `optimize` rejects
+them with the same message it uses for plain-grid sweeps.
 
 ### `get`
 

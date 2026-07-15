@@ -45,7 +45,9 @@ use rayon::prelude::*;
 use serde_json::Value;
 
 use crate::backtest;
-use crate::calendar::{self, AssetClass, BarsPerYearSpec, Frequency, ScopedFrequency, WindowSpec};
+use crate::calendar::{
+    self, AssetClass, BarsPerYearSpec, Frequency, ScopedFrequency, WalkForwardSpec, WindowSpec,
+};
 use crate::costs::CostConfig;
 use crate::data::DataFrame;
 use crate::imports;
@@ -108,6 +110,16 @@ pub struct OptimizeOptions<'a> {
     /// the trading calendar inside [`run`] (duration form requires
     /// `asset_class` and a resolvable bar cadence).
     pub windowed: Option<WindowSpec>,
+    /// `--walkforward IS,OS[,Embargo]`: rolling walk-forward optimization. When
+    /// set, [`run`] takes the walk-forward branch (dispatched into
+    /// [`walkforward`]) instead of the plain grid sweep — mutually exclusive
+    /// with `windowed` (enforced at clap parse time).
+    pub walkforward: Option<WalkForwardSpec>,
+    /// `--keep-unstable`: under `--walkforward`, skip only the grid-wide
+    /// `max(warm_up_period)` at the head of the atom slice, not
+    /// `max(stable_period)`. Lets IIR settling bleed into the first IS window.
+    /// No-op without `walkforward`.
+    pub keep_unstable: bool,
     /// `-k/--risk-aversion`: shift each grid point's `--best-by` cross-window
     /// mean *against* it by this many standard deviations before ranking
     /// (direction-aware: `mean − k·std` descending, `mean + k·std` ascending).
@@ -223,6 +235,34 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
         .asset_class
         .zip(effective_freq)
         .map(|(class, freq)| class.trading_seconds_per_bar(freq));
+
+    // Walk-forward branch: an independent driver — different outputs and a
+    // fold-scoped per-row measurement rather than one whole-run reduction. The
+    // grid loop shape is similar, but the emitted artifacts have their own
+    // schema (per-fold winners + composite OOS), so we don't try to squeeze it
+    // through the [`Sweep`] shape.
+    if let Some(walkforward_spec) = opts.walkforward {
+        return walkforward_run(
+            &base_value,
+            subgrids,
+            &atoms,
+            opts.cash,
+            bars_per_year,
+            opts.risk_free_rate,
+            opts.cost_config,
+            effective_freq,
+            walkforward_spec,
+            opts.keep_unstable,
+            opts.asset_class,
+            seconds_per_bar,
+            &opts.metrics,
+            opts.best_by.as_deref(),
+            opts.output,
+            opts.jobs,
+            opts.quiet,
+            &skipped_overlay_columns,
+        );
+    }
 
     let sweep = optimize(
         &base_value,
@@ -1355,6 +1395,573 @@ fn print_indented(text: &str) {
     println!("           {text}");
 }
 
+// ---------------------------------------------------------------------------
+// Walk-forward (rolling)
+// ---------------------------------------------------------------------------
+
+/// One fold's bar ranges — same layout across every grid row (fold boundaries
+/// are grid-wide, not per-row, so per-fold metrics are directly comparable).
+struct FoldLayout {
+    is: std::ops::Range<usize>,
+    /// First bar included in OOS metric evaluation (post-embargo). State still
+    /// rolls through the embargo bars — they're just dropped from the OOS
+    /// reduction.
+    oos: std::ops::Range<usize>,
+}
+
+/// Rolling walk-forward driver — the `--walkforward` peer of the [`optimize`]
+/// grid sweep. Runs every grid row's full backtest once, then per fold: slices
+/// each row's report into IS + OOS, ranks the rows by `--best-by`'s IS metric,
+/// records the winner and the winner's OOS realization, and (across folds)
+/// assembles a composite out-of-sample equity curve.
+///
+/// Emits three artifacts alongside `output` (all sibling files, derived stems):
+/// the per-fold table, the composite OOS `bar,equity` curve, and the composite
+/// OOS `Metrics` document. Console output mirrors [`run`]'s shape: header,
+/// inputs block, per-fold summary.
+#[allow(clippy::too_many_arguments)]
+fn walkforward_run(
+    base_value: &Value,
+    subgrids: Vec<Subgrid>,
+    atoms: &[(String, Atom)],
+    cash: Real,
+    bars_per_year: Real,
+    risk_free_rate: Real,
+    cost_config: &CostConfig,
+    effective_freq: Option<Frequency>,
+    spec: WalkForwardSpec,
+    keep_unstable: bool,
+    asset_class: Option<AssetClass>,
+    seconds_per_bar: Option<Real>,
+    metric_names: &[String],
+    best_by: Option<&str>,
+    output: &Path,
+    jobs: Option<usize>,
+    quiet: bool,
+    skipped_overlay_columns: &[String],
+) -> Result<()> {
+    let (is_bars, oos_bars, embargo_bars) = spec
+        .resolve(effective_freq, asset_class)
+        .map_err(anyhow::Error::msg)
+        .context("resolving `--walkforward`")?;
+
+    // Grid enumeration — same shape as [`optimize`] so subgrids stack the same
+    // way and the union-column projection is compatible with the per-fold row.
+    let union_columns = compute_union_columns(&subgrids);
+    let plan: Vec<(usize, usize)> = subgrids
+        .iter()
+        .enumerate()
+        .flat_map(|(si, s)| (0..s.combos.len()).map(move |ci| (si, ci)))
+        .collect();
+
+    // Pre-scan: build every row's strategy once (throwaway) and take grid-wide
+    // max readiness. Doing this before the fold layout — so every row's IS/OOS
+    // ranges are identical, and per-fold metrics are directly comparable
+    // regardless of which combo winds up warming up faster.
+    let schema = backtest::schema_from_atoms(atoms);
+    let pool = crate::pool::build_pool(jobs)?;
+    let plan_ref = &plan;
+    let subgrids_ref = &subgrids;
+    let base_ref = base_value;
+    let schema_ref = &schema;
+    let prefix_skip: usize = pool.install(|| {
+        plan_ref
+            .par_iter()
+            .map(|&(si, ci)| {
+                let subgrid = &subgrids_ref[si];
+                let combo = &subgrid.combos[ci];
+                let params = combine_params(&subgrid.fixed, &subgrid.axes, combo);
+                let s = build_spec(base_ref, &params)?;
+                let built = s.build(cash, schema_ref);
+                Ok::<usize, anyhow::Error>(if keep_unstable {
+                    built.warm_up_period()
+                } else {
+                    built.stable_period()
+                })
+            })
+            .try_reduce(|| 0usize, |a, b| Ok(a.max(b)))
+    })?;
+
+    let folds = walkforward_layout(atoms.len(), prefix_skip, is_bars, oos_bars, embargo_bars)?;
+
+    // Main pass: one full backtest per row. Store the reports so per-fold
+    // slicing is a bounded-cost operation (equity is `Vec<f64>` of length
+    // `atoms.len()`; fills are typically short).
+    let reports: Vec<fugazi::RunReport<String>> = pool.install(|| {
+        plan_ref
+            .par_iter()
+            .map(|&(si, ci)| {
+                let subgrid = &subgrids_ref[si];
+                let combo = &subgrid.combos[ci];
+                let params = combine_params(&subgrid.fixed, &subgrid.axes, combo);
+                let s = build_spec(base_ref, &params)?;
+                let costs = cost_config.resolve(&s.symbol, effective_freq);
+                Ok::<_, anyhow::Error>(backtest::measured_report(&s, atoms, cash, costs))
+            })
+            .collect::<Result<Vec<_>>>()
+    })?;
+
+    // Resolve --metrics / --best-by against the first row's *whole-run*
+    // Metrics document, not a fold slice — a narrow slice (e.g. embargo
+    // eating most of a 2-bar OOS) can leave many metrics `None`, and
+    // `resolve_metric` requires a *numeric* leaf when matching by short name.
+    // The whole-run reduction covers the full catalogue reliably.
+    let sample_metrics = if let Some(first_report) = reports.first() {
+        metrics::from_report(first_report, bars_per_year, risk_free_rate, seconds_per_bar)
+    } else {
+        // Never reached: walkforward_layout errors out on zero folds, and the
+        // grid always has ≥1 row (enforced upstream in `run`).
+        bail!("walkforward: empty fold or grid")
+    };
+
+    let metric_columns: Vec<(String, String)> = if metric_names.is_empty() {
+        metrics::flatten(&sample_metrics)
+            .into_iter()
+            .map(|(path, _)| (path.to_string(), path.to_string()))
+            .collect()
+    } else {
+        metric_names
+            .iter()
+            .map(|name| {
+                let (path, _) = metrics::resolve_metric(name, &sample_metrics)?;
+                Ok::<_, anyhow::Error>((path.clone(), path))
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
+
+    let best_by = best_by
+        .map(|name| {
+            let (path, _) = metrics::resolve_metric(name, &sample_metrics)?;
+            let direction = direction_for(&path).ok_or_else(|| {
+                anyhow!(
+                    "--best-by `{name}` has no built-in direction; pass one whose \
+                     direction is known (e.g. sharpe, sortino, cagr_pct, max_pct, \
+                     ulcer_index, annualized_volatility_pct)"
+                )
+            })?;
+            Ok::<_, anyhow::Error>((path.clone(), path, direction))
+        })
+        .transpose()?;
+
+    // Per-fold pass: for each fold, compute every row's IS + OOS metrics,
+    // pick the winner by IS-metric ranking, and collect the winner's OOS
+    // slice for the composite.
+    let mut fold_rows: Vec<WalkForwardRow> = Vec::with_capacity(folds.len());
+    let mut composite_equity: Vec<Real> = Vec::new();
+    let mut composite_fills: Vec<fugazi::Fill<String>> = Vec::new();
+    let mut running_equity: Real = cash;
+
+    for (fold_idx, fold) in folds.iter().enumerate() {
+        let per_row: Vec<(metrics::Metrics, metrics::Metrics)> = pool.install(|| {
+            reports
+                .par_iter()
+                .map(|r| {
+                    let is_slice = metrics::report_slice(r, fold.is.clone());
+                    let oos_slice = metrics::report_slice(r, fold.oos.clone());
+                    (
+                        metrics::from_report(
+                            &is_slice,
+                            bars_per_year,
+                            risk_free_rate,
+                            seconds_per_bar,
+                        ),
+                        metrics::from_report(
+                            &oos_slice,
+                            bars_per_year,
+                            risk_free_rate,
+                            seconds_per_bar,
+                        ),
+                    )
+                })
+                .collect()
+        });
+
+        // Winner selection. Without --best-by we still emit a row per fold, but
+        // the "winner" is just the first grid point in enumeration order (same
+        // convention the plain grid sweep uses when --best-by is absent).
+        let winner_idx: usize = match &best_by {
+            Some((_, path, direction)) => {
+                let keys: Vec<Option<Real>> = per_row
+                    .iter()
+                    .map(|(is_m, _)| {
+                        // Direction-aware key: flip sign for ascending metrics so
+                        // `max_by` still finds the winner.
+                        lookup(is_m, path).map(|v| match direction {
+                            Direction::Descending => v,
+                            Direction::Ascending => -v,
+                        })
+                    })
+                    .collect();
+                keys.iter()
+                    .enumerate()
+                    .filter_map(|(i, k)| k.map(|k| (i, k)))
+                    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(i, _)| i)
+                    .unwrap_or(0)
+            }
+            None => 0,
+        };
+        let (winner_is, winner_oos) = &per_row[winner_idx];
+
+        // Composite OOS: stitch the winner's OOS slice onto the running curve.
+        // Scale each fold's equity into the running total so mode-switching
+        // between winners doesn't create discontinuities.
+        let oos_slice = metrics::report_slice(&reports[winner_idx], fold.oos.clone());
+        let scale = if oos_slice.initial_equity > 0.0 {
+            running_equity / oos_slice.initial_equity
+        } else {
+            1.0
+        };
+        let bar_offset = composite_equity.len();
+        for eq in &oos_slice.equity_curve {
+            composite_equity.push(*eq * scale);
+        }
+        for fill in oos_slice.fills {
+            composite_fills.push(fugazi::Fill {
+                bar: fill.bar + bar_offset,
+                order: fill.order,
+            });
+        }
+        running_equity = composite_equity.last().copied().unwrap_or(running_equity);
+
+        // Project the winner's params onto the union columns for the CSV.
+        let (si, ci) = plan[winner_idx];
+        let values =
+            project_row(&subgrids[si], &subgrids[si].combos[ci], &union_columns);
+
+        fold_rows.push(WalkForwardRow {
+            fold: fold_idx,
+            is_start: fold.is.start,
+            is_end: fold.is.end,
+            oos_start: fold.oos.start,
+            oos_end: fold.oos.end,
+            values,
+            is_metrics: winner_is.clone(),
+            oos_metrics: winner_oos.clone(),
+        });
+    }
+
+    // Composite OOS artifact: build a synthetic RunReport from the stitched
+    // equity + fills, then run every metric against it.
+    let composite_report = fugazi::RunReport {
+        equity_curve: composite_equity.clone(),
+        fills: composite_fills,
+        initial_equity: cash,
+    };
+    let composite_metrics = metrics::from_report(
+        &composite_report,
+        bars_per_year,
+        risk_free_rate,
+        seconds_per_bar,
+    );
+
+    // Output — three sibling files.
+    write_walkforward_csv(output, &union_columns, &metric_columns, &fold_rows)?;
+    write_composite_equity_csv(&derive_sibling(output, "composite_oos_equity", "csv"), &composite_equity)?;
+    write_composite_metrics_yaml(
+        &derive_sibling(output, "composite_oos_metrics", "yml"),
+        &composite_metrics,
+    )?;
+
+    if !quiet {
+        style::print_header("optimize", "walk-forward optimization");
+        print_skipped_overlay_warning(skipped_overlay_columns);
+        print_walkforward_inputs(
+            &spec,
+            (is_bars, oos_bars, embargo_bars),
+            prefix_skip,
+            keep_unstable,
+            folds.len(),
+            atoms.len(),
+            output,
+        );
+        print_walkforward_summary(&fold_rows, &metric_columns, best_by.as_ref());
+    }
+    Ok(())
+}
+
+/// Compute the per-fold ranges. Fold `k` occupies IS
+/// `[prefix + k*oos, prefix + k*oos + is)` and OOS
+/// `[prefix + k*oos + is + embargo, prefix + k*oos + is + oos)`. The final
+/// fold's OOS extends to `n_bars` so trailing bars aren't dropped.
+fn walkforward_layout(
+    n_bars: usize,
+    prefix_skip: usize,
+    is: usize,
+    oos: usize,
+    embargo: usize,
+) -> Result<Vec<FoldLayout>> {
+    if prefix_skip >= n_bars {
+        bail!(
+            "walkforward: prefix skip ({prefix_skip} bars) is >= total bars ({n_bars}); \
+             the strategy grid's readiness period doesn't fit in the input"
+        );
+    }
+    let usable = n_bars - prefix_skip;
+    if is + oos > usable {
+        bail!(
+            "walkforward: one IS+OOS fold ({is}+{oos} = {} bars) doesn't fit into the \
+             usable range ({usable} bars, after skipping {prefix_skip} for readiness) — \
+             shrink the windows or extend the input",
+            is + oos,
+        );
+    }
+    if embargo >= oos {
+        bail!(
+            "walkforward: embargo ({embargo} bars) >= OS ({oos} bars) — the entire \
+             out-of-sample window would be embargoed"
+        );
+    }
+    let n_folds = (usable - is) / oos;
+    if n_folds == 0 {
+        bail!(
+            "walkforward: no full fold fits (usable={usable}, IS={is}, OS={oos})"
+        );
+    }
+    let mut out = Vec::with_capacity(n_folds);
+    for k in 0..n_folds {
+        let is_start = prefix_skip + k * oos;
+        let is_end = is_start + is;
+        let mut oos_end = is_end + oos;
+        // Last fold absorbs trailing bars — windows are minimums, not exact
+        // widths (matches "sizes-are-minimums" from the design chat).
+        if k + 1 == n_folds {
+            oos_end = n_bars;
+        }
+        let oos_start = (is_end + embargo).min(oos_end);
+        out.push(FoldLayout {
+            is: is_start..is_end,
+            oos: oos_start..oos_end,
+        });
+    }
+    Ok(out)
+}
+
+/// One row of the per-fold walk-forward CSV. Carries the winner's params
+/// (projected onto union columns), IS + OOS bar ranges, and both metric
+/// documents so the writer can emit `_is`/`_oos`/`_wfe` triples per
+/// `--metrics` column.
+struct WalkForwardRow {
+    fold: usize,
+    is_start: usize,
+    is_end: usize,
+    oos_start: usize,
+    oos_end: usize,
+    values: Vec<Option<Value>>,
+    is_metrics: metrics::Metrics,
+    oos_metrics: metrics::Metrics,
+}
+
+/// Given `-o out/wf.csv` and `("composite_oos_equity", "csv")` returns
+/// `out/wf.composite_oos_equity.csv`. Preserves the parent directory; folds
+/// the stem when the output already has an extension.
+fn derive_sibling(output: &Path, suffix_stem: &str, extension: &str) -> std::path::PathBuf {
+    let parent = output.parent().unwrap_or_else(|| Path::new(""));
+    let stem = output
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "walkforward".to_string());
+    parent.join(format!("{stem}.{suffix_stem}.{extension}"))
+}
+
+fn write_walkforward_csv(
+    path: &Path,
+    union_columns: &[String],
+    metric_columns: &[(String, String)],
+    rows: &[WalkForwardRow],
+) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating output dir `{}`", parent.display()))?;
+    }
+    let mut writer = csv::WriterBuilder::new()
+        .delimiter(b',')
+        .from_path(path)
+        .with_context(|| format!("creating `{}`", path.display()))?;
+
+    let mut header: Vec<String> = vec![
+        "fold".into(),
+        "is_start".into(),
+        "is_end".into(),
+        "oos_start".into(),
+        "oos_end".into(),
+    ];
+    header.extend(union_columns.iter().cloned());
+    for (name, _) in metric_columns {
+        header.push(format!("{name}_is"));
+        header.push(format!("{name}_oos"));
+        header.push(format!("{name}_wfe"));
+    }
+    writer.write_record(&header)?;
+
+    // Same trick as the plain-grid writer: flatten once per Metrics document
+    // and index by column position.
+    let sample = rows.first().map(|r| &r.oos_metrics);
+    let positions: Vec<Option<ColumnPos>> = if let Some(sample) = sample {
+        let flat = metrics::flatten(sample);
+        metric_columns
+            .iter()
+            .map(|(_, path)| flat.iter().position(|(k, _)| *k == path.as_str()))
+            .collect()
+    } else {
+        vec![None; metric_columns.len()]
+    };
+
+    let cell = |v: Option<Real>| v.map(format_number).unwrap_or_default();
+    for row in rows {
+        let mut record: Vec<String> = vec![
+            row.fold.to_string(),
+            row.is_start.to_string(),
+            row.is_end.to_string(),
+            row.oos_start.to_string(),
+            row.oos_end.to_string(),
+        ];
+        record.extend(
+            row.values
+                .iter()
+                .map(|v| v.as_ref().map(format_value).unwrap_or_default()),
+        );
+        let is_flat = metrics::flatten(&row.is_metrics);
+        let oos_flat = metrics::flatten(&row.oos_metrics);
+        for pos in &positions {
+            let is_v = pos.and_then(|p| is_flat[p].1);
+            let oos_v = pos.and_then(|p| oos_flat[p].1);
+            let wfe = match (is_v, oos_v) {
+                (Some(i), Some(o)) if i.abs() > f64::EPSILON => Some(o / i),
+                _ => None,
+            };
+            record.push(cell(is_v));
+            record.push(cell(oos_v));
+            record.push(cell(wfe));
+        }
+        writer.write_record(&record)?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_composite_equity_csv(path: &Path, equity: &[Real]) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating output dir `{}`", parent.display()))?;
+    }
+    let mut writer = csv::WriterBuilder::new()
+        .delimiter(b',')
+        .from_path(path)
+        .with_context(|| format!("creating `{}`", path.display()))?;
+    writer.write_record(["bar", "equity"])?;
+    for (i, eq) in equity.iter().enumerate() {
+        writer.write_record([i.to_string(), format_number(*eq)])?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_composite_metrics_yaml(path: &Path, m: &metrics::Metrics) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating output dir `{}`", parent.display()))?;
+    }
+    let yaml = serde_norway::to_string(m)
+        .with_context(|| format!("serializing composite OOS metrics for `{}`", path.display()))?;
+    std::fs::write(path, yaml)
+        .with_context(|| format!("writing `{}`", path.display()))?;
+    Ok(())
+}
+
+fn print_walkforward_inputs(
+    spec: &WalkForwardSpec,
+    resolved: (usize, usize, usize),
+    prefix_skip: usize,
+    keep_unstable: bool,
+    n_folds: usize,
+    n_bars: usize,
+    output: &Path,
+) {
+    let (is_b, oos_b, emb_b) = resolved;
+    println!("{}", style::bold("inputs"));
+    print_field("windows", &format!("{spec}  →  IS={is_b}, OS={oos_b}, embargo={emb_b} (bars)"));
+    print_field(
+        "prefix",
+        &format!(
+            "{prefix_skip} bars ({})",
+            if keep_unstable { "keep_unstable → max(warm_up)" } else { "safe → max(stable)" }
+        ),
+    );
+    print_field("folds", &format!("{n_folds}  (over {n_bars} bars)"));
+    print_field("output", &format!("{}", output.display()));
+    print_indented(&format!(
+        "+ {}",
+        derive_sibling(output, "composite_oos_equity", "csv").display()
+    ));
+    print_indented(&format!(
+        "+ {}",
+        derive_sibling(output, "composite_oos_metrics", "yml").display()
+    ));
+}
+
+fn print_walkforward_summary(
+    rows: &[WalkForwardRow],
+    metric_columns: &[(String, String)],
+    best_by: Option<&(String, String, Direction)>,
+) {
+    println!("\n{}", style::bold("folds"));
+    if let Some((label, path, _dir)) = best_by {
+        for row in rows {
+            let is_v = lookup(&row.is_metrics, path);
+            let oos_v = lookup(&row.oos_metrics, path);
+            let wfe = match (is_v, oos_v) {
+                (Some(i), Some(o)) if i.abs() > f64::EPSILON => Some(o / i),
+                _ => None,
+            };
+            let params_label: String = row
+                .values
+                .iter()
+                .filter_map(|v| v.as_ref().map(format_value))
+                .collect::<Vec<_>>()
+                .join(", ");
+            print_field(
+                &format!("#{}", row.fold),
+                &format!(
+                    "[{}..{})/[{}..{})  {label}_is={} _oos={} _wfe={}  params: {params_label}",
+                    row.is_start,
+                    row.is_end,
+                    row.oos_start,
+                    row.oos_end,
+                    is_v.map(format_number).unwrap_or_else(|| "—".into()),
+                    oos_v.map(format_number).unwrap_or_else(|| "—".into()),
+                    wfe.map(format_number).unwrap_or_else(|| "—".into()),
+                ),
+            );
+        }
+    } else {
+        // No --best-by: dump the first `-m` column's IS/OOS for orientation.
+        let path = metric_columns.first().map(|(_, p)| p.as_str());
+        for row in rows {
+            let (is_str, oos_str) = match path {
+                Some(p) => (
+                    lookup(&row.is_metrics, p).map(format_number).unwrap_or_else(|| "—".into()),
+                    lookup(&row.oos_metrics, p).map(format_number).unwrap_or_else(|| "—".into()),
+                ),
+                None => ("—".into(), "—".into()),
+            };
+            print_field(
+                &format!("#{}", row.fold),
+                &format!(
+                    "[{}..{})/[{}..{})  is={is_str} oos={oos_str}",
+                    row.is_start, row.is_end, row.oos_start, row.oos_end
+                ),
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1725,5 +2332,51 @@ mod tests {
                 baseline / fixed,
             );
         }
+    }
+
+    #[test]
+    fn walkforward_layout_absorbs_trailing_bars_into_last_fold() {
+        // 100 bars, no prefix skip, IS=20, OS=10, no embargo.
+        // n_folds = (100 - 20) / 10 = 8. Last fold's OOS extends to bar 100.
+        let folds = walkforward_layout(100, 0, 20, 10, 0).unwrap();
+        assert_eq!(folds.len(), 8);
+        // First fold: IS [0..20), OOS [20..30).
+        assert_eq!(folds[0].is, 0..20);
+        assert_eq!(folds[0].oos, 20..30);
+        // Second fold: IS [10..30), OOS [30..40) — slides by OS=10.
+        assert_eq!(folds[1].is, 10..30);
+        assert_eq!(folds[1].oos, 30..40);
+        // Last fold: OOS extends to bar 100 (absorbing 10 trailing bars past
+        // where the nominal 10-bar OOS would end at 90).
+        assert_eq!(folds[7].oos.end, 100);
+    }
+
+    #[test]
+    fn walkforward_layout_honors_prefix_skip() {
+        // 50 bars, skip 5 for readiness, IS=10, OS=5.
+        // usable=45; n_folds = (45 - 10) / 5 = 7.
+        let folds = walkforward_layout(50, 5, 10, 5, 0).unwrap();
+        assert_eq!(folds.len(), 7);
+        assert_eq!(folds[0].is, 5..15);
+        assert_eq!(folds[0].oos.start, 15);
+    }
+
+    #[test]
+    fn walkforward_layout_embargo_shifts_oos_start_only() {
+        // Embargo drops the first bars from OOS metrics; the fold's OOS end
+        // (and next fold's IS start) is unchanged.
+        let folds = walkforward_layout(60, 0, 20, 10, 3).unwrap();
+        assert_eq!(folds[0].is, 0..20);
+        assert_eq!(folds[0].oos, 23..30);
+        assert_eq!(folds[1].is, 10..30);
+        assert_eq!(folds[1].oos.start, 33);
+    }
+
+    #[test]
+    fn walkforward_layout_rejects_when_no_fold_fits() {
+        assert!(walkforward_layout(10, 0, 20, 5, 0).is_err()); // IS > usable
+        assert!(walkforward_layout(30, 25, 10, 5, 0).is_err()); // prefix > usable-fold
+        assert!(walkforward_layout(50, 50, 10, 5, 0).is_err()); // prefix == n_bars
+        assert!(walkforward_layout(100, 0, 20, 10, 10).is_err()); // embargo == OS
     }
 }

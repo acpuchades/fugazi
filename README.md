@@ -540,6 +540,15 @@ higher-is-better metrics, `mean + K·std` for lower-is-better ones), so
 `sharpe 2.0 ± 3.0` no longer outranks `1.8 ± 0.2`. Output files are
 `,`-delimited.
 
+`optimize --walkforward IS,OS[,Embargo]` rolls a walk-forward loop instead: on
+each fold the grid is scored on the IS window, the `--best-by` winner is
+recorded together with its OOS realization (with a per-fold `_wfe = OOS/IS`
+column), and a composite OOS equity curve is stitched from every fold's winner —
+a run that is genuinely out-of-sample at every bar. Emits three sibling files
+(per-fold table, composite OOS equity CSV, composite OOS metrics YAML).
+Grid-wide `max(stable_period)` is skipped at the head by default;
+`--keep-unstable` opts out. Mutually exclusive with `-w`.
+
 `run` and `optimize` measure the whole run. The strategy layer's readiness
 default holds entries until every wired signal *and* every attached
 protective level is past its `stable_period()` (see

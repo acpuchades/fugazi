@@ -332,7 +332,7 @@ impl<Sym: Clone + Hash + Eq + 'static> SingleAssetStrategy<Sym> {
     /// stable-period). Wrap a subtree in [`Unstable`](crate::indicators::Unstable)
     /// to zero out its IIR settling contribution and only wait for the
     /// warm-up.
-    fn readiness_threshold(&self) -> usize {
+    pub fn stable_period(&self) -> usize {
         let mut needed = self.long.stable_period();
         needed = needed.max(self.close_long.stable_period());
         needed = needed.max(self.short.stable_period());
@@ -348,8 +348,30 @@ impl<Sym: Clone + Hash + Eq + 'static> SingleAssetStrategy<Sym> {
         {
             needed = needed.max(level.stable_period());
         }
-        needed = needed.max(self.sizing.stable_period());
-        needed
+        needed.max(self.sizing.stable_period())
+    }
+
+    /// The largest `warm_up_period()` across every wired signal and attached
+    /// protective level — the readiness threshold *ignoring* IIR settling
+    /// (matching `optimize --walkforward --keep-unstable`). Same aggregation
+    /// shape as [`stable_period`](Self::stable_period).
+    pub fn warm_up_period(&self) -> usize {
+        let mut needed = self.long.warm_up_period();
+        needed = needed.max(self.close_long.warm_up_period());
+        needed = needed.max(self.short.warm_up_period());
+        needed = needed.max(self.close_short.warm_up_period());
+        for level in [
+            &self.long_stop,
+            &self.long_target,
+            &self.short_stop,
+            &self.short_target,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            needed = needed.max(level.warm_up_period());
+        }
+        needed.max(self.sizing.warm_up_period())
     }
 }
 
@@ -390,7 +412,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Strategy for SingleAssetStrat
     }
 
     fn is_ready(&self) -> bool {
-        self.bars_seen >= self.readiness_threshold()
+        self.bars_seen >= self.stable_period()
     }
 
     fn on_fill(&mut self, order: &Order<Sym>) {
