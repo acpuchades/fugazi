@@ -14,7 +14,7 @@ and signal owns its internal state and is advanced one sample at a time via
 
 ```toml
 [dependencies]
-fugazi = "0.25"
+fugazi = "0.26"
 ```
 
 ## Concepts
