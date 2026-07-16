@@ -56,7 +56,9 @@ use crate::input;
 use crate::metrics;
 use crate::params;
 use crate::run::join_universe_by_time;
-use crate::spec::{BasketStrategySpec, MultiAssetStrategySpec, SingleStrategySpec};
+use crate::spec::{
+    BasketStrategySpec, MultiAssetStrategySpec, PairsStrategySpec, SingleStrategySpec,
+};
 use crate::style;
 
 /// Sort direction of a `--best-by` optimization: descending = higher is better
@@ -75,13 +77,13 @@ type Partition = (HashMap<String, Value>, Vec<Axis>);
 /// Threaded-in inputs, same shape as [`crate::run::RunOptions`].
 pub struct OptimizeOptions<'a> {
     pub cash: Real,
-    /// The shape of the strategy YAML being swept — single-asset, basket,
-    /// multi-asset. `Pairs` is rejected upstream; single-asset is the
+    /// The shape of the strategy YAML being swept. Single-asset is the
     /// legacy path (one symbol probed from the spec + one atom slice from
-    /// the frame). Basket / multi-asset take the union of every symbol in
-    /// the frame as universe and time-align the per-symbol streams into
-    /// one shared snapshot sequence (same shape as `run_basket` /
-    /// `run_multi`).
+    /// the frame). Pairs probes `[left, right]` from the first subgrid
+    /// (every other subgrid must resolve to the same pair) and joins those
+    /// two atom streams into snapshots. Basket / multi-asset take the union
+    /// of every symbol in the frame as universe and time-align the
+    /// per-symbol streams — same shape as `run_basket` / `run_multi`.
     pub strategy_kind: StrategyKind,
     pub strategy_text: &'a str,
     /// The directory the strategy's `!import` paths resolve against — its own
@@ -199,12 +201,9 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
 
     match opts.strategy_kind {
         StrategyKind::Single => run_single(&opts, subgrids, frame, &base_value),
-        StrategyKind::Basket | StrategyKind::Multi => {
+        StrategyKind::Pairs | StrategyKind::Basket | StrategyKind::Multi => {
             run_multi_symbol(&opts, subgrids, frame, &base_value)
         }
-        StrategyKind::Pairs => bail!(
-            "`fugazi optimize` doesn't support `pairs:` strategies (rejected at dispatch)"
-        ),
     }
 }
 
@@ -384,12 +383,19 @@ fn run_single(
     Ok(())
 }
 
-/// The basket / multi-asset grid path — the tradeable universe is every
-/// symbol in `frame`, and per-bar snapshots are the outer-join of every
-/// symbol's atom stream on `time` (same shape as `run_basket` /
-/// `run_multi`). Walk-forward is not wired for this path; bails with a
-/// specific message. `--windowed` is supported via the basket / multi
-/// twins of the single-asset windowed evaluator.
+/// The pairs / basket / multi-asset grid path — the tradeable universe is
+/// determined by the strategy kind, and per-bar snapshots are the outer-join
+/// of every relevant symbol's atom stream on `time` (same shape as
+/// `run_basket` / `run_multi` / `run_pairs`).
+///
+/// **Universe extraction differs by kind:**
+/// - `basket:` / `multi:` — every symbol in `frame` (floating universe).
+/// - `pairs:` — exactly `[spec.left, spec.right]` probed from the first
+///   subgrid. Every other subgrid must resolve to the same left/right
+///   (checked upfront), same convention as `run_single`.
+///
+/// `--windowed` is supported via the per-kind windowed evaluator twins;
+/// `--walkforward` routes through [`run_multi_symbol_walkforward`].
 fn run_multi_symbol(
     opts: &OptimizeOptions,
     subgrids: Vec<Subgrid>,
@@ -397,12 +403,39 @@ fn run_multi_symbol(
     base_value: &Value,
 ) -> Result<()> {
     let kind_label = match opts.strategy_kind {
+        StrategyKind::Pairs => "pairs",
         StrategyKind::Basket => "basket",
         StrategyKind::Multi => "multi",
-        _ => unreachable!("run_multi_symbol only dispatched for basket/multi"),
+        _ => unreachable!("run_multi_symbol only dispatched for pairs/basket/multi"),
     };
 
-    let universe = frame.symbols();
+    // Extract the tradeable universe. Pairs probe the first subgrid to
+    // resolve `left`/`right` and validate every other subgrid picks the same
+    // pair (loading multiple pair slices from one frame isn't supported).
+    // Basket / multi take the frame's whole symbol set.
+    let universe: Vec<String> = match opts.strategy_kind {
+        StrategyKind::Pairs => {
+            let probe = build_pairs_spec(base_value, &probe_params(&subgrids[0]))?;
+            let left = probe.left.clone();
+            let right = probe.right.clone();
+            for (idx, subgrid) in subgrids.iter().enumerate().skip(1) {
+                let other = build_pairs_spec(base_value, &probe_params(subgrid))?;
+                if other.left != left || other.right != right {
+                    bail!(
+                        "--grid #{} resolves to pair `{}`/`{}`, but --grid #1 resolves to \
+                         `{}`/`{}` — every subgrid must trade the same pair",
+                        idx + 1,
+                        other.left,
+                        other.right,
+                        left,
+                        right,
+                    );
+                }
+            }
+            vec![left, right]
+        }
+        _ => frame.symbols(),
+    };
     if universe.is_empty() {
         bail!(
             "no symbols found in the input series — `{kind_label}:` optimization needs at least \
@@ -478,6 +511,32 @@ fn run_multi_symbol(
 
     let evaluate_row = move |params: &HashMap<String, Value>| -> Result<Evaluation> {
         Ok(match kind {
+            StrategyKind::Pairs => {
+                let spec = build_pairs_spec(base_value, params)?;
+                match windowed_n {
+                    Some(w) => Evaluation::Windowed(backtest::evaluate_windowed_pairs(
+                        &spec,
+                        snapshots_ref,
+                        opts.cash,
+                        bars_per_year,
+                        opts.risk_free_rate,
+                        cost_config,
+                        effective_freq,
+                        w,
+                        seconds_per_bar,
+                    )),
+                    None => Evaluation::Whole(Box::new(backtest::evaluate_pairs(
+                        &spec,
+                        snapshots_ref,
+                        opts.cash,
+                        bars_per_year,
+                        opts.risk_free_rate,
+                        cost_config,
+                        effective_freq,
+                        seconds_per_bar,
+                    ))),
+                }
+            }
             StrategyKind::Basket => {
                 let spec = build_basket_spec(base_value, params)?;
                 match windowed_n {
@@ -534,7 +593,7 @@ fn run_multi_symbol(
                     ))),
                 }
             }
-            _ => unreachable!("run_multi_symbol only dispatched for basket/multi"),
+            _ => unreachable!("run_multi_symbol only dispatched for pairs/basket/multi"),
         })
     };
 
@@ -628,6 +687,19 @@ fn run_multi_symbol_walkforward(
 
     let probe = |params: &HashMap<String, Value>| -> Result<usize> {
         match kind {
+            StrategyKind::Pairs => {
+                // Pairs' chains are held eagerly (both legs known at
+                // construction from `left`/`right`), so `stable_period()`
+                // reads meaningful numbers on a freshly-built strategy —
+                // no probe-snapshot feed needed.
+                let spec = build_pairs_spec(base_value, params)?;
+                let built = spec.build(cash, schema_ref);
+                Ok(if keep_unstable {
+                    built.warm_up_period()
+                } else {
+                    built.stable_period()
+                })
+            }
             StrategyKind::Basket => {
                 let spec = build_basket_spec(base_value, params)?;
                 let mut built = spec.build(cash, schema_ref);
@@ -651,7 +723,9 @@ fn run_multi_symbol_walkforward(
                     built.stable_period()
                 })
             }
-            _ => unreachable!("run_multi_symbol_walkforward only dispatched for basket/multi"),
+            _ => unreachable!(
+                "run_multi_symbol_walkforward only dispatched for pairs/basket/multi"
+            ),
         }
     };
 
@@ -664,6 +738,15 @@ fn run_multi_symbol_walkforward(
     let run_backtest =
         |params: &HashMap<String, Value>| -> Result<fugazi::RunReport<String>> {
             let report = match kind {
+                StrategyKind::Pairs => {
+                    let spec = build_pairs_spec(base_value, params)?;
+                    backtest::measured_report_from_strategy(
+                        || spec.build(cash, schema_ref),
+                        snapshots_ref,
+                        cash,
+                        build_per_symbol_costs(),
+                    )
+                }
                 StrategyKind::Basket => {
                     let spec = build_basket_spec(base_value, params)?;
                     backtest::measured_report_from_strategy(
@@ -682,7 +765,9 @@ fn run_multi_symbol_walkforward(
                         build_per_symbol_costs(),
                     )
                 }
-                _ => unreachable!("run_multi_symbol_walkforward only dispatched for basket/multi"),
+                _ => unreachable!(
+                    "run_multi_symbol_walkforward only dispatched for pairs/basket/multi"
+                ),
             };
             Ok(report)
         };
@@ -896,6 +981,13 @@ fn sample_metrics(eval: &Evaluation) -> Option<&metrics::Metrics> {
         Evaluation::Whole(m) => Some(m.as_ref()),
         Evaluation::Windowed(ws) => ws.first().map(|w| &w.metrics),
     }
+}
+
+/// Substitute a params table into the base strategy value, then typed-parse
+/// as a [`PairsStrategySpec`]. Pairs twin of [`build_spec`].
+fn build_pairs_spec(base: &Value, params: &HashMap<String, Value>) -> Result<PairsStrategySpec> {
+    let value = params::substitute(base.clone(), params)?;
+    Ok(serde_json::from_value(value)?)
 }
 
 /// Substitute a params table into the base strategy value, then typed-parse

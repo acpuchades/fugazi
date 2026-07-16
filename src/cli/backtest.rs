@@ -227,6 +227,77 @@ pub fn evaluate_windowed_basket(
     )
 }
 
+/// The pairs twin of [`evaluate`] — one grid-cell evaluation for a
+/// `pairs:` document. Two symbols (`spec.left` / `spec.right`), atoms
+/// pre-joined by time into per-bar snapshots.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_pairs(
+    spec: &PairsStrategySpec,
+    snapshots: &[fugazi::types::Snapshot<String>],
+    cash: Real,
+    bars_per_year: Real,
+    risk_free_rate: Real,
+    cost_config: &CostConfig,
+    frequency: Option<Frequency>,
+    seconds_per_bar: Option<Real>,
+) -> metrics::Metrics {
+    let per_symbol_costs: Vec<(String, TradingCosts)> = vec![
+        (spec.left.clone(), cost_config.resolve(&spec.left, frequency)),
+        (spec.right.clone(), cost_config.resolve(&spec.right, frequency)),
+    ];
+    let schema = snapshots
+        .iter()
+        .flat_map(|s| s.iter())
+        .find_map(|(_sym, _freq, a)| a.overlays.as_ref())
+        .map(|ov| ov.schema().clone())
+        .unwrap_or_else(Schema::empty);
+    let measured = measured_report_from_strategy(
+        || spec.build(cash, &schema),
+        snapshots,
+        cash,
+        per_symbol_costs,
+    );
+    metrics::from_report(&measured, bars_per_year, risk_free_rate, seconds_per_bar)
+}
+
+/// Windowed twin of [`evaluate_pairs`].
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_windowed_pairs(
+    spec: &PairsStrategySpec,
+    snapshots: &[fugazi::types::Snapshot<String>],
+    cash: Real,
+    bars_per_year: Real,
+    risk_free_rate: Real,
+    cost_config: &CostConfig,
+    frequency: Option<Frequency>,
+    window: usize,
+    seconds_per_bar: Option<Real>,
+) -> Vec<metrics::WindowMetrics> {
+    let per_symbol_costs: Vec<(String, TradingCosts)> = vec![
+        (spec.left.clone(), cost_config.resolve(&spec.left, frequency)),
+        (spec.right.clone(), cost_config.resolve(&spec.right, frequency)),
+    ];
+    let schema = snapshots
+        .iter()
+        .flat_map(|s| s.iter())
+        .find_map(|(_sym, _freq, a)| a.overlays.as_ref())
+        .map(|ov| ov.schema().clone())
+        .unwrap_or_else(Schema::empty);
+    let measured = measured_report_from_strategy(
+        || spec.build(cash, &schema),
+        snapshots,
+        cash,
+        per_symbol_costs,
+    );
+    metrics::windowed_from_report(
+        &measured,
+        window,
+        bars_per_year,
+        risk_free_rate,
+        seconds_per_bar,
+    )
+}
+
 /// The multi-asset twin of [`evaluate`] — one grid-cell evaluation for a
 /// `multi:` document (independent per-symbol
 /// [`SingleAssetStrategy`](fugazi::strategies::SingleAssetStrategy)-shaped

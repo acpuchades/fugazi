@@ -652,11 +652,6 @@ fn run(args: RunArgs) -> Result<()> {
 }
 
 fn optimize(args: OptimizeArgs) -> Result<()> {
-    if args.strategy.kind == StrategyKind::Pairs {
-        anyhow::bail!(
-            "`fugazi optimize` doesn't yet support `pairs:` strategies; use `fugazi run` for now"
-        );
-    }
     let param_table = params::table(&args.params)?;
     optimize::reject_axes_in_params(&param_table)?;
     let grid_tables: Vec<HashMap<String, serde_json::Value>> = args

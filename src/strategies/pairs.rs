@@ -253,14 +253,29 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> PairsStrategy<Sym>
     }
 
     /// The number of bars that must be fed before [`is_ready`](Strategy::is_ready)
-    /// reports `true`: the largest `stable_period()` across `enter`, `exit`, and
-    /// any attached spread level.
-    fn readiness_threshold(&self) -> usize {
+    /// reports `true`: the largest `stable_period()` across `enter`, `exit`, any
+    /// attached spread level, and the sizing indicator. Same aggregation shape as
+    /// [`SingleAssetStrategy::stable_period`](crate::strategies::SingleAssetStrategy::stable_period).
+    pub fn stable_period(&self) -> usize {
         let mut needed = self.enter.stable_period().max(self.exit.stable_period());
         for level in [&self.stop, &self.target].into_iter().flatten() {
             needed = needed.max(level.stable_period());
         }
         needed = needed.max(self.sizing.stable_period());
+        needed
+    }
+
+    /// The largest `warm_up_period()` across every wired signal, attached
+    /// spread level, and the sizing indicator — the readiness threshold
+    /// *ignoring* IIR settling (matching `optimize --walkforward
+    /// --keep-unstable`). Same aggregation shape as
+    /// [`stable_period`](Self::stable_period).
+    pub fn warm_up_period(&self) -> usize {
+        let mut needed = self.enter.warm_up_period().max(self.exit.warm_up_period());
+        for level in [&self.stop, &self.target].into_iter().flatten() {
+            needed = needed.max(level.warm_up_period());
+        }
+        needed = needed.max(self.sizing.warm_up_period());
         needed
     }
 
@@ -312,7 +327,7 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> Strategy for Pairs
     }
 
     fn is_ready(&self) -> bool {
-        self.bars_seen >= self.readiness_threshold()
+        self.bars_seen >= self.stable_period()
     }
 
     fn on_fill(&mut self, order: &Order<Sym>) {

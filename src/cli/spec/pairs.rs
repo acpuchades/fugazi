@@ -179,6 +179,22 @@ pub struct DynPairsStrategy {
     inner: PairsStrategy<String>,
 }
 
+impl DynPairsStrategy {
+    /// Grid-wide readiness — pass-through to
+    /// [`PairsStrategy::stable_period`]. All chains are held eagerly, so
+    /// this reads directly (no lazy-probe needed like basket / multi).
+    pub fn stable_period(&self) -> usize {
+        self.inner.stable_period()
+    }
+
+    /// Warm-up-only readiness (ignoring IIR settling) — pass-through to
+    /// [`PairsStrategy::warm_up_period`]. Used by
+    /// `optimize --walkforward --keep-unstable`.
+    pub fn warm_up_period(&self) -> usize {
+        self.inner.warm_up_period()
+    }
+}
+
 impl Strategy for DynPairsStrategy {
     type Input = fugazi::types::Snapshot<String>;
     type Symbol = String;
