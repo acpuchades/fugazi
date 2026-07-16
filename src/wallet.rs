@@ -431,6 +431,22 @@ struct Protective {
     take_profit: Option<Leg>,
 }
 
+/// A queued order that [`PaperWallet::update`] tried and failed to fill on a
+/// given bar, along with the [`WalletError`] that blocked it and the
+/// [`OrderId`] the submission returned in its [`Ack::Working`].
+///
+/// The wallet stashes one of these on every silent drop so a driver can
+/// inspect why a bar produced no fill (typically `InsufficientFunds` for a
+/// `Size::Units` buy larger than cash on hand, after the shrink helper
+/// exempts fractional sizings). Query with
+/// [`PaperWallet::rejections`](PaperWallet::rejections).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rejection<Sym> {
+    pub symbol: Sym,
+    pub id: OrderId,
+    pub error: WalletError,
+}
+
 /// The built-in **pure**, in-memory [`Wallet`]: a paper book of `funds`,
 /// per-symbol positions, the prices fed to it, a queue of market orders awaiting
 /// their next-open fill, the resting protective brackets, and a blotter of
@@ -456,6 +472,7 @@ pub struct PaperWallet<Sym> {
     funds: Real,
     initial_funds: Real,
     blotter: Vec<Order<Sym>>,
+    rejections: Vec<Rejection<Sym>>,
     next_id: u64,
     costs: TradingCosts,
     per_symbol_costs: HashMap<Sym, TradingCosts>,
@@ -483,6 +500,7 @@ impl<Sym> PaperWallet<Sym> {
             funds,
             initial_funds: funds,
             blotter: Vec::new(),
+            rejections: Vec::new(),
             next_id: 0,
             costs,
             per_symbol_costs: HashMap::new(),
@@ -494,6 +512,17 @@ impl<Sym> PaperWallet<Sym> {
         &self.blotter
     }
 
+    /// Every queued order [`update`](Wallet::update) tried and failed to fill,
+    /// in submission order. Populated by any [`WalletError`] the flush hit —
+    /// typically `InsufficientFunds` on a [`Size::Units`] buy larger than
+    /// cash on hand (fractional sizings shrink to fit and never end up here),
+    /// or `InvalidPrice` on a zero-opening bar. Lets a driver report why a
+    /// bar produced no fill instead of the silent drop the pre-fix wallet
+    /// left callers with.
+    pub fn rejections(&self) -> &[Rejection<Sym>] {
+        &self.rejections
+    }
+
     /// Restore the wallet to its freshly-constructed state — the seed `funds`
     /// it was built with, no positions, no fed prices, no pending or resting
     /// orders, and an empty blotter. Lets one wallet drive successive runs.
@@ -503,6 +532,7 @@ impl<Sym> PaperWallet<Sym> {
         self.pending.clear();
         self.protective.clear();
         self.blotter.clear();
+        self.rejections.clear();
         self.funds = self.initial_funds;
         self.next_id = 0;
     }
@@ -813,10 +843,14 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
                     (side.sign() * magnitude, id)
                 }
             };
-            if let Ok(Some(order)) =
-                self.fill_at(symbol.clone(), target, candle.open, OrderKind::Market, id)
-            {
-                fills.push(order);
+            match self.fill_at(symbol.clone(), target, candle.open, OrderKind::Market, id) {
+                Ok(Some(order)) => fills.push(order),
+                Ok(None) => {}
+                Err(error) => self.rejections.push(Rejection {
+                    symbol: symbol.clone(),
+                    id,
+                    error,
+                }),
             }
         }
         if let Some(order) = self.match_protective(&symbol, &candle) {
@@ -999,6 +1033,29 @@ mod tests {
         w.update("X", Candle::new(95.0, 106.0, 94.0, 105.0, 0.0));
         assert_fill(w.orders().last().unwrap(), Side::Sell, 20.0, 95.0, OrderKind::Market);
         assert_eq!(w.position(&"X").amount, -10.0);
+    }
+
+    #[test]
+    fn infeasible_units_buy_is_recorded_as_a_rejection() {
+        // A caller-explicit Size::Units target that costs more than funds does
+        // not shrink (it carries a specific unit intent). Instead of the
+        // pre-fix silent drop, the wallet now records a Rejection queryable
+        // via `rejections()`.
+        let mut w: PaperWallet<&str> = PaperWallet::new(100.0);
+        w.update("X", bar(50.0));
+        // 3 units @ 50 = 150 > funds 100.
+        let ack = w.set("X", Side::Buy, Size::units(3.0)).unwrap();
+        let id = match ack {
+            Ack::Working(id) => id,
+            Ack::Filled(_) => panic!("market order should queue, not fill"),
+        };
+        let fills = w.update("X", bar(50.0));
+        assert!(fills.is_empty(), "expected no fill");
+        assert!(w.positions().next().is_none());
+        assert_eq!(w.rejections().len(), 1);
+        assert_eq!(w.rejections()[0].symbol, "X");
+        assert_eq!(w.rejections()[0].id, id);
+        assert_eq!(w.rejections()[0].error, WalletError::InsufficientFunds);
     }
 
     #[test]
