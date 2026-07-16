@@ -22,6 +22,7 @@
 
 mod basket;
 mod expr;
+mod multi_asset;
 mod pairs;
 mod preset;
 mod signal;
@@ -62,6 +63,8 @@ pub use expr::ExprSpec;
 #[allow(unused_imports)]
 pub use expr::ValueLit;
 #[allow(unused_imports)]
+pub use multi_asset::MultiAssetStrategySpec;
+#[allow(unused_imports)]
 pub use pairs::PairsStrategySpec;
 #[allow(unused_imports)]
 pub use preset::{StrategyPreset, StrategyRef};
@@ -72,6 +75,8 @@ pub use signal::StrOperand;
 pub use strategy::SingleStrategySpec;
 #[allow(unused_imports)]
 pub use template::SpecTemplate;
+#[allow(unused_imports)]
+pub(crate) use multi_asset::DynMultiAssetStrategy;
 #[allow(unused_imports)]
 pub(crate) use pairs::DynPairsStrategy;
 #[allow(unused_imports)]

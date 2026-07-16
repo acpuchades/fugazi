@@ -25,17 +25,20 @@ identical across all three.
 | --- | --- | --- | --- |
 | none, or `single:` | [`SingleAssetStrategy`](../src/strategies/single_asset.rs) | [Single-asset](#single-asset-documents) | one, named by `symbol` |
 | `pairs:` | [`PairsStrategy`](../src/strategies/pairs.rs) | [Pairs](#pairs-documents) | two, named by `left` / `right` |
-| `basket:` | [`BasketStrategy`](../src/strategies/basket.rs) | [Basket](#basket-documents) | N — **whatever the input series carry** |
+| `basket:` | [`BasketStrategy`](../src/strategies/basket.rs) | [Basket](#basket-documents) | N — cross-sectional rank across the input universe |
+| `multi:` | [`MultiAssetStrategy`](../src/strategies/multi_asset.rs) | [Multi-asset](#multi-asset-documents) | N — same signals applied independently per symbol |
 
 ```sh
 fugazi run @strategy.yml         --series @btc.csv --output-dir out/           # single
 fugazi run pairs:@spread.yml     --series @btc.csv --series @eth.csv -o out/   # pairs
 fugazi run basket:@basket.yml    --series @btc.csv --series @eth.csv \
                                  --series @sol.csv --series @ada.csv -o out/   # basket
+fugazi run multi:@portfolio.yml  --series @btc.csv --series @eth.csv \
+                                 --series @sol.csv --series @ada.csv -o out/   # multi
 ```
 
-`fugazi optimize` currently supports the single-asset shape only; `pairs:` and
-`basket:` documents run under `fugazi run` (and validate under
+`fugazi optimize` currently supports the single-asset shape only; `pairs:`,
+`basket:`, and `multi:` documents run under `fugazi run` (and validate under
 `fugazi check strategy`).
 
 > This document is the syntax reference. For the surrounding CLI (`--series`,
@@ -439,6 +442,73 @@ document. The [book-anchored sizing recipes](#sizing-recipes) *are* wired, and
 read the basket's aggregate equity curve.
 
 See [`examples/basket.yml`](../examples/basket.yml) for the annotated version.
+
+## Multi-asset documents
+
+`multi:@file.yml` builds an N-symbol **independent** portfolio
+([`MultiAssetStrategy`](../src/strategies/multi_asset.rs)): every symbol
+runs the same [`SingleAssetStrategy`](#single-asset-documents)-shaped
+decision in isolation — the same entry / exit signals, the same
+protective levels, the same sizing rule — and any subset of them can be
+long / short / flat at once. Where a [`basket:`](#basket-documents) is
+*cross-sectional* (a symbol trades because it ranks against the
+others), a `multi:` is *independent* (a symbol trades because *its own*
+signals fired).
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `long` | side | omitted | the long side — `enter` + optional `exit` / `stop_loss` / `take_profit`, each templated by `!arg SYM` |
+| `short` | side | omitted | the short side, same shape as `long` |
+| `sizing` | source *(template)* | `!value 1` (all-in per leg) | the per-leg size, as a fraction of equity |
+| `universe` | universe rule | *floating* (every symbol in the series) | which symbols the portfolio is willing to trade — see [Universe](#universe) (shared with `basket:`) |
+
+`long` and `short` mirror the [single-asset side](#single-asset-documents)
+grammar exactly (`enter`, `exit`, `stop_loss`, `take_profit`); the
+difference is that every subtree is a **template** that gets rebuilt per
+symbol with `!arg SYM` substituted, same as `score` / `sizing` in a
+basket. Every atom-input leaf inside must be rooted through
+`!pick { symbol: !arg SYM }`, since a multi-asset snapshot has no
+implicit "sole atom" to unpack.
+
+### A complete multi-asset portfolio
+
+```yaml
+# Same MA-crossover applied per-symbol, independent per leg.
+# Equal-weighted at 25% per leg (4 legs = 100% gross).
+long:
+  enter: !crosses_above
+    lhs: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 5 }
+    rhs: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 20 }
+  exit: !crosses_below
+    lhs: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 5 }
+    rhs: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 20 }
+  stop_loss: !mul
+    lhs: !entry
+    rhs: !value 0.95
+short:
+  enter: !crosses_below
+    lhs: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 5 }
+    rhs: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 20 }
+  exit: !crosses_above
+    lhs: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 5 }
+    rhs: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 20 }
+sizing: !equal_weight 4
+universe: !all_of [BTC, ETH, SOL, ADA]
+```
+
+```sh
+fugazi run multi:@portfolio.yml \
+  --series @btc.csv --series @eth.csv --series @sol.csv --series @ada.csv \
+  --output-dir out/ --crypto -f 1d
+```
+
+Protective levels (`stop_loss` / `take_profit`) inside a `long` /
+`short` side see the **per-symbol** [`Position`](#position-anchored-sources-bare-words)
+— `!entry`, `!peak`, `!trough` compose into per-leg trailing stops
+exactly as on `single:`.
+
+**Not yet wired:** `fugazi optimize` on a `multi:` document (bails, same
+as `basket:` today).
 
 ## Sources
 

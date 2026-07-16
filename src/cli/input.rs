@@ -128,7 +128,11 @@ impl FromStr for Source {
 /// [`PairsStrategy`](fugazi::strategies::PairsStrategy). Prefixing with
 /// `basket:` (e.g. `basket:@basket.yml`) declares an N-symbol cross-sectional
 /// basket that resolves to a
-/// [`BasketStrategy`](fugazi::strategies::BasketStrategy).
+/// [`BasketStrategy`](fugazi::strategies::BasketStrategy). Prefixing with
+/// `multi:` (e.g. `multi:@portfolio.yml`) declares an N-symbol per-asset
+/// independent strategy — every symbol runs the same signals in isolation —
+/// that resolves to a
+/// [`MultiAssetStrategy`](fugazi::strategies::MultiAssetStrategy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StrategyKind {
     /// A single-asset strategy (default; matches `@file.yml` and `single:@file.yml`).
@@ -137,6 +141,8 @@ pub enum StrategyKind {
     Pairs,
     /// An N-symbol cross-sectional basket strategy (`basket:@file.yml`).
     Basket,
+    /// An N-symbol independent multi-asset strategy (`multi:@file.yml`).
+    Multi,
 }
 
 /// A strategy positional: a [`Source`] plus a decided [`StrategyKind`] from
@@ -188,6 +194,12 @@ impl FromStr for StrategySource {
         if let Some(rest) = s.strip_prefix("basket:") {
             return Ok(StrategySource {
                 kind: StrategyKind::Basket,
+                source: rest.parse().expect("infallible"),
+            });
+        }
+        if let Some(rest) = s.strip_prefix("multi:") {
+            return Ok(StrategySource {
+                kind: StrategyKind::Multi,
                 source: rest.parse().expect("infallible"),
             });
         }

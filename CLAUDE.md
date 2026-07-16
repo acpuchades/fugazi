@@ -108,6 +108,14 @@ Each bar the driver: feed each symbol to wallet, route each fill to every strate
 - **Transitions** = market orders, only when target side differs.
 - **Not shipped**: `.dollar_neutral()`, `.rebalance_every(...)`, per-leg protective levels, Python bindings.
 
+**`MultiAssetStrategy<Sym>`** (`strategies/multi_asset.rs`) — N-symbol **independent** portfolio (not cross-sectional): every symbol runs the same `SingleAssetStrategy`-shaped decision in isolation — same four signal slots, same protective-level slots, same sizing — and any subset can be long / short / flat at once. Sibling to `BasketStrategy`; reach for it when a symbol's fate depends only on its own signals, not on how it ranks against the rest.
+
+- **Factories.** Every slot is a per-symbol factory (`Fn(&Sym) -> Signal` / `Fn(&Sym) -> Real source`), plus level factories that additionally receive the per-symbol `Position` (`Fn(&Sym, &Position) -> Level`) so `position.entry()` / `.peak()` / `.trough()` inside compose exactly as on `SingleAssetStrategy`. Sizing factory takes `&Sym` only. Chains are built lazily on first sight, filtered by [`Universe`](#basket-universe).
+- **Universe** knob (reused from `basket::Universe`): `.all_of([...])` strict / `.any_of([...])` lax / floating default. Same semantics as basket — declared universes filter symbol discovery and, under `all_of`, panic on missing + gate `is_ready()` until every listed leg is past its own `stable_period`.
+- **Per-symbol readiness.** Under floating / `any_of`: a symbol trades once *its own* chains have settled (gated inside `trade`); under `all_of`: `is_ready()` blocks until every listed leg is past its own `stable_period`.
+- **State.** Per-symbol `Position` + shared `Book<Sym>` (aggregate equity across all legs). Same book-anchored sizing recipes apply.
+- **Not shipped** (yet): `optimize` support (bails), Python bindings, YAML trailing-risk wrapping.
+
 `src/strategy.rs` carries only the `Strategy` trait. `Wallet` vocabulary lives in **`src/wallet.rs`** so downstream broker crates don't drag `Strategy` machinery.
 
 - **`Wallet<Sym>`** (`&mut dyn`) — single **seam** to downstream execution. Priced **from outside**: `update(symbol, candle) -> Vec<Order>` feeds bar per tick (`close` marks, `[low, high]` bounds fills), returns fills booked. Query: `funds()`/`position(&Sym)`/`price(&Sym)`/`equity()`.
@@ -230,6 +238,7 @@ One binary (`fugazi`); layout by concern:
   - `trailing.rs` — `!sharpe`/`!sortino`/`!volatility`/`!max_drawdown`/`!calmar`. Wraps non-`Clone` `Sharpe<S>` etc. in `RebuildIndicator` rebuilding on clone. `strategy:` is `AnyStrategyRef` (`Single | Pairs | Basket`); bridge routes by distinctive key.
   - `pairs.rs` — `PairsStrategySpec`, `DynPairsStrategy`.
   - `basket.rs` — `BasketStrategySpec` + `SelectionRuleSpec` (`!top_bottom`/`!threshold`/`!quantile`) + `UniverseSpec` (`!all_of [sym, ...]` / `!any_of [sym, ...]`). Fields: `selection`, `score: SpecTemplate<ExprSpec>`, `sizing: SpecTemplate<ExprSpec>`, optional `universe: UniverseSpec` (default floating). `.build(initial_equity, schema)` clones templates into per-symbol factories resolving `!arg SYM`, installs universe on the concrete `BasketStrategy`. `!entry`/`!peak`/`!trough` read dummy `Position` in score/sizing (always `None`). Shared `Book` wired: book-anchored sizing recipes work per-symbol against aggregate. `!equal_weight <N>` = sugar. Wired into `run.rs`; `optimize` bails on baskets.
+  - `multi_asset.rs` — `MultiAssetStrategySpec` + `MultiSideSpec` (`enter: SpecTemplate<SignalSpec>`, `exit`, `stop_loss`, `take_profit`), `sizing: SpecTemplate<ExprSpec>`, optional `universe: UniverseSpec` (reused from `basket.rs`). No `symbol:` field — multi-asset runs across many by construction. `.build(initial_equity, schema)` wires per-side signal / level / sizing factories on the concrete `MultiAssetStrategy`; long/short side factories are called once per symbol on first sight, protective-level factories additionally receive the per-symbol `Position`. Wired into `run.rs` (`run_multi` + `run_iteration_multi`) via the `multi:` prefix; `optimize` bails.
   - `mod.rs` — shared `load_value(text, params, base)` (`parse → !import → !param → typed parse`).
 - **`costs/`** — `--costs`:
   - `spec.rs` — CLI-arg parsing into `CostSpec`; `CostTerm` + `split_top_commas`/`parse_term`.

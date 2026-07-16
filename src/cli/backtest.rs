@@ -31,7 +31,9 @@ use fugazi::prelude::*;
 use crate::calendar::Frequency;
 use crate::costs::CostConfig;
 use crate::metrics;
-use crate::spec::{BasketStrategySpec, PairsStrategySpec, SingleStrategySpec, StrategyRef};
+use crate::spec::{
+    BasketStrategySpec, MultiAssetStrategySpec, PairsStrategySpec, SingleStrategySpec, StrategyRef,
+};
 
 /// Drive `spec` over `atoms` through a fresh paper wallet with `cash`
 /// starting funds and the given trading `costs`, returning the full
@@ -314,6 +316,49 @@ pub fn run_iteration_basket(
         .collect();
     // The shared overlay schema — first atom carrying an OverlayInfo wins;
     // if none of them do, `Schema::empty` (matches the single-asset path).
+    let schema = snapshots
+        .iter()
+        .flat_map(|s| s.iter())
+        .find_map(|(_sym, _freq, a)| a.overlays.as_ref())
+        .map(|ov| ov.schema().clone())
+        .unwrap_or_else(Schema::empty);
+    run_iteration_core(
+        || spec.build(inputs.cash, &schema),
+        snapshots,
+        bars.to_vec(),
+        per_symbol_costs,
+        inputs,
+    )
+}
+
+/// Run a full backtest iteration for a
+/// [`MultiAssetStrategySpec`]. Same shape as
+/// [`run_iteration_basket`] (per-symbol costs, shared overlay schema
+/// from the first-atom-with-schema, [`run_iteration_core`] reduction),
+/// but builds a [`DynMultiAssetStrategy`](crate::spec::DynMultiAssetStrategy)
+/// instead — one that runs the same signals / protective levels /
+/// sizing independently per symbol.
+pub fn run_iteration_multi(
+    spec: &MultiAssetStrategySpec,
+    bars: &[String],
+    snapshots: &[fugazi::types::Snapshot<String>],
+    universe: &[String],
+    inputs: &IterationInputs,
+) -> IterationResult {
+    assert_eq!(
+        bars.len(),
+        snapshots.len(),
+        "multi-asset run: `bars` and `snapshots` must be the same length"
+    );
+    let per_symbol_costs: Vec<(String, TradingCosts)> = universe
+        .iter()
+        .map(|s| {
+            (
+                s.clone(),
+                inputs.cost_config.resolve(s, inputs.effective_freq),
+            )
+        })
+        .collect();
     let schema = snapshots
         .iter()
         .flat_map(|s| s.iter())

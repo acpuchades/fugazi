@@ -505,6 +505,29 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
                 );
             }
         }
+        StrategyKind::Multi => {
+            // Multi-asset parses eagerly like basket: the top-level +
+            // per-slot templates deserialize now; each template only
+            // typed-parses per-symbol at run time (against `!arg SYM`).
+            let spec = spec::MultiAssetStrategySpec::from_text_with_params_in(&text, &param_table, &base, &label)
+                .with_context(|| parse_error_hint(&args.strategy))?;
+            if !args.quiet {
+                style::print_header("check", "parse and validate a multi-asset strategy spec");
+                let sides: Vec<&str> = [
+                    spec.long.as_ref().map(|_| "long"),
+                    spec.short.as_ref().map(|_| "short"),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                let sides = if sides.is_empty() {
+                    "no sides wired".to_string()
+                } else {
+                    sides.join(" + ")
+                };
+                println!("{label}: ok ({sides})");
+            }
+        }
     }
     Ok(())
 }
@@ -619,6 +642,11 @@ fn run(args: RunArgs) -> Result<()> {
                 .with_context(|| parse_error_hint(&args.strategy))?;
             run::run_basket(&spec, &frame, &opts)?;
         }
+        StrategyKind::Multi => {
+            let spec = spec::MultiAssetStrategySpec::from_text_with_params_in(&text, &param_table, &base, &strat_label)
+                .with_context(|| parse_error_hint(&args.strategy))?;
+            run::run_multi(&spec, &frame, &opts)?;
+        }
     }
     Ok(())
 }
@@ -632,6 +660,11 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
     if args.strategy.kind == StrategyKind::Basket {
         anyhow::bail!(
             "`fugazi optimize` doesn't yet support `basket:` strategies; use `fugazi run` for now"
+        );
+    }
+    if args.strategy.kind == StrategyKind::Multi {
+        anyhow::bail!(
+            "`fugazi optimize` doesn't yet support `multi:` strategies; use `fugazi run` for now"
         );
     }
     let param_table = params::table(&args.params)?;

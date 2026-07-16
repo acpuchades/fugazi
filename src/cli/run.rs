@@ -47,7 +47,7 @@ use crate::calendar::{self, AssetClass, BarsPerYearSpec, ScopedFrequency, Window
 use crate::costs::CostConfig;
 use crate::data::DataFrame;
 use crate::metrics;
-use crate::spec::{BasketStrategySpec, PairsStrategySpec, StrategyRef};
+use crate::spec::{BasketStrategySpec, MultiAssetStrategySpec, PairsStrategySpec, StrategyRef};
 use crate::style;
 
 /// Console-logging knobs plus the run's inputs, threaded in from the CLI args.
@@ -446,6 +446,140 @@ pub fn run_basket(
 
     write_returns_csv(&iter, &opts.out_dir.join("returns.csv"))?;
 
+    metrics::write_yaml(&iter.metrics, &opts.out_dir.join("metrics.yml"))?;
+
+    if let Some(ws) = iter.windowed.as_deref() {
+        let dsr_context = metrics::windows_dsr_context(ws);
+        write_windowed_csv(ws, &iter.bars, dsr_context, &opts.out_dir.join("metrics.csv"))?;
+    }
+    if let Some(rs) = iter.rolling.as_deref() {
+        write_windowed_csv(rs, &iter.bars, None, &opts.out_dir.join("rolling.csv"))?;
+    }
+
+    let summary = Summary {
+        final_equity: iter.summary.final_equity,
+        return_pct: if opts.cash != 0.0 {
+            (iter.summary.final_equity - opts.cash) / opts.cash * 100.0
+        } else {
+            0.0
+        },
+        fills: iter.summary.fills,
+        bars: iter.summary.bars,
+    };
+
+    let finished = SystemTime::now();
+    if !opts.quiet {
+        print_result_block(opts, &summary, started, finished);
+        print_metrics_block(
+            &iter.metrics,
+            None,
+            iter.gross_metrics.as_ref(),
+            effective_freq,
+        );
+        if let Some(windows) = iter.windowed.as_deref() {
+            print_windowed_metrics_block(windows);
+        }
+    }
+    Ok(summary)
+}
+
+/// The multi-asset runner: drive a
+/// [`MultiAssetStrategy`](fugazi::strategies::MultiAssetStrategy) over
+/// every symbol discovered in `frame`, time-aligning per-symbol atom
+/// streams by outer-joining on `time` — same pipeline as
+/// [`run_basket`], since the frame → snapshot bridge is identical. The
+/// tradeable universe is either the frame's set of symbols (default) or
+/// the intersection with the YAML's declared `!all_of` / `!any_of`.
+pub fn run_multi(
+    spec: &MultiAssetStrategySpec,
+    frame: &DataFrame,
+    opts: &RunOptions,
+) -> Result<Summary> {
+    let started = SystemTime::now();
+    let universe = frame.symbols();
+    if universe.is_empty() {
+        anyhow::bail!(
+            "no symbols found in the input series — a multi-asset strategy needs at least one traded asset"
+        );
+    }
+    let per_symbol: Vec<(String, Vec<(String, Atom)>)> = universe
+        .iter()
+        .map(|sym| Ok::<_, anyhow::Error>((sym.clone(), frame.atoms(sym)?.atoms)))
+        .collect::<Result<_>>()?;
+    let (bars, snapshots) = join_universe_by_time(&per_symbol);
+    if bars.is_empty() {
+        anyhow::bail!(
+            "no bars found in the input series across the {} discovered symbol(s)",
+            universe.len()
+        );
+    }
+
+    std::fs::create_dir_all(opts.out_dir)
+        .with_context(|| format!("creating output dir `{}`", opts.out_dir.display()))?;
+
+    let start = bars.first().map_or("", |t| t.as_str());
+    let end = bars.last().map_or("", |t| t.as_str());
+    let representative = &universe[0];
+    let effective_freq = calendar::pick_frequency(opts.frequency, representative).or_else(|| {
+        per_symbol
+            .iter()
+            .find(|(s, _)| s == representative)
+            .and_then(|(_, atoms)| {
+                calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a))
+            })
+    });
+    let bars_per_year = calendar::pick_bars_per_year(
+        opts.bars_per_year,
+        representative,
+        effective_freq,
+    )
+    .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
+    let no_cost_warning = !opts.costs_supplied;
+    let windowed_bars = opts
+        .windowed
+        .map(|w| {
+            w.resolve(effective_freq, opts.asset_class)
+                .map_err(anyhow::Error::msg)
+        })
+        .transpose()
+        .context("resolving `-w/--windowed`")?;
+    let seconds_per_bar = opts
+        .asset_class
+        .zip(effective_freq)
+        .map(|(class, freq)| class.trading_seconds_per_bar(freq));
+    let inputs = IterationInputs {
+        cash: opts.cash,
+        bars_per_year,
+        risk_free_rate: opts.risk_free_rate,
+        cost_config: opts.cost_config,
+        effective_freq,
+        windowed: windowed_bars,
+        seconds_per_bar,
+    };
+    if !opts.quiet {
+        let costs_active = universe
+            .iter()
+            .any(|s| !opts.cost_config.resolve(s, effective_freq).is_none());
+        style::print_header(
+            "run",
+            "trade a multi-asset portfolio across an N-symbol universe",
+        );
+        print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active);
+        if no_cost_warning {
+            print_no_cost_warning();
+        }
+    }
+
+    let iter =
+        backtest::run_iteration_multi(spec, &bars, &snapshots, &universe, &inputs);
+
+    write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
+    if !opts.quiet {
+        println!("\n{}", style::bold("fills"));
+        stream_fills(&iter);
+    }
+    write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
+    write_returns_csv(&iter, &opts.out_dir.join("returns.csv"))?;
     metrics::write_yaml(&iter.metrics, &opts.out_dir.join("metrics.yml"))?;
 
     if let Some(ws) = iter.windowed.as_deref() {

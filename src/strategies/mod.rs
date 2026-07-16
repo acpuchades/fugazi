@@ -48,12 +48,14 @@ pub mod basket;
 pub mod composite;
 pub mod mean_reversion;
 pub mod momentum;
+pub mod multi_asset;
 pub mod pairs;
 pub mod single_asset;
 pub mod trend;
 pub mod volume;
 
 pub use basket::BasketStrategy;
+pub use multi_asset::MultiAssetStrategy;
 pub use pairs::PairsStrategy;
 pub use single_asset::SingleAssetStrategy;
 

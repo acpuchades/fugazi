@@ -182,9 +182,10 @@ pub enum Universe<Sym> {
 
 impl<Sym: PartialEq> Universe<Sym> {
     /// Whether `sym` is allowed into the basket under this universe.
-    /// Floating universes always accept; declared universes accept only
-    /// listed members.
-    fn admits(&self, sym: &Sym) -> bool {
+    /// [`Floating`](Self::Floating) always accepts; declared universes
+    /// accept only listed members. Used at symbol discovery to filter the
+    /// incoming snapshot down to admissible names.
+    pub fn admits(&self, sym: &Sym) -> bool {
         match self {
             Universe::Floating => true,
             Universe::AllOf(v) | Universe::AnyOf(v) => v.contains(sym),
@@ -192,8 +193,10 @@ impl<Sym: PartialEq> Universe<Sym> {
     }
 
     /// The symbols this universe *requires* on every bar, if any. Only
-    /// [`Universe::AllOf`] returns `Some`.
-    fn required(&self) -> Option<&[Sym]> {
+    /// [`AllOf`](Self::AllOf) returns `Some`; the strict-erroring convention
+    /// panics from `update` when a required symbol is absent from a
+    /// snapshot.
+    pub fn required(&self) -> Option<&[Sym]> {
         match self {
             Universe::AllOf(v) => Some(v.as_slice()),
             _ => None,
