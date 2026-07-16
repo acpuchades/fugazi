@@ -1,5 +1,5 @@
-//! [`BasketStrategy`]: a cross-sectional, multi-symbol ranker over a floating
-//! universe.
+//! [`BasketStrategy`]: a cross-sectional, multi-symbol ranker with a
+//! caller-declared or floating universe.
 //!
 //! Where [`SingleAssetStrategy`](crate::strategies::SingleAssetStrategy) drives
 //! one asset from boolean signals and [`PairsStrategy`](crate::strategies::PairsStrategy)
@@ -7,10 +7,16 @@
 //! [`Snapshot<Sym>`](crate::types::Snapshot) each bar: it scores every symbol
 //! present with a per-symbol *scoring* source, applies a **selection closure**
 //! (mapping the score map to per-symbol [`Side`]s), and drives each selection
-//! long / short / flat. The universe is *floating*: symbols are discovered
-//! from the incoming snapshot on first sight, and the per-symbol score /
-//! sizing chains are spun up lazily by user-supplied factories — no upfront
-//! universe list, no reject on a new listing.
+//! long / short / flat. The default universe is *floating*: symbols are
+//! discovered from the incoming snapshot on first sight, and the per-symbol
+//! score / sizing chains are spun up lazily by user-supplied factories — no
+//! upfront universe list, no reject on a new listing.
+//!
+//! A caller who wants to catch feed gaps or typos declares an explicit
+//! [`Universe`] via [`BasketStrategy::all_of`] (strict — every listed symbol
+//! must be present in every snapshot, panics on absence, readiness waits
+//! until all are ready) or [`BasketStrategy::any_of`] (lax — restricts to
+//! the listed subset but silently ignores absent or still-unready members).
 //!
 //! The crate ships three built-in selection functions — [`top_bottom`],
 //! [`threshold`], and [`quantile`] — plus matching builder methods on
@@ -137,6 +143,64 @@ fn quantile_count(q: Real, n: usize) -> usize {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Universe — declared vs. floating symbol scope.
+// ---------------------------------------------------------------------------
+
+/// The set of symbols a [`BasketStrategy`] is willing to trade.
+///
+/// - [`Floating`](Self::Floating) — the default. Symbols are discovered
+///   from the incoming snapshot on first sight; nothing is required, nothing
+///   is filtered.
+/// - [`AllOf`](Self::AllOf) — a strict, declared universe. Only listed
+///   symbols enter the basket, every listed symbol *must* appear in every
+///   snapshot (an absent symbol **panics** from
+///   [`Strategy::update`](crate::Strategy::update)), and
+///   [`is_ready`](crate::Strategy::is_ready) stays `false` until every
+///   listed symbol has produced a score *and* a size this bar. Catches
+///   typos and feed gaps loud instead of silently building an
+///   under-populated basket.
+/// - [`AnyOf`](Self::AnyOf) — a lax, declared universe. Restricts to the
+///   listed subset but silently ignores absent or still-unready members —
+///   same per-bar filter the floating universe does, just narrowed to a
+///   fixed list.
+///
+/// Installed via [`BasketStrategy::all_of`] / [`BasketStrategy::any_of`];
+/// the floating default matches `Universe::Floating`.
+#[derive(Debug, Clone)]
+pub enum Universe<Sym> {
+    /// No declared scope — every symbol seen in the snapshot enters the
+    /// basket lazily.
+    Floating,
+    /// Strict declared scope: exactly these symbols, every bar. Absence
+    /// panics; readiness gates on every listed symbol scoring `Some`.
+    AllOf(Vec<Sym>),
+    /// Lax declared scope: these symbols only, silently skip absent /
+    /// unready members.
+    AnyOf(Vec<Sym>),
+}
+
+impl<Sym: PartialEq> Universe<Sym> {
+    /// Whether `sym` is allowed into the basket under this universe.
+    /// Floating universes always accept; declared universes accept only
+    /// listed members.
+    fn admits(&self, sym: &Sym) -> bool {
+        match self {
+            Universe::Floating => true,
+            Universe::AllOf(v) | Universe::AnyOf(v) => v.contains(sym),
+        }
+    }
+
+    /// The symbols this universe *requires* on every bar, if any. Only
+    /// [`Universe::AllOf`] returns `Some`.
+    fn required(&self) -> Option<&[Sym]> {
+        match self {
+            Universe::AllOf(v) => Some(v.as_slice()),
+            _ => None,
+        }
+    }
+}
+
 /// The selection closure a [`BasketStrategy`] holds: takes a
 /// per-symbol score map and returns which symbols to trade on which side.
 /// Symbols not in the returned map are not selected (an open position on
@@ -163,17 +227,27 @@ type Selection<Sym> = Box<dyn Fn(&HashMap<Sym, Real>) -> HashMap<Sym, Side>>;
 /// function) or via [`selection`](Self::selection) with an arbitrary
 /// closure.
 ///
-/// ## Floating universe
+/// ## Universe
 ///
-/// Symbols aren't declared upfront — the strategy owns two factories,
-/// `Fn(&Sym) -> impl Indicator`, and calls each factory once on the first
-/// bar a new symbol appears in the snapshot. Every leaf inside is expected
-/// to root itself on the current symbol via [`Pick`](crate::indicators::Pick)
-/// / [`Selector::by_symbol`](crate::types::Selector::by_symbol), so the
+/// By default the universe is **floating**: symbols aren't declared
+/// upfront — the strategy owns two factories, `Fn(&Sym) -> impl Indicator`,
+/// and calls each factory once on the first bar a new symbol appears in
+/// the snapshot. Every leaf inside is expected to root itself on the
+/// current symbol via [`Pick`](crate::indicators::Pick) /
+/// [`Selector::by_symbol`](crate::types::Selector::by_symbol), so the
 /// same factory closure produces a per-symbol chain for every symbol it's
 /// asked about. A symbol that stops appearing keeps its chain (in case it
 /// comes back) but rolls off the score / sizing maps as its chain's
 /// `Pick` reads `None` — so the ranker only sees the currently-live symbols.
+///
+/// A caller who wants to *catch* feed gaps or typos declares an explicit
+/// [`Universe`] via [`all_of`](Self::all_of) (strict: every listed symbol
+/// must appear on every bar — panics otherwise — and
+/// [`is_ready`](Strategy::is_ready) waits until all listed symbols score
+/// `Some`) or [`any_of`](Self::any_of) (lax: restricts to the listed
+/// subset but silently ignores absent / unready members). Either way
+/// non-listed symbols are filtered out at discovery — no chain gets built
+/// for a symbol outside the declared universe.
 ///
 /// ## Sizing
 ///
@@ -257,6 +331,7 @@ pub struct BasketStrategy<Sym> {
     latest_score: HashMap<Sym, Real>,
     latest_size: HashMap<Sym, Real>,
     selection: Selection<Sym>,
+    universe: Universe<Sym>,
     book: Book<Sym>,
 }
 
@@ -299,6 +374,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> BasketStrategy<Sym> {
             latest_score: HashMap::new(),
             latest_size: HashMap::new(),
             selection: Box::new(|_scores: &HashMap<Sym, Real>| HashMap::new()),
+            universe: Universe::Floating,
             book: Book::new(initial_equity),
         }
     }
@@ -381,6 +457,36 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> BasketStrategy<Sym> {
         self
     }
 
+    /// Restrict this basket to the exact set `symbols` under a **strict**
+    /// contract: every listed symbol must appear on every bar (an absent
+    /// symbol panics from [`update`](Strategy::update)), and
+    /// [`is_ready`](Strategy::is_ready) stays `false` until every listed
+    /// symbol has scored *and* sized `Some`. Non-listed symbols are
+    /// filtered out at discovery — no chain is built for them.
+    ///
+    /// Use this when the universe list is authoritative and a missing
+    /// symbol means the data feed is broken. If silent skipping is what
+    /// you want, use [`any_of`](Self::any_of) instead.
+    pub fn all_of<I>(mut self, symbols: I) -> Self
+    where
+        I: IntoIterator<Item = Sym>,
+    {
+        self.universe = Universe::AllOf(symbols.into_iter().collect());
+        self
+    }
+
+    /// Restrict this basket to the set `symbols` under a **lax** contract:
+    /// only listed symbols enter the basket, but absent or still-unready
+    /// members are silently skipped — same per-bar filtering the floating
+    /// universe does, just narrowed to a fixed list.
+    pub fn any_of<I>(mut self, symbols: I) -> Self
+    where
+        I: IntoIterator<Item = Sym>,
+    {
+        self.universe = Universe::AnyOf(symbols.into_iter().collect());
+        self
+    }
+
     /// A clone of the [`Position`] tracker for `symbol`, if it has been
     /// seen. Available for building per-symbol protective levels off the
     /// tracked entry / peak / trough (not wired into `trade` in this
@@ -407,13 +513,36 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Strategy for BasketStrategy<S
     type Symbol = Sym;
 
     fn update(&mut self, snap: Snapshot<Sym>) {
-        // 1. Discover symbols on first sight and spin up their chains. We
+        // 0. Universe: !all_of requires every listed symbol on every bar.
+        // Absence is a hard panic — the point of a strict universe is to
+        // catch feed gaps and typos at the first bar, not silently trade a
+        // smaller basket.
+        if let Some(required) = self.universe.required() {
+            for sym in required {
+                let present = snap.iter().any(|(s, _, _)| s == Some(sym));
+                if !present {
+                    panic!(
+                        "BasketStrategy: `all_of` universe requires every \
+                         listed symbol to be present in every snapshot, but \
+                         at least one is missing this bar. Either fix the \
+                         data feed or switch to `any_of` if silent skipping \
+                         is what you want."
+                    );
+                }
+            }
+        }
+
+        // 1. Discover symbols on first sight and spin up their chains,
+        // filtered by the declared universe (floating admits all). We
         // collect the new symbols first so the borrow of `snap` ends before
         // we mutate `self`.
         let new_syms: Vec<Sym> = snap
             .iter()
             .filter_map(|(sym_opt, _freq, _atom)| {
-                sym_opt.filter(|s| !self.scores.contains_key(s)).cloned()
+                sym_opt
+                    .filter(|s| self.universe.admits(s))
+                    .filter(|s| !self.scores.contains_key(s))
+                    .cloned()
             })
             .collect();
         for sym in new_syms {
@@ -511,6 +640,22 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Strategy for BasketStrategy<S
                     }
                 }
             }
+        }
+    }
+
+    fn is_ready(&self) -> bool {
+        // Floating / any_of: per-symbol readiness is enforced inside
+        // `trade` by only considering symbols that scored `Some` this bar,
+        // so the strategy is always ready to *try*.
+        //
+        // all_of: strict — the driver skips `trade` until every listed
+        // symbol has both scored and sized `Some`, so the basket sits
+        // through warm-up rather than picking from a partial universe.
+        match &self.universe {
+            Universe::AllOf(required) => required.iter().all(|s| {
+                self.latest_score.contains_key(s) && self.latest_size.contains_key(s)
+            }),
+            _ => true,
         }
     }
 
@@ -953,5 +1098,118 @@ mod tests {
     #[allow(dead_code)]
     fn _touch_indicator_ext() {
         let _ = Close::<Pick<&'static str>>::of(Pick::<&'static str>::new()).roc(5);
+    }
+
+    // ---------------- Universe (all_of / any_of) -------------------------
+
+    #[test]
+    fn all_of_restricts_discovery_to_listed_symbols() {
+        // Universe = {A, B}. Snapshot carries A, B, C — C should never get
+        // a chain built.
+        let mut strat: BasketStrategy<&'static str> =
+            BasketStrategy::with_initial_equity(1_000.0)
+                .scored_by(|sym: &&'static str| {
+                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
+                })
+                .sized_by(|_| equal_weight::<&'static str>(2))
+                .top_bottom(1, 1)
+                .all_of(["A", "B"]);
+        strat.update(snap(&[("A", 100.0), ("B", 50.0), ("C", 200.0)]));
+        assert!(strat.position(&"A").is_some());
+        assert!(strat.position(&"B").is_some());
+        assert!(
+            strat.position(&"C").is_none(),
+            "C is not in the declared universe; no chain / position should be built for it"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "`all_of` universe requires")]
+    fn all_of_panics_when_listed_symbol_absent() {
+        let mut strat: BasketStrategy<&'static str> =
+            BasketStrategy::with_initial_equity(1_000.0)
+                .scored_by(|sym: &&'static str| {
+                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
+                })
+                .sized_by(|_| equal_weight::<&'static str>(2))
+                .top_bottom(1, 1)
+                .all_of(["A", "B"]);
+        // B is missing from the snapshot — strict-erroring convention.
+        strat.update(snap(&[("A", 100.0)]));
+    }
+
+    #[test]
+    fn all_of_is_ready_gates_on_every_listed_symbol_scoring() {
+        // Score = SMA-3 so the first two bars score None for every symbol.
+        // Under !all_of, is_ready must stay false until every listed
+        // symbol has settled.
+        let mut strat: BasketStrategy<&'static str> =
+            BasketStrategy::with_initial_equity(1_000.0)
+                .scored_by(|sym: &&'static str| {
+                    crate::indicators::Sma::new(
+                        Close::of(Pick::matching(Selector::by_symbol(*sym))),
+                        3,
+                    )
+                })
+                .sized_by(|_| equal_weight::<&'static str>(2))
+                .top_bottom(1, 1)
+                .all_of(["A", "B"]);
+        assert!(!strat.is_ready(), "empty basket cannot be ready under all_of");
+        strat.update(snap(&[("A", 100.0), ("B", 50.0)]));
+        assert!(!strat.is_ready(), "first bar: SMA-3 not warmed for either");
+        strat.update(snap(&[("A", 101.0), ("B", 51.0)]));
+        assert!(!strat.is_ready(), "second bar: SMA-3 still not warmed");
+        strat.update(snap(&[("A", 102.0), ("B", 52.0)]));
+        assert!(
+            strat.is_ready(),
+            "third bar: both listed symbols have scored — ready"
+        );
+    }
+
+    #[test]
+    fn any_of_ignores_absent_symbols() {
+        // Universe = {A, B} lax. B is missing on this bar — must not panic.
+        let mut strat: BasketStrategy<&'static str> =
+            BasketStrategy::with_initial_equity(1_000.0)
+                .scored_by(|sym: &&'static str| {
+                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
+                })
+                .sized_by(|_| equal_weight::<&'static str>(2))
+                .top_bottom(1, 1)
+                .any_of(["A", "B"]);
+        strat.update(snap(&[("A", 100.0)]));
+        assert!(strat.position(&"A").is_some());
+        // No B in the snapshot: no chain built yet (it hasn't been seen).
+        assert!(strat.position(&"B").is_none());
+        // any_of doesn't gate readiness on absence.
+        assert!(strat.is_ready());
+    }
+
+    #[test]
+    fn any_of_restricts_discovery_to_listed_symbols() {
+        // Same shape as the all_of restriction test, but without the
+        // presence-required panic. C in the snapshot must still be
+        // filtered out at discovery.
+        let mut strat: BasketStrategy<&'static str> =
+            BasketStrategy::with_initial_equity(1_000.0)
+                .scored_by(|sym: &&'static str| {
+                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
+                })
+                .sized_by(|_| equal_weight::<&'static str>(2))
+                .top_bottom(1, 1)
+                .any_of(["A", "B"]);
+        strat.update(snap(&[("A", 100.0), ("B", 50.0), ("C", 200.0)]));
+        assert!(strat.position(&"A").is_some());
+        assert!(strat.position(&"B").is_some());
+        assert!(strat.position(&"C").is_none());
+    }
+
+    #[test]
+    fn floating_universe_is_ready_by_default() {
+        // Sanity: the default (no all_of / no any_of) leaves is_ready as
+        // the trait default.
+        let strat: BasketStrategy<&'static str> =
+            BasketStrategy::with_initial_equity(1_000.0);
+        assert!(strat.is_ready());
     }
 }

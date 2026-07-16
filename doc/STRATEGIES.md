@@ -324,13 +324,18 @@ symbol — the classic cross-sectional momentum / value / carry shape.
 | `selection` | selection rule | — (**required**) | how ranked scores become sides |
 | `score` | source *(template)* | — (**required**) | the per-symbol ranking value |
 | `sizing` | source *(template)* | — (**required**) | the per-leg size, as a fraction of equity |
+| `universe` | universe rule | *floating* (every symbol seen) | which symbols the basket is willing to trade — see [Universe](#universe) |
 
-**The universe is not declared in the file** — it is exactly the set of symbols
-the `--series` inputs carry. The basket builds a fresh score and sizing chain for
-each symbol the first time it appears, so one document covers a 4-symbol universe
-and a 40-symbol one unchanged. Symbols missing a bar at some timestamp simply
-don't appear in that bar's snapshot, drop out of the ranking, and rejoin when
-they resume.
+**By default the universe is not declared in the file** — it is exactly the set
+of symbols the `--series` inputs carry. The basket builds a fresh score and
+sizing chain for each symbol the first time it appears, so one document covers a
+4-symbol universe and a 40-symbol one unchanged. Symbols missing a bar at some
+timestamp simply don't appear in that bar's snapshot, drop out of the ranking,
+and rejoin when they resume.
+
+An explicit [`universe:`](#universe) field opts the basket into a declared
+symbol list — strict (`!all_of`, errors on absence) or lax (`!any_of`, silently
+skips absent / unready).
 
 ### `!arg SYM` — the per-symbol placeholder
 
@@ -374,6 +379,33 @@ exposure floats with it too unless the sizing expression compensates.
 Symbols that aren't selected are flattened. A symbol keeps its side across bars
 if the ranking doesn't change — transitions only fire when the target side
 actually differs, so an unchanged selection doesn't churn the wallet.
+
+### Universe
+
+By default the basket is *floating* — it picks up any symbol the `--series`
+inputs carry and rolls with typos and gaps. `universe:` opts into a declared
+symbol list so a missing name is caught instead of silently trading a smaller
+basket:
+
+| Tag | Fields | On absent listed symbol | On unready listed symbol |
+| --- | --- | --- | --- |
+| `!all_of` | `[sym, sym, …]` | **panics** on the first bar it's missing | `is_ready()` waits — basket skips `trade` until every listed symbol has both scored and sized |
+| `!any_of` | `[sym, sym, …]` | silently ignored this bar | silently ignored this bar |
+
+Both tags **filter discovery** to the listed set: symbols outside the universe
+never get a per-symbol chain built, and any `--series` input for them is dropped
+at the basket boundary (the wallet still marks them, but the basket won't
+trade them).
+
+```yaml
+universe: !all_of [BTC, ETH, SOL, ADA]   # strict — a missing feed panics
+# — or —
+universe: !any_of [BTC, ETH, SOL, ADA]   # lax — a missing feed silently skips
+```
+
+Use `!all_of` when the universe list is authoritative and a gap means the data
+feed is broken; use `!any_of` when the same document should run across
+overlapping subsets. Omit the field for the default floating behaviour.
 
 ### A complete basket
 

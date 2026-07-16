@@ -100,9 +100,10 @@ Each bar the driver: feed each symbol to wallet, route each fill to every strate
 
 - **Selection.** Ready-made: `strategies::basket::{top_bottom, threshold, quantile}` + builders `.top_bottom(longs, shorts)`/`.threshold(long_min, short_max)`/`.quantile(long_q, short_q)`. `.selection(closure)` = escape hatch.
 - **Floating universe.** Two factories (`Fn(&Sym) -> impl Indicator<Input=Snapshot<Sym>, Output=Real> + 'static`) called once per symbol on first sight, rooting leaves via `Pick::matching(Selector::by_symbol(sym.clone()))`.
+- **Declared universe** (opt-in): `.all_of([sym, ...])` strict — panics when a listed symbol is absent on any bar, gates `is_ready()` on every listed symbol scoring *and* sizing `Some`; `.any_of([sym, ...])` lax — restricts discovery to the listed subset but silently skips absent / unready members (readiness stays `true`, filtered inside `trade`). Both filter non-listed symbols out at discovery (no chain built). Enum lives at `strategies::basket::Universe` (`Floating` default).
 - **Sizing.** Per-leg `ValueFraction`, **no auto-normalization** — use `sizing::equal_weight(n_legs)` for 100% gross.
 - **Costs** stay on wallet — `PaperWallet::set_costs_for(sym, ...)`.
-- **Per-symbol readiness.** `is_ready() = true` unconditionally; enforced inside `trade()` by only ranking symbols whose score read `Some` this bar.
+- **Per-symbol readiness.** Under `Floating` / `any_of`: `is_ready() = true` unconditionally; enforced inside `trade()` by only ranking symbols whose score read `Some` this bar. Under `all_of`: `is_ready()` blocks until every listed symbol has both scored and sized `Some` — the driver skips `trade` while the universe warms.
 - **State.** Per-symbol `Position` (per-leg protective not wired) + shared `Book<Sym>`. Seed `with_initial_equity(cash)`.
 - **Transitions** = market orders, only when target side differs.
 - **Not shipped**: `.dollar_neutral()`, `.rebalance_every(...)`, per-leg protective levels, Python bindings.
@@ -228,7 +229,7 @@ One binary (`fugazi`); layout by concern:
   - `preset.rs` — `StrategyPreset` (externally-tagged: `!buy_and_hold`/`!ma_crossover`/`!rsi_reversal`/`!donchian_breakout`/`!keltner_breakout`) and `StrategyRef` (`Spec | Preset` bridge). `optimize` = `SingleStrategySpec`-only.
   - `trailing.rs` — `!sharpe`/`!sortino`/`!volatility`/`!max_drawdown`/`!calmar`. Wraps non-`Clone` `Sharpe<S>` etc. in `RebuildIndicator` rebuilding on clone. `strategy:` is `AnyStrategyRef` (`Single | Pairs | Basket`); bridge routes by distinctive key.
   - `pairs.rs` — `PairsStrategySpec`, `DynPairsStrategy`.
-  - `basket.rs` — `BasketStrategySpec` + `SelectionRuleSpec` (`!top_bottom`/`!threshold`/`!quantile`). Fields: `selection`, `score: SpecTemplate<ExprSpec>`, `sizing: SpecTemplate<ExprSpec>`. `.build(initial_equity, schema)` clones templates into per-symbol factories resolving `!arg SYM`. `!entry`/`!peak`/`!trough` read dummy `Position` in score/sizing (always `None`). Shared `Book` wired: book-anchored sizing recipes work per-symbol against aggregate. `!equal_weight <N>` = sugar. Wired into `run.rs`; `optimize` bails on baskets.
+  - `basket.rs` — `BasketStrategySpec` + `SelectionRuleSpec` (`!top_bottom`/`!threshold`/`!quantile`) + `UniverseSpec` (`!all_of [sym, ...]` / `!any_of [sym, ...]`). Fields: `selection`, `score: SpecTemplate<ExprSpec>`, `sizing: SpecTemplate<ExprSpec>`, optional `universe: UniverseSpec` (default floating). `.build(initial_equity, schema)` clones templates into per-symbol factories resolving `!arg SYM`, installs universe on the concrete `BasketStrategy`. `!entry`/`!peak`/`!trough` read dummy `Position` in score/sizing (always `None`). Shared `Book` wired: book-anchored sizing recipes work per-symbol against aggregate. `!equal_weight <N>` = sugar. Wired into `run.rs`; `optimize` bails on baskets.
   - `mod.rs` — shared `load_value(text, params, base)` (`parse → !import → !param → typed parse`).
 - **`costs/`** — `--costs`:
   - `spec.rs` — CLI-arg parsing into `CostSpec`; `CostTerm` + `split_top_commas`/`parse_term`.
@@ -297,6 +298,7 @@ Cargo: `python/Cargo.toml` depends on `fugazi_core = { package = "fugazi", … d
 | Position tracking inside strategy | `SingleAssetStrategy::position()`; `BasketStrategy::position(&sym)` | `src/indicators/position.rs`, `src/strategies/*.rs` |
 | Sizing recipes | `indicators::sizing::{equal_weight, vol_target, atr_risk, drawdown_throttle, equity_vol_target, fractional_kelly}` | `src/indicators/sizing.rs` |
 | Cross-sectional rank → `Side` | `strategies::basket::{top_bottom, threshold, quantile}`; `.selection(closure)` | `src/strategies/basket.rs` |
+| Declared basket universe (strict vs. lax) | `BasketStrategy::{all_of, any_of}` on the Rust builder; YAML `universe: !all_of [...] \| !any_of [...]` on `BasketStrategySpec` | `src/strategies/basket.rs`, `src/cli/spec/basket.rs` |
 | Strategy-lifetime equity/trade tracking | `SingleAssetStrategy::book()`/`PairsStrategy::book()`/`BasketStrategy::book()` + `BookField` accessors | `src/indicators/book.rs`, `src/strategies/*.rs` |
 | Resolve metric name once, reuse | `MetricKey::from_name(name, sample)` + `.resolve(&metrics)` | `src/cli/metrics.rs` |
 | Wrap indicator as `DynIndicator` / zero unstable / typed view / chain | `runtime::{wrap, unstable_wrap, AsReal/AsBool/AsCandle/AsAtom/AsStr, chain}` | `src/runtime.rs` |

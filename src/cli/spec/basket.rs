@@ -64,6 +64,33 @@ pub enum SelectionRuleSpec {
     Quantile { long_q: Real, short_q: Real },
 }
 
+/// YAML surface for a declared basket [`Universe`](fugazi::strategies::basket::Universe).
+///
+/// Externally tagged, taking a raw list of symbol names:
+///
+/// ```yaml
+/// universe: !all_of [BTC, ETH, SOL]     # strict: panic on absence, wait for all
+/// universe: !any_of [BTC, ETH, SOL]     # lax:    silently skip absent / unready
+/// ```
+///
+/// Omitted (`universe:` absent from the spec) means the default floating
+/// universe — every symbol seen in the snapshot is picked up on first
+/// sight.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum UniverseSpec {
+    /// Strict declared universe: every listed symbol must be present on
+    /// every bar (absence panics); readiness gates on all listed symbols
+    /// scoring `Some`. See
+    /// [`fugazi::strategies::basket::Universe::AllOf`].
+    AllOf(Vec<String>),
+
+    /// Lax declared universe: restrict to the listed subset but silently
+    /// skip absent or still-unready members. See
+    /// [`fugazi::strategies::basket::Universe::AnyOf`].
+    AnyOf(Vec<String>),
+}
+
 /// A whole `basket.yml`: the ranking rule plus deferred score and sizing
 /// templates, resolved per-symbol at build time.
 ///
@@ -89,6 +116,14 @@ pub struct BasketStrategySpec {
     /// n_legs` per leg. No `!arg` is needed there since equal-weight
     /// doesn't depend on the symbol.
     pub sizing: SpecTemplate<ExprSpec>,
+
+    /// Declared symbol universe — `!all_of [...]` (strict: error on
+    /// absence, wait until every listed symbol is ready) or `!any_of
+    /// [...]` (lax: silently skip absent / unready). Omitted means the
+    /// default floating universe (every symbol seen in the snapshot is
+    /// picked up on first sight). See [`UniverseSpec`].
+    #[serde(default)]
+    pub universe: Option<UniverseSpec>,
 }
 
 impl BasketStrategySpec {
@@ -176,6 +211,12 @@ impl BasketStrategySpec {
             SelectionRuleSpec::Quantile { long_q, short_q } => {
                 strat.quantile(long_q, short_q)
             }
+        };
+
+        let strat = match &self.universe {
+            Some(UniverseSpec::AllOf(syms)) => strat.all_of(syms.iter().cloned()),
+            Some(UniverseSpec::AnyOf(syms)) => strat.any_of(syms.iter().cloned()),
+            None => strat,
         };
 
         DynBasketStrategy { inner: strat }
@@ -393,6 +434,106 @@ mod tests {
         // shape retrieves X's atom.
         let snap = snap_of(&[("X", 200.0), ("Y", 100.0)]);
         assert!(snap.find(&Selector::by_symbol("X".to_string())).is_some());
+    }
+
+    #[test]
+    fn universe_defaults_to_floating_when_omitted() {
+        let yaml = r#"
+            selection: !top_bottom { longs: 1, shorts: 1 }
+            score: !close { source: !pick { symbol: !arg SYM } }
+            sizing: !value 0.5
+        "#;
+        let spec =
+            BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        assert!(spec.universe.is_none());
+    }
+
+    #[test]
+    fn universe_all_of_parses_symbol_list() {
+        let yaml = r#"
+            selection: !top_bottom { longs: 1, shorts: 1 }
+            score: !close { source: !pick { symbol: !arg SYM } }
+            sizing: !value 0.5
+            universe: !all_of [BTC, ETH, SOL]
+        "#;
+        let spec =
+            BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        match spec.universe {
+            Some(UniverseSpec::AllOf(v)) => {
+                assert_eq!(v, vec!["BTC".to_string(), "ETH".to_string(), "SOL".to_string()]);
+            }
+            other => panic!("expected AllOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn universe_any_of_parses_symbol_list() {
+        let yaml = r#"
+            selection: !top_bottom { longs: 1, shorts: 1 }
+            score: !close { source: !pick { symbol: !arg SYM } }
+            sizing: !value 0.5
+            universe: !any_of [BTC, ETH]
+        "#;
+        let spec =
+            BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        match spec.universe {
+            Some(UniverseSpec::AnyOf(v)) => {
+                assert_eq!(v, vec!["BTC".to_string(), "ETH".to_string()]);
+            }
+            other => panic!("expected AnyOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_with_all_of_filters_non_listed_symbols() {
+        // Universe = {X, Y}. Snapshot also carries Z — the built strategy
+        // must ignore Z at discovery (no chain, no fill).
+        let yaml = r#"
+            selection: !top_bottom { longs: 1, shorts: 1 }
+            score: !close { source: !pick { symbol: !arg SYM } }
+            sizing: !value 0.5
+            universe: !all_of [X, Y]
+        "#;
+        let spec =
+            BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let mut strat = spec.build(10_000.0, &schema());
+        let mut wallet: PaperWallet<String> = PaperWallet::new(10_000.0);
+
+        for _ in 0..2 {
+            for fill in wallet.update("X".to_string(), candle(200.0)) {
+                strat.on_fill(&fill);
+            }
+            for fill in wallet.update("Y".to_string(), candle(100.0)) {
+                strat.on_fill(&fill);
+            }
+            for fill in wallet.update("Z".to_string(), candle(500.0)) {
+                strat.on_fill(&fill);
+            }
+            strat.update(snap_of(&[("X", 200.0), ("Y", 100.0), ("Z", 500.0)]));
+            strat.trade(&mut wallet);
+        }
+        assert!(wallet.position(&"X".to_string()).amount > 0.0, "X long");
+        assert!(wallet.position(&"Y".to_string()).amount < 0.0, "Y short");
+        assert!(
+            wallet.position(&"Z".to_string()).amount.abs() < 1e-9,
+            "Z is outside the declared universe: no trade"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "`all_of` universe requires")]
+    fn build_with_all_of_panics_on_missing_symbol() {
+        let yaml = r#"
+            selection: !top_bottom { longs: 1, shorts: 1 }
+            score: !close { source: !pick { symbol: !arg SYM } }
+            sizing: !value 0.5
+            universe: !all_of [X, Y]
+        "#;
+        let spec =
+            BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let mut strat = spec.build(10_000.0, &schema());
+        // Y is missing from the snapshot — strict-erroring.
+        strat.update(snap_of(&[("X", 100.0)]));
     }
 
     #[test]
