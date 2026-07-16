@@ -108,7 +108,7 @@ pub fn run<Sym, S, W, I, A>(
 ) -> RunReport<Sym>
 where
     Sym: Clone + PartialEq,
-    S: Strategy<Symbol = Sym, Input = Snapshot<Sym>>,
+    S: Strategy<Symbol = Sym, Input = Snapshot<Sym>> + ?Sized,
     W: Wallet<Sym>,
     I: IntoIterator<Item = A>,
     A: Into<Snapshot<Sym>>,

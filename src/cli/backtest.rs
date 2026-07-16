@@ -120,6 +120,164 @@ pub fn evaluate_windowed(
     )
 }
 
+/// Drive an already-built strategy over pre-aligned `snapshots` through
+/// a fresh paper wallet with `cash` starting funds and `per_symbol_costs`
+/// per leg. The strategy-agnostic seam: given any
+/// `Strategy<Input=Snapshot<String>, Symbol=String>`, produce the run
+/// report. Single-asset / pairs / basket / multi all reduce through
+/// this helper.
+///
+/// `build_strategy` is called once — no re-build needed since the
+/// caller passes a fresh builder per invocation.
+pub fn measured_report_from_strategy<S>(
+    build_strategy: impl FnOnce() -> S,
+    snapshots: &[fugazi::types::Snapshot<String>],
+    cash: Real,
+    per_symbol_costs: Vec<(String, TradingCosts)>,
+) -> fugazi::RunReport<String>
+where
+    S: fugazi::Strategy<Input = fugazi::types::Snapshot<String>, Symbol = String>,
+{
+    let mut strategy = build_strategy();
+    let mut wallet: PaperWallet<String> = PaperWallet::new(cash);
+    for (sym, costs) in per_symbol_costs {
+        wallet.set_costs_for(sym, costs);
+    }
+    fugazi::backtest::run(&mut strategy, &mut wallet, snapshots.iter().cloned())
+}
+
+/// The basket twin of [`evaluate`]: reduce a whole-run backtest of
+/// `spec` over `snapshots` to a single [`metrics::Metrics`] document.
+/// What `optimize` calls per grid combination for a `basket:` document.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_basket(
+    spec: &BasketStrategySpec,
+    snapshots: &[fugazi::types::Snapshot<String>],
+    universe: &[String],
+    cash: Real,
+    bars_per_year: Real,
+    risk_free_rate: Real,
+    cost_config: &CostConfig,
+    frequency: Option<Frequency>,
+    seconds_per_bar: Option<Real>,
+) -> metrics::Metrics {
+    let per_symbol_costs: Vec<(String, TradingCosts)> = universe
+        .iter()
+        .map(|s| (s.clone(), cost_config.resolve(s, frequency)))
+        .collect();
+    let schema = snapshots
+        .iter()
+        .flat_map(|s| s.iter())
+        .find_map(|(_sym, _freq, a)| a.overlays.as_ref())
+        .map(|ov| ov.schema().clone())
+        .unwrap_or_else(Schema::empty);
+    let measured =
+        measured_report_from_strategy(|| spec.build(cash, &schema), snapshots, cash, per_symbol_costs);
+    metrics::from_report(&measured, bars_per_year, risk_free_rate, seconds_per_bar)
+}
+
+/// Windowed twin of [`evaluate_basket`] — same shape as
+/// [`evaluate_windowed`] but for a `basket:` document.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_windowed_basket(
+    spec: &BasketStrategySpec,
+    snapshots: &[fugazi::types::Snapshot<String>],
+    universe: &[String],
+    cash: Real,
+    bars_per_year: Real,
+    risk_free_rate: Real,
+    cost_config: &CostConfig,
+    frequency: Option<Frequency>,
+    window: usize,
+    seconds_per_bar: Option<Real>,
+) -> Vec<metrics::WindowMetrics> {
+    let per_symbol_costs: Vec<(String, TradingCosts)> = universe
+        .iter()
+        .map(|s| (s.clone(), cost_config.resolve(s, frequency)))
+        .collect();
+    let schema = snapshots
+        .iter()
+        .flat_map(|s| s.iter())
+        .find_map(|(_sym, _freq, a)| a.overlays.as_ref())
+        .map(|ov| ov.schema().clone())
+        .unwrap_or_else(Schema::empty);
+    let measured =
+        measured_report_from_strategy(|| spec.build(cash, &schema), snapshots, cash, per_symbol_costs);
+    metrics::windowed_from_report(
+        &measured,
+        window,
+        bars_per_year,
+        risk_free_rate,
+        seconds_per_bar,
+    )
+}
+
+/// The multi-asset twin of [`evaluate`] — one grid-cell evaluation for a
+/// `multi:` document (independent per-symbol
+/// [`SingleAssetStrategy`](fugazi::strategies::SingleAssetStrategy)-shaped
+/// decisions).
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_multi(
+    spec: &MultiAssetStrategySpec,
+    snapshots: &[fugazi::types::Snapshot<String>],
+    universe: &[String],
+    cash: Real,
+    bars_per_year: Real,
+    risk_free_rate: Real,
+    cost_config: &CostConfig,
+    frequency: Option<Frequency>,
+    seconds_per_bar: Option<Real>,
+) -> metrics::Metrics {
+    let per_symbol_costs: Vec<(String, TradingCosts)> = universe
+        .iter()
+        .map(|s| (s.clone(), cost_config.resolve(s, frequency)))
+        .collect();
+    let schema = snapshots
+        .iter()
+        .flat_map(|s| s.iter())
+        .find_map(|(_sym, _freq, a)| a.overlays.as_ref())
+        .map(|ov| ov.schema().clone())
+        .unwrap_or_else(Schema::empty);
+    let measured =
+        measured_report_from_strategy(|| spec.build(cash, &schema), snapshots, cash, per_symbol_costs);
+    metrics::from_report(&measured, bars_per_year, risk_free_rate, seconds_per_bar)
+}
+
+/// Windowed twin of [`evaluate_multi`].
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_windowed_multi(
+    spec: &MultiAssetStrategySpec,
+    snapshots: &[fugazi::types::Snapshot<String>],
+    universe: &[String],
+    cash: Real,
+    bars_per_year: Real,
+    risk_free_rate: Real,
+    cost_config: &CostConfig,
+    frequency: Option<Frequency>,
+    window: usize,
+    seconds_per_bar: Option<Real>,
+) -> Vec<metrics::WindowMetrics> {
+    let per_symbol_costs: Vec<(String, TradingCosts)> = universe
+        .iter()
+        .map(|s| (s.clone(), cost_config.resolve(s, frequency)))
+        .collect();
+    let schema = snapshots
+        .iter()
+        .flat_map(|s| s.iter())
+        .find_map(|(_sym, _freq, a)| a.overlays.as_ref())
+        .map(|ov| ov.schema().clone())
+        .unwrap_or_else(Schema::empty);
+    let measured =
+        measured_report_from_strategy(|| spec.build(cash, &schema), snapshots, cash, per_symbol_costs);
+    metrics::windowed_from_report(
+        &measured,
+        window,
+        bars_per_year,
+        risk_free_rate,
+        seconds_per_bar,
+    )
+}
+
 /// Everything one iteration of a backtest produces — consumed by
 /// [`crate::run::run`]. Deliberately owns no IO — the driver decides how
 /// (and whether) to persist the payload.
