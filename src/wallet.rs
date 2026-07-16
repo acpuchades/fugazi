@@ -636,6 +636,69 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         Ok(Some(order))
     }
 
+    /// Shrink a resolved [`Size`] magnitude so a net buy fits within available
+    /// cash *after* spread, slippage and commission. Only fractional sizings
+    /// (`ValueFraction` / `FundsFraction`) hit the funds ceiling this covers —
+    /// [`Size::Units`] is a caller-explicit unit count that should fail loudly
+    /// if it doesn't fit rather than silently truncate, and a sell always
+    /// credits cash. Returns the input magnitude unchanged on any of those.
+    ///
+    /// The cost pipeline is opaque behind [`CommissionModel`] / [`SpreadModel`]
+    /// / [`SlippageModel`] so the shrink is a fixed-point iteration rather
+    /// than a closed-form invert: probe the cost at the current magnitude,
+    /// scale down by the deficit ratio, repeat. Converges in one step for
+    /// linear cost shapes (`PercentageCommission`, `FixedBpsSpread`), quickly
+    /// for the others; an 8-iteration cap keeps a pathological composite
+    /// bounded.
+    fn shrink_buy_to_fit(
+        &self,
+        symbol: &Sym,
+        side: Side,
+        current: Real,
+        magnitude: Real,
+        candle: &Candle,
+    ) -> Real {
+        if magnitude <= 0.0 {
+            return magnitude;
+        }
+        // A sell (delta < 0) credits cash and always fits.
+        let target = side.sign() * magnitude;
+        if target - current <= 0.0 {
+            return magnitude;
+        }
+        let costs = self.per_symbol_costs.get(symbol).unwrap_or(&self.costs);
+        let tolerance = DEFAULT_EPSILON * self.funds.abs().max(1.0);
+        let mut m = magnitude;
+        for _ in 0..8 {
+            let delta = side.sign() * m - current;
+            if delta <= 0.0 {
+                return m.max(0.0);
+            }
+            let half_spread = costs.spread.half_spread(candle.open, candle);
+            let post_spread = candle.open + half_spread; // net buy
+            let final_price =
+                costs.slippage.adjust(Side::Buy, post_spread, delta, candle, OrderKind::Market);
+            if final_price <= 0.0 {
+                return 0.0;
+            }
+            let notional = final_price * delta;
+            let commission = costs.commission.commission(notional, delta).max(0.0);
+            let cost = notional + commission;
+            if cost - self.funds <= tolerance {
+                return m;
+            }
+            // Scale toward feasibility. For a linear cost model this converges
+            // in one step; for a non-linear one it monotonically decreases.
+            let scale = (self.funds / cost).clamp(0.0, 1.0);
+            let next = m * scale;
+            if (m - next).abs() <= DEFAULT_EPSILON * m.abs().max(1.0) {
+                return next.max(0.0);
+            }
+            m = next;
+        }
+        m.max(0.0)
+    }
+
     /// Trigger and fill a resting protective leg on `symbol` against `candle`, if
     /// one is crossed. Stop-loss takes precedence over take-profit, and at most one
     /// leg fills per bar (the fill flattens, which drops the whole bracket).
@@ -732,6 +795,21 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
                             })
                             .sum::<Real>();
                     let magnitude = size.resolve(candle.open, position, self.funds, equity_at_open);
+                    // For a fractional sizing ("as much of my equity/funds as
+                    // fits"), shrink a net buy so spread + slippage +
+                    // commission fit available cash. Without this, an all-in
+                    // `value_frac(1.0)` under any positive cost model would
+                    // size the notional to the entire equity, and paying
+                    // commission on top would fail the affordability check in
+                    // `fill_at` and silently drop the fill. An explicit
+                    // `Size::Units(n)` or `Size::PositionFraction(f)` carries
+                    // a specific unit intent and is left alone — an infeasible
+                    // request is a caller error, not a sizing target.
+                    let magnitude = match size {
+                        Size::ValueFraction(_) | Size::FundsFraction(_) => self
+                            .shrink_buy_to_fit(&symbol, side, position, magnitude, &candle),
+                        Size::Units(_) | Size::PositionFraction(_) => magnitude,
+                    };
                     (side.sign() * magnitude, id)
                 }
             };
@@ -921,6 +999,38 @@ mod tests {
         w.update("X", Candle::new(95.0, 106.0, 94.0, 105.0, 0.0));
         assert_fill(w.orders().last().unwrap(), Side::Sell, 20.0, 95.0, OrderKind::Market);
         assert_eq!(w.position(&"X").amount, -10.0);
+    }
+
+    #[test]
+    fn value_fraction_all_in_shrinks_to_fit_under_costs() {
+        // Regression: `value_frac(1.0)` under any positive cost model used to
+        // silently produce zero fills — the resolved size was `equity/open`,
+        // but paying commission on top drove `cost > funds` and the fill was
+        // rejected. The wallet now shrinks the resolved magnitude so the fill
+        // clears the affordability check.
+        use crate::costs::{FixedBpsSpread, NoSlippage, PercentageCommission};
+        let costs = TradingCosts::new(
+            Box::new(PercentageCommission::new(0.001)), // 10 bps
+            Box::new(FixedBpsSpread::new(10.0)),        // 10 bps round-trip
+            Box::new(NoSlippage),
+        );
+        let mut w: PaperWallet<&str> = PaperWallet::with_costs(1_000.0, costs);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::value_frac(1.0)).unwrap();
+        let fills = w.update("X", bar(100.0));
+        // A fill happens (was zero before the fix) and cash never goes negative.
+        assert_eq!(fills.len(), 1, "expected one fill, got {}", fills.len());
+        assert!(w.position(&"X").amount > 0.0);
+        assert!(
+            w.funds().0 >= -1e-6,
+            "funds went negative: {}",
+            w.funds().0
+        );
+        // The resulting notional is just under equity (deducted spread +
+        // commission), not equal to it.
+        let fill = &fills[0];
+        assert!(fill.units < 10.0, "units {} should be shrunk below 10.0", fill.units);
+        assert!(fill.units > 9.9, "units {} shrunk too aggressively", fill.units);
     }
 
     #[test]
