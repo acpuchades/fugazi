@@ -10,7 +10,7 @@ use serde::Deserialize;
 use fugazi::indicators::compare;
 use fugazi::indicators::logic::Const;
 use fugazi::indicators::{
-    Book, DEFAULT_EPSILON, GetBool, IsWeekday, IsWeekend, Pick, Position, ValueStr,
+    Book, DEFAULT_EPSILON, Every, GetBool, IsWeekday, IsWeekend, Pick, Position, ValueStr,
 };
 use fugazi::prelude::*;
 
@@ -200,6 +200,14 @@ pub enum SignalSpec {
     /// A constant boolean leaf. Spelled `!value` like [`ExprSpec::Value`] —
     /// one tag for "a literal", typed by position (bool here, number there).
     Value(bool),
+    /// Sugar for `Value(false)` — reads better on a `rebalance_on` field
+    /// where the intent is "never rebalance".
+    Never,
+    /// A periodic pulse — [`Every(N)`](crate::indicators::Every) with
+    /// *delayed* first fire on bar `N-1` (0-indexed), then every `N`
+    /// bars. `!every 1` fires on every bar; `!every 5` on bar 4, 9, 14, …
+    /// The canonical `rebalance_on` cadence source.
+    Every(usize),
 
     // --- calendar signals (read `atom.time`, emit bool; None when time is
     // absent). Anything else (`is_monday`, "hour < 9", "trading window") is a
@@ -295,6 +303,8 @@ enum SignalSpecRaw {
     },
     Unstable { signal: Box<SignalSpec> },
     Value(bool),
+    Never,
+    Every(usize),
     IsWeekday,
     IsWeekend,
 }
@@ -324,6 +334,8 @@ impl From<SignalSpecRaw> for SignalSpec {
             SignalSpecRaw::StrNe { lhs, rhs } => SignalSpec::StrNe { lhs, rhs },
             SignalSpecRaw::Unstable { signal } => SignalSpec::Unstable { signal },
             SignalSpecRaw::Value(b) => SignalSpec::Value(b),
+            SignalSpecRaw::Never => SignalSpec::Never,
+            SignalSpecRaw::Every(n) => SignalSpec::Every(n),
             SignalSpecRaw::IsWeekday => SignalSpec::IsWeekday,
             SignalSpecRaw::IsWeekend => SignalSpec::IsWeekend,
         }
@@ -343,7 +355,7 @@ impl TryFrom<serde_norway::Value> for SignalSpec {
 
         // Unit-variant tags: their content stays as `Value::Null`
         // (see the mirror `ExprSpec::TryFrom` for the "why").
-        const UNIT_VARIANTS: &[&str] = &["is_weekday", "is_weekend"];
+        const UNIT_VARIANTS: &[&str] = &["is_weekday", "is_weekend", "never"];
 
         let promote_null_for = |tag: &str, v: serde_norway::Value| match v {
             serde_norway::Value::Null if !UNIT_VARIANTS.contains(&tag) => {
@@ -494,6 +506,12 @@ impl SignalSpec {
             Unstable { signal } => dyn_indicator::unstable_wrap(signal.build(anchor, book, schema)),
             Value(b) => {
                 dyn_indicator::wrap(self::Const::<fugazi::types::Snapshot<String>>::new(*b))
+            }
+            Never => {
+                dyn_indicator::wrap(self::Const::<fugazi::types::Snapshot<String>>::new(false))
+            }
+            SignalSpec::Every(n) => {
+                dyn_indicator::wrap(self::Every::<fugazi::types::Snapshot<String>>::new(*n))
             }
             Get { key } => build_signal_get(schema, key),
             StrEq { lhs, rhs } => {

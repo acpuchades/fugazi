@@ -17,6 +17,9 @@
 //! [`Position`] anchor, exactly like [`SingleAssetStrategy`]'s per-leg levels.
 
 use crate::indicators::{Book, Close, Const, Pick, Position, Value};
+
+/// The rebalance-gate signal type — a boolean over the pair's snapshot.
+type RebalanceSignal<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool>>;
 use crate::prelude::*;
 use crate::types::{Selector, Snapshot};
 
@@ -108,6 +111,10 @@ pub struct PairsStrategy<Sym> {
     stop: Option<Level<Sym>>,
     target: Option<Level<Sym>>,
     sizing: Level<Sym>,
+    /// Rebalance gate — on `true`, resize both legs to the current
+    /// sizing target. Default is `Const::new(false)` (never rebalance),
+    /// preserving pre-refactor behavior.
+    rebalance: RebalanceSignal<Sym>,
     left_position: Position,
     right_position: Position,
     book: Book<Sym>,
@@ -146,11 +153,26 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> PairsStrategy<Sym>
             stop: None,
             target: None,
             sizing: Box::new(Value::<Snapshot<Sym>>::new(1.0)),
+            rebalance: Box::new(Const::<Snapshot<Sym>>::new(false)),
             left_position: Position::new(),
             right_position: Position::new(),
             book: Book::new(initial_equity),
             bars_seen: 0,
         }
+    }
+
+    /// Install the **rebalance gate** — a boolean signal that decides,
+    /// on each bar, whether both legs are resized to the current
+    /// sizing target. Defaults to a constant `false` (never rebalance,
+    /// matches pre-refactor behavior where sizing only reads on entry).
+    ///
+    /// A `None` reading is treated as `false` — the safe default.
+    pub fn rebalance_on(
+        mut self,
+        signal: impl Indicator<Input = Snapshot<Sym>, Output = bool> + 'static,
+    ) -> Self {
+        self.rebalance = Box::new(signal);
+        self
     }
 
     /// Wire the pair's `enter` and `exit` signals. `enter` opens a long-left /
@@ -284,7 +306,8 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> Strategy for Pairs
         if let Some(l) = self.target.as_mut() {
             l.update(snap.clone());
         }
-        self.sizing.update(snap);
+        self.sizing.update(snap.clone());
+        self.rebalance.update(snap);
         self.bars_seen = self.bars_seen.saturating_add(1);
     }
 
@@ -349,6 +372,15 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> Strategy for Pairs
             let leg_frac = 0.5 * size;
             let _ = wallet.set(self.left.clone(), Side::Buy, Size::value_frac(leg_frac));
             let _ = wallet.set(self.right.clone(), Side::Sell, Size::value_frac(leg_frac));
+            return;
+        }
+        // Rebalance gate: on `true`, resize both legs to the current
+        // sizing target. `wallet.set` at the current side is idempotent
+        // when the target already matches, so no spurious fills.
+        if open && self.rebalance.value().unwrap_or(false) {
+            let leg_frac = 0.5 * size;
+            let _ = wallet.set(self.left.clone(), Side::Buy, Size::value_frac(leg_frac));
+            let _ = wallet.set(self.right.clone(), Side::Sell, Size::value_frac(leg_frac));
         }
     }
 
@@ -363,6 +395,7 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> Strategy for Pairs
             l.reset();
         }
         self.sizing.reset();
+        self.rebalance.reset();
         self.left_position.reset();
         self.right_position.reset();
         self.book.reset();

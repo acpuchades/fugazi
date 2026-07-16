@@ -27,7 +27,7 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 
-use crate::indicators::{Book, Position, Value};
+use crate::indicators::{Book, Every, Position, Value};
 use crate::prelude::*;
 use crate::types::Snapshot;
 
@@ -325,6 +325,10 @@ type Selection<Sym> = Box<dyn Fn(&HashMap<Sym, Real>) -> HashMap<Sym, Side>>;
 ///         .top_bottom(2, 2);
 /// # let _ = strat;
 /// ```
+/// A boolean chain over the basket's `Snapshot<Sym>` — the shape used
+/// by the [`rebalance`](BasketStrategy::rebalance_on) gate signal.
+type RebalanceSignal<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool>>;
+
 pub struct BasketStrategy<Sym> {
     score_factory: Factory<Sym>,
     sizing_factory: Factory<Sym>,
@@ -334,6 +338,12 @@ pub struct BasketStrategy<Sym> {
     latest_score: HashMap<Sym, Real>,
     latest_size: HashMap<Sym, Real>,
     selection: Selection<Sym>,
+    /// The **rebalance gate**: on each bar `trade()` runs the selection
+    /// and issues resize orders only when this signal reads `true`.
+    /// Default is `Every::new(1)` — fires every bar, matching the
+    /// pre-`rebalance_on` "re-rank every bar" behavior. Set with
+    /// [`rebalance_on`](Self::rebalance_on).
+    rebalance: RebalanceSignal<Sym>,
     universe: Universe<Sym>,
     book: Book<Sym>,
 }
@@ -377,9 +387,34 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> BasketStrategy<Sym> {
             latest_score: HashMap::new(),
             latest_size: HashMap::new(),
             selection: Box::new(|_scores: &HashMap<Sym, Real>| HashMap::new()),
+            rebalance: Box::new(Every::<Snapshot<Sym>>::new(1)),
             universe: Universe::Floating,
             book: Book::new(initial_equity),
         }
+    }
+
+    /// Install the **rebalance gate** — a boolean signal that decides,
+    /// on each bar, whether [`trade`](Strategy::trade) re-runs the
+    /// selection and issues resize orders. Defaults to
+    /// [`Every::new(1)`](crate::indicators::Every) (fires every bar,
+    /// preserving the pre-`rebalance_on` behavior).
+    ///
+    /// A less-frequent rebalance both reduces turnover (churn on noisy
+    /// scores) and lets the basket hold "stale" picks between rebalance
+    /// events. That's usually the desired trade-off for
+    /// weekly/monthly-rebalanced strategies; compose with a
+    /// drawdown-triggered signal (`!or [!every 20, !drawdown_exceeds 0.1]`
+    /// in YAML) if you want drift protection between rebalances too.
+    ///
+    /// A `None` reading from the gate is treated as `false` (safe
+    /// default — don't rebalance during warm-up), same as elsewhere in
+    /// the crate.
+    pub fn rebalance_on<S>(mut self, signal: S) -> Self
+    where
+        S: Indicator<Input = Snapshot<Sym>, Output = bool> + 'static,
+    {
+        self.rebalance = Box::new(signal);
+        self
     }
 
     /// Wire the **score factory**: a closure that builds a fresh real-valued
@@ -595,6 +630,11 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Strategy for BasketStrategy<S
         if !marks.is_empty() {
             self.book.update(marks);
         }
+
+        // 5. Advance the rebalance gate — a signal over the whole
+        // snapshot. Reads on the same bar as scoring, but only consulted
+        // in `trade()`.
+        self.rebalance.update(snap);
     }
 
     fn on_fill(&mut self, order: &Order<Sym>) {
@@ -606,6 +646,14 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Strategy for BasketStrategy<S
     }
 
     fn trade(&self, wallet: &mut dyn Wallet<Sym>) {
+        // Rebalance gate: skip the whole selection + resize step on bars
+        // where the gate signal doesn't fire (None reads as false — the
+        // "unsettled data ⇒ wait" convention). Default gate is
+        // `Every::new(1)` so this is a no-op unless the caller wired a
+        // less-frequent cadence.
+        if !self.rebalance.value().unwrap_or(false) {
+            return;
+        }
         let selection = (self.selection)(&self.latest_score);
         for sym in self.scores.keys() {
             let position = self.positions.get(sym);
@@ -668,6 +716,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Strategy for BasketStrategy<S
         self.positions.clear();
         self.latest_score.clear();
         self.latest_size.clear();
+        self.rebalance.reset();
         self.book.reset();
     }
 }
@@ -1214,5 +1263,121 @@ mod tests {
         let strat: BasketStrategy<&'static str> =
             BasketStrategy::with_initial_equity(1_000.0);
         assert!(strat.is_ready());
+    }
+
+    // ---------------- Rebalance gate ------------------------------------
+
+    #[test]
+    fn default_rebalance_fires_every_bar() {
+        // No `.rebalance_on(...)` set — default `Every::new(1)` gate
+        // rebalances on every bar (matches the pre-`rebalance_on`
+        // behavior). A top-1 long / bottom-1 short basket enters on bar 2.
+        let mut strat: BasketStrategy<&'static str> =
+            BasketStrategy::with_initial_equity(10_000.0)
+                .scored_by(|sym: &&'static str| {
+                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
+                })
+                .sized_by(|_| equal_weight::<&'static str>(2))
+                .top_bottom(1, 1);
+        let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
+        let tick = |strat: &mut BasketStrategy<&'static str>,
+                    wallet: &mut PaperWallet<&'static str>,
+                    entries: &[(&'static str, Real)]| {
+            let s = snap(entries);
+            for (sym_opt, _f, atom) in s.iter() {
+                let sym = sym_opt.copied().unwrap();
+                for fill in wallet.update(sym, atom.candle) {
+                    strat.on_fill(&fill);
+                }
+            }
+            strat.update(s);
+            strat.trade(wallet);
+        };
+        tick(&mut strat, &mut wallet, &[("A", 100.0), ("B", 50.0)]);
+        tick(&mut strat, &mut wallet, &[("A", 100.0), ("B", 50.0)]);
+        assert!(wallet.position(&"A").amount > 0.0);
+        assert!(wallet.position(&"B").amount < 0.0);
+    }
+
+    #[test]
+    fn rebalance_every_3_only_re_ranks_periodically() {
+        // Score = close. Every 3 bars, top-1 long / bottom-1 short.
+        // On bar 3 (the first fire of `Every::new(3)`), a queued order
+        // enters positions. Between rebalance bars the basket should NOT
+        // issue new orders even if the ranking changed.
+        use crate::indicators::Every;
+        let mut strat: BasketStrategy<&'static str> =
+            BasketStrategy::with_initial_equity(10_000.0)
+                .scored_by(|sym: &&'static str| {
+                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
+                })
+                .sized_by(|_| equal_weight::<&'static str>(2))
+                .top_bottom(1, 1)
+                .rebalance_on(Every::<Snapshot<&'static str>>::new(3));
+        let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
+        let tick = |strat: &mut BasketStrategy<&'static str>,
+                    wallet: &mut PaperWallet<&'static str>,
+                    entries: &[(&'static str, Real)]| {
+            let s = snap(entries);
+            for (sym_opt, _f, atom) in s.iter() {
+                let sym = sym_opt.copied().unwrap();
+                for fill in wallet.update(sym, atom.candle) {
+                    strat.on_fill(&fill);
+                }
+            }
+            strat.update(s);
+            strat.trade(wallet);
+        };
+        // Bars 1 and 2: gate is false, no orders queued.
+        tick(&mut strat, &mut wallet, &[("A", 100.0), ("B", 50.0)]);
+        assert!(wallet.orders().is_empty(), "bar 1: no rebalance");
+        tick(&mut strat, &mut wallet, &[("A", 100.0), ("B", 50.0)]);
+        assert!(wallet.orders().is_empty(), "bar 2: no rebalance");
+        // Bar 3: gate fires — selection runs, orders queued.
+        tick(&mut strat, &mut wallet, &[("A", 100.0), ("B", 50.0)]);
+        // Bar 4: fills at open.
+        tick(&mut strat, &mut wallet, &[("A", 100.0), ("B", 50.0)]);
+        assert!(wallet.position(&"A").amount > 0.0, "A long after first rebalance");
+        assert!(wallet.position(&"B").amount < 0.0, "B short after first rebalance");
+        let n_after_first = wallet.orders().len();
+        // Bar 5: ranking flip — A drops to 40, B rises to 100. Under
+        // `rebalance_on: !every 3`, the basket must NOT re-rank on this
+        // off-cycle bar. Positions should hold.
+        tick(&mut strat, &mut wallet, &[("A", 40.0), ("B", 100.0)]);
+        assert_eq!(
+            wallet.orders().len(),
+            n_after_first,
+            "bar 5 is off-cycle: no new orders"
+        );
+        assert!(wallet.position(&"A").amount > 0.0, "A stays long between rebalances");
+        assert!(wallet.position(&"B").amount < 0.0, "B stays short between rebalances");
+    }
+
+    #[test]
+    fn rebalance_on_never_freezes_the_basket() {
+        // With `rebalance_on(Const::new(false))`, the basket never runs
+        // selection. No orders at all.
+        use crate::indicators::Const;
+        let mut strat: BasketStrategy<&'static str> =
+            BasketStrategy::with_initial_equity(10_000.0)
+                .scored_by(|sym: &&'static str| {
+                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
+                })
+                .sized_by(|_| equal_weight::<&'static str>(2))
+                .top_bottom(1, 1)
+                .rebalance_on(Const::<Snapshot<&'static str>>::new(false));
+        let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
+        for _ in 0..5 {
+            let s = snap(&[("A", 100.0), ("B", 50.0)]);
+            for (sym_opt, _f, atom) in s.iter() {
+                let sym = sym_opt.copied().unwrap();
+                for fill in wallet.update(sym, atom.candle) {
+                    strat.on_fill(&fill);
+                }
+            }
+            strat.update(s);
+            strat.trade(&mut wallet);
+        }
+        assert!(wallet.orders().is_empty(), "never-rebalance basket must not trade");
     }
 }

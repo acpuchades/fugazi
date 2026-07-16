@@ -35,8 +35,9 @@ use fugazi::strategies::BasketStrategy;
 use fugazi::types::Snapshot;
 
 use super::expr::ExprSpec;
+use super::signal::SignalSpec;
 use super::template::SpecTemplate;
-use crate::dyn_indicator::{AsReal, DynIndicator};
+use crate::dyn_indicator::{AsBool, AsReal, DynIndicator};
 
 /// YAML surface for the ranking rule. Externally tagged
 /// (`!top_bottom { longs, shorts }` / `!threshold { long_min, short_max }`
@@ -124,6 +125,20 @@ pub struct BasketStrategySpec {
     /// picked up on first sight). See [`UniverseSpec`].
     #[serde(default)]
     pub universe: Option<UniverseSpec>,
+
+    /// The **rebalance gate**: a boolean signal deciding, on each bar,
+    /// whether the basket re-runs its selection and issues resize
+    /// orders. Defaults to `!every 1` (fire every bar — preserves the
+    /// pre-`rebalance_on` re-rank-every-bar behavior). Common
+    /// non-default: `!every 5` for weekly (on a daily strategy),
+    /// `!every 20` for ~monthly, `!is_weekday` composed with a
+    /// calendar signal for weekday-only rebalances.
+    ///
+    /// A `None` reading (from a still-warming user signal) is treated as
+    /// `false` — the safe default; the basket sits between rebalances
+    /// rather than trading through unsettled data.
+    #[serde(default)]
+    pub rebalance_on: Option<SignalSpec>,
 }
 
 impl BasketStrategySpec {
@@ -217,6 +232,18 @@ impl BasketStrategySpec {
             Some(UniverseSpec::AllOf(syms)) => strat.all_of(syms.iter().cloned()),
             Some(UniverseSpec::AnyOf(syms)) => strat.any_of(syms.iter().cloned()),
             None => strat,
+        };
+
+        // Rebalance gate: default is `Every::new(1)` (every bar) so an
+        // omitted `rebalance_on:` preserves the pre-refactor behavior. A
+        // supplied signal is built against a dummy anchor / the shared
+        // book — same convention as basket score/sizing templates.
+        let strat = if let Some(rebalance_spec) = &self.rebalance_on {
+            let anchor = Position::new();
+            let dyn_ind: Box<dyn DynIndicator> = rebalance_spec.build(&anchor, &book, schema);
+            strat.rebalance_on(AsBool::new(dyn_ind))
+        } else {
+            strat
         };
 
         DynBasketStrategy { inner: strat }
@@ -534,6 +561,90 @@ mod tests {
         let mut strat = spec.build(10_000.0, &schema());
         // Y is missing from the snapshot — strict-erroring.
         strat.update(snap_of(&[("X", 100.0)]));
+    }
+
+    #[test]
+    fn rebalance_on_defaults_to_none_and_omitting_matches_current_behavior() {
+        // Sanity: omitting `rebalance_on:` parses cleanly. The default
+        // gate is installed at build time (`Every::new(1)`), so an
+        // omitted YAML field behaves identically to the pre-refactor
+        // basket.
+        let yaml = r#"
+            selection: !top_bottom { longs: 1, shorts: 1 }
+            score: !close { source: !pick { symbol: !arg SYM } }
+            sizing: !value 0.5
+        "#;
+        let spec =
+            BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        assert!(spec.rebalance_on.is_none());
+    }
+
+    #[test]
+    fn rebalance_on_every_5_only_re_ranks_periodically() {
+        // Rebalance every 5 bars — no orders on bars 1..4 (gate is
+        // false), a queued order on bar 5, fill on bar 6.
+        let yaml = r#"
+            selection: !top_bottom { longs: 1, shorts: 1 }
+            score: !close { source: !pick { symbol: !arg SYM } }
+            sizing: !value 0.5
+            rebalance_on: !every 5
+        "#;
+        let spec =
+            BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let mut strat = spec.build(10_000.0, &schema());
+        let mut wallet: PaperWallet<String> = PaperWallet::new(10_000.0);
+        for _ in 0..4 {
+            for fill in wallet.update("A".to_string(), candle(100.0)) {
+                strat.on_fill(&fill);
+            }
+            for fill in wallet.update("B".to_string(), candle(50.0)) {
+                strat.on_fill(&fill);
+            }
+            strat.update(snap_of(&[("A", 100.0), ("B", 50.0)]));
+            strat.trade(&mut wallet);
+        }
+        assert!(wallet.orders().is_empty(), "no orders in the first 4 off-cycle bars");
+        // Bar 5: gate fires. Bar 6: order fills.
+        for _ in 0..2 {
+            for fill in wallet.update("A".to_string(), candle(100.0)) {
+                strat.on_fill(&fill);
+            }
+            for fill in wallet.update("B".to_string(), candle(50.0)) {
+                strat.on_fill(&fill);
+            }
+            strat.update(snap_of(&[("A", 100.0), ("B", 50.0)]));
+            strat.trade(&mut wallet);
+        }
+        assert!(
+            wallet.position(&"A".to_string()).amount > 0.0,
+            "A long after the first rebalance fires"
+        );
+    }
+
+    #[test]
+    fn rebalance_on_never_freezes_the_basket() {
+        // `!never` is a Const::false — the basket never rebalances.
+        let yaml = r#"
+            selection: !top_bottom { longs: 1, shorts: 1 }
+            score: !close { source: !pick { symbol: !arg SYM } }
+            sizing: !value 0.5
+            rebalance_on: !never
+        "#;
+        let spec =
+            BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let mut strat = spec.build(10_000.0, &schema());
+        let mut wallet: PaperWallet<String> = PaperWallet::new(10_000.0);
+        for _ in 0..8 {
+            for fill in wallet.update("A".to_string(), candle(100.0)) {
+                strat.on_fill(&fill);
+            }
+            for fill in wallet.update("B".to_string(), candle(50.0)) {
+                strat.on_fill(&fill);
+            }
+            strat.update(snap_of(&[("A", 100.0), ("B", 50.0)]));
+            strat.trade(&mut wallet);
+        }
+        assert!(wallet.orders().is_empty(), "!never must not trade");
     }
 
     #[test]

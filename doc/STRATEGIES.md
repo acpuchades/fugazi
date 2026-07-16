@@ -122,6 +122,7 @@ The default shape (no prefix, or `single:`). A mapping with these fields
 | `long` | side | none | the long entry/exit (see [Sides](#sides)) |
 | `short` | side | none | the short entry/exit |
 | `sizing` | source | `!value 1.0` | position-size multiplier (see [Sizing](#sizing)) |
+| `rebalance_on` | signal | `!never` | resize the open position when this fires (see [Rebalance](#rebalance)) |
 
 The strategy wires up whichever of `long`/`short` you provide; omitting both
 yields a strategy that never trades.
@@ -281,6 +282,7 @@ equity; exiting flattens both.
 | `stop_loss` | source | none | a **spread level**; flatten when the spread falls to it |
 | `take_profit` | source | none | a **spread level**; flatten when the spread rises to it |
 | `sizing` | source | `!value 1.0` | gross-exposure multiplier (see [Sizing](#sizing)) |
+| `rebalance_on` | signal | `!never` | resize both legs when this fires (see [Rebalance](#rebalance)) |
 
 Two things distinguish a pairs document from a single-asset one:
 
@@ -328,6 +330,7 @@ symbol — the classic cross-sectional momentum / value / carry shape.
 | `score` | source *(template)* | — (**required**) | the per-symbol ranking value |
 | `sizing` | source *(template)* | — (**required**) | the per-leg size, as a fraction of equity |
 | `universe` | universe rule | *floating* (every symbol seen) | which symbols the basket is willing to trade — see [Universe](#universe) |
+| `rebalance_on` | signal | `!every 1` (every bar) | re-rank + resize when this fires (see [Rebalance](#rebalance)) |
 
 **By default the universe is not declared in the file** — it is exactly the set
 of symbols the `--series` inputs carry. The basket builds a fresh score and
@@ -461,6 +464,7 @@ signals fired).
 | `short` | side | omitted | the short side, same shape as `long` |
 | `sizing` | source *(template)* | `!value 1` (all-in per leg) | the per-leg size, as a fraction of equity |
 | `universe` | universe rule | *floating* (every symbol in the series) | which symbols the portfolio is willing to trade — see [Universe](#universe) (shared with `basket:`) |
+| `rebalance_on` | signal | `!never` | resize every held position when this fires (see [Rebalance](#rebalance)) |
 
 `long` and `short` mirror the [single-asset side](#single-asset-documents)
 grammar exactly (`enter`, `exit`, `stop_loss`, `take_profit`); the
@@ -509,6 +513,60 @@ exactly as on `single:`.
 
 **Not yet wired:** `fugazi optimize` on a `multi:` document (bails, same
 as `basket:` today).
+
+## Rebalance
+
+Every strategy shape (`single:`, `pairs:`, `basket:`, `multi:`) exposes an
+optional top-level `rebalance_on:` field: a **boolean signal** that
+decides, on each bar, whether the strategy re-runs its sizing/selection
+step. `sizing:` answers "what size?"; `rebalance_on:` answers "act on
+that size *right now*?".
+
+What "rebalance" means depends on the strategy shape:
+
+| Strategy | On `rebalance_on` fire | Every bar (regardless of gate) |
+| --- | --- | --- |
+| `single:` | resize the open position to the current sizing target | entry / exit signals fire, protective levels rest |
+| `pairs:` | resize both legs to the current sizing target | enter / exit spread signals fire, spread levels rest |
+| `multi:` | resize every held per-symbol position to its sizing target | per-symbol entry / exit signals fire |
+| `basket:` | re-run selection **and** resize | (nothing else — basket has no per-symbol entry / exit) |
+
+Basket is the odd one because a cross-sectional ranker's *target set* is
+itself the sizing decision — so gating selection and gating resize are
+the same act. The others cleanly separate entry / exit (bar-driven
+signals) from sizing (rebalance-driven).
+
+### Defaults
+
+| Strategy | Default `rebalance_on` | Rationale |
+| --- | --- | --- |
+| `single:` / `pairs:` / `multi:` | `!never` | sizing only reads on transitions (pre-refactor behavior) |
+| `basket:` | `!every 1` (every bar) | re-rank every bar (pre-refactor behavior) |
+
+Omit the field to get the default. Set `!never` to opt out of
+rebalancing entirely; set `!every N` for a periodic pulse (`!every 5`
+for weekly on a daily strategy, `!every 20` for ~monthly). Any other
+boolean signal works too — compose with drawdown, weight-drift, or
+calendar signals to trigger event-driven rebalancing.
+
+### Cadence signals
+
+| Tag | Fires |
+| --- | --- |
+| `!never` | never (sugar for `!value false`) |
+| `!every N` | on bar `N-1` (0-indexed), then every `N` bars — delayed first fire so `!every 5` at end of every 5-bar block |
+| `!value true` / `!value false` | constants — for programmatic overrides |
+| composite: `!and`, `!or`, `!xor`, `!not`, `!all`, `!any` | boolean logic over any of the above and any other signal |
+| calendar / drawdown / crossover / … | any [Signal](#signals) works |
+
+### Between rebalances
+
+A gated strategy holds "stale" state between rebalance events. For
+`basket:` under `!every 20`, a symbol whose score drops out of the
+selection between rebalance bars stays in the position until the next
+rebalance fires. That's the desired behavior for periodic rebalancing —
+but if you also want drift protection between rebalances, compose the
+gate: `!or [!every 20, !above { source: !drawdown, level: 0.1 }]`.
 
 ## Sources
 

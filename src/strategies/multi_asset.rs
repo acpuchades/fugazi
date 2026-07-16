@@ -64,6 +64,12 @@ type LevelFactory<Sym> = Box<dyn Fn(&Sym, &Position) -> LevelChain<Sym>>;
 /// on the shared [`Book`]).
 type SizingFactory<Sym> = Box<dyn Fn(&Sym) -> LevelChain<Sym>>;
 
+/// The **rebalance gate** — a boolean signal decided on the whole
+/// snapshot (not per symbol). On bars where it reads `true`,
+/// [`MultiAssetStrategy::trade`] resizes every held per-symbol position
+/// to its current sizing target.
+type RebalanceSignal<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool>>;
+
 // ---------------------------------------------------------------------------
 // Per-symbol state
 // ---------------------------------------------------------------------------
@@ -237,6 +243,12 @@ pub struct MultiAssetStrategy<Sym> {
     short_target_factory: Option<LevelFactory<Sym>>,
     sizing_factory: SizingFactory<Sym>,
     states: HashMap<Sym, PerAssetState<Sym>>,
+    /// The rebalance gate: on bars where it fires, `trade` resizes every
+    /// held per-symbol position to its current sizing target. Default is
+    /// `Const::new(false)` — never rebalance — so a strategy that
+    /// doesn't wire `.rebalance_on(...)` behaves exactly as before (sizing
+    /// only read on transitions).
+    rebalance: RebalanceSignal<Sym>,
     universe: Universe<Sym>,
     book: Book<Sym>,
 }
@@ -290,9 +302,33 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> MultiAssetStrategy<Sym> {
                 s
             }),
             states: HashMap::new(),
+            rebalance: Box::new(Const::<Snapshot<Sym>>::new(false)),
             universe: Universe::Floating,
             book: Book::new(initial_equity),
         }
+    }
+
+    /// Install the **rebalance gate** — a boolean signal that decides,
+    /// on each bar, whether [`trade`](Strategy::trade) resizes every
+    /// held per-symbol position to its current sizing target. Defaults
+    /// to a constant `false` (never rebalance — matches the pre-refactor
+    /// behavior where sizing is only read on transitions).
+    ///
+    /// A common non-default: `Every::new(20)` for a ~monthly rebalance
+    /// on a daily strategy, or an equity-drawdown signal for
+    /// drawdown-triggered de-risking. On bars where the gate is `true`,
+    /// the strategy issues `wallet.set(sym, held_side, value_frac(size))`
+    /// on each open leg — a no-op when the target size matches current,
+    /// a market resize otherwise. Entry / exit signals still fire every
+    /// bar independently of the gate.
+    ///
+    /// A `None` reading is treated as `false` — the safe default.
+    pub fn rebalance_on<S>(mut self, signal: S) -> Self
+    where
+        S: Indicator<Input = Snapshot<Sym>, Output = bool> + 'static,
+    {
+        self.rebalance = Box::new(signal);
+        self
     }
 
     /// Wire the **long side**: `enter` opens (or reverses into) a long,
@@ -596,6 +632,10 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Strategy for MultiAssetStrate
         if !marks.is_empty() {
             self.book.update(marks);
         }
+
+        // 4. Advance the rebalance gate. Reads the same snapshot as the
+        // per-symbol chains but only consulted in `trade()`.
+        self.rebalance.update(snap);
     }
 
     fn on_fill(&mut self, order: &Order<Sym>) {
@@ -624,6 +664,9 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Strategy for MultiAssetStrate
     }
 
     fn trade(&self, wallet: &mut dyn Wallet<Sym>) {
+        // The rebalance gate is read once per bar and applied per symbol
+        // below. Default is `false` (matches pre-refactor behavior).
+        let rebalancing = self.rebalance.value().unwrap_or(false);
         for (sym, state) in self.states.iter() {
             // Per-symbol readiness gate — a leg whose own chains haven't
             // settled sits out this bar even under a floating universe.
@@ -658,6 +701,21 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Strategy for MultiAssetStrate
                 let _ = wallet.cancel_protective(sym);
                 continue;
             }
+            // Rebalance gate: on bars where the gate fires, resize the
+            // held position (if any) to the current sizing target. A
+            // `wallet.set(sym, held_side, value_frac(size))` at the
+            // current side is idempotent when the target already
+            // matches, and queues a market resize otherwise. Protective
+            // levels stay in place across the resize (position stays on
+            // the same side so the anchor point / peak / trough carry
+            // through — see the `Position::apply` merge convention).
+            if rebalancing {
+                if long {
+                    let _ = wallet.set(sym.clone(), Side::Buy, Size::value_frac(size));
+                } else if short {
+                    let _ = wallet.set(sym.clone(), Side::Sell, Size::value_frac(size));
+                }
+            }
             // Rest the active side's protective levels — re-submitted
             // every bar so a trailing level cancel/replaces.
             if long {
@@ -680,6 +738,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Strategy for MultiAssetStrate
 
     fn reset(&mut self) {
         self.states.clear();
+        self.rebalance.reset();
         self.book.reset();
     }
 }
@@ -928,6 +987,96 @@ mod tests {
         assert!(
             panic_result.is_err(),
             "universe should survive reset — all_of([A, B]) still expects B"
+        );
+    }
+
+    // ---------------- Rebalance gate ------------------------------------
+
+    #[test]
+    fn default_rebalance_never_resizes_held_positions() {
+        // Sizing target drifts over time, but with the default
+        // never-rebalance gate, only the entry's size is used and no
+        // resize orders fire. Verifies pre-refactor behavior is
+        // preserved when `.rebalance_on(...)` isn't called.
+        use crate::indicators::Const;
+        let mut strat: MultiAssetStrategy<&'static str> =
+            MultiAssetStrategy::with_initial_equity(10_000.0)
+                .long_on(
+                    |_sym: &&'static str| Const::<Snapshot<&'static str>>::new(true),
+                    |_sym: &&'static str| Const::<Snapshot<&'static str>>::new(false),
+                )
+                .position_sizing(|_| Value::<Snapshot<&'static str>>::new(0.25));
+        let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
+        // Bar 1 signal, Bar 2 fill — entry sized at 0.25.
+        tick(&mut strat, &mut wallet, &[("A", 100.0)]);
+        tick(&mut strat, &mut wallet, &[("A", 100.0)]);
+        assert!(wallet.position(&"A").amount > 0.0);
+        let orders_after_entry = wallet.orders().len();
+        // Bars 3-5: no rebalance signal → no new orders.
+        for _ in 0..3 {
+            tick(&mut strat, &mut wallet, &[("A", 100.0)]);
+        }
+        assert_eq!(
+            wallet.orders().len(),
+            orders_after_entry,
+            "default (!never) rebalance: no mid-position resize"
+        );
+    }
+
+    #[test]
+    fn rebalance_every_bar_holds_position_when_target_size_unchanged() {
+        // With `rebalance_on(Every::new(1))` and a constant sizing at
+        // steady prices, the resize is idempotent — wallet.set at the
+        // same target size / same side just re-affirms the target
+        // without changing units.
+        use crate::indicators::{Const, Every};
+        let mut strat: MultiAssetStrategy<&'static str> =
+            MultiAssetStrategy::with_initial_equity(10_000.0)
+                .long_on(
+                    |_sym: &&'static str| Const::<Snapshot<&'static str>>::new(true),
+                    |_sym: &&'static str| Const::<Snapshot<&'static str>>::new(false),
+                )
+                .position_sizing(|_| Value::<Snapshot<&'static str>>::new(0.5))
+                .rebalance_on(Every::<Snapshot<&'static str>>::new(1));
+        let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
+        tick(&mut strat, &mut wallet, &[("A", 100.0)]);
+        tick(&mut strat, &mut wallet, &[("A", 100.0)]);
+        let after_entry = wallet.position(&"A").amount;
+        assert!(after_entry > 0.0);
+        // Several more bars: idempotent resize, no change in units.
+        for _ in 0..3 {
+            tick(&mut strat, &mut wallet, &[("A", 100.0)]);
+        }
+        assert!(
+            (wallet.position(&"A").amount - after_entry).abs() < 1e-6,
+            "same-target resize doesn't move units"
+        );
+    }
+
+    #[test]
+    fn entry_and_exit_signals_still_fire_between_rebalances() {
+        // Verify the rebalance gate is orthogonal to the entry / exit
+        // signals: even with `rebalance_on(!never)`, an exit signal
+        // still flattens the position.
+        use crate::indicators::Const;
+        let mut strat: MultiAssetStrategy<&'static str> =
+            MultiAssetStrategy::with_initial_equity(10_000.0)
+                .long_on(
+                    |sym: &&'static str| close_of(sym).gt(Value::new(50.0)),
+                    |sym: &&'static str| close_of(sym).lt(Value::new(30.0)),
+                )
+                .position_sizing(|_| Value::<Snapshot<&'static str>>::new(0.5))
+                .rebalance_on(Const::<Snapshot<&'static str>>::new(false));
+        let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
+        tick(&mut strat, &mut wallet, &[("A", 100.0)]);
+        tick(&mut strat, &mut wallet, &[("A", 100.0)]);
+        assert!(wallet.position(&"A").amount > 0.0, "A long after entry");
+        // Price drops through the exit threshold — flatten fires.
+        tick(&mut strat, &mut wallet, &[("A", 20.0)]);
+        tick(&mut strat, &mut wallet, &[("A", 20.0)]);
+        assert!(
+            wallet.position(&"A").amount.abs() < 1e-9,
+            "A flat after exit signal (unaffected by never-rebalance)"
         );
     }
 }

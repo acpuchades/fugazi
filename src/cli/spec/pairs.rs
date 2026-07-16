@@ -67,6 +67,13 @@ pub struct PairsStrategySpec {
     /// reading skips the trade for that bar.
     #[serde(default)]
     pub sizing: Option<Box<ExprSpec>>,
+
+    /// Optional **rebalance gate** — a boolean signal deciding, on each
+    /// bar, whether both legs are resized to the current sizing target.
+    /// Defaults to `!never` — sizing only reads on entry, matching
+    /// pre-refactor behavior.
+    #[serde(default)]
+    pub rebalance_on: Option<SignalSpec>,
 }
 
 impl PairsStrategySpec {
@@ -154,6 +161,9 @@ impl PairsStrategySpec {
         }
         if let Some(sizing) = &self.sizing {
             strat = strat.position_sizing(AsReal::new(sizing.build(&anchor, &book, schema)));
+        }
+        if let Some(rebalance) = &self.rebalance_on {
+            strat = strat.rebalance_on(AsBool::new(rebalance.build(&anchor, &book, schema)));
         }
         DynPairsStrategy { inner: strat }
     }

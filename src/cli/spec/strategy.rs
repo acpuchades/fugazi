@@ -85,6 +85,15 @@ pub struct SingleStrategySpec {
     /// fallback into the spec if that isn't what you want).
     #[serde(default)]
     pub sizing: Option<Box<ExprSpec>>,
+
+    /// Optional **rebalance gate** — a boolean signal deciding, on each
+    /// bar, whether the open position is resized to the current sizing
+    /// target. Defaults to `!never` — sizing only reads on transitions,
+    /// matching pre-refactor behavior. Useful for a vol-targeted or
+    /// Kelly-scaled single-asset strategy that wants to adjust an open
+    /// position when the target drifts.
+    #[serde(default)]
+    pub rebalance_on: Option<SignalSpec>,
 }
 
 impl SingleStrategySpec {
@@ -183,6 +192,9 @@ impl SingleStrategySpec {
         }
         if let Some(sizing) = &self.sizing {
             strat = strat.position_sizing(AsReal::new(sizing.build(&anchor, &book, schema)));
+        }
+        if let Some(rebalance) = &self.rebalance_on {
+            strat = strat.rebalance_on(AsBool::new(rebalance.build(&anchor, &book, schema)));
         }
         DynSingleStrategy { inner: strat }
     }

@@ -202,3 +202,131 @@ impl<In> Indicator for Const<In> {
 
     fn reset(&mut self) {}
 }
+
+/// A **periodic pulse** — a boolean signal that fires `true` once every
+/// `period` bars, with a *delayed* first fire on bar `period - 1`
+/// (0-indexed).
+///
+/// So `Every::new(1)` fires on every bar (bar 0, 1, 2, …);
+/// `Every::new(5)` first fires on bar 4, then bar 9, 14, 19, … A common
+/// use is as a `rebalance_on` gate on a multi-position strategy — e.g.
+/// weekly rebalance for a daily strategy is `Every::new(5)` (or the
+/// tag-form `!every 5`).
+///
+/// Generic over its input like [`Const`] — the timing depends only on
+/// the number of [`update`](Indicator::update) calls, not on their
+/// contents.
+#[derive(Debug, Clone, Copy)]
+pub struct Every<In> {
+    period: usize,
+    /// Total bars seen so far. On update N (1-indexed) we fire iff
+    /// `N % period == 0` — giving the delayed-first-fire semantics
+    /// documented above.
+    seen: usize,
+    last: Option<bool>,
+    _input: PhantomData<fn(In)>,
+}
+
+impl<In> Every<In> {
+    /// A pulse that fires `true` every `period` bars (bar `period-1`
+    /// first, then every `period` bars after).
+    ///
+    /// # Panics
+    /// Panics if `period` is zero — a zero-period pulse has no meaning.
+    pub fn new(period: usize) -> Self {
+        assert!(period > 0, "Every::new: period must be > 0");
+        Self {
+            period,
+            seen: 0,
+            last: None,
+            _input: PhantomData,
+        }
+    }
+}
+
+impl<In> Indicator for Every<In> {
+    type Input = In;
+    type Output = bool;
+
+    fn update(&mut self, _input: In) -> Option<bool> {
+        self.seen = self.seen.saturating_add(1);
+        let fires = self.seen.is_multiple_of(self.period);
+        self.last = Some(fires);
+        Some(fires)
+    }
+
+    fn value(&self) -> Option<bool> {
+        self.last
+    }
+
+    /// Always ready — `Every` emits `Some(bool)` from the first bar (it
+    /// just emits `false` while inside a period). Wrap in
+    /// [`Unstable`](crate::indicators::Unstable) if you need to opt an
+    /// enclosing strategy's readiness gate out of the pulse's contribution
+    /// (not usually needed since it's zero already).
+    fn warm_up_period(&self) -> usize {
+        0
+    }
+
+    fn reset(&mut self) {
+        self.seen = 0;
+        self.last = None;
+    }
+}
+
+#[cfg(test)]
+mod every_tests {
+    use super::*;
+    use crate::Indicator;
+
+    #[test]
+    fn every_1_fires_on_every_bar() {
+        let mut e: Every<()> = Every::new(1);
+        for _ in 0..5 {
+            assert_eq!(e.update(()), Some(true));
+        }
+    }
+
+    #[test]
+    fn every_5_first_fires_on_bar_four_then_periodic() {
+        let mut e: Every<()> = Every::new(5);
+        // Bars 0..3 (1st through 4th updates): false. Bar 4 (5th update): true.
+        for _ in 0..4 {
+            assert_eq!(e.update(()), Some(false));
+        }
+        assert_eq!(e.update(()), Some(true));
+        // Bars 5..8: false. Bar 9 (10th update): true.
+        for _ in 0..4 {
+            assert_eq!(e.update(()), Some(false));
+        }
+        assert_eq!(e.update(()), Some(true));
+    }
+
+    #[test]
+    fn every_warm_up_is_zero_but_first_reading_can_be_false() {
+        let mut e: Every<()> = Every::new(3);
+        assert_eq!(e.warm_up_period(), 0);
+        assert_eq!(e.update(()), Some(false));
+        assert_eq!(e.update(()), Some(false));
+        assert_eq!(e.update(()), Some(true));
+    }
+
+    #[test]
+    fn every_resets_the_counter() {
+        let mut e: Every<()> = Every::new(3);
+        e.update(());
+        e.update(());
+        e.update(()); // fires
+        e.reset();
+        assert_eq!(e.value(), None);
+        assert_eq!(e.update(()), Some(false));
+        assert_eq!(e.update(()), Some(false));
+        assert_eq!(e.update(()), Some(true));
+    }
+
+    #[test]
+    #[should_panic(expected = "period must be > 0")]
+    fn every_rejects_zero_period() {
+        let _: Every<()> = Every::new(0);
+    }
+}

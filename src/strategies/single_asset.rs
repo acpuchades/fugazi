@@ -17,6 +17,9 @@ use crate::types::{Selector, Snapshot};
 /// carriers.
 type Level<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real>>;
 
+/// The **rebalance gate** signal — a boolean over the strategy's snapshot.
+type RebalanceSignal<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool>>;
+
 /// The latest value of an optional level, if it is present and warmed up.
 fn level_value<Sym>(level: &Option<Level<Sym>>) -> Option<Real> {
     level.as_ref().and_then(|l| l.value())
@@ -163,6 +166,10 @@ pub struct SingleAssetStrategy<Sym> {
     short_stop: Option<Level<Sym>>,
     short_target: Option<Level<Sym>>,
     sizing: Level<Sym>,
+    /// Rebalance gate — on `true`, resize the (possibly open) position
+    /// to the current sizing target. Default is `Const::new(false)` —
+    /// sizing is only read on transitions.
+    rebalance: RebalanceSignal<Sym>,
     position: Position,
     book: Book<Sym>,
     bars_seen: usize,
@@ -202,10 +209,29 @@ impl<Sym: Clone + Hash + Eq + 'static> SingleAssetStrategy<Sym> {
             short_stop: None,
             short_target: None,
             sizing: Box::new(Value::<Snapshot<Sym>>::new(1.0)),
+            rebalance: Box::new(Const::<Snapshot<Sym>>::new(false)),
             position: Position::new(),
             book: Book::new(initial_equity),
             bars_seen: 0,
         }
+    }
+
+    /// Install the **rebalance gate** — a boolean signal that decides,
+    /// on each bar, whether the open position (if any) is resized to
+    /// the current sizing target. Default is a constant `false` (never
+    /// rebalance) — sizing only reads on transitions, matching the
+    /// pre-refactor behavior.
+    ///
+    /// A `None` reading is treated as `false` — the safe default. Use
+    /// [`Every::new(N)`](crate::indicators::Every) for periodic
+    /// resize; use a book-anchored signal (e.g. an
+    /// `Above` on `book.drawdown()`) for event-driven rebalance.
+    pub fn rebalance_on(
+        mut self,
+        signal: impl Indicator<Input = Snapshot<Sym>, Output = bool> + 'static,
+    ) -> Self {
+        self.rebalance = Box::new(signal);
+        self
     }
 
     /// Go all-in long on the first bar and hold — a long entry that never exits.
@@ -407,7 +433,8 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Strategy for SingleAssetStrat
         if let Some(l) = self.short_target.as_mut() {
             l.update(snap.clone());
         }
-        self.sizing.update(snap);
+        self.sizing.update(snap.clone());
+        self.rebalance.update(snap);
         self.bars_seen = self.bars_seen.saturating_add(1);
     }
 
@@ -455,6 +482,17 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Strategy for SingleAssetStrat
             let _ = wallet.cancel_protective(&self.symbol);
             return;
         }
+        // Rebalance gate: on `true`, resize the held position to the
+        // current sizing target. `wallet.set` at the current side is
+        // idempotent when the target already matches, so no spurious
+        // fills. Protective levels stay in place across the resize.
+        if self.rebalance.value().unwrap_or(false) {
+            if long {
+                let _ = wallet.set(self.symbol.clone(), Side::Buy, Size::value_frac(size));
+            } else if short {
+                let _ = wallet.set(self.symbol.clone(), Side::Sell, Size::value_frac(size));
+            }
+        }
         // Rest the protective levels on the active side. Re-submitted every bar so
         // a moving (trailing) level cancel/replaces; the wallet triggers and prices
         // them. The wallet reads the side from the position, so a stop is always the
@@ -494,6 +532,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Strategy for SingleAssetStrat
             l.reset();
         }
         self.sizing.reset();
+        self.rebalance.reset();
         self.position.reset();
         self.book.reset();
         self.bars_seen = 0;

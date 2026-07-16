@@ -111,6 +111,18 @@ pub struct MultiAssetStrategySpec {
     /// [`UniverseSpec`].
     #[serde(default)]
     pub universe: Option<UniverseSpec>,
+
+    /// The **rebalance gate**: a boolean signal deciding, on each bar,
+    /// whether the strategy resizes every held per-symbol position to
+    /// its current sizing target. Defaults to `!never` — sizing is only
+    /// read on transitions (entries and reversals), preserving the
+    /// pre-`rebalance_on` behavior.
+    ///
+    /// Common non-default: `!every 20` for ~monthly resize on a daily
+    /// strategy, or an equity-drawdown signal for de-risking. Entry /
+    /// exit signals still fire every bar independently of the gate.
+    #[serde(default)]
+    pub rebalance_on: Option<SignalSpec>,
 }
 
 impl MultiAssetStrategySpec {
@@ -276,6 +288,17 @@ impl MultiAssetStrategySpec {
             Some(UniverseSpec::AllOf(syms)) => strat.all_of(syms.iter().cloned()),
             Some(UniverseSpec::AnyOf(syms)) => strat.any_of(syms.iter().cloned()),
             None => strat,
+        };
+
+        // --- rebalance gate ----------------------------------------------
+        // Default is `Const::false` (installed on the library type), so
+        // an omitted `rebalance_on:` matches pre-refactor behavior.
+        let strat = if let Some(rebalance_spec) = &self.rebalance_on {
+            let anchor = Position::new();
+            let dyn_ind: Box<dyn DynIndicator> = rebalance_spec.build(&anchor, &book, schema);
+            strat.rebalance_on(AsBool::new(dyn_ind))
+        } else {
+            strat
         };
 
         DynMultiAssetStrategy { inner: strat }
@@ -557,6 +580,85 @@ mod tests {
         let spec = MultiAssetStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut strat = spec.build(1_000.0, &schema());
         strat.update(snap_of(&[("X", 100.0)])); // Y missing → panic
+    }
+
+    #[test]
+    fn rebalance_on_defaults_to_none_and_never_resizes() {
+        // Omitted `rebalance_on:` parses cleanly (defaults to None → the
+        // library type installs `Const::false`, matching pre-refactor
+        // behavior).
+        let yaml = r#"
+            long:
+              enter: !value true
+              exit: !value false
+            sizing: !value 0.25
+        "#;
+        let spec = MultiAssetStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        assert!(spec.rebalance_on.is_none());
+    }
+
+    #[test]
+    fn rebalance_on_every_1_holds_position_when_target_unchanged() {
+        // With `rebalance_on: !every 1` and steady sizing / price, the
+        // resize is idempotent — no spurious fills after the initial
+        // entry.
+        let yaml = r#"
+            long:
+              enter: !value true
+              exit: !value false
+            sizing: !value 0.5
+            rebalance_on: !every 1
+        "#;
+        let spec = MultiAssetStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let mut strat = spec.build(10_000.0, &schema());
+        let mut wallet: PaperWallet<String> = PaperWallet::new(10_000.0);
+        // Bar 1: entry queues; Bar 2: fill.
+        for _ in 0..2 {
+            for fill in wallet.update("A".to_string(), candle(100.0)) {
+                strat.on_fill(&fill);
+            }
+            strat.update(snap_of(&[("A", 100.0)]));
+            strat.trade(&mut wallet);
+        }
+        let after_entry = wallet.position(&"A".to_string()).amount;
+        assert!(after_entry > 0.0, "entry filled");
+        // Bars 3-6: idempotent resize.
+        for _ in 0..4 {
+            for fill in wallet.update("A".to_string(), candle(100.0)) {
+                strat.on_fill(&fill);
+            }
+            strat.update(snap_of(&[("A", 100.0)]));
+            strat.trade(&mut wallet);
+        }
+        assert!(
+            (wallet.position(&"A".to_string()).amount - after_entry).abs() < 1e-6,
+            "same-target resize is a no-op"
+        );
+    }
+
+    #[test]
+    fn rebalance_on_never_parses_and_preserves_no_resize() {
+        let yaml = r#"
+            long:
+              enter: !value true
+              exit: !value false
+            sizing: !value 0.25
+            rebalance_on: !never
+        "#;
+        let spec = MultiAssetStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        assert!(spec.rebalance_on.is_some());
+        // Build the strategy — sanity check that !never doesn't blow up.
+        let mut strat = spec.build(10_000.0, &schema());
+        let mut wallet: PaperWallet<String> = PaperWallet::new(10_000.0);
+        for _ in 0..3 {
+            for fill in wallet.update("A".to_string(), candle(100.0)) {
+                strat.on_fill(&fill);
+            }
+            strat.update(snap_of(&[("A", 100.0)]));
+            strat.trade(&mut wallet);
+        }
+        // Entry fill exists; no other orders (rebalance = never).
+        assert_eq!(wallet.orders().len(), 1, "!never: only the entry");
     }
 
     #[test]

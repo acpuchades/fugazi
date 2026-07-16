@@ -68,7 +68,7 @@ Output is `Option` (warm-up → `None`).
 **A signal is just `Indicator<Output = bool>`** — no second trait hierarchy. `Signal` is thin marker `trait Signal: Indicator<Input = Candle, Output = bool>` (blanket, `?Sized`) so strategies hold `Box<dyn Signal>`. `None` until warmed; read as `bool` (false until ready) via `BoolIndicatorExt::is_true`.
 
 - **Comparisons**: aliases `Gt`/`Lt`/`Ge`/`Le`/`Eq`/`Ne` for `Combine<L, R, GtOp>` etc. Op carries absolute `epsilon` (default `1e-8`); `Gt::with_epsilon(a, b, eps)` overrides.
-- **Boolean logic**: `And`/`Or`/`Xor` are `Combine<...>`; `Not` and `Change` are dedicated unary carriers; `Const<In>` is constant-bool leaf.
+- **Boolean logic**: `And`/`Or`/`Xor` are `Combine<...>`; `Not` and `Change` are dedicated unary carriers; `Const<In>` is constant-bool leaf; `Every<In>(period)` is a **periodic pulse** — fires `true` every `period` bars with a *delayed* first fire on bar `period - 1` (0-indexed). Canonical `rebalance_on` cadence source. YAML: `!every N`; `!never` is sugar for `!value false`.
 - **`IndicatorExt`** (blanket over Real-output): fluent builder for **operators only** — comparisons (`gt`/`lt`/`ge`/`le`/`eq_to`/`ne_to`, `above`/`below` — `eq_to`/`ne_to` avoid `PartialEq` collision), arithmetic (`add`/`sub`/`mul`/`div`), lookback (`lag`/`diff`/`ratio`/`roc`), rolling extremum (`rolling_max`/`rolling_min`), `unstable`, `crosses_above`/`crosses_below`. Named indicators are **not** builder methods; use `::new`. Don't add `.sma()`-style builders.
 - **`BoolIndicatorExt`** (blanket over `Indicator<Output = bool>`, `?Sized`): `is_true()`, `and`/`or`/`xor`/`not`, edge primitive `changed`, `unstable`.
 - **Crossover is not a primitive**: `crosses_above(a,b)` = `a.gt(b).and(a.gt(b).changed())` (clones operands, ~2× source work).
@@ -84,7 +84,8 @@ Each bar the driver: feed each symbol to wallet, route each fill to every strate
 - **Readiness gate.** `is_ready()` = `bars_seen >= max(stable_period())` across every wired signal, protective level, sizing indicator. Wrap subtree in `Unstable` to contribute `0`.
 - **Builders.** `long_on(enter, exit)`, `short_on(enter, exit)` (opposite-side entry reverses), `buy_and_hold(symbol)`.
 - **Protective levels.** Per-side stop/take-profit as `Box<dyn Indicator<Output = Real>>` via `long_stop_loss`/`long_take_profit`/`short_*`, built against `position()`. E.g. `position.entry().mul(Value::new(0.95))` (fixed), `position.peak().mul(Value::new(0.95))` (trailing), `position.entry().sub(Atr::new(14).mul(Value::new(2.0)))` (ATR).
-- **`trade` sequence.** Read sizing → skip on `None` → entries (sizing-scaled, reversal-capable) → flatten-to-flat signal exits → rest protective on active side.
+- **`trade` sequence.** Read sizing → skip on `None` → entries (sizing-scaled, reversal-capable) → flatten-to-flat signal exits → **rebalance gate** (resize held to sizing target when signal fires) → rest protective on active side.
+- **`rebalance_on(signal)`** (default `Const::false` — never). On bars where the gate fires, `wallet.set(sym, held_side, value_frac(size))` re-affirms the current sizing target — idempotent when target unchanged, market resize otherwise. Lets vol-targeted / Kelly-scaled strategies adjust an open position when the target drifts.
 - **Order semantics.** Entries and signal exits are **market** (`set`/`close` then `cancel_protective`), filled next bar at `open`. Protective stops are **resting** orders the wallet owns; strategy re-submits each bar (idempotent, latest-wins); wallet triggers and prices (at level, or `open` on gap). Trailing tracks *completed* bars.
 - **Not a rule engine.** Don't add `(signal, action)` tables without being asked.
 
@@ -104,6 +105,7 @@ Each bar the driver: feed each symbol to wallet, route each fill to every strate
 - **Sizing.** Per-leg `ValueFraction`, **no auto-normalization** — use `sizing::equal_weight(n_legs)` for 100% gross.
 - **Costs** stay on wallet — `PaperWallet::set_costs_for(sym, ...)`.
 - **Per-symbol readiness.** Under `Floating` / `any_of`: `is_ready() = true` unconditionally; enforced inside `trade()` by only ranking symbols whose score read `Some` this bar. Under `all_of`: `is_ready()` blocks until every listed symbol has both scored and sized `Some` — the driver skips `trade` while the universe warms.
+- **`rebalance_on(signal)`** (default `Every::new(1)` — every bar). Gates the whole selection + resize step; a less-frequent cadence (`!every 20` for weekly on a daily strategy, or a drawdown-triggered signal) lets the basket hold its picks between rebalance events. Because basket's selection *is* the sizing decision, gating selection is the natural rebalance semantics — the same knob shape as on the other strategies but with a fire-every-bar default to preserve pre-refactor behavior.
 - **State.** Per-symbol `Position` (per-leg protective not wired) + shared `Book<Sym>`. Seed `with_initial_equity(cash)`.
 - **Transitions** = market orders, only when target side differs.
 - **Not shipped**: `.dollar_neutral()`, `.rebalance_every(...)`, per-leg protective levels, Python bindings.
@@ -114,6 +116,7 @@ Each bar the driver: feed each symbol to wallet, route each fill to every strate
 - **Universe** knob (reused from `basket::Universe`): `.all_of([...])` strict / `.any_of([...])` lax / floating default. Same semantics as basket — declared universes filter symbol discovery and, under `all_of`, panic on missing + gate `is_ready()` until every listed leg is past its own `stable_period`.
 - **Per-symbol readiness.** Under floating / `any_of`: a symbol trades once *its own* chains have settled (gated inside `trade`); under `all_of`: `is_ready()` blocks until every listed leg is past its own `stable_period`.
 - **State.** Per-symbol `Position` + shared `Book<Sym>` (aggregate equity across all legs). Same book-anchored sizing recipes apply.
+- **`rebalance_on(signal)`** (default `Const::false` — never). On fire, resizes every held per-symbol position to its current sizing target. Same knob shape as single/pairs. Entry/exit signals fire every bar regardless.
 - **Not shipped** (yet): `optimize` support (bails), Python bindings, YAML trailing-risk wrapping.
 
 `src/strategy.rs` carries only the `Strategy` trait. `Wallet` vocabulary lives in **`src/wallet.rs`** so downstream broker crates don't drag `Strategy` machinery.
