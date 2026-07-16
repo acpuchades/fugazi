@@ -729,6 +729,43 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         m.max(0.0)
     }
 
+    /// Pre-flight a market submission against the last close: reject
+    /// synchronously when the symbol has never been priced, its close is
+    /// non-positive, or a net-buy `delta` clearly can't be paid for out of
+    /// cash on hand at that price.
+    ///
+    /// Used by [`Wallet::set_position`](Wallet::set_position) — the
+    /// unit-explicit market path — and mirrors what a live venue does with an
+    /// unfillable order. The affordability check is *approximate* (uses
+    /// last-close as a proxy for the actual fill price at next open, and
+    /// ignores costs), so a submission that just clears here can still be
+    /// dropped into the rejections log at fill time if the open gaps
+    /// meaningfully higher than the close.
+    fn preflight_market(&self, symbol: &Sym, delta: Real) -> Result<(), WalletError> {
+        let close = self.price(symbol).ok_or(WalletError::UnknownPrice)?.0;
+        if close <= 0.0 {
+            return Err(WalletError::InvalidPrice);
+        }
+        self.check_buy_affordability(delta, close)
+    }
+
+    /// Reject a net-buy `delta` whose notional at `price` clearly exceeds
+    /// cash on hand. Sells and no-ops always clear. Uses the same
+    /// funds-plus-tolerance comparison [`fill_at`](Self::fill_at) does at
+    /// fill time so a submission passing this is virtually certain to fill
+    /// (barring a big gap in the open).
+    fn check_buy_affordability(&self, delta: Real, price: Real) -> Result<(), WalletError> {
+        if delta <= 0.0 {
+            return Ok(());
+        }
+        let cost = delta * price;
+        let tolerance = DEFAULT_EPSILON * self.funds.abs().max(1.0);
+        if cost - self.funds > tolerance {
+            return Err(WalletError::InsufficientFunds);
+        }
+        Ok(())
+    }
+
     /// Trigger and fill a resting protective leg on `symbol` against `candle`, if
     /// one is crossed. Stop-loss takes precedence over take-profit, and at most one
     /// leg fills per bar (the fill flattens, which drops the whole bracket).
@@ -860,7 +897,11 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
     }
 
     fn set_position(&mut self, target: Units<Sym>) -> Result<Ack<Sym>, WalletError> {
-        // Market order: queue the absolute target to fill at the next bar's open.
+        // Pre-flight against last close so an infeasible submission errors
+        // synchronously (mirroring a live venue's rejection) rather than
+        // queuing an order that fill_at will drop into the rejections log.
+        let current = self.positions.get(&target.symbol).copied().unwrap_or(0.0);
+        self.preflight_market(&target.symbol, target.amount - current)?;
         let id = self.mint();
         self.pending
             .insert(target.symbol, Pending::Target(target.amount, id));
@@ -868,7 +909,20 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
     }
 
     fn set(&mut self, symbol: Sym, side: Side, size: Size) -> Result<Ack<Sym>, WalletError> {
-        // Market order: queue the side+size and resolve it at the fill (open).
+        // Pre-flight what we can at submission: price validity always, and the
+        // affordability check for an explicit Size::Units target. Fractional
+        // sizings (ValueFraction / FundsFraction) always shrink to fit at
+        // fill time, so they never fail a submission-time affordability
+        // check and only need the price-validity guards here.
+        let close = self.price(&symbol).ok_or(WalletError::UnknownPrice)?.0;
+        if close <= 0.0 {
+            return Err(WalletError::InvalidPrice);
+        }
+        if let Size::Units(units) = size {
+            let current = self.positions.get(&symbol).copied().unwrap_or(0.0);
+            let target = side.sign() * units.abs();
+            self.check_buy_affordability(target - current, close)?;
+        }
         let id = self.mint();
         self.pending.insert(symbol, Pending::Sized(side, size, id));
         Ok(Ack::Working(id))
@@ -1036,20 +1090,21 @@ mod tests {
     }
 
     #[test]
-    fn infeasible_units_buy_is_recorded_as_a_rejection() {
-        // A caller-explicit Size::Units target that costs more than funds does
-        // not shrink (it carries a specific unit intent). Instead of the
-        // pre-fix silent drop, the wallet now records a Rejection queryable
-        // via `rejections()`.
+    fn fill_time_rejection_is_recorded_on_a_gap_up() {
+        // A submission that clears the last-close pre-flight can still be
+        // dropped at fill time if the next open gaps meaningfully higher.
+        // The wallet stashes the drop in `rejections()` so a driver can
+        // report why a bar produced no fill.
         let mut w: PaperWallet<&str> = PaperWallet::new(100.0);
         w.update("X", bar(50.0));
-        // 3 units @ 50 = 150 > funds 100.
-        let ack = w.set("X", Side::Buy, Size::units(3.0)).unwrap();
+        // 1 unit @ close 50 = 50, comfortably within 100 funds — pre-flight passes.
+        let ack = w.set("X", Side::Buy, Size::units(1.0)).unwrap();
         let id = match ack {
             Ack::Working(id) => id,
             Ack::Filled(_) => panic!("market order should queue, not fill"),
         };
-        let fills = w.update("X", bar(50.0));
+        // But the bar gaps up: open 200 > 100 funds. fill_at rejects.
+        let fills = w.update("X", Candle::new(200.0, 210.0, 195.0, 205.0, 0.0));
         assert!(fills.is_empty(), "expected no fill");
         assert!(w.positions().next().is_none());
         assert_eq!(w.rejections().len(), 1);
@@ -1101,36 +1156,46 @@ mod tests {
     }
 
     #[test]
-    fn unknown_price_is_flagged_on_a_fill() {
+    fn unknown_price_is_flagged_at_submission_and_at_fill() {
         let mut w: PaperWallet<&str> = PaperWallet::new(1_000.0);
-        // "X" was never fed a bar, so a fill can't be priced; a market order just
-        // queues (it resolves at the fill, which has a price).
+        // "X" was never fed a bar. fill_at flags it directly...
         assert_eq!(
             w.fill_at("X", 1.0, 50.0, OrderKind::Market, OrderId(0)),
             Err(WalletError::UnknownPrice)
         );
-        assert!(matches!(
-            w.set_position(Units {
-                symbol: "X",
-                amount: 1.0
-            }),
-            Ok(Ack::Working(_))
-        ));
+        // ...and the submission-time pre-flight refuses to queue an order
+        // that can never be priced, so the caller learns synchronously
+        // instead of via the rejections log.
+        assert_eq!(
+            w.set_position(Units { symbol: "X", amount: 1.0 }),
+            Err(WalletError::UnknownPrice)
+        );
+        assert_eq!(
+            w.set("X", Side::Buy, Size::units(1.0)),
+            Err(WalletError::UnknownPrice)
+        );
     }
 
     #[test]
-    fn insufficient_funds_is_flagged_but_shorts_are_free() {
+    fn insufficient_funds_is_flagged_at_submission_but_shorts_are_free() {
         let mut w: PaperWallet<&str> = PaperWallet::new(100.0);
         w.update("X", bar(50.0));
-        // 3 units cost 150 > 100 funds, and there is no margin.
+        // 3 units cost 150 > 100 funds, and there is no margin. fill_at
+        // flags it directly...
         assert_eq!(
             w.fill_at("X", 3.0, 50.0, OrderKind::Market, OrderId(0)),
             Err(WalletError::InsufficientFunds)
         );
-        // A queued buy beyond funds simply never fills (the error is swallowed).
-        w.set("X", Side::Buy, Size::units(3.0)).unwrap();
-        w.update("X", bar(50.0));
-        assert!(w.positions().next().is_none());
+        // ...and set/set_position pre-flight against last close so a caller
+        // learns synchronously instead of waiting for the fill-time rejection.
+        assert_eq!(
+            w.set("X", Side::Buy, Size::units(3.0)),
+            Err(WalletError::InsufficientFunds)
+        );
+        assert_eq!(
+            w.set_position(Units { symbol: "X", amount: 3.0 }),
+            Err(WalletError::InsufficientFunds)
+        );
         // A short sale credits cash, so selling is always feasible.
         w.set("X", Side::Sell, Size::units(3.0)).unwrap();
         w.update("X", bar(50.0));
@@ -1138,17 +1203,24 @@ mod tests {
     }
 
     #[test]
-    fn non_positive_price_is_flagged() {
+    fn non_positive_price_is_flagged_at_submission_and_at_fill() {
         let mut w: PaperWallet<&str> = PaperWallet::new(1_000.0);
         w.update("X", bar(0.0));
+        // fill_at flags a non-positive theoretical price directly...
         assert_eq!(
             w.fill_at("X", 1.0, 0.0, OrderKind::Market, OrderId(0)),
             Err(WalletError::InvalidPrice)
         );
-        // A queued order against a zero open likewise never fills.
-        w.set("X", Side::Buy, Size::value_frac(1.0)).unwrap();
-        w.update("X", bar(0.0));
-        assert!(w.positions().next().is_none());
+        // ...and submissions against a symbol whose last close is
+        // non-positive refuse to queue at all.
+        assert_eq!(
+            w.set("X", Side::Buy, Size::value_frac(1.0)),
+            Err(WalletError::InvalidPrice)
+        );
+        assert_eq!(
+            w.set_position(Units { symbol: "X", amount: 1.0 }),
+            Err(WalletError::InvalidPrice)
+        );
     }
 
     #[test]
