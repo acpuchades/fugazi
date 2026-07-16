@@ -622,7 +622,7 @@ pub fn run_multi(
 /// that time — sparse per bar is normal. Each per-symbol series is already
 /// sorted (BTreeMap invariant), so a single N-way merge over cursors
 /// suffices.
-fn join_universe_by_time(
+pub(crate) fn join_universe_by_time(
     per_symbol: &[(String, Vec<(String, Atom)>)],
 ) -> (Vec<String>, Vec<fugazi::types::Snapshot<String>>) {
     // Cursor per symbol.

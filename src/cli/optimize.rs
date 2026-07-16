@@ -51,10 +51,12 @@ use crate::calendar::{
 use crate::costs::CostConfig;
 use crate::data::DataFrame;
 use crate::imports;
+use crate::input::StrategyKind;
 use crate::input;
 use crate::metrics;
 use crate::params;
-use crate::spec::SingleStrategySpec;
+use crate::run::join_universe_by_time;
+use crate::spec::{BasketStrategySpec, MultiAssetStrategySpec, SingleStrategySpec};
 use crate::style;
 
 /// Sort direction of a `--best-by` optimization: descending = higher is better
@@ -73,6 +75,14 @@ type Partition = (HashMap<String, Value>, Vec<Axis>);
 /// Threaded-in inputs, same shape as [`crate::run::RunOptions`].
 pub struct OptimizeOptions<'a> {
     pub cash: Real,
+    /// The shape of the strategy YAML being swept — single-asset, basket,
+    /// multi-asset. `Pairs` is rejected upstream; single-asset is the
+    /// legacy path (one symbol probed from the spec + one atom slice from
+    /// the frame). Basket / multi-asset take the union of every symbol in
+    /// the frame as universe and time-align the per-symbol streams into
+    /// one shared snapshot sequence (same shape as `run_basket` /
+    /// `run_multi`).
+    pub strategy_kind: StrategyKind,
     pub strategy_text: &'a str,
     /// The directory the strategy's `!import` paths resolve against — its own
     /// directory when loaded from `@file`, the working directory for inline
@@ -187,15 +197,36 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
     let base_value =
         imports::resolve(base_value, opts.strategy_dir).context("resolving strategy imports")?;
 
+    match opts.strategy_kind {
+        StrategyKind::Single => run_single(&opts, subgrids, frame, &base_value),
+        StrategyKind::Basket | StrategyKind::Multi => {
+            run_multi_symbol(&opts, subgrids, frame, &base_value)
+        }
+        StrategyKind::Pairs => bail!(
+            "`fugazi optimize` doesn't support `pairs:` strategies (rejected at dispatch)"
+        ),
+    }
+}
+
+/// The single-asset grid path — probes the strategy's symbol once, fetches
+/// its atom slice, and drives the sweep through a
+/// [`SingleStrategySpec`]-typed closure. Handles walk-forward too (which is
+/// only wired for single-asset strategies).
+fn run_single(
+    opts: &OptimizeOptions,
+    subgrids: Vec<Subgrid>,
+    frame: &DataFrame,
+    base_value: &Value,
+) -> Result<()> {
     // Resolve the strategy's symbol from a probe built with the first subgrid's
     // first combo. Every other subgrid must resolve to the same symbol —
     // otherwise the atoms slice we're about to fetch is only valid for one of
     // them and the others silently backtest against the wrong data. Cheaper to
     // validate here than debug later.
-    let probe_spec = build_spec(&base_value, &probe_params(&subgrids[0]))?;
+    let probe_spec = build_spec(base_value, &probe_params(&subgrids[0]))?;
     let probe_symbol = probe_spec.symbol.clone();
     for (idx, subgrid) in subgrids.iter().enumerate().skip(1) {
-        let other = build_spec(&base_value, &probe_params(subgrid))?;
+        let other = build_spec(base_value, &probe_params(subgrid))?;
         if other.symbol != probe_symbol {
             bail!(
                 "--grid #{} resolves to symbol `{}`, but --grid #1 resolves to `{}` — every \
@@ -243,7 +274,7 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
     // through the [`Sweep`] shape.
     if let Some(walkforward_spec) = opts.walkforward {
         return walkforward_run(
-            &base_value,
+            base_value,
             subgrids,
             &atoms,
             opts.cash,
@@ -264,21 +295,44 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
         );
     }
 
+    let cost_config = opts.cost_config;
+    let atoms_ref = &atoms;
+    let windowed_n = windowed_bars.map(NonZeroUsize::get);
+    let evaluate_row = move |params: &HashMap<String, Value>| -> Result<Evaluation> {
+        let spec = build_spec(base_value, params)?;
+        Ok(match windowed_n {
+            Some(w) => Evaluation::Windowed(backtest::evaluate_windowed(
+                &spec,
+                atoms_ref,
+                opts.cash,
+                bars_per_year,
+                opts.risk_free_rate,
+                cost_config,
+                effective_freq,
+                w,
+                seconds_per_bar,
+            )),
+            None => Evaluation::Whole(Box::new(backtest::evaluate(
+                &spec,
+                atoms_ref,
+                opts.cash,
+                bars_per_year,
+                opts.risk_free_rate,
+                cost_config,
+                effective_freq,
+                seconds_per_bar,
+            ))),
+        })
+    };
+
     let sweep = optimize(
-        &base_value,
         subgrids,
-        &atoms,
-        opts.cash,
-        bars_per_year,
-        opts.risk_free_rate,
-        opts.cost_config,
-        effective_freq,
-        windowed_bars,
-        seconds_per_bar,
+        windowed_n,
         &opts.metrics,
         opts.best_by.as_deref(),
         opts.risk_aversion,
         opts.jobs,
+        evaluate_row,
     )?;
 
     write_grid_csv(
@@ -293,9 +347,189 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
     if !opts.quiet {
         style::print_header("optimize", "sweep a strategy over a parameter grid");
         print_skipped_overlay_warning(&skipped_overlay_columns);
-        print_inputs_block(&opts, windowed_bars, &sweep.subgrid_summaries, &sweep.rows);
+        print_inputs_block(opts, windowed_bars, &sweep.subgrid_summaries, &sweep.rows);
         // A "best" row only means something when the user gave us a metric to
         // rank by. Without one, the sweep has produced a CSV but no verdict.
+        if sweep.best_by.is_some() {
+            print_best_block(
+                &sweep.union_columns,
+                &sweep.metric_columns,
+                sweep.best_by.as_ref(),
+                opts.risk_aversion,
+                &sweep.rows,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The basket / multi-asset grid path — the tradeable universe is every
+/// symbol in `frame`, and per-bar snapshots are the outer-join of every
+/// symbol's atom stream on `time` (same shape as `run_basket` /
+/// `run_multi`). Walk-forward is not wired for this path; bails with a
+/// specific message. `--windowed` is supported via the basket / multi
+/// twins of the single-asset windowed evaluator.
+fn run_multi_symbol(
+    opts: &OptimizeOptions,
+    subgrids: Vec<Subgrid>,
+    frame: &DataFrame,
+    base_value: &Value,
+) -> Result<()> {
+    let kind_label = match opts.strategy_kind {
+        StrategyKind::Basket => "basket",
+        StrategyKind::Multi => "multi",
+        _ => unreachable!("run_multi_symbol only dispatched for basket/multi"),
+    };
+
+    if opts.walkforward.is_some() {
+        bail!(
+            "`fugazi optimize --walkforward` doesn't yet support `{kind_label}:` strategies; \
+             grid-only for now"
+        );
+    }
+
+    let universe = frame.symbols();
+    if universe.is_empty() {
+        bail!(
+            "no symbols found in the input series — `{kind_label}:` optimization needs at least \
+             one traded asset"
+        );
+    }
+    // Per-symbol atom streams, sorted by time. `DataFrame::atoms` walks a
+    // BTreeMap so each per-symbol stream is already ascending; the joiner
+    // then N-way merges them into shared bar-tagged snapshots.
+    let per_symbol: Vec<(String, Vec<(String, Atom)>)> = universe
+        .iter()
+        .map(|sym| Ok::<_, anyhow::Error>((sym.clone(), frame.atoms(sym)?.atoms)))
+        .collect::<Result<_>>()?;
+    let (_bars, snapshots) = join_universe_by_time(&per_symbol);
+    if snapshots.is_empty() {
+        bail!(
+            "no bars found in the input series across the {} discovered symbol(s)",
+            universe.len()
+        );
+    }
+
+    // Cadence: try the representative (first) symbol's --frequency scope, then
+    // fall back to detection from that symbol's timestamps. Matches
+    // `run_basket` / `run_multi`.
+    let representative = &universe[0];
+    let effective_freq = calendar::pick_frequency(opts.frequency, representative).or_else(|| {
+        per_symbol
+            .iter()
+            .find(|(s, _)| s == representative)
+            .and_then(|(_, atoms)| {
+                calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a))
+            })
+    });
+    let bars_per_year =
+        calendar::pick_bars_per_year(opts.bars_per_year, representative, effective_freq)
+            .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
+
+    let windowed_bars = opts
+        .windowed
+        .map(|w| {
+            w.resolve(effective_freq, opts.asset_class)
+                .map_err(anyhow::Error::msg)
+        })
+        .transpose()
+        .context("resolving `-w/--windowed`")?;
+
+    let seconds_per_bar = opts
+        .asset_class
+        .zip(effective_freq)
+        .map(|(class, freq)| class.trading_seconds_per_bar(freq));
+
+    let cost_config = opts.cost_config;
+    let snapshots_ref = &snapshots;
+    let universe_ref = &universe;
+    let windowed_n = windowed_bars.map(NonZeroUsize::get);
+    let kind = opts.strategy_kind;
+
+    let evaluate_row = move |params: &HashMap<String, Value>| -> Result<Evaluation> {
+        Ok(match kind {
+            StrategyKind::Basket => {
+                let spec = build_basket_spec(base_value, params)?;
+                match windowed_n {
+                    Some(w) => Evaluation::Windowed(backtest::evaluate_windowed_basket(
+                        &spec,
+                        snapshots_ref,
+                        universe_ref,
+                        opts.cash,
+                        bars_per_year,
+                        opts.risk_free_rate,
+                        cost_config,
+                        effective_freq,
+                        w,
+                        seconds_per_bar,
+                    )),
+                    None => Evaluation::Whole(Box::new(backtest::evaluate_basket(
+                        &spec,
+                        snapshots_ref,
+                        universe_ref,
+                        opts.cash,
+                        bars_per_year,
+                        opts.risk_free_rate,
+                        cost_config,
+                        effective_freq,
+                        seconds_per_bar,
+                    ))),
+                }
+            }
+            StrategyKind::Multi => {
+                let spec = build_multi_spec(base_value, params)?;
+                match windowed_n {
+                    Some(w) => Evaluation::Windowed(backtest::evaluate_windowed_multi(
+                        &spec,
+                        snapshots_ref,
+                        universe_ref,
+                        opts.cash,
+                        bars_per_year,
+                        opts.risk_free_rate,
+                        cost_config,
+                        effective_freq,
+                        w,
+                        seconds_per_bar,
+                    )),
+                    None => Evaluation::Whole(Box::new(backtest::evaluate_multi(
+                        &spec,
+                        snapshots_ref,
+                        universe_ref,
+                        opts.cash,
+                        bars_per_year,
+                        opts.risk_free_rate,
+                        cost_config,
+                        effective_freq,
+                        seconds_per_bar,
+                    ))),
+                }
+            }
+            _ => unreachable!("run_multi_symbol only dispatched for basket/multi"),
+        })
+    };
+
+    let sweep = optimize(
+        subgrids,
+        windowed_n,
+        &opts.metrics,
+        opts.best_by.as_deref(),
+        opts.risk_aversion,
+        opts.jobs,
+        evaluate_row,
+    )?;
+
+    write_grid_csv(
+        opts.output,
+        &sweep.union_columns,
+        &sweep.metric_columns,
+        sweep.windowed,
+        sweep.deflated_sharpe_context,
+        &sweep.rows,
+    )?;
+
+    if !opts.quiet {
+        style::print_header("optimize", "sweep a strategy over a parameter grid");
+        print_inputs_block(opts, windowed_bars, &sweep.subgrid_summaries, &sweep.rows);
         if sweep.best_by.is_some() {
             print_best_block(
                 &sweep.union_columns,
@@ -316,30 +550,33 @@ fn probe_params(subgrid: &Subgrid) -> HashMap<String, Value> {
     combine_params(&subgrid.fixed, &subgrid.axes, &combo)
 }
 
-/// Enumerate every subgrid's Cartesian product over `atoms`, evaluate every
-/// combination (whole-run or windowed), project each result onto the union of
-/// axis-column names, and rank the rows by `best_by`'s ranking value —
-/// direction-aware, with `risk_aversion` shifting a windowed row's mean
-/// *against* it by k·std so dispersion is always penalized. Pure: no
-/// filesystem, no printing. The CLI's [`run`] wraps it with argument
-/// marshaling + CSV write + console output.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn optimize(
-    base_value: &Value,
+/// Enumerate every subgrid's Cartesian product, drive `evaluate_row` on
+/// each parameter combination (whole-run or windowed at the callsite's
+/// discretion), project each result onto the union of axis-column names,
+/// and rank the rows by `best_by`'s ranking value — direction-aware, with
+/// `risk_aversion` shifting a windowed row's mean *against* it by k·std
+/// so dispersion is always penalized. Pure: no filesystem, no printing.
+/// The CLI's [`run`] wraps it with argument marshaling + CSV write +
+/// console output.
+///
+/// `evaluate_row` owns everything strategy-specific — the base YAML
+/// value, the atom / snapshot stream(s), cost config, and the choice of
+/// whole-run vs windowed reduction. That closure is the seam Single /
+/// Basket / Multi share — the sweep loop itself is strategy-type-agnostic.
+/// `windowed` mirrors the closure's mode (used only to shape column
+/// headers and DSR aggregation).
+pub(crate) fn optimize<F>(
     subgrids: Vec<Subgrid>,
-    atoms: &[(String, Atom)],
-    cash: Real,
-    bars_per_year: Real,
-    risk_free_rate: Real,
-    cost_config: &CostConfig,
-    frequency: Option<Frequency>,
-    windowed: Option<NonZeroUsize>,
-    seconds_per_bar: Option<Real>,
+    windowed: Option<usize>,
     metric_names: &[String],
     best_by: Option<&str>,
     risk_aversion: Real,
     jobs: Option<usize>,
-) -> Result<Sweep> {
+    evaluate_row: F,
+) -> Result<Sweep>
+where
+    F: Fn(&HashMap<String, Value>) -> Result<Evaluation> + Sync,
+{
     // A negative k would *reward* dispersion — the opposite of what the flag
     // is for. (Presence alongside `-w`/`--best-by` is enforced by clap.)
     if risk_aversion < 0.0 {
@@ -372,17 +609,13 @@ pub(crate) fn optimize(
         &subgrids[first_si].axes,
         &subgrids[first_si].combos[first_ci],
     );
-    let first_spec = build_spec(base_value, &first_params)?;
-    let first_metrics = backtest::evaluate(
-        &first_spec,
-        atoms,
-        cash,
-        bars_per_year,
-        risk_free_rate,
-        cost_config,
-        frequency,
-        seconds_per_bar,
-    );
+    let first_eval = evaluate_row(&first_params)?;
+    let first_metrics = sample_metrics(&first_eval).cloned().ok_or_else(|| {
+        anyhow!(
+            "optimize: first grid point produced no metrics document — the strategy \
+             may not run over the provided data (empty snapshot stream?)"
+        )
+    })?;
 
     // Resolve column paths once — errors here catch typos before the sweep.
     // An empty `-m/--metrics` defaults to the whole catalogue (one column per
@@ -418,11 +651,9 @@ pub(crate) fn optimize(
         })
         .transpose()?;
 
-    // Run the grid. The first plan entry's result is already computed
-    // (windowed mode re-evaluates it windowed — one extra backtest, off the
-    // hot path); the rest run on the pool in parallel.
+    // Run the grid. The first plan entry is already computed; the rest run
+    // on the pool in parallel.
     let pool = crate::pool::build_pool(jobs)?;
-    let windowed_n = windowed.map(NonZeroUsize::get);
 
     // Chunk the outer par_iter so a huge grid doesn't drown rayon in one task
     // per combo (task overhead dominates when combos are cheap), while a small
@@ -433,34 +664,9 @@ pub(crate) fn optimize(
     let remaining_len = plan.len().saturating_sub(1);
     let min_len = remaining_len.div_ceil(workers * 16).max(1);
 
-    let evaluate = |spec: &SingleStrategySpec| -> Evaluation {
-        match windowed_n {
-            Some(w) => Evaluation::Windowed(backtest::evaluate_windowed(
-                spec,
-                atoms,
-                cash,
-                bars_per_year,
-                risk_free_rate,
-                cost_config,
-                frequency,
-                w,
-                seconds_per_bar,
-            )),
-            None => Evaluation::Whole(Box::new(backtest::evaluate(
-                spec,
-                atoms,
-                cash,
-                bars_per_year,
-                risk_free_rate,
-                cost_config,
-                frequency,
-                seconds_per_bar,
-            ))),
-        }
-    };
-
     let subgrids_ref = &subgrids;
     let union_ref = &union_columns;
+    let evaluate_ref = &evaluate_row;
     let remaining: Vec<Row> = pool.install(|| {
         plan[1..]
             .par_iter()
@@ -469,10 +675,10 @@ pub(crate) fn optimize(
                 let subgrid = &subgrids_ref[si];
                 let combo = &subgrid.combos[ci];
                 let params = combine_params(&subgrid.fixed, &subgrid.axes, combo);
-                let spec = build_spec(base_value, &params)?;
+                let eval = evaluate_ref(&params)?;
                 Ok::<_, anyhow::Error>(Row {
                     values: project_row(subgrid, combo, union_ref),
-                    eval: evaluate(&spec),
+                    eval,
                 })
             })
             .collect::<Result<Vec<_>>>()
@@ -485,10 +691,7 @@ pub(crate) fn optimize(
             &subgrids[first_si].combos[first_ci],
             &union_columns,
         ),
-        eval: match windowed_n {
-            Some(_) => evaluate(&first_spec),
-            None => Evaluation::Whole(Box::new(first_metrics)),
-        },
+        eval: first_eval,
     });
     rows.extend(remaining);
 
@@ -507,9 +710,38 @@ pub(crate) fn optimize(
         metric_columns,
         best_by,
         rows,
-        windowed: windowed_n.is_some(),
+        windowed: windowed.is_some(),
         deflated_sharpe_context,
     })
+}
+
+/// Extract a [`metrics::Metrics`] document from an evaluation — the whole-run
+/// document, or the first window's when the row was reduced windowed. Used
+/// by [`optimize`] to resolve `--metrics` / `--best-by` names against the
+/// probe row before the sweep spins up. `None` when a windowed row is
+/// empty (an unlikely edge case guarded against upstream).
+fn sample_metrics(eval: &Evaluation) -> Option<&metrics::Metrics> {
+    match eval {
+        Evaluation::Whole(m) => Some(m.as_ref()),
+        Evaluation::Windowed(ws) => ws.first().map(|w| &w.metrics),
+    }
+}
+
+/// Substitute a params table into the base strategy value, then typed-parse
+/// as a [`BasketStrategySpec`]. Basket twin of [`build_spec`].
+fn build_basket_spec(base: &Value, params: &HashMap<String, Value>) -> Result<BasketStrategySpec> {
+    let value = params::substitute(base.clone(), params)?;
+    Ok(serde_json::from_value(value)?)
+}
+
+/// Substitute a params table into the base strategy value, then typed-parse
+/// as a [`MultiAssetStrategySpec`]. Multi-asset twin of [`build_spec`].
+fn build_multi_spec(
+    base: &Value,
+    params: &HashMap<String, Value>,
+) -> Result<MultiAssetStrategySpec> {
+    let value = params::substitute(base.clone(), params)?;
+    Ok(serde_json::from_value(value)?)
 }
 
 /// The union of axis-column names across every subgrid: every axis name, plus
