@@ -524,6 +524,7 @@ from fugazi import metrics
 
 fills = []
 wallet = ta.PaperWallet(10_000.0)
+wallet.update("AAPL", candles[0])          # prime with a price for pre-flight
 wallet.set_position("AAPL", 100.0)         # queued market buy
 for i, c in enumerate(candles):
     for order in wallet.update("AAPL", c):

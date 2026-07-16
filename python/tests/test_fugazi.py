@@ -759,9 +759,11 @@ def test_wallet_rejects_bad_side():
 def test_impossible_market_orders_never_fill():
     w = ta.PaperWallet(100.0)
     w.update("X", 50.0)
-    # A queued market buy beyond funds (3 * 50 = 150 > 100) simply never fills.
-    w.set("X", "buy", 3.0)
-    w.update("X", 50.0)
+    # A market buy beyond funds (3 * 50 = 150 > 100) is pre-flighted at
+    # submission against last close — the wallet raises synchronously
+    # instead of queuing an order that would never fill.
+    with pytest.raises(ValueError, match="insufficient funds"):
+        w.set("X", "buy", 3.0)
     assert not w.positions()
     # A short sale credits cash, so selling is always feasible.
     w.set("X", "sell", 3.0)
@@ -1476,6 +1478,7 @@ def test_reconstruct_trades_round_trip_through_wallet():
 
     w = ta.PaperWallet(1000.0)
     fills = []
+    w.update("BTC", 100.0)  # prime the wallet with a price for pre-flight
     w.set_position("BTC", 1.0)  # queue market buy
     for i, price in enumerate([100.0, 110.0]):
         for o in w.update("BTC", price):
@@ -1503,6 +1506,7 @@ def test_trade_and_drawdown_segment_are_frozen_readonly():
 
 def test_fill_has_bar_and_order_getters():
     w = ta.PaperWallet(1000.0)
+    w.update("BTC", 100.0)  # prime the wallet with a price for pre-flight
     w.set_position("BTC", 1.0)  # queued
     fills = w.update("BTC", 100.0)  # fills at the next update's open
     assert len(fills) == 1
