@@ -74,6 +74,21 @@ pub fn schema_from_atoms(atoms: &[(String, Atom)]) -> std::sync::Arc<Schema> {
         .unwrap_or_else(Schema::empty)
 }
 
+/// The snapshot-stream twin of [`schema_from_atoms`] — walks every atom
+/// across every snapshot's tagged entries and returns the first shared
+/// overlay [`Schema`] `Arc`. Falls back to [`Schema::empty()`] under the
+/// same conditions.
+pub fn schema_from_snapshots(
+    snapshots: &[fugazi::types::Snapshot<String>],
+) -> std::sync::Arc<Schema> {
+    snapshots
+        .iter()
+        .flat_map(|s| s.iter())
+        .find_map(|(_sym, _freq, a)| a.overlays.as_ref())
+        .map(|ov| ov.schema().clone())
+        .unwrap_or_else(Schema::empty)
+}
+
 /// Pure metrics-only evaluation: drive `spec` over `atoms` through a paper
 /// wallet with `cash` starting funds, the given `cost_config` resolved for
 /// (spec's symbol, `frequency`), and reduce the run to a [`metrics::Metrics`]

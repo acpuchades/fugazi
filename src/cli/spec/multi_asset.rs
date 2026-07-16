@@ -375,6 +375,28 @@ impl DynMultiAssetStrategy {
     pub fn book(&self) -> Book<String> {
         self.inner.book()
     }
+
+    /// Grid-wide readiness across the currently-discovered per-symbol
+    /// states and the rebalance gate — pass-through to
+    /// [`MultiAssetStrategy::stable_period`](fugazi::strategies::MultiAssetStrategy::stable_period).
+    ///
+    /// **Lazy readiness contract**: a multi-asset strategy's per-symbol
+    /// chains are built on first sight, so a freshly-built strategy
+    /// reports the rebalance-signal period only. Feed one representative
+    /// snapshot via [`update`](Strategy::update) before probing so the
+    /// per-symbol chains exist. See the underlying method for details.
+    pub fn stable_period(&self) -> usize {
+        self.inner.stable_period()
+    }
+
+    /// Warm-up-only readiness (ignoring IIR settling) — pass-through to
+    /// [`MultiAssetStrategy::warm_up_period`](fugazi::strategies::MultiAssetStrategy::warm_up_period).
+    /// Used by `optimize --walkforward --keep-unstable`.
+    ///
+    /// Same lazy-readiness caveat as [`stable_period`](Self::stable_period).
+    pub fn warm_up_period(&self) -> usize {
+        self.inner.warm_up_period()
+    }
 }
 
 #[cfg(test)]

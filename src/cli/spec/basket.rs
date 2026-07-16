@@ -315,6 +315,28 @@ impl DynBasketStrategy {
     pub fn book(&self) -> Book<String> {
         self.inner.book()
     }
+
+    /// Grid-wide readiness across the currently-built per-symbol score /
+    /// sizing chains and the rebalance gate — pass-through to
+    /// [`BasketStrategy::stable_period`](fugazi::strategies::BasketStrategy::stable_period).
+    ///
+    /// **Lazy readiness contract**: a basket's per-symbol chains are
+    /// built on first sight, so a freshly-built strategy reports the
+    /// rebalance-signal period only. Feed one representative snapshot
+    /// via [`update`](Strategy::update) before probing so the per-symbol
+    /// chains exist. See the underlying method for details.
+    pub fn stable_period(&self) -> usize {
+        self.inner.stable_period()
+    }
+
+    /// Warm-up-only readiness (ignoring IIR settling) — pass-through to
+    /// [`BasketStrategy::warm_up_period`](fugazi::strategies::BasketStrategy::warm_up_period).
+    /// Used by `optimize --walkforward --keep-unstable`.
+    ///
+    /// Same lazy-readiness caveat as [`stable_period`](Self::stable_period).
+    pub fn warm_up_period(&self) -> usize {
+        self.inner.warm_up_period()
+    }
 }
 
 #[cfg(test)]

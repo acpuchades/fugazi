@@ -538,6 +538,48 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> BasketStrategy<Sym> {
     pub fn book(&self) -> Book<Sym> {
         self.book.clone()
     }
+
+    /// The largest `stable_period()` across every currently-built score /
+    /// sizing chain and the rebalance gate — the number of bars the driver
+    /// waits before treating the strategy as ready.
+    ///
+    /// **Lazy readiness contract.** A basket's per-symbol score / sizing
+    /// chains are built on first sight (see
+    /// [`update`](Strategy::update)) — a freshly-constructed strategy that
+    /// hasn't seen any snapshot yet has no chains, and this method reports
+    /// `0` (only the rebalance signal contributes). To probe grid-wide
+    /// readiness (for `optimize --walkforward`'s prefix skip, or any
+    /// caller that wants the "worst case across every symbol" number),
+    /// feed the strategy one representative snapshot with
+    /// [`update`](Strategy::update) first so the chains exist, then read
+    /// `stable_period()`.
+    pub fn stable_period(&self) -> usize {
+        let mut n = self.rebalance.stable_period();
+        for score in self.scores.values() {
+            n = n.max(score.stable_period());
+        }
+        for size in self.sizes.values() {
+            n = n.max(size.stable_period());
+        }
+        n
+    }
+
+    /// The warm-up-only twin of [`stable_period`](Self::stable_period) —
+    /// ignores IIR unstable settling. Used by
+    /// `optimize --walkforward --keep-unstable`.
+    ///
+    /// Same lazy-readiness caveat: feed one snapshot before probing so
+    /// per-symbol chains exist.
+    pub fn warm_up_period(&self) -> usize {
+        let mut n = self.rebalance.warm_up_period();
+        for score in self.scores.values() {
+            n = n.max(score.warm_up_period());
+        }
+        for size in self.sizes.values() {
+            n = n.max(size.warm_up_period());
+        }
+        n
+    }
 }
 
 impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Default for BasketStrategy<Sym> {

@@ -116,6 +116,29 @@ impl<Sym> PerAssetState<Sym> {
         n.max(self.sizing.stable_period())
     }
 
+    /// Largest `warm_up_period()` across this symbol's four signals, four
+    /// (optional) protective levels, and sizing — the warm-up-only twin of
+    /// [`stable_period`](Self::stable_period), ignoring IIR unstable
+    /// settling.
+    fn warm_up_period(&self) -> usize {
+        let mut n = self.long.warm_up_period();
+        n = n.max(self.close_long.warm_up_period());
+        n = n.max(self.short.warm_up_period());
+        n = n.max(self.close_short.warm_up_period());
+        for level in [
+            &self.long_stop,
+            &self.long_target,
+            &self.short_stop,
+            &self.short_target,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            n = n.max(level.warm_up_period());
+        }
+        n.max(self.sizing.warm_up_period())
+    }
+
     /// Whether this leg has seen enough bars for its own decision to be
     /// safe to act on. Consulted at trade time; also folded into the
     /// [`MultiAssetStrategy::is_ready`] gate under
@@ -508,6 +531,42 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> MultiAssetStrategy<Sym> {
     /// sizing against the portfolio's aggregate equity curve.
     pub fn book(&self) -> Book<Sym> {
         self.book.clone()
+    }
+
+    /// The largest `stable_period()` across every currently-discovered
+    /// symbol's per-asset chains and the rebalance gate — the number of
+    /// bars the driver waits before treating the strategy as ready.
+    ///
+    /// **Lazy readiness contract.** A multi-asset strategy's per-symbol
+    /// chains are built on first sight (see
+    /// [`update`](Strategy::update)) — a freshly-constructed strategy
+    /// that hasn't seen any snapshot yet has no chains, and this method
+    /// reports `0` (only the rebalance signal contributes). To probe
+    /// grid-wide readiness (for `optimize --walkforward`'s prefix skip,
+    /// or any caller that wants the "worst case across every symbol"
+    /// number), feed the strategy one representative snapshot with
+    /// [`update`](Strategy::update) first so the per-symbol chains exist,
+    /// then read `stable_period()`.
+    pub fn stable_period(&self) -> usize {
+        let mut n = self.rebalance.stable_period();
+        for state in self.states.values() {
+            n = n.max(state.stable_period());
+        }
+        n
+    }
+
+    /// The warm-up-only twin of [`stable_period`](Self::stable_period) —
+    /// ignores IIR unstable settling. Used by
+    /// `optimize --walkforward --keep-unstable`.
+    ///
+    /// Same lazy-readiness caveat: feed one snapshot before probing so
+    /// per-symbol chains exist.
+    pub fn warm_up_period(&self) -> usize {
+        let mut n = self.rebalance.warm_up_period();
+        for state in self.states.values() {
+            n = n.max(state.warm_up_period());
+        }
+        n
     }
 }
 

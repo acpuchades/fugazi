@@ -273,14 +273,34 @@ fn run_single(
     // schema (per-fold winners + composite OOS), so we don't try to squeeze it
     // through the [`Sweep`] shape.
     if let Some(walkforward_spec) = opts.walkforward {
+        let schema = backtest::schema_from_atoms(&atoms);
+        let keep_unstable = opts.keep_unstable;
+        let cash = opts.cash;
+        let cost_config = opts.cost_config;
+        let atoms_ref = &atoms;
+        let schema_ref = &schema;
+        let probe = |params: &HashMap<String, Value>| -> Result<usize> {
+            let s = build_spec(base_value, params)?;
+            let built = s.build(cash, schema_ref);
+            Ok(if keep_unstable {
+                built.warm_up_period()
+            } else {
+                built.stable_period()
+            })
+        };
+        let run_backtest =
+            |params: &HashMap<String, Value>| -> Result<fugazi::RunReport<String>> {
+                let s = build_spec(base_value, params)?;
+                let costs = cost_config.resolve(&s.symbol, effective_freq);
+                Ok(backtest::measured_report(&s, atoms_ref, cash, costs))
+            };
         return walkforward_run(
-            base_value,
             subgrids,
-            &atoms,
-            opts.cash,
+            atoms.len(),
+            probe,
+            run_backtest,
             bars_per_year,
             opts.risk_free_rate,
-            opts.cost_config,
             effective_freq,
             walkforward_spec,
             opts.keep_unstable,
@@ -292,6 +312,7 @@ fn run_single(
             opts.jobs,
             opts.quiet,
             &skipped_overlay_columns,
+            opts.cash,
         );
     }
 
@@ -381,13 +402,6 @@ fn run_multi_symbol(
         _ => unreachable!("run_multi_symbol only dispatched for basket/multi"),
     };
 
-    if opts.walkforward.is_some() {
-        bail!(
-            "`fugazi optimize --walkforward` doesn't yet support `{kind_label}:` strategies; \
-             grid-only for now"
-        );
-    }
-
     let universe = frame.symbols();
     if universe.is_empty() {
         bail!(
@@ -439,6 +453,22 @@ fn run_multi_symbol(
         .asset_class
         .zip(effective_freq)
         .map(|(class, freq)| class.trading_seconds_per_bar(freq));
+
+    // Walk-forward branch: same shape as `run_single`'s — closures inject
+    // the basket/multi build + backtest, the driver stays strategy-agnostic.
+    if let Some(walkforward_spec) = opts.walkforward {
+        return run_multi_symbol_walkforward(
+            opts,
+            subgrids,
+            base_value,
+            &snapshots,
+            &universe,
+            walkforward_spec,
+            bars_per_year,
+            effective_freq,
+            seconds_per_bar,
+        );
+    }
 
     let cost_config = opts.cost_config;
     let snapshots_ref = &snapshots;
@@ -541,6 +571,147 @@ fn run_multi_symbol(
         }
     }
     Ok(())
+}
+
+/// The basket / multi-asset walk-forward driver — the `--walkforward`
+/// peer of [`run_multi_symbol`]'s grid sweep, sharing the strategy-agnostic
+/// [`walkforward_run`] via closures.
+///
+/// **Lazy readiness probing.** Basket / multi strategies build per-symbol
+/// chains on first sight of a snapshot — a freshly-constructed strategy
+/// has no chains yet and `stable_period()` reports only the rebalance
+/// signal's period. To reveal the grid-wide max the walk-forward layout
+/// needs, we feed each throwaway probe strategy one *synthetic* snapshot
+/// containing every universe symbol with a dummy [`Atom`], triggering the
+/// factories on every symbol before reading `stable_period()` /
+/// `warm_up_period()`. The dummy atom carries no overlays and a zero
+/// candle — safe because the probe never trades, only exercises chain
+/// construction.
+#[allow(clippy::too_many_arguments)]
+fn run_multi_symbol_walkforward(
+    opts: &OptimizeOptions,
+    subgrids: Vec<Subgrid>,
+    base_value: &Value,
+    snapshots: &[fugazi::types::Snapshot<String>],
+    universe: &[String],
+    walkforward_spec: WalkForwardSpec,
+    bars_per_year: Real,
+    effective_freq: Option<Frequency>,
+    seconds_per_bar: Option<Real>,
+) -> Result<()> {
+    let schema = backtest::schema_from_snapshots(snapshots);
+    let keep_unstable = opts.keep_unstable;
+    let cash = opts.cash;
+    let cost_config = opts.cost_config;
+    let kind = opts.strategy_kind;
+
+    // Synthetic single-snapshot probe: one dummy atom per universe symbol
+    // so the strategy's per-symbol factories fire on the first update() call.
+    // The probe strategy never trades — just exposes stable/warm-up state.
+    let probe_snapshot: fugazi::types::Snapshot<String> = {
+        let mut s = fugazi::types::Snapshot::<String>::new();
+        let dummy_atom = Atom::new(Candle::new(0.0, 0.0, 0.0, 0.0, 0.0));
+        for sym in universe {
+            s.push(Some(sym.clone()), None, dummy_atom.clone());
+        }
+        s
+    };
+
+    // `TradingCosts` isn't `Clone` (boxed trait objects inside), so the
+    // per-symbol cost bundle is rebuilt inside the run closure for every
+    // grid row rather than cloned. `cost_config.resolve` is cheap — a
+    // HashMap lookup + trivial model construction — so the cost is
+    // negligible next to the backtest itself.
+    let schema_ref = &schema;
+    let probe_snap_ref = &probe_snapshot;
+    let snapshots_ref = snapshots;
+
+    let probe = |params: &HashMap<String, Value>| -> Result<usize> {
+        match kind {
+            StrategyKind::Basket => {
+                let spec = build_basket_spec(base_value, params)?;
+                let mut built = spec.build(cash, schema_ref);
+                // Probe: one synthetic snapshot triggers the lazy per-symbol
+                // chain construction so `stable_period()` reflects the
+                // fully-populated worst case.
+                built.update(probe_snap_ref.clone());
+                Ok(if keep_unstable {
+                    built.warm_up_period()
+                } else {
+                    built.stable_period()
+                })
+            }
+            StrategyKind::Multi => {
+                let spec = build_multi_spec(base_value, params)?;
+                let mut built = spec.build(cash, schema_ref);
+                built.update(probe_snap_ref.clone());
+                Ok(if keep_unstable {
+                    built.warm_up_period()
+                } else {
+                    built.stable_period()
+                })
+            }
+            _ => unreachable!("run_multi_symbol_walkforward only dispatched for basket/multi"),
+        }
+    };
+
+    let build_per_symbol_costs = || -> Vec<(String, TradingCosts)> {
+        universe
+            .iter()
+            .map(|s| (s.clone(), cost_config.resolve(s, effective_freq)))
+            .collect()
+    };
+    let run_backtest =
+        |params: &HashMap<String, Value>| -> Result<fugazi::RunReport<String>> {
+            let report = match kind {
+                StrategyKind::Basket => {
+                    let spec = build_basket_spec(base_value, params)?;
+                    backtest::measured_report_from_strategy(
+                        || spec.build(cash, schema_ref),
+                        snapshots_ref,
+                        cash,
+                        build_per_symbol_costs(),
+                    )
+                }
+                StrategyKind::Multi => {
+                    let spec = build_multi_spec(base_value, params)?;
+                    backtest::measured_report_from_strategy(
+                        || spec.build(cash, schema_ref),
+                        snapshots_ref,
+                        cash,
+                        build_per_symbol_costs(),
+                    )
+                }
+                _ => unreachable!("run_multi_symbol_walkforward only dispatched for basket/multi"),
+            };
+            Ok(report)
+        };
+
+    // Basket / multi drivers currently don't surface `skipped_overlay_columns`
+    // — the frame's per-symbol atoms are the source of truth, but the CLI's
+    // multi-symbol path never propagated the skip list to this driver. Pass an
+    // empty slice so the "warn:" banner doesn't misfire.
+    let no_skipped: [String; 0] = [];
+    walkforward_run(
+        subgrids,
+        snapshots.len(),
+        probe,
+        run_backtest,
+        bars_per_year,
+        opts.risk_free_rate,
+        effective_freq,
+        walkforward_spec,
+        opts.keep_unstable,
+        opts.asset_class,
+        seconds_per_bar,
+        &opts.metrics,
+        opts.best_by.as_deref(),
+        opts.output,
+        opts.jobs,
+        opts.quiet,
+        &no_skipped,
+        opts.cash,
+    )
 }
 
 /// Params for the probe spec: subgrid's fixed scalars + the first value of each
@@ -1651,15 +1822,34 @@ struct FoldLayout {
 /// the per-fold table, the composite OOS `bar,equity` curve, and the composite
 /// OOS `Metrics` document. Console output mirrors [`run`]'s shape: header,
 /// inputs block, per-fold summary.
+///
+/// Strategy-agnostic: two closures inject the strategy-specific work.
+///
+/// * `probe_readiness(params) -> usize` — build the strategy for one grid
+///   row's params and return its `stable_period()` (or `warm_up_period()`
+///   under `--keep-unstable`). The grid-wide max is the fold-layout's
+///   prefix skip. For basket / multi strategies the caller is responsible
+///   for feeding one representative snapshot to trigger lazy per-symbol
+///   chain discovery before reading the period — see the
+///   [`DynBasketStrategy::stable_period`](crate::spec::DynBasketStrategy::stable_period)
+///   / [`DynMultiAssetStrategy::stable_period`](crate::spec::DynMultiAssetStrategy::stable_period)
+///   rustdoc for the contract.
+/// * `run_backtest(params) -> RunReport` — build the strategy and drive it
+///   through a fresh paper wallet over the whole run, returning the report.
+///   The main pass calls this once per grid row; the resulting report is
+///   sliced per fold rather than re-running.
+///
+/// `n_bars` is the length of the bar sequence the reports are indexed
+/// against — the atom count for single-asset, the aligned-snapshot count
+/// for basket / multi.
 #[allow(clippy::too_many_arguments)]
-fn walkforward_run(
-    base_value: &Value,
+fn walkforward_run<P, R>(
     subgrids: Vec<Subgrid>,
-    atoms: &[(String, Atom)],
-    cash: Real,
+    n_bars: usize,
+    probe_readiness: P,
+    run_backtest: R,
     bars_per_year: Real,
     risk_free_rate: Real,
-    cost_config: &CostConfig,
     effective_freq: Option<Frequency>,
     spec: WalkForwardSpec,
     keep_unstable: bool,
@@ -1671,7 +1861,12 @@ fn walkforward_run(
     jobs: Option<usize>,
     quiet: bool,
     skipped_overlay_columns: &[String],
-) -> Result<()> {
+    cash: Real,
+) -> Result<()>
+where
+    P: Fn(&HashMap<String, Value>) -> Result<usize> + Sync,
+    R: Fn(&HashMap<String, Value>) -> Result<fugazi::RunReport<String>> + Sync,
+{
     let (is_bars, oos_bars, embargo_bars) = spec
         .resolve(effective_freq, asset_class)
         .map_err(anyhow::Error::msg)
@@ -1690,12 +1885,10 @@ fn walkforward_run(
     // max readiness. Doing this before the fold layout — so every row's IS/OOS
     // ranges are identical, and per-fold metrics are directly comparable
     // regardless of which combo winds up warming up faster.
-    let schema = backtest::schema_from_atoms(atoms);
     let pool = crate::pool::build_pool(jobs)?;
     let plan_ref = &plan;
     let subgrids_ref = &subgrids;
-    let base_ref = base_value;
-    let schema_ref = &schema;
+    let probe_ref = &probe_readiness;
     let prefix_skip: usize = pool.install(|| {
         plan_ref
             .par_iter()
@@ -1703,22 +1896,17 @@ fn walkforward_run(
                 let subgrid = &subgrids_ref[si];
                 let combo = &subgrid.combos[ci];
                 let params = combine_params(&subgrid.fixed, &subgrid.axes, combo);
-                let s = build_spec(base_ref, &params)?;
-                let built = s.build(cash, schema_ref);
-                Ok::<usize, anyhow::Error>(if keep_unstable {
-                    built.warm_up_period()
-                } else {
-                    built.stable_period()
-                })
+                probe_ref(&params)
             })
             .try_reduce(|| 0usize, |a, b| Ok(a.max(b)))
     })?;
 
-    let folds = walkforward_layout(atoms.len(), prefix_skip, is_bars, oos_bars, embargo_bars)?;
+    let folds = walkforward_layout(n_bars, prefix_skip, is_bars, oos_bars, embargo_bars)?;
 
     // Main pass: one full backtest per row. Store the reports so per-fold
     // slicing is a bounded-cost operation (equity is `Vec<f64>` of length
-    // `atoms.len()`; fills are typically short).
+    // `n_bars`; fills are typically short).
+    let run_ref = &run_backtest;
     let reports: Vec<fugazi::RunReport<String>> = pool.install(|| {
         plan_ref
             .par_iter()
@@ -1726,9 +1914,7 @@ fn walkforward_run(
                 let subgrid = &subgrids_ref[si];
                 let combo = &subgrid.combos[ci];
                 let params = combine_params(&subgrid.fixed, &subgrid.axes, combo);
-                let s = build_spec(base_ref, &params)?;
-                let costs = cost_config.resolve(&s.symbol, effective_freq);
-                Ok::<_, anyhow::Error>(backtest::measured_report(&s, atoms, cash, costs))
+                run_ref(&params)
             })
             .collect::<Result<Vec<_>>>()
     })?;
@@ -1904,7 +2090,7 @@ fn walkforward_run(
             prefix_skip,
             keep_unstable,
             folds.len(),
-            atoms.len(),
+            n_bars,
             output,
         );
         print_walkforward_summary(&fold_rows, &metric_columns, best_by.as_ref());
