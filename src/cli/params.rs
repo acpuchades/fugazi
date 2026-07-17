@@ -173,6 +173,54 @@ pub fn substitute(value: Value, params: &HashMap<String, Value>) -> Result<Value
     }
 }
 
+/// Rewrite every `param` placeholder in `value` **only when its key
+/// appears in `params`** — every other placeholder (including one with a
+/// `default`) is left in place for the outer [`substitute`] pass to
+/// resolve later.
+///
+/// Used by [`crate::imports`] when an `!import` node carries inline
+/// `params: { … }`: the imported subtree is *partially* resolved with
+/// those inline values, and any placeholder whose key isn't listed
+/// inline falls through unchanged. That gives callers scope-limited
+/// overrides — one shared strategy fragment can be imported N times with
+/// N distinct parameterizations — without eagerly applying `default`s or
+/// erroring on the outer document's own `--params` keys.
+pub fn substitute_partial(value: Value, params: &HashMap<String, Value>) -> Result<Value> {
+    match value {
+        Value::Object(map) if map.len() == 1 && map.contains_key("param") => {
+            // Extract the key if the placeholder is well-formed; if the
+            // inline table has a value for it, substitute that value.
+            // Otherwise leave the whole `{param: …}` node in place —
+            // the outer pass gets to decide (via `--params`, a
+            // `default`, or an error).
+            let key: Option<String> = match &map["param"] {
+                Value::String(name) => Some(name.clone()),
+                Value::Object(o) => o.get("key").and_then(Value::as_str).map(str::to_string),
+                _ => None,
+            };
+            if let Some(key) = key
+                && let Some(value) = params.get(&key)
+            {
+                return Ok(value.clone());
+            }
+            Ok(Value::Object(map))
+        }
+        Value::Object(map) => {
+            let mut out = Map::new();
+            for (k, v) in map {
+                out.insert(k, substitute_partial(v, params)?);
+            }
+            Ok(Value::Object(out))
+        }
+        Value::Array(seq) => seq
+            .into_iter()
+            .map(|v| substitute_partial(v, params))
+            .collect::<Result<Vec<_>>>()
+            .map(Value::Array),
+        other => Ok(other),
+    }
+}
+
 /// Resolve a single placeholder body (its `{ key, default }` object or bare key
 /// name) against the supplied params.
 fn resolve(body: &Value, params: &HashMap<String, Value>) -> Result<Value> {
