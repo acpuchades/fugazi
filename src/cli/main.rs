@@ -528,6 +528,24 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
                 println!("{label}: ok ({sides})");
             }
         }
+        StrategyKind::Portfolio => {
+            // Portfolio parses eagerly at the top level (children,
+            // weights); each child's own spec typed-parses too. Per-symbol
+            // child templates (basket / multi under a child) still resolve
+            // `!arg SYM` at run time — same convention as those specs
+            // standalone.
+            let spec = spec::PortfolioSpec::from_text_with_params_in(&text, &param_table, &base, &label)
+                .with_context(|| parse_error_hint(&args.strategy))?;
+            if !args.quiet {
+                style::print_header("check", "parse and validate a portfolio strategy spec");
+                println!(
+                    "{}: ok ({} child strateg{})",
+                    label,
+                    spec.children.len(),
+                    if spec.children.len() == 1 { "y" } else { "ies" },
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -646,6 +664,11 @@ fn run(args: RunArgs) -> Result<()> {
             let spec = spec::MultiAssetStrategySpec::from_text_with_params_in(&text, &param_table, &base, &strat_label)
                 .with_context(|| parse_error_hint(&args.strategy))?;
             run::run_multi(&spec, &frame, &opts)?;
+        }
+        StrategyKind::Portfolio => {
+            let spec = spec::PortfolioSpec::from_text_with_params_in(&text, &param_table, &base, &strat_label)
+                .with_context(|| parse_error_hint(&args.strategy))?;
+            run::run_portfolio(&spec, &frame, &opts)?;
         }
     }
     Ok(())

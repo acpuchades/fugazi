@@ -57,7 +57,8 @@ use crate::metrics;
 use crate::params;
 use crate::run::join_universe_by_time;
 use crate::spec::{
-    BasketStrategySpec, MultiAssetStrategySpec, PairsStrategySpec, SingleStrategySpec,
+    BasketStrategySpec, MultiAssetStrategySpec, PairsStrategySpec, PortfolioSpec,
+    SingleStrategySpec,
 };
 use crate::style;
 
@@ -201,9 +202,10 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
 
     match opts.strategy_kind {
         StrategyKind::Single => run_single(&opts, subgrids, frame, &base_value),
-        StrategyKind::Pairs | StrategyKind::Basket | StrategyKind::Multi => {
-            run_multi_symbol(&opts, subgrids, frame, &base_value)
-        }
+        StrategyKind::Pairs
+        | StrategyKind::Basket
+        | StrategyKind::Multi
+        | StrategyKind::Portfolio => run_multi_symbol(&opts, subgrids, frame, &base_value),
     }
 }
 
@@ -406,13 +408,14 @@ fn run_multi_symbol(
         StrategyKind::Pairs => "pairs",
         StrategyKind::Basket => "basket",
         StrategyKind::Multi => "multi",
-        _ => unreachable!("run_multi_symbol only dispatched for pairs/basket/multi"),
+        StrategyKind::Portfolio => "portfolio",
+        _ => unreachable!("run_multi_symbol only dispatched for pairs/basket/multi/portfolio"),
     };
 
     // Extract the tradeable universe. Pairs probe the first subgrid to
     // resolve `left`/`right` and validate every other subgrid picks the same
     // pair (loading multiple pair slices from one frame isn't supported).
-    // Basket / multi take the frame's whole symbol set.
+    // Basket / multi / portfolio take the frame's whole symbol set.
     let universe: Vec<String> = match opts.strategy_kind {
         StrategyKind::Pairs => {
             let probe = build_pairs_spec(base_value, &probe_params(&subgrids[0]))?;
@@ -593,7 +596,35 @@ fn run_multi_symbol(
                     ))),
                 }
             }
-            _ => unreachable!("run_multi_symbol only dispatched for pairs/basket/multi"),
+            StrategyKind::Portfolio => {
+                let spec = build_portfolio_spec(base_value, params)?;
+                match windowed_n {
+                    Some(w) => Evaluation::Windowed(backtest::evaluate_windowed_portfolio(
+                        &spec,
+                        snapshots_ref,
+                        opts.cash,
+                        bars_per_year,
+                        opts.risk_free_rate,
+                        cost_config,
+                        effective_freq,
+                        w,
+                        seconds_per_bar,
+                    )),
+                    None => Evaluation::Whole(Box::new(backtest::evaluate_portfolio(
+                        &spec,
+                        snapshots_ref,
+                        opts.cash,
+                        bars_per_year,
+                        opts.risk_free_rate,
+                        cost_config,
+                        effective_freq,
+                        seconds_per_bar,
+                    ))),
+                }
+            }
+            _ => unreachable!(
+                "run_multi_symbol only dispatched for pairs/basket/multi/portfolio"
+            ),
         })
     };
 
@@ -723,8 +754,23 @@ fn run_multi_symbol_walkforward(
                     built.stable_period()
                 })
             }
+            StrategyKind::Portfolio => {
+                // Portfolio captures per-child readiness at build (see
+                // `PortfolioSpec::build`); we don't need a probe-snapshot
+                // feed here — the aggregate is already the max child
+                // stable/warm-up, computed on typed children before they
+                // were boxed. Costs don't affect readiness, so we build
+                // without.
+                let spec = build_portfolio_spec(base_value, params)?;
+                let built = spec.build(cash, schema_ref, None);
+                Ok(if keep_unstable {
+                    built.warm_up_period()
+                } else {
+                    built.stable_period()
+                })
+            }
             _ => unreachable!(
-                "run_multi_symbol_walkforward only dispatched for pairs/basket/multi"
+                "run_multi_symbol_walkforward only dispatched for pairs/basket/multi/portfolio"
             ),
         }
     };
@@ -765,8 +811,21 @@ fn run_multi_symbol_walkforward(
                         build_per_symbol_costs(),
                     )
                 }
+                StrategyKind::Portfolio => {
+                    // Portfolio uses its own composite wallet driver.
+                    // Costs are resolved unscoped (see the note on
+                    // `run_iteration_portfolio` — Portfolio applies one
+                    // bundle uniformly).
+                    let spec = build_portfolio_spec(base_value, params)?;
+                    let costs = cost_config.resolve("", effective_freq);
+                    let costs_opt = (!costs.is_none()).then_some(costs);
+                    backtest::measured_report_portfolio(
+                        || spec.build(cash, schema_ref, costs_opt),
+                        snapshots_ref,
+                    )
+                }
                 _ => unreachable!(
-                    "run_multi_symbol_walkforward only dispatched for pairs/basket/multi"
+                    "run_multi_symbol_walkforward only dispatched for pairs/basket/multi/portfolio"
                 ),
             };
             Ok(report)
@@ -1003,6 +1062,16 @@ fn build_multi_spec(
     base: &Value,
     params: &HashMap<String, Value>,
 ) -> Result<MultiAssetStrategySpec> {
+    let value = params::substitute(base.clone(), params)?;
+    Ok(serde_json::from_value(value)?)
+}
+
+/// Substitute a params table into the base strategy value, then typed-parse
+/// as a [`PortfolioSpec`]. Portfolio twin of [`build_spec`].
+fn build_portfolio_spec(
+    base: &Value,
+    params: &HashMap<String, Value>,
+) -> Result<PortfolioSpec> {
     let value = params::substitute(base.clone(), params)?;
     Ok(serde_json::from_value(value)?)
 }

@@ -32,7 +32,8 @@ use crate::calendar::Frequency;
 use crate::costs::CostConfig;
 use crate::metrics;
 use crate::spec::{
-    BasketStrategySpec, MultiAssetStrategySpec, PairsStrategySpec, SingleStrategySpec, StrategyRef,
+    BasketStrategySpec, MultiAssetStrategySpec, PairsStrategySpec, PortfolioSpec,
+    SingleStrategySpec, StrategyRef,
 };
 
 /// Drive `spec` over `atoms` through a fresh paper wallet with `cash`
@@ -362,6 +363,186 @@ pub fn evaluate_windowed_multi(
         risk_free_rate,
         seconds_per_bar,
     )
+}
+
+/// The portfolio twin of [`measured_report_from_strategy`]: drive an
+/// already-built [`DynPortfolio`](crate::spec::DynPortfolio) through its
+/// own composite wallet view (a
+/// [`PortfolioWallet`](fugazi::portfolio::PortfolioWallet), not a plain
+/// [`PaperWallet`]), returning the aggregate run report.
+///
+/// Portfolio can't share [`measured_report_from_strategy`]'s wallet setup
+/// because per-child fills route through the composite; costs are already
+/// baked into each sub-wallet at build time via
+/// [`PortfolioSpec::build`](crate::spec::PortfolioSpec::build)'s `costs:`
+/// argument, so this driver just wires the wallet view and runs.
+pub fn measured_report_portfolio(
+    build_portfolio: impl FnOnce() -> crate::spec::DynPortfolio,
+    snapshots: &[fugazi::types::Snapshot<String>],
+) -> fugazi::RunReport<String> {
+    let mut portfolio = build_portfolio();
+    let mut wallet = portfolio.wallet_view();
+    fugazi::backtest::run(&mut portfolio, &mut wallet, snapshots.iter().cloned())
+}
+
+/// The portfolio twin of [`evaluate`] — one grid-cell evaluation for a
+/// `portfolio:` document. Resolves an **unscoped** [`TradingCosts`] bundle
+/// (v1 constraint: [`Portfolio`](fugazi::portfolio::Portfolio) applies one
+/// bundle uniformly across children — per-symbol scoping via `--costs
+/// SYM:...` is silently ignored at the portfolio boundary), threads it
+/// into [`PortfolioSpec::build`](crate::spec::PortfolioSpec::build), and
+/// reduces the whole-run report to a single [`metrics::Metrics`] document.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_portfolio(
+    spec: &PortfolioSpec,
+    snapshots: &[fugazi::types::Snapshot<String>],
+    cash: Real,
+    bars_per_year: Real,
+    risk_free_rate: Real,
+    cost_config: &CostConfig,
+    frequency: Option<Frequency>,
+    seconds_per_bar: Option<Real>,
+) -> metrics::Metrics {
+    let costs = cost_config.resolve("", frequency);
+    let costs_opt = (!costs.is_none()).then_some(costs);
+    let schema = schema_from_snapshots(snapshots);
+    let measured = measured_report_portfolio(
+        || spec.build(cash, &schema, costs_opt),
+        snapshots,
+    );
+    metrics::from_report(&measured, bars_per_year, risk_free_rate, seconds_per_bar)
+}
+
+/// Windowed twin of [`evaluate_portfolio`].
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_windowed_portfolio(
+    spec: &PortfolioSpec,
+    snapshots: &[fugazi::types::Snapshot<String>],
+    cash: Real,
+    bars_per_year: Real,
+    risk_free_rate: Real,
+    cost_config: &CostConfig,
+    frequency: Option<Frequency>,
+    window: usize,
+    seconds_per_bar: Option<Real>,
+) -> Vec<metrics::WindowMetrics> {
+    let costs = cost_config.resolve("", frequency);
+    let costs_opt = (!costs.is_none()).then_some(costs);
+    let schema = schema_from_snapshots(snapshots);
+    let measured = measured_report_portfolio(
+        || spec.build(cash, &schema, costs_opt),
+        snapshots,
+    );
+    metrics::windowed_from_report(
+        &measured,
+        window,
+        bars_per_year,
+        risk_free_rate,
+        seconds_per_bar,
+    )
+}
+
+/// Run a full backtest iteration for a
+/// [`PortfolioSpec`]. Portfolio's composite wallet takes portfolio-wide
+/// costs at build time (via [`PortfolioSpec::build`]) rather than
+/// per-symbol overrides on the wallet, so this diverges from
+/// [`run_iteration_core`]'s shape: two builds (priced + gross) each with
+/// their own composite wallet, then the same measurement reduction.
+pub fn run_iteration_portfolio(
+    spec: &PortfolioSpec,
+    bars: &[String],
+    snapshots: &[fugazi::types::Snapshot<String>],
+    inputs: &IterationInputs,
+) -> IterationResult {
+    assert_eq!(
+        bars.len(),
+        snapshots.len(),
+        "portfolio run: `bars` and `snapshots` must be the same length"
+    );
+    let schema = schema_from_snapshots(snapshots);
+    let costs = inputs.cost_config.resolve("", inputs.effective_freq);
+    let costs_active = !costs.is_none();
+    let costs_opt = costs_active.then_some(costs);
+
+    let mut priced = spec.build(inputs.cash, &schema, costs_opt);
+    let mut priced_wallet = priced.wallet_view();
+    let report = fugazi::backtest::run(
+        &mut priced,
+        &mut priced_wallet,
+        snapshots.iter().cloned(),
+    );
+    // Gross twin: rebuild without costs so the diff attributable to costs
+    // is a clean subtraction. Matches the [`run_iteration_core`]
+    // convention.
+    let gross_report = if costs_active {
+        let mut gross = spec.build(inputs.cash, &schema, None);
+        let mut gross_wallet = gross.wallet_view();
+        Some(fugazi::backtest::run(
+            &mut gross,
+            &mut gross_wallet,
+            snapshots.iter().cloned(),
+        ))
+    } else {
+        None
+    };
+
+    let mut whole = metrics::from_report(
+        &report,
+        inputs.bars_per_year,
+        inputs.risk_free_rate,
+        inputs.seconds_per_bar,
+    );
+    if costs_active {
+        whole.costs = Some(metrics::costs_section(
+            &report,
+            gross_report.as_ref(),
+            inputs.bars_per_year,
+        ));
+    }
+    let gross_metrics = gross_report.as_ref().map(|g| {
+        metrics::from_report(
+            g,
+            inputs.bars_per_year,
+            inputs.risk_free_rate,
+            inputs.seconds_per_bar,
+        )
+    });
+    let (windowed, rolling) = match inputs.windowed {
+        Some(n) => {
+            let w = metrics::windowed_from_report(
+                &report,
+                n.get(),
+                inputs.bars_per_year,
+                inputs.risk_free_rate,
+                inputs.seconds_per_bar,
+            );
+            let r = metrics::rolling_from_report(
+                &report,
+                n.get(),
+                inputs.bars_per_year,
+                inputs.risk_free_rate,
+                inputs.seconds_per_bar,
+            );
+            (Some(w), Some(r))
+        }
+        None => (None, None),
+    };
+    let final_equity = report.equity_curve.last().copied().unwrap_or(inputs.cash);
+    let summary = SummaryRow {
+        final_equity,
+        fills: report.fills.len(),
+        bars: report.equity_curve.len(),
+    };
+    IterationResult {
+        bars: bars.to_vec(),
+        report,
+        metrics: whole,
+        gross_metrics,
+        windowed,
+        rolling,
+        summary,
+        costs_active,
+    }
 }
 
 /// Everything one iteration of a backtest produces — consumed by

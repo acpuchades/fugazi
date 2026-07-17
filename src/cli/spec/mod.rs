@@ -24,6 +24,7 @@ mod basket;
 mod expr;
 mod multi_asset;
 mod pairs;
+mod portfolio;
 mod preset;
 mod signal;
 mod strategy;
@@ -67,6 +68,8 @@ pub use multi_asset::MultiAssetStrategySpec;
 #[allow(unused_imports)]
 pub use pairs::PairsStrategySpec;
 #[allow(unused_imports)]
+pub use portfolio::{PortfolioSpec, PortfolioChildSpec, PortfolioChildStrategy, WeightPolicySpec};
+#[allow(unused_imports)]
 pub use preset::{StrategyPreset, StrategyRef};
 #[allow(unused_imports)]
 pub use signal::SignalSpec;
@@ -79,6 +82,8 @@ pub use template::SpecTemplate;
 pub(crate) use multi_asset::DynMultiAssetStrategy;
 #[allow(unused_imports)]
 pub(crate) use pairs::DynPairsStrategy;
+#[allow(unused_imports)]
+pub(crate) use portfolio::DynPortfolio;
 #[allow(unused_imports)]
 pub(crate) use strategy::{DynSingleStrategy, SideSpec};
 

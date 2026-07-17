@@ -132,7 +132,11 @@ impl FromStr for Source {
 /// `multi:` (e.g. `multi:@portfolio.yml`) declares an N-symbol per-asset
 /// independent strategy — every symbol runs the same signals in isolation —
 /// that resolves to a
-/// [`MultiAssetStrategy`](fugazi::strategies::MultiAssetStrategy).
+/// [`MultiAssetStrategy`](fugazi::strategies::MultiAssetStrategy). Prefixing
+/// with `portfolio:` (e.g. `portfolio:@portfolio.yml`) declares a composite
+/// N-child portfolio — a heterogeneous mix of single / pairs / basket /
+/// multi strategies sharing one cash pool via per-child sub-wallets — that
+/// resolves to a [`Portfolio`](fugazi::portfolio::Portfolio).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StrategyKind {
     /// A single-asset strategy (default; matches `@file.yml` and `single:@file.yml`).
@@ -143,6 +147,9 @@ pub enum StrategyKind {
     Basket,
     /// An N-symbol independent multi-asset strategy (`multi:@file.yml`).
     Multi,
+    /// A composite portfolio over N heterogeneous child strategies
+    /// (`portfolio:@file.yml`).
+    Portfolio,
 }
 
 /// A strategy positional: a [`Source`] plus a decided [`StrategyKind`] from
@@ -200,6 +207,12 @@ impl FromStr for StrategySource {
         if let Some(rest) = s.strip_prefix("multi:") {
             return Ok(StrategySource {
                 kind: StrategyKind::Multi,
+                source: rest.parse().expect("infallible"),
+            });
+        }
+        if let Some(rest) = s.strip_prefix("portfolio:") {
+            return Ok(StrategySource {
+                kind: StrategyKind::Portfolio,
                 source: rest.parse().expect("infallible"),
             });
         }
