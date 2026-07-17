@@ -670,6 +670,73 @@ mod tests {
     }
 
     #[test]
+    fn vol_target_with_per_symbol_source_survives_multi_symbol_snapshot() {
+        // `!vol_target { source: !pick { symbol: !arg SYM }, ... }` — each
+        // leg's sizing chain projects its own asset, so the sole-atom panic
+        // that the sourceless shortcut would fire on a multi-entry snapshot
+        // never fires here. Just proves the build path doesn't blow up.
+        let yaml = r#"
+            selection: !top_bottom { longs: 1, shorts: 1 }
+            score: !close { source: !pick { symbol: !arg SYM } }
+            sizing:
+              !vol_target
+                source: !pick { symbol: !arg SYM }
+                target: 0.20
+                window: 3
+                bars_per_year: 252
+        "#;
+        let spec =
+            BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let mut strat = spec.build(10_000.0, &schema());
+        let mut wallet: PaperWallet<String> = PaperWallet::new(10_000.0);
+        // Drive a few bars over two symbols with varying prices so the
+        // sizing chain settles and the top/bottom selection alternates.
+        for i in 0..8 {
+            let a = 100.0 + (i as Real);
+            let b = 50.0 - (i as Real);
+            for fill in wallet.update("A".to_string(), candle(a)) {
+                strat.on_fill(&fill);
+            }
+            for fill in wallet.update("B".to_string(), candle(b)) {
+                strat.on_fill(&fill);
+            }
+            strat.update(snap_of(&[("A", a), ("B", b)]));
+            strat.trade(&mut wallet);
+        }
+    }
+
+    #[test]
+    fn atr_risk_with_per_symbol_source_survives_multi_symbol_snapshot() {
+        // Twin of the vol_target case for the ATR-risk sizing recipe.
+        let yaml = r#"
+            selection: !top_bottom { longs: 1, shorts: 1 }
+            score: !close { source: !pick { symbol: !arg SYM } }
+            sizing:
+              !atr_risk
+                source: !pick { symbol: !arg SYM }
+                risk_frac: 0.01
+                period: 3
+                atr_multiple: 2.0
+        "#;
+        let spec =
+            BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let mut strat = spec.build(10_000.0, &schema());
+        let mut wallet: PaperWallet<String> = PaperWallet::new(10_000.0);
+        for i in 0..8 {
+            let a = 100.0 + (i as Real);
+            let b = 50.0 - (i as Real);
+            for fill in wallet.update("A".to_string(), candle(a)) {
+                strat.on_fill(&fill);
+            }
+            for fill in wallet.update("B".to_string(), candle(b)) {
+                strat.on_fill(&fill);
+            }
+            strat.update(snap_of(&[("A", a), ("B", b)]));
+            strat.trade(&mut wallet);
+        }
+    }
+
+    #[test]
     fn params_are_substituted_at_load_time() {
         // `!param FAST` gets resolved from `--params`, `!arg SYM` remains
         // deferred for the per-symbol build.

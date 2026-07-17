@@ -258,13 +258,19 @@ type Selection<Sym> = Box<dyn Fn(&HashMap<Sym, Real>) -> HashMap<Sym, Side>>;
 /// magnitude — same semantics as
 /// [`SingleAssetStrategy::position_sizing`](crate::strategies::SingleAssetStrategy::position_sizing).
 /// No auto-normalization: `sized_by(|_| equal_weight(N)).top_bottom(N/2, N/2)`
-/// yields a 100% gross exposure. Use
+/// yields 100% gross exposure. Use
 /// [`sizing::equal_weight`](crate::indicators::sizing::equal_weight) for the
-/// common case; a per-symbol vol-target ([`vol_target`](crate::indicators::sizing::vol_target))
-/// / ATR-risk ([`atr_risk`](crate::indicators::sizing::atr_risk)) chain
-/// works the same way. A symbol whose sizing reads `None` this bar is
-/// skipped for entry (safe default; opt out with a fallback in the sizing
-/// closure).
+/// common case. For a per-symbol *vol-target* or *ATR-risk* chain, reach
+/// for the source-generic
+/// [`vol_target_of`](crate::indicators::sizing::vol_target_of) /
+/// [`atr_risk_of`](crate::indicators::sizing::atr_risk_of) recipes and
+/// hand them a per-leg `Pick::matching(Selector::by_symbol(sym.clone()))`
+/// — the no-source
+/// [`vol_target`](crate::indicators::sizing::vol_target) /
+/// [`atr_risk`](crate::indicators::sizing::atr_risk) shortcuts default to
+/// the empty-selector `Pick::new()`, which panics on a multi-symbol
+/// snapshot. A symbol whose sizing reads `None` this bar is skipped for
+/// entry (safe default; opt out with a fallback in the sizing closure).
 ///
 /// ## Readiness
 ///

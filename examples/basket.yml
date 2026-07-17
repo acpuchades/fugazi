@@ -38,6 +38,10 @@ score: !roc
 
 # The per-leg position size, as a fraction of equity. 2 longs + 2 shorts = 4
 # legs, so `!equal_weight 4` is 25% per leg and 100% gross exposure. Any
-# real-valued expression fits here instead — e.g. `!vol_target` for inverse-vol
-# weighting, or `!drawdown_throttle` to de-lever the whole basket in a drawdown.
+# real-valued expression fits here instead — e.g. `!vol_target { source: !pick
+# { symbol: !arg SYM }, target: 0.20, window: 20, bars_per_year: 252 }` for
+# per-leg inverse-vol weighting (the `source:` is mandatory in a basket — the
+# sourceless shortcut uses the sole-atom `Pick::new()` and panics on a
+# multi-symbol snapshot), or `!drawdown_throttle { max_drawdown: 0.20 }` to
+# de-lever the whole basket in a drawdown.
 sizing: !equal_weight 4

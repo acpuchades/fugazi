@@ -523,16 +523,27 @@ pub enum ExprSpec {
     EqualWeight(usize),
     /// Inverse realized-vol sizing —
     /// `target / (stddev(log_returns(close), window) * sqrt(bars_per_year))`.
-    /// See [`fugazi::indicators::sizing::vol_target`].
+    /// `source` defaults to the single-asset empty-selector `Pick`; in a
+    /// [`BasketStrategySpec`](super::basket::BasketStrategySpec) set it to
+    /// `!pick { symbol: !arg SYM }` so each leg reads its own asset. See
+    /// [`fugazi::indicators::sizing::vol_target`] /
+    /// [`fugazi::indicators::sizing::vol_target_of`].
     VolTarget {
+        #[serde(default)]
+        source: Option<Box<ExprSpec>>,
         target: Real,
         window: usize,
         bars_per_year: Real,
     },
     /// Fixed per-trade risk sized by ATR —
-    /// `risk_frac * close / (atr_multiple * ATR(period))`. See
-    /// [`fugazi::indicators::sizing::atr_risk`].
+    /// `risk_frac * close / (atr_multiple * ATR(period))`. `source` defaults
+    /// to the single-asset empty-selector `Pick`; in a basket set it to
+    /// `!pick { symbol: !arg SYM }`. See
+    /// [`fugazi::indicators::sizing::atr_risk`] /
+    /// [`fugazi::indicators::sizing::atr_risk_of`].
     AtrRisk {
+        #[serde(default)]
+        source: Option<Box<ExprSpec>>,
         risk_frac: Real,
         period: usize,
         atr_multiple: Real,
@@ -1159,16 +1170,27 @@ enum ExprSpecRaw {
     EqualWeight(usize),
     /// Inverse realized-vol sizing —
     /// `target / (stddev(log_returns(close), window) * sqrt(bars_per_year))`.
-    /// See [`fugazi::indicators::sizing::vol_target`].
+    /// `source` defaults to the single-asset empty-selector `Pick`; in a
+    /// [`BasketStrategySpec`](super::basket::BasketStrategySpec) set it to
+    /// `!pick { symbol: !arg SYM }` so each leg reads its own asset. See
+    /// [`fugazi::indicators::sizing::vol_target`] /
+    /// [`fugazi::indicators::sizing::vol_target_of`].
     VolTarget {
+        #[serde(default)]
+        source: Option<Box<ExprSpec>>,
         target: Real,
         window: usize,
         bars_per_year: Real,
     },
     /// Fixed per-trade risk sized by ATR —
-    /// `risk_frac * close / (atr_multiple * ATR(period))`. See
-    /// [`fugazi::indicators::sizing::atr_risk`].
+    /// `risk_frac * close / (atr_multiple * ATR(period))`. `source` defaults
+    /// to the single-asset empty-selector `Pick`; in a basket set it to
+    /// `!pick { symbol: !arg SYM }`. See
+    /// [`fugazi::indicators::sizing::atr_risk`] /
+    /// [`fugazi::indicators::sizing::atr_risk_of`].
     AtrRisk {
+        #[serde(default)]
+        source: Option<Box<ExprSpec>>,
         risk_frac: Real,
         period: usize,
         atr_multiple: Real,
@@ -1488,8 +1510,8 @@ impl From<ExprSpecRaw> for ExprSpec {
             ExprSpecRaw::TrueRange { source } => ExprSpec::TrueRange { source },
             ExprSpecRaw::Sar { source, step, max } => ExprSpec::Sar { source, step, max },
             ExprSpecRaw::EqualWeight(n) => ExprSpec::EqualWeight(n),
-            ExprSpecRaw::VolTarget { target, window, bars_per_year } => ExprSpec::VolTarget { target, window, bars_per_year },
-            ExprSpecRaw::AtrRisk { risk_frac, period, atr_multiple } => ExprSpec::AtrRisk { risk_frac, period, atr_multiple },
+            ExprSpecRaw::VolTarget { source, target, window, bars_per_year } => ExprSpec::VolTarget { source, target, window, bars_per_year },
+            ExprSpecRaw::AtrRisk { source, risk_frac, period, atr_multiple } => ExprSpec::AtrRisk { source, risk_frac, period, atr_multiple },
             ExprSpecRaw::DrawdownThrottle { max_drawdown } => ExprSpec::DrawdownThrottle { max_drawdown },
             ExprSpecRaw::EquityVolTarget { target, window, bars_per_year } => ExprSpec::EquityVolTarget { target, window, bars_per_year },
             ExprSpecRaw::FractionalKelly { kelly_fraction, window } => ExprSpec::FractionalKelly { kelly_fraction, window },
@@ -1926,23 +1948,33 @@ impl ExprSpec {
                 fugazi::indicators::sizing::equal_weight::<String>(*n_legs),
             ),
             VolTarget {
+                source,
                 target,
                 window,
                 bars_per_year,
-            } => dyn_indicator::wrap(fugazi::indicators::sizing::vol_target::<String>(
-                *target,
-                *window,
-                *bars_per_year,
-            )),
+            } => {
+                let s = atom_src(source.as_ref());
+                dyn_indicator::wrap(fugazi::indicators::sizing::vol_target_of::<String, _>(
+                    s,
+                    *target,
+                    *window,
+                    *bars_per_year,
+                ))
+            }
             AtrRisk {
+                source,
                 risk_frac,
                 period,
                 atr_multiple,
-            } => dyn_indicator::wrap(fugazi::indicators::sizing::atr_risk::<String>(
-                *risk_frac,
-                *period,
-                *atr_multiple,
-            )),
+            } => {
+                let s = atom_src(source.as_ref());
+                dyn_indicator::wrap(fugazi::indicators::sizing::atr_risk_of::<String, _>(
+                    s,
+                    *risk_frac,
+                    *period,
+                    *atr_multiple,
+                ))
+            }
             DrawdownThrottle { max_drawdown } => {
                 dyn_indicator::wrap(fugazi::indicators::sizing::drawdown_throttle::<String>(
                     book,

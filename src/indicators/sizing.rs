@@ -20,7 +20,7 @@ use crate::indicators::stats::WindowStats;
 use crate::indicators::{
     Atr, Book, Close, CurrentBar, IndicatorExt, Log, Pick, StdDev, Value,
 };
-use crate::types::{Real, Snapshot};
+use crate::types::{Atom, Real, Snapshot};
 
 /// **Equal-weight sizing.**
 ///
@@ -72,6 +72,14 @@ pub fn equal_weight<Sym: Clone + PartialEq + 'static>(
 /// `diff(1)`). The sizing indicator's `stable_period()` folds into the
 /// strategy's readiness gate, so no trade fires while it is still warming.
 ///
+/// # Basket usage
+/// The default source `Pick::<Sym>::new()` is the empty-selector *sole-atom*
+/// unpack — it panics on any snapshot with two or more entries, so it can't
+/// be used as-is inside a [`BasketStrategy`](crate::strategies::BasketStrategy)
+/// where each leg's sizing chain sees the whole multi-symbol snapshot. Use
+/// [`vol_target_of`] with a per-leg
+/// `Pick::matching(Selector::by_symbol(sym.clone()))` instead.
+///
 /// # Panics
 /// Panics if `target_annualized_vol <= 0`, `window == 0`, or
 /// `bars_per_year <= 0`.
@@ -80,6 +88,33 @@ pub fn vol_target<Sym: Clone + PartialEq + 'static>(
     window: usize,
     bars_per_year: Real,
 ) -> impl Indicator<Input = Snapshot<Sym>, Output = Real> + Clone {
+    vol_target_of(Pick::<Sym>::new(), target_annualized_vol, window, bars_per_year)
+}
+
+/// [`vol_target`] with a caller-supplied atom source — the basket-safe
+/// twin of [`vol_target`].
+///
+/// `source` is any indicator whose output is an [`Atom`] and whose input is
+/// the [`Snapshot<Sym>`] the strategy is fed. In a basket, pass
+/// `Pick::matching(Selector::by_symbol(sym.clone()))` (the per-leg
+/// projection) so each symbol's sizing chain reads its own atom instead of
+/// tripping the empty-selector sole-atom panic.
+///
+/// See [`vol_target`] for the semantics.
+///
+/// # Panics
+/// Panics if `target_annualized_vol <= 0`, `window == 0`, or
+/// `bars_per_year <= 0`.
+pub fn vol_target_of<Sym, S>(
+    source: S,
+    target_annualized_vol: Real,
+    window: usize,
+    bars_per_year: Real,
+) -> impl Indicator<Input = Snapshot<Sym>, Output = Real> + Clone
+where
+    Sym: Clone + PartialEq + 'static,
+    S: Indicator<Input = Snapshot<Sym>, Output = Atom> + Clone,
+{
     assert!(
         target_annualized_vol > 0.0,
         "target_annualized_vol must be > 0"
@@ -87,7 +122,7 @@ pub fn vol_target<Sym: Clone + PartialEq + 'static>(
     assert!(window > 0, "window must be > 0");
     assert!(bars_per_year > 0.0, "bars_per_year must be > 0");
 
-    let close = Close::of(Pick::<Sym>::new());
+    let close = Close::of(source);
     let log_return = Log::natural(close).diff(1);
     let realized_vol = StdDev::new(log_return, window);
     let annualized = realized_vol.mul(Value::<Snapshot<Sym>>::new(bars_per_year.sqrt()));
@@ -113,6 +148,12 @@ pub fn vol_target<Sym: Clone + PartialEq + 'static>(
 ///
 /// Warm-up is the ATR's `period + 1` samples.
 ///
+/// # Basket usage
+/// Same story as [`vol_target`] — the default source is
+/// `Pick::<Sym>::new()`, which panics on multi-entry snapshots. Use
+/// [`atr_risk_of`] with a per-leg `Pick::matching(...)` inside a
+/// [`BasketStrategy`](crate::strategies::BasketStrategy).
+///
 /// # Panics
 /// Panics if `risk_frac <= 0`, `period == 0`, or `atr_multiple <= 0`.
 pub fn atr_risk<Sym: Clone + PartialEq + 'static>(
@@ -120,12 +161,36 @@ pub fn atr_risk<Sym: Clone + PartialEq + 'static>(
     period: usize,
     atr_multiple: Real,
 ) -> impl Indicator<Input = Snapshot<Sym>, Output = Real> + Clone {
+    atr_risk_of(Pick::<Sym>::new(), risk_frac, period, atr_multiple)
+}
+
+/// [`atr_risk`] with a caller-supplied atom source — the basket-safe twin
+/// of [`atr_risk`].
+///
+/// `source` must be [`Clone`] because the recipe reads it twice (once for
+/// `Close`, once for `CurrentBar` feeding `Atr`). In a basket, pass
+/// `Pick::matching(Selector::by_symbol(sym.clone()))`.
+///
+/// See [`atr_risk`] for the semantics.
+///
+/// # Panics
+/// Panics if `risk_frac <= 0`, `period == 0`, or `atr_multiple <= 0`.
+pub fn atr_risk_of<Sym, S>(
+    source: S,
+    risk_frac: Real,
+    period: usize,
+    atr_multiple: Real,
+) -> impl Indicator<Input = Snapshot<Sym>, Output = Real> + Clone
+where
+    Sym: Clone + PartialEq + 'static,
+    S: Indicator<Input = Snapshot<Sym>, Output = Atom> + Clone,
+{
     assert!(risk_frac > 0.0, "risk_frac must be > 0");
     assert!(period > 0, "period must be > 0");
     assert!(atr_multiple > 0.0, "atr_multiple must be > 0");
 
-    let close = Close::of(Pick::<Sym>::new());
-    let atr = Atr::new(CurrentBar::of(Pick::<Sym>::new()), period);
+    let close = Close::of(source.clone());
+    let atr = Atr::new(CurrentBar::of(source), period);
     close
         .mul(Value::<Snapshot<Sym>>::new(risk_frac / atr_multiple))
         .div(atr)
@@ -396,6 +461,88 @@ mod tests {
         assert!(
             (got - expected).abs() < 1e-6,
             "vol_target: got {got}, expected {expected}"
+        );
+    }
+
+    #[test]
+    fn vol_target_of_reads_named_leg_from_multi_symbol_snapshot() {
+        use crate::indicators::Pick;
+        use crate::types::Selector;
+
+        // Two symbols in the snapshot; `vol_target_of(Pick::matching("A"), ...)`
+        // must key off A's close without tripping the sole-atom panic that the
+        // default `vol_target(...) / Pick::new()` path would fire on a
+        // multi-entry snapshot.
+        let target = 0.20;
+        let bpy = 252.0;
+        let window = 4;
+        let mut ind = vol_target_of::<String, _>(
+            Pick::matching(Selector::by_symbol("A".to_string())),
+            target,
+            window,
+            bpy,
+        );
+        // A oscillates 100/101 (log-return magnitude ln(1.01)); B is noise
+        // that must be ignored.
+        let mut a = 100.0;
+        for i in 0..(window + 2) {
+            a = if a > 100.5 { 100.0 } else { 101.0 };
+            let b = 50.0 + (i as Real);
+            let mut snap = Snapshot::<String>::new();
+            snap.push(
+                Some("A".to_string()),
+                None,
+                Atom::new(Candle::new(a, a, a, a, 0.0)),
+            );
+            snap.push(
+                Some("B".to_string()),
+                None,
+                Atom::new(Candle::new(b, b, b, b, 0.0)),
+            );
+            ind.update(snap);
+        }
+        // Expected multiplier from A's alternating returns alone.
+        let expected = target / (0.01_f64.ln_1p().abs() * bpy.sqrt());
+        let got = ind.value().unwrap();
+        assert!(
+            (got - expected).abs() < 1e-6,
+            "vol_target_of: got {got}, expected {expected}"
+        );
+    }
+
+    #[test]
+    fn atr_risk_of_reads_named_leg_from_multi_symbol_snapshot() {
+        use crate::indicators::Pick;
+        use crate::types::Selector;
+
+        // Constant range on A (h-l=2, close=100) → ATR stays at 2 → multiplier
+        // = 0.02 * 100 / (2 * 2) = 0.5. B is nonsense that must be ignored.
+        let risk = 0.02;
+        let period = 5;
+        let atr_mult = 2.0;
+        let mut ind = atr_risk_of::<String, _>(
+            Pick::matching(Selector::by_symbol("A".to_string())),
+            risk,
+            period,
+            atr_mult,
+        );
+        let bar_a = Candle::new(100.0, 101.0, 99.0, 100.0, 0.0);
+        for i in 0..(period + 1) {
+            let noise = 50.0 + (i as Real);
+            let mut snap = Snapshot::<String>::new();
+            snap.push(Some("A".to_string()), None, Atom::new(bar_a));
+            snap.push(
+                Some("B".to_string()),
+                None,
+                Atom::new(Candle::new(noise, noise, noise, noise, 0.0)),
+            );
+            ind.update(snap);
+        }
+        let expected = risk * 100.0 / (atr_mult * 2.0);
+        let got = ind.value().unwrap();
+        assert!(
+            (got - expected).abs() < 1e-12,
+            "atr_risk_of: got {got}, expected {expected}"
         );
     }
 
