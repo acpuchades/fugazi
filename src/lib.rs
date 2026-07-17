@@ -64,6 +64,7 @@ pub mod indicator;
 pub mod indicators;
 pub mod market;
 pub mod metrics;
+pub mod portfolio;
 #[cfg(feature = "runtime")]
 pub mod runtime;
 pub mod signal;
@@ -82,6 +83,7 @@ pub use indicator::Indicator;
 pub use indicators::BoolIndicatorExt;
 pub use market::{Atom, Candle, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder};
 pub use metrics::{DrawdownSegment, Trade};
+pub use portfolio::{Portfolio, PortfolioBuilder, PortfolioWallet};
 pub use signal::Signal;
 pub use snapshot::{Selector, Snapshot};
 pub use strategy::Strategy;

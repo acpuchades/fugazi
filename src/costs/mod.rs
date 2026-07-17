@@ -42,8 +42,25 @@ use crate::types::{Candle, Real};
 /// post-slippage) and `units` magnitude. The returned amount is deducted from
 /// the wallet's cash **on top of** the fill's cash flow and recorded on
 /// [`Order::commission`](crate::Order::commission).
+///
+/// [`clone_box`](Self::clone_box) makes `Box<dyn CommissionModel>` cloneable
+/// (via the [`Clone`] impl below), which in turn makes [`TradingCosts`]
+/// cloneable — needed so a caller can install one cost bundle onto
+/// several wallets (e.g. a [`Portfolio`](crate::portfolio::Portfolio) of
+/// N sub-wallets). Every concrete impl in this module implements it as
+/// `Box::new(self.clone())`; a downstream impl over an untypeable
+/// closure can `unimplemented!()` if that particular model doesn't need
+/// to survive cloning.
 pub trait CommissionModel: Send + Sync {
     fn commission(&self, notional: Real, units: Real) -> Real;
+    /// Return a boxed deep clone of `self`. See the trait doc.
+    fn clone_box(&self) -> Box<dyn CommissionModel>;
+}
+
+impl Clone for Box<dyn CommissionModel> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
 }
 
 /// A per-fill half-spread (buys pay it, sells receive it), in reference currency
@@ -51,8 +68,19 @@ pub trait CommissionModel: Send + Sync {
 ///
 /// Called with the theoretical fill price and the bar being filled on (some
 /// models may want the bar's range to size the spread proportionally).
+///
+/// [`clone_box`](Self::clone_box) mirrors [`CommissionModel::clone_box`] —
+/// see that trait's doc.
 pub trait SpreadModel: Send + Sync {
     fn half_spread(&self, price: Real, candle: &Candle) -> Real;
+    /// Return a boxed deep clone of `self`.
+    fn clone_box(&self) -> Box<dyn SpreadModel>;
+}
+
+impl Clone for Box<dyn SpreadModel> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
 }
 
 /// A per-fill price adjustment, adverse to the trading side.
@@ -62,6 +90,9 @@ pub trait SpreadModel: Send + Sync {
 /// (for size / volume relative models), and the [`OrderKind`] (a stop or
 /// take-profit may be multiplied over a market fill). Returns the **final** fill
 /// price the wallet stamps on the order.
+///
+/// [`clone_box`](Self::clone_box) mirrors [`CommissionModel::clone_box`] —
+/// see that trait's doc.
 pub trait SlippageModel: Send + Sync {
     fn adjust(
         &self,
@@ -71,6 +102,14 @@ pub trait SlippageModel: Send + Sync {
         candle: &Candle,
         kind: OrderKind,
     ) -> Real;
+    /// Return a boxed deep clone of `self`.
+    fn clone_box(&self) -> Box<dyn SlippageModel>;
+}
+
+impl Clone for Box<dyn SlippageModel> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -78,6 +117,11 @@ pub trait SlippageModel: Send + Sync {
 // ---------------------------------------------------------------------------
 
 /// The three cost models a [`PaperWallet`](crate::PaperWallet) applies to every
+/// fill. Bundles cheaply into a caller-owned [`Clone`] so one bundle can seed
+/// multiple wallets (a portfolio of N sub-wallets, per-symbol overrides via
+/// [`PaperWallet::set_costs_for`](crate::PaperWallet::set_costs_for)). See
+/// the trait docs for the [`clone_box`](CommissionModel::clone_box) contract.
+#[derive(Clone)]
 /// fill, bundled together so the wallet holds one field and a caller passes one
 /// value to [`PaperWallet::with_costs`](crate::PaperWallet::with_costs).
 pub struct TradingCosts {
@@ -142,6 +186,9 @@ impl CommissionModel for NoCommission {
     fn commission(&self, _notional: Real, _units: Real) -> Real {
         0.0
     }
+    fn clone_box(&self) -> Box<dyn CommissionModel> {
+        Box::new(*self)
+    }
 }
 
 /// The zero-spread model: half-spread is `0.0` on every fill.
@@ -151,6 +198,9 @@ pub struct NoSpread;
 impl SpreadModel for NoSpread {
     fn half_spread(&self, _price: Real, _candle: &Candle) -> Real {
         0.0
+    }
+    fn clone_box(&self) -> Box<dyn SpreadModel> {
+        Box::new(*self)
     }
 }
 
@@ -168,6 +218,9 @@ impl SlippageModel for NoSlippage {
         _kind: OrderKind,
     ) -> Real {
         price
+    }
+    fn clone_box(&self) -> Box<dyn SlippageModel> {
+        Box::new(*self)
     }
 }
 
@@ -191,6 +244,9 @@ impl CommissionModel for FixedCommission {
     fn commission(&self, _notional: Real, _units: Real) -> Real {
         self.amount.max(0.0)
     }
+    fn clone_box(&self) -> Box<dyn CommissionModel> {
+        Box::new(*self)
+    }
 }
 
 /// A percentage-of-notional commission: `rate × notional` (e.g. `rate = 0.001`
@@ -209,6 +265,9 @@ impl PercentageCommission {
 impl CommissionModel for PercentageCommission {
     fn commission(&self, notional: Real, _units: Real) -> Real {
         (self.rate * notional.abs()).max(0.0)
+    }
+    fn clone_box(&self) -> Box<dyn CommissionModel> {
+        Box::new(*self)
     }
 }
 
@@ -229,10 +288,14 @@ impl CommissionModel for PerUnitCommission {
     fn commission(&self, _notional: Real, units: Real) -> Real {
         (self.rate * units.abs()).max(0.0)
     }
+    fn clone_box(&self) -> Box<dyn CommissionModel> {
+        Box::new(*self)
+    }
 }
 
 /// Sum of several commission components. Useful when a venue charges multiple
 /// concurrent legs (e.g. an exchange fee plus a regulatory fee).
+#[derive(Clone)]
 pub struct CompositeCommission {
     parts: Vec<Box<dyn CommissionModel>>,
 }
@@ -247,6 +310,9 @@ impl CommissionModel for CompositeCommission {
     fn commission(&self, notional: Real, units: Real) -> Real {
         self.parts.iter().map(|p| p.commission(notional, units)).sum()
     }
+    fn clone_box(&self) -> Box<dyn CommissionModel> {
+        Box::new(self.clone())
+    }
 }
 
 impl std::fmt::Debug for CompositeCommission {
@@ -259,6 +325,7 @@ impl std::fmt::Debug for CompositeCommission {
 
 /// `max(a, b)` of two commission models — the shape a per-order-minimum fee
 /// takes (e.g. IBKR's US-equities schedule: `max($1.00, $0.0035 × shares)`).
+#[derive(Clone)]
 pub struct MaxCommission {
     pub lhs: Box<dyn CommissionModel>,
     pub rhs: Box<dyn CommissionModel>,
@@ -275,6 +342,9 @@ impl CommissionModel for MaxCommission {
         let a = self.lhs.commission(notional, units);
         let b = self.rhs.commission(notional, units);
         a.max(b)
+    }
+    fn clone_box(&self) -> Box<dyn CommissionModel> {
+        Box::new(self.clone())
     }
 }
 
@@ -305,6 +375,9 @@ impl SpreadModel for FixedBpsSpread {
     fn half_spread(&self, price: Real, _candle: &Candle) -> Real {
         (self.bps.abs() * price.abs() * 1e-4) / 2.0
     }
+    fn clone_box(&self) -> Box<dyn SpreadModel> {
+        Box::new(*self)
+    }
 }
 
 /// A fixed absolute half-spread in reference currency units (`amount` per unit
@@ -323,6 +396,9 @@ impl FixedAbsoluteSpread {
 impl SpreadModel for FixedAbsoluteSpread {
     fn half_spread(&self, _price: Real, _candle: &Candle) -> Real {
         self.amount.abs() / 2.0
+    }
+    fn clone_box(&self) -> Box<dyn SpreadModel> {
+        Box::new(*self)
     }
 }
 
@@ -373,6 +449,9 @@ impl SlippageModel for FixedBpsSlippage {
         let mult = kind_multiplier(kind, self.stop_multiplier);
         let move_frac = self.bps.abs() * 1e-4 * mult;
         adverse(side, price, price.abs() * move_frac)
+    }
+    fn clone_box(&self) -> Box<dyn SlippageModel> {
+        Box::new(*self)
     }
 }
 
@@ -437,6 +516,9 @@ impl SlippageModel for VolumeParticipationSlippage {
             return price;
         }
         adverse(side, price, price.abs() * impact_frac)
+    }
+    fn clone_box(&self) -> Box<dyn SlippageModel> {
+        Box::new(*self)
     }
 }
 
