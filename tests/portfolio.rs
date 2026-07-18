@@ -213,6 +213,59 @@ fn on_fill_only_reaches_the_owning_child() {
 }
 
 #[test]
+fn install_costs_for_scopes_by_symbol_across_sub_wallets() {
+    // Portfolio with two buy-and-hold children on A and B. Install a
+    // non-zero commission bundle for A only via `install_costs_for("A", ...)`
+    // — every A fill (in whichever sub-wallet) should book with commission;
+    // every B fill should stay commission-free. This is the seam the CLI
+    // uses to thread `--costs SYM:...` scoped overrides.
+    let a_costs = TradingCosts::new(
+        Box::new(PercentageCommission::new(0.001)),
+        Box::new(FixedBpsSpread::new(10.0)),
+        Box::new(NoSlippage),
+    );
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(2_000.0)
+        .add(
+            "trader_a",
+            SingleAssetStrategy::<&'static str>::buy_and_hold("A"),
+        )
+        .add(
+            "trader_b",
+            SingleAssetStrategy::<&'static str>::buy_and_hold("B"),
+        )
+        .weights(EqualWeight)
+        .build();
+    // Install A-only costs *after* build — mirrors the CLI's post-build
+    // per-symbol install.
+    portfolio.install_costs_for(&"A", a_costs);
+
+    let mut wallet = portfolio.wallet_view();
+    let report = backtest::run(&mut portfolio, &mut wallet, a_rising_b_flat_snapshots());
+
+    // Every fill on A should carry commission (> 0); every fill on B
+    // should stay commission-free.
+    let a_fills: Vec<_> = report.fills.iter().filter(|f| f.order.symbol == "A").collect();
+    let b_fills: Vec<_> = report.fills.iter().filter(|f| f.order.symbol == "B").collect();
+    assert!(!a_fills.is_empty(), "expected at least one A fill");
+    assert!(!b_fills.is_empty(), "expected at least one B fill");
+    for f in &a_fills {
+        assert!(
+            f.order.commission > 0.0,
+            "A fill should carry commission via install_costs_for; got {}",
+            f.order.commission,
+        );
+    }
+    for f in &b_fills {
+        assert_eq!(
+            f.order.commission, 0.0,
+            "B fill should be commission-free; got {}",
+            f.order.commission,
+        );
+    }
+}
+
+#[test]
 fn passing_costs_bundle_clones_per_sub() {
     // Regression / smoke test for TradingCosts: Clone — the same bundle
     // installs on N sub-wallets and the fills carry non-zero commission.

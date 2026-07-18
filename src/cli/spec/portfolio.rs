@@ -482,6 +482,17 @@ impl DynPortfolio {
     pub fn warm_up_period(&self) -> usize {
         self.warm_up_period
     }
+
+    /// Install a per-symbol [`TradingCosts`] bundle on every sub-wallet
+    /// inside the composite. Used by CLI runners to thread scoped
+    /// `--costs SYM:...` overrides through the portfolio boundary: after
+    /// the composite is built with a uniform default (via
+    /// [`PortfolioSpec::build`]'s `costs` arg), each symbol's resolved
+    /// bundle is installed here on every sub, so whichever child ends up
+    /// filling that symbol books at the right rate.
+    pub fn install_costs_for(&mut self, symbol: &str, costs: TradingCosts) {
+        self.inner.install_costs_for(&symbol.to_string(), costs);
+    }
 }
 
 #[cfg(test)]

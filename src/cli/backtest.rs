@@ -25,6 +25,7 @@
 //! `!all [<entry>, !stable { signal: <entry> }]`.
 
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use fugazi::prelude::*;
 
@@ -385,13 +386,61 @@ pub fn measured_report_portfolio(
     fugazi::backtest::run(&mut portfolio, &mut wallet, snapshots.iter().cloned())
 }
 
+/// Discover the tradeable universe from a snapshot stream — the distinct
+/// symbols carried across every bar, sorted so the resulting per-symbol
+/// cost install order is deterministic.
+pub fn universe_from_snapshots(snapshots: &[fugazi::types::Snapshot<String>]) -> Vec<String> {
+    let mut set = std::collections::HashSet::new();
+    for snap in snapshots {
+        for (sym, _, _) in snap.iter() {
+            if let Some(s) = sym {
+                set.insert(s.clone());
+            }
+        }
+    }
+    let mut v: Vec<_> = set.into_iter().collect();
+    v.sort();
+    v
+}
+
+/// Build a [`DynPortfolio`](crate::spec::DynPortfolio) with the unscoped
+/// [`TradingCosts`] default installed uniformly on every sub-wallet, then
+/// walk `universe` and install each symbol's resolved per-symbol bundle on
+/// every sub via [`DynPortfolio::install_costs_for`]. This is how the
+/// portfolio runner threads `--costs SYM:...` scoped overrides through the
+/// composite boundary.
+///
+/// A per-symbol bundle that resolves the same as the default becomes a
+/// (redundant but harmless) explicit install; per-symbol bundles that
+/// resolve to `is_none()` are still installed because
+/// [`PaperWallet::set_costs_for`](fugazi::PaperWallet::set_costs_for) is a
+/// per-symbol *override* — an explicit no-op override differs from
+/// falling through to the default when the default itself is non-trivial.
+fn build_priced_portfolio_with_costs(
+    spec: &PortfolioSpec,
+    cash: Real,
+    schema: &Arc<Schema>,
+    cost_config: &CostConfig,
+    frequency: Option<Frequency>,
+    universe: &[String],
+) -> crate::spec::DynPortfolio {
+    let default_costs = cost_config.resolve("", frequency);
+    let costs_opt = (!default_costs.is_none()).then_some(default_costs);
+    let mut portfolio = spec.build(cash, schema, costs_opt);
+    for sym in universe {
+        let sym_costs = cost_config.resolve(sym, frequency);
+        portfolio.install_costs_for(sym, sym_costs);
+    }
+    portfolio
+}
+
 /// The portfolio twin of [`evaluate`] — one grid-cell evaluation for a
-/// `portfolio:` document. Resolves an **unscoped** [`TradingCosts`] bundle
-/// (v1 constraint: [`Portfolio`](fugazi::portfolio::Portfolio) applies one
-/// bundle uniformly across children — per-symbol scoping via `--costs
-/// SYM:...` is silently ignored at the portfolio boundary), threads it
-/// into [`PortfolioSpec::build`](crate::spec::PortfolioSpec::build), and
-/// reduces the whole-run report to a single [`metrics::Metrics`] document.
+/// `portfolio:` document. Resolves the unscoped [`TradingCosts`] default
+/// as the wallet-wide fallback, plus per-symbol scoped bundles for every
+/// symbol in the discovered universe (installed on every sub-wallet via
+/// [`DynPortfolio::install_costs_for`](crate::spec::DynPortfolio::install_costs_for)),
+/// then reduces the whole-run report to a single [`metrics::Metrics`]
+/// document.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_portfolio(
     spec: &PortfolioSpec,
@@ -403,11 +452,10 @@ pub fn evaluate_portfolio(
     frequency: Option<Frequency>,
     seconds_per_bar: Option<Real>,
 ) -> metrics::Metrics {
-    let costs = cost_config.resolve("", frequency);
-    let costs_opt = (!costs.is_none()).then_some(costs);
     let schema = schema_from_snapshots(snapshots);
+    let universe = universe_from_snapshots(snapshots);
     let measured = measured_report_portfolio(
-        || spec.build(cash, &schema, costs_opt),
+        || build_priced_portfolio_with_costs(spec, cash, &schema, cost_config, frequency, &universe),
         snapshots,
     );
     metrics::from_report(&measured, bars_per_year, risk_free_rate, seconds_per_bar)
@@ -426,11 +474,10 @@ pub fn evaluate_windowed_portfolio(
     window: usize,
     seconds_per_bar: Option<Real>,
 ) -> Vec<metrics::WindowMetrics> {
-    let costs = cost_config.resolve("", frequency);
-    let costs_opt = (!costs.is_none()).then_some(costs);
     let schema = schema_from_snapshots(snapshots);
+    let universe = universe_from_snapshots(snapshots);
     let measured = measured_report_portfolio(
-        || spec.build(cash, &schema, costs_opt),
+        || build_priced_portfolio_with_costs(spec, cash, &schema, cost_config, frequency, &universe),
         snapshots,
     );
     metrics::windowed_from_report(
@@ -460,11 +507,24 @@ pub fn run_iteration_portfolio(
         "portfolio run: `bars` and `snapshots` must be the same length"
     );
     let schema = schema_from_snapshots(snapshots);
-    let costs = inputs.cost_config.resolve("", inputs.effective_freq);
-    let costs_active = !costs.is_none();
-    let costs_opt = costs_active.then_some(costs);
+    let universe = universe_from_snapshots(snapshots);
+    // "Costs active" now means either the unscoped default is non-empty
+    // *or* any per-symbol scoped bundle is non-empty — otherwise we skip
+    // the gross rebuild.
+    let default_costs = inputs.cost_config.resolve("", inputs.effective_freq);
+    let any_scoped_active = universe
+        .iter()
+        .any(|s| !inputs.cost_config.resolve(s, inputs.effective_freq).is_none());
+    let costs_active = !default_costs.is_none() || any_scoped_active;
 
-    let mut priced = spec.build(inputs.cash, &schema, costs_opt);
+    let mut priced = build_priced_portfolio_with_costs(
+        spec,
+        inputs.cash,
+        &schema,
+        inputs.cost_config,
+        inputs.effective_freq,
+        &universe,
+    );
     let mut priced_wallet = priced.wallet_view();
     let report = fugazi::backtest::run(
         &mut priced,

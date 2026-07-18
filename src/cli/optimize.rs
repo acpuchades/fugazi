@@ -813,14 +813,23 @@ fn run_multi_symbol_walkforward(
                 }
                 StrategyKind::Portfolio => {
                     // Portfolio uses its own composite wallet driver.
-                    // Costs are resolved unscoped (see the note on
-                    // `run_iteration_portfolio` — Portfolio applies one
-                    // bundle uniformly).
+                    // The unscoped default costs are installed as every
+                    // sub-wallet's fallback; per-symbol scoped bundles
+                    // are then installed on every sub via
+                    // `install_costs_for` so whichever child ends up
+                    // filling a given symbol books at the right rate.
                     let spec = build_portfolio_spec(base_value, params)?;
-                    let costs = cost_config.resolve("", effective_freq);
-                    let costs_opt = (!costs.is_none()).then_some(costs);
+                    let default_costs = cost_config.resolve("", effective_freq);
+                    let costs_opt = (!default_costs.is_none()).then_some(default_costs);
                     backtest::measured_report_portfolio(
-                        || spec.build(cash, schema_ref, costs_opt),
+                        || {
+                            let mut p = spec.build(cash, schema_ref, costs_opt);
+                            for sym in universe.iter() {
+                                let c = cost_config.resolve(sym, effective_freq);
+                                p.install_costs_for(sym, c);
+                            }
+                            p
+                        },
                         snapshots_ref,
                     )
                 }

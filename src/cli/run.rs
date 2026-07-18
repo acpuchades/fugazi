@@ -625,11 +625,12 @@ pub fn run_multi(
 /// [`run_multi`]. Each child sub-wallet marks / fills against the same fanned
 /// bar; the aggregate wallet reports one unified equity curve and blotter.
 ///
-/// **Costs (v1 constraint).** The composite [`PortfolioWallet`](fugazi::portfolio::PortfolioWallet)
-/// applies one [`TradingCosts`] bundle uniformly across every child — a
-/// per-symbol scoping via `--costs SYM:...` doesn't reach into individual
-/// sub-wallets today. This runner honors the **unscoped** `--costs`
-/// default; scoped entries are silently ignored at the portfolio boundary.
+/// **Costs.** The unscoped `--costs` default is installed as every
+/// sub-wallet's fallback bundle; per-symbol scoped bundles from
+/// `--costs SYM:...` are then installed on every sub via
+/// [`Portfolio::install_costs_for`](fugazi::portfolio::Portfolio::install_costs_for),
+/// so whichever child ends up filling a given symbol books at the right
+/// rate. See [`backtest::build_priced_portfolio_with_costs`](crate::backtest).
 pub fn run_portfolio(
     spec: &PortfolioSpec,
     frame: &DataFrame,
@@ -697,8 +698,12 @@ pub fn run_portfolio(
         seconds_per_bar,
     };
     if !opts.quiet {
-        // Portfolio costs are read unscoped — see `run_iteration_portfolio`.
-        let costs_active = !opts.cost_config.resolve("", effective_freq).is_none();
+        // Costs are active if the unscoped default is non-empty or any
+        // per-symbol scoped bundle in the universe is non-empty.
+        let costs_active = !opts.cost_config.resolve("", effective_freq).is_none()
+            || universe
+                .iter()
+                .any(|s| !opts.cost_config.resolve(s, effective_freq).is_none());
         style::print_header(
             "run",
             "trade a composite portfolio of heterogeneous child strategies",

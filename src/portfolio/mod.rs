@@ -231,6 +231,24 @@ impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
         &self.children[idx].name
     }
 
+    /// Install per-symbol [`TradingCosts`] on every sub-wallet. Whichever
+    /// child ends up filling `symbol` will book at this bundle instead of
+    /// the wallet's default.
+    ///
+    /// This is the seam CLI runners use to thread `--costs SYM:...` scoped
+    /// overrides through the composite: rather than a portfolio-wide
+    /// uniform bundle (the [`PortfolioBuilder::costs`] path), each symbol's
+    /// resolved bundle gets installed on every sub — safe because
+    /// [`PaperWallet::set_costs_for`](crate::PaperWallet::set_costs_for) is
+    /// idempotent and per-symbol lookup wins over the fallback default.
+    pub fn install_costs_for(&mut self, symbol: &Sym, costs: TradingCosts) {
+        self.inner
+            .borrow_mut()
+            .subs
+            .iter_mut()
+            .for_each(|w| w.set_costs_for(symbol.clone(), costs.clone()));
+    }
+
     /// The total equity the portfolio was seeded with — the argument to
     /// [`with_initial_equity`](PortfolioBuilder::with_initial_equity).
     pub fn initial_equity(&self) -> Real {
