@@ -823,13 +823,17 @@ def test_trailing_risk_of_strategy_indicators_construct_and_read():
         ta.calmar_of(strat, period=period, bars_per_year=bpy),
     ]
     prices = [10, 11, 12, 11, 10, 12, 14, 16, 15, 13, 15, 17, 19, 21]
+    # Trailing indicators consume Snapshot, so feed a per-bar dict tagged
+    # with the strategy's symbol (the embedded strategy prices its own
+    # wallet from that entry).
     for ind in inds:
-        # feed() drives the indicator on the price series and returns the
-        # final value (a `Real` when warm, or None if still filling).
-        values = ind.feed(_ohlcv(prices))
+        readings = []
+        for p in prices:
+            v = ind.update({"BTC": ta.Candle(open=p, high=p, low=p, close=p, volume=0.0)})
+            if v is not None:
+                readings.append(v)
         # Every metric should have produced at least one Some over a
         # 14-bar path with period=3.
-        readings = [v for v in values if v is not None]
         assert len(readings) > 0, f"no readings from trailing indicator {ind}"
 
 
