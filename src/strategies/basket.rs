@@ -35,17 +35,17 @@ use crate::types::Snapshot;
 /// basket's [`Snapshot<Sym>`](crate::types::Snapshot). One instance is built
 /// per symbol on first sight, so every leaf inside is free to root itself on
 /// the symbol via [`Pick`](crate::indicators::Pick).
-type Chain<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real>>;
+type Chain<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real> + Send + Sync>;
 
 /// A per-symbol factory: builds a fresh [`Chain`] for the given symbol. Called
 /// exactly once per symbol the first time it appears in a snapshot.
-type Factory<Sym> = Box<dyn Fn(&Sym) -> Chain<Sym>>;
+type Factory<Sym> = Box<dyn Fn(&Sym) -> Chain<Sym> + Send + Sync>;
 
 /// A per-symbol protective-level factory: receives both the symbol and the
 /// per-symbol [`Position`] so `position.entry()` / `.peak()` / `.trough()`
 /// leaves can anchor themselves inside the returned chain. Called once per
 /// symbol first sight, same as [`Factory`].
-type LevelFactory<Sym> = Box<dyn Fn(&Sym, &Position) -> Chain<Sym>>;
+type LevelFactory<Sym> = Box<dyn Fn(&Sym, &Position) -> Chain<Sym> + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // Selection functions — each rule is a standalone `pub fn` that ranks a
@@ -220,7 +220,7 @@ impl<Sym: PartialEq> Universe<Sym> {
 /// implementations of `.top_bottom(...)` / `.threshold(...)` /
 /// `.quantile(...)` on [`BasketStrategy`]. A caller with a custom rule
 /// installs an arbitrary closure via [`BasketStrategy::selection`].
-type Selection<Sym> = Box<dyn Fn(&HashMap<Sym, Real>) -> HashMap<Sym, Side>>;
+type Selection<Sym> = Box<dyn Fn(&HashMap<Sym, Real>) -> HashMap<Sym, Side> + Send + Sync>;
 
 /// A cross-sectional, ranking basket strategy over a floating universe.
 ///
@@ -339,7 +339,7 @@ type Selection<Sym> = Box<dyn Fn(&HashMap<Sym, Real>) -> HashMap<Sym, Side>>;
 /// ```
 /// A boolean chain over the basket's `Snapshot<Sym>` — the shape used
 /// by the [`rebalance`](BasketStrategy::rebalance_on) gate signal.
-type RebalanceSignal<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool>>;
+type RebalanceSignal<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool> + Send + Sync>;
 
 pub struct BasketStrategy<Sym> {
     score_factory: Factory<Sym>,
@@ -379,7 +379,7 @@ pub struct BasketStrategy<Sym> {
     dollar_neutral: bool,
 }
 
-impl<Sym: Clone + PartialEq + Hash + Eq + 'static> BasketStrategy<Sym> {
+impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> BasketStrategy<Sym> {
     /// A fresh basket with a seed-1.0 [`Book`], the default zero score /
     /// zero sizing factories, and a no-op selection (empty map, so nothing
     /// is picked). All three defaults trade nothing — a basket only comes
@@ -442,8 +442,8 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> BasketStrategy<Sym> {
     /// the bracket on flatten.
     pub fn long_stop_loss<F, L>(mut self, factory: F) -> Self
     where
-        F: Fn(&Sym, &Position) -> L + 'static,
-        L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+        F: Fn(&Sym, &Position) -> L + 'static + Send + Sync,
+        L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
         self.long_stop_factory = Some(Box::new(move |sym: &Sym, pos: &Position| {
             let ind: Chain<Sym> = Box::new(factory(sym, pos));
@@ -456,8 +456,8 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> BasketStrategy<Sym> {
     /// [`long_stop_loss`](Self::long_stop_loss) for the factory shape.
     pub fn long_take_profit<F, L>(mut self, factory: F) -> Self
     where
-        F: Fn(&Sym, &Position) -> L + 'static,
-        L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+        F: Fn(&Sym, &Position) -> L + 'static + Send + Sync,
+        L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
         self.long_target_factory = Some(Box::new(move |sym: &Sym, pos: &Position| {
             let ind: Chain<Sym> = Box::new(factory(sym, pos));
@@ -470,8 +470,8 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> BasketStrategy<Sym> {
     /// [`long_stop_loss`](Self::long_stop_loss) for the factory shape.
     pub fn short_stop_loss<F, L>(mut self, factory: F) -> Self
     where
-        F: Fn(&Sym, &Position) -> L + 'static,
-        L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+        F: Fn(&Sym, &Position) -> L + 'static + Send + Sync,
+        L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
         self.short_stop_factory = Some(Box::new(move |sym: &Sym, pos: &Position| {
             let ind: Chain<Sym> = Box::new(factory(sym, pos));
@@ -484,8 +484,8 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> BasketStrategy<Sym> {
     /// [`long_stop_loss`](Self::long_stop_loss) for the factory shape.
     pub fn short_take_profit<F, L>(mut self, factory: F) -> Self
     where
-        F: Fn(&Sym, &Position) -> L + 'static,
-        L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+        F: Fn(&Sym, &Position) -> L + 'static + Send + Sync,
+        L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
         self.short_target_factory = Some(Box::new(move |sym: &Sym, pos: &Position| {
             let ind: Chain<Sym> = Box::new(factory(sym, pos));
@@ -531,7 +531,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> BasketStrategy<Sym> {
     /// the crate.
     pub fn rebalance_on<S>(mut self, signal: S) -> Self
     where
-        S: Indicator<Input = Snapshot<Sym>, Output = bool> + 'static,
+        S: Indicator<Input = Snapshot<Sym>, Output = bool> + 'static + Send + Sync,
     {
         self.rebalance = Box::new(signal);
         self
@@ -546,8 +546,8 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> BasketStrategy<Sym> {
     /// point of the ranker.
     pub fn scored_by<F, I>(mut self, factory: F) -> Self
     where
-        F: Fn(&Sym) -> I + 'static,
-        I: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+        F: Fn(&Sym) -> I + 'static + Send + Sync,
+        I: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
         self.score_factory = Box::new(move |sym: &Sym| {
             let ind: Chain<Sym> = Box::new(factory(sym));
@@ -567,8 +567,8 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> BasketStrategy<Sym> {
     /// [`sized_by(|_| equal_weight(N))`](crate::indicators::sizing::equal_weight).
     pub fn sized_by<F, I>(mut self, factory: F) -> Self
     where
-        F: Fn(&Sym) -> I + 'static,
-        I: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+        F: Fn(&Sym) -> I + 'static + Send + Sync,
+        I: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
         self.sizing_factory = Box::new(move |sym: &Sym| {
             let ind: Chain<Sym> = Box::new(factory(sym));
@@ -609,7 +609,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> BasketStrategy<Sym> {
     /// [`quantile`](Self::quantile)) delegate here.
     pub fn selection<F>(mut self, f: F) -> Self
     where
-        F: Fn(&HashMap<Sym, Real>) -> HashMap<Sym, Side> + 'static,
+        F: Fn(&HashMap<Sym, Real>) -> HashMap<Sym, Side> + 'static + Send + Sync,
     {
         self.selection = Box::new(f);
         self
@@ -720,13 +720,13 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> BasketStrategy<Sym> {
     }
 }
 
-impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Default for BasketStrategy<Sym> {
+impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Default for BasketStrategy<Sym> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Strategy for BasketStrategy<Sym> {
+impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for BasketStrategy<Sym> {
     type Input = Snapshot<Sym>;
     type Symbol = Sym;
 

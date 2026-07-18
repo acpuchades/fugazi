@@ -11,7 +11,7 @@ use super::SingleAssetStrategy;
 /// Takes the SMA golden cross only when the trend is strong enough — ADX above
 /// `adx_min` — and exits on the death cross. The strength gate uses the ADX
 /// component accessor (`adx.adx()`), filtering out crossovers in chop.
-pub fn adx_trend_filter<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>(
+pub fn adx_trend_filter<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>(
     symbol: Sym,
     fast: usize,
     slow: usize,
@@ -30,7 +30,7 @@ pub fn adx_trend_filter<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>
 /// Buys an RSI dip (RSI crossing down through `oversold`) **only while** the
 /// close is above its long `trend`-period SMA, so dips are bought with the trend,
 /// not against it. Exits when RSI recovers up through `exit_level`.
-pub fn rsi_pullback<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>(
+pub fn rsi_pullback<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>(
     symbol: Sym,
     rsi_period: usize,
     trend: usize,
@@ -50,7 +50,7 @@ pub fn rsi_pullback<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>(
 /// An ATR-banded cousin of the Bollinger breakout: long when the close pierces
 /// the upper Keltner band, short below the lower one, using the channel's
 /// component accessors.
-pub fn keltner_breakout<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>(
+pub fn keltner_breakout<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>(
     symbol: Sym,
     ema_period: usize,
     atr_period: usize,

@@ -15,10 +15,10 @@ use crate::types::{Selector, Snapshot};
 /// `position.entry()` (etc.) is already
 /// [`Input = Snapshot<Sym>`](crate::types::Snapshot) via the [`Position`]
 /// carriers.
-type Level<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real>>;
+type Level<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real> + Send + Sync>;
 
 /// The **rebalance gate** signal — a boolean over the strategy's snapshot.
-type RebalanceSignal<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool>>;
+type RebalanceSignal<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool> + Send + Sync>;
 
 /// The latest value of an optional level, if it is present and warmed up.
 fn level_value<Sym>(level: &Option<Level<Sym>>) -> Option<Real> {
@@ -157,10 +157,10 @@ fn extract_self_atom<Sym: PartialEq + Clone>(snap: &Snapshot<Sym>, symbol: &Sym)
 // asymmetric.
 pub struct SingleAssetStrategy<Sym> {
     symbol: Sym,
-    long: Box<dyn Signal<Snapshot<Sym>>>,
-    close_long: Box<dyn Signal<Snapshot<Sym>>>,
-    short: Box<dyn Signal<Snapshot<Sym>>>,
-    close_short: Box<dyn Signal<Snapshot<Sym>>>,
+    long: Box<dyn Signal<Snapshot<Sym>> + Send + Sync>,
+    close_long: Box<dyn Signal<Snapshot<Sym>> + Send + Sync>,
+    short: Box<dyn Signal<Snapshot<Sym>> + Send + Sync>,
+    close_short: Box<dyn Signal<Snapshot<Sym>> + Send + Sync>,
     long_stop: Option<Level<Sym>>,
     long_target: Option<Level<Sym>>,
     short_stop: Option<Level<Sym>>,
@@ -175,7 +175,7 @@ pub struct SingleAssetStrategy<Sym> {
     bars_seen: usize,
 }
 
-impl<Sym: Clone + Hash + Eq + 'static> SingleAssetStrategy<Sym> {
+impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> SingleAssetStrategy<Sym> {
     /// A strategy on `symbol` with no transitions wired — every slot a
     /// constant-`false` signal and no stops. Add sides with
     /// [`long_on`](Self::long_on) / [`short_on`](Self::short_on).
@@ -228,7 +228,7 @@ impl<Sym: Clone + Hash + Eq + 'static> SingleAssetStrategy<Sym> {
     /// `Above` on `book.drawdown()`) for event-driven rebalance.
     pub fn rebalance_on(
         mut self,
-        signal: impl Indicator<Input = Snapshot<Sym>, Output = bool> + 'static,
+        signal: impl Indicator<Input = Snapshot<Sym>, Output = bool> + 'static + Send + Sync,
     ) -> Self {
         self.rebalance = Box::new(signal);
         self
@@ -251,8 +251,8 @@ impl<Sym: Clone + Hash + Eq + 'static> SingleAssetStrategy<Sym> {
     /// strategy uses `long_on` alone.
     pub fn long_on(
         mut self,
-        enter: impl Signal<Snapshot<Sym>> + 'static,
-        exit: impl Signal<Snapshot<Sym>> + 'static,
+        enter: impl Signal<Snapshot<Sym>> + 'static + Send + Sync,
+        exit: impl Signal<Snapshot<Sym>> + 'static + Send + Sync,
     ) -> Self {
         self.long = Box::new(enter);
         self.close_long = Box::new(exit);
@@ -263,8 +263,8 @@ impl<Sym: Clone + Hash + Eq + 'static> SingleAssetStrategy<Sym> {
     /// `exit`. Opening the short closes any open long, and vice versa.
     pub fn short_on(
         mut self,
-        enter: impl Signal<Snapshot<Sym>> + 'static,
-        exit: impl Signal<Snapshot<Sym>> + 'static,
+        enter: impl Signal<Snapshot<Sym>> + 'static + Send + Sync,
+        exit: impl Signal<Snapshot<Sym>> + 'static + Send + Sync,
     ) -> Self {
         self.short = Box::new(enter);
         self.close_short = Box::new(exit);
@@ -293,7 +293,7 @@ impl<Sym: Clone + Hash + Eq + 'static> SingleAssetStrategy<Sym> {
     /// `low` reaches it.
     pub fn long_stop_loss(
         mut self,
-        level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+        level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     ) -> Self {
         self.long_stop = Some(Box::new(level));
         self
@@ -303,7 +303,7 @@ impl<Sym: Clone + Hash + Eq + 'static> SingleAssetStrategy<Sym> {
     /// `high` reaches it.
     pub fn long_take_profit(
         mut self,
-        level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+        level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     ) -> Self {
         self.long_target = Some(Box::new(level));
         self
@@ -313,7 +313,7 @@ impl<Sym: Clone + Hash + Eq + 'static> SingleAssetStrategy<Sym> {
     /// `high` reaches it.
     pub fn short_stop_loss(
         mut self,
-        level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+        level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     ) -> Self {
         self.short_stop = Some(Box::new(level));
         self
@@ -323,7 +323,7 @@ impl<Sym: Clone + Hash + Eq + 'static> SingleAssetStrategy<Sym> {
     /// `low` reaches it.
     pub fn short_take_profit(
         mut self,
-        level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+        level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     ) -> Self {
         self.short_target = Some(Box::new(level));
         self
@@ -344,7 +344,7 @@ impl<Sym: Clone + Hash + Eq + 'static> SingleAssetStrategy<Sym> {
     /// mid-position does not resize.
     pub fn position_sizing(
         mut self,
-        sizing: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+        sizing: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     ) -> Self {
         self.sizing = Box::new(sizing);
         self
@@ -401,7 +401,7 @@ impl<Sym: Clone + Hash + Eq + 'static> SingleAssetStrategy<Sym> {
     }
 }
 
-impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Strategy for SingleAssetStrategy<Sym> {
+impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for SingleAssetStrategy<Sym> {
     type Input = Snapshot<Sym>;
     type Symbol = Sym;
 

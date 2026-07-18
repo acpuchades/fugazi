@@ -302,7 +302,7 @@ impl TypeOf for Snapshot<String> {
 /// [`AsBool`] / [`AsCandle`] / [`AsAtom`] / [`AsStr`] typed views. Payload
 /// projection at consumer sites is via `TryFrom<DynValue>` (the invariant is
 /// checked at spec-build time, so the unwrap arm is unreachable).
-pub trait DynIndicator {
+pub trait DynIndicator: Send + Sync {
     fn input_type(&self) -> DynType;
     fn output_type(&self) -> DynType;
     fn update(&mut self, input: DynValue) -> Option<DynValue>;
@@ -382,7 +382,7 @@ impl<I> Adapter<I> {
 
 impl<I, X, Y> DynIndicator for Adapter<I>
 where
-    I: Indicator<Input = X, Output = Y> + Clone + 'static,
+    I: Indicator<Input = X, Output = Y> + Clone + Send + Sync + 'static,
     X: TryFrom<DynValue, Error = DynType> + TypeOf,
     Y: Into<DynValue> + Clone + TypeOf,
 {
@@ -422,7 +422,7 @@ where
 /// Wrap a concrete indicator into a boxed [`DynIndicator`].
 pub fn wrap<I, X, Y>(inner: I) -> Box<dyn DynIndicator>
 where
-    I: Indicator<Input = X, Output = Y> + Clone + 'static,
+    I: Indicator<Input = X, Output = Y> + Clone + Send + Sync + 'static,
     X: TryFrom<DynValue, Error = DynType> + TypeOf,
     Y: Into<DynValue> + Clone + TypeOf,
 {

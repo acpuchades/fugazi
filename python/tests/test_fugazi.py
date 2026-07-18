@@ -806,6 +806,33 @@ def test_all_catalogue_presets_construct_and_produce_snapshots():
         assert len(rep.equity_curve) == len(prices)
 
 
+def test_trailing_risk_of_strategy_indicators_construct_and_read():
+    # Trailing-risk-of-strategy indicators embed a preset Strategy, drive it
+    # against a private wallet, and read a rolling metric over its equity
+    # curve. Smoke-test that each variant builds and produces at least one
+    # Some reading over a modest window.
+    strat = ta.ma_crossover("BTC", fast=2, slow=4)
+    period = 3
+    bpy = 252.0
+    # Build one instance of each — verify no panic on construction.
+    inds = [
+        ta.sharpe_of(strat, period=period, bars_per_year=bpy),
+        ta.sortino_of(strat, period=period, bars_per_year=bpy),
+        ta.volatility_of(strat, period=period, bars_per_year=bpy),
+        ta.max_drawdown_of(strat, period=period),
+        ta.calmar_of(strat, period=period, bars_per_year=bpy),
+    ]
+    prices = [10, 11, 12, 11, 10, 12, 14, 16, 15, 13, 15, 17, 19, 21]
+    for ind in inds:
+        # feed() drives the indicator on the price series and returns the
+        # final value (a `Real` when warm, or None if still filling).
+        values = ind.feed(_ohlcv(prices))
+        # Every metric should have produced at least one Some over a
+        # 14-bar path with period=3.
+        readings = [v for v in values if v is not None]
+        assert len(readings) > 0, f"no readings from trailing indicator {ind}"
+
+
 def test_preset_strategy_rejects_builder_methods():
     # Preset strategies carry their catalogue recipe; layering `.long_on()`
     # etc. on top makes no sense — should raise a clear error.

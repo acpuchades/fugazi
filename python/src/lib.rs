@@ -3399,13 +3399,212 @@ fn keltner_breakout(
     }
 }
 
-// Trailing-risk-of-strategy indicators (`sharpe_of`, `sortino_of`, etc.)
-// remain blocked in Python bindings even after the Position + Book + Shared
-// Send + Sync refactor: `SingleAssetStrategy` internals still hold
-// `Box<dyn Signal + 'static>` etc. without `Send + Sync` bounds, so the
-// composed `Sharpe<SingleAssetStrategy<String>>` isn't Send + Sync either.
-// Unblocking requires adding `Send + Sync` bounds on those strategy fields
-// (a larger touch: every strategy trait object). Tracked as a follow-up.
+// ---------------------------------------------------------------------------
+// Trailing risk-of-strategy indicators — embed a preset [`Strategy`], drive
+// it against a private wallet, and read a rolling metric over its equity
+// curve. Unblocked by two changes: the Position + Book + Shared
+// `Arc<Mutex>` refactor (was `Rc<RefCell>`) *and* the strategy internal
+// trait-object bound tightening (`Box<dyn Signal + 'static>` →
+// `+ Send + Sync + 'static`).
+//
+// The trailing indicators aren't `Clone` (they own an embedded strategy +
+// PaperWallet), so we wrap them in `RebuildOnClone` — an `Arc`-based
+// mirror of the CLI's `RebuildIndicator` that rebuilds a fresh instance
+// on `Clone`. This satisfies `TypedSource`'s Clone + Send + Sync bound.
+// ---------------------------------------------------------------------------
+
+/// The fixed wallet seed the trailing-risk-of-strategy indicators use for
+/// their embedded strategy. Every metric is a ratio, so the seed only
+/// determines value scale — matches `src/cli/spec/trailing.rs::SEED`.
+const TRAILING_STRATEGY_SEED: Real = 1_000.0;
+
+/// A `Clone`-able wrapper around a non-`Clone` inner indicator. Holds a
+/// factory closure that builds a fresh instance on each `Clone`, so the
+/// enclosing carrier can be `Clone + Send + Sync` even when the inner
+/// (an embedded-strategy trailing indicator) is not. Mirror of
+/// `RebuildIndicator` in `src/cli/spec/trailing.rs`, but with `Arc` for
+/// `Send + Sync`.
+type BoxedSnapshotReal =
+    Box<dyn Indicator<Input = Snapshot<String>, Output = Real> + Send + Sync>;
+
+struct RebuildOnClone {
+    build: Arc<dyn Fn() -> BoxedSnapshotReal + Send + Sync>,
+    inner: BoxedSnapshotReal,
+}
+
+impl Clone for RebuildOnClone {
+    fn clone(&self) -> Self {
+        let inner = (self.build)();
+        Self {
+            build: Arc::clone(&self.build),
+            inner,
+        }
+    }
+}
+
+impl Indicator for RebuildOnClone {
+    type Input = Snapshot<String>;
+    type Output = Real;
+    fn update(&mut self, input: Snapshot<String>) -> Option<Real> {
+        self.inner.update(input)
+    }
+    fn value(&self) -> Option<Real> {
+        self.inner.value()
+    }
+    fn warm_up_period(&self) -> usize {
+        self.inner.warm_up_period()
+    }
+    fn unstable_period(&self) -> usize {
+        self.inner.unstable_period()
+    }
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+}
+
+/// Turn a factory closure that builds a non-`Clone` indicator into a
+/// [`PyIndicator`] that carries the factory in a
+/// [`RebuildOnClone`] so `TypedSource::new`'s `Clone` bound is satisfied.
+fn wrap_rebuild<F>(build: F) -> PyIndicator
+where
+    F: Fn() -> BoxedSnapshotReal + Send + Sync + 'static,
+{
+    let build = Arc::new(build);
+    let inner = build();
+    let carrier = RebuildOnClone {
+        build,
+        inner,
+    };
+    PyIndicator::wrap(AnySource::Snapshot(Source::new(carrier)))
+}
+
+/// Rolling annualized Sharpe over the equity curve of an embedded
+/// [`Strategy`](PyStrategy). Matches `!sharpe` in the YAML spec.
+#[pyfunction]
+#[pyo3(signature = (strategy, period, bars_per_year, risk_free_rate=0.0))]
+fn sharpe_of(
+    strategy: &PyStrategy,
+    period: usize,
+    bars_per_year: Real,
+    risk_free_rate: Real,
+) -> PyIndicator {
+    let preset = strategy.preset.clone();
+    let symbol = strategy.symbol.clone();
+    wrap_rebuild(move || {
+        let strat = build_preset_or_bare(&preset, &symbol);
+        Box::new(fugazi_core::indicators::Sharpe::new(
+            strat,
+            symbol.clone(),
+            TRAILING_STRATEGY_SEED,
+            period,
+            risk_free_rate,
+            bars_per_year,
+        ))
+    })
+}
+
+/// Rolling annualized Sortino over the equity curve of an embedded
+/// [`Strategy`](PyStrategy). Matches `!sortino` in the YAML spec.
+#[pyfunction]
+#[pyo3(signature = (strategy, period, bars_per_year, risk_free_rate=0.0))]
+fn sortino_of(
+    strategy: &PyStrategy,
+    period: usize,
+    bars_per_year: Real,
+    risk_free_rate: Real,
+) -> PyIndicator {
+    let preset = strategy.preset.clone();
+    let symbol = strategy.symbol.clone();
+    wrap_rebuild(move || {
+        let strat = build_preset_or_bare(&preset, &symbol);
+        Box::new(fugazi_core::indicators::Sortino::new(
+            strat,
+            symbol.clone(),
+            TRAILING_STRATEGY_SEED,
+            period,
+            risk_free_rate,
+            bars_per_year,
+        ))
+    })
+}
+
+/// Rolling annualized volatility of the equity curve of an embedded
+/// [`Strategy`](PyStrategy). Matches `!volatility` in the YAML spec.
+#[pyfunction]
+fn volatility_of(
+    strategy: &PyStrategy,
+    period: usize,
+    bars_per_year: Real,
+) -> PyIndicator {
+    let preset = strategy.preset.clone();
+    let symbol = strategy.symbol.clone();
+    wrap_rebuild(move || {
+        let strat = build_preset_or_bare(&preset, &symbol);
+        Box::new(fugazi_core::indicators::Volatility::new(
+            strat,
+            symbol.clone(),
+            TRAILING_STRATEGY_SEED,
+            period,
+            bars_per_year,
+        ))
+    })
+}
+
+/// Rolling maximum drawdown of the equity curve of an embedded
+/// [`Strategy`](PyStrategy). Matches `!max_drawdown` in the YAML spec.
+#[pyfunction]
+fn max_drawdown_of(strategy: &PyStrategy, period: usize) -> PyIndicator {
+    let preset = strategy.preset.clone();
+    let symbol = strategy.symbol.clone();
+    wrap_rebuild(move || {
+        let strat = build_preset_or_bare(&preset, &symbol);
+        Box::new(fugazi_core::indicators::MaxDrawdown::new(
+            strat,
+            symbol.clone(),
+            TRAILING_STRATEGY_SEED,
+            period,
+        ))
+    })
+}
+
+/// Rolling Calmar ratio (annualized return / max drawdown) over the equity
+/// curve of an embedded [`Strategy`](PyStrategy). Matches `!calmar` in the
+/// YAML spec.
+#[pyfunction]
+fn calmar_of(
+    strategy: &PyStrategy,
+    period: usize,
+    bars_per_year: Real,
+) -> PyIndicator {
+    let preset = strategy.preset.clone();
+    let symbol = strategy.symbol.clone();
+    wrap_rebuild(move || {
+        let strat = build_preset_or_bare(&preset, &symbol);
+        Box::new(fugazi_core::indicators::Calmar::new(
+            strat,
+            symbol.clone(),
+            TRAILING_STRATEGY_SEED,
+            period,
+            bars_per_year,
+        ))
+    })
+}
+
+/// Rebuild a preset strategy (or a bare `SingleAssetStrategy` if none set)
+/// with the trailing seed. Used inside the `wrap_rebuild` factory of each
+/// trailing-risk-of-strategy indicator.
+fn build_preset_or_bare(
+    preset: &Option<PresetSpec>,
+    symbol: &str,
+) -> SingleAssetStrategy<String> {
+    match preset {
+        Some(p) => p.build(TRAILING_STRATEGY_SEED),
+        None => SingleAssetStrategy::<String>::with_initial_equity(
+            symbol.to_string(),
+            TRAILING_STRATEGY_SEED,
+        ),
+    }
+}
 
 /// The result of [`Strategy.run`](PyStrategy::run): the per-bar equity curve, the
 /// fill blotter, and the pre-run seed equity — everything the `fugazi.metrics`
@@ -6199,6 +6398,10 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // `Strategy` (calls the same Rust free function `fugazi::strategies`
         // exposes).
         buy_and_hold, ma_crossover, rsi_reversal, donchian_breakout, keltner_breakout,
+        // Trailing-risk-of-strategy indicators — embed a Strategy, drive it
+        // against a private wallet, and read a rolling metric over its
+        // equity curve.
+        sharpe_of, sortino_of, volatility_of, max_drawdown_of, calmar_of,
     );
 
     // `fugazi.metrics` — mirror of `fugazi::metrics::*`. Registered as a

@@ -65,29 +65,29 @@ use crate::indicators::{Close, CurrentBar, High, Low, Pick, Volume};
 /// asset's close out of the incoming [`Snapshot`](crate::types::Snapshot).
 /// The empty-selector [`Pick`] unpacks a size-1 snapshot on the single-series
 /// hot path and matches by symbol at the strategy layer otherwise.
-pub(crate) fn self_close<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>() -> Close<Pick<Sym>> {
+pub(crate) fn self_close<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>() -> Close<Pick<Sym>> {
     Close::of(Pick::<Sym>::new())
 }
 
 /// Shorthand for `High::of(Pick::<Sym>::new())` — see [`self_close`].
-pub(crate) fn self_high<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>() -> High<Pick<Sym>> {
+pub(crate) fn self_high<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>() -> High<Pick<Sym>> {
     High::of(Pick::<Sym>::new())
 }
 
 /// Shorthand for `Low::of(Pick::<Sym>::new())` — see [`self_close`].
-pub(crate) fn self_low<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>() -> Low<Pick<Sym>> {
+pub(crate) fn self_low<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>() -> Low<Pick<Sym>> {
     Low::of(Pick::<Sym>::new())
 }
 
 /// Shorthand for `Volume::of(Pick::<Sym>::new())` — see [`self_close`].
 #[allow(dead_code)]
-pub(crate) fn self_volume<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>() -> Volume<Pick<Sym>> {
+pub(crate) fn self_volume<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>() -> Volume<Pick<Sym>> {
     Volume::of(Pick::<Sym>::new())
 }
 
 /// Shorthand for `CurrentBar::of(Pick::<Sym>::new())` — read the strategy's
 /// own asset's whole [`Candle`](crate::types::Candle) out of the snapshot;
 /// used to root the bar indicators (`Atr`, `Adx`, `Obv`, …).
-pub(crate) fn self_bar<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>() -> CurrentBar<Pick<Sym>> {
+pub(crate) fn self_bar<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>() -> CurrentBar<Pick<Sym>> {
     CurrentBar::of(Pick::<Sym>::new())
 }

@@ -17,7 +17,7 @@ fn is_short(position: Real) -> bool {
 ///
 /// Buys the dip when RSI crosses *down* through `oversold`, and exits when RSI
 /// recovers up through `exit_level` (e.g. 30 → 50).
-pub fn rsi_reversal<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>(
+pub fn rsi_reversal<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>(
     symbol: Sym,
     period: usize,
     oversold: Real,
@@ -34,7 +34,7 @@ pub fn rsi_reversal<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>(
 /// Buys when the close crosses below the lower band and exits when it crosses
 /// back above the middle band (the moving average). Fades the bands rather than
 /// chasing the breakout.
-pub fn bollinger_reversion<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>(symbol: Sym, period: usize, k: Real) -> SingleAssetStrategy<Sym> {
+pub fn bollinger_reversion<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>(symbol: Sym, period: usize, k: Real) -> SingleAssetStrategy<Sym> {
     let bands = Bollinger::new(super::self_close::<Sym>(), period, k).shared();
     SingleAssetStrategy::new(symbol).long_on(
         super::self_close::<Sym>().crosses_below(bands.lower()),
@@ -47,7 +47,7 @@ pub fn bollinger_reversion<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'stat
 /// The stochastic ranges `0..1` here, so `oversold`/`overbought` are fractions
 /// (e.g. 0.2 / 0.8). Buys when %K crosses down through `oversold`, exits when it
 /// crosses up through `overbought`.
-pub fn stochastic_reversal<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>(
+pub fn stochastic_reversal<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>(
     symbol: Sym,
     period: usize,
     oversold: Real,
@@ -64,7 +64,7 @@ pub fn stochastic_reversal<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'stat
 /// The stochastic transform over an RSI source (also `0..1`): a more responsive
 /// oscillator than either alone. Same dip-buy / recovery-exit edges as
 /// [`stochastic_reversal`].
-pub fn stoch_rsi_reversal<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>(
+pub fn stoch_rsi_reversal<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>(
     symbol: Sym,
     rsi_period: usize,
     stoch_period: usize,
@@ -82,7 +82,7 @@ pub fn stoch_rsi_reversal<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'stati
 ///
 /// Volume-weighted RSI cousin (`0..100`): buys when MFI crosses down through
 /// `oversold`, exits when it crosses up through `overbought` (e.g. 20 / 80).
-pub fn mfi_reversal<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>(
+pub fn mfi_reversal<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>(
     symbol: Sym,
     period: usize,
     oversold: Real,
@@ -111,7 +111,7 @@ pub struct ZScoreReversion<Sym> {
     entry: Real,
 }
 
-impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> ZScoreReversion<Sym> {
+impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> ZScoreReversion<Sym> {
     pub fn new(symbol: Sym, period: usize, entry: Real) -> Self {
         Self {
             symbol,
@@ -125,7 +125,7 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> ZScoreReversion<Sy
     }
 }
 
-impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> Strategy for ZScoreReversion<Sym> {
+impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Strategy for ZScoreReversion<Sym> {
     type Input = crate::types::Snapshot<Sym>;
     type Symbol = Sym;
 

@@ -19,15 +19,15 @@
 use crate::indicators::{Book, Close, Const, Pick, Position, Value};
 
 /// The rebalance-gate signal type — a boolean over the pair's snapshot.
-type RebalanceSignal<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool>>;
+type RebalanceSignal<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool> + Send + Sync>;
 use crate::prelude::*;
 use crate::types::{Selector, Snapshot};
 
 /// Spread-level source (a real-valued indicator over the pair's `Snapshot`).
-type Level<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real>>;
+type Level<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real> + Send + Sync>;
 
 /// The strategy's internal spread indicator: `close(left) - close(right)`.
-type Spread<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real>>;
+type Spread<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real> + Send + Sync>;
 
 /// Fetch a matching atom out of a per-bar [`Snapshot`], for the [`Position`]
 /// tracker's own view. Returns `None` on a miss (the pair leg is absent on this
@@ -105,8 +105,8 @@ fn level_value<Sym>(level: &Option<Level<Sym>>) -> Option<Real> {
 pub struct PairsStrategy<Sym> {
     left: Sym,
     right: Sym,
-    enter: Box<dyn Signal<Snapshot<Sym>>>,
-    exit: Box<dyn Signal<Snapshot<Sym>>>,
+    enter: Box<dyn Signal<Snapshot<Sym>> + Send + Sync>,
+    exit: Box<dyn Signal<Snapshot<Sym>> + Send + Sync>,
     spread: Spread<Sym>,
     stop: Option<Level<Sym>>,
     target: Option<Level<Sym>>,
@@ -121,7 +121,7 @@ pub struct PairsStrategy<Sym> {
     bars_seen: usize,
 }
 
-impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> PairsStrategy<Sym> {
+impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> PairsStrategy<Sym> {
     /// A pairs strategy over `left`/`right` with no transitions wired — both
     /// signal slots are constant-`false` and neither spread level is set. Add
     /// the signals with [`on`](Self::on); attach a level with
@@ -169,7 +169,7 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> PairsStrategy<Sym>
     /// A `None` reading is treated as `false` — the safe default.
     pub fn rebalance_on(
         mut self,
-        signal: impl Indicator<Input = Snapshot<Sym>, Output = bool> + 'static,
+        signal: impl Indicator<Input = Snapshot<Sym>, Output = bool> + 'static + Send + Sync,
     ) -> Self {
         self.rebalance = Box::new(signal);
         self
@@ -181,8 +181,8 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> PairsStrategy<Sym>
     /// flat book is likewise silent.
     pub fn on(
         mut self,
-        enter: impl Signal<Snapshot<Sym>> + 'static,
-        exit: impl Signal<Snapshot<Sym>> + 'static,
+        enter: impl Signal<Snapshot<Sym>> + 'static + Send + Sync,
+        exit: impl Signal<Snapshot<Sym>> + 'static + Send + Sync,
     ) -> Self {
         self.enter = Box::new(enter);
         self.exit = Box::new(exit);
@@ -194,7 +194,7 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> PairsStrategy<Sym>
     /// pair is long the spread by construction, this is the adverse side.
     pub fn spread_stop_loss(
         mut self,
-        level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+        level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     ) -> Self {
         self.stop = Some(Box::new(level));
         self
@@ -204,7 +204,7 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> PairsStrategy<Sym>
     /// spread reads **at or above** this level (the favourable side).
     pub fn spread_take_profit(
         mut self,
-        level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+        level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     ) -> Self {
         self.target = Some(Box::new(level));
         self
@@ -225,7 +225,7 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> PairsStrategy<Sym>
     /// `target_vol.div(spread_realized_vol)` for spread-vol targeting.
     pub fn position_sizing(
         mut self,
-        sizing: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+        sizing: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     ) -> Self {
         self.sizing = Box::new(sizing);
         self
@@ -285,7 +285,7 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> PairsStrategy<Sym>
     }
 }
 
-impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static> Strategy for PairsStrategy<Sym> {
+impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Strategy for PairsStrategy<Sym> {
     type Input = Snapshot<Sym>;
     type Symbol = Sym;
 

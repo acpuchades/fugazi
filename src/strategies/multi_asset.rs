@@ -42,33 +42,33 @@ use crate::types::Snapshot;
 // ---------------------------------------------------------------------------
 
 /// A per-symbol boolean chain — one of the four signal slots.
-type SignalChain<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool>>;
+type SignalChain<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool> + Send + Sync>;
 
 /// A per-symbol real chain — the sizing multiplier and each of the four
 /// protective levels.
-type LevelChain<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real>>;
+type LevelChain<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real> + Send + Sync>;
 
 /// A per-symbol signal factory: `Fn(&Sym) -> SignalChain<Sym>`.
-type SignalFactory<Sym> = Box<dyn Fn(&Sym) -> SignalChain<Sym>>;
+type SignalFactory<Sym> = Box<dyn Fn(&Sym) -> SignalChain<Sym> + Send + Sync>;
 
 /// A per-symbol level factory that receives the per-symbol
 /// [`Position`] so `position.entry()` / `.peak()` / `.trough()` inside
 /// the chain resolves against the strategy's actual entry for that
 /// symbol.
-type LevelFactory<Sym> = Box<dyn Fn(&Sym, &Position) -> LevelChain<Sym>>;
+type LevelFactory<Sym> = Box<dyn Fn(&Sym, &Position) -> LevelChain<Sym> + Send + Sync>;
 
 /// A per-symbol sizing factory: `Fn(&Sym) -> LevelChain<Sym>`. The sizing
 /// slot doesn't take a [`Position`] because a size that reads back the
 /// entry price for its own leg is unusual — most sizing recipes are
 /// symbol-agnostic magnitudes (equal weight, ATR risk, drawdown throttle
 /// on the shared [`Book`]).
-type SizingFactory<Sym> = Box<dyn Fn(&Sym) -> LevelChain<Sym>>;
+type SizingFactory<Sym> = Box<dyn Fn(&Sym) -> LevelChain<Sym> + Send + Sync>;
 
 /// The **rebalance gate** — a boolean signal decided on the whole
 /// snapshot (not per symbol). On bars where it reads `true`,
 /// [`MultiAssetStrategy::trade`] resizes every held per-symbol position
 /// to its current sizing target.
-type RebalanceSignal<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool>>;
+type RebalanceSignal<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool> + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // Per-symbol state
@@ -276,7 +276,7 @@ pub struct MultiAssetStrategy<Sym> {
     book: Book<Sym>,
 }
 
-impl<Sym: Clone + PartialEq + Hash + Eq + 'static> MultiAssetStrategy<Sym> {
+impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrategy<Sym> {
     /// A fresh multi-asset strategy with every signal slot a
     /// constant-`false`, no protective levels, a constant-`1.0` sizing,
     /// and a seed-1.0 [`Book`]. Add sides with [`long_on`](Self::long_on)
@@ -348,7 +348,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> MultiAssetStrategy<Sym> {
     /// A `None` reading is treated as `false` — the safe default.
     pub fn rebalance_on<S>(mut self, signal: S) -> Self
     where
-        S: Indicator<Input = Snapshot<Sym>, Output = bool> + 'static,
+        S: Indicator<Input = Snapshot<Sym>, Output = bool> + 'static + Send + Sync,
     {
         self.rebalance = Box::new(signal);
         self
@@ -366,10 +366,10 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> MultiAssetStrategy<Sym> {
     /// `.long_on(up, down).short_on(down, up)`.
     pub fn long_on<E, X, FE, FX>(mut self, enter: FE, exit: FX) -> Self
     where
-        FE: Fn(&Sym) -> E + 'static,
-        FX: Fn(&Sym) -> X + 'static,
-        E: Indicator<Input = Snapshot<Sym>, Output = bool> + 'static,
-        X: Indicator<Input = Snapshot<Sym>, Output = bool> + 'static,
+        FE: Fn(&Sym) -> E + 'static + Send + Sync,
+        FX: Fn(&Sym) -> X + 'static + Send + Sync,
+        E: Indicator<Input = Snapshot<Sym>, Output = bool> + 'static + Send + Sync,
+        X: Indicator<Input = Snapshot<Sym>, Output = bool> + 'static + Send + Sync,
     {
         self.long_factory = Box::new(move |sym: &Sym| {
             let s: SignalChain<Sym> = Box::new(enter(sym));
@@ -388,10 +388,10 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> MultiAssetStrategy<Sym> {
     /// long on that symbol.
     pub fn short_on<E, X, FE, FX>(mut self, enter: FE, exit: FX) -> Self
     where
-        FE: Fn(&Sym) -> E + 'static,
-        FX: Fn(&Sym) -> X + 'static,
-        E: Indicator<Input = Snapshot<Sym>, Output = bool> + 'static,
-        X: Indicator<Input = Snapshot<Sym>, Output = bool> + 'static,
+        FE: Fn(&Sym) -> E + 'static + Send + Sync,
+        FX: Fn(&Sym) -> X + 'static + Send + Sync,
+        E: Indicator<Input = Snapshot<Sym>, Output = bool> + 'static + Send + Sync,
+        X: Indicator<Input = Snapshot<Sym>, Output = bool> + 'static + Send + Sync,
     {
         self.short_factory = Box::new(move |sym: &Sym| {
             let s: SignalChain<Sym> = Box::new(enter(sym));
@@ -412,8 +412,8 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> MultiAssetStrategy<Sym> {
     /// [`SingleAssetStrategy::long_stop_loss`](crate::strategies::SingleAssetStrategy::long_stop_loss).
     pub fn long_stop_loss<F, L>(mut self, factory: F) -> Self
     where
-        F: Fn(&Sym, &Position) -> L + 'static,
-        L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+        F: Fn(&Sym, &Position) -> L + 'static + Send + Sync,
+        L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
         self.long_stop_factory = Some(Box::new(move |sym: &Sym, pos: &Position| {
             let l: LevelChain<Sym> = Box::new(factory(sym, pos));
@@ -426,8 +426,8 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> MultiAssetStrategy<Sym> {
     /// [`long_stop_loss`](Self::long_stop_loss).
     pub fn long_take_profit<F, L>(mut self, factory: F) -> Self
     where
-        F: Fn(&Sym, &Position) -> L + 'static,
-        L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+        F: Fn(&Sym, &Position) -> L + 'static + Send + Sync,
+        L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
         self.long_target_factory = Some(Box::new(move |sym: &Sym, pos: &Position| {
             let l: LevelChain<Sym> = Box::new(factory(sym, pos));
@@ -441,8 +441,8 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> MultiAssetStrategy<Sym> {
     /// composes from `position.trough()`.
     pub fn short_stop_loss<F, L>(mut self, factory: F) -> Self
     where
-        F: Fn(&Sym, &Position) -> L + 'static,
-        L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+        F: Fn(&Sym, &Position) -> L + 'static + Send + Sync,
+        L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
         self.short_stop_factory = Some(Box::new(move |sym: &Sym, pos: &Position| {
             let l: LevelChain<Sym> = Box::new(factory(sym, pos));
@@ -455,8 +455,8 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> MultiAssetStrategy<Sym> {
     /// [`long_stop_loss`](Self::long_stop_loss).
     pub fn short_take_profit<F, L>(mut self, factory: F) -> Self
     where
-        F: Fn(&Sym, &Position) -> L + 'static,
-        L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+        F: Fn(&Sym, &Position) -> L + 'static + Send + Sync,
+        L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
         self.short_target_factory = Some(Box::new(move |sym: &Sym, pos: &Position| {
             let l: LevelChain<Sym> = Box::new(factory(sym, pos));
@@ -477,8 +477,8 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> MultiAssetStrategy<Sym> {
     /// ([`sizing::equal_weight`](crate::indicators::sizing::equal_weight)).
     pub fn position_sizing<F, S>(mut self, factory: F) -> Self
     where
-        F: Fn(&Sym) -> S + 'static,
-        S: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+        F: Fn(&Sym) -> S + 'static + Send + Sync,
+        S: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
         self.sizing_factory = Box::new(move |sym: &Sym| {
             let l: LevelChain<Sym> = Box::new(factory(sym));
@@ -570,13 +570,13 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> MultiAssetStrategy<Sym> {
     }
 }
 
-impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Default for MultiAssetStrategy<Sym> {
+impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Default for MultiAssetStrategy<Sym> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Strategy for MultiAssetStrategy<Sym> {
+impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for MultiAssetStrategy<Sym> {
     type Input = Snapshot<Sym>;
     type Symbol = Sym;
 

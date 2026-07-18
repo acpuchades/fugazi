@@ -23,7 +23,6 @@
 //! embedded strategy's [`Book`](fugazi::indicators::Book) is seeded to the same
 //! value so its book-anchored sizing recipes stay meaningful.
 
-use std::rc::Rc;
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -147,13 +146,13 @@ impl TryFrom<serde_norway::Value> for AnyStrategyRef {
 
 /// A boxed real-valued source over the single-asset snapshot stream — the
 /// erased form every trailing indicator collapses to.
-type BoxedReal = Box<dyn Indicator<Input = Snapshot<String>, Output = Real>>;
+type BoxedReal = Box<dyn Indicator<Input = Snapshot<String>, Output = Real> + Send + Sync>;
 
 /// A `Clone`-able wrapper around a non-`Clone` trailing indicator: it holds the
 /// closure that builds a fresh instance (rebuilding the embedded strategy from
 /// its spec) and rebuilds on every clone. See the module docs.
 struct RebuildIndicator {
-    build: Rc<dyn Fn() -> BoxedReal>,
+    build: Arc<dyn Fn() -> BoxedReal + Send + Sync>,
     inner: BoxedReal,
 }
 
@@ -161,7 +160,7 @@ impl Clone for RebuildIndicator {
     fn clone(&self) -> Self {
         let inner = (self.build)();
         Self {
-            build: Rc::clone(&self.build),
+            build: Arc::clone(&self.build),
             inner,
         }
     }
@@ -205,7 +204,7 @@ fn make<S>(
     bars_per_year: Real,
 ) -> BoxedReal
 where
-    S: fugazi::Strategy<Symbol = String, Input = Snapshot<String>> + 'static,
+    S: fugazi::Strategy<Symbol = String, Input = Snapshot<String>> + Send + Sync + 'static,
 {
     match metric {
         TrailingMetric::Sharpe => Box::new(Sharpe::new(
@@ -264,7 +263,7 @@ pub(super) fn build(
     let schema = Arc::clone(schema);
     let fallback = strategy.fallback_symbol();
 
-    let build_fn: Rc<dyn Fn() -> BoxedReal> = Rc::new(move || {
+    let build_fn: Arc<dyn Fn() -> BoxedReal + Send + Sync> = Arc::new(move || {
         let sym = fallback.clone();
         match &*spec {
             AnyStrategyRef::Single(s) => make(
