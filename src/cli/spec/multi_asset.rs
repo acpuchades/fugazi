@@ -369,9 +369,10 @@ impl Strategy for DynMultiAssetStrategy {
 }
 
 impl DynMultiAssetStrategy {
-    /// A clone of the shared [`Book`] anchor — for downstream book-side
-    /// diagnostics and initial-equity assertions.
-    #[allow(dead_code)]
+    /// A clone of the shared [`Book`] anchor — hand-off point for
+    /// portfolio-level weight-share templates that want to read
+    /// `!drawdown` / `!return_per_bar` / `!trade_return` against this
+    /// child's aggregate multi-asset book.
     pub fn book(&self) -> Book<String> {
         self.inner.book()
     }

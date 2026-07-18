@@ -174,6 +174,12 @@ struct PortfolioChild<Sym> {
 /// by the [`rebalance_on`](PortfolioBuilder::rebalance_on) gate.
 type RebalanceSignal<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool>>;
 
+/// A real chain over the portfolio's `Snapshot<Sym>` — the shape used by
+/// each child's [`weight_share`](PortfolioBuilder::weight_shares) template
+/// instance. Portfolio normalizes the vector of chain values into weights
+/// at each rebalance-fire.
+type WeightShareChain<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real>>;
+
 pub struct Portfolio<Sym> {
     children: Vec<PortfolioChild<Sym>>,
     inner: Rc<RefCell<PortfolioInner<Sym>>>,
@@ -195,6 +201,13 @@ pub struct Portfolio<Sym> {
     /// behavior. Explicit opt-in via
     /// [`rebalance_on`](PortfolioBuilder::rebalance_on).
     rebalance: RebalanceSignal<Sym>,
+    /// One weight-share indicator per child (in `add(...)` order). When
+    /// non-empty, each rebalance-fire reads their values, normalizes
+    /// `w_i = N_i / Σ N_j`, and uses those as the target weight vector
+    /// instead of the fallback [`WeightPolicy::weights`]. Advanced every
+    /// bar in [`update`](Strategy::update). Empty vector means "no
+    /// per-child overrides — use the policy's weights".
+    share_indicators: Vec<WeightShareChain<Sym>>,
 }
 
 impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
@@ -307,6 +320,11 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
         for child in &mut self.children {
             child.strategy.update(snap.clone());
         }
+        // Advance each per-child weight-share indicator (when installed)
+        // so they warm on the same schedule as the children.
+        for chain in self.share_indicators.iter_mut() {
+            let _ = chain.update(snap.clone());
+        }
         // Advance the rebalance gate over the same snapshot. Reads next
         // in `trade()`; a `None` reading is treated as `false` (safe
         // default — don't rebalance through unsettled data).
@@ -321,14 +339,18 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
 
     fn is_ready(&self) -> bool {
         // A portfolio is ready when every child is ready, the policy is
-        // past its own warm-up (which v1 built-ins report as 0), and the
-        // rebalance signal has settled. A child that's still warming
-        // keeps the whole portfolio out of trade() — matching the
-        // safe-defaults rule (unsettled data ⇒ wait), just aggregated
-        // over every leg. The signal's own stable-period covers its
-        // warm-up + any IIR settling.
+        // past its own warm-up (which v1 built-ins report as 0), the
+        // rebalance signal has settled, and every installed weight-share
+        // indicator has settled. A child that's still warming keeps the
+        // whole portfolio out of trade() — matching the safe-defaults
+        // rule (unsettled data ⇒ wait), just aggregated over every leg.
+        let shares_ready = self
+            .share_indicators
+            .iter()
+            .all(|c| self.bars_seen >= c.stable_period());
         self.bars_seen >= self.policy.warm_up_period()
             && self.bars_seen >= self.rebalance.stable_period()
+            && shares_ready
             && self.children.iter().all(|c| c.strategy.is_ready())
     }
 
@@ -383,6 +405,9 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
         }
         self.policy.reset();
         self.rebalance.reset();
+        for chain in self.share_indicators.iter_mut() {
+            chain.reset();
+        }
         // Each sub-wallet's own reset() restores it to *its own* seed —
         // the per-child allocation captured at build (since that's what
         // `PaperWallet::new(f)` was called with). No re-splitting needed.
@@ -403,13 +428,38 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Portfolio<Sym> {
         }
 
         // Compute target equities from the current weight vector, sized
-        // against aggregate equity. Weight magnitudes are normalized on
-        // use — the policy contract says they needn't sum to 1.0.
-        let weights = self.policy.weights(n);
+        // against aggregate equity. When per-child weight-share
+        // indicators are installed, they win — read each's `.value()`
+        // and normalize; else fall back to the WeightPolicy. Weight
+        // magnitudes are normalized on use — the policy contract says
+        // they needn't sum to 1.0.
+        let weights: Vec<Real> = if !self.share_indicators.is_empty() {
+            assert_eq!(
+                self.share_indicators.len(),
+                n,
+                "Portfolio::rebalance_now: {} share indicators installed for {n} children",
+                self.share_indicators.len(),
+            );
+            let raw: Vec<Real> = self
+                .share_indicators
+                .iter()
+                .map(|c| c.value().unwrap_or(0.0).max(0.0))
+                .collect();
+            let sum: Real = raw.iter().sum();
+            if sum > 0.0 {
+                raw
+            } else {
+                // Every share reads 0 (or None) — fall back to the
+                // policy so we still produce a rebalance direction.
+                self.policy.weights(n)
+            }
+        } else {
+            self.policy.weights(n)
+        };
         assert_eq!(
             weights.len(),
             n,
-            "Portfolio::rebalance_now: policy returned {} weights for {n} children",
+            "Portfolio::rebalance_now: got {} weights for {n} children",
             weights.len()
         );
         let sum_w: Real = weights.iter().sum();
@@ -488,6 +538,7 @@ pub struct PortfolioBuilder<Sym> {
     initial_equity: Real,
     costs: Option<TradingCosts>,
     rebalance: Option<RebalanceSignal<Sym>>,
+    share_indicators: Vec<WeightShareChain<Sym>>,
 }
 
 impl<Sym: 'static> Default for PortfolioBuilder<Sym> {
@@ -498,6 +549,7 @@ impl<Sym: 'static> Default for PortfolioBuilder<Sym> {
             initial_equity: 1.0,
             costs: None,
             rebalance: None,
+            share_indicators: Vec::new(),
         }
     }
 }
@@ -589,6 +641,34 @@ impl<Sym: Clone + Eq + Hash + 'static> PortfolioBuilder<Sym> {
         self
     }
 
+    /// Install one **weight-share indicator per child** — a real-valued
+    /// chain over the portfolio's `Snapshot<Sym>` that produces `N_i`
+    /// per bar. At each rebalance-fire the portfolio normalizes
+    /// `w_i = N_i / Σ N_j` and uses that as the target weight vector,
+    /// overriding the fallback [`WeightPolicy`].
+    ///
+    /// This is the seam for adaptive weighting — an inverse-vol,
+    /// Kelly-fraction, or drawdown-throttled weighting is just a matter
+    /// of writing the right indicator per child. The
+    /// [`YAML surface`](crate::cli) exposes this via
+    /// `weights: !indicator <template>` where the template is
+    /// instantiated per-child with `!arg SYM` / `!arg CHILD_NAME`
+    /// substitution.
+    ///
+    /// The vector must have exactly `children.len()` entries at
+    /// [`build`](Self::build). Every share value read `None` (still
+    /// warming) or negative-clamped-to-zero on read; if the whole
+    /// vector sums to `0.0` the portfolio falls back to
+    /// [`WeightPolicy::weights`] for that fire.
+    ///
+    /// # Panics
+    /// Panics at build if the vector length doesn't match the number of
+    /// children.
+    pub fn weight_shares(mut self, shares: Vec<WeightShareChain<Sym>>) -> Self {
+        self.share_indicators = shares;
+        self
+    }
+
     /// Realize the [`Portfolio`] — resolve the initial weight vector from
     /// the policy, split `initial_equity` across children accordingly,
     /// seed one [`PaperWallet`](crate::PaperWallet) per child at that
@@ -603,10 +683,17 @@ impl<Sym: Clone + Eq + Hash + 'static> PortfolioBuilder<Sym> {
             initial_equity,
             costs,
             rebalance,
+            share_indicators,
         } = self;
         assert!(
             !children.is_empty(),
             "PortfolioBuilder::build: at least one child strategy must be added"
+        );
+        assert!(
+            share_indicators.is_empty() || share_indicators.len() == children.len(),
+            "PortfolioBuilder::build: {} share indicators supplied for {} children",
+            share_indicators.len(),
+            children.len(),
         );
         let policy: Box<dyn WeightPolicy> = policy.unwrap_or_else(|| Box::new(policy::EqualWeight));
         let n = children.len();
@@ -630,6 +717,7 @@ impl<Sym: Clone + Eq + Hash + 'static> PortfolioBuilder<Sym> {
             initial_equity,
             initial_allocations: allocations,
             rebalance,
+            share_indicators,
         }
     }
 }

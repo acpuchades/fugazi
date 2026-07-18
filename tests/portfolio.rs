@@ -684,6 +684,67 @@ fn scenario_b_cash_drains_position_phase_queues_downsize_next_fire_converges() {
 }
 
 #[test]
+fn weight_shares_override_weight_policy_at_rebalance() {
+    // Two buy-and-hold children with static Value(3) / Value(1) share
+    // indicators. Rebalance every bar → aggregate equity should split
+    // 75% / 25% between the two subs. Policy would otherwise be
+    // EqualWeight (50/50), so this verifies the share indicators are
+    // actually consulted and win.
+    use fugazi::indicators::{Const, Every, Value};
+
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(1_000.0)
+        .add(
+            "big",
+            SingleAssetStrategy::<&'static str>::with_initial_equity("A", 500.0)
+                .long_on(
+                    Const::<Snapshot<&'static str>>::new(true),
+                    Const::<Snapshot<&'static str>>::new(false),
+                )
+                .position_sizing(Value::<Snapshot<&'static str>>::new(0.5)),
+        )
+        .add(
+            "small",
+            SingleAssetStrategy::<&'static str>::with_initial_equity("B", 500.0)
+                .long_on(
+                    Const::<Snapshot<&'static str>>::new(true),
+                    Const::<Snapshot<&'static str>>::new(false),
+                )
+                .position_sizing(Value::<Snapshot<&'static str>>::new(0.5)),
+        )
+        .weight_shares(vec![
+            Box::new(Value::<Snapshot<&'static str>>::new(3.0)),
+            Box::new(Value::<Snapshot<&'static str>>::new(1.0)),
+        ])
+        .rebalance_on(Every::<Snapshot<&'static str>>::new(1))
+        .build();
+    let mut wallet = portfolio.wallet_view();
+    // Flat prices throughout — the divergence in sub-equities comes
+    // purely from the rebalance moving cash to hit the 75/25 target.
+    let snaps: Vec<Snapshot<&'static str>> = (0..4)
+        .map(|_| {
+            let mut s = Snapshot::new();
+            s.push(Some("A"), None, Atom::new(flat_bar(100.0)));
+            s.push(Some("B"), None, Atom::new(flat_bar(100.0)));
+            s
+        })
+        .collect();
+    let _report = backtest::run(&mut portfolio, &mut wallet, snaps);
+
+    // Aggregate equity 1000 → sub 0 gets 750, sub 1 gets 250.
+    let e0 = wallet.sub_equity(0).0;
+    let e1 = wallet.sub_equity(1).0;
+    assert!(
+        (e0 - 750.0).abs() < 5.0,
+        "share-3 sub should hold ~750 equity; got {e0}",
+    );
+    assert!(
+        (e1 - 250.0).abs() < 5.0,
+        "share-1 sub should hold ~250 equity; got {e1}",
+    );
+}
+
+#[test]
 fn cash_covered_rebalance_queues_no_new_fills() {
     // A close cousin of scenario A: two children with cash headroom (50%
     // sizing) plus a price move that shifts equity. Verify the rebalance

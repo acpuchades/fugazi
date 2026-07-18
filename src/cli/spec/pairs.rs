@@ -193,6 +193,14 @@ impl DynPairsStrategy {
     pub fn warm_up_period(&self) -> usize {
         self.inner.warm_up_period()
     }
+
+    /// The strategy's shared [`Book<String>`] — hand-off point for
+    /// portfolio-level weight-share templates that want to read
+    /// `!drawdown` / `!return_per_bar` / `!trade_return` against this
+    /// child's aggregate two-leg book.
+    pub fn book(&self) -> Book<String> {
+        self.inner.book()
+    }
 }
 
 impl Strategy for DynPairsStrategy {

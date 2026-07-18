@@ -49,13 +49,15 @@ use fugazi::portfolio::Portfolio;
 use fugazi::prelude::*;
 use fugazi::types::Snapshot;
 
-use crate::dyn_indicator::{AsBool, DynIndicator};
+use crate::dyn_indicator::{AsBool, AsReal, DynIndicator};
 
 use super::basket::BasketStrategySpec;
+use super::expr::ExprSpec;
 use super::multi_asset::MultiAssetStrategySpec;
 use super::pairs::PairsStrategySpec;
 use super::preset::StrategyRef;
 use super::signal::SignalSpec;
+use super::template::SpecTemplate;
 
 /// A whole `portfolio.yml`: an ordered list of children plus an optional
 /// weight policy that governs how the initial cash is split at build.
@@ -224,11 +226,16 @@ fn is_preset_tag(name: &str) -> bool {
     )
 }
 
-/// YAML surface for the [`WeightPolicy`] governing the initial cash split.
+/// YAML surface for the [`WeightPolicy`] governing the initial cash split
+/// and each rebalance target.
 ///
-/// Externally tagged: `!equal_weight` (unit) picks
-/// [`EqualWeight`](fugazi::portfolio::policy::EqualWeight); `!fixed [w1, w2, …]`
-/// (tuple over a plain list) picks [`Fixed`](fugazi::portfolio::policy::Fixed).
+/// Externally tagged:
+/// - `!equal_weight` — every child's N = 1 (stateless uniform).
+/// - `!fixed [w1, w2, …]` — fixed literal weights, one per child.
+/// - `!indicator <template>` — an [`ExprSpec`] template built per child.
+///   At each rebalance-fire the portfolio reads `N_i` from child i's
+///   indicator instance and normalizes `w_i = N_i / Σ N_j`.
+///
 /// Weights are magnitudes and needn't sum to `1.0` — the portfolio
 /// normalizes on use.
 #[derive(Debug, Clone, Deserialize)]
@@ -239,6 +246,12 @@ pub enum WeightPolicySpec {
     /// A fixed weight vector of length `children.len()`. Panics at build
     /// if the vector's length doesn't match the number of children.
     Fixed(Vec<Real>),
+    /// A per-child indicator template. Instantiated once per child at
+    /// build (with the child's `!arg SYM` — its symbol for single-asset
+    /// children — and `!arg CHILD_NAME` in scope); each instance is
+    /// advanced every bar by the portfolio, and read into a weight at
+    /// rebalance-fire.
+    Indicator(SpecTemplate<ExprSpec>),
 }
 
 impl PortfolioSpec {
@@ -315,6 +328,12 @@ impl PortfolioSpec {
         let mut max_stable = 0usize;
         let mut max_warm_up = 0usize;
         let mut builder = Portfolio::<String>::builder().with_initial_equity(total_initial_equity);
+        // Capture each child's Book at build so weight-share templates
+        // below can anchor `!drawdown` / `!return_per_bar` /
+        // `!trade_return` against the child's own book (not a dummy).
+        // The Book handle is a shared `Rc<RefCell<_>>`, so cloning is
+        // cheap and the template's view stays in sync with the child.
+        let mut child_books: Vec<Book<String>> = Vec::with_capacity(self.children.len());
         for (i, c) in self.children.iter().enumerate() {
             let name = c
                 .name
@@ -327,24 +346,28 @@ impl PortfolioSpec {
                     let built = s.build(child_equity, schema);
                     stable = built.stable_period();
                     warm_up = built.warm_up_period();
+                    child_books.push(built.book());
                     builder.add(name, built)
                 }
                 PortfolioChildStrategy::Pairs(p) => {
                     let built = p.build(child_equity, schema);
                     stable = built.stable_period();
                     warm_up = built.warm_up_period();
+                    child_books.push(built.book());
                     builder.add(name, built)
                 }
                 PortfolioChildStrategy::Basket(b) => {
                     let built = b.build(child_equity, schema);
                     stable = built.stable_period();
                     warm_up = built.warm_up_period();
+                    child_books.push(built.book());
                     builder.add(name, built)
                 }
                 PortfolioChildStrategy::Multi(m) => {
                     let built = m.build(child_equity, schema);
                     stable = built.stable_period();
                     warm_up = built.warm_up_period();
+                    child_books.push(built.book());
                     builder.add(name, built)
                 }
             };
@@ -356,11 +379,64 @@ impl PortfolioSpec {
         }
         // Install the policy on the builder; on rebalance-fire bars
         // `Portfolio` re-queries `WeightPolicy::weights` to compute new
-        // target equities from the aggregate.
+        // target equities from the aggregate. When the policy is
+        // `!indicator`, we also build one weight-share indicator per
+        // child below (which wins over the underlying policy on fire).
         builder = match &self.weights {
             Some(WeightPolicySpec::Fixed(w)) => builder.weights(Fixed::new(w.clone())),
-            Some(WeightPolicySpec::EqualWeight) | None => builder.weights(EqualWeight),
+            Some(WeightPolicySpec::EqualWeight)
+            | Some(WeightPolicySpec::Indicator(_))
+            | None => builder.weights(EqualWeight),
         };
+        // Weight-share indicators (only under !indicator): one
+        // instance per child. Each carries the child's `CHILD_NAME`
+        // (always) and `SYM` (single-asset only — a template using
+        // `!arg SYM` against a basket / multi / pairs child errors at
+        // build). The Book anchor is currently a dummy per-child book
+        // seeded at the allocation; per-child book plumbing (wiring
+        // the actual child's book so `!drawdown` / `!return_per_bar`
+        // read against real state) is a follow-up.
+        if let Some(WeightPolicySpec::Indicator(template)) = &self.weights {
+            let mut shares: Vec<
+                Box<
+                    dyn fugazi::indicator::Indicator<
+                        Input = Snapshot<String>,
+                        Output = Real,
+                    >,
+                >,
+            > = Vec::new();
+            for (i, c) in self.children.iter().enumerate() {
+                let name = c
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| format!("child_{i}"));
+                let mut args: HashMap<String, Value> = HashMap::new();
+                args.insert(
+                    "CHILD_NAME".to_string(),
+                    Value::String(name.clone()),
+                );
+                if let PortfolioChildStrategy::Single(s) = &c.strategy {
+                    args.insert(
+                        "SYM".to_string(),
+                        Value::String(s.symbol().to_string()),
+                    );
+                }
+                let concrete = template.build(&args).unwrap_or_else(|e| {
+                    panic!(
+                        "PortfolioSpec::build: weight_share template failed \
+                         for child '{name}' (index {i}): {e}"
+                    )
+                });
+                let anchor = Position::new();
+                let dyn_ind: Box<dyn DynIndicator> =
+                    concrete.build(&anchor, &child_books[i], schema);
+                let real_ind = AsReal::new(dyn_ind);
+                max_stable = max_stable.max(real_ind.stable_period());
+                max_warm_up = max_warm_up.max(real_ind.warm_up_period());
+                shares.push(Box::new(real_ind));
+            }
+            builder = builder.weight_shares(shares);
+        }
         // Install the rebalance gate — a boolean signal over
         // `Snapshot<String>`. Built against a dummy `Position` and a
         // fresh `Book` because a portfolio-level rebalance signal has no
@@ -394,9 +470,15 @@ impl PortfolioSpec {
     /// does internally; kept in sync by construction (both consult the same
     /// policy via [`WeightPolicy::weights`]).
     fn resolve_allocations(&self, total: Real, n: usize) -> Vec<Real> {
+        // For the initial allocation split, `!indicator` behaves as
+        // `!equal_weight` — the indicators haven't seen any bars yet,
+        // so there's no read to normalize on. First rebalance-fire
+        // then hands weighting to the per-child shares.
         let policy: Box<dyn WeightPolicy> = match &self.weights {
             Some(WeightPolicySpec::Fixed(w)) => Box::new(Fixed::new(w.clone())),
-            Some(WeightPolicySpec::EqualWeight) | None => Box::new(EqualWeight),
+            Some(WeightPolicySpec::EqualWeight)
+            | Some(WeightPolicySpec::Indicator(_))
+            | None => Box::new(EqualWeight),
         };
         let weights = policy.weights(n);
         let sum: Real = weights.iter().sum();
@@ -670,6 +752,32 @@ mod tests {
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         assert!(spec.rebalance_on.is_none());
         // Should build without failure.
+        let _portfolio = spec.build(1_000.0, &Schema::empty(), None);
+    }
+
+    #[test]
+    fn parses_indicator_weight_policy() {
+        // `weights: !indicator <template>` picks the per-child indicator
+        // policy. Each child gets its own instance of the template built
+        // with `!arg SYM` (single-asset only) and `!arg CHILD_NAME`.
+        // Nested `!tag` inside the `!indicator` payload must be wrapped
+        // in the block form since serde_norway doesn't accept adjacent
+        // top-level tags on the same line.
+        let yaml = r#"
+            weights:
+              !indicator
+              close:
+                source:
+                  pick:
+                    symbol: !arg SYM
+            children:
+              - strategy: !buy_and_hold { symbol: A }
+              - strategy: !buy_and_hold { symbol: B }
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        assert!(matches!(spec.weights, Some(WeightPolicySpec::Indicator(_))));
+        // Should build cleanly — each child's template instance uses its
+        // own symbol via !arg SYM.
         let _portfolio = spec.build(1_000.0, &Schema::empty(), None);
     }
 
