@@ -470,23 +470,29 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     let text = args.strategy.read().context("reading strategy")?;
     let label = args.strategy.label();
     let base = args.strategy.base_dir();
+    let params_label = params_label(&param_table);
     match args.strategy.kind {
         StrategyKind::Single => {
             let strategy = spec::StrategyRef::from_text_with_params_in(&text, &param_table, &base, &label)
                 .with_context(|| parse_error_hint(&args.strategy))?;
             if !args.quiet {
-                style::print_header("check", "parse and validate a strategy spec");
-                println!("{}: ok (symbol {})", label, strategy.symbol());
+                print_check_report(
+                    "parse and validate a strategy spec",
+                    &label,
+                    &params_label,
+                    &format!("symbol {}", strategy.symbol()),
+                );
             }
         }
         StrategyKind::Pairs => {
             let spec = spec::PairsStrategySpec::from_text_with_params_in(&text, &param_table, &base, &label)
                 .with_context(|| parse_error_hint(&args.strategy))?;
             if !args.quiet {
-                style::print_header("check", "parse and validate a pairs strategy spec");
-                println!(
-                    "{}: ok (pair {} / {})",
-                    label, spec.left, spec.right,
+                print_check_report(
+                    "parse and validate a pairs strategy spec",
+                    &label,
+                    &params_label,
+                    &format!("pair {} / {}", spec.left, spec.right),
                 );
             }
         }
@@ -498,10 +504,11 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             let spec = spec::BasketStrategySpec::from_text_with_params_in(&text, &param_table, &base, &label)
                 .with_context(|| parse_error_hint(&args.strategy))?;
             if !args.quiet {
-                style::print_header("check", "parse and validate a basket strategy spec");
-                println!(
-                    "{}: ok (selection {:?})",
-                    label, spec.selection,
+                print_check_report(
+                    "parse and validate a basket strategy spec",
+                    &label,
+                    &params_label,
+                    &format!("selection {:?}", spec.selection),
                 );
             }
         }
@@ -512,7 +519,6 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             let spec = spec::MultiAssetStrategySpec::from_text_with_params_in(&text, &param_table, &base, &label)
                 .with_context(|| parse_error_hint(&args.strategy))?;
             if !args.quiet {
-                style::print_header("check", "parse and validate a multi-asset strategy spec");
                 let sides: Vec<&str> = [
                     spec.long.as_ref().map(|_| "long"),
                     spec.short.as_ref().map(|_| "short"),
@@ -525,7 +531,12 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
                 } else {
                     sides.join(" + ")
                 };
-                println!("{label}: ok ({sides})");
+                print_check_report(
+                    "parse and validate a multi-asset strategy spec",
+                    &label,
+                    &params_label,
+                    &sides,
+                );
             }
         }
         StrategyKind::Portfolio => {
@@ -537,17 +548,32 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             let spec = spec::PortfolioSpec::from_text_with_params_in(&text, &param_table, &base, &label)
                 .with_context(|| parse_error_hint(&args.strategy))?;
             if !args.quiet {
-                style::print_header("check", "parse and validate a portfolio strategy spec");
-                println!(
-                    "{}: ok ({} child strateg{})",
-                    label,
-                    spec.children.len(),
-                    if spec.children.len() == 1 { "y" } else { "ies" },
+                let n = spec.children.len();
+                print_check_report(
+                    "parse and validate a portfolio strategy spec",
+                    &label,
+                    &params_label,
+                    &format!("{n} child strateg{}", if n == 1 { "y" } else { "ies" }),
                 );
             }
         }
     }
     Ok(())
+}
+
+/// One-shape `check` output: the standard header, an `inputs` block with the
+/// spec label and any resolved params, then a `result` block with `ok` and
+/// the per-kind summary detail (`symbol BTC`, `pair … / …`, `N child …`).
+/// Mirrors the section shape of `run` / `optimize`.
+fn print_check_report(description: &str, input_label: &str, params: &str, detail: &str) {
+    style::print_header("check", description);
+    style::print_section("inputs");
+    style::print_field("spec", input_label, 8);
+    style::print_field("params", params, 8);
+    println!();
+    style::print_section("result");
+    let ok = style::green("ok");
+    style::print_field("status", &format!("{ok} · {detail}"), 8);
 }
 
 fn check_costs(args: CheckCostsArgs) -> Result<()> {
@@ -575,14 +601,20 @@ fn check_costs(args: CheckCostsArgs) -> Result<()> {
         } else {
             format!("{n_scoped} scoped override(s)")
         };
-        let labels: Vec<String> = args
-            .specs
-            .iter()
-            .map(|_| "(spec)".to_string())
-            .collect();
-        println!(
-            "{}: ok ({default_note}; {scope_note})",
-            labels.join(", "),
+        let n_specs = args.specs.len();
+        style::print_section("inputs");
+        style::print_field(
+            "specs",
+            &format!("{n_specs} spec{}", if n_specs == 1 { "" } else { "s" }),
+            8,
+        );
+        println!();
+        style::print_section("result");
+        let ok = style::green("ok");
+        style::print_field(
+            "status",
+            &format!("{ok} · {default_note}; {scope_note}"),
+            8,
         );
     }
     Ok(())
@@ -605,14 +637,27 @@ fn check_overlay(args: CheckOverlayArgs) -> Result<()> {
         style::print_header("check", "parse and validate an overlay spec");
         let labels: Vec<String> = args.overlays.iter().map(|s| s.label()).collect();
         let n_cols = columns.len();
-        println!(
-            "{}: ok ({} overlay{} across {} column{}: {})",
-            labels.join(", "),
-            overlays.len(),
-            if overlays.len() == 1 { "" } else { "s" },
-            n_cols,
-            if n_cols == 1 { "" } else { "s" },
-            columns.join(", "),
+        style::print_section("inputs");
+        style::print_field("specs", &labels.join(", "), 8);
+        style::print_field(
+            "params",
+            &params_label(&params::table(&args.params).unwrap_or_default()),
+            8,
+        );
+        println!();
+        style::print_section("result");
+        let ok = style::green("ok");
+        style::print_field(
+            "status",
+            &format!(
+                "{ok} · {} overlay{} · {} column{}: {}",
+                overlays.len(),
+                if overlays.len() == 1 { "" } else { "s" },
+                n_cols,
+                if n_cols == 1 { "" } else { "s" },
+                columns.join(", "),
+            ),
+            8,
         );
     }
     Ok(())

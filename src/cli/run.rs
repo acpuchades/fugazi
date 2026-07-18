@@ -159,11 +159,8 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
     if !opts.quiet {
         let costs_active = !opts.cost_config.resolve(&symbol, effective_freq).is_none();
         style::print_header("run", "backtest a strategy over CSV series");
-        print_skipped_overlay_warning(&skipped_overlay_columns);
+        style::print_warns(&collect_warnings(&skipped_overlay_columns, no_cost_warning));
         print_inputs_block(opts, start, end, atoms.len(), costs_active);
-        if no_cost_warning {
-            print_no_cost_warning();
-        }
     }
 
     let iter = backtest::run_iteration(strategy, &atoms, &inputs);
@@ -172,7 +169,8 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
     // them. The console stream matches the CSV row-for-row.
     write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
     if !opts.quiet {
-        println!("\n{}", style::bold("fills"));
+        println!();
+        style::print_section("fills");
         stream_fills(&iter);
     }
     write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
@@ -284,10 +282,8 @@ pub fn run_pairs(
                 .resolve(&spec.right, effective_freq)
                 .is_none();
         style::print_header("run", "pair-trade a two-leg strategy over CSV series");
+        style::print_warns(&collect_warnings(&[], no_cost_warning));
         print_pairs_inputs_block(opts, spec, start, end, bars.len(), costs_active);
-        if no_cost_warning {
-            print_no_cost_warning();
-        }
     }
 
     let iter =
@@ -295,7 +291,8 @@ pub fn run_pairs(
 
     write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
     if !opts.quiet {
-        println!("\n{}", style::bold("fills"));
+        println!();
+        style::print_section("fills");
         stream_fills(&iter);
     }
     write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
@@ -430,10 +427,8 @@ pub fn run_basket(
             .iter()
             .any(|s| !opts.cost_config.resolve(s, effective_freq).is_none());
         style::print_header("run", "trade a basket across an N-symbol universe");
+        style::print_warns(&collect_warnings(&[], no_cost_warning));
         print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active);
-        if no_cost_warning {
-            print_no_cost_warning();
-        }
     }
 
     let iter =
@@ -441,7 +436,8 @@ pub fn run_basket(
 
     write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
     if !opts.quiet {
-        println!("\n{}", style::bold("fills"));
+        println!();
+        style::print_section("fills");
         stream_fills(&iter);
     }
     write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
@@ -566,10 +562,8 @@ pub fn run_multi(
             "run",
             "trade a multi-asset portfolio across an N-symbol universe",
         );
+        style::print_warns(&collect_warnings(&[], no_cost_warning));
         print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active);
-        if no_cost_warning {
-            print_no_cost_warning();
-        }
     }
 
     let iter =
@@ -577,7 +571,8 @@ pub fn run_multi(
 
     write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
     if !opts.quiet {
-        println!("\n{}", style::bold("fills"));
+        println!();
+        style::print_section("fills");
         stream_fills(&iter);
     }
     write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
@@ -708,17 +703,16 @@ pub fn run_portfolio(
             "run",
             "trade a composite portfolio of heterogeneous child strategies",
         );
+        style::print_warns(&collect_warnings(&[], no_cost_warning));
         print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active);
-        if no_cost_warning {
-            print_no_cost_warning();
-        }
     }
 
     let iter = backtest::run_iteration_portfolio(spec, &bars, &snapshots, &inputs);
 
     write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
     if !opts.quiet {
-        println!("\n{}", style::bold("fills"));
+        println!();
+        style::print_section("fills");
         stream_fills(&iter);
     }
     write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
@@ -806,7 +800,7 @@ fn print_basket_inputs_block(
     bars: usize,
     costs_active: bool,
 ) {
-    println!("{}", style::bold("inputs"));
+    style::print_section("inputs");
     print_field("strategy", opts.strategy_label);
     print_field(
         "universe",
@@ -858,7 +852,7 @@ fn print_pairs_inputs_block(
     bars: usize,
     costs_active: bool,
 ) {
-    println!("{}", style::bold("inputs"));
+    style::print_section("inputs");
     print_field("strategy", opts.strategy_label);
     print_field("pair", &format!("{} / {}", spec.left, spec.right));
     print_field("params", opts.params);
@@ -971,12 +965,49 @@ fn write_returns_csv(iter: &IterationResult, path: &Path) -> Result<()> {
 }
 
 /// Echo each fill of `iter` to the console — one line per row, matching
-/// the `fills.csv` order.
+/// the `fills.csv` order. Prints a dim header row first so the columns are
+/// self-labelling.
 fn stream_fills(iter: &IterationResult) {
+    // No header for an empty stream — a bare "fills" title makes it obvious.
+    if iter.report.fills.is_empty() {
+        return;
+    }
+    let symbol_w = iter
+        .report
+        .fills
+        .iter()
+        .map(|f| f.order.symbol.len())
+        .max()
+        .unwrap_or(6)
+        .max(6);
+    let costed = iter.costs_active;
+    let header = if costed {
+        format!(
+            "  {time_col:<10}  {sym_col:<symbol_w$}  {side_col:<4}  {units_col:>10}  {price_col:>8}  {kind_col:<8}  {fee_col}",
+            time_col = "time",
+            sym_col = "symbol",
+            side_col = "side",
+            units_col = "units",
+            price_col = "price",
+            kind_col = "kind",
+            fee_col = "fee",
+        )
+    } else {
+        format!(
+            "  {time_col:<10}  {sym_col:<symbol_w$}  {side_col:<4}  {units_col:>10}  {price_col:>8}  {kind_col}",
+            time_col = "time",
+            sym_col = "symbol",
+            side_col = "side",
+            units_col = "units",
+            price_col = "price",
+            kind_col = "kind",
+        )
+    };
+    println!("{}", style::dim(&header));
     for fill in &iter.report.fills {
         let order = &fill.order;
         let time = &iter.bars[fill.bar];
-        let side = match order.side {
+        let side_txt = match order.side {
             Side::Buy => "buy",
             Side::Sell => "sell",
         };
@@ -985,14 +1016,14 @@ fn stream_fills(iter: &IterationResult) {
             OrderKind::Stop => "stop",
             OrderKind::TakeProfit => "take_profit",
         };
-        let side_padded = format!("{side:<4}");
+        let side_padded = format!("{side_txt:<4}");
         let side_colored = match order.side {
             Side::Buy => style::green(&side_padded),
             Side::Sell => style::red(&side_padded),
         };
-        if iter.costs_active {
+        if costed {
             println!(
-                "  {}  {:<6}  {side_colored} {:.4} @ {:.2}  {} · fee {:.4}",
+                "  {}  {:<symbol_w$}  {side_colored}  {:>10.4}  {:>8.2}  {:<8}  {:.4}",
                 style::dim(time),
                 order.symbol,
                 order.units,
@@ -1002,7 +1033,7 @@ fn stream_fills(iter: &IterationResult) {
             );
         } else {
             println!(
-                "  {}  {:<6}  {side_colored} {:.4} @ {:.2}  {}",
+                "  {}  {:<symbol_w$}  {side_colored}  {:>10.4}  {:>8.2}  {}",
                 style::dim(time),
                 order.symbol,
                 order.units,
@@ -1086,7 +1117,7 @@ fn writer(path: &Path) -> Result<csv::Writer<std::fs::File>> {
 /// The "inputs" block: what this run was given. Timing (start/finish) lives
 /// in the result block, since it's not an input.
 fn print_inputs_block(opts: &RunOptions, start: &str, end: &str, bars: usize, costs_active: bool) {
-    println!("{}", style::bold("inputs"));
+    style::print_section("inputs");
     print_field("strategy", opts.strategy_label);
     print_field("params", opts.params);
     print_field("period", &format!("{start} → {end} ({bars} bars)"));
@@ -1099,32 +1130,33 @@ fn print_inputs_block(opts: &RunOptions, start: &str, end: &str, bars: usize, co
     print_field("output", &opts.out_dir.display().to_string());
 }
 
-/// The default-cost warning banner: nothing was set, so every fill was
-/// frictionless.
-fn print_no_cost_warning() {
-    let msg = "no cost model set — commission, spread, and slippage are zero; results are frictionless";
-    println!("  {} {msg}", style::yellow("warn"));
-}
-
-/// The "skipped overlay columns" banner: non-numeric CSV columns that were
-/// dropped from the overlay [`Schema`] because at least one value failed to
-/// parse as [`Real`]. Silent when nothing was skipped.
-fn print_skipped_overlay_warning(skipped: &[String]) {
-    if skipped.is_empty() {
-        return;
+/// Collect the top-of-run warnings — skipped overlay columns and the no-cost
+/// notice — into one list so [`style::print_warns`] can emit them at column 0
+/// above the `inputs` section (with a trailing blank line only when at least
+/// one fires). Keeps `warn` from masquerading as an input field.
+fn collect_warnings(skipped: &[String], no_cost: bool) -> Vec<String> {
+    let mut w = Vec::new();
+    if !skipped.is_empty() {
+        w.push(format!(
+            "skipped non-numeric overlay column{}: {} — not accessible via `!get`",
+            if skipped.len() == 1 { "" } else { "s" },
+            skipped.join(", "),
+        ));
     }
-    let msg = format!(
-        "skipped non-numeric overlay column{}: {} \
-         — not accessible via `!get`",
-        if skipped.len() == 1 { "" } else { "s" },
-        skipped.join(", "),
-    );
-    println!("  {} {msg}", style::yellow("warn"));
+    if no_cost {
+        w.push(
+            "no cost model set — commission, spread, and slippage are zero; \
+             results are frictionless"
+                .to_string(),
+        );
+    }
+    w
 }
 
 /// The "result" block: the run's outputs, then its wall-clock timing.
 fn print_result_block(opts: &RunOptions, s: &Summary, started: SystemTime, finished: SystemTime) {
-    println!("\n{}", style::bold("result"));
+    println!();
+    style::print_section("result");
     print_field("bars", &s.bars.to_string());
     print_field("fills", &s.fills.to_string());
     let delta = s.final_equity - opts.cash;
@@ -1157,7 +1189,8 @@ fn print_metrics_block(
     gross: Option<&metrics::Metrics>,
     bar_freq: Option<Frequency>,
 ) {
-    println!("\n{}", style::bold("metrics"));
+    println!();
+    style::print_section("metrics");
     if let Some(measured) = measured {
         print_field("measured", measured);
     }
@@ -1207,6 +1240,10 @@ fn print_metrics_block(
 /// Compose the `holding` line: `avg N bars (~Xu) · min N (~Xu) · max N (~Xu)`,
 /// the duration twin dropped when `bar_freq` is unknown. `None` when the run
 /// booked no trades (all three legs are absent).
+///
+/// When min, max, and avg coincide (one closed trade, or every trade held the
+/// exact same number of bars), collapses to a single `N bars (~Xu)` — no point
+/// showing three identical numbers.
 fn format_holding_line(m: &metrics::Metrics, bar_freq: Option<Frequency>) -> Option<String> {
     let avg = m.trades.average_bars;
     let min = m.trades.min_bars.map(|n| n as Real);
@@ -1214,12 +1251,24 @@ fn format_holding_line(m: &metrics::Metrics, bar_freq: Option<Frequency>) -> Opt
     if avg.is_none() && min.is_none() && max.is_none() {
         return None;
     }
-    let leg = |label: &str, bars: Option<Real>, precision: usize| -> Option<String> {
-        let bars = bars?;
+    let bars_str = |bars: Real, precision: usize| -> String {
         let dur = bar_freq
             .map(|f| format!(" (~{})", format_bars_as_duration(bars, f)))
             .unwrap_or_default();
-        Some(format!("{label} {bars:.*} bars{dur}", precision))
+        format!("{bars:.*} bars{dur}", precision)
+    };
+    // Collapse to a single value when the three legs coincide (either one
+    // trade, or every trade held the exact same number of bars). Uses a
+    // 1e-6 tolerance since `avg` is a Real from a running mean.
+    if let (Some(avg), Some(min), Some(max)) = (avg, min, max)
+        && (avg - min).abs() < 1e-6
+        && (avg - max).abs() < 1e-6
+    {
+        let precision = if avg.fract().abs() < 1e-6 { 0 } else { 1 };
+        return Some(bars_str(avg, precision));
+    }
+    let leg = |label: &str, bars: Option<Real>, precision: usize| -> Option<String> {
+        Some(format!("{label} {}", bars_str(bars?, precision)))
     };
     let parts: Vec<String> = [leg("avg", avg, 1), leg("min", min, 0), leg("max", max, 0)]
         .into_iter()
@@ -1268,7 +1317,8 @@ fn format_pct(v: Option<Real>) -> String {
 /// priced run, and printing whole-run gross next to windowed-net numbers would
 /// mix aggregation scopes.
 fn print_windowed_metrics_block(windows: &[metrics::WindowMetrics]) {
-    println!("\n{}", style::bold("windowed metrics"));
+    println!();
+    style::print_section("windowed metrics");
     print_field(
         "windows",
         &format!(
@@ -1377,7 +1427,7 @@ fn format_elapsed(d: Duration) -> String {
 }
 
 fn print_field(label: &str, value: &str) {
-    println!("  {}{value}", style::dim(&format!("{label:<9}")));
+    style::print_field(label, value, 9);
 }
 
 /// Format a [`SystemTime`] as `YYYY-MM-DD HH:MM:SS UTC`, without pulling in

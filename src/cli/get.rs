@@ -360,6 +360,7 @@ fn run_candles(
 
     if !args.quiet {
         style::print_header("get", "fetch OHLCV candles from remote providers");
+        print_inputs_block(&args, since_ts, until_ts, since_specified, &overlay_columns);
     }
 
     // Expand each `FetchSpec` into one `Series` per `(symbol, interval)` — the
@@ -478,14 +479,7 @@ fn run_candles(
         .with_context(|| format!("writing {}", args.output.display()))?;
 
     if !args.quiet {
-        println!(
-            "{}: wrote {} rows across {} symbol{}/{} interval series",
-            args.output.display(),
-            rows.len(),
-            n_symbols,
-            if n_symbols == 1 { "" } else { "s" },
-            series.len(),
-        );
+        print_result_block(rows.len(), n_symbols, series.len());
     }
     Ok(())
 }
@@ -518,6 +512,7 @@ fn run_overlay_columns(
 
     if !args.quiet {
         style::print_header("get", "fetch overlay columns from remote providers");
+        print_inputs_block(&args, since_ts, until_ts, false, &[]);
     }
 
     // One `Series` per (symbol, interval). `stable` is 0: there are no computed
@@ -561,14 +556,7 @@ fn run_overlay_columns(
         .with_context(|| format!("writing {}", args.output.display()))?;
 
     if !args.quiet {
-        println!(
-            "{}: wrote {} rows across {} symbol{}/{} interval series",
-            args.output.display(),
-            rows.len(),
-            n_symbols,
-            if n_symbols == 1 { "" } else { "s" },
-            series.len(),
-        );
+        print_result_block(rows.len(), n_symbols, series.len());
     }
     Ok(())
 }
@@ -1202,6 +1190,73 @@ fn unknown_provider_error(other: &str) -> String {
         "unknown provider {other:?}. Known providers: {}",
         known.join(", ")
     )
+}
+
+/// The `get` inputs block — same structural shape as `run`/`optimize`:
+/// specs (what was asked for), period (resolved date range), overlay columns
+/// (when present), output file. Uses the shared `style::print_field` so the
+/// label column lines up across subcommands.
+fn print_inputs_block(
+    args: &GetArgs,
+    since: Timestamp,
+    until: Timestamp,
+    since_specified: bool,
+    overlay_columns: &[String],
+) {
+    style::print_section("inputs");
+    let specs = if args.specs.len() == 1 {
+        args.specs[0].clone()
+    } else {
+        args.specs.join(", ")
+    };
+    style::print_field("specs", &specs, 8);
+    let period_note = if since_specified { "" } else { " (default)" };
+    style::print_field(
+        "period",
+        &format!(
+            "{}{period_note} → {}",
+            format_date(since),
+            format_date(until),
+        ),
+        8,
+    );
+    if !overlay_columns.is_empty() {
+        style::print_field(
+            "overlay",
+            &format!(
+                "{} column{}: {}",
+                overlay_columns.len(),
+                if overlay_columns.len() == 1 { "" } else { "s" },
+                overlay_columns.join(", "),
+            ),
+            8,
+        );
+    }
+    style::print_field("output", &args.output.display().to_string(), 8);
+}
+
+/// The `get` result block — rows written, symbol/interval-series count.
+fn print_result_block(rows: usize, n_symbols: usize, n_series: usize) {
+    println!();
+    style::print_section("result");
+    style::print_field("rows", &rows.to_string(), 8);
+    style::print_field(
+        "series",
+        &format!(
+            "{n_symbols} symbol{} · {n_series} interval series",
+            if n_symbols == 1 { "" } else { "s" },
+        ),
+        8,
+    );
+}
+
+/// Format a fetch `Timestamp` as `YYYY-MM-DD` for the console — dates only,
+/// since the fetch grammar is date-precision and printing HH:MM:SS would add
+/// noise the user never gave us.
+fn format_date(t: Timestamp) -> String {
+    t.to_datetime()
+        .date()
+        .to_string()
 }
 
 /// Write the row list to `path` as a `,`-delimited CSV. Base header:

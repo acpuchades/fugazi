@@ -64,3 +64,52 @@ pub fn print_header(command: &str, description: &str) {
     println!("{}", dim(&format!("{command} · {description}")));
     println!();
 }
+
+/// A section title: `bold` at column 0 with no trailing decoration. Used by
+/// every command's body blocks (`inputs`, `result`, `metrics`, `best`, …) so
+/// section boundaries are visually consistent across subcommands.
+pub fn print_section(title: &str) {
+    println!("{}", bold(title));
+}
+
+/// One `label value` row inside a section, indented two spaces with a fixed
+/// dim-styled label column. Callers should pass short labels (≤ the pad width);
+/// longer labels get one padding space appended so alignment degrades
+/// gracefully rather than jamming.
+pub fn print_field(label: &str, value: &str, pad: usize) {
+    let padded = if label.len() < pad {
+        format!("{label:<pad$}")
+    } else {
+        format!("{label} ")
+    };
+    println!("  {}{value}", dim(&padded));
+}
+
+/// A hangover continuation under a [`print_field`] value — indented so the
+/// text lands under the value column (2 leading spaces + `pad` label column).
+pub fn print_field_continuation(text: &str, pad: usize) {
+    let indent = 2 + pad;
+    println!("{:indent$}{text}", "", indent = indent);
+}
+
+/// A top-level warning line printed at column 0, above the section it would
+/// otherwise sit inside as a masquerading field. The `warn` prefix is yellow;
+/// the message body is plain. Pass every warning through [`print_warns`]
+/// instead of calling this directly so the trailing blank line is emitted only
+/// when at least one warning fires.
+pub fn print_warn(msg: &str) {
+    println!("{} {msg}", yellow("warn"));
+}
+
+/// Emit each warning as a column-0 line and a trailing blank line separating
+/// the warnings from the following section. A no-op when the slice is empty
+/// so callers can hand off a lazily-built list without a guard.
+pub fn print_warns(warns: &[String]) {
+    if warns.is_empty() {
+        return;
+    }
+    for w in warns {
+        print_warn(w);
+    }
+    println!();
+}
