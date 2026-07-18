@@ -119,8 +119,7 @@
 //!   portfolio-wide ids.
 //! - `initial_equity` is the sum of every seeded sub-wallet.
 //!
-//! Per-child reads (individual equity, funds) are on
-//! [`PortfolioWallet::sub_equity`] / [`sub_funds`](PortfolioWallet::sub_funds).
+//! Per-child equity reads are on [`PortfolioWallet::sub_equity`].
 //! Trade-level metrics computed off the aggregate `fills` mix owners —
 //! two children opening the same symbol on the same bar reconstruct as a
 //! scale-in rather than two trades. For clean per-child trade metrics,
@@ -185,16 +184,6 @@ pub struct Portfolio<Sym> {
     inner: Rc<RefCell<PortfolioInner<Sym>>>,
     policy: Box<dyn WeightPolicy>,
     bars_seen: usize,
-    /// Total initial equity captured at build. Used by
-    /// [`reset`](Strategy::reset) to re-seed sub-wallets at the same
-    /// per-child allocation.
-    initial_equity: Real,
-    /// The per-child seed amounts computed at build from
-    /// `initial_equity * weights[i] / sum(weights)`. Cached so
-    /// [`reset`](Strategy::reset) restores the same split without
-    /// re-querying the policy (some policies are stateful and would
-    /// change their answer post-reset).
-    initial_allocations: Vec<Real>,
     /// The **rebalance gate**: on each bar `trade()` runs one rebalance
     /// cycle only when this signal reads `true`. Default is
     /// `Const::false` — never rebalance, matching pre-rebalance v1
@@ -260,37 +249,6 @@ impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
             .subs
             .iter_mut()
             .for_each(|w| w.set_costs_for(symbol.clone(), costs.clone()));
-    }
-
-    /// The total equity the portfolio was seeded with — the argument to
-    /// [`with_initial_equity`](PortfolioBuilder::with_initial_equity).
-    pub fn initial_equity(&self) -> Real {
-        self.initial_equity
-    }
-
-    /// The per-child initial cash allocation computed at build. In v1
-    /// weights aren't re-read after this, so these are the seeds each
-    /// sub-wallet started at (drift over time reflects P&L only).
-    pub fn initial_allocations(&self) -> &[Real] {
-        &self.initial_allocations
-    }
-
-    /// Extra bars the rebalance signal needs before its readings are
-    /// meaningful (warm-up + any IIR settling). `0` for the default
-    /// `Const::false` gate; non-zero for signals wrapping smoothed
-    /// sources (e.g. a rolling-drawdown trigger). The
-    /// [`fugazi::cli`](crate::cli) `optimize --walkforward` layout adds
-    /// this to each child's own stable-period to know how many head
-    /// bars to skip.
-    pub fn rebalance_stable_period(&self) -> usize {
-        self.rebalance.stable_period()
-    }
-
-    /// Warm-up-only twin of
-    /// [`rebalance_stable_period`](Self::rebalance_stable_period) —
-    /// ignores IIR settling. Used under `--keep-unstable`.
-    pub fn rebalance_warm_up_period(&self) -> usize {
-        self.rebalance.warm_up_period()
     }
 
     /// Snapshot every sub-wallet's current equity/funds for a
@@ -714,8 +672,6 @@ impl<Sym: Clone + Eq + Hash + 'static> PortfolioBuilder<Sym> {
             inner,
             policy,
             bars_seen: 0,
-            initial_equity,
-            initial_allocations: allocations,
             rebalance,
             share_indicators,
         }

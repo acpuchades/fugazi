@@ -282,18 +282,6 @@ impl<Sym: Clone + Eq + Hash> PortfolioWallet<Sym> {
         self.inner.borrow().subs[idx].equity()
     }
 
-    /// The cash balance of the child at index `idx`.
-    ///
-    /// # Panics
-    /// Panics if `idx` is out of range.
-    pub fn sub_funds(&self, idx: usize) -> Reference {
-        self.inner.borrow().subs[idx].funds()
-    }
-
-    /// The number of child sub-wallets carried in this portfolio.
-    pub fn sub_count(&self) -> usize {
-        self.inner.borrow().subs.len()
-    }
 }
 
 impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PortfolioWallet<Sym> {
