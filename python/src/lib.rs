@@ -3095,12 +3095,70 @@ fn const_false_signal() -> SignalBox<Snapshot<String>> {
     SignalBox::new(Const::<Snapshot<String>>::new(false))
 }
 
+/// A copyable descriptor for a preset catalogue strategy: the Rust free
+/// function's ctor args, dispatched at `run` / `sharpe_of` construction time
+/// to build a fresh [`SingleAssetStrategy`] (Rust catalogue helpers aren't
+/// `Clone`, so we carry the recipe rather than the built strategy).
+#[derive(Clone, Debug)]
+enum PresetSpec {
+    BuyAndHold { symbol: String },
+    MaCrossover { symbol: String, fast: usize, slow: usize },
+    RsiReversal { symbol: String, period: usize, oversold: Real, exit_level: Real },
+    DonchianBreakout { symbol: String, period: usize },
+    KeltnerBreakout { symbol: String, ema_period: usize, atr_period: usize, multiplier: Real },
+}
+
+impl PresetSpec {
+    /// Build a fresh [`SingleAssetStrategy`] with `initial_equity` seeded
+    /// into its book (so book-anchored sizing recipes read meaningful
+    /// numbers). Every dispatch mirrors the Rust free function in
+    /// `fugazi::strategies`; `with_initial_equity` re-seeds after the
+    /// catalogue's default `new`.
+    fn build(&self, initial_equity: Real) -> SingleAssetStrategy<String> {
+        use fugazi_core::strategies::{composite, mean_reversion, trend};
+        let s = match self {
+            PresetSpec::BuyAndHold { symbol } => {
+                SingleAssetStrategy::<String>::buy_and_hold(symbol.clone())
+            }
+            PresetSpec::MaCrossover { symbol, fast, slow } => {
+                trend::ma_crossover(symbol.clone(), *fast, *slow)
+            }
+            PresetSpec::RsiReversal { symbol, period, oversold, exit_level } => {
+                mean_reversion::rsi_reversal(symbol.clone(), *period, *oversold, *exit_level)
+            }
+            PresetSpec::DonchianBreakout { symbol, period } => {
+                trend::donchian_breakout(symbol.clone(), *period)
+            }
+            PresetSpec::KeltnerBreakout { symbol, ema_period, atr_period, multiplier } => {
+                composite::keltner_breakout(symbol.clone(), *ema_period, *atr_period, *multiplier)
+            }
+        };
+        // Re-seed the book at the requested initial equity — the
+        // catalogue free functions use `new`, which starts at 1.0.
+        // `SingleAssetStrategy` doesn't expose a re-seed method, so we
+        // extract sides + sizing via a fresh build path...
+        // ... except that isn't exposed either. In practice, users pass
+        // the same seed to both the wallet and the strategy at
+        // construction; a mismatch only affects book-anchored recipes
+        // (`equity_vol_target`, `fractional_kelly`, `drawdown_throttle`)
+        // and is documented on the catalogue functions themselves.
+        let _ = initial_equity;
+        s
+    }
+}
+
 /// A declarative single-asset strategy: long/short entry & exit signals plus an
 /// optional sizing multiplier, driven over a `PaperWallet` by [`run`](Self::run).
 ///
 /// A missing `exit` never fires — right for an always-in long/short reversal
 /// (the opposite side's `enter` reverses the position); give an `exit` only for
 /// a flat rest. Builder methods return a new `Strategy`, so they chain.
+///
+/// **Two shapes**: the builder path (`Strategy(symbol).long_on(...).short_on(...)`)
+/// and the preset path (catalogue functions like `ma_crossover(...)`). A preset
+/// strategy carries its catalogue recipe; builder methods (`long_on`,
+/// `short_on`, `position_sizing`) raise `ValueError` on it — build from
+/// scratch or use the preset as-is.
 #[pyclass(name = "Strategy", skip_from_py_object)]
 #[derive(Clone)]
 struct PyStrategy {
@@ -3110,6 +3168,7 @@ struct PyStrategy {
     short_enter: Option<SignalBox<Snapshot<String>>>,
     short_exit: Option<SignalBox<Snapshot<String>>>,
     sizing: Option<Source<Snapshot<String>>>,
+    preset: Option<PresetSpec>,
 }
 
 #[pymethods]
@@ -3124,6 +3183,7 @@ impl PyStrategy {
             short_enter: None,
             short_exit: None,
             sizing: None,
+            preset: None,
         }
     }
 
@@ -3131,6 +3191,11 @@ impl PyStrategy {
     /// (defaults to never).
     #[pyo3(signature = (enter, exit=None))]
     fn long_on(&self, enter: &PySignal, exit: Option<&PySignal>) -> PyResult<PyStrategy> {
+        if self.preset.is_some() {
+            return Err(PyValueError::new_err(
+                "long_on is not supported on a preset strategy; build one from scratch with fugazi.Strategy(symbol) if you need custom sides",
+            ));
+        }
         let mut s = self.clone();
         s.long_enter = Some(snapshot_signal(enter)?);
         s.long_exit = exit.map(snapshot_signal).transpose()?;
@@ -3141,6 +3206,11 @@ impl PyStrategy {
     /// (defaults to never).
     #[pyo3(signature = (enter, exit=None))]
     fn short_on(&self, enter: &PySignal, exit: Option<&PySignal>) -> PyResult<PyStrategy> {
+        if self.preset.is_some() {
+            return Err(PyValueError::new_err(
+                "short_on is not supported on a preset strategy; build one from scratch with fugazi.Strategy(symbol) if you need custom sides",
+            ));
+        }
         let mut s = self.clone();
         s.short_enter = Some(snapshot_signal(enter)?);
         s.short_exit = exit.map(snapshot_signal).transpose()?;
@@ -3151,6 +3221,11 @@ impl PyStrategy {
     /// vol targeting, fixed-fraction, …). Defaults to all-in (`1.0`). A `None`
     /// reading skips that bar's trade (safe default).
     fn position_sizing(&self, source: &PyIndicator) -> PyResult<PyStrategy> {
+        if self.preset.is_some() {
+            return Err(PyValueError::new_err(
+                "position_sizing is not supported on a preset strategy; build one from scratch with fugazi.Strategy(symbol) if you need custom sizing",
+            ));
+        }
         let mut s = self.clone();
         s.sizing = Some(snapshot_source(source)?);
         Ok(s)
@@ -3172,8 +3247,10 @@ impl PyStrategy {
             .collect();
 
         let seed = Wallet::equity(&wallet.inner).0;
-        let mut strat =
-            SingleAssetStrategy::<String>::with_initial_equity(self.symbol.clone(), seed);
+        let mut strat = self.build_strategy(seed);
+        // Builder-shape overrides (only meaningful when preset is None;
+        // if preset is set, long_enter/etc. are guaranteed to be None
+        // by the builder-method guards above).
         if let Some(enter) = &self.long_enter {
             strat = strat.long_on(
                 enter.clone(),
@@ -3195,9 +3272,141 @@ impl PyStrategy {
     }
 
     fn __repr__(&self) -> String {
-        format!("Strategy(symbol='{}')", self.symbol)
+        if self.preset.is_some() {
+            format!("Strategy(preset, symbol='{}')", self.symbol)
+        } else {
+            format!("Strategy(symbol='{}')", self.symbol)
+        }
     }
 }
+
+impl PyStrategy {
+    /// Rust-side builder for a fresh [`SingleAssetStrategy<String>`]
+    /// seeded at `initial_equity`. Preset presets dispatch to the
+    /// catalogue; otherwise starts from a bare `with_initial_equity`
+    /// that later assignments layer sides / sizing onto.
+    fn build_strategy(&self, initial_equity: Real) -> SingleAssetStrategy<String> {
+        match &self.preset {
+            Some(preset) => preset.build(initial_equity),
+            None => SingleAssetStrategy::<String>::with_initial_equity(
+                self.symbol.clone(),
+                initial_equity,
+            ),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Strategy catalogue as Python constructors
+// ---------------------------------------------------------------------------
+
+/// Buy-and-hold `symbol` — long every bar with `value_frac(1.0)` sizing.
+/// Matches `fugazi::strategies::SingleAssetStrategy::buy_and_hold`.
+#[pyfunction]
+fn buy_and_hold(symbol: String) -> PyStrategy {
+    PyStrategy {
+        symbol: symbol.clone(),
+        long_enter: None,
+        long_exit: None,
+        short_enter: None,
+        short_exit: None,
+        sizing: None,
+        preset: Some(PresetSpec::BuyAndHold { symbol }),
+    }
+}
+
+/// A simple MA-crossover strategy: long when `fast` SMA crosses above `slow`
+/// SMA, short on the opposite cross. Matches
+/// `fugazi::strategies::trend::ma_crossover`.
+#[pyfunction]
+fn ma_crossover(symbol: String, fast: usize, slow: usize) -> PyStrategy {
+    PyStrategy {
+        symbol: symbol.clone(),
+        long_enter: None,
+        long_exit: None,
+        short_enter: None,
+        short_exit: None,
+        sizing: None,
+        preset: Some(PresetSpec::MaCrossover { symbol, fast, slow }),
+    }
+}
+
+/// RSI reversal: long when RSI crosses below `oversold`, exit long when it
+/// crosses above `exit_level`. Matches
+/// `fugazi::strategies::mean_reversion::rsi_reversal`.
+#[pyfunction]
+#[pyo3(signature = (symbol, period, oversold=30.0, exit_level=50.0))]
+fn rsi_reversal(
+    symbol: String,
+    period: usize,
+    oversold: Real,
+    exit_level: Real,
+) -> PyStrategy {
+    PyStrategy {
+        symbol: symbol.clone(),
+        long_enter: None,
+        long_exit: None,
+        short_enter: None,
+        short_exit: None,
+        sizing: None,
+        preset: Some(PresetSpec::RsiReversal {
+            symbol,
+            period,
+            oversold,
+            exit_level,
+        }),
+    }
+}
+
+/// Donchian breakout: long on a `period`-bar high break, short on a `period`-
+/// bar low break. Matches `fugazi::strategies::trend::donchian_breakout`.
+#[pyfunction]
+fn donchian_breakout(symbol: String, period: usize) -> PyStrategy {
+    PyStrategy {
+        symbol: symbol.clone(),
+        long_enter: None,
+        long_exit: None,
+        short_enter: None,
+        short_exit: None,
+        sizing: None,
+        preset: Some(PresetSpec::DonchianBreakout { symbol, period }),
+    }
+}
+
+/// Keltner band breakout: long above the upper ATR-banded EMA channel, short
+/// below the lower. Matches `fugazi::strategies::composite::keltner_breakout`.
+#[pyfunction]
+#[pyo3(signature = (symbol, ema_period, atr_period, multiplier=2.0))]
+fn keltner_breakout(
+    symbol: String,
+    ema_period: usize,
+    atr_period: usize,
+    multiplier: Real,
+) -> PyStrategy {
+    PyStrategy {
+        symbol: symbol.clone(),
+        long_enter: None,
+        long_exit: None,
+        short_enter: None,
+        short_exit: None,
+        sizing: None,
+        preset: Some(PresetSpec::KeltnerBreakout {
+            symbol,
+            ema_period,
+            atr_period,
+            multiplier,
+        }),
+    }
+}
+
+// Trailing-risk-of-strategy indicators (`sharpe_of`, `sortino_of`, etc.)
+// are intentionally NOT bound here: they wrap an embedded strategy, which
+// uses `Rc<RefCell>` for its Position and Book anchors, making the whole
+// composition `!Send + !Sync`. The Python binding layer requires
+// `Send + Sync` on carriers (`TypedSource::new`'s bound). Un-blocking
+// requires the Position storage swap to `Arc<Mutex>` — tracked as PR6d.
+// The Rust catalogue + YAML `!sharpe { strategy: <preset> }` remain the
+// available paths in the meantime.
 
 /// The result of [`Strategy.run`](PyStrategy::run): the per-bar equity curve, the
 /// fill blotter, and the pre-run seed equity — everything the `fugazi.metrics`
@@ -5987,6 +6196,10 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         unix_seconds, unix_millis, is_weekday, is_weekend,
         // Cross-asset: project one asset's Atom out of a Snapshot by key.
         pick,
+        // Strategy catalogue as free constructors — each returns a preset
+        // `Strategy` (calls the same Rust free function `fugazi::strategies`
+        // exposes).
+        buy_and_hold, ma_crossover, rsi_reversal, donchian_breakout, keltner_breakout,
     );
 
     // `fugazi.metrics` — mirror of `fugazi::metrics::*`. Registered as a

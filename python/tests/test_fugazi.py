@@ -749,6 +749,75 @@ def test_strategy_rejects_a_real_rooted_signal():
         ta.Strategy("BTC").long_on(ta.identity().above(5.0))
 
 
+# ---------------------------------------------------------------------------
+# Preset catalogue: `buy_and_hold`, `ma_crossover`, `rsi_reversal`,
+# `donchian_breakout`, `keltner_breakout` — each returns a preset Strategy
+# whose recipe dispatches to the Rust `fugazi::strategies` catalogue.
+# ---------------------------------------------------------------------------
+
+
+def test_buy_and_hold_preset_runs_end_to_end():
+    strat = ta.buy_and_hold("BTC")
+    prices = [100, 102, 105, 108, 112, 115]
+    wallet = ta.PaperWallet(10_000.0)
+    rep = strat.run(wallet, _ohlcv(prices))
+    # Enters on bar 1, holds through: at least one fill, equity rises.
+    assert len(rep.fills) >= 1
+    assert rep.equity_curve[-1] > rep.initial_equity
+
+
+def test_ma_crossover_preset_matches_the_manual_build_shape():
+    # A preset ma_crossover should trade the same golden/death crosses as the
+    # manual builder with the same fast/slow. We assert convergence of the
+    # blotters' fill counts on a golden-then-death path.
+    manual = ta.Strategy("BTC").long_on(
+        ta.sma(ta.close(), 2).crosses_above(ta.sma(ta.close(), 4)),
+        ta.sma(ta.close(), 2).crosses_below(ta.sma(ta.close(), 4)),
+    ).short_on(
+        ta.sma(ta.close(), 2).crosses_below(ta.sma(ta.close(), 4)),
+        ta.sma(ta.close(), 2).crosses_above(ta.sma(ta.close(), 4)),
+    )
+    preset = ta.ma_crossover("BTC", fast=2, slow=4)
+    prices = [14, 13, 12, 11, 12, 14, 16, 18, 15, 12]
+
+    w1 = ta.PaperWallet(10_000.0)
+    r1 = manual.run(w1, _ohlcv(prices))
+    w2 = ta.PaperWallet(10_000.0)
+    r2 = preset.run(w2, _ohlcv(prices))
+    # Both trade non-trivially and land the same total number of fills.
+    assert len(r1.fills) >= 1
+    assert len(r1.fills) == len(r2.fills)
+
+
+def test_all_catalogue_presets_construct_and_produce_snapshots():
+    # Smoke test: every catalogue preset builds a Strategy that runs against
+    # a paper wallet without panicking, and produces an equity curve.
+    presets = [
+        ta.buy_and_hold("BTC"),
+        ta.ma_crossover("BTC", fast=2, slow=4),
+        ta.rsi_reversal("BTC", period=3),
+        ta.donchian_breakout("BTC", period=3),
+        ta.keltner_breakout("BTC", ema_period=3, atr_period=3),
+    ]
+    prices = [10, 12, 11, 14, 15, 13, 16, 18, 17, 19, 21, 18, 15, 12, 14, 17]
+    for strat in presets:
+        wallet = ta.PaperWallet(10_000.0)
+        rep = strat.run(wallet, _ohlcv(prices))
+        assert len(rep.equity_curve) == len(prices)
+
+
+def test_preset_strategy_rejects_builder_methods():
+    # Preset strategies carry their catalogue recipe; layering `.long_on()`
+    # etc. on top makes no sense — should raise a clear error.
+    preset = ta.buy_and_hold("BTC")
+    with pytest.raises(ValueError, match="preset"):
+        preset.long_on(ta.value(True))
+    with pytest.raises(ValueError, match="preset"):
+        preset.short_on(ta.value(True))
+    with pytest.raises(ValueError, match="preset"):
+        preset.position_sizing(ta.value(0.5))
+
+
 def test_wallet_rejects_bad_side():
     w = ta.PaperWallet(100.0)
     w.update("X", 10.0)
