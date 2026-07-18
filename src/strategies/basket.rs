@@ -815,16 +815,16 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Strategy for BasketStrategy<S
         // Advance any protective-level chains against the same snapshot.
         // We drop their return values on the floor here; `trade` reads
         // `.value()` when it needs to re-submit the resting order.
-        for (_, chain) in self.long_stops.iter_mut() {
+        for chain in self.long_stops.values_mut() {
             let _ = chain.update(snap.clone());
         }
-        for (_, chain) in self.long_targets.iter_mut() {
+        for chain in self.long_targets.values_mut() {
             let _ = chain.update(snap.clone());
         }
-        for (_, chain) in self.short_stops.iter_mut() {
+        for chain in self.short_stops.values_mut() {
             let _ = chain.update(snap.clone());
         }
-        for (_, chain) in self.short_targets.iter_mut() {
+        for chain in self.short_targets.values_mut() {
             let _ = chain.update(snap.clone());
         }
 
