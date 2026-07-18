@@ -288,3 +288,388 @@ fn is_ready_gates_trade_until_every_child_is_ready() {
         "portfolio should be ready after 15 bars"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Dynamic rebalance (rebalance_on: two-phase cash-then-positions)
+// ---------------------------------------------------------------------------
+
+/// A price series where symbol A doubles between bar 2 and bar 3 (so
+/// after each child's entry order fills at bar 2's open, A's position
+/// value jumps for the bar-3 rebalance to react to). B stays flat.
+///
+/// Bars are 1-indexed here for readability; snapshot indices are 0-based
+/// in the returned `Vec` (`snap[0]` is bar 1).
+fn a_step_up_b_flat_snapshots(bars: usize) -> Vec<Snapshot<&'static str>> {
+    (0..bars)
+        .map(|i| {
+            // Bar 1..=2: A at 100. Bar 3+: A at 200. B always 100.
+            let px_a = if i < 2 { 100.0 } else { 200.0 };
+            let mut snap = Snapshot::new();
+            snap.push(Some("A"), None, Atom::new(flat_bar(px_a)));
+            snap.push(Some("B"), None, Atom::new(flat_bar(100.0)));
+            snap
+        })
+        .collect()
+}
+
+#[test]
+fn default_rebalance_gate_is_off_so_equities_drift_with_pnl() {
+    // Without `.rebalance_on(...)`, the portfolio behaves exactly as the
+    // pre-rebalance v1: weights govern the initial split, then per-child
+    // equities drift with P&L and nothing re-syncs them.
+    let (portfolio, _report, wallet) = run_buy_and_hold_portfolio(2_000.0, EqualWeight);
+    // A rises 5x (100 → 195 over 20 bars), B stays flat → sub 0 equity
+    // grew significantly, sub 1 didn't. They should be very different.
+    let e0 = wallet.sub_equity(0).0;
+    let e1 = wallet.sub_equity(1).0;
+    assert!(
+        e0 > 1.5 * e1,
+        "expected significant divergence without rebalance; got sub_equity(0)={e0}, sub_equity(1)={e1}",
+    );
+    let _ = portfolio;
+}
+
+#[test]
+fn cash_phase_alone_handles_a_rebalance_when_contributors_have_free_cash() {
+    // Both children run buy-and-hold at 50% sizing so half their equity
+    // stays as cash. A doubles on bar 3; the bar-3 rebalance's cash phase
+    // has enough on the contributor side to snap everyone to 50/50 in
+    // one fire — the position phase is a natural no-op (shortfall = 0).
+    //
+    // Post-entry (bars 2+):    A: 250 cash + 2.5 units of A
+    //                          B: 250 cash + 2.5 units of B
+    // Bar 3 close (A at 200):  A: 250 + 500 = 750 equity
+    //                          B: 250 + 250 = 500 equity  (total 1250)
+    // Target 50/50 = 625 each. A donates 125 cash; B receives 125.
+    // Result: A: 125 + 500 = 625, B: 375 + 250 = 625. No fills queued.
+    use fugazi::indicators::{Const, Every, Value};
+
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(1_000.0)
+        .add(
+            "half_a",
+            SingleAssetStrategy::<&'static str>::with_initial_equity("A", 500.0)
+                .long_on(
+                    Const::<Snapshot<&'static str>>::new(true),
+                    Const::<Snapshot<&'static str>>::new(false),
+                )
+                .position_sizing(Value::<Snapshot<&'static str>>::new(0.5)),
+        )
+        .add(
+            "half_b",
+            SingleAssetStrategy::<&'static str>::with_initial_equity("B", 500.0)
+                .long_on(
+                    Const::<Snapshot<&'static str>>::new(true),
+                    Const::<Snapshot<&'static str>>::new(false),
+                )
+                .position_sizing(Value::<Snapshot<&'static str>>::new(0.5)),
+        )
+        .weights(Fixed::new(vec![0.5, 0.5]))
+        .rebalance_on(Every::<Snapshot<&'static str>>::new(1))
+        .build();
+    let mut wallet = portfolio.wallet_view();
+    // 4 bars: enter, fill, price step-up + rebalance, hold.
+    let snaps = a_step_up_b_flat_snapshots(4);
+    let _report = backtest::run(&mut portfolio, &mut wallet, snaps);
+
+    let e0 = wallet.sub_equity(0).0;
+    let e1 = wallet.sub_equity(1).0;
+    assert!(
+        (e0 - e1).abs() < 1.0,
+        "cash phase alone should snap sub-equities to 50/50; got e0={e0}, e1={e1}",
+    );
+}
+
+#[test]
+fn position_phase_downsizes_when_contributor_has_no_free_cash() {
+    // Buy-and-hold with 100% sizing → contributor has zero free cash to
+    // donate. Cash phase can't cover the shortfall, so the position phase
+    // queues a proportional set_position scale-down on the contributor's
+    // position. Next fire cycle: the freed cash gets donated. Two fire
+    // cycles hit the target.
+    //
+    // Bar 3 (fire): A is overweight by 250 and has 0 cash. Cash phase
+    // moves nothing. Position phase queues a 25% haircut (250/1000).
+    // Bar 4 open: fill lands → A holds 3.75 units + 250 cash, equity
+    // still 1000. Bar 4 fire (Every::new(1)): cash phase donates 125
+    // (delta at that point). Snap continues over more fires; here we
+    // just verify convergence proceeds.
+    use fugazi::indicators::{Const, Every};
+
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(1_000.0)
+        .add(
+            "full_a",
+            SingleAssetStrategy::<&'static str>::with_initial_equity("A", 500.0).long_on(
+                Const::<Snapshot<&'static str>>::new(true),
+                Const::<Snapshot<&'static str>>::new(false),
+            ),
+        )
+        .add(
+            "full_b",
+            SingleAssetStrategy::<&'static str>::with_initial_equity("B", 500.0).long_on(
+                Const::<Snapshot<&'static str>>::new(true),
+                Const::<Snapshot<&'static str>>::new(false),
+            ),
+        )
+        .weights(Fixed::new(vec![0.5, 0.5]))
+        .rebalance_on(Every::<Snapshot<&'static str>>::new(1))
+        .build();
+    let mut wallet = portfolio.wallet_view();
+    let snaps = a_step_up_b_flat_snapshots(4);
+    let _report = backtest::run(&mut portfolio, &mut wallet, snaps);
+
+    let e0 = wallet.sub_equity(0).0;
+    let e1 = wallet.sub_equity(1).0;
+    // After the two-phase rebalance converges over multiple fires,
+    // sub-equities should be at (or very close to) the target. Allow a
+    // small tolerance since fills fill at open and the exact convergence
+    // depends on price paths.
+    assert!(
+        (e0 - e1).abs() < 5.0,
+        "phased rebalance should converge to target within a fire cycle; got e0={e0}, e1={e1}",
+    );
+}
+
+#[test]
+fn rebalance_gate_never_freezes_the_portfolio() {
+    // `Const::false` gate (the default) — a full run, and no rebalance
+    // ever runs; equities drift exactly as they would without the knob
+    // at all.
+    use fugazi::indicators::Const;
+
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(2_000.0)
+        .add(
+            "hold_a",
+            SingleAssetStrategy::<&'static str>::buy_and_hold("A"),
+        )
+        .add(
+            "hold_b",
+            SingleAssetStrategy::<&'static str>::buy_and_hold("B"),
+        )
+        .weights(EqualWeight)
+        .rebalance_on(Const::<Snapshot<&'static str>>::new(false))
+        .build();
+    let mut wallet = portfolio.wallet_view();
+    let report = backtest::run(&mut portfolio, &mut wallet, a_rising_b_flat_snapshots());
+
+    // Same result as run_buy_and_hold_portfolio's assertions — Const::false
+    // is by definition a no-op gate.
+    assert!(wallet.sub_equity(0).0 > 1.5 * wallet.sub_equity(1).0);
+    assert!(!report.fills.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Precise numerical scenarios (mirror the two cases in the design walkthrough)
+// ---------------------------------------------------------------------------
+
+/// A one-shot Strategy that seeds a specific position on its first
+/// [`trade`](Strategy::trade) call and then does nothing.  Used to
+/// construct a portfolio whose sub-wallets start in specific
+/// funds/position configurations for the scenario tests below.
+struct SeedThenIdle {
+    symbol: &'static str,
+    units: Real,
+    done: std::cell::Cell<bool>,
+}
+
+impl SeedThenIdle {
+    fn new(symbol: &'static str, units: Real) -> Self {
+        Self {
+            symbol,
+            units,
+            done: std::cell::Cell::new(false),
+        }
+    }
+}
+
+impl Strategy for SeedThenIdle {
+    type Input = Snapshot<&'static str>;
+    type Symbol = &'static str;
+    fn update(&mut self, _snap: Snapshot<&'static str>) {}
+    fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
+        if self.done.get() {
+            return;
+        }
+        let _ = wallet.set_position(fugazi::wallet::Units {
+            symbol: self.symbol,
+            amount: self.units,
+        });
+        self.done.set(true);
+    }
+    fn reset(&mut self) {
+        self.done.set(false);
+    }
+}
+
+/// Scenario A: contributor at (200 cash + 300 in positions = 500 equity)
+/// with target 400. Just remove 100 cash; no fills queued.
+///
+/// Setup: children A and B, each seeded 500 cash.
+/// - A buys 3 units of X @ $100 (uses 300 cash, leaves 200 cash + 300 in
+///   position = 500 equity).
+/// - B stays flat (500 cash, 500 equity).
+/// - Target after rebalance: aggregate 1000, weights [0.4, 0.6] → A: 400,
+///   B: 600.
+/// - Fire bar: delta A = -100, delta B = +100. Cash phase covers fully.
+/// - Post-rebalance: A has 100 cash + 300 in position = 400. B has 600
+///   cash + 0 in position = 600. No position downsize needed.
+#[test]
+fn scenario_a_cash_phase_only_moves_the_100_and_queues_no_fills() {
+    use fugazi::indicators::{Const, Every};
+
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(1_000.0)
+        .add("holds_x", SeedThenIdle::new("X", 3.0))
+        // B does nothing — sits on its cash.
+        .add(
+            "idle",
+            SingleAssetStrategy::<&'static str>::with_initial_equity("Y", 500.0).long_on(
+                Const::<Snapshot<&'static str>>::new(false),
+                Const::<Snapshot<&'static str>>::new(false),
+            ),
+        )
+        .weights(Fixed::new(vec![0.4, 0.6]))
+        .rebalance_on(Every::<Snapshot<&'static str>>::new(1))
+        .build();
+    let mut wallet = portfolio.wallet_view();
+
+    // 4 bars at flat prices for X. Y symbol carries a price so the wallet
+    // can mark it if needed, but nothing trades it.
+    let snaps: Vec<Snapshot<&'static str>> = (0..4)
+        .map(|_| {
+            let mut s = Snapshot::new();
+            s.push(Some("X"), None, Atom::new(flat_bar(100.0)));
+            s.push(Some("Y"), None, Atom::new(flat_bar(100.0)));
+            s
+        })
+        .collect();
+    let report = backtest::run(&mut portfolio, &mut wallet, snaps);
+
+    // Sub A should have equity 400, sub B should have equity 600. Tight
+    // tolerance since the price is flat and there's no drift.
+    assert!(
+        (wallet.sub_equity(0).0 - 400.0).abs() < 0.01,
+        "scenario A: expected sub_equity(0) == 400, got {}",
+        wallet.sub_equity(0).0,
+    );
+    assert!(
+        (wallet.sub_equity(1).0 - 600.0).abs() < 0.01,
+        "scenario A: expected sub_equity(1) == 600, got {}",
+        wallet.sub_equity(1).0,
+    );
+    // Only fill on the blotter is the initial entry buy — no rebalance
+    // fill should ever have been queued (cash phase does all the work).
+    assert_eq!(
+        report.fills.len(),
+        1,
+        "scenario A: expected exactly 1 fill (initial entry); got {} fills",
+        report.fills.len(),
+    );
+}
+
+/// Scenario B: contributor at (200 cash + 300 in positions = 500 equity)
+/// with target 250. Cash phase drains all 200 cash; position phase queues
+/// a proportional downsize to shed the remaining 50 in equity next bar.
+///
+/// Setup: children A and B, each seeded 500 cash.
+/// - A buys 3 units of X @ $100 (300 in position + 200 cash = 500 equity).
+/// - B stays flat (500 cash, 500 equity).
+/// - Target after rebalance: aggregate 1000, weights [0.25, 0.75] → A: 250,
+///   B: 750.
+/// - Fire bar T (bar 3): delta A = -250. Cash phase donates 200 (all cash).
+///   Shortfall = 50. Position phase: invested = 300, f = 50/300 ≈ 0.1667,
+///   queues set_position(3 * (1 - 0.1667)) = set_position(2.5).
+/// - Bar T+1 (bar 4): fill lands at $100. A now holds 2.5 units, gained
+///   50 in cash. A: 50 cash + 250 in position = 300 equity. B: 700 cash.
+///   Bar T+1 rebalance fires: A donates 50 (delta = -50), B receives 50.
+///   Final: A = 250, B = 750. Aligned.
+#[test]
+fn scenario_b_cash_drains_position_phase_queues_downsize_next_fire_converges() {
+    use fugazi::indicators::{Const, Every};
+
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(1_000.0)
+        .add("holds_x", SeedThenIdle::new("X", 3.0))
+        .add(
+            "idle",
+            SingleAssetStrategy::<&'static str>::with_initial_equity("Y", 500.0).long_on(
+                Const::<Snapshot<&'static str>>::new(false),
+                Const::<Snapshot<&'static str>>::new(false),
+            ),
+        )
+        .weights(Fixed::new(vec![0.25, 0.75]))
+        .rebalance_on(Every::<Snapshot<&'static str>>::new(1))
+        .build();
+    let mut wallet = portfolio.wallet_view();
+
+    // 5 bars: bar 1 seeds the position (order queued), bar 2 fills the
+    // entry, bar 3 rebalance kicks in (cash phase drains + position phase
+    // queues), bar 4 downsize fill lands + rebalance donates freed cash,
+    // bar 5 hold. Prices flat throughout.
+    let snaps: Vec<Snapshot<&'static str>> = (0..5)
+        .map(|_| {
+            let mut s = Snapshot::new();
+            s.push(Some("X"), None, Atom::new(flat_bar(100.0)));
+            s.push(Some("Y"), None, Atom::new(flat_bar(100.0)));
+            s
+        })
+        .collect();
+    let _report = backtest::run(&mut portfolio, &mut wallet, snaps);
+
+    assert!(
+        (wallet.sub_equity(0).0 - 250.0).abs() < 1.0,
+        "scenario B: expected sub_equity(0) ≈ 250 (contributor's target), got {}",
+        wallet.sub_equity(0).0,
+    );
+    assert!(
+        (wallet.sub_equity(1).0 - 750.0).abs() < 1.0,
+        "scenario B: expected sub_equity(1) ≈ 750 (receiver's target), got {}",
+        wallet.sub_equity(1).0,
+    );
+}
+
+#[test]
+fn cash_covered_rebalance_queues_no_new_fills() {
+    // A close cousin of scenario A: two children with cash headroom (50%
+    // sizing) plus a price move that shifts equity. Verify the rebalance
+    // fires but generates no new blotter entries beyond the two initial
+    // entry fills — position phase should be a natural no-op.
+    use fugazi::indicators::{Const, Every, Value};
+
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(1_000.0)
+        .add(
+            "half_a",
+            SingleAssetStrategy::<&'static str>::with_initial_equity("A", 500.0)
+                .long_on(
+                    Const::<Snapshot<&'static str>>::new(true),
+                    Const::<Snapshot<&'static str>>::new(false),
+                )
+                .position_sizing(Value::<Snapshot<&'static str>>::new(0.5)),
+        )
+        .add(
+            "half_b",
+            SingleAssetStrategy::<&'static str>::with_initial_equity("B", 500.0)
+                .long_on(
+                    Const::<Snapshot<&'static str>>::new(true),
+                    Const::<Snapshot<&'static str>>::new(false),
+                )
+                .position_sizing(Value::<Snapshot<&'static str>>::new(0.5)),
+        )
+        .weights(Fixed::new(vec![0.5, 0.5]))
+        .rebalance_on(Every::<Snapshot<&'static str>>::new(1))
+        .build();
+    let mut wallet = portfolio.wallet_view();
+    let snaps = a_step_up_b_flat_snapshots(4);
+    let report = backtest::run(&mut portfolio, &mut wallet, snaps);
+
+    // Two initial entries → 2 fills. No rebalance-generated fills.
+    assert_eq!(
+        report.fills.len(),
+        2,
+        "cash-covered rebalance shouldn't queue any orders; got {} fills",
+        report.fills.len(),
+    );
+}

@@ -61,22 +61,54 @@
 //!    methods forward to the child's sub-wallet with id namespacing so
 //!    fills still route back correctly.
 //!
-//! # Weight policy in v1
+//! # Weight policy and rebalancing
 //!
-//! [`WeightPolicy`](policy::WeightPolicy) currently governs only the
-//! **initial cash allocation** at build time: each child i gets
-//! `initial_equity * weights[i] / sum(weights)` seeded into its
-//! sub-wallet. Weights aren't re-read once the run begins — child
-//! equities drift naturally with per-child P&L. Two policies ship:
-//! [`Fixed`](policy::Fixed) and [`EqualWeight`](policy::EqualWeight).
+//! [`WeightPolicy`](policy::WeightPolicy) governs both the **initial cash
+//! allocation** at build time (each child i gets `initial_equity *
+//! weights[i] / sum(weights)` seeded into its sub-wallet) *and* the
+//! **rebalance target** on each fire bar of the
+//! [`rebalance_on`](PortfolioBuilder::rebalance_on) gate. Two policies
+//! ship: [`Fixed`](policy::Fixed) and [`EqualWeight`](policy::EqualWeight).
 //!
-//! Dynamic rebalancing (a `rebalance_on` gate that re-queries
-//! [`WeightPolicy::weights`](policy::WeightPolicy::weights) and reshuffles
-//! free cash between sub-wallets) and adaptive policies
-//! (inverse-volatility, performance-weighted) are follow-ups — the trait
-//! carries an [`observe`](policy::WeightPolicy::observe) hook and a
+//! The gate is opt-in — its default (`Const::false`) means "never
+//! rebalance", so a portfolio with no explicit
+//! [`rebalance_on`](PortfolioBuilder::rebalance_on) call behaves exactly
+//! as the pre-rebalance shape (weights set at build, then drift with
+//! per-child P&L). Wiring a signal — typically `Every::new(N)` for a
+//! fixed cadence — turns on the two-phase rebalance loop:
+//!
+//! 1. **Cash phase** — each child's equity delta is computed from the
+//!    policy's current weights; contributors donate what free cash they
+//!    can (capped at available funds) via
+//!    [`Wallet::adjust_funds`];
+//!    receivers split the pot in proportion to their target. Instant, no
+//!    fills. Because the phase routes through the `Wallet` trait, it
+//!    works with any wallet impl that supports programmatic cash
+//!    adjustment (paper always does; live-broker impls plug into their
+//!    venue's deposit / withdrawal / sub-account transfer API, or return
+//!    [`WalletError::UnsupportedOperation`]).
+//!    Debit refusals fold into the contributor's shortfall for the
+//!    position phase; receiver credit refusals trigger a symmetric
+//!    refund back to contributors so total equity stays conserved.
+//! 2. **Position phase** — for each contributor whose cash phase
+//!    couldn't fully cover its donation (either because it was cash-
+//!    limited or because its wallet refused the debit), submit
+//!    `set_position` scale-downs proportional across its held positions.
+//!    Fills land next bar; the freed cash flows to receivers on the
+//!    following fire cycle. A shortfall of `0` (fully covered by cash)
+//!    skips this phase for that child — no orders, no blotter noise, so
+//!    a rebalance that only needs cash movement stays free of fills.
+//!    Because this phase uses only `Wallet::set_position` — universally
+//!    supported by every wallet impl — it's the wallet-agnostic path
+//!    for portfolios whose sub-wallets don't support `adjust_funds`.
+//!
+//! Adaptive policies (inverse-volatility, performance-weighted) are the
+//! natural follow-up: the trait already carries an
+//! [`observe`](policy::WeightPolicy::observe) hook that's called every
+//! bar with per-child equity / funds samples, and a
 //! [`warm_up_period`](policy::WeightPolicy::warm_up_period) knob for
-//! them, but the portfolio doesn't drive them yet.
+//! rolling-window policies to gate readiness through. Ship one when a
+//! concrete use case shows up.
 //!
 //! # Reporting
 //!
@@ -106,9 +138,11 @@ use std::hash::Hash;
 use std::rc::Rc;
 
 use crate::costs::TradingCosts;
+use crate::indicator::Indicator;
+use crate::indicators::Const;
 use crate::strategy::Strategy;
 use crate::types::{Real, Snapshot};
-use crate::wallet::{Order, Wallet};
+use crate::wallet::{Order, Units, Wallet};
 
 use self::policy::{ChildSample, WeightPolicy};
 use self::wallet::{PortfolioInner, SubWalletHandle, allocate_funds, seed_subs};
@@ -136,6 +170,10 @@ struct PortfolioChild<Sym> {
 /// `wallet_view` out — because everything else (per-bar plumbing, fill
 /// routing, aggregate reporting) is on the composed [`PortfolioWallet`]
 /// and the [`Strategy`] impl.
+/// A boolean chain over the portfolio's `Snapshot<Sym>` — the shape used
+/// by the [`rebalance_on`](PortfolioBuilder::rebalance_on) gate.
+type RebalanceSignal<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool>>;
+
 pub struct Portfolio<Sym> {
     children: Vec<PortfolioChild<Sym>>,
     inner: Rc<RefCell<PortfolioInner<Sym>>>,
@@ -151,6 +189,12 @@ pub struct Portfolio<Sym> {
     /// re-querying the policy (some policies are stateful and would
     /// change their answer post-reset).
     initial_allocations: Vec<Real>,
+    /// The **rebalance gate**: on each bar `trade()` runs one rebalance
+    /// cycle only when this signal reads `true`. Default is
+    /// `Const::false` — never rebalance, matching pre-rebalance v1
+    /// behavior. Explicit opt-in via
+    /// [`rebalance_on`](PortfolioBuilder::rebalance_on).
+    rebalance: RebalanceSignal<Sym>,
 }
 
 impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
@@ -200,6 +244,24 @@ impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
         &self.initial_allocations
     }
 
+    /// Extra bars the rebalance signal needs before its readings are
+    /// meaningful (warm-up + any IIR settling). `0` for the default
+    /// `Const::false` gate; non-zero for signals wrapping smoothed
+    /// sources (e.g. a rolling-drawdown trigger). The
+    /// [`fugazi::cli`](crate::cli) `optimize --walkforward` layout adds
+    /// this to each child's own stable-period to know how many head
+    /// bars to skip.
+    pub fn rebalance_stable_period(&self) -> usize {
+        self.rebalance.stable_period()
+    }
+
+    /// Warm-up-only twin of
+    /// [`rebalance_stable_period`](Self::rebalance_stable_period) —
+    /// ignores IIR settling. Used under `--keep-unstable`.
+    pub fn rebalance_warm_up_period(&self) -> usize {
+        self.rebalance.warm_up_period()
+    }
+
     /// Snapshot every sub-wallet's current equity/funds for a
     /// [`WeightPolicy::observe`] call. Kept private because policies
     /// read this indirectly via the trait.
@@ -227,22 +289,28 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
         for child in &mut self.children {
             child.strategy.update(snap.clone());
         }
-        // Fold this bar's per-child equity/funds into the policy — even
-        // though the v1 portfolio only reads weights at build, the hook
-        // lets a future dynamic rebalance path pick up rolling stats
-        // without a trait break.
+        // Advance the rebalance gate over the same snapshot. Reads next
+        // in `trade()`; a `None` reading is treated as `false` (safe
+        // default — don't rebalance through unsettled data).
+        self.rebalance.update(snap);
+        // Fold this bar's per-child equity/funds into the policy so
+        // adaptive policies (inverse-vol, performance-weighted) can
+        // accumulate rolling stats even when the gate hasn't fired yet.
         let samples = self.sample_children();
         self.policy.observe(&samples);
         self.bars_seen = self.bars_seen.saturating_add(1);
     }
 
     fn is_ready(&self) -> bool {
-        // A portfolio is ready when every child is ready and the policy
-        // is past its own warm-up (which v1 built-ins report as 0). A
-        // child that's still warming keeps the whole portfolio out of
-        // trade() — matching the safe-defaults rule (unsettled data ⇒
-        // wait), just aggregated over every leg.
+        // A portfolio is ready when every child is ready, the policy is
+        // past its own warm-up (which v1 built-ins report as 0), and the
+        // rebalance signal has settled. A child that's still warming
+        // keeps the whole portfolio out of trade() — matching the
+        // safe-defaults rule (unsettled data ⇒ wait), just aggregated
+        // over every leg. The signal's own stable-period covers its
+        // warm-up + any IIR settling.
         self.bars_seen >= self.policy.warm_up_period()
+            && self.bars_seen >= self.rebalance.stable_period()
             && self.children.iter().all(|c| c.strategy.is_ready())
     }
 
@@ -263,6 +331,11 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
         // through a SubWalletHandle over the same inner. Well-formed
         // drivers pass `self.wallet_view()` as this argument, so nothing
         // observable changes — this is documented on the module.
+        //
+        // Ordering: children trade first (against their own pre-rebalance
+        // equity for `value_frac` sizing), then — if the gate fires — the
+        // rebalance runs. Children on the fire bar therefore see a stable
+        // equity value; rebalance is bookkeeping that lands after.
         for i in 0..self.children.len() {
             let child = &self.children[i];
             // Per-child readiness gates each leg independently — the
@@ -275,6 +348,15 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
             let mut handle = SubWalletHandle::new(Rc::clone(&self.inner), i);
             child.strategy.trade(&mut handle);
         }
+
+        // Rebalance gate: skip the whole rebalance step on bars where the
+        // signal doesn't fire. Default gate is `Const::false` so this is
+        // a no-op unless the caller wired a signal via
+        // `rebalance_on(...)`.
+        if !self.rebalance.value().unwrap_or(false) {
+            return;
+        }
+        self.rebalance_now();
     }
 
     fn reset(&mut self) {
@@ -282,11 +364,94 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
             child.strategy.reset();
         }
         self.policy.reset();
+        self.rebalance.reset();
         // Each sub-wallet's own reset() restores it to *its own* seed —
         // the per-child allocation captured at build (since that's what
         // `PaperWallet::new(f)` was called with). No re-splitting needed.
         self.inner.borrow_mut().reset();
         self.bars_seen = 0;
+    }
+}
+
+impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Portfolio<Sym> {
+    /// Execute one rebalance cycle — cash phase followed by a position
+    /// phase for whatever the cash phase couldn't cover. Called by
+    /// [`trade`](Strategy::trade) on gate-fire bars, after every child has
+    /// traded.
+    fn rebalance_now(&self) {
+        let n = self.children.len();
+        if n == 0 {
+            return;
+        }
+
+        // Compute target equities from the current weight vector, sized
+        // against aggregate equity. Weight magnitudes are normalized on
+        // use — the policy contract says they needn't sum to 1.0.
+        let weights = self.policy.weights(n);
+        assert_eq!(
+            weights.len(),
+            n,
+            "Portfolio::rebalance_now: policy returned {} weights for {n} children",
+            weights.len()
+        );
+        let sum_w: Real = weights.iter().sum();
+        if sum_w <= 0.0 {
+            // Degenerate weight vector — no rebalance direction defined.
+            return;
+        }
+
+        let shortfalls = {
+            let mut inner = self.inner.borrow_mut();
+            let total: Real = inner.subs.iter().map(|w| w.equity().0).sum();
+            let targets: Vec<Real> = weights.iter().map(|w| total * w / sum_w).collect();
+            inner.rebalance_cash_to(&targets)
+        };
+
+        // Position phase: for each contributor whose cash phase couldn't
+        // fully cover its donation, scale down every held position
+        // proportionally so the freed cash lands next bar and can flow to
+        // receivers on the following fire cycle. A shortfall of `0` (fully
+        // covered by cash) skips this phase for that child — no order,
+        // no blotter noise. Fills route back through the sub-wallet's own
+        // seam so per-child `on_fill` fires normally.
+        for (i, &shortfall) in shortfalls.iter().enumerate() {
+            if shortfall <= 0.0 {
+                continue;
+            }
+            // After cash phase this child is fully cash-out; its equity
+            // is entirely invested. Fraction to unwind = shortfall /
+            // invested value, clamped to [0, 1].
+            let (invested, positions_snapshot): (Real, Vec<(Sym, Real)>) = {
+                let inner = self.inner.borrow();
+                let sub = &inner.subs[i];
+                let inv = sub.equity().0 - sub.funds().0;
+                let snap: Vec<(Sym, Real)> = sub
+                    .positions()
+                    .map(|u| (u.symbol.clone(), u.amount))
+                    .collect();
+                (inv, snap)
+            };
+            if invested <= 0.0 || positions_snapshot.is_empty() {
+                continue;
+            }
+            let f = (shortfall / invested).clamp(0.0, 1.0);
+            if f <= 0.0 {
+                continue;
+            }
+            let scale = 1.0 - f;
+            let mut handle = SubWalletHandle::new(Rc::clone(&self.inner), i);
+            for (sym, amt) in positions_snapshot {
+                let target = Units {
+                    symbol: sym,
+                    amount: amt * scale,
+                };
+                // Ignore the Ack — the fill routing tables are already
+                // updated by SubWalletHandle::set_position, and any
+                // WalletError here is a genuine bug (PaperWallet queues
+                // market moves without checking funds).
+                let _ = handle.set_position(target);
+            }
+        }
     }
 }
 
@@ -304,15 +469,17 @@ pub struct PortfolioBuilder<Sym> {
     policy: Option<Box<dyn WeightPolicy>>,
     initial_equity: Real,
     costs: Option<TradingCosts>,
+    rebalance: Option<RebalanceSignal<Sym>>,
 }
 
-impl<Sym> Default for PortfolioBuilder<Sym> {
+impl<Sym: 'static> Default for PortfolioBuilder<Sym> {
     fn default() -> Self {
         Self {
             children: Vec::new(),
             policy: None,
             initial_equity: 1.0,
             costs: None,
+            rebalance: None,
         }
     }
 }
@@ -371,6 +538,39 @@ impl<Sym: Clone + Eq + Hash + 'static> PortfolioBuilder<Sym> {
         self
     }
 
+    /// Install the **rebalance gate** — a boolean signal that decides,
+    /// on each bar, whether [`trade`](Strategy::trade) runs one rebalance
+    /// cycle after children have traded. Defaults to `Const::false` —
+    /// **never rebalance** (weights stay at build-time allocation and
+    /// drift with per-child P&L).
+    ///
+    /// A common cadence is `Every::new(N)` — e.g. `!every 28` on a
+    /// daily-bar portfolio to rebalance approximately monthly. Compose
+    /// with any other snapshot signal (a drawdown gate, a calendar rule)
+    /// to trigger on custom conditions.
+    ///
+    /// Each fire runs the same two-phase rebalance:
+    /// 1. **Cash phase** — contributors donate what free cash they have
+    ///    (capped at their available funds) via
+    ///    [`Wallet::adjust_funds`];
+    ///    receivers split the pot in proportion to their target.
+    /// 2. **Position phase** — for each contributor whose cash phase
+    ///    couldn't fully cover its donation, submit `set_position`
+    ///    scale-downs proportional across its held positions. Fills land
+    ///    next bar; the freed cash then transfers to receivers on the
+    ///    following fire cycle.
+    ///
+    /// A `None` reading from the gate is treated as `false` (safe
+    /// default — don't rebalance during warm-up), same as elsewhere in
+    /// the crate.
+    pub fn rebalance_on<S>(mut self, signal: S) -> Self
+    where
+        S: Indicator<Input = Snapshot<Sym>, Output = bool> + 'static,
+    {
+        self.rebalance = Some(Box::new(signal));
+        self
+    }
+
     /// Realize the [`Portfolio`] — resolve the initial weight vector from
     /// the policy, split `initial_equity` across children accordingly,
     /// seed one [`PaperWallet`](crate::PaperWallet) per child at that
@@ -384,6 +584,7 @@ impl<Sym: Clone + Eq + Hash + 'static> PortfolioBuilder<Sym> {
             policy,
             initial_equity,
             costs,
+            rebalance,
         } = self;
         assert!(
             !children.is_empty(),
@@ -401,6 +602,8 @@ impl<Sym: Clone + Eq + Hash + 'static> PortfolioBuilder<Sym> {
         let allocations = allocate_funds(initial_equity, &weights);
         let subs = seed_subs::<Sym>(&allocations, costs.as_ref());
         let inner = Rc::new(RefCell::new(PortfolioInner::new(subs)));
+        let rebalance: RebalanceSignal<Sym> =
+            rebalance.unwrap_or_else(|| Box::new(Const::<Snapshot<Sym>>::new(false)));
         Portfolio {
             children,
             inner,
@@ -408,6 +611,7 @@ impl<Sym: Clone + Eq + Hash + 'static> PortfolioBuilder<Sym> {
             bars_seen: 0,
             initial_equity,
             initial_allocations: allocations,
+            rebalance,
         }
     }
 }

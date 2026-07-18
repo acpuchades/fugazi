@@ -266,6 +266,13 @@ pub enum WalletError {
     /// A net buy would drive cash below zero, and the wallet allows no margin.
     /// (A short sale credits cash, so selling is always feasible.)
     InsufficientFunds,
+    /// The operation is not supported by this wallet implementation. Returned
+    /// by the default [`Wallet::adjust_funds`] impl, which live-broker impls
+    /// selectively override when their venue exposes a deposit / withdrawal /
+    /// sub-account transfer API. Callers (e.g. [`Portfolio`](crate::portfolio::Portfolio)'s
+    /// cash-phase rebalance) should treat this as "the transfer didn't
+    /// happen" and fall back to trait-friendly alternatives (position resize).
+    UnsupportedOperation,
 }
 
 impl fmt::Display for WalletError {
@@ -273,6 +280,9 @@ impl fmt::Display for WalletError {
         match self {
             WalletError::UnknownPrice => f.write_str("no price has been fed for this symbol"),
             WalletError::InvalidPrice => f.write_str("the fed price is not strictly positive"),
+            WalletError::UnsupportedOperation => {
+                f.write_str("the operation is not supported by this wallet implementation")
+            }
             WalletError::PriceOutOfRange => {
                 f.write_str("the fill price is outside the current candle's range")
             }
@@ -397,6 +407,32 @@ pub trait Wallet<Sym> {
 
     /// Cancel both resting protective legs (stop and take-profit) on `symbol`.
     fn cancel_protective(&mut self, symbol: &Sym) -> Result<(), WalletError>;
+
+    /// Credit the cash balance by `delta` (positive = deposit / credit,
+    /// negative = withdrawal / debit) with no order flow. Used by
+    /// [`Portfolio`](crate::portfolio::Portfolio)'s cash-phase rebalance to
+    /// shift free cash between sub-wallets without generating fills, and
+    /// available to any caller that wants to represent an external funding
+    /// event (initial deposit, broker margin adjustment).
+    ///
+    /// **Support is optional.** The default impl returns
+    /// [`WalletError::UnsupportedOperation`] — an in-memory paper wallet
+    /// overrides it directly, while a live-broker impl selectively wires
+    /// it up to the venue's deposit / withdrawal / sub-account transfer
+    /// API only when such a facility exists. Callers should treat an
+    /// error as "the transfer didn't happen" and fall back to
+    /// trait-friendly alternatives (position resize via
+    /// [`set_position`](Self::set_position)) when they need to move value
+    /// through a wallet that doesn't support programmatic cash adjustment.
+    ///
+    /// An impl that supports the operation should return
+    /// [`WalletError::InsufficientFunds`] if `delta < 0` and the resulting
+    /// balance would go negative — matching the "no margin" convention of
+    /// the market movements. Positive-delta credits are always feasible.
+    fn adjust_funds(&mut self, delta: Real) -> Result<(), WalletError> {
+        let _ = delta;
+        Err(WalletError::UnsupportedOperation)
+    }
 }
 
 /// A market order queued on a [`PaperWallet`] to fill at the next bar's `open`.
@@ -569,6 +605,7 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
             amount,
         })
     }
+
 
     /// Book a fill: drive `symbol` to `target` signed units, using
     /// `theoretical_price` as the pre-cost trigger price (bar `open` for a
@@ -952,6 +989,20 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
 
     fn cancel_protective(&mut self, symbol: &Sym) -> Result<(), WalletError> {
         self.protective.remove(symbol);
+        Ok(())
+    }
+
+    /// Directly credit / debit the cash balance — the paper impl of the
+    /// [`Wallet::adjust_funds`] hook. Returns
+    /// [`WalletError::InsufficientFunds`] if the resulting balance would
+    /// be negative, otherwise applies the delta atomically. Booked
+    /// outside the blotter (no `Order`, no `on_fill`).
+    fn adjust_funds(&mut self, delta: Real) -> Result<(), WalletError> {
+        let new_funds = self.funds + delta;
+        if new_funds < 0.0 {
+            return Err(WalletError::InsufficientFunds);
+        }
+        self.funds = new_funds;
         Ok(())
     }
 }
@@ -1543,5 +1594,75 @@ mod tests {
         assert!((b_fill.commission - 5.0).abs() < 1e-9, "B: got {}", b_fill.commission);
         // Cash out: 100000 − (3·10 + 1) − (2·20 + 5) = 100000 − 31 − 45 = 99924.
         assert!((w.funds().0 - 99_924.0).abs() < 1e-6, "funds: {}", w.funds().0);
+    }
+
+    #[test]
+    fn adjust_funds_credits_debits_and_rejects_overdraft() {
+        let mut w: PaperWallet<&'static str> = PaperWallet::new(1_000.0);
+        // Deposit / credit: funds go up, no blotter entry.
+        assert!(w.adjust_funds(500.0).is_ok());
+        assert_eq!(w.funds().0, 1_500.0);
+        assert!(w.orders().is_empty());
+        // Withdrawal within available: fine.
+        assert!(w.adjust_funds(-1_000.0).is_ok());
+        assert_eq!(w.funds().0, 500.0);
+        // Overdraft: refused, funds unchanged.
+        assert_eq!(w.adjust_funds(-1_000.0), Err(WalletError::InsufficientFunds));
+        assert_eq!(w.funds().0, 500.0);
+    }
+
+    #[test]
+    fn trait_default_adjust_funds_returns_unsupported() {
+        // A minimal Wallet impl that only fills the required methods and
+        // relies on the trait defaults — exercising the default
+        // `adjust_funds` path a live-broker wallet without account-transfer
+        // support would inherit unchanged.
+        struct NoTransferWallet;
+        impl Wallet<&'static str> for NoTransferWallet {
+            fn funds(&self) -> Reference {
+                Reference(0.0)
+            }
+            fn position(&self, symbol: &&'static str) -> Units<&'static str> {
+                Units {
+                    symbol: *symbol,
+                    amount: 0.0,
+                }
+            }
+            fn price(&self, _symbol: &&'static str) -> Option<Reference> {
+                None
+            }
+            fn equity(&self) -> Reference {
+                Reference(0.0)
+            }
+            fn update(&mut self, _symbol: &'static str, _candle: Candle) -> Vec<Order<&'static str>> {
+                Vec::new()
+            }
+            fn set_position(
+                &mut self,
+                _target: Units<&'static str>,
+            ) -> Result<Ack<&'static str>, WalletError> {
+                Err(WalletError::UnsupportedOperation)
+            }
+            fn set_stop(
+                &mut self,
+                _symbol: &'static str,
+                _trigger: Reference,
+            ) -> Result<Ack<&'static str>, WalletError> {
+                Err(WalletError::UnsupportedOperation)
+            }
+            fn set_take_profit(
+                &mut self,
+                _symbol: &'static str,
+                _trigger: Reference,
+            ) -> Result<Ack<&'static str>, WalletError> {
+                Err(WalletError::UnsupportedOperation)
+            }
+            fn cancel_protective(&mut self, _symbol: &&'static str) -> Result<(), WalletError> {
+                Ok(())
+            }
+        }
+        let mut w = NoTransferWallet;
+        assert_eq!(w.adjust_funds(100.0), Err(WalletError::UnsupportedOperation));
+        assert_eq!(w.adjust_funds(-50.0), Err(WalletError::UnsupportedOperation));
     }
 }

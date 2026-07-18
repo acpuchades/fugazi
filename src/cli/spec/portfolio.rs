@@ -43,15 +43,19 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
 
+use fugazi::indicators::{Book, Position};
 use fugazi::portfolio::policy::{EqualWeight, Fixed, WeightPolicy};
 use fugazi::portfolio::Portfolio;
 use fugazi::prelude::*;
 use fugazi::types::Snapshot;
 
+use crate::dyn_indicator::{AsBool, DynIndicator};
+
 use super::basket::BasketStrategySpec;
 use super::multi_asset::MultiAssetStrategySpec;
 use super::pairs::PairsStrategySpec;
 use super::preset::StrategyRef;
+use super::signal::SignalSpec;
 
 /// A whole `portfolio.yml`: an ordered list of children plus an optional
 /// weight policy that governs how the initial cash is split at build.
@@ -65,11 +69,35 @@ pub struct PortfolioSpec {
     /// How the initial cash is split across children at build. Omitted
     /// means [`WeightPolicySpec::EqualWeight`] (1/N per child).
     ///
-    /// V1: weights are read once at build only — child equities then drift
-    /// with per-child P&L. Dynamic rebalance is a follow-up (see the
-    /// [`fugazi::portfolio`] module docs).
+    /// Weights are read once at build to seed each child's sub-wallet;
+    /// on subsequent [`rebalance_on`](Self::rebalance_on) fire bars the
+    /// policy is re-queried to compute new targets.
     #[serde(default)]
     pub weights: Option<WeightPolicySpec>,
+
+    /// The **rebalance gate**: a boolean signal deciding, on each bar,
+    /// whether the portfolio runs one rebalance cycle after children
+    /// have traded. Defaults to `!never` (`Const::false`) — no
+    /// rebalance, weights drift with per-child P&L (v1 behavior).
+    ///
+    /// Common cadences: `!every 5` for weekly on a daily portfolio,
+    /// `!every 28` for approximately monthly, or a compound signal
+    /// (`!or [!every 28, !gt { lhs: !drawdown, rhs: !value 0.1 }]`) for
+    /// scheduled rebalance with drawdown-triggered overrides.
+    ///
+    /// A `None` reading (from a still-warming user signal) is treated as
+    /// `false` — the safe default; the portfolio sits between rebalances
+    /// rather than trading through unsettled data.
+    ///
+    /// Each fire runs the same two-phase rebalance: cash phase first
+    /// (contributors donate free cash, receivers split the pot), then a
+    /// position phase for any contributor whose cash phase couldn't
+    /// cover its donation (submits proportional `set_position`
+    /// scale-downs that fill next bar, freeing cash for the following
+    /// fire cycle). A rebalance whose cash phase covers everyone stays
+    /// fill-free automatically.
+    #[serde(default)]
+    pub rebalance_on: Option<SignalSpec>,
 }
 
 /// One child slot: an optional display name plus the nested strategy spec.
@@ -326,13 +354,32 @@ impl PortfolioSpec {
         if let Some(c) = costs {
             builder = builder.costs(c);
         }
-        // Install the policy on the builder so post-build queries stay
-        // consistent (v1 only reads at build time, but a future dynamic
-        // rebalance path would consult it every bar).
-        let built = match &self.weights {
-            Some(WeightPolicySpec::Fixed(w)) => builder.weights(Fixed::new(w.clone())).build(),
-            Some(WeightPolicySpec::EqualWeight) | None => builder.weights(EqualWeight).build(),
+        // Install the policy on the builder; on rebalance-fire bars
+        // `Portfolio` re-queries `WeightPolicy::weights` to compute new
+        // target equities from the aggregate.
+        builder = match &self.weights {
+            Some(WeightPolicySpec::Fixed(w)) => builder.weights(Fixed::new(w.clone())),
+            Some(WeightPolicySpec::EqualWeight) | None => builder.weights(EqualWeight),
         };
+        // Install the rebalance gate — a boolean signal over
+        // `Snapshot<String>`. Built against a dummy `Position` and a
+        // fresh `Book` because a portfolio-level rebalance signal has no
+        // per-child position or book to anchor to; a signal using
+        // `!entry` / `!drawdown` at this level will read the (empty)
+        // dummies. Fold the signal's stable / warm-up periods into the
+        // aggregate so `optimize --walkforward` sees an accurate head
+        // skip.
+        if let Some(rebalance_spec) = &self.rebalance_on {
+            let anchor = Position::new();
+            let book = Book::new(total_initial_equity);
+            let dyn_ind: Box<dyn DynIndicator> =
+                rebalance_spec.build(&anchor, &book, schema);
+            let signal = AsBool::new(dyn_ind);
+            max_stable = max_stable.max(signal.stable_period());
+            max_warm_up = max_warm_up.max(signal.warm_up_period());
+            builder = builder.rebalance_on(signal);
+        }
+        let built = builder.build();
         DynPortfolio {
             inner: built,
             stable_period: max_stable,
@@ -598,5 +645,106 @@ mod tests {
             PortfolioChildStrategy::Single(s) => assert_eq!(s.symbol(), "BTC"),
             _ => panic!("expected a single-asset child"),
         }
+    }
+
+    #[test]
+    fn rebalance_on_defaults_to_none() {
+        // Omitted `rebalance_on:` → the built portfolio behaves as
+        // pre-rebalance v1 (Const::false gate, weights drift with P&L).
+        let yaml = r#"
+            children:
+              - strategy: !buy_and_hold { symbol: A }
+              - strategy: !buy_and_hold { symbol: B }
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        assert!(spec.rebalance_on.is_none());
+        // Should build without failure.
+        let _portfolio = spec.build(1_000.0, &Schema::empty(), None);
+    }
+
+    #[test]
+    fn parses_rebalance_on_every_28() {
+        let yaml = r#"
+            rebalance_on: !every 28
+            children:
+              - strategy: !buy_and_hold { symbol: A }
+              - strategy: !buy_and_hold { symbol: B }
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        assert!(spec.rebalance_on.is_some());
+    }
+
+    #[test]
+    fn parses_rebalance_on_never_as_const_false() {
+        let yaml = r#"
+            rebalance_on: !never
+            children:
+              - strategy: !buy_and_hold { symbol: A }
+              - strategy: !buy_and_hold { symbol: B }
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        assert!(spec.rebalance_on.is_some());
+        // Should build cleanly — !never resolves to Const::false, which
+        // has zero warm-up / stable period.
+        let portfolio = spec.build(1_000.0, &Schema::empty(), None);
+        assert_eq!(portfolio.stable_period(), 0);
+    }
+
+    #[test]
+    fn build_drives_rebalance_cycle_snapping_equities_to_fixed_target() {
+        // End-to-end: partial-sizing buy-and-hold children with a rebalance
+        // gate that fires every bar should snap sub-equities back to the
+        // Fixed target after price divergence — cash phase does all the work
+        // since contributors have cash headroom (position phase is a no-op).
+        //
+        // Bar 1: children enter (queue market orders).
+        // Bar 2: fills at $100 → each child holds 2.5 units of its symbol
+        //        + 250 cash. Equities: 500 each. Rebalance no-op.
+        // Bar 3: A jumps to $200. A's position value doubles: 250 cash +
+        //        500 in position = 750 equity. B stays at 500. Total 1250.
+        //        Rebalance fires: A donates 125 cash to B. Result: 625 each.
+        // Bar 4: nothing changes. Rebalance is a no-op (equities at target).
+        let yaml = r#"
+            weights: !fixed [0.5, 0.5]
+            rebalance_on: !every 1
+            children:
+              - name: half_a
+                strategy:
+                  symbol: A
+                  sizing: !value 0.5
+                  long:
+                    enter: !value true
+                    exit: !value false
+              - name: half_b
+                strategy:
+                  symbol: B
+                  sizing: !value 0.5
+                  long:
+                    enter: !value true
+                    exit: !value false
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let mut portfolio = spec.build(1_000.0, &Schema::empty(), None);
+        let mut wallet = portfolio.wallet_view();
+
+        for bar in 0..4usize {
+            let px_a = if bar < 2 { 100.0 } else { 200.0 };
+            let px_b = 100.0;
+            for fill in wallet.update("A".to_string(), candle(px_a)) {
+                portfolio.on_fill(&fill);
+            }
+            for fill in wallet.update("B".to_string(), candle(px_b)) {
+                portfolio.on_fill(&fill);
+            }
+            portfolio.update(snap_of(&[("A", px_a), ("B", px_b)]));
+            portfolio.trade(&mut wallet);
+        }
+
+        let e0 = wallet.sub_equity(0).0;
+        let e1 = wallet.sub_equity(1).0;
+        assert!(
+            (e0 - e1).abs() < 1.0,
+            "cash-mode rebalance should snap sub-equities to 50/50; got e0={e0}, e1={e1}",
+        );
     }
 }

@@ -107,6 +107,129 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
         self.sub_to_pf.clear();
         self.next_pf_id = 0;
     }
+
+    /// Run the **cash phase** of a rebalance: for each child i, compute the
+    /// signed equity delta `delta_i = target_equities[i] - equity_i`; every
+    /// contributor (`delta_i < 0`) donates `min(|delta_i|, funds_i)` in cash
+    /// via [`Wallet::adjust_funds`], and receivers (`delta_i > 0`) split the
+    /// pot in proportion to `|delta_i|`.
+    ///
+    /// Returns a per-child vector of **residual shortfalls** — the amount of
+    /// equity a contributor still holds above its target after donating what
+    /// cash it could (`0.0` for receivers and for contributors whose full
+    /// donation fit into cash on hand). The position phase reads this vector
+    /// to decide which children need forced position downsizes to raise cash
+    /// for the *next* rebalance cycle.
+    ///
+    /// Cash flow routes through the [`Wallet::adjust_funds`] trait method so
+    /// this phase works with any wallet impl that supports programmatic cash
+    /// adjustment (paper wallets always do; live-broker wallets may, if their
+    /// venue exposes a deposit / withdrawal / sub-account transfer API). A
+    /// wallet that returns [`WalletError::UnsupportedOperation`] gets its
+    /// intended donation added to its shortfall instead — the position phase
+    /// then handles the delta through
+    /// [`set_position`](Wallet::set_position), which is universally supported.
+    /// If a receiver's credit fails on that same error, the corresponding
+    /// contributor debits are rolled back symmetrically (their pot re-adds
+    /// to the receiver's shortfall) to keep total equity conserved.
+    ///
+    /// No fills, no blotter entries. Equity math on the receiver side lands
+    /// atomically this bar when the underlying wallet supports the credit.
+    ///
+    /// # Panics
+    /// Panics if `target_equities.len() != self.subs.len()`.
+    pub(super) fn rebalance_cash_to(&mut self, target_equities: &[Real]) -> Vec<Real> {
+        assert_eq!(
+            target_equities.len(),
+            self.subs.len(),
+            "rebalance_cash_to: target_equities has {} entries but portfolio has {} children",
+            target_equities.len(),
+            self.subs.len(),
+        );
+        let n = self.subs.len();
+        // Snapshot current equities and funds — read once so subsequent
+        // `adjust_funds` mutations don't shift the deltas mid-loop.
+        let equities: Vec<Real> = self.subs.iter().map(|w| w.equity().0).collect();
+        let funds: Vec<Real> = self.subs.iter().map(|w| w.funds().0).collect();
+
+        // Signed deltas: positive = receiver (wants gain), negative = contributor
+        // (needs to shed). By conservation Σ target = Σ equity, so Σ delta = 0.
+        let deltas: Vec<Real> = (0..n).map(|i| target_equities[i] - equities[i]).collect();
+
+        // Cap each contributor's donation at its available cash. Any excess
+        // over `funds` becomes a residual shortfall for the position phase.
+        let mut donations = vec![0.0; n];
+        let mut shortfalls = vec![0.0; n];
+        for i in 0..n {
+            if deltas[i] < 0.0 {
+                let need = -deltas[i];
+                let donation = need.min(funds[i]);
+                donations[i] = donation;
+                shortfalls[i] = need - donation;
+            }
+        }
+
+        // Debit contributors first. A wallet that refuses the debit (returns
+        // `UnsupportedOperation`) has its intended donation folded into its
+        // own shortfall instead of the shared pot — that equity stays where
+        // it is until the position phase raises it via `set_position`.
+        let mut actual_donations = vec![0.0; n];
+        for i in 0..n {
+            if donations[i] > 0.0 {
+                match self.subs[i].adjust_funds(-donations[i]) {
+                    Ok(()) => actual_donations[i] = donations[i],
+                    Err(_) => {
+                        // Debit refused — the shortfall grows by the amount
+                        // that couldn't be donated.
+                        shortfalls[i] += donations[i];
+                    }
+                }
+            }
+        }
+        let pot: Real = actual_donations.iter().sum();
+
+        // Receivers' total demand (positive deltas). By conservation this
+        // equals `Σ -delta_contributor`; when all contributors are fully
+        // covered by their cash and every debit succeeded, `pot == demand`.
+        // Cash-limited contributors OR debit refusals shrink the pot and each
+        // receiver gets a proportional share of what was raised.
+        let demand: Real = deltas.iter().filter(|&&d| d > 0.0).sum();
+        let scale = if demand > 0.0 { pot / demand } else { 0.0 };
+
+        // Credit receivers. If a receiver's wallet refuses the credit, roll
+        // back the proportional pot back to contributors symmetrically —
+        // total equity must stay conserved even under partial trait
+        // support. A refunded contribution re-inflates that contributor's
+        // shortfall so the position phase can still act on it.
+        for (i, &delta) in deltas.iter().enumerate() {
+            if delta > 0.0 && scale > 0.0 {
+                let credit = delta * scale;
+                if self.subs[i].adjust_funds(credit).is_err() {
+                    // Refund pot fraction back to each contributor
+                    // proportionally to their actual donation.
+                    let total_actual: Real = actual_donations.iter().sum();
+                    if total_actual > 0.0 {
+                        let refund_scale = credit / total_actual;
+                        for (j, &donation) in actual_donations.iter().enumerate() {
+                            if donation > 0.0 {
+                                let refund = donation * refund_scale;
+                                // Best-effort re-credit — if the same
+                                // wallet refuses the refund (which would be
+                                // surprising for a wallet that just
+                                // accepted a debit), the equity is stuck
+                                // in limbo; log via shortfall so the
+                                // position phase can compensate.
+                                if self.subs[j].adjust_funds(refund).is_err() {
+                                    shortfalls[j] += refund;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        shortfalls
+    }
 }
 
 /// A composite [`Wallet`] that carries one [`PaperWallet`] per child
