@@ -41,6 +41,12 @@ type Chain<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real>>;
 /// exactly once per symbol the first time it appears in a snapshot.
 type Factory<Sym> = Box<dyn Fn(&Sym) -> Chain<Sym>>;
 
+/// A per-symbol protective-level factory: receives both the symbol and the
+/// per-symbol [`Position`] so `position.entry()` / `.peak()` / `.trough()`
+/// leaves can anchor themselves inside the returned chain. Called once per
+/// symbol first sight, same as [`Factory`].
+type LevelFactory<Sym> = Box<dyn Fn(&Sym, &Position) -> Chain<Sym>>;
+
 // ---------------------------------------------------------------------------
 // Selection functions — each rule is a standalone `pub fn` that ranks a
 // score map into a per-symbol side, so a caller who knows which rule they
@@ -338,8 +344,23 @@ type RebalanceSignal<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bo
 pub struct BasketStrategy<Sym> {
     score_factory: Factory<Sym>,
     sizing_factory: Factory<Sym>,
+    /// Per-symbol protective-level factories. When present, each
+    /// scored symbol also builds a stop / take-profit chain that reads
+    /// against that symbol's [`Position`] (via `position.entry()` etc.);
+    /// `trade` re-submits the resting level after entries, and closes
+    /// the bracket on flatten.
+    long_stop_factory: Option<LevelFactory<Sym>>,
+    long_target_factory: Option<LevelFactory<Sym>>,
+    short_stop_factory: Option<LevelFactory<Sym>>,
+    short_target_factory: Option<LevelFactory<Sym>>,
     scores: HashMap<Sym, Chain<Sym>>,
     sizes: HashMap<Sym, Chain<Sym>>,
+    /// Per-symbol protective-level chains built lazily on first sight
+    /// (mirrors [`scores`](Self::scores) / [`sizes`](Self::sizes)).
+    long_stops: HashMap<Sym, Chain<Sym>>,
+    long_targets: HashMap<Sym, Chain<Sym>>,
+    short_stops: HashMap<Sym, Chain<Sym>>,
+    short_targets: HashMap<Sym, Chain<Sym>>,
     positions: HashMap<Sym, Position>,
     latest_score: HashMap<Sym, Real>,
     latest_size: HashMap<Sym, Real>,
@@ -352,6 +373,10 @@ pub struct BasketStrategy<Sym> {
     rebalance: RebalanceSignal<Sym>,
     universe: Universe<Sym>,
     book: Book<Sym>,
+    /// If `true`, per-symbol sizes are scaled at each rebalance so
+    /// `Σ long_sizes == Σ short_sizes` (dollar-neutral). Set via
+    /// [`dollar_neutral`](Self::dollar_neutral); defaults to `false`.
+    dollar_neutral: bool,
 }
 
 impl<Sym: Clone + PartialEq + Hash + Eq + 'static> BasketStrategy<Sym> {
@@ -387,8 +412,16 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> BasketStrategy<Sym> {
                 let ind: Chain<Sym> = Box::new(Value::<Snapshot<Sym>>::new(0.0));
                 ind
             }),
+            long_stop_factory: None,
+            long_target_factory: None,
+            short_stop_factory: None,
+            short_target_factory: None,
             scores: HashMap::new(),
             sizes: HashMap::new(),
+            long_stops: HashMap::new(),
+            long_targets: HashMap::new(),
+            short_stops: HashMap::new(),
+            short_targets: HashMap::new(),
             positions: HashMap::new(),
             latest_score: HashMap::new(),
             latest_size: HashMap::new(),
@@ -396,7 +429,88 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> BasketStrategy<Sym> {
             rebalance: Box::new(Every::<Snapshot<Sym>>::new(1)),
             universe: Universe::Floating,
             book: Book::new(initial_equity),
+            dollar_neutral: false,
         }
+    }
+
+    /// Attach a per-leg **long stop-loss** factory. Called once per new
+    /// symbol on first sight, receiving both the symbol and its
+    /// [`Position`] so `position.entry()` / `.peak()` levels compose
+    /// exactly as on [`SingleAssetStrategy`](crate::strategies::SingleAssetStrategy).
+    /// The returned chain reads a `Real` level per bar; the basket
+    /// re-submits the resting stop after every long entry, and cancels
+    /// the bracket on flatten.
+    pub fn long_stop_loss<F, L>(mut self, factory: F) -> Self
+    where
+        F: Fn(&Sym, &Position) -> L + 'static,
+        L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+    {
+        self.long_stop_factory = Some(Box::new(move |sym: &Sym, pos: &Position| {
+            let ind: Chain<Sym> = Box::new(factory(sym, pos));
+            ind
+        }));
+        self
+    }
+
+    /// Attach a per-leg **long take-profit** factory. See
+    /// [`long_stop_loss`](Self::long_stop_loss) for the factory shape.
+    pub fn long_take_profit<F, L>(mut self, factory: F) -> Self
+    where
+        F: Fn(&Sym, &Position) -> L + 'static,
+        L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+    {
+        self.long_target_factory = Some(Box::new(move |sym: &Sym, pos: &Position| {
+            let ind: Chain<Sym> = Box::new(factory(sym, pos));
+            ind
+        }));
+        self
+    }
+
+    /// Attach a per-leg **short stop-loss** factory. See
+    /// [`long_stop_loss`](Self::long_stop_loss) for the factory shape.
+    pub fn short_stop_loss<F, L>(mut self, factory: F) -> Self
+    where
+        F: Fn(&Sym, &Position) -> L + 'static,
+        L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+    {
+        self.short_stop_factory = Some(Box::new(move |sym: &Sym, pos: &Position| {
+            let ind: Chain<Sym> = Box::new(factory(sym, pos));
+            ind
+        }));
+        self
+    }
+
+    /// Attach a per-leg **short take-profit** factory. See
+    /// [`long_stop_loss`](Self::long_stop_loss) for the factory shape.
+    pub fn short_take_profit<F, L>(mut self, factory: F) -> Self
+    where
+        F: Fn(&Sym, &Position) -> L + 'static,
+        L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static,
+    {
+        self.short_target_factory = Some(Box::new(move |sym: &Sym, pos: &Position| {
+            let ind: Chain<Sym> = Box::new(factory(sym, pos));
+            ind
+        }));
+        self
+    }
+
+    /// Enforce **dollar-neutrality**: at each rebalance, scale per-symbol
+    /// sizes so that the sum of long weights equals the sum of short
+    /// weights. Concretely, the smaller of the two per-side sums is
+    /// taken as the target gross-per-side (never levers up), and each
+    /// side's sizes are rescaled by `target / side_sum`.
+    ///
+    /// If the selection is one-sided on a given fire bar (no longs, or
+    /// no shorts), the basket **skips that rebalance** — dollar-neutral
+    /// with no hedgeable counter-side is undefined; the safe default is
+    /// to sit rather than run an accidental net-long or net-short leg.
+    ///
+    /// Off by default. Compose with any selection rule
+    /// ([`top_bottom`](Self::top_bottom) / [`threshold`](Self::threshold) /
+    /// [`quantile`](Self::quantile) / [`selection`](Self::selection)).
+    pub fn dollar_neutral(mut self) -> Self {
+        self.dollar_neutral = true;
+        self
     }
 
     /// Install the **rebalance gate** — a boolean signal that decides,
@@ -567,6 +681,15 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> BasketStrategy<Sym> {
         for size in self.sizes.values() {
             n = n.max(size.stable_period());
         }
+        for level in self
+            .long_stops
+            .values()
+            .chain(self.long_targets.values())
+            .chain(self.short_stops.values())
+            .chain(self.short_targets.values())
+        {
+            n = n.max(level.stable_period());
+        }
         n
     }
 
@@ -583,6 +706,15 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> BasketStrategy<Sym> {
         }
         for size in self.sizes.values() {
             n = n.max(size.warm_up_period());
+        }
+        for level in self
+            .long_stops
+            .values()
+            .chain(self.long_targets.values())
+            .chain(self.short_stops.values())
+            .chain(self.short_targets.values())
+        {
+            n = n.max(level.warm_up_period());
         }
         n
     }
@@ -632,11 +764,28 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Strategy for BasketStrategy<S
             })
             .collect();
         for sym in new_syms {
+            let position = Position::new();
             let score = (self.score_factory)(&sym);
             let size = (self.sizing_factory)(&sym);
+            // Build any per-leg protective chain factories against this
+            // symbol's brand-new Position so `position.entry()` /
+            // `.peak()` / `.trough()` inside the level compose against
+            // the right anchor.
+            if let Some(f) = &self.long_stop_factory {
+                self.long_stops.insert(sym.clone(), f(&sym, &position));
+            }
+            if let Some(f) = &self.long_target_factory {
+                self.long_targets.insert(sym.clone(), f(&sym, &position));
+            }
+            if let Some(f) = &self.short_stop_factory {
+                self.short_stops.insert(sym.clone(), f(&sym, &position));
+            }
+            if let Some(f) = &self.short_target_factory {
+                self.short_targets.insert(sym.clone(), f(&sym, &position));
+            }
             self.scores.insert(sym.clone(), score);
             self.sizes.insert(sym.clone(), size);
-            self.positions.insert(sym, Position::new());
+            self.positions.insert(sym, position);
         }
 
         // 2. Advance every known chain against the whole snapshot; the
@@ -662,6 +811,21 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Strategy for BasketStrategy<S
                     self.latest_size.remove(sym);
                 }
             }
+        }
+        // Advance any protective-level chains against the same snapshot.
+        // We drop their return values on the floor here; `trade` reads
+        // `.value()` when it needs to re-submit the resting order.
+        for (_, chain) in self.long_stops.iter_mut() {
+            let _ = chain.update(snap.clone());
+        }
+        for (_, chain) in self.long_targets.iter_mut() {
+            let _ = chain.update(snap.clone());
+        }
+        for (_, chain) in self.short_stops.iter_mut() {
+            let _ = chain.update(snap.clone());
+        }
+        for (_, chain) in self.short_targets.iter_mut() {
+            let _ = chain.update(snap.clone());
         }
 
         // 3. Fold the in-progress bar into each held symbol's Position.
@@ -703,6 +867,32 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Strategy for BasketStrategy<S
             return;
         }
         let selection = (self.selection)(&self.latest_score);
+
+        // Dollar-neutrality: scale per-side sizes so Σ long_sizes ==
+        // Σ short_sizes. The smaller side's sum becomes the target
+        // gross-per-side (never levers up). A one-sided selection skips
+        // the whole rebalance — running only one leg would break the
+        // hedge intent.
+        let (long_scale, short_scale) = if self.dollar_neutral {
+            let long_sum: Real = selection
+                .iter()
+                .filter(|(_, s)| **s == Side::Buy)
+                .map(|(sym, _)| self.latest_size.get(sym).copied().unwrap_or(0.0))
+                .sum();
+            let short_sum: Real = selection
+                .iter()
+                .filter(|(_, s)| **s == Side::Sell)
+                .map(|(sym, _)| self.latest_size.get(sym).copied().unwrap_or(0.0))
+                .sum();
+            if long_sum <= 0.0 || short_sum <= 0.0 {
+                return;
+            }
+            let target = long_sum.min(short_sum);
+            (target / long_sum, target / short_sum)
+        } else {
+            (1.0, 1.0)
+        };
+
         for sym in self.scores.keys() {
             let position = self.positions.get(sym);
             match selection.get(sym) {
@@ -713,22 +903,40 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Strategy for BasketStrategy<S
                     let Some(&size) = self.latest_size.get(sym) else {
                         continue;
                     };
+                    let scaled = size * long_scale;
                     let is_long = position.map(|p| p.is_long()).unwrap_or(false);
                     if !is_long {
                         let _ =
-                            wallet.set(sym.clone(), Side::Buy, Size::value_frac(size));
+                            wallet.set(sym.clone(), Side::Buy, Size::value_frac(scaled));
                         let _ = wallet.cancel_protective(sym);
+                    }
+                    // Re-submit long-side resting orders every fire —
+                    // idempotent (`set_stop` / `set_take_profit` are
+                    // latest-wins on `PaperWallet`) so trailing levels
+                    // that move with the bar update naturally.
+                    if let Some(level) = self.long_stops.get(sym).and_then(|c| c.value()) {
+                        let _ = wallet.set_stop(sym.clone(), Reference(level));
+                    }
+                    if let Some(level) = self.long_targets.get(sym).and_then(|c| c.value()) {
+                        let _ = wallet.set_take_profit(sym.clone(), Reference(level));
                     }
                 }
                 Some(Side::Sell) => {
                     let Some(&size) = self.latest_size.get(sym) else {
                         continue;
                     };
+                    let scaled = size * short_scale;
                     let is_short = position.map(|p| p.is_short()).unwrap_or(false);
                     if !is_short {
                         let _ =
-                            wallet.set(sym.clone(), Side::Sell, Size::value_frac(size));
+                            wallet.set(sym.clone(), Side::Sell, Size::value_frac(scaled));
                         let _ = wallet.cancel_protective(sym);
+                    }
+                    if let Some(level) = self.short_stops.get(sym).and_then(|c| c.value()) {
+                        let _ = wallet.set_stop(sym.clone(), Reference(level));
+                    }
+                    if let Some(level) = self.short_targets.get(sym).and_then(|c| c.value()) {
+                        let _ = wallet.set_take_profit(sym.clone(), Reference(level));
                     }
                 }
                 None => {
@@ -761,6 +969,10 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static> Strategy for BasketStrategy<S
     fn reset(&mut self) {
         self.scores.clear();
         self.sizes.clear();
+        self.long_stops.clear();
+        self.long_targets.clear();
+        self.short_stops.clear();
+        self.short_targets.clear();
         self.positions.clear();
         self.latest_score.clear();
         self.latest_size.clear();
@@ -1427,5 +1639,93 @@ mod tests {
             strat.trade(&mut wallet);
         }
         assert!(wallet.orders().is_empty(), "never-rebalance basket must not trade");
+    }
+
+    // ---------------- Dollar-neutral ------------------------------------
+
+    #[test]
+    fn dollar_neutral_rescales_sides_to_min_gross() {
+        // Three symbols. Uniform sizing 0.5 per leg. Top-2 long / bottom-1
+        // short: long side sums to 1.0, short side sums to 0.5. Dollar-
+        // neutral should downscale longs from 0.5 each to 0.25 each (so
+        // Σ longs == Σ shorts == 0.5).
+        //
+        // Verify via wallet notional (units × price) after fills land.
+        let mut strat: BasketStrategy<&'static str> =
+            BasketStrategy::with_initial_equity(10_000.0)
+                .scored_by(|sym: &&'static str| {
+                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
+                })
+                .sized_by(|_| crate::indicators::Value::<Snapshot<&'static str>>::new(0.5))
+                .top_bottom(2, 1)
+                .dollar_neutral();
+        let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
+        let tick = |strat: &mut BasketStrategy<&'static str>,
+                    wallet: &mut PaperWallet<&'static str>,
+                    entries: &[(&'static str, Real)]| {
+            let s = snap(entries);
+            for (sym_opt, _f, atom) in s.iter() {
+                let sym = sym_opt.copied().unwrap();
+                for fill in wallet.update(sym, atom.candle) {
+                    strat.on_fill(&fill);
+                }
+            }
+            strat.update(s);
+            strat.trade(wallet);
+        };
+        // A = 300 (top), B = 200 (mid, long), C = 100 (bottom, short).
+        tick(&mut strat, &mut wallet, &[("A", 300.0), ("B", 200.0), ("C", 100.0)]);
+        tick(&mut strat, &mut wallet, &[("A", 300.0), ("B", 200.0), ("C", 100.0)]);
+
+        // Per-symbol notionals: |units × price|. Longs summed vs shorts summed
+        // should be equal (dollar-neutral) and each side ≈ 0.5 × equity ≈ 5000.
+        let notional = |sym: &'static str, price: Real| -> Real {
+            wallet.position(&sym).amount.abs() * price
+        };
+        let long_gross = notional("A", 300.0) + notional("B", 200.0);
+        let short_gross = notional("C", 100.0);
+        // Same tolerance we use elsewhere for equity math with rounded
+        // unit counts.
+        assert!(
+            (long_gross - short_gross).abs() < 50.0,
+            "dollar-neutral: longs={long_gross}, shorts={short_gross}",
+        );
+        // And the target-per-side is the smaller (short) sum ≈ 5000
+        // (before any drift for prices set at close = open).
+        assert!(
+            short_gross > 4_000.0 && short_gross < 6_000.0,
+            "dollar-neutral gross-per-side should be ≈ 5000; got {short_gross}",
+        );
+    }
+
+    #[test]
+    fn dollar_neutral_skips_one_sided_rebalance() {
+        // Only long side selected → dollar-neutral has no counter-side to
+        // hedge, so the whole rebalance skips (no orders queued).
+        let mut strat: BasketStrategy<&'static str> =
+            BasketStrategy::with_initial_equity(10_000.0)
+                .scored_by(|sym: &&'static str| {
+                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
+                })
+                .sized_by(|_| crate::indicators::Value::<Snapshot<&'static str>>::new(0.5))
+                .top_bottom(2, 0) // longs only
+                .dollar_neutral();
+        let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
+        for _ in 0..3 {
+            let s = snap(&[("A", 300.0), ("B", 200.0), ("C", 100.0)]);
+            for (sym_opt, _f, atom) in s.iter() {
+                let sym = sym_opt.copied().unwrap();
+                for fill in wallet.update(sym, atom.candle) {
+                    strat.on_fill(&fill);
+                }
+            }
+            strat.update(s);
+            strat.trade(&mut wallet);
+        }
+        assert!(
+            wallet.orders().is_empty(),
+            "one-sided dollar-neutral basket must not trade; got {} orders",
+            wallet.orders().len(),
+        );
     }
 }

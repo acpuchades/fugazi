@@ -106,9 +106,11 @@ Each bar the driver: feed each symbol to wallet, route each fill to every strate
 - **Costs** stay on wallet — `PaperWallet::set_costs_for(sym, ...)`.
 - **Per-symbol readiness.** Under `Floating` / `any_of`: `is_ready() = true` unconditionally; enforced inside `trade()` by only ranking symbols whose score read `Some` this bar. Under `all_of`: `is_ready()` blocks until every listed symbol has both scored and sized `Some` — the driver skips `trade` while the universe warms.
 - **`rebalance_on(signal)`** (default `Every::new(1)` — every bar). Gates the whole selection + resize step; a less-frequent cadence (`!every 20` for weekly on a daily strategy, or a drawdown-triggered signal) lets the basket hold its picks between rebalance events. Because basket's selection *is* the sizing decision, gating selection is the natural rebalance semantics — the same knob shape as on the other strategies but with a fire-every-bar default to preserve pre-refactor behavior.
-- **State.** Per-symbol `Position` (per-leg protective not wired) + shared `Book<Sym>`. Seed `with_initial_equity(cash)`.
+- **State.** Per-symbol `Position` (+ per-symbol per-leg protective chains lazily built on first sight — reference the symbol's own Position, same shape as MultiAssetStrategy) + shared `Book<Sym>`. Seed `with_initial_equity(cash)`.
+- **Dollar neutrality.** `.dollar_neutral()` (YAML `dollar_neutral: true`) scales per-symbol sizes at each rebalance so `Σ long_sizes == Σ short_sizes`; the smaller-side sum is the target gross-per-side (never levers up). A one-sided selection this bar skips the whole rebalance — the hedge is undefined.
+- **Per-leg protective.** `.long_stop_loss(|sym, &Position| level)` / `.long_take_profit(...)` / `.short_stop_loss(...)` / `.short_take_profit(...)` per-symbol factories, plus YAML `long: { stop_loss: ..., take_profit: ... }` / `short: { ... }` using `BasketSideSpec` templates with `!arg SYM` and `!entry` / `!peak` / `!trough` anchored to *that* symbol's Position. Idempotent re-submit on each fire, `cancel_protective` on flatten.
 - **Transitions** = market orders, only when target side differs.
-- **Not shipped**: `.dollar_neutral()`, `.rebalance_every(...)`, per-leg protective levels, Python bindings.
+- **Not shipped**: Python bindings.
 
 **`MultiAssetStrategy<Sym>`** (`strategies/multi_asset.rs`) — N-symbol **independent** portfolio (not cross-sectional): every symbol runs the same `SingleAssetStrategy`-shaped decision in isolation — same four signal slots, same protective-level slots, same sizing — and any subset can be long / short / flat at once. Sibling to `BasketStrategy`; reach for it when a symbol's fate depends only on its own signals, not on how it ranks against the rest.
 

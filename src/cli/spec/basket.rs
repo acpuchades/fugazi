@@ -139,6 +139,42 @@ pub struct BasketStrategySpec {
     /// rather than trading through unsettled data.
     #[serde(default)]
     pub rebalance_on: Option<SignalSpec>,
+
+    /// Enforce **dollar-neutrality**: at each rebalance, per-symbol sizes
+    /// are scaled so that Σ long_sizes == Σ short_sizes. The smaller
+    /// per-side sum is taken as the target gross-per-side (never levers
+    /// up); a one-sided selection this bar skips the rebalance entirely
+    /// (the hedge is undefined). Off by default.
+    #[serde(default)]
+    pub dollar_neutral: bool,
+
+    /// Per-leg protective levels — same shape as the single-asset
+    /// `long:` / `short:` spec sides but templated (`!arg SYM` for the
+    /// current symbol). Each side's `stop_loss` and `take_profit` is an
+    /// `ExprSpec` template built once per new symbol; `!entry` / `!peak`
+    /// / `!trough` inside the template read against *that* symbol's
+    /// [`Position`], letting fixed / ATR / trailing stops compose
+    /// exactly as they do on `SingleAssetStrategy`.
+    ///
+    /// `enter` / `exit` on this side are ignored — basket uses its
+    /// [`selection`](Self::selection) rule to decide per-symbol side.
+    #[serde(default)]
+    pub long: Option<BasketSideSpec>,
+    #[serde(default)]
+    pub short: Option<BasketSideSpec>,
+}
+
+/// Per-leg protective template for a [`BasketStrategySpec`] side. Only
+/// the two protective fields are honored — `enter` / `exit` semantics
+/// live on the basket's [`selection`](BasketStrategySpec::selection)
+/// rule, which the ranking output supplies.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BasketSideSpec {
+    #[serde(default)]
+    pub stop_loss: Option<SpecTemplate<ExprSpec>>,
+    #[serde(default)]
+    pub take_profit: Option<SpecTemplate<ExprSpec>>,
 }
 
 impl BasketStrategySpec {
@@ -184,11 +220,12 @@ impl BasketStrategySpec {
     ///
     /// The **per-leg `Position` accessors** (`!entry`, `!peak`, `!trough`)
     /// are wired to a *dummy* `Position` inside score/sizing subtrees, so
-    /// they always read `None` in a basket. Those accessors make sense
-    /// only inside a per-side protective level (a follow-up on
-    /// `BasketStrategy`); using them in a score / sizing expression today
-    /// silently produces `None` and skips the leg. The shared `Book`
-    /// anchor *is* wired, so book-anchored sizing recipes
+    /// they always read `None` there. Inside the per-leg protective level
+    /// templates ([`long`](Self::long) / [`short`](Self::short) with their
+    /// `stop_loss:` / `take_profit:` fields) they *do* mean something —
+    /// the factory receives that symbol's own `Position` so `!entry`
+    /// reads the entry price of *that* leg. The shared `Book` anchor is
+    /// wired everywhere, so book-anchored sizing recipes
     /// (`!drawdown_throttle`, `!equity_vol_target`, `!fractional_kelly`)
     /// work on the basket's aggregate equity curve.
     pub fn build(&self, initial_equity: Real, schema: &Arc<Schema>) -> DynBasketStrategy {
@@ -242,6 +279,70 @@ impl BasketStrategySpec {
             let anchor = Position::new();
             let dyn_ind: Box<dyn DynIndicator> = rebalance_spec.build(&anchor, &book, schema);
             strat.rebalance_on(AsBool::new(dyn_ind))
+        } else {
+            strat
+        };
+
+        // Per-leg protective levels — each side's stop_loss / take_profit
+        // is a `SpecTemplate<ExprSpec>` built per-symbol and anchored
+        // against *that* symbol's Position (not a dummy — this is where
+        // `!entry` / `!peak` / `!trough` actually mean something in a
+        // basket).
+        let strat = if let Some(long) = &self.long {
+            let mut strat = strat;
+            if let Some(t) = long.stop_loss.clone() {
+                let book_c = book.clone();
+                let schema_c = schema.clone();
+                strat = strat.long_stop_loss(move |sym: &String, pos: &Position| {
+                    let concrete = build_per_symbol(&t, sym, "long.stop_loss");
+                    let dyn_ind: Box<dyn DynIndicator> =
+                        concrete.build(pos, &book_c, &schema_c);
+                    AsReal::new(dyn_ind)
+                });
+            }
+            if let Some(t) = long.take_profit.clone() {
+                let book_c = book.clone();
+                let schema_c = schema.clone();
+                strat = strat.long_take_profit(move |sym: &String, pos: &Position| {
+                    let concrete = build_per_symbol(&t, sym, "long.take_profit");
+                    let dyn_ind: Box<dyn DynIndicator> =
+                        concrete.build(pos, &book_c, &schema_c);
+                    AsReal::new(dyn_ind)
+                });
+            }
+            strat
+        } else {
+            strat
+        };
+        let strat = if let Some(short) = &self.short {
+            let mut strat = strat;
+            if let Some(t) = short.stop_loss.clone() {
+                let book_c = book.clone();
+                let schema_c = schema.clone();
+                strat = strat.short_stop_loss(move |sym: &String, pos: &Position| {
+                    let concrete = build_per_symbol(&t, sym, "short.stop_loss");
+                    let dyn_ind: Box<dyn DynIndicator> =
+                        concrete.build(pos, &book_c, &schema_c);
+                    AsReal::new(dyn_ind)
+                });
+            }
+            if let Some(t) = short.take_profit.clone() {
+                let book_c = book.clone();
+                let schema_c = schema.clone();
+                strat = strat.short_take_profit(move |sym: &String, pos: &Position| {
+                    let concrete = build_per_symbol(&t, sym, "short.take_profit");
+                    let dyn_ind: Box<dyn DynIndicator> =
+                        concrete.build(pos, &book_c, &schema_c);
+                    AsReal::new(dyn_ind)
+                });
+            }
+            strat
+        } else {
+            strat
+        };
+
+        let strat = if self.dollar_neutral {
+            strat.dollar_neutral()
         } else {
             strat
         };
@@ -734,6 +835,40 @@ mod tests {
             strat.update(snap_of(&[("A", a), ("B", b)]));
             strat.trade(&mut wallet);
         }
+    }
+
+    #[test]
+    fn parses_dollar_neutral_flag() {
+        let yaml = r#"
+            selection: !top_bottom { longs: 1, shorts: 1 }
+            score: !close { source: !pick { symbol: !arg SYM } }
+            sizing: !value 0.5
+            dollar_neutral: true
+        "#;
+        let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        assert!(spec.dollar_neutral);
+    }
+
+    #[test]
+    fn parses_per_leg_protective_templates() {
+        // Basket with per-leg protective levels — 5% stop-loss below entry.
+        // The template uses `!entry` (a Position accessor) which is only
+        // meaningful in the per-leg factory context; here we just verify
+        // the spec parses and builds without panicking.
+        let yaml = r#"
+            selection: !top_bottom { longs: 1, shorts: 1 }
+            score: !close { source: !pick { symbol: !arg SYM } }
+            sizing: !value 0.5
+            long:
+              stop_loss: !mul { lhs: !entry, rhs: !value 0.95 }
+            short:
+              stop_loss: !mul { lhs: !entry, rhs: !value 1.05 }
+        "#;
+        let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        assert!(spec.long.is_some());
+        assert!(spec.short.is_some());
+        // Build shouldn't panic.
+        let _built = spec.build(1_000.0, &Schema::empty());
     }
 
     #[test]
