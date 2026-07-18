@@ -3400,13 +3400,12 @@ fn keltner_breakout(
 }
 
 // Trailing-risk-of-strategy indicators (`sharpe_of`, `sortino_of`, etc.)
-// are intentionally NOT bound here: they wrap an embedded strategy, which
-// uses `Rc<RefCell>` for its Position and Book anchors, making the whole
-// composition `!Send + !Sync`. The Python binding layer requires
-// `Send + Sync` on carriers (`TypedSource::new`'s bound). Un-blocking
-// requires the Position storage swap to `Arc<Mutex>` — tracked as PR6d.
-// The Rust catalogue + YAML `!sharpe { strategy: <preset> }` remain the
-// available paths in the meantime.
+// remain blocked in Python bindings even after the Position + Book + Shared
+// Send + Sync refactor: `SingleAssetStrategy` internals still hold
+// `Box<dyn Signal + 'static>` etc. without `Send + Sync` bounds, so the
+// composed `Sharpe<SingleAssetStrategy<String>>` isn't Send + Sync either.
+// Unblocking requires adding `Send + Sync` bounds on those strategy fields
+// (a larger touch: every strategy trait object). Tracked as a follow-up.
 
 /// The result of [`Strategy.run`](PyStrategy::run): the per-bar equity curve, the
 /// fill blotter, and the pre-run seed equity — everything the `fugazi.metrics`

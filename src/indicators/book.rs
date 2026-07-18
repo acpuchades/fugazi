@@ -63,11 +63,10 @@
 //!
 //! [`PairsStrategy`]: crate::strategies::PairsStrategy
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::marker::PhantomData;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use crate::indicator::Indicator;
 use crate::indicators::DEFAULT_EPSILON;
@@ -181,16 +180,19 @@ impl<Sym: Hash + Eq> BookState<Sym> {
 
 /// A strategy's own view of its equity curve and closed-trade history.
 ///
-/// Backed by an `Rc<RefCell<…>>`, so cloning shares one state — every
+/// Backed by an `Arc<Mutex<…>>`, so cloning shares one state — every
 /// [`BookField`] accessor holds a clone and reads the same facts the
 /// strategy writes via [`apply_fill`](Book::apply_fill) /
-/// [`update`](Book::update).
+/// [`update`](Book::update). The `Arc + Mutex` combo (previously
+/// `Rc + RefCell`) makes the whole composition `Send + Sync`, required by
+/// the pyo3 Python bindings and by any Rust caller that wants to
+/// parallelize backtests.
 ///
 /// Generic over the symbol type `Sym` — defaults to [`String`] so callers
 /// that don't care about the sym type can write `Book` and let the
 /// default apply. Requires `Sym: Hash + Eq + Clone` so it can key an
 /// internal `HashMap<Sym, LegState>` for per-leg accounting.
-pub struct Book<Sym = String>(Rc<RefCell<BookState<Sym>>>);
+pub struct Book<Sym = String>(Arc<Mutex<BookState<Sym>>>);
 
 impl<Sym> std::fmt::Debug for Book<Sym>
 where
@@ -203,7 +205,7 @@ where
 
 impl<Sym> Clone for Book<Sym> {
     fn clone(&self) -> Self {
-        Self(Rc::clone(&self.0))
+        Self(Arc::clone(&self.0))
     }
 }
 
@@ -219,14 +221,14 @@ impl<Sym: Hash + Eq + Clone> Book<Sym> {
             initial_equity > 0.0,
             "initial_equity must be strictly positive"
         );
-        Self(Rc::new(RefCell::new(BookState::seed(initial_equity))))
+        Self(Arc::new(Mutex::new(BookState::seed(initial_equity))))
     }
 
     /// Reset every counter back to the freshly-constructed state, keeping
     /// the original `initial_equity` seed.
     pub fn reset(&self) {
-        let seed = self.0.borrow().initial_equity;
-        *self.0.borrow_mut() = BookState::seed(seed);
+        let seed = self.0.lock().expect("Book lock poisoned").initial_equity;
+        *self.0.lock().expect("Book lock poisoned") = BookState::seed(seed);
     }
 
     /// Apply a fill of `units` at `price` on `side`, tagged with the leg's
@@ -246,7 +248,7 @@ impl<Sym: Hash + Eq + Clone> Book<Sym> {
     ///
     /// [`Position::apply`]: crate::indicators::Position::apply
     pub fn apply_fill(&self, sym: &Sym, side: Side, units: Real, price: Real) {
-        let mut s = self.0.borrow_mut();
+        let mut s = self.0.lock().expect("Book lock poisoned");
         let sign = side.sign();
         let signed_units = sign * units;
 
@@ -317,7 +319,7 @@ impl<Sym: Hash + Eq + Clone> Book<Sym> {
     where
         I: IntoIterator<Item = (Sym, Candle)>,
     {
-        let mut s = self.0.borrow_mut();
+        let mut s = self.0.lock().expect("Book lock poisoned");
 
         // Promote pending-close → active so `book.trade_pnl` /
         // `book.trade_return` read Some this bar.
@@ -355,19 +357,19 @@ impl<Sym: Hash + Eq + Clone> Book<Sym> {
 
     /// The seed value the book started with.
     pub fn initial_equity(&self) -> Real {
-        self.0.borrow().initial_equity
+        self.0.lock().expect("Book lock poisoned").initial_equity
     }
 
     /// The marked-to-market equity as of the most recent
     /// [`Book::update`] call.
     pub fn equity_value(&self) -> Real {
-        self.0.borrow().equity
+        self.0.lock().expect("Book lock poisoned").equity
     }
 
     /// The running peak of [`equity_value`](Self::equity_value) since
     /// construction (or [`reset`](Self::reset)).
     pub fn equity_peak_value(&self) -> Real {
-        self.0.borrow().equity_peak
+        self.0.lock().expect("Book lock poisoned").equity_peak
     }
 
     /// The book's [equity level](Self::equity_value) as a real-valued
@@ -468,7 +470,7 @@ impl<Sym, In> Indicator for BookField<Sym, In> {
     }
 
     fn value(&self) -> Option<Real> {
-        (self.select)(&self.book.0.borrow())
+        (self.select)(&self.book.0.lock().expect("Book lock poisoned"))
     }
 
     fn warm_up_period(&self) -> usize {

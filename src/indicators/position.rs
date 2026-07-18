@@ -13,9 +13,8 @@
 //! `position.peak().mul(Value::new(0.95))` for a trailing one. They read `None`
 //! (not ready) while flat.
 
-use std::cell::RefCell;
 use std::marker::PhantomData;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use crate::indicator::Indicator;
 use crate::indicators::DEFAULT_EPSILON;
@@ -49,10 +48,19 @@ struct PositionState {
 ///
 /// A strategy (e.g. [`SingleAssetStrategy`](crate::strategies::SingleAssetStrategy))
 /// owns one `Position` and hands clones to the position-anchored sources built
-/// into its stop levels. Backed by an `Rc<RefCell<…>>`, so cloning shares one
-/// state and the level sources read the same facts the strategy writes.
+/// into its stop levels. Backed by an `Arc<Mutex<…>>`, so cloning shares one
+/// state, the level sources read the same facts the strategy writes, *and* the
+/// whole composition is `Send + Sync` — required by both the pyo3 Python
+/// bindings (which force `Send + Sync` on carriers) and by any Rust caller
+/// that wants to parallelize backtests (`optimize --parallel`, rayon over a
+/// grid).
+///
+/// The lock is uncontended in single-threaded use (the strategy owns writer
+/// access; level sources are read-only), so the switch from
+/// [`RefCell`](std::cell::RefCell) is essentially free at runtime — an
+/// uncontended `Mutex::lock` is ~5ns on modern hardware.
 #[derive(Debug, Clone, Default)]
-pub struct Position(Rc<RefCell<PositionState>>);
+pub struct Position(Arc<Mutex<PositionState>>);
 
 impl Position {
     /// A fresh, flat position.
@@ -65,7 +73,7 @@ impl Position {
     /// through zero re-anchors the entry at `price` and restarts the extremes;
     /// flattening clears everything; scaling the same side keeps the entry.
     pub fn apply(&self, side: Side, units: Real, price: Real) {
-        let mut s = self.0.borrow_mut();
+        let mut s = self.0.lock().expect("Position lock poisoned");
         let new_size = s.size + side.sign() * units;
         let crossed_zero = s.size * new_size < 0.0;
         if new_size.abs() <= DEFAULT_EPSILON {
@@ -88,7 +96,7 @@ impl Position {
     /// bar's open and reacts on the bar *after* a new extreme — never intra-bar.
     /// A no-op while flat.
     pub fn update(&self, candle: Candle) {
-        let mut s = self.0.borrow_mut();
+        let mut s = self.0.lock().expect("Position lock poisoned");
         if s.entry.is_none() {
             return;
         }
@@ -100,12 +108,12 @@ impl Position {
 
     /// Reset to flat.
     pub fn reset(&self) {
-        *self.0.borrow_mut() = PositionState::default();
+        *self.0.lock().expect("Position lock poisoned") = PositionState::default();
     }
 
     /// The signed position size (positive long, negative short, zero flat).
     pub fn size(&self) -> Real {
-        self.0.borrow().size
+        self.0.lock().expect("Position lock poisoned").size
     }
 
     /// Whether the position is meaningfully long.
@@ -125,7 +133,7 @@ impl Position {
 
     /// The entry price of the current position, `None` while flat.
     pub fn entry_price(&self) -> Option<Real> {
-        self.0.borrow().entry
+        self.0.lock().expect("Position lock poisoned").entry
     }
 
     /// The entry price as an [`Indicator`] — the leaf of a fixed stop / take-profit
@@ -193,7 +201,7 @@ impl<In> Indicator for PositionField<In> {
     }
 
     fn value(&self) -> Option<Real> {
-        (self.select)(&self.position.0.borrow())
+        (self.select)(&self.position.0.lock().expect("Position lock poisoned"))
     }
 
     /// `0`: readiness tracks the live [`Position`] (open vs flat), not how many

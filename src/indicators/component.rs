@@ -9,9 +9,8 @@
 //! same source and advances it **at most once per bar** — the first accessor
 //! updated each bar drives the shared source, the rest read the cached output.
 
-use std::cell::RefCell;
 use std::fmt;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use crate::indicator::Indicator;
 use crate::types::Real;
@@ -227,7 +226,7 @@ pub struct Shared<M: Indicator>
 where
     M::Output: Copy,
 {
-    inner: Rc<RefCell<SharedInner<M>>>,
+    inner: Arc<Mutex<SharedInner<M>>>,
 }
 
 impl<M: Indicator> Shared<M>
@@ -241,7 +240,7 @@ where
     /// re-trigger an update.
     pub fn new(source: M) -> Self {
         Self {
-            inner: Rc::new(RefCell::new(SharedInner {
+            inner: Arc::new(Mutex::new(SharedInner {
                 source,
                 generation: 0,
                 last_output: None,
@@ -256,7 +255,7 @@ where
 {
     fn clone(&self) -> Self {
         Self {
-            inner: Rc::clone(&self.inner),
+            inner: Arc::clone(&self.inner),
         }
     }
 }
@@ -287,7 +286,7 @@ where
         // handle is shared, so a fingerprint of the Rc count is what a Debug
         // reader wants to see.
         f.debug_struct("Shared")
-            .field("refs", &Rc::strong_count(&self.inner))
+            .field("refs", &Arc::strong_count(&self.inner))
             .finish()
     }
 }
@@ -320,7 +319,7 @@ pub struct SharedComponent<M: Indicator>
 where
     M::Output: Copy,
 {
-    handle: Rc<RefCell<SharedInner<M>>>,
+    handle: Arc<Mutex<SharedInner<M>>>,
     select: fn(M::Output) -> Real,
     /// Last `generation` this component observed; equal to the shared counter
     /// once it has synced this bar, strictly less than it between the shared
@@ -344,9 +343,9 @@ where
     /// N bars starts in sync with the shared counter and will not spuriously
     /// re-advance on its first `update`.
     pub fn new(shared: &Shared<M>, select: fn(M::Output) -> Real) -> Self {
-        let local_gen = shared.inner.borrow().generation;
+        let local_gen = shared.inner.lock().expect("Shared lock poisoned").generation;
         Self {
-            handle: Rc::clone(&shared.inner),
+            handle: Arc::clone(&shared.inner),
             select,
             local_gen,
             value: None,
@@ -360,7 +359,7 @@ where
 {
     fn clone(&self) -> Self {
         Self {
-            handle: Rc::clone(&self.handle),
+            handle: Arc::clone(&self.handle),
             select: self.select,
             local_gen: self.local_gen,
             value: self.value,
@@ -388,7 +387,7 @@ where
     type Output = Real;
 
     fn update(&mut self, input: Self::Input) -> Option<Real> {
-        let mut inner = self.handle.borrow_mut();
+        let mut inner = self.handle.lock().expect("Shared lock poisoned");
         if self.local_gen == inner.generation {
             // First accessor of this bar — drive the shared source.
             let out = inner.source.update(input);
@@ -406,15 +405,15 @@ where
     }
 
     fn warm_up_period(&self) -> usize {
-        self.handle.borrow().source.warm_up_period().max(1)
+        self.handle.lock().expect("Shared lock poisoned").source.warm_up_period().max(1)
     }
 
     fn unstable_period(&self) -> usize {
-        self.handle.borrow().source.unstable_period()
+        self.handle.lock().expect("Shared lock poisoned").source.unstable_period()
     }
 
     fn reset(&mut self) {
-        let mut inner = self.handle.borrow_mut();
+        let mut inner = self.handle.lock().expect("Shared lock poisoned");
         inner.source.reset();
         inner.last_output = None;
         // Leave `generation` alone. This component is now back in sync with
