@@ -33,6 +33,7 @@ use fugazi::prelude::*;
 use fugazi::types::{Real, Snapshot};
 
 use super::basket::BasketStrategySpec;
+use super::multi_asset::MultiAssetStrategySpec;
 use super::pairs::PairsStrategySpec;
 use super::preset::StrategyRef;
 use crate::dyn_indicator::{self, DynIndicator};
@@ -72,20 +73,21 @@ pub enum AnyStrategyRef {
     Single(StrategyRef),
     Pairs(Box<PairsStrategySpec>),
     Basket(Box<BasketStrategySpec>),
+    Multi(Box<MultiAssetStrategySpec>),
 }
 
 impl AnyStrategyRef {
     /// The tag applied to *untagged* snapshot entries the embedded engine prices
     /// (see the [engine docs](fugazi::indicators::Sharpe)). For a single asset
-    /// it's the traded symbol; for a pair, the left leg. A basket names no
-    /// symbol upfront (its universe floats), so it has none — but a basket is
-    /// only ever fed tagged multi-asset snapshots, where the fallback is never
-    /// consulted.
+    /// it's the traded symbol; for a pair, the left leg. A basket / multi
+    /// names no symbol upfront (its universe floats), so it has none — but
+    /// they're only ever fed tagged multi-asset snapshots, where the fallback
+    /// is never consulted.
     fn fallback_symbol(&self) -> String {
         match self {
             AnyStrategyRef::Single(s) => s.symbol().to_string(),
             AnyStrategyRef::Pairs(p) => p.left.clone(),
-            AnyStrategyRef::Basket(_) => String::new(),
+            AnyStrategyRef::Basket(_) | AnyStrategyRef::Multi(_) => String::new(),
         }
     }
 }
@@ -96,19 +98,19 @@ impl TryFrom<serde_norway::Value> for AnyStrategyRef {
     fn try_from(v: serde_norway::Value) -> Result<Self, Self::Error> {
         use serde_norway::Value;
 
-        // Detect pairs / basket by a distinctive top-level key. Works through
-        // both the direct YAML path and the serde_json load path (where tags are
-        // already normalised to `{tag: value}` maps) — both land here as a
-        // `Value::Mapping`.
-        let (is_pairs, is_basket) = match &v {
+        // Detect pairs / basket / multi by distinctive top-level keys.
+        // Multi has no unique key — its shape is "a bare mapping with no
+        // symbol, no left+right, no selection" (mirrors how
+        // `PortfolioChildStrategy` distinguishes multi from single).
+        let (is_pairs, is_basket, has_symbol) = match &v {
             Value::Mapping(m) => {
                 let has = |key: &str| {
                     m.iter()
                         .any(|(k, _)| matches!(k, Value::String(s) if s == key))
                 };
-                (has("left") && has("right"), has("selection"))
+                (has("left") && has("right"), has("selection"), has("symbol"))
             }
-            _ => (false, false),
+            _ => (false, false, false),
         };
 
         // Deserialize pairs / basket through the *serde_json* path (normalising
@@ -129,6 +131,14 @@ impl TryFrom<serde_norway::Value> for AnyStrategyRef {
                     .map(|b| AnyStrategyRef::Basket(Box::new(b)))
                     .map_err(|e| e.to_string())
             };
+        }
+
+        // Multi: bare mapping without symbol / pairs / basket keys.
+        if matches!(&v, Value::Mapping(_)) && !has_symbol {
+            let json = crate::convert::yaml_to_json(v).map_err(|e| e.to_string())?;
+            return serde_json::from_value::<MultiAssetStrategySpec>(json)
+                .map(|m| AnyStrategyRef::Multi(Box::new(m)))
+                .map_err(|e| e.to_string());
         }
 
         StrategyRef::try_from(v).map(AnyStrategyRef::Single)
@@ -276,6 +286,14 @@ pub(super) fn build(
             AnyStrategyRef::Basket(b) => make(
                 metric,
                 b.build(SEED, &schema),
+                sym,
+                period,
+                risk_free_rate,
+                bars_per_year,
+            ),
+            AnyStrategyRef::Multi(m) => make(
+                metric,
+                m.build(SEED, &schema),
                 sym,
                 period,
                 risk_free_rate,

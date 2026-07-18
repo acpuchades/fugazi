@@ -119,7 +119,7 @@ Each bar the driver: feed each symbol to wallet, route each fill to every strate
 - **Per-symbol readiness.** Under floating / `any_of`: a symbol trades once *its own* chains have settled (gated inside `trade`); under `all_of`: `is_ready()` blocks until every listed leg is past its own `stable_period`.
 - **State.** Per-symbol `Position` + shared `Book<Sym>` (aggregate equity across all legs). Same book-anchored sizing recipes apply.
 - **`rebalance_on(signal)`** (default `Const::false` — never). On fire, resizes every held per-symbol position to its current sizing target. Same knob shape as single/pairs. Entry/exit signals fire every bar regardless.
-- **Not shipped** (yet): `optimize` support (bails), Python bindings, YAML trailing-risk wrapping.
+- **Not shipped** (yet): Python bindings.
 
 **`Portfolio<Sym>`** (`src/portfolio/`) — composite `Strategy<Input=Snapshot<Sym>, Symbol=Sym>` that runs N heterogeneous child strategies through a shared **`PortfolioWallet<Sym>`**, one `PaperWallet` per child behind an aggregate outward view. Plugs into `backtest::run` unchanged: driver sees a normal `Wallet<Sym>`, gets a normal `RunReport<Sym>` (aggregate equity curve + concatenated blotter), so every metric / windowing / walk-forward reduction falls out for free. Sibling to `BasketStrategy` / `MultiAssetStrategy`; reach for it when a portfolio combines *different* strategies rather than the same shape across many symbols.
 

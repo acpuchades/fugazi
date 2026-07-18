@@ -663,6 +663,41 @@ mod tests {
     }
 
     #[test]
+    fn sharpe_accepts_a_multi_asset_strategy() {
+        // A bare mapping without `symbol` / pairs / basket keys routes to
+        // multi-asset. The embedded multi runs independent per-symbol
+        // decisions; the trailing Sharpe reads over its aggregate equity.
+        use super::trailing::AnyStrategyRef;
+        let yaml = r#"
+            !sharpe
+            strategy:
+              long:
+                enter: !gt { lhs: !close { source: !pick { symbol: !arg SYM } }, rhs: !value 0.0 }
+              sizing: !equal_weight 2
+            period: 3
+            bars_per_year: 252
+        "#;
+        let json = crate::input::parse_value(yaml).unwrap();
+        let spec: ExprSpec = serde_json::from_value(json).unwrap();
+        match &spec {
+            ExprSpec::Sharpe { strategy, .. } => {
+                assert!(matches!(**strategy, AnyStrategyRef::Multi(_)))
+            }
+            other => panic!("expected a Sharpe spec, got {other:?}"),
+        }
+        // Builds without panicking; drives on a small 2-symbol path.
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        assert_eq!(built.output_type(), crate::dyn_indicator::DynType::Real);
+        for i in 0..6 {
+            let f = i as Real;
+            let _ = built.update(Payload::Snapshot(multi_snap(&[
+                ("A", 100.0 + f),
+                ("B", 100.0 + f * 0.5),
+            ])));
+        }
+    }
+
+    #[test]
     fn max_drawdown_tag_defaults_and_builds() {
         // `!max_drawdown` needs no rf/bpy. Over a rise-then-dip path the
         // trailing drawdown is a defined non-negative fraction.
