@@ -199,15 +199,11 @@ mod parallel_tests {
 
     /// A minimal SMA-crossover strategy: long on fast > slow, flat when it
     /// reverses. Same shape as `PairsTrade` in the wallet tests, but on a
-    /// single asset with a real signal.
-    ///
-    /// The `Box<dyn Signal + Send>` bound is what makes the strategy usable
-    /// with the parallel [`super::run_many`] driver — `Box<dyn Signal>` by
-    /// itself is not `Send`, so the crate's own `SingleAssetStrategy` (which
-    /// uses that plain form) can't cross thread boundaries yet. That's a
-    /// follow-up: relaxing the signal trait bound to require `Send` on the
-    /// four wired signal slots would be a one-liner per slot but a public
-    /// API refinement.
+    /// single asset with a real signal. Kept as a compact standalone example
+    /// of a hand-written [`Strategy`] that plugs into [`super::run_many`]; the
+    /// crate's own [`SingleAssetStrategy`](crate::strategies::SingleAssetStrategy)
+    /// now carries `Send + Sync` on its signal slots too, so it drives
+    /// `run_many` directly — see `run_many_drives_single_asset_strategy`.
     struct MaCross {
         symbol: &'static str,
         long: Box<dyn Signal<Snapshot<&'static str>> + Send>,
@@ -315,5 +311,40 @@ mod parallel_tests {
         let seq1 = run(&mut s1, &mut w1, snaps.iter().cloned());
         assert_eq!(reports[0].equity_curve, seq0.equity_curve);
         assert_eq!(reports[1].equity_curve, seq1.equity_curve);
+    }
+
+    /// The payoff of the `Send + Sync` bounds on the strategy layer: the
+    /// crate's own [`SingleAssetStrategy`](crate::strategies::SingleAssetStrategy)
+    /// — with `Box<dyn Signal + Send + Sync>` slots — now crosses thread
+    /// boundaries, so `run_many` fans a grid of the real catalogue strategies
+    /// across a rayon pool without a hand-rolled stand-in. Verifies parity
+    /// against the sequential `run` per slot.
+    #[test]
+    fn run_many_drives_single_asset_strategy() {
+        use crate::strategies::SingleAssetStrategy;
+        use crate::strategies::trend::ma_crossover;
+
+        let prices = [
+            14.0, 13.0, 12.0, 11.0, 10.0, 11.0, 13.0, 15.0, 17.0, 15.0, 12.0, 9.0, 7.0,
+        ];
+        let snaps = make_snapshots(&prices);
+
+        // A small sweep of (fast, slow) pairs — the exact shape `optimize`
+        // fans out, but over pre-built strategies rather than re-parsed specs.
+        let grid = [(2usize, 4usize), (3, 5), (2, 6)];
+        let mut runs: Vec<(SingleAssetStrategy<&'static str>, PaperWallet<&'static str>)> = grid
+            .iter()
+            .map(|&(fast, slow)| (ma_crossover("X", fast, slow), PaperWallet::new(1_000.0)))
+            .collect();
+        let parallel = run_many(&mut runs, &snaps);
+
+        assert_eq!(parallel.len(), grid.len());
+        for (&(fast, slow), p) in grid.iter().zip(parallel.iter()) {
+            let mut strat = ma_crossover("X", fast, slow);
+            let mut wallet: PaperWallet<&'static str> = PaperWallet::new(1_000.0);
+            let seq = run(&mut strat, &mut wallet, snaps.iter().cloned());
+            assert_eq!(seq.equity_curve, p.equity_curve);
+            assert_eq!(seq.fills.len(), p.fills.len());
+        }
     }
 }
