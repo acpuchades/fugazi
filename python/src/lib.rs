@@ -63,7 +63,9 @@ use fugazi_core::types::{
 };
 use fugazi_core::backtest::{Fill, RunReport};
 use fugazi_core::indicators::Const;
-use fugazi_core::strategies::SingleAssetStrategy;
+use fugazi_core::strategies::{
+    BasketStrategy, MultiAssetStrategy, PairsStrategy, SingleAssetStrategy,
+};
 use fugazi_core::metrics as core_metrics;
 use fugazi_core::metrics::{DrawdownSegment, Trade};
 use fugazi_core::runtime::{self, DynType, DynValue, TypeOf};
@@ -3095,6 +3097,50 @@ fn const_false_signal() -> SignalBox<Snapshot<String>> {
     SignalBox::new(Const::<Snapshot<String>>::new(false))
 }
 
+/// Turn a Python callable `sym -> Signal` into the per-symbol signal factory a
+/// [`MultiAssetStrategy`] / [`BasketStrategy`] consumes. The callable is invoked
+/// once per symbol on first sight (during `run`, GIL held); it must return a
+/// candle- or snapshot-rooted `Signal`. Errors surface as a Python exception via
+/// pyo3's panic bridge, since the factory boundary has no `Result` channel.
+fn signal_factory_from_callable(
+    cb: Py<PyAny>,
+) -> impl Fn(&String) -> SignalBox<Snapshot<String>> + Send + Sync + 'static {
+    move |sym: &String| {
+        Python::attach(|py| {
+            let obj = cb
+                .call1(py, (sym.clone(),))
+                .unwrap_or_else(|e| panic!("signal factory raised for symbol '{sym}': {e}"));
+            let bound = obj.bind(py);
+            let sig = bound.cast::<PySignal>().unwrap_or_else(|_| {
+                panic!("signal factory for symbol '{sym}' must return a fugazi.Signal")
+            });
+            snapshot_signal(&sig.borrow())
+                .unwrap_or_else(|e| panic!("signal factory for symbol '{sym}': {e}"))
+        })
+    }
+}
+
+/// Turn a Python callable `sym -> Indicator` into the per-symbol real-source
+/// factory a [`MultiAssetStrategy`] / [`BasketStrategy`] consumes (sizing / score).
+/// Same lifecycle and error handling as [`signal_factory_from_callable`].
+fn source_factory_from_callable(
+    cb: Py<PyAny>,
+) -> impl Fn(&String) -> Source<Snapshot<String>> + Send + Sync + 'static {
+    move |sym: &String| {
+        Python::attach(|py| {
+            let obj = cb
+                .call1(py, (sym.clone(),))
+                .unwrap_or_else(|e| panic!("source factory raised for symbol '{sym}': {e}"));
+            let bound = obj.bind(py);
+            let ind = bound.cast::<PyIndicator>().unwrap_or_else(|_| {
+                panic!("source factory for symbol '{sym}' must return a fugazi.Indicator")
+            });
+            snapshot_source(&ind.borrow())
+                .unwrap_or_else(|e| panic!("source factory for symbol '{sym}': {e}"))
+        })
+    }
+}
+
 /// A copyable descriptor for a preset catalogue strategy: the Rust free
 /// function's ctor args, dispatched at `run` / `sharpe_of` construction time
 /// to build a fresh [`SingleAssetStrategy`] (Rust catalogue helpers aren't
@@ -3293,6 +3339,473 @@ impl PyStrategy {
                 initial_equity,
             ),
         }
+    }
+}
+
+/// A two-leg, spread-driven pairs strategy: on `enter`, go long `left` and
+/// short `right` (a 1.0-gross dollar-neutral pair, `value_frac(0.5)` per leg);
+/// on `exit`, flatten both. Optional spread stop-loss / take-profit levels are
+/// compared against the running `close(left) − close(right)`. Mirrors
+/// `fugazi::strategies::PairsStrategy`. Signals and levels are snapshot-rooted
+/// (built from `pick(...)` sources); `run` consumes a sequence of snapshots.
+#[pyclass(name = "PairsStrategy", skip_from_py_object)]
+#[derive(Clone)]
+struct PyPairsStrategy {
+    left: String,
+    right: String,
+    enter: Option<SignalBox<Snapshot<String>>>,
+    exit: Option<SignalBox<Snapshot<String>>>,
+    stop: Option<Source<Snapshot<String>>>,
+    target: Option<Source<Snapshot<String>>>,
+    sizing: Option<Source<Snapshot<String>>>,
+    rebalance: Option<SignalBox<Snapshot<String>>>,
+}
+
+#[pymethods]
+impl PyPairsStrategy {
+    /// A fresh pairs strategy over `left` / `right` with no transitions wired.
+    #[new]
+    fn new(left: String, right: String) -> Self {
+        PyPairsStrategy {
+            left,
+            right,
+            enter: None,
+            exit: None,
+            stop: None,
+            target: None,
+            sizing: None,
+            rebalance: None,
+        }
+    }
+
+    /// Wire the `enter` (open long-left / short-right) and `exit` (flatten both)
+    /// signals. A missing `exit` never fires.
+    #[pyo3(signature = (enter, exit=None))]
+    fn on(&self, enter: &PySignal, exit: Option<&PySignal>) -> PyResult<PyPairsStrategy> {
+        let mut s = self.clone();
+        s.enter = Some(snapshot_signal(enter)?);
+        s.exit = exit.map(snapshot_signal).transpose()?;
+        Ok(s)
+    }
+
+    /// Attach a spread stop-loss: flatten the pair when `close(left) −
+    /// close(right)` reads at or below `level`.
+    fn spread_stop_loss(&self, level: &PyIndicator) -> PyResult<PyPairsStrategy> {
+        let mut s = self.clone();
+        s.stop = Some(snapshot_source(level)?);
+        Ok(s)
+    }
+
+    /// Attach a spread take-profit: flatten the pair when the running spread
+    /// reads at or above `level`.
+    fn spread_take_profit(&self, level: &PyIndicator) -> PyResult<PyPairsStrategy> {
+        let mut s = self.clone();
+        s.target = Some(snapshot_source(level)?);
+        Ok(s)
+    }
+
+    /// Scale the pair's gross exposure by this real source (each leg entries at
+    /// `value_frac(0.5 * m)`). Defaults to `1.0`. A `None` reading skips the
+    /// bar's trade (safe default).
+    fn position_sizing(&self, source: &PyIndicator) -> PyResult<PyPairsStrategy> {
+        let mut s = self.clone();
+        s.sizing = Some(snapshot_source(source)?);
+        Ok(s)
+    }
+
+    /// Install the rebalance gate — on bars where `signal` fires, both legs are
+    /// resized to the current sizing target. Defaults to never.
+    fn rebalance_on(&self, signal: &PySignal) -> PyResult<PyPairsStrategy> {
+        let mut s = self.clone();
+        s.rebalance = Some(snapshot_signal(signal)?);
+        Ok(s)
+    }
+
+    /// Drive the pair over `snapshots` (a sequence of `Snapshot` or `dict`)
+    /// against `wallet`, returning the [`RunReport`](PyRunReport). The book is
+    /// seeded to the wallet's opening equity. The wallet is mutated in place.
+    fn run(
+        &self,
+        mut wallet: PyRefMut<'_, PyWallet>,
+        snapshots: &Bound<'_, PyAny>,
+    ) -> PyResult<PyRunReport> {
+        let snaps = snapshots_from_sequence(snapshots)?;
+        let seed = Wallet::equity(&wallet.inner).0;
+        let mut strat = PairsStrategy::<String>::with_initial_equity(
+            self.left.clone(),
+            self.right.clone(),
+            seed,
+        );
+        if let Some(enter) = &self.enter {
+            strat = strat.on(
+                enter.clone(),
+                self.exit.clone().unwrap_or_else(const_false_signal),
+            );
+        }
+        if let Some(stop) = &self.stop {
+            strat = strat.spread_stop_loss(stop.clone());
+        }
+        if let Some(target) = &self.target {
+            strat = strat.spread_take_profit(target.clone());
+        }
+        if let Some(sizing) = &self.sizing {
+            strat = strat.position_sizing(sizing.clone());
+        }
+        if let Some(rebalance) = &self.rebalance {
+            strat = strat.rebalance_on(rebalance.clone());
+        }
+
+        let report = fugazi_core::backtest::run(&mut strat, &mut wallet.inner, snaps);
+        Ok(PyRunReport { inner: report })
+    }
+
+    fn __repr__(&self) -> String {
+        format!("PairsStrategy(left='{}', right='{}')", self.left, self.right)
+    }
+}
+
+/// A declared universe restriction shared by [`PyMultiAssetStrategy`] and
+/// [`PyBasketStrategy`]: `strict` → `all_of` (missing symbol panics, readiness
+/// gated on every leg); otherwise `any_of` (absent / unready silently skipped).
+#[derive(Clone)]
+struct DeclaredUniverse {
+    strict: bool,
+    symbols: Vec<String>,
+}
+
+/// An N-symbol strategy running the same single-asset decision independently on
+/// every symbol in a snapshot (any subset long / short / flat at once). Mirrors
+/// `fugazi::strategies::MultiAssetStrategy`. Every side is a Python factory
+/// `sym -> Signal` (built once per symbol on first sight, its leaves rooted on
+/// that symbol via `pick(...)`); sizing is `sym -> Indicator`. Position-anchored
+/// protective levels are not exposed (they require a per-leg `Position`).
+#[pyclass(name = "MultiAssetStrategy", skip_from_py_object)]
+struct PyMultiAssetStrategy {
+    long_enter: Option<Py<PyAny>>,
+    long_exit: Option<Py<PyAny>>,
+    short_enter: Option<Py<PyAny>>,
+    short_exit: Option<Py<PyAny>>,
+    sizing: Option<Py<PyAny>>,
+    rebalance: Option<SignalBox<Snapshot<String>>>,
+    universe: Option<DeclaredUniverse>,
+}
+
+impl Clone for PyMultiAssetStrategy {
+    fn clone(&self) -> Self {
+        Python::attach(|py| PyMultiAssetStrategy {
+            long_enter: self.long_enter.as_ref().map(|p| p.clone_ref(py)),
+            long_exit: self.long_exit.as_ref().map(|p| p.clone_ref(py)),
+            short_enter: self.short_enter.as_ref().map(|p| p.clone_ref(py)),
+            short_exit: self.short_exit.as_ref().map(|p| p.clone_ref(py)),
+            sizing: self.sizing.as_ref().map(|p| p.clone_ref(py)),
+            rebalance: self.rebalance.clone(),
+            universe: self.universe.clone(),
+        })
+    }
+}
+
+#[pymethods]
+impl PyMultiAssetStrategy {
+    /// A fresh multi-asset strategy with no sides wired (trades nothing until a
+    /// side is added).
+    #[new]
+    fn new() -> Self {
+        PyMultiAssetStrategy {
+            long_enter: None,
+            long_exit: None,
+            short_enter: None,
+            short_exit: None,
+            sizing: None,
+            rebalance: None,
+            universe: None,
+        }
+    }
+
+    /// Wire the long side: `enter(sym)` opens (or reverses into) a long on that
+    /// symbol, `exit(sym)` flattens it. Both are callables `sym -> Signal`; a
+    /// missing `exit` never fires.
+    #[pyo3(signature = (enter, exit=None))]
+    fn long_on(&self, enter: Py<PyAny>, exit: Option<Py<PyAny>>) -> PyMultiAssetStrategy {
+        let mut s = self.clone();
+        s.long_enter = Some(enter);
+        s.long_exit = exit;
+        s
+    }
+
+    /// Wire the short side: `enter(sym)` opens (or reverses into) a short,
+    /// `exit(sym)` flattens it. Same factory shape as [`long_on`](Self::long_on).
+    #[pyo3(signature = (enter, exit=None))]
+    fn short_on(&self, enter: Py<PyAny>, exit: Option<Py<PyAny>>) -> PyMultiAssetStrategy {
+        let mut s = self.clone();
+        s.short_enter = Some(enter);
+        s.short_exit = exit;
+        s
+    }
+
+    /// Wire the per-symbol sizing factory `sym -> Indicator` — the
+    /// value-fraction magnitude every entry on that symbol is sized against.
+    /// Defaults to all-in (`1.0`).
+    fn position_sizing(&self, factory: Py<PyAny>) -> PyMultiAssetStrategy {
+        let mut s = self.clone();
+        s.sizing = Some(factory);
+        s
+    }
+
+    /// Install the rebalance gate (a snapshot-rooted signal). On fire, every
+    /// held position is resized to its current sizing target. Defaults to never.
+    fn rebalance_on(&self, signal: &PySignal) -> PyResult<PyMultiAssetStrategy> {
+        let mut s = self.clone();
+        s.rebalance = Some(snapshot_signal(signal)?);
+        Ok(s)
+    }
+
+    /// Restrict to exactly `symbols` (strict): a missing symbol on any bar
+    /// panics, and readiness waits until every listed leg has settled.
+    fn all_of(&self, symbols: Vec<String>) -> PyMultiAssetStrategy {
+        let mut s = self.clone();
+        s.universe = Some(DeclaredUniverse { strict: true, symbols });
+        s
+    }
+
+    /// Restrict to `symbols` (lax): only listed symbols trade, absent / unready
+    /// ones are silently skipped.
+    fn any_of(&self, symbols: Vec<String>) -> PyMultiAssetStrategy {
+        let mut s = self.clone();
+        s.universe = Some(DeclaredUniverse { strict: false, symbols });
+        s
+    }
+
+    /// Drive the strategy over `snapshots` against `wallet`, returning the
+    /// [`RunReport`](PyRunReport). The book is seeded to the wallet's opening
+    /// equity. The wallet is mutated in place.
+    fn run(
+        &self,
+        mut wallet: PyRefMut<'_, PyWallet>,
+        snapshots: &Bound<'_, PyAny>,
+    ) -> PyResult<PyRunReport> {
+        let snaps = snapshots_from_sequence(snapshots)?;
+        let seed = Wallet::equity(&wallet.inner).0;
+        let mut strat = MultiAssetStrategy::<String>::with_initial_equity(seed);
+
+        if let Some(enter) = &self.long_enter {
+            let ef = signal_factory_from_callable(enter.clone_ref(wallet.py()));
+            strat = match &self.long_exit {
+                Some(exit) => {
+                    let xf = signal_factory_from_callable(exit.clone_ref(wallet.py()));
+                    strat.long_on(ef, xf)
+                }
+                None => strat.long_on(ef, |_: &String| const_false_signal()),
+            };
+        }
+        if let Some(enter) = &self.short_enter {
+            let ef = signal_factory_from_callable(enter.clone_ref(wallet.py()));
+            strat = match &self.short_exit {
+                Some(exit) => {
+                    let xf = signal_factory_from_callable(exit.clone_ref(wallet.py()));
+                    strat.short_on(ef, xf)
+                }
+                None => strat.short_on(ef, |_: &String| const_false_signal()),
+            };
+        }
+        if let Some(sizing) = &self.sizing {
+            let sf = source_factory_from_callable(sizing.clone_ref(wallet.py()));
+            strat = strat.position_sizing(sf);
+        }
+        if let Some(rebalance) = &self.rebalance {
+            strat = strat.rebalance_on(rebalance.clone());
+        }
+        if let Some(u) = &self.universe {
+            strat = if u.strict {
+                strat.all_of(u.symbols.clone())
+            } else {
+                strat.any_of(u.symbols.clone())
+            };
+        }
+
+        let report = fugazi_core::backtest::run(&mut strat, &mut wallet.inner, snaps);
+        Ok(PyRunReport { inner: report })
+    }
+
+    fn __repr__(&self) -> String {
+        "MultiAssetStrategy(...)".to_string()
+    }
+}
+
+/// The cross-sectional selection rule for a [`PyBasketStrategy`].
+#[derive(Clone)]
+enum BasketSelection {
+    TopBottom { longs: usize, shorts: usize },
+    Threshold { long_min: Real, short_max: Real },
+    Quantile { long_q: Real, short_q: Real },
+}
+
+/// An N-symbol cross-sectional basket: score every symbol, then a selection rule
+/// picks the longs / shorts. Mirrors `fugazi::strategies::BasketStrategy`. Score
+/// and sizing are Python factories `sym -> Indicator` (leaves rooted on that
+/// symbol via `pick(...)`); the selection is one of top-bottom / threshold /
+/// quantile. The `.selection(closure)` escape hatch and per-leg protective
+/// levels are not exposed.
+#[pyclass(name = "BasketStrategy", skip_from_py_object)]
+struct PyBasketStrategy {
+    score: Option<Py<PyAny>>,
+    sizing: Option<Py<PyAny>>,
+    selection: Option<BasketSelection>,
+    dollar_neutral: bool,
+    rebalance: Option<SignalBox<Snapshot<String>>>,
+    universe: Option<DeclaredUniverse>,
+}
+
+impl Clone for PyBasketStrategy {
+    fn clone(&self) -> Self {
+        Python::attach(|py| PyBasketStrategy {
+            score: self.score.as_ref().map(|p| p.clone_ref(py)),
+            sizing: self.sizing.as_ref().map(|p| p.clone_ref(py)),
+            selection: self.selection.clone(),
+            dollar_neutral: self.dollar_neutral,
+            rebalance: self.rebalance.clone(),
+            universe: self.universe.clone(),
+        })
+    }
+}
+
+#[pymethods]
+impl PyBasketStrategy {
+    /// A fresh basket (trades nothing until scored, sized, and given a selection
+    /// rule).
+    #[new]
+    fn new() -> Self {
+        PyBasketStrategy {
+            score: None,
+            sizing: None,
+            selection: None,
+            dollar_neutral: false,
+            rebalance: None,
+            universe: None,
+        }
+    }
+
+    /// Wire the per-symbol score factory `sym -> Indicator`; the selection rule
+    /// ranks symbols by this value each rebalance.
+    fn scored_by(&self, factory: Py<PyAny>) -> PyBasketStrategy {
+        let mut s = self.clone();
+        s.score = Some(factory);
+        s
+    }
+
+    /// Wire the per-symbol sizing factory `sym -> Indicator` — each selected
+    /// leg's value-fraction. Use an equal-weight source for a normalized gross.
+    fn sized_by(&self, factory: Py<PyAny>) -> PyBasketStrategy {
+        let mut s = self.clone();
+        s.sizing = Some(factory);
+        s
+    }
+
+    /// Select the top `longs` and bottom `shorts` symbols by score.
+    fn top_bottom(&self, longs: usize, shorts: usize) -> PyBasketStrategy {
+        let mut s = self.clone();
+        s.selection = Some(BasketSelection::TopBottom { longs, shorts });
+        s
+    }
+
+    /// Long every symbol scoring `>= long_min`, short every symbol scoring
+    /// `<= short_max`.
+    fn threshold(&self, long_min: Real, short_max: Real) -> PyBasketStrategy {
+        let mut s = self.clone();
+        s.selection = Some(BasketSelection::Threshold { long_min, short_max });
+        s
+    }
+
+    /// Long the top `long_q` quantile by score, short the bottom `short_q`
+    /// quantile (each in `[0, 1]`).
+    fn quantile(&self, long_q: Real, short_q: Real) -> PyBasketStrategy {
+        let mut s = self.clone();
+        s.selection = Some(BasketSelection::Quantile { long_q, short_q });
+        s
+    }
+
+    /// Enforce dollar-neutrality: scale per-symbol sizes each rebalance so
+    /// `Σ long == Σ short` (never levers up; one-sided bars skip the rebalance).
+    fn dollar_neutral(&self) -> PyBasketStrategy {
+        let mut s = self.clone();
+        s.dollar_neutral = true;
+        s
+    }
+
+    /// Install the rebalance gate (snapshot-rooted signal). Defaults to every
+    /// bar (`Every::new(1)`), matching the Rust default.
+    fn rebalance_on(&self, signal: &PySignal) -> PyResult<PyBasketStrategy> {
+        let mut s = self.clone();
+        s.rebalance = Some(snapshot_signal(signal)?);
+        Ok(s)
+    }
+
+    /// Restrict discovery to exactly `symbols` (strict): a missing symbol panics
+    /// and readiness gates on every listed leg scoring & sizing.
+    fn all_of(&self, symbols: Vec<String>) -> PyBasketStrategy {
+        let mut s = self.clone();
+        s.universe = Some(DeclaredUniverse { strict: true, symbols });
+        s
+    }
+
+    /// Restrict discovery to `symbols` (lax): absent / unready members skipped.
+    fn any_of(&self, symbols: Vec<String>) -> PyBasketStrategy {
+        let mut s = self.clone();
+        s.universe = Some(DeclaredUniverse { strict: false, symbols });
+        s
+    }
+
+    /// Drive the basket over `snapshots` against `wallet`, returning the
+    /// [`RunReport`](PyRunReport). The book is seeded to the wallet's opening
+    /// equity. The wallet is mutated in place.
+    fn run(
+        &self,
+        mut wallet: PyRefMut<'_, PyWallet>,
+        snapshots: &Bound<'_, PyAny>,
+    ) -> PyResult<PyRunReport> {
+        let snaps = snapshots_from_sequence(snapshots)?;
+        let seed = Wallet::equity(&wallet.inner).0;
+        let mut strat = BasketStrategy::<String>::with_initial_equity(seed);
+
+        if let Some(score) = &self.score {
+            let f = source_factory_from_callable(score.clone_ref(wallet.py()));
+            strat = strat.scored_by(f);
+        }
+        if let Some(sizing) = &self.sizing {
+            let f = source_factory_from_callable(sizing.clone_ref(wallet.py()));
+            strat = strat.sized_by(f);
+        }
+        strat = match &self.selection {
+            Some(BasketSelection::TopBottom { longs, shorts }) => {
+                strat.top_bottom(*longs, *shorts)
+            }
+            Some(BasketSelection::Threshold { long_min, short_max }) => {
+                strat.threshold(*long_min, *short_max)
+            }
+            Some(BasketSelection::Quantile { long_q, short_q }) => {
+                strat.quantile(*long_q, *short_q)
+            }
+            None => strat,
+        };
+        if self.dollar_neutral {
+            strat = strat.dollar_neutral();
+        }
+        if let Some(rebalance) = &self.rebalance {
+            strat = strat.rebalance_on(rebalance.clone());
+        }
+        if let Some(u) = &self.universe {
+            strat = if u.strict {
+                strat.all_of(u.symbols.clone())
+            } else {
+                strat.any_of(u.symbols.clone())
+            };
+        }
+
+        let report = fugazi_core::backtest::run(&mut strat, &mut wallet.inner, snaps);
+        Ok(PyRunReport { inner: report })
+    }
+
+    fn __repr__(&self) -> String {
+        "BasketStrategy(...)".to_string()
     }
 }
 
@@ -6370,6 +6883,9 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyOrder>()?;
     m.add_class::<PySize>()?;
     m.add_class::<PyStrategy>()?;
+    m.add_class::<PyPairsStrategy>()?;
+    m.add_class::<PyMultiAssetStrategy>()?;
+    m.add_class::<PyBasketStrategy>()?;
     m.add_class::<PyRunReport>()?;
     m.add_class::<PyFill>()?;
     m.add_class::<PyBinance>()?;

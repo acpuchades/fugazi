@@ -852,6 +852,128 @@ def test_preset_strategy_rejects_builder_methods():
         preset.position_sizing(ta.value(0.5))
 
 
+# ---------------------------------------------------------------------------
+# Multi-symbol strategies: PairsStrategy, MultiAssetStrategy, BasketStrategy —
+# each drives over a sequence of snapshots (dict[sym -> Candle]).
+# ---------------------------------------------------------------------------
+
+
+def _msnaps(series):
+    """A list of Snapshots from dict[sym -> list[close]] (flat OHLC candles)."""
+    n = len(next(iter(series.values())))
+    out = []
+    for i in range(n):
+        d = {sym: ta.Candle(prices[i], prices[i], prices[i], prices[i], 1000.0)
+             for sym, prices in series.items()}
+        out.append(ta.Snapshot(d))
+    return out
+
+
+def test_pairs_strategy_runs_and_reports():
+    # Enter (long BTC / short ETH) when BTC's close crosses above ETH's;
+    # exit when it crosses back below. Both signals are snapshot-rooted.
+    enter = ta.close(ta.pick("BTC")).crosses_above(ta.close(ta.pick("ETH")))
+    exit_ = ta.close(ta.pick("BTC")).crosses_below(ta.close(ta.pick("ETH")))
+    strat = ta.PairsStrategy("BTC", "ETH").on(enter, exit_)
+
+    snaps = _msnaps({
+        "BTC": [10, 11, 9, 8, 10, 13, 15, 14, 11, 9, 8],
+        "ETH": [10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10],
+    })
+    wallet = ta.PaperWallet(10_000.0)
+    rep = strat.run(wallet, snaps)
+
+    assert len(rep.equity_curve) == len(snaps)
+    assert rep.initial_equity == pytest.approx(10_000.0)
+    # An up-cross opens both legs (long BTC + short ETH) → at least two fills.
+    assert len(rep.fills) >= 2
+    assert len(rep.fills) == len(wallet.orders())
+    assert {f.order.symbol for f in rep.fills} == {"BTC", "ETH"}
+
+
+def test_multi_asset_strategy_trades_symbols_independently():
+    # The same SMA(2)/SMA(4) crossover reversal run independently per symbol,
+    # via per-symbol factories rooted on each symbol with pick(sym).
+    def up(sym):
+        return ta.sma(ta.close(ta.pick(sym)), 2).crosses_above(
+            ta.sma(ta.close(ta.pick(sym)), 4))
+
+    def down(sym):
+        return ta.sma(ta.close(ta.pick(sym)), 2).crosses_below(
+            ta.sma(ta.close(ta.pick(sym)), 4))
+
+    strat = (
+        ta.MultiAssetStrategy()
+        .long_on(up, down)
+        .short_on(down, up)
+        .position_sizing(lambda sym: ta.value(0.5))
+    )
+    snaps = _msnaps({
+        "BTC": [14, 13, 12, 11, 10, 11, 13, 15, 17, 15, 12, 9, 7, 9, 12, 15],
+        "ETH": [20, 21, 22, 23, 24, 23, 21, 19, 17, 19, 22, 25, 27, 25, 22, 19],
+    })
+    wallet = ta.PaperWallet(10_000.0)
+    rep = strat.run(wallet, snaps)
+
+    assert len(rep.equity_curve) == len(snaps)
+    # Both symbols trade at least once (they cross on opposite schedules).
+    assert {f.order.symbol for f in rep.fills} == {"BTC", "ETH"}
+    assert len(rep.fills) == len(wallet.orders())
+
+
+def test_multi_asset_factory_type_error_surfaces():
+    # A factory that returns a non-Signal raises when the symbol is first seen.
+    strat = ta.MultiAssetStrategy().long_on(lambda sym: "not a signal")
+    wallet = ta.PaperWallet(10_000.0)
+    with pytest.raises(BaseException):
+        strat.run(wallet, _msnaps({"BTC": [1, 2, 3]}))
+
+
+def test_basket_strategy_selects_top_and_bottom():
+    # Cross-sectional momentum: score each symbol by 1-bar rate of change,
+    # long the top, short the bottom, half-weight each leg, rebalanced daily.
+    strat = (
+        ta.BasketStrategy()
+        .scored_by(lambda sym: ta.close(ta.pick(sym)).roc(1))
+        .sized_by(lambda sym: ta.value(0.5))
+        .top_bottom(1, 1)
+    )
+    # AAA rising, CCC falling, BBB flat → AAA long, CCC short each bar.
+    snaps = _msnaps({
+        "AAA": [10, 11, 12, 13, 14, 15, 16, 17],
+        "BBB": [10, 10, 10, 10, 10, 10, 10, 10],
+        "CCC": [10, 9, 8, 7, 6, 5, 4, 3],
+    })
+    wallet = ta.PaperWallet(10_000.0)
+    rep = strat.run(wallet, snaps)
+
+    assert len(rep.equity_curve) == len(snaps)
+    assert len(rep.fills) >= 2
+    # Only the extreme movers get traded; the flat middle is never selected.
+    assert "BBB" not in {f.order.symbol for f in rep.fills}
+
+
+def test_basket_dollar_neutral_and_universe_chain():
+    # The builder methods chain and the dollar-neutral + declared-universe
+    # variant still runs end-to-end.
+    strat = (
+        ta.BasketStrategy()
+        .scored_by(lambda sym: ta.close(ta.pick(sym)).roc(1))
+        .sized_by(lambda sym: ta.value(1.0))
+        .top_bottom(1, 1)
+        .dollar_neutral()
+        .any_of(["AAA", "BBB", "CCC"])
+    )
+    snaps = _msnaps({
+        "AAA": [10, 11, 12, 13, 14, 15],
+        "BBB": [10, 10, 10, 10, 10, 10],
+        "CCC": [10, 9, 8, 7, 6, 5],
+    })
+    wallet = ta.PaperWallet(10_000.0)
+    rep = strat.run(wallet, snaps)
+    assert len(rep.equity_curve) == len(snaps)
+
+
 def test_wallet_rejects_bad_side():
     w = ta.PaperWallet(100.0)
     w.update("X", 10.0)
