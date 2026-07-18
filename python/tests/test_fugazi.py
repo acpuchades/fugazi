@@ -810,10 +810,13 @@ def test_preset_strategy_rejects_builder_methods():
     # Preset strategies carry their catalogue recipe; layering `.long_on()`
     # etc. on top makes no sense — should raise a clear error.
     preset = ta.buy_and_hold("BTC")
+    # An always-true signal from close > 0 (candle-rooted, matches Strategy's
+    # snapshot input) — the shape a real user would pass.
+    always_true = ta.close().gt(ta.value(-1.0))
     with pytest.raises(ValueError, match="preset"):
-        preset.long_on(ta.value(True))
+        preset.long_on(always_true)
     with pytest.raises(ValueError, match="preset"):
-        preset.short_on(ta.value(True))
+        preset.short_on(always_true)
     with pytest.raises(ValueError, match="preset"):
         preset.position_sizing(ta.value(0.5))
 
