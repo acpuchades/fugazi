@@ -590,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "`all_of` universe requires")]
+    #[should_panic(expected = "strict universe requires")]
     fn build_with_all_of_panics_on_missing_symbol() {
         let yaml = r#"
             long:
