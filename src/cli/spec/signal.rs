@@ -163,7 +163,27 @@ pub enum SignalSpec {
     /// OR-fold of a list (empty ⇒ constant `false`).
     Any(Vec<SignalSpec>),
     Not(Box<SignalSpec>),
+    /// Toggle detector with a **`Bool`-typed** inner: fires on either edge
+    /// (rising OR falling). For gating on "the moment `cond` became true",
+    /// use [`BecameTrue`](Self::BecameTrue); for a Real-valued transition
+    /// detector (calendar rollovers, meta signals), see
+    /// [`ChangedReal`](Self::ChangedReal).
     Changed(Box<SignalSpec>),
+    /// Toggle detector with a **`Real`-typed** inner: fires on the single
+    /// bar where the inner's Real value differs from the prior bar (any
+    /// transition — including monotonic-wrap cases like `!month` going 12
+    /// → 1). Same YAML tag as [`Changed`](Self::Changed) — the CLI's
+    /// [`TryFrom<Value>`] tries the Bool-inner shape first and falls back
+    /// to this Real-inner shape.
+    ChangedReal(Box<ExprSpec>),
+    /// Rising-edge detector for a Bool inner: fires the bar it transitions
+    /// `false → true`. Sugar for `!and { <inner>, !changed { source: <inner>
+    /// } }` bundled as one primitive so the inner doesn't need to be named
+    /// twice.
+    BecameTrue(Box<SignalSpec>),
+    /// Falling-edge detector: mirror of [`BecameTrue`](Self::BecameTrue),
+    /// fires on `true → false`.
+    BecameFalse(Box<SignalSpec>),
 
     /// Read a `Bool` overlay column as a signal. The column's declared type
     /// in the atom stream's schema must be `Bool`; a `Real` or `Str` column
@@ -292,6 +312,13 @@ enum SignalSpecRaw {
     Any(Vec<SignalSpec>),
     Not(Box<SignalSpec>),
     Changed(Box<SignalSpec>),
+    // Real-inner shape of `!changed`. Not exposed at the raw enum tag level
+    // (the YAML tag is still `!changed`); populated by the polymorphic
+    // dispatch in `SignalSpec::TryFrom<Value>` when the Bool-inner parse
+    // fails and the ExprSpec fallback succeeds.
+    ChangedReal(Box<ExprSpec>),
+    BecameTrue(Box<SignalSpec>),
+    BecameFalse(Box<SignalSpec>),
     Get { key: String },
     StrEq {
         lhs: Box<ExprSpec>,
@@ -329,6 +356,9 @@ impl From<SignalSpecRaw> for SignalSpec {
             SignalSpecRaw::Any(v) => SignalSpec::Any(v),
             SignalSpecRaw::Not(inner) => SignalSpec::Not(inner),
             SignalSpecRaw::Changed(inner) => SignalSpec::Changed(inner),
+            SignalSpecRaw::ChangedReal(inner) => SignalSpec::ChangedReal(inner),
+            SignalSpecRaw::BecameTrue(inner) => SignalSpec::BecameTrue(inner),
+            SignalSpecRaw::BecameFalse(inner) => SignalSpec::BecameFalse(inner),
             SignalSpecRaw::Get { key } => SignalSpec::Get { key },
             SignalSpecRaw::StrEq { lhs, rhs } => SignalSpec::StrEq { lhs, rhs },
             SignalSpecRaw::StrNe { lhs, rhs } => SignalSpec::StrNe { lhs, rhs },
@@ -355,7 +385,13 @@ impl TryFrom<serde_norway::Value> for SignalSpec {
 
         // Unit-variant tags: their content stays as `Value::Null`
         // (see the mirror `ExprSpec::TryFrom` for the "why").
-        const UNIT_VARIANTS: &[&str] = &["is_weekday", "is_weekend", "never"];
+        const UNIT_VARIANTS: &[&str] = &[
+            "is_weekday", "is_weekend", "never",
+            // Wall-clock cadence sugar (all unit tags — they rewrite to
+            // `!changed { source: !<calendar_accessor> }` before the raw
+            // deserialize).
+            "hourly", "daily", "weekly", "monthly", "quarterly", "annually",
+        ];
 
         let promote_null_for = |tag: &str, v: serde_norway::Value| match v {
             serde_norway::Value::Null if !UNIT_VARIANTS.contains(&tag) => {
@@ -398,10 +434,148 @@ impl TryFrom<serde_norway::Value> for SignalSpec {
             }
             other => other,
         };
+
+        // Parse-time rewrites — sugar tags that expand to underlying
+        // primitives before the raw deserialize sees them:
+        //
+        // * `!hourly` / `!daily` / `!weekly` / `!monthly` / `!quarterly`
+        //   / `!annually`  → `!changed { source: !<hour|day|week_of_year
+        //   |month|quarter|year> }` (a calendar-anchored transition
+        //   detector; fires the first bar of each new hour/day/week/…).
+        //
+        // * `!changed <bool_or_real_inner>` polymorphic dispatch — if the
+        //   inner value parses as a `SignalSpec` (Bool), use `Changed`;
+        //   otherwise try `ExprSpec` (Real) and produce `ChangedReal`.
+        let normalised = rewrite_cadence_sugar(normalised);
+        if let Some(rewritten) = try_dispatch_edge_polymorphic(&normalised)? {
+            return Ok(rewritten);
+        }
+
         let raw: SignalSpecRaw =
             serde_norway::from_value(normalised).map_err(|e| e.to_string())?;
         Ok(raw.into())
     }
+}
+
+/// Rewrite the six wall-clock cadence sugar tags (`!hourly`, `!daily`,
+/// `!weekly`, `!monthly`, `!quarterly`, `!annually`) to
+/// `!changed { source: !<calendar_accessor> }` before the raw deserialize
+/// runs. Kept in the parse layer so downstream debug prints show the
+/// desugared form (self-documenting: readers see exactly what will run).
+fn rewrite_cadence_sugar(v: serde_norway::Value) -> serde_norway::Value {
+    use serde_norway::value::{Tag, TaggedValue};
+
+    let (name, tag_value) = match &v {
+        serde_norway::Value::Tagged(tv) => {
+            let tag = tv.tag.to_string();
+            let stripped = tag.strip_prefix('!').unwrap_or(&tag).to_string();
+            (stripped, tv.value.clone())
+        }
+        _ => return v,
+    };
+    let accessor_tag = match name.as_str() {
+        "hourly" => "hour",
+        "daily" => "day",
+        "weekly" => "week_of_year",
+        "monthly" => "month",
+        "quarterly" => "quarter",
+        "annually" => "year",
+        _ => return v,
+    };
+    // Ignore any payload the sugar tag came with (all unit variants).
+    let _ = tag_value;
+
+    // Build `!changed { source: !<accessor> {} }` — the source is an
+    // empty-map for the calendar accessor to fall into its default-source
+    // path (implicit `!pick`, same as a bare `!month` in any signal
+    // subtree).
+    let accessor_val = serde_norway::Value::Tagged(Box::new(TaggedValue {
+        tag: Tag::new(accessor_tag),
+        value: serde_norway::Value::Mapping(serde_norway::Mapping::new()),
+    }));
+    let mut inner_map = serde_norway::Mapping::new();
+    inner_map.insert(
+        serde_norway::Value::String("source".to_string()),
+        accessor_val,
+    );
+    serde_norway::Value::Tagged(Box::new(TaggedValue {
+        tag: Tag::new("changed"),
+        value: serde_norway::Value::Mapping(inner_map),
+    }))
+}
+
+/// Extract the inner payload of a unary edge-detector tag (`!changed`,
+/// `!became_true`, `!became_false`). Accepts both YAML shapes:
+///
+/// * Bare tag inner: `!changed !gt { ... }` — inner value is directly the
+///   sub-expression's Tagged form. Read raw.
+/// * Source-mapping inner: `!changed { source: !month }` — the more
+///   readable form for unit accessor tags where the bare form looks off
+///   (`!changed !month` is technically fine but reads as two tags).
+///
+/// Returns `Some(inner)` on either shape or `None` when the outer tag
+/// doesn't match `wanted`.
+fn extract_edge_inner(
+    v: &serde_norway::Value,
+    wanted: &str,
+) -> Option<serde_norway::Value> {
+    let inner_payload = match v {
+        serde_norway::Value::Tagged(tv)
+            if tv.tag.to_string().trim_start_matches('!') == wanted =>
+        {
+            &tv.value
+        }
+        _ => return None,
+    };
+    // If the payload is a single-key `{ source: <inner> }` map, unwrap to
+    // the inner. Otherwise return the payload as-is (the bare-tag form).
+    match inner_payload {
+        serde_norway::Value::Mapping(m) if m.len() == 1 => {
+            match m.iter().next() {
+                Some((serde_norway::Value::String(k), source)) if k == "source" => {
+                    Some(source.clone())
+                }
+                _ => Some(inner_payload.clone()),
+            }
+        }
+        _ => Some(inner_payload.clone()),
+    }
+}
+
+/// If the incoming value is a `!changed`, `!became_true`, or
+/// `!became_false` tag, dispatch its inner:
+///
+/// * `!changed` — try Bool ([`SignalSpec`]) first; on failure, fall back
+///   to Real ([`ExprSpec`]) and produce [`SignalSpec::ChangedReal`].
+/// * `!became_true` / `!became_false` — Bool inner only; wrap in the
+///   corresponding rising/falling variant.
+///
+/// Returns `Ok(Some(spec))` on match, `Ok(None)` on non-match, and `Err`
+/// when both fallback parses fail (Bool-side error surfaced).
+fn try_dispatch_edge_polymorphic(
+    v: &serde_norway::Value,
+) -> Result<Option<SignalSpec>, String> {
+    // `!changed` — Bool-first, Real-fallback.
+    if let Some(inner) = extract_edge_inner(v, "changed") {
+        return match SignalSpec::try_from(inner.clone()) {
+            Ok(bool_inner) => Ok(Some(SignalSpec::Changed(Box::new(bool_inner)))),
+            Err(bool_err) => match ExprSpec::try_from(inner) {
+                Ok(real_inner) => Ok(Some(SignalSpec::ChangedReal(Box::new(real_inner)))),
+                Err(_) => Err(bool_err),
+            },
+        };
+    }
+    // `!became_true` — Bool inner only.
+    if let Some(inner) = extract_edge_inner(v, "became_true") {
+        let bool_inner = SignalSpec::try_from(inner)?;
+        return Ok(Some(SignalSpec::BecameTrue(Box::new(bool_inner))));
+    }
+    // `!became_false` — Bool inner only.
+    if let Some(inner) = extract_edge_inner(v, "became_false") {
+        let bool_inner = SignalSpec::try_from(inner)?;
+        return Ok(Some(SignalSpec::BecameFalse(Box::new(bool_inner))));
+    }
+    Ok(None)
 }
 
 /// Resolve an optional tolerance to its concrete value.
@@ -503,6 +677,9 @@ impl SignalSpec {
             }
             Not(inner) => dyn_indicator::wrap(boolean(inner).not()),
             Changed(inner) => dyn_indicator::wrap(boolean(inner).changed()),
+            ChangedReal(inner) => dyn_indicator::wrap(real(inner).changed()),
+            BecameTrue(inner) => dyn_indicator::wrap(boolean(inner).became_true()),
+            BecameFalse(inner) => dyn_indicator::wrap(boolean(inner).became_false()),
             Unstable { signal } => dyn_indicator::unstable_wrap(signal.build(anchor, book, schema)),
             Value(b) => {
                 dyn_indicator::wrap(self::Const::<fugazi::types::Snapshot<String>>::new(*b))
