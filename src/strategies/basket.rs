@@ -5,9 +5,10 @@
 //! one asset from boolean signals and [`PairsStrategy`](crate::strategies::PairsStrategy)
 //! drives two symbols as a spread, `BasketStrategy` reads the whole
 //! [`Snapshot<Sym>`](crate::types::Snapshot) each bar: it scores every symbol
-//! present with a per-symbol *scoring* source, applies a **selection closure**
-//! (mapping the score map to per-symbol [`Side`]s), and drives each selection
-//! long / short / flat. The default universe is *floating*: symbols are
+//! present with a per-symbol *scoring* source, applies a
+//! [`Selection`] impl (mapping the score map to per-symbol [`Side`]s),
+//! and drives each selection long / short / flat. The default universe
+//! is *floating*: symbols are
 //! discovered from the incoming snapshot on first sight, and the per-symbol
 //! score / sizing chains are spun up lazily by user-supplied factories — no
 //! upfront universe list, no reject on a new listing.
@@ -18,10 +19,14 @@
 //! until all are ready) or [`BasketStrategy::any_of`] (lax — restricts to
 //! the listed subset but silently ignores absent or still-unready members).
 //!
-//! The crate ships three built-in selection functions — [`top_bottom`],
-//! [`threshold`], and [`quantile`] — plus matching builder methods on
-//! [`BasketStrategy`] that wrap them. A caller who needs something the
-//! built-ins don't cover installs their own closure via
+//! The crate ships three built-in [`Selection`] impls —
+//! [`TopBottom`], [`Threshold`], and [`Quantile`] — plus matching
+//! builder shortcuts on [`BasketStrategy`] that install them
+//! ([`top_bottom`](BasketStrategy::top_bottom) /
+//! [`threshold`](BasketStrategy::threshold) /
+//! [`quantile`](BasketStrategy::quantile)). A caller who needs
+//! something the built-ins don't cover installs a custom impl (or a
+//! closure, via the [`Selection`] blanket impl) via
 //! [`BasketStrategy::selection`].
 
 use std::collections::HashMap;
@@ -48,13 +53,85 @@ type Factory<Sym> = Box<dyn Fn(&Sym) -> Chain<Sym> + Send + Sync>;
 type LevelFactory<Sym> = Box<dyn Fn(&Sym, &Position) -> Chain<Sym> + Send + Sync>;
 
 // ---------------------------------------------------------------------------
-// Selection functions — each rule is a standalone `pub fn` that ranks a
-// score map into a per-symbol side, so a caller who knows which rule they
-// want can call it directly (`basket::top_bottom(&scores, 3, 3)`) without
-// going through [`SelectionRule::pick`]. The enum is a data-carrier for
-// [`BasketStrategy`]'s storage and the YAML/spec discriminator; `pick`
-// dispatches to whichever of these three functions matches its variant.
+// Selection — the cross-sectional pick from a per-symbol score map to a
+// per-symbol side, as a pluggable trait.
+//
+// Each of the three built-in rules is both a standalone `pub fn` (call
+// it directly if you have a raw score map) and a struct impl of
+// [`Selection`] (install via `BasketStrategy::selection`).
 // ---------------------------------------------------------------------------
+
+/// The cross-sectional rule that turns a per-symbol score map into a
+/// per-symbol trade side. Consumed as a `Box<dyn Selection<Sym>>` by
+/// [`BasketStrategy`] so a caller can plug in their own rule (a
+/// per-sector rank, a risk-parity picker, a machine-learned classifier)
+/// without touching the strategy.
+///
+/// Three built-in impls ship: [`TopBottom`], [`Threshold`], [`Quantile`].
+/// A blanket impl for any `Fn(&HashMap<Sym, Real>) -> HashMap<Sym, Side>`
+/// closure means `.selection(|scores| { ... })` continues to work for
+/// ad-hoc rules that don't warrant a new type.
+///
+/// Symbols not in the returned map are not selected (an open position on
+/// such a symbol is flattened).
+pub trait Selection<Sym>: Send + Sync {
+    /// Compute per-symbol sides from the current bar's score map.
+    fn pick(&self, scores: &HashMap<Sym, Real>) -> HashMap<Sym, Side>;
+}
+
+/// Blanket [`Selection`] impl for any closure of the same shape —
+/// preserves the `.selection(|scores| { ... })` closure ergonomics after
+/// the trait-ification.
+impl<Sym, F> Selection<Sym> for F
+where
+    F: Fn(&HashMap<Sym, Real>) -> HashMap<Sym, Side> + Send + Sync,
+{
+    fn pick(&self, scores: &HashMap<Sym, Real>) -> HashMap<Sym, Side> {
+        (self)(scores)
+    }
+}
+
+/// The [`Selection`] impl of the ranked "long the highest N, short the
+/// lowest M" rule — a struct wrapper over [`top_bottom`].
+#[derive(Debug, Clone, Copy)]
+pub struct TopBottom {
+    pub longs: usize,
+    pub shorts: usize,
+}
+
+impl<Sym: Clone + Hash + Eq + Send + Sync> Selection<Sym> for TopBottom {
+    fn pick(&self, scores: &HashMap<Sym, Real>) -> HashMap<Sym, Side> {
+        top_bottom(scores, self.longs, self.shorts)
+    }
+}
+
+/// The [`Selection`] impl of the "long above `long_min`, short below
+/// `short_max`" cutoff rule — a struct wrapper over [`threshold`].
+#[derive(Debug, Clone, Copy)]
+pub struct Threshold {
+    pub long_min: Real,
+    pub short_max: Real,
+}
+
+impl<Sym: Clone + Hash + Eq + Send + Sync> Selection<Sym> for Threshold {
+    fn pick(&self, scores: &HashMap<Sym, Real>) -> HashMap<Sym, Side> {
+        threshold(scores, self.long_min, self.short_max)
+    }
+}
+
+/// The [`Selection`] impl of the "long the top q_l, short the bottom
+/// q_s" fractional rule — a struct wrapper over [`quantile`].
+#[derive(Debug, Clone, Copy)]
+pub struct Quantile {
+    pub long_q: Real,
+    pub short_q: Real,
+}
+
+impl<Sym: Clone + Hash + Eq + Send + Sync> Selection<Sym> for Quantile {
+    fn pick(&self, scores: &HashMap<Sym, Real>) -> HashMap<Sym, Side> {
+        quantile(scores, self.long_q, self.short_q)
+    }
+}
 
 /// Rank `scores` and return the `longs` highest-scoring symbols as
 /// [`Side::Buy`] and the `shorts` lowest-scoring as [`Side::Sell`].
@@ -65,8 +142,8 @@ type LevelFactory<Sym> = Box<dyn Fn(&Sym, &Position) -> Chain<Sym> + Send + Sync
 /// and are not stable — a caller who needs deterministic tie-breaking
 /// should score unique values (or add a tie-breaker term to the score).
 ///
-/// Symbols not in the returned map are not selected. Called by
-/// [`SelectionRule::TopBottom`] and (as a post-count) by [`quantile`].
+/// Symbols not in the returned map are not selected. See [`TopBottom`]
+/// for the [`Selection`] trait wrapper.
 pub fn top_bottom<Sym: Clone + Hash + Eq>(
     scores: &HashMap<Sym, Real>,
     longs: usize,
@@ -98,7 +175,7 @@ pub fn top_bottom<Sym: Clone + Hash + Eq>(
 /// `long_min <= short_max`), **long wins** — the strategy will not put a
 /// symbol on both sides at once.
 ///
-/// Called by [`SelectionRule::Threshold`].
+/// See [`Threshold`] for the [`Selection`] trait wrapper.
 pub fn threshold<Sym: Clone + Hash + Eq>(
     scores: &HashMap<Sym, Real>,
     long_min: Real,
@@ -123,8 +200,8 @@ pub fn threshold<Sym: Clone + Hash + Eq>(
 /// Zero-quantile sides are legal (a top-decile long-only basket is
 /// `quantile(scores, 0.1, 0.0)`).
 ///
-/// Called by [`SelectionRule::Quantile`]. Delegates the actual rank to
-/// [`top_bottom`] once the two counts are resolved.
+/// See [`Quantile`] for the [`Selection`] trait wrapper. Delegates the
+/// actual rank to [`top_bottom`] once the two counts are resolved.
 pub fn quantile<Sym: Clone + Hash + Eq>(
     scores: &HashMap<Sym, Real>,
     long_q: Real,
@@ -244,17 +321,6 @@ impl<Sym: PartialEq + Send + Sync> Universe<Sym> for AnyOf<Sym> {
     }
 }
 
-/// The selection closure a [`BasketStrategy`] holds: takes a
-/// per-symbol score map and returns which symbols to trade on which side.
-/// Symbols not in the returned map are not selected (an open position on
-/// such a symbol is flattened).
-///
-/// The three built-in rules — [`top_bottom`] / [`threshold`] /
-/// [`quantile`] — all match this signature and are the natural
-/// implementations of `.top_bottom(...)` / `.threshold(...)` /
-/// `.quantile(...)` on [`BasketStrategy`]. A caller with a custom rule
-/// installs an arbitrary closure via [`BasketStrategy::selection`].
-type Selection<Sym> = Box<dyn Fn(&HashMap<Sym, Real>) -> HashMap<Sym, Side> + Send + Sync>;
 
 /// A cross-sectional, ranking basket strategy over a floating universe.
 ///
@@ -398,7 +464,7 @@ pub struct BasketStrategy<Sym> {
     positions: HashMap<Sym, Position>,
     latest_score: HashMap<Sym, Real>,
     latest_size: HashMap<Sym, Real>,
-    selection: Selection<Sym>,
+    selection: Box<dyn Selection<Sym>>,
     /// The **rebalance gate**: on each bar `trade()` runs the selection
     /// and issues resize orders only when this signal reads `true`.
     /// Default is `Every::new(1)` — fires every bar, matching the
@@ -611,41 +677,48 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> BasketStrategy<
         self
     }
 
-    /// Take the top `longs` and bottom `shorts` symbols by score. Wraps
-    /// [`top_bottom`].
+    /// Take the top `longs` and bottom `shorts` symbols by score.
+    /// Installs the [`TopBottom`] [`Selection`] impl.
     pub fn top_bottom(self, longs: usize, shorts: usize) -> Self {
-        self.selection(move |scores| top_bottom(scores, longs, shorts))
+        self.selection(TopBottom { longs, shorts })
     }
 
     /// Long every symbol scoring at/above `long_min`; short at/below
-    /// `short_max`. Wraps [`threshold`].
+    /// `short_max`. Installs the [`Threshold`] [`Selection`] impl.
     pub fn threshold(self, long_min: Real, short_max: Real) -> Self {
-        self.selection(move |scores| threshold(scores, long_min, short_max))
+        self.selection(Threshold { long_min, short_max })
     }
 
     /// Long the top `long_q` fraction, short the bottom `short_q` fraction
-    /// of the score distribution. Wraps [`quantile`].
+    /// of the score distribution. Installs the [`Quantile`] [`Selection`]
+    /// impl.
     pub fn quantile(self, long_q: Real, short_q: Real) -> Self {
-        self.selection(move |scores| quantile(scores, long_q, short_q))
+        self.selection(Quantile { long_q, short_q })
     }
 
-    /// Install an **arbitrary selection closure** — the escape hatch for
-    /// custom logic the three built-in rules don't cover (e.g. a signal
-    /// gate on top of a rank, or a stateful selector that reads the
-    /// strategy's [`Book`](Self::book)).
+    /// Install any [`Selection`] impl — the general seam behind the
+    /// [`top_bottom`](Self::top_bottom) / [`threshold`](Self::threshold)
+    /// / [`quantile`](Self::quantile) shortcuts, and the escape hatch
+    /// for custom rules the built-ins don't cover (a signal gate on top
+    /// of a rank, a stateful selector that reads
+    /// [`book`](Self::book), a per-sector picker, a machine-learned
+    /// classifier).
     ///
-    /// The closure takes the current bar's score map (one entry per symbol
-    /// whose score chain produced a `Some` this bar) and returns the
-    /// symbols to trade tagged with a [`Side`]. Symbols not in the
-    /// returned map are not selected (an open position on such a symbol
-    /// gets flattened). The three sugar builders
-    /// ([`top_bottom`](Self::top_bottom) / [`threshold`](Self::threshold) /
-    /// [`quantile`](Self::quantile)) delegate here.
-    pub fn selection<F>(mut self, f: F) -> Self
+    /// Because the trait carries a blanket impl for any
+    /// `Fn(&HashMap<Sym, Real>) -> HashMap<Sym, Side>` closure, you can
+    /// still pass a closure directly for one-off logic:
+    ///
+    /// ```ignore
+    /// basket.selection(|scores: &HashMap<Sym, Real>| { ... })
+    /// ```
+    ///
+    /// A returned map's absent symbols are not selected (any open
+    /// position on such a symbol gets flattened).
+    pub fn selection<S>(mut self, s: S) -> Self
     where
-        F: Fn(&HashMap<Sym, Real>) -> HashMap<Sym, Side> + 'static + Send + Sync,
+        S: Selection<Sym> + 'static,
     {
-        self.selection = Box::new(f);
+        self.selection = Box::new(s);
         self
     }
 
@@ -912,7 +985,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Ba
         if !self.rebalance.value().unwrap_or(false) {
             return;
         }
-        let selection = (self.selection)(&self.latest_score);
+        let selection = self.selection.pick(&self.latest_score);
 
         // Dollar-neutrality: scale per-side sizes so Σ long_sizes ==
         // Σ short_sizes. The smaller side's sum becomes the target
@@ -1130,7 +1203,7 @@ mod tests {
                     Close::of(Pick::matching(Selector::by_symbol(*sym)))
                 })
                 .sized_by(|_| equal_weight::<&'static str>(2))
-                .selection(|scores| {
+                .selection(|scores: &HashMap<&'static str, Real>| {
                     let mut out = HashMap::new();
                     for sym in scores.keys() {
                         if sym.starts_with('A') {
@@ -1156,6 +1229,57 @@ mod tests {
         tick(&mut strat, &mut wallet, &[("AAPL", 100.0), ("BTC", 50.0)]);
         tick(&mut strat, &mut wallet, &[("AAPL", 100.0), ("BTC", 50.0)]);
         assert!(wallet.position(&"AAPL").amount > 0.0, "AAPL long via custom rule");
+        assert!(
+            wallet.position(&"BTC").amount.abs() < 1e-9,
+            "BTC not picked, so flat"
+        );
+    }
+
+    #[test]
+    fn custom_selection_impl_plugs_in_via_the_trait() {
+        // Same behavior as the closure test above but with a dedicated
+        // struct impl of Selection — proves the trait, not just the
+        // closure blanket, is the extension seam. A caller wanting to
+        // ship a reusable rule (per-sector top-N, risk-parity, etc.)
+        // implements the trait once and installs it via `.selection(...)`.
+        struct StartsWithSelection(char);
+        impl Selection<&'static str> for StartsWithSelection {
+            fn pick(
+                &self,
+                scores: &HashMap<&'static str, Real>,
+            ) -> HashMap<&'static str, Side> {
+                scores
+                    .keys()
+                    .filter(|s| s.starts_with(self.0))
+                    .map(|s| (*s, Side::Buy))
+                    .collect()
+            }
+        }
+
+        let mut strat: BasketStrategy<&'static str> =
+            BasketStrategy::with_initial_equity(1_000.0)
+                .scored_by(|sym: &&'static str| {
+                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
+                })
+                .sized_by(|_| equal_weight::<&'static str>(2))
+                .selection(StartsWithSelection('A'));
+        let mut wallet: PaperWallet<&'static str> = PaperWallet::new(1_000.0);
+        let tick = |strat: &mut BasketStrategy<&'static str>,
+                    wallet: &mut PaperWallet<&'static str>,
+                    entries: &[(&'static str, Real)]| {
+            let s = snap(entries);
+            for (sym_opt, _f, atom) in s.iter() {
+                let sym = sym_opt.copied().unwrap();
+                for fill in wallet.update(sym, atom.candle) {
+                    strat.on_fill(&fill);
+                }
+            }
+            strat.update(s);
+            strat.trade(wallet);
+        };
+        tick(&mut strat, &mut wallet, &[("AAPL", 100.0), ("BTC", 50.0)]);
+        tick(&mut strat, &mut wallet, &[("AAPL", 100.0), ("BTC", 50.0)]);
+        assert!(wallet.position(&"AAPL").amount > 0.0, "AAPL long via custom impl");
         assert!(
             wallet.position(&"BTC").amount.abs() < 1e-9,
             "BTC not picked, so flat"

@@ -43,10 +43,14 @@ use crate::dyn_indicator::{AsBool, AsReal, DynIndicator};
 /// (`!top_bottom { longs, shorts }` / `!threshold { long_min, short_max }`
 /// / `!quantile { long_q, short_q }`).
 ///
-/// Kept separate from [`fugazi::strategies::SelectionRule`] because the
-/// library's enum isn't `Deserialize`; this spec is the CLI-only
-/// discriminator that dispatches to the three free functions
-/// `top_bottom` / `threshold` / `quantile` at build time.
+/// A CLI-only discriminator; at build it constructs the corresponding
+/// [`fugazi::strategies::basket::Selection`] trait impl (one of
+/// [`TopBottom`](fugazi::strategies::basket::TopBottom) /
+/// [`Threshold`](fugazi::strategies::basket::Threshold) /
+/// [`Quantile`](fugazi::strategies::basket::Quantile)) and installs it via
+/// [`BasketStrategy::selection`](fugazi::strategies::BasketStrategy::selection).
+/// Rust-side callers with a custom rule build their own `Selection`
+/// impl and install it directly — no CLI-side wiring needed.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum SelectionRuleSpec {
