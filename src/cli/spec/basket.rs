@@ -82,13 +82,12 @@ pub enum SelectionRuleSpec {
 pub enum UniverseSpec {
     /// Strict declared universe: every listed symbol must be present on
     /// every bar (absence panics); readiness gates on all listed symbols
-    /// scoring `Some`. See
-    /// [`fugazi::strategies::basket::Universe::AllOf`].
+    /// scoring `Some`. Wraps [`fugazi::strategies::basket::AllOf`].
     AllOf(Vec<String>),
 
     /// Lax declared universe: restrict to the listed subset but silently
-    /// skip absent or still-unready members. See
-    /// [`fugazi::strategies::basket::Universe::AnyOf`].
+    /// skip absent or still-unready members. Wraps
+    /// [`fugazi::strategies::basket::AnyOf`].
     AnyOf(Vec<String>),
 }
 
@@ -671,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "`all_of` universe requires")]
+    #[should_panic(expected = "strict universe requires")]
     fn build_with_all_of_panics_on_missing_symbol() {
         let yaml = r#"
             selection: !top_bottom { longs: 1, shorts: 1 }

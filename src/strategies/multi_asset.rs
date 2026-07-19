@@ -23,18 +23,19 @@
 //! [`Position`] so `position.entry()` / `.peak()` / `.trough()` track the
 //! actual entry per leg.
 //!
-//! Uses the same [`Universe`] knob as
+//! Uses the same [`Universe`] trait knob as
 //! [`BasketStrategy`](crate::strategies::BasketStrategy) — declare
-//! [`all_of`](Self::all_of) (strict) or [`any_of`](Self::any_of) (lax),
-//! or leave the default [`Universe::Floating`] to pick up every symbol
-//! the snapshot carries.
+//! [`all_of`](Self::all_of) (strict), [`any_of`](Self::any_of) (lax),
+//! or [`universe(custom)`](Self::universe) to plug in an arbitrary
+//! [`Universe`] impl. Leaving the default [`Floating`] picks up every
+//! symbol the snapshot carries.
 
 use std::collections::HashMap;
 use std::hash::Hash;
 
 use crate::indicators::{Book, Const, Position, Value};
 use crate::prelude::*;
-use crate::strategies::basket::Universe;
+use crate::strategies::basket::{AllOf, AnyOf, Floating, Universe};
 use crate::types::Snapshot;
 
 // ---------------------------------------------------------------------------
@@ -141,8 +142,9 @@ impl<Sym> PerAssetState<Sym> {
 
     /// Whether this leg has seen enough bars for its own decision to be
     /// safe to act on. Consulted at trade time; also folded into the
-    /// [`MultiAssetStrategy::is_ready`] gate under
-    /// [`Universe::AllOf`](crate::strategies::basket::Universe::AllOf).
+    /// [`MultiAssetStrategy::is_ready`] gate under a strict
+    /// [`Universe`](crate::strategies::basket::Universe) impl (e.g.
+    /// [`AllOf`](crate::strategies::basket::AllOf)).
     fn is_ready(&self) -> bool {
         self.bars_seen >= self.stable_period()
     }
@@ -272,7 +274,7 @@ pub struct MultiAssetStrategy<Sym> {
     /// doesn't wire `.rebalance_on(...)` behaves exactly as before (sizing
     /// only read on transitions).
     rebalance: RebalanceSignal<Sym>,
-    universe: Universe<Sym>,
+    universe: Box<dyn Universe<Sym>>,
     book: Book<Sym>,
 }
 
@@ -326,7 +328,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
             }),
             states: HashMap::new(),
             rebalance: Box::new(Const::<Snapshot<Sym>>::new(false)),
-            universe: Universe::Floating,
+            universe: Box::new(Floating),
             book: Book::new(initial_equity),
         }
     }
@@ -499,12 +501,11 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
     /// Use this when the universe list is authoritative and a missing
     /// symbol means the data feed is broken. For silent skipping, use
     /// [`any_of`](Self::any_of).
-    pub fn all_of<I>(mut self, symbols: I) -> Self
+    pub fn all_of<I>(self, symbols: I) -> Self
     where
         I: IntoIterator<Item = Sym>,
     {
-        self.universe = Universe::AllOf(symbols.into_iter().collect());
-        self
+        self.universe(AllOf(symbols.into_iter().collect()))
     }
 
     /// Restrict this strategy to the set `symbols` under a **lax**
@@ -512,11 +513,21 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
     /// still-unready members are silently skipped — same per-bar
     /// filtering the floating universe does, just narrowed to a fixed
     /// list.
-    pub fn any_of<I>(mut self, symbols: I) -> Self
+    pub fn any_of<I>(self, symbols: I) -> Self
     where
         I: IntoIterator<Item = Sym>,
     {
-        self.universe = Universe::AnyOf(symbols.into_iter().collect());
+        self.universe(AnyOf(symbols.into_iter().collect()))
+    }
+
+    /// Install a custom [`Universe`] impl — the general seam behind
+    /// [`all_of`](Self::all_of) / [`any_of`](Self::any_of). See
+    /// [`BasketStrategy::universe`](crate::strategies::BasketStrategy::universe).
+    pub fn universe<U>(mut self, universe: U) -> Self
+    where
+        U: Universe<Sym> + 'static,
+    {
+        self.universe = Box::new(universe);
         self
     }
 
@@ -581,19 +592,21 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Mu
     type Symbol = Sym;
 
     fn update(&mut self, snap: Snapshot<Sym>) {
-        // 0. Universe: !all_of requires every listed symbol on every bar.
-        if let Some(required) = self.universe.required() {
-            for sym in required {
-                let present = snap.iter().any(|(s, _, _)| s == Some(sym));
-                if !present {
-                    panic!(
-                        "MultiAssetStrategy: `all_of` universe requires every \
-                         listed symbol to be present in every snapshot, but \
-                         at least one is missing this bar. Either fix the \
-                         data feed or switch to `any_of` if silent skipping \
-                         is what you want."
-                    );
-                }
+        // 0. Universe: strict impls (e.g. `AllOf`) require every listed
+        // symbol on every bar. Absence panics — the point of a strict
+        // universe is to catch feed gaps and typos loudly. Lax /
+        // floating impls report an empty `required()` and this loop
+        // is a no-op.
+        for sym in self.universe.required() {
+            let present = snap.iter().any(|(s, _, _)| s == Some(sym));
+            if !present {
+                panic!(
+                    "MultiAssetStrategy: the installed strict universe \
+                     requires every listed symbol to be present in every \
+                     snapshot, but at least one is missing this bar. Either \
+                     fix the data feed or install a lax universe (`any_of` \
+                     / `Floating`) if silent skipping is what you want."
+                );
             }
         }
 
@@ -714,12 +727,10 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Mu
         // symbol has been discovered and is past its own stable_period,
         // so the whole portfolio sits through warm-up rather than trading
         // a partial universe.
-        match &self.universe {
-            Universe::AllOf(required) => required.iter().all(|s| {
-                self.states.get(s).map(|st| st.is_ready()).unwrap_or(false)
-            }),
-            _ => true,
-        }
+        self.universe
+            .required()
+            .iter()
+            .all(|s| self.states.get(s).map(|st| st.is_ready()).unwrap_or(false))
     }
 
     fn trade(&self, wallet: &mut dyn Wallet<Sym>) {
@@ -903,7 +914,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "`all_of` universe requires")]
+    #[should_panic(expected = "strict universe requires")]
     fn all_of_panics_when_listed_symbol_absent() {
         let mut strat: MultiAssetStrategy<&'static str> =
             MultiAssetStrategy::with_initial_equity(1_000.0)
