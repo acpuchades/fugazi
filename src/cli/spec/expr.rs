@@ -579,12 +579,12 @@ pub enum ExprSpec {
     // (`DrawdownThrottle`, `EquityVolTarget`, `FractionalKelly`) additionally
     // require the strategy to own a `Book` — `SingleStrategySpec` does;
     // `PairsStrategySpec` does not (they'll emit `None` there).
-    /// Equal-weight sizing — a constant `1.0 / n_legs`. The one-line
-    /// helper the common basket case reaches for: `sizing: !equal_weight
-    /// 6` on a 3-long / 3-short basket yields 1/6 per leg = 100% gross
-    /// exposure. Doesn't depend on the symbol, so no `!arg SYM` needed.
-    /// See [`fugazi::indicators::sizing::equal_weight`].
-    EqualWeight(usize),
+    //
+    // `!equal_weight <N>` used to be a variant here, but it's really
+    // just `!value <1/N>` — a per-leg constant that normalizes to
+    // `1/N`. It's now recognized as sugar and rewritten to `!value`
+    // during `ExprSpec::try_from` before typed parse. See
+    // [`rewrite_sugar_tags`].
     /// Inverse realized-vol sizing —
     /// `target / (stddev(log_returns(close), window) * sqrt(bars_per_year))`.
     /// `source` defaults to the single-asset empty-selector `Pick`; in a
@@ -1294,12 +1294,12 @@ enum ExprSpecRaw {
     // (`DrawdownThrottle`, `EquityVolTarget`, `FractionalKelly`) additionally
     // require the strategy to own a `Book` — `SingleStrategySpec` does;
     // `PairsStrategySpec` does not (they'll emit `None` there).
-    /// Equal-weight sizing — a constant `1.0 / n_legs`. The one-line
-    /// helper the common basket case reaches for: `sizing: !equal_weight
-    /// 6` on a 3-long / 3-short basket yields 1/6 per leg = 100% gross
-    /// exposure. Doesn't depend on the symbol, so no `!arg SYM` needed.
-    /// See [`fugazi::indicators::sizing::equal_weight`].
-    EqualWeight(usize),
+    //
+    // `!equal_weight <N>` used to be a variant here, but it's really
+    // just `!value <1/N>` — a per-leg constant that normalizes to
+    // `1/N`. It's now recognized as sugar and rewritten to `!value`
+    // during `ExprSpec::try_from` before typed parse. See
+    // [`rewrite_sugar_tags`].
     /// Inverse realized-vol sizing —
     /// `target / (stddev(log_returns(close), window) * sqrt(bars_per_year))`.
     /// `source` defaults to the single-asset empty-selector `Pick`; in a
@@ -1652,7 +1652,6 @@ impl From<ExprSpecRaw> for ExprSpec {
             ExprSpecRaw::Ad { source } => ExprSpec::Ad { source },
             ExprSpecRaw::TrueRange { source } => ExprSpec::TrueRange { source },
             ExprSpecRaw::Sar { source, step, max } => ExprSpec::Sar { source, step, max },
-            ExprSpecRaw::EqualWeight(n) => ExprSpec::EqualWeight(n),
             ExprSpecRaw::VolTarget { source, target, window, bars_per_year } => ExprSpec::VolTarget { source, target, window, bars_per_year },
             ExprSpecRaw::AtrRisk { source, risk_frac, period, atr_multiple } => ExprSpec::AtrRisk { source, risk_frac, period, atr_multiple },
             ExprSpecRaw::DrawdownThrottle { max_drawdown } => ExprSpec::DrawdownThrottle { max_drawdown },
@@ -1816,10 +1815,60 @@ impl TryFrom<serde_norway::Value> for ExprSpec {
             }
             other => other,
         };
+        // Sugar tags — rewrite to their canonical form before typed
+        // parse. `!equal_weight <N>` is really just `!value <1/N>`
+        // (a per-leg constant that normalizes to `1/N`); collapsing
+        // it here means there's one primitive (`!value`) instead of
+        // two variants doing the same thing.
+        let normalised = rewrite_sugar_tags(normalised)?;
         let raw: ExprSpecRaw =
             serde_norway::from_value(normalised).map_err(|e| e.to_string())?;
         Ok(raw.into())
     }
+}
+
+/// Rewrite ExprSpec sugar tags to their canonical `!value` forms.
+/// Runs after shape-normalization (so tagged / bare / single-key-map
+/// inputs all reach this pass in `Value::Tagged` form). Currently
+/// covers `!equal_weight <N>` → `!value <1/N>`; other sugar tags can
+/// be added the same way if the pattern repeats.
+fn rewrite_sugar_tags(v: serde_norway::Value) -> Result<serde_norway::Value, String> {
+    use serde_norway::value::{Tag, TaggedValue};
+    if let serde_norway::Value::Tagged(tagged) = v {
+        let TaggedValue { tag, value } = *tagged;
+        let tag_str = tag.to_string();
+        let name = tag_str.strip_prefix('!').unwrap_or(&tag_str);
+        if name == "equal_weight" {
+            let n = match &value {
+                serde_norway::Value::Number(n) => n
+                    .as_u64()
+                    .ok_or_else(|| format!(
+                        "!equal_weight: expected a positive integer leg count, got {n}"
+                    ))?,
+                other => {
+                    return Err(format!(
+                        "!equal_weight: expected a positive integer leg count, got {other:?}"
+                    ));
+                }
+            };
+            if n == 0 {
+                return Err(
+                    "!equal_weight: leg count must be strictly positive".to_string()
+                );
+            }
+            let weight = 1.0_f64 / n as f64;
+            return Ok(serde_norway::Value::Tagged(Box::new(TaggedValue {
+                tag: Tag::new("value"),
+                value: serde_norway::Value::Number(weight.into()),
+            })));
+        }
+        // Not a sugar tag — repack and return.
+        return Ok(serde_norway::Value::Tagged(Box::new(TaggedValue {
+            tag,
+            value,
+        })));
+    }
+    Ok(v)
 }
 
 
@@ -2129,9 +2178,6 @@ impl ExprSpec {
                 dyn_indicator::wrap(self::Sar::new(candle(source), *step, *max))
             }
 
-            EqualWeight(n_legs) => dyn_indicator::wrap(
-                fugazi::indicators::sizing::equal_weight::<String>(*n_legs),
-            ),
             VolTarget {
                 source,
                 target,
