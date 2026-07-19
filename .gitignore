@@ -1,4 +1,6 @@
 /.claude
+/.direnv
+/.python-version
 
 /target
 /tests/data/talib_expected.csv
