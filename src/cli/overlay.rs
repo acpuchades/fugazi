@@ -92,7 +92,7 @@ impl Overlay {
         // Overlays don't run inside a strategy, so there's no live Position
         // or Book — using them here (`entry`, `peak`, book-anchored sizing)
         // never fires. Pass fresh anchors for signature compatibility.
-        self.spec.build(&Position::new(), &Book::new(1.0), schema)
+        self.spec.build(&Position::new(), &Book::new(1.0), None, schema)
     }
 }
 

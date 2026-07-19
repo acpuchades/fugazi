@@ -74,13 +74,14 @@ impl StrOperand {
         &self,
         anchor: &Position,
         book: &Book,
+        portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
     ) -> Box<dyn DynIndicator> {
         match self {
             StrOperand::Literal(s) => {
                 dyn_indicator::wrap(ValueStr::<fugazi::types::Snapshot<String>>::new(s.as_str()))
             }
-            StrOperand::Expr(e) => e.build(anchor, book, schema),
+            StrOperand::Expr(e) => e.build(anchor, book, portfolio_book, schema),
         }
     }
 }
@@ -605,11 +606,13 @@ impl SignalSpec {
         &self,
         anchor: &Position,
         book: &Book,
+        portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
     ) -> Box<dyn DynIndicator> {
         use SignalSpec::*;
-        let real = |s: &ExprSpec| AsReal::new(s.build(anchor, book, schema));
-        let boolean = |s: &SignalSpec| AsBool::new(s.build(anchor, book, schema));
+        let real = |s: &ExprSpec| AsReal::new(s.build(anchor, book, portfolio_book, schema));
+        let boolean =
+            |s: &SignalSpec| AsBool::new(s.build(anchor, book, portfolio_book, schema));
 
         match self {
             Gt { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Gt::with_epsilon(
@@ -664,9 +667,10 @@ impl SignalSpec {
                 if specs.is_empty() {
                     dyn_indicator::wrap(self::Const::<fugazi::types::Snapshot<String>>::new(true))
                 } else {
-                    let mut acc = AsBool::new(specs[0].build(anchor, book, schema));
+                    let mut acc =
+                        AsBool::new(specs[0].build(anchor, book, portfolio_book, schema));
                     for s in &specs[1..] {
-                        let next = AsBool::new(s.build(anchor, book, schema));
+                        let next = AsBool::new(s.build(anchor, book, portfolio_book, schema));
                         // AsBool `and` AsBool → concrete Combine; wrap in AsBool
                         // by round-tripping through the box so the fold's accumulator
                         // stays a single library type.
@@ -679,9 +683,10 @@ impl SignalSpec {
                 if specs.is_empty() {
                     dyn_indicator::wrap(self::Const::<fugazi::types::Snapshot<String>>::new(false))
                 } else {
-                    let mut acc = AsBool::new(specs[0].build(anchor, book, schema));
+                    let mut acc =
+                        AsBool::new(specs[0].build(anchor, book, portfolio_book, schema));
                     for s in &specs[1..] {
-                        let next = AsBool::new(s.build(anchor, book, schema));
+                        let next = AsBool::new(s.build(anchor, book, portfolio_book, schema));
                         acc = AsBool::new(dyn_indicator::wrap(acc.or(next)));
                     }
                     dyn_indicator::wrap(acc)
@@ -692,7 +697,9 @@ impl SignalSpec {
             ChangedReal(inner) => dyn_indicator::wrap(real(inner).changed()),
             BecameTrue(inner) => dyn_indicator::wrap(boolean(inner).became_true()),
             BecameFalse(inner) => dyn_indicator::wrap(boolean(inner).became_false()),
-            Unstable { signal } => dyn_indicator::unstable_wrap(signal.build(anchor, book, schema)),
+            Unstable { signal } => {
+                dyn_indicator::unstable_wrap(signal.build(anchor, book, portfolio_book, schema))
+            }
             Value(b) => {
                 dyn_indicator::wrap(self::Const::<fugazi::types::Snapshot<String>>::new(*b))
             }
@@ -704,13 +711,13 @@ impl SignalSpec {
             }
             Get { key } => build_signal_get(schema, key),
             StrEq { lhs, rhs } => {
-                let lhs = AsStr::new(lhs.build(anchor, book, schema));
-                let rhs = AsStr::new(rhs.build(anchor, book, schema));
+                let lhs = AsStr::new(lhs.build(anchor, book, portfolio_book, schema));
+                let rhs = AsStr::new(rhs.build(anchor, book, portfolio_book, schema));
                 dyn_indicator::wrap(compare::StrEq::new(lhs, rhs))
             }
             StrNe { lhs, rhs } => {
-                let lhs = AsStr::new(lhs.build(anchor, book, schema));
-                let rhs = AsStr::new(rhs.build(anchor, book, schema));
+                let lhs = AsStr::new(lhs.build(anchor, book, portfolio_book, schema));
+                let rhs = AsStr::new(rhs.build(anchor, book, portfolio_book, schema));
                 dyn_indicator::wrap(compare::StrNe::new(lhs, rhs))
             }
 

@@ -845,8 +845,10 @@ fn weight_share_reads_aggregate_directly() {
     // 75/25 skew.
     //
     // Mirrors the mechanism PortfolioSpec::build uses in the YAML
-    // pipeline: each per-child instantiation is built with a clone of
-    // the aggregate book (linked to the child's book for `!at_child`).
+    // pipeline: each per-child instantiation is built with the child's
+    // own book as the strategy book, and the aggregate book passed as
+    // the `portfolio_book` build argument (so `source: !portfolio_book`
+    // resolves to the aggregate).
     use fugazi::indicators::{Book, Const, Every};
 
     let agg_book: Book<&'static str> = Book::new(1_000.0);

@@ -118,7 +118,7 @@ impl PairsStrategySpec {
     ) -> Box<dyn DynIndicator> {
         self.exit
             .as_ref()
-            .map(|s| s.build(anchor, book, schema))
+            .map(|s| s.build(anchor, book, None, schema))
             .unwrap_or_else(|| {
                 crate::dyn_indicator::wrap(Const::<fugazi::types::Snapshot<String>>::new(false))
             })
@@ -150,20 +150,20 @@ impl PairsStrategySpec {
         // (`!drawdown_throttle`, `!equity_vol_target`, `!fractional_kelly`)
         // read the pair's aggregate equity curve.
         let book = strat.book();
-        let enter = AsBool::new(self.enter.build(&anchor, &book, schema));
+        let enter = AsBool::new(self.enter.build(&anchor, &book, None, schema));
         let exit = AsBool::new(self.exit(&anchor, &book, schema));
         let mut strat = strat.on(enter, exit);
         if let Some(sl) = &self.stop_loss {
-            strat = strat.spread_stop_loss(AsReal::new(sl.build(&anchor, &book, schema)));
+            strat = strat.spread_stop_loss(AsReal::new(sl.build(&anchor, &book, None, schema)));
         }
         if let Some(tp) = &self.take_profit {
-            strat = strat.spread_take_profit(AsReal::new(tp.build(&anchor, &book, schema)));
+            strat = strat.spread_take_profit(AsReal::new(tp.build(&anchor, &book, None, schema)));
         }
         if let Some(sizing) = &self.sizing {
-            strat = strat.position_sizing(AsReal::new(sizing.build(&anchor, &book, schema)));
+            strat = strat.position_sizing(AsReal::new(sizing.build(&anchor, &book, None, schema)));
         }
         if let Some(rebalance) = &self.rebalance_on {
-            strat = strat.rebalance_on(AsBool::new(rebalance.build(&anchor, &book, schema)));
+            strat = strat.rebalance_on(AsBool::new(rebalance.build(&anchor, &book, None, schema)));
         }
         DynPairsStrategy { inner: strat }
     }

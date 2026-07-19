@@ -242,7 +242,7 @@ impl BasketStrategySpec {
             let concrete = build_per_symbol(&score_template, sym, "score");
             let anchor = Position::new();
             let dyn_ind: Box<dyn DynIndicator> =
-                concrete.build(&anchor, &book_score, &schema_score);
+                concrete.build(&anchor, &book_score, None, &schema_score);
             AsReal::new(dyn_ind)
         });
 
@@ -253,7 +253,7 @@ impl BasketStrategySpec {
             let concrete = build_per_symbol(&sizing_template, sym, "sizing");
             let anchor = Position::new();
             let dyn_ind: Box<dyn DynIndicator> =
-                concrete.build(&anchor, &book_sizing, &schema_sizing);
+                concrete.build(&anchor, &book_sizing, None, &schema_sizing);
             AsReal::new(dyn_ind)
         });
 
@@ -280,7 +280,7 @@ impl BasketStrategySpec {
         // book — same convention as basket score/sizing templates.
         let strat = if let Some(rebalance_spec) = &self.rebalance_on {
             let anchor = Position::new();
-            let dyn_ind: Box<dyn DynIndicator> = rebalance_spec.build(&anchor, &book, schema);
+            let dyn_ind: Box<dyn DynIndicator> = rebalance_spec.build(&anchor, &book, None, schema);
             strat.rebalance_on(AsBool::new(dyn_ind))
         } else {
             strat
@@ -299,7 +299,7 @@ impl BasketStrategySpec {
                 strat = strat.long_stop_loss(move |sym: &String, pos: &Position| {
                     let concrete = build_per_symbol(&t, sym, "long.stop_loss");
                     let dyn_ind: Box<dyn DynIndicator> =
-                        concrete.build(pos, &book_c, &schema_c);
+                        concrete.build(pos, &book_c, None, &schema_c);
                     AsReal::new(dyn_ind)
                 });
             }
@@ -309,7 +309,7 @@ impl BasketStrategySpec {
                 strat = strat.long_take_profit(move |sym: &String, pos: &Position| {
                     let concrete = build_per_symbol(&t, sym, "long.take_profit");
                     let dyn_ind: Box<dyn DynIndicator> =
-                        concrete.build(pos, &book_c, &schema_c);
+                        concrete.build(pos, &book_c, None, &schema_c);
                     AsReal::new(dyn_ind)
                 });
             }
@@ -325,7 +325,7 @@ impl BasketStrategySpec {
                 strat = strat.short_stop_loss(move |sym: &String, pos: &Position| {
                     let concrete = build_per_symbol(&t, sym, "short.stop_loss");
                     let dyn_ind: Box<dyn DynIndicator> =
-                        concrete.build(pos, &book_c, &schema_c);
+                        concrete.build(pos, &book_c, None, &schema_c);
                     AsReal::new(dyn_ind)
                 });
             }
@@ -335,7 +335,7 @@ impl BasketStrategySpec {
                 strat = strat.short_take_profit(move |sym: &String, pos: &Position| {
                     let concrete = build_per_symbol(&t, sym, "short.take_profit");
                     let dyn_ind: Box<dyn DynIndicator> =
-                        concrete.build(pos, &book_c, &schema_c);
+                        concrete.build(pos, &book_c, None, &schema_c);
                     AsReal::new(dyn_ind)
                 });
             }

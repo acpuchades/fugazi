@@ -208,13 +208,10 @@ pub struct Portfolio<Sym> {
     /// Aggregate [`Book`] of the portfolio, marked to market on each
     /// [`update`](Strategy::update) from the sum of every sub-wallet's
     /// equity. Handed out by [`book`](Self::book); the CLI's
-    /// `PortfolioSpec::build` uses it as the default anchor for
-    /// weight-share templates (so `!drawdown`, `!return_per_bar`, …
-    /// inside a template read *aggregate* state) and pairs each per-child
-    /// instantiation with the corresponding child's book via
-    /// [`Book::linked_to`](crate::indicators::Book::linked_to) so an
-    /// `!at_child { ... }` scope inside a template can walk to per-child
-    /// state on demand.
+    /// `PortfolioSpec::build` passes it as the `portfolio_book` build
+    /// argument for weight-share templates, so a book-reading node with
+    /// `source: !portfolio_book` inside a template resolves to it (bare
+    /// nodes default to the child's own book — see [`ExprSpec`]).
     agg_book: Book<Sym>,
 }
 
@@ -258,14 +255,12 @@ impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
     /// sub-wallet's equity.
     ///
     /// Cheap to call — cloning shares the same underlying state through
-    /// its `Arc<Mutex<_>>`. The natural use is *as the default anchor*
-    /// for a weight-share expression built inside a
-    /// [`Portfolio`](crate::portfolio::Portfolio): the aggregate book is
-    /// what a weight template most often needs (aggregate drawdown,
-    /// aggregate return, etc.), and per-child access is reached via the
-    /// `!at_child` scope (implemented by pairing each per-child
-    /// instantiation's aggregate book handle with the child's book via
-    /// [`Book::linked_to`](crate::indicators::Book::linked_to)).
+    /// its `Arc<Mutex<_>>`. The CLI's `PortfolioSpec::build` passes this
+    /// handle as the `portfolio_book` build argument to weight-share
+    /// templates so a book-reading node with
+    /// `source: !portfolio_book` inside a template resolves to it. Bare
+    /// nodes default to the child's own book — this handle is *only* the
+    /// aggregate.
     ///
     /// Trade-level fields (`trade_pnl`, `trade_return`) on the aggregate
     /// book stay `None` — the mark-driven path used to update it doesn't
@@ -563,10 +558,9 @@ pub struct PortfolioBuilder<Sym> {
     /// Pre-supplied aggregate [`Book`] — when set, the built portfolio
     /// uses this book (rather than a freshly-seeded one) so a caller that
     /// needed the handle *before* `build()` (typically the CLI's
-    /// `PortfolioSpec::build`, which uses this book as the default anchor
-    /// for weight-share templates and pairs each per-child instantiation
-    /// with the child's own book via [`Book::linked_to`]) can share the
-    /// same handle with the built portfolio.
+    /// `PortfolioSpec::build`, which passes it as `portfolio_book` when
+    /// building each per-child weight-share template) can share the same
+    /// handle with the built portfolio.
     agg_book: Option<Book<Sym>>,
 }
 
@@ -705,11 +699,10 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
     /// otherwise construct at [`build`](Self::build).
     ///
     /// Intended for callers who need the aggregate book handle *before*
-    /// `build()` returns — typically to use it as the default anchor for
-    /// weight-share templates while pairing each per-child instantiation
-    /// with the corresponding child's own book via
-    /// [`Book::linked_to`](crate::indicators::Book::linked_to), so that a
-    /// template's `!at_child { ... }` scope can walk to per-child state.
+    /// `build()` returns — typically to pass it to per-child weight-share
+    /// templates as the `portfolio_book` build argument (so a book-reading
+    /// node inside a template with `source: !portfolio_book` reads
+    /// aggregate state).
     ///
     /// The supplied book should be seeded at the portfolio's initial
     /// equity (same value that would be passed to

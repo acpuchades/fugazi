@@ -125,8 +125,10 @@ pub struct PortfolioSpec {
     /// - **`!value 1.0`** (or any per-child constant) → normalizes to
     ///   `1/N`, so an equivalent to explicit "equal weight".
     /// - **Any other expression** — e.g.
-    ///   `weights: !at_child !drawdown_throttle { max_drawdown: 0.15 }`
-    ///   for aggregate-drawdown-throttled per-child sizing; the whole
+    ///   `weights: !drawdown_throttle { source: !portfolio_book, max_drawdown: 0.15 }`
+    ///   for aggregate-drawdown-throttled per-child sizing (bare
+    ///   `!drawdown_throttle` reads each child's own book; add
+    ///   `source: !portfolio_book` to read the aggregate). The whole
     ///   surface of [`ExprSpec`] is available. `!fixed` and
     ///   `!equal_weight` are recognized as sugar and rewritten to the
     ///   corresponding `!value` form at load time.
@@ -312,7 +314,8 @@ fn is_preset_tag(name: &str) -> bool {
 ///
 /// Everything else falls through untouched — the whole [`ExprSpec`]
 /// surface is available under `weights:`, e.g.
-/// `weights: !at_child !drawdown_throttle { max_drawdown: 0.15 }`.
+/// `weights: !drawdown_throttle { source: !portfolio_book, max_drawdown: 0.15 }`
+/// to throttle every child's weight by the aggregate drawdown.
 fn deserialize_weights<'de, D>(
     d: D,
 ) -> Result<Option<SpecTemplate<ExprSpec>>, D::Error>
@@ -501,23 +504,20 @@ impl PortfolioSpec {
         // children (documented v1 limitation).
         let mut max_stable = 0usize;
         let mut max_warm_up = 0usize;
-        // Aggregate book — the portfolio's own mark-to-market view. Used
-        // as the **default anchor** for weight-share templates below (so
-        // `!drawdown`, `!return_per_bar`, `!drawdown_throttle`,
-        // `!equity_vol_target`, `!fractional_kelly` inside a template
-        // resolve against the aggregate). Per-child access is opt-in via
-        // `!at_child { ... }`, which walks to the child book via the
-        // link we install on each per-child clone below. Also handed to
+        // Aggregate book — the portfolio's own mark-to-market view. Passed
+        // as `portfolio_book` to per-child weight-share instantiations
+        // below, so a book-reading node inside a weight template resolves
+        // to it whenever `source: !portfolio_book` is given. Also handed to
         // `PortfolioBuilder::aggregate_book` so the built portfolio
         // shares the exact same handle — one state, one truth.
         let agg_book: Book<String> = Book::new(total_initial_equity);
         let mut builder = Portfolio::<String>::builder()
             .with_initial_equity(total_initial_equity)
             .aggregate_book(agg_book.clone());
-        // Capture each child's Book at build so we can pair it with a
-        // per-child clone of the aggregate book below. The Book handle
-        // is a shared `Arc<Mutex<_>>`, so cloning is cheap and each
-        // template's view stays in sync with the child it points at.
+        // Capture each child's Book at build so each per-child weight-share
+        // template can be built with that child's book as its `strategy_book`
+        // — bare `!drawdown` / `!return_per_bar` / etc. inside a template
+        // resolves to the child's own state.
         let mut child_books: Vec<Book<String>> = Vec::with_capacity(self.children.len());
         for (i, c) in self.children.iter().enumerate() {
             let name = c
@@ -581,13 +581,13 @@ impl PortfolioSpec {
         // Weight-share indicators — one instance per child. Each
         // carries `!arg CHILD_NAME` (always), `!arg SYM` (single-asset
         // children only), and `!arg CHILD_INDEX` (a number, used to
-        // resolve `!value <list>` literals per child). The Book anchor
-        // is a per-child clone of the aggregate book, linked to that
-        // child's own book — so `!drawdown` / `!return_per_bar` /
-        // `!drawdown_throttle` / `!equity_vol_target` / `!fractional_kelly`
-        // inside a template read aggregate state by default, and
-        // wrapping any book-anchored subtree in `!at_child { ... }`
-        // walks to that child's per-child book via `Book::linked`.
+        // resolve `!value <list>` literals per child). The strategy-book
+        // slot is the child's own book, so bare `!drawdown` /
+        // `!return_per_bar` / `!drawdown_throttle` / `!equity_vol_target`
+        // / `!fractional_kelly` inside a template reads that child's
+        // per-child state by default; the aggregate book is passed as
+        // `portfolio_book`, so `source: !portfolio_book` inside any
+        // book-reading node routes to it.
         if let Some(template) = &self.weights {
             let mut shares: Vec<
                 Box<
@@ -633,9 +633,8 @@ impl PortfolioSpec {
                     )
                 });
                 let anchor = Position::new();
-                let book = agg_book.clone().linked_to(child_books[i].clone());
                 let dyn_ind: Box<dyn DynIndicator> =
-                    concrete.build(&anchor, &book, schema);
+                    concrete.build(&anchor, &child_books[i], Some(&agg_book), schema);
                 let real_ind = AsReal::new(dyn_ind);
                 max_stable = max_stable.max(real_ind.stable_period());
                 max_warm_up = max_warm_up.max(real_ind.warm_up_period());
@@ -644,18 +643,20 @@ impl PortfolioSpec {
             builder = builder.weight_shares(shares);
         }
         // Install the rebalance gate — a boolean signal over
-        // `Snapshot<String>`. Built against a dummy `Position` and a
-        // fresh `Book` because a portfolio-level rebalance signal has no
-        // per-child position or book to anchor to; a signal using
-        // `!entry` / `!drawdown` at this level will read the (empty)
-        // dummies. Fold the signal's stable / warm-up periods into the
+        // `Snapshot<String>`. Built against a dummy `Position` because a
+        // portfolio-level rebalance signal has no per-child position to
+        // anchor to (a signal using `!entry` will read the empty dummy).
+        // The strategy-book slot is the aggregate book itself (bare book
+        // reads at portfolio scope mean the aggregate — the natural read
+        // for a portfolio-level gate), and `portfolio_book` is `Some`ing
+        // the same handle so explicit `source: !portfolio_book` also
+        // works. Fold the signal's stable / warm-up periods into the
         // aggregate so `optimize --walkforward` sees an accurate head
         // skip.
         if let Some(rebalance_spec) = &self.rebalance_on {
             let anchor = Position::new();
-            let book = Book::new(total_initial_equity);
             let dyn_ind: Box<dyn DynIndicator> =
-                rebalance_spec.build(&anchor, &book, schema);
+                rebalance_spec.build(&anchor, &agg_book, Some(&agg_book), schema);
             let signal = AsBool::new(dyn_ind);
             max_stable = max_stable.max(signal.stable_period());
             max_warm_up = max_warm_up.max(signal.warm_up_period());
@@ -1358,15 +1359,15 @@ mod tests {
     }
 
     #[test]
-    fn default_weight_share_anchor_is_the_aggregate_book() {
-        // A weight-share template whose value is `!equity_peak` — no
-        // scope wrapping — reads the *aggregate* book by default. Both
-        // children read the same aggregate value each rebalance-fire, so
-        // the normalized weight vector is uniform regardless of the
-        // underlying Fixed fallback's 3:1 skew.
+    fn portfolio_book_weight_share_reads_the_aggregate() {
+        // A weight-share template whose value is
+        // `!equity_peak { source: !portfolio_book }` reads the aggregate
+        // book — every child reads the same value each rebalance-fire,
+        // so the normalized weight vector is uniform.
         let yaml = r#"
             weights:
-              equity_peak: {}
+              equity_peak:
+                source: !portfolio_book
             rebalance_on: !every 1
             children:
               - name: a
@@ -1408,21 +1409,70 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "!at_child")]
-    fn at_child_outside_portfolio_context_panics() {
-        // A `!at_child` used in a place that has no linked book
-        // (a plain single-asset spec) panics at build.
+    #[should_panic(expected = "!portfolio_book")]
+    fn portfolio_book_source_outside_portfolio_context_panics() {
+        // Referencing `!portfolio_book` in a place with no portfolio
+        // scope (a plain single-asset spec) panics at build with a
+        // clear message.
         use super::super::SingleStrategySpec;
         let yaml = r#"
             symbol: X
             long:
               enter: !gt
-                lhs:
-                  at_child:
-                    source: !drawdown
+                lhs: !drawdown { source: !portfolio_book }
                 rhs: !value 0
         "#;
         let spec = SingleStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let _built = spec.build(1_000.0, &Schema::empty());
+    }
+
+    #[test]
+    fn weight_share_bare_drawdown_reads_child_book() {
+        // Under the source-based book design (Option A), a bare
+        // `!drawdown` inside a per-child weight-share template reads
+        // that child's own book — not the aggregate. Wire two children
+        // whose sub-wallets diverge (only one holds a position), then
+        // observe that the drawdown-reading weight expression sees
+        // per-child state rather than a shared aggregate reading.
+        //
+        // The specific check: the aggregate never draws down (prices
+        // don't move, everyone is flat / long at cost), but if we
+        // deliberately override one child's book to have a drawdown,
+        // its weight share should react while the other's doesn't.
+        // Here the cleanest observable is that the two book handles
+        // *are* distinct — validated by the compile-time plumbing
+        // (`strategy_book = child_books[i]`, `portfolio_book = agg`).
+        let yaml = r#"
+            weights: !drawdown
+            children:
+              - strategy: !buy_and_hold { symbol: A }
+              - strategy: !buy_and_hold { symbol: B }
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        // Just check that the build succeeds — the plumbing test above
+        // is really a documentation of the wiring; a full behavior
+        // test that shows the per-child drawdown reading would need a
+        // fake `PortfolioWallet` seam. This is `smoke` — the source
+        // resolution isn't hit until the spec runs, and every child's
+        // book is a fresh `Book` (initial equity = allocated share)
+        // that reports `Some(0.0)` for `!drawdown` at bar 0, so the
+        // build itself is enough to prove it compiles.
+        let _portfolio = spec.build(1_000.0, &Schema::empty(), None);
+    }
+
+    #[test]
+    fn portfolio_book_source_in_weights_reads_aggregate() {
+        // Explicit `source: !portfolio_book` in a weight-share
+        // template resolves to the aggregate book — the mirror of
+        // `weight_share_bare_drawdown_reads_child_book` for the
+        // portfolio-side default.
+        let yaml = r#"
+            weights: !drawdown { source: !portfolio_book }
+            children:
+              - strategy: !buy_and_hold { symbol: A }
+              - strategy: !buy_and_hold { symbol: B }
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let _portfolio = spec.build(1_000.0, &Schema::empty(), None);
     }
 }

@@ -144,7 +144,7 @@ mod tests {
             rhs: !sma { source: close, period: 4 }
         "#;
         let spec: SignalSpec = serde_norway::from_str(yaml).unwrap();
-        let mut sig = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut sig = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         let mut fired = false;
         for p in [10.0, 9.0, 8.0, 7.0, 8.0, 10.0, 12.0, 14.0, 16.0] {
             fired |= feed_bool(&mut sig, bar(p)).unwrap_or(false);
@@ -170,7 +170,7 @@ mod tests {
     #[test]
     fn default_source_is_close() {
         let spec: ExprSpec = serde_norway::from_str("!ema { period: 3 }").unwrap();
-        let mut ema = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut ema = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         let mut reference = Ema::new(Current::close(), 3);
         for p in [1.0, 2.0, 3.0, 4.0, 5.0] {
             assert_eq!(feed_real(&mut ema, bar(p)), reference.update(bar(p).into()));
@@ -184,15 +184,15 @@ mod tests {
         let closes = [10.0, 12.0, 9.0, 14.0, 8.0, 15.0, 11.0];
 
         let sk: ExprSpec = serde_norway::from_str("!skewness { period: 4 }").unwrap();
-        let mut sk = sk.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut sk = sk.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         let mut sk_ref = Skewness::new(Current::close(), 4);
 
         let ku: ExprSpec = serde_norway::from_str("!kurtosis { period: 4 }").unwrap();
-        let mut ku = ku.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut ku = ku.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         let mut ku_ref = Kurtosis::new(Current::close(), 4);
 
         let z: ExprSpec = serde_norway::from_str("!zscore { period: 4 }").unwrap();
-        let mut z = z.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut z = z.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         let mut z_ref = ZScore::new(Current::close(), 4);
 
         for p in closes {
@@ -208,7 +208,7 @@ mod tests {
         let spec: ExprSpec =
             serde_norway::from_str("!correlation { lhs: close, rhs: !lag { periods: 1 }, period: 3 }")
                 .unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         let mut reference = Correlation::new(Current::close(), Current::close().lag(1), 3);
         for p in [10.0, 12.0, 9.0, 14.0, 8.0, 15.0] {
             assert_eq!(feed_real(&mut built, bar(p)), reference.update(bar(p).into()));
@@ -221,7 +221,7 @@ mod tests {
         // library indicator (`> 1` trending, `< 1` mean-reverting).
         let spec: ExprSpec =
             serde_norway::from_str("!variance_ratio { period: 5, lag: 2 }").unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         let mut reference = VarianceRatio::new(Current::close(), 5, 2);
         for p in [10.0, 12.0, 9.0, 14.0, 8.0, 15.0, 11.0] {
             assert_eq!(feed_real(&mut built, bar(p)), reference.update(bar(p).into()));
@@ -232,7 +232,7 @@ mod tests {
     fn log_defaults_to_natural_and_accepts_explicit_base() {
         // Default base: natural log (`e`).
         let bare: ExprSpec = serde_norway::from_str("!log").unwrap();
-        let mut ln = bare.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut ln = bare.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         for p in [1.0, std::f64::consts::E, 10.0, 100.0] {
             let got = feed_real(&mut ln, bar(p)).unwrap();
             assert!((got - p.ln()).abs() < 1e-12, "ln({p})");
@@ -240,7 +240,7 @@ mod tests {
 
         // Explicit base: 10.
         let spec: ExprSpec = serde_norway::from_str("!log { base: 10.0 }").unwrap();
-        let mut log10 = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut log10 = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         for p in [1.0, 10.0, 1000.0] {
             let got = feed_real(&mut log10, bar(p)).unwrap();
             assert!((got - p.log10()).abs() < 1e-12, "log10({p})");
@@ -302,7 +302,7 @@ mod tests {
             signal: !above { source: !ema { period: 3 }, level: 0 }
         "#;
         let spec: SignalSpec = serde_norway::from_str(yaml).unwrap();
-        let wrapped = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let wrapped = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         let inner_raw = Ema::new(Current::close(), 3).above(0.0);
         assert_eq!(wrapped.warm_up_period(), inner_raw.warm_up_period());
         assert_eq!(wrapped.unstable_period(), 0);
@@ -314,7 +314,7 @@ mod tests {
     fn unstable_source_zeroes_unstable_period_but_forwards_output() {
         let yaml = r#"!unstable { source: !ema { period: 5 } }"#;
         let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
-        let wrapped = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let wrapped = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         let inner_raw = Ema::new(Current::close(), 5);
         assert_eq!(wrapped.warm_up_period(), inner_raw.warm_up_period());
         assert_eq!(wrapped.unstable_period(), 0);
@@ -431,7 +431,7 @@ mod tests {
         // the Nth base tick, None between.
         let spec: ExprSpec =
             serde_norway::from_str("!resample { every: 4, inner: close }").unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         for i in 1..=8 {
             let out = feed_real(&mut built, bar(i as Real));
             if i % 4 == 0 {
@@ -450,7 +450,7 @@ mod tests {
             "!latch { source: !resample { every: 3, inner: close } }",
         )
         .unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         assert_eq!(feed_real(&mut built, bar(1.0)), None);
         assert_eq!(feed_real(&mut built, bar(2.0)), None);
         assert_eq!(feed_real(&mut built, bar(3.0)), Some(3.0));
@@ -465,7 +465,7 @@ mod tests {
         // pointing to `!current`, so a bare `!obv` / `!vwap` / … tag with no
         // map still deserializes and drives the base bar stream.
         let obv: ExprSpec = serde_norway::from_str("!obv").unwrap();
-        let mut built = obv.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut built = obv.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         // OBV seeds at first bar's volume.
         assert_eq!(
             feed_real(&mut built, Candle::new(1.0, 1.0, 1.0, 1.0, 100.0)),
@@ -476,14 +476,14 @@ mod tests {
         let obv_htf: ExprSpec =
             serde_norway::from_str("!obv { source: !resample { every: 2, inner: current } }")
                 .unwrap();
-        let _ = obv_htf.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let _ = obv_htf.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
     }
 
     #[test]
     fn atr_tag_parses_with_default_current_source() {
         // `!atr { period: 3 }` without a source keeps its historical form.
         let spec: ExprSpec = serde_norway::from_str("!atr { period: 3 }").unwrap();
-        let _ = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let _ = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
     }
 
     #[test]
@@ -500,15 +500,15 @@ mod tests {
         ];
 
         let pk: ExprSpec = serde_norway::from_str("!parkinson { period: 3 }").unwrap();
-        let mut pk = pk.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut pk = pk.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         let mut pk_ref = Parkinson::new(Current::candle(), 3);
 
         let gk: ExprSpec = serde_norway::from_str("!garman_klass { period: 3 }").unwrap();
-        let mut gk = gk.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut gk = gk.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         let mut gk_ref = GarmanKlass::new(Current::candle(), 3);
 
         let rs: ExprSpec = serde_norway::from_str("!rogers_satchell { period: 3 }").unwrap();
-        let mut rs = rs.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut rs = rs.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         let mut rs_ref = RogersSatchell::new(Current::candle(), 3);
 
         for c in ohlc {
@@ -527,7 +527,7 @@ mod tests {
             "!keltner_upper { ema_period: 3, atr_period: 3, multiplier: 2.0 }",
         )
         .unwrap();
-        let _ = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let _ = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
     }
 
     #[test]
@@ -541,7 +541,7 @@ mod tests {
              period: 4, bars_per_year: 252 }",
         )
         .unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         assert_eq!(built.output_type(), crate::dyn_indicator::DynType::Real);
 
         let mut last = None;
@@ -566,7 +566,7 @@ mod tests {
              period: 4, bars_per_year: 252 }",
         )
         .unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         assert_eq!(built.output_type(), crate::dyn_indicator::DynType::Real);
         // Drives a golden-then-death cross without panicking; reads Some once warm.
         let mut last = None;
@@ -601,7 +601,7 @@ mod tests {
             other => panic!("expected a Sharpe spec, got {other:?}"),
         }
 
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         assert_eq!(built.output_type(), crate::dyn_indicator::DynType::Real);
 
         // BTC drifts up, ETH drifts down: long-BTC / short-ETH earns on both
@@ -650,7 +650,7 @@ mod tests {
 
         // Builds and drives a 3-symbol universe without panicking (the embedded
         // basket ranks per-symbol ROC, longs the top / shorts the bottom).
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         assert_eq!(built.output_type(), crate::dyn_indicator::DynType::Real);
         for i in 0..8 {
             let f = i as Real;
@@ -686,7 +686,7 @@ mod tests {
             other => panic!("expected a Sharpe spec, got {other:?}"),
         }
         // Builds without panicking; drives on a small 2-symbol path.
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         assert_eq!(built.output_type(), crate::dyn_indicator::DynType::Real);
         for i in 0..6 {
             let f = i as Real;
@@ -706,7 +706,7 @@ mod tests {
              period: 3 }",
         )
         .unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         let mut last = None;
         for p in [100.0, 110.0, 120.0, 108.0, 96.0] {
             last = built.update(Payload::Snapshot(snap(bar(p))));
@@ -727,7 +727,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(spec, ExprSpec::Sortino { risk_free_rate, .. } if risk_free_rate == 0.0));
-        let _ = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let _ = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
     }
 
     #[test]
@@ -738,7 +738,7 @@ mod tests {
         let schema = b.finish();
 
         let spec: ExprSpec = serde_norway::from_str("!get { key: vol_20 }").unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), &schema);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &schema);
         assert_eq!(built.output_type(), crate::dyn_indicator::DynType::Real);
 
         let ov = OverlayInfo::new(schema.clone(), vec![OverlayValue::Real(0.42)]);
@@ -755,7 +755,7 @@ mod tests {
         let schema = b.finish();
 
         let spec: SignalSpec = serde_norway::from_str("!get { key: risk_on }").unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), &schema);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &schema);
         assert_eq!(built.output_type(), crate::dyn_indicator::DynType::Bool);
 
         let ov = OverlayInfo::new(schema.clone(), vec![OverlayValue::Bool(true)]);
@@ -775,7 +775,7 @@ mod tests {
             "!str_eq { lhs: !get { key: regime }, rhs: bull }",
         )
         .unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), &schema);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &schema);
         assert_eq!(built.output_type(), crate::dyn_indicator::DynType::Bool);
 
         let bull = OverlayInfo::new(
@@ -845,12 +845,12 @@ mod tests {
         ];
         for (yaml, want) in cases {
             let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
-            let built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+            let built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
             assert_eq!(built.output_type(), want, "{yaml}");
         }
 
         let spec: ExprSpec = serde_norway::from_str("!value bull").unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         assert_eq!(
             built.update(Payload::Snapshot(snap(bar(100.0)))),
             Some(Payload::Str(std::sync::Arc::from("bull"))),
@@ -876,7 +876,7 @@ mod tests {
 
         let build = |yaml: &str| {
             let spec: SignalSpec = serde_norway::from_str(yaml).unwrap();
-            spec.build(&Position::new(), &Book::new(1.0), &schema)
+            spec.build(&Position::new(), &Book::new(1.0), None, &schema)
         };
         // The bare literal (the original shape), the same constant written the
         // long way, and a second Str column — "the regime is unchanged".
@@ -933,14 +933,14 @@ mod tests {
         b.add_real("vol_20");
         let schema = b.finish();
         let spec: ExprSpec = serde_norway::from_str("!get { key: missing }").unwrap();
-        let _ = spec.build(&Position::new(), &Book::new(1.0), &schema);
+        let _ = spec.build(&Position::new(), &Book::new(1.0), None, &schema);
     }
 
     #[test]
     #[should_panic(expected = "no overlay side channel is bound")]
     fn get_panics_on_empty_schema_with_hint() {
         let spec: ExprSpec = serde_norway::from_str("!get { key: anything }").unwrap();
-        let _ = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let _ = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
     }
 
     #[test]
@@ -950,7 +950,7 @@ mod tests {
         b.add_real("vol_20");
         let schema = b.finish();
         let spec: SignalSpec = serde_norway::from_str("!get { key: vol_20 }").unwrap();
-        let _ = spec.build(&Position::new(), &Book::new(1.0), &schema);
+        let _ = spec.build(&Position::new(), &Book::new(1.0), None, &schema);
     }
 
     #[test]
@@ -960,7 +960,7 @@ mod tests {
         b.add_str("regime");
         let schema = b.finish();
         let spec: SignalSpec = serde_norway::from_str("!get { key: regime }").unwrap();
-        let _ = spec.build(&Position::new(), &Book::new(1.0), &schema);
+        let _ = spec.build(&Position::new(), &Book::new(1.0), None, &schema);
     }
 
     #[test]
@@ -987,7 +987,7 @@ mod tests {
             ("unix_millis", 1_710_506_096_000.0),
         ] {
             let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
-            let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+            let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
             assert_eq!(built.output_type(), DynType::Real, "{yaml}: output type");
             assert_eq!(
                 built.update(Payload::Snapshot(Snapshot::of_atom(atom.clone()))),
@@ -998,7 +998,7 @@ mod tests {
 
         // `!time` is the raw Timestamp payload, not a scalar.
         let spec: ExprSpec = serde_norway::from_str("time").unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         assert_eq!(built.output_type(), DynType::Time);
         assert_eq!(
             built.update(Payload::Snapshot(Snapshot::of_atom(atom.clone()))),
@@ -1016,7 +1016,7 @@ mod tests {
 
         let mut wd = serde_norway::from_str::<SignalSpec>("is_weekday")
             .unwrap()
-            .build(&Position::new(), &Book::new(1.0), &Schema::empty());
+            .build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         assert_eq!(
             wd.update(Payload::Snapshot(Snapshot::of_atom(fri.clone()))),
             Some(Payload::Bool(true)),
@@ -1028,7 +1028,7 @@ mod tests {
 
         let mut we = serde_norway::from_str::<SignalSpec>("is_weekend")
             .unwrap()
-            .build(&Position::new(), &Book::new(1.0), &Schema::empty());
+            .build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         assert_eq!(we.update(Payload::Snapshot(Snapshot::of_atom(fri.clone()))), Some(Payload::Bool(false)));
         assert_eq!(we.update(Payload::Snapshot(Snapshot::of_atom(sat.clone()))), Some(Payload::Bool(true)));
     }
@@ -1059,7 +1059,7 @@ mod tests {
             ("quarter", 1.0),
         ] {
             let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
-            let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+            let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
             assert_eq!(
                 built.update(Payload::Snapshot(multi.clone())),
                 Some(Payload::Real(want)),
@@ -1094,7 +1094,7 @@ mod tests {
         // !changed is None on the warm-up bar (it needs a prior value to
         // compare against), so we only assert on the second bar's edge.
         let spec: SignalSpec = serde_norway::from_str("daily").unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         let _ = built.update(Payload::Snapshot(mk(day1)));
         assert_eq!(
             built.update(Payload::Snapshot(mk(day2))),
@@ -1103,7 +1103,7 @@ mod tests {
         );
 
         let spec: SignalSpec = serde_norway::from_str("monthly").unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         let _ = built.update(Payload::Snapshot(mk(day1)));
         assert_eq!(
             built.update(Payload::Snapshot(mk(day2))),
@@ -1131,7 +1131,7 @@ mod tests {
         };
 
         let spec: SignalSpec = serde_norway::from_str("is_weekday").unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         assert_eq!(built.update(Payload::Snapshot(mk(fri))), Some(Payload::Bool(true)));
         assert_eq!(built.update(Payload::Snapshot(mk(sat))), Some(Payload::Bool(false)));
     }
@@ -1141,7 +1141,7 @@ mod tests {
         // A calendar accessor over a bare Atom (time=None) yields None — same
         // shape as a not-yet-warm indicator.
         let spec: ExprSpec = serde_norway::from_str("year").unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         assert_eq!(built.update(Payload::Snapshot(Snapshot::of_atom(bar(1.0).into()))), None);
     }
 
@@ -1180,7 +1180,7 @@ mod tests {
         // `!equal_weight 4` is the sugar for the 1/4 = 0.25 constant per
         // leg — the common basket case for a 4-leg balanced strategy.
         let spec: ExprSpec = serde_norway::from_str("!equal_weight 4").unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         assert_eq!(feed_real(&mut built, bar(100.0)), Some(0.25));
         assert_eq!(feed_real(&mut built, bar(50.0)), Some(0.25));
     }
@@ -1198,7 +1198,7 @@ mod tests {
             if_false: !value -1.0
         "#;
         let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         // close = 99 → cond false → -1; close = 101 → cond true → 1.
         assert_eq!(feed_real(&mut built, bar(99.0)), Some(-1.0));
         assert_eq!(feed_real(&mut built, bar(101.0)), Some(1.0));
@@ -1218,7 +1218,7 @@ mod tests {
             if_false: !value 99.0
         "#;
         let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         for _ in 0..4 {
             assert_eq!(feed_real(&mut built, bar(100.0)), None);
         }
@@ -1241,7 +1241,7 @@ mod tests {
             if_false: !value -1.0
         "#;
         let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         // First bar: cond is Some(false), if_false is Some(-1.0).
         assert_eq!(feed_real(&mut built, bar(100.0)), Some(-1.0));
         // The reported stability window still covers the slowest source
@@ -1260,7 +1260,7 @@ mod tests {
             "!latch { source: !resample { every: 4, inner: !ema { period: 3, source: close } } }",
         )
         .unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
         let mut reference = fugazi::indicators::Latch::new(Ema::new(
             fugazi::indicators::Resample::new(fugazi::indicators::CurrentBar::new(), 4).close(),
             3,

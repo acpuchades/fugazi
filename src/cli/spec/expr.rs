@@ -264,41 +264,73 @@ pub enum ExprSpec {
     /// The running low since entry (a short trailing-stop anchor).
     Trough,
 
-    // --- book-anchored leaves. Unit variants; the book they read is the
-    // enclosing scope's book — the strategy's own `Book` under
-    // `SingleAssetStrategy` / `PairsStrategy` / `BasketStrategy` /
-    // `MultiAssetStrategy`, the child's `Book` under a portfolio's per-child
-    // weight template, and the aggregate `Book` inside an
-    // `!at_portfolio { ... }` scope.
-    /// The marked-to-market equity of the enclosing book. Always `Some`
+    // --- book source-selectors. These are build-time only — they carry no
+    // runtime value; they resolve, at build, to a `Book<String>` handle that
+    // a book-reading node (a bare book leaf like `!drawdown`, or a
+    // book-anchored recipe like `!drawdown_throttle`) picks up via its
+    // `source:` field. Bare (used as an expression on its own) is invalid
+    // and panics at build.
+    /// The **strategy book** — the `Book` owned by the enclosing strategy
+    /// scope (single/pairs/basket/multi/the current per-child instance of
+    /// a portfolio's `weights:` expression). This is the default source of
+    /// every book-reading node when its `source:` is omitted.
+    StrategyBook,
+    /// The **portfolio aggregate book** — the mark-to-market view of the
+    /// composite [`Portfolio`](fugazi::portfolio::Portfolio). Only meaningful
+    /// inside a portfolio's `weights:` expression; panics at build if
+    /// referenced elsewhere.
+    PortfolioBook,
+
+    // --- book-anchored leaves. Each takes an optional `source:` that
+    // resolves to the book they read (see [`ExprSpec::StrategyBook`] /
+    // [`ExprSpec::PortfolioBook`]). Omitted → `!strategy_book`.
+    /// The marked-to-market equity of the book. Always `Some`
     /// (seeded at the book's `initial_equity`). See
     /// [`fugazi::indicators::Book::equity`].
-    Equity,
-    /// The running peak of the enclosing book's equity. Always `Some`.
+    Equity {
+        #[serde(default)]
+        source: Option<Box<ExprSpec>>,
+    },
+    /// The running peak of the book's equity. Always `Some`.
     /// See [`fugazi::indicators::Book::equity_peak`].
-    EquityPeak,
-    /// The enclosing book's current drawdown as a non-positive fraction —
+    EquityPeak {
+        #[serde(default)]
+        source: Option<Box<ExprSpec>>,
+    },
+    /// The book's current drawdown as a non-positive fraction —
     /// `(equity - peak) / peak`, `0` at a fresh peak. See
     /// [`fugazi::indicators::Book::drawdown`].
-    Drawdown,
+    Drawdown {
+        #[serde(default)]
+        source: Option<Box<ExprSpec>>,
+    },
     /// The just-completed bar's equity return —
     /// `(equity - prev_equity) / prev_equity`. `None` on the first bar
     /// (`warm_up_period() = 2`). See
     /// [`fugazi::indicators::Book::return_per_bar`].
-    ReturnPerBar,
+    ReturnPerBar {
+        #[serde(default)]
+        source: Option<Box<ExprSpec>>,
+    },
     /// The realized P&L of the just-closed aggregate trade in
     /// reference-currency terms. `Some` only on the bar whose fill closed
     /// the trade. See [`fugazi::indicators::Book::trade_pnl`].
     ///
-    /// At the aggregate scope (`!at_portfolio { !trade_pnl }`) this is
-    /// always `None` — the portfolio's aggregate book is mark-driven and
-    /// doesn't route fills, so no "portfolio trade" is defined.
-    TradePnl,
+    /// On the portfolio aggregate book (`source: !portfolio_book`) this is
+    /// always `None` — the aggregate book is mark-driven and doesn't route
+    /// fills, so no "portfolio trade" is defined.
+    TradePnl {
+        #[serde(default)]
+        source: Option<Box<ExprSpec>>,
+    },
     /// The just-closed trade's return as a fraction of the equity at
     /// trade open. `Some` only on the close bar. See
-    /// [`fugazi::indicators::Book::trade_return`]. Also `None` at the
-    /// aggregate scope for the same reason as [`ExprSpec::TradePnl`].
-    TradeReturn,
+    /// [`fugazi::indicators::Book::trade_return`]. Also `None` on the
+    /// portfolio aggregate book for the same reason as [`ExprSpec::TradePnl`].
+    TradeReturn {
+        #[serde(default)]
+        source: Option<Box<ExprSpec>>,
+    },
 
     /// Read one overlay column by name from each atom's side-channel data.
     ///
@@ -632,23 +664,33 @@ pub enum ExprSpec {
         atr_multiple: Real,
     },
     /// Drawdown-throttled sizing — `max(0, min(1, 1 + book.drawdown() /
-    /// max_drawdown))`. Reads the strategy's [`Book`] anchor. See
+    /// max_drawdown))`. Reads a book via `source:` (default:
+    /// [`ExprSpec::StrategyBook`]). See
     /// [`fugazi::indicators::sizing::drawdown_throttle`].
-    DrawdownThrottle { max_drawdown: Real },
-    /// Realized-vol targeting on the strategy's own equity return series
+    DrawdownThrottle {
+        #[serde(default)]
+        source: Option<Box<ExprSpec>>,
+        max_drawdown: Real,
+    },
+    /// Realized-vol targeting on the book's equity return series
     /// — `target / (stddev(book.return_per_bar, window) *
-    /// sqrt(bars_per_year))`. Reads the strategy's [`Book`] anchor. See
+    /// sqrt(bars_per_year))`. Reads a book via `source:` (default:
+    /// [`ExprSpec::StrategyBook`]). See
     /// [`fugazi::indicators::sizing::equity_vol_target`].
     EquityVolTarget {
+        #[serde(default)]
+        source: Option<Box<ExprSpec>>,
         target: Real,
         window: usize,
         bars_per_year: Real,
     },
     /// Fractional Kelly over the last `window` closed-trade returns —
-    /// `kelly_fraction * mean / variance`, clamped to `>= 0`. Reads the
-    /// strategy's [`Book`] anchor. See
+    /// `kelly_fraction * mean / variance`, clamped to `>= 0`. Reads a book
+    /// via `source:` (default: [`ExprSpec::StrategyBook`]). See
     /// [`fugazi::indicators::sizing::fractional_kelly`].
     FractionalKelly {
+        #[serde(default)]
+        source: Option<Box<ExprSpec>>,
         kelly_fraction: Real,
         window: usize,
     },
@@ -798,38 +840,6 @@ pub enum ExprSpec {
     /// every source to be past its unstable tail" safe default; see
     /// [`fugazi::indicators::Unstable`].
     Unstable { source: Box<ExprSpec> },
-
-    /// **Scope switch** — build `source` against the enclosing book's
-    /// [linked](fugazi::indicators::Book::linked) book rather than the
-    /// book itself. Everything else (the `Position` anchor, the overlay
-    /// [`Schema`], the recursion path) is unchanged.
-    ///
-    /// The intended use is inside a
-    /// [`Portfolio`](fugazi::portfolio::Portfolio) `weights: !indicator`
-    /// template: each template instance is built against the portfolio's
-    /// **aggregate** book (per-portfolio equity, drawdown, return), and
-    /// the portfolio pairs each per-child clone with the corresponding
-    /// child's own book via [`Book::linked_to`]. Wrapping a subtree in
-    /// `!at_child` rebuilds it against that per-child book, so any
-    /// book-anchored tag inside — `!drawdown`, `!return_per_bar`,
-    /// `!trade_return`, `!drawdown_throttle`, `!equity_vol_target`,
-    /// `!fractional_kelly` — reads that child's per-child state instead
-    /// of the aggregate.
-    ///
-    /// ```yaml
-    /// # Inverse-vol on each child's own return stream, throttled by
-    /// # aggregate drawdown (default anchor is the aggregate).
-    /// weights:
-    ///   !indicator
-    ///   !mul
-    ///     lhs: !at_child !fractional_kelly { kelly_fraction: 0.5, window: 30 }
-    ///     rhs: !drawdown_throttle { max_drawdown: 0.15 }
-    /// ```
-    ///
-    /// Panics at build if the enclosing book has no link — i.e. the tag
-    /// is being used outside a portfolio weight-share template (a plain
-    /// strategy's book carries no link).
-    AtChild { source: Box<ExprSpec> },
 
     // --- calendar accessors (read `atom.time`, emit Real; None when time is
     // absent). Each takes an optional `source` for cross-asset use — the
@@ -979,41 +989,73 @@ enum ExprSpecRaw {
     /// The running low since entry (a short trailing-stop anchor).
     Trough,
 
-    // --- book-anchored leaves. Unit variants; the book they read is the
-    // enclosing scope's book — the strategy's own `Book` under
-    // `SingleAssetStrategy` / `PairsStrategy` / `BasketStrategy` /
-    // `MultiAssetStrategy`, the child's `Book` under a portfolio's per-child
-    // weight template, and the aggregate `Book` inside an
-    // `!at_portfolio { ... }` scope.
-    /// The marked-to-market equity of the enclosing book. Always `Some`
+    // --- book source-selectors. These are build-time only — they carry no
+    // runtime value; they resolve, at build, to a `Book<String>` handle that
+    // a book-reading node (a bare book leaf like `!drawdown`, or a
+    // book-anchored recipe like `!drawdown_throttle`) picks up via its
+    // `source:` field. Bare (used as an expression on its own) is invalid
+    // and panics at build.
+    /// The **strategy book** — the `Book` owned by the enclosing strategy
+    /// scope (single/pairs/basket/multi/the current per-child instance of
+    /// a portfolio's `weights:` expression). This is the default source of
+    /// every book-reading node when its `source:` is omitted.
+    StrategyBook,
+    /// The **portfolio aggregate book** — the mark-to-market view of the
+    /// composite [`Portfolio`](fugazi::portfolio::Portfolio). Only meaningful
+    /// inside a portfolio's `weights:` expression; panics at build if
+    /// referenced elsewhere.
+    PortfolioBook,
+
+    // --- book-anchored leaves. Each takes an optional `source:` that
+    // resolves to the book they read (see [`ExprSpec::StrategyBook`] /
+    // [`ExprSpec::PortfolioBook`]). Omitted → `!strategy_book`.
+    /// The marked-to-market equity of the book. Always `Some`
     /// (seeded at the book's `initial_equity`). See
     /// [`fugazi::indicators::Book::equity`].
-    Equity,
-    /// The running peak of the enclosing book's equity. Always `Some`.
+    Equity {
+        #[serde(default)]
+        source: Option<Box<ExprSpec>>,
+    },
+    /// The running peak of the book's equity. Always `Some`.
     /// See [`fugazi::indicators::Book::equity_peak`].
-    EquityPeak,
-    /// The enclosing book's current drawdown as a non-positive fraction —
+    EquityPeak {
+        #[serde(default)]
+        source: Option<Box<ExprSpec>>,
+    },
+    /// The book's current drawdown as a non-positive fraction —
     /// `(equity - peak) / peak`, `0` at a fresh peak. See
     /// [`fugazi::indicators::Book::drawdown`].
-    Drawdown,
+    Drawdown {
+        #[serde(default)]
+        source: Option<Box<ExprSpec>>,
+    },
     /// The just-completed bar's equity return —
     /// `(equity - prev_equity) / prev_equity`. `None` on the first bar
     /// (`warm_up_period() = 2`). See
     /// [`fugazi::indicators::Book::return_per_bar`].
-    ReturnPerBar,
+    ReturnPerBar {
+        #[serde(default)]
+        source: Option<Box<ExprSpec>>,
+    },
     /// The realized P&L of the just-closed aggregate trade in
     /// reference-currency terms. `Some` only on the bar whose fill closed
     /// the trade. See [`fugazi::indicators::Book::trade_pnl`].
     ///
-    /// At the aggregate scope (`!at_portfolio { !trade_pnl }`) this is
-    /// always `None` — the portfolio's aggregate book is mark-driven and
-    /// doesn't route fills, so no "portfolio trade" is defined.
-    TradePnl,
+    /// On the portfolio aggregate book (`source: !portfolio_book`) this is
+    /// always `None` — the aggregate book is mark-driven and doesn't route
+    /// fills, so no "portfolio trade" is defined.
+    TradePnl {
+        #[serde(default)]
+        source: Option<Box<ExprSpec>>,
+    },
     /// The just-closed trade's return as a fraction of the equity at
     /// trade open. `Some` only on the close bar. See
-    /// [`fugazi::indicators::Book::trade_return`]. Also `None` at the
-    /// aggregate scope for the same reason as [`ExprSpec::TradePnl`].
-    TradeReturn,
+    /// [`fugazi::indicators::Book::trade_return`]. Also `None` on the
+    /// portfolio aggregate book for the same reason as [`ExprSpec::TradePnl`].
+    TradeReturn {
+        #[serde(default)]
+        source: Option<Box<ExprSpec>>,
+    },
 
     /// Read one overlay column by name from each atom's side-channel data.
     ///
@@ -1347,23 +1389,33 @@ enum ExprSpecRaw {
         atr_multiple: Real,
     },
     /// Drawdown-throttled sizing — `max(0, min(1, 1 + book.drawdown() /
-    /// max_drawdown))`. Reads the strategy's [`Book`] anchor. See
+    /// max_drawdown))`. Reads a book via `source:` (default:
+    /// [`ExprSpec::StrategyBook`]). See
     /// [`fugazi::indicators::sizing::drawdown_throttle`].
-    DrawdownThrottle { max_drawdown: Real },
-    /// Realized-vol targeting on the strategy's own equity return series
+    DrawdownThrottle {
+        #[serde(default)]
+        source: Option<Box<ExprSpec>>,
+        max_drawdown: Real,
+    },
+    /// Realized-vol targeting on the book's equity return series
     /// — `target / (stddev(book.return_per_bar, window) *
-    /// sqrt(bars_per_year))`. Reads the strategy's [`Book`] anchor. See
+    /// sqrt(bars_per_year))`. Reads a book via `source:` (default:
+    /// [`ExprSpec::StrategyBook`]). See
     /// [`fugazi::indicators::sizing::equity_vol_target`].
     EquityVolTarget {
+        #[serde(default)]
+        source: Option<Box<ExprSpec>>,
         target: Real,
         window: usize,
         bars_per_year: Real,
     },
     /// Fractional Kelly over the last `window` closed-trade returns —
-    /// `kelly_fraction * mean / variance`, clamped to `>= 0`. Reads the
-    /// strategy's [`Book`] anchor. See
+    /// `kelly_fraction * mean / variance`, clamped to `>= 0`. Reads a book
+    /// via `source:` (default: [`ExprSpec::StrategyBook`]). See
     /// [`fugazi::indicators::sizing::fractional_kelly`].
     FractionalKelly {
+        #[serde(default)]
+        source: Option<Box<ExprSpec>>,
         kelly_fraction: Real,
         window: usize,
     },
@@ -1514,11 +1566,6 @@ enum ExprSpecRaw {
     /// [`fugazi::indicators::Unstable`].
     Unstable { source: Box<ExprSpec> },
 
-    /// See [`ExprSpec::AtChild`] — scope switch that rebuilds `source`
-    /// against the enclosing book's linked book (the per-child book, inside
-    /// a portfolio weight-share template).
-    AtChild { source: Box<ExprSpec> },
-
     // --- calendar accessors (read `atom.time`, emit Real; None when time is
     // absent). Each takes an optional `source` for cross-asset use — the
     // bare form (`!year`) is the default single-series shortcut,
@@ -1608,12 +1655,14 @@ impl From<ExprSpecRaw> for ExprSpec {
             ExprSpecRaw::Entry => ExprSpec::Entry,
             ExprSpecRaw::Peak => ExprSpec::Peak,
             ExprSpecRaw::Trough => ExprSpec::Trough,
-            ExprSpecRaw::Equity => ExprSpec::Equity,
-            ExprSpecRaw::EquityPeak => ExprSpec::EquityPeak,
-            ExprSpecRaw::Drawdown => ExprSpec::Drawdown,
-            ExprSpecRaw::ReturnPerBar => ExprSpec::ReturnPerBar,
-            ExprSpecRaw::TradePnl => ExprSpec::TradePnl,
-            ExprSpecRaw::TradeReturn => ExprSpec::TradeReturn,
+            ExprSpecRaw::StrategyBook => ExprSpec::StrategyBook,
+            ExprSpecRaw::PortfolioBook => ExprSpec::PortfolioBook,
+            ExprSpecRaw::Equity { source } => ExprSpec::Equity { source },
+            ExprSpecRaw::EquityPeak { source } => ExprSpec::EquityPeak { source },
+            ExprSpecRaw::Drawdown { source } => ExprSpec::Drawdown { source },
+            ExprSpecRaw::ReturnPerBar { source } => ExprSpec::ReturnPerBar { source },
+            ExprSpecRaw::TradePnl { source } => ExprSpec::TradePnl { source },
+            ExprSpecRaw::TradeReturn { source } => ExprSpec::TradeReturn { source },
             ExprSpecRaw::Get { key, source } => ExprSpec::Get { key, source },
             ExprSpecRaw::Ema { source, period } => ExprSpec::Ema { source, period },
             ExprSpecRaw::Sma { source, period } => ExprSpec::Sma { source, period },
@@ -1673,9 +1722,9 @@ impl From<ExprSpecRaw> for ExprSpec {
             ExprSpecRaw::Sar { source, step, max } => ExprSpec::Sar { source, step, max },
             ExprSpecRaw::VolTarget { source, target, window, bars_per_year } => ExprSpec::VolTarget { source, target, window, bars_per_year },
             ExprSpecRaw::AtrRisk { source, risk_frac, period, atr_multiple } => ExprSpec::AtrRisk { source, risk_frac, period, atr_multiple },
-            ExprSpecRaw::DrawdownThrottle { max_drawdown } => ExprSpec::DrawdownThrottle { max_drawdown },
-            ExprSpecRaw::EquityVolTarget { target, window, bars_per_year } => ExprSpec::EquityVolTarget { target, window, bars_per_year },
-            ExprSpecRaw::FractionalKelly { kelly_fraction, window } => ExprSpec::FractionalKelly { kelly_fraction, window },
+            ExprSpecRaw::DrawdownThrottle { source, max_drawdown } => ExprSpec::DrawdownThrottle { source, max_drawdown },
+            ExprSpecRaw::EquityVolTarget { source, target, window, bars_per_year } => ExprSpec::EquityVolTarget { source, target, window, bars_per_year },
+            ExprSpecRaw::FractionalKelly { source, kelly_fraction, window } => ExprSpec::FractionalKelly { source, kelly_fraction, window },
             ExprSpecRaw::Sharpe { strategy, period, bars_per_year, risk_free_rate } => ExprSpec::Sharpe { strategy, period, bars_per_year, risk_free_rate },
             ExprSpecRaw::Sortino { strategy, period, bars_per_year, risk_free_rate } => ExprSpec::Sortino { strategy, period, bars_per_year, risk_free_rate },
             ExprSpecRaw::Volatility { strategy, period, bars_per_year } => ExprSpec::Volatility { strategy, period, bars_per_year },
@@ -1704,7 +1753,6 @@ impl From<ExprSpecRaw> for ExprSpec {
             ExprSpecRaw::Latch { source } => ExprSpec::Latch { source },
             ExprSpecRaw::Resample { every, inner, source } => ExprSpec::Resample { every, inner, source },
             ExprSpecRaw::Unstable { source } => ExprSpec::Unstable { source },
-            ExprSpecRaw::AtChild { source } => ExprSpec::AtChild { source },
             ExprSpecRaw::Year { source } => ExprSpec::Year { source },
             ExprSpecRaw::Month { source } => ExprSpec::Month { source },
             ExprSpecRaw::Day { source } => ExprSpec::Day { source },
@@ -1765,12 +1813,8 @@ impl TryFrom<serde_norway::Value> for ExprSpec {
             "entry",
             "peak",
             "trough",
-            "equity",
-            "equity_peak",
-            "drawdown",
-            "return_per_bar",
-            "trade_pnl",
-            "trade_return",
+            "strategy_book",
+            "portfolio_book",
         ];
 
         let promote_null_for = |tag: &str, v: serde_norway::Value| {
@@ -1900,11 +1944,12 @@ fn atom_source_of(
     source: Option<&ExprSpec>,
     anchor: &Position,
     book: &Book,
+    portfolio_book: Option<&Book>,
     schema: &Arc<Schema>,
 ) -> AsAtom {
     match source {
         None => AsAtom::new(dyn_indicator::wrap(pick_root())),
-        Some(s) => AsAtom::new(s.build(anchor, book, schema)),
+        Some(s) => AsAtom::new(s.build(anchor, book, portfolio_book, schema)),
     }
 }
 
@@ -1923,11 +1968,46 @@ fn atom_source_any_of(
     source: Option<&ExprSpec>,
     anchor: &Position,
     book: &Book,
+    portfolio_book: Option<&Book>,
     schema: &Arc<Schema>,
 ) -> AsAtom {
     match source {
         None => AsAtom::new(dyn_indicator::wrap(pick_any_root())),
-        Some(s) => AsAtom::new(s.build(anchor, book, schema)),
+        Some(s) => AsAtom::new(s.build(anchor, book, portfolio_book, schema)),
+    }
+}
+
+/// Resolve an optional book-source spec into the concrete [`Book`] a
+/// book-reading node should read from. The vocabulary is intentionally
+/// minimal — only the two build-time source-selector tags
+/// ([`ExprSpec::StrategyBook`] and [`ExprSpec::PortfolioBook`]) are
+/// accepted; anything else in a book-reading node's `source:` slot is a
+/// hard build error, since the resulting expression would have no defined
+/// interpretation.
+///
+/// - `None` → `book` (default: the strategy book).
+/// - `Some(!strategy_book)` → `book`.
+/// - `Some(!portfolio_book)` → `portfolio_book` (panics if `None` —
+///   caller isn't in a portfolio weight scope).
+/// - `Some(anything else)` → panics with a helpful message.
+fn resolve_book_source<'a>(
+    source: Option<&ExprSpec>,
+    book: &'a Book,
+    portfolio_book: Option<&'a Book>,
+) -> &'a Book {
+    match source {
+        None | Some(ExprSpec::StrategyBook) => book,
+        Some(ExprSpec::PortfolioBook) => portfolio_book.unwrap_or_else(|| {
+            panic!(
+                "!portfolio_book: not inside a portfolio weight scope — this \
+                 source only makes sense in a portfolio's `weights:` expression"
+            )
+        }),
+        Some(other) => panic!(
+            "expected a book source (!strategy_book or !portfolio_book) in \
+             `source:` slot of a book-reading node, got a value-producing \
+             expression: {other:?}"
+        ),
     }
 }
 
@@ -1935,26 +2015,32 @@ impl ExprSpec {
     /// Construct the live, runtime-typed source this spec describes as a
     /// `Box<dyn DynIndicator>`. `anchor` is the owning strategy's
     /// [`Position`], shared by any `entry` / `peak` / `trough` leaves in the
-    /// tree; `book` is the owning strategy's [`Book`], shared by any
-    /// book-anchored sizing recipe (`!drawdown_throttle`, `!equity_vol_target`,
-    /// `!fractional_kelly`); `schema` is the overlay [`Schema`] the atom
-    /// stream carries, used by `!get { key }` to look up the column's
-    /// declared [`OverlayType`] and dispatch to the right typed leaf.
+    /// tree; `book` is the owning strategy's [`Book`], the default source of
+    /// any book-reading node (`!drawdown`, `!equity`, `!drawdown_throttle`,
+    /// `!equity_vol_target`, `!fractional_kelly`) whose `source:` is omitted
+    /// or set to `!strategy_book`; `portfolio_book` is the portfolio's
+    /// aggregate `Book` — only `Some` inside a
+    /// [`Portfolio`](fugazi::portfolio::Portfolio) weight scope, and read
+    /// only by book-reading nodes whose `source:` is `!portfolio_book`;
+    /// `schema` is the overlay [`Schema`] the atom stream carries, used by
+    /// `!get { key }` to look up the column's declared [`OverlayType`] and
+    /// dispatch to the right typed leaf.
     pub fn build(
         &self,
         anchor: &Position,
         book: &Book,
+        portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
     ) -> Box<dyn DynIndicator> {
         use ExprSpec::*;
         // Recursive-build shorthands: build `s`, view it as a library-typed
         // `Indicator<Input=Snapshot, Output=Real>` (or Candle) so it drops
         // into a concrete library constructor.
-        let real = |s: &ExprSpec| AsReal::new(s.build(anchor, book, schema));
-        let candle = |s: &ExprSpec| AsCandle::new(s.build(anchor, book, schema));
+        let real = |s: &ExprSpec| AsReal::new(s.build(anchor, book, portfolio_book, schema));
+        let candle = |s: &ExprSpec| AsCandle::new(s.build(anchor, book, portfolio_book, schema));
         // The `Pick`-shaped `source:` field on every atom-input leaf.
         let atom_src = |source: Option<&Box<ExprSpec>>| {
-            atom_source_of(source.map(|b| &**b), anchor, book, schema)
+            atom_source_of(source.map(|b| &**b), anchor, book, portfolio_book, schema)
         };
         // Symbol-agnostic variant for calendar accessors + `!time`: an
         // omitted `source:` defaults to the "any entry" PickAny rather
@@ -1962,7 +2048,7 @@ impl ExprSpec {
         // (and the cadence sugar `!daily` / `!monthly` / …) works on
         // multi-symbol snapshots — every entry shares atom.time.
         let atom_src_any = |source: Option<&Box<ExprSpec>>| {
-            atom_source_any_of(source.map(|b| &**b), anchor, book, schema)
+            atom_source_any_of(source.map(|b| &**b), anchor, book, portfolio_book, schema)
         };
 
         match self {
@@ -2018,12 +2104,38 @@ impl ExprSpec {
             Peak => dyn_indicator::wrap(anchor.peak::<Snapshot<String>>()),
             Trough => dyn_indicator::wrap(anchor.trough::<Snapshot<String>>()),
 
-            Equity => dyn_indicator::wrap(book.equity::<Snapshot<String>>()),
-            EquityPeak => dyn_indicator::wrap(book.equity_peak::<Snapshot<String>>()),
-            Drawdown => dyn_indicator::wrap(book.drawdown::<Snapshot<String>>()),
-            ReturnPerBar => dyn_indicator::wrap(book.return_per_bar::<Snapshot<String>>()),
-            TradePnl => dyn_indicator::wrap(book.trade_pnl::<Snapshot<String>>()),
-            TradeReturn => dyn_indicator::wrap(book.trade_return::<Snapshot<String>>()),
+            StrategyBook | PortfolioBook => panic!(
+                "!strategy_book / !portfolio_book are build-time source \
+                 selectors — they only make sense as the `source:` of a \
+                 book-reading node (e.g. \
+                 `!drawdown {{ source: !portfolio_book }}`), not as a \
+                 standalone expression"
+            ),
+
+            Equity { source } => {
+                let b = resolve_book_source(source.as_deref(), book, portfolio_book);
+                dyn_indicator::wrap(b.equity::<Snapshot<String>>())
+            }
+            EquityPeak { source } => {
+                let b = resolve_book_source(source.as_deref(), book, portfolio_book);
+                dyn_indicator::wrap(b.equity_peak::<Snapshot<String>>())
+            }
+            Drawdown { source } => {
+                let b = resolve_book_source(source.as_deref(), book, portfolio_book);
+                dyn_indicator::wrap(b.drawdown::<Snapshot<String>>())
+            }
+            ReturnPerBar { source } => {
+                let b = resolve_book_source(source.as_deref(), book, portfolio_book);
+                dyn_indicator::wrap(b.return_per_bar::<Snapshot<String>>())
+            }
+            TradePnl { source } => {
+                let b = resolve_book_source(source.as_deref(), book, portfolio_book);
+                dyn_indicator::wrap(b.trade_pnl::<Snapshot<String>>())
+            }
+            TradeReturn { source } => {
+                let b = resolve_book_source(source.as_deref(), book, portfolio_book);
+                dyn_indicator::wrap(b.trade_return::<Snapshot<String>>())
+            }
 
             Get { key, source } => {
                 let s = atom_src(source.as_ref());
@@ -2256,32 +2368,44 @@ impl ExprSpec {
                     *atr_multiple,
                 ))
             }
-            DrawdownThrottle { max_drawdown } => {
+            DrawdownThrottle {
+                source,
+                max_drawdown,
+            } => {
+                let b = resolve_book_source(source.as_deref(), book, portfolio_book);
                 dyn_indicator::wrap(fugazi::indicators::sizing::drawdown_throttle::<String>(
-                    book,
+                    b,
                     *max_drawdown,
                 ))
             }
             EquityVolTarget {
+                source,
                 target,
                 window,
                 bars_per_year,
-            } => dyn_indicator::wrap(
-                fugazi::indicators::sizing::equity_vol_target::<String>(
-                    book,
-                    *target,
-                    *window,
-                    *bars_per_year,
-                ),
-            ),
+            } => {
+                let b = resolve_book_source(source.as_deref(), book, portfolio_book);
+                dyn_indicator::wrap(
+                    fugazi::indicators::sizing::equity_vol_target::<String>(
+                        b,
+                        *target,
+                        *window,
+                        *bars_per_year,
+                    ),
+                )
+            }
             FractionalKelly {
+                source,
                 kelly_fraction,
                 window,
-            } => dyn_indicator::wrap(fugazi::indicators::sizing::fractional_kelly::<String>(
-                book,
-                *kelly_fraction,
-                *window,
-            )),
+            } => {
+                let b = resolve_book_source(source.as_deref(), book, portfolio_book);
+                dyn_indicator::wrap(fugazi::indicators::sizing::fractional_kelly::<String>(
+                    b,
+                    *kelly_fraction,
+                    *window,
+                ))
+            }
 
             // Trailing risk indicators own an embedded strategy; they ignore
             // the enclosing `anchor`/`book` (the embedded strategy builds its
@@ -2354,7 +2478,7 @@ impl ExprSpec {
                 if_true,
                 if_false,
             } => {
-                let cond_ind = AsBool::new(cond.build(anchor, book, schema));
+                let cond_ind = AsBool::new(cond.build(anchor, book, portfolio_book, schema));
                 let t_ind = real(if_true);
                 let f_ind = real(if_false);
                 dyn_indicator::wrap(self::IfElse::new(cond_ind, t_ind, f_ind))
@@ -2371,7 +2495,7 @@ impl ExprSpec {
             }
             Log { source, base } => dyn_indicator::wrap(self::Log::new(real(source), *base)),
             Latch { source } => {
-                let inner = AsReal::new(source.build(anchor, book, schema));
+                let inner = AsReal::new(source.build(anchor, book, portfolio_book, schema));
                 dyn_indicator::wrap(self::Latch::new(inner))
             }
             Resample {
@@ -2382,26 +2506,11 @@ impl ExprSpec {
                 assert!(*every > 0, "resample every must be greater than zero");
                 let candle_src = candle(source);
                 let resample_dyn = dyn_indicator::wrap(self::Resample::new(candle_src, *every));
-                let inner_dyn = inner.build(anchor, book, schema);
+                let inner_dyn = inner.build(anchor, book, portfolio_book, schema);
                 dyn_indicator::chain(resample_dyn, inner_dyn)
             }
-            Unstable { source } => dyn_indicator::unstable_wrap(source.build(anchor, book, schema)),
-            AtChild { source } => {
-                // Rebuild `source` against the enclosing book's linked
-                // book — the per-child book, paired with the aggregate
-                // by `PortfolioSpec::build`. Any book-anchored tag
-                // inside (`!drawdown`, `!return_per_bar`,
-                // `!trade_return`, `!drawdown_throttle`,
-                // `!equity_vol_target`, `!fractional_kelly`) then reads
-                // per-child state.
-                let linked = book.linked().unwrap_or_else(|| {
-                    panic!(
-                        "!at_child: no linked book on the enclosing scope \
-                         — this tag only makes sense inside a portfolio \
-                         weight-share template"
-                    )
-                });
-                source.build(anchor, linked, schema)
+            Unstable { source } => {
+                dyn_indicator::unstable_wrap(source.build(anchor, book, portfolio_book, schema))
             }
 
             Year { source } => {

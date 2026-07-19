@@ -56,7 +56,7 @@ impl SideSpec {
     ) -> Box<dyn DynIndicator> {
         self.exit
             .as_ref()
-            .map(|s| s.build(anchor, book, schema))
+            .map(|s| s.build(anchor, book, None, schema))
             .unwrap_or_else(|| {
                 dyn_indicator::wrap(Const::<fugazi::types::Snapshot<String>>::new(false))
             })
@@ -168,33 +168,33 @@ impl SingleStrategySpec {
         let book = strat.book();
         if let Some(long) = &self.long {
             strat = strat.long_on(
-                AsBool::new(long.enter.build(&anchor, &book, schema)),
+                AsBool::new(long.enter.build(&anchor, &book, None, schema)),
                 AsBool::new(long.exit(&anchor, &book, schema)),
             );
             if let Some(sl) = &long.stop_loss {
-                strat = strat.long_stop_loss(AsReal::new(sl.build(&anchor, &book, schema)));
+                strat = strat.long_stop_loss(AsReal::new(sl.build(&anchor, &book, None, schema)));
             }
             if let Some(tp) = &long.take_profit {
-                strat = strat.long_take_profit(AsReal::new(tp.build(&anchor, &book, schema)));
+                strat = strat.long_take_profit(AsReal::new(tp.build(&anchor, &book, None, schema)));
             }
         }
         if let Some(short) = &self.short {
             strat = strat.short_on(
-                AsBool::new(short.enter.build(&anchor, &book, schema)),
+                AsBool::new(short.enter.build(&anchor, &book, None, schema)),
                 AsBool::new(short.exit(&anchor, &book, schema)),
             );
             if let Some(sl) = &short.stop_loss {
-                strat = strat.short_stop_loss(AsReal::new(sl.build(&anchor, &book, schema)));
+                strat = strat.short_stop_loss(AsReal::new(sl.build(&anchor, &book, None, schema)));
             }
             if let Some(tp) = &short.take_profit {
-                strat = strat.short_take_profit(AsReal::new(tp.build(&anchor, &book, schema)));
+                strat = strat.short_take_profit(AsReal::new(tp.build(&anchor, &book, None, schema)));
             }
         }
         if let Some(sizing) = &self.sizing {
-            strat = strat.position_sizing(AsReal::new(sizing.build(&anchor, &book, schema)));
+            strat = strat.position_sizing(AsReal::new(sizing.build(&anchor, &book, None, schema)));
         }
         if let Some(rebalance) = &self.rebalance_on {
-            strat = strat.rebalance_on(AsBool::new(rebalance.build(&anchor, &book, schema)));
+            strat = strat.rebalance_on(AsBool::new(rebalance.build(&anchor, &book, None, schema)));
         }
         DynSingleStrategy { inner: strat }
     }
