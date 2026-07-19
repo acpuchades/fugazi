@@ -25,8 +25,8 @@ use fugazi::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Book, Cci, Component,
     Correlation, Dmi, DmiValue, Donchian, DonchianValue, Ema, GarmanKlass, GetBool, GetReal, GetStr,
     Hma, IfElse, Keltner, KeltnerValue, Kurtosis, Latch, Log, Macd, MacdValue, Mfi, Obv, Parkinson,
-    Pick, Position, Resample, Rma, RogersSatchell, Rsi, Sar, Skewness, Sma, StdDev, StochRsi,
-    Stochastic, TrueRange, Value, ValueStr, VarianceRatio, Vwap, WilliamsR, Wma, ZScore,
+    Pick, PickAny, Position, Resample, Rma, RogersSatchell, Rsi, Sar, Skewness, Sma, StdDev,
+    StochRsi, Stochastic, TrueRange, Value, ValueStr, VarianceRatio, Vwap, WilliamsR, Wma, ZScore,
 };
 use fugazi::prelude::*;
 use fugazi::types::Snapshot;
@@ -45,6 +45,25 @@ use std::str::FromStr;
 /// the `source:` of the leaf.
 fn pick_root() -> Pick<String> {
     Pick::<String>::new()
+}
+
+/// Symbol-agnostic atom root for calendar accessors (`!year`, `!month`,
+/// `!day`, `!hour`, `!minute`, `!second`, `!day_of_week`, `!day_of_year`,
+/// `!week_of_year`, `!quarter`, `!unix_seconds`, `!unix_millis`, `!time`)
+/// and the wall-clock cadence sugar (`!hourly`, `!daily`, `!weekly`,
+/// `!monthly`, `!quarterly`, `!annually`, which desugar into
+/// `!changed { source: !<accessor> }`). Every calendar accessor only reads
+/// [`Atom::time`], which every entry in a well-formed snapshot shares, so
+/// picking the first entry is a stable answer even when the snapshot
+/// carries multiple symbols — as in a
+/// [`MultiAssetStrategy`](fugazi::strategies::MultiAssetStrategy),
+/// [`BasketStrategy`](fugazi::strategies::BasketStrategy), or a
+/// [`Portfolio`](fugazi::portfolio::Portfolio) `rebalance_on:` gate.
+/// Contrast with [`pick_root`], which panics on a 2+ entry snapshot
+/// because price-field leaves (`!close`, `!high`, …) genuinely depend on
+/// *which* asset.
+fn pick_any_root() -> PickAny<String> {
+    PickAny::<String>::new()
 }
 
 pub(super) fn default_source() -> Box<ExprSpec> {
@@ -1889,6 +1908,29 @@ fn atom_source_of(
     }
 }
 
+/// Twin of [`atom_source_of`] for symbol-agnostic leaves — the calendar
+/// accessor family and the wall-clock cadence sugar. When `source` is
+/// `None`, roots on the "any entry" [`PickAny`] instead of the
+/// panic-on-2+ [`Pick`], so a bare `!month` / `!daily` / `!is_weekday`
+/// composes cleanly inside a
+/// [`MultiAssetStrategy`](fugazi::strategies::MultiAssetStrategy),
+/// [`BasketStrategy`](fugazi::strategies::BasketStrategy), or a
+/// [`Portfolio`](fugazi::portfolio::Portfolio) `rebalance_on:` gate.
+/// An explicit `!pick { symbol: ... }` source is honored verbatim (same
+/// as [`atom_source_of`]), so callers who want a specific symbol's time
+/// keep that ability.
+fn atom_source_any_of(
+    source: Option<&ExprSpec>,
+    anchor: &Position,
+    book: &Book,
+    schema: &Arc<Schema>,
+) -> AsAtom {
+    match source {
+        None => AsAtom::new(dyn_indicator::wrap(pick_any_root())),
+        Some(s) => AsAtom::new(s.build(anchor, book, schema)),
+    }
+}
+
 impl ExprSpec {
     /// Construct the live, runtime-typed source this spec describes as a
     /// `Box<dyn DynIndicator>`. `anchor` is the owning strategy's
@@ -1913,6 +1955,14 @@ impl ExprSpec {
         // The `Pick`-shaped `source:` field on every atom-input leaf.
         let atom_src = |source: Option<&Box<ExprSpec>>| {
             atom_source_of(source.map(|b| &**b), anchor, book, schema)
+        };
+        // Symbol-agnostic variant for calendar accessors + `!time`: an
+        // omitted `source:` defaults to the "any entry" PickAny rather
+        // than the sole-atom Pick, so a bare `!month` / `!hour` / `!time`
+        // (and the cadence sugar `!daily` / `!monthly` / …) works on
+        // multi-symbol snapshots — every entry shares atom.time.
+        let atom_src_any = |source: Option<&Box<ExprSpec>>| {
+            atom_source_any_of(source.map(|b| &**b), anchor, book, schema)
         };
 
         match self {
@@ -2355,55 +2405,55 @@ impl ExprSpec {
             }
 
             Year { source } => {
-                let s = atom_src(source.as_ref());
+                let s = atom_src_any(source.as_ref());
                 dyn_indicator::wrap(fugazi::indicators::Year::of(s))
             }
             Month { source } => {
-                let s = atom_src(source.as_ref());
+                let s = atom_src_any(source.as_ref());
                 dyn_indicator::wrap(fugazi::indicators::Month::of(s))
             }
             Day { source } => {
-                let s = atom_src(source.as_ref());
+                let s = atom_src_any(source.as_ref());
                 dyn_indicator::wrap(fugazi::indicators::Day::of(s))
             }
             Hour { source } => {
-                let s = atom_src(source.as_ref());
+                let s = atom_src_any(source.as_ref());
                 dyn_indicator::wrap(fugazi::indicators::Hour::of(s))
             }
             Minute { source } => {
-                let s = atom_src(source.as_ref());
+                let s = atom_src_any(source.as_ref());
                 dyn_indicator::wrap(fugazi::indicators::Minute::of(s))
             }
             Second { source } => {
-                let s = atom_src(source.as_ref());
+                let s = atom_src_any(source.as_ref());
                 dyn_indicator::wrap(fugazi::indicators::Second::of(s))
             }
             DayOfWeek { source } => {
-                let s = atom_src(source.as_ref());
+                let s = atom_src_any(source.as_ref());
                 dyn_indicator::wrap(fugazi::indicators::DayOfWeek::of(s))
             }
             DayOfYear { source } => {
-                let s = atom_src(source.as_ref());
+                let s = atom_src_any(source.as_ref());
                 dyn_indicator::wrap(fugazi::indicators::DayOfYear::of(s))
             }
             WeekOfYear { source } => {
-                let s = atom_src(source.as_ref());
+                let s = atom_src_any(source.as_ref());
                 dyn_indicator::wrap(fugazi::indicators::WeekOfYear::of(s))
             }
             Quarter { source } => {
-                let s = atom_src(source.as_ref());
+                let s = atom_src_any(source.as_ref());
                 dyn_indicator::wrap(fugazi::indicators::Quarter::of(s))
             }
             UnixSeconds { source } => {
-                let s = atom_src(source.as_ref());
+                let s = atom_src_any(source.as_ref());
                 dyn_indicator::wrap(fugazi::indicators::UnixSeconds::of(s))
             }
             UnixMillis { source } => {
-                let s = atom_src(source.as_ref());
+                let s = atom_src_any(source.as_ref());
                 dyn_indicator::wrap(fugazi::indicators::UnixMillis::of(s))
             }
             Time { source } => {
-                let s = atom_src(source.as_ref());
+                let s = atom_src_any(source.as_ref());
                 dyn_indicator::wrap(fugazi::indicators::CurrentTime::of(s))
             }
         }

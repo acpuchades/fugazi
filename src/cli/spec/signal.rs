@@ -10,7 +10,7 @@ use serde::Deserialize;
 use fugazi::indicators::compare;
 use fugazi::indicators::logic::Const;
 use fugazi::indicators::{
-    Book, DEFAULT_EPSILON, Every, GetBool, IsWeekday, IsWeekend, Pick, Position, ValueStr,
+    Book, DEFAULT_EPSILON, Every, GetBool, IsWeekday, IsWeekend, Pick, PickAny, Position, ValueStr,
 };
 use fugazi::prelude::*;
 
@@ -23,6 +23,18 @@ use crate::dyn_indicator::{self, AsBool, AsReal, AsStr, DynIndicator};
 /// strategies opt in with an explicit `!pick { symbol: ... }` selector.
 fn pick_root() -> Pick<String> {
     Pick::<String>::new()
+}
+
+/// Symbol-agnostic atom root for calendar signals (`!is_weekday`,
+/// `!is_weekend`) — reads only `atom.time`, which every entry in a
+/// well-formed snapshot shares, so "first entry" is a stable answer even
+/// when the snapshot carries multiple symbols (as in
+/// [`MultiAssetStrategy`](fugazi::strategies::MultiAssetStrategy),
+/// [`BasketStrategy`](fugazi::strategies::BasketStrategy), or a
+/// [`Portfolio`](fugazi::portfolio::Portfolio) `rebalance_on:` gate).
+/// Contrast with [`pick_root`], which panics on a 2+ entry snapshot.
+fn pick_any_root() -> PickAny<String> {
+    PickAny::<String>::new()
 }
 
 /// The right-hand operand of `!str_eq` / `!str_ne`.
@@ -702,8 +714,8 @@ impl SignalSpec {
                 dyn_indicator::wrap(compare::StrNe::new(lhs, rhs))
             }
 
-            IsWeekday => dyn_indicator::wrap(self::IsWeekday::of(pick_root())),
-            IsWeekend => dyn_indicator::wrap(self::IsWeekend::of(pick_root())),
+            IsWeekday => dyn_indicator::wrap(self::IsWeekday::of(pick_any_root())),
+            IsWeekend => dyn_indicator::wrap(self::IsWeekend::of(pick_any_root())),
         }
     }
 }

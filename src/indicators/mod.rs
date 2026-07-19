@@ -112,7 +112,7 @@ pub use macd::{Macd, MacdValue};
 pub use mfi::Mfi;
 pub use obv::Obv;
 pub use parkinson::Parkinson;
-pub use pick::Pick;
+pub use pick::{Pick, PickAny};
 pub use ops::{
     Add, BinaryOp, Combine, Diff, Div, Extreme, ExtremeOp, Lag, Lookback, LookbackOp, MaxOp, MinOp,
     Mul, Ratio, Roc, RollingMax, RollingMin, Sub,

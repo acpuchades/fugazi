@@ -813,6 +813,18 @@ mod tests {
         s
     }
 
+    fn snap_of_at(
+        entries: &[(&'static str, Real)],
+        ts: fugazi::types::Timestamp,
+    ) -> Snapshot<String> {
+        let mut s = Snapshot::new();
+        for &(sym, close) in entries {
+            let atom = Atom::with_time(candle(close), ts);
+            s.push(Some(sym.to_string()), None, atom);
+        }
+        s
+    }
+
     #[test]
     fn parses_a_portfolio_with_mixed_children() {
         let yaml = r#"
@@ -1128,6 +1140,67 @@ mod tests {
         // has zero warm-up / stable period.
         let portfolio = spec.build(1_000.0, &Schema::empty(), None);
         assert_eq!(portfolio.stable_period(), 0);
+    }
+
+    #[test]
+    fn rebalance_on_monthly_drives_multi_symbol_portfolio_without_panic() {
+        // Regression: `rebalance_on: !monthly` (and the whole cadence sugar
+        // family) used to panic on the first bar of a 2+ symbol portfolio
+        // because the calendar accessor rooted through Pick::new, which
+        // sole-atom-unpacks and panics on 2+ entries. With PickAny as the
+        // calendar default, a portfolio-level `rebalance_on: !monthly`
+        // now builds and drives cleanly over a multi-symbol snapshot
+        // stream — the exact shape CLAUDE.md's PortfolioSpec bullet
+        // recommends ("use snapshot / calendar / cadence signals").
+        use fugazi::types::Timestamp;
+
+        let yaml = r#"
+            weights: !value [0.5, 0.5]
+            rebalance_on: !monthly
+            children:
+              - name: half_a
+                strategy:
+                  symbol: A
+                  sizing: !value 0.5
+                  long:
+                    enter: !value true
+                    exit: !value false
+              - name: half_b
+                strategy:
+                  symbol: B
+                  sizing: !value 0.5
+                  long:
+                    enter: !value true
+                    exit: !value false
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let mut portfolio = spec.build(1_000.0, &Schema::empty(), None);
+        let mut wallet = portfolio.wallet_view();
+
+        // Three bars spanning a month rollover: 2024-01-31, 2024-02-01,
+        // 2024-02-02. `!monthly` fires on 2024-02-01 (month rolled from
+        // 1 → 2). All three snapshots carry two symbols — the panic path
+        // is exactly this: PickAny reads the first atom's time, which
+        // both entries share.
+        let day = 86_400_000i64;
+        let jan_31 = Timestamp(1_706_659_200_000); // 2024-01-31 00:00 UTC
+        let feb_01 = Timestamp(jan_31.0 + day);
+        let feb_02 = Timestamp(feb_01.0 + day);
+
+        for (bar_i, ts) in [jan_31, feb_01, feb_02].into_iter().enumerate() {
+            let px_a = 100.0 + (bar_i as Real);
+            let px_b = 200.0 + (bar_i as Real);
+            for fill in wallet.update("A".to_string(), candle(px_a)) {
+                portfolio.on_fill(&fill);
+            }
+            for fill in wallet.update("B".to_string(), candle(px_b)) {
+                portfolio.on_fill(&fill);
+            }
+            portfolio.update(snap_of_at(&[("A", px_a), ("B", px_b)], ts));
+            portfolio.trade(&mut wallet);
+        }
+        // Aggregate equity should stay well-defined (no NaN, no panic).
+        assert!(portfolio.inner.book().equity_value().is_finite());
     }
 
     #[test]

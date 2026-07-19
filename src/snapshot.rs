@@ -194,6 +194,21 @@ impl<Sym> Snapshot<Sym> {
             .map(|(s, f, a)| (s.as_ref(), *f, a))
     }
 
+    /// The first atom in the snapshot, or `None` if empty. Never panics,
+    /// even on multi-entry snapshots — this is the primitive
+    /// [`PickAny::new`](crate::indicators::PickAny::new) uses for
+    /// symbol-agnostic reads (calendar accessors like
+    /// [`Year`](crate::indicators::Year) / [`Hour`](crate::indicators::Hour)
+    /// only inspect [`Atom::time`], which every entry in a well-formed
+    /// snapshot shares, so "any one" is defined and stable).
+    ///
+    /// Contrast with [`sole_atom`](Self::sole_atom), which is the
+    /// single-series safety net: it panics on 2+ entries because most price
+    /// leaves (`!close`, `!high`, …) genuinely depend on *which* asset.
+    pub fn any_atom(&self) -> Option<&Atom> {
+        self.entries.first().map(|(_, _, a)| a)
+    }
+
     /// The sole atom in a single-entry snapshot, if there is exactly one.
     /// Returns `None` for empty snapshots; **panics** with a diagnostic
     /// message when the snapshot has 2+ entries. This is the primitive
@@ -202,6 +217,9 @@ impl<Sym> Snapshot<Sym> {
     /// feeds a size-1 snapshot, so a 2+ read means the run was accidentally
     /// hooked up to multi-asset input and the loud failure is preferable to
     /// silently returning an arbitrary asset.
+    ///
+    /// For sources that are symbol-agnostic (calendar accessors that only
+    /// read `atom.time`), see [`any_atom`](Self::any_atom).
     pub fn sole_atom(&self) -> Option<&Atom> {
         match self.entries.len() {
             0 => None,

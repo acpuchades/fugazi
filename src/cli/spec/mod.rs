@@ -1034,6 +1034,109 @@ mod tests {
     }
 
     #[test]
+    fn calendar_source_tags_read_first_atom_on_multi_symbol_snapshot() {
+        // Regression: bare calendar tags used to root through Pick::new(),
+        // which panics on 2+ entries. The whole point of a calendar
+        // accessor is that atom.time is symbol-agnostic (every entry in a
+        // bar's snapshot shares the same wall-clock time), so picking any
+        // one is stable. PickAny is now the default source — the same
+        // spec should parse, build, and read on a multi-symbol snapshot
+        // without touching the panic path.
+        use fugazi::types::Timestamp;
+
+        let ts = Timestamp(1_710_506_096_000); // 2024-03-15 12:34:56 UTC
+        let atom_btc = Atom::with_time(bar(1.0), ts);
+        let atom_eth = Atom::with_time(bar(2.0), ts);
+        let mut multi = Snapshot::<String>::new();
+        multi.push(Some("BTC".to_string()), None, atom_btc);
+        multi.push(Some("ETH".to_string()), None, atom_eth);
+
+        for (yaml, want) in [
+            ("month", 3.0),
+            ("day", 15.0),
+            ("hour", 12.0),
+            ("day_of_week", 5.0),
+            ("quarter", 1.0),
+        ] {
+            let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
+            let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+            assert_eq!(
+                built.update(Payload::Snapshot(multi.clone())),
+                Some(Payload::Real(want)),
+                "{yaml}: value on 2-symbol snapshot",
+            );
+        }
+    }
+
+    #[test]
+    fn cadence_sugar_tags_fire_on_multi_symbol_snapshot() {
+        // Regression: `!daily` / `!monthly` etc. desugar to
+        // `!changed { source: !<accessor> {} }` — the calendar accessor's
+        // empty-map source used to root on Pick::new(), which panicked on
+        // 2+ entries. With PickAny as the calendar default, the cadence
+        // sugar composes cleanly on a multi-symbol snapshot — the exact
+        // shape a portfolio `rebalance_on:` sees.
+        use fugazi::types::Timestamp;
+
+        // Two consecutive days in the same month — `!daily` fires on the
+        // second bar (day rolls over); `!monthly` stays false.
+        let day1 = Timestamp(1_710_506_096_000); // 2024-03-15
+        let day2 = Timestamp(1_710_506_096_000 + 86_400_000); // 2024-03-16
+        let mk = |ts: Timestamp| {
+            let a = Atom::with_time(bar(1.0), ts);
+            let b = Atom::with_time(bar(2.0), ts);
+            let mut s = Snapshot::<String>::new();
+            s.push(Some("BTC".to_string()), None, a);
+            s.push(Some("ETH".to_string()), None, b);
+            s
+        };
+
+        // !changed is None on the warm-up bar (it needs a prior value to
+        // compare against), so we only assert on the second bar's edge.
+        let spec: SignalSpec = serde_norway::from_str("daily").unwrap();
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let _ = built.update(Payload::Snapshot(mk(day1)));
+        assert_eq!(
+            built.update(Payload::Snapshot(mk(day2))),
+            Some(Payload::Bool(true)),
+            "!daily should fire on the day rollover",
+        );
+
+        let spec: SignalSpec = serde_norway::from_str("monthly").unwrap();
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        let _ = built.update(Payload::Snapshot(mk(day1)));
+        assert_eq!(
+            built.update(Payload::Snapshot(mk(day2))),
+            Some(Payload::Bool(false)),
+            "!monthly should not fire on a same-month rollover",
+        );
+    }
+
+    #[test]
+    fn is_weekday_reads_multi_symbol_snapshot_without_panic() {
+        // Regression: `!is_weekday` used to root on Pick::new() and would
+        // panic on 2+ entries. Now uses PickAny — reads the first atom's
+        // time, which is stable because all entries share the timestamp.
+        use fugazi::types::Timestamp;
+
+        let fri = Timestamp(1_710_506_096_000); // 2024-03-15 Friday
+        let sat = Timestamp(fri.0 + 86_400_000); // 2024-03-16 Saturday
+        let mk = |ts: Timestamp| {
+            let a = Atom::with_time(bar(1.0), ts);
+            let b = Atom::with_time(bar(2.0), ts);
+            let mut s = Snapshot::<String>::new();
+            s.push(Some("BTC".to_string()), None, a);
+            s.push(Some("ETH".to_string()), None, b);
+            s
+        };
+
+        let spec: SignalSpec = serde_norway::from_str("is_weekday").unwrap();
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), &Schema::empty());
+        assert_eq!(built.update(Payload::Snapshot(mk(fri))), Some(Payload::Bool(true)));
+        assert_eq!(built.update(Payload::Snapshot(mk(sat))), Some(Payload::Bool(false)));
+    }
+
+    #[test]
     fn calendar_source_none_on_untimed_atom() {
         // A calendar accessor over a bare Atom (time=None) yields None — same
         // shape as a not-yet-warm indicator.
