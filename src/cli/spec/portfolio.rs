@@ -48,6 +48,7 @@ use serde_json::Value;
 
 use fugazi::indicators::{Book, Position};
 use fugazi::portfolio::policy::{EqualWeight, Fixed};
+use fugazi::portfolio::rebalance::{LargestFirst, Proportional};
 use fugazi::portfolio::Portfolio;
 use fugazi::prelude::*;
 use fugazi::types::Snapshot;
@@ -61,6 +62,42 @@ use super::pairs::PairsStrategySpec;
 use super::preset::StrategyRef;
 use super::signal::SignalSpec;
 use super::template::SpecTemplate;
+
+/// YAML surface for the **position-phase rebalance policy** — the impl
+/// picked from [`rebalance`](fugazi::portfolio::rebalance) that decides
+/// which held positions to scale down (and by how much) when a
+/// contributor's cash-phase donation can't be fully covered.
+///
+/// Externally tagged, currently unit-only:
+///
+/// ```yaml
+/// rebalance_policy: !proportional   # default — every leg scaled uniformly
+/// rebalance_policy: !largest_first  # fully close biggest positions first
+/// ```
+///
+/// Omitted (`rebalance_policy:` absent) defaults to
+/// [`Proportional`](fugazi::portfolio::rebalance::Proportional), matching
+/// the [`PortfolioBuilder`](fugazi::portfolio::PortfolioBuilder) default.
+/// A CLI-only discriminator; at build it constructs the corresponding
+/// [`PositionRebalancer`](fugazi::portfolio::rebalance::PositionRebalancer)
+/// impl and installs it via
+/// [`PortfolioBuilder::position_rebalancer`](fugazi::portfolio::PortfolioBuilder::position_rebalancer).
+/// Rust-side callers with a bespoke rule build their own impl and install
+/// it directly — no CLI-side wiring needed.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum RebalancePolicySpec {
+    /// Scale every held leg by the same fraction to cover the shortfall.
+    /// The default — matches
+    /// [`Proportional`](fugazi::portfolio::rebalance::Proportional).
+    Proportional,
+
+    /// Fully liquidate biggest positions (by `|units| * price`) first,
+    /// walking down until the shortfall is covered. The last position
+    /// touched is partially scaled if fully closing it would overshoot.
+    /// Wraps [`LargestFirst`](fugazi::portfolio::rebalance::LargestFirst).
+    LargestFirst,
+}
 
 /// A whole `portfolio.yml`: an ordered list of children plus an optional
 /// weight expression governing how cash is split at build and re-targeted
@@ -126,6 +163,16 @@ pub struct PortfolioSpec {
     /// fill-free automatically.
     #[serde(default)]
     pub rebalance_on: Option<SignalSpec>,
+
+    /// The **position-phase rebalance policy** — which
+    /// [`PositionRebalancer`](fugazi::portfolio::rebalance::PositionRebalancer)
+    /// impl decides what to sell (and by how much) when a contributor's
+    /// cash-phase donation can't be fully covered.
+    ///
+    /// Defaults to `!proportional` when omitted (matches the built-in
+    /// `PortfolioBuilder` default). See [`RebalancePolicySpec`].
+    #[serde(default)]
+    pub rebalance_policy: Option<RebalancePolicySpec>,
 }
 
 /// One child slot: an optional display name plus the nested strategy spec.
@@ -614,6 +661,14 @@ impl PortfolioSpec {
             max_warm_up = max_warm_up.max(signal.warm_up_period());
             builder = builder.rebalance_on(signal);
         }
+        // Install the position-phase policy — omitted `rebalance_policy:`
+        // means `Proportional` (matches PortfolioBuilder's default).
+        if let Some(policy) = self.rebalance_policy {
+            builder = match policy {
+                RebalancePolicySpec::Proportional => builder.position_rebalancer(Proportional),
+                RebalancePolicySpec::LargestFirst => builder.position_rebalancer(LargestFirst),
+            };
+        }
         let built = builder.build();
         DynPortfolio {
             inner: built,
@@ -904,6 +959,109 @@ mod tests {
             PortfolioChildStrategy::Single(s) => assert_eq!(s.symbol(), "BTC"),
             _ => panic!("expected a single-asset child"),
         }
+    }
+
+    #[test]
+    fn rebalance_policy_defaults_to_none_and_omitting_matches_proportional() {
+        // Omitted `rebalance_policy:` parses to `None` — the built
+        // portfolio installs the default `Proportional` policy
+        // internally, matching PortfolioBuilder's own default.
+        let yaml = r#"
+            children:
+              - strategy: !buy_and_hold { symbol: A }
+              - strategy: !buy_and_hold { symbol: B }
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        assert!(spec.rebalance_policy.is_none());
+        // Should build without failure.
+        let _portfolio = spec.build(1_000.0, &Schema::empty(), None);
+    }
+
+    #[test]
+    fn parses_rebalance_policy_proportional() {
+        let yaml = r#"
+            rebalance_policy: !proportional
+            children:
+              - strategy: !buy_and_hold { symbol: A }
+              - strategy: !buy_and_hold { symbol: B }
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        assert!(matches!(
+            spec.rebalance_policy,
+            Some(RebalancePolicySpec::Proportional),
+        ));
+        let _portfolio = spec.build(1_000.0, &Schema::empty(), None);
+    }
+
+    #[test]
+    fn parses_rebalance_policy_largest_first() {
+        let yaml = r#"
+            rebalance_policy: !largest_first
+            children:
+              - strategy: !buy_and_hold { symbol: A }
+              - strategy: !buy_and_hold { symbol: B }
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        assert!(matches!(
+            spec.rebalance_policy,
+            Some(RebalancePolicySpec::LargestFirst),
+        ));
+        let _portfolio = spec.build(1_000.0, &Schema::empty(), None);
+    }
+
+    #[test]
+    fn largest_first_policy_closes_biggest_leg_first_during_rebalance() {
+        // Two fully-invested children under `!fixed [0.5, 0.5]`. After bar 2,
+        // A jumps 10× so its sub-equity dwarfs B's. On bar 3 the rebalance
+        // fires — A is the sole contributor; with cash phase capped at its
+        // (near-zero) free cash, the position phase runs. Under
+        // `!largest_first`, A's leg is scaled down to raise the shortfall,
+        // and the fill lands on bar 4.
+        let yaml = r#"
+            weights: !fixed [0.5, 0.5]
+            rebalance_on: !every 1
+            rebalance_policy: !largest_first
+            children:
+              - name: full_a
+                strategy:
+                  symbol: A
+                  sizing: !value 1.0
+                  long:
+                    enter: !value true
+                    exit: !value false
+              - name: full_b
+                strategy:
+                  symbol: B
+                  sizing: !value 1.0
+                  long:
+                    enter: !value true
+                    exit: !value false
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let mut portfolio = spec.build(1_000.0, &Schema::empty(), None);
+        let mut wallet = portfolio.wallet_view();
+
+        for bar in 0..4usize {
+            let px_a = if bar < 2 { 100.0 } else { 1000.0 };
+            let px_b = 100.0;
+            for fill in wallet.update("A".to_string(), candle(px_a)) {
+                portfolio.on_fill(&fill);
+            }
+            for fill in wallet.update("B".to_string(), candle(px_b)) {
+                portfolio.on_fill(&fill);
+            }
+            portfolio.update(snap_of(&[("A", px_a), ("B", px_b)]));
+            portfolio.trade(&mut wallet);
+        }
+
+        // A must have shrunk (its position phase scaled the sole leg down);
+        // B remains flat or grew from the freed cash on the next fire.
+        let e0 = wallet.sub_equity(0).0;
+        let e1 = wallet.sub_equity(1).0;
+        assert!(
+            e0 < e1 * 4.0,
+            "largest-first should have started rebalancing A down; got e0={e0}, e1={e1}",
+        );
     }
 
     #[test]
