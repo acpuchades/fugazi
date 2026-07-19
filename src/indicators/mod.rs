@@ -107,7 +107,7 @@ pub use if_else::IfElse;
 pub use keltner::{Keltner, KeltnerValue};
 pub use kurtosis::Kurtosis;
 pub use log::Log;
-pub use logic::{And, Change, Const, Every, Not, Or, Xor};
+pub use logic::{And, BecameFalse, BecameTrue, Change, Const, Every, Not, Or, Xor};
 pub use macd::{Macd, MacdValue};
 pub use mfi::Mfi;
 pub use obv::Obv;

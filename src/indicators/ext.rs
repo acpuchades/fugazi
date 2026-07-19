@@ -6,7 +6,7 @@ use crate::indicators::compare::{Eq, Ge, Gt, Le, Lt, Ne};
 use crate::indicators::crosses::{CrossesAbove, CrossesBelow};
 use crate::indicators::if_else::IfElse;
 use crate::indicators::log::Log;
-use crate::indicators::logic::{And, Change, Not, Or, Xor};
+use crate::indicators::logic::{And, BecameFalse, BecameTrue, Change, Not, Or, Xor};
 use crate::indicators::ops::{Add, Diff, Div, Lag, Mul, Ratio, Roc, RollingMax, RollingMin, Sub};
 use crate::indicators::unstable::Unstable;
 use crate::indicators::value::Value;
@@ -174,6 +174,20 @@ pub trait IndicatorExt: Indicator<Output = Real> + Sized {
         Unstable::new(self)
     }
 
+    /// Fires on the single step where `self`'s value differs from the prior
+    /// step. Mirrors [`BoolIndicatorExt::changed`] on the Real side. Useful
+    /// for calendar rollovers on integer-valued Real accessors:
+    /// `!month.changed()` fires once per month change; `!week_of_year.changed()`
+    /// fires once per ISO-week rollover. Any transition qualifies — including
+    /// wrap-arounds like Dec (12) → Jan (1), so no special-casing is needed
+    /// at year end.
+    fn changed(self) -> Change<Self>
+    where
+        Self: Sized,
+    {
+        Change::new(self)
+    }
+
     /// `self` rises above `rhs` on this step.
     ///
     /// Returns a native [`CrossesAbove`] primitive: one comparison state plus
@@ -259,14 +273,40 @@ pub trait BoolIndicatorExt: Indicator<Output = bool> {
     /// Fires on the single step where `self`'s value toggles (in either
     /// direction).
     ///
-    /// This is the one edge primitive. Directional events compose from it:
-    /// "became true" is `s.changed().and(s)` and a crossover is
-    /// `a.gt(b).and(a.gt(b).changed())` — see [`IndicatorExt::crosses_above`].
+    /// The one edge primitive. Directional events compose from it —
+    /// [`became_true`](Self::became_true) and
+    /// [`became_false`](Self::became_false) are the rising / falling-edge
+    /// forms; a crossover is `a.gt(b).and(a.gt(b).changed())` — see
+    /// [`IndicatorExt::crosses_above`].
     fn changed(self) -> Change<Self>
     where
         Self: Sized,
     {
         Change::new(self)
+    }
+
+    /// Rising-edge detector: fires (`true`) on the single step where `self`
+    /// transitions `false → true`. Semantically equivalent to
+    /// `self.and(self.changed())` but bundled so callers don't need to name
+    /// the source twice — useful for gating rebalance schedules on "the
+    /// moment a condition begins to hold" (e.g. `!became_true { source: !ge
+    /// { lhs: !day_of_month, rhs: !value 27 } }` fires on the first bar of
+    /// each month's TOM window).
+    fn became_true(self) -> BecameTrue<Self>
+    where
+        Self: Sized,
+    {
+        BecameTrue::new(self)
+    }
+
+    /// Falling-edge detector: fires (`true`) on the single step where `self`
+    /// transitions `true → false`. Mirror of [`became_true`](Self::became_true);
+    /// equivalent to `self.not().and(self.changed())`.
+    fn became_false(self) -> BecameFalse<Self>
+    where
+        Self: Sized,
+    {
+        BecameFalse::new(self)
     }
 
     /// Wrap `self` so its [`unstable_period`](Indicator::unstable_period)

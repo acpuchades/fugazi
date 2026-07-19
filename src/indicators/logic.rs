@@ -101,20 +101,46 @@ impl<S: Indicator<Output = bool>> Indicator for Not<S> {
 }
 
 /// Toggle (change) detector. Created via
-/// [`BoolIndicatorExt::changed`](crate::indicators::BoolIndicatorExt::changed).
+/// [`BoolIndicatorExt::changed`](crate::indicators::BoolIndicatorExt::changed)
+/// for `bool`-output sources and
+/// [`IndicatorExt::changed`](crate::indicators::IndicatorExt::changed) for
+/// `Real`-output sources.
 ///
-/// Fires (`Some(true)`) on the single step where the source's value differs from
-/// the previous step, in either direction; `Some(false)` otherwise. It is `None`
-/// until the source has produced a value on two consecutive steps (the first
-/// warmed value never fires — there is no prior to compare against).
+/// Fires (`Some(true)`) on the single step where the source's value differs
+/// from the previous step, in either direction; `Some(false)` otherwise. It
+/// is `None` until the source has produced a value on two consecutive steps
+/// (the first warmed value never fires — there is no prior to compare
+/// against).
+///
+/// Generic over the source's output type: any `PartialEq + Clone` output is
+/// supported, so the same detector doubles as a bool edge detector (`s.not()`
+/// / `s.and(t)` / etc.) and a Real transition detector (`!month` / `!year` /
+/// any custom Real signal whose value flipping is the interesting event).
+///
+/// `bool` inner semantics: fires when the source's `true`/`false` flip.
+/// Note that on a raw bool condition this fires on *both* the rising and
+/// falling edges — pair with the condition itself
+/// (`s.and(s.changed())`) if only the rising edge is wanted, or use
+/// [`BecameTrue`] / [`BecameFalse`] for the pre-composed forms.
+///
+/// `Real` inner semantics: fires when the source's Real value differs bar
+/// over bar. Ideal for calendar rollovers (`!month`, `!week_of_year`) where
+/// every transition is a real "rollover" event and no rising/falling
+/// distinction applies.
 #[derive(Debug, Clone)]
-pub struct Change<S> {
+pub struct Change<S: Indicator>
+where
+    S::Output: PartialEq + Clone,
+{
     inner: S,
-    prev: Option<bool>,
+    prev: Option<S::Output>,
     value: Option<bool>,
 }
 
-impl<S> Change<S> {
+impl<S: Indicator> Change<S>
+where
+    S::Output: PartialEq + Clone,
+{
     pub(crate) fn new(inner: S) -> Self {
         Self {
             inner,
@@ -124,13 +150,16 @@ impl<S> Change<S> {
     }
 }
 
-impl<S: Indicator<Output = bool>> Indicator for Change<S> {
+impl<S: Indicator> Indicator for Change<S>
+where
+    S::Output: PartialEq + Clone,
+{
     type Input = S::Input;
     type Output = bool;
 
     fn update(&mut self, input: Self::Input) -> Option<bool> {
         let now = self.inner.update(input);
-        self.value = match (self.prev, now) {
+        self.value = match (&self.prev, &now) {
             (Some(prev), Some(now)) => Some(now != prev),
             _ => None,
         };
@@ -146,6 +175,121 @@ impl<S: Indicator<Output = bool>> Indicator for Change<S> {
         // Two consecutive warmed source values: the first never fires.
         // `max(1)` so a `warm_up = 0` inner still needs a first update
         // before a second can compare against it.
+        self.inner.warm_up_period().max(1) + 1
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.inner.unstable_period()
+    }
+
+    fn reset(&mut self) {
+        self.inner.reset();
+        self.prev = None;
+        self.value = None;
+    }
+}
+
+/// Rising-edge detector for a `bool`-output source: fires (`Some(true)`) on
+/// the single bar where the source transitions `false → true`; `Some(false)`
+/// otherwise. Equivalent to `source.and(source.changed())` — bundled here so
+/// callers gating on "the moment a condition begins to hold" don't need to
+/// name the source twice.
+///
+/// Created via
+/// [`BoolIndicatorExt::became_true`](crate::indicators::BoolIndicatorExt::became_true).
+#[derive(Debug, Clone)]
+pub struct BecameTrue<S> {
+    inner: S,
+    prev: Option<bool>,
+    value: Option<bool>,
+}
+
+impl<S> BecameTrue<S> {
+    pub(crate) fn new(inner: S) -> Self {
+        Self {
+            inner,
+            prev: None,
+            value: None,
+        }
+    }
+}
+
+impl<S: Indicator<Output = bool>> Indicator for BecameTrue<S> {
+    type Input = S::Input;
+    type Output = bool;
+
+    fn update(&mut self, input: Self::Input) -> Option<bool> {
+        let now = self.inner.update(input);
+        self.value = match (self.prev, now) {
+            (Some(prev), Some(now)) => Some(!prev && now),
+            _ => None,
+        };
+        self.prev = now;
+        self.value
+    }
+
+    fn value(&self) -> Option<bool> {
+        self.value
+    }
+
+    fn warm_up_period(&self) -> usize {
+        self.inner.warm_up_period().max(1) + 1
+    }
+
+    fn unstable_period(&self) -> usize {
+        self.inner.unstable_period()
+    }
+
+    fn reset(&mut self) {
+        self.inner.reset();
+        self.prev = None;
+        self.value = None;
+    }
+}
+
+/// Falling-edge detector for a `bool`-output source: fires (`Some(true)`) on
+/// the single bar where the source transitions `true → false`; `Some(false)`
+/// otherwise. Mirror of [`BecameTrue`]; equivalent to
+/// `source.not().and(source.changed())` bundled as one indicator.
+///
+/// Created via
+/// [`BoolIndicatorExt::became_false`](crate::indicators::BoolIndicatorExt::became_false).
+#[derive(Debug, Clone)]
+pub struct BecameFalse<S> {
+    inner: S,
+    prev: Option<bool>,
+    value: Option<bool>,
+}
+
+impl<S> BecameFalse<S> {
+    pub(crate) fn new(inner: S) -> Self {
+        Self {
+            inner,
+            prev: None,
+            value: None,
+        }
+    }
+}
+
+impl<S: Indicator<Output = bool>> Indicator for BecameFalse<S> {
+    type Input = S::Input;
+    type Output = bool;
+
+    fn update(&mut self, input: Self::Input) -> Option<bool> {
+        let now = self.inner.update(input);
+        self.value = match (self.prev, now) {
+            (Some(prev), Some(now)) => Some(prev && !now),
+            _ => None,
+        };
+        self.prev = now;
+        self.value
+    }
+
+    fn value(&self) -> Option<bool> {
+        self.value
+    }
+
+    fn warm_up_period(&self) -> usize {
         self.inner.warm_up_period().max(1) + 1
     }
 
