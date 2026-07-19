@@ -787,3 +787,111 @@ fn cash_covered_rebalance_queues_no_new_fills() {
         report.fills.len(),
     );
 }
+
+#[test]
+fn portfolio_book_tracks_aggregate_mark_to_market() {
+    // The aggregate book Portfolio::book() should march in lockstep with
+    // the sum of sub-wallet equities as each bar marks-to-market. Two
+    // buy-and-hold children on A (rising) and B (flat) give a moving
+    // aggregate we can assert against.
+    let (portfolio, report, wallet) = run_buy_and_hold_portfolio(2_000.0, EqualWeight);
+    let book = portfolio.book();
+    // After the full run the book's marked equity should equal what the
+    // aggregate wallet reads, and equal the final curve point.
+    let final_agg = wallet.equity().0;
+    let last_curve = *report.equity_curve.last().unwrap();
+    assert!(
+        (book.equity_value() - final_agg).abs() < 1e-9,
+        "book equity {} != wallet equity {}",
+        book.equity_value(),
+        final_agg,
+    );
+    assert!(
+        (book.equity_value() - last_curve).abs() < 1e-9,
+        "book equity {} != last curve point {}",
+        book.equity_value(),
+        last_curve,
+    );
+    // Peak >= current (both trend up, so equal here — A rose monotonically).
+    assert!(book.equity_peak_value() >= book.equity_value() - 1e-9);
+    // Drawdown at a fresh peak is 0.
+    let dd = book.drawdown::<Atom>().value().unwrap();
+    assert!(dd.abs() < 1e-9, "expected 0 drawdown at fresh peak, got {dd}");
+}
+
+#[test]
+fn portfolio_book_reset_returns_to_seed() {
+    // After reset(), the aggregate book restores to its seed equity —
+    // same rule as any other Book, verified end-to-end through the
+    // portfolio surface.
+    let (mut portfolio, _report, _wallet) =
+        run_buy_and_hold_portfolio(2_000.0, EqualWeight);
+    let book = portfolio.book();
+    assert!(book.equity_value() > 2_000.0); // rose from the run
+    portfolio.reset();
+    assert!(
+        (book.equity_value() - 2_000.0).abs() < 1e-9,
+        "expected reset to seed 2000, got {}",
+        book.equity_value()
+    );
+}
+
+#[test]
+fn weight_share_reads_aggregate_directly() {
+    // The aggregate book is the default anchor for weight-share
+    // templates — a template that reads `equity_peak` on the aggregate
+    // book gives every child the same value, so the normalized weight
+    // vector is uniform regardless of the underlying Fixed fallback's
+    // 75/25 skew.
+    //
+    // Mirrors the mechanism PortfolioSpec::build uses in the YAML
+    // pipeline: each per-child instantiation is built with a clone of
+    // the aggregate book (linked to the child's book for `!at_child`).
+    use fugazi::indicators::{Book, Const, Every};
+
+    let agg_book: Book<&'static str> = Book::new(1_000.0);
+    let child_a = SingleAssetStrategy::<&'static str>::with_initial_equity("A", 500.0)
+        .long_on(
+            Const::<Snapshot<&'static str>>::new(true),
+            Const::<Snapshot<&'static str>>::new(false),
+        );
+    let child_b = SingleAssetStrategy::<&'static str>::with_initial_equity("B", 500.0)
+        .long_on(
+            Const::<Snapshot<&'static str>>::new(true),
+            Const::<Snapshot<&'static str>>::new(false),
+        );
+    // Weight-share indicators built directly on the aggregate book —
+    // both read the same value each bar.
+    let share_a = agg_book.equity_peak::<Snapshot<&'static str>>();
+    let share_b = agg_book.equity_peak::<Snapshot<&'static str>>();
+
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(1_000.0)
+        .aggregate_book(agg_book.clone())
+        .add("a", child_a)
+        .add("b", child_b)
+        .weights(Fixed::new(vec![0.75, 0.25]))
+        .weight_shares(vec![Box::new(share_a), Box::new(share_b)])
+        .rebalance_on(Every::<Snapshot<&'static str>>::new(1))
+        .build();
+    let mut wallet = portfolio.wallet_view();
+    let snaps: Vec<Snapshot<&'static str>> = (0..4)
+        .map(|_| {
+            let mut s = Snapshot::new();
+            s.push(Some("A"), None, Atom::new(flat_bar(100.0)));
+            s.push(Some("B"), None, Atom::new(flat_bar(100.0)));
+            s
+        })
+        .collect();
+    let _report = backtest::run(&mut portfolio, &mut wallet, snaps);
+
+    // Both weight-shares read the same aggregate value each bar, so
+    // weights normalize to 50/50 (regardless of the 75/25 Fixed policy
+    // fallback).
+    let e0 = wallet.sub_equity(0).0;
+    let e1 = wallet.sub_equity(1).0;
+    assert!(
+        (e0 - 500.0).abs() < 5.0 && (e1 - 500.0).abs() < 5.0,
+        "aggregate-book weight shares should equalize the split; got e0={e0}, e1={e1}",
+    );
+}

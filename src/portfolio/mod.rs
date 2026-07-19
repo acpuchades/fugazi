@@ -138,7 +138,7 @@ use std::rc::Rc;
 
 use crate::costs::TradingCosts;
 use crate::indicator::Indicator;
-use crate::indicators::Const;
+use crate::indicators::{Book, Const};
 use crate::strategy::Strategy;
 use crate::types::{Real, Snapshot};
 use crate::wallet::{Order, Units, Wallet};
@@ -197,6 +197,17 @@ pub struct Portfolio<Sym> {
     /// bar in [`update`](Strategy::update). Empty vector means "no
     /// per-child overrides — use the policy's weights".
     share_indicators: Vec<WeightShareChain<Sym>>,
+    /// Aggregate [`Book`] of the portfolio, marked to market on each
+    /// [`update`](Strategy::update) from the sum of every sub-wallet's
+    /// equity. Handed out by [`book`](Self::book); the CLI's
+    /// `PortfolioSpec::build` uses it as the default anchor for
+    /// weight-share templates (so `!drawdown`, `!return_per_bar`, …
+    /// inside a template read *aggregate* state) and pairs each per-child
+    /// instantiation with the corresponding child's book via
+    /// [`Book::linked_to`](crate::indicators::Book::linked_to) so an
+    /// `!at_child { ... }` scope inside a template can walk to per-child
+    /// state on demand.
+    agg_book: Book<Sym>,
 }
 
 impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
@@ -231,6 +242,28 @@ impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
     /// Panics if `idx` is out of range.
     pub fn child_name(&self, idx: usize) -> &str {
         &self.children[idx].name
+    }
+
+    /// The portfolio's aggregate [`Book`] — a shared handle to the
+    /// mark-to-market equity / peak / return series that
+    /// [`update`](Strategy::update) updates each bar from the sum of every
+    /// sub-wallet's equity.
+    ///
+    /// Cheap to call — cloning shares the same underlying state through
+    /// its `Arc<Mutex<_>>`. The natural use is *as the default anchor*
+    /// for a weight-share expression built inside a
+    /// [`Portfolio`](crate::portfolio::Portfolio): the aggregate book is
+    /// what a weight template most often needs (aggregate drawdown,
+    /// aggregate return, etc.), and per-child access is reached via the
+    /// `!at_child` scope (implemented by pairing each per-child
+    /// instantiation's aggregate book handle with the child's book via
+    /// [`Book::linked_to`](crate::indicators::Book::linked_to)).
+    ///
+    /// Trade-level fields (`trade_pnl`, `trade_return`) on the aggregate
+    /// book stay `None` — the mark-driven path used to update it doesn't
+    /// route fills, and portfolio-wide "trades" have no clean definition.
+    pub fn book(&self) -> Book<Sym> {
+        self.agg_book.clone()
     }
 
     /// Install per-symbol [`TradingCosts`] on every sub-wallet. Whichever
@@ -278,8 +311,19 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
         for child in &mut self.children {
             child.strategy.update(snap.clone());
         }
+        // Mark the aggregate book from the sum of every sub-wallet's
+        // marked-to-market equity — the driver has already run
+        // `wallet.update(...)` for this bar before calling us, so
+        // sub-wallets are already priced against this bar's closes.
+        // Weight-share templates and any external consumer reading via
+        // `Portfolio::book()` see the freshly-marked value on this bar.
+        let samples = self.sample_children();
+        let agg_equity: Real = samples.iter().map(|s| s.equity).sum();
+        self.agg_book.mark_equity(agg_equity);
         // Advance each per-child weight-share indicator (when installed)
-        // so they warm on the same schedule as the children.
+        // so they warm on the same schedule as the children. Runs after
+        // `mark_equity` so a template reading `!portfolio_return_per_bar`
+        // sees this bar's aggregate return, not the prior bar's.
         for chain in self.share_indicators.iter_mut() {
             let _ = chain.update(snap.clone());
         }
@@ -290,7 +334,6 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
         // Fold this bar's per-child equity/funds into the policy so
         // adaptive policies (inverse-vol, performance-weighted) can
         // accumulate rolling stats even when the gate hasn't fired yet.
-        let samples = self.sample_children();
         self.policy.observe(&samples);
         self.bars_seen = self.bars_seen.saturating_add(1);
     }
@@ -366,9 +409,10 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
         for chain in self.share_indicators.iter_mut() {
             chain.reset();
         }
-        // Each sub-wallet's own reset() restores it to *its own* seed —
-        // the per-child allocation captured at build (since that's what
-        // `PaperWallet::new(f)` was called with). No re-splitting needed.
+        // Aggregate book returns to its seed (matches Book::reset — the
+        // link stays wired for any indicator handles holding a clone).
+        // Sub-wallets each restore to their own seed.
+        self.agg_book.reset();
         self.inner.borrow_mut().reset();
         self.bars_seen = 0;
     }
@@ -497,6 +541,14 @@ pub struct PortfolioBuilder<Sym> {
     costs: Option<TradingCosts>,
     rebalance: Option<RebalanceSignal<Sym>>,
     share_indicators: Vec<WeightShareChain<Sym>>,
+    /// Pre-supplied aggregate [`Book`] — when set, the built portfolio
+    /// uses this book (rather than a freshly-seeded one) so a caller that
+    /// needed the handle *before* `build()` (typically the CLI's
+    /// `PortfolioSpec::build`, which uses this book as the default anchor
+    /// for weight-share templates and pairs each per-child instantiation
+    /// with the child's own book via [`Book::linked_to`]) can share the
+    /// same handle with the built portfolio.
+    agg_book: Option<Book<Sym>>,
 }
 
 impl<Sym: 'static> Default for PortfolioBuilder<Sym> {
@@ -508,6 +560,7 @@ impl<Sym: 'static> Default for PortfolioBuilder<Sym> {
             costs: None,
             rebalance: None,
             share_indicators: Vec::new(),
+            agg_book: None,
         }
     }
 }
@@ -627,6 +680,27 @@ impl<Sym: Clone + Eq + Hash + 'static> PortfolioBuilder<Sym> {
         self
     }
 
+    /// Install a pre-supplied aggregate [`Book`] to use as the portfolio's
+    /// own book. Overrides the freshly-seeded default the portfolio would
+    /// otherwise construct at [`build`](Self::build).
+    ///
+    /// Intended for callers who need the aggregate book handle *before*
+    /// `build()` returns — typically to use it as the default anchor for
+    /// weight-share templates while pairing each per-child instantiation
+    /// with the corresponding child's own book via
+    /// [`Book::linked_to`](crate::indicators::Book::linked_to), so that a
+    /// template's `!at_child { ... }` scope can walk to per-child state.
+    ///
+    /// The supplied book should be seeded at the portfolio's initial
+    /// equity (same value that would be passed to
+    /// [`with_initial_equity`](Self::with_initial_equity)); otherwise
+    /// aggregate drawdown and per-bar return readings will start from a
+    /// mismatched baseline.
+    pub fn aggregate_book(mut self, book: Book<Sym>) -> Self {
+        self.agg_book = Some(book);
+        self
+    }
+
     /// Realize the [`Portfolio`] — resolve the initial weight vector from
     /// the policy, split `initial_equity` across children accordingly,
     /// seed one [`PaperWallet`](crate::PaperWallet) per child at that
@@ -642,6 +716,7 @@ impl<Sym: Clone + Eq + Hash + 'static> PortfolioBuilder<Sym> {
             costs,
             rebalance,
             share_indicators,
+            agg_book,
         } = self;
         assert!(
             !children.is_empty(),
@@ -667,6 +742,11 @@ impl<Sym: Clone + Eq + Hash + 'static> PortfolioBuilder<Sym> {
         let inner = Rc::new(RefCell::new(PortfolioInner::new(subs)));
         let rebalance: RebalanceSignal<Sym> =
             rebalance.unwrap_or_else(|| Box::new(Const::<Snapshot<Sym>>::new(false)));
+        // Aggregate book: use the pre-supplied handle when a caller wired
+        // one via `aggregate_book(...)` (typically because they needed
+        // the handle before `build()` to wire per-child links);
+        // otherwise seed a fresh book at the portfolio's initial equity.
+        let agg_book = agg_book.unwrap_or_else(|| Book::new(initial_equity));
         Portfolio {
             children,
             inner,
@@ -674,6 +754,7 @@ impl<Sym: Clone + Eq + Hash + 'static> PortfolioBuilder<Sym> {
             bars_seen: 0,
             rebalance,
             share_indicators,
+            agg_book,
         }
     }
 }

@@ -192,20 +192,45 @@ impl<Sym: Hash + Eq> BookState<Sym> {
 /// that don't care about the sym type can write `Book` and let the
 /// default apply. Requires `Sym: Hash + Eq + Clone` so it can key an
 /// internal `HashMap<Sym, LegState>` for per-leg accounting.
-pub struct Book<Sym = String>(Arc<Mutex<BookState<Sym>>>);
+///
+/// ## Linked book (optional)
+///
+/// A `Book` may optionally carry a reference to a **linked** `Book` via
+/// [`linked_to`](Self::linked_to) — a separate, shared `Book` (its own
+/// state, its own [`apply_fill`] / [`update`] cycle) that this book is
+/// paired with for cross-scope reads. Direction is caller-defined: the
+/// intended use is [`Portfolio`](crate::portfolio::Portfolio), which owns
+/// one aggregate `Book` at the top and one leaf `Book` per child, and
+/// wires each per-child template instance's book (a clone of the aggregate)
+/// with the corresponding child's book as its link — so a weight-share
+/// template reads aggregate fields by default (`!drawdown`,
+/// `!return_per_bar`, …) and reaches its child's book via the
+/// `!at_child` scope, which delegates to [`linked`](Self::linked). A book
+/// without a link (the default) simply returns `None` from `linked()`,
+/// and nothing else changes.
+pub struct Book<Sym = String> {
+    state: Arc<Mutex<BookState<Sym>>>,
+    linked: Option<Arc<Book<Sym>>>,
+}
 
 impl<Sym> std::fmt::Debug for Book<Sym>
 where
     Sym: std::fmt::Debug,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("Book").field(&self.0).finish()
+        f.debug_struct("Book")
+            .field("state", &self.state)
+            .field("linked", &self.linked.as_ref().map(|_| "<linked>"))
+            .finish()
     }
 }
 
 impl<Sym> Clone for Book<Sym> {
     fn clone(&self) -> Self {
-        Self(Arc::clone(&self.0))
+        Self {
+            state: Arc::clone(&self.state),
+            linked: self.linked.clone(),
+        }
     }
 }
 
@@ -221,14 +246,42 @@ impl<Sym: Hash + Eq + Clone> Book<Sym> {
             initial_equity > 0.0,
             "initial_equity must be strictly positive"
         );
-        Self(Arc::new(Mutex::new(BookState::seed(initial_equity))))
+        Self {
+            state: Arc::new(Mutex::new(BookState::seed(initial_equity))),
+            linked: None,
+        }
+    }
+
+    /// Return a `Book` handle pointing at the same state as `self`, but
+    /// paired with `other` as its **linked** book. See the type-level doc
+    /// on [`Book`]; the primary use is
+    /// [`Portfolio`](crate::portfolio::Portfolio) wiring one leaf child
+    /// book onto each per-child clone of the aggregate book, so a
+    /// weight-share template rooted on the aggregate reaches the specific
+    /// child through [`Book::linked`] via the `!at_child` scope.
+    ///
+    /// Chainable and cheap — the underlying state stays shared through the
+    /// existing `Arc<Mutex<_>>`, and the link is itself an
+    /// `Arc<Book<Sym>>` so a large graph doesn't clone the state pool.
+    /// Overwrites any prior link on this handle.
+    pub fn linked_to(mut self, other: Book<Sym>) -> Self {
+        self.linked = Some(Arc::new(other));
+        self
+    }
+
+    /// The linked book installed via [`linked_to`](Self::linked_to), or
+    /// [`None`] on a book without a link (the default). Reads never mutate
+    /// state; returned reference is valid as long as `self`.
+    pub fn linked(&self) -> Option<&Book<Sym>> {
+        self.linked.as_deref()
     }
 
     /// Reset every counter back to the freshly-constructed state, keeping
-    /// the original `initial_equity` seed.
+    /// the original `initial_equity` seed. Does not touch the link — that
+    /// stays wired.
     pub fn reset(&self) {
-        let seed = self.0.lock().expect("Book lock poisoned").initial_equity;
-        *self.0.lock().expect("Book lock poisoned") = BookState::seed(seed);
+        let seed = self.state.lock().expect("Book lock poisoned").initial_equity;
+        *self.state.lock().expect("Book lock poisoned") = BookState::seed(seed);
     }
 
     /// Apply a fill of `units` at `price` on `side`, tagged with the leg's
@@ -248,7 +301,7 @@ impl<Sym: Hash + Eq + Clone> Book<Sym> {
     ///
     /// [`Position::apply`]: crate::indicators::Position::apply
     pub fn apply_fill(&self, sym: &Sym, side: Side, units: Real, price: Real) {
-        let mut s = self.0.lock().expect("Book lock poisoned");
+        let mut s = self.state.lock().expect("Book lock poisoned");
         let sign = side.sign();
         let signed_units = sign * units;
 
@@ -319,7 +372,7 @@ impl<Sym: Hash + Eq + Clone> Book<Sym> {
     where
         I: IntoIterator<Item = (Sym, Candle)>,
     {
-        let mut s = self.0.lock().expect("Book lock poisoned");
+        let mut s = self.state.lock().expect("Book lock poisoned");
 
         // Promote pending-close → active so `book.trade_pnl` /
         // `book.trade_return` read Some this bar.
@@ -357,19 +410,60 @@ impl<Sym: Hash + Eq + Clone> Book<Sym> {
 
     /// The seed value the book started with.
     pub fn initial_equity(&self) -> Real {
-        self.0.lock().expect("Book lock poisoned").initial_equity
+        self.state.lock().expect("Book lock poisoned").initial_equity
     }
 
     /// The marked-to-market equity as of the most recent
     /// [`Book::update`] call.
     pub fn equity_value(&self) -> Real {
-        self.0.lock().expect("Book lock poisoned").equity
+        self.state.lock().expect("Book lock poisoned").equity
     }
 
     /// The running peak of [`equity_value`](Self::equity_value) since
     /// construction (or [`reset`](Self::reset)).
     pub fn equity_peak_value(&self) -> Real {
-        self.0.lock().expect("Book lock poisoned").equity_peak
+        self.state.lock().expect("Book lock poisoned").equity_peak
+    }
+
+    /// Set the book's `equity` directly, without routing through
+    /// [`apply_fill`](Self::apply_fill) / [`update`](Self::update).
+    ///
+    /// Intended for **externally-marked** books whose equity is computed
+    /// outside the leg/cash accounting the ordinary
+    /// [`apply_fill`] / [`update`] cycle maintains — the aggregate book
+    /// [`Portfolio`](crate::portfolio::Portfolio) publishes for weight-share
+    /// templates, live-broker seams that report a single equity number
+    /// rather than a fill/mark stream, etc.
+    ///
+    /// Updates:
+    /// - `equity` = `value`
+    /// - `equity_peak` (running max),
+    /// - `active_return` = `(value - prev_equity) / prev_equity`
+    ///   (`None` on the first call, matching
+    ///   [`return_per_bar`](Self::return_per_bar) semantics against a
+    ///   normally-driven book).
+    ///
+    /// Does **not** touch `cash`, per-leg state, or trade tracking — so
+    /// [`trade_pnl`](Self::trade_pnl) / [`trade_return`](Self::trade_return)
+    /// stay `None` on a mark-driven book (aggregate "trades" are not
+    /// meaningfully defined at the portfolio level). Mixing `mark_equity`
+    /// with `apply_fill` / `update` on the same book will produce
+    /// inconsistent readings and is not supported.
+    pub fn mark_equity(&self, value: Real) {
+        let mut s = self.state.lock().expect("Book lock poisoned");
+        let prev_equity = s.equity;
+        s.equity = value;
+        if s.equity > s.equity_peak {
+            s.equity_peak = s.equity;
+        }
+        if s.first_update {
+            s.first_update = false;
+            s.active_return = None;
+        } else if prev_equity.abs() > DEFAULT_EPSILON {
+            s.active_return = Some((s.equity - prev_equity) / prev_equity);
+        } else {
+            s.active_return = None;
+        }
     }
 
     /// The book's [equity level](Self::equity_value) as a real-valued
@@ -470,7 +564,7 @@ impl<Sym, In> Indicator for BookField<Sym, In> {
     }
 
     fn value(&self) -> Option<Real> {
-        (self.select)(&self.book.0.lock().expect("Book lock poisoned"))
+        (self.select)(&self.book.state.lock().expect("Book lock poisoned"))
     }
 
     fn warm_up_period(&self) -> usize {
@@ -650,5 +744,67 @@ mod tests {
         book.update([("X", bar(120.0))]);
         assert_eq!(eq1.value(), eq2.value());
         assert!((eq1.value().unwrap() - 1_200.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn mark_equity_drives_equity_peak_and_returns_without_fills() {
+        let book: Book<&str> = Book::new(1_000.0);
+        // First mark: return should be None (first_update sentinel).
+        book.mark_equity(1_100.0);
+        assert_eq!(book.equity_value(), 1_100.0);
+        assert_eq!(book.equity_peak_value(), 1_100.0);
+        assert_eq!(book.return_per_bar::<Atom>().value(), None);
+        // Second mark: return computed from previous equity.
+        book.mark_equity(1_210.0);
+        assert!((book.return_per_bar::<Atom>().value().unwrap() - 0.1).abs() < 1e-12);
+        assert_eq!(book.equity_peak_value(), 1_210.0);
+        // Dip: peak stays, drawdown fires.
+        book.mark_equity(1_089.0);
+        assert_eq!(book.equity_peak_value(), 1_210.0);
+        assert!((book.drawdown::<Atom>().value().unwrap() - (-0.1)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn mark_equity_does_not_touch_trade_state() {
+        // A pure mark-driven book never records trades — cash/legs are
+        // never updated, so trade_pnl / trade_return stay None regardless
+        // of how many marks land.
+        let book: Book<&str> = Book::new(1_000.0);
+        book.mark_equity(1_100.0);
+        book.mark_equity(1_050.0);
+        book.mark_equity(1_200.0);
+        assert_eq!(book.trade_pnl::<Atom>().value(), None);
+        assert_eq!(book.trade_return::<Atom>().value(), None);
+    }
+
+    #[test]
+    fn linked_to_wires_a_separate_state_reachable_via_linked() {
+        // A book paired with another via linked_to lets a consumer read
+        // either state via the same handle. The two states are
+        // independent: fills on one don't move the other.
+        let other: Book<&str> = Book::new(2_000.0);
+        other.mark_equity(2_500.0);
+        let book: Book<&str> = Book::new(1_000.0).linked_to(other.clone());
+        book.apply_fill(&"X", Side::Buy, 10.0, 100.0);
+        book.update([("X", bar(110.0))]);
+        assert_eq!(book.equity_value(), 1_100.0);
+        assert_eq!(book.linked().unwrap().equity_value(), 2_500.0);
+    }
+
+    #[test]
+    fn linked_returns_none_by_default() {
+        let book: Book<&str> = Book::new(1_000.0);
+        assert!(book.linked().is_none());
+    }
+
+    #[test]
+    fn reset_keeps_link_wired() {
+        let other: Book<&str> = Book::new(1_000.0);
+        let book: Book<&str> = Book::new(500.0).linked_to(other.clone());
+        book.apply_fill(&"X", Side::Buy, 5.0, 100.0);
+        book.update([("X", bar(120.0))]);
+        book.reset();
+        assert_eq!(book.equity_value(), 500.0);
+        assert!(book.linked().is_some());
     }
 }

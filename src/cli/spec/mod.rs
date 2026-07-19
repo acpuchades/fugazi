@@ -68,7 +68,7 @@ pub use multi_asset::MultiAssetStrategySpec;
 #[allow(unused_imports)]
 pub use pairs::PairsStrategySpec;
 #[allow(unused_imports)]
-pub use portfolio::{PortfolioSpec, PortfolioChildSpec, PortfolioChildStrategy, WeightPolicySpec};
+pub use portfolio::{PortfolioSpec, PortfolioChildSpec, PortfolioChildStrategy};
 #[allow(unused_imports)]
 pub use preset::{StrategyPreset, StrategyRef};
 #[allow(unused_imports)]

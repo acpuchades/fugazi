@@ -71,29 +71,40 @@ pub(super) fn default_risk_free_rate() -> Real {
     0.0
 }
 
-/// The payload of [`ExprSpec::Value`] — a constant leaf, either numeric or
-/// string-valued.
+/// The payload of [`ExprSpec::Value`] — a constant leaf: numeric, string,
+/// or (in per-child weight-share context) a list-indexed constant.
 ///
 /// A YAML number builds a [`Value`] (`Real` output, the operand of every
 /// arithmetic op and comparison); a YAML string builds a
 /// [`ValueStr`] (`Arc<str>` output, the operand of `!str_eq` / `!str_ne`
-/// against a `Str` overlay column read by `!get`):
+/// against a `Str` overlay column read by `!get`); a YAML list of numbers
+/// (`[w0, w1, w2, ...]`) is a per-child indexed constant — meaningful only
+/// inside a portfolio weight-share template, where the SpecTemplate's
+/// per-child build pass rewrites the list to its `CHILD_INDEX`th element
+/// before typed parse:
 ///
 /// ```yaml
 /// !gt      { lhs: !rsi { period: 14 }, rhs: !value 70 }        # Real
 /// !str_ne  { lhs: !get { key: regime }, rhs: !value bear }     # Str
+/// weights: !value [0.4, 0.6]                                    # List (fixed per-child)
 /// ```
 ///
-/// Quoting decides the type when the two would collide: `!value 70` is the
-/// number, `!value "70"` the string. Deserializes through a
-/// [`serde_norway::Value`] bridge (rather than `#[serde(untagged)]`) so a
-/// wrong-typed literal reports what `!value` accepts instead of the
-/// "did not match any variant" untagged error.
+/// Quoting decides the type when the two scalar forms would collide:
+/// `!value 70` is the number, `!value "70"` the string. Deserializes
+/// through a [`serde_norway::Value`] bridge (rather than
+/// `#[serde(untagged)]`) so a wrong-typed literal reports what `!value`
+/// accepts instead of the "did not match any variant" untagged error.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(try_from = "serde_norway::Value")]
 pub enum ValueLit {
     Real(Real),
     Str(String),
+    /// A per-child indexed constant — only meaningful inside a portfolio
+    /// weight-share template. `SpecTemplate::build` rewrites this to
+    /// `ValueLit::Real(list[CHILD_INDEX])` when `CHILD_INDEX` is present
+    /// in the build args; if it isn't, [`ExprSpec::build`] panics because
+    /// a list literal has no defined output outside per-child context.
+    List(Vec<Real>),
 }
 
 impl TryFrom<serde_norway::Value> for ValueLit {
@@ -106,9 +117,26 @@ impl TryFrom<serde_norway::Value> for ValueLit {
                 .map(ValueLit::Real)
                 .ok_or_else(|| format!("!value: {n} is not a finite number")),
             serde_norway::Value::String(s) => Ok(ValueLit::Str(s)),
+            serde_norway::Value::Sequence(seq) => {
+                let mut out = Vec::with_capacity(seq.len());
+                for (i, item) in seq.into_iter().enumerate() {
+                    let n = match item {
+                        serde_norway::Value::Number(n) => n,
+                        other => return Err(format!(
+                            "!value list element {i}: expected number, got {other:?}"
+                        )),
+                    };
+                    let f = n.as_f64().ok_or_else(|| {
+                        format!("!value list element {i}: {n} is not a finite number")
+                    })?;
+                    out.push(f);
+                }
+                Ok(ValueLit::List(out))
+            }
             other => Err(format!(
-                "!value takes a number (a constant scalar) or a string (a \
-                 constant string, for !str_eq / !str_ne), got {other:?}"
+                "!value takes a number (a constant scalar), a string (a \
+                 constant string, for !str_eq / !str_ne), or a list of \
+                 numbers (a per-child weight vector), got {other:?}"
             )),
         }
     }
@@ -216,6 +244,42 @@ pub enum ExprSpec {
     Peak,
     /// The running low since entry (a short trailing-stop anchor).
     Trough,
+
+    // --- book-anchored leaves. Unit variants; the book they read is the
+    // enclosing scope's book — the strategy's own `Book` under
+    // `SingleAssetStrategy` / `PairsStrategy` / `BasketStrategy` /
+    // `MultiAssetStrategy`, the child's `Book` under a portfolio's per-child
+    // weight template, and the aggregate `Book` inside an
+    // `!at_portfolio { ... }` scope.
+    /// The marked-to-market equity of the enclosing book. Always `Some`
+    /// (seeded at the book's `initial_equity`). See
+    /// [`fugazi::indicators::Book::equity`].
+    Equity,
+    /// The running peak of the enclosing book's equity. Always `Some`.
+    /// See [`fugazi::indicators::Book::equity_peak`].
+    EquityPeak,
+    /// The enclosing book's current drawdown as a non-positive fraction —
+    /// `(equity - peak) / peak`, `0` at a fresh peak. See
+    /// [`fugazi::indicators::Book::drawdown`].
+    Drawdown,
+    /// The just-completed bar's equity return —
+    /// `(equity - prev_equity) / prev_equity`. `None` on the first bar
+    /// (`warm_up_period() = 2`). See
+    /// [`fugazi::indicators::Book::return_per_bar`].
+    ReturnPerBar,
+    /// The realized P&L of the just-closed aggregate trade in
+    /// reference-currency terms. `Some` only on the bar whose fill closed
+    /// the trade. See [`fugazi::indicators::Book::trade_pnl`].
+    ///
+    /// At the aggregate scope (`!at_portfolio { !trade_pnl }`) this is
+    /// always `None` — the portfolio's aggregate book is mark-driven and
+    /// doesn't route fills, so no "portfolio trade" is defined.
+    TradePnl,
+    /// The just-closed trade's return as a fraction of the equity at
+    /// trade open. `Some` only on the close bar. See
+    /// [`fugazi::indicators::Book::trade_return`]. Also `None` at the
+    /// aggregate scope for the same reason as [`ExprSpec::TradePnl`].
+    TradeReturn,
 
     /// Read one overlay column by name from each atom's side-channel data.
     ///
@@ -715,6 +779,38 @@ pub enum ExprSpec {
     /// every source to be past its unstable tail" safe default; see
     /// [`fugazi::indicators::Unstable`].
     Unstable { source: Box<ExprSpec> },
+
+    /// **Scope switch** — build `source` against the enclosing book's
+    /// [linked](fugazi::indicators::Book::linked) book rather than the
+    /// book itself. Everything else (the `Position` anchor, the overlay
+    /// [`Schema`], the recursion path) is unchanged.
+    ///
+    /// The intended use is inside a
+    /// [`Portfolio`](fugazi::portfolio::Portfolio) `weights: !indicator`
+    /// template: each template instance is built against the portfolio's
+    /// **aggregate** book (per-portfolio equity, drawdown, return), and
+    /// the portfolio pairs each per-child clone with the corresponding
+    /// child's own book via [`Book::linked_to`]. Wrapping a subtree in
+    /// `!at_child` rebuilds it against that per-child book, so any
+    /// book-anchored tag inside — `!drawdown`, `!return_per_bar`,
+    /// `!trade_return`, `!drawdown_throttle`, `!equity_vol_target`,
+    /// `!fractional_kelly` — reads that child's per-child state instead
+    /// of the aggregate.
+    ///
+    /// ```yaml
+    /// # Inverse-vol on each child's own return stream, throttled by
+    /// # aggregate drawdown (default anchor is the aggregate).
+    /// weights:
+    ///   !indicator
+    ///   !mul
+    ///     lhs: !at_child !fractional_kelly { kelly_fraction: 0.5, window: 30 }
+    ///     rhs: !drawdown_throttle { max_drawdown: 0.15 }
+    /// ```
+    ///
+    /// Panics at build if the enclosing book has no link — i.e. the tag
+    /// is being used outside a portfolio weight-share template (a plain
+    /// strategy's book carries no link).
+    AtChild { source: Box<ExprSpec> },
 
     // --- calendar accessors (read `atom.time`, emit Real; None when time is
     // absent). Each takes an optional `source` for cross-asset use — the
@@ -864,6 +960,42 @@ enum ExprSpecRaw {
     /// The running low since entry (a short trailing-stop anchor).
     Trough,
 
+    // --- book-anchored leaves. Unit variants; the book they read is the
+    // enclosing scope's book — the strategy's own `Book` under
+    // `SingleAssetStrategy` / `PairsStrategy` / `BasketStrategy` /
+    // `MultiAssetStrategy`, the child's `Book` under a portfolio's per-child
+    // weight template, and the aggregate `Book` inside an
+    // `!at_portfolio { ... }` scope.
+    /// The marked-to-market equity of the enclosing book. Always `Some`
+    /// (seeded at the book's `initial_equity`). See
+    /// [`fugazi::indicators::Book::equity`].
+    Equity,
+    /// The running peak of the enclosing book's equity. Always `Some`.
+    /// See [`fugazi::indicators::Book::equity_peak`].
+    EquityPeak,
+    /// The enclosing book's current drawdown as a non-positive fraction —
+    /// `(equity - peak) / peak`, `0` at a fresh peak. See
+    /// [`fugazi::indicators::Book::drawdown`].
+    Drawdown,
+    /// The just-completed bar's equity return —
+    /// `(equity - prev_equity) / prev_equity`. `None` on the first bar
+    /// (`warm_up_period() = 2`). See
+    /// [`fugazi::indicators::Book::return_per_bar`].
+    ReturnPerBar,
+    /// The realized P&L of the just-closed aggregate trade in
+    /// reference-currency terms. `Some` only on the bar whose fill closed
+    /// the trade. See [`fugazi::indicators::Book::trade_pnl`].
+    ///
+    /// At the aggregate scope (`!at_portfolio { !trade_pnl }`) this is
+    /// always `None` — the portfolio's aggregate book is mark-driven and
+    /// doesn't route fills, so no "portfolio trade" is defined.
+    TradePnl,
+    /// The just-closed trade's return as a fraction of the equity at
+    /// trade open. `Some` only on the close bar. See
+    /// [`fugazi::indicators::Book::trade_return`]. Also `None` at the
+    /// aggregate scope for the same reason as [`ExprSpec::TradePnl`].
+    TradeReturn,
+
     /// Read one overlay column by name from each atom's side-channel data.
     ///
     /// The column's declared [`OverlayType`] in the atom stream's schema
@@ -1363,6 +1495,11 @@ enum ExprSpecRaw {
     /// [`fugazi::indicators::Unstable`].
     Unstable { source: Box<ExprSpec> },
 
+    /// See [`ExprSpec::AtChild`] — scope switch that rebuilds `source`
+    /// against the enclosing book's linked book (the per-child book, inside
+    /// a portfolio weight-share template).
+    AtChild { source: Box<ExprSpec> },
+
     // --- calendar accessors (read `atom.time`, emit Real; None when time is
     // absent). Each takes an optional `source` for cross-asset use — the
     // bare form (`!year`) is the default single-series shortcut,
@@ -1452,6 +1589,12 @@ impl From<ExprSpecRaw> for ExprSpec {
             ExprSpecRaw::Entry => ExprSpec::Entry,
             ExprSpecRaw::Peak => ExprSpec::Peak,
             ExprSpecRaw::Trough => ExprSpec::Trough,
+            ExprSpecRaw::Equity => ExprSpec::Equity,
+            ExprSpecRaw::EquityPeak => ExprSpec::EquityPeak,
+            ExprSpecRaw::Drawdown => ExprSpec::Drawdown,
+            ExprSpecRaw::ReturnPerBar => ExprSpec::ReturnPerBar,
+            ExprSpecRaw::TradePnl => ExprSpec::TradePnl,
+            ExprSpecRaw::TradeReturn => ExprSpec::TradeReturn,
             ExprSpecRaw::Get { key, source } => ExprSpec::Get { key, source },
             ExprSpecRaw::Ema { source, period } => ExprSpec::Ema { source, period },
             ExprSpecRaw::Sma { source, period } => ExprSpec::Sma { source, period },
@@ -1543,6 +1686,7 @@ impl From<ExprSpecRaw> for ExprSpec {
             ExprSpecRaw::Latch { source } => ExprSpec::Latch { source },
             ExprSpecRaw::Resample { every, inner, source } => ExprSpec::Resample { every, inner, source },
             ExprSpecRaw::Unstable { source } => ExprSpec::Unstable { source },
+            ExprSpecRaw::AtChild { source } => ExprSpec::AtChild { source },
             ExprSpecRaw::Year { source } => ExprSpec::Year { source },
             ExprSpecRaw::Month { source } => ExprSpec::Month { source },
             ExprSpecRaw::Day { source } => ExprSpec::Day { source },
@@ -1599,13 +1743,39 @@ impl TryFrom<serde_norway::Value> for ExprSpec {
         // shapes both have to be normalised at the same layer because a
         // downstream `!pick` can appear as either an empty struct-variant
         // (`!pick {}` / `!pick`) or a filled one (`!pick { symbol: BTC }`).
-        const UNIT_VARIANTS: &[&str] = &["entry", "peak", "trough"];
+        const UNIT_VARIANTS: &[&str] = &[
+            "entry",
+            "peak",
+            "trough",
+            "equity",
+            "equity_peak",
+            "drawdown",
+            "return_per_bar",
+            "trade_pnl",
+            "trade_return",
+        ];
 
-        let promote_null_for = |tag: &str, v: serde_norway::Value| match v {
-            serde_norway::Value::Null if !UNIT_VARIANTS.contains(&tag) => {
+        let promote_null_for = |tag: &str, v: serde_norway::Value| {
+            if UNIT_VARIANTS.contains(&tag) {
+                // Unit variants take no payload — `!entry`, `entry:` (null),
+                // and `entry: {}` (empty mapping) all mean the same thing.
+                // Serde's derived Deserialize expects `unit` content for a
+                // unit variant, so collapse the empty-map form to null too.
+                match v {
+                    serde_norway::Value::Mapping(m) if m.is_empty() => {
+                        serde_norway::Value::Null
+                    }
+                    other => other,
+                }
+            } else if matches!(v, serde_norway::Value::Null) {
+                // Non-unit variants need a struct-variant content — an
+                // empty map lets serde default every field. Serde
+                // rejects `Null` for a struct variant even when every
+                // field defaults.
                 serde_norway::Value::Mapping(serde_norway::Mapping::new())
+            } else {
+                v
             }
-            other => other,
         };
 
         let normalised = match v {
@@ -1737,9 +1907,24 @@ impl ExprSpec {
             Value(ValueLit::Str(s)) => {
                 dyn_indicator::wrap(ValueStr::<Snapshot<String>>::new(s.as_str()))
             }
+            Value(ValueLit::List(_)) => panic!(
+                "!value <list>: a list literal is only meaningful in a \
+                 portfolio weight-share template — the per-child build \
+                 pass rewrites it to !value <list[CHILD_INDEX]> before \
+                 this arm ever runs. Either it's being used outside a \
+                 portfolio, or PortfolioSpec::build failed to install \
+                 the CHILD_INDEX arg."
+            ),
             Entry => dyn_indicator::wrap(anchor.entry::<Snapshot<String>>()),
             Peak => dyn_indicator::wrap(anchor.peak::<Snapshot<String>>()),
             Trough => dyn_indicator::wrap(anchor.trough::<Snapshot<String>>()),
+
+            Equity => dyn_indicator::wrap(book.equity::<Snapshot<String>>()),
+            EquityPeak => dyn_indicator::wrap(book.equity_peak::<Snapshot<String>>()),
+            Drawdown => dyn_indicator::wrap(book.drawdown::<Snapshot<String>>()),
+            ReturnPerBar => dyn_indicator::wrap(book.return_per_bar::<Snapshot<String>>()),
+            TradePnl => dyn_indicator::wrap(book.trade_pnl::<Snapshot<String>>()),
+            TradeReturn => dyn_indicator::wrap(book.trade_return::<Snapshot<String>>()),
 
             Get { key, source } => {
                 let s = atom_src(source.as_ref());
@@ -2105,6 +2290,23 @@ impl ExprSpec {
                 dyn_indicator::chain(resample_dyn, inner_dyn)
             }
             Unstable { source } => dyn_indicator::unstable_wrap(source.build(anchor, book, schema)),
+            AtChild { source } => {
+                // Rebuild `source` against the enclosing book's linked
+                // book — the per-child book, paired with the aggregate
+                // by `PortfolioSpec::build`. Any book-anchored tag
+                // inside (`!drawdown`, `!return_per_bar`,
+                // `!trade_return`, `!drawdown_throttle`,
+                // `!equity_vol_target`, `!fractional_kelly`) then reads
+                // per-child state.
+                let linked = book.linked().unwrap_or_else(|| {
+                    panic!(
+                        "!at_child: no linked book on the enclosing scope \
+                         — this tag only makes sense inside a portfolio \
+                         weight-share template"
+                    )
+                });
+                source.build(anchor, linked, schema)
+            }
 
             Year { source } => {
                 let s = atom_src(source.as_ref());

@@ -9,7 +9,7 @@
 //! init-only, weights don't rebalance).
 //!
 //! ```yaml
-//! weights: !fixed [0.4, 0.6]
+//! weights: !value [0.4, 0.6]        # per-child fixed weights
 //! children:
 //!   - name: trend
 //!     strategy: !ma_crossover { symbol: BTC, fast: 20, slow: 50 }
@@ -32,9 +32,12 @@
 //!     strategy: !import { path: trend.yml, params: { FAST: 50, SLOW: 200 } }
 //! ```
 //!
-//! `weights:` is optional — omitting it (or writing `!equal_weight`) picks
-//! [`EqualWeight`](fugazi::portfolio::policy::EqualWeight), splitting cash
-//! 1/N across children.
+//! `weights:` is a portfolio-scope indicator expression, instantiated per
+//! child at build time. Omitting it picks an equal split (`1/N`).
+//! `!value <list>` gives per-child indexed constants (the classic "fixed
+//! weights" case); any other expression drives dynamic weighting.
+//! `!fixed [...]` and `!equal_weight` are recognized as sugar and
+//! rewritten to their `!value` equivalents at load time.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -44,7 +47,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use fugazi::indicators::{Book, Position};
-use fugazi::portfolio::policy::{EqualWeight, Fixed, WeightPolicy};
+use fugazi::portfolio::policy::{EqualWeight, Fixed};
 use fugazi::portfolio::Portfolio;
 use fugazi::prelude::*;
 use fugazi::types::Snapshot;
@@ -60,22 +63,45 @@ use super::signal::SignalSpec;
 use super::template::SpecTemplate;
 
 /// A whole `portfolio.yml`: an ordered list of children plus an optional
-/// weight policy that governs how the initial cash is split at build.
+/// weight expression governing how cash is split at build and re-targeted
+/// on each rebalance-fire.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortfolioSpec {
-    /// The child strategies, in insertion order. Weights returned by
-    /// [`WeightPolicySpec`] apply in the same order. Must be non-empty.
+    /// The child strategies, in insertion order. Weight expressions are
+    /// instantiated per child in the same order, and `!value <list>`
+    /// literals index into their list by that position. Must be non-empty.
     pub children: Vec<PortfolioChildSpec>,
 
-    /// How the initial cash is split across children at build. Omitted
-    /// means [`WeightPolicySpec::EqualWeight`] (1/N per child).
+    /// The weight expression: a portfolio-scope indicator instantiated
+    /// once per child at build time. The portfolio reads each instance's
+    /// value at every rebalance-fire and normalizes `w_i = N_i / Σ N_j`.
     ///
-    /// Weights are read once at build to seed each child's sub-wallet;
-    /// on subsequent [`rebalance_on`](Self::rebalance_on) fire bars the
-    /// policy is re-queried to compute new targets.
-    #[serde(default)]
-    pub weights: Option<WeightPolicySpec>,
+    /// Everything is expressions — the two common patterns just use
+    /// convenient constants:
+    /// - **Omitted** → equal weight (every child seeded to `1/N`; on
+    ///   rebalance-fire, equal target as long as no weight expression
+    ///   changes it).
+    /// - **`!value [w0, w1, ...]`** → per-child indexed constant (child
+    ///   *i* reads `w_i`). Equivalent to the classic "fixed weights"
+    ///   policy — no separate tag needed.
+    /// - **`!value 1.0`** (or any per-child constant) → normalizes to
+    ///   `1/N`, so an equivalent to explicit "equal weight".
+    /// - **Any other expression** — e.g.
+    ///   `weights: !at_child !drawdown_throttle { max_drawdown: 0.15 }`
+    ///   for aggregate-drawdown-throttled per-child sizing; the whole
+    ///   surface of [`ExprSpec`] is available. `!fixed` and
+    ///   `!equal_weight` are recognized as sugar and rewritten to the
+    ///   corresponding `!value` form at load time.
+    ///
+    /// Per-child instantiation supplies `!arg SYM` (single-asset
+    /// children only), `!arg CHILD_NAME`, and `!arg CHILD_INDEX` (a
+    /// numeric index used to resolve `!value <list>` literals).
+    ///
+    /// Weights are magnitudes and needn't sum to `1.0`; the portfolio
+    /// normalizes on use.
+    #[serde(default, deserialize_with = "deserialize_weights")]
+    pub weights: Option<SpecTemplate<ExprSpec>>,
 
     /// The **rebalance gate**: a boolean signal deciding, on each bar,
     /// whether the portfolio runs one rebalance cycle after children
@@ -226,32 +252,132 @@ fn is_preset_tag(name: &str) -> bool {
     )
 }
 
-/// YAML surface for the [`WeightPolicy`] governing the initial cash split
-/// and each rebalance target.
+/// Deserialize the `weights:` field, rewriting the sugar tags
+/// `!fixed [w0, w1, ...]` and `!equal_weight` to their canonical
+/// `!value` equivalents before wrapping in the deferred
+/// [`SpecTemplate<ExprSpec>`].
 ///
-/// Externally tagged:
-/// - `!equal_weight` — every child's N = 1 (stateless uniform).
-/// - `!fixed [w1, w2, …]` — fixed literal weights, one per child.
-/// - `!indicator <template>` — an [`ExprSpec`] template built per child.
-///   At each rebalance-fire the portfolio reads `N_i` from child i's
-///   indicator instance and normalizes `w_i = N_i / Σ N_j`.
+/// The two sugar tags exist so common weight cases stay readable:
+/// - `!fixed [w0, w1, ...]` → `!value [w0, w1, ...]` (per-child indexed
+///   list literal).
+/// - `!equal_weight` → `!value 1.0` (any per-child constant normalizes
+///   to `1/N`).
 ///
-/// Weights are magnitudes and needn't sum to `1.0` — the portfolio
-/// normalizes on use.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum WeightPolicySpec {
-    /// The 1/N uniform policy — stateless.
-    EqualWeight,
-    /// A fixed weight vector of length `children.len()`. Panics at build
-    /// if the vector's length doesn't match the number of children.
-    Fixed(Vec<Real>),
-    /// A per-child indicator template. Instantiated once per child at
-    /// build (with the child's `!arg SYM` — its symbol for single-asset
-    /// children — and `!arg CHILD_NAME` in scope); each instance is
-    /// advanced every bar by the portfolio, and read into a weight at
-    /// rebalance-fire.
-    Indicator(SpecTemplate<ExprSpec>),
+/// Everything else falls through untouched — the whole [`ExprSpec`]
+/// surface is available under `weights:`, e.g.
+/// `weights: !at_child !drawdown_throttle { max_drawdown: 0.15 }`.
+fn deserialize_weights<'de, D>(
+    d: D,
+) -> Result<Option<SpecTemplate<ExprSpec>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let raw: Option<Value> = Option::deserialize(d)?;
+    let raw = match raw {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    let rewritten = rewrite_weights_sugar(raw).map_err(D::Error::custom)?;
+    Ok(Some(SpecTemplate::<ExprSpec>::from_tree(rewritten)))
+}
+
+/// Rewrite `!fixed`/`!equal_weight` at the top level of a weights
+/// expression to their `!value` equivalents. The rewrite is shallow
+/// (only the outermost node) since these tags are policy-shortcuts,
+/// not general primitives.
+fn rewrite_weights_sugar(v: Value) -> std::result::Result<Value, String> {
+    use serde_json::json;
+    // Sugar tags arrive from the load pipeline as single-key objects
+    // (the serde_norway → serde_json bridge encodes YAML tags this way).
+    if let Value::Object(m) = &v
+        && m.len() == 1
+    {
+        let (k, payload) = m.iter().next().unwrap();
+        match k.as_str() {
+            "fixed" => {
+                // `!fixed [w0, w1, ...]` → `!value [w0, w1, ...]`.
+                // Payload must be a numeric list; typed parse of the
+                // resulting `!value` verifies element shape.
+                return Ok(json!({ "value": payload.clone() }));
+            }
+            "equal_weight" => {
+                // `!equal_weight` → `!value 1.0`. Payload is expected
+                // to be `null`/`{}` (unit tag); accept either.
+                // Normalization at rebalance-fire turns every child's
+                // `1.0` into `1/N`.
+                return Ok(json!({ "value": 1.0 }));
+            }
+            _ => {}
+        }
+    }
+    Ok(v)
+}
+
+/// Recursively rewrite every `!value <list>` node in `tree` to
+/// `!value <list[index]>` — the per-child indexing pass. Called once
+/// per child in [`PortfolioSpec::build`] with that child's index.
+///
+/// Non-list `!value` payloads (`Real`, `Str`) and every non-`!value`
+/// node pass through untouched. An out-of-range `index` leaves the list
+/// alone; the downstream typed parse then rejects the list as an
+/// invalid `!value` payload in a non-per-child context (matches the
+/// panic path in [`ExprSpec::build`]).
+fn rewrite_value_list_by_index(v: Value, index: usize) -> Value {
+    match v {
+        Value::Object(mut m) => {
+            // Detect `{"value": <list>}` — rewrite in place.
+            let is_value_list = m.len() == 1
+                && m.get("value")
+                    .map(|payload| payload.is_array())
+                    .unwrap_or(false);
+            if is_value_list {
+                let payload = m.remove("value").unwrap();
+                if let Value::Array(items) = payload {
+                    if let Some(elem) = items.get(index) {
+                        let mut out = serde_json::Map::new();
+                        out.insert("value".to_string(), elem.clone());
+                        return Value::Object(out);
+                    } else {
+                        // Restore original so downstream can report the
+                        // shape mismatch clearly.
+                        let mut out = serde_json::Map::new();
+                        out.insert("value".to_string(), Value::Array(items));
+                        return Value::Object(out);
+                    }
+                }
+            }
+            // Otherwise recurse into every value.
+            let rebuilt: serde_json::Map<String, Value> = m
+                .into_iter()
+                .map(|(k, v)| (k, rewrite_value_list_by_index(v, index)))
+                .collect();
+            Value::Object(rebuilt)
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|v| rewrite_value_list_by_index(v, index))
+                .collect(),
+        ),
+        scalar => scalar,
+    }
+}
+
+/// If `tree` is exactly `!value <list of numbers>` at the top level,
+/// extract the list as `Vec<Real>`. Used by [`resolve_allocations`] to
+/// give a `!fixed`-style initial cash split the same seed-time
+/// behavior as the classic policy variant. Returns `None` for any other
+/// shape (dynamic expressions, string values, nested trees).
+fn extract_top_level_value_list(tree: &Value) -> Option<Vec<Real>> {
+    let m = tree.as_object()?;
+    if m.len() != 1 {
+        return None;
+    }
+    let list = m.get("value")?.as_array()?;
+    list.iter()
+        .map(|v| v.as_f64())
+        .collect::<Option<Vec<Real>>>()
 }
 
 impl PortfolioSpec {
@@ -294,8 +420,9 @@ impl PortfolioSpec {
     ///
     /// # Panics
     /// Panics if the spec declares no children (a zero-child portfolio has
-    /// no meaning) or if a [`WeightPolicySpec::Fixed`] weight vector's
-    /// length doesn't match the number of children.
+    /// no meaning) or if a `weights: !value <list>` (or sugar `!fixed
+    /// <list>`) has a length that doesn't match the number of children
+    /// — a per-child index out of range for the list.
     pub fn build(
         &self,
         total_initial_equity: Real,
@@ -327,12 +454,23 @@ impl PortfolioSpec {
         // children (documented v1 limitation).
         let mut max_stable = 0usize;
         let mut max_warm_up = 0usize;
-        let mut builder = Portfolio::<String>::builder().with_initial_equity(total_initial_equity);
-        // Capture each child's Book at build so weight-share templates
-        // below can anchor `!drawdown` / `!return_per_bar` /
-        // `!trade_return` against the child's own book (not a dummy).
-        // The Book handle is a shared `Rc<RefCell<_>>`, so cloning is
-        // cheap and the template's view stays in sync with the child.
+        // Aggregate book — the portfolio's own mark-to-market view. Used
+        // as the **default anchor** for weight-share templates below (so
+        // `!drawdown`, `!return_per_bar`, `!drawdown_throttle`,
+        // `!equity_vol_target`, `!fractional_kelly` inside a template
+        // resolve against the aggregate). Per-child access is opt-in via
+        // `!at_child { ... }`, which walks to the child book via the
+        // link we install on each per-child clone below. Also handed to
+        // `PortfolioBuilder::aggregate_book` so the built portfolio
+        // shares the exact same handle — one state, one truth.
+        let agg_book: Book<String> = Book::new(total_initial_equity);
+        let mut builder = Portfolio::<String>::builder()
+            .with_initial_equity(total_initial_equity)
+            .aggregate_book(agg_book.clone());
+        // Capture each child's Book at build so we can pair it with a
+        // per-child clone of the aggregate book below. The Book handle
+        // is a shared `Arc<Mutex<_>>`, so cloning is cheap and each
+        // template's view stays in sync with the child it points at.
         let mut child_books: Vec<Book<String>> = Vec::with_capacity(self.children.len());
         for (i, c) in self.children.iter().enumerate() {
             let name = c
@@ -377,26 +515,33 @@ impl PortfolioSpec {
         if let Some(c) = costs {
             builder = builder.costs(c);
         }
-        // Install the policy on the builder; on rebalance-fire bars
-        // `Portfolio` re-queries `WeightPolicy::weights` to compute new
-        // target equities from the aggregate. When the policy is
-        // `!indicator`, we also build one weight-share indicator per
-        // child below (which wins over the underlying policy on fire).
+        // Install the library-side `WeightPolicy` fallback. This drives
+        // two things: (a) the initial cash split, so sub-wallets seed at
+        // the same values the child strategies' books saw as their
+        // initial equity; (b) the *fallback* target on rebalance-fire
+        // when every weight-share reads `0` (still warming, or
+        // genuinely zero). Omitting `weights:` picks
+        // [`EqualWeight`](fugazi::portfolio::policy::EqualWeight) —
+        // stateless, equal split now and forever. A `!value <list>`
+        // pre-resolves to `Fixed(list)` so the seed and fallback both
+        // respect the user's per-child weights. Any other expression
+        // gets a `Fixed(equal-split)` fallback so a warming expression
+        // rebalances toward its initial (equal) seed.
         builder = match &self.weights {
-            Some(WeightPolicySpec::Fixed(w)) => builder.weights(Fixed::new(w.clone())),
-            Some(WeightPolicySpec::EqualWeight)
-            | Some(WeightPolicySpec::Indicator(_))
-            | None => builder.weights(EqualWeight),
+            None => builder.weights(EqualWeight),
+            Some(_) => builder.weights(Fixed::new(allocations.clone())),
         };
-        // Weight-share indicators (only under !indicator): one
-        // instance per child. Each carries the child's `CHILD_NAME`
-        // (always) and `SYM` (single-asset only — a template using
-        // `!arg SYM` against a basket / multi / pairs child errors at
-        // build). The Book anchor is currently a dummy per-child book
-        // seeded at the allocation; per-child book plumbing (wiring
-        // the actual child's book so `!drawdown` / `!return_per_bar`
-        // read against real state) is a follow-up.
-        if let Some(WeightPolicySpec::Indicator(template)) = &self.weights {
+        // Weight-share indicators — one instance per child. Each
+        // carries `!arg CHILD_NAME` (always), `!arg SYM` (single-asset
+        // children only), and `!arg CHILD_INDEX` (a number, used to
+        // resolve `!value <list>` literals per child). The Book anchor
+        // is a per-child clone of the aggregate book, linked to that
+        // child's own book — so `!drawdown` / `!return_per_bar` /
+        // `!drawdown_throttle` / `!equity_vol_target` / `!fractional_kelly`
+        // inside a template read aggregate state by default, and
+        // wrapping any book-anchored subtree in `!at_child { ... }`
+        // walks to that child's per-child book via `Book::linked`.
+        if let Some(template) = &self.weights {
             let mut shares: Vec<
                 Box<
                     dyn fugazi::indicator::Indicator<
@@ -415,21 +560,35 @@ impl PortfolioSpec {
                     "CHILD_NAME".to_string(),
                     Value::String(name.clone()),
                 );
+                args.insert(
+                    "CHILD_INDEX".to_string(),
+                    Value::Number(serde_json::Number::from(i)),
+                );
                 if let PortfolioChildStrategy::Single(s) = &c.strategy {
                     args.insert(
                         "SYM".to_string(),
                         Value::String(s.symbol().to_string()),
                     );
                 }
-                let concrete = template.build(&args).unwrap_or_else(|e| {
+                // Preprocess the template tree so `!value <list>`
+                // literals resolve to `!value <list[i]>` for this
+                // child. Runs before args::substitute (which only
+                // handles `!arg`) so the typed parse below sees only
+                // scalar `!value` payloads.
+                let preprocessed_tree =
+                    rewrite_value_list_by_index(template.tree().clone(), i);
+                let per_child_template =
+                    SpecTemplate::<ExprSpec>::from_tree(preprocessed_tree);
+                let concrete = per_child_template.build(&args).unwrap_or_else(|e| {
                     panic!(
                         "PortfolioSpec::build: weight_share template failed \
                          for child '{name}' (index {i}): {e}"
                     )
                 });
                 let anchor = Position::new();
+                let book = agg_book.clone().linked_to(child_books[i].clone());
                 let dyn_ind: Box<dyn DynIndicator> =
-                    concrete.build(&anchor, &child_books[i], schema);
+                    concrete.build(&anchor, &book, schema);
                 let real_ind = AsReal::new(dyn_ind);
                 max_stable = max_stable.max(real_ind.stable_period());
                 max_warm_up = max_warm_up.max(real_ind.warm_up_period());
@@ -464,27 +623,31 @@ impl PortfolioSpec {
     }
 
     /// Pre-compute the per-child cash allocations the built [`Portfolio`]
-    /// will seed each sub-wallet with — used to hand each child its own
-    /// slice as its book seed. Mirrors the split
-    /// [`PortfolioBuilder::build`](fugazi::portfolio::PortfolioBuilder::build)
-    /// does internally; kept in sync by construction (both consult the same
-    /// policy via [`WeightPolicy::weights`]).
+    /// will seed each sub-wallet with. The rule:
+    ///
+    /// - **Omitted `weights:`** → equal split (`1/N`).
+    /// - **`weights: !value <list>`** (a pure per-child indexed
+    ///   constant) → use `list[i]` as the initial weight for child `i`.
+    ///   This preserves the classic "fixed weights" behavior: writing
+    ///   `weights: !fixed [0.7, 0.3]` (which lowers to `!value [0.7,
+    ///   0.3]`) seeds 70/30 from bar zero.
+    /// - **Any other expression** → equal split for initial cash.
+    ///   Dynamic expressions haven't warmed up at build time, so an
+    ///   equal seed is the safe default; the first rebalance-fire then
+    ///   hands weighting to the expression.
     fn resolve_allocations(&self, total: Real, n: usize) -> Vec<Real> {
-        // For the initial allocation split, `!indicator` behaves as
-        // `!equal_weight` — the indicators haven't seen any bars yet,
-        // so there's no read to normalize on. First rebalance-fire
-        // then hands weighting to the per-child shares.
-        let policy: Box<dyn WeightPolicy> = match &self.weights {
-            Some(WeightPolicySpec::Fixed(w)) => Box::new(Fixed::new(w.clone())),
-            Some(WeightPolicySpec::EqualWeight)
-            | Some(WeightPolicySpec::Indicator(_))
-            | None => Box::new(EqualWeight),
+        let weights = match &self.weights {
+            None => vec![1.0; n],
+            Some(template) => match extract_top_level_value_list(template.tree()) {
+                Some(list) if list.len() == n => list,
+                _ => vec![1.0; n],
+            },
         };
-        let weights = policy.weights(n);
         let sum: Real = weights.iter().sum();
         if sum <= 0.0 {
-            // Degenerate policy (all-zero weights): fall through to equal
-            // split so the CLI reports something usable rather than 0s.
+            // Degenerate weights (all zero / negative): fall through to
+            // equal split so the CLI reports something usable rather
+            // than 0s.
             return vec![total / n as Real; n];
         }
         weights.iter().map(|w| total * w / sum).collect()
@@ -612,7 +775,10 @@ mod tests {
         assert_eq!(spec.children.len(), 2);
         assert!(matches!(&spec.children[0].strategy, PortfolioChildStrategy::Single(_)));
         assert!(matches!(&spec.children[1].strategy, PortfolioChildStrategy::Single(_)));
-        assert!(matches!(spec.weights, Some(WeightPolicySpec::Fixed(_))));
+        // `!fixed [...]` lowered to `!value [...]` via sugar rewrite.
+        let list = extract_top_level_value_list(spec.weights.as_ref().unwrap().tree())
+            .expect("!fixed should have lowered to !value <list>");
+        assert_eq!(list, vec![0.6, 0.4]);
     }
 
     #[test]
@@ -756,16 +922,13 @@ mod tests {
     }
 
     #[test]
-    fn parses_indicator_weight_policy() {
-        // `weights: !indicator <template>` picks the per-child indicator
-        // policy. Each child gets its own instance of the template built
-        // with `!arg SYM` (single-asset only) and `!arg CHILD_NAME`.
-        // Nested `!tag` inside the `!indicator` payload must be wrapped
-        // in the block form since serde_norway doesn't accept adjacent
-        // top-level tags on the same line.
+    fn parses_indicator_weight_policy_without_indicator_wrapper() {
+        // A bare expression under `weights:` falls through into the
+        // indicator template — no `!indicator` wrapper needed. Each
+        // child gets its own instance of the template built with
+        // `!arg SYM` (single-asset only) and `!arg CHILD_NAME`.
         let yaml = r#"
             weights:
-              !indicator
               close:
                 source:
                   pick:
@@ -775,7 +938,7 @@ mod tests {
               - strategy: !buy_and_hold { symbol: B }
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
-        assert!(matches!(spec.weights, Some(WeightPolicySpec::Indicator(_))));
+        assert!(spec.weights.is_some());
         // Should build cleanly — each child's template instance uses its
         // own symbol via !arg SYM.
         let _portfolio = spec.build(1_000.0, &Schema::empty(), None);
@@ -865,5 +1028,170 @@ mod tests {
             (e0 - e1).abs() < 1.0,
             "cash-mode rebalance should snap sub-equities to 50/50; got e0={e0}, e1={e1}",
         );
+    }
+
+    #[test]
+    fn value_list_seeds_and_rebalances_at_the_indexed_weights() {
+        // `weights: !value [0.75, 0.25]` (the canonical form of what
+        // `!fixed` used to be) both seeds the initial cash split at
+        // 75/25 and — on rebalance-fire — snaps back to that same
+        // target after any price divergence.
+        let yaml = r#"
+            weights: !value [0.75, 0.25]
+            rebalance_on: !every 1
+            children:
+              - name: a
+                strategy:
+                  symbol: A
+                  sizing: !value 0.5
+                  long:
+                    enter: !value true
+                    exit: !value false
+              - name: b
+                strategy:
+                  symbol: B
+                  sizing: !value 0.5
+                  long:
+                    enter: !value true
+                    exit: !value false
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let mut portfolio = spec.build(1_000.0, &Schema::empty(), None);
+        let mut wallet = portfolio.wallet_view();
+        // Initial split respects the list (seed via extract_top_level_value_list).
+        assert!((wallet.sub_equity(0).0 - 750.0).abs() < 1e-6);
+        assert!((wallet.sub_equity(1).0 - 250.0).abs() < 1e-6);
+        // Run a few bars — rebalance keeps ratios locked to 75/25.
+        for _ in 0..4 {
+            for fill in wallet.update("A".to_string(), candle(100.0)) {
+                portfolio.on_fill(&fill);
+            }
+            for fill in wallet.update("B".to_string(), candle(100.0)) {
+                portfolio.on_fill(&fill);
+            }
+            portfolio.update(snap_of(&[("A", 100.0), ("B", 100.0)]));
+            portfolio.trade(&mut wallet);
+        }
+        let e0 = wallet.sub_equity(0).0;
+        let e1 = wallet.sub_equity(1).0;
+        let total = e0 + e1;
+        assert!(
+            (e0 / total - 0.75).abs() < 0.01 && (e1 / total - 0.25).abs() < 0.01,
+            "!value [0.75, 0.25] should hold 75/25 split; got e0={e0}, e1={e1}",
+        );
+    }
+
+    #[test]
+    fn fixed_sugar_lowers_to_value_list() {
+        // `!fixed [0.6, 0.4]` should behave identically to
+        // `!value [0.6, 0.4]` — both lower to the same tree.
+        let yaml_fixed = r#"
+            weights: !fixed [0.6, 0.4]
+            children:
+              - strategy: !buy_and_hold { symbol: A }
+              - strategy: !buy_and_hold { symbol: B }
+        "#;
+        let yaml_value = r#"
+            weights: !value [0.6, 0.4]
+            children:
+              - strategy: !buy_and_hold { symbol: A }
+              - strategy: !buy_and_hold { symbol: B }
+        "#;
+        let spec_fixed =
+            PortfolioSpec::from_text_with_params(yaml_fixed, &HashMap::new()).unwrap();
+        let spec_value =
+            PortfolioSpec::from_text_with_params(yaml_value, &HashMap::new()).unwrap();
+        assert_eq!(
+            spec_fixed.weights.as_ref().unwrap().tree(),
+            spec_value.weights.as_ref().unwrap().tree(),
+            "!fixed should lower to the same tree as !value <list>",
+        );
+    }
+
+    #[test]
+    fn equal_weight_sugar_lowers_to_value_one() {
+        // `!equal_weight` should lower to `!value 1.0` — a per-child
+        // constant that normalizes to `1/N`.
+        let yaml = r#"
+            weights: !equal_weight
+            children:
+              - strategy: !buy_and_hold { symbol: A }
+              - strategy: !buy_and_hold { symbol: B }
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let tree = spec.weights.as_ref().unwrap().tree();
+        let m = tree.as_object().expect("tree should be an object");
+        assert_eq!(m.len(), 1);
+        let payload = m.get("value").expect("!equal_weight → !value <n>");
+        assert_eq!(payload.as_f64(), Some(1.0));
+    }
+
+    #[test]
+    fn default_weight_share_anchor_is_the_aggregate_book() {
+        // A weight-share template whose value is `!equity_peak` — no
+        // scope wrapping — reads the *aggregate* book by default. Both
+        // children read the same aggregate value each rebalance-fire, so
+        // the normalized weight vector is uniform regardless of the
+        // underlying Fixed fallback's 3:1 skew.
+        let yaml = r#"
+            weights:
+              equity_peak: {}
+            rebalance_on: !every 1
+            children:
+              - name: a
+                strategy:
+                  symbol: A
+                  sizing: !value 0.5
+                  long:
+                    enter: !value true
+                    exit: !value false
+              - name: b
+                strategy:
+                  symbol: B
+                  sizing: !value 0.5
+                  long:
+                    enter: !value true
+                    exit: !value false
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let mut portfolio = spec.build(1_000.0, &Schema::empty(), None);
+        let mut wallet = portfolio.wallet_view();
+
+        for _ in 0..4usize {
+            for fill in wallet.update("A".to_string(), candle(100.0)) {
+                portfolio.on_fill(&fill);
+            }
+            for fill in wallet.update("B".to_string(), candle(100.0)) {
+                portfolio.on_fill(&fill);
+            }
+            portfolio.update(snap_of(&[("A", 100.0), ("B", 100.0)]));
+            portfolio.trade(&mut wallet);
+        }
+        let e0 = wallet.sub_equity(0).0;
+        let e1 = wallet.sub_equity(1).0;
+        assert!(
+            (e0 - e1).abs() < 1.0,
+            "weight-share reading same aggregate value per child should split \
+             equally; got e0={e0}, e1={e1}",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "!at_child")]
+    fn at_child_outside_portfolio_context_panics() {
+        // A `!at_child` used in a place that has no linked book
+        // (a plain single-asset spec) panics at build.
+        use super::super::SingleStrategySpec;
+        let yaml = r#"
+            symbol: X
+            long:
+              enter: !gt
+                lhs:
+                  at_child:
+                    source: !drawdown
+                rhs: !value 0
+        "#;
+        let spec = SingleStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let _built = spec.build(1_000.0, &Schema::empty());
     }
 }
