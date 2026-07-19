@@ -130,6 +130,7 @@
 //! [`Rc<RefCell<_>>`]: std::rc::Rc
 
 pub mod policy;
+pub mod rebalance;
 pub mod wallet;
 
 use std::cell::RefCell;
@@ -141,9 +142,10 @@ use crate::indicator::Indicator;
 use crate::indicators::{Book, Const};
 use crate::strategy::Strategy;
 use crate::types::{Real, Snapshot};
-use crate::wallet::{Order, Units, Wallet};
+use crate::wallet::{Order, Wallet};
 
 use self::policy::{ChildSample, WeightPolicy};
+use self::rebalance::{PositionInfo, PositionRebalancer, Proportional};
 use self::wallet::{PortfolioInner, SubWalletHandle, allocate_funds, seed_subs};
 
 pub use self::wallet::PortfolioWallet;
@@ -197,6 +199,12 @@ pub struct Portfolio<Sym> {
     /// bar in [`update`](Strategy::update). Empty vector means "no
     /// per-child overrides — use the policy's weights".
     share_indicators: Vec<WeightShareChain<Sym>>,
+    /// The **position-phase policy** — decides which positions to
+    /// scale down (and by how much) to raise the residual cash a
+    /// contributor's cash-phase donation couldn't cover. Defaults to
+    /// [`Proportional`]. Install a custom impl via
+    /// [`PortfolioBuilder::position_rebalancer`].
+    position_rebalancer: Box<dyn PositionRebalancer<Sym>>,
     /// Aggregate [`Book`] of the portfolio, marked to market on each
     /// [`update`](Strategy::update) from the sum of every sub-wallet's
     /// equity. Handed out by [`book`](Self::book); the CLI's
@@ -477,44 +485,52 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Portfolio<Sym> {
             inner.rebalance_cash_to(&targets)
         };
 
-        // Position phase: for each contributor whose cash phase couldn't
-        // fully cover its donation, scale down every held position
-        // proportionally so the freed cash lands next bar and can flow to
-        // receivers on the following fire cycle. A shortfall of `0` (fully
-        // covered by cash) skips this phase for that child — no order,
-        // no blotter noise. Fills route back through the sub-wallet's own
-        // seam so per-child `on_fill` fires normally.
+        // Position phase: hand each contributor's shortfall + position
+        // snapshot to the installed [`PositionRebalancer`] policy,
+        // which returns the targeted per-position unit counts. Default
+        // policy is [`Proportional`] — scale every leg by
+        // `(1 - shortfall/invested)`. Alternatives (largest-first,
+        // "sell losers first", per-child bespoke) plug in via
+        // [`PortfolioBuilder::position_rebalancer`] without changing
+        // anything below.
+        //
+        // A shortfall of `0` (fully covered by cash) skips this phase
+        // for that child — no order, no blotter noise. Fills route back
+        // through the sub-wallet's own seam so per-child `on_fill`
+        // fires normally.
         for (i, &shortfall) in shortfalls.iter().enumerate() {
             if shortfall <= 0.0 {
                 continue;
             }
-            // After cash phase this child is fully cash-out; its equity
-            // is entirely invested. Fraction to unwind = shortfall /
-            // invested value, clamped to [0, 1].
-            let (invested, positions_snapshot): (Real, Vec<(Sym, Real)>) = {
+            // Snapshot per-position marks so the policy can decide by
+            // absolute value (largest-first) or a custom rule. Prices
+            // come from the sub-wallet's own `price()` — the same mark
+            // it uses for equity accounting; positions without a mark
+            // are skipped defensively (their value would be undefined).
+            let positions_snapshot: Vec<PositionInfo<Sym>> = {
                 let inner = self.inner.borrow();
                 let sub = &inner.subs[i];
-                let inv = sub.equity().0 - sub.funds().0;
-                let snap: Vec<(Sym, Real)> = sub
-                    .positions()
-                    .map(|u| (u.symbol.clone(), u.amount))
-                    .collect();
-                (inv, snap)
+                sub.positions()
+                    .filter_map(|u| {
+                        sub.price(&u.symbol).map(|p| PositionInfo {
+                            symbol: u.symbol.clone(),
+                            units: u.amount,
+                            price: p.0,
+                        })
+                    })
+                    .collect()
             };
-            if invested <= 0.0 || positions_snapshot.is_empty() {
+            if positions_snapshot.is_empty() {
                 continue;
             }
-            let f = (shortfall / invested).clamp(0.0, 1.0);
-            if f <= 0.0 {
+            let targets = self
+                .position_rebalancer
+                .plan_scaledowns(&positions_snapshot, shortfall);
+            if targets.is_empty() {
                 continue;
             }
-            let scale = 1.0 - f;
             let mut handle = SubWalletHandle::new(Rc::clone(&self.inner), i);
-            for (sym, amt) in positions_snapshot {
-                let target = Units {
-                    symbol: sym,
-                    amount: amt * scale,
-                };
+            for target in targets {
                 // Ignore the Ack — the fill routing tables are already
                 // updated by SubWalletHandle::set_position, and any
                 // WalletError here is a genuine bug (PaperWallet queues
@@ -541,6 +557,9 @@ pub struct PortfolioBuilder<Sym> {
     costs: Option<TradingCosts>,
     rebalance: Option<RebalanceSignal<Sym>>,
     share_indicators: Vec<WeightShareChain<Sym>>,
+    /// Position-phase rebalancer. `None` picks the [`Proportional`]
+    /// default at build; set via [`position_rebalancer`](Self::position_rebalancer).
+    position_rebalancer: Option<Box<dyn PositionRebalancer<Sym>>>,
     /// Pre-supplied aggregate [`Book`] — when set, the built portfolio
     /// uses this book (rather than a freshly-seeded one) so a caller that
     /// needed the handle *before* `build()` (typically the CLI's
@@ -560,12 +579,13 @@ impl<Sym: 'static> Default for PortfolioBuilder<Sym> {
             costs: None,
             rebalance: None,
             share_indicators: Vec::new(),
+            position_rebalancer: None,
             agg_book: None,
         }
     }
 }
 
-impl<Sym: Clone + Eq + Hash + 'static> PortfolioBuilder<Sym> {
+impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
     /// Seed the portfolio's total cash budget. Split across children by
     /// the weight policy at [`build`](Self::build) time.
     ///
@@ -701,6 +721,24 @@ impl<Sym: Clone + Eq + Hash + 'static> PortfolioBuilder<Sym> {
         self
     }
 
+    /// Install a custom [`PositionRebalancer`] impl — the pluggable
+    /// position-phase policy that decides which held positions to
+    /// scale down (and by how much) to raise the cash a contributor's
+    /// cash-phase donation couldn't cover.
+    ///
+    /// Defaults to [`Proportional`] — every leg contributes in
+    /// proportion to its value, matching the original hardcoded
+    /// behavior. Alternatives ship as [`LargestFirst`] (liquidates
+    /// biggest positions first) and any user-supplied impl of the
+    /// trait ("sell losers first", "keep hedges intact", etc.).
+    pub fn position_rebalancer<R>(mut self, rebalancer: R) -> Self
+    where
+        R: PositionRebalancer<Sym> + 'static,
+    {
+        self.position_rebalancer = Some(Box::new(rebalancer));
+        self
+    }
+
     /// Realize the [`Portfolio`] — resolve the initial weight vector from
     /// the policy, split `initial_equity` across children accordingly,
     /// seed one [`PaperWallet`](crate::PaperWallet) per child at that
@@ -716,6 +754,7 @@ impl<Sym: Clone + Eq + Hash + 'static> PortfolioBuilder<Sym> {
             costs,
             rebalance,
             share_indicators,
+            position_rebalancer,
             agg_book,
         } = self;
         assert!(
@@ -747,6 +786,8 @@ impl<Sym: Clone + Eq + Hash + 'static> PortfolioBuilder<Sym> {
         // the handle before `build()` to wire per-child links);
         // otherwise seed a fresh book at the portfolio's initial equity.
         let agg_book = agg_book.unwrap_or_else(|| Book::new(initial_equity));
+        let position_rebalancer: Box<dyn PositionRebalancer<Sym>> =
+            position_rebalancer.unwrap_or_else(|| Box::new(Proportional));
         Portfolio {
             children,
             inner,
@@ -754,6 +795,7 @@ impl<Sym: Clone + Eq + Hash + 'static> PortfolioBuilder<Sym> {
             bars_seen: 0,
             rebalance,
             share_indicators,
+            position_rebalancer,
             agg_book,
         }
     }

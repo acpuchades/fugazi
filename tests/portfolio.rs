@@ -895,3 +895,115 @@ fn weight_share_reads_aggregate_directly() {
         "aggregate-book weight shares should equalize the split; got e0={e0}, e1={e1}",
     );
 }
+
+/// Test strategy that opens *two* long positions on its first `trade` call
+/// then goes idle. Lets us stage a contributor holding multiple positions
+/// of different sizes so a position-phase policy has a meaningful choice.
+struct SeedTwoThenIdle {
+    a: (&'static str, Real),
+    b: (&'static str, Real),
+    done: std::cell::Cell<bool>,
+}
+
+impl SeedTwoThenIdle {
+    fn new(a: (&'static str, Real), b: (&'static str, Real)) -> Self {
+        Self {
+            a,
+            b,
+            done: std::cell::Cell::new(false),
+        }
+    }
+}
+
+impl Strategy for SeedTwoThenIdle {
+    type Input = Snapshot<&'static str>;
+    type Symbol = &'static str;
+    fn update(&mut self, _snap: Snapshot<&'static str>) {}
+    fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
+        if self.done.get() {
+            return;
+        }
+        let _ = wallet.set_position(fugazi::wallet::Units {
+            symbol: self.a.0,
+            amount: self.a.1,
+        });
+        let _ = wallet.set_position(fugazi::wallet::Units {
+            symbol: self.b.0,
+            amount: self.b.1,
+        });
+        self.done.set(true);
+    }
+    fn reset(&mut self) {
+        self.done.set(false);
+    }
+}
+
+#[test]
+fn largest_first_position_phase_touches_only_the_bigger_leg() {
+    // A contributor over its target holds two positions of different
+    // sizes. LargestFirst should shrink the bigger one (leaving the
+    // smaller alone if the shortfall fits); Proportional would scale
+    // both.
+    //
+    // Setup: equal-weight seed (500 cash each of two children). Child 0
+    // opens 3 X @ 100 + 2 Y @ 100 → 500 invested, 0 cash, 500 equity.
+    // Child 1 idle at 500. Aggregate 1000. Equal-weight target: still
+    // 500 each — no rebalance yet.
+    //
+    // Then X pumps to 200. Child 0 equity = 3 * 200 + 2 * 100 = 800.
+    // Child 1 still 500. Aggregate 1300. Target 650 each. Child 0
+    // delta = -150. Cash = 0 → shortfall 150.
+    //
+    // Under LargestFirst: X value = 600 (biggest), Y = 200. Shortfall
+    // fits in X — keep (600-150)/600 = 75% of X → target 2.25 units.
+    // Y untouched at 2 units.
+    use fugazi::indicators::{Const, Every};
+    use fugazi::portfolio::rebalance::LargestFirst;
+
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(1_000.0)
+        .add(
+            "holds_x_and_y",
+            SeedTwoThenIdle::new(("X", 3.0), ("Y", 2.0)),
+        )
+        .add(
+            "idle",
+            SingleAssetStrategy::<&'static str>::with_initial_equity("Z", 500.0)
+                .long_on(
+                    Const::<Snapshot<&'static str>>::new(false),
+                    Const::<Snapshot<&'static str>>::new(false),
+                ),
+        )
+        .weights(EqualWeight)
+        .rebalance_on(Every::<Snapshot<&'static str>>::new(1))
+        .position_rebalancer(LargestFirst)
+        .build();
+    let mut wallet = portfolio.wallet_view();
+    // Bars 1-3 at $100 (seed + fill). Bars 4+ X pumps to $200 to force
+    // child 0 over-target under equal weighting.
+    let snaps: Vec<Snapshot<&'static str>> = (0..6)
+        .enumerate()
+        .map(|(bar, _)| {
+            let x_px = if bar < 3 { 100.0 } else { 200.0 };
+            let mut s = Snapshot::new();
+            s.push(Some("X"), None, Atom::new(flat_bar(x_px)));
+            s.push(Some("Y"), None, Atom::new(flat_bar(100.0)));
+            s.push(Some("Z"), None, Atom::new(flat_bar(100.0)));
+            s
+        })
+        .collect();
+    let _report = backtest::run(&mut portfolio, &mut wallet, snaps);
+
+    // Under LargestFirst, Y stays at 2 units and X shrinks. (Multiple
+    // rebalance cycles refine, but Y never gets touched.)
+    let y_units = wallet.position(&"Y").amount;
+    let x_units = wallet.position(&"X").amount;
+    assert!(
+        (y_units - 2.0).abs() < 1e-6,
+        "LargestFirst should leave Y at 2 units, got {y_units}"
+    );
+    assert!(
+        x_units > 0.0 && x_units < 3.0,
+        "LargestFirst should shrink X below its 3-unit seed; got {x_units}"
+    );
+}
