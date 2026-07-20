@@ -1942,6 +1942,35 @@ impl TryFrom<serde_norway::Value> for ExprSpec {
                     }
                 }
             }
+            // Bare number literal — auto-wrap as `!value N`. Numbers are
+            // never leaf names, so this is unambiguous: any position
+            // expecting an ExprSpec that got `70` really means "the
+            // constant 70". Removes the `!value` boilerplate from the
+            // most common comparison shape (`!gt { lhs: !close, rhs: 70 }`
+            // instead of `rhs: !value 70`).
+            serde_norway::Value::Number(n) => {
+                serde_norway::Value::Tagged(Box::new(TaggedValue {
+                    tag: Tag::new("value"),
+                    value: serde_norway::Value::Number(n),
+                }))
+            }
+            // Bare list of numbers — auto-wrap as `!value [...]`. Only
+            // meaningful inside a portfolio weight-share template
+            // (`weights: [0.4, 0.6]` for the per-child fixed-weights
+            // case). The typed parse of `!value` handles the shape
+            // check; a list of anything else (strings, nested maps)
+            // isn't a valid ExprSpec, so falling through to `other =>
+            // other` and letting serde report the mismatch is fine.
+            serde_norway::Value::Sequence(seq)
+                if seq
+                    .iter()
+                    .all(|item| matches!(item, serde_norway::Value::Number(_))) =>
+            {
+                serde_norway::Value::Tagged(Box::new(TaggedValue {
+                    tag: Tag::new("value"),
+                    value: serde_norway::Value::Sequence(seq),
+                }))
+            }
             other => other,
         };
         // Sugar tags — rewrite to their canonical form before typed

@@ -764,6 +764,49 @@ mod tests {
     }
 
     #[test]
+    fn bare_number_auto_wraps_as_value_in_expr_position() {
+        // `rhs: 100` (bare number) is auto-wrapped as `!value 100` — no
+        // more `!value` boilerplate needed in the common comparison
+        // shape. Same result as writing `rhs: !value 100` explicitly.
+        let spec_bare: SignalSpec =
+            serde_norway::from_str("!gt { lhs: close, rhs: 100 }").unwrap();
+        let spec_explicit: SignalSpec =
+            serde_norway::from_str("!gt { lhs: close, rhs: !value 100 }").unwrap();
+        let mut b1 = spec_bare.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
+        let mut b2 = spec_explicit.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
+        for px in [99.0, 100.0, 101.0] {
+            assert_eq!(
+                feed_bool(&mut b1, bar(px)),
+                feed_bool(&mut b2, bar(px)),
+                "bare-number and !value-wrapped forms must agree at px={px}",
+            );
+        }
+    }
+
+    #[test]
+    fn bare_bool_auto_wraps_as_value_in_signal_position() {
+        // `enter: true` / `exit: false` (bare bools) are auto-wrapped as
+        // `!value true` / `!value false` in signal positions. Removes
+        // the boilerplate from constant signal slots.
+        let spec_bare: SignalSpec = serde_norway::from_str("true").unwrap();
+        let spec_explicit: SignalSpec = serde_norway::from_str("!value true").unwrap();
+        let mut b1 = spec_bare.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
+        let mut b2 = spec_explicit.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
+        assert_eq!(feed_bool(&mut b1, bar(1.0)), feed_bool(&mut b2, bar(1.0)));
+    }
+
+    #[test]
+    fn bare_number_list_auto_wraps_as_value_in_expr_position() {
+        // A bare `[0.5, 0.5]` in an ExprSpec position auto-wraps to
+        // `!value [0.5, 0.5]` — the common case for portfolio weights
+        // being cleaner without the `!value` prefix.
+        let spec_bare: ExprSpec = serde_norway::from_str("[0.5, 0.5]").unwrap();
+        let spec_explicit: ExprSpec = serde_norway::from_str("!value [0.5, 0.5]").unwrap();
+        assert!(matches!(spec_bare, ExprSpec::Value(_)));
+        assert!(matches!(spec_explicit, ExprSpec::Value(_)));
+    }
+
+    #[test]
     fn polymorphic_eq_dispatches_by_lhs_output_type() {
         // `!eq` inspects `lhs`'s built output type and picks compare::Eq
         // (Real) or compare::StrEq (Str). Same YAML shape covers both.

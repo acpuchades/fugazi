@@ -445,6 +445,17 @@ impl TryFrom<serde_norway::Value> for SignalSpec {
                     }
                 }
             }
+            // Bare bool literal — auto-wrap as `!value true|false`.
+            // Bools are never leaf variants, so this is unambiguous.
+            // Removes the `!value` boilerplate from constant signal
+            // slots (`enter: true` / `exit: false` instead of `!value
+            // true` / `!value false`).
+            serde_norway::Value::Bool(b) => {
+                serde_norway::Value::Tagged(Box::new(TaggedValue {
+                    tag: Tag::new("value"),
+                    value: serde_norway::Value::Bool(b),
+                }))
+            }
             other => other,
         };
 
