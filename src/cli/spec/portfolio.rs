@@ -1698,10 +1698,10 @@ mod tests {
               !match
                 on: !value { arg: CHILD_GROUP }
                 cases:
-                  - value: momentum
-                    result: !value 2.0
-                  - value: mean_rev
-                    result: !value 1.0
+                  - when: momentum
+                    value: !value 2.0
+                  - when: mean_rev
+                    value: !value 1.0
                 default: !value 0.5
             rebalance_on: !every 1
             children:

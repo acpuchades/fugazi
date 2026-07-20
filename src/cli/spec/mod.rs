@@ -1298,10 +1298,10 @@ mod tests {
             !match
             on: close
             cases:
-              - value: 100.0
-                result: !value 1.0
-              - value: 200.0
-                result: !value 2.0
+              - when: 100.0
+                value: !value 1.0
+              - when: 200.0
+                value: !value 2.0
             default: !value -1.0
         "#;
         let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
@@ -1320,8 +1320,8 @@ mod tests {
             !match
             on: close
             cases:
-              - value: 42.0
-                result: !value 1.0
+              - when: 42.0
+                value: !value 1.0
             default: !value 0.0
         "#;
         let yaml_if_else = r#"
@@ -1372,10 +1372,10 @@ mod tests {
             !match
             on: close
             cases:
-              - value: 42.0
-                result: !value 1.0
-              - value: mixed_string
-                result: !value 2.0
+              - when: 42.0
+                value: !value 1.0
+              - when: mixed_string
+                value: !value 2.0
             default: !value 0.0
         "#;
         let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
@@ -1390,10 +1390,10 @@ mod tests {
             !match
             on: close
             cases:
-              - value: 100.0
-                result: !value 1.0
-              - value: 100.0
-                result: !value 999.0
+              - when: 100.0
+                value: !value 1.0
+              - when: 100.0
+                value: !value 999.0
             default: !value 0.0
         "#;
         let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();

@@ -163,10 +163,11 @@ impl TryFrom<serde_norway::Value> for ValueLit {
 }
 
 /// One case in a `!match` dispatch: the pattern to compare `on` against
-/// and the branch to emit on a hit. `value:` is a scalar — either a
+/// and the branch to emit on a hit. `when:` is a scalar — either a
 /// number (for numeric dispatch, `on` produces `Real`) or a string (for
 /// string dispatch, `on` produces `Str`); the two forms can't be mixed
-/// within one `!match` (build-time error).
+/// within one `!match` (build-time error). `value:` is the ExprSpec
+/// branch to emit — the "when X, value is Y" pairing.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MatchCase {
@@ -174,11 +175,13 @@ pub struct MatchCase {
     /// variants (`Real` and `Str`) — the `List` variant is not a valid
     /// pattern (it has no defined equality against `on`'s reading) and
     /// is rejected at build.
-    pub value: ValueLit,
+    pub when: ValueLit,
     /// The branch to emit when the pattern matches. Advanced every bar
     /// regardless of match, per the same "keep warming up" convention as
-    /// `!if_else`'s non-selected branch.
-    pub result: Box<ExprSpec>,
+    /// `!if_else`'s non-selected branch. Named `value:` for the
+    /// "when X, value is Y" reading — a full [`ExprSpec`] (not just a
+    /// literal; wrap constants in `!value` as elsewhere).
+    pub value: Box<ExprSpec>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2030,27 +2033,27 @@ fn build_match(
 
     // Sniff the pattern type once — every case must agree, else the
     // library-level `Match<S, T, K>` can't be given a single `K`.
-    let is_str = match &cases[0].value {
+    let is_str = match &cases[0].when {
         ValueLit::Str(_) => true,
         ValueLit::Real(_) => false,
         ValueLit::List(_) => panic!(
-            "!match: case 0 `value:` is a `!value <list>` — list literals \
+            "!match: case 0 `when:` is a `!value <list>` — list literals \
              have no defined equality against `on` and aren't a valid \
              match pattern",
         ),
     };
     for (i, c) in cases.iter().enumerate() {
-        match &c.value {
+        match &c.when {
             ValueLit::Str(_) if !is_str => panic!(
-                "!match: case {i} `value:` is a string but case 0 is a \
+                "!match: case {i} `when:` is a string but case 0 is a \
                  number — all cases must dispatch on the same type"
             ),
             ValueLit::Real(_) if is_str => panic!(
-                "!match: case {i} `value:` is a number but case 0 is a \
+                "!match: case {i} `when:` is a number but case 0 is a \
                  string — all cases must dispatch on the same type"
             ),
             ValueLit::List(_) => panic!(
-                "!match: case {i} `value:` is a `!value <list>` — list \
+                "!match: case {i} `when:` is a `!value <list>` — list \
                  literals have no defined equality against `on` and \
                  aren't a valid match pattern",
             ),
@@ -2065,12 +2068,12 @@ fn build_match(
         let pairs: Vec<(Arc<str>, AsReal)> = cases
             .iter()
             .map(|c| {
-                let pattern: Arc<str> = match &c.value {
+                let pattern: Arc<str> = match &c.when {
                     ValueLit::Str(s) => Arc::from(s.as_str()),
                     _ => unreachable!("string-pattern branch, already validated"),
                 };
                 let branch = AsReal::new(
-                    c.result.build(anchor, book, portfolio_book, schema),
+                    c.value.build(anchor, book, portfolio_book, schema),
                 );
                 (pattern, branch)
             })
@@ -2081,12 +2084,12 @@ fn build_match(
         let pairs: Vec<(Real, AsReal)> = cases
             .iter()
             .map(|c| {
-                let pattern: Real = match &c.value {
+                let pattern: Real = match &c.when {
                     ValueLit::Real(x) => *x,
                     _ => unreachable!("numeric-pattern branch, already validated"),
                 };
                 let branch = AsReal::new(
-                    c.result.build(anchor, book, portfolio_book, schema),
+                    c.value.build(anchor, book, portfolio_book, schema),
                 );
                 (pattern, branch)
             })
