@@ -37,7 +37,7 @@ jobs:
           - { runner: macos-14, target: aarch64 }
           - { runner: windows-latest, target: x64 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build wheel
         uses: PyO3/maturin-action@v1
         with:
@@ -46,7 +46,7 @@ jobs:
           args: --release --out dist
           manylinux: ${{ matrix.platform.manylinux }}
           sccache: "true"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-${{ matrix.platform.runner }}-${{ matrix.platform.target }}
           path: python/dist
@@ -55,14 +55,14 @@ jobs:
     name: sdist
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
           working-directory: python
           command: sdist
           args: --out dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-sdist
           path: python/dist
@@ -76,7 +76,7 @@ jobs:
     permissions:
       id-token: write # Trusted Publishing (OIDC)
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: dist-*
           path: dist
@@ -93,7 +93,7 @@ jobs:
     needs: [wheels, sdist]
     if: startsWith(github.ref, 'refs/tags/')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       # System libs for plotters' `ttf` feature — the `fugazi` binary target
       # (CLI) links them via font-kit → fontconfig + freetype during the
