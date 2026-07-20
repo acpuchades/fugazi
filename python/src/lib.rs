@@ -69,7 +69,6 @@ use fugazi_core::strategies::{
 use fugazi_core::metrics as core_metrics;
 use fugazi_core::metrics::{DrawdownSegment, Trade};
 use fugazi_core::runtime::{self, DynType, DynValue, TypeOf};
-use fugazi_core::costs::TradingCosts;
 // Spec-driven surface: YAML load, evaluate, optimize.
 use fugazi_core::spec::backtest as spec_backtest;
 use fugazi_core::spec::costs::CostConfig;
@@ -6873,7 +6872,7 @@ fn register_metrics_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 //
 // The library-side `fugazi::spec` module exposes typed spec trees plus the
 // pure evaluate / optimize kernel; this section wraps them into a small
-// Python surface: `ta.load_strategy(text)` returns a `StrategySpec` whose
+// Python surface: `ta.load_spec(text)` returns a `StrategySpec` whose
 // `.run()` / `.evaluate()` drive the same measurement pipeline the CLI uses,
 // and `ta.optimize(text, snaps, ...)` enumerates a parameter grid and
 // returns a ranked `Sweep`.
@@ -7260,99 +7259,68 @@ struct PyStrategySpec {
     inner: LoadedSpec,
 }
 
-/// Drive one already-loaded spec through a fresh `PaperWallet` + backtest.
-/// Returns the run report. Every variant funnels through
-/// [`spec_backtest::measured_report*`] to keep parity with the CLI.
+/// Drive one already-loaded spec through the user-supplied `PaperWallet` and
+/// return the run report. Same shape as [`PyStrategy::run`] and its siblings —
+/// the wallet's `equity()` seeds the strategy, and any costs the caller
+/// pre-installed via `wallet.set_costs_for(sym, ...)` apply naturally.
+///
+/// The one non-conformant variant is `Portfolio`: `Portfolio::trade` ignores
+/// the external wallet by design (see [`crate::portfolio`] in the Rust
+/// library — it drives its own composite `PortfolioWallet` internally). The
+/// external wallet's `equity()` is still used as the cash seed, but its
+/// installed costs are *not* propagated to the portfolio's sub-wallets; the
+/// caller must install portfolio-wide costs via the spec's own facilities
+/// (currently `None` — a documented follow-up).
 fn run_spec(
     loaded: &LoadedSpec,
     snapshots: &[Snapshot<String>],
-    cash: Real,
-    cost_config: &CostConfig,
+    wallet: &mut PaperWallet<String>,
 ) -> RunReport<String> {
+    let cash = <PaperWallet<String> as Wallet<String>>::equity(wallet).0;
     match loaded {
         LoadedSpec::Single(sref) => {
-            let symbol = sref.symbol().to_string();
-            let costs = cost_config.resolve(&symbol, None);
             let schema = spec_backtest::schema_from_snapshots(snapshots);
             let mut strategy = sref.build(cash, &schema);
-            let mut wallet = PaperWallet::with_costs(cash, costs);
-            fugazi_core::backtest::run(
-                &mut strategy,
-                &mut wallet,
-                snapshots.iter().cloned(),
-            )
+            fugazi_core::backtest::run(&mut strategy, wallet, snapshots.iter().cloned())
         }
         LoadedSpec::Pairs(spec) => {
-            let per_symbol_costs = vec![
-                (spec.left.clone(), cost_config.resolve(&spec.left, None)),
-                (spec.right.clone(), cost_config.resolve(&spec.right, None)),
-            ];
             let schema = spec_backtest::schema_from_snapshots(snapshots);
-            spec_backtest::measured_report_from_strategy(
-                || spec.build(cash, &schema),
-                snapshots,
-                cash,
-                per_symbol_costs,
-            )
+            let mut strategy = spec.build(cash, &schema);
+            fugazi_core::backtest::run(&mut strategy, wallet, snapshots.iter().cloned())
         }
         LoadedSpec::Basket(spec) => {
-            let universe = spec_backtest::universe_from_snapshots(snapshots);
-            let per_symbol_costs: Vec<(String, TradingCosts)> = universe
-                .iter()
-                .map(|s| (s.clone(), cost_config.resolve(s, None)))
-                .collect();
             let schema = spec_backtest::schema_from_snapshots(snapshots);
-            spec_backtest::measured_report_from_strategy(
-                || spec.build(cash, &schema),
-                snapshots,
-                cash,
-                per_symbol_costs,
-            )
+            let mut strategy = spec.build(cash, &schema);
+            fugazi_core::backtest::run(&mut strategy, wallet, snapshots.iter().cloned())
         }
         LoadedSpec::Multi(spec) => {
-            let universe = spec_backtest::universe_from_snapshots(snapshots);
-            let per_symbol_costs: Vec<(String, TradingCosts)> = universe
-                .iter()
-                .map(|s| (s.clone(), cost_config.resolve(s, None)))
-                .collect();
             let schema = spec_backtest::schema_from_snapshots(snapshots);
-            spec_backtest::measured_report_from_strategy(
-                || spec.build(cash, &schema),
-                snapshots,
-                cash,
-                per_symbol_costs,
-            )
+            let mut strategy = spec.build(cash, &schema);
+            fugazi_core::backtest::run(&mut strategy, wallet, snapshots.iter().cloned())
         }
         LoadedSpec::Portfolio(spec) => {
             let schema = spec_backtest::schema_from_snapshots(snapshots);
-            let universe = spec_backtest::universe_from_snapshots(snapshots);
-            let default_costs = cost_config.resolve("", None);
-            let costs_opt = (!default_costs.is_none()).then_some(default_costs);
+            // Portfolio owns its composite wallet; the external wallet's
+            // equity is only used for the cash seed.
             spec_backtest::measured_report_portfolio(
-                || {
-                    let mut p = spec.build(cash, &schema, costs_opt.clone());
-                    for sym in &universe {
-                        p.install_costs_for(sym, cost_config.resolve(sym, None));
-                    }
-                    p
-                },
+                || spec.build(cash, &schema, None),
                 snapshots,
             )
         }
     }
 }
 
-/// Reduce a run report to a `SpecMetrics` document.
+/// Reduce a run report to a `SpecMetrics` document. Uses the caller's wallet
+/// (matching [`run_spec`]) — cash comes from `wallet.equity()`.
 fn evaluate_spec(
     loaded: &LoadedSpec,
     snapshots: &[Snapshot<String>],
-    cash: Real,
+    wallet: &mut PaperWallet<String>,
     bars_per_year: Real,
     risk_free_rate: Real,
     seconds_per_bar: Option<Real>,
-    cost_config: &CostConfig,
 ) -> SpecMetrics {
-    let report = run_spec(loaded, snapshots, cash, cost_config);
+    let report = run_spec(loaded, snapshots, wallet);
     spec_metrics::from_report(&report, bars_per_year, risk_free_rate, seconds_per_bar)
 }
 
@@ -7372,51 +7340,50 @@ impl PyStrategySpec {
         self.inner.kind_str()
     }
 
-    /// Drive the spec over `snapshots` and return the full run report.
-    #[pyo3(signature = (snapshots, cash = 1.0, costs = None))]
+    /// Drive the spec over `snapshots` against `wallet`, returning the full
+    /// run report. Matches the [`PyStrategy::run`] shape: the wallet's
+    /// `equity()` seeds the strategy, and any costs the caller pre-installed
+    /// via `wallet.set_costs_for(sym, ...)` apply naturally (except for
+    /// portfolio, whose composite wallet is owned internally — see
+    /// [`run_spec`]).
     fn run(
         &self,
+        mut wallet: PyRefMut<'_, PyWallet>,
         snapshots: &Bound<'_, PyAny>,
-        cash: Real,
-        costs: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyRunReport> {
         let snaps = snapshots_from_sequence(snapshots)?;
-        let cost_config = coerce_cost_config(costs)?;
-        let report = run_spec(&self.inner, &snaps, cash, &cost_config);
+        let report = run_spec(&self.inner, &snaps, &mut wallet.inner);
         Ok(PyRunReport { inner: report })
     }
 
-    /// Drive the spec over `snapshots`, reduce the run report to a metrics
-    /// document, and return it as a nested dict (mirroring `metrics.yml`).
-    #[allow(clippy::too_many_arguments)]
+    /// Drive the spec over `snapshots` against `wallet`, reduce the run
+    /// report to a metrics document, and return it as a nested dict (mirroring
+    /// `metrics.yml`). Convenience over calling `.run(...)` then feeding the
+    /// report to `fugazi.metrics.*` — same wallet-first shape as [`Self::run`].
     #[pyo3(signature = (
+        wallet,
         snapshots,
-        cash = 1.0,
         bars_per_year = 252.0,
         risk_free_rate = 0.0,
-        costs = None,
         seconds_per_bar = None,
     ))]
     fn evaluate(
         &self,
         py: Python<'_>,
+        mut wallet: PyRefMut<'_, PyWallet>,
         snapshots: &Bound<'_, PyAny>,
-        cash: Real,
         bars_per_year: Real,
         risk_free_rate: Real,
-        costs: Option<&Bound<'_, PyAny>>,
         seconds_per_bar: Option<Real>,
     ) -> PyResult<Py<PyAny>> {
         let snaps = snapshots_from_sequence(snapshots)?;
-        let cost_config = coerce_cost_config(costs)?;
         let metrics = evaluate_spec(
             &self.inner,
             &snaps,
-            cash,
+            &mut wallet.inner,
             bars_per_year,
             risk_free_rate,
             seconds_per_bar,
-            &cost_config,
         );
         metrics_to_py(py, &metrics)
     }
@@ -7433,7 +7400,7 @@ impl PyStrategySpec {
 /// `kind` is one of `single`/`pairs`/`basket`/`multi`/`portfolio`.
 #[pyfunction]
 #[pyo3(signature = (text, params = None, base_dir = None, kind = "auto"))]
-fn load_strategy(
+fn load_spec(
     text: &str,
     params: Option<&Bound<'_, PyAny>>,
     base_dir: Option<&str>,
@@ -8384,7 +8351,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         sharpe_of, sortino_of, volatility_of, max_drawdown_of, calmar_of,
         // Spec-driven surface: load a YAML strategy, run it, evaluate it, or
         // sweep a parameter grid over it. Full parity with the CLI.
-        load_strategy, optimize,
+        load_spec, optimize,
     );
 
     // `fugazi.metrics` — mirror of `fugazi::metrics::*`. Registered as a

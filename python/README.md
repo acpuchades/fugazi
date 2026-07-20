@@ -485,18 +485,20 @@ candle- or snapshot-rooted (a bare-value signal is rejected). Not bound yet:
 position-anchored protective stops, pairs / basket strategies, and the Rust
 recipe catalogue — drop to the wallet loop above for those.
 
-## YAML strategy specs — `load_strategy`, `optimize`, walkforward
+## YAML strategy specs — `load_spec`, `optimize`, walkforward
 
 The CLI's YAML surface (see the crate root's `strategy.yml` examples) is
-available natively from Python. `ta.load_strategy(text)` parses a spec
+available natively from Python. `ta.load_spec(text)` parses a spec
 document, auto-detects its shape (single / pairs / basket / multi /
-portfolio), and returns a `StrategySpec` you can `.run(snapshots)` against or
-`.evaluate(snapshots)` for a full metrics dict.
+portfolio), and returns a `StrategySpec` that implements the same
+`.run(wallet, snapshots)` interface as the manual [`Strategy`](#the-declarative-strategy-builder)
+builder. `.evaluate(...)` is a bonus method that runs + reduces to a metrics
+dict in one call.
 
 ```python
 import fugazi as ta
 
-spec = ta.load_strategy("""
+spec = ta.load_spec("""
 symbol: BTC
 long:
   enter: !crosses_above
@@ -509,15 +511,16 @@ snaps = [
     ta.Snapshot({"BTC": ta.Candle(v, v, v, v, 1.0)})
     for v in [10, 9, 8, 7, 6, 7, 9, 12, 15, 18, 21, 22, 21, 20, 18, 15, 12, 10, 8, 6]
 ]
-report = spec.run(snaps, cash=1000.0)      # -> RunReport
-metrics = spec.evaluate(snaps, cash=1000.0)  # -> nested dict mirroring metrics.yml
+wallet = ta.PaperWallet(1000.0)
+report = spec.run(wallet, snaps)              # -> RunReport
+metrics = spec.evaluate(ta.PaperWallet(1000.0), snaps)  # -> nested dict mirroring metrics.yml
 ```
 
 Preset tags (`!buy_and_hold`, `!ma_crossover`, `!rsi_reversal`,
 `!donchian_breakout`, `!keltner_breakout`) work directly:
 
 ```python
-spec = ta.load_strategy("!buy_and_hold { symbol: BTC }")
+spec = ta.load_spec("!buy_and_hold { symbol: BTC }")
 ```
 
 The five shapes are auto-detected by top-level YAML key:
@@ -596,7 +599,7 @@ costs = ta.TradingCostsConfig({
     "commission": {"percentage": {"rate": 0.001}},
     "spread":     {"bps": {"bps": 5}},
 })
-report = spec.run(snaps, cash=1000.0, costs=costs)
+sweep = ta.optimize(yaml, snaps, cash=1000.0, grid=[{"FAST": [3, 5]}], costs=costs)
 ```
 
 Per-symbol / per-interval overrides use the same shape as the CLI:
@@ -610,8 +613,10 @@ costs = ta.TradingCostsConfig({
 })
 ```
 
-`costs=` also accepts a raw dict directly on `.run()` / `.evaluate()` /
-`ta.optimize(...)`.
+`costs=` accepts either a `TradingCostsConfig` or a raw dict on `ta.optimize(...)`.
+For `.run(wallet, snapshots)` and `.evaluate(wallet, snapshots)`, costs come
+from what's pre-installed on the wallet (matching how the manual
+[`Strategy`](#the-declarative-strategy-builder) builder works).
 
 ## Metrics
 

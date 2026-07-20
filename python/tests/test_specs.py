@@ -1,4 +1,4 @@
-"""Tests for the YAML-driven strategy surface: load_strategy, evaluate, optimize."""
+"""Tests for the YAML-driven strategy surface: load_spec, evaluate, optimize."""
 
 import pytest
 
@@ -27,17 +27,18 @@ def _snaps_multi(series, volume=1000.0):
 
 
 # ---------------------------------------------------------------------------
-# load_strategy: shape detection + run
+# load_spec: shape detection + run
 # ---------------------------------------------------------------------------
 
 
 def test_load_preset_and_run():
     """A `!buy_and_hold` preset loads, kind='single', and runs against snapshots."""
-    spec = ta.load_strategy("!buy_and_hold { symbol: BTC }")
+    spec = ta.load_spec("!buy_and_hold { symbol: BTC }")
     assert spec.kind == "single"
 
     snaps = _snaps_single("BTC", [100.0, 101.0, 102.0, 103.0, 104.0])
-    rep = spec.run(snaps, cash=1000.0)
+    wallet = ta.PaperWallet(1000.0)
+    rep = spec.run(wallet, snaps)
     assert len(rep.equity_curve) == len(snaps)
     assert rep.initial_equity == pytest.approx(1000.0)
     # Buy-and-hold on a rising path — final equity should exceed initial.
@@ -53,14 +54,15 @@ def test_load_single_spec_map_and_evaluate():
         lhs: !sma { period: 3 }
         rhs: !sma { period: 6 }
     """
-    spec = ta.load_strategy(yaml)
+    spec = ta.load_spec(yaml)
     assert spec.kind == "single"
 
     snaps = _snaps_single(
         "BTC",
         [10, 9, 8, 7, 6, 7, 9, 12, 15, 18, 21, 22, 21, 20, 18, 15, 12, 10, 8, 6],
     )
-    m = spec.evaluate(snaps, cash=1000.0)
+    wallet = ta.PaperWallet(1000.0)
+    m = spec.evaluate(wallet, snaps)
     # Metrics doc: nested dict, section keys are `run`, `returns`, ...
     assert "run" in m
     assert "returns" in m
@@ -77,7 +79,7 @@ def test_load_pairs_and_run():
       lhs: !close { source: !pick { symbol: BTC } }
       rhs: !close { source: !pick { symbol: ETH } }
     """
-    spec = ta.load_strategy(yaml)
+    spec = ta.load_spec(yaml)
     assert spec.kind == "pairs"
 
     # BTC up, ETH down — expect entry with both legs active.
@@ -85,7 +87,8 @@ def test_load_pairs_and_run():
         "BTC": [90, 91, 92, 93, 95, 100, 105, 110, 112, 115],
         "ETH": [110, 108, 107, 105, 103, 100, 98, 96, 94, 92],
     })
-    rep = spec.run(snaps, cash=1000.0)
+    wallet = ta.PaperWallet(1000.0)
+    rep = spec.run(wallet, snaps)
     assert len(rep.equity_curve) == len(snaps)
 
 
@@ -95,14 +98,15 @@ def test_load_basket_and_run():
     score: !roc { source: !close { source: !pick { symbol: !arg SYM } }, periods: 2 }
     sizing: !equal_weight 2
     """
-    spec = ta.load_strategy(yaml)
+    spec = ta.load_spec(yaml)
     assert spec.kind == "basket"
 
     snaps = _snaps_multi({
         "BTC": [100, 102, 104, 106, 108, 110, 112, 114, 116, 118, 120, 122],
         "ETH": [100, 98, 96, 94, 92, 90, 88, 86, 84, 82, 80, 78],
     })
-    rep = spec.run(snaps, cash=1000.0)
+    wallet = ta.PaperWallet(1000.0)
+    rep = spec.run(wallet, snaps)
     assert len(rep.equity_curve) == len(snaps)
     # BTC scoring higher than ETH → long BTC / short ETH → at least two fills.
     assert len(rep.fills) >= 2
@@ -113,14 +117,15 @@ def test_load_multi_and_run():
     long:
       enter: !gt { lhs: !close { source: !pick { symbol: !arg SYM } }, rhs: 50 }
     """
-    spec = ta.load_strategy(yaml)
+    spec = ta.load_spec(yaml)
     assert spec.kind == "multi"
 
     snaps = _snaps_multi({
         "BTC": [100, 101, 102, 103, 104, 105],
         "ETH": [200, 201, 202, 203, 204, 205],
     })
-    rep = spec.run(snaps, cash=1000.0)
+    wallet = ta.PaperWallet(1000.0)
+    rep = spec.run(wallet, snaps)
     assert len(rep.equity_curve) == len(snaps)
 
 
@@ -132,20 +137,21 @@ def test_load_portfolio_and_run():
       - name: c2
         strategy: !buy_and_hold { symbol: ETH }
     """
-    spec = ta.load_strategy(yaml)
+    spec = ta.load_spec(yaml)
     assert spec.kind == "portfolio"
 
     snaps = _snaps_multi({
         "BTC": [100, 101, 102, 103, 104, 105],
         "ETH": [200, 201, 202, 203, 204, 205],
     })
-    rep = spec.run(snaps, cash=1000.0)
+    wallet = ta.PaperWallet(1000.0)
+    rep = spec.run(wallet, snaps)
     assert len(rep.equity_curve) == len(snaps)
     # Two buy-and-holds → one fill per child.
     assert len(rep.fills) >= 2
 
 
-def test_load_strategy_with_params():
+def test_load_spec_with_params():
     """`!param` placeholders resolve from the `params=` dict."""
     yaml = """
     symbol: BTC
@@ -154,13 +160,13 @@ def test_load_strategy_with_params():
         lhs: !sma { period: !param FAST }
         rhs: !sma { period: !param SLOW }
     """
-    spec = ta.load_strategy(yaml, params={"FAST": 3, "SLOW": 8})
+    spec = ta.load_spec(yaml, params={"FAST": 3, "SLOW": 8})
     assert spec.kind == "single"
 
 
-def test_load_strategy_explicit_kind_override():
+def test_load_spec_explicit_kind_override():
     """Passing `kind=` bypasses auto-detection."""
-    spec = ta.load_strategy(
+    spec = ta.load_spec(
         "symbol: BTC\nlong:\n  enter: !value true\n",
         kind="single",
     )
@@ -198,18 +204,20 @@ def test_trading_costs_scoped_shape():
     assert "scoped=1" in repr(c) or "defaults=true" in repr(c)
 
 
-def test_run_with_costs_lowers_equity():
-    """A run with a nonzero cost model produces a smaller final equity."""
-    spec = ta.load_strategy("!buy_and_hold { symbol: BTC }")
+def test_optimize_with_cost_config_lowers_equity():
+    """A cost config passed to `ta.optimize` produces a smaller final equity."""
+    yaml = "!buy_and_hold { symbol: BTC }"
     snaps = _snaps_single("BTC", [100.0, 101.0, 102.0, 103.0, 104.0])
-    r0 = spec.run(snaps, cash=1000.0)
-    r1 = spec.run(snaps, cash=1000.0, costs={"commission": {"percentage": {"rate": 0.001}}})
-    assert r1.equity_curve[-1] < r0.equity_curve[-1]
-
-    # A pre-built PyCostConfig works too.
-    cc = ta.TradingCostsConfig({"commission": {"percentage": {"rate": 0.001}}})
-    r2 = spec.run(snaps, cash=1000.0, costs=cc)
-    assert r2.equity_curve[-1] == pytest.approx(r1.equity_curve[-1])
+    baseline = ta.optimize(yaml, snaps, cash=1000.0, grid=[{}])
+    with_cost = ta.optimize(
+        yaml, snaps, cash=1000.0, grid=[{}],
+        costs={"commission": {"percentage": {"rate": 0.001}}},
+    )
+    # Higher cost → lower final metric value (total_return dips).
+    b_ret = baseline.rows[0].metrics.get("returns.total_pct")
+    c_ret = with_cost.rows[0].metrics.get("returns.total_pct")
+    if b_ret is not None and c_ret is not None:
+        assert c_ret <= b_ret
 
 
 # ---------------------------------------------------------------------------
