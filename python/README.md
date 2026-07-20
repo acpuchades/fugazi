@@ -485,6 +485,134 @@ candle- or snapshot-rooted (a bare-value signal is rejected). Not bound yet:
 position-anchored protective stops, pairs / basket strategies, and the Rust
 recipe catalogue — drop to the wallet loop above for those.
 
+## YAML strategy specs — `load_strategy`, `optimize`, walkforward
+
+The CLI's YAML surface (see the crate root's `strategy.yml` examples) is
+available natively from Python. `ta.load_strategy(text)` parses a spec
+document, auto-detects its shape (single / pairs / basket / multi /
+portfolio), and returns a `StrategySpec` you can `.run(snapshots)` against or
+`.evaluate(snapshots)` for a full metrics dict.
+
+```python
+import fugazi as ta
+
+spec = ta.load_strategy("""
+symbol: BTC
+long:
+  enter: !crosses_above
+    lhs: !sma { period: 3 }
+    rhs: !sma { period: 10 }
+""")
+assert spec.kind == "single"
+
+snaps = [
+    ta.Snapshot({"BTC": ta.Candle(v, v, v, v, 1.0)})
+    for v in [10, 9, 8, 7, 6, 7, 9, 12, 15, 18, 21, 22, 21, 20, 18, 15, 12, 10, 8, 6]
+]
+report = spec.run(snaps, cash=1000.0)      # -> RunReport
+metrics = spec.evaluate(snaps, cash=1000.0)  # -> nested dict mirroring metrics.yml
+```
+
+Preset tags (`!buy_and_hold`, `!ma_crossover`, `!rsi_reversal`,
+`!donchian_breakout`, `!keltner_breakout`) work directly:
+
+```python
+spec = ta.load_strategy("!buy_and_hold { symbol: BTC }")
+```
+
+The five shapes are auto-detected by top-level YAML key:
+
+| Top-level key(s)        | Detected kind |
+| ---                     | ---           |
+| `children:`             | `portfolio`   |
+| `left:` + `right:`      | `pairs`       |
+| `selection:`            | `basket`      |
+| `symbol:` or preset tag | `single`      |
+| (bare mapping)          | `multi`       |
+
+Pass `kind="single"` / `"pairs"` / ... to override detection, and
+`params={"NAME": value}` to fill `!param` placeholders in the document.
+
+### Parameter-grid optimize
+
+`ta.optimize(text, snapshots, ...)` sweeps a parameter grid, ranks rows by
+`--best-by`-style metric, and returns a `Sweep`:
+
+```python
+yaml = """
+symbol: BTC
+long:
+  enter: !crosses_above
+    lhs: !sma { period: !param FAST }
+    rhs: !sma { period: !param SLOW }
+"""
+
+sweep = ta.optimize(
+    yaml,
+    snaps,
+    cash=1000.0,
+    grid=[{"FAST": [3, 5, 7], "SLOW": [10, 15]}],
+    metric_names=["risk_adjusted.sharpe", "returns.total_pct"],
+    best_by="risk_adjusted.sharpe",
+)
+sweep.columns          # -> ["FAST", "SLOW"]
+sweep.rows[0].values   # -> {"FAST": 3, "SLOW": 10}
+sweep.rows[0].metrics  # -> {"risk_adjusted.sharpe": ..., "returns.total_pct": ...}
+sweep.best             # -> highest-ranked row (None when best_by is unset)
+```
+
+`grid` is a list of dicts (one per subgrid; stacked subgrids union), where
+values that are lists become sweep axes and `"start..end[:step]"` strings
+expand to numeric ranges. Pass `windowed=N` to reduce each grid point across
+non-overlapping N-bar windows (`row.metrics_windowed` carries the per-window
+docs), or `walkforward=(is, oos)` / `walkforward=(is, oos, embargo)` for
+walk-forward validation:
+
+```python
+result = ta.optimize(
+    yaml,
+    snaps,
+    cash=1000.0,
+    grid=[{"FAST": [3, 5]}],
+    best_by="risk_adjusted.sharpe",
+    walkforward=(5, 3),
+)
+# -> WalkForwardResult with per-fold IS/OOS metrics + composite OOS equity
+for fold in result.folds:
+    fold.is_range, fold.oos_range     # bar ranges
+    fold.values                         # winning params for that fold
+    fold.is_metrics, fold.oos_metrics   # nested metrics dicts
+result.composite_equity                 # stitched OOS curve
+result.composite_metrics                # composite metrics doc
+```
+
+### Costs
+
+Trading costs load from a Python dict matching the CLI's YAML shape
+(externally-tagged models: `!percentage`, `!bps`, `!volume_participation`, …):
+
+```python
+costs = ta.TradingCostsConfig({
+    "commission": {"percentage": {"rate": 0.001}},
+    "spread":     {"bps": {"bps": 5}},
+})
+report = spec.run(snaps, cash=1000.0, costs=costs)
+```
+
+Per-symbol / per-interval overrides use the same shape as the CLI:
+
+```python
+costs = ta.TradingCostsConfig({
+    "commission": {
+        "default": {"percentage": {"rate": 0.001}},
+        "by_symbol": {"BTC": {"percentage": {"rate": 0.0005}}},
+    }
+})
+```
+
+`costs=` also accepts a raw dict directly on `.run()` / `.evaluate()` /
+`ta.optimize(...)`.
+
 ## Metrics
 
 `fugazi.metrics` is the standalone reporting surface — one function per metric
