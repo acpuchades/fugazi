@@ -491,8 +491,10 @@ dependencies = [
 name = "fugazi-python"
 version = "0.29.0"
 dependencies = [
+ "anyhow",
  "fugazi",
  "pyo3",
+ "serde_json",
  "time",
  "tokio",
 ]

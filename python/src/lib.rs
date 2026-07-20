@@ -69,6 +69,15 @@ use fugazi_core::strategies::{
 use fugazi_core::metrics as core_metrics;
 use fugazi_core::metrics::{DrawdownSegment, Trade};
 use fugazi_core::runtime::{self, DynType, DynValue, TypeOf};
+use fugazi_core::costs::TradingCosts;
+// Spec-driven surface: YAML load, evaluate, optimize.
+use fugazi_core::spec::backtest as spec_backtest;
+use fugazi_core::spec::costs::CostConfig;
+use fugazi_core::spec::metrics::{self as spec_metrics, Metrics as SpecMetrics};
+use fugazi_core::spec::optimize as spec_optimize;
+use fugazi_core::spec::{
+    BasketStrategySpec, MultiAssetStrategySpec, PairsStrategySpec, PortfolioSpec, StrategyRef,
+};
 
 // ---------------------------------------------------------------------------
 // Shared type-erasure vocabulary (fugazi::runtime)
@@ -6860,6 +6869,1040 @@ fn register_metrics_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Spec-driven surface: YAML strategies, evaluate, optimize.
+//
+// The library-side `fugazi::spec` module exposes typed spec trees plus the
+// pure evaluate / optimize kernel; this section wraps them into a small
+// Python surface: `ta.load_strategy(text)` returns a `StrategySpec` whose
+// `.run()` / `.evaluate()` drive the same measurement pipeline the CLI uses,
+// and `ta.optimize(text, snaps, ...)` enumerates a parameter grid and
+// returns a ranked `Sweep`.
+//
+// Design notes:
+// * One `PyStrategySpec` pyclass with an internal 5-variant enum
+//   ([`LoadedSpec`]) covering single / pairs / basket / multi / portfolio —
+//   Python's dispatch on `kind` is a plain match on the variant.
+// * Costs accept a Python dict, a `PyCostConfig` instance, or `None`: the
+//   dict path serialises to `serde_json::Value` and typed-parses through
+//   `CostConfig`'s serde impl, so the Python surface mirrors the CLI's YAML
+//   shape (nested `default:` / `by_symbol:` / `by_interval:` all work).
+// * Walkforward isn't wired yet — `optimize(walkforward=…)` raises
+//   NotImplementedError. Plain grids and `windowed=N` are supported.
+// ---------------------------------------------------------------------------
+
+use serde_json::Value as JsonValue;
+
+/// Convert a Python object into a `serde_json::Value`. Handles the common
+/// leaf types (`None`/`bool`/`int`/`float`/`str`) and containers (`list`/
+/// `tuple`/`dict`). A dict key must be a string.
+fn py_to_json(v: &Bound<'_, PyAny>) -> PyResult<JsonValue> {
+    if v.is_none() {
+        return Ok(JsonValue::Null);
+    }
+    // Booleans are a subclass of int in Python — check them first.
+    if is_python_bool(v) {
+        return Ok(JsonValue::Bool(v.extract::<bool>()?));
+    }
+    if let Ok(x) = v.extract::<i64>() {
+        return Ok(JsonValue::from(x));
+    }
+    if let Ok(x) = v.extract::<f64>() {
+        return Ok(serde_json::Number::from_f64(x)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null));
+    }
+    if let Ok(s) = v.extract::<String>() {
+        return Ok(JsonValue::String(s));
+    }
+    if let Ok(d) = v.cast::<pyo3::types::PyDict>() {
+        let mut m = serde_json::Map::new();
+        for (k, val) in d.iter() {
+            let key = k.extract::<String>().map_err(|_| {
+                PyTypeError::new_err("dict keys must be strings when converting to JSON")
+            })?;
+            m.insert(key, py_to_json(&val)?);
+        }
+        return Ok(JsonValue::Object(m));
+    }
+    if let Ok(l) = v.cast::<pyo3::types::PyList>() {
+        let mut arr = Vec::with_capacity(l.len());
+        for item in l.iter() {
+            arr.push(py_to_json(&item)?);
+        }
+        return Ok(JsonValue::Array(arr));
+    }
+    if let Ok(t) = v.cast::<pyo3::types::PyTuple>() {
+        let mut arr = Vec::with_capacity(t.len());
+        for item in t.iter() {
+            arr.push(py_to_json(&item)?);
+        }
+        return Ok(JsonValue::Array(arr));
+    }
+    // Fallback: try to iterate.
+    if let Ok(iter) = v.try_iter() {
+        let mut arr = Vec::new();
+        for item in iter {
+            arr.push(py_to_json(&item?)?);
+        }
+        return Ok(JsonValue::Array(arr));
+    }
+    Err(PyTypeError::new_err(format!(
+        "cannot convert Python value to JSON: {}",
+        v.get_type().name()?
+    )))
+}
+
+/// Convert a `serde_json::Value` into a Python object.
+fn json_to_py(py: Python<'_>, v: &JsonValue) -> PyResult<Py<PyAny>> {
+    match v {
+        JsonValue::Null => Ok(py.None()),
+        JsonValue::Bool(b) => Ok(b.into_pyobject(py)?.to_owned().into_any().unbind()),
+        JsonValue::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(i.into_pyobject(py)?.to_owned().into_any().unbind())
+            } else if let Some(u) = n.as_u64() {
+                Ok(u.into_pyobject(py)?.to_owned().into_any().unbind())
+            } else if let Some(f) = n.as_f64() {
+                Ok(f.into_pyobject(py)?.to_owned().into_any().unbind())
+            } else {
+                Ok(py.None())
+            }
+        }
+        JsonValue::String(s) => Ok(s.into_pyobject(py)?.to_owned().into_any().unbind()),
+        JsonValue::Array(arr) => {
+            let items: PyResult<Vec<Py<PyAny>>> =
+                arr.iter().map(|v| json_to_py(py, v)).collect();
+            let list = pyo3::types::PyList::new(py, items?)?;
+            Ok(list.into_any().unbind())
+        }
+        JsonValue::Object(obj) => {
+            let d = pyo3::types::PyDict::new(py);
+            for (k, val) in obj {
+                d.set_item(k, json_to_py(py, val)?)?;
+            }
+            Ok(d.into_any().unbind())
+        }
+    }
+}
+
+/// Extract a `HashMap<String, serde_json::Value>` from an optional Python
+/// dict, for the `!param` substitution table. `None` is treated as an empty
+/// table.
+fn extract_params(
+    obj: Option<&Bound<'_, PyAny>>,
+) -> PyResult<std::collections::HashMap<String, JsonValue>> {
+    let Some(o) = obj else {
+        return Ok(std::collections::HashMap::new());
+    };
+    if o.is_none() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let dict = o.cast::<pyo3::types::PyDict>().map_err(|_| {
+        PyTypeError::new_err("`params` must be a dict[str, Any] (or None)")
+    })?;
+    let mut out = std::collections::HashMap::new();
+    for (k, v) in dict.iter() {
+        let key = k
+            .extract::<String>()
+            .map_err(|_| PyTypeError::new_err("`params` keys must be strings"))?;
+        out.insert(key, py_to_json(&v)?);
+    }
+    Ok(out)
+}
+
+/// A wrapper around the library's `CostConfig` that Python callers use to
+/// build cost bundles from a dict once and reuse across many runs / grid
+/// points. Stores the resolved JSON tree internally so it can rebuild the
+/// (non-Cloneable) `CostConfig` per use — the cost of a serde round-trip
+/// is negligible next to any run.
+#[pyclass(name = "TradingCostsConfig", module = "fugazi")]
+struct PyCostConfig {
+    tree: JsonValue,
+}
+
+impl PyCostConfig {
+    fn build(&self) -> PyResult<CostConfig> {
+        serde_json::from_value(self.tree.clone())
+            .map_err(|e| PyValueError::new_err(format!("invalid TradingCostsConfig: {e}")))
+    }
+
+    fn build_view(tree: &JsonValue) -> PyResult<CostConfig> {
+        serde_json::from_value(tree.clone())
+            .map_err(|e| PyValueError::new_err(format!("invalid TradingCostsConfig: {e}")))
+    }
+}
+
+#[pymethods]
+impl PyCostConfig {
+    /// Build a config from a Python dict mirroring the CLI's YAML shape:
+    /// `{"commission": {"percentage": {"rate": 0.001}}, ...}` for the
+    /// simple flat form or `{"commission": {"default": {...}, "by_symbol":
+    /// {"BTC": {...}}}}` for scoped overrides. Passing no argument or `{}`
+    /// yields a zero-cost bundle.
+    #[new]
+    #[pyo3(signature = (mapping = None))]
+    fn new(mapping: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let value = match mapping {
+            None => JsonValue::Object(serde_json::Map::new()),
+            Some(o) if o.is_none() => JsonValue::Object(serde_json::Map::new()),
+            Some(o) => py_to_json(o)?,
+        };
+        let tree = normalize_cost_dict(value)?;
+        // Validate now so the caller sees the error at construction rather than
+        // at .run().
+        let _cfg = PyCostConfig::build_view(&tree)?;
+        Ok(PyCostConfig { tree })
+    }
+
+    fn __repr__(&self) -> String {
+        match PyCostConfig::build_view(&self.tree) {
+            Ok(inner) if inner.is_none() => "TradingCostsConfig(<zero-cost>)".to_string(),
+            Ok(inner) => format!(
+                "TradingCostsConfig(scoped={}, defaults={})",
+                inner.scoped_count(),
+                inner.has_any_default(),
+            ),
+            Err(_) => "TradingCostsConfig(<invalid>)".to_string(),
+        }
+    }
+}
+
+/// Turn a user-facing Python cost dict into the canonical structured shape
+/// `CostConfig`'s serde impl expects: hoist a flat model into `default:`.
+/// Non-cost keys pass through so a caller can also hand us an
+/// already-structured dict.
+fn normalize_cost_dict(value: JsonValue) -> PyResult<JsonValue> {
+    let JsonValue::Object(map) = value else {
+        return Err(PyValueError::new_err(
+            "TradingCostsConfig expects a dict mapping (e.g. {'commission': {'percentage': ...}})",
+        ));
+    };
+    let mut out = serde_json::Map::new();
+    for (leg, node) in map {
+        if !matches!(leg.as_str(), "commission" | "spread" | "slippage") {
+            return Err(PyValueError::new_err(format!(
+                "TradingCostsConfig: unknown leg `{leg}` (expected commission/spread/slippage)"
+            )));
+        }
+        let JsonValue::Object(obj) = node else {
+            out.insert(leg, node);
+            continue;
+        };
+        let structured = obj.contains_key("default")
+            || obj.contains_key("by_symbol")
+            || obj.contains_key("by_interval")
+            || obj.contains_key("scoped");
+        // A flat singleton like {percentage: {rate: 0.001}} — hoist to default.
+        let is_model_shape = obj.len() == 1
+            && obj.keys().next().is_some_and(|k| {
+                matches!(
+                    k.as_str(),
+                    "none"
+                        | "fixed"
+                        | "percentage"
+                        | "per_unit"
+                        | "composite"
+                        | "max"
+                        | "bps"
+                        | "absolute"
+                        | "volume_participation"
+                )
+            });
+        if is_model_shape && !structured {
+            let mut wrapper = serde_json::Map::new();
+            wrapper.insert("default".to_string(), JsonValue::Object(obj));
+            out.insert(leg, JsonValue::Object(wrapper));
+        } else {
+            out.insert(leg, JsonValue::Object(obj));
+        }
+    }
+    Ok(JsonValue::Object(out))
+}
+
+/// Coerce the `costs=` argument on `.run()` / `.evaluate()` / `ta.optimize()`
+/// into an owned `CostConfig`. Accepts `None`, a `PyCostConfig`, or a raw
+/// Python dict.
+fn coerce_cost_config(obj: Option<&Bound<'_, PyAny>>) -> PyResult<CostConfig> {
+    let Some(o) = obj else {
+        return Ok(default_cost_config());
+    };
+    if o.is_none() {
+        return Ok(default_cost_config());
+    }
+    if let Ok(cc) = o.cast::<PyCostConfig>() {
+        return cc.borrow().build();
+    }
+    // Dict path.
+    let value = py_to_json(o)?;
+    let normalized = normalize_cost_dict(value)?;
+    serde_json::from_value(normalized)
+        .map_err(|e| PyValueError::new_err(format!("invalid `costs=` dict: {e}")))
+}
+
+/// A zero-cost `CostConfig` — parsed from `{}` (deserialization sets every
+/// leg to its default, i.e. the no-op model).
+fn default_cost_config() -> CostConfig {
+    serde_json::from_value(JsonValue::Object(serde_json::Map::new()))
+        .expect("empty CostConfig deserialization is infallible")
+}
+
+/// The five strategy shapes the spec surface supports — one variant per
+/// top-level YAML kind. Kept in lock-step with the CLI's [`StrategyKind`].
+enum LoadedSpec {
+    Single(StrategyRef),
+    Pairs(PairsStrategySpec),
+    Basket(BasketStrategySpec),
+    Multi(MultiAssetStrategySpec),
+    Portfolio(PortfolioSpec),
+}
+
+impl LoadedSpec {
+    fn kind_str(&self) -> &'static str {
+        match self {
+            LoadedSpec::Single(_) => "single",
+            LoadedSpec::Pairs(_) => "pairs",
+            LoadedSpec::Basket(_) => "basket",
+            LoadedSpec::Multi(_) => "multi",
+            LoadedSpec::Portfolio(_) => "portfolio",
+        }
+    }
+}
+
+/// Detect the strategy kind from a resolved (post `!import`/`!param`) YAML
+/// value. Mirrors the CLI's shape-based routing rules.
+fn detect_kind(v: &JsonValue) -> &'static str {
+    // Presets like !buy_and_hold arrive as either a top-level tagged value
+    // (serde_norway path) or a single-key mapping (JSON path). In both cases
+    // the tag key is one of the preset names — route them as `single`.
+    const PRESET_TAGS: &[&str] = &[
+        "buy_and_hold",
+        "ma_crossover",
+        "rsi_reversal",
+        "donchian_breakout",
+        "keltner_breakout",
+    ];
+    if let JsonValue::Object(m) = v
+        && m.len() == 1
+        && let Some(k) = m.keys().next()
+        && PRESET_TAGS.contains(&k.as_str())
+    {
+        return "single";
+    }
+    let Some(map) = v.as_object() else {
+        return "single"; // fallback; typed parse will surface the error
+    };
+    if map.contains_key("children") {
+        return "portfolio";
+    }
+    if map.contains_key("left") && map.contains_key("right") {
+        return "pairs";
+    }
+    if map.contains_key("selection") {
+        return "basket";
+    }
+    if map.contains_key("symbol") {
+        return "single";
+    }
+    // Bare per-side factories or a lone `long:` / `short:` mapping — that's
+    // a multi-asset shape.
+    "multi"
+}
+
+/// Load a strategy YAML doc from text, auto-detecting kind (or using the
+/// caller's `kind` override). Returns the typed `LoadedSpec`.
+fn load_loaded_spec(
+    text: &str,
+    params: &std::collections::HashMap<String, JsonValue>,
+    base_dir: &std::path::Path,
+    kind: &str,
+) -> PyResult<LoadedSpec> {
+    let value = fugazi_core::spec::load_value(text, params, base_dir, "(inline)")
+        .map_err(|e| PyValueError::new_err(format!("loading strategy: {e:#}")))?;
+    let kind = if kind == "auto" { detect_kind(&value) } else { kind };
+    match kind {
+        "single" => {
+            let sref: StrategyRef = serde_json::from_value(value)
+                .map_err(|e| PyValueError::new_err(format!("parsing single strategy: {e}")))?;
+            Ok(LoadedSpec::Single(sref))
+        }
+        "pairs" => {
+            let s: PairsStrategySpec = serde_json::from_value(value)
+                .map_err(|e| PyValueError::new_err(format!("parsing pairs strategy: {e}")))?;
+            Ok(LoadedSpec::Pairs(s))
+        }
+        "basket" => {
+            let s: BasketStrategySpec = serde_json::from_value(value)
+                .map_err(|e| PyValueError::new_err(format!("parsing basket strategy: {e}")))?;
+            Ok(LoadedSpec::Basket(s))
+        }
+        "multi" => {
+            let s: MultiAssetStrategySpec = serde_json::from_value(value)
+                .map_err(|e| PyValueError::new_err(format!("parsing multi strategy: {e}")))?;
+            Ok(LoadedSpec::Multi(s))
+        }
+        "portfolio" => {
+            let s: PortfolioSpec = serde_json::from_value(value)
+                .map_err(|e| PyValueError::new_err(format!("parsing portfolio strategy: {e}")))?;
+            Ok(LoadedSpec::Portfolio(s))
+        }
+        other => Err(PyValueError::new_err(format!(
+            "unknown strategy kind `{other}` (expected auto/single/pairs/basket/multi/portfolio)"
+        ))),
+    }
+}
+
+/// The pyclass surface for a loaded strategy spec: one for every YAML shape,
+/// dispatched off the inner enum's variant.
+#[pyclass(name = "StrategySpec", module = "fugazi")]
+struct PyStrategySpec {
+    inner: LoadedSpec,
+}
+
+/// Drive one already-loaded spec through a fresh `PaperWallet` + backtest.
+/// Returns the run report. Every variant funnels through
+/// [`spec_backtest::measured_report*`] to keep parity with the CLI.
+fn run_spec(
+    loaded: &LoadedSpec,
+    snapshots: &[Snapshot<String>],
+    cash: Real,
+    cost_config: &CostConfig,
+) -> RunReport<String> {
+    match loaded {
+        LoadedSpec::Single(sref) => {
+            let symbol = sref.symbol().to_string();
+            let costs = cost_config.resolve(&symbol, None);
+            let schema = spec_backtest::schema_from_snapshots(snapshots);
+            let mut strategy = sref.build(cash, &schema);
+            let mut wallet = PaperWallet::with_costs(cash, costs);
+            fugazi_core::backtest::run(
+                &mut strategy,
+                &mut wallet,
+                snapshots.iter().cloned(),
+            )
+        }
+        LoadedSpec::Pairs(spec) => {
+            let per_symbol_costs = vec![
+                (spec.left.clone(), cost_config.resolve(&spec.left, None)),
+                (spec.right.clone(), cost_config.resolve(&spec.right, None)),
+            ];
+            let schema = spec_backtest::schema_from_snapshots(snapshots);
+            spec_backtest::measured_report_from_strategy(
+                || spec.build(cash, &schema),
+                snapshots,
+                cash,
+                per_symbol_costs,
+            )
+        }
+        LoadedSpec::Basket(spec) => {
+            let universe = spec_backtest::universe_from_snapshots(snapshots);
+            let per_symbol_costs: Vec<(String, TradingCosts)> = universe
+                .iter()
+                .map(|s| (s.clone(), cost_config.resolve(s, None)))
+                .collect();
+            let schema = spec_backtest::schema_from_snapshots(snapshots);
+            spec_backtest::measured_report_from_strategy(
+                || spec.build(cash, &schema),
+                snapshots,
+                cash,
+                per_symbol_costs,
+            )
+        }
+        LoadedSpec::Multi(spec) => {
+            let universe = spec_backtest::universe_from_snapshots(snapshots);
+            let per_symbol_costs: Vec<(String, TradingCosts)> = universe
+                .iter()
+                .map(|s| (s.clone(), cost_config.resolve(s, None)))
+                .collect();
+            let schema = spec_backtest::schema_from_snapshots(snapshots);
+            spec_backtest::measured_report_from_strategy(
+                || spec.build(cash, &schema),
+                snapshots,
+                cash,
+                per_symbol_costs,
+            )
+        }
+        LoadedSpec::Portfolio(spec) => {
+            let schema = spec_backtest::schema_from_snapshots(snapshots);
+            let universe = spec_backtest::universe_from_snapshots(snapshots);
+            let default_costs = cost_config.resolve("", None);
+            let costs_opt = (!default_costs.is_none()).then_some(default_costs);
+            spec_backtest::measured_report_portfolio(
+                || {
+                    let mut p = spec.build(cash, &schema, costs_opt.clone());
+                    for sym in &universe {
+                        p.install_costs_for(sym, cost_config.resolve(sym, None));
+                    }
+                    p
+                },
+                snapshots,
+            )
+        }
+    }
+}
+
+/// Reduce a run report to a `SpecMetrics` document.
+fn evaluate_spec(
+    loaded: &LoadedSpec,
+    snapshots: &[Snapshot<String>],
+    cash: Real,
+    bars_per_year: Real,
+    risk_free_rate: Real,
+    seconds_per_bar: Option<Real>,
+    cost_config: &CostConfig,
+) -> SpecMetrics {
+    let report = run_spec(loaded, snapshots, cash, cost_config);
+    spec_metrics::from_report(&report, bars_per_year, risk_free_rate, seconds_per_bar)
+}
+
+/// Serialize a `SpecMetrics` document into a Python dict via serde_json.
+fn metrics_to_py(py: Python<'_>, m: &SpecMetrics) -> PyResult<Py<PyAny>> {
+    let value = serde_json::to_value(m)
+        .map_err(|e| PyValueError::new_err(format!("serializing metrics: {e}")))?;
+    json_to_py(py, &value)
+}
+
+#[pymethods]
+impl PyStrategySpec {
+    /// The strategy kind, one of `single`, `pairs`, `basket`, `multi`,
+    /// `portfolio`.
+    #[getter]
+    fn kind(&self) -> &'static str {
+        self.inner.kind_str()
+    }
+
+    /// Drive the spec over `snapshots` and return the full run report.
+    #[pyo3(signature = (snapshots, cash = 1.0, costs = None))]
+    fn run(
+        &self,
+        snapshots: &Bound<'_, PyAny>,
+        cash: Real,
+        costs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyRunReport> {
+        let snaps = snapshots_from_sequence(snapshots)?;
+        let cost_config = coerce_cost_config(costs)?;
+        let report = run_spec(&self.inner, &snaps, cash, &cost_config);
+        Ok(PyRunReport { inner: report })
+    }
+
+    /// Drive the spec over `snapshots`, reduce the run report to a metrics
+    /// document, and return it as a nested dict (mirroring `metrics.yml`).
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (
+        snapshots,
+        cash = 1.0,
+        bars_per_year = 252.0,
+        risk_free_rate = 0.0,
+        costs = None,
+        seconds_per_bar = None,
+    ))]
+    fn evaluate(
+        &self,
+        py: Python<'_>,
+        snapshots: &Bound<'_, PyAny>,
+        cash: Real,
+        bars_per_year: Real,
+        risk_free_rate: Real,
+        costs: Option<&Bound<'_, PyAny>>,
+        seconds_per_bar: Option<Real>,
+    ) -> PyResult<Py<PyAny>> {
+        let snaps = snapshots_from_sequence(snapshots)?;
+        let cost_config = coerce_cost_config(costs)?;
+        let metrics = evaluate_spec(
+            &self.inner,
+            &snaps,
+            cash,
+            bars_per_year,
+            risk_free_rate,
+            seconds_per_bar,
+            &cost_config,
+        );
+        metrics_to_py(py, &metrics)
+    }
+
+    fn __repr__(&self) -> String {
+        format!("StrategySpec(kind='{}')", self.inner.kind_str())
+    }
+}
+
+/// Load a strategy YAML doc from text into a `StrategySpec`.
+///
+/// `params` is a dict of `!param` substitutions; `base_dir` is the directory
+/// `!import` paths resolve against. Auto-detects the strategy kind unless
+/// `kind` is one of `single`/`pairs`/`basket`/`multi`/`portfolio`.
+#[pyfunction]
+#[pyo3(signature = (text, params = None, base_dir = None, kind = "auto"))]
+fn load_strategy(
+    text: &str,
+    params: Option<&Bound<'_, PyAny>>,
+    base_dir: Option<&str>,
+    kind: &str,
+) -> PyResult<PyStrategySpec> {
+    let params = extract_params(params)?;
+    let base = std::path::PathBuf::from(base_dir.unwrap_or("."));
+    let inner = load_loaded_spec(text, &params, &base, kind)?;
+    Ok(PyStrategySpec { inner })
+}
+
+// ---------------------------------------------------------------------------
+// Optimize
+// ---------------------------------------------------------------------------
+
+#[pyclass(name = "SweepRow", module = "fugazi")]
+struct PySweepRow {
+    // Axis-name → value (None for sparse cells).
+    axis_columns: Vec<String>,
+    axis_values: Vec<Option<JsonValue>>,
+    // Metric-name (user-facing) → resolved value.
+    metric_columns: Vec<(String, String)>,
+    metric_values: Vec<Option<Real>>,
+    // If windowed, one Metrics dict per window.
+    windowed_metrics: Option<Vec<SpecMetrics>>,
+}
+
+#[pymethods]
+impl PySweepRow {
+    #[getter]
+    fn values(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
+        let d = pyo3::types::PyDict::new(py);
+        for (name, v) in self.axis_columns.iter().zip(&self.axis_values) {
+            match v {
+                Some(val) => d.set_item(name, json_to_py(py, val)?)?,
+                None => d.set_item(name, py.None())?,
+            }
+        }
+        Ok(d.into())
+    }
+
+    #[getter]
+    fn metrics(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
+        let d = pyo3::types::PyDict::new(py);
+        for ((user, _resolved), v) in self.metric_columns.iter().zip(&self.metric_values) {
+            match v {
+                Some(x) => d.set_item(user, x)?,
+                None => d.set_item(user, py.None())?,
+            }
+        }
+        Ok(d.into())
+    }
+
+    #[getter]
+    fn metrics_windowed(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.windowed_metrics {
+            None => Ok(py.None()),
+            Some(v) => {
+                let list = pyo3::types::PyList::empty(py);
+                for m in v {
+                    list.append(metrics_to_py(py, m)?)?;
+                }
+                Ok(list.into_any().unbind())
+            }
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "SweepRow(axes={}, metrics={})",
+            self.axis_columns.len(),
+            self.metric_columns.len(),
+        )
+    }
+}
+
+#[pyclass(name = "Sweep", module = "fugazi")]
+struct PySweep {
+    columns: Vec<String>,
+    metric_columns: Vec<(String, String)>,
+    rows: Vec<Py<PySweepRow>>,
+    best_idx: Option<usize>,
+}
+
+#[pymethods]
+impl PySweep {
+    #[getter]
+    fn columns(&self) -> Vec<String> {
+        self.columns.clone()
+    }
+
+    #[getter]
+    fn metric_columns(&self) -> Vec<(String, String)> {
+        self.metric_columns.clone()
+    }
+
+    #[getter]
+    fn rows(&self, py: Python<'_>) -> Vec<Py<PySweepRow>> {
+        self.rows.iter().map(|r| r.clone_ref(py)).collect()
+    }
+
+    #[getter]
+    fn best(&self, py: Python<'_>) -> Option<Py<PySweepRow>> {
+        self.best_idx.map(|i| self.rows[i].clone_ref(py))
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Sweep(rows={}, columns={})", self.rows.len(), self.columns.len())
+    }
+}
+
+/// Fold the Python `grid` list-of-dicts into `Vec<Subgrid>`, layering the
+/// baseline scalar `params` under each subgrid. Values that are lists become
+/// axes; `"start..end[:step]"` strings become ranges.
+fn build_subgrids(
+    baseline: &std::collections::HashMap<String, JsonValue>,
+    grid_py: &Bound<'_, PyAny>,
+) -> PyResult<Vec<spec_optimize::Subgrid>> {
+    if grid_py.is_none() {
+        return Err(PyValueError::new_err(
+            "`grid` must be a list of dicts (at least one)",
+        ));
+    }
+    let list = grid_py.cast::<pyo3::types::PyList>().map_err(|_| {
+        PyTypeError::new_err("`grid` must be a list of dicts (each dict maps NAME -> value)")
+    })?;
+    if list.is_empty() {
+        return Err(PyValueError::new_err("`grid` must contain at least one subgrid"));
+    }
+    let mut subgrids = Vec::with_capacity(list.len());
+    for (idx, item) in list.iter().enumerate() {
+        let dict = item.cast::<pyo3::types::PyDict>().map_err(|_| {
+            PyTypeError::new_err(format!("`grid[{idx}]` must be a dict"))
+        })?;
+        let mut merged: std::collections::HashMap<String, JsonValue> = baseline.clone();
+        for (k, v) in dict.iter() {
+            let key: String = k.extract().map_err(|_| {
+                PyTypeError::new_err(format!("`grid[{idx}]` keys must be strings"))
+            })?;
+            merged.insert(key, py_to_json(&v)?);
+        }
+        let (fixed, axes) = spec_optimize::split_axes(&merged)
+            .map_err(|e| PyValueError::new_err(format!("--grid #{}: {e}", idx + 1)))?;
+        let combos = spec_optimize::cartesian(&axes);
+        subgrids.push(spec_optimize::Subgrid { fixed, axes, combos });
+    }
+    Ok(subgrids)
+}
+
+/// Run a parameter-grid sweep over a strategy YAML document. Returns a
+/// `Sweep` with one row per grid point, ranked by `best_by` when set.
+///
+/// Walkforward is not yet wired; passing `walkforward` raises
+/// `NotImplementedError`.
+#[pyfunction]
+#[pyo3(signature = (
+    text,
+    snapshots,
+    cash = 1.0,
+    params = None,
+    grid = None,
+    kind = "auto",
+    metric_names = None,
+    best_by = None,
+    windowed = None,
+    walkforward = None,
+    risk_aversion = 0.0,
+    jobs = None,
+    bars_per_year = 252.0,
+    risk_free_rate = 0.0,
+    costs = None,
+    seconds_per_bar = None,
+    base_dir = None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn optimize(
+    py: Python<'_>,
+    text: &str,
+    snapshots: &Bound<'_, PyAny>,
+    cash: Real,
+    params: Option<&Bound<'_, PyAny>>,
+    grid: Option<&Bound<'_, PyAny>>,
+    kind: &str,
+    metric_names: Option<Vec<String>>,
+    best_by: Option<String>,
+    windowed: Option<usize>,
+    walkforward: Option<&Bound<'_, PyAny>>,
+    risk_aversion: Real,
+    jobs: Option<usize>,
+    bars_per_year: Real,
+    risk_free_rate: Real,
+    costs: Option<&Bound<'_, PyAny>>,
+    seconds_per_bar: Option<Real>,
+    base_dir: Option<&str>,
+) -> PyResult<PySweep> {
+    if walkforward.is_some() && !walkforward.unwrap().is_none() {
+        return Err(pyo3::exceptions::PyNotImplementedError::new_err(
+            "walkforward= is not yet wired in the Python bindings",
+        ));
+    }
+    let snaps = snapshots_from_sequence(snapshots)?;
+    let params_table = extract_params(params)?;
+    spec_optimize::reject_axes_in_params(&params_table)
+        .map_err(|e| PyValueError::new_err(format!("`params`: {e}")))?;
+    let base = std::path::PathBuf::from(base_dir.unwrap_or("."));
+    // Load and !import-splice the base value once — every grid point substitutes
+    // over this same value.
+    let base_value = fugazi_core::spec::input::parse_value_at(text, "(inline)")
+        .map_err(|e| PyValueError::new_err(format!("parsing strategy YAML: {e:#}")))?;
+    let base_value = fugazi_core::spec::imports::resolve(base_value, &base)
+        .map_err(|e| PyValueError::new_err(format!("resolving imports: {e:#}")))?;
+    // Detect the kind from the raw (pre-`!param`) base value. Kind is fixed by
+    // top-level shape, not by any parameter — running `!param` here would fail
+    // for grid-only names.
+    let detected = if kind == "auto" { detect_kind(&base_value) } else { kind };
+    let grid_py = grid.ok_or_else(|| {
+        PyValueError::new_err("`grid` is required (list of dicts, one per subgrid)")
+    })?;
+    let subgrids = build_subgrids(&params_table, grid_py)?;
+    // Cost config resolved once — cloning it per row isn't needed because the
+    // resolve() call inside evaluate_* takes &CostConfig.
+    let cost_config = coerce_cost_config(costs)?;
+    // Snapshots ref borrowed by the evaluate closure. `windowed = Some(n)`
+    // switches the closure into windowed mode.
+
+    let metric_names_vec: Vec<String> = metric_names.unwrap_or_default();
+    let best_by_str = best_by.clone();
+
+    // Discover universe once for basket / multi / portfolio.
+    let universe = spec_backtest::universe_from_snapshots(&snaps);
+
+    let sweep = py.detach(|| -> anyhow::Result<spec_optimize::Sweep> {
+        let evaluate_row = |params: &std::collections::HashMap<String, JsonValue>|
+            -> anyhow::Result<spec_optimize::Evaluation>
+        {
+            match detected {
+                "single" => {
+                    // StrategyRef supports presets + spec map; substitute + typed-parse.
+                    let value = fugazi_core::spec::params::substitute(base_value.clone(), params)?;
+                    let sref: StrategyRef = serde_json::from_value(value)?;
+                    // Convert snapshots to (String, Atom) for the single-asset path.
+                    let symbol = sref.symbol().to_string();
+                    let atoms: Vec<(String, Atom)> = snaps
+                        .iter()
+                        .filter_map(|s| {
+                            s.find(&Selector::by_symbol(symbol.clone()))
+                                .map(|a| (String::new(), a.clone()))
+                        })
+                        .collect();
+                    let schema = spec_backtest::schema_from_atoms(&atoms);
+                    let costs = cost_config.resolve(&symbol, None);
+                    let mut strategy = sref.build(cash, &schema);
+                    let mut wallet = PaperWallet::with_costs(cash, costs);
+                    let symbol_clone = symbol.clone();
+                    let report = fugazi_core::backtest::run(
+                        &mut strategy,
+                        &mut wallet,
+                        atoms
+                            .iter()
+                            .map(|(_, a)| Snapshot::single(symbol_clone.clone(), a.clone())),
+                    );
+                    Ok(match windowed {
+                        None => spec_optimize::Evaluation::Whole(Box::new(
+                            spec_metrics::from_report(
+                                &report,
+                                bars_per_year,
+                                risk_free_rate,
+                                seconds_per_bar,
+                            ),
+                        )),
+                        Some(w) => spec_optimize::Evaluation::Windowed(
+                            spec_metrics::windowed_from_report(
+                                &report,
+                                w,
+                                bars_per_year,
+                                risk_free_rate,
+                                seconds_per_bar,
+                            ),
+                        ),
+                    })
+                }
+                "pairs" => {
+                    let spec = spec_optimize::build_pairs_spec(&base_value, params)?;
+                    Ok(match windowed {
+                        None => spec_optimize::Evaluation::Whole(Box::new(
+                            spec_backtest::evaluate_pairs(
+                                &spec,
+                                &snaps,
+                                cash,
+                                bars_per_year,
+                                risk_free_rate,
+                                &cost_config,
+                                None,
+                                seconds_per_bar,
+                            ),
+                        )),
+                        Some(w) => spec_optimize::Evaluation::Windowed(
+                            spec_backtest::evaluate_windowed_pairs(
+                                &spec,
+                                &snaps,
+                                cash,
+                                bars_per_year,
+                                risk_free_rate,
+                                &cost_config,
+                                None,
+                                w,
+                                seconds_per_bar,
+                            ),
+                        ),
+                    })
+                }
+                "basket" => {
+                    let spec = spec_optimize::build_basket_spec(&base_value, params)?;
+                    Ok(match windowed {
+                        None => spec_optimize::Evaluation::Whole(Box::new(
+                            spec_backtest::evaluate_basket(
+                                &spec,
+                                &snaps,
+                                &universe,
+                                cash,
+                                bars_per_year,
+                                risk_free_rate,
+                                &cost_config,
+                                None,
+                                seconds_per_bar,
+                            ),
+                        )),
+                        Some(w) => spec_optimize::Evaluation::Windowed(
+                            spec_backtest::evaluate_windowed_basket(
+                                &spec,
+                                &snaps,
+                                &universe,
+                                cash,
+                                bars_per_year,
+                                risk_free_rate,
+                                &cost_config,
+                                None,
+                                w,
+                                seconds_per_bar,
+                            ),
+                        ),
+                    })
+                }
+                "multi" => {
+                    let spec = spec_optimize::build_multi_spec(&base_value, params)?;
+                    Ok(match windowed {
+                        None => spec_optimize::Evaluation::Whole(Box::new(
+                            spec_backtest::evaluate_multi(
+                                &spec,
+                                &snaps,
+                                &universe,
+                                cash,
+                                bars_per_year,
+                                risk_free_rate,
+                                &cost_config,
+                                None,
+                                seconds_per_bar,
+                            ),
+                        )),
+                        Some(w) => spec_optimize::Evaluation::Windowed(
+                            spec_backtest::evaluate_windowed_multi(
+                                &spec,
+                                &snaps,
+                                &universe,
+                                cash,
+                                bars_per_year,
+                                risk_free_rate,
+                                &cost_config,
+                                None,
+                                w,
+                                seconds_per_bar,
+                            ),
+                        ),
+                    })
+                }
+                "portfolio" => {
+                    let spec = spec_optimize::build_portfolio_spec(&base_value, params)?;
+                    Ok(match windowed {
+                        None => spec_optimize::Evaluation::Whole(Box::new(
+                            spec_backtest::evaluate_portfolio(
+                                &spec,
+                                &snaps,
+                                cash,
+                                bars_per_year,
+                                risk_free_rate,
+                                &cost_config,
+                                None,
+                                seconds_per_bar,
+                            ),
+                        )),
+                        Some(w) => spec_optimize::Evaluation::Windowed(
+                            spec_backtest::evaluate_windowed_portfolio(
+                                &spec,
+                                &snaps,
+                                cash,
+                                bars_per_year,
+                                risk_free_rate,
+                                &cost_config,
+                                None,
+                                w,
+                                seconds_per_bar,
+                            ),
+                        ),
+                    })
+                }
+                other => anyhow::bail!("unknown strategy kind `{other}`"),
+            }
+        };
+        spec_optimize::optimize(
+            subgrids,
+            windowed,
+            &metric_names_vec,
+            best_by_str.as_deref(),
+            risk_aversion,
+            jobs,
+            evaluate_row,
+        )
+    })
+    .map_err(|e| PyValueError::new_err(format!("optimize: {e:#}")))?;
+
+    // Turn the kernel's Sweep into pyclass-facing rows. We serialize windowed
+    // per-window metrics on demand only when `windowed` is set, matching the
+    // API contract.
+    let columns = sweep.union_columns.clone();
+    let metric_columns = sweep.metric_columns.clone();
+
+    let mut row_objs: Vec<Py<PySweepRow>> = Vec::with_capacity(sweep.rows.len());
+    for row in &sweep.rows {
+        // Extract metric values by resolved-column path.
+        let metric_values: Vec<Option<Real>> = metric_columns
+            .iter()
+            .map(|(_user, resolved)| match &row.eval {
+                spec_optimize::Evaluation::Whole(m) => spec_optimize::lookup(m.as_ref(), resolved),
+                spec_optimize::Evaluation::Windowed(ws) => {
+                    spec_optimize::lookup_windowed(ws.as_slice(), resolved).map(|(mean, _)| mean)
+                }
+            })
+            .collect();
+        let windowed_metrics = match &row.eval {
+            spec_optimize::Evaluation::Whole(_) => None,
+            spec_optimize::Evaluation::Windowed(ws) => {
+                Some(ws.iter().map(|w| w.metrics.clone()).collect())
+            }
+        };
+        let py_row = Py::new(
+            py,
+            PySweepRow {
+                axis_columns: columns.clone(),
+                axis_values: row.values.clone(),
+                metric_columns: metric_columns.clone(),
+                metric_values,
+                windowed_metrics,
+            },
+        )?;
+        row_objs.push(py_row);
+    }
+    // best is row 0 iff best_by was set; the kernel already sorted `rows`.
+    let best_idx = if sweep.best_by.is_some() && !row_objs.is_empty() {
+        Some(0)
+    } else {
+        None
+    };
+    Ok(PySweep {
+        columns,
+        metric_columns,
+        rows: row_objs,
+        best_idx,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Module
 // ---------------------------------------------------------------------------
 
@@ -6892,6 +7935,10 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyYahoo>()?;
     m.add_class::<PyCoinGecko>()?;
     m.add_class::<PyCoinMarketCap>()?;
+    m.add_class::<PyCostConfig>()?;
+    m.add_class::<PyStrategySpec>()?;
+    m.add_class::<PySweep>()?;
+    m.add_class::<PySweepRow>()?;
 
     m.add("DEFAULT_EPSILON", DEFAULT_EPSILON)?;
 
@@ -6918,6 +7965,9 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // against a private wallet, and read a rolling metric over its
         // equity curve.
         sharpe_of, sortino_of, volatility_of, max_drawdown_of, calmar_of,
+        // Spec-driven surface: load a YAML strategy, run it, evaluate it, or
+        // sweep a parameter grid over it. Full parity with the CLI.
+        load_strategy, optimize,
     );
 
     // `fugazi.metrics` — mirror of `fugazi::metrics::*`. Registered as a
