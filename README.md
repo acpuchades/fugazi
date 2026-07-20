@@ -808,6 +808,63 @@ subcommands — briefly listed here, fully documented in
 - `fugazi completions <shell>` — a shell-completion script (see
   [doc/CLI.md § Shell completion](doc/CLI.md#shell-completion)).
 
+## Live trading (Binance)
+
+The same `Wallet` a backtest trades into is the seam to a live broker: the
+`live` feature ships `BinanceFuturesWallet`, a `Wallet<String>` that routes
+orders to Binance USDⓈ-M Futures over its signed REST API. A strategy driven by
+`backtest::run` needs no change — swap the `PaperWallet` for a live one:
+
+```rust,ignore
+use fugazi::live::BinanceFuturesWallet;
+
+// Testnet (free, no real funds) or ::mainnet(key, secret) for production.
+let mut wallet = BinanceFuturesWallet::testnet(key, secret);
+// ... then drive any strategy through `fugazi::backtest::run` as usual.
+```
+
+Enable it in `Cargo.toml` with `features = ["live"]` (off by default). Market
+orders, `reduceOnly` stop / take-profit legs, account-marked equity, and fill
+polling all work through the ordinary trait methods; `poll_fills()` drains
+fills booked between bars and `take_rejections()` surfaces venue refusals to
+`Strategy::on_reject`.
+
+### Testing against the Binance testnet
+
+Binance runs a free futures **testnet** (fake funds) that's endpoint-compatible
+with production, so the live wallet is exercisable end-to-end without risking
+money:
+
+1. Log in at <https://testnet.binancefuture.com> and generate an API key —
+   **choose the HMAC_SHA256 key type** (the wallet signs with HMAC-SHA256; an
+   Ed25519 key fails signature validation with `-1022`).
+2. The account is pre-funded and defaults to **one-way position mode** (what the
+   wallet assumes).
+3. Run the narrated smoke-test example:
+
+   ```bash
+   BINANCE_TESTNET_KEY=… BINANCE_TESTNET_SECRET=… \
+     cargo run --example binance_testnet --features live
+   ```
+
+   It reads the account, opens a tiny `BTCUSDT` position with a market order,
+   polls the fill, then flattens back — leaving the account as it started.
+
+4. Or run the opt-in integration test (`#[ignore]`d and gated on the same env
+   vars, so a plain `cargo test` never hits the network):
+
+   ```bash
+   BINANCE_TESTNET_KEY=… BINANCE_TESTNET_SECRET=… \
+     cargo test --features live --test live_binance -- --ignored live_testnet_round_trip
+   ```
+
+Plain `cargo test --features live` runs only the offline `wiremock` tests
+(signing, order encoding, fill decoding, protective dedup) and never reaches the
+network. If a signed call is rejected with `-1021`, your machine's clock has
+drifted past the `recvWindow` — resync it. Before going to `::mainnet`, note the
+one-way-mode assumption and that leverage / rate-limit backoff / clock-offset
+sync aren't managed yet.
+
 ## Examples
 
 Runnable example programs live in [`examples/`](examples) — run any with
@@ -826,6 +883,9 @@ Runnable example programs live in [`examples/`](examples) — run any with
   using `wallet.set` and funds-fraction sizing.
 - `pairs` — a multi-asset strategy: two symbols traded from one wallet, driven by
   a per-symbol snapshot input.
+- `binance_testnet` — a live round-trip against the Binance futures testnet
+  (needs `--features live` and `BINANCE_TESTNET_{KEY,SECRET}`; see [Live
+  trading](#live-trading-binance)).
 
 A `cargo test` checks that every example still compiles.
 
