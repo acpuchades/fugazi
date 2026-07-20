@@ -195,6 +195,51 @@ fn protective_stop_dedups_an_unchanged_trigger() {
     assert_eq!(order_posts.load(Ordering::SeqCst), 2, "a moved trigger re-submits");
 }
 
+#[test]
+fn a_venue_rejected_order_surfaces_through_take_rejections() {
+    let (_rt, _server, uri) = serve(|server| {
+        Box::pin(async move {
+            Mock::given(method("GET"))
+                .and(path("/fapi/v1/exchangeInfo"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(exchange_info("BTCUSDT")))
+                .mount(server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/fapi/v1/userTrades"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+                .mount(server)
+                .await;
+            // The venue refuses the order (e.g. -2019 margin insufficient).
+            Mock::given(method("POST"))
+                .and(path("/fapi/v1/order"))
+                .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                    "code": -2019, "msg": "Margin is insufficient."
+                })))
+                .mount(server)
+                .await;
+        })
+    });
+
+    let mut w = BinanceFuturesWallet::with_base_url(uri, "key", "secret");
+
+    // The submission fails synchronously with the Venue category …
+    let err = w
+        .set_position(Units { symbol: "BTCUSDT".to_string(), amount: 0.003 })
+        .expect_err("venue refuses the order");
+    assert_eq!(err, fugazi::wallet::WalletError::Venue);
+
+    // … and — the point of this test — the refusal is drained through the
+    // failure stream so a driver can route it to `Strategy::on_reject`, rather
+    // than vanishing when `trade()` discards the `Err`.
+    let refused = w.take_rejections();
+    assert_eq!(refused.len(), 1, "one refused order; errors: {:?}", w.errors());
+    assert_eq!(refused[0].symbol, "BTCUSDT");
+    assert_eq!(refused[0].kind, fugazi::wallet::OrderKind::Market);
+    assert_eq!(refused[0].error, fugazi::wallet::WalletError::Venue);
+    // Draining is destructive: a second call yields nothing.
+    assert!(w.take_rejections().is_empty(), "already drained");
+}
+
 /// Opt-in end-to-end test against the real Binance futures **testnet**.
 ///
 /// Ignored by default and additionally gated on `BINANCE_TESTNET_KEY` /

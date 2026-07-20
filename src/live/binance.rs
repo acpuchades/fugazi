@@ -32,6 +32,13 @@
 //!   symbol we've traded), so a fill on a symbol that didn't tick this bar still
 //!   reaches the strategy. Partial fills arrive as several [`Order`]s sharing one
 //!   [`OrderId`].
+//! * **Refusals** — an order the venue rejects — return the
+//!   [`WalletError::Venue`] category *and* are buffered onto the trait's failure
+//!   stream, drained by [`take_rejections`](Wallet::take_rejections) and routed
+//!   to [`Strategy::on_reject`](crate::Strategy::on_reject) by the driver, so a
+//!   rejected entry/exit doesn't silently desync the strategy's view of its
+//!   position. The full error detail (status, body) also lands on
+//!   [`errors`](BinanceFuturesWallet::errors).
 //!
 //! REST fill polling is the MVP; a user-data websocket stream is the natural
 //! lower-latency follow-up.
@@ -45,7 +52,9 @@ use sha2::Sha256;
 
 use crate::indicators::DEFAULT_EPSILON;
 use crate::types::{Candle, Real};
-use crate::wallet::{Ack, Order, OrderId, OrderKind, Reference, Side, Units, Wallet, WalletError};
+use crate::wallet::{
+    Ack, Order, OrderId, OrderKind, Reference, Rejection, Side, Units, Wallet, WalletError,
+};
 
 use super::LiveError;
 
@@ -117,6 +126,9 @@ pub struct BinanceFuturesWallet {
     // Fill polling: per-symbol last-seen tradeId, and the accumulated errors.
     trade_cursor: HashMap<String, i64>,
     errors: Vec<LiveError>,
+    // Refused orders awaiting a drain through take_rejections (the trait's
+    // failure stream — the twin of the fill stream update()/poll_fills return).
+    rejections: Vec<Rejection<String>>,
 }
 
 impl BinanceFuturesWallet {
@@ -164,6 +176,7 @@ impl BinanceFuturesWallet {
             protective: HashMap::new(),
             trade_cursor: HashMap::new(),
             errors: Vec::new(),
+            rejections: Vec::new(),
         }
     }
 
@@ -288,6 +301,30 @@ impl BinanceFuturesWallet {
         WalletError::Venue
     }
 
+    /// A **refused order**: log the detail, buffer a [`Rejection`] for
+    /// [`take_rejections`](Wallet::take_rejections) so the driver can route it
+    /// to [`Strategy::on_reject`](crate::Strategy::on_reject), and return the
+    /// trait-facing [`WalletError::Venue`]. Unlike [`fail`](Self::fail), this is
+    /// for a submission the strategy expected to place — an entry the venue
+    /// rejects leaves the strategy flat when it wanted a position, a rejected
+    /// protective leg leaves it holding one it wanted out of.
+    fn refuse(
+        &mut self,
+        symbol: &str,
+        id: OrderId,
+        kind: OrderKind,
+        err: LiveError,
+    ) -> WalletError {
+        self.errors.push(err);
+        self.rejections.push(Rejection {
+            symbol: symbol.to_string(),
+            id,
+            error: WalletError::Venue,
+            kind,
+        });
+        WalletError::Venue
+    }
+
     // --- REST plumbing -----------------------------------------------------
 
     /// A signed private request; blocks on the owned runtime. Params are the
@@ -374,11 +411,18 @@ impl BinanceFuturesWallet {
         kind: OrderKind,
         trigger: Real,
     ) -> Result<RestingLeg, WalletError> {
-        let filter = self.ensure_filter(symbol).map_err(|e| self.fail(e))?;
+        let local = self.mint();
+        let filter = match self.ensure_filter(symbol) {
+            Ok(f) => f,
+            Err(e) => return Err(self.refuse(symbol, local, kind, e)),
+        };
         let pos = self.positions.get(symbol).copied().unwrap_or(0.0);
         if pos.abs() <= DEFAULT_EPSILON {
-            // Nothing to protect; treat as a no-op resting leg record.
-            return Err(WalletError::Venue);
+            // Nothing to protect — our own guard, not a venue refusal; log it
+            // but don't buffer a per-bar rejection for a flat re-submit.
+            return Err(self.fail(LiveError::Decode(format!(
+                "no open {symbol} position to rest a protective leg against"
+            ))));
         }
         // A protective exit trades the opposite side of the open position.
         let side = if pos > 0.0 { Side::Sell } else { Side::Buy };
@@ -390,7 +434,6 @@ impl BinanceFuturesWallet {
         if let Err(e) = self.ensure_cursor(symbol) {
             self.errors.push(e);
         }
-        let local = self.mint();
         let params = vec![
             ("symbol", symbol.to_string()),
             ("side", side_token(side).to_string()),
@@ -402,13 +445,18 @@ impl BinanceFuturesWallet {
             ("closePosition", "true".to_string()),
             ("newClientOrderId", client_order_id(local)),
         ];
-        let value = self
-            .signed(Method::POST, "/fapi/v1/order", params)
-            .map_err(|e| self.fail(e))?;
-        let venue_id = value
-            .get("orderId")
-            .and_then(|v| v.as_i64())
-            .ok_or(WalletError::Venue)?;
+        let value = match self.signed(Method::POST, "/fapi/v1/order", params) {
+            Ok(v) => v,
+            Err(e) => return Err(self.refuse(symbol, local, kind, e)),
+        };
+        let Some(venue_id) = value.get("orderId").and_then(|v| v.as_i64()) else {
+            return Err(self.refuse(
+                symbol,
+                local,
+                kind,
+                LiveError::Decode("order response missing orderId".into()),
+            ));
+        };
         self.map_order(local, venue_id, kind);
         Ok(RestingLeg { trigger, venue_id, local })
     }
@@ -484,11 +532,16 @@ impl Wallet<String> for BinanceFuturesWallet {
 
     fn set_position(&mut self, target: Units<String>) -> Result<Ack<String>, WalletError> {
         let symbol = target.symbol;
-        let filter = self.ensure_filter(&symbol).map_err(|e| self.fail(e))?;
+        // Mint the id up front so a refusal before the POST still carries the
+        // submission's id into its Rejection.
+        let id = self.mint();
+        let filter = match self.ensure_filter(&symbol) {
+            Ok(f) => f,
+            Err(e) => return Err(self.refuse(&symbol, id, OrderKind::Market, e)),
+        };
         let current = self.positions.get(&symbol).copied().unwrap_or(0.0);
         let delta = target.amount - current;
         let qty = floor_to_step(delta.abs(), filter.step);
-        let id = self.mint();
         if qty < filter.min_qty || qty <= DEFAULT_EPSILON {
             // Below the venue's minimum tradable size: accept the submission
             // but place nothing (no fill will arrive under this id).
@@ -508,13 +561,18 @@ impl Wallet<String> for BinanceFuturesWallet {
             ("quantity", format_decimals(qty, filter.qty_decimals)),
             ("newClientOrderId", client_order_id(id)),
         ];
-        let value = self
-            .signed(Method::POST, "/fapi/v1/order", params)
-            .map_err(|e| self.fail(e))?;
-        let venue_id = value
-            .get("orderId")
-            .and_then(|v| v.as_i64())
-            .ok_or(WalletError::Venue)?;
+        let value = match self.signed(Method::POST, "/fapi/v1/order", params) {
+            Ok(v) => v,
+            Err(e) => return Err(self.refuse(&symbol, id, OrderKind::Market, e)),
+        };
+        let Some(venue_id) = value.get("orderId").and_then(|v| v.as_i64()) else {
+            return Err(self.refuse(
+                &symbol,
+                id,
+                OrderKind::Market,
+                LiveError::Decode("order response missing orderId".into()),
+            ));
+        };
         self.map_order(id, venue_id, OrderKind::Market);
         Ok(Ack::Working(id))
     }
@@ -541,6 +599,10 @@ impl Wallet<String> for BinanceFuturesWallet {
             }
         }
         Ok(())
+    }
+
+    fn take_rejections(&mut self) -> Vec<Rejection<String>> {
+        std::mem::take(&mut self.rejections)
     }
 
     fn poll_fills(&mut self) -> Vec<Order<String>> {
