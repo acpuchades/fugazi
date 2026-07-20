@@ -173,6 +173,9 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
         style::print_section("fills");
         stream_fills(&iter);
     }
+    if !opts.quiet {
+        print_rejection_warning(&iter.report);
+    }
     write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
 
     write_returns_csv(&iter, &opts.out_dir.join("returns.csv"))?;
@@ -294,6 +297,9 @@ pub fn run_pairs(
         println!();
         style::print_section("fills");
         stream_fills(&iter);
+    }
+    if !opts.quiet {
+        print_rejection_warning(&iter.report);
     }
     write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
 
@@ -440,6 +446,9 @@ pub fn run_basket(
         style::print_section("fills");
         stream_fills(&iter);
     }
+    if !opts.quiet {
+        print_rejection_warning(&iter.report);
+    }
     write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
 
     write_returns_csv(&iter, &opts.out_dir.join("returns.csv"))?;
@@ -574,6 +583,9 @@ pub fn run_multi(
         println!();
         style::print_section("fills");
         stream_fills(&iter);
+    }
+    if !opts.quiet {
+        print_rejection_warning(&iter.report);
     }
     write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
     write_returns_csv(&iter, &opts.out_dir.join("returns.csv"))?;
@@ -714,6 +726,9 @@ pub fn run_portfolio(
         println!();
         style::print_section("fills");
         stream_fills(&iter);
+    }
+    if !opts.quiet {
+        print_rejection_warning(&iter.report);
     }
     write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
     write_returns_csv(&iter, &opts.out_dir.join("returns.csv"))?;
@@ -1151,6 +1166,48 @@ fn collect_warnings(skipped: &[String], no_cost: bool) -> Vec<String> {
         );
     }
     w
+}
+
+/// The post-run "orders were refused" banner.
+///
+/// Unlike the top-of-run warnings this can only be known after the fact, so it
+/// prints between the run and the trades block. A rejection means the run did
+/// not trade the way the strategy asked — most often an entry sized beyond
+/// available funds, or a protective stop that could not be booked — so the
+/// metrics below describe a different strategy than the one specified. Grouped
+/// by reason so a systematic problem reads as one line rather than N.
+fn print_rejection_warning<Sym>(report: &fugazi::RunReport<Sym>) {
+    if report.rejections.is_empty() {
+        return;
+    }
+    let n = report.rejections.len();
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for r in &report.rejections {
+        let key = format!("{} ({})", r.rejection.error, kind_label(r.rejection.kind));
+        match counts.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, c)) => *c += 1,
+            None => counts.push((key, 1)),
+        }
+    }
+    let detail = counts
+        .into_iter()
+        .map(|(reason, count)| format!("{count}x {reason}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    style::print_warns(&[format!(
+        "{n} order{} refused by the wallet — the equity curve and metrics below \
+         reflect trades that did not happen as specified: {detail}",
+        if n == 1 { " was" } else { "s were" },
+    )]);
+}
+
+/// Human label for an [`OrderKind`] inside the rejection banner.
+fn kind_label(kind: fugazi::OrderKind) -> &'static str {
+    match kind {
+        fugazi::OrderKind::Market => "market",
+        fugazi::OrderKind::Stop => "stop",
+        fugazi::OrderKind::TakeProfit => "take-profit",
+    }
 }
 
 /// The "result" block: the run's outputs, then its wall-clock timing.

@@ -155,6 +155,7 @@ fn matches_empyrical_reference() {
     let report: RunReport<String> = RunReport {
         equity_curve: equity,
         fills: Vec::new(),
+        rejections: Vec::new(),
         initial_equity: INITIAL_CASH,
     };
     let m = metrics::from_report(&report, BARS_PER_YEAR, RISK_FREE_RATE, None);

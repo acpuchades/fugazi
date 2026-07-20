@@ -61,7 +61,7 @@ use fugazi_core::types::{
     Atom, Candle, Frequency, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder,
     Selector, Snapshot,
 };
-use fugazi_core::backtest::{Fill, RunReport};
+use fugazi_core::backtest::{Fill, Rejected, RunReport};
 use fugazi_core::indicators::Const;
 use fugazi_core::strategies::{
     BasketStrategy, MultiAssetStrategy, PairsStrategy, SingleAssetStrategy,
@@ -4127,9 +4127,66 @@ fn build_preset_or_bare(
     }
 }
 
+/// One order the wallet **refused**, stamped with the bar it was refused on —
+/// the failure-side twin of [`Fill`](PyFill).
+///
+/// A refusal is otherwise invisible: an order can be accepted at submission and
+/// still fail later when it is filled, with nobody holding a result to check. A
+/// non-empty `RunReport.rejections` means the run did not trade the way the
+/// strategy intended, so the metrics describe something other than what was
+/// specified.
+#[pyclass(name = "Rejected", frozen)]
+struct PyRejected {
+    inner: Rejected<String>,
+}
+
+#[pymethods]
+impl PyRejected {
+    /// The bar index at which the order was refused.
+    #[getter]
+    fn bar(&self) -> usize {
+        self.inner.bar
+    }
+
+    /// The instrument the refused order was for.
+    #[getter]
+    fn symbol(&self) -> String {
+        self.inner.rejection.symbol.clone()
+    }
+
+    /// Why it was refused, as the `WalletError`'s message.
+    #[getter]
+    fn error(&self) -> String {
+        self.inner.rejection.error.to_string()
+    }
+
+    /// `"market"`, `"stop"` or `"take_profit"` — a refused stop means the
+    /// position is still open and its protection did not fire.
+    #[getter]
+    fn kind(&self) -> &'static str {
+        kind_str(self.inner.rejection.kind)
+    }
+
+    /// The id of the submission this refusal belongs to.
+    #[getter]
+    fn id(&self) -> u64 {
+        self.inner.rejection.id.0
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Rejected(bar={}, symbol='{}', error='{}', kind='{}')",
+            self.inner.bar,
+            self.inner.rejection.symbol,
+            self.inner.rejection.error,
+            kind_str(self.inner.rejection.kind),
+        )
+    }
+}
+
 /// The result of [`Strategy.run`](PyStrategy::run): the per-bar equity curve, the
-/// fill blotter, and the pre-run seed equity — everything the `fugazi.metrics`
-/// functions reduce to numbers.
+/// fill blotter, the refused orders, and the pre-run seed equity — everything the
+/// `fugazi.metrics` functions reduce to numbers.
 #[pyclass(name = "RunReport", frozen)]
 struct PyRunReport {
     inner: RunReport<String>,
@@ -4154,6 +4211,18 @@ impl PyRunReport {
             .collect()
     }
 
+    /// Every refused order (a [`Rejected`](PyRejected)), in refusal order. Empty
+    /// on a clean run — check it before trusting the metrics.
+    #[getter]
+    fn rejections(&self) -> Vec<PyRejected> {
+        self.inner
+            .rejections
+            .iter()
+            .cloned()
+            .map(|inner| PyRejected { inner })
+            .collect()
+    }
+
     /// The wallet's equity captured immediately before the first bar — the seed
     /// returns / CAGR compound against.
     #[getter]
@@ -4163,9 +4232,10 @@ impl PyRunReport {
 
     fn __repr__(&self) -> String {
         format!(
-            "RunReport(bars={}, fills={}, initial_equity={})",
+            "RunReport(bars={}, fills={}, rejections={}, initial_equity={})",
             self.inner.equity_curve.len(),
             self.inner.fills.len(),
+            self.inner.rejections.len(),
             self.inner.initial_equity,
         )
     }
@@ -8312,6 +8382,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyMultiAssetStrategy>()?;
     m.add_class::<PyBasketStrategy>()?;
     m.add_class::<PyRunReport>()?;
+    m.add_class::<PyRejected>()?;
     m.add_class::<PyFill>()?;
     m.add_class::<PyBinance>()?;
     m.add_class::<PyYahoo>()?;

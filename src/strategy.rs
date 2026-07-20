@@ -6,7 +6,7 @@
 //! built-in in-memory [`PaperWallet`](crate::PaperWallet)) live in
 //! [`crate::wallet`].
 
-use crate::wallet::{Order, Wallet};
+use crate::wallet::{Order, Rejection, Wallet};
 
 /// An incremental trading strategy — the *decision* layer above indicators and
 /// signals.
@@ -52,6 +52,27 @@ pub trait Strategy {
     /// wallet. Defaults to a no-op for strategies that don't need it.
     fn on_fill(&mut self, order: &Order<Self::Symbol>) {
         let _ = order;
+    }
+
+    /// Hook called for each order the wallet **refused** — the failure-side twin
+    /// of [`on_fill`](Self::on_fill).
+    ///
+    /// A strategy that tracks its own position from the fill stream is, by
+    /// default, silently wrong when a submission is refused: it staged an entry,
+    /// no fill ever arrives, and nothing tells it so. Override this to notice.
+    /// The common shapes are to stand down (clear whatever intent was staged) or
+    /// to escalate — a repeated
+    /// [`InsufficientFunds`](crate::WalletError::InsufficientFunds) usually means
+    /// the sizing indicator disagrees with the wallet about available capital,
+    /// which is not a condition to trade through. A refused
+    /// [`Stop`](crate::OrderKind::Stop) is graver still: the position is still
+    /// open and its protection did not fire.
+    ///
+    /// Called by the driver before [`update`](Self::update) for refusals booked
+    /// while the wallet was being priced, and after [`trade`](Self::trade) for
+    /// those the strategy's own submissions caused this bar. Default: no-op.
+    fn on_reject(&mut self, rejection: &Rejection<Self::Symbol>) {
+        let _ = rejection;
     }
 
     /// Whether the strategy has seen enough history that its

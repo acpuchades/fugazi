@@ -433,6 +433,32 @@ pub trait Wallet<Sym> {
         let _ = delta;
         Err(WalletError::UnsupportedOperation)
     }
+
+    /// Drain the [`Rejection`]s booked since the last call — orders this wallet
+    /// refused, in the order it refused them.
+    ///
+    /// This is the wallet's **failure stream**, the twin of the fill stream
+    /// [`update`](Wallet::update) returns, and it exists because the `Result` on
+    /// a submission is not enough on its own. A strategy has no way to report an
+    /// `Err` — its [`trade`](crate::Strategy::trade) returns `()` — and an order
+    /// accepted as [`Ack::Working`] can still fail later at fill time, when
+    /// nobody holds a `Result` to check. A driver drains this each bar and routes
+    /// the entries to [`Strategy::on_reject`](crate::Strategy::on_reject).
+    ///
+    /// Draining is destructive: each rejection is yielded exactly once. It is
+    /// deliberately distinct from
+    /// [`PaperWallet::rejections`](PaperWallet::rejections), which is a
+    /// non-destructive view of the *whole* run history for tests and debugging —
+    /// draining does not disturb it.
+    ///
+    /// The default returns nothing, so an implementor that never refuses an
+    /// order — or that surfaces failures entirely out-of-band — needs no
+    /// override. **Any implementor that can drop an order should override it**;
+    /// a refusal that reaches no one leaves the strategy's `Position` and `Book`
+    /// describing a position it does not hold.
+    fn take_rejections(&mut self) -> Vec<Rejection<Sym>> {
+        Vec::new()
+    }
 }
 
 /// A market order queued on a [`PaperWallet`] to fill at the next bar's `open`.
@@ -481,6 +507,12 @@ pub struct Rejection<Sym> {
     pub symbol: Sym,
     pub id: OrderId,
     pub error: WalletError,
+    /// Whether the refused order was a plain market order or one of the resting
+    /// protective legs. A protective leg fails at *trigger* time rather than at
+    /// submission, and the distinction matters: a refused entry leaves the
+    /// strategy flat when it wanted a position, while a refused stop leaves it
+    /// holding one it wanted out of.
+    pub kind: OrderKind,
 }
 
 /// The built-in **pure**, in-memory [`Wallet`]: a paper book of `funds`,
@@ -509,6 +541,11 @@ pub struct PaperWallet<Sym> {
     initial_funds: Real,
     blotter: Vec<Order<Sym>>,
     rejections: Vec<Rejection<Sym>>,
+    /// How many of `rejections` have already been yielded by
+    /// [`take_rejections`](Wallet::take_rejections). The vec is never truncated,
+    /// so [`rejections`](Self::rejections) keeps reporting the full run history
+    /// while the drain still yields each entry exactly once.
+    rejections_drained: usize,
     next_id: u64,
     costs: TradingCosts,
     per_symbol_costs: HashMap<Sym, TradingCosts>,
@@ -537,6 +574,7 @@ impl<Sym> PaperWallet<Sym> {
             initial_funds: funds,
             blotter: Vec::new(),
             rejections: Vec::new(),
+            rejections_drained: 0,
             next_id: 0,
             costs,
             per_symbol_costs: HashMap::new(),
@@ -569,6 +607,7 @@ impl<Sym> PaperWallet<Sym> {
         self.protective.clear();
         self.blotter.clear();
         self.rejections.clear();
+        self.rejections_drained = 0;
         self.funds = self.initial_funds;
         self.next_id = 0;
     }
@@ -791,6 +830,28 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
     /// funds-plus-tolerance comparison [`fill_at`](Self::fill_at) does at
     /// fill time so a submission passing this is virtually certain to fill
     /// (barring a big gap in the open).
+    /// Book a **submission-time** refusal and hand the error back.
+    ///
+    /// The pre-flight paths on [`set`](Wallet::set) /
+    /// [`set_position`](Wallet::set_position) return `Err` synchronously, which
+    /// a [`Strategy`](crate::Strategy) has no way to report — its `trade`
+    /// returns `()`, so the caller's only option is `let _ = ...`. Recording the
+    /// refusal here puts it on the same failure stream as a fill-time drop, so
+    /// the driver surfaces both through
+    /// [`take_rejections`](Wallet::take_rejections) regardless of *when* the
+    /// order died. An id is minted for it so it correlates like any other
+    /// submission, even though no order was ever queued.
+    fn reject_submission(&mut self, symbol: &Sym, error: WalletError) -> WalletError {
+        let id = self.mint();
+        self.rejections.push(Rejection {
+            symbol: symbol.clone(),
+            id,
+            error,
+            kind: OrderKind::Market,
+        });
+        error
+    }
+
     fn check_buy_affordability(&self, delta: Real, price: Real) -> Result<(), WalletError> {
         if delta <= 0.0 {
             return Ok(());
@@ -839,9 +900,23 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         } else {
             return None;
         };
-        self.fill_at(symbol.clone(), 0.0, fill, kind, leg.id)
-            .ok()
-            .flatten()
+        // A protective leg that triggers but cannot be booked is the worst
+        // silent failure in the wallet: the strategy believes its stop is
+        // protecting it, and the bracket stays resting (`fill_at` only clears it
+        // on success) so it retries next bar — but without this nobody is ever
+        // told the exit did not happen.
+        match self.fill_at(symbol.clone(), 0.0, fill, kind, leg.id) {
+            Ok(order) => order,
+            Err(error) => {
+                self.rejections.push(Rejection {
+                    symbol: symbol.clone(),
+                    id: leg.id,
+                    error,
+                    kind,
+                });
+                None
+            }
+        }
     }
 }
 
@@ -924,6 +999,7 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
                     symbol: symbol.clone(),
                     id,
                     error,
+                    kind: OrderKind::Market,
                 }),
             }
         }
@@ -938,7 +1014,9 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
         // synchronously (mirroring a live venue's rejection) rather than
         // queuing an order that fill_at will drop into the rejections log.
         let current = self.positions.get(&target.symbol).copied().unwrap_or(0.0);
-        self.preflight_market(&target.symbol, target.amount - current)?;
+        if let Err(e) = self.preflight_market(&target.symbol, target.amount - current) {
+            return Err(self.reject_submission(&target.symbol, e));
+        }
         let id = self.mint();
         self.pending
             .insert(target.symbol, Pending::Target(target.amount, id));
@@ -951,14 +1029,19 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
         // sizings (ValueFraction / FundsFraction) always shrink to fit at
         // fill time, so they never fail a submission-time affordability
         // check and only need the price-validity guards here.
-        let close = self.price(&symbol).ok_or(WalletError::UnknownPrice)?.0;
+        let close = match self.price(&symbol) {
+            Some(p) => p.0,
+            None => return Err(self.reject_submission(&symbol, WalletError::UnknownPrice)),
+        };
         if close <= 0.0 {
-            return Err(WalletError::InvalidPrice);
+            return Err(self.reject_submission(&symbol, WalletError::InvalidPrice));
         }
         if let Size::Units(units) = size {
             let current = self.positions.get(&symbol).copied().unwrap_or(0.0);
             let target = side.sign() * units.abs();
-            self.check_buy_affordability(target - current, close)?;
+            if let Err(e) = self.check_buy_affordability(target - current, close) {
+                return Err(self.reject_submission(&symbol, e));
+            }
         }
         let id = self.mint();
         self.pending.insert(symbol, Pending::Sized(side, size, id));
@@ -990,6 +1073,14 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
     fn cancel_protective(&mut self, symbol: &Sym) -> Result<(), WalletError> {
         self.protective.remove(symbol);
         Ok(())
+    }
+
+    fn take_rejections(&mut self) -> Vec<Rejection<Sym>> {
+        // Yield the not-yet-drained tail and advance the cursor rather than
+        // truncating — `rejections()` still reports the full run history.
+        let fresh = self.rejections[self.rejections_drained..].to_vec();
+        self.rejections_drained = self.rejections.len();
+        fresh
     }
 
     /// Directly credit / debit the cash balance — the paper impl of the
@@ -1162,6 +1253,48 @@ mod tests {
         assert_eq!(w.rejections()[0].symbol, "X");
         assert_eq!(w.rejections()[0].id, id);
         assert_eq!(w.rejections()[0].error, WalletError::InsufficientFunds);
+    }
+
+    #[test]
+    fn drain_yields_each_rejection_once_without_disturbing_the_accessor() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(100.0);
+        w.update("X", bar(50.0));
+        w.set("X", Side::Buy, Size::units(1.0)).unwrap();
+        w.update("X", Candle::new(200.0, 210.0, 195.0, 205.0, 0.0));
+
+        // The drain is the driver-facing stream: each entry exactly once.
+        let drained = w.take_rejections();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].error, WalletError::InsufficientFunds);
+        assert_eq!(drained[0].kind, OrderKind::Market);
+        assert!(w.take_rejections().is_empty(), "already yielded");
+
+        // ...but the non-destructive accessor still reports the full history.
+        assert_eq!(w.rejections().len(), 1, "drain must not truncate history");
+    }
+
+    #[test]
+    fn a_triggered_stop_that_cannot_be_booked_is_reported() {
+        // The protective-leg drop site: a stop triggers, but booking the exit
+        // fails. Before this was reported, the strategy was left holding a
+        // position it believed was protected, with nothing said.
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Sell, Size::units(50.0)).unwrap();
+        w.update("X", bar(100.0));
+        assert_eq!(w.position(&"X").amount, -50.0, "short 50");
+
+        // Rest a stop above, then gap through it to a price that makes buying
+        // back the short unaffordable.
+        w.set_stop("X", Reference(120.0)).unwrap();
+        let fills = w.update("X", Candle::new(900.0, 950.0, 890.0, 940.0, 0.0));
+
+        assert!(fills.is_empty(), "the stop could not be booked");
+        assert_eq!(w.position(&"X").amount, -50.0, "still exposed");
+        let drained = w.take_rejections();
+        assert_eq!(drained.len(), 1, "the refusal must be surfaced");
+        assert_eq!(drained[0].kind, OrderKind::Stop, "reported as a stop");
+        assert_eq!(drained[0].error, WalletError::InsufficientFunds);
     }
 
     #[test]

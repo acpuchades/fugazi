@@ -965,6 +965,9 @@ pub struct WalkForwardResult {
     pub composite_equity: Vec<Real>,
     /// Fills from the stitched composite, with per-fold bar offsets applied.
     pub composite_fills: Vec<crate::Fill<String>>,
+    /// Orders refused during the stitched OOS segments, on the same composite
+    /// bar axis as `composite_fills`.
+    pub composite_rejections: Vec<crate::Rejected<String>>,
     /// The composite equity curve reduced through the full metrics catalogue.
     pub composite_metrics: metrics::Metrics,
     /// The resolved IS / OOS / embargo bar counts (post-`WalkForwardSpec::resolve`).
@@ -1100,6 +1103,7 @@ where
     let mut fold_rows: Vec<WalkForwardRow> = Vec::with_capacity(folds.len());
     let mut composite_equity: Vec<Real> = Vec::new();
     let mut composite_fills: Vec<crate::Fill<String>> = Vec::new();
+    let mut composite_rejections: Vec<crate::Rejected<String>> = Vec::new();
     let mut running_equity: Real = cash;
 
     for (fold_idx, fold) in folds.iter().enumerate() {
@@ -1171,6 +1175,12 @@ where
                 order: fill.order,
             });
         }
+        for rejected in oos_slice.rejections {
+            composite_rejections.push(crate::Rejected {
+                bar: rejected.bar + bar_offset,
+                rejection: rejected.rejection,
+            });
+        }
         running_equity = composite_equity.last().copied().unwrap_or(running_equity);
 
         let (si, ci) = plan[winner_idx];
@@ -1191,6 +1201,7 @@ where
     let composite_report = crate::RunReport {
         equity_curve: composite_equity.clone(),
         fills: composite_fills.clone(),
+        rejections: composite_rejections.clone(),
         initial_equity: cash,
     };
     let composite_metrics = metrics::from_report(
@@ -1209,6 +1220,7 @@ where
         fold_rows,
         composite_equity,
         composite_fills,
+        composite_rejections,
         composite_metrics,
         is_bars,
         oos_bars,
@@ -1230,6 +1242,7 @@ mod tests {
         let report: RunReport<String> = RunReport {
             equity_curve: vec![110.0, 110.0, 132.0, 132.0],
             fills: vec![],
+            rejections: Vec::new(),
             initial_equity: 100.0,
         };
         let windows = metrics::windowed_from_report(&report, 2, 252.0, 0.0, None);
@@ -1450,6 +1463,7 @@ mod tests {
         let report: RunReport<String> = RunReport {
             equity_curve: equity,
             fills: vec![],
+            rejections: Vec::new(),
             initial_equity: 100.0,
         };
         let base = metrics::from_report(&report, 252.0, 0.0, None);
@@ -1530,6 +1544,7 @@ mod tests {
         let report: RunReport<String> = RunReport {
             equity_curve: equity,
             fills: vec![],
+            rejections: Vec::new(),
             initial_equity: 100.0,
         };
         let base = metrics::from_report(&report, 252.0, 0.0, None);

@@ -36,6 +36,7 @@
 //! for multi-asset).
 
 use crate::types::Snapshot;
+use crate::wallet::Rejection;
 use crate::{Order, Real, Strategy, Wallet};
 
 /// One booked order stamped with the bar index it filled on.
@@ -53,6 +54,18 @@ pub struct Fill<Sym> {
     pub order: Order<Sym>,
 }
 
+/// One refused order stamped with the bar index it was refused on.
+///
+/// The failure-side twin of [`Fill`]. Held in [`RunReport::rejections`] in the
+/// order the wallet booked them.
+#[derive(Debug, Clone)]
+pub struct Rejected<Sym> {
+    /// Zero-based index into the input snapshot stream.
+    pub bar: usize,
+    /// The order that was refused, and why (see [`Rejection`]).
+    pub rejection: Rejection<Sym>,
+}
+
 /// Everything a post-run analytic needs to reduce one run to numbers.
 ///
 /// - [`equity_curve`](Self::equity_curve) holds one mark-to-market equity value
@@ -68,6 +81,13 @@ pub struct RunReport<Sym> {
     pub equity_curve: Vec<Real>,
     /// Every booked fill, in the order the wallet produced them.
     pub fills: Vec<Fill<Sym>>,
+    /// Every order the wallet **refused**, in the order it refused them.
+    ///
+    /// Empty on a clean run, and empty for any [`Wallet`] that does not override
+    /// [`take_rejections`](Wallet::take_rejections). A non-empty list means the
+    /// run's equity curve reflects trades that did not happen the way the
+    /// strategy intended — check it before trusting the metrics.
+    pub rejections: Vec<Rejected<Sym>>,
     /// Total wallet equity captured immediately before the first bar.
     pub initial_equity: Real,
 }
@@ -118,6 +138,21 @@ where
     let (lower, _) = iter.size_hint();
     let mut equity_curve = Vec::with_capacity(lower);
     let mut fills: Vec<Fill<Sym>> = Vec::new();
+    let mut rejections: Vec<Rejected<Sym>> = Vec::new();
+
+    /// Drain the wallet's failure stream, route each entry to the strategy, and
+    /// record it against `bar`.
+    macro_rules! drain_rejections {
+        ($bar:expr) => {
+            for rejection in wallet.take_rejections() {
+                strategy.on_reject(&rejection);
+                rejections.push(Rejected {
+                    bar: $bar,
+                    rejection,
+                });
+            }
+        };
+    }
 
     for (bar, snap) in iter.enumerate() {
         let snap: Snapshot<Sym> = snap.into();
@@ -134,12 +169,21 @@ where
                 fills.push(Fill { bar, order: fill });
             }
         }
+        // Refusals booked while pricing — a queued market order that turned out
+        // infeasible at this bar's open, or a protective leg that triggered but
+        // could not be booked. Routed before update(), like the fills alongside
+        // which they occurred.
+        drain_rejections!(bar);
         strategy.update(snap);
         // update()/on_fill() always run so warm-up progresses; trade() only
         // runs once the strategy reports ready. is_ready() defaults to true,
         // so this is a no-op for strategies that don't override it.
         if strategy.is_ready() {
             strategy.trade(wallet);
+            // Refusals from this bar's own submissions — a live wallet rejecting
+            // synchronously. (PaperWallet accepts everything at submit time and
+            // fails at fill time instead, so this drain is empty for it.)
+            drain_rejections!(bar);
         }
         equity_curve.push(wallet.equity().0);
     }
@@ -147,6 +191,7 @@ where
     RunReport {
         equity_curve,
         fills,
+        rejections,
         initial_equity,
     }
 }
@@ -183,6 +228,91 @@ where
     runs.par_iter_mut()
         .map(|(strategy, wallet)| run(strategy, wallet, snapshots.iter().cloned()))
         .collect()
+}
+
+#[cfg(test)]
+mod rejection_tests {
+    use super::*;
+    use crate::types::{Atom, Candle};
+    use crate::wallet::{PaperWallet, Rejection, Side, Size, WalletError};
+
+    fn bar(close: Real) -> Candle {
+        Candle::new(close, close, close, close, 0.0)
+    }
+
+    /// Buys far more than the wallet can afford, and records what it is told.
+    struct Overreacher {
+        symbol: &'static str,
+        seen: Vec<WalletError>,
+    }
+
+    impl Strategy for Overreacher {
+        type Input = Snapshot<&'static str>;
+        type Symbol = &'static str;
+
+        fn update(&mut self, _snap: Snapshot<&'static str>) {}
+
+        fn on_reject(&mut self, rejection: &Rejection<&'static str>) {
+            self.seen.push(rejection.error);
+        }
+
+        fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
+            // The shape that motivates the mechanism: the strategy discards the
+            // Result, because `trade` returns (). `Size::units` is used since
+            // fractional sizings shrink to fit rather than reject.
+            let _ = wallet.set(self.symbol, Side::Buy, Size::units(1_000.0));
+        }
+
+        fn reset(&mut self) {}
+    }
+
+    #[test]
+    fn a_refused_order_reaches_the_strategy_and_the_report() {
+        let mut strategy = Overreacher {
+            symbol: "X",
+            seen: Vec::new(),
+        };
+        let mut wallet: PaperWallet<&'static str> = PaperWallet::new(100.0);
+        let snaps: Vec<Snapshot<&'static str>> = [100.0, 100.0, 100.0]
+            .iter()
+            .map(|&p| Snapshot::single("X", Atom::new(bar(p))))
+            .collect();
+
+        let report = run(&mut strategy, &mut wallet, snaps);
+
+        assert!(report.fills.is_empty(), "nothing could fill");
+        assert_eq!(wallet.position(&"X").amount, 0.0);
+        assert!(!report.rejections.is_empty(), "must be reported");
+        assert!(
+            report
+                .rejections
+                .iter()
+                .all(|r| r.rejection.error == WalletError::InsufficientFunds)
+        );
+        // Routed to the strategy, so it can stand down rather than carry on
+        // believing it is long.
+        assert_eq!(
+            strategy.seen.len(),
+            report.rejections.len(),
+            "every reported rejection reached on_reject"
+        );
+    }
+
+    #[test]
+    fn a_clean_run_reports_no_rejections() {
+        struct Idle;
+        impl Strategy for Idle {
+            type Input = Snapshot<&'static str>;
+            type Symbol = &'static str;
+            fn update(&mut self, _snap: Snapshot<&'static str>) {}
+            fn trade(&self, _wallet: &mut dyn Wallet<&'static str>) {}
+            fn reset(&mut self) {}
+        }
+        let mut wallet: PaperWallet<&'static str> = PaperWallet::new(1_000.0);
+        let snaps: Vec<Snapshot<&'static str>> = vec![Snapshot::single("X", Atom::new(bar(100.0)))];
+        let report = run(&mut Idle, &mut wallet, snaps);
+        assert!(report.rejections.is_empty());
+    }
 }
 
 #[cfg(all(test, feature = "parallel"))]

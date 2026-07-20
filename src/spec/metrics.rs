@@ -17,7 +17,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
-use crate::Fill;
+use crate::{Fill, Rejected};
 use crate::backtest::RunReport;
 use crate::prelude::*;
 use serde::Serialize;
@@ -412,9 +412,19 @@ pub fn report_slice<Sym: Clone>(
             order: f.order.clone(),
         })
         .collect();
+    let rejections: Vec<Rejected<Sym>> = report
+        .rejections
+        .iter()
+        .filter(|r| bars.contains(&r.bar))
+        .map(|r| Rejected {
+            bar: r.bar - bars.start,
+            rejection: r.rejection.clone(),
+        })
+        .collect();
     RunReport {
         equity_curve: report.equity_curve[bars.clone()].to_vec(),
         fills,
+        rejections,
         initial_equity: if bars.start == 0 {
             report.initial_equity
         } else {
@@ -909,6 +919,7 @@ mod tests {
         let report = RunReport {
             equity_curve: vec![100.0, 105.0, 110.0, 108.0, 103.0],
             fills,
+            rejections: Vec::new(),
             initial_equity: 100.0,
         };
         from_report(&report, 252.0, 0.0, None)
@@ -989,6 +1000,7 @@ mod tests {
                 bar: 3,
                 order: order(Side::Buy, 1.0, 108.0),
             }],
+            rejections: Vec::new(),
             initial_equity: 100.0,
         };
         let windows = windowed_from_report(&report, 2, 252.0, 0.0, None);
@@ -1028,6 +1040,7 @@ mod tests {
                 bar: 3,
                 order: order(Side::Buy, 1.0, 108.0),
             }],
+            rejections: Vec::new(),
             initial_equity: 100.0,
         };
         let windows = rolling_from_report(&report, 3, 252.0, 0.0, None);
@@ -1057,6 +1070,7 @@ mod tests {
         let report: RunReport<String> = RunReport {
             equity_curve: vec![100.0, 105.0],
             fills: Vec::new(),
+            rejections: Vec::new(),
             initial_equity: 100.0,
         };
         assert!(rolling_from_report(&report, 3, 252.0, 0.0, None).is_empty());
@@ -1084,6 +1098,7 @@ mod tests {
         let report: RunReport<String> = RunReport {
             equity_curve: equity,
             fills: vec![],
+            rejections: Vec::new(),
             initial_equity: 100.0,
         };
 

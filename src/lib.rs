@@ -79,7 +79,7 @@ pub mod time;
 pub mod types;
 pub mod wallet;
 
-pub use backtest::{Fill, RunReport};
+pub use backtest::{Fill, Rejected, RunReport};
 pub use costs::{CommissionModel, SlippageModel, SpreadModel, TradingCosts};
 pub use indicator::Indicator;
 pub use indicators::BoolIndicatorExt;
@@ -91,7 +91,7 @@ pub use snapshot::{Selector, Snapshot};
 pub use strategy::Strategy;
 pub use time::{Frequency, Timestamp};
 pub use wallet::{
-    Ack, Order, OrderId, OrderKind, PaperWallet, Reference, Side, Size, Units, Wallet, WalletError,
+    Ack, Order, OrderId, OrderKind, PaperWallet, Reference, Rejection, Side, Size, Units, Wallet, WalletError,
 };
 
 /// Convenient glob-import of the core traits and types.
@@ -107,7 +107,7 @@ pub mod prelude {
     pub use crate::strategy::Strategy;
     pub use crate::time::{Frequency, Timestamp};
     pub use crate::wallet::{
-        Ack, Order, OrderId, OrderKind, PaperWallet, Reference, Side, Size, Units, Wallet,
+        Ack, Order, OrderId, OrderKind, PaperWallet, Reference, Rejection, Side, Size, Units, Wallet,
         WalletError,
     };
 }
