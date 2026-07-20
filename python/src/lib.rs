@@ -6886,8 +6886,10 @@ fn register_metrics_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 //   dict path serialises to `serde_json::Value` and typed-parses through
 //   `CostConfig`'s serde impl, so the Python surface mirrors the CLI's YAML
 //   shape (nested `default:` / `by_symbol:` / `by_interval:` all work).
-// * Walkforward isn't wired yet — `optimize(walkforward=…)` raises
-//   NotImplementedError. Plain grids and `windowed=N` are supported.
+// * Walkforward is wired: `optimize(walkforward=(is, oos[, embargo]))`
+//   returns a `WalkForwardResult` (mutually exclusive with `windowed=`).
+//   The library kernel does grid-wide readiness pre-scan, per-row full-run
+//   backtest, per-fold IS/OOS selection, and composite OOS stitching.
 // ---------------------------------------------------------------------------
 
 use serde_json::Value as JsonValue;
@@ -7584,8 +7586,10 @@ fn build_subgrids(
 /// Run a parameter-grid sweep over a strategy YAML document. Returns a
 /// `Sweep` with one row per grid point, ranked by `best_by` when set.
 ///
-/// Walkforward is not yet wired; passing `walkforward` raises
-/// `NotImplementedError`.
+/// Pass `walkforward=(is, oos)` or `walkforward=(is, oos, embargo)` to run
+/// walk-forward validation instead — mutually exclusive with `windowed=`;
+/// returns a [`WalkForwardResult`] with per-fold IS/OOS metrics and the
+/// stitched composite OOS equity curve.
 #[pyfunction]
 #[pyo3(signature = (
     text,
@@ -7626,10 +7630,12 @@ fn optimize(
     costs: Option<&Bound<'_, PyAny>>,
     seconds_per_bar: Option<Real>,
     base_dir: Option<&str>,
-) -> PyResult<PySweep> {
-    if walkforward.is_some() && !walkforward.unwrap().is_none() {
-        return Err(pyo3::exceptions::PyNotImplementedError::new_err(
-            "walkforward= is not yet wired in the Python bindings",
+) -> PyResult<Py<PyAny>> {
+    // Walkforward and windowed are mutually exclusive (same as the CLI).
+    let walkforward_tuple = extract_walkforward(walkforward)?;
+    if walkforward_tuple.is_some() && windowed.is_some() {
+        return Err(PyValueError::new_err(
+            "`walkforward=` and `windowed=` are mutually exclusive",
         ));
     }
     let snaps = snapshots_from_sequence(snapshots)?;
@@ -7662,6 +7668,29 @@ fn optimize(
 
     // Discover universe once for basket / multi / portfolio.
     let universe = spec_backtest::universe_from_snapshots(&snaps);
+
+    // ----- Walkforward path (mutually exclusive with `windowed=`) -----
+    if let Some((is_bars, oos_bars, embargo_bars)) = walkforward_tuple {
+        return run_walkforward(
+            py,
+            detected,
+            &base_value,
+            &snaps,
+            &universe,
+            &cost_config,
+            subgrids,
+            is_bars,
+            oos_bars,
+            embargo_bars,
+            &metric_names_vec,
+            best_by_str.as_deref(),
+            jobs,
+            cash,
+            bars_per_year,
+            risk_free_rate,
+            seconds_per_bar,
+        );
+    }
 
     let sweep = py.detach(|| -> anyhow::Result<spec_optimize::Sweep> {
         let evaluate_row = |params: &std::collections::HashMap<String, JsonValue>|
@@ -7894,12 +7923,398 @@ fn optimize(
     } else {
         None
     };
-    Ok(PySweep {
-        columns,
-        metric_columns,
-        rows: row_objs,
-        best_idx,
-    })
+    let py_sweep = Py::new(
+        py,
+        PySweep {
+            columns,
+            metric_columns,
+            rows: row_objs,
+            best_idx,
+        },
+    )?;
+    Ok(py_sweep.into_any())
+}
+
+/// Extract `(is, oos, embargo)` from a Python `walkforward=` argument. `None`
+/// / a Python `None` returns `Ok(None)`; a 2- or 3-tuple / list of positive
+/// ints returns `Ok(Some((is, oos, embargo)))` (embargo defaults to 0).
+fn extract_walkforward(
+    arg: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<(usize, usize, usize)>> {
+    let Some(obj) = arg else { return Ok(None) };
+    if obj.is_none() {
+        return Ok(None);
+    }
+    let items: Vec<usize> = obj.try_iter()?
+        .map(|it| it?.extract::<usize>())
+        .collect::<PyResult<Vec<_>>>()
+        .map_err(|_| PyValueError::new_err(
+            "`walkforward` must be a 2- or 3-tuple of positive ints: (is, oos) or (is, oos, embargo)",
+        ))?;
+    match items.len() {
+        2 => Ok(Some((items[0], items[1], 0))),
+        3 => Ok(Some((items[0], items[1], items[2]))),
+        n => Err(PyValueError::new_err(format!(
+            "`walkforward` expects 2 or 3 ints (got {n})"
+        ))),
+    }
+}
+
+/// One fold's row in [`PyWalkForwardResult`]: the winning param combo, the
+/// IS / OOS bar ranges, and both metrics documents.
+#[pyclass(name = "WalkForwardFold", module = "fugazi")]
+struct PyWalkForwardFold {
+    fold: usize,
+    is_range: (usize, usize),
+    oos_range: (usize, usize),
+    axis_columns: Vec<String>,
+    axis_values: Vec<Option<JsonValue>>,
+    is_metrics: SpecMetrics,
+    oos_metrics: SpecMetrics,
+}
+
+#[pymethods]
+impl PyWalkForwardFold {
+    #[getter]
+    fn fold(&self) -> usize {
+        self.fold
+    }
+    #[getter]
+    fn is_range(&self) -> (usize, usize) {
+        self.is_range
+    }
+    #[getter]
+    fn oos_range(&self) -> (usize, usize) {
+        self.oos_range
+    }
+    #[getter]
+    fn values(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
+        let d = pyo3::types::PyDict::new(py);
+        for (name, v) in self.axis_columns.iter().zip(&self.axis_values) {
+            match v {
+                Some(val) => d.set_item(name, json_to_py(py, val)?)?,
+                None => d.set_item(name, py.None())?,
+            }
+        }
+        Ok(d.into())
+    }
+    #[getter]
+    fn is_metrics(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        metrics_to_py(py, &self.is_metrics)
+    }
+    #[getter]
+    fn oos_metrics(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        metrics_to_py(py, &self.oos_metrics)
+    }
+    fn __repr__(&self) -> String {
+        format!(
+            "WalkForwardFold(fold={}, is={:?}, oos={:?})",
+            self.fold, self.is_range, self.oos_range
+        )
+    }
+}
+
+/// The result of a walk-forward run (`ta.optimize(..., walkforward=(is,
+/// oos))`). Carries per-fold winner rows, the stitched composite OOS equity
+/// curve, and the composite metrics document.
+#[pyclass(name = "WalkForwardResult", module = "fugazi")]
+struct PyWalkForwardResult {
+    is_bars: usize,
+    oos_bars: usize,
+    embargo_bars: usize,
+    prefix_skip: usize,
+    folds: Vec<Py<PyWalkForwardFold>>,
+    composite_equity: Vec<Real>,
+    composite_fills: Vec<fugazi_core::Fill<String>>,
+    composite_metrics: SpecMetrics,
+    columns: Vec<String>,
+    metric_columns: Vec<(String, String)>,
+    cash: Real,
+}
+
+#[pymethods]
+impl PyWalkForwardResult {
+    #[getter]
+    fn is_bars(&self) -> usize {
+        self.is_bars
+    }
+    #[getter]
+    fn oos_bars(&self) -> usize {
+        self.oos_bars
+    }
+    #[getter]
+    fn embargo_bars(&self) -> usize {
+        self.embargo_bars
+    }
+    #[getter]
+    fn prefix_skip(&self) -> usize {
+        self.prefix_skip
+    }
+    #[getter]
+    fn columns(&self) -> Vec<String> {
+        self.columns.clone()
+    }
+    #[getter]
+    fn metric_columns(&self) -> Vec<(String, String)> {
+        self.metric_columns.clone()
+    }
+    #[getter]
+    fn folds(&self, py: Python<'_>) -> Vec<Py<PyWalkForwardFold>> {
+        self.folds.iter().map(|f| f.clone_ref(py)).collect()
+    }
+    #[getter]
+    fn composite_equity(&self) -> Vec<Real> {
+        self.composite_equity.clone()
+    }
+    #[getter]
+    fn composite_fills(&self) -> Vec<PyFill> {
+        self.composite_fills
+            .iter()
+            .cloned()
+            .map(|inner| PyFill { inner })
+            .collect()
+    }
+    #[getter]
+    fn composite_metrics(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        metrics_to_py(py, &self.composite_metrics)
+    }
+    #[getter]
+    fn cash(&self) -> Real {
+        self.cash
+    }
+    fn __repr__(&self) -> String {
+        format!(
+            "WalkForwardResult(folds={}, is={}, oos={}, embargo={})",
+            self.folds.len(),
+            self.is_bars,
+            self.oos_bars,
+            self.embargo_bars,
+        )
+    }
+}
+
+/// Drive the walk-forward kernel — same argument shape as [`optimize`] for
+/// the plain sweep path, minus the mode toggles (walkforward is a distinct
+/// mode). Wraps every strategy shape's `stable_period` + full-run backtest
+/// in the two closures the library's [`spec_optimize::walkforward`] takes.
+#[allow(clippy::too_many_arguments)]
+fn run_walkforward(
+    py: Python<'_>,
+    detected: &str,
+    base_value: &JsonValue,
+    snaps: &[Snapshot<String>],
+    universe: &[String],
+    cost_config: &fugazi_core::spec::costs::CostConfig,
+    subgrids: Vec<spec_optimize::Subgrid>,
+    is_bars: usize,
+    oos_bars: usize,
+    embargo_bars: usize,
+    metric_names: &[String],
+    best_by: Option<&str>,
+    jobs: Option<usize>,
+    cash: Real,
+    bars_per_year: Real,
+    risk_free_rate: Real,
+    seconds_per_bar: Option<Real>,
+) -> PyResult<Py<PyAny>> {
+    // Bar count: single-asset walks the atom-per-symbol stream; every other
+    // shape uses the snapshot count (already time-aligned upstream).
+    let n_bars = match detected {
+        "single" => snaps.len(),
+        _ => snaps.len(),
+    };
+
+    let result = py
+        .detach(|| -> anyhow::Result<spec_optimize::WalkForwardResult> {
+            let probe_readiness = |params: &std::collections::HashMap<String, JsonValue>|
+                -> anyhow::Result<usize>
+            {
+                match detected {
+                    "single" => {
+                        let value = fugazi_core::spec::params::substitute(base_value.clone(), params)?;
+                        let sref: StrategyRef = serde_json::from_value(value)?;
+                        let symbol = sref.symbol().to_string();
+                        let atoms: Vec<(String, Atom)> = snaps
+                            .iter()
+                            .filter_map(|s| {
+                                s.find(&Selector::by_symbol(symbol.clone()))
+                                    .map(|a| (String::new(), a.clone()))
+                            })
+                            .collect();
+                        let schema = spec_backtest::schema_from_atoms(&atoms);
+                        Ok(sref.build(cash, &schema).stable_period())
+                    }
+                    "pairs" => {
+                        let spec = spec_optimize::build_pairs_spec(base_value, params)?;
+                        let schema = spec_backtest::schema_from_snapshots(snaps);
+                        Ok(spec.build(cash, &schema).stable_period())
+                    }
+                    "basket" => {
+                        let spec = spec_optimize::build_basket_spec(base_value, params)?;
+                        let schema = spec_backtest::schema_from_snapshots(snaps);
+                        Ok(spec.build(cash, &schema).stable_period())
+                    }
+                    "multi" => {
+                        let spec = spec_optimize::build_multi_spec(base_value, params)?;
+                        let schema = spec_backtest::schema_from_snapshots(snaps);
+                        Ok(spec.build(cash, &schema).stable_period())
+                    }
+                    "portfolio" => {
+                        let spec = spec_optimize::build_portfolio_spec(base_value, params)?;
+                        let schema = spec_backtest::schema_from_snapshots(snaps);
+                        let default_costs = cost_config.resolve("", None);
+                        let costs_opt = (!default_costs.is_none()).then_some(default_costs);
+                        Ok(spec.build(cash, &schema, costs_opt).stable_period())
+                    }
+                    other => anyhow::bail!("unknown strategy kind `{other}`"),
+                }
+            };
+
+            let run_backtest = |params: &std::collections::HashMap<String, JsonValue>|
+                -> anyhow::Result<fugazi_core::RunReport<String>>
+            {
+                match detected {
+                    "single" => {
+                        let value = fugazi_core::spec::params::substitute(base_value.clone(), params)?;
+                        let sref: StrategyRef = serde_json::from_value(value)?;
+                        let symbol = sref.symbol().to_string();
+                        let atoms: Vec<(String, Atom)> = snaps
+                            .iter()
+                            .filter_map(|s| {
+                                s.find(&Selector::by_symbol(symbol.clone()))
+                                    .map(|a| (String::new(), a.clone()))
+                            })
+                            .collect();
+                        let schema = spec_backtest::schema_from_atoms(&atoms);
+                        let costs = cost_config.resolve(&symbol, None);
+                        let mut strategy = sref.build(cash, &schema);
+                        let mut wallet = PaperWallet::with_costs(cash, costs);
+                        let symbol_clone = symbol.clone();
+                        Ok(fugazi_core::backtest::run(
+                            &mut strategy,
+                            &mut wallet,
+                            atoms
+                                .iter()
+                                .map(|(_, a)| Snapshot::single(symbol_clone.clone(), a.clone())),
+                        ))
+                    }
+                    "pairs" => {
+                        let spec = spec_optimize::build_pairs_spec(base_value, params)?;
+                        let schema = spec_backtest::schema_from_snapshots(snaps);
+                        let per_symbol_costs = vec![
+                            (spec.left.clone(), cost_config.resolve(&spec.left, None)),
+                            (spec.right.clone(), cost_config.resolve(&spec.right, None)),
+                        ];
+                        Ok(spec_backtest::measured_report_from_strategy(
+                            || spec.build(cash, &schema),
+                            snaps,
+                            cash,
+                            per_symbol_costs,
+                        ))
+                    }
+                    "basket" => {
+                        let spec = spec_optimize::build_basket_spec(base_value, params)?;
+                        let schema = spec_backtest::schema_from_snapshots(snaps);
+                        let per_symbol_costs: Vec<(String, _)> = universe
+                            .iter()
+                            .map(|s| (s.clone(), cost_config.resolve(s, None)))
+                            .collect();
+                        Ok(spec_backtest::measured_report_from_strategy(
+                            || spec.build(cash, &schema),
+                            snaps,
+                            cash,
+                            per_symbol_costs,
+                        ))
+                    }
+                    "multi" => {
+                        let spec = spec_optimize::build_multi_spec(base_value, params)?;
+                        let schema = spec_backtest::schema_from_snapshots(snaps);
+                        let per_symbol_costs: Vec<(String, _)> = universe
+                            .iter()
+                            .map(|s| (s.clone(), cost_config.resolve(s, None)))
+                            .collect();
+                        Ok(spec_backtest::measured_report_from_strategy(
+                            || spec.build(cash, &schema),
+                            snaps,
+                            cash,
+                            per_symbol_costs,
+                        ))
+                    }
+                    "portfolio" => {
+                        let spec = spec_optimize::build_portfolio_spec(base_value, params)?;
+                        let schema = spec_backtest::schema_from_snapshots(snaps);
+                        let default_costs = cost_config.resolve("", None);
+                        let costs_opt = (!default_costs.is_none()).then_some(default_costs);
+                        Ok(spec_backtest::measured_report_portfolio(
+                            || {
+                                let mut p = spec.build(cash, &schema, costs_opt.clone());
+                                for sym in universe {
+                                    p.install_costs_for(sym, cost_config.resolve(sym, None));
+                                }
+                                p
+                            },
+                            snaps,
+                        ))
+                    }
+                    other => anyhow::bail!("unknown strategy kind `{other}`"),
+                }
+            };
+
+            spec_optimize::walkforward(
+                subgrids,
+                n_bars,
+                probe_readiness,
+                run_backtest,
+                bars_per_year,
+                risk_free_rate,
+                seconds_per_bar,
+                is_bars,
+                oos_bars,
+                embargo_bars,
+                metric_names,
+                best_by,
+                jobs,
+                cash,
+            )
+        })
+        .map_err(|e| PyValueError::new_err(format!("walkforward: {e:#}")))?;
+
+    // Convert into pyclass objects.
+    let columns = result.union_columns.clone();
+    let metric_columns = result.metric_columns.clone();
+    let mut fold_objs: Vec<Py<PyWalkForwardFold>> = Vec::with_capacity(result.fold_rows.len());
+    for row in &result.fold_rows {
+        let fold = Py::new(
+            py,
+            PyWalkForwardFold {
+                fold: row.fold,
+                is_range: (row.is_start, row.is_end),
+                oos_range: (row.oos_start, row.oos_end),
+                axis_columns: columns.clone(),
+                axis_values: row.values.clone(),
+                is_metrics: row.is_metrics.clone(),
+                oos_metrics: row.oos_metrics.clone(),
+            },
+        )?;
+        fold_objs.push(fold);
+    }
+    let py_result = Py::new(
+        py,
+        PyWalkForwardResult {
+            is_bars: result.is_bars,
+            oos_bars: result.oos_bars,
+            embargo_bars: result.embargo_bars,
+            prefix_skip: result.prefix_skip,
+            folds: fold_objs,
+            composite_equity: result.composite_equity,
+            composite_fills: result.composite_fills,
+            composite_metrics: result.composite_metrics,
+            columns,
+            metric_columns,
+            cash: result.cash,
+        },
+    )?;
+    Ok(py_result.into_any())
 }
 
 // ---------------------------------------------------------------------------
@@ -7939,6 +8354,8 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStrategySpec>()?;
     m.add_class::<PySweep>()?;
     m.add_class::<PySweepRow>()?;
+    m.add_class::<PyWalkForwardResult>()?;
+    m.add_class::<PyWalkForwardFold>()?;
 
     m.add("DEFAULT_EPSILON", DEFAULT_EPSILON)?;
 

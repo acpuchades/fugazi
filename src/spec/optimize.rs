@@ -919,6 +919,303 @@ pub fn walkforward_layout(
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// Walk-forward driver kernel
+// ---------------------------------------------------------------------------
+
+/// One row of the per-fold walk-forward table: the winner's params projected
+/// onto the sweep's [`Sweep::union_columns`], its IS + OOS bar ranges, and
+/// both metric documents so the caller can emit `_is`/`_oos`/`_wfe` triples
+/// per metric column.
+pub struct WalkForwardRow {
+    pub fold: usize,
+    pub is_start: usize,
+    pub is_end: usize,
+    pub oos_start: usize,
+    pub oos_end: usize,
+    pub values: Vec<Option<Value>>,
+    pub is_metrics: metrics::Metrics,
+    pub oos_metrics: metrics::Metrics,
+}
+
+/// The full result of a walk-forward run: per-fold rows plus the stitched
+/// composite OOS artefacts. The CLI wrapper reduces this into three sibling
+/// files (per-fold CSV, composite equity CSV, composite metrics YAML); Python
+/// / other embedders reduce it into whatever shape they want.
+pub struct WalkForwardResult {
+    /// Union of every subgrid's axis columns — mirrors [`Sweep::union_columns`].
+    pub union_columns: Vec<String>,
+    /// Resolved `(user_name, canonical_dotted_path)` for every requested metric
+    /// — mirrors [`Sweep::metric_columns`].
+    pub metric_columns: Vec<(String, String)>,
+    /// The `--best-by` name, resolved path and direction (`None` = first-in-
+    /// enumeration wins each fold).
+    pub best_by: Option<(String, String, Direction)>,
+    /// Grid-wide max readiness (bars) from the pre-scan — the head skip fed
+    /// into [`walkforward_layout`].
+    pub prefix_skip: usize,
+    /// The resolved fold layout — the same [`FoldLayout`] vector
+    /// [`walkforward_layout`] returned.
+    pub folds: Vec<FoldLayout>,
+    /// One per fold, winner-selected by IS metric ranking. Same order as
+    /// [`Self::folds`].
+    pub fold_rows: Vec<WalkForwardRow>,
+    /// The stitched OOS equity curve — each fold's winner's OOS slice scaled
+    /// into the running composite so mode-switches don't create jumps.
+    pub composite_equity: Vec<Real>,
+    /// Fills from the stitched composite, with per-fold bar offsets applied.
+    pub composite_fills: Vec<crate::Fill<String>>,
+    /// The composite equity curve reduced through the full metrics catalogue.
+    pub composite_metrics: metrics::Metrics,
+    /// The resolved IS / OOS / embargo bar counts (post-`WalkForwardSpec::resolve`).
+    pub is_bars: usize,
+    pub oos_bars: usize,
+    pub embargo_bars: usize,
+    /// The starting cash used to seed the composite report.
+    pub cash: Real,
+}
+
+/// Pure walk-forward kernel — strategy-agnostic. Runs one full backtest per
+/// grid row (via `run_backtest`), pre-scans grid-wide readiness (via
+/// `probe_readiness`), computes the fold layout, and per fold ranks by
+/// IS-metric to pick a winner whose OOS slice contributes to the composite.
+///
+/// `probe_readiness` should return the row's `stable_period()` (or
+/// `warm_up_period()` under a keep-unstable opt-out).
+///
+/// `run_backtest` should return the full-run [`RunReport`](crate::RunReport) —
+/// per-fold slicing happens inside via [`metrics::report_slice`].
+///
+/// The CLI's `walkforward_run` wraps this with `WalkForwardSpec` resolution,
+/// output-path derivation, CSV emission, and console printing.
+#[allow(clippy::too_many_arguments)]
+pub fn walkforward<P, R>(
+    subgrids: Vec<Subgrid>,
+    n_bars: usize,
+    probe_readiness: P,
+    run_backtest: R,
+    bars_per_year: Real,
+    risk_free_rate: Real,
+    seconds_per_bar: Option<Real>,
+    is_bars: usize,
+    oos_bars: usize,
+    embargo_bars: usize,
+    metric_names: &[String],
+    best_by: Option<&str>,
+    jobs: Option<usize>,
+    cash: Real,
+) -> Result<WalkForwardResult>
+where
+    P: Fn(&HashMap<String, Value>) -> Result<usize> + Sync,
+    R: Fn(&HashMap<String, Value>) -> Result<crate::RunReport<String>> + Sync,
+{
+    assert!(!subgrids.is_empty(), "walkforward: called with zero subgrids");
+
+    // Grid enumeration — same shape as [`optimize`] so subgrids stack the same
+    // way and the union-column projection is compatible with the per-fold row.
+    let union_columns = compute_union_columns(&subgrids);
+    let plan: Vec<(usize, usize)> = subgrids
+        .iter()
+        .enumerate()
+        .flat_map(|(si, s)| (0..s.combos.len()).map(move |ci| (si, ci)))
+        .collect();
+
+    // Pre-scan: probe every row's readiness and take the grid-wide max, so
+    // every row's IS/OOS ranges are identical and per-fold metrics are
+    // directly comparable regardless of which combo winds up warming up faster.
+    let pool = crate::spec::pool::build_pool(jobs)?;
+    let plan_ref = &plan;
+    let subgrids_ref = &subgrids;
+    let probe_ref = &probe_readiness;
+    let prefix_skip: usize = pool.install(|| {
+        plan_ref
+            .par_iter()
+            .map(|&(si, ci)| {
+                let subgrid = &subgrids_ref[si];
+                let combo = &subgrid.combos[ci];
+                let params = combine_params(&subgrid.fixed, &subgrid.axes, combo);
+                probe_ref(&params)
+            })
+            .try_reduce(|| 0usize, |a, b| Ok(a.max(b)))
+    })?;
+
+    let folds = walkforward_layout(n_bars, prefix_skip, is_bars, oos_bars, embargo_bars)?;
+
+    // Main pass: one full backtest per row. Store the reports so per-fold
+    // slicing is a bounded-cost operation.
+    let run_ref = &run_backtest;
+    let reports: Vec<crate::RunReport<String>> = pool.install(|| {
+        plan_ref
+            .par_iter()
+            .map(|&(si, ci)| {
+                let subgrid = &subgrids_ref[si];
+                let combo = &subgrid.combos[ci];
+                let params = combine_params(&subgrid.fixed, &subgrid.axes, combo);
+                run_ref(&params)
+            })
+            .collect::<Result<Vec<_>>>()
+    })?;
+
+    // Resolve --metrics / --best-by against the first row's *whole-run*
+    // Metrics document, not a fold slice — a narrow slice can leave many
+    // metrics `None`, and short-name matching requires a numeric leaf.
+    let sample_metrics = if let Some(first_report) = reports.first() {
+        metrics::from_report(first_report, bars_per_year, risk_free_rate, seconds_per_bar)
+    } else {
+        bail!("walkforward: empty fold or grid")
+    };
+
+    let metric_columns: Vec<(String, String)> = if metric_names.is_empty() {
+        metrics::flatten(&sample_metrics)
+            .into_iter()
+            .map(|(path, _)| (path.to_string(), path.to_string()))
+            .collect()
+    } else {
+        metric_names
+            .iter()
+            .map(|name| {
+                let (path, _) = metrics::resolve_metric(name, &sample_metrics)?;
+                Ok::<_, anyhow::Error>((path.clone(), path))
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
+
+    let best_by = best_by
+        .map(|name| {
+            let (path, _) = metrics::resolve_metric(name, &sample_metrics)?;
+            let direction = direction_for(&path).ok_or_else(|| {
+                anyhow!(
+                    "--best-by `{name}` has no built-in direction; pass one whose \
+                     direction is known (e.g. sharpe, sortino, cagr_pct, max_pct, \
+                     ulcer_index, annualized_volatility_pct)"
+                )
+            })?;
+            Ok::<_, anyhow::Error>((path.clone(), path, direction))
+        })
+        .transpose()?;
+
+    // Per-fold pass: for each fold, compute every row's IS + OOS metrics,
+    // pick the winner by IS-metric ranking, and collect the winner's OOS
+    // slice for the composite.
+    let mut fold_rows: Vec<WalkForwardRow> = Vec::with_capacity(folds.len());
+    let mut composite_equity: Vec<Real> = Vec::new();
+    let mut composite_fills: Vec<crate::Fill<String>> = Vec::new();
+    let mut running_equity: Real = cash;
+
+    for (fold_idx, fold) in folds.iter().enumerate() {
+        let per_row: Vec<(metrics::Metrics, metrics::Metrics)> = pool.install(|| {
+            reports
+                .par_iter()
+                .map(|r| {
+                    let is_slice = metrics::report_slice(r, fold.is.clone());
+                    let oos_slice = metrics::report_slice(r, fold.oos.clone());
+                    (
+                        metrics::from_report(
+                            &is_slice,
+                            bars_per_year,
+                            risk_free_rate,
+                            seconds_per_bar,
+                        ),
+                        metrics::from_report(
+                            &oos_slice,
+                            bars_per_year,
+                            risk_free_rate,
+                            seconds_per_bar,
+                        ),
+                    )
+                })
+                .collect()
+        });
+
+        // Winner selection. Without --best-by we still emit a row per fold, but
+        // the "winner" is just the first grid point in enumeration order (same
+        // convention the plain grid sweep uses when --best-by is absent).
+        let winner_idx: usize = match &best_by {
+            Some((_, path, direction)) => {
+                let keys: Vec<Option<Real>> = per_row
+                    .iter()
+                    .map(|(is_m, _)| {
+                        lookup(is_m, path).map(|v| match direction {
+                            Direction::Descending => v,
+                            Direction::Ascending => -v,
+                        })
+                    })
+                    .collect();
+                keys.iter()
+                    .enumerate()
+                    .filter_map(|(i, k)| k.map(|k| (i, k)))
+                    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(i, _)| i)
+                    .unwrap_or(0)
+            }
+            None => 0,
+        };
+        let (winner_is, winner_oos) = &per_row[winner_idx];
+
+        // Composite OOS: stitch the winner's OOS slice onto the running curve.
+        // Scale each fold's equity into the running total so mode-switching
+        // between winners doesn't create discontinuities.
+        let oos_slice = metrics::report_slice(&reports[winner_idx], fold.oos.clone());
+        let scale = if oos_slice.initial_equity > 0.0 {
+            running_equity / oos_slice.initial_equity
+        } else {
+            1.0
+        };
+        let bar_offset = composite_equity.len();
+        for eq in &oos_slice.equity_curve {
+            composite_equity.push(*eq * scale);
+        }
+        for fill in oos_slice.fills {
+            composite_fills.push(crate::Fill {
+                bar: fill.bar + bar_offset,
+                order: fill.order,
+            });
+        }
+        running_equity = composite_equity.last().copied().unwrap_or(running_equity);
+
+        let (si, ci) = plan[winner_idx];
+        let values = project_row(&subgrids[si], &subgrids[si].combos[ci], &union_columns);
+
+        fold_rows.push(WalkForwardRow {
+            fold: fold_idx,
+            is_start: fold.is.start,
+            is_end: fold.is.end,
+            oos_start: fold.oos.start,
+            oos_end: fold.oos.end,
+            values,
+            is_metrics: winner_is.clone(),
+            oos_metrics: winner_oos.clone(),
+        });
+    }
+
+    let composite_report = crate::RunReport {
+        equity_curve: composite_equity.clone(),
+        fills: composite_fills.clone(),
+        initial_equity: cash,
+    };
+    let composite_metrics = metrics::from_report(
+        &composite_report,
+        bars_per_year,
+        risk_free_rate,
+        seconds_per_bar,
+    );
+
+    Ok(WalkForwardResult {
+        union_columns,
+        metric_columns,
+        best_by,
+        prefix_skip,
+        folds,
+        fold_rows,
+        composite_equity,
+        composite_fills,
+        composite_metrics,
+        is_bars,
+        oos_bars,
+        embargo_bars,
+        cash,
+    })
+}
 
 #[cfg(test)]
 mod tests {

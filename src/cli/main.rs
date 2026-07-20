@@ -37,7 +37,6 @@ pub(crate) use fugazi::spec::input;
 pub(crate) use fugazi::spec::metrics;
 pub(crate) use fugazi::spec::params;
 pub(crate) use fugazi::spec::backtest;
-pub(crate) use fugazi::spec::pool;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

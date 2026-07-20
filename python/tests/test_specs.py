@@ -290,15 +290,57 @@ def test_optimize_windowed_produces_per_window_metrics():
         assert "run" in row.metrics_windowed[0]
 
 
-def test_optimize_walkforward_raises():
-    """Walkforward is not yet wired — raises NotImplementedError."""
-    with pytest.raises(NotImplementedError):
+def test_optimize_walkforward_two_tuple():
+    """`walkforward=(is, oos)` returns a WalkForwardResult with per-fold IS/OOS."""
+    result = ta.optimize(
+        _trend_yaml(),
+        _trend_snaps(),
+        cash=1000.0,
+        grid=[{"FAST": [3, 5], "SLOW": [10]}],
+        metric_names=["risk_adjusted.sharpe"],
+        best_by="risk_adjusted.sharpe",
+        walkforward=(20, 10),
+    )
+    # 60 bars, 20/10 → 4 non-overlapping OOS folds (last absorbs tail).
+    assert isinstance(result, ta.WalkForwardResult)
+    assert result.is_bars == 20
+    assert result.oos_bars == 10
+    assert result.embargo_bars == 0
+    assert len(result.folds) >= 1
+    for fold in result.folds:
+        assert fold.is_range[1] > fold.is_range[0]
+        assert fold.oos_range[1] > fold.oos_range[0]
+        assert "run" in fold.is_metrics
+        assert "run" in fold.oos_metrics
+        # Winner's param combo projected onto union columns.
+        assert "FAST" in fold.values
+    # Composite OOS: monotone-length bars stitched together, plus a metrics doc.
+    assert len(result.composite_equity) > 0
+    assert "run" in result.composite_metrics
+
+
+def test_optimize_walkforward_three_tuple_embargo():
+    """`walkforward=(is, oos, embargo)` drops embargo bars from OOS metric slice."""
+    result = ta.optimize(
+        _trend_yaml(),
+        _trend_snaps(),
+        cash=1000.0,
+        grid=[{"FAST": [3, 5], "SLOW": [10]}],
+        best_by="risk_adjusted.sharpe",
+        walkforward=(20, 10, 2),
+    )
+    assert result.embargo_bars == 2
+
+
+def test_optimize_walkforward_and_windowed_mutually_exclusive():
+    with pytest.raises(ValueError, match="mutually exclusive"):
         ta.optimize(
             _trend_yaml(),
             _trend_snaps(),
             cash=1000.0,
-            grid=[{"FAST": [3, 5]}],
+            grid=[{"FAST": [3]}],
             walkforward=(20, 10),
+            windowed=15,
         )
 
 
