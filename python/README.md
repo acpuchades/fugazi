@@ -542,17 +542,21 @@ Pass `kind="single"` / `"pairs"` / ... to override detection, and
 `--best-by`-style metric, and returns a `Sweep`:
 
 ```python
-yaml = """
+spec_yaml = """
 symbol: BTC
 long:
   enter: !crosses_above
     lhs: !sma { period: !param FAST }
     rhs: !sma { period: !param SLOW }
 """
+opt_snaps = [
+    ta.Snapshot({"BTC": ta.Candle(v, v, v, v, 1.0)})
+    for v in [100 + i * 0.5 for i in range(40)]
+]
 
 sweep = ta.optimize(
-    yaml,
-    snaps,
+    spec_yaml,
+    opt_snaps,
     cash=1000.0,
     grid=[{"FAST": [3, 5, 7], "SLOW": [10, 15]}],
     metric_names=["risk_adjusted.sharpe", "returns.total_pct"],
@@ -572,9 +576,21 @@ docs), or `walkforward=(is, oos)` / `walkforward=(is, oos, embargo)` for
 walk-forward validation:
 
 ```python
+wf_yaml = """
+symbol: BTC
+long:
+  enter: !crosses_above
+    lhs: !sma { period: !param FAST }
+    rhs: !sma { period: 15 }
+"""
+wf_snaps = [
+    ta.Snapshot({"BTC": ta.Candle(v, v, v, v, 1.0)})
+    for v in [100 + i * 0.5 for i in range(40)]
+]
+
 result = ta.optimize(
-    yaml,
-    snaps,
+    wf_yaml,
+    wf_snaps,
     cash=1000.0,
     grid=[{"FAST": [3, 5]}],
     best_by="risk_adjusted.sharpe",
@@ -599,7 +615,12 @@ costs = ta.TradingCostsConfig({
     "commission": {"percentage": {"rate": 0.001}},
     "spread":     {"bps": {"bps": 5}},
 })
-sweep = ta.optimize(yaml, snaps, cash=1000.0, grid=[{"FAST": [3, 5]}], costs=costs)
+cost_yaml = "!buy_and_hold { symbol: BTC }"
+cost_snaps = [
+    ta.Snapshot({"BTC": ta.Candle(v, v, v, v, 1.0)})
+    for v in [100, 101, 102, 103, 104]
+]
+sweep = ta.optimize(cost_yaml, cost_snaps, cash=1000.0, grid=[{}], costs=costs)
 ```
 
 Per-symbol / per-interval overrides use the same shape as the CLI:
