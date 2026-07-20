@@ -19,9 +19,7 @@
 //! Constants (`INITIAL_CASH`, `BARS_PER_YEAR`, `RISK_FREE_RATE`) must match
 //! `tools/gen_metrics_fixtures.py`.
 
-#[path = "../src/cli/metrics.rs"]
-#[allow(dead_code)]
-mod metrics;
+use fugazi::spec::metrics;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

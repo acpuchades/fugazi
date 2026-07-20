@@ -857,9 +857,6 @@ fn run_multi_symbol_walkforward(
     )
 }
 
-/// Params for the probe spec: subgrid's fixed scalars + the first value of each
-/// of its axes. When the subgrid has no axes this is just the fixed map.
-
 // ---------------------------------------------------------------------------
 // CSV output
 // ---------------------------------------------------------------------------

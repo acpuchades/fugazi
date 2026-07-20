@@ -39,8 +39,11 @@
 use std::num::NonZeroUsize;
 use std::str::FromStr;
 
-use anyhow::{Result, bail};
+#[cfg(feature = "sources")]
+use anyhow::bail;
+use anyhow::Result;
 use crate::prelude::*;
+#[cfg(feature = "sources")]
 use crate::sources::Interval;
 use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
@@ -128,6 +131,10 @@ pub use crate::Frequency;
 /// `1M`) into an [`Interval`]. Case-sensitive on the unit letter: `m` = minute,
 /// `M` = month. The same `N<unit>` alphabet as [`Frequency::from_str`], but
 /// yields the sources-layer [`Interval`] used by the remote candle providers.
+///
+/// Gated behind the `sources` feature since `Interval` lives in
+/// [`crate::sources`]; consumers of `spec` without `sources` don't need it.
+#[cfg(feature = "sources")]
 pub fn parse_interval(s: &str) -> Result<Interval> {
     let s = s.trim();
     if s.is_empty() {
@@ -681,6 +688,7 @@ mod tests {
         assert!(Frequency::from_str("abc").is_err());
     }
 
+    #[cfg(feature = "sources")]
     #[test]
     fn parse_interval_parses_all_units() {
         assert_eq!(parse_interval("5m").unwrap(), Interval::Minute(5));
@@ -690,6 +698,7 @@ mod tests {
         assert_eq!(parse_interval("1M").unwrap(), Interval::Month(1));
     }
 
+    #[cfg(feature = "sources")]
     #[test]
     fn parse_interval_rejects_zero_multiplier() {
         assert!(parse_interval("0d").is_err());
