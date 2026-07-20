@@ -24,16 +24,17 @@ use serde::Deserialize;
 use fugazi::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Book, Cci, Component,
     Correlation, Dmi, DmiValue, Donchian, DonchianValue, Ema, GarmanKlass, GetBool, GetReal, GetStr,
-    Hma, IfElse, Keltner, KeltnerValue, Kurtosis, Latch, Log, Macd, MacdValue, Mfi, Obv, Parkinson,
-    Pick, PickAny, Position, Resample, Rma, RogersSatchell, Rsi, Sar, Skewness, Sma, StdDev,
-    StochRsi, Stochastic, TrueRange, Value, ValueStr, VarianceRatio, Vwap, WilliamsR, Wma, ZScore,
+    Hma, IfElse, Keltner, KeltnerValue, Kurtosis, Latch, Log, Macd, MacdValue,
+    Match as MatchIndicator, Mfi, Obv, Parkinson, Pick, PickAny, Position, Resample, Rma,
+    RogersSatchell, Rsi, Sar, Skewness, Sma, StdDev, StochRsi, Stochastic, TrueRange, Value,
+    ValueStr, VarianceRatio, Vwap, WilliamsR, Wma, ZScore,
 };
 use fugazi::prelude::*;
 use fugazi::types::Snapshot;
 
 use super::signal::SignalSpec;
 use super::trailing::{self, AnyStrategyRef, TrailingMetric};
-use crate::dyn_indicator::{self, AsAtom, AsBool, AsCandle, AsReal, DynIndicator};
+use crate::dyn_indicator::{self, AsAtom, AsBool, AsCandle, AsReal, AsStr, DynIndicator};
 
 use fugazi::{Frequency, Selector};
 use std::str::FromStr;
@@ -159,6 +160,25 @@ impl TryFrom<serde_norway::Value> for ValueLit {
             )),
         }
     }
+}
+
+/// One case in a `!match` dispatch: the pattern to compare `on` against
+/// and the branch to emit on a hit. `value:` is a scalar — either a
+/// number (for numeric dispatch, `on` produces `Real`) or a string (for
+/// string dispatch, `on` produces `Str`); the two forms can't be mixed
+/// within one `!match` (build-time error).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MatchCase {
+    /// The pattern this case fires on. Reuses [`ValueLit`]'s scalar
+    /// variants (`Real` and `Str`) — the `List` variant is not a valid
+    /// pattern (it has no defined equality against `on`'s reading) and
+    /// is rejected at build.
+    pub value: ValueLit,
+    /// The branch to emit when the pattern matches. Advanced every bar
+    /// regardless of match, per the same "keep warming up" convention as
+    /// `!if_else`'s non-selected branch.
+    pub result: Box<ExprSpec>,
 }
 
 // ---------------------------------------------------------------------------
@@ -770,6 +790,23 @@ pub enum ExprSpec {
         cond: Box<SignalSpec>,
         if_true: Box<ExprSpec>,
         if_false: Box<ExprSpec>,
+    },
+    /// N-way dispatch by value equality — reads `on` once per bar and
+    /// picks the *first* case whose pattern equals `on`'s reading; falls
+    /// through to `default` when no case matches. Every branch (all
+    /// cases + default) is advanced every bar so its warm-up progresses
+    /// even on bars it isn't selected — same convention as
+    /// [`ExprSpec::IfElse`](Self::IfElse).
+    ///
+    /// Case patterns are homogeneous: either all numeric (dispatching
+    /// on a `Real`-output `on`) or all string (dispatching on a
+    /// `Str`-output `on`, typically `!value { arg: CHILD_GROUP }`).
+    /// Mixed patterns are rejected at build. See
+    /// [`fugazi::indicators::Match`].
+    Match {
+        on: Box<ExprSpec>,
+        cases: Vec<MatchCase>,
+        default: Box<ExprSpec>,
     },
     Lag {
         #[serde(default = "default_source")]
@@ -1496,6 +1533,23 @@ enum ExprSpecRaw {
         if_true: Box<ExprSpec>,
         if_false: Box<ExprSpec>,
     },
+    /// N-way dispatch by value equality — reads `on` once per bar and
+    /// picks the *first* case whose pattern equals `on`'s reading; falls
+    /// through to `default` when no case matches. Every branch (all
+    /// cases + default) is advanced every bar so its warm-up progresses
+    /// even on bars it isn't selected — same convention as
+    /// [`ExprSpec::IfElse`](Self::IfElse).
+    ///
+    /// Case patterns are homogeneous: either all numeric (dispatching
+    /// on a `Real`-output `on`) or all string (dispatching on a
+    /// `Str`-output `on`, typically `!value { arg: CHILD_GROUP }`).
+    /// Mixed patterns are rejected at build. See
+    /// [`fugazi::indicators::Match`].
+    Match {
+        on: Box<ExprSpec>,
+        cases: Vec<MatchCase>,
+        default: Box<ExprSpec>,
+    },
     Lag {
         #[serde(default = "default_source")]
         source: Box<ExprSpec>,
@@ -1743,6 +1797,15 @@ impl From<ExprSpecRaw> for ExprSpec {
                 if_true,
                 if_false,
             },
+            ExprSpecRaw::Match {
+                on,
+                cases,
+                default,
+            } => ExprSpec::Match {
+                on,
+                cases,
+                default,
+            },
             ExprSpecRaw::Lag { source, periods } => ExprSpec::Lag { source, periods },
             ExprSpecRaw::Diff { source, periods } => ExprSpec::Diff { source, periods },
             ExprSpecRaw::Ratio { source, periods } => ExprSpec::Ratio { source, periods },
@@ -1890,11 +1953,11 @@ impl TryFrom<serde_norway::Value> for ExprSpec {
     }
 }
 
-/// Rewrite ExprSpec sugar tags to their canonical `!value` forms.
-/// Runs after shape-normalization (so tagged / bare / single-key-map
-/// inputs all reach this pass in `Value::Tagged` form). Currently
-/// covers `!equal_weight <N>` → `!value <1/N>`; other sugar tags can
-/// be added the same way if the pattern repeats.
+/// Rewrite ExprSpec sugar tags to their canonical `!value` forms. Runs
+/// after shape-normalization (so tagged / bare / single-key-map inputs
+/// all reach this pass in `Value::Tagged` form). Currently covers
+/// `!equal_weight <N>` → `!value <1/N>`; other sugar tags can be added
+/// the same way if the pattern repeats.
 fn rewrite_sugar_tags(v: serde_norway::Value) -> Result<serde_norway::Value, String> {
     use serde_norway::value::{Tag, TaggedValue};
     if let serde_norway::Value::Tagged(tagged) = v {
@@ -1934,12 +1997,104 @@ fn rewrite_sugar_tags(v: serde_norway::Value) -> Result<serde_norway::Value, Str
     Ok(v)
 }
 
-
 /// Resolve an optional cross-asset `source` spec into a concrete
 /// atom-emitting source. When the spec is `None`, returns the implicit
 /// empty-selector `Pick` (single-entry unpack); when `Some`, builds the
 /// user's subtree (typically a `!pick { symbol, freq }`) and wraps as an
 /// [`AsAtom`] view for the leaf's `T::of(source)` constructor.
+/// Build the runtime [`fugazi::indicators::Match`] chain for
+/// [`ExprSpec::Match`]. Case patterns are homogeneous — either all
+/// numeric (`ValueLit::Real`, dispatching on a `Real`-output `on`) or
+/// all string (`ValueLit::Str`, dispatching on a `Str`-output `on`).
+/// Mixed and `List` patterns are rejected with a build-time panic (loud
+/// on bad YAML — the CLI convention).
+///
+/// # Panics
+/// Panics if `cases` is empty, if any case's `value:` is a `List`, or
+/// if the cases mix `Real` and `Str` patterns. The typed
+/// [`Deserialize`] path already rejects `deny_unknown_fields` typos.
+fn build_match(
+    on: &ExprSpec,
+    cases: &[MatchCase],
+    default: &ExprSpec,
+    anchor: &Position,
+    book: &Book,
+    portfolio_book: Option<&Book>,
+    schema: &Arc<Schema>,
+) -> Box<dyn DynIndicator> {
+    assert!(
+        !cases.is_empty(),
+        "!match: `cases` must not be empty (use `!if_else` for a single \
+         branch, or reduce to `default` if there's nothing to match)",
+    );
+
+    // Sniff the pattern type once — every case must agree, else the
+    // library-level `Match<S, T, K>` can't be given a single `K`.
+    let is_str = match &cases[0].value {
+        ValueLit::Str(_) => true,
+        ValueLit::Real(_) => false,
+        ValueLit::List(_) => panic!(
+            "!match: case 0 `value:` is a `!value <list>` — list literals \
+             have no defined equality against `on` and aren't a valid \
+             match pattern",
+        ),
+    };
+    for (i, c) in cases.iter().enumerate() {
+        match &c.value {
+            ValueLit::Str(_) if !is_str => panic!(
+                "!match: case {i} `value:` is a string but case 0 is a \
+                 number — all cases must dispatch on the same type"
+            ),
+            ValueLit::Real(_) if is_str => panic!(
+                "!match: case {i} `value:` is a number but case 0 is a \
+                 string — all cases must dispatch on the same type"
+            ),
+            ValueLit::List(_) => panic!(
+                "!match: case {i} `value:` is a `!value <list>` — list \
+                 literals have no defined equality against `on` and \
+                 aren't a valid match pattern",
+            ),
+            _ => {}
+        }
+    }
+
+    let default_ind = AsReal::new(default.build(anchor, book, portfolio_book, schema));
+
+    if is_str {
+        let on_ind = AsStr::new(on.build(anchor, book, portfolio_book, schema));
+        let pairs: Vec<(Arc<str>, AsReal)> = cases
+            .iter()
+            .map(|c| {
+                let pattern: Arc<str> = match &c.value {
+                    ValueLit::Str(s) => Arc::from(s.as_str()),
+                    _ => unreachable!("string-pattern branch, already validated"),
+                };
+                let branch = AsReal::new(
+                    c.result.build(anchor, book, portfolio_book, schema),
+                );
+                (pattern, branch)
+            })
+            .collect();
+        dyn_indicator::wrap(MatchIndicator::new(on_ind, pairs, default_ind))
+    } else {
+        let on_ind = AsReal::new(on.build(anchor, book, portfolio_book, schema));
+        let pairs: Vec<(Real, AsReal)> = cases
+            .iter()
+            .map(|c| {
+                let pattern: Real = match &c.value {
+                    ValueLit::Real(x) => *x,
+                    _ => unreachable!("numeric-pattern branch, already validated"),
+                };
+                let branch = AsReal::new(
+                    c.result.build(anchor, book, portfolio_book, schema),
+                );
+                (pattern, branch)
+            })
+            .collect();
+        dyn_indicator::wrap(MatchIndicator::new(on_ind, pairs, default_ind))
+    }
+}
+
 fn atom_source_of(
     source: Option<&ExprSpec>,
     anchor: &Position,
@@ -2482,6 +2637,9 @@ impl ExprSpec {
                 let t_ind = real(if_true);
                 let f_ind = real(if_false);
                 dyn_indicator::wrap(self::IfElse::new(cond_ind, t_ind, f_ind))
+            }
+            Match { on, cases, default } => {
+                build_match(on, cases, default, anchor, book, portfolio_book, schema)
             }
             Lag { source, periods } => dyn_indicator::wrap(real(source).lag(*periods)),
             Diff { source, periods } => dyn_indicator::wrap(real(source).diff(*periods)),

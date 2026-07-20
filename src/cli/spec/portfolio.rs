@@ -133,9 +133,14 @@ pub struct PortfolioSpec {
     ///   `!equal_weight` are recognized as sugar and rewritten to the
     ///   corresponding `!value` form at load time.
     ///
-    /// Per-child instantiation supplies `!arg SYM` (single-asset
-    /// children only), `!arg CHILD_NAME`, and `!arg CHILD_INDEX` (a
-    /// numeric index used to resolve `!value <list>` literals).
+    /// Per-child instantiation supplies these auto-args:
+    /// `!arg CHILD_INDEX` (always — a numeric index used to resolve
+    /// `!value <list>` literals), `!arg CHILD_NAME` (only when the
+    /// child sets `name:`), `!arg CHILD_GROUP` (only when the child
+    /// sets `group:`), and `!arg SYM` (single-asset children only —
+    /// same convention as basket / multi-asset specs). Anything not
+    /// declared on the child isn't injected — a template referencing an
+    /// unset arg fails at build with a clear missing-arg error.
     ///
     /// Weights are magnitudes and needn't sum to `1.0`; the portfolio
     /// normalizes on use.
@@ -177,14 +182,39 @@ pub struct PortfolioSpec {
     pub rebalance_policy: Option<RebalancePolicySpec>,
 }
 
-/// One child slot: an optional display name plus the nested strategy spec.
+/// One child slot: optional identity metadata (`name`, `group`) plus the
+/// nested strategy spec. When set, `name` and `group` are surfaced to
+/// the `weights:` expression via auto-injected `!arg` values
+/// (`CHILD_NAME`, `CHILD_GROUP`) so a portfolio-scope weight template
+/// can dispatch on them — the natural way to write "up-weight every
+/// momentum child when ADX is high" without enumerating names in a big
+/// `!if_else` tower.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortfolioChildSpec {
-    /// Display name for logs and downstream per-child reporting. Defaults
-    /// to `child_<idx>` when omitted.
+    /// Optional display name for logs and downstream per-child
+    /// reporting. Defaults internally to `child_<idx>` when omitted
+    /// (used as the sub-wallet key inside [`Portfolio`]). Must be
+    /// unique across the portfolio after defaulting;
+    /// [`PortfolioSpec::build`] panics on collisions.
+    ///
+    /// Surfaced to `weights:` as `!arg CHILD_NAME` **only when
+    /// explicitly set** — a template referencing `!arg CHILD_NAME`
+    /// against an unnamed child fails at build with a clear
+    /// missing-arg error (matches the `CHILD_GROUP` and `SYM`
+    /// injection convention: no silent auto-populated value).
     #[serde(default)]
     pub name: Option<String>,
+
+    /// Optional group label — may be shared across siblings (e.g.
+    /// `group: momentum`) so a `weights:` expression can gate on
+    /// `!arg CHILD_GROUP` to steer whole cohorts together. When omitted,
+    /// `CHILD_GROUP` is not injected — a template that references it
+    /// against an ungrouped child fails at build with a clear
+    /// missing-arg error (matches the `SYM`-only-for-single-asset
+    /// convention).
+    #[serde(default)]
+    pub group: Option<String>,
 
     /// The nested strategy — of any shape. Routed by distinctive top-level
     /// key on the child's `strategy:` map (see [`PortfolioChildStrategy`]).
@@ -430,6 +460,44 @@ fn extract_top_level_value_list(tree: &Value) -> Option<Vec<Real>> {
         .collect::<Option<Vec<Real>>>()
 }
 
+/// Resolve every child's internal display name — using its declared
+/// `name:` when set, else defaulting to `child_<index>` — and enforce
+/// that the resulting vector has no duplicates. This is the string
+/// [`Portfolio`] uses to key its sub-wallets and to label template-build
+/// errors ("template failed for child `X`"), so shadowing between an
+/// explicitly-named child and an auto-generated `child_N` slot must be
+/// a hard error (otherwise sub-wallet lookups become ambiguous). Note
+/// this is *not* the `!arg CHILD_NAME` injection value — that arg is
+/// only injected when `name:` was declared explicitly.
+///
+/// # Panics
+/// Panics with a listing of the collided name(s) if any duplicate is
+/// detected. Matches the "loud on bad YAML" convention already used by
+/// [`PortfolioSpec::build`] for empty `children:` and out-of-range list
+/// indices.
+fn resolve_child_names(children: &[PortfolioChildSpec]) -> Vec<String> {
+    let resolved: Vec<String> = children
+        .iter()
+        .enumerate()
+        .map(|(i, c)| c.name.clone().unwrap_or_else(|| format!("child_{i}")))
+        .collect();
+    let mut seen: std::collections::HashSet<&str> =
+        std::collections::HashSet::with_capacity(resolved.len());
+    let mut collisions: Vec<&str> = Vec::new();
+    for name in &resolved {
+        if !seen.insert(name.as_str()) {
+            collisions.push(name.as_str());
+        }
+    }
+    assert!(
+        collisions.is_empty(),
+        "PortfolioSpec::build: duplicate child name(s) after defaulting: {collisions:?} \
+         — every child's resolved `name:` (or the auto-generated `child_<index>` \
+         fallback) must be unique across the portfolio",
+    );
+    resolved
+}
+
 impl PortfolioSpec {
     /// Parse a YAML portfolio document, applying `!import` splices and
     /// `!param` substitutions before typed deserialization.
@@ -484,6 +552,7 @@ impl PortfolioSpec {
             "PortfolioSpec::build: `children:` must have at least one entry"
         );
         let n = self.children.len();
+        let resolved_names = resolve_child_names(&self.children);
         let allocations = self.resolve_allocations(total_initial_equity, n);
 
         // Track each child's readiness periods at build. We inspect the
@@ -520,10 +589,7 @@ impl PortfolioSpec {
         // resolves to the child's own state.
         let mut child_books: Vec<Book<String>> = Vec::with_capacity(self.children.len());
         for (i, c) in self.children.iter().enumerate() {
-            let name = c
-                .name
-                .clone()
-                .unwrap_or_else(|| format!("child_{i}"));
+            let name = resolved_names[i].clone();
             let child_equity = allocations[i];
             let (stable, warm_up);
             builder = match &c.strategy {
@@ -578,16 +644,25 @@ impl PortfolioSpec {
             None => builder.weights(EqualWeight),
             Some(_) => builder.weights(Fixed::new(allocations.clone())),
         };
-        // Weight-share indicators — one instance per child. Each
-        // carries `!arg CHILD_NAME` (always), `!arg SYM` (single-asset
-        // children only), and `!arg CHILD_INDEX` (a number, used to
-        // resolve `!value <list>` literals per child). The strategy-book
-        // slot is the child's own book, so bare `!drawdown` /
-        // `!return_per_bar` / `!drawdown_throttle` / `!equity_vol_target`
-        // / `!fractional_kelly` inside a template reads that child's
-        // per-child state by default; the aggregate book is passed as
-        // `portfolio_book`, so `source: !portfolio_book` inside any
-        // book-reading node routes to it.
+        // Weight-share indicators — one instance per child. Each carries
+        // the `$`-prefixed portfolio-scope reserved auto-args:
+        // `$CHILD_NAME` (always), `$CHILD_INDEX` (a number, used to
+        // resolve `!value <list>` literals per child), and `$CHILD_GROUP`
+        // (only when the child sets `group:`). The `$`-prefix reserves
+        // the portfolio-scope auto-arg namespace so user args (via
+        // future `defs:` mechanisms) can't shadow the system-provided
+        // ones — a template referencing `!arg CHILD_GROUP` against an
+        // ungrouped child fails at build with a clear missing-arg error.
+        //
+        // `SYM` is also injected for single-asset children (prefix-free,
+        // matching the basket/multi-asset per-symbol convention).
+        //
+        // The strategy-book slot is the child's own book, so bare
+        // `!drawdown` / `!return_per_bar` / `!drawdown_throttle` /
+        // `!equity_vol_target` / `!fractional_kelly` inside a template
+        // reads that child's per-child state by default; the aggregate
+        // book is passed as `portfolio_book`, so `source: !portfolio_book`
+        // inside any book-reading node routes to it.
         if let Some(template) = &self.weights {
             let mut shares: Vec<
                 Box<
@@ -598,25 +673,45 @@ impl PortfolioSpec {
                 >,
             > = Vec::new();
             for (i, c) in self.children.iter().enumerate() {
-                let name = c
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| format!("child_{i}"));
+                let internal_name = resolved_names[i].clone();
                 let mut args: HashMap<String, Value> = HashMap::new();
-                args.insert(
-                    "CHILD_NAME".to_string(),
-                    Value::String(name.clone()),
-                );
+                // `CHILD_INDEX` is unconditional — every child has a
+                // stable position in `.add(...)` order, so `!arg
+                // CHILD_INDEX` always resolves.
                 args.insert(
                     "CHILD_INDEX".to_string(),
                     Value::Number(serde_json::Number::from(i)),
                 );
+                // `CHILD_NAME` / `CHILD_GROUP` are only injected when
+                // the child sets them explicitly. Same policy for both:
+                // no silent auto-populated fallback (a template that
+                // references either against a child that doesn't
+                // declare it fails at build with a clear missing-arg
+                // error). The internal `child_<idx>` default is only
+                // used to key the sub-wallet inside `Portfolio`, never
+                // exposed as an arg.
+                if let Some(name) = &c.name {
+                    args.insert(
+                        "CHILD_NAME".to_string(),
+                        Value::String(name.clone()),
+                    );
+                }
+                if let Some(group) = &c.group {
+                    args.insert(
+                        "CHILD_GROUP".to_string(),
+                        Value::String(group.clone()),
+                    );
+                }
                 if let PortfolioChildStrategy::Single(s) = &c.strategy {
                     args.insert(
                         "SYM".to_string(),
                         Value::String(s.symbol().to_string()),
                     );
                 }
+                // The `child_<idx>` default is still used below as the
+                // template-build-error label for anyone chasing a
+                // "template failed for child 'child_2'" panic.
+                let name = internal_name;
                 // Preprocess the template tree so `!value <list>`
                 // literals resolve to `!value <list[i]>` for this
                 // child. Runs before args::substitute (which only
@@ -1474,5 +1569,210 @@ mod tests {
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let _portfolio = spec.build(1_000.0, &Schema::empty(), None);
+    }
+
+    #[test]
+    fn parses_group_field_on_children() {
+        // `group:` is optional on every child; children may share a
+        // group so a `weights:` expression can dispatch by cohort.
+        let yaml = r#"
+            children:
+              - name: fast
+                group: momentum
+                strategy: !buy_and_hold { symbol: A }
+              - name: slow
+                group: momentum
+                strategy: !buy_and_hold { symbol: B }
+              - name: reverter
+                group: mean_rev
+                strategy: !buy_and_hold { symbol: C }
+              - name: ungrouped
+                strategy: !buy_and_hold { symbol: D }
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        assert_eq!(spec.children[0].group.as_deref(), Some("momentum"));
+        assert_eq!(spec.children[1].group.as_deref(), Some("momentum"));
+        assert_eq!(spec.children[2].group.as_deref(), Some("mean_rev"));
+        assert_eq!(spec.children[3].group, None);
+    }
+
+    #[test]
+    fn child_group_arg_resolves_in_weights_template() {
+        // `!arg CHILD_GROUP` in the weights template resolves per child.
+        // Here we dispatch on group via `!if_else` — the momentum leg
+        // reads 2.0, the mean-rev leg reads 1.0; normalized 2/3 and
+        // 1/3 with `rebalance_on: !every 1` should snap the sub-equities
+        // toward those weights. The `!value { arg: CHILD_GROUP }`
+        // wrapper turns the resolved arg into an `ExprSpec::Value(Str)`
+        // — the position where `!str_eq`'s lhs takes any
+        // `Str`-emitting ExprSpec.
+        let yaml = r#"
+            weights:
+              !if_else
+                cond: !str_eq { lhs: !value { arg: CHILD_GROUP }, rhs: momentum }
+                if_true: !value 2.0
+                if_false: !value 1.0
+            rebalance_on: !every 1
+            children:
+              - name: mom
+                group: momentum
+                strategy:
+                  symbol: A
+                  sizing: !value 0.5
+                  long:
+                    enter: !value true
+                    exit: !value false
+              - name: mr
+                group: mean_rev
+                strategy:
+                  symbol: B
+                  sizing: !value 0.5
+                  long:
+                    enter: !value true
+                    exit: !value false
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let mut portfolio = spec.build(1_500.0, &Schema::empty(), None);
+        let mut wallet = portfolio.wallet_view();
+        for _ in 0..4 {
+            for fill in wallet.update("A".to_string(), candle(100.0)) {
+                portfolio.on_fill(&fill);
+            }
+            for fill in wallet.update("B".to_string(), candle(100.0)) {
+                portfolio.on_fill(&fill);
+            }
+            portfolio.update(snap_of(&[("A", 100.0), ("B", 100.0)]));
+            portfolio.trade(&mut wallet);
+        }
+        let e0 = wallet.sub_equity(0).0;
+        let e1 = wallet.sub_equity(1).0;
+        let total = e0 + e1;
+        // Weights normalize to 2/3 (momentum) and 1/3 (mean_rev).
+        assert!(
+            (e0 / total - 2.0 / 3.0).abs() < 0.02,
+            "momentum leg should be ~2/3; got e0={e0}, e1={e1}",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "CHILD_GROUP")]
+    fn child_group_arg_missing_on_ungrouped_child_panics() {
+        // A weights template that references `!arg CHILD_GROUP` with an
+        // ungrouped child fails at build with a missing-arg error —
+        // matches the CHILD_NAME / SYM convention (no silent auto-populated
+        // fallback for identity args).
+        let yaml = r#"
+            weights: !arg CHILD_GROUP
+            children:
+              - name: named_but_ungrouped
+                strategy: !buy_and_hold { symbol: A }
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let _ = spec.build(1_000.0, &Schema::empty(), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "CHILD_NAME")]
+    fn child_name_arg_missing_on_unnamed_child_panics() {
+        // Symmetry with the CHILD_GROUP case: `!arg CHILD_NAME` on an
+        // unnamed child (no explicit `name:`) fails. The internal
+        // `child_<idx>` default only keys sub-wallets — it's not
+        // injected as the arg.
+        let yaml = r#"
+            weights: !arg CHILD_NAME
+            children:
+              - strategy: !buy_and_hold { symbol: A }
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let _ = spec.build(1_000.0, &Schema::empty(), None);
+    }
+
+    #[test]
+    fn match_dispatches_weights_by_child_group() {
+        // The motivating case for `!match`: pick a per-child weight
+        // expression by group name. Momentum children score 2.0,
+        // mean-rev children score 1.0, others fall through to 0.5.
+        // Normalized weights: 2.0 → 4/6, 1.0 → 2/6 (only two children here).
+        let yaml = r#"
+            weights:
+              !match
+                on: !value { arg: CHILD_GROUP }
+                cases:
+                  - value: momentum
+                    result: !value 2.0
+                  - value: mean_rev
+                    result: !value 1.0
+                default: !value 0.5
+            rebalance_on: !every 1
+            children:
+              - name: mom
+                group: momentum
+                strategy:
+                  symbol: A
+                  sizing: !value 0.5
+                  long:
+                    enter: !value true
+                    exit: !value false
+              - name: mr
+                group: mean_rev
+                strategy:
+                  symbol: B
+                  sizing: !value 0.5
+                  long:
+                    enter: !value true
+                    exit: !value false
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let mut portfolio = spec.build(1_500.0, &Schema::empty(), None);
+        let mut wallet = portfolio.wallet_view();
+        for _ in 0..4 {
+            for fill in wallet.update("A".to_string(), candle(100.0)) {
+                portfolio.on_fill(&fill);
+            }
+            for fill in wallet.update("B".to_string(), candle(100.0)) {
+                portfolio.on_fill(&fill);
+            }
+            portfolio.update(snap_of(&[("A", 100.0), ("B", 100.0)]));
+            portfolio.trade(&mut wallet);
+        }
+        let e0 = wallet.sub_equity(0).0;
+        let e1 = wallet.sub_equity(1).0;
+        let total = e0 + e1;
+        // Momentum leg (weight 2) vs mean_rev leg (weight 1) → 2/3, 1/3.
+        assert!(
+            (e0 / total - 2.0 / 3.0).abs() < 0.02,
+            "!match by CHILD_GROUP should give momentum ~2/3; got e0={e0}, e1={e1}",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate child name")]
+    fn duplicate_child_names_panic_at_build() {
+        // Two children declaring the same name — build fails.
+        let yaml = r#"
+            children:
+              - name: dup
+                strategy: !buy_and_hold { symbol: A }
+              - name: dup
+                strategy: !buy_and_hold { symbol: B }
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let _ = spec.build(1_000.0, &Schema::empty(), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate child name")]
+    fn explicit_name_colliding_with_default_child_slot_panics() {
+        // An explicit `name: child_1` collides with the auto-generated
+        // `child_1` for the second (unnamed) slot — must panic to keep
+        // sub-wallet lookups unambiguous.
+        let yaml = r#"
+            children:
+              - name: child_1
+                strategy: !buy_and_hold { symbol: A }
+              - strategy: !buy_and_hold { symbol: B }
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let _ = spec.build(1_000.0, &Schema::empty(), None);
     }
 }

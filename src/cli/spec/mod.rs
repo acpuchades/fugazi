@@ -1252,6 +1252,118 @@ mod tests {
     }
 
     #[test]
+    fn match_numeric_dispatches_by_value_equality() {
+        // `!match` on a numeric `on` — each case fires when `on == value`.
+        // Here `on` is `!current_bar { close }` (effectively the close),
+        // and cases dispatch by the actual close value.
+        let yaml = r#"
+            !match
+            on: close
+            cases:
+              - value: 100.0
+                result: !value 1.0
+              - value: 200.0
+                result: !value 2.0
+            default: !value -1.0
+        "#;
+        let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
+        assert_eq!(feed_real(&mut built, bar(100.0)), Some(1.0));
+        assert_eq!(feed_real(&mut built, bar(200.0)), Some(2.0));
+        assert_eq!(feed_real(&mut built, bar(150.0)), Some(-1.0));
+    }
+
+    #[test]
+    fn match_lowers_to_nested_if_else_for_a_single_case() {
+        // A one-case `!match` is equivalent to a single `!if_else`:
+        // cond fires on equality, if_true is the case's result, if_false
+        // is the default.
+        let yaml_match = r#"
+            !match
+            on: close
+            cases:
+              - value: 42.0
+                result: !value 1.0
+            default: !value 0.0
+        "#;
+        let yaml_if_else = r#"
+            !if_else
+            cond: !eq { lhs: close, rhs: !value 42.0 }
+            if_true: !value 1.0
+            if_false: !value 0.0
+        "#;
+        let spec_match: ExprSpec = serde_norway::from_str(yaml_match).unwrap();
+        let spec_if_else: ExprSpec = serde_norway::from_str(yaml_if_else).unwrap();
+        let mut m = spec_match.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
+        let mut e = spec_if_else.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
+        for px in [41.0, 42.0, 43.0, 42.0, 100.0] {
+            assert_eq!(
+                feed_real(&mut m, bar(px)),
+                feed_real(&mut e, bar(px)),
+                "!match one-case must match !if_else at px={px}",
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "cases")]
+    fn match_empty_cases_rejected_at_build() {
+        // A zero-case `!match` isn't a legal shape — it collapses to
+        // just the default, at which point `!if_else` isn't needed.
+        // The check lives on the build side (not the load side) because
+        // the typed enum accepts an empty `Vec<MatchCase>` — we can't
+        // encode a non-empty vec constraint at serde level without
+        // custom deserialize.
+        let yaml = r#"
+            !match
+            on: close
+            cases: []
+            default: !value 0.0
+        "#;
+        let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
+        let _ = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "same type")]
+    fn match_mixed_pattern_types_rejected_at_build() {
+        // A `!match` with one numeric and one string case can't map to
+        // a single `K` on the library-level `Match<S, T, K>` — rejected
+        // at build with a clear message.
+        let yaml = r#"
+            !match
+            on: close
+            cases:
+              - value: 42.0
+                result: !value 1.0
+              - value: mixed_string
+                result: !value 2.0
+            default: !value 0.0
+        "#;
+        let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
+        let _ = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
+    }
+
+    #[test]
+    fn match_first_matching_case_wins() {
+        // Ordering matters — cases are checked in list order; a later
+        // case that also matches doesn't fire.
+        let yaml = r#"
+            !match
+            on: close
+            cases:
+              - value: 100.0
+                result: !value 1.0
+              - value: 100.0
+                result: !value 999.0
+            default: !value 0.0
+        "#;
+        let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
+        assert_eq!(feed_real(&mut built, bar(100.0)), Some(1.0));
+    }
+
+    #[test]
     fn latch_ema_of_resample_matches_reference_htf_ema() {
         // The composition-order regression at the YAML surface: an EMA-3
         // running inside !resample, wrapped in !latch, agrees numerically
