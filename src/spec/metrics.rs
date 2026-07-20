@@ -1,7 +1,7 @@
 //! Post-run backtest evaluation metrics, written to `metrics.yml`.
 //!
 //! Derived from the two artefacts every run already produces (equity curve +
-//! fill blotter), via the pure per-metric functions in [`fugazi::metrics`].
+//! fill blotter), via the pure per-metric functions in [`crate::metrics`].
 //! This module is the CLI's aggregation layer: it holds the serde-decorated
 //! [`Metrics`] document that lands on disk as YAML, glues the library's
 //! standalone metric functions into that document via [`from_report`], and
@@ -17,9 +17,9 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
-use fugazi::Fill;
-use fugazi::backtest::RunReport;
-use fugazi::prelude::*;
+use crate::Fill;
+use crate::backtest::RunReport;
+use crate::prelude::*;
 use serde::Serialize;
 
 /// The metrics document written to `metrics.yml`, grouped by theme so the file
@@ -231,11 +231,11 @@ pub struct TradeSection {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_bars: Option<usize>,
     /// Holding duration in trading seconds — the `_bars` siblings scaled by
-    /// [`AssetClass::trading_seconds_per_bar`](crate::calendar::AssetClass::trading_seconds_per_bar).
+    /// [`AssetClass::trading_seconds_per_bar`](crate::spec::calendar::AssetClass::trading_seconds_per_bar).
     /// A machine-readable twin of the console's `holding` line: downstream
     /// tools divide by 3600 for hours, 86400 for days, etc., without having to
     /// know the bar cadence or trading calendar. Populated only when both an
-    /// [`AssetClass`](crate::calendar::AssetClass) and a resolvable bar cadence
+    /// [`AssetClass`](crate::spec::calendar::AssetClass) and a resolvable bar cadence
     /// are known; omitted otherwise so a CSV column that isn't well-defined
     /// stays empty.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -254,7 +254,7 @@ pub struct TradeSection {
 /// the trading-time span of one bar, used to populate the trades'
 /// `average_seconds` / `min_seconds` / `max_seconds` twins of the `_bars`
 /// fields; typically derived via
-/// [`AssetClass::trading_seconds_per_bar`](crate::calendar::AssetClass::trading_seconds_per_bar).
+/// [`AssetClass::trading_seconds_per_bar`](crate::spec::calendar::AssetClass::trading_seconds_per_bar).
 pub fn from_report<Sym>(
     report: &RunReport<Sym>,
     bars_per_year: Real,
@@ -267,9 +267,9 @@ pub fn from_report<Sym>(
     let final_equity = equity.last().copied().unwrap_or(initial);
 
     // Build each intermediate once, hand it to every metric that consumes it.
-    let returns = fugazi::metrics::per_bar_returns(equity, initial);
-    let trades = fugazi::metrics::reconstruct_trades(&report.fills);
-    let segments = fugazi::metrics::drawdown_segments(equity);
+    let returns = crate::metrics::per_bar_returns(equity, initial);
+    let trades = crate::metrics::reconstruct_trades(&report.fills);
+    let segments = crate::metrics::drawdown_segments(equity);
     let rf_per_bar = if bars_per_year > 0.0 {
         risk_free_rate / bars_per_year
     } else {
@@ -278,15 +278,15 @@ pub fn from_report<Sym>(
 
     // Return-section values are computed as fractions in the library and
     // scaled to percent here at the presentation boundary.
-    let total = fugazi::metrics::total_return(equity, initial);
-    let cagr = fugazi::metrics::cagr(equity, initial, bars_per_year);
-    let ann_mean = fugazi::metrics::annualized_return(&returns, bars_per_year);
-    let ann_vol = fugazi::metrics::annualized_volatility(&returns, bars_per_year);
-    let max_dd = fugazi::metrics::max_drawdown(&segments);
-    let avg_dd = fugazi::metrics::average_drawdown(&segments);
-    let win_rate = fugazi::metrics::win_rate(&trades);
-    let avg_trade_return = fugazi::metrics::average_trade_return(&trades);
-    let exposure = fugazi::metrics::exposure_ratio(&report.fills, bars);
+    let total = crate::metrics::total_return(equity, initial);
+    let cagr = crate::metrics::cagr(equity, initial, bars_per_year);
+    let ann_mean = crate::metrics::annualized_return(&returns, bars_per_year);
+    let ann_vol = crate::metrics::annualized_volatility(&returns, bars_per_year);
+    let max_dd = crate::metrics::max_drawdown(&segments);
+    let avg_dd = crate::metrics::average_drawdown(&segments);
+    let win_rate = crate::metrics::win_rate(&trades);
+    let avg_trade_return = crate::metrics::average_trade_return(&trades);
+    let exposure = crate::metrics::exposure_ratio(&report.fills, bars);
 
     Metrics {
         run: RunSection {
@@ -300,33 +300,33 @@ pub fn from_report<Sym>(
             total,
             total_pct: total * 100.0,
             cagr_pct: cagr.map(|c| c * 100.0),
-            mean_bar: fugazi::metrics::mean_return(&returns),
-            median_bar: fugazi::metrics::median_return(&returns),
-            stddev_bar: fugazi::metrics::stddev_return(&returns),
-            best_bar: fugazi::metrics::best_return(&returns),
-            worst_bar: fugazi::metrics::worst_return(&returns),
-            positive_bars_pct: fugazi::metrics::positive_bars_ratio(&returns) * 100.0,
-            skewness: fugazi::metrics::skewness(&returns),
-            kurtosis: fugazi::metrics::kurtosis(&returns),
-            var_95: fugazi::metrics::value_at_risk(&returns, 0.95),
-            cvar_95: fugazi::metrics::conditional_value_at_risk(&returns, 0.95),
-            tail_ratio: fugazi::metrics::tail_ratio(&returns),
+            mean_bar: crate::metrics::mean_return(&returns),
+            median_bar: crate::metrics::median_return(&returns),
+            stddev_bar: crate::metrics::stddev_return(&returns),
+            best_bar: crate::metrics::best_return(&returns),
+            worst_bar: crate::metrics::worst_return(&returns),
+            positive_bars_pct: crate::metrics::positive_bars_ratio(&returns) * 100.0,
+            skewness: crate::metrics::skewness(&returns),
+            kurtosis: crate::metrics::kurtosis(&returns),
+            var_95: crate::metrics::value_at_risk(&returns, 0.95),
+            cvar_95: crate::metrics::conditional_value_at_risk(&returns, 0.95),
+            tail_ratio: crate::metrics::tail_ratio(&returns),
             annualized_mean_pct: ann_mean * 100.0,
             annualized_volatility_pct: ann_vol * 100.0,
         },
         risk_adjusted: RiskAdjustedSection {
-            sharpe: fugazi::metrics::sharpe(&returns, risk_free_rate, bars_per_year),
-            sortino: fugazi::metrics::sortino(&returns, risk_free_rate, bars_per_year),
-            calmar: fugazi::metrics::calmar(equity, initial, bars_per_year),
-            omega: fugazi::metrics::omega(&returns, rf_per_bar),
-            ulcer_index: fugazi::metrics::ulcer_index(equity),
-            ulcer_performance_index: fugazi::metrics::ulcer_performance_index(
+            sharpe: crate::metrics::sharpe(&returns, risk_free_rate, bars_per_year),
+            sortino: crate::metrics::sortino(&returns, risk_free_rate, bars_per_year),
+            calmar: crate::metrics::calmar(equity, initial, bars_per_year),
+            omega: crate::metrics::omega(&returns, rf_per_bar),
+            ulcer_index: crate::metrics::ulcer_index(equity),
+            ulcer_performance_index: crate::metrics::ulcer_performance_index(
                 equity,
                 initial,
                 risk_free_rate,
                 bars_per_year,
             ),
-            probabilistic_sharpe: fugazi::metrics::probabilistic_sharpe(
+            probabilistic_sharpe: crate::metrics::probabilistic_sharpe(
                 &returns,
                 risk_free_rate,
                 bars_per_year,
@@ -336,45 +336,45 @@ pub fn from_report<Sym>(
         drawdown: DrawdownSection {
             max: max_dd,
             max_pct: max_dd * 100.0,
-            max_duration_bars: fugazi::metrics::max_drawdown_duration(&segments),
+            max_duration_bars: crate::metrics::max_drawdown_duration(&segments),
             avg: avg_dd,
             avg_pct: avg_dd.map(|a| a * 100.0),
-            avg_duration_bars: fugazi::metrics::average_drawdown_duration(&segments),
-            count: fugazi::metrics::drawdown_count(&segments),
-            time_in_drawdown_pct: fugazi::metrics::time_in_drawdown_ratio(&segments, bars) * 100.0,
-            recovery_factor: fugazi::metrics::recovery_factor(equity, initial),
+            avg_duration_bars: crate::metrics::average_drawdown_duration(&segments),
+            count: crate::metrics::drawdown_count(&segments),
+            time_in_drawdown_pct: crate::metrics::time_in_drawdown_ratio(&segments, bars) * 100.0,
+            recovery_factor: crate::metrics::recovery_factor(equity, initial),
         },
         costs: None,
         trades: TradeSection {
-            total: fugazi::metrics::total_trades(&trades),
-            wins: fugazi::metrics::winning_trades(&trades),
-            losses: fugazi::metrics::losing_trades(&trades),
-            flat: fugazi::metrics::flat_trades(&trades),
-            long_trades: fugazi::metrics::long_trades(&trades),
-            short_trades: fugazi::metrics::short_trades(&trades),
+            total: crate::metrics::total_trades(&trades),
+            wins: crate::metrics::winning_trades(&trades),
+            losses: crate::metrics::losing_trades(&trades),
+            flat: crate::metrics::flat_trades(&trades),
+            long_trades: crate::metrics::long_trades(&trades),
+            short_trades: crate::metrics::short_trades(&trades),
             total_fills: report.fills.len(),
-            max_consecutive_wins: fugazi::metrics::max_consecutive_wins(&trades),
-            max_consecutive_losses: fugazi::metrics::max_consecutive_losses(&trades),
+            max_consecutive_wins: crate::metrics::max_consecutive_wins(&trades),
+            max_consecutive_losses: crate::metrics::max_consecutive_losses(&trades),
             exposure_pct: exposure * 100.0,
             win_rate_pct: win_rate.map(|w| w * 100.0),
-            profit_factor: fugazi::metrics::profit_factor(&trades),
-            payoff_ratio: fugazi::metrics::payoff_ratio(&trades),
-            expectancy: fugazi::metrics::expectancy(&trades),
-            kelly_fraction: fugazi::metrics::kelly_fraction(&trades),
-            average_win: fugazi::metrics::average_win(&trades),
-            average_loss: fugazi::metrics::average_loss(&trades),
-            largest_win: fugazi::metrics::largest_win(&trades),
-            largest_loss: fugazi::metrics::largest_loss(&trades),
+            profit_factor: crate::metrics::profit_factor(&trades),
+            payoff_ratio: crate::metrics::payoff_ratio(&trades),
+            expectancy: crate::metrics::expectancy(&trades),
+            kelly_fraction: crate::metrics::kelly_fraction(&trades),
+            average_win: crate::metrics::average_win(&trades),
+            average_loss: crate::metrics::average_loss(&trades),
+            largest_win: crate::metrics::largest_win(&trades),
+            largest_loss: crate::metrics::largest_loss(&trades),
             average_return_pct: avg_trade_return.map(|r| r * 100.0),
-            average_bars: fugazi::metrics::average_bars_held(&trades),
-            min_bars: fugazi::metrics::min_bars_held(&trades),
-            max_bars: fugazi::metrics::max_bars_held(&trades),
+            average_bars: crate::metrics::average_bars_held(&trades),
+            min_bars: crate::metrics::min_bars_held(&trades),
+            max_bars: crate::metrics::max_bars_held(&trades),
             average_seconds: seconds_per_bar
-                .and_then(|s| fugazi::metrics::average_bars_held(&trades).map(|b| b * s)),
+                .and_then(|s| crate::metrics::average_bars_held(&trades).map(|b| b * s)),
             min_seconds: seconds_per_bar
-                .and_then(|s| fugazi::metrics::min_bars_held(&trades).map(|b| b as Real * s)),
+                .and_then(|s| crate::metrics::min_bars_held(&trades).map(|b| b as Real * s)),
             max_seconds: seconds_per_bar
-                .and_then(|s| fugazi::metrics::max_bars_held(&trades).map(|b| b as Real * s)),
+                .and_then(|s| crate::metrics::max_bars_held(&trades).map(|b| b as Real * s)),
         },
     }
 }
@@ -522,7 +522,7 @@ pub fn mean_std(values: impl Iterator<Item = Real>) -> Option<(Real, Real)> {
 }
 
 /// `(n_trials, sample_variance_of_annualized_Sharpe)` across `windows` — the
-/// trial-context tuple [`fugazi::metrics::deflated_sharpe_from_stats`] takes.
+/// trial-context tuple [`crate::metrics::deflated_sharpe_from_stats`] takes.
 /// `None` when fewer than two windows have a defined Sharpe or the variance is
 /// zero (DSR is undefined in either case). Sample variance (ddof = 1) matches
 /// the reference variance-of-estimators used across the Bailey/LdP literature.
@@ -700,12 +700,12 @@ pub fn costs_section<Sym: Clone + PartialEq>(
                 }
             }
         }
-        let net_cagr = fugazi::metrics::cagr(
+        let net_cagr = crate::metrics::cagr(
             &net_report.equity_curve,
             net_report.initial_equity,
             bars_per_year,
         );
-        let gross_cagr = fugazi::metrics::cagr(
+        let gross_cagr = crate::metrics::cagr(
             &gross.equity_curve,
             gross.initial_equity,
             bars_per_year,
@@ -879,7 +879,7 @@ fn lookup_number(root: &serde_json::Value, path: &[String]) -> Option<Real> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fugazi::Fill;
+    use crate::Fill;
 
     fn order(side: Side, units: Real, price: Real) -> Order<String> {
         Order::new(

@@ -13,7 +13,7 @@ use anyhow::{Context, Result, anyhow};
 
 /// Parse `text` (YAML) into a [`serde_json::Value`] — the common shape the spec
 /// and params loaders both work on. The document is normalized via
-/// [`crate::convert::yaml_to_json`] so `!tags` become serde_json's singleton-map
+/// [`crate::spec::convert::yaml_to_json`] so `!tags` become serde_json's singleton-map
 /// external-tag form. (JSON is a subset of YAML, so JSON-shaped text still parses.)
 ///
 /// Errors carry only the inner YAML message (with the serde_norway `, line: N,
@@ -32,7 +32,7 @@ pub fn parse_value(text: &str) -> Result<serde_json::Value> {
 pub fn parse_value_at(text: &str, label: &str) -> Result<serde_json::Value> {
     let value: serde_norway::Value = serde_norway::from_str(text)
         .map_err(|e| yaml_parse_error(e, label))?;
-    crate::convert::yaml_to_json(value)
+    crate::spec::convert::yaml_to_json(value)
         .with_context(|| format!("normalising YAML tags in {label}"))
 }
 
@@ -81,7 +81,7 @@ impl Source {
     /// against: the file's own directory for `@path` (so a strategy's imports
     /// are relative to the strategy, not to wherever `fugazi` was invoked
     /// from), and the working directory for inline text, which has no
-    /// directory of its own. See [`crate::imports`].
+    /// directory of its own. See [`crate::spec::imports`].
     pub fn base_dir(&self) -> PathBuf {
         match self {
             Source::File(path) => match path.parent() {
@@ -122,21 +122,21 @@ impl FromStr for Source {
 /// Which strategy shape a [`StrategySource`] resolves to.
 ///
 /// The default (no prefix, or `single:`) is a
-/// [`SingleAssetStrategy`](fugazi::strategies::SingleAssetStrategy). Prefixing
+/// [`SingleAssetStrategy`](crate::strategies::SingleAssetStrategy). Prefixing
 /// with `pairs:` (e.g. `pairs:@spread.yml`) declares a two-symbol pair-trading
 /// spec that resolves to a
-/// [`PairsStrategy`](fugazi::strategies::PairsStrategy). Prefixing with
+/// [`PairsStrategy`](crate::strategies::PairsStrategy). Prefixing with
 /// `basket:` (e.g. `basket:@basket.yml`) declares an N-symbol cross-sectional
 /// basket that resolves to a
-/// [`BasketStrategy`](fugazi::strategies::BasketStrategy). Prefixing with
+/// [`BasketStrategy`](crate::strategies::BasketStrategy). Prefixing with
 /// `multi:` (e.g. `multi:@portfolio.yml`) declares an N-symbol per-asset
 /// independent strategy — every symbol runs the same signals in isolation —
 /// that resolves to a
-/// [`MultiAssetStrategy`](fugazi::strategies::MultiAssetStrategy). Prefixing
+/// [`MultiAssetStrategy`](crate::strategies::MultiAssetStrategy). Prefixing
 /// with `portfolio:` (e.g. `portfolio:@portfolio.yml`) declares a composite
 /// N-child portfolio — a heterogeneous mix of single / pairs / basket /
 /// multi strategies sharing one cash pool via per-child sub-wallets — that
-/// resolves to a [`Portfolio`](fugazi::portfolio::Portfolio).
+/// resolves to a [`Portfolio`](crate::portfolio::Portfolio).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StrategyKind {
     /// A single-asset strategy (default; matches `@file.yml` and `single:@file.yml`).

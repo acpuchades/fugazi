@@ -7,14 +7,14 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
-use fugazi::indicators::{Book, Position};
-use fugazi::indicators::logic::Const;
-use fugazi::prelude::*;
-use fugazi::strategies::SingleAssetStrategy;
+use crate::indicators::{Book, Position};
+use crate::indicators::logic::Const;
+use crate::prelude::*;
+use crate::strategies::SingleAssetStrategy;
 
 use super::signal::SignalSpec;
 use super::expr::ExprSpec;
-use crate::dyn_indicator::{self, AsBool, AsReal, DynIndicator};
+use crate::spec::dyn_indicator::{self, AsBool, AsReal, DynIndicator};
 
 // ---------------------------------------------------------------------------
 // Strategy
@@ -58,7 +58,7 @@ impl SideSpec {
             .as_ref()
             .map(|s| s.build(anchor, book, None, schema))
             .unwrap_or_else(|| {
-                dyn_indicator::wrap(Const::<fugazi::types::Snapshot<String>>::new(false))
+                dyn_indicator::wrap(Const::<crate::types::Snapshot<String>>::new(false))
             })
     }
 }
@@ -99,17 +99,17 @@ pub struct SingleStrategySpec {
 impl SingleStrategySpec {
     /// Parse a YAML strategy document, splicing in every `!import`ed file and
     /// resolving `!param` placeholders against `params` first (see
-    /// [`super::load_value`], [`crate::imports`], [`crate::params`]).
+    /// [`super::load_value`], [`crate::spec::imports`], [`crate::spec::params`]).
     ///
     /// Untyped-first: the document is normalized to a [`serde_json::Value`]
-    /// (via [`crate::convert::yaml_to_json`], so `!tags` become serde_json's
+    /// (via [`crate::spec::convert::yaml_to_json`], so `!tags` become serde_json's
     /// singleton-map external-tag form), every import and placeholder node is
     /// rewritten to its resolved value, and only then is the result deserialized
     /// into the typed spec — so a param can stand in for a number, a symbol, or
     /// any other concretely-typed field, and an import for any subtree.
     ///
     /// Import paths resolve against `base`, the importing document's own
-    /// directory ([`crate::input::Source::base_dir`]).
+    /// directory ([`crate::spec::input::Source::base_dir`]).
     ///
     /// The CLI's top-level Single-strategy load goes through
     /// [`StrategyRef::from_text_with_params_in`](super::preset::StrategyRef::from_text_with_params_in)
@@ -131,7 +131,7 @@ impl SingleStrategySpec {
     /// [`from_text_with_params_in`](Self::from_text_with_params_in) with imports
     /// resolved against the working directory and an `(inline)` source label.
     /// A test convenience: every CLI call site has a
-    /// [`Source`](crate::input::Source) and passes its `base_dir()` (already `.`
+    /// [`Source`](crate::spec::input::Source) and passes its `base_dir()` (already `.`
     /// for inline text) and its `label()`.
     #[cfg(test)]
     pub fn from_text_with_params(
@@ -157,7 +157,7 @@ impl SingleStrategySpec {
     ///
     /// No automatic wrapping — every signal / level is built exactly as the
     /// YAML describes it. If you want to gate an entry on stability, compose
-    /// [`Unstable`](fugazi::indicators::Unstable) at the signal level to opt a
+    /// [`Unstable`](crate::indicators::Unstable) at the signal level to opt a
     /// subtree out of the strategy-readiness wait.
     pub fn build(&self, initial_equity: Real, schema: &Arc<Schema>) -> DynSingleStrategy {
         let mut strat =
@@ -206,11 +206,11 @@ impl SingleStrategySpec {
 
 /// The CLI's built-strategy handle. Wraps a [`SingleAssetStrategy<String>`]
 /// whose entry/exit signals and protective levels came from runtime-typed
-/// [`DynIndicator`]s (bridged into typed [`Signal`](fugazi::Signal) / real
+/// [`DynIndicator`]s (bridged into typed [`Signal`](crate::Signal) / real
 /// levels by the private [`AsBool`] / [`AsReal`] adapters at construction).
 ///
-/// Implements [`Strategy`](fugazi::Strategy) by delegation, so it drops into
-/// [`fugazi::backtest::run`] unchanged.
+/// Implements [`Strategy`](crate::Strategy) by delegation, so it drops into
+/// [`crate::backtest::run`] unchanged.
 pub struct DynSingleStrategy {
     inner: SingleAssetStrategy<String>,
 }
@@ -218,7 +218,7 @@ pub struct DynSingleStrategy {
 impl DynSingleStrategy {
     /// Wrap an already-built [`SingleAssetStrategy<String>`] — the seam the
     /// [`StrategyPreset`](super::preset::StrategyPreset) catalogue tags use to
-    /// hand a ready-made strategy (built by the `fugazi::strategies` free
+    /// hand a ready-made strategy (built by the `crate::strategies` free
     /// functions) into the same `DynSingleStrategy` the YAML `SingleStrategySpec`
     /// path produces.
     pub(crate) fn from_single(inner: SingleAssetStrategy<String>) -> Self {
@@ -250,10 +250,10 @@ impl DynSingleStrategy {
 }
 
 impl Strategy for DynSingleStrategy {
-    type Input = fugazi::types::Snapshot<String>;
+    type Input = crate::types::Snapshot<String>;
     type Symbol = String;
 
-    fn update(&mut self, snap: fugazi::types::Snapshot<String>) {
+    fn update(&mut self, snap: crate::types::Snapshot<String>) {
         self.inner.update(snap);
     }
     fn on_fill(&mut self, order: &Order<String>) {

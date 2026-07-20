@@ -28,7 +28,7 @@
 //! `enter` / `exit` / `stop_loss` / `take_profit` / `sizing` are all
 //! typed as [`SpecTemplate`](super::SpecTemplate), so their `!arg SYM`
 //! leaves survive the load pass and get resolved once per symbol at
-//! build time. See [`crate::args`] for the placeholder grammar.
+//! build time. See [`crate::spec::args`] for the placeholder grammar.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -37,17 +37,17 @@ use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
 
-use fugazi::indicators::logic::Const;
-use fugazi::indicators::{Book, Position};
-use fugazi::prelude::*;
-use fugazi::strategies::MultiAssetStrategy;
-use fugazi::types::Snapshot;
+use crate::indicators::logic::Const;
+use crate::indicators::{Book, Position};
+use crate::prelude::*;
+use crate::strategies::MultiAssetStrategy;
+use crate::types::Snapshot;
 
 use super::basket::UniverseSpec;
 use super::expr::ExprSpec;
 use super::signal::SignalSpec;
 use super::template::SpecTemplate;
-use crate::dyn_indicator::{self, AsBool, AsReal, DynIndicator};
+use crate::spec::dyn_indicator::{self, AsBool, AsReal, DynIndicator};
 
 /// One side of a [`MultiAssetStrategySpec`]: the entry condition, an
 /// optional exit, and optional per-leg protective levels. Mirrors
@@ -66,7 +66,7 @@ pub struct MultiSideSpec {
     pub exit: Option<SpecTemplate<SignalSpec>>,
 
     /// An optional stop-loss price level (a per-symbol source). The
-    /// per-symbol [`Position`](fugazi::indicators::Position) is provided
+    /// per-symbol [`Position`](crate::indicators::Position) is provided
     /// at build time, so `!entry` / `!peak` / `!trough` inside compose as
     /// they do on [`SingleStrategySpec`](super::SingleStrategySpec).
     #[serde(default)]
@@ -342,7 +342,7 @@ fn build_expr(
 /// [`MultiAssetStrategy<String>`] whose per-symbol signal / level /
 /// sizing factories were assembled from
 /// [`SpecTemplate`](SpecTemplate)s. Implements [`Strategy`] by
-/// delegation so it drops into [`fugazi::backtest::run`] unchanged.
+/// delegation so it drops into [`crate::backtest::run`] unchanged.
 pub struct DynMultiAssetStrategy {
     inner: MultiAssetStrategy<String>,
 }
@@ -379,7 +379,7 @@ impl DynMultiAssetStrategy {
 
     /// Grid-wide readiness across the currently-discovered per-symbol
     /// states and the rebalance gate — pass-through to
-    /// [`MultiAssetStrategy::stable_period`](fugazi::strategies::MultiAssetStrategy::stable_period).
+    /// [`MultiAssetStrategy::stable_period`](crate::strategies::MultiAssetStrategy::stable_period).
     ///
     /// **Lazy readiness contract**: a multi-asset strategy's per-symbol
     /// chains are built on first sight, so a freshly-built strategy
@@ -391,7 +391,7 @@ impl DynMultiAssetStrategy {
     }
 
     /// Warm-up-only readiness (ignoring IIR settling) — pass-through to
-    /// [`MultiAssetStrategy::warm_up_period`](fugazi::strategies::MultiAssetStrategy::warm_up_period).
+    /// [`MultiAssetStrategy::warm_up_period`](crate::strategies::MultiAssetStrategy::warm_up_period).
     /// Used by `optimize --walkforward --keep-unstable`.
     ///
     /// Same lazy-readiness caveat as [`stable_period`](Self::stable_period).
@@ -403,8 +403,8 @@ impl DynMultiAssetStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fugazi::PaperWallet;
-    use fugazi::types::Atom;
+    use crate::PaperWallet;
+    use crate::types::Atom;
 
     fn candle(price: Real) -> Candle {
         Candle::new(price, price, price, price, 0.0)

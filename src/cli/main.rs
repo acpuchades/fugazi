@@ -13,28 +13,31 @@
 //! The strategy (a positional) takes `@file` to load a file, or inline YAML for
 //! anything else — the same `@` convention `--series`/`--params` use.
 
-mod args;
-mod backtest;
-mod calendar;
 mod completions;
-mod convert;
-mod costs;
-mod data;
 mod csv_source;
-mod dyn_indicator;
+mod data;
 mod get;
 mod glob;
-mod imports;
-mod input;
 mod list;
-mod metrics;
 mod optimize;
 mod overlay;
-mod params;
-mod pool;
 mod run;
-mod spec;
 mod style;
+
+// Re-export spec vocabulary into the binary crate's namespace so the existing
+// `crate::foo::bar` references in the remaining CLI files continue to resolve.
+// The moved modules now live under `fugazi::spec::*` on the library; these
+// re-exports let this binary keep its historical short paths.
+pub(crate) use fugazi::spec as spec;
+pub(crate) use fugazi::spec::calendar;
+pub(crate) use fugazi::spec::costs;
+pub(crate) use fugazi::spec::dyn_indicator;
+pub(crate) use fugazi::spec::imports;
+pub(crate) use fugazi::spec::input;
+pub(crate) use fugazi::spec::metrics;
+pub(crate) use fugazi::spec::params;
+pub(crate) use fugazi::spec::backtest;
+pub(crate) use fugazi::spec::pool;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

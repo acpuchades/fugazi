@@ -34,7 +34,7 @@
 //!
 //! * [`spec`] — `--costs` argument parsing into a [`CostSpec`] term list.
 //! * [`config`] — folding into [`CostConfig`] and resolving to a runtime
-//!   [`fugazi::costs::TradingCosts`].
+//!   [`crate::costs::TradingCosts`].
 
 mod config;
 mod spec;
@@ -47,8 +47,8 @@ mod tests {
     use super::*;
     use super::config::{CommissionSpec, SpreadSpec};
     use super::spec::CostTerm;
-    use crate::calendar::Frequency;
-    use crate::input::Source;
+    use crate::spec::calendar::Frequency;
+    use crate::spec::input::Source;
     use std::str::FromStr;
 
     fn parse(spec: &str) -> CostSpec {
@@ -133,7 +133,7 @@ mod tests {
         let btc = cfg.resolve("BTC", None);
         let eth = cfg.resolve("ETH", None);
         // A 100-price probe: BTC's half-spread is 0.015; ETH's is 0.05.
-        let b = fugazi::types::Candle::new(100.0, 100.0, 100.0, 100.0, 0.0);
+        let b = crate::types::Candle::new(100.0, 100.0, 100.0, 100.0, 0.0);
         assert!((btc.spread.half_spread(100.0, &b) - 0.015).abs() < 1e-9);
         assert!((eth.spread.half_spread(100.0, &b) - 0.05).abs() < 1e-9);
     }
@@ -144,7 +144,7 @@ mod tests {
             "BTC:spread=!bps { bps: 10 }",
             "BTC[1d]:spread=!bps { bps: 2 }",
         ]);
-        let b = fugazi::types::Candle::new(100.0, 100.0, 100.0, 100.0, 0.0);
+        let b = crate::types::Candle::new(100.0, 100.0, 100.0, 100.0, 0.0);
         let daily = cfg.resolve("BTC", Some(Frequency::Day(1)));
         let hourly = cfg.resolve("BTC", Some(Frequency::Hour(1)));
         // Daily gets the more-specific 2 bps; hourly falls back to the 10-bps
@@ -160,7 +160,7 @@ mod tests {
             "BTC[1d]:spread=!bps { bps: 5 }",
             "BTC[1d]:spread=!bps { bps: 2 }",
         ]);
-        let b = fugazi::types::Candle::new(100.0, 100.0, 100.0, 100.0, 0.0);
+        let b = crate::types::Candle::new(100.0, 100.0, 100.0, 100.0, 0.0);
         let daily = cfg.resolve("BTC", Some(Frequency::Day(1)));
         assert!((daily.spread.half_spread(100.0, &b) - 0.01).abs() < 1e-9);
     }
@@ -193,7 +193,7 @@ mod tests {
         "#;
         let cfg = config(&[CostSpec(vec![CostTerm::Load(Source::Inline(yaml.to_string()))])])
             .unwrap();
-        let b = fugazi::types::Candle::new(100.0, 100.0, 100.0, 100.0, 0.0);
+        let b = crate::types::Candle::new(100.0, 100.0, 100.0, 100.0, 0.0);
         let btc = cfg.resolve("BTC", None);
         let eth = cfg.resolve("ETH", None);
         let other = cfg.resolve("XRP", None);
@@ -248,7 +248,7 @@ mod tests {
         // Both live under by_symbol["BTC"], not the default leg.
         assert!(cfg.commission.default.is_none());
         assert!(cfg.spread.default.is_none());
-        let b = fugazi::types::Candle::new(100.0, 100.0, 100.0, 100.0, 0.0);
+        let b = crate::types::Candle::new(100.0, 100.0, 100.0, 100.0, 0.0);
         let btc = cfg.resolve("BTC", None);
         let eth = cfg.resolve("ETH", None);
         assert!((btc.commission.commission(1_000.0, 10.0) - 1.0).abs() < 1e-9);
@@ -264,7 +264,7 @@ mod tests {
         let cfg = config_of(&[
             "BTC:commission=!percentage { rate: 0.001 },ETH:spread=!bps { bps: 3 }",
         ]);
-        let b = fugazi::types::Candle::new(100.0, 100.0, 100.0, 100.0, 0.0);
+        let b = crate::types::Candle::new(100.0, 100.0, 100.0, 100.0, 0.0);
         // BTC has the commission, no spread.
         let btc = cfg.resolve("BTC", None);
         assert!((btc.commission.commission(1_000.0, 10.0) - 1.0).abs() < 1e-9);
@@ -286,7 +286,7 @@ mod tests {
         // The spread is on the DEFAULT leg — a fresh flag = a fresh scope context.
         assert!(cfg.spread.default.is_some());
         assert!(cfg.commission.default.is_none());
-        let b = fugazi::types::Candle::new(100.0, 100.0, 100.0, 100.0, 0.0);
+        let b = crate::types::Candle::new(100.0, 100.0, 100.0, 100.0, 0.0);
         let eth = cfg.resolve("ETH", None);
         assert!((eth.spread.half_spread(100.0, &b) - 0.015).abs() < 1e-9);
     }

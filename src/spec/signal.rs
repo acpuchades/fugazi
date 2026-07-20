@@ -7,15 +7,15 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
-use fugazi::indicators::compare;
-use fugazi::indicators::logic::Const;
-use fugazi::indicators::{
+use crate::indicators::compare;
+use crate::indicators::logic::Const;
+use crate::indicators::{
     Book, DEFAULT_EPSILON, Every, GetBool, IsWeekday, IsWeekend, Pick, PickAny, Position, ValueStr,
 };
-use fugazi::prelude::*;
+use crate::prelude::*;
 
 use super::expr::{ExprSpec, default_source};
-use crate::dyn_indicator::{self, AsBool, AsReal, AsStr, DynIndicator, DynType};
+use crate::spec::dyn_indicator::{self, AsBool, AsReal, AsStr, DynIndicator, DynType};
 
 /// Every atom-input leaf on the YAML side is built rooted through an
 /// empty-selector `Pick::<String>` — the single-entry snapshot unpack that
@@ -29,9 +29,9 @@ fn pick_root() -> Pick<String> {
 /// `!is_weekend`) — reads only `atom.time`, which every entry in a
 /// well-formed snapshot shares, so "first entry" is a stable answer even
 /// when the snapshot carries multiple symbols (as in
-/// [`MultiAssetStrategy`](fugazi::strategies::MultiAssetStrategy),
-/// [`BasketStrategy`](fugazi::strategies::BasketStrategy), or a
-/// [`Portfolio`](fugazi::portfolio::Portfolio) `rebalance_on:` gate).
+/// [`MultiAssetStrategy`](crate::strategies::MultiAssetStrategy),
+/// [`BasketStrategy`](crate::strategies::BasketStrategy), or a
+/// [`Portfolio`](crate::portfolio::Portfolio) `rebalance_on:` gate).
 /// Contrast with [`pick_root`], which panics on a 2+ entry snapshot.
 fn pick_any_root() -> PickAny<String> {
     PickAny::<String>::new()
@@ -79,7 +79,7 @@ impl StrOperand {
     ) -> Box<dyn DynIndicator> {
         match self {
             StrOperand::Literal(s) => {
-                dyn_indicator::wrap(ValueStr::<fugazi::types::Snapshot<String>>::new(s.as_str()))
+                dyn_indicator::wrap(ValueStr::<crate::types::Snapshot<String>>::new(s.as_str()))
             }
             StrOperand::Expr(e) => e.build(anchor, book, portfolio_book, schema),
         }
@@ -228,7 +228,7 @@ pub enum SignalSpec {
     /// (which counts up to `stable_period()`) no longer waits for this
     /// subtree's IIR settling tail. The explicit opt-out to the "wait for
     /// every source to be past its unstable tail" safe default; see
-    /// [`fugazi::indicators::Unstable`].
+    /// [`crate::indicators::Unstable`].
     Unstable { signal: Box<SignalSpec> },
     /// A constant boolean leaf. Spelled `!value` like [`ExprSpec::Value`] —
     /// one tag for "a literal", typed by position (bool here, number there).
@@ -681,7 +681,7 @@ impl SignalSpec {
             Xor { lhs, rhs } => dyn_indicator::wrap(boolean(lhs).xor(boolean(rhs))),
             All(specs) => {
                 if specs.is_empty() {
-                    dyn_indicator::wrap(self::Const::<fugazi::types::Snapshot<String>>::new(true))
+                    dyn_indicator::wrap(self::Const::<crate::types::Snapshot<String>>::new(true))
                 } else {
                     let mut acc =
                         AsBool::new(specs[0].build(anchor, book, portfolio_book, schema));
@@ -697,7 +697,7 @@ impl SignalSpec {
             }
             Any(specs) => {
                 if specs.is_empty() {
-                    dyn_indicator::wrap(self::Const::<fugazi::types::Snapshot<String>>::new(false))
+                    dyn_indicator::wrap(self::Const::<crate::types::Snapshot<String>>::new(false))
                 } else {
                     let mut acc =
                         AsBool::new(specs[0].build(anchor, book, portfolio_book, schema));
@@ -717,13 +717,13 @@ impl SignalSpec {
                 dyn_indicator::unstable_wrap(signal.build(anchor, book, portfolio_book, schema))
             }
             Value(b) => {
-                dyn_indicator::wrap(self::Const::<fugazi::types::Snapshot<String>>::new(*b))
+                dyn_indicator::wrap(self::Const::<crate::types::Snapshot<String>>::new(*b))
             }
             Never => {
-                dyn_indicator::wrap(self::Const::<fugazi::types::Snapshot<String>>::new(false))
+                dyn_indicator::wrap(self::Const::<crate::types::Snapshot<String>>::new(false))
             }
             SignalSpec::Every(n) => {
-                dyn_indicator::wrap(self::Every::<fugazi::types::Snapshot<String>>::new(*n))
+                dyn_indicator::wrap(self::Every::<crate::types::Snapshot<String>>::new(*n))
             }
             Get { key } => build_signal_get(schema, key),
             StrEq { lhs, rhs } => {
@@ -776,7 +776,7 @@ fn build_polymorphic_eq(
         DynType::Real => {
             let l = AsReal::new(lhs_built);
             let r = AsReal::new(rhs.build(anchor, book, portfolio_book, schema));
-            let e = epsilon.unwrap_or(fugazi::indicators::DEFAULT_EPSILON);
+            let e = epsilon.unwrap_or(crate::indicators::DEFAULT_EPSILON);
             if negate {
                 dyn_indicator::wrap(compare::Ne::with_epsilon(l, r, e))
             } else {

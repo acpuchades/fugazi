@@ -1,6 +1,6 @@
 //! YAML-deserializable [`PortfolioSpec`] — a top-level composite strategy
 //! that runs N heterogeneous child strategies against one shared cash pool
-//! through a [`Portfolio<String>`](fugazi::portfolio::Portfolio).
+//! through a [`Portfolio<String>`](crate::portfolio::Portfolio).
 //!
 //! Each child slot names a child (for reporting) and a nested strategy of
 //! any shape — single-asset, pairs, basket, or multi-asset — routed by
@@ -46,14 +46,14 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
 
-use fugazi::indicators::{Book, Position};
-use fugazi::portfolio::policy::{EqualWeight, Fixed};
-use fugazi::portfolio::rebalance::{LargestFirst, Proportional};
-use fugazi::portfolio::Portfolio;
-use fugazi::prelude::*;
-use fugazi::types::Snapshot;
+use crate::indicators::{Book, Position};
+use crate::portfolio::policy::{EqualWeight, Fixed};
+use crate::portfolio::rebalance::{LargestFirst, Proportional};
+use crate::portfolio::Portfolio;
+use crate::prelude::*;
+use crate::types::Snapshot;
 
-use crate::dyn_indicator::{AsBool, AsReal, DynIndicator};
+use crate::spec::dyn_indicator::{AsBool, AsReal, DynIndicator};
 
 use super::basket::BasketStrategySpec;
 use super::expr::ExprSpec;
@@ -64,7 +64,7 @@ use super::signal::SignalSpec;
 use super::template::SpecTemplate;
 
 /// YAML surface for the **position-phase rebalance policy** — the impl
-/// picked from [`rebalance`](fugazi::portfolio::rebalance) that decides
+/// picked from [`rebalance`](crate::portfolio::rebalance) that decides
 /// which held positions to scale down (and by how much) when a
 /// contributor's cash-phase donation can't be fully covered.
 ///
@@ -76,12 +76,12 @@ use super::template::SpecTemplate;
 /// ```
 ///
 /// Omitted (`rebalance_policy:` absent) defaults to
-/// [`Proportional`](fugazi::portfolio::rebalance::Proportional), matching
-/// the [`PortfolioBuilder`](fugazi::portfolio::PortfolioBuilder) default.
+/// [`Proportional`](crate::portfolio::rebalance::Proportional), matching
+/// the [`PortfolioBuilder`](crate::portfolio::PortfolioBuilder) default.
 /// A CLI-only discriminator; at build it constructs the corresponding
-/// [`PositionRebalancer`](fugazi::portfolio::rebalance::PositionRebalancer)
+/// [`PositionRebalancer`](crate::portfolio::rebalance::PositionRebalancer)
 /// impl and installs it via
-/// [`PortfolioBuilder::position_rebalancer`](fugazi::portfolio::PortfolioBuilder::position_rebalancer).
+/// [`PortfolioBuilder::position_rebalancer`](crate::portfolio::PortfolioBuilder::position_rebalancer).
 /// Rust-side callers with a bespoke rule build their own impl and install
 /// it directly — no CLI-side wiring needed.
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -89,13 +89,13 @@ use super::template::SpecTemplate;
 pub enum RebalancePolicySpec {
     /// Scale every held leg by the same fraction to cover the shortfall.
     /// The default — matches
-    /// [`Proportional`](fugazi::portfolio::rebalance::Proportional).
+    /// [`Proportional`](crate::portfolio::rebalance::Proportional).
     Proportional,
 
     /// Fully liquidate biggest positions (by `|units| * price`) first,
     /// walking down until the shortfall is covered. The last position
     /// touched is partially scaled if fully closing it would overshoot.
-    /// Wraps [`LargestFirst`](fugazi::portfolio::rebalance::LargestFirst).
+    /// Wraps [`LargestFirst`](crate::portfolio::rebalance::LargestFirst).
     LargestFirst,
 }
 
@@ -172,7 +172,7 @@ pub struct PortfolioSpec {
     pub rebalance_on: Option<SignalSpec>,
 
     /// The **position-phase rebalance policy** — which
-    /// [`PositionRebalancer`](fugazi::portfolio::rebalance::PositionRebalancer)
+    /// [`PositionRebalancer`](crate::portfolio::rebalance::PositionRebalancer)
     /// impl decides what to sell (and by how much) when a contributor's
     /// cash-phase donation can't be fully covered.
     ///
@@ -291,13 +291,13 @@ impl TryFrom<serde_norway::Value> for PortfolioChildStrategy {
         // `MultiAssetStrategySpec` (same reason). Kept consistent for pairs
         // too so all three go through one path.
         if is_pairs {
-            let json = crate::convert::yaml_to_json(v).map_err(|e| e.to_string())?;
+            let json = crate::spec::convert::yaml_to_json(v).map_err(|e| e.to_string())?;
             return serde_json::from_value::<PairsStrategySpec>(json)
                 .map(|p| PortfolioChildStrategy::Pairs(Box::new(p)))
                 .map_err(|e| e.to_string());
         }
         if is_basket {
-            let json = crate::convert::yaml_to_json(v).map_err(|e| e.to_string())?;
+            let json = crate::spec::convert::yaml_to_json(v).map_err(|e| e.to_string())?;
             return serde_json::from_value::<BasketStrategySpec>(json)
                 .map(|b| PortfolioChildStrategy::Basket(Box::new(b)))
                 .map_err(|e| e.to_string());
@@ -305,7 +305,7 @@ impl TryFrom<serde_norway::Value> for PortfolioChildStrategy {
         // A bare mapping without `symbol:` (and without pairs/basket keys)
         // is multi-asset — the shape with no upfront symbol declaration.
         if matches!(&v, YV::Mapping(_)) && !has_symbol {
-            let json = crate::convert::yaml_to_json(v).map_err(|e| e.to_string())?;
+            let json = crate::spec::convert::yaml_to_json(v).map_err(|e| e.to_string())?;
             return serde_json::from_value::<MultiAssetStrategySpec>(json)
                 .map(|m| PortfolioChildStrategy::Multi(Box::new(m)))
                 .map_err(|e| e.to_string());
@@ -524,13 +524,13 @@ impl PortfolioSpec {
     ///
     /// `total_initial_equity` is the whole cash budget passed to the
     /// portfolio builder — split across children per the weight policy.
-    /// Each child's own [`SingleAssetStrategy::with_initial_equity`](fugazi::strategies::SingleAssetStrategy::with_initial_equity)-style
+    /// Each child's own [`SingleAssetStrategy::with_initial_equity`](crate::strategies::SingleAssetStrategy::with_initial_equity)-style
     /// book seed is set to the child's allocated share, so book-anchored
     /// sizing recipes inside a child read against that child's slice of
     /// the pool rather than the aggregate.
     ///
     /// `costs` is the [`TradingCosts`] bundle installed on every child's
-    /// sub-wallet — [`Portfolio`](fugazi::portfolio::Portfolio) applies the
+    /// sub-wallet — [`Portfolio`](crate::portfolio::Portfolio) applies the
     /// same bundle uniformly (v1 constraint: no per-symbol dispatch
     /// through the composite wallet). Pass `None` to skip cost wiring
     /// (matches the zero-cost paper-wallet default the other specs use for
@@ -634,7 +634,7 @@ impl PortfolioSpec {
         // initial equity; (b) the *fallback* target on rebalance-fire
         // when every weight-share reads `0` (still warming, or
         // genuinely zero). Omitting `weights:` picks
-        // [`EqualWeight`](fugazi::portfolio::policy::EqualWeight) —
+        // [`EqualWeight`](crate::portfolio::policy::EqualWeight) —
         // stateless, equal split now and forever. A `!value <list>`
         // pre-resolves to `Fixed(list)` so the seed and fallback both
         // respect the user's per-child weights. Any other expression
@@ -666,7 +666,7 @@ impl PortfolioSpec {
         if let Some(template) = &self.weights {
             let mut shares: Vec<
                 Box<
-                    dyn fugazi::indicator::Indicator<
+                    dyn crate::indicator::Indicator<
                         Input = Snapshot<String>,
                         Output = Real,
                     >,
@@ -810,7 +810,7 @@ impl PortfolioSpec {
 // ---------------------------------------------------------------------------
 
 /// The CLI's built portfolio handle. Implements [`Strategy`] by
-/// delegation so it drops into [`fugazi::backtest::run`] unchanged — but
+/// delegation so it drops into [`crate::backtest::run`] unchanged — but
 /// unlike the other `Dyn*Strategy`s it must be driven through
 /// [`wallet_view`](Self::wallet_view) rather than a plain [`PaperWallet`],
 /// since portfolio fills route through a composite wallet that owns one
@@ -846,11 +846,11 @@ impl Strategy for DynPortfolio {
 }
 
 impl DynPortfolio {
-    /// A fresh aggregate [`PortfolioWallet`](fugazi::portfolio::PortfolioWallet)
+    /// A fresh aggregate [`PortfolioWallet`](crate::portfolio::PortfolioWallet)
     /// sharing this portfolio's interior — the wallet the CLI hands to
-    /// [`fugazi::backtest::run`]. Multiple views share the same underlying
+    /// [`crate::backtest::run`]. Multiple views share the same underlying
     /// state, so a second view for side-inspection is cheap.
-    pub fn wallet_view(&self) -> fugazi::portfolio::PortfolioWallet<String> {
+    pub fn wallet_view(&self) -> crate::portfolio::PortfolioWallet<String> {
         self.inner.wallet_view()
     }
 
@@ -894,7 +894,7 @@ impl DynPortfolio {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fugazi::types::Atom;
+    use crate::types::Atom;
 
     fn candle(price: Real) -> Candle {
         Candle::new(price, price, price, price, 0.0)
@@ -911,7 +911,7 @@ mod tests {
 
     fn snap_of_at(
         entries: &[(&'static str, Real)],
-        ts: fugazi::types::Timestamp,
+        ts: crate::types::Timestamp,
     ) -> Snapshot<String> {
         let mut s = Snapshot::new();
         for &(sym, close) in entries {
@@ -1248,7 +1248,7 @@ mod tests {
         // now builds and drives cleanly over a multi-symbol snapshot
         // stream — the exact shape CLAUDE.md's PortfolioSpec bullet
         // recommends ("use snapshot / calendar / cadence signals").
-        use fugazi::types::Timestamp;
+        use crate::types::Timestamp;
 
         let yaml = r#"
             weights: !value [0.5, 0.5]

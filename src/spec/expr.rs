@@ -16,12 +16,12 @@ use std::sync::Arc;
 use serde::Deserialize;
 
 // Field / calendar / current-bar / current-time leaves are referenced through
-// their full `fugazi::indicators::` paths inside the `ExprSpec::build`
+// their full `crate::indicators::` paths inside the `ExprSpec::build`
 // match arms — the source-spec variants share those names (Close, High, Year,
 // …) as enum-variant identifiers, so a bare `Close::of(...)` would try to
 // resolve on the enum variant. The `Pick` root is the one exception because
 // it isn't a `ExprSpec` variant.
-use fugazi::indicators::{
+use crate::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Book, Cci, Component,
     Correlation, Dmi, DmiValue, Donchian, DonchianValue, Ema, GarmanKlass, GetBool, GetReal, GetStr,
     Hma, IfElse, Keltner, KeltnerValue, Kurtosis, Latch, Log, Macd, MacdValue,
@@ -29,14 +29,14 @@ use fugazi::indicators::{
     RogersSatchell, Rsi, Sar, Skewness, Sma, StdDev, StochRsi, Stochastic, TrueRange, Value,
     ValueStr, VarianceRatio, Vwap, WilliamsR, Wma, ZScore,
 };
-use fugazi::prelude::*;
-use fugazi::types::Snapshot;
+use crate::prelude::*;
+use crate::types::Snapshot;
 
 use super::signal::SignalSpec;
 use super::trailing::{self, AnyStrategyRef, TrailingMetric};
-use crate::dyn_indicator::{self, AsAtom, AsBool, AsCandle, AsReal, AsStr, DynIndicator};
+use crate::spec::dyn_indicator::{self, AsAtom, AsBool, AsCandle, AsReal, AsStr, DynIndicator};
 
-use fugazi::{Frequency, Selector};
+use crate::{Frequency, Selector};
 use std::str::FromStr;
 
 /// Every atom-input leaf's `source` field defaults to `None`, at which point
@@ -57,9 +57,9 @@ fn pick_root() -> Pick<String> {
 /// [`Atom::time`], which every entry in a well-formed snapshot shares, so
 /// picking the first entry is a stable answer even when the snapshot
 /// carries multiple symbols — as in a
-/// [`MultiAssetStrategy`](fugazi::strategies::MultiAssetStrategy),
-/// [`BasketStrategy`](fugazi::strategies::BasketStrategy), or a
-/// [`Portfolio`](fugazi::portfolio::Portfolio) `rebalance_on:` gate.
+/// [`MultiAssetStrategy`](crate::strategies::MultiAssetStrategy),
+/// [`BasketStrategy`](crate::strategies::BasketStrategy), or a
+/// [`Portfolio`](crate::portfolio::Portfolio) `rebalance_on:` gate.
 /// Contrast with [`pick_root`], which panics on a 2+ entry snapshot
 /// because price-field leaves (`!close`, `!high`, …) genuinely depend on
 /// *which* asset.
@@ -299,7 +299,7 @@ pub enum ExprSpec {
     /// every book-reading node when its `source:` is omitted.
     StrategyBook,
     /// The **portfolio aggregate book** — the mark-to-market view of the
-    /// composite [`Portfolio`](fugazi::portfolio::Portfolio). Only meaningful
+    /// composite [`Portfolio`](crate::portfolio::Portfolio). Only meaningful
     /// inside a portfolio's `weights:` expression; panics at build if
     /// referenced elsewhere.
     PortfolioBook,
@@ -309,20 +309,20 @@ pub enum ExprSpec {
     // [`ExprSpec::PortfolioBook`]). Omitted → `!strategy_book`.
     /// The marked-to-market equity of the book. Always `Some`
     /// (seeded at the book's `initial_equity`). See
-    /// [`fugazi::indicators::Book::equity`].
+    /// [`crate::indicators::Book::equity`].
     Equity {
         #[serde(default)]
         source: Option<Box<ExprSpec>>,
     },
     /// The running peak of the book's equity. Always `Some`.
-    /// See [`fugazi::indicators::Book::equity_peak`].
+    /// See [`crate::indicators::Book::equity_peak`].
     EquityPeak {
         #[serde(default)]
         source: Option<Box<ExprSpec>>,
     },
     /// The book's current drawdown as a non-positive fraction —
     /// `(equity - peak) / peak`, `0` at a fresh peak. See
-    /// [`fugazi::indicators::Book::drawdown`].
+    /// [`crate::indicators::Book::drawdown`].
     Drawdown {
         #[serde(default)]
         source: Option<Box<ExprSpec>>,
@@ -330,14 +330,14 @@ pub enum ExprSpec {
     /// The just-completed bar's equity return —
     /// `(equity - prev_equity) / prev_equity`. `None` on the first bar
     /// (`warm_up_period() = 2`). See
-    /// [`fugazi::indicators::Book::return_per_bar`].
+    /// [`crate::indicators::Book::return_per_bar`].
     ReturnPerBar {
         #[serde(default)]
         source: Option<Box<ExprSpec>>,
     },
     /// The realized P&L of the just-closed aggregate trade in
     /// reference-currency terms. `Some` only on the bar whose fill closed
-    /// the trade. See [`fugazi::indicators::Book::trade_pnl`].
+    /// the trade. See [`crate::indicators::Book::trade_pnl`].
     ///
     /// On the portfolio aggregate book (`source: !portfolio_book`) this is
     /// always `None` — the aggregate book is mark-driven and doesn't route
@@ -348,7 +348,7 @@ pub enum ExprSpec {
     },
     /// The just-closed trade's return as a fraction of the equity at
     /// trade open. `Some` only on the close bar. See
-    /// [`fugazi::indicators::Book::trade_return`]. Also `None` on the
+    /// [`crate::indicators::Book::trade_return`]. Also `None` on the
     /// portfolio aggregate book for the same reason as [`ExprSpec::TradePnl`].
     TradeReturn {
         #[serde(default)]
@@ -665,8 +665,8 @@ pub enum ExprSpec {
     /// `source` defaults to the single-asset empty-selector `Pick`; in a
     /// [`BasketStrategySpec`](super::basket::BasketStrategySpec) set it to
     /// `!pick { symbol: !arg SYM }` so each leg reads its own asset. See
-    /// [`fugazi::indicators::sizing::vol_target`] /
-    /// [`fugazi::indicators::sizing::vol_target_of`].
+    /// [`crate::indicators::sizing::vol_target`] /
+    /// [`crate::indicators::sizing::vol_target_of`].
     VolTarget {
         #[serde(default)]
         source: Option<Box<ExprSpec>>,
@@ -678,8 +678,8 @@ pub enum ExprSpec {
     /// `risk_frac * close / (atr_multiple * ATR(period))`. `source` defaults
     /// to the single-asset empty-selector `Pick`; in a basket set it to
     /// `!pick { symbol: !arg SYM }`. See
-    /// [`fugazi::indicators::sizing::atr_risk`] /
-    /// [`fugazi::indicators::sizing::atr_risk_of`].
+    /// [`crate::indicators::sizing::atr_risk`] /
+    /// [`crate::indicators::sizing::atr_risk_of`].
     AtrRisk {
         #[serde(default)]
         source: Option<Box<ExprSpec>>,
@@ -690,7 +690,7 @@ pub enum ExprSpec {
     /// Drawdown-throttled sizing — `max(0, min(1, 1 + book.drawdown() /
     /// max_drawdown))`. Reads a book via `source:` (default:
     /// [`ExprSpec::StrategyBook`]). See
-    /// [`fugazi::indicators::sizing::drawdown_throttle`].
+    /// [`crate::indicators::sizing::drawdown_throttle`].
     DrawdownThrottle {
         #[serde(default)]
         source: Option<Box<ExprSpec>>,
@@ -700,7 +700,7 @@ pub enum ExprSpec {
     /// — `target / (stddev(book.return_per_bar, window) *
     /// sqrt(bars_per_year))`. Reads a book via `source:` (default:
     /// [`ExprSpec::StrategyBook`]). See
-    /// [`fugazi::indicators::sizing::equity_vol_target`].
+    /// [`crate::indicators::sizing::equity_vol_target`].
     EquityVolTarget {
         #[serde(default)]
         source: Option<Box<ExprSpec>>,
@@ -711,7 +711,7 @@ pub enum ExprSpec {
     /// Fractional Kelly over the last `window` closed-trade returns —
     /// `kelly_fraction * mean / variance`, clamped to `>= 0`. Reads a book
     /// via `source:` (default: [`ExprSpec::StrategyBook`]). See
-    /// [`fugazi::indicators::sizing::fractional_kelly`].
+    /// [`crate::indicators::sizing::fractional_kelly`].
     FractionalKelly {
         #[serde(default)]
         source: Option<Box<ExprSpec>>,
@@ -728,7 +728,7 @@ pub enum ExprSpec {
     // home is a `fugazi get -x` overlay column (a live regime feature), which
     // removes the "run a strategy → dump returns.csv → re-join" round-trip.
     /// Trailing annualized Sharpe of `strategy`'s equity curve over the last
-    /// `period` bars. See [`fugazi::indicators::Sharpe`].
+    /// `period` bars. See [`crate::indicators::Sharpe`].
     Sharpe {
         strategy: Box<AnyStrategyRef>,
         period: usize,
@@ -737,7 +737,7 @@ pub enum ExprSpec {
         risk_free_rate: Real,
     },
     /// Trailing annualized Sortino of `strategy`'s equity curve. See
-    /// [`fugazi::indicators::Sortino`].
+    /// [`crate::indicators::Sortino`].
     Sortino {
         strategy: Box<AnyStrategyRef>,
         period: usize,
@@ -746,20 +746,20 @@ pub enum ExprSpec {
         risk_free_rate: Real,
     },
     /// Trailing annualized volatility of `strategy`'s equity return stream.
-    /// See [`fugazi::indicators::Volatility`].
+    /// See [`crate::indicators::Volatility`].
     Volatility {
         strategy: Box<AnyStrategyRef>,
         period: usize,
         bars_per_year: Real,
     },
     /// Trailing maximum drawdown of `strategy`'s equity curve, as a
-    /// non-negative fraction. See [`fugazi::indicators::MaxDrawdown`].
+    /// non-negative fraction. See [`crate::indicators::MaxDrawdown`].
     MaxDrawdown {
         strategy: Box<AnyStrategyRef>,
         period: usize,
     },
     /// Trailing Calmar (windowed CAGR / max drawdown) of `strategy`'s equity
-    /// curve. See [`fugazi::indicators::Calmar`].
+    /// curve. See [`crate::indicators::Calmar`].
     Calmar {
         strategy: Box<AnyStrategyRef>,
         period: usize,
@@ -789,7 +789,7 @@ pub enum ExprSpec {
     /// bar so a branch that doesn't fire this bar keeps warming up in the
     /// background. Warm-up is the max of the three; the ternary reports
     /// `None` until every source has warmed. See
-    /// [`fugazi::indicators::IfElse`].
+    /// [`crate::indicators::IfElse`].
     IfElse {
         cond: Box<SignalSpec>,
         if_true: Box<ExprSpec>,
@@ -806,7 +806,7 @@ pub enum ExprSpec {
     /// on a `Real`-output `on`) or all string (dispatching on a
     /// `Str`-output `on`, typically `!value { arg: CHILD_GROUP }`).
     /// Mixed patterns are rejected at build. See
-    /// [`fugazi::indicators::Match`].
+    /// [`crate::indicators::Match`].
     Match {
         on: Box<ExprSpec>,
         cases: Vec<MatchCase>,
@@ -854,7 +854,7 @@ pub enum ExprSpec {
     /// ticks where `source` returns `None`. Wrap the outermost recursive
     /// smoother of a resampled pipeline so per-base-tick consumers see the
     /// finished higher-timeframe value between boundaries — see
-    /// [`fugazi::indicators::Latch`].
+    /// [`crate::indicators::Latch`].
     Latch { source: Box<ExprSpec> },
     /// Aggregates `every` base candles into one higher-timeframe candle and
     /// runs the `inner` source over it, emitting `inner`'s output on each
@@ -879,7 +879,7 @@ pub enum ExprSpec {
     /// (which counts up to `stable_period()`) no longer waits for this
     /// subtree's IIR settling tail. The explicit opt-out to the "wait for
     /// every source to be past its unstable tail" safe default; see
-    /// [`fugazi::indicators::Unstable`].
+    /// [`crate::indicators::Unstable`].
     Unstable { source: Box<ExprSpec> },
 
     // --- calendar accessors (read `atom.time`, emit Real; None when time is
@@ -1042,7 +1042,7 @@ enum ExprSpecRaw {
     /// every book-reading node when its `source:` is omitted.
     StrategyBook,
     /// The **portfolio aggregate book** — the mark-to-market view of the
-    /// composite [`Portfolio`](fugazi::portfolio::Portfolio). Only meaningful
+    /// composite [`Portfolio`](crate::portfolio::Portfolio). Only meaningful
     /// inside a portfolio's `weights:` expression; panics at build if
     /// referenced elsewhere.
     PortfolioBook,
@@ -1052,20 +1052,20 @@ enum ExprSpecRaw {
     // [`ExprSpec::PortfolioBook`]). Omitted → `!strategy_book`.
     /// The marked-to-market equity of the book. Always `Some`
     /// (seeded at the book's `initial_equity`). See
-    /// [`fugazi::indicators::Book::equity`].
+    /// [`crate::indicators::Book::equity`].
     Equity {
         #[serde(default)]
         source: Option<Box<ExprSpec>>,
     },
     /// The running peak of the book's equity. Always `Some`.
-    /// See [`fugazi::indicators::Book::equity_peak`].
+    /// See [`crate::indicators::Book::equity_peak`].
     EquityPeak {
         #[serde(default)]
         source: Option<Box<ExprSpec>>,
     },
     /// The book's current drawdown as a non-positive fraction —
     /// `(equity - peak) / peak`, `0` at a fresh peak. See
-    /// [`fugazi::indicators::Book::drawdown`].
+    /// [`crate::indicators::Book::drawdown`].
     Drawdown {
         #[serde(default)]
         source: Option<Box<ExprSpec>>,
@@ -1073,14 +1073,14 @@ enum ExprSpecRaw {
     /// The just-completed bar's equity return —
     /// `(equity - prev_equity) / prev_equity`. `None` on the first bar
     /// (`warm_up_period() = 2`). See
-    /// [`fugazi::indicators::Book::return_per_bar`].
+    /// [`crate::indicators::Book::return_per_bar`].
     ReturnPerBar {
         #[serde(default)]
         source: Option<Box<ExprSpec>>,
     },
     /// The realized P&L of the just-closed aggregate trade in
     /// reference-currency terms. `Some` only on the bar whose fill closed
-    /// the trade. See [`fugazi::indicators::Book::trade_pnl`].
+    /// the trade. See [`crate::indicators::Book::trade_pnl`].
     ///
     /// On the portfolio aggregate book (`source: !portfolio_book`) this is
     /// always `None` — the aggregate book is mark-driven and doesn't route
@@ -1091,7 +1091,7 @@ enum ExprSpecRaw {
     },
     /// The just-closed trade's return as a fraction of the equity at
     /// trade open. `Some` only on the close bar. See
-    /// [`fugazi::indicators::Book::trade_return`]. Also `None` on the
+    /// [`crate::indicators::Book::trade_return`]. Also `None` on the
     /// portfolio aggregate book for the same reason as [`ExprSpec::TradePnl`].
     TradeReturn {
         #[serde(default)]
@@ -1408,8 +1408,8 @@ enum ExprSpecRaw {
     /// `source` defaults to the single-asset empty-selector `Pick`; in a
     /// [`BasketStrategySpec`](super::basket::BasketStrategySpec) set it to
     /// `!pick { symbol: !arg SYM }` so each leg reads its own asset. See
-    /// [`fugazi::indicators::sizing::vol_target`] /
-    /// [`fugazi::indicators::sizing::vol_target_of`].
+    /// [`crate::indicators::sizing::vol_target`] /
+    /// [`crate::indicators::sizing::vol_target_of`].
     VolTarget {
         #[serde(default)]
         source: Option<Box<ExprSpec>>,
@@ -1421,8 +1421,8 @@ enum ExprSpecRaw {
     /// `risk_frac * close / (atr_multiple * ATR(period))`. `source` defaults
     /// to the single-asset empty-selector `Pick`; in a basket set it to
     /// `!pick { symbol: !arg SYM }`. See
-    /// [`fugazi::indicators::sizing::atr_risk`] /
-    /// [`fugazi::indicators::sizing::atr_risk_of`].
+    /// [`crate::indicators::sizing::atr_risk`] /
+    /// [`crate::indicators::sizing::atr_risk_of`].
     AtrRisk {
         #[serde(default)]
         source: Option<Box<ExprSpec>>,
@@ -1433,7 +1433,7 @@ enum ExprSpecRaw {
     /// Drawdown-throttled sizing — `max(0, min(1, 1 + book.drawdown() /
     /// max_drawdown))`. Reads a book via `source:` (default:
     /// [`ExprSpec::StrategyBook`]). See
-    /// [`fugazi::indicators::sizing::drawdown_throttle`].
+    /// [`crate::indicators::sizing::drawdown_throttle`].
     DrawdownThrottle {
         #[serde(default)]
         source: Option<Box<ExprSpec>>,
@@ -1443,7 +1443,7 @@ enum ExprSpecRaw {
     /// — `target / (stddev(book.return_per_bar, window) *
     /// sqrt(bars_per_year))`. Reads a book via `source:` (default:
     /// [`ExprSpec::StrategyBook`]). See
-    /// [`fugazi::indicators::sizing::equity_vol_target`].
+    /// [`crate::indicators::sizing::equity_vol_target`].
     EquityVolTarget {
         #[serde(default)]
         source: Option<Box<ExprSpec>>,
@@ -1454,7 +1454,7 @@ enum ExprSpecRaw {
     /// Fractional Kelly over the last `window` closed-trade returns —
     /// `kelly_fraction * mean / variance`, clamped to `>= 0`. Reads a book
     /// via `source:` (default: [`ExprSpec::StrategyBook`]). See
-    /// [`fugazi::indicators::sizing::fractional_kelly`].
+    /// [`crate::indicators::sizing::fractional_kelly`].
     FractionalKelly {
         #[serde(default)]
         source: Option<Box<ExprSpec>>,
@@ -1471,7 +1471,7 @@ enum ExprSpecRaw {
     // home is a `fugazi get -x` overlay column (a live regime feature), which
     // removes the "run a strategy → dump returns.csv → re-join" round-trip.
     /// Trailing annualized Sharpe of `strategy`'s equity curve over the last
-    /// `period` bars. See [`fugazi::indicators::Sharpe`].
+    /// `period` bars. See [`crate::indicators::Sharpe`].
     Sharpe {
         strategy: Box<AnyStrategyRef>,
         period: usize,
@@ -1480,7 +1480,7 @@ enum ExprSpecRaw {
         risk_free_rate: Real,
     },
     /// Trailing annualized Sortino of `strategy`'s equity curve. See
-    /// [`fugazi::indicators::Sortino`].
+    /// [`crate::indicators::Sortino`].
     Sortino {
         strategy: Box<AnyStrategyRef>,
         period: usize,
@@ -1489,20 +1489,20 @@ enum ExprSpecRaw {
         risk_free_rate: Real,
     },
     /// Trailing annualized volatility of `strategy`'s equity return stream.
-    /// See [`fugazi::indicators::Volatility`].
+    /// See [`crate::indicators::Volatility`].
     Volatility {
         strategy: Box<AnyStrategyRef>,
         period: usize,
         bars_per_year: Real,
     },
     /// Trailing maximum drawdown of `strategy`'s equity curve, as a
-    /// non-negative fraction. See [`fugazi::indicators::MaxDrawdown`].
+    /// non-negative fraction. See [`crate::indicators::MaxDrawdown`].
     MaxDrawdown {
         strategy: Box<AnyStrategyRef>,
         period: usize,
     },
     /// Trailing Calmar (windowed CAGR / max drawdown) of `strategy`'s equity
-    /// curve. See [`fugazi::indicators::Calmar`].
+    /// curve. See [`crate::indicators::Calmar`].
     Calmar {
         strategy: Box<AnyStrategyRef>,
         period: usize,
@@ -1532,7 +1532,7 @@ enum ExprSpecRaw {
     /// bar so a branch that doesn't fire this bar keeps warming up in the
     /// background. Warm-up is the max of the three; the ternary reports
     /// `None` until every source has warmed. See
-    /// [`fugazi::indicators::IfElse`].
+    /// [`crate::indicators::IfElse`].
     IfElse {
         cond: Box<SignalSpec>,
         if_true: Box<ExprSpec>,
@@ -1549,7 +1549,7 @@ enum ExprSpecRaw {
     /// on a `Real`-output `on`) or all string (dispatching on a
     /// `Str`-output `on`, typically `!value { arg: CHILD_GROUP }`).
     /// Mixed patterns are rejected at build. See
-    /// [`fugazi::indicators::Match`].
+    /// [`crate::indicators::Match`].
     Match {
         on: Box<ExprSpec>,
         cases: Vec<MatchCase>,
@@ -1597,7 +1597,7 @@ enum ExprSpecRaw {
     /// ticks where `source` returns `None`. Wrap the outermost recursive
     /// smoother of a resampled pipeline so per-base-tick consumers see the
     /// finished higher-timeframe value between boundaries — see
-    /// [`fugazi::indicators::Latch`].
+    /// [`crate::indicators::Latch`].
     Latch { source: Box<ExprSpec> },
     /// Aggregates `every` base candles into one higher-timeframe candle and
     /// runs the `inner` source over it, emitting `inner`'s output on each
@@ -1622,7 +1622,7 @@ enum ExprSpecRaw {
     /// (which counts up to `stable_period()`) no longer waits for this
     /// subtree's IIR settling tail. The explicit opt-out to the "wait for
     /// every source to be past its unstable tail" safe default; see
-    /// [`fugazi::indicators::Unstable`].
+    /// [`crate::indicators::Unstable`].
     Unstable { source: Box<ExprSpec> },
 
     // --- calendar accessors (read `atom.time`, emit Real; None when time is
@@ -2036,7 +2036,7 @@ fn rewrite_sugar_tags(v: serde_norway::Value) -> Result<serde_norway::Value, Str
 /// empty-selector `Pick` (single-entry unpack); when `Some`, builds the
 /// user's subtree (typically a `!pick { symbol, freq }`) and wraps as an
 /// [`AsAtom`] view for the leaf's `T::of(source)` constructor.
-/// Build the runtime [`fugazi::indicators::Match`] chain for
+/// Build the runtime [`crate::indicators::Match`] chain for
 /// [`ExprSpec::Match`]. Case patterns are homogeneous — either all
 /// numeric (`ValueLit::Real`, dispatching on a `Real`-output `on`) or
 /// all string (`ValueLit::Str`, dispatching on a `Str`-output `on`).
@@ -2147,9 +2147,9 @@ fn atom_source_of(
 /// `None`, roots on the "any entry" [`PickAny`] instead of the
 /// panic-on-2+ [`Pick`], so a bare `!month` / `!daily` / `!is_weekday`
 /// composes cleanly inside a
-/// [`MultiAssetStrategy`](fugazi::strategies::MultiAssetStrategy),
-/// [`BasketStrategy`](fugazi::strategies::BasketStrategy), or a
-/// [`Portfolio`](fugazi::portfolio::Portfolio) `rebalance_on:` gate.
+/// [`MultiAssetStrategy`](crate::strategies::MultiAssetStrategy),
+/// [`BasketStrategy`](crate::strategies::BasketStrategy), or a
+/// [`Portfolio`](crate::portfolio::Portfolio) `rebalance_on:` gate.
 /// An explicit `!pick { symbol: ... }` source is honored verbatim (same
 /// as [`atom_source_of`]), so callers who want a specific symbol's time
 /// keep that ability.
@@ -2209,7 +2209,7 @@ impl ExprSpec {
     /// `!equity_vol_target`, `!fractional_kelly`) whose `source:` is omitted
     /// or set to `!strategy_book`; `portfolio_book` is the portfolio's
     /// aggregate `Book` — only `Some` inside a
-    /// [`Portfolio`](fugazi::portfolio::Portfolio) weight scope, and read
+    /// [`Portfolio`](crate::portfolio::Portfolio) weight scope, and read
     /// only by book-reading nodes whose `source:` is `!portfolio_book`;
     /// `schema` is the overlay [`Schema`] the atom stream carries, used by
     /// `!get { key }` to look up the column's declared [`OverlayType`] and
@@ -2244,35 +2244,35 @@ impl ExprSpec {
             // --- atom-input leaves ---
             Close { source } => {
                 let s = atom_src(source.as_ref());
-                dyn_indicator::wrap(fugazi::indicators::Close::of(s))
+                dyn_indicator::wrap(crate::indicators::Close::of(s))
             }
             High { source } => {
                 let s = atom_src(source.as_ref());
-                dyn_indicator::wrap(fugazi::indicators::High::of(s))
+                dyn_indicator::wrap(crate::indicators::High::of(s))
             }
             Low { source } => {
                 let s = atom_src(source.as_ref());
-                dyn_indicator::wrap(fugazi::indicators::Low::of(s))
+                dyn_indicator::wrap(crate::indicators::Low::of(s))
             }
             Open { source } => {
                 let s = atom_src(source.as_ref());
-                dyn_indicator::wrap(fugazi::indicators::Open::of(s))
+                dyn_indicator::wrap(crate::indicators::Open::of(s))
             }
             Volume { source } => {
                 let s = atom_src(source.as_ref());
-                dyn_indicator::wrap(fugazi::indicators::Volume::of(s))
+                dyn_indicator::wrap(crate::indicators::Volume::of(s))
             }
             Typical { source } => {
                 let s = atom_src(source.as_ref());
-                dyn_indicator::wrap(fugazi::indicators::Typical::of(s))
+                dyn_indicator::wrap(crate::indicators::Typical::of(s))
             }
             Median { source } => {
                 let s = atom_src(source.as_ref());
-                dyn_indicator::wrap(fugazi::indicators::Median::of(s))
+                dyn_indicator::wrap(crate::indicators::Median::of(s))
             }
             Current { source } => {
                 let s = atom_src(source.as_ref());
-                dyn_indicator::wrap(fugazi::indicators::CurrentBar::of(s))
+                dyn_indicator::wrap(crate::indicators::CurrentBar::of(s))
             }
 
             Pick { symbol, freq } => build_pick(symbol.as_deref(), freq.as_deref()),
@@ -2538,7 +2538,7 @@ impl ExprSpec {
                 bars_per_year,
             } => {
                 let s = atom_src(source.as_ref());
-                dyn_indicator::wrap(fugazi::indicators::sizing::vol_target_of::<String, _>(
+                dyn_indicator::wrap(crate::indicators::sizing::vol_target_of::<String, _>(
                     s,
                     *target,
                     *window,
@@ -2552,7 +2552,7 @@ impl ExprSpec {
                 atr_multiple,
             } => {
                 let s = atom_src(source.as_ref());
-                dyn_indicator::wrap(fugazi::indicators::sizing::atr_risk_of::<String, _>(
+                dyn_indicator::wrap(crate::indicators::sizing::atr_risk_of::<String, _>(
                     s,
                     *risk_frac,
                     *period,
@@ -2564,7 +2564,7 @@ impl ExprSpec {
                 max_drawdown,
             } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book);
-                dyn_indicator::wrap(fugazi::indicators::sizing::drawdown_throttle::<String>(
+                dyn_indicator::wrap(crate::indicators::sizing::drawdown_throttle::<String>(
                     b,
                     *max_drawdown,
                 ))
@@ -2577,7 +2577,7 @@ impl ExprSpec {
             } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book);
                 dyn_indicator::wrap(
-                    fugazi::indicators::sizing::equity_vol_target::<String>(
+                    crate::indicators::sizing::equity_vol_target::<String>(
                         b,
                         *target,
                         *window,
@@ -2591,7 +2591,7 @@ impl ExprSpec {
                 window,
             } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book);
-                dyn_indicator::wrap(fugazi::indicators::sizing::fractional_kelly::<String>(
+                dyn_indicator::wrap(crate::indicators::sizing::fractional_kelly::<String>(
                     b,
                     *kelly_fraction,
                     *window,
@@ -2709,55 +2709,55 @@ impl ExprSpec {
 
             Year { source } => {
                 let s = atom_src_any(source.as_ref());
-                dyn_indicator::wrap(fugazi::indicators::Year::of(s))
+                dyn_indicator::wrap(crate::indicators::Year::of(s))
             }
             Month { source } => {
                 let s = atom_src_any(source.as_ref());
-                dyn_indicator::wrap(fugazi::indicators::Month::of(s))
+                dyn_indicator::wrap(crate::indicators::Month::of(s))
             }
             Day { source } => {
                 let s = atom_src_any(source.as_ref());
-                dyn_indicator::wrap(fugazi::indicators::Day::of(s))
+                dyn_indicator::wrap(crate::indicators::Day::of(s))
             }
             Hour { source } => {
                 let s = atom_src_any(source.as_ref());
-                dyn_indicator::wrap(fugazi::indicators::Hour::of(s))
+                dyn_indicator::wrap(crate::indicators::Hour::of(s))
             }
             Minute { source } => {
                 let s = atom_src_any(source.as_ref());
-                dyn_indicator::wrap(fugazi::indicators::Minute::of(s))
+                dyn_indicator::wrap(crate::indicators::Minute::of(s))
             }
             Second { source } => {
                 let s = atom_src_any(source.as_ref());
-                dyn_indicator::wrap(fugazi::indicators::Second::of(s))
+                dyn_indicator::wrap(crate::indicators::Second::of(s))
             }
             DayOfWeek { source } => {
                 let s = atom_src_any(source.as_ref());
-                dyn_indicator::wrap(fugazi::indicators::DayOfWeek::of(s))
+                dyn_indicator::wrap(crate::indicators::DayOfWeek::of(s))
             }
             DayOfYear { source } => {
                 let s = atom_src_any(source.as_ref());
-                dyn_indicator::wrap(fugazi::indicators::DayOfYear::of(s))
+                dyn_indicator::wrap(crate::indicators::DayOfYear::of(s))
             }
             WeekOfYear { source } => {
                 let s = atom_src_any(source.as_ref());
-                dyn_indicator::wrap(fugazi::indicators::WeekOfYear::of(s))
+                dyn_indicator::wrap(crate::indicators::WeekOfYear::of(s))
             }
             Quarter { source } => {
                 let s = atom_src_any(source.as_ref());
-                dyn_indicator::wrap(fugazi::indicators::Quarter::of(s))
+                dyn_indicator::wrap(crate::indicators::Quarter::of(s))
             }
             UnixSeconds { source } => {
                 let s = atom_src_any(source.as_ref());
-                dyn_indicator::wrap(fugazi::indicators::UnixSeconds::of(s))
+                dyn_indicator::wrap(crate::indicators::UnixSeconds::of(s))
             }
             UnixMillis { source } => {
                 let s = atom_src_any(source.as_ref());
-                dyn_indicator::wrap(fugazi::indicators::UnixMillis::of(s))
+                dyn_indicator::wrap(crate::indicators::UnixMillis::of(s))
             }
             Time { source } => {
                 let s = atom_src_any(source.as_ref());
-                dyn_indicator::wrap(fugazi::indicators::CurrentTime::of(s))
+                dyn_indicator::wrap(crate::indicators::CurrentTime::of(s))
             }
         }
     }

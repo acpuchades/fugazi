@@ -7,17 +7,17 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, anyhow, bail};
-use fugazi::costs::{
+use crate::costs::{
     CommissionModel, CompositeCommission, FixedAbsoluteSpread, FixedBpsSlippage, FixedBpsSpread,
     FixedCommission, MaxCommission, NoCommission, NoSlippage, NoSpread, PercentageCommission,
     PerUnitCommission, SlippageModel, SpreadModel, TradingCosts, VolumeParticipationSlippage,
 };
-use fugazi::types::Real;
+use crate::types::Real;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-use crate::calendar::{Frequency, Scope};
-use crate::input;
+use crate::spec::calendar::{Frequency, Scope};
+use crate::spec::input;
 
 use super::spec::{CostSpec, CostTerm};
 
@@ -571,7 +571,7 @@ impl CostConfig {
     }
 
     /// Build the live [`TradingCosts`] for `(symbol, freq)`. A leg whose
-    /// resolution is `None` becomes the [`No*`](fugazi::costs::NoCommission)
+    /// resolution is `None` becomes the [`No*`](crate::costs::NoCommission)
     /// zero-cost default.
     pub fn resolve(&self, symbol: &str, freq: Option<Frequency>) -> TradingCosts {
         let commission = self

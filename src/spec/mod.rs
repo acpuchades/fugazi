@@ -8,28 +8,64 @@
 //!
 //! Three layers, mirroring the crate; one per submodule:
 //!
-//! * [`ExprSpec`] (see [`expr`]) → [`crate::dyn_indicator::DynValue`] — a
+//! * [`ExprSpec`] (see [`expr`]) → [`crate::spec::dyn_indicator::DynValue`] — a
 //!   value-producing expression (nominally `Output = Real`, but polymorphic
-//!   over the runtime [`DynType`](crate::dyn_indicator::DynType) — some
+//!   over the runtime [`DynType`](crate::spec::dyn_indicator::DynType) — some
 //!   variants yield `Atom` / `Candle` / `Str` / `Time`).
 //! * [`SignalSpec`] (see [`signal`]) → boolean condition (a `Signal`).
-//! * [`SingleStrategySpec`] (see [`strategy`]) → [`fugazi::strategies::SingleAssetStrategy`] —
+//! * [`SingleStrategySpec`] (see [`strategy`]) → [`crate::strategies::SingleAssetStrategy`] —
 //!   the decision layer.
 //!
 //! The enums are *externally tagged* (serde's default), so an indicator reads as
 //! a single-key map — `{ema: {source: close, period: 20}}` — and a parameterless
 //! leaf or bar indicator reads as a bare string — `close`, `obv`.
 
-mod basket;
-mod expr;
-mod multi_asset;
-mod pairs;
-mod portfolio;
-mod preset;
-mod signal;
-mod strategy;
-mod template;
-mod trailing;
+// Spec-tree submodules.
+pub mod basket;
+pub mod expr;
+pub mod multi_asset;
+pub mod pairs;
+pub mod portfolio;
+pub mod preset;
+pub mod signal;
+pub mod strategy;
+pub mod template;
+pub mod trailing;
+
+// Load-pass primitives (`!import` / `!param` / `!arg` and the YAML→JSON bridge)
+// plus the file-vs-inline `Source` input type. Kept at `spec::*` because the
+// spec tree itself is what the passes chew through — but they're independent
+// enough of the tree to live in their own modules.
+pub mod args;
+pub mod convert;
+pub mod dyn_indicator;
+pub mod imports;
+pub mod input;
+pub mod params;
+
+// Calendar / windowing primitives (`Frequency`, `AssetClass`, `WindowSpec`,
+// `WalkForwardSpec`, `parse_time_to_millis`, `detect_frequency_from_atoms`).
+pub mod calendar;
+
+// Trading-costs spec + config (`CostSpec` → `CostConfig`; the runtime
+// `TradingCosts` / `CommissionModel` etc. live in `crate::costs`).
+pub mod costs;
+
+// Backtest kernel exposed for use by both `run` and `optimize`: pure
+// measurement + iteration functions with no I/O of their own.
+pub mod backtest;
+
+// CLI-shaped `Metrics` document + `MetricKey` + windowed / rolling / slice
+// helpers on top of the library's `metrics` module.
+pub mod metrics;
+
+// The optimize kernel — pure sweep enumeration, ranking, walk-forward
+// scaffolding — reachable without pulling in the CLI's clap / csv / progress
+// stack.
+pub mod optimize;
+
+// Shared rayon thread-pool constructor — the optimize kernel uses it.
+pub mod pool;
 
 /// The load-time passes every strategy document goes through before typed
 /// deserialization, in order: parse the YAML into an untyped tree, splice in
@@ -41,21 +77,21 @@ mod trailing;
 /// the document: it may carry its own `!param` placeholders, resolved from the
 /// same table as the importer. `base` is the directory relative import paths
 /// resolve against — the importing document's own directory (see
-/// [`crate::imports`] and [`crate::input::Source::base_dir`]).
+/// [`imports`] and [`input::Source::base_dir`]).
 ///
 /// `label` is a short origin string (a file path, `(inline)`, …) folded into
 /// the parse-error prefix so a user reading the error sees which document
 /// failed. Import splices carry their own file label; the passed `label` names
 /// only the *importing* document.
-fn load_value(
+pub fn load_value(
     text: &str,
     params: &std::collections::HashMap<String, serde_json::Value>,
     base: &std::path::Path,
     label: &str,
 ) -> anyhow::Result<serde_json::Value> {
-    let value = crate::input::parse_value_at(text, label)?;
-    let value = crate::imports::resolve(value, base)?;
-    crate::params::substitute(value, params)
+    let value = crate::spec::input::parse_value_at(text, label)?;
+    let value = crate::spec::imports::resolve(value, base)?;
+    crate::spec::params::substitute(value, params)
 }
 
 #[allow(unused_imports)]
@@ -78,25 +114,23 @@ pub use signal::StrOperand;
 pub use strategy::SingleStrategySpec;
 #[allow(unused_imports)]
 pub use template::SpecTemplate;
-#[allow(unused_imports)]
-pub(crate) use multi_asset::DynMultiAssetStrategy;
-#[allow(unused_imports)]
-pub(crate) use pairs::DynPairsStrategy;
-#[allow(unused_imports)]
-pub(crate) use portfolio::DynPortfolio;
-#[allow(unused_imports)]
-pub(crate) use strategy::{DynSingleStrategy, SideSpec};
+pub use multi_asset::DynMultiAssetStrategy;
+pub use pairs::DynPairsStrategy;
+pub use portfolio::DynPortfolio;
+pub use strategy::{DynSingleStrategy, SideSpec};
+
+pub use input::{Source, StrategyKind, StrategySource};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dyn_indicator::{DynIndicator, DynValue as Payload};
-    use fugazi::indicators::{
+    use crate::spec::dyn_indicator::{DynIndicator, DynValue as Payload};
+    use crate::indicators::{
         Book, Correlation, Current, Ema, GarmanKlass, Kurtosis, Parkinson, Position, RogersSatchell,
         Skewness, VarianceRatio, ZScore,
     };
-    use fugazi::prelude::*;
-    use fugazi::types::Snapshot;
+    use crate::prelude::*;
+    use crate::types::Snapshot;
 
     fn bar(close: Real) -> Candle {
         Candle::new(close, close, close, close, 0.0)
@@ -160,7 +194,7 @@ mod tests {
               enter: !crosses_above { lhs: !sma { source: close, period: 3 }, rhs: !sma { period: 8 } }
         "#;
         let value: serde_norway::Value = serde_norway::from_str(yaml).unwrap();
-        let json = crate::convert::yaml_to_json(value).unwrap();
+        let json = crate::spec::convert::yaml_to_json(value).unwrap();
         let spec: SingleStrategySpec = serde_json::from_value(json).unwrap();
         assert_eq!(spec.symbol, "BTC");
         assert!(spec.long.is_some());
@@ -542,7 +576,7 @@ mod tests {
         )
         .unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
-        assert_eq!(built.output_type(), crate::dyn_indicator::DynType::Real);
+        assert_eq!(built.output_type(), crate::spec::dyn_indicator::DynType::Real);
 
         let mut last = None;
         for p in [100.0, 102.0, 105.0, 108.0, 112.0, 116.0, 121.0, 127.0] {
@@ -567,7 +601,7 @@ mod tests {
         )
         .unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
-        assert_eq!(built.output_type(), crate::dyn_indicator::DynType::Real);
+        assert_eq!(built.output_type(), crate::spec::dyn_indicator::DynType::Real);
         // Drives a golden-then-death cross without panicking; reads Some once warm.
         let mut last = None;
         for p in [14.0, 13.0, 12.0, 11.0, 12.0, 14.0, 16.0, 18.0, 15.0, 12.0] {
@@ -602,7 +636,7 @@ mod tests {
         }
 
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
-        assert_eq!(built.output_type(), crate::dyn_indicator::DynType::Real);
+        assert_eq!(built.output_type(), crate::spec::dyn_indicator::DynType::Real);
 
         // BTC drifts up, ETH drifts down: long-BTC / short-ETH earns on both
         // legs → a rising, variable equity curve → a positive trailing Sharpe.
@@ -639,7 +673,7 @@ mod tests {
             period: 3
             bars_per_year: 252
         "#;
-        let json = crate::input::parse_value(yaml).unwrap();
+        let json = crate::spec::input::parse_value(yaml).unwrap();
         let spec: ExprSpec = serde_json::from_value(json).unwrap();
         match &spec {
             ExprSpec::Sharpe { strategy, .. } => {
@@ -651,7 +685,7 @@ mod tests {
         // Builds and drives a 3-symbol universe without panicking (the embedded
         // basket ranks per-symbol ROC, longs the top / shorts the bottom).
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
-        assert_eq!(built.output_type(), crate::dyn_indicator::DynType::Real);
+        assert_eq!(built.output_type(), crate::spec::dyn_indicator::DynType::Real);
         for i in 0..8 {
             let f = i as Real;
             let _ = built.update(Payload::Snapshot(multi_snap(&[
@@ -677,7 +711,7 @@ mod tests {
             period: 3
             bars_per_year: 252
         "#;
-        let json = crate::input::parse_value(yaml).unwrap();
+        let json = crate::spec::input::parse_value(yaml).unwrap();
         let spec: ExprSpec = serde_json::from_value(json).unwrap();
         match &spec {
             ExprSpec::Sharpe { strategy, .. } => {
@@ -687,7 +721,7 @@ mod tests {
         }
         // Builds without panicking; drives on a small 2-symbol path.
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
-        assert_eq!(built.output_type(), crate::dyn_indicator::DynType::Real);
+        assert_eq!(built.output_type(), crate::spec::dyn_indicator::DynType::Real);
         for i in 0..6 {
             let f = i as Real;
             let _ = built.update(Payload::Snapshot(multi_snap(&[
@@ -739,7 +773,7 @@ mod tests {
 
         let spec: ExprSpec = serde_norway::from_str("!get { key: vol_20 }").unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &schema);
-        assert_eq!(built.output_type(), crate::dyn_indicator::DynType::Real);
+        assert_eq!(built.output_type(), crate::spec::dyn_indicator::DynType::Real);
 
         let ov = OverlayInfo::new(schema.clone(), vec![OverlayValue::Real(0.42)]);
         let atom = Atom::with_overlays(bar(100.0), ov);
@@ -756,7 +790,7 @@ mod tests {
 
         let spec: SignalSpec = serde_norway::from_str("!get { key: risk_on }").unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &schema);
-        assert_eq!(built.output_type(), crate::dyn_indicator::DynType::Bool);
+        assert_eq!(built.output_type(), crate::spec::dyn_indicator::DynType::Bool);
 
         let ov = OverlayInfo::new(schema.clone(), vec![OverlayValue::Bool(true)]);
         let atom = Atom::with_overlays(bar(100.0), ov);
@@ -857,7 +891,7 @@ mod tests {
         )
         .unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &schema);
-        assert_eq!(built.output_type(), crate::dyn_indicator::DynType::Bool);
+        assert_eq!(built.output_type(), crate::spec::dyn_indicator::DynType::Bool);
 
         let bull = OverlayInfo::new(
             schema.clone(),
@@ -920,9 +954,9 @@ mod tests {
         // `!value 70` is the scalar constant; `!value bull` the string one.
         // Quoting decides when the two would collide: `!value "70"` is a string.
         let cases = [
-            ("!value 70", crate::dyn_indicator::DynType::Real),
-            ("!value bull", crate::dyn_indicator::DynType::Str),
-            ("!value \"70\"", crate::dyn_indicator::DynType::Str),
+            ("!value 70", crate::spec::dyn_indicator::DynType::Real),
+            ("!value bull", crate::spec::dyn_indicator::DynType::Str),
+            ("!value \"70\"", crate::spec::dyn_indicator::DynType::Str),
         ];
         for (yaml, want) in cases {
             let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
@@ -998,7 +1032,7 @@ mod tests {
               exit: !str_ne { lhs: !get { key: regime }, rhs: bull }
         "#;
         let value: serde_norway::Value = serde_norway::from_str(yaml).unwrap();
-        let json = crate::convert::yaml_to_json(value).unwrap();
+        let json = crate::spec::convert::yaml_to_json(value).unwrap();
         let spec: SingleStrategySpec = serde_json::from_value(json).unwrap();
 
         let mut b = Schema::builder();
@@ -1048,8 +1082,8 @@ mod tests {
     fn calendar_source_tags_decompose_atom_time() {
         // Each bare calendar tag parses, builds, and emits the expected
         // component on a timed atom.
-        use crate::dyn_indicator::DynType;
-        use fugazi::types::Timestamp;
+        use crate::spec::dyn_indicator::DynType;
+        use crate::types::Timestamp;
 
         // 2024-03-15 12:34:56 UTC — Friday, Q1, DOY 75.
         let atom = Atom::with_time(bar(1.0), Timestamp(1_710_506_096_000));
@@ -1089,7 +1123,7 @@ mod tests {
 
     #[test]
     fn calendar_signal_tags_gate_by_weekday() {
-        use fugazi::types::Timestamp;
+        use crate::types::Timestamp;
 
         // 2024-03-15 (Fri) vs 2024-03-16 (Sat).
         let fri = Atom::with_time(bar(1.0), Timestamp(1_710_506_096_000));
@@ -1123,7 +1157,7 @@ mod tests {
         // one is stable. PickAny is now the default source — the same
         // spec should parse, build, and read on a multi-symbol snapshot
         // without touching the panic path.
-        use fugazi::types::Timestamp;
+        use crate::types::Timestamp;
 
         let ts = Timestamp(1_710_506_096_000); // 2024-03-15 12:34:56 UTC
         let atom_btc = Atom::with_time(bar(1.0), ts);
@@ -1157,7 +1191,7 @@ mod tests {
         // 2+ entries. With PickAny as the calendar default, the cadence
         // sugar composes cleanly on a multi-symbol snapshot — the exact
         // shape a portfolio `rebalance_on:` sees.
-        use fugazi::types::Timestamp;
+        use crate::types::Timestamp;
 
         // Two consecutive days in the same month — `!daily` fires on the
         // second bar (day rolls over); `!monthly` stays false.
@@ -1198,7 +1232,7 @@ mod tests {
         // Regression: `!is_weekday` used to root on Pick::new() and would
         // panic on 2+ entries. Now uses PickAny — reads the first atom's
         // time, which is stable because all entries share the timestamp.
-        use fugazi::types::Timestamp;
+        use crate::types::Timestamp;
 
         let fri = Timestamp(1_710_506_096_000); // 2024-03-15 Friday
         let sat = Timestamp(fri.0 + 86_400_000); // 2024-03-16 Saturday
@@ -1454,8 +1488,8 @@ mod tests {
         )
         .unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
-        let mut reference = fugazi::indicators::Latch::new(Ema::new(
-            fugazi::indicators::Resample::new(fugazi::indicators::CurrentBar::new(), 4).close(),
+        let mut reference = crate::indicators::Latch::new(Ema::new(
+            crate::indicators::Resample::new(crate::indicators::CurrentBar::new(), 4).close(),
             3,
         ));
         for i in 1..=24 {

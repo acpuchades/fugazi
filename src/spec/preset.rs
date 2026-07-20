@@ -1,10 +1,10 @@
 //! [`StrategyPreset`] / [`StrategyRef`] — YAML sugar for the ready-made
-//! single-asset strategies in [`fugazi::strategies`].
+//! single-asset strategies in [`crate::strategies`].
 //!
 //! A full [`SingleStrategySpec`] spells out every `long`/`short` signal by
 //! hand; a **preset** names one of the crate's convenience recipes and its
 //! parameters — `!ma_crossover { symbol: BTC, fast: 3, slow: 8 }` builds the
-//! same strategy [`fugazi::strategies::trend::ma_crossover`] does. Presets
+//! same strategy [`crate::strategies::trend::ma_crossover`] does. Presets
 //! reuse the Rust catalogue directly (single source of truth — no re-encoding
 //! as a spec tree), so a preset and its Rust twin are identical by construction.
 //!
@@ -17,13 +17,13 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
-use fugazi::prelude::*;
-use fugazi::strategies::{SingleAssetStrategy, composite, mean_reversion, trend};
+use crate::prelude::*;
+use crate::strategies::{SingleAssetStrategy, composite, mean_reversion, trend};
 
 use super::strategy::{DynSingleStrategy, SingleStrategySpec};
 
 /// The externally-tagged catalogue of ready-made single-asset strategies.
-/// Each variant maps one-to-one onto a `fugazi::strategies` recipe.
+/// Each variant maps one-to-one onto a `crate::strategies` recipe.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum StrategyPreset {
@@ -31,7 +31,7 @@ pub enum StrategyPreset {
     /// [`SingleAssetStrategy::buy_and_hold`].
     BuyAndHold { symbol: String },
     /// Always-in SMA fast/slow crossover. See
-    /// [`fugazi::strategies::trend::ma_crossover`].
+    /// [`crate::strategies::trend::ma_crossover`].
     MaCrossover {
         symbol: String,
         fast: usize,
@@ -39,7 +39,7 @@ pub enum StrategyPreset {
     },
     /// RSI mean-reversion, long/flat: buy when RSI crosses below `oversold`,
     /// exit when it crosses back above `exit`. See
-    /// [`fugazi::strategies::mean_reversion::rsi_reversal`].
+    /// [`crate::strategies::mean_reversion::rsi_reversal`].
     RsiReversal {
         symbol: String,
         period: usize,
@@ -47,10 +47,10 @@ pub enum StrategyPreset {
         exit: Real,
     },
     /// Always-in Donchian channel breakout. See
-    /// [`fugazi::strategies::trend::donchian_breakout`].
+    /// [`crate::strategies::trend::donchian_breakout`].
     DonchianBreakout { symbol: String, period: usize },
     /// Always-in Keltner channel breakout. See
-    /// [`fugazi::strategies::composite::keltner_breakout`].
+    /// [`crate::strategies::composite::keltner_breakout`].
     KeltnerBreakout {
         symbol: String,
         ema_period: usize,
@@ -82,7 +82,7 @@ impl StrategyPreset {
         }
     }
 
-    /// Build the live strategy by delegating to the `fugazi::strategies` recipe.
+    /// Build the live strategy by delegating to the `crate::strategies` recipe.
     fn build_strategy(&self) -> SingleAssetStrategy<String> {
         match self {
             StrategyPreset::BuyAndHold { symbol } => {
@@ -135,7 +135,7 @@ impl StrategyRef {
     }
 
     /// Build the live [`DynSingleStrategy`]. `initial_equity` seeds a spec's
-    /// [`Book`](fugazi::indicators::Book) (presets don't read the book, so it's
+    /// [`Book`](crate::indicators::Book) (presets don't read the book, so it's
     /// inert for them); `schema` resolves a spec's `!get` leaves (presets have
     /// none).
     pub fn build(&self, initial_equity: Real, schema: &Arc<Schema>) -> DynSingleStrategy {

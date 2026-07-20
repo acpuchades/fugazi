@@ -8,8 +8,8 @@ use std::str::FromStr;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 
-use crate::calendar::{self, Scope};
-use crate::input::{self, Source};
+use crate::spec::calendar::{self, Scope};
+use crate::spec::input::{self, Source};
 
 // ---------------------------------------------------------------------------
 // Parsing: one `--costs` argument
@@ -119,7 +119,7 @@ fn parse_term(text: &str) -> Result<CostTerm> {
 // ---------------------------------------------------------------------------
 
 /// Split off a leading `SYMBOL[FREQ]:` scope prefix. Same bracket grammar as
-/// [`crate::calendar::parse_scope`], but the delimiter rules are cost-DSL
+/// [`crate::spec::calendar::parse_scope`], but the delimiter rules are cost-DSL
 /// specific: a `:` at bracket depth zero is the separator; a `=` at depth zero
 /// without a preceding `:` means "no scope, start of an inline pair" — so the
 /// splitter can't share with the calendar side, which never sees `=`.

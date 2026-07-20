@@ -44,7 +44,7 @@
 //! ## Passes and semantics
 //!
 //! Substitution runs on the **untyped value tree**, exactly like
-//! [`crate::params`] — the typed spec has no room for a placeholder where a
+//! [`crate::spec::params`] — the typed spec has no room for a placeholder where a
 //! `SignalSpec` is expected, so the hole must be filled before typed parsing.
 //! The pass order is `parse → imports → !param → typed parse`, which means an
 //! imported document is itself a first-class spec fragment: it may contain its
@@ -67,7 +67,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Map, Value};
 
-/// The singleton key a `!import` tag normalizes to (see [`crate::convert`]).
+/// The singleton key a `!import` tag normalizes to (see [`crate::spec::convert`]).
 const IMPORT: &str = "import";
 
 /// One resolved `!import` directive: the path to load and the inline
@@ -83,7 +83,7 @@ struct ImportDirective {
 
 /// Resolve every `!import` node in `value`, splicing in the document each one
 /// names. `base` is the directory relative import paths resolve against — the
-/// importing document's own directory (see [`crate::input::Source::base_dir`]).
+/// importing document's own directory (see [`crate::spec::input::Source::base_dir`]).
 pub fn resolve(value: Value, base: &Path) -> Result<Value> {
     walk(value, base, &mut Vec::new())
 }
@@ -182,7 +182,7 @@ fn import_directive(map: &Map<String, Value>) -> Result<Option<ImportDirective>>
 /// `!tag`s normalize exactly like the importing document's), resolve its
 /// nested imports against *its own* directory, and — if the directive
 /// carried inline `params:` — apply those against the loaded tree via
-/// [`crate::params::substitute_partial`] before returning.
+/// [`crate::spec::params::substitute_partial`] before returning.
 fn load(directive: &ImportDirective, base: &Path, stack: &mut Vec<PathBuf>) -> Result<Value> {
     let joined = base.join(&directive.path);
     let canonical = std::fs::canonicalize(&joined).with_context(|| {
@@ -205,7 +205,7 @@ fn load(directive: &ImportDirective, base: &Path, stack: &mut Vec<PathBuf>) -> R
             canonical.display()
         )
     })?;
-    let value = crate::input::parse_value_at(&text, &canonical.display().to_string())
+    let value = crate::spec::input::parse_value_at(&text, &canonical.display().to_string())
         .with_context(|| {
             format!(
                 "!import {}: parsing `{}`",
@@ -236,7 +236,7 @@ fn load(directive: &ImportDirective, base: &Path, stack: &mut Vec<PathBuf>) -> R
     for (key, value) in inline {
         inline_resolved.insert(key.clone(), walk(value.clone(), base, stack)?);
     }
-    crate::params::substitute_partial(resolved, &inline_resolved)
+    crate::spec::params::substitute_partial(resolved, &inline_resolved)
 }
 
 #[cfg(test)]
@@ -260,7 +260,7 @@ mod tests {
     }
 
     fn resolve_text(text: &str, base: &Path) -> Result<Value> {
-        resolve(crate::input::parse_value(text).unwrap(), base)
+        resolve(crate::spec::input::parse_value(text).unwrap(), base)
     }
 
     #[test]
@@ -278,7 +278,7 @@ mod tests {
         )
         .unwrap();
 
-        let expected = crate::input::parse_value(
+        let expected = crate::spec::input::parse_value(
             "symbol: BTC\nlong:\n  enter: !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } }\n",
         )
         .unwrap();
@@ -295,7 +295,7 @@ mod tests {
         write(&dir, "parts/enter.yml", "!value true\n");
 
         let value = resolve_text("long: !import parts/side.yml\n", &dir).unwrap();
-        let expected = crate::input::parse_value("long:\n  enter: !value true\n").unwrap();
+        let expected = crate::spec::input::parse_value("long:\n  enter: !value true\n").unwrap();
         assert_eq!(value, expected);
     }
 
@@ -373,7 +373,7 @@ mod tests {
             &dir,
         )
         .unwrap();
-        let expected = crate::input::parse_value(
+        let expected = crate::spec::input::parse_value(
             "\
              a: { period_fast: 5,  period_slow: 20 }\n\
              b: { period_fast: 20, period_slow: 50 }\n\
@@ -405,8 +405,8 @@ mod tests {
             "SLOW".to_string(),
             Value::from(50),
         )]);
-        let value = crate::params::substitute(value, &params).unwrap();
-        let expected = crate::input::parse_value("cfg: { fast: 5, slow: 50 }\n").unwrap();
+        let value = crate::spec::params::substitute(value, &params).unwrap();
+        let expected = crate::spec::input::parse_value("cfg: { fast: 5, slow: 50 }\n").unwrap();
         assert_eq!(value, expected);
     }
 
@@ -433,8 +433,8 @@ mod tests {
             "FAST".to_string(),
             Value::from(3),
         )]);
-        let value = crate::params::substitute(value, &params).unwrap();
-        let expected = crate::input::parse_value("cfg: { value: 3 }\n").unwrap();
+        let value = crate::spec::params::substitute(value, &params).unwrap();
+        let expected = crate::spec::input::parse_value("cfg: { value: 3 }\n").unwrap();
         assert_eq!(value, expected);
 
         // Same import, no --params: default applies on the outer pass.
@@ -443,8 +443,8 @@ mod tests {
             &dir,
         )
         .unwrap();
-        let value = crate::params::substitute(value, &std::collections::HashMap::new()).unwrap();
-        let expected = crate::input::parse_value("cfg: { value: 99 }\n").unwrap();
+        let value = crate::spec::params::substitute(value, &std::collections::HashMap::new()).unwrap();
+        let expected = crate::spec::input::parse_value("cfg: { value: 99 }\n").unwrap();
         assert_eq!(value, expected);
     }
 
@@ -464,7 +464,7 @@ mod tests {
         )
         .unwrap();
         let expected =
-            crate::input::parse_value("cfg: { inner: { fast: 5 } }\n").unwrap();
+            crate::spec::input::parse_value("cfg: { inner: { fast: 5 } }\n").unwrap();
         assert_eq!(value, expected);
     }
 
@@ -488,7 +488,7 @@ mod tests {
         )
         .unwrap();
         let expected =
-            crate::input::parse_value("cfg: { inner: { fast: 99 } }\n").unwrap();
+            crate::spec::input::parse_value("cfg: { inner: { fast: 99 } }\n").unwrap();
         assert_eq!(value, expected);
     }
 
@@ -514,8 +514,8 @@ mod tests {
             "OUTER".to_string(),
             Value::from(7),
         )]);
-        let value = crate::params::substitute(value, &params).unwrap();
-        let expected = crate::input::parse_value("cfg: { fast: 7 }\n").unwrap();
+        let value = crate::spec::params::substitute(value, &params).unwrap();
+        let expected = crate::spec::input::parse_value("cfg: { fast: 7 }\n").unwrap();
         assert_eq!(value, expected);
     }
 
@@ -537,7 +537,7 @@ mod tests {
         // score.yml resolves to `!value 42`, which is spliced in as
         // the SCORE value inside outer.yml.
         let expected =
-            crate::input::parse_value("cfg: { score: !value 42 }\n").unwrap();
+            crate::spec::input::parse_value("cfg: { score: !value 42 }\n").unwrap();
         assert_eq!(value, expected);
     }
 
@@ -547,7 +547,7 @@ mod tests {
         let text = "symbol: BTC\nlong:\n  enter: !gt { lhs: close, rhs: !value 10 }\n";
         assert_eq!(
             resolve_text(text, &dir).unwrap(),
-            crate::input::parse_value(text).unwrap(),
+            crate::spec::input::parse_value(text).unwrap(),
         );
     }
 }

@@ -14,11 +14,11 @@
 //!
 //! 1. **Load-time** — the user's `!param` substitutions (from `--params`
 //!    CLI args) are applied to the whole document once, via
-//!    [`crate::params::substitute`]. Those values are baked into the
+//!    [`crate::spec::params::substitute`]. Those values are baked into the
 //!    stored tree; every subsequent `.build()` sees them already-resolved.
 //! 2. **Build-time** — a driver (e.g. `BasketStrategySpec`'s per-symbol
 //!    factory) supplies `!arg NAME` values via
-//!    [`crate::args::substitute`]. This runs on every `.build()` call,
+//!    [`crate::spec::args::substitute`]. This runs on every `.build()` call,
 //!    so one template can produce many concrete `T` values (one per
 //!    set of driver-supplied args).
 //!
@@ -51,7 +51,7 @@ use anyhow::Result;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
-use crate::args;
+use crate::spec::args;
 
 /// A deferred spec: an untyped `serde_json::Value` tree with `!arg`
 /// placeholder leaves, resolved into a concrete `T` at build time. See
@@ -69,7 +69,7 @@ impl<T> SpecTemplate<T> {
     /// Wrap a raw JSON tree as a template. Any load-time `!param`
     /// substitutions should already be applied to `tree` (the standard
     /// path is via the [`Deserialize`] impl below, after a caller runs
-    /// [`params::substitute`](crate::params::substitute) on the whole
+    /// [`params::substitute`](crate::spec::params::substitute) on the whole
     /// document first).
     pub fn from_tree(tree: Value) -> Self {
         Self {
@@ -197,7 +197,7 @@ mod tests {
             symbol: !arg SYM
             period: 30
         "#;
-        let value = crate::input::parse_value(yaml).unwrap();
+        let value = crate::spec::input::parse_value(yaml).unwrap();
         let template: SpecTemplate<Toy> = serde_json::from_value(value).unwrap();
         let concrete = template.build(&args(&[("SYM", json!("SOL"))])).unwrap();
         assert_eq!(concrete.symbol, "SOL");

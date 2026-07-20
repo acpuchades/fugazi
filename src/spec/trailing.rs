@@ -1,8 +1,8 @@
 //! CLI builder for the trailing risk indicators (`!sharpe` / `!sortino` /
 //! `!volatility` / `!max_drawdown` / `!calmar`).
 //!
-//! The library indicators ([`fugazi::indicators::Sharpe`] and friends) each own
-//! a [`Strategy`](fugazi::Strategy) and drive it internally. Since the embedded
+//! The library indicators ([`crate::indicators::Sharpe`] and friends) each own
+//! a [`Strategy`](crate::Strategy) and drive it internally. Since the embedded
 //! engine forwards the whole snapshot to its strategy, that strategy can be a
 //! single-asset, **pairs**, or **basket** one — the [`AnyStrategyRef`] the
 //! `strategy:` field deserializes to picks which.
@@ -20,22 +20,22 @@
 //! The wallet seed is a fixed [`SEED`]: every metric here is a ratio of
 //! equity-curve returns, and the returns are scale-invariant in the seed, so
 //! exposing it as a knob would add surface with no effect on the reading. The
-//! embedded strategy's [`Book`](fugazi::indicators::Book) is seeded to the same
+//! embedded strategy's [`Book`](crate::indicators::Book) is seeded to the same
 //! value so its book-anchored sizing recipes stay meaningful.
 
 use std::sync::Arc;
 
 use serde::Deserialize;
 
-use fugazi::indicators::{Calmar, MaxDrawdown, Sharpe, Sortino, Volatility};
-use fugazi::prelude::*;
-use fugazi::types::{Real, Snapshot};
+use crate::indicators::{Calmar, MaxDrawdown, Sharpe, Sortino, Volatility};
+use crate::prelude::*;
+use crate::types::{Real, Snapshot};
 
 use super::basket::BasketStrategySpec;
 use super::multi_asset::MultiAssetStrategySpec;
 use super::pairs::PairsStrategySpec;
 use super::preset::StrategyRef;
-use crate::dyn_indicator::{self, DynIndicator};
+use crate::spec::dyn_indicator::{self, DynIndicator};
 
 /// The wallet / book seed for every embedded strategy. Arbitrary and positive
 /// — the ratio metrics are scale-invariant in it (see the module docs).
@@ -55,7 +55,7 @@ pub(super) enum TrailingMetric {
 /// single-asset [`StrategyRef`] to also name a **pairs** or **basket** strategy.
 ///
 /// The embedded engine forwards the whole snapshot to its strategy, so any
-/// [`Strategy`](fugazi::Strategy) over a `Snapshot<String>` drives it:
+/// [`Strategy`](crate::Strategy) over a `Snapshot<String>` drives it:
 /// `!sharpe { strategy: <single | pairs | basket> }` reads the trailing risk of
 /// whichever one. (A pairs / basket strategy only produces meaningful numbers
 /// when the surrounding run feeds it a tagged multi-asset snapshot each bar —
@@ -77,7 +77,7 @@ pub enum AnyStrategyRef {
 
 impl AnyStrategyRef {
     /// The tag applied to *untagged* snapshot entries the embedded engine prices
-    /// (see the [engine docs](fugazi::indicators::Sharpe)). For a single asset
+    /// (see the [engine docs](crate::indicators::Sharpe)). For a single asset
     /// it's the traded symbol; for a pair, the left leg. A basket / multi
     /// names no symbol upfront (its universe floats), so it has none — but
     /// they're only ever fed tagged multi-asset snapshots, where the fallback
@@ -120,7 +120,7 @@ impl TryFrom<serde_norway::Value> for AnyStrategyRef {
         // `SelectionRuleSpec` is a bare externally-tagged enum serde_norway
         // reads only from a `Value::Tagged`, not a plain single-key map.
         if is_pairs || is_basket {
-            let json = crate::convert::yaml_to_json(v).map_err(|e| e.to_string())?;
+            let json = crate::spec::convert::yaml_to_json(v).map_err(|e| e.to_string())?;
             return if is_pairs {
                 serde_json::from_value::<PairsStrategySpec>(json)
                     .map(|p| AnyStrategyRef::Pairs(Box::new(p)))
@@ -134,7 +134,7 @@ impl TryFrom<serde_norway::Value> for AnyStrategyRef {
 
         // Multi: bare mapping without symbol / pairs / basket keys.
         if matches!(&v, Value::Mapping(_)) && !has_symbol {
-            let json = crate::convert::yaml_to_json(v).map_err(|e| e.to_string())?;
+            let json = crate::spec::convert::yaml_to_json(v).map_err(|e| e.to_string())?;
             return serde_json::from_value::<MultiAssetStrategySpec>(json)
                 .map(|m| AnyStrategyRef::Multi(Box::new(m)))
                 .map_err(|e| e.to_string());
@@ -204,7 +204,7 @@ fn make<S>(
     bars_per_year: Real,
 ) -> BoxedReal
 where
-    S: fugazi::Strategy<Symbol = String, Input = Snapshot<String>> + Send + Sync + 'static,
+    S: crate::Strategy<Symbol = String, Input = Snapshot<String>> + Send + Sync + 'static,
 {
     match metric {
         TrailingMetric::Sharpe => Box::new(Sharpe::new(

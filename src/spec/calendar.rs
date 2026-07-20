@@ -40,8 +40,8 @@ use std::num::NonZeroUsize;
 use std::str::FromStr;
 
 use anyhow::{Result, bail};
-use fugazi::prelude::*;
-use fugazi::sources::Interval;
+use crate::prelude::*;
+use crate::sources::Interval;
 use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 
@@ -120,15 +120,15 @@ impl AssetClass {
     }
 }
 
-// The bar-cadence type itself lives in the core (`fugazi::types::Frequency`) —
+// The bar-cadence type itself lives in the core (`crate::types::Frequency`) —
 // it's the same alphabet used by `!pick { freq }` and `Snapshot<Selector>`.
-pub use fugazi::Frequency;
+pub use crate::Frequency;
 
 /// Parse a Binance-style interval token (`1m`, `5m`, `1h`, `4h`, `1d`, `1w`,
 /// `1M`) into an [`Interval`]. Case-sensitive on the unit letter: `m` = minute,
 /// `M` = month. The same `N<unit>` alphabet as [`Frequency::from_str`], but
 /// yields the sources-layer [`Interval`] used by the remote candle providers.
-pub(crate) fn parse_interval(s: &str) -> Result<Interval> {
+pub fn parse_interval(s: &str) -> Result<Interval> {
     let s = s.trim();
     if s.is_empty() {
         bail!("empty interval token");
@@ -389,7 +389,7 @@ pub fn detect_frequency_from_atoms<'a>(
 /// [`detect_frequency_from_atoms`]; also directly consumed by tests that want
 /// to exercise the string-parse vocabulary via [`parse_time_to_millis`]
 /// without constructing atoms.
-pub(crate) fn detect_frequency_from_millis(
+pub fn detect_frequency_from_millis(
     stamps: impl IntoIterator<Item = i64>,
 ) -> Option<Frequency> {
     let stamps: Vec<i64> = stamps.into_iter().collect();
@@ -418,7 +418,7 @@ pub(crate) fn detect_frequency_from_millis(
 /// at load, so the calendar indicators (`!year`, `!month`, …) and the
 /// duration-form `-w/--windowed` resolver both work on the real timeline
 /// without re-parsing.
-pub(crate) fn parse_time_to_millis(raw: &str) -> Option<i64> {
+pub fn parse_time_to_millis(raw: &str) -> Option<i64> {
     let s = raw.trim();
     if s.is_empty() {
         return None;
@@ -504,7 +504,7 @@ fn split_scope(text: &str) -> Result<(Scope, &str), String> {
 ///
 /// The raw shared bracket grammar behind [`parse_scope`] and
 /// [`crate::overlay::OverlayScope`]'s parser.
-pub(crate) fn parse_scope_parts(text: &str) -> Result<(Option<String>, Option<&str>), String> {
+pub fn parse_scope_parts(text: &str) -> Result<(Option<String>, Option<&str>), String> {
     let text = text.trim();
     if text.is_empty() {
         return Ok((None, None));
@@ -535,7 +535,7 @@ pub(crate) fn parse_scope_parts(text: &str) -> Result<(Option<String>, Option<&s
 ///
 /// Shared by [`crate::costs`] (`--costs` argument parsing) and this module's
 /// `--bars-per-year` / `-f/--frequency` prefixes.
-pub(crate) fn parse_scope(text: &str) -> Result<Scope, String> {
+pub fn parse_scope(text: &str) -> Result<Scope, String> {
     let (symbol, freq_str) = parse_scope_parts(text)?;
     let freq = match freq_str {
         Some(f) => Some(Frequency::from_str(f).map_err(|e| format!("scope `{text}`: {e}"))?),

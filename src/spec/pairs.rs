@@ -9,14 +9,14 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
-use fugazi::indicators::{Book, Position};
-use fugazi::indicators::logic::Const;
-use fugazi::prelude::*;
-use fugazi::strategies::PairsStrategy;
+use crate::indicators::{Book, Position};
+use crate::indicators::logic::Const;
+use crate::prelude::*;
+use crate::strategies::PairsStrategy;
 
 use super::signal::SignalSpec;
 use super::expr::ExprSpec;
-use crate::dyn_indicator::{AsBool, AsReal, DynIndicator};
+use crate::spec::dyn_indicator::{AsBool, AsReal, DynIndicator};
 
 /// A whole `pairs.yml`: the two traded symbols plus one enter/exit signal pair
 /// and optional spread levels.
@@ -78,7 +78,7 @@ pub struct PairsStrategySpec {
 
 impl PairsStrategySpec {
     /// Parse a YAML pairs-strategy document, resolving `param` placeholders
-    /// against `params` first (see [`crate::params`]).
+    /// against `params` first (see [`crate::spec::params`]).
     ///
     /// Same two-pass shape as [`super::SingleStrategySpec::from_text_with_params`]:
     /// the document is normalized to an untyped [`serde_json::Value`], every
@@ -120,7 +120,7 @@ impl PairsStrategySpec {
             .as_ref()
             .map(|s| s.build(anchor, book, None, schema))
             .unwrap_or_else(|| {
-                crate::dyn_indicator::wrap(Const::<fugazi::types::Snapshot<String>>::new(false))
+                crate::spec::dyn_indicator::wrap(Const::<crate::types::Snapshot<String>>::new(false))
             })
     }
 
@@ -170,11 +170,11 @@ impl PairsStrategySpec {
 }
 
 /// The CLI's built pairs-strategy handle. Wraps a
-/// [`PairsStrategy<String>`](fugazi::strategies::PairsStrategy) whose signals
+/// [`PairsStrategy<String>`](crate::strategies::PairsStrategy) whose signals
 /// and levels came from runtime-typed [`DynIndicator`]s.
 ///
-/// Implements [`Strategy`](fugazi::Strategy) by delegation, so it drops into
-/// [`fugazi::backtest::run`] unchanged.
+/// Implements [`Strategy`](crate::Strategy) by delegation, so it drops into
+/// [`crate::backtest::run`] unchanged.
 pub struct DynPairsStrategy {
     inner: PairsStrategy<String>,
 }
@@ -204,10 +204,10 @@ impl DynPairsStrategy {
 }
 
 impl Strategy for DynPairsStrategy {
-    type Input = fugazi::types::Snapshot<String>;
+    type Input = crate::types::Snapshot<String>;
     type Symbol = String;
 
-    fn update(&mut self, snap: fugazi::types::Snapshot<String>) {
+    fn update(&mut self, snap: crate::types::Snapshot<String>) {
         self.inner.update(snap);
     }
     fn on_fill(&mut self, order: &Order<String>) {

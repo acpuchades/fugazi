@@ -20,7 +20,7 @@
 //! Both `score` and `sizing` are typed as
 //! [`SpecTemplate<ExprSpec>`](super::SpecTemplate), so a `!arg SYM` leaf
 //! survives the load pass and gets resolved once per symbol at build
-//! time. See [`crate::args`] for the placeholder grammar.
+//! time. See [`crate::spec::args`] for the placeholder grammar.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,26 +29,26 @@ use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
 
-use fugazi::indicators::{Book, Position};
-use fugazi::prelude::*;
-use fugazi::strategies::BasketStrategy;
-use fugazi::types::Snapshot;
+use crate::indicators::{Book, Position};
+use crate::prelude::*;
+use crate::strategies::BasketStrategy;
+use crate::types::Snapshot;
 
 use super::expr::ExprSpec;
 use super::signal::SignalSpec;
 use super::template::SpecTemplate;
-use crate::dyn_indicator::{AsBool, AsReal, DynIndicator};
+use crate::spec::dyn_indicator::{AsBool, AsReal, DynIndicator};
 
 /// YAML surface for the ranking rule. Externally tagged
 /// (`!top_bottom { longs, shorts }` / `!threshold { long_min, short_max }`
 /// / `!quantile { long_q, short_q }`).
 ///
 /// A CLI-only discriminator; at build it constructs the corresponding
-/// [`fugazi::strategies::basket::Selection`] trait impl (one of
-/// [`TopBottom`](fugazi::strategies::basket::TopBottom) /
-/// [`Threshold`](fugazi::strategies::basket::Threshold) /
-/// [`Quantile`](fugazi::strategies::basket::Quantile)) and installs it via
-/// [`BasketStrategy::selection`](fugazi::strategies::BasketStrategy::selection).
+/// [`crate::strategies::basket::Selection`] trait impl (one of
+/// [`TopBottom`](crate::strategies::basket::TopBottom) /
+/// [`Threshold`](crate::strategies::basket::Threshold) /
+/// [`Quantile`](crate::strategies::basket::Quantile)) and installs it via
+/// [`BasketStrategy::selection`](crate::strategies::BasketStrategy::selection).
 /// Rust-side callers with a custom rule build their own `Selection`
 /// impl and install it directly — no CLI-side wiring needed.
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -56,20 +56,20 @@ use crate::dyn_indicator::{AsBool, AsReal, DynIndicator};
 pub enum SelectionRuleSpec {
     /// Take the `longs` highest-scoring symbols long, the `shorts`
     /// lowest-scoring short. See
-    /// [`fugazi::strategies::basket::top_bottom`].
+    /// [`crate::strategies::basket::top_bottom`].
     TopBottom { longs: usize, shorts: usize },
 
     /// Long every symbol scoring at/above `long_min`; short at/below
-    /// `short_max`. See [`fugazi::strategies::basket::threshold`].
+    /// `short_max`. See [`crate::strategies::basket::threshold`].
     Threshold { long_min: Real, short_max: Real },
 
     /// Long the top `long_q` fraction of the score distribution; short
     /// the bottom `short_q`. See
-    /// [`fugazi::strategies::basket::quantile`].
+    /// [`crate::strategies::basket::quantile`].
     Quantile { long_q: Real, short_q: Real },
 }
 
-/// YAML surface for a declared basket [`Universe`](fugazi::strategies::basket::Universe).
+/// YAML surface for a declared basket [`Universe`](crate::strategies::basket::Universe).
 ///
 /// Externally tagged, taking a raw list of symbol names:
 ///
@@ -86,12 +86,12 @@ pub enum SelectionRuleSpec {
 pub enum UniverseSpec {
     /// Strict declared universe: every listed symbol must be present on
     /// every bar (absence panics); readiness gates on all listed symbols
-    /// scoring `Some`. Wraps [`fugazi::strategies::basket::AllOf`].
+    /// scoring `Some`. Wraps [`crate::strategies::basket::AllOf`].
     AllOf(Vec<String>),
 
     /// Lax declared universe: restrict to the listed subset but silently
     /// skip absent or still-unready members. Wraps
-    /// [`fugazi::strategies::basket::AnyOf`].
+    /// [`crate::strategies::basket::AnyOf`].
     AnyOf(Vec<String>),
 }
 
@@ -375,12 +375,12 @@ fn build_per_symbol(
 // ---------------------------------------------------------------------------
 
 /// The CLI's built-basket handle. Wraps a
-/// [`BasketStrategy<String>`](fugazi::strategies::BasketStrategy) whose
+/// [`BasketStrategy<String>`](crate::strategies::BasketStrategy) whose
 /// per-symbol score / sizing factories were assembled from
 /// [`SpecTemplate<ExprSpec>`](SpecTemplate).
 ///
-/// Implements [`Strategy`](fugazi::Strategy) by delegation, so it drops
-/// into [`fugazi::backtest::run`] unchanged (once the CLI dispatch grows
+/// Implements [`Strategy`](crate::Strategy) by delegation, so it drops
+/// into [`crate::backtest::run`] unchanged (once the CLI dispatch grows
 /// a `basket:` prefix — a follow-up).
 pub struct DynBasketStrategy {
     inner: BasketStrategy<String>,
@@ -422,7 +422,7 @@ impl DynBasketStrategy {
 
     /// Grid-wide readiness across the currently-built per-symbol score /
     /// sizing chains and the rebalance gate — pass-through to
-    /// [`BasketStrategy::stable_period`](fugazi::strategies::BasketStrategy::stable_period).
+    /// [`BasketStrategy::stable_period`](crate::strategies::BasketStrategy::stable_period).
     ///
     /// **Lazy readiness contract**: a basket's per-symbol chains are
     /// built on first sight, so a freshly-built strategy reports the
@@ -434,7 +434,7 @@ impl DynBasketStrategy {
     }
 
     /// Warm-up-only readiness (ignoring IIR settling) — pass-through to
-    /// [`BasketStrategy::warm_up_period`](fugazi::strategies::BasketStrategy::warm_up_period).
+    /// [`BasketStrategy::warm_up_period`](crate::strategies::BasketStrategy::warm_up_period).
     /// Used by `optimize --walkforward --keep-unstable`.
     ///
     /// Same lazy-readiness caveat as [`stable_period`](Self::stable_period).
@@ -446,8 +446,8 @@ impl DynBasketStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fugazi::PaperWallet;
-    use fugazi::types::{Atom, Selector};
+    use crate::PaperWallet;
+    use crate::types::{Atom, Selector};
 
     fn candle(price: Real) -> Candle {
         Candle::new(price, price, price, price, 0.0)

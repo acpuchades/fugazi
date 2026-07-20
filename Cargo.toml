@@ -48,15 +48,23 @@ runtime = []
 # CLI's own dep list); a caller who wants the ensemble primitive without
 # the CLI enables it on its own (`features = ["parallel"]`).
 parallel = ["dep:rayon"]
+# `spec` compiles the YAML-driven declarative surface (`fugazi::spec`) — the
+# `*Spec` types, `evaluate*` / `measured_report*` / `optimize` kernel,
+# `Metrics` document + `MetricKey`, `CostConfig`, `WindowSpec`, and the
+# `!import` / `!param` / `!arg` load passes. It's what a downstream crate
+# (the Python bindings, a hosting server, a batch runner) enables to reach
+# through to the strategy vocabulary without pulling in the CLI's clap /
+# progress / csv / date-parsing stack. Depends on `runtime` (all builders
+# resolve into `DynIndicator` chains) and on `serde_norway` + `anyhow` (YAML
+# in, structured errors out); the CLI-only bits (indicatif progress bars,
+# console styling, csv output, interim date parsing) stay behind `cli`.
+spec = ["runtime", "parallel", "dep:serde_norway", "dep:anyhow"]
 cli = [
+    "spec",
     "sources",
-    "runtime",
-    "parallel",
     "dep:clap",
     "dep:clap_complete",
-    "dep:serde_norway",
     "dep:csv",
-    "dep:anyhow",
     "dep:indicatif",
     "dep:console",
     "dep:interim",

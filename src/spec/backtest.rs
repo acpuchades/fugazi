@@ -27,11 +27,11 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use fugazi::prelude::*;
+use crate::prelude::*;
 
-use crate::calendar::Frequency;
-use crate::costs::CostConfig;
-use crate::metrics;
+use crate::spec::calendar::Frequency;
+use crate::spec::costs::CostConfig;
+use crate::spec::metrics;
 use crate::spec::{
     BasketStrategySpec, MultiAssetStrategySpec, PairsStrategySpec, PortfolioSpec,
     SingleStrategySpec, StrategyRef,
@@ -39,7 +39,7 @@ use crate::spec::{
 
 /// Drive `spec` over `atoms` through a fresh paper wallet with `cash`
 /// starting funds and the given trading `costs`, returning the full
-/// [`fugazi::RunReport`]. The shared core of [`evaluate`] and
+/// [`crate::RunReport`]. The shared core of [`evaluate`] and
 /// [`evaluate_windowed`], and the seam
 /// [`optimize --walkforward`](crate::optimize) reaches through so it can slice
 /// one report per row into many fold-scoped sub-reports rather than re-running.
@@ -48,17 +48,17 @@ pub fn measured_report(
     atoms: &[(String, Atom)],
     cash: Real,
     costs: TradingCosts,
-) -> fugazi::RunReport<String> {
+) -> crate::RunReport<String> {
     let symbol = spec.symbol.clone();
     let schema = schema_from_atoms(atoms);
     let mut strategy = spec.build(cash, &schema);
     let mut wallet = PaperWallet::with_costs(cash, costs);
-    fugazi::backtest::run(
+    crate::backtest::run(
         &mut strategy,
         &mut wallet,
         atoms
             .iter()
-            .map(|(_, a)| fugazi::types::Snapshot::single(symbol.clone(), a.clone())),
+            .map(|(_, a)| crate::types::Snapshot::single(symbol.clone(), a.clone())),
     )
 }
 
@@ -81,7 +81,7 @@ pub fn schema_from_atoms(atoms: &[(String, Atom)]) -> std::sync::Arc<Schema> {
 /// overlay [`Schema`] `Arc`. Falls back to [`Schema::empty()`] under the
 /// same conditions.
 pub fn schema_from_snapshots(
-    snapshots: &[fugazi::types::Snapshot<String>],
+    snapshots: &[crate::types::Snapshot<String>],
 ) -> std::sync::Arc<Schema> {
     snapshots
         .iter()
@@ -148,19 +148,19 @@ pub fn evaluate_windowed(
 /// caller passes a fresh builder per invocation.
 pub fn measured_report_from_strategy<S>(
     build_strategy: impl FnOnce() -> S,
-    snapshots: &[fugazi::types::Snapshot<String>],
+    snapshots: &[crate::types::Snapshot<String>],
     cash: Real,
     per_symbol_costs: Vec<(String, TradingCosts)>,
-) -> fugazi::RunReport<String>
+) -> crate::RunReport<String>
 where
-    S: fugazi::Strategy<Input = fugazi::types::Snapshot<String>, Symbol = String>,
+    S: crate::Strategy<Input = crate::types::Snapshot<String>, Symbol = String>,
 {
     let mut strategy = build_strategy();
     let mut wallet: PaperWallet<String> = PaperWallet::new(cash);
     for (sym, costs) in per_symbol_costs {
         wallet.set_costs_for(sym, costs);
     }
-    fugazi::backtest::run(&mut strategy, &mut wallet, snapshots.iter().cloned())
+    crate::backtest::run(&mut strategy, &mut wallet, snapshots.iter().cloned())
 }
 
 /// The basket twin of [`evaluate`]: reduce a whole-run backtest of
@@ -169,7 +169,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_basket(
     spec: &BasketStrategySpec,
-    snapshots: &[fugazi::types::Snapshot<String>],
+    snapshots: &[crate::types::Snapshot<String>],
     universe: &[String],
     cash: Real,
     bars_per_year: Real,
@@ -198,7 +198,7 @@ pub fn evaluate_basket(
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_windowed_basket(
     spec: &BasketStrategySpec,
-    snapshots: &[fugazi::types::Snapshot<String>],
+    snapshots: &[crate::types::Snapshot<String>],
     universe: &[String],
     cash: Real,
     bars_per_year: Real,
@@ -235,7 +235,7 @@ pub fn evaluate_windowed_basket(
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_pairs(
     spec: &PairsStrategySpec,
-    snapshots: &[fugazi::types::Snapshot<String>],
+    snapshots: &[crate::types::Snapshot<String>],
     cash: Real,
     bars_per_year: Real,
     risk_free_rate: Real,
@@ -266,7 +266,7 @@ pub fn evaluate_pairs(
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_windowed_pairs(
     spec: &PairsStrategySpec,
-    snapshots: &[fugazi::types::Snapshot<String>],
+    snapshots: &[crate::types::Snapshot<String>],
     cash: Real,
     bars_per_year: Real,
     risk_free_rate: Real,
@@ -302,12 +302,12 @@ pub fn evaluate_windowed_pairs(
 
 /// The multi-asset twin of [`evaluate`] — one grid-cell evaluation for a
 /// `multi:` document (independent per-symbol
-/// [`SingleAssetStrategy`](fugazi::strategies::SingleAssetStrategy)-shaped
+/// [`SingleAssetStrategy`](crate::strategies::SingleAssetStrategy)-shaped
 /// decisions).
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_multi(
     spec: &MultiAssetStrategySpec,
-    snapshots: &[fugazi::types::Snapshot<String>],
+    snapshots: &[crate::types::Snapshot<String>],
     universe: &[String],
     cash: Real,
     bars_per_year: Real,
@@ -335,7 +335,7 @@ pub fn evaluate_multi(
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_windowed_multi(
     spec: &MultiAssetStrategySpec,
-    snapshots: &[fugazi::types::Snapshot<String>],
+    snapshots: &[crate::types::Snapshot<String>],
     universe: &[String],
     cash: Real,
     bars_per_year: Real,
@@ -369,7 +369,7 @@ pub fn evaluate_windowed_multi(
 /// The portfolio twin of [`measured_report_from_strategy`]: drive an
 /// already-built [`DynPortfolio`](crate::spec::DynPortfolio) through its
 /// own composite wallet view (a
-/// [`PortfolioWallet`](fugazi::portfolio::PortfolioWallet), not a plain
+/// [`PortfolioWallet`](crate::portfolio::PortfolioWallet), not a plain
 /// [`PaperWallet`]), returning the aggregate run report.
 ///
 /// Portfolio can't share [`measured_report_from_strategy`]'s wallet setup
@@ -379,17 +379,17 @@ pub fn evaluate_windowed_multi(
 /// argument, so this driver just wires the wallet view and runs.
 pub fn measured_report_portfolio(
     build_portfolio: impl FnOnce() -> crate::spec::DynPortfolio,
-    snapshots: &[fugazi::types::Snapshot<String>],
-) -> fugazi::RunReport<String> {
+    snapshots: &[crate::types::Snapshot<String>],
+) -> crate::RunReport<String> {
     let mut portfolio = build_portfolio();
     let mut wallet = portfolio.wallet_view();
-    fugazi::backtest::run(&mut portfolio, &mut wallet, snapshots.iter().cloned())
+    crate::backtest::run(&mut portfolio, &mut wallet, snapshots.iter().cloned())
 }
 
 /// Discover the tradeable universe from a snapshot stream — the distinct
 /// symbols carried across every bar, sorted so the resulting per-symbol
 /// cost install order is deterministic.
-pub fn universe_from_snapshots(snapshots: &[fugazi::types::Snapshot<String>]) -> Vec<String> {
+pub fn universe_from_snapshots(snapshots: &[crate::types::Snapshot<String>]) -> Vec<String> {
     let mut set = std::collections::HashSet::new();
     for snap in snapshots {
         for (sym, _, _) in snap.iter() {
@@ -413,7 +413,7 @@ pub fn universe_from_snapshots(snapshots: &[fugazi::types::Snapshot<String>]) ->
 /// A per-symbol bundle that resolves the same as the default becomes a
 /// (redundant but harmless) explicit install; per-symbol bundles that
 /// resolve to `is_none()` are still installed because
-/// [`PaperWallet::set_costs_for`](fugazi::PaperWallet::set_costs_for) is a
+/// [`PaperWallet::set_costs_for`](crate::PaperWallet::set_costs_for) is a
 /// per-symbol *override* — an explicit no-op override differs from
 /// falling through to the default when the default itself is non-trivial.
 fn build_priced_portfolio_with_costs(
@@ -444,7 +444,7 @@ fn build_priced_portfolio_with_costs(
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_portfolio(
     spec: &PortfolioSpec,
-    snapshots: &[fugazi::types::Snapshot<String>],
+    snapshots: &[crate::types::Snapshot<String>],
     cash: Real,
     bars_per_year: Real,
     risk_free_rate: Real,
@@ -465,7 +465,7 @@ pub fn evaluate_portfolio(
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_windowed_portfolio(
     spec: &PortfolioSpec,
-    snapshots: &[fugazi::types::Snapshot<String>],
+    snapshots: &[crate::types::Snapshot<String>],
     cash: Real,
     bars_per_year: Real,
     risk_free_rate: Real,
@@ -498,7 +498,7 @@ pub fn evaluate_windowed_portfolio(
 pub fn run_iteration_portfolio(
     spec: &PortfolioSpec,
     bars: &[String],
-    snapshots: &[fugazi::types::Snapshot<String>],
+    snapshots: &[crate::types::Snapshot<String>],
     inputs: &IterationInputs,
 ) -> IterationResult {
     assert_eq!(
@@ -526,7 +526,7 @@ pub fn run_iteration_portfolio(
         &universe,
     );
     let mut priced_wallet = priced.wallet_view();
-    let report = fugazi::backtest::run(
+    let report = crate::backtest::run(
         &mut priced,
         &mut priced_wallet,
         snapshots.iter().cloned(),
@@ -537,7 +537,7 @@ pub fn run_iteration_portfolio(
     let gross_report = if costs_active {
         let mut gross = spec.build(inputs.cash, &schema, None);
         let mut gross_wallet = gross.wallet_view();
-        Some(fugazi::backtest::run(
+        Some(crate::backtest::run(
             &mut gross,
             &mut gross_wallet,
             snapshots.iter().cloned(),
@@ -612,8 +612,8 @@ pub struct IterationResult {
     /// One time label per bar, borrowed from the input atoms' time column
     /// and cloned so the result is `Send + 'static`.
     pub bars: Vec<String>,
-    /// The priced (net) run report from `fugazi::backtest::run`.
-    pub report: fugazi::RunReport<String>,
+    /// The priced (net) run report from `crate::backtest::run`.
+    pub report: crate::RunReport<String>,
     /// Whole-run metrics document.
     pub metrics: metrics::Metrics,
     /// Whole-run metrics for the gross twin, when it exists.
@@ -671,9 +671,9 @@ pub fn run_iteration(
     let costs = inputs.cost_config.resolve(symbol, inputs.effective_freq);
     let schema = schema_from_atoms(atoms);
     let bars: Vec<String> = atoms.iter().map(|(t, _)| t.clone()).collect();
-    let snapshots: Vec<fugazi::types::Snapshot<String>> = atoms
+    let snapshots: Vec<crate::types::Snapshot<String>> = atoms
         .iter()
-        .map(|(_, a)| fugazi::types::Snapshot::single(symbol.to_string(), a.clone()))
+        .map(|(_, a)| crate::types::Snapshot::single(symbol.to_string(), a.clone()))
         .collect();
     run_iteration_core(
         || strategy.build(inputs.cash, &schema),
@@ -685,9 +685,9 @@ pub fn run_iteration(
 }
 
 /// The pairs twin of [`run_iteration`]. Drives a
-/// [`PairsStrategy`](fugazi::strategies::PairsStrategy) over a time-aligned
+/// [`PairsStrategy`](crate::strategies::PairsStrategy) over a time-aligned
 /// pair of atom streams (both symbols packed into one
-/// [`Snapshot<String>`](fugazi::types::Snapshot) per bar).
+/// [`Snapshot<String>`](crate::types::Snapshot) per bar).
 ///
 /// `left`/`right` are the parallel atom streams — the caller is responsible
 /// for joining them on `time`; each index corresponds to the same time
@@ -735,11 +735,11 @@ pub fn run_iteration_pairs(
         .find_map(|a| a.overlays.as_ref())
         .map(|ov| ov.schema().clone())
         .unwrap_or_else(Schema::empty);
-    let snapshots: Vec<fugazi::types::Snapshot<String>> = left
+    let snapshots: Vec<crate::types::Snapshot<String>> = left
         .iter()
         .zip(right.iter())
         .map(|(l, r)| {
-            let mut s = fugazi::types::Snapshot::<String>::new();
+            let mut s = crate::types::Snapshot::<String>::new();
             s.push(Some(spec.left.clone()), None, l.clone());
             s.push(Some(spec.right.clone()), None, r.clone());
             s
@@ -755,7 +755,7 @@ pub fn run_iteration_pairs(
 }
 
 /// The basket twin of [`run_iteration`] / [`run_iteration_pairs`]. Drives a
-/// [`BasketStrategy`](fugazi::strategies::BasketStrategy) over pre-aligned
+/// [`BasketStrategy`](crate::strategies::BasketStrategy) over pre-aligned
 /// snapshots — each snapshot carries the symbol-tagged atoms for one bar of
 /// the shared timeline, ordered by `bars` (each `snapshots[i]` corresponds
 /// to `bars[i]`).
@@ -763,7 +763,7 @@ pub fn run_iteration_pairs(
 /// The caller (`crate::run::run_basket`) is responsible for the multi-way
 /// time alignment: unioning per-symbol atom streams into a shared bar
 /// sequence and packing the atoms present at each bar into a
-/// [`Snapshot<String>`](fugazi::types::Snapshot). Symbols that are missing
+/// [`Snapshot<String>`](crate::types::Snapshot). Symbols that are missing
 /// on a bar simply don't appear in that snapshot — the strategy's inner
 /// `Pick`s read `None` and the score/sizing chains propagate that up.
 ///
@@ -776,12 +776,12 @@ pub fn run_iteration_pairs(
 /// `universe` fills at zero cost (a minor safety net; the driver passes
 /// the full symbol set discovered in the frame).
 ///
-/// [`PaperWallet::set_costs_for`]: fugazi::PaperWallet::set_costs_for
-/// [`TradingCosts::none`]: fugazi::TradingCosts::none
+/// [`PaperWallet::set_costs_for`]: crate::PaperWallet::set_costs_for
+/// [`TradingCosts::none`]: crate::TradingCosts::none
 pub fn run_iteration_basket(
     spec: &BasketStrategySpec,
     bars: &[String],
-    snapshots: &[fugazi::types::Snapshot<String>],
+    snapshots: &[crate::types::Snapshot<String>],
     universe: &[String],
     inputs: &IterationInputs,
 ) -> IterationResult {
@@ -826,7 +826,7 @@ pub fn run_iteration_basket(
 pub fn run_iteration_multi(
     spec: &MultiAssetStrategySpec,
     bars: &[String],
-    snapshots: &[fugazi::types::Snapshot<String>],
+    snapshots: &[crate::types::Snapshot<String>],
     universe: &[String],
     inputs: &IterationInputs,
 ) -> IterationResult {
@@ -866,7 +866,7 @@ pub fn run_iteration_multi(
 ///
 /// `per_symbol_costs` is the flat list of per-symbol cost bundles the
 /// wallet is primed with — installed via
-/// [`PaperWallet::set_costs_for`](fugazi::PaperWallet::set_costs_for) so
+/// [`PaperWallet::set_costs_for`](crate::PaperWallet::set_costs_for) so
 /// each traded symbol carries its own commission / spread / slippage
 /// pipeline. The wallet's fallback is always [`TradingCosts::none`], so a
 /// symbol the strategy trades that isn't in the list fills at zero cost.
@@ -880,13 +880,13 @@ pub fn run_iteration_multi(
 /// carries reads freshly on each call.
 fn run_iteration_core<S>(
     mut build_strategy: impl FnMut() -> S,
-    snapshots: &[fugazi::types::Snapshot<String>],
+    snapshots: &[crate::types::Snapshot<String>],
     bars: Vec<String>,
     per_symbol_costs: Vec<(String, TradingCosts)>,
     inputs: &IterationInputs,
 ) -> IterationResult
 where
-    S: fugazi::Strategy<Input = fugazi::types::Snapshot<String>, Symbol = String>,
+    S: crate::Strategy<Input = crate::types::Snapshot<String>, Symbol = String>,
 {
     let costs_active = per_symbol_costs.iter().any(|(_, c)| !c.is_none());
     let mut strategy = build_strategy();
@@ -894,13 +894,13 @@ where
     for (sym, c) in per_symbol_costs {
         wallet.set_costs_for(sym, c);
     }
-    let report = fugazi::backtest::run(&mut strategy, &mut wallet, snapshots.iter().cloned());
+    let report = crate::backtest::run(&mut strategy, &mut wallet, snapshots.iter().cloned());
     // Gross twin under active costs: same strategy/snapshots/cash, no cost
     // model, so any difference is attributable to costs alone.
     let gross_report = if costs_active {
         let mut gs = build_strategy();
         let mut gw = PaperWallet::new(inputs.cash);
-        Some(fugazi::backtest::run(
+        Some(crate::backtest::run(
             &mut gs,
             &mut gw,
             snapshots.iter().cloned(),

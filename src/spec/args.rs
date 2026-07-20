@@ -1,6 +1,6 @@
 //! Build-time `!arg` substitution for a [`SpecTemplate`](crate::spec::SpecTemplate).
 //!
-//! Twin of [`crate::params`]. Where `!param` is resolved at **load time**
+//! Twin of [`crate::spec::params`]. Where `!param` is resolved at **load time**
 //! from the user's `--params` CLI args (same values for every build of the
 //! spec), `!arg` is resolved at **build time** by whatever driver
 //! constructs the concrete spec — for a
@@ -27,7 +27,7 @@ use serde_json::{Map, Value};
 /// `args`, recursing through objects and arrays. Non-placeholder scalars
 /// pass through untouched. `param` placeholders (which are `!param`'s
 /// singleton form) are treated as ordinary objects and left alone — those
-/// are `crate::params::substitute`'s responsibility.
+/// are `crate::spec::params::substitute`'s responsibility.
 pub fn substitute(value: Value, args: &HashMap<String, Value>) -> Result<Value> {
     match value {
         Value::Object(map) if map.len() == 1 && map.contains_key("arg") => {

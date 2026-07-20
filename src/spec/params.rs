@@ -5,11 +5,11 @@
 //! no room to drop a `param` placeholder where a number is expected during typed
 //! parsing. So substitution happens in a **first pass over the untyped value
 //! tree**: the document is normalized to a [`serde_json::Value`] (see
-//! [`crate::convert`]), every placeholder node is rewritten to its resolved value
+//! [`crate::spec::convert`]), every placeholder node is rewritten to its resolved value
 //! here, and only then is the result deserialized into the typed spec.
 //!
 //! A placeholder is a singleton object keyed `param` — written `!param { … }` in
-//! YAML (the tag becomes that object via [`crate::convert`]) or, in flow/map form,
+//! YAML (the tag becomes that object via [`crate::spec::convert`]) or, in flow/map form,
 //! `{ param: { … } }`:
 //!
 //! ```yaml
@@ -24,7 +24,7 @@ use std::str::FromStr;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Map, Value};
 
-use crate::input::{self, Source};
+use crate::spec::input::{self, Source};
 
 /// One term of a `--params` spec: set a single value, or load a mapping file.
 #[derive(Debug, Clone)]
@@ -178,7 +178,7 @@ pub fn substitute(value: Value, params: &HashMap<String, Value>) -> Result<Value
 /// `default`) is left in place for the outer [`substitute`] pass to
 /// resolve later.
 ///
-/// Used by [`crate::imports`] when an `!import` node carries inline
+/// Used by [`crate::spec::imports`] when an `!import` node carries inline
 /// `params: { … }`: the imported subtree is *partially* resolved with
 /// those inline values, and any placeholder whose key isn't listed
 /// inline falls through unchanged. That gives callers scope-limited
@@ -248,7 +248,7 @@ fn resolve(body: &Value, params: &HashMap<String, Value>) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::convert::yaml_to_json;
+    use crate::spec::convert::yaml_to_json;
     use crate::spec::SingleStrategySpec;
 
     fn table_of(specs: &[&str]) -> HashMap<String, Value> {
@@ -350,6 +350,6 @@ mod tests {
         let spec: SingleStrategySpec = serde_json::from_value(value).unwrap();
         assert_eq!(spec.symbol, "BTC");
         assert!(spec.long.is_some());
-        let _strat = spec.build(1_000.0, &fugazi::Schema::empty());
+        let _strat = spec.build(1_000.0, &crate::Schema::empty());
     }
 }

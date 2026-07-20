@@ -71,6 +71,8 @@ pub mod signal;
 pub mod snapshot;
 #[cfg(feature = "sources")]
 pub mod sources;
+#[cfg(feature = "spec")]
+pub mod spec;
 pub mod strategies;
 pub mod strategy;
 pub mod time;
