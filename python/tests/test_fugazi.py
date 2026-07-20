@@ -602,6 +602,23 @@ def test_wallet_set_position_is_absolute_and_books_funds():
     assert w.funds == pytest.approx(1_000.0 - 5.0 * 100.0)
 
 
+def test_wallet_poll_fills_and_cancel():
+    w = ta.PaperWallet(1_000.0)
+    w.update("AAPL", 100.0)
+    # A paper wallet never has out-of-band fills (the method exists for parity
+    # with live wallets, which buffer async fills there).
+    assert w.poll_fills() == []
+    w.set_position("AAPL", 3.0)
+    w.update("AAPL", 100.0)
+    order = w.orders()[-1]
+    # Every booked order exposes the id of its submission.
+    assert isinstance(order.id, int)
+    # Cancelling a known (already-filled) or unknown id is a safe no-op.
+    w.cancel(order.id)
+    w.cancel(9999)
+    assert w.poll_fills() == []
+
+
 def test_wallet_set_is_absolute_and_reverses():
     w = ta.PaperWallet(10_000.0)
     w.update("X", 50.0)

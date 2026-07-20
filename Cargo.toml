@@ -27,6 +27,11 @@ name = "fugazi"
 path = "src/cli/main.rs"
 required-features = ["cli"]
 
+# The live-wallet smoke test needs the `live` feature (Binance futures testnet).
+[[example]]
+name = "binance_testnet"
+required-features = ["live"]
+
 # `sources` pulls in the async HTTP stack the remote candle providers
 # (`fugazi::sources`) rely on. `cli` pulls in everything only the binary uses.
 # All CLI deps are pure Rust — no system libraries link in, so the Python wheel
@@ -48,6 +53,13 @@ runtime = []
 # CLI's own dep list); a caller who wants the ensemble primitive without
 # the CLI enables it on its own (`features = ["parallel"]`).
 parallel = ["dep:rayon"]
+# `live` compiles the live-execution wallets (`fugazi::live`) — downstream
+# `Wallet` impls that route orders to a real broker instead of an in-memory
+# paper book. It builds on `sources` (which already pulls in the async
+# `reqwest`/`tokio` stack the REST clients use) and adds the HMAC-SHA256
+# request signing every private venue endpoint requires (`hmac` + `sha2` +
+# `hex`). Not default-on: `cargo build` and the Python wheel are unaffected.
+live = ["sources", "dep:hmac", "dep:sha2", "dep:hex"]
 # `spec` compiles the YAML-driven declarative surface (`fugazi::spec`) — the
 # `*Spec` types, `evaluate*` / `measured_report*` / `optimize` kernel,
 # `Metrics` document + `MetricKey`, `CostConfig`, `WindowSpec`, and the
@@ -86,6 +98,9 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros"],
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 statrs = { version = "0.18", default-features = false }
 thiserror = { version = "2", optional = true }
+hmac = { version = "0.12", optional = true }
+sha2 = { version = "0.10", optional = true }
+hex = { version = "0.4", optional = true }
 interim = { version = "0.2.1", default-features = false, features = ["std", "time_0_3"], optional = true }
 
 [dev-dependencies]

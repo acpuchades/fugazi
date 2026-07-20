@@ -55,7 +55,7 @@ use fugazi_core::sources::{
     SourceError, Timestamp, Yahoo,
 };
 use fugazi_core::wallet::{
-    Ack, Order, OrderKind, PaperWallet, Reference, Side, Size, Units, Wallet, WalletError,
+    Ack, Order, OrderId, OrderKind, PaperWallet, Reference, Side, Size, Units, Wallet, WalletError,
 };
 use fugazi_core::types::{
     Atom, Candle, Frequency, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder,
@@ -2815,18 +2815,25 @@ impl PyOrder {
     fn kind(&self) -> &'static str {
         kind_str(self.inner.kind)
     }
+    /// The id of the submission this fill belongs to — pass it to
+    /// `PaperWallet.cancel(id)` to cancel a still-working order.
+    #[getter]
+    fn id(&self) -> u64 {
+        self.inner.id.0
+    }
     /// `+units` for a buy, `-units` for a sell.
     fn signed_units(&self) -> f64 {
         self.inner.signed_units()
     }
     fn __repr__(&self) -> String {
         format!(
-            "Order(symbol='{}', side='{}', units={}, price={}, kind='{}')",
+            "Order(symbol='{}', side='{}', units={}, price={}, kind='{}', id={})",
             self.inner.symbol,
             self.side(),
             self.inner.units,
             self.inner.price,
             self.kind(),
+            self.inner.id.0,
         )
     }
 }
@@ -2981,6 +2988,25 @@ impl PyWallet {
     fn cancel_protective(&mut self, symbol: String) -> PyResult<()> {
         self.inner
             .cancel_protective(&symbol)
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    /// Drain fills booked out of band (not on a specific `update`). Always empty
+    /// for the paper wallet — the method exists for parity with live wallets,
+    /// which buffer async fills here.
+    fn poll_fills(&mut self) -> Vec<PyOrder> {
+        self.inner
+            .poll_fills()
+            .into_iter()
+            .map(|inner| PyOrder { inner })
+            .collect()
+    }
+
+    /// Cancel a working order by its `id` (see `Order.id`): a queued market
+    /// order or a resting protective leg is dropped. An unknown id is a no-op.
+    fn cancel(&mut self, id: u64) -> PyResult<()> {
+        self.inner
+            .cancel(OrderId(id))
             .map_err(|error| PyValueError::new_err(error.to_string()))
     }
 }

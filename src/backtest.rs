@@ -174,6 +174,15 @@ where
         // could not be booked. Routed before update(), like the fills alongside
         // which they occurred.
         drain_rejections!(bar);
+        // Drain any out-of-band fills the wallet booked between bars (a live
+        // venue reports fills asynchronously, on its own schedule and possibly
+        // for a symbol that didn't tick this bar). A `PaperWallet` has none —
+        // its `poll_fills` keeps the empty default — so this is a no-op for
+        // backtests and the equity curve is byte-identical.
+        for fill in wallet.poll_fills() {
+            strategy.on_fill(&fill);
+            fills.push(Fill { bar, order: fill });
+        }
         strategy.update(snap);
         // update()/on_fill() always run so warm-up progresses; trade() only
         // runs once the strategy reports ready. is_ready() defaults to true,

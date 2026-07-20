@@ -273,6 +273,14 @@ pub enum WalletError {
     /// cash-phase rebalance) should treat this as "the transfer didn't
     /// happen" and fall back to trait-friendly alternatives (position resize).
     UnsupportedOperation,
+    /// A live venue could not carry out the operation — the request failed at
+    /// the broker (network error, HTTP error, an exchange rejection, or an
+    /// unparseable response). The [`WalletError`] stays a small `Copy` enum, so
+    /// this variant is a **category**, not the detail: a live wallet records
+    /// the full error (endpoint, status, body) on an internal, queryable log
+    /// and returns this to say "the venue leg failed". The [`PaperWallet`]
+    /// never returns it.
+    Venue,
 }
 
 impl fmt::Display for WalletError {
@@ -283,6 +291,7 @@ impl fmt::Display for WalletError {
             WalletError::UnsupportedOperation => {
                 f.write_str("the operation is not supported by this wallet implementation")
             }
+            WalletError::Venue => f.write_str("the live venue could not carry out the operation"),
             WalletError::PriceOutOfRange => {
                 f.write_str("the fill price is outside the current candle's range")
             }
@@ -458,6 +467,47 @@ pub trait Wallet<Sym> {
     /// describing a position it does not hold.
     fn take_rejections(&mut self) -> Vec<Rejection<Sym>> {
         Vec::new()
+    }
+
+    /// Drain fills that arrived **out of band** — booked by the venue between
+    /// bars rather than on a specific [`update`](Wallet::update) call — and
+    /// return them, clearing the buffer.
+    ///
+    /// [`update`](Wallet::update) is the fill stream for order flow tied to a
+    /// bar (a queued market order filling at the next `open`, a resting stop
+    /// triggering against a candle's range). A live venue, though, fills on
+    /// its own schedule and reports fills asynchronously; a live [`Wallet`]
+    /// buffers those and hands them over here, so the fill latency isn't
+    /// pinned to the bar-feeding cadence and a fill on a symbol that didn't
+    /// tick this bar still reaches the strategy. A driver should call this
+    /// once per bar (the [`run`](crate::backtest::run) loop does) and route
+    /// each returned [`Order`] through
+    /// [`Strategy::on_fill`](crate::Strategy::on_fill), exactly as it does the
+    /// [`update`](Wallet::update) fills.
+    ///
+    /// The default returns an empty vector — the [`PaperWallet`] and every
+    /// synchronous impl have no out-of-band fills, so this is a no-op for
+    /// backtests (the equity curve is byte-identical whether or not the driver
+    /// drains it).
+    fn poll_fills(&mut self) -> Vec<Order<Sym>> {
+        Vec::new()
+    }
+
+    /// Cancel a working order by the [`OrderId`] its submission returned in an
+    /// [`Ack`], returning `Ok(())` once it is (or already was) gone.
+    ///
+    /// Complements [`cancel_protective`](Wallet::cancel_protective) (which
+    /// drops the whole resting bracket) with a single-order cancel — the shape
+    /// a live venue exposes for a working entry order. The default returns
+    /// [`WalletError::UnsupportedOperation`]; a paper impl overrides it to drop
+    /// a matching queued market order or resting protective leg, and a live
+    /// impl relays a cancel to the broker. Cancelling an id the wallet no
+    /// longer knows (already filled, already cancelled, never minted here) is
+    /// **not** an error — the post-condition "that order is not working" holds
+    /// either way — so an impl should return `Ok(())` for an unknown id.
+    fn cancel(&mut self, id: OrderId) -> Result<(), WalletError> {
+        let _ = id;
+        Err(WalletError::UnsupportedOperation)
     }
 }
 
@@ -1094,6 +1144,38 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
             return Err(WalletError::InsufficientFunds);
         }
         self.funds = new_funds;
+        Ok(())
+    }
+
+    /// Drop a working order by id — the paper impl of [`Wallet::cancel`]. A
+    /// queued market order (one per symbol) is removed by matching its
+    /// [`OrderId`]; a resting protective leg is cleared (and its bracket
+    /// dropped when both legs are gone). An id the wallet no longer holds is a
+    /// no-op `Ok(())`, per the trait contract.
+    fn cancel(&mut self, id: OrderId) -> Result<(), WalletError> {
+        // A queued market order carries its id in either `Pending` variant.
+        let queued = self.pending.iter().find_map(|(sym, pending)| {
+            let pid = match pending {
+                Pending::Target(_, pid) | Pending::Sized(_, _, pid) => *pid,
+            };
+            (pid == id).then(|| sym.clone())
+        });
+        if let Some(sym) = queued {
+            self.pending.remove(&sym);
+            return Ok(());
+        }
+        // Otherwise clear a matching resting protective leg, then discard any
+        // now-empty bracket.
+        for prot in self.protective.values_mut() {
+            if prot.stop.is_some_and(|l| l.id == id) {
+                prot.stop = None;
+            }
+            if prot.take_profit.is_some_and(|l| l.id == id) {
+                prot.take_profit = None;
+            }
+        }
+        self.protective
+            .retain(|_, prot| prot.stop.is_some() || prot.take_profit.is_some());
         Ok(())
     }
 }
@@ -1797,5 +1879,59 @@ mod tests {
         let mut w = NoTransferWallet;
         assert_eq!(w.adjust_funds(100.0), Err(WalletError::UnsupportedOperation));
         assert_eq!(w.adjust_funds(-50.0), Err(WalletError::UnsupportedOperation));
+        // The two Tier-B additions also fall through to their trait defaults:
+        // no out-of-band fills, and cancel is unsupported for a bare impl.
+        assert!(w.poll_fills().is_empty());
+        assert_eq!(w.cancel(OrderId(7)), Err(WalletError::UnsupportedOperation));
+    }
+
+    #[test]
+    fn paper_wallet_poll_fills_is_empty() {
+        // A backtest never has out-of-band fills, so the paper impl keeps the
+        // empty default — the driver draining it must be a no-op.
+        let mut w: PaperWallet<&str> = PaperWallet::new(1_000.0);
+        w.update("X", bar(100.0));
+        w.set_position(Units { symbol: "X", amount: 3.0 }).unwrap();
+        w.update("X", bar(100.0));
+        assert!(w.poll_fills().is_empty());
+    }
+
+    #[test]
+    fn cancel_drops_a_queued_market_order() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(1_000.0);
+        w.update("X", bar(100.0));
+        let id = match w.set_position(Units { symbol: "X", amount: 3.0 }).unwrap() {
+            Ack::Working(id) => id,
+            Ack::Filled(_) => panic!("market order should queue, not fill"),
+        };
+        // Cancel before the next bar flushes the queue -> no fill happens.
+        assert_eq!(w.cancel(id), Ok(()));
+        let fills = w.update("X", bar(100.0));
+        assert!(fills.is_empty(), "cancelled order should not fill");
+        assert_eq!(w.position(&"X").amount, 0.0);
+        // Cancelling an unknown / already-gone id is a no-op, not an error.
+        assert_eq!(w.cancel(id), Ok(()));
+        assert_eq!(w.cancel(OrderId(999)), Ok(()));
+    }
+
+    #[test]
+    fn cancel_clears_a_resting_protective_leg() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::units(10.0)).unwrap();
+        w.update("X", bar(100.0)); // long 10 @ 100
+        let stop = match w.set_stop("X", Reference(90.0)).unwrap() {
+            Ack::Working(id) => id,
+            Ack::Filled(_) => panic!("resting order returns Working"),
+        };
+        w.set_take_profit("X", Reference(120.0)).unwrap();
+        // Cancel only the stop; the take-profit leg survives and still fires.
+        assert_eq!(w.cancel(stop), Ok(()));
+        let through_stop = w.update("X", Candle::new(95.0, 96.0, 85.0, 88.0, 0.0));
+        assert!(through_stop.is_empty(), "cancelled stop must not fill");
+        assert_eq!(w.position(&"X").amount, 10.0);
+        let through_tp = w.update("X", Candle::new(115.0, 125.0, 114.0, 121.0, 0.0));
+        assert_eq!(through_tp.len(), 1, "take-profit leg should still fire");
+        assert_fill(&through_tp[0], Side::Sell, 10.0, 120.0, OrderKind::TakeProfit);
     }
 }
