@@ -630,6 +630,7 @@ pub enum ExprSpec {
     Vwap {
         #[serde(default = "default_bar_source")]
         source: Box<ExprSpec>,
+        period: usize,
     },
     Ad {
         #[serde(default = "default_bar_source")]
@@ -1372,6 +1373,7 @@ enum ExprSpecRaw {
     Vwap {
         #[serde(default = "default_bar_source")]
         source: Box<ExprSpec>,
+        period: usize,
     },
     Ad {
         #[serde(default = "default_bar_source")]
@@ -1773,7 +1775,7 @@ impl From<ExprSpecRaw> for ExprSpec {
             ExprSpecRaw::Mfi { source, period } => ExprSpec::Mfi { source, period },
             ExprSpecRaw::WilliamsR { source, period } => ExprSpec::WilliamsR { source, period },
             ExprSpecRaw::Obv { source } => ExprSpec::Obv { source },
-            ExprSpecRaw::Vwap { source } => ExprSpec::Vwap { source },
+            ExprSpecRaw::Vwap { source, period } => ExprSpec::Vwap { source, period },
             ExprSpecRaw::Ad { source } => ExprSpec::Ad { source },
             ExprSpecRaw::TrueRange { source } => ExprSpec::TrueRange { source },
             ExprSpecRaw::Sar { source, step, max } => ExprSpec::Sar { source, step, max },
@@ -2520,7 +2522,9 @@ impl ExprSpec {
                 dyn_indicator::wrap(self::WilliamsR::new(candle(source), *period))
             }
             Obv { source } => dyn_indicator::wrap(self::Obv::new(candle(source))),
-            Vwap { source } => dyn_indicator::wrap(self::Vwap::new(candle(source))),
+            Vwap { source, period } => {
+                dyn_indicator::wrap(self::Vwap::new(candle(source), *period))
+            }
             Ad { source } => dyn_indicator::wrap(self::Ad::new(candle(source))),
             TrueRange { source } => dyn_indicator::wrap(self::TrueRange::new(candle(source))),
             Sar { source, step, max } => {

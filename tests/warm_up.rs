@@ -90,7 +90,7 @@ fn warm_up_is_exact_for_the_catalogue() {
     candle_case(TrueRange::new(Current::candle()), "true_range");
     candle_case(Obv::new(Current::candle()), "obv");
     candle_case(fugazi::indicators::Ad::new(Current::candle()), "ad");
-    candle_case(Vwap::new(Current::candle()), "vwap");
+    candle_case(Vwap::new(Current::candle(), 20), "vwap");
     candle_case(Sar::with_defaults(Current::candle()), "sar");
     candle_case(Atr::new(Current::candle(), 14), "atr");
     candle_case(Parkinson::new(Current::candle(), 20), "parkinson");

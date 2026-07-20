@@ -16,13 +16,13 @@ pub fn obv_trend<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send 
 
 /// VWAP reversion, long/flat.
 ///
-/// Buys when price dips below the (session-anchored) VWAP and exits when it
-/// recovers above — a classic intraday "fair value" fade. Call
-/// [`reset`](Strategy::reset) at each session boundary to re-anchor the VWAP.
-pub fn vwap_reversion<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>(symbol: Sym) -> SingleAssetStrategy<Sym> {
+/// Buys when price dips below a rolling VWAP over the last `period` bars and
+/// exits when it recovers above — a "fair value" fade against the recent
+/// volume-weighted mean.
+pub fn vwap_reversion<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>(symbol: Sym, period: usize) -> SingleAssetStrategy<Sym> {
     SingleAssetStrategy::new(symbol).long_on(
-        super::self_close::<Sym>().crosses_below(Vwap::new(super::self_bar::<Sym>())),
-        super::self_close::<Sym>().crosses_above(Vwap::new(super::self_bar::<Sym>())),
+        super::self_close::<Sym>().crosses_below(Vwap::new(super::self_bar::<Sym>(), period)),
+        super::self_close::<Sym>().crosses_above(Vwap::new(super::self_bar::<Sym>(), period)),
     )
 }
 

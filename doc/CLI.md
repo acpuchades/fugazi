@@ -1065,8 +1065,8 @@ Real-valued indicators, one YAML tag per fugazi constructor:
 - **Trend / directional**: `!adx`/`!plus_di`/`!minus_di { period }`,
   `!dmi_plus_di`/`!dmi_minus_di { period }`, `!aroon_up`/`!aroon_down`/
   `!aroon_oscillator { period }`, `!sar { step, max }`.
-- **Bar indicators**: `!atr { period }`, `!mfi { period }`,
-  `!true_range`, `!obv`, `!vwap`, `!ad`.
+- **Bar indicators**: `!atr { period }`, `!mfi { period }`, `!vwap { period }`,
+  `!true_range`, `!obv`, `!ad`.
 - **Arithmetic**: `!add`/`!sub`/`!mul`/`!div { lhs, rhs }`.
 - **Lookback**: `!lag`/`!diff`/`!ratio`/`!roc { source, periods }`.
 - **Rolling extremum**: `!rolling_max`/`!rolling_min { source, period }`.

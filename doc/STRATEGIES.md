@@ -75,7 +75,7 @@ two equivalent spellings, and you can mix them freely in one file:
 The tag form and the single-key-map form are interchangeable because the loader
 normalizes `!tag value` into `{tag: value}` before typing the document. The bare
 word is just the map/tag with no body, used for parameterless leaves (`close`)
-and bar indicators (`obv`, `vwap`).
+and bar indicators (`obv`, `ad`).
 
 The format is always YAML, in either block or flow (inline) style. JSON is a
 subset of YAML, so a JSON-shaped document still parses — it just lands on the map
@@ -656,7 +656,7 @@ Each line of a multi-output indicator is its own source tag:
 ### Bar indicators (consume the whole candle)
 
 `!atr { period }`, `!mfi { period }`, `!williams_r { period }`,
-`!sar { step, max }`; and the parameterless `!obv`, `!vwap`, `!ad`,
+`!vwap { period }`, `!sar { step, max }`; and the parameterless `!obv`, `!ad`,
 `!true_range` (usable as bare words). Each accepts an optional `source:`
 field for the underlying candle stream, defaulting to `!current` — set it
 when composing across timeframes (e.g. `!atr { period: 14, source:

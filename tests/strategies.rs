@@ -114,7 +114,7 @@ fn every_strategy_trades_over_the_path() {
 
     // Volume / flow.
     assert_trades("obv_trend", obv_trend(SYMBOL, 20), &c);
-    assert_trades("vwap_reversion", vwap_reversion(SYMBOL), &c);
+    assert_trades("vwap_reversion", vwap_reversion(SYMBOL, 20), &c);
     assert_trades("chaikin_ad_trend", chaikin_ad_trend(SYMBOL, 20), &c);
 
     // Composite.

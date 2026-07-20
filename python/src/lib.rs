@@ -4961,6 +4961,11 @@ bar_period!(
     "Money-flow index over `period` (consumes the full bar)."
 );
 bar_period!(
+    vwap,
+    Vwap,
+    "Volume-weighted average price over `period` (rolling)."
+);
+bar_period!(
     williams_r,
     WilliamsR,
     "Williams %R over `period` (consumes the full bar)."
@@ -4980,11 +4985,6 @@ bar_noarg!(
     obv,
     Obv,
     "On-balance volume (cumulative; reset to re-anchor)."
-);
-bar_noarg!(
-    vwap,
-    Vwap,
-    "Volume-weighted average price (cumulative; reset at session boundaries)."
 );
 bar_noarg!(
     ad,

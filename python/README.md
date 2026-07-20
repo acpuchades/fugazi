@@ -87,7 +87,7 @@ import pandas as pd      # or: import polars as pl
 # df is your OHLCV frame (open/high/low/close/volume columns)
 df["ema20"] = ta.ema(ta.close(), 20).feed(df)   # assigns straight back
 ta.atr(14).feed(df)                             # uses high/low/close
-ta.vwap().feed(df)                              # uses high/low/close/volume
+ta.vwap(20).feed(df)                            # uses high/low/close/volume
 ```
 
 Column names are matched case-insensitively (`Close`/`CLOSE`/`close`), and
@@ -155,9 +155,9 @@ node.reset()                   # call reset() to start a fresh, independent pass
 | `correlation(lhs, rhs, period)` | rolling Pearson correlation in `[-1, 1]` (autocorrelation: `correlation(x, x.lag(n), period)`) |
 | `variance_ratio(source, period, lag)` | Lo-MacKinlay regime classifier (`>1` trending, `<1` mean-reverting); O(period)/bar recompute |
 | `stoch_rsi(source, rsi_period=14, stoch_period=14)` | a value |
-| `atr mfi williams_r (period)` | a value |
+| `atr mfi williams_r vwap (period)` | a value |
 | `parkinson garman_klass rogers_satchell (period)` | range-based volatility estimate (uses the full candle; more efficient than close-to-close stddev) |
-| `obv() vwap() ad() true_range()` | a value |
+| `obv() ad() true_range()` | a value |
 | `sar(step=0.02, max=0.2)` | a value |
 | `macd(source, fast=12, slow=26, signal=9)` | dict `{macd, signal, histogram}` |
 | `bollinger(source, period=20, k=2.0)` | dict `{upper, middle, lower}` |

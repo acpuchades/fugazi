@@ -462,7 +462,7 @@ mod tests {
     #[test]
     fn bar_indicator_tags_parse_bare_with_default_source() {
         // Every bar-indicator variant carries a defaulted `source` field
-        // pointing to `!current`, so a bare `!obv` / `!vwap` / … tag with no
+        // pointing to `!current`, so a bare `!obv` / `!ad` / … tag with no
         // map still deserializes and drives the base bar stream.
         let obv: ExprSpec = serde_norway::from_str("!obv").unwrap();
         let mut built = obv.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());

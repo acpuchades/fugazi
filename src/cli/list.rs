@@ -123,9 +123,9 @@ const GROUPS: &[Group] = &[
         entries: &[
             Entry { tag: "atr",         args: "period", doc: "average true range" },
             Entry { tag: "mfi",         args: "period", doc: "money-flow index" },
+            Entry { tag: "vwap",        args: "period", doc: "rolling volume-weighted average price" },
             Entry { tag: "true_range",  args: "",       doc: "true range of the current bar" },
             Entry { tag: "obv",         args: "",       doc: "on-balance volume (cumulative)" },
-            Entry { tag: "vwap",        args: "",       doc: "volume-weighted average price (cumulative)" },
             Entry { tag: "ad",          args: "",       doc: "Chaikin A/D line (cumulative)" },
         ],
     },
