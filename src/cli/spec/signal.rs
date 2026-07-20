@@ -15,7 +15,7 @@ use fugazi::indicators::{
 use fugazi::prelude::*;
 
 use super::expr::{ExprSpec, default_source};
-use crate::dyn_indicator::{self, AsBool, AsReal, AsStr, DynIndicator};
+use crate::dyn_indicator::{self, AsBool, AsReal, AsStr, DynIndicator, DynType};
 
 /// Every atom-input leaf on the YAML side is built rooted through an
 /// empty-selector `Pick::<String>` — the single-entry snapshot unpack that
@@ -635,16 +635,21 @@ impl SignalSpec {
                 real(rhs),
                 eps(epsilon),
             )),
-            Eq { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Eq::with_epsilon(
-                real(lhs),
-                real(rhs),
-                eps(epsilon),
-            )),
-            Ne { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Ne::with_epsilon(
-                real(lhs),
-                real(rhs),
-                eps(epsilon),
-            )),
+            // `!eq` / `!ne` are polymorphic: they dispatch to
+            // `compare::Eq` / `compare::Ne` when lhs builds to `Real`,
+            // and to `compare::StrEq` / `compare::StrNe` when lhs
+            // builds to `Str`. The `!str_eq` / `!str_ne` tags remain as
+            // dedicated shortcuts (their rhs is a `StrOperand`, letting
+            // you write `rhs: bear` without a `!value` wrapper); use
+            // them when you want the ergonomic bare-string rhs form.
+            // Under `!eq { lhs, rhs: !value bear }` both operands are
+            // ExprSpecs, so the string constant must be `!value`-wrapped.
+            Eq { lhs, rhs, epsilon } => build_polymorphic_eq(
+                lhs, rhs, *epsilon, false, anchor, book, portfolio_book, schema,
+            ),
+            Ne { lhs, rhs, epsilon } => build_polymorphic_eq(
+                lhs, rhs, *epsilon, true, anchor, book, portfolio_book, schema,
+            ),
             Above { source, level } => dyn_indicator::wrap(real(source).above(*level)),
             Below { source, level } => dyn_indicator::wrap(real(source).below(*level)),
 
@@ -724,6 +729,69 @@ impl SignalSpec {
             IsWeekday => dyn_indicator::wrap(self::IsWeekday::of(pick_any_root())),
             IsWeekend => dyn_indicator::wrap(self::IsWeekend::of(pick_any_root())),
         }
+    }
+}
+
+/// Build the polymorphic `!eq` / `!ne` — the Real-or-Str dispatcher.
+/// Inspects `lhs`'s built [`output_type`](DynIndicator::output_type) at
+/// runtime and threads it into the matching [`compare`] primitive:
+/// [`compare::Eq`] / [`compare::Ne`] for `Real`, [`compare::StrEq`] /
+/// [`compare::StrNe`] for `Str`. Non-scalar outputs (`Bool`, `Candle`,
+/// `Atom`, …) panic loudly.
+///
+/// `rhs` must build to the same type as `lhs`; a mismatch surfaces
+/// through [`AsReal::new`] / [`AsStr::new`]'s assertions (which panic
+/// with a "requires a X-output DynIndicator" message that names the
+/// wrong type).
+///
+/// `epsilon` is only meaningful for the `Real` path; the `Str` path
+/// silently ignores it (string equality is exact — there's no
+/// tolerance to apply).
+///
+/// `negate = false` builds `!eq`; `negate = true` builds `!ne`.
+#[allow(clippy::too_many_arguments)]
+fn build_polymorphic_eq(
+    lhs: &ExprSpec,
+    rhs: &ExprSpec,
+    epsilon: Option<Real>,
+    negate: bool,
+    anchor: &Position,
+    book: &Book,
+    portfolio_book: Option<&Book>,
+    schema: &Arc<Schema>,
+) -> Box<dyn DynIndicator> {
+    let lhs_built = lhs.build(anchor, book, portfolio_book, schema);
+    match lhs_built.output_type() {
+        DynType::Real => {
+            let l = AsReal::new(lhs_built);
+            let r = AsReal::new(rhs.build(anchor, book, portfolio_book, schema));
+            let e = epsilon.unwrap_or(fugazi::indicators::DEFAULT_EPSILON);
+            if negate {
+                dyn_indicator::wrap(compare::Ne::with_epsilon(l, r, e))
+            } else {
+                dyn_indicator::wrap(compare::Eq::with_epsilon(l, r, e))
+            }
+        }
+        DynType::Str => {
+            let l = AsStr::new(lhs_built);
+            let r = AsStr::new(rhs.build(anchor, book, portfolio_book, schema));
+            // `epsilon:` is silently ignored — string equality is
+            // exact. Documenting it as a no-op instead of erroring so
+            // a template that carries a shared `epsilon:` default
+            // across both a Real `!eq` and a Str `!eq` doesn't need
+            // conditional plumbing.
+            if negate {
+                dyn_indicator::wrap(compare::StrNe::new(l, r))
+            } else {
+                dyn_indicator::wrap(compare::StrEq::new(l, r))
+            }
+        }
+        other => panic!(
+            "!{tag}: lhs must produce Real or Str, got {other} — Bool / \
+             Candle / Atom / Snapshot / Time outputs have no defined \
+             equality semantics here",
+            tag = if negate { "ne" } else { "eq" },
+        ),
     }
 }
 

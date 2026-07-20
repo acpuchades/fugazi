@@ -764,6 +764,44 @@ mod tests {
     }
 
     #[test]
+    fn polymorphic_eq_dispatches_by_lhs_output_type() {
+        // `!eq` inspects `lhs`'s built output type and picks compare::Eq
+        // (Real) or compare::StrEq (Str). Same YAML shape covers both.
+        let mut b = Schema::builder();
+        b.add_str("regime");
+        let schema = b.finish();
+        // Str path: lhs is a Str column, rhs is a !value Str literal.
+        let spec: SignalSpec = serde_norway::from_str(
+            "!eq { lhs: !get { key: regime }, rhs: !value bull }",
+        )
+        .unwrap();
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &schema);
+        let bull = OverlayInfo::new(
+            schema.clone(),
+            vec![OverlayValue::Str(std::sync::Arc::from("bull"))],
+        );
+        let bear = OverlayInfo::new(
+            schema.clone(),
+            vec![OverlayValue::Str(std::sync::Arc::from("bear"))],
+        );
+        assert_eq!(
+            built.update(Payload::Snapshot(Snapshot::of_atom(Atom::with_overlays(bar(100.0), bull)))),
+            Some(Payload::Bool(true)),
+        );
+        assert_eq!(
+            built.update(Payload::Snapshot(Snapshot::of_atom(Atom::with_overlays(bar(100.0), bear)))),
+            Some(Payload::Bool(false)),
+        );
+        // Real path: lhs is close, rhs is a !value number. Same tag, no
+        // change in shape needed.
+        let spec: SignalSpec =
+            serde_norway::from_str("!eq { lhs: close, rhs: !value 100.0 }").unwrap();
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
+        assert_eq!(feed_bool(&mut built, bar(100.0)), Some(true));
+        assert_eq!(feed_bool(&mut built, bar(99.9)), Some(false));
+    }
+
+    #[test]
     fn str_eq_against_a_str_get_column() {
         // `!str_eq { lhs: !get { key: regime }, rhs: bull }` fires only when
         // the current regime cell reads exactly "bull".
