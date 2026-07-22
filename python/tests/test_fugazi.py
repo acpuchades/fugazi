@@ -991,6 +991,51 @@ def test_basket_dollar_neutral_and_universe_chain():
     assert len(rep.equity_curve) == len(snaps)
 
 
+def test_basket_selection_composes_via_of():
+    # top_bottom(2, 2) OF threshold(85, 15): the inner threshold admits
+    # AAA, BBB on the long side (>= 85) and DDD on the short side (<= 15);
+    # CCC (80) sits in the gap, so the ranked pick never sees it — where a
+    # bare top_bottom(2, 2) would have shorted it. Proves the `of=` inner
+    # actually narrows the pool.
+    strat = (
+        ta.BasketStrategy()
+        .scored_by(lambda sym: ta.close(ta.pick(sym)))
+        .sized_by(lambda sym: ta.value(0.2))
+        .top_bottom(2, 2, of=ta.threshold(85.0, 15.0))
+    )
+    snaps = _msnaps({
+        "AAA": [100, 100, 100, 100],
+        "BBB": [90, 90, 90, 90],
+        "CCC": [80, 80, 80, 80],
+        "DDD": [10, 10, 10, 10],
+    })
+    wallet = ta.PaperWallet(10_000.0)
+    rep = strat.run(wallet, snaps)
+    traded = {f.order.symbol for f in rep.fills}
+    assert {"AAA", "BBB", "DDD"} <= traded
+    assert "CCC" not in traded  # gated out by the inner threshold
+
+
+def test_basket_selection_install_via_seam_and_everything_leaf():
+    # The general `.selection(...)` seam installs a rule built from the free
+    # constructors, and `ta.everything()` is an explicit full-universe leaf.
+    strat = (
+        ta.BasketStrategy()
+        .scored_by(lambda sym: ta.close(ta.pick(sym)).roc(1))
+        .sized_by(lambda sym: ta.value(0.5))
+        .selection(ta.top_bottom(1, 1, of=ta.everything()))
+    )
+    snaps = _msnaps({
+        "AAA": [10, 11, 12, 13, 14],
+        "BBB": [10, 10, 10, 10, 10],
+        "CCC": [10, 9, 8, 7, 6],
+    })
+    wallet = ta.PaperWallet(10_000.0)
+    rep = strat.run(wallet, snaps)
+    assert len(rep.equity_curve) == len(snaps)
+    assert "BBB" not in {f.order.symbol for f in rep.fills}
+
+
 def test_wallet_rejects_bad_side():
     w = ta.PaperWallet(100.0)
     w.update("X", 10.0)

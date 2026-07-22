@@ -32,6 +32,9 @@ use serde_json::Value;
 use crate::indicators::{Book, Position};
 use crate::prelude::*;
 use crate::strategies::BasketStrategy;
+use crate::strategies::basket::{
+    DynSelection, Everything, Quantile, Selection, Threshold, TopBottom,
+};
 use crate::types::Snapshot;
 
 use super::expr::ExprSpec;
@@ -41,32 +44,109 @@ use crate::spec::dyn_indicator::{AsBool, AsReal, DynIndicator};
 
 /// YAML surface for the ranking rule. Externally tagged
 /// (`!top_bottom { longs, shorts }` / `!threshold { long_min, short_max }`
-/// / `!quantile { long_q, short_q }`).
+/// / `!quantile { long_q, short_q }` / `!everything`).
+///
+/// **Composable.** Every rule carries an optional `of:` inner rule that
+/// defaults to [`!everything`](Self::Everything) — the full universe. A
+/// bare `!top_bottom { longs, shorts }` therefore ranks every symbol,
+/// while
+///
+/// ```yaml
+/// selection: !top_bottom { longs: 2, shorts: 2, of: !threshold { long_min: 0.5, short_max: -0.5 } }
+/// ```
+///
+/// ranks the top-2 / bottom-2 *of the threshold survivors* — the YAML
+/// mirror of `TopBottom::of(Threshold::new(0.5, -0.5), 2, 2)`. Each stage
+/// narrows the inner's per-side candidate sets, so the chain nests to any
+/// depth.
 ///
 /// A CLI-only discriminator; at build it constructs the corresponding
-/// [`crate::strategies::basket::Selection`] trait impl (one of
+/// [`crate::strategies::basket::Selection`] chain (one of
+/// [`Everything`](crate::strategies::basket::Everything) /
 /// [`TopBottom`](crate::strategies::basket::TopBottom) /
 /// [`Threshold`](crate::strategies::basket::Threshold) /
 /// [`Quantile`](crate::strategies::basket::Quantile)) and installs it via
 /// [`BasketStrategy::selection`](crate::strategies::BasketStrategy::selection).
 /// Rust-side callers with a custom rule build their own `Selection`
 /// impl and install it directly — no CLI-side wiring needed.
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum SelectionRuleSpec {
+    /// The leaf: every scored symbol eligible for either side (the full
+    /// universe). The implicit `of:` default; rarely written explicitly.
+    /// See [`crate::strategies::basket::Everything`].
+    Everything,
+
     /// Take the `longs` highest-scoring symbols long, the `shorts`
-    /// lowest-scoring short. See
-    /// [`crate::strategies::basket::top_bottom`].
-    TopBottom { longs: usize, shorts: usize },
+    /// lowest-scoring short — ranked within [`of`](Self) (default the
+    /// full universe). See [`crate::strategies::basket::top_bottom`].
+    TopBottom {
+        longs: usize,
+        shorts: usize,
+        #[serde(default)]
+        of: Box<SelectionRuleSpec>,
+    },
 
     /// Long every symbol scoring at/above `long_min`; short at/below
-    /// `short_max`. See [`crate::strategies::basket::threshold`].
-    Threshold { long_min: Real, short_max: Real },
+    /// `short_max` — applied within [`of`](Self) (default the full
+    /// universe). See [`crate::strategies::basket::threshold`].
+    Threshold {
+        long_min: Real,
+        short_max: Real,
+        #[serde(default)]
+        of: Box<SelectionRuleSpec>,
+    },
 
-    /// Long the top `long_q` fraction of the score distribution; short
-    /// the bottom `short_q`. See
-    /// [`crate::strategies::basket::quantile`].
-    Quantile { long_q: Real, short_q: Real },
+    /// Long the top `long_q` fraction, short the bottom `short_q` — of
+    /// [`of`](Self)'s per-side candidate sets (default the full universe).
+    /// See [`crate::strategies::basket::quantile`].
+    Quantile {
+        long_q: Real,
+        short_q: Real,
+        #[serde(default)]
+        of: Box<SelectionRuleSpec>,
+    },
+}
+
+impl Default for SelectionRuleSpec {
+    /// The implicit `of:` inner: the [`Everything`] leaf.
+    ///
+    /// [`Everything`]: crate::strategies::basket::Everything
+    fn default() -> Self {
+        SelectionRuleSpec::Everything
+    }
+}
+
+impl SelectionRuleSpec {
+    /// Build the (possibly composed) [`Selection`] this spec describes.
+    /// Each rule's `of:` inner defaults to [`Everything`], so a bare
+    /// `!top_bottom { longs, shorts }` ranks the full universe while
+    /// `!top_bottom { longs, shorts, of: !threshold { .. } }` ranks the
+    /// threshold survivors.
+    ///
+    /// [`Everything`]: crate::strategies::basket::Everything
+    fn build(&self) -> Box<dyn Selection<String>> {
+        match self {
+            SelectionRuleSpec::Everything => Box::new(Everything),
+            SelectionRuleSpec::TopBottom { longs, shorts, of } => {
+                Box::new(TopBottom::of(DynSelection(of.build()), *longs, *shorts))
+            }
+            SelectionRuleSpec::Threshold {
+                long_min,
+                short_max,
+                of,
+            } => Box::new(Threshold::of(
+                DynSelection(of.build()),
+                *long_min,
+                *short_max,
+            )),
+            SelectionRuleSpec::Quantile {
+                long_q,
+                short_q,
+                of,
+            } => Box::new(Quantile::of(DynSelection(of.build()), *long_q, *short_q)),
+        }
+    }
 }
 
 /// YAML surface for a declared basket [`Universe`](crate::strategies::basket::Universe).
@@ -257,16 +337,7 @@ impl BasketStrategySpec {
             AsReal::new(dyn_ind)
         });
 
-        let strat = match self.selection {
-            SelectionRuleSpec::TopBottom { longs, shorts } => strat.top_bottom(longs, shorts),
-            SelectionRuleSpec::Threshold {
-                long_min,
-                short_max,
-            } => strat.threshold(long_min, short_max),
-            SelectionRuleSpec::Quantile { long_q, short_q } => {
-                strat.quantile(long_q, short_q)
-            }
-        };
+        let strat = strat.selection(DynSelection(self.selection.build()));
 
         let strat = match &self.universe {
             Some(UniverseSpec::AllOf(syms)) => strat.all_of(syms.iter().cloned()),
@@ -482,9 +553,11 @@ mod tests {
         )
         .unwrap();
         match spec.selection {
-            SelectionRuleSpec::TopBottom { longs, shorts } => {
+            SelectionRuleSpec::TopBottom { longs, shorts, of } => {
                 assert_eq!(longs, 2);
                 assert_eq!(shorts, 2);
+                // No `of:` supplied → defaults to the Everything leaf.
+                assert!(matches!(*of, SelectionRuleSpec::Everything));
             }
             _ => panic!("expected TopBottom"),
         }
@@ -509,6 +582,71 @@ mod tests {
                 (r, e) => panic!("unexpected variant for {yaml}: got {r:?}, expected {e}"),
             }
         }
+    }
+
+    #[test]
+    fn composed_selection_parses_nested_of() {
+        let yaml = "!top_bottom { longs: 2, shorts: 2, of: !threshold { long_min: 0.5, short_max: -0.5 } }";
+        let rule: SelectionRuleSpec = serde_norway::from_str(yaml).unwrap();
+        match rule {
+            SelectionRuleSpec::TopBottom { longs, shorts, of } => {
+                assert_eq!((longs, shorts), (2, 2));
+                match *of {
+                    SelectionRuleSpec::Threshold {
+                        long_min,
+                        short_max,
+                        of,
+                    } => {
+                        assert_eq!(long_min, 0.5);
+                        assert_eq!(short_max, -0.5);
+                        // Inner rule's own `of:` defaults to Everything.
+                        assert!(matches!(*of, SelectionRuleSpec::Everything));
+                    }
+                    other => panic!("inner should be Threshold, got {other:?}"),
+                }
+            }
+            other => panic!("outer should be TopBottom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn composed_selection_gates_ranked_picks_through_threshold() {
+        // top_bottom(2,2) OF threshold(85, 15): the threshold admits {A,B}
+        // long (>= 85) and {D} short (<= 15); C (80) sits in the gap. The
+        // ranked top-2 / bottom-2 therefore draw only from the survivors,
+        // so C ends flat — where a bare top_bottom(2,2) would have shorted
+        // it. Proves the `of:` inner actually narrows the pool.
+        let yaml = r#"
+            selection: !top_bottom { longs: 2, shorts: 2, of: !threshold { long_min: 85.0, short_max: 15.0 } }
+            score: !close { source: !pick { symbol: !arg SYM } }
+            sizing: !value 0.2
+        "#;
+        let spec =
+            BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let mut strat = spec.build(10_000.0, &schema());
+        let mut wallet: PaperWallet<String> = PaperWallet::new(10_000.0);
+
+        for _ in 0..2 {
+            for (sym, px) in [("A", 100.0), ("B", 90.0), ("C", 80.0), ("D", 10.0)] {
+                for fill in wallet.update(sym.to_string(), candle(px)) {
+                    strat.on_fill(&fill);
+                }
+            }
+            strat.update(snap_of(&[
+                ("A", 100.0),
+                ("B", 90.0),
+                ("C", 80.0),
+                ("D", 10.0),
+            ]));
+            strat.trade(&mut wallet);
+        }
+        assert!(wallet.position(&"A".to_string()).amount > 0.0, "A long");
+        assert!(wallet.position(&"B".to_string()).amount > 0.0, "B long");
+        assert!(
+            wallet.position(&"C".to_string()).amount.abs() < 1e-9,
+            "C gated out by threshold → flat"
+        );
+        assert!(wallet.position(&"D".to_string()).amount < 0.0, "D short");
     }
 
     #[test]

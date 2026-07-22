@@ -130,11 +130,12 @@ const GROUPS: &[Group] = &[
         ],
     },
     Group {
-        title: "basket selection rules (for `selection:` on BasketStrategySpec)",
+        title: "basket selection rules (for `selection:` on BasketStrategySpec; each takes an optional `of:` inner rule, default !everything)",
         entries: &[
-            Entry { tag: "top_bottom", args: "longs, shorts",       doc: "top `longs` symbols by score → long, bottom `shorts` → short (never overlapping)" },
-            Entry { tag: "threshold",  args: "long_min, short_max", doc: "long at/above long_min; short at/below short_max" },
-            Entry { tag: "quantile",   args: "long_q, short_q",     doc: "long the top long_q fraction; short the bottom short_q — counts are ceil(q * n)" },
+            Entry { tag: "everything", args: "",                    doc: "the full-universe leaf: every symbol eligible either side — the implicit `of:` default" },
+            Entry { tag: "top_bottom", args: "longs, shorts [, of]", doc: "top `longs` by score → long, bottom `shorts` → short, ranked within `of` (default all)" },
+            Entry { tag: "threshold",  args: "long_min, short_max [, of]", doc: "long at/above long_min; short at/below short_max, within `of` (default all)" },
+            Entry { tag: "quantile",   args: "long_q, short_q [, of]", doc: "top long_q fraction long; bottom short_q short (ceil(q·n)), within `of` (default all)" },
         ],
     },
     Group {

@@ -724,7 +724,10 @@ The strategy positional accepts an optional shape prefix:
 - `basket:` — an N-symbol cross-sectional `BasketStrategy` file
   (`basket:@basket.yml`); the document declares a `selection` rule plus
   per-symbol `score`/`sizing` templates (`!arg SYM` picks the current
-  symbol). `fugazi run` only — `optimize` doesn't sweep baskets yet.
+  symbol). Selection rules **compose**: a ranked rule may nest an `of:`
+  inner (default `!everything`), e.g.
+  `!top_bottom { longs: 2, shorts: 2, of: !threshold { long_min: 0.5, short_max: -0.5 } }`
+  ranks the top-2 / bottom-2 *of* the threshold survivors.
 
 Any other prefix is rejected as an unknown shape. A single-asset run
 feeds every candle in the input series to the strategy in `time` order.

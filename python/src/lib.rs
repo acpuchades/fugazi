@@ -63,6 +63,7 @@ use fugazi_core::types::{
 };
 use fugazi_core::backtest::{Fill, Rejected, RunReport};
 use fugazi_core::indicators::Const;
+use fugazi_core::strategies::basket as core_basket;
 use fugazi_core::strategies::{
     BasketStrategy, MultiAssetStrategy, PairsStrategy, SingleAssetStrategy,
 };
@@ -3665,20 +3666,147 @@ impl PyMultiAssetStrategy {
     }
 }
 
-/// The cross-sectional selection rule for a [`PyBasketStrategy`].
+/// The cross-sectional selection rule for a [`PyBasketStrategy`] — a
+/// composable tree mirroring `fugazi::strategies::basket::Selection`. Each
+/// ranked rule narrows an inner rule (`of`), defaulting to the
+/// `Everything` leaf (the whole universe).
 #[derive(Clone)]
 enum BasketSelection {
-    TopBottom { longs: usize, shorts: usize },
-    Threshold { long_min: Real, short_max: Real },
-    Quantile { long_q: Real, short_q: Real },
+    Everything,
+    TopBottom {
+        longs: usize,
+        shorts: usize,
+        of: Box<BasketSelection>,
+    },
+    Threshold {
+        long_min: Real,
+        short_max: Real,
+        of: Box<BasketSelection>,
+    },
+    Quantile {
+        long_q: Real,
+        short_q: Real,
+        of: Box<BasketSelection>,
+    },
+}
+
+impl BasketSelection {
+    /// Build the composed `Selection` chain this tree describes, nesting
+    /// each rule's `of` inner via the core `::of` constructors.
+    fn build(&self) -> Box<dyn core_basket::Selection<String>> {
+        match self {
+            BasketSelection::Everything => Box::new(core_basket::Everything),
+            BasketSelection::TopBottom { longs, shorts, of } => Box::new(
+                core_basket::TopBottom::of(
+                    core_basket::DynSelection(of.build()),
+                    *longs,
+                    *shorts,
+                ),
+            ),
+            BasketSelection::Threshold {
+                long_min,
+                short_max,
+                of,
+            } => Box::new(core_basket::Threshold::of(
+                core_basket::DynSelection(of.build()),
+                *long_min,
+                *short_max,
+            )),
+            BasketSelection::Quantile {
+                long_q,
+                short_q,
+                of,
+            } => Box::new(core_basket::Quantile::of(
+                core_basket::DynSelection(of.build()),
+                *long_q,
+                *short_q,
+            )),
+        }
+    }
+}
+
+/// Wrap an optional inner rule, defaulting to the `Everything` leaf.
+fn selection_inner(of: Option<PySelection>) -> Box<BasketSelection> {
+    Box::new(of.map_or(BasketSelection::Everything, |s| s.inner))
+}
+
+/// A composed basket selection rule — built by `ta.top_bottom` /
+/// `ta.threshold` / `ta.quantile` / `ta.everything`, installed via
+/// `BasketStrategy.selection(...)`, and usable as the `of=` inner of
+/// another rule so selections nest to any depth (e.g. the top-2 / bottom-2
+/// *of* the threshold survivors).
+#[pyclass(name = "Selection", module = "fugazi", from_py_object)]
+#[derive(Clone)]
+struct PySelection {
+    inner: BasketSelection,
+}
+
+#[pymethods]
+impl PySelection {
+    fn __repr__(&self) -> String {
+        "Selection(...)".to_string()
+    }
+}
+
+/// The full-universe selection leaf — every symbol eligible for either
+/// side. The implicit `of=` default; rarely needed explicitly.
+#[pyfunction]
+fn everything() -> PySelection {
+    PySelection {
+        inner: BasketSelection::Everything,
+    }
+}
+
+/// Select the top `longs` and bottom `shorts` symbols by score, ranked
+/// within the optional `of` inner rule (default: the whole universe).
+#[pyfunction]
+#[pyo3(signature = (longs, shorts, of=None))]
+fn top_bottom(longs: usize, shorts: usize, of: Option<PySelection>) -> PySelection {
+    PySelection {
+        inner: BasketSelection::TopBottom {
+            longs,
+            shorts,
+            of: selection_inner(of),
+        },
+    }
+}
+
+/// Long every symbol scoring `>= long_min`, short every symbol scoring
+/// `<= short_max`, within the optional `of` inner rule (default: all).
+#[pyfunction]
+#[pyo3(signature = (long_min, short_max, of=None))]
+fn threshold(long_min: Real, short_max: Real, of: Option<PySelection>) -> PySelection {
+    PySelection {
+        inner: BasketSelection::Threshold {
+            long_min,
+            short_max,
+            of: selection_inner(of),
+        },
+    }
+}
+
+/// Long the top `long_q` quantile by score, short the bottom `short_q`
+/// (each in `[0, 1]`), within the optional `of` inner rule (default: all).
+#[pyfunction]
+#[pyo3(signature = (long_q, short_q, of=None))]
+fn quantile(long_q: Real, short_q: Real, of: Option<PySelection>) -> PySelection {
+    PySelection {
+        inner: BasketSelection::Quantile {
+            long_q,
+            short_q,
+            of: selection_inner(of),
+        },
+    }
 }
 
 /// An N-symbol cross-sectional basket: score every symbol, then a selection rule
 /// picks the longs / shorts. Mirrors `fugazi::strategies::BasketStrategy`. Score
 /// and sizing are Python factories `sym -> Indicator` (leaves rooted on that
 /// symbol via `pick(...)`); the selection is one of top-bottom / threshold /
-/// quantile. The `.selection(closure)` escape hatch and per-leg protective
-/// levels are not exposed.
+/// quantile, each of which composes by narrowing an inner rule via `of=`
+/// (e.g. `strat.top_bottom(2, 2, of=ta.threshold(0.5, -0.5))`, or the general
+/// `strat.selection(...)` seam). The `.selection(closure)` escape hatch and
+/// per-leg protective levels are not exposed.
 #[pyclass(name = "BasketStrategy", skip_from_py_object)]
 struct PyBasketStrategy {
     score: Option<Py<PyAny>>,
@@ -3734,26 +3862,67 @@ impl PyBasketStrategy {
         s
     }
 
-    /// Select the top `longs` and bottom `shorts` symbols by score.
-    fn top_bottom(&self, longs: usize, shorts: usize) -> PyBasketStrategy {
+    /// Select the top `longs` and bottom `shorts` symbols by score, ranked
+    /// within the optional `of` inner rule (default: the whole universe).
+    #[pyo3(signature = (longs, shorts, of=None))]
+    fn top_bottom(
+        &self,
+        longs: usize,
+        shorts: usize,
+        of: Option<PySelection>,
+    ) -> PyBasketStrategy {
         let mut s = self.clone();
-        s.selection = Some(BasketSelection::TopBottom { longs, shorts });
+        s.selection = Some(BasketSelection::TopBottom {
+            longs,
+            shorts,
+            of: selection_inner(of),
+        });
         s
     }
 
     /// Long every symbol scoring `>= long_min`, short every symbol scoring
-    /// `<= short_max`.
-    fn threshold(&self, long_min: Real, short_max: Real) -> PyBasketStrategy {
+    /// `<= short_max`, within the optional `of` inner rule (default: all).
+    #[pyo3(signature = (long_min, short_max, of=None))]
+    fn threshold(
+        &self,
+        long_min: Real,
+        short_max: Real,
+        of: Option<PySelection>,
+    ) -> PyBasketStrategy {
         let mut s = self.clone();
-        s.selection = Some(BasketSelection::Threshold { long_min, short_max });
+        s.selection = Some(BasketSelection::Threshold {
+            long_min,
+            short_max,
+            of: selection_inner(of),
+        });
         s
     }
 
     /// Long the top `long_q` quantile by score, short the bottom `short_q`
-    /// quantile (each in `[0, 1]`).
-    fn quantile(&self, long_q: Real, short_q: Real) -> PyBasketStrategy {
+    /// quantile (each in `[0, 1]`), within the optional `of` inner rule.
+    #[pyo3(signature = (long_q, short_q, of=None))]
+    fn quantile(
+        &self,
+        long_q: Real,
+        short_q: Real,
+        of: Option<PySelection>,
+    ) -> PyBasketStrategy {
         let mut s = self.clone();
-        s.selection = Some(BasketSelection::Quantile { long_q, short_q });
+        s.selection = Some(BasketSelection::Quantile {
+            long_q,
+            short_q,
+            of: selection_inner(of),
+        });
+        s
+    }
+
+    /// Install a composed selection rule (from `ta.top_bottom` /
+    /// `ta.threshold` / `ta.quantile` / `ta.everything`) — the general
+    /// seam behind the convenience methods, and how you nest rules via
+    /// `of=`.
+    fn selection(&self, rule: PySelection) -> PyBasketStrategy {
+        let mut s = self.clone();
+        s.selection = Some(rule.inner);
         s
     }
 
@@ -3809,15 +3978,7 @@ impl PyBasketStrategy {
             strat = strat.sized_by(f);
         }
         strat = match &self.selection {
-            Some(BasketSelection::TopBottom { longs, shorts }) => {
-                strat.top_bottom(*longs, *shorts)
-            }
-            Some(BasketSelection::Threshold { long_min, short_max }) => {
-                strat.threshold(*long_min, *short_max)
-            }
-            Some(BasketSelection::Quantile { long_q, short_q }) => {
-                strat.quantile(*long_q, *short_q)
-            }
+            Some(sel) => strat.selection(core_basket::DynSelection(sel.build())),
             None => strat,
         };
         if self.dollar_neutral {
@@ -8407,6 +8568,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPairsStrategy>()?;
     m.add_class::<PyMultiAssetStrategy>()?;
     m.add_class::<PyBasketStrategy>()?;
+    m.add_class::<PySelection>()?;
     m.add_class::<PyRunReport>()?;
     m.add_class::<PyRejected>()?;
     m.add_class::<PyFill>()?;
@@ -8438,6 +8600,9 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         unix_seconds, unix_millis, is_weekday, is_weekend,
         // Cross-asset: project one asset's Atom out of a Snapshot by key.
         pick,
+        // Composable basket selection rules — each returns a `Selection`
+        // that narrows an optional `of=` inner (default `everything`).
+        everything, top_bottom, threshold, quantile,
         // Strategy catalogue as free constructors — each returns a preset
         // `Strategy` (calls the same Rust free function `fugazi::strategies`
         // exposes).
