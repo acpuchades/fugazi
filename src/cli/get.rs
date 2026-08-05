@@ -620,6 +620,7 @@ pub fn run(mut args: GetArgs) -> Result<()> {
 /// `dataset_overlays` are the pre-parsed indicator columns from a `@dataset.yml`
 /// spec; CLI `--overlay` args are appended after them so the CLI wins for any
 /// same-name column.
+#[allow(clippy::too_many_arguments)]
 fn run_candles(
     args: GetArgs,
     fetch_specs: Vec<FetchSpec>,
