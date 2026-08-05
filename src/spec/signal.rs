@@ -251,6 +251,12 @@ pub enum SignalSpec {
     IsWeekday,
     /// True on Sat/Sun, false on Mon–Fri. `None` when `atom.time` is absent.
     IsWeekend,
+    /// Schema-level check: `true` if the overlay column `name` exists in the
+    /// atom stream's [`Schema`], `false` otherwise. The result is constant per
+    /// dataset (the schema is fixed at build time), so this is most useful as
+    /// the `cond:` of an `!if_else` that selects between two price sources —
+    /// e.g. `!has_column { name: adj_close }`.
+    HasColumn { name: String },
 }
 
 /// Private mirror of [`SignalSpec`] with derived externally-tagged
@@ -347,6 +353,7 @@ enum SignalSpecRaw {
     Every(usize),
     IsWeekday,
     IsWeekend,
+    HasColumn { name: String },
 }
 
 impl From<SignalSpecRaw> for SignalSpec {
@@ -381,6 +388,7 @@ impl From<SignalSpecRaw> for SignalSpec {
             SignalSpecRaw::Every(n) => SignalSpec::Every(n),
             SignalSpecRaw::IsWeekday => SignalSpec::IsWeekday,
             SignalSpecRaw::IsWeekend => SignalSpec::IsWeekend,
+            SignalSpecRaw::HasColumn { name } => SignalSpec::HasColumn { name },
         }
     }
 }
@@ -739,6 +747,10 @@ impl SignalSpec {
 
             IsWeekday => dyn_indicator::wrap(self::IsWeekday::of(pick_any_root())),
             IsWeekend => dyn_indicator::wrap(self::IsWeekend::of(pick_any_root())),
+            HasColumn { name } => {
+                let exists = schema.index_of(name.as_str()).is_some();
+                dyn_indicator::wrap(self::Const::<crate::types::Snapshot<String>>::new(exists))
+            }
         }
     }
 }

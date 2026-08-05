@@ -68,7 +68,7 @@ fn pick_any_root() -> PickAny<String> {
 }
 
 pub(super) fn default_source() -> Box<ExprSpec> {
-    Box::new(ExprSpec::Close { source: None })
+    Box::new(ExprSpec::Price { source: None })
 }
 pub(super) fn default_high() -> Box<ExprSpec> {
     Box::new(ExprSpec::High { source: None })
@@ -371,6 +371,17 @@ pub enum ExprSpec {
     /// type-clashed spec.
     Get {
         key: String,
+        #[serde(default)]
+        source: Option<Box<ExprSpec>>,
+    },
+
+    /// The canonical price leaf: `adj_close` when the atom stream's schema
+    /// carries an `adj_close` Real overlay column, `close` otherwise. The
+    /// branch is resolved at build time against the schema — no runtime
+    /// overhead. Use this as the default price root so strategies
+    /// automatically use split/dividend-adjusted prices on datasets that
+    /// provide them while gracefully falling back to raw close elsewhere.
+    Price {
         #[serde(default)]
         source: Option<Box<ExprSpec>>,
     },
@@ -1118,6 +1129,17 @@ enum ExprSpecRaw {
         source: Option<Box<ExprSpec>>,
     },
 
+    /// The canonical price leaf: `adj_close` when the atom stream's schema
+    /// carries an `adj_close` Real overlay column, `close` otherwise. The
+    /// branch is resolved at build time against the schema — no runtime
+    /// overhead. Use this as the default price root so strategies
+    /// automatically use split/dividend-adjusted prices on datasets that
+    /// provide them while gracefully falling back to raw close elsewhere.
+    Price {
+        #[serde(default)]
+        source: Option<Box<ExprSpec>>,
+    },
+
     // --- price-series indicators (a source + parameters) ---
     Ema {
         #[serde(default = "default_source")]
@@ -1723,6 +1745,7 @@ impl From<ExprSpecRaw> for ExprSpec {
             ExprSpecRaw::TradePnl { source } => ExprSpec::TradePnl { source },
             ExprSpecRaw::TradeReturn { source } => ExprSpec::TradeReturn { source },
             ExprSpecRaw::Get { key, source } => ExprSpec::Get { key, source },
+            ExprSpecRaw::Price { source } => ExprSpec::Price { source },
             ExprSpecRaw::Ema { source, period } => ExprSpec::Ema { source, period },
             ExprSpecRaw::Sma { source, period } => ExprSpec::Sma { source, period },
             ExprSpecRaw::Rma { source, period } => ExprSpec::Rma { source, period },
@@ -2329,6 +2352,15 @@ impl ExprSpec {
             Get { key, source } => {
                 let s = atom_src(source.as_ref());
                 build_get(schema, key, s)
+            }
+
+            Price { source } => {
+                let s = atom_src(source.as_ref());
+                if schema.type_of_key("adj_close") == Some(OverlayType::Real) {
+                    dyn_indicator::wrap(GetReal::of(schema, "adj_close", s))
+                } else {
+                    dyn_indicator::wrap(crate::indicators::Close::of(s))
+                }
             }
 
             Ema { source, period } => dyn_indicator::wrap(self::Ema::new(real(source), *period)),
