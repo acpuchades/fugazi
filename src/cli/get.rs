@@ -56,6 +56,15 @@ use crate::overlay::{self, Overlay};
 use crate::params;
 use crate::style;
 
+/// Metadata extracted from a `@file.yml` spec: the dataset name and any default
+/// time-range hints declared in the YAML. All three fields are used by `run()`
+/// to fill in CLI defaults; CLI flags always override whatever is here.
+struct DatasetMeta {
+    name: String,
+    since: Option<String>,
+    until: Option<String>,
+}
+
 /// A dataset descriptor loaded from a `@file.yml` spec argument.
 ///
 /// A dataset defines a fixed universe of symbols and a single shared interval.
@@ -63,16 +72,22 @@ use crate::style;
 /// every series in a dataset runs at the same cadence — multi-frequency datasets
 /// are not yet well-supported in the backtesting workflow.
 ///
-/// Time range and output path are runtime concerns supplied via `--since`,
-/// `--until`, and `-o`; the descriptor never opinions on them.
+/// `since` and `until` are optional hints that set the default time range when
+/// those flags are omitted on the CLI. CLI flags always win. Output path is
+/// always a runtime concern (`-o`); the descriptor never opinions on it.
 #[derive(serde::Deserialize)]
 struct DatasetSpec {
-    #[allow(dead_code)]
     name: String,
     #[allow(dead_code)]
     #[serde(default)]
     description: Option<String>,
     interval: String,
+    /// Default `--since` (overridden by the CLI flag). ISO `YYYY-MM-DD`.
+    #[serde(default)]
+    since: Option<String>,
+    /// Default `--until` (overridden by the CLI flag). ISO `YYYY-MM-DD` or `today`.
+    #[serde(default)]
+    until: Option<String>,
     sources: Vec<DatasetSource>,
 }
 
@@ -83,15 +98,16 @@ struct DatasetSource {
 }
 
 /// Parse a `@path/to/dataset.yml` spec argument into one [`FetchSpec`] per
-/// source entry. All sources share the interval declared at the dataset level.
-fn parse_dataset(path: &str) -> Result<Vec<FetchSpec>> {
+/// source entry plus a [`DatasetMeta`] carrying the dataset name and any default
+/// time-range hints. All sources share the interval declared at the dataset level.
+fn parse_dataset(path: &str) -> Result<(Vec<FetchSpec>, DatasetMeta)> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("reading dataset {path:?}"))?;
     let dataset: DatasetSpec = serde_norway::from_str(&content)
         .with_context(|| format!("parsing dataset {path:?}"))?;
     let interval = crate::calendar::parse_interval(&dataset.interval)
         .with_context(|| format!("dataset {path:?}: interval {:?}", dataset.interval))?;
-    dataset
+    let specs = dataset
         .sources
         .into_iter()
         .map(|src| {
@@ -108,7 +124,13 @@ fn parse_dataset(path: &str) -> Result<Vec<FetchSpec>> {
                 symbols,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    let meta = DatasetMeta {
+        name: dataset.name,
+        since: dataset.since,
+        until: dataset.until,
+    };
+    Ok((specs, meta))
 }
 
 /// Parse a plain symbol string (no `[freq]` bracket) into a [`SymbolSpec`]
@@ -139,14 +161,17 @@ fn parse_symbol_plain(s: &str, interval: Interval) -> Result<SymbolSpec> {
     })
 }
 
-/// Parse one CLI spec argument into zero or more [`FetchSpec`]s. A `@path`
-/// argument loads a dataset YAML and may expand to multiple specs (one per
-/// source); any other argument is a single inline provider spec.
-fn parse_spec_arg(s: &str) -> Result<Vec<FetchSpec>> {
+/// Parse one CLI spec argument into zero or more [`FetchSpec`]s and an optional
+/// [`DatasetMeta`]. A `@path` argument loads a dataset YAML and may expand to
+/// multiple specs (one per source); any other argument is a single inline spec
+/// with no metadata.
+fn parse_spec_arg(s: &str) -> Result<(Vec<FetchSpec>, Option<DatasetMeta>)> {
     if let Some(path) = s.strip_prefix('@') {
-        parse_dataset(path).with_context(|| format!("loading dataset {path:?}"))
+        let (specs, meta) = parse_dataset(path)
+            .with_context(|| format!("loading dataset {path:?}"))?;
+        Ok((specs, Some(meta)))
     } else {
-        parse_spec(s).map(|f| vec![f])
+        parse_spec(s).map(|f| (vec![f], None))
     }
 }
 
@@ -360,14 +385,17 @@ pub struct GetArgs {
     #[arg(long, value_name = "DATE")]
     since: Option<String>,
 
-    /// End date (exclusive). Same grammar as `--since`; defaults to `today`.
-    #[arg(long, default_value = "today")]
-    until: String,
+    /// End date (exclusive). Same grammar as `--since`; defaults to `today`,
+    /// or to the `until` field in a `@dataset.yml` if it declares one.
+    #[arg(long)]
+    until: Option<String>,
 
     /// Output CSV path. Header: `symbol,freq,time,open,high,low,close,volume`.
     /// Parent directories are created if missing.
+    /// When a single `@dataset.yml` is given and `-o` is omitted, defaults to
+    /// `{name}_{YYYYMMDD}.csv` in the current directory, where the date is today.
     #[arg(short, long, value_name = "FILE")]
-    output: PathBuf,
+    output: Option<PathBuf>,
 
     /// Overlay definition(s) — extra columns computed on top of the fetched
     /// bars. Repeatable, and each argument takes an optional scope prefix plus
@@ -414,31 +442,64 @@ pub struct GetArgs {
 /// about, without dragging down the fetch when the flag *is* set.
 const DEFAULT_SINCE: &str = "2020-01-01";
 
-pub fn run(args: GetArgs) -> Result<()> {
-    let fetch_specs: Vec<FetchSpec> = args
+pub fn run(mut args: GetArgs) -> Result<()> {
+    let parsed: Vec<(Vec<FetchSpec>, Option<DatasetMeta>)> = args
         .specs
         .iter()
         .map(|s| parse_spec_arg(s).with_context(|| format!("parsing spec {s:?}")))
-        .collect::<Result<Vec<Vec<FetchSpec>>>>()?
-        .into_iter()
-        .flatten()
-        .collect();
+        .collect::<Result<_>>()?;
+    let mut metas: Vec<DatasetMeta> = Vec::new();
+    let mut fetch_specs: Vec<FetchSpec> = Vec::new();
+    for (specs, meta) in parsed {
+        fetch_specs.extend(specs);
+        if let Some(m) = meta {
+            metas.push(m);
+        }
+    }
+
     let mode = resolve_mode(&fetch_specs)?;
     let now = OffsetDateTime::now_utc();
+
+    // --since: CLI wins; fall back to dataset hint (only when exactly one dataset);
+    // then the hardcoded default.
     let since_specified = args.since.is_some();
-    let since_raw = args.since.as_deref().unwrap_or(DEFAULT_SINCE);
+    let dataset_since = if metas.len() == 1 { metas[0].since.as_deref() } else { None };
+    let _ = &metas; // ensure metas is not partially moved before output resolution
+    let since_raw = args.since.as_deref().or(dataset_since).unwrap_or(DEFAULT_SINCE);
     let since = parse_date(since_raw, now).with_context(|| format!("--since {since_raw:?}"))?;
-    let until = parse_date(&args.until, now).with_context(|| format!("--until {:?}", args.until))?;
+
+    // --until: CLI wins; fall back to dataset hint; then "today".
+    let dataset_until = if metas.len() == 1 { metas[0].until.as_deref() } else { None };
+    let until_raw = args.until.as_deref().or(dataset_until).unwrap_or("today");
+    let until = parse_date(until_raw, now).with_context(|| format!("--until {until_raw:?}"))?;
+
     if until <= since {
-        bail!(
-            "--until ({}) must be strictly after --since ({since_raw})",
-            args.until,
-        );
+        bail!("--until ({until_raw}) must be strictly after --since ({since_raw})");
     }
     let since_ts = Timestamp::from_datetime(since);
     let until_ts = Timestamp::from_datetime(until);
 
-    if let Some(parent) = args.output.parent()
+    // -o: explicit path wins; fall back to `{name}_{YYYYMMDD}.csv` when a single
+    // dataset is given; otherwise the flag is required.
+    let output: PathBuf = match args.output.take() {
+        Some(path) => path,
+        None => match metas.as_slice() {
+            [meta] => {
+                let safe = meta.name.replace(['/', '\\', ' '], "-");
+                let d = now.date();
+                PathBuf::from(format!(
+                    "{safe}_{:04}{:02}{:02}.csv",
+                    d.year(),
+                    d.month() as u8,
+                    d.day(),
+                ))
+            }
+            [] => bail!("-o/--output is required when no @dataset.yml spec is given"),
+            _ => bail!("-o/--output is required when multiple @dataset.yml specs are given"),
+        },
+    };
+
+    if let Some(parent) = output.parent()
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent)
@@ -451,8 +512,12 @@ pub fn run(args: GetArgs) -> Result<()> {
         .context("building tokio runtime")?;
 
     match mode {
-        ProviderKind::Candles => run_candles(args, fetch_specs, since_ts, until_ts, since_specified, &rt),
-        ProviderKind::Overlays => run_overlay_columns(args, fetch_specs, since_ts, until_ts, &rt),
+        ProviderKind::Candles => {
+            run_candles(args, fetch_specs, since_ts, until_ts, since_specified, &output, &rt)
+        }
+        ProviderKind::Overlays => {
+            run_overlay_columns(args, fetch_specs, since_ts, until_ts, &output, &rt)
+        }
     }
 }
 
@@ -464,6 +529,7 @@ fn run_candles(
     since_ts: Timestamp,
     until_ts: Timestamp,
     since_specified: bool,
+    output: &Path,
     rt: &tokio::runtime::Runtime,
 ) -> Result<()> {
     let param_table = params::table(&args.params)?;
@@ -472,7 +538,7 @@ fn run_candles(
 
     if !args.quiet {
         style::print_header("get", "fetch OHLCV candles from remote providers");
-        print_inputs_block(&args, since_ts, until_ts, since_specified, &overlay_columns);
+        print_inputs_block(&args, since_ts, until_ts, since_specified, &overlay_columns, output);
     }
 
     // Expand each `FetchSpec` into one `Series` per `(symbol, interval)` — the
@@ -587,8 +653,8 @@ fn run_candles(
         &overlay_columns,
     );
 
-    write_candles_csv(&args.output, &rows, &overlay_columns)
-        .with_context(|| format!("writing {}", args.output.display()))?;
+    write_candles_csv(output, &rows, &overlay_columns)
+        .with_context(|| format!("writing {}", output.display()))?;
 
     if !args.quiet {
         print_result_block(rows.len(), n_symbols, series.len());
@@ -611,6 +677,7 @@ fn run_overlay_columns(
     fetch_specs: Vec<FetchSpec>,
     since_ts: Timestamp,
     until_ts: Timestamp,
+    output: &Path,
     rt: &tokio::runtime::Runtime,
 ) -> Result<()> {
     if !args.overlay.is_empty() {
@@ -624,7 +691,7 @@ fn run_overlay_columns(
 
     if !args.quiet {
         style::print_header("get", "fetch overlay columns from remote providers");
-        print_inputs_block(&args, since_ts, until_ts, false, &[]);
+        print_inputs_block(&args, since_ts, until_ts, false, &[], output);
     }
 
     // One `Series` per (symbol, interval). `stable` is 0: there are no computed
@@ -664,8 +731,8 @@ fn run_overlay_columns(
             .cmp(&(b.time, b.symbol.as_str(), b.freq.as_str()))
     });
 
-    write_overlays_csv(&args.output, &rows)
-        .with_context(|| format!("writing {}", args.output.display()))?;
+    write_overlays_csv(output, &rows)
+        .with_context(|| format!("writing {}", output.display()))?;
 
     if !args.quiet {
         print_result_block(rows.len(), n_symbols, series.len());
@@ -1314,6 +1381,7 @@ fn print_inputs_block(
     until: Timestamp,
     since_specified: bool,
     overlay_columns: &[String],
+    output: &Path,
 ) {
     style::print_section("inputs");
     let specs = if args.specs.len() == 1 {
@@ -1344,7 +1412,7 @@ fn print_inputs_block(
             8,
         );
     }
-    style::print_field("output", &args.output.display().to_string(), 8);
+    style::print_field("output", &output.display().to_string(), 8);
 }
 
 /// The `get` result block — rows written, symbol/interval-series count.
