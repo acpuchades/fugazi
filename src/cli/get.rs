@@ -45,7 +45,7 @@ use tokio::task::JoinSet;
 
 use fugazi::prelude::*;
 use fugazi::sources::{
-    self, Binance, CandleSource, CoinGecko, CoinMarketCap, Interval, OverlayRow, OverlaySource,
+    self, Binance, CandleSource, CoinGecko, Interval, OverlayRow, OverlaySource,
     Timestamp, Yahoo, binance::binance_schema, yahoo::yahoo_schema,
 };
 
@@ -262,11 +262,6 @@ pub(crate) const KNOWN_PROVIDERS: &[(&str, &str)] = &[
          (symbols are coin ids: `bitcoin`, not `BTC`)",
     ),
     (
-        "cmc",
-        "CoinMarketCap price / volume / market cap / supply — overlay columns only, \
-         no OHLCV (symbols are tickers `BTC` or numeric ids; paid tier required)",
-    ),
-    (
         "csv",
         "Local OHLCV CSV — spec is `csv:PATH` (no `[freq]` bracket)",
     ),
@@ -296,7 +291,7 @@ enum ProviderKind {
 
 fn provider_kind(provider: &str) -> ProviderKind {
     match provider {
-        "cg" | "cmc" => ProviderKind::Overlays,
+        "cg" => ProviderKind::Overlays,
         _ => ProviderKind::Candles,
     }
 }
@@ -920,9 +915,6 @@ async fn fetch_overlays(
         "cg" => Ok(CoinGecko::new()
             .overlays(symbol, interval, since, Some(until))
             .await?),
-        "cmc" => Ok(CoinMarketCap::new()
-            .overlays(symbol, interval, since, Some(until))
-            .await?),
         other => bail!(unknown_provider_error(other)),
     }
 }
@@ -1451,7 +1443,6 @@ pub(crate) async fn tickers_of(provider: &str) -> Result<Vec<String>> {
     match provider {
         "binance" => Ok(Binance::new().tickers().await?),
         "cg" => Ok(OverlaySource::tickers(&CoinGecko::new()).await?),
-        "cmc" => Ok(OverlaySource::tickers(&CoinMarketCap::new()).await?),
         "yfinance" => Ok(Yahoo::new().tickers().await?),
         "csv" => bail!(
             "`csv:` reads a local CSV — the ticker list is whatever `symbol` \
