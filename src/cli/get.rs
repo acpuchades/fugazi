@@ -49,6 +49,8 @@ use fugazi::sources::{
     Timestamp, Yahoo, binance::binance_schema, yahoo::yahoo_schema,
 };
 
+use serde_json::Value as Json;
+
 use crate::dyn_indicator::{DynIndicator, DynValue};
 use crate::csv_source::{CsvBar, CsvSource};
 use crate::input::Source as InputSource;
@@ -56,13 +58,18 @@ use crate::overlay::{self, Overlay};
 use crate::params;
 use crate::style;
 
-/// Metadata extracted from a `@file.yml` spec: the dataset name and any default
-/// time-range hints declared in the YAML. All three fields are used by `run()`
-/// to fill in CLI defaults; CLI flags always override whatever is here.
+/// Metadata extracted from a `@file.yml` spec: the dataset name, any default
+/// time-range hints declared in the YAML, and overlay columns to compute.
+/// CLI flags always override the time-range hints; CLI `--overlay` args are
+/// appended after the dataset overlays so same-name columns prefer the CLI.
 struct DatasetMeta {
     name: String,
     since: Option<String>,
     until: Option<String>,
+    /// Indicator overlays declared in the dataset YAML — pre-parsed so they
+    /// don't need re-parsing in `run_candles`. CLI `--overlay` args are
+    /// appended after these, so the CLI wins for same-name columns.
+    overlays: Vec<Overlay>,
 }
 
 /// A dataset descriptor loaded from a `@file.yml` spec argument.
@@ -75,6 +82,29 @@ struct DatasetMeta {
 /// `since` and `until` are optional hints that set the default time range when
 /// those flags are omitted on the CLI. CLI flags always win. Output path is
 /// always a runtime concern (`-o`); the descriptor never opinions on it.
+///
+/// Each source entry is a single-key YAML mapping whose key is the provider
+/// name and whose value holds the provider-specific parameters:
+///
+/// ```yaml
+/// sources:
+///   - binance:
+///       symbols: [BTCUSDT, ETHUSDT]
+///   - csv:
+///       path: /data/extra.csv
+/// ```
+///
+/// The optional `overlays` mapping defines indicator columns computed from the
+/// fetched candles — same format as a standalone `@overlays.yml` file:
+///
+/// ```yaml
+/// overlays:
+///   sma20: !sma { period: 20 }
+///   ema50: !ema { period: 50 }
+/// ```
+///
+/// `!import path` is resolved before typed parsing, so a shared overlay library
+/// can be pulled in with `overlays: !import shared/indicators.yml`.
 #[derive(serde::Deserialize)]
 struct DatasetSpec {
     name: String,
@@ -88,47 +118,92 @@ struct DatasetSpec {
     /// Default `--until` (overridden by the CLI flag). ISO `YYYY-MM-DD` or `today`.
     #[serde(default)]
     until: Option<String>,
-    sources: Vec<DatasetSource>,
-}
-
-#[derive(serde::Deserialize)]
-struct DatasetSource {
-    provider: String,
-    symbols: Vec<String>,
+    /// Sources as single-key maps `{ provider_name: { params } }`.
+    /// Deserialized after `yaml_to_json`, so each entry is already a JSON map.
+    sources: Vec<serde_json::Map<String, Json>>,
+    /// Indicator overlays: a YAML mapping of `column_name: ExprSpec`.
+    /// Deserialized as a raw JSON value so the typed ExprSpec parse can reuse
+    /// the same `serde_json::from_value` path the strategy spec uses.
+    #[serde(default)]
+    overlays: Option<Json>,
 }
 
 /// Parse a `@path/to/dataset.yml` spec argument into one [`FetchSpec`] per
-/// source entry plus a [`DatasetMeta`] carrying the dataset name and any default
-/// time-range hints. All sources share the interval declared at the dataset level.
+/// source entry plus a [`DatasetMeta`] carrying the dataset name, default
+/// time-range hints, and pre-parsed overlay columns.
+///
+/// The full parse pipeline runs here so that `!import` and YAML tags (`!sma`,
+/// `!ema`, …) work inside dataset files exactly as they do in strategy specs:
+/// `serde_norway::from_str` → `imports::resolve` → `yaml_to_json` →
+/// `serde_json::from_value`.
 fn parse_dataset(path: &str) -> Result<(Vec<FetchSpec>, DatasetMeta)> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("reading dataset {path:?}"))?;
-    let dataset: DatasetSpec = serde_norway::from_str(&content)
+    let base = Path::new(path).parent().unwrap_or(Path::new("."));
+    let yaml: serde_norway::Value = serde_norway::from_str(&content)
+        .with_context(|| format!("parsing dataset YAML {path:?}"))?;
+    let json = crate::spec::convert::yaml_to_json(yaml)
+        .with_context(|| format!("normalising tags in dataset {path:?}"))?;
+    let json = crate::imports::resolve(json, base)
+        .with_context(|| format!("resolving !import in dataset {path:?}"))?;
+    let dataset: DatasetSpec = serde_json::from_value(json)
         .with_context(|| format!("parsing dataset {path:?}"))?;
     let interval = crate::calendar::parse_interval(&dataset.interval)
         .with_context(|| format!("dataset {path:?}: interval {:?}", dataset.interval))?;
     let specs = dataset
         .sources
         .into_iter()
-        .map(|src| {
-            let symbols = src
-                .symbols
-                .iter()
-                .map(|s| parse_symbol_plain(s, interval))
-                .collect::<Result<Vec<_>>>()
-                .with_context(|| {
-                    format!("dataset {path:?}: provider {:?}", src.provider)
-                })?;
-            Ok(FetchSpec::Remote {
-                provider: src.provider,
-                symbols,
-            })
+        .map(|src_map| {
+            if src_map.len() != 1 {
+                bail!(
+                    "dataset {path:?}: each source entry must have exactly one provider key, got {}",
+                    src_map.len()
+                );
+            }
+            let (provider, params) = src_map.into_iter().next().unwrap();
+            if provider == "csv" {
+                let csv_path = params
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("dataset {path:?}: csv source requires a `path` field"))?;
+                Ok(FetchSpec::Csv { path: PathBuf::from(csv_path) })
+            } else {
+                let symbols_raw = params
+                    .get("symbols")
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| {
+                        anyhow!("dataset {path:?}: source {provider:?} requires a `symbols` list")
+                    })?;
+                let symbols = symbols_raw
+                    .iter()
+                    .map(|v| {
+                        v.as_str()
+                            .ok_or_else(|| anyhow!("symbol must be a string"))
+                            .and_then(|s| parse_symbol_plain(s, interval))
+                    })
+                    .collect::<Result<Vec<_>>>()
+                    .with_context(|| {
+                        format!("dataset {path:?}: provider {provider:?}")
+                    })?;
+                Ok(FetchSpec::Remote { provider, symbols })
+            }
         })
         .collect::<Result<Vec<_>>>()?;
+    let overlays = if let Some(overlays_json) = dataset.overlays {
+        overlay::parse_from_value(
+            overlays_json,
+            &Default::default(),
+            &format!("dataset {path:?}"),
+        )
+        .with_context(|| format!("parsing overlays in dataset {path:?}"))?
+    } else {
+        Vec::new()
+    };
     let meta = DatasetMeta {
         name: dataset.name,
         since: dataset.since,
         until: dataset.until,
+        overlays,
     };
     Ok((specs, meta))
 }
@@ -460,17 +535,33 @@ pub fn run(mut args: GetArgs) -> Result<()> {
     let mode = resolve_mode(&fetch_specs)?;
     let now = OffsetDateTime::now_utc();
 
-    // --since: CLI wins; fall back to dataset hint (only when exactly one dataset);
-    // then the hardcoded default.
+    // Extract per-dataset metadata upfront (cloned so we can consume `metas` later).
+    let n_datasets = metas.len();
+    let (dataset_since, dataset_until, dataset_name): (Option<String>, Option<String>, Option<String>) =
+        if n_datasets == 1 {
+            let m = &metas[0];
+            (m.since.clone(), m.until.clone(), Some(m.name.clone()))
+        } else {
+            (None, None, None)
+        };
+    // Consume metas to take ownership of the pre-parsed overlays.
+    let dataset_overlays: Vec<Overlay> = metas.into_iter().flat_map(|m| m.overlays).collect();
+
+    // --since: CLI wins; fall back to dataset hint; then the hardcoded default.
     let since_specified = args.since.is_some();
-    let dataset_since = if metas.len() == 1 { metas[0].since.as_deref() } else { None };
-    let _ = &metas; // ensure metas is not partially moved before output resolution
-    let since_raw = args.since.as_deref().or(dataset_since).unwrap_or(DEFAULT_SINCE);
+    let since_raw = args
+        .since
+        .as_deref()
+        .or(dataset_since.as_deref())
+        .unwrap_or(DEFAULT_SINCE);
     let since = parse_date(since_raw, now).with_context(|| format!("--since {since_raw:?}"))?;
 
     // --until: CLI wins; fall back to dataset hint; then "today".
-    let dataset_until = if metas.len() == 1 { metas[0].until.as_deref() } else { None };
-    let until_raw = args.until.as_deref().or(dataset_until).unwrap_or("today");
+    let until_raw = args
+        .until
+        .as_deref()
+        .or(dataset_until.as_deref())
+        .unwrap_or("today");
     let until = parse_date(until_raw, now).with_context(|| format!("--until {until_raw:?}"))?;
 
     if until <= since {
@@ -483,9 +574,9 @@ pub fn run(mut args: GetArgs) -> Result<()> {
     // dataset is given; otherwise the flag is required.
     let output: PathBuf = match args.output.take() {
         Some(path) => path,
-        None => match metas.as_slice() {
-            [meta] => {
-                let safe = meta.name.replace(['/', '\\', ' '], "-");
+        None => match dataset_name.as_deref() {
+            Some(name) => {
+                let safe = name.replace(['/', '\\', ' '], "-");
                 let d = now.date();
                 PathBuf::from(format!(
                     "{safe}_{:04}{:02}{:02}.csv",
@@ -494,8 +585,10 @@ pub fn run(mut args: GetArgs) -> Result<()> {
                     d.day(),
                 ))
             }
-            [] => bail!("-o/--output is required when no @dataset.yml spec is given"),
-            _ => bail!("-o/--output is required when multiple @dataset.yml specs are given"),
+            None if n_datasets == 0 => {
+                bail!("-o/--output is required when no @dataset.yml spec is given")
+            }
+            None => bail!("-o/--output is required when multiple @dataset.yml specs are given"),
         },
     };
 
@@ -513,7 +606,7 @@ pub fn run(mut args: GetArgs) -> Result<()> {
 
     match mode {
         ProviderKind::Candles => {
-            run_candles(args, fetch_specs, since_ts, until_ts, since_specified, &output, &rt)
+            run_candles(args, fetch_specs, since_ts, until_ts, since_specified, dataset_overlays, &output, &rt)
         }
         ProviderKind::Overlays => {
             run_overlay_columns(args, fetch_specs, since_ts, until_ts, &output, &rt)
@@ -523,17 +616,24 @@ pub fn run(mut args: GetArgs) -> Result<()> {
 
 /// The OHLCV pipeline: fetch candles, compute `-x` overlays over them, write
 /// `symbol,freq,time,open,high,low,close,volume,...`.
+///
+/// `dataset_overlays` are the pre-parsed indicator columns from a `@dataset.yml`
+/// spec; CLI `--overlay` args are appended after them so the CLI wins for any
+/// same-name column.
 fn run_candles(
     args: GetArgs,
     fetch_specs: Vec<FetchSpec>,
     since_ts: Timestamp,
     until_ts: Timestamp,
     since_specified: bool,
+    dataset_overlays: Vec<Overlay>,
     output: &Path,
     rt: &tokio::runtime::Runtime,
 ) -> Result<()> {
     let param_table = params::table(&args.params)?;
-    let overlays = overlay::parse_specs(&args.overlay, &param_table)?;
+    let cli_overlays = overlay::parse_specs(&args.overlay, &param_table)?;
+    // Dataset overlays first; CLI overlays appended so same-name CLI column wins.
+    let overlays: Vec<Overlay> = dataset_overlays.into_iter().chain(cli_overlays).collect();
     let overlay_columns = overlay::column_names(&overlays);
 
     if !args.quiet {
