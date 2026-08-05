@@ -211,24 +211,22 @@ fn parse_dataset(path: &str) -> Result<(Vec<FetchSpec>, DatasetMeta)> {
 /// Parse a plain symbol string (no `[freq]` bracket) into a [`SymbolSpec`]
 /// with the given interval. Accepts the `OUTPUT=QUERY` remap form used by
 /// overlay providers (e.g. `BTCUSDT=bitcoin` for CoinGecko).
+/// Parse a plain symbol string from a dataset YAML (no `[freq]` bracket, no
+/// `OUTPUT=QUERY` aliasing). The full string is the provider ID, sent verbatim
+/// to the provider AND used as the CSV `symbol` label.
+///
+/// Unlike the inline-spec [`parse_symbol`], dataset YAML symbols are raw
+/// provider IDs (e.g. `EURUSD=X`, `^GSPC`). The `OUTPUT=QUERY` remap is an
+/// inline-CLI feature; applying it here would silently mangle FX tickers whose
+/// names contain `=` (Yahoo Finance convention).
 fn parse_symbol_plain(s: &str, interval: Interval) -> Result<SymbolSpec> {
     let s = s.trim();
     if s.is_empty() {
         bail!("empty symbol name");
     }
-    let (output, query) = match s.split_once('=') {
-        Some((out, q)) => (out.trim(), q.trim()),
-        None => (s, s),
-    };
-    if output.is_empty() {
-        bail!("empty output symbol on the left of `=` in {s:?}");
-    }
-    if query.is_empty() {
-        bail!("empty provider query on the right of `=` in {s:?}");
-    }
     Ok(SymbolSpec {
-        output: output.to_string(),
-        query: query.to_string(),
+        output: s.to_string(),
+        query: s.to_string(),
         freqs: vec![FreqSpec {
             output: interval.as_token(),
             query: interval,

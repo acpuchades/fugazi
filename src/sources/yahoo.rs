@@ -64,7 +64,10 @@ impl Yahoo {
     /// default User-Agent header.
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .http1_only()
+                .build()
+                .expect("failed to build Yahoo HTTP client"),
             base_url: DEFAULT_BASE_URL.to_string(),
             user_agent: DEFAULT_USER_AGENT.to_string(),
         }
