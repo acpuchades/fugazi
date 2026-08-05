@@ -1,15 +1,24 @@
 //! The `fugazi get` subcommand: fetch OHLCV bars from remote providers and
 //! write them to a `,`-delimited CSV in the same shape `--series` reads back.
 //!
-//! Takes one or more specs, each
-//! `<provider>:<symbol>[<freq>(,<freq>)*](,<symbol>[<freq>(,<freq>)*])*`
-//! — the brackets are required. Every symbol/interval series across all specs
-//! downloads concurrently, one progress bar per series. Example:
+//! Takes one or more specs, each either a provider spec string or a `@dataset.yml`
+//! file reference:
+//!
+//! * **Inline spec:** `<provider>:<symbol>[<freq>(,<freq>)*](,<symbol>[...])*`
+//! * **Dataset file:** `@path/to/dataset.yml` — YAML with `name`, optional
+//!   `description`, a single `interval`, and a list of `sources` (each with
+//!   `provider` and `symbols`). The interval is shared across all sources;
+//!   this enforces that a dataset is always a single-frequency universe.
+//!
+//! Every symbol/interval series across all specs downloads concurrently, one
+//! progress bar per series. Example:
 //!
 //! ```text
 //! fugazi get binance:BTCUSDT[1d,1h],ETHUSDT[1d] yfinance:AAPL[1d] \
 //!            --since 2020-01-01 --until today \
 //!            -o candles.csv
+//!
+//! fugazi get @datasets/crypto/large-cap-1d.yml --since 2019-01-01 -o candles.csv
 //! ```
 //!
 //! Output columns: `symbol,freq,time,open,high,low,close,volume`, sorted
@@ -46,6 +55,100 @@ use crate::input::Source as InputSource;
 use crate::overlay::{self, Overlay};
 use crate::params;
 use crate::style;
+
+/// A dataset descriptor loaded from a `@file.yml` spec argument.
+///
+/// A dataset defines a fixed universe of symbols and a single shared interval.
+/// The interval is intentionally top-level (not per-source) to enforce that
+/// every series in a dataset runs at the same cadence — multi-frequency datasets
+/// are not yet well-supported in the backtesting workflow.
+///
+/// Time range and output path are runtime concerns supplied via `--since`,
+/// `--until`, and `-o`; the descriptor never opinions on them.
+#[derive(serde::Deserialize)]
+struct DatasetSpec {
+    #[allow(dead_code)]
+    name: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    description: Option<String>,
+    interval: String,
+    sources: Vec<DatasetSource>,
+}
+
+#[derive(serde::Deserialize)]
+struct DatasetSource {
+    provider: String,
+    symbols: Vec<String>,
+}
+
+/// Parse a `@path/to/dataset.yml` spec argument into one [`FetchSpec`] per
+/// source entry. All sources share the interval declared at the dataset level.
+fn parse_dataset(path: &str) -> Result<Vec<FetchSpec>> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("reading dataset {path:?}"))?;
+    let dataset: DatasetSpec = serde_norway::from_str(&content)
+        .with_context(|| format!("parsing dataset {path:?}"))?;
+    let interval = crate::calendar::parse_interval(&dataset.interval)
+        .with_context(|| format!("dataset {path:?}: interval {:?}", dataset.interval))?;
+    dataset
+        .sources
+        .into_iter()
+        .map(|src| {
+            let symbols = src
+                .symbols
+                .iter()
+                .map(|s| parse_symbol_plain(s, interval))
+                .collect::<Result<Vec<_>>>()
+                .with_context(|| {
+                    format!("dataset {path:?}: provider {:?}", src.provider)
+                })?;
+            Ok(FetchSpec::Remote {
+                provider: src.provider,
+                symbols,
+            })
+        })
+        .collect()
+}
+
+/// Parse a plain symbol string (no `[freq]` bracket) into a [`SymbolSpec`]
+/// with the given interval. Accepts the `OUTPUT=QUERY` remap form used by
+/// overlay providers (e.g. `BTCUSDT=bitcoin` for CoinGecko).
+fn parse_symbol_plain(s: &str, interval: Interval) -> Result<SymbolSpec> {
+    let s = s.trim();
+    if s.is_empty() {
+        bail!("empty symbol name");
+    }
+    let (output, query) = match s.split_once('=') {
+        Some((out, q)) => (out.trim(), q.trim()),
+        None => (s, s),
+    };
+    if output.is_empty() {
+        bail!("empty output symbol on the left of `=` in {s:?}");
+    }
+    if query.is_empty() {
+        bail!("empty provider query on the right of `=` in {s:?}");
+    }
+    Ok(SymbolSpec {
+        output: output.to_string(),
+        query: query.to_string(),
+        freqs: vec![FreqSpec {
+            output: interval.as_token(),
+            query: interval,
+        }],
+    })
+}
+
+/// Parse one CLI spec argument into zero or more [`FetchSpec`]s. A `@path`
+/// argument loads a dataset YAML and may expand to multiple specs (one per
+/// source); any other argument is a single inline provider spec.
+fn parse_spec_arg(s: &str) -> Result<Vec<FetchSpec>> {
+    if let Some(path) = s.strip_prefix('@') {
+        parse_dataset(path).with_context(|| format!("loading dataset {path:?}"))
+    } else {
+        parse_spec(s).map(|f| vec![f])
+    }
+}
 
 /// The remote candle providers this CLI can fetch from. Kept as `(name,
 /// description)` so `fugazi list sources` and the "unknown provider" error
@@ -213,11 +316,17 @@ fn resolve_mode(specs: &[FetchSpec]) -> Result<ProviderKind> {
 
 #[derive(Args, Debug)]
 pub struct GetArgs {
-    /// Fetch specs: `<provider>:[OUT=]<symbol>[[OFREQ=]<freq>,...](,...)*`, e.g.
-    /// `binance:BTCUSDT[1d,1h],ETHUSDT[1d]`. Frequency tokens are the familiar
-    /// `1m`/`5m`/`1h`/`4h`/`1d`/`1w`/`1M`. All series download in parallel.
+    /// Fetch specs: one or more of the following, all series downloading in parallel:
     ///
-    /// Both the symbol and each freq accept an optional `EMITTED=FETCHED`
+    /// * **Inline:** `<provider>:[OUT=]<symbol>[[OFREQ=]<freq>,...](,...)*`, e.g.
+    ///   `binance:BTCUSDT[1d,1h],ETHUSDT[1d]`. Frequency tokens: `1m`/`5m`/`1h`/`4h`/`1d`/`1w`/`1M`.
+    ///
+    /// * **Dataset file:** `@path/to/dataset.yml` — a YAML descriptor with `name`,
+    ///   optional `description`, a single top-level `interval`, and `sources` (list
+    ///   of `{ provider, symbols }`). All sources share the dataset's interval.
+    ///   Example: `fugazi get @datasets/crypto/large-cap-1d.yml --since 2019-01-01 -o out.csv`.
+    ///
+    /// Both the symbol and each freq in an inline spec accept an optional `EMITTED=FETCHED`
     /// remap — the left side is what gets written to the CSV, the right side is
     /// what the provider is asked for. Omit it and the two are the same (the
     /// plain form above). Use it when a provider's vocabulary differs from the
@@ -309,8 +418,11 @@ pub fn run(args: GetArgs) -> Result<()> {
     let fetch_specs: Vec<FetchSpec> = args
         .specs
         .iter()
-        .map(|s| parse_spec(s).with_context(|| format!("parsing spec {s:?}")))
-        .collect::<Result<_>>()?;
+        .map(|s| parse_spec_arg(s).with_context(|| format!("parsing spec {s:?}")))
+        .collect::<Result<Vec<Vec<FetchSpec>>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
     let mode = resolve_mode(&fetch_specs)?;
     let now = OffsetDateTime::now_utc();
     let since_specified = args.since.is_some();
