@@ -376,6 +376,36 @@ fn reject_reserved_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Parse overlay columns from an already-converted JSON value (a mapping of column
+/// names to ExprSpec values).
+///
+/// The caller is responsible for the `serde_norway → imports → yaml_to_json` pass
+/// before calling this — it is used by the dataset YAML parser, which has already
+/// done that work. The scope of every column produced here is the default (no
+/// symbol or interval filter), i.e. the overlay applies to all fetch groups.
+pub fn parse_from_value(
+    value: Json,
+    params: &HashMap<String, Json>,
+    label: &str,
+) -> Result<Vec<Overlay>> {
+    let value = crate::params::substitute(value, params)
+        .with_context(|| format!("resolving `!param` in overlay {label}"))?;
+    let Json::Object(map) = value else {
+        bail!("overlay {label} must be a mapping of column names to source expressions");
+    };
+    let mut out = Vec::with_capacity(map.len());
+    for (name, expr_value) in map {
+        if name.is_empty() {
+            bail!("overlay {label}: empty column name");
+        }
+        let spec: ExprSpec = serde_json::from_value(expr_value)
+            .with_context(|| format!("overlay {name:?} in {label}"))?;
+        reject_reserved_name(&name)?;
+        out.push(Overlay { name, spec, scope: OverlayScope::default() });
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
