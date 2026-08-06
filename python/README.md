@@ -155,6 +155,7 @@ node.reset()                   # call reset() to start a fresh, independent pass
 | `correlation(lhs, rhs, period)` | rolling Pearson correlation in `[-1, 1]` (autocorrelation: `correlation(x, x.lag(n), period)`) |
 | `percentile(source, period, pct)` | the `pct`-quantile over the window (`pct=0.5` is the rolling median), linearly interpolated like numpy's default |
 | `percentile_rank(source, period)` | where the current reading sits in its own window: `count(v <= x)/period`, in `(0, 1]` |
+| `get(schema, key, source=None)` | the overlay column, typed by its declaration (real→Indicator, bool→Signal, str→StrSource); `source=pick(sym)` reads another series' column |
 | `bars_since(signal)` | bars since `signal` was last true (`0` on the firing bar); `None` until it has fired once, so thresholds read false until then |
 | `bars_since_high bars_since_low (source, period)` | bars since the source set a new `period`-bar extreme, in `[0, period-1]` |
 | `variance_ratio(source, period, lag)` | Lo-MacKinlay regime classifier (`>1` trending, `<1` mean-reverting); O(period)/bar recompute |

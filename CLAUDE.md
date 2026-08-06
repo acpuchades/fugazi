@@ -371,6 +371,7 @@ Cargo: `python/Cargo.toml` depends on `fugazi_core = { package = "fugazi", … d
 | Wrap indicator as `DynIndicator` / zero unstable / typed view / chain | `runtime::{wrap, unstable_wrap, AsReal/AsBool/AsCandle/AsAtom/AsStr, chain}` | `src/runtime.rs` |
 | Full-run backtest → `Metrics`; slice a report | `backtest::{evaluate, evaluate_windowed, run_iteration}`; `metrics::report_slice` | `src/cli/{backtest,metrics}.rs` |
 | Returns / trades / drawdown segments from a report | `metrics::{per_bar_returns, reconstruct_trades, drawdown_segments}` | `src/metrics.rs` |
+| Python: read an overlay column, optionally from another series | `get(schema, key, source=None)` / `get_real` / `get_bool` / `get_str` — `source=pick(sym)` re-roots onto a picked atom, mirroring `close(source=…)`. `AnyStrSource` carries a `Snapshot` variant for this, and `str_pair` resolves the two operands' domains (`StrPair`) so a literal adopts its partner's | `python/src/lib.rs` |
 | Python: domain-preserving wrap / combine / bool build | `map_source!`, `combine_sources!`/`sources_to_signal!`/`combine_signals!`/`combine_multi!`, `source_to_signal!` | `python/src/lib.rs` |
 | Python: register metric on `fugazi.metrics` | Add to `reg!(...)` in `register_metrics_module` | `python/src/lib.rs` |
 

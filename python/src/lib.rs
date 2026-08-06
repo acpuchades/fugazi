@@ -652,7 +652,7 @@ impl AnySource {
     /// Dispatch a frame of samples through the domain the source lives in,
     /// producing one `Option<Real>` per bar. Extracts the correct input type
     /// from `data` (OHLCV frame / 1-D series / snapshot sequence) and folds it
-    /// through `Indicator::update`. A `ValueBool` source re-emits its value for
+    /// through `Indicator::update`. A `Const` source re-emits its value for
     /// every bar and reads the frame as candles (its neutral default domain).
     fn feed_rows(&mut self, data: &Bound<'_, PyAny>) -> PyResult<Vec<Option<Real>>> {
         Ok(match self {
@@ -782,56 +782,77 @@ impl AnySignal {
 #[derive(Clone)]
 enum AnyStrSource {
     Candle(StrSource<Atom>),
+    /// Snapshot-rooted — a `Str` overlay column read through an explicit
+    /// atom source (`get_str(schema, key, source=pick("M"))`). The candle
+    /// domain cannot express that: picking one asset out of a multi-symbol
+    /// bar needs the whole snapshot as input.
+    Snapshot(StrSource<Snapshot<String>>),
     /// A constant string (the `ValueStr` leaf), domain-neutral. Adopts a
     /// candle-rooted partner when composed against one (see [`str_pair`]).
-    ValueBool(Arc<str>),
+    Const(Arc<str>),
 }
 
 impl AnyStrSource {
     fn value(&self) -> Option<Arc<str>> {
         match self {
             AnyStrSource::Candle(s) => Indicator::value(s),
-            AnyStrSource::ValueBool(c) => Some(c.clone()),
+            AnyStrSource::Snapshot(s) => Indicator::value(s),
+            AnyStrSource::Const(c) => Some(c.clone()),
         }
     }
     fn warm_up_period(&self) -> usize {
         match self {
             AnyStrSource::Candle(s) => Indicator::warm_up_period(s),
-            AnyStrSource::ValueBool(_) => 0,
+            AnyStrSource::Snapshot(s) => Indicator::warm_up_period(s),
+            AnyStrSource::Const(_) => 0,
         }
     }
     fn unstable_period(&self) -> usize {
         match self {
             AnyStrSource::Candle(s) => Indicator::unstable_period(s),
-            AnyStrSource::ValueBool(_) => 0,
+            AnyStrSource::Snapshot(s) => Indicator::unstable_period(s),
+            AnyStrSource::Const(_) => 0,
         }
     }
     fn reset(&mut self) {
         match self {
             AnyStrSource::Candle(s) => Indicator::reset(s),
-            AnyStrSource::ValueBool(_) => {}
+            AnyStrSource::Snapshot(s) => Indicator::reset(s),
+            AnyStrSource::Const(_) => {}
         }
     }
 }
 
 /// Two string sources resolved to the candle domain, with any neutral constant
 /// materialised via [`ValueStr`]. Both sides end up as `StrSource<Atom>`.
-fn str_pair(
-    lhs: AnyStrSource,
-    rhs: AnyStrSource,
-) -> (StrSource<Atom>, StrSource<Atom>) {
-    fn lift(c: Arc<str>) -> StrSource<Atom> {
+enum StrPair {
+    Candle(StrSource<Atom>, StrSource<Atom>),
+    Snapshot(StrSource<Snapshot<String>>, StrSource<Snapshot<String>>),
+}
+
+fn str_pair(lhs: AnyStrSource, rhs: AnyStrSource) -> PyResult<StrPair> {
+    use AnyStrSource as A;
+    fn lift_candle(c: Arc<str>) -> StrSource<Atom> {
         StrSource::new(ValueStr::<Atom>::new(c))
     }
-    let l = match lhs {
-        AnyStrSource::Candle(s) => s,
-        AnyStrSource::ValueBool(c) => lift(c),
-    };
-    let r = match rhs {
-        AnyStrSource::Candle(s) => s,
-        AnyStrSource::ValueBool(c) => lift(c),
-    };
-    (l, r)
+    fn lift_snapshot(c: Arc<str>) -> StrSource<Snapshot<String>> {
+        StrSource::new(ValueStr::<Snapshot<String>>::new(c))
+    }
+    Ok(match (lhs, rhs) {
+        (A::Candle(l), A::Candle(r)) => StrPair::Candle(l, r),
+        (A::Snapshot(l), A::Snapshot(r)) => StrPair::Snapshot(l, r),
+        // A neutral constant adopts its partner's domain, exactly as on the
+        // Real side — so `str_eq(get_str(.., source=pick("M")), "bull")` works
+        // without the caller having to say which domain the literal is in.
+        (A::Candle(l), A::Const(c)) => StrPair::Candle(l, lift_candle(c)),
+        (A::Const(c), A::Candle(r)) => StrPair::Candle(lift_candle(c), r),
+        (A::Snapshot(l), A::Const(c)) => StrPair::Snapshot(l, lift_snapshot(c)),
+        (A::Const(c), A::Snapshot(r)) => StrPair::Snapshot(lift_snapshot(c), r),
+        (A::Const(l), A::Const(r)) => StrPair::Candle(lift_candle(l), lift_candle(r)),
+        // A genuine clash: one side reads a single atom stream, the other picks
+        // out of a multi-symbol snapshot.
+        _ => return Err(domain_mismatch()),
+    })
 }
 
 /// A multi-output indicator erased to one of the three input domains.
@@ -905,7 +926,7 @@ fn domain_mismatch() -> PyErr {
     )
 }
 
-/// Materialise a `ValueBool` source's payload as a candle-rooted `Source<Atom>` so
+/// Materialise a `Const` source's payload as a candle-rooted `Source<Atom>` so
 /// the single-source dispatch macros can feed it into a source-slot builder.
 /// The candle domain is neutral (matches the enum's own default), so a bare
 /// constant used on its own reads as a per-bar constant candle stream.
@@ -2454,10 +2475,15 @@ impl PyStrSource {
     /// overlay-free atom — which makes an overlay-reading source yield
     /// `None`).
     fn update(&mut self, sample: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
-        let atom = extract_atom(sample)?;
         let out = match &mut self.src {
-            AnyStrSource::Candle(s) => Indicator::update(s, atom),
-            AnyStrSource::ValueBool(c) => Some(c.clone()),
+            AnyStrSource::Candle(s) => Indicator::update(s, extract_atom(sample)?),
+            AnyStrSource::Snapshot(s) => Indicator::update(s, extract_snapshot(sample)?),
+            AnyStrSource::Const(c) => {
+                // Still validate the sample so a constant behaves like any
+                // other source when handed nonsense.
+                extract_atom(sample)?;
+                Some(c.clone())
+            }
         };
         Ok(out.map(|s| s.to_string()))
     }
@@ -2492,19 +2518,27 @@ impl PyStrSource {
     /// (lifted to a `ValueStr` constant).
     fn eq(&self, other: &Bound<'_, PyAny>) -> PyResult<PySignal> {
         let rhs = coerce_str_operand(other)?;
-        let (l, r) = str_pair(self.src.clone(), rhs);
-        Ok(PySignal::wrap(AnySignal::Candle(SignalBox::new(
-            Combine::<_, _, StrEqOp>::new(l, r),
-        ))))
+        Ok(match str_pair(self.src.clone(), rhs)? {
+            StrPair::Candle(l, r) => PySignal::wrap(AnySignal::Candle(SignalBox::new(
+                Combine::<_, _, StrEqOp>::new(l, r),
+            ))),
+            StrPair::Snapshot(l, r) => PySignal::wrap(AnySignal::Snapshot(SignalBox::new(
+                Combine::<_, _, StrEqOp>::new(l, r),
+            ))),
+        })
     }
 
     /// `self != other` — the string counterpart to [`eq`](Self::eq).
     fn ne(&self, other: &Bound<'_, PyAny>) -> PyResult<PySignal> {
         let rhs = coerce_str_operand(other)?;
-        let (l, r) = str_pair(self.src.clone(), rhs);
-        Ok(PySignal::wrap(AnySignal::Candle(SignalBox::new(
-            Combine::<_, _, StrNeOp>::new(l, r),
-        ))))
+        Ok(match str_pair(self.src.clone(), rhs)? {
+            StrPair::Candle(l, r) => PySignal::wrap(AnySignal::Candle(SignalBox::new(
+                Combine::<_, _, StrNeOp>::new(l, r),
+            ))),
+            StrPair::Snapshot(l, r) => PySignal::wrap(AnySignal::Snapshot(SignalBox::new(
+                Combine::<_, _, StrNeOp>::new(l, r),
+            ))),
+        })
     }
 
     fn __repr__(&self) -> String {
@@ -2516,13 +2550,13 @@ impl PyStrSource {
 }
 
 /// Coerce a Python operand for a string-comparison RHS: accepts either a
-/// `PyStrSource` or a Python `str` (lifted to `AnyStrSource::ValueBool`).
+/// `PyStrSource` or a Python `str` (lifted to `AnyStrSource::Const`).
 fn coerce_str_operand(other: &Bound<'_, PyAny>) -> PyResult<AnyStrSource> {
     if let Ok(src) = other.cast::<PyStrSource>() {
         return Ok(src.borrow().src.clone());
     }
     if let Ok(s) = other.extract::<String>() {
-        return Ok(AnyStrSource::ValueBool(Arc::from(s.as_str())));
+        return Ok(AnyStrSource::Const(Arc::from(s.as_str())));
     }
     Err(PyTypeError::new_err(
         "expected a StrSource or a str for string comparison",
@@ -5666,30 +5700,43 @@ fn if_else(cond: PyRef<'_, PySignal>, then: PyRef<'_, PyIndicator>, otherwise: P
 }
 
 /// Read a per-atom overlay column by its `key` in `schema`. Rooted at the
-/// atom stream, so it slots into the same candle-rooted pipelines as
-/// `close()`/`atr()`/etc. When fed a bare `Candle` (no overlays), the reader
-/// yields `None` — pass an `Atom` carrying an `OverlayInfo` bound to the same
-/// schema to see values.
+/// atom stream by default, so it slots into the same candle-rooted pipelines
+/// as `close()`/`atr()`/etc. When fed a bare `Candle` (no overlays), the
+/// reader yields `None` — pass an `Atom` carrying an `OverlayInfo` bound to
+/// the same schema to see values.
 ///
 /// **Polymorphic on the column's declared type**: a `Real` column yields an
 /// `Indicator`, a `Bool` column yields a `Signal`, and a `Str` column yields
 /// a `StrSource`. Use `get_real()` / `get_bool()` / `get_str()` if you want
 /// to assert the returned type at the call site.
 ///
+/// `source` re-roots the reader onto a selected atom, exactly as it does on
+/// `close()` and the other atom leaves — `get(schema, "funding", source=pick("M"))`
+/// reads M's overlay column out of a multi-symbol snapshot while the strategy
+/// trades something else. A source that yields an atom carrying no overlays,
+/// or none bound to this schema, reads `None` rather than raising.
+///
 /// Raises `ValueError` if `key` isn't registered in `schema`.
 #[pyfunction]
-fn get<'py>(py: Python<'py>, schema: &PySchema, key: &str) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (schema, key, source = None))]
+fn get<'py>(
+    py: Python<'py>,
+    schema: &PySchema,
+    key: &str,
+    source: Option<PyRef<'_, PyAtomSource>>,
+) -> PyResult<Py<PyAny>> {
+    let source = source.map(|s| s.inner.clone());
     match schema.inner.type_of_key(key) {
         Some(OverlayType::Real) => {
-            let ind = build_get_real(schema, key)?;
+            let ind = build_get_real(schema, key, source)?;
             Ok(ind.into_pyobject(py)?.into_any().unbind())
         }
         Some(OverlayType::Bool) => {
-            let sig = build_get_bool(schema, key)?;
+            let sig = build_get_bool(schema, key, source)?;
             Ok(sig.into_pyobject(py)?.into_any().unbind())
         }
         Some(OverlayType::Str) => {
-            let src = build_get_str(schema, key)?;
+            let src = build_get_str(schema, key, source)?;
             Ok(src.into_pyobject(py)?.into_any().unbind())
         }
         None => Err(unknown_key_error(schema, key)),
@@ -5699,46 +5746,102 @@ fn get<'py>(py: Python<'py>, schema: &PySchema, key: &str) -> PyResult<Py<PyAny>
 /// Read a `Real`-typed overlay column. Always returns an `Indicator`; raises
 /// `ValueError` if the column is missing or its declared type isn't `Real`.
 #[pyfunction]
-fn get_real(schema: &PySchema, key: &str) -> PyResult<PyIndicator> {
+#[pyo3(signature = (schema, key, source = None))]
+fn get_real(
+    schema: &PySchema,
+    key: &str,
+    source: Option<PyRef<'_, PyAtomSource>>,
+) -> PyResult<PyIndicator> {
     if !schema.inner.contains(key) {
         return Err(unknown_key_error(schema, key));
     }
-    build_get_real(schema, key)
+    build_get_real(schema, key, source.map(|s| s.inner.clone()))
 }
 
 /// Read a `Bool`-typed overlay column. Always returns a `Signal`; raises
 /// `ValueError` if the column is missing or its declared type isn't `Bool`.
 #[pyfunction]
-fn get_bool(schema: &PySchema, key: &str) -> PyResult<PySignal> {
+#[pyo3(signature = (schema, key, source = None))]
+fn get_bool(
+    schema: &PySchema,
+    key: &str,
+    source: Option<PyRef<'_, PyAtomSource>>,
+) -> PyResult<PySignal> {
     if !schema.inner.contains(key) {
         return Err(unknown_key_error(schema, key));
     }
-    build_get_bool(schema, key)
+    build_get_bool(schema, key, source.map(|s| s.inner.clone()))
 }
 
 /// Read a `Str`-typed overlay column. Always returns a `StrSource`; raises
 /// `ValueError` if the column is missing or its declared type isn't `Str`.
 #[pyfunction]
-fn get_str(schema: &PySchema, key: &str) -> PyResult<PyStrSource> {
+#[pyo3(signature = (schema, key, source = None))]
+fn get_str(
+    schema: &PySchema,
+    key: &str,
+    source: Option<PyRef<'_, PyAtomSource>>,
+) -> PyResult<PyStrSource> {
     if !schema.inner.contains(key) {
         return Err(unknown_key_error(schema, key));
     }
-    build_get_str(schema, key)
+    build_get_str(schema, key, source.map(|s| s.inner.clone()))
 }
 
-fn build_get_real(schema: &PySchema, key: &str) -> PyResult<PyIndicator> {
-    let src = GetReal::try_new(&schema.inner, key).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(PyIndicator::wrap(AnySource::Candle(Source::new(src))))
+fn build_get_real(
+    schema: &PySchema,
+    key: &str,
+    source: Option<AnyAtomSource>,
+) -> PyResult<PyIndicator> {
+    // Validate through `try_new`, which owns the key/type diagnostics — `of`
+    // is infallible and would skip them. Then rebuild with the source.
+    let checked =
+        GetReal::try_new(&schema.inner, key).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(match source {
+        None => PyIndicator::wrap(AnySource::Candle(Source::new(checked))),
+        Some(AnyAtomSource::Atom(s)) => PyIndicator::wrap(AnySource::Candle(Source::new(
+            GetReal::of(&schema.inner, key, s),
+        ))),
+        Some(AnyAtomSource::Snapshot(s)) => PyIndicator::wrap(AnySource::Snapshot(Source::new(
+            GetReal::of(&schema.inner, key, s),
+        ))),
+    })
 }
 
-fn build_get_bool(schema: &PySchema, key: &str) -> PyResult<PySignal> {
-    let src = GetBool::try_new(&schema.inner, key).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(PySignal::wrap(AnySignal::Candle(SignalBox::new(src))))
+fn build_get_bool(
+    schema: &PySchema,
+    key: &str,
+    source: Option<AnyAtomSource>,
+) -> PyResult<PySignal> {
+    let checked =
+        GetBool::try_new(&schema.inner, key).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(match source {
+        None => PySignal::wrap(AnySignal::Candle(SignalBox::new(checked))),
+        Some(AnyAtomSource::Atom(s)) => PySignal::wrap(AnySignal::Candle(SignalBox::new(
+            GetBool::of(&schema.inner, key, s),
+        ))),
+        Some(AnyAtomSource::Snapshot(s)) => PySignal::wrap(AnySignal::Snapshot(SignalBox::new(
+            GetBool::of(&schema.inner, key, s),
+        ))),
+    })
 }
 
-fn build_get_str(schema: &PySchema, key: &str) -> PyResult<PyStrSource> {
-    let src = GetStr::try_new(&schema.inner, key).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(PyStrSource::wrap(AnyStrSource::Candle(StrSource::new(src))))
+fn build_get_str(
+    schema: &PySchema,
+    key: &str,
+    source: Option<AnyAtomSource>,
+) -> PyResult<PyStrSource> {
+    let checked =
+        GetStr::try_new(&schema.inner, key).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(match source {
+        None => PyStrSource::wrap(AnyStrSource::Candle(StrSource::new(checked))),
+        Some(AnyAtomSource::Atom(s)) => PyStrSource::wrap(AnyStrSource::Candle(StrSource::new(
+            GetStr::of(&schema.inner, key, s),
+        ))),
+        Some(AnyAtomSource::Snapshot(s)) => PyStrSource::wrap(AnyStrSource::Snapshot(
+            StrSource::new(GetStr::of(&schema.inner, key, s)),
+        )),
+    })
 }
 
 /// The "unknown overlay key" error message used by `get*()` — lists the
@@ -5766,7 +5869,7 @@ fn unknown_key_error(schema: &PySchema, key: &str) -> PyErr {
 /// Pull the erased indicator handle + its overlay column type out of a Python
 /// carrier (`Indicator` → Real, `Signal` → Bool, `StrSource` → Str). Returns
 /// `None` if `v` is none of those. The handle is deep-cloned so the caller's
-/// carrier is untouched; a domain-neutral `ValueBool` carrier synthesises a
+/// carrier is untouched; a domain-neutral `Const` carrier synthesises a
 /// constant leaf. The raw inner handle (not the `SignalBox` wrapper) is taken
 /// on purpose — a warming bool overlay then reads `None`, not `false`.
 fn carrier_inner_indicator(
@@ -5795,7 +5898,8 @@ fn carrier_inner_indicator(
         let ss = ss.borrow();
         let inner: Box<dyn runtime::DynIndicator> = match &ss.src {
             AnyStrSource::Candle(s) => s.0.clone(),
-            AnyStrSource::ValueBool(c) => runtime::wrap(ValueStr::<Atom>::new(c.clone())),
+            AnyStrSource::Snapshot(s) => s.0.clone(),
+            AnyStrSource::Const(c) => runtime::wrap(ValueStr::<Atom>::new(c.clone())),
         };
         return Ok(Some((inner, OverlayType::Str)));
     }
@@ -6036,7 +6140,7 @@ fn compute_overlays_snapshots<'py>(
 /// accepts a raw Python `str` on the right-hand side and lifts internally.
 #[pyfunction]
 fn value_str(s: &str) -> PyStrSource {
-    PyStrSource::wrap(AnyStrSource::ValueBool(Arc::from(s)))
+    PyStrSource::wrap(AnyStrSource::Const(Arc::from(s)))
 }
 
 /// `lhs == rhs` on two string sources. `lhs` is a `StrSource`; `rhs` may be
@@ -6045,20 +6149,28 @@ fn value_str(s: &str) -> PyStrSource {
 #[pyfunction]
 fn str_eq(lhs: &PyStrSource, rhs: &Bound<'_, PyAny>) -> PyResult<PySignal> {
     let rhs = coerce_str_operand(rhs)?;
-    let (l, r) = str_pair(lhs.src.clone(), rhs);
-    Ok(PySignal::wrap(AnySignal::Candle(SignalBox::new(
-        Combine::<_, _, StrEqOp>::new(l, r),
-    ))))
+    Ok(match str_pair(lhs.src.clone(), rhs)? {
+        StrPair::Candle(l, r) => PySignal::wrap(AnySignal::Candle(SignalBox::new(
+            Combine::<_, _, StrEqOp>::new(l, r),
+        ))),
+        StrPair::Snapshot(l, r) => PySignal::wrap(AnySignal::Snapshot(SignalBox::new(
+            Combine::<_, _, StrEqOp>::new(l, r),
+        ))),
+    })
 }
 
 /// `lhs != rhs` on two string sources. The complement of [`str_eq`].
 #[pyfunction]
 fn str_ne(lhs: &PyStrSource, rhs: &Bound<'_, PyAny>) -> PyResult<PySignal> {
     let rhs = coerce_str_operand(rhs)?;
-    let (l, r) = str_pair(lhs.src.clone(), rhs);
-    Ok(PySignal::wrap(AnySignal::Candle(SignalBox::new(
-        Combine::<_, _, StrNeOp>::new(l, r),
-    ))))
+    Ok(match str_pair(lhs.src.clone(), rhs)? {
+        StrPair::Candle(l, r) => PySignal::wrap(AnySignal::Candle(SignalBox::new(
+            Combine::<_, _, StrNeOp>::new(l, r),
+        ))),
+        StrPair::Snapshot(l, r) => PySignal::wrap(AnySignal::Snapshot(SignalBox::new(
+            Combine::<_, _, StrNeOp>::new(l, r),
+        ))),
+    })
 }
 
 // ---------------------------------------------------------------------------

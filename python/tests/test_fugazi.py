@@ -2193,6 +2193,77 @@ def test_pick_exact_disambiguates_between_frequencies():
     assert daily.update(snap) == pytest.approx(300.0)
 
 
+# --- get(source=) : cross-series overlay reads ------------------------------
+
+
+def _overlay_schema():
+    b = ta.SchemaBuilder()
+    b.add_real("val")
+    b.add_bool("flag")
+    b.add_str("regime")
+    return b.finish()
+
+
+def _overlay_atom(schema, px, val=None, flag=None, regime=None):
+    return ta.Atom(ta.Candle(px, px, px, px, 1.0), ta.OverlayInfo(schema, [val, flag, regime]))
+
+
+def _two_symbol_snaps(schema, n=4):
+    return [
+        ta.Snapshot({
+            "T": _overlay_atom(schema, 100 + i, val=0.0, flag=False, regime="flat"),
+            "M": _overlay_atom(schema, 50 + i, val=1.5 + i, flag=True, regime="bull"),
+        })
+        for i in range(n)
+    ]
+
+
+def test_get_source_reads_another_series_overlay_column():
+    # The gap this closes: `close(source=pick(...))` could read another series'
+    # candle fields, but `get` had no way to reach its overlay columns.
+    schema = _overlay_schema()
+    g = ta.get(schema, "val", source=ta.pick("M"))
+    assert [g.update(s) for s in _two_symbol_snaps(schema)] == [1.5, 2.5, 3.5, 4.5]
+
+
+def test_get_without_source_is_unchanged():
+    schema = _overlay_schema()
+    assert ta.get_real(schema, "val").update(_overlay_atom(schema, 1.0, val=9.0)) == 9.0
+
+
+def test_get_source_preserves_type_polymorphism():
+    schema = _overlay_schema()
+    snap = _two_symbol_snaps(schema)[0]
+    assert isinstance(ta.get(schema, "val", source=ta.pick("M")), ta.Indicator)
+    assert isinstance(ta.get(schema, "flag", source=ta.pick("M")), ta.Signal)
+    assert isinstance(ta.get(schema, "regime", source=ta.pick("M")), ta.StrSource)
+    assert ta.get(schema, "flag", source=ta.pick("M")).update(snap) is True
+    assert ta.get(schema, "regime", source=ta.pick("M")).update(snap) == "bull"
+
+
+def test_str_eq_composes_over_a_sourced_str_column():
+    # A snapshot-rooted Str source has to be comparable, or reading a `regime`
+    # column cross-series would be useless. The literal adopts its partner's
+    # domain, same as on the Real side.
+    schema = _overlay_schema()
+    sig = ta.str_eq(ta.get_str(schema, "regime", source=ta.pick("M")), "bull")
+    assert sig.update(_two_symbol_snaps(schema)[0]) is True
+
+
+def test_get_source_yielding_an_overlayless_atom_reads_none():
+    # Not a panic: a bare Candle has no overlay side channel at all.
+    schema = _overlay_schema()
+    bare = ta.Snapshot({"M": ta.Candle(1.0, 1.0, 1.0, 1.0, 1.0)})
+    assert ta.get(schema, "val", source=ta.pick("M")).update(bare) is None
+
+
+def test_get_source_still_rejects_an_unknown_key():
+    schema = _overlay_schema()
+    for ctor in (ta.get, ta.get_real):
+        with pytest.raises(ValueError, match="unknown overlay key"):
+            ctor(schema, "nope", source=ta.pick("M"))
+
+
 # --- CoinGecko (overlay source) -------------------------------------------
 #
 # The live fetch is exercised by the README block (test_readme.py, which skips
