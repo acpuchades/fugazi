@@ -231,8 +231,41 @@ And it reports each unresolved placeholder's **inferred type**, so you know what
 every `--params` value has to look like before running anything:
 
 ```
-params  (defaults) (4 unset placeholders held as holes)
+params  (defaults) (4 unset placeholders)
   FAST: number, LEVEL: number, SLOW: number, SYMBOL: string
+```
+
+##### `!undefined` — a deliberate hole
+
+`!undefined` is the same mechanism made explicit: write it anywhere a value goes
+and `check` will validate everything *around* it, then tell you what type that
+position wants. It is for iterating on a document that isn't finished — scaffold,
+check, fill in, repeat — without inventing throwaway `!param` names.
+
+```yaml
+symbol: BTC
+long:
+  enter: !above
+    source: !sma { period: !undefined }
+    level: !undefined
+```
+
+```
+params  (defaults) (2 !undefined)
+  !undefined at long.enter.above.source.sma.period: number
+  !undefined at long.enter.above.level: number
+
+result
+  status  ok · symbol BTC
+```
+
+Each one is located by its **path in the document**, since it has no name to be
+reported under. `run` and `optimize` refuse a spec that still contains one:
+
+```
+error: `!undefined` is a check-time placeholder — `fugazi check` accepts it so
+       the rest of the document can be validated, but a value has to be supplied
+       before the spec can run
 ```
 
 Two things it cannot decide without data, and therefore skips rather than
