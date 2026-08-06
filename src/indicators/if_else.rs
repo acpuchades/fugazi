@@ -8,7 +8,7 @@
 use crate::indicator::Indicator;
 use crate::types::Real;
 
-/// A three-source ternary. Reads `condition` each bar and returns:
+/// A three-source ternary. Reads `cond` each bar and returns:
 ///
 /// * `Some(then.value())` when the condition is `Some(true)` — which may
 ///   itself be `None` if that branch is still warming;
@@ -58,7 +58,7 @@ use crate::types::Real;
 /// [`Combine`]: crate::indicators::Combine
 #[derive(Debug, Clone)]
 pub struct IfElse<Cond, T, F> {
-    condition: Cond,
+    cond: Cond,
     then: T,
     otherwise: F,
     /// Latest selected value. `None` while the condition is `None`, or
@@ -67,11 +67,11 @@ pub struct IfElse<Cond, T, F> {
 }
 
 impl<Cond, T, F> IfElse<Cond, T, F> {
-    /// Build a ternary that reads `condition` each bar and returns
+    /// Build a ternary that reads `cond` each bar and returns
     /// `then`'s or `otherwise`'s value.
-    pub fn new(condition: Cond, then: T, otherwise: F) -> Self {
+    pub fn new(cond: Cond, then: T, otherwise: F) -> Self {
         Self {
-            condition,
+            cond,
             then,
             otherwise,
             value: None,
@@ -92,7 +92,7 @@ where
     fn update(&mut self, input: I) -> Option<Real> {
         // Advance all three unconditionally so a branch that doesn't fire
         // this bar keeps its warm-up progressing.
-        let cond = self.condition.update(input.clone());
+        let cond = self.cond.update(input.clone());
         let true_v = self.then.update(input.clone());
         let false_v = self.otherwise.update(input);
         // Natural semantics: `None` on `None` cond, otherwise the selected
@@ -110,7 +110,7 @@ where
     }
 
     fn warm_up_period(&self) -> usize {
-        self.condition
+        self.cond
             .warm_up_period()
             .max(self.then.warm_up_period())
             .max(self.otherwise.warm_up_period())
@@ -121,7 +121,7 @@ where
         // stable periods; the unstable-period we return is the excess above
         // our own warm-up.
         let stable = self
-            .condition
+            .cond
             .stable_period()
             .max(self.then.stable_period())
             .max(self.otherwise.stable_period());
@@ -129,7 +129,7 @@ where
     }
 
     fn reset(&mut self) {
-        self.condition.reset();
+        self.cond.reset();
         self.then.reset();
         self.otherwise.reset();
         self.value = None;
