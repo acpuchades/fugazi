@@ -261,26 +261,48 @@ impl SchemaBuilder {
 /// Per-bar overlay data attached to an [`Atom`]: a shared [`Schema`] plus that
 /// bar's values in schema order.
 ///
+/// Each slot is an `Option<OverlayValue>` — `None` marks a column whose value
+/// is absent for this bar (a computed overlay still in its warm-up, or a
+/// genuinely missing cell). A `!get` (or the typed `GetReal`/`GetBool`/`GetStr`
+/// leaves) reads `None` for such a slot, so the readiness gate waits exactly as
+/// it would before an indicator's first sample.
+///
 /// Cheap to clone (two atomic bumps: the shared `Arc<Schema>` and the per-atom
-/// `Arc<[OverlayValue]>`, no allocation), which is what
+/// `Arc<[Option<OverlayValue>]>`, no allocation), which is what
 /// [`Combine`](crate::indicators::Combine) needs when it feeds the same
 /// [`Atom`] to both sides. Both fields are `Arc` so an atom slice can also be
 /// shared across worker threads (used by the CLI's `optimize` sweep).
 #[derive(Debug, Clone)]
 pub struct OverlayInfo {
     schema: Arc<Schema>,
-    values: Arc<[OverlayValue]>,
+    values: Arc<[Option<OverlayValue>]>,
 }
 
 impl OverlayInfo {
-    /// Bind `values` to a fixed `schema`. `values.len()` must equal
-    /// `schema.len()`, and each `values[i]`'s runtime type must match
-    /// `schema.type_of(i)`.
+    /// Bind a fully-present `values` row to a fixed `schema` — the common case
+    /// where every column has a value this bar (a fetched provider row, a CSV
+    /// line). `values.len()` must equal `schema.len()`, and each `values[i]`'s
+    /// runtime type must match `schema.type_of(i)`.
     ///
     /// # Panics
     /// Panics on length mismatch or on any per-slot type mismatch.
-    pub fn new(schema: Arc<Schema>, values: impl Into<Arc<[OverlayValue]>>) -> Self {
-        let values = values.into();
+    pub fn new(schema: Arc<Schema>, values: impl IntoIterator<Item = OverlayValue>) -> Self {
+        Self::sparse(schema, values.into_iter().map(Some))
+    }
+
+    /// Bind a `values` row that may leave individual slots `None` (absent this
+    /// bar). Same length + per-slot type rules as [`new`](Self::new), but a
+    /// `None` slot is skipped by the type check. This is the constructor the
+    /// overlay-compute path uses so a column still in its warm-up reads `None`
+    /// rather than a sentinel.
+    ///
+    /// # Panics
+    /// Panics on length mismatch or on a type mismatch in any `Some` slot.
+    pub fn sparse(
+        schema: Arc<Schema>,
+        values: impl IntoIterator<Item = Option<OverlayValue>>,
+    ) -> Self {
+        let values: Arc<[Option<OverlayValue>]> = values.into_iter().collect();
         assert_eq!(
             values.len(),
             schema.len(),
@@ -289,6 +311,7 @@ impl OverlayInfo {
             schema.len(),
         );
         for (i, v) in values.iter().enumerate() {
+            let Some(v) = v else { continue };
             let declared = schema.type_of(i).expect("index in range");
             let actual = v.type_of();
             assert_eq!(
@@ -305,14 +328,16 @@ impl OverlayInfo {
         &self.schema
     }
 
-    /// The values array, in schema order.
-    pub fn values(&self) -> &[OverlayValue] {
+    /// The values array, in schema order. A `None` entry is a slot absent for
+    /// this bar (a warming computed column, or a missing cell).
+    pub fn values(&self) -> &[Option<OverlayValue>] {
         &self.values
     }
 
-    /// Read the value at a resolved column index, `None` if out of bounds.
+    /// Read the value at a resolved column index. `None` if the index is out of
+    /// bounds *or* the slot is absent for this bar.
     pub fn get(&self, index: usize) -> Option<&OverlayValue> {
-        self.values.get(index)
+        self.values.get(index).and_then(Option::as_ref)
     }
 
     /// Look up a value by column name (a one-time convenience — hot-path

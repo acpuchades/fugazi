@@ -2111,3 +2111,143 @@ def test_coingecko_rejects_sub_hourly():
     with pytest.raises(ValueError, match="unsupported interval"):
         ta.CoinGecko().overlays(symbol="bitcoin", freq="5m", since="2026-07-08")
 
+
+
+# ---------------------------------------------------------------------------
+# compute_overlays: derive overlay columns from indicator specs and attach
+# them onto Atoms / Snapshots (the dataset "overlays" step).
+# ---------------------------------------------------------------------------
+
+
+def _bars(closes):
+    """A list of overlay-free Atoms with the given close prices."""
+    return [ta.Atom(ta.Candle(c, c, c, c, 1_000.0)) for c in closes]
+
+
+def test_compute_overlays_real_column_atoms_yaml():
+    atoms = _bars([10.0, 20.0, 30.0, 40.0])
+    schema, out = ta.compute_overlays(atoms, "sma3: !sma { period: 3 }")
+
+    assert schema.keys() == ["sma3"]
+    i = schema.index_of("sma3")
+    assert len(out) == 4
+    # Warm-up bars read None (not a sentinel).
+    assert out[0].overlays.get_real(i) is None
+    assert out[1].overlays.get_real(i) is None
+    # SMA(10, 20, 30) = 20, then SMA(20, 30, 40) = 30.
+    assert out[2].overlays.get_real(i) == pytest.approx(20.0)
+    assert out[3].overlays.get_real(i) == pytest.approx(30.0)
+
+
+def test_compute_overlays_result_feeds_into_get():
+    atoms = _bars([10.0, 20.0, 30.0, 40.0])
+    schema, out = ta.compute_overlays(atoms, "sma3: !sma { period: 3 }")
+
+    # A reader built against the *returned* schema reads the computed values.
+    reader = ta.get(schema, "sma3")
+    read = [reader.update(a) for a in out]
+    assert read[0] is None and read[1] is None
+    assert read[2] == pytest.approx(20.0)
+    assert read[3] == pytest.approx(30.0)
+
+
+def test_compute_overlays_str_column():
+    atoms = _bars([1.0, 2.0])
+    schema, out = ta.compute_overlays(atoms, "label: !value bull")
+    assert schema.type_of_key("label") == "str"
+    i = schema.index_of("label")
+    assert out[0].overlays.get_str(i) == "bull"
+
+
+def test_compute_overlays_bool_column_via_dict():
+    atoms = _bars([10.0, 20.0, 30.0])
+    schema, out = ta.compute_overlays(atoms, {"hot": ta.close().above(15.0)})
+    assert schema.type_of_key("hot") == "bool"
+    i = schema.index_of("hot")
+    assert out[0].overlays.get_bool(i) is False
+    assert out[1].overlays.get_bool(i) is True
+
+
+def test_compute_overlays_merges_and_extends_existing():
+    # Atoms already carry a `vol` overlay bound to one schema.
+    existing = _schema("vol")
+    atoms = []
+    for k, c in enumerate([10.0, 20.0, 30.0, 40.0]):
+        candle = ta.Candle(c, c, c, c, 1_000.0)
+        atoms.append(ta.Atom(candle, ta.OverlayInfo(existing, [float(k)])))
+
+    schema, out = ta.compute_overlays(atoms, "sma3: !sma { period: 3 }")
+    assert schema.keys() == ["vol", "sma3"]
+
+    vol_i = schema.index_of("vol")
+    sma_i = schema.index_of("sma3")
+    # Pre-existing column preserved & unchanged on every bar, including the
+    # new column's warm-up bars.
+    for k, a in enumerate(out):
+        assert a.overlays.get_real(vol_i) == pytest.approx(float(k))
+    assert out[0].overlays.get_real(sma_i) is None
+    assert out[2].overlays.get_real(sma_i) == pytest.approx(20.0)
+
+
+def test_compute_overlays_snapshots_multi_symbol():
+    snaps = []
+    btc = [10.0, 20.0, 30.0, 40.0]
+    eth = [1.0, 2.0, 3.0, 4.0]
+    for b, e in zip(btc, eth):
+        snaps.append(
+            ta.Snapshot(
+                {
+                    "BTC": ta.Atom(ta.Candle(b, b, b, b, 1.0)),
+                    "ETH": ta.Atom(ta.Candle(e, e, e, e, 1.0)),
+                }
+            )
+        )
+
+    schema, out = ta.compute_overlays(snaps, "sma3: !sma { period: 3 }")
+    i = schema.index_of("sma3")
+    assert len(out) == 4
+
+    # Each symbol carries its own-series SMA; they warm independently but here
+    # both warm at bar index 2.
+    assert out[2]["BTC"].overlays.get_real(i) == pytest.approx(20.0)
+    assert out[2]["ETH"].overlays.get_real(i) == pytest.approx(2.0)
+    assert out[1]["BTC"].overlays.get_real(i) is None
+
+
+def test_compute_overlays_dict_of_prebuilt_indicators():
+    atoms = _bars([10.0, 20.0, 30.0])
+    schema, out = ta.compute_overlays(
+        atoms, {"c": ta.close(), "r": ta.rsi(ta.close(), 2)}
+    )
+    assert schema.type_of_key("c") == "real"
+    assert schema.type_of_key("r") == "real"
+    # `c` is just the close, available every bar.
+    assert out[0].overlays.get_real(schema.index_of("c")) == pytest.approx(10.0)
+
+
+def test_compute_overlays_params_passthrough():
+    atoms = _bars([10.0, 20.0, 30.0])
+    schema, out = ta.compute_overlays(
+        atoms, "r: !sma { period: !param P }", params={"P": 2}
+    )
+    i = schema.index_of("r")
+    # SMA(2): warm at bar index 1 → mean(10, 20) = 15.
+    assert out[1].overlays.get_real(i) == pytest.approx(15.0)
+
+
+def test_compute_overlays_empty_series_returns_schema():
+    schema, out = ta.compute_overlays([], "sma3: !sma { period: 3 }")
+    assert schema.keys() == ["sma3"]
+    assert out == []
+
+
+def test_compute_overlays_rejects_non_indicator_dict_value():
+    atoms = _bars([1.0, 2.0])
+    with pytest.raises(TypeError, match="Indicator"):
+        ta.compute_overlays(atoms, {"x": 5.0})
+
+
+def test_compute_overlays_rejects_bad_overlays_type():
+    atoms = _bars([1.0, 2.0])
+    with pytest.raises(TypeError, match="YAML string or a dict"):
+        ta.compute_overlays(atoms, 42)

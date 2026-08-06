@@ -38,7 +38,6 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value as Json;
 
 use fugazi::Schema;
-use fugazi::indicators::{Book, Position};
 use fugazi::sources::Interval;
 
 use crate::dyn_indicator::DynIndicator;
@@ -91,8 +90,8 @@ impl Overlay {
     pub fn build(&self, schema: &std::sync::Arc<Schema>) -> Box<dyn DynIndicator> {
         // Overlays don't run inside a strategy, so there's no live Position
         // or Book — using them here (`entry`, `peak`, book-anchored sizing)
-        // never fires. Pass fresh anchors for signature compatibility.
-        self.spec.build(&Position::new(), &Book::new(1.0), None, schema)
+        // never fires. The shared library core installs the stub anchors.
+        crate::spec::overlay::build_overlay(&self.spec, schema)
     }
 }
 
@@ -309,22 +308,8 @@ fn parse_file(
     let value = input::parse_value_at(text, label)?;
     let value = params::substitute(value, params)
         .with_context(|| format!("resolving `!param` in overlay {label}"))?;
-    let Json::Object(map) = value else {
-        bail!("overlay file {label} must be a mapping of column names to source expressions");
-    };
-    let mut out = Vec::with_capacity(map.len());
-    for (name, expr_value) in map {
-        if name.is_empty() {
-            bail!("overlay file {label} has an empty column name");
-        }
-        let spec: ExprSpec = serde_json::from_value(expr_value)
-            .with_context(|| format!("building overlay {name:?} from {label}"))?;
-        out.push(Overlay {
-            name,
-            spec,
-            scope: scope.clone(),
-        });
-    }
+    let out = scoped_from_value(value, scope, label)
+        .with_context(|| format!("building overlays from {label}"))?;
     if out.is_empty() {
         bail!("overlay file {label} has no entries");
     }
@@ -397,20 +382,23 @@ pub fn parse_from_value(
 ) -> Result<Vec<Overlay>> {
     let value = crate::params::substitute(value, params)
         .with_context(|| format!("resolving `!param` in overlay {label}"))?;
-    let Json::Object(map) = value else {
-        bail!("overlay {label} must be a mapping of column names to source expressions");
-    };
-    let mut out = Vec::with_capacity(map.len());
-    for (name, expr_value) in map {
-        if name.is_empty() {
-            bail!("overlay {label}: empty column name");
-        }
-        let spec: ExprSpec = serde_json::from_value(expr_value)
-            .with_context(|| format!("overlay {name:?} in {label}"))?;
-        reject_reserved_name(&name)?;
-        out.push(Overlay { name, spec, scope: OverlayScope::default() });
-    }
-    Ok(out)
+    scoped_from_value(value, OverlayScope::default(), label)
+}
+
+/// Shared adapter: parse a `name: ExprSpec` map via the library core, apply the
+/// CLI's reserved-name policy, and tag every column with `scope`.
+fn scoped_from_value(value: Json, scope: OverlayScope, label: &str) -> Result<Vec<Overlay>> {
+    crate::spec::overlay::columns_from_value(value, label)?
+        .into_iter()
+        .map(|c| {
+            reject_reserved_name(&c.name)?;
+            Ok(Overlay {
+                name: c.name,
+                spec: c.spec,
+                scope: scope.clone(),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

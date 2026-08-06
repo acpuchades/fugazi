@@ -334,6 +334,47 @@ assert a1 == a2 and a1 < a3
 assert len({a1, a2, a3}) == 2                          # a1 == a2, distinct from a3
 ```
 
+### Computing overlays — deriving columns from a series
+
+A **dataset** is a series (bars) plus a set of **overlays** — derived columns
+computed from that series and carried on each bar's `OverlayInfo` side-channel.
+`compute_overlays(series, overlays)` runs the overlay indicators over the series
+and attaches the results, returning `(schema, augmented)`. Read the columns back
+with `get(...)` — **use the returned schema**, the augmented atoms are bound to
+it:
+
+```python
+import fugazi as ta
+
+atoms = [ta.Atom(ta.Candle(c, c, c, c, 1_000)) for c in (10, 20, 30, 40)]
+
+# `overlays` is a YAML doc of `name: !expr { ... }` ...
+schema, out = ta.compute_overlays(atoms, "sma3: !sma { period: 3 }")
+assert out[1].overlays.get_real(schema.index_of("sma3")) is None   # warming up
+assert out[2].overlays.get_real(schema.index_of("sma3")) == 20.0   # mean(10,20,30)
+
+# ... or a dict of pre-built indicators (Real / Signal → Bool / StrSource → Str).
+schema, out = ta.compute_overlays(atoms, {"c": ta.close(), "hot": ta.close().above(15)})
+
+reader = ta.get(schema, "c")            # resolve against the *returned* schema
+assert [reader.update(a) for a in out][0] == 10.0
+```
+
+Existing overlay columns are preserved (same indexes) and the new columns
+appended, so overlays layer over a fetched series. A computed column reads
+`None` while it warms up. `Snapshot` sequences work too — each symbol's overlay
+derives from its own series, warming independently:
+
+```python
+snaps = [
+    ta.Snapshot({"BTC": ta.Atom(ta.Candle(b, b, b, b, 1)),
+                 "ETH": ta.Atom(ta.Candle(e, e, e, e, 1))})
+    for b, e in zip((10, 20, 30), (1, 2, 3))
+]
+schema, out = ta.compute_overlays(snaps, "sma3: !sma { period: 3 }")
+assert out[2]["BTC"].overlays.get_real(schema.index_of("sma3")) == 20.0
+```
+
 ## Operators
 
 Combine value indicators into **other indicators**:
