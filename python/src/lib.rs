@@ -1262,9 +1262,11 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send + 'static>) -> String {
 /// Per-atom overlay values, bound to a shared [`Schema`]. Construct as
 /// `OverlayInfo(schema, values)` — `values` is a list whose length matches
 /// `len(schema)`, with each entry a Python `float` / `bool` / `str` matching
-/// the column's declared type. Reading a value with `get()` returns the
-/// native Python type; the typed accessors (`get_real` / `get_bool` /
-/// `get_str`) return `None` on a type mismatch.
+/// the column's declared type, or `None` to mark that column absent for this
+/// bar (a warming computed column, or a missing cell). Reading a value with
+/// `get()` returns the native Python type (or `None` for an absent slot); the
+/// typed accessors (`get_real` / `get_bool` / `get_str`) return `None` on an
+/// absent slot or a type mismatch.
 ///
 /// The internal `Rc<[OverlayValue]>` (per-atom, non-atomic refcount) makes
 /// this class `unsendable` — it's confined to the Python thread that created
@@ -1287,14 +1289,20 @@ impl PyOverlayInfo {
                 schema.inner.len(),
             )));
         }
-        let mut typed: Vec<OverlayValue> = Vec::with_capacity(values.len());
+        let mut typed: Vec<Option<OverlayValue>> = Vec::with_capacity(values.len());
         for (i, v) in values.into_iter().enumerate() {
             let declared = schema.inner.type_of(i).expect("schema index in range");
             let bound = v.bind(py);
-            typed.push(python_to_overlay_value(bound, declared, i)?);
+            if bound.is_none() {
+                // Python `None` marks a slot absent for this bar (a warming
+                // computed column, or a genuinely missing cell).
+                typed.push(None);
+            } else {
+                typed.push(Some(python_to_overlay_value(bound, declared, i)?));
+            }
         }
         Ok(Self {
-            inner: OverlayInfo::new(schema.inner.clone(), typed),
+            inner: OverlayInfo::sparse(schema.inner.clone(), typed),
         })
     }
 
@@ -5595,6 +5603,278 @@ fn unknown_key_error(schema: &PySchema, key: &str) -> PyErr {
     }
 }
 
+// ---------------------------------------------------------------------------
+// compute_overlays: derive overlay columns from indicator specs and attach
+// them onto a series of Atoms / Snapshots — the dataset "overlays" step.
+// ---------------------------------------------------------------------------
+
+/// Pull the erased indicator handle + its overlay column type out of a Python
+/// carrier (`Indicator` → Real, `Signal` → Bool, `StrSource` → Str). Returns
+/// `None` if `v` is none of those. The handle is deep-cloned so the caller's
+/// carrier is untouched; a domain-neutral `Const` carrier synthesises a
+/// constant leaf. The raw inner handle (not the `SignalBox` wrapper) is taken
+/// on purpose — a warming bool overlay then reads `None`, not `false`.
+fn carrier_inner_indicator(
+    v: &Bound<'_, PyAny>,
+) -> PyResult<Option<(Box<dyn runtime::DynIndicator>, OverlayType)>> {
+    if let Ok(ind) = v.cast::<PyIndicator>() {
+        let ind = ind.borrow();
+        let inner: Box<dyn runtime::DynIndicator> = match &ind.src {
+            AnySource::Candle(s) => s.0.clone(),
+            AnySource::Real(s) => s.0.clone(),
+            AnySource::Snapshot(s) => s.0.clone(),
+            AnySource::Const(c) => runtime::wrap(Value::<Atom>::new(*c)),
+        };
+        return Ok(Some((inner, OverlayType::Real)));
+    }
+    if let Ok(sig) = v.cast::<PySignal>() {
+        let sig = sig.borrow();
+        let inner: Box<dyn runtime::DynIndicator> = match &sig.sig {
+            AnySignal::Candle(s) => s.0.0.clone(),
+            AnySignal::Real(s) => s.0.0.clone(),
+            AnySignal::Snapshot(s) => s.0.0.clone(),
+        };
+        return Ok(Some((inner, OverlayType::Bool)));
+    }
+    if let Ok(ss) = v.cast::<PyStrSource>() {
+        let ss = ss.borrow();
+        let inner: Box<dyn runtime::DynIndicator> = match &ss.src {
+            AnyStrSource::Candle(s) => s.0.clone(),
+            AnyStrSource::Const(c) => runtime::wrap(ValueStr::<Atom>::new(c.clone())),
+        };
+        return Ok(Some((inner, OverlayType::Str)));
+    }
+    Ok(None)
+}
+
+/// The two accepted `overlays` shapes, normalised.
+enum OverlayInput {
+    /// A `name: ExprSpec` YAML doc (built per series against the input schema).
+    Spec(Vec<fugazi_core::spec::overlay::OverlayColumn>),
+    /// A dict of pre-built carriers (deep-cloned per series).
+    Built(Vec<(String, Box<dyn runtime::DynIndicator>)>),
+}
+
+/// Parse the `overlays` argument: a YAML string (the fugazi-web overlay-file
+/// shape `rsi_14: !rsi { period: 14 }`) or a dict `{name: Indicator|Signal|
+/// StrSource}`. `params` resolves `!param` inside the YAML form only.
+fn parse_overlay_input(
+    overlays: &Bound<'_, PyAny>,
+    params: Option<&Bound<'_, PyAny>>,
+) -> PyResult<OverlayInput> {
+    if let Ok(text) = overlays.extract::<String>() {
+        let table = extract_params(params)?;
+        let cols = fugazi_core::spec::overlay::columns_from_yaml(
+            &text,
+            &table,
+            std::path::Path::new("."),
+            "(overlays)",
+        )
+        .map_err(|e| PyValueError::new_err(format!("{e:#}")))?;
+        return Ok(OverlayInput::Spec(cols));
+    }
+    if let Ok(dict) = overlays.cast::<pyo3::types::PyDict>() {
+        let mut named = Vec::new();
+        for (k, v) in dict.iter() {
+            let name = k.extract::<String>().map_err(|_| {
+                PyTypeError::new_err("overlay column names (dict keys) must be strings")
+            })?;
+            match carrier_inner_indicator(&v)? {
+                Some((ind, _ty)) => named.push((name, ind)),
+                None => {
+                    return Err(PyTypeError::new_err(format!(
+                        "overlay column {name:?} must be an Indicator, Signal, or StrSource \
+                         (or pass the whole overlay set as a YAML string)"
+                    )));
+                }
+            }
+        }
+        return Ok(OverlayInput::Built(named));
+    }
+    Err(PyTypeError::new_err(
+        "`overlays` must be a YAML string or a dict of {name: Indicator|Signal|StrSource}",
+    ))
+}
+
+/// Build the output schema + a fresh (never-fed) prepared column set for a
+/// series with input schema `existing`.
+fn build_overlay_prepared(
+    existing: &std::sync::Arc<Schema>,
+    input: &OverlayInput,
+) -> PyResult<(std::sync::Arc<Schema>, Vec<fugazi_core::spec::overlay::PreparedColumn>)> {
+    use fugazi_core::spec::overlay as ov;
+    let result = match input {
+        OverlayInput::Spec(cols) => ov::prepare(existing, cols),
+        OverlayInput::Built(named) => {
+            let cloned: Vec<(String, Box<dyn runtime::DynIndicator>)> =
+                named.iter().map(|(n, i)| (n.clone(), i.clone())).collect();
+            ov::prepare_built(existing, cloned)
+        }
+    };
+    result.map_err(|e| PyValueError::new_err(format!("{e:#}")))
+}
+
+/// Derive the one input overlay schema shared by an atom stream — the schema of
+/// the first atom carrying overlays, validated identical (by `Arc` identity)
+/// across every other overlay-bearing atom. Bare atoms are ignored; an empty
+/// stream (or an all-bare one) yields the empty schema.
+fn existing_schema_from_atoms<'a>(
+    atoms: impl Iterator<Item = &'a Atom>,
+) -> PyResult<std::sync::Arc<Schema>> {
+    let mut existing: Option<std::sync::Arc<Schema>> = None;
+    for a in atoms {
+        if let Some(ov) = &a.overlays {
+            match &existing {
+                None => existing = Some(ov.schema().clone()),
+                Some(e) => {
+                    if !std::sync::Arc::ptr_eq(e, ov.schema()) {
+                        return Err(PyValueError::new_err(
+                            "input atoms carry overlays bound to different schemas; \
+                             compute_overlays needs one shared input schema",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(existing.unwrap_or_else(Schema::empty))
+}
+
+/// Extract a `Vec<Atom>` from a Python sequence of `Atom` (or `Candle`).
+fn atoms_from_sequence(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Atom>> {
+    let iter = obj
+        .try_iter()
+        .map_err(|_| PyTypeError::new_err("`series` must be an iterable of Atom"))?;
+    let mut out = Vec::new();
+    for item in iter {
+        out.push(extract_atom(&item?)?);
+    }
+    Ok(out)
+}
+
+/// Compute derived overlay columns from indicator specs and attach them onto a
+/// series of `Atom`s (single series) or `Snapshot`s (multi-symbol), returning
+/// `(schema, augmented)`.
+///
+/// `overlays` is a YAML doc (`name: !expr { ... }`) or a dict `{name:
+/// Indicator|Signal|StrSource}`. Existing overlay columns are preserved (same
+/// indexes) and the new columns appended; a computed column reads `None` while
+/// it warms up. **Use the returned schema for downstream `get(...)`** — the
+/// augmented atoms are bound to it by `Arc` identity.
+#[pyfunction]
+#[pyo3(signature = (series, overlays, params = None))]
+fn compute_overlays<'py>(
+    py: Python<'py>,
+    series: &Bound<'py, PyAny>,
+    overlays: &Bound<'py, PyAny>,
+    params: Option<&Bound<'py, PyAny>>,
+) -> PyResult<(PySchema, Py<PyAny>)> {
+    let input = parse_overlay_input(overlays, params)?;
+
+    // Sniff the first element to pick the atoms-vs-snapshots path.
+    let mut iter = series
+        .try_iter()
+        .map_err(|_| PyTypeError::new_err("`series` must be a sequence of Atom or Snapshot"))?;
+    let Some(first) = iter.next() else {
+        // Empty series: still return a meaningful (possibly extended) schema.
+        let (schema, _) = build_overlay_prepared(&Schema::empty(), &input)?;
+        let empty = pyo3::types::PyList::empty(py).into_any().unbind();
+        return Ok((PySchema { inner: schema }, empty));
+    };
+    let first = first?;
+
+    if first.cast::<PyAtom>().is_ok() {
+        compute_overlays_atoms(py, series, &input)
+    } else if first.cast::<PySnapshot>().is_ok() || first.cast::<pyo3::types::PyDict>().is_ok() {
+        compute_overlays_snapshots(py, series, &input)
+    } else {
+        Err(PyTypeError::new_err(
+            "`series` must be a sequence of Atom or Snapshot",
+        ))
+    }
+}
+
+fn compute_overlays_atoms<'py>(
+    py: Python<'py>,
+    series: &Bound<'py, PyAny>,
+    input: &OverlayInput,
+) -> PyResult<(PySchema, Py<PyAny>)> {
+    use fugazi_core::spec::overlay as ov;
+    let atoms = atoms_from_sequence(series)?;
+    let existing = existing_schema_from_atoms(atoms.iter())?;
+    let (out_schema, mut prepared) = build_overlay_prepared(&existing, input)?;
+    let augmented = ov::compute_series(None, &atoms, &out_schema, existing.len(), &mut prepared);
+
+    let list = pyo3::types::PyList::empty(py);
+    for a in augmented {
+        list.append(PyAtom { inner: a })?;
+    }
+    Ok((PySchema { inner: out_schema }, list.into_any().unbind()))
+}
+
+fn compute_overlays_snapshots<'py>(
+    py: Python<'py>,
+    series: &Bound<'py, PyAny>,
+    input: &OverlayInput,
+) -> PyResult<(PySchema, Py<PyAny>)> {
+    use fugazi_core::spec::overlay as ov;
+    use std::collections::HashMap;
+
+    let snaps = snapshots_from_sequence(series)?;
+    let existing =
+        existing_schema_from_atoms(snaps.iter().flat_map(|s| s.iter().map(|(_, _, a)| a)))?;
+    let (out_schema, template) = build_overlay_prepared(&existing, input)?;
+    let existing_len = existing.len();
+
+    // Pass 1: collect each (symbol, freq) series in first-appearance order.
+    type Key = (Option<String>, Option<Frequency>);
+    let mut order: Vec<Key> = Vec::new();
+    let mut index: HashMap<Key, usize> = HashMap::new();
+    let mut series_atoms: Vec<Vec<Atom>> = Vec::new();
+    for snap in &snaps {
+        for (sym, freq, atom) in snap.iter() {
+            let key = (sym.cloned(), freq);
+            let i = *index.entry(key.clone()).or_insert_with(|| {
+                order.push(key.clone());
+                series_atoms.push(Vec::new());
+                series_atoms.len() - 1
+            });
+            series_atoms[i].push(atom.clone());
+        }
+    }
+
+    // Pass 2: compute each series with a fresh indicator set, reusing the one
+    // out_schema so every augmented atom binds to the same `Arc`.
+    let mut augmented: Vec<Vec<Atom>> = Vec::with_capacity(order.len());
+    for (key, atoms) in order.iter().zip(series_atoms.iter()) {
+        let mut prepared = template.clone();
+        augmented.push(ov::compute_series(
+            key.0.as_deref(),
+            atoms,
+            &out_schema,
+            existing_len,
+            &mut prepared,
+        ));
+    }
+
+    // Pass 3: rebuild each snapshot with its atoms replaced by the augmented ones.
+    let mut cursor: HashMap<Key, usize> = HashMap::new();
+    let list = pyo3::types::PyList::empty(py);
+    for snap in &snaps {
+        let mut rebuilt = Snapshot::<String>::new();
+        for (sym, freq, _) in snap.iter() {
+            let key = (sym.cloned(), freq);
+            let i = index[&key];
+            let c = cursor.entry(key.clone()).or_insert(0);
+            let aug = augmented[i][*c].clone();
+            *c += 1;
+            rebuilt.push(key.0.clone(), key.1, aug);
+        }
+        list.append(PySnapshot { inner: rebuilt })?;
+    }
+    Ok((PySchema { inner: out_schema }, list.into_any().unbind()))
+}
+
 /// A constant string source — the string twin of `value(x)`. Feeds a
 /// [`ValueStr`] leaf as a `StrSource` that ignores its input and always emits
 /// `s`. Usually you don't need to build one explicitly: `StrSource.eq("foo")`
@@ -8495,7 +8775,8 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         variance_ratio, stochastic, cci, log, atr, parkinson, garman_klass, rogers_satchell, mfi,
         williams_r, obv, vwap, ad,
         true_range, adx, dmi, aroon, sar, macd, bollinger, keltner, donchian, stoch_rsi, resample,
-        latch, unstable, if_else, get, get_real, get_bool, get_str, str_eq, str_ne, fetch,
+        latch, unstable, if_else, get, get_real, get_bool, get_str, compute_overlays,
+        str_eq, str_ne, fetch,
         // Calendar accessors + weekday/weekend signals; consume `atom.time`.
         year, month, day, hour, minute, second, day_of_week, day_of_year, week_of_year, quarter,
         unix_seconds, unix_millis, is_weekday, is_weekend,
