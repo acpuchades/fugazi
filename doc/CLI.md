@@ -434,8 +434,16 @@ order — sensible for exploration, not for production.
   trade stats measured on a run that never saw the parameters it
   executed.
 
-**Pairs / basket strategies** are not supported (yet); `optimize` rejects
-them with the same message it uses for plain-grid sweeps.
+**Every strategy shape is supported.** `single:`, `pairs:`, `basket:`,
+`multi:` and `portfolio:` documents all sweep and walk-forward — the
+multi-symbol shapes route through the same kernel as single-asset, reading
+their legs out of the `--series` frame exactly as `run` does. Prefix the spec
+the same way you would for `run`:
+
+```
+fugazi optimize pairs:@spread.yml -s @btc.csv -s @eth.csv \
+                --grid 'WINDOW=[20,40,60]' -m sharpe -o sweep.csv
+```
 
 ### `get`
 

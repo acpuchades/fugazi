@@ -41,6 +41,12 @@ use serde_norway::Value as Yaml;
 /// value carries the original `!param` key (for diagnostics, not parsing).
 pub const HOLE_KEY: &str = "__fugazi_param_hole__";
 
+/// The `!arg` twin of [`HOLE_KEY`]. Kept distinct so the type observations
+/// below can report on `!param` placeholders — the ones a user supplies from
+/// `--params` and might get wrong — without mixing in `!arg`s, which a driver
+/// supplies and a user never writes a value for.
+pub const ARG_HOLE_KEY: &str = "__fugazi_arg_hole__";
+
 /// Build the sentinel [`Json`] node standing in for an unresolved required
 /// `!param` with the given key.
 pub fn sentinel(param_key: &str) -> Json {
@@ -49,9 +55,111 @@ pub fn sentinel(param_key: &str) -> Json {
     Json::Object(map)
 }
 
-/// Is this buffered YAML node the hole sentinel [`sentinel`] produces?
+/// The `!arg` twin of [`sentinel`], for
+/// [`args::substitute_for_check`](crate::spec::args::substitute_for_check).
+pub fn arg_sentinel(arg_key: &str) -> Json {
+    let mut map = Map::with_capacity(1);
+    map.insert(ARG_HOLE_KEY.to_string(), Json::String(arg_key.to_string()));
+    Json::Object(map)
+}
+
+/// Is this buffered YAML node either hole sentinel?
 pub fn is_hole(value: &Yaml) -> bool {
-    matches!(value, Yaml::Mapping(m) if m.len() == 1 && m.contains_key(HOLE_KEY))
+    hole_key(value).is_some()
+}
+
+/// The `(reserved-key, placeholder-name)` of a hole node, if it is one.
+fn hole_parts(value: &Yaml) -> Option<(&str, &str)> {
+    let Yaml::Mapping(m) = value else {
+        return None;
+    };
+    if m.len() != 1 {
+        return None;
+    }
+    for key in [HOLE_KEY, ARG_HOLE_KEY] {
+        if let Some(Yaml::String(name)) = m.get(Yaml::String(key.to_string())) {
+            return Some((key, name.as_str()));
+        }
+    }
+    None
+}
+
+fn hole_key(value: &Yaml) -> Option<&str> {
+    hole_parts(value).map(|(_, name)| name)
+}
+
+/// The `!param` name of a hole node — `None` for a non-hole *and* for an
+/// `!arg` hole, which is not a user-supplied value.
+fn param_hole_name(value: &Yaml) -> Option<&str> {
+    match hole_parts(value) {
+        Some((HOLE_KEY, name)) => Some(name),
+        _ => None,
+    }
+}
+
+/// The coarse type a placeholder is required to have, inferred from which
+/// `deserialize_*` method serde asked for at the hole.
+///
+/// Deliberately coarse: `u8` and `f64` are both `Number` because a user writes
+/// `--params N=20` either way. What matters is catching a genuine
+/// contradiction — the same `!param` used where a number is required *and*
+/// where a string is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HoleType {
+    Bool,
+    Number,
+    Str,
+    List,
+    Table,
+}
+
+impl HoleType {
+    pub fn label(self) -> &'static str {
+        match self {
+            HoleType::Bool => "bool",
+            HoleType::Number => "number",
+            HoleType::Str => "string",
+            HoleType::List => "list",
+            HoleType::Table => "table",
+        }
+    }
+}
+
+thread_local! {
+    /// Every `(param name, required type)` a hole answered during the current
+    /// check parse, in encounter order. Drained by
+    /// [`take_param_observations`].
+    static PARAM_USES: std::cell::RefCell<Vec<(String, HoleType)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn observe(value: &Yaml, ty: HoleType) {
+    if let Some(name) = param_hole_name(value) {
+        let entry = (name.to_string(), ty);
+        PARAM_USES.with(|u| u.borrow_mut().push(entry));
+    }
+}
+
+/// Drain the recorded placeholder type observations, collapsed to one entry per
+/// `!param` name with the distinct types it was required to have (sorted).
+///
+/// A name mapping to more than one type is a genuine contradiction: no single
+/// `--params` value can satisfy both positions, so the document can never run
+/// whatever the user supplies.
+pub fn take_param_observations() -> Vec<(String, Vec<HoleType>)> {
+    let raw = PARAM_USES.with(|u| std::mem::take(&mut *u.borrow_mut()));
+    let mut by_name: std::collections::BTreeMap<String, Vec<HoleType>> =
+        std::collections::BTreeMap::new();
+    for (name, ty) in raw {
+        let seen = by_name.entry(name).or_default();
+        if !seen.contains(&ty) {
+            seen.push(ty);
+        }
+    }
+    for types in by_name.values_mut() {
+        types.sort();
+    }
+    by_name.into_iter().collect()
 }
 
 thread_local! {
@@ -77,7 +185,12 @@ impl Drop for CheckModeGuard {
     }
 }
 
-fn in_check_mode() -> bool {
+/// Whether a [`check_mode`] guard is currently held on this thread.
+///
+/// Read by [`from_value`] to pick the hole-aware path, and by
+/// [`SpecTemplate`](crate::spec::SpecTemplate)'s `Deserialize` to decide
+/// whether to typed-parse its deferred body for shape errors.
+pub fn in_check_mode() -> bool {
     CHECK_MODE.with(Cell::get)
 }
 
@@ -113,9 +226,13 @@ struct HoleDeserializer(Yaml);
 /// type; anything else delegates to the underlying `serde_norway::Value` (which
 /// is a plain scalar, so no children are lost).
 macro_rules! scalar_methods {
-    ($($method:ident => $visit:ident ( $zero:expr )),* $(,)?) => {$(
+    ($($method:ident => $visit:ident ( $zero:expr ) as $ty:expr),* $(,)?) => {$(
         fn $method<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
             if is_hole(&self.0) {
+                // Record what type this position demanded before answering, so
+                // `check` can report a placeholder's inferred type and catch a
+                // name used at two incompatible ones.
+                observe(&self.0, $ty);
                 visitor.$visit($zero)
             } else {
                 self.0.$method(visitor)
@@ -136,24 +253,24 @@ impl<'de> Deserializer<'de> for HoleDeserializer {
     }
 
     scalar_methods! {
-        deserialize_bool => visit_bool(false),
-        deserialize_i8 => visit_i64(0),
-        deserialize_i16 => visit_i64(0),
-        deserialize_i32 => visit_i64(0),
-        deserialize_i64 => visit_i64(0),
-        deserialize_i128 => visit_i128(0),
-        deserialize_u8 => visit_u64(0),
-        deserialize_u16 => visit_u64(0),
-        deserialize_u32 => visit_u64(0),
-        deserialize_u64 => visit_u64(0),
-        deserialize_u128 => visit_u128(0),
-        deserialize_f32 => visit_f64(0.0),
-        deserialize_f64 => visit_f64(0.0),
-        deserialize_char => visit_char('\0'),
-        deserialize_str => visit_str(""),
-        deserialize_string => visit_str(""),
-        deserialize_bytes => visit_bytes(&[]),
-        deserialize_byte_buf => visit_bytes(&[]),
+        deserialize_bool => visit_bool(false) as HoleType::Bool,
+        deserialize_i8 => visit_i64(0) as HoleType::Number,
+        deserialize_i16 => visit_i64(0) as HoleType::Number,
+        deserialize_i32 => visit_i64(0) as HoleType::Number,
+        deserialize_i64 => visit_i64(0) as HoleType::Number,
+        deserialize_i128 => visit_i128(0) as HoleType::Number,
+        deserialize_u8 => visit_u64(0) as HoleType::Number,
+        deserialize_u16 => visit_u64(0) as HoleType::Number,
+        deserialize_u32 => visit_u64(0) as HoleType::Number,
+        deserialize_u64 => visit_u64(0) as HoleType::Number,
+        deserialize_u128 => visit_u128(0) as HoleType::Number,
+        deserialize_f32 => visit_f64(0.0) as HoleType::Number,
+        deserialize_f64 => visit_f64(0.0) as HoleType::Number,
+        deserialize_char => visit_char('\0') as HoleType::Str,
+        deserialize_str => visit_str("") as HoleType::Str,
+        deserialize_string => visit_str("") as HoleType::Str,
+        deserialize_bytes => visit_bytes(&[]) as HoleType::Str,
+        deserialize_byte_buf => visit_bytes(&[]) as HoleType::Str,
     }
 
     fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
@@ -191,6 +308,7 @@ impl<'de> Deserializer<'de> for HoleDeserializer {
 
     fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         if is_hole(&self.0) {
+            observe(&self.0, HoleType::List);
             return visitor.visit_seq(HoleSeq(Vec::new().into_iter()));
         }
         match self.0 {
@@ -218,6 +336,7 @@ impl<'de> Deserializer<'de> for HoleDeserializer {
 
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
         if is_hole(&self.0) {
+            observe(&self.0, HoleType::Table);
             return visitor.visit_map(HoleMap {
                 entries: Vec::new().into_iter(),
                 pending_value: None,

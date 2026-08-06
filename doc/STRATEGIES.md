@@ -37,9 +37,10 @@ fugazi run multi:@portfolio.yml  --series @btc.csv --series @eth.csv \
                                  --series @sol.csv --series @ada.csv -o out/   # multi
 ```
 
-`fugazi optimize` currently supports the single-asset shape only; `pairs:`,
-`basket:`, and `multi:` documents run under `fugazi run` (and validate under
-`fugazi check strategy`).
+`fugazi optimize` accepts the same prefixes, so every shape sweeps and
+walk-forwards: `fugazi optimize pairs:@spread.yml -s @btc.csv -s @eth.csv
+--grid 'WINDOW=[20,40,60]'`. `fugazi check strategy` validates any of them
+without data.
 
 > This document is the syntax reference. For the surrounding CLI (`--series`,
 > `--params`, output files, console output) see the

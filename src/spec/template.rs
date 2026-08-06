@@ -48,6 +48,7 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use anyhow::Result;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
@@ -101,12 +102,27 @@ impl<T: for<'de> Deserialize<'de>> SpecTemplate<T> {
 /// Deserialization captures the raw tree without trying to typed-parse it
 /// into `T` — that's deferred to [`build`](SpecTemplate::build), so any
 /// `!arg` placeholders inside the tree survive the load pass.
-impl<'de, T> Deserialize<'de> for SpecTemplate<T> {
+///
+/// **Except under `fugazi check`.** Deferring the typed parse means a template
+/// body is otherwise never validated by `check`: an unknown tag or a
+/// misspelled field inside a basket's `score:`, a multi-asset side's `enter:`,
+/// or a portfolio's `weights:` would pass and only fail once a run reached the
+/// symbol that instantiates it. A template's *shape* doesn't depend on which
+/// symbol the driver eventually binds, so while a
+/// [`check_mode`](crate::spec::hole::check_mode) guard is held this
+/// additionally parses a copy of the tree with every `!arg` marked as a hole,
+/// surfacing those errors at check time. The stored tree is the original,
+/// untouched — `build` still resolves real args later.
+impl<'de, T: DeserializeOwned> Deserialize<'de> for SpecTemplate<T> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let tree = Value::deserialize(deserializer)?;
+        if crate::spec::hole::in_check_mode() {
+            let probe = args::substitute_for_check(tree.clone());
+            crate::spec::hole::from_json_value::<T>(probe).map_err(serde::de::Error::custom)?;
+        }
         Ok(Self::from_tree(tree))
     }
 }
