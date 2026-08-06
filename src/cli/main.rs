@@ -487,101 +487,100 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     // (see `spec::hole`).
     let value = spec::load_value_pre_params(&text, &base, &label)
         .with_context(|| parse_error_hint(&args.strategy))?;
-    let (value, n_holes) = params::substitute_for_check(value, &param_table)
+    // The site count is discarded: the report below counts distinct placeholder
+    // *names* instead, which is what the user has to supply values for.
+    let (value, _n_hole_sites) = params::substitute_for_check(value, &param_table)
         .with_context(|| parse_error_hint(&args.strategy))?;
-    let params_label = params_label_with_holes(&params_label(&param_table), n_holes);
+    let params_base = params_label(&param_table);
 
     // Deserialize under the hole-aware guard. `from_json_value` moves the tree
     // into the `serde_norway::Value` shape the bridges buffer through.
     let _guard = spec::hole::check_mode();
     let parse_err = || parse_error_hint(&args.strategy);
 
-    match args.strategy.kind {
+    // Each arm parses its shape and reports back `(description, detail)`; the
+    // placeholder-type checks and the printing are common, and must run *after*
+    // the parse, since that is what populates the observations.
+    let (description, detail) = match args.strategy.kind {
         StrategyKind::Single => {
             let strategy: spec::StrategyRef =
                 spec::hole::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
-            if !args.quiet {
-                print_check_report(
-                    "parse and validate a strategy spec",
-                    &label,
-                    &params_label,
-                    &format!("symbol {}", strategy.symbol()),
-                );
-            }
+            (
+                "parse and validate a strategy spec",
+                format!("symbol {}", strategy.symbol()),
+            )
         }
         StrategyKind::Pairs => {
             let spec: spec::PairsStrategySpec =
                 spec::hole::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
-            if !args.quiet {
-                print_check_report(
-                    "parse and validate a pairs strategy spec",
-                    &label,
-                    &params_label,
-                    &format!("pair {} / {}", spec.left, spec.right),
-                );
-            }
+            (
+                "parse and validate a pairs strategy spec",
+                format!("pair {} / {}", spec.left, spec.right),
+            )
         }
         StrategyKind::Basket => {
-            // Basket parses eagerly: the top-level enum + templates
-            // deserialize, but the templates only typed-parse per-symbol
-            // at run time (against `!arg SYM`). So `check` here just
-            // confirms the outer spec + selection dispatch.
+            // Basket parses eagerly: the top-level enum + templates. Under the
+            // check-mode guard each template *body* typed-parses too (with its
+            // `!arg`s held as holes), so an unknown tag or misspelled field
+            // inside `score:` / `sizing:` is caught here rather than at the
+            // first run that reaches a symbol.
             let spec: spec::BasketStrategySpec =
                 spec::hole::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
-            if !args.quiet {
-                print_check_report(
-                    "parse and validate a basket strategy spec",
-                    &label,
-                    &params_label,
-                    &format!("selection {:?}", spec.selection),
-                );
-            }
+            (
+                "parse and validate a basket strategy spec",
+                format!("selection {:?}", spec.selection),
+            )
         }
         StrategyKind::Multi => {
-            // Multi-asset parses eagerly like basket: the top-level +
-            // per-slot templates deserialize now; each template only
-            // typed-parses per-symbol at run time (against `!arg SYM`).
+            // Multi-asset parses eagerly like basket, template bodies included.
             let spec: spec::MultiAssetStrategySpec =
                 spec::hole::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
-            if !args.quiet {
-                let sides: Vec<&str> = [
-                    spec.long.as_ref().map(|_| "long"),
-                    spec.short.as_ref().map(|_| "short"),
-                ]
-                .into_iter()
-                .flatten()
-                .collect();
-                let sides = if sides.is_empty() {
-                    "no sides wired".to_string()
-                } else {
-                    sides.join(" + ")
-                };
-                print_check_report(
-                    "parse and validate a multi-asset strategy spec",
-                    &label,
-                    &params_label,
-                    &sides,
-                );
-            }
+            let sides: Vec<&str> = [
+                spec.long.as_ref().map(|_| "long"),
+                spec.short.as_ref().map(|_| "short"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            let sides = if sides.is_empty() {
+                "no sides wired".to_string()
+            } else {
+                sides.join(" + ")
+            };
+            ("parse and validate a multi-asset strategy spec", sides)
         }
         StrategyKind::Portfolio => {
-            // Portfolio parses eagerly at the top level (children,
-            // weights); each child's own spec typed-parses too. Per-symbol
-            // child templates (basket / multi under a child) still resolve
-            // `!arg SYM` at run time — same convention as those specs
-            // standalone.
+            // Portfolio parses eagerly at the top level (children, weights);
+            // each child's own spec typed-parses too, and every template body
+            // under a child validates the same way it would standalone.
             let spec: spec::PortfolioSpec =
                 spec::hole::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
-            if !args.quiet {
-                let n = spec.children.len();
-                print_check_report(
-                    "parse and validate a portfolio strategy spec",
-                    &label,
-                    &params_label,
-                    &format!("{n} child strateg{}", if n == 1 { "y" } else { "ies" }),
-                );
-            }
+            let n = spec.children.len();
+            (
+                "parse and validate a portfolio strategy spec",
+                format!("{n} child strateg{}", if n == 1 { "y" } else { "ies" }),
+            )
         }
+    };
+
+    // The typed parse above resolved every unset `!param` through a hole, and
+    // each hole recorded the type its position demanded. A name required to be
+    // two different types can never be satisfied by any `--params` value, so
+    // that is a hard error; the rest is reported so the user knows what each
+    // placeholder has to look like.
+    let observations = spec::hole::take_param_observations();
+    reject_contradictory_params(&observations).with_context(parse_err)?;
+
+    if !args.quiet {
+        // Count distinct placeholder *names*, not substitution sites: one name
+        // used in three positions is one value the user has to supply, and the
+        // type line below lists it once.
+        let params_label = params_label_with_holes(&params_base, observations.len());
+        let params_label = match param_types_label(&observations) {
+            Some(types) => format!("{params_label}\n  {types}"),
+            None => params_label,
+        };
+        print_check_report(description, &label, &params_label, &detail);
     }
     Ok(())
 }
@@ -817,6 +816,56 @@ fn params_label_with_holes(base: &str, n_holes: usize) -> String {
             if n_holes == 1 { "a hole" } else { "holes" }
         )
     }
+}
+
+/// The inferred type of each unresolved `!param`, e.g. `PERIOD: number`.
+///
+/// `check` cannot know a placeholder's *value*, but the typed parse reveals its
+/// *type*: serde asks for a `usize` at `period:`, a `String` at `symbol:`, and
+/// the hole records which. Reporting that turns "3 unset placeholders" into
+/// something a user can act on — it says exactly what each `--params` value has
+/// to look like.
+fn param_types_label(observations: &[(String, Vec<spec::hole::HoleType>)]) -> Option<String> {
+    if observations.is_empty() {
+        return None;
+    }
+    Some(
+        observations
+            .iter()
+            .map(|(name, types)| {
+                let types: Vec<&str> = types.iter().map(|t| t.label()).collect();
+                format!("{name}: {}", types.join(" | "))
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
+
+/// Reject a `!param` required to be two different types in two places.
+///
+/// This is decidable without any data and is always a real defect: no single
+/// `--params NAME=…` value can satisfy both positions, so the document cannot
+/// run whatever the user supplies. Catching it here is the whole point of
+/// inferring hole types rather than just counting them.
+fn reject_contradictory_params(
+    observations: &[(String, Vec<spec::hole::HoleType>)],
+) -> anyhow::Result<()> {
+    let bad: Vec<String> = observations
+        .iter()
+        .filter(|(_, types)| types.len() > 1)
+        .map(|(name, types)| {
+            let types: Vec<&str> = types.iter().map(|t| t.label()).collect();
+            format!("`{name}` is used as {}", types.join(" and as "))
+        })
+        .collect();
+    if bad.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "contradictory placeholder types: {}. No single `--params` value can satisfy \
+         both positions — use a separate placeholder name for each.",
+        bad.join("; ")
+    )
 }
 
 /// Collapse the three mutually-exclusive asset-class booleans (clap enforces
