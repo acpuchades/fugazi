@@ -150,8 +150,27 @@ pub fn table(specs: &[ParamSpec]) -> Result<HashMap<String, Value>> {
 
 /// Rewrite every `param` placeholder in `value` to its resolved value, recursing
 /// through objects and arrays.
+/// The tag an author writes for a deliberate hole: `period: !undefined`.
+///
+/// Converted to a singleton object by `yaml_to_json` like every other tag, so
+/// it is recognised the same way `!param` is. No spec enum has an `undefined`
+/// variant, which is what makes the match unambiguous.
+const UNDEFINED_KEY: &str = "undefined";
+
 pub fn substitute(value: Value, params: &HashMap<String, Value>) -> Result<Value> {
     match value {
+        // `!undefined` validates under `fugazi check` and nowhere else: it
+        // stands for a decision not yet made, so a spec still carrying one
+        // cannot be run. Rejecting it here — rather than letting it reach the
+        // typed parse as an "invalid type" — is what makes that message
+        // actionable.
+        Value::Object(map) if map.len() == 1 && map.contains_key(UNDEFINED_KEY) => {
+            bail!(
+                "`!undefined` is a check-time placeholder — `fugazi check` accepts it so the \
+                 rest of the document can be validated, but a value has to be supplied before \
+                 the spec can run"
+            )
+        }
         // A `{param: …}` singleton object is a placeholder (no spec enum has a
         // `param` variant, so this is unambiguous).
         Value::Object(map) if map.len() == 1 && map.contains_key("param") => {
@@ -262,7 +281,7 @@ pub fn substitute_for_check(
     params: &HashMap<String, Value>,
 ) -> Result<(Value, usize)> {
     let mut holes = 0;
-    let value = substitute_for_check_inner(value, params, &mut holes)?;
+    let value = substitute_for_check_inner(value, params, &mut holes, &mut Vec::new())?;
     Ok((value, holes))
 }
 
@@ -270,8 +289,18 @@ fn substitute_for_check_inner(
     value: Value,
     params: &HashMap<String, Value>,
     holes: &mut usize,
+    path: &mut Vec<String>,
 ) -> Result<Value> {
     match value {
+        // `!undefined` — an author-written hole. Same machinery as an unset
+        // `!param`, but with no name to key on. This pass owns the traversal,
+        // so it knows exactly where in the document it is: name the sentinel
+        // by that path. Two `!undefined`s therefore never collapse into one
+        // entry, and never look like one placeholder demanded at two types.
+        Value::Object(map) if map.len() == 1 && map.contains_key(UNDEFINED_KEY) => {
+            *holes += 1;
+            Ok(crate::spec::hole::undefined_sentinel(&path.join(".")))
+        }
         Value::Object(map) if map.len() == 1 && map.contains_key("param") => {
             let (key, default) = placeholder_parts(&map["param"])?;
             if params.contains_key(key) || default.is_some() {
@@ -284,15 +313,22 @@ fn substitute_for_check_inner(
         Value::Object(map) => {
             let mut out = Map::new();
             for (k, v) in map {
-                out.insert(k, substitute_for_check_inner(v, params, holes)?);
+                path.push(k.clone());
+                let v = substitute_for_check_inner(v, params, holes, path)?;
+                path.pop();
+                out.insert(k, v);
             }
             Ok(Value::Object(out))
         }
-        Value::Array(seq) => seq
-            .into_iter()
-            .map(|v| substitute_for_check_inner(v, params, holes))
-            .collect::<Result<Vec<_>>>()
-            .map(Value::Array),
+        Value::Array(seq) => {
+            let mut out = Vec::with_capacity(seq.len());
+            for (i, v) in seq.into_iter().enumerate() {
+                path.push(format!("[{i}]"));
+                out.push(substitute_for_check_inner(v, params, holes, path)?);
+                path.pop();
+            }
+            Ok(Value::Array(out))
+        }
         other => Ok(other),
     }
 }
@@ -300,6 +336,7 @@ fn substitute_for_check_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use crate::spec::convert::yaml_to_json;
     use crate::spec::SingleStrategySpec;
 
@@ -461,5 +498,57 @@ mod tests {
         let err = check("symbol: !param { default: BTC }\nlong: { enter: !value true }", &[])
             .unwrap_err();
         assert!(err.to_string().contains("needs a string"), "{err}");
+    }
+
+    #[test]
+    fn undefined_is_rejected_outside_check_mode() {
+        // A spec still carrying `!undefined` cannot run, and the message has to
+        // say so rather than surfacing as an "invalid type" from the typed parse.
+        let input = json!({"period": {"undefined": null}});
+        let err = substitute(input, &HashMap::new()).expect_err("run must refuse");
+        assert!(
+            format!("{err:#}").contains("check-time placeholder"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn undefined_becomes_a_hole_named_by_its_document_path() {
+        // The path is what locates it — there is no name to report, and a
+        // positional counter would make the reader count occurrences.
+        let input = json!({"long": {"enter": {"sma": {"period": {"undefined": null}}}}});
+        let (out, holes) = substitute_for_check(input, &HashMap::new()).unwrap();
+        assert_eq!(holes, 1);
+        let hole = &out["long"]["enter"]["sma"]["period"];
+        assert_eq!(
+            hole[crate::spec::hole::UNDEFINED_HOLE_KEY],
+            json!("long.enter.sma.period")
+        );
+    }
+
+    #[test]
+    fn two_undefined_holes_get_distinct_paths() {
+        // Distinct keys are what stop them collapsing into one report entry —
+        // and stop two positions of different types looking like one
+        // contradictory placeholder.
+        let input = json!({
+            "a": {"undefined": null},
+            "b": {"c": {"undefined": null}},
+        });
+        let (out, holes) = substitute_for_check(input, &HashMap::new()).unwrap();
+        assert_eq!(holes, 2);
+        let key = crate::spec::hole::UNDEFINED_HOLE_KEY;
+        assert_eq!(out["a"][key], json!("a"));
+        assert_eq!(out["b"]["c"][key], json!("b.c"));
+    }
+
+    #[test]
+    fn undefined_inside_a_sequence_records_its_index() {
+        let input = json!({"cases": [{"when": {"undefined": null}}]});
+        let (out, _) = substitute_for_check(input, &HashMap::new()).unwrap();
+        assert_eq!(
+            out["cases"][0]["when"][crate::spec::hole::UNDEFINED_HOLE_KEY],
+            json!("cases.[0].when")
+        );
     }
 }

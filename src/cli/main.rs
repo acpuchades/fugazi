@@ -608,7 +608,12 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
         // Count distinct placeholder *names*, not substitution sites: one name
         // used in three positions is one value the user has to supply, and the
         // type line below lists it once.
-        let params_label = params_label_with_holes(&params_base, observations.len());
+        let n_undefined = observations
+            .iter()
+            .filter(|(o, _, _)| *o == spec::hole::HoleOrigin::Undefined)
+            .count();
+        let params_label =
+            params_label_with_holes(&params_base, observations.len() - n_undefined, n_undefined);
         let params_label = match param_types_label(&observations) {
             Some(types) => format!("{params_label}\n  {types}"),
             None => params_label,
@@ -839,15 +844,21 @@ fn params_label(table: &HashMap<String, serde_json::Value>) -> String {
 /// `params_label` with a note of how many required placeholders `check` had to
 /// fill with a hole (unset, no `default` — see `spec::hole`). `0` is the common
 /// case and adds nothing.
-fn params_label_with_holes(base: &str, n_holes: usize) -> String {
-    if n_holes == 0 {
+fn params_label_with_holes(base: &str, n_params: usize, n_undefined: usize) -> String {
+    let mut parts = Vec::new();
+    if n_params > 0 {
+        parts.push(format!(
+            "{n_params} unset placeholder{}",
+            if n_params == 1 { "" } else { "s" }
+        ));
+    }
+    if n_undefined > 0 {
+        parts.push(format!("{n_undefined} !undefined"));
+    }
+    if parts.is_empty() {
         base.to_string()
     } else {
-        format!(
-            "{base} ({n_holes} unset placeholder{} held as {})",
-            if n_holes == 1 { "" } else { "s" },
-            if n_holes == 1 { "a hole" } else { "holes" }
-        )
+        format!("{base} ({})", parts.join(", "))
     }
 }
 
@@ -858,19 +869,28 @@ fn params_label_with_holes(base: &str, n_holes: usize) -> String {
 /// the hole records which. Reporting that turns "3 unset placeholders" into
 /// something a user can act on — it says exactly what each `--params` value has
 /// to look like.
-fn param_types_label(observations: &[(String, Vec<spec::hole::HoleType>)]) -> Option<String> {
+fn param_types_label(
+    observations: &[(spec::hole::HoleOrigin, String, Vec<spec::hole::HoleType>)],
+) -> Option<String> {
+    use spec::hole::HoleOrigin;
     if observations.is_empty() {
         return None;
     }
     Some(
         observations
             .iter()
-            .map(|(name, types)| {
+            .map(|(origin, name, types)| {
                 let types: Vec<&str> = types.iter().map(|t| t.label()).collect();
-                format!("{name}: {}", types.join(" | "))
+                let types = types.join(" | ");
+                match origin {
+                    // A `--params` key: the name is what the user passes.
+                    HoleOrigin::Param => format!("{name}: {types}"),
+                    // An `!undefined`: it has no name, so say where it is.
+                    HoleOrigin::Undefined => format!("!undefined at {name}: {types}"),
+                }
             })
             .collect::<Vec<_>>()
-            .join(", "),
+            .join("\n  "),
     )
 }
 
@@ -881,12 +901,15 @@ fn param_types_label(observations: &[(String, Vec<spec::hole::HoleType>)]) -> Op
 /// run whatever the user supplies. Catching it here is the whole point of
 /// inferring hole types rather than just counting them.
 fn reject_contradictory_params(
-    observations: &[(String, Vec<spec::hole::HoleType>)],
+    observations: &[(spec::hole::HoleOrigin, String, Vec<spec::hole::HoleType>)],
 ) -> anyhow::Result<()> {
+    use spec::hole::HoleOrigin;
     let bad: Vec<String> = observations
         .iter()
-        .filter(|(_, types)| types.len() > 1)
-        .map(|(name, types)| {
+        // Only named placeholders can contradict: an `!undefined` is keyed by
+        // its own document path, so it is one position and cannot be two types.
+        .filter(|(origin, _, types)| *origin == HoleOrigin::Param && types.len() > 1)
+        .map(|(_, name, types)| {
             let types: Vec<&str> = types.iter().map(|t| t.label()).collect();
             format!("`{name}` is used as {}", types.join(" and as "))
         })

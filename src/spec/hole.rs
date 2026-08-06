@@ -47,11 +47,26 @@ pub const HOLE_KEY: &str = "__fugazi_param_hole__";
 /// supplies and a user never writes a value for.
 pub const ARG_HOLE_KEY: &str = "__fugazi_arg_hole__";
 
+/// The `!undefined` twin of [`HOLE_KEY`]. Distinct so the report can say
+/// *where* an author-written hole is (its document path) rather than naming it
+/// like a `--params` key the user is expected to recognise.
+pub const UNDEFINED_HOLE_KEY: &str = "__fugazi_undefined_hole__";
+
 /// Build the sentinel [`Json`] node standing in for an unresolved required
 /// `!param` with the given key.
 pub fn sentinel(param_key: &str) -> Json {
     let mut map = Map::with_capacity(1);
     map.insert(HOLE_KEY.to_string(), Json::String(param_key.to_string()));
+    Json::Object(map)
+}
+
+/// The `!undefined` twin of [`sentinel`], carrying the hole's document path.
+pub fn undefined_sentinel(path: &str) -> Json {
+    let mut map = Map::with_capacity(1);
+    map.insert(
+        UNDEFINED_HOLE_KEY.to_string(),
+        Json::String(path.to_string()),
+    );
     Json::Object(map)
 }
 
@@ -76,7 +91,7 @@ fn hole_parts(value: &Yaml) -> Option<(&str, &str)> {
     if m.len() != 1 {
         return None;
     }
-    for key in [HOLE_KEY, ARG_HOLE_KEY] {
+    for key in [HOLE_KEY, ARG_HOLE_KEY, UNDEFINED_HOLE_KEY] {
         if let Some(Yaml::String(name)) = m.get(Yaml::String(key.to_string())) {
             return Some((key, name.as_str()));
         }
@@ -88,11 +103,22 @@ fn hole_key(value: &Yaml) -> Option<&str> {
     hole_parts(value).map(|(_, name)| name)
 }
 
-/// The `!param` name of a hole node — `None` for a non-hole *and* for an
-/// `!arg` hole, which is not a user-supplied value.
-fn param_hole_name(value: &Yaml) -> Option<&str> {
+/// Where a user-facing hole came from — a named `--params` placeholder, or an
+/// author-written `!undefined` located by its document path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HoleOrigin {
+    /// An unset required `!param`; the key is its name.
+    Param,
+    /// An `!undefined`; the key is its path in the document.
+    Undefined,
+}
+
+/// The user-facing identity of a hole node — `None` for a non-hole *and* for an
+/// `!arg` hole, which a driver supplies rather than a user.
+fn user_hole(value: &Yaml) -> Option<(HoleOrigin, &str)> {
     match hole_parts(value) {
-        Some((HOLE_KEY, name)) => Some(name),
+        Some((HOLE_KEY, name)) => Some((HoleOrigin::Param, name)),
+        Some((UNDEFINED_HOLE_KEY, path)) => Some((HoleOrigin::Undefined, path)),
         _ => None,
     }
 }
@@ -129,13 +155,13 @@ thread_local! {
     /// Every `(param name, required type)` a hole answered during the current
     /// check parse, in encounter order. Drained by
     /// [`take_param_observations`].
-    static PARAM_USES: std::cell::RefCell<Vec<(String, HoleType)>> =
+    static PARAM_USES: std::cell::RefCell<Vec<(HoleOrigin, String, HoleType)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn observe(value: &Yaml, ty: HoleType) {
-    if let Some(name) = param_hole_name(value) {
-        let entry = (name.to_string(), ty);
+    if let Some((origin, name)) = user_hole(value) {
+        let entry = (origin, name.to_string(), ty);
         PARAM_USES.with(|u| u.borrow_mut().push(entry));
     }
 }
@@ -146,12 +172,12 @@ fn observe(value: &Yaml, ty: HoleType) {
 /// A name mapping to more than one type is a genuine contradiction: no single
 /// `--params` value can satisfy both positions, so the document can never run
 /// whatever the user supplies.
-pub fn take_param_observations() -> Vec<(String, Vec<HoleType>)> {
+pub fn take_param_observations() -> Vec<(HoleOrigin, String, Vec<HoleType>)> {
     let raw = PARAM_USES.with(|u| std::mem::take(&mut *u.borrow_mut()));
-    let mut by_name: std::collections::BTreeMap<String, Vec<HoleType>> =
+    let mut by_name: std::collections::BTreeMap<(HoleOrigin, String), Vec<HoleType>> =
         std::collections::BTreeMap::new();
-    for (name, ty) in raw {
-        let seen = by_name.entry(name).or_default();
+    for (origin, name, ty) in raw {
+        let seen = by_name.entry((origin, name)).or_default();
         if !seen.contains(&ty) {
             seen.push(ty);
         }
@@ -159,7 +185,10 @@ pub fn take_param_observations() -> Vec<(String, Vec<HoleType>)> {
     for types in by_name.values_mut() {
         types.sort();
     }
-    by_name.into_iter().collect()
+    by_name
+        .into_iter()
+        .map(|((origin, name), types)| (origin, name, types))
+        .collect()
 }
 
 thread_local! {
