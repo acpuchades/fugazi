@@ -1560,3 +1560,74 @@ mod tests {
         }
     }
 }
+
+/// Rendering helpers for spec-parse diagnostics.
+///
+/// Parse errors accumulate a ` > `-separated tag path as they rise through the
+/// nested `ExprSpec` / `SignalSpec` bridges (`!above > !add > !mul > …`). That
+/// keeps the mechanism trivial — each level prepends its own tag — but a raw
+/// chain in front of every message is noise for whoever reads it, human or
+/// agent. [`split_trail`] separates the two so the CLI can print the failure
+/// once and the location once.
+pub mod diagnostics {
+    /// Split an accumulated message into `(tag path, message)`.
+    ///
+    /// Consumes only a *leading* run of `!tag > ` tokens, so a ` > ` inside the
+    /// message itself (a serde "expected one of …" list, a user string) is
+    /// never mistaken for a separator.
+    pub fn split_trail(message: &str) -> (Vec<&str>, &str) {
+        let mut trail = Vec::new();
+        let mut rest = message;
+        while let Some(tag) = rest.strip_prefix('!') {
+            let Some(end) = tag.find(" > ") else {
+                break;
+            };
+            let (name, after) = tag.split_at(end);
+            if name.is_empty()
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                break;
+            }
+            trail.push(&rest[..end + 1]); // include the leading `!`
+            rest = &after[" > ".len()..];
+        }
+        (trail, rest)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn splits_a_leading_tag_path() {
+            let (trail, msg) = split_trail("!above > !add > !mul > boom");
+            assert_eq!(trail, vec!["!above", "!add", "!mul"]);
+            assert_eq!(msg, "boom");
+        }
+
+        #[test]
+        fn leaves_an_unprefixed_message_alone() {
+            let (trail, msg) = split_trail("missing field `period`");
+            assert!(trail.is_empty());
+            assert_eq!(msg, "missing field `period`");
+        }
+
+        #[test]
+        fn a_separator_inside_the_message_is_not_a_tag() {
+            // serde's "expected one of" lists and user strings can contain
+            // ` > `; only a leading `!tag > ` run counts.
+            let (trail, msg) = split_trail("!sma > expected a > b, got c");
+            assert_eq!(trail, vec!["!sma"]);
+            assert_eq!(msg, "expected a > b, got c");
+        }
+
+        #[test]
+        fn a_bare_bang_is_not_a_tag() {
+            let (trail, msg) = split_trail("!not a tag > still the message");
+            assert!(trail.is_empty());
+            assert_eq!(msg, "!not a tag > still the message");
+        }
+    }
+}
