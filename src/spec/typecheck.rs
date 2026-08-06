@@ -37,6 +37,7 @@
 
 use crate::runtime::DynType;
 use crate::spec::expr::{ExprSpec, ValueLit};
+use crate::spec::signal::SignalSpec;
 
 /// What a child slot is allowed to produce.
 #[derive(Debug, Clone, Copy)]
@@ -387,6 +388,88 @@ fn children(spec: &ExprSpec) -> Vec<(&'static str, Expect, &ExprSpec)> {
     }
 }
 
+/// A [`SignalSpec`]'s directly-typed expression children.
+///
+/// The signal layer is where most type mismatches actually land — a comparison
+/// or a level test is the first place a source gets *used*, so `!above
+/// { source: !pick { … } }` is a far likelier slip than the same mistake nested
+/// inside an arithmetic tag.
+///
+/// Exhaustive with no wildcard, for the same reason as [`children`]: a new
+/// `SignalSpec` variant must be classified rather than silently unchecked.
+fn signal_children(spec: &SignalSpec) -> Vec<(&'static str, Expect, &ExprSpec)> {
+    use SignalSpec::*;
+    match spec {
+        // `!eq` / `!ne` dispatch on the left operand's type and can compare
+        // strings as well as numbers, so both sides admit either. (A Real-vs-Str
+        // *pairing* is still rejected at build; what is checked here is that
+        // neither side is something no comparison accepts, like an Atom.)
+        Eq { lhs, rhs, .. } | Ne { lhs, rhs, .. } => {
+            vec![("lhs", REAL_OR_STR, lhs), ("rhs", REAL_OR_STR, rhs)]
+        }
+        Gt { lhs, rhs, .. }
+        | Lt { lhs, rhs, .. }
+        | Ge { lhs, rhs, .. }
+        | Le { lhs, rhs, .. }
+        | CrossesAbove { lhs, rhs }
+        | CrossesBelow { lhs, rhs } => vec![("lhs", REAL, lhs), ("rhs", REAL, rhs)],
+
+        // `level` is a plain literal, not an expression — nothing to check.
+        Above { source, .. } | Below { source, .. } => vec![("source", REAL, source)],
+
+        ChangedReal(source) => vec![("source", REAL, source)],
+
+        // The string comparisons read a `Str` column on the left; `rhs` is a
+        // `StrOperand`, not an `ExprSpec`.
+        StrEq { lhs, .. } | StrNe { lhs, .. } => vec![("lhs", Expect::Only(DynType::Str), lhs)],
+
+        // Bool-only or leaf variants: no expression child to type.
+        And { .. }
+        | Or { .. }
+        | Xor { .. }
+        | All(_)
+        | Any(_)
+        | Not(_)
+        | Changed(_)
+        | BecameTrue(_)
+        | BecameFalse(_)
+        | Unstable { .. }
+        | Get { .. }
+        | HasColumn { .. }
+        | Value(_)
+        | Never
+        | Every(_)
+        | IsWeekday
+        | IsWeekend => Vec::new(),
+    }
+}
+
+/// [`check_immediate`] for the signal layer.
+pub fn check_signal_immediate(spec: &SignalSpec) -> Result<(), String> {
+    for (slot, expect, child) in signal_children(spec) {
+        if matches!(expect, Expect::OneOf([])) {
+            continue;
+        }
+        let Some(actual) = output_type(child) else {
+            continue;
+        };
+        if !expect.admits(actual) {
+            return Err(format!(
+                "{}'s `{slot}` expects a {} source, but {} produces {actual}",
+                signal_tag_name(spec),
+                expect.describe(),
+                tag_name(child),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// [`tag_name`] for a [`SignalSpec`].
+fn signal_tag_name(spec: &SignalSpec) -> String {
+    snake_tag(&format!("{spec:?}"))
+}
+
 /// The tag name of a variant, for diagnostics (`Sma` → `!sma`).
 ///
 /// Read off the `Debug` derive's leading identifier rather than a 113-arm
@@ -394,7 +477,11 @@ fn children(spec: &ExprSpec) -> Vec<(&'static str, Expect, &ExprSpec)> {
 /// names modulo case, so this stays correct for free as variants are added —
 /// which a hand-written table would not.
 fn tag_name(spec: &ExprSpec) -> String {
-    let debug = format!("{spec:?}");
+    snake_tag(&format!("{spec:?}"))
+}
+
+/// `"MacdLine { .. }"` → `"!macd_line"`.
+fn snake_tag(debug: &str) -> String {
     let ident: String = debug
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric())
@@ -444,6 +531,7 @@ pub fn check_immediate(spec: &ExprSpec) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::indicators::{Book, Position};
+    use crate::spec::signal::SignalSpec;
     use crate::types::Schema;
 
     /// Parse **without** the type check, so these tests can construct the
@@ -691,6 +779,51 @@ mod tests {
                 .expect_err("nested mismatch");
         assert!(err.contains("!add's `lhs`"), "{err}");
         assert!(err.contains("produces Str"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_non_real_source_in_a_signal_slot() {
+        // The signal layer is where a source is first *used*, so this is the
+        // likeliest place a mismatch lands — and it went unchecked until an
+        // `!above { source: !pick { … } }` reached `AsReal`'s assert mid-run.
+        let sig: Result<SignalSpec, String> = serde_norway::from_str::<serde_norway::Value>(
+            "!above { source: !pick { symbol: BTC }, level: 0.0 }",
+        )
+        .map_err(|e| e.to_string())
+        .and_then(SignalSpec::try_from);
+        let err = sig.expect_err("Atom into a Real slot");
+        assert!(err.contains("!above's `source`"), "{err}");
+        assert!(err.contains("produces Atom"), "{err}");
+    }
+
+    #[test]
+    fn signal_comparisons_reject_a_candle_operand() {
+        for yaml in [
+            "!gt { lhs: !current {}, rhs: close }",
+            "!crosses_above { lhs: close, rhs: !current {} }",
+        ] {
+            let sig: Result<SignalSpec, String> =
+                serde_norway::from_str::<serde_norway::Value>(yaml)
+                    .map_err(|e| e.to_string())
+                    .and_then(SignalSpec::try_from);
+            assert!(sig.is_err(), "{yaml} should be rejected");
+        }
+    }
+
+    #[test]
+    fn eq_admits_both_real_and_str_operands() {
+        // `!eq` dispatches on the left operand's type, so neither Real nor Str
+        // may be rejected here — only something no comparison accepts.
+        for yaml in [
+            "!eq { lhs: close, rhs: !value 5.0 }",
+            "!eq { lhs: !value bull, rhs: !value bear }",
+        ] {
+            let sig: Result<SignalSpec, String> =
+                serde_norway::from_str::<serde_norway::Value>(yaml)
+                    .map_err(|e| e.to_string())
+                    .and_then(SignalSpec::try_from);
+            assert!(sig.is_ok(), "{yaml} should type-check: {sig:?}");
+        }
     }
 
     #[test]

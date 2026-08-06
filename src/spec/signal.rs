@@ -516,7 +516,14 @@ impl TryFrom<serde_norway::Value> for SignalSpec {
                 Some(t) => format!("!{t} > {e}"),
                 None => e.to_string(),
             })?;
-        Ok(raw.into())
+        let spec: SignalSpec = raw.into();
+        // Same check the `ExprSpec` bridge applies, for the signal layer's own
+        // expression operands. This is where most mismatches land in practice:
+        // a comparison or a level test is the first place a source gets used,
+        // so `!above { source: !pick { … } }` is a likelier slip than the same
+        // mistake buried inside an arithmetic tag.
+        crate::spec::typecheck::check_signal_immediate(&spec)?;
+        Ok(spec)
     }
 }
 
