@@ -190,8 +190,16 @@ cleanly, non-zero = something's off. In both forms `--quiet` suppresses the
 | Flag | Description |
 | --- | --- |
 | `<STRATEGY>` | Positional. `@file.yml` or inline YAML — same shape as `run`. |
-| `-p`, `--params <SPEC>` | Placeholder substitution. Repeatable. See [--params](#--params). Omitting a required placeholder is a check failure. |
+| `-p`, `--params <SPEC>` | Placeholder substitution. Repeatable. See [--params](#--params). Unlike `run`, omitting a required placeholder is **not** a failure — `check` validates shape only, so an unset placeholder is held as a typed *hole* (see below). |
 | `-q`, `--quiet` | Suppress the "ok" message on success. Errors still print; exit code is unchanged (`0` ok, non-zero on failure). |
+
+`check strategy` validates the document's **shape**, not its values — it never
+builds or drives the strategy. So a required `!param` with no `--params` value
+and no `default` doesn't need the real value: it is filled with a typed *hole*
+(a number, string, or bool as the surrounding field demands) so the rest of the
+spec still parses. The report notes how many holes it filled. A malformed
+placeholder (e.g. no `key`) is still a genuine error — that's a format mistake,
+not a missing value.
 
 #### `check overlay`
 

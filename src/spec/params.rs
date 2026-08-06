@@ -224,24 +224,76 @@ pub fn substitute_partial(value: Value, params: &HashMap<String, Value>) -> Resu
 /// Resolve a single placeholder body (its `{ key, default }` object or bare key
 /// name) against the supplied params.
 fn resolve(body: &Value, params: &HashMap<String, Value>) -> Result<Value> {
-    let (key, default) = match body {
-        Value::String(name) => (name.as_str(), None),
-        Value::Object(o) => {
-            let key = o
-                .get("key")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("`param` needs a string `key`"))?;
-            (key, o.get("default"))
-        }
-        _ => bail!("`param` expects a key name or a `{{ key: NAME }}` object"),
-    };
-
+    let (key, default) = placeholder_parts(body)?;
     if let Some(value) = params.get(key) {
         Ok(value.clone())
     } else if let Some(default) = default {
         Ok(default.clone())
     } else {
         bail!("parameter `{key}` is not set (pass `--params {key}=…` or add a `default`)")
+    }
+}
+
+/// Extract a placeholder body's `(key, default)` — the shared parse of the
+/// `{ key, default }` object and bare-string forms. Errors on a malformed body
+/// (no string `key`); an unset-but-well-formed key is not an error here.
+fn placeholder_parts(body: &Value) -> Result<(&str, Option<&Value>)> {
+    match body {
+        Value::String(name) => Ok((name.as_str(), None)),
+        Value::Object(o) => {
+            let key = o
+                .get("key")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("`param` needs a string `key`"))?;
+            Ok((key, o.get("default")))
+        }
+        _ => bail!("`param` expects a key name or a `{{ key: NAME }}` object"),
+    }
+}
+
+/// [`substitute`] for `fugazi check`: a required placeholder with no `--params`
+/// value and no `default` becomes a [`hole`](crate::spec::hole) sentinel to
+/// validate *around*, rather than the hard error [`substitute`] raises. A
+/// malformed placeholder (no string `key`) still errors — that's a genuine
+/// format mistake `check` should catch. Returns the rewritten tree and the
+/// number of holes introduced.
+pub fn substitute_for_check(
+    value: Value,
+    params: &HashMap<String, Value>,
+) -> Result<(Value, usize)> {
+    let mut holes = 0;
+    let value = substitute_for_check_inner(value, params, &mut holes)?;
+    Ok((value, holes))
+}
+
+fn substitute_for_check_inner(
+    value: Value,
+    params: &HashMap<String, Value>,
+    holes: &mut usize,
+) -> Result<Value> {
+    match value {
+        Value::Object(map) if map.len() == 1 && map.contains_key("param") => {
+            let (key, default) = placeholder_parts(&map["param"])?;
+            if params.contains_key(key) || default.is_some() {
+                resolve(&map["param"], params)
+            } else {
+                *holes += 1;
+                Ok(crate::spec::hole::sentinel(key))
+            }
+        }
+        Value::Object(map) => {
+            let mut out = Map::new();
+            for (k, v) in map {
+                out.insert(k, substitute_for_check_inner(v, params, holes)?);
+            }
+            Ok(Value::Object(out))
+        }
+        Value::Array(seq) => seq
+            .into_iter()
+            .map(|v| substitute_for_check_inner(v, params, holes))
+            .collect::<Result<Vec<_>>>()
+            .map(Value::Array),
+        other => Ok(other),
     }
 }
 
@@ -351,5 +403,63 @@ mod tests {
         assert_eq!(spec.symbol, "BTC");
         assert!(spec.long.is_some());
         let _strat = spec.build(1_000.0, &crate::Schema::empty());
+    }
+
+    /// End-to-end `check` path: substitute-for-check over a YAML doc, then
+    /// parse the hole-marked tree through the hole-aware deserializer, exactly
+    /// as `fugazi check` does.
+    fn check(yaml: &str, pairs: &[&str]) -> Result<(SingleStrategySpec, usize)> {
+        let value = yaml_to_json(serde_norway::from_str(yaml).unwrap()).unwrap();
+        let (value, holes) = substitute_for_check(value, &table_of(pairs))?;
+        let _guard = crate::spec::hole::check_mode();
+        let spec = crate::spec::hole::from_json_value(value).map_err(anyhow::Error::new)?;
+        Ok((spec, holes))
+    }
+
+    #[test]
+    fn check_validates_around_an_unset_numeric_param() {
+        // `period` has no default and no value — `check` fills it with a
+        // number (the type serde asks for), so the spec still parses.
+        let yaml = r#"
+            symbol: BTC
+            long:
+              enter: !crosses_above
+                lhs: !sma { source: close, period: !param { key: FAST } }
+                rhs: !sma { source: close, period: 20 }
+        "#;
+        let (spec, holes) = check(yaml, &[]).unwrap();
+        assert_eq!(spec.symbol, "BTC");
+        assert_eq!(holes, 1);
+    }
+
+    #[test]
+    fn check_validates_around_an_unset_string_param() {
+        // `symbol` is a `String` field — the hole must satisfy it as a string,
+        // not a number. This is the case a single fixed placeholder can't cover.
+        let (spec, holes) = check("symbol: !param SYM\nlong: { enter: !value true }", &[]).unwrap();
+        assert_eq!(spec.symbol, "");
+        assert_eq!(holes, 1);
+    }
+
+    #[test]
+    fn check_still_prefers_a_supplied_value_or_default() {
+        let (spec, holes) =
+            check("symbol: !param { key: SYM, default: BTC }\nlong: { enter: !value true }", &[])
+                .unwrap();
+        assert_eq!(spec.symbol, "BTC");
+        assert_eq!(holes, 0);
+
+        let (spec, holes) =
+            check("symbol: !param SYM\nlong: { enter: !value true }", &["SYM=ETH"]).unwrap();
+        assert_eq!(spec.symbol, "ETH");
+        assert_eq!(holes, 0);
+    }
+
+    #[test]
+    fn check_still_rejects_a_malformed_placeholder() {
+        // No string `key` is a genuine format error, not a hole to fill.
+        let err = check("symbol: !param { default: BTC }\nlong: { enter: !value true }", &[])
+            .unwrap_err();
+        assert!(err.to_string().contains("needs a string"), "{err}");
     }
 }

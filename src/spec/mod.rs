@@ -24,6 +24,7 @@
 pub mod basket;
 pub mod expr;
 pub mod multi_asset;
+pub mod overlay;
 pub mod pairs;
 pub mod portfolio;
 pub mod preset;
@@ -39,6 +40,7 @@ pub mod trailing;
 pub mod args;
 pub mod convert;
 pub mod dyn_indicator;
+pub mod hole;
 pub mod imports;
 pub mod input;
 pub mod params;
@@ -89,9 +91,21 @@ pub fn load_value(
     base: &std::path::Path,
     label: &str,
 ) -> anyhow::Result<serde_json::Value> {
-    let value = crate::spec::input::parse_value_at(text, label)?;
-    let value = crate::spec::imports::resolve(value, base)?;
+    let value = load_value_pre_params(text, base, label)?;
     crate::spec::params::substitute(value, params)
+}
+
+/// [`load_value`] through the `!import` splice, stopping short of `!param`
+/// substitution. Split out for `fugazi check`, which substitutes with
+/// [`params::substitute_for_check`] instead — marking a required-but-unset
+/// placeholder as a [`hole`] to validate around rather than erroring on.
+pub fn load_value_pre_params(
+    text: &str,
+    base: &std::path::Path,
+    label: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let value = crate::spec::input::parse_value_at(text, label)?;
+    crate::spec::imports::resolve(value, base)
 }
 
 #[allow(unused_imports)]
