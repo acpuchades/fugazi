@@ -59,11 +59,10 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use serde::Deserialize;
-use time::{Date, Duration as TimeDuration, Time};
 
 use crate::types::{OverlayInfo, OverlayValue, Real, Schema};
 
-use super::{Interval, OverlayRow, OverlaySource, SourceError, Timestamp};
+use super::{Interval, OverlayRow, OverlaySource, SourceError, Timestamp, floor_to_bucket};
 
 const DEFAULT_BASE_URL: &str = "https://api.coingecko.com";
 const DEFAULT_MIN_DELAY_MS: u64 = 1_500;
@@ -331,38 +330,6 @@ fn page_end_ms(cursor: i64, until_ms: i64, interval: Interval) -> i64 {
             .saturating_add(HOURLY_WINDOW_DAYS * MS_PER_DAY)
             .min(until_ms),
         _ => until_ms,
-    }
-}
-
-/// Floor a millisecond timestamp onto the bar-open boundary of `interval`.
-///
-/// `Hour`/`Day` floor by epoch modulo — the Unix epoch is itself a UTC midnight
-/// on an hour boundary, so this lands on real clock boundaries and matches the
-/// convention every candle provider uses. `Week` floors to Monday 00:00 UTC
-/// (epoch day 0 was a Thursday, so modulo would anchor weeks on Thursdays and
-/// silently fail to join against a Monday-anchored weekly candle). `Month`
-/// floors to the 1st at 00:00 UTC, which modulo cannot express at all.
-///
-/// Only the cadences [`check_interval`] admits are reachable here; anything
-/// else falls back to epoch modulo.
-fn floor_to_bucket(ms: i64, interval: Interval) -> i64 {
-    match interval {
-        Interval::Week(1) => {
-            let dt = Timestamp(ms).to_datetime();
-            let back = dt.weekday().number_days_from_monday() as i64;
-            let monday = dt.date() - TimeDuration::days(back);
-            Timestamp::from_datetime(monday.with_time(Time::MIDNIGHT).assume_utc()).0
-        }
-        Interval::Month(1) => {
-            let dt = Timestamp(ms).to_datetime();
-            let first = Date::from_calendar_date(dt.year(), dt.month(), 1)
-                .expect("day 1 is valid in every month");
-            Timestamp::from_datetime(first.with_time(Time::MIDNIGHT).assume_utc()).0
-        }
-        other => {
-            let step = other.duration_ms();
-            if step <= 0 { ms } else { ms - ms.rem_euclid(step) }
-        }
     }
 }
 

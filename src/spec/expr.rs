@@ -22,12 +22,12 @@ use serde::Deserialize;
 // resolve on the enum variant. The `Pick` root is the one exception because
 // it isn't a `ExprSpec` variant.
 use crate::indicators::{
-    Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Book, Cci, Component,
-    Correlation, Dmi, DmiValue, Donchian, DonchianValue, Ema, GarmanKlass, GetBool, GetReal, GetStr,
-    Hma, IfElse, Keltner, KeltnerValue, Kurtosis, Latch, Log, Macd, MacdValue,
-    Match as MatchIndicator, Mfi, Obv, Parkinson, Pick, PickAny, Position, Resample, Rma,
-    RogersSatchell, Rsi, Sar, Skewness, Sma, StdDev, StochRsi, Stochastic, TrueRange, Value,
-    ValueStr, VarianceRatio, Vwap, WilliamsR, Wma, ZScore,
+    Ad, Adx, AdxValue, Aroon, AroonValue, Atr, BarsSince, BarsSinceHigh, BarsSinceLow, Bollinger,
+    BollingerValue, Book, Cci, Component, Correlation, Dmi, DmiValue, Donchian, DonchianValue, Ema,
+    GarmanKlass, GetBool, GetReal, GetStr, Hma, IfElse, Keltner, KeltnerValue, Kurtosis, Latch, Log,
+    Macd, MacdValue, Match as MatchIndicator, Mfi, Obv, Parkinson, Percentile, PercentileRank, Pick,
+    PickAny, Position, Resample, Rma, RogersSatchell, Rsi, Sar, Skewness, Sma, StdDev, StochRsi,
+    Stochastic, TrueRange, Value, ValueStr, VarianceRatio, Vwap, WilliamsR, Wma, ZScore,
 };
 use crate::prelude::*;
 use crate::types::Snapshot;
@@ -435,6 +435,44 @@ pub enum ExprSpec {
     },
     #[serde(rename = "zscore")]
     ZScore {
+        #[serde(default = "default_source")]
+        source: Box<ExprSpec>,
+        period: usize,
+    },
+    /// The `pct`-quantile of a source over the trailing `period` bars —
+    /// `pct: 0.5` is the rolling median. Linearly interpolated (R type-7), the
+    /// same convention the report-level percentiles use. Prefer
+    /// `!rolling_max` / `!rolling_min` over `pct: 1.0` / `pct: 0.0`; those are
+    /// O(1). See [`crate::indicators::Percentile`].
+    Percentile {
+        #[serde(default = "default_source")]
+        source: Box<ExprSpec>,
+        period: usize,
+        pct: Real,
+    },
+    /// Where the current reading sits in its own trailing distribution, as
+    /// `count(v <= x) / period` in `(0, 1]`. See
+    /// [`crate::indicators::PercentileRank`].
+    PercentileRank {
+        #[serde(default = "default_source")]
+        source: Box<ExprSpec>,
+        period: usize,
+    },
+    /// Bars elapsed since `source` (a **signal**) last read true — `0` on the
+    /// firing bar. `None` until it has fired at least once, which makes every
+    /// threshold against it read false until then. See
+    /// [`crate::indicators::BarsSince`].
+    BarsSince { source: Box<SignalSpec> },
+    /// Bars elapsed since `source` last set a new `period`-bar high, in
+    /// `[0, period - 1]`. See [`crate::indicators::BarsSinceHigh`].
+    BarsSinceHigh {
+        #[serde(default = "default_source")]
+        source: Box<ExprSpec>,
+        period: usize,
+    },
+    /// Bars elapsed since `source` last set a new `period`-bar low.
+    /// See [`crate::indicators::BarsSinceLow`].
+    BarsSinceLow {
         #[serde(default = "default_source")]
         source: Box<ExprSpec>,
         period: usize,
@@ -1193,6 +1231,44 @@ enum ExprSpecRaw {
         source: Box<ExprSpec>,
         period: usize,
     },
+    /// The `pct`-quantile of a source over the trailing `period` bars —
+    /// `pct: 0.5` is the rolling median. Linearly interpolated (R type-7), the
+    /// same convention the report-level percentiles use. Prefer
+    /// `!rolling_max` / `!rolling_min` over `pct: 1.0` / `pct: 0.0`; those are
+    /// O(1). See [`crate::indicators::Percentile`].
+    Percentile {
+        #[serde(default = "default_source")]
+        source: Box<ExprSpec>,
+        period: usize,
+        pct: Real,
+    },
+    /// Where the current reading sits in its own trailing distribution, as
+    /// `count(v <= x) / period` in `(0, 1]`. See
+    /// [`crate::indicators::PercentileRank`].
+    PercentileRank {
+        #[serde(default = "default_source")]
+        source: Box<ExprSpec>,
+        period: usize,
+    },
+    /// Bars elapsed since `source` (a **signal**) last read true — `0` on the
+    /// firing bar. `None` until it has fired at least once, which makes every
+    /// threshold against it read false until then. See
+    /// [`crate::indicators::BarsSince`].
+    BarsSince { source: Box<SignalSpec> },
+    /// Bars elapsed since `source` last set a new `period`-bar high, in
+    /// `[0, period - 1]`. See [`crate::indicators::BarsSinceHigh`].
+    BarsSinceHigh {
+        #[serde(default = "default_source")]
+        source: Box<ExprSpec>,
+        period: usize,
+    },
+    /// Bars elapsed since `source` last set a new `period`-bar low.
+    /// See [`crate::indicators::BarsSinceLow`].
+    BarsSinceLow {
+        #[serde(default = "default_source")]
+        source: Box<ExprSpec>,
+        period: usize,
+    },
     /// Rolling Pearson correlation between two Real sources. Both operands are
     /// required — there is no single natural default for a two-source stat.
     Correlation {
@@ -1756,6 +1832,25 @@ impl From<ExprSpecRaw> for ExprSpec {
             ExprSpecRaw::Skewness { source, period } => ExprSpec::Skewness { source, period },
             ExprSpecRaw::Kurtosis { source, period } => ExprSpec::Kurtosis { source, period },
             ExprSpecRaw::ZScore { source, period } => ExprSpec::ZScore { source, period },
+            ExprSpecRaw::Percentile {
+                source,
+                period,
+                pct,
+            } => ExprSpec::Percentile {
+                source,
+                period,
+                pct,
+            },
+            ExprSpecRaw::PercentileRank { source, period } => {
+                ExprSpec::PercentileRank { source, period }
+            }
+            ExprSpecRaw::BarsSince { source } => ExprSpec::BarsSince { source },
+            ExprSpecRaw::BarsSinceHigh { source, period } => {
+                ExprSpec::BarsSinceHigh { source, period }
+            }
+            ExprSpecRaw::BarsSinceLow { source, period } => {
+                ExprSpec::BarsSinceLow { source, period }
+            }
             ExprSpecRaw::Correlation { lhs, rhs, period } => ExprSpec::Correlation { lhs, rhs, period },
             ExprSpecRaw::VarianceRatio {
                 source,
@@ -2388,6 +2483,26 @@ impl ExprSpec {
             }
             ZScore { source, period } => {
                 dyn_indicator::wrap(self::ZScore::new(real(source), *period))
+            }
+            Percentile {
+                source,
+                period,
+                pct,
+            } => dyn_indicator::wrap(self::Percentile::new(real(source), *period, *pct)),
+            PercentileRank { source, period } => {
+                dyn_indicator::wrap(self::PercentileRank::new(real(source), *period))
+            }
+            BarsSince { source } => {
+                // Same shape as `IfElse`'s `cond`: a signal leg is built
+                // through `SignalSpec::build` and viewed as bool.
+                let sig = AsBool::new(source.build(anchor, book, portfolio_book, schema));
+                dyn_indicator::wrap(self::BarsSince::new(sig))
+            }
+            BarsSinceHigh { source, period } => {
+                dyn_indicator::wrap(self::BarsSinceHigh::new(real(source), *period))
+            }
+            BarsSinceLow { source, period } => {
+                dyn_indicator::wrap(self::BarsSinceLow::new(real(source), *period))
             }
             Correlation { lhs, rhs, period } => {
                 dyn_indicator::wrap(self::Correlation::new(real(lhs), real(rhs), *period))

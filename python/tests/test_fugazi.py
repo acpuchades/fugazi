@@ -549,6 +549,63 @@ def test_zscore_measures_distance_from_windowed_mean():
     assert out[2] == pytest.approx(2.0 / math.sqrt(8.0 / 3.0))
 
 
+def test_percentile_interpolates_like_numpy_default():
+    med = ta.percentile(ta.close(), 4, 0.5)
+    out = feed(med, closes([1.0, 2.0, 3.0, 4.0]))
+    assert out[:3] == [None, None, None]
+    # Sorted [1, 2, 3, 4] -> R type-7 / numpy median is 2.5.
+    assert out[3] == pytest.approx(2.5)
+
+
+def test_percentile_extremes_agree_with_rolling_max_and_min():
+    bars = closes([4.0, 1.0, 9.0, 7.0, 2.0])
+    lo = feed(ta.percentile(ta.close(), 5, 0.0), bars)[-1]
+    hi = feed(ta.percentile(ta.close(), 5, 1.0), bars)[-1]
+    assert lo == pytest.approx(1.0)
+    assert hi == pytest.approx(9.0)
+
+
+def test_percentile_rejects_an_out_of_range_pct():
+    with pytest.raises(ValueError):
+        ta.percentile(ta.close(), 4, 1.5)
+
+
+def test_percentile_rank_counts_the_current_sample():
+    rank = ta.percentile_rank(ta.close(), 4)
+    out = feed(rank, closes([10.0, 20.0, 30.0, 25.0]))
+    # 25 sits above 10 and 20, and counts itself: 3 of 4.
+    assert out[3] == pytest.approx(0.75)
+    # A fresh high is at-or-above everything in the window.
+    assert rank.update(ta.Candle(99.0, 99.0, 99.0, 99.0, 1.0)) == pytest.approx(1.0)
+
+
+def test_bars_since_is_none_until_the_signal_first_fires():
+    bs = ta.bars_since(ta.close().gt(ta.value(10.0)))
+    out = feed(bs, closes([1.0, 2.0, 42.0, 3.0, 4.0, 99.0]))
+    assert out[0] is None and out[1] is None  # never fired yet
+    assert out[2] == pytest.approx(0.0)  # fires
+    assert out[3] == pytest.approx(1.0)
+    assert out[4] == pytest.approx(2.0)
+    assert out[5] == pytest.approx(0.0)  # fires again
+
+
+def test_bars_since_threshold_reads_false_before_the_first_fire():
+    # The safety property: a never-fired signal can't gate an entry in.
+    fresh = ta.bars_since(ta.close().gt(ta.value(1e9))).lt(ta.value(5.0))
+    feed(fresh, closes([1.0, 2.0, 3.0]))
+    assert not fresh.is_true()
+
+
+def test_bars_since_high_reports_the_argmax_offset():
+    bs = ta.bars_since_high(ta.close(), 3)
+    out = feed(bs, closes([5.0, 3.0, 1.0, 9.0, 2.0]))
+    assert out[0] is None and out[1] is None
+    assert out[2] == pytest.approx(2.0)  # the 5.0 was two bars back
+    assert out[3] == pytest.approx(0.0)  # new high now
+    assert out[4] == pytest.approx(1.0)
+    assert feed(ta.bars_since_low(ta.close(), 3), closes([1.0, 3.0, 5.0]))[-1] == pytest.approx(2.0)
+
+
 def test_correlation_bounds_and_domain_check():
     # y = x fed to both legs → perfect positive correlation.
     c = ta.correlation(ta.close(), ta.close(), 3)
@@ -906,6 +963,58 @@ def test_pairs_strategy_runs_and_reports():
     assert len(rep.fills) >= 2
     assert len(rep.fills) == len(wallet.orders())
     assert {f.order.symbol for f in rep.fills} == {"BTC", "ETH"}
+
+
+def test_pairs_strategy_trades_both_spread_directions():
+    # The spread close(BTC) - close(ETH) crosses zero in both directions.
+    # Long-spread when BTC leads, short-spread when it lags.
+    spread = ta.close(ta.pick("BTC")).sub(ta.close(ta.pick("ETH")))
+    long_only = ta.PairsStrategy("BTC", "ETH").long_spread_on(
+        spread.gt(ta.value(1.0)), spread.lt(ta.value(0.0))
+    )
+    both = long_only.short_spread_on(
+        spread.lt(ta.value(-1.0)), spread.gt(ta.value(0.0))
+    )
+
+    snaps = _msnaps({
+        "BTC": [10, 12, 13, 10, 8, 7, 8, 11, 13, 12, 9, 7],
+        "ETH": [10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10],
+    })
+
+    def min_btc_position(report):
+        """Lowest signed BTC holding across the run, replayed from fills."""
+        units = 0.0
+        lowest = 0.0
+        for fill in report.fills:
+            if fill.order.symbol != "BTC":
+                continue
+            units += fill.order.units if fill.order.side == "buy" else -fill.order.units
+            lowest = min(lowest, units)
+        return lowest
+
+    long_report = long_only.run(ta.PaperWallet(10_000.0), snaps)
+    both_report = both.run(ta.PaperWallet(10_000.0), snaps)
+
+    # A sell on BTC alone proves nothing (closing a long also sells) — the
+    # signed position is what separates the two directions.
+    assert min_btc_position(long_report) > -1e-9
+    assert min_btc_position(both_report) < -1e-9
+    assert len(both_report.fills) > len(long_report.fills)
+
+
+def test_pairs_short_spread_alias_methods_still_work():
+    # `on` / `spread_stop_loss` / `spread_take_profit` remain valid spellings
+    # of the long-spread side.
+    spread = ta.close(ta.pick("BTC")).sub(ta.close(ta.pick("ETH")))
+    strat = (
+        ta.PairsStrategy("BTC", "ETH")
+        .on(spread.gt(ta.value(1.0)), spread.lt(ta.value(0.0)))
+        .spread_stop_loss(ta.value(-5.0))
+        .spread_take_profit(ta.value(5.0))
+    )
+    snaps = _msnaps({"BTC": [10, 12, 13, 9], "ETH": [10, 10, 10, 10]})
+    rep = strat.run(ta.PaperWallet(10_000.0), snaps)
+    assert len(rep.equity_curve) == len(snaps)
 
 
 def test_multi_asset_strategy_trades_symbols_independently():
@@ -2111,6 +2220,30 @@ def test_coingecko_rejects_sub_hourly():
     with pytest.raises(ValueError, match="unsupported interval"):
         ta.CoinGecko().overlays(symbol="bitcoin", freq="5m", since="2026-07-08")
 
+
+# --- BinanceFunding (overlay source) ---------------------------------------
+#
+# Offline guards only; the summing / bucketing behaviour is pinned by the
+# wiremock suite in tests/sources_binance_funding.rs.
+
+
+def test_binance_funding_constructs():
+    assert ta.BinanceFunding() is not None
+    assert ta.BinanceFunding(base_url="http://localhost:1") is not None
+
+
+def test_fetch_redirects_binance_funding_to_overlays():
+    # Same trap as CoinGecko: a funding series has no OHLCV, so `fetch()` must
+    # redirect rather than hand back a candle-less "candle" frame.
+    with pytest.raises(ValueError, match="overlay provider"):
+        ta.fetch(provider="binance-funding", symbol="BTCUSDT")
+
+
+def test_binance_funding_rejects_sub_hourly():
+    # Funding settles every 4-8h, so a 15m bucket is empty on almost every bar
+    # — a column of zeros reading as "no carry" rather than "no data".
+    with pytest.raises(ValueError, match="unsupported interval"):
+        ta.BinanceFunding().overlays(symbol="BTCUSDT", freq="15m", since="2024-01-01")
 
 
 # ---------------------------------------------------------------------------

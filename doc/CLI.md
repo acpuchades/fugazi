@@ -494,6 +494,7 @@ Frequency tokens have no remap form — each is parsed as a real cadence and the
 | `binance` | `binance:BTCUSDT[1d,1h],ETHUSDT[1d]` | Binance spot klines. Frequencies: `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d`, `1w`, `1M`. |
 | `yfinance` | `yfinance:SPY[1d],AAPL[1h]` | Yahoo Finance chart endpoint (stocks/ETFs/indices/FX). Rejects multiples the provider doesn't advertise (e.g. `Day(3)`). |
 | `cg` | `cg:BTCUSDT=bitcoin[1d]` | **CoinGecko — overlay-only, no OHLCV.** Market cap / volume / supply columns; symbols are coin ids (`bitcoin`, not `BTC`). Join onto a price series via `--series`. Frequencies: `1h`…`12h`, `1d`, `1w`, `1M`. |
+| `binance-funding` | `binance-funding:BTCUSDT[1d]` | **Binance perpetual funding rate — overlay-only, no OHLCV.** One `funding_rate` column, from `fapi.binance.com` (the perp host, a different listing set from spot). Settlements land every 4–8h; those inside one bar are **summed**, so `[1d]` is that day's total carry and `[8h]` is one settlement per row. Hourly and coarser only. |
 | `csv` | `csv:./candles.csv` | **No `[freq]` bracket.** Reads a local OHLCV CSV (delimiter autodetected: `;`, `,`, `\t`, `|`) — typically a previous `fugazi get` output. Each row's `symbol` + `freq` columns drive the output; `--since` / `--until` filter by `time`; overlays apply the same way. `symbol`, `freq`, `time`, `open`, `high`, `low`, `close` are required, `volume` optional. |
 
 Frequency tokens are case-sensitive: `m` = minute, `M` = month. `fugazi list
@@ -1098,6 +1099,13 @@ Real-valued indicators, one YAML tag per fugazi constructor:
   `!aroon_oscillator { period }`, `!sar { step, max }`.
 - **Bar indicators**: `!atr { period }`, `!mfi { period }`, `!vwap { period }`,
   `!true_range`, `!obv`, `!ad`.
+- **Rolling statistics**: `!skewness`/`!kurtosis`/`!zscore { source, period }`,
+  `!correlation { lhs, rhs, period }`, `!variance_ratio { source, period, lag }`,
+  `!percentile { source, period, pct }` (`pct: 0.5` is the rolling median),
+  `!percentile_rank { source, period }`.
+- **Event timing**: `!bars_since { source }` — bars since a **signal** last read
+  true (`0` on the firing bar, `None` until it has fired once);
+  `!bars_since_high`/`!bars_since_low { source, period }`.
 - **Arithmetic**: `!add`/`!sub`/`!mul`/`!div { lhs, rhs }`.
 - **Lookback**: `!lag`/`!diff`/`!ratio`/`!roc { source, periods }`.
 - **Rolling extremum**: `!rolling_max`/`!rolling_min { source, period }`.

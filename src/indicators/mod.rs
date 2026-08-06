@@ -27,6 +27,7 @@ mod ad;
 mod adx;
 mod aroon;
 mod atr;
+mod bars_since;
 mod bollinger;
 mod book;
 mod calendar;
@@ -51,6 +52,7 @@ mod macd;
 mod mfi;
 mod obv;
 mod parkinson;
+mod percentile;
 mod pick;
 mod position;
 mod rma;
@@ -60,7 +62,10 @@ mod sar;
 mod skewness;
 mod sma;
 mod smoothing;
-mod stats;
+// Crate-visible rather than private: `crate::metrics` reaches in for the shared
+// `quantile_of_sorted` / `cmp_asc` so report-level and rolling percentiles use
+// one convention. Nothing here is re-exported publicly.
+pub(crate) mod stats;
 mod stddev;
 mod stochastic;
 mod trailing;
@@ -78,6 +83,7 @@ pub use ad::Ad;
 pub use adx::{Adx, AdxValue};
 pub use aroon::{Aroon, AroonValue};
 pub use atr::Atr;
+pub use bars_since::{BarsSince, BarsSinceHigh, BarsSinceLow};
 pub use bollinger::{Bollinger, BollingerValue};
 pub use book::{Book, BookField};
 pub use calendar::{
@@ -114,6 +120,7 @@ pub use macd::{Macd, MacdValue};
 pub use mfi::Mfi;
 pub use obv::Obv;
 pub use parkinson::Parkinson;
+pub use percentile::{Percentile, PercentileRank};
 pub use pick::{Pick, PickAny};
 pub use ops::{
     Add, BinaryOp, Combine, Diff, Div, Extreme, ExtremeOp, Lag, Lookback, LookbackOp, MaxOp, MinOp,

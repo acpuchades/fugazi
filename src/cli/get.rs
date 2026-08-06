@@ -45,7 +45,7 @@ use tokio::task::JoinSet;
 
 use fugazi::prelude::*;
 use fugazi::sources::{
-    self, Binance, CandleSource, CoinGecko, Interval, OverlayRow, OverlaySource,
+    self, Binance, BinanceFunding, CandleSource, CoinGecko, Interval, OverlayRow, OverlaySource,
     Timestamp, Yahoo, binance::binance_schema, yahoo::yahoo_schema,
 };
 
@@ -314,6 +314,12 @@ pub(crate) const KNOWN_PROVIDERS: &[(&str, &str)] = &[
         "Binance spot klines endpoint (BTC/ETH/... vs. USDT/EUR/...)",
     ),
     (
+        "binance-funding",
+        "Binance perpetual funding rate — overlay columns only, no OHLCV. One \
+         `funding_rate` column; settlements inside a bar are summed, so `[1d]` \
+         is that day's total carry. Hourly and coarser only",
+    ),
+    (
         "cg",
         "CoinGecko market cap / volume / supply — overlay columns only, no OHLCV \
          (symbols are coin ids: `bitcoin`, not `BTC`)",
@@ -348,7 +354,7 @@ enum ProviderKind {
 
 fn provider_kind(provider: &str) -> ProviderKind {
     match provider {
-        "cg" => ProviderKind::Overlays,
+        "cg" | "binance-funding" => ProviderKind::Overlays,
         _ => ProviderKind::Candles,
     }
 }
@@ -457,9 +463,9 @@ pub struct GetArgs {
     /// Each row's `freq` cell is the fetched cadence's own token — cadences are
     /// not relabellable.
     ///
-    /// Overlay-only providers (`coingecko`) emit side-channel columns and no
-    /// OHLCV, and cannot be mixed with candle providers in one invocation —
-    /// fetch each to its own file and pass both to `run -s`.
+    /// Overlay-only providers (`cg`, `binance-funding`) emit side-channel
+    /// columns and no OHLCV, and cannot be mixed with candle providers in one
+    /// invocation — fetch each to its own file and pass both to `run -s`.
     #[arg(value_name = "SPEC", required = true, num_args = 1..)]
     specs: Vec<String>,
 
@@ -932,6 +938,9 @@ async fn fetch_overlays(
 ) -> Result<Vec<OverlayRow>> {
     match provider {
         "cg" => Ok(CoinGecko::new()
+            .overlays(symbol, interval, since, Some(until))
+            .await?),
+        "binance-funding" => Ok(BinanceFunding::new()
             .overlays(symbol, interval, since, Some(until))
             .await?),
         other => bail!(unknown_provider_error(other)),
@@ -1467,6 +1476,7 @@ async fn fetch(
 pub(crate) async fn tickers_of(provider: &str) -> Result<Vec<String>> {
     match provider {
         "binance" => Ok(Binance::new().tickers().await?),
+        "binance-funding" => Ok(OverlaySource::tickers(&BinanceFunding::new()).await?),
         "cg" => Ok(OverlaySource::tickers(&CoinGecko::new()).await?),
         "yfinance" => Ok(Yahoo::new().tickers().await?),
         "csv" => bail!(

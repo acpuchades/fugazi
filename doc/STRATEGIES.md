@@ -266,23 +266,85 @@ The book-anchored three (`!drawdown_throttle`, `!equity_vol_target`,
 `--cash` to match it to the wallet's starting funds, or their numbers are
 meaningless.
 
+### Choosing a sizing method from the command line
+
+To compare sizing methods without maintaining a file per method, dispatch on a
+`!param` with `!match`. Because `!param` resolves at *load* time and substitutes
+whatever value it is handed — a scalar, or a whole tagged subtree — the `on:`
+operand collapses to a constant before the strategy is ever built, and `!match`
+then selects the branch:
+
+```yaml
+sizing: !match
+  on: !value { param: { key: SIZING_MODE, default: vol_target } }
+  cases:
+    - when: vol_target
+      value: !vol_target { target: 0.20, window: 30, bars_per_year: 365 }
+    - when: atr_risk
+      value: !atr_risk { risk_frac: 0.01, period: 14, atr_multiple: 2.0 }
+    - when: kelly
+      value: !fractional_kelly { kelly_fraction: 0.5, window: 30 }
+  default: !value 1.0
+```
+
+```sh
+fugazi run      @strategy.yml --params SIZING_MODE=atr_risk
+fugazi optimize @strategy.yml --grid   'SIZING_MODE=["vol_target","atr_risk","kelly"]'
+```
+
+The `optimize` form is the useful one: a `--grid` axis is normally limited to
+scalars, but here the scalar selects a whole *structure*, so one sweep ranks the
+sizing methods against each other and the CSV carries a `SIZING_MODE` column
+like any other axis.
+
+Two caveats:
+
+- **Every branch is built and advanced, not just the selected one.** So the
+  readiness gate takes the **max `stable_period` across all branches** — a run
+  that selects a cheap branch still waits for the slowest one to warm up. On a
+  short series that can suppress trading entirely: a `!value 1.0` branch sitting
+  next to a `!vol_target { window: 10 }` branch inherits the latter's warm-up.
+  For a comparison sweep this is arguably the right behaviour, since every
+  variant then starts on the same bar.
+- **An unmatched value falls through to `default:` silently**, so a typo in
+  `--params` produces a valid run at the default sizing rather than an error.
+  Give `default:` a value you would notice (`!value 0.0` never trades).
+
+A `!param` whose value is a whole subtree is the other half of this: put the
+alternatives in files and select one with `--params @sizings/atr.yml`, since a
+`--params @file.yml` is parsed through the YAML tag converter and can therefore
+carry a full `!vol_target { ... }` node.
+
 ## Pairs documents
 
-`pairs:@file.yml` builds a two-leg [`PairsStrategy`](../src/strategies/pairs.rs):
-one enter/exit signal pair driving both legs at once. Entering goes **long
-`left` / short `right`**, each leg sized at half the [sized](#sizing) fraction of
-equity; exiting flattens both.
+`pairs:@file.yml` builds a two-leg [`PairsStrategy`](../src/strategies/pairs.rs).
+The traded instrument is the **spread**, `close(left) − close(right)`, and the
+strategy is long / flat / short on it:
+
+| Direction | Legs | Profits when |
+| --- | --- | --- |
+| **long spread** | long `left`, short `right` | the spread rises |
+| **short spread** | short `left`, long `right` | the spread falls |
+
+Each leg is sized at half the [sized](#sizing) fraction of equity; an exit
+flattens both.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `left` | string | — (**required**) | the long leg on entry |
-| `right` | string | — (**required**) | the short leg on entry |
-| `enter` | signal | — (**required**) | open the pair when this fires |
-| `exit` | signal | never fires | flatten both legs |
-| `stop_loss` | source | none | a **spread level**; flatten when the spread falls to it |
-| `take_profit` | source | none | a **spread level**; flatten when the spread rises to it |
+| `left` | string | — (**required**) | the leg bought when long the spread |
+| `right` | string | — (**required**) | the leg sold when long the spread |
+| `long_spread` | side block | none | the long-spread side: `{ enter, exit, stop_loss, take_profit }` |
+| `short_spread` | side block | none | the short-spread side, same shape |
+| `enter` | signal | none | flat spelling of `long_spread.enter` |
+| `exit` | signal | never fires | flat spelling of `long_spread.exit` |
+| `stop_loss` | source | none | flat spelling of `long_spread.stop_loss` |
+| `take_profit` | source | none | flat spelling of `long_spread.take_profit` |
 | `sizing` | source | `!value 1.0` | gross-exposure multiplier (see [Sizing](#sizing)) |
 | `rebalance_on` | signal | `!never` | resize both legs when this fires (see [Rebalance](#rebalance)) |
+
+At least one side must be wired. The flat top-level keys are a shorthand for the
+long-spread side, so every pre-existing pairs document keeps working unchanged;
+setting both them and a `long_spread:` block is an error.
 
 Two things distinguish a pairs document from a single-asset one:
 
@@ -316,6 +378,48 @@ stop_loss: !sub { lhs: *spread_ma, rhs: !mul { lhs: *spread_sd, rhs: !value 4.0 
 ```
 
 See [`examples/pairs.yml`](../examples/pairs.yml) for the annotated version.
+
+### Trading both tails
+
+The document above is **long-spread only**: it acts when the spread is unusually
+cheap and bets it rises. But a mean-reverting spread visits both tails, and the
+correct position is *opposite* at each — at a rich spread you short it. Which leg
+does the converging is irrelevant (that is what the hedge removes), but the sign
+is not optional, so a one-directional document silently skips every excursion on
+the other side of the mean.
+
+Add a `short_spread:` block to pick those up. There is no flag to enable it —
+wiring the block is the switch, exactly as `short:` is on a single-asset
+document:
+
+```yaml
+left: BTC
+right: ETH
+
+long_spread:                     # spread cheap → expect it to rise
+  enter: !below { source: *z, level: -2.0 }
+  exit:  !above { source: *z, level:  0.0 }
+  stop_loss: !sub { lhs: *spread_ma, rhs: !mul { lhs: *spread_sd, rhs: !value 4.0 } }
+
+short_spread:                    # spread rich → expect it to fall
+  enter: !above { source: *z, level:  2.0 }
+  exit:  !below { source: *z, level:  0.0 }
+  stop_loss: !add { lhs: *spread_ma, rhs: !mul { lhs: *spread_sd, rhs: !value 4.0 } }
+```
+
+Three things to know:
+
+- **Each side needs its own conditions.** A signal is an opaque `bool` — the
+  engine sees `true`, not "the z-score is −2.3" — so it cannot derive one side's
+  entry by negating the other's. Write the mirror condition explicitly.
+- **The short side's levels compare with mirrored sense.** It profits as the
+  spread falls, so its `stop_loss` fires when the spread rises *to or above* the
+  level and its `take_profit` when the spread falls *to or below* it. Note the
+  `!add` above where the long side has `!sub`.
+- **The two directions are mutually exclusive in time.** They are inverse
+  positions — held together they would net flat — so they share one capital pool
+  at full notional rather than splitting it, and the opposite side's `enter`
+  firing while a pair is open **reverses** it in one order per leg.
 
 ## Basket documents
 
@@ -638,6 +742,62 @@ restart on each new entry.
 
 `!stoch_rsi { source = close, rsi_period, stoch_period }` — the stochastic of an
 RSI.
+
+### Rolling statistics — `{ source = close, period }`
+
+`!skewness`, `!kurtosis` (raw, ~3 for a normal), `!zscore`,
+`!correlation { lhs, rhs, period }`, `!variance_ratio { source, period, lag }`.
+
+`!percentile { source = close, period, pct }` — the `pct`-quantile over the
+window, linearly interpolated (R type-7, the same convention the report-level
+percentiles use). `pct: 0.5` is the rolling median. This is the adaptive-threshold
+primitive: rather than a hardcoded RSI level of 70, ask the series where *its own*
+80th percentile sat over the trailing year, and let it move with the regime:
+
+```yaml
+enter: !gt
+  lhs: &rsi !rsi { period: 14 }
+  rhs: !percentile { source: *rsi, period: 252, pct: 0.8 }
+```
+
+For the extremes, prefer `!rolling_max` / `!rolling_min` over `pct: 1.0` /
+`pct: 0.0` — those are O(1) per bar; `!percentile` is O(period).
+
+`!percentile_rank { source = close, period }` — the inverse question: where does
+*today's* reading sit in its own distribution, as `count(v <= x) / period` in
+`(0, 1]`. The current sample counts itself, so a fresh high reads exactly `1.0`
+and a fresh low `1/period`. Useful as a cross-sectional score, since each symbol
+is ranked against its own history rather than against the others, so assets of
+different volatility compare fairly.
+
+### Event timing — how long since something happened
+
+`!bars_since { source }` — bars elapsed since `source` last read true, `0` on the
+firing bar. **`source` here is a signal, not a value source** — this is the one
+value-producing tag that takes a boolean input (`!if_else`'s `cond:` is the
+other direction).
+
+It reads `None` until the signal has fired at least once, which makes any
+threshold against it read false until then. That is the conservative answer in
+both directions: a signal that has never fired cannot gate an entry *in*, and a
+clock that never started cannot time-stop a position *out*.
+
+```yaml
+# Enter on the MA cross, but only if ADX crossed 25 within the last 5 bars.
+enter: !all
+  - !crosses_above { lhs: !ema { period: 12 }, rhs: !ema { period: 26 } }
+  - !lt
+      lhs: !bars_since
+        source: !crosses_above { lhs: !adx { period: 14 }, rhs: !value 25 }
+      rhs: !value 5
+```
+
+`!bars_since_high` / `!bars_since_low { source = close, period }` — bars since the
+source last set a new `period`-bar extreme, in `[0, period - 1]`. O(1) per bar
+(they share the monotonic-deque core `!rolling_max` and `!aroon_*` use), and
+unlike the general `!bars_since` their warm-up is exact, since a window always
+contains its own extreme. Aroon Up is exactly
+`100·(period − bars_since_high)/period` over a `period + 1` window.
 
 ### Multi-output indicators — one tag per component
 

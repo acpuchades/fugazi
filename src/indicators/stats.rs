@@ -315,6 +315,117 @@ impl WmaState {
     }
 }
 
+/// Ascending-order comparison that tolerates `NaN` by treating it as equal to
+/// everything, matching [`ExtremeOp`]'s convention. `sort_unstable_by` and
+/// `binary_search_by` both panic on a comparator that returns `None`, so every
+/// ordered read in the crate funnels through this.
+pub(crate) fn cmp_asc(a: &Real, b: &Real) -> std::cmp::Ordering {
+    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+}
+
+/// Linearly-interpolated `p`-quantile of a sorted-ascending slice (R's type-7,
+/// `numpy`'s default). `p` in `[0, 1]`; `0.0` on an empty slice.
+///
+/// The crate's single quantile convention: shared by the rolling
+/// [`WindowQuantile`] core and by `metrics`' `value_at_risk` /
+/// `conditional_value_at_risk` / `tail_ratio`, so an indicator's 5th percentile
+/// and a report's 5th percentile mean the same thing.
+pub(crate) fn quantile_of_sorted(sorted: &[Real], p: Real) -> Real {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let n = sorted.len();
+    if n == 1 {
+        return sorted[0];
+    }
+    let idx = p * (n - 1) as Real;
+    let lo = idx.floor() as usize;
+    let hi = (lo + 1).min(n - 1);
+    let frac = idx - lo as Real;
+    sorted[lo] * (1.0 - frac) + sorted[hi] * frac
+}
+
+/// Rolling order statistics over the last `period` samples: arbitrary
+/// quantiles and the rank of a value within the window.
+///
+/// The third shared core, beside [`WindowStats`] (moments) and
+/// [`WindowExtreme`] (extrema). It is deliberately *not* folded into
+/// `WindowStats`: that one's O(1) contract rests on running sum / sum-of-squares,
+/// which say nothing about order, and sorted access would quietly break it.
+///
+/// Keeps two views of the same window — a [`VecDeque`] in arrival order (to know
+/// what to evict) and a sorted `Vec` (to answer order queries). Each update is
+/// one binary search plus one `Vec` insert and one remove, so O(period) from the
+/// memmove and O(log period) for the queries — strictly better than re-sorting
+/// per bar, and the same complexity class as
+/// [`VarianceRatio`](super::VarianceRatio), the crate's other non-O(1) window.
+///
+/// Ordering is `NaN`-tolerant via [`cmp_asc`]; a `NaN` in the window sorts
+/// wherever it lands rather than panicking.
+#[derive(Debug, Clone)]
+pub(crate) struct WindowQuantile {
+    period: usize,
+    /// Arrival order — the front is the next sample to evict.
+    window: VecDeque<Real>,
+    /// The same samples, kept sorted ascending.
+    sorted: Vec<Real>,
+}
+
+impl WindowQuantile {
+    pub fn new(period: usize) -> Self {
+        assert!(period > 0, "window period must be greater than zero");
+        Self {
+            period,
+            window: VecDeque::with_capacity(period),
+            sorted: Vec::with_capacity(period),
+        }
+    }
+
+    pub fn period(&self) -> usize {
+        self.period
+    }
+
+    /// Push a sample, evicting the oldest once the window is full. Returns
+    /// whether the window is now full (i.e. order statistics are valid).
+    pub fn update(&mut self, x: Real) -> bool {
+        self.window.push_back(x);
+        let at = self.sorted.partition_point(|v| cmp_asc(v, &x).is_lt());
+        self.sorted.insert(at, x);
+        if self.window.len() > self.period {
+            let old = self.window.pop_front().expect("window is non-empty");
+            // `binary_search_by` finds *an* equal element, which is all that is
+            // needed: equal values are interchangeable in the sorted view.
+            if let Ok(at) = self.sorted.binary_search_by(|v| cmp_asc(v, &old)) {
+                self.sorted.remove(at);
+            }
+        }
+        self.is_full()
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.window.len() == self.period
+    }
+
+    /// The `p`-quantile over the window (`p` in `[0, 1]`). Only meaningful once
+    /// [`is_full`](Self::is_full).
+    pub fn quantile(&self, p: Real) -> Real {
+        quantile_of_sorted(&self.sorted, p)
+    }
+
+    /// The fraction of the window at or below `x` — `count(v <= x) / period`,
+    /// in `(0, 1]` for a value drawn from the window itself. Only meaningful
+    /// once [`is_full`](Self::is_full).
+    pub fn rank_of(&self, x: Real) -> Real {
+        let at_or_below = self.sorted.partition_point(|v| cmp_asc(v, &x).is_le());
+        at_or_below as Real / self.period as Real
+    }
+
+    pub fn reset(&mut self) {
+        self.window.clear();
+        self.sorted.clear();
+    }
+}
+
 /// Rolling extremum over the last `period` samples via a monotonic deque, so
 /// each update is O(1) amortised. The direction (max/min) is the [`ExtremeOp`]
 /// marker. Embedded by [`Extreme`](super::ops::Extreme) (→ `RollingMax`/
