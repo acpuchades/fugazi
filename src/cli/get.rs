@@ -210,28 +210,85 @@ fn parse_dataset(path: &str) -> Result<(Vec<FetchSpec>, DatasetMeta)> {
 
 /// Parse a plain symbol string (no `[freq]` bracket) into a [`SymbolSpec`]
 /// with the given interval. Accepts the `OUTPUT=QUERY` remap form used by
-/// overlay providers (e.g. `BTCUSDT=bitcoin` for CoinGecko).
-/// Parse a plain symbol string from a dataset YAML (no `[freq]` bracket, no
-/// `OUTPUT=QUERY` aliasing). The full string is the provider ID, sent verbatim
-/// to the provider AND used as the CSV `symbol` label.
+/// overlay providers (e.g. `BTCUSDT=bitcoin` for CoinGecko), and the same
+/// `\=` escape — see [`split_remap`].
 ///
-/// Unlike the inline-spec [`parse_symbol`], dataset YAML symbols are raw
-/// provider IDs (e.g. `EURUSD=X`, `^GSPC`). The `OUTPUT=QUERY` remap is an
-/// inline-CLI feature; applying it here would silently mangle FX tickers whose
-/// names contain `=` (Yahoo Finance convention).
+/// A dataset YAML listing a provider id that contains `=` (Yahoo's `EURUSD=X`,
+/// `JPY=X`) must escape it, or the head splits and only `X` reaches the
+/// provider: write `- EURUSD\=X` as a plain or single-quoted scalar, both of
+/// which keep the backslash. A *double*-quoted YAML scalar processes escapes
+/// itself and rejects `\=`, so don't use that form here.
 fn parse_symbol_plain(s: &str, interval: Interval) -> Result<SymbolSpec> {
     let s = s.trim();
     if s.is_empty() {
         bail!("empty symbol name");
     }
+    let (output, query) = split_remap(s).with_context(|| format!("symbol {s:?}"))?;
     Ok(SymbolSpec {
-        output: s.to_string(),
-        query: s.to_string(),
-        freqs: vec![FreqSpec {
-            output: interval.as_token(),
-            query: interval,
-        }],
+        output,
+        query,
+        freqs: vec![interval],
     })
+}
+
+/// Split a symbol head into `(emitted, fetched)` on the first **unescaped** `=`,
+/// unescaping both sides. With no unescaped `=`, the whole (unescaped) string is
+/// both.
+///
+/// A ticker that legitimately contains `=` — Yahoo's `EURUSD=X`, `ES=F` — writes
+/// it `\=`, so `yfinance:EURUSD\=X[1d]` fetches and emits `EURUSD=X` while
+/// `cg:BTCUSDT=bitcoin[1d]` still means "fetch `bitcoin`, emit `BTCUSDT`". Both
+/// sides accept the escape, so an emitted label may carry one too
+/// (`ES\=F=ES=F` is a redundant but legal way to spell the same thing).
+///
+/// Escapes are `\=` → `=` and `\\` → `\`; any other backslash sequence is an
+/// error rather than a silent passthrough, so a typo surfaces at parse time.
+///
+/// Note for callers writing shell: the shell eats a bare backslash, so the
+/// argument needs quoting — `'yfinance:EURUSD\=X[1d]'` or `EURUSD\\=X`.
+/// Thin `anyhow` wrappers over the shared symbol-escape rules in
+/// [`crate::calendar`], which the `-x` / `--costs` scope splitters use too.
+fn unescape(s: &str) -> Result<String> {
+    crate::calendar::unescape_symbol(s).map_err(|e| anyhow!("{e}"))
+}
+
+fn escape(s: &str) -> String {
+    crate::calendar::escape_symbol(s)
+}
+
+fn split_remap(head: &str) -> Result<(String, String)> {
+    let mut escaped = false;
+    let mut split_at = None;
+    for (i, c) in head.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            '=' => {
+                split_at = Some(i);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let Some(i) = split_at else {
+        let whole = unescape(head)?;
+        return Ok((whole.clone(), whole));
+    };
+    // Unescape before trimming: `A\ =B`'s left side is `A\ `, and trimming
+    // first would leave a dangling `\` and report that instead of the real
+    // problem (an unknown `\ ` escape).
+    let output = unescape(&head[..i])?.trim().to_string();
+    let query = unescape(&head[i + 1..])?.trim().to_string();
+    if output.is_empty() {
+        bail!("empty output symbol on the left of `=`");
+    }
+    if query.is_empty() {
+        bail!("empty provider query on the right of `=`");
+    }
+    Ok((output, query))
 }
 
 /// Parse one CLI spec argument into zero or more [`FetchSpec`]s and an optional
@@ -306,58 +363,23 @@ fn provider_kind(provider: &str) -> ProviderKind {
 /// `symbol`. `cg:BTCUSDT=bitcoin[1d]` fetches `bitcoin` and writes
 /// `BTCUSDT`, so the two files line up.
 ///
-/// With no `=`, output and query are the same string (the previous behaviour).
+/// With no unescaped `=`, output and query are the same string. A symbol that
+/// contains a literal `=` escapes it as `\=` — see [`split_remap`].
 #[derive(Debug, Clone, PartialEq)]
 struct SymbolSpec {
     /// The value written to the `symbol` column — the `--series` join key.
     output: String,
     /// The identifier sent to the provider.
     query: String,
-    freqs: Vec<FreqSpec>,
-}
-
-/// One `[OFREQ=]FREQ` entry inside a symbol's bracket — the cadence twin of
-/// [`SymbolSpec`]'s `OUTPUT=QUERY`, and the same left-is-emitted /
-/// right-is-fetched rule.
-///
-/// The remap is for **relabelling a cadence, not changing one**: the two sides
-/// normally denote the same duration under a different name, so that the `freq`
-/// column agrees with whatever the series you intend to join against uses.
-/// `binance:BTCUSDT[1d=24h]` fetches 24-hour bars and tags them `1d`;
-/// `[1h=60m]` is the same idea.
-///
-/// The **output side is an opaque label, not an interval** — `[FOO=1d]` is
-/// legal and writes `freq=FOO`. Only the fetched side has to be a real interval
-/// token, because only it is sent to a provider. This is safe for the workflow
-/// that matters: the `--series` loader treats `freq` as a reserved passthrough
-/// column and never parses it, so an arbitrary label joins fine. (The one
-/// consumer that *does* parse it back is `get csv:PATH`, which reads a file's
-/// `freq` cells into `Interval`s — a file labelled `FOO` cannot be re-read
-/// through that path.)
-///
-/// **It relabels; it does not resample.** Every fetched row is emitted with only
-/// its `freq` cell rewritten. So if the two sides denote *different* durations
-/// (`[4h=1h]`), the extra rows land on timestamps no 4-hour bar-open covers,
-/// they find no price bar in the join, and `run` rejects them outright
-/// (`missing required column 'open'`). That is the intended failure — this is
-/// not a downsampler.
-///
-/// A provider's *own* token spelling (Binance's `1M`, a hypothetical `1hr`) is
-/// not this mechanism's job either — that mapping lives inside each provider,
-/// which translates an [`Interval`] into its native vocabulary.
-#[derive(Debug, Clone, PartialEq)]
-struct FreqSpec {
-    /// Written verbatim to the `freq` column. Any string.
-    output: String,
-    /// The cadence actually fetched (and chunked, and paginated). Also what `-x`
-    /// scope prefixes match against, since a scope names a real cadence.
-    query: Interval,
+    /// The cadences to fetch. Each is written to the `freq` column as its own
+    /// canonical token, and is what `-x` scope prefixes match against.
+    freqs: Vec<Interval>,
 }
 
 /// A parsed CLI `get` spec.
 ///
 /// Remote providers share the same
-/// `<provider>:[OUTPUT=]<query>[<freq>,...],[OUTPUT=]<query>[<freq>,...]`
+/// `<provider>:<symbol>[<freq>,...],<symbol>[<freq>,...]`
 /// grammar; `csv:PATH` is its own variant, since the file already carries
 /// symbol+freq per row and the bracket doesn't apply.
 #[derive(Debug, Clone, PartialEq)]
@@ -396,7 +418,7 @@ fn resolve_mode(specs: &[FetchSpec]) -> Result<ProviderKind> {
              zero out your real prices when the files are joined.\n\n\
              Fetch them separately and let `run` join the two on (symbol, time):\n\
              \x20 fugazi get binance:BTCUSDT[1d]           -o prices.csv\n\
-             \x20 fugazi get cg:BTCUSDT=bitcoin[1d] -o caps.csv\n\
+             \x20 fugazi get cg:BTCUSDT=bitcoin[1d]     -o caps.csv\n\
              \x20 fugazi run @strategy.yml -s @prices.csv -s @caps.csv -o out/"
         );
     }
@@ -411,7 +433,7 @@ fn resolve_mode(specs: &[FetchSpec]) -> Result<ProviderKind> {
 pub struct GetArgs {
     /// Fetch specs: one or more of the following, all series downloading in parallel:
     ///
-    /// * **Inline:** `<provider>:[OUT=]<symbol>[[OFREQ=]<freq>,...](,...)*`, e.g.
+    /// * **Inline:** `<provider>:[OUT=]<symbol>[<freq>,...](,...)*`, e.g.
     ///   `binance:BTCUSDT[1d,1h],ETHUSDT[1d]`. Frequency tokens: `1m`/`5m`/`1h`/`4h`/`1d`/`1w`/`1M`.
     ///
     /// * **Dataset file:** `@path/to/dataset.yml` — a YAML descriptor with `name`,
@@ -419,21 +441,21 @@ pub struct GetArgs {
     ///   of `{ provider, symbols }`). All sources share the dataset's interval.
     ///   Example: `fugazi get @datasets/crypto/large-cap-1d.yml --since 2019-01-01 -o out.csv`.
     ///
-    /// Both the symbol and each freq in an inline spec accept an optional `EMITTED=FETCHED`
-    /// remap — the left side is what gets written to the CSV, the right side is
-    /// what the provider is asked for. Omit it and the two are the same (the
-    /// plain form above). Use it when a provider's vocabulary differs from the
-    /// price series you intend to join against, since `run` joins on an exact
-    /// `(symbol, time)` match:
+    /// The symbol accepts an optional `EMITTED=FETCHED` remap — the left side is
+    /// written to the CSV, the right side is what the provider is asked for.
+    /// Omit it and the two are the same. Use it when a provider's vocabulary
+    /// differs from the price series you intend to join against, since `run`
+    /// joins on an exact `(symbol, time)` match: `cg:BTCUSDT=bitcoin[1d]`
+    /// fetches the coin id `bitcoin` and emits `symbol=BTCUSDT`. The same form
+    /// works for a dataset file's `symbols:` entries.
     ///
-    /// * `cg:BTCUSDT=bitcoin[1d]` — fetch the coin id `bitcoin`, emit
-    ///   `symbol=BTCUSDT`.
-    /// * `binance:BTCUSDT[1d=24h]` — fetch 24-hour bars, tag them `freq=1d`.
+    /// A ticker that itself contains `=` — Yahoo's `EURUSD=X`, `ES=F` — escapes
+    /// it as `\=`, on either side of the remap. Quote the argument so the shell
+    /// doesn't eat the backslash: `fugazi get 'yfinance:EURUSD\=X[1d]'`. The
+    /// only escapes are `\=` and `\\`; anything else is an error.
     ///
-    /// The freq form *relabels* a cadence; it does not resample one, so the two
-    /// sides should denote the same duration under a different name (`1d=24h`).
-    /// Only the fetched side must be a real interval token — the emitted label
-    /// is free-form (`[FOO=1d]` writes `freq=FOO`).
+    /// Each row's `freq` cell is the fetched cadence's own token — cadences are
+    /// not relabellable.
     ///
     /// Overlay-only providers (`coingecko`) emit side-channel columns and no
     /// OHLCV, and cannot be mixed with candle providers in one invocation —
@@ -656,23 +678,19 @@ fn run_candles(
                     _ => Schema::empty(),
                 };
                 for sym in symbols {
-                    for freq in &sym.freqs {
-                        // `-x` scopes match the symbol the user sees, but the
-                        // *fetched* cadence: a scope's `[FREQ]` names a real
-                        // interval, and the emitted label may not be one.
+                    for &freq in &sym.freqs {
                         let stable = overlay::stable_period_for(
                             &overlays,
                             &overlay_columns,
                             &sym.output,
-                            freq.query,
+                            freq,
                             &schema,
                         );
                         series.push(Series {
                             provider: provider.clone(),
                             output: sym.output.clone(),
                             query: sym.query.clone(),
-                            interval: freq.query,
-                            out_freq: freq.output.clone(),
+                            interval: freq,
                             stable,
                             csv_bars: None,
                             csv_path: None,
@@ -709,14 +727,13 @@ fn run_candles(
                         interval,
                         &file_schema,
                     );
-                    // A `csv:` file already carries its own `symbol` and `freq`
-                    // columns, so there is nothing to remap: emitted == fetched.
+                    // A `csv:` file already carries its own `symbol` and
+                    // `freq` columns, so there is nothing to remap.
                     series.push(Series {
                         provider: "csv".into(),
                         output: sym.clone(),
                         query: sym,
                         interval,
-                        out_freq: interval.as_token(),
                         stable,
                         csv_bars: Some(shared.clone()),
                         csv_path: Some(path.clone()),
@@ -798,13 +815,12 @@ fn run_overlay_columns(
         };
         n_symbols += symbols.len();
         for sym in symbols {
-            for freq in &sym.freqs {
+            for &freq in &sym.freqs {
                 series.push(Series {
                     provider: provider.clone(),
                     output: sym.output.clone(),
                     query: sym.query.clone(),
-                    interval: freq.query,
-                    out_freq: freq.output.clone(),
+                    interval: freq,
                     stable: 0,
                     csv_bars: None,
                     csv_path: None,
@@ -839,8 +855,7 @@ fn run_overlay_columns(
 /// [`Row`].
 struct OverlayOut {
     symbol: String,
-    /// The `freq` cell, verbatim — an opaque label, not necessarily an interval
-    /// token. See [`FreqSpec`].
+    /// The `freq` cell — the fetched cadence's own token.
     freq: String,
     time: Timestamp,
     overlays: OverlayInfo,
@@ -892,7 +907,7 @@ async fn fetch_overlay_series(
         .with_context(|| format!("fetching {label}"))?;
         rows.extend(fetched.into_iter().map(|r| OverlayOut {
             symbol: series.output.clone(),
-            freq: series.out_freq.clone(),
+            freq: series.interval.as_token(),
             time: r.time,
             overlays: r.overlays,
         }));
@@ -979,7 +994,7 @@ fn write_overlays_csv(path: &Path, rows: &[OverlayOut]) -> Result<()> {
 /// non-OHLCV cells classified as `Real`/`Bool`/`Str`).
 struct Row {
     symbol: String,
-    /// The `freq` cell, verbatim. See [`FreqSpec`].
+    /// The `freq` cell — the fetched cadence's own token.
     freq: String,
     /// Fully-populated bar: OHLCV, bar-open `time`, and the source-provided
     /// overlay side channel (Binance's `quote_volume` / `n_trades` / …;
@@ -1007,13 +1022,9 @@ struct Series {
     /// The identifier this series is *fetched* with (a CoinGecko coin id, a
     /// Binance pair, …). See [`SymbolSpec`].
     query: String,
-    /// The cadence actually fetched — what chunking, pagination, the provider
-    /// call, and `-x` scope matching all use.
+    /// The cadence fetched — what chunking, pagination, the provider call, `-x`
+    /// scope matching, and the emitted `freq` cell all use.
     interval: Interval,
-    /// The label written to the `freq` column, verbatim. Equal to
-    /// `interval.as_token()` unless the spec used the `OFREQ=FREQ` form; may be
-    /// any string. See [`FreqSpec`].
-    out_freq: String,
     stable: usize,
     /// The file's pre-read bar list, shared between every series that reads
     /// from the same file. `None` for remote-provider series.
@@ -1028,24 +1039,19 @@ impl Series {
             return format!(
                 "csv:{}[{}:{}]",
                 path.display(),
-                self.output,
+                escape(&self.output),
                 self.interval.as_token()
             );
         }
-        // Echo each mapping when there is one, so the progress line makes the
-        // fetched-vs-emitted distinction visible while it runs.
+        // Echo the mapping when there is one, so the progress line makes the
+        // fetched-vs-emitted distinction visible while it runs. Re-escaped, so
+        // what is printed is a spec that parses back to this series.
         let symbol = if self.output == self.query {
-            self.query.clone()
+            escape(&self.query)
         } else {
-            format!("{}={}", self.output, self.query)
+            format!("{}={}", escape(&self.output), escape(&self.query))
         };
-        let token = self.interval.as_token();
-        let freq = if self.out_freq == token {
-            token
-        } else {
-            format!("{}={}", self.out_freq, token)
-        };
-        format!("{}:{}[{}]", self.provider, symbol, freq)
+        format!("{}:{}[{}]", self.provider, symbol, self.interval.as_token())
     }
 
     /// Where this series' fetch actually starts: `since` on the nose when the
@@ -1101,10 +1107,9 @@ const CHUNK_DELAY: StdDuration = StdDuration::from_millis(100);
 /// `Row` list is emitted.
 struct RawBar {
     symbol: String,
-    /// The cadence actually fetched — what `-x` scopes match against.
+    /// The cadence fetched — what `-x` scopes match against, and what the
+    /// emitted `freq` cell spells.
     interval: Interval,
-    /// The `freq` cell, verbatim. See [`FreqSpec`].
-    freq: String,
     atom: Atom,
 }
 
@@ -1154,7 +1159,6 @@ async fn fetch_series(
             .map(|b| RawBar {
                 symbol: series.output.clone(),
                 interval: b.interval,
-                freq: series.out_freq.clone(),
                 atom: b.atom.clone(),
             })
             .collect();
@@ -1180,11 +1184,10 @@ async fn fetch_series(
         )
         .await
         .with_context(|| format!("fetching {label}"))?;
-        // Rows are tagged with the *emitted* symbol and freq — the join keys.
+        // Rows are tagged with the *emitted* symbol — the join key.
         rows.extend(atoms.into_iter().map(|atom| RawBar {
             symbol: series.output.clone(),
             interval: series.interval,
-            freq: series.out_freq.clone(),
             atom,
         }));
         bar.inc(1);
@@ -1207,26 +1210,22 @@ fn apply_overlays(
     overlays: &[Overlay],
     columns: &[String],
 ) -> Vec<Row> {
-    // Bin the incoming stream by `(symbol, freq-label, interval)` — order within
-    // each bin is preserved by the sort below and matches the order the provider
-    // paged the bars in (ascending time). The outer sort re-orders across groups.
-    //
-    // The key carries both the emitted label and the fetched interval: the label
-    // identifies the output series, and the interval is what `-x` scopes match
-    // on. Keying on only one of them would let two series with the same label
-    // but different cadences (or vice versa) share one set of overlay
-    // instances.
-    let mut by_group: std::collections::HashMap<(String, String, Interval), Vec<RawBar>> =
+    // Bin the incoming stream by `(symbol, interval)` — order within each bin is
+    // preserved by the sort below and matches the order the provider paged the
+    // bars in (ascending time). The outer sort re-orders across groups. The
+    // interval is what `-x` scopes match on, so two cadences of one symbol get
+    // their own overlay instances.
+    let mut by_group: std::collections::HashMap<(String, Interval), Vec<RawBar>> =
         std::collections::HashMap::new();
     for bar in raw {
         by_group
-            .entry((bar.symbol.clone(), bar.freq.clone(), bar.interval))
+            .entry((bar.symbol.clone(), bar.interval))
             .or_default()
             .push(bar);
     }
 
     let mut out: Vec<Row> = Vec::new();
-    for ((symbol, _freq, interval), mut bars) in by_group {
+    for ((symbol, interval), mut bars) in by_group {
         bars.sort_by_key(|b| b.atom.time);
 
         // Every atom in a group shares the same source-provided schema (one
@@ -1258,7 +1257,7 @@ fn apply_overlays(
                     .collect();
                 Row {
                     symbol: b.symbol,
-                    freq: b.freq,
+                    freq: b.interval.as_token(),
                     atom: b.atom,
                     overlays: values,
                 }
@@ -1328,7 +1327,7 @@ fn warn_short_history(
     for s in series {
         let Some(earliest) = raw
             .iter()
-            .filter(|b| b.symbol == s.output && b.interval == s.interval && b.freq == s.out_freq)
+            .filter(|b| b.symbol == s.output && b.interval == s.interval)
             .filter_map(|b| b.atom.time)
             .min()
         else {
@@ -1715,7 +1714,7 @@ fn parse_spec(spec: &str) -> Result<FetchSpec> {
 }
 
 /// Parse one `[OUTPUT=]QUERY[freq,...]` entry. See [`SymbolSpec`] for what the
-/// `OUTPUT=` prefix is for.
+/// `OUTPUT=` prefix is for and [`split_remap`] for the `\=` escape.
 fn parse_symbol(s: &str) -> Result<SymbolSpec> {
     let s = s.trim();
     let open = s
@@ -1728,19 +1727,7 @@ fn parse_symbol(s: &str) -> Result<SymbolSpec> {
     if head.is_empty() {
         bail!("{s:?}: empty symbol name");
     }
-    // `OUTPUT=QUERY` — emit under the left, fetch under the right. Split on the
-    // first `=` only: a provider id is free to contain one, an output symbol
-    // (which has to match a CSV `symbol` cell) is not going to.
-    let (output, query) = match head.split_once('=') {
-        Some((out, q)) => (out.trim(), q.trim()),
-        None => (head, head),
-    };
-    if output.is_empty() {
-        bail!("{s:?}: empty output symbol on the left of `=`");
-    }
-    if query.is_empty() {
-        bail!("{s:?}: empty provider query on the right of `=`");
-    }
+    let (output, query) = split_remap(head).with_context(|| format!("{s:?}"))?;
     let inner = &s[open + 1..s.len() - 1];
     let mut freqs = Vec::new();
     for tok in inner.split(',') {
@@ -1748,29 +1735,17 @@ fn parse_symbol(s: &str) -> Result<SymbolSpec> {
         if tok.is_empty() {
             bail!("{s:?}: empty frequency token in bracket");
         }
-        // `OFREQ=FREQ` — tag rows with the left, fetch at the right. Same rule
-        // as the symbol's `OUTPUT=QUERY`; absent, the label is the fetched
-        // cadence's own token. Only the fetched side is parsed: the label is
-        // written to the CSV verbatim and never interpreted.
-        let (out_label, query_tok) = match tok.split_once('=') {
-            Some((out, q)) => (out.trim(), q.trim()),
-            None => (tok, tok),
-        };
-        if out_label.is_empty() || query_tok.is_empty() {
-            bail!("{s:?}: freq {tok:?} has an empty side around `=`");
-        }
-        freqs.push(FreqSpec {
-            output: out_label.to_string(),
-            query: crate::calendar::parse_interval(query_tok)
-                .with_context(|| format!("{s:?}: freq {query_tok:?}"))?,
-        });
+        freqs.push(
+            crate::calendar::parse_interval(tok)
+                .with_context(|| format!("{s:?}: freq {tok:?}"))?,
+        );
     }
     if freqs.is_empty() {
         bail!("{s:?}: empty frequency list");
     }
     Ok(SymbolSpec {
-        output: output.to_string(),
-        query: query.to_string(),
+        output,
+        query,
         freqs,
     })
 }
@@ -1871,18 +1846,6 @@ mod tests {
         datetime!(2024-03-15 12:34:56 UTC)
     }
 
-    /// Helper: the `FreqSpec` list an unmapped bracket (`[1d,1h]`) produces —
-    /// the label is just the fetched cadence's own token.
-    fn plain(freqs: &[Interval]) -> Vec<FreqSpec> {
-        freqs
-            .iter()
-            .map(|&f| FreqSpec {
-                output: f.as_token(),
-                query: f,
-            })
-            .collect()
-    }
-
     /// Helper: unwrap the remote variant, panicking otherwise. All the
     /// non-`csv:` parse tests below use it.
     fn remote(spec: &str) -> (String, Vec<SymbolSpec>) {
@@ -1900,47 +1863,7 @@ mod tests {
         // No `=`: the fetched symbol is also the emitted one.
         assert_eq!(symbols[0].output, "BTCUSDT");
         assert_eq!(symbols[0].query, "BTCUSDT");
-        assert_eq!(symbols[0].freqs, plain(&[Interval::Day(1)]));
-    }
-
-    #[test]
-    fn freq_prefix_relabels_the_emitted_cadence() {
-        // The intended use: same duration under a different name. Fetch 24h
-        // bars, tag them `1d` so the `freq` column agrees with the series being
-        // joined against.
-        let (_, symbols) = remote("binance:BTCUSDT[1d=24h,1d]");
-        assert_eq!(
-            symbols[0].freqs[0],
-            FreqSpec {
-                output: "1d".to_string(),
-                query: Interval::Hour(24),
-            }
-        );
-        // A plain entry in the same bracket stays unmapped.
-        assert_eq!(symbols[0].freqs[1], plain(&[Interval::Day(1)])[0]);
-    }
-
-    #[test]
-    fn the_emitted_freq_label_is_an_opaque_string() {
-        // Only the fetched side has to be an interval; the label is written to
-        // the CSV verbatim and never parsed back by the `--series` loader.
-        let (_, symbols) = remote("cg:BTCUSDT=bitcoin[FOO=1d]");
-        assert_eq!(
-            symbols[0].freqs[0],
-            FreqSpec {
-                output: "FOO".to_string(),
-                query: Interval::Day(1),
-            }
-        );
-    }
-
-    #[test]
-    fn rejects_malformed_freq_mapping() {
-        assert!(parse_spec("cg:BTCUSDT=bitcoin[=1h]").is_err());
-        assert!(parse_spec("cg:BTCUSDT=bitcoin[4h=]").is_err());
-        // The *fetched* side must be a real interval token — it is what gets
-        // sent to the provider. (The emitted label is free-form.)
-        assert!(parse_spec("cg:BTCUSDT=bitcoin[4h=1x]").is_err());
+        assert_eq!(symbols[0].freqs, vec![Interval::Day(1)]);
     }
 
     #[test]
@@ -1966,42 +1889,102 @@ mod tests {
     }
 
     #[test]
+    fn an_escaped_equals_is_part_of_the_symbol() {
+        // Yahoo's FX / futures tickers carry `=`. Escaped, the head is one
+        // symbol — no remap — and the `=` survives into both sides.
+        let (provider, symbols) = remote(r"yfinance:EURUSD\=X[1d],ES\=F[1h]");
+        assert_eq!(provider, "yfinance");
+        assert_eq!(symbols[0].output, "EURUSD=X");
+        assert_eq!(symbols[0].query, "EURUSD=X");
+        assert_eq!(symbols[0].freqs, vec![Interval::Day(1)]);
+        assert_eq!(symbols[1].output, "ES=F");
+        assert_eq!(symbols[1].query, "ES=F");
+    }
+
+    #[test]
+    fn escapes_work_on_either_side_of_a_remap() {
+        // Emit under an escaped label, fetch an escaped id: the split happens
+        // at the first *unescaped* `=` only.
+        let (_, symbols) = remote(r"yfinance:EURUSD\=X=EURUSD\=X[1d]");
+        assert_eq!(symbols[0].output, "EURUSD=X");
+        assert_eq!(symbols[0].query, "EURUSD=X");
+
+        let (_, mapped) = remote(r"yfinance:EURUSD=EURUSD\=X[1d]");
+        assert_eq!(mapped[0].output, "EURUSD");
+        assert_eq!(mapped[0].query, "EURUSD=X");
+
+        // `\\` is the other escape — a literal backslash, not an escaper.
+        let (_, backslash) = remote(r"binance:A\\B[1d]");
+        assert_eq!(backslash[0].query, r"A\B");
+    }
+
+    #[test]
+    fn rejects_unknown_and_dangling_escapes() {
+        // A typo surfaces at parse time rather than silently passing through.
+        assert!(parse_spec(r"binance:BTC\USDT[1d]").is_err());
+        assert!(parse_spec(r"binance:BTCUSDT\[1d]").is_err());
+    }
+
+    #[test]
+    fn an_escape_error_names_the_escape_not_the_padding() {
+        // Unescaping runs before the whitespace trim, so `A\ =B` reports the
+        // unknown `\ ` escape rather than a dangling backslash left by trimming.
+        let err = parse_spec(r"binance:A\ =B[1d]").unwrap_err().to_string();
+        let chain = format!("{:#}", parse_spec(r"binance:A\ =B[1d]").unwrap_err());
+        assert!(chain.contains("unknown escape"), "{err} / {chain}");
+    }
+
+    #[test]
+    fn dataset_symbols_share_the_remap_and_escape_rules() {
+        // The bracket-less `@dataset.yml` path goes through the same splitter.
+        let mapped = parse_symbol_plain("BTCUSDT=bitcoin", Interval::Day(1)).unwrap();
+        assert_eq!(mapped.output, "BTCUSDT");
+        assert_eq!(mapped.query, "bitcoin");
+        assert_eq!(mapped.freqs, vec![Interval::Day(1)]);
+
+        let escaped = parse_symbol_plain(r"EURUSD\=X", Interval::Day(1)).unwrap();
+        assert_eq!(escaped.output, "EURUSD=X");
+        assert_eq!(escaped.query, "EURUSD=X");
+
+        assert!(parse_symbol_plain(r"BTC\USDT", Interval::Day(1)).is_err());
+    }
+
+    #[test]
+    fn every_freq_token_must_be_a_real_interval() {
+        // There is no relabel form: each token is parsed as a cadence.
+        assert!(parse_spec("binance:BTCUSDT[1d=24h]").is_err());
+        assert!(parse_spec("binance:BTCUSDT[FOO]").is_err());
+        assert!(parse_spec("binance:BTCUSDT[1x]").is_err());
+    }
+
+    #[test]
     fn rejects_half_empty_output_mapping() {
         assert!(parse_spec("cg:=bitcoin[1d]").is_err());
         assert!(parse_spec("cg:BTCUSDT=[1d]").is_err());
     }
 
     #[test]
-    fn label_shows_each_mapping_only_when_there_is_one() {
+    fn label_echoes_a_mapping_only_when_there_is_one_and_re_escapes() {
         let mapped = Series {
             provider: "cg".into(),
             output: "BTCUSDT".into(),
             query: "bitcoin".into(),
             interval: Interval::Day(1),
-            out_freq: "1d".to_string(),
             stable: 0,
             csv_bars: None,
             csv_path: None,
         };
-        // Symbol remapped, freq not.
         assert_eq!(mapped.label(), "cg:BTCUSDT=bitcoin[1d]");
 
-        // Both remapped.
-        let both = Series {
-            interval: Interval::Day(1),
-            out_freq: "FOO".to_string(),
-            ..mapped.clone()
-        };
-        assert_eq!(both.label(), "cg:BTCUSDT=bitcoin[FOO=1d]");
-
-        // Neither: the plain form is unchanged from before this grammar existed.
+        // Unmapped: the plain form, with any literal `=` escaped back so the
+        // echoed spec parses to this same series.
         let plain = Series {
-            query: "BTCUSDT".into(),
-            output: "BTCUSDT".into(),
-            provider: "binance".into(),
+            provider: "yfinance".into(),
+            output: "EURUSD=X".into(),
+            query: "EURUSD=X".into(),
             ..mapped
         };
-        assert_eq!(plain.label(), "binance:BTCUSDT[1d]");
+        assert_eq!(plain.label(), r"yfinance:EURUSD\=X[1d]");
     }
 
     #[test]
@@ -2027,11 +2010,8 @@ mod tests {
     fn parses_multi_symbol_multi_freq() {
         let (_, symbols) = remote("binance:BTCUSDT[1d,1h],ETHUSDT[1d]");
         assert_eq!(symbols.len(), 2);
-        assert_eq!(
-            symbols[0].freqs,
-            plain(&[Interval::Day(1), Interval::Hour(1)])
-        );
-        assert_eq!(symbols[1].freqs, plain(&[Interval::Day(1)]));
+        assert_eq!(symbols[0].freqs, vec![Interval::Day(1), Interval::Hour(1)]);
+        assert_eq!(symbols[1].freqs, vec![Interval::Day(1)]);
     }
 
     #[test]
@@ -2087,10 +2067,7 @@ mod tests {
     fn tolerates_whitespace() {
         let (_, symbols) = remote("binance: BTCUSDT [ 1d , 1h ] , ETHUSDT [1d]");
         assert_eq!(symbols.len(), 2);
-        assert_eq!(
-            symbols[0].freqs,
-            plain(&[Interval::Day(1), Interval::Hour(1)])
-        );
+        assert_eq!(symbols[0].freqs, vec![Interval::Day(1), Interval::Hour(1)]);
     }
 
     #[test]

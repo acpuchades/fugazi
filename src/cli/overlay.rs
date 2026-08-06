@@ -42,7 +42,7 @@ use fugazi::indicators::{Book, Position};
 use fugazi::sources::Interval;
 
 use crate::dyn_indicator::DynIndicator;
-use crate::calendar::{parse_interval, parse_scope_parts};
+use crate::calendar::{is_escaped, parse_interval, parse_scope_parts};
 use crate::input::{self, Source};
 use crate::params;
 use crate::spec::ExprSpec;
@@ -224,6 +224,11 @@ fn parse_argument(text: &str, params: &HashMap<String, Json>) -> Result<Vec<Over
 /// when no prefix is present) and the remaining body. The `:` is only a
 /// separator at bracket depth zero, so a `!sma { source: close, period: 20 }`
 /// body without a scope still parses.
+///
+/// An **escaped** `\=` is not the start of an inline pair — it belongs to the
+/// scoped symbol, so `'EURUSD\=X[1d]:r=!rsi { period: 2 }'` scopes to
+/// `EURUSD=X` rather than reading `EURUSD` as a column name. Same rule as
+/// `fugazi get`'s spec heads; see [`crate::calendar::unescape_symbol`].
 fn split_scope(text: &str) -> Result<(OverlayScope, &str)> {
     let mut depth: i32 = 0;
     for (i, ch) in text.char_indices() {
@@ -235,7 +240,9 @@ fn split_scope(text: &str) -> Result<(OverlayScope, &str)> {
                 let body = &text[i + 1..];
                 return Ok((parse_scope(scope_text)?, body));
             }
-            '=' if depth == 0 => break, // an inline pair started; no scope
+            // An inline pair started; no scope — unless the `=` is escaped, in
+            // which case it is part of the symbol being scoped.
+            '=' if depth == 0 && !is_escaped(text, i) => break,
             _ => {}
         }
     }
@@ -452,6 +459,26 @@ mod tests {
         let overlays = parse_specs(std::slice::from_ref(&src)).unwrap();
         assert_eq!(overlays[0].scope.symbol.as_deref(), Some("BTCUSDT"));
         assert!(overlays[0].scope.interval.is_none());
+    }
+
+    #[test]
+    fn scope_symbol_may_carry_an_escaped_equals() {
+        // The `\=` is part of the symbol, not the start of the `col=expr` pair
+        // — otherwise `EURUSD` would be read as the column name.
+        let src = Source::Inline(r"EURUSD\=X[1d]:r=!rsi { period: 2 }".to_string());
+        let overlays = parse_specs(std::slice::from_ref(&src)).unwrap();
+        assert_eq!(overlays[0].scope.symbol.as_deref(), Some("EURUSD=X"));
+        assert_eq!(overlays[0].scope.interval, Some(Interval::Day(1)));
+        assert_eq!(overlays[0].name, "r");
+    }
+
+    #[test]
+    fn an_unescaped_equals_still_means_no_scope() {
+        // The inline-pair form is unchanged: no `:` before the `=`, no scope.
+        let src = Source::Inline("s=!sma { period: 5 }".to_string());
+        let overlays = parse_specs(std::slice::from_ref(&src)).unwrap();
+        assert!(overlays[0].scope.symbol.is_none());
+        assert_eq!(overlays[0].name, "s");
     }
 
     #[test]
