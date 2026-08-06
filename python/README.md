@@ -153,6 +153,10 @@ node.reset()                   # call reset() to start a fresh, independent pass
 | `sma ema rma wma hma rsi stddev stochastic cci (source, period)` | a value |
 | `skewness kurtosis zscore (source, period)` | a value (distribution shape / normalization; `kurtosis` is raw, ~3 for normal) |
 | `correlation(lhs, rhs, period)` | rolling Pearson correlation in `[-1, 1]` (autocorrelation: `correlation(x, x.lag(n), period)`) |
+| `percentile(source, period, pct)` | the `pct`-quantile over the window (`pct=0.5` is the rolling median), linearly interpolated like numpy's default |
+| `percentile_rank(source, period)` | where the current reading sits in its own window: `count(v <= x)/period`, in `(0, 1]` |
+| `bars_since(signal)` | bars since `signal` was last true (`0` on the firing bar); `None` until it has fired once, so thresholds read false until then |
+| `bars_since_high bars_since_low (source, period)` | bars since the source set a new `period`-bar extreme, in `[0, period-1]` |
 | `variance_ratio(source, period, lag)` | Lo-MacKinlay regime classifier (`>1` trending, `<1` mean-reverting); O(period)/bar recompute |
 | `stoch_rsi(source, rsi_period=14, stoch_period=14)` | a value |
 | `atr mfi williams_r vwap (period)` | a value |
@@ -523,8 +527,42 @@ missing `exit` never fires — right for an always-in reversal), `position_sizin
 (scales the value-fraction magnitude; a `None` reading skips that bar's trade),
 and the strategy's book is seeded to the wallet's opening equity. Signals must be
 candle- or snapshot-rooted (a bare-value signal is rejected). Not bound yet:
-position-anchored protective stops, pairs / basket strategies, and the Rust
-recipe catalogue — drop to the wallet loop above for those.
+position-anchored protective stops and the Rust recipe catalogue — drop to the
+wallet loop above for those.
+
+### Multi-symbol strategies
+
+`PairsStrategy`, `MultiAssetStrategy` and `BasketStrategy` mirror their Rust
+siblings and drive over a sequence of snapshots (`.run(wallet, snapshots)`).
+Their signals are snapshot-rooted, so atom leaves are rooted per symbol with
+`ta.pick(sym)`.
+
+`PairsStrategy` trades the **spread** `close(left) − close(right)`, long / flat
+/ short on it. `long_spread_on` goes long `left` / short `right` (profiting as
+the spread rises); `short_spread_on` is the mirror. A mean-reverting spread
+visits both tails and the correct position is opposite at each, so wiring only
+one side skips every excursion on the other:
+
+```python
+spread = ta.close(ta.pick("BTC")).sub(ta.close(ta.pick("ETH")))
+z = ta.zscore(spread, 60)
+
+pair = (
+    ta.PairsStrategy("BTC", "ETH")
+    # spread cheap -> long it, close on reversion through 0
+    .long_spread_on(z.lt(ta.value(-2.0)), z.gt(ta.value(0.0)))
+    # spread rich -> short it (short BTC, long ETH)
+    .short_spread_on(z.gt(ta.value(2.0)), z.lt(ta.value(0.0)))
+)
+```
+
+The two directions are inverse positions, so they are mutually exclusive in time
+and share one capital pool at full notional; the opposite side's entry reverses
+an open pair. Per-side spread levels
+(`long_spread_stop_loss` / `short_spread_stop_loss` and the take-profit twins)
+compare with mirrored sense — the short side stops out when the spread rises
+*above* its level. `on` / `spread_stop_loss` / `spread_take_profit` remain valid
+as aliases for the long-spread side.
 
 ## YAML strategy specs — `load_spec`, `optimize`, walkforward
 
@@ -788,3 +826,28 @@ Two limits of the public tier: it serves only the **last 365 days** (a wider
 CoinGecko only samples that finely over windows too short to backtest on.
 `ta.fetch(provider="cg", ...)` deliberately raises rather than returning a
 candle-less frame from a function named `fetch`.
+
+`BinanceFunding` is the same shape, for the perpetual **funding rate** — the
+periodic payment between the two sides of a perp (positive = longs pay shorts),
+the primary carry signal in crypto:
+
+```python
+fund = ta.BinanceFunding()
+rates = fund.overlays(symbol="BTCUSDT", freq="1d", since="90d ago")
+# columns: time, funding_rate
+```
+
+`symbol` is a **perpetual contract** symbol, served from `fapi.binance.com` — a
+different host and listing set from the spot vocabulary `Binance` uses;
+`fund.symbols()` enumerates it.
+
+Binance settles funding every 4–8 hours. Those are events, not bars, so a
+coarser `freq` covers several of them and **their rates are summed**:
+`freq="1d"` is that day's total carry, `freq="8h"` is one settlement per row.
+That is the right aggregation because funding is an accrual rather than a level
+(contrast CoinGecko's market cap, where the first sample in the bucket wins),
+and it means there is nothing to forward-fill — request the cadence you trade.
+Sub-hourly is rejected: those buckets would be empty on almost every bar, which
+reads as "no carry" rather than "no data". As with CoinGecko,
+`ta.fetch(provider="binance-funding", ...)` redirects rather than returning a
+candle-less frame.

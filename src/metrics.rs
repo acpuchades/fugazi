@@ -996,25 +996,18 @@ fn downside_stddev(xs: &[Real], threshold: Real) -> Real {
 /// Sorted-ascending copy, `NaN`-tolerant.
 fn sorted_asc(xs: &[Real]) -> Vec<Real> {
     let mut v = xs.to_vec();
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    v.sort_by(crate::indicators::stats::cmp_asc);
     v
 }
 
 /// Linearly-interpolated `p`-quantile of a sorted-ascending slice (R's type-7,
 /// `numpy`'s default). `p` in `[0, 1]`.
+///
+/// Delegates to the shared core so the report-level percentiles here and the
+/// rolling [`Percentile`](crate::indicators::Percentile) indicator cannot drift
+/// apart.
 fn percentile(sorted: &[Real], p: Real) -> Real {
-    if sorted.is_empty() {
-        return 0.0;
-    }
-    let n = sorted.len();
-    if n == 1 {
-        return sorted[0];
-    }
-    let idx = p * (n - 1) as Real;
-    let lo = idx.floor() as usize;
-    let hi = (lo + 1).min(n - 1);
-    let frac = idx - lo as Real;
-    sorted[lo] * (1.0 - frac) + sorted[hi] * frac
+    crate::indicators::stats::quantile_of_sorted(sorted, p)
 }
 
 /// Mean of the bottom-`p` fraction of a sorted-ascending slice.

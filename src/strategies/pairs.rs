@@ -42,19 +42,45 @@ fn level_value<Sym>(level: &Option<Level<Sym>>) -> Option<Real> {
     level.as_ref().and_then(|l| l.value())
 }
 
-/// A two-symbol, spread-driven pair-trading strategy. On **enter**, go long
-/// `left` and short `right` at `value_frac(0.5 * m)` each — a 1.0 gross exposure
-/// dollar-neutral pair by default (`m = 1.0`), scaled by the strategy's
-/// **position-sizing indicator** `m`. On **exit**, flatten both legs. Optional
-/// **spread** stop-loss / take-profit levels are compared against the running
-/// `close_left − close_right`; either firing flattens the whole pair.
+/// A two-symbol, spread-driven pair-trading strategy, long / flat / short **on
+/// the spread**.
+///
+/// The traded instrument is `spread = close(left) − close(right)`, and the two
+/// directions are:
+///
+/// | Direction | Legs | Profits when |
+/// | --- | --- | --- |
+/// | **long spread** | long `left`, short `right` | the spread rises |
+/// | **short spread** | short `left`, long `right` | the spread falls |
+///
+/// Each leg entries at `value_frac(0.5 * m)` — a 1.0-gross, dollar-neutral pair
+/// by default (`m = 1.0`), scaled by the **position-sizing indicator** `m`. An
+/// `exit` flattens both legs, as does either **spread** level on the active
+/// side.
+///
+/// ## Why both directions
+///
+/// A mean-reverting spread visits both tails, and the correct position is
+/// *opposite* at each: at a rich spread you short it, at a cheap spread you long
+/// it. Which leg does the converging is irrelevant — that is what the hedge
+/// removes — but the *sign* is not optional. A one-directional pair therefore
+/// skips every excursion on the wrong side of the mean, silently, showing up
+/// only as a lower trade count.
+///
+/// Wiring [`short_spread_on`](Self::short_spread_on) is what enables the second
+/// direction; a strategy with only [`long_spread_on`](Self::long_spread_on)
+/// wired behaves exactly as before. The two directions are mutually exclusive
+/// in time (they are inverse positions — held together they would net flat), so
+/// they share one capital pool at full notional rather than splitting it.
+///
+/// Each side needs its own entry / exit conditions: a signal is an opaque
+/// `bool`, so the engine sees `true`, not "the z-score is −2.3", and cannot
+/// derive one side's conditions by negating the other's.
 ///
 /// Same shape as [`SingleAssetStrategy`](crate::strategies::SingleAssetStrategy)
 /// at the trait boundary: `Input = Snapshot<Sym>`, `Symbol = Sym`, updated one
-/// snapshot at a time, and levels compose off a shared [`Position`] anchor —
-/// but with two signals instead of four, since "short the pair" is just
-/// long/short swapped and can be obtained by swapping `left`/`right` at
-/// construction rather than doubling the signal surface.
+/// snapshot at a time, levels compose off a shared [`Position`] anchor, and the
+/// opposite side's entry reverses an open position.
 ///
 /// ## Position sizing
 ///
@@ -62,7 +88,7 @@ fn level_value<Sym>(level: &Option<Level<Sym>>) -> Option<Real> {
 /// indicator, set via [`position_sizing`](Self::position_sizing) and defaulting
 /// to `Value::new(1.0)` (the classical 1.0-gross, 0.5-per-leg dollar-neutral
 /// pair). Each leg entries at `value_frac(0.5 * m)`. `m` is a *magnitude only*
-/// (the long-left/short-right structure is fixed), and a `None` reading — while
+/// (the direction comes from which side's entry fired), and a `None` reading — while
 /// the sizing indicator is warming, or on a division by zero — causes the
 /// whole [`trade`](Strategy::trade) call to be skipped for that bar (safe
 /// default; opt out by composing a well-defined fallback into the sizing
@@ -84,10 +110,10 @@ fn level_value<Sym>(level: &Option<Level<Sym>>) -> Option<Real> {
 /// ## Readiness
 ///
 /// [`is_ready`](Strategy::is_ready) returns `true` once `bars_seen` reaches the
-/// largest `stable_period()` across the wired `enter`/`exit` signals, any
-/// attached spread level, and the sizing indicator. Because the internal spread
-/// is a raw close-of-left − close-of-right expression, its own
-/// `stable_period()` is `0` and it never dominates.
+/// largest `stable_period()` across every wired signal, any attached spread
+/// level, and the sizing indicator. Because the internal spread is a raw
+/// close-of-left − close-of-right expression, its own `stable_period()` is `0`
+/// and it never dominates.
 ///
 /// ```
 /// use fugazi::prelude::*;
@@ -95,21 +121,55 @@ fn level_value<Sym>(level: &Option<Level<Sym>>) -> Option<Real> {
 /// use fugazi::strategies::PairsStrategy;
 /// use fugazi::types::Selector;
 ///
-/// // Enter when a spread-vs-MA gap exceeds a threshold; exit when it closes.
+/// // The spread and its 20-bar mean, reused by both directions.
 /// let spread = || Close::of(Pick::matching(Selector::by_symbol("BTC")))
 ///     .sub(Close::of(Pick::matching(Selector::by_symbol("ETH"))));
-/// let enter = spread().sub(Sma::new(spread(), 20)).below(-1.0);
-/// let exit = spread().sub(Sma::new(spread(), 20)).above(0.0);
-/// let _strat = PairsStrategy::new("BTC", "ETH").on(enter, exit);
+/// let gap = || spread().sub(Sma::new(spread(), 20));
+///
+/// let _strat = PairsStrategy::new("BTC", "ETH")
+///     // Spread cheap -> long it; close on reversion through the mean.
+///     .long_spread_on(gap().below(-1.0), gap().above(0.0))
+///     // Spread rich -> short it; close on reversion the other way.
+///     .short_spread_on(gap().above(1.0), gap().below(0.0));
 /// ```
+/// Which direction the pair is currently holding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Direction {
+    /// Long `left`, short `right` — profits as the spread rises.
+    LongSpread,
+    /// Short `left`, long `right` — profits as the spread falls.
+    ShortSpread,
+}
+
+impl Direction {
+    /// The order sides for `(left, right)` in this direction.
+    fn legs(self) -> (Side, Side) {
+        match self {
+            Direction::LongSpread => (Side::Buy, Side::Sell),
+            Direction::ShortSpread => (Side::Sell, Side::Buy),
+        }
+    }
+
+    fn opposite(self) -> Self {
+        match self {
+            Direction::LongSpread => Direction::ShortSpread,
+            Direction::ShortSpread => Direction::LongSpread,
+        }
+    }
+}
+
 pub struct PairsStrategy<Sym> {
     left: Sym,
     right: Sym,
-    enter: Box<dyn Signal<Snapshot<Sym>> + Send + Sync>,
-    exit: Box<dyn Signal<Snapshot<Sym>> + Send + Sync>,
+    long_enter: Box<dyn Signal<Snapshot<Sym>> + Send + Sync>,
+    long_exit: Box<dyn Signal<Snapshot<Sym>> + Send + Sync>,
+    short_enter: Box<dyn Signal<Snapshot<Sym>> + Send + Sync>,
+    short_exit: Box<dyn Signal<Snapshot<Sym>> + Send + Sync>,
     spread: Spread<Sym>,
-    stop: Option<Level<Sym>>,
-    target: Option<Level<Sym>>,
+    long_stop: Option<Level<Sym>>,
+    long_target: Option<Level<Sym>>,
+    short_stop: Option<Level<Sym>>,
+    short_target: Option<Level<Sym>>,
     sizing: Level<Sym>,
     /// Rebalance gate — on `true`, resize both legs to the current
     /// sizing target. Default is `Const::new(false)` (never rebalance),
@@ -147,11 +207,15 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Pair
         Self {
             left,
             right,
-            enter: Box::new(Const::<Snapshot<Sym>>::new(false)),
-            exit: Box::new(Const::<Snapshot<Sym>>::new(false)),
+            long_enter: Box::new(Const::<Snapshot<Sym>>::new(false)),
+            long_exit: Box::new(Const::<Snapshot<Sym>>::new(false)),
+            short_enter: Box::new(Const::<Snapshot<Sym>>::new(false)),
+            short_exit: Box::new(Const::<Snapshot<Sym>>::new(false)),
             spread,
-            stop: None,
-            target: None,
+            long_stop: None,
+            long_target: None,
+            short_stop: None,
+            short_target: None,
             sizing: Box::new(Value::<Snapshot<Sym>>::new(1.0)),
             rebalance: Box::new(Const::<Snapshot<Sym>>::new(false)),
             left_position: Position::new(),
@@ -175,39 +239,105 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Pair
         self
     }
 
-    /// Wire the pair's `enter` and `exit` signals. `enter` opens a long-left /
-    /// short-right pair; `exit` flattens both legs. Both fire idempotently: a
-    /// held `enter` reads as no-op while the pair is open, and an `exit` on a
-    /// flat book is likewise silent.
-    pub fn on(
+    /// Wire the **long-spread** side: `enter` opens long `left` / short `right`
+    /// (profiting as the spread rises), `exit` flattens both legs. Both fire
+    /// idempotently — a held `enter` is a no-op while that side is open, and an
+    /// `exit` on a flat book is silent.
+    ///
+    /// If the short-spread side is also wired, its `enter` firing while this
+    /// side is open **reverses** the pair, matching
+    /// [`SingleAssetStrategy`](crate::strategies::SingleAssetStrategy).
+    pub fn long_spread_on(
         mut self,
         enter: impl Signal<Snapshot<Sym>> + 'static + Send + Sync,
         exit: impl Signal<Snapshot<Sym>> + 'static + Send + Sync,
     ) -> Self {
-        self.enter = Box::new(enter);
-        self.exit = Box::new(exit);
+        self.long_enter = Box::new(enter);
+        self.long_exit = Box::new(exit);
         self
     }
 
-    /// Attach a **spread stop-loss**: the pair flattens when the running
-    /// `close(left) − close(right)` reads **at or below** this level. Since the
-    /// pair is long the spread by construction, this is the adverse side.
+    /// Wire the **short-spread** side: `enter` opens short `left` / long
+    /// `right` (profiting as the spread falls), `exit` flattens both legs.
+    ///
+    /// Leaving this unwired keeps the strategy long-spread-only, which is the
+    /// historical behaviour.
+    pub fn short_spread_on(
+        mut self,
+        enter: impl Signal<Snapshot<Sym>> + 'static + Send + Sync,
+        exit: impl Signal<Snapshot<Sym>> + 'static + Send + Sync,
+    ) -> Self {
+        self.short_enter = Box::new(enter);
+        self.short_exit = Box::new(exit);
+        self
+    }
+
+    /// The long-spread side's alias for [`long_spread_on`](Self::long_spread_on),
+    /// kept for callers written before the short side existed.
+    pub fn on(
+        self,
+        enter: impl Signal<Snapshot<Sym>> + 'static + Send + Sync,
+        exit: impl Signal<Snapshot<Sym>> + 'static + Send + Sync,
+    ) -> Self {
+        self.long_spread_on(enter, exit)
+    }
+
+    /// Attach the **long-spread stop-loss**: that side flattens when the running
+    /// `close(left) − close(right)` reads **at or below** this level. The long
+    /// side profits as the spread rises, so falling is its adverse direction.
+    pub fn long_spread_stop_loss(
+        mut self,
+        level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
+    ) -> Self {
+        self.long_stop = Some(Box::new(level));
+        self
+    }
+
+    /// Attach the **long-spread take-profit**: that side flattens when the
+    /// spread reads **at or above** this level (its favourable direction).
+    pub fn long_spread_take_profit(
+        mut self,
+        level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
+    ) -> Self {
+        self.long_target = Some(Box::new(level));
+        self
+    }
+
+    /// Attach the **short-spread stop-loss**. The comparison is mirrored: the
+    /// short side profits as the spread falls, so it stops out when the spread
+    /// reads **at or above** this level.
+    pub fn short_spread_stop_loss(
+        mut self,
+        level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
+    ) -> Self {
+        self.short_stop = Some(Box::new(level));
+        self
+    }
+
+    /// Attach the **short-spread take-profit**: that side flattens when the
+    /// spread reads **at or below** this level (its favourable direction).
+    pub fn short_spread_take_profit(
+        mut self,
+        level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
+    ) -> Self {
+        self.short_target = Some(Box::new(level));
+        self
+    }
+
+    /// Alias for [`long_spread_stop_loss`](Self::long_spread_stop_loss).
     pub fn spread_stop_loss(
-        mut self,
+        self,
         level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     ) -> Self {
-        self.stop = Some(Box::new(level));
-        self
+        self.long_spread_stop_loss(level)
     }
 
-    /// Attach a **spread take-profit**: the pair flattens when the running
-    /// spread reads **at or above** this level (the favourable side).
+    /// Alias for [`long_spread_take_profit`](Self::long_spread_take_profit).
     pub fn spread_take_profit(
-        mut self,
+        self,
         level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     ) -> Self {
-        self.target = Some(Box::new(level));
-        self
+        self.long_spread_take_profit(level)
     }
 
     /// Set the **position-sizing multiplier** — a real-valued source read on
@@ -257,8 +387,21 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Pair
     /// attached spread level, and the sizing indicator. Same aggregation shape as
     /// [`SingleAssetStrategy::stable_period`](crate::strategies::SingleAssetStrategy::stable_period).
     pub fn stable_period(&self) -> usize {
-        let mut needed = self.enter.stable_period().max(self.exit.stable_period());
-        for level in [&self.stop, &self.target].into_iter().flatten() {
+        let mut needed = self
+            .long_enter
+            .stable_period()
+            .max(self.long_exit.stable_period())
+            .max(self.short_enter.stable_period())
+            .max(self.short_exit.stable_period());
+        for level in [
+            &self.long_stop,
+            &self.long_target,
+            &self.short_stop,
+            &self.short_target,
+        ]
+        .into_iter()
+        .flatten()
+        {
             needed = needed.max(level.stable_period());
         }
         needed = needed.max(self.sizing.stable_period());
@@ -271,17 +414,73 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Pair
     /// --keep-unstable`). Same aggregation shape as
     /// [`stable_period`](Self::stable_period).
     pub fn warm_up_period(&self) -> usize {
-        let mut needed = self.enter.warm_up_period().max(self.exit.warm_up_period());
-        for level in [&self.stop, &self.target].into_iter().flatten() {
+        let mut needed = self
+            .long_enter
+            .warm_up_period()
+            .max(self.long_exit.warm_up_period())
+            .max(self.short_enter.warm_up_period())
+            .max(self.short_exit.warm_up_period());
+        for level in [
+            &self.long_stop,
+            &self.long_target,
+            &self.short_stop,
+            &self.short_target,
+        ]
+        .into_iter()
+        .flatten()
+        {
             needed = needed.max(level.warm_up_period());
         }
         needed = needed.max(self.sizing.warm_up_period());
         needed
     }
 
-    /// Whether the pair is currently open (both legs held on the intended sides).
-    fn is_open(&self) -> bool {
-        self.left_position.is_long() && self.right_position.is_short()
+    /// Which direction the pair is currently holding, if any. Anything other
+    /// than a cleanly-opposed pair of legs (one flat, both same side, a partial
+    /// fill) reads as `None` — flat — so the entry path can re-establish it.
+    fn open_side(&self) -> Option<Direction> {
+        if self.left_position.is_long() && self.right_position.is_short() {
+            Some(Direction::LongSpread)
+        } else if self.left_position.is_short() && self.right_position.is_long() {
+            Some(Direction::ShortSpread)
+        } else {
+            None
+        }
+    }
+
+    /// That side's `(enter, exit)` signals.
+    fn signals(&self, side: Direction) -> (&dyn Signal<Snapshot<Sym>>, &dyn Signal<Snapshot<Sym>>) {
+        match side {
+            Direction::LongSpread => (&*self.long_enter, &*self.long_exit),
+            Direction::ShortSpread => (&*self.short_enter, &*self.short_exit),
+        }
+    }
+
+    /// Whether an open position on `side` should flatten on its spread levels.
+    ///
+    /// The comparisons are mirrored per direction, because "adverse" is a
+    /// different sign on each: the long-spread side loses as the spread falls
+    /// and profits as it rises, and the short-spread side is the exact
+    /// opposite.
+    fn level_exit_hit(&self, side: Direction) -> bool {
+        let Some(spread) = self.spread.value() else {
+            return false;
+        };
+        let (stop, target) = match side {
+            Direction::LongSpread => (&self.long_stop, &self.long_target),
+            Direction::ShortSpread => (&self.short_stop, &self.short_target),
+        };
+        let stop_hit = match (level_value(stop), side) {
+            (Some(level), Direction::LongSpread) => spread <= level,
+            (Some(level), Direction::ShortSpread) => spread >= level,
+            (None, _) => false,
+        };
+        let target_hit = match (level_value(target), side) {
+            (Some(level), Direction::LongSpread) => spread >= level,
+            (Some(level), Direction::ShortSpread) => spread <= level,
+            (None, _) => false,
+        };
+        stop_hit || target_hit
     }
 }
 
@@ -312,14 +511,24 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Stra
             self.book.update(marks);
         }
 
-        self.enter.update(snap.clone());
-        self.exit.update(snap.clone());
+        // Every signal and level is advanced each bar regardless of which side
+        // is open, so an idle side keeps its own warm-up progressing and reads
+        // a properly-settled value the moment it becomes relevant.
+        self.long_enter.update(snap.clone());
+        self.long_exit.update(snap.clone());
+        self.short_enter.update(snap.clone());
+        self.short_exit.update(snap.clone());
         self.spread.update(snap.clone());
-        if let Some(l) = self.stop.as_mut() {
-            l.update(snap.clone());
-        }
-        if let Some(l) = self.target.as_mut() {
-            l.update(snap.clone());
+        for level in [
+            self.long_stop.as_mut(),
+            self.long_target.as_mut(),
+            self.short_stop.as_mut(),
+            self.short_target.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            level.update(snap.clone());
         }
         self.sizing.update(snap.clone());
         self.rebalance.update(snap);
@@ -352,62 +561,81 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Stra
         let Some(size) = self.sizing.value() else {
             return;
         };
-        let open = self.is_open();
-        // Signal-driven exit takes precedence: an exit fires even on the same
-        // bar as an entry re-fires (idempotent open → close → open would be
-        // wasteful; the trade layer never opens what the exit just closed).
-        if open && self.exit.is_true() {
-            let _ = wallet.close(self.left.clone());
-            let _ = wallet.close(self.right.clone());
-            return;
-        }
-        // Spread-level exits (compared against the running spread indicator).
-        if open {
-            let spread = self.spread.value();
-            let stop_hit = matches!(
-                (spread, level_value(&self.stop)),
-                (Some(s), Some(lvl)) if s <= lvl,
-            );
-            let target_hit = matches!(
-                (spread, level_value(&self.target)),
-                (Some(s), Some(lvl)) if s >= lvl,
-            );
-            if stop_hit || target_hit {
+        let open = self.open_side();
+        let leg_frac = 0.5 * size;
+        // Open both legs on `side` at `value_frac(0.5 * m)` for a
+        // dollar-neutral pair with gross `m`. Each leg's size resolves against
+        // the same shared equity at the *next* bar's open (each leg is a queued
+        // market order in `PaperWallet`), so the two legs' notionals match at
+        // the fill. A `set` at the side already held is idempotent; a `set` at
+        // the opposite side reverses in one order.
+        let open_pair = |wallet: &mut dyn Wallet<Sym>, side: Direction| {
+            let (left_side, right_side) = side.legs();
+            let _ = wallet.set(self.left.clone(), left_side, Size::value_frac(leg_frac));
+            let _ = wallet.set(self.right.clone(), right_side, Size::value_frac(leg_frac));
+        };
+
+        if let Some(side) = open {
+            // Signal-driven exit takes precedence: an exit fires even on the
+            // same bar as an entry re-fires (idempotent open → close → open
+            // would be wasteful; the trade layer never opens what the exit just
+            // closed).
+            let (_, exit) = self.signals(side);
+            if exit.is_true() {
                 let _ = wallet.close(self.left.clone());
                 let _ = wallet.close(self.right.clone());
                 return;
             }
-        }
-        // Entry: open both legs at `value_frac(0.5 * m)` for a dollar-neutral
-        // pair with gross `m`. Each leg's size resolves against the same
-        // shared equity at the *next* bar's open (each leg is a queued
-        // market order in `PaperWallet`), so the two legs' notionals match at
-        // the fill.
-        if !open && self.enter.is_true() {
-            let leg_frac = 0.5 * size;
-            let _ = wallet.set(self.left.clone(), Side::Buy, Size::value_frac(leg_frac));
-            let _ = wallet.set(self.right.clone(), Side::Sell, Size::value_frac(leg_frac));
+            // Spread-level exits on the active side (sign-aware, see
+            // `level_exit_hit`).
+            if self.level_exit_hit(side) {
+                let _ = wallet.close(self.left.clone());
+                let _ = wallet.close(self.right.clone());
+                return;
+            }
+            // Reversal: the opposite side's entry flips the pair directly,
+            // matching `SingleAssetStrategy`. One `set` per leg does it, since
+            // sizing is against equity.
+            let (opposite_enter, _) = self.signals(side.opposite());
+            if opposite_enter.is_true() {
+                open_pair(wallet, side.opposite());
+                return;
+            }
+            // Rebalance gate: on `true`, resize both legs to the current
+            // sizing target. `wallet.set` at the current side is idempotent
+            // when the target already matches, so no spurious fills.
+            if self.rebalance.value().unwrap_or(false) {
+                open_pair(wallet, side);
+            }
             return;
         }
-        // Rebalance gate: on `true`, resize both legs to the current
-        // sizing target. `wallet.set` at the current side is idempotent
-        // when the target already matches, so no spurious fills.
-        if open && self.rebalance.value().unwrap_or(false) {
-            let leg_frac = 0.5 * size;
-            let _ = wallet.set(self.left.clone(), Side::Buy, Size::value_frac(leg_frac));
-            let _ = wallet.set(self.right.clone(), Side::Sell, Size::value_frac(leg_frac));
+
+        // Flat: whichever side's entry fires opens the pair. Long wins if both
+        // fire on the same bar — the same tie-break `basket::Selection::pick`
+        // uses, and the two are inverse positions so one must be chosen.
+        if self.long_enter.is_true() {
+            open_pair(wallet, Direction::LongSpread);
+        } else if self.short_enter.is_true() {
+            open_pair(wallet, Direction::ShortSpread);
         }
     }
 
     fn reset(&mut self) {
-        self.enter.reset();
-        self.exit.reset();
+        self.long_enter.reset();
+        self.long_exit.reset();
+        self.short_enter.reset();
+        self.short_exit.reset();
         self.spread.reset();
-        if let Some(l) = self.stop.as_mut() {
-            l.reset();
-        }
-        if let Some(l) = self.target.as_mut() {
-            l.reset();
+        for level in [
+            self.long_stop.as_mut(),
+            self.long_target.as_mut(),
+            self.short_stop.as_mut(),
+            self.short_target.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            level.reset();
         }
         self.sizing.reset();
         self.rebalance.reset();

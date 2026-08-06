@@ -14,7 +14,7 @@ and signal owns its internal state and is advanced one sample at a time via
 
 ```toml
 [dependencies]
-fugazi = "0.32"
+fugazi = "0.33"
 ```
 
 ## Concepts
@@ -615,7 +615,13 @@ to `close`. The vocabulary mirrors the library one-to-one:
   { period }`, `!obv`/
   `!ad`/`!true_range`, `!sar { step, max }`; transforms `!add`/`!sub`/
   `!mul`/`!div { lhs, rhs }`, `!lag`/`!diff`/`!ratio`/`!roc { source, periods }`,
-  `!rolling_max`/`!rolling_min { source, period }`.
+  `!rolling_max`/`!rolling_min { source, period }`; rolling order statistics
+  `!percentile { source, period, pct }` (`pct: 0.5` = rolling median — the
+  adaptive-threshold primitive, e.g. an RSI against its own trailing-year 80th
+  percentile instead of a fixed 70) and `!percentile_rank { source, period }`;
+  event timing `!bars_since { source }` (bars since a **signal** last read true —
+  `None` until it has fired once, so thresholds read false until then) plus the
+  O(1) shorthands `!bars_since_high`/`!bars_since_low { source, period }`.
 - **Signals:** `!gt`/`!lt`/`!ge`/`!le`/`!eq`/`!ne { lhs, rhs, epsilon? }`,
   `!above`/`!below { source, level }`; `!crosses_above`/`!crosses_below
   { lhs, rhs }`; `!and`/`!or`/`!xor { lhs, rhs }`, `!all [ … ]`, `!any [ … ]`,
@@ -721,6 +727,15 @@ The strategy positional accepts an optional shape prefix:
 - `pairs:` — a two-symbol `PairsStrategy` file (`pairs:@spread.yml`);
   the document declares `left`/`right` symbols and cross-asset
   signal / level expressions rooted through `!pick { symbol, freq }`.
+  The traded instrument is the spread `close(left) − close(right)`, and
+  the strategy is long / flat / short on it: a `long_spread:` block
+  (long `left` / short `right`, profiting as the spread rises) and an
+  optional `short_spread:` block (the mirror). A mean-reverting spread
+  visits both tails and the correct position is opposite at each, so a
+  one-sided document silently skips half the round-trips; wiring
+  `short_spread:` is what picks them up. The flat top-level `enter:` /
+  `exit:` / `stop_loss:` / `take_profit:` keys remain a valid spelling of
+  the long-spread side.
 - `basket:` — an N-symbol cross-sectional `BasketStrategy` file
   (`basket:@basket.yml`); the document declares a `selection` rule plus
   per-symbol `score`/`sizing` templates (`!arg SYM` picks the current
@@ -800,7 +815,11 @@ subcommands — briefly listed here, fully documented in
   OHLCV bars from `binance` or `yfinance` into a `run`-ready CSV, or
   re-process an existing CSV with `csv:PATH`. `-x/--overlay col=<source>`
   appends indicator columns computed on the fetched bars; `--params` resolves
-  `!param` placeholders inside those overlay expressions.
+  `!param` placeholders inside those overlay expressions. The **overlay-only**
+  providers (`cg` for CoinGecko market cap / volume / supply,
+  `binance-funding` for the perpetual funding rate) carry side-channel columns
+  and no OHLCV; fetch those to their own file and `--series` both into a run,
+  then read a column with `!get { key: funding_rate }`.
 - `fugazi list indicators` / `list sources` / `list tickers <PROVIDER> [PATTERN]`
   — the YAML tag catalogue, the `get`-provider table, and (via HTTP) the
   provider's ticker vocabulary. A provider lists thousands of symbols, so

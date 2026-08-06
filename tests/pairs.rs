@@ -85,6 +85,161 @@ fn spread_reversion_strategy_trades_over_the_pair() {
 }
 
 #[test]
+fn a_bidirectional_pair_trades_both_tails_of_the_spread() {
+    // The spread oscillates through both tails. A long-spread-only strategy can
+    // only harvest the cheap side; wiring `short_spread_on` picks up the rich
+    // side too, in the opposite direction.
+    let bars = pair_series();
+    let gap = || {
+        let spread = || {
+            Close::of(Pick::matching(Selector::by_symbol(LEFT)))
+                .sub(Close::of(Pick::matching(Selector::by_symbol(RIGHT))))
+        };
+        spread().sub(Sma::new(spread(), 20))
+    };
+
+    let long_only = PairsStrategy::new(LEFT, RIGHT).long_spread_on(
+        gap().below(-2.0),
+        gap().above(0.0),
+    );
+    let both = PairsStrategy::new(LEFT, RIGHT)
+        .long_spread_on(gap().below(-2.0), gap().above(0.0))
+        .short_spread_on(gap().above(2.0), gap().below(0.0));
+
+    let long_wallet = run(long_only, &bars);
+    let both_wallet = run(both, &bars);
+
+    // A `Sell` on the left leg alone proves nothing — closing a long also
+    // sells. What separates the two directions is the *signed* position, so
+    // replay the blotter and watch where the left leg's holding goes.
+    let min_left_position = |wallet: &PaperWallet<&'static str>| {
+        let mut units: Real = 0.0;
+        let mut lowest: Real = 0.0;
+        for order in wallet.orders().iter().filter(|o| o.symbol == LEFT) {
+            units += match order.side {
+                Side::Buy => order.units,
+                Side::Sell => -order.units,
+            };
+            lowest = lowest.min(units);
+        }
+        lowest
+    };
+
+    // Long-spread-only never holds the left leg short.
+    assert!(
+        min_left_position(&long_wallet) > -1e-9,
+        "long-spread-only strategy went short the left leg (min position {})",
+        min_left_position(&long_wallet),
+    );
+
+    // The bidirectional one does — that is the whole point.
+    assert!(
+        min_left_position(&both_wallet) < -1e-9,
+        "bidirectional pair never opened the short-spread side (min left position {})",
+        min_left_position(&both_wallet),
+    );
+    assert!(
+        both_wallet.orders().len() > long_wallet.orders().len(),
+        "bidirectional pair should trade strictly more than the long-only one \
+         ({} vs {} orders)",
+        both_wallet.orders().len(),
+        long_wallet.orders().len(),
+    );
+}
+
+#[test]
+fn short_spread_legs_are_the_mirror_of_long_spread_legs() {
+    // Force the short side open on bar 0: short left, long right, each at half
+    // equity — the exact mirror of the long-spread entry.
+    let bars = vec![(flat_bar(100.0), flat_bar(50.0)); 2];
+    let strat = PairsStrategy::new(LEFT, RIGHT).short_spread_on(
+        Const::<Snapshot<&'static str>>::new(true),
+        Const::<Snapshot<&'static str>>::new(false),
+    );
+    let wallet = run(strat, &bars);
+    assert_eq!(wallet.orders().len(), 2);
+    let l_fill = wallet.orders().iter().find(|o| o.symbol == LEFT).unwrap();
+    let r_fill = wallet.orders().iter().find(|o| o.symbol == RIGHT).unwrap();
+    assert_eq!(l_fill.side, Side::Sell);
+    assert_eq!(r_fill.side, Side::Buy);
+    let target = FUNDS * 0.5;
+    assert!((l_fill.units * l_fill.price - target).abs() < target * 0.05);
+    assert!((r_fill.units * r_fill.price - target).abs() < target * 0.05);
+}
+
+#[test]
+fn the_short_side_stop_fires_on_a_rising_spread() {
+    // Sign-awareness: the short-spread side loses as the spread *rises*, so its
+    // stop compares the other way round from the long side's.
+    //
+    // Spread starts at 50 and climbs. Enter short-spread immediately; the stop
+    // sits at 60, so it must fire once the spread crosses it upward.
+    let bars: Vec<(Candle, Candle)> = (0..12)
+        .map(|i| (flat_bar(100.0 + f64::from(i) * 2.0), flat_bar(50.0)))
+        .collect();
+    let strat = PairsStrategy::new(LEFT, RIGHT)
+        .short_spread_on(
+            Const::<Snapshot<&'static str>>::new(true),
+            Const::<Snapshot<&'static str>>::new(false),
+        )
+        .short_spread_stop_loss(fugazi::indicators::Value::<Snapshot<&'static str>>::new(
+            60.0,
+        ));
+    let wallet = run(strat, &bars);
+    // Opened (2 orders) then stopped out (2 more) — and possibly re-opened,
+    // since the constant-true entry fires again once flat.
+    assert!(
+        wallet.orders().len() > 2,
+        "short-spread stop never fired on the rising spread ({} orders)",
+        wallet.orders().len()
+    );
+    // The close-out buys back the short left leg.
+    assert!(
+        wallet
+            .orders()
+            .iter()
+            .any(|o| o.symbol == LEFT && o.side == Side::Buy),
+        "expected a buy on L to close the short-spread position"
+    );
+}
+
+#[test]
+fn the_opposite_entry_reverses_an_open_pair() {
+    // Spread climbs 50 → 72. The long side enters below 60, the short side
+    // above it, so once the spread crosses 60 the short entry fires while the
+    // long pair is still open, and must flip it rather than be ignored.
+    let bars: Vec<(Candle, Candle)> = (0..12)
+        .map(|i| (flat_bar(100.0 + f64::from(i) * 2.0), flat_bar(50.0)))
+        .collect();
+    let spread = || {
+        Close::of(Pick::matching(Selector::by_symbol(LEFT)))
+            .sub(Close::of(Pick::matching(Selector::by_symbol(RIGHT))))
+    };
+    let strat = PairsStrategy::new(LEFT, RIGHT)
+        .long_spread_on(
+            spread().below(60.0),
+            Const::<Snapshot<&'static str>>::new(false),
+        )
+        .short_spread_on(
+            spread().above(60.0),
+            Const::<Snapshot<&'static str>>::new(false),
+        );
+    let wallet = run(strat, &bars);
+    // First fills are the long-spread pair, later ones flip to the mirror.
+    let left_sides: Vec<Side> = wallet
+        .orders()
+        .iter()
+        .filter(|o| o.symbol == LEFT)
+        .map(|o| o.side)
+        .collect();
+    assert_eq!(left_sides.first(), Some(&Side::Buy), "should open long-spread");
+    assert!(
+        left_sides.contains(&Side::Sell),
+        "short-spread entry should have reversed the pair ({left_sides:?})"
+    );
+}
+
+#[test]
 fn reset_replays_the_run_identically() {
     let bars = pair_series();
     let spread = || {

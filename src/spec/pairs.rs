@@ -16,6 +16,7 @@ use crate::strategies::PairsStrategy;
 
 use super::signal::SignalSpec;
 use super::expr::ExprSpec;
+use super::strategy::SideSpec;
 use crate::spec::dyn_indicator::{AsBool, AsReal, DynIndicator};
 
 /// A whole `pairs.yml`: the two traded symbols plus one enter/exit signal pair
@@ -43,24 +44,68 @@ use crate::spec::dyn_indicator::{AsBool, AsReal, DynIndicator};
 /// take_profit: !value  50.0
 /// ```
 ///
+/// ## Trading both directions
+///
+/// The keys above describe the **long-spread** side (long `left`, short
+/// `right`, profiting as the spread rises). A mean-reverting spread visits both
+/// tails, so the other half is reached by adding a `short_spread:` block —
+/// short `left`, long `right`, profiting as the spread falls:
+///
+/// ```yaml
+/// left: BTC
+/// right: ETH
+///
+/// long_spread:                             # spread cheap -> expect it to rise
+///   enter: !below { source: *z, level: -2.0 }
+///   exit:  !above { source: *z, level:  0.0 }
+///   stop_loss: !sub { lhs: *ma, rhs: !mul { lhs: *sd, rhs: !value 4.0 } }
+///
+/// short_spread:                            # spread rich -> expect it to fall
+///   enter: !above { source: *z, level:  2.0 }
+///   exit:  !below { source: *z, level:  0.0 }
+///   stop_loss: !add { lhs: *ma, rhs: !mul { lhs: *sd, rhs: !value 4.0 } }
+/// ```
+///
+/// The two directions are inverse positions, so they are mutually exclusive in
+/// time and share one capital pool at full notional. The short side's levels
+/// are compared with **mirrored sense** — its stop fires when the spread rises
+/// *above* the level, since that is its adverse direction.
+///
+/// The flat top-level `enter` / `exit` / `stop_loss` / `take_profit` keys remain
+/// valid as a spelling of the long-spread side, so existing documents are
+/// unaffected. Setting both them and a `long_spread:` block is an error.
+///
 /// As with [`super::SingleStrategySpec`], a subtree is shared across sites via a
 /// plain YAML anchor (`&name` / `*name`).
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, try_from = "PairsStrategySpecRaw")]
 pub struct PairsStrategySpec {
     pub left: String,
     pub right: String,
-    pub enter: SignalSpec,
+    /// The long-spread entry, in the flat spelling. Mutually exclusive with
+    /// [`long_spread`](Self::long_spread); one of the two (or a
+    /// [`short_spread`](Self::short_spread) block) must be present.
+    #[serde(default)]
+    pub enter: Option<SignalSpec>,
     #[serde(default)]
     pub exit: Option<SignalSpec>,
-    /// Optional spread stop-loss level — the pair flattens when the running
-    /// spread reads at or below this level.
+    /// Optional spread stop-loss level — the long-spread side flattens when the
+    /// running spread reads at or below this level.
     #[serde(default)]
     pub stop_loss: Option<Box<ExprSpec>>,
-    /// Optional spread take-profit level — the pair flattens when the running
-    /// spread reads at or above this level.
+    /// Optional spread take-profit level — the long-spread side flattens when
+    /// the running spread reads at or above this level.
     #[serde(default)]
     pub take_profit: Option<Box<ExprSpec>>,
+    /// The **long-spread** side (long `left` / short `right`) as a block — the
+    /// symmetric spelling of the four flat keys above.
+    #[serde(default)]
+    pub long_spread: Option<SideSpec>,
+    /// The **short-spread** side (short `left` / long `right`). Present only
+    /// when the pair should also trade reversion from the rich tail; its
+    /// `stop_loss` / `take_profit` compare with mirrored sense.
+    #[serde(default)]
+    pub short_spread: Option<SideSpec>,
     /// Optional **position-sizing multiplier** — a real-valued source scaling
     /// the pair's gross exposure. Each leg entries at `value_frac(0.5 * m)`.
     /// Defaults to a constant `1.0` (1.0 gross, dollar-neutral); a `None`
@@ -74,6 +119,76 @@ pub struct PairsStrategySpec {
     /// pre-refactor behavior.
     #[serde(default)]
     pub rebalance_on: Option<SignalSpec>,
+}
+
+/// Deserialization mirror of [`PairsStrategySpec`], carrying the same fields
+/// with a derived `Deserialize`.
+///
+/// The side-wiring rules are checked in the [`TryFrom`] below rather than in
+/// [`PairsStrategySpec::build`], so `fugazi check strategy` — which validates a
+/// document's *shape* without ever building it — catches them too, and so a
+/// spec mistake surfaces as an error rather than a panic. Same reason
+/// `ExprSpec` and `SignalSpec` deserialize through a raw mirror.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PairsStrategySpecRaw {
+    left: String,
+    right: String,
+    #[serde(default)]
+    enter: Option<SignalSpec>,
+    #[serde(default)]
+    exit: Option<SignalSpec>,
+    #[serde(default)]
+    stop_loss: Option<Box<ExprSpec>>,
+    #[serde(default)]
+    take_profit: Option<Box<ExprSpec>>,
+    #[serde(default)]
+    long_spread: Option<SideSpec>,
+    #[serde(default)]
+    short_spread: Option<SideSpec>,
+    #[serde(default)]
+    sizing: Option<Box<ExprSpec>>,
+    #[serde(default)]
+    rebalance_on: Option<SignalSpec>,
+}
+
+impl TryFrom<PairsStrategySpecRaw> for PairsStrategySpec {
+    type Error = String;
+
+    fn try_from(raw: PairsStrategySpecRaw) -> Result<Self, Self::Error> {
+        let flat_present = raw.enter.is_some()
+            || raw.exit.is_some()
+            || raw.stop_loss.is_some()
+            || raw.take_profit.is_some();
+        if flat_present && raw.long_spread.is_some() {
+            return Err(
+                "a pairs document sets both the flat `enter`/`exit`/`stop_loss`/`take_profit` \
+                 keys and a `long_spread:` block — they are two spellings of the same side \
+                 (long left / short right); keep one"
+                    .to_string(),
+            );
+        }
+        if !flat_present && raw.long_spread.is_none() && raw.short_spread.is_none() {
+            return Err(
+                "a pairs document wires neither direction — give `long_spread:` (or the flat \
+                 `enter:`) to trade the spread from the cheap tail, and/or `short_spread:` to \
+                 trade it from the rich one"
+                    .to_string(),
+            );
+        }
+        Ok(PairsStrategySpec {
+            left: raw.left,
+            right: raw.right,
+            enter: raw.enter,
+            exit: raw.exit,
+            stop_loss: raw.stop_loss,
+            take_profit: raw.take_profit,
+            long_spread: raw.long_spread,
+            short_spread: raw.short_spread,
+            sizing: raw.sizing,
+            rebalance_on: raw.rebalance_on,
+        })
+    }
 }
 
 impl PairsStrategySpec {
@@ -108,17 +223,49 @@ impl PairsStrategySpec {
         Self::from_text_with_params_in(text, params, std::path::Path::new("."), "(inline)")
     }
 
-    /// Build a spec's exit signal, defaulting a missing one to constant-`false`
-    /// (matching the unwired slot in [`PairsStrategy::new`]).
-    fn exit(
-        &self,
+    /// The long-spread side, however it was spelled: either the `long_spread:`
+    /// block or the four flat top-level keys.
+    ///
+    /// `None` when only `short_spread:` was given. The "both spellings" and
+    /// "neither direction" cases are rejected at deserialization (see
+    /// [`PairsStrategySpecRaw`]), so they cannot reach here.
+    fn long_side(&self) -> Option<std::borrow::Cow<'_, SideSpec>> {
+        if let Some(block) = &self.long_spread {
+            return Some(std::borrow::Cow::Borrowed(block));
+        }
+        let enter = self.enter.clone()?;
+        Some(std::borrow::Cow::Owned(SideSpec {
+            enter,
+            exit: self.exit.clone(),
+            stop_loss: self.stop_loss.clone(),
+            take_profit: self.take_profit.clone(),
+        }))
+    }
+
+    /// Build a side's exit signal, defaulting a missing one to constant-`false`
+    /// (matching the unwired slots in [`PairsStrategy::new`]).
+    fn exit_of(
+        side: Option<&SideSpec>,
         anchor: &Position,
         book: &Book,
         schema: &Arc<Schema>,
     ) -> Box<dyn DynIndicator> {
-        self.exit
-            .as_ref()
+        side.and_then(|s| s.exit.as_ref())
             .map(|s| s.build(anchor, book, None, schema))
+            .unwrap_or_else(|| {
+                crate::spec::dyn_indicator::wrap(Const::<crate::types::Snapshot<String>>::new(false))
+            })
+    }
+
+    /// Build a side's entry signal, defaulting an absent side to
+    /// constant-`false` so that direction never opens.
+    fn enter_of(
+        side: Option<&SideSpec>,
+        anchor: &Position,
+        book: &Book,
+        schema: &Arc<Schema>,
+    ) -> Box<dyn DynIndicator> {
+        side.map(|s| s.enter.build(anchor, book, None, schema))
             .unwrap_or_else(|| {
                 crate::spec::dyn_indicator::wrap(Const::<crate::types::Snapshot<String>>::new(false))
             })
@@ -150,14 +297,35 @@ impl PairsStrategySpec {
         // (`!drawdown_throttle`, `!equity_vol_target`, `!fractional_kelly`)
         // read the pair's aggregate equity curve.
         let book = strat.book();
-        let enter = AsBool::new(self.enter.build(&anchor, &book, None, schema));
-        let exit = AsBool::new(self.exit(&anchor, &book, schema));
-        let mut strat = strat.on(enter, exit);
-        if let Some(sl) = &self.stop_loss {
-            strat = strat.spread_stop_loss(AsReal::new(sl.build(&anchor, &book, None, schema)));
+        let long = self.long_side();
+        let long = long.as_deref();
+        let short = self.short_spread.as_ref();
+
+        let mut strat = strat.long_spread_on(
+            AsBool::new(Self::enter_of(long, &anchor, &book, schema)),
+            AsBool::new(Self::exit_of(long, &anchor, &book, schema)),
+        );
+        if short.is_some() {
+            strat = strat.short_spread_on(
+                AsBool::new(Self::enter_of(short, &anchor, &book, schema)),
+                AsBool::new(Self::exit_of(short, &anchor, &book, schema)),
+            );
         }
-        if let Some(tp) = &self.take_profit {
-            strat = strat.spread_take_profit(AsReal::new(tp.build(&anchor, &book, None, schema)));
+        if let Some(sl) = long.and_then(|s| s.stop_loss.as_ref()) {
+            strat =
+                strat.long_spread_stop_loss(AsReal::new(sl.build(&anchor, &book, None, schema)));
+        }
+        if let Some(tp) = long.and_then(|s| s.take_profit.as_ref()) {
+            strat =
+                strat.long_spread_take_profit(AsReal::new(tp.build(&anchor, &book, None, schema)));
+        }
+        if let Some(sl) = short.and_then(|s| s.stop_loss.as_ref()) {
+            strat =
+                strat.short_spread_stop_loss(AsReal::new(sl.build(&anchor, &book, None, schema)));
+        }
+        if let Some(tp) = short.and_then(|s| s.take_profit.as_ref()) {
+            strat =
+                strat.short_spread_take_profit(AsReal::new(tp.build(&anchor, &book, None, schema)));
         }
         if let Some(sizing) = &self.sizing {
             strat = strat.position_sizing(AsReal::new(sizing.build(&anchor, &book, None, schema)));
@@ -272,6 +440,79 @@ mod tests {
         .unwrap();
         assert!(spec.exit.is_none() && spec.stop_loss.is_none() && spec.take_profit.is_none());
         let _built = spec.build(1_000.0, &Schema::empty());
+    }
+
+    #[test]
+    fn parses_both_spread_directions() {
+        let yaml = r#"
+            left: BTC
+            right: ETH
+            long_spread:
+              enter: !below { source: &z !zscore { period: 20, source: &spread !sub {
+                        lhs: !close { source: !pick { symbol: BTC } },
+                        rhs: !close { source: !pick { symbol: ETH } } } }, level: -2.0 }
+              exit:  !above { source: *z, level: 0.0 }
+              stop_loss: !sub { lhs: !sma { period: 20, source: *spread }, rhs: !value 20.0 }
+            short_spread:
+              enter: !above { source: *z, level: 2.0 }
+              exit:  !below { source: *z, level: 0.0 }
+              stop_loss: !add { lhs: !sma { period: 20, source: *spread }, rhs: !value 20.0 }
+        "#;
+        let spec =
+            PairsStrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
+                .unwrap();
+        assert!(spec.long_spread.is_some());
+        assert!(spec.short_spread.is_some());
+        assert!(spec.enter.is_none(), "flat keys unused when blocks are given");
+        let _built = spec.build(10_000.0, &Schema::empty());
+    }
+
+    #[test]
+    fn a_short_spread_only_spec_needs_no_long_side() {
+        let yaml = r#"
+            left: BTC
+            right: ETH
+            short_spread:
+              enter: !value true
+        "#;
+        let spec =
+            PairsStrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
+                .unwrap();
+        let _built = spec.build(1_000.0, &Schema::empty());
+    }
+
+    #[test]
+    fn rejects_a_spec_that_sets_both_the_flat_keys_and_a_long_spread_block() {
+        // Rejected at *parse*, not at build — so `fugazi check strategy`,
+        // which never builds, catches it too.
+        let yaml = r#"
+            left: BTC
+            right: ETH
+            enter: !value true
+            long_spread:
+              enter: !value true
+        "#;
+        let err = PairsStrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
+            .expect_err("both spellings of the long side should be rejected");
+        assert!(
+            format!("{err:#}").contains("two spellings of the same side"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_spec_with_no_direction_wired() {
+        let yaml = r#"
+            left: BTC
+            right: ETH
+            sizing: !value 1.0
+        "#;
+        let err = PairsStrategySpec::from_text_with_params(yaml, &std::collections::HashMap::new())
+            .expect_err("a pair that can never trade should be rejected");
+        assert!(
+            format!("{err:#}").contains("wires neither direction"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]

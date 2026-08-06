@@ -41,17 +41,18 @@ use std::sync::{Arc, Mutex};
 use fugazi_core::Indicator;
 use fugazi_core::indicators::compare::{EqOp, GeOp, GtOp, LeOp, LtOp, NeOp, StrEqOp, StrNeOp};
 use fugazi_core::indicators::{
-    Ad, Adx, AdxValue, Aroon, AroonValue, Atr, Bollinger, BollingerValue, Cci, Close, Correlation,
-    CurrentBar, Day, DayOfWeek, DayOfYear, Dmi, DmiValue, Donchian, DonchianValue, Ema, GarmanKlass,
-    GetBool, GetReal, GetStr, High, Hma, Hour, Identity, IfElse, IsWeekday, IsWeekend, Keltner,
-    KeltnerValue, Kurtosis, Latch, Log, Low, Macd, MacdValue, Median, Mfi, Minute, Month, Obv, Open,
-    Parkinson, Pick, Quarter, Resample, Rma, RogersSatchell, Rsi, Sar, Second, Skewness, Sma, StdDev,
-    Stochastic, TrueRange, Typical, UnixMillis, UnixSeconds, Value, ValueStr, VarianceRatio, Volume,
-    Vwap, WeekOfYear, WilliamsR, Wma, Year, ZScore,
+    Ad, Adx, AdxValue, Aroon, AroonValue, Atr, BarsSince, BarsSinceHigh, BarsSinceLow, Bollinger,
+    BollingerValue, Cci, Close, Correlation, CurrentBar, Day, DayOfWeek, DayOfYear, Dmi, DmiValue,
+    Donchian, DonchianValue, Ema, GarmanKlass, GetBool, GetReal, GetStr, High, Hma, Hour, Identity,
+    IfElse, IsWeekday, IsWeekend, Keltner, KeltnerValue, Kurtosis, Latch, Log, Low, Macd, MacdValue,
+    Median, Mfi, Minute, Month, Obv, Open, Parkinson, Percentile, PercentileRank, Pick, Quarter,
+    Resample, Rma, RogersSatchell, Rsi, Sar, Second, Skewness, Sma, StdDev, Stochastic, TrueRange,
+    Typical, UnixMillis, UnixSeconds, Value, ValueStr, VarianceRatio, Volume, Vwap, WeekOfYear,
+    WilliamsR, Wma, Year, ZScore,
 };
 use fugazi_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
 use fugazi_core::sources::{
-    Binance, CandleSource, CoinGecko, Interval, OverlayRow, OverlaySource,
+    Binance, BinanceFunding, CandleSource, CoinGecko, Interval, OverlayRow, OverlaySource,
     SourceError, Timestamp, Yahoo,
 };
 use fugazi_core::wallet::{
@@ -3385,10 +3386,24 @@ impl PyStrategy {
     }
 }
 
-/// A two-leg, spread-driven pairs strategy: on `enter`, go long `left` and
-/// short `right` (a 1.0-gross dollar-neutral pair, `value_frac(0.5)` per leg);
-/// on `exit`, flatten both. Optional spread stop-loss / take-profit levels are
-/// compared against the running `close(left) − close(right)`. Mirrors
+/// A two-leg pairs strategy, long / flat / short **on the spread**
+/// `close(left) − close(right)`.
+///
+/// `long_spread_on` goes long `left` / short `right` (profiting as the spread
+/// rises); `short_spread_on` is the mirror (profiting as it falls). Each leg
+/// entries at `value_frac(0.5 * m)` — a 1.0-gross dollar-neutral pair by
+/// default. The two directions are inverse positions, so they are mutually
+/// exclusive in time and share one capital pool at full notional; the opposite
+/// side's entry reverses an open pair.
+///
+/// A mean-reverting spread visits both tails and the correct position is
+/// opposite at each, so wiring only one side skips every excursion on the
+/// other. Leaving `short_spread_on` unwired keeps the historical
+/// long-spread-only behaviour.
+///
+/// Spread stop-loss / take-profit levels are per-side and compared with
+/// mirrored sense: the short side stops out when the spread rises *above* its
+/// level, since that is its adverse direction. Mirrors
 /// `fugazi::strategies::PairsStrategy`. Signals and levels are snapshot-rooted
 /// (built from `pick(...)` sources); `run` consumes a sequence of snapshots.
 #[pyclass(name = "PairsStrategy", skip_from_py_object)]
@@ -3398,8 +3413,12 @@ struct PyPairsStrategy {
     right: String,
     enter: Option<SignalBox<Snapshot<String>>>,
     exit: Option<SignalBox<Snapshot<String>>>,
+    short_enter: Option<SignalBox<Snapshot<String>>>,
+    short_exit: Option<SignalBox<Snapshot<String>>>,
     stop: Option<Source<Snapshot<String>>>,
     target: Option<Source<Snapshot<String>>>,
+    short_stop: Option<Source<Snapshot<String>>>,
+    short_target: Option<Source<Snapshot<String>>>,
     sizing: Option<Source<Snapshot<String>>>,
     rebalance: Option<SignalBox<Snapshot<String>>>,
 }
@@ -3414,37 +3433,91 @@ impl PyPairsStrategy {
             right,
             enter: None,
             exit: None,
+            short_enter: None,
+            short_exit: None,
             stop: None,
             target: None,
+            short_stop: None,
+            short_target: None,
             sizing: None,
             rebalance: None,
         }
     }
 
-    /// Wire the `enter` (open long-left / short-right) and `exit` (flatten both)
-    /// signals. A missing `exit` never fires.
+    /// Wire the **long-spread** side: `enter` opens long `left` / short `right`
+    /// (profiting as the spread rises), `exit` flattens both. A missing `exit`
+    /// never fires.
     #[pyo3(signature = (enter, exit=None))]
-    fn on(&self, enter: &PySignal, exit: Option<&PySignal>) -> PyResult<PyPairsStrategy> {
+    fn long_spread_on(&self, enter: &PySignal, exit: Option<&PySignal>) -> PyResult<PyPairsStrategy> {
         let mut s = self.clone();
         s.enter = Some(snapshot_signal(enter)?);
         s.exit = exit.map(snapshot_signal).transpose()?;
         Ok(s)
     }
 
-    /// Attach a spread stop-loss: flatten the pair when `close(left) −
-    /// close(right)` reads at or below `level`.
-    fn spread_stop_loss(&self, level: &PyIndicator) -> PyResult<PyPairsStrategy> {
+    /// Wire the **short-spread** side: `enter` opens short `left` / long
+    /// `right` (profiting as the spread falls), `exit` flattens both. Leaving
+    /// this unwired keeps the pair long-spread-only.
+    #[pyo3(signature = (enter, exit=None))]
+    fn short_spread_on(
+        &self,
+        enter: &PySignal,
+        exit: Option<&PySignal>,
+    ) -> PyResult<PyPairsStrategy> {
+        let mut s = self.clone();
+        s.short_enter = Some(snapshot_signal(enter)?);
+        s.short_exit = exit.map(snapshot_signal).transpose()?;
+        Ok(s)
+    }
+
+    /// Alias for `long_spread_on`, kept for callers written before the short
+    /// side existed.
+    #[pyo3(signature = (enter, exit=None))]
+    fn on(&self, enter: &PySignal, exit: Option<&PySignal>) -> PyResult<PyPairsStrategy> {
+        self.long_spread_on(enter, exit)
+    }
+
+    /// Attach the long-spread stop-loss: that side flattens when `close(left) −
+    /// close(right)` reads at or below `level` (its adverse direction).
+    fn long_spread_stop_loss(&self, level: &PyIndicator) -> PyResult<PyPairsStrategy> {
         let mut s = self.clone();
         s.stop = Some(snapshot_source(level)?);
         Ok(s)
     }
 
-    /// Attach a spread take-profit: flatten the pair when the running spread
+    /// Attach the long-spread take-profit: that side flattens when the spread
     /// reads at or above `level`.
-    fn spread_take_profit(&self, level: &PyIndicator) -> PyResult<PyPairsStrategy> {
+    fn long_spread_take_profit(&self, level: &PyIndicator) -> PyResult<PyPairsStrategy> {
         let mut s = self.clone();
         s.target = Some(snapshot_source(level)?);
         Ok(s)
+    }
+
+    /// Attach the short-spread stop-loss. Mirrored sense: that side flattens
+    /// when the spread reads at or **above** `level`, since it profits as the
+    /// spread falls.
+    fn short_spread_stop_loss(&self, level: &PyIndicator) -> PyResult<PyPairsStrategy> {
+        let mut s = self.clone();
+        s.short_stop = Some(snapshot_source(level)?);
+        Ok(s)
+    }
+
+    /// Attach the short-spread take-profit: that side flattens when the spread
+    /// reads at or **below** `level`.
+    fn short_spread_take_profit(&self, level: &PyIndicator) -> PyResult<PyPairsStrategy> {
+        let mut s = self.clone();
+        s.short_target = Some(snapshot_source(level)?);
+        Ok(s)
+    }
+
+    /// Alias for `long_spread_stop_loss`.
+    fn spread_stop_loss(&self, level: &PyIndicator) -> PyResult<PyPairsStrategy> {
+        self.long_spread_stop_loss(level)
+    }
+
+    /// Alias for `long_spread_take_profit`.
+    fn spread_take_profit(&self, level: &PyIndicator) -> PyResult<PyPairsStrategy> {
+        self.long_spread_take_profit(level)
     }
 
     /// Scale the pair's gross exposure by this real source (each leg entries at
@@ -3480,16 +3553,28 @@ impl PyPairsStrategy {
             seed,
         );
         if let Some(enter) = &self.enter {
-            strat = strat.on(
+            strat = strat.long_spread_on(
                 enter.clone(),
                 self.exit.clone().unwrap_or_else(const_false_signal),
             );
         }
+        if let Some(enter) = &self.short_enter {
+            strat = strat.short_spread_on(
+                enter.clone(),
+                self.short_exit.clone().unwrap_or_else(const_false_signal),
+            );
+        }
         if let Some(stop) = &self.stop {
-            strat = strat.spread_stop_loss(stop.clone());
+            strat = strat.long_spread_stop_loss(stop.clone());
         }
         if let Some(target) = &self.target {
-            strat = strat.spread_take_profit(target.clone());
+            strat = strat.long_spread_take_profit(target.clone());
+        }
+        if let Some(stop) = &self.short_stop {
+            strat = strat.short_spread_stop_loss(stop.clone());
+        }
+        if let Some(target) = &self.short_target {
+            strat = strat.short_spread_take_profit(target.clone());
         }
         if let Some(sizing) = &self.sizing {
             strat = strat.position_sizing(sizing.clone());
@@ -5119,6 +5204,76 @@ src_period!(
     ZScore,
     "Rolling z-score of `source` over `period`: `(x - mean) / stddev`."
 );
+src_period!(
+    percentile_rank,
+    PercentileRank,
+    "Where the current reading sits in its own trailing `period`-bar \
+     distribution: `count(v <= x) / period`, in `(0, 1]`. A fresh high reads \
+     `1.0`, a fresh low `1/period`."
+);
+src_period!(
+    bars_since_high,
+    BarsSinceHigh,
+    "Bars elapsed since `source` last set a new `period`-bar high — `0` on the \
+     bar that sets it, up to `period - 1`. `None` until the window is full."
+);
+src_period!(
+    bars_since_low,
+    BarsSinceLow,
+    "Bars elapsed since `source` last set a new `period`-bar low."
+);
+
+/// The `pct`-quantile of `source` over the trailing `period` bars —
+/// `pct=0.5` is the rolling median, `0.8` the 80th percentile.
+///
+/// Interpolates linearly between the bracketing samples (R type-7, numpy's
+/// default), the same convention `fugazi.metrics.value_at_risk` uses. Returns
+/// `None` until the window is full.
+///
+/// The adaptive-threshold primitive — an RSI compared against its own
+/// trailing-year 80th percentile rather than a hardcoded 70:
+///
+/// ```python
+/// rsi = ta.rsi(ta.close(), 14)
+/// hot = rsi.gt(ta.percentile(ta.rsi(ta.close(), 14), 252, 0.8))
+/// ```
+///
+/// For the extremes prefer `rolling_max` / `rolling_min`, which are O(1).
+#[pyfunction]
+fn percentile(source: PyRef<'_, PyIndicator>, period: usize, pct: f64) -> PyResult<PyIndicator> {
+    ensure_period(period)?;
+    if !(0.0..=1.0).contains(&pct) {
+        return Err(PyValueError::new_err(format!(
+            "percentile pct must lie in [0.0, 1.0], got {pct}"
+        )));
+    }
+    Ok(PyIndicator::wrap(map_source!(source.src.clone(), |s| {
+        Percentile::new(s, period, pct)
+    })))
+}
+
+/// Bars elapsed since `source` (a **signal**) last read true — `0` on the
+/// firing bar, `1` on the next, and so on.
+///
+/// Returns `None` until the signal has fired at least once. That makes every
+/// threshold against it read false until then, which is the conservative
+/// answer in both directions: a never-fired signal can't gate an entry in, and
+/// a clock that never started can't time-stop a position out.
+///
+/// ```python
+/// # Only act on a crossover that happened within the last 5 bars.
+/// cross = ta.close().crosses_above(ta.sma(ta.close(), 50))
+/// fresh = ta.bars_since(cross).lt(ta.value(5.0))
+/// ```
+#[pyfunction]
+fn bars_since(source: PyRef<'_, PySignal>) -> PyResult<PyIndicator> {
+    let out = match source.sig.clone() {
+        AnySignal::Candle(s) => AnySource::Candle(Source::new(BarsSince::new(s))),
+        AnySignal::Real(s) => AnySource::Real(Source::new(BarsSince::new(s))),
+        AnySignal::Snapshot(s) => AnySource::Snapshot(Source::new(BarsSince::new(s))),
+    };
+    Ok(PyIndicator::wrap(out))
+}
 
 /// Rolling Pearson correlation between two Real sources over `period`, in
 /// `[-1, 1]`. Both operands must share an input domain (both candle-rooted,
@@ -6525,6 +6680,81 @@ impl PyCoinGecko {
     }
 }
 
+/// Binance perpetual **funding rate** — an overlay provider, not a candle one.
+///
+/// The funding rate is the periodic payment between the two sides of a
+/// perpetual swap (positive = longs pay shorts), the primary carry signal in
+/// crypto. It is not a price, so the frame has `time` plus `funding_rate` and
+/// no `open`/`high`/`low`/`close`. Join it onto a price frame on `time` to use
+/// both.
+///
+/// `symbol` is a **perpetual contract** symbol (`"BTCUSDT"`), served from
+/// `fapi.binance.com` — a different host and a different listing set from the
+/// spot vocabulary `Binance` uses. `.symbols()` enumerates it.
+///
+/// Binance settles funding every 4–8 hours. Those are events, not bars, so a
+/// coarser `freq` covers several of them and **their rates are summed**:
+/// `freq="1d"` gives that day's total carry, which is the number a daily-bar
+/// strategy wants. At `freq="8h"` each bucket holds one settlement. Sub-hourly
+/// `freq` values are rejected — they would be empty on almost every bar, which
+/// reads as "no carry" rather than "no data".
+#[pyclass(name = "BinanceFunding", frozen)]
+struct PyBinanceFunding {
+    inner: BinanceFunding,
+}
+
+#[pymethods]
+impl PyBinanceFunding {
+    /// Construct a client. `base_url` overrides the API endpoint
+    /// (`https://fapi.binance.com`), useful for local test servers.
+    #[new]
+    #[pyo3(signature = (base_url = None))]
+    fn new(base_url: Option<String>) -> Self {
+        let mut inner = BinanceFunding::new();
+        if let Some(url) = base_url {
+            inner = inner.with_base_url(url);
+        }
+        Self { inner }
+    }
+
+    /// Fetch the funding-rate column for one `(symbol, freq)` window.
+    ///
+    /// * `symbol` — a perpetual contract symbol: `"BTCUSDT"`, `"ETHUSDT"`.
+    /// * `freq` — bar cadence, hourly or coarser (`"8h"`, `"1d"`, `"1w"`,
+    ///   `"1M"`). Settlements inside a bar are summed.
+    /// * `since` / `until` — dates, same grammar as the candle providers.
+    ///   `until` is exclusive; `None` means "up to now".
+    /// * `output` — `"polars"` (default), `"pandas"`, or `"numpy"`.
+    ///
+    /// Returned columns: `time` (ISO 8601 UTC) and `funding_rate` (f64).
+    /// **No OHLCV columns** — see the class docs.
+    #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
+    fn overlays(
+        &self,
+        py: Python<'_>,
+        symbol: &str,
+        freq: &str,
+        since: &str,
+        until: Option<&str>,
+        output: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let interval = parse_interval_token(freq)?;
+        let (since_ts, until_ts) = resolve_since_until(since, until)?;
+        let out = CandlesOutput::from_kwarg(output)?;
+        let rows = fetch_overlay_rows(py, &self.inner, symbol, interval, since_ts, until_ts)?;
+        build_overlays_frame(py, out, self.inner.schema(), rows)
+    }
+
+    /// Every perpetual contract symbol currently trading, sorted.
+    fn symbols(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        let client = self.inner.clone();
+        py.detach(|| {
+            sources_runtime().block_on(async move { OverlaySource::tickers(&client).await })
+        })
+        .map_err(source_error_to_py)
+    }
+}
+
 /// Fetch OHLCV candles from a named provider and return a DataFrame.
 ///
 /// ```python
@@ -6563,6 +6793,14 @@ fn fetch(
                  cap / volume / supply columns and no OHLCV, so it cannot be fetched through \
                  `fetch()`. Use `CoinGecko().overlays(symbol=..., freq=...)` instead, and join \
                  the result onto a price frame on `time`.",
+            ));
+        }
+        "binance-funding" => {
+            return Err(PyValueError::new_err(
+                "binance-funding is an overlay provider, not a candle provider — it returns a \
+                 funding_rate column and no OHLCV, so it cannot be fetched through `fetch()`. \
+                 Use `BinanceFunding().overlays(symbol=..., freq=...)` instead, and join the \
+                 result onto a price frame on `time`.",
             ));
         }
         other => {
@@ -8757,6 +8995,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBinance>()?;
     m.add_class::<PyYahoo>()?;
     m.add_class::<PyCoinGecko>()?;
+    m.add_class::<PyBinanceFunding>()?;
     m.add_class::<PyCostConfig>()?;
     m.add_class::<PyStrategySpec>()?;
     m.add_class::<PySweep>()?;
@@ -8772,6 +9011,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     reg!(
         open, high, low, close, volume, typical, median, identity, value, value_str, sma, ema, rma,
         wma, hma, rsi, stddev, skewness_indicator, kurtosis_indicator, zscore, correlation,
+        percentile, percentile_rank, bars_since, bars_since_high, bars_since_low,
         variance_ratio, stochastic, cci, log, atr, parkinson, garman_klass, rogers_satchell, mfi,
         williams_r, obv, vwap, ad,
         true_range, adx, dmi, aroon, sar, macd, bollinger, keltner, donchian, stoch_rsi, resample,

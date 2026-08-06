@@ -194,12 +194,17 @@ const GROUPS: &[Group] = &[
         ],
     },
     Group {
-        title: "conditional (three-source ternary)",
+        title: "conditional (branch selection)",
         entries: &[
             Entry {
                 tag: "if_else",
                 args: "cond, if_true, if_false",
                 doc: "cond ? if_true : if_false — cond is a signal, both branches are real sources; None on cond ⇒ None; warm-up = max across the three (see IfElse docs)",
+            },
+            Entry {
+                tag: "match",
+                args: "on, cases: [{ when, value }], default",
+                doc: "dispatch on `on`'s reading — numeric or string patterns (not mixed); every branch is advanced, so warm-up is the max across all of them. With `on: !value { param: ... }` this selects a branch from --params/--grid at load time",
             },
         ],
     },
@@ -231,6 +236,14 @@ const GROUPS: &[Group] = &[
         entries: &[
             Entry { tag: "crosses_above", args: "lhs, rhs", doc: "lhs > rhs and the comparison just flipped" },
             Entry { tag: "crosses_below", args: "lhs, rhs", doc: "lhs < rhs and the comparison just flipped" },
+        ],
+    },
+    Group {
+        title: "event timing (how long since something happened)",
+        entries: &[
+            Entry { tag: "bars_since",      args: "source",         doc: "bars since `source` (a signal) was last true; 0 on the firing bar, None until it has fired once" },
+            Entry { tag: "bars_since_high", args: "source, period", doc: "bars since the source set a new period-bar high, in [0, period-1]" },
+            Entry { tag: "bars_since_low",  args: "source, period", doc: "bars since the source set a new period-bar low" },
         ],
     },
     Group {
@@ -301,6 +314,18 @@ const GROUPS: &[Group] = &[
         entries: &[
             Entry { tag: "rolling_max", args: "source, period", doc: "rolling maximum over the window" },
             Entry { tag: "rolling_min", args: "source, period", doc: "rolling minimum over the window" },
+        ],
+    },
+    Group {
+        title: "rolling statistics (windowed over a Real source)",
+        entries: &[
+            Entry { tag: "correlation",     args: "lhs, rhs, period",  doc: "rolling Pearson correlation between two sources" },
+            Entry { tag: "kurtosis",        args: "source, period",    doc: "standardized 4th moment, raw (~3 for a normal), not excess" },
+            Entry { tag: "percentile",      args: "source, period, pct", doc: "the pct-quantile over the window (pct 0.5 = rolling median), linearly interpolated" },
+            Entry { tag: "percentile_rank", args: "source, period",    doc: "where the current reading sits in its own window: count(v <= x)/period, in (0, 1]" },
+            Entry { tag: "skewness",        args: "source, period",    doc: "standardized 3rd moment" },
+            Entry { tag: "variance_ratio",  args: "source, period, lag", doc: "Lo-MacKinlay regime classifier (>1 trending, <1 mean-reverting); O(period)/bar" },
+            Entry { tag: "zscore",          args: "source, period",    doc: "(x - mean) / stddev over the window" },
         ],
     },
     Group {

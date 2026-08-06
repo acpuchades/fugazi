@@ -140,8 +140,9 @@ mod tests {
     use super::*;
     use crate::spec::dyn_indicator::{DynIndicator, DynValue as Payload};
     use crate::indicators::{
-        Book, Correlation, Current, Ema, GarmanKlass, Kurtosis, Parkinson, Position, RogersSatchell,
-        Skewness, VarianceRatio, ZScore,
+        BarsSince, BarsSinceHigh, BarsSinceLow, Book, Correlation, Current, Ema, GarmanKlass,
+        Kurtosis, Parkinson, Percentile, PercentileRank, Position, RogersSatchell, Skewness,
+        VarianceRatio, ZScore,
     };
     use crate::prelude::*;
     use crate::types::Snapshot;
@@ -248,6 +249,52 @@ mod tests {
             assert_eq!(feed_real(&mut ku, bar(p)), ku_ref.update(bar(p).into()));
             assert_eq!(feed_real(&mut z, bar(p)), z_ref.update(bar(p).into()));
         }
+    }
+
+    #[test]
+    fn percentile_tags_match_reference() {
+        let closes = [10.0, 12.0, 9.0, 14.0, 8.0, 15.0, 11.0];
+
+        let p: ExprSpec = serde_norway::from_str("!percentile { period: 4, pct: 0.75 }").unwrap();
+        let mut p = p.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
+        let mut p_ref = Percentile::new(Current::close(), 4, 0.75);
+
+        let r: ExprSpec = serde_norway::from_str("!percentile_rank { period: 4 }").unwrap();
+        let mut r = r.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
+        let mut r_ref = PercentileRank::new(Current::close(), 4);
+
+        for c in closes {
+            assert_eq!(feed_real(&mut p, bar(c)), p_ref.update(bar(c).into()));
+            assert_eq!(feed_real(&mut r, bar(c)), r_ref.update(bar(c).into()));
+        }
+    }
+
+    #[test]
+    fn bars_since_tags_match_reference() {
+        // The signal-input form: `source:` is a SignalSpec, not an ExprSpec.
+        let yaml = "!bars_since { source: !above { source: close, level: 12.0 } }";
+        let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
+        let mut reference = BarsSince::new(Current::close().above(12.0));
+
+        // And the two rolling-extremum shorthands.
+        let hi: ExprSpec = serde_norway::from_str("!bars_since_high { period: 3 }").unwrap();
+        let mut hi = hi.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
+        let mut hi_ref = BarsSinceHigh::new(Current::close(), 3);
+
+        let lo: ExprSpec = serde_norway::from_str("!bars_since_low { period: 3 }").unwrap();
+        let mut lo = lo.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
+        let mut lo_ref = BarsSinceLow::new(Current::close(), 3);
+
+        let mut saw_some = false;
+        for c in [10.0, 15.0, 9.0, 8.0, 20.0, 11.0, 7.0] {
+            let got = feed_real(&mut built, bar(c));
+            saw_some |= got.is_some();
+            assert_eq!(got, reference.update(bar(c).into()));
+            assert_eq!(feed_real(&mut hi, bar(c)), hi_ref.update(bar(c).into()));
+            assert_eq!(feed_real(&mut lo, bar(c)), lo_ref.update(bar(c).into()));
+        }
+        assert!(saw_some, "expected `!bars_since` to produce values once fired");
     }
 
     #[test]

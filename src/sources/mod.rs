@@ -52,6 +52,7 @@
 //! ```
 
 pub mod binance;
+pub mod binance_funding;
 pub mod coingecko;
 pub mod yahoo;
 
@@ -63,8 +64,43 @@ use crate::types::{Atom, OverlayInfo, Schema};
 pub use crate::types::Timestamp;
 
 pub use binance::Binance;
+pub use binance_funding::BinanceFunding;
 pub use coingecko::CoinGecko;
 pub use yahoo::Yahoo;
+
+/// Floor a millisecond timestamp onto the bar-open boundary of `interval`.
+///
+/// `Hour`/`Day` floor by epoch modulo — the Unix epoch is itself a UTC midnight
+/// on an hour boundary, so this lands on real clock boundaries and matches the
+/// convention every candle provider uses. `Week` floors to Monday 00:00 UTC
+/// (epoch day 0 was a Thursday, so modulo would anchor weeks on Thursdays and
+/// silently fail to join against a Monday-anchored weekly candle). `Month`
+/// floors to the 1st at 00:00 UTC, which modulo cannot express at all.
+///
+/// Shared by every [`OverlaySource`] that buckets irregular samples onto a
+/// requested cadence, so their timestamps line up when two overlay CSVs are
+/// joined onto the same price series.
+pub(crate) fn floor_to_bucket(ms: i64, interval: Interval) -> i64 {
+    use time::{Date, Duration as TimeDuration, Time};
+    match interval {
+        Interval::Week(1) => {
+            let dt = Timestamp(ms).to_datetime();
+            let back = dt.weekday().number_days_from_monday() as i64;
+            let monday = dt.date() - TimeDuration::days(back);
+            Timestamp::from_datetime(monday.with_time(Time::MIDNIGHT).assume_utc()).0
+        }
+        Interval::Month(1) => {
+            let dt = Timestamp(ms).to_datetime();
+            let first = Date::from_calendar_date(dt.year(), dt.month(), 1)
+                .expect("day 1 is valid in every month");
+            Timestamp::from_datetime(first.with_time(Time::MIDNIGHT).assume_utc()).0
+        }
+        other => {
+            let step = other.duration_ms();
+            if step <= 0 { ms } else { ms - ms.rem_euclid(step) }
+        }
+    }
+}
 
 /// The shared [`Schema`] carried by an atom stream, or [`Schema::empty()`] if
 /// none of the atoms bind an [`OverlayInfo`](crate::OverlayInfo).

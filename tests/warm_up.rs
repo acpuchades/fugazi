@@ -9,11 +9,12 @@
 //! an instance that saw the full history.
 
 use fugazi::indicators::{
-    Adx, Aroon, Atr, Bollinger, Cci, Correlation, CurrentTime, Current, Day, DayOfWeek, DayOfYear,
-    Dmi, Donchian, Ema, GarmanKlass, Hma, Hour, Identity, IsWeekday, IsWeekend, Keltner, Kurtosis,
-    Latch, Log, Macd, Mfi, Minute, Month, Obv, Parkinson, Quarter, Resample, Rma, RogersSatchell,
-    Rsi, Sar, Second, Skewness, Sma, StdDev, Stochastic, TrueRange, UnixMillis, UnixSeconds, Value,
-    VarianceRatio, Vwap, WeekOfYear, WilliamsR, Wma, Year, ZScore,
+    Adx, Aroon, Atr, BarsSinceHigh, BarsSinceLow, Bollinger, Cci, Correlation, CurrentTime, Current,
+    Day, DayOfWeek, DayOfYear, Dmi, Donchian, Ema, GarmanKlass, Hma, Hour, Identity, IsWeekday,
+    IsWeekend, Keltner, Kurtosis, Latch, Log, Macd, Mfi, Minute, Month, Obv, Parkinson, Percentile,
+    PercentileRank, Quarter, Resample, Rma, RogersSatchell, Rsi, Sar, Second, Skewness, Sma, StdDev,
+    Stochastic, TrueRange, UnixMillis, UnixSeconds, Value, VarianceRatio, Vwap, WeekOfYear,
+    WilliamsR, Wma, Year, ZScore,
 };
 use fugazi::prelude::*;
 use fugazi::types::{Atom, Candle, Real, Timestamp};
@@ -112,6 +113,19 @@ fn warm_up_is_exact_for_the_catalogue() {
     candle_case(Skewness::new(Current::close(), 20), "skewness");
     candle_case(Kurtosis::new(Current::close(), 20), "kurtosis");
     candle_case(ZScore::new(Current::close(), 20), "zscore");
+    candle_case(Percentile::new(Current::close(), 20, 0.8), "percentile");
+    candle_case(
+        PercentileRank::new(Current::close(), 20),
+        "percentile_rank",
+    );
+    // The rolling-extremum shorthands are exact (the window's extreme is always
+    // attained somewhere inside it); the general `BarsSince` is not — see the
+    // exclusion note in `warm_up_is_exact_for_composition`.
+    candle_case(
+        BarsSinceHigh::new(Current::close(), 20),
+        "bars_since_high",
+    );
+    candle_case(BarsSinceLow::new(Current::close(), 20), "bars_since_low");
     candle_case(
         Correlation::new(Current::close(), Current::open(), 20),
         "correlation",
@@ -190,6 +204,14 @@ fn warm_up_is_exact_for_composition() {
     // sample N" contract this battery asserts. `IfElse` is covered by
     // the unit tests in `src/indicators/if_else.rs`.
     //
+    // `BarsSince` is excluded on the same footing. Its `warm_up_period()`
+    // reports the source's own warm-up, but the first `Some` lands on the
+    // source's first `true` — data-dependent and, for a source that never
+    // fires, never. (The `!bars_since_high` / `!bars_since_low` shorthands
+    // *are* exact and do sit in the battery above: a window always contains
+    // its own extreme, so they fire on the first full window.) `BarsSince` is
+    // covered by the unit tests in `src/indicators/bars_since.rs`.
+    //
     // The trailing risk indicators (`Sharpe` / `Sortino` / `Volatility` /
     // `MaxDrawdown` / `Calmar`) are excluded on the same footing: they own an
     // embedded strategy whose equity is flat (zero-variance → `None` for the
@@ -237,6 +259,22 @@ fn warm_up_from_a_warm_up_zero_source_is_exact() {
     assert_eq!(Kurtosis::new(Value::<Real>::new(1.0), 3).warm_up_period(), 3);
     assert_eq!(ZScore::new(Value::<Real>::new(1.0), 3).warm_up_period(), 3);
     assert_eq!(
+        Percentile::new(Value::<Real>::new(1.0), 3, 0.5).warm_up_period(),
+        3
+    );
+    assert_eq!(
+        PercentileRank::new(Value::<Real>::new(1.0), 3).warm_up_period(),
+        3
+    );
+    assert_eq!(
+        BarsSinceHigh::new(Value::<Real>::new(1.0), 3).warm_up_period(),
+        3
+    );
+    assert_eq!(
+        BarsSinceLow::new(Value::<Real>::new(1.0), 3).warm_up_period(),
+        3
+    );
+    assert_eq!(
         Correlation::new(Value::<Real>::new(1.0), Value::<Real>::new(2.0), 3).warm_up_period(),
         3
     );
@@ -274,6 +312,18 @@ fn windowed_indicators_are_stable_once_ready() {
     assert_eq!(Skewness::new(Current::close(), 20).unstable_period(), 0);
     assert_eq!(Kurtosis::new(Current::close(), 20).unstable_period(), 0);
     assert_eq!(ZScore::new(Current::close(), 20).unstable_period(), 0);
+    assert_eq!(
+        Percentile::new(Current::close(), 20, 0.8).unstable_period(),
+        0
+    );
+    assert_eq!(
+        PercentileRank::new(Current::close(), 20).unstable_period(),
+        0
+    );
+    assert_eq!(
+        BarsSinceHigh::new(Current::close(), 20).unstable_period(),
+        0
+    );
     assert_eq!(
         Correlation::new(Current::close(), Current::open(), 20).unstable_period(),
         0
