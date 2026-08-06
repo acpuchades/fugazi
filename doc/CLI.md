@@ -190,14 +190,14 @@ cleanly, non-zero = something's off. In both forms `--quiet` suppresses the
 | Flag | Description |
 | --- | --- |
 | `<STRATEGY>` | Positional. `@file.yml` or inline YAML — same shape as `run`. |
-| `-p`, `--params <SPEC>` | Placeholder substitution. Repeatable. See [--params](#--params). Unlike `run`, omitting a required placeholder is **not** a failure — `check` validates shape only, so an unset placeholder is held as a typed *hole* (see below). |
+| `-p`, `--params <SPEC>` | Placeholder substitution. Repeatable. See [--params](#--params). Unlike `run`, omitting a required placeholder is **not** a failure — `check` validates shape only, an unset placeholder is held as a typed *undefined value* instead (see below). |
 | `-q`, `--quiet` | Suppress the "ok" message on success. Errors still print; exit code is unchanged (`0` ok, non-zero on failure). |
 
 `check strategy` validates the document's **shape**, not its values — it never
 builds or drives the strategy. So a required `!param` with no `--params` value
-and no `default` doesn't need the real value: it is filled with a typed *hole*
-(a number, string, or bool as the surrounding field demands) so the rest of the
-spec still parses. A malformed placeholder (e.g. no `key`) is still a genuine
+and no `default` doesn't need the real value: it is treated as *undefined* and
+satisfied with whatever type the surrounding field demands (a number, a string,
+a bool), so the rest of the spec still parses. A malformed placeholder (e.g. no `key`) is still a genuine
 error — that's a format mistake, not a missing value.
 
 Within that constraint it is as strict as it can be. It catches:
@@ -206,7 +206,7 @@ Within that constraint it is as strict as it can be. It catches:
   including inside a basket's `score:` / `sizing:`, a multi-asset side's
   `enter:`, and a portfolio's `weights:`. Those are deferred templates that only
   instantiate per-symbol at run time, but their *shape* doesn't depend on the
-  symbol, so `check` parses each with its `!arg`s held as holes.
+  symbol, so `check` parses each with its `!arg`s held undefined.
 - **Input/output type mismatches between tags.** `!sma` needs a `Real` source,
   `!atr` a `Candle` one, `!close` an `Atom`; a violation is reported against the
   innermost offending node, with a trail of the enclosing tags, rather than
@@ -242,7 +242,7 @@ The `<…>` is the *shape of the value that goes there* — inferred from the fi
 the placeholder lands in, since a `period` wants a number and a `symbol` wants a
 string.
 
-##### `!undefined` — a deliberate hole
+##### `!undefined` — a deliberate gap
 
 `!undefined` is the same mechanism made explicit: write it anywhere a value goes
 and `check` will validate everything *around* it, then tell you what type that
