@@ -913,6 +913,10 @@ async fn fetch_overlay_series(
         }));
         bar.inc(1);
     }
+    // Same chunk-boundary dedup as `fetch_series` — a provider that resolves the
+    // range in exchange-local time can return one row in two adjacent UTC chunks
+    // (see the note on `dedup_by_time`). Keep the first occurrence per timestamp.
+    dedup_by_time(&mut rows, |r| Some(r.time.0));
     bar.finish_with_message("done");
     Ok(rows)
 }
@@ -1093,6 +1097,27 @@ fn chunk_bounds(since: Timestamp, until: Timestamp, interval: Interval) -> Vec<(
     chunks
 }
 
+/// Drop entries whose timestamp `key` has already appeared, keeping the first
+/// occurrence and preserving order. This restores the per-series
+/// `(symbol, interval, timestamp)` uniqueness invariant at the stitch point that
+/// splices the [`chunk_bounds`] windows back together.
+///
+/// The windows are half-open and non-overlapping *in UTC*, but a provider that
+/// resolves the fetch range in exchange-local time can still return one bar in
+/// two adjacent chunks. Yahoo FX stamps a daily bar for trading day D at
+/// D-1T23:00Z under European summer time, so that bar is *before* the UTC
+/// midnight boundary between the two chunks: it satisfies the earlier chunk's
+/// UTC upper bound *and* the later chunk's local-time range, and both chunks
+/// emit it. A `None` key — a synthetic, timeless atom; remote providers always
+/// stamp `time` — is never treated as a duplicate.
+fn dedup_by_time<T>(rows: &mut Vec<T>, key: impl Fn(&T) -> Option<i64>) {
+    let mut seen = std::collections::HashSet::new();
+    rows.retain(|r| match key(r) {
+        Some(t) => seen.insert(t),
+        None => true,
+    });
+}
+
 /// Delay between successive chunk requests *within one series*, mirroring the
 /// politeness delay the providers apply between their own pagination pages.
 /// Series run concurrently; the delay paces each series' own request stream.
@@ -1192,6 +1217,7 @@ async fn fetch_series(
         }));
         bar.inc(1);
     }
+    dedup_by_time(&mut rows, |b| b.atom.time.map(|t| t.0));
     bar.finish_with_message("done");
     Ok(rows)
 }
@@ -2152,6 +2178,39 @@ mod tests {
     #[test]
     fn chunk_bounds_empty_window_yields_no_chunks() {
         assert!(chunk_bounds(Timestamp(100), Timestamp(100), Interval::Day(1)).is_empty());
+    }
+
+    #[test]
+    fn dedup_by_time_drops_chunk_boundary_duplicates() {
+        // Simulates the stitched output of two adjacent `chunk_bounds` windows
+        // whose boundary lands one hour after a Yahoo FX summer-time bar: the
+        // bar stamped at the boundary-minus-1h (`230000`) is returned by both
+        // the earlier chunk (its UTC upper bound) and the later chunk (which
+        // Yahoo resolves in exchange-local time), so it appears twice in a row
+        // once the chunks are spliced.
+        const BOUNDARY: i64 = 240000;
+        let mut rows = vec![
+            (BOUNDARY - 3600, 'a'), // last real bar of chunk 1
+            (BOUNDARY - 10, 'b'),   // summer-time boundary bar, from chunk 1
+            (BOUNDARY - 10, 'b'),   // ...re-emitted by chunk 2 — the duplicate
+            (BOUNDARY + 3600, 'c'), // first genuinely-new bar of chunk 2
+        ];
+        dedup_by_time(&mut rows, |&(t, _)| Some(t));
+        // Duplicate removed, first occurrence kept, order and every distinct
+        // timestamp preserved — nothing that appeared only once is dropped.
+        assert_eq!(
+            rows,
+            vec![(BOUNDARY - 3600, 'a'), (BOUNDARY - 10, 'b'), (BOUNDARY + 3600, 'c')]
+        );
+    }
+
+    #[test]
+    fn dedup_by_time_keeps_timeless_atoms() {
+        // A `None` key is a synthetic, timeless atom, not a duplicate: two of
+        // them must both survive even though their keys compare equal.
+        let mut rows = vec![(Some(1_i64), 'a'), (None, 'b'), (None, 'c'), (Some(1), 'd')];
+        dedup_by_time(&mut rows, |&(t, _)| t);
+        assert_eq!(rows, vec![(Some(1), 'a'), (None, 'b'), (None, 'c')]);
     }
 
     #[test]
