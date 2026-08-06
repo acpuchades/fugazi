@@ -49,7 +49,7 @@ pub fn substitute(value: Value, args: &HashMap<String, Value>) -> Result<Value> 
     }
 }
 
-/// Rewrite every `arg` placeholder to a [`hole`](crate::spec::hole) sentinel,
+/// Rewrite every `arg` placeholder to an [undefined](crate::spec::undefined) sentinel,
 /// so a template body can be typed-parsed without knowing what the driver will
 /// eventually supply.
 ///
@@ -57,7 +57,7 @@ pub fn substitute(value: Value, args: &HashMap<String, Value>) -> Result<Value> 
 /// [`params::substitute_for_check`](crate::spec::params::substitute_for_check),
 /// and used for the same reason: `fugazi check` validates a document's
 /// **shape**, and a template's shape does not depend on which symbol (or child
-/// index, or group) the driver will bind. Marking every `!arg` as a hole lets
+/// index, or group) the driver will bind. Marking every `!arg` undefined lets
 /// the typed parse run anyway, which is what catches an unknown tag or a
 /// misspelled field inside a `score:` / `sizing:` / per-side template — errors
 /// that otherwise surface only once a run reaches that symbol.
@@ -69,7 +69,7 @@ pub fn substitute_for_check(value: Value) -> Value {
     match value {
         Value::Object(map) if map.len() == 1 && map.contains_key("arg") => {
             // Keep the key for diagnostics when it is well-formed; a malformed
-            // placeholder still becomes a hole here, and `build` is where its
+            // placeholder still becomes undefined here, and `build` is where its
             // shape is enforced (check does not resolve args at all).
             let key = match &map["arg"] {
                 Value::String(name) => name.clone(),
@@ -80,7 +80,7 @@ pub fn substitute_for_check(value: Value) -> Value {
                     .to_string(),
                 _ => "arg".to_string(),
             };
-            crate::spec::hole::arg_sentinel(&key)
+            crate::spec::undefined::arg_sentinel(&key)
         }
         Value::Object(map) => Value::Object(
             map.into_iter()

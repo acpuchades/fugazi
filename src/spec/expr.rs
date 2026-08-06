@@ -2015,7 +2015,7 @@ impl ExprSpec {
         // that resolves to an entire source). Only present under `check`, so
         // this never matches in a real run. A constant `0.0` is a valid
         // Real-typed source, enough for the surrounding shape to validate.
-        if crate::spec::hole::is_hole(&v) {
+        if crate::spec::undefined::is_undefined(&v) {
             return Ok(ExprSpec::Value(ValueLit::Real(0.0)));
         }
 
@@ -2143,7 +2143,7 @@ impl ExprSpec {
             }
             _ => None,
         };
-        let raw: ExprSpecRaw = crate::spec::hole::from_value(normalised)
+        let raw: ExprSpecRaw = crate::spec::undefined::from_value(normalised)
             // Nesting this at every level turns a bare "expects a Real source"
             // into a trail from the outermost tag down to the offending one —
             // the closest thing to a source location available, since the

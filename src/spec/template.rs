@@ -109,7 +109,7 @@ impl<T: for<'de> Deserialize<'de>> SpecTemplate<T> {
 /// or a portfolio's `weights:` would pass and only fail once a run reached the
 /// symbol that instantiates it. A template's *shape* doesn't depend on which
 /// symbol the driver eventually binds, so while a
-/// [`check_mode`](crate::spec::hole::check_mode) guard is held this
+/// [`check_mode`](crate::spec::undefined::check_mode) guard is held this
 /// additionally parses a copy of the tree with every `!arg` marked as a hole,
 /// surfacing those errors at check time. The stored tree is the original,
 /// untouched — `build` still resolves real args later.
@@ -119,9 +119,9 @@ impl<'de, T: DeserializeOwned> Deserialize<'de> for SpecTemplate<T> {
         D: Deserializer<'de>,
     {
         let tree = Value::deserialize(deserializer)?;
-        if crate::spec::hole::in_check_mode() {
+        if crate::spec::undefined::in_check_mode() {
             let probe = args::substitute_for_check(tree.clone());
-            crate::spec::hole::from_json_value::<T>(probe).map_err(serde::de::Error::custom)?;
+            crate::spec::undefined::from_json_value::<T>(probe).map_err(serde::de::Error::custom)?;
         }
         Ok(Self::from_tree(tree))
     }

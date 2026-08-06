@@ -41,7 +41,7 @@ pub mod typecheck;
 pub mod args;
 pub mod convert;
 pub mod dyn_indicator;
-pub mod hole;
+pub mod undefined;
 pub mod imports;
 pub mod input;
 pub mod params;
@@ -99,7 +99,8 @@ pub fn load_value(
 /// [`load_value`] through the `!import` splice, stopping short of `!param`
 /// substitution. Split out for `fugazi check`, which substitutes with
 /// [`params::substitute_for_check`] instead — marking a required-but-unset
-/// placeholder as a [`hole`] to validate around rather than erroring on.
+/// placeholder as [undefined](crate::spec::undefined) to validate around rather
+/// than erroring on.
 pub fn load_value_pre_params(
     text: &str,
     base: &std::path::Path,

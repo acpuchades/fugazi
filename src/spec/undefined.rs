@@ -1,4 +1,4 @@
-//! Type-directed *hole* deserialization for `fugazi check`.
+//! Type-directed *undefined-value* deserialization for `fugazi check`.
 //!
 //! `fugazi check strategy` validates a document's **shape**, not its values —
 //! unlike `run`/`optimize`, it never builds or drives the strategy. So a
@@ -9,16 +9,21 @@
 //! (`symbol`) a string, a `bool` field a bool — and the type each hole needs
 //! isn't visible on the untyped tree.
 //!
+//! Three things deserialize as undefined, all through the same machinery: an
+//! unset required `!param`, an `!arg` the driver has not bound yet, and an
+//! author-written `!undefined`. They differ only in what is reported about
+//! them afterwards — see [`UndefinedOrigin`].
+//!
 //! It *is* visible to serde: at each leaf, the derived `Deserialize` calls the
 //! matching `deserialize_*` method (`deserialize_u64` for a `usize`,
-//! `deserialize_str` for a `String`, …). [`HoleDeserializer`] wraps the value
+//! `deserialize_str` for a `String`, …). [`UndefinedDeserializer`] wraps the value
 //! tree and, at a hole node, answers whichever method serde asks for with a
 //! type-appropriate zero (`0` / `""` / `false`). No guessing, no search — the
 //! type is dictated by the caller.
 //!
 //! ## Wiring
 //!
-//! `check` marks a required-but-unset `!param` with a [`sentinel`] node instead
+//! `check` marks an undefined value with a [`sentinel`] node instead
 //! of erroring (see [`crate::spec::params::substitute_for_check`]), then parses
 //! under a [`check_mode`] guard. The spec enums re-buffer through
 //! `serde_norway::Value` for tag normalization and then parse their inner
@@ -37,26 +42,26 @@ use serde_json::{Map, Value as Json};
 use serde_norway::Value as Yaml;
 
 /// The reserved single-key object a check-mode hole is represented as. No real
-/// spec node uses this key, so [`is_hole`] can recognize it unambiguously; the
+/// spec node uses this key, so [`is_undefined`] can recognize it unambiguously; the
 /// value carries the original `!param` key (for diagnostics, not parsing).
-pub const HOLE_KEY: &str = "__fugazi_param_hole__";
+pub const UNSET_PARAM_KEY: &str = "__fugazi_param_hole__";
 
-/// The `!arg` twin of [`HOLE_KEY`]. Kept distinct so the type observations
+/// The `!arg` twin of [`UNSET_PARAM_KEY`]. Kept distinct so the type observations
 /// below can report on `!param` placeholders — the ones a user supplies from
 /// `--params` and might get wrong — without mixing in `!arg`s, which a driver
 /// supplies and a user never writes a value for.
-pub const ARG_HOLE_KEY: &str = "__fugazi_arg_hole__";
+pub const UNSET_ARG_KEY: &str = "__fugazi_arg_hole__";
 
-/// The `!undefined` twin of [`HOLE_KEY`]. Distinct so the report can say
+/// The `!undefined` twin of [`UNSET_PARAM_KEY`]. Distinct so the report can say
 /// *where* an author-written hole is (its document path) rather than naming it
 /// like a `--params` key the user is expected to recognise.
-pub const UNDEFINED_HOLE_KEY: &str = "__fugazi_undefined_hole__";
+pub const UNDEFINED_KEY: &str = "__fugazi_undefined_hole__";
 
 /// Build the sentinel [`Json`] node standing in for an unresolved required
 /// `!param` with the given key.
 pub fn sentinel(param_key: &str) -> Json {
     let mut map = Map::with_capacity(1);
-    map.insert(HOLE_KEY.to_string(), Json::String(param_key.to_string()));
+    map.insert(UNSET_PARAM_KEY.to_string(), Json::String(param_key.to_string()));
     Json::Object(map)
 }
 
@@ -64,7 +69,7 @@ pub fn sentinel(param_key: &str) -> Json {
 pub fn undefined_sentinel(path: &str) -> Json {
     let mut map = Map::with_capacity(1);
     map.insert(
-        UNDEFINED_HOLE_KEY.to_string(),
+        UNDEFINED_KEY.to_string(),
         Json::String(path.to_string()),
     );
     Json::Object(map)
@@ -74,24 +79,24 @@ pub fn undefined_sentinel(path: &str) -> Json {
 /// [`args::substitute_for_check`](crate::spec::args::substitute_for_check).
 pub fn arg_sentinel(arg_key: &str) -> Json {
     let mut map = Map::with_capacity(1);
-    map.insert(ARG_HOLE_KEY.to_string(), Json::String(arg_key.to_string()));
+    map.insert(UNSET_ARG_KEY.to_string(), Json::String(arg_key.to_string()));
     Json::Object(map)
 }
 
 /// Is this buffered YAML node either hole sentinel?
-pub fn is_hole(value: &Yaml) -> bool {
-    hole_key(value).is_some()
+pub fn is_undefined(value: &Yaml) -> bool {
+    undefined_name(value).is_some()
 }
 
 /// The `(reserved-key, placeholder-name)` of a hole node, if it is one.
-fn hole_parts(value: &Yaml) -> Option<(&str, &str)> {
+fn undefined_parts(value: &Yaml) -> Option<(&str, &str)> {
     let Yaml::Mapping(m) = value else {
         return None;
     };
     if m.len() != 1 {
         return None;
     }
-    for key in [HOLE_KEY, ARG_HOLE_KEY, UNDEFINED_HOLE_KEY] {
+    for key in [UNSET_PARAM_KEY, UNSET_ARG_KEY, UNDEFINED_KEY] {
         if let Some(Yaml::String(name)) = m.get(Yaml::String(key.to_string())) {
             return Some((key, name.as_str()));
         }
@@ -99,14 +104,14 @@ fn hole_parts(value: &Yaml) -> Option<(&str, &str)> {
     None
 }
 
-fn hole_key(value: &Yaml) -> Option<&str> {
-    hole_parts(value).map(|(_, name)| name)
+fn undefined_name(value: &Yaml) -> Option<&str> {
+    undefined_parts(value).map(|(_, name)| name)
 }
 
 /// Where a user-facing hole came from — a named `--params` placeholder, or an
 /// author-written `!undefined` located by its document path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum HoleOrigin {
+pub enum UndefinedOrigin {
     /// An unset required `!param`; the key is its name.
     Param,
     /// An `!undefined`; the key is its path in the document.
@@ -115,10 +120,10 @@ pub enum HoleOrigin {
 
 /// The user-facing identity of a hole node — `None` for a non-hole *and* for an
 /// `!arg` hole, which a driver supplies rather than a user.
-fn user_hole(value: &Yaml) -> Option<(HoleOrigin, &str)> {
-    match hole_parts(value) {
-        Some((HOLE_KEY, name)) => Some((HoleOrigin::Param, name)),
-        Some((UNDEFINED_HOLE_KEY, path)) => Some((HoleOrigin::Undefined, path)),
+fn user_hole(value: &Yaml) -> Option<(UndefinedOrigin, &str)> {
+    match undefined_parts(value) {
+        Some((UNSET_PARAM_KEY, name)) => Some((UndefinedOrigin::Param, name)),
+        Some((UNDEFINED_KEY, path)) => Some((UndefinedOrigin::Undefined, path)),
         _ => None,
     }
 }
@@ -131,7 +136,7 @@ fn user_hole(value: &Yaml) -> Option<(HoleOrigin, &str)> {
 /// contradiction — the same `!param` used where a number is required *and*
 /// where a string is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum HoleType {
+pub enum RequiredType {
     Bool,
     Number,
     Str,
@@ -139,14 +144,14 @@ pub enum HoleType {
     Table,
 }
 
-impl HoleType {
+impl RequiredType {
     pub fn label(self) -> &'static str {
         match self {
-            HoleType::Bool => "bool",
-            HoleType::Number => "number",
-            HoleType::Str => "string",
-            HoleType::List => "list",
-            HoleType::Table => "table",
+            RequiredType::Bool => "bool",
+            RequiredType::Number => "number",
+            RequiredType::Str => "string",
+            RequiredType::List => "list",
+            RequiredType::Table => "table",
         }
     }
 }
@@ -154,12 +159,12 @@ impl HoleType {
 thread_local! {
     /// Every `(param name, required type)` a hole answered during the current
     /// check parse, in encounter order. Drained by
-    /// [`take_param_observations`].
-    static PARAM_USES: std::cell::RefCell<Vec<(HoleOrigin, String, HoleType)>> =
+    /// [`take_observations`].
+    static PARAM_USES: std::cell::RefCell<Vec<(UndefinedOrigin, String, RequiredType)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-fn observe(value: &Yaml, ty: HoleType) {
+fn observe(value: &Yaml, ty: RequiredType) {
     if let Some((origin, name)) = user_hole(value) {
         let entry = (origin, name.to_string(), ty);
         PARAM_USES.with(|u| u.borrow_mut().push(entry));
@@ -172,9 +177,9 @@ fn observe(value: &Yaml, ty: HoleType) {
 /// A name mapping to more than one type is a genuine contradiction: no single
 /// `--params` value can satisfy both positions, so the document can never run
 /// whatever the user supplies.
-pub fn take_param_observations() -> Vec<(HoleOrigin, String, Vec<HoleType>)> {
+pub fn take_observations() -> Vec<(UndefinedOrigin, String, Vec<RequiredType>)> {
     let raw = PARAM_USES.with(|u| std::mem::take(&mut *u.borrow_mut()));
-    let mut by_name: std::collections::BTreeMap<(HoleOrigin, String), Vec<HoleType>> =
+    let mut by_name: std::collections::BTreeMap<(UndefinedOrigin, String), Vec<RequiredType>> =
         std::collections::BTreeMap::new();
     for (origin, name, ty) in raw {
         let seen = by_name.entry((origin, name)).or_default();
@@ -232,7 +237,7 @@ pub fn in_check_mode() -> bool {
 /// inner payload parse rather than `serde_norway::from_value` directly.
 pub fn from_value<T: DeserializeOwned>(value: Yaml) -> Result<T, serde_norway::Error> {
     if in_check_mode() {
-        T::deserialize(HoleDeserializer(value))
+        T::deserialize(UndefinedDeserializer(value))
     } else {
         serde_norway::from_value(value)
     }
@@ -249,7 +254,7 @@ pub fn from_json_value<T: DeserializeOwned>(value: Json) -> Result<T, serde_norw
 /// A [`Deserializer`] over a `serde_norway::Value` that treats a [`sentinel`]
 /// node as a wildcard, answering each leaf method with a type-appropriate zero.
 /// Compound nodes recurse through wrappers that keep every child hole-aware.
-struct HoleDeserializer(Yaml);
+struct UndefinedDeserializer(Yaml);
 
 /// Answer scalar leaf methods: a hole visits the zero value for the requested
 /// type; anything else delegates to the underlying `serde_norway::Value` (which
@@ -257,7 +262,7 @@ struct HoleDeserializer(Yaml);
 macro_rules! scalar_methods {
     ($($method:ident => $visit:ident ( $zero:expr ) as $ty:expr),* $(,)?) => {$(
         fn $method<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-            if is_hole(&self.0) {
+            if is_undefined(&self.0) {
                 // Record what type this position demanded before answering, so
                 // `check` can report a placeholder's inferred type and catch a
                 // name used at two incompatible ones.
@@ -270,7 +275,7 @@ macro_rules! scalar_methods {
     )*};
 }
 
-impl<'de> Deserializer<'de> for HoleDeserializer {
+impl<'de> Deserializer<'de> for UndefinedDeserializer {
     type Error = serde_norway::Error;
 
     // The self-describing path — used when a bridge re-buffers this subtree back
@@ -282,24 +287,24 @@ impl<'de> Deserializer<'de> for HoleDeserializer {
     }
 
     scalar_methods! {
-        deserialize_bool => visit_bool(false) as HoleType::Bool,
-        deserialize_i8 => visit_i64(0) as HoleType::Number,
-        deserialize_i16 => visit_i64(0) as HoleType::Number,
-        deserialize_i32 => visit_i64(0) as HoleType::Number,
-        deserialize_i64 => visit_i64(0) as HoleType::Number,
-        deserialize_i128 => visit_i128(0) as HoleType::Number,
-        deserialize_u8 => visit_u64(0) as HoleType::Number,
-        deserialize_u16 => visit_u64(0) as HoleType::Number,
-        deserialize_u32 => visit_u64(0) as HoleType::Number,
-        deserialize_u64 => visit_u64(0) as HoleType::Number,
-        deserialize_u128 => visit_u128(0) as HoleType::Number,
-        deserialize_f32 => visit_f64(0.0) as HoleType::Number,
-        deserialize_f64 => visit_f64(0.0) as HoleType::Number,
-        deserialize_char => visit_char('\0') as HoleType::Str,
-        deserialize_str => visit_str("") as HoleType::Str,
-        deserialize_string => visit_str("") as HoleType::Str,
-        deserialize_bytes => visit_bytes(&[]) as HoleType::Str,
-        deserialize_byte_buf => visit_bytes(&[]) as HoleType::Str,
+        deserialize_bool => visit_bool(false) as RequiredType::Bool,
+        deserialize_i8 => visit_i64(0) as RequiredType::Number,
+        deserialize_i16 => visit_i64(0) as RequiredType::Number,
+        deserialize_i32 => visit_i64(0) as RequiredType::Number,
+        deserialize_i64 => visit_i64(0) as RequiredType::Number,
+        deserialize_i128 => visit_i128(0) as RequiredType::Number,
+        deserialize_u8 => visit_u64(0) as RequiredType::Number,
+        deserialize_u16 => visit_u64(0) as RequiredType::Number,
+        deserialize_u32 => visit_u64(0) as RequiredType::Number,
+        deserialize_u64 => visit_u64(0) as RequiredType::Number,
+        deserialize_u128 => visit_u128(0) as RequiredType::Number,
+        deserialize_f32 => visit_f64(0.0) as RequiredType::Number,
+        deserialize_f64 => visit_f64(0.0) as RequiredType::Number,
+        deserialize_char => visit_char('\0') as RequiredType::Str,
+        deserialize_str => visit_str("") as RequiredType::Str,
+        deserialize_string => visit_str("") as RequiredType::Str,
+        deserialize_bytes => visit_bytes(&[]) as RequiredType::Str,
+        deserialize_byte_buf => visit_bytes(&[]) as RequiredType::Str,
     }
 
     fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
@@ -307,12 +312,12 @@ impl<'de> Deserializer<'de> for HoleDeserializer {
         // it deserializes as `Some(hole)` and the inner type resolves it.
         match self.0 {
             Yaml::Null => visitor.visit_none(),
-            other => visitor.visit_some(HoleDeserializer(other)),
+            other => visitor.visit_some(UndefinedDeserializer(other)),
         }
     }
 
     fn deserialize_unit<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        if is_hole(&self.0) {
+        if is_undefined(&self.0) {
             visitor.visit_unit()
         } else {
             self.0.deserialize_unit(visitor)
@@ -336,12 +341,12 @@ impl<'de> Deserializer<'de> for HoleDeserializer {
     }
 
     fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        if is_hole(&self.0) {
-            observe(&self.0, HoleType::List);
-            return visitor.visit_seq(HoleSeq(Vec::new().into_iter()));
+        if is_undefined(&self.0) {
+            observe(&self.0, RequiredType::List);
+            return visitor.visit_seq(UndefinedSeq(Vec::new().into_iter()));
         }
         match self.0 {
-            Yaml::Sequence(seq) => visitor.visit_seq(HoleSeq(seq.into_iter())),
+            Yaml::Sequence(seq) => visitor.visit_seq(UndefinedSeq(seq.into_iter())),
             other => other.deserialize_seq(visitor),
         }
     }
@@ -364,15 +369,15 @@ impl<'de> Deserializer<'de> for HoleDeserializer {
     }
 
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        if is_hole(&self.0) {
-            observe(&self.0, HoleType::Table);
-            return visitor.visit_map(HoleMap {
+        if is_undefined(&self.0) {
+            observe(&self.0, RequiredType::Table);
+            return visitor.visit_map(UndefinedMap {
                 entries: Vec::new().into_iter(),
                 pending_value: None,
             });
         }
         match self.0 {
-            Yaml::Mapping(map) => visitor.visit_map(HoleMap {
+            Yaml::Mapping(map) => visitor.visit_map(UndefinedMap {
                 entries: map.into_iter().collect::<Vec<_>>().into_iter(),
                 pending_value: None,
             }),
@@ -397,7 +402,7 @@ impl<'de> Deserializer<'de> for HoleDeserializer {
     ) -> Result<V::Value, Self::Error> {
         match self.0 {
             // A bare string is a unit variant (`close`, `obv`).
-            Yaml::String(tag) => visitor.visit_enum(HoleEnum {
+            Yaml::String(tag) => visitor.visit_enum(UndefinedEnum {
                 tag,
                 content: None,
             }),
@@ -407,7 +412,7 @@ impl<'de> Deserializer<'de> for HoleDeserializer {
                 let Yaml::String(tag) = key else {
                     return Err(de::Error::custom("enum variant key must be a string"));
                 };
-                visitor.visit_enum(HoleEnum {
+                visitor.visit_enum(UndefinedEnum {
                     tag,
                     content: Some(content),
                 })
@@ -416,7 +421,7 @@ impl<'de> Deserializer<'de> for HoleDeserializer {
             Yaml::Tagged(tagged) => {
                 let tag = tagged.tag.to_string();
                 let tag = tag.strip_prefix('!').unwrap_or(&tag).to_string();
-                visitor.visit_enum(HoleEnum {
+                visitor.visit_enum(UndefinedEnum {
                     tag,
                     content: Some(tagged.value),
                 })
@@ -436,9 +441,9 @@ impl<'de> Deserializer<'de> for HoleDeserializer {
 }
 
 /// [`SeqAccess`] keeping each element hole-aware.
-struct HoleSeq(std::vec::IntoIter<Yaml>);
+struct UndefinedSeq(std::vec::IntoIter<Yaml>);
 
-impl<'de> SeqAccess<'de> for HoleSeq {
+impl<'de> SeqAccess<'de> for UndefinedSeq {
     type Error = serde_norway::Error;
 
     fn next_element_seed<T: DeserializeSeed<'de>>(
@@ -446,19 +451,19 @@ impl<'de> SeqAccess<'de> for HoleSeq {
         seed: T,
     ) -> Result<Option<T::Value>, Self::Error> {
         match self.0.next() {
-            Some(value) => seed.deserialize(HoleDeserializer(value)).map(Some),
+            Some(value) => seed.deserialize(UndefinedDeserializer(value)).map(Some),
             None => Ok(None),
         }
     }
 }
 
 /// [`MapAccess`] keeping each value hole-aware (keys are always plain strings).
-struct HoleMap {
+struct UndefinedMap {
     entries: std::vec::IntoIter<(Yaml, Yaml)>,
     pending_value: Option<Yaml>,
 }
 
-impl<'de> MapAccess<'de> for HoleMap {
+impl<'de> MapAccess<'de> for UndefinedMap {
     type Error = serde_norway::Error;
 
     fn next_key_seed<K: DeserializeSeed<'de>>(
@@ -468,7 +473,7 @@ impl<'de> MapAccess<'de> for HoleMap {
         match self.entries.next() {
             Some((key, value)) => {
                 self.pending_value = Some(value);
-                seed.deserialize(HoleDeserializer(key)).map(Some)
+                seed.deserialize(UndefinedDeserializer(key)).map(Some)
             }
             None => Ok(None),
         }
@@ -482,17 +487,17 @@ impl<'de> MapAccess<'de> for HoleMap {
             .pending_value
             .take()
             .expect("next_value_seed called after next_key_seed");
-        seed.deserialize(HoleDeserializer(value))
+        seed.deserialize(UndefinedDeserializer(value))
     }
 }
 
 /// [`EnumAccess`] for the variant name plus its (hole-aware) content.
-struct HoleEnum {
+struct UndefinedEnum {
     tag: String,
     content: Option<Yaml>,
 }
 
-impl<'de> EnumAccess<'de> for HoleEnum {
+impl<'de> EnumAccess<'de> for UndefinedEnum {
     type Error = serde_norway::Error;
     type Variant = HoleVariant;
 
@@ -500,7 +505,7 @@ impl<'de> EnumAccess<'de> for HoleEnum {
         self,
         seed: V,
     ) -> Result<(V::Value, Self::Variant), Self::Error> {
-        let tag = seed.deserialize(HoleDeserializer(Yaml::String(self.tag)))?;
+        let tag = seed.deserialize(UndefinedDeserializer(Yaml::String(self.tag)))?;
         Ok((tag, HoleVariant(self.content)))
     }
 }
@@ -524,7 +529,7 @@ impl<'de> VariantAccess<'de> for HoleVariant {
         self,
         seed: T,
     ) -> Result<T::Value, Self::Error> {
-        seed.deserialize(HoleDeserializer(self.content()))
+        seed.deserialize(UndefinedDeserializer(self.content()))
     }
 
     fn tuple_variant<V: Visitor<'de>>(
@@ -532,7 +537,7 @@ impl<'de> VariantAccess<'de> for HoleVariant {
         len: usize,
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
-        HoleDeserializer(self.content()).deserialize_tuple(len, visitor)
+        UndefinedDeserializer(self.content()).deserialize_tuple(len, visitor)
     }
 
     fn struct_variant<V: Visitor<'de>>(
@@ -540,7 +545,7 @@ impl<'de> VariantAccess<'de> for HoleVariant {
         fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
-        HoleDeserializer(self.content()).deserialize_struct("", fields, visitor)
+        UndefinedDeserializer(self.content()).deserialize_struct("", fields, visitor)
     }
 }
 

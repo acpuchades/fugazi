@@ -195,11 +195,11 @@ impl TryFrom<serde_norway::Value> for StrategyRef {
 
         if let Some(tagged) = tagged_preset {
             let p: StrategyPreset =
-                crate::spec::hole::from_value(tagged).map_err(|e| e.to_string())?;
+                crate::spec::undefined::from_value(tagged).map_err(|e| e.to_string())?;
             Ok(StrategyRef::Preset(p))
         } else {
             let s: SingleStrategySpec =
-                crate::spec::hole::from_value(v).map_err(|e| e.to_string())?;
+                crate::spec::undefined::from_value(v).map_err(|e| e.to_string())?;
             Ok(StrategyRef::Spec(Box::new(s)))
         }
     }

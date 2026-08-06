@@ -517,7 +517,7 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     // Splice imports, then substitute in check mode: an unresolved required
     // placeholder becomes a *hole* rather than an error, and the typed parse
     // below fills each hole with a value of whatever type the field expects
-    // (see `spec::hole`).
+    // (see `spec::undefined`).
     let value = spec::load_value_pre_params(&text, &base, &label)
         .with_context(|| parse_error_hint(&args.strategy))?;
     // The site count is discarded: the report below counts distinct placeholder
@@ -528,7 +528,7 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
 
     // Deserialize under the hole-aware guard. `from_json_value` moves the tree
     // into the `serde_norway::Value` shape the bridges buffer through.
-    let _guard = spec::hole::check_mode();
+    let _guard = spec::undefined::check_mode();
     let parse_err = || parse_error_hint(&args.strategy);
 
     // Each arm parses its shape and reports back `(description, detail)`; the
@@ -537,7 +537,7 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     let (description, detail) = match args.strategy.kind {
         StrategyKind::Single => {
             let strategy: spec::StrategyRef =
-                spec::hole::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
+                spec::undefined::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
             (
                 "parse and validate a strategy spec",
                 format!("symbol {}", strategy.symbol()),
@@ -545,7 +545,7 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
         }
         StrategyKind::Pairs => {
             let spec: spec::PairsStrategySpec =
-                spec::hole::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
+                spec::undefined::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
             (
                 "parse and validate a pairs strategy spec",
                 format!("pair {} / {}", spec.left, spec.right),
@@ -558,7 +558,7 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             // inside `score:` / `sizing:` is caught here rather than at the
             // first run that reaches a symbol.
             let spec: spec::BasketStrategySpec =
-                spec::hole::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
+                spec::undefined::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
             (
                 "parse and validate a basket strategy spec",
                 format!("selection {:?}", spec.selection),
@@ -567,7 +567,7 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
         StrategyKind::Multi => {
             // Multi-asset parses eagerly like basket, template bodies included.
             let spec: spec::MultiAssetStrategySpec =
-                spec::hole::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
+                spec::undefined::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
             let sides: Vec<&str> = [
                 spec.long.as_ref().map(|_| "long"),
                 spec.short.as_ref().map(|_| "short"),
@@ -587,7 +587,7 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             // each child's own spec typed-parses too, and every template body
             // under a child validates the same way it would standalone.
             let spec: spec::PortfolioSpec =
-                spec::hole::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
+                spec::undefined::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
             let n = spec.children.len();
             (
                 "parse and validate a portfolio strategy spec",
@@ -601,7 +601,7 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     // two different types can never be satisfied by any `--params` value, so
     // that is a hard error; the rest is reported so the user knows what each
     // placeholder has to look like.
-    let observations = spec::hole::take_param_observations();
+    let observations = spec::undefined::take_observations();
     reject_contradictory_params(&observations).with_context(parse_err)?;
 
     if !args.quiet {
@@ -610,7 +610,7 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
         // type line below lists it once.
         let n_undefined = observations
             .iter()
-            .filter(|(o, _, _)| *o == spec::hole::HoleOrigin::Undefined)
+            .filter(|(o, _, _)| *o == spec::undefined::UndefinedOrigin::Undefined)
             .count();
         let params_label =
             params_label_with_holes(&params_base, observations.len() - n_undefined, n_undefined);
@@ -842,7 +842,7 @@ fn params_label(table: &HashMap<String, serde_json::Value>) -> String {
 }
 
 /// `params_label` with a note of how many required placeholders `check` had to
-/// fill with a hole (unset, no `default` — see `spec::hole`). `0` is the common
+/// fill with a hole (unset, no `default` — see `spec::undefined`). `0` is the common
 /// case and adds nothing.
 fn params_label_with_holes(base: &str, n_params: usize, n_undefined: usize) -> String {
     let mut parts = Vec::new();
@@ -870,9 +870,9 @@ fn params_label_with_holes(base: &str, n_params: usize, n_undefined: usize) -> S
 /// something a user can act on — it says exactly what each `--params` value has
 /// to look like.
 fn param_types_label(
-    observations: &[(spec::hole::HoleOrigin, String, Vec<spec::hole::HoleType>)],
+    observations: &[(spec::undefined::UndefinedOrigin, String, Vec<spec::undefined::RequiredType>)],
 ) -> Option<String> {
-    use spec::hole::HoleOrigin;
+    use spec::undefined::UndefinedOrigin;
     if observations.is_empty() {
         return None;
     }
@@ -881,12 +881,14 @@ fn param_types_label(
             .iter()
             .map(|(origin, name, types)| {
                 let types: Vec<&str> = types.iter().map(|t| t.label()).collect();
-                let types = types.join(" | ");
+                let types = types.join("|");
                 match origin {
-                    // A `--params` key: the name is what the user passes.
-                    HoleOrigin::Param => format!("{name}: {types}"),
-                    // An `!undefined`: it has no name, so say where it is.
-                    HoleOrigin::Undefined => format!("!undefined at {name}: {types}"),
+                    // Spelled as the flag the user would actually type, so the
+                    // type is unambiguous: `<number>` is the shape of the value
+                    // that goes there, not a category being asserted about it.
+                    UndefinedOrigin::Param => format!("needs --params {name}=<{types}>"),
+                    // An `!undefined` has no name, so say what it needs and where.
+                    UndefinedOrigin::Undefined => format!("needs <{types}> at {name}"),
                 }
             })
             .collect::<Vec<_>>()
@@ -901,14 +903,14 @@ fn param_types_label(
 /// run whatever the user supplies. Catching it here is the whole point of
 /// inferring hole types rather than just counting them.
 fn reject_contradictory_params(
-    observations: &[(spec::hole::HoleOrigin, String, Vec<spec::hole::HoleType>)],
+    observations: &[(spec::undefined::UndefinedOrigin, String, Vec<spec::undefined::RequiredType>)],
 ) -> anyhow::Result<()> {
-    use spec::hole::HoleOrigin;
+    use spec::undefined::UndefinedOrigin;
     let bad: Vec<String> = observations
         .iter()
         // Only named placeholders can contradict: an `!undefined` is keyed by
         // its own document path, so it is one position and cannot be two types.
-        .filter(|(origin, _, types)| *origin == HoleOrigin::Param && types.len() > 1)
+        .filter(|(origin, _, types)| *origin == UndefinedOrigin::Param && types.len() > 1)
         .map(|(_, name, types)| {
             let types: Vec<&str> = types.iter().map(|t| t.label()).collect();
             format!("`{name}` is used as {}", types.join(" and as "))
