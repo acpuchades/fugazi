@@ -197,9 +197,41 @@ cleanly, non-zero = something's off. In both forms `--quiet` suppresses the
 builds or drives the strategy. So a required `!param` with no `--params` value
 and no `default` doesn't need the real value: it is filled with a typed *hole*
 (a number, string, or bool as the surrounding field demands) so the rest of the
-spec still parses. The report notes how many holes it filled. A malformed
-placeholder (e.g. no `key`) is still a genuine error — that's a format mistake,
-not a missing value.
+spec still parses. A malformed placeholder (e.g. no `key`) is still a genuine
+error — that's a format mistake, not a missing value.
+
+Within that constraint it is as strict as it can be. It catches:
+
+- **Unknown tags and misspelled or missing fields**, anywhere in the document —
+  including inside a basket's `score:` / `sizing:`, a multi-asset side's
+  `enter:`, and a portfolio's `weights:`. Those are deferred templates that only
+  instantiate per-symbol at run time, but their *shape* doesn't depend on the
+  symbol, so `check` parses each with its `!arg`s held as holes.
+- **Input/output type mismatches between tags.** `!sma` needs a `Real` source,
+  `!atr` a `Candle` one, `!close` an `Atom`; a violation is reported against the
+  innermost offending node rather than surfacing as an assertion mid-run:
+
+  ```
+  !sma's `source` expects a Real source, but !value produces Str
+  ```
+
+- **Contradictory placeholders.** A `!param` required to be a number in one
+  position and a string in another can't be satisfied by any `--params` value,
+  so it is rejected outright.
+
+And it reports each unresolved placeholder's **inferred type**, so you know what
+every `--params` value has to look like before running anything:
+
+```
+params  (defaults) (4 unset placeholders held as holes)
+  FAST: number, LEVEL: number, SLOW: number, SYMBOL: string
+```
+
+Two things it cannot decide without data, and therefore skips rather than
+guesses: an expression rooted in `!get { key }` (the column's type lives in the
+overlay schema, and there is no `--series` at check time), and a placeholder
+standing in for a whole expression. Skipping is sound — an unknown never fails a
+check, so the pass has no false positives.
 
 #### `check overlay`
 
