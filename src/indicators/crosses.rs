@@ -94,7 +94,7 @@ where
 
     fn warm_up_period(&self) -> usize {
         // Same as the composed `And<Gt, Change<Gt>>`: max of the operands,
-        // clamped to 1 so a `warm_up = 0` operand (e.g. a `Const`) still
+        // clamped to 1 so a `warm_up = 0` operand (e.g. a `ValueBool`) still
         // needs one update before the prev slot can be compared against,
         // plus 1 for the edge detection.
         self.lhs

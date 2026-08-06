@@ -4,7 +4,7 @@
 //! signal, and (c) reset replays byte-identically like the single-asset
 //! strategies do.
 
-use fugazi::indicators::{Close, Const, Pick, Sma};
+use fugazi::indicators::{Close, ValueBool, Pick, Sma};
 use fugazi::prelude::*;
 use fugazi::strategies::PairsStrategy;
 use fugazi::types::{Selector, Snapshot};
@@ -153,8 +153,8 @@ fn short_spread_legs_are_the_mirror_of_long_spread_legs() {
     // equity — the exact mirror of the long-spread entry.
     let bars = vec![(flat_bar(100.0), flat_bar(50.0)); 2];
     let strat = PairsStrategy::new(LEFT, RIGHT).short_spread_on(
-        Const::<Snapshot<&'static str>>::new(true),
-        Const::<Snapshot<&'static str>>::new(false),
+        ValueBool::<Snapshot<&'static str>>::new(true),
+        ValueBool::<Snapshot<&'static str>>::new(false),
     );
     let wallet = run(strat, &bars);
     assert_eq!(wallet.orders().len(), 2);
@@ -179,8 +179,8 @@ fn the_short_side_stop_fires_on_a_rising_spread() {
         .collect();
     let strat = PairsStrategy::new(LEFT, RIGHT)
         .short_spread_on(
-            Const::<Snapshot<&'static str>>::new(true),
-            Const::<Snapshot<&'static str>>::new(false),
+            ValueBool::<Snapshot<&'static str>>::new(true),
+            ValueBool::<Snapshot<&'static str>>::new(false),
         )
         .short_spread_stop_loss(fugazi::indicators::Value::<Snapshot<&'static str>>::new(
             60.0,
@@ -218,11 +218,11 @@ fn the_opposite_entry_reverses_an_open_pair() {
     let strat = PairsStrategy::new(LEFT, RIGHT)
         .long_spread_on(
             spread().below(60.0),
-            Const::<Snapshot<&'static str>>::new(false),
+            ValueBool::<Snapshot<&'static str>>::new(false),
         )
         .short_spread_on(
             spread().above(60.0),
-            Const::<Snapshot<&'static str>>::new(false),
+            ValueBool::<Snapshot<&'static str>>::new(false),
         );
     let wallet = run(strat, &bars);
     // First fills are the long-spread pair, later ones flip to the mirror.
@@ -283,8 +283,8 @@ fn enter_dollar_neutral_sizes_legs_at_half_equity_each() {
     // each, so the gross exposure is ~1.0× starting equity.
     let bars = vec![(flat_bar(100.0), flat_bar(50.0)); 2];
     let strat = PairsStrategy::new(LEFT, RIGHT).on(
-        Const::<Snapshot<&'static str>>::new(true),
-        Const::<Snapshot<&'static str>>::new(false),
+        ValueBool::<Snapshot<&'static str>>::new(true),
+        ValueBool::<Snapshot<&'static str>>::new(false),
     );
     let wallet = run(strat, &bars);
     // One fill per leg.

@@ -868,7 +868,7 @@ candle-field leaves.
 | `!log` | `{ source = close, base = e }` | logarithm of `source`; `None` on non-positive samples |
 | `!lag`, `!diff`, `!ratio`, `!roc` | `{ source = close, periods }` | lookback vs. `periods` bars ago |
 | `!rolling_max`, `!rolling_min` | `{ source = close, period }` | rolling extremum over `period` bars |
-| `!if_else` | `{ cond, if_true, if_false }` | ternary: `cond` is a **signal**, the branches are sources — see below |
+| `!if_else` | `{ cond, then, otherwise }` | ternary: `cond` is a **signal**, the branches are sources — see below |
 | `!unstable` | `{ source }` | passthrough that reports no unstable period, so the readiness gate stops waiting for this subtree's IIR tail (the signal-side twin is `!unstable { signal }`) |
 | `!resample` | `{ every, inner, source = !current }` | aggregate every N candles of `source` (a `Candle`-output stream, defaulting to `!current`) into one higher-timeframe candle and run `inner` (any Real source) over that HTF candle; emits `inner`'s output on each completed bucket and `None` in between. `inner` is **required** — no default |
 | `!latch` | `{ source }` | hold the last `Some` output of `source`; `None` before the first arrives |
@@ -882,8 +882,8 @@ sources:
 # An ADX-gated momentum score: the ROC when the trend is strong, 0 otherwise.
 !if_else
   cond:     !above { source: !adx { period: 14 }, level: 25 }
-  if_true:  !roc   { source: close, periods: 20 }
-  if_false: !value 0
+  then:  !roc   { source: close, periods: 20 }
+  otherwise: !value 0
 ```
 
 All three sources advance every bar — the branch that didn't fire keeps warming

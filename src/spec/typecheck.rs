@@ -344,8 +344,8 @@ fn children(spec: &ExprSpec) -> Vec<(&'static str, Expect, &ExprSpec)> {
         ],
 
         IfElse {
-            if_true, if_false, ..
-        } => vec![("if_true", REAL, if_true), ("if_false", REAL, if_false)],
+            then, otherwise, ..
+        } => vec![("then", REAL, then), ("otherwise", REAL, otherwise)],
 
         Match { on, cases, default } => {
             let mut out = vec![("on", REAL_OR_STR, &**on), ("default", REAL, &**default)];
@@ -499,7 +499,7 @@ mod tests {
             "!latch { source: close }",
             "!unstable { source: close }",
             "!resample { every: 2, inner: !sma { period: 2 } }",
-            "!if_else { cond: !value true, if_true: close, if_false: close }",
+            "!if_else { cond: !value true, then: close, otherwise: close }",
             "!correlation { lhs: close, rhs: close, period: 3 }",
             "!vol_target { target: 0.2, window: 3, bars_per_year: 365.0 }",
             "!drawdown",

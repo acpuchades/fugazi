@@ -2185,9 +2185,9 @@ mod tests {
 
     #[test]
     fn rebalance_on_never_freezes_the_basket() {
-        // With `rebalance_on(Const::new(false))`, the basket never runs
+        // With `rebalance_on(ValueBool::new(false))`, the basket never runs
         // selection. No orders at all.
-        use crate::indicators::Const;
+        use crate::indicators::ValueBool;
         let mut strat: BasketStrategy<&'static str> =
             BasketStrategy::with_initial_equity(10_000.0)
                 .scored_by(|sym: &&'static str| {
@@ -2195,7 +2195,7 @@ mod tests {
                 })
                 .sized_by(|_| equal_weight::<&'static str>(2))
                 .top_bottom(1, 1)
-                .rebalance_on(Const::<Snapshot<&'static str>>::new(false));
+                .rebalance_on(ValueBool::<Snapshot<&'static str>>::new(false));
         let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
         for _ in 0..5 {
             let s = snap(&[("A", 100.0), ("B", 50.0)]);

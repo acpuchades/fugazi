@@ -10,9 +10,9 @@ use crate::types::Real;
 
 /// A three-source ternary. Reads `condition` each bar and returns:
 ///
-/// * `Some(if_true.value())` when the condition is `Some(true)` — which may
+/// * `Some(then.value())` when the condition is `Some(true)` — which may
 ///   itself be `None` if that branch is still warming;
-/// * `Some(if_false.value())` on `Some(false)`, likewise;
+/// * `Some(otherwise.value())` on `Some(false)`, likewise;
 /// * `None` when the condition is `None` — unsettled control propagates
 ///   the same way it does elsewhere in the crate.
 ///
@@ -59,8 +59,8 @@ use crate::types::Real;
 #[derive(Debug, Clone)]
 pub struct IfElse<Cond, T, F> {
     condition: Cond,
-    if_true: T,
-    if_false: F,
+    then: T,
+    otherwise: F,
     /// Latest selected value. `None` while the condition is `None`, or
     /// while the currently-selected branch is `None`.
     pub value: Option<Real>,
@@ -68,12 +68,12 @@ pub struct IfElse<Cond, T, F> {
 
 impl<Cond, T, F> IfElse<Cond, T, F> {
     /// Build a ternary that reads `condition` each bar and returns
-    /// `if_true`'s or `if_false`'s value.
-    pub fn new(condition: Cond, if_true: T, if_false: F) -> Self {
+    /// `then`'s or `otherwise`'s value.
+    pub fn new(condition: Cond, then: T, otherwise: F) -> Self {
         Self {
             condition,
-            if_true,
-            if_false,
+            then,
+            otherwise,
             value: None,
         }
     }
@@ -93,8 +93,8 @@ where
         // Advance all three unconditionally so a branch that doesn't fire
         // this bar keeps its warm-up progressing.
         let cond = self.condition.update(input.clone());
-        let true_v = self.if_true.update(input.clone());
-        let false_v = self.if_false.update(input);
+        let true_v = self.then.update(input.clone());
+        let false_v = self.otherwise.update(input);
         // Natural semantics: `None` on `None` cond, otherwise the selected
         // branch's reading (which may itself still be `None` while warming).
         self.value = match cond {
@@ -112,8 +112,8 @@ where
     fn warm_up_period(&self) -> usize {
         self.condition
             .warm_up_period()
-            .max(self.if_true.warm_up_period())
-            .max(self.if_false.warm_up_period())
+            .max(self.then.warm_up_period())
+            .max(self.otherwise.warm_up_period())
     }
 
     fn unstable_period(&self) -> usize {
@@ -123,15 +123,15 @@ where
         let stable = self
             .condition
             .stable_period()
-            .max(self.if_true.stable_period())
-            .max(self.if_false.stable_period());
+            .max(self.then.stable_period())
+            .max(self.otherwise.stable_period());
         stable - self.warm_up_period()
     }
 
     fn reset(&mut self) {
         self.condition.reset();
-        self.if_true.reset();
-        self.if_false.reset();
+        self.then.reset();
+        self.otherwise.reset();
         self.value = None;
     }
 }
@@ -224,8 +224,8 @@ mod tests {
 
     #[test]
     fn selected_branch_none_propagates() {
-        // Condition true → we pick if_true; if_true is an SMA-5, still warming,
-        // so the ternary reads None even though if_false would have been Some.
+        // Condition true → we pick then; then is an SMA-5, still warming,
+        // so the ternary reads None even though otherwise would have been Some.
         let mut ind = IfElse::new(
             Value::<Real>::new(1.0).above(0.5),
             Sma::new(crate::indicators::Identity::<Real>::new(), 5),
@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn non_selected_branch_still_advances() {
         // Both branches are warming SMA-3s. Toggle the condition each bar via
-        // AtBar (Some(false) until bar 4, then Some(true)). The if_true branch
+        // AtBar (Some(false) until bar 4, then Some(true)). The then branch
         // isn't consulted until bar 4, but by that bar it should read Some —
         // its warm-up has advanced silently.
         let mut ind = IfElse::new(
@@ -249,23 +249,23 @@ mod tests {
             Sma::new(crate::indicators::Identity::<Real>::new(), 3),
             Sma::new(crate::indicators::Identity::<Real>::new(), 3),
         );
-        // Bars 1..=3: cond is false, so we read if_false (SMA-3) — warming.
+        // Bars 1..=3: cond is false, so we read otherwise (SMA-3) — warming.
         assert_eq!(ind.update(10.0), None);
         assert_eq!(ind.update(20.0), None);
-        assert_eq!(ind.update(30.0), Some(20.0)); // if_false's SMA-3 = (10+20+30)/3
-        // Bar 4: cond flips to true; if_true has also seen bars 1..=3, so its
+        assert_eq!(ind.update(30.0), Some(20.0)); // otherwise's SMA-3 = (10+20+30)/3
+        // Bar 4: cond flips to true; then has also seen bars 1..=3, so its
         // SMA-3 is also settled.
         assert_eq!(ind.update(40.0), Some((20.0 + 30.0 + 40.0) / 3.0));
     }
 
     #[test]
     fn publishes_early_when_selected_branch_warms_before_the_max() {
-        // Cond is fast (Const true), if_true is slow (SMA-5), if_false is
+        // Cond is fast (ValueBool true), then is slow (SMA-5), otherwise is
         // fast (Value). `warm_up_period()` is 5, but the ternary picks
-        // `if_false` and can publish on bar 1 — the "actual first Some
+        // `otherwise` and can publish on bar 1 — the "actual first Some
         // can arrive earlier than warm_up_period" contract.
         let mut ind = IfElse::new(
-            Value::<Real>::new(1.0).below(0.5), // Const false
+            Value::<Real>::new(1.0).below(0.5), // ValueBool false
             Sma::new(crate::indicators::Identity::<Real>::new(), 5),
             Value::<Real>::new(-1.0),
         );
@@ -275,7 +275,7 @@ mod tests {
 
     #[test]
     fn warm_up_is_max_of_three_sources() {
-        // Cond warms in 1, if_true in 5, if_false in 2 → overall = 5.
+        // Cond warms in 1, then in 5, otherwise in 2 → overall = 5.
         let ind = IfElse::new(
             Value::<Real>::new(1.0).above(0.5), // warm-up 0
             Sma::new(crate::indicators::Identity::<Real>::new(), 5), // 5

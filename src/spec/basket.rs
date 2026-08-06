@@ -887,7 +887,7 @@ mod tests {
 
     #[test]
     fn rebalance_on_never_freezes_the_basket() {
-        // `!never` is a Const::false — the basket never rebalances.
+        // `!never` is a ValueBool::false — the basket never rebalances.
         let yaml = r#"
             selection: !top_bottom { longs: 1, shorts: 1 }
             score: !close { source: !pick { symbol: !arg SYM } }

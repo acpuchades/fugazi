@@ -322,8 +322,8 @@ pub trait BoolIndicatorExt: Indicator<Output = bool> {
         Unstable::new(self)
     }
 
-    /// Ternary: reads `self` each bar and yields `if_true`'s value on
-    /// [`true`], `if_false`'s on [`false`], `None` when `self` reads `None`.
+    /// Ternary: reads `self` each bar and yields `then`'s value on
+    /// [`true`], `otherwise`'s on [`false`], `None` when `self` reads `None`.
     /// All three sources are advanced every bar (a branch that doesn't fire
     /// this bar still warms up in the background), matching how
     /// [`Combine`](crate::indicators::Combine) treats its two operands.
@@ -333,14 +333,14 @@ pub trait BoolIndicatorExt: Indicator<Output = bool> {
     /// momentum score in one expression.
     ///
     /// See [`IfElse`] for the full semantics.
-    fn if_else<T, F>(self, if_true: T, if_false: F) -> IfElse<Self, T, F>
+    fn if_else<T, F>(self, then: T, otherwise: F) -> IfElse<Self, T, F>
     where
         Self: Sized,
         T: Indicator<Input = Self::Input, Output = Real>,
         F: Indicator<Input = Self::Input, Output = Real>,
         Self::Input: Clone,
     {
-        IfElse::new(self, if_true, if_false)
+        IfElse::new(self, then, otherwise)
     }
 }
 
@@ -349,7 +349,7 @@ impl<I: Indicator<Output = bool> + ?Sized> BoolIndicatorExt for I {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::logic::Const;
+    use crate::indicators::logic::ValueBool;
 
     /// Emits a scripted sequence of booleans, for exercising combinators.
     struct Script {
@@ -390,22 +390,22 @@ mod tests {
     #[test]
     fn boolean_combinators() {
         assert_eq!(
-            Const::<()>::new(true).and(Const::new(true)).update(()),
+            ValueBool::<()>::new(true).and(ValueBool::new(true)).update(()),
             Some(true)
         );
         assert_eq!(
-            Const::<()>::new(true).and(Const::new(false)).update(()),
+            ValueBool::<()>::new(true).and(ValueBool::new(false)).update(()),
             Some(false)
         );
         assert_eq!(
-            Const::<()>::new(false).or(Const::new(true)).update(()),
+            ValueBool::<()>::new(false).or(ValueBool::new(true)).update(()),
             Some(true)
         );
         assert_eq!(
-            Const::<()>::new(true).xor(Const::new(false)).update(()),
+            ValueBool::<()>::new(true).xor(ValueBool::new(false)).update(()),
             Some(true)
         );
-        assert_eq!(Const::<()>::new(false).not().update(()), Some(true));
+        assert_eq!(ValueBool::<()>::new(false).not().update(()), Some(true));
     }
 
     #[test]

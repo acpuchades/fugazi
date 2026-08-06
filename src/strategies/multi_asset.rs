@@ -33,7 +33,7 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 
-use crate::indicators::{Book, Const, Position, Value};
+use crate::indicators::{Book, ValueBool, Position, Value};
 use crate::prelude::*;
 use crate::strategies::basket::{AllOf, AnyOf, Floating, Universe};
 use crate::types::Snapshot;
@@ -270,7 +270,7 @@ pub struct MultiAssetStrategy<Sym> {
     states: HashMap<Sym, PerAssetState<Sym>>,
     /// The rebalance gate: on bars where it fires, `trade` resizes every
     /// held per-symbol position to its current sizing target. Default is
-    /// `Const::new(false)` — never rebalance — so a strategy that
+    /// `ValueBool::new(false)` — never rebalance — so a strategy that
     /// doesn't wire `.rebalance_on(...)` behaves exactly as before (sizing
     /// only read on transitions).
     rebalance: RebalanceSignal<Sym>,
@@ -303,19 +303,19 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
     pub fn with_initial_equity(initial_equity: Real) -> Self {
         Self {
             long_factory: Box::new(|_sym: &Sym| {
-                let s: SignalChain<Sym> = Box::new(Const::<Snapshot<Sym>>::new(false));
+                let s: SignalChain<Sym> = Box::new(ValueBool::<Snapshot<Sym>>::new(false));
                 s
             }),
             close_long_factory: Box::new(|_sym: &Sym| {
-                let s: SignalChain<Sym> = Box::new(Const::<Snapshot<Sym>>::new(false));
+                let s: SignalChain<Sym> = Box::new(ValueBool::<Snapshot<Sym>>::new(false));
                 s
             }),
             short_factory: Box::new(|_sym: &Sym| {
-                let s: SignalChain<Sym> = Box::new(Const::<Snapshot<Sym>>::new(false));
+                let s: SignalChain<Sym> = Box::new(ValueBool::<Snapshot<Sym>>::new(false));
                 s
             }),
             close_short_factory: Box::new(|_sym: &Sym| {
-                let s: SignalChain<Sym> = Box::new(Const::<Snapshot<Sym>>::new(false));
+                let s: SignalChain<Sym> = Box::new(ValueBool::<Snapshot<Sym>>::new(false));
                 s
             }),
             long_stop_factory: None,
@@ -327,7 +327,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
                 s
             }),
             states: HashMap::new(),
-            rebalance: Box::new(Const::<Snapshot<Sym>>::new(false)),
+            rebalance: Box::new(ValueBool::<Snapshot<Sym>>::new(false)),
             universe: Box::new(Floating),
             book: Book::new(initial_equity),
         }
@@ -970,8 +970,8 @@ mod tests {
         let mut strat: MultiAssetStrategy<&'static str> =
             MultiAssetStrategy::with_initial_equity(1_000.0)
                 .long_on(
-                    |_sym: &&'static str| crate::indicators::Const::<Snapshot<&'static str>>::new(true),
-                    |_sym: &&'static str| crate::indicators::Const::<Snapshot<&'static str>>::new(false),
+                    |_sym: &&'static str| crate::indicators::ValueBool::<Snapshot<&'static str>>::new(true),
+                    |_sym: &&'static str| crate::indicators::ValueBool::<Snapshot<&'static str>>::new(false),
                 )
                 .position_sizing(|_| Value::<Snapshot<&'static str>>::new(0.5))
                 .long_stop_loss(|_sym: &&'static str, pos: &Position| {
@@ -1009,8 +1009,8 @@ mod tests {
         let mut strat: MultiAssetStrategy<&'static str> =
             MultiAssetStrategy::with_initial_equity(10_000.0)
                 .long_on(
-                    |_sym: &&'static str| crate::indicators::Const::<Snapshot<&'static str>>::new(true),
-                    |_sym: &&'static str| crate::indicators::Const::<Snapshot<&'static str>>::new(false),
+                    |_sym: &&'static str| crate::indicators::ValueBool::<Snapshot<&'static str>>::new(true),
+                    |_sym: &&'static str| crate::indicators::ValueBool::<Snapshot<&'static str>>::new(false),
                 )
                 .position_sizing(|_| Value::<Snapshot<&'static str>>::new(0.25));
         let book = strat.book();
@@ -1068,12 +1068,12 @@ mod tests {
         // never-rebalance gate, only the entry's size is used and no
         // resize orders fire. Verifies pre-refactor behavior is
         // preserved when `.rebalance_on(...)` isn't called.
-        use crate::indicators::Const;
+        use crate::indicators::ValueBool;
         let mut strat: MultiAssetStrategy<&'static str> =
             MultiAssetStrategy::with_initial_equity(10_000.0)
                 .long_on(
-                    |_sym: &&'static str| Const::<Snapshot<&'static str>>::new(true),
-                    |_sym: &&'static str| Const::<Snapshot<&'static str>>::new(false),
+                    |_sym: &&'static str| ValueBool::<Snapshot<&'static str>>::new(true),
+                    |_sym: &&'static str| ValueBool::<Snapshot<&'static str>>::new(false),
                 )
                 .position_sizing(|_| Value::<Snapshot<&'static str>>::new(0.25));
         let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
@@ -1099,12 +1099,12 @@ mod tests {
         // steady prices, the resize is idempotent — wallet.set at the
         // same target size / same side just re-affirms the target
         // without changing units.
-        use crate::indicators::{Const, Every};
+        use crate::indicators::{ValueBool, Every};
         let mut strat: MultiAssetStrategy<&'static str> =
             MultiAssetStrategy::with_initial_equity(10_000.0)
                 .long_on(
-                    |_sym: &&'static str| Const::<Snapshot<&'static str>>::new(true),
-                    |_sym: &&'static str| Const::<Snapshot<&'static str>>::new(false),
+                    |_sym: &&'static str| ValueBool::<Snapshot<&'static str>>::new(true),
+                    |_sym: &&'static str| ValueBool::<Snapshot<&'static str>>::new(false),
                 )
                 .position_sizing(|_| Value::<Snapshot<&'static str>>::new(0.5))
                 .rebalance_on(Every::<Snapshot<&'static str>>::new(1));
@@ -1128,7 +1128,7 @@ mod tests {
         // Verify the rebalance gate is orthogonal to the entry / exit
         // signals: even with `rebalance_on(!never)`, an exit signal
         // still flattens the position.
-        use crate::indicators::Const;
+        use crate::indicators::ValueBool;
         let mut strat: MultiAssetStrategy<&'static str> =
             MultiAssetStrategy::with_initial_equity(10_000.0)
                 .long_on(
@@ -1136,7 +1136,7 @@ mod tests {
                     |sym: &&'static str| close_of(sym).lt(Value::new(30.0)),
                 )
                 .position_sizing(|_| Value::<Snapshot<&'static str>>::new(0.5))
-                .rebalance_on(Const::<Snapshot<&'static str>>::new(false));
+                .rebalance_on(ValueBool::<Snapshot<&'static str>>::new(false));
         let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
         tick(&mut strat, &mut wallet, &[("A", 100.0)]);
         tick(&mut strat, &mut wallet, &[("A", 100.0)]);

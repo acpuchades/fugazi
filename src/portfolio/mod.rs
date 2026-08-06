@@ -70,7 +70,7 @@
 //! [`rebalance_on`](PortfolioBuilder::rebalance_on) gate. Two policies
 //! ship: [`Fixed`](policy::Fixed) and [`EqualWeight`](policy::EqualWeight).
 //!
-//! The gate is opt-in — its default (`Const::false`) means "never
+//! The gate is opt-in — its default (`ValueBool::false`) means "never
 //! rebalance", so a portfolio with no explicit
 //! [`rebalance_on`](PortfolioBuilder::rebalance_on) call behaves exactly
 //! as the pre-rebalance shape (weights set at build, then drift with
@@ -139,7 +139,7 @@ use std::rc::Rc;
 
 use crate::costs::TradingCosts;
 use crate::indicator::Indicator;
-use crate::indicators::{Book, Const};
+use crate::indicators::{Book, ValueBool};
 use crate::strategy::Strategy;
 use crate::types::{Real, Snapshot};
 use crate::wallet::{Order, Wallet};
@@ -188,7 +188,7 @@ pub struct Portfolio<Sym> {
     bars_seen: usize,
     /// The **rebalance gate**: on each bar `trade()` runs one rebalance
     /// cycle only when this signal reads `true`. Default is
-    /// `Const::false` — never rebalance, matching pre-rebalance v1
+    /// `ValueBool::false` — never rebalance, matching pre-rebalance v1
     /// behavior. Explicit opt-in via
     /// [`rebalance_on`](PortfolioBuilder::rebalance_on).
     rebalance: RebalanceSignal<Sym>,
@@ -394,7 +394,7 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
         }
 
         // Rebalance gate: skip the whole rebalance step on bars where the
-        // signal doesn't fire. Default gate is `Const::false` so this is
+        // signal doesn't fire. Default gate is `ValueBool::false` so this is
         // a no-op unless the caller wired a signal via
         // `rebalance_on(...)`.
         if !self.rebalance.value().unwrap_or(false) {
@@ -635,7 +635,7 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
 
     /// Install the **rebalance gate** — a boolean signal that decides,
     /// on each bar, whether [`trade`](Strategy::trade) runs one rebalance
-    /// cycle after children have traded. Defaults to `Const::false` —
+    /// cycle after children have traded. Defaults to `ValueBool::false` —
     /// **never rebalance** (weights stay at build-time allocation and
     /// drift with per-child P&L).
     ///
@@ -773,7 +773,7 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
         let subs = seed_subs::<Sym>(&allocations, costs.as_ref());
         let inner = Rc::new(RefCell::new(PortfolioInner::new(subs)));
         let rebalance: RebalanceSignal<Sym> =
-            rebalance.unwrap_or_else(|| Box::new(Const::<Snapshot<Sym>>::new(false)));
+            rebalance.unwrap_or_else(|| Box::new(ValueBool::<Snapshot<Sym>>::new(false)));
         // Aggregate book: use the pre-supplied handle when a caller wired
         // one via `aggregate_book(...)` (typically because they needed
         // the handle before `build()` to wire per-child links);
