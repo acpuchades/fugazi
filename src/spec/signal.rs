@@ -408,7 +408,7 @@ impl TryFrom<serde_norway::Value> for SignalSpec {
         // resolves to an entire condition). Only present under `check`; a
         // constant `false` is a valid boolean signal, enough to validate the
         // surrounding shape. (See the mirror `ExprSpec::TryFrom`.)
-        if crate::spec::hole::is_hole(&v) {
+        if crate::spec::undefined::is_undefined(&v) {
             return Ok(SignalSpec::Value(false));
         }
 
@@ -501,7 +501,7 @@ impl TryFrom<serde_norway::Value> for SignalSpec {
             }
             _ => None,
         };
-        let raw: SignalSpecRaw = crate::spec::hole::from_value(normalised)
+        let raw: SignalSpecRaw = crate::spec::undefined::from_value(normalised)
             .map_err(|e| match &tag {
                 // A ` > `-separated path, built inside-out as the error rises.
                 // Rendered as one `at:` line by `diagnostics::split_trail`; if

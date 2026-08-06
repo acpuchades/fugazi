@@ -271,11 +271,11 @@ fn placeholder_parts(body: &Value) -> Result<(&str, Option<&Value>)> {
 }
 
 /// [`substitute`] for `fugazi check`: a required placeholder with no `--params`
-/// value and no `default` becomes a [`hole`](crate::spec::hole) sentinel to
+/// value and no `default` becomes an [undefined](crate::spec::undefined) sentinel to
 /// validate *around*, rather than the hard error [`substitute`] raises. A
 /// malformed placeholder (no string `key`) still errors — that's a genuine
 /// format mistake `check` should catch. Returns the rewritten tree and the
-/// number of holes introduced.
+/// number of undefined placeholders introduced.
 pub fn substitute_for_check(
     value: Value,
     params: &HashMap<String, Value>,
@@ -299,7 +299,7 @@ fn substitute_for_check_inner(
         // entry, and never look like one placeholder demanded at two types.
         Value::Object(map) if map.len() == 1 && map.contains_key(UNDEFINED_KEY) => {
             *holes += 1;
-            Ok(crate::spec::hole::undefined_sentinel(&path.join(".")))
+            Ok(crate::spec::undefined::undefined_sentinel(&path.join(".")))
         }
         Value::Object(map) if map.len() == 1 && map.contains_key("param") => {
             let (key, default) = placeholder_parts(&map["param"])?;
@@ -307,7 +307,7 @@ fn substitute_for_check_inner(
                 resolve(&map["param"], params)
             } else {
                 *holes += 1;
-                Ok(crate::spec::hole::sentinel(key))
+                Ok(crate::spec::undefined::sentinel(key))
             }
         }
         Value::Object(map) => {
@@ -448,8 +448,8 @@ mod tests {
     fn check(yaml: &str, pairs: &[&str]) -> Result<(SingleStrategySpec, usize)> {
         let value = yaml_to_json(serde_norway::from_str(yaml).unwrap()).unwrap();
         let (value, holes) = substitute_for_check(value, &table_of(pairs))?;
-        let _guard = crate::spec::hole::check_mode();
-        let spec = crate::spec::hole::from_json_value(value).map_err(anyhow::Error::new)?;
+        let _guard = crate::spec::undefined::check_mode();
+        let spec = crate::spec::undefined::from_json_value(value).map_err(anyhow::Error::new)?;
         Ok((spec, holes))
     }
 
@@ -521,7 +521,7 @@ mod tests {
         assert_eq!(holes, 1);
         let hole = &out["long"]["enter"]["sma"]["period"];
         assert_eq!(
-            hole[crate::spec::hole::UNDEFINED_HOLE_KEY],
+            hole[crate::spec::undefined::UNDEFINED_KEY],
             json!("long.enter.sma.period")
         );
     }
@@ -537,7 +537,7 @@ mod tests {
         });
         let (out, holes) = substitute_for_check(input, &HashMap::new()).unwrap();
         assert_eq!(holes, 2);
-        let key = crate::spec::hole::UNDEFINED_HOLE_KEY;
+        let key = crate::spec::undefined::UNDEFINED_KEY;
         assert_eq!(out["a"][key], json!("a"));
         assert_eq!(out["b"]["c"][key], json!("b.c"));
     }
@@ -547,7 +547,7 @@ mod tests {
         let input = json!({"cases": [{"when": {"undefined": null}}]});
         let (out, _) = substitute_for_check(input, &HashMap::new()).unwrap();
         assert_eq!(
-            out["cases"][0]["when"][crate::spec::hole::UNDEFINED_HOLE_KEY],
+            out["cases"][0]["when"][crate::spec::undefined::UNDEFINED_KEY],
             json!("cases.[0].when")
         );
     }

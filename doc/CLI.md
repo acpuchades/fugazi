@@ -232,8 +232,15 @@ every `--params` value has to look like before running anything:
 
 ```
 params  (defaults) (4 unset placeholders)
-  FAST: number, LEVEL: number, SLOW: number, SYMBOL: string
+needs --params FAST=<number>
+needs --params LEVEL=<number>
+needs --params SLOW=<number>
+needs --params SYMBOL=<string>
 ```
+
+The `<…>` is the *shape of the value that goes there* — inferred from the field
+the placeholder lands in, since a `period` wants a number and a `symbol` wants a
+string.
 
 ##### `!undefined` — a deliberate hole
 
@@ -252,8 +259,8 @@ long:
 
 ```
 params  (defaults) (2 !undefined)
-  !undefined at long.enter.above.source.sma.period: number
-  !undefined at long.enter.above.level: number
+needs <number> at long.enter.above.source.sma.period
+needs <number> at long.enter.above.level
 
 result
   status  ok · symbol BTC
