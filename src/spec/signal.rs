@@ -491,8 +491,21 @@ impl TryFrom<serde_norway::Value> for SignalSpec {
             return Ok(rewritten);
         }
 
-        let raw: SignalSpecRaw =
-            crate::spec::hole::from_value(normalised).map_err(|e| e.to_string())?;
+        // Same error breadcrumb as `ExprSpec::parse_unchecked` — so a trail
+        // through a mixed signal/source tree stays unbroken across the two
+        // bridges (`!all` → `!above` → `!add` → …).
+        let tag = match &normalised {
+            serde_norway::Value::Tagged(t) => {
+                let s = t.tag.to_string();
+                Some(s.strip_prefix('!').unwrap_or(&s).to_string())
+            }
+            _ => None,
+        };
+        let raw: SignalSpecRaw = crate::spec::hole::from_value(normalised)
+            .map_err(|e| match &tag {
+                Some(t) => format!("in !{t}: {e}"),
+                None => e.to_string(),
+            })?;
         Ok(raw.into())
     }
 }

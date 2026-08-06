@@ -440,41 +440,24 @@ pub fn check_immediate(spec: &ExprSpec) -> Result<(), String> {
     Ok(())
 }
 
-/// Walk `spec`, reporting the first provable input/output type mismatch.
-///
-/// `path` is the dotted position of `spec` in the enclosing document, used to
-/// point at the offending node (`long.enter.source`).
-pub fn check(spec: &ExprSpec, path: &str) -> Result<(), String> {
-    for (slot, expect, child) in children(spec) {
-        let child_path = format!("{path}.{slot}");
-        // Recurse first: the innermost mismatch is the informative one.
-        check(child, &child_path)?;
-        // An empty `OneOf` is the passthrough marker — nothing is demanded.
-        if matches!(expect, Expect::OneOf([])) {
-            continue;
-        }
-        // `None` is *unknown*, never *invalid* — see the module docs.
-        let Some(actual) = output_type(child) else {
-            continue;
-        };
-        if !expect.admits(actual) {
-            return Err(format!(
-                "at `{child_path}`: expected a {} source, but this expression produces {actual}",
-                expect.describe(),
-            ));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::indicators::{Book, Position};
     use crate::types::Schema;
 
+    /// Parse **without** the type check, so these tests can construct the
+    /// ill-typed trees they exercise — the public parse path rejects them now.
     fn parse(yaml: &str) -> ExprSpec {
-        serde_norway::from_str(yaml).unwrap_or_else(|e| panic!("parsing {yaml:?}: {e}"))
+        let value: serde_norway::Value =
+            serde_norway::from_str(yaml).unwrap_or_else(|e| panic!("parsing {yaml:?}: {e}"));
+        ExprSpec::parse_unchecked(value).unwrap_or_else(|e| panic!("parsing {yaml:?}: {e}"))
+    }
+
+    /// Parse through the **public** path, which applies the check.
+    fn parse_checked(yaml: &str) -> Result<ExprSpec, String> {
+        let value: serde_norway::Value = serde_norway::from_str(yaml).expect("valid YAML");
+        ExprSpec::try_from(value)
     }
 
     /// The drift guard: for a representative of every classification, the type
@@ -638,7 +621,7 @@ mod tests {
             }
             _ => return None,
         }
-        serde_norway::from_value::<ExprSpec>(Y::Tagged(tagged)).ok()
+        ExprSpec::parse_unchecked(Y::Tagged(tagged)).ok()
     }
 
     /// The undecidable cases must report `None` — *skip*, not a wrong guess.
@@ -663,67 +646,56 @@ mod tests {
             "!add { lhs: !sma { period: 2 }, rhs: !ema { period: 3 } }",
             "!keltner_upper { ema_period: 3, atr_period: 3, multiplier: 2.0, source: close, candle_source: !current {} }",
         ] {
-            assert!(
-                check(&parse(yaml), "root").is_ok(),
-                "{yaml} should type-check"
-            );
+            assert!(parse_checked(yaml).is_ok(), "{yaml} should type-check");
         }
     }
 
     #[test]
     fn rejects_a_str_source_where_real_is_required() {
-        let err = check(&parse("!sma { period: 3, source: !value bull }"), "root")
+        let err = parse_checked("!sma { period: 3, source: !value bull }")
             .expect_err("Str into a Real slot");
-        assert!(err.contains("expected a Real source"), "{err}");
+        assert!(err.contains("!sma's `source`"), "{err}");
+        assert!(err.contains("expects a Real source"), "{err}");
         assert!(err.contains("produces Str"), "{err}");
-        assert!(err.contains("root.source"), "{err}");
     }
 
     #[test]
     fn rejects_a_candle_source_where_real_is_required() {
-        let err = check(&parse("!add { lhs: !current {}, rhs: !value 1.0 }"), "root")
+        let err = parse_checked("!add { lhs: !current {}, rhs: !value 1.0 }")
             .expect_err("Candle into a Real slot");
+        assert!(err.contains("!add's `lhs`"), "{err}");
         assert!(err.contains("produces Candle"), "{err}");
-        assert!(err.contains("root.lhs"), "{err}");
     }
 
     #[test]
     fn rejects_a_real_source_where_a_candle_is_required() {
-        let err = check(
-            &parse("!atr { period: 3, source: !sma { period: 2 } }"),
-            "root",
-        )
-        .expect_err("Real into a Candle slot");
-        assert!(err.contains("expected a Candle source"), "{err}");
+        let err = parse_checked("!atr { period: 3, source: !sma { period: 2 } }")
+            .expect_err("Real into a Candle slot");
+        assert!(err.contains("expects a Candle source"), "{err}");
     }
 
     #[test]
     fn rejects_a_candle_source_where_an_atom_is_required() {
-        let err = check(&parse("!close { source: !current {} }"), "root")
-            .expect_err("Candle into an Atom slot");
-        assert!(err.contains("expected a Atom source"), "{err}");
+        let err =
+            parse_checked("!close { source: !current {} }").expect_err("Candle into an Atom slot");
+        assert!(err.contains("expects a Atom source"), "{err}");
     }
 
     #[test]
     fn reports_the_innermost_mismatch() {
-        // The outer `!sma` is fine; the error is two levels down.
-        let err = check(
-            &parse("!sma { period: 3, source: !add { lhs: !value bull, rhs: close } }"),
-            "root",
-        )
-        .expect_err("nested mismatch");
-        assert!(err.contains("root.source.lhs"), "{err}");
+        // The outer `!sma` would also be unhappy (its source can't be built),
+        // but children parse first, so the reported error is the inner `!add`'s
+        // — the one that actually names the mistake.
+        let err =
+            parse_checked("!sma { period: 3, source: !add { lhs: !value bull, rhs: close } }")
+                .expect_err("nested mismatch");
+        assert!(err.contains("!add's `lhs`"), "{err}");
+        assert!(err.contains("produces Str"), "{err}");
     }
 
     #[test]
     fn an_unknown_child_is_skipped_not_rejected() {
         // `!get`'s type needs the schema, so this must pass rather than guess.
-        assert!(
-            check(
-                &parse("!sma { period: 3, source: !get { key: x } }"),
-                "root"
-            )
-            .is_ok()
-        );
+        assert!(parse_checked("!sma { period: 3, source: !get { key: x } }").is_ok());
     }
 }

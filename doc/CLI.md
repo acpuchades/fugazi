@@ -209,11 +209,19 @@ Within that constraint it is as strict as it can be. It catches:
   symbol, so `check` parses each with its `!arg`s held as holes.
 - **Input/output type mismatches between tags.** `!sma` needs a `Real` source,
   `!atr` a `Candle` one, `!close` an `Atom`; a violation is reported against the
-  innermost offending node rather than surfacing as an assertion mid-run:
+  innermost offending node, with a trail of the enclosing tags, rather than
+  surfacing as an assertion mid-run:
 
   ```
-  !sma's `source` expects a Real source, but !value produces Str
+  in !above: in !add: in !mul: !sma's `source` expects a Real source, but !value produces Str
   ```
+
+  This check is **not** exclusive to `check` — `run` and `optimize` apply it too,
+  so a spec that would have died mid-build is now rejected at load with the same
+  message. The trail is the closest thing to a source location available: the
+  `!import` / `!param` passes rewrite the document before it is typed-parsed, so
+  original line numbers no longer correspond to what is being validated (and
+  spliced or substituted nodes never had one).
 
 - **Contradictory placeholders.** A `!param` required to be a number in one
   position and a string in another can't be satisfied by any `--params` value,

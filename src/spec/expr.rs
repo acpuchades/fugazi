@@ -1983,6 +1983,32 @@ impl TryFrom<serde_norway::Value> for ExprSpec {
     /// `TryFrom` — so a nested bare-word inside a tagged form is normalised
     /// on the way down.
     fn try_from(v: serde_norway::Value) -> Result<Self, Self::Error> {
+        let spec = ExprSpec::parse_unchecked(v)?;
+        // Reject a child whose output type this tag cannot consume —
+        // `!sma { source: !value bull }` and friends. The engine would catch it
+        // anyway, but only on reaching `AsReal::new`'s `assert_eq!` mid-build,
+        // which reports `left: Str, right: Real` and no location. Doing it here
+        // turns that into a parse error naming the tag and the slot.
+        //
+        // Runs on **every** parse, not just `fugazi check`: a spec that would
+        // panic during `run` or `optimize` is better rejected at load. The pass
+        // only reports mismatches it can prove (an undecidable child type is
+        // skipped), and `typecheck`'s tests pin its table against what `build`
+        // actually demands, so it cannot reject a spec the engine would accept.
+        crate::spec::typecheck::check_immediate(&spec)?;
+        Ok(spec)
+    }
+}
+
+impl ExprSpec {
+    /// The normalisation + typed parse, **without** the type check
+    /// [`TryFrom`] applies on top.
+    ///
+    /// Exists so `typecheck`'s own tests can construct the deliberately
+    /// ill-typed trees they exercise — which the public parse path now
+    /// rejects, by design. Not a way around validation for real callers:
+    /// every deserialization of an `ExprSpec` goes through `TryFrom`.
+    pub(crate) fn parse_unchecked(v: serde_norway::Value) -> Result<Self, String> {
         use serde_norway::value::{Tag, TaggedValue};
 
         // A `check`-mode hole standing in for a whole expression (a `!param`
@@ -2107,18 +2133,27 @@ impl TryFrom<serde_norway::Value> for ExprSpec {
         // it here means there's one primitive (`!value`) instead of
         // two variants doing the same thing.
         let normalised = rewrite_sugar_tags(normalised)?;
-        let raw: ExprSpecRaw =
-            crate::spec::hole::from_value(normalised).map_err(|e| e.to_string())?;
-        let spec: ExprSpec = raw.into();
-        // Under `fugazi check`, reject a child whose output type this tag
-        // cannot consume — `!sma { source: !value bull }` and friends, which
-        // otherwise reach `AsReal::new`'s `assert_eq!` mid-run. Children parse
-        // before their parent, so the innermost mismatch is the one reported.
-        // Only in check mode: `run`/`optimize` keep their existing behaviour.
-        if crate::spec::hole::in_check_mode() {
-            crate::spec::typecheck::check_immediate(&spec)?;
-        }
-        Ok(spec)
+        // The tag this node parses as, for the error breadcrumb below. Known
+        // here even when the typed parse fails, which is exactly when it is
+        // needed.
+        let tag = match &normalised {
+            serde_norway::Value::Tagged(t) => {
+                let s = t.tag.to_string();
+                Some(s.strip_prefix('!').unwrap_or(&s).to_string())
+            }
+            _ => None,
+        };
+        let raw: ExprSpecRaw = crate::spec::hole::from_value(normalised)
+            // Nesting this at every level turns a bare "expects a Real source"
+            // into a trail from the outermost tag down to the offending one —
+            // the closest thing to a source location available, since the
+            // `!import` / `!param` passes rewrite the tree and drop any spans
+            // the original text had.
+            .map_err(|e| match &tag {
+                Some(t) => format!("in !{t}: {e}"),
+                None => e.to_string(),
+            })?;
+        Ok(raw.into())
     }
 }
 
