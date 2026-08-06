@@ -455,9 +455,9 @@ struct OptimizeArgs {
     quiet: bool,
 }
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
-    match cli.command {
+    let outcome = match cli.command {
         Command::Run(args) => run(args),
         Command::Check { cmd } => match cmd {
             CheckCmd::Strategy(args) => check_strategy(args),
@@ -468,6 +468,39 @@ fn main() -> Result<()> {
         Command::Get(args) => get::run(args),
         Command::Completions { shell } => completions::run(shell),
         Command::List { cmd } => list::run(cmd),
+    };
+    match outcome {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            print_error(&e);
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// Render a failure as a short block instead of anyhow's default chain.
+///
+/// The audience is as often a tool as a person — an agent iterating on a
+/// strategy document reads this output and edits the file — so the shape is:
+/// one line saying *what* is wrong, then the location on its own line, then
+/// the context chain. Spec-parse errors arrive with a ` > `-separated tag path
+/// glued to the front (see [`spec::diagnostics`]); splitting it out keeps the
+/// first line to the actual problem rather than burying it behind a run of
+/// `!above > !add > !mul >` that has to be read past every time.
+fn print_error(err: &anyhow::Error) {
+    // The innermost cause carries the real message; the outer ones are the
+    // `with_context` breadcrumbs ("building strategy from …").
+    let root = err.chain().last().map(|c| c.to_string()).unwrap_or_default();
+    let (trail, message) = spec::diagnostics::split_trail(&root);
+
+    eprintln!("{} {message}", style::red("error:"));
+    if !trail.is_empty() {
+        eprintln!("  {} {}", style::dim("at: "), trail.join(" › "));
+    }
+    // Context frames, outermost first, minus the root we already printed.
+    let context: Vec<String> = err.chain().map(|c| c.to_string()).collect();
+    for frame in context.iter().take(context.len().saturating_sub(1)) {
+        eprintln!("  {} {frame}", style::dim("in: "));
     }
 }
 

@@ -503,7 +503,11 @@ impl TryFrom<serde_norway::Value> for SignalSpec {
         };
         let raw: SignalSpecRaw = crate::spec::hole::from_value(normalised)
             .map_err(|e| match &tag {
-                Some(t) => format!("in !{t}: {e}"),
+                // A ` > `-separated path, built inside-out as the error rises.
+                // Rendered as one `at:` line by `diagnostics::split_trail`; if
+                // that ever fails to run, the raw string still reads as a path
+                // rather than as a stack of `in x: in y:` prefixes.
+                Some(t) => format!("!{t} > {e}"),
                 None => e.to_string(),
             })?;
         Ok(raw.into())
