@@ -216,7 +216,7 @@ fugazi get cg:BTCUSDT=bitcoin[1d]                    -o caps.csv
 fugazi run @strategy.yml -s @prices.csv -s @caps.csv -o out/
 ```
 
-`OUT=QUERY` remap lines up join key. Cross-sectional `BasketStrategy` is the natural consumer.
+`OUT=QUERY` remap lines up join key; a `=` *inside* a symbol escapes as `\=` (`'yfinance:EURUSD\=X[1d]'` — quote it, the shell eats bare backslashes). Cross-sectional `BasketStrategy` is the natural consumer.
 
 **CoinGecko specifics.** `market_chart/range` picks granularity from window length (~5-min ≤1d, hourly ≤90d, daily beyond). Client rejects sub-hourly, paginates hourly in 80-day windows, buckets onto requested cadence keeping **first** sample per bucket. Weekly floors to Monday, monthly to 1st via calendar (epoch day 0 = Thursday would silently break Monday joins). `User-Agent` **mandatory**. Public tier serves **last 365 days** only. `COINGECKO_API_KEY` = demo key.
 
@@ -254,7 +254,7 @@ CLI layout by concern:
 
 - **`main.rs`** — clap defs, subcommand dispatch. Uses `pub(crate) use fugazi::spec::*;` to keep the rest of `src/cli/` referencing `crate::spec::foo` unchanged.
 - **`run.rs`, `optimize.rs`, `backtest.rs`** — user-facing drivers sit on pure `backtest` (`run_iteration`, `evaluate`, `evaluate_windowed`) from `src/spec/backtest.rs`. `optimize.rs`'s kernel (`spec::optimize::{optimize, walkforward, ...}`) lives in the library; the CLI wrapper owns CSV output + progress banners.
-- **`get.rs`** — `fugazi get`. Grammar: `<provider>:[OUT=]<symbol>[[OFREQ=]<freq>,...]`. **Left = emitted, right = fetched.** `OUT=` decouples emitted `symbol` from provider id (`cg:BTCUSDT=bitcoin[1d]`) — makes `--series` join line up. `OFREQ=` decouples emitted `freq` from fetched cadence; **relabels, doesn't resample**. Two pipelines by `resolve_mode`, **never mixed**: `run_candles` (OHLCV + `-x`) and `run_overlay_columns` (`OverlaySource`, no OHLCV; `-x` rejected). `get --params` resolves `!param` inside `-x/--overlay`.
+- **`get.rs`** — `fugazi get`. Grammar: `<provider>:[OUT=]<symbol>[<freq>,...]`. **Left = emitted, right = fetched.** `OUT=` decouples emitted `symbol` from provider id (`cg:BTCUSDT=bitcoin[1d]`) — makes `--series` join line up; same form in a `@dataset.yml`'s `symbols:` (`parse_symbol_plain`). Split happens at the first **unescaped** `=` (`split_remap`/`unescape`/`escape`): a symbol carrying a literal `=` writes `\=` (Yahoo's `EURUSD=X`, `ES=F`), escapes are `\=` and `\\` only, anything else is a parse error, and `Series::label` re-escapes so an echoed spec round-trips. **Freqs have no remap** — every bracket token is a real cadence and the `freq` column carries its token. Two pipelines by `resolve_mode`, **never mixed**: `run_candles` (OHLCV + `-x`) and `run_overlay_columns` (`OverlaySource`, no OHLCV; `-x` rejected). `get --params` resolves `!param` inside `-x/--overlay`.
 - **`spec/`** — YAML mirror of composition API:
   - `expr.rs` — `ExprSpec` (value-producing enum; polymorphic over `DynType` for `!current`/`!pick`/`!time`/`!get`/`!if_else`/`!value`); `default_source`/`default_high`/`default_low`/`default_bar_source` helpers; **`ValueLit`** — `!value` payload, number (→ `Value`, `Real`) or string (→ `ValueStr`, `Str`; quoting picks type). Uses `serde_norway::Value` bridge (`#[serde(untagged)]` buffering can't see YAML tags).
   - `signal.rs` — `SignalSpec` + `StrOperand` (rhs of `!str_eq`/`!str_ne`).
@@ -324,6 +324,7 @@ Cargo: `python/Cargo.toml` depends on `fugazi_core = { package = "fugazi", … d
 | Join overlay CSV onto price CSV | Two `get` → two `-s`; `DataFrame::insert` full-joins | `src/cli/data.rs` |
 | CSV delimiter probe | `csv_source::detect_delimiter(path)` | `src/cli/csv_source.rs` |
 | Shell glob (case-insensitive, whole-string) | `glob::Pattern::from_str(pat)` + `.matches(text)` | `src/cli/glob.rs` |
+| Symbol `\=` escape (Yahoo's `EURUSD=X` vs. every `=`-delimited CLI grammar) | `calendar::{unescape_symbol, escape_symbol, is_escaped}` — `parse_scope_parts` unescapes symbols, so `-x` / `--costs` / `--bars-per-year` scopes and `get` spec heads agree; both scope splitters skip an escaped `=` | `src/spec/calendar.rs`, `src/cli/{get,overlay}.rs`, `src/spec/costs/spec.rs` |
 | Load `@file` or inline; YAML → JSON value | `input::Source::{File, Inline}` + `.read()`; `input::parse_value(text)` | `src/spec/input.rs` |
 | Load whole strategy doc | `spec::load_value(text, &params, base)`; `*StrategySpec::from_text_with_params_in` | `src/spec/mod.rs` |
 | Load-time `!param` / `!import` substitution | `params::substitute` / `imports::resolve(value, base)` | `src/cli/{params,imports}.rs` |

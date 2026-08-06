@@ -525,7 +525,10 @@ pub fn parse_scope_parts(text: &str) -> Result<(Option<String>, Option<&str>), S
         }
         None => (text, None),
     };
-    let symbol = (!sym_part.is_empty()).then(|| sym_part.to_string());
+    let symbol = match (!sym_part.is_empty()).then(|| unescape_symbol(sym_part)) {
+        Some(sym) => Some(sym.map_err(|e| format!("scope `{text}`: {e}"))?),
+        None => None,
+    };
     let freq = match freq_part {
         Some("") => return Err(format!("scope `{text}`: empty `[freq]` bracket")),
         Some(f) => Some(f),
@@ -535,6 +538,53 @@ pub fn parse_scope_parts(text: &str) -> Result<(Option<String>, Option<&str>), S
         return Err(format!("scope `{text}`: neither symbol nor freq present"));
     }
     Ok((symbol, freq))
+}
+
+/// Resolve `\=` → `=` and `\\` → `\` in a symbol; reject any other escape
+/// sequence and a trailing lone backslash.
+///
+/// Symbols carrying a literal `=` (Yahoo's `EURUSD=X`, `JPY=X`) collide with
+/// every `=`-delimited grammar in the CLI — `fugazi get`'s `OUT=QUERY` remap,
+/// `-x col=expr`, `--costs term=value` — so one escape rule serves them all:
+/// wherever a symbol appears, `\=` is a literal `=`. Shared so the scope
+/// prefixes (`SYMBOL[FREQ]:` on `-x` / `--costs` / `--bars-per-year`) and
+/// `fugazi get`'s spec heads agree on the spelling of a given symbol.
+///
+/// Shell and YAML both want to eat the backslash: quote the CLI argument
+/// (`'EURUSD\=X[1d]:r=…'`), and in YAML use a plain or *single*-quoted scalar
+/// (`'EURUSD\=X'`) — a double-quoted one rejects `\=` as an unknown escape.
+pub fn unescape_symbol(s: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some(esc @ ('=' | '\\')) => out.push(esc),
+            Some(other) => {
+                return Err(format!(
+                    "unknown escape `\\{other}` (only `\\=` and `\\\\` are escapes)"
+                ));
+            }
+            None => return Err("trailing `\\` with nothing to escape".to_string()),
+        }
+    }
+    Ok(out)
+}
+
+/// Re-escape a symbol for display, inverting [`unescape_symbol`] — so an echoed
+/// spec can be pasted back verbatim.
+pub fn escape_symbol(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('=', "\\=")
+}
+
+/// Whether the char at `i` in `text` is escaped by an odd run of preceding
+/// backslashes. Used by the `=`/`:`-delimited scope splitters, which scan for a
+/// delimiter that a symbol may itself contain as `\=`.
+pub fn is_escaped(text: &str, i: usize) -> bool {
+    text[..i].chars().rev().take_while(|&c| c == '\\').count() % 2 == 1
 }
 
 /// Parse a bare `SYMBOL[FREQ]` prefix (no trailing colon), or return the

@@ -120,9 +120,14 @@ fn parse_term(text: &str) -> Result<CostTerm> {
 
 /// Split off a leading `SYMBOL[FREQ]:` scope prefix. Same bracket grammar as
 /// [`crate::spec::calendar::parse_scope`], but the delimiter rules are cost-DSL
-/// specific: a `:` at bracket depth zero is the separator; a `=` at depth zero
-/// without a preceding `:` means "no scope, start of an inline pair" — so the
-/// splitter can't share with the calendar side, which never sees `=`.
+/// specific: a `:` at bracket depth zero is the separator; an **unescaped** `=`
+/// at depth zero without a preceding `:` means "no scope, start of an inline
+/// pair" — so the splitter can't share with the calendar side, which never sees
+/// `=`.
+///
+/// A `\=` belongs to the scoped symbol instead, so a Yahoo FX ticker can carry
+/// costs: `'EURUSD\=X:commission=!percentage { rate: 0.0002 }'`. Same escape
+/// rule as `fugazi get`; see [`crate::spec::calendar::unescape_symbol`].
 fn split_scope(text: &str) -> Result<(Scope, &str)> {
     let mut depth: i32 = 0;
     for (i, ch) in text.char_indices() {
@@ -136,7 +141,7 @@ fn split_scope(text: &str) -> Result<(Scope, &str)> {
                     .map_err(|e| anyhow!("cost scope: {e}"))?;
                 return Ok((scope, body));
             }
-            '=' if depth == 0 => break,
+            '=' if depth == 0 && !calendar::is_escaped(text, i) => break,
             _ => {}
         }
     }
@@ -198,3 +203,37 @@ fn split_top_commas(s: &str) -> Result<Vec<String>> {
 // Folding: multiple CostSpec → one Value tree → typed CostConfig
 // ---------------------------------------------------------------------------
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    impl CostSpec {
+        /// Pull the scope + key off the first setter term, panicking on any
+        /// other shape.
+        fn first_set(&self) -> (Scope, Vec<String>) {
+            match &self.0[0] {
+                CostTerm::Set { scope, key, .. } => (scope.clone(), key.clone()),
+                other => panic!("expected a Set term, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn scope_symbol_may_carry_an_escaped_equals() {
+        // `\=` belongs to the symbol; the `commission=` pair still parses.
+        let spec = CostSpec::from_str(r"EURUSD\=X:commission=!percentage { rate: 0.0002 }")
+            .unwrap();
+        let (scope, key) = spec.first_set();
+        assert_eq!(scope.symbol.as_deref(), Some("EURUSD=X"));
+        assert_eq!(key, vec!["commission".to_string()]);
+    }
+
+    #[test]
+    fn an_unescaped_equals_still_means_no_scope() {
+        let spec = CostSpec::from_str("commission=!percentage { rate: 0.0002 }").unwrap();
+        let (scope, key) = spec.first_set();
+        assert!(scope.is_default());
+        assert_eq!(key, vec!["commission".to_string()]);
+    }
+}
