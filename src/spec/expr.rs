@@ -1890,6 +1890,14 @@ impl TryFrom<serde_norway::Value> for ExprSpec {
     fn try_from(v: serde_norway::Value) -> Result<Self, Self::Error> {
         use serde_norway::value::{Tag, TaggedValue};
 
+        // A `check`-mode hole standing in for a whole expression (a `!param`
+        // that resolves to an entire source). Only present under `check`, so
+        // this never matches in a real run. A constant `0.0` is a valid
+        // Real-typed source, enough for the surrounding shape to validate.
+        if crate::spec::hole::is_hole(&v) {
+            return Ok(ExprSpec::Value(ValueLit::Real(0.0)));
+        }
+
         // Unit-variant tags: their content stays as `Value::Null` because
         // serde's derived Deserialize expects unit content for a unit
         // variant. Every other variant is a struct with all-defaulted
@@ -2005,7 +2013,7 @@ impl TryFrom<serde_norway::Value> for ExprSpec {
         // two variants doing the same thing.
         let normalised = rewrite_sugar_tags(normalised)?;
         let raw: ExprSpecRaw =
-            serde_norway::from_value(normalised).map_err(|e| e.to_string())?;
+            crate::spec::hole::from_value(normalised).map_err(|e| e.to_string())?;
         Ok(raw.into())
     }
 }

@@ -404,6 +404,14 @@ impl TryFrom<serde_norway::Value> for SignalSpec {
     fn try_from(v: serde_norway::Value) -> Result<Self, Self::Error> {
         use serde_norway::value::{Tag, TaggedValue};
 
+        // A `check`-mode hole standing in for a whole signal (a `!param` that
+        // resolves to an entire condition). Only present under `check`; a
+        // constant `false` is a valid boolean signal, enough to validate the
+        // surrounding shape. (See the mirror `ExprSpec::TryFrom`.)
+        if crate::spec::hole::is_hole(&v) {
+            return Ok(SignalSpec::Value(false));
+        }
+
         // Unit-variant tags: their content stays as `Value::Null`
         // (see the mirror `ExprSpec::TryFrom` for the "why").
         const UNIT_VARIANTS: &[&str] = &[
@@ -484,7 +492,7 @@ impl TryFrom<serde_norway::Value> for SignalSpec {
         }
 
         let raw: SignalSpecRaw =
-            serde_norway::from_value(normalised).map_err(|e| e.to_string())?;
+            crate::spec::hole::from_value(normalised).map_err(|e| e.to_string())?;
         Ok(raw.into())
     }
 }

@@ -61,10 +61,11 @@ enum Command {
     Run(RunArgs),
     /// Parse a spec and report whether it is syntactically valid.
     ///
-    /// `fugazi check strategy <STRATEGY>` validates a strategy spec (with
-    /// `--params` substitution); `fugazi check overlay <SPEC>...` validates
-    /// one or more `get --overlay` specs; `fugazi check costs <SPEC>...`
-    /// validates one or more `run --costs` specs.
+    /// `fugazi check strategy <STRATEGY>` validates a strategy spec's shape
+    /// (an unset required `--params` placeholder is held as a typed hole, since
+    /// `check` never builds or drives the strategy); `fugazi check overlay
+    /// <SPEC>...` validates one or more `get --overlay` specs; `fugazi check
+    /// costs <SPEC>...` validates one or more `run --costs` specs.
     #[command(subcommand_required = true, arg_required_else_help = true)]
     Check {
         #[command(subcommand)]
@@ -227,7 +228,8 @@ struct RunArgs {
 /// having to caveat "only applies when `kind = ...`".
 #[derive(Subcommand)]
 enum CheckCmd {
-    /// Validate a strategy spec (with `--params` substitution).
+    /// Validate a strategy spec's shape (an unset required `--params`
+    /// placeholder is held as a typed hole rather than failing the check).
     Strategy(CheckStrategyArgs),
     /// Parse `get --overlay` specs — validates spec structure, the
     /// `SYMBOL[FREQ]:` scope prefix, column names, and reserved-name
@@ -256,8 +258,10 @@ struct CheckStrategyArgs {
 
     /// Resolve the strategy's `param` placeholders. Same shape as `run --params`:
     /// a `,`-separated list of `NAME=value` settings and `@file.yml` mapping
-    /// loaders (repeatable; later terms win). Omitting a required placeholder is
-    /// a check failure.
+    /// loaders (repeatable; later terms win). Unlike `run`, omitting a required
+    /// placeholder is *not* a check failure — `check` validates shape only, so
+    /// an unset placeholder is held as a typed hole (the field's expected type
+    /// decides the stand-in) and the count is reported alongside the params.
     #[arg(short, long = "params", value_name = "SPEC")]
     params: Vec<params::ParamSpec>,
 
@@ -473,11 +477,29 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     let text = args.strategy.read().context("reading strategy")?;
     let label = args.strategy.label();
     let base = args.strategy.base_dir();
-    let params_label = params_label(&param_table);
+
+    // `check` validates shape, not values — it never builds or drives the
+    // strategy (unlike `run`/`optimize`), so a required `!param` with no
+    // `--params` value and no `default` doesn't need the user's real value.
+    // Splice imports, then substitute in check mode: an unresolved required
+    // placeholder becomes a *hole* rather than an error, and the typed parse
+    // below fills each hole with a value of whatever type the field expects
+    // (see `spec::hole`).
+    let value = spec::load_value_pre_params(&text, &base, &label)
+        .with_context(|| parse_error_hint(&args.strategy))?;
+    let (value, n_holes) = params::substitute_for_check(value, &param_table)
+        .with_context(|| parse_error_hint(&args.strategy))?;
+    let params_label = params_label_with_holes(&params_label(&param_table), n_holes);
+
+    // Deserialize under the hole-aware guard. `from_json_value` moves the tree
+    // into the `serde_norway::Value` shape the bridges buffer through.
+    let _guard = spec::hole::check_mode();
+    let parse_err = || parse_error_hint(&args.strategy);
+
     match args.strategy.kind {
         StrategyKind::Single => {
-            let strategy = spec::StrategyRef::from_text_with_params_in(&text, &param_table, &base, &label)
-                .with_context(|| parse_error_hint(&args.strategy))?;
+            let strategy: spec::StrategyRef =
+                spec::hole::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
             if !args.quiet {
                 print_check_report(
                     "parse and validate a strategy spec",
@@ -488,8 +510,8 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             }
         }
         StrategyKind::Pairs => {
-            let spec = spec::PairsStrategySpec::from_text_with_params_in(&text, &param_table, &base, &label)
-                .with_context(|| parse_error_hint(&args.strategy))?;
+            let spec: spec::PairsStrategySpec =
+                spec::hole::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
             if !args.quiet {
                 print_check_report(
                     "parse and validate a pairs strategy spec",
@@ -504,8 +526,8 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             // deserialize, but the templates only typed-parse per-symbol
             // at run time (against `!arg SYM`). So `check` here just
             // confirms the outer spec + selection dispatch.
-            let spec = spec::BasketStrategySpec::from_text_with_params_in(&text, &param_table, &base, &label)
-                .with_context(|| parse_error_hint(&args.strategy))?;
+            let spec: spec::BasketStrategySpec =
+                spec::hole::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
             if !args.quiet {
                 print_check_report(
                     "parse and validate a basket strategy spec",
@@ -519,8 +541,8 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             // Multi-asset parses eagerly like basket: the top-level +
             // per-slot templates deserialize now; each template only
             // typed-parses per-symbol at run time (against `!arg SYM`).
-            let spec = spec::MultiAssetStrategySpec::from_text_with_params_in(&text, &param_table, &base, &label)
-                .with_context(|| parse_error_hint(&args.strategy))?;
+            let spec: spec::MultiAssetStrategySpec =
+                spec::hole::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
             if !args.quiet {
                 let sides: Vec<&str> = [
                     spec.long.as_ref().map(|_| "long"),
@@ -548,8 +570,8 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             // child templates (basket / multi under a child) still resolve
             // `!arg SYM` at run time — same convention as those specs
             // standalone.
-            let spec = spec::PortfolioSpec::from_text_with_params_in(&text, &param_table, &base, &label)
-                .with_context(|| parse_error_hint(&args.strategy))?;
+            let spec: spec::PortfolioSpec =
+                spec::hole::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
             if !args.quiet {
                 let n = spec.children.len();
                 print_check_report(
@@ -780,6 +802,21 @@ fn params_label(table: &HashMap<String, serde_json::Value>) -> String {
         .collect();
     entries.sort();
     entries.join(", ")
+}
+
+/// `params_label` with a note of how many required placeholders `check` had to
+/// fill with a hole (unset, no `default` — see `spec::hole`). `0` is the common
+/// case and adds nothing.
+fn params_label_with_holes(base: &str, n_holes: usize) -> String {
+    if n_holes == 0 {
+        base.to_string()
+    } else {
+        format!(
+            "{base} ({n_holes} unset placeholder{} held as {})",
+            if n_holes == 1 { "" } else { "s" },
+            if n_holes == 1 { "a hole" } else { "holes" }
+        )
+    }
 }
 
 /// Collapse the three mutually-exclusive asset-class booleans (clap enforces
