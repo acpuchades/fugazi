@@ -8,7 +8,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 
 use crate::indicators::{Book, Position};
-use crate::indicators::logic::Const;
+use crate::indicators::logic::ValueBool;
 use crate::prelude::*;
 use crate::strategies::SingleAssetStrategy;
 
@@ -58,7 +58,7 @@ impl SideSpec {
             .as_ref()
             .map(|s| s.build(anchor, book, None, schema))
             .unwrap_or_else(|| {
-                dyn_indicator::wrap(Const::<crate::types::Snapshot<String>>::new(false))
+                dyn_indicator::wrap(ValueBool::<crate::types::Snapshot<String>>::new(false))
             })
     }
 }

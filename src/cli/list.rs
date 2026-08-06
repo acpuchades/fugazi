@@ -198,8 +198,8 @@ const GROUPS: &[Group] = &[
         entries: &[
             Entry {
                 tag: "if_else",
-                args: "cond, if_true, if_false",
-                doc: "cond ? if_true : if_false — cond is a signal, both branches are real sources; None on cond ⇒ None; warm-up = max across the three (see IfElse docs)",
+                args: "cond, then, otherwise",
+                doc: "cond ? then : otherwise — cond is a signal, both branches are real sources; None on cond ⇒ None; warm-up = max across the three (see IfElse docs)",
             },
             Entry {
                 tag: "match",

@@ -1316,7 +1316,7 @@ def test_if_else_selects_by_condition():
 
 
 def test_if_else_waits_for_the_selected_branch_to_warm():
-    # The condition (close > 0) is always true, so we pick if_true
+    # The condition (close > 0) is always true, so we pick then
     # (SMA-5, warm-up 5). Ternary reads None for the first four bars while
     # the SELECTED branch is warming, publishes on bar 5.
     branch = ta.if_else(
@@ -1332,7 +1332,7 @@ def test_if_else_waits_for_the_selected_branch_to_warm():
 
 def test_if_else_publishes_early_when_selected_branch_is_fast():
     # Same shape but the condition picks the fast branch: close < 0 is
-    # always false, so we pick if_false (a constant). The ternary reads
+    # always false, so we pick otherwise (a constant). The ternary reads
     # Some on bar 1 even though the UNSELECTED SMA-5 hasn't warmed —
     # `warm_up_period()` is still 5 (upper bound for downstream stability
     # gates), but the actual first Some can arrive earlier.

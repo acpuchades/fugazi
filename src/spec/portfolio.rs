@@ -149,7 +149,7 @@ pub struct PortfolioSpec {
 
     /// The **rebalance gate**: a boolean signal deciding, on each bar,
     /// whether the portfolio runs one rebalance cycle after children
-    /// have traded. Defaults to `!never` (`Const::false`) — no
+    /// have traded. Defaults to `!never` (`ValueBool::false`) — no
     /// rebalance, weights drift with per-child P&L (v1 behavior).
     ///
     /// Common cadences: `!every 5` for weekly on a daily portfolio,
@@ -1175,7 +1175,7 @@ mod tests {
     #[test]
     fn rebalance_on_defaults_to_none() {
         // Omitted `rebalance_on:` → the built portfolio behaves as
-        // pre-rebalance v1 (Const::false gate, weights drift with P&L).
+        // pre-rebalance v1 (ValueBool::false gate, weights drift with P&L).
         let yaml = r#"
             children:
               - strategy: !buy_and_hold { symbol: A }
@@ -1232,7 +1232,7 @@ mod tests {
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         assert!(spec.rebalance_on.is_some());
-        // Should build cleanly — !never resolves to Const::false, which
+        // Should build cleanly — !never resolves to ValueBool::false, which
         // has zero warm-up / stable period.
         let portfolio = spec.build(1_000.0, &Schema::empty(), None);
         assert_eq!(portfolio.stable_period(), 0);
@@ -1610,8 +1610,8 @@ mod tests {
             weights:
               !if_else
                 cond: !str_eq { lhs: !value { arg: CHILD_GROUP }, rhs: momentum }
-                if_true: !value 2.0
-                if_false: !value 1.0
+                then: !value 2.0
+                otherwise: !value 1.0
             rebalance_on: !every 1
             children:
               - name: mom

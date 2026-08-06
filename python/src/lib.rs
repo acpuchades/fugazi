@@ -63,7 +63,7 @@ use fugazi_core::types::{
     Selector, Snapshot,
 };
 use fugazi_core::backtest::{Fill, Rejected, RunReport};
-use fugazi_core::indicators::Const;
+use fugazi_core::indicators::ValueBool;
 use fugazi_core::strategies::basket as core_basket;
 use fugazi_core::strategies::{
     BasketStrategy, MultiAssetStrategy, PairsStrategy, SingleAssetStrategy,
@@ -652,7 +652,7 @@ impl AnySource {
     /// Dispatch a frame of samples through the domain the source lives in,
     /// producing one `Option<Real>` per bar. Extracts the correct input type
     /// from `data` (OHLCV frame / 1-D series / snapshot sequence) and folds it
-    /// through `Indicator::update`. A `Const` source re-emits its value for
+    /// through `Indicator::update`. A `ValueBool` source re-emits its value for
     /// every bar and reads the frame as candles (its neutral default domain).
     fn feed_rows(&mut self, data: &Bound<'_, PyAny>) -> PyResult<Vec<Option<Real>>> {
         Ok(match self {
@@ -784,32 +784,32 @@ enum AnyStrSource {
     Candle(StrSource<Atom>),
     /// A constant string (the `ValueStr` leaf), domain-neutral. Adopts a
     /// candle-rooted partner when composed against one (see [`str_pair`]).
-    Const(Arc<str>),
+    ValueBool(Arc<str>),
 }
 
 impl AnyStrSource {
     fn value(&self) -> Option<Arc<str>> {
         match self {
             AnyStrSource::Candle(s) => Indicator::value(s),
-            AnyStrSource::Const(c) => Some(c.clone()),
+            AnyStrSource::ValueBool(c) => Some(c.clone()),
         }
     }
     fn warm_up_period(&self) -> usize {
         match self {
             AnyStrSource::Candle(s) => Indicator::warm_up_period(s),
-            AnyStrSource::Const(_) => 0,
+            AnyStrSource::ValueBool(_) => 0,
         }
     }
     fn unstable_period(&self) -> usize {
         match self {
             AnyStrSource::Candle(s) => Indicator::unstable_period(s),
-            AnyStrSource::Const(_) => 0,
+            AnyStrSource::ValueBool(_) => 0,
         }
     }
     fn reset(&mut self) {
         match self {
             AnyStrSource::Candle(s) => Indicator::reset(s),
-            AnyStrSource::Const(_) => {}
+            AnyStrSource::ValueBool(_) => {}
         }
     }
 }
@@ -825,11 +825,11 @@ fn str_pair(
     }
     let l = match lhs {
         AnyStrSource::Candle(s) => s,
-        AnyStrSource::Const(c) => lift(c),
+        AnyStrSource::ValueBool(c) => lift(c),
     };
     let r = match rhs {
         AnyStrSource::Candle(s) => s,
-        AnyStrSource::Const(c) => lift(c),
+        AnyStrSource::ValueBool(c) => lift(c),
     };
     (l, r)
 }
@@ -905,7 +905,7 @@ fn domain_mismatch() -> PyErr {
     )
 }
 
-/// Materialise a `Const` source's payload as a candle-rooted `Source<Atom>` so
+/// Materialise a `ValueBool` source's payload as a candle-rooted `Source<Atom>` so
 /// the single-source dispatch macros can feed it into a source-slot builder.
 /// The candle domain is neutral (matches the enum's own default), so a bare
 /// constant used on its own reads as a per-bar constant candle stream.
@@ -2457,7 +2457,7 @@ impl PyStrSource {
         let atom = extract_atom(sample)?;
         let out = match &mut self.src {
             AnyStrSource::Candle(s) => Indicator::update(s, atom),
-            AnyStrSource::Const(c) => Some(c.clone()),
+            AnyStrSource::ValueBool(c) => Some(c.clone()),
         };
         Ok(out.map(|s| s.to_string()))
     }
@@ -2516,13 +2516,13 @@ impl PyStrSource {
 }
 
 /// Coerce a Python operand for a string-comparison RHS: accepts either a
-/// `PyStrSource` or a Python `str` (lifted to `AnyStrSource::Const`).
+/// `PyStrSource` or a Python `str` (lifted to `AnyStrSource::ValueBool`).
 fn coerce_str_operand(other: &Bound<'_, PyAny>) -> PyResult<AnyStrSource> {
     if let Ok(src) = other.cast::<PyStrSource>() {
         return Ok(src.borrow().src.clone());
     }
     if let Ok(s) = other.extract::<String>() {
-        return Ok(AnyStrSource::Const(Arc::from(s.as_str())));
+        return Ok(AnyStrSource::ValueBool(Arc::from(s.as_str())));
     }
     Err(PyTypeError::new_err(
         "expected a StrSource or a str for string comparison",
@@ -3138,7 +3138,7 @@ fn snapshot_source(ind: &PyIndicator) -> PyResult<Source<Snapshot<String>>> {
 }
 
 fn const_false_signal() -> SignalBox<Snapshot<String>> {
-    SignalBox::new(Const::<Snapshot<String>>::new(false))
+    SignalBox::new(ValueBool::<Snapshot<String>>::new(false))
 }
 
 /// Turn a Python callable `sym -> Signal` into the per-symbol signal factory a
@@ -5626,8 +5626,8 @@ fn unstable(py: Python<'_>, arg: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     ))
 }
 
-/// Three-source ternary: reads `cond` each bar and returns `if_true`'s value
-/// when the condition is true, `if_false`'s when false. Returns `None` while
+/// Three-source ternary: reads `cond` each bar and returns `then`'s value
+/// when the condition is true, `otherwise`'s when false. Returns `None` while
 /// `cond` reads `None` or any of the three sources is still warming.
 ///
 /// All three sources are advanced every bar (never short-circuited), so a
@@ -5642,13 +5642,13 @@ fn unstable(py: Python<'_>, arg: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
 ///
 /// All three inputs must share the same input domain (candle / real /
 /// snapshot). A neutral constant (`ta.value(...)`) adopts its partner's
-/// domain, so a bare `if_false=ta.value(0.0)` composes with a candle-rooted
+/// domain, so a bare `otherwise=ta.value(0.0)` composes with a candle-rooted
 /// condition without extra ceremony.
 #[pyfunction]
-fn if_else(cond: PyRef<'_, PySignal>, if_true: PyRef<'_, PyIndicator>, if_false: PyRef<'_, PyIndicator>) -> PyResult<PyIndicator> {
+fn if_else(cond: PyRef<'_, PySignal>, then: PyRef<'_, PyIndicator>, otherwise: PyRef<'_, PyIndicator>) -> PyResult<PyIndicator> {
     // Resolve constants against each other first (via `pair`), then match
     // the pair's domain against the condition's.
-    let branches = pair(if_true.src.clone(), if_false.src.clone())?;
+    let branches = pair(then.src.clone(), otherwise.src.clone())?;
     let cond_sig = cond.sig.clone();
     let out = match (cond_sig, branches) {
         (AnySignal::Candle(c), Pair::Candle(t, f)) => {
@@ -5766,7 +5766,7 @@ fn unknown_key_error(schema: &PySchema, key: &str) -> PyErr {
 /// Pull the erased indicator handle + its overlay column type out of a Python
 /// carrier (`Indicator` → Real, `Signal` → Bool, `StrSource` → Str). Returns
 /// `None` if `v` is none of those. The handle is deep-cloned so the caller's
-/// carrier is untouched; a domain-neutral `Const` carrier synthesises a
+/// carrier is untouched; a domain-neutral `ValueBool` carrier synthesises a
 /// constant leaf. The raw inner handle (not the `SignalBox` wrapper) is taken
 /// on purpose — a warming bool overlay then reads `None`, not `false`.
 fn carrier_inner_indicator(
@@ -5795,7 +5795,7 @@ fn carrier_inner_indicator(
         let ss = ss.borrow();
         let inner: Box<dyn runtime::DynIndicator> = match &ss.src {
             AnyStrSource::Candle(s) => s.0.clone(),
-            AnyStrSource::Const(c) => runtime::wrap(ValueStr::<Atom>::new(c.clone())),
+            AnyStrSource::ValueBool(c) => runtime::wrap(ValueStr::<Atom>::new(c.clone())),
         };
         return Ok(Some((inner, OverlayType::Str)));
     }
@@ -6036,7 +6036,7 @@ fn compute_overlays_snapshots<'py>(
 /// accepts a raw Python `str` on the right-hand side and lifts internally.
 #[pyfunction]
 fn value_str(s: &str) -> PyStrSource {
-    PyStrSource::wrap(AnyStrSource::Const(Arc::from(s)))
+    PyStrSource::wrap(AnyStrSource::ValueBool(Arc::from(s)))
 }
 
 /// `lhs == rhs` on two string sources. `lhs` is a `StrSource`; `rhs` may be

@@ -37,7 +37,7 @@ use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::indicators::logic::Const;
+use crate::indicators::logic::ValueBool;
 use crate::indicators::{Book, Position};
 use crate::prelude::*;
 use crate::strategies::MultiAssetStrategy;
@@ -194,7 +194,7 @@ impl MultiAssetStrategySpec {
                             concrete.build(&anchor, &book_lx, None, &schema_lx)
                         }
                         None => {
-                            dyn_indicator::wrap(Const::<Snapshot<String>>::new(false))
+                            dyn_indicator::wrap(ValueBool::<Snapshot<String>>::new(false))
                         }
                     };
                     AsBool::new(dyn_ind)
@@ -242,7 +242,7 @@ impl MultiAssetStrategySpec {
                             concrete.build(&anchor, &book_sx, None, &schema_sx)
                         }
                         None => {
-                            dyn_indicator::wrap(Const::<Snapshot<String>>::new(false))
+                            dyn_indicator::wrap(ValueBool::<Snapshot<String>>::new(false))
                         }
                     };
                     AsBool::new(dyn_ind)
@@ -291,7 +291,7 @@ impl MultiAssetStrategySpec {
         };
 
         // --- rebalance gate ----------------------------------------------
-        // Default is `Const::false` (installed on the library type), so
+        // Default is `ValueBool::false` (installed on the library type), so
         // an omitted `rebalance_on:` matches pre-refactor behavior.
         let strat = if let Some(rebalance_spec) = &self.rebalance_on {
             let anchor = Position::new();
@@ -608,7 +608,7 @@ mod tests {
     #[test]
     fn rebalance_on_defaults_to_none_and_never_resizes() {
         // Omitted `rebalance_on:` parses cleanly (defaults to None → the
-        // library type installs `Const::false`, matching pre-refactor
+        // library type installs `ValueBool::false`, matching pre-refactor
         // behavior).
         let yaml = r#"
             long:

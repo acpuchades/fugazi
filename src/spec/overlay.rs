@@ -339,10 +339,10 @@ mod tests {
 
     #[test]
     fn prepare_built_infers_bool_and_computes() {
-        use crate::indicators::Const;
+        use crate::indicators::ValueBool;
         use crate::runtime::wrap;
 
-        let ind = wrap(Const::<Atom>::new(true));
+        let ind = wrap(ValueBool::<Atom>::new(true));
         let (out_schema, mut prepared) =
             prepare_built(&Schema::empty(), vec![("flag".to_string(), ind)]).unwrap();
         assert_eq!(out_schema.type_of_key("flag"), Some(OverlayType::Bool));

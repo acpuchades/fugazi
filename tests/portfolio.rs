@@ -53,16 +53,16 @@ fn run_buy_and_hold_portfolio(
             "hold_a",
             SingleAssetStrategy::<&'static str>::with_initial_equity("A", initial_equity / 2.0)
                 .long_on(
-                    fugazi::indicators::Const::<Snapshot<&'static str>>::new(true),
-                    fugazi::indicators::Const::<Snapshot<&'static str>>::new(false),
+                    fugazi::indicators::ValueBool::<Snapshot<&'static str>>::new(true),
+                    fugazi::indicators::ValueBool::<Snapshot<&'static str>>::new(false),
                 ),
         )
         .add(
             "hold_b",
             SingleAssetStrategy::<&'static str>::with_initial_equity("B", initial_equity / 2.0)
                 .long_on(
-                    fugazi::indicators::Const::<Snapshot<&'static str>>::new(true),
-                    fugazi::indicators::Const::<Snapshot<&'static str>>::new(false),
+                    fugazi::indicators::ValueBool::<Snapshot<&'static str>>::new(true),
+                    fugazi::indicators::ValueBool::<Snapshot<&'static str>>::new(false),
                 ),
         )
         .weights(policy)
@@ -395,7 +395,7 @@ fn cash_phase_alone_handles_a_rebalance_when_contributors_have_free_cash() {
     //                          B: 250 + 250 = 500 equity  (total 1250)
     // Target 50/50 = 625 each. A donates 125 cash; B receives 125.
     // Result: A: 125 + 500 = 625, B: 375 + 250 = 625. No fills queued.
-    use fugazi::indicators::{Const, Every, Value};
+    use fugazi::indicators::{ValueBool, Every, Value};
 
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(1_000.0)
@@ -403,8 +403,8 @@ fn cash_phase_alone_handles_a_rebalance_when_contributors_have_free_cash() {
             "half_a",
             SingleAssetStrategy::<&'static str>::with_initial_equity("A", 500.0)
                 .long_on(
-                    Const::<Snapshot<&'static str>>::new(true),
-                    Const::<Snapshot<&'static str>>::new(false),
+                    ValueBool::<Snapshot<&'static str>>::new(true),
+                    ValueBool::<Snapshot<&'static str>>::new(false),
                 )
                 .position_sizing(Value::<Snapshot<&'static str>>::new(0.5)),
         )
@@ -412,8 +412,8 @@ fn cash_phase_alone_handles_a_rebalance_when_contributors_have_free_cash() {
             "half_b",
             SingleAssetStrategy::<&'static str>::with_initial_equity("B", 500.0)
                 .long_on(
-                    Const::<Snapshot<&'static str>>::new(true),
-                    Const::<Snapshot<&'static str>>::new(false),
+                    ValueBool::<Snapshot<&'static str>>::new(true),
+                    ValueBool::<Snapshot<&'static str>>::new(false),
                 )
                 .position_sizing(Value::<Snapshot<&'static str>>::new(0.5)),
         )
@@ -447,22 +447,22 @@ fn position_phase_downsizes_when_contributor_has_no_free_cash() {
     // still 1000. Bar 4 fire (Every::new(1)): cash phase donates 125
     // (delta at that point). Snap continues over more fires; here we
     // just verify convergence proceeds.
-    use fugazi::indicators::{Const, Every};
+    use fugazi::indicators::{ValueBool, Every};
 
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(1_000.0)
         .add(
             "full_a",
             SingleAssetStrategy::<&'static str>::with_initial_equity("A", 500.0).long_on(
-                Const::<Snapshot<&'static str>>::new(true),
-                Const::<Snapshot<&'static str>>::new(false),
+                ValueBool::<Snapshot<&'static str>>::new(true),
+                ValueBool::<Snapshot<&'static str>>::new(false),
             ),
         )
         .add(
             "full_b",
             SingleAssetStrategy::<&'static str>::with_initial_equity("B", 500.0).long_on(
-                Const::<Snapshot<&'static str>>::new(true),
-                Const::<Snapshot<&'static str>>::new(false),
+                ValueBool::<Snapshot<&'static str>>::new(true),
+                ValueBool::<Snapshot<&'static str>>::new(false),
             ),
         )
         .weights(Fixed::new(vec![0.5, 0.5]))
@@ -486,10 +486,10 @@ fn position_phase_downsizes_when_contributor_has_no_free_cash() {
 
 #[test]
 fn rebalance_gate_never_freezes_the_portfolio() {
-    // `Const::false` gate (the default) — a full run, and no rebalance
+    // `ValueBool::false` gate (the default) — a full run, and no rebalance
     // ever runs; equities drift exactly as they would without the knob
     // at all.
-    use fugazi::indicators::Const;
+    use fugazi::indicators::ValueBool;
 
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(2_000.0)
@@ -502,12 +502,12 @@ fn rebalance_gate_never_freezes_the_portfolio() {
             SingleAssetStrategy::<&'static str>::buy_and_hold("B"),
         )
         .weights(EqualWeight)
-        .rebalance_on(Const::<Snapshot<&'static str>>::new(false))
+        .rebalance_on(ValueBool::<Snapshot<&'static str>>::new(false))
         .build();
     let mut wallet = portfolio.wallet_view();
     let report = backtest::run(&mut portfolio, &mut wallet, a_rising_b_flat_snapshots());
 
-    // Same result as run_buy_and_hold_portfolio's assertions — Const::false
+    // Same result as run_buy_and_hold_portfolio's assertions — ValueBool::false
     // is by definition a no-op gate.
     assert!(wallet.sub_equity(0).0 > 1.5 * wallet.sub_equity(1).0);
     assert!(!report.fills.is_empty());
@@ -570,7 +570,7 @@ impl Strategy for SeedThenIdle {
 ///   cash + 0 in position = 600. No position downsize needed.
 #[test]
 fn scenario_a_cash_phase_only_moves_the_100_and_queues_no_fills() {
-    use fugazi::indicators::{Const, Every};
+    use fugazi::indicators::{ValueBool, Every};
 
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(1_000.0)
@@ -579,8 +579,8 @@ fn scenario_a_cash_phase_only_moves_the_100_and_queues_no_fills() {
         .add(
             "idle",
             SingleAssetStrategy::<&'static str>::with_initial_equity("Y", 500.0).long_on(
-                Const::<Snapshot<&'static str>>::new(false),
-                Const::<Snapshot<&'static str>>::new(false),
+                ValueBool::<Snapshot<&'static str>>::new(false),
+                ValueBool::<Snapshot<&'static str>>::new(false),
             ),
         )
         .weights(Fixed::new(vec![0.4, 0.6]))
@@ -640,7 +640,7 @@ fn scenario_a_cash_phase_only_moves_the_100_and_queues_no_fills() {
 ///   Final: A = 250, B = 750. Aligned.
 #[test]
 fn scenario_b_cash_drains_position_phase_queues_downsize_next_fire_converges() {
-    use fugazi::indicators::{Const, Every};
+    use fugazi::indicators::{ValueBool, Every};
 
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(1_000.0)
@@ -648,8 +648,8 @@ fn scenario_b_cash_drains_position_phase_queues_downsize_next_fire_converges() {
         .add(
             "idle",
             SingleAssetStrategy::<&'static str>::with_initial_equity("Y", 500.0).long_on(
-                Const::<Snapshot<&'static str>>::new(false),
-                Const::<Snapshot<&'static str>>::new(false),
+                ValueBool::<Snapshot<&'static str>>::new(false),
+                ValueBool::<Snapshot<&'static str>>::new(false),
             ),
         )
         .weights(Fixed::new(vec![0.25, 0.75]))
@@ -690,7 +690,7 @@ fn weight_shares_override_weight_policy_at_rebalance() {
     // 75% / 25% between the two subs. Policy would otherwise be
     // EqualWeight (50/50), so this verifies the share indicators are
     // actually consulted and win.
-    use fugazi::indicators::{Const, Every, Value};
+    use fugazi::indicators::{ValueBool, Every, Value};
 
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(1_000.0)
@@ -698,8 +698,8 @@ fn weight_shares_override_weight_policy_at_rebalance() {
             "big",
             SingleAssetStrategy::<&'static str>::with_initial_equity("A", 500.0)
                 .long_on(
-                    Const::<Snapshot<&'static str>>::new(true),
-                    Const::<Snapshot<&'static str>>::new(false),
+                    ValueBool::<Snapshot<&'static str>>::new(true),
+                    ValueBool::<Snapshot<&'static str>>::new(false),
                 )
                 .position_sizing(Value::<Snapshot<&'static str>>::new(0.5)),
         )
@@ -707,8 +707,8 @@ fn weight_shares_override_weight_policy_at_rebalance() {
             "small",
             SingleAssetStrategy::<&'static str>::with_initial_equity("B", 500.0)
                 .long_on(
-                    Const::<Snapshot<&'static str>>::new(true),
-                    Const::<Snapshot<&'static str>>::new(false),
+                    ValueBool::<Snapshot<&'static str>>::new(true),
+                    ValueBool::<Snapshot<&'static str>>::new(false),
                 )
                 .position_sizing(Value::<Snapshot<&'static str>>::new(0.5)),
         )
@@ -750,7 +750,7 @@ fn cash_covered_rebalance_queues_no_new_fills() {
     // sizing) plus a price move that shifts equity. Verify the rebalance
     // fires but generates no new blotter entries beyond the two initial
     // entry fills — position phase should be a natural no-op.
-    use fugazi::indicators::{Const, Every, Value};
+    use fugazi::indicators::{ValueBool, Every, Value};
 
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(1_000.0)
@@ -758,8 +758,8 @@ fn cash_covered_rebalance_queues_no_new_fills() {
             "half_a",
             SingleAssetStrategy::<&'static str>::with_initial_equity("A", 500.0)
                 .long_on(
-                    Const::<Snapshot<&'static str>>::new(true),
-                    Const::<Snapshot<&'static str>>::new(false),
+                    ValueBool::<Snapshot<&'static str>>::new(true),
+                    ValueBool::<Snapshot<&'static str>>::new(false),
                 )
                 .position_sizing(Value::<Snapshot<&'static str>>::new(0.5)),
         )
@@ -767,8 +767,8 @@ fn cash_covered_rebalance_queues_no_new_fills() {
             "half_b",
             SingleAssetStrategy::<&'static str>::with_initial_equity("B", 500.0)
                 .long_on(
-                    Const::<Snapshot<&'static str>>::new(true),
-                    Const::<Snapshot<&'static str>>::new(false),
+                    ValueBool::<Snapshot<&'static str>>::new(true),
+                    ValueBool::<Snapshot<&'static str>>::new(false),
                 )
                 .position_sizing(Value::<Snapshot<&'static str>>::new(0.5)),
         )
@@ -849,18 +849,18 @@ fn weight_share_reads_aggregate_directly() {
     // own book as the strategy book, and the aggregate book passed as
     // the `portfolio_book` build argument (so `source: !portfolio_book`
     // resolves to the aggregate).
-    use fugazi::indicators::{Book, Const, Every};
+    use fugazi::indicators::{Book, ValueBool, Every};
 
     let agg_book: Book<&'static str> = Book::new(1_000.0);
     let child_a = SingleAssetStrategy::<&'static str>::with_initial_equity("A", 500.0)
         .long_on(
-            Const::<Snapshot<&'static str>>::new(true),
-            Const::<Snapshot<&'static str>>::new(false),
+            ValueBool::<Snapshot<&'static str>>::new(true),
+            ValueBool::<Snapshot<&'static str>>::new(false),
         );
     let child_b = SingleAssetStrategy::<&'static str>::with_initial_equity("B", 500.0)
         .long_on(
-            Const::<Snapshot<&'static str>>::new(true),
-            Const::<Snapshot<&'static str>>::new(false),
+            ValueBool::<Snapshot<&'static str>>::new(true),
+            ValueBool::<Snapshot<&'static str>>::new(false),
         );
     // Weight-share indicators built directly on the aggregate book —
     // both read the same value each bar.
@@ -959,7 +959,7 @@ fn largest_first_position_phase_touches_only_the_bigger_leg() {
     // Under LargestFirst: X value = 600 (biggest), Y = 200. Shortfall
     // fits in X — keep (600-150)/600 = 75% of X → target 2.25 units.
     // Y untouched at 2 units.
-    use fugazi::indicators::{Const, Every};
+    use fugazi::indicators::{ValueBool, Every};
     use fugazi::portfolio::rebalance::LargestFirst;
 
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
@@ -972,8 +972,8 @@ fn largest_first_position_phase_touches_only_the_bigger_leg() {
             "idle",
             SingleAssetStrategy::<&'static str>::with_initial_equity("Z", 500.0)
                 .long_on(
-                    Const::<Snapshot<&'static str>>::new(false),
-                    Const::<Snapshot<&'static str>>::new(false),
+                    ValueBool::<Snapshot<&'static str>>::new(false),
+                    ValueBool::<Snapshot<&'static str>>::new(false),
                 ),
         )
         .weights(EqualWeight)

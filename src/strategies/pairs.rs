@@ -16,7 +16,7 @@
 //! Levels are ordinary indicator expressions built off the strategy's
 //! [`Position`] anchor, exactly like [`SingleAssetStrategy`]'s per-leg levels.
 
-use crate::indicators::{Book, Close, Const, Pick, Position, Value};
+use crate::indicators::{Book, Close, ValueBool, Pick, Position, Value};
 
 /// The rebalance-gate signal type — a boolean over the pair's snapshot.
 type RebalanceSignal<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool> + Send + Sync>;
@@ -172,7 +172,7 @@ pub struct PairsStrategy<Sym> {
     short_target: Option<Level<Sym>>,
     sizing: Level<Sym>,
     /// Rebalance gate — on `true`, resize both legs to the current
-    /// sizing target. Default is `Const::new(false)` (never rebalance),
+    /// sizing target. Default is `ValueBool::new(false)` (never rebalance),
     /// preserving pre-refactor behavior.
     rebalance: RebalanceSignal<Sym>,
     left_position: Position,
@@ -207,17 +207,17 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Pair
         Self {
             left,
             right,
-            long_enter: Box::new(Const::<Snapshot<Sym>>::new(false)),
-            long_exit: Box::new(Const::<Snapshot<Sym>>::new(false)),
-            short_enter: Box::new(Const::<Snapshot<Sym>>::new(false)),
-            short_exit: Box::new(Const::<Snapshot<Sym>>::new(false)),
+            long_enter: Box::new(ValueBool::<Snapshot<Sym>>::new(false)),
+            long_exit: Box::new(ValueBool::<Snapshot<Sym>>::new(false)),
+            short_enter: Box::new(ValueBool::<Snapshot<Sym>>::new(false)),
+            short_exit: Box::new(ValueBool::<Snapshot<Sym>>::new(false)),
             spread,
             long_stop: None,
             long_target: None,
             short_stop: None,
             short_target: None,
             sizing: Box::new(Value::<Snapshot<Sym>>::new(1.0)),
-            rebalance: Box::new(Const::<Snapshot<Sym>>::new(false)),
+            rebalance: Box::new(ValueBool::<Snapshot<Sym>>::new(false)),
             left_position: Position::new(),
             right_position: Position::new(),
             book: Book::new(initial_equity),
@@ -692,8 +692,8 @@ mod tests {
         // Constant-true enter, constant-false exit — the first trade bar
         // should open a long on L and a short on R.
         let mut strat = PairsStrategy::new("L", "R").on(
-            Const::<Snapshot<&'static str>>::new(true),
-            Const::<Snapshot<&'static str>>::new(false),
+            ValueBool::<Snapshot<&'static str>>::new(true),
+            ValueBool::<Snapshot<&'static str>>::new(false),
         );
         // Two bars: first bar signals, second bar fills at the open (both legs).
         let w = run(&mut strat, &[(100.0, 50.0), (100.0, 50.0)]);
@@ -777,8 +777,8 @@ mod tests {
         // Enter → spread = 50 (100-50). Stop at 40; a bar where L=100, R=65
         // gives spread 35, hitting the stop.
         let strat = PairsStrategy::new("L", "R").on(
-            Const::<Snapshot<&'static str>>::new(true),
-            Const::<Snapshot<&'static str>>::new(false),
+            ValueBool::<Snapshot<&'static str>>::new(true),
+            ValueBool::<Snapshot<&'static str>>::new(false),
         );
         let stop = Value::<Snapshot<&'static str>>::new(40.0);
         let mut strat = strat.spread_stop_loss(stop);
@@ -803,8 +803,8 @@ mod tests {
         // R=50 → R units = 0.25 * 1000 / 50 = 5.0.
         let mut strat = PairsStrategy::new("L", "R")
             .on(
-                Const::<Snapshot<&'static str>>::new(true),
-                Const::<Snapshot<&'static str>>::new(false),
+                ValueBool::<Snapshot<&'static str>>::new(true),
+                ValueBool::<Snapshot<&'static str>>::new(false),
             )
             .position_sizing(Value::<Snapshot<&'static str>>::new(0.5));
         let w = run(&mut strat, &[(100.0, 50.0), (100.0, 50.0)]);
@@ -834,8 +834,8 @@ mod tests {
         let sizing = Sma::new(Value::<Snapshot<&'static str>>::new(0.5), 5);
         let mut strat = PairsStrategy::new("L", "R")
             .on(
-                Const::<Snapshot<&'static str>>::new(true),
-                Const::<Snapshot<&'static str>>::new(false),
+                ValueBool::<Snapshot<&'static str>>::new(true),
+                ValueBool::<Snapshot<&'static str>>::new(false),
             )
             .position_sizing(sizing);
         let w = run(
@@ -862,8 +862,8 @@ mod tests {
         let sizing = Sma::new(Value::<Snapshot<&'static str>>::new(0.5), 5);
         let mut strat = PairsStrategy::new("L", "R")
             .on(
-                Const::<Snapshot<&'static str>>::new(true),
-                Const::<Snapshot<&'static str>>::new(false),
+                ValueBool::<Snapshot<&'static str>>::new(true),
+                ValueBool::<Snapshot<&'static str>>::new(false),
             )
             .position_sizing(sizing);
         assert!(!strat.is_ready());
@@ -878,8 +878,8 @@ mod tests {
     #[test]
     fn spread_take_profit_flattens_when_spread_climbs_above() {
         let strat = PairsStrategy::new("L", "R").on(
-            Const::<Snapshot<&'static str>>::new(true),
-            Const::<Snapshot<&'static str>>::new(false),
+            ValueBool::<Snapshot<&'static str>>::new(true),
+            ValueBool::<Snapshot<&'static str>>::new(false),
         );
         let target = Value::<Snapshot<&'static str>>::new(60.0);
         let mut strat = strat.spread_take_profit(target);
@@ -924,8 +924,8 @@ mod tests {
         // Enter bar 0, hold. Book equity should track cash + L*close_L +
         // R_units*close_R (short right → negative units).
         let mut strat = PairsStrategy::with_initial_equity("L", "R", 10_000.0).on(
-            Const::<Snapshot<&'static str>>::new(true),
-            Const::<Snapshot<&'static str>>::new(false),
+            ValueBool::<Snapshot<&'static str>>::new(true),
+            ValueBool::<Snapshot<&'static str>>::new(false),
         );
         let book = strat.book();
         let _ = run_with_capital(

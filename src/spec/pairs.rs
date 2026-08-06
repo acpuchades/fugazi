@@ -10,7 +10,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 
 use crate::indicators::{Book, Position};
-use crate::indicators::logic::Const;
+use crate::indicators::logic::ValueBool;
 use crate::prelude::*;
 use crate::strategies::PairsStrategy;
 
@@ -253,7 +253,7 @@ impl PairsStrategySpec {
         side.and_then(|s| s.exit.as_ref())
             .map(|s| s.build(anchor, book, None, schema))
             .unwrap_or_else(|| {
-                crate::spec::dyn_indicator::wrap(Const::<crate::types::Snapshot<String>>::new(false))
+                crate::spec::dyn_indicator::wrap(ValueBool::<crate::types::Snapshot<String>>::new(false))
             })
     }
 
@@ -267,7 +267,7 @@ impl PairsStrategySpec {
     ) -> Box<dyn DynIndicator> {
         side.map(|s| s.enter.build(anchor, book, None, schema))
             .unwrap_or_else(|| {
-                crate::spec::dyn_indicator::wrap(Const::<crate::types::Snapshot<String>>::new(false))
+                crate::spec::dyn_indicator::wrap(ValueBool::<crate::types::Snapshot<String>>::new(false))
             })
     }
 

@@ -224,7 +224,7 @@ bars_since_extreme!(BarsSinceLow, MinOp, "low");
 mod tests {
     use super::*;
     use crate::indicators::ext::{BoolIndicatorExt, IndicatorExt};
-    use crate::indicators::{Const, Identity};
+    use crate::indicators::{ValueBool, Identity};
 
     /// A signal that fires whenever the input exceeds 10.
     fn spike() -> impl Indicator<Input = Real, Output = bool> {
@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn a_never_firing_source_never_produces_a_value() {
-        let mut bars = BarsSince::new(Const::<Real>::new(false));
+        let mut bars = BarsSince::new(ValueBool::<Real>::new(false));
         for _ in 0..50 {
             assert_eq!(bars.update(1.0), None);
         }

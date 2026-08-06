@@ -1342,8 +1342,8 @@ mod tests {
                   !and
                     lhs: !above { source: close, level: 0.0 }
                     rhs: !below { source: close, level: 1000000.0 }
-                if_true: !value 0.5
-                if_false: !value 0.0
+                then: !value 0.5
+                otherwise: !value 0.0
         "#;
         let spec = SingleStrategySpec::from_text_with_params(
             yaml,
@@ -1365,15 +1365,15 @@ mod tests {
 
     #[test]
     fn if_else_selects_by_condition() {
-        // `!if_else { cond, if_true, if_false }`: an ADX-gated momentum
+        // `!if_else { cond, then, otherwise }`: an ADX-gated momentum
         // score shape without the ADX (which would need many bars to
         // warm) — use a level comparison as the condition so we can
         // trigger both branches on adjacent bars.
         let yaml = r#"
             !if_else
             cond: !above { source: close, level: 100.0 }
-            if_true: !value 1.0
-            if_false: !value -1.0
+            then: !value 1.0
+            otherwise: !value -1.0
         "#;
         let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
@@ -1385,15 +1385,15 @@ mod tests {
 
     #[test]
     fn if_else_holds_none_while_selected_branch_warms() {
-        // The condition is always true (close > 0) and picks `if_true`
+        // The condition is always true (close > 0) and picks `then`
         // (SMA-5, warm-up 5). The ternary reads None for the first four
         // bars while the SELECTED branch is still warming; on bar 5 it
         // reports the SMA's first value.
         let yaml = r#"
             !if_else
             cond: !above { source: close, level: 0.0 }
-            if_true: !sma { source: close, period: 5 }
-            if_false: !value 99.0
+            then: !sma { source: close, period: 5 }
+            otherwise: !value 99.0
         "#;
         let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
@@ -1407,7 +1407,7 @@ mod tests {
     #[test]
     fn if_else_publishes_early_when_selected_branch_warms_fast() {
         // Same shape but with the condition inverted: close < 0 is always
-        // false, so the ternary picks `if_false` — a Value with warm-up 0,
+        // false, so the ternary picks `otherwise` — a Value with warm-up 0,
         // so a `Some` shows up on the very first bar even though the
         // *unselected* branch (SMA-5) has a warm-up of 5. Reported
         // `stable_period()` is still the max, so a downstream consumer
@@ -1415,12 +1415,12 @@ mod tests {
         let yaml = r#"
             !if_else
             cond: !below { source: close, level: 0.0 }
-            if_true: !sma { source: close, period: 5 }
-            if_false: !value -1.0
+            then: !sma { source: close, period: 5 }
+            otherwise: !value -1.0
         "#;
         let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty());
-        // First bar: cond is Some(false), if_false is Some(-1.0).
+        // First bar: cond is Some(false), otherwise is Some(-1.0).
         assert_eq!(feed_real(&mut built, bar(100.0)), Some(-1.0));
         // The reported stability window still covers the slowest source
         // (SMA-5 → warm-up 5), so callers waiting on `stable_period()`
@@ -1454,7 +1454,7 @@ mod tests {
     #[test]
     fn match_lowers_to_nested_if_else_for_a_single_case() {
         // A one-case `!match` is equivalent to a single `!if_else`:
-        // cond fires on equality, if_true is the case's result, if_false
+        // cond fires on equality, then is the case's result, otherwise
         // is the default.
         let yaml_match = r#"
             !match
@@ -1467,8 +1467,8 @@ mod tests {
         let yaml_if_else = r#"
             !if_else
             cond: !eq { lhs: close, rhs: !value 42.0 }
-            if_true: !value 1.0
-            if_false: !value 0.0
+            then: !value 1.0
+            otherwise: !value 0.0
         "#;
         let spec_match: ExprSpec = serde_norway::from_str(yaml_match).unwrap();
         let spec_if_else: ExprSpec = serde_norway::from_str(yaml_if_else).unwrap();

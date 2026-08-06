@@ -2,7 +2,7 @@
 //!
 //! The binary connectives ([`And`], [`Or`], [`Xor`]) reuse the [`Combine`]
 //! carrier with `bool → bool` operators; [`Not`] and [`Change`] are unary
-//! carriers, and [`Const`] is the constant-`bool` leaf (the twin of
+//! carriers, and [`ValueBool`] is the constant-`bool` leaf (the twin of
 //! [`Value`](crate::indicators::Value)). Build them with the
 //! [`BoolIndicatorExt`](crate::indicators::BoolIndicatorExt) combinators (`a.and(b)`, `s.not()`,
 //! `s.changed()`); each yields `None` until its source(s) warm up.
@@ -85,7 +85,7 @@ impl<S: Indicator<Output = bool>> Indicator for Not<S> {
     }
 
     fn warm_up_period(&self) -> usize {
-        // `max(1)` guards a `warm_up = 0` inner (e.g. `Const`) — negation
+        // `max(1)` guards a `warm_up = 0` inner (e.g. `ValueBool`) — negation
         // still needs one `update` to observe the source.
         self.inner.warm_up_period().max(1)
     }
@@ -307,19 +307,19 @@ impl<S: Indicator<Output = bool>> Indicator for BecameFalse<S> {
 /// A constant-`bool` source, ignoring its input — the boolean twin of
 /// [`Value`](crate::indicators::Value).
 ///
-/// The neutral "no condition" leaf: a `Const::new(false)` fills an unused
+/// The neutral "no condition" leaf: a `ValueBool::new(false)` fills an unused
 /// entry/exit slot of a
 /// [`SingleAssetStrategy`](crate::strategies::SingleAssetStrategy).
 ///
 /// Generic over the input type so it can share an `Input` with whatever it is
 /// composed against (the input is ignored).
 #[derive(Debug, Clone, Copy)]
-pub struct Const<In> {
+pub struct ValueBool<In> {
     value: bool,
     _input: PhantomData<fn(In)>,
 }
 
-impl<In> Const<In> {
+impl<In> ValueBool<In> {
     pub fn new(value: bool) -> Self {
         Self {
             value,
@@ -328,7 +328,7 @@ impl<In> Const<In> {
     }
 }
 
-impl<In> Indicator for Const<In> {
+impl<In> Indicator for ValueBool<In> {
     type Input = In;
     type Output = bool;
 
@@ -357,7 +357,7 @@ impl<In> Indicator for Const<In> {
 /// weekly rebalance for a daily strategy is `Every::new(5)` (or the
 /// tag-form `!every 5`).
 ///
-/// Generic over its input like [`Const`] — the timing depends only on
+/// Generic over its input like [`ValueBool`] — the timing depends only on
 /// the number of [`update`](Indicator::update) calls, not on their
 /// contents.
 #[derive(Debug, Clone, Copy)]

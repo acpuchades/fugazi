@@ -3,7 +3,7 @@
 
 use std::hash::Hash;
 
-use crate::indicators::{Book, Const, Position, Value};
+use crate::indicators::{Book, ValueBool, Position, Value};
 use crate::prelude::*;
 use crate::types::{Selector, Snapshot};
 
@@ -167,7 +167,7 @@ pub struct SingleAssetStrategy<Sym> {
     short_target: Option<Level<Sym>>,
     sizing: Level<Sym>,
     /// Rebalance gate — on `true`, resize the (possibly open) position
-    /// to the current sizing target. Default is `Const::new(false)` —
+    /// to the current sizing target. Default is `ValueBool::new(false)` —
     /// sizing is only read on transitions.
     rebalance: RebalanceSignal<Sym>,
     position: Position,
@@ -200,16 +200,16 @@ impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> SingleAssetStrategy<Sym> {
     pub fn with_initial_equity(symbol: Sym, initial_equity: Real) -> Self {
         Self {
             symbol,
-            long: Box::new(Const::<Snapshot<Sym>>::new(false)),
-            close_long: Box::new(Const::<Snapshot<Sym>>::new(false)),
-            short: Box::new(Const::<Snapshot<Sym>>::new(false)),
-            close_short: Box::new(Const::<Snapshot<Sym>>::new(false)),
+            long: Box::new(ValueBool::<Snapshot<Sym>>::new(false)),
+            close_long: Box::new(ValueBool::<Snapshot<Sym>>::new(false)),
+            short: Box::new(ValueBool::<Snapshot<Sym>>::new(false)),
+            close_short: Box::new(ValueBool::<Snapshot<Sym>>::new(false)),
             long_stop: None,
             long_target: None,
             short_stop: None,
             short_target: None,
             sizing: Box::new(Value::<Snapshot<Sym>>::new(1.0)),
-            rebalance: Box::new(Const::<Snapshot<Sym>>::new(false)),
+            rebalance: Box::new(ValueBool::<Snapshot<Sym>>::new(false)),
             position: Position::new(),
             book: Book::new(initial_equity),
             bars_seen: 0,
@@ -237,8 +237,8 @@ impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> SingleAssetStrategy<Sym> {
     /// Go all-in long on the first bar and hold — a long entry that never exits.
     pub fn buy_and_hold(symbol: Sym) -> Self {
         Self::new(symbol).long_on(
-            Const::<Snapshot<Sym>>::new(true),
-            Const::<Snapshot<Sym>>::new(false),
+            ValueBool::<Snapshot<Sym>>::new(true),
+            ValueBool::<Snapshot<Sym>>::new(false),
         )
     }
 
@@ -354,7 +354,7 @@ impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> SingleAssetStrategy<Sym> {
     /// reports `true`: the largest `stable_period()` across every wired signal
     /// (`long`, `close_long`, `short`, `close_short`) and every attached
     /// protective level. Unwired slots contribute `0`
-    /// ([`Const::<Atom>::new(false)`](crate::indicators::Const) has zero
+    /// ([`ValueBool::<Atom>::new(false)`](crate::indicators::ValueBool) has zero
     /// stable-period). Wrap a subtree in [`Unstable`](crate::indicators::Unstable)
     /// to zero out its IIR settling contribution and only wait for the
     /// warm-up.
@@ -736,8 +736,8 @@ mod tests {
         // 2 (queued bar 1). Bar 3: mark to 120 → equity should be 1200.
         let mut strat = SingleAssetStrategy::with_initial_equity("X", 1_000.0)
             .long_on(
-                Const::<Snapshot<&'static str>>::new(true),
-                Const::<Snapshot<&'static str>>::new(false),
+                ValueBool::<Snapshot<&'static str>>::new(true),
+                ValueBool::<Snapshot<&'static str>>::new(false),
             );
         let book = strat.book();
         let _ = run_with_capital(

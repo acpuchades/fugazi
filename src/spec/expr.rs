@@ -833,7 +833,7 @@ pub enum ExprSpec {
         rhs: Box<ExprSpec>,
     },
     /// Three-source ternary: reads `cond` (a bool signal), emits
-    /// `if_true`'s value when `cond` is true, `if_false`'s when false, and
+    /// `then`'s value when `cond` is true, `otherwise`'s when false, and
     /// `None` when `cond` is `None`. All three sources are advanced every
     /// bar so a branch that doesn't fire this bar keeps warming up in the
     /// background. Warm-up is the max of the three; the ternary reports
@@ -841,8 +841,8 @@ pub enum ExprSpec {
     /// [`crate::indicators::IfElse`].
     IfElse {
         cond: Box<SignalSpec>,
-        if_true: Box<ExprSpec>,
-        if_false: Box<ExprSpec>,
+        then: Box<ExprSpec>,
+        otherwise: Box<ExprSpec>,
     },
     /// N-way dispatch by value equality — reads `on` once per bar and
     /// picks the *first* case whose pattern equals `on`'s reading; falls
@@ -1010,6 +1010,12 @@ pub enum ExprSpec {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]
+// Unknown keys are a typo, not something to ignore: `!if_else { then, els }`
+// silently dropping `els` and reporting only "missing field `else`" tells a
+// reader what is absent but not that what they wrote was discarded — so the
+// obvious next edit adds the right key and leaves the wrong one behind.
+// Denying produces serde's "unknown field `els`, expected one of ..." instead.
+#[serde(deny_unknown_fields)]
 enum ExprSpecRaw {
 
     // --- atom-input leaves (candle fields) ---
@@ -1625,7 +1631,7 @@ enum ExprSpecRaw {
         rhs: Box<ExprSpec>,
     },
     /// Three-source ternary: reads `cond` (a bool signal), emits
-    /// `if_true`'s value when `cond` is true, `if_false`'s when false, and
+    /// `then`'s value when `cond` is true, `otherwise`'s when false, and
     /// `None` when `cond` is `None`. All three sources are advanced every
     /// bar so a branch that doesn't fire this bar keeps warming up in the
     /// background. Warm-up is the max of the three; the ternary reports
@@ -1633,8 +1639,8 @@ enum ExprSpecRaw {
     /// [`crate::indicators::IfElse`].
     IfElse {
         cond: Box<SignalSpec>,
-        if_true: Box<ExprSpec>,
-        if_false: Box<ExprSpec>,
+        then: Box<ExprSpec>,
+        otherwise: Box<ExprSpec>,
     },
     /// N-way dispatch by value equality — reads `on` once per bar and
     /// picks the *first* case whose pattern equals `on`'s reading; falls
@@ -1913,12 +1919,12 @@ impl From<ExprSpecRaw> for ExprSpec {
             ExprSpecRaw::Div { lhs, rhs } => ExprSpec::Div { lhs, rhs },
             ExprSpecRaw::IfElse {
                 cond,
-                if_true,
-                if_false,
+                then,
+                otherwise,
             } => ExprSpec::IfElse {
                 cond,
-                if_true,
-                if_false,
+                then,
+                otherwise,
             },
             ExprSpecRaw::Match {
                 on,
@@ -2869,12 +2875,12 @@ impl ExprSpec {
             Div { lhs, rhs } => dyn_indicator::wrap(real(lhs).div(real(rhs))),
             IfElse {
                 cond,
-                if_true,
-                if_false,
+                then,
+                otherwise,
             } => {
                 let cond_ind = AsBool::new(cond.build(anchor, book, portfolio_book, schema));
-                let t_ind = real(if_true);
-                let f_ind = real(if_false);
+                let t_ind = real(then);
+                let f_ind = real(otherwise);
                 dyn_indicator::wrap(self::IfElse::new(cond_ind, t_ind, f_ind))
             }
             Match { on, cases, default } => {

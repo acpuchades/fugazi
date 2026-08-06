@@ -8,7 +8,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 
 use crate::indicators::compare;
-use crate::indicators::logic::Const;
+use crate::indicators::logic::ValueBool;
 use crate::indicators::{
     Book, DEFAULT_EPSILON, Every, GetBool, IsWeekday, IsWeekend, Pick, PickAny, Position, ValueStr,
 };
@@ -266,6 +266,12 @@ pub enum SignalSpec {
 /// Kept in lock-step with the public enum variant-for-variant.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
+// Unknown keys are a typo, not something to ignore: `!if_else { then, els }`
+// silently dropping `els` and reporting only "missing field `else`" tells a
+// reader what is absent but not that what they wrote was discarded — so the
+// obvious next edit adds the right key and leaves the wrong one behind.
+// Denying produces serde's "unknown field `els`, expected one of ..." instead.
+#[serde(deny_unknown_fields)]
 enum SignalSpecRaw {
     Gt {
         lhs: Box<ExprSpec>,
@@ -714,7 +720,7 @@ impl SignalSpec {
             Xor { lhs, rhs } => dyn_indicator::wrap(boolean(lhs).xor(boolean(rhs))),
             All(specs) => {
                 if specs.is_empty() {
-                    dyn_indicator::wrap(self::Const::<crate::types::Snapshot<String>>::new(true))
+                    dyn_indicator::wrap(self::ValueBool::<crate::types::Snapshot<String>>::new(true))
                 } else {
                     let mut acc =
                         AsBool::new(specs[0].build(anchor, book, portfolio_book, schema));
@@ -730,7 +736,7 @@ impl SignalSpec {
             }
             Any(specs) => {
                 if specs.is_empty() {
-                    dyn_indicator::wrap(self::Const::<crate::types::Snapshot<String>>::new(false))
+                    dyn_indicator::wrap(self::ValueBool::<crate::types::Snapshot<String>>::new(false))
                 } else {
                     let mut acc =
                         AsBool::new(specs[0].build(anchor, book, portfolio_book, schema));
@@ -750,10 +756,10 @@ impl SignalSpec {
                 dyn_indicator::unstable_wrap(signal.build(anchor, book, portfolio_book, schema))
             }
             Value(b) => {
-                dyn_indicator::wrap(self::Const::<crate::types::Snapshot<String>>::new(*b))
+                dyn_indicator::wrap(self::ValueBool::<crate::types::Snapshot<String>>::new(*b))
             }
             Never => {
-                dyn_indicator::wrap(self::Const::<crate::types::Snapshot<String>>::new(false))
+                dyn_indicator::wrap(self::ValueBool::<crate::types::Snapshot<String>>::new(false))
             }
             SignalSpec::Every(n) => {
                 dyn_indicator::wrap(self::Every::<crate::types::Snapshot<String>>::new(*n))
@@ -774,7 +780,7 @@ impl SignalSpec {
             IsWeekend => dyn_indicator::wrap(self::IsWeekend::of(pick_any_root())),
             HasColumn { name } => {
                 let exists = schema.index_of(name.as_str()).is_some();
-                dyn_indicator::wrap(self::Const::<crate::types::Snapshot<String>>::new(exists))
+                dyn_indicator::wrap(self::ValueBool::<crate::types::Snapshot<String>>::new(exists))
             }
         }
     }
