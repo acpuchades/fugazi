@@ -32,6 +32,7 @@ pub mod signal;
 pub mod strategy;
 pub mod template;
 pub mod trailing;
+pub mod typecheck;
 
 // Load-pass primitives (`!import` / `!param` / `!arg` and the YAML→JSON bridge)
 // plus the file-vs-inline `Source` input type. Kept at `spec::*` because the

@@ -2109,7 +2109,16 @@ impl TryFrom<serde_norway::Value> for ExprSpec {
         let normalised = rewrite_sugar_tags(normalised)?;
         let raw: ExprSpecRaw =
             crate::spec::hole::from_value(normalised).map_err(|e| e.to_string())?;
-        Ok(raw.into())
+        let spec: ExprSpec = raw.into();
+        // Under `fugazi check`, reject a child whose output type this tag
+        // cannot consume — `!sma { source: !value bull }` and friends, which
+        // otherwise reach `AsReal::new`'s `assert_eq!` mid-run. Children parse
+        // before their parent, so the innermost mismatch is the one reported.
+        // Only in check mode: `run`/`optimize` keep their existing behaviour.
+        if crate::spec::hole::in_check_mode() {
+            crate::spec::typecheck::check_immediate(&spec)?;
+        }
+        Ok(spec)
     }
 }
 
