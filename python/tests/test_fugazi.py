@@ -2264,7 +2264,7 @@ def test_get_source_still_rejects_an_unknown_key():
             ctor(schema, "nope", source=ta.pick("M"))
 
 
-# --- CoinGecko (overlay source) -------------------------------------------
+# --- CoinGecko (price-less / overlay series) ------------------------------
 #
 # The live fetch is exercised by the README block (test_readme.py, which skips
 # on an HTTP error). Everything here is offline: each guard rejects the call
@@ -2276,12 +2276,14 @@ def test_coingecko_constructs():
     assert ta.CoinGecko(api_key="demo", vs_currency="eur") is not None
 
 
-def test_fetch_redirects_coingecko_to_overlays():
-    # `fetch()` returns candle frames. CoinGecko has no OHLCV, so handing it
-    # back a candle-less frame from a function named `fetch` would be a trap —
-    # it must redirect instead.
-    with pytest.raises(ValueError, match="overlay provider"):
-        ta.fetch(provider="cg", symbol="bitcoin")
+def test_fetch_accepts_coingecko():
+    # Every provider shares one `SeriesSource` now, so `fetch()` dispatches cg
+    # like any other — a price-less frame is fine (the OHLCV block is omitted
+    # when no row carries a bar). Proven offline: the sub-hourly guard fires
+    # from inside CoinGecko, so reaching "unsupported interval" (not "unknown
+    # provider") shows the call routed through rather than being rejected.
+    with pytest.raises(ValueError, match="unsupported interval"):
+        ta.fetch(provider="cg", symbol="bitcoin", freq="5m")
 
 
 def test_coingecko_rejects_sub_hourly():
@@ -2289,10 +2291,10 @@ def test_coingecko_rejects_sub_hourly():
     # silently serving daily data for a "5m" request is the failure mode this
     # guard exists to prevent.
     with pytest.raises(ValueError, match="unsupported interval"):
-        ta.CoinGecko().overlays(symbol="bitcoin", freq="5m", since="2026-07-08")
+        ta.CoinGecko().fetch(symbol="bitcoin", freq="5m", since="2026-07-08")
 
 
-# --- BinanceVision (overlay source) ---------------------------------------
+# --- BinanceVision (price-less / overlay series) --------------------------
 #
 # Offline guards only; the summing / bucketing behaviour is pinned by the
 # wiremock suite in tests/sources_binance_vision.rs.
@@ -2303,10 +2305,11 @@ def test_binance_vision_constructs():
     assert ta.BinanceVision(base_url="http://localhost:1") is not None
 
 
-def test_fetch_redirects_binance_vision_to_overlays():
-    # Same trap as CoinGecko: a funding series has no OHLCV, so `fetch()` must
-    # redirect rather than hand back a candle-less "candle" frame.
-    with pytest.raises(ValueError, match="overlay provider"):
+def test_fetch_binance_vision_needs_explicit_market():
+    # binance-vision is fetchable like any other provider, but it needs a market
+    # ('spot'/'futures') that fetch()'s flat signature can't carry — so it points
+    # the caller at the explicit constructor rather than guessing.
+    with pytest.raises(ValueError, match="needs a market"):
         ta.fetch(provider="binance-vision", symbol="BTCUSDT")
 
 
@@ -2316,7 +2319,7 @@ def test_binance_vision_futures_rejects_sub_hourly():
     # no such constraint: it is klines only, and Binance publishes those at
     # every cadence.
     with pytest.raises(ValueError, match="unsupported interval"):
-        ta.BinanceVision("futures").overlays(symbol="BTCUSDT", freq="15m", since="2024-01-01")
+        ta.BinanceVision("futures").fetch(symbol="BTCUSDT", freq="15m", since="2024-01-01")
 
 
 def test_binance_vision_market_must_be_spot_or_futures():

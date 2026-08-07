@@ -6226,8 +6226,8 @@ fn source_error_to_py(e: SourceError) -> PyErr {
     }
 }
 
-/// Chosen DataFrame library for the return value of `Binance.candles()` /
-/// `fugazi.get()`.
+/// Chosen DataFrame library for the return value of `Binance.fetch()` /
+/// `fugazi.fetch()`.
 #[derive(Clone, Copy)]
 enum CandlesOutput {
     Polars,
@@ -6395,46 +6395,57 @@ fn format_ts_iso(ms: i64) -> String {
 /// `taker_buy_quote_volume`; Yahoo's `adj_close`) — same names as the atom
 /// schema's keys. Bool / Str overlay columns land as Python-native lists;
 /// Real ones as `f64` lists.
-fn build_candles_frame(
+/// Materialise a [`SeriesSource`] fetch into a DataFrame.
+///
+/// Columns: `time` (ISO 8601 UTC str), then the OHLCV block **only when at
+/// least one atom carries a bar**, then one column per `schema` key. A provider
+/// whose atoms are all price-less — an overlay series like CoinGecko's market
+/// caps or Binance-Vision's funding — yields a frame with no `open`/`high`/
+/// `low`/`close`/`volume`, meant to be joined onto a price frame on `time`.
+/// This mirrors the CLI's single `get` pipeline, where `Atom::candle` is
+/// optional and the writer omits the OHLCV block when no row has a bar.
+fn build_series_frame(
     py: Python<'_>,
     output: CandlesOutput,
+    schema: std::sync::Arc<fugazi_core::Schema>,
     atoms: Vec<Atom>,
 ) -> PyResult<Py<PyAny>> {
     let n = atoms.len();
+    let has_bars = atoms.iter().any(|a| a.candle.is_some());
     let mut times: Vec<String> = Vec::with_capacity(n);
     let mut opens: Vec<f64> = Vec::with_capacity(n);
     let mut highs: Vec<f64> = Vec::with_capacity(n);
     let mut lows: Vec<f64> = Vec::with_capacity(n);
     let mut closes: Vec<f64> = Vec::with_capacity(n);
     let mut volumes: Vec<f64> = Vec::with_capacity(n);
-    // Overlay column order comes from any atom's schema (all atoms in one
-    // fetch share the same `Arc<Schema>`).
-    let schema = fugazi_core::sources::schema_of(&atoms);
     let mut overlays: Vec<Option<OverlayInfo>> = Vec::with_capacity(n);
     for atom in atoms {
         let time = atom
             .time
-            .expect("candle source atoms always carry a time")
+            .expect("series-source atoms always carry a time")
             .0;
         times.push(format_ts_iso(time));
-        // An overlay-only atom has no bar. NaN is what polars/pandas read as
-        // a missing cell, and the column has to stay the same length as the
-        // rest of the frame.
-        let c = atom.candle;
-        opens.push(c.map_or(Real::NAN, |c| c.open));
-        highs.push(c.map_or(Real::NAN, |c| c.high));
-        lows.push(c.map_or(Real::NAN, |c| c.low));
-        closes.push(c.map_or(Real::NAN, |c| c.close));
-        volumes.push(c.map_or(Real::NAN, |c| c.volume));
+        // A price-less atom leaves a NaN cell — what polars/pandas read as
+        // missing, keeping the column the same length as the rest of the frame.
+        if has_bars {
+            let c = atom.candle;
+            opens.push(c.map_or(Real::NAN, |c| c.open));
+            highs.push(c.map_or(Real::NAN, |c| c.high));
+            lows.push(c.map_or(Real::NAN, |c| c.low));
+            closes.push(c.map_or(Real::NAN, |c| c.close));
+            volumes.push(c.map_or(Real::NAN, |c| c.volume));
+        }
         overlays.push(atom.overlays);
     }
     let data = PyDict::new(py);
     data.set_item("time", &times)?;
-    data.set_item("open", &opens)?;
-    data.set_item("high", &highs)?;
-    data.set_item("low", &lows)?;
-    data.set_item("close", &closes)?;
-    data.set_item("volume", &volumes)?;
+    if has_bars {
+        data.set_item("open", &opens)?;
+        data.set_item("high", &highs)?;
+        data.set_item("low", &lows)?;
+        data.set_item("close", &closes)?;
+        data.set_item("volume", &volumes)?;
+    }
     set_overlay_columns(&data, &schema, overlays)?;
     match output {
         CandlesOutput::Polars => {
@@ -6504,53 +6515,29 @@ fn set_overlay_columns(
     Ok(())
 }
 
-/// Materialise an [`SeriesSource`] fetch into a DataFrame.
-///
-/// Columns: `time` (ISO 8601 UTC str), then one per provider schema key —
-/// **and no OHLCV**, because an overlay-only series has none. That is the point of
-/// the type: these rows describe a property of an instrument at a point in
-/// time, not a price bar, and are meant to be joined onto a price frame on
-/// `time` (see the class docs on `CoinGecko`).
-fn build_overlays_frame(
+/// Fetch one `(symbol, interval)` window from any [`SeriesSource`] and build
+/// its DataFrame. The provider's fixed [`schema`](SeriesSource::schema) wins
+/// when it has one (overlay providers know their columns before the fetch);
+/// otherwise the schema is picked off the returned atoms with [`schema_of`].
+fn fetch_frame<C>(
     py: Python<'_>,
+    source: &C,
     output: CandlesOutput,
-    schema: std::sync::Arc<fugazi_core::Schema>,
-    rows: Vec<Atom>,
-) -> PyResult<Py<PyAny>> {
-    let n = rows.len();
-    let mut times: Vec<String> = Vec::with_capacity(n);
-    let mut overlays: Vec<Option<OverlayInfo>> = Vec::with_capacity(n);
-    for row in rows {
-        times.push(format_ts_iso(
-            row.time.expect("overlay atoms always carry a bar-open time").0,
-        ));
-        overlays.push(row.overlays);
-    }
-    let data = PyDict::new(py);
-    data.set_item("time", &times)?;
-    set_overlay_columns(&data, &schema, overlays)?;
-    match output {
-        CandlesOutput::Polars => {
-            let polars = py.import("polars").map_err(|_| {
-                PyValueError::new_err(
-                    "output='polars' requested but the polars package is not installed",
-                )
-            })?;
-            Ok(polars.getattr("DataFrame")?.call1((data,))?.unbind())
-        }
-        CandlesOutput::Pandas => {
-            let pandas = py.import("pandas").map_err(|_| {
-                PyValueError::new_err(
-                    "output='pandas' requested but the pandas package is not installed",
-                )
-            })?;
-            Ok(pandas.getattr("DataFrame")?.call1((data,))?.unbind())
-        }
-        CandlesOutput::Numpy => Ok(data.into_any().unbind()),
-    }
+    symbol: &str,
+    interval: Interval,
+    since: Timestamp,
+    until: Option<Timestamp>,
+) -> PyResult<Py<PyAny>>
+where
+    C: SeriesSource + Clone,
+{
+    let atoms = fetch_bars(py, source, symbol, interval, since, until)?;
+    let schema = source
+        .schema()
+        .unwrap_or_else(|| fugazi_core::sources::schema_of(&atoms));
+    build_series_frame(py, output, schema, atoms)
 }
 
-/// Fetch a single (symbol, interval) window of overlay rows through the shared
 /// Fetch a single (symbol, interval) window through the shared runtime,
 /// releasing the GIL for the network I/O.
 fn fetch_bars<C>(
@@ -6577,8 +6564,8 @@ where
 ///
 /// ```python
 /// b = fugazi.Binance()                  # public endpoint, defaults
-/// df = b.candles(symbol="BTCUSDT", freq="1d",
-///                since="2020-01-01", until="today")
+/// df = b.fetch(symbol="BTCUSDT", freq="1d",
+///              since="2020-01-01", until="today")
 /// ```
 ///
 /// One call = one (symbol, freq) fetch = one DataFrame. Batch multiple
@@ -6616,7 +6603,7 @@ impl PyBinance {
     /// `quote_volume`, `n_trades`, `taker_buy_base_volume`,
     /// `taker_buy_quote_volume` (all f64).
     #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
-    fn candles(
+    fn fetch(
         &self,
         py: Python<'_>,
         symbol: &str,
@@ -6628,8 +6615,7 @@ impl PyBinance {
         let interval = parse_interval_token(freq)?;
         let (since_ts, until_ts) = resolve_since_until(since, until)?;
         let out = CandlesOutput::from_kwarg(output)?;
-        let atoms = fetch_bars(py, &self.inner, symbol, interval, since_ts, until_ts)?;
-        build_candles_frame(py, out, atoms)
+        fetch_frame(py, &self.inner, out, symbol, interval, since_ts, until_ts)
     }
 }
 
@@ -6637,8 +6623,8 @@ impl PyBinance {
 ///
 /// ```python
 /// y = fugazi.Yahoo()                     # public endpoint, defaults
-/// df = y.candles(symbol="AAPL", freq="1d",
-///                since="2020-01-01", until="today")
+/// df = y.fetch(symbol="AAPL", freq="1d",
+///              since="2020-01-01", until="today")
 /// ```
 ///
 /// One call = one (symbol, freq) fetch = one DataFrame. Batch multiple
@@ -6680,7 +6666,7 @@ impl PyYahoo {
     /// `low`, `close`, `volume`, plus the Yahoo extra `adj_close` — the
     /// split- and dividend-adjusted close (all f64).
     #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
-    fn candles(
+    fn fetch(
         &self,
         py: Python<'_>,
         symbol: &str,
@@ -6692,8 +6678,7 @@ impl PyYahoo {
         let interval = parse_interval_token(freq)?;
         let (since_ts, until_ts) = resolve_since_until(since, until)?;
         let out = CandlesOutput::from_kwarg(output)?;
-        let atoms = fetch_bars(py, &self.inner, symbol, interval, since_ts, until_ts)?;
-        build_candles_frame(py, out, atoms)
+        fetch_frame(py, &self.inner, out, symbol, interval, since_ts, until_ts)
     }
 }
 
@@ -6701,12 +6686,13 @@ impl PyYahoo {
 ///
 /// ```python
 /// cg = fugazi.CoinGecko()                        # public endpoint, defaults
-/// df = cg.overlays(symbol="bitcoin", freq="1d",
-///                  since="30d ago", until="today")
+/// df = cg.fetch(symbol="bitcoin", freq="1d",
+///               since="30d ago", until="today")
 /// ```
 ///
-/// Unlike `Binance` / `Yahoo`, this is not a candle provider: it returns data
-/// that is a property of an asset at a point in time rather than a price bar,
+/// Every provider fetches through the same `.fetch(...)` method, but unlike
+/// `Binance` / `Yahoo` this one carries no price: it returns data that is a
+/// property of an asset at a point in time rather than a price bar,
 /// so the frame has `time` plus `price`, `market_cap`, `total_volume` and
 /// `circulating_supply` — and no `open`/`high`/`low`/`close`. Join it onto a
 /// price frame on `time` to use both.
@@ -6770,7 +6756,7 @@ impl PyCoinGecko {
     /// derived as `market_cap / price`, and is `NaN` on any bar where either
     /// input is missing. **No OHLCV columns** — see the class docs.
     #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
-    fn overlays(
+    fn fetch(
         &self,
         py: Python<'_>,
         symbol: &str,
@@ -6782,8 +6768,7 @@ impl PyCoinGecko {
         let interval = parse_interval_token(freq)?;
         let (since_ts, until_ts) = resolve_since_until(since, until)?;
         let out = CandlesOutput::from_kwarg(output)?;
-        let rows = fetch_bars(py, &self.inner, symbol, interval, since_ts, until_ts)?;
-        build_overlays_frame(py, out, self.inner.schema().unwrap_or_else(fugazi_core::Schema::empty), rows)
+        fetch_frame(py, &self.inner, out, symbol, interval, since_ts, until_ts)
     }
 
     /// Every coin id CoinGecko exposes, sorted — the vocabulary `symbol` accepts.
@@ -6854,7 +6839,7 @@ impl PyBinanceVision {
     /// Returned columns: `time` (ISO 8601 UTC) and `funding_rate` (f64).
     /// **No OHLCV columns** — see the class docs.
     #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
-    fn overlays(
+    fn fetch(
         &self,
         py: Python<'_>,
         symbol: &str,
@@ -6866,8 +6851,7 @@ impl PyBinanceVision {
         let interval = parse_interval_token(freq)?;
         let (since_ts, until_ts) = resolve_since_until(since, until)?;
         let out = CandlesOutput::from_kwarg(output)?;
-        let rows = fetch_bars(py, &self.inner, symbol, interval, since_ts, until_ts)?;
-        build_overlays_frame(py, out, self.inner.schema().unwrap_or_else(fugazi_core::Schema::empty), rows)
+        fetch_frame(py, &self.inner, out, symbol, interval, since_ts, until_ts)
     }
 
     /// Every perpetual contract symbol currently trading, sorted.
@@ -6880,21 +6864,23 @@ impl PyBinanceVision {
     }
 }
 
-/// Fetch OHLCV candles from a named provider and return a DataFrame.
+/// Fetch a series from a named provider and return a DataFrame.
 ///
 /// ```python
 /// df = fugazi.fetch(provider="binance", symbol="BTCUSDT", freq="1d",
 ///                   since="2020-01-01", until="today", output="polars")
 /// ```
 ///
-/// Same shape as `Binance().candles(...)` / `Yahoo().candles(...)`; the extra
-/// `provider` argument dispatches to the right client (`"binance"` or
-/// `"yfinance"`).
+/// Same shape as `Binance().fetch(...)` / `Yahoo().fetch(...)`; the extra
+/// `provider` argument dispatches to the right client. Every provider fetches
+/// the same way now that they share one `SeriesSource` trait — a candle
+/// provider yields an OHLCV frame, an overlay provider (`"cg"`) yields a
+/// price-less one (`time` + its own columns), and the frame builder omits the
+/// OHLCV block when no row carries a bar.
 ///
-/// `"cg"` (CoinGecko) is deliberately **not** dispatchable here: it is not a
-/// candle provider, and returning a frame with no OHLCV from a function named
-/// `fetch` would be a trap. Call `CoinGecko().overlays(...)` instead — the
-/// error message says so.
+/// Providers: `"binance"`, `"yfinance"`, `"cg"` (CoinGecko). `BinanceVision`
+/// needs a `market` (`"spot"`/`"futures"`) that this flat signature can't
+/// carry — construct it explicitly (`BinanceVision(market=...).fetch(...)`).
 #[pyfunction]
 #[pyo3(signature = (provider, symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
 fn fetch(
@@ -6909,32 +6895,18 @@ fn fetch(
     let interval = parse_interval_token(freq)?;
     let (since_ts, until_ts) = resolve_since_until(since, until)?;
     let out = CandlesOutput::from_kwarg(output)?;
-    let bars = match provider {
-        "binance" => fetch_bars(py, &Binance::new(), symbol, interval, since_ts, until_ts)?,
-        "yfinance" => fetch_bars(py, &Yahoo::new(), symbol, interval, since_ts, until_ts)?,
-        "cg" => {
-            return Err(PyValueError::new_err(
-                "cg (CoinGecko) is an overlay provider, not a candle provider — it returns market \
-                 cap / volume / supply columns and no OHLCV, so it cannot be fetched through \
-                 `fetch()`. Use `CoinGecko().overlays(symbol=..., freq=...)` instead, and join \
-                 the result onto a price frame on `time`.",
-            ));
-        }
-        "binance-vision" => {
-            return Err(PyValueError::new_err(
-                "binance-vision is an overlay provider, not a candle provider — it returns a \
-                 funding_rate column and no OHLCV, so it cannot be fetched through `fetch()`. \
-                 Use `BinanceVision().overlays(symbol=..., freq=...)` instead, and join the \
-                 result onto a price frame on `time`.",
-            ));
-        }
-        other => {
-            return Err(PyValueError::new_err(format!(
-                "unknown provider {other:?}. Known providers: binance, yfinance"
-            )));
-        }
-    };
-    build_candles_frame(py, out, bars)
+    match provider {
+        "binance" => fetch_frame(py, &Binance::new(), out, symbol, interval, since_ts, until_ts),
+        "yfinance" => fetch_frame(py, &Yahoo::new(), out, symbol, interval, since_ts, until_ts),
+        "cg" => fetch_frame(py, &CoinGecko::new(), out, symbol, interval, since_ts, until_ts),
+        "binance-vision" => Err(PyValueError::new_err(
+            "binance-vision needs a market ('spot' or 'futures') that fetch()'s flat signature \
+             can't carry. Construct it explicitly: BinanceVision(market='futures').fetch(...).",
+        )),
+        other => Err(PyValueError::new_err(format!(
+            "unknown provider {other:?}. Known providers: binance, yfinance, cg"
+        ))),
+    }
 }
 
 // ---------------------------------------------------------------------------

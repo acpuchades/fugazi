@@ -781,11 +781,11 @@ with `output="numpy"`):
 import fugazi as ta
 
 binance = ta.Binance()                     # public endpoint, defaults
-df = binance.candles(symbol="BTCUSDT", freq="1d",
-                     since="2020-01-01", until="today")
+df = binance.fetch(symbol="BTCUSDT", freq="1d",
+                   since="2020-01-01", until="today")
 
 yahoo = ta.Yahoo()
-df = yahoo.candles(symbol="AAPL", freq="1d", since="2020-01-01")
+df = yahoo.fetch(symbol="AAPL", freq="1d", since="2020-01-01")
 ```
 
 `freq` is a bar-cadence token (`"1m"`/`"5m"`/`"1h"`/`"4h"`/`"1d"`/`"1w"`/`"1M"`);
@@ -805,14 +805,16 @@ df = ta.fetch(provider="yfinance", symbol="AAPL", freq="1d", since="2020-01-01")
 
 ### Overlay data (no OHLCV)
 
-`CoinGecko` is a different shape of provider: it returns data that is a property
-of an asset at a point in time — market capitalisation, traded volume, supply —
-rather than a price bar. So it has `overlays(...)` instead of `candles(...)`, and
-the frame it returns has **no `open`/`high`/`low`/`close`**:
+Every provider fetches through the same `.fetch(...)` method, but `CoinGecko`
+returns a different *shape* of frame: data that is a property of an asset at a
+point in time — market capitalisation, traded volume, supply — rather than a
+price bar. It carries no price, so the frame has **no
+`open`/`high`/`low`/`close`** (the OHLCV block is omitted whenever no row carries
+a bar):
 
 ```python
 cg = ta.CoinGecko()                        # public endpoint; COINGECKO_API_KEY if set
-caps = cg.overlays(symbol="bitcoin", freq="1d", since="30d ago")
+caps = cg.fetch(symbol="bitcoin", freq="1d", since="30d ago")
 # columns: time, price, market_cap, total_volume, circulating_supply
 ```
 
@@ -824,17 +826,17 @@ whole reason the provider exists.
 
 Two limits of the public tier: it serves only the **last 365 days** (a wider
 `since` raises `ValueError`), and sub-hourly frequencies are rejected, because
-CoinGecko only samples that finely over windows too short to backtest on.
-`ta.fetch(provider="cg", ...)` deliberately raises rather than returning a
-candle-less frame from a function named `fetch`.
+CoinGecko only samples that finely over windows too short to backtest on. The
+provider-generic `ta.fetch(provider="cg", ...)` works too — it returns the same
+price-less frame.
 
 `BinanceVision` is the same shape, for the perpetual **funding rate** — the
 periodic payment between the two sides of a perp (positive = longs pay shorts),
 the primary carry signal in crypto:
 
 ```python
-fund = ta.BinanceVision()
-rates = fund.overlays(symbol="BTCUSDT", freq="1d", since="90d ago")
+fund = ta.BinanceVision(market="futures")
+rates = fund.fetch(symbol="BTCUSDT", freq="1d", since="90d ago")
 # columns: time, funding_rate
 ```
 
