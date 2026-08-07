@@ -41,7 +41,7 @@ use fugazi::Schema;
 use fugazi::sources::Interval;
 
 use crate::dyn_indicator::DynIndicator;
-use crate::calendar::{is_escaped, parse_interval, parse_scope_parts};
+use crate::calendar::{is_escaped, looks_like_body, parse_interval, parse_scope_parts};
 use crate::input::{self, Source};
 use crate::params;
 use crate::spec::ExprSpec;
@@ -234,14 +234,16 @@ fn split_scope(text: &str) -> Result<(OverlayScope, &str)> {
         match ch {
             '{' | '[' => depth += 1,
             '}' | ']' => depth -= 1,
-            ':' if depth == 0 => {
+            ':' if depth == 0 && !is_escaped(text, i) => {
+                // The prefix is a scope only when what follows can be a
+                // body; otherwise this colon belongs to the body itself.
+                if !looks_like_body(&text[i + 1..]) {
+                    break;
+                }
                 let scope_text = text[..i].trim();
                 let body = &text[i + 1..];
                 return Ok((parse_scope(scope_text)?, body));
             }
-            // An inline pair started; no scope — unless the `=` is escaped, in
-            // which case it is part of the symbol being scoped.
-            '=' if depth == 0 && !is_escaped(text, i) => break,
             _ => {}
         }
     }
@@ -450,14 +452,34 @@ mod tests {
     }
 
     #[test]
-    fn scope_symbol_may_carry_an_escaped_equals() {
-        // The `\=` is part of the symbol, not the start of the `col=expr` pair
-        // — otherwise `EURUSD` would be read as the column name.
-        let src = Source::Inline(r"EURUSD\=X[1d]:r=!rsi { period: 2 }".to_string());
+    fn scope_symbol_may_carry_an_escaped_colon() {
+        // `:` ends the scope, so a symbol containing one escapes it — CCXT
+        // spells a perpetual `BTC/USDT:USDT`.
+        let src = Source::Inline(r"BTC/USDT\:USDT[1d]:r=!rsi { period: 2 }".to_string());
         let overlays = parse_specs(std::slice::from_ref(&src)).unwrap();
-        assert_eq!(overlays[0].scope.symbol.as_deref(), Some("EURUSD=X"));
+        assert_eq!(overlays[0].scope.symbol.as_deref(), Some("BTC/USDT:USDT"));
         assert_eq!(overlays[0].scope.interval, Some(Interval::Day(1)));
         assert_eq!(overlays[0].name, "r");
+    }
+
+    #[test]
+    fn a_scope_symbol_carrying_an_equals_needs_no_escape() {
+        // With the remap gone nothing in a symbol is `=`-delimited, so Yahoo's
+        // tickers scope plainly. What disambiguates `EURUSD=X:r=…` from a
+        // scopeless body is that the text after the colon assigns.
+        let src = Source::Inline("EURUSD=X[1d]:r=!rsi { period: 2 }".to_string());
+        let overlays = parse_specs(std::slice::from_ref(&src)).unwrap();
+        assert_eq!(overlays[0].scope.symbol.as_deref(), Some("EURUSD=X"));
+        assert_eq!(overlays[0].name, "r");
+    }
+
+    #[test]
+    fn a_colon_inside_a_value_does_not_start_a_scope() {
+        // `30` assigns nothing, so the colon belongs to the value.
+        let src = Source::Inline("dur=!value 12:30".to_string());
+        let overlays = parse_specs(std::slice::from_ref(&src)).unwrap();
+        assert!(overlays[0].scope.symbol.is_none());
+        assert_eq!(overlays[0].name, "dur");
     }
 
     #[test]

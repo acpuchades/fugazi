@@ -134,14 +134,18 @@ fn split_scope(text: &str) -> Result<(Scope, &str)> {
         match ch {
             '{' | '[' => depth += 1,
             '}' | ']' => depth -= 1,
-            ':' if depth == 0 => {
+            ':' if depth == 0 && !calendar::is_escaped(text, i) => {
+                // The prefix is a scope only when what follows can be a
+                // body; otherwise this colon belongs to the body itself.
+                if !calendar::looks_like_body(&text[i + 1..]) {
+                    break;
+                }
                 let scope_text = text[..i].trim();
                 let body = &text[i + 1..];
                 let scope = calendar::parse_scope(scope_text)
                     .map_err(|e| anyhow!("cost scope: {e}"))?;
                 return Ok((scope, body));
             }
-            '=' if depth == 0 && !calendar::is_escaped(text, i) => break,
             _ => {}
         }
     }
@@ -220,10 +224,22 @@ mod tests {
     }
 
     #[test]
-    fn scope_symbol_may_carry_an_escaped_equals() {
-        // `\=` belongs to the symbol; the `commission=` pair still parses.
-        let spec = CostSpec::from_str(r"EURUSD\=X:commission=!percentage { rate: 0.0002 }")
-            .unwrap();
+    fn scope_symbol_may_carry_an_escaped_colon() {
+        // `:` is the scope delimiter, so a symbol containing one — CCXT spells
+        // a perpetual `BTC/USDT:USDT` — escapes it.
+        let spec =
+            CostSpec::from_str(r"BTC/USDT\:USDT:commission=!percentage { rate: 0.0002 }").unwrap();
+        let (scope, key) = spec.first_set();
+        assert_eq!(scope.symbol.as_deref(), Some("BTC/USDT:USDT"));
+        assert_eq!(key, vec!["commission".to_string()]);
+    }
+
+    #[test]
+    fn a_scope_symbol_carrying_an_equals_needs_no_escape() {
+        // Nothing in a scope *symbol* is `=`-delimited: the `=` that matters
+        // opens the `key=value` term, and it comes after the `:`.
+        let spec =
+            CostSpec::from_str("EURUSD=X:commission=!percentage { rate: 0.0002 }").unwrap();
         let (scope, key) = spec.first_set();
         assert_eq!(scope.symbol.as_deref(), Some("EURUSD=X"));
         assert_eq!(key, vec!["commission".to_string()]);
