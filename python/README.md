@@ -794,7 +794,10 @@ df = yahoo.fetch(symbol="AAPL", freq="1d", since="2020-01-01")
 and defaults to now. The returned frame has `time` (ISO 8601 UTC), `open`,
 `high`, `low`, `close`, `volume`, and — carried through from each provider's
 own API — Binance's `quote_volume`, `n_trades`, `taker_buy_base_volume`,
-`taker_buy_quote_volume`; Yahoo's `adj_close` (split- and dividend-adjusted).
+`taker_buy_quote_volume`. Yahoo candles are **split/dividend-adjusted by
+default** (`ta.Yahoo(adjusted=False)` to opt out): `close` is the adjusted
+price and the extra column is `raw_close` (the untouched close), or with
+`adjusted=False` the OHLCV are raw and the extra is `adj_close`.
 
 `fugazi.fetch(provider=..., symbol=..., ...)` is the provider-generic form of
 the same call — handy when the provider name is itself a variable:

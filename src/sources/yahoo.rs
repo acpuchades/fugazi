@@ -30,17 +30,38 @@ use super::{SeriesSource, Interval, SourceError, Timestamp};
 const DEFAULT_BASE_URL: &str = "https://query1.finance.yahoo.com";
 const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (compatible; fugazi)";
 
-/// Yahoo exposes one useful extra beyond raw OHLCV: the split- and dividend-
-/// adjusted close (`indicators.adjclose[0].adjclose[i]` in the API response).
-/// Every returned atom carries this as a `Real` overlay under the key
-/// `adj_close`; missing / nulled bars read `Real::NAN` there.
-pub fn yahoo_schema() -> &'static Arc<Schema> {
-    static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
-    SCHEMA.get_or_init(|| {
-        let mut b = Schema::builder();
-        b.add_real("adj_close");
-        b.finish()
-    })
+/// The overlay schema of a Yahoo fetch, which depends on whether the client
+/// adjusts its candles (see [`Yahoo::with_adjusted`]).
+///
+/// Yahoo returns the split- and dividend-adjusted close
+/// (`indicators.adjclose[0].adjclose[i]`) alongside the raw OHLCV. The two
+/// modes fold that in opposite directions, so each keeps the *other* close as
+/// its one overlay column:
+///
+/// * **adjusted** (the default) — the candle is rescaled by `adj_close / close`,
+///   so `close` already *is* the adjusted price. The pre-adjustment close is
+///   preserved as a `raw_close` `Real` overlay, so the real traded level is
+///   never lost.
+/// * **raw** — the candle is the untouched print, and the adjusted close rides
+///   along as an `adj_close` `Real` overlay.
+///
+/// Missing / nulled bars read `Real::NAN` in whichever overlay column applies.
+pub fn yahoo_schema(adjusted: bool) -> &'static Arc<Schema> {
+    static ADJUSTED: OnceLock<Arc<Schema>> = OnceLock::new();
+    static RAW: OnceLock<Arc<Schema>> = OnceLock::new();
+    if adjusted {
+        ADJUSTED.get_or_init(|| {
+            let mut b = Schema::builder();
+            b.add_real("raw_close");
+            b.finish()
+        })
+    } else {
+        RAW.get_or_init(|| {
+            let mut b = Schema::builder();
+            b.add_real("adj_close");
+            b.finish()
+        })
+    }
 }
 
 /// A Yahoo Finance chart-API client.
@@ -51,6 +72,7 @@ pub struct Yahoo {
     client: reqwest::Client,
     base_url: String,
     user_agent: String,
+    adjusted: bool,
 }
 
 impl Default for Yahoo {
@@ -61,7 +83,8 @@ impl Default for Yahoo {
 
 impl Yahoo {
     /// A client pointing at the public Yahoo Finance endpoint with a plain
-    /// default User-Agent header.
+    /// default User-Agent header. Candles are **split/dividend-adjusted by
+    /// default** — see [`with_adjusted`](Self::with_adjusted).
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::builder()
@@ -70,7 +93,28 @@ impl Yahoo {
                 .expect("failed to build Yahoo HTTP client"),
             base_url: DEFAULT_BASE_URL.to_string(),
             user_agent: DEFAULT_USER_AGENT.to_string(),
+            adjusted: true,
         }
+    }
+
+    /// Whether to back-adjust each candle for splits and dividends (default
+    /// `true`).
+    ///
+    /// Adjustment is a property of the *data feed*, not of a strategy, so it is
+    /// resolved here at the source: with it on, every returned candle is
+    /// rescaled by its `adj_close / close` factor (open/high/low ×`f`, close set
+    /// to the adjusted close, volume ÷`f`), so a downstream `close` read — and
+    /// the wallet that prices bars from it — is on one consistent adjusted
+    /// scale, and the raw print is preserved as a `raw_close` overlay. With it
+    /// off, the candle is the untouched print and the adjusted close rides along
+    /// as an `adj_close` overlay instead.
+    ///
+    /// Adjusted is the safe default for equities: a split rendered as a raw
+    /// −50% bar would silently corrupt every return, volatility and drawdown
+    /// figure. Turn it off when you specifically need the real traded levels.
+    pub fn with_adjusted(mut self, adjusted: bool) -> Self {
+        self.adjusted = adjusted;
+        self
     }
 
     /// Override the API base URL (`https://query1.finance.yahoo.com` by default).
@@ -92,6 +136,10 @@ impl SeriesSource for Yahoo {
         "yfinance"
     }
 
+    fn schema(&self) -> Option<Arc<Schema>> {
+        Some(yahoo_schema(self.adjusted).clone())
+    }
+
     fn atoms(
         &self,
         symbol: &str,
@@ -104,6 +152,7 @@ impl SeriesSource for Yahoo {
         let client = self.client.clone();
         let base_url = self.base_url.clone();
         let user_agent = self.user_agent.clone();
+        let adjusted = self.adjusted;
         async move {
             let token = interval_to_token(interval)?;
             let period1 = (since.0 / 1_000).max(0);
@@ -155,7 +204,7 @@ impl SeriesSource for Yahoo {
                 .and_then(|mut r| r.pop())
                 .ok_or_else(|| SourceError::Decode("chart.result missing".into()))?;
 
-            decode_result(result)
+            decode_result(result, adjusted)
         }
     }
 }
@@ -182,14 +231,39 @@ fn interval_to_token(interval: Interval) -> Result<&'static str, SourceError> {
     Ok(token)
 }
 
+/// Rescale a candle to its adjusted close: factor `f = adj_close / close`,
+/// applied to open/high/low (close becomes `adj_close` exactly), and to volume
+/// inversely (a split back-adjustment inflates the historical share count as
+/// prices shrink). Scaling all prices by one factor keeps the bar internally
+/// consistent — geometry, typical price and true range are preserved.
+///
+/// Returns the candle untouched when `adj` is not usable (NaN — a bar Yahoo
+/// left null) or the raw close is zero / non-finite, so an unadjustable bar
+/// falls back to its real print rather than to garbage.
+fn adjust_candle(c: Candle, adj: Real) -> Candle {
+    if !adj.is_finite() || c.close == 0.0 || !c.close.is_finite() {
+        return c;
+    }
+    let f = adj / c.close;
+    Candle::new(
+        c.open * f,
+        c.high * f,
+        c.low * f,
+        adj,
+        if f != 0.0 { c.volume / f } else { c.volume },
+    )
+}
+
 /// Decode the single-element `chart.result` payload into a list of [`Atom`]s.
 /// Skips bars where any of `open`/`high`/`low`/`close`/`volume` is null (Yahoo
 /// emits nulls for scheduled bars that never printed, e.g. a mid-session halt).
 ///
-/// Populates each atom's overlay side channel with the adjusted-close value
-/// from `indicators.adjclose[0].adjclose[i]`, or `Real::NAN` when the array is
-/// absent / short / null on that bar.
-fn decode_result(result: ChartResult) -> Result<Vec<Atom>, SourceError> {
+/// With `adjusted`, each candle is rescaled by [`adjust_candle`] and the raw
+/// close is kept as a `raw_close` overlay; otherwise the candle is the raw
+/// print and the adjusted close is kept as an `adj_close` overlay. The adjusted
+/// close comes from `indicators.adjclose[0].adjclose[i]`, or `Real::NAN` when
+/// the array is absent / short / null on that bar.
+fn decode_result(result: ChartResult, adjusted: bool) -> Result<Vec<Atom>, SourceError> {
     let quote = result
         .indicators
         .quote
@@ -220,7 +294,7 @@ fn decode_result(result: ChartResult) -> Result<Vec<Atom>, SourceError> {
             quote.volume.len(),
         )));
     }
-    let schema = yahoo_schema().clone();
+    let schema = yahoo_schema(adjusted).clone();
     let mut out = Vec::with_capacity(n);
     for (i, &t) in times.iter().enumerate() {
         let (Some(o), Some(h), Some(l), Some(c), Some(v)) = (
@@ -233,9 +307,18 @@ fn decode_result(result: ChartResult) -> Result<Vec<Atom>, SourceError> {
             continue;
         };
         let adj = adjclose.get(i).copied().flatten().unwrap_or(Real::NAN);
-        let overlays = OverlayInfo::new(schema.clone(), vec![OverlayValue::Real(adj)]);
+        let raw = Candle::new(o, h, l, c, v);
+        // Adjusted mode: the candle carries the adjusted price and the overlay
+        // preserves the raw close. Raw mode: the reverse. So each mode keeps
+        // whichever close it did *not* fold into the bar.
+        let (candle, overlay) = if adjusted {
+            (adjust_candle(raw, adj), c)
+        } else {
+            (raw, adj)
+        };
+        let overlays = OverlayInfo::new(schema.clone(), vec![OverlayValue::Real(overlay)]);
         out.push(Atom::with_overlays_and_time(
-            Candle::new(o, h, l, c, v),
+            candle,
             overlays,
             Timestamp(t.saturating_mul(1_000)),
         ));
@@ -387,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_result_builds_atoms_with_adj_close_and_scales_seconds_to_millis() {
+    fn decode_result_raw_mode_carries_adj_close_and_scales_seconds_to_millis() {
         let result = ChartResult {
             timestamp: vec![1_704_067_200, 1_704_153_600],
             indicators: ChartIndicators {
@@ -403,7 +486,9 @@ mod tests {
                 }],
             },
         };
-        let out = decode_result(result).unwrap();
+        // Raw mode: the candle is the untouched print, adjusted close rides as
+        // an `adj_close` overlay.
+        let out = decode_result(result, false).unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].time, Some(Timestamp(1_704_067_200_000)));
         assert_eq!(out[0].candle.unwrap().open, 100.0);
@@ -412,6 +497,60 @@ mod tests {
         assert_eq!(out[1].candle.unwrap().volume, 1_200.0);
         let ov0 = out[0].overlays.as_ref().expect("adj_close overlay");
         assert_eq!(ov0.get_by_key("adj_close"), Some(&OverlayValue::Real(90.0)));
+    }
+
+    #[test]
+    fn decode_result_adjusted_mode_rescales_the_candle_and_keeps_raw_close() {
+        // A clean 2:1 relationship: adj_close is half the raw close, so f = 0.5.
+        let result = ChartResult {
+            timestamp: vec![1_704_067_200],
+            indicators: ChartIndicators {
+                quote: vec![ChartQuote {
+                    open: vec![Some(100.0)],
+                    high: vec![Some(120.0)],
+                    low: vec![Some(90.0)],
+                    close: vec![Some(100.0)],
+                    volume: vec![Some(1_000.0)],
+                }],
+                adjclose: vec![ChartAdjclose {
+                    adjclose: vec![Some(50.0)],
+                }],
+            },
+        };
+        let out = decode_result(result, true).unwrap();
+        let c = out[0].candle.expect("candle");
+        // Every price ×0.5, close pinned to adj_close, volume ÷0.5.
+        assert_eq!(c.open, 50.0);
+        assert_eq!(c.high, 60.0);
+        assert_eq!(c.low, 45.0);
+        assert_eq!(c.close, 50.0);
+        assert_eq!(c.volume, 2_000.0);
+        // The real traded close is preserved as a `raw_close` overlay.
+        let ov = out[0].overlays.as_ref().expect("raw_close overlay");
+        assert_eq!(ov.get_by_key("raw_close"), Some(&OverlayValue::Real(100.0)));
+    }
+
+    #[test]
+    fn decode_result_adjusted_mode_falls_back_to_raw_when_adj_close_is_missing() {
+        // A bar Yahoo left null in the adjclose array: unadjustable, so the
+        // real print survives rather than turning into garbage.
+        let result = ChartResult {
+            timestamp: vec![1_704_067_200],
+            indicators: ChartIndicators {
+                quote: vec![ChartQuote {
+                    open: vec![Some(100.0)],
+                    high: vec![Some(120.0)],
+                    low: vec![Some(90.0)],
+                    close: vec![Some(110.0)],
+                    volume: vec![Some(1_000.0)],
+                }],
+                adjclose: vec![ChartAdjclose {
+                    adjclose: vec![None],
+                }],
+            },
+        };
+        let out = decode_result(result, true).unwrap();
+        assert_eq!(out[0].candle.unwrap(), Candle::new(100.0, 120.0, 90.0, 110.0, 1_000.0));
     }
 
     #[test]
@@ -429,7 +568,7 @@ mod tests {
                 adjclose: vec![],
             },
         };
-        let out = decode_result(result).unwrap();
+        let out = decode_result(result, true).unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].time, Some(Timestamp(1_704_067_200_000)));
         assert_eq!(out[1].time, Some(Timestamp(1_704_240_000_000)));
@@ -463,7 +602,7 @@ mod tests {
             },
         };
         assert!(matches!(
-            decode_result(result),
+            decode_result(result, true),
             Err(SourceError::Decode(_))
         ));
     }

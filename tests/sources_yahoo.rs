@@ -44,7 +44,9 @@ async fn decodes_chart_response() {
         .mount(&server)
         .await;
 
-    let client = Yahoo::new().with_base_url(server.uri());
+    // Raw mode: the candle is the untouched print and the adjusted close rides
+    // along as an `adj_close` overlay.
+    let client = Yahoo::new().with_adjusted(false).with_base_url(server.uri());
 
     let bars = client
         .atoms(
@@ -71,6 +73,65 @@ async fn decodes_chart_response() {
     assert_eq!(
         ov.get_by_key("adj_close"),
         Some(&fugazi::OverlayValue::Real(468.0))
+    );
+}
+
+#[tokio::test]
+async fn decodes_chart_response_adjusted_by_default() {
+    let server = MockServer::start().await;
+
+    let body = serde_json::json!({
+        "chart": {
+            "result": [{
+                "meta": {"symbol": "SPY"},
+                "timestamp": [1_704_067_200_i64],
+                "indicators": {
+                    "quote": [{
+                        "open":   [200.0],
+                        "high":   [240.0],
+                        "low":    [180.0],
+                        "close":  [200.0],
+                        "volume": [1_000_000]
+                    }],
+                    "adjclose": [{
+                        // Half the raw close — a clean 2:1 factor.
+                        "adjclose": [100.0]
+                    }]
+                }
+            }],
+            "error": null
+        }
+    });
+
+    Mock::given(method("GET"))
+        .and(path("/v8/finance/chart/SPY"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+        .mount(&server)
+        .await;
+
+    // Default client: candles are split/dividend-adjusted, raw close kept as
+    // a `raw_close` overlay.
+    let client = Yahoo::new().with_base_url(server.uri());
+    let bars = client
+        .atoms(
+            "SPY",
+            Interval::Day(1),
+            Timestamp(1_704_067_200_000),
+            Some(Timestamp(1_704_326_400_000)),
+        )
+        .await
+        .expect("fetch succeeds");
+
+    let c = bars[0].candle.expect("candle");
+    assert_eq!(c.open, 100.0);
+    assert_eq!(c.high, 120.0);
+    assert_eq!(c.low, 90.0);
+    assert_eq!(c.close, 100.0);
+    assert_eq!(c.volume, 2_000_000.0);
+    let ov = bars[0].overlays.as_ref().expect("Yahoo atoms carry overlays");
+    assert_eq!(
+        ov.get_by_key("raw_close"),
+        Some(&fugazi::OverlayValue::Real(200.0))
     );
 }
 

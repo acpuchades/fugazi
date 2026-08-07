@@ -6392,7 +6392,8 @@ fn format_ts_iso(ms: i64) -> String {
 /// Columns: `time` (ISO 8601 UTC str), `open`/`high`/`low`/`close`/`volume`
 /// (f64), then one column per source-provided overlay (Binance's
 /// `quote_volume` / `n_trades` / `taker_buy_base_volume` /
-/// `taker_buy_quote_volume`; Yahoo's `adj_close`) — same names as the atom
+/// `taker_buy_quote_volume`; Yahoo's `raw_close`, or `adj_close` when the
+/// client is built `adjusted=False`) — same names as the atom
 /// schema's keys. Bool / Str overlay columns land as Python-native lists;
 /// Real ones as `f64` lists.
 /// Materialise a [`SeriesSource`] fetch into a DataFrame.
@@ -6636,14 +6637,18 @@ struct PyYahoo {
 
 #[pymethods]
 impl PyYahoo {
-    /// Construct a client. `base_url` overrides the API endpoint (default
-    /// `https://query1.finance.yahoo.com`), useful for local test servers;
-    /// `user_agent` overrides the default `User-Agent` header Yahoo's chart
-    /// endpoint requires.
+    /// Construct a client. `adjusted` (default `True`) back-adjusts each candle
+    /// for splits and dividends at fetch time — every price is rescaled by its
+    /// `adj_close / close` factor so `close` is the adjusted price, and the raw
+    /// close is preserved as a `raw_close` column. Set it `False` to get the
+    /// untouched prints with `adj_close` as the extra column instead. `base_url`
+    /// overrides the API endpoint (default `https://query1.finance.yahoo.com`),
+    /// useful for local test servers; `user_agent` overrides the default
+    /// `User-Agent` header Yahoo's chart endpoint requires.
     #[new]
-    #[pyo3(signature = (base_url = None, user_agent = None))]
-    fn new(base_url: Option<String>, user_agent: Option<String>) -> Self {
-        let mut inner = Yahoo::new();
+    #[pyo3(signature = (adjusted = true, base_url = None, user_agent = None))]
+    fn new(adjusted: bool, base_url: Option<String>, user_agent: Option<String>) -> Self {
+        let mut inner = Yahoo::new().with_adjusted(adjusted);
         if let Some(url) = base_url {
             inner = inner.with_base_url(url);
         }
@@ -6663,8 +6668,10 @@ impl PyYahoo {
     /// * `output` — `"polars"` (default), `"pandas"`, or `"numpy"` (dict of arrays).
     ///
     /// Returned DataFrame columns: `time` (ISO 8601 UTC), `open`, `high`,
-    /// `low`, `close`, `volume`, plus the Yahoo extra `adj_close` — the
-    /// split- and dividend-adjusted close (all f64).
+    /// `low`, `close`, `volume`, plus one Yahoo extra (all f64). With the
+    /// default `adjusted=True` the OHLCV are split/dividend-adjusted and the
+    /// extra is `raw_close` (the untouched close); with `adjusted=False` the
+    /// OHLCV are raw and the extra is `adj_close` (the adjusted close).
     #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
     fn fetch(
         &self,

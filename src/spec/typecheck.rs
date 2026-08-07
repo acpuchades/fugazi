@@ -108,7 +108,6 @@ pub fn output_type(spec: &ExprSpec) -> Option<DynType> {
         | Volume { .. }
         | Typical { .. }
         | Median { .. }
-        | Price { .. }
         | Entry
         | Peak
         | Trough
@@ -290,7 +289,6 @@ fn children(spec: &ExprSpec) -> Vec<(&'static str, Expect, &ExprSpec)> {
         | Typical { source }
         | Median { source }
         | Current { source }
-        | Price { source }
         | Get { source, .. }
         | Year { source }
         | Month { source }
