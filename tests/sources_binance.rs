@@ -1,11 +1,11 @@
 #![cfg(feature = "sources")]
-//! Integration test for the Binance `CandleSource` implementation.
+//! Integration test for the Binance `SeriesSource` implementation.
 //!
 //! Spins up a `wiremock` server on a random port, stubs `/api/v3/klines` with
 //! a canned two-page response, and verifies the client pages through both
 //! pages, decodes the JSON correctly, and stops at the short second page.
 
-use fugazi::sources::{Binance, CandleSource, Interval, Timestamp};
+use fugazi::sources::{Binance, SeriesSource, Interval, Timestamp};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -146,7 +146,7 @@ async fn tickers_filters_to_trading_and_sorts() {
         .await;
 
     let client = fugazi::sources::Binance::new().with_base_url(server.uri());
-    let tickers = <fugazi::sources::Binance as fugazi::sources::CandleSource>::tickers(&client)
+    let tickers = <fugazi::sources::Binance as fugazi::sources::SeriesSource>::tickers(&client)
         .await
         .expect("fetch succeeds");
     assert_eq!(tickers, vec!["ADAUSDT", "BTCUSDT", "ETHUSDT"]);

@@ -402,7 +402,7 @@ pub fn run(cmd: ListCmd) -> Result<()> {
 /// **column-major grid** sized to the terminal width when stdout is a TTY (so
 /// eyeballing 1000+ symbols isn't a scrollfest). Spins up a short-lived tokio
 /// runtime — like `fugazi get` — since the underlying
-/// [`crate::sources::CandleSource::tickers`] method is async.
+/// [`crate::sources::SeriesSource::tickers`] method is async.
 ///
 /// The two branches differ in one more way, and it matters: the grid elides an
 /// overlong symbol at [`MAX_CELL_WIDTH`], while the piped branch **never

@@ -1,4 +1,4 @@
-//! CoinGecko implementation of [`OverlaySource`] — market capitalisation,
+//! CoinGecko implementation of [`SeriesSource`] — market capitalisation,
 //! traded volume, and derived circulating supply, with **no OHLCV**.
 //!
 //! Fetches `GET /api/v3/coins/{id}/market_chart/range`, which returns three
@@ -19,7 +19,7 @@
 //! where either input is missing or the price is zero. `price` is worth keeping
 //! even though you are joining these onto someone else's candles: comparing it
 //! against that series' `close` is the cheapest way to catch a wrong
-//! `OUTPUT=QUERY` mapping (see [`OverlaySource`]).
+//! `OUTPUT=QUERY` mapping (see [`SeriesSource`]).
 //!
 //! ## Granularity is chosen by CoinGecko, not by us
 //!
@@ -60,9 +60,9 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::types::{OverlayInfo, OverlayValue, Real, Schema};
+use crate::types::{Atom, OverlayInfo, OverlayValue, Real, Schema};
 
-use super::{Interval, OverlayRow, OverlaySource, SourceError, Timestamp, floor_to_bucket};
+use super::{Interval, SeriesSource, SourceError, Timestamp, floor_to_bucket};
 
 const DEFAULT_BASE_URL: &str = "https://api.coingecko.com";
 const DEFAULT_MIN_DELAY_MS: u64 = 1_500;
@@ -109,7 +109,7 @@ pub fn coingecko_schema() -> &'static Arc<Schema> {
 ///
 /// The `symbol` this provider takes is a CoinGecko **coin id** (`bitcoin`,
 /// `ethereum`, `solana`) — not a ticker and not an exchange pair. Fetch the
-/// vocabulary with [`OverlaySource::tickers`] (`fugazi list tickers cg`).
+/// vocabulary with [`SeriesSource::tickers`] (`fugazi list tickers cg`).
 #[derive(Debug, Clone)]
 pub struct CoinGecko {
     client: reqwest::Client,
@@ -180,13 +180,13 @@ impl CoinGecko {
     }
 }
 
-impl OverlaySource for CoinGecko {
+impl SeriesSource for CoinGecko {
     fn name(&self) -> &'static str {
         "cg"
     }
 
-    fn schema(&self) -> Arc<Schema> {
-        coingecko_schema().clone()
+    fn schema(&self) -> Option<Arc<Schema>> {
+        Some(coingecko_schema().clone())
     }
 
     fn tickers(&self) -> impl Future<Output = Result<Vec<String>, SourceError>> + Send {
@@ -212,13 +212,13 @@ impl OverlaySource for CoinGecko {
         }
     }
 
-    fn overlays(
+    fn atoms(
         &self,
         symbol: &str,
         interval: Interval,
         since: Timestamp,
         until: Option<Timestamp>,
-    ) -> impl Future<Output = Result<Vec<OverlayRow>, SourceError>> + Send {
+    ) -> impl Future<Output = Result<Vec<Atom>, SourceError>> + Send {
         // Own the strings so the returned future doesn't borrow the caller.
         let id = symbol.to_string();
         let client = self.client.clone();
@@ -354,11 +354,11 @@ impl Samples {
         fill(&mut self.total_volume, &chart.total_volumes, interval);
     }
 
-    /// Emit one [`OverlayRow`] per bucket that any series touched, ascending by
+    /// Emit one overlay-only [`Atom`] per bucket that any series touched, ascending by
     /// time, restricted to `[since, until)`. A series missing a bucket yields
     /// `NaN` for that cell rather than dropping the row — a coin with prices but
     /// no market cap still produces a usable `price` column.
-    fn into_rows(self, schema: &Arc<Schema>, since_ms: i64, until_ms: i64) -> Vec<OverlayRow> {
+    fn into_rows(self, schema: &Arc<Schema>, since_ms: i64, until_ms: i64) -> Vec<Atom> {
         let buckets: BTreeSet<i64> = self
             .price
             .keys()
@@ -383,10 +383,7 @@ impl Samples {
                         OverlayValue::Real(circulating_supply(market_cap, price)),
                     ],
                 );
-                OverlayRow {
-                    time: Timestamp(t),
-                    overlays,
-                }
+                Atom::overlay_only(overlays, Timestamp(t))
             })
             .collect()
     }
@@ -545,8 +542,8 @@ mod tests {
         let rows = s.into_rows(coingecko_schema(), 0, i64::MAX);
 
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].time, Timestamp(WED));
-        let ov = &rows[0].overlays;
+        assert_eq!(rows[0].time, Some(Timestamp(WED)));
+        let ov = rows[0].overlays.as_ref().unwrap();
         assert_eq!(ov.get_by_key("price"), Some(&OverlayValue::Real(42_000.0)));
         assert_eq!(
             ov.get_by_key("market_cap"),
@@ -572,7 +569,7 @@ mod tests {
         let rows = s.into_rows(coingecko_schema(), 0, i64::MAX);
 
         assert_eq!(rows.len(), 1);
-        let ov = &rows[0].overlays;
+        let ov = rows[0].overlays.as_ref().unwrap();
         assert_eq!(ov.get_by_key("price"), Some(&OverlayValue::Real(5.0)));
         for key in ["market_cap", "total_volume", "circulating_supply"] {
             match ov.get_by_key(key) {
@@ -599,8 +596,8 @@ mod tests {
         let rows = s.into_rows(coingecko_schema(), MON, MON + 2 * MS_PER_DAY);
 
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].time, Timestamp(MON));
-        assert_eq!(rows[1].time, Timestamp(MON + MS_PER_DAY));
+        assert_eq!(rows[0].time, Some(Timestamp(MON)));
+        assert_eq!(rows[1].time, Some(Timestamp(MON + MS_PER_DAY)));
     }
 
     #[test]
@@ -625,7 +622,7 @@ mod tests {
         let rows = s.into_rows(coingecko_schema(), 0, i64::MAX);
         assert_eq!(rows.len(), 1);
         assert_eq!(
-            rows[0].overlays.get_by_key("price"),
+            rows[0].overlays.as_ref().unwrap().get_by_key("price"),
             Some(&OverlayValue::Real(1.0))
         );
     }
@@ -657,7 +654,7 @@ mod tests {
         let rows = s.into_rows(coingecko_schema(), 0, i64::MAX);
         // The NaN did not win the bucket; the real sample behind it did.
         assert_eq!(
-            rows[0].overlays.get_by_key("price"),
+            rows[0].overlays.as_ref().unwrap().get_by_key("price"),
             Some(&OverlayValue::Real(7.0))
         );
     }

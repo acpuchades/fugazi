@@ -52,7 +52,7 @@ use fugazi_core::indicators::{
 };
 use fugazi_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
 use fugazi_core::sources::{
-    Binance, BinanceVision, CandleSource, CoinGecko, Interval, OverlayRow, OverlaySource,
+    Binance, BinanceVision, CoinGecko, Interval, SeriesSource,
     SourceError, Timestamp, Yahoo,
 };
 use fugazi_core::wallet::{
@@ -6460,7 +6460,7 @@ fn build_candles_frame(
 /// Set one DataFrame column per [`Schema`] key, from a per-row overlay list.
 ///
 /// Shared by the candle frame (a provider's OHLCV extras) and the overlay frame
-/// (an `OverlaySource`'s whole payload) — both are "a schema plus one
+/// (an overlay-only series's whole payload) — both are "a schema plus one
 /// `OverlayInfo` per row", so the Real/Bool/Str dispatch lives here once.
 ///
 /// A row missing a cell reads as `NaN` / `false` / `""` by column type, matching
@@ -6504,10 +6504,10 @@ fn set_overlay_columns(
     Ok(())
 }
 
-/// Materialise an [`OverlaySource`] fetch into a DataFrame.
+/// Materialise an [`SeriesSource`] fetch into a DataFrame.
 ///
 /// Columns: `time` (ISO 8601 UTC str), then one per provider schema key —
-/// **and no OHLCV**, because an overlay source has none. That is the point of
+/// **and no OHLCV**, because an overlay-only series has none. That is the point of
 /// the type: these rows describe a property of an instrument at a point in
 /// time, not a price bar, and are meant to be joined onto a price frame on
 /// `time` (see the class docs on `CoinGecko`).
@@ -6515,14 +6515,16 @@ fn build_overlays_frame(
     py: Python<'_>,
     output: CandlesOutput,
     schema: std::sync::Arc<fugazi_core::Schema>,
-    rows: Vec<OverlayRow>,
+    rows: Vec<Atom>,
 ) -> PyResult<Py<PyAny>> {
     let n = rows.len();
     let mut times: Vec<String> = Vec::with_capacity(n);
     let mut overlays: Vec<Option<OverlayInfo>> = Vec::with_capacity(n);
     for row in rows {
-        times.push(format_ts_iso(row.time.0));
-        overlays.push(Some(row.overlays));
+        times.push(format_ts_iso(
+            row.time.expect("overlay atoms always carry a bar-open time").0,
+        ));
+        overlays.push(row.overlays);
     }
     let data = PyDict::new(py);
     data.set_item("time", &times)?;
@@ -6549,28 +6551,6 @@ fn build_overlays_frame(
 }
 
 /// Fetch a single (symbol, interval) window of overlay rows through the shared
-/// runtime, releasing the GIL for the network I/O. The [`OverlaySource`] twin of
-/// [`fetch_bars`].
-fn fetch_overlay_rows<O>(
-    py: Python<'_>,
-    source: &O,
-    symbol: &str,
-    interval: Interval,
-    since: Timestamp,
-    until: Option<Timestamp>,
-) -> PyResult<Vec<OverlayRow>>
-where
-    O: OverlaySource + Clone,
-{
-    let client = source.clone();
-    let symbol = symbol.to_string();
-    py.detach(|| {
-        sources_runtime()
-            .block_on(async move { client.overlays(&symbol, interval, since, until).await })
-    })
-    .map_err(source_error_to_py)
-}
-
 /// Fetch a single (symbol, interval) window through the shared runtime,
 /// releasing the GIL for the network I/O.
 fn fetch_bars<C>(
@@ -6582,7 +6562,7 @@ fn fetch_bars<C>(
     until: Option<Timestamp>,
 ) -> PyResult<Vec<Atom>>
 where
-    C: CandleSource + Clone,
+    C: SeriesSource + Clone,
 {
     let client = source.clone();
     let symbol = symbol.to_string();
@@ -6802,8 +6782,8 @@ impl PyCoinGecko {
         let interval = parse_interval_token(freq)?;
         let (since_ts, until_ts) = resolve_since_until(since, until)?;
         let out = CandlesOutput::from_kwarg(output)?;
-        let rows = fetch_overlay_rows(py, &self.inner, symbol, interval, since_ts, until_ts)?;
-        build_overlays_frame(py, out, self.inner.schema(), rows)
+        let rows = fetch_bars(py, &self.inner, symbol, interval, since_ts, until_ts)?;
+        build_overlays_frame(py, out, self.inner.schema().unwrap_or_else(fugazi_core::Schema::empty), rows)
     }
 
     /// Every coin id CoinGecko exposes, sorted — the vocabulary `symbol` accepts.
@@ -6875,15 +6855,15 @@ impl PyBinanceVision {
         let interval = parse_interval_token(freq)?;
         let (since_ts, until_ts) = resolve_since_until(since, until)?;
         let out = CandlesOutput::from_kwarg(output)?;
-        let rows = fetch_overlay_rows(py, &self.inner, symbol, interval, since_ts, until_ts)?;
-        build_overlays_frame(py, out, self.inner.schema(), rows)
+        let rows = fetch_bars(py, &self.inner, symbol, interval, since_ts, until_ts)?;
+        build_overlays_frame(py, out, self.inner.schema().unwrap_or_else(fugazi_core::Schema::empty), rows)
     }
 
     /// Every perpetual contract symbol currently trading, sorted.
     fn symbols(&self, py: Python<'_>) -> PyResult<Vec<String>> {
         let client = self.inner.clone();
         py.detach(|| {
-            sources_runtime().block_on(async move { OverlaySource::tickers(&client).await })
+            sources_runtime().block_on(async move { SeriesSource::tickers(&client).await })
         })
         .map_err(source_error_to_py)
     }
