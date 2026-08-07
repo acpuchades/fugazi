@@ -2310,11 +2310,18 @@ def test_fetch_redirects_binance_vision_to_overlays():
         ta.fetch(provider="binance-vision", symbol="BTCUSDT")
 
 
-def test_binance_vision_rejects_sub_hourly():
+def test_binance_vision_futures_rejects_sub_hourly():
     # Funding settles every 4-8h, so a 15m bucket is empty on almost every bar
-    # — a column of zeros reading as "no carry" rather than "no data".
+    # — a column of zeros reading as "no carry" rather than "no data". Spot has
+    # no such constraint: it is klines only, and Binance publishes those at
+    # every cadence.
     with pytest.raises(ValueError, match="unsupported interval"):
-        ta.BinanceVision().overlays(symbol="BTCUSDT", freq="15m", since="2024-01-01")
+        ta.BinanceVision("futures").overlays(symbol="BTCUSDT", freq="15m", since="2024-01-01")
+
+
+def test_binance_vision_market_must_be_spot_or_futures():
+    with pytest.raises(ValueError, match="must be 'spot' or 'futures'"):
+        ta.BinanceVision("perp")
 
 
 # ---------------------------------------------------------------------------

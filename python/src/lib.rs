@@ -6819,16 +6819,27 @@ struct PyBinanceVision {
 
 #[pymethods]
 impl PyBinanceVision {
-    /// Construct a client. `base_url` overrides the API endpoint
-    /// (`https://fapi.binance.com`), useful for local test servers.
+    /// Construct a client. `market` picks the archive tree — `"spot"` (the
+    /// default) or `"futures"`, which adds the funding rate, premium index and
+    /// positioning columns a derivative has and a cash market does not.
+    /// `base_url` overrides the archive host, useful for local test servers.
     #[new]
-    #[pyo3(signature = (base_url = None))]
-    fn new(base_url: Option<String>) -> Self {
-        let mut inner = BinanceVision::new();
+    #[pyo3(signature = (market = "spot", base_url = None))]
+    fn new(market: &str, base_url: Option<String>) -> PyResult<Self> {
+        let market = match market.to_ascii_lowercase().as_str() {
+            "spot" => fugazi_core::sources::binance_vision::Market::Spot,
+            "futures" | "um" => fugazi_core::sources::binance_vision::Market::UsdMFutures,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "market must be 'spot' or 'futures' (got {other:?})"
+                )));
+            }
+        };
+        let mut inner = BinanceVision::for_market(market);
         if let Some(url) = base_url {
             inner = inner.with_base_url(url);
         }
-        Self { inner }
+        Ok(Self { inner })
     }
 
     /// Fetch the funding-rate column for one `(symbol, freq)` window.
