@@ -43,7 +43,7 @@ fn pick_projects_the_named_asset() {
         (s("ETH"), None, atom(50.0)),
     ]);
     let out = btc.update(s_).expect("BTC present");
-    assert_eq!(out.candle.close, 100.0);
+    assert_eq!(out.candle.unwrap().close, 100.0);
 }
 
 #[test]
@@ -116,7 +116,7 @@ fn pick_by_freq_wildcards_symbol() {
         (s("ETH"), Some(Frequency::Day(1)), atom(50.0)),
     ]);
     let out = hourly.update(s_).expect("some hourly entry");
-    assert_eq!(out.candle.close, 100.0);
+    assert_eq!(out.candle.unwrap().close, 100.0);
 }
 
 #[test]
@@ -129,7 +129,7 @@ fn pick_exact_disambiguates_between_frequencies() {
         (s("BTC"), Some(Frequency::Hour(1)), atom(100.0)),
         (s("BTC"), Some(Frequency::Day(1)), atom(300.0)),
     ]);
-    assert_eq!(btc_hour.update(s_).map(|a| a.candle.close), Some(100.0));
+    assert_eq!(btc_hour.update(s_).map(|a| a.candle.unwrap().close), Some(100.0));
 }
 
 #[test]

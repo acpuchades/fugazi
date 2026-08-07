@@ -231,7 +231,13 @@ pub fn compute_series(
             let input = match pc.ind.input_type() {
                 DynType::Snapshot => DynValue::Snapshot(snap.clone()),
                 DynType::Atom => DynValue::Atom(atom.clone()),
-                DynType::Candle => DynValue::Candle(atom.candle),
+                // A candle-rooted overlay over an overlay-only series has
+                // nothing to read; hand it the atom so the column warms up as
+                // absent rather than fabricating a bar.
+                DynType::Candle => match atom.candle {
+                    Some(candle) => DynValue::Candle(candle),
+                    None => DynValue::Atom(atom.clone()),
+                },
                 // Overlay roots are Snapshot/Atom/Candle; anything else (a
                 // scalar-input carrier) gets the atom as a best effort.
                 _ => DynValue::Atom(atom.clone()),

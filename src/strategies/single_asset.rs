@@ -412,9 +412,9 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Si
         // `!pick`, but Position tracks a plain Candle, so we need to extract
         // one asset's atom here.
         let self_atom = extract_self_atom(&snap, &self.symbol);
-        if let Some(atom) = &self_atom {
-            self.position.update(atom.candle);
-            self.book.update([(self.symbol.clone(), atom.candle)]);
+        if let Some(candle) = self_atom.as_ref().and_then(|a| a.candle) {
+            self.position.update(candle);
+            self.book.update([(self.symbol.clone(), candle)]);
         }
 
         self.long.update(snap.clone());

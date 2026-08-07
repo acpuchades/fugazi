@@ -221,10 +221,19 @@ impl<Sym> Snapshot<Sym> {
     /// For sources that are symbol-agnostic (calendar accessors that only
     /// read `atom.time`), see [`any_atom`](Self::any_atom).
     pub fn sole_atom(&self) -> Option<&Atom> {
-        match self.entries.len() {
-            0 => None,
-            1 => Some(&self.entries[0].2),
-            n => panic!(
+        // Only priceable entries count. An overlay-only series — a funding
+        // rate, an open interest — is stacked into the snapshot beside the
+        // price series and is reached deliberately, with `!pick`; it must stay
+        // invisible to the implicit unpack, or attaching one would break every
+        // bare `!close` in a single-asset strategy that never asked for it.
+        let mut priceable = self.entries.iter().filter(|(_, _, a)| a.is_priceable());
+        let first = priceable.next();
+        match (first, priceable.count()) {
+            (None, _) => None,
+            (Some(entry), 0) => Some(&entry.2),
+            (Some(_), extra) => {
+                let n = extra + 1;
+                panic!(
                 "Snapshot::sole_atom: expected a single-entry snapshot, got {n} entries. \
                  This usually means a strategy authored for single-series input was fed a \
                  multi-asset snapshot, and the implicit no-arg `Pick::new()` on one of its \
@@ -236,7 +245,8 @@ impl<Sym> Snapshot<Sym> {
                  leaf — e.g. `!close {{ source: !pick {{ symbol: BTC }} }}`. \n\
                  - In Rust, replace `Pick::new()` with `Pick::matching(Selector::by_symbol(...))` \
                  (or `by_freq(...)` / `exact(...)`)."
-            ),
+                )
+            }
         }
     }
 }
@@ -296,5 +306,52 @@ impl<Sym> From<Atom> for Snapshot<Sym> {
 impl<Sym> From<crate::market::Candle> for Snapshot<Sym> {
     fn from(candle: crate::market::Candle) -> Self {
         Self::of_atom(Atom::new(candle))
+    }
+}
+
+#[cfg(test)]
+mod overlay_only_tests {
+    use super::*;
+    use crate::market::{Candle, OverlayInfo, OverlayValue, Schema};
+    use crate::time::Timestamp;
+
+    fn funding_atom(rate: f64) -> Atom {
+        let mut b = Schema::builder();
+        b.add_real("funding_rate");
+        let schema = b.finish();
+        Atom::overlay_only(
+            OverlayInfo::new(schema, vec![OverlayValue::Real(rate)]),
+            Timestamp(0),
+        )
+    }
+
+    #[test]
+    fn sole_atom_ignores_an_overlay_only_entry() {
+        // The point of the whole change: stacking a funding series next to a
+        // price series must not break a single-asset strategy's bare `!close`,
+        // which reaches its bar through the implicit no-arg unpack.
+        let mut snap: Snapshot<String> = Snapshot::new();
+        snap.push(Some("BTC".into()), None, Atom::new(Candle::new(1.0, 2.0, 0.5, 1.5, 10.0)));
+        snap.push(Some("BTC.funding".into()), None, funding_atom(0.0003));
+
+        let sole = snap.sole_atom().expect("the one priceable entry");
+        assert_eq!(sole.candle.unwrap().close, 1.5);
+    }
+
+    #[test]
+    fn sole_atom_still_panics_on_two_real_bars() {
+        // The ambiguity it exists to catch is unchanged: two *priceable*
+        // entries remain a programming error, not a silent arbitrary pick.
+        let mut snap: Snapshot<String> = Snapshot::new();
+        snap.push(Some("BTC".into()), None, Atom::new(Candle::new(1.0, 2.0, 0.5, 1.5, 10.0)));
+        snap.push(Some("ETH".into()), None, Atom::new(Candle::new(2.0, 3.0, 1.5, 2.5, 20.0)));
+        assert!(std::panic::catch_unwind(|| snap.sole_atom()).is_err());
+    }
+
+    #[test]
+    fn an_all_overlay_snapshot_has_no_sole_atom() {
+        let mut snap: Snapshot<String> = Snapshot::new();
+        snap.push(Some("BTC.funding".into()), None, funding_atom(0.0003));
+        assert!(snap.sole_atom().is_none());
     }
 }

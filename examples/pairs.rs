@@ -101,7 +101,8 @@ fn main() {
         // per-symbol).
         for (sym, _, atom) in snap.iter() {
             if let Some(sym) = sym {
-                for fill in wallet.update(*sym, atom.candle) {
+                let Some(candle) = atom.candle else { continue };
+                for fill in wallet.update(*sym, candle) {
                     strat.on_fill(&fill);
                 }
             }
@@ -111,7 +112,7 @@ fn main() {
         for order in &wallet.orders()[filled..] {
             let price = snap
                 .find(&Selector::by_symbol(order.symbol))
-                .map(|a| a.candle.close)
+                .map(|a| a.candle.unwrap().close)
                 .unwrap_or(0.0);
             println!(
                 "bar {i:>3}  {:<4} {:>3} {:8.3} @ {:7.2}",

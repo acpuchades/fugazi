@@ -2292,29 +2292,29 @@ def test_coingecko_rejects_sub_hourly():
         ta.CoinGecko().overlays(symbol="bitcoin", freq="5m", since="2026-07-08")
 
 
-# --- BinanceFunding (overlay source) ---------------------------------------
+# --- BinanceVision (overlay source) ---------------------------------------
 #
 # Offline guards only; the summing / bucketing behaviour is pinned by the
-# wiremock suite in tests/sources_binance_funding.rs.
+# wiremock suite in tests/sources_binance_vision.rs.
 
 
-def test_binance_funding_constructs():
-    assert ta.BinanceFunding() is not None
-    assert ta.BinanceFunding(base_url="http://localhost:1") is not None
+def test_binance_vision_constructs():
+    assert ta.BinanceVision() is not None
+    assert ta.BinanceVision(base_url="http://localhost:1") is not None
 
 
-def test_fetch_redirects_binance_funding_to_overlays():
+def test_fetch_redirects_binance_vision_to_overlays():
     # Same trap as CoinGecko: a funding series has no OHLCV, so `fetch()` must
     # redirect rather than hand back a candle-less "candle" frame.
     with pytest.raises(ValueError, match="overlay provider"):
-        ta.fetch(provider="binance-funding", symbol="BTCUSDT")
+        ta.fetch(provider="binance-vision", symbol="BTCUSDT")
 
 
-def test_binance_funding_rejects_sub_hourly():
+def test_binance_vision_rejects_sub_hourly():
     # Funding settles every 4-8h, so a 15m bucket is empty on almost every bar
     # — a column of zeros reading as "no carry" rather than "no data".
     with pytest.raises(ValueError, match="unsupported interval"):
-        ta.BinanceFunding().overlays(symbol="BTCUSDT", freq="15m", since="2024-01-01")
+        ta.BinanceVision().overlays(symbol="BTCUSDT", freq="15m", since="2024-01-01")
 
 
 # ---------------------------------------------------------------------------
@@ -2455,3 +2455,31 @@ def test_compute_overlays_rejects_bad_overlays_type():
     atoms = _bars([1.0, 2.0])
     with pytest.raises(TypeError, match="YAML string or a dict"):
         ta.compute_overlays(atoms, 42)
+
+
+# ── overlay-only atoms: a series that is not a price ─────────────────────────
+
+
+def _funding_overlays(rate: float):
+    b = ta.SchemaBuilder()
+    b.add_real("funding_rate")
+    schema = b.finish()
+    return ta.OverlayInfo(schema, [rate])
+
+
+def test_atom_without_a_candle_is_overlay_only():
+    atom = ta.Atom(overlays=_funding_overlays(0.0003), time=0)
+    assert atom.candle is None
+    assert not atom.is_priceable
+
+
+def test_atom_with_a_candle_stays_priceable():
+    atom = ta.Atom(ta.Candle(1.0, 2.0, 0.5, 1.5, 10.0))
+    assert atom.candle is not None
+    assert atom.candle.close == 1.5
+    assert atom.is_priceable
+
+
+def test_an_atom_carrying_neither_is_rejected():
+    with pytest.raises(ValueError, match="carries no data"):
+        ta.Atom()

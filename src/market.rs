@@ -383,7 +383,7 @@ impl OverlayInfo {
 ///
 /// The `Input` associated type of every [`Indicator`](crate::Indicator) that
 /// reads bar-shaped data. OHLCV access stays a direct field read
-/// (`atom.candle.close`); overlay access goes through an index resolved once at
+/// (`atom.candle.unwrap().close`); overlay access goes through an index resolved once at
 /// construction against the schema; time is read directly via
 /// [`atom.time`](Atom::time) by calendar indicators
 /// (`Year`/`Month`/`Day`/…, in [`crate::indicators::calendar`]). Cheap to
@@ -399,8 +399,21 @@ impl OverlayInfo {
 /// [`Atom::with_overlays_and_time`]) when the bar's open time is known.
 #[derive(Debug, Clone)]
 pub struct Atom {
-    /// The OHLCV bar for this tick.
-    pub candle: Candle,
+    /// The OHLCV bar for this tick, when the series has one.
+    ///
+    /// `None` marks an **overlay-only** atom: a series that is not a price at
+    /// all — a funding rate, an open interest, a market capitalisation. Such a
+    /// series is stacked into a [`Snapshot`](crate::types::Snapshot) alongside
+    /// the price series and reached explicitly with `!pick` + `!get`, so the
+    /// absence has to be representable rather than papered over: a synthesised
+    /// zero candle would mark positions to nothing, and a `NaN` one passes
+    /// every `close <= 0.0` guard in the wallet and silently poisons the equity
+    /// curve.
+    ///
+    /// Everything that prices a bar must therefore skip these atoms — the
+    /// wallet's mark-to-market, `sole_atom`'s implicit unpack — while
+    /// everything that reads the side channel treats them as ordinary.
+    pub candle: Option<Candle>,
     /// The bar's open time as a UTC millisecond epoch, if known. `None` for
     /// synthetic / time-agnostic bars; the calendar indicators read this and
     /// emit `None` when it is absent.
@@ -413,16 +426,32 @@ impl Atom {
     /// An atom carrying only a candle (no time, no overlays).
     pub fn new(candle: Candle) -> Self {
         Self {
-            candle,
+            candle: Some(candle),
             time: None,
             overlays: None,
         }
     }
 
+    /// An atom with overlay values and **no candle** — a series that is not a
+    /// price. See the [`candle`](Self::candle) field.
+    pub fn overlay_only(overlays: OverlayInfo, time: Timestamp) -> Self {
+        Self {
+            candle: None,
+            time: Some(time),
+            overlays: Some(overlays),
+        }
+    }
+
+    /// Whether this atom can be priced — i.e. carries a candle. The predicate
+    /// the wallet and the sole-atom unpack filter on.
+    pub fn is_priceable(&self) -> bool {
+        self.candle.is_some()
+    }
+
     /// An atom with a candle and a bar-open [`Timestamp`] (no overlays).
     pub fn with_time(candle: Candle, time: Timestamp) -> Self {
         Self {
-            candle,
+            candle: Some(candle),
             time: Some(time),
             overlays: None,
         }
@@ -431,7 +460,7 @@ impl Atom {
     /// An atom with both a candle and bound overlay values.
     pub fn with_overlays(candle: Candle, overlays: OverlayInfo) -> Self {
         Self {
-            candle,
+            candle: Some(candle),
             time: None,
             overlays: Some(overlays),
         }
@@ -445,7 +474,7 @@ impl Atom {
         time: Timestamp,
     ) -> Self {
         Self {
-            candle,
+            candle: Some(candle),
             time: Some(time),
             overlays: Some(overlays),
         }
@@ -590,6 +619,6 @@ mod tests {
         let c = Candle::new(1.0, 2.0, 0.5, 1.5, 100.0);
         let a: Atom = c.into();
         assert!(a.overlays.is_none());
-        assert_eq!(a.candle.close, 1.5);
+        assert_eq!(a.candle.unwrap().close, 1.5);
     }
 }

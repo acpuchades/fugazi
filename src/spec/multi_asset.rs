@@ -540,7 +540,8 @@ mod tests {
         );
         for (sym_opt, _f, atom) in s.iter() {
             let sym = sym_opt.cloned().unwrap();
-            for fill in wallet.update(sym, atom.candle) {
+            let Some(candle) = atom.candle else { continue };
+            for fill in wallet.update(sym, candle) {
                 strat.on_fill(&fill);
             }
         }

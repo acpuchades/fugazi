@@ -164,7 +164,13 @@ where
         // strategy's `on_fill` and collected into the blotter.
         for (sym, _freq, atom) in snap.iter() {
             let Some(sym) = sym else { continue };
-            for fill in wallet.update(sym.clone(), atom.candle) {
+            // An overlay-only series carries no price, so it is not something
+            // the wallet can mark a position against. Skipping is the whole
+            // reason `candle` is optional: a synthesised zero would mark the
+            // position to nothing, and a `NaN` would pass every `close <= 0.0`
+            // guard and poison the equity curve without a single error.
+            let Some(candle) = atom.candle else { continue };
+            for fill in wallet.update(sym.clone(), candle) {
                 strategy.on_fill(&fill);
                 fills.push(Fill { bar, order: fill });
             }

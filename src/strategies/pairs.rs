@@ -492,17 +492,17 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Stra
         // Collect per-leg atoms for both positions AND the book.
         let left_atom = find_atom(&snap, &self.left);
         let right_atom = find_atom(&snap, &self.right);
-        if let Some(atom) = &left_atom {
-            self.left_position.update(atom.candle);
+        if let Some(candle) = left_atom.as_ref().and_then(|a| a.candle) {
+            self.left_position.update(candle);
         }
-        if let Some(atom) = &right_atom {
-            self.right_position.update(atom.candle);
+        if let Some(candle) = right_atom.as_ref().and_then(|a| a.candle) {
+            self.right_position.update(candle);
         }
         // Feed the book both legs' closes in one call so aggregate
         // mark-to-market and per-bar return are computed correctly.
         let marks: Vec<(Sym, Candle)> = [
-            left_atom.as_ref().map(|a| (self.left.clone(), a.candle)),
-            right_atom.as_ref().map(|a| (self.right.clone(), a.candle)),
+            left_atom.as_ref().and_then(|a| a.candle).map(|c| (self.left.clone(), c)),
+            right_atom.as_ref().and_then(|a| a.candle).map(|c| (self.right.clone(), c)),
         ]
         .into_iter()
         .flatten()

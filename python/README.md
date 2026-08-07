@@ -828,12 +828,12 @@ CoinGecko only samples that finely over windows too short to backtest on.
 `ta.fetch(provider="cg", ...)` deliberately raises rather than returning a
 candle-less frame from a function named `fetch`.
 
-`BinanceFunding` is the same shape, for the perpetual **funding rate** — the
+`BinanceVision` is the same shape, for the perpetual **funding rate** — the
 periodic payment between the two sides of a perp (positive = longs pay shorts),
 the primary carry signal in crypto:
 
 ```python
-fund = ta.BinanceFunding()
+fund = ta.BinanceVision()
 rates = fund.overlays(symbol="BTCUSDT", freq="1d", since="90d ago")
 # columns: time, funding_rate
 ```
@@ -850,5 +850,5 @@ That is the right aggregation because funding is an accrual rather than a level
 and it means there is nothing to forward-fill — request the cadence you trade.
 Sub-hourly is rejected: those buckets would be empty on almost every bar, which
 reads as "no carry" rather than "no data". As with CoinGecko,
-`ta.fetch(provider="binance-funding", ...)` redirects rather than returning a
+`ta.fetch(provider="binance-vision", ...)` redirects rather than returning a
 candle-less frame.

@@ -65,7 +65,9 @@ impl<S: Indicator<Output = Atom>> Indicator for CurrentBar<S> {
     type Output = Candle;
 
     fn update(&mut self, input: S::Input) -> Option<Candle> {
-        self.value = self.source.update(input).map(|a| a.candle);
+        // `and_then`, not `map`: an overlay-only atom has no bar, and the
+        // leaf reads `None` for it exactly as it does before warm-up.
+        self.value = self.source.update(input).and_then(|a| a.candle);
         self.value
     }
 
@@ -135,7 +137,10 @@ impl<F: CandleField, S: Indicator<Output = Atom>> Indicator for Field<F, S> {
     type Output = Real;
 
     fn update(&mut self, input: S::Input) -> Option<Real> {
-        self.value = self.source.update(input).map(|a| F::get(&a.candle));
+        self.value = self.source
+            .update(input)
+            .and_then(|a| a.candle)
+            .map(|c| F::get(&c));
         self.value
     }
 

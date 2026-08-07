@@ -46,13 +46,17 @@
 //! let since = Timestamp(1_704_067_200_000); // 2024-01-01 UTC
 //! let rows = b.atoms("BTCEUR", Interval::Day(1), since, None).await?;
 //! for row in &rows {
-//!     println!("{:?} {}", row.time, row.candle.close);
+//!     // `candle` is optional — a candle provider always fills it, but an
+//!     // overlay-only series has no price to put there.
+//!     if let Some(c) = row.candle {
+//!         println!("{:?} {}", row.time, c.close);
+//!     }
 //! }
 //! # Ok(()) }
 //! ```
 
 pub mod binance;
-pub mod binance_funding;
+pub mod binance_vision;
 pub mod coingecko;
 pub mod yahoo;
 
@@ -64,7 +68,7 @@ use crate::types::{Atom, OverlayInfo, Schema};
 pub use crate::types::Timestamp;
 
 pub use binance::Binance;
-pub use binance_funding::BinanceFunding;
+pub use binance_vision::BinanceVision;
 pub use coingecko::CoinGecko;
 pub use yahoo::Yahoo;
 

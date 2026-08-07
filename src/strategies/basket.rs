@@ -1194,10 +1194,13 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Ba
         let mut marks: Vec<(Sym, Candle)> = Vec::new();
         for (sym_opt, _freq, atom) in snap.iter() {
             if let Some(sym) = sym_opt {
+                // An overlay-only series stacked into the snapshot carries no
+                // price, so it neither advances a position nor marks a leg.
+                let Some(candle) = atom.candle else { continue };
                 if let Some(pos) = self.positions.get(sym) {
-                    pos.update(atom.candle);
+                    pos.update(candle);
                 }
-                marks.push((sym.clone(), atom.candle));
+                marks.push((sym.clone(), candle));
             }
         }
         if !marks.is_empty() {
@@ -1579,7 +1582,8 @@ mod tests {
             let s = snap(entries);
             for (sym_opt, _f, atom) in s.iter() {
                 let sym = sym_opt.copied().unwrap();
-                for fill in wallet.update(sym, atom.candle) {
+                let Some(candle) = atom.candle else { continue };
+                for fill in wallet.update(sym, candle) {
                     strat.on_fill(&fill);
                 }
             }
@@ -1633,7 +1637,8 @@ mod tests {
             let s = snap(entries);
             for (sym_opt, _f, atom) in s.iter() {
                 let sym = sym_opt.copied().unwrap();
-                for fill in wallet.update(sym, atom.candle) {
+                let Some(candle) = atom.candle else { continue };
+                for fill in wallet.update(sym, candle) {
                     strat.on_fill(&fill);
                 }
             }
@@ -1695,7 +1700,8 @@ mod tests {
         let bar1 = snap(&[("A", 100.0), ("B", 50.0), ("C", 25.0)]);
         for (sym_opt, _f, atom) in bar1.iter() {
             let sym = sym_opt.copied().unwrap();
-            for fill in wallet.update(sym, atom.candle) {
+            let Some(candle) = atom.candle else { continue };
+            for fill in wallet.update(sym, candle) {
                 strat.on_fill(&fill);
             }
         }
@@ -1708,7 +1714,8 @@ mod tests {
         let bar2 = snap(&[("A", 100.0), ("B", 50.0), ("C", 25.0)]);
         for (sym_opt, _f, atom) in bar2.iter() {
             let sym = sym_opt.copied().unwrap();
-            for fill in wallet.update(sym, atom.candle) {
+            let Some(candle) = atom.candle else { continue };
+            for fill in wallet.update(sym, candle) {
                 strat.on_fill(&fill);
             }
         }
@@ -1746,7 +1753,8 @@ mod tests {
             let s = snap(symbols);
             for (sym_opt, _f, atom) in s.iter() {
                 let sym = sym_opt.copied().unwrap();
-                for fill in wallet.update(sym, atom.candle) {
+                let Some(candle) = atom.candle else { continue };
+                for fill in wallet.update(sym, candle) {
                     strat.on_fill(&fill);
                 }
             }
@@ -1793,7 +1801,8 @@ mod tests {
             let s = snap(&[("A", 100.0), ("B", 50.0)]);
             for (sym_opt, _f, atom) in s.iter() {
                 let sym = sym_opt.copied().unwrap();
-                for fill in wallet.update(sym, atom.candle) {
+                let Some(candle) = atom.candle else { continue };
+                for fill in wallet.update(sym, candle) {
                     strat.on_fill(&fill);
                 }
             }
@@ -1824,7 +1833,8 @@ mod tests {
             let s = snap(entries);
             for (sym_opt, _f, atom) in s.iter() {
                 let sym = sym_opt.copied().unwrap();
-                for fill in wallet.update(sym, atom.candle) {
+                let Some(candle) = atom.candle else { continue };
+                for fill in wallet.update(sym, candle) {
                     strat.on_fill(&fill);
                 }
             }
@@ -1845,7 +1855,8 @@ mod tests {
         let bar4 = snap(&[("A", 100.0), ("B", 50.0)]);
         for (sym_opt, _f, atom) in bar4.iter() {
             let sym = sym_opt.copied().unwrap();
-            for fill in wallet.update(sym, atom.candle) {
+            let Some(candle) = atom.candle else { continue };
+            for fill in wallet.update(sym, candle) {
                 strat.on_fill(&fill);
             }
         }
@@ -1878,7 +1889,8 @@ mod tests {
             let s = snap(entries);
             for (sym_opt, _f, atom) in s.iter() {
                 let sym = sym_opt.copied().unwrap();
-                for fill in wallet.update(sym, atom.candle) {
+                let Some(candle) = atom.candle else { continue };
+                for fill in wallet.update(sym, candle) {
                     strat.on_fill(&fill);
                 }
             }
@@ -2116,7 +2128,8 @@ mod tests {
             let s = snap(entries);
             for (sym_opt, _f, atom) in s.iter() {
                 let sym = sym_opt.copied().unwrap();
-                for fill in wallet.update(sym, atom.candle) {
+                let Some(candle) = atom.candle else { continue };
+                for fill in wallet.update(sym, candle) {
                     strat.on_fill(&fill);
                 }
             }
@@ -2151,7 +2164,8 @@ mod tests {
             let s = snap(entries);
             for (sym_opt, _f, atom) in s.iter() {
                 let sym = sym_opt.copied().unwrap();
-                for fill in wallet.update(sym, atom.candle) {
+                let Some(candle) = atom.candle else { continue };
+                for fill in wallet.update(sym, candle) {
                     strat.on_fill(&fill);
                 }
             }
@@ -2201,7 +2215,8 @@ mod tests {
             let s = snap(&[("A", 100.0), ("B", 50.0)]);
             for (sym_opt, _f, atom) in s.iter() {
                 let sym = sym_opt.copied().unwrap();
-                for fill in wallet.update(sym, atom.candle) {
+                let Some(candle) = atom.candle else { continue };
+                for fill in wallet.update(sym, candle) {
                     strat.on_fill(&fill);
                 }
             }
@@ -2236,7 +2251,8 @@ mod tests {
             let s = snap(entries);
             for (sym_opt, _f, atom) in s.iter() {
                 let sym = sym_opt.copied().unwrap();
-                for fill in wallet.update(sym, atom.candle) {
+                let Some(candle) = atom.candle else { continue };
+                for fill in wallet.update(sym, candle) {
                     strat.on_fill(&fill);
                 }
             }
@@ -2285,7 +2301,8 @@ mod tests {
             let s = snap(&[("A", 300.0), ("B", 200.0), ("C", 100.0)]);
             for (sym_opt, _f, atom) in s.iter() {
                 let sym = sym_opt.copied().unwrap();
-                for fill in wallet.update(sym, atom.candle) {
+                let Some(candle) = atom.candle else { continue };
+                for fill in wallet.update(sym, candle) {
                     strat.on_fill(&fill);
                 }
             }
