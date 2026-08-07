@@ -1,4 +1,4 @@
-//! Binance klines-endpoint implementation of [`CandleSource`].
+//! Binance klines-endpoint implementation of [`SeriesSource`].
 //!
 //! Fetches OHLCV bars from `GET /api/v3/klines`, auto-paginating in
 //! `max_per_request` chunks until either the API returns a short page or the
@@ -22,7 +22,7 @@ use serde::Deserialize;
 
 use crate::types::{Atom, Candle, OverlayInfo, OverlayValue, Real, Schema};
 
-use super::{CandleSource, Interval, SourceError, Timestamp};
+use super::{SeriesSource, Interval, SourceError, Timestamp};
 
 const DEFAULT_BASE_URL: &str = "https://api.binance.com";
 const DEFAULT_MAX_PER_REQUEST: usize = 1000;
@@ -94,7 +94,7 @@ impl Binance {
     }
 }
 
-impl CandleSource for Binance {
+impl SeriesSource for Binance {
     fn name(&self) -> &'static str {
         "binance"
     }

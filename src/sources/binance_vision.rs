@@ -1,4 +1,4 @@
-//! Binance Vision — the public historical archive — as an [`OverlaySource`].
+//! Binance Vision — the public historical archive — as an [`SeriesSource`].
 //!
 //! Binance publishes its own market data as dated ZIP-of-CSV files at
 //! `data.binance.vision` rather than behind a query API: one archive per symbol
@@ -63,9 +63,9 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::types::{OverlayInfo, OverlayValue, Real, Schema};
+use crate::types::{Atom, OverlayInfo, OverlayValue, Real, Schema};
 
-use super::{Interval, OverlayRow, OverlaySource, SourceError, Timestamp, floor_to_bucket};
+use super::{Interval, SeriesSource, SourceError, Timestamp, floor_to_bucket};
 
 /// The archive host. Static files, no API key, no rate limit.
 const DEFAULT_BASE_URL: &str = "https://data.binance.vision";
@@ -156,13 +156,13 @@ impl BinanceVision {
     }
 }
 
-impl OverlaySource for BinanceVision {
+impl SeriesSource for BinanceVision {
     fn name(&self) -> &'static str {
         "binance-vision"
     }
 
-    fn schema(&self) -> Arc<Schema> {
-        binance_vision_schema().clone()
+    fn schema(&self) -> Option<Arc<Schema>> {
+        Some(binance_vision_schema().clone())
     }
 
     /// The archive is a plain file tree with no index endpoint, so the symbol
@@ -191,13 +191,13 @@ impl OverlaySource for BinanceVision {
         }
     }
 
-    fn overlays(
+    fn atoms(
         &self,
         symbol: &str,
         interval: Interval,
         since: Timestamp,
         until: Option<Timestamp>,
-    ) -> impl Future<Output = Result<Vec<OverlayRow>, SourceError>> + Send {
+    ) -> impl Future<Output = Result<Vec<Atom>, SourceError>> + Send {
         // Own the strings so the returned future doesn't borrow the caller.
         let symbol = symbol.to_string();
         let client = self.client.clone();
@@ -248,14 +248,16 @@ impl OverlaySource for BinanceVision {
 
             Ok(buckets
                 .into_iter()
-                .map(|time| OverlayRow {
-                    time: Timestamp(time),
-                    overlays: OverlayInfo::sparse(
-                        schema.clone(),
-                        columns
-                            .iter()
-                            .map(|c| c.get(&time).copied().map(OverlayValue::Real)),
-                    ),
+                .map(|time| {
+                    Atom::overlay_only(
+                        OverlayInfo::sparse(
+                            schema.clone(),
+                            columns
+                                .iter()
+                                .map(|c| c.get(&time).copied().map(OverlayValue::Real)),
+                        ),
+                        Timestamp(time),
+                    )
                 })
                 .collect())
         }

@@ -1,5 +1,5 @@
 #![cfg(feature = "sources")]
-//! Integration test for the Yahoo Finance `CandleSource` implementation.
+//! Integration test for the Yahoo Finance `SeriesSource` implementation.
 //!
 //! Spins up a `wiremock` server on a random port, stubs
 //! `/v8/finance/chart/{symbol}` with a canned chart-API response, and verifies
@@ -7,7 +7,7 @@
 //! millisecond `Timestamp`s, skips null bars, and maps `Not Found` / `429`
 //! into the right `SourceError` variants.
 
-use fugazi::sources::{CandleSource, Interval, Timestamp, Yahoo};
+use fugazi::sources::{SeriesSource, Interval, Timestamp, Yahoo};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 

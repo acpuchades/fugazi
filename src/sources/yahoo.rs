@@ -1,4 +1,4 @@
-//! Yahoo Finance chart-endpoint implementation of [`CandleSource`].
+//! Yahoo Finance chart-endpoint implementation of [`SeriesSource`].
 //!
 //! Fetches OHLCV bars from `GET /v8/finance/chart/{symbol}`. Unlike Binance,
 //! Yahoo returns the whole `[period1, period2]` window in one response, so
@@ -25,7 +25,7 @@ use serde::Deserialize;
 
 use crate::types::{Atom, Candle, OverlayInfo, OverlayValue, Real, Schema};
 
-use super::{CandleSource, Interval, SourceError, Timestamp};
+use super::{SeriesSource, Interval, SourceError, Timestamp};
 
 const DEFAULT_BASE_URL: &str = "https://query1.finance.yahoo.com";
 const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (compatible; fugazi)";
@@ -87,7 +87,7 @@ impl Yahoo {
     }
 }
 
-impl CandleSource for Yahoo {
+impl SeriesSource for Yahoo {
     fn name(&self) -> &'static str {
         "yfinance"
     }

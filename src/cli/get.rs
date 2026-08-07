@@ -45,7 +45,7 @@ use tokio::task::JoinSet;
 
 use fugazi::prelude::*;
 use fugazi::sources::{
-    self, Binance, BinanceVision, CandleSource, CoinGecko, Interval, OverlayRow, OverlaySource,
+    self, Binance, BinanceVision, CoinGecko, Interval, SeriesSource,
     Timestamp, Yahoo, binance::binance_schema, yahoo::yahoo_schema,
 };
 
@@ -334,31 +334,6 @@ pub(crate) const KNOWN_PROVIDERS: &[(&str, &str)] = &[
     ),
 ];
 
-/// What a provider yields — the two [`fugazi::sources`] traits, as seen by the
-/// CLI.
-///
-/// The distinction is load-bearing rather than cosmetic. An overlay provider has
-/// no OHLCV, so its rows must not be written through the candle CSV writer:
-/// that writer emits a fixed `open,high,low,close,volume` block, and a
-/// synthesised zero-candle in those columns would silently *overwrite* the real
-/// prices when the file is later joined into a `--series` dataframe (which
-/// merges on `(symbol, time)` and lets the later file win each column). Hence
-/// [`resolve_mode`] refuses to mix the two kinds in one invocation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProviderKind {
-    /// Implements `CandleSource` — yields OHLCV bars. Also covers `csv:`.
-    Candles,
-    /// Implements `OverlaySource` — yields timestamped side-channel columns.
-    Overlays,
-}
-
-fn provider_kind(provider: &str) -> ProviderKind {
-    match provider {
-        "cg" | "binance-vision" => ProviderKind::Overlays,
-        _ => ProviderKind::Candles,
-    }
-}
-
 /// One `[OUTPUT=]QUERY[freq,freq,...]` entry in the CLI spec.
 ///
 /// The optional `OUTPUT=` prefix decouples the name a row is *emitted* under
@@ -400,39 +375,6 @@ enum FetchSpec {
 }
 
 impl FetchSpec {
-    fn kind(&self) -> ProviderKind {
-        match self {
-            FetchSpec::Remote { provider, .. } => provider_kind(provider),
-            FetchSpec::Csv { .. } => ProviderKind::Candles,
-        }
-    }
-}
-
-/// Decide which pipeline this invocation runs, rejecting a mix.
-///
-/// Candle and overlay providers write different CSV shapes into the single
-/// `-o` file, and merging them there would mean inventing OHLCV for the overlay
-/// rows — see [`ProviderKind`]. Two `get` calls and two `--series` flags do the
-/// job correctly, so that is what the error tells the user to do.
-fn resolve_mode(specs: &[FetchSpec]) -> Result<ProviderKind> {
-    let overlay = specs.iter().any(|s| s.kind() == ProviderKind::Overlays);
-    let candle = specs.iter().any(|s| s.kind() == ProviderKind::Candles);
-    if overlay && candle {
-        bail!(
-            "cannot mix candle providers and overlay-only providers in one `get` — they write \
-             different CSV shapes, and giving the overlay rows a synthetic OHLCV block would \
-             zero out your real prices when the files are joined.\n\n\
-             Fetch them separately and let `run` join the two on (symbol, time):\n\
-             \x20 fugazi get binance:BTCUSDT[1d]           -o prices.csv\n\
-             \x20 fugazi get cg:BTCUSDT=bitcoin[1d]     -o caps.csv\n\
-             \x20 fugazi run @strategy.yml -s @prices.csv -s @caps.csv -o out/"
-        );
-    }
-    Ok(if overlay {
-        ProviderKind::Overlays
-    } else {
-        ProviderKind::Candles
-    })
 }
 
 #[derive(Args, Debug)]
@@ -553,7 +495,6 @@ pub fn run(mut args: GetArgs) -> Result<()> {
         }
     }
 
-    let mode = resolve_mode(&fetch_specs)?;
     let now = OffsetDateTime::now_utc();
 
     // Extract per-dataset metadata upfront (cloned so we can consume `metas` later).
@@ -625,14 +566,20 @@ pub fn run(mut args: GetArgs) -> Result<()> {
         .build()
         .context("building tokio runtime")?;
 
-    match mode {
-        ProviderKind::Candles => {
-            run_candles(args, fetch_specs, since_ts, until_ts, since_specified, dataset_overlays, &output, &rt)
-        }
-        ProviderKind::Overlays => {
-            run_overlay_columns(args, fetch_specs, since_ts, until_ts, &output, &rt)
-        }
-    }
+    // One pipeline for every provider. A series that is not a price is an
+    // ordinary series whose atoms carry no candle, so there is nothing left to
+    // route around: the writer omits the OHLCV block when no row has a bar and
+    // blanks it per-row when only some do.
+    run_candles(
+        args,
+        fetch_specs,
+        since_ts,
+        until_ts,
+        since_specified,
+        dataset_overlays,
+        &output,
+        &rt,
+    )
 }
 
 /// The OHLCV pipeline: fetch candles, compute `-x` overlays over them, write
@@ -779,226 +726,10 @@ fn run_candles(
     Ok(())
 }
 
-/// The overlay-only pipeline: fetch side-channel columns from an
-/// [`OverlaySource`](fugazi::sources::OverlaySource) and write
-/// `symbol,freq,time,<provider columns>` — **no OHLCV block**, so the file is
-/// safe to `--series`-join on top of a price series without clobbering it (see
-/// [`ProviderKind`]).
-///
-/// `-x/--overlay` is rejected here rather than supported: a computed overlay is
-/// an indicator chain over `Atom`s, and there is no candle to build one from.
-/// Compute derived columns downstream, in the strategy spec, where the two
-/// files have been joined and the price bars actually exist.
-fn run_overlay_columns(
-    args: GetArgs,
-    fetch_specs: Vec<FetchSpec>,
-    since_ts: Timestamp,
-    until_ts: Timestamp,
-    output: &Path,
-    rt: &tokio::runtime::Runtime,
-) -> Result<()> {
-    if !args.overlay.is_empty() {
-        bail!(
-            "`-x/--overlay` computes indicator columns over OHLCV bars, and an overlay-only \
-             provider has none. Fetch the columns here, then compute derived values in the \
-             strategy spec (`!get {{ key: market_cap }}`) once `run` has joined this file onto \
-             a price series."
-        );
-    }
 
-    if !args.quiet {
-        style::print_header("get", "fetch overlay columns from remote providers");
-        print_inputs_block(&args, since_ts, until_ts, false, &[], output);
-    }
 
-    // One `Series` per (symbol, interval). `stable` is 0: there are no computed
-    // overlays to warm up, so no leading bars need pulling in ahead of `since`.
-    let mut series: Vec<Series> = Vec::new();
-    let mut n_symbols: usize = 0;
-    for spec in &fetch_specs {
-        let FetchSpec::Remote { provider, symbols } = spec else {
-            unreachable!("resolve_mode routes `csv:` specs to the candle pipeline");
-        };
-        n_symbols += symbols.len();
-        for sym in symbols {
-            for &freq in &sym.freqs {
-                series.push(Series {
-                    provider: provider.clone(),
-                    output: sym.output.clone(),
-                    query: sym.query.clone(),
-                    interval: freq,
-                    stable: 0,
-                    csv_bars: None,
-                    csv_path: None,
-                });
-            }
-        }
-    }
 
-    let (multi, bars) = build_progress_bars(&series, since_ts, until_ts, false, args.quiet);
-    let result = rt.block_on(fetch_all_overlays(series.clone(), since_ts, until_ts, bars));
-    let _ = multi.clear();
-    let mut rows = result?;
 
-    // Same output ordering as the candle writer: ascending by time, ties broken
-    // by symbol then freq.
-    rows.sort_by(|a, b| {
-        (a.time, a.symbol.as_str(), a.freq.as_str())
-            .cmp(&(b.time, b.symbol.as_str(), b.freq.as_str()))
-    });
-
-    write_overlays_csv(output, &rows)
-        .with_context(|| format!("writing {}", output.display()))?;
-
-    if !args.quiet {
-        print_result_block(rows.len(), n_symbols, series.len());
-    }
-    Ok(())
-}
-
-/// One overlay row of output: the emitted symbol + interval it belongs to, its
-/// bar-open time, and the provider's per-bar values. The candle-less twin of
-/// [`Row`].
-struct OverlayOut {
-    symbol: String,
-    /// The `freq` cell — the fetched cadence's own token.
-    freq: String,
-    time: Timestamp,
-    overlays: OverlayInfo,
-}
-
-/// Download every overlay series concurrently, one task per series.
-async fn fetch_all_overlays(
-    series: Vec<Series>,
-    since: Timestamp,
-    until: Timestamp,
-    bars: Vec<ProgressBar>,
-) -> Result<Vec<OverlayOut>> {
-    let mut tasks = JoinSet::new();
-    for (s, bar) in series.into_iter().zip(bars) {
-        tasks.spawn(fetch_overlay_series(s, since, until, bar));
-    }
-    let mut all: Vec<OverlayOut> = Vec::new();
-    while let Some(joined) = tasks.join_next().await {
-        all.extend(joined.context("fetch task panicked")??);
-    }
-    Ok(all)
-}
-
-/// Fetch one overlay series chunk-by-chunk, advancing its progress bar. Rows are
-/// tagged with the series' *output* symbol — the `--series` join key.
-async fn fetch_overlay_series(
-    series: Series,
-    since: Timestamp,
-    until: Timestamp,
-    bar: ProgressBar,
-) -> Result<Vec<OverlayOut>> {
-    let label = series.label();
-    let mut rows: Vec<OverlayOut> = Vec::new();
-    let mut first = true;
-    for (chunk_since, chunk_until) in chunk_bounds(since, until, series.interval) {
-        if !first {
-            tokio::time::sleep(CHUNK_DELAY).await;
-        }
-        first = false;
-        bar.set_message(chunk_since.to_datetime().date().to_string());
-        let fetched = fetch_overlays(
-            &series.provider,
-            &series.query,
-            series.interval,
-            chunk_since,
-            chunk_until,
-        )
-        .await
-        .with_context(|| format!("fetching {label}"))?;
-        rows.extend(fetched.into_iter().map(|r| OverlayOut {
-            symbol: series.output.clone(),
-            freq: series.interval.as_token(),
-            time: r.time,
-            overlays: r.overlays,
-        }));
-        bar.inc(1);
-    }
-    // Same chunk-boundary dedup as `fetch_series` — a provider that resolves the
-    // range in exchange-local time can return one row in two adjacent UTC chunks
-    // (see the note on `dedup_by_time`). Keep the first occurrence per timestamp.
-    dedup_by_time(&mut rows, |r| Some(r.time.0));
-    bar.finish_with_message("done");
-    Ok(rows)
-}
-
-/// Dispatch on the provider name to a concrete [`OverlaySource`](fugazi::sources::OverlaySource)
-/// implementation. The overlay-side twin of [`fetch`].
-async fn fetch_overlays(
-    provider: &str,
-    symbol: &str,
-    interval: Interval,
-    since: Timestamp,
-    until: Timestamp,
-) -> Result<Vec<OverlayRow>> {
-    match provider {
-        "cg" => Ok(CoinGecko::new()
-            .overlays(symbol, interval, since, Some(until))
-            .await?),
-        "binance-vision" => Ok(BinanceVision::new()
-            .overlays(symbol, interval, since, Some(until))
-            .await?),
-        other => bail!(unknown_provider_error(other)),
-    }
-}
-
-/// Write overlay rows as `symbol,freq,time,<column>...`, `,`-delimited.
-///
-/// Columns are the union of every row's schema keys in first-appearance order
-/// (all rows from one provider share one schema, so in practice this is just
-/// that provider's column list). **There is deliberately no OHLCV block**: this
-/// file is meant to be `--series`-joined on top of a price series, and the join
-/// lets the later file win each column it carries — an `open,high,low,close`
-/// block full of synthesised zeroes here would silently overwrite the real
-/// prices there. A missing cell renders blank, matching the candle writer.
-fn write_overlays_csv(path: &Path, rows: &[OverlayOut]) -> Result<()> {
-    let mut wtr = csv::WriterBuilder::new()
-        .delimiter(b',')
-        .from_path(path)
-        .with_context(|| format!("creating {}", path.display()))?;
-
-    let mut columns: Vec<String> = Vec::new();
-    for r in rows {
-        for name in r.overlays.schema().keys() {
-            if !columns.iter().any(|c| c == name) {
-                columns.push(name.to_string());
-            }
-        }
-    }
-
-    let mut header: Vec<&str> = vec!["symbol", "freq", "time"];
-    header.extend(columns.iter().map(String::as_str));
-    wtr.write_record(&header)?;
-
-    for row in rows {
-        let time = row
-            .time
-            .to_datetime()
-            .format(&Rfc3339)
-            .unwrap_or_else(|_| row.time.0.to_string());
-        let mut record: Vec<String> = vec![row.symbol.clone(), row.freq.clone(), time];
-        for name in &columns {
-            let cell = row
-                .overlays
-                .get_by_key(name)
-                .map(format_overlay_value)
-                // A `Real` cell can be NaN (the provider had no value for this
-                // bar); render it blank rather than as the literal "NaN", so the
-                // `--series` loader reads it back as a missing cell.
-                .filter(|s| s != "NaN")
-                .unwrap_or_default();
-            record.push(cell);
-        }
-        wtr.write_record(&record)?;
-    }
-    wtr.flush()?;
-    Ok(())
-}
 
 /// One row of output: which symbol + interval it came from, the timed candle,
 /// the per-`-x`-column overlay values (aligned with the CLI's overlay column
@@ -1451,7 +1182,7 @@ fn build_progress_bars(
     (multi, bars)
 }
 
-/// Dispatch on the provider name to a concrete [`CandleSource`] implementation.
+/// Dispatch on the provider name to a concrete [`SeriesSource`] implementation.
 async fn fetch(
     provider: &str,
     symbol: &str,
@@ -1466,6 +1197,12 @@ async fn fetch(
         "yfinance" => Ok(Yahoo::new()
             .atoms(symbol, interval, since, Some(until))
             .await?),
+        "cg" => Ok(CoinGecko::new()
+            .atoms(symbol, interval, since, Some(until))
+            .await?),
+        "binance-vision" => Ok(BinanceVision::new()
+            .atoms(symbol, interval, since, Some(until))
+            .await?),
         other => bail!(unknown_provider_error(other)),
     }
 }
@@ -1476,8 +1213,8 @@ async fn fetch(
 pub(crate) async fn tickers_of(provider: &str) -> Result<Vec<String>> {
     match provider {
         "binance" => Ok(Binance::new().tickers().await?),
-        "binance-vision" => Ok(OverlaySource::tickers(&BinanceVision::new()).await?),
-        "cg" => Ok(OverlaySource::tickers(&CoinGecko::new()).await?),
+        "binance-vision" => Ok(BinanceVision::new().tickers().await?),
+        "cg" => Ok(CoinGecko::new().tickers().await?),
         "yfinance" => Ok(Yahoo::new().tickers().await?),
         "csv" => bail!(
             "`csv:` reads a local CSV — the ticker list is whatever `symbol` \
@@ -2037,24 +1774,6 @@ mod tests {
         assert_eq!(plain.label(), r"yfinance:EURUSD\=X[1d]");
     }
 
-    #[test]
-    fn overlay_and_candle_providers_cannot_be_mixed() {
-        let candles = parse_spec("binance:BTCUSDT[1d]").unwrap();
-        let overlays = parse_spec("cg:BTCUSDT=bitcoin[1d]").unwrap();
-        let csv = parse_spec("csv:./x.csv").unwrap();
-
-        assert_eq!(
-            resolve_mode(std::slice::from_ref(&candles)).unwrap(),
-            ProviderKind::Candles
-        );
-        assert_eq!(
-            resolve_mode(std::slice::from_ref(&overlays)).unwrap(),
-            ProviderKind::Overlays
-        );
-        // `csv:` is a candle source, so it clashes with an overlay provider too.
-        assert!(resolve_mode(&[candles, overlays.clone()]).is_err());
-        assert!(resolve_mode(&[csv, overlays]).is_err());
-    }
 
     #[test]
     fn parses_multi_symbol_multi_freq() {
