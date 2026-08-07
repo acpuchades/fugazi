@@ -567,11 +567,14 @@ fn run_candles(
             FetchSpec::Remote { provider, symbols } => {
                 n_symbols += symbols.len();
                 // The remote provider's canonical Schema — Binance's four
-                // kline extras, Yahoo's `adj_close`. Every atom in a fetch
-                // will bind to this via `OverlayInfo::new(schema, ...)`.
+                // kline extras, Yahoo's `raw_close` (its candles are adjusted
+                // by default). Every atom in a fetch will bind to this via
+                // `OverlayInfo::new(schema, ...)`.
                 let schema = match provider.as_str() {
                     "binance" => binance_schema().clone(),
-                    "yfinance" => yahoo_schema().clone(),
+                    // The CLI fetches Yahoo with the provider default (adjusted
+                    // candles + `raw_close` overlay).
+                    "yfinance" => yahoo_schema(true).clone(),
                     _ => Schema::empty(),
                 };
                 for sym in symbols {

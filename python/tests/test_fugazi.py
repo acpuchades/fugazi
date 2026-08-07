@@ -2276,6 +2276,14 @@ def test_coingecko_constructs():
     assert ta.CoinGecko(api_key="demo", vs_currency="eur") is not None
 
 
+def test_yahoo_constructs_with_adjusted_param():
+    # Candles are split/dividend-adjusted by default; `adjusted=False` opts out.
+    # Construction is offline — no fetch — so this just proves the knob is wired.
+    assert ta.Yahoo() is not None
+    assert ta.Yahoo(adjusted=False) is not None
+    assert ta.Yahoo(adjusted=True, base_url="http://localhost:0") is not None
+
+
 def test_fetch_accepts_coingecko():
     # Every provider shares one `SeriesSource` now, so `fetch()` dispatches cg
     # like any other — a price-less frame is fine (the OHLCV block is omitted
