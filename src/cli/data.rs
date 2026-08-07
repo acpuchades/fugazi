@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result, anyhow, bail};
 use fugazi::prelude::*;
@@ -196,6 +197,11 @@ impl SeriesSpec {
 #[derive(Debug, Default)]
 pub struct DataFrame {
     rows: BTreeMap<(String, String), Row>,
+    /// Memoized frame-wide overlay schema — see
+    /// [`shared_schema`](Self::shared_schema). Every atom the frame produces
+    /// binds to this one `Arc`, which is what makes a cross-symbol `!get`
+    /// resolve.
+    schema: OnceLock<Option<Arc<Schema>>>,
 }
 
 impl DataFrame {
@@ -228,6 +234,11 @@ impl DataFrame {
 
     /// Merge one row into the frame, joining on `(symbol, time)`.
     fn insert(&mut self, spec: &str, row: Row) -> Result<()> {
+        // A new row can introduce a column, so any schema built from the
+        // previous contents is stale. In practice every insert happens inside
+        // `from_series` before the first `atoms` call, but nothing in the type
+        // enforces that ordering.
+        self.schema.take();
         let symbol = row
             .get("symbol")
             .cloned()
@@ -240,9 +251,58 @@ impl DataFrame {
         Ok(())
     }
 
+    /// The one overlay [`Schema`] every atom in the frame binds to, built from
+    /// every non-reserved column across **all** symbols and memoized so each
+    /// call hands back the same `Arc`.
+    ///
+    /// Frame-wide rather than per-symbol on purpose. A strategy resolves
+    /// `!get { key }` once, against the run's schema, and
+    /// [`GetReal`](crate::indicators::GetReal) guards every read with
+    /// `Arc::ptr_eq` against the schema the atom is bound to. Build a schema
+    /// per symbol and a cross-symbol read — `!get` through
+    /// `!pick { symbol }` — sees a different `Arc` and returns `None` on every
+    /// bar, silently. One schema for the frame makes the pointers match and
+    /// registers a column for every symbol, including the ones whose rows never
+    /// carried it: those read as an absent sample, which is what they are.
+    ///
+    /// `None` when no symbol has any non-reserved column, i.e. there is no
+    /// side channel at all.
+    fn shared_schema(&self) -> Option<&Arc<Schema>> {
+        self.schema
+            .get_or_init(|| {
+                let mut classification: BTreeMap<String, ColumnState> = BTreeMap::new();
+                for row in self.rows.values() {
+                    for (name, value) in row {
+                        if RESERVED_COLUMNS.contains(&name.as_str()) {
+                            continue;
+                        }
+                        classification
+                            .entry(name.clone())
+                            .or_insert_with(ColumnState::new)
+                            .observe(value);
+                    }
+                }
+                if classification.is_empty() {
+                    return None;
+                }
+                // BTreeMap iterates alphabetically, so the column order — and
+                // therefore every index `Get` resolves — is deterministic.
+                let mut b = Schema::builder();
+                for (name, state) in &classification {
+                    match state.resolve() {
+                        OverlayType::Real => b.add_real(name.clone()),
+                        OverlayType::Bool => b.add_bool(name.clone()),
+                        OverlayType::Str => b.add_str(name.clone()),
+                    };
+                }
+                Some(b.finish())
+            })
+            .as_ref()
+    }
+
     /// The atom series for `symbol`, ascending by `time`: OHLCV candles plus
-    /// per-bar overlay values keyed by a shared [`Schema`] built from every
-    /// non-reserved column found in the symbol's rows.
+    /// per-bar overlay values keyed by the frame-wide [`Schema`] every symbol
+    /// shares (see [`shared_schema`](Self::shared_schema)).
     ///
     /// Each candidate overlay column is auto-classified across its observed
     /// values by the **Bool > Real > Str** priority classifier
@@ -251,50 +311,21 @@ impl DataFrame {
     /// `Bool` column, and `""` for a `Str` column. Schema columns are ordered
     /// alphabetically for determinism.
     pub fn atoms(&self, symbol: &str) -> Result<AtomSeries> {
-        // Single pass over the symbol's rows to (a) confirm the symbol has
-        // rows at all and (b) classify each non-reserved column by
-        // parseability across its observed values.
-        let mut classification: BTreeMap<String, ColumnState> = BTreeMap::new();
-        let mut any_row = false;
-        for ((sym, _time), row) in &self.rows {
-            if sym != symbol {
-                continue;
-            }
-            any_row = true;
-            for (name, value) in row {
-                if RESERVED_COLUMNS.contains(&name.as_str()) {
-                    continue;
-                }
-                classification
-                    .entry(name.clone())
-                    .or_insert_with(ColumnState::new)
-                    .observe(value);
-            }
-        }
-
-        if !any_row {
+        if !self.rows.keys().any(|(sym, _)| sym == symbol) {
             bail!("no rows found for symbol `{symbol}` across the given --series");
         }
 
-        // BTreeMap iterates alphabetically, so column_types stays sorted.
-        let column_types: Vec<(String, OverlayType)> = classification
-            .iter()
-            .map(|(k, s)| (k.clone(), s.resolve()))
-            .collect();
-
-        let schema = if column_types.is_empty() {
-            None
-        } else {
-            let mut b = Schema::builder();
-            for (name, ty) in &column_types {
-                match ty {
-                    OverlayType::Real => b.add_real(name.clone()),
-                    OverlayType::Bool => b.add_bool(name.clone()),
-                    OverlayType::Str => b.add_str(name.clone()),
-                };
-            }
-            Some(b.finish())
-        };
+        let schema = self.shared_schema();
+        // Read the column order back off the schema rather than keeping a
+        // parallel list, so the cells can never drift from the indexes `Get`
+        // resolved against it.
+        let column_types: Vec<(String, OverlayType)> = schema
+            .map(|s| {
+                s.keys()
+                    .map(|k| (k.to_string(), s.type_of_key(k).expect("key came from keys()")))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         // Second pass: build one atom per row, attaching overlays when the
         // schema has any columns.
@@ -311,25 +342,27 @@ impl DataFrame {
             // An unparseable label leaves `time` as `None`; the strings still
             // sort the frame the way the user typed them.
             let ts = calendar::parse_time_to_millis(time).map(Timestamp);
-            let atom = match (&schema, ts) {
-                (None, None) => Atom::new(candle),
-                (None, Some(t)) => Atom::with_time(candle, t),
-                (Some(schema), _) => {
-                    let values: Vec<OverlayValue> = column_types
-                        .iter()
-                        .map(|(name, ty)| {
-                            let raw = row.get(name).map(|s| s.trim()).unwrap_or("");
-                            cell_to_overlay(raw, *ty)
-                        })
-                        .collect();
-                    let overlays = OverlayInfo::new(schema.clone(), values);
-                    match ts {
-                        Some(t) => Atom::with_overlays_and_time(candle, overlays, t),
-                        None => Atom::with_overlays(candle, overlays),
-                    }
-                }
-            };
-            atoms.push((time.clone(), atom));
+            // Built field-wise rather than through the constructors: with the
+            // candle optional there are eight combinations, and naming them all
+            // reads worse than the three fields do.
+            let overlays = schema.map(|schema| {
+                let values: Vec<OverlayValue> = column_types
+                    .iter()
+                    .map(|(name, ty)| {
+                        let raw = row.get(name).map(|s| s.trim()).unwrap_or("");
+                        cell_to_overlay(raw, *ty)
+                    })
+                    .collect();
+                OverlayInfo::new(schema.clone(), values)
+            });
+            atoms.push((
+                time.clone(),
+                Atom {
+                    candle,
+                    time: ts,
+                    overlays,
+                },
+            ));
         }
 
         Ok(AtomSeries {
@@ -363,8 +396,34 @@ fn cell_to_overlay(raw: &str, ty: OverlayType) -> OverlayValue {
     }
 }
 
-/// Build a [`Candle`] from one row's OHLCV columns.
-fn row_to_candle(sym: &str, time: &str, row: &Row) -> Result<Candle> {
+/// Build a [`Candle`] from one row's OHLCV columns, or `None` when the row
+/// carries no price at all — an **overlay-only** series such as a funding rate
+/// or an open interest, which is stacked into the run beside the price series
+/// and read with `!pick` + `!get`.
+///
+/// A column counts as present only when it is also non-empty, because
+/// `fugazi get` writes a blank OHLCV block for overlay rows: the header is
+/// there, the cells are not. Testing for the key alone would make that file
+/// fail to load back through `--series`.
+///
+/// A row carrying *some* of the four is an error rather than a third case. A
+/// half-filled price bar is a malformed candle, not a series that isn't a
+/// price, and silently demoting it to overlay-only would hide the typo.
+fn row_to_candle(sym: &str, time: &str, row: &Row) -> Result<Option<Candle>> {
+    const OHLC: [&str; 4] = ["open", "high", "low", "close"];
+    let filled = |name: &str| row.get(name).is_some_and(|v| !v.trim().is_empty());
+    let present = OHLC.iter().filter(|n| filled(n)).count();
+    if present == 0 {
+        return Ok(None);
+    }
+    if present < OHLC.len() {
+        let missing: Vec<&str> = OHLC.iter().copied().filter(|n| !filled(n)).collect();
+        bail!(
+            "{sym} @ {time}: price bar is missing `{}` — a row with some OHLC columns \
+             but not all is a malformed candle, not an overlay-only series",
+            missing.join("`, `")
+        );
+    }
     let field = |name: &str| -> Result<Real> {
         let raw = row
             .get(name)
@@ -378,13 +437,13 @@ fn row_to_candle(sym: &str, time: &str, row: &Row) -> Result<Candle> {
             .with_context(|| format!("{sym} @ {time}: column `volume` = {raw:?}"))?,
         _ => 0.0,
     };
-    Ok(Candle::new(
+    Ok(Some(Candle::new(
         field("open")?,
         field("high")?,
         field("low")?,
         field("close")?,
         volume,
-    ))
+    )))
 }
 
 /// Read a CSV file into lowercased-column rows, autodetecting its delimiter.
@@ -450,8 +509,8 @@ mod tests {
         let series = frame.atoms("BTC").unwrap();
         assert_eq!(series.atoms.len(), 2);
         assert_eq!(series.atoms[0].0, "1");
-        assert_eq!(series.atoms[0].1.candle.close, 10.5);
-        assert_eq!(series.atoms[1].1.candle.high, 12.0);
+        assert_eq!(series.atoms[0].1.candle.unwrap().close, 10.5);
+        assert_eq!(series.atoms[1].1.candle.unwrap().high, 12.0);
     }
 
     #[test]
@@ -474,7 +533,7 @@ mod tests {
         // Candles still build (volume defaulted to 0).
         let series = frame.atoms("BTC").unwrap();
         assert_eq!(series.atoms.len(), 2);
-        assert_eq!(series.atoms[0].1.candle.volume, 0.0);
+        assert_eq!(series.atoms[0].1.candle.unwrap().volume, 0.0);
     }
 
     #[test]
@@ -666,6 +725,104 @@ mod tests {
             let s = atom.overlays.as_ref().unwrap().schema();
             assert!(Arc::ptr_eq(&schema0, s), "every atom must reuse the shared Arc<Schema>");
         }
+    }
+
+    #[test]
+    fn atoms_share_one_schema_across_every_symbol() {
+        // A column that only one symbol carries must still resolve for the
+        // others: `GetReal` is built once against the run's schema and guards
+        // reads with `Arc::ptr_eq`, so a per-symbol schema makes a cross-symbol
+        // `!get { source: !pick { symbol } }` read `None` on every bar rather
+        // than fail loudly.
+        let prices = tmp_csv(
+            "fugazi_atoms_cross_symbol_prices.csv",
+            "symbol;time;open;high;low;close\n\
+             BTC;1;10;11;9;10\n\
+             ETH;1;20;21;19;20\n",
+        );
+        let funding = tmp_csv(
+            "fugazi_atoms_cross_symbol_funding.csv",
+            "symbol;time;funding\n\
+             ETH;1;0.5\n",
+        );
+        let frame = DataFrame::from_series(&[
+            format!("@{prices}").parse().unwrap(),
+            format!("@{funding}").parse().unwrap(),
+        ])
+        .unwrap();
+
+        let btc = frame.atoms("BTC").unwrap();
+        let eth = frame.atoms("ETH").unwrap();
+        let btc_schema = btc.atoms[0].1.overlays.as_ref().unwrap().schema().clone();
+        let eth_schema = eth.atoms[0].1.overlays.as_ref().unwrap().schema().clone();
+
+        assert!(
+            Arc::ptr_eq(&btc_schema, &eth_schema),
+            "every symbol must reuse one Arc<Schema>, or `Get`'s ptr_eq guard rejects the reads"
+        );
+        assert!(
+            btc_schema.contains("funding"),
+            "a column only ETH carries must still be registered for BTC"
+        );
+        // BTC has no cell for it, which reads as an absent sample rather than
+        // as a missing column.
+        let i = btc_schema.index_of("funding").unwrap();
+        assert!(matches!(
+            btc.atoms[0].1.overlays.as_ref().unwrap().get(i),
+            Some(OverlayValue::Real(v)) if v.is_nan()
+        ));
+    }
+
+    #[test]
+    fn a_series_with_no_ohlc_loads_as_overlay_only_atoms() {
+        // A funding series has no price. It must load, carry its column, and
+        // stay unpriceable rather than being rejected for missing `open`.
+        let path = tmp_csv(
+            "fugazi_atoms_overlay_only.csv",
+            "symbol;time;funding\nBTC.funding;1;0.0003\nBTC.funding;2;-0.0001\n",
+        );
+        let frame =
+            DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
+        let series = frame.atoms("BTC.funding").unwrap();
+        assert_eq!(series.atoms.len(), 2);
+        for (_, atom) in &series.atoms {
+            assert!(atom.candle.is_none(), "an overlay series carries no bar");
+            assert!(!atom.is_priceable());
+        }
+        let ov = series.atoms[0].1.overlays.as_ref().unwrap();
+        let i = ov.schema().index_of("funding").unwrap();
+        assert_eq!(ov.get(i), Some(&OverlayValue::Real(0.0003)));
+    }
+
+    #[test]
+    fn a_blank_ohlcv_block_round_trips_back_through_series() {
+        // `fugazi get` writes the header for every column and leaves the OHLCV
+        // cells empty on an overlay row. Reading that file back must yield an
+        // overlay-only atom, not a parse failure on `""`.
+        let path = tmp_csv(
+            "fugazi_atoms_blank_ohlcv.csv",
+            "symbol;time;open;high;low;close;volume;funding\n\
+             BTC.funding;1;;;;;;0.0003\n",
+        );
+        let frame =
+            DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
+        let series = frame.atoms("BTC.funding").unwrap();
+        assert!(series.atoms[0].1.candle.is_none());
+    }
+
+    #[test]
+    fn a_half_filled_price_bar_is_an_error() {
+        // Some OHLC but not all is a malformed candle. Demoting it to
+        // overlay-only would swallow the typo.
+        let path = tmp_csv(
+            "fugazi_atoms_half_bar.csv",
+            "symbol;time;open;high;close\nBTC;1;10;11;10.5\n",
+        );
+        let frame =
+            DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
+        let err = frame.atoms("BTC").unwrap_err().to_string();
+        assert!(err.contains("`low`"), "got {err}");
+        assert!(err.contains("malformed candle"), "got {err}");
     }
 
     #[test]

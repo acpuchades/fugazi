@@ -58,10 +58,10 @@ async fn decodes_chart_response() {
 
     assert_eq!(bars.len(), 3);
     assert_eq!(bars[0].time, Some(Timestamp(1_704_067_200_000)));
-    assert_eq!(bars[0].candle.open, 470.0);
-    assert_eq!(bars[0].candle.close, 471.5);
+    assert_eq!(bars[0].candle.unwrap().open, 470.0);
+    assert_eq!(bars[0].candle.unwrap().close, 471.5);
     assert_eq!(bars[2].time, Some(Timestamp(1_704_240_000_000)));
-    assert_eq!(bars[2].candle.close, 473.5);
+    assert_eq!(bars[2].candle.unwrap().close, 473.5);
     for w in bars.windows(2) {
         assert!(w[0].time < w[1].time, "times must be ascending");
     }

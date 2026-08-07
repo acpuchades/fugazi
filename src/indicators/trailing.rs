@@ -173,7 +173,10 @@ where
         let snap = self.tagged(snap);
         for (sym, _freq, atom) in snap.iter() {
             let Some(sym) = sym else { continue };
-            for fill in self.wallet.update(sym.clone(), atom.candle) {
+            // Same rule as `backtest::run`: an overlay-only series is not
+            // priceable, so it never reaches mark-to-market.
+            let Some(candle) = atom.candle else { continue };
+            for fill in self.wallet.update(sym.clone(), candle) {
                 self.strategy.on_fill(&fill);
             }
         }

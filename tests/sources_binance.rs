@@ -78,10 +78,10 @@ async fn paginates_and_decodes_klines() {
 
     assert_eq!(bars.len(), 5);
     assert_eq!(bars[0].time, Some(Timestamp(1_704_067_200_000)));
-    assert_eq!(bars[0].candle.open, 42000.0);
-    assert_eq!(bars[0].candle.close, 42100.0);
+    assert_eq!(bars[0].candle.unwrap().open, 42000.0);
+    assert_eq!(bars[0].candle.unwrap().close, 42100.0);
     assert_eq!(bars[4].time, Some(Timestamp(1_704_412_800_000)));
-    assert_eq!(bars[4].candle.close, 42550.0);
+    assert_eq!(bars[4].candle.unwrap().close, 42550.0);
 
     // Times are strictly ascending.
     for w in bars.windows(2) {

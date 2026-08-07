@@ -52,7 +52,7 @@ use fugazi_core::indicators::{
 };
 use fugazi_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
 use fugazi_core::sources::{
-    Binance, BinanceFunding, CandleSource, CoinGecko, Interval, OverlayRow, OverlaySource,
+    Binance, BinanceVision, CandleSource, CoinGecko, Interval, OverlayRow, OverlaySource,
     SourceError, Timestamp, Yahoo,
 };
 use fugazi_core::wallet::{
@@ -1456,30 +1456,48 @@ impl PyAtom {
     /// to any calendar indicator (`year()`, `month()`, `day_of_week()`, …) in
     /// the chain. `None` on synthetic bars leaves those calendar reads at
     /// `None` (matching a not-yet-warm result).
+    ///
+    /// `candle` may be `None`, which builds an **overlay-only** atom: a series
+    /// that is not a price — a funding rate, an open interest, a market
+    /// capitalisation. Such an atom is stacked into a `Snapshot` beside the
+    /// price series and read with `pick()` + `get()`; it never reaches
+    /// mark-to-market, and `sole_atom` skips it, so attaching one cannot
+    /// disturb a strategy that never asked for it. An overlay-only atom with
+    /// no overlays at all is rejected — it would carry nothing.
     #[new]
-    #[pyo3(signature = (candle, overlays = None, time = None))]
+    #[pyo3(signature = (candle = None, overlays = None, time = None))]
     fn new(
-        candle: &PyCandle,
+        candle: Option<&PyCandle>,
         overlays: Option<&PyOverlayInfo>,
         time: Option<i64>,
-    ) -> Self {
-        let time = time.map(Timestamp);
-        let atom = match (overlays, time) {
-            (Some(ov), Some(t)) => {
-                Atom::with_overlays_and_time(candle.inner, ov.inner.clone(), t)
-            }
-            (Some(ov), None) => Atom::with_overlays(candle.inner, ov.inner.clone()),
-            (None, Some(t)) => Atom::with_time(candle.inner, t),
-            (None, None) => Atom::new(candle.inner),
+    ) -> PyResult<Self> {
+        if candle.is_none() && overlays.is_none() {
+            return Err(PyValueError::new_err(
+                "an Atom needs a candle, overlay values, or both — one with neither \
+                 carries no data",
+            ));
+        }
+        let inner = Atom {
+            candle: candle.map(|c| c.inner),
+            time: time.map(Timestamp),
+            overlays: overlays.map(|ov| ov.inner.clone()),
         };
-        Self { inner: atom }
+        Ok(Self { inner })
     }
 
+    /// The bar, or `None` for an overlay-only atom — a series that is not a
+    /// price (a funding rate, an open interest). Reading it is how a caller
+    /// tells the two apart; everything that prices a bar must handle the
+    /// `None`.
     #[getter]
-    fn candle(&self) -> PyCandle {
-        PyCandle {
-            inner: self.inner.candle,
-        }
+    fn candle(&self) -> Option<PyCandle> {
+        self.inner.candle.map(|inner| PyCandle { inner })
+    }
+
+    /// Whether this atom carries a bar and can therefore be priced.
+    #[getter]
+    fn is_priceable(&self) -> bool {
+        self.inner.is_priceable()
     }
 
     #[getter]
@@ -6399,11 +6417,15 @@ fn build_candles_frame(
             .expect("candle source atoms always carry a time")
             .0;
         times.push(format_ts_iso(time));
-        opens.push(atom.candle.open);
-        highs.push(atom.candle.high);
-        lows.push(atom.candle.low);
-        closes.push(atom.candle.close);
-        volumes.push(atom.candle.volume);
+        // An overlay-only atom has no bar. NaN is what polars/pandas read as
+        // a missing cell, and the column has to stay the same length as the
+        // rest of the frame.
+        let c = atom.candle;
+        opens.push(c.map_or(Real::NAN, |c| c.open));
+        highs.push(c.map_or(Real::NAN, |c| c.high));
+        lows.push(c.map_or(Real::NAN, |c| c.low));
+        closes.push(c.map_or(Real::NAN, |c| c.close));
+        volumes.push(c.map_or(Real::NAN, |c| c.volume));
         overlays.push(atom.overlays);
     }
     let data = PyDict::new(py);
@@ -6810,19 +6832,19 @@ impl PyCoinGecko {
 /// strategy wants. At `freq="8h"` each bucket holds one settlement. Sub-hourly
 /// `freq` values are rejected — they would be empty on almost every bar, which
 /// reads as "no carry" rather than "no data".
-#[pyclass(name = "BinanceFunding", frozen)]
-struct PyBinanceFunding {
-    inner: BinanceFunding,
+#[pyclass(name = "BinanceVision", frozen)]
+struct PyBinanceVision {
+    inner: BinanceVision,
 }
 
 #[pymethods]
-impl PyBinanceFunding {
+impl PyBinanceVision {
     /// Construct a client. `base_url` overrides the API endpoint
     /// (`https://fapi.binance.com`), useful for local test servers.
     #[new]
     #[pyo3(signature = (base_url = None))]
     fn new(base_url: Option<String>) -> Self {
-        let mut inner = BinanceFunding::new();
+        let mut inner = BinanceVision::new();
         if let Some(url) = base_url {
             inner = inner.with_base_url(url);
         }
@@ -6907,11 +6929,11 @@ fn fetch(
                  the result onto a price frame on `time`.",
             ));
         }
-        "binance-funding" => {
+        "binance-vision" => {
             return Err(PyValueError::new_err(
-                "binance-funding is an overlay provider, not a candle provider — it returns a \
+                "binance-vision is an overlay provider, not a candle provider — it returns a \
                  funding_rate column and no OHLCV, so it cannot be fetched through `fetch()`. \
-                 Use `BinanceFunding().overlays(symbol=..., freq=...)` instead, and join the \
+                 Use `BinanceVision().overlays(symbol=..., freq=...)` instead, and join the \
                  result onto a price frame on `time`.",
             ));
         }
@@ -9107,7 +9129,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBinance>()?;
     m.add_class::<PyYahoo>()?;
     m.add_class::<PyCoinGecko>()?;
-    m.add_class::<PyBinanceFunding>()?;
+    m.add_class::<PyBinanceVision>()?;
     m.add_class::<PyCostConfig>()?;
     m.add_class::<PyStrategySpec>()?;
     m.add_class::<PySweep>()?;

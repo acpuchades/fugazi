@@ -386,11 +386,11 @@ mod tests {
         let schema = binance_schema().clone();
         let atom = decode_row(&row, &schema).unwrap();
         assert_eq!(atom.time, Some(Timestamp(1_700_000_000_000)));
-        assert_eq!(atom.candle.open, 27000.50);
-        assert_eq!(atom.candle.high, 27100.00);
-        assert_eq!(atom.candle.low, 26950.10);
-        assert_eq!(atom.candle.close, 27050.75);
-        assert_eq!(atom.candle.volume, 12.345);
+        assert_eq!(atom.candle.unwrap().open, 27000.50);
+        assert_eq!(atom.candle.unwrap().high, 27100.00);
+        assert_eq!(atom.candle.unwrap().low, 26950.10);
+        assert_eq!(atom.candle.unwrap().close, 27050.75);
+        assert_eq!(atom.candle.unwrap().volume, 12.345);
         let overlays = atom.overlays.expect("Binance atoms carry overlays");
         assert_eq!(overlays.get_by_key("quote_volume"), Some(&OverlayValue::Real(334000.00)));
         assert_eq!(overlays.get_by_key("n_trades"), Some(&OverlayValue::Real(42.0)));
@@ -405,7 +405,7 @@ mod tests {
         let row = serde_json::json!([1_700_000_000_000_i64, 1.0, 2.0, 0.5, 1.5, 10.0]);
         let schema = binance_schema().clone();
         let atom = decode_row(&row, &schema).unwrap();
-        assert_eq!(atom.candle.close, 1.5);
+        assert_eq!(atom.candle.unwrap().close, 1.5);
         let overlays = atom.overlays.expect("Binance atoms carry overlays");
         match overlays.get_by_key("n_trades") {
             Some(OverlayValue::Real(v)) => assert!(v.is_nan()),

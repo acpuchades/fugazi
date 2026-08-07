@@ -348,9 +348,9 @@ mod tests {
         assert_eq!(bars.len(), 2);
         assert_eq!(bars[0].symbol, "BTCUSDT");
         assert_eq!(bars[0].interval, Interval::Day(1));
-        assert_eq!(bars[0].atom.candle.close, 105.0);
+        assert_eq!(bars[0].atom.candle.unwrap().close, 105.0);
         assert_eq!(bars[0].atom.time, Some(Timestamp(1_704_067_200_000)));
-        assert_eq!(bars[1].atom.candle.volume, 1200.0);
+        assert_eq!(bars[1].atom.candle.unwrap().volume, 1200.0);
     }
 
     #[test]
@@ -373,7 +373,7 @@ mod tests {
              AAA;1d;2024-01-01T00:00:00Z;1;2;0.5;1.5\n",
         );
         let bars = CsvSource::new(path).read().unwrap();
-        assert_eq!(bars[0].atom.candle.volume, 0.0);
+        assert_eq!(bars[0].atom.candle.unwrap().volume, 0.0);
 
         let path = tmp_csv(
             "fugazi_csv_source_test_d.csv",
@@ -381,7 +381,7 @@ mod tests {
              AAA;1d;2024-01-01T00:00:00Z;1;2;0.5;1.5;\n",
         );
         let bars = CsvSource::new(path).read().unwrap();
-        assert_eq!(bars[0].atom.candle.volume, 0.0);
+        assert_eq!(bars[0].atom.candle.unwrap().volume, 0.0);
     }
 
     #[test]
@@ -405,7 +405,7 @@ mod tests {
         );
         let bars = CsvSource::new(path).read().unwrap();
         assert_eq!(bars.len(), 2);
-        assert_eq!(bars[0].atom.candle.close, 1.5);
+        assert_eq!(bars[0].atom.candle.unwrap().close, 1.5);
         // Non-OHLCV columns survive as a typed schema, column-classified
         // across the whole file (sma20 → Real, risk_on → Bool, regime → Str).
         let types = classified_types(&bars);

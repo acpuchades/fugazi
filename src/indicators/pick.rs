@@ -252,7 +252,7 @@ mod tests {
             (Some("BTC".into()), None, 10.0),
             (Some("ETH".into()), None, 20.0),
         ]));
-        assert_eq!(out.map(|a| a.candle.close), Some(10.0));
+        assert_eq!(out.map(|a| a.candle.unwrap().close), Some(10.0));
     }
 
     #[test]
@@ -263,7 +263,7 @@ mod tests {
             (Some("BTC".into()), Some(Frequency::Hour(1)), 42.0),
             (Some("ETH".into()), Some(Frequency::Hour(1)), 100.0),
         ]));
-        assert_eq!(out.map(|a| a.candle.close), Some(42.0));
+        assert_eq!(out.map(|a| a.candle.unwrap().close), Some(42.0));
     }
 
     #[test]
@@ -281,7 +281,7 @@ mod tests {
     fn new_no_query_unpacks_single_entry_snapshot() {
         let mut p = Pick::<String>::new();
         let out = p.update(snap([(Some("BTC".into()), None, 99.0)]));
-        assert_eq!(out.map(|a| a.candle.close), Some(99.0));
+        assert_eq!(out.map(|a| a.candle.unwrap().close), Some(99.0));
     }
 
     #[test]
@@ -292,7 +292,7 @@ mod tests {
         let mut p = Pick::<String>::new();
         let atom = Atom::new(Candle::new(1.0, 1.0, 1.0, 7.0, 1.0));
         let out = p.update(Snapshot::of_atom(atom));
-        assert_eq!(out.map(|a| a.candle.close), Some(7.0));
+        assert_eq!(out.map(|a| a.candle.unwrap().close), Some(7.0));
     }
 
     #[test]
@@ -325,7 +325,7 @@ mod tests {
     fn reset_clears_cached_value() {
         let mut p = Pick::<String>::matching(Selector::by_symbol("BTC"));
         p.update(snap([(Some("BTC".into()), None, 42.0)]));
-        assert_eq!(p.value().map(|a| a.candle.close), Some(42.0));
+        assert_eq!(p.value().map(|a| a.candle.unwrap().close), Some(42.0));
         p.reset();
         assert_eq!(p.value(), None);
     }
@@ -340,7 +340,7 @@ mod tests {
             (Some("BTC".into()), None, 10.0),
             (Some("ETH".into()), None, 20.0),
         ]));
-        assert_eq!(out.map(|a| a.candle.close), Some(10.0));
+        assert_eq!(out.map(|a| a.candle.unwrap().close), Some(10.0));
     }
 
     #[test]
@@ -353,14 +353,14 @@ mod tests {
     fn pick_any_unpacks_single_entry_snapshot() {
         let mut p = PickAny::<String>::new();
         let out = p.update(snap([(Some("BTC".into()), None, 99.0)]));
-        assert_eq!(out.map(|a| a.candle.close), Some(99.0));
+        assert_eq!(out.map(|a| a.candle.unwrap().close), Some(99.0));
     }
 
     #[test]
     fn pick_any_reset_clears_cached_value() {
         let mut p = PickAny::<String>::new();
         p.update(snap([(Some("BTC".into()), None, 7.0)]));
-        assert_eq!(p.value().map(|a| a.candle.close), Some(7.0));
+        assert_eq!(p.value().map(|a| a.candle.unwrap().close), Some(7.0));
         p.reset();
         assert_eq!(p.value(), None);
     }

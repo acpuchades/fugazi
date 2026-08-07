@@ -406,10 +406,10 @@ mod tests {
         let out = decode_result(result).unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].time, Some(Timestamp(1_704_067_200_000)));
-        assert_eq!(out[0].candle.open, 100.0);
-        assert_eq!(out[0].candle.close, 101.5);
+        assert_eq!(out[0].candle.unwrap().open, 100.0);
+        assert_eq!(out[0].candle.unwrap().close, 101.5);
         assert_eq!(out[1].time, Some(Timestamp(1_704_153_600_000)));
-        assert_eq!(out[1].candle.volume, 1_200.0);
+        assert_eq!(out[1].candle.unwrap().volume, 1_200.0);
         let ov0 = out[0].overlays.as_ref().expect("adj_close overlay");
         assert_eq!(ov0.get_by_key("adj_close"), Some(&OverlayValue::Real(90.0)));
     }

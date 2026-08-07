@@ -40,7 +40,12 @@ required-features = ["live"]
 # default-on so `cargo build` builds the CLI unchanged.
 [features]
 default = ["sources", "cli"]
-sources = ["dep:reqwest", "dep:tokio", "dep:thiserror"]
+# `csv` and `zip` are here rather than under `cli` because `binance_vision`
+# fetches ZIP-of-CSV archives rather than a JSON API — the parsing is part of
+# the source, not of the command line. That does widen the Python wheel, which
+# enables `sources`; `zip` is taken with default features off so only `deflate`
+# (the compression Binance actually uses) is compiled in.
+sources = ["dep:reqwest", "dep:tokio", "dep:thiserror", "dep:csv", "dep:zip"]
 # `runtime` compiles the pure, no-extra-deps type-erasure vocabulary
 # (`fugazi::runtime`) that YAML/JSON-driven builders and the Python bindings
 # use to nest indicators whose types are only known at runtime. The `cli`
@@ -76,7 +81,6 @@ cli = [
     "sources",
     "dep:clap",
     "dep:clap_complete",
-    "dep:csv",
     "dep:indicatif",
     "dep:console",
     "dep:interim",
@@ -89,6 +93,7 @@ serde = { version = "1", features = ["derive"] }
 serde_norway = { version = "0.9", optional = true }
 serde_json = "1"
 csv = { version = "1", optional = true }
+zip = { version = "8", default-features = false, features = ["deflate"], optional = true }
 anyhow = { version = "1", optional = true }
 indicatif = { version = "0.18", optional = true }
 console = { version = "0.16", optional = true }

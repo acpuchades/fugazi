@@ -45,7 +45,7 @@ use tokio::task::JoinSet;
 
 use fugazi::prelude::*;
 use fugazi::sources::{
-    self, Binance, BinanceFunding, CandleSource, CoinGecko, Interval, OverlayRow, OverlaySource,
+    self, Binance, BinanceVision, CandleSource, CoinGecko, Interval, OverlayRow, OverlaySource,
     Timestamp, Yahoo, binance::binance_schema, yahoo::yahoo_schema,
 };
 
@@ -314,7 +314,7 @@ pub(crate) const KNOWN_PROVIDERS: &[(&str, &str)] = &[
         "Binance spot klines endpoint (BTC/ETH/... vs. USDT/EUR/...)",
     ),
     (
-        "binance-funding",
+        "binance-vision",
         "Binance perpetual funding rate — overlay columns only, no OHLCV. One \
          `funding_rate` column; settlements inside a bar are summed, so `[1d]` \
          is that day's total carry. Hourly and coarser only",
@@ -354,7 +354,7 @@ enum ProviderKind {
 
 fn provider_kind(provider: &str) -> ProviderKind {
     match provider {
-        "cg" | "binance-funding" => ProviderKind::Overlays,
+        "cg" | "binance-vision" => ProviderKind::Overlays,
         _ => ProviderKind::Candles,
     }
 }
@@ -463,7 +463,7 @@ pub struct GetArgs {
     /// Each row's `freq` cell is the fetched cadence's own token — cadences are
     /// not relabellable.
     ///
-    /// Overlay-only providers (`cg`, `binance-funding`) emit side-channel
+    /// Overlay-only providers (`cg`, `binance-vision`) emit side-channel
     /// columns and no OHLCV, and cannot be mixed with candle providers in one
     /// invocation — fetch each to its own file and pass both to `run -s`.
     #[arg(value_name = "SPEC", required = true, num_args = 1..)]
@@ -940,7 +940,7 @@ async fn fetch_overlays(
         "cg" => Ok(CoinGecko::new()
             .overlays(symbol, interval, since, Some(until))
             .await?),
-        "binance-funding" => Ok(BinanceFunding::new()
+        "binance-vision" => Ok(BinanceVision::new()
             .overlays(symbol, interval, since, Some(until))
             .await?),
         other => bail!(unknown_provider_error(other)),
@@ -1476,7 +1476,7 @@ async fn fetch(
 pub(crate) async fn tickers_of(provider: &str) -> Result<Vec<String>> {
     match provider {
         "binance" => Ok(Binance::new().tickers().await?),
-        "binance-funding" => Ok(OverlaySource::tickers(&BinanceFunding::new()).await?),
+        "binance-vision" => Ok(OverlaySource::tickers(&BinanceVision::new()).await?),
         "cg" => Ok(OverlaySource::tickers(&CoinGecko::new()).await?),
         "yfinance" => Ok(Yahoo::new().tickers().await?),
         "csv" => bail!(
@@ -1585,9 +1585,20 @@ fn write_candles_csv(path: &Path, rows: &[Row], overlay_columns: &[String]) -> R
     // `--overlay` (name collision — the computed one wins its slot).
     let extra_columns = collect_extra_columns(rows, overlay_columns);
 
-    let mut header: Vec<&str> = vec![
-        "symbol", "freq", "time", "open", "high", "low", "close", "volume",
-    ];
+    // The OHLCV block is emitted only when some row actually has a bar. A
+    // fetch of nothing but overlay series — a funding rate, an open interest —
+    // would otherwise carry five columns that are blank in every row, and
+    // asserting a price shape a file does not have invites a reader to treat
+    // the blanks as zeros. A *mixed* fetch keeps the block: the candle rows
+    // need it, and a table has one header, so the overlay rows blank those
+    // cells instead (blank rather than zero — `--series` full-joins with
+    // last-writer-wins per column, and a zero would clobber a real price).
+    let any_candle = rows.iter().any(|r| r.atom.candle.is_some());
+
+    let mut header: Vec<&str> = vec!["symbol", "freq", "time"];
+    if any_candle {
+        header.extend(["open", "high", "low", "close", "volume"]);
+    }
     header.extend(overlay_columns.iter().map(String::as_str));
     header.extend(extra_columns.iter().map(String::as_str));
     wtr.write_record(&header)?;
@@ -1600,16 +1611,19 @@ fn write_candles_csv(path: &Path, rows: &[Row], overlay_columns: &[String]) -> R
             .to_datetime()
             .format(&Rfc3339)
             .unwrap_or_else(|_| time_ts.0.to_string());
-        let mut record: Vec<String> = vec![
-            row.symbol.clone(),
-            row.freq.clone(),
-            time,
-            format_f64(row.atom.candle.open),
-            format_f64(row.atom.candle.high),
-            format_f64(row.atom.candle.low),
-            format_f64(row.atom.candle.close),
-            format_f64(row.atom.candle.volume),
-        ];
+        let mut record: Vec<String> = vec![row.symbol.clone(), row.freq.clone(), time];
+        if any_candle {
+            let ohlcv = |f: fn(&Candle) -> Real| {
+                row.atom.candle.as_ref().map(f).map(format_f64).unwrap_or_default()
+            };
+            record.extend([
+                ohlcv(|c| c.open),
+                ohlcv(|c| c.high),
+                ohlcv(|c| c.low),
+                ohlcv(|c| c.close),
+                ohlcv(|c| c.volume),
+            ]);
+        }
         for v in &row.overlays {
             record.push(v.as_ref().map(format_overlay_value).unwrap_or_default());
         }

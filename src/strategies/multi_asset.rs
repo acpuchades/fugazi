@@ -669,8 +669,8 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Mu
             let self_atom = snap.iter().find_map(|(s, _, a)| {
                 if s == Some(sym) { Some(a.clone()) } else { None }
             });
-            if let Some(atom) = self_atom {
-                state.position.update(atom.candle);
+            if let Some(candle) = self_atom.and_then(|a| a.candle) {
+                state.position.update(candle);
             }
 
             state.long.update(snap.clone());
@@ -699,7 +699,9 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Mu
         //    registered via apply_fill), so it's cheap.
         let marks: Vec<(Sym, Candle)> = snap
             .iter()
-            .filter_map(|(s, _, a)| s.cloned().map(|sym| (sym, a.candle)))
+            // `a.candle?` drops the overlay-only entries: they are not
+            // prices, so there is nothing to mark them at.
+            .filter_map(|(s, _, a)| Some((s.cloned()?, a.candle?)))
             .collect();
         if !marks.is_empty() {
             self.book.update(marks);
@@ -844,7 +846,8 @@ mod tests {
         let s = snap(entries);
         for (sym_opt, _f, atom) in s.iter() {
             let sym = sym_opt.copied().unwrap();
-            for fill in wallet.update(sym, atom.candle) {
+            let Some(candle) = atom.candle else { continue };
+            for fill in wallet.update(sym, candle) {
                 strat.on_fill(&fill);
             }
         }
@@ -988,7 +991,8 @@ mod tests {
         s.push(Some("A"), None, Atom::new(Candle::new(95.0, 96.0, 88.0, 89.0, 0.0)));
         for (sym_opt, _f, atom) in s.iter() {
             let sym = sym_opt.copied().unwrap();
-            for fill in wallet.update(sym, atom.candle) {
+            let Some(candle) = atom.candle else { continue };
+            for fill in wallet.update(sym, candle) {
                 strat.on_fill(&fill);
             }
         }
