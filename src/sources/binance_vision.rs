@@ -63,7 +63,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::types::{Atom, OverlayInfo, OverlayValue, Real, Schema};
+use crate::types::{Atom, Candle, OverlayInfo, OverlayValue, Real, Schema};
 
 use super::{Interval, SeriesSource, SourceError, Timestamp, floor_to_bucket};
 
@@ -96,6 +96,11 @@ pub fn binance_vision_schema() -> &'static Arc<Schema> {
         b.add_real("top_trader_account_ratio"); // 5 — top accounts, by count
         b.add_real("top_trader_position_ratio"); // 6 — top accounts, by size
         b.add_real("taker_long_short_ratio"); // 7 — taker buy vs sell volume
+        // The perp kline's own extras, named as the spot provider names them.
+        b.add_real("quote_volume"); // 8
+        b.add_real("n_trades"); // 9
+        b.add_real("taker_buy_base_volume"); // 10
+        b.add_real("taker_buy_quote_volume"); // 11
         b.finish()
     })
 }
@@ -223,8 +228,21 @@ impl SeriesSource for BinanceVision {
 
             let fetched = fetch_concurrently(&client, jobs, max_in_flight, min_delay).await?;
 
-            // One `bucket -> value` map per schema column.
+            // One `bucket -> value` map per schema column, plus the bars the
+            // kline archive contributes.
             let mut columns: Vec<BTreeMap<i64, Real>> = vec![BTreeMap::new(); schema.len()];
+            let mut bars: BTreeMap<i64, Candle> = BTreeMap::new();
+            for (kind, url, csv) in &fetched {
+                if *kind != Archive::Klines {
+                    continue;
+                }
+                for (time, candle) in parse_candles(csv, url)? {
+                    if time < since.0 || time >= until_ms {
+                        continue;
+                    }
+                    bars.insert(floor_to_bucket(time, interval), candle);
+                }
+            }
             for (kind, url, csv) in fetched {
                 for (time, slot, value) in parse_archive(kind, &csv, &url)? {
                     if time < since.0 || time >= until_ms {
@@ -242,22 +260,29 @@ impl SeriesSource for BinanceVision {
                 }
             }
 
-            let mut buckets: Vec<i64> = columns.iter().flat_map(|c| c.keys().copied()).collect();
+            let mut buckets: Vec<i64> = columns
+                .iter()
+                .flat_map(|c| c.keys().copied())
+                .chain(bars.keys().copied())
+                .collect();
             buckets.sort_unstable();
             buckets.dedup();
 
             Ok(buckets
                 .into_iter()
-                .map(|time| {
-                    Atom::overlay_only(
-                        OverlayInfo::sparse(
-                            schema.clone(),
-                            columns
-                                .iter()
-                                .map(|c| c.get(&time).copied().map(OverlayValue::Real)),
-                        ),
-                        Timestamp(time),
-                    )
+                .map(|time| Atom {
+                    // A bar when the kline archive covered this bucket; `None`
+                    // for a bucket only the overlay archives reached — early
+                    // funding history predates nothing, but `metrics` and the
+                    // klines start at different dates.
+                    candle: bars.get(&time).copied(),
+                    time: Some(Timestamp(time)),
+                    overlays: Some(OverlayInfo::sparse(
+                        schema.clone(),
+                        columns
+                            .iter()
+                            .map(|c| c.get(&time).copied().map(OverlayValue::Real)),
+                    )),
                 })
                 .collect())
         }
@@ -283,6 +308,13 @@ enum Archive {
     Funding,
     /// Monthly, partitioned by interval.
     Premium,
+    /// Monthly, partitioned by interval — the **perpetual's own klines**, which
+    /// give each atom its candle. Pairing the funding rate with the contract it
+    /// is charged on is the point: a spot bar and a perp funding rate are two
+    /// different instruments, and joining them by symbol would quietly imply
+    /// otherwise. On the same series there is no join at all — one symbol, one
+    /// set of atoms carrying both the bar and the side channel.
+    Klines,
     /// **Daily**, and the reason this source exists: `fapi`'s
     /// `/futures/data/*` endpoints serve these statistics for the last 30 days
     /// only, while the archive keeps them from 2021. The cost is one file per
@@ -292,7 +324,8 @@ enum Archive {
 }
 
 impl Archive {
-    const ALL: [Archive; 3] = [Archive::Funding, Archive::Premium, Archive::Metrics];
+    const ALL: [Archive; 4] =
+        [Archive::Klines, Archive::Funding, Archive::Premium, Archive::Metrics];
 
     fn url(self, base: &str, symbol: &str, token: &str, stamp: &str) -> String {
         match self {
@@ -304,6 +337,9 @@ impl Archive {
             ),
             Archive::Metrics => format!(
                 "{base}/data/futures/um/daily/metrics/{symbol}/{symbol}-metrics-{stamp}.zip"
+            ),
+            Archive::Klines => format!(
+                "{base}/data/futures/um/monthly/klines/{symbol}/{token}/{symbol}-{token}-{stamp}.zip"
             ),
         }
     }
@@ -326,6 +362,7 @@ impl Archive {
             Archive::Funding => "calc_time",
             Archive::Premium => "open_time",
             Archive::Metrics => "create_time",
+            Archive::Klines => "open_time",
         }
     }
 
@@ -352,6 +389,14 @@ impl Archive {
         match self {
             Archive::Funding => &[("last_funding_rate", 0)],
             Archive::Premium => &[("close", 1)],
+            // The candle columns are read separately (see `parse_candles`);
+            // these are the kline's side-channel extras.
+            Archive::Klines => &[
+                ("quote_volume", 8),
+                ("count", 9),
+                ("taker_buy_volume", 10),
+                ("taker_buy_quote_volume", 11),
+            ],
             Archive::Metrics => &[
                 ("sum_open_interest", 2),
                 ("sum_open_interest_value", 3),
@@ -517,6 +562,54 @@ fn parse_archive(
     Ok(out)
 }
 
+/// Pull `(epoch_ms, candle)` pairs out of a kline archive. Read by header name
+/// like [`parse_archive`], for the same reason: an added column upstream must
+/// not shift the values.
+fn parse_candles(text: &str, url: &str) -> Result<Vec<(i64, Candle)>, SourceError> {
+    let mut reader = csv::Reader::from_reader(text.as_bytes());
+    let headers = reader
+        .headers()
+        .map_err(|e| SourceError::Decode(format!("{url}: header: {e}")))?
+        .clone();
+    let index_of = |name: &str| {
+        headers
+            .iter()
+            .position(|h| h.trim() == name)
+            .ok_or_else(|| SourceError::Decode(format!("{url}: missing column `{name}`")))
+    };
+    let idx = [
+        index_of("open_time")?,
+        index_of("open")?,
+        index_of("high")?,
+        index_of("low")?,
+        index_of("close")?,
+        index_of("volume")?,
+    ];
+
+    let mut out = Vec::new();
+    for record in reader.records() {
+        let record = record.map_err(|e| SourceError::Decode(format!("{url}: row: {e}")))?;
+        let cell = |i: usize, name: &str| -> Result<Real, SourceError> {
+            let raw = record.get(idx[i]).unwrap_or_default().trim();
+            raw.parse().map_err(|e| {
+                SourceError::Decode(format!("{url}: `{name}` = {raw:?}: {e}"))
+            })
+        };
+        let time = cell(0, "open_time")? as i64;
+        out.push((
+            time,
+            Candle::new(
+                cell(1, "open")?,
+                cell(2, "high")?,
+                cell(3, "low")?,
+                cell(4, "close")?,
+                cell(5, "volume")?,
+            ),
+        ));
+    }
+    Ok(out)
+}
+
 /// Every `YYYY-MM-DD` the half-open range `[since, until)` touches.
 fn days_between(since: i64, until: i64) -> Vec<String> {
     const DAY_MS: i64 = 86_400_000;
@@ -654,7 +747,7 @@ mod tests {
         // definitions have to be checked against each other or a reordered
         // schema would silently write values into the wrong column.
         let schema = binance_vision_schema();
-        assert_eq!(schema.len(), 8);
+        assert_eq!(schema.len(), 12);
         let mut seen = vec![false; schema.len()];
         for kind in Archive::ALL {
             for &(_, slot) in kind.columns() {
@@ -678,6 +771,10 @@ mod tests {
             "top_trader_account_ratio",
             "top_trader_position_ratio",
             "taker_long_short_ratio",
+            "quote_volume",
+            "n_trades",
+            "taker_buy_base_volume",
+            "taker_buy_quote_volume",
         ]
         .into_iter()
         .enumerate()
@@ -741,6 +838,14 @@ mod tests {
         assert_eq!(
             Archive::Premium.url(base, "BTCUSDT", "1d", "2024-01"),
             "https://data.binance.vision/data/futures/um/monthly/premiumIndexKlines/BTCUSDT/1d/BTCUSDT-1d-2024-01.zip"
+        );
+        assert_eq!(
+            Archive::Klines.url(base, "BTCUSDT", "1d", "2024-01"),
+            "https://data.binance.vision/data/futures/um/monthly/klines/BTCUSDT/1d/BTCUSDT-1d-2024-01.zip"
+        );
+        assert_eq!(
+            Archive::Metrics.url(base, "BTCUSDT", "1d", "2024-01-15"),
+            "https://data.binance.vision/data/futures/um/daily/metrics/BTCUSDT/BTCUSDT-metrics-2024-01-15.zip"
         );
     }
 

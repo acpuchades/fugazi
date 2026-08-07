@@ -223,72 +223,11 @@ fn parse_symbol_plain(s: &str, interval: Interval) -> Result<SymbolSpec> {
     if s.is_empty() {
         bail!("empty symbol name");
     }
-    let (output, query) = split_remap(s).with_context(|| format!("symbol {s:?}"))?;
+    let symbol = s.to_string();
     Ok(SymbolSpec {
-        output,
-        query,
+        symbol,
         freqs: vec![interval],
     })
-}
-
-/// Split a symbol head into `(emitted, fetched)` on the first **unescaped** `=`,
-/// unescaping both sides. With no unescaped `=`, the whole (unescaped) string is
-/// both.
-///
-/// A ticker that legitimately contains `=` — Yahoo's `EURUSD=X`, `ES=F` — writes
-/// it `\=`, so `yfinance:EURUSD\=X[1d]` fetches and emits `EURUSD=X` while
-/// `cg:BTCUSDT=bitcoin[1d]` still means "fetch `bitcoin`, emit `BTCUSDT`". Both
-/// sides accept the escape, so an emitted label may carry one too
-/// (`ES\=F=ES=F` is a redundant but legal way to spell the same thing).
-///
-/// Escapes are `\=` → `=` and `\\` → `\`; any other backslash sequence is an
-/// error rather than a silent passthrough, so a typo surfaces at parse time.
-///
-/// Note for callers writing shell: the shell eats a bare backslash, so the
-/// argument needs quoting — `'yfinance:EURUSD\=X[1d]'` or `EURUSD\\=X`.
-/// Thin `anyhow` wrappers over the shared symbol-escape rules in
-/// [`crate::calendar`], which the `-x` / `--costs` scope splitters use too.
-fn unescape(s: &str) -> Result<String> {
-    crate::calendar::unescape_symbol(s).map_err(|e| anyhow!("{e}"))
-}
-
-fn escape(s: &str) -> String {
-    crate::calendar::escape_symbol(s)
-}
-
-fn split_remap(head: &str) -> Result<(String, String)> {
-    let mut escaped = false;
-    let mut split_at = None;
-    for (i, c) in head.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match c {
-            '\\' => escaped = true,
-            '=' => {
-                split_at = Some(i);
-                break;
-            }
-            _ => {}
-        }
-    }
-    let Some(i) = split_at else {
-        let whole = unescape(head)?;
-        return Ok((whole.clone(), whole));
-    };
-    // Unescape before trimming: `A\ =B`'s left side is `A\ `, and trimming
-    // first would leave a dangling `\` and report that instead of the real
-    // problem (an unknown `\ ` escape).
-    let output = unescape(&head[..i])?.trim().to_string();
-    let query = unescape(&head[i + 1..])?.trim().to_string();
-    if output.is_empty() {
-        bail!("empty output symbol on the left of `=`");
-    }
-    if query.is_empty() {
-        bail!("empty provider query on the right of `=`");
-    }
-    Ok((output, query))
 }
 
 /// Parse one CLI spec argument into zero or more [`FetchSpec`]s and an optional
@@ -348,10 +287,8 @@ pub(crate) const KNOWN_PROVIDERS: &[(&str, &str)] = &[
 /// contains a literal `=` escapes it as `\=` — see [`split_remap`].
 #[derive(Debug, Clone, PartialEq)]
 struct SymbolSpec {
-    /// The value written to the `symbol` column — the `--series` join key.
-    output: String,
-    /// The identifier sent to the provider.
-    query: String,
+    /// The symbol: sent to the provider, and written to the `symbol` column.
+    symbol: String,
     /// The cadences to fetch. Each is written to the `freq` column as its own
     /// canonical token, and is what `-x` scope prefixes match against.
     freqs: Vec<Interval>,
@@ -635,14 +572,13 @@ fn run_candles(
                         let stable = overlay::stable_period_for(
                             &overlays,
                             &overlay_columns,
-                            &sym.output,
+                            &sym.symbol,
                             freq,
                             &schema,
                         );
                         series.push(Series {
                             provider: provider.clone(),
-                            output: sym.output.clone(),
-                            query: sym.query.clone(),
+                            symbol: sym.symbol.clone(),
                             interval: freq,
                             stable,
                             csv_bars: None,
@@ -684,8 +620,7 @@ fn run_candles(
                     // `freq` columns, so there is nothing to remap.
                     series.push(Series {
                         provider: "csv".into(),
-                        output: sym.clone(),
-                        query: sym,
+                        symbol: sym,
                         interval,
                         stable,
                         csv_bars: Some(shared.clone()),
@@ -760,12 +695,9 @@ struct Row {
 #[derive(Clone)]
 struct Series {
     provider: String,
-    /// The symbol this series' rows are *written* under — the `--series` join
-    /// key. Equal to `query` unless the spec used the `OUTPUT=QUERY` form.
-    output: String,
-    /// The identifier this series is *fetched* with (a CoinGecko coin id, a
-    /// Binance pair, …). See [`SymbolSpec`].
-    query: String,
+    /// The symbol: sent to the provider, and written to the `symbol` column
+    /// that `--series` joins on.
+    symbol: String,
     /// The cadence fetched — what chunking, pagination, the provider call, `-x`
     /// scope matching, and the emitted `freq` cell all use.
     interval: Interval,
@@ -783,19 +715,18 @@ impl Series {
             return format!(
                 "csv:{}[{}:{}]",
                 path.display(),
-                escape(&self.output),
+                self.symbol,
                 self.interval.as_token()
             );
         }
-        // Echo the mapping when there is one, so the progress line makes the
-        // fetched-vs-emitted distinction visible while it runs. Re-escaped, so
-        // what is printed is a spec that parses back to this series.
-        let symbol = if self.output == self.query {
-            escape(&self.query)
-        } else {
-            format!("{}={}", escape(&self.output), escape(&self.query))
-        };
-        format!("{}:{}[{}]", self.provider, symbol, self.interval.as_token())
+        // Re-escaped, so what is printed is a spec that parses back to this
+        // series.
+        format!(
+            "{}:{}[{}]",
+            self.provider,
+            self.symbol,
+            self.interval.as_token()
+        )
     }
 
     /// Where this series' fetch actually starts: `since` on the nose when the
@@ -917,12 +848,12 @@ async fn fetch_series(
         let rows: Vec<RawBar> = csv_bars
             .iter()
             .filter(|b| {
-                b.symbol == series.query
+                b.symbol == series.symbol
                     && b.interval == series.interval
                     && b.atom.time.map(|t| t.0 >= fetch_since.0 && t.0 < until.0).unwrap_or(false)
             })
             .map(|b| RawBar {
-                symbol: series.output.clone(),
+                symbol: series.symbol.clone(),
                 interval: b.interval,
                 atom: b.atom.clone(),
             })
@@ -942,7 +873,7 @@ async fn fetch_series(
         bar.set_message(chunk_since.to_datetime().date().to_string());
         let atoms = fetch(
             &series.provider,
-            &series.query,
+            &series.symbol,
             series.interval,
             chunk_since,
             chunk_until,
@@ -951,7 +882,7 @@ async fn fetch_series(
         .with_context(|| format!("fetching {label}"))?;
         // Rows are tagged with the *emitted* symbol — the join key.
         rows.extend(atoms.into_iter().map(|atom| RawBar {
-            symbol: series.output.clone(),
+            symbol: series.symbol.clone(),
             interval: series.interval,
             atom,
         }));
@@ -1093,7 +1024,7 @@ fn warn_short_history(
     for s in series {
         let Some(earliest) = raw
             .iter()
-            .filter(|b| b.symbol == s.output && b.interval == s.interval)
+            .filter(|b| b.symbol == s.symbol && b.interval == s.interval)
             .filter_map(|b| b.atom.time)
             .min()
         else {
@@ -1514,7 +1445,7 @@ fn parse_symbol(s: &str) -> Result<SymbolSpec> {
     if head.is_empty() {
         bail!("{s:?}: empty symbol name");
     }
-    let (output, query) = split_remap(head).with_context(|| format!("{s:?}"))?;
+    let symbol = head.trim().to_string();
     let inner = &s[open + 1..s.len() - 1];
     let mut freqs = Vec::new();
     for tok in inner.split(',') {
@@ -1531,8 +1462,7 @@ fn parse_symbol(s: &str) -> Result<SymbolSpec> {
         bail!("{s:?}: empty frequency list");
     }
     Ok(SymbolSpec {
-        output,
-        query,
+        symbol,
         freqs,
     })
 }
@@ -1648,92 +1578,39 @@ mod tests {
         assert_eq!(provider, "binance");
         assert_eq!(symbols.len(), 1);
         // No `=`: the fetched symbol is also the emitted one.
-        assert_eq!(symbols[0].output, "BTCUSDT");
-        assert_eq!(symbols[0].query, "BTCUSDT");
+        assert_eq!(symbols[0].symbol, "BTCUSDT");
+        assert_eq!(symbols[0].symbol, "BTCUSDT");
         assert_eq!(symbols[0].freqs, vec![Interval::Day(1)]);
     }
 
+
+
+
+
+
+
+
     #[test]
-    fn output_prefix_remaps_the_emitted_symbol() {
-        let (provider, symbols) = remote("cg:BTCUSDT=bitcoin[1d],ETHUSDT=ethereum[1d]");
-        assert_eq!(provider, "cg");
-        assert_eq!(symbols.len(), 2);
-        // Fetch under the provider's id, emit under the price series' key.
-        assert_eq!(symbols[0].query, "bitcoin");
-        assert_eq!(symbols[0].output, "BTCUSDT");
-        assert_eq!(symbols[1].query, "ethereum");
-        assert_eq!(symbols[1].output, "ETHUSDT");
+    fn a_symbol_carrying_an_equals_needs_no_escape() {
+        // With the `OUT=QUERY` remap gone, nothing in a spec head is
+        // `=`-delimited, so Yahoo's tickers are written plainly.
+        let (_, symbols) = remote("yfinance:EURUSD=X[1d],ES=F[1d]");
+        assert_eq!(symbols[0].symbol, "EURUSD=X");
+        assert_eq!(symbols[1].symbol, "ES=F");
+
+        // Same through the bracket-less `@dataset.yml` path.
+        let plain = parse_symbol_plain("EURUSD=X", Interval::Day(1)).unwrap();
+        assert_eq!(plain.symbol, "EURUSD=X");
     }
 
     #[test]
-    fn output_prefix_tolerates_whitespace_and_mixes_with_plain_entries() {
-        let (_, symbols) = remote("binance: BTCEUR = BTCUSDT [1d] , ETHEUR[1d]");
-        assert_eq!(symbols[0].output, "BTCEUR");
-        assert_eq!(symbols[0].query, "BTCUSDT");
-        // A plain entry alongside a mapped one still defaults output = query.
-        assert_eq!(symbols[1].output, "ETHEUR");
-        assert_eq!(symbols[1].query, "ETHEUR");
-    }
-
-    #[test]
-    fn an_escaped_equals_is_part_of_the_symbol() {
-        // Yahoo's FX / futures tickers carry `=`. Escaped, the head is one
-        // symbol — no remap — and the `=` survives into both sides.
-        let (provider, symbols) = remote(r"yfinance:EURUSD\=X[1d],ES\=F[1h]");
-        assert_eq!(provider, "yfinance");
-        assert_eq!(symbols[0].output, "EURUSD=X");
-        assert_eq!(symbols[0].query, "EURUSD=X");
-        assert_eq!(symbols[0].freqs, vec![Interval::Day(1)]);
-        assert_eq!(symbols[1].output, "ES=F");
-        assert_eq!(symbols[1].query, "ES=F");
-    }
-
-    #[test]
-    fn escapes_work_on_either_side_of_a_remap() {
-        // Emit under an escaped label, fetch an escaped id: the split happens
-        // at the first *unescaped* `=` only.
-        let (_, symbols) = remote(r"yfinance:EURUSD\=X=EURUSD\=X[1d]");
-        assert_eq!(symbols[0].output, "EURUSD=X");
-        assert_eq!(symbols[0].query, "EURUSD=X");
-
-        let (_, mapped) = remote(r"yfinance:EURUSD=EURUSD\=X[1d]");
-        assert_eq!(mapped[0].output, "EURUSD");
-        assert_eq!(mapped[0].query, "EURUSD=X");
-
-        // `\\` is the other escape — a literal backslash, not an escaper.
-        let (_, backslash) = remote(r"binance:A\\B[1d]");
-        assert_eq!(backslash[0].query, r"A\B");
-    }
-
-    #[test]
-    fn rejects_unknown_and_dangling_escapes() {
-        // A typo surfaces at parse time rather than silently passing through.
-        assert!(parse_spec(r"binance:BTC\USDT[1d]").is_err());
-        assert!(parse_spec(r"binance:BTCUSDT\[1d]").is_err());
-    }
-
-    #[test]
-    fn an_escape_error_names_the_escape_not_the_padding() {
-        // Unescaping runs before the whitespace trim, so `A\ =B` reports the
-        // unknown `\ ` escape rather than a dangling backslash left by trimming.
-        let err = parse_spec(r"binance:A\ =B[1d]").unwrap_err().to_string();
-        let chain = format!("{:#}", parse_spec(r"binance:A\ =B[1d]").unwrap_err());
-        assert!(chain.contains("unknown escape"), "{err} / {chain}");
-    }
-
-    #[test]
-    fn dataset_symbols_share_the_remap_and_escape_rules() {
-        // The bracket-less `@dataset.yml` path goes through the same splitter.
-        let mapped = parse_symbol_plain("BTCUSDT=bitcoin", Interval::Day(1)).unwrap();
-        assert_eq!(mapped.output, "BTCUSDT");
-        assert_eq!(mapped.query, "bitcoin");
-        assert_eq!(mapped.freqs, vec![Interval::Day(1)]);
-
-        let escaped = parse_symbol_plain(r"EURUSD\=X", Interval::Day(1)).unwrap();
-        assert_eq!(escaped.output, "EURUSD=X");
-        assert_eq!(escaped.query, "EURUSD=X");
-
-        assert!(parse_symbol_plain(r"BTC\USDT", Interval::Day(1)).is_err());
+    fn a_symbol_carrying_a_colon_survives_the_provider_split() {
+        // The provider is split off at the *first* colon, and no provider name
+        // contains one — so a CCXT-style perpetual symbol needs no escape here
+        // either.
+        let (provider, symbols) = remote("binance-vision:BTC/USDT:USDT[1d]");
+        assert_eq!(provider, "binance-vision");
+        assert_eq!(symbols[0].symbol, "BTC/USDT:USDT");
     }
 
     #[test]
@@ -1744,34 +1621,22 @@ mod tests {
         assert!(parse_spec("binance:BTCUSDT[1x]").is_err());
     }
 
-    #[test]
-    fn rejects_half_empty_output_mapping() {
-        assert!(parse_spec("cg:=bitcoin[1d]").is_err());
-        assert!(parse_spec("cg:BTCUSDT=[1d]").is_err());
-    }
 
     #[test]
-    fn label_echoes_a_mapping_only_when_there_is_one_and_re_escapes() {
-        let mapped = Series {
-            provider: "cg".into(),
-            output: "BTCUSDT".into(),
-            query: "bitcoin".into(),
+    fn label_round_trips_to_a_spec_that_parses_back() {
+        let series = Series {
+            provider: "yfinance".into(),
+            symbol: "EURUSD=X".into(),
             interval: Interval::Day(1),
             stable: 0,
             csv_bars: None,
             csv_path: None,
         };
-        assert_eq!(mapped.label(), "cg:BTCUSDT=bitcoin[1d]");
-
-        // Unmapped: the plain form, with any literal `=` escaped back so the
-        // echoed spec parses to this same series.
-        let plain = Series {
-            provider: "yfinance".into(),
-            output: "EURUSD=X".into(),
-            query: "EURUSD=X".into(),
-            ..mapped
-        };
-        assert_eq!(plain.label(), r"yfinance:EURUSD\=X[1d]");
+        // Verbatim: with no `=`-delimited grammar left in a spec head, the
+        // ticker needs no escaping to parse back.
+        assert_eq!(series.label(), "yfinance:EURUSD=X[1d]");
+        let (_, parsed) = remote(&series.label());
+        assert_eq!(parsed[0].symbol, "EURUSD=X");
     }
 
 
