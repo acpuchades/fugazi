@@ -37,7 +37,7 @@ use std::time::Duration as StdDuration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
-use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle};
 use time::format_description::well_known::Rfc3339;
 use time::{Date, Duration, Month, OffsetDateTime, Time};
 use tokio::runtime::Builder as RuntimeBuilder;
@@ -642,15 +642,20 @@ fn run_candles(
         }
     }
 
-    let (multi, bars) =
-        build_progress_bars(&series, since_ts, until_ts, since_specified, args.quiet);
+    let progress = build_progress(series.len(), args.quiet);
 
     // Async: download every series in parallel — no overlay state crosses task
     // boundaries. Overlays are applied synchronously below, per (symbol,
     // interval) group, so `DynValue`'s non-Send `Rc`-backed `Position` stub
     // stays on one thread. `csv:` series short-circuit inside `fetch_series`.
-    let result = rt.block_on(fetch_all(series.clone(), since_ts, until_ts, since_specified, bars));
-    let _ = multi.clear();
+    let result = rt.block_on(fetch_all(
+        series.clone(),
+        since_ts,
+        until_ts,
+        since_specified,
+        progress.clone(),
+    ));
+    progress.finish_and_clear();
     let raw = result?;
     warn_short_history(&series, &raw, since_ts, since_specified, args.keep_unstable);
     let rows = apply_overlays(
@@ -757,40 +762,19 @@ impl Series {
     }
 }
 
-/// Bars per download chunk. Matches Binance's max klines per request, so on
-/// that provider one chunk is roughly one HTTP request; on providers that
-/// return the whole window in one call (Yahoo) it just bounds the request
-/// size the same way.
-const CHUNK_BARS: i64 = 1000;
-
-/// Split `[since, until)` into consecutive `[start, end)` windows of at most
-/// [`CHUNK_BARS`] bars each, so a long fetch advances the progress bar as it
-/// goes rather than in one jump per symbol/interval pair.
-fn chunk_bounds(since: Timestamp, until: Timestamp, interval: Interval) -> Vec<(Timestamp, Timestamp)> {
-    let step = interval.duration_ms().saturating_mul(CHUNK_BARS);
-    let mut chunks = Vec::new();
-    let mut cursor = since.0;
-    while cursor < until.0 {
-        let end = cursor.saturating_add(step).min(until.0);
-        chunks.push((Timestamp(cursor), Timestamp(end)));
-        cursor = end;
-    }
-    chunks
-}
-
 /// Drop entries whose timestamp `key` has already appeared, keeping the first
-/// occurrence and preserving order. This restores the per-series
-/// `(symbol, interval, timestamp)` uniqueness invariant at the stitch point that
-/// splices the [`chunk_bounds`] windows back together.
+/// occurrence and preserving order — the per-series
+/// `(symbol, interval, timestamp)` uniqueness invariant, enforced at the CLI
+/// boundary regardless of how the provider assembled the series.
 ///
-/// The windows are half-open and non-overlapping *in UTC*, but a provider that
-/// resolves the fetch range in exchange-local time can still return one bar in
-/// two adjacent chunks. Yahoo FX stamps a daily bar for trading day D at
-/// D-1T23:00Z under European summer time, so that bar is *before* the UTC
-/// midnight boundary between the two chunks: it satisfies the earlier chunk's
-/// UTC upper bound *and* the later chunk's local-time range, and both chunks
-/// emit it. A `None` key — a synthetic, timeless atom; remote providers always
-/// stamp `time` — is never treated as a duplicate.
+/// Each series is one `atoms()` call, and a provider is free to paginate that
+/// range internally; a provider that resolves the fetch range in exchange-local
+/// time can return the same bar twice across an internal page boundary. Yahoo
+/// FX stamps a daily bar for trading day D at D-1T23:00Z under European summer
+/// time, straddling a UTC page boundary, so it can be emitted on both sides.
+/// De-duplicating here keeps that provider-side quirk from leaking a repeated
+/// row into the output. A `None` key — a synthetic, timeless atom; remote
+/// providers always stamp `time` — is never treated as a duplicate.
 fn dedup_by_time<T>(rows: &mut Vec<T>, key: impl Fn(&T) -> Option<i64>) {
     let mut seen = std::collections::HashSet::new();
     rows.retain(|r| match key(r) {
@@ -798,11 +782,6 @@ fn dedup_by_time<T>(rows: &mut Vec<T>, key: impl Fn(&T) -> Option<i64>) {
         None => true,
     });
 }
-
-/// Delay between successive chunk requests *within one series*, mirroring the
-/// politeness delay the providers apply between their own pagination pages.
-/// Series run concurrently; the delay paces each series' own request stream.
-const CHUNK_DELAY: StdDuration = StdDuration::from_millis(100);
 
 /// One un-overlaid downloaded bar in the intermediate fetch result: which
 /// symbol + interval it came from, and the fully-populated [`Atom`] the
@@ -828,12 +807,14 @@ async fn fetch_all(
     since: Timestamp,
     until: Timestamp,
     since_specified: bool,
-    bars: Vec<ProgressBar>,
+    progress: ProgressBar,
 ) -> Result<Vec<RawBar>> {
     let mut tasks = JoinSet::new();
-    for (s, bar) in series.into_iter().zip(bars) {
+    for s in series.into_iter() {
         let fetch_since = s.fetch_since(since, since_specified);
-        tasks.spawn(fetch_series(s, fetch_since, until, bar));
+        // One shared global bar; each task ticks it by one when its series
+        // finishes. `ProgressBar` clones share the same underlying state.
+        tasks.spawn(fetch_series(s, fetch_since, until, progress.clone()));
     }
     let mut all: Vec<RawBar> = Vec::new();
     while let Some(joined) = tasks.join_next().await {
@@ -842,8 +823,16 @@ async fn fetch_all(
     Ok(all)
 }
 
-/// Fetch one series chunk-by-chunk (sequentially — the politeness delay is
-/// per series), advancing its own progress bar. Overlay-agnostic.
+/// Fetch one series in a single `atoms()` call over the whole
+/// `[fetch_since, until)` range, advancing its own progress bar. Overlay-agnostic.
+///
+/// Pagination and request concurrency are the **provider's** concern — Binance
+/// auto-paginates its klines endpoint, BinanceVision fans its archive files out
+/// concurrently, Yahoo returns the window in one request — so the CLI hands over
+/// the full range and lets each source apply its own transport policy (chunk
+/// size, rate-limit pacing, in-flight concurrency) rather than imposing a
+/// provider-agnostic one on top. Series still run concurrently (one task each,
+/// see [`fetch_all`]).
 ///
 /// A `csv:` series short-circuits: the file has already been read into
 /// [`Series::csv_bars`] up front, so this is just an in-memory filter to the
@@ -852,7 +841,7 @@ async fn fetch_series(
     series: Series,
     fetch_since: Timestamp,
     until: Timestamp,
-    bar: ProgressBar,
+    progress: ProgressBar,
 ) -> Result<Vec<RawBar>> {
     if let Some(csv_bars) = series.csv_bars.clone() {
         let rows: Vec<RawBar> = csv_bars
@@ -868,38 +857,30 @@ async fn fetch_series(
                 atom: b.atom.clone(),
             })
             .collect();
-        bar.inc(1);
-        bar.finish_with_message("done");
+        progress.inc(1);
         return Ok(rows);
     }
     let label = series.label();
-    let mut rows: Vec<RawBar> = Vec::new();
-    let mut first = true;
-    for (chunk_since, chunk_until) in chunk_bounds(fetch_since, until, series.interval) {
-        if !first {
-            tokio::time::sleep(CHUNK_DELAY).await;
-        }
-        first = false;
-        bar.set_message(chunk_since.to_datetime().date().to_string());
-        let atoms = fetch(
-            &series.provider,
-            &series.symbol,
-            series.interval,
-            chunk_since,
-            chunk_until,
-        )
-        .await
-        .with_context(|| format!("fetching {label}"))?;
-        // Rows are tagged with the *emitted* symbol — the join key.
-        rows.extend(atoms.into_iter().map(|atom| RawBar {
+    let atoms = fetch(
+        &series.provider,
+        &series.symbol,
+        series.interval,
+        fetch_since,
+        until,
+    )
+    .await
+    .with_context(|| format!("fetching {label}"))?;
+    // Rows are tagged with the *emitted* symbol — the join key.
+    let mut rows: Vec<RawBar> = atoms
+        .into_iter()
+        .map(|atom| RawBar {
             symbol: series.symbol.clone(),
             interval: series.interval,
             atom,
-        }));
-        bar.inc(1);
-    }
+        })
+        .collect();
     dedup_by_time(&mut rows, |b| b.atom.time.map(|t| t.0));
-    bar.finish_with_message("done");
+    progress.inc(1);
     Ok(rows)
 }
 
@@ -1078,49 +1059,30 @@ fn warn_short_history(
     }
 }
 
-/// Build one fetch-progress bar per series, denominated in download *chunks*
-/// (see [`chunk_bounds`]), grouped under a [`MultiProgress`] so they render
-/// stacked and update independently. Hidden — a no-op sink — when `--quiet`
-/// is set or when stderr is not a terminal, so the CLI stays silent when its
-/// output is being piped or redirected.
-fn build_progress_bars(
-    series: &[Series],
-    since: Timestamp,
-    until: Timestamp,
-    since_specified: bool,
-    quiet: bool,
-) -> (MultiProgress, Vec<ProgressBar>) {
-    let multi = if quiet || !std::io::stderr().is_terminal() {
-        MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
+/// Build one **global** fetch-progress bar, denominated in series completed —
+/// each of the `n_series` series is a single `atoms()` call whose internal
+/// pagination the CLI doesn't see, so per-series sub-progress isn't available,
+/// and the meaningful aggregate is "how many of N series are done". Series
+/// finish out of order (they run concurrently); each ticks the bar by one on
+/// completion. A live spinner shows the fetch is working between ticks. Hidden
+/// — a no-op sink — when `--quiet` is set or when stderr is not a terminal, so
+/// the CLI stays silent when its output is being piped or redirected.
+fn build_progress(n_series: usize, quiet: bool) -> ProgressBar {
+    let bar = if quiet || !std::io::stderr().is_terminal() {
+        ProgressBar::hidden()
     } else {
-        MultiProgress::new()
+        ProgressBar::new(n_series as u64)
     };
-    let width = series.iter().map(|s| s.label().len()).max().unwrap_or(0);
-    let style = ProgressStyle::with_template("  {prefix} [{bar:20.cyan/blue}] {pos}/{len} {msg}")
+    bar.set_style(
+        ProgressStyle::with_template(
+            "  {spinner:.cyan} fetching [{bar:24.cyan/blue}] {pos}/{len} series",
+        )
         .expect("progress template compiles")
-        .progress_chars("=> ");
-    let bars = series
-        .iter()
-        .map(|s| {
-            // Per-series bar accounts for the overlay warm-up window pulled in
-            // ahead of `since` so the progress count matches what fetch_series
-            // actually chunks through. `csv:` series are read once up front,
-            // so their bar is a single tick that flips straight to `done`.
-            let n_chunks = if s.csv_bars.is_some() {
-                1
-            } else {
-                let start = s.fetch_since(since, since_specified);
-                chunk_bounds(start, until, s.interval).len()
-            };
-            let bar = multi.add(ProgressBar::new(n_chunks as u64));
-            bar.set_style(style.clone());
-            bar.set_prefix(format!("{:<width$}", s.label()));
-            // Steady tick so the bar animates while a single chunk is in flight.
-            bar.enable_steady_tick(StdDuration::from_millis(120));
-            bar
-        })
-        .collect();
-    (multi, bars)
+        .progress_chars("=> "),
+    );
+    // Steady tick so the spinner animates while requests are in flight.
+    bar.enable_steady_tick(StdDuration::from_millis(120));
+    bar
 }
 
 /// Dispatch on the provider name to a concrete [`SeriesSource`] implementation.
@@ -1762,60 +1724,17 @@ mod tests {
     }
 
     #[test]
-    fn chunk_bounds_splits_long_windows() {
-        // 3000 daily bars -> 3 full chunks of CHUNK_BARS days each.
-        let day = Interval::Day(1).duration_ms();
-        let since = Timestamp(0);
-        let until = Timestamp(3000 * day);
-        let chunks = chunk_bounds(since, until, Interval::Day(1));
-        assert_eq!(chunks.len(), 3);
-        assert_eq!(chunks[0], (Timestamp(0), Timestamp(1000 * day)));
-        assert_eq!(chunks[1], (Timestamp(1000 * day), Timestamp(2000 * day)));
-        assert_eq!(chunks[2], (Timestamp(2000 * day), Timestamp(3000 * day)));
-    }
-
-    #[test]
-    fn chunk_bounds_partitions_exactly_with_ragged_tail() {
-        let day = Interval::Day(1).duration_ms();
-        let since = Timestamp(5);
-        let until = Timestamp(1500 * day + 7);
-        let chunks = chunk_bounds(since, until, Interval::Day(1));
-        assert_eq!(chunks.len(), 2);
-        // Consecutive, gap-free, and covering [since, until) exactly.
-        assert_eq!(chunks.first().unwrap().0, since);
-        assert_eq!(chunks.last().unwrap().1, until);
-        for pair in chunks.windows(2) {
-            assert_eq!(pair[0].1, pair[1].0);
-        }
-    }
-
-    #[test]
-    fn chunk_bounds_short_window_is_one_chunk() {
-        let since = Timestamp(0);
-        let until = Timestamp(30 * Interval::Day(1).duration_ms());
-        let chunks = chunk_bounds(since, until, Interval::Day(1));
-        assert_eq!(chunks, vec![(since, until)]);
-    }
-
-    #[test]
-    fn chunk_bounds_empty_window_yields_no_chunks() {
-        assert!(chunk_bounds(Timestamp(100), Timestamp(100), Interval::Day(1)).is_empty());
-    }
-
-    #[test]
-    fn dedup_by_time_drops_chunk_boundary_duplicates() {
-        // Simulates the stitched output of two adjacent `chunk_bounds` windows
-        // whose boundary lands one hour after a Yahoo FX summer-time bar: the
-        // bar stamped at the boundary-minus-1h (`230000`) is returned by both
-        // the earlier chunk (its UTC upper bound) and the later chunk (which
-        // Yahoo resolves in exchange-local time), so it appears twice in a row
-        // once the chunks are spliced.
+    fn dedup_by_time_drops_duplicate_timestamps() {
+        // A provider that resolves its fetch range in exchange-local time can
+        // emit the same bar twice across an internal pagination boundary: a
+        // Yahoo FX summer-time daily bar stamped at `boundary - 1h` straddles a
+        // UTC page edge and comes back on both sides, appearing twice in a row.
         const BOUNDARY: i64 = 240000;
         let mut rows = vec![
-            (BOUNDARY - 3600, 'a'), // last real bar of chunk 1
-            (BOUNDARY - 10, 'b'),   // summer-time boundary bar, from chunk 1
-            (BOUNDARY - 10, 'b'),   // ...re-emitted by chunk 2 — the duplicate
-            (BOUNDARY + 3600, 'c'), // first genuinely-new bar of chunk 2
+            (BOUNDARY - 3600, 'a'), // an earlier bar
+            (BOUNDARY - 10, 'b'),   // the summer-time boundary bar
+            (BOUNDARY - 10, 'b'),   // ...re-emitted across the page edge — the duplicate
+            (BOUNDARY + 3600, 'c'), // a later, genuinely-new bar
         ];
         dedup_by_time(&mut rows, |&(t, _)| Some(t));
         // Duplicate removed, first occurrence kept, order and every distinct
