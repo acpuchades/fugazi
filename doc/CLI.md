@@ -557,23 +557,11 @@ The common shape is `<provider>:[<out>=]<symbol>[<freq>,<freq>...](,[<out>=]<sym
 — several symbols and several frequencies per spec are one download. `csv:`
 is the one exception; see below.
 
-The optional `<out>=` prefix decouples the name rows are **emitted** under from
-the identifier the provider is **queried** with — left is emitted, right is
-fetched. Use it when a provider's vocabulary differs from the price series you
-intend to join against, since `run -s` joins on an exact `(symbol, time)` match:
-`cg:BTCUSDT=bitcoin[1d]` fetches the coin id `bitcoin` and writes
-`symbol=BTCUSDT`. The same form works for a `@dataset.yml`'s `symbols:` entries.
+A symbol is taken verbatim: the provider is split off at the **first** colon,
+and no provider name contains one, so everything after it is the symbol. That
+means a ticker carrying `=` or `:` needs no escaping —
+`fugazi get 'yfinance:EURUSD=X[1d]'`, `fugazi get 'binance-vision:BTC/USDT:USDT[1d]'`.
 
-A ticker that itself contains `=` — Yahoo's `EURUSD=X`, `ES=F` — escapes it as
-`\=`, on either side of the remap. Quote the argument so the shell doesn't eat
-the backslash:
-
-```bash
-fugazi get 'yfinance:EURUSD\=X[1d]' -o fx.csv        # one symbol, no remap
-fugazi get 'yfinance:EURUSD=EURUSD\=X[1d]' -o fx.csv # fetch EURUSD=X, emit EURUSD
-```
-
-The only escapes are `\=` and `\\`; any other backslash sequence is an error.
 Frequency tokens have no remap form — each is parsed as a real cadence and the
 `freq` column always carries that cadence's own token.
 
@@ -600,10 +588,11 @@ Each `-x` argument is `[SCOPE:]BODY`, where:
 - **Scope** (optional): `SYMBOL[FREQ]:`, `SYMBOL:`, or `[FREQ]:` — the
   overlay only runs for matching `(symbol, interval)` fetches. A missing
   component is a wildcard; no prefix is a global overlay covering every
-  fetch. Cells outside the scope render blank. A scoped symbol containing
-  `=` escapes it as `\=`, the same rule
-  [fetch specs](#fetch-specs) use — `-x 'EURUSD\=X[1d]:r=!rsi { period: 2 }'`
-  — otherwise the `=` reads as the start of the `col=expr` body.
+  fetch. Cells outside the scope render blank. The scope ends at the first
+  `:`, so a symbol containing one escapes it as `\:`
+  (`-x 'BTC/USDT\:USDT[1d]:r=!rsi { period: 2 }'`). A symbol containing `=`
+  needs no escape — `-x 'EURUSD=X[1d]:r=!rsi { period: 2 }'` scopes fine,
+  because what follows the colon assigns and a scopeless body would not.
 - **Body**: either inline `col=expr[,col=expr,...]`
   (`sma20=!sma { period: 20 },ema50=!ema { period: 50 }`) or `@file.yml` — a
   YAML mapping of column name → source expression.
@@ -835,8 +824,8 @@ as [`--params`](#--params):
 
 Terms apply left-to-right, later wins; the `SYMBOL[FREQ]:` scope prefix is
 the same as [`get --overlay`](#-x----overlay) — either half is optional
-(`BTC:`, `[1d]:`, `BTC[1d]:`), and a symbol containing `=` escapes it as `\=`
-(`'EURUSD\=X:commission=!percentage { rate: 0.0002 }'`).
+(`BTC:`, `[1d]:`, `BTC[1d]:`), and a symbol containing `:` escapes it as `\:`
+(`'BTC/USDT\:USDT:commission=!percentage { rate: 0.0002 }'`).
 
 A leading scope on the first inline term of one `--costs` flag distributes
 over every later inline term in the same flag that doesn't carry its own
