@@ -254,9 +254,16 @@ pub(crate) const KNOWN_PROVIDERS: &[(&str, &str)] = &[
     ),
     (
         "binance-vision",
-        "Binance perpetual funding rate — overlay columns only, no OHLCV. One \
-         `funding_rate` column; settlements inside a bar are summed, so `[1d]` \
-         is that day's total carry. Hourly and coarser only",
+        "Binance spot klines from the public archive (data.binance.vision) — \
+         deeper and cheaper than the live endpoint, one request per month and no \
+         rate limit, at the cost of a ~2-day lag. Same columns as `binance`",
+    ),
+    (
+        "binance-vision-futures",
+        "Binance USDⓈ-M perpetual klines from the same archive, plus the side \
+         channels only a derivative has: funding rate (summed within a bar, so \
+         `[1d]` is that day's carry), premium index, open interest and the \
+         long/short ratios. Hourly to daily only",
     ),
     (
         "cg",
@@ -342,7 +349,7 @@ pub struct GetArgs {
     /// Each row's `freq` cell is the fetched cadence's own token — cadences are
     /// not relabellable.
     ///
-    /// Overlay-only providers (`cg`, `binance-vision`) emit side-channel
+    /// Overlay-only providers (`cg`) emit side-channel
     /// columns and no OHLCV, and cannot be mixed with candle providers in one
     /// invocation — fetch each to its own file and pass both to `run -s`.
     #[arg(value_name = "SPEC", required = true, num_args = 1..)]
@@ -1134,6 +1141,9 @@ async fn fetch(
         "binance-vision" => Ok(BinanceVision::new()
             .atoms(symbol, interval, since, Some(until))
             .await?),
+        "binance-vision-futures" => Ok(BinanceVision::futures()
+            .atoms(symbol, interval, since, Some(until))
+            .await?),
         other => bail!(unknown_provider_error(other)),
     }
 }
@@ -1145,6 +1155,7 @@ pub(crate) async fn tickers_of(provider: &str) -> Result<Vec<String>> {
     match provider {
         "binance" => Ok(Binance::new().tickers().await?),
         "binance-vision" => Ok(BinanceVision::new().tickers().await?),
+        "binance-vision-futures" => Ok(BinanceVision::futures().tickers().await?),
         "cg" => Ok(CoinGecko::new().tickers().await?),
         "yfinance" => Ok(Yahoo::new().tickers().await?),
         "csv" => bail!(

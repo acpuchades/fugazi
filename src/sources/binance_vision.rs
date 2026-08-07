@@ -67,6 +67,33 @@ use crate::types::{Atom, Candle, OverlayInfo, OverlayValue, Real, Schema};
 
 use super::{Interval, SeriesSource, SourceError, Timestamp, floor_to_bucket};
 
+/// Which of the archive's two trees a client reads.
+///
+/// They are different instruments, not two spellings of one: a perpetual's
+/// funding rate belongs to the contract it is charged on, and pairing it with a
+/// spot bar would quietly assert the two are the same thing. So the market is
+/// chosen at construction and decides both the paths and the schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Market {
+    /// `spot/` — the exchange's cash market. OHLCV plus the kline's own
+    /// order-flow extras, the same four columns the live `binance` provider
+    /// exposes.
+    Spot,
+    /// `futures/um/` — USDⓈ-M perpetuals. Everything spot carries, plus the
+    /// funding rate, the premium index and the positioning statistics that only
+    /// exist for a derivative.
+    UsdMFutures,
+}
+
+impl Market {
+    fn path(self) -> &'static str {
+        match self {
+            Market::Spot => "spot",
+            Market::UsdMFutures => "futures/um",
+        }
+    }
+}
+
 /// The archive host. Static files, no API key, no rate limit.
 const DEFAULT_BASE_URL: &str = "https://data.binance.vision";
 /// Where the ticker list comes from — the archive has no index endpoint, so the
@@ -79,30 +106,41 @@ const DEFAULT_MIN_DELAY_MS: u64 = 20;
 /// hammering the host once `fugazi get`'s per-series tasks multiply it.
 const DEFAULT_MAX_IN_FLIGHT: usize = 8;
 
-/// The overlay columns this provider exposes. Read them from a strategy or an
-/// `--overlay` spec with `!get { key: funding_rate }` /
-/// `!get { key: premium_index }`.
-/// The column order here is the contract [`Archive::columns`] indexes into;
-/// the two must be changed together.
-pub fn binance_vision_schema() -> &'static Arc<Schema> {
-    static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
-    SCHEMA.get_or_init(|| {
-        let mut b = Schema::builder();
-        b.add_real("funding_rate"); // 0
-        b.add_real("premium_index"); // 1
-        b.add_real("open_interest"); // 2 — contracts
-        b.add_real("open_interest_value"); // 3 — quote currency
-        b.add_real("long_short_ratio"); // 4 — all accounts
-        b.add_real("top_trader_account_ratio"); // 5 — top accounts, by count
-        b.add_real("top_trader_position_ratio"); // 6 — top accounts, by size
-        b.add_real("taker_long_short_ratio"); // 7 — taker buy vs sell volume
-        // The perp kline's own extras, named as the spot provider names them.
-        b.add_real("quote_volume"); // 8
-        b.add_real("n_trades"); // 9
-        b.add_real("taker_buy_base_volume"); // 10
-        b.add_real("taker_buy_quote_volume"); // 11
-        b.finish()
-    })
+/// The columns a client exposes, by market.
+///
+/// The spot schema is a **prefix** of the futures one, so a slot index means
+/// the same column in both and [`Archive::columns`] can name one set of
+/// indexes. Order is the contract those indexes rest on; the two must be
+/// changed together.
+pub fn binance_vision_schema(market: Market) -> &'static Arc<Schema> {
+    static SPOT: OnceLock<Arc<Schema>> = OnceLock::new();
+    static FUTURES: OnceLock<Arc<Schema>> = OnceLock::new();
+    fn kline_extras(b: &mut crate::market::SchemaBuilder) {
+        b.add_real("quote_volume"); // 0
+        b.add_real("n_trades"); // 1
+        b.add_real("taker_buy_base_volume"); // 2
+        b.add_real("taker_buy_quote_volume"); // 3
+    }
+    match market {
+        Market::Spot => SPOT.get_or_init(|| {
+            let mut b = Schema::builder();
+            kline_extras(&mut b);
+            b.finish()
+        }),
+        Market::UsdMFutures => FUTURES.get_or_init(|| {
+            let mut b = Schema::builder();
+            kline_extras(&mut b);
+            b.add_real("funding_rate"); // 4
+            b.add_real("premium_index"); // 5
+            b.add_real("open_interest"); // 6 — contracts
+            b.add_real("open_interest_value"); // 7 — quote currency
+            b.add_real("long_short_ratio"); // 8 — all accounts
+            b.add_real("top_trader_account_ratio"); // 9 — top accounts, by count
+            b.add_real("top_trader_position_ratio"); // 10 — top accounts, by size
+            b.add_real("taker_long_short_ratio"); // 11 — taker buy vs sell volume
+            b.finish()
+        }),
+    }
 }
 
 /// A Binance Vision archive client.
@@ -115,6 +153,7 @@ pub fn binance_vision_schema() -> &'static Arc<Schema> {
 /// (`fugazi list tickers binance-vision`).
 #[derive(Debug, Clone)]
 pub struct BinanceVision {
+    market: Market,
     client: reqwest::Client,
     base_url: String,
     min_delay_between_requests: Duration,
@@ -128,9 +167,20 @@ impl Default for BinanceVision {
 }
 
 impl BinanceVision {
-    /// A client pointing at the public archive.
+    /// A spot client. See [`futures`](Self::futures) for the perpetual tree.
     pub fn new() -> Self {
+        Self::for_market(Market::Spot)
+    }
+
+    /// A USDⓈ-M perpetuals client.
+    pub fn futures() -> Self {
+        Self::for_market(Market::UsdMFutures)
+    }
+
+    /// A client for `market`.
+    pub fn for_market(market: Market) -> Self {
         Self {
+            market,
             client: reqwest::Client::new(),
             base_url: DEFAULT_BASE_URL.to_string(),
             min_delay_between_requests: Duration::from_millis(DEFAULT_MIN_DELAY_MS),
@@ -167,7 +217,7 @@ impl SeriesSource for BinanceVision {
     }
 
     fn schema(&self) -> Option<Arc<Schema>> {
-        Some(binance_vision_schema().clone())
+        Some(binance_vision_schema(self.market).clone())
     }
 
     /// The archive is a plain file tree with no index endpoint, so the symbol
@@ -209,9 +259,10 @@ impl SeriesSource for BinanceVision {
         let base_url = self.base_url.clone();
         let min_delay = self.min_delay_between_requests;
         let max_in_flight = self.max_in_flight;
+        let market = self.market;
         async move {
-            let token = interval_token(interval)?;
-            let schema = binance_vision_schema().clone();
+            let token = interval_token(market, interval)?;
+            let schema = binance_vision_schema(market).clone();
             let until_ms = until.map(|t| t.0).unwrap_or_else(|| Timestamp::now().0);
             let base = base_url.trim_end_matches('/').to_string();
 
@@ -220,9 +271,9 @@ impl SeriesSource for BinanceVision {
             // these are independent static objects, so the unit of parallelism
             // is the file, not a time chunk of one series.
             let mut jobs: Vec<(Archive, String)> = Vec::new();
-            for kind in Archive::ALL {
+            for &kind in Archive::all(market) {
                 for stamp in kind.periods(since.0, until_ms) {
-                    jobs.push((kind, kind.url(&base, &symbol, token, &stamp)));
+                    jobs.push((kind, kind.url(market, &base, &symbol, token, &stamp)));
                 }
             }
 
@@ -324,22 +375,35 @@ enum Archive {
 }
 
 impl Archive {
-    const ALL: [Archive; 4] =
-        [Archive::Klines, Archive::Funding, Archive::Premium, Archive::Metrics];
+    /// The archives a market is assembled from. Spot has only its klines: the
+    /// funding rate, premium index and positioning statistics describe a
+    /// derivative and have no spot counterpart.
+    fn all(market: Market) -> &'static [Archive] {
+        match market {
+            Market::Spot => &[Archive::Klines],
+            Market::UsdMFutures => &[
+                Archive::Klines,
+                Archive::Funding,
+                Archive::Premium,
+                Archive::Metrics,
+            ],
+        }
+    }
 
-    fn url(self, base: &str, symbol: &str, token: &str, stamp: &str) -> String {
+    fn url(self, market: Market, base: &str, symbol: &str, token: &str, stamp: &str) -> String {
+        let m = market.path();
         match self {
+            Archive::Klines => format!(
+                "{base}/data/{m}/monthly/klines/{symbol}/{token}/{symbol}-{token}-{stamp}.zip"
+            ),
             Archive::Funding => format!(
-                "{base}/data/futures/um/monthly/fundingRate/{symbol}/{symbol}-fundingRate-{stamp}.zip"
+                "{base}/data/{m}/monthly/fundingRate/{symbol}/{symbol}-fundingRate-{stamp}.zip"
             ),
             Archive::Premium => format!(
-                "{base}/data/futures/um/monthly/premiumIndexKlines/{symbol}/{token}/{symbol}-{token}-{stamp}.zip"
+                "{base}/data/{m}/monthly/premiumIndexKlines/{symbol}/{token}/{symbol}-{token}-{stamp}.zip"
             ),
             Archive::Metrics => format!(
-                "{base}/data/futures/um/daily/metrics/{symbol}/{symbol}-metrics-{stamp}.zip"
-            ),
-            Archive::Klines => format!(
-                "{base}/data/futures/um/monthly/klines/{symbol}/{token}/{symbol}-{token}-{stamp}.zip"
+                "{base}/data/{m}/daily/metrics/{symbol}/{symbol}-metrics-{stamp}.zip"
             ),
         }
     }
@@ -379,7 +443,7 @@ impl Archive {
                     .map(|dt| Timestamp::from_datetime(dt.assume_utc()).0)
                     .map_err(|e| e.to_string())
             }
-            _ => raw.parse::<i64>().map_err(|e| e.to_string()),
+            _ => raw.parse::<i64>().map(to_millis).map_err(|e| e.to_string()),
         }
     }
 
@@ -387,23 +451,56 @@ impl Archive {
     /// `(CSV header, index into the provider schema)`.
     fn columns(self) -> &'static [(&'static str, usize)] {
         match self {
-            Archive::Funding => &[("last_funding_rate", 0)],
-            Archive::Premium => &[("close", 1)],
+            Archive::Funding => &[("last_funding_rate", 4)],
+            Archive::Premium => &[("close", 5)],
             // The candle columns are read separately (see `parse_candles`);
             // these are the kline's side-channel extras.
             Archive::Klines => &[
-                ("quote_volume", 8),
-                ("count", 9),
-                ("taker_buy_volume", 10),
-                ("taker_buy_quote_volume", 11),
+                ("quote_volume", 0),
+                ("count", 1),
+                ("taker_buy_volume", 2),
+                ("taker_buy_quote_volume", 3),
             ],
             Archive::Metrics => &[
-                ("sum_open_interest", 2),
-                ("sum_open_interest_value", 3),
-                ("count_long_short_ratio", 4),
-                ("count_toptrader_long_short_ratio", 5),
-                ("sum_toptrader_long_short_ratio", 6),
-                ("sum_taker_long_short_vol_ratio", 7),
+                ("sum_open_interest", 6),
+                ("sum_open_interest_value", 7),
+                ("count_long_short_ratio", 8),
+                ("count_toptrader_long_short_ratio", 9),
+                ("sum_toptrader_long_short_ratio", 10),
+                ("sum_taker_long_short_vol_ratio", 11),
+            ],
+        }
+    }
+
+    /// The archive's column layout, in file order — the fallback for the
+    /// pre-2024 archives that ship no header row. Only names this provider
+    /// reads have to be right; the rest are placeholders holding position.
+    fn layout(self) -> &'static [&'static str] {
+        match self {
+            Archive::Funding => &["calc_time", "funding_interval_hours", "last_funding_rate"],
+            Archive::Premium | Archive::Klines => &[
+                "open_time",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "close_time",
+                "quote_volume",
+                "count",
+                "taker_buy_volume",
+                "taker_buy_quote_volume",
+                "ignore",
+            ],
+            Archive::Metrics => &[
+                "create_time",
+                "symbol",
+                "sum_open_interest",
+                "sum_open_interest_value",
+                "count_toptrader_long_short_ratio",
+                "sum_toptrader_long_short_ratio",
+                "count_long_short_ratio",
+                "sum_taker_long_short_vol_ratio",
             ],
         }
     }
@@ -510,6 +607,61 @@ async fn fetch_concurrently(
     Ok(out)
 }
 
+/// Normalise an archive timestamp to milliseconds.
+///
+/// Binance changed the unit partway through 2025: an archive written before the
+/// switch stamps rows in milliseconds, one written after stamps them in
+/// microseconds, and both spellings are still served side by side. Left alone,
+/// the newer files land a thousand times past every range filter and simply
+/// vanish — no error, just an empty fetch, which is how this was found.
+///
+/// The two are unambiguous by magnitude: a millisecond epoch for any date this
+/// archive covers is 13 digits, a microsecond one is 16, and nothing plausible
+/// falls between.
+fn to_millis(raw: i64) -> i64 {
+    const MICROS_FLOOR: i64 = 100_000_000_000_000; // 1e14 — past any ms epoch
+    if raw.abs() >= MICROS_FLOOR { raw / 1_000 } else { raw }
+}
+
+/// Resolve the CSV column names to positions, whether or not the archive has a
+/// header row.
+///
+/// Binance only started shipping headers around mid-2024; every archive older
+/// than that opens straight on data. Reading by name is still the right default
+/// — it is what keeps an added column upstream from shifting the values — but
+/// it cannot be the only mode, or the provider works for recent history and
+/// fails on everything before it, which is most of what an archive is for.
+///
+/// A header is detected by its first cell: every archive's timestamp column is
+/// an integer, so a first cell that does not parse as one is a name. When there
+/// is no header the caller's declared order *is* the layout, which is safe here
+/// because a headerless archive predates every column Binance has since added.
+fn resolve_columns(
+    text: &str,
+    wanted: &[&str],
+    layout: &[&str],
+    url: &str,
+) -> Result<(Vec<usize>, bool), SourceError> {
+    let first = text.lines().next().unwrap_or_default();
+    let first_cell = first.split(',').next().unwrap_or_default().trim();
+    let has_header = first_cell.parse::<i64>().is_err();
+
+    let names: Vec<&str> = if has_header {
+        first.split(',').map(str::trim).collect()
+    } else {
+        layout.to_vec()
+    };
+    let idx = wanted
+        .iter()
+        .map(|name| {
+            names.iter().position(|h| h == name).ok_or_else(|| {
+                SourceError::Decode(format!("{url}: missing column `{name}`"))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((idx, has_header))
+}
+
 /// Pull `(epoch_ms, schema slot, value)` triples out of an archive's CSV,
 /// reading every column it needs **by header name** rather than by position, so
 /// an added column upstream doesn't silently shift the values.
@@ -522,24 +674,21 @@ fn parse_archive(
     text: &str,
     url: &str,
 ) -> Result<Vec<(i64, usize, Real)>, SourceError> {
-    let mut reader = csv::Reader::from_reader(text.as_bytes());
-    let headers = reader
-        .headers()
-        .map_err(|e| SourceError::Decode(format!("{url}: header: {e}")))?
-        .clone();
-    let index_of = |name: &str| {
-        headers
-            .iter()
-            .position(|h| h.trim() == name)
-            .ok_or_else(|| SourceError::Decode(format!("{url}: missing column `{name}`")))
-    };
     let time_col = kind.time_column();
-    let i_time = index_of(time_col)?;
+    let mut names: Vec<&str> = vec![time_col];
+    names.extend(kind.columns().iter().map(|(n, _)| *n));
+    let (idx, has_header) = resolve_columns(text, &names, kind.layout(), url)?;
+    let i_time = idx[0];
     let wanted: Vec<(usize, usize, &'static str)> = kind
         .columns()
         .iter()
-        .map(|(name, slot)| index_of(name).map(|i| (i, *slot, *name)))
-        .collect::<Result<_, _>>()?;
+        .zip(&idx[1..])
+        .map(|((name, slot), i)| (*i, *slot, *name))
+        .collect();
+
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(has_header)
+        .from_reader(text.as_bytes());
 
     let mut out = Vec::new();
     for record in reader.records() {
@@ -566,25 +715,16 @@ fn parse_archive(
 /// like [`parse_archive`], for the same reason: an added column upstream must
 /// not shift the values.
 fn parse_candles(text: &str, url: &str) -> Result<Vec<(i64, Candle)>, SourceError> {
-    let mut reader = csv::Reader::from_reader(text.as_bytes());
-    let headers = reader
-        .headers()
-        .map_err(|e| SourceError::Decode(format!("{url}: header: {e}")))?
-        .clone();
-    let index_of = |name: &str| {
-        headers
-            .iter()
-            .position(|h| h.trim() == name)
-            .ok_or_else(|| SourceError::Decode(format!("{url}: missing column `{name}`")))
-    };
-    let idx = [
-        index_of("open_time")?,
-        index_of("open")?,
-        index_of("high")?,
-        index_of("low")?,
-        index_of("close")?,
-        index_of("volume")?,
-    ];
+    let (idx, has_header) = resolve_columns(
+        text,
+        &["open_time", "open", "high", "low", "close", "volume"],
+        Archive::Klines.layout(),
+        url,
+    )?;
+
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(has_header)
+        .from_reader(text.as_bytes());
 
     let mut out = Vec::new();
     for record in reader.records() {
@@ -595,7 +735,7 @@ fn parse_candles(text: &str, url: &str) -> Result<Vec<(i64, Candle)>, SourceErro
                 SourceError::Decode(format!("{url}: `{name}` = {raw:?}: {e}"))
             })
         };
-        let time = cell(0, "open_time")? as i64;
+        let time = to_millis(cell(0, "open_time")? as i64);
         out.push((
             time,
             Candle::new(
@@ -667,7 +807,28 @@ fn months_between(since: i64, until: i64) -> Vec<(i32, u8)> {
 /// `1w` and monthly all 404, and admitting them would hand back a series with a
 /// `funding_rate` column and a silently empty `premium_index` one, which reads
 /// as "no premium" rather than "never published".
-fn interval_token(interval: Interval) -> Result<&'static str, SourceError> {
+fn interval_token(market: Market, interval: Interval) -> Result<&'static str, SourceError> {
+    // Spot is klines only, so it admits the whole kline vocabulary. Futures is
+    // bounded by `premiumIndexKlines`, which stops at `1d`.
+    if market == Market::Spot {
+        return match interval {
+            Interval::Minute(n @ (1 | 3 | 5 | 15 | 30)) => Ok(match n {
+                1 => "1m",
+                3 => "3m",
+                5 => "5m",
+                15 => "15m",
+                _ => "30m",
+            }),
+            Interval::Week(1) => Ok("1w"),
+            Interval::Month(1) => Ok("1mo"),
+            other => hourly_or_daily_token(other),
+        };
+    }
+    hourly_or_daily_token(interval)
+}
+
+/// The tokens both markets share.
+fn hourly_or_daily_token(interval: Interval) -> Result<&'static str, SourceError> {
     let token = match interval {
         Interval::Hour(1) => "1h",
         Interval::Hour(2) => "2h",
@@ -743,26 +904,41 @@ mod tests {
 
     #[test]
     fn every_archive_column_maps_to_a_real_schema_slot() {
-        // `Archive::columns` indexes into the schema by position, so the two
-        // definitions have to be checked against each other or a reordered
-        // schema would silently write values into the wrong column.
-        let schema = binance_vision_schema();
-        assert_eq!(schema.len(), 12);
-        let mut seen = vec![false; schema.len()];
-        for kind in Archive::ALL {
-            for &(_, slot) in kind.columns() {
-                assert!(slot < schema.len(), "{kind:?} indexes past the schema");
-                assert!(!seen[slot], "slot {slot} claimed twice");
-                seen[slot] = true;
+        for market in [Market::Spot, Market::UsdMFutures] {
+            let schema = binance_vision_schema(market);
+            let mut seen = vec![false; schema.len()];
+            for &kind in Archive::all(market) {
+                for &(_, slot) in kind.columns() {
+                    assert!(slot < schema.len(), "{kind:?} indexes past {market:?}");
+                    assert!(!seen[slot], "slot {slot} claimed twice in {market:?}");
+                    seen[slot] = true;
+                }
             }
+            assert!(seen.iter().all(|&s| s), "{market:?} has an unsourced slot");
         }
-        assert!(seen.iter().all(|&s| s), "every schema slot must have a source");
+    }
+
+    #[test]
+    fn the_spot_schema_is_a_prefix_of_the_futures_one() {
+        // The slot indexes in `Archive::columns` are shared between markets, so
+        // the shorter schema has to agree column-for-column with the longer.
+        let spot = binance_vision_schema(Market::Spot);
+        let futures = binance_vision_schema(Market::UsdMFutures);
+        assert_eq!(spot.len(), 4);
+        assert_eq!(futures.len(), 12);
+        for (i, name) in spot.keys().enumerate() {
+            assert_eq!(futures.index_of(name), Some(i), "column `{name}`");
+        }
     }
 
     #[test]
     fn the_schema_names_are_stable() {
-        let schema = binance_vision_schema();
+        let schema = binance_vision_schema(Market::UsdMFutures);
         for (i, name) in [
+            "quote_volume",
+            "n_trades",
+            "taker_buy_base_volume",
+            "taker_buy_quote_volume",
             "funding_rate",
             "premium_index",
             "open_interest",
@@ -771,10 +947,6 @@ mod tests {
             "top_trader_account_ratio",
             "top_trader_position_ratio",
             "taker_long_short_ratio",
-            "quote_volume",
-            "n_trades",
-            "taker_buy_base_volume",
-            "taker_buy_quote_volume",
         ]
         .into_iter()
         .enumerate()
@@ -787,8 +959,8 @@ mod tests {
     fn admits_exactly_the_published_cadences() {
         // Funding settles every 4-8h, so a sub-hourly bucket would be empty
         // almost everywhere and read as "no carry".
-        assert!(interval_token(Interval::Minute(1)).is_err());
-        assert!(interval_token(Interval::Minute(30)).is_err());
+        assert!(interval_token(Market::UsdMFutures, Interval::Minute(1)).is_err());
+        assert!(interval_token(Market::UsdMFutures, Interval::Minute(30)).is_err());
 
         for (interval, token) in [
             (Interval::Hour(1), "1h"),
@@ -799,14 +971,20 @@ mod tests {
             (Interval::Hour(12), "12h"),
             (Interval::Day(1), "1d"),
         ] {
-            assert_eq!(interval_token(interval).unwrap(), token);
+            assert_eq!(interval_token(Market::UsdMFutures, interval).unwrap(), token);
         }
 
         // Above a day the premium archive is not published at all. Admitting
         // these would return funding with a silently empty premium column.
-        assert!(interval_token(Interval::Day(3)).is_err());
-        assert!(interval_token(Interval::Week(1)).is_err());
-        assert!(interval_token(Interval::Month(1)).is_err());
+        assert!(interval_token(Market::UsdMFutures, Interval::Day(3)).is_err());
+        assert!(interval_token(Market::UsdMFutures, Interval::Week(1)).is_err());
+        assert!(interval_token(Market::UsdMFutures, Interval::Month(1)).is_err());
+
+        // Spot is klines only, so it admits the whole vocabulary — including
+        // the cadences the futures premium archive does not publish.
+        assert_eq!(interval_token(Market::Spot, Interval::Minute(1)).unwrap(), "1m");
+        assert_eq!(interval_token(Market::Spot, Interval::Week(1)).unwrap(), "1w");
+        assert_eq!(interval_token(Market::Spot, Interval::Month(1)).unwrap(), "1mo");
     }
 
     #[test]
@@ -832,19 +1010,19 @@ mod tests {
     fn archive_urls_match_the_published_layout() {
         let base = "https://data.binance.vision";
         assert_eq!(
-            Archive::Funding.url(base, "BTCUSDT", "1d", "2024-01"),
+            Archive::Funding.url(Market::UsdMFutures, base, "BTCUSDT", "1d", "2024-01"),
             "https://data.binance.vision/data/futures/um/monthly/fundingRate/BTCUSDT/BTCUSDT-fundingRate-2024-01.zip"
         );
         assert_eq!(
-            Archive::Premium.url(base, "BTCUSDT", "1d", "2024-01"),
+            Archive::Premium.url(Market::UsdMFutures, base, "BTCUSDT", "1d", "2024-01"),
             "https://data.binance.vision/data/futures/um/monthly/premiumIndexKlines/BTCUSDT/1d/BTCUSDT-1d-2024-01.zip"
         );
         assert_eq!(
-            Archive::Klines.url(base, "BTCUSDT", "1d", "2024-01"),
-            "https://data.binance.vision/data/futures/um/monthly/klines/BTCUSDT/1d/BTCUSDT-1d-2024-01.zip"
+            Archive::Klines.url(Market::Spot, base, "BTCUSDT", "1d", "2024-01"),
+            "https://data.binance.vision/data/spot/monthly/klines/BTCUSDT/1d/BTCUSDT-1d-2024-01.zip"
         );
         assert_eq!(
-            Archive::Metrics.url(base, "BTCUSDT", "1d", "2024-01-15"),
+            Archive::Metrics.url(Market::UsdMFutures, base, "BTCUSDT", "1d", "2024-01-15"),
             "https://data.binance.vision/data/futures/um/daily/metrics/BTCUSDT/BTCUSDT-metrics-2024-01-15.zip"
         );
     }
@@ -856,7 +1034,7 @@ mod tests {
                        1704096000000,8,0.00027213\n";
         assert_eq!(
             parse_archive(Archive::Funding, funding, "u").unwrap(),
-            vec![(1704067200000, 0, 0.00037409), (1704096000000, 0, 0.00027213)],
+            vec![(1704067200000, 4, 0.00037409), (1704096000000, 4, 0.00027213)],
         );
 
         // The premium archive is kline-shaped; only `open_time` and `close`
@@ -868,7 +1046,7 @@ mod tests {
                        1704153599999,0,17280,0,0,0\n";
         assert_eq!(
             parse_archive(Archive::Premium, premium, "u").unwrap(),
-            vec![(1704067200000, 1, 0.00120254)],
+            vec![(1704067200000, 5, 0.00120254)],
         );
     }
 
@@ -889,12 +1067,12 @@ mod tests {
         assert_eq!(
             parsed,
             vec![
-                (at, 2, 105550.985),
-                (at, 3, 6858675634.706254),
-                (at, 4, 1.19972635),
-                (at, 5, 1.28623339),
-                (at, 6, 1.47112400),
-                (at, 7, 1.55827200),
+                (at, 6, 105550.985),
+                (at, 7, 6858675634.706254),
+                (at, 8, 1.19972635),
+                (at, 9, 1.28623339),
+                (at, 10, 1.47112400),
+                (at, 11, 1.55827200),
             ],
         );
     }
@@ -909,7 +1087,50 @@ mod tests {
                        2026-07-15 00:00:00,105550.985,6858675634.706254,,,,\n";
         let parsed = parse_archive(Archive::Metrics, metrics, "u").unwrap();
         assert_eq!(parsed.len(), 2, "only the two populated cells survive");
-        assert!(parsed.iter().all(|&(_, slot, _)| slot == 2 || slot == 3));
+        assert!(parsed.iter().all(|&(_, slot, _)| slot == 6 || slot == 7));
+    }
+
+    #[test]
+    fn a_headerless_archive_reads_by_position() {
+        // Binance only started shipping header rows partway through 2024, and
+        // both spellings are still served. Reading by name has to degrade to
+        // the declared layout, or the provider works for recent history and
+        // fails on most of the archive.
+        let headerless = "1594339200000,0.003989,0.003989,0.003340,0.003535,\
+                          7578204800,1594425599999,27852027.907311,168920,\
+                          3846820083,14160877.361201,0\n";
+        let bars = parse_candles(headerless, "u").unwrap();
+        assert_eq!(bars.len(), 1);
+        assert_eq!(bars[0].0, 1594339200000);
+        assert_eq!(bars[0].1.close, 0.003535);
+
+        // The same file with a header must give the same answer.
+        let headed = format!(
+            "open_time,open,high,low,close,volume,close_time,quote_volume,count,\
+             taker_buy_volume,taker_buy_quote_volume,ignore\n{headerless}"
+        );
+        assert_eq!(parse_candles(&headed, "u").unwrap(), bars);
+    }
+
+    #[test]
+    fn microsecond_stamps_normalise_to_milliseconds() {
+        // Binance switched the archive's unit during 2025. Left alone the newer
+        // rows land a thousand times past every range filter and vanish with no
+        // error at all — an empty fetch, which is how this was found.
+        assert_eq!(to_millis(1_704_067_200_000), 1_704_067_200_000);
+        assert_eq!(to_millis(1_748_736_000_000_000), 1_748_736_000_000);
+
+        let micros = "1748736000000000,104591.88,105866.0,104000.0,105000.0,1.0,\
+                      1748822399999999,2.0,3,4.0,5.0,0\n";
+        let bars = parse_candles(micros, "u").unwrap();
+        assert_eq!(bars[0].0, 1_748_736_000_000);
+
+        // And on the overlay side, which stamps its own columns.
+        let funding = "1748736000000000,8,0.0001\n";
+        assert_eq!(
+            parse_archive(Archive::Funding, funding, "u").unwrap(),
+            vec![(1_748_736_000_000, 4, 0.0001)],
+        );
     }
 
     #[test]
@@ -918,7 +1139,7 @@ mod tests {
                        0.00037409,1704067200000,8\n";
         assert_eq!(
             parse_archive(Archive::Funding, swapped, "u").unwrap(),
-            vec![(1704067200000, 0, 0.00037409)],
+            vec![(1704067200000, 4, 0.00037409)],
         );
     }
 
