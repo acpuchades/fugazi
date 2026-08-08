@@ -14,12 +14,12 @@ The strategy is the positional argument and follows the `@` convention the data
 flags use: `@file.yml` loads a file, anything else is treated as
 inline content (handy for one-offs, e.g. `'{ symbol: BTC, long: { enter: !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } } } }'`).
 
-## The three strategy shapes
+## The five strategy shapes
 
-There are three document shapes, picked by an optional **prefix** on the
+There are five document shapes, picked by an optional **prefix** on the
 positional. The prefix decides which document type the YAML is deserialized
 into — the expression vocabulary ([Sources](#sources) / [Signals](#signals)) is
-identical across all three.
+identical across all five.
 
 | Prefix | Shape | Document | Traded symbols |
 | --- | --- | --- | --- |
@@ -27,14 +27,20 @@ identical across all three.
 | `pairs:` | [`PairsStrategy`](../src/strategies/pairs.rs) | [Pairs](#pairs-documents) | two, named by `left` / `right` |
 | `basket:` | [`BasketStrategy`](../src/strategies/basket.rs) | [Basket](#basket-documents) | N — cross-sectional rank across the input universe |
 | `multi:` | [`MultiAssetStrategy`](../src/strategies/multi_asset.rs) | [Multi-asset](#multi-asset-documents) | N — same signals applied independently per symbol |
+| `portfolio:` | [`Portfolio`](../src/portfolio/mod.rs) | [Portfolio](#portfolio-documents) | N — several *different* strategies, each with its own sub-wallet |
+
+The first four all run **one** decision shape. `portfolio:` is the odd one: it
+composes several of the others, so reach for it when a portfolio combines
+different strategies rather than the same strategy across many symbols.
 
 ```sh
 fugazi run @strategy.yml         --series @btc.csv --output-dir out/           # single
 fugazi run pairs:@spread.yml     --series @btc.csv --series @eth.csv -o out/   # pairs
 fugazi run basket:@basket.yml    --series @btc.csv --series @eth.csv \
                                  --series @sol.csv --series @ada.csv -o out/   # basket
-fugazi run multi:@portfolio.yml  --series @btc.csv --series @eth.csv \
+fugazi run multi:@independent.yml --series @btc.csv --series @eth.csv \
                                  --series @sol.csv --series @ada.csv -o out/   # multi
+fugazi run portfolio:@book.yml   --series @btc.csv --series @eth.csv -o out/   # portfolio
 ```
 
 `fugazi optimize` accepts the same prefixes, so every shape sweeps and
@@ -618,6 +624,128 @@ exactly as on `single:`.
 
 **Not yet wired:** `fugazi optimize` on a `multi:` document (bails, same
 as `basket:` today).
+
+## Portfolio documents
+
+`portfolio:@file.yml` runs **N different strategies side by side**, each with
+its own sub-wallet, behind one aggregate equity curve and blotter. The other
+four shapes each run a single decision rule; this one composes them.
+
+Reach for it when the strategies differ. If you want the *same* rule across many
+symbols, `multi:` is smaller and cheaper; if you want a cross-sectional rank,
+`basket:` is.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `children` | list | *required, non-empty* | the child strategies, in order |
+| `weights` | expression | equal (`1/N`) | how capital is split — see [Weights](#weights) |
+| `rebalance_on` | signal | `!never` | when to pull capital back to target — see [Rebalance](#rebalance) |
+| `rebalance_policy` | `!proportional` \| `!largest_first` | `!proportional` | how positions are scaled down when cash alone can't fund a rebalance |
+
+Each child is `{ name?, group?, strategy }`, where `strategy` is **any of the
+other four document shapes**, routed by its distinctive top-level key
+(`left`+`right` → pairs, `selection` → basket, `symbol` or a preset tag →
+single, otherwise multi):
+
+```yaml
+children:
+  - name: trend
+    group: momentum
+    strategy: !ma_crossover { symbol: BTC, fast: 10, slow: 30 }
+  - name: spread
+    strategy:
+      left: BTC
+      right: ETH
+      enter: !lt { lhs: !zscore { source: !close { source: !pick { symbol: BTC } }, period: 20 }, rhs: !value -2 }
+```
+
+`name` is optional but must be unique (it defaults to `child_<index>`); it names
+the child in errors and is available to weight expressions as `!arg CHILD_NAME`.
+`group` is a free-form label, available as `!arg CHILD_GROUP` — the natural
+dispatch key for "up-weight every momentum child when ADX is high".
+
+To reuse one child spec several times with different parameters, use
+`!import { path, params }` rather than repeating it: each import resolves its
+own `!param`s, so the names don't collide.
+
+### Weights
+
+`weights:` is a single expression, instantiated **once per child** and read at
+every rebalance-fire; the portfolio normalizes `w_i = N_i / Σ N_j`, so weights
+are magnitudes and needn't sum to 1.
+
+```yaml
+weights: !value [0.6, 0.4]      # fixed per-child weights (child i reads w_i)
+weights: !value 1.0             # any per-child constant → equal weight
+weights: !fractional_kelly { kelly_fraction: 0.5, window: 30 }   # each child's own book
+weights: !drawdown_throttle { source: !portfolio_book, max_drawdown: 0.15 }  # aggregate
+```
+
+The last two are the point of making this an expression rather than a fixed
+policy: a bare book-reading node (`!drawdown`, `!fractional_kelly`, …) reads
+**that child's own book**, so each child is weighted by its own record; adding
+`source: !portfolio_book` reads the **aggregate** instead, so one gate dials
+every child down together. `!fixed [...]` and `!equal_weight` are accepted as
+sugar for the `!value` forms.
+
+Per-child instantiation injects `!arg CHILD_INDEX` always, `!arg CHILD_NAME` /
+`!arg CHILD_GROUP` when the child declared them, and `!arg SYM` for single-asset
+children. Referencing an arg the child didn't declare is a build error.
+
+### How capital moves
+
+Each child gets its own sub-wallet, seeded with its share of `--cash`, and sizes
+against **its own** equity — `value_frac(1.0)` in a child means all of *that
+child's* capital, not the portfolio's. Fills route only to the child that owns
+the order.
+
+Without `rebalance_on:` the split drifts with P&L, which is usually what you
+want. When it fires, each cycle first shifts free cash between sub-wallets, then
+covers any remaining shortfall by scaling positions down (`!proportional`
+shrinks every position uniformly; `!largest_first` closes the biggest ones
+first). Freed cash lands the next bar, so a portfolio of fully-invested children
+takes an extra fire to converge.
+
+One caveat worth knowing: a child that hard-targets 100% invested (a naked
+`!buy_and_hold`) will simply re-enter on the next bar and undo the rebalance.
+Book-anchored sizing recipes respect the post-rebalance equity naturally.
+
+### A complete portfolio
+
+```yaml
+# book.yml — trend-follow BTC, mean-revert the BTC/ETH spread, monthly rebalance
+weights: !value [0.7, 0.3]
+rebalance_on: !every 28
+rebalance_policy: !proportional
+children:
+  - name: btc_trend
+    strategy:
+      symbol: BTC
+      long:
+        enter: !crosses_above { lhs: !sma { period: 10 }, rhs: !sma { period: 30 } }
+        exit:  !crosses_below { lhs: !sma { period: 10 }, rhs: !sma { period: 30 } }
+      sizing: !vol_target { target: 0.20, window: 20, bars_per_year: 365 }
+
+  - name: btc_eth_spread
+    strategy:
+      left: BTC
+      right: ETH
+      long_spread:
+        enter: !lt { lhs: !zscore { source: !close { source: !pick { symbol: BTC } }, period: 20 }, rhs: !value -2 }
+        exit:  !gt { lhs: !zscore { source: !close { source: !pick { symbol: BTC } }, period: 20 }, rhs: !value 0 }
+```
+
+```sh
+fugazi run portfolio:@book.yml --series @btc.csv --series @eth.csv \
+                               --cash 100000 --output-dir out/
+```
+
+Two notes on writing expressions at portfolio scope. A **`rebalance_on:` gate
+spans every child**, so there is no "this series" for a bare `!close` to mean —
+use cadence or calendar signals (`!every`, `!monthly`), or name the asset with
+`!pick { symbol: … }`. And `!entry` / `!peak` / `!trough` inside a
+portfolio-level gate read an empty dummy position, since the portfolio has no
+position of its own.
 
 ## Rebalance
 
