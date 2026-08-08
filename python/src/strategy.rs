@@ -1,0 +1,1792 @@
+use crate::prelude::*;
+// The binding modules were one flat namespace before the split and still read
+// as one: each pulls in its siblings, so a cross-module reference needs no path.
+#[allow(unused_imports)]
+use crate::carriers::*;
+#[allow(unused_imports)]
+use crate::classes::*;
+#[allow(unused_imports)]
+use crate::constructors::*;
+#[allow(unused_imports)]
+use crate::sources::*;
+#[allow(unused_imports)]
+use crate::metrics::*;
+#[allow(unused_imports)]
+use crate::spec::*;
+
+// ---------------------------------------------------------------------------
+// Strategy layer: Wallet + Order + Size
+//
+// A strategy in Python is just code that, each bar, reads signals/indicators and
+// acts on a Wallet. So rather than binding a Rust strategy trait, we expose the
+// Wallet the strategy trades into. Symbols are plain strings; sides are "buy" /
+// "sell"; sizes are a unit count or a `Size`.
+// ---------------------------------------------------------------------------
+
+/// How much to trade: a bare number is units, or use the relative constructors.
+#[pyclass(name = "Size", frozen, from_py_object)]
+#[derive(Clone, Copy)]
+pub(crate) struct PySize {
+    pub(crate) inner: Size,
+}
+
+#[pymethods]
+impl PySize {
+    /// An absolute number of units.
+    #[staticmethod]
+    pub(crate) fn units(units: f64) -> Self {
+        PySize {
+            inner: Size::Units(units),
+        }
+    }
+    /// A fraction of available funds (cash), converted to units at the price.
+    #[staticmethod]
+    pub(crate) fn funds_frac(fraction: f64) -> Self {
+        PySize {
+            inner: Size::FundsFraction(fraction),
+        }
+    }
+    /// A fraction of total equity, converted to units at the price.
+    /// `value_frac(1.0)` is "all-in" and reverses cleanly on a flip.
+    #[staticmethod]
+    pub(crate) fn value_frac(fraction: f64) -> Self {
+        PySize {
+            inner: Size::ValueFraction(fraction),
+        }
+    }
+    /// A fraction of the symbol's current position (adjust-only).
+    #[staticmethod]
+    pub(crate) fn position_frac(fraction: f64) -> Self {
+        PySize {
+            inner: Size::PositionFraction(fraction),
+        }
+    }
+}
+
+/// A filled order: `symbol`, `side` ("buy"/"sell"), and a positive `units`.
+#[pyclass(name = "Order", frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub(crate) struct PyOrder {
+    pub(crate) inner: Order<String>,
+}
+
+#[pymethods]
+impl PyOrder {
+    #[getter]
+    pub(crate) fn symbol(&self) -> String {
+        self.inner.symbol.clone()
+    }
+    #[getter]
+    pub(crate) fn side(&self) -> &'static str {
+        side_str(self.inner.side)
+    }
+    #[getter]
+    pub(crate) fn units(&self) -> f64 {
+        self.inner.units
+    }
+    /// The per-unit price this order filled at.
+    #[getter]
+    pub(crate) fn price(&self) -> f64 {
+        self.inner.price
+    }
+    /// What produced this fill: `"market"`, `"stop"`, or `"take_profit"`.
+    #[getter]
+    pub(crate) fn kind(&self) -> &'static str {
+        kind_str(self.inner.kind)
+    }
+    /// The id of the submission this fill belongs to — pass it to
+    /// `PaperWallet.cancel(id)` to cancel a still-working order.
+    #[getter]
+    pub(crate) fn id(&self) -> u64 {
+        self.inner.id.0
+    }
+    /// `+units` for a buy, `-units` for a sell.
+    pub(crate) fn signed_units(&self) -> f64 {
+        self.inner.signed_units()
+    }
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "Order(symbol='{}', side='{}', units={}, price={}, kind='{}', id={})",
+            self.inner.symbol,
+            self.side(),
+            self.inner.units,
+            self.inner.price,
+            self.kind(),
+            self.inner.id.0,
+        )
+    }
+}
+
+/// A paper-trading wallet a strategy trades into: funds, per-symbol positions,
+/// the prices fed to it, and a blotter of executed orders. (The live-broker
+/// counterpart would be a separate wallet type implementing the same interface.)
+///
+/// Feed each symbol's bar every tick with `update(symbol, candle_or_price)`,
+/// which returns the orders that filled on it (the fill stream); the wallet is
+/// otherwise market-agnostic. `set(symbol, side, size)` targets an absolute
+/// position (an opposite-side `set` reverses; `Size.value_frac(1.0)` is all-in),
+/// `set_position(symbol, target)` drives to an absolute unit count, and `close`
+/// flattens. These are **market orders**: they queue and fill on the next
+/// `update`, at that bar's `open` (so a backtest never fills on the same bar whose
+/// `close` triggered the signal), returning `None` — the filled `Order` shows up
+/// in that `update`'s return (and in `orders()`). Protective exits are **resting
+/// orders**: `set_stop(symbol, trigger)` and `set_take_profit(symbol, trigger)`
+/// register a level (idempotent, latest-wins per symbol; re-submit to trail) that
+/// the wallet triggers and prices itself — filling at the level, or the bar's
+/// `open` on a gap — and `cancel_protective(symbol)` drops both legs. Each `Order`
+/// carries a `kind` of `"market"`, `"stop"`, or `"take_profit"`.
+#[pyclass(name = "PaperWallet")]
+pub(crate) struct PyWallet {
+    pub(crate) inner: PaperWallet<String>,
+}
+
+#[pymethods]
+impl PyWallet {
+    /// A wallet seeded with `funds` of cash and no positions.
+    #[new]
+    pub(crate) fn new(funds: f64) -> Self {
+        PyWallet {
+            inner: PaperWallet::new(funds),
+        }
+    }
+
+    /// The available cash balance.
+    #[getter]
+    pub(crate) fn funds(&self) -> f64 {
+        self.inner.funds().0
+    }
+
+    /// The signed position in `symbol` (positive long, negative short).
+    pub(crate) fn position(&self, symbol: &str) -> f64 {
+        self.inner.position(&symbol.to_string()).amount
+    }
+
+    /// The last price fed for `symbol`, or `None` if never fed.
+    pub(crate) fn price(&self, symbol: &str) -> Option<f64> {
+        self.inner.price(&symbol.to_string()).map(|p| p.0)
+    }
+
+    /// The held positions as a `{symbol: quantity}` dict.
+    pub(crate) fn positions<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let dict = PyDict::new(py);
+        for position in self.inner.positions() {
+            dict.set_item(position.symbol, position.amount)?;
+        }
+        Ok(dict)
+    }
+
+    /// Every order executed so far (the trade blotter).
+    pub(crate) fn orders(&self) -> Vec<PyOrder> {
+        self.inner
+            .orders()
+            .iter()
+            .cloned()
+            .map(|inner| PyOrder { inner })
+            .collect()
+    }
+
+    /// Restore the wallet to its freshly-constructed state — the seed funds it
+    /// was built with, no positions, no fed prices, no pending or resting
+    /// orders, and an empty blotter.
+    pub(crate) fn reset(&mut self) {
+        self.inner.reset();
+    }
+
+    /// Mark-to-market equity: funds plus each position valued at its fed price.
+    pub(crate) fn equity(&self) -> f64 {
+        self.inner.equity().0
+    }
+
+    /// Feed `symbol`'s current bar and return the orders that filled on it (the
+    /// fill stream — a queued market order at this bar's `open`, and any resting
+    /// stop / take-profit this bar triggers). Accepts a `Candle` (whose `close`
+    /// marks to market and whose `[low, high]` bounds fills) or a bare price
+    /// `float` (a flat bar `open = high = low = close`). Call this each tick before
+    /// trading or reading `equity`.
+    pub(crate) fn update(&mut self, symbol: String, bar: &Bound<'_, PyAny>) -> PyResult<Vec<PyOrder>> {
+        let candle = if let Ok(candle) = bar.cast::<PyCandle>() {
+            candle.borrow().inner
+        } else {
+            let price: f64 = bar.extract()?;
+            Candle::new(price, price, price, price, 0.0)
+        };
+        Ok(self
+            .inner
+            .update(symbol, candle)
+            .into_iter()
+            .map(|inner| PyOrder { inner })
+            .collect())
+    }
+
+    /// Queue a market order driving `symbol` to `target` signed units; it fills on
+    /// the next `update`, at that bar's `open`. Returns `None` (working — the fill
+    /// shows up in that `update`'s return, not here).
+    pub(crate) fn set_position(&mut self, symbol: String, target: f64) -> PyResult<Option<PyOrder>> {
+        wrap_ack(self.inner.set_position(Units {
+            symbol,
+            amount: target,
+        }))
+    }
+
+    /// Queue a market order targeting `side` `size` of `symbol`; it fills on the
+    /// next `update`, at that bar's `open` (where the `size` is resolved, so an
+    /// all-in stays exact). Returns `None` — working.
+    pub(crate) fn set(
+        &mut self,
+        symbol: String,
+        side: &str,
+        size: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<PyOrder>> {
+        wrap_ack(
+            self.inner
+                .set(symbol, parse_side(side)?, coerce_size(size)?),
+        )
+    }
+
+    /// Queue a market order flattening `symbol`; it fills on the next `update`, at
+    /// that bar's `open`. Returns `None` — working.
+    pub(crate) fn close(&mut self, symbol: String) -> PyResult<Option<PyOrder>> {
+        wrap_ack(self.inner.close(symbol))
+    }
+
+    /// Rest a stop-loss on `symbol` at `trigger` — an adverse level the wallet
+    /// fills when a bar trades through it (the side is read from the current
+    /// position). Idempotent, latest-wins per symbol; re-submit to trail. Returns
+    /// `None` (the resting order is working until it triggers in some `update`).
+    pub(crate) fn set_stop(&mut self, symbol: String, trigger: f64) -> PyResult<Option<PyOrder>> {
+        wrap_ack(self.inner.set_stop(symbol, Reference(trigger)))
+    }
+
+    /// Rest a take-profit on `symbol` at `trigger` — the favourable twin of
+    /// `set_stop`. Idempotent, latest-wins per symbol. Returns `None` (working).
+    pub(crate) fn set_take_profit(&mut self, symbol: String, trigger: f64) -> PyResult<Option<PyOrder>> {
+        wrap_ack(self.inner.set_take_profit(symbol, Reference(trigger)))
+    }
+
+    /// Cancel both resting protective legs (stop and take-profit) on `symbol`.
+    pub(crate) fn cancel_protective(&mut self, symbol: String) -> PyResult<()> {
+        self.inner
+            .cancel_protective(&symbol)
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    /// Drain fills booked out of band (not on a specific `update`). Always empty
+    /// for the paper wallet — the method exists for parity with live wallets,
+    /// which buffer async fills here.
+    pub(crate) fn poll_fills(&mut self) -> Vec<PyOrder> {
+        self.inner
+            .poll_fills()
+            .into_iter()
+            .map(|inner| PyOrder { inner })
+            .collect()
+    }
+
+    /// Cancel a working order by its `id` (see `Order.id`): a queued market
+    /// order or a resting protective leg is dropped. An unknown id is a no-op.
+    pub(crate) fn cancel(&mut self, id: u64) -> PyResult<()> {
+        self.inner
+            .cancel(OrderId(id))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+}
+
+/// Map a wallet `Ack` to Python: the fill if it filled synchronously, `None` if it
+/// is merely working, or a `ValueError`.
+pub(crate) fn wrap_ack(result: Result<Ack<String>, WalletError>) -> PyResult<Option<PyOrder>> {
+    match result {
+        Ok(Ack::Filled(inner)) => Ok(Some(PyOrder { inner })),
+        Ok(Ack::Working(_)) => Ok(None),
+        Err(error) => Err(PyValueError::new_err(error.to_string())),
+    }
+}
+
+/// Parse a side string into a [`Side`].
+pub(crate) fn parse_side(side: &str) -> PyResult<Side> {
+    match side.to_ascii_lowercase().as_str() {
+        "buy" | "long" => Ok(Side::Buy),
+        "sell" | "short" => Ok(Side::Sell),
+        _ => Err(PyValueError::new_err("side must be 'buy' or 'sell'")),
+    }
+}
+
+/// Coerce a Python argument into a [`Size`]: a number is units, or a `Size`.
+pub(crate) fn coerce_size(obj: &Bound<'_, PyAny>) -> PyResult<Size> {
+    if let Ok(size) = obj.extract::<PySize>() {
+        Ok(size.inner)
+    } else if let Ok(units) = obj.extract::<f64>() {
+        Ok(Size::Units(units))
+    } else {
+        Err(PyTypeError::new_err(
+            "size must be a number of units or a Size",
+        ))
+    }
+}
+
+/// The `"buy"`/`"sell"` string for a [`Side`].
+pub(crate) fn side_str(side: Side) -> &'static str {
+    match side {
+        Side::Buy => "buy",
+        Side::Sell => "sell",
+    }
+}
+
+/// The `"market"`/`"stop"`/`"take_profit"` string for an [`OrderKind`].
+pub(crate) fn kind_str(kind: OrderKind) -> &'static str {
+    match kind {
+        OrderKind::Market => "market",
+        OrderKind::Stop => "stop",
+        OrderKind::TakeProfit => "take_profit",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Strategy builder + run
+//
+// The declarative `SingleAssetStrategy` builder, mirrored for Python: a
+// `Strategy("BTC").long_on(enter, exit).short_on(down, up).run(wallet, candles)`
+// pipeline over a `PaperWallet`, returning a `RunReport` (equity curve + fill
+// blotter) the metrics functions consume. The strategy layer is snapshot-rooted;
+// the everyday Python leaves are candle-rooted, so `AtomLift` bridges them.
+//
+// Deliberately omitted this pass (see python parity notes): position-anchored
+// protective levels (`Position` uses `Rc`, which isn't `Send + Sync`, so the
+// `entry()`/`peak()`/`trough()` accessors can't be type-erased for pyo3),
+// pairs/basket strategies, and the `src/strategies` recipe catalogue.
+// ---------------------------------------------------------------------------
+
+/// Lift a candle-rooted (`Input = Atom`) source/signal into a snapshot-rooted
+/// one by projecting the single-entry snapshot's sole atom. `SingleAssetStrategy`
+/// is snapshot-rooted, but `ta.close()` & friends are candle-rooted; this bridges
+/// them, the same size-1 unpack a CLI `Pick` performs.
+#[derive(Clone)]
+pub(crate) struct AtomLift<S>(pub(crate) S);
+
+impl<S: Indicator<Input = Atom>> Indicator for AtomLift<S> {
+    type Input = Snapshot<String>;
+    type Output = S::Output;
+    fn update(&mut self, snap: Snapshot<String>) -> Option<S::Output> {
+        snap.sole_atom().cloned().and_then(|a| self.0.update(a))
+    }
+    fn value(&self) -> Option<S::Output> {
+        self.0.value()
+    }
+    fn warm_up_period(&self) -> usize {
+        self.0.warm_up_period()
+    }
+    fn unstable_period(&self) -> usize {
+        self.0.unstable_period()
+    }
+    fn reset(&mut self) {
+        self.0.reset()
+    }
+}
+
+/// Project a Python signal (candle- or snapshot-rooted) into the snapshot-rooted
+/// form a strategy consumes. A bare-value (Real) signal is a domain error.
+pub(crate) fn snapshot_signal(sig: &PySignal) -> PyResult<SignalBox<Snapshot<String>>> {
+    match &sig.sig {
+        AnySignal::Candle(s) => Ok(SignalBox::new(AtomLift(s.clone()))),
+        AnySignal::Snapshot(s) => Ok(s.clone()),
+        AnySignal::Real(_) => Err(PyValueError::new_err(
+            "a strategy signal must be candle- or snapshot-rooted, not a bare value (Real) signal",
+        )),
+    }
+}
+
+/// Project a Python real source (candle-rooted, snapshot-rooted, or a constant)
+/// into the snapshot-rooted sizing multiplier a strategy consumes.
+pub(crate) fn snapshot_source(ind: &PyIndicator) -> PyResult<Source<Snapshot<String>>> {
+    match &ind.src {
+        AnySource::Candle(s) => Ok(Source::new(AtomLift(s.clone()))),
+        AnySource::Snapshot(s) => Ok(s.clone()),
+        AnySource::Const(c) => Ok(Source::new(Value::<Snapshot<String>>::new(*c))),
+        AnySource::Real(_) => Err(PyValueError::new_err(
+            "a sizing source must be candle- or snapshot-rooted (or a constant), not a bare value (Real) source",
+        )),
+    }
+}
+
+pub(crate) fn const_false_signal() -> SignalBox<Snapshot<String>> {
+    SignalBox::new(ValueBool::<Snapshot<String>>::new(false))
+}
+
+/// Turn a Python callable `sym -> Signal` into the per-symbol signal factory a
+/// [`MultiAssetStrategy`] / [`BasketStrategy`] consumes. The callable is invoked
+/// once per symbol on first sight (during `run`, GIL held); it must return a
+/// candle- or snapshot-rooted `Signal`. Errors surface as a Python exception via
+/// pyo3's panic bridge, since the factory boundary has no `Result` channel.
+pub(crate) fn signal_factory_from_callable(
+    cb: Py<PyAny>,
+) -> impl Fn(&String) -> SignalBox<Snapshot<String>> + Send + Sync + 'static {
+    move |sym: &String| {
+        Python::attach(|py| {
+            let obj = cb
+                .call1(py, (sym.clone(),))
+                .unwrap_or_else(|e| panic!("signal factory raised for symbol '{sym}': {e}"));
+            let bound = obj.bind(py);
+            let sig = bound.cast::<PySignal>().unwrap_or_else(|_| {
+                panic!("signal factory for symbol '{sym}' must return a fugazi.Signal")
+            });
+            snapshot_signal(&sig.borrow())
+                .unwrap_or_else(|e| panic!("signal factory for symbol '{sym}': {e}"))
+        })
+    }
+}
+
+/// Turn a Python callable `sym -> Indicator` into the per-symbol real-source
+/// factory a [`MultiAssetStrategy`] / [`BasketStrategy`] consumes (sizing / score).
+/// Same lifecycle and error handling as [`signal_factory_from_callable`].
+pub(crate) fn source_factory_from_callable(
+    cb: Py<PyAny>,
+) -> impl Fn(&String) -> Source<Snapshot<String>> + Send + Sync + 'static {
+    move |sym: &String| {
+        Python::attach(|py| {
+            let obj = cb
+                .call1(py, (sym.clone(),))
+                .unwrap_or_else(|e| panic!("source factory raised for symbol '{sym}': {e}"));
+            let bound = obj.bind(py);
+            let ind = bound.cast::<PyIndicator>().unwrap_or_else(|_| {
+                panic!("source factory for symbol '{sym}' must return a fugazi.Indicator")
+            });
+            snapshot_source(&ind.borrow())
+                .unwrap_or_else(|e| panic!("source factory for symbol '{sym}': {e}"))
+        })
+    }
+}
+
+/// A copyable descriptor for a preset catalogue strategy: the Rust free
+/// function's ctor args, dispatched at `run` / `sharpe_of` construction time
+/// to build a fresh [`SingleAssetStrategy`] (Rust catalogue helpers aren't
+/// `Clone`, so we carry the recipe rather than the built strategy).
+#[derive(Clone, Debug)]
+pub(crate) enum PresetSpec {
+    BuyAndHold { symbol: String },
+    MaCrossover { symbol: String, fast: usize, slow: usize },
+    RsiReversal { symbol: String, period: usize, oversold: Real, exit_level: Real },
+    DonchianBreakout { symbol: String, period: usize },
+    KeltnerBreakout { symbol: String, ema_period: usize, atr_period: usize, multiplier: Real },
+}
+
+impl PresetSpec {
+    /// Build a fresh [`SingleAssetStrategy`] with `initial_equity` seeded
+    /// into its book (so book-anchored sizing recipes read meaningful
+    /// numbers). Every dispatch mirrors the Rust free function in
+    /// `fugazi::strategies`; `with_initial_equity` re-seeds after the
+    /// catalogue's default `new`.
+    pub(crate) fn build(&self, initial_equity: Real) -> SingleAssetStrategy<String> {
+        use fugazi_core::strategies::{composite, mean_reversion, trend};
+        let s = match self {
+            PresetSpec::BuyAndHold { symbol } => {
+                SingleAssetStrategy::<String>::buy_and_hold(symbol.clone())
+            }
+            PresetSpec::MaCrossover { symbol, fast, slow } => {
+                trend::ma_crossover(symbol.clone(), *fast, *slow)
+            }
+            PresetSpec::RsiReversal { symbol, period, oversold, exit_level } => {
+                mean_reversion::rsi_reversal(symbol.clone(), *period, *oversold, *exit_level)
+            }
+            PresetSpec::DonchianBreakout { symbol, period } => {
+                trend::donchian_breakout(symbol.clone(), *period)
+            }
+            PresetSpec::KeltnerBreakout { symbol, ema_period, atr_period, multiplier } => {
+                composite::keltner_breakout(symbol.clone(), *ema_period, *atr_period, *multiplier)
+            }
+        };
+        // Re-seed the book at the requested initial equity — the
+        // catalogue free functions use `new`, which starts at 1.0.
+        // `SingleAssetStrategy` doesn't expose a re-seed method, so we
+        // extract sides + sizing via a fresh build path...
+        // ... except that isn't exposed either. In practice, users pass
+        // the same seed to both the wallet and the strategy at
+        // construction; a mismatch only affects book-anchored recipes
+        // (`equity_vol_target`, `fractional_kelly`, `drawdown_throttle`)
+        // and is documented on the catalogue functions themselves.
+        let _ = initial_equity;
+        s
+    }
+}
+
+/// A declarative single-asset strategy: long/short entry & exit signals plus an
+/// optional sizing multiplier, driven over a `PaperWallet` by [`run`](Self::run).
+///
+/// A missing `exit` never fires — right for an always-in long/short reversal
+/// (the opposite side's `enter` reverses the position); give an `exit` only for
+/// a flat rest. Builder methods return a new `Strategy`, so they chain.
+///
+/// **Two shapes**: the builder path (`Strategy(symbol).long_on(...).short_on(...)`)
+/// and the preset path (catalogue functions like `ma_crossover(...)`). A preset
+/// strategy carries its catalogue recipe; builder methods (`long_on`,
+/// `short_on`, `position_sizing`) raise `ValueError` on it — build from
+/// scratch or use the preset as-is.
+#[pyclass(name = "Strategy", skip_from_py_object)]
+#[derive(Clone)]
+pub(crate) struct PyStrategy {
+    pub(crate) symbol: String,
+    pub(crate) long_enter: Option<SignalBox<Snapshot<String>>>,
+    pub(crate) long_exit: Option<SignalBox<Snapshot<String>>>,
+    pub(crate) short_enter: Option<SignalBox<Snapshot<String>>>,
+    pub(crate) short_exit: Option<SignalBox<Snapshot<String>>>,
+    pub(crate) sizing: Option<Source<Snapshot<String>>>,
+    pub(crate) preset: Option<PresetSpec>,
+}
+
+#[pymethods]
+impl PyStrategy {
+    /// A fresh strategy trading `symbol`, with no sides wired.
+    #[new]
+    pub(crate) fn new(symbol: String) -> Self {
+        PyStrategy {
+            symbol,
+            long_enter: None,
+            long_exit: None,
+            short_enter: None,
+            short_exit: None,
+            sizing: None,
+            preset: None,
+        }
+    }
+
+    /// Enter (or reverse into) a long on `enter`; flatten it on `exit`
+    /// (defaults to never).
+    #[pyo3(signature = (enter, exit=None))]
+    pub(crate) fn long_on(&self, enter: &PySignal, exit: Option<&PySignal>) -> PyResult<PyStrategy> {
+        if self.preset.is_some() {
+            return Err(PyValueError::new_err(
+                "long_on is not supported on a preset strategy; build one from scratch with fugazi.Strategy(symbol) if you need custom sides",
+            ));
+        }
+        let mut s = self.clone();
+        s.long_enter = Some(snapshot_signal(enter)?);
+        s.long_exit = exit.map(snapshot_signal).transpose()?;
+        Ok(s)
+    }
+
+    /// Enter (or reverse into) a short on `enter`; flatten it on `exit`
+    /// (defaults to never).
+    #[pyo3(signature = (enter, exit=None))]
+    pub(crate) fn short_on(&self, enter: &PySignal, exit: Option<&PySignal>) -> PyResult<PyStrategy> {
+        if self.preset.is_some() {
+            return Err(PyValueError::new_err(
+                "short_on is not supported on a preset strategy; build one from scratch with fugazi.Strategy(symbol) if you need custom sides",
+            ));
+        }
+        let mut s = self.clone();
+        s.short_enter = Some(snapshot_signal(enter)?);
+        s.short_exit = exit.map(snapshot_signal).transpose()?;
+        Ok(s)
+    }
+
+    /// Scale every entry's value-fraction magnitude by this real source (Kelly,
+    /// vol targeting, fixed-fraction, …). Defaults to all-in (`1.0`). A `None`
+    /// reading skips that bar's trade (safe default).
+    pub(crate) fn position_sizing(&self, source: &PyIndicator) -> PyResult<PyStrategy> {
+        if self.preset.is_some() {
+            return Err(PyValueError::new_err(
+                "position_sizing is not supported on a preset strategy; build one from scratch with fugazi.Strategy(symbol) if you need custom sizing",
+            ));
+        }
+        let mut s = self.clone();
+        s.sizing = Some(snapshot_source(source)?);
+        Ok(s)
+    }
+
+    /// Drive the strategy over `candles` against `wallet`, returning the
+    /// [`RunReport`](PyRunReport). `candles` is a DataFrame / dict of OHLCV
+    /// columns (same shape as `Indicator.feed`). The strategy's book is seeded
+    /// to the wallet's opening equity, so book-anchored sizing reads meaningful
+    /// numbers. The wallet is mutated in place (positions, blotter).
+    pub(crate) fn run(
+        &self,
+        mut wallet: PyRefMut<'_, PyWallet>,
+        candles: &Bound<'_, PyAny>,
+    ) -> PyResult<PyRunReport> {
+        let snaps: Vec<Snapshot<String>> = candles_from_frame(candles)?
+            .into_iter()
+            .map(|c| Snapshot::single(self.symbol.clone(), Atom::from(c)))
+            .collect();
+
+        let seed = Wallet::equity(&wallet.inner).0;
+        let mut strat = self.build_strategy(seed);
+        // Builder-shape overrides (only meaningful when preset is None;
+        // if preset is set, long_enter/etc. are guaranteed to be None
+        // by the builder-method guards above).
+        if let Some(enter) = &self.long_enter {
+            strat = strat.long_on(
+                enter.clone(),
+                self.long_exit.clone().unwrap_or_else(const_false_signal),
+            );
+        }
+        if let Some(enter) = &self.short_enter {
+            strat = strat.short_on(
+                enter.clone(),
+                self.short_exit.clone().unwrap_or_else(const_false_signal),
+            );
+        }
+        if let Some(sizing) = &self.sizing {
+            strat = strat.position_sizing(sizing.clone());
+        }
+
+        let report = fugazi_core::backtest::run(&mut strat, &mut wallet.inner, snaps);
+        Ok(PyRunReport { inner: report })
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        if self.preset.is_some() {
+            format!("Strategy(preset, symbol='{}')", self.symbol)
+        } else {
+            format!("Strategy(symbol='{}')", self.symbol)
+        }
+    }
+}
+
+impl PyStrategy {
+    /// Rust-side builder for a fresh [`SingleAssetStrategy<String>`]
+    /// seeded at `initial_equity`. Preset presets dispatch to the
+    /// catalogue; otherwise starts from a bare `with_initial_equity`
+    /// that later assignments layer sides / sizing onto.
+    pub(crate) fn build_strategy(&self, initial_equity: Real) -> SingleAssetStrategy<String> {
+        match &self.preset {
+            Some(preset) => preset.build(initial_equity),
+            None => SingleAssetStrategy::<String>::with_initial_equity(
+                self.symbol.clone(),
+                initial_equity,
+            ),
+        }
+    }
+}
+
+/// A two-leg pairs strategy, long / flat / short **on the spread**
+/// `close(left) − close(right)`.
+///
+/// `long_spread_on` goes long `left` / short `right` (profiting as the spread
+/// rises); `short_spread_on` is the mirror (profiting as it falls). Each leg
+/// entries at `value_frac(0.5 * m)` — a 1.0-gross dollar-neutral pair by
+/// default. The two directions are inverse positions, so they are mutually
+/// exclusive in time and share one capital pool at full notional; the opposite
+/// side's entry reverses an open pair.
+///
+/// A mean-reverting spread visits both tails and the correct position is
+/// opposite at each, so wiring only one side skips every excursion on the
+/// other. Leaving `short_spread_on` unwired keeps the historical
+/// long-spread-only behaviour.
+///
+/// Spread stop-loss / take-profit levels are per-side and compared with
+/// mirrored sense: the short side stops out when the spread rises *above* its
+/// level, since that is its adverse direction. Mirrors
+/// `fugazi::strategies::PairsStrategy`. Signals and levels are snapshot-rooted
+/// (built from `pick(...)` sources); `run` consumes a sequence of snapshots.
+#[pyclass(name = "PairsStrategy", skip_from_py_object)]
+#[derive(Clone)]
+pub(crate) struct PyPairsStrategy {
+    pub(crate) left: String,
+    pub(crate) right: String,
+    pub(crate) enter: Option<SignalBox<Snapshot<String>>>,
+    pub(crate) exit: Option<SignalBox<Snapshot<String>>>,
+    pub(crate) short_enter: Option<SignalBox<Snapshot<String>>>,
+    pub(crate) short_exit: Option<SignalBox<Snapshot<String>>>,
+    pub(crate) stop: Option<Source<Snapshot<String>>>,
+    pub(crate) target: Option<Source<Snapshot<String>>>,
+    pub(crate) short_stop: Option<Source<Snapshot<String>>>,
+    pub(crate) short_target: Option<Source<Snapshot<String>>>,
+    pub(crate) sizing: Option<Source<Snapshot<String>>>,
+    pub(crate) rebalance: Option<SignalBox<Snapshot<String>>>,
+}
+
+#[pymethods]
+impl PyPairsStrategy {
+    /// A fresh pairs strategy over `left` / `right` with no transitions wired.
+    #[new]
+    pub(crate) fn new(left: String, right: String) -> Self {
+        PyPairsStrategy {
+            left,
+            right,
+            enter: None,
+            exit: None,
+            short_enter: None,
+            short_exit: None,
+            stop: None,
+            target: None,
+            short_stop: None,
+            short_target: None,
+            sizing: None,
+            rebalance: None,
+        }
+    }
+
+    /// Wire the **long-spread** side: `enter` opens long `left` / short `right`
+    /// (profiting as the spread rises), `exit` flattens both. A missing `exit`
+    /// never fires.
+    #[pyo3(signature = (enter, exit=None))]
+    pub(crate) fn long_spread_on(&self, enter: &PySignal, exit: Option<&PySignal>) -> PyResult<PyPairsStrategy> {
+        let mut s = self.clone();
+        s.enter = Some(snapshot_signal(enter)?);
+        s.exit = exit.map(snapshot_signal).transpose()?;
+        Ok(s)
+    }
+
+    /// Wire the **short-spread** side: `enter` opens short `left` / long
+    /// `right` (profiting as the spread falls), `exit` flattens both. Leaving
+    /// this unwired keeps the pair long-spread-only.
+    #[pyo3(signature = (enter, exit=None))]
+    pub(crate) fn short_spread_on(
+        &self,
+        enter: &PySignal,
+        exit: Option<&PySignal>,
+    ) -> PyResult<PyPairsStrategy> {
+        let mut s = self.clone();
+        s.short_enter = Some(snapshot_signal(enter)?);
+        s.short_exit = exit.map(snapshot_signal).transpose()?;
+        Ok(s)
+    }
+
+    /// Alias for `long_spread_on`, kept for callers written before the short
+    /// side existed.
+    #[pyo3(signature = (enter, exit=None))]
+    pub(crate) fn on(&self, enter: &PySignal, exit: Option<&PySignal>) -> PyResult<PyPairsStrategy> {
+        self.long_spread_on(enter, exit)
+    }
+
+    /// Attach the long-spread stop-loss: that side flattens when `close(left) −
+    /// close(right)` reads at or below `level` (its adverse direction).
+    pub(crate) fn long_spread_stop_loss(&self, level: &PyIndicator) -> PyResult<PyPairsStrategy> {
+        let mut s = self.clone();
+        s.stop = Some(snapshot_source(level)?);
+        Ok(s)
+    }
+
+    /// Attach the long-spread take-profit: that side flattens when the spread
+    /// reads at or above `level`.
+    pub(crate) fn long_spread_take_profit(&self, level: &PyIndicator) -> PyResult<PyPairsStrategy> {
+        let mut s = self.clone();
+        s.target = Some(snapshot_source(level)?);
+        Ok(s)
+    }
+
+    /// Attach the short-spread stop-loss. Mirrored sense: that side flattens
+    /// when the spread reads at or **above** `level`, since it profits as the
+    /// spread falls.
+    pub(crate) fn short_spread_stop_loss(&self, level: &PyIndicator) -> PyResult<PyPairsStrategy> {
+        let mut s = self.clone();
+        s.short_stop = Some(snapshot_source(level)?);
+        Ok(s)
+    }
+
+    /// Attach the short-spread take-profit: that side flattens when the spread
+    /// reads at or **below** `level`.
+    pub(crate) fn short_spread_take_profit(&self, level: &PyIndicator) -> PyResult<PyPairsStrategy> {
+        let mut s = self.clone();
+        s.short_target = Some(snapshot_source(level)?);
+        Ok(s)
+    }
+
+    /// Alias for `long_spread_stop_loss`.
+    pub(crate) fn spread_stop_loss(&self, level: &PyIndicator) -> PyResult<PyPairsStrategy> {
+        self.long_spread_stop_loss(level)
+    }
+
+    /// Alias for `long_spread_take_profit`.
+    pub(crate) fn spread_take_profit(&self, level: &PyIndicator) -> PyResult<PyPairsStrategy> {
+        self.long_spread_take_profit(level)
+    }
+
+    /// Scale the pair's gross exposure by this real source (each leg entries at
+    /// `value_frac(0.5 * m)`). Defaults to `1.0`. A `None` reading skips the
+    /// bar's trade (safe default).
+    pub(crate) fn position_sizing(&self, source: &PyIndicator) -> PyResult<PyPairsStrategy> {
+        let mut s = self.clone();
+        s.sizing = Some(snapshot_source(source)?);
+        Ok(s)
+    }
+
+    /// Install the rebalance gate — on bars where `signal` fires, both legs are
+    /// resized to the current sizing target. Defaults to never.
+    pub(crate) fn rebalance_on(&self, signal: &PySignal) -> PyResult<PyPairsStrategy> {
+        let mut s = self.clone();
+        s.rebalance = Some(snapshot_signal(signal)?);
+        Ok(s)
+    }
+
+    /// Drive the pair over `snapshots` (a sequence of `Snapshot` or `dict`)
+    /// against `wallet`, returning the [`RunReport`](PyRunReport). The book is
+    /// seeded to the wallet's opening equity. The wallet is mutated in place.
+    pub(crate) fn run(
+        &self,
+        mut wallet: PyRefMut<'_, PyWallet>,
+        snapshots: &Bound<'_, PyAny>,
+    ) -> PyResult<PyRunReport> {
+        let snaps = snapshots_from_sequence(snapshots)?;
+        let seed = Wallet::equity(&wallet.inner).0;
+        let mut strat = PairsStrategy::<String>::with_initial_equity(
+            self.left.clone(),
+            self.right.clone(),
+            seed,
+        );
+        if let Some(enter) = &self.enter {
+            strat = strat.long_spread_on(
+                enter.clone(),
+                self.exit.clone().unwrap_or_else(const_false_signal),
+            );
+        }
+        if let Some(enter) = &self.short_enter {
+            strat = strat.short_spread_on(
+                enter.clone(),
+                self.short_exit.clone().unwrap_or_else(const_false_signal),
+            );
+        }
+        if let Some(stop) = &self.stop {
+            strat = strat.long_spread_stop_loss(stop.clone());
+        }
+        if let Some(target) = &self.target {
+            strat = strat.long_spread_take_profit(target.clone());
+        }
+        if let Some(stop) = &self.short_stop {
+            strat = strat.short_spread_stop_loss(stop.clone());
+        }
+        if let Some(target) = &self.short_target {
+            strat = strat.short_spread_take_profit(target.clone());
+        }
+        if let Some(sizing) = &self.sizing {
+            strat = strat.position_sizing(sizing.clone());
+        }
+        if let Some(rebalance) = &self.rebalance {
+            strat = strat.rebalance_on(rebalance.clone());
+        }
+
+        let report = fugazi_core::backtest::run(&mut strat, &mut wallet.inner, snaps);
+        Ok(PyRunReport { inner: report })
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!("PairsStrategy(left='{}', right='{}')", self.left, self.right)
+    }
+}
+
+/// A declared universe restriction shared by [`PyMultiAssetStrategy`] and
+/// [`PyBasketStrategy`]: `strict` → `all_of` (missing symbol panics, readiness
+/// gated on every leg); otherwise `any_of` (absent / unready silently skipped).
+#[derive(Clone)]
+pub(crate) struct DeclaredUniverse {
+    pub(crate) strict: bool,
+    pub(crate) symbols: Vec<String>,
+}
+
+/// An N-symbol strategy running the same single-asset decision independently on
+/// every symbol in a snapshot (any subset long / short / flat at once). Mirrors
+/// `fugazi::strategies::MultiAssetStrategy`. Every side is a Python factory
+/// `sym -> Signal` (built once per symbol on first sight, its leaves rooted on
+/// that symbol via `pick(...)`); sizing is `sym -> Indicator`. Position-anchored
+/// protective levels are not exposed (they require a per-leg `Position`).
+#[pyclass(name = "MultiAssetStrategy", skip_from_py_object)]
+pub(crate) struct PyMultiAssetStrategy {
+    pub(crate) long_enter: Option<Py<PyAny>>,
+    pub(crate) long_exit: Option<Py<PyAny>>,
+    pub(crate) short_enter: Option<Py<PyAny>>,
+    pub(crate) short_exit: Option<Py<PyAny>>,
+    pub(crate) sizing: Option<Py<PyAny>>,
+    pub(crate) rebalance: Option<SignalBox<Snapshot<String>>>,
+    pub(crate) universe: Option<DeclaredUniverse>,
+}
+
+impl Clone for PyMultiAssetStrategy {
+    fn clone(&self) -> Self {
+        Python::attach(|py| PyMultiAssetStrategy {
+            long_enter: self.long_enter.as_ref().map(|p| p.clone_ref(py)),
+            long_exit: self.long_exit.as_ref().map(|p| p.clone_ref(py)),
+            short_enter: self.short_enter.as_ref().map(|p| p.clone_ref(py)),
+            short_exit: self.short_exit.as_ref().map(|p| p.clone_ref(py)),
+            sizing: self.sizing.as_ref().map(|p| p.clone_ref(py)),
+            rebalance: self.rebalance.clone(),
+            universe: self.universe.clone(),
+        })
+    }
+}
+
+#[pymethods]
+impl PyMultiAssetStrategy {
+    /// A fresh multi-asset strategy with no sides wired (trades nothing until a
+    /// side is added).
+    #[new]
+    pub(crate) fn new() -> Self {
+        PyMultiAssetStrategy {
+            long_enter: None,
+            long_exit: None,
+            short_enter: None,
+            short_exit: None,
+            sizing: None,
+            rebalance: None,
+            universe: None,
+        }
+    }
+
+    /// Wire the long side: `enter(sym)` opens (or reverses into) a long on that
+    /// symbol, `exit(sym)` flattens it. Both are callables `sym -> Signal`; a
+    /// missing `exit` never fires.
+    #[pyo3(signature = (enter, exit=None))]
+    pub(crate) fn long_on(&self, enter: Py<PyAny>, exit: Option<Py<PyAny>>) -> PyMultiAssetStrategy {
+        let mut s = self.clone();
+        s.long_enter = Some(enter);
+        s.long_exit = exit;
+        s
+    }
+
+    /// Wire the short side: `enter(sym)` opens (or reverses into) a short,
+    /// `exit(sym)` flattens it. Same factory shape as [`long_on`](Self::long_on).
+    #[pyo3(signature = (enter, exit=None))]
+    pub(crate) fn short_on(&self, enter: Py<PyAny>, exit: Option<Py<PyAny>>) -> PyMultiAssetStrategy {
+        let mut s = self.clone();
+        s.short_enter = Some(enter);
+        s.short_exit = exit;
+        s
+    }
+
+    /// Wire the per-symbol sizing factory `sym -> Indicator` — the
+    /// value-fraction magnitude every entry on that symbol is sized against.
+    /// Defaults to all-in (`1.0`).
+    pub(crate) fn position_sizing(&self, factory: Py<PyAny>) -> PyMultiAssetStrategy {
+        let mut s = self.clone();
+        s.sizing = Some(factory);
+        s
+    }
+
+    /// Install the rebalance gate (a snapshot-rooted signal). On fire, every
+    /// held position is resized to its current sizing target. Defaults to never.
+    pub(crate) fn rebalance_on(&self, signal: &PySignal) -> PyResult<PyMultiAssetStrategy> {
+        let mut s = self.clone();
+        s.rebalance = Some(snapshot_signal(signal)?);
+        Ok(s)
+    }
+
+    /// Restrict to exactly `symbols` (strict): a missing symbol on any bar
+    /// panics, and readiness waits until every listed leg has settled.
+    pub(crate) fn all_of(&self, symbols: Vec<String>) -> PyMultiAssetStrategy {
+        let mut s = self.clone();
+        s.universe = Some(DeclaredUniverse { strict: true, symbols });
+        s
+    }
+
+    /// Restrict to `symbols` (lax): only listed symbols trade, absent / unready
+    /// ones are silently skipped.
+    pub(crate) fn any_of(&self, symbols: Vec<String>) -> PyMultiAssetStrategy {
+        let mut s = self.clone();
+        s.universe = Some(DeclaredUniverse { strict: false, symbols });
+        s
+    }
+
+    /// Drive the strategy over `snapshots` against `wallet`, returning the
+    /// [`RunReport`](PyRunReport). The book is seeded to the wallet's opening
+    /// equity. The wallet is mutated in place.
+    pub(crate) fn run(
+        &self,
+        mut wallet: PyRefMut<'_, PyWallet>,
+        snapshots: &Bound<'_, PyAny>,
+    ) -> PyResult<PyRunReport> {
+        let snaps = snapshots_from_sequence(snapshots)?;
+        let seed = Wallet::equity(&wallet.inner).0;
+        let mut strat = MultiAssetStrategy::<String>::with_initial_equity(seed);
+
+        if let Some(enter) = &self.long_enter {
+            let ef = signal_factory_from_callable(enter.clone_ref(wallet.py()));
+            strat = match &self.long_exit {
+                Some(exit) => {
+                    let xf = signal_factory_from_callable(exit.clone_ref(wallet.py()));
+                    strat.long_on(ef, xf)
+                }
+                None => strat.long_on(ef, |_: &String| const_false_signal()),
+            };
+        }
+        if let Some(enter) = &self.short_enter {
+            let ef = signal_factory_from_callable(enter.clone_ref(wallet.py()));
+            strat = match &self.short_exit {
+                Some(exit) => {
+                    let xf = signal_factory_from_callable(exit.clone_ref(wallet.py()));
+                    strat.short_on(ef, xf)
+                }
+                None => strat.short_on(ef, |_: &String| const_false_signal()),
+            };
+        }
+        if let Some(sizing) = &self.sizing {
+            let sf = source_factory_from_callable(sizing.clone_ref(wallet.py()));
+            strat = strat.position_sizing(sf);
+        }
+        if let Some(rebalance) = &self.rebalance {
+            strat = strat.rebalance_on(rebalance.clone());
+        }
+        if let Some(u) = &self.universe {
+            strat = if u.strict {
+                strat.all_of(u.symbols.clone())
+            } else {
+                strat.any_of(u.symbols.clone())
+            };
+        }
+
+        let report = fugazi_core::backtest::run(&mut strat, &mut wallet.inner, snaps);
+        Ok(PyRunReport { inner: report })
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        "MultiAssetStrategy(...)".to_string()
+    }
+}
+
+/// The cross-sectional selection rule for a [`PyBasketStrategy`] — a
+/// composable tree mirroring `fugazi::strategies::basket::Selection`. Each
+/// ranked rule narrows an inner rule (`of`), defaulting to the
+/// `Everything` leaf (the whole universe).
+#[derive(Clone)]
+pub(crate) enum BasketSelection {
+    Everything,
+    TopBottom {
+        longs: usize,
+        shorts: usize,
+        of: Box<BasketSelection>,
+    },
+    Threshold {
+        long_min: Real,
+        short_max: Real,
+        of: Box<BasketSelection>,
+    },
+    Quantile {
+        long_q: Real,
+        short_q: Real,
+        of: Box<BasketSelection>,
+    },
+}
+
+impl BasketSelection {
+    /// Build the composed `Selection` chain this tree describes, nesting
+    /// each rule's `of` inner via the core `::of` constructors.
+    pub(crate) fn build(&self) -> Box<dyn core_basket::Selection<String>> {
+        match self {
+            BasketSelection::Everything => Box::new(core_basket::Everything),
+            BasketSelection::TopBottom { longs, shorts, of } => Box::new(
+                core_basket::TopBottom::of(
+                    core_basket::DynSelection(of.build()),
+                    *longs,
+                    *shorts,
+                ),
+            ),
+            BasketSelection::Threshold {
+                long_min,
+                short_max,
+                of,
+            } => Box::new(core_basket::Threshold::of(
+                core_basket::DynSelection(of.build()),
+                *long_min,
+                *short_max,
+            )),
+            BasketSelection::Quantile {
+                long_q,
+                short_q,
+                of,
+            } => Box::new(core_basket::Quantile::of(
+                core_basket::DynSelection(of.build()),
+                *long_q,
+                *short_q,
+            )),
+        }
+    }
+}
+
+/// Wrap an optional inner rule, defaulting to the `Everything` leaf.
+pub(crate) fn selection_inner(of: Option<PySelection>) -> Box<BasketSelection> {
+    Box::new(of.map_or(BasketSelection::Everything, |s| s.inner))
+}
+
+/// A composed basket selection rule — built by `ta.top_bottom` /
+/// `ta.threshold` / `ta.quantile` / `ta.everything`, installed via
+/// `BasketStrategy.selection(...)`, and usable as the `of=` inner of
+/// another rule so selections nest to any depth (e.g. the top-2 / bottom-2
+/// *of* the threshold survivors).
+#[pyclass(name = "Selection", module = "fugazi", from_py_object)]
+#[derive(Clone)]
+pub(crate) struct PySelection {
+    pub(crate) inner: BasketSelection,
+}
+
+#[pymethods]
+impl PySelection {
+    pub(crate) fn __repr__(&self) -> String {
+        "Selection(...)".to_string()
+    }
+}
+
+/// The full-universe selection leaf — every symbol eligible for either
+/// side. The implicit `of=` default; rarely needed explicitly.
+#[pyfunction]
+pub(crate) fn everything() -> PySelection {
+    PySelection {
+        inner: BasketSelection::Everything,
+    }
+}
+
+/// Select the top `longs` and bottom `shorts` symbols by score, ranked
+/// within the optional `of` inner rule (default: the whole universe).
+#[pyfunction]
+#[pyo3(signature = (longs, shorts, of=None))]
+pub(crate) fn top_bottom(longs: usize, shorts: usize, of: Option<PySelection>) -> PySelection {
+    PySelection {
+        inner: BasketSelection::TopBottom {
+            longs,
+            shorts,
+            of: selection_inner(of),
+        },
+    }
+}
+
+/// Long every symbol scoring `>= long_min`, short every symbol scoring
+/// `<= short_max`, within the optional `of` inner rule (default: all).
+#[pyfunction]
+#[pyo3(signature = (long_min, short_max, of=None))]
+pub(crate) fn threshold(long_min: Real, short_max: Real, of: Option<PySelection>) -> PySelection {
+    PySelection {
+        inner: BasketSelection::Threshold {
+            long_min,
+            short_max,
+            of: selection_inner(of),
+        },
+    }
+}
+
+/// Long the top `long_q` quantile by score, short the bottom `short_q`
+/// (each in `[0, 1]`), within the optional `of` inner rule (default: all).
+#[pyfunction]
+#[pyo3(signature = (long_q, short_q, of=None))]
+pub(crate) fn quantile(long_q: Real, short_q: Real, of: Option<PySelection>) -> PySelection {
+    PySelection {
+        inner: BasketSelection::Quantile {
+            long_q,
+            short_q,
+            of: selection_inner(of),
+        },
+    }
+}
+
+/// An N-symbol cross-sectional basket: score every symbol, then a selection rule
+/// picks the longs / shorts. Mirrors `fugazi::strategies::BasketStrategy`. Score
+/// and sizing are Python factories `sym -> Indicator` (leaves rooted on that
+/// symbol via `pick(...)`); the selection is one of top-bottom / threshold /
+/// quantile, each of which composes by narrowing an inner rule via `of=`
+/// (e.g. `strat.top_bottom(2, 2, of=ta.threshold(0.5, -0.5))`, or the general
+/// `strat.selection(...)` seam). The `.selection(closure)` escape hatch and
+/// per-leg protective levels are not exposed.
+#[pyclass(name = "BasketStrategy", skip_from_py_object)]
+pub(crate) struct PyBasketStrategy {
+    pub(crate) score: Option<Py<PyAny>>,
+    pub(crate) sizing: Option<Py<PyAny>>,
+    pub(crate) selection: Option<BasketSelection>,
+    pub(crate) dollar_neutral: bool,
+    pub(crate) rebalance: Option<SignalBox<Snapshot<String>>>,
+    pub(crate) universe: Option<DeclaredUniverse>,
+}
+
+impl Clone for PyBasketStrategy {
+    fn clone(&self) -> Self {
+        Python::attach(|py| PyBasketStrategy {
+            score: self.score.as_ref().map(|p| p.clone_ref(py)),
+            sizing: self.sizing.as_ref().map(|p| p.clone_ref(py)),
+            selection: self.selection.clone(),
+            dollar_neutral: self.dollar_neutral,
+            rebalance: self.rebalance.clone(),
+            universe: self.universe.clone(),
+        })
+    }
+}
+
+#[pymethods]
+impl PyBasketStrategy {
+    /// A fresh basket (trades nothing until scored, sized, and given a selection
+    /// rule).
+    #[new]
+    pub(crate) fn new() -> Self {
+        PyBasketStrategy {
+            score: None,
+            sizing: None,
+            selection: None,
+            dollar_neutral: false,
+            rebalance: None,
+            universe: None,
+        }
+    }
+
+    /// Wire the per-symbol score factory `sym -> Indicator`; the selection rule
+    /// ranks symbols by this value each rebalance.
+    pub(crate) fn scored_by(&self, factory: Py<PyAny>) -> PyBasketStrategy {
+        let mut s = self.clone();
+        s.score = Some(factory);
+        s
+    }
+
+    /// Wire the per-symbol sizing factory `sym -> Indicator` — each selected
+    /// leg's value-fraction. Use an equal-weight source for a normalized gross.
+    pub(crate) fn sized_by(&self, factory: Py<PyAny>) -> PyBasketStrategy {
+        let mut s = self.clone();
+        s.sizing = Some(factory);
+        s
+    }
+
+    /// Select the top `longs` and bottom `shorts` symbols by score, ranked
+    /// within the optional `of` inner rule (default: the whole universe).
+    #[pyo3(signature = (longs, shorts, of=None))]
+    pub(crate) fn top_bottom(
+        &self,
+        longs: usize,
+        shorts: usize,
+        of: Option<PySelection>,
+    ) -> PyBasketStrategy {
+        let mut s = self.clone();
+        s.selection = Some(BasketSelection::TopBottom {
+            longs,
+            shorts,
+            of: selection_inner(of),
+        });
+        s
+    }
+
+    /// Long every symbol scoring `>= long_min`, short every symbol scoring
+    /// `<= short_max`, within the optional `of` inner rule (default: all).
+    #[pyo3(signature = (long_min, short_max, of=None))]
+    pub(crate) fn threshold(
+        &self,
+        long_min: Real,
+        short_max: Real,
+        of: Option<PySelection>,
+    ) -> PyBasketStrategy {
+        let mut s = self.clone();
+        s.selection = Some(BasketSelection::Threshold {
+            long_min,
+            short_max,
+            of: selection_inner(of),
+        });
+        s
+    }
+
+    /// Long the top `long_q` quantile by score, short the bottom `short_q`
+    /// quantile (each in `[0, 1]`), within the optional `of` inner rule.
+    #[pyo3(signature = (long_q, short_q, of=None))]
+    pub(crate) fn quantile(
+        &self,
+        long_q: Real,
+        short_q: Real,
+        of: Option<PySelection>,
+    ) -> PyBasketStrategy {
+        let mut s = self.clone();
+        s.selection = Some(BasketSelection::Quantile {
+            long_q,
+            short_q,
+            of: selection_inner(of),
+        });
+        s
+    }
+
+    /// Install a composed selection rule (from `ta.top_bottom` /
+    /// `ta.threshold` / `ta.quantile` / `ta.everything`) — the general
+    /// seam behind the convenience methods, and how you nest rules via
+    /// `of=`.
+    pub(crate) fn selection(&self, rule: PySelection) -> PyBasketStrategy {
+        let mut s = self.clone();
+        s.selection = Some(rule.inner);
+        s
+    }
+
+    /// Enforce dollar-neutrality: scale per-symbol sizes each rebalance so
+    /// `Σ long == Σ short` (never levers up; one-sided bars skip the rebalance).
+    pub(crate) fn dollar_neutral(&self) -> PyBasketStrategy {
+        let mut s = self.clone();
+        s.dollar_neutral = true;
+        s
+    }
+
+    /// Install the rebalance gate (snapshot-rooted signal). Defaults to every
+    /// bar (`Every::new(1)`), matching the Rust default.
+    pub(crate) fn rebalance_on(&self, signal: &PySignal) -> PyResult<PyBasketStrategy> {
+        let mut s = self.clone();
+        s.rebalance = Some(snapshot_signal(signal)?);
+        Ok(s)
+    }
+
+    /// Restrict discovery to exactly `symbols` (strict): a missing symbol panics
+    /// and readiness gates on every listed leg scoring & sizing.
+    pub(crate) fn all_of(&self, symbols: Vec<String>) -> PyBasketStrategy {
+        let mut s = self.clone();
+        s.universe = Some(DeclaredUniverse { strict: true, symbols });
+        s
+    }
+
+    /// Restrict discovery to `symbols` (lax): absent / unready members skipped.
+    pub(crate) fn any_of(&self, symbols: Vec<String>) -> PyBasketStrategy {
+        let mut s = self.clone();
+        s.universe = Some(DeclaredUniverse { strict: false, symbols });
+        s
+    }
+
+    /// Drive the basket over `snapshots` against `wallet`, returning the
+    /// [`RunReport`](PyRunReport). The book is seeded to the wallet's opening
+    /// equity. The wallet is mutated in place.
+    pub(crate) fn run(
+        &self,
+        mut wallet: PyRefMut<'_, PyWallet>,
+        snapshots: &Bound<'_, PyAny>,
+    ) -> PyResult<PyRunReport> {
+        let snaps = snapshots_from_sequence(snapshots)?;
+        let seed = Wallet::equity(&wallet.inner).0;
+        let mut strat = BasketStrategy::<String>::with_initial_equity(seed);
+
+        if let Some(score) = &self.score {
+            let f = source_factory_from_callable(score.clone_ref(wallet.py()));
+            strat = strat.scored_by(f);
+        }
+        if let Some(sizing) = &self.sizing {
+            let f = source_factory_from_callable(sizing.clone_ref(wallet.py()));
+            strat = strat.sized_by(f);
+        }
+        strat = match &self.selection {
+            Some(sel) => strat.selection(core_basket::DynSelection(sel.build())),
+            None => strat,
+        };
+        if self.dollar_neutral {
+            strat = strat.dollar_neutral();
+        }
+        if let Some(rebalance) = &self.rebalance {
+            strat = strat.rebalance_on(rebalance.clone());
+        }
+        if let Some(u) = &self.universe {
+            strat = if u.strict {
+                strat.all_of(u.symbols.clone())
+            } else {
+                strat.any_of(u.symbols.clone())
+            };
+        }
+
+        let report = fugazi_core::backtest::run(&mut strat, &mut wallet.inner, snaps);
+        Ok(PyRunReport { inner: report })
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        "BasketStrategy(...)".to_string()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Strategy catalogue as Python constructors
+// ---------------------------------------------------------------------------
+
+/// Buy-and-hold `symbol` — long every bar with `value_frac(1.0)` sizing.
+/// Matches `fugazi::strategies::SingleAssetStrategy::buy_and_hold`.
+#[pyfunction]
+pub(crate) fn buy_and_hold(symbol: String) -> PyStrategy {
+    PyStrategy {
+        symbol: symbol.clone(),
+        long_enter: None,
+        long_exit: None,
+        short_enter: None,
+        short_exit: None,
+        sizing: None,
+        preset: Some(PresetSpec::BuyAndHold { symbol }),
+    }
+}
+
+/// A simple MA-crossover strategy: long when `fast` SMA crosses above `slow`
+/// SMA, short on the opposite cross. Matches
+/// `fugazi::strategies::trend::ma_crossover`.
+#[pyfunction]
+pub(crate) fn ma_crossover(symbol: String, fast: usize, slow: usize) -> PyStrategy {
+    PyStrategy {
+        symbol: symbol.clone(),
+        long_enter: None,
+        long_exit: None,
+        short_enter: None,
+        short_exit: None,
+        sizing: None,
+        preset: Some(PresetSpec::MaCrossover { symbol, fast, slow }),
+    }
+}
+
+/// RSI reversal: long when RSI crosses below `oversold`, exit long when it
+/// crosses above `exit_level`. Matches
+/// `fugazi::strategies::mean_reversion::rsi_reversal`.
+#[pyfunction]
+#[pyo3(signature = (symbol, period, oversold=30.0, exit_level=50.0))]
+pub(crate) fn rsi_reversal(
+    symbol: String,
+    period: usize,
+    oversold: Real,
+    exit_level: Real,
+) -> PyStrategy {
+    PyStrategy {
+        symbol: symbol.clone(),
+        long_enter: None,
+        long_exit: None,
+        short_enter: None,
+        short_exit: None,
+        sizing: None,
+        preset: Some(PresetSpec::RsiReversal {
+            symbol,
+            period,
+            oversold,
+            exit_level,
+        }),
+    }
+}
+
+/// Donchian breakout: long on a `period`-bar high break, short on a `period`-
+/// bar low break. Matches `fugazi::strategies::trend::donchian_breakout`.
+#[pyfunction]
+pub(crate) fn donchian_breakout(symbol: String, period: usize) -> PyStrategy {
+    PyStrategy {
+        symbol: symbol.clone(),
+        long_enter: None,
+        long_exit: None,
+        short_enter: None,
+        short_exit: None,
+        sizing: None,
+        preset: Some(PresetSpec::DonchianBreakout { symbol, period }),
+    }
+}
+
+/// Keltner band breakout: long above the upper ATR-banded EMA channel, short
+/// below the lower. Matches `fugazi::strategies::composite::keltner_breakout`.
+#[pyfunction]
+#[pyo3(signature = (symbol, ema_period, atr_period, multiplier=2.0))]
+pub(crate) fn keltner_breakout(
+    symbol: String,
+    ema_period: usize,
+    atr_period: usize,
+    multiplier: Real,
+) -> PyStrategy {
+    PyStrategy {
+        symbol: symbol.clone(),
+        long_enter: None,
+        long_exit: None,
+        short_enter: None,
+        short_exit: None,
+        sizing: None,
+        preset: Some(PresetSpec::KeltnerBreakout {
+            symbol,
+            ema_period,
+            atr_period,
+            multiplier,
+        }),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Trailing risk-of-strategy indicators — embed a preset [`Strategy`], drive
+// it against a private wallet, and read a rolling metric over its equity
+// curve. Unblocked by two changes: the Position + Book + Shared
+// `Arc<Mutex>` refactor (was `Rc<RefCell>`) *and* the strategy internal
+// trait-object bound tightening (`Box<dyn Signal + 'static>` →
+// `+ Send + Sync + 'static`).
+//
+// The trailing indicators aren't `Clone` (they own an embedded strategy +
+// PaperWallet), so we wrap them in `RebuildOnClone` — an `Arc`-based
+// mirror of the CLI's `RebuildIndicator` that rebuilds a fresh instance
+// on `Clone`. This satisfies `TypedSource`'s Clone + Send + Sync bound.
+// ---------------------------------------------------------------------------
+
+/// The fixed wallet seed the trailing-risk-of-strategy indicators use for
+/// their embedded strategy. Every metric is a ratio, so the seed only
+/// determines value scale — matches `src/cli/spec/trailing.rs::SEED`.
+pub(crate) const TRAILING_STRATEGY_SEED: Real = 1_000.0;
+
+/// A `Clone`-able wrapper around a non-`Clone` inner indicator. Holds a
+/// factory closure that builds a fresh instance on each `Clone`, so the
+/// enclosing carrier can be `Clone + Send + Sync` even when the inner
+/// (an embedded-strategy trailing indicator) is not. Mirror of
+/// `RebuildIndicator` in `src/cli/spec/trailing.rs`, but with `Arc` for
+/// `Send + Sync`.
+pub(crate) type BoxedSnapshotReal =
+    Box<dyn Indicator<Input = Snapshot<String>, Output = Real> + Send + Sync>;
+
+pub(crate) struct RebuildOnClone {
+    pub(crate) build: Arc<dyn Fn() -> BoxedSnapshotReal + Send + Sync>,
+    pub(crate) inner: BoxedSnapshotReal,
+}
+
+impl Clone for RebuildOnClone {
+    fn clone(&self) -> Self {
+        let inner = (self.build)();
+        Self {
+            build: Arc::clone(&self.build),
+            inner,
+        }
+    }
+}
+
+impl Indicator for RebuildOnClone {
+    type Input = Snapshot<String>;
+    type Output = Real;
+    fn update(&mut self, input: Snapshot<String>) -> Option<Real> {
+        self.inner.update(input)
+    }
+    fn value(&self) -> Option<Real> {
+        self.inner.value()
+    }
+    fn warm_up_period(&self) -> usize {
+        self.inner.warm_up_period()
+    }
+    fn unstable_period(&self) -> usize {
+        self.inner.unstable_period()
+    }
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+}
+
+/// Turn a factory closure that builds a non-`Clone` indicator into a
+/// [`PyIndicator`] that carries the factory in a
+/// [`RebuildOnClone`] so `TypedSource::new`'s `Clone` bound is satisfied.
+pub(crate) fn wrap_rebuild<F>(build: F) -> PyIndicator
+where
+    F: Fn() -> BoxedSnapshotReal + Send + Sync + 'static,
+{
+    let build = Arc::new(build);
+    let inner = build();
+    let carrier = RebuildOnClone {
+        build,
+        inner,
+    };
+    PyIndicator::wrap(AnySource::Snapshot(Source::new(carrier)))
+}
+
+/// Rolling annualized Sharpe over the equity curve of an embedded
+/// [`Strategy`](PyStrategy). Matches `!sharpe` in the YAML spec.
+#[pyfunction]
+#[pyo3(signature = (strategy, period, bars_per_year, risk_free_rate=0.0))]
+pub(crate) fn sharpe_of(
+    strategy: &PyStrategy,
+    period: usize,
+    bars_per_year: Real,
+    risk_free_rate: Real,
+) -> PyIndicator {
+    let preset = strategy.preset.clone();
+    let symbol = strategy.symbol.clone();
+    wrap_rebuild(move || {
+        let strat = build_preset_or_bare(&preset, &symbol);
+        Box::new(fugazi_core::indicators::Sharpe::new(
+            strat,
+            symbol.clone(),
+            TRAILING_STRATEGY_SEED,
+            period,
+            risk_free_rate,
+            bars_per_year,
+        ))
+    })
+}
+
+/// Rolling annualized Sortino over the equity curve of an embedded
+/// [`Strategy`](PyStrategy). Matches `!sortino` in the YAML spec.
+#[pyfunction]
+#[pyo3(signature = (strategy, period, bars_per_year, risk_free_rate=0.0))]
+pub(crate) fn sortino_of(
+    strategy: &PyStrategy,
+    period: usize,
+    bars_per_year: Real,
+    risk_free_rate: Real,
+) -> PyIndicator {
+    let preset = strategy.preset.clone();
+    let symbol = strategy.symbol.clone();
+    wrap_rebuild(move || {
+        let strat = build_preset_or_bare(&preset, &symbol);
+        Box::new(fugazi_core::indicators::Sortino::new(
+            strat,
+            symbol.clone(),
+            TRAILING_STRATEGY_SEED,
+            period,
+            risk_free_rate,
+            bars_per_year,
+        ))
+    })
+}
+
+/// Rolling annualized volatility of the equity curve of an embedded
+/// [`Strategy`](PyStrategy). Matches `!volatility` in the YAML spec.
+#[pyfunction]
+pub(crate) fn volatility_of(
+    strategy: &PyStrategy,
+    period: usize,
+    bars_per_year: Real,
+) -> PyIndicator {
+    let preset = strategy.preset.clone();
+    let symbol = strategy.symbol.clone();
+    wrap_rebuild(move || {
+        let strat = build_preset_or_bare(&preset, &symbol);
+        Box::new(fugazi_core::indicators::Volatility::new(
+            strat,
+            symbol.clone(),
+            TRAILING_STRATEGY_SEED,
+            period,
+            bars_per_year,
+        ))
+    })
+}
+
+/// Rolling maximum drawdown of the equity curve of an embedded
+/// [`Strategy`](PyStrategy). Matches `!max_drawdown` in the YAML spec.
+#[pyfunction]
+pub(crate) fn max_drawdown_of(strategy: &PyStrategy, period: usize) -> PyIndicator {
+    let preset = strategy.preset.clone();
+    let symbol = strategy.symbol.clone();
+    wrap_rebuild(move || {
+        let strat = build_preset_or_bare(&preset, &symbol);
+        Box::new(fugazi_core::indicators::MaxDrawdown::new(
+            strat,
+            symbol.clone(),
+            TRAILING_STRATEGY_SEED,
+            period,
+        ))
+    })
+}
+
+/// Rolling Calmar ratio (annualized return / max drawdown) over the equity
+/// curve of an embedded [`Strategy`](PyStrategy). Matches `!calmar` in the
+/// YAML spec.
+#[pyfunction]
+pub(crate) fn calmar_of(
+    strategy: &PyStrategy,
+    period: usize,
+    bars_per_year: Real,
+) -> PyIndicator {
+    let preset = strategy.preset.clone();
+    let symbol = strategy.symbol.clone();
+    wrap_rebuild(move || {
+        let strat = build_preset_or_bare(&preset, &symbol);
+        Box::new(fugazi_core::indicators::Calmar::new(
+            strat,
+            symbol.clone(),
+            TRAILING_STRATEGY_SEED,
+            period,
+            bars_per_year,
+        ))
+    })
+}
+
+/// Rebuild a preset strategy (or a bare `SingleAssetStrategy` if none set)
+/// with the trailing seed. Used inside the `wrap_rebuild` factory of each
+/// trailing-risk-of-strategy indicator.
+pub(crate) fn build_preset_or_bare(
+    preset: &Option<PresetSpec>,
+    symbol: &str,
+) -> SingleAssetStrategy<String> {
+    match preset {
+        Some(p) => p.build(TRAILING_STRATEGY_SEED),
+        None => SingleAssetStrategy::<String>::with_initial_equity(
+            symbol.to_string(),
+            TRAILING_STRATEGY_SEED,
+        ),
+    }
+}
+
+/// One order the wallet **refused**, stamped with the bar it was refused on —
+/// the failure-side twin of [`Fill`](PyFill).
+///
+/// A refusal is otherwise invisible: an order can be accepted at submission and
+/// still fail later when it is filled, with nobody holding a result to check. A
+/// non-empty `RunReport.rejections` means the run did not trade the way the
+/// strategy intended, so the metrics describe something other than what was
+/// specified.
+#[pyclass(name = "Rejected", frozen)]
+pub(crate) struct PyRejected {
+    pub(crate) inner: Rejected<String>,
+}
+
+#[pymethods]
+impl PyRejected {
+    /// The bar index at which the order was refused.
+    #[getter]
+    pub(crate) fn bar(&self) -> usize {
+        self.inner.bar
+    }
+
+    /// The instrument the refused order was for.
+    #[getter]
+    pub(crate) fn symbol(&self) -> String {
+        self.inner.rejection.symbol.clone()
+    }
+
+    /// Why it was refused, as the `WalletError`'s message.
+    #[getter]
+    pub(crate) fn error(&self) -> String {
+        self.inner.rejection.error.to_string()
+    }
+
+    /// `"market"`, `"stop"` or `"take_profit"` — a refused stop means the
+    /// position is still open and its protection did not fire.
+    #[getter]
+    pub(crate) fn kind(&self) -> &'static str {
+        kind_str(self.inner.rejection.kind)
+    }
+
+    /// The id of the submission this refusal belongs to.
+    #[getter]
+    pub(crate) fn id(&self) -> u64 {
+        self.inner.rejection.id.0
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "Rejected(bar={}, symbol='{}', error='{}', kind='{}')",
+            self.inner.bar,
+            self.inner.rejection.symbol,
+            self.inner.rejection.error,
+            kind_str(self.inner.rejection.kind),
+        )
+    }
+}
+
+/// The result of [`Strategy.run`](PyStrategy::run): the per-bar equity curve, the
+/// fill blotter, the refused orders, and the pre-run seed equity — everything the
+/// `fugazi.metrics` functions reduce to numbers.
+#[pyclass(name = "RunReport", frozen)]
+pub(crate) struct PyRunReport {
+    pub(crate) inner: RunReport<String>,
+}
+
+#[pymethods]
+impl PyRunReport {
+    /// One marked-to-market equity value per input bar.
+    #[getter]
+    pub(crate) fn equity_curve(&self) -> Vec<f64> {
+        self.inner.equity_curve.clone()
+    }
+
+    /// Every booked fill (a [`Fill`](PyFill)), in fill order.
+    #[getter]
+    pub(crate) fn fills(&self) -> Vec<PyFill> {
+        self.inner
+            .fills
+            .iter()
+            .cloned()
+            .map(|inner| PyFill { inner })
+            .collect()
+    }
+
+    /// Every refused order (a [`Rejected`](PyRejected)), in refusal order. Empty
+    /// on a clean run — check it before trusting the metrics.
+    #[getter]
+    pub(crate) fn rejections(&self) -> Vec<PyRejected> {
+        self.inner
+            .rejections
+            .iter()
+            .cloned()
+            .map(|inner| PyRejected { inner })
+            .collect()
+    }
+
+    /// The wallet's equity captured immediately before the first bar — the seed
+    /// returns / CAGR compound against.
+    #[getter]
+    pub(crate) fn initial_equity(&self) -> f64 {
+        self.inner.initial_equity
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "RunReport(bars={}, fills={}, rejections={}, initial_equity={})",
+            self.inner.equity_curve.len(),
+            self.inner.fills.len(),
+            self.inner.rejections.len(),
+            self.inner.initial_equity,
+        )
+    }
+}
+

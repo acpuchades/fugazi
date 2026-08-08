@@ -372,7 +372,22 @@ CLI layout by concern:
 
 **Spec-loading discipline**: when a new YAML tag / spec shape is added under `src/spec/`, no Python change is usually needed — the `StrategySpec` wrapper just calls the typed-parse machinery, so the surface flows through automatically. But: (a) if a new top-level strategy shape is added, `detect_kind` (in `python/src/lib.rs`) needs a new arm and `LoadedSpec` a new variant; (b) if the `.run()` / `.evaluate()` per-kind dispatch needs new plumbing (e.g. a new per-symbol cost pathway), thread it through. `optimize` shares the same dispatch as `.run()`; keep them in sync.
 
-Layout (grep by section header): type-erasing carriers → domain enums + macros → Python classes (`PyCandle`/`PySchema`/`PySchemaBuilder`/`PyOverlayInfo`/`PyAtom`/`PyIndicator`/`PySignal`/`PyMulti`/`PyWallet`/`PyOrder`/`PySize`) → strategy layer (`PyWallet` + `PyStrategy` + `PyPairsStrategy` + `PyMultiAssetStrategy` + `PyBasketStrategy` + `PyRunReport`; `AtomLift`; per-symbol factory helpers `signal_factory_from_callable` / `source_factory_from_callable`) → metrics (`PyFill`/`PyTrade`/`PyDrawdownSegment` + `#[pyfunction]` per metric; submodule injected into `sys.modules["fugazi.metrics"]`) → constructors (leaf sources, macro invocations, hand-written `macd`/`bollinger`/`keltner`/`donchian`/`stoch_rsi`, `resample`/`latch`, `unstable`, `get`) → remote sources (`PyBinance`/`PyYahoo`/`PyCoinGecko`/`PyBinanceVision`/`fetch`) → spec-driven surface (`PyCostConfig` + `PyStrategySpec` + `PySweep` + `PySweepRow` + `PyWalkForwardResult` + `PyWalkForwardFold` + `load_spec` / `optimize`) → `#[pymodule] fn fugazi`.
+**Layout — one module per concern** (was one 9.2k-line `lib.rs`):
+
+| File | Holds |
+|---|---|
+| `carriers.rs` | type-erasing `TypedSource` + `Source`/`SignalBox`/`StrSource`/`AtomBox`/`MultiBox`, the `AnySource`/`AnySignal`/`AnyMulti` domain enums |
+| `macros.rs` | the 8 domain-preserving dispatch macros (`map_source!`, `combine_sources!`, …). `#[macro_use]`d first in `lib.rs` |
+| `classes.rs` | `PyCandle`/`PySchema`/`PySchemaBuilder`/`PyOverlayInfo`/`PyAtom`/`PyFrequency`/`PySelector`/`PySnapshot`/`PyAtomSource`/`PyIndicator`/`PySignal`/`PyMulti` |
+| `strategy.rs` | `PyWallet`/`PyOrder`/`PySize`, the four strategy builders, `PyRunReport`, `AtomLift`, the per-symbol factory helpers, the catalogue constructors and trailing risk indicators |
+| `constructors.rs` | leaf sources, the `src_period!`/`bar_period!`/… macro invocations, hand-written `macd`/`bollinger`/`keltner`/`donchian`/`stoch_rsi`, `resample`/`latch`, `unstable`, `get`, `compute_overlays` |
+| `sources.rs` | `PyBinance`/`PyYahoo`/`PyCoinGecko`/`PyBinanceVision` + `fetch` |
+| `metrics.rs` | `PyFill`/`PyTrade`/`PyDrawdownSegment` + one `#[pyfunction]` per metric; injected into `sys.modules["fugazi.metrics"]` |
+| `spec.rs` | `PyCostConfig`/`PyStrategySpec`/`PySweep`/`PySweepRow`/`PyWalkForward*` + `load_spec` / `optimize` / `spec_tags` |
+| `prelude.rs` | the shared `use` block every module glob-imports |
+| `lib.rs` | module wiring + `#[pymodule] fn fugazi` |
+
+Two wiring rules worth knowing: modules glob-import their siblings (`use crate::classes::*;`) so cross-module references stay path-free the way they read when this was one file — **not** through a `pub(crate) use` at the crate root, which creates a resolution cycle. And `lib.rs` names every registered function **explicitly** rather than by glob, because `wrap_pyfunction!` resolves a hidden item pyo3 generates beside each `#[pyfunction]` that a glob import doesn't carry; the import list doubles as the module's index.
 
 Cargo: `python/Cargo.toml` depends on `fugazi_core = { package = "fugazi", … default-features = false, features = ["sources", "runtime", "spec"] }`; the `spec` feature gates the spec/backtest/optimize kernel under `src/spec/` (kept out of CLI-only concerns like clap / indicatif / console / interim / clap_complete). `pyo3 = "0.29"` with `abi3-py39`. Test: `maturin develop` then `pytest python/tests/` (`test_specs.py` covers spec loading + run + optimize + walkforward; `test_readme.py` runs code blocks in `python/README.md`).
 
