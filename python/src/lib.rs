@@ -8478,6 +8478,18 @@ fn optimize(
     }
 
     let sweep = py.detach(|| -> anyhow::Result<spec_optimize::Sweep> {
+        let ctx = spec_backtest::EvalContext {
+            cash,
+            bars_per_year,
+            risk_free_rate,
+            cost_config: &cost_config,
+            // The Python surface takes snapshots, not a dated series, so
+            // there's no bar cadence to resolve cost scopes against.
+            effective_freq: None,
+            windowed: windowed.and_then(std::num::NonZeroUsize::new),
+            seconds_per_bar,
+        };
+        let ctx_ref = &ctx;
         let evaluate_row = |params: &std::collections::HashMap<String, JsonValue>|
             -> anyhow::Result<spec_optimize::Evaluation>
         {
@@ -8541,25 +8553,15 @@ fn optimize(
                             spec_backtest::evaluate_pairs(
                                 &spec,
                                 &snaps,
-                                cash,
-                                bars_per_year,
-                                risk_free_rate,
-                                &cost_config,
-                                None,
-                                seconds_per_bar,
+                                ctx_ref,
                             ),
                         )),
                         Some(w) => spec_optimize::Evaluation::Windowed(
                             spec_backtest::evaluate_windowed_pairs(
                                 &spec,
                                 &snaps,
-                                cash,
-                                bars_per_year,
-                                risk_free_rate,
-                                &cost_config,
-                                None,
+                                ctx_ref,
                                 w,
-                                seconds_per_bar,
                             ),
                         ),
                     })
@@ -8575,12 +8577,7 @@ fn optimize(
                                 &spec,
                                 &snaps,
                                 &universe,
-                                cash,
-                                bars_per_year,
-                                risk_free_rate,
-                                &cost_config,
-                                None,
-                                seconds_per_bar,
+                                ctx_ref,
                             ),
                         )),
                         Some(w) => spec_optimize::Evaluation::Windowed(
@@ -8588,13 +8585,8 @@ fn optimize(
                                 &spec,
                                 &snaps,
                                 &universe,
-                                cash,
-                                bars_per_year,
-                                risk_free_rate,
-                                &cost_config,
-                                None,
+                                ctx_ref,
                                 w,
-                                seconds_per_bar,
                             ),
                         ),
                     })
@@ -8610,12 +8602,7 @@ fn optimize(
                                 &spec,
                                 &snaps,
                                 &universe,
-                                cash,
-                                bars_per_year,
-                                risk_free_rate,
-                                &cost_config,
-                                None,
-                                seconds_per_bar,
+                                ctx_ref,
                             ),
                         )),
                         Some(w) => spec_optimize::Evaluation::Windowed(
@@ -8623,13 +8610,8 @@ fn optimize(
                                 &spec,
                                 &snaps,
                                 &universe,
-                                cash,
-                                bars_per_year,
-                                risk_free_rate,
-                                &cost_config,
-                                None,
+                                ctx_ref,
                                 w,
-                                seconds_per_bar,
                             ),
                         ),
                     })
@@ -8644,25 +8626,15 @@ fn optimize(
                             spec_backtest::evaluate_portfolio(
                                 &spec,
                                 &snaps,
-                                cash,
-                                bars_per_year,
-                                risk_free_rate,
-                                &cost_config,
-                                None,
-                                seconds_per_bar,
+                                ctx_ref,
                             ),
                         )),
                         Some(w) => spec_optimize::Evaluation::Windowed(
                             spec_backtest::evaluate_windowed_portfolio(
                                 &spec,
                                 &snaps,
-                                cash,
-                                bars_per_year,
-                                risk_free_rate,
-                                &cost_config,
-                                None,
+                                ctx_ref,
                                 w,
-                                seconds_per_bar,
                             ),
                         ),
                     })

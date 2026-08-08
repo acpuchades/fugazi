@@ -286,6 +286,16 @@ fn run_single(
     let windowed_n = windowed_bars.map(NonZeroUsize::get);
     let schema = backtest::schema_from_atoms(&atoms);
     let schema_ref = &schema;
+    let ctx = backtest::EvalContext {
+        cash: opts.cash,
+        bars_per_year,
+        risk_free_rate: opts.risk_free_rate,
+        cost_config,
+        effective_freq,
+        windowed: windowed_bars,
+        seconds_per_bar,
+    };
+    let ctx_ref = &ctx;
     let evaluate_row = move |params: &HashMap<String, Value>| -> Result<Evaluation> {
         let spec = build_spec(base_value, params)?;
         // The evaluate/measured_report path builds through the infallible
@@ -296,24 +306,14 @@ fn run_single(
             Some(w) => Evaluation::Windowed(backtest::evaluate_windowed(
                 &spec,
                 atoms_ref,
-                opts.cash,
-                bars_per_year,
-                opts.risk_free_rate,
-                cost_config,
-                effective_freq,
-                w,
-                seconds_per_bar,
-            )),
+                ctx_ref,
+                        w,
+                    )),
             None => Evaluation::Whole(Box::new(backtest::evaluate(
                 &spec,
                 atoms_ref,
-                opts.cash,
-                bars_per_year,
-                opts.risk_free_rate,
-                cost_config,
-                effective_freq,
-                seconds_per_bar,
-            ))),
+                ctx_ref,
+                    ))),
         })
     };
 
@@ -497,6 +497,16 @@ fn run_multi_symbol(
     let kind = opts.strategy_kind;
     let schema = backtest::schema_from_snapshots(&snapshots);
     let schema_ref = &schema;
+    let ctx = backtest::EvalContext {
+        cash: opts.cash,
+        bars_per_year,
+        risk_free_rate: opts.risk_free_rate,
+        cost_config,
+        effective_freq,
+        windowed: windowed_bars,
+        seconds_per_bar,
+    };
+    let ctx_ref = &ctx;
 
     let evaluate_row = move |params: &HashMap<String, Value>| -> Result<Evaluation> {
         Ok(match kind {
@@ -507,23 +517,13 @@ fn run_multi_symbol(
                     Some(w) => Evaluation::Windowed(backtest::evaluate_windowed_pairs(
                         &spec,
                         snapshots_ref,
-                        opts.cash,
-                        bars_per_year,
-                        opts.risk_free_rate,
-                        cost_config,
-                        effective_freq,
+                        ctx_ref,
                         w,
-                        seconds_per_bar,
                     )),
                     None => Evaluation::Whole(Box::new(backtest::evaluate_pairs(
                         &spec,
                         snapshots_ref,
-                        opts.cash,
-                        bars_per_year,
-                        opts.risk_free_rate,
-                        cost_config,
-                        effective_freq,
-                        seconds_per_bar,
+                        ctx_ref,
                     ))),
                 }
             }
@@ -535,24 +535,14 @@ fn run_multi_symbol(
                         &spec,
                         snapshots_ref,
                         universe_ref,
-                        opts.cash,
-                        bars_per_year,
-                        opts.risk_free_rate,
-                        cost_config,
-                        effective_freq,
+                        ctx_ref,
                         w,
-                        seconds_per_bar,
                     )),
                     None => Evaluation::Whole(Box::new(backtest::evaluate_basket(
                         &spec,
                         snapshots_ref,
                         universe_ref,
-                        opts.cash,
-                        bars_per_year,
-                        opts.risk_free_rate,
-                        cost_config,
-                        effective_freq,
-                        seconds_per_bar,
+                        ctx_ref,
                     ))),
                 }
             }
@@ -564,24 +554,14 @@ fn run_multi_symbol(
                         &spec,
                         snapshots_ref,
                         universe_ref,
-                        opts.cash,
-                        bars_per_year,
-                        opts.risk_free_rate,
-                        cost_config,
-                        effective_freq,
+                        ctx_ref,
                         w,
-                        seconds_per_bar,
                     )),
                     None => Evaluation::Whole(Box::new(backtest::evaluate_multi(
                         &spec,
                         snapshots_ref,
                         universe_ref,
-                        opts.cash,
-                        bars_per_year,
-                        opts.risk_free_rate,
-                        cost_config,
-                        effective_freq,
-                        seconds_per_bar,
+                        ctx_ref,
                     ))),
                 }
             }
@@ -592,23 +572,13 @@ fn run_multi_symbol(
                     Some(w) => Evaluation::Windowed(backtest::evaluate_windowed_portfolio(
                         &spec,
                         snapshots_ref,
-                        opts.cash,
-                        bars_per_year,
-                        opts.risk_free_rate,
-                        cost_config,
-                        effective_freq,
+                        ctx_ref,
                         w,
-                        seconds_per_bar,
                     )),
                     None => Evaluation::Whole(Box::new(backtest::evaluate_portfolio(
                         &spec,
                         snapshots_ref,
-                        opts.cash,
-                        bars_per_year,
-                        opts.risk_free_rate,
-                        cost_config,
-                        effective_freq,
-                        seconds_per_bar,
+                        ctx_ref,
                     ))),
                 }
             }

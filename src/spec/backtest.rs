@@ -131,52 +131,6 @@ pub fn schema_from_snapshots(
         .unwrap_or_else(Schema::empty)
 }
 
-/// Pure metrics-only evaluation: drive `spec` over `atoms` through a paper
-/// wallet with `cash` starting funds, the given `cost_config` resolved for
-/// (spec's symbol, `frequency`), and reduce the run to a [`metrics::Metrics`]
-/// document. The shape `optimize` calls per grid combination.
-#[allow(clippy::too_many_arguments)]
-pub fn evaluate(
-    spec: &SingleStrategySpec,
-    atoms: &[(String, Atom)],
-    cash: Real,
-    bars_per_year: Real,
-    risk_free_rate: Real,
-    cost_config: &CostConfig,
-    frequency: Option<Frequency>,
-    seconds_per_bar: Option<Real>,
-) -> metrics::Metrics {
-    let costs = cost_config.resolve(&spec.symbol, frequency);
-    let measured = measured_report(spec, atoms, cash, costs);
-    metrics::from_report(&measured, bars_per_year, risk_free_rate, seconds_per_bar)
-}
-
-/// The windowed twin of [`evaluate`]: reduce the same measured run to one
-/// [`metrics::Metrics`] per non-overlapping `window`-bar span — what
-/// `optimize -w/--windowed` calls per grid combination.
-#[allow(clippy::too_many_arguments)]
-pub fn evaluate_windowed(
-    spec: &SingleStrategySpec,
-    atoms: &[(String, Atom)],
-    cash: Real,
-    bars_per_year: Real,
-    risk_free_rate: Real,
-    cost_config: &CostConfig,
-    frequency: Option<Frequency>,
-    window: usize,
-    seconds_per_bar: Option<Real>,
-) -> Vec<metrics::WindowMetrics> {
-    let costs = cost_config.resolve(&spec.symbol, frequency);
-    let measured = measured_report(spec, atoms, cash, costs);
-    metrics::windowed_from_report(
-        &measured,
-        window,
-        bars_per_year,
-        risk_free_rate,
-        seconds_per_bar,
-    )
-}
-
 /// Drive an already-built strategy over pre-aligned `snapshots` through
 /// a fresh paper wallet with `cash` starting funds and `per_symbol_costs`
 /// per leg. The strategy-agnostic seam: given any
@@ -203,208 +157,155 @@ where
     crate::backtest::run(&mut strategy, &mut wallet, snapshots.iter().cloned())
 }
 
-/// The basket twin of [`evaluate`]: reduce a whole-run backtest of
-/// `spec` over `snapshots` to a single [`metrics::Metrics`] document.
-/// What `optimize` calls per grid combination for a `basket:` document.
-#[allow(clippy::too_many_arguments)]
-pub fn evaluate_basket(
-    spec: &BasketStrategySpec,
+/// Whole-run measurement for a `pairs:` document — two symbols, atoms
+/// pre-joined by time into per-bar snapshots.
+pub fn measured_report_pairs(
+    spec: &PairsStrategySpec,
     snapshots: &[crate::types::Snapshot<String>],
-    universe: &[String],
-    cash: Real,
-    bars_per_year: Real,
-    risk_free_rate: Real,
-    cost_config: &CostConfig,
-    frequency: Option<Frequency>,
-    seconds_per_bar: Option<Real>,
-) -> metrics::Metrics {
-    let per_symbol_costs: Vec<(String, TradingCosts)> = universe
-        .iter()
-        .map(|s| (s.clone(), cost_config.resolve(s, frequency)))
-        .collect();
-    let schema = snapshots
-        .iter()
-        .flat_map(|s| s.iter())
-        .find_map(|(_sym, _freq, a)| a.overlays.as_ref())
-        .map(|ov| ov.schema().clone())
-        .unwrap_or_else(Schema::empty);
-    let measured =
-        measured_report_from_strategy(|| spec.build(cash, &schema), snapshots, cash, per_symbol_costs);
-    metrics::from_report(&measured, bars_per_year, risk_free_rate, seconds_per_bar)
+    ctx: &EvalContext,
+) -> crate::RunReport<String> {
+    let schema = schema_from_snapshots(snapshots);
+    measured_report_from_strategy(
+        || spec.build(ctx.cash, &schema),
+        snapshots,
+        ctx.cash,
+        ctx.costs_for([&spec.left, &spec.right]),
+    )
 }
 
-/// Windowed twin of [`evaluate_basket`] — same shape as
-/// [`evaluate_windowed`] but for a `basket:` document.
-#[allow(clippy::too_many_arguments)]
-pub fn evaluate_windowed_basket(
+/// Whole-run measurement for a `basket:` document.
+pub fn measured_report_basket(
     spec: &BasketStrategySpec,
     snapshots: &[crate::types::Snapshot<String>],
     universe: &[String],
-    cash: Real,
-    bars_per_year: Real,
-    risk_free_rate: Real,
-    cost_config: &CostConfig,
-    frequency: Option<Frequency>,
+    ctx: &EvalContext,
+) -> crate::RunReport<String> {
+    let schema = schema_from_snapshots(snapshots);
+    measured_report_from_strategy(
+        || spec.build(ctx.cash, &schema),
+        snapshots,
+        ctx.cash,
+        ctx.costs_for(universe),
+    )
+}
+
+/// Whole-run measurement for a `multi:` document (independent per-symbol
+/// [`SingleAssetStrategy`](crate::strategies::SingleAssetStrategy)-shaped
+/// decisions).
+pub fn measured_report_multi(
+    spec: &MultiAssetStrategySpec,
+    snapshots: &[crate::types::Snapshot<String>],
+    universe: &[String],
+    ctx: &EvalContext,
+) -> crate::RunReport<String> {
+    let schema = schema_from_snapshots(snapshots);
+    measured_report_from_strategy(
+        || spec.build(ctx.cash, &schema),
+        snapshots,
+        ctx.cash,
+        ctx.costs_for(universe),
+    )
+}
+
+/// Pure metrics-only evaluation: drive `spec` over `atoms` through a paper
+/// wallet seeded from `ctx`, and reduce the run to a [`metrics::Metrics`]
+/// document. The shape `optimize` calls per grid combination.
+pub fn evaluate(
+    spec: &SingleStrategySpec,
+    atoms: &[(String, Atom)],
+    ctx: &EvalContext,
+) -> metrics::Metrics {
+    ctx.reduce(&measured_report(
+        spec,
+        atoms,
+        ctx.cash,
+        ctx.costs_for_one(&spec.symbol),
+    ))
+}
+
+/// The windowed twin of [`evaluate`]: reduce the same measured run to one
+/// [`metrics::Metrics`] per non-overlapping `window`-bar span — what
+/// `optimize -w/--windowed` calls per grid combination.
+pub fn evaluate_windowed(
+    spec: &SingleStrategySpec,
+    atoms: &[(String, Atom)],
+    ctx: &EvalContext,
     window: usize,
-    seconds_per_bar: Option<Real>,
 ) -> Vec<metrics::WindowMetrics> {
-    let per_symbol_costs: Vec<(String, TradingCosts)> = universe
-        .iter()
-        .map(|s| (s.clone(), cost_config.resolve(s, frequency)))
-        .collect();
-    let schema = snapshots
-        .iter()
-        .flat_map(|s| s.iter())
-        .find_map(|(_sym, _freq, a)| a.overlays.as_ref())
-        .map(|ov| ov.schema().clone())
-        .unwrap_or_else(Schema::empty);
-    let measured =
-        measured_report_from_strategy(|| spec.build(cash, &schema), snapshots, cash, per_symbol_costs);
-    metrics::windowed_from_report(
-        &measured,
+    ctx.reduce_windowed(
+        &measured_report(spec, atoms, ctx.cash, ctx.costs_for_one(&spec.symbol)),
         window,
-        bars_per_year,
-        risk_free_rate,
-        seconds_per_bar,
     )
 }
 
 /// The pairs twin of [`evaluate`] — one grid-cell evaluation for a
-/// `pairs:` document. Two symbols (`spec.left` / `spec.right`), atoms
-/// pre-joined by time into per-bar snapshots.
-#[allow(clippy::too_many_arguments)]
+/// `pairs:` document.
 pub fn evaluate_pairs(
     spec: &PairsStrategySpec,
     snapshots: &[crate::types::Snapshot<String>],
-    cash: Real,
-    bars_per_year: Real,
-    risk_free_rate: Real,
-    cost_config: &CostConfig,
-    frequency: Option<Frequency>,
-    seconds_per_bar: Option<Real>,
+    ctx: &EvalContext,
 ) -> metrics::Metrics {
-    let per_symbol_costs: Vec<(String, TradingCosts)> = vec![
-        (spec.left.clone(), cost_config.resolve(&spec.left, frequency)),
-        (spec.right.clone(), cost_config.resolve(&spec.right, frequency)),
-    ];
-    let schema = snapshots
-        .iter()
-        .flat_map(|s| s.iter())
-        .find_map(|(_sym, _freq, a)| a.overlays.as_ref())
-        .map(|ov| ov.schema().clone())
-        .unwrap_or_else(Schema::empty);
-    let measured = measured_report_from_strategy(
-        || spec.build(cash, &schema),
-        snapshots,
-        cash,
-        per_symbol_costs,
-    );
-    metrics::from_report(&measured, bars_per_year, risk_free_rate, seconds_per_bar)
+    ctx.reduce(&measured_report_pairs(spec, snapshots, ctx))
 }
 
 /// Windowed twin of [`evaluate_pairs`].
-#[allow(clippy::too_many_arguments)]
 pub fn evaluate_windowed_pairs(
     spec: &PairsStrategySpec,
     snapshots: &[crate::types::Snapshot<String>],
-    cash: Real,
-    bars_per_year: Real,
-    risk_free_rate: Real,
-    cost_config: &CostConfig,
-    frequency: Option<Frequency>,
+    ctx: &EvalContext,
     window: usize,
-    seconds_per_bar: Option<Real>,
 ) -> Vec<metrics::WindowMetrics> {
-    let per_symbol_costs: Vec<(String, TradingCosts)> = vec![
-        (spec.left.clone(), cost_config.resolve(&spec.left, frequency)),
-        (spec.right.clone(), cost_config.resolve(&spec.right, frequency)),
-    ];
-    let schema = snapshots
-        .iter()
-        .flat_map(|s| s.iter())
-        .find_map(|(_sym, _freq, a)| a.overlays.as_ref())
-        .map(|ov| ov.schema().clone())
-        .unwrap_or_else(Schema::empty);
-    let measured = measured_report_from_strategy(
-        || spec.build(cash, &schema),
-        snapshots,
-        cash,
-        per_symbol_costs,
-    );
-    metrics::windowed_from_report(
-        &measured,
+    ctx.reduce_windowed(&measured_report_pairs(spec, snapshots, ctx), window)
+}
+
+/// The basket twin of [`evaluate`].
+pub fn evaluate_basket(
+    spec: &BasketStrategySpec,
+    snapshots: &[crate::types::Snapshot<String>],
+    universe: &[String],
+    ctx: &EvalContext,
+) -> metrics::Metrics {
+    ctx.reduce(&measured_report_basket(spec, snapshots, universe, ctx))
+}
+
+/// Windowed twin of [`evaluate_basket`].
+pub fn evaluate_windowed_basket(
+    spec: &BasketStrategySpec,
+    snapshots: &[crate::types::Snapshot<String>],
+    universe: &[String],
+    ctx: &EvalContext,
+    window: usize,
+) -> Vec<metrics::WindowMetrics> {
+    ctx.reduce_windowed(
+        &measured_report_basket(spec, snapshots, universe, ctx),
         window,
-        bars_per_year,
-        risk_free_rate,
-        seconds_per_bar,
     )
 }
 
-/// The multi-asset twin of [`evaluate`] — one grid-cell evaluation for a
-/// `multi:` document (independent per-symbol
-/// [`SingleAssetStrategy`](crate::strategies::SingleAssetStrategy)-shaped
-/// decisions).
-#[allow(clippy::too_many_arguments)]
+/// The multi-asset twin of [`evaluate`].
 pub fn evaluate_multi(
     spec: &MultiAssetStrategySpec,
     snapshots: &[crate::types::Snapshot<String>],
     universe: &[String],
-    cash: Real,
-    bars_per_year: Real,
-    risk_free_rate: Real,
-    cost_config: &CostConfig,
-    frequency: Option<Frequency>,
-    seconds_per_bar: Option<Real>,
+    ctx: &EvalContext,
 ) -> metrics::Metrics {
-    let per_symbol_costs: Vec<(String, TradingCosts)> = universe
-        .iter()
-        .map(|s| (s.clone(), cost_config.resolve(s, frequency)))
-        .collect();
-    let schema = snapshots
-        .iter()
-        .flat_map(|s| s.iter())
-        .find_map(|(_sym, _freq, a)| a.overlays.as_ref())
-        .map(|ov| ov.schema().clone())
-        .unwrap_or_else(Schema::empty);
-    let measured =
-        measured_report_from_strategy(|| spec.build(cash, &schema), snapshots, cash, per_symbol_costs);
-    metrics::from_report(&measured, bars_per_year, risk_free_rate, seconds_per_bar)
+    ctx.reduce(&measured_report_multi(spec, snapshots, universe, ctx))
 }
 
 /// Windowed twin of [`evaluate_multi`].
-#[allow(clippy::too_many_arguments)]
 pub fn evaluate_windowed_multi(
     spec: &MultiAssetStrategySpec,
     snapshots: &[crate::types::Snapshot<String>],
     universe: &[String],
-    cash: Real,
-    bars_per_year: Real,
-    risk_free_rate: Real,
-    cost_config: &CostConfig,
-    frequency: Option<Frequency>,
+    ctx: &EvalContext,
     window: usize,
-    seconds_per_bar: Option<Real>,
 ) -> Vec<metrics::WindowMetrics> {
-    let per_symbol_costs: Vec<(String, TradingCosts)> = universe
-        .iter()
-        .map(|s| (s.clone(), cost_config.resolve(s, frequency)))
-        .collect();
-    let schema = snapshots
-        .iter()
-        .flat_map(|s| s.iter())
-        .find_map(|(_sym, _freq, a)| a.overlays.as_ref())
-        .map(|ov| ov.schema().clone())
-        .unwrap_or_else(Schema::empty);
-    let measured =
-        measured_report_from_strategy(|| spec.build(cash, &schema), snapshots, cash, per_symbol_costs);
-    metrics::windowed_from_report(
-        &measured,
+    ctx.reduce_windowed(
+        &measured_report_multi(spec, snapshots, universe, ctx),
         window,
-        bars_per_year,
-        risk_free_rate,
-        seconds_per_bar,
     )
 }
+
 
 /// The portfolio twin of [`measured_report_from_strategy`]: drive an
 /// already-built [`DynPortfolio`](crate::spec::DynPortfolio) through its
@@ -474,58 +375,53 @@ fn build_priced_portfolio_with_costs(
     portfolio
 }
 
+/// Whole-run measurement for a `portfolio:` document. Resolves the unscoped
+/// [`TradingCosts`] default as the wallet-wide fallback, plus per-symbol
+/// scoped bundles for every symbol in the discovered universe (installed on
+/// every sub-wallet via
+/// [`DynPortfolio::install_costs_for`](crate::spec::DynPortfolio::install_costs_for)).
+pub fn measured_report_portfolio_spec(
+    spec: &PortfolioSpec,
+    snapshots: &[crate::types::Snapshot<String>],
+    ctx: &EvalContext,
+) -> crate::RunReport<String> {
+    let schema = schema_from_snapshots(snapshots);
+    let universe = universe_from_snapshots(snapshots);
+    measured_report_portfolio(
+        || {
+            build_priced_portfolio_with_costs(
+                spec,
+                ctx.cash,
+                &schema,
+                ctx.cost_config,
+                ctx.effective_freq,
+                &universe,
+            )
+        },
+        snapshots,
+    )
+}
+
 /// The portfolio twin of [`evaluate`] — one grid-cell evaluation for a
-/// `portfolio:` document. Resolves the unscoped [`TradingCosts`] default
-/// as the wallet-wide fallback, plus per-symbol scoped bundles for every
-/// symbol in the discovered universe (installed on every sub-wallet via
-/// [`DynPortfolio::install_costs_for`](crate::spec::DynPortfolio::install_costs_for)),
-/// then reduces the whole-run report to a single [`metrics::Metrics`]
-/// document.
-#[allow(clippy::too_many_arguments)]
+/// `portfolio:` document.
 pub fn evaluate_portfolio(
     spec: &PortfolioSpec,
     snapshots: &[crate::types::Snapshot<String>],
-    cash: Real,
-    bars_per_year: Real,
-    risk_free_rate: Real,
-    cost_config: &CostConfig,
-    frequency: Option<Frequency>,
-    seconds_per_bar: Option<Real>,
+    ctx: &EvalContext,
 ) -> metrics::Metrics {
-    let schema = schema_from_snapshots(snapshots);
-    let universe = universe_from_snapshots(snapshots);
-    let measured = measured_report_portfolio(
-        || build_priced_portfolio_with_costs(spec, cash, &schema, cost_config, frequency, &universe),
-        snapshots,
-    );
-    metrics::from_report(&measured, bars_per_year, risk_free_rate, seconds_per_bar)
+    ctx.reduce(&measured_report_portfolio_spec(spec, snapshots, ctx))
 }
 
 /// Windowed twin of [`evaluate_portfolio`].
-#[allow(clippy::too_many_arguments)]
 pub fn evaluate_windowed_portfolio(
     spec: &PortfolioSpec,
     snapshots: &[crate::types::Snapshot<String>],
-    cash: Real,
-    bars_per_year: Real,
-    risk_free_rate: Real,
-    cost_config: &CostConfig,
-    frequency: Option<Frequency>,
+    ctx: &EvalContext,
     window: usize,
-    seconds_per_bar: Option<Real>,
 ) -> Vec<metrics::WindowMetrics> {
-    let schema = schema_from_snapshots(snapshots);
-    let universe = universe_from_snapshots(snapshots);
-    let measured = measured_report_portfolio(
-        || build_priced_portfolio_with_costs(spec, cash, &schema, cost_config, frequency, &universe),
-        snapshots,
-    );
-    metrics::windowed_from_report(
-        &measured,
+    ctx.reduce_windowed(
+        &measured_report_portfolio_spec(spec, snapshots, ctx),
         window,
-        bars_per_year,
-        risk_free_rate,
-        seconds_per_bar,
     )
 }
 
@@ -539,7 +435,7 @@ pub fn run_iteration_portfolio(
     spec: &PortfolioSpec,
     bars: &[String],
     snapshots: &[crate::types::Snapshot<String>],
-    inputs: &IterationInputs,
+    inputs: &EvalContext,
 ) -> IterationResult {
     assert_eq!(
         bars.len(),
@@ -680,11 +576,22 @@ pub struct SummaryRow {
     pub bars: usize,
 }
 
-/// The resolved-once inputs [`run_iteration`] consumes. Kept separate from
-/// the driver's option struct (see [`crate::run::RunOptions`]) so the
-/// pure-work layer doesn't carry `out_dir`, `strategy_label`, etc. — the
-/// knobs that only make sense to the IO layer.
-pub struct IterationInputs<'a> {
+/// The resolved-once inputs every measurement in this module consumes —
+/// [`evaluate`] and its per-shape twins, and [`run_iteration`] and its.
+///
+/// Kept separate from the driver's option struct (see
+/// [`crate::run::RunOptions`]) so the pure-work layer doesn't carry
+/// `out_dir`, `strategy_label`, etc. — the knobs that only make sense to the
+/// IO layer.
+///
+/// The fields group into three concerns, which is also how the methods below
+/// divide: **execution** (`cash`, `cost_config`, `effective_freq`) seeds the
+/// wallet, **measurement** (`bars_per_year`, `risk_free_rate`,
+/// `seconds_per_bar`) reduces a report to metrics, and `windowed` picks the
+/// reduction. They travel together through every entry point here, which is
+/// why they're one struct rather than the seven positional arguments this
+/// used to be.
+pub struct EvalContext<'a> {
     pub cash: Real,
     pub bars_per_year: Real,
     pub risk_free_rate: Real,
@@ -699,13 +606,62 @@ pub struct IterationInputs<'a> {
     pub seconds_per_bar: Option<Real>,
 }
 
+impl EvalContext<'_> {
+    /// Resolve one symbol's [`TradingCosts`] at this run's cadence.
+    pub fn costs_for_one(&self, symbol: &str) -> TradingCosts {
+        self.cost_config.resolve(symbol, self.effective_freq)
+    }
+
+    /// Resolve a per-symbol cost bundle for each of `symbols` — the shape
+    /// [`measured_report_from_strategy`] primes its wallet with. Pairs pass
+    /// their two legs, basket / multi their whole universe.
+    pub fn costs_for<S: AsRef<str>>(
+        &self,
+        symbols: impl IntoIterator<Item = S>,
+    ) -> Vec<(String, TradingCosts)> {
+        symbols
+            .into_iter()
+            .map(|s| {
+                let s = s.as_ref();
+                (s.to_string(), self.costs_for_one(s))
+            })
+            .collect()
+    }
+
+    /// Reduce a whole run to one [`metrics::Metrics`] document.
+    pub fn reduce(&self, report: &crate::RunReport<String>) -> metrics::Metrics {
+        metrics::from_report(
+            report,
+            self.bars_per_year,
+            self.risk_free_rate,
+            self.seconds_per_bar,
+        )
+    }
+
+    /// Reduce a run to one [`metrics::Metrics`] per non-overlapping
+    /// `window`-bar span.
+    pub fn reduce_windowed(
+        &self,
+        report: &crate::RunReport<String>,
+        window: usize,
+    ) -> Vec<metrics::WindowMetrics> {
+        metrics::windowed_from_report(
+            report,
+            window,
+            self.bars_per_year,
+            self.risk_free_rate,
+            self.seconds_per_bar,
+        )
+    }
+}
+
 /// The pure-work half of a run: drive the strategy over `atoms`, reduce
 /// the report to `Metrics`, and hand back an [`IterationResult`]. Does no
 /// IO and no console printing — that's the driver's responsibility.
 pub fn run_iteration(
     strategy: &StrategyRef,
     atoms: &[(String, Atom)],
-    inputs: &IterationInputs,
+    inputs: &EvalContext,
 ) -> IterationResult {
     let symbol = strategy.symbol();
     let costs = inputs.cost_config.resolve(symbol, inputs.effective_freq);
@@ -747,7 +703,7 @@ pub fn run_iteration_pairs(
     bars: &[String],
     left: &[Atom],
     right: &[Atom],
-    inputs: &IterationInputs,
+    inputs: &EvalContext,
 ) -> IterationResult {
     assert_eq!(
         left.len(),
@@ -823,7 +779,7 @@ pub fn run_iteration_basket(
     bars: &[String],
     snapshots: &[crate::types::Snapshot<String>],
     universe: &[String],
-    inputs: &IterationInputs,
+    inputs: &EvalContext,
 ) -> IterationResult {
     assert_eq!(
         bars.len(),
@@ -868,7 +824,7 @@ pub fn run_iteration_multi(
     bars: &[String],
     snapshots: &[crate::types::Snapshot<String>],
     universe: &[String],
-    inputs: &IterationInputs,
+    inputs: &EvalContext,
 ) -> IterationResult {
     assert_eq!(
         bars.len(),
@@ -923,7 +879,7 @@ fn run_iteration_core<S>(
     snapshots: &[crate::types::Snapshot<String>],
     bars: Vec<String>,
     per_symbol_costs: Vec<(String, TradingCosts)>,
-    inputs: &IterationInputs,
+    inputs: &EvalContext,
 ) -> IterationResult
 where
     S: crate::Strategy<Input = crate::types::Snapshot<String>, Symbol = String>,
