@@ -1160,6 +1160,51 @@ mod tests {
     }
 
     #[test]
+    fn pick_rejects_a_malformed_frequency() {
+        let spec: ExprSpec = serde_norway::from_str("!pick { symbol: BTC, freq: banana }").unwrap();
+        let err = expr_build_err(&spec, &Schema::empty());
+        let (trail, message) = crate::spec::diagnostics::split_trail(&err);
+        assert_eq!(trail, vec!["!pick"], "{err}");
+        assert!(message.contains("invalid frequency"), "{err}");
+        assert!(message.contains("banana"), "names the offender: {err}");
+    }
+
+    #[test]
+    fn a_bare_book_source_selector_is_rejected() {
+        // `!strategy_book` / `!portfolio_book` only mean something in the
+        // `source:` slot of a book-reading node; standing alone they have no
+        // runtime value at all.
+        for tag in ["!strategy_book", "!portfolio_book"] {
+            let spec: ExprSpec = serde_norway::from_str(tag).unwrap();
+            let err = expr_build_err(&spec, &Schema::empty());
+            assert!(err.contains("build-time source selector"), "{tag}: {err}");
+        }
+    }
+
+    #[test]
+    fn portfolio_book_outside_a_portfolio_weight_scope_is_rejected() {
+        // The `source:` is well-formed here — there just is no aggregate book
+        // to resolve it against, which is what the message has to say.
+        let spec: ExprSpec =
+            serde_norway::from_str("!drawdown { source: !portfolio_book }").unwrap();
+        let err = expr_build_err(&spec, &Schema::empty());
+        assert!(
+            err.contains("not inside a portfolio weight scope"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_value_list_outside_a_portfolio_weight_template_is_rejected() {
+        // `!value [..]` is only reachable through `PortfolioSpec::build`, which
+        // rewrites it to the child's own element first. Seeing one here means
+        // it was used somewhere it has no meaning.
+        let spec: ExprSpec = serde_norway::from_str("!value [0.6, 0.4]").unwrap();
+        let err = expr_build_err(&spec, &Schema::empty());
+        assert!(err.contains("portfolio weight-share template"), "{err}");
+    }
+
+    #[test]
     fn a_nested_failure_carries_the_whole_tag_path() {
         // The reason the breadcrumb exists: the offending `!get` is three
         // levels down, and the message has to say where it is.

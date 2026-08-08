@@ -8497,7 +8497,9 @@ fn optimize(
                         .collect();
                     let schema = spec_backtest::schema_from_atoms(&atoms);
                     let costs = cost_config.resolve(&symbol, None);
-                    let mut strategy = sref.build(cash, &schema);
+                    let mut strategy = sref
+                        .try_build(cash, &schema)
+                        .map_err(spec_backtest::build_error)?;
                     let mut wallet = PaperWallet::with_costs(cash, costs);
                     let symbol_clone = symbol.clone();
                     let report = fugazi_core::backtest::run(
@@ -8529,6 +8531,11 @@ fn optimize(
                 }
                 "pairs" => {
                     let spec = spec_optimize::build_pairs_spec(&base_value, params)?;
+                    // The evaluate_* path builds through the infallible shim,
+                    // so validate first — same reason as the CLI's rows.
+                    spec_backtest::validated(|| {
+                        spec.try_build(cash, &spec_backtest::schema_from_snapshots(&snaps))
+                    })?;
                     Ok(match windowed {
                         None => spec_optimize::Evaluation::Whole(Box::new(
                             spec_backtest::evaluate_pairs(
@@ -8559,6 +8566,9 @@ fn optimize(
                 }
                 "basket" => {
                     let spec = spec_optimize::build_basket_spec(&base_value, params)?;
+                    spec_backtest::validated(|| {
+                        spec.try_build(cash, &spec_backtest::schema_from_snapshots(&snaps))
+                    })?;
                     Ok(match windowed {
                         None => spec_optimize::Evaluation::Whole(Box::new(
                             spec_backtest::evaluate_basket(
@@ -8591,6 +8601,9 @@ fn optimize(
                 }
                 "multi" => {
                     let spec = spec_optimize::build_multi_spec(&base_value, params)?;
+                    spec_backtest::validated(|| {
+                        spec.try_build(cash, &spec_backtest::schema_from_snapshots(&snaps))
+                    })?;
                     Ok(match windowed {
                         None => spec_optimize::Evaluation::Whole(Box::new(
                             spec_backtest::evaluate_multi(
@@ -8623,6 +8636,9 @@ fn optimize(
                 }
                 "portfolio" => {
                     let spec = spec_optimize::build_portfolio_spec(&base_value, params)?;
+                    spec_backtest::validated(|| {
+                        spec.try_build(cash, &spec_backtest::schema_from_snapshots(&snaps), None)
+                    })?;
                     Ok(match windowed {
                         None => spec_optimize::Evaluation::Whole(Box::new(
                             spec_backtest::evaluate_portfolio(
@@ -8927,29 +8943,44 @@ fn run_walkforward(
                             })
                             .collect();
                         let schema = spec_backtest::schema_from_atoms(&atoms);
-                        Ok(sref.build(cash, &schema).stable_period())
+                        Ok(sref
+                            .try_build(cash, &schema)
+                            .map_err(spec_backtest::build_error)?
+                            .stable_period())
                     }
                     "pairs" => {
                         let spec = spec_optimize::build_pairs_spec(base_value, params)?;
                         let schema = spec_backtest::schema_from_snapshots(snaps);
-                        Ok(spec.build(cash, &schema).stable_period())
+                        Ok(spec
+                            .try_build(cash, &schema)
+                            .map_err(spec_backtest::build_error)?
+                            .stable_period())
                     }
                     "basket" => {
                         let spec = spec_optimize::build_basket_spec(base_value, params)?;
                         let schema = spec_backtest::schema_from_snapshots(snaps);
-                        Ok(spec.build(cash, &schema).stable_period())
+                        Ok(spec
+                            .try_build(cash, &schema)
+                            .map_err(spec_backtest::build_error)?
+                            .stable_period())
                     }
                     "multi" => {
                         let spec = spec_optimize::build_multi_spec(base_value, params)?;
                         let schema = spec_backtest::schema_from_snapshots(snaps);
-                        Ok(spec.build(cash, &schema).stable_period())
+                        Ok(spec
+                            .try_build(cash, &schema)
+                            .map_err(spec_backtest::build_error)?
+                            .stable_period())
                     }
                     "portfolio" => {
                         let spec = spec_optimize::build_portfolio_spec(base_value, params)?;
                         let schema = spec_backtest::schema_from_snapshots(snaps);
                         let default_costs = cost_config.resolve("", None);
                         let costs_opt = (!default_costs.is_none()).then_some(default_costs);
-                        Ok(spec.build(cash, &schema, costs_opt).stable_period())
+                        Ok(spec
+                            .try_build(cash, &schema, costs_opt)
+                            .map_err(spec_backtest::build_error)?
+                            .stable_period())
                     }
                     other => anyhow::bail!("unknown strategy kind `{other}`"),
                 }
@@ -8972,7 +9003,9 @@ fn run_walkforward(
                             .collect();
                         let schema = spec_backtest::schema_from_atoms(&atoms);
                         let costs = cost_config.resolve(&symbol, None);
-                        let mut strategy = sref.build(cash, &schema);
+                        let mut strategy = sref
+                            .try_build(cash, &schema)
+                            .map_err(spec_backtest::build_error)?;
                         let mut wallet = PaperWallet::with_costs(cash, costs);
                         let symbol_clone = symbol.clone();
                         Ok(fugazi_core::backtest::run(
@@ -8990,8 +9023,12 @@ fn run_walkforward(
                             (spec.left.clone(), cost_config.resolve(&spec.left, None)),
                             (spec.right.clone(), cost_config.resolve(&spec.right, None)),
                         ];
+                        let built = spec
+                            .try_build(cash, &schema)
+                            .map_err(spec_backtest::build_error)?;
+                        let mut built = Some(built);
                         Ok(spec_backtest::measured_report_from_strategy(
-                            || spec.build(cash, &schema),
+                            || built.take().expect("built once"),
                             snaps,
                             cash,
                             per_symbol_costs,
@@ -9004,8 +9041,12 @@ fn run_walkforward(
                             .iter()
                             .map(|s| (s.clone(), cost_config.resolve(s, None)))
                             .collect();
+                        let built = spec
+                            .try_build(cash, &schema)
+                            .map_err(spec_backtest::build_error)?;
+                        let mut built = Some(built);
                         Ok(spec_backtest::measured_report_from_strategy(
-                            || spec.build(cash, &schema),
+                            || built.take().expect("built once"),
                             snaps,
                             cash,
                             per_symbol_costs,
@@ -9018,8 +9059,12 @@ fn run_walkforward(
                             .iter()
                             .map(|s| (s.clone(), cost_config.resolve(s, None)))
                             .collect();
+                        let built = spec
+                            .try_build(cash, &schema)
+                            .map_err(spec_backtest::build_error)?;
+                        let mut built = Some(built);
                         Ok(spec_backtest::measured_report_from_strategy(
-                            || spec.build(cash, &schema),
+                            || built.take().expect("built once"),
                             snaps,
                             cash,
                             per_symbol_costs,
@@ -9030,14 +9075,15 @@ fn run_walkforward(
                         let schema = spec_backtest::schema_from_snapshots(snaps);
                         let default_costs = cost_config.resolve("", None);
                         let costs_opt = (!default_costs.is_none()).then_some(default_costs);
+                        let mut built = spec
+                            .try_build(cash, &schema, costs_opt.clone())
+                            .map_err(spec_backtest::build_error)?;
+                        for sym in universe {
+                            built.install_costs_for(sym, cost_config.resolve(sym, None));
+                        }
+                        let mut built = Some(built);
                         Ok(spec_backtest::measured_report_portfolio(
-                            || {
-                                let mut p = spec.build(cash, &schema, costs_opt.clone());
-                                for sym in universe {
-                                    p.install_costs_for(sym, cost_config.resolve(sym, None));
-                                }
-                                p
-                            },
+                            || built.take().expect("built once"),
                             snaps,
                         ))
                     }

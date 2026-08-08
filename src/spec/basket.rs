@@ -637,6 +637,28 @@ mod tests {
         Schema::empty()
     }
 
+    /// The point of the build-time probe: a per-symbol template that can't
+    /// build is caught *here*, not on the first bar that mentions a symbol.
+    ///
+    /// Without the probe, `score` is only constructed inside
+    /// `BasketStrategy::update` — deep in the driver, with no error path — so a
+    /// bad `!get` in it would abort a run that had already started.
+    #[test]
+    fn a_bad_per_symbol_template_is_rejected_at_build_not_mid_run() {
+        let yaml = r#"
+            selection: !top_bottom { longs: 1, shorts: 1 }
+            score: !get { key: no_such_column }
+            sizing: !value 1.0
+        "#;
+        let spec = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let err = spec
+            .try_build(1.0, &schema())
+            .err()
+            .expect("the probe must reject this");
+        assert!(err.contains("no_such_column"), "{err}");
+        assert!(err.contains("!get"), "carries the tag trail: {err}");
+    }
+
     #[test]
     fn deserializes_a_full_basket_spec() {
         let yaml = r#"
