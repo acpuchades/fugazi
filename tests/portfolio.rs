@@ -41,7 +41,7 @@ fn a_rising_b_flat_snapshots() -> Vec<Snapshot<&'static str>> {
 /// per-child readings).
 fn run_buy_and_hold_portfolio(
     initial_equity: Real,
-    policy: impl WeightPolicy,
+    policy: impl WeightPolicy + Send,
 ) -> (
     Portfolio<&'static str>,
     fugazi::RunReport<&'static str>,
@@ -167,21 +167,23 @@ fn on_fill_only_reaches_the_owning_child() {
     // other is a passive recorder that never trades. The recorder
     // should see zero fills; only the buy-and-hold owner sees its own
     // — verifies portfolio-wide OrderId namespacing and owners routing.
+    // `Arc<Mutex<_>>`, not `Rc<RefCell<_>>`: a portfolio child must be `Send`
+    // now that `Portfolio` itself is, so shared test state has to be too.
     let recorder_log =
-        std::rc::Rc::new(std::cell::RefCell::new(Vec::<Order<&'static str>>::new()));
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::<Order<&'static str>>::new()));
     struct SharedRecorder {
-        log: std::rc::Rc<std::cell::RefCell<Vec<Order<&'static str>>>>,
+        log: std::sync::Arc<std::sync::Mutex<Vec<Order<&'static str>>>>,
     }
     impl Strategy for SharedRecorder {
         type Input = Snapshot<&'static str>;
         type Symbol = &'static str;
         fn update(&mut self, _snap: Snapshot<&'static str>) {}
         fn on_fill(&mut self, order: &Order<&'static str>) {
-            self.log.borrow_mut().push(*order);
+            self.log.lock().unwrap().push(*order);
         }
         fn trade(&self, _wallet: &mut dyn Wallet<&'static str>) {}
         fn reset(&mut self) {
-            self.log.borrow_mut().clear();
+            self.log.lock().unwrap().clear();
         }
     }
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
@@ -193,7 +195,7 @@ fn on_fill_only_reaches_the_owning_child() {
         .add(
             "passive_b",
             SharedRecorder {
-                log: std::rc::Rc::clone(&recorder_log),
+                log: std::sync::Arc::clone(&recorder_log),
             },
         )
         .weights(EqualWeight)
@@ -202,9 +204,9 @@ fn on_fill_only_reaches_the_owning_child() {
     let _report = backtest::run(&mut portfolio, &mut wallet, a_rising_b_flat_snapshots());
 
     assert!(
-        recorder_log.borrow().is_empty(),
+        recorder_log.lock().unwrap().is_empty(),
         "passive child received {} fills but never placed an order",
-        recorder_log.borrow().len(),
+        recorder_log.lock().unwrap().len(),
     );
     // Sanity: child 0 (buy-and-hold on A) does trade, so its equity
     // grew from 1_000 → ~1_857 (A went from 100 → 195, entry at bar 1's
@@ -1008,4 +1010,39 @@ fn largest_first_position_phase_touches_only_the_bigger_leg() {
         x_units > 0.0 && x_units < 3.0,
         "LargestFirst should shrink X below its 3-unit seed; got {x_units}"
     );
+}
+
+/// The point of `Arc<Mutex<_>>` over `Rc<RefCell<_>>`: a portfolio can cross a
+/// thread boundary. Before, `Portfolio` was `!Send`, so an ensemble of
+/// portfolios could only be evaluated serially and the type could never be
+/// handed to a worker pool.
+#[test]
+fn a_portfolio_can_be_driven_from_another_thread() {
+    let bars = vec![10.0, 11.0, 12.0, 13.0];
+    let snaps: Vec<Snapshot<&'static str>> = bars
+        .iter()
+        .map(|&p| {
+            let mut s = Snapshot::new();
+            s.push(Some("A"), None, Atom::new(Candle::new(p, p, p, p, 100.0)));
+            s
+        })
+        .collect();
+
+    let handle = std::thread::spawn(move || {
+        let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+            .with_initial_equity(1_000.0)
+            .add(
+                "hold_a",
+                SingleAssetStrategy::<&'static str>::buy_and_hold("A"),
+            )
+            .weights(EqualWeight)
+            .build();
+        let mut wallet = portfolio.wallet_view();
+        let report = fugazi::backtest::run(&mut portfolio, &mut wallet, snaps);
+        *report.equity_curve.last().unwrap()
+    });
+
+    let final_equity = handle.join().expect("the worker must not panic");
+    // Bought at bar 1's open (11) with 1000, held to 13.
+    assert!(final_equity > 1_000.0, "equity {final_equity} should have grown");
 }
