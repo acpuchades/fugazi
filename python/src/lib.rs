@@ -8211,6 +8211,27 @@ impl PyStrategySpec {
     }
 }
 
+/// Every tag the YAML spec layer accepts, grouped by the vocabulary it belongs
+/// to: `"expr"` (value-producing sources), `"signal"` (boolean conditions) and
+/// `"selection"` (a `basket:` document's `selection:` rules). Names come back
+/// without the leading `!`.
+///
+/// Read off serde's own variant list rather than a hand-maintained table, so it
+/// cannot go stale. Useful for discovery (`"sma" in ta.spec_tags()["expr"]`),
+/// for editor tooling, and for the parity test that keeps this module's
+/// constructors in step with the tags.
+#[pyfunction]
+fn spec_tags(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    use fugazi_core::spec::typecheck::{
+        known_expr_tags, known_selection_tags, known_signal_tags,
+    };
+    let out = pyo3::types::PyDict::new(py);
+    out.set_item("expr", known_expr_tags())?;
+    out.set_item("signal", known_signal_tags())?;
+    out.set_item("selection", known_selection_tags())?;
+    Ok(out.into_any().unbind())
+}
+
 /// Load a strategy YAML doc from text into a `StrategySpec`.
 ///
 /// `params` is a dict of `!param` substitutions; `base_dir` is the directory
@@ -9194,7 +9215,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         sharpe_of, sortino_of, volatility_of, max_drawdown_of, calmar_of,
         // Spec-driven surface: load a YAML strategy, run it, evaluate it, or
         // sweep a parameter grid over it. Full parity with the CLI.
-        load_spec, optimize,
+        load_spec, optimize, spec_tags,
     );
 
     // `fugazi.metrics` — mirror of `fugazi::metrics::*`. Registered as a

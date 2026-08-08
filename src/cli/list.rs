@@ -102,6 +102,7 @@ const GROUPS: &[Group] = &[
             Entry { tag: "sub", args: "lhs, rhs", doc: "lhs − rhs" },
             Entry { tag: "mul", args: "lhs, rhs", doc: "lhs × rhs" },
             Entry { tag: "div", args: "lhs, rhs", doc: "lhs / rhs (None on divide-by-zero)" },
+            Entry { tag: "log", args: "source, base", doc: "logarithm of source; `base` defaults to e" },
         ],
     },
     Group {
@@ -127,6 +128,9 @@ const GROUPS: &[Group] = &[
             Entry { tag: "true_range",  args: "",       doc: "true range of the current bar" },
             Entry { tag: "obv",         args: "",       doc: "on-balance volume (cumulative)" },
             Entry { tag: "ad",          args: "",       doc: "Chaikin A/D line (cumulative)" },
+            Entry { tag: "parkinson",       args: "period", doc: "range volatility from high/low" },
+            Entry { tag: "garman_klass",    args: "period", doc: "range volatility from OHLC (clamped >= 0)" },
+            Entry { tag: "rogers_satchell", args: "period", doc: "drift-independent range volatility from OHLC" },
         ],
     },
     Group {
@@ -180,11 +184,15 @@ const GROUPS: &[Group] = &[
             Entry { tag: "volume",  args: "", doc: "the bar's traded volume" },
             Entry { tag: "typical", args: "", doc: "(high + low + close) / 3" },
             Entry { tag: "median",  args: "", doc: "(high + low) / 2" },
+            Entry { tag: "current", args: "", doc: "the whole Candle — what the bar indicators consume" },
+            Entry { tag: "pick",    args: "symbol, freq", doc: "project one asset's bar out of a multi-symbol snapshot; the `source:` of any leaf that must read across" },
         ],
     },
     Group {
         title: "comparisons (tolerance-aware; epsilon defaults to 1e-8)",
         entries: &[
+            Entry { tag: "str_eq", args: "lhs, rhs", doc: "string equality; `rhs` may be a bare string literal" },
+            Entry { tag: "str_ne", args: "lhs, rhs", doc: "string inequality; the complement of !str_eq" },
             Entry { tag: "gt", args: "lhs, rhs, epsilon?", doc: "lhs > rhs" },
             Entry { tag: "lt", args: "lhs, rhs, epsilon?", doc: "lhs < rhs" },
             Entry { tag: "ge", args: "lhs, rhs, epsilon?", doc: "lhs >= rhs" },
@@ -214,6 +222,8 @@ const GROUPS: &[Group] = &[
             Entry { tag: "value", args: "<n>",    doc: "a constant scalar" },
             Entry { tag: "value", args: "<str>",  doc: "a constant string — the operand of !str_eq / !str_ne (quote a numeric-looking one: !value \"70\")" },
             Entry { tag: "value", args: "<bool>", doc: "a constant boolean leaf" },
+            Entry { tag: "never", args: "",       doc: "a signal that never fires — sugar for !value false" },
+            Entry { tag: "every", args: "<n>",    doc: "a periodic pulse: true every n bars (first fire on bar n-1). The canonical `rebalance_on:` cadence" },
         ],
     },
     Group {
@@ -236,6 +246,15 @@ const GROUPS: &[Group] = &[
         entries: &[
             Entry { tag: "crosses_above", args: "lhs, rhs", doc: "lhs > rhs and the comparison just flipped" },
             Entry { tag: "crosses_below", args: "lhs, rhs", doc: "lhs < rhs and the comparison just flipped" },
+        ],
+    },
+    Group {
+        title: "edge detectors (fire on a transition, not a level)",
+        entries: &[
+            Entry { tag: "changed",      args: "signal", doc: "fires on either edge of a Bool source (rising OR falling)" },
+            Entry { tag: "changed_real", args: "source", doc: "fires on the bar a Real source differs from the previous bar" },
+            Entry { tag: "became_true",  args: "signal", doc: "rising edge: fires the bar the source goes false → true" },
+            Entry { tag: "became_false", args: "signal", doc: "falling edge: the mirror of !became_true" },
         ],
     },
     Group {
@@ -292,6 +311,13 @@ const GROUPS: &[Group] = &[
         ],
     },
     Group {
+        title: "overlay side channel (columns carried alongside OHLCV; see `fugazi get -x`)",
+        entries: &[
+            Entry { tag: "get",        args: "key, source", doc: "read overlay column `key`; dispatches on its declared type (Real / Bool / Str)" },
+            Entry { tag: "has_column", args: "name",        doc: "signal: whether `name` is a registered overlay column" },
+        ],
+    },
+    Group {
         title: "placeholders (resolved before typed parsing; see `fugazi run --params`)",
         entries: &[
             Entry { tag: "param", args: "key, default?", doc: "load-time: substitute the value passed as --params key=..." },
@@ -337,6 +363,19 @@ const GROUPS: &[Group] = &[
             Entry { tag: "drawdown_throttle", args: "max_drawdown",                        doc: "linear de-lever as book drawdown deepens (0..1)" },
             Entry { tag: "equity_vol_target", args: "target, window, bars_per_year",       doc: "vol targeting on the strategy's own equity returns" },
             Entry { tag: "fractional_kelly",  args: "kelly_fraction, window",              doc: "kelly_fraction * mean/variance of the last N trade returns" },
+        ],
+    },
+    Group {
+        title: "strategy book (equity / trade state over the strategy's lifetime; `source:` picks !strategy_book or !portfolio_book)",
+        entries: &[
+            Entry { tag: "equity",         args: "source", doc: "mark-to-market equity" },
+            Entry { tag: "equity_peak",    args: "source", doc: "running high-water equity" },
+            Entry { tag: "drawdown",       args: "source", doc: "fractional drop from the equity peak, in [0, 1]" },
+            Entry { tag: "return_per_bar", args: "source", doc: "this bar's equity return" },
+            Entry { tag: "trade_pnl",      args: "source", doc: "the closing trade's P&L (Some only on a closing bar)" },
+            Entry { tag: "trade_return",   args: "source", doc: "the closing trade's return ratio (Some only on a closing bar)" },
+            Entry { tag: "strategy_book",  args: "",       doc: "source selector: the enclosing strategy's own book (the default)" },
+            Entry { tag: "portfolio_book", args: "",       doc: "source selector: the portfolio aggregate — only inside a portfolio `weights:`" },
         ],
     },
     Group {
@@ -642,6 +681,68 @@ mod tests {
             assert!(!e.tag.is_empty(), "empty tag");
             assert!(!e.doc.is_empty(), "empty doc for `{}`", e.tag);
         }
+    }
+
+    /// `GROUPS` is hand-maintained, so nothing but this test stops a tag from
+    /// shipping and never appearing in `fugazi list indicators`.
+    ///
+    /// The expected set comes from serde's own variant list (see
+    /// [`typecheck::known_expr_tags`]), so it needs no upkeep: add a variant to
+    /// `ExprSpec` or `SignalSpec` and this fails until the catalogue documents
+    /// it.
+    #[test]
+    fn the_catalogue_documents_every_spec_tag() {
+        use crate::spec::typecheck::{known_expr_tags, known_signal_tags};
+
+        let documented: std::collections::HashSet<&str> =
+            all_entries().iter().map(|e| e.tag).collect();
+
+        let mut missing: Vec<String> = Vec::new();
+        for (layer, tags) in [
+            ("ExprSpec", known_expr_tags()),
+            ("SignalSpec", known_signal_tags()),
+        ] {
+            for tag in tags {
+                if !documented.contains(tag.as_str()) {
+                    missing.push(format!("!{tag} ({layer})"));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "these tags are accepted by the spec layer but absent from \
+             `fugazi list indicators`:\n  {}\n\
+             Add an Entry for each to the matching group in GROUPS.",
+            missing.join("\n  "),
+        );
+    }
+
+    /// The other direction: a documented tag the parser doesn't accept is a
+    /// typo or a leftover from a removed variant, and would send a user to a
+    /// tag that errors.
+    #[test]
+    fn the_catalogue_documents_nothing_the_parser_rejects() {
+        use crate::spec::typecheck::{
+            REWRITTEN_TAGS, known_expr_tags, known_selection_tags, known_signal_tags,
+        };
+
+        let mut known: std::collections::HashSet<String> =
+            known_expr_tags().into_iter().collect();
+        known.extend(known_signal_tags());
+        // The `selection:` vocabulary is its own enum, and the rewritten tags
+        // (sugar + load-pass placeholders) never reach a typed parse at all.
+        known.extend(known_selection_tags());
+        known.extend(REWRITTEN_TAGS.iter().map(|s| s.to_string()));
+
+        let bogus: Vec<&str> = all_entries()
+            .iter()
+            .map(|e| e.tag)
+            .filter(|t| !known.contains(*t))
+            .collect();
+        assert!(
+            bogus.is_empty(),
+            "`fugazi list indicators` advertises tags the spec layer rejects: {bogus:?}",
+        );
     }
 
     #[test]
