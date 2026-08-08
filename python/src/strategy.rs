@@ -263,6 +263,35 @@ impl PyWallet {
         wrap_ack(self.inner.set_take_profit(symbol, Reference(trigger)))
     }
 
+    /// Rest a limit order on `symbol`: drive the position to `side · size` once
+    /// the market trades through `limit`, filling at that price **or better**
+    /// and never worse. The entry counterpart to `set_stop`. Idempotent,
+    /// latest-wins per symbol. Returns `None` (working until it triggers).
+    ///
+    /// The size resolves at the *fill* price, not at submission — an all-in
+    /// `Size.value_frac(1.0)` sizes against equity when the limit is hit.
+    pub(crate) fn set_limit(
+        &mut self,
+        symbol: String,
+        side: &str,
+        size: &Bound<'_, PyAny>,
+        limit: f64,
+    ) -> PyResult<Option<PyOrder>> {
+        wrap_ack(self.inner.set_limit(
+            symbol,
+            parse_side(side)?,
+            coerce_size(size)?,
+            Reference(limit),
+        ))
+    }
+
+    /// Cancel any resting limit order on `symbol`. A no-op when none rests.
+    pub(crate) fn cancel_limit(&mut self, symbol: String) -> PyResult<()> {
+        self.inner
+            .cancel_limit(&symbol)
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
     /// Cancel both resting protective legs (stop and take-profit) on `symbol`.
     pub(crate) fn cancel_protective(&mut self, symbol: String) -> PyResult<()> {
         self.inner
@@ -330,12 +359,13 @@ pub(crate) fn side_str(side: Side) -> &'static str {
     }
 }
 
-/// The `"market"`/`"stop"`/`"take_profit"` string for an [`OrderKind`].
+/// The `"market"`/`"stop"`/`"take_profit"`/`"limit"` string for an [`OrderKind`].
 pub(crate) fn kind_str(kind: OrderKind) -> &'static str {
     match kind {
         OrderKind::Market => "market",
         OrderKind::Stop => "stop",
         OrderKind::TakeProfit => "take_profit",
+        OrderKind::Limit => "limit",
     }
 }
 

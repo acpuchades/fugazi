@@ -1018,7 +1018,7 @@ fn largest_first_position_phase_touches_only_the_bigger_leg() {
 /// handed to a worker pool.
 #[test]
 fn a_portfolio_can_be_driven_from_another_thread() {
-    let bars = vec![10.0, 11.0, 12.0, 13.0];
+    let bars = [10.0, 11.0, 12.0, 13.0];
     let snaps: Vec<Snapshot<&'static str>> = bars
         .iter()
         .map(|&p| {

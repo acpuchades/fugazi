@@ -426,10 +426,17 @@ impl BinanceFuturesWallet {
         }
         // A protective exit trades the opposite side of the open position.
         let side = if pos > 0.0 { Side::Sell } else { Side::Buy };
+        // This path rests a *protective* leg, so only the two protective kinds
+        // are meaningful. `Market` has always fallen back to `STOP_MARKET`
+        // (the caller reached `rest_protective`, so a stop is what they meant);
+        // `Limit` reaches here only if a future caller wires `set_limit`
+        // through it, which it should not — a resting entry is a different
+        // venue order (`LIMIT` with a `price`, not `closePosition`), and this
+        // wallet doesn't implement `set_limit` yet, so the trait's
+        // `UnsupportedOperation` default stands.
         let type_token = match kind {
-            OrderKind::Stop => "STOP_MARKET",
             OrderKind::TakeProfit => "TAKE_PROFIT_MARKET",
-            OrderKind::Market => "STOP_MARKET",
+            OrderKind::Stop | OrderKind::Market | OrderKind::Limit => "STOP_MARKET",
         };
         if let Err(e) = self.ensure_cursor(symbol) {
             self.errors.push(e);

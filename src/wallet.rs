@@ -142,6 +142,17 @@ pub enum OrderKind {
     Stop,
     /// A resting take-profit, triggered when the bar traded through its level.
     TakeProfit,
+    /// A resting limit order, filled when the bar trades through its price —
+    /// at that price or better. Unlike the other three this is an *entry*
+    /// instrument: it drives the position toward a target rather than
+    /// flattening one.
+    ///
+    /// A limit fill is **passive**: it provides liquidity rather than taking
+    /// it, so it crosses no spread and suffers no slippage (see
+    /// [`PaperWallet::fill_at`] and `costs::kind_multiplier`). Anything else
+    /// would let the cost pipeline fill it worse than the price the caller
+    /// named, which is the one thing a limit order guarantees.
+    Limit,
 }
 
 /// A single filled order: a `symbol`, a [`Side`], a strictly-positive number of
@@ -417,6 +428,44 @@ pub trait Wallet<Sym> {
     /// Cancel both resting protective legs (stop and take-profit) on `symbol`.
     fn cancel_protective(&mut self, symbol: &Sym) -> Result<(), WalletError>;
 
+    /// Rest a **limit order** on `symbol`: drive the position to `side · size`
+    /// once the market trades through `limit`, filling at that price **or
+    /// better** and never worse.
+    ///
+    /// The entry counterpart to [`set_stop`](Wallet::set_stop) — where the
+    /// protective legs flatten an open position, this one opens or adjusts one.
+    /// A buy fills when a bar's `low` reaches `limit` (at `limit`, or at the
+    /// `open` when the bar gapped below it — the better price); a sell mirrors
+    /// on `high`. Idempotent and latest-wins per symbol, like the protective
+    /// legs, so re-submitting each bar walks the price. Returns the resting
+    /// order's [`OrderId`] in an [`Ack::Working`].
+    ///
+    /// The [`Size`] resolves at the **fill** price, not at submission — an
+    /// all-in `value_frac(1.0)` sizes against what the equity actually is when
+    /// the limit is hit.
+    ///
+    /// Defaults to [`UnsupportedOperation`](WalletError::UnsupportedOperation)
+    /// so a downstream wallet whose venue has no resting limit (or which hasn't
+    /// wired one yet) keeps compiling; [`PaperWallet`] implements it.
+    fn set_limit(
+        &mut self,
+        symbol: Sym,
+        side: Side,
+        size: Size,
+        limit: Reference,
+    ) -> Result<Ack<Sym>, WalletError> {
+        let _ = (symbol, side, size, limit);
+        Err(WalletError::UnsupportedOperation)
+    }
+
+    /// Cancel any resting limit order on `symbol`. A no-op when none rests, so
+    /// a strategy can call it unconditionally. Defaults to `Ok(())` for wallets
+    /// that never accept one.
+    fn cancel_limit(&mut self, symbol: &Sym) -> Result<(), WalletError> {
+        let _ = symbol;
+        Ok(())
+    }
+
     /// Credit the cash balance by `delta` (positive = deposit / credit,
     /// negative = withdrawal / debit) with no order flow. Used by
     /// [`Portfolio`](crate::portfolio::Portfolio)'s cash-phase rebalance to
@@ -543,6 +592,49 @@ struct Protective {
     take_profit: Option<Leg>,
 }
 
+/// Where and how a fill prices: the bar it lands on, the pre-cost price, and
+/// the [`OrderKind`]. Travels together through the cost pipeline, so it is one
+/// argument rather than three.
+#[derive(Debug, Clone, Copy)]
+struct FillPricing<'a> {
+    bar: &'a Candle,
+    price: Real,
+    kind: OrderKind,
+}
+
+/// The half-spread a fill of `kind` crosses.
+///
+/// Zero for a [`Limit`](OrderKind::Limit): a resting limit provides liquidity
+/// instead of taking it, so it crosses no spread. This is wallet policy rather
+/// than a per-model decision — every spread model gives the same answer for a
+/// passive fill — which is why [`SpreadModel::half_spread`] doesn't take the
+/// kind. Together with the zero slippage multiplier `costs` gives `Limit`, it
+/// is what keeps a limit fill from ever pricing worse than the caller's limit.
+///
+/// Shared by [`PaperWallet::fill_at`] and
+/// [`shrink_buy_to_fit`](PaperWallet::shrink_buy_to_fit) so the price a buy is
+/// sized against and the price it books at can't disagree.
+fn half_spread_for(costs: &TradingCosts, kind: OrderKind, price: Real, bar: &Candle) -> Real {
+    match kind {
+        OrderKind::Limit => 0.0,
+        _ => costs.spread.half_spread(price, bar),
+    }
+}
+
+/// A resting limit order: a target `side · size` to be reached once the bar
+/// trades through `limit`.
+///
+/// The [`Size`] is stored unresolved and resolved at the fill price, so an
+/// all-in sizes against the equity at the moment the limit is actually hit
+/// rather than at submission — the same reason [`Pending::Sized`] defers.
+#[derive(Debug, Clone, Copy)]
+struct RestingLimit {
+    side: Side,
+    size: Size,
+    limit: Real,
+    id: OrderId,
+}
+
 /// A queued order that [`PaperWallet::update`] tried and failed to fill on a
 /// given bar, along with the [`WalletError`] that blocked it and the
 /// [`OrderId`] the submission returned in its [`Ack::Working`].
@@ -587,6 +679,9 @@ pub struct PaperWallet<Sym> {
     bars: HashMap<Sym, Candle>,
     pending: HashMap<Sym, Pending>,
     protective: HashMap<Sym, Protective>,
+    /// One resting limit order per symbol, latest-wins — the same convention
+    /// `pending` and `protective` use.
+    limits: HashMap<Sym, RestingLimit>,
     funds: Real,
     initial_funds: Real,
     blotter: Vec<Order<Sym>>,
@@ -620,6 +715,7 @@ impl<Sym> PaperWallet<Sym> {
             bars: HashMap::new(),
             pending: HashMap::new(),
             protective: HashMap::new(),
+            limits: HashMap::new(),
             funds,
             initial_funds: funds,
             blotter: Vec::new(),
@@ -655,6 +751,7 @@ impl<Sym> PaperWallet<Sym> {
         self.bars.clear();
         self.pending.clear();
         self.protective.clear();
+        self.limits.clear();
         self.blotter.clear();
         self.rejections.clear();
         self.rejections_drained = 0;
@@ -746,7 +843,7 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
             .per_symbol_costs
             .get(&symbol)
             .unwrap_or(&self.costs);
-        let half_spread = costs.spread.half_spread(theoretical_price, &bar);
+        let half_spread = half_spread_for(costs, kind, theoretical_price, &bar);
         let post_spread = match side {
             Side::Buy => theoretical_price + half_spread,
             Side::Sell => theoretical_price - half_spread,
@@ -806,14 +903,23 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
     /// linear cost shapes (`PercentageCommission`, `FixedBpsSpread`), quickly
     /// for the others; an 8-iteration cap keeps a pathological composite
     /// bounded.
+    /// Shrink a fractional buy so spread + slippage + commission fit available
+    /// cash, at `price` for a fill of `kind`.
+    ///
+    /// `price` and `kind` are parameters rather than `candle.open` /
+    /// `OrderKind::Market` because a resting limit fills at its own price: sized
+    /// against the open, an all-in limit buy below the market would shrink to
+    /// the units the *open* could afford rather than the (larger) number its
+    /// own cheaper fill can.
     fn shrink_buy_to_fit(
         &self,
         symbol: &Sym,
         side: Side,
         current: Real,
         magnitude: Real,
-        candle: &Candle,
+        pricing: FillPricing<'_>,
     ) -> Real {
+        let FillPricing { bar: candle, price, kind } = pricing;
         if magnitude <= 0.0 {
             return magnitude;
         }
@@ -830,10 +936,10 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
             if delta <= 0.0 {
                 return m.max(0.0);
             }
-            let half_spread = costs.spread.half_spread(candle.open, candle);
-            let post_spread = candle.open + half_spread; // net buy
+            let half_spread = half_spread_for(costs, kind, price, candle);
+            let post_spread = price + half_spread; // net buy
             let final_price =
-                costs.slippage.adjust(Side::Buy, post_spread, delta, candle, OrderKind::Market);
+                costs.slippage.adjust(Side::Buy, post_spread, delta, candle, kind);
             if final_price <= 0.0 {
                 return 0.0;
             }
@@ -917,6 +1023,86 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
     /// Trigger and fill a resting protective leg on `symbol` against `candle`, if
     /// one is crossed. Stop-loss takes precedence over take-profit, and at most one
     /// leg fills per bar (the fill flattens, which drops the whole bracket).
+    /// Fill any resting limit on `symbol` that this bar traded through.
+    ///
+    /// A buy triggers when `low` reaches the limit and fills at
+    /// `min(limit, open)`; a sell triggers on `high` and fills at
+    /// `max(limit, open)`. Both spellings say the same thing: **at the limit
+    /// or better, never worse** — a bar that gapped past the limit hands the
+    /// caller the better `open` rather than their stale price.
+    ///
+    /// The [`Size`] resolves here, at the fill price, so an all-in sizes
+    /// against the equity when the limit is hit. Equity marks this symbol at
+    /// the fill price rather than the bar's `close` for the same reason
+    /// [`Pending::Sized`] marks at the `open`: sizing must not see information
+    /// from later in the bar than the fill.
+    ///
+    /// The order is consumed whether or not it books — a limit that triggers
+    /// but can't be afforded is a rejection, not something to silently retry
+    /// next bar at a price the market has already left behind.
+    fn match_limit(&mut self, symbol: &Sym, candle: &Candle) -> Option<Order<Sym>> {
+        let resting = *self.limits.get(symbol)?;
+        let fill = match resting.side {
+            Side::Buy if candle.low <= resting.limit + DEFAULT_EPSILON => {
+                resting.limit.min(candle.open)
+            }
+            Side::Sell if candle.high >= resting.limit - DEFAULT_EPSILON => {
+                resting.limit.max(candle.open)
+            }
+            _ => return None,
+        };
+        self.limits.remove(symbol);
+
+        let position = self.positions.get(symbol).copied().unwrap_or(0.0);
+        let equity_at_fill = self.funds
+            + self
+                .positions
+                .iter()
+                .map(|(s, &a)| {
+                    let mark = if s == symbol {
+                        fill
+                    } else {
+                        self.bars.get(s).map_or(0.0, |c| c.close)
+                    };
+                    a * mark
+                })
+                .sum::<Real>();
+        let magnitude = resting
+            .size
+            .resolve(fill, position, self.funds, equity_at_fill);
+        // Same rule as the queued-market path: a fractional sizing means "as
+        // much as fits", so shrink it to leave room for commission; an explicit
+        // unit count is a specific intent and is left alone.
+        let magnitude = match resting.size {
+            Size::ValueFraction(_) | Size::FundsFraction(_) => self.shrink_buy_to_fit(
+                symbol,
+                resting.side,
+                position,
+                magnitude,
+                FillPricing {
+                    bar: candle,
+                    price: fill,
+                    kind: OrderKind::Limit,
+                },
+            ),
+            Size::Units(_) | Size::PositionFraction(_) => magnitude,
+        };
+        let target = resting.side.sign() * magnitude;
+
+        match self.fill_at(symbol.clone(), target, fill, OrderKind::Limit, resting.id) {
+            Ok(order) => order,
+            Err(error) => {
+                self.rejections.push(Rejection {
+                    symbol: symbol.clone(),
+                    id: resting.id,
+                    error,
+                    kind: OrderKind::Limit,
+                });
+                None
+            }
+        }
+    }
+
     fn match_protective(&mut self, symbol: &Sym, candle: &Candle) -> Option<Order<Sym>> {
         let pos = self.positions.get(symbol).copied().unwrap_or(0.0);
         let prot = *self.protective.get(symbol)?;
@@ -1036,7 +1222,17 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
                     // request is a caller error, not a sizing target.
                     let magnitude = match size {
                         Size::ValueFraction(_) | Size::FundsFraction(_) => self
-                            .shrink_buy_to_fit(&symbol, side, position, magnitude, &candle),
+                            .shrink_buy_to_fit(
+                                &symbol,
+                                side,
+                                position,
+                                magnitude,
+                                FillPricing {
+                                    bar: &candle,
+                                    price: candle.open,
+                                    kind: OrderKind::Market,
+                                },
+                            ),
                         Size::Units(_) | Size::PositionFraction(_) => magnitude,
                     };
                     (side.sign() * magnitude, id)
@@ -1054,6 +1250,13 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
             }
         }
         if let Some(order) = self.match_protective(&symbol, &candle) {
+            fills.push(order);
+        }
+        // Limits come last: a protective leg guards a position that already
+        // exists, so letting a fresh entry fill ahead of the exit it was meant
+        // to trigger would leave the strategy holding something it had asked to
+        // be out of.
+        if let Some(order) = self.match_limit(&symbol, &candle) {
             fills.push(order);
         }
         fills
@@ -1122,6 +1325,34 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
 
     fn cancel_protective(&mut self, symbol: &Sym) -> Result<(), WalletError> {
         self.protective.remove(symbol);
+        Ok(())
+    }
+
+    fn set_limit(
+        &mut self,
+        symbol: Sym,
+        side: Side,
+        size: Size,
+        limit: Reference,
+    ) -> Result<Ack<Sym>, WalletError> {
+        if limit.0 <= 0.0 {
+            return Err(WalletError::InvalidPrice);
+        }
+        let id = self.mint();
+        self.limits.insert(
+            symbol,
+            RestingLimit {
+                side,
+                size,
+                limit: limit.0,
+                id,
+            },
+        );
+        Ok(Ack::Working(id))
+    }
+
+    fn cancel_limit(&mut self, symbol: &Sym) -> Result<(), WalletError> {
+        self.limits.remove(symbol);
         Ok(())
     }
 
@@ -1198,6 +1429,214 @@ mod tests {
         assert!((o.units - units).abs() < 1e-9, "units {} != {}", o.units, units);
         assert!((o.price - price).abs() < 1e-9, "price {} != {}", o.price, price);
         assert_eq!(o.kind, kind, "kind");
+    }
+
+    /// An OHLC bar, for the limit tests — the flat `bar()` helper can't
+    /// express "traded down to X and back".
+    fn ohlc(open: Real, high: Real, low: Real, close: Real) -> Candle {
+        Candle::new(open, high, low, close, 1_000.0)
+    }
+
+    #[test]
+    fn a_buy_limit_rests_until_the_bar_trades_down_to_it() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(1_000.0);
+        w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
+        assert!(matches!(
+            w.set_limit("X", Side::Buy, Size::units(5.0), Reference(98.0)),
+            Ok(Ack::Working(_))
+        ));
+
+        // Bar never reaches 98 — nothing fills, the order still rests.
+        let fills = w.update("X", ohlc(100.0, 102.0, 98.5, 101.0));
+        assert!(fills.is_empty(), "limit must not fill above its price");
+        assert_eq!(w.position(&"X").amount, 0.0);
+
+        // Bar trades through it.
+        let fills = w.update("X", ohlc(100.0, 101.0, 97.0, 99.0));
+        assert_eq!(fills.len(), 1);
+        assert_fill(&fills[0], Side::Buy, 5.0, 98.0, OrderKind::Limit);
+        assert_eq!(w.position(&"X").amount, 5.0);
+    }
+
+    #[test]
+    fn a_sell_limit_mirrors_on_the_high() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(1_000.0);
+        w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
+        w.set_limit("X", Side::Sell, Size::units(3.0), Reference(105.0))
+            .unwrap();
+
+        assert!(w.update("X", ohlc(100.0, 104.0, 99.0, 103.0)).is_empty());
+        let fills = w.update("X", ohlc(104.0, 106.0, 103.0, 105.0));
+        assert_eq!(fills.len(), 1);
+        assert_fill(&fills[0], Side::Sell, 3.0, 105.0, OrderKind::Limit);
+        assert_eq!(w.position(&"X").amount, -3.0);
+    }
+
+    #[test]
+    fn a_gap_through_the_limit_fills_at_the_better_open() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
+        w.set_limit("X", Side::Buy, Size::units(5.0), Reference(98.0))
+            .unwrap();
+        // Opens at 95 — below the limit. The caller asked for "98 or better"
+        // and the market opened better, so they get 95, not 98.
+        let fills = w.update("X", ohlc(95.0, 96.0, 94.0, 95.5));
+        assert_fill(&fills[0], Side::Buy, 5.0, 95.0, OrderKind::Limit);
+    }
+
+    #[test]
+    fn a_limit_never_fills_worse_than_its_price_under_costs() {
+        // The invariant that makes a limit a limit. An aggressive spread +
+        // slippage bundle would push a market buy well above 98; a passive fill
+        // crosses no spread and takes no impact, so it prices exactly at the
+        // limit.
+        use crate::costs::{FixedBpsSlippage, FixedBpsSpread, NoCommission};
+        let costs = TradingCosts::new(
+            Box::new(NoCommission),
+            Box::new(FixedBpsSpread::new(50.0)),
+            Box::new(FixedBpsSlippage::new(100.0)),
+        );
+        let mut w: PaperWallet<&str> = PaperWallet::with_costs(10_000.0, costs);
+        w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
+        w.set_limit("X", Side::Buy, Size::units(5.0), Reference(98.0))
+            .unwrap();
+        let fills = w.update("X", ohlc(100.0, 101.0, 97.0, 99.0));
+        assert_eq!(fills.len(), 1);
+        assert!(
+            fills[0].price <= 98.0 + 1e-9,
+            "limit buy filled at {}, worse than its 98.0 limit",
+            fills[0].price
+        );
+        assert_fill(&fills[0], Side::Buy, 5.0, 98.0, OrderKind::Limit);
+    }
+
+    #[test]
+    fn a_limit_is_latest_wins_and_cancellable() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
+        w.set_limit("X", Side::Buy, Size::units(5.0), Reference(98.0))
+            .unwrap();
+        // Re-submitting replaces rather than stacking — the convention the
+        // protective legs use, so a strategy can walk the price each bar.
+        w.set_limit("X", Side::Buy, Size::units(2.0), Reference(96.0))
+            .unwrap();
+        let fills = w.update("X", ohlc(100.0, 101.0, 95.0, 97.0));
+        assert_eq!(fills.len(), 1, "only the latest order rests");
+        assert_fill(&fills[0], Side::Buy, 2.0, 96.0, OrderKind::Limit);
+
+        w.set_limit("X", Side::Buy, Size::units(1.0), Reference(90.0))
+            .unwrap();
+        w.cancel_limit(&"X").unwrap();
+        assert!(w.update("X", ohlc(95.0, 96.0, 85.0, 90.0)).is_empty());
+    }
+
+    #[test]
+    fn a_limit_sizes_against_equity_at_the_fill_not_at_submission() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(1_000.0);
+        w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
+        w.set_limit("X", Side::Buy, Size::value_frac(1.0), Reference(50.0))
+            .unwrap();
+        let fills = w.update("X", ohlc(100.0, 101.0, 40.0, 45.0));
+        // All-in at 50 with 1000 of equity — 20 units, not the 10 that sizing
+        // at the submission price of 100 would have produced.
+        assert_fill(&fills[0], Side::Buy, 20.0, 50.0, OrderKind::Limit);
+    }
+
+    #[test]
+    fn a_protective_exit_fills_before_a_limit_entry_on_the_same_bar() {
+        // Both trigger on one bar. The stop guards a position that already
+        // exists; filling the entry first would leave the strategy holding
+        // something it had asked to be out of.
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
+        w.set_position(Units {
+            symbol: "X",
+            amount: 10.0,
+        })
+        .unwrap();
+        w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
+        w.set_stop("X", Reference(95.0)).unwrap();
+        w.set_limit("X", Side::Buy, Size::units(4.0), Reference(94.0))
+            .unwrap();
+
+        let fills = w.update("X", ohlc(99.0, 99.5, 93.0, 94.0));
+        assert_eq!(fills.len(), 2);
+        assert_eq!(fills[0].kind, OrderKind::Stop, "stop books first");
+        assert_eq!(fills[1].kind, OrderKind::Limit);
+        // Flattened by the stop, then re-entered 4 long by the limit.
+        assert_eq!(w.position(&"X").amount, 4.0);
+    }
+
+    #[test]
+    fn an_unaffordable_limit_is_rejected_not_silently_retried() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(100.0);
+        w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
+        w.set_limit("X", Side::Buy, Size::units(1_000.0), Reference(98.0))
+            .unwrap();
+        let fills = w.update("X", ohlc(100.0, 101.0, 97.0, 99.0));
+        assert!(fills.is_empty());
+        let rejections = w.take_rejections();
+        assert_eq!(rejections.len(), 1);
+        assert_eq!(rejections[0].error, WalletError::InsufficientFunds);
+        assert_eq!(rejections[0].kind, OrderKind::Limit);
+        // Consumed, not left resting at a price the market has moved past.
+        assert!(w.update("X", ohlc(97.0, 98.0, 96.0, 97.0)).is_empty());
+    }
+
+    #[test]
+    fn set_limit_defaults_to_unsupported_for_a_wallet_that_opts_out() {
+        // The trait default, so a downstream wallet whose venue has no resting
+        // limit keeps compiling and says so rather than silently doing nothing.
+        struct Minimal;
+        impl Wallet<&'static str> for Minimal {
+            fn funds(&self) -> Reference {
+                Reference(0.0)
+            }
+            fn position(&self, _s: &&'static str) -> Units<&'static str> {
+                Units {
+                    symbol: "X",
+                    amount: 0.0,
+                }
+            }
+            fn price(&self, _s: &&'static str) -> Option<Reference> {
+                None
+            }
+            fn equity(&self) -> Reference {
+                Reference(0.0)
+            }
+            fn update(&mut self, _s: &'static str, _c: Candle) -> Vec<Order<&'static str>> {
+                Vec::new()
+            }
+            fn set_position(
+                &mut self,
+                _t: Units<&'static str>,
+            ) -> Result<Ack<&'static str>, WalletError> {
+                Err(WalletError::UnsupportedOperation)
+            }
+            fn set_stop(
+                &mut self,
+                _s: &'static str,
+                _t: Reference,
+            ) -> Result<Ack<&'static str>, WalletError> {
+                Err(WalletError::UnsupportedOperation)
+            }
+            fn set_take_profit(
+                &mut self,
+                _s: &'static str,
+                _t: Reference,
+            ) -> Result<Ack<&'static str>, WalletError> {
+                Err(WalletError::UnsupportedOperation)
+            }
+            fn cancel_protective(&mut self, _s: &&'static str) -> Result<(), WalletError> {
+                Ok(())
+            }
+        }
+        let mut w = Minimal;
+        assert_eq!(
+            w.set_limit("X", Side::Buy, Size::units(1.0), Reference(10.0)),
+            Err(WalletError::UnsupportedOperation)
+        );
+        assert!(w.cancel_limit(&"X").is_ok());
     }
 
     #[test]

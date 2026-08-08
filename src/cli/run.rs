@@ -932,6 +932,7 @@ fn write_fills_csv(iter: &IterationResult, path: &Path) -> Result<()> {
             OrderKind::Market => "market",
             OrderKind::Stop => "stop",
             OrderKind::TakeProfit => "take_profit",
+            OrderKind::Limit => "limit",
         };
         let mut row: Vec<String> = vec![
             time.clone(),
@@ -1055,6 +1056,7 @@ fn stream_fills(iter: &IterationResult) {
             OrderKind::Market => "market",
             OrderKind::Stop => "stop",
             OrderKind::TakeProfit => "take_profit",
+            OrderKind::Limit => "limit",
         };
         let side_padded = format!("{side_txt:<4}");
         let side_colored = match order.side {
@@ -1232,6 +1234,7 @@ fn kind_label(kind: fugazi::OrderKind) -> &'static str {
         fugazi::OrderKind::Market => "market",
         fugazi::OrderKind::Stop => "stop",
         fugazi::OrderKind::TakeProfit => "take-profit",
+        fugazi::OrderKind::Limit => "limit",
     }
 }
 

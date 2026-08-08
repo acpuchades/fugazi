@@ -696,6 +696,33 @@ def test_wallet_set_is_absolute_and_reverses():
     assert w.position("X") == pytest.approx(-4.0)
 
 
+def test_wallet_limit_order_fills_at_its_price_or_better():
+    """A resting limit is the entry counterpart to `set_stop`."""
+    w = ta.PaperWallet(10_000.0)
+    w.update("X", ta.Candle(100, 101, 99, 100, 1000))
+    assert w.set_limit("X", "buy", ta.Size.units(5.0), 98.0) is None  # working
+
+    # Bar never reaches the limit.
+    assert w.update("X", ta.Candle(100, 102, 98.5, 101, 1000)) == []
+    assert w.position("X") == 0.0
+
+    # Bar trades through it — fills at the limit.
+    fills = w.update("X", ta.Candle(100, 101, 97, 99, 1000))
+    assert len(fills) == 1
+    assert fills[0].kind == "limit"
+    assert fills[0].price == pytest.approx(98.0)
+    assert w.position("X") == pytest.approx(5.0)
+
+
+def test_wallet_limit_order_can_be_cancelled():
+    w = ta.PaperWallet(10_000.0)
+    w.update("X", ta.Candle(100, 101, 99, 100, 1000))
+    w.set_limit("X", "buy", ta.Size.units(5.0), 98.0)
+    w.cancel_limit("X")
+    assert w.update("X", ta.Candle(100, 101, 90, 95, 1000)) == []
+    assert w.position("X") == 0.0
+
+
 def test_wallet_relative_sizing():
     w = ta.PaperWallet(1_000.0)
     w.update("X", 25.0)

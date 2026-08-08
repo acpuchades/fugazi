@@ -527,11 +527,18 @@ impl SlippageModel for VolumeParticipationSlippage {
 // ---------------------------------------------------------------------------
 
 /// The slippage multiplier for a [`OrderKind`]: `1.0` on a market fill,
-/// `stop_multiplier` on a stop or take-profit.
+/// `stop_multiplier` on a stop or take-profit, and `0.0` on a limit.
+///
+/// A limit order rests until the market comes to it, so it provides liquidity
+/// rather than taking it — there is no impact to model, and any adverse
+/// adjustment would fill it worse than the price the caller named, which is
+/// precisely what a limit order rules out. Commission still applies; the crate
+/// has no maker/taker distinction to price the difference with.
 fn kind_multiplier(kind: OrderKind, stop_multiplier: Real) -> Real {
     match kind {
         OrderKind::Market => 1.0,
         OrderKind::Stop | OrderKind::TakeProfit => stop_multiplier.max(0.0),
+        OrderKind::Limit => 0.0,
     }
 }
 
