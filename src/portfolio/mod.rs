@@ -167,6 +167,8 @@
 //!
 //! [`PortfolioWallet`]: crate::portfolio::PortfolioWallet
 
+pub mod ledger;
+pub mod netting;
 pub mod policy;
 pub mod rebalance;
 pub mod wallet;
@@ -186,9 +188,11 @@ use crate::wallet::{Order, Rejection, Wallet};
 
 use self::policy::{ChildSample, WeightPolicy};
 use self::rebalance::{PositionInfo, PositionRebalancer, Proportional};
-use self::wallet::{PortfolioInner, SubWalletHandle, allocate_funds, paper_sub_wallets};
+use self::ledger::LedgerWallet;
+use self::netting::{PortfolioInner, allocate_funds, paper_substrate};
 
-pub use self::wallet::{PortfolioWallet, SubWalletFactory};
+pub use self::netting::SubstrateFactory;
+pub use self::wallet::PortfolioWallet;
 
 /// One child slot in a [`Portfolio`]: a user-supplied name and the boxed
 /// strategy that trades that slot's sub-wallet.
@@ -401,13 +405,10 @@ impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
     /// The bundle is also recorded, so a later [`reset`](Strategy::reset) —
     /// which rebuilds sub-wallets from the factory — can re-apply it rather
     /// than silently dropping back to the build-time defaults.
-    pub fn install_costs_for(&mut self, symbol: &Sym, costs: TradingCosts) -> usize {
+    pub fn install_costs_for(&mut self, symbol: &Sym, costs: TradingCosts) -> bool {
         let mut inner = self.inner.lock().expect("portfolio lock poisoned");
         inner.record_scoped_costs(symbol.clone(), costs.clone());
-        inner
-            .subs
-            .iter_mut()
-            .fold(0, |n, w| n + usize::from(w.set_costs_for(symbol.clone(), costs.clone()).is_ok()))
+        inner.substrate.set_costs_for(symbol.clone(), costs).is_ok()
     }
 
     /// Snapshot every sub-wallet's current equity/funds for a
@@ -415,12 +416,10 @@ impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
     /// read this indirectly via the trait.
     fn sample_children(&self) -> Vec<ChildSample> {
         let inner = self.inner.lock().expect("portfolio lock poisoned");
-        inner
-            .subs
-            .iter()
-            .map(|w| ChildSample {
-                equity: w.equity().0,
-                funds: w.funds().0,
+        (0..inner.child_count())
+            .map(|i| ChildSample {
+                equity: inner.child_equity(i),
+                funds: inner.ledgers[i].cash,
             })
             .collect()
     }
@@ -549,18 +548,26 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
             if !child.strategy.is_ready() {
                 continue;
             }
-            let mut handle = SubWalletHandle::new(Arc::clone(&self.inner), i);
+            let mut handle = LedgerWallet::new(Arc::clone(&self.inner), i);
             child.strategy.trade(&mut handle);
         }
 
         // Rebalance gate: skip the whole rebalance step on bars where the
         // signal doesn't fire. Default gate is `ValueBool::false` so this is
         // a no-op unless the caller wired a signal via
-        // `rebalance_on(...)`.
-        if !self.rebalance.value().unwrap_or(false) {
-            return;
+        // `rebalance_on(...)`. It runs before netting so a rebalance's
+        // position changes merge into the same order as the children's.
+        if self.rebalance.value().unwrap_or(false) {
+            self.rebalance_now();
         }
-        self.rebalance_now();
+
+        // Nothing has reached the account yet — every child (and the
+        // rebalance) has only recorded what it wants. Combine those into one
+        // order per symbol and rest the most urgent protective leg.
+        self.inner
+            .lock()
+            .expect("portfolio lock poisoned")
+            .net_and_submit();
     }
 
     fn reset(&mut self) {
@@ -634,11 +641,14 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Portfolio<Sym> {
             return;
         }
 
+        // Cash phase. On a shared account this is pure bookkeeping — the
+        // balance never moves, only the notional split of it — so it cannot
+        // fail, costs nothing, and generates no orders.
         let shortfalls = {
             let mut inner = self.inner.lock().expect("portfolio lock poisoned");
-            let total: Real = inner.subs.iter().map(|w| w.equity().0).sum();
+            let total: Real = (0..inner.child_count()).map(|i| inner.child_equity(i)).sum();
             let targets: Vec<Real> = weights.iter().map(|w| total * w / sum_w).collect();
-            inner.rebalance_cash_to(&targets)
+            inner.rebalance_ledgers_to(&targets)
         };
 
         // Position phase: hand each contributor's shortfall + position
@@ -665,14 +675,14 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Portfolio<Sym> {
             // are skipped defensively (their value would be undefined).
             let positions_snapshot: Vec<PositionInfo<Sym>> = {
                 let inner = self.inner.lock().expect("portfolio lock poisoned");
-                let sub = &inner.subs[i];
-                sub.positions()
-                    .into_iter()
-                    .filter_map(|u| {
-                        sub.price(&u.symbol).map(|p| PositionInfo {
-                            symbol: u.symbol.clone(),
-                            units: u.amount,
-                            price: p.0,
+                inner.ledgers[i]
+                    .positions
+                    .iter()
+                    .filter_map(|(symbol, &units)| {
+                        inner.price_of(symbol).map(|price| PositionInfo {
+                            symbol: symbol.clone(),
+                            units,
+                            price,
                         })
                     })
                     .collect()
@@ -686,12 +696,11 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Portfolio<Sym> {
             if targets.is_empty() {
                 continue;
             }
-            let mut handle = SubWalletHandle::new(Arc::clone(&self.inner), i);
+            let mut handle = LedgerWallet::new(Arc::clone(&self.inner), i);
             for target in targets {
-                // Ignore the Ack — the fill routing tables are already
-                // updated by SubWalletHandle::set_position, and any
-                // WalletError here is a genuine bug (PaperWallet queues
-                // market moves without checking funds).
+                // Records intent on the child's ledger; the netting pass at
+                // the end of `trade` turns it into account flow. A scale-down
+                // never trips the hard cap, so an Err here would be a bug.
                 let _ = handle.set_position(target);
             }
         }
@@ -720,7 +729,7 @@ pub struct PortfolioBuilder<Sym> {
     /// How each child's sub-wallet is built. `None` picks
     /// [`paper_sub_wallets`] at build; set via
     /// [`sub_wallets`](Self::sub_wallets).
-    sub_wallets: Option<SubWalletFactory<Sym>>,
+    sub_wallets: Option<SubstrateFactory<Sym>>,
     /// Pre-supplied aggregate [`Book`] — when set, the built portfolio
     /// uses this book (rather than a freshly-seeded one) so a caller that
     /// needed the handle *before* `build()` (typically the CLI's
@@ -792,55 +801,48 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
         self
     }
 
-    /// Replace how each child's sub-wallet is built.
+    /// Replace the **account** the portfolio trades.
     ///
-    /// The factory is called once per child at [`build`](Self::build) — and
-    /// again per child on [`reset`](Strategy::reset) — with that child's index
-    /// and its share of the cash budget. It defaults to an in-memory
-    /// [`PaperWallet`](crate::PaperWallet) carrying whatever
-    /// [`costs`](Self::costs) bundle was set, which is what every backtest
+    /// The factory is called once at [`build`](Self::build), and again on
+    /// [`reset`](Strategy::reset), with the portfolio's total cash budget. It
+    /// defaults to an in-memory [`PaperWallet`](crate::PaperWallet) carrying
+    /// whatever [`costs`](Self::costs) bundle was set, which is what a backtest
     /// wants.
     ///
-    /// Override it to run a portfolio against **live sub-accounts**: the
-    /// composite is wallet-agnostic, so a child trades a real venue through
-    /// exactly the same [`SubWalletHandle`](wallet::SubWalletHandle) path it
-    /// trades paper through.
+    /// Override it to run the portfolio **live**. Children keep trading their
+    /// own notional [`Ledger`](ledger::Ledger)s exactly as they do on paper;
+    /// the portfolio nets their intents into one order per symbol and sends
+    /// that to this wallet. Nothing about a child changes.
     ///
     /// ```no_run
     /// # use fugazi::portfolio::Portfolio;
     /// # use fugazi::{PaperWallet, Wallet};
     /// # use fugazi::strategies::SingleAssetStrategy;
     /// # use std::sync::Arc;
-    /// # fn account_for(idx: usize) -> Box<dyn Wallet<String> + Send> {
+    /// # fn the_account() -> Box<dyn Wallet<String> + Send> {
     /// #     Box::new(PaperWallet::new(0.0))
     /// # }
     /// let portfolio: Portfolio<String> = Portfolio::builder()
     ///     .with_initial_equity(10_000.0)
     ///     .add("a", SingleAssetStrategy::<String>::buy_and_hold("BTCUSDT".to_string()))
-    ///     // One venue sub-account per child.
-    ///     .sub_wallets(Arc::new(|idx, _seed| account_for(idx)))
+    ///     // The one account every child's flow is netted onto.
+    ///     .substrate(Arc::new(|_seed| the_account()))
     ///     .build();
     /// ```
     ///
-    /// # The sub-wallets must be disjoint
+    /// # The account must be the portfolio's alone
     ///
-    /// The composite's aggregate reads are **sums** over the subs
-    /// ([`funds`](Wallet::funds), [`equity`](Wallet::equity),
-    /// [`position`](Wallet::position)), and its rebalance moves value *between*
-    /// them. Handing N children N handles onto the *same* account therefore
-    /// reports N× the real balance and lets children silently trade over each
-    /// other's positions. Each child needs its own account, sub-account, or
-    /// otherwise separately-accounted book.
+    /// The portfolio drives this wallet to the sum of its children's positions,
+    /// so anything else trading the same account — a second portfolio, a manual
+    /// order — looks to the netting layer like a position no child asked for,
+    /// and will be traded back out.
     ///
-    /// A live factory should also note two things the paper default gives for
-    /// free. `seed` is the child's share of the cash budget, which a live
-    /// wallet cannot honour — the venue holds the real balance, so treat it as
-    /// advisory and expect [`equity`](Wallet::equity) to reflect the account.
-    /// And a wallet that returns `Err` from
-    /// [`adjust_funds`](Wallet::adjust_funds) or empty from
-    /// [`positions`](Wallet::positions) simply gets less rebalancing, not
-    /// broken rebalancing — see the module docs.
-    pub fn sub_wallets(mut self, factory: SubWalletFactory<Sym>) -> Self {
+    /// A live factory should also know that `seed` is advisory: a venue holds
+    /// the real balance and cannot be told to have $10,000, so
+    /// [`equity`](Wallet::equity) will reflect the account rather than the
+    /// budget. The children's ledgers are still seeded from the budget, so seed
+    /// it with what the account actually holds if you want the two to agree.
+    pub fn substrate(mut self, factory: SubstrateFactory<Sym>) -> Self {
         self.sub_wallets = Some(factory);
         self
     }
@@ -1007,7 +1009,7 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
             weights.len()
         );
         let allocations = allocate_funds(initial_equity, &weights);
-        let factory = sub_wallets.unwrap_or_else(|| paper_sub_wallets::<Sym>(costs));
+        let factory = sub_wallets.unwrap_or_else(|| paper_substrate::<Sym>(costs));
         let inner = Arc::new(Mutex::new(PortfolioInner::new(allocations, factory)));
         let rebalance: RebalanceSignal<Sym> =
             rebalance.unwrap_or_else(|| Box::new(ValueBool::<Snapshot<Sym>>::new(false)));

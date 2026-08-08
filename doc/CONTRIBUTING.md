@@ -391,10 +391,11 @@ through `atom_src`, not `atom_src_any`.
 takes `&self` and a `&mut dyn Wallet`. Don't add a price argument to reach past
 it.
 
-The one exception is `Portfolio`, which needs a sub-wallet per child and so
-ignores the wallet it is handed, trading its own interior. Its subs are erased
-(`Box<dyn Wallet + Send>`, built by a `SubWalletFactory`), so it still reaches
-a live venue through the seam — one disjoint account per child. That makes pairing a
+The one exception is `Portfolio`, which ignores the wallet it is handed and
+trades its own — a single **substrate** wallet (`Box<dyn Wallet + Send>`, built
+by a `SubstrateFactory`) that every child's flow is netted onto. Children trade
+notional ledgers over it, so the same composite runs on paper or against a live
+account with nothing else changing. That makes pairing a
 caller obligation, enforced two ways: `Portfolio::run(snapshots)` removes the
 pairing entirely (prefer it), and `Portfolio::trade` panics if a bar the driver
 would have priced went by without this portfolio's own composite wallet seeing
