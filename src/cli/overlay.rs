@@ -37,8 +37,10 @@ use std::collections::HashMap;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value as Json;
 
-use fugazi::Schema;
+use std::str::FromStr;
+
 use fugazi::sources::Interval;
+use fugazi::{Frequency, Schema, Selector};
 
 use crate::dyn_indicator::DynIndicator;
 use crate::calendar::{is_escaped, looks_like_body, parse_interval, parse_scope_parts};
@@ -62,12 +64,14 @@ impl OverlayScope {
     }
 }
 
-/// One overlay column: its output name, source expression, and scope.
+/// One overlay column: its output name, source expression, scope, and the
+/// document it came from (used to name the offending file in a build error).
 #[derive(Debug, Clone)]
 pub struct Overlay {
     pub name: String,
     pub spec: ExprSpec,
     pub scope: OverlayScope,
+    pub origin: String,
 }
 
 impl Overlay {
@@ -87,11 +91,26 @@ impl Overlay {
     /// (`!ema { source: !get { key: adj_close } }`); a `!get { key }` on an
     /// unknown key panics at build time with the schema's registered-keys
     /// list.
-    pub fn build(&self, schema: &std::sync::Arc<Schema>) -> Box<dyn DynIndicator> {
+    /// `root` is the blessed series this instance reads for any
+    /// `source:`-omitted leaf — the `(symbol, freq)` fetch group it's being
+    /// built for. A bare `!close` reads that group's own bar;
+    /// `!close { source: !pick { symbol: SPY } }` reaches across to SPY in the
+    /// same snapshot.
+    ///
+    /// Returns `Err` rather than aborting when the expression can't be built
+    /// (an unknown `!get` key, a malformed `!pick` frequency, …) — see
+    /// [`crate::spec::overlay::build_overlay`]. The message names this column
+    /// and the document it was written in.
+    pub fn build(
+        &self,
+        schema: &std::sync::Arc<Schema>,
+        root: Option<&Selector<String>>,
+    ) -> Result<Box<dyn DynIndicator>> {
         // Overlays don't run inside a strategy, so there's no live Position
         // or Book — using them here (`entry`, `peak`, book-anchored sizing)
         // never fires. The shared library core installs the stub anchors.
-        crate::spec::overlay::build_overlay(&self.spec, schema)
+        crate::spec::overlay::build_overlay(&self.spec, schema, root)
+            .map_err(|e| anyhow!("overlay {:?} in {}: {e}", self.name, self.origin))
     }
 }
 
@@ -170,13 +189,33 @@ pub fn stable_period_for(
     symbol: &str,
     interval: Interval,
     schema: &std::sync::Arc<Schema>,
-) -> usize {
-    active_for(overlays, columns, symbol, interval)
+) -> Result<usize> {
+    let root = group_root(symbol, interval);
+    let mut max = 0usize;
+    for o in active_for(overlays, columns, symbol, interval)
         .into_iter()
         .flatten()
-        .map(|o| o.build(schema).stable_period())
-        .max()
-        .unwrap_or(0)
+    {
+        max = max.max(o.build(schema, Some(&root))?.stable_period());
+    }
+    Ok(max)
+}
+
+/// The blessed series of one `(symbol, interval)` fetch group, as a
+/// [`Selector`] the overlay build roots its `source:`-omitted leaves on.
+///
+/// The interval round-trips through its token (`"1d"`) because
+/// [`Interval`] and [`Frequency`] are provider-side and library-side twins with
+/// no direct conversion; `as_token` / `from_str` are the existing bridge, and
+/// the same token is what the emitted `freq` column spells. A token that
+/// somehow doesn't parse degrades to a symbol-only selector rather than
+/// failing the fetch — matching on symbol alone is still right whenever a
+/// symbol appears at one cadence, which is the overwhelmingly common case.
+pub fn group_root(symbol: &str, interval: Interval) -> Selector<String> {
+    Selector::<String> {
+        symbol: Some(symbol.to_string()),
+        freq: Frequency::from_str(&interval.as_token()).ok(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -291,6 +330,7 @@ fn parse_inline(
             name: name.to_string(),
             spec,
             scope: scope.clone(),
+            origin: INLINE_ORIGIN.to_string(),
         });
     }
     if out.is_empty() {
@@ -317,6 +357,9 @@ fn parse_file(
     }
     Ok(out)
 }
+
+/// How an inline `-x col=expr` overlay names itself in a build error.
+const INLINE_ORIGIN: &str = "(inline overlay)";
 
 /// Parse a bare source expression (the RHS of `col=expr`) into a [`ExprSpec`].
 fn parse_expr(text: &str, params: &HashMap<String, Json>) -> Result<ExprSpec> {
@@ -398,6 +441,7 @@ fn scoped_from_value(value: Json, scope: OverlayScope, label: &str) -> Result<Ve
                 name: c.name,
                 spec: c.spec,
                 scope: scope.clone(),
+                origin: c.origin,
             })
         })
         .collect()
@@ -618,6 +662,7 @@ mod tests {
                     symbol: Some("BTC".to_string()),
                     interval: None,
                 },
+                origin: "(test)".to_string(),
             },
             Overlay {
                 name: "b".to_string(),
@@ -626,11 +671,12 @@ mod tests {
                     period: 20,
                 },
                 scope: OverlayScope::default(),
+                origin: "(test)".to_string(),
             },
         ];
         let cols = column_names(&overlays);
-        assert_eq!(stable_period_for(&overlays, &cols, "BTC", Interval::Day(1), &Schema::empty()), 200);
-        assert_eq!(stable_period_for(&overlays, &cols, "ETH", Interval::Day(1), &Schema::empty()), 20);
+        assert_eq!(stable_period_for(&overlays, &cols, "BTC", Interval::Day(1), &Schema::empty()).unwrap(), 200);
+        assert_eq!(stable_period_for(&overlays, &cols, "ETH", Interval::Day(1), &Schema::empty()).unwrap(), 20);
     }
 
     #[test]
@@ -641,8 +687,8 @@ mod tests {
         let b = Source::Inline("BTC:ma=!sma { period: 30 }".to_string());
         let overlays = parse_specs(&[a, b]).unwrap();
         let cols = column_names(&overlays);
-        assert_eq!(stable_period_for(&overlays, &cols, "BTC", Interval::Day(1), &Schema::empty()), 30);
-        assert_eq!(stable_period_for(&overlays, &cols, "ETH", Interval::Day(1), &Schema::empty()), 200);
+        assert_eq!(stable_period_for(&overlays, &cols, "BTC", Interval::Day(1), &Schema::empty()).unwrap(), 30);
+        assert_eq!(stable_period_for(&overlays, &cols, "ETH", Interval::Day(1), &Schema::empty()).unwrap(), 200);
     }
 
     #[test]
@@ -652,7 +698,7 @@ mod tests {
         let src = Source::Inline("s=!sma { period: 14 }".to_string());
         let overlays = parse_specs(std::slice::from_ref(&src)).unwrap();
         let cols = column_names(&overlays);
-        assert_eq!(stable_period_for(&overlays, &cols, "X", Interval::Day(1), &Schema::empty()), 14);
+        assert_eq!(stable_period_for(&overlays, &cols, "X", Interval::Day(1), &Schema::empty()).unwrap(), 14);
     }
 
     #[test]

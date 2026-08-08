@@ -322,7 +322,7 @@ impl BasketStrategySpec {
             let concrete = build_per_symbol(&score_template, sym, "score");
             let anchor = Position::new();
             let dyn_ind: Box<dyn DynIndicator> =
-                concrete.build(&anchor, &book_score, None, &schema_score);
+                concrete.build(&anchor, &book_score, None, &schema_score, Some(&leg_root(sym)));
             AsReal::new(dyn_ind)
         });
 
@@ -333,7 +333,7 @@ impl BasketStrategySpec {
             let concrete = build_per_symbol(&sizing_template, sym, "sizing");
             let anchor = Position::new();
             let dyn_ind: Box<dyn DynIndicator> =
-                concrete.build(&anchor, &book_sizing, None, &schema_sizing);
+                concrete.build(&anchor, &book_sizing, None, &schema_sizing, Some(&leg_root(sym)));
             AsReal::new(dyn_ind)
         });
 
@@ -351,7 +351,12 @@ impl BasketStrategySpec {
         // book — same convention as basket score/sizing templates.
         let strat = if let Some(rebalance_spec) = &self.rebalance_on {
             let anchor = Position::new();
-            let dyn_ind: Box<dyn DynIndicator> = rebalance_spec.build(&anchor, &book, None, schema);
+            // `root: None` — the gate is basket-wide, not per-leg, so there is
+            // no "this series" for it to mean. Cadence / calendar signals
+            // (`!every`, `!monthly`) need no asset; one that reads a price
+            // must name it with `!pick { symbol: ... }`.
+            let dyn_ind: Box<dyn DynIndicator> =
+                rebalance_spec.build(&anchor, &book, None, schema, None);
             strat.rebalance_on(AsBool::new(dyn_ind))
         } else {
             strat
@@ -370,7 +375,7 @@ impl BasketStrategySpec {
                 strat = strat.long_stop_loss(move |sym: &String, pos: &Position| {
                     let concrete = build_per_symbol(&t, sym, "long.stop_loss");
                     let dyn_ind: Box<dyn DynIndicator> =
-                        concrete.build(pos, &book_c, None, &schema_c);
+                        concrete.build(pos, &book_c, None, &schema_c, Some(&leg_root(sym)));
                     AsReal::new(dyn_ind)
                 });
             }
@@ -380,7 +385,7 @@ impl BasketStrategySpec {
                 strat = strat.long_take_profit(move |sym: &String, pos: &Position| {
                     let concrete = build_per_symbol(&t, sym, "long.take_profit");
                     let dyn_ind: Box<dyn DynIndicator> =
-                        concrete.build(pos, &book_c, None, &schema_c);
+                        concrete.build(pos, &book_c, None, &schema_c, Some(&leg_root(sym)));
                     AsReal::new(dyn_ind)
                 });
             }
@@ -396,7 +401,7 @@ impl BasketStrategySpec {
                 strat = strat.short_stop_loss(move |sym: &String, pos: &Position| {
                     let concrete = build_per_symbol(&t, sym, "short.stop_loss");
                     let dyn_ind: Box<dyn DynIndicator> =
-                        concrete.build(pos, &book_c, None, &schema_c);
+                        concrete.build(pos, &book_c, None, &schema_c, Some(&leg_root(sym)));
                     AsReal::new(dyn_ind)
                 });
             }
@@ -406,7 +411,7 @@ impl BasketStrategySpec {
                 strat = strat.short_take_profit(move |sym: &String, pos: &Position| {
                     let concrete = build_per_symbol(&t, sym, "short.take_profit");
                     let dyn_ind: Box<dyn DynIndicator> =
-                        concrete.build(pos, &book_c, None, &schema_c);
+                        concrete.build(pos, &book_c, None, &schema_c, Some(&leg_root(sym)));
                     AsReal::new(dyn_ind)
                 });
             }
@@ -423,6 +428,21 @@ impl BasketStrategySpec {
 
         DynBasketStrategy { inner: strat }
     }
+}
+
+/// The blessed series for one leg's chain: every `source:`-omitted leaf in a
+/// score / sizing / protective template reads *that leg's* symbol out of the
+/// snapshot.
+///
+/// This is what makes `!arg SYM` **optional** rather than required in a basket
+/// template — `score: !rsi { period: 14 }` and the fully-spelled
+/// `score: !rsi { period: 14, source: !close { source: !pick { symbol: !arg SYM } } }`
+/// now build the same chain. The explicit form keeps working (it resolves
+/// through [`build_per_symbol`] exactly as before), and stays the way to read
+/// a *different* symbol per leg — a hedge ratio against a common benchmark,
+/// say — which the implicit root can't express.
+fn leg_root(sym: &str) -> Selector<String> {
+    Selector::by_symbol(sym.to_string())
 }
 
 /// Resolve a per-symbol template into a concrete `ExprSpec` by supplying

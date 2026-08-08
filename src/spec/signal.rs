@@ -10,32 +10,18 @@ use serde::Deserialize;
 use crate::indicators::compare;
 use crate::indicators::logic::ValueBool;
 use crate::indicators::{
-    Book, DEFAULT_EPSILON, Every, GetBool, IsWeekday, IsWeekend, Pick, PickAny, Position, ValueStr,
+    Book, DEFAULT_EPSILON, Every, GetBool, IsWeekday, IsWeekend, Position, ValueStr,
 };
 use crate::prelude::*;
 
 use super::expr::{ExprSpec, default_source};
 use crate::spec::dyn_indicator::{self, AsBool, AsReal, AsStr, DynIndicator, DynType};
 
-/// Every atom-input leaf on the YAML side is built rooted through an
-/// empty-selector `Pick::<String>` — the single-entry snapshot unpack that
-/// makes existing single-series strategies keep working while multi-asset
-/// strategies opt in with an explicit `!pick { symbol: ... }` selector.
-fn pick_root() -> Pick<String> {
-    Pick::<String>::new()
-}
-
-/// Symbol-agnostic atom root for calendar signals (`!is_weekday`,
-/// `!is_weekend`) — reads only `atom.time`, which every entry in a
-/// well-formed snapshot shares, so "first entry" is a stable answer even
-/// when the snapshot carries multiple symbols (as in
-/// [`MultiAssetStrategy`](crate::strategies::MultiAssetStrategy),
-/// [`BasketStrategy`](crate::strategies::BasketStrategy), or a
-/// [`Portfolio`](crate::portfolio::Portfolio) `rebalance_on:` gate).
-/// Contrast with [`pick_root`], which panics on a 2+ entry snapshot.
-fn pick_any_root() -> PickAny<String> {
-    PickAny::<String>::new()
-}
+// The implicit atom roots are shared with the expression layer — one
+// definition of what a `source:`-omitted leaf reads, used by both. See
+// `super::expr::pick_root` for the blessed-series rule and
+// `super::expr::pick_any_root` for the symbol-agnostic calendar root.
+use super::expr::{pick_any_root, pick_root};
 
 /// The right-hand operand of `!str_eq` / `!str_ne`.
 ///
@@ -76,12 +62,13 @@ impl StrOperand {
         book: &Book,
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
+        root: Option<&Selector<String>>,
     ) -> Box<dyn DynIndicator> {
         match self {
             StrOperand::Literal(s) => {
                 dyn_indicator::wrap(ValueStr::<crate::types::Snapshot<String>>::new(s.as_str()))
             }
-            StrOperand::Expr(e) => e.build(anchor, book, portfolio_book, schema),
+            StrOperand::Expr(e) => e.build(anchor, book, portfolio_book, schema, root),
         }
     }
 }
@@ -665,11 +652,12 @@ impl SignalSpec {
         book: &Book,
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
+        root: Option<&Selector<String>>,
     ) -> Box<dyn DynIndicator> {
         use SignalSpec::*;
-        let real = |s: &ExprSpec| AsReal::new(s.build(anchor, book, portfolio_book, schema));
+        let real = |s: &ExprSpec| AsReal::new(s.build(anchor, book, portfolio_book, schema, root));
         let boolean =
-            |s: &SignalSpec| AsBool::new(s.build(anchor, book, portfolio_book, schema));
+            |s: &SignalSpec| AsBool::new(s.build(anchor, book, portfolio_book, schema, root));
 
         match self {
             Gt { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Gt::with_epsilon(
@@ -702,10 +690,10 @@ impl SignalSpec {
             // Under `!eq { lhs, rhs: !value bear }` both operands are
             // ExprSpecs, so the string constant must be `!value`-wrapped.
             Eq { lhs, rhs, epsilon } => build_polymorphic_eq(
-                lhs, rhs, *epsilon, false, anchor, book, portfolio_book, schema,
+                lhs, rhs, *epsilon, false, anchor, book, portfolio_book, schema, root,
             ),
             Ne { lhs, rhs, epsilon } => build_polymorphic_eq(
-                lhs, rhs, *epsilon, true, anchor, book, portfolio_book, schema,
+                lhs, rhs, *epsilon, true, anchor, book, portfolio_book, schema, root,
             ),
             Above { source, level } => dyn_indicator::wrap(real(source).above(*level)),
             Below { source, level } => dyn_indicator::wrap(real(source).below(*level)),
@@ -730,9 +718,9 @@ impl SignalSpec {
                     dyn_indicator::wrap(self::ValueBool::<crate::types::Snapshot<String>>::new(true))
                 } else {
                     let mut acc =
-                        AsBool::new(specs[0].build(anchor, book, portfolio_book, schema));
+                        AsBool::new(specs[0].build(anchor, book, portfolio_book, schema, root));
                     for s in &specs[1..] {
-                        let next = AsBool::new(s.build(anchor, book, portfolio_book, schema));
+                        let next = AsBool::new(s.build(anchor, book, portfolio_book, schema, root));
                         // AsBool `and` AsBool → concrete Combine; wrap in AsBool
                         // by round-tripping through the box so the fold's accumulator
                         // stays a single library type.
@@ -746,9 +734,9 @@ impl SignalSpec {
                     dyn_indicator::wrap(self::ValueBool::<crate::types::Snapshot<String>>::new(false))
                 } else {
                     let mut acc =
-                        AsBool::new(specs[0].build(anchor, book, portfolio_book, schema));
+                        AsBool::new(specs[0].build(anchor, book, portfolio_book, schema, root));
                     for s in &specs[1..] {
-                        let next = AsBool::new(s.build(anchor, book, portfolio_book, schema));
+                        let next = AsBool::new(s.build(anchor, book, portfolio_book, schema, root));
                         acc = AsBool::new(dyn_indicator::wrap(acc.or(next)));
                     }
                     dyn_indicator::wrap(acc)
@@ -760,7 +748,7 @@ impl SignalSpec {
             BecameTrue(inner) => dyn_indicator::wrap(boolean(inner).became_true()),
             BecameFalse(inner) => dyn_indicator::wrap(boolean(inner).became_false()),
             Unstable { signal } => {
-                dyn_indicator::unstable_wrap(signal.build(anchor, book, portfolio_book, schema))
+                dyn_indicator::unstable_wrap(signal.build(anchor, book, portfolio_book, schema, root))
             }
             Value(b) => {
                 dyn_indicator::wrap(self::ValueBool::<crate::types::Snapshot<String>>::new(*b))
@@ -771,15 +759,15 @@ impl SignalSpec {
             SignalSpec::Every(n) => {
                 dyn_indicator::wrap(self::Every::<crate::types::Snapshot<String>>::new(*n))
             }
-            Get { key } => build_signal_get(schema, key),
+            Get { key } => build_signal_get(schema, key, root),
             StrEq { lhs, rhs } => {
-                let lhs = AsStr::new(lhs.build(anchor, book, portfolio_book, schema));
-                let rhs = AsStr::new(rhs.build(anchor, book, portfolio_book, schema));
+                let lhs = AsStr::new(lhs.build(anchor, book, portfolio_book, schema, root));
+                let rhs = AsStr::new(rhs.build(anchor, book, portfolio_book, schema, root));
                 dyn_indicator::wrap(compare::StrEq::new(lhs, rhs))
             }
             StrNe { lhs, rhs } => {
-                let lhs = AsStr::new(lhs.build(anchor, book, portfolio_book, schema));
-                let rhs = AsStr::new(rhs.build(anchor, book, portfolio_book, schema));
+                let lhs = AsStr::new(lhs.build(anchor, book, portfolio_book, schema, root));
+                let rhs = AsStr::new(rhs.build(anchor, book, portfolio_book, schema, root));
                 dyn_indicator::wrap(compare::StrNe::new(lhs, rhs))
             }
 
@@ -820,12 +808,13 @@ fn build_polymorphic_eq(
     book: &Book,
     portfolio_book: Option<&Book>,
     schema: &Arc<Schema>,
+    root: Option<&Selector<String>>,
 ) -> Box<dyn DynIndicator> {
-    let lhs_built = lhs.build(anchor, book, portfolio_book, schema);
+    let lhs_built = lhs.build(anchor, book, portfolio_book, schema, root);
     match lhs_built.output_type() {
         DynType::Real => {
             let l = AsReal::new(lhs_built);
-            let r = AsReal::new(rhs.build(anchor, book, portfolio_book, schema));
+            let r = AsReal::new(rhs.build(anchor, book, portfolio_book, schema, root));
             let e = epsilon.unwrap_or(crate::indicators::DEFAULT_EPSILON);
             if negate {
                 dyn_indicator::wrap(compare::Ne::with_epsilon(l, r, e))
@@ -835,7 +824,7 @@ fn build_polymorphic_eq(
         }
         DynType::Str => {
             let l = AsStr::new(lhs_built);
-            let r = AsStr::new(rhs.build(anchor, book, portfolio_book, schema));
+            let r = AsStr::new(rhs.build(anchor, book, portfolio_book, schema, root));
             // `epsilon:` is silently ignored — string equality is
             // exact. Documenting it as a no-op instead of erroring so
             // a template that carries a shared `epsilon:` default
@@ -862,9 +851,13 @@ fn build_polymorphic_eq(
 /// a `Str` column likewise can't (wrap it in `!str_eq { lhs: !get { key }, rhs:
 /// "value" }`). Missing keys produce the same registered-keys-listing message
 /// as the source-side `!get`.
-fn build_signal_get(schema: &Arc<Schema>, key: &str) -> Box<dyn DynIndicator> {
+fn build_signal_get(
+    schema: &Arc<Schema>,
+    key: &str,
+    root: Option<&Selector<String>>,
+) -> Box<dyn DynIndicator> {
     match schema.type_of_key(key) {
-        Some(OverlayType::Bool) => dyn_indicator::wrap(GetBool::of(schema, key, pick_root())),
+        Some(OverlayType::Bool) => dyn_indicator::wrap(GetBool::of(schema, key, pick_root(root))),
         Some(OverlayType::Real) => panic!(
             "!get {{ key: {key:?} }} in signal position: column is Real, but a signal must be \
              Bool. Use a comparison like `!gt {{ lhs: !get {{ key: {key:?} }}, rhs: ... }}` \

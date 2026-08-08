@@ -2436,6 +2436,59 @@ def test_compute_overlays_snapshots_multi_symbol():
     assert out[1]["BTC"].overlays.get_real(i) is None
 
 
+def test_compute_overlays_snapshots_resolve_cross_symbol_picks():
+    # A `!pick { symbol: ... }` naming *another* series must resolve against the
+    # real multi-symbol snapshot. This used to yield an empty column on every
+    # bar — silently, and indistinguishably from a warming indicator.
+    btc = [10.0, 20.0, 30.0, 40.0]
+    eth = [100.0, 90.0, 80.0, 70.0]
+    snaps = [
+        ta.Snapshot(
+            {
+                "BTC": ta.Atom(ta.Candle(b, b, b, b, 1.0), time=i * 86_400_000),
+                "ETH": ta.Atom(ta.Candle(e, e, e, e, 1.0), time=i * 86_400_000),
+            }
+        )
+        for i, (b, e) in enumerate(zip(btc, eth))
+    ]
+
+    schema, out = ta.compute_overlays(
+        snaps,
+        """
+        own: !close
+        eth_close: !close { source: !pick { symbol: ETH } }
+        spread: !sub { lhs: !close, rhs: !close { source: !pick { symbol: ETH } } }
+        """,
+    )
+
+    def col(sym, name):
+        i = schema.index_of(name)
+        return [s.get(sym).overlays.get_real(i) for s in out]
+
+    # A bare leaf still reads its own series...
+    assert col("BTC", "own") == pytest.approx(btc)
+    assert col("ETH", "own") == pytest.approx(eth)
+    # ...while the explicit pick reads ETH on *both* series' rows.
+    assert col("BTC", "eth_close") == pytest.approx(eth)
+    assert col("ETH", "eth_close") == pytest.approx(eth)
+    # And both readings compose in one expression.
+    assert col("BTC", "spread") == pytest.approx([b - e for b, e in zip(btc, eth)])
+    assert col("ETH", "spread") == pytest.approx([0.0] * 4)
+
+
+def test_compute_overlays_pick_of_absent_symbol_stays_empty():
+    # A typo'd symbol must read empty, never fall through to another series.
+    snaps = [
+        ta.Snapshot({"BTC": ta.Atom(ta.Candle(c, c, c, c, 1.0), time=i * 86_400_000)})
+        for i, c in enumerate([10.0, 20.0, 30.0])
+    ]
+    schema, out = ta.compute_overlays(
+        snaps, "typo: !close { source: !pick { symbol: NOPE } }"
+    )
+    i = schema.index_of("typo")
+    assert [s.get("BTC").overlays.get_real(i) for s in out] == [None, None, None]
+
+
 def test_compute_overlays_dict_of_prebuilt_indicators():
     atoms = _bars([10.0, 20.0, 30.0])
     schema, out = ta.compute_overlays(

@@ -11,12 +11,26 @@
 //!
 //! ## Compute model
 //!
-//! Overlay indicators built from an [`ExprSpec`] are **snapshot-rooted** (a
-//! [`Pick`](crate::indicators::Pick) reads the atom out of a `Snapshot`), and a
-//! bare `!close` uses the sole-atom `Pick`, which panics on a multi-symbol
-//! snapshot. So the engine computes **per series** — driving each symbol's
-//! indicator set with size-1 snapshots — and an overlay therefore derives from
-//! its *own* series. A cross-asset reference to another symbol reads `None`.
+//! Overlay indicators built from an [`ExprSpec`] are **snapshot-rooted** — a
+//! [`Pick`](crate::indicators::Pick) reads the atom out of a `Snapshot`. An
+//! overlay column is written once and instantiated once per `(symbol, freq)`
+//! series, so each instantiation has a **blessed series**: the group key. It's
+//! installed as that instantiation's [`Pick::rooted`](crate::indicators::Pick::rooted)
+//! root, which is what lets the two readings coexist on one bar —
+//!
+//! * a bare `!close` (or any `source:`-omitted leaf) reads **its own** series;
+//! * `!close { source: !pick { symbol: SPY } }` reaches **across** to SPY.
+//!
+//! [`compute_snapshots`] is therefore driven by the *whole* multi-symbol
+//! snapshot, with one indicator set per series. [`compute_series`] remains for
+//! the genuinely single-series case (an untagged `Sequence[Atom]` from the
+//! Python binding), where there is nothing to reach across to.
+//!
+//! Cross-symbol `!get` carries one caveat:
+//! [`GetReal`](crate::indicators::GetReal) guards on `Arc::ptr_eq` against the
+//! schema it was built with, so reading another series' overlay column only
+//! resolves when both series share one schema `Arc` — true within a single
+//! `csv:` source or one provider's fetch, not across two providers.
 //!
 //! The output schema is the input schema's columns (same order, same indexes)
 //! with the new columns **appended**. Every output atom is bound to that one
@@ -35,15 +49,20 @@ use serde_json::Value as Json;
 use crate::indicators::{Book, Position};
 use crate::market::{Atom, OverlayInfo, OverlayType, OverlayValue, Schema};
 use crate::runtime::{DynIndicator, DynType, DynValue};
+use crate::snapshot::Selector;
+use crate::time::Frequency;
 use crate::types::Snapshot;
 
 use super::expr::ExprSpec;
 
-/// One named overlay column: its output column name and its source expression.
+/// One named overlay column: its output column name, its source expression,
+/// and where it was written (a file path or `(inline overlay)`) so a build
+/// failure can say *which* column of *which* document is at fault.
 #[derive(Debug, Clone)]
 pub struct OverlayColumn {
     pub name: String,
     pub spec: ExprSpec,
+    pub origin: String,
 }
 
 impl OverlayColumn {
@@ -52,16 +71,85 @@ impl OverlayColumn {
     /// Overlays never run inside a strategy, so position-anchored leaves
     /// (`entry`, `peak`, `trough`) read from a stub [`Position`] that never
     /// updates, and book-reading leaves from a stub [`Book`]; both stay `None`.
-    pub fn build(&self, schema: &Arc<Schema>) -> Box<dyn DynIndicator> {
-        build_overlay(&self.spec, schema)
+    ///
+    /// `root` is the blessed series this instantiation reads for any
+    /// `source:`-omitted leaf — see the module docs.
+    pub fn build(
+        &self,
+        schema: &Arc<Schema>,
+        root: Option<&Selector<String>>,
+    ) -> Result<Box<dyn DynIndicator>> {
+        build_overlay(&self.spec, schema, root)
+            .map_err(|e| anyhow!("overlay {:?} in {}: {e}", self.name, self.origin))
     }
 }
 
 /// Build a live overlay indicator for a bare [`ExprSpec`] against `schema`,
 /// with the stub anchors overlays always use (no live `Position` / `Book`).
 /// Shared by [`OverlayColumn::build`] and the CLI's scoped `Overlay::build`.
-pub fn build_overlay(spec: &ExprSpec, schema: &Arc<Schema>) -> Box<dyn DynIndicator> {
-    spec.build(&Position::new(), &Book::new(1.0), None, schema)
+///
+/// [`ExprSpec::build`] reports an invalid spec by **panicking** — the CLI
+/// convention, and reasonable when the spec came from a strategy author who
+/// wants a loud failure. An overlay expression is ordinary user input, though,
+/// so a `!get` naming a column the stream doesn't carry, a `!pick` with a
+/// malformed frequency, or a mixed-type `!match` is bad input, not a broken
+/// invariant: it belongs on the normal error path, not as a process abort with
+/// a stack trace. [`catch_build`] converts the whole family at this one
+/// boundary, and the caller prefixes the column and source document.
+pub fn build_overlay(
+    spec: &ExprSpec,
+    schema: &Arc<Schema>,
+    root: Option<&Selector<String>>,
+) -> Result<Box<dyn DynIndicator>> {
+    catch_build(|| spec.build(&Position::new(), &Book::new(1.0), None, schema, root))
+}
+
+// ---------------------------------------------------------------------------
+// Build-panic capture
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// Set only while [`catch_build`] is running on this thread. Read by the
+    /// installed hook to decide whether a panic is one we're about to convert
+    /// into an `Err` (stay quiet) or a genuine one (print as usual).
+    static SUPPRESS_PANIC_OUTPUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Installed at most once, the first time an overlay is built. Chains to
+/// whatever hook was in place, so panics anywhere else in the process — other
+/// threads included, since the flag is thread-local — print exactly as before.
+static HOOK_INSTALLED: std::sync::Once = std::sync::Once::new();
+
+fn install_quiet_hook() {
+    HOOK_INSTALLED.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if !SUPPRESS_PANIC_OUTPUT.with(std::cell::Cell::get) {
+                previous(info);
+            }
+        }));
+    });
+}
+
+/// Run `f`, converting a panic into an `Err` carrying its message.
+fn catch_build<T>(f: impl FnOnce() -> T) -> Result<T> {
+    install_quiet_hook();
+    SUPPRESS_PANIC_OUTPUT.with(|q| q.set(true));
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    SUPPRESS_PANIC_OUTPUT.with(|q| q.set(false));
+    outcome.map_err(|payload| anyhow!("{}", panic_message(&payload)))
+}
+
+/// Recover a panic payload's message. `String` and `&str` are the two shapes
+/// `panic!("…")` and `assert!(cond, "…")` produce.
+fn panic_message(payload: &Box<dyn std::any::Any + Send + 'static>) -> String {
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        return (*s).to_string();
+    }
+    "overlay expression failed to build".to_string()
 }
 
 /// Parse a flat `name: ExprSpec` JSON map (already `!import`/`!param`-resolved
@@ -79,7 +167,11 @@ pub fn columns_from_value(value: Json, label: &str) -> Result<Vec<OverlayColumn>
         }
         let spec: ExprSpec = serde_json::from_value(expr_value)
             .map_err(|e| anyhow!("overlay {name:?} in {label}: {e}"))?;
-        out.push(OverlayColumn { name, spec });
+        out.push(OverlayColumn {
+            name,
+            spec,
+            origin: label.to_string(),
+        });
     }
     Ok(out)
 }
@@ -143,10 +235,22 @@ pub fn prepare(
     existing: &Arc<Schema>,
     columns: &[OverlayColumn],
 ) -> Result<(Arc<Schema>, Vec<PreparedColumn>)> {
+    prepare_for(existing, columns, None)
+}
+
+/// [`prepare`] for one blessed series: every `source:`-omitted leaf in every
+/// column reads `root`'s entry out of the snapshot, while an explicit
+/// `!pick { symbol: … }` still reaches across. This is the per-series
+/// instantiation [`compute_snapshots`] builds once per `(symbol, freq)` key.
+pub fn prepare_for(
+    existing: &Arc<Schema>,
+    columns: &[OverlayColumn],
+    root: Option<&Selector<String>>,
+) -> Result<(Arc<Schema>, Vec<PreparedColumn>)> {
     let named: Vec<(String, Box<dyn DynIndicator>)> = columns
         .iter()
-        .map(|c| (c.name.clone(), c.build(existing)))
-        .collect();
+        .map(|c| Ok((c.name.clone(), c.build(existing, root)?)))
+        .collect::<Result<_>>()?;
     prepare_built(existing, named)
 }
 
@@ -209,50 +313,119 @@ pub fn compute_series(
     existing_len: usize,
     prepared: &mut [PreparedColumn],
 ) -> Vec<Atom> {
-    let mut out = Vec::with_capacity(atoms.len());
-    for atom in atoms {
-        let snap: Snapshot<String> = match symbol {
-            Some(s) => Snapshot::single(s.to_string(), atom.clone()),
-            None => Snapshot::of_atom(atom.clone()),
-        };
-
-        let mut slots: Vec<Option<OverlayValue>> = Vec::with_capacity(out_schema.len());
-        match &atom.overlays {
-            Some(ov) => {
-                let vals = ov.values();
-                for i in 0..existing_len {
-                    slots.push(vals.get(i).and_then(Clone::clone));
-                }
-            }
-            None => slots.resize(existing_len, None),
-        }
-
-        for pc in prepared.iter_mut() {
-            let input = match pc.ind.input_type() {
-                DynType::Snapshot => DynValue::Snapshot(snap.clone()),
-                DynType::Atom => DynValue::Atom(atom.clone()),
-                // A candle-rooted overlay over an overlay-only series has
-                // nothing to read; hand it the atom so the column warms up as
-                // absent rather than fabricating a bar.
-                DynType::Candle => match atom.candle {
-                    Some(candle) => DynValue::Candle(candle),
-                    None => DynValue::Atom(atom.clone()),
-                },
-                // Overlay roots are Snapshot/Atom/Candle; anything else (a
-                // scalar-input carrier) gets the atom as a best effort.
-                _ => DynValue::Atom(atom.clone()),
+    atoms
+        .iter()
+        .map(|atom| {
+            let snap: Snapshot<String> = match symbol {
+                Some(s) => Snapshot::single(s.to_string(), atom.clone()),
+                None => Snapshot::of_atom(atom.clone()),
             };
-            let produced = pc.ind.update(input).and_then(|dv| to_overlay_value(pc.ty, dv));
-            slots.push(produced);
-        }
+            drive(prepared, &snap, atom, out_schema, existing_len)
+        })
+        .collect()
+}
 
-        out.push(Atom {
-            candle: atom.candle,
-            time: atom.time,
-            overlays: Some(OverlayInfo::sparse(out_schema.clone(), slots)),
-        });
+/// The **snapshot-aware** entry point: compute every column for every series
+/// in a multi-symbol stream, driving each series' indicator set with the whole
+/// per-bar snapshot.
+///
+/// One prepared set is built per `(symbol, freq)` key, in first-appearance
+/// order, each rooted on its own key — so within one bar a column reads its
+/// own series through a bare `!close` and another series through
+/// `!pick { symbol: … }`. A series' set advances only on bars where that
+/// series has an entry, exactly as a per-series drive would.
+///
+/// Returns the output schema alongside the rebuilt snapshots; every augmented
+/// atom is bound to that one schema `Arc`.
+pub fn compute_snapshots(
+    existing: &Arc<Schema>,
+    columns: &[OverlayColumn],
+    snaps: &[Snapshot<String>],
+) -> Result<(Arc<Schema>, Vec<Snapshot<String>>)> {
+    // The output schema doesn't depend on which series drives a column — every
+    // instantiation has the same shape — so resolve it once, unrooted.
+    let (out_schema, _) = prepare_for(existing, columns, None)?;
+    let existing_len = existing.len();
+
+    type Key = (Option<String>, Option<Frequency>);
+    let mut sets: HashMap<Key, Vec<PreparedColumn>> = HashMap::new();
+    let mut out = Vec::with_capacity(snaps.len());
+
+    for snap in snaps {
+        let mut rebuilt = Snapshot::<String>::new();
+        for (sym, freq, atom) in snap.iter() {
+            let key: Key = (sym.cloned(), freq);
+            if !sets.contains_key(&key) {
+                let root = Selector::<String> {
+                    symbol: key.0.clone(),
+                    freq: key.1,
+                };
+                // An untagged entry has nothing to be rooted on; it falls back
+                // to the sole-atom unpack, same as the single-series path.
+                let root = (!root.is_empty()).then_some(root);
+                let (_, prepared) = prepare_for(existing, columns, root.as_ref())?;
+                sets.insert(key.clone(), prepared);
+            }
+            let prepared = sets.get_mut(&key).expect("just inserted");
+            let augmented = drive(prepared, snap, atom, &out_schema, existing_len);
+            rebuilt.push(key.0, key.1, augmented);
+        }
+        out.push(rebuilt);
     }
-    out
+    Ok((out_schema, out))
+}
+
+/// Advance one series' prepared columns by a single bar and assemble the
+/// augmented atom: the input atom's existing overlay slots carried through
+/// verbatim, then one new slot per column (`None` while it warms up).
+///
+/// `snap` is what snapshot-rooted columns read — the whole multi-symbol
+/// snapshot under [`compute_snapshots`], a size-1 one under
+/// [`compute_series`]. `atom` is *this* series' bar, used for the carried-over
+/// slots and for the atom-/candle-rooted carriers the Python binding can
+/// supply.
+fn drive(
+    prepared: &mut [PreparedColumn],
+    snap: &Snapshot<String>,
+    atom: &Atom,
+    out_schema: &Arc<Schema>,
+    existing_len: usize,
+) -> Atom {
+    let mut slots: Vec<Option<OverlayValue>> = Vec::with_capacity(out_schema.len());
+    match &atom.overlays {
+        Some(ov) => {
+            let vals = ov.values();
+            for i in 0..existing_len {
+                slots.push(vals.get(i).and_then(Clone::clone));
+            }
+        }
+        None => slots.resize(existing_len, None),
+    }
+
+    for pc in prepared.iter_mut() {
+        let input = match pc.ind.input_type() {
+            DynType::Snapshot => DynValue::Snapshot(snap.clone()),
+            DynType::Atom => DynValue::Atom(atom.clone()),
+            // A candle-rooted overlay over an overlay-only series has
+            // nothing to read; hand it the atom so the column warms up as
+            // absent rather than fabricating a bar.
+            DynType::Candle => match atom.candle {
+                Some(candle) => DynValue::Candle(candle),
+                None => DynValue::Atom(atom.clone()),
+            },
+            // Overlay roots are Snapshot/Atom/Candle; anything else (a
+            // scalar-input carrier) gets the atom as a best effort.
+            _ => DynValue::Atom(atom.clone()),
+        };
+        let produced = pc.ind.update(input).and_then(|dv| to_overlay_value(pc.ty, dv));
+        slots.push(produced);
+    }
+
+    Atom {
+        candle: atom.candle,
+        time: atom.time,
+        overlays: Some(OverlayInfo::sparse(out_schema.clone(), slots)),
+    }
 }
 
 fn to_overlay_value(ty: OverlayType, dv: DynValue) -> Option<OverlayValue> {

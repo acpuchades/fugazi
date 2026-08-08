@@ -184,14 +184,14 @@ impl MultiAssetStrategySpec {
                     // decoupled from entry — that's the level layer's job), so
                     // a fresh anchor is fine.
                     let anchor = Position::new();
-                    AsBool::new(concrete.build(&anchor, &book_l, None, &schema_l))
+                    AsBool::new(concrete.build(&anchor, &book_l, None, &schema_l, Some(&leg_root(sym))))
                 },
                 move |sym: &String| {
                     let dyn_ind: Box<dyn DynIndicator> = match &exit_template {
                         Some(t) => {
                             let concrete = build_signal(t, sym, "long exit");
                             let anchor = Position::new();
-                            concrete.build(&anchor, &book_lx, None, &schema_lx)
+                            concrete.build(&anchor, &book_lx, None, &schema_lx, Some(&leg_root(sym)))
                         }
                         None => {
                             dyn_indicator::wrap(ValueBool::<Snapshot<String>>::new(false))
@@ -206,7 +206,7 @@ impl MultiAssetStrategySpec {
                 let schema_sl = schema.clone();
                 strat = strat.long_stop_loss(move |sym: &String, position: &Position| {
                     let concrete = build_expr(&sl, sym, "long stop_loss");
-                    AsReal::new(concrete.build(position, &book_sl, None, &schema_sl))
+                    AsReal::new(concrete.build(position, &book_sl, None, &schema_sl, Some(&leg_root(sym))))
                 });
             }
             if let Some(tp) = &long.take_profit {
@@ -215,7 +215,7 @@ impl MultiAssetStrategySpec {
                 let schema_tp = schema.clone();
                 strat = strat.long_take_profit(move |sym: &String, position: &Position| {
                     let concrete = build_expr(&tp, sym, "long take_profit");
-                    AsReal::new(concrete.build(position, &book_tp, None, &schema_tp))
+                    AsReal::new(concrete.build(position, &book_tp, None, &schema_tp, Some(&leg_root(sym))))
                 });
             }
         }
@@ -232,14 +232,14 @@ impl MultiAssetStrategySpec {
                 move |sym: &String| {
                     let concrete = build_signal(&enter_template, sym, "short enter");
                     let anchor = Position::new();
-                    AsBool::new(concrete.build(&anchor, &book_s, None, &schema_s))
+                    AsBool::new(concrete.build(&anchor, &book_s, None, &schema_s, Some(&leg_root(sym))))
                 },
                 move |sym: &String| {
                     let dyn_ind: Box<dyn DynIndicator> = match &exit_template {
                         Some(t) => {
                             let concrete = build_signal(t, sym, "short exit");
                             let anchor = Position::new();
-                            concrete.build(&anchor, &book_sx, None, &schema_sx)
+                            concrete.build(&anchor, &book_sx, None, &schema_sx, Some(&leg_root(sym)))
                         }
                         None => {
                             dyn_indicator::wrap(ValueBool::<Snapshot<String>>::new(false))
@@ -254,7 +254,7 @@ impl MultiAssetStrategySpec {
                 let schema_sl = schema.clone();
                 strat = strat.short_stop_loss(move |sym: &String, position: &Position| {
                     let concrete = build_expr(&sl, sym, "short stop_loss");
-                    AsReal::new(concrete.build(position, &book_sl, None, &schema_sl))
+                    AsReal::new(concrete.build(position, &book_sl, None, &schema_sl, Some(&leg_root(sym))))
                 });
             }
             if let Some(tp) = &short.take_profit {
@@ -263,7 +263,7 @@ impl MultiAssetStrategySpec {
                 let schema_tp = schema.clone();
                 strat = strat.short_take_profit(move |sym: &String, position: &Position| {
                     let concrete = build_expr(&tp, sym, "short take_profit");
-                    AsReal::new(concrete.build(position, &book_tp, None, &schema_tp))
+                    AsReal::new(concrete.build(position, &book_tp, None, &schema_tp, Some(&leg_root(sym))))
                 });
             }
         }
@@ -279,7 +279,7 @@ impl MultiAssetStrategySpec {
                 // are symbol-agnostic magnitudes), so a fresh anchor is fine
                 // — same convention as `BasketStrategySpec::build`.
                 let anchor = Position::new();
-                AsReal::new(concrete.build(&anchor, &book_sz, None, &schema_sz))
+                AsReal::new(concrete.build(&anchor, &book_sz, None, &schema_sz, Some(&leg_root(sym))))
             });
         }
 
@@ -295,7 +295,11 @@ impl MultiAssetStrategySpec {
         // an omitted `rebalance_on:` matches pre-refactor behavior.
         let strat = if let Some(rebalance_spec) = &self.rebalance_on {
             let anchor = Position::new();
-            let dyn_ind: Box<dyn DynIndicator> = rebalance_spec.build(&anchor, &book, None, schema);
+            // `root: None` — the gate is portfolio-wide, not per-leg, so
+            // there is no "this series" for it to mean. Cadence / calendar
+            // signals need no asset; one that reads a price must name it.
+            let dyn_ind: Box<dyn DynIndicator> =
+                rebalance_spec.build(&anchor, &book, None, schema, None);
             strat.rebalance_on(AsBool::new(dyn_ind))
         } else {
             strat
@@ -320,6 +324,14 @@ fn build_signal(
     template.build(&args).unwrap_or_else(|e| {
         panic!("multi-asset {slot} signal template build failed for symbol {sym:?}: {e}")
     })
+}
+
+/// The blessed series for one leg's chain — every `source:`-omitted leaf in a
+/// per-symbol signal / level / sizing template reads *that leg's* symbol.
+/// Makes `!arg SYM` optional here for the same reason it does in a basket;
+/// see `crate::spec::basket::leg_root`.
+fn leg_root(sym: &str) -> Selector<String> {
+    Selector::by_symbol(sym.to_string())
 }
 
 fn build_expr(

@@ -728,8 +728,24 @@ impl PortfolioSpec {
                     )
                 });
                 let anchor = Position::new();
-                let dyn_ind: Box<dyn DynIndicator> =
-                    concrete.build(&anchor, &child_books[i], Some(&agg_book), schema);
+                // A single-asset child has one blessed series — its traded
+                // symbol, the same value bound to `!arg SYM` above — so a
+                // bare price leaf in its weight expression reads that. Every
+                // other child shape spans many symbols, so there is no
+                // "this series" and its leaves must name one.
+                let child_root = match &c.strategy {
+                    PortfolioChildStrategy::Single(s) => {
+                        Some(Selector::by_symbol(s.symbol().to_string()))
+                    }
+                    _ => None,
+                };
+                let dyn_ind: Box<dyn DynIndicator> = concrete.build(
+                    &anchor,
+                    &child_books[i],
+                    Some(&agg_book),
+                    schema,
+                    child_root.as_ref(),
+                );
                 let real_ind = AsReal::new(dyn_ind);
                 max_stable = max_stable.max(real_ind.stable_period());
                 max_warm_up = max_warm_up.max(real_ind.warm_up_period());
@@ -750,8 +766,11 @@ impl PortfolioSpec {
         // skip.
         if let Some(rebalance_spec) = &self.rebalance_on {
             let anchor = Position::new();
+            // `root: None` — a portfolio-level gate spans every child, so
+            // "this series" is undefined; a price leaf inside one must name
+            // its asset with `!pick { symbol: ... }`.
             let dyn_ind: Box<dyn DynIndicator> =
-                rebalance_spec.build(&anchor, &agg_book, Some(&agg_book), schema);
+                rebalance_spec.build(&anchor, &agg_book, Some(&agg_book), schema, None);
             let signal = AsBool::new(dyn_ind);
             max_stable = max_stable.max(signal.stable_period());
             max_warm_up = max_warm_up.max(signal.warm_up_period());
