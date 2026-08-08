@@ -30,8 +30,10 @@
 //! CLI's user-facing strings (dates, intervals, the compound spec) into those
 //! objects before invoking the fetching machinery.
 
+use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
@@ -585,7 +587,7 @@ fn run_candles(
                             &sym.symbol,
                             freq,
                             &schema,
-                        );
+                        )?;
                         series.push(Series {
                             provider: provider.clone(),
                             symbol: sym.symbol.clone(),
@@ -625,7 +627,7 @@ fn run_candles(
                         &sym,
                         interval,
                         &file_schema,
-                    );
+                    )?;
                     // A `csv:` file already carries its own `symbol` and
                     // `freq` columns, so there is nothing to remap.
                     series.push(Series {
@@ -639,6 +641,19 @@ fn run_candles(
                 }
                 n_symbols += seen_symbols.len();
             }
+        }
+    }
+
+    // Level the warm-up preroll across every series. Each group's figure above
+    // covers only the overlays that run *for that group*, but a cross-symbol
+    // column makes one group's output depend on another group's history — a
+    // `!correlation` against SPY is only settled once SPY is settled too.
+    // Rather than trace which columns reference which symbols, fetch every
+    // series back to the deepest warm-up any of them needs. Over-fetching is
+    // free: the extra leading rows are trimmed right back out below.
+    if let Some(deepest) = series.iter().map(|s| s.stable).max() {
+        for s in series.iter_mut() {
+            s.stable = deepest;
         }
     }
 
@@ -665,7 +680,8 @@ fn run_candles(
         args.keep_unstable,
         &overlays,
         &overlay_columns,
-    );
+    )?;
+    warn_empty_overlay_columns(&rows, &overlay_columns, args.quiet);
 
     write_candles_csv(output, &rows, &overlay_columns)
         .with_context(|| format!("writing {}", output.display()))?;
@@ -884,12 +900,49 @@ async fn fetch_series(
     Ok(rows)
 }
 
+/// Assemble one [`Snapshot`] per bar timestamp, carrying **every** series'
+/// atom for that instant, tagged with its `(symbol, freq)`.
+///
+/// This is what makes a cross-symbol overlay resolve: a column computed for
+/// XLF is driven with a snapshot that also holds SPY, so
+/// `!close { source: !pick { symbol: SPY } }` finds it, while XLF's own
+/// `source:`-omitted leaves read XLF through the group root. Bars are inserted
+/// in `(time, symbol, freq)` order so a partial selector — `!pick { freq: 1d }`
+/// with no symbol — resolves deterministically via
+/// [`Snapshot::find`]'s first-match rule.
+///
+/// Atoms with no timestamp can't be aligned with anything and are left out;
+/// the caller falls back to a size-1 snapshot for those.
+fn snapshots_by_time(raw: &[RawBar]) -> HashMap<i64, Snapshot<String>> {
+    let mut ordered: Vec<&RawBar> = raw.iter().filter(|b| b.atom.time.is_some()).collect();
+    ordered.sort_by(|a, b| {
+        (a.atom.time, a.symbol.as_str(), a.interval.as_token())
+            .cmp(&(b.atom.time, b.symbol.as_str(), b.interval.as_token()))
+    });
+
+    let mut by_time: HashMap<i64, Snapshot<String>> = HashMap::new();
+    for bar in ordered {
+        let t = bar.atom.time.expect("filtered to timestamped bars").0;
+        by_time.entry(t).or_default().push(
+            Some(bar.symbol.clone()),
+            Frequency::from_str(&bar.interval.as_token()).ok(),
+            bar.atom.clone(),
+        );
+    }
+    by_time
+}
+
 /// Group raw bars by `(symbol, interval)`, feed each group's bars through its
 /// per-group active overlays (last-defined applicable one wins per column;
 /// see [`overlay::active_for`]), and drop the leading warm-up rows unless the
 /// caller opted to keep them. Bars are then sorted ascending by time (ties
 /// broken by symbol, then freq) — the shape the previous overlay-less writer
 /// already committed to.
+///
+/// Each group's indicators are driven with the **whole-market snapshot** for
+/// the bar (see [`snapshots_by_time`]), rooted on that group's own
+/// `(symbol, freq)`. Groups still hold independent indicator state — a column
+/// is one series' answer — but they can now *read* each other.
 fn apply_overlays(
     raw: Vec<RawBar>,
     since: Timestamp,
@@ -897,7 +950,9 @@ fn apply_overlays(
     keep_unstable: bool,
     overlays: &[Overlay],
     columns: &[String],
-) -> Vec<Row> {
+) -> Result<Vec<Row>> {
+    let by_time = snapshots_by_time(&raw);
+
     // Bin the incoming stream by `(symbol, interval)` — order within each bin is
     // preserved by the sort below and matches the order the provider paged the
     // bars in (ascending time). The outer sort re-orders across groups. The
@@ -919,27 +974,42 @@ fn apply_overlays(
         // Every atom in a group shares the same source-provided schema (one
         // `Arc<Schema>`); pluck it off the first atom that carries overlays.
         // Falls back to `Schema::empty()` for a source that exposes no
-        // extras — `!get { key }` then panics at build with an unknown key,
-        // matching the pre-refactor behaviour.
+        // extras — `!get { key }` then fails the build with an unknown key.
         let group_atoms: Vec<Atom> = bars.iter().map(|b| b.atom.clone()).collect();
         let schema = sources::schema_of(&group_atoms);
 
+        // This group's blessed series: a `source:`-omitted leaf in any of its
+        // columns reads this symbol out of the shared snapshot.
+        let root = overlay::group_root(&symbol, interval);
+
         let active: Vec<Option<&Overlay>> =
             overlay::active_for(overlays, columns, &symbol, interval);
-        let mut instances: Vec<Option<Box<dyn DynIndicator>>> = active
-            .iter()
-            .map(|slot| slot.as_ref().map(|o| o.build(&schema)))
-            .collect();
+        let mut instances: Vec<Option<Box<dyn DynIndicator>>> = Vec::with_capacity(active.len());
+        for slot in &active {
+            instances.push(match slot {
+                Some(o) => Some(o.build(&schema, Some(&root))?),
+                None => None,
+            });
+        }
         let has_applicable = instances.iter().any(Option::is_some);
 
         let mut group_rows: Vec<Row> = bars
             .into_iter()
             .map(|b| {
+                // The whole market at this instant. A bar with no timestamp
+                // can't be aligned with the rest, so it sees only itself —
+                // tagged, so the group root still resolves.
+                let snap = b
+                    .atom
+                    .time
+                    .and_then(|t| by_time.get(&t.0))
+                    .cloned()
+                    .unwrap_or_else(|| Snapshot::single(b.symbol.clone(), b.atom.clone()));
                 let values: Vec<Option<OverlayValue>> = instances
                     .iter_mut()
                     .map(|slot| {
                         slot.as_mut().and_then(|inst| {
-                            dyn_value_to_overlay(inst.update(DynValue::Atom(b.atom.clone()))?)
+                            dyn_value_to_overlay(inst.update(DynValue::Snapshot(snap.clone()))?)
                         })
                     })
                     .collect();
@@ -980,7 +1050,7 @@ fn apply_overlays(
         (a.atom.time, a.symbol.as_str(), a.freq.as_str())
             .cmp(&(b.atom.time, b.symbol.as_str(), b.freq.as_str()))
     });
-    out
+    Ok(out)
 }
 
 /// Warn (to stderr) about any series whose fetched history falls short of the
@@ -1054,6 +1124,43 @@ fn warn_short_history(
                  unstable/pre-warm; pass --keep-unstable to inspect them.",
                 style::yellow("warn"),
                 s.label(),
+            );
+        }
+    }
+}
+
+/// Warn about any overlay column that produced **no value on any row**.
+///
+/// A uniformly-empty column is indistinguishable, in the CSV, from one whose
+/// indicator is still warming up — which is exactly how cross-symbol overlays
+/// shipped broken and went unnoticed. The remaining ways to land here are a
+/// `!pick { symbol: … }` naming a symbol the fetch doesn't carry (a typo, or a
+/// spec pointed at the wrong dataset), a `!get` reading another series' column
+/// across a provider boundary (the schema `Arc` differs, so the guard on
+/// [`fugazi::indicators::GetReal`] declines), or a warm-up longer than the
+/// available history.
+///
+/// A warning rather than an error, because an all-empty column is legitimate
+/// for a leaf that never fires outside a strategy — `!entry` / `!peak` read a
+/// stub `Position` here and are documented as producing an empty column. Goes
+/// to stderr regardless of `--quiet`, which governs the success summary rather
+/// than correctness warnings; suppressed only when there are no rows at all,
+/// where every column is trivially empty and the row count already says so.
+fn warn_empty_overlay_columns(rows: &[Row], columns: &[String], _quiet: bool) {
+    if rows.is_empty() {
+        return;
+    }
+    for (i, name) in columns.iter().enumerate() {
+        let any = rows
+            .iter()
+            .any(|r| r.overlays.get(i).is_some_and(Option::is_some));
+        if !any {
+            eprintln!(
+                "  {} overlay column {name:?} is empty on all {} row(s) — the expression \
+                 never produced a value. Check that any `!pick {{ symbol: ... }}` names a \
+                 symbol present in the fetched data, and that the warm-up fits the range.",
+                style::yellow("warn"),
+                rows.len(),
             );
         }
     }

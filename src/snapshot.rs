@@ -219,7 +219,8 @@ impl<Sym> Snapshot<Sym> {
     /// silently returning an arbitrary asset.
     ///
     /// For sources that are symbol-agnostic (calendar accessors that only
-    /// read `atom.time`), see [`any_atom`](Self::any_atom).
+    /// read `atom.time`), see [`any_atom`](Self::any_atom); for the
+    /// non-panicking twin, [`lone_atom`](Self::lone_atom).
     pub fn sole_atom(&self) -> Option<&Atom> {
         // Only priceable entries count. An overlay-only series — a funding
         // rate, an open interest — is stacked into the snapshot beside the
@@ -247,6 +248,25 @@ impl<Sym> Snapshot<Sym> {
                  (or `by_freq(...)` / `exact(...)`)."
                 )
             }
+        }
+    }
+
+    /// The sole priceable atom, or `None` when there isn't exactly one — the
+    /// **non-panicking** twin of [`sole_atom`](Self::sole_atom).
+    ///
+    /// [`Pick::rooted`](crate::indicators::Pick::rooted) uses this as its
+    /// fallback when the blessed symbol doesn't match. The distinction from
+    /// `sole_atom` is the whole point: in a rooted context a 2+ entry snapshot
+    /// is *normal* — it just means the blessed leg is absent this bar (a
+    /// listing gap, a different exchange calendar), which should read `None`
+    /// and let the caller roll the symbol off, not abort the run. The panic in
+    /// `sole_atom` is for the genuinely mis-wired case, where nothing named an
+    /// asset at all.
+    pub fn lone_atom(&self) -> Option<&Atom> {
+        let mut priceable = self.entries.iter().filter(|(_, _, a)| a.is_priceable());
+        match (priceable.next(), priceable.next()) {
+            (Some(entry), None) => Some(&entry.2),
+            _ => None,
         }
     }
 }

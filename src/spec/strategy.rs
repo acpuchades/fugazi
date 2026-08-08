@@ -53,10 +53,11 @@ impl SideSpec {
         anchor: &Position,
         book: &Book,
         schema: &Arc<Schema>,
+        root: Option<&Selector<String>>,
     ) -> Box<dyn DynIndicator> {
         self.exit
             .as_ref()
-            .map(|s| s.build(anchor, book, None, schema))
+            .map(|s| s.build(anchor, book, None, schema, root))
             .unwrap_or_else(|| {
                 dyn_indicator::wrap(ValueBool::<crate::types::Snapshot<String>>::new(false))
             })
@@ -166,35 +167,42 @@ impl SingleStrategySpec {
         // leaf (position) and every book-anchored sizing recipe (book).
         let anchor = strat.position();
         let book = strat.book();
+        // The blessed series: every `source:`-omitted leaf in this spec reads
+        // the symbol the strategy trades. Declaring `symbol:` and having a
+        // bare `!close` mean something else would be indefensible — and it
+        // lets a single-asset spec run against a multi-symbol `--series`
+        // frame instead of tripping the sole-atom panic.
+        let root = Selector::by_symbol(self.symbol.clone());
+        let root = Some(&root);
         if let Some(long) = &self.long {
             strat = strat.long_on(
-                AsBool::new(long.enter.build(&anchor, &book, None, schema)),
-                AsBool::new(long.exit(&anchor, &book, schema)),
+                AsBool::new(long.enter.build(&anchor, &book, None, schema, root)),
+                AsBool::new(long.exit(&anchor, &book, schema, root)),
             );
             if let Some(sl) = &long.stop_loss {
-                strat = strat.long_stop_loss(AsReal::new(sl.build(&anchor, &book, None, schema)));
+                strat = strat.long_stop_loss(AsReal::new(sl.build(&anchor, &book, None, schema, root)));
             }
             if let Some(tp) = &long.take_profit {
-                strat = strat.long_take_profit(AsReal::new(tp.build(&anchor, &book, None, schema)));
+                strat = strat.long_take_profit(AsReal::new(tp.build(&anchor, &book, None, schema, root)));
             }
         }
         if let Some(short) = &self.short {
             strat = strat.short_on(
-                AsBool::new(short.enter.build(&anchor, &book, None, schema)),
-                AsBool::new(short.exit(&anchor, &book, schema)),
+                AsBool::new(short.enter.build(&anchor, &book, None, schema, root)),
+                AsBool::new(short.exit(&anchor, &book, schema, root)),
             );
             if let Some(sl) = &short.stop_loss {
-                strat = strat.short_stop_loss(AsReal::new(sl.build(&anchor, &book, None, schema)));
+                strat = strat.short_stop_loss(AsReal::new(sl.build(&anchor, &book, None, schema, root)));
             }
             if let Some(tp) = &short.take_profit {
-                strat = strat.short_take_profit(AsReal::new(tp.build(&anchor, &book, None, schema)));
+                strat = strat.short_take_profit(AsReal::new(tp.build(&anchor, &book, None, schema, root)));
             }
         }
         if let Some(sizing) = &self.sizing {
-            strat = strat.position_sizing(AsReal::new(sizing.build(&anchor, &book, None, schema)));
+            strat = strat.position_sizing(AsReal::new(sizing.build(&anchor, &book, None, schema, root)));
         }
         if let Some(rebalance) = &self.rebalance_on {
-            strat = strat.rebalance_on(AsBool::new(rebalance.build(&anchor, &book, None, schema)));
+            strat = strat.rebalance_on(AsBool::new(rebalance.build(&anchor, &book, None, schema, root)));
         }
         DynSingleStrategy { inner: strat }
     }

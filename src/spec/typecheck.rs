@@ -604,7 +604,7 @@ mod tests {
             let Some(declared) = output_type(&spec) else {
                 panic!("{yaml}: expected a declared output type");
             };
-            let built = spec.build(&anchor, &book, None, &schema).output_type();
+            let built = spec.build(&anchor, &book, None, &schema, None).output_type();
             assert_eq!(
                 declared, built,
                 "{yaml}: declared {declared} but build produced {built}"
@@ -657,7 +657,7 @@ mod tests {
                     continue;
                 };
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    mutated.build(&anchor, &book, None, &schema)
+                    mutated.build(&anchor, &book, None, &schema, None)
                 }));
                 if outcome.is_ok() {
                     // Collected rather than asserted inline: the hook is muted

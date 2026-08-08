@@ -6100,6 +6100,27 @@ fn compute_overlays_snapshots<'py>(
     let snaps = snapshots_from_sequence(series)?;
     let existing =
         existing_schema_from_atoms(snaps.iter().flat_map(|s| s.iter().map(|(_, _, a)| a)))?;
+
+    // Spec-authored columns go through the snapshot-aware engine: it builds one
+    // indicator set per (symbol, freq) series rooted on that series, and drives
+    // each with the *whole* snapshot — so a bare `!close` reads its own series
+    // while `!pick { symbol: SPY }` reaches across to another. This is the path
+    // a multi-symbol upload takes.
+    if let OverlayInput::Spec(cols) = input {
+        let (out_schema, augmented) = ov::compute_snapshots(&existing, cols, &snaps)
+            .map_err(|e| PyValueError::new_err(format!("{e:#}")))?;
+        let list = pyo3::types::PyList::empty(py);
+        for snap in augmented {
+            list.append(PySnapshot { inner: snap })?;
+        }
+        return Ok((PySchema { inner: out_schema }, list.into_any().unbind()));
+    }
+
+    // Pre-built Python carriers (the `{name: Indicator}` dict form) have no
+    // spec to rebuild, so they can't be re-rooted per series — and a carrier
+    // rooted on the sole-atom `Pick` would panic on a multi-symbol snapshot.
+    // They keep the per-series drive: each series computed on its own size-1
+    // snapshots, cross-symbol references unavailable.
     let (out_schema, template) = build_overlay_prepared(&existing, input)?;
     let existing_len = existing.len();
 

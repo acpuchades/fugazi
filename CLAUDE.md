@@ -42,8 +42,8 @@ Output is `Option` (warm-up → `None`).
 - **Cross-asset sources** (`time.rs` + `snapshot.rs` + `indicators/pick.rs`):
   - **`Frequency`** — bar cadence enum (`Minute(u32)`/`Hour`/`Day`/`Week`/`Month`), totally ordered by duration, `FromStr` on `N<unit>` (`m`/`h`/`d`/`w`/`M`). `sources::Interval` is provider-side twin.
   - **`Selector { symbol: Option<String>, freq: Option<Frequency> }`** — partial key. `None` = wildcard; shorthands `by_symbol`/`by_freq`/`exact`.
-  - **`Snapshot<K>`** — newtype `HashMap<K, Atom>` with `get`/`insert`/`iter`/`FromIterator` + `sole_atom(&self)` (unique in size-1, **panics on 2+**, `None` on empty). `impl Snapshot<Selector>` adds `find(query)`.
-  - **`Pick<S = Identity<Snapshot<Selector>>>`** projects one asset: `Output = Atom`. `Pick::new()` (empty selector, sole-atom), `Pick::matching(selector)`, `Pick::of(selector, source)`. Non-empty selector → `None` on no match; empty **panics** on 2+ snapshot. **`Atom` equality is by `time`**; `Ord` sorts chronologically with `None` first. **`PickAny<S = Identity<Snapshot<Sym>>>`** is the symbol-agnostic sibling: no selector, always returns the first entry's atom (`snap.any_atom()`), `None` on empty. Used by every calendar accessor's default source path — calendar reads only touch `atom.time`, which every entry in a bar's snapshot shares, so "any" is stable across multi-symbol contexts.
+  - **`Snapshot<K>`** — newtype `HashMap<K, Atom>` with `get`/`insert`/`iter`/`FromIterator` + `sole_atom(&self)` (unique in size-1, **panics on 2+**, `None` on empty) + `lone_atom(&self)` (the **non-panicking** twin — `None` unless there's exactly one priceable entry; backs `Pick::rooted`'s fallback, where a 2+ snapshot means "the blessed leg is absent this bar", not "mis-wired"). `impl Snapshot<Selector>` adds `find(query)`.
+  - **`Pick<S = Identity<Snapshot<Selector>>>`** projects one asset: `Output = Atom`. Three modes: `Pick::new()` (empty selector → sole-atom, **panics** on 2+); `Pick::matching(selector)` (strict structural match → `None` when absent — the explicit cross-asset form); **`Pick::rooted(selector)`** (match, else fall back to `lone_atom` — the *blessed-series* root a context installs for `source:`-omitted leaves; the fallback keeps untagged size-1 snapshots, i.e. `Vec<Candle>` drivers, resolving). `Pick::of(selector, source)` re-roots any of them. **`Atom` equality is by `time`**; `Ord` sorts chronologically with `None` first. **`PickAny<S = Identity<Snapshot<Sym>>>`** is the symbol-agnostic sibling: no selector, always returns the first entry's atom (`snap.any_atom()`), `None` on empty. Used by every calendar accessor's default source path — calendar reads only touch `atom.time`, which every entry in a bar's snapshot shares, so "any" is stable across multi-symbol contexts.
 
   Python: `ta.Frequency("1h")`, `ta.Selector(symbol="BTC", freq="1h")`, `ta.Snapshot({...})`, `ta.pick(...)`. Snapshot keys accept `str`/`Frequency`/`(str, freq)`/`Selector`.
 
@@ -53,7 +53,7 @@ Output is `Option` (warm-up → `None`).
 
 - **Windowed stats over Real**: `Skewness`/`Kurtosis` (standardized moments; kurtosis raw, ~3 for normal), `ZScore` (`(x−SMA)/stddev`), two-source `Correlation` (rolling Pearson; autocorrelation via `Correlation::new(x.clone(), x.lag(n), period)`). O(1)/bar off `WindowStats`/`WindowCovariance`. **`VarianceRatio` is the deliberate exception** — Lo-MacKinlay regime classifier over first differences (`1.0` random-walk null, `>1` trending, `<1` mean-reverting), **O(`period`)/bar** (retains window in `VecDeque`). Asserts `lag ≥ 2`, `period ≥ lag + 2`.
 
-- **Calendar sources** (`indicators/calendar.rs`) decompose `atom.time` (UTC ms): `Year`/`Month`/`Day`/`Hour`/`Minute`/`Second`/`DayOfWeek` (ISO 1=Mon..7=Sun)/`DayOfYear`/`WeekOfYear`/`Quarter`/`UnixSeconds`/`UnixMillis` on `Calendar<F, S> + CalendarField`. Plus `CurrentTime` leaf and bool `IsWeekday`/`IsWeekend`. CSV loader and remote providers set `Atom::time`; `None` only for synthetic atoms. Daily+ bars at 00:00 UTC. YAML: bare `!year`/…/`!time`/`!is_weekday`/`!is_weekend`. Uses `time` crate — the unconditional dep. **Default atom source is `PickAny`, not `Pick`** — every entry in a bar's snapshot shares `atom.time`, so picking any one is stable, and the sole-atom-panic `Pick` behavior would break the natural home for these (multi-symbol snapshots inside `MultiAssetStrategy` / `BasketStrategy` / a portfolio's `rebalance_on:` gate). Price leaves (`!close`/`!high`/…) keep the `Pick::new()` default because they *do* depend on which asset — no silent fallback. An explicit `source: !pick { symbol: ... }` is honored on any calendar accessor for callers who want a specific symbol's time.
+- **Calendar sources** (`indicators/calendar.rs`) decompose `atom.time` (UTC ms): `Year`/`Month`/`Day`/`Hour`/`Minute`/`Second`/`DayOfWeek` (ISO 1=Mon..7=Sun)/`DayOfYear`/`WeekOfYear`/`Quarter`/`UnixSeconds`/`UnixMillis` on `Calendar<F, S> + CalendarField`. Plus `CurrentTime` leaf and bool `IsWeekday`/`IsWeekend`. CSV loader and remote providers set `Atom::time`; `None` only for synthetic atoms. Daily+ bars at 00:00 UTC. YAML: bare `!year`/…/`!time`/`!is_weekday`/`!is_weekend`. Uses `time` crate — the unconditional dep. **Default atom source is `PickAny`, not `Pick`** — every entry in a bar's snapshot shares `atom.time`, so picking any one is stable, and the sole-atom-panic `Pick` behavior would break the natural home for these (multi-symbol snapshots inside `MultiAssetStrategy` / `BasketStrategy` / a portfolio's `rebalance_on:` gate). Price leaves (`!close`/`!high`/…) resolve through the **blessed root** instead (see *Blessed series* below) because they *do* depend on which asset — no silent fallback. An explicit `source: !pick { symbol: ... }` is honored on any calendar accessor for callers who want a specific symbol's time.
 
 - **`Unstable<S>`** (`indicators/unstable.rs`): passthrough forwarding everything to `S` *except* `unstable_period() = 0`. Fluent `.unstable()` on both extension traits. YAML: `!unstable { source | signal }`. Opt-in override for readiness gate.
 
@@ -227,6 +227,33 @@ Overlay series carry their own symbol and are **stacked** into the run rather th
 
 **CoinGecko specifics.** `market_chart/range` picks granularity from window length (~5-min ≤1d, hourly ≤90d, daily beyond). Client rejects sub-hourly, paginates hourly in 80-day windows, buckets onto requested cadence keeping **first** sample per bucket. Weekly floors to Monday, monthly to 1st via calendar (epoch day 0 = Thursday would silently break Monday joins). `User-Agent` **mandatory**. Public tier serves **last 365 days** only. `COINGECKO_API_KEY` = demo key.
 
+## Blessed series — what a `source:`-omitted leaf reads
+
+There are **two stacked defaults** on any atom leaf. Don't conflate them.
+
+1. **Per-tag** (`src/spec/expr.rs`, `default_source` / `default_bar_source` / `default_high` / `default_low`): which *sub-expression* a wrapper defaults to — `!ema`/`!sma`/`!rsi` → `!close`, `!atr`/`!obv`/`!adx` → `!current`, `!donchian` → `!high`/`!low`.
+2. **Blessed series**: once you bottom out at a leaf (`!close`, `!high`, `!current`, `!get`, …), which *asset* it projects out of the bar's `Snapshot`.
+
+The blessed series is carried as an explicit `root: Option<&Selector<String>>` **parameter** on `ExprSpec::build` / `SignalSpec::build`, consumed by `pick_root` / `build_pick`. `Some(sel)` → `Pick::rooted(sel)`, `None` → `Pick::new()` (sole-atom, panics on 2+). The ~112 + 30 match arms never mention it: they fan out through the `atom_src` / `atom_src_any` closures (`expr.rs`, in `build`) and `atom_source_of` / `atom_source_any_of`, which capture it.
+
+**Who blesses what:**
+
+| Context | root |
+|---|---|
+| `SingleStrategySpec::build` | `Some(by_symbol(self.symbol))` — the declared `symbol:` means the same for signals as for trading |
+| `BasketStrategySpec` / `MultiAssetStrategySpec` per-leg factories | `Some(by_symbol(sym))` via `leg_root` |
+| overlay column, per `(symbol, freq)` series | `Some(group key)` via `cli::overlay::group_root` |
+| `PortfolioSpec` `weights:`, single-asset child | `Some(by_symbol(child.symbol))` |
+| `PairsStrategySpec` | `None` — two legs, neither privileged |
+| portfolio / basket / multi `rebalance_on:`, portfolio `weights:` on non-single children | `None` — gate spans everything |
+| `!sharpe` & co.'s `strategy:` subtree | `None` — the embedded strategy blesses itself from its own `symbol:` |
+
+Consequences worth knowing:
+
+- **`!arg SYM` is optional, not required**, in basket / multi templates — `score: !rsi { period: 14 }` and the fully-spelled `!pick { symbol: !arg SYM }` build the same chain. The explicit form still works and remains the only way to read a *different* symbol per leg.
+- **`pick_any_root` ignores the root.** Calendar leaves read only `atom.time`, shared by every entry; re-rooting would make them `None` on a bar where that one symbol is absent.
+- **`Pick::rooted` falls back through `lone_atom`, not `sole_atom`.** In a rooted context a 2+ entry snapshot is ordinary — the blessed leg is just absent this bar — so it reads `None` and the caller rolls the symbol off. Using `sole_atom` there would panic on every basket with a listing gap.
+
 ## Safe defaults, opt-in overrides
 
 Numbers during warm-up or IIR settling are *unsettled*. Every knob that could paper over an unsettled bar biases toward **waiting**, with one named opt-out:
@@ -333,7 +360,9 @@ Cargo: `python/Cargo.toml` depends on `fugazi_core = { package = "fugazi", … d
 | Provider schemas | `*::*_schema()` (`OnceLock`) | `src/sources/{binance,binance_vision,yahoo,coingecko}.rs` |
 | Bucket an irregular sample stream onto a requested cadence | `sources::floor_to_bucket(ms, interval)` — Monday-anchored weeks, 1st-of-month months, epoch modulo otherwise. Shared by the providers that bucket off-cadence side-channel samples (`CoinGecko`, `BinanceVision`) so two overlay CSVs join on the same timestamps | `src/sources/mod.rs` |
 | Join overlay CSV onto price CSV | Two `get` → two `-s`; `DataFrame::insert` full-joins | `src/cli/data.rs` |
-| Compute overlay columns from `name: ExprSpec` + attach onto a series | `spec::overlay::{OverlayColumn, columns_from_value, columns_from_yaml, prepare, prepare_built, compute_series}` (Python: `ta.compute_overlays`; CLI `-x` delegates via `build_overlay`) | `src/spec/overlay.rs`, `python/src/lib.rs`, `src/cli/overlay.rs` |
+| Compute overlay columns from `name: ExprSpec` + attach onto a series | `spec::overlay::{OverlayColumn, columns_from_value, columns_from_yaml, prepare, prepare_for, prepare_built, compute_series, compute_snapshots}` (Python: `ta.compute_overlays`; CLI `-x` delegates via `build_overlay`). **`compute_snapshots` is the multi-symbol path**: one prepared set per `(symbol, freq)` key, each rooted on its own key, all driven with the *whole* snapshot — so a bare `!close` reads its own series and `!pick { symbol: SPY }` reaches across. `compute_series` stays for the genuinely single-series / untagged case | `src/spec/overlay.rs`, `python/src/lib.rs`, `src/cli/overlay.rs` |
+| Blessed series of an overlay fetch group / basket leg | `cli::overlay::group_root(symbol, interval)`; `spec::basket::leg_root(sym)` / `spec::multi_asset::leg_root(sym)` | `src/cli/overlay.rs`, `src/spec/{basket,multi_asset}.rs` |
+| Overlay build that errors instead of aborting | `spec::overlay::build_overlay(spec, schema, root) -> Result<..>` — `ExprSpec::build` reports bad specs by panicking; this one boundary catches the whole family (unknown `!get` key, malformed `!pick` freq, mixed-type `!match`) and the caller prefixes `overlay "<col>" in <file>` | `src/spec/overlay.rs` |
 | CSV delimiter probe | `csv_source::detect_delimiter(path)` | `src/cli/csv_source.rs` |
 | Shell glob (case-insensitive, whole-string) | `glob::Pattern::from_str(pat)` + `.matches(text)` | `src/cli/glob.rs` |
 | Scope symbol `\:` escape (CCXT's `BTC/USDT:USDT` vs. the `SYMBOL[FREQ]:` prefix) | `calendar::{unescape_symbol, escape_symbol, is_escaped, looks_like_body}` — only the **scope** grammars need it; `get` spec heads take the symbol verbatim. `looks_like_body` breaks the `A=B:C` tie: the prefix is a scope only when what follows assigns or is an `@file` | `src/spec/calendar.rs`, `src/cli/overlay.rs`, `src/spec/costs/spec.rs` |

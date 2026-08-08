@@ -10,9 +10,16 @@
 //!   fed a multi-asset-shaped input by a driver that only ever populates one
 //!   entry; a snapshot of size 2+ **panics** rather than silently picking an
 //!   arbitrary asset (see [`Snapshot::sole_atom`]).
-//! - **Non-empty selector** — the *structural-match* path: forwards to
-//!   [`Snapshot::find`], which returns the first stored atom whose tag
-//!   matches the query (`None` fields on the query are wildcards).
+//! - **Non-empty selector** ([`Pick::matching`]) — the *structural-match*
+//!   path: forwards to [`Snapshot::find`], which returns the first stored atom
+//!   whose tag matches the query (`None` fields on the query are wildcards).
+//!   A bar the query doesn't match reads `None`.
+//! - **Blessed root** ([`Pick::rooted`]) — structural match that falls back to
+//!   the sole-atom unpack when nothing matches. This is what a strategy or the
+//!   overlay engine installs as the implicit root of a `source:`-omitted leaf,
+//!   so "this series" resolves by name in a multi-symbol snapshot while an
+//!   untagged single-entry snapshot (what `Vec<Candle>` input produces) still
+//!   reads its bar.
 //!
 //! Cross-asset expressions then compose from the same primitives as
 //! single-asset ones — every source-generic candle leaf ([`Close`](super::Close),
@@ -47,6 +54,10 @@ use crate::types::{Atom, Selector, Snapshot};
 #[derive(Debug, Clone)]
 pub struct Pick<Sym, S = Identity<Snapshot<Sym>>> {
     selector: Selector<Sym>,
+    /// When the selector matches nothing on a bar, fall back to
+    /// [`Snapshot::sole_atom`] instead of reading `None`. Set only by
+    /// [`Pick::rooted`] — see its docs for why the fallback is load-bearing.
+    sole_atom_fallback: bool,
     source: S,
     /// The last atom projected out; `None` before the first bar or if the last
     /// snapshot had no matching entry.
@@ -71,6 +82,40 @@ impl<Sym> Pick<Sym, Identity<Snapshot<Sym>>> {
     pub fn matching(selector: Selector<Sym>) -> Self {
         Self::of(selector, Identity::new())
     }
+
+    /// The **blessed root**: match `selector`, falling back to the
+    /// [`Snapshot::sole_atom`] unpack when nothing matches.
+    ///
+    /// This is what a context that knows which series is "its own" installs as
+    /// the implicit root of every `source:`-omitted leaf — a
+    /// [`SingleAssetStrategy`](crate::strategies::SingleAssetStrategy) uses its
+    /// declared symbol, a [`BasketStrategy`](crate::strategies::BasketStrategy)
+    /// or [`MultiAssetStrategy`](crate::strategies::MultiAssetStrategy) uses the
+    /// leg's, and the overlay engine uses the `(symbol, freq)` series key. It
+    /// lets a bare `!close` mean "this series" in a multi-symbol snapshot while
+    /// `!close { source: !pick { symbol: SPY } }` reaches across the same bar.
+    ///
+    /// The fallback is load-bearing, not cosmetic: `Vec<Candle>` / `Vec<Atom>`
+    /// drivers produce *untagged* size-1 snapshots, where a strict
+    /// [`matching`](Self::matching) would find nothing and read `None`. These
+    /// are the same match-then-fall-back semantics
+    /// `strategies::single_asset::extract_self_atom` already uses to route a
+    /// strategy's own atom to its `Position`.
+    ///
+    /// It falls back through [`Snapshot::lone_atom`], **not**
+    /// [`Snapshot::sole_atom`]: a 2+ entry snapshot in a rooted context is
+    /// ordinary — it means the blessed leg is simply absent on this bar — and
+    /// must read `None` so the caller can roll that symbol off, rather than
+    /// tripping the mis-wiring panic.
+    ///
+    /// A context with no blessed series (a pair — two legs, neither
+    /// privileged; a portfolio's `weights:`) installs [`Pick::new`] instead and
+    /// keeps the sole-atom panic as its guard.
+    pub fn rooted(selector: Selector<Sym>) -> Self {
+        let mut pick = Self::of(selector, Identity::new());
+        pick.sole_atom_fallback = true;
+        pick
+    }
 }
 
 impl<Sym, S> Pick<Sym, S> {
@@ -80,6 +125,7 @@ impl<Sym, S> Pick<Sym, S> {
     pub fn of(selector: Selector<Sym>, source: S) -> Self {
         Self {
             selector,
+            sole_atom_fallback: false,
             source,
             value: None,
             _phantom: PhantomData,
@@ -111,6 +157,14 @@ where
         self.value = self.source.update(input).and_then(|snap| {
             if self.selector.is_empty() {
                 snap.sole_atom().cloned()
+            } else if self.sole_atom_fallback {
+                // Blessed root: name wins, but an untagged single-entry
+                // snapshot still resolves. `lone_atom`, not `sole_atom` —
+                // a 2+ entry snapshot here means the blessed leg is absent
+                // this bar, which reads `None`. See `Pick::rooted`.
+                snap.find(&self.selector)
+                    .cloned()
+                    .or_else(|| snap.lone_atom().cloned())
             } else {
                 snap.find(&self.selector).cloned()
             }

@@ -39,13 +39,25 @@ use crate::spec::dyn_indicator::{self, AsAtom, AsBool, AsCandle, AsReal, AsStr, 
 use crate::{Frequency, Selector};
 use std::str::FromStr;
 
-/// Every atom-input leaf's `source` field defaults to `None`, at which point
-/// `atom_source_of` produces this implicit empty-selector [`Pick`] — the
-/// single-entry snapshot unpack that keeps single-series strategies working.
-/// Multi-asset ones opt in by writing an explicit `!pick { symbol: ... }` as
-/// the `source:` of the leaf.
-fn pick_root() -> Pick<String> {
-    Pick::<String>::new()
+/// The implicit atom root of every `source:`-omitted leaf.
+///
+/// `root` is the **blessed series** of the context doing the build — the
+/// declared `symbol:` of a [`SingleAssetStrategy`](crate::strategies::SingleAssetStrategy),
+/// the leg of a basket / multi-asset factory, the `(symbol, freq)` key of an
+/// overlay column. When one is supplied, a bare `!close` resolves *by name*
+/// out of the snapshot ([`Pick::rooted`]), which is what lets it coexist with
+/// a `!close { source: !pick { symbol: SPY } }` reaching across the same bar.
+///
+/// A context with no blessed series (a pair — two legs, neither privileged; a
+/// portfolio's `weights:`; a snapshot-level `rebalance_on:` gate) passes
+/// `None` and gets the empty-selector [`Pick::new`], whose sole-atom unpack
+/// panics on a multi-symbol snapshot rather than guessing. Those specs name
+/// their asset explicitly with `!pick { symbol: ... }`.
+pub(super) fn pick_root(root: Option<&Selector<String>>) -> Pick<String> {
+    match root {
+        Some(selector) => Pick::<String>::rooted(selector.clone()),
+        None => Pick::<String>::new(),
+    }
 }
 
 /// Symbol-agnostic atom root for calendar accessors (`!year`, `!month`,
@@ -63,7 +75,12 @@ fn pick_root() -> Pick<String> {
 /// Contrast with [`pick_root`], which panics on a 2+ entry snapshot
 /// because price-field leaves (`!close`, `!high`, …) genuinely depend on
 /// *which* asset.
-fn pick_any_root() -> PickAny<String> {
+///
+/// Deliberately takes **no** `root`: re-rooting a calendar leaf onto one
+/// symbol would make it read `None` on a bar where that symbol happens to be
+/// absent, when the answer it wants — the bar's time — is right there on every
+/// other entry.
+pub(super) fn pick_any_root() -> PickAny<String> {
     PickAny::<String>::new()
 }
 
@@ -2209,6 +2226,12 @@ fn rewrite_sugar_tags(v: serde_norway::Value) -> Result<serde_norway::Value, Str
 /// Panics if `cases` is empty, if any case's `value:` is a `List`, or
 /// if the cases mix `Real` and `Str` patterns. The typed
 /// [`Deserialize`] path already rejects `deny_unknown_fields` typos.
+// Five of the eight are the build context (`anchor` / `book` /
+// `portfolio_book` / `schema` / `root`) that every recursive build carries and
+// this helper only forwards. Grouping them into a context struct is a
+// worthwhile refactor of `ExprSpec::build` as a whole, not of the one private
+// helper that happens to sit one argument over the threshold.
+#[allow(clippy::too_many_arguments)]
 fn build_match(
     on: &ExprSpec,
     cases: &[MatchCase],
@@ -2217,6 +2240,7 @@ fn build_match(
     book: &Book,
     portfolio_book: Option<&Book>,
     schema: &Arc<Schema>,
+    root: Option<&Selector<String>>,
 ) -> Box<dyn DynIndicator> {
     assert!(
         !cases.is_empty(),
@@ -2254,10 +2278,10 @@ fn build_match(
         }
     }
 
-    let default_ind = AsReal::new(default.build(anchor, book, portfolio_book, schema));
+    let default_ind = AsReal::new(default.build(anchor, book, portfolio_book, schema, root));
 
     if is_str {
-        let on_ind = AsStr::new(on.build(anchor, book, portfolio_book, schema));
+        let on_ind = AsStr::new(on.build(anchor, book, portfolio_book, schema, root));
         let pairs: Vec<(Arc<str>, AsReal)> = cases
             .iter()
             .map(|c| {
@@ -2266,14 +2290,14 @@ fn build_match(
                     _ => unreachable!("string-pattern branch, already validated"),
                 };
                 let branch = AsReal::new(
-                    c.value.build(anchor, book, portfolio_book, schema),
+                    c.value.build(anchor, book, portfolio_book, schema, root),
                 );
                 (pattern, branch)
             })
             .collect();
         dyn_indicator::wrap(MatchIndicator::new(on_ind, pairs, default_ind))
     } else {
-        let on_ind = AsReal::new(on.build(anchor, book, portfolio_book, schema));
+        let on_ind = AsReal::new(on.build(anchor, book, portfolio_book, schema, root));
         let pairs: Vec<(Real, AsReal)> = cases
             .iter()
             .map(|c| {
@@ -2282,7 +2306,7 @@ fn build_match(
                     _ => unreachable!("numeric-pattern branch, already validated"),
                 };
                 let branch = AsReal::new(
-                    c.value.build(anchor, book, portfolio_book, schema),
+                    c.value.build(anchor, book, portfolio_book, schema, root),
                 );
                 (pattern, branch)
             })
@@ -2297,10 +2321,11 @@ fn atom_source_of(
     book: &Book,
     portfolio_book: Option<&Book>,
     schema: &Arc<Schema>,
+    root: Option<&Selector<String>>,
 ) -> AsAtom {
     match source {
-        None => AsAtom::new(dyn_indicator::wrap(pick_root())),
-        Some(s) => AsAtom::new(s.build(anchor, book, portfolio_book, schema)),
+        None => AsAtom::new(dyn_indicator::wrap(pick_root(root))),
+        Some(s) => AsAtom::new(s.build(anchor, book, portfolio_book, schema, root)),
     }
 }
 
@@ -2321,10 +2346,11 @@ fn atom_source_any_of(
     book: &Book,
     portfolio_book: Option<&Book>,
     schema: &Arc<Schema>,
+    root: Option<&Selector<String>>,
 ) -> AsAtom {
     match source {
         None => AsAtom::new(dyn_indicator::wrap(pick_any_root())),
-        Some(s) => AsAtom::new(s.build(anchor, book, portfolio_book, schema)),
+        Some(s) => AsAtom::new(s.build(anchor, book, portfolio_book, schema, root)),
     }
 }
 
@@ -2375,23 +2401,34 @@ impl ExprSpec {
     /// only by book-reading nodes whose `source:` is `!portfolio_book`;
     /// `schema` is the overlay [`Schema`] the atom stream carries, used by
     /// `!get { key }` to look up the column's declared [`OverlayType`] and
-    /// dispatch to the right typed leaf.
+    /// dispatch to the right typed leaf; `root` is the **blessed series** —
+    /// which asset a `source:`-omitted leaf reads out of the snapshot (see
+    /// [`pick_root`]). Pass `None` from a context with no single blessed
+    /// series and every price leaf must name its asset.
     pub fn build(
         &self,
         anchor: &Position,
         book: &Book,
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
+        root: Option<&Selector<String>>,
     ) -> Box<dyn DynIndicator> {
         use ExprSpec::*;
         // Recursive-build shorthands: build `s`, view it as a library-typed
         // `Indicator<Input=Snapshot, Output=Real>` (or Candle) so it drops
         // into a concrete library constructor.
-        let real = |s: &ExprSpec| AsReal::new(s.build(anchor, book, portfolio_book, schema));
-        let candle = |s: &ExprSpec| AsCandle::new(s.build(anchor, book, portfolio_book, schema));
+        let real = |s: &ExprSpec| AsReal::new(s.build(anchor, book, portfolio_book, schema, root));
+        let candle = |s: &ExprSpec| AsCandle::new(s.build(anchor, book, portfolio_book, schema, root));
         // The `Pick`-shaped `source:` field on every atom-input leaf.
         let atom_src = |source: Option<&Box<ExprSpec>>| {
-            atom_source_of(source.map(|b| &**b), anchor, book, portfolio_book, schema)
+            atom_source_of(
+                source.map(|b| &**b),
+                anchor,
+                book,
+                portfolio_book,
+                schema,
+                root,
+            )
         };
         // Symbol-agnostic variant for calendar accessors + `!time`: an
         // omitted `source:` defaults to the "any entry" PickAny rather
@@ -2399,7 +2436,14 @@ impl ExprSpec {
         // (and the cadence sugar `!daily` / `!monthly` / …) works on
         // multi-symbol snapshots — every entry shares atom.time.
         let atom_src_any = |source: Option<&Box<ExprSpec>>| {
-            atom_source_any_of(source.map(|b| &**b), anchor, book, portfolio_book, schema)
+            atom_source_any_of(
+                source.map(|b| &**b),
+                anchor,
+                book,
+                portfolio_book,
+                schema,
+                root,
+            )
         };
 
         match self {
@@ -2437,7 +2481,7 @@ impl ExprSpec {
                 dyn_indicator::wrap(crate::indicators::CurrentBar::of(s))
             }
 
-            Pick { symbol, freq } => build_pick(symbol.as_deref(), freq.as_deref()),
+            Pick { symbol, freq } => build_pick(symbol.as_deref(), freq.as_deref(), root),
 
             Value(ValueLit::Real(x)) => dyn_indicator::wrap(self::Value::<Snapshot<String>>::new(*x)),
             Value(ValueLit::Str(s)) => {
@@ -2522,7 +2566,7 @@ impl ExprSpec {
             BarsSince { source } => {
                 // Same shape as `IfElse`'s `cond`: a signal leg is built
                 // through `SignalSpec::build` and viewed as bool.
-                let sig = AsBool::new(source.build(anchor, book, portfolio_book, schema));
+                let sig = AsBool::new(source.build(anchor, book, portfolio_book, schema, root));
                 dyn_indicator::wrap(self::BarsSince::new(sig))
             }
             BarsSinceHigh { source, period } => {
@@ -2851,13 +2895,13 @@ impl ExprSpec {
                 then,
                 otherwise,
             } => {
-                let cond_ind = AsBool::new(cond.build(anchor, book, portfolio_book, schema));
+                let cond_ind = AsBool::new(cond.build(anchor, book, portfolio_book, schema, root));
                 let t_ind = real(then);
                 let f_ind = real(otherwise);
                 dyn_indicator::wrap(self::IfElse::new(cond_ind, t_ind, f_ind))
             }
             Match { on, cases, default } => {
-                build_match(on, cases, default, anchor, book, portfolio_book, schema)
+                build_match(on, cases, default, anchor, book, portfolio_book, schema, root)
             }
             Lag { source, periods } => dyn_indicator::wrap(real(source).lag(*periods)),
             Diff { source, periods } => dyn_indicator::wrap(real(source).diff(*periods)),
@@ -2871,7 +2915,7 @@ impl ExprSpec {
             }
             Log { source, base } => dyn_indicator::wrap(self::Log::new(real(source), *base)),
             Latch { source } => {
-                let inner = AsReal::new(source.build(anchor, book, portfolio_book, schema));
+                let inner = AsReal::new(source.build(anchor, book, portfolio_book, schema, root));
                 dyn_indicator::wrap(self::Latch::new(inner))
             }
             Resample {
@@ -2882,11 +2926,11 @@ impl ExprSpec {
                 assert!(*every > 0, "resample every must be greater than zero");
                 let candle_src = candle(source);
                 let resample_dyn = dyn_indicator::wrap(self::Resample::new(candle_src, *every));
-                let inner_dyn = inner.build(anchor, book, portfolio_book, schema);
+                let inner_dyn = inner.build(anchor, book, portfolio_book, schema, root);
                 dyn_indicator::chain(resample_dyn, inner_dyn)
             }
             Unstable { source } => {
-                dyn_indicator::unstable_wrap(source.build(anchor, book, portfolio_book, schema))
+                dyn_indicator::unstable_wrap(source.build(anchor, book, portfolio_book, schema, root))
             }
 
             Year { source } => {
@@ -2950,8 +2994,22 @@ impl ExprSpec {
 /// every atom-input leaf uses by default. A `freq` string is parsed via
 /// [`Frequency::from_str`] (the `N<unit>` alphabet: `1m`/`4h`/`1d`/`1w`/`1M`);
 /// a parse failure panics with the offending string included.
-fn build_pick(symbol: Option<&str>, freq: Option<&str>) -> Box<dyn DynIndicator> {
-    let sym = symbol.map(String::from);
+///
+/// An omitted `symbol:` adopts the blessed series' symbol when a `root` is in
+/// play, so inside a rooted context both `!pick {}` and `!pick { freq: 1h }`
+/// mean "my own series" rather than "whichever entry sorts first". Naming a
+/// symbol explicitly always wins — that's how a leaf reaches across to another
+/// asset, and it stays a strict [`Pick::matching`] that reads `None` on a bar
+/// where the named asset is absent.
+fn build_pick(
+    symbol: Option<&str>,
+    freq: Option<&str>,
+    root: Option<&Selector<String>>,
+) -> Box<dyn DynIndicator> {
+    let named = symbol.is_some();
+    let sym = symbol
+        .map(String::from)
+        .or_else(|| root.and_then(|r| r.symbol.clone()));
     let f = freq.map(|s| {
         Frequency::from_str(s)
             .unwrap_or_else(|e| panic!("!pick {{ freq: {s:?} }}: invalid frequency: {e}"))
@@ -2962,8 +3020,13 @@ fn build_pick(symbol: Option<&str>, freq: Option<&str>) -> Box<dyn DynIndicator>
     };
     if selector.is_empty() {
         dyn_indicator::wrap(Pick::<String>::new())
-    } else {
+    } else if named {
         dyn_indicator::wrap(Pick::<String>::matching(selector))
+    } else {
+        // Symbol came from the root, so this is still the implicit
+        // "this series" read — keep the sole-atom fallback that makes an
+        // untagged single-entry snapshot resolve. See `Pick::rooted`.
+        dyn_indicator::wrap(Pick::<String>::rooted(selector))
     }
 }
 
