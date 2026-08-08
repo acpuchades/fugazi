@@ -160,3 +160,82 @@ fn bench_macd_crossover_components() {
     );
     eprintln!("multiplier = {:.2}×", bm / mm);
 }
+
+// ---------------------------------------------------------------------------
+// Snapshot clone cost as the universe grows.
+//
+// `Snapshot` is fed to every signal slot of every symbol each bar, so if a
+// clone is a deep copy the per-bar cost grows with the *square* of the
+// universe: N symbols × (slots × N-entry Vec copy). This probe drives the same
+// strategy over 2, 8, 32 and 64 symbols and prints ns/bar — a deep-copying
+// Snapshot shows super-linear growth, a refcounted one stays linear in N (the
+// per-symbol chains still have to run).
+// ---------------------------------------------------------------------------
+
+fn multi_snapshots(n_symbols: usize, bars: usize) -> Vec<fugazi::types::Snapshot<String>> {
+    let candles = synth_candles(bars);
+    let syms: Vec<String> = (0..n_symbols).map(|i| format!("S{i:03}")).collect();
+    (0..bars)
+        .map(|b| {
+            let mut snap = fugazi::types::Snapshot::new();
+            for (i, s) in syms.iter().enumerate() {
+                // Vary each symbol's series a little so the chains do real work.
+                let c = candles[(b + i * 7) % bars];
+                snap.push(Some(s.clone()), None, fugazi::types::Atom::new(c));
+            }
+            snap
+        })
+        .collect()
+}
+
+#[test]
+#[ignore]
+fn bench_snapshot_clone_scaling() {
+    use fugazi::strategies::MultiAssetStrategy;
+
+    const N_BARS: usize = 4_000;
+    eprintln!("bars={N_BARS} reps={REPS}");
+    eprintln!("{:>8}  {:>12}  {:>14}", "symbols", "median s", "ns/bar");
+
+    for &n in &[2usize, 8, 16, 32, 64] {
+        let snaps = multi_snapshots(n, N_BARS);
+        let mut times = vec![];
+        for _ in 0..REPS {
+            // One SMA-crossover decision per symbol: four signal slots, each
+            // fed a clone of the whole snapshot every bar.
+            let mut strat = MultiAssetStrategy::<String>::with_initial_equity(10_000.0)
+                .long_on(
+                    |sym: &String| {
+                        use fugazi::indicators::{Close, Pick, Sma};
+                        let close = || {
+                            Close::of(Pick::matching(fugazi::types::Selector::by_symbol(
+                                sym.clone(),
+                            )))
+                        };
+                        Sma::new(close(), 5).crosses_above(Sma::new(close(), 20))
+                    },
+                    |sym: &String| {
+                        use fugazi::indicators::{Close, Pick, Sma};
+                        let close = || {
+                            Close::of(Pick::matching(fugazi::types::Selector::by_symbol(
+                                sym.clone(),
+                            )))
+                        };
+                        Sma::new(close(), 5).crosses_below(Sma::new(close(), 20))
+                    },
+                );
+            let mut w: PaperWallet<String> = PaperWallet::new(10_000.0);
+            let t = Instant::now();
+            let rep = run(&mut strat, &mut w, snaps.iter().cloned());
+            times.push(t.elapsed().as_secs_f64());
+            let _ = std::hint::black_box(rep.equity_curve.len());
+        }
+        let m = median(times);
+        eprintln!(
+            "{:>8}  {:>12.4}  {:>14.1}",
+            n,
+            m,
+            m * 1e9 / N_BARS as f64
+        );
+    }
+}

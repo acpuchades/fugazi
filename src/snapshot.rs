@@ -3,6 +3,8 @@
 //! tagged [`Atom`]s that lets a strategy or an indicator reason about more
 //! than one instrument at a time.
 
+use std::sync::Arc;
+
 use crate::market::Atom;
 use crate::time::Frequency;
 
@@ -113,12 +115,30 @@ impl<Sym: PartialEq> Selector<Sym> {
 /// [`Selector`] matches against; the atom is what a [`Pick`](crate::indicators::Pick)
 /// projects out.
 ///
-/// The storage is deliberately a `Vec` rather than a hashmap: [`Selector`]
+/// The storage is deliberately a sequence rather than a hashmap: [`Selector`]
 /// is a predicate, not a key, so entries never dedup by tag (`Sym: PartialEq`
 /// is enough — no `Eq + Hash` bound) and duplicates at push time are legal
 /// with first-match-wins on [`Snapshot::find`]. Iteration order is insertion
 /// order, so a driver that pushes entries deterministically gets a
 /// deterministic scan for free.
+///
+/// # Cloning is a refcount bump
+///
+/// The entries live behind an [`Arc`], so `clone` costs one atomic increment
+/// and no allocation. That is load-bearing rather than an optimisation: a
+/// snapshot is fed to *every* signal slot of *every* symbol each bar (see
+/// [`MultiAssetStrategy::update`](crate::strategies::MultiAssetStrategy)), and
+/// every binary node in an expression tree clones its input again because
+/// [`Combine`](crate::indicators::Combine) feeds both sides. With a plain `Vec`
+/// the per-bar cost grew with the *square* of the universe — an N-symbol run
+/// deep-copied an N-entry vector N × slots times per bar.
+///
+/// The mutators ([`push`](Self::push), [`remove_matching`](Self::remove_matching))
+/// are copy-on-write via [`Arc::make_mut`]: while a snapshot is being built by
+/// the driver it is uniquely owned, so they mutate in place and the shared case
+/// never arises on the hot path. This is the same treatment
+/// [`OverlayInfo`](crate::market::OverlayInfo) already gets, for the same
+/// reason.
 ///
 /// Cross-asset expressions compose from the same primitives as single-asset
 /// ones:
@@ -133,14 +153,18 @@ impl<Sym: PartialEq> Selector<Sym> {
 /// ```
 #[derive(Debug, Clone)]
 pub struct Snapshot<Sym> {
-    entries: Vec<(Option<Sym>, Option<Frequency>, Atom)>,
+    entries: Arc<Vec<Entry<Sym>>>,
 }
+
+/// One tagged atom inside a [`Snapshot`]: `(symbol, frequency, atom)`, with
+/// both tags optional. Named so the shared storage type stays readable.
+pub type Entry<Sym> = (Option<Sym>, Option<Frequency>, Atom);
 
 impl<Sym> Snapshot<Sym> {
     /// An empty snapshot with no assets.
     pub fn new() -> Self {
         Self {
-            entries: Vec::new(),
+            entries: Arc::new(Vec::new()),
         }
     }
 
@@ -156,7 +180,7 @@ impl<Sym> Snapshot<Sym> {
     /// use [`single`](Self::single) instead.
     pub fn of_atom(atom: Atom) -> Self {
         Self {
-            entries: vec![(None, None, atom)],
+            entries: Arc::new(vec![(None, None, atom)]),
         }
     }
 
@@ -166,15 +190,22 @@ impl<Sym> Snapshot<Sym> {
     /// this entry's `symbol` each bar.
     pub fn single(symbol: Sym, atom: Atom) -> Self {
         Self {
-            entries: vec![(Some(symbol), None, atom)],
+            entries: Arc::new(vec![(Some(symbol), None, atom)]),
         }
     }
 
     /// Append a tagged atom to the snapshot. Duplicates are allowed —
     /// [`Snapshot::find`] returns the first match on a query, so
     /// insertion order determines precedence.
-    pub fn push(&mut self, symbol: Option<Sym>, freq: Option<Frequency>, atom: Atom) {
-        self.entries.push((symbol, freq, atom));
+    ///
+    /// Copy-on-write: mutates in place while this snapshot is the sole owner of
+    /// its entries (the case during driver construction), and clones them first
+    /// if it is not.
+    pub fn push(&mut self, symbol: Option<Sym>, freq: Option<Frequency>, atom: Atom)
+    where
+        Sym: Clone,
+    {
+        Arc::make_mut(&mut self.entries).push((symbol, freq, atom));
     }
 
     /// Number of tagged atoms in this snapshot.
@@ -291,9 +322,11 @@ impl<Sym: PartialEq> Snapshot<Sym> {
     /// bindings' `__setitem__` to implement "assignment overwrites" — Rust
     /// callers who want raw list semantics should use [`push`](Self::push)
     /// directly.
-    pub fn remove_matching(&mut self, query: &Selector<Sym>) {
-        self.entries
-            .retain(|(s, f, _)| !query.matches(s.as_ref(), *f));
+    pub fn remove_matching(&mut self, query: &Selector<Sym>)
+    where
+        Sym: Clone,
+    {
+        Arc::make_mut(&mut self.entries).retain(|(s, f, _)| !query.matches(s.as_ref(), *f));
     }
 }
 
@@ -309,10 +342,10 @@ impl<Sym> Default for Snapshot<Sym> {
     }
 }
 
-impl<Sym> FromIterator<(Option<Sym>, Option<Frequency>, Atom)> for Snapshot<Sym> {
-    fn from_iter<I: IntoIterator<Item = (Option<Sym>, Option<Frequency>, Atom)>>(iter: I) -> Self {
+impl<Sym> FromIterator<Entry<Sym>> for Snapshot<Sym> {
+    fn from_iter<I: IntoIterator<Item = Entry<Sym>>>(iter: I) -> Self {
         Self {
-            entries: iter.into_iter().collect(),
+            entries: Arc::new(iter.into_iter().collect()),
         }
     }
 }
