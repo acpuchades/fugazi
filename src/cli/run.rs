@@ -42,7 +42,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use fugazi::prelude::*;
 
-use crate::backtest::{self, IterationInputs, IterationResult};
+use crate::backtest::{self, EvalContext, IterationResult};
 use crate::calendar::{self, AssetClass, BarsPerYearSpec, ScopedFrequency, WindowSpec};
 use crate::costs::CostConfig;
 use crate::data::DataFrame;
@@ -145,7 +145,7 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
         .asset_class
         .zip(effective_freq)
         .map(|(class, freq)| class.trading_seconds_per_bar(freq));
-    let inputs = IterationInputs {
+    let inputs = EvalContext {
         cash: opts.cash,
         bars_per_year,
         risk_free_rate: opts.risk_free_rate,
@@ -272,7 +272,7 @@ pub fn run_pairs(
         .asset_class
         .zip(effective_freq)
         .map(|(class, freq)| class.trading_seconds_per_bar(freq));
-    let inputs = IterationInputs {
+    let inputs = EvalContext {
         cash: opts.cash,
         bars_per_year,
         risk_free_rate: opts.risk_free_rate,
@@ -434,7 +434,7 @@ pub fn run_basket(
         .asset_class
         .zip(effective_freq)
         .map(|(class, freq)| class.trading_seconds_per_bar(freq));
-    let inputs = IterationInputs {
+    let inputs = EvalContext {
         cash: opts.cash,
         bars_per_year,
         risk_free_rate: opts.risk_free_rate,
@@ -573,7 +573,7 @@ pub fn run_multi(
         .asset_class
         .zip(effective_freq)
         .map(|(class, freq)| class.trading_seconds_per_bar(freq));
-    let inputs = IterationInputs {
+    let inputs = EvalContext {
         cash: opts.cash,
         bars_per_year,
         risk_free_rate: opts.risk_free_rate,
@@ -718,7 +718,7 @@ pub fn run_portfolio(
         .asset_class
         .zip(effective_freq)
         .map(|(class, freq)| class.trading_seconds_per_bar(freq));
-    let inputs = IterationInputs {
+    let inputs = EvalContext {
         cash: opts.cash,
         bars_per_year,
         risk_free_rate: opts.risk_free_rate,
