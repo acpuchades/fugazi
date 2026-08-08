@@ -459,21 +459,37 @@ where
 /// pure-library composition and doesn't get base-bar-scaled for free.
 ///
 /// # Panics
-/// If `outer.output_type() != inner.input_type()`, at construction — the
-/// recursive spec builder guarantees compatible types, so this is a hard bug
-/// if ever hit.
+/// If `outer.output_type() != inner.input_type()`, at construction. Prefer
+/// [`try_chain`] where the types come from a user-authored document and the
+/// mismatch should be reported rather than aborted.
 pub fn chain(outer: Box<dyn DynIndicator>, inner: Box<dyn DynIndicator>) -> Box<dyn DynIndicator> {
-    assert!(
-        can_lift(outer.output_type(), inner.input_type()),
-        "chain: outer output type ({}) doesn't match inner input type ({})",
-        outer.output_type(),
-        inner.input_type(),
-    );
-    Box::new(Chain {
+    try_chain(outer, inner).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// The fallible twin of [`chain`]: reports a type mismatch as an `Err` instead
+/// of panicking.
+///
+/// This is what the spec builders call. A mismatch here is reachable from a
+/// user-authored document, so it is an error to render, not an invariant to
+/// abort on. The message follows the crate's diagnostic convention — a bare
+/// sentence, to which each enclosing `try_build` arm prepends its own `!tag > `
+/// breadcrumb (see [`crate::spec::diagnostics`]).
+pub fn try_chain(
+    outer: Box<dyn DynIndicator>,
+    inner: Box<dyn DynIndicator>,
+) -> Result<Box<dyn DynIndicator>, String> {
+    if !can_lift(outer.output_type(), inner.input_type()) {
+        return Err(format!(
+            "cannot chain: outer output type ({}) doesn't match inner input type ({})",
+            outer.output_type(),
+            inner.input_type(),
+        ));
+    }
+    Ok(Box::new(Chain {
         outer,
         inner,
         value: None,
-    })
+    }))
 }
 
 struct Chain {
@@ -595,27 +611,38 @@ impl DynIndicator for UnstableWrap {
 ///
 /// # Panics
 /// [`new`](Self::new) panics if `inner.input_type() != Snapshot` or
-/// `inner.output_type() != Out::TYPE`; the recursive spec builder enforces
-/// both at construction, so the unwrap arms in `update`/`value` are
-/// unreachable in practice.
+/// `inner.output_type() != Out::TYPE`. Prefer [`try_new`](Self::try_new) where
+/// the types come from a user-authored document. Once construction has been
+/// checked either way, the unwrap arms in `update`/`value` are unreachable.
 pub struct As<Out>(Box<dyn DynIndicator>, std::marker::PhantomData<fn() -> Out>);
 
 impl<Out: TypeOf> As<Out> {
     pub fn new(inner: Box<dyn DynIndicator>) -> Self {
-        assert_eq!(
-            inner.input_type(),
-            DynType::Snapshot,
-            "As<{}> requires a Snapshot-input DynIndicator",
-            Out::TYPE,
-        );
-        assert_eq!(
-            inner.output_type(),
-            Out::TYPE,
-            "As<{}> requires a {}-output DynIndicator",
-            Out::TYPE,
-            Out::TYPE,
-        );
-        Self(inner, std::marker::PhantomData)
+        Self::try_new(inner).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// The fallible twin of [`new`](Self::new): reports a type mismatch as an
+    /// `Err` instead of panicking.
+    ///
+    /// This is the check that used to fire as `AsReal`'s `assert_eq!` in the
+    /// middle of a run. Returning it lets the spec builders surface "this slot
+    /// wanted a Real and got a Str" as a load-time diagnostic with the enclosing
+    /// tag trail attached.
+    pub fn try_new(inner: Box<dyn DynIndicator>) -> Result<Self, String> {
+        if inner.input_type() != DynType::Snapshot {
+            return Err(format!(
+                "expected a Snapshot-input expression, got {}-input",
+                inner.input_type(),
+            ));
+        }
+        if inner.output_type() != Out::TYPE {
+            return Err(format!(
+                "expected a {} expression, got {}",
+                Out::TYPE,
+                inner.output_type(),
+            ));
+        }
+        Ok(Self(inner, std::marker::PhantomData))
     }
 }
 

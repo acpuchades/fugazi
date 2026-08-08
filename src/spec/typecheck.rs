@@ -464,7 +464,7 @@ pub fn check_signal_immediate(spec: &SignalSpec) -> Result<(), String> {
 }
 
 /// [`tag_name`] for a [`SignalSpec`].
-fn signal_tag_name(spec: &SignalSpec) -> String {
+pub(crate) fn signal_tag_name(spec: &SignalSpec) -> String {
     snake_tag(&format!("{spec:?}"))
 }
 
@@ -474,7 +474,7 @@ fn signal_tag_name(spec: &SignalSpec) -> String {
 /// table: the enum is externally tagged and its variant idents are the tag
 /// names modulo case, so this stays correct for free as variants are added —
 /// which a hand-written table would not.
-fn tag_name(spec: &ExprSpec) -> String {
+pub(crate) fn tag_name(spec: &ExprSpec) -> String {
     snake_tag(&format!("{spec:?}"))
 }
 
