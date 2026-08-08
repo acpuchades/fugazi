@@ -64,7 +64,7 @@ Output is `Option` (warm-up → `None`).
 
 - `Real = f64` and `Candle` (OHLCV) in `src/market.rs` alongside `Atom`/`OverlayInfo`/`Schema`. `src/types.rs` is a facade re-exporting `time`/`market`/`snapshot`.
 
-- **Multi-output indicators** (`Macd`, `Adx`, `Bollinger`, `Donchian`, `Keltner`, `Aroon`, `Dmi`) expose named fields; `Output` is `Copy` struct. Each has **component accessor per output** (`macd.line()`/`.signal()`/`.histogram()`, `bands.upper()`/`.middle()`/`.lower()`, `dmi.plus_di()`, …) returning `Component<Self>` — field projected as `Indicator<Output = Real>`: `macd.line().crosses_above(macd.signal())`. Accessors **clone** source. Bodies via **`component_accessors!` macro** — don't hand-write.
+- **Multi-output indicators** (`Macd`, `Adx`, `Bollinger`, `Donchian`, `Keltner`, `Aroon`, `Dmi`) expose named fields; `Output` is `Copy` struct. Each has **component accessor per output** (`macd.line()`/`.signal()`/`.histogram()`, `bands.upper()`/`.middle()`/`.lower()`, `dmi.plus_di()`, …) returning `Component<Self>` — field projected as `Indicator<Output = Real>`: `macd.line().crosses_above(macd.signal())`. Accessors **clone** source, so two accessors on the same indicator run two independent computations. **`.shared()`** (→ `Shared<Self>`, whose accessors return `SharedComponent`) is the fix: every accessor on one handle borrows the same source and advances it at most once per bar. The `strategies/` catalogue uses it; **`src/spec/` does not**, so a YAML-built `!macd_line`/`!macd_signal` crossover still does 2× the work. Bodies via **`component_accessors!` macro** — don't hand-write.
 
 - `StochRsi<S>` = alias for `Stochastic<Rsi<S>>`.
 
@@ -76,7 +76,7 @@ Output is `Option` (warm-up → `None`).
 - **Boolean logic**: `And`/`Or`/`Xor` are `Combine<...>`; `Not` and `Change` are dedicated unary carriers; `Const<In>` is constant-bool leaf; `Every<In>(period)` is a **periodic pulse** — fires `true` every `period` bars with a *delayed* first fire on bar `period - 1` (0-indexed). Canonical `rebalance_on` cadence source. YAML: `!every N`; `!never` is sugar for `!value false`.
 - **`IndicatorExt`** (blanket over Real-output): fluent builder for **operators only** — comparisons (`gt`/`lt`/`ge`/`le`/`eq_to`/`ne_to`, `above`/`below` — `eq_to`/`ne_to` avoid `PartialEq` collision), arithmetic (`add`/`sub`/`mul`/`div`), lookback (`lag`/`diff`/`ratio`/`roc`), rolling extremum (`rolling_max`/`rolling_min`), `unstable`, `crosses_above`/`crosses_below`. Named indicators are **not** builder methods; use `::new`. Don't add `.sma()`-style builders.
 - **`BoolIndicatorExt`** (blanket over `Indicator<Output = bool>`, `?Sized`): `is_true()`, `and`/`or`/`xor`/`not`, edge primitive `changed`, `unstable`.
-- **Crossover is not a primitive**: `crosses_above(a,b)` = `a.gt(b).and(a.gt(b).changed())` (clones operands, ~2× source work).
+- **Crossover *is* a primitive**: `CrossesAbove<L, R>` / `CrossesBelow<L, R>` (`indicators/crosses.rs`) hold one comparison state plus a previous-value slot, so each operand advances once per bar. `IndicatorExt::crosses_above` / `crosses_below` return them. Behaviour is byte-identical to the old composed `a.gt(b).and(a.gt(b).changed())` form, which cloned both operands and did ~2× the source work.
 
 ### Strategies — decision layer (`src/strategy.rs`, `src/wallet.rs`)
 

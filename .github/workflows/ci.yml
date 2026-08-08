@@ -23,10 +23,6 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # System libs for plotters' `ttf` feature (font-kit → fontconfig + freetype),
-      # which the CLI uses to render `equity.png` labels.
-      - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype-dev
       # Scope to the core crate: the `fugazi-python` member links libpython via
       # pyo3's extension-module feature and can't be `cargo test`ed standalone.
       # Its Rust + Python surface is exercised by the `python` job below.
@@ -34,6 +30,51 @@ jobs:
         run: cargo test -p fugazi
       - name: Clippy
         run: cargo clippy -p fugazi --all-targets -- -D warnings
+
+  # `fugazi` is heavily feature-gated, and the default set (`sources` + `cli`)
+  # is only one point in the space. Cargo.toml documents each of these as a
+  # supported standalone configuration; without this job that claim is
+  # unchecked, and `live` — which nothing else compiles — could rot silently.
+  # `cargo check` rather than `cargo test`: this guards *compilation* under each
+  # gate, and the behaviour is covered by the default-feature job above.
+  #
+  # Restricted rows check `--lib` rather than `--all-targets`, because the
+  # integration tests in `tests/` reach for `fugazi::spec` unconditionally —
+  # they're written against the full surface, which is the right call for them.
+  # The `--all-features` row is the one that covers every target.
+  features:
+    name: Feature matrix (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The pure library: no async stack, no type erasure, no YAML.
+          - features: "--no-default-features"
+          # Each optional feature standing alone, as its Cargo.toml comment
+          # promises a downstream caller can enable it.
+          - features: "--no-default-features --features runtime"
+          - features: "--no-default-features --features sources"
+          - features: "--no-default-features --features parallel"
+          # What the Python wheel enables (`spec` implies runtime + parallel).
+          - features: "--no-default-features --features spec"
+          # The live-execution wallets. Not default-on, so this is the only
+          # place they are compiled at all.
+          - features: "--no-default-features --features live"
+          # Everything at once — catches a pair of features that only conflict
+          # when both are on.
+          - features: "--all-features"
+            targets: "--all-targets"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check
+        run: cargo check -p fugazi ${{ matrix.features }} ${{ matrix.targets || '--lib' }}
+      - name: Clippy
+        run: cargo clippy -p fugazi ${{ matrix.features }} ${{ matrix.targets || '--lib' }} -- -D warnings
 
   python:
     name: Python bindings (pytest)
@@ -45,10 +86,6 @@ jobs:
           python-version: "3.13"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # No fontconfig/freetype here on purpose: the python member depends on
-      # the core crate with the `cli` feature off, so plotters (whose `ttf`
-      # feature links those libs) must stay out of the wheel build — this job
-      # failing to link would mean the feature gate regressed.
       - name: Build + install wheel
         working-directory: python
         run: |

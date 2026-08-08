@@ -330,11 +330,16 @@ impl Clone for Box<dyn DynIndicator> {
 
 /// [`DynIndicator`] plus `Send + Sync` and a `Send + Sync`-preserving deep
 /// clone. The base [`DynIndicator`] trait deliberately doesn't require these
-/// autotraits — some concrete library indicators (`PositionField`, `BookField`)
-/// hold `Rc<RefCell<…>>` state and can't satisfy them, and the CLI's spec
-/// builder wraps those alongside the rest. Downstream callers that *do* need
-/// autotrait-preserving type erasure (pyo3 pyclasses require `Send + Sync` on
-/// every field) reach for this subtrait via [`wrap_sync`] instead of [`wrap`].
+/// autotraits, so a downstream impl holding thread-bound state is still a valid
+/// `DynIndicator`. Callers that *do* need autotrait-preserving type erasure
+/// (pyo3 pyclasses require `Send + Sync` on every field) reach for this subtrait
+/// via [`wrap_sync`] instead of [`wrap`].
+///
+/// The library's own position- and book-anchored sources
+/// ([`PositionField`](crate::indicators::PositionField), `BookField`) used to be
+/// the reason for the split — they held `Rc<RefCell<…>>`. Both moved to
+/// `Arc<Mutex<…>>` so the whole composition could cross thread boundaries, so
+/// every indicator this crate ships now satisfies the subtrait.
 ///
 /// The blanket impl fires for every `T: DynIndicator + Clone + Send + Sync +
 /// 'static`, so `Adapter<I>` picks it up automatically when `I` is itself
