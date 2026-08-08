@@ -163,6 +163,12 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
         print_inputs_block(opts, start, end, atoms.len(), costs_active);
     }
 
+    // Surface a malformed spec as an error before the run machinery (which
+    // builds through the infallible shim) touches it.
+    backtest::validated(|| {
+        strategy.try_build(opts.cash, &backtest::schema_from_atoms(&atoms))
+    })?;
+
     let iter = backtest::run_iteration(strategy, &atoms, &inputs);
 
     // Emit `fills.csv` and echo each fill in the same order the wallet booked
@@ -288,6 +294,15 @@ pub fn run_pairs(
         style::print_warns(&collect_warnings(&[], no_cost_warning));
         print_pairs_inputs_block(opts, spec, start, end, bars.len(), costs_active);
     }
+
+    let pair_atoms: Vec<(String, Atom)> = left_atoms
+        .iter()
+        .chain(right_atoms.iter())
+        .map(|a| (String::new(), a.clone()))
+        .collect();
+    backtest::validated(|| {
+        spec.try_build(opts.cash, &backtest::schema_from_atoms(&pair_atoms))
+    })?;
 
     let iter =
         backtest::run_iteration_pairs(spec, &bars, &left_atoms, &right_atoms, &inputs);
@@ -437,6 +452,10 @@ pub fn run_basket(
         print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active);
     }
 
+    backtest::validated(|| {
+        spec.try_build(opts.cash, &backtest::schema_from_snapshots(&snapshots))
+    })?;
+
     let iter =
         backtest::run_iteration_basket(spec, &bars, &snapshots, &universe, &inputs);
 
@@ -574,6 +593,10 @@ pub fn run_multi(
         style::print_warns(&collect_warnings(&[], no_cost_warning));
         print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active);
     }
+
+    backtest::validated(|| {
+        spec.try_build(opts.cash, &backtest::schema_from_snapshots(&snapshots))
+    })?;
 
     let iter =
         backtest::run_iteration_multi(spec, &bars, &snapshots, &universe, &inputs);
@@ -718,6 +741,14 @@ pub fn run_portfolio(
         style::print_warns(&collect_warnings(&[], no_cost_warning));
         print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active);
     }
+
+    backtest::validated(|| {
+        spec.try_build(
+            opts.cash,
+            &backtest::schema_from_snapshots(&snapshots),
+            None,
+        )
+    })?;
 
     let iter = backtest::run_iteration_portfolio(spec, &bars, &snapshots, &inputs);
 

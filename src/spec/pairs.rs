@@ -249,12 +249,13 @@ impl PairsStrategySpec {
         anchor: &Position,
         book: &Book,
         schema: &Arc<Schema>,
-    ) -> Box<dyn DynIndicator> {
-        side.and_then(|s| s.exit.as_ref())
-            .map(|s| s.build(anchor, book, None, schema, None))
-            .unwrap_or_else(|| {
-                crate::spec::dyn_indicator::wrap(ValueBool::<crate::types::Snapshot<String>>::new(false))
-            })
+    ) -> Result<Box<dyn DynIndicator>, String> {
+        match side.and_then(|s| s.exit.as_ref()) {
+            Some(s) => s.try_build(anchor, book, None, schema, None),
+            None => Ok(crate::spec::dyn_indicator::wrap(ValueBool::<
+                crate::types::Snapshot<String>,
+            >::new(false))),
+        }
     }
 
     /// Build a side's entry signal, defaulting an absent side to
@@ -264,11 +265,13 @@ impl PairsStrategySpec {
         anchor: &Position,
         book: &Book,
         schema: &Arc<Schema>,
-    ) -> Box<dyn DynIndicator> {
-        side.map(|s| s.enter.build(anchor, book, None, schema, None))
-            .unwrap_or_else(|| {
-                crate::spec::dyn_indicator::wrap(ValueBool::<crate::types::Snapshot<String>>::new(false))
-            })
+    ) -> Result<Box<dyn DynIndicator>, String> {
+        match side {
+            Some(s) => s.enter.try_build(anchor, book, None, schema, None),
+            None => Ok(crate::spec::dyn_indicator::wrap(ValueBool::<
+                crate::types::Snapshot<String>,
+            >::new(false))),
+        }
     }
 
     /// Build the live [`DynPairsStrategy`] this spec describes.
@@ -286,6 +289,17 @@ impl PairsStrategySpec {
     /// since a spread-based level typically doesn't need the per-leg entry
     /// price, but present for symmetry with [`super::SingleStrategySpec`].
     pub fn build(&self, initial_equity: Real, schema: &Arc<Schema>) -> DynPairsStrategy {
+        self.try_build(initial_equity, schema)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// The fallible twin of [`build`](Self::build) — see
+    /// [`SingleStrategySpec::try_build`](crate::spec::SingleStrategySpec::try_build).
+    pub fn try_build(
+        &self,
+        initial_equity: Real,
+        schema: &Arc<Schema>,
+    ) -> Result<DynPairsStrategy, String> {
         let strat = PairsStrategy::with_initial_equity(
             self.left.clone(),
             self.right.clone(),
@@ -307,38 +321,38 @@ impl PairsStrategySpec {
         let short = self.short_spread.as_ref();
 
         let mut strat = strat.long_spread_on(
-            AsBool::new(Self::enter_of(long, &anchor, &book, schema)),
-            AsBool::new(Self::exit_of(long, &anchor, &book, schema)),
+            AsBool::try_new(Self::enter_of(long, &anchor, &book, schema)?)?,
+            AsBool::try_new(Self::exit_of(long, &anchor, &book, schema)?)?,
         );
         if short.is_some() {
             strat = strat.short_spread_on(
-                AsBool::new(Self::enter_of(short, &anchor, &book, schema)),
-                AsBool::new(Self::exit_of(short, &anchor, &book, schema)),
+                AsBool::try_new(Self::enter_of(short, &anchor, &book, schema)?)?,
+                AsBool::try_new(Self::exit_of(short, &anchor, &book, schema)?)?,
             );
         }
         if let Some(sl) = long.and_then(|s| s.stop_loss.as_ref()) {
             strat =
-                strat.long_spread_stop_loss(AsReal::new(sl.build(&anchor, &book, None, schema, None)));
+                strat.long_spread_stop_loss(AsReal::try_new(sl.try_build(&anchor, &book, None, schema, None)?)?);
         }
         if let Some(tp) = long.and_then(|s| s.take_profit.as_ref()) {
             strat =
-                strat.long_spread_take_profit(AsReal::new(tp.build(&anchor, &book, None, schema, None)));
+                strat.long_spread_take_profit(AsReal::try_new(tp.try_build(&anchor, &book, None, schema, None)?)?);
         }
         if let Some(sl) = short.and_then(|s| s.stop_loss.as_ref()) {
             strat =
-                strat.short_spread_stop_loss(AsReal::new(sl.build(&anchor, &book, None, schema, None)));
+                strat.short_spread_stop_loss(AsReal::try_new(sl.try_build(&anchor, &book, None, schema, None)?)?);
         }
         if let Some(tp) = short.and_then(|s| s.take_profit.as_ref()) {
             strat =
-                strat.short_spread_take_profit(AsReal::new(tp.build(&anchor, &book, None, schema, None)));
+                strat.short_spread_take_profit(AsReal::try_new(tp.try_build(&anchor, &book, None, schema, None)?)?);
         }
         if let Some(sizing) = &self.sizing {
-            strat = strat.position_sizing(AsReal::new(sizing.build(&anchor, &book, None, schema, None)));
+            strat = strat.position_sizing(AsReal::try_new(sizing.try_build(&anchor, &book, None, schema, None)?)?);
         }
         if let Some(rebalance) = &self.rebalance_on {
-            strat = strat.rebalance_on(AsBool::new(rebalance.build(&anchor, &book, None, schema, None)));
+            strat = strat.rebalance_on(AsBool::try_new(rebalance.try_build(&anchor, &book, None, schema, None)?)?);
         }
-        DynPairsStrategy { inner: strat }
+        Ok(DynPairsStrategy { inner: strat })
     }
 }
 

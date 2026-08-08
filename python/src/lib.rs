@@ -8077,38 +8077,49 @@ fn run_spec(
     loaded: &LoadedSpec,
     snapshots: &[Snapshot<String>],
     wallet: &mut PaperWallet<String>,
-) -> RunReport<String> {
+) -> PyResult<RunReport<String>> {
     let cash = <PaperWallet<String> as Wallet<String>>::equity(wallet).0;
-    match loaded {
+    let schema = spec_backtest::schema_from_snapshots(snapshots);
+    Ok(match loaded {
         LoadedSpec::Single(sref) => {
-            let schema = spec_backtest::schema_from_snapshots(snapshots);
-            let mut strategy = sref.build(cash, &schema);
+            let mut strategy = sref.try_build(cash, &schema).map_err(build_err)?;
             fugazi_core::backtest::run(&mut strategy, wallet, snapshots.iter().cloned())
         }
         LoadedSpec::Pairs(spec) => {
-            let schema = spec_backtest::schema_from_snapshots(snapshots);
-            let mut strategy = spec.build(cash, &schema);
+            let mut strategy = spec.try_build(cash, &schema).map_err(build_err)?;
             fugazi_core::backtest::run(&mut strategy, wallet, snapshots.iter().cloned())
         }
         LoadedSpec::Basket(spec) => {
-            let schema = spec_backtest::schema_from_snapshots(snapshots);
-            let mut strategy = spec.build(cash, &schema);
+            let mut strategy = spec.try_build(cash, &schema).map_err(build_err)?;
             fugazi_core::backtest::run(&mut strategy, wallet, snapshots.iter().cloned())
         }
         LoadedSpec::Multi(spec) => {
-            let schema = spec_backtest::schema_from_snapshots(snapshots);
-            let mut strategy = spec.build(cash, &schema);
+            let mut strategy = spec.try_build(cash, &schema).map_err(build_err)?;
             fugazi_core::backtest::run(&mut strategy, wallet, snapshots.iter().cloned())
         }
         LoadedSpec::Portfolio(spec) => {
-            let schema = spec_backtest::schema_from_snapshots(snapshots);
             // Portfolio owns its composite wallet; the external wallet's
-            // equity is only used for the cash seed.
+            // equity is only used for the cash seed. Build eagerly so a bad
+            // spec surfaces as a ValueError rather than inside the driver.
+            let built = spec.try_build(cash, &schema, None).map_err(build_err)?;
+            let mut built = Some(built);
             spec_backtest::measured_report_portfolio(
-                || spec.build(cash, &schema, None),
+                || built.take().expect("built once"),
                 snapshots,
             )
         }
+    })
+}
+
+/// Map a spec-build failure to a Python `ValueError`, splitting the crate's
+/// `!tag > ` breadcrumb onto its own line so the message reads the way the
+/// CLI renders it.
+fn build_err(e: String) -> PyErr {
+    let (trail, message) = fugazi_core::spec::diagnostics::split_trail(&e);
+    if trail.is_empty() {
+        PyValueError::new_err(message.to_string())
+    } else {
+        PyValueError::new_err(format!("{message}\n  at: {}", trail.join(" > ")))
     }
 }
 
@@ -8121,9 +8132,14 @@ fn evaluate_spec(
     bars_per_year: Real,
     risk_free_rate: Real,
     seconds_per_bar: Option<Real>,
-) -> SpecMetrics {
-    let report = run_spec(loaded, snapshots, wallet);
-    spec_metrics::from_report(&report, bars_per_year, risk_free_rate, seconds_per_bar)
+) -> PyResult<SpecMetrics> {
+    let report = run_spec(loaded, snapshots, wallet)?;
+    Ok(spec_metrics::from_report(
+        &report,
+        bars_per_year,
+        risk_free_rate,
+        seconds_per_bar,
+    ))
 }
 
 /// Serialize a `SpecMetrics` document into a Python dict via serde_json.
@@ -8154,7 +8170,7 @@ impl PyStrategySpec {
         snapshots: &Bound<'_, PyAny>,
     ) -> PyResult<PyRunReport> {
         let snaps = snapshots_from_sequence(snapshots)?;
-        let report = run_spec(&self.inner, &snaps, &mut wallet.inner);
+        let report = run_spec(&self.inner, &snaps, &mut wallet.inner)?;
         Ok(PyRunReport { inner: report })
     }
 
@@ -8186,7 +8202,7 @@ impl PyStrategySpec {
             bars_per_year,
             risk_free_rate,
             seconds_per_bar,
-        );
+        )?;
         metrics_to_py(py, &metrics)
     }
 

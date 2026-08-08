@@ -246,7 +246,7 @@ fn run_single(
         let schema_ref = &schema;
         let probe = |params: &HashMap<String, Value>| -> Result<usize> {
             let s = build_spec(base_value, params)?;
-            let built = s.build(cash, schema_ref);
+            let built = s.try_build(cash, schema_ref).map_err(backtest::build_error)?;
             Ok(if keep_unstable {
                 built.warm_up_period()
             } else {
@@ -284,8 +284,14 @@ fn run_single(
     let cost_config = opts.cost_config;
     let atoms_ref = &atoms;
     let windowed_n = windowed_bars.map(NonZeroUsize::get);
+    let schema = backtest::schema_from_atoms(&atoms);
+    let schema_ref = &schema;
     let evaluate_row = move |params: &HashMap<String, Value>| -> Result<Evaluation> {
         let spec = build_spec(base_value, params)?;
+        // The evaluate/measured_report path builds through the infallible
+        // shim, so validate this row's spec first — a bad expression is a
+        // whole-grid error, not a per-row NaN.
+        backtest::validated(|| spec.try_build(opts.cash, schema_ref))?;
         Ok(match windowed_n {
             Some(w) => Evaluation::Windowed(backtest::evaluate_windowed(
                 &spec,
@@ -489,11 +495,14 @@ fn run_multi_symbol(
     let universe_ref = &universe;
     let windowed_n = windowed_bars.map(NonZeroUsize::get);
     let kind = opts.strategy_kind;
+    let schema = backtest::schema_from_snapshots(&snapshots);
+    let schema_ref = &schema;
 
     let evaluate_row = move |params: &HashMap<String, Value>| -> Result<Evaluation> {
         Ok(match kind {
             StrategyKind::Pairs => {
                 let spec = build_pairs_spec(base_value, params)?;
+                backtest::validated(|| spec.try_build(opts.cash, schema_ref))?;
                 match windowed_n {
                     Some(w) => Evaluation::Windowed(backtest::evaluate_windowed_pairs(
                         &spec,
@@ -520,6 +529,7 @@ fn run_multi_symbol(
             }
             StrategyKind::Basket => {
                 let spec = build_basket_spec(base_value, params)?;
+                backtest::validated(|| spec.try_build(opts.cash, schema_ref))?;
                 match windowed_n {
                     Some(w) => Evaluation::Windowed(backtest::evaluate_windowed_basket(
                         &spec,
@@ -548,6 +558,7 @@ fn run_multi_symbol(
             }
             StrategyKind::Multi => {
                 let spec = build_multi_spec(base_value, params)?;
+                backtest::validated(|| spec.try_build(opts.cash, schema_ref))?;
                 match windowed_n {
                     Some(w) => Evaluation::Windowed(backtest::evaluate_windowed_multi(
                         &spec,
@@ -576,6 +587,7 @@ fn run_multi_symbol(
             }
             StrategyKind::Portfolio => {
                 let spec = build_portfolio_spec(base_value, params)?;
+                backtest::validated(|| spec.try_build(opts.cash, schema_ref, None))?;
                 match windowed_n {
                     Some(w) => Evaluation::Windowed(backtest::evaluate_windowed_portfolio(
                         &spec,
@@ -712,7 +724,7 @@ fn run_multi_symbol_walkforward(
                 // reads meaningful numbers on a freshly-built strategy —
                 // no probe-snapshot feed needed.
                 let spec = build_pairs_spec(base_value, params)?;
-                let built = spec.build(cash, schema_ref);
+                let built = spec.try_build(cash, schema_ref).map_err(backtest::build_error)?;
                 Ok(if keep_unstable {
                     built.warm_up_period()
                 } else {
@@ -721,7 +733,7 @@ fn run_multi_symbol_walkforward(
             }
             StrategyKind::Basket => {
                 let spec = build_basket_spec(base_value, params)?;
-                let mut built = spec.build(cash, schema_ref);
+                let mut built = spec.try_build(cash, schema_ref).map_err(backtest::build_error)?;
                 // Probe: one synthetic snapshot triggers the lazy per-symbol
                 // chain construction so `stable_period()` reflects the
                 // fully-populated worst case.
@@ -734,7 +746,7 @@ fn run_multi_symbol_walkforward(
             }
             StrategyKind::Multi => {
                 let spec = build_multi_spec(base_value, params)?;
-                let mut built = spec.build(cash, schema_ref);
+                let mut built = spec.try_build(cash, schema_ref).map_err(backtest::build_error)?;
                 built.update(probe_snap_ref.clone());
                 Ok(if keep_unstable {
                     built.warm_up_period()
@@ -750,7 +762,9 @@ fn run_multi_symbol_walkforward(
                 // were boxed. Costs don't affect readiness, so we build
                 // without.
                 let spec = build_portfolio_spec(base_value, params)?;
-                let built = spec.build(cash, schema_ref, None);
+                let built = spec
+                    .try_build(cash, schema_ref, None)
+                    .map_err(backtest::build_error)?;
                 Ok(if keep_unstable {
                     built.warm_up_period()
                 } else {

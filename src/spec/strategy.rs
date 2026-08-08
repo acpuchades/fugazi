@@ -54,13 +54,13 @@ impl SideSpec {
         book: &Book,
         schema: &Arc<Schema>,
         root: Option<&Selector<String>>,
-    ) -> Box<dyn DynIndicator> {
-        self.exit
-            .as_ref()
-            .map(|s| s.build(anchor, book, None, schema, root))
-            .unwrap_or_else(|| {
-                dyn_indicator::wrap(ValueBool::<crate::types::Snapshot<String>>::new(false))
-            })
+    ) -> Result<Box<dyn DynIndicator>, String> {
+        match &self.exit {
+            Some(s) => s.try_build(anchor, book, None, schema, root),
+            None => Ok(dyn_indicator::wrap(ValueBool::<
+                crate::types::Snapshot<String>,
+            >::new(false))),
+        }
     }
 }
 
@@ -161,6 +161,19 @@ impl SingleStrategySpec {
     /// [`Unstable`](crate::indicators::Unstable) at the signal level to opt a
     /// subtree out of the strategy-readiness wait.
     pub fn build(&self, initial_equity: Real, schema: &Arc<Schema>) -> DynSingleStrategy {
+        self.try_build(initial_equity, schema)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// The fallible twin of [`build`](Self::build): every slot is built through
+    /// [`ExprSpec::try_build`] / [`SignalSpec::try_build`], so a bad expression
+    /// anywhere in the document comes back as a message with its tag trail
+    /// instead of aborting the process.
+    pub fn try_build(
+        &self,
+        initial_equity: Real,
+        schema: &Arc<Schema>,
+    ) -> Result<DynSingleStrategy, String> {
         let mut strat =
             SingleAssetStrategy::with_initial_equity(self.symbol.clone(), initial_equity);
         // One position + book per strategy, shared by every `entry`/`peak`/`trough`
@@ -176,35 +189,35 @@ impl SingleStrategySpec {
         let root = Some(&root);
         if let Some(long) = &self.long {
             strat = strat.long_on(
-                AsBool::new(long.enter.build(&anchor, &book, None, schema, root)),
-                AsBool::new(long.exit(&anchor, &book, schema, root)),
+                AsBool::try_new(long.enter.try_build(&anchor, &book, None, schema, root)?)?,
+                AsBool::try_new(long.exit(&anchor, &book, schema, root)?)?,
             );
             if let Some(sl) = &long.stop_loss {
-                strat = strat.long_stop_loss(AsReal::new(sl.build(&anchor, &book, None, schema, root)));
+                strat = strat.long_stop_loss(AsReal::try_new(sl.try_build(&anchor, &book, None, schema, root)?)?);
             }
             if let Some(tp) = &long.take_profit {
-                strat = strat.long_take_profit(AsReal::new(tp.build(&anchor, &book, None, schema, root)));
+                strat = strat.long_take_profit(AsReal::try_new(tp.try_build(&anchor, &book, None, schema, root)?)?);
             }
         }
         if let Some(short) = &self.short {
             strat = strat.short_on(
-                AsBool::new(short.enter.build(&anchor, &book, None, schema, root)),
-                AsBool::new(short.exit(&anchor, &book, schema, root)),
+                AsBool::try_new(short.enter.try_build(&anchor, &book, None, schema, root)?)?,
+                AsBool::try_new(short.exit(&anchor, &book, schema, root)?)?,
             );
             if let Some(sl) = &short.stop_loss {
-                strat = strat.short_stop_loss(AsReal::new(sl.build(&anchor, &book, None, schema, root)));
+                strat = strat.short_stop_loss(AsReal::try_new(sl.try_build(&anchor, &book, None, schema, root)?)?);
             }
             if let Some(tp) = &short.take_profit {
-                strat = strat.short_take_profit(AsReal::new(tp.build(&anchor, &book, None, schema, root)));
+                strat = strat.short_take_profit(AsReal::try_new(tp.try_build(&anchor, &book, None, schema, root)?)?);
             }
         }
         if let Some(sizing) = &self.sizing {
-            strat = strat.position_sizing(AsReal::new(sizing.build(&anchor, &book, None, schema, root)));
+            strat = strat.position_sizing(AsReal::try_new(sizing.try_build(&anchor, &book, None, schema, root)?)?);
         }
         if let Some(rebalance) = &self.rebalance_on {
-            strat = strat.rebalance_on(AsBool::new(rebalance.build(&anchor, &book, None, schema, root)));
+            strat = strat.rebalance_on(AsBool::try_new(rebalance.try_build(&anchor, &book, None, schema, root)?)?);
         }
-        DynSingleStrategy { inner: strat }
+        Ok(DynSingleStrategy { inner: strat })
     }
 }
 

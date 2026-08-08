@@ -166,8 +166,49 @@ impl MultiAssetStrategySpec {
     /// validated up front (best done by dry-running on a representative
     /// symbol set in tests).
     pub fn build(&self, initial_equity: Real, schema: &Arc<Schema>) -> DynMultiAssetStrategy {
+        self.try_build(initial_equity, schema)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// The fallible twin of [`build`](Self::build). Every per-symbol template is
+    /// probed once against a stand-in symbol before any factory is wired — see
+    /// [`probe_signal`].
+    pub fn try_build(
+        &self,
+        initial_equity: Real,
+        schema: &Arc<Schema>,
+    ) -> Result<DynMultiAssetStrategy, String> {
         let mut strat = MultiAssetStrategy::<String>::with_initial_equity(initial_equity);
         let book = strat.book();
+
+        // Probe every lazily-built template before wiring any of them.
+        let probe_anchor = Position::new();
+        for (side, slots) in [("long", &self.long), ("short", &self.short)] {
+            let Some(side_spec) = slots else { continue };
+            let (enter, exit, sl, tp) = if side == "long" {
+                ("long enter", "long exit", "long stop_loss", "long take_profit")
+            } else {
+                (
+                    "short enter",
+                    "short exit",
+                    "short stop_loss",
+                    "short take_profit",
+                )
+            };
+            probe_signal(&side_spec.enter, enter, &probe_anchor, &book, schema)?;
+            if let Some(t) = &side_spec.exit {
+                probe_signal(t, exit, &probe_anchor, &book, schema)?;
+            }
+            if let Some(t) = &side_spec.stop_loss {
+                probe_expr(t, sl, &probe_anchor, &book, schema)?;
+            }
+            if let Some(t) = &side_spec.take_profit {
+                probe_expr(t, tp, &probe_anchor, &book, schema)?;
+            }
+        }
+        if let Some(t) = &self.sizing {
+            probe_expr(t, "sizing", &probe_anchor, &book, schema)?;
+        }
 
         // --- long side ----------------------------------------------------
         if let Some(long) = &self.long {
@@ -299,13 +340,13 @@ impl MultiAssetStrategySpec {
             // there is no "this series" for it to mean. Cadence / calendar
             // signals need no asset; one that reads a price must name it.
             let dyn_ind: Box<dyn DynIndicator> =
-                rebalance_spec.build(&anchor, &book, None, schema, None);
-            strat.rebalance_on(AsBool::new(dyn_ind))
+                rebalance_spec.try_build(&anchor, &book, None, schema, None)?;
+            strat.rebalance_on(AsBool::try_new(dyn_ind)?)
         } else {
             strat
         };
 
-        DynMultiAssetStrategy { inner: strat }
+        Ok(DynMultiAssetStrategy { inner: strat })
     }
 }
 
@@ -319,10 +360,19 @@ fn build_signal(
     sym: &str,
     slot: &'static str,
 ) -> SignalSpec {
+    try_build_signal(template, sym, slot).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// The fallible twin of [`build_signal`].
+fn try_build_signal(
+    template: &SpecTemplate<SignalSpec>,
+    sym: &str,
+    slot: &'static str,
+) -> Result<SignalSpec, String> {
     let mut args = HashMap::new();
     args.insert("SYM".to_string(), Value::String(sym.to_string()));
-    template.build(&args).unwrap_or_else(|e| {
-        panic!("multi-asset {slot} signal template build failed for symbol {sym:?}: {e}")
+    template.build(&args).map_err(|e| {
+        format!("multi-asset {slot} signal template build failed for symbol {sym:?}: {e}")
     })
 }
 
@@ -339,11 +389,56 @@ fn build_expr(
     sym: &str,
     slot: &'static str,
 ) -> ExprSpec {
+    try_build_expr(template, sym, slot).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// The fallible twin of [`build_expr`].
+fn try_build_expr(
+    template: &SpecTemplate<ExprSpec>,
+    sym: &str,
+    slot: &'static str,
+) -> Result<ExprSpec, String> {
     let mut args = HashMap::new();
     args.insert("SYM".to_string(), Value::String(sym.to_string()));
-    template.build(&args).unwrap_or_else(|e| {
-        panic!("multi-asset {slot} template build failed for symbol {sym:?}: {e}")
-    })
+    template
+        .build(&args)
+        .map_err(|e| format!("multi-asset {slot} template build failed for symbol {sym:?}: {e}"))
+}
+
+/// The stand-in symbol the build-time probe substitutes for `!arg SYM`. See
+/// [`basket::PROBE_SYMBOL`](crate::spec::basket) for the reasoning.
+const PROBE_SYMBOL: &str = "__fugazi_probe__";
+
+/// Validate a per-symbol signal template once, at spec-build time — the
+/// multi-asset twin of `basket`'s `probe_template`. The per-symbol factories
+/// run lazily inside `MultiAssetStrategy::update`, where there is no error path
+/// to return through; probing here is what makes their remaining panic
+/// unreachable.
+fn probe_signal(
+    template: &SpecTemplate<SignalSpec>,
+    slot: &'static str,
+    anchor: &Position,
+    book: &Book,
+    schema: &Arc<Schema>,
+) -> Result<(), String> {
+    let concrete = try_build_signal(template, PROBE_SYMBOL, slot)?;
+    concrete
+        .try_build(anchor, book, None, schema, Some(&leg_root(PROBE_SYMBOL)))
+        .map(|_| ())
+}
+
+/// [`probe_signal`] for an expression template (protective levels, sizing).
+fn probe_expr(
+    template: &SpecTemplate<ExprSpec>,
+    slot: &'static str,
+    anchor: &Position,
+    book: &Book,
+    schema: &Arc<Schema>,
+) -> Result<(), String> {
+    let concrete = try_build_expr(template, PROBE_SYMBOL, slot)?;
+    concrete
+        .try_build(anchor, book, None, schema, Some(&leg_root(PROBE_SYMBOL)))
+        .map(|_| ())
 }
 
 // ---------------------------------------------------------------------------

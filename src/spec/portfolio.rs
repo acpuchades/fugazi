@@ -547,10 +547,23 @@ impl PortfolioSpec {
         schema: &Arc<Schema>,
         costs: Option<TradingCosts>,
     ) -> DynPortfolio {
-        assert!(
-            !self.children.is_empty(),
-            "PortfolioSpec::build: `children:` must have at least one entry"
-        );
+        self.try_build(total_initial_equity, schema, costs)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// The fallible twin of [`build`](Self::build) — see
+    /// [`SingleStrategySpec::try_build`](crate::spec::SingleStrategySpec::try_build).
+    pub fn try_build(
+        &self,
+        total_initial_equity: Real,
+        schema: &Arc<Schema>,
+        costs: Option<TradingCosts>,
+    ) -> Result<DynPortfolio, String> {
+        if self.children.is_empty() {
+            return Err(
+                "PortfolioSpec::build: `children:` must have at least one entry".to_string(),
+            );
+        }
         let n = self.children.len();
         let resolved_names = resolve_child_names(&self.children);
         let allocations = self.resolve_allocations(total_initial_equity, n);
@@ -594,14 +607,14 @@ impl PortfolioSpec {
             let (stable, warm_up);
             builder = match &c.strategy {
                 PortfolioChildStrategy::Single(s) => {
-                    let built = s.build(child_equity, schema);
+                    let built = s.try_build(child_equity, schema)?;
                     stable = built.stable_period();
                     warm_up = built.warm_up_period();
                     child_books.push(built.book());
                     builder.add(name, built)
                 }
                 PortfolioChildStrategy::Pairs(p) => {
-                    let built = p.build(child_equity, schema);
+                    let built = p.try_build(child_equity, schema)?;
                     stable = built.stable_period();
                     warm_up = built.warm_up_period();
                     child_books.push(built.book());
@@ -721,12 +734,12 @@ impl PortfolioSpec {
                     rewrite_value_list_by_index(template.tree().clone(), i);
                 let per_child_template =
                     SpecTemplate::<ExprSpec>::from_tree(preprocessed_tree);
-                let concrete = per_child_template.build(&args).unwrap_or_else(|e| {
-                    panic!(
+                let concrete = per_child_template.build(&args).map_err(|e| {
+                    format!(
                         "PortfolioSpec::build: weight_share template failed \
                          for child '{name}' (index {i}): {e}"
                     )
-                });
+                })?;
                 let anchor = Position::new();
                 // A single-asset child has one blessed series — its traded
                 // symbol, the same value bound to `!arg SYM` above — so a
@@ -739,14 +752,14 @@ impl PortfolioSpec {
                     }
                     _ => None,
                 };
-                let dyn_ind: Box<dyn DynIndicator> = concrete.build(
+                let dyn_ind: Box<dyn DynIndicator> = concrete.try_build(
                     &anchor,
                     &child_books[i],
                     Some(&agg_book),
                     schema,
                     child_root.as_ref(),
-                );
-                let real_ind = AsReal::new(dyn_ind);
+                )?;
+                let real_ind = AsReal::try_new(dyn_ind)?;
                 max_stable = max_stable.max(real_ind.stable_period());
                 max_warm_up = max_warm_up.max(real_ind.warm_up_period());
                 shares.push(Box::new(real_ind));
@@ -770,8 +783,8 @@ impl PortfolioSpec {
             // "this series" is undefined; a price leaf inside one must name
             // its asset with `!pick { symbol: ... }`.
             let dyn_ind: Box<dyn DynIndicator> =
-                rebalance_spec.build(&anchor, &agg_book, Some(&agg_book), schema, None);
-            let signal = AsBool::new(dyn_ind);
+                rebalance_spec.try_build(&anchor, &agg_book, Some(&agg_book), schema, None)?;
+            let signal = AsBool::try_new(dyn_ind)?;
             max_stable = max_stable.max(signal.stable_period());
             max_warm_up = max_warm_up.max(signal.warm_up_period());
             builder = builder.rebalance_on(signal);
@@ -785,11 +798,11 @@ impl PortfolioSpec {
             };
         }
         let built = builder.build();
-        DynPortfolio {
+        Ok(DynPortfolio {
             inner: built,
             stable_period: max_stable,
             warm_up_period: max_warm_up,
-        }
+        })
     }
 
     /// Pre-compute the per-child cash allocations the built [`Portfolio`]

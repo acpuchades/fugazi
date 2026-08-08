@@ -684,6 +684,20 @@ impl SignalSpec {
         schema: &Arc<Schema>,
         root: Option<&Selector<String>>,
     ) -> Result<Box<dyn DynIndicator>, String> {
+        self.try_build_inner(anchor, book, portfolio_book, schema, root)
+            .map_err(|e| trail(self, e))
+    }
+
+    /// The match itself — wrapped by [`try_build`](Self::try_build), which
+    /// prepends this node's tag. See [`ExprSpec::try_build`].
+    fn try_build_inner(
+        &self,
+        anchor: &Position,
+        book: &Book,
+        portfolio_book: Option<&Book>,
+        schema: &Arc<Schema>,
+        root: Option<&Selector<String>>,
+    ) -> Result<Box<dyn DynIndicator>, String> {
         use SignalSpec::*;
         let real = |s: &ExprSpec| -> Result<AsReal, String> {
             let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
@@ -908,27 +922,25 @@ fn build_signal_get(
             Ok(dyn_indicator::wrap(GetBool::of(schema, key, pick_root(root))))
         }
         Some(OverlayType::Real) => Err(format!(
-            "!get {{ key: {key:?} }} in signal position: column is Real, but a signal must be \
-             Bool. Use a comparison like `!gt {{ lhs: !get {{ key: {key:?} }}, rhs: ... }}` \
-             instead.",
+            "overlay column {key:?} is Real, but a signal must be Bool. Use a \
+             comparison like `!gt {{ lhs: !get {{ key: {key:?} }}, rhs: ... }}` instead.",
         )),
         Some(OverlayType::Str) => Err(format!(
-            "!get {{ key: {key:?} }} in signal position: column is Str, but a signal must be \
-             Bool. Wrap it in `!str_eq {{ lhs: !get {{ key: {key:?} }}, rhs: \"value\" }}` \
-             (or `!str_ne`) instead.",
+            "overlay column {key:?} is Str, but a signal must be Bool. Wrap it in \
+             `!str_eq {{ lhs: !get {{ key: {key:?} }}, rhs: \"value\" }}` (or `!str_ne`) \
+             instead.",
         )),
         None => {
             let registered: Vec<&str> = schema.keys().collect();
             if registered.is_empty() {
                 Err(format!(
-                    "!get {{ key: {key:?} }} in signal position: no overlay side channel is \
-                     bound — feed `--series` data that carries additional (non-OHLCV) columns \
-                     to attach overlays",
+                    "overlay column {key:?}: no overlay side channel is bound — feed \
+                     `--series` data that carries additional (non-OHLCV) columns to \
+                     attach overlays",
                 ))
             } else {
                 Err(format!(
-                    "!get {{ key: {key:?} }} in signal position: overlay column not registered. \
-                     Registered columns: {}",
+                    "overlay column {key:?} is not registered. Registered columns: {}",
                     registered.join(", "),
                 ))
             }

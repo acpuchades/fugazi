@@ -88,68 +88,18 @@ impl OverlayColumn {
 /// with the stub anchors overlays always use (no live `Position` / `Book`).
 /// Shared by [`OverlayColumn::build`] and the CLI's scoped `Overlay::build`.
 ///
-/// [`ExprSpec::build`] reports an invalid spec by **panicking** — the CLI
-/// convention, and reasonable when the spec came from a strategy author who
-/// wants a loud failure. An overlay expression is ordinary user input, though,
-/// so a `!get` naming a column the stream doesn't carry, a `!pick` with a
-/// malformed frequency, or a mixed-type `!match` is bad input, not a broken
-/// invariant: it belongs on the normal error path, not as a process abort with
-/// a stack trace. [`catch_build`] converts the whole family at this one
-/// boundary, and the caller prefixes the column and source document.
+/// An overlay expression is ordinary user input, so a `!get` naming a column
+/// the stream doesn't carry, a `!pick` with a malformed frequency, or a
+/// mixed-type `!match` is bad input rather than a broken invariant: it belongs
+/// on the normal error path. [`ExprSpec::try_build`] returns the whole family
+/// as values, and the caller prefixes the column and source document.
 pub fn build_overlay(
     spec: &ExprSpec,
     schema: &Arc<Schema>,
     root: Option<&Selector<String>>,
 ) -> Result<Box<dyn DynIndicator>> {
-    catch_build(|| spec.build(&Position::new(), &Book::new(1.0), None, schema, root))
-}
-
-// ---------------------------------------------------------------------------
-// Build-panic capture
-// ---------------------------------------------------------------------------
-
-thread_local! {
-    /// Set only while [`catch_build`] is running on this thread. Read by the
-    /// installed hook to decide whether a panic is one we're about to convert
-    /// into an `Err` (stay quiet) or a genuine one (print as usual).
-    static SUPPRESS_PANIC_OUTPUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Installed at most once, the first time an overlay is built. Chains to
-/// whatever hook was in place, so panics anywhere else in the process — other
-/// threads included, since the flag is thread-local — print exactly as before.
-static HOOK_INSTALLED: std::sync::Once = std::sync::Once::new();
-
-fn install_quiet_hook() {
-    HOOK_INSTALLED.call_once(|| {
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            if !SUPPRESS_PANIC_OUTPUT.with(std::cell::Cell::get) {
-                previous(info);
-            }
-        }));
-    });
-}
-
-/// Run `f`, converting a panic into an `Err` carrying its message.
-fn catch_build<T>(f: impl FnOnce() -> T) -> Result<T> {
-    install_quiet_hook();
-    SUPPRESS_PANIC_OUTPUT.with(|q| q.set(true));
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-    SUPPRESS_PANIC_OUTPUT.with(|q| q.set(false));
-    outcome.map_err(|payload| anyhow!("{}", panic_message(&payload)))
-}
-
-/// Recover a panic payload's message. `String` and `&str` are the two shapes
-/// `panic!("…")` and `assert!(cond, "…")` produce.
-fn panic_message(payload: &Box<dyn std::any::Any + Send + 'static>) -> String {
-    if let Some(s) = payload.downcast_ref::<String>() {
-        return s.clone();
-    }
-    if let Some(s) = payload.downcast_ref::<&'static str>() {
-        return (*s).to_string();
-    }
-    "overlay expression failed to build".to_string()
+    spec.try_build(&Position::new(), &Book::new(1.0), None, schema, root)
+        .map_err(|e| anyhow!("{e}"))
 }
 
 /// Parse a flat `name: ExprSpec` JSON map (already `!import`/`!param`-resolved

@@ -1104,41 +1104,96 @@ mod tests {
         let _ = spec.build(1.0, &schema);
     }
 
+    /// Build `spec` and return the error message it must fail with.
+    fn expr_build_err(spec: &ExprSpec, schema: &std::sync::Arc<Schema>) -> String {
+        // `.expect_err` needs `T: Debug`, and `Box<dyn DynIndicator>` isn't.
+        spec.try_build(&Position::new(), &Book::new(1.0), None, schema, None)
+            .err()
+            .expect("expected the build to be rejected")
+    }
+
+    /// [`expr_build_err`] for the signal layer.
+    fn signal_build_err(spec: &SignalSpec, schema: &std::sync::Arc<Schema>) -> String {
+        spec.try_build(&Position::new(), &Book::new(1.0), None, schema, None)
+            .err()
+            .expect("expected the build to be rejected")
+    }
+
     #[test]
-    #[should_panic(expected = "overlay column not registered")]
-    fn get_panics_on_unknown_key_with_registered_list() {
+    fn get_rejects_an_unknown_key_and_lists_the_registered_ones() {
         let mut b = Schema::builder();
         b.add_real("vol_20");
         let schema = b.finish();
         let spec: ExprSpec = serde_norway::from_str("!get { key: missing }").unwrap();
-        let _ = spec.build(&Position::new(), &Book::new(1.0), None, &schema, None);
+        let err = expr_build_err(&spec, &schema);
+        assert!(err.contains("is not registered"), "{err}");
+        assert!(err.contains("vol_20"), "names what is registered: {err}");
+        // The tag trail is what `diagnostics::split_trail` renders as `at:`.
+        assert!(err.starts_with("!get > "), "{err}");
     }
 
     #[test]
-    #[should_panic(expected = "no overlay side channel is bound")]
-    fn get_panics_on_empty_schema_with_hint() {
+    fn get_rejects_an_empty_schema_with_a_hint() {
         let spec: ExprSpec = serde_norway::from_str("!get { key: anything }").unwrap();
-        let _ = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let err = expr_build_err(&spec, &Schema::empty());
+        assert!(err.contains("no overlay side channel is bound"), "{err}");
     }
 
     #[test]
-    #[should_panic(expected = "must be Bool")]
     fn signal_get_on_real_column_hints_at_comparison() {
         let mut b = Schema::builder();
         b.add_real("vol_20");
         let schema = b.finish();
         let spec: SignalSpec = serde_norway::from_str("!get { key: vol_20 }").unwrap();
-        let _ = spec.build(&Position::new(), &Book::new(1.0), None, &schema, None);
+        let err = signal_build_err(&spec, &schema);
+        assert!(err.contains("must be Bool"), "{err}");
     }
 
     #[test]
-    #[should_panic(expected = "!str_eq")]
     fn signal_get_on_str_column_hints_at_str_eq() {
         let mut b = Schema::builder();
         b.add_str("regime");
         let schema = b.finish();
         let spec: SignalSpec = serde_norway::from_str("!get { key: regime }").unwrap();
-        let _ = spec.build(&Position::new(), &Book::new(1.0), None, &schema, None);
+        let err = signal_build_err(&spec, &schema);
+        assert!(err.contains("!str_eq"), "{err}");
+    }
+
+    #[test]
+    fn a_nested_failure_carries_the_whole_tag_path() {
+        // The reason the breadcrumb exists: the offending `!get` is three
+        // levels down, and the message has to say where it is.
+        let yaml = r#"
+            !and
+            lhs: !gt { lhs: !sma { source: !get { key: nope }, period: 3 }, rhs: !value 1.0 }
+            rhs: !value true
+        "#;
+        let spec: SignalSpec = serde_norway::from_str(yaml).unwrap();
+        let err = signal_build_err(&spec, &Schema::empty());
+        let (trail, message) = crate::spec::diagnostics::split_trail(&err);
+        assert_eq!(trail, vec!["!and", "!gt", "!sma", "!get"], "{err}");
+        assert!(message.contains("no overlay side channel is bound"), "{err}");
+    }
+
+    #[test]
+    fn a_type_mismatch_is_attributed_to_the_child_that_produced_it() {
+        // The static checker rejects most ill-typed trees at parse time. It
+        // deliberately can't decide a `!get`, whose type is only knowable from
+        // the schema — so this is the case that genuinely reaches the builder,
+        // and the one the returned error has to describe well.
+        //
+        // The failure names the *child* that produced the wrong type, not the
+        // slot that rejected it: that's where the author has to look.
+        let mut b = Schema::builder();
+        b.add_str("regime");
+        let schema = b.finish();
+        let spec: ExprSpec =
+            serde_norway::from_str("!sma { source: !get { key: regime }, period: 3 }").unwrap();
+        let err = expr_build_err(&spec, &schema);
+        let (trail, message) = crate::spec::diagnostics::split_trail(&err);
+        assert_eq!(trail, vec!["!sma", "!get"], "{err}");
+        assert!(message.contains("expected a Real expression"), "{err}");
+        assert!(message.contains("got Str"), "{err}");
     }
 
     #[test]
@@ -1484,7 +1539,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "cases")]
     fn match_empty_cases_rejected_at_build() {
         // A zero-case `!match` isn't a legal shape — it collapses to
         // just the default, at which point `!if_else` isn't needed.
@@ -1499,11 +1553,11 @@ mod tests {
             default: !value 0.0
         "#;
         let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
-        let _ = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let err = expr_build_err(&spec, &Schema::empty());
+        assert!(err.contains("`cases` must not be empty"), "{err}");
     }
 
     #[test]
-    #[should_panic(expected = "same type")]
     fn match_mixed_pattern_types_rejected_at_build() {
         // A `!match` with one numeric and one string case can't map to
         // a single `K` on the library-level `Match<S, T, K>` — rejected
@@ -1519,7 +1573,8 @@ mod tests {
             default: !value 0.0
         "#;
         let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
-        let _ = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let err = expr_build_err(&spec, &Schema::empty());
+        assert!(err.contains("same type"), "{err}");
     }
 
     #[test]

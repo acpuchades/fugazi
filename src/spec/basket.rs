@@ -312,8 +312,48 @@ impl BasketStrategySpec {
     /// (`!drawdown_throttle`, `!equity_vol_target`, `!fractional_kelly`)
     /// work on the basket's aggregate equity curve.
     pub fn build(&self, initial_equity: Real, schema: &Arc<Schema>) -> DynBasketStrategy {
+        self.try_build(initial_equity, schema)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// The fallible twin of [`build`](Self::build).
+    ///
+    /// The eager parts (the rebalance gate) are built through `try_build`
+    /// directly. The per-symbol `score` / `sizing` / protective-level templates
+    /// can't be, because their factories run lazily inside the driver — so each
+    /// is validated once here against a probe symbol (see [`probe_template`]),
+    /// which is what makes those closures' remaining panic unreachable.
+    pub fn try_build(
+        &self,
+        initial_equity: Real,
+        schema: &Arc<Schema>,
+    ) -> Result<DynBasketStrategy, String> {
         let strat = BasketStrategy::<String>::with_initial_equity(initial_equity);
         let book = strat.book();
+
+        // Probe every lazily-built template before wiring any of them.
+        let probe_anchor = Position::new();
+        probe_template(&self.score, "score", &probe_anchor, &book, schema)?;
+        probe_template(&self.sizing, "sizing", &probe_anchor, &book, schema)?;
+        for (side, slots) in [("long", &self.long), ("short", &self.short)] {
+            let Some(side_spec) = slots else { continue };
+            if let Some(t) = &side_spec.stop_loss {
+                let slot = if side == "long" {
+                    "long.stop_loss"
+                } else {
+                    "short.stop_loss"
+                };
+                probe_template(t, slot, &probe_anchor, &book, schema)?;
+            }
+            if let Some(t) = &side_spec.take_profit {
+                let slot = if side == "long" {
+                    "long.take_profit"
+                } else {
+                    "short.take_profit"
+                };
+                probe_template(t, slot, &probe_anchor, &book, schema)?;
+            }
+        }
 
         let score_template = self.score.clone();
         let book_score = book.clone();
@@ -356,8 +396,8 @@ impl BasketStrategySpec {
             // (`!every`, `!monthly`) need no asset; one that reads a price
             // must name it with `!pick { symbol: ... }`.
             let dyn_ind: Box<dyn DynIndicator> =
-                rebalance_spec.build(&anchor, &book, None, schema, None);
-            strat.rebalance_on(AsBool::new(dyn_ind))
+                rebalance_spec.try_build(&anchor, &book, None, schema, None)?;
+            strat.rebalance_on(AsBool::try_new(dyn_ind)?)
         } else {
             strat
         };
@@ -426,7 +466,7 @@ impl BasketStrategySpec {
             strat
         };
 
-        DynBasketStrategy { inner: strat }
+        Ok(DynBasketStrategy { inner: strat })
     }
 }
 
@@ -454,11 +494,51 @@ fn build_per_symbol(
     sym: &str,
     slot: &'static str,
 ) -> ExprSpec {
+    try_build_per_symbol(template, sym, slot).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// The fallible twin of [`build_per_symbol`].
+fn try_build_per_symbol(
+    template: &SpecTemplate<ExprSpec>,
+    sym: &str,
+    slot: &'static str,
+) -> Result<ExprSpec, String> {
     let mut args = HashMap::new();
     args.insert("SYM".to_string(), Value::String(sym.to_string()));
     template
         .build(&args)
-        .unwrap_or_else(|e| panic!("basket {slot} template build failed for symbol {sym:?}: {e}"))
+        .map_err(|e| format!("basket {slot} template build failed for symbol {sym:?}: {e}"))
+}
+
+/// The stand-in symbol the build-time probe substitutes for `!arg SYM`.
+///
+/// Deliberately not a plausible ticker: it never matches a real snapshot entry,
+/// so a probe chain is inert even if one were accidentally retained.
+const PROBE_SYMBOL: &str = "__fugazi_probe__";
+
+/// Validate a per-symbol template by building it once, at spec-build time,
+/// against [`PROBE_SYMBOL`].
+///
+/// The per-symbol factories build their chain on **first sight of a symbol**,
+/// inside `BasketStrategy::update` — a context with no error path to return
+/// through, which is why those closures still `panic!`. The only thing that
+/// varies between symbols is the `!arg SYM` substitution and the blessed root
+/// selector, and neither can change *which* tags the tree contains or what
+/// types they produce. So a template that builds for one symbol builds for
+/// every symbol, and checking once here is enough to turn the factories'
+/// remaining panic into a proven-unreachable invariant — while moving the
+/// diagnostic to load time, where the author can act on it.
+fn probe_template(
+    template: &SpecTemplate<ExprSpec>,
+    slot: &'static str,
+    anchor: &Position,
+    book: &Book,
+    schema: &Arc<Schema>,
+) -> Result<(), String> {
+    let concrete = try_build_per_symbol(template, PROBE_SYMBOL, slot)?;
+    concrete
+        .try_build(anchor, book, None, schema, Some(&leg_root(PROBE_SYMBOL)))
+        .map(|_| ())
 }
 
 // ---------------------------------------------------------------------------
