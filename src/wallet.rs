@@ -492,6 +492,49 @@ pub trait Wallet<Sym> {
         Err(WalletError::UnsupportedOperation)
     }
 
+    /// Every position this wallet currently holds, as signed unit-tagged
+    /// amounts. Symbols with no position are omitted; order is unspecified.
+    ///
+    /// Returns an owned `Vec` rather than an iterator so the method stays
+    /// object-safe — this is called through `&dyn Wallet` by
+    /// [`Portfolio`](crate::portfolio::Portfolio)'s position-phase rebalance,
+    /// which needs to know what a sub-wallet holds before deciding what to
+    /// scale down. It allocates only on rebalance-fire bars.
+    ///
+    /// **Support is optional**, same shape as [`adjust_funds`](Self::adjust_funds):
+    /// the default returns empty, which a caller must read as "this wallet
+    /// cannot enumerate its positions", not as "it holds nothing". The
+    /// consequence for a portfolio is benign and already-documented — a
+    /// contributor whose positions can't be enumerated simply gets no
+    /// position-phase downsizing, and its shortfall carries to the next fire,
+    /// exactly as for a wallet that refuses `adjust_funds`.
+    fn positions(&self) -> Vec<Units<Sym>> {
+        Vec::new()
+    }
+
+    /// Install a per-symbol [`TradingCosts`] override — every fill on
+    /// `symbol` thereafter books through this bundle instead of the wallet's
+    /// default. Latest-wins per symbol.
+    ///
+    /// Scales to any number of symbols — a multi-asset driver just calls this
+    /// once per traded symbol (the pairs CLI does it for `left`/`right`; the
+    /// portfolio runner loops over its universe). An impl's fallback default
+    /// doubles as the "unscoped" model for symbols the caller doesn't
+    /// explicitly configure; [`PaperWallet::new`] (zero-cost default) plus
+    /// per-symbol installs gives a fully symmetric, N-way cost model where
+    /// every priced leg is a per-symbol entry.
+    ///
+    /// **Support is optional.** The default returns
+    /// [`WalletError::UnsupportedOperation`]: costs are a *modelling* concept,
+    /// and a live wallet's fees are set by the venue, not by us. A live impl
+    /// may still override it where the venue exposes a fee tier. Callers
+    /// installing costs across a heterogeneous set of wallets should treat
+    /// `Err` as "this wallet prices its own fills" and carry on.
+    fn set_costs_for(&mut self, symbol: Sym, costs: TradingCosts) -> Result<(), WalletError> {
+        let _ = (symbol, costs);
+        Err(WalletError::UnsupportedOperation)
+    }
+
     /// Drain the [`Rejection`]s booked since the last call — orders this wallet
     /// refused, in the order it refused them.
     ///
@@ -768,31 +811,6 @@ impl<Sym> PaperWallet<Sym> {
 }
 
 impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
-    /// Install a per-symbol [`TradingCosts`] override. Every fill on `symbol`
-    /// thereafter routes through the given bundle instead of the default set
-    /// by [`with_costs`](Self::with_costs); fills on other symbols still see
-    /// the default. Latest-wins per symbol.
-    ///
-    /// Scales to any number of symbols — a multi-asset driver just calls this
-    /// once per traded symbol (the pairs CLI does it for `left`/`right`; a
-    /// future N-symbol basket driver would loop over its universe). The
-    /// wallet's fallback default doubles as the "unscoped" model for symbols
-    /// the caller doesn't explicitly configure; using [`Self::new`]
-    /// (zero-cost default) plus per-symbol installs gives a fully symmetric,
-    /// N-way cost model where every priced leg is a per-symbol entry.
-    pub fn set_costs_for(&mut self, symbol: Sym, costs: TradingCosts) {
-        self.per_symbol_costs.insert(symbol, costs);
-    }
-
-    /// Iterate the held positions.
-    pub fn positions(&self) -> impl Iterator<Item = Units<Sym>> + '_ {
-        self.positions.iter().map(|(symbol, &amount)| Units {
-            symbol: symbol.clone(),
-            amount,
-        })
-    }
-
-
     /// Book a fill: drive `symbol` to `target` signed units, using
     /// `theoretical_price` as the pre-cost trigger price (bar `open` for a
     /// market order, the trigger level — or the `open` on a gap — for a stop /
@@ -1166,6 +1184,21 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
             symbol: symbol.clone(),
             amount: self.positions.get(symbol).copied().unwrap_or(0.0),
         }
+    }
+
+    fn positions(&self) -> Vec<Units<Sym>> {
+        self.positions
+            .iter()
+            .map(|(symbol, &amount)| Units {
+                symbol: symbol.clone(),
+                amount,
+            })
+            .collect()
+    }
+
+    fn set_costs_for(&mut self, symbol: Sym, costs: TradingCosts) -> Result<(), WalletError> {
+        self.per_symbol_costs.insert(symbol, costs);
+        Ok(())
     }
 
     fn price(&self, symbol: &Sym) -> Option<Reference> {
@@ -1699,7 +1732,7 @@ mod tests {
         assert!(matches!(w.close("X"), Ok(Ack::Working(_)))); // queued
         w.update("X", bar(110.0)); // fills the close at the open 110
         assert_fill(w.orders().last().unwrap(), Side::Sell, 10.0, 110.0, OrderKind::Market);
-        assert!(w.positions().next().is_none());
+        assert!(w.positions().is_empty());
         assert_eq!(w.funds().0, 1_100.0);
     }
 
@@ -1769,7 +1802,7 @@ mod tests {
         // But the bar gaps up: open 200 > 100 funds. fill_at rejects.
         let fills = w.update("X", Candle::new(200.0, 210.0, 195.0, 205.0, 0.0));
         assert!(fills.is_empty(), "expected no fill");
-        assert!(w.positions().next().is_none());
+        assert!(w.positions().is_empty());
         assert_eq!(w.rejections().len(), 1);
         assert_eq!(w.rejections()[0].symbol, "X");
         assert_eq!(w.rejections()[0].id, id);
@@ -1950,7 +1983,7 @@ mod tests {
         let fills = w.update("X", Candle::new(95.0, 96.0, 88.0, 89.0, 0.0));
         assert_eq!(fills.len(), 1);
         assert_fill(&fills[0], Side::Sell, 1.0, 90.0, OrderKind::Stop);
-        assert!(w.positions().next().is_none());
+        assert!(w.positions().is_empty());
     }
 
     #[test]
@@ -1963,7 +1996,7 @@ mod tests {
         // Gaps down opening at 85, already below the stop -> fills at the open.
         let fills = w.update("X", Candle::new(85.0, 86.0, 84.0, 84.0, 0.0));
         assert_fill(&fills[0], Side::Sell, 1.0, 85.0, OrderKind::Stop);
-        assert!(w.positions().next().is_none());
+        assert!(w.positions().is_empty());
     }
 
     #[test]
@@ -1976,7 +2009,7 @@ mod tests {
         w.set_take_profit("X", Reference(90.0)).unwrap();
         let fills = w.update("X", Candle::new(95.0, 96.0, 88.0, 92.0, 0.0));
         assert_fill(&fills[0], Side::Buy, 1.0, 90.0, OrderKind::TakeProfit);
-        assert!(w.positions().next().is_none());
+        assert!(w.positions().is_empty());
     }
 
     #[test]
@@ -1992,7 +2025,7 @@ mod tests {
         let fills = w.update("X", Candle::new(100.0, 111.0, 89.0, 105.0, 0.0));
         assert_eq!(fills.len(), 1);
         assert_eq!(fills[0].kind, OrderKind::Stop);
-        assert!(w.positions().next().is_none());
+        assert!(w.positions().is_empty());
         // No leftover leg: a later bar does nothing.
         let more = w.update("X", Candle::new(105.0, 112.0, 88.0, 100.0, 0.0));
         assert!(more.is_empty());
@@ -2008,7 +2041,7 @@ mod tests {
         // Flatten with a market close; the fill drops the resting stop.
         w.close("X").unwrap();
         w.update("X", bar(100.0));
-        assert!(w.positions().next().is_none());
+        assert!(w.positions().is_empty());
         // The old stop no longer fires even if price revisits 90.
         let fills = w.update("X", Candle::new(95.0, 96.0, 88.0, 89.0, 0.0));
         assert!(fills.is_empty());
@@ -2024,7 +2057,7 @@ mod tests {
         w.cancel_protective(&"X").unwrap();
         let fills = w.update("X", Candle::new(95.0, 96.0, 88.0, 89.0, 0.0));
         assert!(fills.is_empty());
-        assert!(w.positions().next().is_some());
+        assert!(!w.positions().is_empty());
     }
 
     /// A self-contained strategy type: long the golden cross, flat the death
@@ -2092,7 +2125,7 @@ mod tests {
         w.update("X", bar(7.0));
         // It entered and later exited at least once; ends flat with funds back.
         assert!(!w.orders().is_empty());
-        assert!(w.positions().next().is_none());
+        assert!(w.positions().is_empty());
         assert!(w.funds().0 > 0.0);
     }
 
@@ -2156,7 +2189,7 @@ mod tests {
         // Universe of five symbols, each on its own commission model.
         let universe = [("A", 1.0), ("B", 2.0), ("C", 3.0), ("D", 4.0), ("E", 5.0)];
         for &(sym, fee) in &universe {
-            w.set_costs_for(
+            let _ = w.set_costs_for(
                 sym,
                 TradingCosts::new(
                     Box::new(FixedCommission::new(fee)),
@@ -2197,7 +2230,7 @@ mod tests {
         use crate::costs::{FixedCommission, NoSlippage, NoSpread};
         let mut w: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
         // Only "A" gets a custom model; "B" trades on the (zero-cost) fallback.
-        w.set_costs_for(
+        let _ = w.set_costs_for(
             "A",
             TradingCosts::new(
                 Box::new(FixedCommission::new(7.0)),
@@ -2232,7 +2265,7 @@ mod tests {
             Box::new(NoSlippage),
         );
         let mut w: PaperWallet<&'static str> = PaperWallet::with_costs(100_000.0, default);
-        w.set_costs_for("B", leg_override);
+        let _ = w.set_costs_for("B", leg_override);
         // Prime both symbols and queue a buy on each.
         w.update("A", bar(10.0));
         w.update("B", bar(20.0));

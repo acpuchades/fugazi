@@ -591,7 +591,7 @@ mod tests {
         let exit = w.orders().last().unwrap();
         assert_eq!(exit.side, Side::Sell);
         assert_eq!(exit.price, 90.0); // filled exactly at the stop level
-        assert!(w.positions().next().is_none());
+        assert!(w.positions().is_empty());
     }
 
     #[test]
@@ -609,7 +609,7 @@ mod tests {
         );
         let exit = w.orders().last().unwrap();
         assert_eq!(exit.price, 85.0);
-        assert!(w.positions().next().is_none());
+        assert!(w.positions().is_empty());
     }
 
     #[test]
@@ -638,7 +638,7 @@ mod tests {
         assert_eq!(exit.side, Side::Sell);
         assert_eq!(exit.price, 117.0); // 130 * 0.9, opened above so filled at the level
         assert_eq!(exit.kind, OrderKind::Stop);
-        assert!(w.positions().next().is_none());
+        assert!(w.positions().is_empty());
     }
 
     #[test]
@@ -651,7 +651,7 @@ mod tests {
             &[flat_bar(100.0), flat_bar(95.0), flat_bar(105.0)],
         );
         assert_eq!(w.orders().len(), 1); // only the entry
-        assert!(w.positions().next().is_some());
+        assert!(!w.positions().is_empty());
     }
 
     #[test]

@@ -31,6 +31,32 @@ use crate::wallet::{
     Ack, Order, OrderId, PaperWallet, Reference, Rejection, Side, Size, Units, Wallet, WalletError,
 };
 
+/// Builds the sub-wallet for child `idx`, seeded with `funds` of cash.
+///
+/// Called once per child at [`Portfolio`](super::Portfolio) build time, and
+/// again for each child on [`reset`](PortfolioInner::reset) — resetting a
+/// portfolio rebuilds its sub-wallets from this rather than requiring a
+/// `reset` method on the [`Wallet`] seam (there is no sensible one for a live
+/// venue, and a defaulted no-op would silently corrupt the second run of an
+/// `optimize` sweep).
+///
+/// `Arc` rather than `Box` so [`PortfolioInner`] can hold it and still be
+/// rebuilt from; `Send + Sync` so the composite stays `Send`.
+pub type SubWalletFactory<Sym> =
+    Arc<dyn Fn(usize, Real) -> Box<dyn Wallet<Sym> + Send> + Send + Sync>;
+
+/// The default [`SubWalletFactory`]: an in-memory [`PaperWallet`] per child,
+/// optionally carrying a shared [`TradingCosts`] bundle.
+pub(super) fn paper_sub_wallets<Sym>(costs: Option<TradingCosts>) -> SubWalletFactory<Sym>
+where
+    Sym: Clone + Eq + Hash + Send + 'static,
+{
+    Arc::new(move |_idx, funds| match &costs {
+        Some(c) => Box::new(PaperWallet::with_costs(funds, c.clone())),
+        None => Box::new(PaperWallet::new(funds)),
+    })
+}
+
 /// The interior state a [`PortfolioWallet`] and every
 /// [`SubWalletHandle`] share via `Arc<Mutex<_>>`. Carries one
 /// [`PaperWallet`] per child plus the id-translation tables needed to route
@@ -44,7 +70,22 @@ use crate::wallet::{
 /// portfolio id → child idx for [`Portfolio::on_fill`](super::Portfolio) to
 /// route fills to the right child.
 pub(super) struct PortfolioInner<Sym> {
-    pub(super) subs: Vec<PaperWallet<Sym>>,
+    /// One wallet per child. **Erased**, not concrete: a portfolio of live
+    /// sub-accounts is the whole point of the [`SubWalletFactory`] seam, and
+    /// every operation the portfolio performs on a sub is a [`Wallet`] trait
+    /// method.
+    pub(super) subs: Vec<Box<dyn Wallet<Sym> + Send>>,
+    /// How to (re)build a sub-wallet. Retained for
+    /// [`reset`](Self::reset).
+    factory: SubWalletFactory<Sym>,
+    /// Each child's build-time cash allocation, in child order. Retained so
+    /// `reset` reseeds exactly as `build` did.
+    seeds: Vec<Real>,
+    /// Per-symbol cost bundles installed *after* build via
+    /// [`Portfolio::install_costs_for`](super::Portfolio::install_costs_for),
+    /// in installation order. Replayed onto freshly-built subs by `reset`, so
+    /// a reset portfolio books at the same rates the run did.
+    scoped_costs: Vec<(Sym, TradingCosts)>,
     /// Portfolio-wide `OrderId` → owning child index. Populated at
     /// submission via [`register_ack`](Self::register_ack), drained by
     /// [`Portfolio::on_fill`](super::Portfolio).
@@ -71,14 +112,34 @@ pub(super) struct PortfolioInner<Sym> {
 }
 
 impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
-    pub(super) fn new(subs: Vec<PaperWallet<Sym>>) -> Self {
+    /// Seed one sub-wallet per entry in `seeds` from `factory`.
+    pub(super) fn new(seeds: Vec<Real>, factory: SubWalletFactory<Sym>) -> Self {
+        let subs = seeds
+            .iter()
+            .enumerate()
+            .map(|(i, &funds)| factory(i, funds))
+            .collect();
         Self {
             subs,
+            factory,
+            seeds,
+            scoped_costs: Vec::new(),
             owners: HashMap::new(),
             sub_to_pf: HashMap::new(),
             pf_to_sub: HashMap::new(),
             next_pf_id: 0,
             priced: false,
+        }
+    }
+
+    /// Remember a per-symbol bundle installed after build, so
+    /// [`reset`](Self::reset) can replay it onto the rebuilt sub-wallets.
+    /// Latest-wins per symbol, matching the wallets' own semantics.
+    pub(super) fn record_scoped_costs(&mut self, symbol: Sym, costs: TradingCosts) {
+        if let Some(slot) = self.scoped_costs.iter_mut().find(|(s, _)| *s == symbol) {
+            slot.1 = costs;
+        } else {
+            self.scoped_costs.push((symbol, costs));
         }
     }
 
@@ -116,9 +177,27 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
     /// Reset every sub-wallet and clear the id-tracking tables — matches
     /// [`Strategy::reset`](crate::Strategy::reset) semantics on the wallet
     /// side.
+    /// Rebuild every sub-wallet from the factory at its original seed, then
+    /// replay any post-build per-symbol cost bundles.
+    ///
+    /// Rebuilding rather than calling a `reset` method on each sub is what
+    /// keeps [`Wallet`] free of one: a live wallet has no meaningful "restore
+    /// to freshly-constructed" (the venue holds the real position), and a
+    /// defaulted no-op on the seam would silently leave a stale wallet driving
+    /// the second run of an `optimize` sweep. Rebuilding says exactly what it
+    /// does — for paper subs it is equivalent to the old in-place reset, and
+    /// for a live sub it hands back a fresh handle on the same account.
     pub(super) fn reset(&mut self) {
-        for sub in &mut self.subs {
-            sub.reset();
+        self.subs = self
+            .seeds
+            .iter()
+            .enumerate()
+            .map(|(i, &funds)| (self.factory)(i, funds))
+            .collect();
+        for (symbol, costs) in &self.scoped_costs {
+            for sub in &mut self.subs {
+                let _ = sub.set_costs_for(symbol.clone(), costs.clone());
+            }
         }
         self.owners.clear();
         self.sub_to_pf.clear();
@@ -655,25 +734,6 @@ pub(super) fn allocate_funds(total_funds: Real, weights: &[Real]) -> Vec<Real> {
     weights.iter().map(|w| total_funds * w / sum).collect()
 }
 
-/// Fresh [`PaperWallet`]s seeded from `initial_funds` (one per child),
-/// optionally wearing `costs` cloned per-sub. Used by
-/// [`PortfolioBuilder::build`](super::PortfolioBuilder).
-pub(super) fn seed_subs<Sym>(
-    initial_funds: &[Real],
-    costs: Option<&TradingCosts>,
-) -> Vec<PaperWallet<Sym>>
-where
-    Sym: Clone + Eq + Hash,
-{
-    initial_funds
-        .iter()
-        .map(|&f| match costs {
-            Some(c) => PaperWallet::with_costs(f, c.clone()),
-            None => PaperWallet::new(f),
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -682,7 +742,7 @@ mod tests {
     /// A two-sub interior with no cash — enough to exercise the pure
     /// id-translation logic, which never touches the sub-wallets.
     fn inner() -> PortfolioInner<&'static str> {
-        PortfolioInner::new(vec![PaperWallet::new(0.0), PaperWallet::new(0.0)])
+        PortfolioInner::new(vec![0.0, 0.0], paper_sub_wallets(None))
     }
 
     fn order(id: u64) -> Order<&'static str> {

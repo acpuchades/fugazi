@@ -29,7 +29,7 @@ use std::sync::Arc;
 use crate::costs::TradingCosts;
 use crate::market::{Real, Schema};
 use crate::types::Snapshot;
-use crate::wallet::PaperWallet;
+use crate::wallet::{PaperWallet, Wallet};
 use crate::{RunReport, Strategy};
 
 use super::basket::{BasketStrategySpec, DynBasketStrategy};
@@ -68,7 +68,9 @@ pub trait RunnableStrategy: Strategy<Input = Snapshot<String>, Symbol = String> 
     ) -> RunReport<String> {
         let mut wallet: PaperWallet<String> = PaperWallet::new(cash);
         for (sym, costs) in per_symbol_costs {
-            wallet.set_costs_for(sym.clone(), costs.clone());
+            // Always Ok on a PaperWallet; the Result exists for wallets
+            // whose fees the venue owns.
+            let _ = wallet.set_costs_for(sym.clone(), costs.clone());
         }
         crate::backtest::run(self, &mut wallet, snapshots.iter().cloned())
     }

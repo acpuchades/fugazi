@@ -769,7 +769,7 @@ mod tests {
         );
         assert_eq!(w.orders().len(), 4, "2 open + 2 close fills");
         // Wallet should be flat at the end.
-        assert!(w.positions().next().is_none());
+        assert!(w.positions().is_empty());
     }
 
     #[test]
@@ -793,7 +793,7 @@ mod tests {
         );
         // 2 opens + 2 closes = 4 orders; flat at the end.
         assert_eq!(w.orders().len(), 4);
-        assert!(w.positions().next().is_none());
+        assert!(w.positions().is_empty());
     }
 
     #[test]
@@ -893,7 +893,7 @@ mod tests {
             ],
         );
         assert_eq!(w.orders().len(), 4);
-        assert!(w.positions().next().is_none());
+        assert!(w.positions().is_empty());
     }
 
     /// Drive the pair with an explicit initial-equity book seed.

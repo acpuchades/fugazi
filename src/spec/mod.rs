@@ -387,7 +387,7 @@ mod tests {
             strat.update(snap(c));
             strat.trade(&mut w);
         }
-        assert!(w.positions().next().is_none());
+        assert!(w.positions().is_empty());
         assert_eq!(w.orders().last().unwrap().price, 90.0);
     }
 

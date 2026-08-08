@@ -22,10 +22,9 @@
 //!
 //! `Portfolio` implements `Strategy<Input = Snapshot<Sym>, Symbol = Sym>` —
 //! the same shape as [`BasketStrategy`](crate::strategies::BasketStrategy) —
-//! and internally owns a [`PortfolioWallet`] carrying one
-//! [`PaperWallet`](crate::PaperWallet) per child. The pair share their
-//! interior via `Arc<Mutex<_>>`. A caller that wants to drive a
-//! portfolio:
+//! and internally owns a [`PortfolioWallet`] carrying one sub-wallet per
+//! child. The pair share their interior via `Arc<Mutex<_>>`. A caller that
+//! wants to drive a portfolio:
 //!
 //! ```no_run
 //! use fugazi::portfolio::{Portfolio, policy::EqualWeight};
@@ -70,6 +69,32 @@
 //!    child's allocated equity, not the aggregate) and whose mutation
 //!    methods forward to the child's sub-wallet with id namespacing so
 //!    fills still route back correctly.
+//!
+//! # Sub-wallets, paper and live
+//!
+//! Each child's wallet comes from a [`SubWalletFactory`], installed with
+//! [`sub_wallets`](PortfolioBuilder::sub_wallets) and defaulting to an
+//! in-memory [`PaperWallet`](crate::PaperWallet) carrying whatever
+//! [`costs`](PortfolioBuilder::costs) bundle was set. The subs are held as
+//! `Box<dyn Wallet<Sym> + Send>`, so a portfolio can be driven against **live
+//! sub-accounts** — the composite performs only [`Wallet`] trait operations on
+//! them, and a child reaches its venue through the same
+//! [`SubWalletHandle`](wallet::SubWalletHandle) path it reaches paper through.
+//!
+//! Two constraints come with that. **The sub-wallets must be disjoint**: the
+//! aggregate reads are sums over the subs and the rebalance moves value
+//! between them, so N handles onto one account reports N× the balance and lets
+//! children trade over each other. And the optional parts of the seam degrade
+//! rather than break — a sub that refuses [`adjust_funds`](Wallet::adjust_funds)
+//! or reports no [`positions`](Wallet::positions) simply gets less
+//! rebalancing, per the two-phase description below.
+//!
+//! [`reset`](Strategy::reset) rebuilds every sub from the factory at its
+//! original seed and replays any per-symbol cost bundles installed via
+//! [`install_costs_for`](Portfolio::install_costs_for). That is why [`Wallet`]
+//! carries no `reset`: a live venue has no "restore to freshly-constructed",
+//! and a defaulted no-op on the seam would silently leave a stale wallet
+//! driving the second run of an `optimize` sweep.
 //!
 //! # Weight policy and rebalancing
 //!
@@ -161,9 +186,9 @@ use crate::wallet::{Order, Rejection, Wallet};
 
 use self::policy::{ChildSample, WeightPolicy};
 use self::rebalance::{PositionInfo, PositionRebalancer, Proportional};
-use self::wallet::{PortfolioInner, SubWalletHandle, allocate_funds, seed_subs};
+use self::wallet::{PortfolioInner, SubWalletHandle, allocate_funds, paper_sub_wallets};
 
-pub use self::wallet::PortfolioWallet;
+pub use self::wallet::{PortfolioWallet, SubWalletFactory};
 
 /// One child slot in a [`Portfolio`]: a user-supplied name and the boxed
 /// strategy that trades that slot's sub-wallet.
@@ -364,14 +389,25 @@ impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
     /// overrides through the composite: rather than a portfolio-wide
     /// uniform bundle (the [`PortfolioBuilder::costs`] path), each symbol's
     /// resolved bundle gets installed on every sub — safe because
-    /// [`PaperWallet::set_costs_for`](crate::PaperWallet::set_costs_for) is
-    /// idempotent and per-symbol lookup wins over the fallback default.
-    pub fn install_costs_for(&mut self, symbol: &Sym, costs: TradingCosts) {
-        self.inner
-            .lock().expect("portfolio lock poisoned")
+    /// [`Wallet::set_costs_for`] is idempotent and per-symbol lookup wins over
+    /// the fallback default.
+    ///
+    /// Returns the number of sub-wallets that accepted the bundle. A sub that
+    /// refuses (the trait default, and the honest answer for a live wallet
+    /// whose fees the venue owns) is skipped — its fills book at whatever its
+    /// own impl charges. For an all-paper portfolio this is always
+    /// [`child_count`](Self::child_count).
+    ///
+    /// The bundle is also recorded, so a later [`reset`](Strategy::reset) —
+    /// which rebuilds sub-wallets from the factory — can re-apply it rather
+    /// than silently dropping back to the build-time defaults.
+    pub fn install_costs_for(&mut self, symbol: &Sym, costs: TradingCosts) -> usize {
+        let mut inner = self.inner.lock().expect("portfolio lock poisoned");
+        inner.record_scoped_costs(symbol.clone(), costs.clone());
+        inner
             .subs
             .iter_mut()
-            .for_each(|w| w.set_costs_for(symbol.clone(), costs.clone()));
+            .fold(0, |n, w| n + usize::from(w.set_costs_for(symbol.clone(), costs.clone()).is_ok()))
     }
 
     /// Snapshot every sub-wallet's current equity/funds for a
@@ -631,6 +667,7 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Portfolio<Sym> {
                 let inner = self.inner.lock().expect("portfolio lock poisoned");
                 let sub = &inner.subs[i];
                 sub.positions()
+                    .into_iter()
                     .filter_map(|u| {
                         sub.price(&u.symbol).map(|p| PositionInfo {
                             symbol: u.symbol.clone(),
@@ -680,6 +717,10 @@ pub struct PortfolioBuilder<Sym> {
     /// Position-phase rebalancer. `None` picks the [`Proportional`]
     /// default at build; set via [`position_rebalancer`](Self::position_rebalancer).
     position_rebalancer: Option<Box<dyn PositionRebalancer<Sym> + Send>>,
+    /// How each child's sub-wallet is built. `None` picks
+    /// [`paper_sub_wallets`] at build; set via
+    /// [`sub_wallets`](Self::sub_wallets).
+    sub_wallets: Option<SubWalletFactory<Sym>>,
     /// Pre-supplied aggregate [`Book`] — when set, the built portfolio
     /// uses this book (rather than a freshly-seeded one) so a caller that
     /// needed the handle *before* `build()` (typically the CLI's
@@ -699,6 +740,7 @@ impl<Sym: 'static> Default for PortfolioBuilder<Sym> {
             rebalance: None,
             share_indicators: Vec::new(),
             position_rebalancer: None,
+            sub_wallets: None,
             agg_book: None,
         }
     }
@@ -747,6 +789,59 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
             name: name.into(),
             strategy: Box::new(strategy),
         });
+        self
+    }
+
+    /// Replace how each child's sub-wallet is built.
+    ///
+    /// The factory is called once per child at [`build`](Self::build) — and
+    /// again per child on [`reset`](Strategy::reset) — with that child's index
+    /// and its share of the cash budget. It defaults to an in-memory
+    /// [`PaperWallet`](crate::PaperWallet) carrying whatever
+    /// [`costs`](Self::costs) bundle was set, which is what every backtest
+    /// wants.
+    ///
+    /// Override it to run a portfolio against **live sub-accounts**: the
+    /// composite is wallet-agnostic, so a child trades a real venue through
+    /// exactly the same [`SubWalletHandle`](wallet::SubWalletHandle) path it
+    /// trades paper through.
+    ///
+    /// ```no_run
+    /// # use fugazi::portfolio::Portfolio;
+    /// # use fugazi::{PaperWallet, Wallet};
+    /// # use fugazi::strategies::SingleAssetStrategy;
+    /// # use std::sync::Arc;
+    /// # fn account_for(idx: usize) -> Box<dyn Wallet<String> + Send> {
+    /// #     Box::new(PaperWallet::new(0.0))
+    /// # }
+    /// let portfolio: Portfolio<String> = Portfolio::builder()
+    ///     .with_initial_equity(10_000.0)
+    ///     .add("a", SingleAssetStrategy::<String>::buy_and_hold("BTCUSDT".to_string()))
+    ///     // One venue sub-account per child.
+    ///     .sub_wallets(Arc::new(|idx, _seed| account_for(idx)))
+    ///     .build();
+    /// ```
+    ///
+    /// # The sub-wallets must be disjoint
+    ///
+    /// The composite's aggregate reads are **sums** over the subs
+    /// ([`funds`](Wallet::funds), [`equity`](Wallet::equity),
+    /// [`position`](Wallet::position)), and its rebalance moves value *between*
+    /// them. Handing N children N handles onto the *same* account therefore
+    /// reports N× the real balance and lets children silently trade over each
+    /// other's positions. Each child needs its own account, sub-account, or
+    /// otherwise separately-accounted book.
+    ///
+    /// A live factory should also note two things the paper default gives for
+    /// free. `seed` is the child's share of the cash budget, which a live
+    /// wallet cannot honour — the venue holds the real balance, so treat it as
+    /// advisory and expect [`equity`](Wallet::equity) to reflect the account.
+    /// And a wallet that returns `Err` from
+    /// [`adjust_funds`](Wallet::adjust_funds) or empty from
+    /// [`positions`](Wallet::positions) simply gets less rebalancing, not
+    /// broken rebalancing — see the module docs.
+    pub fn sub_wallets(mut self, factory: SubWalletFactory<Sym>) -> Self {
+        self.sub_wallets = Some(factory);
         self
     }
 
@@ -889,6 +984,7 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
             rebalance,
             share_indicators,
             position_rebalancer,
+            sub_wallets,
             agg_book,
         } = self;
         assert!(
@@ -911,8 +1007,8 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
             weights.len()
         );
         let allocations = allocate_funds(initial_equity, &weights);
-        let subs = seed_subs::<Sym>(&allocations, costs.as_ref());
-        let inner = Arc::new(Mutex::new(PortfolioInner::new(subs)));
+        let factory = sub_wallets.unwrap_or_else(|| paper_sub_wallets::<Sym>(costs));
+        let inner = Arc::new(Mutex::new(PortfolioInner::new(allocations, factory)));
         let rebalance: RebalanceSignal<Sym> =
             rebalance.unwrap_or_else(|| Box::new(ValueBool::<Snapshot<Sym>>::new(false)));
         // Aggregate book: use the pre-supplied handle when a caller wired
