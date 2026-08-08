@@ -20,6 +20,15 @@ fn flat_bar(px: Real) -> Candle {
     Candle::new(px, px, px, px, 1.0)
 }
 
+/// A price-less atom — an overlay series carries values but no candle, and
+/// `backtest::run` skips it for wallet pricing.
+fn overlay_only_atom() -> Atom {
+    Atom::overlay_only(
+        OverlayInfo::new(std::sync::Arc::new(Schema::default()), Vec::new()),
+        Timestamp(0),
+    )
+}
+
 /// Two synchronized single-asset snapshot streams: A rises linearly from
 /// `100 → 200` over 20 bars, B stays flat at `50`. Buy-and-hold on A
 /// doubles; buy-and-hold on B goes nowhere.
@@ -242,8 +251,7 @@ fn install_costs_for_scopes_by_symbol_across_sub_wallets() {
     // per-symbol install.
     portfolio.install_costs_for(&"A", a_costs);
 
-    let mut wallet = portfolio.wallet_view();
-    let report = backtest::run(&mut portfolio, &mut wallet, a_rising_b_flat_snapshots());
+    let report = portfolio.run(a_rising_b_flat_snapshots());
 
     // Every fill on A should carry commission (> 0); every fill on B
     // should stay commission-free.
@@ -289,8 +297,7 @@ fn passing_costs_bundle_clones_per_sub() {
         .weights(EqualWeight)
         .costs(costs)
         .build();
-    let mut wallet = portfolio.wallet_view();
-    let report = backtest::run(&mut portfolio, &mut wallet, a_rising_b_flat_snapshots());
+    let report = portfolio.run(a_rising_b_flat_snapshots());
     // Every buy fill on each sub should carry non-zero commission
     // (percentage rate * notional > 0). At least one fill per sub.
     assert!(!report.fills.is_empty());
@@ -777,9 +784,8 @@ fn cash_covered_rebalance_queues_no_new_fills() {
         .weights(Fixed::new(vec![0.5, 0.5]))
         .rebalance_on(Every::<Snapshot<&'static str>>::new(1))
         .build();
-    let mut wallet = portfolio.wallet_view();
     let snaps = a_step_up_b_flat_snapshots(4);
-    let report = backtest::run(&mut portfolio, &mut wallet, snaps);
+    let report = portfolio.run(snaps);
 
     // Two initial entries → 2 fills. No rebalance-generated fills.
     assert_eq!(
@@ -1045,4 +1051,431 @@ fn a_portfolio_can_be_driven_from_another_thread() {
     let final_equity = handle.join().expect("the worker must not panic");
     // Bought at bar 1's open (11) with 1000, held to 13.
     assert!(final_equity > 1_000.0, "equity {final_equity} should have grown");
+}
+
+// ---------------------------------------------------------------------------
+// Rejection routing, the wallet-pairing guard, and the per-child wallet seam.
+// ---------------------------------------------------------------------------
+
+/// Shared per-child log of everything the driver routed back to a child.
+type RejectLog = std::sync::Arc<std::sync::Mutex<Vec<Rejection<&'static str>>>>;
+
+/// A child that submits one fixed order per bar and records every rejection
+/// routed back to it. `Arc<Mutex<_>>` rather than `Rc<RefCell<_>>` because a
+/// portfolio child must be `Send`.
+struct Submitter {
+    log: RejectLog,
+    /// What to submit each bar. `None` submits nothing.
+    order: Option<(&'static str, Side, Size)>,
+}
+
+impl Strategy for Submitter {
+    type Input = Snapshot<&'static str>;
+    type Symbol = &'static str;
+    fn update(&mut self, _snap: Snapshot<&'static str>) {}
+    fn on_reject(&mut self, rejection: &Rejection<&'static str>) {
+        self.log.lock().unwrap().push(*rejection);
+    }
+    fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
+        if let Some((sym, side, size)) = self.order {
+            let _ = wallet.set(sym, side, size);
+        }
+    }
+    fn reset(&mut self) {
+        self.log.lock().unwrap().clear();
+    }
+}
+
+fn submitter(log: &RejectLog, order: Option<(&'static str, Side, Size)>) -> Submitter {
+    Submitter {
+        log: std::sync::Arc::clone(log),
+        order,
+    }
+}
+
+#[test]
+fn rejections_from_a_child_reach_the_report_and_the_child() {
+    // Before the composite wallet forwarded `take_rejections`, this ran
+    // clean: the sub-wallet booked every refusal and nobody ever drained it,
+    // so `RunReport::rejections` was permanently empty for a portfolio.
+    let log: RejectLog = Default::default();
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(1_000.0)
+        // Asks for a billion units of A against ~1_000 of cash — refused by
+        // the sub-wallet's submit-time pre-flight, every bar.
+        .add("greedy", submitter(&log, Some(("A", Side::Buy, Size::units(1e9)))))
+        .add("idle", submitter(&Default::default(), None))
+        .weights(EqualWeight)
+        .build();
+    let report = portfolio.run(a_rising_b_flat_snapshots());
+
+    assert!(
+        !report.rejections.is_empty(),
+        "a portfolio run must surface its children's refusals",
+    );
+    assert!(
+        report
+            .rejections
+            .iter()
+            .all(|r| r.rejection.error == WalletError::InsufficientFunds),
+        "expected every refusal to be InsufficientFunds",
+    );
+    assert_eq!(
+        log.lock().unwrap().len(),
+        report.rejections.len(),
+        "every reported rejection should also reach the child that caused it",
+    );
+}
+
+#[test]
+fn a_rejection_reaches_only_the_owning_child() {
+    // Mirrors `on_fill_only_reaches_the_owning_child` on the failure side.
+    let greedy_log: RejectLog = Default::default();
+    let innocent_log: RejectLog = Default::default();
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(1_000.0)
+        .add(
+            "greedy",
+            submitter(&greedy_log, Some(("A", Side::Buy, Size::units(1e9)))),
+        )
+        // Affordable, so it never refuses — and must not be told about its
+        // sibling's refusals.
+        .add(
+            "innocent",
+            submitter(&innocent_log, Some(("B", Side::Buy, Size::value_frac(0.5)))),
+        )
+        .weights(EqualWeight)
+        .build();
+    let _ = portfolio.run(a_rising_b_flat_snapshots());
+
+    assert!(!greedy_log.lock().unwrap().is_empty());
+    assert!(
+        innocent_log.lock().unwrap().is_empty(),
+        "the innocent child was handed {} of its sibling's rejections",
+        innocent_log.lock().unwrap().len(),
+    );
+}
+
+#[test]
+fn a_fill_time_refusal_routes_through_the_acked_id() {
+    // The other branch of `translate_rejections`: this order *does* get an
+    // Ack (it clears pre-flight against the last close), then dies at fill
+    // time when the open gaps far above it. That id is already in the map,
+    // so translation must find it rather than mint a fresh one.
+    let log: RejectLog = Default::default();
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(1_000.0)
+        // 45 units cost 450 at the last close of 10 — comfortably within the
+        // child's 1_000, so pre-flight passes and the order is acked. At the
+        // gapped open of 100 the same 45 units cost 4_500 and can't be paid for.
+        .add("gapped", submitter(&log, Some(("A", Side::Buy, Size::units(45.0)))))
+        .weights(EqualWeight)
+        .build();
+
+    // ...then gap the open 10x above that close, so the queued order can no
+    // longer be paid for when it fills.
+    let snaps: Vec<Snapshot<&'static str>> = (0..4)
+        .map(|i| {
+            let mut snap = Snapshot::new();
+            let candle = if i == 0 {
+                flat_bar(10.0)
+            } else {
+                // open 100, rest of the bar back at 10 — only the open matters
+                // for a queued market fill.
+                Candle::new(100.0, 100.0, 10.0, 10.0, 1.0)
+            };
+            snap.push(Some("A"), None, Atom::new(candle));
+            snap
+        })
+        .collect();
+    let report = portfolio.run(snaps);
+
+    assert!(
+        report
+            .rejections
+            .iter()
+            .any(|r| r.rejection.error == WalletError::InsufficientFunds),
+        "a queued order that can't be paid for at the open must be reported",
+    );
+    assert!(
+        !log.lock().unwrap().is_empty(),
+        "the fill-time refusal must reach the child that submitted it",
+    );
+}
+
+#[test]
+#[should_panic(expected = "never been priced")]
+fn driving_a_portfolio_with_a_foreign_wallet_panics() {
+    // Used to be a silent wrong answer: flat equity curve at the seed, empty
+    // blotter, children never told about their fills.
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(1_000.0)
+        .add("a", SingleAssetStrategy::<&'static str>::buy_and_hold("A"))
+        .weights(EqualWeight)
+        .build();
+    let mut foreign: PaperWallet<&'static str> = PaperWallet::new(1_000.0);
+    let _ = backtest::run(&mut portfolio, &mut foreign, a_rising_b_flat_snapshots());
+}
+
+#[test]
+#[should_panic(expected = "never been priced")]
+fn driving_with_another_portfolios_view_panics() {
+    let mut left: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(1_000.0)
+        .add("a", SingleAssetStrategy::<&'static str>::buy_and_hold("A"))
+        .weights(EqualWeight)
+        .build();
+    let right: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(1_000.0)
+        .add("a", SingleAssetStrategy::<&'static str>::buy_and_hold("A"))
+        .weights(EqualWeight)
+        .build();
+    // `right`'s subs get priced; `left`'s never do.
+    let mut wallet = right.wallet_view();
+    let _ = backtest::run(&mut left, &mut wallet, a_rising_b_flat_snapshots());
+}
+
+#[test]
+fn an_overlay_only_stream_does_not_trip_the_pairing_guard() {
+    // The guard must only fire on bars the driver would actually have
+    // priced. A stream of price-less (overlay) atoms carries nothing to
+    // price, so a correctly-paired run over it stays silent.
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(1_000.0)
+        .add("idle", submitter(&Default::default(), None))
+        .weights(EqualWeight)
+        .build();
+    let snaps: Vec<Snapshot<&'static str>> = (0..5)
+        .map(|_| {
+            let mut snap = Snapshot::new();
+            snap.push(Some("A"), None, overlay_only_atom());
+            snap
+        })
+        .collect();
+    let report = portfolio.run(snaps);
+    assert_eq!(report.equity_curve.len(), 5);
+}
+
+#[test]
+fn an_overlay_only_bar_mid_run_does_not_trip_the_pairing_guard() {
+    // A priceable bar followed by an overlay-only one: the flags are
+    // cumulative, so the gap can't be mistaken for a mis-pairing.
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(1_000.0)
+        .add("a", SingleAssetStrategy::<&'static str>::buy_and_hold("A"))
+        .weights(EqualWeight)
+        .build();
+    let snaps: Vec<Snapshot<&'static str>> = (0..6)
+        .map(|i| {
+            let mut snap = Snapshot::new();
+            let atom = if i == 3 {
+                overlay_only_atom() // no candle on this bar
+            } else {
+                Atom::new(flat_bar(100.0))
+            };
+            snap.push(Some("A"), None, atom);
+            snap
+        })
+        .collect();
+    let report = portfolio.run(snaps);
+    assert_eq!(report.equity_curve.len(), 6);
+}
+
+#[test]
+#[should_panic(expected = "cannot be a child of a Portfolio")]
+fn a_nested_portfolio_is_refused_at_build() {
+    // Compiles (a Portfolio satisfies `add`'s bounds) but can never work:
+    // only the outer composite wallet receives bars, so the inner
+    // portfolio's sub-wallets would never be priced.
+    let inner: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(500.0)
+        .add("a", SingleAssetStrategy::<&'static str>::buy_and_hold("A"))
+        .weights(EqualWeight)
+        .build();
+    let _ = PortfolioBuilder::default()
+        .with_initial_equity(1_000.0)
+        .add("nested", inner)
+        .weights(EqualWeight)
+        .build();
+}
+
+#[test]
+fn portfolio_run_matches_hand_paired_backtest_run() {
+    // `Portfolio::run` must be exactly the hand-paired spelling, or the
+    // migration of every call site onto it would be a silent behavior change.
+    let build = || -> Portfolio<&'static str> {
+        PortfolioBuilder::default()
+            .with_initial_equity(2_000.0)
+            .add("a", SingleAssetStrategy::<&'static str>::buy_and_hold("A"))
+            .add("b", SingleAssetStrategy::<&'static str>::buy_and_hold("B"))
+            .weights(EqualWeight)
+            .build()
+    };
+
+    let mut hand_paired = build();
+    let mut wallet = hand_paired.wallet_view();
+    let expected = backtest::run(&mut hand_paired, &mut wallet, a_rising_b_flat_snapshots());
+
+    let mut via_run = build();
+    let actual = via_run.run(a_rising_b_flat_snapshots());
+
+    assert_eq!(actual.equity_curve, expected.equity_curve);
+    assert_eq!(actual.fills.len(), expected.fills.len());
+    assert_eq!(actual.rejections.len(), expected.rejections.len());
+    assert_eq!(actual.initial_equity, expected.initial_equity);
+}
+
+/// A child that rests a limit order on its first trade and remembers the
+/// `OrderId` it was given, so a later test can cancel exactly that order.
+struct Limiter {
+    symbol: &'static str,
+    limit: Real,
+    id: std::sync::Arc<std::sync::Mutex<Option<OrderId>>>,
+    /// When set, cancel this id instead of resting a new order.
+    cancel: Option<OrderId>,
+}
+
+impl Strategy for Limiter {
+    type Input = Snapshot<&'static str>;
+    type Symbol = &'static str;
+    fn update(&mut self, _snap: Snapshot<&'static str>) {}
+    fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
+        if let Some(id) = self.cancel {
+            let _ = wallet.cancel(id);
+            return;
+        }
+        if self.id.lock().unwrap().is_some() {
+            return;
+        }
+        if let Ok(Ack::Working(id)) = wallet.set_limit(
+            self.symbol,
+            Side::Buy,
+            Size::value_frac(0.5),
+            Reference(self.limit),
+        ) {
+            *self.id.lock().unwrap() = Some(id);
+        }
+    }
+    fn reset(&mut self) {
+        *self.id.lock().unwrap() = None;
+    }
+}
+
+#[test]
+fn a_child_can_rest_a_limit_order_through_its_handle() {
+    // `SubWalletHandle` used to inherit the trait default here, so a child
+    // inside a portfolio got `UnsupportedOperation` from a method its own
+    // sub-wallet fully implements.
+    let id: std::sync::Arc<std::sync::Mutex<Option<OrderId>>> = Default::default();
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(1_000.0)
+        .add(
+            "limiter",
+            Limiter {
+                symbol: "B",
+                // B trades flat at 50, so a limit at 60 is marketable and fills.
+                limit: 60.0,
+                id: std::sync::Arc::clone(&id),
+                cancel: None,
+            },
+        )
+        .weights(EqualWeight)
+        .build();
+    let report = portfolio.run(a_rising_b_flat_snapshots());
+
+    assert!(
+        id.lock().unwrap().is_some(),
+        "set_limit through a SubWalletHandle must be accepted, not refused",
+    );
+    assert!(
+        report.fills.iter().any(|f| f.order.kind == OrderKind::Limit),
+        "the resting limit should have filled",
+    );
+}
+
+#[test]
+fn cancel_through_a_handle_only_touches_that_childs_order() {
+    // The hazard `pf_to_sub` exists to prevent: every sub mints ids from 0,
+    // so forwarding a child's portfolio-wide id untranslated would cancel
+    // whatever order happened to hold that raw id in that sub.
+    //
+    // Child 0 rests a limit at a price B never reaches, so it stays working.
+    // Child 1 then cancels portfolio id 0 — which belongs to child 0, not to
+    // itself. Child 0's order must survive.
+    let victim_id: std::sync::Arc<std::sync::Mutex<Option<OrderId>>> = Default::default();
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(1_000.0)
+        .add(
+            "victim",
+            Limiter {
+                symbol: "B",
+                limit: 10.0, // far below B's flat 50 — never fills
+                id: std::sync::Arc::clone(&victim_id),
+                cancel: None,
+            },
+        )
+        .add(
+            "meddler",
+            Limiter {
+                symbol: "B",
+                limit: 10.0,
+                id: Default::default(),
+                // Child 0's first ack is portfolio id 0.
+                cancel: Some(OrderId(0)),
+            },
+        )
+        .weights(EqualWeight)
+        .build();
+    let report = portfolio.run(a_rising_b_flat_snapshots());
+
+    assert_eq!(
+        *victim_id.lock().unwrap(),
+        Some(OrderId(0)),
+        "child 0 should hold portfolio id 0",
+    );
+    // Nothing filled (both limits are unreachable) and, more to the point,
+    // no cross-child cancel corrupted anyone's book.
+    assert!(
+        report.fills.is_empty(),
+        "no order should have filled: {} fills",
+        report.fills.len(),
+    );
+    let wallet = portfolio.wallet_view();
+    assert!((wallet.sub_equity(0).0 - 500.0).abs() < 1e-9);
+    assert!((wallet.sub_equity(1).0 - 500.0).abs() < 1e-9);
+}
+
+#[test]
+fn a_child_adjusting_funds_moves_only_its_own_sub_wallet() {
+    struct Depositor;
+    impl Strategy for Depositor {
+        type Input = Snapshot<&'static str>;
+        type Symbol = &'static str;
+        fn update(&mut self, _snap: Snapshot<&'static str>) {}
+        fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
+            // Called once per bar; only the first needs to succeed for the
+            // assertion below, but repeating is harmless.
+            let _ = wallet.adjust_funds(1.0);
+        }
+        fn reset(&mut self) {}
+    }
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(1_000.0)
+        .add("depositor", Depositor)
+        .add("idle", submitter(&Default::default(), None))
+        .weights(EqualWeight)
+        .build();
+    let _ = portfolio.run(a_rising_b_flat_snapshots());
+
+    let wallet = portfolio.wallet_view();
+    assert!(
+        (wallet.sub_equity(0).0 - (500.0 + 20.0)).abs() < 1e-9,
+        "depositor should have gained 1.0 per bar over 20 bars, got {}",
+        wallet.sub_equity(0).0,
+    );
+    assert!(
+        (wallet.sub_equity(1).0 - 500.0).abs() < 1e-9,
+        "the sibling's cash must be untouched, got {}",
+        wallet.sub_equity(1).0,
+    );
 }

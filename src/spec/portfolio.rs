@@ -869,6 +869,12 @@ impl Strategy for DynPortfolio {
     fn on_fill(&mut self, order: &Order<String>) {
         self.inner.on_fill(order);
     }
+    fn on_reject(&mut self, rejection: &Rejection<String>) {
+        // Must be forwarded explicitly: without this the whole rejection
+        // path below (sub-wallet drain → owner lookup → child) is invisible
+        // to the CLI and Python, which only ever see a `DynPortfolio`.
+        self.inner.on_reject(rejection);
+    }
     fn is_ready(&self) -> bool {
         self.inner.is_ready()
     }
@@ -884,6 +890,14 @@ impl DynPortfolio {
     /// state, so a second view for side-inspection is cheap.
     pub fn wallet_view(&self) -> crate::portfolio::PortfolioWallet<String> {
         self.inner.wallet_view()
+    }
+
+    /// Drive the composite over `snapshots` through its own wallet — the
+    /// [`RunnableStrategy::drive`](crate::spec::runnable::RunnableStrategy)
+    /// body for this shape. Delegates to [`Portfolio::run`], so the
+    /// portfolio/wallet pairing has exactly one spelling in the crate.
+    pub fn run(&mut self, snapshots: &[Snapshot<String>]) -> crate::RunReport<String> {
+        self.inner.run(snapshots.iter().cloned())
     }
 
     /// The number of children the portfolio holds, in `.add(...)` order.
@@ -1806,5 +1820,50 @@ mod tests {
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let _ = spec.build(1_000.0, &Schema::empty(), None);
+    }
+
+    #[test]
+    fn dyn_portfolio_surfaces_a_childs_rejection() {
+        // The CLI and Python only ever see a `DynPortfolio`, so the composite
+        // wallet's rejection drain has to survive the wrapper and land in
+        // `RunReport::rejections`. (The `on_reject` delegation down to the
+        // owning child is covered in tests/portfolio.rs, where a test child
+        // actually records what it is handed — the spec-built shapes all
+        // inherit the no-op default, so routing isn't observable here.)
+        //
+        // A short position whose buy-to-cover stop triggers on a violent gap
+        // up is the cleanest way to force a refusal from a spec-built child:
+        // covering costs far more than the sub-wallet's cash, so the wallet
+        // books a `Stop` rejection and leaves the bracket resting.
+        let yaml = r#"
+            children:
+              - name: shorty
+                strategy:
+                  symbol: A
+                  short:
+                    enter: !value true
+                    exit: !value false
+                    stop_loss: !mul { lhs: !entry, rhs: !value 1.05 }
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let mut portfolio = spec.build(1_000.0, &Schema::empty(), None);
+
+        // Bars 0-1 open and fill the short at 100; bar 2 gaps to 100_000, so
+        // the stop triggers at a price the child cannot pay to cover.
+        let snaps: Vec<Snapshot<String>> = vec![
+            snap_of(&[("A", 100.0)]),
+            snap_of(&[("A", 100.0)]),
+            snap_of(&[("A", 100_000.0)]),
+            snap_of(&[("A", 100_000.0)]),
+        ];
+        let report = portfolio.run(&snaps);
+
+        assert!(
+            report
+                .rejections
+                .iter()
+                .any(|r| r.rejection.kind == OrderKind::Stop),
+            "a refused protective leg must reach the report through DynPortfolio",
+        );
     }
 }

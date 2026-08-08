@@ -29,6 +29,17 @@ use crate::wallet::{Order, Rejection, Wallet};
 /// strategy, then `trade` each one. Because [`Wallet`] is taken as `&mut dyn`,
 /// the same strategy runs against a [`PaperWallet`](crate::PaperWallet) backtest
 /// or a live broker wallet unchanged.
+///
+/// **One shape does not honour that literally.**
+/// [`Portfolio`](crate::portfolio::Portfolio) is a composite that needs one
+/// sub-wallet *per child*, and `trade` offers it one wallet — so it ignores the
+/// argument and trades its own interior instead. That makes the
+/// portfolio/wallet pairing a caller obligation rather than a type-level one,
+/// which is why `Portfolio` both checks it at runtime (an unpriced interior
+/// panics rather than producing a silently flat equity curve) and offers
+/// [`Portfolio::run`](crate::portfolio::Portfolio::run), where there is nothing
+/// to pair. Every other shape routes all order flow through the wallet it is
+/// handed.
 pub trait Strategy {
     /// The per-bar input — commonly a [`Candle`](crate::Candle), or a
     /// multi-asset snapshot.

@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 use crate::costs::TradingCosts;
 use crate::types::{Candle, Real};
 use crate::wallet::{
-    Ack, Order, OrderId, PaperWallet, Reference, Side, Size, Units, Wallet, WalletError,
+    Ack, Order, OrderId, PaperWallet, Reference, Rejection, Side, Size, Units, Wallet, WalletError,
 };
 
 /// The interior state a [`PortfolioWallet`] and every
@@ -52,8 +52,22 @@ pub(super) struct PortfolioInner<Sym> {
     /// `(child_idx, sub_local_id)` → portfolio-wide `OrderId`. Translates
     /// the sub-wallet's fill-stream id back to what the outside world saw.
     pub(super) sub_to_pf: HashMap<(usize, OrderId), OrderId>,
+    /// The reverse of [`sub_to_pf`](Self::sub_to_pf): portfolio-wide
+    /// `OrderId` → `(child_idx, sub_local_id)`.
+    ///
+    /// Needed because [`Wallet::cancel`] takes an id *inward*, unlike every
+    /// other method. A child holds portfolio-wide ids (that's what its
+    /// [`Ack`]s carried), but every sub-wallet mints from `0` and
+    /// [`PaperWallet::cancel`] matches on the raw id — so forwarding a
+    /// child's id untranslated would cancel an unrelated order in that sub.
+    pub(super) pf_to_sub: HashMap<OrderId, (usize, OrderId)>,
     /// Running counter for portfolio-wide id minting.
     next_pf_id: u64,
+    /// Whether this interior has ever been priced through
+    /// [`PortfolioWallet::update`] — the mis-pairing guard read by
+    /// [`Portfolio::trade`](super::Portfolio). See the guard's rationale
+    /// there.
+    pub(super) priced: bool,
 }
 
 impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
@@ -62,7 +76,9 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
             subs,
             owners: HashMap::new(),
             sub_to_pf: HashMap::new(),
+            pf_to_sub: HashMap::new(),
             next_pf_id: 0,
+            priced: false,
         }
     }
 
@@ -80,6 +96,7 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
         match sub_ack {
             Ack::Working(sub_id) => {
                 self.sub_to_pf.insert((idx, sub_id), pf_id);
+                self.pf_to_sub.insert(pf_id, (idx, sub_id));
                 self.owners.insert(pf_id, idx);
                 Ack::Working(pf_id)
             }
@@ -105,7 +122,73 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
         }
         self.owners.clear();
         self.sub_to_pf.clear();
+        self.pf_to_sub.clear();
         self.next_pf_id = 0;
+        self.priced = false;
+    }
+
+    /// Translate a batch of fills out of sub-wallet `idx` into the
+    /// portfolio-wide id space.
+    ///
+    /// **Consuming** (`remove`): a fill is *terminal* for its order, so the
+    /// mapping has no further use and holding it would leak. Contrast
+    /// [`translate_rejections`](Self::translate_rejections), which must not
+    /// consume.
+    ///
+    /// A fill with no mapping keeps its sub-local id — that only happens for
+    /// an order the portfolio never acked (see `register_ack`'s
+    /// [`Ack::Filled`] arm), and there is no better id to give it.
+    pub(super) fn translate_fills(&mut self, idx: usize, fills: Vec<Order<Sym>>) -> Vec<Order<Sym>> {
+        fills
+            .into_iter()
+            .map(|mut fill| {
+                if let Some(pf_id) = self.sub_to_pf.remove(&(idx, fill.id)) {
+                    self.pf_to_sub.remove(&pf_id);
+                    fill.id = pf_id;
+                }
+                fill
+            })
+            .collect()
+    }
+
+    /// Translate a batch of rejections out of sub-wallet `idx` into the
+    /// portfolio-wide id space, registering an owner for any that the
+    /// portfolio never saw an [`Ack`] for.
+    ///
+    /// Two things here are deliberate and load-bearing:
+    ///
+    /// **Non-consuming** (`get`, not `remove`): a rejection is *not*
+    /// terminal. `PaperWallet::match_protective` books the refusal and
+    /// leaves the bracket resting (`fill_at` only clears it on success), so
+    /// the very same leg id can reject on bar N and *fill* on bar N+1.
+    /// Consuming the mapping here would break that later fill's translation
+    /// and the owning child would never learn its stop executed.
+    ///
+    /// **Mint-on-miss**: a submit-time refusal never went through
+    /// [`register_ack`] at all — `SubWalletHandle::set` and friends use `?`,
+    /// so the `Err` path returns before the ack is registered, and
+    /// `PaperWallet::reject_submission` mints its own sub-local id. Without
+    /// minting a portfolio id and recording the owner here, those rejections
+    /// could never be routed to the child that caused them.
+    pub(super) fn translate_rejections(
+        &mut self,
+        idx: usize,
+        rejections: Vec<Rejection<Sym>>,
+    ) -> Vec<Rejection<Sym>> {
+        rejections
+            .into_iter()
+            .map(|mut rejection| {
+                rejection.id = match self.sub_to_pf.get(&(idx, rejection.id)) {
+                    Some(&pf_id) => pf_id,
+                    None => {
+                        let pf_id = self.mint_pf_id();
+                        self.owners.insert(pf_id, idx);
+                        pf_id
+                    }
+                };
+                rejection
+            })
+            .collect()
     }
 
     /// Run the **cash phase** of a rebalance: for each child i, compute the
@@ -316,6 +399,10 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PortfolioWallet<Sym> {
 
     fn update(&mut self, symbol: Sym, candle: Candle) -> Vec<Order<Sym>> {
         let mut inner = self.inner.lock().expect("portfolio lock poisoned");
+        // Record that this interior has been priced through its own
+        // aggregate view — `Portfolio::trade` reads this to catch a driver
+        // that was handed some *other* wallet.
+        inner.priced = true;
         // Feed every sub the same bar so their pending queues flush, their
         // resting brackets trigger, and their mark-to-market updates. Then
         // translate each fill's sub-local id into the portfolio-wide id
@@ -323,13 +410,47 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PortfolioWallet<Sym> {
         // via `owners` in Portfolio::on_fill.
         let mut all = Vec::new();
         for i in 0..inner.subs.len() {
+            // Collect into an owned Vec first: the mutable borrow of
+            // `subs[i]` has to end before `translate_fills` touches `inner`.
             let fills = inner.subs[i].update(symbol.clone(), candle);
-            for mut fill in fills {
-                if let Some(pf_id) = inner.sub_to_pf.remove(&(i, fill.id)) {
-                    fill.id = pf_id;
-                }
-                all.push(fill);
-            }
+            all.extend(inner.translate_fills(i, fills));
+        }
+        all
+    }
+
+    /// Drain every sub-wallet's rejections into one portfolio-wide stream.
+    ///
+    /// Without this the driver's drain (`backtest::run`) always came back
+    /// empty for a portfolio run: `RunReport::rejections` was permanently
+    /// empty and no child ever saw its own `on_reject`, even though the
+    /// sub-wallets were booking refusals the whole time.
+    ///
+    /// [`PaperWallet::take_rejections`] is a *cursor* drain, so refusals
+    /// booked during this bar's [`update`](Wallet::update) are picked up by
+    /// this bar's drain while the non-destructive `PaperWallet::rejections()`
+    /// history stays intact.
+    fn take_rejections(&mut self) -> Vec<Rejection<Sym>> {
+        let mut inner = self.inner.lock().expect("portfolio lock poisoned");
+        let mut all = Vec::new();
+        for i in 0..inner.subs.len() {
+            let batch = inner.subs[i].take_rejections();
+            all.extend(inner.translate_rejections(i, batch));
+        }
+        all
+    }
+
+    /// Fan the out-of-band fill poll to every sub-wallet, translating ids the
+    /// same way [`update`](Wallet::update) does.
+    ///
+    /// A no-op while the subs are [`PaperWallet`]s (which fill only through
+    /// `update`), but a sub that reports fills asynchronously would otherwise
+    /// have them silently dropped.
+    fn poll_fills(&mut self) -> Vec<Order<Sym>> {
+        let mut inner = self.inner.lock().expect("portfolio lock poisoned");
+        let mut all = Vec::new();
+        for i in 0..inner.subs.len() {
+            let fills = inner.subs[i].poll_fills();
+            all.extend(inner.translate_fills(i, fills));
         }
         all
     }
@@ -468,6 +589,54 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for SubWalletHandle<Sym> {
     fn cancel_protective(&mut self, symbol: &Sym) -> Result<(), WalletError> {
         self.inner.lock().expect("portfolio lock poisoned").subs[self.idx].cancel_protective(symbol)
     }
+
+    fn set_limit(
+        &mut self,
+        symbol: Sym,
+        side: Side,
+        size: Size,
+        limit: Reference,
+    ) -> Result<Ack<Sym>, WalletError> {
+        let mut inner = self.inner.lock().expect("portfolio lock poisoned");
+        let ack = inner.subs[self.idx].set_limit(symbol, side, size, limit)?;
+        Ok(inner.register_ack(self.idx, ack))
+    }
+
+    fn cancel_limit(&mut self, symbol: &Sym) -> Result<(), WalletError> {
+        self.inner.lock().expect("portfolio lock poisoned").subs[self.idx].cancel_limit(symbol)
+    }
+
+    fn adjust_funds(&mut self, delta: Real) -> Result<(), WalletError> {
+        // Forwarded so a child behaves the same inside a portfolio as it does
+        // standalone. It doesn't disturb rebalancing, which reads every
+        // child's equity and funds fresh at each fire.
+        self.inner.lock().expect("portfolio lock poisoned").subs[self.idx].adjust_funds(delta)
+    }
+
+    fn cancel(&mut self, id: OrderId) -> Result<(), WalletError> {
+        // `cancel` is the one method that takes an id *inward*. The child
+        // holds a portfolio-wide id (that's what its Ack carried), but the
+        // sub-wallet mints from 0 and matches on the raw id — so forwarding
+        // it untranslated would cancel some unrelated order in this sub.
+        let mut inner = self.inner.lock().expect("portfolio lock poisoned");
+        match inner.pf_to_sub.get(&id).copied() {
+            // Ours: cancel the sub-local order the id really names.
+            Some((idx, sub_id)) if idx == self.idx => inner.subs[idx].cancel(sub_id),
+            // Unknown, already terminal, or another child's id. The trait's
+            // post-condition — "that order is not working" — holds from this
+            // child's point of view either way, and we must not touch a
+            // sibling's book.
+            _ => Ok(()),
+        }
+    }
+
+    // `take_rejections` and `poll_fills` are deliberately left at their trait
+    // defaults (empty). A handle is *not* a drain point: the driver drains
+    // the outer `PortfolioWallet`, and `PaperWallet::take_rejections`
+    // advances a cursor — so a child that helpfully drained its own handle
+    // inside `trade` would consume those entries before the outer drain ran,
+    // silently deleting them from `RunReport::rejections` *and* from its own
+    // `on_reject`. Don't "complete" this impl.
 }
 
 /// Split `total_funds` into `n` allocations by `weights` (normalized to sum
@@ -503,4 +672,107 @@ where
             None => PaperWallet::new(f),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wallet::OrderKind;
+
+    /// A two-sub interior with no cash — enough to exercise the pure
+    /// id-translation logic, which never touches the sub-wallets.
+    fn inner() -> PortfolioInner<&'static str> {
+        PortfolioInner::new(vec![PaperWallet::new(0.0), PaperWallet::new(0.0)])
+    }
+
+    fn order(id: u64) -> Order<&'static str> {
+        Order::new(
+            "A",
+            Side::Buy,
+            1.0,
+            10.0,
+            OrderKind::Market,
+            OrderId(id),
+        )
+    }
+
+    fn rejection(id: u64, kind: OrderKind) -> Rejection<&'static str> {
+        Rejection {
+            symbol: "A",
+            id: OrderId(id),
+            error: WalletError::InsufficientFunds,
+            kind,
+        }
+    }
+
+    #[test]
+    fn pf_to_sub_round_trips_through_register_ack() {
+        let mut inner = inner();
+        // Both subs mint from 0, so the same sub-local id in two children
+        // is exactly the collision the portfolio id space exists to fix.
+        let a = inner.register_ack(0, Ack::Working(OrderId(0)));
+        let b = inner.register_ack(1, Ack::Working(OrderId(0)));
+        let (Ack::Working(a), Ack::Working(b)) = (a, b) else {
+            panic!("expected Working acks");
+        };
+        assert_ne!(a, b, "distinct children must get distinct portfolio ids");
+        assert_eq!(inner.pf_to_sub.get(&a), Some(&(0, OrderId(0))));
+        assert_eq!(inner.pf_to_sub.get(&b), Some(&(1, OrderId(0))));
+        assert_eq!(inner.owners.get(&a), Some(&0));
+        assert_eq!(inner.owners.get(&b), Some(&1));
+    }
+
+    #[test]
+    fn translate_fills_consumes_the_mapping() {
+        let mut inner = inner();
+        let Ack::Working(pf_id) = inner.register_ack(0, Ack::Working(OrderId(7))) else {
+            panic!("expected a Working ack");
+        };
+        let out = inner.translate_fills(0, vec![order(7)]);
+        assert_eq!(out[0].id, pf_id, "fill should carry the portfolio-wide id");
+        // A fill is terminal, so both directions of the mapping are gone.
+        assert!(inner.sub_to_pf.is_empty());
+        assert!(inner.pf_to_sub.is_empty());
+    }
+
+    #[test]
+    fn translate_rejections_is_non_destructive() {
+        // A protective leg that can't be booked stays resting and retries
+        // next bar, so the same id must still translate after a rejection.
+        let mut inner = inner();
+        let Ack::Working(pf_id) = inner.register_ack(0, Ack::Working(OrderId(3))) else {
+            panic!("expected a Working ack");
+        };
+        let rejected = inner.translate_rejections(0, vec![rejection(3, OrderKind::Stop)]);
+        assert_eq!(rejected[0].id, pf_id);
+        // Mapping survives — the later fill on the same leg still routes.
+        let filled = inner.translate_fills(0, vec![order(3)]);
+        assert_eq!(filled[0].id, pf_id);
+    }
+
+    #[test]
+    fn translate_rejections_mints_for_an_unacked_refusal() {
+        // A submit-time refusal never reaches `register_ack` (the handle's
+        // `?` returns first), so there is no mapping to find. It still has
+        // to be attributable to the child that caused it.
+        let mut inner = inner();
+        let out = inner.translate_rejections(1, vec![rejection(0, OrderKind::Market)]);
+        assert_eq!(
+            inner.owners.get(&out[0].id),
+            Some(&1),
+            "a minted rejection id must record its owning child",
+        );
+    }
+
+    #[test]
+    fn translate_rejections_does_not_collide_across_children() {
+        // Both subs refuse their own sub-local id 0; the two must not
+        // collapse onto one portfolio id, or `on_reject` would misroute.
+        let mut inner = inner();
+        let first = inner.translate_rejections(0, vec![rejection(0, OrderKind::Market)]);
+        let second = inner.translate_rejections(1, vec![rejection(0, OrderKind::Market)]);
+        assert_ne!(first[0].id, second[0].id);
+        assert_eq!(inner.owners.get(&first[0].id), Some(&0));
+        assert_eq!(inner.owners.get(&second[0].id), Some(&1));
+    }
 }

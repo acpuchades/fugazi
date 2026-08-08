@@ -391,5 +391,14 @@ through `atom_src`, not `atom_src_any`.
 takes `&self` and a `&mut dyn Wallet`. Don't add a price argument to reach past
 it.
 
+The one exception is `Portfolio`, which needs a sub-wallet per child and so
+ignores the wallet it is handed, trading its own interior. That makes pairing a
+caller obligation, enforced two ways: `Portfolio::run(snapshots)` removes the
+pairing entirely (prefer it), and `Portfolio::trade` panics if a bar the driver
+would have priced went by without this portfolio's own composite wallet seeing
+it — which is also what catches a `Portfolio` used as a child of another
+`Portfolio`. If you add a shape that owns wallets, do the same; a silently flat
+equity curve is the failure mode to design against.
+
 **Not a rule engine.** `SingleAssetStrategy` is four signal slots plus
 protective levels. Don't add `(signal, action)` tables without being asked.

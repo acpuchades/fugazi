@@ -120,8 +120,8 @@ impl RunnableStrategy for DynPortfolio {
 
     /// The one shape that can't use the default: portfolio fills route through
     /// a composite wallet owning one [`PaperWallet`] per child, so it must be
-    /// driven through [`wallet_view`](DynPortfolio::wallet_view). Per-symbol
-    /// costs were installed on every sub-wallet at build time
+    /// driven through that wallet rather than a fresh one. Per-symbol costs
+    /// were installed on every sub-wallet at build time
     /// ([`PortfolioSpec::try_build`]'s `costs` argument plus
     /// [`DynPortfolio::install_costs_for`]), so the list passed here is already
     /// accounted for and the `cash` seed came from the same place.
@@ -131,8 +131,7 @@ impl RunnableStrategy for DynPortfolio {
         _cash: Real,
         _per_symbol_costs: &[(String, TradingCosts)],
     ) -> RunReport<String> {
-        let mut wallet = self.wallet_view();
-        crate::backtest::run(self, &mut wallet, snapshots.iter().cloned())
+        DynPortfolio::run(self, snapshots)
     }
 }
 

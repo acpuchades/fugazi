@@ -377,12 +377,17 @@ pub(crate) struct PyStrategySpec {
 /// pre-installed via `wallet.set_costs_for(sym, ...)` apply naturally.
 ///
 /// The one non-conformant variant is `Portfolio`: `Portfolio::trade` ignores
-/// the external wallet by design (see [`crate::portfolio`] in the Rust
-/// library — it drives its own composite `PortfolioWallet` internally). The
-/// external wallet's `equity()` is still used as the cash seed, but its
-/// installed costs are *not* propagated to the portfolio's sub-wallets; the
-/// caller must install portfolio-wide costs via the spec's own facilities
-/// (currently `None` — a documented follow-up).
+/// the external wallet by design (a composite needs one sub-wallet per child
+/// and the `Strategy` trait offers one, so it drives its own composite
+/// `PortfolioWallet` internally — see `fugazi::portfolio` in the Rust
+/// library). The external wallet's `equity()` is still used as the cash seed,
+/// but its installed costs are *not* propagated to the portfolio's
+/// sub-wallets; the caller must install portfolio-wide costs via the spec's
+/// own facilities (currently `None` — a documented follow-up).
+///
+/// This is safe here because the portfolio arm below drives through the
+/// portfolio's own wallet rather than the one passed in; handing a portfolio
+/// some other wallet is caught at runtime on the Rust side.
 pub(crate) fn run_spec(
     loaded: &CoreStrategySpec,
     snapshots: &[Snapshot<String>],
