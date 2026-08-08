@@ -292,6 +292,35 @@ pub fn build_portfolio_spec(
     Ok(serde_json::from_value(value)?)
 }
 
+/// Substitute a params table into the base strategy value, then typed-parse as
+/// whichever shape `kind` names — the one builder every driver needs, replacing
+/// a five-arm match at each call site.
+pub fn build_any_spec(
+    kind: crate::spec::input::StrategyKind,
+    base: &Value,
+    params: &HashMap<String, Value>,
+) -> Result<crate::spec::StrategySpec> {
+    use crate::spec::StrategySpec as S;
+    use crate::spec::input::StrategyKind as K;
+    Ok(match kind {
+        K::Single => S::Single(Box::new(build_strategy_ref(base, params)?)),
+        K::Pairs => S::Pairs(Box::new(build_pairs_spec(base, params)?)),
+        K::Basket => S::Basket(Box::new(build_basket_spec(base, params)?)),
+        K::Multi => S::Multi(Box::new(build_multi_spec(base, params)?)),
+        K::Portfolio => S::Portfolio(Box::new(build_portfolio_spec(base, params)?)),
+    })
+}
+
+/// [`build_spec`]'s preset-tolerant twin: parses as a [`StrategyRef`], so a
+/// `!ma_crossover { … }` document sweeps like a spelled-out one.
+pub fn build_strategy_ref(
+    base: &Value,
+    params: &HashMap<String, Value>,
+) -> Result<crate::spec::StrategyRef> {
+    let value = params::substitute(base.clone(), params)?;
+    Ok(serde_json::from_value(value)?)
+}
+
 /// The union of axis-column names across every subgrid: every axis name, plus
 /// every scalar name whose effective value differs across subgrids (or is
 /// absent in at least one). Name-sorted so the header is stable regardless of

@@ -32,8 +32,8 @@ use crate::style;
 // module.
 pub use fugazi::spec::optimize::{
     ColumnPos, Direction, Evaluation, Row, Subgrid,
-    build_basket_spec, build_multi_spec, build_pairs_spec, build_portfolio_spec,
-    build_spec, cartesian, format_number, format_value, lookup, lookup_windowed,
+    build_any_spec, build_pairs_spec, build_spec, cartesian, format_number,
+    format_value, lookup, lookup_windowed,
     mean_std_of, optimize, probe_params, ranking_value, reject_axes_in_params,
     row_dsr_inputs, split_axes,
 };
@@ -242,11 +242,30 @@ fn run_single(
         let keep_unstable = opts.keep_unstable;
         let cash = opts.cash;
         let cost_config = opts.cost_config;
-        let atoms_ref = &atoms;
         let schema_ref = &schema;
+        // Same lift as the sweep path: the unified measurement is
+        // snapshot-shaped, so tag each bar with the strategy's symbol once.
+        let wf_symbol = probe_symbol.clone();
+        let wf_snapshots: Vec<fugazi::types::Snapshot<String>> = atoms
+            .iter()
+            .map(|(_, a)| fugazi::types::Snapshot::single(wf_symbol.clone(), a.clone()))
+            .collect();
+        let wf_snapshots_ref = &wf_snapshots;
+        let ctx = backtest::EvalContext {
+            cash,
+            bars_per_year,
+            risk_free_rate: opts.risk_free_rate,
+            cost_config,
+            effective_freq,
+            windowed: None,
+            seconds_per_bar,
+        };
+        let ctx_ref = &ctx;
         let probe = |params: &HashMap<String, Value>| -> Result<usize> {
-            let s = build_spec(base_value, params)?;
-            let built = s.try_build(cash, schema_ref).map_err(backtest::build_error)?;
+            let spec = build_any_spec(StrategyKind::Single, base_value, params)?;
+            let built = spec
+                .try_build(cash, schema_ref, None)
+                .map_err(backtest::build_error)?;
             Ok(if keep_unstable {
                 built.warm_up_period()
             } else {
@@ -255,9 +274,9 @@ fn run_single(
         };
         let run_backtest =
             |params: &HashMap<String, Value>| -> Result<fugazi::RunReport<String>> {
-                let s = build_spec(base_value, params)?;
-                let costs = cost_config.resolve(&s.symbol, effective_freq);
-                Ok(backtest::measured_report(&s, atoms_ref, cash, costs))
+                let spec = build_any_spec(StrategyKind::Single, base_value, params)?;
+                backtest::measured_report_any(&spec, wf_snapshots_ref, ctx_ref)
+                    .map_err(backtest::build_error)
             };
         return walkforward_run(
             subgrids,
@@ -282,10 +301,16 @@ fn run_single(
     }
 
     let cost_config = opts.cost_config;
-    let atoms_ref = &atoms;
     let windowed_n = windowed_bars.map(NonZeroUsize::get);
-    let schema = backtest::schema_from_atoms(&atoms);
-    let schema_ref = &schema;
+    // The unified evaluator is snapshot-shaped, so lift the single-asset atom
+    // stream once here rather than per grid row (`run_iteration` used to do
+    // this inside every call).
+    let symbol = probe_symbol.clone();
+    let snapshots: Vec<fugazi::types::Snapshot<String>> = atoms
+        .iter()
+        .map(|(_, a)| fugazi::types::Snapshot::single(symbol.clone(), a.clone()))
+        .collect();
+    let snapshots_ref = &snapshots;
     let ctx = backtest::EvalContext {
         cash: opts.cash,
         bars_per_year,
@@ -297,23 +322,16 @@ fn run_single(
     };
     let ctx_ref = &ctx;
     let evaluate_row = move |params: &HashMap<String, Value>| -> Result<Evaluation> {
-        let spec = build_spec(base_value, params)?;
-        // The evaluate/measured_report path builds through the infallible
-        // shim, so validate this row's spec first — a bad expression is a
-        // whole-grid error, not a per-row NaN.
-        backtest::validated(|| spec.try_build(opts.cash, schema_ref))?;
+        let spec = build_any_spec(StrategyKind::Single, base_value, params)?;
         Ok(match windowed_n {
-            Some(w) => Evaluation::Windowed(backtest::evaluate_windowed(
-                &spec,
-                atoms_ref,
-                ctx_ref,
-                        w,
-                    )),
-            None => Evaluation::Whole(Box::new(backtest::evaluate(
-                &spec,
-                atoms_ref,
-                ctx_ref,
-                    ))),
+            Some(w) => Evaluation::Windowed(
+                backtest::evaluate_windowed_any(&spec, snapshots_ref, ctx_ref, w)
+                    .map_err(backtest::build_error)?,
+            ),
+            None => Evaluation::Whole(Box::new(
+                backtest::evaluate_any(&spec, snapshots_ref, ctx_ref)
+                    .map_err(backtest::build_error)?,
+            )),
         })
     };
 
@@ -492,11 +510,8 @@ fn run_multi_symbol(
 
     let cost_config = opts.cost_config;
     let snapshots_ref = &snapshots;
-    let universe_ref = &universe;
     let windowed_n = windowed_bars.map(NonZeroUsize::get);
     let kind = opts.strategy_kind;
-    let schema = backtest::schema_from_snapshots(&snapshots);
-    let schema_ref = &schema;
     let ctx = backtest::EvalContext {
         cash: opts.cash,
         bars_per_year,
@@ -508,83 +523,20 @@ fn run_multi_symbol(
     };
     let ctx_ref = &ctx;
 
+    // One path for every shape: `StrategySpec` carries which one, and the
+    // per-shape differences (wallet, how costs are applied, what the universe
+    // is) live behind `RunnableStrategy` / `StrategySpec` rather than here.
     let evaluate_row = move |params: &HashMap<String, Value>| -> Result<Evaluation> {
-        Ok(match kind {
-            StrategyKind::Pairs => {
-                let spec = build_pairs_spec(base_value, params)?;
-                backtest::validated(|| spec.try_build(opts.cash, schema_ref))?;
-                match windowed_n {
-                    Some(w) => Evaluation::Windowed(backtest::evaluate_windowed_pairs(
-                        &spec,
-                        snapshots_ref,
-                        ctx_ref,
-                        w,
-                    )),
-                    None => Evaluation::Whole(Box::new(backtest::evaluate_pairs(
-                        &spec,
-                        snapshots_ref,
-                        ctx_ref,
-                    ))),
-                }
-            }
-            StrategyKind::Basket => {
-                let spec = build_basket_spec(base_value, params)?;
-                backtest::validated(|| spec.try_build(opts.cash, schema_ref))?;
-                match windowed_n {
-                    Some(w) => Evaluation::Windowed(backtest::evaluate_windowed_basket(
-                        &spec,
-                        snapshots_ref,
-                        universe_ref,
-                        ctx_ref,
-                        w,
-                    )),
-                    None => Evaluation::Whole(Box::new(backtest::evaluate_basket(
-                        &spec,
-                        snapshots_ref,
-                        universe_ref,
-                        ctx_ref,
-                    ))),
-                }
-            }
-            StrategyKind::Multi => {
-                let spec = build_multi_spec(base_value, params)?;
-                backtest::validated(|| spec.try_build(opts.cash, schema_ref))?;
-                match windowed_n {
-                    Some(w) => Evaluation::Windowed(backtest::evaluate_windowed_multi(
-                        &spec,
-                        snapshots_ref,
-                        universe_ref,
-                        ctx_ref,
-                        w,
-                    )),
-                    None => Evaluation::Whole(Box::new(backtest::evaluate_multi(
-                        &spec,
-                        snapshots_ref,
-                        universe_ref,
-                        ctx_ref,
-                    ))),
-                }
-            }
-            StrategyKind::Portfolio => {
-                let spec = build_portfolio_spec(base_value, params)?;
-                backtest::validated(|| spec.try_build(opts.cash, schema_ref, None))?;
-                match windowed_n {
-                    Some(w) => Evaluation::Windowed(backtest::evaluate_windowed_portfolio(
-                        &spec,
-                        snapshots_ref,
-                        ctx_ref,
-                        w,
-                    )),
-                    None => Evaluation::Whole(Box::new(backtest::evaluate_portfolio(
-                        &spec,
-                        snapshots_ref,
-                        ctx_ref,
-                    ))),
-                }
-            }
-            _ => unreachable!(
-                "run_multi_symbol only dispatched for pairs/basket/multi/portfolio"
+        let spec = build_any_spec(kind, base_value, params)?;
+        Ok(match windowed_n {
+            Some(w) => Evaluation::Windowed(
+                backtest::evaluate_windowed_any(&spec, snapshots_ref, ctx_ref, w)
+                    .map_err(backtest::build_error)?,
             ),
+            None => Evaluation::Whole(Box::new(
+                backtest::evaluate_any(&spec, snapshots_ref, ctx_ref)
+                    .map_err(backtest::build_error)?,
+            )),
         })
     };
 
@@ -686,130 +638,46 @@ fn run_multi_symbol_walkforward(
     let probe_snap_ref = &probe_snapshot;
     let snapshots_ref = snapshots;
 
+    // Basket and multi build their per-symbol chains lazily, on first sight of
+    // a symbol, so `stable_period()` only reads true once a snapshot has gone
+    // through — hence the probe feed. The other shapes build eagerly and must
+    // *not* be fed it: a pairs leaf that didn't name its asset would hit the
+    // sole-atom guard on a multi-symbol snapshot.
+    let needs_probe_feed = matches!(kind, StrategyKind::Basket | StrategyKind::Multi);
+
+    // Walk-forward measures whole runs and slices them per fold, so the
+    // windowed field is irrelevant here.
+    let ctx = backtest::EvalContext {
+        cash,
+        bars_per_year,
+        risk_free_rate: opts.risk_free_rate,
+        cost_config,
+        effective_freq,
+        windowed: None,
+        seconds_per_bar,
+    };
+    let ctx_ref = &ctx;
+
     let probe = |params: &HashMap<String, Value>| -> Result<usize> {
-        match kind {
-            StrategyKind::Pairs => {
-                // Pairs' chains are held eagerly (both legs known at
-                // construction from `left`/`right`), so `stable_period()`
-                // reads meaningful numbers on a freshly-built strategy —
-                // no probe-snapshot feed needed.
-                let spec = build_pairs_spec(base_value, params)?;
-                let built = spec.try_build(cash, schema_ref).map_err(backtest::build_error)?;
-                Ok(if keep_unstable {
-                    built.warm_up_period()
-                } else {
-                    built.stable_period()
-                })
-            }
-            StrategyKind::Basket => {
-                let spec = build_basket_spec(base_value, params)?;
-                let mut built = spec.try_build(cash, schema_ref).map_err(backtest::build_error)?;
-                // Probe: one synthetic snapshot triggers the lazy per-symbol
-                // chain construction so `stable_period()` reflects the
-                // fully-populated worst case.
-                built.update(probe_snap_ref.clone());
-                Ok(if keep_unstable {
-                    built.warm_up_period()
-                } else {
-                    built.stable_period()
-                })
-            }
-            StrategyKind::Multi => {
-                let spec = build_multi_spec(base_value, params)?;
-                let mut built = spec.try_build(cash, schema_ref).map_err(backtest::build_error)?;
-                built.update(probe_snap_ref.clone());
-                Ok(if keep_unstable {
-                    built.warm_up_period()
-                } else {
-                    built.stable_period()
-                })
-            }
-            StrategyKind::Portfolio => {
-                // Portfolio captures per-child readiness at build (see
-                // `PortfolioSpec::build`); we don't need a probe-snapshot
-                // feed here — the aggregate is already the max child
-                // stable/warm-up, computed on typed children before they
-                // were boxed. Costs don't affect readiness, so we build
-                // without.
-                let spec = build_portfolio_spec(base_value, params)?;
-                let built = spec
-                    .try_build(cash, schema_ref, None)
-                    .map_err(backtest::build_error)?;
-                Ok(if keep_unstable {
-                    built.warm_up_period()
-                } else {
-                    built.stable_period()
-                })
-            }
-            _ => unreachable!(
-                "run_multi_symbol_walkforward only dispatched for pairs/basket/multi/portfolio"
-            ),
+        let spec = build_any_spec(kind, base_value, params)?;
+        let mut built = spec
+            .try_build(cash, schema_ref, None)
+            .map_err(backtest::build_error)?;
+        if needs_probe_feed {
+            built.update(probe_snap_ref.clone());
         }
+        Ok(if keep_unstable {
+            built.warm_up_period()
+        } else {
+            built.stable_period()
+        })
     };
 
-    let build_per_symbol_costs = || -> Vec<(String, TradingCosts)> {
-        universe
-            .iter()
-            .map(|s| (s.clone(), cost_config.resolve(s, effective_freq)))
-            .collect()
-    };
     let run_backtest =
         |params: &HashMap<String, Value>| -> Result<fugazi::RunReport<String>> {
-            let report = match kind {
-                StrategyKind::Pairs => {
-                    let spec = build_pairs_spec(base_value, params)?;
-                    backtest::measured_report_from_strategy(
-                        || spec.build(cash, schema_ref),
-                        snapshots_ref,
-                        cash,
-                        build_per_symbol_costs(),
-                    )
-                }
-                StrategyKind::Basket => {
-                    let spec = build_basket_spec(base_value, params)?;
-                    backtest::measured_report_from_strategy(
-                        || spec.build(cash, schema_ref),
-                        snapshots_ref,
-                        cash,
-                        build_per_symbol_costs(),
-                    )
-                }
-                StrategyKind::Multi => {
-                    let spec = build_multi_spec(base_value, params)?;
-                    backtest::measured_report_from_strategy(
-                        || spec.build(cash, schema_ref),
-                        snapshots_ref,
-                        cash,
-                        build_per_symbol_costs(),
-                    )
-                }
-                StrategyKind::Portfolio => {
-                    // Portfolio uses its own composite wallet driver.
-                    // The unscoped default costs are installed as every
-                    // sub-wallet's fallback; per-symbol scoped bundles
-                    // are then installed on every sub via
-                    // `install_costs_for` so whichever child ends up
-                    // filling a given symbol books at the right rate.
-                    let spec = build_portfolio_spec(base_value, params)?;
-                    let default_costs = cost_config.resolve("", effective_freq);
-                    let costs_opt = (!default_costs.is_none()).then_some(default_costs);
-                    backtest::measured_report_portfolio(
-                        || {
-                            let mut p = spec.build(cash, schema_ref, costs_opt);
-                            for sym in universe.iter() {
-                                let c = cost_config.resolve(sym, effective_freq);
-                                p.install_costs_for(sym, c);
-                            }
-                            p
-                        },
-                        snapshots_ref,
-                    )
-                }
-                _ => unreachable!(
-                    "run_multi_symbol_walkforward only dispatched for pairs/basket/multi/portfolio"
-                ),
-            };
-            Ok(report)
+            let spec = build_any_spec(kind, base_value, params)?;
+            backtest::measured_report_any(&spec, snapshots_ref, ctx_ref)
+                .map_err(backtest::build_error)
         };
 
     // Basket / multi drivers currently don't surface `skipped_overlay_columns`

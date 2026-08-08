@@ -43,6 +43,7 @@ use anyhow::{Context, Result};
 use fugazi::prelude::*;
 
 use crate::backtest::{self, EvalContext, IterationResult};
+use fugazi::spec::StrategySpec;
 use crate::calendar::{self, AssetClass, BarsPerYearSpec, ScopedFrequency, WindowSpec};
 use crate::costs::CostConfig;
 use crate::data::DataFrame;
@@ -163,13 +164,16 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
         print_inputs_block(opts, start, end, atoms.len(), costs_active);
     }
 
-    // Surface a malformed spec as an error before the run machinery (which
-    // builds through the infallible shim) touches it.
-    backtest::validated(|| {
-        strategy.try_build(opts.cash, &backtest::schema_from_atoms(&atoms))
-    })?;
-
-    let iter = backtest::run_iteration(strategy, &atoms, &inputs);
+    // The unified driver is snapshot-shaped; lift the single-symbol atom
+    // stream into one tagged entry per bar.
+    let snapshots: Vec<fugazi::types::Snapshot<String>> = atoms
+        .iter()
+        .map(|(_, a)| fugazi::types::Snapshot::single(symbol.clone(), a.clone()))
+        .collect();
+    let bars: Vec<String> = atoms.iter().map(|(t, _)| t.clone()).collect();
+    let spec = StrategySpec::Single(Box::new(strategy.clone()));
+    let iter = backtest::run_iteration_any(&spec, bars, &snapshots, &inputs)
+        .map_err(backtest::build_error)?;
 
     // Emit `fills.csv` and echo each fill in the same order the wallet booked
     // them. The console stream matches the CSV row-for-row.
@@ -295,17 +299,19 @@ pub fn run_pairs(
         print_pairs_inputs_block(opts, spec, start, end, bars.len(), costs_active);
     }
 
-    let pair_atoms: Vec<(String, Atom)> = left_atoms
+    let snapshots: Vec<fugazi::types::Snapshot<String>> = left_atoms
         .iter()
-        .chain(right_atoms.iter())
-        .map(|a| (String::new(), a.clone()))
+        .zip(right_atoms.iter())
+        .map(|(l, r)| {
+            let mut snap = fugazi::types::Snapshot::new();
+            snap.push(Some(spec.left.clone()), None, l.clone());
+            snap.push(Some(spec.right.clone()), None, r.clone());
+            snap
+        })
         .collect();
-    backtest::validated(|| {
-        spec.try_build(opts.cash, &backtest::schema_from_atoms(&pair_atoms))
-    })?;
-
-    let iter =
-        backtest::run_iteration_pairs(spec, &bars, &left_atoms, &right_atoms, &inputs);
+    let any = StrategySpec::Pairs(Box::new(spec.clone()));
+    let iter = backtest::run_iteration_any(&any, bars.clone(), &snapshots, &inputs)
+        .map_err(backtest::build_error)?;
 
     write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
     if !opts.quiet {
@@ -452,12 +458,9 @@ pub fn run_basket(
         print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active);
     }
 
-    backtest::validated(|| {
-        spec.try_build(opts.cash, &backtest::schema_from_snapshots(&snapshots))
-    })?;
-
-    let iter =
-        backtest::run_iteration_basket(spec, &bars, &snapshots, &universe, &inputs);
+    let any = StrategySpec::Basket(Box::new(spec.clone()));
+    let iter = backtest::run_iteration_any(&any, bars.clone(), &snapshots, &inputs)
+        .map_err(backtest::build_error)?;
 
     write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
     if !opts.quiet {
@@ -594,12 +597,9 @@ pub fn run_multi(
         print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active);
     }
 
-    backtest::validated(|| {
-        spec.try_build(opts.cash, &backtest::schema_from_snapshots(&snapshots))
-    })?;
-
-    let iter =
-        backtest::run_iteration_multi(spec, &bars, &snapshots, &universe, &inputs);
+    let any = StrategySpec::Multi(Box::new(spec.clone()));
+    let iter = backtest::run_iteration_any(&any, bars.clone(), &snapshots, &inputs)
+        .map_err(backtest::build_error)?;
 
     write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
     if !opts.quiet {
@@ -742,15 +742,9 @@ pub fn run_portfolio(
         print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active);
     }
 
-    backtest::validated(|| {
-        spec.try_build(
-            opts.cash,
-            &backtest::schema_from_snapshots(&snapshots),
-            None,
-        )
-    })?;
-
-    let iter = backtest::run_iteration_portfolio(spec, &bars, &snapshots, &inputs);
+    let any = StrategySpec::Portfolio(Box::new(spec.clone()));
+    let iter = backtest::run_iteration_any(&any, bars.clone(), &snapshots, &inputs)
+        .map_err(backtest::build_error)?;
 
     write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
     if !opts.quiet {

@@ -72,6 +72,7 @@ use fugazi_core::metrics as core_metrics;
 use fugazi_core::metrics::{DrawdownSegment, Trade};
 use fugazi_core::runtime::{self, DynType, DynValue, TypeOf};
 // Spec-driven surface: YAML load, evaluate, optimize.
+use fugazi_core::spec::StrategySpec as CoreStrategySpec;
 use fugazi_core::spec::backtest as spec_backtest;
 use fugazi_core::spec::costs::CostConfig;
 use fugazi_core::spec::metrics::{self as spec_metrics, Metrics as SpecMetrics};
@@ -7681,7 +7682,7 @@ fn register_metrics_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 //
 // Design notes:
 // * One `PyStrategySpec` pyclass with an internal 5-variant enum
-//   ([`LoadedSpec`]) covering single / pairs / basket / multi / portfolio —
+//   ([`CoreStrategySpec`]) covering single / pairs / basket / multi / portfolio —
 //   Python's dispatch on `kind` is a plain match on the variant.
 // * Costs accept a Python dict, a `PyCostConfig` instance, or `None`: the
 //   dict path serialises to `serde_json::Value` and typed-parses through
@@ -7950,26 +7951,7 @@ fn default_cost_config() -> CostConfig {
 }
 
 /// The five strategy shapes the spec surface supports — one variant per
-/// top-level YAML kind. Kept in lock-step with the CLI's [`StrategyKind`].
-enum LoadedSpec {
-    Single(StrategyRef),
-    Pairs(PairsStrategySpec),
-    Basket(BasketStrategySpec),
-    Multi(MultiAssetStrategySpec),
-    Portfolio(PortfolioSpec),
-}
 
-impl LoadedSpec {
-    fn kind_str(&self) -> &'static str {
-        match self {
-            LoadedSpec::Single(_) => "single",
-            LoadedSpec::Pairs(_) => "pairs",
-            LoadedSpec::Basket(_) => "basket",
-            LoadedSpec::Multi(_) => "multi",
-            LoadedSpec::Portfolio(_) => "portfolio",
-        }
-    }
-}
 
 /// Detect the strategy kind from a resolved (post `!import`/`!param`) YAML
 /// value. Mirrors the CLI's shape-based routing rules.
@@ -8012,42 +7994,29 @@ fn detect_kind(v: &JsonValue) -> &'static str {
 }
 
 /// Load a strategy YAML doc from text, auto-detecting kind (or using the
-/// caller's `kind` override). Returns the typed `LoadedSpec`.
+/// caller's `kind` override). Returns the typed `CoreStrategySpec`.
 fn load_loaded_spec(
     text: &str,
     params: &std::collections::HashMap<String, JsonValue>,
     base_dir: &std::path::Path,
     kind: &str,
-) -> PyResult<LoadedSpec> {
+) -> PyResult<CoreStrategySpec> {
     let value = fugazi_core::spec::load_value(text, params, base_dir, "(inline)")
         .map_err(|e| PyValueError::new_err(format!("loading strategy: {e:#}")))?;
     let kind = if kind == "auto" { detect_kind(&value) } else { kind };
+    macro_rules! parse {
+        ($variant:ident, $ty:ty, $label:literal) => {{
+            let s: $ty = serde_json::from_value(value)
+                .map_err(|e| PyValueError::new_err(format!("parsing {} strategy: {e}", $label)))?;
+            Ok(CoreStrategySpec::$variant(Box::new(s)))
+        }};
+    }
     match kind {
-        "single" => {
-            let sref: StrategyRef = serde_json::from_value(value)
-                .map_err(|e| PyValueError::new_err(format!("parsing single strategy: {e}")))?;
-            Ok(LoadedSpec::Single(sref))
-        }
-        "pairs" => {
-            let s: PairsStrategySpec = serde_json::from_value(value)
-                .map_err(|e| PyValueError::new_err(format!("parsing pairs strategy: {e}")))?;
-            Ok(LoadedSpec::Pairs(s))
-        }
-        "basket" => {
-            let s: BasketStrategySpec = serde_json::from_value(value)
-                .map_err(|e| PyValueError::new_err(format!("parsing basket strategy: {e}")))?;
-            Ok(LoadedSpec::Basket(s))
-        }
-        "multi" => {
-            let s: MultiAssetStrategySpec = serde_json::from_value(value)
-                .map_err(|e| PyValueError::new_err(format!("parsing multi strategy: {e}")))?;
-            Ok(LoadedSpec::Multi(s))
-        }
-        "portfolio" => {
-            let s: PortfolioSpec = serde_json::from_value(value)
-                .map_err(|e| PyValueError::new_err(format!("parsing portfolio strategy: {e}")))?;
-            Ok(LoadedSpec::Portfolio(s))
-        }
+        "single" => parse!(Single, StrategyRef, "single"),
+        "pairs" => parse!(Pairs, PairsStrategySpec, "pairs"),
+        "basket" => parse!(Basket, BasketStrategySpec, "basket"),
+        "multi" => parse!(Multi, MultiAssetStrategySpec, "multi"),
+        "portfolio" => parse!(Portfolio, PortfolioSpec, "portfolio"),
         other => Err(PyValueError::new_err(format!(
             "unknown strategy kind `{other}` (expected auto/single/pairs/basket/multi/portfolio)"
         ))),
@@ -8058,7 +8027,7 @@ fn load_loaded_spec(
 /// dispatched off the inner enum's variant.
 #[pyclass(name = "StrategySpec", module = "fugazi")]
 struct PyStrategySpec {
-    inner: LoadedSpec,
+    inner: CoreStrategySpec,
 }
 
 /// Drive one already-loaded spec through the user-supplied `PaperWallet` and
@@ -8074,40 +8043,49 @@ struct PyStrategySpec {
 /// caller must install portfolio-wide costs via the spec's own facilities
 /// (currently `None` — a documented follow-up).
 fn run_spec(
-    loaded: &LoadedSpec,
+    loaded: &CoreStrategySpec,
     snapshots: &[Snapshot<String>],
     wallet: &mut PaperWallet<String>,
 ) -> PyResult<RunReport<String>> {
     let cash = <PaperWallet<String> as Wallet<String>>::equity(wallet).0;
     let schema = spec_backtest::schema_from_snapshots(snapshots);
-    Ok(match loaded {
-        LoadedSpec::Single(sref) => {
-            let mut strategy = sref.try_build(cash, &schema).map_err(build_err)?;
-            fugazi_core::backtest::run(&mut strategy, wallet, snapshots.iter().cloned())
-        }
-        LoadedSpec::Pairs(spec) => {
-            let mut strategy = spec.try_build(cash, &schema).map_err(build_err)?;
-            fugazi_core::backtest::run(&mut strategy, wallet, snapshots.iter().cloned())
-        }
-        LoadedSpec::Basket(spec) => {
-            let mut strategy = spec.try_build(cash, &schema).map_err(build_err)?;
-            fugazi_core::backtest::run(&mut strategy, wallet, snapshots.iter().cloned())
-        }
-        LoadedSpec::Multi(spec) => {
-            let mut strategy = spec.try_build(cash, &schema).map_err(build_err)?;
-            fugazi_core::backtest::run(&mut strategy, wallet, snapshots.iter().cloned())
-        }
-        LoadedSpec::Portfolio(spec) => {
-            // Portfolio owns its composite wallet; the external wallet's
-            // equity is only used for the cash seed. Build eagerly so a bad
-            // spec surfaces as a ValueError rather than inside the driver.
-            let built = spec.try_build(cash, &schema, None).map_err(build_err)?;
-            let mut built = Some(built);
-            spec_backtest::measured_report_portfolio(
-                || built.take().expect("built once"),
-                snapshots,
-            )
-        }
+    let mut built = loaded
+        .try_build(cash, &schema, None)
+        .map_err(build_err)?;
+    // Portfolio drives its own composite wallet and ignores the one passed
+    // here (see `RunnableStrategy::drive`); the other shapes trade into the
+    // caller's, keeping any costs it was primed with.
+    if matches!(loaded, CoreStrategySpec::Portfolio(_)) {
+        return Ok(built.drive(snapshots, cash, &[]));
+    }
+    // `&mut *built` rather than `&mut built`: `run` takes `S: Strategy + ?Sized`,
+    // and it is `dyn RunnableStrategy` that carries the `Strategy` supertrait,
+    // not the `Box` around it.
+    Ok(fugazi_core::backtest::run(
+        &mut *built,
+        wallet,
+        snapshots.iter().cloned(),
+    ))
+}
+
+/// Typed-parse an already-`!param`-substituted document as `kind`.
+///
+/// The optimize kernel substitutes a fresh params table per grid row, so the
+/// typed parse has to happen per row; this is the shape-routing half of
+/// [`load_loaded_spec`] without the load passes.
+fn spec_from_value(value: JsonValue, kind: &str) -> anyhow::Result<CoreStrategySpec> {
+    macro_rules! parse {
+        ($variant:ident, $ty:ty) => {
+            CoreStrategySpec::$variant(Box::new(serde_json::from_value::<$ty>(value)?))
+        };
+    }
+    Ok(match kind {
+        "single" => parse!(Single, StrategyRef),
+        "pairs" => parse!(Pairs, PairsStrategySpec),
+        "basket" => parse!(Basket, BasketStrategySpec),
+        "multi" => parse!(Multi, MultiAssetStrategySpec),
+        "portfolio" => parse!(Portfolio, PortfolioSpec),
+        other => anyhow::bail!("unknown strategy kind `{other}`"),
     })
 }
 
@@ -8126,7 +8104,7 @@ fn build_err(e: String) -> PyErr {
 /// Reduce a run report to a `SpecMetrics` document. Uses the caller's wallet
 /// (matching [`run_spec`]) — cash comes from `wallet.equity()`.
 fn evaluate_spec(
-    loaded: &LoadedSpec,
+    loaded: &CoreStrategySpec,
     snapshots: &[Snapshot<String>],
     wallet: &mut PaperWallet<String>,
     bars_per_year: Real,
@@ -8155,7 +8133,7 @@ impl PyStrategySpec {
     /// `portfolio`.
     #[getter]
     fn kind(&self) -> &'static str {
-        self.inner.kind_str()
+        self.inner.kind()
     }
 
     /// Drive the spec over `snapshots` against `wallet`, returning the full
@@ -8207,7 +8185,7 @@ impl PyStrategySpec {
     }
 
     fn __repr__(&self) -> String {
-        format!("StrategySpec(kind='{}')", self.inner.kind_str())
+        format!("StrategySpec(kind='{}')", self.inner.kind())
     }
 }
 
@@ -8472,9 +8450,6 @@ fn optimize(
     let metric_names_vec: Vec<String> = metric_names.unwrap_or_default();
     let best_by_str = best_by.clone();
 
-    // Discover universe once for basket / multi / portfolio.
-    let universe = spec_backtest::universe_from_snapshots(&snaps);
-
     // ----- Walkforward path (mutually exclusive with `windowed=`) -----
     if let Some((is_bars, oos_bars, embargo_bars)) = walkforward_tuple {
         return run_walkforward(
@@ -8482,7 +8457,6 @@ fn optimize(
             detected,
             &base_value,
             &snaps,
-            &universe,
             &cost_config,
             subgrids,
             is_bars,
@@ -8514,155 +8488,20 @@ fn optimize(
         let evaluate_row = |params: &std::collections::HashMap<String, JsonValue>|
             -> anyhow::Result<spec_optimize::Evaluation>
         {
-            match detected {
-                "single" => {
-                    // StrategyRef supports presets + spec map; substitute + typed-parse.
-                    let value = fugazi_core::spec::params::substitute(base_value.clone(), params)?;
-                    let sref: StrategyRef = serde_json::from_value(value)?;
-                    // Convert snapshots to (String, Atom) for the single-asset path.
-                    let symbol = sref.symbol().to_string();
-                    let atoms: Vec<(String, Atom)> = snaps
-                        .iter()
-                        .filter_map(|s| {
-                            s.find(&Selector::by_symbol(symbol.clone()))
-                                .map(|a| (String::new(), a.clone()))
-                        })
-                        .collect();
-                    let schema = spec_backtest::schema_from_atoms(&atoms);
-                    let costs = cost_config.resolve(&symbol, None);
-                    let mut strategy = sref
-                        .try_build(cash, &schema)
-                        .map_err(spec_backtest::build_error)?;
-                    let mut wallet = PaperWallet::with_costs(cash, costs);
-                    let symbol_clone = symbol.clone();
-                    let report = fugazi_core::backtest::run(
-                        &mut strategy,
-                        &mut wallet,
-                        atoms
-                            .iter()
-                            .map(|(_, a)| Snapshot::single(symbol_clone.clone(), a.clone())),
-                    );
-                    Ok(match windowed {
-                        None => spec_optimize::Evaluation::Whole(Box::new(
-                            spec_metrics::from_report(
-                                &report,
-                                bars_per_year,
-                                risk_free_rate,
-                                seconds_per_bar,
-                            ),
-                        )),
-                        Some(w) => spec_optimize::Evaluation::Windowed(
-                            spec_metrics::windowed_from_report(
-                                &report,
-                                w,
-                                bars_per_year,
-                                risk_free_rate,
-                                seconds_per_bar,
-                            ),
-                        ),
-                    })
-                }
-                "pairs" => {
-                    let spec = spec_optimize::build_pairs_spec(&base_value, params)?;
-                    // The evaluate_* path builds through the infallible shim,
-                    // so validate first — same reason as the CLI's rows.
-                    spec_backtest::validated(|| {
-                        spec.try_build(cash, &spec_backtest::schema_from_snapshots(&snaps))
-                    })?;
-                    Ok(match windowed {
-                        None => spec_optimize::Evaluation::Whole(Box::new(
-                            spec_backtest::evaluate_pairs(
-                                &spec,
-                                &snaps,
-                                ctx_ref,
-                            ),
-                        )),
-                        Some(w) => spec_optimize::Evaluation::Windowed(
-                            spec_backtest::evaluate_windowed_pairs(
-                                &spec,
-                                &snaps,
-                                ctx_ref,
-                                w,
-                            ),
-                        ),
-                    })
-                }
-                "basket" => {
-                    let spec = spec_optimize::build_basket_spec(&base_value, params)?;
-                    spec_backtest::validated(|| {
-                        spec.try_build(cash, &spec_backtest::schema_from_snapshots(&snaps))
-                    })?;
-                    Ok(match windowed {
-                        None => spec_optimize::Evaluation::Whole(Box::new(
-                            spec_backtest::evaluate_basket(
-                                &spec,
-                                &snaps,
-                                &universe,
-                                ctx_ref,
-                            ),
-                        )),
-                        Some(w) => spec_optimize::Evaluation::Windowed(
-                            spec_backtest::evaluate_windowed_basket(
-                                &spec,
-                                &snaps,
-                                &universe,
-                                ctx_ref,
-                                w,
-                            ),
-                        ),
-                    })
-                }
-                "multi" => {
-                    let spec = spec_optimize::build_multi_spec(&base_value, params)?;
-                    spec_backtest::validated(|| {
-                        spec.try_build(cash, &spec_backtest::schema_from_snapshots(&snaps))
-                    })?;
-                    Ok(match windowed {
-                        None => spec_optimize::Evaluation::Whole(Box::new(
-                            spec_backtest::evaluate_multi(
-                                &spec,
-                                &snaps,
-                                &universe,
-                                ctx_ref,
-                            ),
-                        )),
-                        Some(w) => spec_optimize::Evaluation::Windowed(
-                            spec_backtest::evaluate_windowed_multi(
-                                &spec,
-                                &snaps,
-                                &universe,
-                                ctx_ref,
-                                w,
-                            ),
-                        ),
-                    })
-                }
-                "portfolio" => {
-                    let spec = spec_optimize::build_portfolio_spec(&base_value, params)?;
-                    spec_backtest::validated(|| {
-                        spec.try_build(cash, &spec_backtest::schema_from_snapshots(&snaps), None)
-                    })?;
-                    Ok(match windowed {
-                        None => spec_optimize::Evaluation::Whole(Box::new(
-                            spec_backtest::evaluate_portfolio(
-                                &spec,
-                                &snaps,
-                                ctx_ref,
-                            ),
-                        )),
-                        Some(w) => spec_optimize::Evaluation::Windowed(
-                            spec_backtest::evaluate_windowed_portfolio(
-                                &spec,
-                                &snaps,
-                                ctx_ref,
-                                w,
-                            ),
-                        ),
-                    })
-                }
-                other => anyhow::bail!("unknown strategy kind `{other}`"),
-            }
+            let value = fugazi_core::spec::params::substitute(base_value.clone(), params)?;
+            let spec = spec_from_value(value, detected)?;
+            Ok(match windowed {
+                None => spec_optimize::Evaluation::Whole(Box::new(
+                    spec_backtest::evaluate_any(&spec, &snaps, ctx_ref)
+                        .map_err(spec_backtest::build_error)?,
+                )),
+                Some(w) => spec_optimize::Evaluation::Windowed(
+                    spec_backtest::evaluate_windowed_any(&spec, &snaps, ctx_ref, w)
+                        .map_err(spec_backtest::build_error)?,
+                ),
+            })
         };
+
         spec_optimize::optimize(
             subgrids,
             windowed,
@@ -8897,7 +8736,6 @@ fn run_walkforward(
     detected: &str,
     base_value: &JsonValue,
     snaps: &[Snapshot<String>],
-    universe: &[String],
     cost_config: &fugazi_core::spec::costs::CostConfig,
     subgrids: Vec<spec_optimize::Subgrid>,
     is_bars: usize,
@@ -8920,168 +8758,45 @@ fn run_walkforward(
 
     let result = py
         .detach(|| -> anyhow::Result<spec_optimize::WalkForwardResult> {
+            // Basket and multi build their per-symbol chains lazily, so their
+            // periods only read true once a snapshot has gone through. The
+            // eager shapes must not be fed one — a pairs leaf that didn't name
+            // its asset would hit the sole-atom guard on a multi-symbol bar.
+            let needs_probe_feed = matches!(detected, "basket" | "multi");
+            let probe_snapshot = snaps.first().cloned().unwrap_or_default();
+            let wf_ctx = spec_backtest::EvalContext {
+                cash,
+                bars_per_year,
+                risk_free_rate,
+                cost_config: &cost_config,
+                effective_freq: None,
+                windowed: None,
+                seconds_per_bar,
+            };
+            let wf_ctx_ref = &wf_ctx;
+            let wf_schema = spec_backtest::schema_from_snapshots(snaps);
+
             let probe_readiness = |params: &std::collections::HashMap<String, JsonValue>|
                 -> anyhow::Result<usize>
             {
-                match detected {
-                    "single" => {
-                        let value = fugazi_core::spec::params::substitute(base_value.clone(), params)?;
-                        let sref: StrategyRef = serde_json::from_value(value)?;
-                        let symbol = sref.symbol().to_string();
-                        let atoms: Vec<(String, Atom)> = snaps
-                            .iter()
-                            .filter_map(|s| {
-                                s.find(&Selector::by_symbol(symbol.clone()))
-                                    .map(|a| (String::new(), a.clone()))
-                            })
-                            .collect();
-                        let schema = spec_backtest::schema_from_atoms(&atoms);
-                        Ok(sref
-                            .try_build(cash, &schema)
-                            .map_err(spec_backtest::build_error)?
-                            .stable_period())
-                    }
-                    "pairs" => {
-                        let spec = spec_optimize::build_pairs_spec(base_value, params)?;
-                        let schema = spec_backtest::schema_from_snapshots(snaps);
-                        Ok(spec
-                            .try_build(cash, &schema)
-                            .map_err(spec_backtest::build_error)?
-                            .stable_period())
-                    }
-                    "basket" => {
-                        let spec = spec_optimize::build_basket_spec(base_value, params)?;
-                        let schema = spec_backtest::schema_from_snapshots(snaps);
-                        Ok(spec
-                            .try_build(cash, &schema)
-                            .map_err(spec_backtest::build_error)?
-                            .stable_period())
-                    }
-                    "multi" => {
-                        let spec = spec_optimize::build_multi_spec(base_value, params)?;
-                        let schema = spec_backtest::schema_from_snapshots(snaps);
-                        Ok(spec
-                            .try_build(cash, &schema)
-                            .map_err(spec_backtest::build_error)?
-                            .stable_period())
-                    }
-                    "portfolio" => {
-                        let spec = spec_optimize::build_portfolio_spec(base_value, params)?;
-                        let schema = spec_backtest::schema_from_snapshots(snaps);
-                        let default_costs = cost_config.resolve("", None);
-                        let costs_opt = (!default_costs.is_none()).then_some(default_costs);
-                        Ok(spec
-                            .try_build(cash, &schema, costs_opt)
-                            .map_err(spec_backtest::build_error)?
-                            .stable_period())
-                    }
-                    other => anyhow::bail!("unknown strategy kind `{other}`"),
+                let value = fugazi_core::spec::params::substitute(base_value.clone(), params)?;
+                let spec = spec_from_value(value, detected)?;
+                let mut built = spec
+                    .try_build(cash, &wf_schema, None)
+                    .map_err(spec_backtest::build_error)?;
+                if needs_probe_feed {
+                    built.update(probe_snapshot.clone());
                 }
+                Ok(built.stable_period())
             };
 
             let run_backtest = |params: &std::collections::HashMap<String, JsonValue>|
                 -> anyhow::Result<fugazi_core::RunReport<String>>
             {
-                match detected {
-                    "single" => {
-                        let value = fugazi_core::spec::params::substitute(base_value.clone(), params)?;
-                        let sref: StrategyRef = serde_json::from_value(value)?;
-                        let symbol = sref.symbol().to_string();
-                        let atoms: Vec<(String, Atom)> = snaps
-                            .iter()
-                            .filter_map(|s| {
-                                s.find(&Selector::by_symbol(symbol.clone()))
-                                    .map(|a| (String::new(), a.clone()))
-                            })
-                            .collect();
-                        let schema = spec_backtest::schema_from_atoms(&atoms);
-                        let costs = cost_config.resolve(&symbol, None);
-                        let mut strategy = sref
-                            .try_build(cash, &schema)
-                            .map_err(spec_backtest::build_error)?;
-                        let mut wallet = PaperWallet::with_costs(cash, costs);
-                        let symbol_clone = symbol.clone();
-                        Ok(fugazi_core::backtest::run(
-                            &mut strategy,
-                            &mut wallet,
-                            atoms
-                                .iter()
-                                .map(|(_, a)| Snapshot::single(symbol_clone.clone(), a.clone())),
-                        ))
-                    }
-                    "pairs" => {
-                        let spec = spec_optimize::build_pairs_spec(base_value, params)?;
-                        let schema = spec_backtest::schema_from_snapshots(snaps);
-                        let per_symbol_costs = vec![
-                            (spec.left.clone(), cost_config.resolve(&spec.left, None)),
-                            (spec.right.clone(), cost_config.resolve(&spec.right, None)),
-                        ];
-                        let built = spec
-                            .try_build(cash, &schema)
-                            .map_err(spec_backtest::build_error)?;
-                        let mut built = Some(built);
-                        Ok(spec_backtest::measured_report_from_strategy(
-                            || built.take().expect("built once"),
-                            snaps,
-                            cash,
-                            per_symbol_costs,
-                        ))
-                    }
-                    "basket" => {
-                        let spec = spec_optimize::build_basket_spec(base_value, params)?;
-                        let schema = spec_backtest::schema_from_snapshots(snaps);
-                        let per_symbol_costs: Vec<(String, _)> = universe
-                            .iter()
-                            .map(|s| (s.clone(), cost_config.resolve(s, None)))
-                            .collect();
-                        let built = spec
-                            .try_build(cash, &schema)
-                            .map_err(spec_backtest::build_error)?;
-                        let mut built = Some(built);
-                        Ok(spec_backtest::measured_report_from_strategy(
-                            || built.take().expect("built once"),
-                            snaps,
-                            cash,
-                            per_symbol_costs,
-                        ))
-                    }
-                    "multi" => {
-                        let spec = spec_optimize::build_multi_spec(base_value, params)?;
-                        let schema = spec_backtest::schema_from_snapshots(snaps);
-                        let per_symbol_costs: Vec<(String, _)> = universe
-                            .iter()
-                            .map(|s| (s.clone(), cost_config.resolve(s, None)))
-                            .collect();
-                        let built = spec
-                            .try_build(cash, &schema)
-                            .map_err(spec_backtest::build_error)?;
-                        let mut built = Some(built);
-                        Ok(spec_backtest::measured_report_from_strategy(
-                            || built.take().expect("built once"),
-                            snaps,
-                            cash,
-                            per_symbol_costs,
-                        ))
-                    }
-                    "portfolio" => {
-                        let spec = spec_optimize::build_portfolio_spec(base_value, params)?;
-                        let schema = spec_backtest::schema_from_snapshots(snaps);
-                        let default_costs = cost_config.resolve("", None);
-                        let costs_opt = (!default_costs.is_none()).then_some(default_costs);
-                        let mut built = spec
-                            .try_build(cash, &schema, costs_opt.clone())
-                            .map_err(spec_backtest::build_error)?;
-                        for sym in universe {
-                            built.install_costs_for(sym, cost_config.resolve(sym, None));
-                        }
-                        let mut built = Some(built);
-                        Ok(spec_backtest::measured_report_portfolio(
-                            || built.take().expect("built once"),
-                            snaps,
-                        ))
-                    }
-                    other => anyhow::bail!("unknown strategy kind `{other}`"),
-                }
+                let value = fugazi_core::spec::params::substitute(base_value.clone(), params)?;
+                let spec = spec_from_value(value, detected)?;
+                spec_backtest::measured_report_any(&spec, snaps, wf_ctx_ref)
+                    .map_err(spec_backtest::build_error)
             };
 
             spec_optimize::walkforward(

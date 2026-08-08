@@ -22,6 +22,7 @@
 
 // Spec-tree submodules.
 pub mod basket;
+pub mod runnable;
 pub mod expr;
 pub mod multi_asset;
 pub mod overlay;
@@ -133,6 +134,7 @@ pub use template::SpecTemplate;
 pub use multi_asset::DynMultiAssetStrategy;
 pub use pairs::DynPairsStrategy;
 pub use portfolio::DynPortfolio;
+pub use runnable::{RunnableStrategy, StrategySpec};
 pub use strategy::{DynSingleStrategy, SideSpec};
 
 pub use input::{Source, StrategyKind, StrategySource};
