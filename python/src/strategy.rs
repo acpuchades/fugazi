@@ -668,26 +668,7 @@ impl PyStrategy {
             .collect();
 
         let seed = Wallet::equity(&wallet.inner).0;
-        let mut strat = self.build_strategy(seed);
-        // Builder-shape overrides (only meaningful when preset is None;
-        // if preset is set, long_enter/etc. are guaranteed to be None
-        // by the builder-method guards above).
-        if let Some(enter) = &self.long_enter {
-            strat = strat.long_on(
-                enter.clone(),
-                self.long_exit.clone().unwrap_or_else(const_false_signal),
-            );
-        }
-        if let Some(enter) = &self.short_enter {
-            strat = strat.short_on(
-                enter.clone(),
-                self.short_exit.clone().unwrap_or_else(const_false_signal),
-            );
-        }
-        if let Some(sizing) = &self.sizing {
-            strat = strat.position_sizing(sizing.clone());
-        }
-
+        let mut strat = self.materialize(seed);
         let report = fugazi_core::backtest::run(&mut strat, &mut wallet.inner, snaps);
         Ok(PyRunReport { inner: report })
     }
@@ -706,6 +687,35 @@ impl PyStrategy {
     /// seeded at `initial_equity`. Preset presets dispatch to the
     /// catalogue; otherwise starts from a bare `with_initial_equity`
     /// that later assignments layer sides / sizing onto.
+    /// The configured strategy, ready to drive — [`build_strategy`](Self::build_strategy)
+    /// plus every builder-shape override layered on.
+    ///
+    /// Split out of `run` so a [`PyPortfolio`] child can be materialized
+    /// without driving it, which is the only difference between running a
+    /// strategy alone and running it inside a portfolio.
+    pub(crate) fn materialize(&self, initial_equity: Real) -> SingleAssetStrategy<String> {
+        let mut strat = self.build_strategy(initial_equity);
+        // Builder-shape overrides (only meaningful when preset is None; if a
+        // preset is set, long_enter/etc. are guaranteed None by the builder
+        // methods' guards).
+        if let Some(enter) = &self.long_enter {
+            strat = strat.long_on(
+                enter.clone(),
+                self.long_exit.clone().unwrap_or_else(const_false_signal),
+            );
+        }
+        if let Some(enter) = &self.short_enter {
+            strat = strat.short_on(
+                enter.clone(),
+                self.short_exit.clone().unwrap_or_else(const_false_signal),
+            );
+        }
+        if let Some(sizing) = &self.sizing {
+            strat = strat.position_sizing(sizing.clone());
+        }
+        strat
+    }
+
     pub(crate) fn build_strategy(&self, initial_equity: Real) -> SingleAssetStrategy<String> {
         match &self.preset {
             Some(preset) => preset.build(initial_equity),
@@ -878,6 +888,20 @@ impl PyPairsStrategy {
     ) -> PyResult<PyRunReport> {
         let snaps = snapshots_from_sequence(snapshots)?;
         let seed = Wallet::equity(&wallet.inner).0;
+        let mut strat = self.materialize(seed);
+        let report = fugazi_core::backtest::run(&mut strat, &mut wallet.inner, snaps);
+        Ok(PyRunReport { inner: report })
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!("PairsStrategy(left='{}', right='{}')", self.left, self.right)
+    }
+}
+
+impl PyPairsStrategy {
+    /// The configured strategy, ready to drive. Split out of `run` so a
+    /// [`PyPortfolio`] child can be materialized without driving it.
+    pub(crate) fn materialize(&self, seed: Real) -> PairsStrategy<String> {
         let mut strat = PairsStrategy::<String>::with_initial_equity(
             self.left.clone(),
             self.right.clone(),
@@ -913,13 +937,7 @@ impl PyPairsStrategy {
         if let Some(rebalance) = &self.rebalance {
             strat = strat.rebalance_on(rebalance.clone());
         }
-
-        let report = fugazi_core::backtest::run(&mut strat, &mut wallet.inner, snaps);
-        Ok(PyRunReport { inner: report })
-    }
-
-    pub(crate) fn __repr__(&self) -> String {
-        format!("PairsStrategy(left='{}', right='{}')", self.left, self.right)
+        strat
     }
 }
 
@@ -1044,30 +1062,45 @@ impl PyMultiAssetStrategy {
     ) -> PyResult<PyRunReport> {
         let snaps = snapshots_from_sequence(snapshots)?;
         let seed = Wallet::equity(&wallet.inner).0;
+        let mut strat = self.materialize(wallet.py(), seed);
+        let report = fugazi_core::backtest::run(&mut strat, &mut wallet.inner, snaps);
+        Ok(PyRunReport { inner: report })
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        "MultiAssetStrategy(...)".to_string()
+    }
+}
+
+impl PyMultiAssetStrategy {
+    /// The configured strategy, ready to drive. Needs the GIL token because
+    /// every slot is a per-symbol Python callable. Split out of `run` so a
+    /// [`PyPortfolio`] child can be materialized without driving it.
+    pub(crate) fn materialize(&self, py: Python<'_>, seed: Real) -> MultiAssetStrategy<String> {
         let mut strat = MultiAssetStrategy::<String>::with_initial_equity(seed);
 
         if let Some(enter) = &self.long_enter {
-            let ef = signal_factory_from_callable(enter.clone_ref(wallet.py()));
+            let ef = signal_factory_from_callable(enter.clone_ref(py));
             strat = match &self.long_exit {
                 Some(exit) => {
-                    let xf = signal_factory_from_callable(exit.clone_ref(wallet.py()));
+                    let xf = signal_factory_from_callable(exit.clone_ref(py));
                     strat.long_on(ef, xf)
                 }
                 None => strat.long_on(ef, |_: &String| const_false_signal()),
             };
         }
         if let Some(enter) = &self.short_enter {
-            let ef = signal_factory_from_callable(enter.clone_ref(wallet.py()));
+            let ef = signal_factory_from_callable(enter.clone_ref(py));
             strat = match &self.short_exit {
                 Some(exit) => {
-                    let xf = signal_factory_from_callable(exit.clone_ref(wallet.py()));
+                    let xf = signal_factory_from_callable(exit.clone_ref(py));
                     strat.short_on(ef, xf)
                 }
                 None => strat.short_on(ef, |_: &String| const_false_signal()),
             };
         }
         if let Some(sizing) = &self.sizing {
-            let sf = source_factory_from_callable(sizing.clone_ref(wallet.py()));
+            let sf = source_factory_from_callable(sizing.clone_ref(py));
             strat = strat.position_sizing(sf);
         }
         if let Some(rebalance) = &self.rebalance {
@@ -1080,13 +1113,7 @@ impl PyMultiAssetStrategy {
                 strat.any_of(u.symbols.clone())
             };
         }
-
-        let report = fugazi_core::backtest::run(&mut strat, &mut wallet.inner, snaps);
-        Ok(PyRunReport { inner: report })
-    }
-
-    pub(crate) fn __repr__(&self) -> String {
-        "MultiAssetStrategy(...)".to_string()
+        strat
     }
 }
 
@@ -1391,14 +1418,29 @@ impl PyBasketStrategy {
     ) -> PyResult<PyRunReport> {
         let snaps = snapshots_from_sequence(snapshots)?;
         let seed = Wallet::equity(&wallet.inner).0;
+        let mut strat = self.materialize(wallet.py(), seed);
+        let report = fugazi_core::backtest::run(&mut strat, &mut wallet.inner, snaps);
+        Ok(PyRunReport { inner: report })
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        "BasketStrategy(...)".to_string()
+    }
+}
+
+impl PyBasketStrategy {
+    /// The configured strategy, ready to drive. Needs the GIL token because
+    /// score / sizing are per-symbol Python callables. Split out of `run` so a
+    /// [`PyPortfolio`] child can be materialized without driving it.
+    pub(crate) fn materialize(&self, py: Python<'_>, seed: Real) -> BasketStrategy<String> {
         let mut strat = BasketStrategy::<String>::with_initial_equity(seed);
 
         if let Some(score) = &self.score {
-            let f = source_factory_from_callable(score.clone_ref(wallet.py()));
+            let f = source_factory_from_callable(score.clone_ref(py));
             strat = strat.scored_by(f);
         }
         if let Some(sizing) = &self.sizing {
-            let f = source_factory_from_callable(sizing.clone_ref(wallet.py()));
+            let f = source_factory_from_callable(sizing.clone_ref(py));
             strat = strat.sized_by(f);
         }
         strat = match &self.selection {
@@ -1418,13 +1460,7 @@ impl PyBasketStrategy {
                 strat.any_of(u.symbols.clone())
             };
         }
-
-        let report = fugazi_core::backtest::run(&mut strat, &mut wallet.inner, snaps);
-        Ok(PyRunReport { inner: report })
-    }
-
-    pub(crate) fn __repr__(&self) -> String {
-        "BasketStrategy(...)".to_string()
+        strat
     }
 }
 
@@ -1852,3 +1888,209 @@ impl PyRunReport {
     }
 }
 
+
+/// N *different* strategies sharing one account.
+///
+/// The other four shapes each run a single decision rule; this one composes
+/// them, so it answers a question none of them can: *what would these
+/// strategies have earned together?*
+///
+/// Each child trades its own notional **ledger** — its slice of the account's
+/// cash and positions — and sizes against that, so `value_frac(1.0)` in a child
+/// still means all of *that child's* capital. Every child's intent is then
+/// netted into one order per symbol against a single account, which is what a
+/// real deployment looks like.
+///
+/// ```python
+/// pf = (ta.Portfolio()
+///         .add("trend",  ta.Strategy("BTC").long_on(fast.crosses_above(slow), fast.crosses_below(slow)))
+///         .add("revert", ta.Strategy("ETH").long_on(rsi.lt(30.0), rsi.gt(70.0)))
+///         .weights([0.7, 0.3]))
+/// report = pf.run(ta.PaperWallet(10_000.0), snapshots)
+/// ```
+///
+/// Because children share a book, opposing flow between them crosses
+/// internally (and pays no costs), and a child's stop takes off only its own
+/// share. See the Rust `fugazi::portfolio` docs for the full set.
+#[pyclass(name = "Portfolio")]
+#[derive(Default)]
+pub(crate) struct PyPortfolio {
+    children: Vec<(String, Py<PyAny>)>,
+    weights: Option<Vec<Real>>,
+    rebalance: Option<SignalBox<Snapshot<String>>>,
+}
+
+#[pymethods]
+impl PyPortfolio {
+    #[new]
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a child under `name`, which must be unique. `strategy` is any of
+    /// `Strategy`, `PairsStrategy`, `BasketStrategy` or `MultiAssetStrategy` —
+    /// a `Portfolio` is refused, since a nested one could never be priced.
+    pub(crate) fn add(
+        &self,
+        py: Python<'_>,
+        name: String,
+        strategy: &Bound<'_, PyAny>,
+    ) -> PyResult<PyPortfolio> {
+        if self.children.iter().any(|(n, _)| *n == name) {
+            return Err(PyValueError::new_err(format!(
+                "Portfolio.add: duplicate child name `{name}`"
+            )));
+        }
+        if strategy.is_instance_of::<PyPortfolio>() {
+            return Err(PyValueError::new_err(
+                "Portfolio.add: a Portfolio cannot be a child of a Portfolio — an inner \
+                 portfolio's account is never priced. Flatten the children into one \
+                 portfolio, or run them separately.",
+            ));
+        }
+        if !(strategy.is_instance_of::<PyStrategy>()
+            || strategy.is_instance_of::<PyPairsStrategy>()
+            || strategy.is_instance_of::<PyBasketStrategy>()
+            || strategy.is_instance_of::<PyMultiAssetStrategy>())
+        {
+            return Err(PyValueError::new_err(
+                "Portfolio.add: strategy must be a Strategy, PairsStrategy, \
+                 BasketStrategy or MultiAssetStrategy",
+            ));
+        }
+        let mut next = self.clone_with(py);
+        next.children.push((name, strategy.clone().unbind()));
+        Ok(next)
+    }
+
+    /// Fixed per-child weights, in `add` order. Magnitudes — they are
+    /// normalized, so they needn't sum to 1. Defaults to equal weight.
+    pub(crate) fn weights(&self, py: Python<'_>, weights: Vec<Real>) -> PyResult<PyPortfolio> {
+        if weights.iter().any(|w| *w < 0.0) {
+            return Err(PyValueError::new_err(
+                "Portfolio.weights: weights must be non-negative",
+            ));
+        }
+        let mut next = self.clone_with(py);
+        next.weights = Some(weights);
+        Ok(next)
+    }
+
+    /// Pull capital back to the target weights whenever `signal` fires.
+    /// Off by default, so the split drifts with P&L.
+    pub(crate) fn rebalance_on(
+        &self,
+        py: Python<'_>,
+        signal: &PySignal,
+    ) -> PyResult<PyPortfolio> {
+        let mut next = self.clone_with(py);
+        next.rebalance = Some(snapshot_signal(signal)?);
+        Ok(next)
+    }
+
+    /// Drive the portfolio over `snapshots` and return the aggregate report.
+    ///
+    /// `wallet` supplies the **cash seed** only. Unlike the other shapes, a
+    /// portfolio trades its own account (that is what lets it net children's
+    /// orders together), so the wallet passed here is not traded into and any
+    /// costs installed on it do not apply — mirroring `load_spec(...).run(...)`
+    /// for a portfolio document.
+    pub(crate) fn run(
+        &self,
+        wallet: PyRef<'_, PyWallet>,
+        snapshots: &Bound<'_, PyAny>,
+    ) -> PyResult<PyRunReport> {
+        let snaps = snapshots_from_sequence(snapshots)?;
+        let seed = Wallet::equity(&wallet.inner).0;
+        let mut portfolio = self.materialize(wallet.py(), seed)?;
+        let report = portfolio.run(snaps);
+        Ok(PyRunReport { inner: report })
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        let names: Vec<&str> = self.children.iter().map(|(n, _)| n.as_str()).collect();
+        format!("Portfolio(children=[{}])", names.join(", "))
+    }
+}
+
+impl PyPortfolio {
+    /// Deep-ish clone: the child handles are refcount bumps, which needs the
+    /// GIL token, so this can't be a plain `Clone` impl.
+    fn clone_with(&self, py: Python<'_>) -> Self {
+        Self {
+            children: self
+                .children
+                .iter()
+                .map(|(n, c)| (n.clone(), c.clone_ref(py)))
+                .collect(),
+            weights: self.weights.clone(),
+            rebalance: self.rebalance.clone(),
+        }
+    }
+
+    /// Build the composite, materializing each child at its share of `seed`.
+    fn materialize(
+        &self,
+        py: Python<'_>,
+        seed: Real,
+    ) -> PyResult<fugazi_core::portfolio::Portfolio<String>> {
+        if self.children.is_empty() {
+            return Err(PyValueError::new_err(
+                "Portfolio.run: add at least one child strategy first",
+            ));
+        }
+        if let Some(w) = &self.weights
+            && w.len() != self.children.len()
+        {
+            return Err(PyValueError::new_err(format!(
+                "Portfolio.weights: {} weights for {} children",
+                w.len(),
+                self.children.len()
+            )));
+        }
+
+        // Each child is seeded with its own share, so a child sizing against
+        // `value_frac(1.0)` commits its slice rather than the whole book —
+        // matching how the builder splits cash on the Rust side.
+        let shares: Vec<Real> = match &self.weights {
+            Some(w) => {
+                let total: Real = w.iter().sum();
+                if total <= 0.0 {
+                    return Err(PyValueError::new_err(
+                        "Portfolio.weights: weights must not sum to zero",
+                    ));
+                }
+                w.iter().map(|x| seed * x / total).collect()
+            }
+            None => vec![seed / self.children.len() as Real; self.children.len()],
+        };
+
+        let mut builder = fugazi_core::portfolio::Portfolio::<String>::builder().with_initial_equity(seed);
+        for ((name, child), share) in self.children.iter().zip(&shares) {
+            let bound = child.bind(py);
+            builder = if let Ok(s) = bound.cast::<PyStrategy>() {
+                builder.add(name.clone(), s.borrow().materialize(*share))
+            } else if let Ok(s) = bound.cast::<PyPairsStrategy>() {
+                builder.add(name.clone(), s.borrow().materialize(*share))
+            } else if let Ok(s) = bound.cast::<PyBasketStrategy>() {
+                builder.add(name.clone(), s.borrow().materialize(py, *share))
+            } else if let Ok(s) = bound.cast::<PyMultiAssetStrategy>() {
+                builder.add(name.clone(), s.borrow().materialize(py, *share))
+            } else {
+                // `add` already vetted the type, so this is unreachable.
+                return Err(PyValueError::new_err(
+                    "Portfolio: unsupported child strategy type",
+                ));
+            };
+        }
+        if let Some(w) = &self.weights {
+            builder = builder.weights(fugazi_core::portfolio::policy::Fixed::new(w.clone()));
+        } else {
+            builder = builder.weights(fugazi_core::portfolio::policy::EqualWeight);
+        }
+        if let Some(rebalance) = &self.rebalance {
+            builder = builder.rebalance_on(rebalance.clone());
+        }
+        Ok(builder.build())
+    }
+}

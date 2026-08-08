@@ -531,6 +531,53 @@ candle- or snapshot-rooted (a bare-value signal is rejected). Not bound yet:
 position-anchored protective stops and the Rust recipe catalogue — drop to the
 wallet loop above for those.
 
+### Portfolios
+
+`Portfolio` runs **N different strategies on one account**, behind a single
+aggregate equity curve and blotter — the question none of the other shapes can
+answer. Children are ordinary `Strategy` / `PairsStrategy` / `BasketStrategy` /
+`MultiAssetStrategy` objects:
+
+```python
+snapshots = [ta.Snapshot({"BTC": c, "ETH": c}) for c in stream]
+
+# Root every leaf on the symbol it reads — see the note below.
+btc, eth = ta.close(source=ta.pick("BTC")), ta.close(source=ta.pick("ETH"))
+
+pf = (ta.Portfolio()
+        .add("trend",  ta.Strategy("BTC").long_on(ta.ema(btc, 5).crosses_above(ta.ema(btc, 10)),
+                                                  ta.ema(btc, 5).crosses_below(ta.ema(btc, 10))))
+        .add("revert", ta.Strategy("ETH").long_on(ta.ema(eth, 5).crosses_below(ta.ema(eth, 10)),
+                                                  ta.ema(eth, 5).crosses_above(ta.ema(eth, 10))))
+        .weights([0.7, 0.3]))          # magnitudes; normalized, default equal
+
+report = pf.run(ta.PaperWallet(10_000.0), snapshots)
+report.equity_curve[-1]
+```
+
+**Root your leaves.** A portfolio always feeds children the full multi-symbol
+snapshot, so a bare `ta.close()` — which works in a standalone
+`Strategy(...).run(wallet, candles)`, where each bar is a one-symbol frame —
+has no way to choose an asset here and raises. Wrap each leaf in
+`ta.close(source=ta.pick(sym))`, as the multi-symbol strategies below do.
+
+Each child trades its own notional **ledger** — its slice of the account's cash
+and positions — and sizes against that, so `value_frac(1.0)` in a child still
+means all of *that child's* capital. Every child's intent is then netted into
+one order per symbol. Two consequences follow from sharing a book: children
+trading one symbol in opposite directions cross internally (and pay no spread or
+commission, because that part never traded), and a child's stop takes off only
+its own share.
+
+The wallet passed to `.run()` is a **cash seed only** — a portfolio trades its
+own account, so costs installed on that wallet don't apply. `.rebalance_on(sig)`
+pulls capital back to the target weights when `sig` fires; without it the split
+drifts with P&L. Like the other builders it is immutable: `.add(...)` returns a
+new portfolio.
+
+Not bound: live accounts (`substrate`) and per-child weight *expressions* — for
+those, write the portfolio as a `portfolio:` YAML document and use `load_spec`.
+
 ### Multi-symbol strategies
 
 `PairsStrategy`, `MultiAssetStrategy` and `BasketStrategy` mirror their Rust

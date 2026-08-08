@@ -119,6 +119,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStrategy>()?;
     m.add_class::<PyPairsStrategy>()?;
     m.add_class::<PyMultiAssetStrategy>()?;
+    m.add_class::<PyPortfolio>()?;
     m.add_class::<PyBasketStrategy>()?;
     m.add_class::<PySelection>()?;
     m.add_class::<PyRunReport>()?;

@@ -403,3 +403,110 @@ long:
         ta.load_spec(yaml).evaluate(ta.PaperWallet(1000.0), snaps)
     with pytest.raises(ValueError, match="nope"):
         ta.optimize(yaml, snaps, cash=1000.0, grid=[{}])
+
+
+# ---------------------------------------------------------------------------
+# Portfolio builder — the Python mirror of `Portfolio::builder()`
+# ---------------------------------------------------------------------------
+
+
+def _always_and_never(symbol):
+    """A signal that is always true and one that never is, rooted on `symbol`."""
+    close = ta.close(source=ta.pick(symbol))
+    return close.above(0.0), close.below(0.0)
+
+
+def test_portfolio_builder_runs_children_on_one_account():
+    snaps = _snaps_multi({"A": [100, 105, 110, 115, 120], "B": [50, 50, 50, 50, 50]})
+    a_on, a_off = _always_and_never("A")
+    b_on, b_off = _always_and_never("B")
+
+    pf = (
+        ta.Portfolio()
+        .add("hold_a", ta.Strategy("A").long_on(a_on, a_off))
+        .add("hold_b", ta.Strategy("B").long_on(b_on, b_off))
+        .weights([0.6, 0.4])
+    )
+    report = pf.run(ta.PaperWallet(10_000.0), snaps)
+
+    assert len(report.equity_curve) == len(snaps)
+    assert report.initial_equity == 10_000.0
+    # Both children entered, and each fill is that child's own share.
+    assert len(report.fills) == 2
+    assert {f.order.symbol for f in report.fills} == {"A", "B"}
+
+
+def test_portfolio_builder_matches_the_equivalent_yaml_document():
+    """The two ways to build a portfolio must agree.
+
+    This is the parity that matters: `ta.Portfolio()` and a `portfolio:`
+    document are two front-ends onto the same Rust composite, so a divergence
+    means one of them is wiring it differently.
+    """
+    snaps = _snaps_multi({"A": [100, 102, 104, 106, 108], "B": [50, 51, 52, 53, 54]})
+
+    yaml = """
+    weights: !value [0.6, 0.4]
+    children:
+      - name: hold_a
+        strategy: !buy_and_hold { symbol: A }
+      - name: hold_b
+        strategy: !buy_and_hold { symbol: B }
+    """
+    from_yaml = ta.load_spec(yaml).run(ta.PaperWallet(10_000.0), snaps)
+
+    a_on, a_off = _always_and_never("A")
+    b_on, b_off = _always_and_never("B")
+    from_builder = (
+        ta.Portfolio()
+        .add("hold_a", ta.Strategy("A").long_on(a_on, a_off))
+        .add("hold_b", ta.Strategy("B").long_on(b_on, b_off))
+        .weights([0.6, 0.4])
+        .run(ta.PaperWallet(10_000.0), snaps)
+    )
+
+    assert from_builder.equity_curve == pytest.approx(from_yaml.equity_curve)
+    assert len(from_builder.fills) == len(from_yaml.fills)
+
+
+def test_portfolio_builder_is_immutable():
+    """`.add(...)` returns a new portfolio, matching the other builders."""
+    base = ta.Portfolio()
+    once = base.add("a", ta.Strategy("A"))
+    assert "a" not in repr(base)
+    assert "a" in repr(once)
+
+
+def test_portfolio_builder_rejects_bad_composition():
+    with pytest.raises(ValueError, match="cannot be a child of a Portfolio"):
+        ta.Portfolio().add("nested", ta.Portfolio())
+
+    with pytest.raises(ValueError, match="duplicate child name"):
+        ta.Portfolio().add("x", ta.Strategy("A")).add("x", ta.Strategy("B"))
+
+    with pytest.raises(ValueError, match="must be a Strategy"):
+        ta.Portfolio().add("x", ta.identity())
+
+    snaps = _snaps_single("A", [100, 101])
+    with pytest.raises(ValueError, match="weights"):
+        (
+            ta.Portfolio()
+            .add("x", ta.Strategy("A"))
+            .weights([1.0, 2.0])
+            .run(ta.PaperWallet(1_000.0), snaps)
+        )
+
+    with pytest.raises(ValueError, match="at least one child"):
+        ta.Portfolio().run(ta.PaperWallet(1_000.0), snaps)
+
+
+def test_portfolio_builder_accepts_every_child_shape():
+    """All four shapes are valid children — the composite is heterogeneous."""
+    pf = (
+        ta.Portfolio()
+        .add("single", ta.Strategy("A"))
+        .add("pairs", ta.PairsStrategy("A", "B"))
+        .add("basket", ta.BasketStrategy())
+        .add("multi", ta.MultiAssetStrategy())
+    )
+    assert repr(pf) == "Portfolio(children=[single, pairs, basket, multi])"
