@@ -56,19 +56,19 @@ impl TryFrom<serde_norway::Value> for StrOperand {
 impl StrOperand {
     /// Build as a `Str`-output source. A literal materialises the same
     /// [`ValueStr`] constant the `!value <string>` expression form builds.
-    fn build(
+    fn try_build(
         &self,
         anchor: &Position,
         book: &Book,
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
         root: Option<&Selector<String>>,
-    ) -> Box<dyn DynIndicator> {
+    ) -> Result<Box<dyn DynIndicator>, String> {
         match self {
-            StrOperand::Literal(s) => {
-                dyn_indicator::wrap(ValueStr::<crate::types::Snapshot<String>>::new(s.as_str()))
-            }
-            StrOperand::Expr(e) => e.build(anchor, book, portfolio_book, schema, root),
+            StrOperand::Literal(s) => Ok(dyn_indicator::wrap(ValueStr::<
+                crate::types::Snapshot<String>,
+            >::new(s.as_str()))),
+            StrOperand::Expr(e) => e.try_build(anchor, book, portfolio_book, schema, root),
         }
     }
 }
@@ -640,6 +640,21 @@ fn eps(epsilon: &Option<Real>) -> Real {
     epsilon.unwrap_or(DEFAULT_EPSILON)
 }
 
+/// Prepend `spec`'s own tag to an error message — the signal-layer twin of
+/// [`ExprSpec`]'s `trail`, building the ` > `-separated breadcrumb inside-out
+/// as the failure rises through the recursive build.
+fn trail(spec: &SignalSpec, message: impl std::fmt::Display) -> String {
+    format!(
+        "{} > {message}",
+        crate::spec::typecheck::signal_tag_name(spec)
+    )
+}
+
+/// [`trail`] for an [`ExprSpec`] operand nested inside a signal.
+fn expr_trail(spec: &ExprSpec, message: impl std::fmt::Display) -> String {
+    format!("{} > {message}", crate::spec::typecheck::tag_name(spec))
+}
+
 impl SignalSpec {
     /// Construct the live, runtime-typed signal this spec describes as a
     /// `Box<dyn DynIndicator>` with `output_type() == DynType::Bool`. `anchor`
@@ -654,30 +669,64 @@ impl SignalSpec {
         schema: &Arc<Schema>,
         root: Option<&Selector<String>>,
     ) -> Box<dyn DynIndicator> {
-        use SignalSpec::*;
-        let real = |s: &ExprSpec| AsReal::new(s.build(anchor, book, portfolio_book, schema, root));
-        let boolean =
-            |s: &SignalSpec| AsBool::new(s.build(anchor, book, portfolio_book, schema, root));
+        self.try_build(anchor, book, portfolio_book, schema, root)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
 
-        match self {
+    /// The fallible twin of [`build`](Self::build) — the signal-layer mirror of
+    /// [`ExprSpec::try_build`], carrying the same `!tag > ` breadcrumb
+    /// convention.
+    pub fn try_build(
+        &self,
+        anchor: &Position,
+        book: &Book,
+        portfolio_book: Option<&Book>,
+        schema: &Arc<Schema>,
+        root: Option<&Selector<String>>,
+    ) -> Result<Box<dyn DynIndicator>, String> {
+        use SignalSpec::*;
+        let real = |s: &ExprSpec| -> Result<AsReal, String> {
+            let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
+            AsReal::try_new(built).map_err(|e| expr_trail(s, e))
+        };
+        let boolean = |s: &SignalSpec| -> Result<AsBool, String> {
+            let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
+            AsBool::try_new(built).map_err(|e| trail(s, e))
+        };
+        // `!str_eq` / `!str_ne` lhs: always a nested expression, viewed as Str.
+        let str_expr = |s: &ExprSpec| -> Result<AsStr, String> {
+            let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
+            AsStr::try_new(built).map_err(|e| expr_trail(s, e))
+        };
+        // `!str_eq` / `!str_ne` rhs: a bare string literal or a nested
+        // expression, both viewed as a `Str` source.
+        let str_operand = |s: &StrOperand| -> Result<AsStr, String> {
+            let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
+            AsStr::try_new(built).map_err(|e| match s {
+                StrOperand::Expr(e2) => expr_trail(e2, e),
+                StrOperand::Literal(_) => e,
+            })
+        };
+
+        Ok(match self {
             Gt { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Gt::with_epsilon(
-                real(lhs),
-                real(rhs),
+                real(lhs)?,
+                real(rhs)?,
                 eps(epsilon),
             )),
             Lt { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Lt::with_epsilon(
-                real(lhs),
-                real(rhs),
+                real(lhs)?,
+                real(rhs)?,
                 eps(epsilon),
             )),
             Ge { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Ge::with_epsilon(
-                real(lhs),
-                real(rhs),
+                real(lhs)?,
+                real(rhs)?,
                 eps(epsilon),
             )),
             Le { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Le::with_epsilon(
-                real(lhs),
-                real(rhs),
+                real(lhs)?,
+                real(rhs)?,
                 eps(epsilon),
             )),
             // `!eq` / `!ne` are polymorphic: they dispatch to
@@ -695,32 +744,33 @@ impl SignalSpec {
             Ne { lhs, rhs, epsilon } => build_polymorphic_eq(
                 lhs, rhs, *epsilon, true, anchor, book, portfolio_book, schema, root,
             ),
-            Above { source, level } => dyn_indicator::wrap(real(source).above(*level)),
-            Below { source, level } => dyn_indicator::wrap(real(source).below(*level)),
+            Above { source, level } => dyn_indicator::wrap(real(source)?.above(*level)),
+            Below { source, level } => dyn_indicator::wrap(real(source)?.below(*level)),
 
             // A crossover clones its operands (the `Change` half needs a fresh
             // comparison state); rebuild each operand from the spec so we get
             // two independently-advanced instances.
             CrossesAbove { lhs, rhs } => {
-                let cmp = || real(lhs).gt(real(rhs));
-                dyn_indicator::wrap(cmp().and(cmp().changed()))
+                let (l, r) = (real(lhs)?, real(rhs)?);
+                let cmp = l.gt(r);
+                dyn_indicator::wrap(cmp.clone().and(cmp.changed()))
             }
             CrossesBelow { lhs, rhs } => {
-                let cmp = || real(lhs).lt(real(rhs));
-                dyn_indicator::wrap(cmp().and(cmp().changed()))
+                let (l, r) = (real(lhs)?, real(rhs)?);
+                let cmp = l.lt(r);
+                dyn_indicator::wrap(cmp.clone().and(cmp.changed()))
             }
 
-            And { lhs, rhs } => dyn_indicator::wrap(boolean(lhs).and(boolean(rhs))),
-            Or { lhs, rhs } => dyn_indicator::wrap(boolean(lhs).or(boolean(rhs))),
-            Xor { lhs, rhs } => dyn_indicator::wrap(boolean(lhs).xor(boolean(rhs))),
+            And { lhs, rhs } => dyn_indicator::wrap(boolean(lhs)?.and(boolean(rhs)?)),
+            Or { lhs, rhs } => dyn_indicator::wrap(boolean(lhs)?.or(boolean(rhs)?)),
+            Xor { lhs, rhs } => dyn_indicator::wrap(boolean(lhs)?.xor(boolean(rhs)?)),
             All(specs) => {
                 if specs.is_empty() {
                     dyn_indicator::wrap(self::ValueBool::<crate::types::Snapshot<String>>::new(true))
                 } else {
-                    let mut acc =
-                        AsBool::new(specs[0].build(anchor, book, portfolio_book, schema, root));
+                    let mut acc = boolean(&specs[0])?;
                     for s in &specs[1..] {
-                        let next = AsBool::new(s.build(anchor, book, portfolio_book, schema, root));
+                        let next = boolean(s)?;
                         // AsBool `and` AsBool → concrete Combine; wrap in AsBool
                         // by round-tripping through the box so the fold's accumulator
                         // stays a single library type.
@@ -733,22 +783,21 @@ impl SignalSpec {
                 if specs.is_empty() {
                     dyn_indicator::wrap(self::ValueBool::<crate::types::Snapshot<String>>::new(false))
                 } else {
-                    let mut acc =
-                        AsBool::new(specs[0].build(anchor, book, portfolio_book, schema, root));
+                    let mut acc = boolean(&specs[0])?;
                     for s in &specs[1..] {
-                        let next = AsBool::new(s.build(anchor, book, portfolio_book, schema, root));
+                        let next = boolean(s)?;
                         acc = AsBool::new(dyn_indicator::wrap(acc.or(next)));
                     }
                     dyn_indicator::wrap(acc)
                 }
             }
-            Not(inner) => dyn_indicator::wrap(boolean(inner).not()),
-            Changed(inner) => dyn_indicator::wrap(boolean(inner).changed()),
-            ChangedReal(inner) => dyn_indicator::wrap(real(inner).changed()),
-            BecameTrue(inner) => dyn_indicator::wrap(boolean(inner).became_true()),
-            BecameFalse(inner) => dyn_indicator::wrap(boolean(inner).became_false()),
+            Not(inner) => dyn_indicator::wrap(boolean(inner)?.not()),
+            Changed(inner) => dyn_indicator::wrap(boolean(inner)?.changed()),
+            ChangedReal(inner) => dyn_indicator::wrap(real(inner)?.changed()),
+            BecameTrue(inner) => dyn_indicator::wrap(boolean(inner)?.became_true()),
+            BecameFalse(inner) => dyn_indicator::wrap(boolean(inner)?.became_false()),
             Unstable { signal } => {
-                dyn_indicator::unstable_wrap(signal.build(anchor, book, portfolio_book, schema, root))
+                dyn_indicator::unstable_wrap(signal.try_build(anchor, book, portfolio_book, schema, root)?)
             }
             Value(b) => {
                 dyn_indicator::wrap(self::ValueBool::<crate::types::Snapshot<String>>::new(*b))
@@ -759,16 +808,14 @@ impl SignalSpec {
             SignalSpec::Every(n) => {
                 dyn_indicator::wrap(self::Every::<crate::types::Snapshot<String>>::new(*n))
             }
-            Get { key } => build_signal_get(schema, key, root),
+            Get { key } => build_signal_get(schema, key, root)?,
             StrEq { lhs, rhs } => {
-                let lhs = AsStr::new(lhs.build(anchor, book, portfolio_book, schema, root));
-                let rhs = AsStr::new(rhs.build(anchor, book, portfolio_book, schema, root));
-                dyn_indicator::wrap(compare::StrEq::new(lhs, rhs))
+                let (l, r) = (str_expr(lhs)?, str_operand(rhs)?);
+                dyn_indicator::wrap(compare::StrEq::new(l, r))
             }
             StrNe { lhs, rhs } => {
-                let lhs = AsStr::new(lhs.build(anchor, book, portfolio_book, schema, root));
-                let rhs = AsStr::new(rhs.build(anchor, book, portfolio_book, schema, root));
-                dyn_indicator::wrap(compare::StrNe::new(lhs, rhs))
+                let (l, r) = (str_expr(lhs)?, str_operand(rhs)?);
+                dyn_indicator::wrap(compare::StrNe::new(l, r))
             }
 
             IsWeekday => dyn_indicator::wrap(self::IsWeekday::of(pick_any_root())),
@@ -777,7 +824,7 @@ impl SignalSpec {
                 let exists = schema.index_of(name.as_str()).is_some();
                 dyn_indicator::wrap(self::ValueBool::<crate::types::Snapshot<String>>::new(exists))
             }
-        }
+        })
     }
 }
 
@@ -855,33 +902,35 @@ fn build_signal_get(
     schema: &Arc<Schema>,
     key: &str,
     root: Option<&Selector<String>>,
-) -> Box<dyn DynIndicator> {
+) -> Result<Box<dyn DynIndicator>, String> {
     match schema.type_of_key(key) {
-        Some(OverlayType::Bool) => dyn_indicator::wrap(GetBool::of(schema, key, pick_root(root))),
-        Some(OverlayType::Real) => panic!(
+        Some(OverlayType::Bool) => {
+            Ok(dyn_indicator::wrap(GetBool::of(schema, key, pick_root(root))))
+        }
+        Some(OverlayType::Real) => Err(format!(
             "!get {{ key: {key:?} }} in signal position: column is Real, but a signal must be \
              Bool. Use a comparison like `!gt {{ lhs: !get {{ key: {key:?} }}, rhs: ... }}` \
              instead.",
-        ),
-        Some(OverlayType::Str) => panic!(
+        )),
+        Some(OverlayType::Str) => Err(format!(
             "!get {{ key: {key:?} }} in signal position: column is Str, but a signal must be \
              Bool. Wrap it in `!str_eq {{ lhs: !get {{ key: {key:?} }}, rhs: \"value\" }}` \
              (or `!str_ne`) instead.",
-        ),
+        )),
         None => {
             let registered: Vec<&str> = schema.keys().collect();
             if registered.is_empty() {
-                panic!(
+                Err(format!(
                     "!get {{ key: {key:?} }} in signal position: no overlay side channel is \
                      bound — feed `--series` data that carries additional (non-OHLCV) columns \
                      to attach overlays",
-                );
+                ))
             } else {
-                panic!(
+                Err(format!(
                     "!get {{ key: {key:?} }} in signal position: overlay column not registered. \
                      Registered columns: {}",
                     registered.join(", "),
-                );
+                ))
             }
         }
     }
