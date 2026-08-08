@@ -6,7 +6,7 @@
 //! Every child strategy in a portfolio needs its own accounting — its own
 //! cash, its own bracket table, its own equity for `value_frac` sizing — but
 //! [`backtest::run`](crate::backtest::run) only sees one wallet. The seam
-//! here is a shared [`Rc<RefCell<PortfolioInner>>`]: the outer
+//! here is a shared `Arc<Mutex<PortfolioInner>>`: the outer
 //! [`PortfolioWallet`] reports aggregate reads (equity, funds, net position)
 //! to the driver, while each child trades through a [`SubWalletHandle`] that
 //! delegates to its own [`PaperWallet`] and namespaces its OrderIds into a
@@ -20,10 +20,10 @@
 //! working against the design, and the panic is the loudest signal we can
 //! give.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::rc::Rc;
+
+use std::sync::{Arc, Mutex};
 
 use crate::costs::TradingCosts;
 use crate::types::{Candle, Real};
@@ -32,7 +32,7 @@ use crate::wallet::{
 };
 
 /// The interior state a [`PortfolioWallet`] and every
-/// [`SubWalletHandle`] share via `Rc<RefCell<_>>`. Carries one
+/// [`SubWalletHandle`] share via `Arc<Mutex<_>>`. Carries one
 /// [`PaperWallet`] per child plus the id-translation tables needed to route
 /// fills back to their owning child.
 ///
@@ -254,19 +254,19 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
 /// Multiple views share the same interior, so cloning is a plain [`Rc`]
 /// bump.
 pub struct PortfolioWallet<Sym> {
-    inner: Rc<RefCell<PortfolioInner<Sym>>>,
+    inner: Arc<Mutex<PortfolioInner<Sym>>>,
 }
 
 impl<Sym> Clone for PortfolioWallet<Sym> {
     fn clone(&self) -> Self {
         Self {
-            inner: Rc::clone(&self.inner),
+            inner: Arc::clone(&self.inner),
         }
     }
 }
 
 impl<Sym> PortfolioWallet<Sym> {
-    pub(super) fn from_inner(inner: Rc<RefCell<PortfolioInner<Sym>>>) -> Self {
+    pub(super) fn from_inner(inner: Arc<Mutex<PortfolioInner<Sym>>>) -> Self {
         Self { inner }
     }
 }
@@ -279,19 +279,19 @@ impl<Sym: Clone + Eq + Hash> PortfolioWallet<Sym> {
     /// # Panics
     /// Panics if `idx` is out of range.
     pub fn sub_equity(&self, idx: usize) -> Reference {
-        self.inner.borrow().subs[idx].equity()
+        self.inner.lock().expect("portfolio lock poisoned").subs[idx].equity()
     }
 
 }
 
 impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PortfolioWallet<Sym> {
     fn funds(&self) -> Reference {
-        let inner = self.inner.borrow();
+        let inner = self.inner.lock().expect("portfolio lock poisoned");
         Reference(inner.subs.iter().map(|w| w.funds().0).sum())
     }
 
     fn position(&self, symbol: &Sym) -> Units<Sym> {
-        let inner = self.inner.borrow();
+        let inner = self.inner.lock().expect("portfolio lock poisoned");
         let amount: Real = inner.subs.iter().map(|w| w.position(symbol).amount).sum();
         Units {
             symbol: symbol.clone(),
@@ -303,19 +303,19 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PortfolioWallet<Sym> {
         // Sub-wallets fed from the same driver see the same price; take the
         // first one that has any.
         self.inner
-            .borrow()
+            .lock().expect("portfolio lock poisoned")
             .subs
             .iter()
             .find_map(|w| w.price(symbol))
     }
 
     fn equity(&self) -> Reference {
-        let inner = self.inner.borrow();
+        let inner = self.inner.lock().expect("portfolio lock poisoned");
         Reference(inner.subs.iter().map(|w| w.equity().0).sum())
     }
 
     fn update(&mut self, symbol: Sym, candle: Candle) -> Vec<Order<Sym>> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self.inner.lock().expect("portfolio lock poisoned");
         // Feed every sub the same bar so their pending queues flush, their
         // resting brackets trigger, and their mark-to-market updates. Then
         // translate each fill's sub-local id into the portfolio-wide id
@@ -394,31 +394,31 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PortfolioWallet<Sym> {
 /// [`update`](Wallet::update) is a no-op / panic path: the driver only calls
 /// `update` on the outer [`PortfolioWallet`], never on a handle.
 pub(super) struct SubWalletHandle<Sym> {
-    inner: Rc<RefCell<PortfolioInner<Sym>>>,
+    inner: Arc<Mutex<PortfolioInner<Sym>>>,
     idx: usize,
 }
 
 impl<Sym> SubWalletHandle<Sym> {
-    pub(super) fn new(inner: Rc<RefCell<PortfolioInner<Sym>>>, idx: usize) -> Self {
+    pub(super) fn new(inner: Arc<Mutex<PortfolioInner<Sym>>>, idx: usize) -> Self {
         Self { inner, idx }
     }
 }
 
 impl<Sym: Clone + Eq + Hash> Wallet<Sym> for SubWalletHandle<Sym> {
     fn funds(&self) -> Reference {
-        self.inner.borrow().subs[self.idx].funds()
+        self.inner.lock().expect("portfolio lock poisoned").subs[self.idx].funds()
     }
 
     fn position(&self, symbol: &Sym) -> Units<Sym> {
-        self.inner.borrow().subs[self.idx].position(symbol)
+        self.inner.lock().expect("portfolio lock poisoned").subs[self.idx].position(symbol)
     }
 
     fn price(&self, symbol: &Sym) -> Option<Reference> {
-        self.inner.borrow().subs[self.idx].price(symbol)
+        self.inner.lock().expect("portfolio lock poisoned").subs[self.idx].price(symbol)
     }
 
     fn equity(&self) -> Reference {
-        self.inner.borrow().subs[self.idx].equity()
+        self.inner.lock().expect("portfolio lock poisoned").subs[self.idx].equity()
     }
 
     fn update(&mut self, _symbol: Sym, _candle: Candle) -> Vec<Order<Sym>> {
@@ -432,25 +432,25 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for SubWalletHandle<Sym> {
     }
 
     fn set_position(&mut self, target: Units<Sym>) -> Result<Ack<Sym>, WalletError> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self.inner.lock().expect("portfolio lock poisoned");
         let ack = inner.subs[self.idx].set_position(target)?;
         Ok(inner.register_ack(self.idx, ack))
     }
 
     fn set(&mut self, symbol: Sym, side: Side, size: Size) -> Result<Ack<Sym>, WalletError> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self.inner.lock().expect("portfolio lock poisoned");
         let ack = inner.subs[self.idx].set(symbol, side, size)?;
         Ok(inner.register_ack(self.idx, ack))
     }
 
     fn close(&mut self, symbol: Sym) -> Result<Ack<Sym>, WalletError> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self.inner.lock().expect("portfolio lock poisoned");
         let ack = inner.subs[self.idx].close(symbol)?;
         Ok(inner.register_ack(self.idx, ack))
     }
 
     fn set_stop(&mut self, symbol: Sym, trigger: Reference) -> Result<Ack<Sym>, WalletError> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self.inner.lock().expect("portfolio lock poisoned");
         let ack = inner.subs[self.idx].set_stop(symbol, trigger)?;
         Ok(inner.register_ack(self.idx, ack))
     }
@@ -460,13 +460,13 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for SubWalletHandle<Sym> {
         symbol: Sym,
         trigger: Reference,
     ) -> Result<Ack<Sym>, WalletError> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self.inner.lock().expect("portfolio lock poisoned");
         let ack = inner.subs[self.idx].set_take_profit(symbol, trigger)?;
         Ok(inner.register_ack(self.idx, ack))
     }
 
     fn cancel_protective(&mut self, symbol: &Sym) -> Result<(), WalletError> {
-        self.inner.borrow_mut().subs[self.idx].cancel_protective(symbol)
+        self.inner.lock().expect("portfolio lock poisoned").subs[self.idx].cancel_protective(symbol)
     }
 }
 

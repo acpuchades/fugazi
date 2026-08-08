@@ -24,7 +24,7 @@
 //! the same shape as [`BasketStrategy`](crate::strategies::BasketStrategy) —
 //! and internally owns a [`PortfolioWallet`] carrying one
 //! [`PaperWallet`](crate::PaperWallet) per child. The pair share their
-//! interior via [`Rc<RefCell<_>>`]. A caller that wants to drive a
+//! interior via `Arc<Mutex<_>>`. A caller that wants to drive a
 //! portfolio:
 //!
 //! ```no_run
@@ -127,15 +127,14 @@
 //! surface can come later).
 //!
 //! [`PortfolioWallet`]: crate::portfolio::PortfolioWallet
-//! [`Rc<RefCell<_>>`]: std::rc::Rc
 
 pub mod policy;
 pub mod rebalance;
 pub mod wallet;
 
-use std::cell::RefCell;
 use std::hash::Hash;
-use std::rc::Rc;
+
+use std::sync::{Arc, Mutex};
 
 use crate::costs::TradingCosts;
 use crate::indicator::Indicator;
@@ -160,7 +159,7 @@ pub use self::wallet::PortfolioWallet;
 struct PortfolioChild<Sym> {
     #[allow(dead_code)] // reserved for future per-child reporting.
     name: String,
-    strategy: Box<dyn Strategy<Input = Snapshot<Sym>, Symbol = Sym>>,
+    strategy: Box<dyn Strategy<Input = Snapshot<Sym>, Symbol = Sym> + Send>,
 }
 
 /// The composite [`Strategy`] documented on the module. Own it, hand its
@@ -173,18 +172,18 @@ struct PortfolioChild<Sym> {
 /// and the [`Strategy`] impl.
 /// A boolean chain over the portfolio's `Snapshot<Sym>` — the shape used
 /// by the [`rebalance_on`](PortfolioBuilder::rebalance_on) gate.
-type RebalanceSignal<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool>>;
+type RebalanceSignal<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool> + Send>;
 
 /// A real chain over the portfolio's `Snapshot<Sym>` — the shape used by
 /// each child's [`weight_share`](PortfolioBuilder::weight_shares) template
 /// instance. Portfolio normalizes the vector of chain values into weights
 /// at each rebalance-fire.
-type WeightShareChain<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real>>;
+type WeightShareChain<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real> + Send>;
 
 pub struct Portfolio<Sym> {
     children: Vec<PortfolioChild<Sym>>,
-    inner: Rc<RefCell<PortfolioInner<Sym>>>,
-    policy: Box<dyn WeightPolicy>,
+    inner: Arc<Mutex<PortfolioInner<Sym>>>,
+    policy: Box<dyn WeightPolicy + Send>,
     bars_seen: usize,
     /// The **rebalance gate**: on each bar `trade()` runs one rebalance
     /// cycle only when this signal reads `true`. Default is
@@ -204,7 +203,7 @@ pub struct Portfolio<Sym> {
     /// contributor's cash-phase donation couldn't cover. Defaults to
     /// [`Proportional`]. Install a custom impl via
     /// [`PortfolioBuilder::position_rebalancer`].
-    position_rebalancer: Box<dyn PositionRebalancer<Sym>>,
+    position_rebalancer: Box<dyn PositionRebalancer<Sym> + Send>,
     /// Aggregate [`Book`] of the portfolio, marked to market on each
     /// [`update`](Strategy::update) from the sum of every sub-wallet's
     /// equity. Handed out by [`book`](Self::book); the CLI's
@@ -232,7 +231,7 @@ impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
     /// plain [`Rc`](std::rc::Rc) bump), so a second view for
     /// side-inspection is cheap; only one should be handed to the driver.
     pub fn wallet_view(&self) -> PortfolioWallet<Sym> {
-        PortfolioWallet::from_inner(Rc::clone(&self.inner))
+        PortfolioWallet::from_inner(Arc::clone(&self.inner))
     }
 
     /// The number of children in this portfolio, in [`add`](PortfolioBuilder::add)
@@ -281,7 +280,7 @@ impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
     /// idempotent and per-symbol lookup wins over the fallback default.
     pub fn install_costs_for(&mut self, symbol: &Sym, costs: TradingCosts) {
         self.inner
-            .borrow_mut()
+            .lock().expect("portfolio lock poisoned")
             .subs
             .iter_mut()
             .for_each(|w| w.set_costs_for(symbol.clone(), costs.clone()));
@@ -291,7 +290,7 @@ impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
     /// [`WeightPolicy::observe`] call. Kept private because policies
     /// read this indirectly via the trait.
     fn sample_children(&self) -> Vec<ChildSample> {
-        let inner = self.inner.borrow();
+        let inner = self.inner.lock().expect("portfolio lock poisoned");
         inner
             .subs
             .iter()
@@ -363,7 +362,7 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
         // route the fill to only that child. Fills whose id isn't in the
         // map either weren't tracked (defensive — shouldn't happen with
         // paper subs) or already routed; drop silently either way.
-        let owner = self.inner.borrow_mut().owners.remove(&order.id);
+        let owner = self.inner.lock().expect("portfolio lock poisoned").owners.remove(&order.id);
         if let Some(idx) = owner {
             self.children[idx].strategy.on_fill(order);
         }
@@ -389,7 +388,7 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
             if !child.strategy.is_ready() {
                 continue;
             }
-            let mut handle = SubWalletHandle::new(Rc::clone(&self.inner), i);
+            let mut handle = SubWalletHandle::new(Arc::clone(&self.inner), i);
             child.strategy.trade(&mut handle);
         }
 
@@ -416,7 +415,7 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
         // link stays wired for any indicator handles holding a clone).
         // Sub-wallets each restore to their own seed.
         self.agg_book.reset();
-        self.inner.borrow_mut().reset();
+        self.inner.lock().expect("portfolio lock poisoned").reset();
         self.bars_seen = 0;
     }
 }
@@ -474,7 +473,7 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Portfolio<Sym> {
         }
 
         let shortfalls = {
-            let mut inner = self.inner.borrow_mut();
+            let mut inner = self.inner.lock().expect("portfolio lock poisoned");
             let total: Real = inner.subs.iter().map(|w| w.equity().0).sum();
             let targets: Vec<Real> = weights.iter().map(|w| total * w / sum_w).collect();
             inner.rebalance_cash_to(&targets)
@@ -503,7 +502,7 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Portfolio<Sym> {
             // it uses for equity accounting; positions without a mark
             // are skipped defensively (their value would be undefined).
             let positions_snapshot: Vec<PositionInfo<Sym>> = {
-                let inner = self.inner.borrow();
+                let inner = self.inner.lock().expect("portfolio lock poisoned");
                 let sub = &inner.subs[i];
                 sub.positions()
                     .filter_map(|u| {
@@ -524,7 +523,7 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Portfolio<Sym> {
             if targets.is_empty() {
                 continue;
             }
-            let mut handle = SubWalletHandle::new(Rc::clone(&self.inner), i);
+            let mut handle = SubWalletHandle::new(Arc::clone(&self.inner), i);
             for target in targets {
                 // Ignore the Ack — the fill routing tables are already
                 // updated by SubWalletHandle::set_position, and any
@@ -547,14 +546,14 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Portfolio<Sym> {
 /// portfolio has no meaning.
 pub struct PortfolioBuilder<Sym> {
     children: Vec<PortfolioChild<Sym>>,
-    policy: Option<Box<dyn WeightPolicy>>,
+    policy: Option<Box<dyn WeightPolicy + Send>>,
     initial_equity: Real,
     costs: Option<TradingCosts>,
     rebalance: Option<RebalanceSignal<Sym>>,
     share_indicators: Vec<WeightShareChain<Sym>>,
     /// Position-phase rebalancer. `None` picks the [`Proportional`]
     /// default at build; set via [`position_rebalancer`](Self::position_rebalancer).
-    position_rebalancer: Option<Box<dyn PositionRebalancer<Sym>>>,
+    position_rebalancer: Option<Box<dyn PositionRebalancer<Sym> + Send>>,
     /// Pre-supplied aggregate [`Book`] — when set, the built portfolio
     /// uses this book (rather than a freshly-seeded one) so a caller that
     /// needed the handle *before* `build()` (typically the CLI's
@@ -600,7 +599,7 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
     pub fn add(
         mut self,
         name: impl Into<String>,
-        strategy: impl Strategy<Input = Snapshot<Sym>, Symbol = Sym> + 'static,
+        strategy: impl Strategy<Input = Snapshot<Sym>, Symbol = Sym> + Send + 'static,
     ) -> Self {
         self.children.push(PortfolioChild {
             name: name.into(),
@@ -613,7 +612,7 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
     /// [`weights`](WeightPolicy::weights) drives the initial cash split.
     ///
     /// Defaults to [`EqualWeight`](policy::EqualWeight) if never set.
-    pub fn weights(mut self, policy: impl WeightPolicy) -> Self {
+    pub fn weights(mut self, policy: impl WeightPolicy + Send) -> Self {
         self.policy = Some(Box::new(policy));
         self
     }
@@ -660,7 +659,7 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
     /// the crate.
     pub fn rebalance_on<S>(mut self, signal: S) -> Self
     where
-        S: Indicator<Input = Snapshot<Sym>, Output = bool> + 'static,
+        S: Indicator<Input = Snapshot<Sym>, Output = bool> + Send + 'static,
     {
         self.rebalance = Some(Box::new(signal));
         self
@@ -760,7 +759,7 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
             share_indicators.len(),
             children.len(),
         );
-        let policy: Box<dyn WeightPolicy> = policy.unwrap_or_else(|| Box::new(policy::EqualWeight));
+        let policy: Box<dyn WeightPolicy + Send> = policy.unwrap_or_else(|| Box::new(policy::EqualWeight));
         let n = children.len();
         let weights = policy.weights(n);
         assert_eq!(
@@ -771,7 +770,7 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
         );
         let allocations = allocate_funds(initial_equity, &weights);
         let subs = seed_subs::<Sym>(&allocations, costs.as_ref());
-        let inner = Rc::new(RefCell::new(PortfolioInner::new(subs)));
+        let inner = Arc::new(Mutex::new(PortfolioInner::new(subs)));
         let rebalance: RebalanceSignal<Sym> =
             rebalance.unwrap_or_else(|| Box::new(ValueBool::<Snapshot<Sym>>::new(false)));
         // Aggregate book: use the pre-supplied handle when a caller wired
@@ -779,7 +778,7 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
         // the handle before `build()` to wire per-child links);
         // otherwise seed a fresh book at the portfolio's initial equity.
         let agg_book = agg_book.unwrap_or_else(|| Book::new(initial_equity));
-        let position_rebalancer: Box<dyn PositionRebalancer<Sym>> =
+        let position_rebalancer: Box<dyn PositionRebalancer<Sym> + Send> =
             position_rebalancer.unwrap_or_else(|| Box::new(Proportional));
         Portfolio {
             children,

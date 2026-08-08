@@ -682,7 +682,7 @@ impl PortfolioSpec {
                     dyn crate::indicator::Indicator<
                         Input = Snapshot<String>,
                         Output = Real,
-                    >,
+                    > + Send,
                 >,
             > = Vec::new();
             for (i, c) in self.children.iter().enumerate() {
