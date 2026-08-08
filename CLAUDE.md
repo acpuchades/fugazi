@@ -2,6 +2,11 @@
 
 Guidance for Claude Code in this repo.
 
+**Adding an indicator / signal / operator / metric / provider?** Follow
+[doc/CONTRIBUTING.md](doc/CONTRIBUTING.md) — it lists every place each change has
+to touch, in order, and which of them are compiler- or test-enforced. This file
+is the architecture; that one is the procedure.
+
 ## What this is
 
 `fugazi` is a Rust library (edition 2024) of **incremental** technical-analysis primitives. Every primitive owns its state and advances one sample at a time via `update()` in ~O(1) — same code for live streaming and batch backtesting.

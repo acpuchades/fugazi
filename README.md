@@ -970,6 +970,17 @@ Install with `pip install fugazi` (prebuilt wheels for Linux, macOS and
 Windows), or build from a checkout with `cd python && maturin develop --release`.
 See the [Python README](doc/PYTHON.md) for the full API.
 
+## Documentation
+
+| | |
+| --- | --- |
+| [doc/STRATEGIES.md](doc/STRATEGIES.md) | The strategy-file format — every YAML tag, all five document shapes |
+| [doc/CLI.md](doc/CLI.md) | `run`, `optimize`, `get`, `check`, `list` and their flags |
+| [doc/METRICS.md](doc/METRICS.md) | What each metric means and how it's computed |
+| [doc/COSTS.md](doc/COSTS.md) | Commission, spread and slippage models |
+| [doc/PYTHON.md](doc/PYTHON.md) | The Python API |
+| [doc/CONTRIBUTING.md](doc/CONTRIBUTING.md) | Recipes for adding an indicator, signal, metric or provider |
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
