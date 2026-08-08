@@ -27,7 +27,7 @@ identical across all five.
 | `pairs:` | [`PairsStrategy`](../src/strategies/pairs.rs) | [Pairs](#pairs-documents) | two, named by `left` / `right` |
 | `basket:` | [`BasketStrategy`](../src/strategies/basket.rs) | [Basket](#basket-documents) | N — cross-sectional rank across the input universe |
 | `multi:` | [`MultiAssetStrategy`](../src/strategies/multi_asset.rs) | [Multi-asset](#multi-asset-documents) | N — same signals applied independently per symbol |
-| `portfolio:` | [`Portfolio`](../src/portfolio/mod.rs) | [Portfolio](#portfolio-documents) | N — several *different* strategies, each with its own sub-wallet |
+| `portfolio:` | [`Portfolio`](../src/portfolio/mod.rs) | [Portfolio](#portfolio-documents) | N — several *different* strategies sharing one account |
 
 The first four all run **one** decision shape. `portfolio:` is the odd one: it
 composes several of the others, so reach for it when a portfolio combines
@@ -50,7 +50,7 @@ without data.
 
 > This document is the syntax reference. For the surrounding CLI (`--series`,
 > `--params`, output files, console output) see the
-> [Command-line backtester](README.md#command-line-backtester) section of the
+> [Command-line backtester](../README.md#command-line-backtester) section of the
 > README. For the library API the vocabulary mirrors, see the rest of the README.
 
 > **Single-series and cross-asset.** Every existing strategy YAML keeps
@@ -548,12 +548,27 @@ Costs stay on the command line and are resolved per symbol, so a scoped
 `--costs 'BTC:0.001,ETH:0.0005'` applies per leg — see
 [CLI § `--costs`](CLI.md#--costs).
 
-**Not yet wired:** per-side protective levels (a basket has no `stop_loss` /
-`take_profit` slot, and the `entry` / `peak` / `trough`
-[position sources](#position-anchored-sources-bare-words) always read `None`
-inside a `score` / `sizing` expression), and `fugazi optimize` on a basket
-document. The [book-anchored sizing recipes](#sizing-recipes) *are* wired, and
-read the basket's aggregate equity curve.
+### Per-leg protective levels
+
+`long:` and `short:` blocks carry `stop_loss` / `take_profit` templates applied
+to **each leg on that side**, anchored to that symbol's own position — so
+`!entry`, `!peak` and `!trough` mean what they do on a `single:` document:
+
+```yaml
+long:
+  stop_loss: !mul { lhs: !peak, rhs: !value 0.9 }        # 10% trailing stop
+short:
+  take_profit: !mul { lhs: !entry, rhs: !value 0.95 }
+```
+
+These blocks take *only* the two protective keys — a basket's entries and exits
+come from its `selection` rule, not from `enter` / `exit` signals.
+
+One thing that genuinely doesn't work: `!entry` / `!peak` / `!trough`
+([position sources](#position-anchored-sources-bare-words)) always read `None`
+inside a `score` or `sizing` expression, which are evaluated before any position
+exists. The [book-anchored sizing recipes](#sizing-recipes) *are* available
+there, and read the basket's aggregate equity curve.
 
 See [`examples/basket.yml`](../examples/basket.yml) for the annotated version.
 
@@ -622,14 +637,14 @@ Protective levels (`stop_loss` / `take_profit`) inside a `long` /
 — `!entry`, `!peak`, `!trough` compose into per-leg trailing stops
 exactly as on `single:`.
 
-**Not yet wired:** `fugazi optimize` on a `multi:` document (bails, same
-as `basket:` today).
-
 ## Portfolio documents
 
-`portfolio:@file.yml` runs **N different strategies side by side**, each with
-its own sub-wallet, behind one aggregate equity curve and blotter. The other
-four shapes each run a single decision rule; this one composes them.
+`portfolio:@file.yml` runs **N different strategies side by side on one
+account**, behind a single aggregate equity curve and blotter. The other four
+shapes each run a single decision rule; this one composes them.
+
+One account is deliberate: it is what a real deployment has, so the same
+document backtests and trades live (see [How capital moves](#how-capital-moves)).
 
 Reach for it when the strategies differ. If you want the *same* rule across many
 symbols, `multi:` is smaller and cheaper; if you want a cross-sectional rank,
@@ -694,17 +709,42 @@ children. Referencing an arg the child didn't declare is a build error.
 
 ### How capital moves
 
-Each child gets its own sub-wallet, seeded with its share of `--cash`, and sizes
-against **its own** equity — `value_frac(1.0)` in a child means all of *that
-child's* capital, not the portfolio's. Fills route only to the child that owns
-the order.
+The portfolio trades **one account**. Each child owns a *ledger* rather than a
+wallet — bookkeeping recording which slice of the account's cash and positions
+belongs to it — and sizes against **its own** ledger, so `value_frac(1.0)` in a
+child still means all of *that child's* capital, not the portfolio's. Fills are
+attributed back to the children that caused them at the real fill price, so
+per-child P&L is built from actual executions rather than simulated ones.
+
+Each bar the portfolio combines every child's intent into **one order per
+symbol**. Three consequences are worth knowing before you rely on the numbers:
+
+- **Children trading one symbol in opposite directions cross internally.** Only
+  the imbalance reaches the market; the offsetting part settles at the bar's
+  open and pays no spread or commission, because it never traded. A portfolio
+  whose children constantly trade against each other will look slightly better
+  than it would live.
+- **A child's stop takes off only that child's share** — but the account holds
+  one resting bracket per symbol, so when several children want a stop on the
+  same symbol, the one nearest to triggering is the one that rests. That is the
+  one that would fire first anyway; if two would be hit on the same bar, the
+  second exits a bar later.
+- **A child cannot spend past its own slice**, even when a sibling is sitting on
+  idle cash. The refusal appears in the run's rejection banner exactly as it
+  would for a standalone strategy.
+
+Resting limit entries are not available inside a portfolio: a limit has no owner
+while it rests, so it cannot be netted, and a child asking for one is told so
+rather than having the eventual fill guessed at.
 
 Without `rebalance_on:` the split drifts with P&L, which is usually what you
-want. When it fires, each cycle first shifts free cash between sub-wallets, then
-covers any remaining shortfall by scaling positions down (`!proportional`
-shrinks every position uniformly; `!largest_first` closes the biggest ones
-first). Freed cash lands the next bar, so a portfolio of fully-invested children
-takes an extra fire to converge.
+want. When it fires, moving cash between children is pure bookkeeping — the
+account balance never moves, only the notional split of it — so it costs
+nothing and generates no orders. Only a child too *invested* to reach its
+target (rather than merely cash-poor) needs positions scaled down
+(`!proportional` shrinks every position uniformly; `!largest_first` closes the
+biggest ones first); that lands as ordinary flow on the next bar, so such a
+portfolio takes an extra fire to converge.
 
 One caveat worth knowing: a child that hard-targets 100% invested (a naked
 `!buy_and_hold`) will simply re-enter on the next bar and undo the rebalance.

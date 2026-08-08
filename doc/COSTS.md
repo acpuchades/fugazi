@@ -307,7 +307,7 @@ those — omit `--costs` and every output byte is unchanged):
   away.
 
 The full `costs.*` catalogue lives in
-[`METRICS.md`](METRICS.md#costs----cost-model-aggregates).
+[`METRICS.md`](METRICS.md#costs--cost-model-aggregates).
 
 ## Comparison with other backtesters
 

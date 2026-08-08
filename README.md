@@ -333,6 +333,52 @@ for candle in feed {
 let _orders = wallet.orders();        // the trade blotter
 ```
 
+### You don't have to write one from scratch
+
+The type above is what a `Strategy` *is*, and worth reading once — but five
+ready-made shapes cover most of what people actually build, each configurable in
+Rust or from a YAML file (see [doc/STRATEGIES.md](doc/STRATEGIES.md)):
+
+| Type | Shape |
+| --- | --- |
+| [`SingleAssetStrategy`](https://docs.rs/fugazi/latest/fugazi/strategies/struct.SingleAssetStrategy.html) | long / flat / short on one symbol, from four signal slots plus protective levels |
+| [`PairsStrategy`](https://docs.rs/fugazi/latest/fugazi/strategies/struct.PairsStrategy.html) | long / flat / short on the spread between two symbols |
+| [`BasketStrategy`](https://docs.rs/fugazi/latest/fugazi/strategies/struct.BasketStrategy.html) | cross-sectional: score every symbol, go long the top and short the bottom |
+| [`MultiAssetStrategy`](https://docs.rs/fugazi/latest/fugazi/strategies/struct.MultiAssetStrategy.html) | the same rule applied independently to N symbols |
+| [`Portfolio`](https://docs.rs/fugazi/latest/fugazi/portfolio/struct.Portfolio.html) | N *different* strategies sharing one account |
+
+`fugazi::strategies` also carries a catalogue of named recipes built on the
+first of these, grouped by family — `trend::ma_crossover`,
+`trend::donchian_breakout`, `mean_reversion::rsi_reversal`,
+`momentum::*`, `volume::*`, `composite::*` — so the common cases are one call.
+
+`Portfolio` is the one worth a paragraph, because it answers a question the
+others can't: *what would these strategies have earned together?* It runs each
+child against its own notional book while trading a **single account**,
+combining every child's intent into one order per symbol. That is what a real
+deployment looks like, so the same portfolio backtests and trades live:
+
+```rust
+use fugazi::portfolio::{Portfolio, policy::EqualWeight};
+use fugazi::strategies::{mean_reversion, trend};
+
+# fn snapshots() -> Vec<fugazi::Snapshot<&'static str>> { Vec::new() }
+let mut portfolio: Portfolio<&'static str> = Portfolio::builder()
+    .with_initial_equity(10_000.0)
+    .add("trend", trend::ma_crossover("BTC", 10, 30))
+    .add("revert", mean_reversion::rsi_reversal("ETH", 14, 30.0, 70.0))
+    .weights(EqualWeight)
+    .build();
+let report = portfolio.run(snapshots());   // aggregate equity curve + blotter
+# let _ = report.equity_curve;
+```
+
+Because children share a book, a few things follow — opposing flow crosses
+internally, one child's stop only takes off its own share — all covered under
+[How capital moves](doc/STRATEGIES.md#how-capital-moves).
+
+### Working with the wallet
+
 The wallet is fed each symbol's bar every tick via `wallet.update` (its `close`
 marks to market, its `[low, high]` bounds fills); `set` targets an absolute
 position (an opposite-side `set` reverses, `value_frac(1.0)` is all-in), and
@@ -743,6 +789,16 @@ The strategy positional accepts an optional shape prefix:
   inner (default `!everything`), e.g.
   `!top_bottom { longs: 2, shorts: 2, of: !threshold { long_min: 0.5, short_max: -0.5 } }`
   ranks the top-2 / bottom-2 *of* the threshold survivors.
+- `multi:` — an N-symbol `MultiAssetStrategy` file (`multi:@multi.yml`);
+  the *same* rule applied independently to every symbol in the input, so
+  any subset can be long / short / flat at once. Reach for it instead of
+  `basket:` when a symbol's fate depends only on its own signals rather
+  than on how it ranks against the rest.
+- `portfolio:` — N *different* strategies sharing one account
+  (`portfolio:@book.yml`); the document lists `children:`, each of which
+  is any of the four shapes above, plus optional `weights:` and
+  `rebalance_on:`. Every child's intent is netted into one order per
+  symbol, behind a single aggregate equity curve and blotter.
 
 Any other prefix is rejected as an unknown shape. A single-asset run
 feeds every candle in the input series to the strategy in `time` order.
@@ -850,6 +906,27 @@ orders, `reduceOnly` stop / take-profit legs, account-marked equity, and fill
 polling all work through the ordinary trait methods; `poll_fills()` drains
 fills booked between bars and `take_rejections()` surfaces venue refusals to
 `Strategy::on_reject`.
+
+A whole `Portfolio` runs live the same way — it trades exactly one account, so
+point it at a live wallet and its children keep trading their own notional books
+unchanged:
+
+```rust,ignore
+use fugazi::live::BinanceFuturesWallet;
+use fugazi::{Wallet, portfolio::Portfolio};
+use std::sync::Arc;
+
+let portfolio: Portfolio<String> = Portfolio::builder()
+    // ... children ...
+    .substrate(Arc::new(move |_seed| {
+        Box::new(BinanceFuturesWallet::mainnet(&key, &secret)) as Box<dyn Wallet<String> + Send>
+    }))
+    .build();
+```
+
+The account must be the portfolio's alone: it drives that wallet to the sum of
+its children's positions, so anything else trading the same account looks like a
+position no child asked for and will be traded back out.
 
 ### Testing against the Binance testnet
 
@@ -971,6 +1048,12 @@ Windows), or build from a checkout with `cd python && maturin develop --release`
 See the [Python README](doc/PYTHON.md) for the full API.
 
 ## Documentation
+
+Two ways in. If you want the **backtester**, read
+[doc/CLI.md](doc/CLI.md) for the commands and
+[doc/STRATEGIES.md](doc/STRATEGIES.md) for the strategy-file format — no Rust
+required. If you're **building on the library**, the sections above cover the
+shape of it and [docs.rs](https://docs.rs/fugazi) has the API.
 
 | | |
 | --- | --- |
