@@ -530,6 +530,23 @@ mod tests {
         Schema::empty()
     }
 
+    /// The multi-asset twin of basket's probe test: a per-symbol *signal*
+    /// template that can't build is caught at build time rather than on the
+    /// first bar mentioning a symbol. See `probe_signal`.
+    #[test]
+    fn a_bad_per_symbol_template_is_rejected_at_build_not_mid_run() {
+        let yaml = r#"
+            long:
+              enter: !get { key: no_such_column }
+        "#;
+        let spec = MultiAssetStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let err = spec
+            .try_build(1.0, &schema())
+            .err()
+            .expect("the probe must reject this");
+        assert!(err.contains("no_such_column"), "{err}");
+    }
+
     #[test]
     fn deserializes_a_full_multi_asset_spec() {
         let yaml = r#"

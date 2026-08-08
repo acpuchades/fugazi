@@ -364,3 +364,42 @@ def test_optimize_range_axis_string():
     )
     # 3, 5, 7 → 3 rows.
     assert len(sweep.rows) == 3
+
+
+def test_bad_spec_raises_value_error_not_a_panic():
+    """A spec that parses but can't build is a `ValueError`, not a panic.
+
+    `!get` naming a column the series doesn't carry is only detectable against
+    the schema, so it survives the static check and reaches the builder. It has
+    to arrive in Python as a normal exception carrying the failing path.
+    """
+    yaml = """
+symbol: X
+long:
+  enter: !gt
+    lhs: !sma { source: !get { key: no_such_column }, period: 3 }
+    rhs: !value 1.0
+"""
+    spec = ta.load_spec(yaml)
+    wallet = ta.PaperWallet(1000.0)
+    snaps = _snaps_single("X", [10.0] * 10)
+    with pytest.raises(ValueError) as excinfo:
+        spec.run(wallet, snaps)
+    message = str(excinfo.value)
+    assert "no_such_column" in message
+    # The tag trail is rendered on its own line, as the CLI does it.
+    assert "at: !gt > !sma > !get" in message
+
+
+def test_bad_spec_also_fails_evaluate_and_optimize():
+    """The same document fails the other two entry points the same way."""
+    yaml = """
+symbol: X
+long:
+  enter: !gt { lhs: !get { key: nope }, rhs: !value 1.0 }
+"""
+    snaps = _snaps_single("X", [10.0] * 10)
+    with pytest.raises(ValueError, match="nope"):
+        ta.load_spec(yaml).evaluate(ta.PaperWallet(1000.0), snaps)
+    with pytest.raises(ValueError, match="nope"):
+        ta.optimize(yaml, snaps, cash=1000.0, grid=[{}])
