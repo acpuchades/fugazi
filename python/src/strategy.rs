@@ -254,13 +254,13 @@ impl PyWallet {
     /// position). Idempotent, latest-wins per symbol; re-submit to trail. Returns
     /// `None` (the resting order is working until it triggers in some `update`).
     pub(crate) fn set_stop(&mut self, symbol: String, trigger: f64) -> PyResult<Option<PyOrder>> {
-        wrap_ack(self.inner.set_stop(symbol, Reference(trigger)))
+        wrap_ack(self.inner.set_stop(symbol, Reference(trigger), Size::position_frac(1.0)))
     }
 
     /// Rest a take-profit on `symbol` at `trigger` — the favourable twin of
     /// `set_stop`. Idempotent, latest-wins per symbol. Returns `None` (working).
     pub(crate) fn set_take_profit(&mut self, symbol: String, trigger: f64) -> PyResult<Option<PyOrder>> {
-        wrap_ack(self.inner.set_take_profit(symbol, Reference(trigger)))
+        wrap_ack(self.inner.set_take_profit(symbol, Reference(trigger), Size::position_frac(1.0)))
     }
 
     /// Rest a limit order on `symbol`: drive the position to `side · size` once

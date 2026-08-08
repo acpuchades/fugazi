@@ -792,17 +792,17 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Mu
             // every bar so a trailing level cancel/replaces.
             if long {
                 if let Some(level) = state.long_stop.as_ref().and_then(|l| l.value()) {
-                    let _ = wallet.set_stop(sym.clone(), Reference(level));
+                    let _ = wallet.set_stop(sym.clone(), Reference(level), Size::position_frac(1.0));
                 }
                 if let Some(level) = state.long_target.as_ref().and_then(|l| l.value()) {
-                    let _ = wallet.set_take_profit(sym.clone(), Reference(level));
+                    let _ = wallet.set_take_profit(sym.clone(), Reference(level), Size::position_frac(1.0));
                 }
             } else if short {
                 if let Some(level) = state.short_stop.as_ref().and_then(|l| l.value()) {
-                    let _ = wallet.set_stop(sym.clone(), Reference(level));
+                    let _ = wallet.set_stop(sym.clone(), Reference(level), Size::position_frac(1.0));
                 }
                 if let Some(level) = state.short_target.as_ref().and_then(|l| l.value()) {
-                    let _ = wallet.set_take_profit(sym.clone(), Reference(level));
+                    let _ = wallet.set_take_profit(sym.clone(), Reference(level), Size::position_frac(1.0));
                 }
             }
         }

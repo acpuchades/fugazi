@@ -1538,15 +1538,17 @@ impl Wallet<&'static str> for Restricted {
         &mut self,
         symbol: &'static str,
         trigger: Reference,
+        size: Size,
     ) -> Result<Ack<&'static str>, WalletError> {
-        self.inner.set_stop(symbol, trigger)
+        self.inner.set_stop(symbol, trigger, size)
     }
     fn set_take_profit(
         &mut self,
         symbol: &'static str,
         trigger: Reference,
+        size: Size,
     ) -> Result<Ack<&'static str>, WalletError> {
-        self.inner.set_take_profit(symbol, trigger)
+        self.inner.set_take_profit(symbol, trigger, size)
     }
     fn cancel_protective(&mut self, symbol: &&'static str) -> Result<(), WalletError> {
         self.inner.cancel_protective(symbol)
@@ -1839,15 +1841,17 @@ impl Wallet<&'static str> for VenuePriced {
         &mut self,
         symbol: &'static str,
         trigger: Reference,
+        size: Size,
     ) -> Result<Ack<&'static str>, WalletError> {
-        self.0.set_stop(symbol, trigger)
+        self.0.set_stop(symbol, trigger, size)
     }
     fn set_take_profit(
         &mut self,
         symbol: &'static str,
         trigger: Reference,
+        size: Size,
     ) -> Result<Ack<&'static str>, WalletError> {
-        self.0.set_take_profit(symbol, trigger)
+        self.0.set_take_profit(symbol, trigger, size)
     }
     fn cancel_protective(&mut self, symbol: &&'static str) -> Result<(), WalletError> {
         self.0.cancel_protective(symbol)

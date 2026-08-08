@@ -555,7 +555,12 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PortfolioWallet<Sym> {
         );
     }
 
-    fn set_stop(&mut self, _symbol: Sym, _trigger: Reference) -> Result<Ack<Sym>, WalletError> {
+    fn set_stop(
+        &mut self,
+        _symbol: Sym,
+        _trigger: Reference,
+        _size: Size,
+    ) -> Result<Ack<Sym>, WalletError> {
         panic!(
             "PortfolioWallet::set_stop: the aggregate wallet is a reporting view; \
              child strategies trade through SubWalletHandle inside Portfolio::trade."
@@ -566,6 +571,7 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PortfolioWallet<Sym> {
         &mut self,
         _symbol: Sym,
         _trigger: Reference,
+        _size: Size,
     ) -> Result<Ack<Sym>, WalletError> {
         panic!(
             "PortfolioWallet::set_take_profit: the aggregate wallet is a reporting view; \
@@ -649,9 +655,14 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for SubWalletHandle<Sym> {
         Ok(inner.register_ack(self.idx, ack))
     }
 
-    fn set_stop(&mut self, symbol: Sym, trigger: Reference) -> Result<Ack<Sym>, WalletError> {
+    fn set_stop(
+        &mut self,
+        symbol: Sym,
+        trigger: Reference,
+        size: Size,
+    ) -> Result<Ack<Sym>, WalletError> {
         let mut inner = self.inner.lock().expect("portfolio lock poisoned");
-        let ack = inner.subs[self.idx].set_stop(symbol, trigger)?;
+        let ack = inner.subs[self.idx].set_stop(symbol, trigger, size)?;
         Ok(inner.register_ack(self.idx, ack))
     }
 
@@ -659,9 +670,10 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for SubWalletHandle<Sym> {
         &mut self,
         symbol: Sym,
         trigger: Reference,
+        size: Size,
     ) -> Result<Ack<Sym>, WalletError> {
         let mut inner = self.inner.lock().expect("portfolio lock poisoned");
-        let ack = inner.subs[self.idx].set_take_profit(symbol, trigger)?;
+        let ack = inner.subs[self.idx].set_take_profit(symbol, trigger, size)?;
         Ok(inner.register_ack(self.idx, ack))
     }
 

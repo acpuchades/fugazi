@@ -1279,10 +1279,10 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Ba
                     // latest-wins on `PaperWallet`) so trailing levels
                     // that move with the bar update naturally.
                     if let Some(level) = self.long_stops.get(sym).and_then(|c| c.value()) {
-                        let _ = wallet.set_stop(sym.clone(), Reference(level));
+                        let _ = wallet.set_stop(sym.clone(), Reference(level), Size::position_frac(1.0));
                     }
                     if let Some(level) = self.long_targets.get(sym).and_then(|c| c.value()) {
-                        let _ = wallet.set_take_profit(sym.clone(), Reference(level));
+                        let _ = wallet.set_take_profit(sym.clone(), Reference(level), Size::position_frac(1.0));
                     }
                 }
                 Some(Side::Sell) => {
@@ -1297,10 +1297,10 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Ba
                         let _ = wallet.cancel_protective(sym);
                     }
                     if let Some(level) = self.short_stops.get(sym).and_then(|c| c.value()) {
-                        let _ = wallet.set_stop(sym.clone(), Reference(level));
+                        let _ = wallet.set_stop(sym.clone(), Reference(level), Size::position_frac(1.0));
                     }
                     if let Some(level) = self.short_targets.get(sym).and_then(|c| c.value()) {
-                        let _ = wallet.set_take_profit(sym.clone(), Reference(level));
+                        let _ = wallet.set_take_profit(sym.clone(), Reference(level), Size::position_frac(1.0));
                     }
                 }
                 None => {

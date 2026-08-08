@@ -77,6 +77,10 @@ struct SymbolFilter {
 #[derive(Debug, Clone, Copy)]
 struct RestingLeg {
     trigger: Real,
+    /// Resolved quantity, or `None` for a whole-position `closePosition` leg.
+    /// Part of the dedup key: re-resting the same trigger for a *different*
+    /// share has to replace the venue order, not be mistaken for a no-op.
+    qty: Option<Real>,
     venue_id: i64,
     local: OrderId,
 }
@@ -424,6 +428,7 @@ impl BinanceFuturesWallet {
         symbol: &str,
         kind: OrderKind,
         trigger: Real,
+        qty: Option<Real>,
     ) -> Result<RestingLeg, WalletError> {
         let local = self.mint();
         let filter = match self.ensure_filter(symbol) {
@@ -453,7 +458,7 @@ impl BinanceFuturesWallet {
         if let Err(e) = self.ensure_cursor(symbol) {
             self.errors.push(e);
         }
-        let params = vec![
+        let mut params = vec![
             ("symbol", symbol.to_string()),
             ("side", side_token(side).to_string()),
             ("type", type_token.to_string()),
@@ -461,9 +466,28 @@ impl BinanceFuturesWallet {
                 "stopPrice",
                 format_decimals(round_to_tick(trigger, filter.tick), filter.price_decimals),
             ),
-            ("closePosition", "true".to_string()),
             ("newClientOrderId", client_order_id(local)),
         ];
+        // A whole-position exit stays `closePosition: true` — it needs no
+        // quantity and the venue keeps it correct as the position moves. A
+        // *partial* exit (one owner's share of a shared account) has to name a
+        // quantity, and is `reduceOnly` so it can never flip the position.
+        match qty {
+            None => params.push(("closePosition", "true".to_string())),
+            Some(q) => {
+                let rounded = floor_to_step(q, filter.step);
+                if rounded <= 0.0 {
+                    return Err(self.refuse(
+                        symbol,
+                        local,
+                        kind,
+                        LiveError::Decode("protective size rounds to zero".into()),
+                    ));
+                }
+                params.push(("quantity", format_decimals(rounded, filter.qty_decimals)));
+                params.push(("reduceOnly", "true".to_string()));
+            }
+        }
         let value = match self.signed(Method::POST, "/fapi/v1/order", params) {
             Ok(v) => v,
             Err(e) => return Err(self.refuse(symbol, local, kind, e)),
@@ -477,7 +501,7 @@ impl BinanceFuturesWallet {
             ));
         };
         self.map_order(local, venue_id, kind);
-        Ok(RestingLeg { trigger, venue_id, local })
+        Ok(RestingLeg { trigger, qty, venue_id, local })
     }
 
     /// Rest a protective leg with idempotent dedup: an unchanged trigger is a
@@ -488,18 +512,43 @@ impl BinanceFuturesWallet {
         symbol: String,
         kind: OrderKind,
         trigger: Real,
+        size: Size,
     ) -> Result<Ack<String>, WalletError> {
+        // Resolve the share against the cached position — the same cache
+        // `set_position` diffs against. `position_frac(1.0)` means "all of it",
+        // which the venue expresses as `closePosition` and keeps correct on its
+        // own, so it deliberately resolves to `None` rather than a quantity.
+        let qty = match size {
+            Size::PositionFraction(f) if (f.abs() - 1.0).abs() <= DEFAULT_EPSILON => None,
+            other => {
+                let pos = self.positions.get(&symbol).copied().unwrap_or(0.0);
+                let magnitude = other
+                    .resolve(
+                        self.marks.get(&symbol).copied().unwrap_or(0.0),
+                        pos,
+                        self.available_balance,
+                        self.wallet_balance + self.unrealized,
+                    )
+                    .min(pos.abs());
+                Some(magnitude)
+            }
+        };
         let existing = self.protective.get(&symbol).and_then(|p| match kind {
             OrderKind::TakeProfit => p.take_profit,
             _ => p.stop,
         });
         if let Some(leg) = existing {
-            if (leg.trigger - trigger).abs() <= DEFAULT_EPSILON {
+            let same_qty = match (leg.qty, qty) {
+                (None, None) => true,
+                (Some(a), Some(b)) => (a - b).abs() <= DEFAULT_EPSILON,
+                _ => false,
+            };
+            if (leg.trigger - trigger).abs() <= DEFAULT_EPSILON && same_qty {
                 return Ok(Ack::Working(leg.local));
             }
             self.cancel_venue(&symbol, leg.venue_id)?;
         }
-        let leg = self.place_protective(&symbol, kind, trigger)?;
+        let leg = self.place_protective(&symbol, kind, trigger, qty)?;
         let entry = self.protective.entry(symbol).or_default();
         match kind {
             OrderKind::TakeProfit => entry.take_profit = Some(leg),
@@ -596,16 +645,22 @@ impl Wallet<String> for BinanceFuturesWallet {
         Ok(Ack::Working(id))
     }
 
-    fn set_stop(&mut self, symbol: String, trigger: Reference) -> Result<Ack<String>, WalletError> {
-        self.rest_protective(symbol, OrderKind::Stop, trigger.0)
+    fn set_stop(
+        &mut self,
+        symbol: String,
+        trigger: Reference,
+        size: Size,
+    ) -> Result<Ack<String>, WalletError> {
+        self.rest_protective(symbol, OrderKind::Stop, trigger.0, size)
     }
 
     fn set_take_profit(
         &mut self,
         symbol: String,
         trigger: Reference,
+        size: Size,
     ) -> Result<Ack<String>, WalletError> {
-        self.rest_protective(symbol, OrderKind::TakeProfit, trigger.0)
+        self.rest_protective(symbol, OrderKind::TakeProfit, trigger.0, size)
     }
 
     fn cancel_protective(&mut self, symbol: &String) -> Result<(), WalletError> {

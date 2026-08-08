@@ -499,17 +499,17 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Si
         // adverse level and a take-profit the favourable one.
         if long {
             if let Some(level) = level_value(&self.long_stop) {
-                let _ = wallet.set_stop(self.symbol.clone(), Reference(level));
+                let _ = wallet.set_stop(self.symbol.clone(), Reference(level), Size::position_frac(1.0));
             }
             if let Some(level) = level_value(&self.long_target) {
-                let _ = wallet.set_take_profit(self.symbol.clone(), Reference(level));
+                let _ = wallet.set_take_profit(self.symbol.clone(), Reference(level), Size::position_frac(1.0));
             }
         } else if short {
             if let Some(level) = level_value(&self.short_stop) {
-                let _ = wallet.set_stop(self.symbol.clone(), Reference(level));
+                let _ = wallet.set_stop(self.symbol.clone(), Reference(level), Size::position_frac(1.0));
             }
             if let Some(level) = level_value(&self.short_target) {
-                let _ = wallet.set_take_profit(self.symbol.clone(), Reference(level));
+                let _ = wallet.set_take_profit(self.symbol.clone(), Reference(level), Size::position_frac(1.0));
             }
         }
     }

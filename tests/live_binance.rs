@@ -180,7 +180,7 @@ fn protective_stop_dedups_an_unchanged_trigger() {
 
     // Rest the same stop three bars running — only the first should hit the venue.
     for _ in 0..3 {
-        w.set_stop("BTCUSDT".to_string(), fugazi::wallet::Reference(26000.0))
+        w.set_stop("BTCUSDT".to_string(), fugazi::wallet::Reference(26000.0), fugazi::wallet::Size::position_frac(1.0))
             .expect("stop accepted");
     }
     assert_eq!(
@@ -190,7 +190,7 @@ fn protective_stop_dedups_an_unchanged_trigger() {
     );
 
     // Moving the trigger cancels + replaces: one more POST (plus a DELETE).
-    w.set_stop("BTCUSDT".to_string(), fugazi::wallet::Reference(26500.0))
+    w.set_stop("BTCUSDT".to_string(), fugazi::wallet::Reference(26500.0), fugazi::wallet::Size::position_frac(1.0))
         .expect("moved stop accepted");
     assert_eq!(order_posts.load(Ordering::SeqCst), 2, "a moved trigger re-submits");
 }

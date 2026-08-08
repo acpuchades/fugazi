@@ -418,12 +418,21 @@ pub trait Wallet<Sym> {
     /// `trigger`, a short when it trades up). The side is read from the current
     /// position. Idempotent and latest-wins per symbol — re-submit each bar to
     /// trail. Returns the [`OrderId`] of the resting order in an [`Ack::Working`].
-    fn set_stop(&mut self, symbol: Sym, trigger: Reference) -> Result<Ack<Sym>, WalletError>;
+    fn set_stop(
+        &mut self,
+        symbol: Sym,
+        trigger: Reference,
+        size: Size,
+    ) -> Result<Ack<Sym>, WalletError>;
 
     /// Rest a **take-profit** on `symbol` at `trigger` — the favourable twin of
     /// [`set_stop`](Wallet::set_stop). Idempotent and latest-wins per symbol.
-    fn set_take_profit(&mut self, symbol: Sym, trigger: Reference)
-    -> Result<Ack<Sym>, WalletError>;
+    fn set_take_profit(
+        &mut self,
+        symbol: Sym,
+        trigger: Reference,
+        size: Size,
+    ) -> Result<Ack<Sym>, WalletError>;
 
     /// Cancel both resting protective legs (stop and take-profit) on `symbol`.
     fn cancel_protective(&mut self, symbol: &Sym) -> Result<(), WalletError>;
@@ -618,11 +627,19 @@ enum Pending {
     Sized(Side, Size, OrderId),
 }
 
-/// One resting protective leg: the `trigger` level and the [`OrderId`] it fills
-/// under.
+/// One resting protective leg: the `trigger` level, **how much of the position
+/// it takes off**, and the [`OrderId`] it fills under.
+///
+/// `size` resolves at the fill price and is clamped to the position's
+/// magnitude, so a protective leg is always *reduce-only* — it can flatten a
+/// position but never flip it. [`Size::position_frac(1.0)`](Size::position_frac)
+/// is the whole-position exit every single-asset strategy wants; an explicit
+/// [`Size::Units`] is what lets one account carry several owners' exits on the
+/// same symbol.
 #[derive(Debug, Clone, Copy)]
 struct Leg {
     trigger: Real,
+    size: Size,
     id: OrderId,
 }
 
@@ -1159,7 +1176,16 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         // protecting it, and the bracket stays resting (`fill_at` only clears it
         // on success) so it retries next bar — but without this nobody is ever
         // told the exit did not happen.
-        match self.fill_at(symbol.clone(), 0.0, fill, kind, leg.id) {
+        // Reduce-only: resolve the leg's size at the fill price, clamp it to the
+        // position's magnitude, and step *toward* zero. `position_frac(1.0)` —
+        // what every whole-position exit passes — resolves to `|pos|` and so
+        // flattens, exactly as an unsized leg used to.
+        let magnitude = leg
+            .size
+            .resolve(fill, pos, self.funds, self.equity().0)
+            .min(pos.abs());
+        let target = pos - pos.signum() * magnitude;
+        match self.fill_at(symbol.clone(), target, fill, kind, leg.id) {
             Ok(order) => order,
             Err(error) => {
                 self.rejections.push(Rejection {
@@ -1334,10 +1360,16 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
         Ok(Ack::Working(id))
     }
 
-    fn set_stop(&mut self, symbol: Sym, trigger: Reference) -> Result<Ack<Sym>, WalletError> {
+    fn set_stop(
+        &mut self,
+        symbol: Sym,
+        trigger: Reference,
+        size: Size,
+    ) -> Result<Ack<Sym>, WalletError> {
         let id = self.mint();
         self.protective.entry(symbol).or_default().stop = Some(Leg {
             trigger: trigger.0,
+            size,
             id,
         });
         Ok(Ack::Working(id))
@@ -1347,10 +1379,12 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
         &mut self,
         symbol: Sym,
         trigger: Reference,
+        size: Size,
     ) -> Result<Ack<Sym>, WalletError> {
         let id = self.mint();
         self.protective.entry(symbol).or_default().take_profit = Some(Leg {
             trigger: trigger.0,
+            size,
             id,
         });
         Ok(Ack::Working(id))
@@ -1588,7 +1622,7 @@ mod tests {
         })
         .unwrap();
         w.update("X", ohlc(100.0, 101.0, 99.0, 100.0));
-        w.set_stop("X", Reference(95.0)).unwrap();
+        w.set_stop("X", Reference(95.0), Size::position_frac(1.0)).unwrap();
         w.set_limit("X", Side::Buy, Size::units(4.0), Reference(94.0))
             .unwrap();
 
@@ -1647,17 +1681,19 @@ mod tests {
                 Err(WalletError::UnsupportedOperation)
             }
             fn set_stop(
-                &mut self,
-                _s: &'static str,
-                _t: Reference,
-            ) -> Result<Ack<&'static str>, WalletError> {
+        &mut self,
+        _s: &'static str,
+        _t: Reference,
+        _size: Size,
+    ) -> Result<Ack<&'static str>, WalletError> {
                 Err(WalletError::UnsupportedOperation)
             }
             fn set_take_profit(
-                &mut self,
-                _s: &'static str,
-                _t: Reference,
-            ) -> Result<Ack<&'static str>, WalletError> {
+        &mut self,
+        _s: &'static str,
+        _t: Reference,
+        _size: Size,
+    ) -> Result<Ack<&'static str>, WalletError> {
                 Err(WalletError::UnsupportedOperation)
             }
             fn cancel_protective(&mut self, _s: &&'static str) -> Result<(), WalletError> {
@@ -1840,7 +1876,7 @@ mod tests {
 
         // Rest a stop above, then gap through it to a price that makes buying
         // back the short unaffordable.
-        w.set_stop("X", Reference(120.0)).unwrap();
+        w.set_stop("X", Reference(120.0), Size::position_frac(1.0)).unwrap();
         let fills = w.update("X", Candle::new(900.0, 950.0, 890.0, 940.0, 0.0));
 
         assert!(fills.is_empty(), "the stop could not be booked");
@@ -1978,7 +2014,7 @@ mod tests {
         w.update("X", bar(100.0));
         w.set("X", Side::Buy, Size::units(1.0)).unwrap();
         w.update("X", bar(100.0)); // long 1 @ 100
-        w.set_stop("X", Reference(90.0)).unwrap();
+        w.set_stop("X", Reference(90.0), Size::position_frac(1.0)).unwrap();
         // The bar trades down through 90 (low 88) but opens above it.
         let fills = w.update("X", Candle::new(95.0, 96.0, 88.0, 89.0, 0.0));
         assert_eq!(fills.len(), 1);
@@ -1992,7 +2028,7 @@ mod tests {
         w.update("X", bar(100.0));
         w.set("X", Side::Buy, Size::units(1.0)).unwrap();
         w.update("X", bar(100.0));
-        w.set_stop("X", Reference(90.0)).unwrap();
+        w.set_stop("X", Reference(90.0), Size::position_frac(1.0)).unwrap();
         // Gaps down opening at 85, already below the stop -> fills at the open.
         let fills = w.update("X", Candle::new(85.0, 86.0, 84.0, 84.0, 0.0));
         assert_fill(&fills[0], Side::Sell, 1.0, 85.0, OrderKind::Stop);
@@ -2006,7 +2042,7 @@ mod tests {
         w.set("X", Side::Sell, Size::units(1.0)).unwrap();
         w.update("X", bar(100.0)); // short 1 @ 100
         // A short take-profit sits below entry; the bar trades down to it.
-        w.set_take_profit("X", Reference(90.0)).unwrap();
+        w.set_take_profit("X", Reference(90.0), Size::position_frac(1.0)).unwrap();
         let fills = w.update("X", Candle::new(95.0, 96.0, 88.0, 92.0, 0.0));
         assert_fill(&fills[0], Side::Buy, 1.0, 90.0, OrderKind::TakeProfit);
         assert!(w.positions().is_empty());
@@ -2018,8 +2054,8 @@ mod tests {
         w.update("X", bar(100.0));
         w.set("X", Side::Buy, Size::units(1.0)).unwrap();
         w.update("X", bar(100.0));
-        w.set_stop("X", Reference(90.0)).unwrap();
-        w.set_take_profit("X", Reference(110.0)).unwrap();
+        w.set_stop("X", Reference(90.0), Size::position_frac(1.0)).unwrap();
+        w.set_take_profit("X", Reference(110.0), Size::position_frac(1.0)).unwrap();
         // A wide bar crosses both legs; the stop wins, and the fill flattens and
         // drops the whole bracket.
         let fills = w.update("X", Candle::new(100.0, 111.0, 89.0, 105.0, 0.0));
@@ -2037,7 +2073,7 @@ mod tests {
         w.update("X", bar(100.0));
         w.set("X", Side::Buy, Size::units(1.0)).unwrap();
         w.update("X", bar(100.0));
-        w.set_stop("X", Reference(90.0)).unwrap();
+        w.set_stop("X", Reference(90.0), Size::position_frac(1.0)).unwrap();
         // Flatten with a market close; the fill drops the resting stop.
         w.close("X").unwrap();
         w.update("X", bar(100.0));
@@ -2053,11 +2089,90 @@ mod tests {
         w.update("X", bar(100.0));
         w.set("X", Side::Buy, Size::units(1.0)).unwrap();
         w.update("X", bar(100.0));
-        w.set_stop("X", Reference(90.0)).unwrap();
+        w.set_stop("X", Reference(90.0), Size::position_frac(1.0)).unwrap();
         w.cancel_protective(&"X").unwrap();
         let fills = w.update("X", Candle::new(95.0, 96.0, 88.0, 89.0, 0.0));
         assert!(fills.is_empty());
         assert!(!w.positions().is_empty());
+    }
+
+    #[test]
+    fn a_sized_stop_takes_off_only_its_share() {
+        // The capability a shared account needs: several owners resting exits
+        // on one position, each reducing its own share rather than flattening
+        // everyone. Previously inexpressible — a stop always targeted 0.
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::units(10.0)).unwrap();
+        w.update("X", bar(100.0));
+
+        w.set_stop("X", Reference(90.0), Size::units(4.0)).unwrap();
+        let fills = w.update("X", Candle::new(95.0, 96.0, 88.0, 89.0, 0.0));
+
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].kind, OrderKind::Stop);
+        assert!((fills[0].units - 4.0).abs() < 1e-9, "units {}", fills[0].units);
+        assert!(
+            (w.position(&"X").amount - 6.0).abs() < 1e-9,
+            "6 units should survive the partial stop, got {}",
+            w.position(&"X").amount,
+        );
+    }
+
+    #[test]
+    fn a_whole_position_stop_still_flattens() {
+        // `position_frac(1.0)` is what every existing caller passes, and it has
+        // to behave exactly as the old unsized leg did.
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::units(10.0)).unwrap();
+        w.update("X", bar(100.0));
+
+        w.set_stop("X", Reference(90.0), Size::position_frac(1.0)).unwrap();
+        let fills = w.update("X", Candle::new(95.0, 96.0, 88.0, 89.0, 0.0));
+
+        assert_eq!(fills.len(), 1);
+        assert!((fills[0].units - 10.0).abs() < 1e-9);
+        assert!(w.positions().is_empty() || w.position(&"X").amount.abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_sized_stop_is_reduce_only_and_never_flips() {
+        // An oversized share is clamped to the position rather than reversing
+        // it — a protective leg must never open an opposite position.
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Buy, Size::units(3.0)).unwrap();
+        w.update("X", bar(100.0));
+
+        w.set_stop("X", Reference(90.0), Size::units(50.0)).unwrap();
+        w.update("X", Candle::new(95.0, 96.0, 88.0, 89.0, 0.0));
+
+        assert!(
+            w.position(&"X").amount.abs() < 1e-9,
+            "expected flat, got {}",
+            w.position(&"X").amount,
+        );
+    }
+
+    #[test]
+    fn a_sized_stop_on_a_short_covers_only_its_share() {
+        // Mirror of the long case: "reduce" is toward zero from below.
+        let mut w: PaperWallet<&str> = PaperWallet::new(10_000.0);
+        w.update("X", bar(100.0));
+        w.set("X", Side::Sell, Size::units(10.0)).unwrap();
+        w.update("X", bar(100.0));
+
+        w.set_stop("X", Reference(110.0), Size::units(4.0)).unwrap();
+        let fills = w.update("X", Candle::new(105.0, 112.0, 104.0, 111.0, 0.0));
+
+        assert_eq!(fills.len(), 1);
+        assert!((fills[0].units - 4.0).abs() < 1e-9);
+        assert!(
+            (w.position(&"X").amount + 6.0).abs() < 1e-9,
+            "6 short units should survive, got {}",
+            w.position(&"X").amount,
+        );
     }
 
     /// A self-contained strategy type: long the golden cross, flat the death
@@ -2331,17 +2446,19 @@ mod tests {
                 Err(WalletError::UnsupportedOperation)
             }
             fn set_stop(
-                &mut self,
-                _symbol: &'static str,
-                _trigger: Reference,
-            ) -> Result<Ack<&'static str>, WalletError> {
+        &mut self,
+        _symbol: &'static str,
+        _trigger: Reference,
+        _size: Size,
+    ) -> Result<Ack<&'static str>, WalletError> {
                 Err(WalletError::UnsupportedOperation)
             }
             fn set_take_profit(
-                &mut self,
-                _symbol: &'static str,
-                _trigger: Reference,
-            ) -> Result<Ack<&'static str>, WalletError> {
+        &mut self,
+        _symbol: &'static str,
+        _trigger: Reference,
+        _size: Size,
+    ) -> Result<Ack<&'static str>, WalletError> {
                 Err(WalletError::UnsupportedOperation)
             }
             fn cancel_protective(&mut self, _symbol: &&'static str) -> Result<(), WalletError> {
@@ -2392,11 +2509,11 @@ mod tests {
         w.update("X", bar(100.0));
         w.set("X", Side::Buy, Size::units(10.0)).unwrap();
         w.update("X", bar(100.0)); // long 10 @ 100
-        let stop = match w.set_stop("X", Reference(90.0)).unwrap() {
+        let stop = match w.set_stop("X", Reference(90.0), Size::position_frac(1.0)).unwrap() {
             Ack::Working(id) => id,
             Ack::Filled(_) => panic!("resting order returns Working"),
         };
-        w.set_take_profit("X", Reference(120.0)).unwrap();
+        w.set_take_profit("X", Reference(120.0), Size::position_frac(1.0)).unwrap();
         // Cancel only the stop; the take-profit leg survives and still fires.
         assert_eq!(w.cancel(stop), Ok(()));
         let through_stop = w.update("X", Candle::new(95.0, 96.0, 85.0, 88.0, 0.0));
