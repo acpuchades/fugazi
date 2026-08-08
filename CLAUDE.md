@@ -259,6 +259,19 @@ Consequences worth knowing:
 - **`pick_any_root` ignores the root.** Calendar leaves read only `atom.time`, shared by every entry; re-rooting would make them `None` on a bar where that one symbol is absent.
 - **`Pick::rooted` falls back through `lone_atom`, not `sole_atom`.** In a rooted context a 2+ entry snapshot is ordinary — the blessed leg is just absent this bar — so it reads `None` and the caller rolls the symbol off. Using `sole_atom` there would panic on every basket with a listing gap.
 
+## One handle per shape
+
+Five document shapes (single / pairs / basket / multi / portfolio) used to mean five of everything: five `evaluate*`, five `evaluate_windowed*`, five `run_iteration_*`, a five-arm match in each CLI and Python driver. Two types collapse that (`src/spec/runnable.rs`):
+
+- **`RunnableStrategy`** — object-safe trait over every built strategy: `Strategy<Input = Snapshot<String>, Symbol = String>` plus `stable_period()` / `warm_up_period()` / `drive()`. Named for what it enables (being driven, as `backtest::run` does), not for where the value came from. Every `Dyn*Strategy` implements it.
+- **`StrategySpec`** — the sum over the five spec types, with one `try_build` / `try_build_priced` / `universe` / `kind`.
+
+**The two genuine per-shape differences live behind those, not at call sites**: `drive`'s default body is the `PaperWallet` path and `DynPortfolio` overrides it (portfolio fills route through a composite wallet); `try_build_priced` is `try_build` for four shapes and bakes costs into the sub-wallets for portfolio. Anything else that looks shape-specific in a driver is a smell.
+
+**Adding a sixth shape** = a `StrategySpec` variant + a `RunnableStrategy` impl + an arm in `optimize::build_any_spec` and Python's `spec_from_value`. Not ten new functions.
+
+One asymmetry worth knowing: basket and multi build their per-symbol chains **lazily**, so `stable_period()` only reads true after one snapshot has gone through — hence the `needs_probe_feed` flag in the walk-forward probes. The eager shapes must *not* be fed a probe snapshot: a pairs leaf that didn't name its asset would trip the sole-atom guard.
+
 ## Build errors are values
 
 A spec that parses but can't be *built* — an unknown `!get` column, a malformed `!pick { freq }`, a slot handed the wrong type, `!portfolio_book` outside a portfolio, a `!value <list>` outside a weight template — is bad **input**, not a broken invariant. It is reported, never aborted on.
@@ -305,7 +318,7 @@ Two related module trees. `src/spec/` is a **library** module (gated behind the 
 CLI layout by concern:
 
 - **`main.rs`** — clap defs, subcommand dispatch. Uses `pub(crate) use fugazi::spec::*;` to keep the rest of `src/cli/` referencing `crate::spec::foo` unchanged.
-- **`run.rs`, `optimize.rs`, `backtest.rs`** — user-facing drivers sit on pure `backtest` (`run_iteration`, `evaluate`, `evaluate_windowed`) from `src/spec/backtest.rs`. Every entry point there takes one **`EvalContext`** rather than the seven positional arguments it used to (`cash` / `bars_per_year` / `risk_free_rate` / `cost_config` / `effective_freq` / `windowed` / `seconds_per_bar`) — build one per driver and pass `&ctx`. `optimize.rs`'s kernel (`spec::optimize::{optimize, walkforward, ...}`) lives in the library; the CLI wrapper owns CSV output + progress banners.
+- **`run.rs`, `optimize.rs`, `backtest.rs`** — user-facing drivers sit on pure `backtest` from `src/spec/backtest.rs`, which is **shape-agnostic**: `run_iteration_any` / `evaluate_any` / `evaluate_windowed_any` / `measured_report_any`, each taking a **`StrategySpec`** (the sum over the five shapes) and one **`EvalContext`** (the seven-field bundle: cash / bars_per_year / risk_free_rate / cost_config / effective_freq / windowed / seconds_per_bar). There is no per-shape `evaluate_pairs` / `run_iteration_basket` / … — see *One handle per shape* below. `optimize.rs`'s kernel (`spec::optimize::{optimize, walkforward, ...}`) lives in the library; the CLI wrapper owns CSV output + progress banners.
 - **`get.rs`** — `fugazi get`. Grammar: `<provider>:<symbol>[<freq>,...]`. The provider is split off at the **first** colon and no provider name contains one, so the symbol is everything after it, verbatim — `yfinance:EURUSD=X[1d]`, `binance-vision:BTC/USDT:USDT[1d]`, no escaping. **Freqs have no remap** — every bracket token is a real cadence and the `freq` column carries its token. **One pipeline**: `run_candles` handles every provider, because `Atom::candle` is optional and the writer omits the OHLCV block when no row has a bar. `get --params` resolves `!param` inside `-x/--overlay`.
 - **`spec/`** — YAML mirror of composition API:
   - `expr.rs` — `ExprSpec` (value-producing enum; polymorphic over `DynType` for `!current`/`!pick`/`!time`/`!get`/`!if_else`/`!value`); `default_source`/`default_high`/`default_low`/`default_bar_source` helpers; **`ValueLit`** — `!value` payload, number (→ `Value`, `Real`) or string (→ `ValueStr`, `Str`; quoting picks type). Uses `serde_norway::Value` bridge (`#[serde(untagged)]` buffering can't see YAML tags).

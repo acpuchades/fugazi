@@ -12,6 +12,7 @@ Most of the cost of a change is remembering the third and fourth.
 - [Add an indicator](#add-an-indicator)
 - [Add a signal](#add-a-signal)
 - [Add an operator](#add-an-operator)
+- [Add a strategy shape](#add-a-strategy-shape)
 - [Add a metric](#add-a-metric)
 - [Add a remote provider](#add-a-remote-provider)
 - [Add a sizing recipe](#add-a-sizing-recipe)
@@ -212,6 +213,28 @@ Arithmetic and boolean ops are zero-sized `Default` markers; comparison ops
 carry their `epsilon` by value. Then follow steps 3–8 above.
 
 ---
+
+## Add a strategy shape
+
+Rare, but the machinery is built for it. A shape is a document type plus a live
+strategy; everything downstream is generic over
+[`RunnableStrategy`](../src/spec/runnable.rs).
+
+1. The strategy in `src/strategies/` (or `src/portfolio/` for a composite).
+2. Its `*StrategySpec` + `Dyn*Strategy` wrapper in `src/spec/`, with `try_build`.
+3. `impl RunnableStrategy for Dyn*Strategy` — `stable_period` / `warm_up_period`,
+   and override `drive` **only** if it can't use a plain `PaperWallet` (the
+   portfolio does, because its fills route through a composite wallet).
+4. A `StrategySpec` variant, and arms in `kind` / `try_build` /
+   `try_build_priced` / `universe`.
+5. A `StrategyKind` variant + prefix routing in `src/spec/input.rs`, and an arm
+   in `optimize::build_any_spec` and Python's `spec_from_value`.
+6. A section in `doc/STRATEGIES.md`.
+
+You should **not** need to add anything to `spec/backtest.rs`, the optimize
+kernel, or the CLI's evaluate paths — those are shape-agnostic. If you find
+yourself wanting to, the difference probably belongs on `RunnableStrategy` or
+`StrategySpec` instead.
 
 ## Add a metric
 
