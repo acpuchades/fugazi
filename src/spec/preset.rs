@@ -139,9 +139,20 @@ impl StrategyRef {
     /// inert for them); `schema` resolves a spec's `!get` leaves (presets have
     /// none).
     pub fn build(&self, initial_equity: Real, schema: &Arc<Schema>) -> DynSingleStrategy {
+        self.try_build(initial_equity, schema)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// The fallible twin of [`build`](Self::build). A preset is constructed in
+    /// Rust and can't fail; only the `Spec` arm can.
+    pub fn try_build(
+        &self,
+        initial_equity: Real,
+        schema: &Arc<Schema>,
+    ) -> Result<DynSingleStrategy, String> {
         match self {
-            StrategyRef::Spec(s) => s.build(initial_equity, schema),
-            StrategyRef::Preset(p) => DynSingleStrategy::from_single(p.build_strategy()),
+            StrategyRef::Spec(s) => s.try_build(initial_equity, schema),
+            StrategyRef::Preset(p) => Ok(DynSingleStrategy::from_single(p.build_strategy())),
         }
     }
 

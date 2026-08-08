@@ -618,24 +618,20 @@ mod tests {
     /// *produces*; this pins what each tag *demands*, which is the half that
     /// would otherwise be an unverified copy of the `build` arms. For every
     /// representative and every slot the table claims is typed, substituting a
-    /// child of a forbidden type must make `build` reject it. If `build` ever
-    /// stops demanding that type — a slot loosened from `real(x)` to something
-    /// polymorphic, or a variant moved between families — the substitution
-    /// stops panicking and this test fails, rather than the checker silently
-    /// reporting a constraint the engine no longer enforces.
+    /// child of a forbidden type must make `try_build` reject it. If the engine
+    /// ever stops demanding that type — a slot loosened from `real(x)` to
+    /// something polymorphic, or a variant moved between families — the
+    /// substitution starts succeeding and this test fails, rather than the
+    /// checker silently reporting a constraint the engine no longer enforces.
     ///
-    /// `catch_unwind` because the engine's enforcement *is* an `assert_eq!`;
-    /// that is confined to this test and never used in the checker itself.
+    /// This used to need `catch_unwind`, because the engine's enforcement *was*
+    /// an `assert_eq!`. Now that `try_build` returns the mismatch as a value,
+    /// the test just reads the `Err`.
     #[test]
     fn declared_child_expectations_match_what_build_demands() {
         let anchor = Position::new();
         let book = Book::new(1.0);
         let schema = Schema::empty();
-
-        // Quiet the panic hook: these panics are the expected outcome, and the
-        // default hook would print a backtrace per case.
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
 
         let mut checked = 0usize;
         let mut stale: Vec<String> = Vec::new();
@@ -656,12 +652,10 @@ mod tests {
                 let Some(mutated) = with_slot(yaml, slot, wrong) else {
                     continue;
                 };
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    mutated.build(&anchor, &book, None, &schema, None)
-                }));
-                if outcome.is_ok() {
-                    // Collected rather than asserted inline: the hook is muted
-                    // here, so an assertion's own message would vanish too.
+                if mutated
+                    .try_build(&anchor, &book, None, &schema, None)
+                    .is_ok()
+                {
                     stale.push(format!(
                         "{yaml}: table says `{slot}` must be {}, but `build` accepted \
                          {wrong} there",
@@ -671,7 +665,6 @@ mod tests {
                 checked += 1;
             }
         }
-        std::panic::set_hook(previous);
         assert!(
             stale.is_empty(),
             "declared child expectations no longer match the engine:\n  {}",

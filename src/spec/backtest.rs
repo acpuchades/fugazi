@@ -62,6 +62,46 @@ pub fn measured_report(
     )
 }
 
+/// Build a strategy once and discard it, turning a malformed document into an
+/// error before the run machinery — which builds through the infallible `build`
+/// shim — ever touches it.
+///
+/// Pass the shape's own `try_build`:
+///
+/// ```ignore
+/// let schema = schema_from_atoms(&atoms);
+/// validated(|| strategy.try_build(cash, &schema))?;
+/// ```
+///
+/// Every driver here already builds its strategy at least twice (the priced run
+/// and the zero-cost gross twin), so one more construction costs nothing next to
+/// the backtest itself — and it buys a clean diagnostic in place of a panic.
+/// This is the same "validate once, then trust" shape the per-symbol factories
+/// in [`basket`](crate::spec::basket) and
+/// [`multi_asset`](crate::spec::multi_asset) use.
+///
+/// The `!tag > ` breadcrumb is split off onto its own `at:` line, matching how
+/// the CLI renders a parse error.
+pub fn validated<T>(build: impl FnOnce() -> std::result::Result<T, String>) -> anyhow::Result<()> {
+    build().map(|_| ()).map_err(build_error)
+}
+
+/// Render a `try_build` failure as an [`anyhow::Error`], splitting the crate's
+/// `!tag > ` breadcrumb off onto its own `at:` line — the same shape the CLI
+/// uses for a parse error, so the two are indistinguishable to whoever reads
+/// them.
+///
+/// Use directly (`.map_err(build_error)?`) where the built value is wanted;
+/// [`validated`] is the discard-the-value convenience over it.
+pub fn build_error(e: String) -> anyhow::Error {
+    let (trail, message) = crate::spec::diagnostics::split_trail(&e);
+    if trail.is_empty() {
+        anyhow::anyhow!("{message}")
+    } else {
+        anyhow::anyhow!("{message}\n  at: {}", trail.join(" > "))
+    }
+}
+
 /// Extract the shared overlay schema from an atom stream — every atom is built
 /// against the same [`Schema`] `Arc` in the loader ([`crate::data`]), so any
 /// atom that carries `overlays` gives us it. Falls back to

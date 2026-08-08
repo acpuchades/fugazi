@@ -2243,9 +2243,8 @@ fn build_match(
     root: Option<&Selector<String>>,
 ) -> Result<Box<dyn DynIndicator>, String> {
     if cases.is_empty() {
-        return Err("!match: `cases` must not be empty (use `!if_else` for a \
-                    single branch, or reduce to `default` if there's nothing \
-                    to match)"
+        return Err("`cases` must not be empty (use `!if_else` for a single branch, \
+                    or reduce to `default` if there's nothing to match)"
             .to_string());
     }
 
@@ -2255,9 +2254,9 @@ fn build_match(
         ValueLit::Str(_) => true,
         ValueLit::Real(_) => false,
         ValueLit::List(_) => {
-            return Err("!match: case 0 `when:` is a `!value <list>` — list \
-                        literals have no defined equality against `on` and \
-                        aren't a valid match pattern"
+            return Err("case 0 `when:` is a `!value <list>` — list literals have \
+                        no defined equality against `on` and aren't a valid \
+                        match pattern"
                 .to_string());
         }
     };
@@ -2265,21 +2264,21 @@ fn build_match(
         match &c.when {
             ValueLit::Str(_) if !is_str => {
                 return Err(format!(
-                    "!match: case {i} `when:` is a string but case 0 is a \
-                     number — all cases must dispatch on the same type"
+                    "case {i} `when:` is a string but case 0 is a number — \
+                     all cases must dispatch on the same type"
                 ));
             }
             ValueLit::Real(_) if is_str => {
                 return Err(format!(
-                    "!match: case {i} `when:` is a number but case 0 is a \
-                     string — all cases must dispatch on the same type"
+                    "case {i} `when:` is a number but case 0 is a string — \
+                     all cases must dispatch on the same type"
                 ));
             }
             ValueLit::List(_) => {
                 return Err(format!(
-                    "!match: case {i} `when:` is a `!value <list>` — list \
-                     literals have no defined equality against `on` and \
-                     aren't a valid match pattern"
+                    "case {i} `when:` is a `!value <list>` — list literals have \
+                     no defined equality against `on` and aren't a valid match \
+                     pattern"
                 ));
             }
             _ => {}
@@ -2459,6 +2458,21 @@ impl ExprSpec {
         schema: &Arc<Schema>,
         root: Option<&Selector<String>>,
     ) -> Result<Box<dyn DynIndicator>, String> {
+        self.try_build_inner(anchor, book, portfolio_book, schema, root)
+            .map_err(|e| trail(self, e))
+    }
+
+    /// The match itself. Wrapped by [`try_build`](Self::try_build), which
+    /// prepends this node's tag — so an error raised anywhere in the tree
+    /// arrives at the caller carrying the full path down to it.
+    fn try_build_inner(
+        &self,
+        anchor: &Position,
+        book: &Book,
+        portfolio_book: Option<&Book>,
+        schema: &Arc<Schema>,
+        root: Option<&Selector<String>>,
+    ) -> Result<Box<dyn DynIndicator>, String> {
         use ExprSpec::*;
         // Recursive-build shorthands: build `s`, view it as a library-typed
         // `Indicator<Input=Snapshot, Output=Real>` (or Candle) so it drops
@@ -2542,13 +2556,12 @@ impl ExprSpec {
                 dyn_indicator::wrap(ValueStr::<Snapshot<String>>::new(s.as_str()))
             }
             Value(ValueLit::List(_)) => {
-                return Err("!value <list>: a list literal is only meaningful \
-                            in a portfolio weight-share template — the \
-                            per-child build pass rewrites it to !value \
-                            <list[CHILD_INDEX]> before this arm ever runs. \
-                            Either it's being used outside a portfolio, or \
-                            PortfolioSpec::build failed to install the \
-                            CHILD_INDEX arg."
+                return Err("a list literal is only meaningful in a \
+                            portfolio weight-share template — the per-child \
+                            build pass rewrites it to !value <list[CHILD_INDEX]> \
+                            before this arm ever runs. Either it's being used \
+                            outside a portfolio, or PortfolioSpec::build failed \
+                            to install the CHILD_INDEX arg."
                     .to_string());
             }
             Entry => dyn_indicator::wrap(anchor.entry::<Snapshot<String>>()),
@@ -2556,11 +2569,10 @@ impl ExprSpec {
             Trough => dyn_indicator::wrap(anchor.trough::<Snapshot<String>>()),
 
             StrategyBook | PortfolioBook => {
-                return Err("!strategy_book / !portfolio_book are build-time \
-                            source selectors — they only make sense as the \
-                            `source:` of a book-reading node (e.g. `!drawdown \
-                            { source: !portfolio_book }`), not as a standalone \
-                            expression"
+                return Err("a build-time source selector — it only makes \
+                            sense as the `source:` of a book-reading node (e.g. \
+                            `!drawdown { source: !portfolio_book }`), not as a \
+                            standalone expression"
                     .to_string());
             }
 
@@ -3097,7 +3109,7 @@ fn build_pick(
         .or_else(|| root.and_then(|r| r.symbol.clone()));
     let f = match freq {
         Some(s) => Some(Frequency::from_str(s).map_err(|e| {
-            format!("!pick {{ freq: {s:?} }}: invalid frequency: {e}")
+            format!("invalid frequency {s:?}: {e}")
         })?),
         None => None,
     };
@@ -3141,14 +3153,13 @@ fn build_get(
             let registered: Vec<&str> = schema.keys().collect();
             if registered.is_empty() {
                 Err(format!(
-                    "!get {{ key: {key:?} }}: no overlay side channel is bound \
-                     — feed `--series` data or a `csv:` source that carries \
-                     additional (non-OHLCV) columns to attach overlays",
+                    "overlay column {key:?}: no overlay side channel is bound — feed \
+                     `--series` data or a `csv:` source that carries additional \
+                     (non-OHLCV) columns to attach overlays",
                 ))
             } else {
                 Err(format!(
-                    "!get {{ key: {key:?} }}: overlay column not registered. \
-                     Registered columns: {}",
+                    "overlay column {key:?} is not registered. Registered columns: {}",
                     registered.join(", "),
                 ))
             }
