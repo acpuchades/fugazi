@@ -17,14 +17,16 @@ Unconditional deps: `serde`+`serde_json`, `time`, `statrs` (Φ/Φ⁻¹ for PSR/D
 
 - Build: `cargo build`; Test: `cargo test`; Lint: `cargo clippy --all-targets` (keep clean); Docs: `cargo doc --open`
 
-### Bumping the version — sync **four** places (`cargo build` only catches Rust drift)
+### Bumping the version — sync **four** places (`cargo check` only catches Rust drift)
 
 1. `Cargo.toml` (workspace root, `X.Y.Z`)
 2. `python/Cargo.toml` (pyo3 cdylib, `X.Y.Z`)
 3. `python/pyproject.toml` (wheel metadata, `X.Y.Z` — what `pip install fugazi` sees)
 4. `README.md` — `## Install` snippet, `fugazi = "X.Y"` (major.minor)
 
-Then `cargo build --workspace` (updates `Cargo.lock`), commit five files (three manifests + README + Lock), tag `vX.Y.Z`, push. `python/README.md` has no version string.
+Then **`cargo check --workspace`** (updates `Cargo.lock`), commit five files (three manifests + README + Lock), tag `vX.Y.Z`, push. `python/README.md` has no version string.
+
+**Not `cargo build --workspace`** — it links the pyo3 cdylib, which needs a Python interpreter to resolve `_PyBaseObject_Type` & co. and fails locally with a wall of `ld:` output that looks like a broken release but isn't (`maturin develop` is what links it properly). `check` refreshes the lock just the same and type-checks *both* crates, so it verifies strictly more of what a bump can break.
 
 ## Architecture
 

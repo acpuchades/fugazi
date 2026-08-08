@@ -329,17 +329,25 @@ Each answer is a different product, and the crate deliberately has no
 
 ## Release a version
 
-Four manifests must agree; `cargo build` only catches the Rust drift.
+Four manifests must agree; `cargo check` only catches the Rust drift.
 
 1. `Cargo.toml` — `X.Y.Z`
 2. `python/Cargo.toml` — `X.Y.Z`
 3. `python/pyproject.toml` — `X.Y.Z`
 4. `README.md` — the `## Install` snippet, `fugazi = "X.Y"` (major.minor only)
 
-Then `cargo build --workspace` to refresh `Cargo.lock`, commit the five files,
+Then `cargo check --workspace` to refresh `Cargo.lock`, commit the five files,
 tag `vX.Y.Z`, and push the tag. **A GitHub workflow publishes to crates.io and
 PyPI** — never run `cargo publish` or `maturin publish` by hand.
 `python/README.md` carries no version string.
+
+Use `check`, not `build --workspace`. Building the workspace links the pyo3
+cdylib, which needs a Python interpreter to resolve `_PyBaseObject_Type` and
+friends; locally it dies in a wall of `ld:` output that reads like a broken
+release and isn't. (`maturin develop` is what links it properly — see
+[Before you start](#before-you-start).) `check` refreshes the lock identically
+and type-checks both crates, so it catches strictly more of what a version bump
+can actually break.
 
 ---
 
