@@ -239,3 +239,70 @@ fn bench_snapshot_clone_scaling() {
         );
     }
 }
+
+/// What does the YAML path cost over the equivalent Rust strategy?
+///
+/// Both express the same MACD crossover. The Rust catalogue's
+/// `macd_crossover` composes it through `.shared()`, so one `Macd` drives both
+/// components; the spec builder has no equivalent, so `!macd_line` and
+/// `!macd_signal` build two independent `Macd`s.
+///
+/// **The duplicate is not where the ~1.9× goes.** Teaching `ExprSpec::build` to
+/// memoise multi-output sub-trees into a `Shared` handle was tried and
+/// measured: the cache hits, one `Macd` genuinely drives both components, and
+/// the total moves ~3% — inside the noise. Four `SharedComponent`s taking a
+/// mutex per bar costs about what the duplicated arithmetic did. The gap is the
+/// type-erasure layer itself — `DynValue` boxing, dynamic dispatch and snapshot
+/// payload wrapping at every node — so that is where to look if this number
+/// ever needs to come down. Don't re-attempt the memo without re-measuring.
+#[test]
+#[ignore]
+fn bench_yaml_vs_rust_macd_crossover() {
+    use fugazi::spec::SingleStrategySpec;
+    let candles = synth_candles(BARS);
+    let snaps: Vec<fugazi::types::Snapshot<String>> = candles
+        .iter()
+        .map(|c| fugazi::types::Snapshot::single("X".to_string(), (*c).into()))
+        .collect();
+
+    let yaml = r#"
+        symbol: X
+        long:
+          enter: !crosses_above
+            lhs: !macd_line { fast: 12, slow: 26, signal: 9 }
+            rhs: !macd_signal { fast: 12, slow: 26, signal: 9 }
+          exit: !crosses_below
+            lhs: !macd_line { fast: 12, slow: 26, signal: 9 }
+            rhs: !macd_signal { fast: 12, slow: 26, signal: 9 }
+    "#;
+    let spec: SingleStrategySpec =
+        SingleStrategySpec::from_text_with_params_in(
+            yaml, &Default::default(), std::path::Path::new("."), "(bench)",
+        ).unwrap();
+    let schema = fugazi::market::Schema::empty();
+
+    let mut yaml_times = vec![];
+    for _ in 0..REPS {
+        let mut strat = spec.build(10_000.0, &schema);
+        let mut w: PaperWallet<String> = PaperWallet::new(10_000.0);
+        let t = Instant::now();
+        let rep = run(&mut strat, &mut w, snaps.iter().cloned());
+        yaml_times.push(t.elapsed().as_secs_f64());
+        let _ = std::hint::black_box(rep.equity_curve.len());
+    }
+
+    let mut rust_times = vec![];
+    for _ in 0..REPS {
+        let mut strat = fugazi::strategies::trend::macd_crossover("X".to_string(), 12, 26, 9);
+        let mut w: PaperWallet<String> = PaperWallet::new(10_000.0);
+        let t = Instant::now();
+        let rep = run(&mut strat, &mut w, snaps.iter().cloned());
+        rust_times.push(t.elapsed().as_secs_f64());
+        let _ = std::hint::black_box(rep.equity_curve.len());
+    }
+
+    let (y, r) = (median(yaml_times), median(rust_times));
+    eprintln!("YAML  !macd_line/!macd_signal : {:.1} ns/bar", y * 1e9 / BARS as f64);
+    eprintln!("Rust  macd_crossover .shared(): {:.1} ns/bar", r * 1e9 / BARS as f64);
+    eprintln!("YAML / Rust = {:.2}×", y / r);
+}
