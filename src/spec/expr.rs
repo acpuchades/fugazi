@@ -875,22 +875,22 @@ pub enum ExprSpec {
     Lag {
         #[serde(default = "default_source")]
         source: Box<ExprSpec>,
-        periods: usize,
+        period: usize,
     },
     Diff {
         #[serde(default = "default_source")]
         source: Box<ExprSpec>,
-        periods: usize,
+        period: usize,
     },
     Ratio {
         #[serde(default = "default_source")]
         source: Box<ExprSpec>,
-        periods: usize,
+        period: usize,
     },
     Roc {
         #[serde(default = "default_source")]
         source: Box<ExprSpec>,
-        periods: usize,
+        period: usize,
     },
     RollingMax {
         #[serde(default = "default_source")]
@@ -1662,22 +1662,22 @@ enum ExprSpecRaw {
     Lag {
         #[serde(default = "default_source")]
         source: Box<ExprSpec>,
-        periods: usize,
+        period: usize,
     },
     Diff {
         #[serde(default = "default_source")]
         source: Box<ExprSpec>,
-        periods: usize,
+        period: usize,
     },
     Ratio {
         #[serde(default = "default_source")]
         source: Box<ExprSpec>,
-        periods: usize,
+        period: usize,
     },
     Roc {
         #[serde(default = "default_source")]
         source: Box<ExprSpec>,
-        periods: usize,
+        period: usize,
     },
     RollingMax {
         #[serde(default = "default_source")]
@@ -1934,10 +1934,10 @@ impl From<ExprSpecRaw> for ExprSpec {
                 cases,
                 default,
             },
-            ExprSpecRaw::Lag { source, periods } => ExprSpec::Lag { source, periods },
-            ExprSpecRaw::Diff { source, periods } => ExprSpec::Diff { source, periods },
-            ExprSpecRaw::Ratio { source, periods } => ExprSpec::Ratio { source, periods },
-            ExprSpecRaw::Roc { source, periods } => ExprSpec::Roc { source, periods },
+            ExprSpecRaw::Lag { source, period } => ExprSpec::Lag { source, period },
+            ExprSpecRaw::Diff { source, period } => ExprSpec::Diff { source, period },
+            ExprSpecRaw::Ratio { source, period } => ExprSpec::Ratio { source, period },
+            ExprSpecRaw::Roc { source, period } => ExprSpec::Roc { source, period },
             ExprSpecRaw::RollingMax { source, period } => ExprSpec::RollingMax { source, period },
             ExprSpecRaw::RollingMin { source, period } => ExprSpec::RollingMin { source, period },
             ExprSpecRaw::Log { source, base } => ExprSpec::Log { source, base },
@@ -2978,10 +2978,10 @@ impl ExprSpec {
             Match { on, cases, default } => {
                 build_match(on, cases, default, anchor, book, portfolio_book, schema, root)?
             }
-            Lag { source, periods } => dyn_indicator::wrap(real(source)?.lag(*periods)),
-            Diff { source, periods } => dyn_indicator::wrap(real(source)?.diff(*periods)),
-            Ratio { source, periods } => dyn_indicator::wrap(real(source)?.ratio(*periods)),
-            Roc { source, periods } => dyn_indicator::wrap(real(source)?.roc(*periods)),
+            Lag { source, period } => dyn_indicator::wrap(real(source)?.lag(*period)),
+            Diff { source, period } => dyn_indicator::wrap(real(source)?.diff(*period)),
+            Ratio { source, period } => dyn_indicator::wrap(real(source)?.ratio(*period)),
+            Roc { source, period } => dyn_indicator::wrap(real(source)?.roc(*period)),
             RollingMax { source, period } => {
                 dyn_indicator::wrap(real(source)?.rolling_max(*period))
             }

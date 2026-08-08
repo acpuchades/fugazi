@@ -12,7 +12,7 @@
 //! selection: !top_bottom { longs: 3, shorts: 3 }
 //! score:
 //!   !mul
-//!     lhs: !roc { source: !close { source: !pick { symbol: !arg SYM } }, periods: 20 }
+//!     lhs: !roc { source: !close { source: !pick { symbol: !arg SYM } }, period: 20 }
 //!     rhs: !adx { source: !current { source: !pick { symbol: !arg SYM } }, period: 14 }
 //! sizing: !equal_weight 6
 //! ```
@@ -666,7 +666,7 @@ mod tests {
             score:
               !roc
                 source: !close { source: !pick { symbol: !arg SYM } }
-                periods: 5
+                period: 5
             sizing: !equal_weight 4
         "#;
         let spec = BasketStrategySpec::from_text_with_params(
@@ -1143,17 +1143,17 @@ mod tests {
             score:
               !roc
                 source: !close { source: !pick { symbol: !arg SYM } }
-                periods: !param FAST
+                period: !param FAST
             sizing: !value 0.5
         "#;
         let mut params = HashMap::new();
         params.insert("FAST".to_string(), Value::Number(10.into()));
         let spec = BasketStrategySpec::from_text_with_params(yaml, &params).unwrap();
-        // The stored tree should carry `periods: 10` (resolved) and
+        // The stored tree should carry `period: 10` (resolved) and
         // `symbol: {arg: "SYM"}` (deferred).
         let tree = spec.score.tree();
-        let periods = tree.pointer("/roc/periods").unwrap();
-        assert_eq!(periods, &Value::Number(10.into()));
+        let period = tree.pointer("/roc/period").unwrap();
+        assert_eq!(period, &Value::Number(10.into()));
         let sym = tree.pointer("/roc/source/close/source/pick/symbol").unwrap();
         assert_eq!(sym, &serde_json::json!({"arg": "SYM"}));
     }

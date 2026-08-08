@@ -305,7 +305,7 @@ mod tests {
     fn correlation_tag_matches_reference() {
         // Lag-1 autocorrelation: lhs close vs. its own previous value.
         let spec: ExprSpec =
-            serde_norway::from_str("!correlation { lhs: close, rhs: !lag { periods: 1 }, period: 3 }")
+            serde_norway::from_str("!correlation { lhs: close, rhs: !lag { period: 1 }, period: 3 }")
                 .unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         let mut reference = Correlation::new(Current::close(), Current::close().lag(1), 3);
@@ -733,7 +733,7 @@ mod tests {
             !sharpe
             strategy:
               selection: !top_bottom { longs: 1, shorts: 1 }
-              score: !roc { source: !close { source: !pick { symbol: !arg SYM } }, periods: 2 }
+              score: !roc { source: !close { source: !pick { symbol: !arg SYM } }, period: 2 }
               sizing: !equal_weight 2
             period: 3
             bars_per_year: 252

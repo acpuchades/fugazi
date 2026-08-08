@@ -644,7 +644,7 @@ mod tests {
             "!donchian_upper { period: 3 }",
             "!sar { step: 0.02, max: 0.2 }",
             "!add { lhs: close, rhs: close }",
-            "!lag { periods: 1 }",
+            "!lag { period: 1 }",
             "!log { base: 2.718281828459045 }",
             "!rolling_max { period: 3 }",
             "!latch { source: close }",

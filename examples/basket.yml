@@ -19,7 +19,7 @@
 # Tags used below:
 #   !arg SYM      — the current symbol, substituted once per symbol at build time.
 #   !pick         — project one asset's bar out of the multi-symbol snapshot.
-#   !roc          — rate of change over `periods` bars (the momentum score).
+#   !roc          — rate of change over `period` bars (the momentum score).
 #   !top_bottom   — take the N highest-scoring symbols long, the N lowest short.
 #   !equal_weight — constant `1 / n_legs` per leg: 4 legs ⇒ 25% each ⇒ 100% gross.
 
@@ -34,7 +34,7 @@ selection: !top_bottom { longs: 2, shorts: 2 }
 # snapshot.
 score: !roc
   source: !close { source: !pick { symbol: !arg SYM } }
-  periods: 20
+  period: 20
 
 # The per-leg position size, as a fraction of equity. 2 longs + 2 shorts = 4
 # legs, so `!equal_weight 4` is 25% per leg and 100% gross exposure. Any

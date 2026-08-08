@@ -95,7 +95,7 @@ def test_load_pairs_and_run():
 def test_load_basket_and_run():
     yaml = """
     selection: !top_bottom { longs: 1, shorts: 1 }
-    score: !roc { source: !close { source: !pick { symbol: !arg SYM } }, periods: 2 }
+    score: !roc { source: !close { source: !pick { symbol: !arg SYM } }, period: 2 }
     sizing: !equal_weight 2
     """
     spec = ta.load_spec(yaml)

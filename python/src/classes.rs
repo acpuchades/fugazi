@@ -1245,21 +1245,21 @@ impl PyIndicator {
     }
 
     // --- lookback / rolling -> Indicator --------------------------------------
-    /// `self` delayed by `periods` steps.
-    pub(crate) fn lag(&self, periods: usize) -> PyIndicator {
-        PyIndicator::wrap(map_source!(self.src.clone(), |s| s.lag(periods)))
+    /// `self` delayed by `period` steps.
+    pub(crate) fn lag(&self, period: usize) -> PyIndicator {
+        PyIndicator::wrap(map_source!(self.src.clone(), |s| s.lag(period)))
     }
-    /// Discrete difference over `periods` steps (`x[t] - x[t-n]`).
-    pub(crate) fn diff(&self, periods: usize) -> PyIndicator {
-        PyIndicator::wrap(map_source!(self.src.clone(), |s| s.diff(periods)))
+    /// Discrete difference over `period` steps (`x[t] - x[t-n]`).
+    pub(crate) fn diff(&self, period: usize) -> PyIndicator {
+        PyIndicator::wrap(map_source!(self.src.clone(), |s| s.diff(period)))
     }
-    /// Ratio to the value `periods` steps ago (`x[t] / x[t-n]`).
-    pub(crate) fn ratio(&self, periods: usize) -> PyIndicator {
-        PyIndicator::wrap(map_source!(self.src.clone(), |s| s.ratio(periods)))
+    /// Ratio to the value `period` steps ago (`x[t] / x[t-n]`).
+    pub(crate) fn ratio(&self, period: usize) -> PyIndicator {
+        PyIndicator::wrap(map_source!(self.src.clone(), |s| s.ratio(period)))
     }
-    /// Percentage rate of change over `periods` steps.
-    pub(crate) fn roc(&self, periods: usize) -> PyIndicator {
-        PyIndicator::wrap(map_source!(self.src.clone(), |s| s.roc(periods)))
+    /// Percentage rate of change over `period` steps.
+    pub(crate) fn roc(&self, period: usize) -> PyIndicator {
+        PyIndicator::wrap(map_source!(self.src.clone(), |s| s.roc(period)))
     }
     /// Rolling maximum over `period` steps.
     pub(crate) fn rolling_max(&self, period: usize) -> PyResult<PyIndicator> {

@@ -111,7 +111,7 @@ impl<S: Indicator<Output = Real>> Indicator for Percentile<S> {
 /// what makes `1.0` mean "at or above all of them" instead of "tied for
 /// highest".
 ///
-/// The natural cross-sectional score: `!percentile_rank { source: !roc { periods: 20 }, period: 252 }`
+/// The natural cross-sectional score: `!percentile_rank { source: !roc { period: 20 }, period: 252 }`
 /// ranks each symbol's momentum against its own history rather than against the
 /// other symbols, so assets of different volatility compare fairly.
 ///

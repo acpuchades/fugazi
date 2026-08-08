@@ -14,7 +14,7 @@ and signal owns its internal state and is advanced one sample at a time via
 
 ```toml
 [dependencies]
-fugazi = "0.36"
+fugazi = "0.37"
 ```
 
 ## Concepts
@@ -660,7 +660,7 @@ to `close`. The vocabulary mirrors the library one-to-one:
   range-based volatility `!parkinson`/`!garman_klass`/`!rogers_satchell
   { period }`, `!obv`/
   `!ad`/`!true_range`, `!sar { step, max }`; transforms `!add`/`!sub`/
-  `!mul`/`!div { lhs, rhs }`, `!lag`/`!diff`/`!ratio`/`!roc { source, periods }`,
+  `!mul`/`!div { lhs, rhs }`, `!lag`/`!diff`/`!ratio`/`!roc { source, period }`,
   `!rolling_max`/`!rolling_min { source, period }`; rolling order statistics
   `!percentile { source, period, pct }` (`pct: 0.5` = rolling median — the
   adaptive-threshold primitive, e.g. an RSI against its own trailing-year 80th

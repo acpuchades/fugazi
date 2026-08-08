@@ -463,7 +463,7 @@ this score…
 ```yaml
 score: !roc
   source: !close { source: !pick { symbol: !arg SYM } }
-  periods: 20
+  period: 20
 ```
 
 …becomes `!pick { symbol: BTC }` on BTC's chain, `!pick { symbol: ETH }` on ETH's,
@@ -533,7 +533,7 @@ selection: !top_bottom { longs: 2, shorts: 2 }
 
 score: !roc
   source: !close { source: !pick { symbol: !arg SYM } }
-  periods: 20
+  period: 20
 
 sizing: !equal_weight 4
 ```
@@ -1034,7 +1034,7 @@ candle-field leaves.
 | --- | --- | --- |
 | `!add`, `!sub`, `!mul`, `!div` | `{ lhs, rhs }` | arithmetic over two sources (`div` → none on /0) |
 | `!log` | `{ source = close, base = e }` | logarithm of `source`; `None` on non-positive samples |
-| `!lag`, `!diff`, `!ratio`, `!roc` | `{ source = close, periods }` | lookback vs. `periods` bars ago |
+| `!lag`, `!diff`, `!ratio`, `!roc` | `{ source = close, period }` | lookback vs. `period` bars ago |
 | `!rolling_max`, `!rolling_min` | `{ source = close, period }` | rolling extremum over `period` bars |
 | `!if_else` | `{ cond, then, otherwise }` | ternary: `cond` is a **signal**, the branches are sources — see below |
 | `!unstable` | `{ source }` | passthrough that reports no unstable period, so the readiness gate stops waiting for this subtree's IIR tail (the signal-side twin is `!unstable { signal }`) |
@@ -1050,7 +1050,7 @@ sources:
 # An ADX-gated momentum score: the ROC when the trend is strong, 0 otherwise.
 !if_else
   cond:     !above { source: !adx { period: 14 }, level: 25 }
-  then:  !roc   { source: close, periods: 20 }
+  then:  !roc   { source: close, period: 20 }
   otherwise: !value 0
 ```
 
@@ -1260,7 +1260,7 @@ by 60-bar momentum, short the bottom decile, de-levering as the drawdown deepens
 
 ```yaml
 selection: !quantile { long_q: 0.1, short_q: 0.1 }
-score:  !roc { source: !close { source: !pick { symbol: !arg SYM } }, periods: 60 }
+score:  !roc { source: !close { source: !pick { symbol: !arg SYM } }, period: 60 }
 sizing: !drawdown_throttle { max_drawdown: 0.25 }
 ```
 

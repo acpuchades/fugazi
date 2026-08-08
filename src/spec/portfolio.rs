@@ -1032,7 +1032,7 @@ mod tests {
             children:
               - strategy:
                   selection: !top_bottom { longs: 1, shorts: 1 }
-                  score: !roc { source: !close { source: !pick { symbol: !arg SYM } }, periods: 5 }
+                  score: !roc { source: !close { source: !pick { symbol: !arg SYM } }, period: 5 }
                   sizing: !equal_weight 2
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();

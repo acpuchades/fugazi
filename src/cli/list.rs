@@ -275,10 +275,10 @@ const GROUPS: &[Group] = &[
     Group {
         title: "lookback operators",
         entries: &[
-            Entry { tag: "lag",   args: "source, periods", doc: "value from `periods` bars ago" },
-            Entry { tag: "diff",  args: "source, periods", doc: "x[t] − x[t − periods]" },
-            Entry { tag: "ratio", args: "source, periods", doc: "x[t] / x[t − periods]" },
-            Entry { tag: "roc",   args: "source, periods", doc: "rate of change (100 × ratio − 100)" },
+            Entry { tag: "lag",   args: "source, period", doc: "value from `period` bars ago" },
+            Entry { tag: "diff",  args: "source, period", doc: "x[t] − x[t − period]" },
+            Entry { tag: "ratio", args: "source, period", doc: "x[t] / x[t − period]" },
+            Entry { tag: "roc",   args: "source, period", doc: "rate of change (100 × ratio − 100)" },
         ],
     },
     Group {

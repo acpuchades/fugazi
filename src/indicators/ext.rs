@@ -126,25 +126,25 @@ pub trait IndicatorExt: Indicator<Output = Real> + Sized {
         Div::new(self, rhs)
     }
 
-    /// `self` delayed by `periods` steps.
-    fn lag(self, periods: usize) -> Lag<Self> {
-        Lag::new(self, periods)
+    /// `self` delayed by `period` steps.
+    fn lag(self, period: usize) -> Lag<Self> {
+        Lag::new(self, period)
     }
 
-    /// Discrete difference of `self` over `periods` steps (`x[t] - x[t-n]`).
-    fn diff(self, periods: usize) -> Diff<Self> {
-        Diff::new(self, periods)
+    /// Discrete difference of `self` over `period` steps (`x[t] - x[t-n]`).
+    fn diff(self, period: usize) -> Diff<Self> {
+        Diff::new(self, period)
     }
 
-    /// Ratio of `self` to its value `periods` steps ago (`x[t] / x[t-n]`).
-    fn ratio(self, periods: usize) -> Ratio<Self> {
-        Ratio::new(self, periods)
+    /// Ratio of `self` to its value `period` steps ago (`x[t] / x[t-n]`).
+    fn ratio(self, period: usize) -> Ratio<Self> {
+        Ratio::new(self, period)
     }
 
-    /// Percentage rate of change of `self` over `periods` steps
+    /// Percentage rate of change of `self` over `period` steps
     /// (`100·(x[t] − x[t-n]) / x[t-n]`).
-    fn roc(self, periods: usize) -> Roc<Self> {
-        Roc::new(self, periods)
+    fn roc(self, period: usize) -> Roc<Self> {
+        Roc::new(self, period)
     }
 
     /// Logarithm of `self` in `base` (emits `None` on samples where the input

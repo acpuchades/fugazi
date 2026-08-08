@@ -1194,7 +1194,7 @@ Real-valued indicators, one YAML tag per fugazi constructor:
   true (`0` on the firing bar, `None` until it has fired once);
   `!bars_since_high`/`!bars_since_low { source, period }`.
 - **Arithmetic**: `!add`/`!sub`/`!mul`/`!div { lhs, rhs }`.
-- **Lookback**: `!lag`/`!diff`/`!ratio`/`!roc { source, periods }`.
+- **Lookback**: `!lag`/`!diff`/`!ratio`/`!roc { source, period }`.
 - **Rolling extremum**: `!rolling_max`/`!rolling_min { source, period }`.
 
 ### Signals

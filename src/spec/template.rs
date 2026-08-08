@@ -35,7 +35,7 @@
 //! ```yaml
 //! score:
 //!   !mul
-//!     lhs: !roc { source: !close { source: !pick { symbol: !arg SYM } }, periods: 20 }
+//!     lhs: !roc { source: !close { source: !pick { symbol: !arg SYM } }, period: 20 }
 //!     rhs: !adx { source: !current_bar { source: !pick { symbol: !arg SYM } }, period: 14 }
 //! ```
 //!

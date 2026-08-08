@@ -159,8 +159,8 @@ fn overlay_indicator_state_stays_per_series() {
 
 /// The `corr_to_spy` shape from the real overlay files: this series' returns
 /// against another symbol's, over a rolling window.
-const CORR: &str = "!correlation { lhs: !roc { periods: 1 }, \
-      rhs: !roc { periods: 1, source: !close { source: !pick { symbol: B } } }, \
+const CORR: &str = "!correlation { lhs: !roc { period: 1 }, \
+      rhs: !roc { period: 1, source: !close { source: !pick { symbol: B } } }, \
       period: 4 }";
 
 #[test]
