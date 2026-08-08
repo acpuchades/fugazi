@@ -52,9 +52,7 @@ use sha2::Sha256;
 
 use crate::indicators::DEFAULT_EPSILON;
 use crate::types::{Candle, Real};
-use crate::wallet::{
-    Ack, Order, OrderId, OrderKind, Reference, Rejection, Side, Units, Wallet, WalletError,
-};
+use crate::wallet::{Ack, Order, OrderId, OrderKind, Reference, Rejection, Side, Size, Units, Wallet, WalletError};
 
 use super::LiveError;
 
@@ -87,6 +85,18 @@ struct RestingLeg {
 struct ProtectiveState {
     stop: Option<RestingLeg>,
     take_profit: Option<RestingLeg>,
+}
+
+/// A resting limit order we've placed, kept for the same reasons as
+/// [`RestingLeg`]: an unchanged re-submit is a no-op, and a changed one cancels
+/// the previous venue order before placing the replacement.
+#[derive(Debug, Clone, Copy)]
+struct RestingLimit {
+    limit: Real,
+    qty: Real,
+    side: Side,
+    venue_id: i64,
+    local: OrderId,
 }
 
 /// A live [`Wallet`] over Binance USDⓈ-M Futures. See the [module
@@ -122,6 +132,9 @@ pub struct BinanceFuturesWallet {
 
     // Resting protective legs, for idempotent re-submit / cancel-on-change.
     protective: HashMap<String, ProtectiveState>,
+    // Resting limit orders, one per symbol — same convention as `protective`
+    // and as `PaperWallet`.
+    limits: HashMap<String, RestingLimit>,
 
     // Fill polling: per-symbol last-seen tradeId, and the accumulated errors.
     trade_cursor: HashMap<String, i64>,
@@ -174,6 +187,7 @@ impl BinanceFuturesWallet {
             venue_to_local: HashMap::new(),
             order_kind: HashMap::new(),
             protective: HashMap::new(),
+            limits: HashMap::new(),
             trade_cursor: HashMap::new(),
             errors: Vec::new(),
             rejections: Vec::new(),
@@ -427,13 +441,11 @@ impl BinanceFuturesWallet {
         // A protective exit trades the opposite side of the open position.
         let side = if pos > 0.0 { Side::Sell } else { Side::Buy };
         // This path rests a *protective* leg, so only the two protective kinds
-        // are meaningful. `Market` has always fallen back to `STOP_MARKET`
-        // (the caller reached `rest_protective`, so a stop is what they meant);
-        // `Limit` reaches here only if a future caller wires `set_limit`
-        // through it, which it should not — a resting entry is a different
-        // venue order (`LIMIT` with a `price`, not `closePosition`), and this
-        // wallet doesn't implement `set_limit` yet, so the trait's
-        // `UnsupportedOperation` default stands.
+        // reach it in practice. `Market` has always fallen back to
+        // `STOP_MARKET` (a caller in `rest_protective` meant a stop), and
+        // `Limit` has its own path in [`set_limit`] — a resting entry is a
+        // different venue order (`LIMIT` with a `price` and `quantity`, not a
+        // `closePosition` trigger), so it never arrives here.
         let type_token = match kind {
             OrderKind::TakeProfit => "TAKE_PROFIT_MARKET",
             OrderKind::Stop | OrderKind::Market | OrderKind::Limit => "STOP_MARKET",
@@ -604,6 +616,121 @@ impl Wallet<String> for BinanceFuturesWallet {
             if let Some(leg) = state.take_profit {
                 self.cancel_venue(symbol, leg.venue_id)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Rest a `LIMIT` / `GTC` order on the venue.
+    ///
+    /// The [`Size`] resolves at the **limit price** — that is where the order
+    /// fills, so it is the price the target should be sized against, matching
+    /// [`PaperWallet`](crate::PaperWallet)'s "resolve at the fill" rule.
+    ///
+    /// The venue order's side comes from the resolved *delta*, not from `side`
+    /// directly: `side · size` is an absolute target, so reducing a long is a
+    /// sell however the caller spelled the target. A limit already through the
+    /// market is simply a marketable limit — the venue fills it immediately, at
+    /// the limit or better, which is the same guarantee a resting one carries.
+    ///
+    /// Idempotent per symbol: re-submitting the same side / price / quantity is
+    /// a no-op that returns the existing order's id, and any other change
+    /// cancels the previous venue order before placing the replacement — the
+    /// convention [`rest_protective`](Self::rest_protective) uses, so a
+    /// strategy can walk its limit every bar without piling up orders.
+    fn set_limit(
+        &mut self,
+        symbol: String,
+        side: Side,
+        size: Size,
+        limit: Reference,
+    ) -> Result<Ack<String>, WalletError> {
+        let local = self.mint();
+        if limit.0 <= 0.0 {
+            return Err(self.refuse(
+                &symbol,
+                local,
+                OrderKind::Limit,
+                LiveError::Decode(format!("limit price must be positive, got {}", limit.0)),
+            ));
+        }
+        let filter = match self.ensure_filter(&symbol) {
+            Ok(f) => f,
+            Err(e) => return Err(self.refuse(&symbol, local, OrderKind::Limit, e)),
+        };
+
+        let current = self.positions.get(&symbol).copied().unwrap_or(0.0);
+        let magnitude = size.resolve(
+            limit.0,
+            current,
+            self.available_balance,
+            self.wallet_balance + self.unrealized,
+        );
+        let delta = side.sign() * magnitude - current;
+        let qty = floor_to_step(delta.abs(), filter.step);
+        let price = round_to_tick(limit.0, filter.tick);
+        if qty < filter.min_qty || qty <= DEFAULT_EPSILON {
+            // Below the venue's minimum tradable size: accept the submission
+            // but place nothing, exactly as `set_position` does.
+            return Ok(Ack::Working(local));
+        }
+        let order_side = if delta > 0.0 { Side::Buy } else { Side::Sell };
+
+        // Idempotent re-submit: an unchanged order stays where it is.
+        if let Some(existing) = self.limits.get(&symbol).copied() {
+            if existing.side == order_side
+                && (existing.limit - price).abs() <= DEFAULT_EPSILON
+                && (existing.qty - qty).abs() <= DEFAULT_EPSILON
+            {
+                return Ok(Ack::Working(existing.local));
+            }
+            self.cancel_venue(&symbol, existing.venue_id)?;
+            self.limits.remove(&symbol);
+        }
+
+        // Seed the fill cursor before placing, so a marketable limit that fills
+        // instantly is caught by the next poll rather than skipped by a cursor
+        // advanced past its own fill — the same ordering `set_position` needs.
+        if let Err(e) = self.ensure_cursor(&symbol) {
+            self.errors.push(e);
+        }
+        let params = vec![
+            ("symbol", symbol.clone()),
+            ("side", side_token(order_side).to_string()),
+            ("type", "LIMIT".to_string()),
+            ("timeInForce", "GTC".to_string()),
+            ("quantity", format_decimals(qty, filter.qty_decimals)),
+            ("price", format_decimals(price, filter.price_decimals)),
+            ("newClientOrderId", client_order_id(local)),
+        ];
+        let value = match self.signed(Method::POST, "/fapi/v1/order", params) {
+            Ok(v) => v,
+            Err(e) => return Err(self.refuse(&symbol, local, OrderKind::Limit, e)),
+        };
+        let Some(venue_id) = value.get("orderId").and_then(|v| v.as_i64()) else {
+            return Err(self.refuse(
+                &symbol,
+                local,
+                OrderKind::Limit,
+                LiveError::Decode("order response missing orderId".into()),
+            ));
+        };
+        self.map_order(local, venue_id, OrderKind::Limit);
+        self.limits.insert(
+            symbol,
+            RestingLimit {
+                limit: price,
+                qty,
+                side: order_side,
+                venue_id,
+                local,
+            },
+        );
+        Ok(Ack::Working(local))
+    }
+
+    fn cancel_limit(&mut self, symbol: &String) -> Result<(), WalletError> {
+        if let Some(resting) = self.limits.remove(symbol) {
+            self.cancel_venue(symbol, resting.venue_id)?;
         }
         Ok(())
     }

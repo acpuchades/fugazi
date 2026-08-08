@@ -9,7 +9,7 @@
 //! then exercise the wallet on the main thread, outside any runtime context.
 
 use fugazi::live::BinanceFuturesWallet;
-use fugazi::wallet::{Ack, Side, Units, Wallet};
+use fugazi::wallet::{Ack, Side, Size, Units, Wallet};
 use fugazi::Candle;
 use wiremock::matchers::{method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -193,6 +193,112 @@ fn protective_stop_dedups_an_unchanged_trigger() {
     w.set_stop("BTCUSDT".to_string(), fugazi::wallet::Reference(26500.0))
         .expect("moved stop accepted");
     assert_eq!(order_posts.load(Ordering::SeqCst), 2, "a moved trigger re-submits");
+}
+
+#[test]
+fn a_limit_order_places_a_gtc_limit_and_dedups_an_unchanged_resubmit() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let posts = Arc::new(AtomicUsize::new(0));
+    let deletes = Arc::new(AtomicUsize::new(0));
+    // The query of the last order POST — Binance signs its parameters into the
+    // URL, so that is where the payload is. Captured so we can assert the venue
+    // really got a LIMIT rather than something that merely returned 200.
+    let last_query = Arc::new(std::sync::Mutex::new(String::new()));
+    let (c_posts, c_deletes, c_query) = (posts.clone(), deletes.clone(), last_query.clone());
+
+    let (_rt, _server, uri) = serve(move |server| {
+        let (c_posts, c_deletes, c_query) = (c_posts.clone(), c_deletes.clone(), c_query.clone());
+        Box::pin(async move {
+            Mock::given(method("GET"))
+                .and(path("/fapi/v1/exchangeInfo"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(exchange_info("BTCUSDT")))
+                .mount(server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/fapi/v1/userTrades"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+                .mount(server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/fapi/v2/account"))
+                // Flat, so a buy target is a plain BUY of the whole size.
+                .respond_with(ResponseTemplate::new(200).set_body_json(account("BTCUSDT", "0.0")))
+                .mount(server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/fapi/v1/order"))
+                .respond_with(move |req: &wiremock::Request| {
+                    *c_query.lock().unwrap() = req.url.query().unwrap_or_default().to_string();
+                    let n = c_posts.fetch_add(1, Ordering::SeqCst);
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "orderId": 500 + n as i64, "status": "NEW"
+                    }))
+                })
+                .mount(server)
+                .await;
+            Mock::given(method("DELETE"))
+                .and(path("/fapi/v1/order"))
+                .respond_with(move |_req: &wiremock::Request| {
+                    c_deletes.fetch_add(1, Ordering::SeqCst);
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"status": "CANCELED"}))
+                })
+                .mount(server)
+                .await;
+        })
+    });
+
+    let mut w = BinanceFuturesWallet::with_base_url(uri, "key", "secret");
+    w.update("BTCUSDT".to_string(), Candle::new(27000.0, 27100.0, 26900.0, 27000.0, 1.0));
+
+    w.set_limit(
+        "BTCUSDT".to_string(),
+        Side::Buy,
+        Size::units(0.005),
+        fugazi::wallet::Reference(26000.0),
+    )
+    .expect("limit accepted");
+
+    let q = last_query.lock().unwrap().clone();
+    assert!(q.contains("type=LIMIT"), "not a LIMIT order: {q}");
+    assert!(q.contains("timeInForce=GTC"), "no time-in-force: {q}");
+    assert!(q.contains("side=BUY"), "wrong side: {q}");
+    assert!(q.contains("price=26000"), "limit price not sent: {q}");
+    assert!(q.contains("quantity=0.005"), "quantity not sent: {q}");
+
+    // Re-submitting the same order every bar must not pile up venue orders —
+    // the convention a strategy relies on when it walks its limit.
+    for _ in 0..3 {
+        w.set_limit(
+            "BTCUSDT".to_string(),
+            Side::Buy,
+            Size::units(0.005),
+            fugazi::wallet::Reference(26000.0),
+        )
+        .expect("unchanged limit accepted");
+    }
+    assert_eq!(
+        posts.load(Ordering::SeqCst),
+        1,
+        "an unchanged limit must not re-submit each bar"
+    );
+
+    // Moving the price cancels and replaces.
+    w.set_limit(
+        "BTCUSDT".to_string(),
+        Side::Buy,
+        Size::units(0.005),
+        fugazi::wallet::Reference(26500.0),
+    )
+    .expect("moved limit accepted");
+    assert_eq!(posts.load(Ordering::SeqCst), 2, "a moved limit re-submits");
+    assert_eq!(deletes.load(Ordering::SeqCst), 1, "and cancels the old one");
+
+    // And an explicit cancel withdraws it.
+    w.cancel_limit(&"BTCUSDT".to_string()).expect("cancel ok");
+    assert_eq!(deletes.load(Ordering::SeqCst), 2);
 }
 
 #[test]

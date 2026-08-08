@@ -16,6 +16,7 @@ Most of the cost of a change is remembering the third and fourth.
 - [Add a metric](#add-a-metric)
 - [Add a remote provider](#add-a-remote-provider)
 - [Add a sizing recipe](#add-a-sizing-recipe)
+- [Work in progress](#work-in-progress)
 - [Release a version](#release-a-version)
 - [The drift guards](#the-drift-guards)
 - [Conventions that bite](#conventions-that-bite)
@@ -299,6 +300,32 @@ Free functions in `src/indicators/sizing.rs` returning an
 Then the usual spec tag + catalogue entry + parity decision.
 
 ---
+
+## Work in progress
+
+Things that are deliberately half-built, so you don't mistake them for bugs or
+finish them the wrong way.
+
+### Strategy-layer limit entries 🚧
+
+The wallet layer has resting limit orders — `Wallet::set_limit` / `cancel_limit`,
+implemented by both `PaperWallet` and `BinanceFuturesWallet`, mirrored in Python.
+**No strategy shape uses them.** `SingleAssetStrategy` and the other four still
+enter at market, so a limit entry today means writing your own `Strategy` (or
+driving the wallet directly).
+
+Wiring them into the four signal slots is a design question rather than missing
+plumbing. An entry signal that fires is currently an instruction that *will*
+execute next bar; a limit entry may never fill, so the strategy layer would have
+to decide what the signal means:
+
+- does the intent expire when the signal stops firing, or rest until cancelled?
+- does an unfilled limit convert to a market order after N bars?
+- what happens when the exit signal fires while the entry is still resting?
+
+Each answer is a different product, and the crate deliberately has no
+`(signal, action)` rule table to hang them on (see *Not a rule engine* in
+`CLAUDE.md`). **Don't pick one without being asked.**
 
 ## Release a version
 
