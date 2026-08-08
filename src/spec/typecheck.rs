@@ -478,6 +478,71 @@ pub(crate) fn tag_name(spec: &ExprSpec) -> String {
     snake_tag(&format!("{spec:?}"))
 }
 
+/// Every tag the [`ExprSpec`] layer accepts, in declaration order.
+///
+/// Same spirit as [`tag_name`]: read it off what serde already knows rather
+/// than maintaining a parallel table. Feeding the deserializer a tag that
+/// cannot exist makes its derived `unknown variant` error enumerate every
+/// variant it *does* accept — so a new `ExprSpec` variant shows up here with no
+/// edit, which is the whole point. A hand-written list is exactly the thing
+/// that silently goes stale.
+///
+/// Names come back **without** the leading `!`.
+pub fn known_expr_tags() -> Vec<String> {
+    let v: serde_norway::Value = serde_norway::from_str(IMPOSSIBLE_TAG).expect("valid YAML");
+    variants_from_error(&ExprSpec::try_from(v).expect_err("the tag cannot exist"))
+}
+
+/// [`known_expr_tags`] for the [`SignalSpec`] layer.
+pub fn known_signal_tags() -> Vec<String> {
+    let v: serde_norway::Value = serde_norway::from_str(IMPOSSIBLE_TAG).expect("valid YAML");
+    variants_from_error(&SignalSpec::try_from(v).expect_err("the tag cannot exist"))
+}
+
+/// [`known_expr_tags`] for [`SelectionRuleSpec`](crate::spec::basket::SelectionRuleSpec)
+/// — the third tag vocabulary, used by a `basket:` document's `selection:`.
+pub fn known_selection_tags() -> Vec<String> {
+    let e = serde_norway::from_str::<crate::spec::basket::SelectionRuleSpec>(IMPOSSIBLE_TAG)
+        .expect_err("the tag cannot exist");
+    variants_from_error(&e.to_string())
+}
+
+/// Tags accepted by the parser that are **not** enum variants, because a
+/// load-time pass rewrites them before the typed parse ever runs.
+///
+/// `!equal_weight <N>` is sizing sugar lowered to `!value <1/N>` by
+/// `rewrite_sugar_tags`; the rest are the `!import` / `!param` / `!arg` /
+/// `!undefined` placeholders resolved by the load passes. They're legitimately
+/// documented in `fugazi list` without appearing in any variant list — so
+/// anything that cross-checks the catalogue against
+/// [`known_expr_tags`] has to know about them.
+pub const REWRITTEN_TAGS: &[&str] = &["equal_weight", "param", "undefined", "import", "arg"];
+
+/// A tag no variant will ever be named, used to provoke serde's
+/// variant-listing error. The mapping body keeps the shape valid for tags that
+/// take fields.
+const IMPOSSIBLE_TAG: &str = "!__fugazi_no_such_tag__ {}";
+
+/// Pull the backtick-quoted names out of serde's
+/// ``unknown variant `x`, expected one of `a`, `b`, …`` message, dropping the
+/// first (the unknown tag itself).
+fn variants_from_error(message: &str) -> Vec<String> {
+    let Some(list) = message.split_once("expected one of ").map(|(_, rest)| rest) else {
+        panic!("serde's unknown-variant error changed shape: {message}");
+    };
+    let names: Vec<String> = list
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect();
+    assert!(
+        !names.is_empty(),
+        "no variants parsed out of: {message}"
+    );
+    names
+}
+
 /// `"MacdLine { .. }"` → `"!macd_line"`.
 fn snake_tag(debug: &str) -> String {
     let ident: String = debug
