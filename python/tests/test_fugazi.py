@@ -2581,3 +2581,36 @@ def test_atom_with_a_candle_stays_priceable():
 def test_an_atom_carrying_neither_is_rejected():
     with pytest.raises(ValueError, match="carries no data"):
         ta.Atom()
+
+
+def test_protective_legs_take_off_only_their_share():
+    """A stop can carry a size, so several owners can protect one position.
+
+    Reduce-only: the size is clamped to the position, so a leg flattens but
+    never flips. Omitting it keeps the whole-position behaviour.
+    """
+    w = ta.PaperWallet(10_000.0)
+    bar = ta.Candle(100.0, 100.0, 100.0, 100.0, 1.0)
+    w.update("A", bar)
+    w.set("A", "buy", ta.Size.units(10.0))
+    w.update("A", bar)
+    assert w.position("A") == 10.0
+
+    w.set_stop("A", 95.0, ta.Size.units(4.0))
+    w.update("A", ta.Candle(100.0, 100.0, 90.0, 92.0, 1.0))
+    assert w.position("A") == 6.0, "only the leg's own share should come off"
+
+    # No size -> the whole position, as before.
+    w.set_stop("A", 95.0)
+    w.update("A", ta.Candle(94.0, 94.0, 90.0, 92.0, 1.0))
+    assert w.position("A") == 0.0
+
+
+def test_adjust_funds_credits_and_refuses_overdraft():
+    w = ta.PaperWallet(1_000.0)
+    w.adjust_funds(250.0)
+    assert w.funds == 1_250.0
+    w.adjust_funds(-250.0)
+    assert w.funds == 1_000.0
+    with pytest.raises(ValueError):
+        w.adjust_funds(-5_000.0)

@@ -253,15 +253,47 @@ impl PyWallet {
     /// fills when a bar trades through it (the side is read from the current
     /// position). Idempotent, latest-wins per symbol; re-submit to trail. Returns
     /// `None` (the resting order is working until it triggers in some `update`).
-    pub(crate) fn set_stop(&mut self, symbol: String, trigger: f64) -> PyResult<Option<PyOrder>> {
-        wrap_ack(self.inner.set_stop(symbol, Reference(trigger), Size::position_frac(1.0)))
+    ///
+    /// `size` is how much of the position the leg takes off, defaulting to all
+    /// of it. It is **reduce-only**: resolved at the fill price and clamped to
+    /// the position's magnitude, so a leg can flatten but never flip. An
+    /// explicit `Size.units(n)` is a *partial* exit — what lets several owners
+    /// rest their own share against one position.
+    #[pyo3(signature = (symbol, trigger, size = None))]
+    pub(crate) fn set_stop(
+        &mut self,
+        symbol: String,
+        trigger: f64,
+        size: Option<PySize>,
+    ) -> PyResult<Option<PyOrder>> {
+        let size = size.map_or(Size::position_frac(1.0), |s| s.inner);
+        wrap_ack(self.inner.set_stop(symbol, Reference(trigger), size))
     }
 
     /// Rest a take-profit on `symbol` at `trigger` — the favourable twin of
-    /// `set_stop`. Idempotent, latest-wins per symbol. Returns `None` (working).
-    pub(crate) fn set_take_profit(&mut self, symbol: String, trigger: f64) -> PyResult<Option<PyOrder>> {
-        wrap_ack(self.inner.set_take_profit(symbol, Reference(trigger), Size::position_frac(1.0)))
+    /// `set_stop`, with the same reduce-only `size` semantics. Idempotent,
+    /// latest-wins per symbol. Returns `None` (working).
+    #[pyo3(signature = (symbol, trigger, size = None))]
+    pub(crate) fn set_take_profit(
+        &mut self,
+        symbol: String,
+        trigger: f64,
+        size: Option<PySize>,
+    ) -> PyResult<Option<PyOrder>> {
+        let size = size.map_or(Size::position_frac(1.0), |s| s.inner);
+        wrap_ack(self.inner.set_take_profit(symbol, Reference(trigger), size))
     }
+
+    /// Credit (positive) or debit (negative) the cash balance with no order
+    /// flow — an external funding event, or the cash leg of a rebalance.
+    /// Raises `ValueError` if a debit would take the balance negative.
+    pub(crate) fn adjust_funds(&mut self, delta: f64) -> PyResult<()> {
+        self.inner
+            .adjust_funds(delta)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+
 
     /// Rest a limit order on `symbol`: drive the position to `side · size` once
     /// the market trades through `limit`, filling at that price **or better**

@@ -188,3 +188,58 @@ def test_the_declared_tables_do_not_go_stale():
     assert not stale, (
         f"these tags are classified here but no longer exist in the spec layer: {stale}"
     )
+
+
+# --------------------------------------------------------------------------
+# Wallet-method parity.
+#
+# The tag ledgers above are derived from serde's own variant lists, so they
+# cannot go stale. `Wallet` is a Rust *trait*, which Python can't reflect into,
+# so this one is hand-maintained — and it exists because that gap let a real
+# regression through: `set_stop` grew a `size` parameter on the Rust side and
+# the binding kept passing a hardcoded whole-position size, quietly making
+# partial protective exits unreachable from Python.
+#
+# If you add or change a `Wallet` method, update this list in the same PR.
+# --------------------------------------------------------------------------
+
+WALLET_BOUND = {
+    "funds", "position", "positions", "price", "equity", "update",
+    "set", "set_position", "close",
+    "set_stop", "set_take_profit", "cancel_protective",
+    "set_limit", "cancel_limit", "cancel",
+    "adjust_funds", "poll_fills",
+    # Inherent PaperWallet extras, not trait methods.
+    "orders", "reset",
+}
+
+WALLET_NOT_BOUND = {
+    "take_rejections": (
+        "needs a bar-less rejection type; the run path already exposes the same "
+        "entries on RunReport.rejections"
+    ),
+    "set_costs_for": (
+        "needs a frequency argument to resolve a bundle; the spec path covers it "
+        "via TradingCostsConfig"
+    ),
+}
+
+
+def test_wallet_surface_matches_the_ledger():
+    actual = {n for n in dir(ta.PaperWallet) if not n.startswith("_")}
+    missing = WALLET_BOUND - actual
+    extra = actual - WALLET_BOUND - set(WALLET_NOT_BOUND)
+    assert not missing, f"ledger claims these are bound but they aren't: {sorted(missing)}"
+    assert not extra, (
+        f"PaperWallet gained methods the ledger doesn't record: {sorted(extra)} — "
+        "add them to WALLET_BOUND, or to WALLET_NOT_BOUND with a reason"
+    )
+
+
+def test_protective_legs_expose_their_size():
+    """The specific regression the ledger above exists to prevent."""
+    w = ta.PaperWallet(1_000.0)
+    w.update("A", ta.Candle(10.0, 10.0, 10.0, 10.0, 1.0))
+    # Must accept a size; a TypeError here means the binding lost the parameter.
+    w.set_stop("A", 9.0, ta.Size.units(1.0))
+    w.set_take_profit("A", 11.0, ta.Size.units(1.0))
