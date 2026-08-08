@@ -126,14 +126,23 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PortfolioWallet<Sym> {
             .settle(symbol, candle)
     }
 
+    /// Fills the venue reported out of band, attributed like any other.
+    ///
+    /// A no-op while the account is a [`PaperWallet`](crate::PaperWallet), and
+    /// load-bearing once it isn't: a live venue reports a fill on a symbol that
+    /// didn't tick this bar through here and nowhere else.
+    fn poll_fills(&mut self) -> Vec<Order<Sym>> {
+        self.inner.lock().expect("portfolio lock poisoned").poll()
+    }
+
     fn take_rejections(&mut self) -> Vec<Rejection<Sym>> {
         let mut inner = self.inner.lock().expect("portfolio lock poisoned");
-        // Both sources: refusals the netting layer booked against a child, and
-        // any the account itself booked.
-        let mut all = inner.take_rejections();
-        let from_account = inner.substrate.take_rejections();
-        all.extend(from_account);
-        all
+        // Pick up anything the account booked since the last settle, then hand
+        // over the translated list. The account's own stream is *not* passed
+        // through raw — a refusal there is about a netted order, so it belongs
+        // to the children that contributed to it.
+        inner.drain_substrate_rejections();
+        inner.take_rejections()
     }
 
     fn set_position(&mut self, _target: Units<Sym>) -> Result<Ack<Sym>, WalletError> {

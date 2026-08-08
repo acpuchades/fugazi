@@ -348,14 +348,32 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
                     amount,
                 })
             };
-            if let Err(error) = submitted {
-                // The account refused the netted order, so nothing moves and
-                // every contributing child hears about it.
-                for leg in &legs {
-                    self.rejections
-                        .push(rejection(symbol.clone(), leg.id, error));
+            match submitted {
+                Err(error) => {
+                    // The account refused the netted order, so nothing moves
+                    // and every contributing child hears about it.
+                    for leg in &legs {
+                        self.rejections
+                            .push(rejection(symbol.clone(), leg.id, error));
+                    }
+                    return;
                 }
-                return;
+                Ok(Ack::Filled(order)) => {
+                    // A venue that fills synchronously — `PaperWallet` never
+                    // does, but the trait allows it. Attribute now, or the
+                    // fill would never reach a ledger: there is no later
+                    // update-stream entry for it.
+                    let flow = PendingFlow {
+                        symbol: symbol.clone(),
+                        legs,
+                        market_delta,
+                    };
+                    let filled = order.side.sign() * order.units;
+                    let fraction = (filled / market_delta).clamp(0.0, 1.0);
+                    self.book(&flow, fraction, order.price, order.price, order.commission);
+                    return;
+                }
+                Ok(Ack::Working(_)) => {}
             }
         }
         self.pending.insert(
@@ -463,6 +481,10 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
     pub(super) fn settle(&mut self, symbol: Sym, candle: Candle) -> Vec<Order<Sym>> {
         self.priced = true;
         let fills = self.substrate.update(symbol.clone(), candle);
+        // Before anything else: a refusal booked during that update kills its
+        // flow, so translating first keeps a dead flow from being mistaken for
+        // one that is still working.
+        self.drain_substrate_rejections();
         let mut out = Vec::new();
         let mut market_filled = false;
 
@@ -480,29 +502,82 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
             }
         }
 
-        // A flow that crossed entirely submitted no order, so no fill arrives
-        // to settle it — book it at the bar's open, which is the price the
-        // market portion would have got.
+        // A flow that crossed entirely submitted no order, so no fill will
+        // ever arrive to settle it — book it at the bar's open, which is the
+        // price the market portion would have got.
+        //
+        // A flow that *did* submit an order and hasn't filled is simply still
+        // working, and stays pending. `PaperWallet` fills or refuses on this
+        // same update so it never lingers, but a live venue fills
+        // asynchronously — dropping it here (or guessing it was refused) would
+        // leave the eventual fill with nothing to attribute against.
         if !market_filled
             && let Some(flow) = self.pending.get(&symbol).cloned()
+            && flow.market_delta.abs() <= DEFAULT_EPSILON
         {
-            if flow.market_delta.abs() <= DEFAULT_EPSILON {
-                self.pending.remove(&symbol);
-                out.extend(self.book(&flow, 1.0, candle.open, candle.open, 0.0));
-            } else {
-                // An order was submitted but nothing filled — the account
-                // refused it at fill time. Tell the children.
-                self.pending.remove(&symbol);
-                for leg in &flow.legs {
-                    self.rejections.push(rejection(
-                        symbol.clone(),
-                        leg.id,
-                        WalletError::InsufficientFunds,
-                    ));
+            self.pending.remove(&symbol);
+            out.extend(self.book(&flow, 1.0, candle.open, candle.open, 0.0));
+        }
+        out
+    }
+
+    /// Drain fills the venue reported **out of band** — booked between bars
+    /// rather than on a specific `update` — and attribute them like any other.
+    ///
+    /// A no-op while the account is a [`PaperWallet`] (which fills only through
+    /// `update`), and the difference between working and broken once it isn't:
+    /// a live venue reports a fill on a symbol that didn't tick this bar
+    /// through here and nowhere else.
+    pub(super) fn poll(&mut self) -> Vec<Order<Sym>> {
+        let fills = self.substrate.poll_fills();
+        let mut out = Vec::new();
+        for fill in fills {
+            match fill.kind {
+                OrderKind::Stop | OrderKind::TakeProfit => {
+                    if let Some(order) = self.attribute_protective(&fill.symbol.clone(), &fill) {
+                        out.push(order);
+                    }
+                }
+                _ => {
+                    // No candle here, so no bar open to settle a cross at —
+                    // which is fine: a flow that crossed entirely never
+                    // submitted an order, so it cannot appear in this stream.
+                    let symbol = fill.symbol.clone();
+                    out.extend(self.attribute_market(&symbol, &fill, fill.price));
                 }
             }
         }
+        self.drain_substrate_rejections();
         out
+    }
+
+    /// Translate refusals the account booked into per-child ones.
+    ///
+    /// The account refuses a *netted* order, which belongs to whichever
+    /// children contributed to it — so the refusal is split back over that
+    /// symbol's pending legs, carrying the venue's real error rather than a
+    /// guess. A refused protective leg goes to the child whose leg was rested.
+    /// Anything unattributable is passed through so it still reaches the run
+    /// report.
+    pub(super) fn drain_substrate_rejections(&mut self) {
+        for refusal in self.substrate.take_rejections() {
+            if let Some(flow) = self.pending.remove(&refusal.symbol) {
+                for leg in &flow.legs {
+                    self.rejections.push(Rejection {
+                        symbol: refusal.symbol.clone(),
+                        id: leg.id,
+                        error: refusal.error,
+                        kind: refusal.kind,
+                    });
+                }
+            } else if let Some(&idx) = self.protective_owner.get(&refusal.symbol) {
+                let id = self.mint();
+                self.owners.insert(id, idx);
+                self.rejections.push(Rejection { id, ..refusal });
+            } else {
+                self.rejections.push(refusal);
+            }
+        }
     }
 
     /// Split a netted market fill across the children whose flow produced it.

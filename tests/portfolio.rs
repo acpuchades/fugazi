@@ -1728,3 +1728,208 @@ fn a_rebalance_moves_notional_cash_without_trading() {
     assert!((wallet.equity().0 - 1_000.0).abs() < 1e-9);
     wallet.assert_books_balance();
 }
+
+// ---------------------------------------------------------------------------
+// The live-substrate paths.
+//
+// A `PaperWallet` fills synchronously inside `update`, so three branches of the
+// netting layer never run in an ordinary backtest: out-of-band fills via
+// `poll_fills`, a submission that fills immediately (`Ack::Filled`), and a
+// submitted order that simply hasn't filled yet. A real venue does all three,
+// and getting them wrong loses fills silently — so they get a double.
+// ---------------------------------------------------------------------------
+
+/// A venue that executes when fed a bar but only *reports* the fill on the next
+/// `poll_fills`, the way a real exchange reports through a trades endpoint.
+struct AsyncVenue {
+    cash: Real,
+    positions: std::collections::HashMap<&'static str, Real>,
+    marks: std::collections::HashMap<&'static str, Real>,
+    queued: Vec<(&'static str, Real)>,
+    unreported: Vec<Order<&'static str>>,
+    /// When set, submissions fill instantly and report through the `Ack`.
+    synchronous: bool,
+    next_id: u64,
+}
+
+impl AsyncVenue {
+    fn new(cash: Real, synchronous: bool) -> Self {
+        Self {
+            cash,
+            positions: Default::default(),
+            marks: Default::default(),
+            queued: Vec::new(),
+            unreported: Vec::new(),
+            synchronous,
+            next_id: 0,
+        }
+    }
+
+    fn execute(&mut self, symbol: &'static str, target: Real, price: Real) -> Order<&'static str> {
+        let current = self.positions.get(symbol).copied().unwrap_or(0.0);
+        let delta = target - current;
+        self.positions.insert(symbol, target);
+        self.cash -= delta * price;
+        let id = OrderId(self.next_id);
+        self.next_id += 1;
+        Order::new(
+            symbol,
+            if delta > 0.0 { Side::Buy } else { Side::Sell },
+            delta.abs(),
+            price,
+            OrderKind::Market,
+            id,
+        )
+    }
+}
+
+impl Wallet<&'static str> for AsyncVenue {
+    fn funds(&self) -> Reference {
+        Reference(self.cash)
+    }
+    fn position(&self, symbol: &&'static str) -> Units<&'static str> {
+        Units {
+            symbol,
+            amount: self.positions.get(symbol).copied().unwrap_or(0.0),
+        }
+    }
+    fn price(&self, symbol: &&'static str) -> Option<Reference> {
+        self.marks.get(symbol).map(|&p| Reference(p))
+    }
+    fn equity(&self) -> Reference {
+        let held: Real = self
+            .positions
+            .iter()
+            .map(|(s, &a)| a * self.marks.get(s).copied().unwrap_or(0.0))
+            .sum();
+        Reference(self.cash + held)
+    }
+    fn update(&mut self, symbol: &'static str, candle: Candle) -> Vec<Order<&'static str>> {
+        self.marks.insert(symbol, candle.close);
+        let due: Vec<(&'static str, Real)> =
+            self.queued.iter().copied().filter(|(s, _)| *s == symbol).collect();
+        self.queued.retain(|(s, _)| *s != symbol);
+        for (sym, target) in due {
+            let order = self.execute(sym, target, candle.open);
+            // Executed, but deliberately not returned here — the caller learns
+            // about it through `poll_fills`, like a real venue.
+            self.unreported.push(order);
+        }
+        Vec::new()
+    }
+    fn poll_fills(&mut self) -> Vec<Order<&'static str>> {
+        std::mem::take(&mut self.unreported)
+    }
+    fn set_position(
+        &mut self,
+        target: Units<&'static str>,
+    ) -> Result<Ack<&'static str>, WalletError> {
+        if self.synchronous {
+            let price = self.price(&target.symbol).ok_or(WalletError::UnknownPrice)?.0;
+            let order = self.execute(target.symbol, target.amount, price);
+            return Ok(Ack::Filled(order));
+        }
+        self.queued.push((target.symbol, target.amount));
+        let id = OrderId(self.next_id);
+        self.next_id += 1;
+        Ok(Ack::Working(id))
+    }
+    fn set(
+        &mut self,
+        symbol: &'static str,
+        side: Side,
+        size: Size,
+    ) -> Result<Ack<&'static str>, WalletError> {
+        let price = self.price(&symbol).ok_or(WalletError::UnknownPrice)?.0;
+        let position = self.position(&symbol).amount;
+        let magnitude = size.resolve(price, position, self.cash, self.equity().0);
+        self.set_position(Units {
+            symbol,
+            amount: side.sign() * magnitude,
+        })
+    }
+    fn set_stop(
+        &mut self,
+        _symbol: &'static str,
+        _trigger: Reference,
+        _size: Size,
+    ) -> Result<Ack<&'static str>, WalletError> {
+        Ok(Ack::Working(OrderId(u64::MAX)))
+    }
+    fn set_take_profit(
+        &mut self,
+        _symbol: &'static str,
+        _trigger: Reference,
+        _size: Size,
+    ) -> Result<Ack<&'static str>, WalletError> {
+        Ok(Ack::Working(OrderId(u64::MAX)))
+    }
+    fn cancel_protective(&mut self, _symbol: &&'static str) -> Result<(), WalletError> {
+        Ok(())
+    }
+    fn positions(&self) -> Vec<Units<&'static str>> {
+        self.positions
+            .iter()
+            .map(|(&symbol, &amount)| Units { symbol, amount })
+            .collect()
+    }
+}
+
+#[test]
+fn fills_reported_out_of_band_still_reach_the_ledgers() {
+    // The branch a `PaperWallet` can never exercise. Before `poll_fills` was
+    // forwarded, a venue that reports through a trades endpoint would move the
+    // account while every child's ledger stayed empty — the account and the
+    // books would silently disagree forever.
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(2_000.0)
+        .add("a", HoldUnits::new("A", 4.0))
+        .add("b", HoldUnits::new("B", 6.0))
+        .substrate(std::sync::Arc::new(|seed| {
+            Box::new(AsyncVenue::new(seed, false)) as Box<dyn Wallet<&'static str> + Send>
+        }))
+        .weights(EqualWeight)
+        .build();
+    let report = portfolio.run(flat_snapshots(5));
+    let wallet = portfolio.wallet_view();
+
+    assert!(!report.fills.is_empty(), "the out-of-band fills should surface");
+    assert!(
+        (wallet.position(&"A").amount - 4.0).abs() < 1e-9,
+        "account A = {}",
+        wallet.position(&"A").amount,
+    );
+    assert!((wallet.position(&"B").amount - 6.0).abs() < 1e-9);
+    // The point of the test: the books tracked the account through a fill
+    // stream that never came back from `update`.
+    wallet.assert_books_balance();
+}
+
+#[test]
+fn a_venue_that_fills_on_submission_still_reaches_the_ledgers() {
+    // `Ack::Filled` — a venue that executes synchronously. There is no later
+    // update-stream entry for such a fill, so attributing it at submission is
+    // the only chance to move a ledger.
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(2_000.0)
+        .add("a", HoldUnits::new("A", 4.0))
+        .substrate(std::sync::Arc::new(|seed| {
+            Box::new(AsyncVenue::new(seed, true)) as Box<dyn Wallet<&'static str> + Send>
+        }))
+        .weights(EqualWeight)
+        .build();
+    let _ = portfolio.run(flat_snapshots(5));
+    let wallet = portfolio.wallet_view();
+
+    assert!(
+        (wallet.position(&"A").amount - 4.0).abs() < 1e-9,
+        "account A = {}",
+        wallet.position(&"A").amount,
+    );
+    assert!(
+        (wallet.sub_equity(0).0 - 2_000.0).abs() < 1e-6,
+        "flat prices, so the child's equity should be unchanged: {}",
+        wallet.sub_equity(0).0,
+    );
+    wallet.assert_books_balance();
+}
