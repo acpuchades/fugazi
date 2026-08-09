@@ -27,9 +27,14 @@ name = "fugazi"
 path = "src/cli/main.rs"
 required-features = ["cli"]
 
-# The live-wallet smoke test needs the `live` feature (Binance futures testnet).
+# The live-wallet smoke tests need the `live` feature (Binance futures testnet /
+# OKX demo trading).
 [[example]]
 name = "binance_testnet"
+required-features = ["live"]
+
+[[example]]
+name = "okx_demo"
 required-features = ["live"]
 
 # `sources` pulls in the async HTTP stack the remote candle providers
@@ -61,10 +66,11 @@ parallel = ["dep:rayon"]
 # `live` compiles the live-execution wallets (`fugazi::live`) — downstream
 # `Wallet` impls that route orders to a real broker instead of an in-memory
 # paper book. It builds on `sources` (which already pulls in the async
-# `reqwest`/`tokio` stack the REST clients use) and adds the HMAC-SHA256
-# request signing every private venue endpoint requires (`hmac` + `sha2` +
-# `hex`). Not default-on: `cargo build` and the Python wheel are unaffected.
-live = ["sources", "dep:hmac", "dep:sha2", "dep:hex"]
+# `reqwest`/`tokio` stack the REST clients use) and adds the request signing
+# every private venue endpoint requires: `hmac` + `sha2` for HMAC-SHA256, `hex`
+# for Binance's hex signatures, and `base64` for OKX's base64 ones. Not
+# default-on: `cargo build` and the Python wheel are unaffected.
+live = ["sources", "dep:hmac", "dep:sha2", "dep:hex", "dep:base64"]
 # `spec` compiles the YAML-driven declarative surface (`fugazi::spec`) — the
 # `*Spec` types, `evaluate*` / `measured_report*` / `optimize` kernel,
 # `Metrics` document + `MetricKey`, `CostConfig`, `WindowSpec`, and the
@@ -106,6 +112,7 @@ thiserror = { version = "2", optional = true }
 hmac = { version = "0.12", optional = true }
 sha2 = { version = "0.10", optional = true }
 hex = { version = "0.4", optional = true }
+base64 = { version = "0.22", optional = true }
 interim = { version = "0.2.1", default-features = false, features = ["std", "time_0_3"], optional = true }
 
 [dev-dependencies]

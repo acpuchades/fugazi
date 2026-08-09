@@ -9,11 +9,13 @@
 //! venue order encoding, fill polling) lives here, behind the same trait a
 //! [`PaperWallet`](crate::PaperWallet) satisfies.
 //!
-//! Ships one backend today — [`BinanceFuturesWallet`], for Binance USDⓈ-M
-//! Futures (and its free public testnet at `testnet.binancefuture.com`). It
-//! reuses the async `reqwest`/`tokio` stack the [`sources`](crate::sources)
-//! providers already pull in, and adds HMAC-SHA256 request signing. Gated behind
-//! the `live` feature.
+//! Ships two backends today — [`BinanceFuturesWallet`], for Binance USDⓈ-M
+//! Futures (and its free public testnet at `testnet.binancefuture.com`), and
+//! [`OkxWallet`], for OKX V5 perpetual swaps (and its free demo-trading
+//! environment). Both reuse the async `reqwest`/`tokio` stack the
+//! [`sources`](crate::sources) providers already pull in, and add request
+//! signing (Binance HMAC-SHA256 hex; OKX base64-HMAC over
+//! `timestamp+method+path+body`). Gated behind the `live` feature.
 //!
 //! **Synchronous over async.** The [`Wallet`](crate::Wallet) trait is a
 //! synchronous `&mut self` surface; a venue REST API is async. Each live wallet
@@ -22,8 +24,10 @@
 //! driver is), not from inside an existing async runtime.
 
 mod binance;
+mod okx;
 
 pub use binance::BinanceFuturesWallet;
+pub use okx::OkxWallet;
 
 use std::fmt;
 
@@ -33,13 +37,14 @@ use std::fmt;
 /// The trait-facing [`WalletError`](crate::WalletError) is a small `Copy` enum
 /// with no room for an endpoint / status / body, so a live wallet returns the
 /// `Venue` category there and stashes one of these on an internal log the caller
-/// can inspect (see [`BinanceFuturesWallet::errors`]).
+/// can inspect (see [`BinanceFuturesWallet::errors`] / [`OkxWallet::errors`]).
 #[derive(Debug, Clone)]
 pub enum LiveError {
     /// The request never completed (DNS, connect, timeout, TLS, …).
     Network(String),
-    /// The venue answered with a non-2xx status; the body usually carries a
-    /// Binance `{ "code": …, "msg": … }` explanation.
+    /// The venue answered with a non-2xx status — or, on OKX, a 2xx envelope
+    /// whose `code` / `sCode` reported a business rejection; the body usually
+    /// carries a `{ "code": …, "msg": … }` explanation.
     Http { status: u16, body: String },
     /// The response completed but didn't parse into the expected shape.
     Decode(String),

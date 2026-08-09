@@ -886,18 +886,20 @@ subcommands — briefly listed here, fully documented in
 - `fugazi completions <shell>` — a shell-completion script (see
   [doc/CLI.md § Shell completion](doc/CLI.md#shell-completion)).
 
-## Live trading (Binance)
+## Live trading
 
 The same `Wallet` a backtest trades into is the seam to a live broker: the
-`live` feature ships `BinanceFuturesWallet`, a `Wallet<String>` that routes
-orders to Binance USDⓈ-M Futures over its signed REST API. A strategy driven by
+`live` feature ships two `Wallet<String>` backends that route orders to a real
+venue over its signed REST API — `OkxWallet` (OKX V5 perpetual swaps) and
+`BinanceFuturesWallet` (Binance USDⓈ-M Futures). A strategy driven by
 `backtest::run` needs no change — swap the `PaperWallet` for a live one:
 
 ```rust,ignore
-use fugazi::live::BinanceFuturesWallet;
+use fugazi::live::OkxWallet;
 
-// Testnet (free, no real funds) or ::mainnet(key, secret) for production.
-let mut wallet = BinanceFuturesWallet::testnet(key, secret);
+// Demo trading (free, no real funds) or ::mainnet(key, secret, passphrase) for
+// production. OKX credentials are a key/secret pair plus a passphrase.
+let mut wallet = OkxWallet::demo(key, secret, passphrase);
 // ... then drive any strategy through `fugazi::backtest::run` as usual.
 ```
 
@@ -907,19 +909,24 @@ polling all work through the ordinary trait methods; `poll_fills()` drains
 fills booked between bars and `take_rejections()` surfaces venue refusals to
 `Strategy::on_reject`.
 
+OKX sizes a swap in **contracts** (one `BTC-USDT-SWAP` contract is `0.01 BTC`),
+while the trait — and every strategy — speaks base-asset units. `OkxWallet`
+converts at the boundary, so a `0.03 BTC` target goes out as `3` contracts and a
+fill comes back as `0.03` units; nothing above the wallet ever sees a contract.
+
 A whole `Portfolio` runs live the same way — it trades exactly one account, so
 point it at a live wallet and its children keep trading their own notional books
 unchanged:
 
 ```rust,ignore
-use fugazi::live::BinanceFuturesWallet;
+use fugazi::live::OkxWallet;
 use fugazi::{Wallet, portfolio::Portfolio};
 use std::sync::Arc;
 
 let portfolio: Portfolio<String> = Portfolio::builder()
     // ... children ...
     .substrate(Arc::new(move |_seed| {
-        Box::new(BinanceFuturesWallet::mainnet(&key, &secret)) as Box<dyn Wallet<String> + Send>
+        Box::new(OkxWallet::mainnet(&key, &secret, &passphrase)) as Box<dyn Wallet<String> + Send>
     }))
     .build();
 ```
@@ -928,11 +935,46 @@ The account must be the portfolio's alone: it drives that wallet to the sum of
 its children's positions, so anything else trading the same account looks like a
 position no child asked for and will be traded back out.
 
+### Testing against OKX demo trading
+
+OKX runs a free **demo-trading** environment (fake funds) on the same host as
+production, selected by a request header — so the live wallet is exercisable end
+to end without risking money:
+
+1. Under **Demo trading** in your OKX account, create an API key — you'll get a
+   key, a secret, and a **passphrase** (all three are required; the passphrase
+   is one you choose at creation, not your login password).
+2. The demo account is pre-funded and runs in **net position mode** (what the
+   wallet assumes).
+3. Run the narrated smoke-test example:
+
+   ```bash
+   OKX_DEMO_KEY=… OKX_DEMO_SECRET=… OKX_DEMO_PASSPHRASE=… \
+     cargo run --example okx_demo --features live
+   ```
+
+   It reads the account, opens a tiny `BTC-USDT-SWAP` position with a market
+   order, polls the fill, then flattens back — leaving the account as it started.
+
+4. Or run the opt-in integration test (`#[ignore]`d and gated on the same env
+   vars, so a plain `cargo test` never hits the network):
+
+   ```bash
+   OKX_DEMO_KEY=… OKX_DEMO_SECRET=… OKX_DEMO_PASSPHRASE=… \
+     cargo test --features live --test live_okx -- --ignored live_demo_round_trip
+   ```
+
+Plain `cargo test --features live` runs only the offline `wiremock` tests
+(signing, order encoding, fill decoding, protective dedup, the contracts↔units
+conversion) and never reaches the network. If a signed call is rejected for a
+timestamp/expiry reason, your machine's clock has drifted — resync it. Before
+going to `::mainnet`, note the net-mode assumption and that leverage / rate-limit
+backoff / clock-offset sync aren't managed yet.
+
 ### Testing against the Binance testnet
 
 Binance runs a free futures **testnet** (fake funds) that's endpoint-compatible
-with production, so the live wallet is exercisable end-to-end without risking
-money:
+with production, exercisable the same way:
 
 1. Log in at <https://testnet.binancefuture.com> and generate an API key —
    **choose the HMAC_SHA256 key type** (the wallet signs with HMAC-SHA256; an
@@ -946,23 +988,15 @@ money:
      cargo run --example binance_testnet --features live
    ```
 
-   It reads the account, opens a tiny `BTCUSDT` position with a market order,
-   polls the fill, then flattens back — leaving the account as it started.
-
-4. Or run the opt-in integration test (`#[ignore]`d and gated on the same env
-   vars, so a plain `cargo test` never hits the network):
+4. Or run the opt-in integration test (gated on the same env vars):
 
    ```bash
    BINANCE_TESTNET_KEY=… BINANCE_TESTNET_SECRET=… \
      cargo test --features live --test live_binance -- --ignored live_testnet_round_trip
    ```
 
-Plain `cargo test --features live` runs only the offline `wiremock` tests
-(signing, order encoding, fill decoding, protective dedup) and never reaches the
-network. If a signed call is rejected with `-1021`, your machine's clock has
-drifted past the `recvWindow` — resync it. Before going to `::mainnet`, note the
-one-way-mode assumption and that leverage / rate-limit backoff / clock-offset
-sync aren't managed yet.
+If a signed Binance call is rejected with `-1021`, your machine's clock has
+drifted past the `recvWindow` — resync it.
 
 ## Examples
 
@@ -982,9 +1016,11 @@ Runnable example programs live in [`examples/`](examples) — run any with
   using `wallet.set` and funds-fraction sizing.
 - `pairs` — a multi-asset strategy: two symbols traded from one wallet, driven by
   a per-symbol snapshot input.
+- `okx_demo` — a live round-trip against OKX demo trading (needs `--features
+  live` and `OKX_DEMO_{KEY,SECRET,PASSPHRASE}`; see [Live trading](#live-trading)).
 - `binance_testnet` — a live round-trip against the Binance futures testnet
   (needs `--features live` and `BINANCE_TESTNET_{KEY,SECRET}`; see [Live
-  trading](#live-trading-binance)).
+  trading](#live-trading)).
 
 A `cargo test` checks that every example still compiles.
 

@@ -508,6 +508,7 @@ name = "fugazi"
 version = "0.37.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "clap_complete",
  "console",
