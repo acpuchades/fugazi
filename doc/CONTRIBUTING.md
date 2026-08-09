@@ -309,7 +309,7 @@ finish them the wrong way.
 ### Strategy-layer limit entries 🚧
 
 The wallet layer has resting limit orders — `Wallet::set_limit` / `cancel_limit`,
-implemented by both `PaperWallet` and `BinanceFuturesWallet`, mirrored in Python.
+implemented by both `PaperWallet` and `OkxWallet`, mirrored in Python.
 **No strategy shape uses them.** `SingleAssetStrategy` and the other four still
 enter at market, so a limit entry today means writing your own `Strategy` (or
 driving the wallet directly).

@@ -889,9 +889,8 @@ subcommands — briefly listed here, fully documented in
 ## Live trading
 
 The same `Wallet` a backtest trades into is the seam to a live broker: the
-`live` feature ships two `Wallet<String>` backends that route orders to a real
-venue over its signed REST API — `OkxWallet` (OKX V5 perpetual swaps) and
-`BinanceFuturesWallet` (Binance USDⓈ-M Futures). A strategy driven by
+`live` feature ships `OkxWallet`, a `Wallet<String>` that routes orders to OKX
+V5 perpetual swaps over its signed REST API. A strategy driven by
 `backtest::run` needs no change — swap the `PaperWallet` for a live one:
 
 ```rust,ignore
@@ -971,33 +970,6 @@ timestamp/expiry reason, your machine's clock has drifted — resync it. Before
 going to `::mainnet`, note the net-mode assumption and that leverage / rate-limit
 backoff / clock-offset sync aren't managed yet.
 
-### Testing against the Binance testnet
-
-Binance runs a free futures **testnet** (fake funds) that's endpoint-compatible
-with production, exercisable the same way:
-
-1. Log in at <https://testnet.binancefuture.com> and generate an API key —
-   **choose the HMAC_SHA256 key type** (the wallet signs with HMAC-SHA256; an
-   Ed25519 key fails signature validation with `-1022`).
-2. The account is pre-funded and defaults to **one-way position mode** (what the
-   wallet assumes).
-3. Run the narrated smoke-test example:
-
-   ```bash
-   BINANCE_TESTNET_KEY=… BINANCE_TESTNET_SECRET=… \
-     cargo run --example binance_testnet --features live
-   ```
-
-4. Or run the opt-in integration test (gated on the same env vars):
-
-   ```bash
-   BINANCE_TESTNET_KEY=… BINANCE_TESTNET_SECRET=… \
-     cargo test --features live --test live_binance -- --ignored live_testnet_round_trip
-   ```
-
-If a signed Binance call is rejected with `-1021`, your machine's clock has
-drifted past the `recvWindow` — resync it.
-
 ## Examples
 
 Runnable example programs live in [`examples/`](examples) — run any with
@@ -1018,9 +990,6 @@ Runnable example programs live in [`examples/`](examples) — run any with
   a per-symbol snapshot input.
 - `okx_demo` — a live round-trip against OKX demo trading (needs `--features
   live` and `OKX_DEMO_{KEY,SECRET,PASSPHRASE}`; see [Live trading](#live-trading)).
-- `binance_testnet` — a live round-trip against the Binance futures testnet
-  (needs `--features live` and `BINANCE_TESTNET_{KEY,SECRET}`; see [Live
-  trading](#live-trading)).
 
 A `cargo test` checks that every example still compiles.
 

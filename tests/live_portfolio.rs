@@ -20,7 +20,7 @@
 use std::sync::Arc;
 
 use fugazi::Wallet;
-use fugazi::live::BinanceFuturesWallet;
+use fugazi::live::OkxWallet;
 use fugazi::portfolio::{Portfolio, SubstrateFactory};
 use fugazi::strategies::SingleAssetStrategy;
 
@@ -29,7 +29,7 @@ fn a_live_wallet_satisfies_the_substrate_factory() {
     let factory: SubstrateFactory<String> = Arc::new(|_seed| {
         // `seed` is advisory live — the venue holds the real balance — so a
         // live factory ignores it and lets `equity()` report the account.
-        Box::new(BinanceFuturesWallet::testnet("key", "secret")) as Box<dyn Wallet<String> + Send>
+        Box::new(OkxWallet::demo("key", "secret", "pass")) as Box<dyn Wallet<String> + Send>
     });
 
     let portfolio: Portfolio<String> = Portfolio::builder()
@@ -62,7 +62,7 @@ fn a_live_backed_portfolio_is_still_send() {
             SingleAssetStrategy::<String>::buy_and_hold("BTCUSDT".to_string()),
         )
         .substrate(Arc::new(|_seed| {
-            Box::new(BinanceFuturesWallet::testnet("key", "secret"))
+            Box::new(OkxWallet::demo("key", "secret", "pass"))
                 as Box<dyn Wallet<String> + Send>
         }))
         .build();
