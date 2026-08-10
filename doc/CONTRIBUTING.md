@@ -94,7 +94,7 @@ Not an estimate — `tests/warm_up.rs` asserts it sample by sample.
 
 ### 3. The YAML tag — `src/spec/expr.rs`
 
-Add a variant to `ExprSpec` **and** to the private `ExprSpecRaw` mirror, then a
+Add a variant to `NodeSpec` **and** to the private `NodeSpecRaw` mirror, then a
 `try_build` arm. The recursive-build shorthands are already in scope:
 
 ```rust
@@ -178,15 +178,22 @@ cd python && maturin develop && pytest              # smoke + parity
 ## Add a signal
 
 A signal is just `Indicator<Output = bool>` — there is no second trait
-hierarchy. Same seven steps, with:
+hierarchy, and (since the value/signal spec split was merged) **no second spec
+enum**: a boolean tag is an ordinary `NodeSpec` variant whose `output_type()` is
+`Bool`. Same seven steps as any node, with:
 
-- The variant goes on `SignalSpec` (`src/spec/signal.rs`), not `ExprSpec`.
-- `boolean(s)?` is the child shorthand; `real(s)?` for a `Real` operand.
+- The variant goes on `NodeSpec` / `NodeSpecRaw` (`src/spec/expr.rs`) like every
+  other tag — its `try_build` arm returns a `Bool`-output `dyn_indicator::wrap`
+  (via `boolean(s)?` for a Bool child, `real(s)?` for a `Real` operand), and
+  `typecheck.rs`'s `output_type` classifies it `Some(DynType::Bool)` while
+  `children` demands `BOOL` on any boolean-inner slot.
+- The strategy signal slots take a `NodeSpec`; the bool-ness is enforced by the
+  slot's `AsBool` view at build (uniform with every other type clash).
 - The catalogue entry goes in a signal-flavoured group (comparisons, boolean
   logic, edge detectors, crossovers).
 - Python-side, a signal is usually a **method** on `Indicator` / `Signal`
   rather than a module function — record which in `test_parity.py`'s
-  `METHOD_BOUND`.
+  `METHOD_BOUND` (the single `test_every_node_tag_is_bound` test now covers it).
 
 ---
 
@@ -409,7 +416,7 @@ When one of these fails, it is telling you something specific:
 
 | Failure | Meaning |
 | --- | --- |
-| `src/spec/typecheck.rs` won't compile | A new `ExprSpec` variant is unclassified. Add it to both matches. |
+| `src/spec/typecheck.rs` won't compile | A new `NodeSpec` variant is unclassified. Add it to both matches. |
 | `declared_output_type_matches_what_build_produces` | The type table claims a tag produces something `build` doesn't. |
 | `declared_child_expectations_match_what_build_demands` | The table claims a slot is typed, but `build` accepts the wrong type there. |
 | `the_catalogue_documents_every_spec_tag` | A tag is invisible to `fugazi list indicators`. |
@@ -434,7 +441,7 @@ source-generic leaves). Do not add pipe / `then` / `Chain` combinators.
 unsettled bar waits by default, with exactly one explicit escape hatch
 (`Unstable` / `--keep-unstable`). If you add such a knob, follow the pattern.
 
-**Build errors are values.** `ExprSpec::try_build` returns `Result`; messages
+**Build errors are values.** `NodeSpec::try_build` returns `Result`; messages
 carry a `!tag > ` breadcrumb built inside-out, and must not repeat their own tag
 (the trail already has it). A type mismatch is attributed to the *child* that
 produced the wrong type. The only place a panic legitimately remains is the lazy
