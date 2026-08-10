@@ -652,15 +652,15 @@ pub fn run_multi(
 /// The portfolio runner: drive a composite [`Portfolio`](fugazi::portfolio::Portfolio)
 /// over every symbol discovered in `frame`, time-aligning per-symbol atom
 /// streams by outer-joining on `time` — same pipeline as [`run_basket`] /
-/// [`run_multi`]. Each child sub-wallet marks / fills against the same fanned
-/// bar; the aggregate wallet reports one unified equity curve and blotter.
+/// [`run_multi`]. Children trade notional ledgers over one account; the
+/// portfolio nets their intents into that account and reports one unified
+/// equity curve and blotter.
 ///
-/// **Costs.** The unscoped `--costs` default is installed as every
-/// sub-wallet's fallback bundle; per-symbol scoped bundles from
-/// `--costs SYM:...` are then installed on every sub via
-/// [`Portfolio::install_costs_for`](fugazi::portfolio::Portfolio::install_costs_for),
-/// so whichever child ends up filling a given symbol books at the right
-/// rate. See [`backtest::build_priced_portfolio_with_costs`](crate::backtest).
+/// **Costs.** A portfolio is now an ordinary strategy that trades the wallet it
+/// is handed, so costs ride on that wallet exactly like the other four shapes:
+/// the unscoped `--costs` default and per-symbol `--costs SYM:...` overrides are
+/// primed onto the `PaperWallet` by `RunnableStrategy::drive`, and whichever
+/// child fills a given symbol books at the wallet's rate for it.
 pub fn run_portfolio(
     spec: &PortfolioSpec,
     frame: &DataFrame,

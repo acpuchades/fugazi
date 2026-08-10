@@ -30,8 +30,10 @@ pub(crate) use fugazi_core::sources::{
     SourceError, Timestamp, Yahoo,
 };
 pub(crate) use fugazi_core::wallet::{
-    Ack, Order, OrderId, OrderKind, PaperWallet, Reference, Side, Size, Units, Wallet, WalletError,
+    Ack, SleeveWallet, Order, OrderId, OrderKind, PaperWallet, Reference, Side, Size, Units,
+    Wallet, WalletError, external_baseline, own_equity,
 };
+pub(crate) use fugazi_core::live::{LiveError, OkxWallet};
 pub(crate) use fugazi_core::types::{
     Atom, Candle, Frequency, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder,
     Selector, Snapshot,

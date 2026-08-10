@@ -14,7 +14,7 @@ and signal owns its internal state and is advanced one sample at a time via
 
 ```toml
 [dependencies]
-fugazi = "0.37"
+fugazi = "0.38"
 ```
 
 ## Concepts
@@ -913,21 +913,21 @@ while the trait — and every strategy — speaks base-asset units. `OkxWallet`
 converts at the boundary, so a `0.03 BTC` target goes out as `3` contracts and a
 fill comes back as `0.03` units; nothing above the wallet ever sees a contract.
 
-A whole `Portfolio` runs live the same way — it trades exactly one account, so
-point it at a live wallet and its children keep trading their own notional books
-unchanged:
+A whole `Portfolio` runs live the same way — it is an ordinary strategy that
+nets its children's intents onto the one wallet it is handed, so pass it a live
+account through `backtest::run` and its children keep trading their own notional
+books unchanged:
 
 ```rust,ignore
+use fugazi::backtest;
 use fugazi::live::OkxWallet;
-use fugazi::{Wallet, portfolio::Portfolio};
-use std::sync::Arc;
+use fugazi::portfolio::Portfolio;
 
-let portfolio: Portfolio<String> = Portfolio::builder()
+let mut portfolio: Portfolio<String> = Portfolio::builder()
     // ... children ...
-    .substrate(Arc::new(move |_seed| {
-        Box::new(OkxWallet::mainnet(&key, &secret, &passphrase)) as Box<dyn Wallet<String> + Send>
-    }))
     .build();
+let mut account = OkxWallet::mainnet(&key, &secret, &passphrase);
+let report = backtest::run(&mut portfolio, &mut account, snapshots);
 ```
 
 The account must be the portfolio's alone: it drives that wallet to the sum of

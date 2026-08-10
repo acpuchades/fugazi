@@ -171,28 +171,24 @@ pub mod ledger;
 pub mod netting;
 pub mod policy;
 pub mod rebalance;
-pub mod wallet;
 
 use std::any::TypeId;
+use std::collections::HashMap;
 use std::hash::Hash;
 
 use std::sync::{Arc, Mutex};
 
 use crate::backtest::RunReport;
-use crate::costs::TradingCosts;
 use crate::indicator::Indicator;
 use crate::indicators::{Book, ValueBool};
 use crate::strategy::Strategy;
 use crate::types::{Real, Snapshot};
-use crate::wallet::{Order, Rejection, Wallet};
+use crate::wallet::{Order, PaperWallet, Rejection, Wallet};
 
 use self::policy::{ChildSample, WeightPolicy};
 use self::rebalance::{PositionInfo, PositionRebalancer, Proportional};
 use self::ledger::LedgerWallet;
-use self::netting::{PortfolioInner, allocate_funds, paper_substrate};
-
-pub use self::netting::SubstrateFactory;
-pub use self::wallet::PortfolioWallet;
+use self::netting::{PortfolioInner, allocate_funds};
 
 /// One child slot in a [`Portfolio`]: a user-supplied name and the boxed
 /// strategy that trades that slot's sub-wallet.
@@ -257,11 +253,9 @@ pub struct Portfolio<Sym> {
     /// `source: !portfolio_book` inside a template resolves to it (bare
     /// nodes default to the child's own book — see [`ExprSpec`]).
     agg_book: Book<Sym>,
-    /// Whether any bar so far carried an entry the driver would have priced
-    /// (tagged with a symbol *and* carrying a candle — exactly
-    /// `backtest::run`'s own condition). Half of the mis-pairing guard; see
-    /// [`assert_priced`](Self::assert_priced).
-    saw_priceable_bar: bool,
+    /// The portfolio's total cash budget, kept so the inherent
+    /// [`run`](Self::run) can seed a fresh [`PaperWallet`] at it.
+    initial_equity: Real,
 }
 
 impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
@@ -273,26 +267,15 @@ impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
         PortfolioBuilder::default()
     }
 
-    /// A [`PortfolioWallet`] sharing this portfolio's interior — hand it
-    /// to [`backtest::run`](crate::backtest::run) alongside the portfolio
-    /// itself.
+    /// Drive this portfolio over `snapshots` against a fresh in-memory account
+    /// seeded at its initial equity, returning the aggregate [`RunReport`].
     ///
-    /// Multiple views share the same underlying [`PortfolioInner`] (a
-    /// plain [`Rc`](std::rc::Rc) bump), so a second view for
-    /// side-inspection is cheap; only one should be handed to the driver.
-    pub fn wallet_view(&self) -> PortfolioWallet<Sym> {
-        PortfolioWallet::from_inner(Arc::clone(&self.inner))
-    }
-
-    /// Drive this portfolio over `snapshots` through its own composite
-    /// wallet, returning the aggregate [`RunReport`].
-    ///
-    /// This is the entry point to prefer. [`backtest::run`](crate::backtest::run)
-    /// takes a strategy *and* a wallet, and a `Portfolio` only works when
-    /// that wallet is its own [`wallet_view`](Self::wallet_view) — nothing in
-    /// the type system enforces the pairing, and getting it wrong used to
-    /// produce a flat equity curve and an empty blotter with no complaint.
-    /// Here there is nothing to pair.
+    /// A convenience over [`backtest::run`](crate::backtest::run): a portfolio is
+    /// now an ordinary [`Strategy`] that trades the wallet it is handed, so
+    /// `backtest::run(&mut portfolio, &mut wallet, snapshots)` works with any
+    /// wallet — a [`PaperWallet`] for a backtest, a live account to trade the
+    /// whole netted portfolio for real. Reach for that spelling when you want to
+    /// supply the account (costs, live venue) or inspect the wallet after.
     ///
     /// ```no_run
     /// # use fugazi::portfolio::Portfolio;
@@ -304,51 +287,48 @@ impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
     ///     .build();
     /// let report = portfolio.run(snaps());
     /// ```
-    ///
-    /// The explicit `backtest::run(&mut pf, &mut pf.wallet_view(), …)`
-    /// spelling stays supported — reach for it when you want to inspect the
-    /// wallet mid-run. `wallet_view()` is a live handle on shared state, so
-    /// calling it *after* `run` works just as well for post-run inspection.
     pub fn run<I, A>(&mut self, snapshots: I) -> RunReport<Sym>
     where
         Sym: PartialEq,
         I: IntoIterator<Item = A>,
         A: Into<Snapshot<Sym>>,
     {
-        let mut wallet = self.wallet_view();
+        let mut wallet = PaperWallet::new(self.initial_equity);
         crate::backtest::run(self, &mut wallet, snapshots)
     }
 
-    /// Panic if this portfolio is about to trade having never been priced
-    /// through its own [`PortfolioWallet`].
+    /// Child `idx`'s mark-to-market equity — its notional slice of the account.
+    /// Populated once the run has fed at least one bar (the marks the children
+    /// price against are refreshed each [`update`](Strategy::update)).
     ///
-    /// `Portfolio::trade` ignores the wallet it is handed (a composite needs
-    /// N sub-wallets; the trait offers one), so a driver paired with *any
-    /// other* wallet — a foreign `PaperWallet`, another portfolio's view, or
-    /// the [`SubWalletHandle`] an outer portfolio would hand a nested one —
-    /// leaves these sub-wallets unpriced. Every downstream number is then
-    /// quietly wrong rather than obviously broken: flat equity curve at the
-    /// seed, empty blotter, children never told about their fills.
+    /// # Panics
+    /// Panics if `idx` is out of range.
+    pub fn sub_equity(&self, idx: usize) -> Real {
+        self.inner
+            .lock()
+            .expect("portfolio lock poisoned")
+            .child_equity(idx)
+    }
+
+    /// Child `idx`'s signed ledger position in `symbol` (0 if it holds none).
     ///
-    /// The check is a *liveness* one rather than an identity one — it asks
-    /// "was I priced?", which needs nothing added to the [`Wallet`] trait,
-    /// and it catches every variant above. Both flags are cumulative, so a
-    /// mid-run bar of overlay-only atoms can't trip it; a stream that never
-    /// carries a priceable entry never arms it (consistent with the driver,
-    /// which would have skipped those entries too).
-    fn assert_priced(&self) {
-        if !self.saw_priceable_bar {
-            return;
-        }
-        let priced = self.inner.lock().expect("portfolio lock poisoned").priced;
-        assert!(
-            priced,
-            "Portfolio::trade: this portfolio's sub-wallets have never been priced, so the \
-             run would be silently wrong (flat equity, empty blotter). A Portfolio must be \
-             driven through its own composite wallet: prefer `portfolio.run(snapshots)`, or \
-             pass `portfolio.wallet_view()` to `backtest::run`. This also fires when a \
-             Portfolio is used as a child of another Portfolio, which is not supported.",
-        );
+    /// # Panics
+    /// Panics if `idx` is out of range.
+    pub fn sub_position(&self, idx: usize, symbol: &Sym) -> Real {
+        self.inner.lock().expect("portfolio lock poisoned").ledgers[idx].position(symbol)
+    }
+
+    /// Assert the core netting identity against `wallet` (the account the
+    /// portfolio was driven with): per symbol Σ ledger positions == account
+    /// position, and Σ ledger cash == account cash.
+    ///
+    /// # Panics
+    /// Panics if the ledgers have drifted from the account.
+    pub fn assert_books_balance(&self, wallet: &dyn Wallet<Sym>) {
+        self.inner
+            .lock()
+            .expect("portfolio lock poisoned")
+            .check_invariants(wallet);
     }
 
     /// The number of children in this portfolio, in [`add`](PortfolioBuilder::add)
@@ -385,32 +365,6 @@ impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
         self.agg_book.clone()
     }
 
-    /// Install per-symbol [`TradingCosts`] on every sub-wallet. Whichever
-    /// child ends up filling `symbol` will book at this bundle instead of
-    /// the wallet's default.
-    ///
-    /// This is the seam CLI runners use to thread `--costs SYM:...` scoped
-    /// overrides through the composite: rather than a portfolio-wide
-    /// uniform bundle (the [`PortfolioBuilder::costs`] path), each symbol's
-    /// resolved bundle gets installed on every sub — safe because
-    /// [`Wallet::set_costs_for`] is idempotent and per-symbol lookup wins over
-    /// the fallback default.
-    ///
-    /// Returns the number of sub-wallets that accepted the bundle. A sub that
-    /// refuses (the trait default, and the honest answer for a live wallet
-    /// whose fees the venue owns) is skipped — its fills book at whatever its
-    /// own impl charges. For an all-paper portfolio this is always
-    /// [`child_count`](Self::child_count).
-    ///
-    /// The bundle is also recorded, so a later [`reset`](Strategy::reset) —
-    /// which rebuilds sub-wallets from the factory — can re-apply it rather
-    /// than silently dropping back to the build-time defaults.
-    pub fn install_costs_for(&mut self, symbol: &Sym, costs: TradingCosts) -> bool {
-        let mut inner = self.inner.lock().expect("portfolio lock poisoned");
-        inner.record_scoped_costs(symbol.clone(), costs.clone());
-        inner.substrate.set_costs_for(symbol.clone(), costs).is_ok()
-    }
-
     /// Snapshot every sub-wallet's current equity/funds for a
     /// [`WeightPolicy::observe`] call. Kept private because policies
     /// read this indirectly via the trait.
@@ -430,26 +384,53 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
     type Symbol = Sym;
 
     fn update(&mut self, snap: Snapshot<Sym>) {
-        // Half of the mis-pairing guard, read in `trade`. The predicate is
-        // exactly the one `backtest::run` uses to decide whether to price an
-        // entry, so "this bar was priceable" here means "the driver called
-        // `wallet.update` for it" there. Must run before `snap` is consumed
-        // by the rebalance gate below.
-        self.saw_priceable_bar |= snap
-            .iter()
-            .any(|(sym, _freq, atom)| sym.is_some() && atom.candle.is_some());
+        // Refresh the marks cache from this bar's priceable entries (tagged +
+        // carrying a candle — exactly `backtest::run`'s own pricing predicate),
+        // and capture opens for cross booking. This is what children size
+        // against in `trade` and what the aggregate book marks at, in place of
+        // the old substrate the driver used to price. It runs first so the mark
+        // is fresh for everything below.
+        let (crossed_fills, child_rejections) = {
+            let mut inner = self.inner.lock().expect("portfolio lock poisoned");
+            let mut opens: HashMap<Sym, Real> = HashMap::new();
+            for (sym, _freq, atom) in snap.iter() {
+                if let (Some(sym), Some(candle)) = (sym, atom.candle) {
+                    inner.marks.insert(sym.clone(), candle.close);
+                    opens.insert(sym.clone(), candle.open);
+                }
+            }
+            // A flow that crossed entirely last bar submitted no order, so no
+            // wallet fill ever arrives to settle it — book it here at this bar's
+            // open. And drain the child hard-cap refusals booked in the prior
+            // bar's `trade` (no driver channel carries them).
+            let child_rejections = inner.take_child_rejections();
+            let crossed_fills = inner.book_crosses(&opens);
+            (crossed_fills, child_rejections)
+        };
+        for (idx, rej) in child_rejections {
+            self.children[idx].strategy.on_reject(&rej);
+        }
+        for order in crossed_fills {
+            let owner = self
+                .inner
+                .lock()
+                .expect("portfolio lock poisoned")
+                .owners
+                .remove(&order.id);
+            if let Some(idx) = owner {
+                self.children[idx].strategy.on_fill(&order);
+            }
+        }
         // Fan the snapshot to every child so their own signals / sizing
         // advance. Cloning is O(entries) — the same cost basket /
         // multi-asset strategies already pay per bar.
         for child in &mut self.children {
             child.strategy.update(snap.clone());
         }
-        // Mark the aggregate book from the sum of every sub-wallet's
-        // marked-to-market equity — the driver has already run
-        // `wallet.update(...)` for this bar before calling us, so
-        // sub-wallets are already priced against this bar's closes.
-        // Weight-share templates and any external consumer reading via
-        // `Portfolio::book()` see the freshly-marked value on this bar.
+        // Mark the aggregate book from the sum of every child's ledger equity
+        // at the freshly-refreshed marks — equal to the account equity by the
+        // netting identity. Weight-share templates and any external consumer
+        // reading via `Portfolio::book()` see the marked value on this bar.
         let samples = self.sample_children();
         let agg_equity: Real = samples.iter().map(|s| s.equity).sum();
         self.agg_book.mark_equity(agg_equity);
@@ -489,51 +470,49 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
     }
 
     fn on_fill(&mut self, order: &Order<Sym>) {
-        // Look up the owner recorded when this order was submitted, then
-        // route the fill to only that child. Fills whose id isn't in the
-        // map either weren't tracked (defensive — shouldn't happen with
-        // paper subs) or already routed; drop silently either way.
-        // `remove`, not `get`: a fill is terminal for its order id, so the
-        // entry has no further use. Deliberately asymmetric with
-        // `on_reject`, which must not consume — see the comment there.
-        let owner = self.inner.lock().expect("portfolio lock poisoned").owners.remove(&order.id);
-        if let Some(idx) = owner {
-            self.children[idx].strategy.on_fill(order);
+        // The driver hands us the RAW account fill (from `wallet.update` /
+        // `poll_fills`). Attribute it across the children whose netted flow
+        // produced it — moving their ledgers — then dispatch each child's
+        // synthetic share to its own `on_fill`, so a stop firing on child A's
+        // position never leaks to child B.
+        let synthetics = self
+            .inner
+            .lock()
+            .expect("portfolio lock poisoned")
+            .attribute_fill(order);
+        for synth in synthetics {
+            let owner = self
+                .inner
+                .lock()
+                .expect("portfolio lock poisoned")
+                .owners
+                .remove(&synth.id);
+            if let Some(idx) = owner {
+                self.children[idx].strategy.on_fill(&synth);
+            }
         }
     }
 
     fn on_reject(&mut self, rejection: &Rejection<Sym>) {
-        // `get`, not `remove` — deliberately asymmetric with `on_fill`. A
-        // rejection is *not* terminal: a protective leg that can't be booked
-        // stays resting and retries next bar, so the same id can reject on
-        // bar N and fill on bar N+1. Consuming the owner entry here would
-        // leave that later fill unroutable and the child would never learn
-        // its stop executed.
-        let owner = self
+        // The driver hands us the RAW account rejection (a refused netted order
+        // or protective leg). Split it across the children that contributed to
+        // it and route each to its own `on_reject`. The account-level entry is
+        // already in the run report; the per-child copies are for the children.
+        let per_child = self
             .inner
             .lock()
             .expect("portfolio lock poisoned")
-            .owners
-            .get(&rejection.id)
-            .copied();
-        if let Some(idx) = owner {
-            self.children[idx].strategy.on_reject(rejection);
+            .attribute_rejection(rejection.clone());
+        for (idx, rej) in per_child {
+            self.children[idx].strategy.on_reject(&rej);
         }
     }
 
-    fn trade(&self, _wallet: &mut dyn Wallet<Sym>) {
-        // The wallet argument is ignored: the portfolio reaches into its
-        // own inner state via `self.inner`, and each child trades
-        // through a SubWalletHandle over the same inner. A composite needs
-        // N sub-wallets and the trait hands it one, so `Portfolio` is the
-        // single shape that can't honour the seam literally.
-        //
-        // What keeps that from being a silent trap is the guard below:
-        // well-formed drivers pass `self.wallet_view()` (or, better, go
-        // through `Portfolio::run`), and if one doesn't, this portfolio's
-        // sub-wallets are never priced and every result would be quietly
-        // wrong. Better to say so.
-        self.assert_priced();
+    fn trade(&self, wallet: &mut dyn Wallet<Sym>) {
+        // A portfolio is now an ordinary strategy: it trades the wallet the
+        // driver hands it. Children each trade a `LedgerWallet` over the shared
+        // inner (recording intent against their notional slice); the intents are
+        // then netted into one order per symbol on this `wallet`.
 
         // Ordering: children trade first (against their own pre-rebalance
         // equity for `value_frac` sizing), then — if the gate fires — the
@@ -563,11 +542,12 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
 
         // Nothing has reached the account yet — every child (and the
         // rebalance) has only recorded what it wants. Combine those into one
-        // order per symbol and rest the most urgent protective leg.
+        // order per symbol on the passed wallet and rest the most urgent
+        // protective leg.
         self.inner
             .lock()
             .expect("portfolio lock poisoned")
-            .net_and_submit();
+            .net_and_submit(wallet);
     }
 
     fn reset(&mut self) {
@@ -585,7 +565,6 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
         self.agg_book.reset();
         self.inner.lock().expect("portfolio lock poisoned").reset();
         self.bars_seen = 0;
-        self.saw_priceable_bar = false;
     }
 }
 
@@ -720,16 +699,11 @@ pub struct PortfolioBuilder<Sym> {
     children: Vec<PortfolioChild<Sym>>,
     policy: Option<Box<dyn WeightPolicy + Send>>,
     initial_equity: Real,
-    costs: Option<TradingCosts>,
     rebalance: Option<RebalanceSignal<Sym>>,
     share_indicators: Vec<WeightShareChain<Sym>>,
     /// Position-phase rebalancer. `None` picks the [`Proportional`]
     /// default at build; set via [`position_rebalancer`](Self::position_rebalancer).
     position_rebalancer: Option<Box<dyn PositionRebalancer<Sym> + Send>>,
-    /// How each child's sub-wallet is built. `None` picks
-    /// [`paper_sub_wallets`] at build; set via
-    /// [`sub_wallets`](Self::sub_wallets).
-    sub_wallets: Option<SubstrateFactory<Sym>>,
     /// Pre-supplied aggregate [`Book`] — when set, the built portfolio
     /// uses this book (rather than a freshly-seeded one) so a caller that
     /// needed the handle *before* `build()` (typically the CLI's
@@ -745,11 +719,9 @@ impl<Sym: 'static> Default for PortfolioBuilder<Sym> {
             children: Vec::new(),
             policy: None,
             initial_equity: 1.0,
-            costs: None,
             rebalance: None,
             share_indicators: Vec::new(),
             position_rebalancer: None,
-            sub_wallets: None,
             agg_book: None,
         }
     }
@@ -801,73 +773,12 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
         self
     }
 
-    /// Replace the **account** the portfolio trades.
-    ///
-    /// The factory is called once at [`build`](Self::build), and again on
-    /// [`reset`](Strategy::reset), with the portfolio's total cash budget. It
-    /// defaults to an in-memory [`PaperWallet`](crate::PaperWallet) carrying
-    /// whatever [`costs`](Self::costs) bundle was set, which is what a backtest
-    /// wants.
-    ///
-    /// Override it to run the portfolio **live**. Children keep trading their
-    /// own notional [`Ledger`](ledger::Ledger)s exactly as they do on paper;
-    /// the portfolio nets their intents into one order per symbol and sends
-    /// that to this wallet. Nothing about a child changes.
-    ///
-    /// ```no_run
-    /// # use fugazi::portfolio::Portfolio;
-    /// # use fugazi::{PaperWallet, Wallet};
-    /// # use fugazi::strategies::SingleAssetStrategy;
-    /// # use std::sync::Arc;
-    /// # fn the_account() -> Box<dyn Wallet<String> + Send> {
-    /// #     Box::new(PaperWallet::new(0.0))
-    /// # }
-    /// let portfolio: Portfolio<String> = Portfolio::builder()
-    ///     .with_initial_equity(10_000.0)
-    ///     .add("a", SingleAssetStrategy::<String>::buy_and_hold("BTCUSDT".to_string()))
-    ///     // The one account every child's flow is netted onto.
-    ///     .substrate(Arc::new(|_seed| the_account()))
-    ///     .build();
-    /// ```
-    ///
-    /// # The account must be the portfolio's alone
-    ///
-    /// The portfolio drives this wallet to the sum of its children's positions,
-    /// so anything else trading the same account — a second portfolio, a manual
-    /// order — looks to the netting layer like a position no child asked for,
-    /// and will be traded back out.
-    ///
-    /// A live factory should also know that `seed` is advisory: a venue holds
-    /// the real balance and cannot be told to have $10,000, so
-    /// [`equity`](Wallet::equity) will reflect the account rather than the
-    /// budget. The children's ledgers are still seeded from the budget, so seed
-    /// it with what the account actually holds if you want the two to agree.
-    pub fn substrate(mut self, factory: SubstrateFactory<Sym>) -> Self {
-        self.sub_wallets = Some(factory);
-        self
-    }
-
     /// Install the [`WeightPolicy`]. Called once per build; the policy's
     /// [`weights`](WeightPolicy::weights) drives the initial cash split.
     ///
     /// Defaults to [`EqualWeight`](policy::EqualWeight) if never set.
     pub fn weights(mut self, policy: impl WeightPolicy + Send) -> Self {
         self.policy = Some(Box::new(policy));
-        self
-    }
-
-    /// Install a [`TradingCosts`] model applied to every child's
-    /// sub-wallet. The bundle is cloned per-sub at
-    /// [`build`](Self::build), so a downstream broker with per-symbol
-    /// cost overrides can still install those on each sub via
-    /// [`PaperWallet::set_costs_for`](crate::PaperWallet::set_costs_for)
-    /// after the portfolio is built.
-    ///
-    /// Skipped by default — every sub is built via
-    /// [`PaperWallet::new`](crate::PaperWallet::new), the zero-friction
-    /// no-op bundle.
-    pub fn costs(mut self, costs: TradingCosts) -> Self {
-        self.costs = Some(costs);
         self
     }
 
@@ -982,11 +893,9 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
             children,
             policy,
             initial_equity,
-            costs,
             rebalance,
             share_indicators,
             position_rebalancer,
-            sub_wallets,
             agg_book,
         } = self;
         assert!(
@@ -1009,8 +918,7 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
             weights.len()
         );
         let allocations = allocate_funds(initial_equity, &weights);
-        let factory = sub_wallets.unwrap_or_else(|| paper_substrate::<Sym>(costs));
-        let inner = Arc::new(Mutex::new(PortfolioInner::new(allocations, factory)));
+        let inner = Arc::new(Mutex::new(PortfolioInner::new(allocations)));
         let rebalance: RebalanceSignal<Sym> =
             rebalance.unwrap_or_else(|| Box::new(ValueBool::<Snapshot<Sym>>::new(false)));
         // Aggregate book: use the pre-supplied handle when a caller wired
@@ -1029,7 +937,7 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
             share_indicators,
             position_rebalancer,
             agg_book,
-            saw_priceable_bar: false,
+            initial_equity,
         }
     }
 }

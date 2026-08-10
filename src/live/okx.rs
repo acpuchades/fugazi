@@ -637,6 +637,21 @@ impl Wallet<String> for OkxWallet {
         }
     }
 
+    /// Every cached signed position, in base units — the venue's open swaps as of
+    /// the last [`refresh_account`](OkxWallet::refresh_account) (which
+    /// [`update`](Wallet::update) runs each bar). Overrides the trait default so a
+    /// caller — e.g. a portfolio or a baseline snapshot of externally-held
+    /// positions — can enumerate what the account holds, not just query one symbol.
+    fn positions(&self) -> Vec<Units<String>> {
+        self.positions
+            .iter()
+            .map(|(symbol, &amount)| Units {
+                symbol: symbol.clone(),
+                amount,
+            })
+            .collect()
+    }
+
     fn price(&self, symbol: &String) -> Option<Reference> {
         self.marks.get(symbol).map(|&p| Reference(p))
     }

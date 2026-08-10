@@ -1,6 +1,6 @@
 [package]
 name = "fugazi-python"
-version = "0.37.0"
+version = "0.38.0"
 edition = "2024"
 description = "Python bindings for the fugazi incremental technical-analysis library"
 license = "MIT"
@@ -16,10 +16,12 @@ crate-type = ["cdylib"]
 [dependencies]
 # `sources` for the remote candle providers, `runtime` for the shared
 # type-erasure vocabulary (fugazi::runtime — DynIndicator + DynValue + Adapter +
-# typed views). Skipping the default `cli` feature keeps clap/csv/interim/etc.
+# typed views), `spec` for the YAML load/backtest/optimize kernel, `live` for the
+# OKX perpetual-swap wallet (adds hmac/sha2/base64; reqwest/tokio already come in
+# via `sources`). Skipping the default `cli` feature keeps clap/csv/interim/etc.
 # out of the wheel. Nothing in the CLI stack links system libs anymore, but the
 # wheel still doesn't want that surface area (no clap-parsed args, no console I/O).
-fugazi_core = { package = "fugazi", path = "..", default-features = false, features = ["sources", "runtime", "spec"] }
+fugazi_core = { package = "fugazi", path = "..", default-features = false, features = ["sources", "runtime", "spec", "live"] }
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 time = { version = "0.3", features = ["formatting"] }

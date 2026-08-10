@@ -1,28 +1,32 @@
-//! The netting layer: one real wallet, N notional [`Ledger`]s, and the
+//! The netting layer: N notional [`Ledger`]s over one account, and the
 //! arithmetic that keeps them in step.
 //!
-//! [`PortfolioInner`] is the interior a [`Portfolio`](super::Portfolio) and its
-//! [`PortfolioWallet`] share. It owns exactly one **substrate** wallet — a
-//! `PaperWallet` in a backtest, a broker live — plus one ledger per child, and
-//! it is the only thing in the crate that talks to the account.
+//! [`PortfolioInner`] is the interior a [`Portfolio`](super::Portfolio) shares
+//! with its children (via [`LedgerWallet`]). It owns one ledger per child and a
+//! per-symbol `marks` cache, but **not** the account: the account is the wallet
+//! [`Portfolio::trade`](super::Portfolio) is handed by the driver, exactly like
+//! every other strategy shape.
 //!
 //! # The identity everything rests on
 //!
 //! For every symbol, the sum of the children's ledger positions equals the
-//! substrate's position; the sum of their ledger cash equals the substrate's
-//! cash. Ledgers are never moved by intent, only by real fills, which is what
-//! keeps that true — and [`check_invariants`](PortfolioInner::check_invariants)
+//! account's position; the sum of their ledger cash equals the account's cash.
+//! Ledgers are never moved by intent, only by real fills, which is what keeps
+//! that true — and [`check_invariants`](PortfolioInner::check_invariants)
 //! asserts it in tests rather than trusting it.
 //!
 //! # One bar
 //!
-//! 1. [`PortfolioWallet::update`] feeds the substrate the bar, then
-//!    [`settle`](PortfolioInner::settle) attributes the resulting fills back to
-//!    the ledgers that caused them.
-//! 2. Children trade into [`LedgerWallet`]s, recording intent.
-//! 3. [`net_and_submit`](PortfolioInner::net_and_submit) turns every child's
-//!    intent into one order per symbol, and rests the most urgent protective
-//!    leg.
+//! 1. The driver feeds the account the bar; the resulting fills reach
+//!    [`Portfolio::on_fill`](super::Portfolio), which calls
+//!    [`attribute_fill`](PortfolioInner::attribute_fill) to move the ledgers
+//!    that caused them.
+//! 2. [`Portfolio::update`](super::Portfolio) refreshes `marks` from the
+//!    snapshot and books any fully-crossed flow at that bar's open.
+//! 3. Children trade into [`LedgerWallet`]s, recording intent, then
+//!    [`net_and_submit`](PortfolioInner::net_and_submit) turns every child's
+//!    intent into one order per symbol on the passed wallet, and rests the most
+//!    urgent protective leg.
 //!
 //! # Crossing
 //!
@@ -37,42 +41,13 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 
-use crate::costs::TradingCosts;
-use crate::types::{Candle, Real};
+use crate::types::Real;
 use crate::wallet::{
-    Ack, Order, OrderId, OrderKind, PaperWallet, Reference, Rejection, Side, Size, Units,
-    Wallet, WalletError,
+    Ack, Order, OrderId, OrderKind, Reference, Rejection, Side, Size, Units, Wallet, WalletError,
 };
 use crate::indicators::DEFAULT_EPSILON;
 
 use super::ledger::{Intent, Ledger, ProtectiveIntent, rejection};
-
-/// Builds the account a [`Portfolio`](super::Portfolio) trades — the one real
-/// wallet every child's flow is netted onto.
-///
-/// `funds` is the portfolio's total cash budget. A paper substrate is seeded
-/// with it; a live substrate should ignore it, since the venue holds the real
-/// balance.
-///
-/// # The account must be exclusively the portfolio's
-///
-/// The portfolio drives this wallet to the sum of its children's intents, so
-/// anything else trading the same account — another portfolio, a manual order —
-/// appears to the netting layer as an unexplained position and will be traded
-/// back out.
-pub type SubstrateFactory<Sym> = std::sync::Arc<dyn Fn(Real) -> Box<dyn Wallet<Sym> + Send> + Send + Sync>;
-
-/// The default [`SubstrateFactory`]: an in-memory [`PaperWallet`], optionally
-/// carrying a [`TradingCosts`] bundle.
-pub(super) fn paper_substrate<Sym>(costs: Option<TradingCosts>) -> SubstrateFactory<Sym>
-where
-    Sym: Clone + Eq + Hash + Send + 'static,
-{
-    std::sync::Arc::new(move |funds| match &costs {
-        Some(c) => Box::new(PaperWallet::with_costs(funds, c.clone())),
-        None => Box::new(PaperWallet::new(funds)),
-    })
-}
 
 /// One child's contribution to a symbol's flow this bar.
 #[derive(Debug, Clone, Copy)]
@@ -94,20 +69,21 @@ struct PendingFlow<Sym> {
     market_delta: Real,
 }
 
-/// The interior shared by a [`Portfolio`](super::Portfolio) and its
-/// [`PortfolioWallet`](super::PortfolioWallet).
+/// The interior a [`Portfolio`](super::Portfolio) shares with its children.
 pub(super) struct PortfolioInner<Sym> {
-    /// The one real wallet. Everything else here is bookkeeping over it.
-    pub(super) substrate: Box<dyn Wallet<Sym> + Send>,
     /// One notional book per child, in `add(...)` order.
     pub(super) ledgers: Vec<Ledger<Sym>>,
+    /// Last-seen close per symbol, refreshed each bar from the snapshot. The
+    /// account is priced by the driver; this is the price children size against
+    /// and the marks the aggregate book uses, in place of the old substrate.
+    pub(super) marks: HashMap<Sym, Real>,
 
     /// This bar's recorded intents, per child, cleared by `net_and_submit`.
     intents: Vec<HashMap<Sym, Intent>>,
     /// Each child's resting protective levels. Persist across bars — a child
     /// re-submits every bar, and only the most urgent reaches the account.
     protective: Vec<HashMap<Sym, ProtectiveIntent>>,
-    /// Which child owns the leg currently rested on the substrate, per symbol,
+    /// Which child owns the leg currently rested on the account, per symbol,
     /// so a protective fill routes to the right ledger.
     protective_owner: HashMap<Sym, usize>,
     /// Submitted flow awaiting settlement, keyed by symbol.
@@ -116,26 +92,21 @@ pub(super) struct PortfolioInner<Sym> {
     /// Portfolio-wide id → owning child, for routing fills and refusals.
     pub(super) owners: HashMap<OrderId, usize>,
     next_pf_id: u64,
-    /// Refusals booked here, drained through the composite wallet.
+    /// Child hard-cap refusals booked here during `trade`, drained to the owning
+    /// child by [`Portfolio::update`](super::Portfolio) on the next bar. They do
+    /// not reach the run report (the account never saw them).
     rejections: Vec<Rejection<Sym>>,
 
-    /// How to rebuild the substrate on `reset`, and with what.
-    factory: SubstrateFactory<Sym>,
+    /// Per-child seed cash, kept for `reset` (rebuild ledgers).
     seeds: Vec<Real>,
-    scoped_costs: Vec<(Sym, TradingCosts)>,
-
-    /// Whether the composite wallet has ever been fed a bar — the mis-pairing
-    /// guard read by [`Portfolio::trade`](super::Portfolio).
-    pub(super) priced: bool,
 }
 
 impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
-    pub(super) fn new(seeds: Vec<Real>, factory: SubstrateFactory<Sym>) -> Self {
-        let total: Real = seeds.iter().sum();
+    pub(super) fn new(seeds: Vec<Real>) -> Self {
         let n = seeds.len();
         Self {
-            substrate: factory(total),
             ledgers: seeds.iter().map(|&c| Ledger::new(c)).collect(),
+            marks: HashMap::new(),
             intents: vec![HashMap::new(); n],
             protective: vec![HashMap::new(); n],
             protective_owner: HashMap::new(),
@@ -143,10 +114,7 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
             owners: HashMap::new(),
             next_pf_id: 0,
             rejections: Vec::new(),
-            factory,
             seeds,
-            scoped_costs: Vec::new(),
-            priced: false,
         }
     }
 
@@ -161,7 +129,7 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
     }
 
     pub(super) fn price_of(&self, symbol: &Sym) -> Option<Real> {
-        self.substrate.price(symbol).map(|p| p.0)
+        self.marks.get(symbol).copied()
     }
 
     /// Child `idx`'s mark-to-market equity.
@@ -169,27 +137,21 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
         self.ledgers[idx].equity(|s| self.price_of(s))
     }
 
-    pub(super) fn record_scoped_costs(&mut self, symbol: Sym, costs: TradingCosts) {
-        if let Some(slot) = self.scoped_costs.iter_mut().find(|(s, _)| *s == symbol) {
-            slot.1 = costs;
-        } else {
-            self.scoped_costs.push((symbol, costs));
-        }
-    }
-
-    pub(super) fn take_rejections(&mut self) -> Vec<Rejection<Sym>> {
+    /// Drain the child hard-cap refusals booked during `trade`, paired with the
+    /// child that owns each. Dispatched to children by `Portfolio::update`; not
+    /// surfaced to the run report.
+    pub(super) fn take_child_rejections(&mut self) -> Vec<(usize, Rejection<Sym>)> {
         std::mem::take(&mut self.rejections)
+            .into_iter()
+            .map(|r| (self.owners.get(&r.id).copied().unwrap_or(0), r))
+            .collect()
     }
 
-    /// Rebuild the substrate at the portfolio's total seed and reset every
-    /// ledger, then replay post-build per-symbol costs.
+    /// Reset every ledger to its seed and clear all bar-to-bar state. There is
+    /// no substrate to rebuild — the driver hands a fresh account each run.
     pub(super) fn reset(&mut self) {
-        let total: Real = self.seeds.iter().sum();
-        self.substrate = (self.factory)(total);
-        for (symbol, costs) in &self.scoped_costs {
-            let _ = self.substrate.set_costs_for(symbol.clone(), costs.clone());
-        }
         self.ledgers = self.seeds.iter().map(|&c| Ledger::new(c)).collect();
+        self.marks.clear();
         for m in &mut self.intents {
             m.clear();
         }
@@ -201,7 +163,6 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
         self.owners.clear();
         self.rejections.clear();
         self.next_pf_id = 0;
-        self.priced = false;
     }
 
     // ---- intent recording (called from LedgerWallet) --------------------
@@ -271,9 +232,9 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
 
     // ---- netting ---------------------------------------------------------
 
-    /// Turn every child's recorded intent into at most one order per symbol,
-    /// then rest the most urgent protective leg per symbol.
-    pub(super) fn net_and_submit(&mut self) {
+    /// Turn every child's recorded intent into at most one order per symbol on
+    /// the passed `wallet`, then rest the most urgent protective leg per symbol.
+    pub(super) fn net_and_submit(&mut self, wallet: &mut dyn Wallet<Sym>) {
         let mut symbols: Vec<Sym> = Vec::new();
         for per_child in &self.intents {
             for symbol in per_child.keys() {
@@ -283,15 +244,15 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
             }
         }
         for symbol in symbols {
-            self.submit_symbol(&symbol);
+            self.submit_symbol(&symbol, wallet);
         }
         for m in &mut self.intents {
             m.clear();
         }
-        self.rest_protective();
+        self.rest_protective(wallet);
     }
 
-    fn submit_symbol(&mut self, symbol: &Sym) {
+    fn submit_symbol(&mut self, symbol: &Sym, wallet: &mut dyn Wallet<Sym>) {
         let mut legs: Vec<Leg> = Vec::new();
         for idx in 0..self.ledgers.len() {
             let Some(intent) = self.intents[idx].get(symbol).copied() else {
@@ -313,7 +274,7 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
 
         if market_delta.abs() > DEFAULT_EPSILON {
             // One order for the imbalance. The rest crosses internally.
-            let current = self.substrate.position(symbol).amount;
+            let current = wallet.position(symbol).amount;
             let amount = current + market_delta;
             // A net buy goes out as a *fraction of equity* rather than a unit
             // count, calibrated to hit `amount` at the current price. Two
@@ -337,13 +298,12 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
             //
             // Sells and short targets need none of this, and an explicit unit
             // target is more predictable, so they take `set_position`.
-            let equity = self.substrate.equity().0;
+            let equity = wallet.equity().0;
             let price = self.price_of(symbol).unwrap_or(0.0);
             let submitted = if market_delta > 0.0 && amount > 0.0 && equity > 0.0 && price > 0.0 {
-                self.substrate
-                    .set(symbol.clone(), Side::Buy, Size::value_frac(amount * price / equity))
+                wallet.set(symbol.clone(), Side::Buy, Size::value_frac(amount * price / equity))
             } else {
-                self.substrate.set_position(Units {
+                wallet.set_position(Units {
                     symbol: symbol.clone(),
                     amount,
                 })
@@ -395,7 +355,7 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
     /// second fires a bar later. Choosing the *nearest* rather than adding
     /// multi-leg brackets to the wallet keeps the seam simple at the cost of
     /// that narrow case.
-    fn rest_protective(&mut self) {
+    fn rest_protective(&mut self, wallet: &mut dyn Wallet<Sym>) {
         let mut symbols: Vec<Sym> = Vec::new();
         for per_child in &self.protective {
             for symbol in per_child.keys() {
@@ -405,10 +365,10 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
             }
         }
         for symbol in symbols {
-            let net = self.substrate.position(&symbol).amount;
+            let net = wallet.position(&symbol).amount;
             if net.abs() <= DEFAULT_EPSILON {
                 self.protective_owner.remove(&symbol);
-                let _ = self.substrate.cancel_protective(&symbol);
+                let _ = wallet.cancel_protective(&symbol);
                 continue;
             }
             let long = net > 0.0;
@@ -448,135 +408,108 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
             match best {
                 Some((idx, level, kind, units)) => {
                     self.protective_owner.insert(symbol.clone(), idx);
-                    let _ = self.substrate.cancel_protective(&symbol);
+                    let _ = wallet.cancel_protective(&symbol);
                     let _ = match kind {
-                        OrderKind::TakeProfit => self.substrate.set_take_profit(
+                        OrderKind::TakeProfit => wallet.set_take_profit(
                             symbol.clone(),
                             Reference(level),
                             Size::units(units),
                         ),
-                        _ => self.substrate.set_stop(
-                            symbol.clone(),
-                            Reference(level),
-                            Size::units(units),
-                        ),
+                        _ => wallet.set_stop(symbol.clone(), Reference(level), Size::units(units)),
                     };
                 }
                 None => {
                     self.protective_owner.remove(&symbol);
-                    let _ = self.substrate.cancel_protective(&symbol);
+                    let _ = wallet.cancel_protective(&symbol);
                 }
             }
         }
     }
 
-    // ---- settlement ------------------------------------------------------
+    // ---- settlement (attribution) ---------------------------------------
 
-    /// Feed the substrate a bar and attribute what filled back to the ledgers
-    /// that caused it, returning one synthetic [`Order`] per child share.
+    /// Attribute one RAW account fill (from the driver's `wallet.update` /
+    /// `poll_fills`) to the ledgers that caused it, returning one synthetic
+    /// [`Order`] per child share for [`Portfolio::on_fill`](super::Portfolio) to
+    /// dispatch to each owning child.
     ///
-    /// The driver sees per-child fills rather than the single netted one, which
-    /// is what keeps `on_fill` routing and the run blotter reading as they did
-    /// when every child had its own wallet.
-    pub(super) fn settle(&mut self, symbol: Sym, candle: Candle) -> Vec<Order<Sym>> {
-        self.priced = true;
-        let fills = self.substrate.update(symbol.clone(), candle);
-        // Before anything else: a refusal booked during that update kills its
-        // flow, so translating first keeps a dead flow from being mistaken for
-        // one that is still working.
-        self.drain_substrate_rejections();
-        let mut out = Vec::new();
-        let mut market_filled = false;
-
-        for fill in fills {
-            match fill.kind {
-                OrderKind::Stop | OrderKind::TakeProfit => {
-                    if let Some(order) = self.attribute_protective(&symbol, &fill) {
-                        out.push(order);
-                    }
-                }
-                _ => {
-                    market_filled = true;
-                    out.extend(self.attribute_market(&symbol, &fill, candle.open));
-                }
+    /// A market fill splits pro-rata across its pending flow; a protective fill
+    /// belongs wholly to the child whose leg was rested. The crossed portion of
+    /// a partially-crossed flow books at the fill price here (≈ the bar open for
+    /// a market fill) rather than the raw open the old substrate settle used —
+    /// identical for a zero-cost paper fill, a negligible slippage-only
+    /// difference otherwise.
+    pub(super) fn attribute_fill(&mut self, fill: &Order<Sym>) -> Vec<Order<Sym>> {
+        match fill.kind {
+            OrderKind::Stop | OrderKind::TakeProfit => self
+                .attribute_protective(&fill.symbol.clone(), fill)
+                .into_iter()
+                .collect(),
+            _ => {
+                let symbol = fill.symbol.clone();
+                self.attribute_market(&symbol, fill, fill.price)
             }
         }
+    }
 
-        // A flow that crossed entirely submitted no order, so no fill will
-        // ever arrive to settle it — book it at the bar's open, which is the
-        // price the market portion would have got.
-        //
-        // A flow that *did* submit an order and hasn't filled is simply still
-        // working, and stays pending. `PaperWallet` fills or refuses on this
-        // same update so it never lingers, but a live venue fills
-        // asynchronously — dropping it here (or guessing it was refused) would
-        // leave the eventual fill with nothing to attribute against.
-        if !market_filled
-            && let Some(flow) = self.pending.get(&symbol).cloned()
-            && flow.market_delta.abs() <= DEFAULT_EPSILON
-        {
-            self.pending.remove(&symbol);
-            out.extend(self.book(&flow, 1.0, candle.open, candle.open, 0.0));
+    /// Book any flow that crossed entirely — net 0, so no order was submitted and
+    /// no fill will ever arrive — at each symbol's `open`, returning the synthetic
+    /// per-child orders. Called once per bar from
+    /// [`Portfolio::update`](super::Portfolio), after the driver's fills have
+    /// removed (via [`attribute_fill`](Self::attribute_fill)) every symbol that
+    /// did reach the market. A flow that submitted an order and hasn't filled
+    /// (nonzero `market_delta`) stays pending — still working.
+    pub(super) fn book_crosses(&mut self, opens: &HashMap<Sym, Real>) -> Vec<Order<Sym>> {
+        let crossed: Vec<Sym> = self
+            .pending
+            .iter()
+            .filter(|(_, flow)| flow.market_delta.abs() <= DEFAULT_EPSILON)
+            .map(|(sym, _)| sym.clone())
+            .collect();
+        let mut out = Vec::new();
+        for symbol in crossed {
+            let Some(flow) = self.pending.remove(&symbol) else {
+                continue;
+            };
+            let open = opens
+                .get(&symbol)
+                .copied()
+                .or_else(|| self.price_of(&symbol))
+                .unwrap_or(0.0);
+            out.extend(self.book(&flow, 1.0, open, open, 0.0));
         }
         out
     }
 
-    /// Drain fills the venue reported **out of band** — booked between bars
-    /// rather than on a specific `update` — and attribute them like any other.
-    ///
-    /// A no-op while the account is a [`PaperWallet`] (which fills only through
-    /// `update`), and the difference between working and broken once it isn't:
-    /// a live venue reports a fill on a symbol that didn't tick this bar
-    /// through here and nowhere else.
-    pub(super) fn poll(&mut self) -> Vec<Order<Sym>> {
-        let fills = self.substrate.poll_fills();
-        let mut out = Vec::new();
-        for fill in fills {
-            match fill.kind {
-                OrderKind::Stop | OrderKind::TakeProfit => {
-                    if let Some(order) = self.attribute_protective(&fill.symbol.clone(), &fill) {
-                        out.push(order);
-                    }
-                }
-                _ => {
-                    // No candle here, so no bar open to settle a cross at —
-                    // which is fine: a flow that crossed entirely never
-                    // submitted an order, so it cannot appear in this stream.
-                    let symbol = fill.symbol.clone();
-                    out.extend(self.attribute_market(&symbol, &fill, fill.price));
-                }
-            }
-        }
-        self.drain_substrate_rejections();
-        out
-    }
-
-    /// Translate refusals the account booked into per-child ones.
-    ///
-    /// The account refuses a *netted* order, which belongs to whichever
-    /// children contributed to it — so the refusal is split back over that
-    /// symbol's pending legs, carrying the venue's real error rather than a
-    /// guess. A refused protective leg goes to the child whose leg was rested.
-    /// Anything unattributable is passed through so it still reaches the run
-    /// report.
-    pub(super) fn drain_substrate_rejections(&mut self) {
-        for refusal in self.substrate.take_rejections() {
-            if let Some(flow) = self.pending.remove(&refusal.symbol) {
-                for leg in &flow.legs {
-                    self.rejections.push(Rejection {
-                        symbol: refusal.symbol.clone(),
-                        id: leg.id,
-                        error: refusal.error,
-                        kind: refusal.kind,
-                    });
-                }
-            } else if let Some(&idx) = self.protective_owner.get(&refusal.symbol) {
-                let id = self.mint();
-                self.owners.insert(id, idx);
-                self.rejections.push(Rejection { id, ..refusal });
-            } else {
-                self.rejections.push(refusal);
-            }
+    /// Split one account refusal into per-child refusals for
+    /// [`Portfolio::on_reject`](super::Portfolio) to dispatch. The account
+    /// refuses a *netted* order, which belongs to whichever children contributed
+    /// to it (its pending legs); a refused protective leg goes to the child whose
+    /// leg was rested. An unattributable refusal yields nothing (the account-level
+    /// entry is already in the run report).
+    pub(super) fn attribute_rejection(
+        &mut self,
+        refusal: Rejection<Sym>,
+    ) -> Vec<(usize, Rejection<Sym>)> {
+        if let Some(flow) = self.pending.remove(&refusal.symbol) {
+            flow.legs
+                .iter()
+                .map(|leg| {
+                    (
+                        self.owners.get(&leg.id).copied().unwrap_or(0),
+                        Rejection {
+                            symbol: refusal.symbol.clone(),
+                            id: leg.id,
+                            error: refusal.error,
+                            kind: refusal.kind,
+                        },
+                    )
+                })
+                .collect()
+        } else if let Some(&idx) = self.protective_owner.get(&refusal.symbol) {
+            vec![(idx, refusal)]
+        } else {
+            Vec::new()
         }
     }
 
@@ -751,9 +684,9 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
     ///
     /// # Panics
     /// Panics if the ledgers have drifted from the account.
-    pub(super) fn check_invariants(&self) {
+    pub(super) fn check_invariants(&self, wallet: &dyn Wallet<Sym>) {
         let ledger_cash: Real = self.ledgers.iter().map(|l| l.cash).sum();
-        let account_cash = self.substrate.funds().0;
+        let account_cash = wallet.funds().0;
         assert!(
             (ledger_cash - account_cash).abs() < 1e-6,
             "ledger cash {ledger_cash} != account cash {account_cash}",
@@ -768,7 +701,7 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
         }
         for symbol in symbols {
             let ledger_units: Real = self.ledgers.iter().map(|l| l.position(&symbol)).sum();
-            let account_units = self.substrate.position(&symbol).amount;
+            let account_units = wallet.position(&symbol).amount;
             assert!(
                 (ledger_units - account_units).abs() < 1e-6,
                 "ledger units {ledger_units} != account units {account_units}",

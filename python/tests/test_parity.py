@@ -236,6 +236,51 @@ def test_wallet_surface_matches_the_ledger():
     )
 
 
+# --------------------------------------------------------------------------
+# The OKX live wallet mirrors the same order-flow surface as PaperWallet, minus
+# the paper-only conveniences and plus two live-only affordances. Same ledger
+# discipline: change a method on the binding, update this list.
+# --------------------------------------------------------------------------
+
+OKX_WALLET_BOUND = {
+    # Constructors (staticmethods).
+    "demo", "mainnet",
+    # Wallet reads.
+    "funds", "position", "price", "equity",
+    # Order flow.
+    "update", "set", "set_position", "close",
+    "set_stop", "set_take_profit", "cancel_protective",
+    "set_limit", "cancel_limit", "cancel", "poll_fills",
+    # Live-only extras.
+    "refresh_account", "errors",
+}
+
+OKX_WALLET_NOT_BOUND = {
+    "positions": (
+        "OkxWallet doesn't override the trait default (empty), so a dict view "
+        "would mislead; read one symbol at a time via position(symbol)"
+    ),
+    "orders": "no in-memory blotter on a live venue (paper-only convenience)",
+    "reset": "a live venue has no freshly-constructed state to restore",
+    "adjust_funds": "OKX takes the trait default (UnsupportedOperation)",
+    "take_rejections": (
+        "needs a bar-less rejection type; errors() surfaces REST-failure detail"
+    ),
+    "set_costs_for": "a live venue owns its own fees",
+}
+
+
+def test_okx_wallet_surface_matches_the_ledger():
+    actual = {n for n in dir(ta.OkxWallet) if not n.startswith("_")}
+    missing = OKX_WALLET_BOUND - actual
+    extra = actual - OKX_WALLET_BOUND - set(OKX_WALLET_NOT_BOUND)
+    assert not missing, f"ledger claims these are bound but they aren't: {sorted(missing)}"
+    assert not extra, (
+        f"OkxWallet gained methods the ledger doesn't record: {sorted(extra)} — "
+        "add them to OKX_WALLET_BOUND, or to OKX_WALLET_NOT_BOUND with a reason"
+    )
+
+
 def test_protective_legs_expose_their_size():
     """The specific regression the ledger above exists to prevent."""
     w = ta.PaperWallet(1_000.0)

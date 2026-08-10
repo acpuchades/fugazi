@@ -723,6 +723,28 @@ def test_wallet_limit_order_can_be_cancelled():
     assert w.position("X") == 0.0
 
 
+def test_okx_wallet_constructs_and_reads_empty_cache():
+    # Construction is offline (no REST call until refresh_account / update), so
+    # this exercises the binding surface without touching the network.
+    w = ta.OkxWallet.demo("key", "secret", "passphrase")
+    assert w.funds == 0.0
+    assert w.equity() == 0.0
+    assert w.position("BTC-USDT-SWAP") == 0.0
+    assert w.price("BTC-USDT-SWAP") is None
+    assert w.errors() == []
+    # The isolated-margin / mainnet variants construct just as cleanly.
+    ta.OkxWallet.demo("key", "secret", "passphrase", td_mode="isolated")
+    ta.OkxWallet.mainnet("key", "secret", "passphrase")
+
+
+def test_run_rejects_a_non_wallet():
+    # `.run(...)` now accepts either a PaperWallet or an OkxWallet; anything else
+    # is a clear TypeError from the wallet-dispatch (not a downstream failure).
+    strat = ta.Strategy("X")
+    with pytest.raises(TypeError, match="PaperWallet or an OkxWallet"):
+        strat.run("not a wallet", {"open": [], "high": [], "low": [], "close": [], "volume": []})
+
+
 def test_wallet_relative_sizing():
     w = ta.PaperWallet(1_000.0)
     w.update("X", 25.0)

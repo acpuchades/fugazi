@@ -557,7 +557,10 @@ impl PortfolioSpec {
         &self,
         total_initial_equity: Real,
         schema: &Arc<Schema>,
-        costs: Option<TradingCosts>,
+        // Costs now ride on the wallet the portfolio is driven with (via
+        // `RunnableStrategy::drive`), like every other shape — there is no
+        // sub-wallet to bake them into. Kept for call-site symmetry.
+        _costs: Option<TradingCosts>,
     ) -> Result<DynPortfolio, String> {
         if self.children.is_empty() {
             return Err(
@@ -637,9 +640,6 @@ impl PortfolioSpec {
             };
             max_stable = max_stable.max(stable);
             max_warm_up = max_warm_up.max(warm_up);
-        }
-        if let Some(c) = costs {
-            builder = builder.costs(c);
         }
         // Install the library-side `WeightPolicy` fallback. This drives
         // two things: (a) the initial cash split, so sub-wallets seed at
@@ -841,12 +841,10 @@ impl PortfolioSpec {
 // DynPortfolio: CLI-owned wrapper around Portfolio<String>
 // ---------------------------------------------------------------------------
 
-/// The CLI's built portfolio handle. Implements [`Strategy`] by
-/// delegation so it drops into [`crate::backtest::run`] unchanged — but
-/// unlike the other `Dyn*Strategy`s it must be driven through
-/// [`wallet_view`](Self::wallet_view) rather than a plain [`PaperWallet`],
-/// since portfolio fills route through a composite wallet that owns one
-/// sub-wallet per child.
+/// The CLI's built portfolio handle. Implements [`Strategy`] by delegation so
+/// it drops into [`crate::backtest::run`] like any other shape — a portfolio now
+/// trades the wallet it is handed, netting its children's intents onto that one
+/// account.
 pub struct DynPortfolio {
     inner: Portfolio<String>,
     /// Max child stable-period captured at build (see
@@ -884,26 +882,30 @@ impl Strategy for DynPortfolio {
 }
 
 impl DynPortfolio {
-    /// A fresh aggregate [`PortfolioWallet`](crate::portfolio::PortfolioWallet)
-    /// sharing this portfolio's interior — the wallet the CLI hands to
-    /// [`crate::backtest::run`]. Multiple views share the same underlying
-    /// state, so a second view for side-inspection is cheap.
-    pub fn wallet_view(&self) -> crate::portfolio::PortfolioWallet<String> {
-        self.inner.wallet_view()
-    }
-
-    /// Drive the composite over `snapshots` through its own wallet — the
-    /// [`RunnableStrategy::drive`](crate::spec::runnable::RunnableStrategy)
-    /// body for this shape. Delegates to [`Portfolio::run`], so the
-    /// portfolio/wallet pairing has exactly one spelling in the crate.
-    pub fn run(&mut self, snapshots: &[Snapshot<String>]) -> crate::RunReport<String> {
-        self.inner.run(snapshots.iter().cloned())
-    }
-
     /// The number of children the portfolio holds, in `.add(...)` order.
     #[allow(dead_code)]
     pub fn child_count(&self) -> usize {
         self.inner.child_count()
+    }
+
+    /// Child `idx`'s mark-to-market equity — see [`Portfolio::sub_equity`].
+    #[allow(dead_code)]
+    pub fn sub_equity(&self, idx: usize) -> Real {
+        self.inner.sub_equity(idx)
+    }
+
+    /// Child `idx`'s signed ledger position in `symbol` — see
+    /// [`Portfolio::sub_position`].
+    #[allow(dead_code)]
+    pub fn sub_position(&self, idx: usize, symbol: &str) -> Real {
+        self.inner.sub_position(idx, &symbol.to_string())
+    }
+
+    /// Assert the netting identity against the account — see
+    /// [`Portfolio::assert_books_balance`].
+    #[allow(dead_code)]
+    pub fn assert_books_balance(&self, wallet: &dyn Wallet<String>) {
+        self.inner.assert_books_balance(wallet);
     }
 
     /// The aggregate stable-period across every child, captured at build.
@@ -923,17 +925,6 @@ impl DynPortfolio {
     /// `--keep-unstable`.
     pub fn warm_up_period(&self) -> usize {
         self.warm_up_period
-    }
-
-    /// Install a per-symbol [`TradingCosts`] bundle on every sub-wallet
-    /// inside the composite. Used by CLI runners to thread scoped
-    /// `--costs SYM:...` overrides through the portfolio boundary: after
-    /// the composite is built with a uniform default (via
-    /// [`PortfolioSpec::build`]'s `costs` arg), each symbol's resolved
-    /// bundle is installed here on every sub, so whichever child ends up
-    /// filling that symbol books at the right rate.
-    pub fn install_costs_for(&mut self, symbol: &str, costs: TradingCosts) {
-        self.inner.install_costs_for(&symbol.to_string(), costs);
     }
 }
 
@@ -1062,7 +1053,7 @@ mod tests {
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut portfolio = spec.build(10_000.0, &Schema::empty(), None);
-        let mut wallet = portfolio.wallet_view();
+        let mut wallet = PaperWallet::new(10_000.0);
 
         // Two bars: bar 1 queues entry, bar 2 fills. Portfolio wallet fans
         // the update to every sub, so each child's own PaperWallet marks +
@@ -1193,7 +1184,7 @@ mod tests {
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut portfolio = spec.build(1_000.0, &Schema::empty(), None);
-        let mut wallet = portfolio.wallet_view();
+        let mut wallet = PaperWallet::new(1_000.0);
 
         for bar in 0..4usize {
             let px_a = if bar < 2 { 100.0 } else { 1000.0 };
@@ -1210,8 +1201,8 @@ mod tests {
 
         // A must have shrunk (its position phase scaled the sole leg down);
         // B remains flat or grew from the freed cash on the next fire.
-        let e0 = wallet.sub_equity(0).0;
-        let e1 = wallet.sub_equity(1).0;
+        let e0 = portfolio.sub_equity(0);
+        let e1 = portfolio.sub_equity(1);
         assert!(
             e0 < e1 * 4.0,
             "largest-first should have started rebalancing A down; got e0={e0}, e1={e1}",
@@ -1317,7 +1308,7 @@ mod tests {
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut portfolio = spec.build(1_000.0, &Schema::empty(), None);
-        let mut wallet = portfolio.wallet_view();
+        let mut wallet = PaperWallet::new(1_000.0);
 
         // Three bars spanning a month rollover: 2024-01-31, 2024-02-01,
         // 2024-02-02. `!monthly` fires on 2024-02-01 (month rolled from
@@ -1380,7 +1371,7 @@ mod tests {
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut portfolio = spec.build(1_000.0, &Schema::empty(), None);
-        let mut wallet = portfolio.wallet_view();
+        let mut wallet = PaperWallet::new(1_000.0);
 
         for bar in 0..4usize {
             let px_a = if bar < 2 { 100.0 } else { 200.0 };
@@ -1395,8 +1386,8 @@ mod tests {
             portfolio.trade(&mut wallet);
         }
 
-        let e0 = wallet.sub_equity(0).0;
-        let e1 = wallet.sub_equity(1).0;
+        let e0 = portfolio.sub_equity(0);
+        let e1 = portfolio.sub_equity(1);
         assert!(
             (e0 - e1).abs() < 1.0,
             "cash-mode rebalance should snap sub-equities to 50/50; got e0={e0}, e1={e1}",
@@ -1430,10 +1421,10 @@ mod tests {
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut portfolio = spec.build(1_000.0, &Schema::empty(), None);
-        let mut wallet = portfolio.wallet_view();
+        let mut wallet = PaperWallet::new(1_000.0);
         // Initial split respects the list (seed via extract_top_level_value_list).
-        assert!((wallet.sub_equity(0).0 - 750.0).abs() < 1e-6);
-        assert!((wallet.sub_equity(1).0 - 250.0).abs() < 1e-6);
+        assert!((portfolio.sub_equity(0) - 750.0).abs() < 1e-6);
+        assert!((portfolio.sub_equity(1) - 250.0).abs() < 1e-6);
         // Run a few bars — rebalance keeps ratios locked to 75/25.
         for _ in 0..4 {
             for fill in wallet.update("A".to_string(), candle(100.0)) {
@@ -1445,8 +1436,8 @@ mod tests {
             portfolio.update(snap_of(&[("A", 100.0), ("B", 100.0)]));
             portfolio.trade(&mut wallet);
         }
-        let e0 = wallet.sub_equity(0).0;
-        let e1 = wallet.sub_equity(1).0;
+        let e0 = portfolio.sub_equity(0);
+        let e1 = portfolio.sub_equity(1);
         let total = e0 + e1;
         assert!(
             (e0 / total - 0.75).abs() < 0.01 && (e1 / total - 0.25).abs() < 0.01,
@@ -1528,7 +1519,7 @@ mod tests {
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut portfolio = spec.build(1_000.0, &Schema::empty(), None);
-        let mut wallet = portfolio.wallet_view();
+        let mut wallet = PaperWallet::new(1_000.0);
 
         for _ in 0..4usize {
             for fill in wallet.update("A".to_string(), candle(100.0)) {
@@ -1540,8 +1531,8 @@ mod tests {
             portfolio.update(snap_of(&[("A", 100.0), ("B", 100.0)]));
             portfolio.trade(&mut wallet);
         }
-        let e0 = wallet.sub_equity(0).0;
-        let e1 = wallet.sub_equity(1).0;
+        let e0 = portfolio.sub_equity(0);
+        let e1 = portfolio.sub_equity(1);
         assert!(
             (e0 - e1).abs() < 1.0,
             "weight-share reading same aggregate value per child should split \
@@ -1679,7 +1670,7 @@ mod tests {
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut portfolio = spec.build(1_500.0, &Schema::empty(), None);
-        let mut wallet = portfolio.wallet_view();
+        let mut wallet = PaperWallet::new(1_500.0);
         for _ in 0..4 {
             for fill in wallet.update("A".to_string(), candle(100.0)) {
                 portfolio.on_fill(&fill);
@@ -1690,8 +1681,8 @@ mod tests {
             portfolio.update(snap_of(&[("A", 100.0), ("B", 100.0)]));
             portfolio.trade(&mut wallet);
         }
-        let e0 = wallet.sub_equity(0).0;
-        let e1 = wallet.sub_equity(1).0;
+        let e0 = portfolio.sub_equity(0);
+        let e1 = portfolio.sub_equity(1);
         let total = e0 + e1;
         // Weights normalize to 2/3 (momentum) and 1/3 (mean_rev).
         assert!(
@@ -1770,7 +1761,7 @@ mod tests {
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut portfolio = spec.build(1_500.0, &Schema::empty(), None);
-        let mut wallet = portfolio.wallet_view();
+        let mut wallet = PaperWallet::new(1_500.0);
         for _ in 0..4 {
             for fill in wallet.update("A".to_string(), candle(100.0)) {
                 portfolio.on_fill(&fill);
@@ -1781,8 +1772,8 @@ mod tests {
             portfolio.update(snap_of(&[("A", 100.0), ("B", 100.0)]));
             portfolio.trade(&mut wallet);
         }
-        let e0 = wallet.sub_equity(0).0;
-        let e1 = wallet.sub_equity(1).0;
+        let e0 = portfolio.sub_equity(0);
+        let e1 = portfolio.sub_equity(1);
         let total = e0 + e1;
         // Momentum leg (weight 2) vs mean_rev leg (weight 1) → 2/3, 1/3.
         assert!(
@@ -1856,7 +1847,8 @@ mod tests {
             snap_of(&[("A", 100_000.0)]),
             snap_of(&[("A", 100_000.0)]),
         ];
-        let report = portfolio.run(&snaps);
+        let mut wallet = PaperWallet::new(1_000.0);
+        let report = crate::backtest::run(&mut portfolio, &mut wallet, snaps.iter().cloned());
 
         assert!(
             report

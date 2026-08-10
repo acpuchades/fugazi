@@ -1,9 +1,8 @@
-//! Integration tests for [`fugazi::Portfolio`]: composite strategy over
-//! N children each trading its own [`PaperWallet`], driven by the standard
-//! [`fugazi::backtest::run`] and reduced through the standard metrics
-//! pipeline. Exercises fill routing, per-child equity isolation, the
-//! aggregate reporting surface, and `TradingCosts::clone` (via
-//! `.costs(...)` on the builder).
+//! Integration tests for [`fugazi::Portfolio`]: a composite strategy over N
+//! children that netts their intents onto the one account it is handed, driven
+//! by the standard [`fugazi::backtest::run`] and reduced through the standard
+//! metrics pipeline. Exercises fill attribution, per-child equity isolation
+//! (via the ledgers), the aggregate reporting surface, and crossing.
 
 use fugazi::backtest;
 use fugazi::costs::{FixedBpsSpread, NoSlippage, PercentageCommission, TradingCosts};
@@ -12,7 +11,7 @@ use fugazi::portfolio::{Portfolio, PortfolioBuilder};
 use fugazi::prelude::*;
 use fugazi::strategies::SingleAssetStrategy;
 use fugazi::types::{Atom, Snapshot};
-use fugazi::wallet::Order;
+use fugazi::wallet::{Order, PaperWallet};
 
 /// A single-symbol always-flat Candle with `close == open == high == low`,
 /// unit volume — enough for the wallet to price and mark to market.
@@ -54,7 +53,7 @@ fn run_buy_and_hold_portfolio(
 ) -> (
     Portfolio<&'static str>,
     fugazi::RunReport<&'static str>,
-    fugazi::portfolio::PortfolioWallet<&'static str>,
+    PaperWallet<&'static str>,
 ) {
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(initial_equity)
@@ -76,7 +75,7 @@ fn run_buy_and_hold_portfolio(
         )
         .weights(policy)
         .build();
-    let mut wallet = portfolio.wallet_view();
+    let mut wallet = PaperWallet::new(initial_equity);
     let report = backtest::run(&mut portfolio, &mut wallet, a_rising_b_flat_snapshots());
     (portfolio, report, wallet)
 }
@@ -99,13 +98,13 @@ fn equal_weight_splits_initial_cash_evenly() {
         )
         .weights(EqualWeight)
         .build();
-    let wallet = portfolio.wallet_view();
+    let wallet: PaperWallet<&'static str> = PaperWallet::new(1_000.0);
     assert_eq!(portfolio.child_count(), 3);
     for i in 0..3 {
         assert!(
-            (wallet.sub_equity(i).0 - 1_000.0 / 3.0).abs() < 1e-9,
+            (portfolio.sub_equity(i) - 1_000.0 / 3.0).abs() < 1e-9,
             "sub {i} equity {} != 1/3",
-            wallet.sub_equity(i).0
+            portfolio.sub_equity(i)
         );
     }
     // Aggregate equity == sum of subs.
@@ -126,9 +125,9 @@ fn fixed_weights_splits_at_the_configured_ratios() {
         )
         .weights(Fixed::new(vec![0.7, 0.3]))
         .build();
-    let wallet = portfolio.wallet_view();
-    assert!((wallet.sub_equity(0).0 - 700.0).abs() < 1e-9);
-    assert!((wallet.sub_equity(1).0 - 300.0).abs() < 1e-9);
+    let wallet: PaperWallet<&'static str> = PaperWallet::new(1_000.0);
+    assert!((portfolio.sub_equity(0) - 700.0).abs() < 1e-9);
+    assert!((portfolio.sub_equity(1) - 300.0).abs() < 1e-9);
     assert!((wallet.equity().0 - 1_000.0).abs() < 1e-9);
 }
 
@@ -157,14 +156,14 @@ fn aggregate_equity_curve_sums_per_child_equity_across_bars() {
     assert!(
         (final_eq - expected_final_agg).abs() < 1e-6,
         "final aggregate equity {final_eq} != {expected_final_agg} (children: {}, {})",
-        wallet.sub_equity(0).0,
-        wallet.sub_equity(1).0,
+        portfolio.sub_equity(0),
+        portfolio.sub_equity(1),
     );
     // Wallet's live aggregate matches the last curve point.
     assert!((wallet.equity().0 - final_eq).abs() < 1e-9);
     // Per-child equities: rising-A sub gained ~85%, flat-B sub is flat.
-    assert!((wallet.sub_equity(0).0 - expected_final_a).abs() < 1e-6);
-    assert!((wallet.sub_equity(1).0 - expected_final_b).abs() < 1e-6);
+    assert!((portfolio.sub_equity(0) - expected_final_a).abs() < 1e-6);
+    assert!((portfolio.sub_equity(1) - expected_final_b).abs() < 1e-6);
     // Preserves child ordering / naming.
     assert_eq!(portfolio.child_name(0), "hold_a");
     assert_eq!(portfolio.child_name(1), "hold_b");
@@ -209,7 +208,7 @@ fn on_fill_only_reaches_the_owning_child() {
         )
         .weights(EqualWeight)
         .build();
-    let mut wallet = portfolio.wallet_view();
+    let mut wallet = PaperWallet::new(2_000.0);
     let _report = backtest::run(&mut portfolio, &mut wallet, a_rising_b_flat_snapshots());
 
     assert!(
@@ -220,16 +219,15 @@ fn on_fill_only_reaches_the_owning_child() {
     // Sanity: child 0 (buy-and-hold on A) does trade, so its equity
     // grew from 1_000 → ~1_857 (A went from 100 → 195, entry at bar 1's
     // open = 105).
-    assert!(wallet.sub_equity(0).0 > 1_500.0);
+    assert!(portfolio.sub_equity(0) > 1_500.0);
 }
 
 #[test]
-fn install_costs_for_scopes_by_symbol_across_sub_wallets() {
-    // Portfolio with two buy-and-hold children on A and B. Install a
-    // non-zero commission bundle for A only via `install_costs_for("A", ...)`
-    // — every A fill (in whichever sub-wallet) should book with commission;
-    // every B fill should stay commission-free. This is the seam the CLI
-    // uses to thread `--costs SYM:...` scoped overrides.
+fn per_symbol_costs_on_the_account_scope_by_symbol() {
+    // A portfolio now trades the wallet it is handed, so per-symbol costs live
+    // on that account like every other shape: install an A-only bundle on the
+    // wallet, and every A fill books with commission while every B fill stays
+    // free. This is the seam the CLI uses for `--costs SYM:...`.
     let a_costs = TradingCosts::new(
         Box::new(PercentageCommission::new(0.001)),
         Box::new(FixedBpsSpread::new(10.0)),
@@ -247,11 +245,10 @@ fn install_costs_for_scopes_by_symbol_across_sub_wallets() {
         )
         .weights(EqualWeight)
         .build();
-    // Install A-only costs *after* build — mirrors the CLI's post-build
-    // per-symbol install.
-    portfolio.install_costs_for(&"A", a_costs);
+    let mut wallet = PaperWallet::new(2_000.0);
+    wallet.set_costs_for("A", a_costs).unwrap();
 
-    let report = portfolio.run(a_rising_b_flat_snapshots());
+    let report = backtest::run(&mut portfolio, &mut wallet, a_rising_b_flat_snapshots());
 
     // Every fill on A should carry commission (> 0); every fill on B
     // should stay commission-free.
@@ -276,9 +273,9 @@ fn install_costs_for_scopes_by_symbol_across_sub_wallets() {
 }
 
 #[test]
-fn passing_costs_bundle_clones_per_sub() {
-    // Regression / smoke test for TradingCosts: Clone — the same bundle
-    // installs on N sub-wallets and the fills carry non-zero commission.
+fn account_costs_apply_to_every_child_fill() {
+    // The account carries one uniform cost bundle; every child's fills into it
+    // book at that rate.
     let costs = TradingCosts::new(
         Box::new(PercentageCommission::new(0.001)),
         Box::new(FixedBpsSpread::new(10.0)),
@@ -295,11 +292,11 @@ fn passing_costs_bundle_clones_per_sub() {
             SingleAssetStrategy::<&'static str>::buy_and_hold("B"),
         )
         .weights(EqualWeight)
-        .costs(costs)
         .build();
-    let report = portfolio.run(a_rising_b_flat_snapshots());
-    // Every buy fill on each sub should carry non-zero commission
-    // (percentage rate * notional > 0). At least one fill per sub.
+    let mut wallet = PaperWallet::with_costs(2_000.0, costs);
+    let report = backtest::run(&mut portfolio, &mut wallet, a_rising_b_flat_snapshots());
+    // Every buy fill should carry non-zero commission
+    // (percentage rate * notional > 0). At least one fill per child.
     assert!(!report.fills.is_empty());
     for fill in &report.fills {
         assert!(
@@ -379,11 +376,11 @@ fn default_rebalance_gate_is_off_so_equities_drift_with_pnl() {
     // Without `.rebalance_on(...)`, the portfolio behaves exactly as the
     // pre-rebalance v1: weights govern the initial split, then per-child
     // equities drift with P&L and nothing re-syncs them.
-    let (portfolio, _report, wallet) = run_buy_and_hold_portfolio(2_000.0, EqualWeight);
+    let (portfolio, _report, _wallet) = run_buy_and_hold_portfolio(2_000.0, EqualWeight);
     // A rises 5x (100 → 195 over 20 bars), B stays flat → sub 0 equity
     // grew significantly, sub 1 didn't. They should be very different.
-    let e0 = wallet.sub_equity(0).0;
-    let e1 = wallet.sub_equity(1).0;
+    let e0 = portfolio.sub_equity(0);
+    let e1 = portfolio.sub_equity(1);
     assert!(
         e0 > 1.5 * e1,
         "expected significant divergence without rebalance; got sub_equity(0)={e0}, sub_equity(1)={e1}",
@@ -429,13 +426,13 @@ fn cash_phase_alone_handles_a_rebalance_when_contributors_have_free_cash() {
         .weights(Fixed::new(vec![0.5, 0.5]))
         .rebalance_on(Every::<Snapshot<&'static str>>::new(1))
         .build();
-    let mut wallet = portfolio.wallet_view();
+    let mut wallet = PaperWallet::new(1_000.0);
     // 4 bars: enter, fill, price step-up + rebalance, hold.
     let snaps = a_step_up_b_flat_snapshots(4);
     let _report = backtest::run(&mut portfolio, &mut wallet, snaps);
 
-    let e0 = wallet.sub_equity(0).0;
-    let e1 = wallet.sub_equity(1).0;
+    let e0 = portfolio.sub_equity(0);
+    let e1 = portfolio.sub_equity(1);
     assert!(
         (e0 - e1).abs() < 1.0,
         "cash phase alone should snap sub-equities to 50/50; got e0={e0}, e1={e1}",
@@ -477,12 +474,12 @@ fn position_phase_downsizes_when_contributor_has_no_free_cash() {
         .weights(Fixed::new(vec![0.5, 0.5]))
         .rebalance_on(Every::<Snapshot<&'static str>>::new(1))
         .build();
-    let mut wallet = portfolio.wallet_view();
+    let mut wallet = PaperWallet::new(1_000.0);
     let snaps = a_step_up_b_flat_snapshots(4);
     let _report = backtest::run(&mut portfolio, &mut wallet, snaps);
 
-    let e0 = wallet.sub_equity(0).0;
-    let e1 = wallet.sub_equity(1).0;
+    let e0 = portfolio.sub_equity(0);
+    let e1 = portfolio.sub_equity(1);
     // After the two-phase rebalance converges over multiple fires,
     // sub-equities should be at (or very close to) the target. Allow a
     // small tolerance since fills fill at open and the exact convergence
@@ -513,12 +510,12 @@ fn rebalance_gate_never_freezes_the_portfolio() {
         .weights(EqualWeight)
         .rebalance_on(ValueBool::<Snapshot<&'static str>>::new(false))
         .build();
-    let mut wallet = portfolio.wallet_view();
+    let mut wallet = PaperWallet::new(2_000.0);
     let report = backtest::run(&mut portfolio, &mut wallet, a_rising_b_flat_snapshots());
 
     // Same result as run_buy_and_hold_portfolio's assertions — ValueBool::false
     // is by definition a no-op gate.
-    assert!(wallet.sub_equity(0).0 > 1.5 * wallet.sub_equity(1).0);
+    assert!(portfolio.sub_equity(0) > 1.5 * portfolio.sub_equity(1));
     assert!(!report.fills.is_empty());
 }
 
@@ -595,7 +592,7 @@ fn scenario_a_cash_phase_only_moves_the_100_and_queues_no_fills() {
         .weights(Fixed::new(vec![0.4, 0.6]))
         .rebalance_on(Every::<Snapshot<&'static str>>::new(1))
         .build();
-    let mut wallet = portfolio.wallet_view();
+    let mut wallet = PaperWallet::new(1_000.0);
 
     // 4 bars at flat prices for X. Y symbol carries a price so the wallet
     // can mark it if needed, but nothing trades it.
@@ -612,14 +609,14 @@ fn scenario_a_cash_phase_only_moves_the_100_and_queues_no_fills() {
     // Sub A should have equity 400, sub B should have equity 600. Tight
     // tolerance since the price is flat and there's no drift.
     assert!(
-        (wallet.sub_equity(0).0 - 400.0).abs() < 0.01,
+        (portfolio.sub_equity(0) - 400.0).abs() < 0.01,
         "scenario A: expected sub_equity(0) == 400, got {}",
-        wallet.sub_equity(0).0,
+        portfolio.sub_equity(0),
     );
     assert!(
-        (wallet.sub_equity(1).0 - 600.0).abs() < 0.01,
+        (portfolio.sub_equity(1) - 600.0).abs() < 0.01,
         "scenario A: expected sub_equity(1) == 600, got {}",
-        wallet.sub_equity(1).0,
+        portfolio.sub_equity(1),
     );
     // Only fill on the blotter is the initial entry buy — no rebalance
     // fill should ever have been queued (cash phase does all the work).
@@ -664,7 +661,7 @@ fn scenario_b_cash_drains_position_phase_queues_downsize_next_fire_converges() {
         .weights(Fixed::new(vec![0.25, 0.75]))
         .rebalance_on(Every::<Snapshot<&'static str>>::new(1))
         .build();
-    let mut wallet = portfolio.wallet_view();
+    let mut wallet = PaperWallet::new(1_000.0);
 
     // 5 bars: bar 1 seeds the position (order queued), bar 2 fills the
     // entry, bar 3 rebalance kicks in (cash phase drains + position phase
@@ -681,14 +678,14 @@ fn scenario_b_cash_drains_position_phase_queues_downsize_next_fire_converges() {
     let _report = backtest::run(&mut portfolio, &mut wallet, snaps);
 
     assert!(
-        (wallet.sub_equity(0).0 - 250.0).abs() < 1.0,
+        (portfolio.sub_equity(0) - 250.0).abs() < 1.0,
         "scenario B: expected sub_equity(0) ≈ 250 (contributor's target), got {}",
-        wallet.sub_equity(0).0,
+        portfolio.sub_equity(0),
     );
     assert!(
-        (wallet.sub_equity(1).0 - 750.0).abs() < 1.0,
+        (portfolio.sub_equity(1) - 750.0).abs() < 1.0,
         "scenario B: expected sub_equity(1) ≈ 750 (receiver's target), got {}",
-        wallet.sub_equity(1).0,
+        portfolio.sub_equity(1),
     );
 }
 
@@ -727,7 +724,7 @@ fn weight_shares_override_weight_policy_at_rebalance() {
         ])
         .rebalance_on(Every::<Snapshot<&'static str>>::new(1))
         .build();
-    let mut wallet = portfolio.wallet_view();
+    let mut wallet = PaperWallet::new(1_000.0);
     // Flat prices throughout — the divergence in sub-equities comes
     // purely from the rebalance moving cash to hit the 75/25 target.
     let snaps: Vec<Snapshot<&'static str>> = (0..4)
@@ -741,8 +738,8 @@ fn weight_shares_override_weight_policy_at_rebalance() {
     let _report = backtest::run(&mut portfolio, &mut wallet, snaps);
 
     // Aggregate equity 1000 → sub 0 gets 750, sub 1 gets 250.
-    let e0 = wallet.sub_equity(0).0;
-    let e1 = wallet.sub_equity(1).0;
+    let e0 = portfolio.sub_equity(0);
+    let e1 = portfolio.sub_equity(1);
     assert!(
         (e0 - 750.0).abs() < 5.0,
         "share-3 sub should hold ~750 equity; got {e0}",
@@ -884,7 +881,7 @@ fn weight_share_reads_aggregate_directly() {
         .weight_shares(vec![Box::new(share_a), Box::new(share_b)])
         .rebalance_on(Every::<Snapshot<&'static str>>::new(1))
         .build();
-    let mut wallet = portfolio.wallet_view();
+    let mut wallet = PaperWallet::new(1_000.0);
     let snaps: Vec<Snapshot<&'static str>> = (0..4)
         .map(|_| {
             let mut s = Snapshot::new();
@@ -898,8 +895,8 @@ fn weight_share_reads_aggregate_directly() {
     // Both weight-shares read the same aggregate value each bar, so
     // weights normalize to 50/50 (regardless of the 75/25 Fixed policy
     // fallback).
-    let e0 = wallet.sub_equity(0).0;
-    let e1 = wallet.sub_equity(1).0;
+    let e0 = portfolio.sub_equity(0);
+    let e1 = portfolio.sub_equity(1);
     assert!(
         (e0 - 500.0).abs() < 5.0 && (e1 - 500.0).abs() < 5.0,
         "aggregate-book weight shares should equalize the split; got e0={e0}, e1={e1}",
@@ -988,7 +985,7 @@ fn largest_first_position_phase_touches_only_the_bigger_leg() {
         .rebalance_on(Every::<Snapshot<&'static str>>::new(1))
         .position_rebalancer(LargestFirst)
         .build();
-    let mut wallet = portfolio.wallet_view();
+    let mut wallet = PaperWallet::new(1_000.0);
     // Bars 1-3 at $100 (seed + fill). Bars 4+ X pumps to $200 to force
     // child 0 over-target under equal weighting.
     let snaps: Vec<Snapshot<&'static str>> = (0..6)
@@ -1043,7 +1040,7 @@ fn a_portfolio_can_be_driven_from_another_thread() {
             )
             .weights(EqualWeight)
             .build();
-        let mut wallet = portfolio.wallet_view();
+        let mut wallet = PaperWallet::new(1_000.0);
         let report = fugazi::backtest::run(&mut portfolio, &mut wallet, snaps);
         *report.equity_curve.last().unwrap()
     });
@@ -1094,15 +1091,17 @@ fn submitter(log: &RejectLog, order: Option<(&'static str, Side, Size)>) -> Subm
 }
 
 #[test]
-fn rejections_from_a_child_reach_the_report_and_the_child() {
-    // Before the composite wallet forwarded `take_rejections`, this ran
-    // clean: the sub-wallet booked every refusal and nobody ever drained it,
-    // so `RunReport::rejections` was permanently empty for a portfolio.
+fn child_hard_cap_rejections_reach_the_child_not_the_report() {
+    // A child that asks to spend past its ledger slice is refused *inside* the
+    // portfolio (`record_intent`), not by the account — the account may hold a
+    // sibling's cash. So the refusal reaches the child via `on_reject`, but not
+    // the run report: the documented consequence of the portfolio no longer
+    // owning a wallet the driver could drain.
     let log: RejectLog = Default::default();
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(1_000.0)
-        // Asks for a billion units of A against ~1_000 of cash — refused by
-        // the sub-wallet's submit-time pre-flight, every bar.
+        // Asks for a billion units of A against ~500 of ledger cash — refused
+        // by the child's own ledger cap, every bar.
         .add("greedy", submitter(&log, Some(("A", Side::Buy, Size::units(1e9)))))
         .add("idle", submitter(&Default::default(), None))
         .weights(EqualWeight)
@@ -1110,20 +1109,14 @@ fn rejections_from_a_child_reach_the_report_and_the_child() {
     let report = portfolio.run(a_rising_b_flat_snapshots());
 
     assert!(
-        !report.rejections.is_empty(),
-        "a portfolio run must surface its children's refusals",
+        report.rejections.is_empty(),
+        "child hard-cap refusals stay off the account-level report",
     );
+    let entries = log.lock().unwrap();
+    assert!(!entries.is_empty(), "the greedy child must hear its own refusals");
     assert!(
-        report
-            .rejections
-            .iter()
-            .all(|r| r.rejection.error == WalletError::InsufficientFunds),
+        entries.iter().all(|r| r.error == WalletError::InsufficientFunds),
         "expected every refusal to be InsufficientFunds",
-    );
-    assert_eq!(
-        log.lock().unwrap().len(),
-        report.rejections.len(),
-        "every reported rejection should also reach the child that caused it",
     );
 }
 
@@ -1157,11 +1150,11 @@ fn a_rejection_reaches_only_the_owning_child() {
 }
 
 #[test]
-fn a_fill_time_refusal_routes_through_the_acked_id() {
-    // The other branch of `translate_rejections`: this order *does* get an
-    // Ack (it clears pre-flight against the last close), then dies at fill
-    // time when the open gaps far above it. That id is already in the map,
-    // so translation must find it rather than mint a fresh one.
+fn a_child_running_past_its_slice_after_partial_fills_reaches_the_child() {
+    // The child clears its ledger cap on the first bars (buying against the low
+    // close), but as the price gaps up its partial fills drain the slice and a
+    // later bar's intent is refused by the ledger cap. That refusal reaches the
+    // child via `on_reject` (child-level, so not in the run report).
     let log: RejectLog = Default::default();
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(1_000.0)
@@ -1188,58 +1181,25 @@ fn a_fill_time_refusal_routes_through_the_acked_id() {
             snap
         })
         .collect();
-    let report = portfolio.run(snaps);
+    let _report = portfolio.run(snaps);
 
     assert!(
-        report
-            .rejections
+        log.lock()
+            .unwrap()
             .iter()
-            .any(|r| r.rejection.error == WalletError::InsufficientFunds),
-        "a queued order that can't be paid for at the open must be reported",
-    );
-    assert!(
-        !log.lock().unwrap().is_empty(),
-        "the fill-time refusal must reach the child that submitted it",
+            .any(|r| r.error == WalletError::InsufficientFunds),
+        "the child must be told when it runs past its own slice",
     );
 }
 
-#[test]
-#[should_panic(expected = "never been priced")]
-fn driving_a_portfolio_with_a_foreign_wallet_panics() {
-    // Used to be a silent wrong answer: flat equity curve at the seed, empty
-    // blotter, children never told about their fills.
-    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
-        .with_initial_equity(1_000.0)
-        .add("a", SingleAssetStrategy::<&'static str>::buy_and_hold("A"))
-        .weights(EqualWeight)
-        .build();
-    let mut foreign: PaperWallet<&'static str> = PaperWallet::new(1_000.0);
-    let _ = backtest::run(&mut portfolio, &mut foreign, a_rising_b_flat_snapshots());
-}
+// The two mis-pairing-guard `#[should_panic]` tests are gone: a portfolio now
+// trades whatever wallet the driver hands it, so driving it with any
+// `PaperWallet` (or a live account) is the supported path, not a panic.
 
 #[test]
-#[should_panic(expected = "never been priced")]
-fn driving_with_another_portfolios_view_panics() {
-    let mut left: Portfolio<&'static str> = PortfolioBuilder::default()
-        .with_initial_equity(1_000.0)
-        .add("a", SingleAssetStrategy::<&'static str>::buy_and_hold("A"))
-        .weights(EqualWeight)
-        .build();
-    let right: Portfolio<&'static str> = PortfolioBuilder::default()
-        .with_initial_equity(1_000.0)
-        .add("a", SingleAssetStrategy::<&'static str>::buy_and_hold("A"))
-        .weights(EqualWeight)
-        .build();
-    // `right`'s subs get priced; `left`'s never do.
-    let mut wallet = right.wallet_view();
-    let _ = backtest::run(&mut left, &mut wallet, a_rising_b_flat_snapshots());
-}
-
-#[test]
-fn an_overlay_only_stream_does_not_trip_the_pairing_guard() {
-    // The guard must only fire on bars the driver would actually have
-    // priced. A stream of price-less (overlay) atoms carries nothing to
-    // price, so a correctly-paired run over it stays silent.
+fn an_overlay_only_stream_produces_a_full_equity_curve() {
+    // A stream of price-less (overlay) atoms carries nothing to price; a run
+    // over it still produces one equity-curve point per bar.
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(1_000.0)
         .add("idle", submitter(&Default::default(), None))
@@ -1257,9 +1217,9 @@ fn an_overlay_only_stream_does_not_trip_the_pairing_guard() {
 }
 
 #[test]
-fn an_overlay_only_bar_mid_run_does_not_trip_the_pairing_guard() {
-    // A priceable bar followed by an overlay-only one: the flags are
-    // cumulative, so the gap can't be mistaken for a mis-pairing.
+fn an_overlay_only_bar_mid_run_is_handled() {
+    // A priceable bar followed by an overlay-only one: the overlay bar simply
+    // carries no mark, and the run continues.
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(1_000.0)
         .add("a", SingleAssetStrategy::<&'static str>::buy_and_hold("A"))
@@ -1301,8 +1261,8 @@ fn a_nested_portfolio_is_refused_at_build() {
 
 #[test]
 fn portfolio_run_matches_hand_paired_backtest_run() {
-    // `Portfolio::run` must be exactly the hand-paired spelling, or the
-    // migration of every call site onto it would be a silent behavior change.
+    // `Portfolio::run` must be exactly the hand-paired spelling — a fresh
+    // `PaperWallet` at the portfolio's seed driven through `backtest::run`.
     let build = || -> Portfolio<&'static str> {
         PortfolioBuilder::default()
             .with_initial_equity(2_000.0)
@@ -1313,7 +1273,7 @@ fn portfolio_run_matches_hand_paired_backtest_run() {
     };
 
     let mut hand_paired = build();
-    let mut wallet = hand_paired.wallet_view();
+    let mut wallet = PaperWallet::new(2_000.0);
     let expected = backtest::run(&mut hand_paired, &mut wallet, a_rising_b_flat_snapshots());
 
     let mut via_run = build();
@@ -1399,16 +1359,15 @@ fn a_child_adjusting_funds_moves_only_its_own_sub_wallet() {
         .build();
     let _ = portfolio.run(a_rising_b_flat_snapshots());
 
-    let wallet = portfolio.wallet_view();
     assert!(
-        (wallet.sub_equity(0).0 - (500.0 + 20.0)).abs() < 1e-9,
+        (portfolio.sub_equity(0) - (500.0 + 20.0)).abs() < 1e-9,
         "depositor should have gained 1.0 per bar over 20 bars, got {}",
-        wallet.sub_equity(0).0,
+        portfolio.sub_equity(0),
     );
     assert!(
-        (wallet.sub_equity(1).0 - 500.0).abs() < 1e-9,
+        (portfolio.sub_equity(1) - 500.0).abs() < 1e-9,
         "the sibling's cash must be untouched, got {}",
-        wallet.sub_equity(1).0,
+        portfolio.sub_equity(1),
     );
 }
 // ---------------------------------------------------------------------------
@@ -1477,13 +1436,13 @@ fn child_ledgers_always_sum_to_the_account() {
         .add("b", SingleAssetStrategy::<&'static str>::buy_and_hold("B"))
         .weights(EqualWeight)
         .build();
-    let mut wallet = portfolio.wallet_view();
+    let mut wallet = PaperWallet::new(2_000.0);
     for snap in a_rising_b_flat_snapshots() {
         let _ = backtest::run(&mut portfolio, &mut wallet, [snap]);
-        wallet.assert_books_balance();
+        portfolio.assert_books_balance(&wallet);
     }
     // And the parts still add up to the whole at the end.
-    let subs = wallet.sub_equity(0).0 + wallet.sub_equity(1).0;
+    let subs = portfolio.sub_equity(0) + portfolio.sub_equity(1);
     assert!(
         (subs - wallet.equity().0).abs() < 1e-6,
         "child equities {subs} != account equity {}",
@@ -1501,19 +1460,21 @@ fn two_children_on_the_same_symbol_send_one_order() {
         .add("a2", HoldUnits::new("A", 2.0))
         .weights(EqualWeight)
         .build();
-    let report = portfolio.run(flat_snapshots(4));
-    let wallet = portfolio.wallet_view();
+    let mut wallet = PaperWallet::new(2_000.0);
+    let report = backtest::run(&mut portfolio, &mut wallet, flat_snapshots(4));
 
     assert!(
         (wallet.position(&"A").amount - 5.0).abs() < 1e-9,
         "account should hold the combined 5 units, got {}",
         wallet.position(&"A").amount,
     );
-    // Two synthetic per-child fills (so each child learns its own share), and
-    // they sum to the account's move.
+    // Same symbol, same side → one netted account order of 5 units (the blotter
+    // is account-level now), and each child's ledger holds its own share.
     let bought: Real = report.fills.iter().map(|f| f.order.units).sum();
-    assert!((bought - 5.0).abs() < 1e-9, "per-child fills sum to {bought}");
-    wallet.assert_books_balance();
+    assert!((bought - 5.0).abs() < 1e-9, "account fills sum to {bought}");
+    assert!((portfolio.sub_position(0, &"A") - 3.0).abs() < 1e-9);
+    assert!((portfolio.sub_position(1, &"A") - 2.0).abs() < 1e-9);
+    portfolio.assert_books_balance(&wallet);
 }
 
 #[test]
@@ -1526,30 +1487,27 @@ fn opposite_sides_cross_internally_and_only_the_imbalance_trades() {
         .add("short_a", HoldUnits::new("A", -2.0))
         .weights(EqualWeight)
         .build();
-    let report = portfolio.run(flat_snapshots(4));
-    let wallet = portfolio.wallet_view();
+    let mut wallet = PaperWallet::new(2_000.0);
+    let report = backtest::run(&mut portfolio, &mut wallet, flat_snapshots(4));
 
     assert!(
         (wallet.position(&"A").amount - 3.0).abs() < 1e-9,
         "only the net 3 units should reach the account, got {}",
         wallet.position(&"A").amount,
     );
-    // Both children still get the position they asked for.
-    let long_units: Real = report
+    // Only the net imbalance reaches the account blotter (the crossed 2 units
+    // never touched the market). The per-child positions each child asked for
+    // live in its ledger.
+    let net_bought: Real = report
         .fills
         .iter()
         .filter(|f| f.order.side == Side::Buy)
         .map(|f| f.order.units)
         .sum();
-    let short_units: Real = report
-        .fills
-        .iter()
-        .filter(|f| f.order.side == Side::Sell)
-        .map(|f| f.order.units)
-        .sum();
-    assert!((long_units - 5.0).abs() < 1e-9, "long child got {long_units}");
-    assert!((short_units - 2.0).abs() < 1e-9, "short child got {short_units}");
-    wallet.assert_books_balance();
+    assert!((net_bought - 3.0).abs() < 1e-9, "only 3 net units trade, got {net_bought}");
+    assert!((portfolio.sub_position(0, &"A") - 5.0).abs() < 1e-9, "long child holds 5");
+    assert!((portfolio.sub_position(1, &"A") + 2.0).abs() < 1e-9, "short child holds -2");
+    portfolio.assert_books_balance(&wallet);
 }
 
 #[test]
@@ -1561,20 +1519,21 @@ fn crossed_flow_pays_no_commission() {
         Box::new(FixedBpsSpread::new(0.0)),
         Box::new(NoSlippage),
     );
-    let build = |long: Real, short: Real| -> Portfolio<&'static str> {
-        PortfolioBuilder::default()
+    let run = |long: Real, short: Real| -> fugazi::RunReport<&'static str> {
+        let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
             .with_initial_equity(2_000.0)
             .add("long_a", HoldUnits::new("A", long))
             .add("short_a", HoldUnits::new("A", short))
             .weights(EqualWeight)
-            .costs(costs.clone())
-            .build()
+            .build();
+        let mut wallet = PaperWallet::with_costs(2_000.0, costs.clone());
+        backtest::run(&mut portfolio, &mut wallet, flat_snapshots(4))
     };
 
     // 5 long / -2 short: 3 units trade, 2 cross.
-    let crossed = build(5.0, -2.0).run(flat_snapshots(4));
+    let crossed = run(5.0, -2.0);
     // 3 long / 0: the same 3 units trade with nothing to cross against.
-    let plain = build(3.0, 0.0).run(flat_snapshots(4));
+    let plain = run(3.0, 0.0);
 
     let paid = |r: &fugazi::RunReport<&'static str>| -> Real {
         r.fills.iter().map(|f| f.order.commission).sum()
@@ -1661,8 +1620,8 @@ fn one_childs_stop_takes_off_only_its_own_share() {
             s
         })
         .collect();
-    let _ = portfolio.run(snaps);
-    let wallet = portfolio.wallet_view();
+    let mut wallet = PaperWallet::new(4_000.0);
+    let _ = backtest::run(&mut portfolio, &mut wallet, snaps);
 
     // The tight stop fired for its 6 units; the loose child's 4 survive.
     assert!(
@@ -1670,7 +1629,7 @@ fn one_childs_stop_takes_off_only_its_own_share() {
         "expected the loose child's 4 units to remain, got {}",
         wallet.position(&"A").amount,
     );
-    wallet.assert_books_balance();
+    portfolio.assert_books_balance(&wallet);
 }
 
 #[test]
@@ -1686,17 +1645,19 @@ fn a_child_cannot_spend_past_its_own_slice() {
         .add("idle", submitter(&Default::default(), None))
         .weights(EqualWeight)
         .build();
-    let report = portfolio.run(flat_snapshots(4));
+    let mut wallet = PaperWallet::new(2_000.0);
+    let _report = backtest::run(&mut portfolio, &mut wallet, flat_snapshots(4));
 
+    // The child hard-cap refusal is a portfolio-ledger concept the account never
+    // sees, so it reaches the *child* (via on_reject) but not the run report —
+    // the documented consequence of the portfolio no longer owning a wallet.
     assert!(
-        report
-            .rejections
+        log.lock()
+            .unwrap()
             .iter()
-            .any(|r| r.rejection.error == WalletError::InsufficientFunds),
-        "the child should be capped at its own slice",
+            .any(|r| r.error == WalletError::InsufficientFunds),
+        "the capped child should be told about its own refusal",
     );
-    assert!(!log.lock().unwrap().is_empty(), "and told about it");
-    let wallet = portfolio.wallet_view();
     assert!(wallet.position(&"A").amount.abs() < 1e-9, "nothing should have traded");
 }
 
@@ -1715,8 +1676,8 @@ fn a_rebalance_moves_notional_cash_without_trading() {
         .weights(Fixed::new(vec![0.9, 0.1]))
         .rebalance_on(Every::<Snapshot<&'static str>>::new(1))
         .build();
-    let report = portfolio.run(flat_snapshots(4));
-    let wallet = portfolio.wallet_view();
+    let mut wallet = PaperWallet::new(1_000.0);
+    let report = backtest::run(&mut portfolio, &mut wallet, flat_snapshots(4));
 
     assert!(
         report.fills.is_empty(),
@@ -1726,7 +1687,7 @@ fn a_rebalance_moves_notional_cash_without_trading() {
     // Fixed weights are also the rebalance target, so the split is re-affirmed
     // rather than moved — and the total is untouched either way.
     assert!((wallet.equity().0 - 1_000.0).abs() < 1e-9);
-    wallet.assert_books_balance();
+    portfolio.assert_books_balance(&wallet);
 }
 
 // ---------------------------------------------------------------------------
@@ -1885,24 +1846,24 @@ fn fills_reported_out_of_band_still_reach_the_ledgers() {
         .with_initial_equity(2_000.0)
         .add("a", HoldUnits::new("A", 4.0))
         .add("b", HoldUnits::new("B", 6.0))
-        .substrate(std::sync::Arc::new(|seed| {
-            Box::new(AsyncVenue::new(seed, false)) as Box<dyn Wallet<&'static str> + Send>
-        }))
         .weights(EqualWeight)
         .build();
-    let report = portfolio.run(flat_snapshots(5));
-    let wallet = portfolio.wallet_view();
+    // Drive the portfolio directly against the async venue — the portfolio now
+    // trades whatever wallet it is handed, so this exercises the real driver's
+    // `poll_fills` loop routing out-of-band fills into `Portfolio::on_fill`.
+    let mut venue = AsyncVenue::new(2_000.0, false);
+    let report = backtest::run(&mut portfolio, &mut venue, flat_snapshots(5));
 
     assert!(!report.fills.is_empty(), "the out-of-band fills should surface");
     assert!(
-        (wallet.position(&"A").amount - 4.0).abs() < 1e-9,
+        (venue.position(&"A").amount - 4.0).abs() < 1e-9,
         "account A = {}",
-        wallet.position(&"A").amount,
+        venue.position(&"A").amount,
     );
-    assert!((wallet.position(&"B").amount - 6.0).abs() < 1e-9);
+    assert!((venue.position(&"B").amount - 6.0).abs() < 1e-9);
     // The point of the test: the books tracked the account through a fill
     // stream that never came back from `update`.
-    wallet.assert_books_balance();
+    portfolio.assert_books_balance(&venue);
 }
 
 #[test]
@@ -1913,23 +1874,102 @@ fn a_venue_that_fills_on_submission_still_reaches_the_ledgers() {
     let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
         .with_initial_equity(2_000.0)
         .add("a", HoldUnits::new("A", 4.0))
-        .substrate(std::sync::Arc::new(|seed| {
-            Box::new(AsyncVenue::new(seed, true)) as Box<dyn Wallet<&'static str> + Send>
-        }))
         .weights(EqualWeight)
         .build();
-    let _ = portfolio.run(flat_snapshots(5));
-    let wallet = portfolio.wallet_view();
+    let mut venue = AsyncVenue::new(2_000.0, true);
+    let _ = backtest::run(&mut portfolio, &mut venue, flat_snapshots(5));
 
     assert!(
-        (wallet.position(&"A").amount - 4.0).abs() < 1e-9,
+        (venue.position(&"A").amount - 4.0).abs() < 1e-9,
         "account A = {}",
-        wallet.position(&"A").amount,
+        venue.position(&"A").amount,
     );
     assert!(
-        (wallet.sub_equity(0).0 - 2_000.0).abs() < 1e-6,
+        (portfolio.sub_equity(0) - 2_000.0).abs() < 1e-6,
         "flat prices, so the child's equity should be unchanged: {}",
-        wallet.sub_equity(0).0,
+        portfolio.sub_equity(0),
     );
-    wallet.assert_books_balance();
+    portfolio.assert_books_balance(&venue);
+}
+
+// ---------------------------------------------------------------------------
+// A portfolio is an ordinary strategy over the wallet it is handed.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn portfolio_trades_the_passed_wallet() {
+    // The headline of the refactor: no `wallet_view`, no owned substrate — the
+    // portfolio nets its children onto whatever wallet `backtest::run` gives it.
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(2_000.0)
+        .add("a", SingleAssetStrategy::<&'static str>::buy_and_hold("A"))
+        .add("b", SingleAssetStrategy::<&'static str>::buy_and_hold("B"))
+        .weights(EqualWeight)
+        .build();
+    let mut wallet = PaperWallet::new(2_000.0);
+    let report = backtest::run(&mut portfolio, &mut wallet, a_rising_b_flat_snapshots());
+
+    assert!(wallet.position(&"A").amount > 0.0, "child A opened on the account");
+    assert!(wallet.position(&"B").amount > 0.0, "child B opened on the account");
+    assert!(
+        (wallet.equity().0 - *report.equity_curve.last().unwrap()).abs() < 1e-6,
+        "the reported curve is the account's own equity",
+    );
+    portfolio.assert_books_balance(&wallet);
+}
+
+#[test]
+fn internal_cross_books_at_open_with_no_wallet_fill() {
+    // A fully-crossed symbol (net 0) submits no order, so nothing reaches the
+    // account or the blotter — but both children's ledgers still book at the
+    // bar open, commission-free. Locks in the cross-booking path in `update`.
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(2_000.0)
+        .add("long_a", HoldUnits::new("A", 5.0))
+        .add("short_a", HoldUnits::new("A", -5.0))
+        .weights(EqualWeight)
+        .build();
+    let mut wallet = PaperWallet::new(2_000.0);
+    let report = backtest::run(&mut portfolio, &mut wallet, flat_snapshots(4));
+
+    assert!(wallet.position(&"A").amount.abs() < 1e-9, "net 0 reaches the account");
+    assert!(
+        report.fills.iter().all(|f| f.order.symbol != "A"),
+        "a fully-crossed symbol never appears in the blotter",
+    );
+    assert!((portfolio.sub_position(0, &"A") - 5.0).abs() < 1e-9, "long child holds 5");
+    assert!((portfolio.sub_position(1, &"A") + 5.0).abs() < 1e-9, "short child holds -5");
+    portfolio.assert_books_balance(&wallet);
+}
+
+#[test]
+fn a_sleeve_lets_a_portfolio_coexist_with_external_positions() {
+    use fugazi::wallet::{SleeveWallet, external_baseline};
+    // The account already holds the user's own 3 units of C. Run the portfolio
+    // over a sleeve of it: the portfolio sees only its own book, trading A while
+    // the external C position is left untouched. Same decorator the direct shapes
+    // use, now over a portfolio's account.
+    let mut account = PaperWallet::new(2_000.0);
+    account.update("C", flat_bar(100.0));
+    let _ = account.set_position(fugazi::wallet::Units { symbol: "C", amount: 3.0 });
+    account.update("C", flat_bar(100.0)); // fills at open 100 → holds 3 C
+    assert!((account.position(&"C").amount - 3.0).abs() < 1e-9);
+
+    let baseline = external_baseline(&account);
+    let mut view = SleeveWallet::new(account, baseline);
+    let seed = view.equity().0; // own equity: cash only, C excluded
+
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(seed)
+        .add("a", SingleAssetStrategy::<&'static str>::buy_and_hold("A"))
+        .weights(EqualWeight)
+        .build();
+    let _ = backtest::run(&mut portfolio, &mut view, a_rising_b_flat_snapshots());
+
+    let account = view.into_inner();
+    assert!(
+        (account.position(&"C").amount - 3.0).abs() < 1e-9,
+        "the external C position must be left untouched",
+    );
+    assert!(account.position(&"A").amount > 0.0, "the portfolio opened its own A position");
 }

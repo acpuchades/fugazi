@@ -119,22 +119,9 @@ impl RunnableStrategy for DynPortfolio {
     fn warm_up_period(&self) -> usize {
         DynPortfolio::warm_up_period(self)
     }
-
-    /// The one shape that can't use the default: portfolio fills route through
-    /// a composite wallet owning one [`PaperWallet`] per child, so it must be
-    /// driven through that wallet rather than a fresh one. Per-symbol costs
-    /// were installed on every sub-wallet at build time
-    /// ([`PortfolioSpec::try_build`]'s `costs` argument plus
-    /// [`DynPortfolio::install_costs_for`]), so the list passed here is already
-    /// accounted for and the `cash` seed came from the same place.
-    fn drive(
-        &mut self,
-        snapshots: &[Snapshot<String>],
-        _cash: Real,
-        _per_symbol_costs: &[(String, TradingCosts)],
-    ) -> RunReport<String> {
-        DynPortfolio::run(self, snapshots)
-    }
+    // Uses the default `drive`: a portfolio is now an ordinary strategy that
+    // trades the wallet it is handed, so it takes the same `PaperWallet` primed
+    // with per-symbol costs as the other four shapes.
 }
 
 /// The five spec shapes as one type, so a driver takes a strategy document
@@ -189,30 +176,21 @@ impl StrategySpec {
 
     /// Build with this run's costs applied the way the shape needs them.
     ///
-    /// Portfolio is the exception the whole seam exists for: its costs are
-    /// baked into each sub-wallet at construction (an unscoped default bundle,
-    /// plus a per-symbol override installed for every symbol in `universe`),
-    /// because a composite wallet has no single order book to prime afterwards.
-    /// The other four take their costs through [`RunnableStrategy::drive`], so for
-    /// them this is exactly [`try_build`](Self::try_build).
+    /// Every shape — portfolio included, now that it trades the wallet it is
+    /// handed like the other four — takes its costs through
+    /// [`RunnableStrategy::drive`], which primes the `PaperWallet` with the
+    /// per-symbol bundles. So this is exactly [`try_build`](Self::try_build); the
+    /// cost/universe arguments are kept for call-site symmetry and a future shape
+    /// that genuinely needs build-time costs.
     pub fn try_build_priced(
         &self,
         cash: Real,
         schema: &Arc<Schema>,
-        cost_config: &super::costs::CostConfig,
-        frequency: Option<crate::time::Frequency>,
-        universe: &[String],
+        _cost_config: &super::costs::CostConfig,
+        _frequency: Option<crate::time::Frequency>,
+        _universe: &[String],
     ) -> Result<Box<dyn RunnableStrategy>, String> {
-        let StrategySpec::Portfolio(spec) = self else {
-            return self.try_build(cash, schema, None);
-        };
-        let default_costs = cost_config.resolve("", frequency);
-        let costs_opt = (!default_costs.is_none()).then_some(default_costs);
-        let mut portfolio = spec.try_build(cash, schema, costs_opt)?;
-        for sym in universe {
-            portfolio.install_costs_for(sym, cost_config.resolve(sym, frequency));
-        }
-        Ok(Box::new(portfolio))
+        self.try_build(cash, schema, None)
     }
 
     /// The symbols this strategy may trade — the set per-symbol cost bundles

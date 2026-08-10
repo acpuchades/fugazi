@@ -151,24 +151,26 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for LedgerWallet<Sym> {
     }
 
     fn price(&self, symbol: &Sym) -> Option<Reference> {
-        // From the substrate: a price belongs to the market, not to a book.
+        // From the marks cache: a price belongs to the market, not to a book.
+        // The portfolio refreshes it from the snapshot each bar, in place of the
+        // old substrate the account's `price()` used to serve.
         self.inner
             .lock()
             .expect("portfolio lock poisoned")
-            .substrate
-            .price(symbol)
+            .price_of(symbol)
+            .map(Reference)
     }
 
     fn equity(&self) -> Reference {
         let inner = self.inner.lock().expect("portfolio lock poisoned");
-        Reference(inner.ledgers[self.idx].equity(|s| inner.substrate.price(s).map(|p| p.0)))
+        Reference(inner.ledgers[self.idx].equity(|s| inner.price_of(s)))
     }
 
     fn update(&mut self, _symbol: Sym, _candle: Candle) -> Vec<Order<Sym>> {
-        // The driver feeds the composite wallet, which feeds the substrate. A
-        // handle receiving update() means the caller wired the driver against
-        // a child's view rather than the portfolio's.
-        panic!("LedgerWallet::update: the driver should update the PortfolioWallet, not a handle.");
+        // The driver feeds the account wallet the portfolio trades, not a child
+        // handle. A handle receiving update() means the caller wired the driver
+        // against a child's view rather than the portfolio's account.
+        panic!("LedgerWallet::update: the driver should update the account wallet, not a handle.");
     }
 
     fn set_position(&mut self, target: Units<Sym>) -> Result<Ack<Sym>, WalletError> {
@@ -181,17 +183,13 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for LedgerWallet<Sym> {
         // reads feeding `Size::resolve` are the child's own, so a fraction
         // means a fraction *of this child*.
         let mut inner = self.inner.lock().expect("portfolio lock poisoned");
-        let price = inner
-            .substrate
-            .price(&symbol)
-            .ok_or(WalletError::UnknownPrice)?
-            .0;
+        let price = inner.price_of(&symbol).ok_or(WalletError::UnknownPrice)?;
         if price <= 0.0 {
             return Err(WalletError::InvalidPrice);
         }
         let ledger = &inner.ledgers[self.idx];
         let position = ledger.position(&symbol);
-        let equity = ledger.equity(|s| inner.substrate.price(s).map(|p| p.0));
+        let equity = ledger.equity(|s| inner.price_of(s));
         let magnitude = size.resolve(price, position, ledger.cash, equity);
         inner.record_intent(self.idx, symbol, side.sign() * magnitude)
     }

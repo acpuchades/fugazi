@@ -15,6 +15,70 @@ use crate::metrics::*;
 use crate::spec::*;
 
 // ---------------------------------------------------------------------------
+// Wallet-preparation seam — the one place the "external positions" concern lives.
+//
+// Every `.run(...)` treats whatever the wallet *already holds at run start* as
+// the user's own, externally-managed book: it is snapshotted as a baseline and
+// left untouched, and the strategy sizes against its **own** capital (cash + only
+// what it opens). A flat wallet has an empty baseline, so this collapses to the
+// fast path — drive the wallet directly, no offset, no move — behaving byte for
+// byte as before. A non-flat wallet is driven through an [`SleeveWallet`].
+// Neither the strategy nor the portfolio run code decides any of this; they call
+// one of the two seams below.
+// ---------------------------------------------------------------------------
+
+/// Drive a direct-shape (single / pairs / multi / basket) run over one already
+/// type-resolved wallet cell. Snapshots the baseline, seeds the book from *our*
+/// opening equity (account minus the external value — identical to plain equity
+/// when flat), and either drives the wallet in place (flat, the fast path) or
+/// moves it into an [`SleeveWallet`] for the run and back afterward
+/// (non-flat). `$strat` is the built strategy using the `$seed` the macro binds
+/// (and `py`, in scope, where the shape's `materialize` needs it).
+macro_rules! run_prepared {
+    ($cell:expr, $placeholder:expr, $snaps:expr, $seed:ident => $strat:expr) => {{
+        let mut guard = $cell.borrow_mut();
+        let baseline = external_baseline(&guard.inner);
+        let $seed = own_equity(&guard.inner, &baseline);
+        let mut strat = $strat;
+        if baseline.is_empty() {
+            let report = fugazi_core::backtest::run(&mut strat, &mut guard.inner, $snaps);
+            Ok(PyRunReport { inner: report })
+        } else {
+            let real = std::mem::replace(&mut guard.inner, $placeholder);
+            let mut offset = SleeveWallet::new(real, baseline);
+            let report = fugazi_core::backtest::run(&mut strat, &mut offset, $snaps);
+            guard.inner = offset.into_inner();
+            Ok(PyRunReport { inner: report })
+        }
+    }};
+}
+
+/// Dispatch a direct-shape run over a wallet that is a [`PaperWallet`](PyWallet)
+/// or an [`OkxWallet`](PyOkxWallet) (any other type is a `TypeError`), then hand
+/// off to [`run_prepared!`]. For the live wallet it first refreshes the account so
+/// `positions()`/`equity()` reflect the venue before the baseline is snapshotted.
+/// `$py` binds the GIL token (pass `_py` when the body doesn't need it).
+macro_rules! run_over_wallet {
+    ($wallet:expr, $py:ident, $snaps:expr, $seed:ident => $strat:expr) => {{
+        let wallet = $wallet;
+        let $py = wallet.py();
+        if let Ok(cell) = wallet.cast::<PyWallet>() {
+            run_prepared!(cell, PaperWallet::new(0.0), $snaps, $seed => $strat)
+        } else if let Ok(cell) = wallet.cast::<PyOkxWallet>() {
+            cell.borrow_mut()
+                .inner
+                .refresh_account()
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            run_prepared!(cell, OkxWallet::demo("", "", ""), $snaps, $seed => $strat)
+        } else {
+            Err(PyTypeError::new_err(
+                "wallet must be a PaperWallet or an OkxWallet",
+            ))
+        }
+    }};
+}
+
+// ---------------------------------------------------------------------------
 // Strategy layer: Wallet + Order + Size
 //
 // A strategy in Python is just code that, each bar, reads signals/indicators and
@@ -351,6 +415,233 @@ impl PyWallet {
     }
 }
 
+/// A live [`Wallet`] over OKX V5 perpetual swaps — the same order-flow surface as
+/// [`PaperWallet`](PyWallet), but routed to OKX's REST API instead of an in-memory
+/// book. Construct with [`OkxWallet.demo`](Self::demo) (the free demo-trading
+/// environment) or [`OkxWallet.mainnet`](Self::mainnet) (**real funds**), each
+/// taking the API key / secret / passphrase set when the key was created and an
+/// optional `td_mode` (`"cross"` — the default — or `"isolated"`).
+///
+/// Drive it exactly like the paper wallet: [`update`](Self::update) each bar marks
+/// price and returns fills, [`set_position`](Self::set_position) / [`set`](Self::set)
+/// / [`close`](Self::close) send market orders, and [`set_stop`](Self::set_stop) /
+/// [`set_take_profit`](Self::set_take_profit) / [`set_limit`](Self::set_limit) rest
+/// protective / entry legs. Submitting a market or resting order returns `None`
+/// (working) — the fill lands later, surfaced by a subsequent
+/// [`update`](Self::update) or by [`poll_fills`](Self::poll_fills). Reads
+/// ([`funds`](Self::funds) / [`equity`](Self::equity) / [`position`](Self::position))
+/// serve a cache refreshed each `update`; call [`refresh_account`](Self::refresh_account)
+/// for a one-off sync. A REST failure surfaces as a `ValueError` (with the detail
+/// also appended to [`errors`](Self::errors)).
+///
+/// It owns a private async runtime and blocks on each request, so it must be
+/// driven from synchronous Python. The higher-level `Strategy.run(...)` builders
+/// take a `PaperWallet`; an `OkxWallet` is driven manually, one bar at a time.
+#[pyclass(name = "OkxWallet")]
+pub(crate) struct PyOkxWallet {
+    pub(crate) inner: OkxWallet,
+}
+
+#[pymethods]
+impl PyOkxWallet {
+    /// A wallet against OKX **demo trading** (production host, requests carry the
+    /// simulated-trading header). Needs demo API credentials.
+    #[staticmethod]
+    #[pyo3(signature = (api_key, api_secret, passphrase, td_mode = None))]
+    pub(crate) fn demo(
+        api_key: String,
+        api_secret: String,
+        passphrase: String,
+        td_mode: Option<String>,
+    ) -> Self {
+        let mut inner = OkxWallet::demo(api_key, api_secret, passphrase);
+        if let Some(mode) = td_mode {
+            inner = inner.with_td_mode(mode);
+        }
+        PyOkxWallet { inner }
+    }
+
+    /// A wallet against OKX **production** (`www.okx.com`). This trades **real
+    /// funds** — supply live keys deliberately.
+    #[staticmethod]
+    #[pyo3(signature = (api_key, api_secret, passphrase, td_mode = None))]
+    pub(crate) fn mainnet(
+        api_key: String,
+        api_secret: String,
+        passphrase: String,
+        td_mode: Option<String>,
+    ) -> Self {
+        let mut inner = OkxWallet::mainnet(api_key, api_secret, passphrase);
+        if let Some(mode) = td_mode {
+            inner = inner.with_td_mode(mode);
+        }
+        PyOkxWallet { inner }
+    }
+
+    /// The available cash balance (the quote-currency `availBal`), from the cache.
+    #[getter]
+    pub(crate) fn funds(&self) -> f64 {
+        self.inner.funds().0
+    }
+
+    /// The signed position in `symbol` (positive long, negative short), in base
+    /// units, from the cache.
+    pub(crate) fn position(&self, symbol: &str) -> f64 {
+        self.inner.position(&symbol.to_string()).amount
+    }
+
+    /// The last price fed for `symbol` via `update`, or `None` if never fed.
+    pub(crate) fn price(&self, symbol: &str) -> Option<f64> {
+        self.inner.price(&symbol.to_string()).map(|p| p.0)
+    }
+
+    /// Mark-to-market account equity (`totalEq`), from the cache.
+    pub(crate) fn equity(&self) -> f64 {
+        self.inner.equity().0
+    }
+
+    /// Force an account-state refresh (balance + positions) now. Raises
+    /// `ValueError` on a REST failure. `update` calls this each bar; call it
+    /// directly for a one-off sync (e.g. right after construction).
+    pub(crate) fn refresh_account(&mut self) -> PyResult<()> {
+        self.inner
+            .refresh_account()
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// The live errors this wallet has recorded, in order — every REST failure
+    /// (the detail behind a raised `ValueError`, plus best-effort refresh /
+    /// fill-poll failures that have no return channel), as strings.
+    pub(crate) fn errors(&self) -> Vec<String> {
+        self.inner.errors().iter().map(|e| e.to_string()).collect()
+    }
+
+    /// Feed `symbol`'s current bar (whose `close` marks price) and return any fills
+    /// polled for it. Accepts a `Candle` or a bare price `float`. Refreshes the
+    /// account cache first.
+    pub(crate) fn update(&mut self, symbol: String, bar: &Bound<'_, PyAny>) -> PyResult<Vec<PyOrder>> {
+        let candle = if let Ok(candle) = bar.cast::<PyCandle>() {
+            candle.borrow().inner
+        } else {
+            let price: f64 = bar.extract()?;
+            Candle::new(price, price, price, price, 0.0)
+        };
+        Ok(self
+            .inner
+            .update(symbol, candle)
+            .into_iter()
+            .map(|inner| PyOrder { inner })
+            .collect())
+    }
+
+    /// Send a market order driving `symbol` to `target` signed base units. Returns
+    /// `None` (working — the fill surfaces from a later `update` / `poll_fills`).
+    pub(crate) fn set_position(&mut self, symbol: String, target: f64) -> PyResult<Option<PyOrder>> {
+        wrap_ack(self.inner.set_position(Units {
+            symbol,
+            amount: target,
+        }))
+    }
+
+    /// Send a market order targeting `side` `size` of `symbol`. Returns `None`.
+    pub(crate) fn set(
+        &mut self,
+        symbol: String,
+        side: &str,
+        size: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<PyOrder>> {
+        wrap_ack(
+            self.inner
+                .set(symbol, parse_side(side)?, coerce_size(size)?),
+        )
+    }
+
+    /// Send a market order flattening `symbol`. Returns `None`.
+    pub(crate) fn close(&mut self, symbol: String) -> PyResult<Option<PyOrder>> {
+        wrap_ack(self.inner.close(symbol))
+    }
+
+    /// Rest a `reduceOnly` stop-loss on `symbol` at `trigger`. Idempotent,
+    /// latest-wins per symbol; re-submit to trail. `size` (a number of units or a
+    /// `Size`) is how much of the position the leg takes off, defaulting to all of
+    /// it. Returns `None` (working until it triggers).
+    #[pyo3(signature = (symbol, trigger, size = None))]
+    pub(crate) fn set_stop(
+        &mut self,
+        symbol: String,
+        trigger: f64,
+        size: Option<PySize>,
+    ) -> PyResult<Option<PyOrder>> {
+        let size = size.map_or(Size::position_frac(1.0), |s| s.inner);
+        wrap_ack(self.inner.set_stop(symbol, Reference(trigger), size))
+    }
+
+    /// Rest a `reduceOnly` take-profit on `symbol` at `trigger` — the favourable
+    /// twin of `set_stop`, same reduce-only `size` semantics. Returns `None`.
+    #[pyo3(signature = (symbol, trigger, size = None))]
+    pub(crate) fn set_take_profit(
+        &mut self,
+        symbol: String,
+        trigger: f64,
+        size: Option<PySize>,
+    ) -> PyResult<Option<PyOrder>> {
+        let size = size.map_or(Size::position_frac(1.0), |s| s.inner);
+        wrap_ack(self.inner.set_take_profit(symbol, Reference(trigger), size))
+    }
+
+    /// Cancel both resting protective legs (stop and take-profit) on `symbol`.
+    pub(crate) fn cancel_protective(&mut self, symbol: String) -> PyResult<()> {
+        self.inner
+            .cancel_protective(&symbol)
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    /// Rest a limit order on `symbol`: drive the position to `side · size` once the
+    /// market trades through `limit`, filling at that price or better. Idempotent,
+    /// latest-wins per symbol. Returns `None` (working until it triggers).
+    pub(crate) fn set_limit(
+        &mut self,
+        symbol: String,
+        side: &str,
+        size: &Bound<'_, PyAny>,
+        limit: f64,
+    ) -> PyResult<Option<PyOrder>> {
+        wrap_ack(self.inner.set_limit(
+            symbol,
+            parse_side(side)?,
+            coerce_size(size)?,
+            Reference(limit),
+        ))
+    }
+
+    /// Cancel any resting limit order on `symbol`. A no-op when none rests.
+    pub(crate) fn cancel_limit(&mut self, symbol: String) -> PyResult<()> {
+        self.inner
+            .cancel_limit(&symbol)
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    /// Cancel a working order by its `id` (see `Order.id`). An unknown id is a
+    /// no-op.
+    pub(crate) fn cancel(&mut self, id: u64) -> PyResult<()> {
+        self.inner
+            .cancel(OrderId(id))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    /// Poll every traded symbol for fills booked out of band (not on a specific
+    /// `update`) and return them — a fill on a symbol that didn't tick this bar
+    /// still reaches the caller here.
+    pub(crate) fn poll_fills(&mut self) -> Vec<PyOrder> {
+        self.inner
+            .poll_fills()
+            .into_iter()
+            .map(|inner| PyOrder { inner })
+            .collect()
+    }
+}
+
+
 /// Map a wallet `Ack` to Python: the fill if it filled synchronously, `None` if it
 /// is merely working, or a `ValueError`.
 pub(crate) fn wrap_ack(result: Result<Ack<String>, WalletError>) -> PyResult<Option<PyOrder>> {
@@ -652,14 +943,20 @@ impl PyStrategy {
         Ok(s)
     }
 
-    /// Drive the strategy over `candles` against `wallet`, returning the
-    /// [`RunReport`](PyRunReport). `candles` is a DataFrame / dict of OHLCV
-    /// columns (same shape as `Indicator.feed`). The strategy's book is seeded
-    /// to the wallet's opening equity, so book-anchored sizing reads meaningful
-    /// numbers. The wallet is mutated in place (positions, blotter).
+    /// Drive the strategy over `candles` against `wallet` (a `PaperWallet` or an
+    /// `OkxWallet`), returning the [`RunReport`](PyRunReport). `candles` is a
+    /// DataFrame / dict of OHLCV columns (same shape as `Indicator.feed`). Passing
+    /// an `OkxWallet` drives the strategy **live**, one bar at a time. The book is
+    /// seeded to the wallet's opening equity, so book-anchored sizing reads
+    /// meaningful numbers. The wallet is mutated in place (positions, blotter).
+    ///
+    /// Whatever the wallet already holds at start is treated as the user's own,
+    /// externally-managed book: the strategy sizes against its own capital (cash +
+    /// only the positions it opens) and never disturbs the pre-existing ones. A
+    /// flat wallet is the common case and behaves exactly as before.
     pub(crate) fn run(
         &self,
-        mut wallet: PyRefMut<'_, PyWallet>,
+        wallet: &Bound<'_, PyAny>,
         candles: &Bound<'_, PyAny>,
     ) -> PyResult<PyRunReport> {
         let snaps: Vec<Snapshot<String>> = candles_from_frame(candles)?
@@ -667,10 +964,7 @@ impl PyStrategy {
             .map(|c| Snapshot::single(self.symbol.clone(), Atom::from(c)))
             .collect();
 
-        let seed = Wallet::equity(&wallet.inner).0;
-        let mut strat = self.materialize(seed);
-        let report = fugazi_core::backtest::run(&mut strat, &mut wallet.inner, snaps);
-        Ok(PyRunReport { inner: report })
+        run_over_wallet!(wallet, _py, snaps, seed => self.materialize(seed))
     }
 
     pub(crate) fn __repr__(&self) -> String {
@@ -879,18 +1173,18 @@ impl PyPairsStrategy {
     }
 
     /// Drive the pair over `snapshots` (a sequence of `Snapshot` or `dict`)
-    /// against `wallet`, returning the [`RunReport`](PyRunReport). The book is
-    /// seeded to the wallet's opening equity. The wallet is mutated in place.
+    /// against `wallet` (a `PaperWallet` or an `OkxWallet`), returning the
+    /// [`RunReport`](PyRunReport). The book is seeded to the wallet's opening
+    /// equity. The wallet is mutated in place. Any positions the wallet already
+    /// holds are left untouched and the pair sizes against its own capital (see
+    /// `Strategy.run`).
     pub(crate) fn run(
         &self,
-        mut wallet: PyRefMut<'_, PyWallet>,
+        wallet: &Bound<'_, PyAny>,
         snapshots: &Bound<'_, PyAny>,
     ) -> PyResult<PyRunReport> {
         let snaps = snapshots_from_sequence(snapshots)?;
-        let seed = Wallet::equity(&wallet.inner).0;
-        let mut strat = self.materialize(seed);
-        let report = fugazi_core::backtest::run(&mut strat, &mut wallet.inner, snaps);
-        Ok(PyRunReport { inner: report })
+        run_over_wallet!(wallet, _py, snaps, seed => self.materialize(seed))
     }
 
     pub(crate) fn __repr__(&self) -> String {
@@ -1052,19 +1346,18 @@ impl PyMultiAssetStrategy {
         s
     }
 
-    /// Drive the strategy over `snapshots` against `wallet`, returning the
-    /// [`RunReport`](PyRunReport). The book is seeded to the wallet's opening
-    /// equity. The wallet is mutated in place.
+    /// Drive the strategy over `snapshots` against `wallet` (a `PaperWallet` or
+    /// an `OkxWallet`), returning the [`RunReport`](PyRunReport). The book is
+    /// seeded to the wallet's opening equity. The wallet is mutated in place. Any
+    /// positions the wallet already holds are left untouched and sizing is against
+    /// our own capital (see `Strategy.run`).
     pub(crate) fn run(
         &self,
-        mut wallet: PyRefMut<'_, PyWallet>,
+        wallet: &Bound<'_, PyAny>,
         snapshots: &Bound<'_, PyAny>,
     ) -> PyResult<PyRunReport> {
         let snaps = snapshots_from_sequence(snapshots)?;
-        let seed = Wallet::equity(&wallet.inner).0;
-        let mut strat = self.materialize(wallet.py(), seed);
-        let report = fugazi_core::backtest::run(&mut strat, &mut wallet.inner, snaps);
-        Ok(PyRunReport { inner: report })
+        run_over_wallet!(wallet, py, snaps, seed => self.materialize(py, seed))
     }
 
     pub(crate) fn __repr__(&self) -> String {
@@ -1408,19 +1701,18 @@ impl PyBasketStrategy {
         s
     }
 
-    /// Drive the basket over `snapshots` against `wallet`, returning the
-    /// [`RunReport`](PyRunReport). The book is seeded to the wallet's opening
-    /// equity. The wallet is mutated in place.
+    /// Drive the basket over `snapshots` against `wallet` (a `PaperWallet` or an
+    /// `OkxWallet`), returning the [`RunReport`](PyRunReport). The book is seeded
+    /// to the wallet's opening equity. The wallet is mutated in place. Any
+    /// positions the wallet already holds are left untouched and sizing is against
+    /// our own capital (see `Strategy.run`).
     pub(crate) fn run(
         &self,
-        mut wallet: PyRefMut<'_, PyWallet>,
+        wallet: &Bound<'_, PyAny>,
         snapshots: &Bound<'_, PyAny>,
     ) -> PyResult<PyRunReport> {
         let snaps = snapshots_from_sequence(snapshots)?;
-        let seed = Wallet::equity(&wallet.inner).0;
-        let mut strat = self.materialize(wallet.py(), seed);
-        let report = fugazi_core::backtest::run(&mut strat, &mut wallet.inner, snaps);
-        Ok(PyRunReport { inner: report })
+        run_over_wallet!(wallet, py, snaps, seed => self.materialize(py, seed))
     }
 
     pub(crate) fn __repr__(&self) -> String {
@@ -1988,23 +2280,29 @@ impl PyPortfolio {
         Ok(next)
     }
 
-    /// Drive the portfolio over `snapshots` and return the aggregate report.
+    /// Drive the portfolio over `snapshots` against `wallet` (a `PaperWallet` or
+    /// an `OkxWallet`), returning the aggregate report.
     ///
-    /// `wallet` supplies the **cash seed** only. Unlike the other shapes, a
-    /// portfolio trades its own account (that is what lets it net children's
-    /// orders together), so the wallet passed here is not traded into and any
-    /// costs installed on it do not apply — mirroring `load_spec(...).run(...)`
-    /// for a portfolio document.
+    /// A portfolio is an ordinary strategy that trades the wallet it is handed,
+    /// exactly like the other four shapes: it nets its children's intents onto
+    /// that one account. The children trade notional slices of it (tracked by
+    /// per-child `Ledger`s), fills settle on it, and it is handed back **mutated**
+    /// — positions, cash, and blotter applied — so the caller's Python wallet
+    /// reflects what happened. Its opening equity seeds the per-child cash split.
+    /// Passing an `OkxWallet` therefore trades the whole netted portfolio **live**.
+    /// Costs pre-installed on the wallet apply (it *is* the account).
+    ///
+    /// Whatever the account already holds at start is treated as the user's own,
+    /// externally-managed book (see `Strategy.run`): the children size against our
+    /// own equity and net only over our own positions, leaving the pre-existing
+    /// ones untouched. A flat account behaves exactly as before.
     pub(crate) fn run(
         &self,
-        wallet: PyRef<'_, PyWallet>,
+        wallet: &Bound<'_, PyAny>,
         snapshots: &Bound<'_, PyAny>,
     ) -> PyResult<PyRunReport> {
         let snaps = snapshots_from_sequence(snapshots)?;
-        let seed = Wallet::equity(&wallet.inner).0;
-        let mut portfolio = self.materialize(wallet.py(), seed)?;
-        let report = portfolio.run(snaps);
-        Ok(PyRunReport { inner: report })
+        run_over_wallet!(wallet, py, snaps, seed => self.materialize(py, seed)?)
     }
 
     pub(crate) fn __repr__(&self) -> String {

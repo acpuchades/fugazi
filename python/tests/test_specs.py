@@ -477,6 +477,33 @@ def test_portfolio_builder_is_immutable():
     assert "a" in repr(once)
 
 
+def test_portfolio_run_adopts_and_mutates_the_wallet():
+    """The passed wallet IS the portfolio's account: it is traded and handed back
+    mutated, so the caller can inspect the resulting position/equity/blotter."""
+    snaps = _snaps_multi({"A": [100, 102, 104, 106, 108]})
+    a_on, a_off = _always_and_never("A")
+
+    w = ta.PaperWallet(10_000.0)
+    report = (
+        ta.Portfolio()
+        .add("hold_a", ta.Strategy("A").long_on(a_on, a_off))
+        .run(w, snaps)
+    )
+
+    # A buy-and-hold child took a long position on the one account, and the
+    # wallet's own equity now agrees with the aggregate curve — proof it was
+    # driven, not merely read for a seed.
+    assert w.position("A") > 0.0
+    assert w.orders(), "the adopted wallet should carry the run's blotter"
+    assert w.equity() == pytest.approx(report.equity_curve[-1])
+
+
+def test_portfolio_run_rejects_a_non_wallet():
+    snaps = _snaps_multi({"A": [100, 101]})
+    with pytest.raises(TypeError, match="PaperWallet or an OkxWallet"):
+        ta.Portfolio().add("a", ta.Strategy("A")).run("not a wallet", snaps)
+
+
 def test_portfolio_builder_rejects_bad_composition():
     with pytest.raises(ValueError, match="cannot be a child of a Portfolio"):
         ta.Portfolio().add("nested", ta.Portfolio())

@@ -89,7 +89,7 @@ pub use indicators::BoolIndicatorExt;
 pub use live::OkxWallet;
 pub use market::{Atom, Candle, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder};
 pub use metrics::{DrawdownSegment, Trade};
-pub use portfolio::{Portfolio, PortfolioBuilder, PortfolioWallet};
+pub use portfolio::{Portfolio, PortfolioBuilder};
 pub use signal::Signal;
 pub use snapshot::{Selector, Snapshot};
 pub use strategy::Strategy;
