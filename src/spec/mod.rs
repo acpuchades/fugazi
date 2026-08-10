@@ -127,7 +127,7 @@ pub use preset::{StrategyPreset, StrategyRef};
 #[allow(unused_imports)]
 pub use signal::SignalSpec;
 #[allow(unused_imports)]
-pub use signal::StrOperand;
+pub use expr::StrOperand;
 pub use strategy::SingleStrategySpec;
 #[allow(unused_imports)]
 pub use template::SpecTemplate;

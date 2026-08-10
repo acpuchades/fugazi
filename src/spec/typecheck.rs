@@ -71,6 +71,11 @@ impl Expect {
 const REAL: Expect = Expect::Only(DynType::Real);
 const CANDLE: Expect = Expect::Only(DynType::Candle);
 const ATOM: Expect = Expect::Only(DynType::Atom);
+const BOOL: Expect = Expect::Only(DynType::Bool);
+/// `!changed` accepts either a Bool inner (toggle) or a Real inner (any-change).
+const BOOL_OR_REAL: Expect = Expect::OneOf(&[DynType::Bool, DynType::Real]);
+/// A string comparison's `lhs` reads a `Str` column.
+const STR: Expect = Expect::Only(DynType::Str);
 /// `!match`'s `on:` — numeric or string dispatch (the two are not mixable
 /// within one `!match`, but that is a build-time check against the cases).
 const REAL_OR_STR: Expect = Expect::OneOf(&[DynType::Real, DynType::Str]);
@@ -100,6 +105,34 @@ pub fn output_type(spec: &NodeSpec) -> Option<DynType> {
         // --- passthroughs: exactly as known as what they wrap ---
         Unstable { source } => output_type(source),
         Resample { inner, .. } => output_type(inner),
+
+        // --- absorbed boolean signals: all produce Bool ---
+        Gt { .. }
+        | Lt { .. }
+        | Ge { .. }
+        | Le { .. }
+        | Eq { .. }
+        | Ne { .. }
+        | Above { .. }
+        | Below { .. }
+        | CrossesAbove { .. }
+        | CrossesBelow { .. }
+        | And { .. }
+        | Or { .. }
+        | Xor { .. }
+        | All(_)
+        | Any(_)
+        | Not(_)
+        | Changed(_)
+        | BecameTrue(_)
+        | BecameFalse(_)
+        | StrEq { .. }
+        | StrNe { .. }
+        | Never
+        | Every(_)
+        | IsWeekday
+        | IsWeekend
+        | HasColumn { .. } => Some(DynType::Bool),
 
         // --- everything else is Real ---
         Close { .. }
@@ -358,6 +391,30 @@ fn children(spec: &NodeSpec) -> Vec<(&'static str, Expect, &NodeSpec)> {
         // Passthrough: its own child carries whatever type; nothing to demand.
         Unstable { source } => vec![("source", Expect::OneOf(&[]), source)],
 
+        // --- absorbed boolean signals ---
+        // `!eq` / `!ne` dispatch on the lhs and admit Real or Str on both
+        // sides (a Real-vs-Str *pairing* is still rejected at build).
+        Eq { lhs, rhs, .. } | Ne { lhs, rhs, .. } => {
+            vec![("lhs", REAL_OR_STR, lhs), ("rhs", REAL_OR_STR, rhs)]
+        }
+        Gt { lhs, rhs, .. }
+        | Lt { lhs, rhs, .. }
+        | Ge { lhs, rhs, .. }
+        | Le { lhs, rhs, .. }
+        | CrossesAbove { lhs, rhs }
+        | CrossesBelow { lhs, rhs } => vec![("lhs", REAL, lhs), ("rhs", REAL, rhs)],
+        Above { source, .. } | Below { source, .. } => vec![("source", REAL, source)],
+        And { lhs, rhs } | Or { lhs, rhs } | Xor { lhs, rhs } => {
+            vec![("lhs", BOOL, lhs), ("rhs", BOOL, rhs)]
+        }
+        All(specs) | Any(specs) => specs.iter().map(|s| ("item", BOOL, s)).collect(),
+        Not(inner) | BecameTrue(inner) | BecameFalse(inner) => vec![("source", BOOL, inner)],
+        // Polymorphic: a Bool inner (toggle) or a Real inner (any-change).
+        Changed(inner) => vec![("source", BOOL_OR_REAL, inner)],
+        // The string comparisons read a `Str` column on the left; `rhs` is a
+        // `StrOperand`, not a `NodeSpec`.
+        StrEq { lhs, .. } | StrNe { lhs, .. } => vec![("lhs", STR, lhs)],
+
         // The book-anchored recipes take a `source:` that is a *book selector*
         // (`!strategy_book` / `!portfolio_book`), not a value — excluded above
         // from `output_type` for the same reason.
@@ -383,7 +440,13 @@ fn children(spec: &NodeSpec) -> Vec<(&'static str, Expect, &NodeSpec)> {
         | Sortino { .. }
         | Volatility { .. }
         | MaxDrawdown { .. }
-        | Calmar { .. } => Vec::new(),
+        | Calmar { .. }
+        // Absorbed leaf signals with no typed expression child.
+        | Never
+        | Every(_)
+        | IsWeekday
+        | IsWeekend
+        | HasColumn { .. } => Vec::new(),
     }
 }
 
@@ -657,6 +720,15 @@ mod tests {
             "!drawdown",
             "!equity",
             "!entry",
+            // absorbed boolean signals
+            "!gt { lhs: close, rhs: close }",
+            "!above { source: close, level: 1.0 }",
+            "!crosses_above { lhs: close, rhs: close }",
+            "!and { lhs: !value true, rhs: !value true }",
+            "!str_eq { lhs: !value bull, rhs: bear }",
+            "!changed { source: close }",
+            "!every 5",
+            "!is_weekday",
         ]
     }
 

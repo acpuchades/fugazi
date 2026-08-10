@@ -10,11 +10,11 @@ use serde::Deserialize;
 use crate::indicators::compare;
 use crate::indicators::logic::ValueBool;
 use crate::indicators::{
-    Book, DEFAULT_EPSILON, Every, GetBool, IsWeekday, IsWeekend, Position, ValueStr,
+    Book, DEFAULT_EPSILON, Every, GetBool, IsWeekday, IsWeekend, Position,
 };
 use crate::prelude::*;
 
-use super::expr::{NodeSpec, default_source};
+use super::expr::{NodeSpec, StrOperand, default_source};
 use crate::spec::dyn_indicator::{self, AsBool, AsReal, AsStr, DynIndicator, DynType};
 
 // The implicit atom roots are shared with the expression layer — one
@@ -22,56 +22,6 @@ use crate::spec::dyn_indicator::{self, AsBool, AsReal, AsStr, DynIndicator, DynT
 // `super::expr::pick_root` for the blessed-series rule and
 // `super::expr::pick_any_root` for the symbol-agnostic calendar root.
 use super::expr::{pick_any_root, pick_root};
-
-/// The right-hand operand of `!str_eq` / `!str_ne`.
-///
-/// A bare YAML string is the literal to match (`rhs: bull`) — the common case,
-/// and the only shape the tag used to take. Anything else deserializes as an
-/// [`NodeSpec`], so both sides of the comparison are symmetric: the same
-/// constant written the long way (`rhs: !value bull`) or a second `Str` column
-/// read (`rhs: !get { key: prev_regime }`) both build to a `Str`-output source.
-///
-/// Deserializes through a [`serde_norway::Value`] bridge rather than
-/// `#[serde(untagged)]` because [`NodeSpec`] carries its own `TryFrom`
-/// normalisation (bare word / tag / single-key map → tagged), which serde's
-/// untagged content buffering would bypass.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(try_from = "serde_norway::Value")]
-pub enum StrOperand {
-    Literal(String),
-    Expr(Box<NodeSpec>),
-}
-
-impl TryFrom<serde_norway::Value> for StrOperand {
-    type Error = String;
-
-    fn try_from(v: serde_norway::Value) -> Result<Self, Self::Error> {
-        match v {
-            serde_norway::Value::String(s) => Ok(StrOperand::Literal(s)),
-            other => NodeSpec::try_from(other).map(|e| StrOperand::Expr(Box::new(e))),
-        }
-    }
-}
-
-impl StrOperand {
-    /// Build as a `Str`-output source. A literal materialises the same
-    /// [`ValueStr`] constant the `!value <string>` expression form builds.
-    fn try_build(
-        &self,
-        anchor: &Position,
-        book: &Book,
-        portfolio_book: Option<&Book>,
-        schema: &Arc<Schema>,
-        root: Option<&Selector<String>>,
-    ) -> Result<Box<dyn DynIndicator>, String> {
-        match self {
-            StrOperand::Literal(s) => Ok(dyn_indicator::wrap(ValueStr::<
-                crate::types::Snapshot<String>,
-            >::new(s.as_str()))),
-            StrOperand::Expr(e) => e.try_build(anchor, book, portfolio_book, schema, root),
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Boolean signals

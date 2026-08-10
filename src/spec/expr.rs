@@ -34,7 +34,8 @@ use crate::types::Snapshot;
 
 use super::signal::SignalSpec;
 use super::trailing::{self, AnyStrategyRef, TrailingMetric};
-use crate::spec::dyn_indicator::{self, AsAtom, AsBool, AsCandle, AsReal, AsStr, DynIndicator};
+use crate::indicators::compare;
+use crate::spec::dyn_indicator::{self, AsAtom, AsBool, AsCandle, AsReal, AsStr, DynIndicator, DynType};
 
 use crate::{Frequency, Selector};
 use std::str::FromStr;
@@ -111,6 +112,51 @@ pub(super) fn default_log_base() -> Real {
 /// Default annualized risk-free rate for `!sharpe` / `!sortino`: `0.0`.
 pub(super) fn default_risk_free_rate() -> Real {
     0.0
+}
+
+/// The right-hand operand of `!str_eq` / `!str_ne`.
+///
+/// A bare YAML string is the literal to match (`rhs: bull`) — the common case.
+/// Anything else deserializes as a [`NodeSpec`], so both sides of the
+/// comparison are symmetric: the same constant written the long way
+/// (`rhs: !value bull`) or a second `Str` column read (`rhs: !get { key: prev }`)
+/// both build to a `Str`-output source.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(try_from = "serde_norway::Value")]
+pub enum StrOperand {
+    Literal(String),
+    Expr(Box<NodeSpec>),
+}
+
+impl TryFrom<serde_norway::Value> for StrOperand {
+    type Error = String;
+
+    fn try_from(v: serde_norway::Value) -> Result<Self, Self::Error> {
+        match v {
+            serde_norway::Value::String(s) => Ok(StrOperand::Literal(s)),
+            other => NodeSpec::try_from(other).map(|e| StrOperand::Expr(Box::new(e))),
+        }
+    }
+}
+
+impl StrOperand {
+    /// Build as a `Str`-output source. A literal materialises the same
+    /// [`ValueStr`] constant the `!value <string>` expression form builds.
+    pub(super) fn try_build(
+        &self,
+        anchor: &Position,
+        book: &Book,
+        portfolio_book: Option<&Book>,
+        schema: &Arc<Schema>,
+        root: Option<&Selector<String>>,
+    ) -> Result<Box<dyn DynIndicator>, String> {
+        match self {
+            StrOperand::Literal(s) => Ok(dyn_indicator::wrap(
+                ValueStr::<crate::types::Snapshot<String>>::new(s.as_str()),
+            )),
+            StrOperand::Expr(e) => e.try_build(anchor, book, portfolio_book, schema, root),
+        }
+    }
 }
 
 /// The payload of [`NodeSpec::Value`] — a constant leaf: numeric, string,
@@ -1018,6 +1064,109 @@ pub enum NodeSpec {
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
+
+    // --- boolean signals (absorbed from the former SignalSpec; every one
+    // produces `Bool`). Comparisons carry an optional absolute `epsilon`
+    // (default `DEFAULT_EPSILON`).
+    Gt {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+        epsilon: Option<Real>,
+    },
+    Lt {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+        epsilon: Option<Real>,
+    },
+    Ge {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+        epsilon: Option<Real>,
+    },
+    Le {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+        epsilon: Option<Real>,
+    },
+    /// Polymorphic equality — Real or Str, dispatched on the lhs at build.
+    Eq {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+        epsilon: Option<Real>,
+    },
+    Ne {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+        epsilon: Option<Real>,
+    },
+    /// `source > level` against a constant.
+    Above {
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+        level: Real,
+    },
+    /// `source < level` against a constant.
+    Below {
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+        level: Real,
+    },
+    CrossesAbove {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+    },
+    CrossesBelow {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+    },
+    And {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+    },
+    Or {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+    },
+    Xor {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+    },
+    /// AND-fold of a list (empty ⇒ constant `true`).
+    All(Vec<NodeSpec>),
+    /// OR-fold of a list (empty ⇒ constant `false`).
+    Any(Vec<NodeSpec>),
+    Not(Box<NodeSpec>),
+    /// Toggle detector — fires on either edge. Dispatches on the child's
+    /// output type at build: a Bool inner is a rising-or-falling toggle, a
+    /// Real inner fires on any value change. Subsumes the former
+    /// `Changed` / `ChangedReal` split of the signal layer.
+    Changed(Box<NodeSpec>),
+    /// Rising-edge detector for a Bool inner (`false → true`).
+    BecameTrue(Box<NodeSpec>),
+    /// Falling-edge detector (`true → false`).
+    BecameFalse(Box<NodeSpec>),
+    /// `lhs == rhs` on two `Str`-typed operands.
+    StrEq {
+        lhs: Box<NodeSpec>,
+        rhs: StrOperand,
+    },
+    /// `lhs != rhs` on two `Str`-typed operands.
+    StrNe {
+        lhs: Box<NodeSpec>,
+        rhs: StrOperand,
+    },
+    /// Sugar for `!value false` — reads better on a `rebalance_on:` field
+    /// where the intent is "never".
+    Never,
+    /// A periodic pulse — [`Every(N)`](crate::indicators::Every) with a
+    /// *delayed* first fire on bar `N-1` (0-indexed), then every `N` bars.
+    Every(usize),
+    /// True Monday through Friday; `None` when `atom.time` is absent.
+    IsWeekday,
+    /// True Saturday/Sunday; `None` when `atom.time` is absent.
+    IsWeekend,
+    /// Schema-level check: `true` if the overlay column `name` exists.
+    HasColumn { name: String },
 }
 
 // Mirror enum: identical shape as NodeSpec but with derived Deserialize —
@@ -1805,6 +1954,90 @@ enum NodeSpecRaw {
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
+
+    // --- boolean signals (mirror of the NodeSpec additions above) ---
+    Gt {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+        epsilon: Option<Real>,
+    },
+    Lt {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+        epsilon: Option<Real>,
+    },
+    Ge {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+        epsilon: Option<Real>,
+    },
+    Le {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+        epsilon: Option<Real>,
+    },
+    Eq {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+        epsilon: Option<Real>,
+    },
+    Ne {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+        epsilon: Option<Real>,
+    },
+    Above {
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+        level: Real,
+    },
+    Below {
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+        level: Real,
+    },
+    CrossesAbove {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+    },
+    CrossesBelow {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+    },
+    And {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+    },
+    Or {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+    },
+    Xor {
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
+    },
+    All(Vec<NodeSpec>),
+    Any(Vec<NodeSpec>),
+    Not(Box<NodeSpec>),
+    // Constructed by the edge dispatch in `parse_unchecked`, never reached via
+    // the derived deserialize — present so the variant is enumerated in
+    // `known_expr_tags` and covered by `From`.
+    Changed(Box<NodeSpec>),
+    BecameTrue(Box<NodeSpec>),
+    BecameFalse(Box<NodeSpec>),
+    StrEq {
+        lhs: Box<NodeSpec>,
+        rhs: StrOperand,
+    },
+    StrNe {
+        lhs: Box<NodeSpec>,
+        rhs: StrOperand,
+    },
+    Never,
+    Every(usize),
+    IsWeekday,
+    IsWeekend,
+    HasColumn { name: String },
 }
 
 impl From<NodeSpecRaw> for NodeSpec {
@@ -1962,6 +2195,32 @@ impl From<NodeSpecRaw> for NodeSpec {
             NodeSpecRaw::UnixSeconds { source } => NodeSpec::UnixSeconds { source },
             NodeSpecRaw::UnixMillis { source } => NodeSpec::UnixMillis { source },
             NodeSpecRaw::Time { source } => NodeSpec::Time { source },
+            NodeSpecRaw::Gt { lhs, rhs, epsilon } => NodeSpec::Gt { lhs, rhs, epsilon },
+            NodeSpecRaw::Lt { lhs, rhs, epsilon } => NodeSpec::Lt { lhs, rhs, epsilon },
+            NodeSpecRaw::Ge { lhs, rhs, epsilon } => NodeSpec::Ge { lhs, rhs, epsilon },
+            NodeSpecRaw::Le { lhs, rhs, epsilon } => NodeSpec::Le { lhs, rhs, epsilon },
+            NodeSpecRaw::Eq { lhs, rhs, epsilon } => NodeSpec::Eq { lhs, rhs, epsilon },
+            NodeSpecRaw::Ne { lhs, rhs, epsilon } => NodeSpec::Ne { lhs, rhs, epsilon },
+            NodeSpecRaw::Above { source, level } => NodeSpec::Above { source, level },
+            NodeSpecRaw::Below { source, level } => NodeSpec::Below { source, level },
+            NodeSpecRaw::CrossesAbove { lhs, rhs } => NodeSpec::CrossesAbove { lhs, rhs },
+            NodeSpecRaw::CrossesBelow { lhs, rhs } => NodeSpec::CrossesBelow { lhs, rhs },
+            NodeSpecRaw::And { lhs, rhs } => NodeSpec::And { lhs, rhs },
+            NodeSpecRaw::Or { lhs, rhs } => NodeSpec::Or { lhs, rhs },
+            NodeSpecRaw::Xor { lhs, rhs } => NodeSpec::Xor { lhs, rhs },
+            NodeSpecRaw::All(v) => NodeSpec::All(v),
+            NodeSpecRaw::Any(v) => NodeSpec::Any(v),
+            NodeSpecRaw::Not(inner) => NodeSpec::Not(inner),
+            NodeSpecRaw::Changed(inner) => NodeSpec::Changed(inner),
+            NodeSpecRaw::BecameTrue(inner) => NodeSpec::BecameTrue(inner),
+            NodeSpecRaw::BecameFalse(inner) => NodeSpec::BecameFalse(inner),
+            NodeSpecRaw::StrEq { lhs, rhs } => NodeSpec::StrEq { lhs, rhs },
+            NodeSpecRaw::StrNe { lhs, rhs } => NodeSpec::StrNe { lhs, rhs },
+            NodeSpecRaw::Never => NodeSpec::Never,
+            NodeSpecRaw::Every(n) => NodeSpec::Every(n),
+            NodeSpecRaw::IsWeekday => NodeSpec::IsWeekday,
+            NodeSpecRaw::IsWeekend => NodeSpec::IsWeekend,
+            NodeSpecRaw::HasColumn { name } => NodeSpec::HasColumn { name },
         }
     }
 }
@@ -2045,6 +2304,19 @@ impl NodeSpec {
             "trough",
             "strategy_book",
             "portfolio_book",
+            // absorbed boolean-signal unit variants
+            "never",
+            "is_weekday",
+            "is_weekend",
+            // wall-clock cadence sugar (rewritten to `!changed { source:
+            // !<accessor> }` before the raw deserialize; unit tags so a bare
+            // `daily` stays `Null` for the rewrite to pick up).
+            "hourly",
+            "daily",
+            "weekly",
+            "monthly",
+            "quarterly",
+            "annually",
         ];
 
         let promote_null_for = |tag: &str, v: serde_norway::Value| {
@@ -2118,6 +2390,16 @@ impl NodeSpec {
                     value: serde_norway::Value::Number(n),
                 }))
             }
+            // Bare bool literal — auto-wrap as `!value true|false`. Bools are
+            // never leaf names, so this is unambiguous: `enter: true` means the
+            // constant-true signal. Subsumes the former signal-layer `!value
+            // <bool>` / `!never` boilerplate.
+            serde_norway::Value::Bool(b) => {
+                serde_norway::Value::Tagged(Box::new(TaggedValue {
+                    tag: Tag::new("value"),
+                    value: serde_norway::Value::Bool(b),
+                }))
+            }
             // Bare list of numbers — auto-wrap as `!value [...]`. Only
             // meaningful inside a portfolio weight-share template
             // (`weights: [0.4, 0.6]` for the per-child fixed-weights
@@ -2143,6 +2425,16 @@ impl NodeSpec {
         // it here means there's one primitive (`!value`) instead of
         // two variants doing the same thing.
         let normalised = rewrite_sugar_tags(normalised)?;
+        // Wall-clock cadence sugar (`!daily` → `!changed { source: !day }`),
+        // then the wrapper dispatch: edge detectors (`!changed`,
+        // `!became_true`, `!became_false`) and `!unstable`'s bare-inner form
+        // are constructed directly from their extracted inner, because that
+        // inner is a bare tagged node rather than a `{ field: ... }` map the
+        // derived Raw parse expects.
+        let normalised = rewrite_cadence_sugar(normalised);
+        if let Some(rewritten) = try_dispatch_wrappers(&normalised)? {
+            return Ok(rewritten);
+        }
         // The tag this node parses as, for the error breadcrumb below. Known
         // here even when the typed parse fails, which is exactly when it is
         // needed.
@@ -2213,6 +2505,164 @@ fn rewrite_sugar_tags(v: serde_norway::Value) -> Result<serde_norway::Value, Str
         })));
     }
     Ok(v)
+}
+
+/// Rewrite the six wall-clock cadence sugar tags (`!hourly`, `!daily`,
+/// `!weekly`, `!monthly`, `!quarterly`, `!annually`) to
+/// `!changed { source: !<calendar_accessor> }` before the raw deserialize
+/// runs. Kept in the parse layer so downstream debug prints show the
+/// desugared form.
+fn rewrite_cadence_sugar(v: serde_norway::Value) -> serde_norway::Value {
+    use serde_norway::value::{Tag, TaggedValue};
+    let name = match &v {
+        serde_norway::Value::Tagged(tv) => {
+            let tag = tv.tag.to_string();
+            tag.strip_prefix('!').unwrap_or(&tag).to_string()
+        }
+        _ => return v,
+    };
+    let accessor_tag = match name.as_str() {
+        "hourly" => "hour",
+        "daily" => "day",
+        "weekly" => "week_of_year",
+        "monthly" => "month",
+        "quarterly" => "quarter",
+        "annually" => "year",
+        _ => return v,
+    };
+    let accessor_val = serde_norway::Value::Tagged(Box::new(TaggedValue {
+        tag: Tag::new(accessor_tag),
+        value: serde_norway::Value::Mapping(serde_norway::Mapping::new()),
+    }));
+    let mut inner_map = serde_norway::Mapping::new();
+    inner_map.insert(
+        serde_norway::Value::String("source".to_string()),
+        accessor_val,
+    );
+    serde_norway::Value::Tagged(Box::new(TaggedValue {
+        tag: Tag::new("changed"),
+        value: serde_norway::Value::Mapping(inner_map),
+    }))
+}
+
+/// Extract the inner payload of a unary wrapper tag, accepting both the bare
+/// form (`!changed !gt { ... }`) and the `{ source: <inner> }` mapping form
+/// (`!changed { source: !month }`). `None` when the outer tag doesn't match
+/// `wanted`.
+fn extract_edge_inner(v: &serde_norway::Value, wanted: &str) -> Option<serde_norway::Value> {
+    let inner_payload = match v {
+        serde_norway::Value::Tagged(tv)
+            if tv.tag.to_string().trim_start_matches('!') == wanted =>
+        {
+            &tv.value
+        }
+        _ => return None,
+    };
+    match inner_payload {
+        serde_norway::Value::Mapping(m) if m.len() == 1 => match m.iter().next() {
+            Some((serde_norway::Value::String(k), source)) if k == "source" => Some(source.clone()),
+            _ => Some(inner_payload.clone()),
+        },
+        _ => Some(inner_payload.clone()),
+    }
+}
+
+/// Dispatch the wrapper tags whose inner is a bare tagged node: `!changed`,
+/// `!became_true`, `!became_false`, and `!unstable`'s bare form. Returns
+/// `Ok(Some(spec))` on match, `Ok(None)` otherwise, `Err` when the inner
+/// fails to parse.
+///
+/// The Real-vs-Bool decision for `!changed` now happens at *build* time
+/// (dispatch on the inner's `output_type`), so the inner is parsed once as a
+/// general [`NodeSpec`] with no parse-time fallback dance.
+fn try_dispatch_wrappers(v: &serde_norway::Value) -> Result<Option<NodeSpec>, String> {
+    if let Some(inner) = extract_edge_inner(v, "changed") {
+        return Ok(Some(NodeSpec::Changed(Box::new(NodeSpec::try_from(inner)?))));
+    }
+    if let Some(inner) = extract_edge_inner(v, "became_true") {
+        return Ok(Some(NodeSpec::BecameTrue(Box::new(NodeSpec::try_from(
+            inner,
+        )?))));
+    }
+    if let Some(inner) = extract_edge_inner(v, "became_false") {
+        return Ok(Some(NodeSpec::BecameFalse(Box::new(NodeSpec::try_from(
+            inner,
+        )?))));
+    }
+    // `!unstable`: only intercept the bare-inner forms (a tagged node or a
+    // bare word). The `{ source: X }` mapping form and any mis-spelled field
+    // (`{ signal: X }`) fall through to the derived Raw parse, which handles
+    // `source` and rejects the unknown field cleanly.
+    if let serde_norway::Value::Tagged(tv) = v {
+        let name = tv.tag.to_string();
+        let name = name.strip_prefix('!').unwrap_or(&name);
+        if name == "unstable"
+            && matches!(
+                tv.value,
+                serde_norway::Value::Tagged(_) | serde_norway::Value::String(_)
+            )
+        {
+            let inner = NodeSpec::try_from(tv.value.clone())?;
+            return Ok(Some(NodeSpec::Unstable {
+                source: Box::new(inner),
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// Resolve an optional tolerance to its concrete value.
+fn eps(epsilon: &Option<Real>) -> Real {
+    epsilon.unwrap_or(crate::indicators::DEFAULT_EPSILON)
+}
+
+/// Build the polymorphic `!eq` / `!ne` — the Real-or-Str dispatcher. Inspects
+/// `lhs`'s built output type and threads it into the matching [`compare`]
+/// primitive. `epsilon` is only meaningful on the `Real` path (string
+/// equality is exact). `negate = false` builds `!eq`; `true` builds `!ne`.
+#[allow(clippy::too_many_arguments)]
+fn build_polymorphic_eq(
+    lhs: &NodeSpec,
+    rhs: &NodeSpec,
+    epsilon: Option<Real>,
+    negate: bool,
+    anchor: &Position,
+    book: &Book,
+    portfolio_book: Option<&Book>,
+    schema: &Arc<Schema>,
+    root: Option<&Selector<String>>,
+) -> Result<Box<dyn DynIndicator>, String> {
+    let lhs_built = lhs.try_build(anchor, book, portfolio_book, schema, root)?;
+    Ok(match lhs_built.output_type() {
+        DynType::Real => {
+            let l = AsReal::new(lhs_built);
+            let r = AsReal::try_new(rhs.try_build(anchor, book, portfolio_book, schema, root)?)
+                .map_err(|e| trail(rhs, e))?;
+            let e = eps(&epsilon);
+            if negate {
+                dyn_indicator::wrap(compare::Ne::with_epsilon(l, r, e))
+            } else {
+                dyn_indicator::wrap(compare::Eq::with_epsilon(l, r, e))
+            }
+        }
+        DynType::Str => {
+            let l = AsStr::new(lhs_built);
+            let r = AsStr::try_new(rhs.try_build(anchor, book, portfolio_book, schema, root)?)
+                .map_err(|e| trail(rhs, e))?;
+            if negate {
+                dyn_indicator::wrap(compare::StrNe::new(l, r))
+            } else {
+                dyn_indicator::wrap(compare::StrEq::new(l, r))
+            }
+        }
+        other => {
+            return Err(format!(
+                "lhs must produce Real or Str, got {other} — Bool / Candle / \
+                 Atom / Snapshot / Time outputs have no defined equality \
+                 semantics here"
+            ));
+        }
+    })
 }
 
 /// Resolve an optional cross-asset `source` spec into a concrete
@@ -2502,6 +2952,22 @@ impl NodeSpec {
         let candle = |s: &NodeSpec| -> Result<AsCandle, String> {
             let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
             AsCandle::try_new(built).map_err(|e| trail(s, e))
+        };
+        // Boolean-signal shorthands, for the absorbed signal variants.
+        let boolean = |s: &NodeSpec| -> Result<AsBool, String> {
+            let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
+            AsBool::try_new(built).map_err(|e| trail(s, e))
+        };
+        let str_view = |s: &NodeSpec| -> Result<AsStr, String> {
+            let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
+            AsStr::try_new(built).map_err(|e| trail(s, e))
+        };
+        let str_operand = |s: &StrOperand| -> Result<AsStr, String> {
+            let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
+            AsStr::try_new(built).map_err(|e| match s {
+                StrOperand::Expr(e2) => trail(e2, e),
+                StrOperand::Literal(_) => e,
+            })
         };
         // The `Pick`-shaped `source:` field on every atom-input leaf.
         let atom_src = |source: Option<&Box<NodeSpec>>| {
@@ -3081,6 +3547,105 @@ impl NodeSpec {
             Time { source } => {
                 let s = atom_src_any(source.as_ref())?;
                 dyn_indicator::wrap(crate::indicators::CurrentTime::of(s))
+            }
+
+            // --- absorbed boolean signals ---
+            Gt { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Gt::with_epsilon(
+                real(lhs)?,
+                real(rhs)?,
+                eps(epsilon),
+            )),
+            Lt { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Lt::with_epsilon(
+                real(lhs)?,
+                real(rhs)?,
+                eps(epsilon),
+            )),
+            Ge { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Ge::with_epsilon(
+                real(lhs)?,
+                real(rhs)?,
+                eps(epsilon),
+            )),
+            Le { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Le::with_epsilon(
+                real(lhs)?,
+                real(rhs)?,
+                eps(epsilon),
+            )),
+            Eq { lhs, rhs, epsilon } => build_polymorphic_eq(
+                lhs, rhs, *epsilon, false, anchor, book, portfolio_book, schema, root,
+            )?,
+            Ne { lhs, rhs, epsilon } => build_polymorphic_eq(
+                lhs, rhs, *epsilon, true, anchor, book, portfolio_book, schema, root,
+            )?,
+            Above { source, level } => dyn_indicator::wrap(real(source)?.above(*level)),
+            Below { source, level } => dyn_indicator::wrap(real(source)?.below(*level)),
+            CrossesAbove { lhs, rhs } => {
+                let (l, r) = (real(lhs)?, real(rhs)?);
+                let cmp = l.gt(r);
+                dyn_indicator::wrap(cmp.clone().and(cmp.changed()))
+            }
+            CrossesBelow { lhs, rhs } => {
+                let (l, r) = (real(lhs)?, real(rhs)?);
+                let cmp = l.lt(r);
+                dyn_indicator::wrap(cmp.clone().and(cmp.changed()))
+            }
+            And { lhs, rhs } => dyn_indicator::wrap(boolean(lhs)?.and(boolean(rhs)?)),
+            Or { lhs, rhs } => dyn_indicator::wrap(boolean(lhs)?.or(boolean(rhs)?)),
+            Xor { lhs, rhs } => dyn_indicator::wrap(boolean(lhs)?.xor(boolean(rhs)?)),
+            All(specs) => {
+                if specs.is_empty() {
+                    dyn_indicator::wrap(crate::indicators::ValueBool::<Snapshot<String>>::new(true))
+                } else {
+                    let mut acc = boolean(&specs[0])?;
+                    for s in &specs[1..] {
+                        let next = boolean(s)?;
+                        acc = AsBool::new(dyn_indicator::wrap(acc.and(next)));
+                    }
+                    dyn_indicator::wrap(acc)
+                }
+            }
+            Any(specs) => {
+                if specs.is_empty() {
+                    dyn_indicator::wrap(crate::indicators::ValueBool::<Snapshot<String>>::new(false))
+                } else {
+                    let mut acc = boolean(&specs[0])?;
+                    for s in &specs[1..] {
+                        let next = boolean(s)?;
+                        acc = AsBool::new(dyn_indicator::wrap(acc.or(next)));
+                    }
+                    dyn_indicator::wrap(acc)
+                }
+            }
+            Not(inner) => dyn_indicator::wrap(boolean(inner)?.not()),
+            Changed(inner) => {
+                let built = inner.try_build(anchor, book, portfolio_book, schema, root)?;
+                match built.output_type() {
+                    DynType::Bool => dyn_indicator::wrap(AsBool::new(built).changed()),
+                    DynType::Real => dyn_indicator::wrap(AsReal::new(built).changed()),
+                    other => {
+                        return Err(trail(
+                            inner,
+                            format!("!changed needs a Bool or Real inner, got {other}"),
+                        ));
+                    }
+                }
+            }
+            BecameTrue(inner) => dyn_indicator::wrap(boolean(inner)?.became_true()),
+            BecameFalse(inner) => dyn_indicator::wrap(boolean(inner)?.became_false()),
+            StrEq { lhs, rhs } => {
+                dyn_indicator::wrap(compare::StrEq::new(str_view(lhs)?, str_operand(rhs)?))
+            }
+            StrNe { lhs, rhs } => {
+                dyn_indicator::wrap(compare::StrNe::new(str_view(lhs)?, str_operand(rhs)?))
+            }
+            Never => {
+                dyn_indicator::wrap(crate::indicators::ValueBool::<Snapshot<String>>::new(false))
+            }
+            Every(n) => dyn_indicator::wrap(crate::indicators::Every::<Snapshot<String>>::new(*n)),
+            IsWeekday => dyn_indicator::wrap(crate::indicators::IsWeekday::of(pick_any_root())),
+            IsWeekend => dyn_indicator::wrap(crate::indicators::IsWeekend::of(pick_any_root())),
+            HasColumn { name } => {
+                let exists = schema.index_of(name.as_str()).is_some();
+                dyn_indicator::wrap(crate::indicators::ValueBool::<Snapshot<String>>::new(exists))
             }
         })
     }
