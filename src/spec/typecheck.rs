@@ -86,6 +86,7 @@ pub fn output_type(spec: &ExprSpec) -> Option<DynType> {
         Time { .. } => Some(DynType::Time),
         Value(ValueLit::Str(_)) => Some(DynType::Str),
         Value(ValueLit::Real(_)) => Some(DynType::Real),
+        Value(ValueLit::Bool(_)) => Some(DynType::Bool),
         // A list literal is rewritten to a scalar per child before any build
         // reaches it; outside a portfolio weight template it is invalid, which
         // `build` reports. Nothing useful to say about its type here.

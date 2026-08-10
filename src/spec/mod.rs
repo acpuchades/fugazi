@@ -1038,10 +1038,17 @@ mod tests {
     }
 
     #[test]
-    fn value_rejects_a_literal_that_is_neither_number_nor_string() {
-        // A bool in a source position isn't a `!value` — it's the signal-side
-        // `!value <bool>` leaf, a different (SignalSpec) tag.
-        let err = serde_norway::from_str::<ExprSpec>("!value true")
+    fn value_accepts_a_bool_and_rejects_a_non_scalar_literal() {
+        // A bool is now a valid `!value` payload — a Bool-output leaf (the merged
+        // home for what was the signal-side `!value <bool>`).
+        let spec: ExprSpec = serde_norway::from_str("!value true").unwrap();
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        assert_eq!(
+            built.update(Payload::Snapshot(snap(bar(100.0)))),
+            Some(Payload::Bool(true)),
+        );
+        // A non-scalar literal (a mapping) is still rejected.
+        let err = serde_norway::from_str::<ExprSpec>("!value {a: 1}")
             .unwrap_err()
             .to_string();
         assert!(err.contains("!value takes a number"), "{err}");

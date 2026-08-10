@@ -140,6 +140,10 @@ pub(super) fn default_risk_free_rate() -> Real {
 #[serde(try_from = "serde_norway::Value")]
 pub enum ValueLit {
     Real(Real),
+    /// A constant boolean — the merged home for what a bool slot means by
+    /// `!value true` / `!value false` (and a bare `true`/`false`). Builds a
+    /// `ValueBool` (a `Bool`-output leaf).
+    Bool(bool),
     Str(String),
     /// A per-child indexed constant — only meaningful inside a portfolio
     /// weight-share template. `SpecTemplate::build` rewrites this to
@@ -158,6 +162,7 @@ impl TryFrom<serde_norway::Value> for ValueLit {
                 .as_f64()
                 .map(ValueLit::Real)
                 .ok_or_else(|| format!("!value: {n} is not a finite number")),
+            serde_norway::Value::Bool(b) => Ok(ValueLit::Bool(b)),
             serde_norway::Value::String(s) => Ok(ValueLit::Str(s)),
             serde_norway::Value::Sequence(seq) => {
                 let mut out = Vec::with_capacity(seq.len());
@@ -176,9 +181,9 @@ impl TryFrom<serde_norway::Value> for ValueLit {
                 Ok(ValueLit::List(out))
             }
             other => Err(format!(
-                "!value takes a number (a constant scalar), a string (a \
-                 constant string, for !str_eq / !str_ne), or a list of \
-                 numbers (a per-child weight vector), got {other:?}"
+                "!value takes a number (a constant scalar), a bool (a constant \
+                 signal), a string (a constant string, for !str_eq / !str_ne), \
+                 or a list of numbers (a per-child weight vector), got {other:?}"
             )),
         }
     }
@@ -2253,6 +2258,11 @@ fn build_match(
     let is_str = match &cases[0].when {
         ValueLit::Str(_) => true,
         ValueLit::Real(_) => false,
+        ValueLit::Bool(_) => {
+            return Err("case 0 `when:` is a bool — a match dispatches on a number \
+                        or a string, not a boolean"
+                .to_string());
+        }
         ValueLit::List(_) => {
             return Err("case 0 `when:` is a `!value <list>` — list literals have \
                         no defined equality against `on` and aren't a valid \
@@ -2279,6 +2289,12 @@ fn build_match(
                     "case {i} `when:` is a `!value <list>` — list literals have \
                      no defined equality against `on` and aren't a valid match \
                      pattern"
+                ));
+            }
+            ValueLit::Bool(_) => {
+                return Err(format!(
+                    "case {i} `when:` is a bool — a match dispatches on a number \
+                     or a string, not a boolean"
                 ));
             }
             _ => {}
@@ -2552,6 +2568,9 @@ impl ExprSpec {
             Pick { symbol, freq } => build_pick(symbol.as_deref(), freq.as_deref(), root)?,
 
             Value(ValueLit::Real(x)) => dyn_indicator::wrap(self::Value::<Snapshot<String>>::new(*x)),
+            Value(ValueLit::Bool(b)) => {
+                dyn_indicator::wrap(crate::indicators::ValueBool::<Snapshot<String>>::new(*b))
+            }
             Value(ValueLit::Str(s)) => {
                 dyn_indicator::wrap(ValueStr::<Snapshot<String>>::new(s.as_str()))
             }
