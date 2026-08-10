@@ -126,6 +126,8 @@ pub use portfolio::{PortfolioSpec, PortfolioChildSpec, PortfolioChildStrategy};
 pub use preset::{StrategyPreset, StrategyRef};
 #[allow(unused_imports)]
 pub use expr::StrOperand;
+#[allow(unused_imports)]
+pub use expr::{BoolNode, RealNode};
 pub use strategy::SingleStrategySpec;
 #[allow(unused_imports)]
 pub use template::SpecTemplate;
@@ -408,6 +410,35 @@ mod tests {
         assert_eq!(wrapped.unstable_period(), 0);
         assert_eq!(wrapped.stable_period(), inner_raw.warm_up_period());
         assert!(inner_raw.stable_period() > inner_raw.warm_up_period());
+    }
+
+    #[test]
+    fn strategy_slots_reject_a_decidably_wrong_output_type_at_parse() {
+        // The RealNode / BoolNode slot newtypes reject a decidably-wrong node
+        // when the document is *read*, not at build inside an AsReal / AsBool
+        // view — a Real expression in an `enter:` (Bool) slot, and a Bool
+        // expression in a `stop_loss:` (Real) slot.
+        let bool_slot_got_real =
+            serde_norway::from_str::<NodeSpec>("!sma { period: 3 }").is_ok()
+                && serde_norway::from_str::<crate::spec::BoolNode>("!sma { period: 3 }").is_err();
+        assert!(bool_slot_got_real, "a Real node must be rejected by BoolNode");
+
+        let real_slot_got_bool = serde_norway::from_str::<crate::spec::RealNode>(
+            "!gt { lhs: close, rhs: close }",
+        )
+        .is_err();
+        assert!(real_slot_got_bool, "a Bool node must be rejected by RealNode");
+
+        // An *undecidable* node (a `!get` — its type needs the schema) still
+        // passes the newtype and is checked at build, the same skip rule the
+        // type checker uses.
+        assert!(
+            serde_norway::from_str::<crate::spec::BoolNode>("!get { key: regime }").is_ok(),
+            "an undecidable node must pass and defer to build"
+        );
+        assert!(
+            serde_norway::from_str::<crate::spec::RealNode>("!get { key: vol_20 }").is_ok(),
+        );
     }
 
     #[test]

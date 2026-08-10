@@ -158,6 +158,125 @@ impl StrOperand {
     }
 }
 
+/// Fail unless `node`'s statically-known output type is `want`. An
+/// undecidable output (`None` — a `!get`, a hole, a passthrough over one) is
+/// **skipped**, exactly as [`crate::spec::typecheck::check_immediate`] skips
+/// it: those defer to the build-time `AsReal` / `AsBool` view. The message
+/// names the offending tag, the same convention the breadcrumb uses.
+fn expect_output(node: &NodeSpec, want: DynType) -> Result<(), String> {
+    if let Some(got) = crate::spec::typecheck::output_type(node)
+        && got != want
+    {
+        return Err(format!(
+            "{} produces {got}, but a {want}-valued expression is required here",
+            crate::spec::typecheck::tag_name(node),
+        ));
+    }
+    Ok(())
+}
+
+/// A [`NodeSpec`] slot constrained to a `Real` output at *parse* time.
+///
+/// The strategy specs use this at their genuine slot boundaries (a
+/// `stop_loss:` / `sizing:` / portfolio `weights:` wants a number), so a
+/// decidably-wrong node — `stop_loss: !gt { … }` (Bool) — is rejected when the
+/// document is read, naming the tag, instead of at build time inside an
+/// `AsReal` view. An *undecidable* node (a `!get`, a `!param` hole) still
+/// passes here and is checked at build, the same skip rule the type checker
+/// uses. **Internal `NodeSpec` fields are never this** — a `!close`'s `source:`
+/// must accept a `!pick` (`Atom`); the newtypes live only at the strategy
+/// struct's slots.
+#[derive(Debug, Clone)]
+pub struct RealNode(pub NodeSpec);
+
+/// A [`NodeSpec`] slot constrained to a `Bool` output at *parse* time — the
+/// twin of [`RealNode`] for signal slots (`enter:` / `exit:` /
+/// `rebalance_on:`). Same undecidable-skip rule.
+#[derive(Debug, Clone)]
+pub struct BoolNode(pub NodeSpec);
+
+impl<'de> serde::Deserialize<'de> for RealNode {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = serde_norway::Value::deserialize(d)?;
+        RealNode::try_from(v).map_err(serde::de::Error::custom)
+    }
+}
+impl<'de> serde::Deserialize<'de> for BoolNode {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = serde_norway::Value::deserialize(d)?;
+        BoolNode::try_from(v).map_err(serde::de::Error::custom)
+    }
+}
+
+impl TryFrom<serde_norway::Value> for RealNode {
+    type Error = String;
+    fn try_from(v: serde_norway::Value) -> Result<Self, Self::Error> {
+        let node = NodeSpec::try_from(v)?;
+        expect_output(&node, DynType::Real)?;
+        Ok(RealNode(node))
+    }
+}
+impl TryFrom<serde_norway::Value> for BoolNode {
+    type Error = String;
+    fn try_from(v: serde_norway::Value) -> Result<Self, Self::Error> {
+        let node = NodeSpec::try_from(v)?;
+        expect_output(&node, DynType::Bool)?;
+        Ok(BoolNode(node))
+    }
+}
+
+impl RealNode {
+    /// The inner node, for probes / typecheck / re-templating.
+    pub fn node(&self) -> &NodeSpec {
+        &self.0
+    }
+    pub fn build(
+        &self,
+        anchor: &Position,
+        book: &Book,
+        portfolio_book: Option<&Book>,
+        schema: &Arc<Schema>,
+        root: Option<&Selector<String>>,
+    ) -> Box<dyn DynIndicator> {
+        self.0.build(anchor, book, portfolio_book, schema, root)
+    }
+    pub fn try_build(
+        &self,
+        anchor: &Position,
+        book: &Book,
+        portfolio_book: Option<&Book>,
+        schema: &Arc<Schema>,
+        root: Option<&Selector<String>>,
+    ) -> Result<Box<dyn DynIndicator>, String> {
+        self.0.try_build(anchor, book, portfolio_book, schema, root)
+    }
+}
+impl BoolNode {
+    pub fn node(&self) -> &NodeSpec {
+        &self.0
+    }
+    pub fn build(
+        &self,
+        anchor: &Position,
+        book: &Book,
+        portfolio_book: Option<&Book>,
+        schema: &Arc<Schema>,
+        root: Option<&Selector<String>>,
+    ) -> Box<dyn DynIndicator> {
+        self.0.build(anchor, book, portfolio_book, schema, root)
+    }
+    pub fn try_build(
+        &self,
+        anchor: &Position,
+        book: &Book,
+        portfolio_book: Option<&Book>,
+        schema: &Arc<Schema>,
+        root: Option<&Selector<String>>,
+    ) -> Result<Box<dyn DynIndicator>, String> {
+        self.0.try_build(anchor, book, portfolio_book, schema, root)
+    }
+}
+
 /// The payload of [`NodeSpec::Value`] — a constant leaf: numeric, string,
 /// or (in per-child weight-share context) a list-indexed constant.
 ///

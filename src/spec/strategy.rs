@@ -12,7 +12,7 @@ use crate::indicators::logic::ValueBool;
 use crate::prelude::*;
 use crate::strategies::SingleAssetStrategy;
 
-use super::expr::NodeSpec;
+use super::expr::{BoolNode, RealNode};
 use crate::spec::dyn_indicator::{self, AsBool, AsReal, DynIndicator};
 
 // ---------------------------------------------------------------------------
@@ -30,18 +30,18 @@ use crate::spec::dyn_indicator::{self, AsBool, AsReal, DynIndicator};
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SideSpec {
-    pub enter: NodeSpec,
+    pub enter: BoolNode,
     #[serde(default)]
-    pub exit: Option<NodeSpec>,
+    pub exit: Option<BoolNode>,
     /// An optional stop-loss price level (a source). The side flattens when the
     /// adverse extreme of the bar reaches it. A `peak` / `trough` source makes it
     /// a trailing stop.
     #[serde(default)]
-    pub stop_loss: Option<Box<NodeSpec>>,
+    pub stop_loss: Option<Box<RealNode>>,
     /// An optional take-profit price level (a source). The side flattens when the
     /// favourable extreme of the bar reaches it.
     #[serde(default)]
-    pub take_profit: Option<Box<NodeSpec>>,
+    pub take_profit: Option<Box<RealNode>>,
 }
 
 impl SideSpec {
@@ -84,7 +84,7 @@ pub struct SingleStrategySpec {
     /// reading skips the trade for that bar (safe default — build a well-defined
     /// fallback into the spec if that isn't what you want).
     #[serde(default)]
-    pub sizing: Option<Box<NodeSpec>>,
+    pub sizing: Option<Box<RealNode>>,
 
     /// Optional **rebalance gate** — a boolean signal deciding, on each
     /// bar, whether the open position is resized to the current sizing
@@ -93,7 +93,7 @@ pub struct SingleStrategySpec {
     /// Kelly-scaled single-asset strategy that wants to adjust an open
     /// position when the target drifts.
     #[serde(default)]
-    pub rebalance_on: Option<NodeSpec>,
+    pub rebalance_on: Option<BoolNode>,
 }
 
 impl SingleStrategySpec {

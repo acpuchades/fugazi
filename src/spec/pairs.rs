@@ -14,7 +14,7 @@ use crate::indicators::logic::ValueBool;
 use crate::prelude::*;
 use crate::strategies::PairsStrategy;
 
-use super::expr::NodeSpec;
+use super::expr::{BoolNode, RealNode};
 use super::strategy::SideSpec;
 use crate::spec::dyn_indicator::{AsBool, AsReal, DynIndicator};
 
@@ -85,17 +85,17 @@ pub struct PairsStrategySpec {
     /// [`long_spread`](Self::long_spread); one of the two (or a
     /// [`short_spread`](Self::short_spread) block) must be present.
     #[serde(default)]
-    pub enter: Option<NodeSpec>,
+    pub enter: Option<BoolNode>,
     #[serde(default)]
-    pub exit: Option<NodeSpec>,
+    pub exit: Option<BoolNode>,
     /// Optional spread stop-loss level — the long-spread side flattens when the
     /// running spread reads at or below this level.
     #[serde(default)]
-    pub stop_loss: Option<Box<NodeSpec>>,
+    pub stop_loss: Option<Box<RealNode>>,
     /// Optional spread take-profit level — the long-spread side flattens when
     /// the running spread reads at or above this level.
     #[serde(default)]
-    pub take_profit: Option<Box<NodeSpec>>,
+    pub take_profit: Option<Box<RealNode>>,
     /// The **long-spread** side (long `left` / short `right`) as a block — the
     /// symmetric spelling of the four flat keys above.
     #[serde(default)]
@@ -110,14 +110,14 @@ pub struct PairsStrategySpec {
     /// Defaults to a constant `1.0` (1.0 gross, dollar-neutral); a `None`
     /// reading skips the trade for that bar.
     #[serde(default)]
-    pub sizing: Option<Box<NodeSpec>>,
+    pub sizing: Option<Box<RealNode>>,
 
     /// Optional **rebalance gate** — a boolean signal deciding, on each
     /// bar, whether both legs are resized to the current sizing target.
     /// Defaults to `!never` — sizing only reads on entry, matching
     /// pre-refactor behavior.
     #[serde(default)]
-    pub rebalance_on: Option<NodeSpec>,
+    pub rebalance_on: Option<BoolNode>,
 }
 
 /// Deserialization mirror of [`PairsStrategySpec`], carrying the same fields
@@ -134,21 +134,21 @@ struct PairsStrategySpecRaw {
     left: String,
     right: String,
     #[serde(default)]
-    enter: Option<NodeSpec>,
+    enter: Option<BoolNode>,
     #[serde(default)]
-    exit: Option<NodeSpec>,
+    exit: Option<BoolNode>,
     #[serde(default)]
-    stop_loss: Option<Box<NodeSpec>>,
+    stop_loss: Option<Box<RealNode>>,
     #[serde(default)]
-    take_profit: Option<Box<NodeSpec>>,
+    take_profit: Option<Box<RealNode>>,
     #[serde(default)]
     long_spread: Option<SideSpec>,
     #[serde(default)]
     short_spread: Option<SideSpec>,
     #[serde(default)]
-    sizing: Option<Box<NodeSpec>>,
+    sizing: Option<Box<RealNode>>,
     #[serde(default)]
-    rebalance_on: Option<NodeSpec>,
+    rebalance_on: Option<BoolNode>,
 }
 
 impl TryFrom<PairsStrategySpecRaw> for PairsStrategySpec {
