@@ -12,7 +12,6 @@ use crate::indicators::logic::ValueBool;
 use crate::prelude::*;
 use crate::strategies::SingleAssetStrategy;
 
-use super::signal::SignalSpec;
 use super::expr::NodeSpec;
 use crate::spec::dyn_indicator::{self, AsBool, AsReal, DynIndicator};
 
@@ -31,9 +30,9 @@ use crate::spec::dyn_indicator::{self, AsBool, AsReal, DynIndicator};
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SideSpec {
-    pub enter: SignalSpec,
+    pub enter: NodeSpec,
     #[serde(default)]
-    pub exit: Option<SignalSpec>,
+    pub exit: Option<NodeSpec>,
     /// An optional stop-loss price level (a source). The side flattens when the
     /// adverse extreme of the bar reaches it. A `peak` / `trough` source makes it
     /// a trailing stop.
@@ -94,7 +93,7 @@ pub struct SingleStrategySpec {
     /// Kelly-scaled single-asset strategy that wants to adjust an open
     /// position when the target drifts.
     #[serde(default)]
-    pub rebalance_on: Option<SignalSpec>,
+    pub rebalance_on: Option<NodeSpec>,
 }
 
 impl SingleStrategySpec {
@@ -166,7 +165,7 @@ impl SingleStrategySpec {
     }
 
     /// The fallible twin of [`build`](Self::build): every slot is built through
-    /// [`NodeSpec::try_build`] / [`SignalSpec::try_build`], so a bad expression
+    /// [`NodeSpec::try_build`] / [`NodeSpec::try_build`], so a bad expression
     /// anywhere in the document comes back as a message with its tag trail
     /// instead of aborting the process.
     pub fn try_build(

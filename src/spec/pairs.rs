@@ -14,7 +14,6 @@ use crate::indicators::logic::ValueBool;
 use crate::prelude::*;
 use crate::strategies::PairsStrategy;
 
-use super::signal::SignalSpec;
 use super::expr::NodeSpec;
 use super::strategy::SideSpec;
 use crate::spec::dyn_indicator::{AsBool, AsReal, DynIndicator};
@@ -86,9 +85,9 @@ pub struct PairsStrategySpec {
     /// [`long_spread`](Self::long_spread); one of the two (or a
     /// [`short_spread`](Self::short_spread) block) must be present.
     #[serde(default)]
-    pub enter: Option<SignalSpec>,
+    pub enter: Option<NodeSpec>,
     #[serde(default)]
-    pub exit: Option<SignalSpec>,
+    pub exit: Option<NodeSpec>,
     /// Optional spread stop-loss level — the long-spread side flattens when the
     /// running spread reads at or below this level.
     #[serde(default)]
@@ -118,7 +117,7 @@ pub struct PairsStrategySpec {
     /// Defaults to `!never` — sizing only reads on entry, matching
     /// pre-refactor behavior.
     #[serde(default)]
-    pub rebalance_on: Option<SignalSpec>,
+    pub rebalance_on: Option<NodeSpec>,
 }
 
 /// Deserialization mirror of [`PairsStrategySpec`], carrying the same fields
@@ -128,16 +127,16 @@ pub struct PairsStrategySpec {
 /// [`PairsStrategySpec::build`], so `fugazi check strategy` — which validates a
 /// document's *shape* without ever building it — catches them too, and so a
 /// spec mistake surfaces as an error rather than a panic. Same reason
-/// `NodeSpec` and `SignalSpec` deserialize through a raw mirror.
+/// `NodeSpec` and `NodeSpec` deserialize through a raw mirror.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PairsStrategySpecRaw {
     left: String,
     right: String,
     #[serde(default)]
-    enter: Option<SignalSpec>,
+    enter: Option<NodeSpec>,
     #[serde(default)]
-    exit: Option<SignalSpec>,
+    exit: Option<NodeSpec>,
     #[serde(default)]
     stop_loss: Option<Box<NodeSpec>>,
     #[serde(default)]
@@ -149,7 +148,7 @@ struct PairsStrategySpecRaw {
     #[serde(default)]
     sizing: Option<Box<NodeSpec>>,
     #[serde(default)]
-    rebalance_on: Option<SignalSpec>,
+    rebalance_on: Option<NodeSpec>,
 }
 
 impl TryFrom<PairsStrategySpecRaw> for PairsStrategySpec {

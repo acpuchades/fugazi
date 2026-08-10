@@ -2,7 +2,7 @@
 //! typed-deserialize into `T`.
 //!
 //! First-class YAML type alongside [`NodeSpec`](super::NodeSpec) and
-//! [`SignalSpec`](super::SignalSpec). Where those two produce a concrete
+//! `NodeSpec`. Where those two produce a concrete
 //! indicator eagerly at `spec.build(...)` time, `SpecTemplate<T>` holds a
 //! raw `serde_json::Value` tree that may still contain `!arg NAME`
 //! placeholder leaves, and produces a concrete `T` only when the caller

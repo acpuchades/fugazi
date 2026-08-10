@@ -45,7 +45,7 @@
 //!
 //! Substitution runs on the **untyped value tree**, exactly like
 //! [`crate::spec::params`] — the typed spec has no room for a placeholder where a
-//! `SignalSpec` is expected, so the hole must be filled before typed parsing.
+//! a boolean-output `NodeSpec` is expected, so the hole must be filled before typed parsing.
 //! The pass order is `parse → imports → !param → typed parse`, which means an
 //! imported document is itself a first-class spec fragment: it may contain its
 //! own `!import`s (resolved relative to *its* directory) and its own `!param`

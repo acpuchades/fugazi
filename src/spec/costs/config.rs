@@ -449,7 +449,7 @@ impl<T> LegConfig<T> {
 // ---------------------------------------------------------------------------
 // Model enums with a build → live-model method. Externally tagged, so a variant
 // is spelled `!percentage { rate: 0.001 }` — the same YAML tag vocabulary the
-// strategy spec (`NodeSpec` / `SignalSpec`) uses.
+// strategy spec (`NodeSpec`) uses.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]

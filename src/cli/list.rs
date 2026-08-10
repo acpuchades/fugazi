@@ -251,8 +251,7 @@ const GROUPS: &[Group] = &[
     Group {
         title: "edge detectors (fire on a transition, not a level)",
         entries: &[
-            Entry { tag: "changed",      args: "signal", doc: "fires on either edge of a Bool source (rising OR falling)" },
-            Entry { tag: "changed_real", args: "source", doc: "fires on the bar a Real source differs from the previous bar" },
+            Entry { tag: "changed",      args: "source", doc: "fires on a transition: either edge of a Bool source (rising OR falling), or the bar a Real source differs from the previous one" },
             Entry { tag: "became_true",  args: "signal", doc: "rising edge: fires the bar the source goes false → true" },
             Entry { tag: "became_false", args: "signal", doc: "falling edge: the mirror of !became_true" },
         ],
@@ -687,25 +686,19 @@ mod tests {
     /// shipping and never appearing in `fugazi list indicators`.
     ///
     /// The expected set comes from serde's own variant list (see
-    /// [`typecheck::known_expr_tags`]), so it needs no upkeep: add a variant to
-    /// `NodeSpec` or `SignalSpec` and this fails until the catalogue documents
-    /// it.
+    /// [`typecheck::known_node_tags`]), so it needs no upkeep: add a variant to
+    /// `NodeSpec` and this fails until the catalogue documents it.
     #[test]
     fn the_catalogue_documents_every_spec_tag() {
-        use crate::spec::typecheck::{known_expr_tags, known_signal_tags};
+        use crate::spec::typecheck::known_node_tags;
 
         let documented: std::collections::HashSet<&str> =
             all_entries().iter().map(|e| e.tag).collect();
 
         let mut missing: Vec<String> = Vec::new();
-        for (layer, tags) in [
-            ("NodeSpec", known_expr_tags()),
-            ("SignalSpec", known_signal_tags()),
-        ] {
-            for tag in tags {
-                if !documented.contains(tag.as_str()) {
-                    missing.push(format!("!{tag} ({layer})"));
-                }
+        for tag in known_node_tags() {
+            if !documented.contains(tag.as_str()) {
+                missing.push(format!("!{tag} (NodeSpec)"));
             }
         }
         assert!(
@@ -722,13 +715,10 @@ mod tests {
     /// tag that errors.
     #[test]
     fn the_catalogue_documents_nothing_the_parser_rejects() {
-        use crate::spec::typecheck::{
-            REWRITTEN_TAGS, known_expr_tags, known_selection_tags, known_signal_tags,
-        };
+        use crate::spec::typecheck::{REWRITTEN_TAGS, known_node_tags, known_selection_tags};
 
         let mut known: std::collections::HashSet<String> =
-            known_expr_tags().into_iter().collect();
-        known.extend(known_signal_tags());
+            known_node_tags().into_iter().collect();
         // The `selection:` vocabulary is its own enum, and the rewritten tags
         // (sugar + load-pass placeholders) never reach a typed parse at all.
         known.extend(known_selection_tags());

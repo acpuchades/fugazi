@@ -8,11 +8,12 @@
 //!
 //! Three layers, mirroring the crate; one per submodule:
 //!
-//! * [`NodeSpec`] (see [`expr`]) → [`crate::spec::dyn_indicator::DynValue`] — a
-//!   value-producing expression (nominally `Output = Real`, but polymorphic
-//!   over the runtime [`DynType`](crate::spec::dyn_indicator::DynType) — some
-//!   variants yield `Atom` / `Candle` / `Str` / `Time`).
-//! * [`SignalSpec`] (see [`signal`]) → boolean condition (a `Signal`).
+//! * [`NodeSpec`] (see [`expr`]) → [`crate::spec::dyn_indicator::DynValue`] — the
+//!   one composable expression enum, polymorphic over the runtime
+//!   [`DynType`](crate::spec::dyn_indicator::DynType): most variants yield
+//!   `Real`, but some yield `Atom` / `Candle` / `Str` / `Time`, and the boolean
+//!   predicates (`!gt`, `!and`, `!crosses_above`, `!changed`, …) yield `Bool`.
+//!   A "signal" is just a `NodeSpec` whose `output_type()` is `Bool`.
 //! * [`SingleStrategySpec`] (see [`strategy`]) → [`crate::strategies::SingleAssetStrategy`] —
 //!   the decision layer.
 //!
@@ -29,7 +30,6 @@ pub mod overlay;
 pub mod pairs;
 pub mod portfolio;
 pub mod preset;
-pub mod signal;
 pub mod strategy;
 pub mod template;
 pub mod trailing;
@@ -125,8 +125,6 @@ pub use portfolio::{PortfolioSpec, PortfolioChildSpec, PortfolioChildStrategy};
 #[allow(unused_imports)]
 pub use preset::{StrategyPreset, StrategyRef};
 #[allow(unused_imports)]
-pub use signal::SignalSpec;
-#[allow(unused_imports)]
 pub use expr::StrOperand;
 pub use strategy::SingleStrategySpec;
 #[allow(unused_imports)]
@@ -196,7 +194,7 @@ mod tests {
             lhs: !sma { source: close, period: 2 }
             rhs: !sma { source: close, period: 4 }
         "#;
-        let spec: SignalSpec = serde_norway::from_str(yaml).unwrap();
+        let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
         let mut sig = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         let mut fired = false;
         for p in [10.0, 9.0, 8.0, 7.0, 8.0, 10.0, 12.0, 14.0, 16.0] {
@@ -275,7 +273,7 @@ mod tests {
 
     #[test]
     fn bars_since_tags_match_reference() {
-        // The signal-input form: `source:` is a SignalSpec, not an NodeSpec.
+        // The signal-input form: `source:` is a NodeSpec, not an NodeSpec.
         let yaml = "!bars_since { source: !above { source: close, level: 12.0 } }";
         let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
@@ -393,20 +391,34 @@ mod tests {
 
     #[test]
     fn unstable_signal_zeroes_unstable_period_but_forwards_output() {
-        // `!unstable { signal }` is a passthrough — same output, same warm-up,
-        // but `unstable_period()` reports 0 so a strategy's readiness gate
-        // stops waiting for the IIR settling tail underneath.
+        // `!unstable` is a passthrough over *any* output type — same output,
+        // same warm-up, but `unstable_period()` reports 0 so a strategy's
+        // readiness gate stops waiting for the IIR settling tail underneath.
+        // Since the value/signal split was merged, a boolean child rides the
+        // one `source:` field — the removed `signal:` field is now a parse
+        // error (see `unstable_rejects_the_removed_signal_field`).
         let yaml = r#"
             !unstable
-            signal: !above { source: !ema { period: 3 }, level: 0 }
+            source: !above { source: !ema { period: 3 }, level: 0 }
         "#;
-        let spec: SignalSpec = serde_norway::from_str(yaml).unwrap();
+        let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
         let wrapped = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         let inner_raw = Ema::new(Current::close(), 3).above(0.0);
         assert_eq!(wrapped.warm_up_period(), inner_raw.warm_up_period());
         assert_eq!(wrapped.unstable_period(), 0);
         assert_eq!(wrapped.stable_period(), inner_raw.warm_up_period());
         assert!(inner_raw.stable_period() > inner_raw.warm_up_period());
+    }
+
+    #[test]
+    fn unstable_rejects_the_removed_signal_field() {
+        // The old `!unstable { signal: … }` form is gone with the
+        // NodeSpec merge — one `source:` field for any output type. A stray
+        // `signal:` is a clean parse error, not a silently-dropped key.
+        let err = serde_norway::from_str::<NodeSpec>("!unstable { signal: !value true }")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("signal"), "{err}");
     }
 
     #[test]
@@ -853,7 +865,7 @@ mod tests {
         b.add_bool("risk_on");
         let schema = b.finish();
 
-        let spec: SignalSpec = serde_norway::from_str("!get { key: risk_on }").unwrap();
+        let spec: NodeSpec = serde_norway::from_str("!get { key: risk_on }").unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &schema, None);
         assert_eq!(built.output_type(), crate::spec::dyn_indicator::DynType::Bool);
 
@@ -867,9 +879,9 @@ mod tests {
         // `rhs: 100` (bare number) is auto-wrapped as `!value 100` — no
         // more `!value` boilerplate needed in the common comparison
         // shape. Same result as writing `rhs: !value 100` explicitly.
-        let spec_bare: SignalSpec =
+        let spec_bare: NodeSpec =
             serde_norway::from_str("!gt { lhs: close, rhs: 100 }").unwrap();
-        let spec_explicit: SignalSpec =
+        let spec_explicit: NodeSpec =
             serde_norway::from_str("!gt { lhs: close, rhs: !value 100 }").unwrap();
         let mut b1 = spec_bare.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         let mut b2 = spec_explicit.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
@@ -887,8 +899,8 @@ mod tests {
         // `enter: true` / `exit: false` (bare bools) are auto-wrapped as
         // `!value true` / `!value false` in signal positions. Removes
         // the boilerplate from constant signal slots.
-        let spec_bare: SignalSpec = serde_norway::from_str("true").unwrap();
-        let spec_explicit: SignalSpec = serde_norway::from_str("!value true").unwrap();
+        let spec_bare: NodeSpec = serde_norway::from_str("true").unwrap();
+        let spec_explicit: NodeSpec = serde_norway::from_str("!value true").unwrap();
         let mut b1 = spec_bare.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         let mut b2 = spec_explicit.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         assert_eq!(feed_bool(&mut b1, bar(1.0)), feed_bool(&mut b2, bar(1.0)));
@@ -913,7 +925,7 @@ mod tests {
         b.add_str("regime");
         let schema = b.finish();
         // Str path: lhs is a Str column, rhs is a !value Str literal.
-        let spec: SignalSpec = serde_norway::from_str(
+        let spec: NodeSpec = serde_norway::from_str(
             "!eq { lhs: !get { key: regime }, rhs: !value bull }",
         )
         .unwrap();
@@ -936,7 +948,7 @@ mod tests {
         );
         // Real path: lhs is close, rhs is a !value number. Same tag, no
         // change in shape needed.
-        let spec: SignalSpec =
+        let spec: NodeSpec =
             serde_norway::from_str("!eq { lhs: close, rhs: !value 100.0 }").unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         assert_eq!(feed_bool(&mut built, bar(100.0)), Some(true));
@@ -951,7 +963,7 @@ mod tests {
         b.add_str("regime");
         let schema = b.finish();
 
-        let spec: SignalSpec = serde_norway::from_str(
+        let spec: NodeSpec = serde_norway::from_str(
             "!str_eq { lhs: !get { key: regime }, rhs: bull }",
         )
         .unwrap();
@@ -1062,7 +1074,7 @@ mod tests {
         let schema = b.finish();
 
         let build = |yaml: &str| {
-            let spec: SignalSpec = serde_norway::from_str(yaml).unwrap();
+            let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
             spec.build(&Position::new(), &Book::new(1.0), None, &schema, None)
         };
         // The bare literal (the original shape), the same constant written the
@@ -1121,13 +1133,6 @@ mod tests {
             .expect("expected the build to be rejected")
     }
 
-    /// [`expr_build_err`] for the signal layer.
-    fn signal_build_err(spec: &SignalSpec, schema: &std::sync::Arc<Schema>) -> String {
-        spec.try_build(&Position::new(), &Book::new(1.0), None, schema, None)
-            .err()
-            .expect("expected the build to be rejected")
-    }
-
     #[test]
     fn get_rejects_an_unknown_key_and_lists_the_registered_ones() {
         let mut b = Schema::builder();
@@ -1149,23 +1154,31 @@ mod tests {
     }
 
     #[test]
-    fn signal_get_on_real_column_hints_at_comparison() {
+    fn get_on_real_column_builds_a_real_node_rejected_in_a_bool_slot() {
+        // After the NodeSpec merge, `!get` on a Real column *is* a Real-output
+        // node — it builds fine on its own. It only fails when placed in a
+        // boolean position, and that rejection is the slot's `AsBool` check,
+        // uniform with every other type clash (no bespoke signal-layer hint).
+        use crate::spec::dyn_indicator::AsBool;
         let mut b = Schema::builder();
         b.add_real("vol_20");
         let schema = b.finish();
-        let spec: SignalSpec = serde_norway::from_str("!get { key: vol_20 }").unwrap();
-        let err = signal_build_err(&spec, &schema);
-        assert!(err.contains("must be Bool"), "{err}");
+        let spec: NodeSpec = serde_norway::from_str("!get { key: vol_20 }").unwrap();
+        let built = spec.build(&Position::new(), &Book::new(1.0), None, &schema, None);
+        assert_eq!(built.output_type(), crate::runtime::DynType::Real);
+        assert!(AsBool::try_new(built).is_err());
     }
 
     #[test]
-    fn signal_get_on_str_column_hints_at_str_eq() {
+    fn get_on_str_column_builds_a_str_node_rejected_in_a_bool_slot() {
+        use crate::spec::dyn_indicator::AsBool;
         let mut b = Schema::builder();
         b.add_str("regime");
         let schema = b.finish();
-        let spec: SignalSpec = serde_norway::from_str("!get { key: regime }").unwrap();
-        let err = signal_build_err(&spec, &schema);
-        assert!(err.contains("!str_eq"), "{err}");
+        let spec: NodeSpec = serde_norway::from_str("!get { key: regime }").unwrap();
+        let built = spec.build(&Position::new(), &Book::new(1.0), None, &schema, None);
+        assert_eq!(built.output_type(), crate::runtime::DynType::Str);
+        assert!(AsBool::try_new(built).is_err());
     }
 
     #[test]
@@ -1222,8 +1235,8 @@ mod tests {
             lhs: !gt { lhs: !sma { source: !get { key: nope }, period: 3 }, rhs: !value 1.0 }
             rhs: !value true
         "#;
-        let spec: SignalSpec = serde_norway::from_str(yaml).unwrap();
-        let err = signal_build_err(&spec, &Schema::empty());
+        let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
+        let err = expr_build_err(&spec, &Schema::empty());
         let (trail, message) = crate::spec::diagnostics::split_trail(&err);
         assert_eq!(trail, vec!["!and", "!gt", "!sma", "!get"], "{err}");
         assert!(message.contains("no overlay side channel is bound"), "{err}");
@@ -1301,7 +1314,7 @@ mod tests {
         let fri = Atom::with_time(bar(1.0), Timestamp(1_710_506_096_000));
         let sat = Atom::with_time(bar(1.0), Timestamp(1_710_506_096_000 + 86_400_000));
 
-        let mut wd = serde_norway::from_str::<SignalSpec>("is_weekday")
+        let mut wd = serde_norway::from_str::<NodeSpec>("is_weekday")
             .unwrap()
             .build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         assert_eq!(
@@ -1313,7 +1326,7 @@ mod tests {
             Some(Payload::Bool(false)),
         );
 
-        let mut we = serde_norway::from_str::<SignalSpec>("is_weekend")
+        let mut we = serde_norway::from_str::<NodeSpec>("is_weekend")
             .unwrap()
             .build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         assert_eq!(we.update(Payload::Snapshot(Snapshot::of_atom(fri.clone()))), Some(Payload::Bool(false)));
@@ -1380,7 +1393,7 @@ mod tests {
 
         // !changed is None on the warm-up bar (it needs a prior value to
         // compare against), so we only assert on the second bar's edge.
-        let spec: SignalSpec = serde_norway::from_str("daily").unwrap();
+        let spec: NodeSpec = serde_norway::from_str("daily").unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         let _ = built.update(Payload::Snapshot(mk(day1)));
         assert_eq!(
@@ -1389,7 +1402,7 @@ mod tests {
             "!daily should fire on the day rollover",
         );
 
-        let spec: SignalSpec = serde_norway::from_str("monthly").unwrap();
+        let spec: NodeSpec = serde_norway::from_str("monthly").unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         let _ = built.update(Payload::Snapshot(mk(day1)));
         assert_eq!(
@@ -1417,7 +1430,7 @@ mod tests {
             s
         };
 
-        let spec: SignalSpec = serde_norway::from_str("is_weekday").unwrap();
+        let spec: NodeSpec = serde_norway::from_str("is_weekday").unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         assert_eq!(built.update(Payload::Snapshot(mk(fri))), Some(Payload::Bool(true)));
         assert_eq!(built.update(Payload::Snapshot(mk(sat))), Some(Payload::Bool(false)));
@@ -1434,9 +1447,9 @@ mod tests {
 
     #[test]
     fn if_else_survives_nested_signals_via_json_bridge() {
-        // Regression: nested `SignalSpec` inside `NodeSpec::IfElse`'s cond
+        // Regression: nested `NodeSpec` inside `NodeSpec::IfElse`'s cond
         // used to fail when the outer document went through the CLI's
-        // serde_json → serde_norway::Value bridge (because SignalSpec had
+        // serde_json → serde_norway::Value bridge (because NodeSpec had
         // no matching `try_from` normaliser). This test hits that path
         // explicitly: build a spec through `SingleStrategySpec::from_text_with_params`
         // (which routes via serde_json) and assert that a nested
@@ -1674,7 +1687,7 @@ mod tests {
 /// Rendering helpers for spec-parse diagnostics.
 ///
 /// Parse errors accumulate a ` > `-separated tag path as they rise through the
-/// nested `NodeSpec` / `SignalSpec` bridges (`!above > !add > !mul > …`). That
+/// nested `NodeSpec` / `NodeSpec` bridges (`!above > !add > !mul > …`). That
 /// keeps the mechanism trivial — each level prepends its own tag — but a raw
 /// chain in front of every message is noise for whoever reads it, human or
 /// agent. [`split_trail`] separates the two so the CLI can print the failure

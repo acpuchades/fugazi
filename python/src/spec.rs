@@ -536,22 +536,22 @@ impl PyStrategySpec {
 }
 
 /// Every tag the YAML spec layer accepts, grouped by the vocabulary it belongs
-/// to: `"expr"` (value-producing sources), `"signal"` (boolean conditions) and
-/// `"selection"` (a `basket:` document's `selection:` rules). Names come back
-/// without the leading `!`.
+/// to: `"node"` (the one composable expression enum — numeric sources, boolean
+/// predicates, and string comparisons together) and `"selection"` (a `basket:`
+/// document's `selection:` rules). Names come back without the leading `!`.
 ///
 /// Read off serde's own variant list rather than a hand-maintained table, so it
-/// cannot go stale. Useful for discovery (`"sma" in ta.spec_tags()["expr"]`),
+/// cannot go stale. Useful for discovery (`"sma" in ta.spec_tags()["node"]`),
 /// for editor tooling, and for the parity test that keeps this module's
 /// constructors in step with the tags.
 #[pyfunction]
 pub(crate) fn spec_tags(py: Python<'_>) -> PyResult<Py<PyAny>> {
-    use fugazi_core::spec::typecheck::{
-        known_expr_tags, known_selection_tags, known_signal_tags,
-    };
+    use fugazi_core::spec::typecheck::{known_node_tags, known_selection_tags};
     let out = pyo3::types::PyDict::new(py);
-    out.set_item("expr", known_expr_tags())?;
-    out.set_item("signal", known_signal_tags())?;
+    // The value/signal split was merged into one `NodeSpec` vocabulary, so
+    // there is a single `"node"` group (numeric sources, boolean predicates,
+    // and string comparisons all together) plus the `selection:` enum.
+    out.set_item("node", known_node_tags())?;
     out.set_item("selection", known_selection_tags())?;
     Ok(out.into_any().unbind())
 }

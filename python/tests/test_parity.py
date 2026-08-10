@@ -99,7 +99,6 @@ NOT_BOUND = {
     "time": "raw Timestamp leaf; the calendar accessors cover the useful reads",
     "all": "n-ary AND fold; chain .and_() instead",
     "any": "n-ary OR fold; chain .or_() instead",
-    "changed_real": "Real-inner edge detector; use .diff() against zero",
     "became_true": "rising edge; compose .changed() with the condition",
     "became_false": "falling edge; compose .changed() with the condition",
     "never": "constant-false signal; use value(False)",
@@ -112,14 +111,18 @@ def _module_names():
     return {n for n in dir(ta) if not n.startswith("_")}
 
 
-def test_every_expr_tag_is_bound_or_declared_unbound():
+def test_every_node_tag_is_bound_or_declared_unbound():
+    # The value/signal split was merged into one NodeSpec vocabulary, so the
+    # former expr and signal parity tests are one: every tag in the single
+    # `"node"` group must be a bound constructor, a bound method / component,
+    # a rename, or recorded in NOT_BOUND with a reason.
     names = _module_names()
     indicator_methods = set(dir(ta.Indicator))
     signal_methods = set(dir(ta.Signal))
     shared_methods = set(dir(ta.SharedMultiIndicator))
 
     unclassified = []
-    for tag in ta.spec_tags()["expr"]:
+    for tag in ta.spec_tags()["node"]:
         if tag in names or tag in NOT_BOUND:
             continue
         if tag in RENAMED:
@@ -145,29 +148,6 @@ def test_every_expr_tag_is_bound_or_declared_unbound():
         + "\n  ".join(f"!{t}" for t in unclassified)
         + "\nBind them in python/src/lib.rs, or add them to NOT_BOUND here with "
         "a reason."
-    )
-
-
-def test_every_signal_tag_is_bound_or_declared_unbound():
-    names = _module_names()
-    signal_methods = set(dir(ta.Signal))
-    indicator_methods = set(dir(ta.Indicator))
-
-    unclassified = []
-    for tag in ta.spec_tags()["signal"]:
-        if tag in names or tag in NOT_BOUND:
-            continue
-        if tag in METHOD_BOUND:
-            method = METHOD_BOUND[tag]
-            assert method in signal_methods or method in indicator_methods, (
-                f"!{tag} claims method .{method}(), which no longer exists"
-            )
-            continue
-        unclassified.append(tag)
-
-    assert not unclassified, (
-        "these signal tags have no Python counterpart and no recorded reason:\n  "
-        + "\n  ".join(f"!{t}" for t in unclassified)
     )
 
 

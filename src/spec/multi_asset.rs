@@ -45,7 +45,6 @@ use crate::types::Snapshot;
 
 use super::basket::UniverseSpec;
 use super::expr::NodeSpec;
-use super::signal::SignalSpec;
 use super::template::SpecTemplate;
 use crate::spec::dyn_indicator::{self, AsBool, AsReal, DynIndicator};
 
@@ -57,13 +56,13 @@ use crate::spec::dyn_indicator::{self, AsBool, AsReal, DynIndicator};
 #[serde(deny_unknown_fields)]
 pub struct MultiSideSpec {
     /// The entry signal for this side, per symbol.
-    pub enter: SpecTemplate<SignalSpec>,
+    pub enter: SpecTemplate<NodeSpec>,
 
     /// An optional signal that flattens this side. Defaults to constant
     /// `false` — omit it for an always-in long/short reversal (the
     /// opposite side's `enter` already flips the position).
     #[serde(default)]
-    pub exit: Option<SpecTemplate<SignalSpec>>,
+    pub exit: Option<SpecTemplate<NodeSpec>>,
 
     /// An optional stop-loss price level (a per-symbol source). The
     /// per-symbol [`Position`](crate::indicators::Position) is provided
@@ -122,7 +121,7 @@ pub struct MultiAssetStrategySpec {
     /// strategy, or an equity-drawdown signal for de-risking. Entry /
     /// exit signals still fire every bar independently of the gate.
     #[serde(default)]
-    pub rebalance_on: Option<SignalSpec>,
+    pub rebalance_on: Option<NodeSpec>,
 }
 
 impl MultiAssetStrategySpec {
@@ -356,19 +355,19 @@ impl MultiAssetStrategySpec {
 // ---------------------------------------------------------------------------
 
 fn build_signal(
-    template: &SpecTemplate<SignalSpec>,
+    template: &SpecTemplate<NodeSpec>,
     sym: &str,
     slot: &'static str,
-) -> SignalSpec {
+) -> NodeSpec {
     try_build_signal(template, sym, slot).unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// The fallible twin of [`build_signal`].
 fn try_build_signal(
-    template: &SpecTemplate<SignalSpec>,
+    template: &SpecTemplate<NodeSpec>,
     sym: &str,
     slot: &'static str,
-) -> Result<SignalSpec, String> {
+) -> Result<NodeSpec, String> {
     let mut args = HashMap::new();
     args.insert("SYM".to_string(), Value::String(sym.to_string()));
     template.build(&args).map_err(|e| {
@@ -415,7 +414,7 @@ const PROBE_SYMBOL: &str = "__fugazi_probe__";
 /// to return through; probing here is what makes their remaining panic
 /// unreachable.
 fn probe_signal(
-    template: &SpecTemplate<SignalSpec>,
+    template: &SpecTemplate<NodeSpec>,
     slot: &'static str,
     anchor: &Position,
     book: &Book,

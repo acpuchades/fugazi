@@ -60,7 +60,6 @@ use super::expr::NodeSpec;
 use super::multi_asset::MultiAssetStrategySpec;
 use super::pairs::PairsStrategySpec;
 use super::preset::StrategyRef;
-use super::signal::SignalSpec;
 use super::template::SpecTemplate;
 
 /// YAML surface for the **position-phase rebalance policy** — the impl
@@ -169,7 +168,7 @@ pub struct PortfolioSpec {
     /// fire cycle). A rebalance whose cash phase covers everyone stays
     /// fill-free automatically.
     #[serde(default)]
-    pub rebalance_on: Option<SignalSpec>,
+    pub rebalance_on: Option<NodeSpec>,
 
     /// The **position-phase rebalance policy** — which
     /// [`PositionRebalancer`](crate::portfolio::rebalance::PositionRebalancer)

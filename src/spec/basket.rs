@@ -38,7 +38,6 @@ use crate::strategies::basket::{
 use crate::types::Snapshot;
 
 use super::expr::NodeSpec;
-use super::signal::SignalSpec;
 use super::template::SpecTemplate;
 use crate::spec::dyn_indicator::{AsBool, AsReal, DynIndicator};
 
@@ -221,7 +220,7 @@ pub struct BasketStrategySpec {
     /// `false` — the safe default; the basket sits between rebalances
     /// rather than trading through unsettled data.
     #[serde(default)]
-    pub rebalance_on: Option<SignalSpec>,
+    pub rebalance_on: Option<NodeSpec>,
 
     /// Enforce **dollar-neutrality**: at each rebalance, per-symbol sizes
     /// are scaled so that Σ long_sizes == Σ short_sizes. The smaller

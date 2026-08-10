@@ -1,12 +1,12 @@
-//! YAML-deserializable [`NodeSpec`] — the value-producing expression layer.
+//! YAML-deserializable [`NodeSpec`] — the one composable expression layer.
 //!
-//! Every YAML tag that produces a value (numeric or otherwise —
-//! `!close`/`!ema`/`!current`/`!pick`/`!time`/`!get` etc.) is a variant of
-//! this enum. The twin [`SignalSpec`](super::signal::SignalSpec) covers the
-//! bool-valued predicates. Together they form the CLI's composable
-//! expression surface: a `SideSpec::stop_loss` is an `NodeSpec` (an
-//! expression producing a Real level); a `SideSpec::enter` is a
-//! `SignalSpec` (an expression producing a Bool signal).
+//! Every YAML tag is a variant of this enum, whatever it produces: numeric
+//! sources (`!close`/`!ema`/`!current`/`!pick`/`!time`/`!get`), the boolean
+//! predicates (`!gt`/`!and`/`!crosses_above`/`!changed`/`!is_weekday`), and
+//! the string comparisons. A "signal" is not a separate type — it is just a
+//! `NodeSpec` whose `output_type()` is `Bool`. A `SideSpec::stop_loss` slot
+//! wants a Real-producing node; a `SideSpec::enter` slot wants a
+//! Bool-producing one; both are the same `NodeSpec`.
 //!
 //! Split out of `spec/mod.rs`; the module lives at `crate::spec::expr` and
 //! the type is re-exported at `crate::spec::NodeSpec` via `mod.rs`.
@@ -32,7 +32,6 @@ use crate::indicators::{
 use crate::prelude::*;
 use crate::types::Snapshot;
 
-use super::signal::SignalSpec;
 use super::trailing::{self, AnyStrategyRef, TrailingMetric};
 use crate::indicators::compare;
 use crate::spec::dyn_indicator::{self, AsAtom, AsBool, AsCandle, AsReal, AsStr, DynIndicator, DynType};
@@ -524,7 +523,7 @@ pub enum NodeSpec {
     /// firing bar. `None` until it has fired at least once, which makes every
     /// threshold against it read false until then. See
     /// [`crate::indicators::BarsSince`].
-    BarsSince { source: Box<SignalSpec> },
+    BarsSince { source: Box<NodeSpec> },
     /// Bars elapsed since `source` last set a new `period`-bar high, in
     /// `[0, period - 1]`. See [`crate::indicators::BarsSinceHigh`].
     BarsSinceHigh {
@@ -902,7 +901,7 @@ pub enum NodeSpec {
     /// `None` until every source has warmed. See
     /// [`crate::indicators::IfElse`].
     IfElse {
-        cond: Box<SignalSpec>,
+        cond: Box<NodeSpec>,
         then: Box<NodeSpec>,
         otherwise: Box<NodeSpec>,
     },
@@ -1414,7 +1413,7 @@ enum NodeSpecRaw {
     /// firing bar. `None` until it has fired at least once, which makes every
     /// threshold against it read false until then. See
     /// [`crate::indicators::BarsSince`].
-    BarsSince { source: Box<SignalSpec> },
+    BarsSince { source: Box<NodeSpec> },
     /// Bars elapsed since `source` last set a new `period`-bar high, in
     /// `[0, period - 1]`. See [`crate::indicators::BarsSinceHigh`].
     BarsSinceHigh {
@@ -1792,7 +1791,7 @@ enum NodeSpecRaw {
     /// `None` until every source has warmed. See
     /// [`crate::indicators::IfElse`].
     IfElse {
-        cond: Box<SignalSpec>,
+        cond: Box<NodeSpec>,
         then: Box<NodeSpec>,
         otherwise: Box<NodeSpec>,
     },
@@ -3119,10 +3118,10 @@ impl NodeSpec {
             }
             BarsSince { source } => {
                 // Same shape as `IfElse`'s `cond`: a signal leg is built
-                // through `SignalSpec::build` and viewed as bool.
+                // a boolean-output NodeSpec, viewed as bool.
                 let sig = {
                     let built = source.try_build(anchor, book, portfolio_book, schema, root)?;
-                    AsBool::try_new(built).map_err(|e| signal_trail(source, e))?
+                    AsBool::try_new(built).map_err(|e| trail(source, e))?
                 };
                 dyn_indicator::wrap(self::BarsSince::new(sig))
             }
@@ -3454,7 +3453,7 @@ impl NodeSpec {
             } => {
                 let cond_ind = {
                     let built = cond.try_build(anchor, book, portfolio_book, schema, root)?;
-                    AsBool::try_new(built).map_err(|e| signal_trail(cond, e))?
+                    AsBool::try_new(built).map_err(|e| trail(cond, e))?
                 };
                 let t_ind = real(then)?;
                 let f_ind = real(otherwise)?;
@@ -3659,15 +3658,6 @@ impl NodeSpec {
 /// one [`split_trail`](crate::spec::diagnostics::split_trail) path.
 fn trail(spec: &NodeSpec, message: impl std::fmt::Display) -> String {
     format!("{} > {message}", crate::spec::typecheck::tag_name(spec))
-}
-
-/// [`trail`] for a [`SignalSpec`] leg nested inside an expression (`!bars_since`,
-/// `!if_else`'s `cond`).
-fn signal_trail(spec: &SignalSpec, message: impl std::fmt::Display) -> String {
-    format!(
-        "{} > {message}",
-        crate::spec::typecheck::signal_tag_name(spec)
-    )
 }
 
 /// Build a `!pick { symbol, freq }` leaf. Both fields are optional; the
