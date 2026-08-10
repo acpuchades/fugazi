@@ -1,26 +1,26 @@
-//! YAML-deserializable [`ExprSpec`] — the value-producing expression layer.
+//! YAML-deserializable [`NodeSpec`] — the value-producing expression layer.
 //!
 //! Every YAML tag that produces a value (numeric or otherwise —
 //! `!close`/`!ema`/`!current`/`!pick`/`!time`/`!get` etc.) is a variant of
 //! this enum. The twin [`SignalSpec`](super::signal::SignalSpec) covers the
 //! bool-valued predicates. Together they form the CLI's composable
-//! expression surface: a `SideSpec::stop_loss` is an `ExprSpec` (an
+//! expression surface: a `SideSpec::stop_loss` is an `NodeSpec` (an
 //! expression producing a Real level); a `SideSpec::enter` is a
 //! `SignalSpec` (an expression producing a Bool signal).
 //!
 //! Split out of `spec/mod.rs`; the module lives at `crate::spec::expr` and
-//! the type is re-exported at `crate::spec::ExprSpec` via `mod.rs`.
+//! the type is re-exported at `crate::spec::NodeSpec` via `mod.rs`.
 
 use std::sync::Arc;
 
 use serde::Deserialize;
 
 // Field / calendar / current-bar / current-time leaves are referenced through
-// their full `crate::indicators::` paths inside the `ExprSpec::build`
+// their full `crate::indicators::` paths inside the `NodeSpec::build`
 // match arms — the source-spec variants share those names (Close, High, Year,
 // …) as enum-variant identifiers, so a bare `Close::of(...)` would try to
 // resolve on the enum variant. The `Pick` root is the one exception because
-// it isn't a `ExprSpec` variant.
+// it isn't a `NodeSpec` variant.
 use crate::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, BarsSince, BarsSinceHigh, BarsSinceLow, Bollinger,
     BollingerValue, Book, Cci, Component, Correlation, Dmi, DmiValue, Donchian, DonchianValue, Ema,
@@ -84,23 +84,23 @@ pub(super) fn pick_any_root() -> PickAny<String> {
     PickAny::<String>::new()
 }
 
-pub(super) fn default_source() -> Box<ExprSpec> {
+pub(super) fn default_source() -> Box<NodeSpec> {
     // The default price source for wrapped indicators (`!ema {}`, `!sma {}`, …)
     // is the bar's `close`. Corporate-action adjustment is a data-sourcing
     // concern handled at ingestion (the `yfinance` provider adjusts its candles
     // at fetch), so `close` is authoritative here — the strategy layer carries
     // no adjustment vocabulary of its own.
-    Box::new(ExprSpec::Close { source: None })
+    Box::new(NodeSpec::Close { source: None })
 }
-pub(super) fn default_high() -> Box<ExprSpec> {
-    Box::new(ExprSpec::High { source: None })
+pub(super) fn default_high() -> Box<NodeSpec> {
+    Box::new(NodeSpec::High { source: None })
 }
-pub(super) fn default_low() -> Box<ExprSpec> {
-    Box::new(ExprSpec::Low { source: None })
+pub(super) fn default_low() -> Box<NodeSpec> {
+    Box::new(NodeSpec::Low { source: None })
 }
 /// Default candle source for bar indicators — the current bar itself.
-pub(super) fn default_bar_source() -> Box<ExprSpec> {
-    Box::new(ExprSpec::Current { source: None })
+pub(super) fn default_bar_source() -> Box<NodeSpec> {
+    Box::new(NodeSpec::Current { source: None })
 }
 
 /// Default base for `!log`: natural log (`e`).
@@ -113,7 +113,7 @@ pub(super) fn default_risk_free_rate() -> Real {
     0.0
 }
 
-/// The payload of [`ExprSpec::Value`] — a constant leaf: numeric, string,
+/// The payload of [`NodeSpec::Value`] — a constant leaf: numeric, string,
 /// or (in per-child weight-share context) a list-indexed constant.
 ///
 /// A YAML number builds a [`Value`] (`Real` output, the operand of every
@@ -148,7 +148,7 @@ pub enum ValueLit {
     /// A per-child indexed constant — only meaningful inside a portfolio
     /// weight-share template. `SpecTemplate::build` rewrites this to
     /// `ValueLit::Real(list[CHILD_INDEX])` when `CHILD_INDEX` is present
-    /// in the build args; if it isn't, [`ExprSpec::build`] panics because
+    /// in the build args; if it isn't, [`NodeSpec::build`] panics because
     /// a list literal has no defined output outside per-child context.
     List(Vec<Real>),
 }
@@ -193,7 +193,7 @@ impl TryFrom<serde_norway::Value> for ValueLit {
 /// and the branch to emit on a hit. `when:` is a scalar — either a
 /// number (for numeric dispatch, `on` produces `Real`) or a string (for
 /// string dispatch, `on` produces `Str`); the two forms can't be mixed
-/// within one `!match` (build-time error). `value:` is the ExprSpec
+/// within one `!match` (build-time error). `value:` is the NodeSpec
 /// branch to emit — the "when X, value is Y" pairing.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -206,9 +206,9 @@ pub struct MatchCase {
     /// The branch to emit when the pattern matches. Advanced every bar
     /// regardless of match, per the same "keep warming up" convention as
     /// `!if_else`'s non-selected branch. Named `value:` for the
-    /// "when X, value is Y" reading — a full [`ExprSpec`] (not just a
+    /// "when X, value is Y" reading — a full [`NodeSpec`] (not just a
     /// literal; wrap constants in `!value` as elsewhere).
-    pub value: Box<ExprSpec>,
+    pub value: Box<NodeSpec>,
 }
 
 // ---------------------------------------------------------------------------
@@ -219,7 +219,7 @@ pub struct MatchCase {
 /// `Indicator<Input = Candle, Output = Real>`.
 ///
 /// Every atom-input leaf (`!close`, `!high`, …, all calendar accessors, and
-/// `!get`) carries a **defaulted optional `source: Option<Box<ExprSpec>>`**
+/// `!get`) carries a **defaulted optional `source: Option<Box<NodeSpec>>`**
 /// field. When omitted, the leaf reads its atom from the implicit
 /// empty-selector [`Pick::<String>::new()`] — the single-entry snapshot
 /// unpack that keeps single-series strategies working. When provided
@@ -241,48 +241,48 @@ pub struct MatchCase {
 /// The bare-word / bare-tag forms use the implicit `Pick` root; the tagged
 /// map form threads the given atom source through the leaf. The custom
 /// [`TryFrom<serde_norway::Value>`] impl below normalises the string and
-/// tagged shapes into the map shape [`ExprSpecRaw`] expects, and
-/// [`ExprSpecRaw`] carries the derived externally-tagged deserialization
+/// tagged shapes into the map shape [`NodeSpecRaw`] expects, and
+/// [`NodeSpecRaw`] carries the derived externally-tagged deserialization
 /// logic.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(try_from = "serde_norway::Value")]
-pub enum ExprSpec {
+pub enum NodeSpec {
     // --- atom-input leaves (candle fields) ---
     Close {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     High {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     Low {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     Open {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     Volume {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     Typical {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     Median {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// The current bar itself — the whole [`Candle`], not a scalar. The default
     /// bar source of every bar-consuming indicator (`!atr`, `!obv`, `!adx`, …);
-    /// wrap in [`ExprSpec::Resample`] to lift a downstream bar indicator
+    /// wrap in [`NodeSpec::Resample`] to lift a downstream bar indicator
     /// onto a higher timeframe.
     Current {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
 
     /// Cross-asset projection: project one asset's [`Atom`] out of the
@@ -332,27 +332,27 @@ pub enum ExprSpec {
     PortfolioBook,
 
     // --- book-anchored leaves. Each takes an optional `source:` that
-    // resolves to the book they read (see [`ExprSpec::StrategyBook`] /
-    // [`ExprSpec::PortfolioBook`]). Omitted → `!strategy_book`.
+    // resolves to the book they read (see [`NodeSpec::StrategyBook`] /
+    // [`NodeSpec::PortfolioBook`]). Omitted → `!strategy_book`.
     /// The marked-to-market equity of the book. Always `Some`
     /// (seeded at the book's `initial_equity`). See
     /// [`crate::indicators::Book::equity`].
     Equity {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// The running peak of the book's equity. Always `Some`.
     /// See [`crate::indicators::Book::equity_peak`].
     EquityPeak {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// The book's current drawdown as a non-positive fraction —
     /// `(equity - peak) / peak`, `0` at a fresh peak. See
     /// [`crate::indicators::Book::drawdown`].
     Drawdown {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// The just-completed bar's equity return —
     /// `(equity - prev_equity) / prev_equity`. `None` on the first bar
@@ -360,7 +360,7 @@ pub enum ExprSpec {
     /// [`crate::indicators::Book::return_per_bar`].
     ReturnPerBar {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// The realized P&L of the just-closed aggregate trade in
     /// reference-currency terms. `Some` only on the bar whose fill closed
@@ -371,15 +371,15 @@ pub enum ExprSpec {
     /// fills, so no "portfolio trade" is defined.
     TradePnl {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// The just-closed trade's return as a fraction of the equity at
     /// trade open. `Some` only on the close bar. See
     /// [`crate::indicators::Book::trade_return`]. Also `None` on the
-    /// portfolio aggregate book for the same reason as [`ExprSpec::TradePnl`].
+    /// portfolio aggregate book for the same reason as [`NodeSpec::TradePnl`].
     TradeReturn {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
 
     /// Read one overlay column by name from each atom's side-channel data.
@@ -399,60 +399,60 @@ pub enum ExprSpec {
     Get {
         key: String,
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
 
     // --- price-series indicators (a source + parameters) ---
     Ema {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Sma {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Rma {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Wma {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Hma {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Rsi {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     #[serde(rename = "stddev")]
     StdDev {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Skewness {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Kurtosis {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     #[serde(rename = "zscore")]
     ZScore {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     /// The `pct`-quantile of a source over the trailing `period` bars —
@@ -462,7 +462,7 @@ pub enum ExprSpec {
     /// O(1). See [`crate::indicators::Percentile`].
     Percentile {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
         pct: Real,
     },
@@ -471,7 +471,7 @@ pub enum ExprSpec {
     /// [`crate::indicators::PercentileRank`].
     PercentileRank {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     /// Bars elapsed since `source` (a **signal**) last read true — `0` on the
@@ -483,44 +483,44 @@ pub enum ExprSpec {
     /// `[0, period - 1]`. See [`crate::indicators::BarsSinceHigh`].
     BarsSinceHigh {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     /// Bars elapsed since `source` last set a new `period`-bar low.
     /// See [`crate::indicators::BarsSinceLow`].
     BarsSinceLow {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     /// Rolling Pearson correlation between two Real sources. Both operands are
     /// required — there is no single natural default for a two-source stat.
     Correlation {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
         period: usize,
     },
     /// Lo-MacKinlay variance-ratio regime classifier (`> 1` trending, `< 1`
     /// mean-reverting) over the source's first differences.
     VarianceRatio {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
         lag: usize,
     },
     Cci {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Stochastic {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     StochRsi {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         rsi_period: usize,
         stoch_period: usize,
     },
@@ -528,186 +528,186 @@ pub enum ExprSpec {
     // --- multi-output indicators, one variant per component ---
     MacdLine {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         fast: usize,
         slow: usize,
         signal: usize,
     },
     MacdSignal {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         fast: usize,
         slow: usize,
         signal: usize,
     },
     MacdHistogram {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         fast: usize,
         slow: usize,
         signal: usize,
     },
     BbUpper {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
         k: Real,
     },
     BbMiddle {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
         k: Real,
     },
     BbLower {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
         k: Real,
     },
     KeltnerUpper {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         #[serde(default = "default_bar_source")]
-        candle_source: Box<ExprSpec>,
+        candle_source: Box<NodeSpec>,
         ema_period: usize,
         atr_period: usize,
         multiplier: Real,
     },
     KeltnerMiddle {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         #[serde(default = "default_bar_source")]
-        candle_source: Box<ExprSpec>,
+        candle_source: Box<NodeSpec>,
         ema_period: usize,
         atr_period: usize,
         multiplier: Real,
     },
     KeltnerLower {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         #[serde(default = "default_bar_source")]
-        candle_source: Box<ExprSpec>,
+        candle_source: Box<NodeSpec>,
         ema_period: usize,
         atr_period: usize,
         multiplier: Real,
     },
     DonchianUpper {
         #[serde(default = "default_high")]
-        high: Box<ExprSpec>,
+        high: Box<NodeSpec>,
         #[serde(default = "default_low")]
-        low: Box<ExprSpec>,
+        low: Box<NodeSpec>,
         period: usize,
     },
     DonchianMiddle {
         #[serde(default = "default_high")]
-        high: Box<ExprSpec>,
+        high: Box<NodeSpec>,
         #[serde(default = "default_low")]
-        low: Box<ExprSpec>,
+        low: Box<NodeSpec>,
         period: usize,
     },
     DonchianLower {
         #[serde(default = "default_high")]
-        high: Box<ExprSpec>,
+        high: Box<NodeSpec>,
         #[serde(default = "default_low")]
-        low: Box<ExprSpec>,
+        low: Box<NodeSpec>,
         period: usize,
     },
     Adx {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     PlusDi {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     MinusDi {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     DmiPlusDi {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     DmiMinusDi {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     AroonUp {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     AroonDown {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     AroonOscillator {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
 
     // --- single-output bar indicators ---
     Atr {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     /// Parkinson high/low range volatility estimator over `period`.
     Parkinson {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     /// Garman–Klass OHLC volatility estimator over `period`.
     GarmanKlass {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     /// Rogers–Satchell drift-independent OHLC volatility estimator over `period`.
     RogersSatchell {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Mfi {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     WilliamsR {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Obv {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
     },
     Vwap {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Ad {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
     },
     TrueRange {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
     },
     Sar {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         step: Real,
         max: Real,
     },
@@ -723,7 +723,7 @@ pub enum ExprSpec {
     // `!equal_weight <N>` used to be a variant here, but it's really
     // just `!value <1/N>` — a per-leg constant that normalizes to
     // `1/N`. It's now recognized as sugar and rewritten to `!value`
-    // during `ExprSpec::try_from` before typed parse. See
+    // during `NodeSpec::try_from` before typed parse. See
     // [`rewrite_sugar_tags`].
     /// Inverse realized-vol sizing —
     /// `target / (stddev(log_returns(close), window) * sqrt(bars_per_year))`.
@@ -734,7 +734,7 @@ pub enum ExprSpec {
     /// [`crate::indicators::sizing::vol_target_of`].
     VolTarget {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
         target: Real,
         window: usize,
         bars_per_year: Real,
@@ -747,39 +747,39 @@ pub enum ExprSpec {
     /// [`crate::indicators::sizing::atr_risk_of`].
     AtrRisk {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
         risk_frac: Real,
         period: usize,
         atr_multiple: Real,
     },
     /// Drawdown-throttled sizing — `max(0, min(1, 1 + book.drawdown() /
     /// max_drawdown))`. Reads a book via `source:` (default:
-    /// [`ExprSpec::StrategyBook`]). See
+    /// [`NodeSpec::StrategyBook`]). See
     /// [`crate::indicators::sizing::drawdown_throttle`].
     DrawdownThrottle {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
         max_drawdown: Real,
     },
     /// Realized-vol targeting on the book's equity return series
     /// — `target / (stddev(book.return_per_bar, window) *
     /// sqrt(bars_per_year))`. Reads a book via `source:` (default:
-    /// [`ExprSpec::StrategyBook`]). See
+    /// [`NodeSpec::StrategyBook`]). See
     /// [`crate::indicators::sizing::equity_vol_target`].
     EquityVolTarget {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
         target: Real,
         window: usize,
         bars_per_year: Real,
     },
     /// Fractional Kelly over the last `window` closed-trade returns —
     /// `kelly_fraction * mean / variance`, clamped to `>= 0`. Reads a book
-    /// via `source:` (default: [`ExprSpec::StrategyBook`]). See
+    /// via `source:` (default: [`NodeSpec::StrategyBook`]). See
     /// [`crate::indicators::sizing::fractional_kelly`].
     FractionalKelly {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
         kelly_fraction: Real,
         window: usize,
     },
@@ -833,20 +833,20 @@ pub enum ExprSpec {
 
     // --- transform operators ---
     Add {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
     },
     Sub {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
     },
     Mul {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
     },
     Div {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
     },
     /// Three-source ternary: reads `cond` (a bool signal), emits
     /// `then`'s value when `cond` is true, `otherwise`'s when false, and
@@ -857,15 +857,15 @@ pub enum ExprSpec {
     /// [`crate::indicators::IfElse`].
     IfElse {
         cond: Box<SignalSpec>,
-        then: Box<ExprSpec>,
-        otherwise: Box<ExprSpec>,
+        then: Box<NodeSpec>,
+        otherwise: Box<NodeSpec>,
     },
     /// N-way dispatch by value equality — reads `on` once per bar and
     /// picks the *first* case whose pattern equals `on`'s reading; falls
     /// through to `default` when no case matches. Every branch (all
     /// cases + default) is advanced every bar so its warm-up progresses
     /// even on bars it isn't selected — same convention as
-    /// [`ExprSpec::IfElse`](Self::IfElse).
+    /// [`NodeSpec::IfElse`](Self::IfElse).
     ///
     /// Case patterns are homogeneous: either all numeric (dispatching
     /// on a `Real`-output `on`) or all string (dispatching on a
@@ -873,45 +873,45 @@ pub enum ExprSpec {
     /// Mixed patterns are rejected at build. See
     /// [`crate::indicators::Match`].
     Match {
-        on: Box<ExprSpec>,
+        on: Box<NodeSpec>,
         cases: Vec<MatchCase>,
-        default: Box<ExprSpec>,
+        default: Box<NodeSpec>,
     },
     Lag {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Diff {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Ratio {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Roc {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     RollingMax {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     RollingMin {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     /// Logarithm of `source` in `base` (defaults to natural log, `e`).
     /// Emits `None` on samples where the source's output is non-positive.
     Log {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         #[serde(default = "default_log_base")]
         base: Real,
     },
@@ -920,7 +920,7 @@ pub enum ExprSpec {
     /// smoother of a resampled pipeline so per-base-tick consumers see the
     /// finished higher-timeframe value between boundaries — see
     /// [`crate::indicators::Latch`].
-    Latch { source: Box<ExprSpec> },
+    Latch { source: Box<NodeSpec> },
     /// Aggregates `every` base candles into one higher-timeframe candle and
     /// runs the `inner` source over it, emitting `inner`'s output on each
     /// completed bucket and `None` in between. `inner` is any source that
@@ -931,13 +931,13 @@ pub enum ExprSpec {
     /// base-timeframe**: it's fed one base candle per tick and reports at
     /// that same cadence; the emitted `Option<Real>` marks whether the inner
     /// produced a value on a completed bucket. Wrap the whole downstream
-    /// chain in [`Latch`](ExprSpec::Latch) so per-base-tick reads see the
+    /// chain in [`Latch`](NodeSpec::Latch) so per-base-tick reads see the
     /// finished value between boundaries.
     Resample {
         every: usize,
-        inner: Box<ExprSpec>,
+        inner: Box<NodeSpec>,
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
     },
     /// Passthrough wrapper that reports `unstable_period() = 0`. The output
     /// and warm-up of `source` are unchanged; the strategy-readiness gate
@@ -945,7 +945,7 @@ pub enum ExprSpec {
     /// subtree's IIR settling tail. The explicit opt-out to the "wait for
     /// every source to be past its unstable tail" safe default; see
     /// [`crate::indicators::Unstable`].
-    Unstable { source: Box<ExprSpec> },
+    Unstable { source: Box<NodeSpec> },
 
     // --- calendar accessors (read `atom.time`, emit Real; None when time is
     // absent). Each takes an optional `source` for cross-asset use — the
@@ -954,73 +954,73 @@ pub enum ExprSpec {
     /// The Gregorian year (e.g. `2024.0`).
     Year {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// The Gregorian month, `1.0` (Jan) through `12.0` (Dec).
     Month {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// The day of the month, `1.0` through `31.0`.
     Day {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// The hour of the day (UTC), `0.0` through `23.0`.
     Hour {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// The minute of the hour, `0.0` through `59.0`.
     Minute {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// The second of the minute, `0.0` through `59.0`.
     Second {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// ISO 8601 weekday, `1.0` (Monday) through `7.0` (Sunday).
     DayOfWeek {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// Day of the year, `1.0` through `366.0`.
     DayOfYear {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// ISO 8601 week of the year, `1.0` through `53.0`.
     WeekOfYear {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// Calendar quarter, `1.0` through `4.0`.
     Quarter {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// Unix seconds since the epoch (as a Real).
     UnixSeconds {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// Unix milliseconds since the epoch (as a Real).
     UnixMillis {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// The raw bar-open [`Timestamp`] payload (yields
     /// `DynType::Time`, not a scalar). The `Timestamp` twin of
-    /// [`ExprSpec::Current`].
+    /// [`NodeSpec::Current`].
     Time {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
 }
 
-// Mirror enum: identical shape as ExprSpec but with derived Deserialize —
+// Mirror enum: identical shape as NodeSpec but with derived Deserialize —
 // used inside TryFrom<serde_norway::Value> to run the standard externally-
 // tagged deserialization once bare-string / tagged shapes are normalised.
 #[derive(Debug, Deserialize)]
@@ -1032,44 +1032,44 @@ pub enum ExprSpec {
 // obvious next edit adds the right key and leaves the wrong one behind.
 // Denying produces serde's "unknown field `els`, expected one of ..." instead.
 #[serde(deny_unknown_fields)]
-enum ExprSpecRaw {
+enum NodeSpecRaw {
 
     // --- atom-input leaves (candle fields) ---
     Close {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     High {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     Low {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     Open {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     Volume {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     Typical {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     Median {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// The current bar itself — the whole [`Candle`], not a scalar. The default
     /// bar source of every bar-consuming indicator (`!atr`, `!obv`, `!adx`, …);
-    /// wrap in [`ExprSpec::Resample`] to lift a downstream bar indicator
+    /// wrap in [`NodeSpec::Resample`] to lift a downstream bar indicator
     /// onto a higher timeframe.
     Current {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
 
     /// Cross-asset projection: project one asset's [`Atom`] out of the
@@ -1119,27 +1119,27 @@ enum ExprSpecRaw {
     PortfolioBook,
 
     // --- book-anchored leaves. Each takes an optional `source:` that
-    // resolves to the book they read (see [`ExprSpec::StrategyBook`] /
-    // [`ExprSpec::PortfolioBook`]). Omitted → `!strategy_book`.
+    // resolves to the book they read (see [`NodeSpec::StrategyBook`] /
+    // [`NodeSpec::PortfolioBook`]). Omitted → `!strategy_book`.
     /// The marked-to-market equity of the book. Always `Some`
     /// (seeded at the book's `initial_equity`). See
     /// [`crate::indicators::Book::equity`].
     Equity {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// The running peak of the book's equity. Always `Some`.
     /// See [`crate::indicators::Book::equity_peak`].
     EquityPeak {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// The book's current drawdown as a non-positive fraction —
     /// `(equity - peak) / peak`, `0` at a fresh peak. See
     /// [`crate::indicators::Book::drawdown`].
     Drawdown {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// The just-completed bar's equity return —
     /// `(equity - prev_equity) / prev_equity`. `None` on the first bar
@@ -1147,7 +1147,7 @@ enum ExprSpecRaw {
     /// [`crate::indicators::Book::return_per_bar`].
     ReturnPerBar {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// The realized P&L of the just-closed aggregate trade in
     /// reference-currency terms. `Some` only on the bar whose fill closed
@@ -1158,15 +1158,15 @@ enum ExprSpecRaw {
     /// fills, so no "portfolio trade" is defined.
     TradePnl {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// The just-closed trade's return as a fraction of the equity at
     /// trade open. `Some` only on the close bar. See
     /// [`crate::indicators::Book::trade_return`]. Also `None` on the
-    /// portfolio aggregate book for the same reason as [`ExprSpec::TradePnl`].
+    /// portfolio aggregate book for the same reason as [`NodeSpec::TradePnl`].
     TradeReturn {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
 
     /// Read one overlay column by name from each atom's side-channel data.
@@ -1186,60 +1186,60 @@ enum ExprSpecRaw {
     Get {
         key: String,
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
 
     // --- price-series indicators (a source + parameters) ---
     Ema {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Sma {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Rma {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Wma {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Hma {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Rsi {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     #[serde(rename = "stddev")]
     StdDev {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Skewness {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Kurtosis {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     #[serde(rename = "zscore")]
     ZScore {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     /// The `pct`-quantile of a source over the trailing `period` bars —
@@ -1249,7 +1249,7 @@ enum ExprSpecRaw {
     /// O(1). See [`crate::indicators::Percentile`].
     Percentile {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
         pct: Real,
     },
@@ -1258,7 +1258,7 @@ enum ExprSpecRaw {
     /// [`crate::indicators::PercentileRank`].
     PercentileRank {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     /// Bars elapsed since `source` (a **signal**) last read true — `0` on the
@@ -1270,44 +1270,44 @@ enum ExprSpecRaw {
     /// `[0, period - 1]`. See [`crate::indicators::BarsSinceHigh`].
     BarsSinceHigh {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     /// Bars elapsed since `source` last set a new `period`-bar low.
     /// See [`crate::indicators::BarsSinceLow`].
     BarsSinceLow {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     /// Rolling Pearson correlation between two Real sources. Both operands are
     /// required — there is no single natural default for a two-source stat.
     Correlation {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
         period: usize,
     },
     /// Lo-MacKinlay variance-ratio regime classifier (`> 1` trending, `< 1`
     /// mean-reverting) over the source's first differences.
     VarianceRatio {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
         lag: usize,
     },
     Cci {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Stochastic {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     StochRsi {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         rsi_period: usize,
         stoch_period: usize,
     },
@@ -1315,186 +1315,186 @@ enum ExprSpecRaw {
     // --- multi-output indicators, one variant per component ---
     MacdLine {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         fast: usize,
         slow: usize,
         signal: usize,
     },
     MacdSignal {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         fast: usize,
         slow: usize,
         signal: usize,
     },
     MacdHistogram {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         fast: usize,
         slow: usize,
         signal: usize,
     },
     BbUpper {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
         k: Real,
     },
     BbMiddle {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
         k: Real,
     },
     BbLower {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
         k: Real,
     },
     KeltnerUpper {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         #[serde(default = "default_bar_source")]
-        candle_source: Box<ExprSpec>,
+        candle_source: Box<NodeSpec>,
         ema_period: usize,
         atr_period: usize,
         multiplier: Real,
     },
     KeltnerMiddle {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         #[serde(default = "default_bar_source")]
-        candle_source: Box<ExprSpec>,
+        candle_source: Box<NodeSpec>,
         ema_period: usize,
         atr_period: usize,
         multiplier: Real,
     },
     KeltnerLower {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         #[serde(default = "default_bar_source")]
-        candle_source: Box<ExprSpec>,
+        candle_source: Box<NodeSpec>,
         ema_period: usize,
         atr_period: usize,
         multiplier: Real,
     },
     DonchianUpper {
         #[serde(default = "default_high")]
-        high: Box<ExprSpec>,
+        high: Box<NodeSpec>,
         #[serde(default = "default_low")]
-        low: Box<ExprSpec>,
+        low: Box<NodeSpec>,
         period: usize,
     },
     DonchianMiddle {
         #[serde(default = "default_high")]
-        high: Box<ExprSpec>,
+        high: Box<NodeSpec>,
         #[serde(default = "default_low")]
-        low: Box<ExprSpec>,
+        low: Box<NodeSpec>,
         period: usize,
     },
     DonchianLower {
         #[serde(default = "default_high")]
-        high: Box<ExprSpec>,
+        high: Box<NodeSpec>,
         #[serde(default = "default_low")]
-        low: Box<ExprSpec>,
+        low: Box<NodeSpec>,
         period: usize,
     },
     Adx {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     PlusDi {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     MinusDi {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     DmiPlusDi {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     DmiMinusDi {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     AroonUp {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     AroonDown {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     AroonOscillator {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
 
     // --- single-output bar indicators ---
     Atr {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     /// Parkinson high/low range volatility estimator over `period`.
     Parkinson {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     /// Garman–Klass OHLC volatility estimator over `period`.
     GarmanKlass {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     /// Rogers–Satchell drift-independent OHLC volatility estimator over `period`.
     RogersSatchell {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Mfi {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     WilliamsR {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Obv {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
     },
     Vwap {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Ad {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
     },
     TrueRange {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
     },
     Sar {
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         step: Real,
         max: Real,
     },
@@ -1510,7 +1510,7 @@ enum ExprSpecRaw {
     // `!equal_weight <N>` used to be a variant here, but it's really
     // just `!value <1/N>` — a per-leg constant that normalizes to
     // `1/N`. It's now recognized as sugar and rewritten to `!value`
-    // during `ExprSpec::try_from` before typed parse. See
+    // during `NodeSpec::try_from` before typed parse. See
     // [`rewrite_sugar_tags`].
     /// Inverse realized-vol sizing —
     /// `target / (stddev(log_returns(close), window) * sqrt(bars_per_year))`.
@@ -1521,7 +1521,7 @@ enum ExprSpecRaw {
     /// [`crate::indicators::sizing::vol_target_of`].
     VolTarget {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
         target: Real,
         window: usize,
         bars_per_year: Real,
@@ -1534,39 +1534,39 @@ enum ExprSpecRaw {
     /// [`crate::indicators::sizing::atr_risk_of`].
     AtrRisk {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
         risk_frac: Real,
         period: usize,
         atr_multiple: Real,
     },
     /// Drawdown-throttled sizing — `max(0, min(1, 1 + book.drawdown() /
     /// max_drawdown))`. Reads a book via `source:` (default:
-    /// [`ExprSpec::StrategyBook`]). See
+    /// [`NodeSpec::StrategyBook`]). See
     /// [`crate::indicators::sizing::drawdown_throttle`].
     DrawdownThrottle {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
         max_drawdown: Real,
     },
     /// Realized-vol targeting on the book's equity return series
     /// — `target / (stddev(book.return_per_bar, window) *
     /// sqrt(bars_per_year))`. Reads a book via `source:` (default:
-    /// [`ExprSpec::StrategyBook`]). See
+    /// [`NodeSpec::StrategyBook`]). See
     /// [`crate::indicators::sizing::equity_vol_target`].
     EquityVolTarget {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
         target: Real,
         window: usize,
         bars_per_year: Real,
     },
     /// Fractional Kelly over the last `window` closed-trade returns —
     /// `kelly_fraction * mean / variance`, clamped to `>= 0`. Reads a book
-    /// via `source:` (default: [`ExprSpec::StrategyBook`]). See
+    /// via `source:` (default: [`NodeSpec::StrategyBook`]). See
     /// [`crate::indicators::sizing::fractional_kelly`].
     FractionalKelly {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
         kelly_fraction: Real,
         window: usize,
     },
@@ -1620,20 +1620,20 @@ enum ExprSpecRaw {
 
     // --- transform operators ---
     Add {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
     },
     Sub {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
     },
     Mul {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
     },
     Div {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
     },
     /// Three-source ternary: reads `cond` (a bool signal), emits
     /// `then`'s value when `cond` is true, `otherwise`'s when false, and
@@ -1644,15 +1644,15 @@ enum ExprSpecRaw {
     /// [`crate::indicators::IfElse`].
     IfElse {
         cond: Box<SignalSpec>,
-        then: Box<ExprSpec>,
-        otherwise: Box<ExprSpec>,
+        then: Box<NodeSpec>,
+        otherwise: Box<NodeSpec>,
     },
     /// N-way dispatch by value equality — reads `on` once per bar and
     /// picks the *first* case whose pattern equals `on`'s reading; falls
     /// through to `default` when no case matches. Every branch (all
     /// cases + default) is advanced every bar so its warm-up progresses
     /// even on bars it isn't selected — same convention as
-    /// [`ExprSpec::IfElse`](Self::IfElse).
+    /// [`NodeSpec::IfElse`](Self::IfElse).
     ///
     /// Case patterns are homogeneous: either all numeric (dispatching
     /// on a `Real`-output `on`) or all string (dispatching on a
@@ -1660,45 +1660,45 @@ enum ExprSpecRaw {
     /// Mixed patterns are rejected at build. See
     /// [`crate::indicators::Match`].
     Match {
-        on: Box<ExprSpec>,
+        on: Box<NodeSpec>,
         cases: Vec<MatchCase>,
-        default: Box<ExprSpec>,
+        default: Box<NodeSpec>,
     },
     Lag {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Diff {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Ratio {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     Roc {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     RollingMax {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     RollingMin {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         period: usize,
     },
     /// Logarithm of `source` in `base` (defaults to natural log, `e`).
     /// Emits `None` on samples where the source's output is non-positive.
     Log {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         #[serde(default = "default_log_base")]
         base: Real,
     },
@@ -1707,7 +1707,7 @@ enum ExprSpecRaw {
     /// smoother of a resampled pipeline so per-base-tick consumers see the
     /// finished higher-timeframe value between boundaries — see
     /// [`crate::indicators::Latch`].
-    Latch { source: Box<ExprSpec> },
+    Latch { source: Box<NodeSpec> },
     /// Aggregates `every` base candles into one higher-timeframe candle and
     /// runs the `inner` source over it, emitting `inner`'s output on each
     /// completed bucket and `None` in between. `inner` is any source that
@@ -1718,13 +1718,13 @@ enum ExprSpecRaw {
     /// base-timeframe**: it's fed one base candle per tick and reports at
     /// that same cadence; the emitted `Option<Real>` marks whether the inner
     /// produced a value on a completed bucket. Wrap the whole downstream
-    /// chain in [`Latch`](ExprSpec::Latch) so per-base-tick reads see the
+    /// chain in [`Latch`](NodeSpec::Latch) so per-base-tick reads see the
     /// finished value between boundaries.
     Resample {
         every: usize,
-        inner: Box<ExprSpec>,
+        inner: Box<NodeSpec>,
         #[serde(default = "default_bar_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
     },
     /// Passthrough wrapper that reports `unstable_period() = 0`. The output
     /// and warm-up of `source` are unchanged; the strategy-readiness gate
@@ -1732,7 +1732,7 @@ enum ExprSpecRaw {
     /// subtree's IIR settling tail. The explicit opt-out to the "wait for
     /// every source to be past its unstable tail" safe default; see
     /// [`crate::indicators::Unstable`].
-    Unstable { source: Box<ExprSpec> },
+    Unstable { source: Box<NodeSpec> },
 
     // --- calendar accessors (read `atom.time`, emit Real; None when time is
     // absent). Each takes an optional `source` for cross-asset use — the
@@ -1741,236 +1741,236 @@ enum ExprSpecRaw {
     /// The Gregorian year (e.g. `2024.0`).
     Year {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// The Gregorian month, `1.0` (Jan) through `12.0` (Dec).
     Month {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// The day of the month, `1.0` through `31.0`.
     Day {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// The hour of the day (UTC), `0.0` through `23.0`.
     Hour {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// The minute of the hour, `0.0` through `59.0`.
     Minute {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// The second of the minute, `0.0` through `59.0`.
     Second {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// ISO 8601 weekday, `1.0` (Monday) through `7.0` (Sunday).
     DayOfWeek {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// Day of the year, `1.0` through `366.0`.
     DayOfYear {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// ISO 8601 week of the year, `1.0` through `53.0`.
     WeekOfYear {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// Calendar quarter, `1.0` through `4.0`.
     Quarter {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// Unix seconds since the epoch (as a Real).
     UnixSeconds {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// Unix milliseconds since the epoch (as a Real).
     UnixMillis {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
     /// The raw bar-open [`Timestamp`] payload (yields
     /// `DynType::Time`, not a scalar). The `Timestamp` twin of
-    /// [`ExprSpec::Current`].
+    /// [`NodeSpec::Current`].
     Time {
         #[serde(default)]
-        source: Option<Box<ExprSpec>>,
+        source: Option<Box<NodeSpec>>,
     },
 }
 
-impl From<ExprSpecRaw> for ExprSpec {
-    fn from(v: ExprSpecRaw) -> Self {
+impl From<NodeSpecRaw> for NodeSpec {
+    fn from(v: NodeSpecRaw) -> Self {
         match v {
-            ExprSpecRaw::Close { source } => ExprSpec::Close { source },
-            ExprSpecRaw::High { source } => ExprSpec::High { source },
-            ExprSpecRaw::Low { source } => ExprSpec::Low { source },
-            ExprSpecRaw::Open { source } => ExprSpec::Open { source },
-            ExprSpecRaw::Volume { source } => ExprSpec::Volume { source },
-            ExprSpecRaw::Typical { source } => ExprSpec::Typical { source },
-            ExprSpecRaw::Median { source } => ExprSpec::Median { source },
-            ExprSpecRaw::Current { source } => ExprSpec::Current { source },
-            ExprSpecRaw::Pick { symbol, freq } => ExprSpec::Pick { symbol, freq },
-            ExprSpecRaw::Value(x) => ExprSpec::Value(x),
-            ExprSpecRaw::Entry => ExprSpec::Entry,
-            ExprSpecRaw::Peak => ExprSpec::Peak,
-            ExprSpecRaw::Trough => ExprSpec::Trough,
-            ExprSpecRaw::StrategyBook => ExprSpec::StrategyBook,
-            ExprSpecRaw::PortfolioBook => ExprSpec::PortfolioBook,
-            ExprSpecRaw::Equity { source } => ExprSpec::Equity { source },
-            ExprSpecRaw::EquityPeak { source } => ExprSpec::EquityPeak { source },
-            ExprSpecRaw::Drawdown { source } => ExprSpec::Drawdown { source },
-            ExprSpecRaw::ReturnPerBar { source } => ExprSpec::ReturnPerBar { source },
-            ExprSpecRaw::TradePnl { source } => ExprSpec::TradePnl { source },
-            ExprSpecRaw::TradeReturn { source } => ExprSpec::TradeReturn { source },
-            ExprSpecRaw::Get { key, source } => ExprSpec::Get { key, source },
-            ExprSpecRaw::Ema { source, period } => ExprSpec::Ema { source, period },
-            ExprSpecRaw::Sma { source, period } => ExprSpec::Sma { source, period },
-            ExprSpecRaw::Rma { source, period } => ExprSpec::Rma { source, period },
-            ExprSpecRaw::Wma { source, period } => ExprSpec::Wma { source, period },
-            ExprSpecRaw::Hma { source, period } => ExprSpec::Hma { source, period },
-            ExprSpecRaw::Rsi { source, period } => ExprSpec::Rsi { source, period },
-            ExprSpecRaw::StdDev { source, period } => ExprSpec::StdDev { source, period },
-            ExprSpecRaw::Skewness { source, period } => ExprSpec::Skewness { source, period },
-            ExprSpecRaw::Kurtosis { source, period } => ExprSpec::Kurtosis { source, period },
-            ExprSpecRaw::ZScore { source, period } => ExprSpec::ZScore { source, period },
-            ExprSpecRaw::Percentile {
+            NodeSpecRaw::Close { source } => NodeSpec::Close { source },
+            NodeSpecRaw::High { source } => NodeSpec::High { source },
+            NodeSpecRaw::Low { source } => NodeSpec::Low { source },
+            NodeSpecRaw::Open { source } => NodeSpec::Open { source },
+            NodeSpecRaw::Volume { source } => NodeSpec::Volume { source },
+            NodeSpecRaw::Typical { source } => NodeSpec::Typical { source },
+            NodeSpecRaw::Median { source } => NodeSpec::Median { source },
+            NodeSpecRaw::Current { source } => NodeSpec::Current { source },
+            NodeSpecRaw::Pick { symbol, freq } => NodeSpec::Pick { symbol, freq },
+            NodeSpecRaw::Value(x) => NodeSpec::Value(x),
+            NodeSpecRaw::Entry => NodeSpec::Entry,
+            NodeSpecRaw::Peak => NodeSpec::Peak,
+            NodeSpecRaw::Trough => NodeSpec::Trough,
+            NodeSpecRaw::StrategyBook => NodeSpec::StrategyBook,
+            NodeSpecRaw::PortfolioBook => NodeSpec::PortfolioBook,
+            NodeSpecRaw::Equity { source } => NodeSpec::Equity { source },
+            NodeSpecRaw::EquityPeak { source } => NodeSpec::EquityPeak { source },
+            NodeSpecRaw::Drawdown { source } => NodeSpec::Drawdown { source },
+            NodeSpecRaw::ReturnPerBar { source } => NodeSpec::ReturnPerBar { source },
+            NodeSpecRaw::TradePnl { source } => NodeSpec::TradePnl { source },
+            NodeSpecRaw::TradeReturn { source } => NodeSpec::TradeReturn { source },
+            NodeSpecRaw::Get { key, source } => NodeSpec::Get { key, source },
+            NodeSpecRaw::Ema { source, period } => NodeSpec::Ema { source, period },
+            NodeSpecRaw::Sma { source, period } => NodeSpec::Sma { source, period },
+            NodeSpecRaw::Rma { source, period } => NodeSpec::Rma { source, period },
+            NodeSpecRaw::Wma { source, period } => NodeSpec::Wma { source, period },
+            NodeSpecRaw::Hma { source, period } => NodeSpec::Hma { source, period },
+            NodeSpecRaw::Rsi { source, period } => NodeSpec::Rsi { source, period },
+            NodeSpecRaw::StdDev { source, period } => NodeSpec::StdDev { source, period },
+            NodeSpecRaw::Skewness { source, period } => NodeSpec::Skewness { source, period },
+            NodeSpecRaw::Kurtosis { source, period } => NodeSpec::Kurtosis { source, period },
+            NodeSpecRaw::ZScore { source, period } => NodeSpec::ZScore { source, period },
+            NodeSpecRaw::Percentile {
                 source,
                 period,
                 pct,
-            } => ExprSpec::Percentile {
+            } => NodeSpec::Percentile {
                 source,
                 period,
                 pct,
             },
-            ExprSpecRaw::PercentileRank { source, period } => {
-                ExprSpec::PercentileRank { source, period }
+            NodeSpecRaw::PercentileRank { source, period } => {
+                NodeSpec::PercentileRank { source, period }
             }
-            ExprSpecRaw::BarsSince { source } => ExprSpec::BarsSince { source },
-            ExprSpecRaw::BarsSinceHigh { source, period } => {
-                ExprSpec::BarsSinceHigh { source, period }
+            NodeSpecRaw::BarsSince { source } => NodeSpec::BarsSince { source },
+            NodeSpecRaw::BarsSinceHigh { source, period } => {
+                NodeSpec::BarsSinceHigh { source, period }
             }
-            ExprSpecRaw::BarsSinceLow { source, period } => {
-                ExprSpec::BarsSinceLow { source, period }
+            NodeSpecRaw::BarsSinceLow { source, period } => {
+                NodeSpec::BarsSinceLow { source, period }
             }
-            ExprSpecRaw::Correlation { lhs, rhs, period } => ExprSpec::Correlation { lhs, rhs, period },
-            ExprSpecRaw::VarianceRatio {
+            NodeSpecRaw::Correlation { lhs, rhs, period } => NodeSpec::Correlation { lhs, rhs, period },
+            NodeSpecRaw::VarianceRatio {
                 source,
                 period,
                 lag,
-            } => ExprSpec::VarianceRatio {
+            } => NodeSpec::VarianceRatio {
                 source,
                 period,
                 lag,
             },
-            ExprSpecRaw::Cci { source, period } => ExprSpec::Cci { source, period },
-            ExprSpecRaw::Stochastic { source, period } => ExprSpec::Stochastic { source, period },
-            ExprSpecRaw::StochRsi { source, rsi_period, stoch_period } => ExprSpec::StochRsi { source, rsi_period, stoch_period },
-            ExprSpecRaw::MacdLine { source, fast, slow, signal } => ExprSpec::MacdLine { source, fast, slow, signal },
-            ExprSpecRaw::MacdSignal { source, fast, slow, signal } => ExprSpec::MacdSignal { source, fast, slow, signal },
-            ExprSpecRaw::MacdHistogram { source, fast, slow, signal } => ExprSpec::MacdHistogram { source, fast, slow, signal },
-            ExprSpecRaw::BbUpper { source, period, k } => ExprSpec::BbUpper { source, period, k },
-            ExprSpecRaw::BbMiddle { source, period, k } => ExprSpec::BbMiddle { source, period, k },
-            ExprSpecRaw::BbLower { source, period, k } => ExprSpec::BbLower { source, period, k },
-            ExprSpecRaw::KeltnerUpper { source, candle_source, ema_period, atr_period, multiplier } => ExprSpec::KeltnerUpper { source, candle_source, ema_period, atr_period, multiplier },
-            ExprSpecRaw::KeltnerMiddle { source, candle_source, ema_period, atr_period, multiplier } => ExprSpec::KeltnerMiddle { source, candle_source, ema_period, atr_period, multiplier },
-            ExprSpecRaw::KeltnerLower { source, candle_source, ema_period, atr_period, multiplier } => ExprSpec::KeltnerLower { source, candle_source, ema_period, atr_period, multiplier },
-            ExprSpecRaw::DonchianUpper { high, low, period } => ExprSpec::DonchianUpper { high, low, period },
-            ExprSpecRaw::DonchianMiddle { high, low, period } => ExprSpec::DonchianMiddle { high, low, period },
-            ExprSpecRaw::DonchianLower { high, low, period } => ExprSpec::DonchianLower { high, low, period },
-            ExprSpecRaw::Adx { source, period } => ExprSpec::Adx { source, period },
-            ExprSpecRaw::PlusDi { source, period } => ExprSpec::PlusDi { source, period },
-            ExprSpecRaw::MinusDi { source, period } => ExprSpec::MinusDi { source, period },
-            ExprSpecRaw::DmiPlusDi { source, period } => ExprSpec::DmiPlusDi { source, period },
-            ExprSpecRaw::DmiMinusDi { source, period } => ExprSpec::DmiMinusDi { source, period },
-            ExprSpecRaw::AroonUp { source, period } => ExprSpec::AroonUp { source, period },
-            ExprSpecRaw::AroonDown { source, period } => ExprSpec::AroonDown { source, period },
-            ExprSpecRaw::AroonOscillator { source, period } => ExprSpec::AroonOscillator { source, period },
-            ExprSpecRaw::Atr { source, period } => ExprSpec::Atr { source, period },
-            ExprSpecRaw::Parkinson { source, period } => ExprSpec::Parkinson { source, period },
-            ExprSpecRaw::GarmanKlass { source, period } => ExprSpec::GarmanKlass { source, period },
-            ExprSpecRaw::RogersSatchell { source, period } => {
-                ExprSpec::RogersSatchell { source, period }
+            NodeSpecRaw::Cci { source, period } => NodeSpec::Cci { source, period },
+            NodeSpecRaw::Stochastic { source, period } => NodeSpec::Stochastic { source, period },
+            NodeSpecRaw::StochRsi { source, rsi_period, stoch_period } => NodeSpec::StochRsi { source, rsi_period, stoch_period },
+            NodeSpecRaw::MacdLine { source, fast, slow, signal } => NodeSpec::MacdLine { source, fast, slow, signal },
+            NodeSpecRaw::MacdSignal { source, fast, slow, signal } => NodeSpec::MacdSignal { source, fast, slow, signal },
+            NodeSpecRaw::MacdHistogram { source, fast, slow, signal } => NodeSpec::MacdHistogram { source, fast, slow, signal },
+            NodeSpecRaw::BbUpper { source, period, k } => NodeSpec::BbUpper { source, period, k },
+            NodeSpecRaw::BbMiddle { source, period, k } => NodeSpec::BbMiddle { source, period, k },
+            NodeSpecRaw::BbLower { source, period, k } => NodeSpec::BbLower { source, period, k },
+            NodeSpecRaw::KeltnerUpper { source, candle_source, ema_period, atr_period, multiplier } => NodeSpec::KeltnerUpper { source, candle_source, ema_period, atr_period, multiplier },
+            NodeSpecRaw::KeltnerMiddle { source, candle_source, ema_period, atr_period, multiplier } => NodeSpec::KeltnerMiddle { source, candle_source, ema_period, atr_period, multiplier },
+            NodeSpecRaw::KeltnerLower { source, candle_source, ema_period, atr_period, multiplier } => NodeSpec::KeltnerLower { source, candle_source, ema_period, atr_period, multiplier },
+            NodeSpecRaw::DonchianUpper { high, low, period } => NodeSpec::DonchianUpper { high, low, period },
+            NodeSpecRaw::DonchianMiddle { high, low, period } => NodeSpec::DonchianMiddle { high, low, period },
+            NodeSpecRaw::DonchianLower { high, low, period } => NodeSpec::DonchianLower { high, low, period },
+            NodeSpecRaw::Adx { source, period } => NodeSpec::Adx { source, period },
+            NodeSpecRaw::PlusDi { source, period } => NodeSpec::PlusDi { source, period },
+            NodeSpecRaw::MinusDi { source, period } => NodeSpec::MinusDi { source, period },
+            NodeSpecRaw::DmiPlusDi { source, period } => NodeSpec::DmiPlusDi { source, period },
+            NodeSpecRaw::DmiMinusDi { source, period } => NodeSpec::DmiMinusDi { source, period },
+            NodeSpecRaw::AroonUp { source, period } => NodeSpec::AroonUp { source, period },
+            NodeSpecRaw::AroonDown { source, period } => NodeSpec::AroonDown { source, period },
+            NodeSpecRaw::AroonOscillator { source, period } => NodeSpec::AroonOscillator { source, period },
+            NodeSpecRaw::Atr { source, period } => NodeSpec::Atr { source, period },
+            NodeSpecRaw::Parkinson { source, period } => NodeSpec::Parkinson { source, period },
+            NodeSpecRaw::GarmanKlass { source, period } => NodeSpec::GarmanKlass { source, period },
+            NodeSpecRaw::RogersSatchell { source, period } => {
+                NodeSpec::RogersSatchell { source, period }
             }
-            ExprSpecRaw::Mfi { source, period } => ExprSpec::Mfi { source, period },
-            ExprSpecRaw::WilliamsR { source, period } => ExprSpec::WilliamsR { source, period },
-            ExprSpecRaw::Obv { source } => ExprSpec::Obv { source },
-            ExprSpecRaw::Vwap { source, period } => ExprSpec::Vwap { source, period },
-            ExprSpecRaw::Ad { source } => ExprSpec::Ad { source },
-            ExprSpecRaw::TrueRange { source } => ExprSpec::TrueRange { source },
-            ExprSpecRaw::Sar { source, step, max } => ExprSpec::Sar { source, step, max },
-            ExprSpecRaw::VolTarget { source, target, window, bars_per_year } => ExprSpec::VolTarget { source, target, window, bars_per_year },
-            ExprSpecRaw::AtrRisk { source, risk_frac, period, atr_multiple } => ExprSpec::AtrRisk { source, risk_frac, period, atr_multiple },
-            ExprSpecRaw::DrawdownThrottle { source, max_drawdown } => ExprSpec::DrawdownThrottle { source, max_drawdown },
-            ExprSpecRaw::EquityVolTarget { source, target, window, bars_per_year } => ExprSpec::EquityVolTarget { source, target, window, bars_per_year },
-            ExprSpecRaw::FractionalKelly { source, kelly_fraction, window } => ExprSpec::FractionalKelly { source, kelly_fraction, window },
-            ExprSpecRaw::Sharpe { strategy, period, bars_per_year, risk_free_rate } => ExprSpec::Sharpe { strategy, period, bars_per_year, risk_free_rate },
-            ExprSpecRaw::Sortino { strategy, period, bars_per_year, risk_free_rate } => ExprSpec::Sortino { strategy, period, bars_per_year, risk_free_rate },
-            ExprSpecRaw::Volatility { strategy, period, bars_per_year } => ExprSpec::Volatility { strategy, period, bars_per_year },
-            ExprSpecRaw::MaxDrawdown { strategy, period } => ExprSpec::MaxDrawdown { strategy, period },
-            ExprSpecRaw::Calmar { strategy, period, bars_per_year } => ExprSpec::Calmar { strategy, period, bars_per_year },
-            ExprSpecRaw::Add { lhs, rhs } => ExprSpec::Add { lhs, rhs },
-            ExprSpecRaw::Sub { lhs, rhs } => ExprSpec::Sub { lhs, rhs },
-            ExprSpecRaw::Mul { lhs, rhs } => ExprSpec::Mul { lhs, rhs },
-            ExprSpecRaw::Div { lhs, rhs } => ExprSpec::Div { lhs, rhs },
-            ExprSpecRaw::IfElse {
+            NodeSpecRaw::Mfi { source, period } => NodeSpec::Mfi { source, period },
+            NodeSpecRaw::WilliamsR { source, period } => NodeSpec::WilliamsR { source, period },
+            NodeSpecRaw::Obv { source } => NodeSpec::Obv { source },
+            NodeSpecRaw::Vwap { source, period } => NodeSpec::Vwap { source, period },
+            NodeSpecRaw::Ad { source } => NodeSpec::Ad { source },
+            NodeSpecRaw::TrueRange { source } => NodeSpec::TrueRange { source },
+            NodeSpecRaw::Sar { source, step, max } => NodeSpec::Sar { source, step, max },
+            NodeSpecRaw::VolTarget { source, target, window, bars_per_year } => NodeSpec::VolTarget { source, target, window, bars_per_year },
+            NodeSpecRaw::AtrRisk { source, risk_frac, period, atr_multiple } => NodeSpec::AtrRisk { source, risk_frac, period, atr_multiple },
+            NodeSpecRaw::DrawdownThrottle { source, max_drawdown } => NodeSpec::DrawdownThrottle { source, max_drawdown },
+            NodeSpecRaw::EquityVolTarget { source, target, window, bars_per_year } => NodeSpec::EquityVolTarget { source, target, window, bars_per_year },
+            NodeSpecRaw::FractionalKelly { source, kelly_fraction, window } => NodeSpec::FractionalKelly { source, kelly_fraction, window },
+            NodeSpecRaw::Sharpe { strategy, period, bars_per_year, risk_free_rate } => NodeSpec::Sharpe { strategy, period, bars_per_year, risk_free_rate },
+            NodeSpecRaw::Sortino { strategy, period, bars_per_year, risk_free_rate } => NodeSpec::Sortino { strategy, period, bars_per_year, risk_free_rate },
+            NodeSpecRaw::Volatility { strategy, period, bars_per_year } => NodeSpec::Volatility { strategy, period, bars_per_year },
+            NodeSpecRaw::MaxDrawdown { strategy, period } => NodeSpec::MaxDrawdown { strategy, period },
+            NodeSpecRaw::Calmar { strategy, period, bars_per_year } => NodeSpec::Calmar { strategy, period, bars_per_year },
+            NodeSpecRaw::Add { lhs, rhs } => NodeSpec::Add { lhs, rhs },
+            NodeSpecRaw::Sub { lhs, rhs } => NodeSpec::Sub { lhs, rhs },
+            NodeSpecRaw::Mul { lhs, rhs } => NodeSpec::Mul { lhs, rhs },
+            NodeSpecRaw::Div { lhs, rhs } => NodeSpec::Div { lhs, rhs },
+            NodeSpecRaw::IfElse {
                 cond,
                 then,
                 otherwise,
-            } => ExprSpec::IfElse {
+            } => NodeSpec::IfElse {
                 cond,
                 then,
                 otherwise,
             },
-            ExprSpecRaw::Match {
+            NodeSpecRaw::Match {
                 on,
                 cases,
                 default,
-            } => ExprSpec::Match {
+            } => NodeSpec::Match {
                 on,
                 cases,
                 default,
             },
-            ExprSpecRaw::Lag { source, period } => ExprSpec::Lag { source, period },
-            ExprSpecRaw::Diff { source, period } => ExprSpec::Diff { source, period },
-            ExprSpecRaw::Ratio { source, period } => ExprSpec::Ratio { source, period },
-            ExprSpecRaw::Roc { source, period } => ExprSpec::Roc { source, period },
-            ExprSpecRaw::RollingMax { source, period } => ExprSpec::RollingMax { source, period },
-            ExprSpecRaw::RollingMin { source, period } => ExprSpec::RollingMin { source, period },
-            ExprSpecRaw::Log { source, base } => ExprSpec::Log { source, base },
-            ExprSpecRaw::Latch { source } => ExprSpec::Latch { source },
-            ExprSpecRaw::Resample { every, inner, source } => ExprSpec::Resample { every, inner, source },
-            ExprSpecRaw::Unstable { source } => ExprSpec::Unstable { source },
-            ExprSpecRaw::Year { source } => ExprSpec::Year { source },
-            ExprSpecRaw::Month { source } => ExprSpec::Month { source },
-            ExprSpecRaw::Day { source } => ExprSpec::Day { source },
-            ExprSpecRaw::Hour { source } => ExprSpec::Hour { source },
-            ExprSpecRaw::Minute { source } => ExprSpec::Minute { source },
-            ExprSpecRaw::Second { source } => ExprSpec::Second { source },
-            ExprSpecRaw::DayOfWeek { source } => ExprSpec::DayOfWeek { source },
-            ExprSpecRaw::DayOfYear { source } => ExprSpec::DayOfYear { source },
-            ExprSpecRaw::WeekOfYear { source } => ExprSpec::WeekOfYear { source },
-            ExprSpecRaw::Quarter { source } => ExprSpec::Quarter { source },
-            ExprSpecRaw::UnixSeconds { source } => ExprSpec::UnixSeconds { source },
-            ExprSpecRaw::UnixMillis { source } => ExprSpec::UnixMillis { source },
-            ExprSpecRaw::Time { source } => ExprSpec::Time { source },
+            NodeSpecRaw::Lag { source, period } => NodeSpec::Lag { source, period },
+            NodeSpecRaw::Diff { source, period } => NodeSpec::Diff { source, period },
+            NodeSpecRaw::Ratio { source, period } => NodeSpec::Ratio { source, period },
+            NodeSpecRaw::Roc { source, period } => NodeSpec::Roc { source, period },
+            NodeSpecRaw::RollingMax { source, period } => NodeSpec::RollingMax { source, period },
+            NodeSpecRaw::RollingMin { source, period } => NodeSpec::RollingMin { source, period },
+            NodeSpecRaw::Log { source, base } => NodeSpec::Log { source, base },
+            NodeSpecRaw::Latch { source } => NodeSpec::Latch { source },
+            NodeSpecRaw::Resample { every, inner, source } => NodeSpec::Resample { every, inner, source },
+            NodeSpecRaw::Unstable { source } => NodeSpec::Unstable { source },
+            NodeSpecRaw::Year { source } => NodeSpec::Year { source },
+            NodeSpecRaw::Month { source } => NodeSpec::Month { source },
+            NodeSpecRaw::Day { source } => NodeSpec::Day { source },
+            NodeSpecRaw::Hour { source } => NodeSpec::Hour { source },
+            NodeSpecRaw::Minute { source } => NodeSpec::Minute { source },
+            NodeSpecRaw::Second { source } => NodeSpec::Second { source },
+            NodeSpecRaw::DayOfWeek { source } => NodeSpec::DayOfWeek { source },
+            NodeSpecRaw::DayOfYear { source } => NodeSpec::DayOfYear { source },
+            NodeSpecRaw::WeekOfYear { source } => NodeSpec::WeekOfYear { source },
+            NodeSpecRaw::Quarter { source } => NodeSpec::Quarter { source },
+            NodeSpecRaw::UnixSeconds { source } => NodeSpec::UnixSeconds { source },
+            NodeSpecRaw::UnixMillis { source } => NodeSpec::UnixMillis { source },
+            NodeSpecRaw::Time { source } => NodeSpec::Time { source },
         }
     }
 }
 
-impl TryFrom<serde_norway::Value> for ExprSpec {
+impl TryFrom<serde_norway::Value> for NodeSpec {
     type Error = String;
 
     /// Normalise the incoming YAML value into a [`serde_norway::Value::Tagged`],
-    /// then deserialize into [`ExprSpecRaw`].
+    /// then deserialize into [`NodeSpecRaw`].
     ///
     /// `serde_norway`'s `Value` deserializer only routes an *enum* input
     /// through its `Value::Tagged` variant — a plain single-key `Mapping`
@@ -1989,11 +1989,11 @@ impl TryFrom<serde_norway::Value> for ExprSpec {
     /// - Anything else (a `Number` for `Value(x)`, etc.) is forwarded verbatim
     ///   and serde_norway will report a helpful "unexpected type" error.
     ///
-    /// Recursion into `Box<ExprSpec>` fields re-enters this same
+    /// Recursion into `Box<NodeSpec>` fields re-enters this same
     /// `TryFrom` — so a nested bare-word inside a tagged form is normalised
     /// on the way down.
     fn try_from(v: serde_norway::Value) -> Result<Self, Self::Error> {
-        let spec = ExprSpec::parse_unchecked(v)?;
+        let spec = NodeSpec::parse_unchecked(v)?;
         // Reject a child whose output type this tag cannot consume —
         // `!sma { source: !value bull }` and friends. The engine would catch it
         // anyway, but only on reaching `AsReal::new`'s `assert_eq!` mid-build,
@@ -2010,14 +2010,14 @@ impl TryFrom<serde_norway::Value> for ExprSpec {
     }
 }
 
-impl ExprSpec {
+impl NodeSpec {
     /// The normalisation + typed parse, **without** the type check
     /// [`TryFrom`] applies on top.
     ///
     /// Exists so `typecheck`'s own tests can construct the deliberately
     /// ill-typed trees they exercise — which the public parse path now
     /// rejects, by design. Not a way around validation for real callers:
-    /// every deserialization of an `ExprSpec` goes through `TryFrom`.
+    /// every deserialization of an `NodeSpec` goes through `TryFrom`.
     pub(crate) fn parse_unchecked(v: serde_norway::Value) -> Result<Self, String> {
         use serde_norway::value::{Tag, TaggedValue};
 
@@ -2026,7 +2026,7 @@ impl ExprSpec {
         // this never matches in a real run. A constant `0.0` is a valid
         // Real-typed source, enough for the surrounding shape to validate.
         if crate::spec::undefined::is_undefined(&v) {
-            return Ok(ExprSpec::Value(ValueLit::Real(0.0)));
+            return Ok(NodeSpec::Value(ValueLit::Real(0.0)));
         }
 
         // Unit-variant tags: their content stays as `Value::Null` because
@@ -2108,7 +2108,7 @@ impl ExprSpec {
             }
             // Bare number literal — auto-wrap as `!value N`. Numbers are
             // never leaf names, so this is unambiguous: any position
-            // expecting an ExprSpec that got `70` really means "the
+            // expecting an NodeSpec that got `70` really means "the
             // constant 70". Removes the `!value` boilerplate from the
             // most common comparison shape (`!gt { lhs: !close, rhs: 70 }`
             // instead of `rhs: !value 70`).
@@ -2123,7 +2123,7 @@ impl ExprSpec {
             // (`weights: [0.4, 0.6]` for the per-child fixed-weights
             // case). The typed parse of `!value` handles the shape
             // check; a list of anything else (strings, nested maps)
-            // isn't a valid ExprSpec, so falling through to `other =>
+            // isn't a valid NodeSpec, so falling through to `other =>
             // other` and letting serde report the mismatch is fine.
             serde_norway::Value::Sequence(seq)
                 if seq
@@ -2153,7 +2153,7 @@ impl ExprSpec {
             }
             _ => None,
         };
-        let raw: ExprSpecRaw = crate::spec::undefined::from_value(normalised)
+        let raw: NodeSpecRaw = crate::spec::undefined::from_value(normalised)
             // Nesting this at every level turns a bare "expects a Real source"
             // into a trail from the outermost tag down to the offending one —
             // the closest thing to a source location available, since the
@@ -2171,7 +2171,7 @@ impl ExprSpec {
     }
 }
 
-/// Rewrite ExprSpec sugar tags to their canonical `!value` forms. Runs
+/// Rewrite NodeSpec sugar tags to their canonical `!value` forms. Runs
 /// after shape-normalization (so tagged / bare / single-key-map inputs
 /// all reach this pass in `Value::Tagged` form). Currently covers
 /// `!equal_weight <N>` → `!value <1/N>`; other sugar tags can be added
@@ -2221,7 +2221,7 @@ fn rewrite_sugar_tags(v: serde_norway::Value) -> Result<serde_norway::Value, Str
 /// user's subtree (typically a `!pick { symbol, freq }`) and wraps as an
 /// [`AsAtom`] view for the leaf's `T::of(source)` constructor.
 /// Build the runtime [`crate::indicators::Match`] chain for
-/// [`ExprSpec::Match`]. Case patterns are homogeneous — either all
+/// [`NodeSpec::Match`]. Case patterns are homogeneous — either all
 /// numeric (`ValueLit::Real`, dispatching on a `Real`-output `on`) or
 /// all string (`ValueLit::Str`, dispatching on a `Str`-output `on`).
 /// Mixed and `List` patterns are rejected with a build-time panic (loud
@@ -2234,13 +2234,13 @@ fn rewrite_sugar_tags(v: serde_norway::Value) -> Result<serde_norway::Value, Str
 // Five of the eight are the build context (`anchor` / `book` /
 // `portfolio_book` / `schema` / `root`) that every recursive build carries and
 // this helper only forwards. Grouping them into a context struct is a
-// worthwhile refactor of `ExprSpec::build` as a whole, not of the one private
+// worthwhile refactor of `NodeSpec::build` as a whole, not of the one private
 // helper that happens to sit one argument over the threshold.
 #[allow(clippy::too_many_arguments)]
 fn build_match(
-    on: &ExprSpec,
+    on: &NodeSpec,
     cases: &[MatchCase],
-    default: &ExprSpec,
+    default: &NodeSpec,
     anchor: &Position,
     book: &Book,
     portfolio_book: Option<&Book>,
@@ -2301,7 +2301,7 @@ fn build_match(
         }
     }
 
-    let as_real_branch = |s: &ExprSpec| -> Result<AsReal, String> {
+    let as_real_branch = |s: &NodeSpec| -> Result<AsReal, String> {
         let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
         AsReal::try_new(built).map_err(|e| trail(s, e))
     };
@@ -2347,7 +2347,7 @@ fn build_match(
 }
 
 fn atom_source_of(
-    source: Option<&ExprSpec>,
+    source: Option<&NodeSpec>,
     anchor: &Position,
     book: &Book,
     portfolio_book: Option<&Book>,
@@ -2375,7 +2375,7 @@ fn atom_source_of(
 /// as [`atom_source_of`]), so callers who want a specific symbol's time
 /// keep that ability.
 fn atom_source_any_of(
-    source: Option<&ExprSpec>,
+    source: Option<&NodeSpec>,
     anchor: &Position,
     book: &Book,
     portfolio_book: Option<&Book>,
@@ -2394,7 +2394,7 @@ fn atom_source_any_of(
 /// Resolve an optional book-source spec into the concrete [`Book`] a
 /// book-reading node should read from. The vocabulary is intentionally
 /// minimal — only the two build-time source-selector tags
-/// ([`ExprSpec::StrategyBook`] and [`ExprSpec::PortfolioBook`]) are
+/// ([`NodeSpec::StrategyBook`] and [`NodeSpec::PortfolioBook`]) are
 /// accepted; anything else in a book-reading node's `source:` slot is a
 /// hard build error, since the resulting expression would have no defined
 /// interpretation.
@@ -2405,13 +2405,13 @@ fn atom_source_any_of(
 ///   isn't in a portfolio weight scope).
 /// - `Some(anything else)` → `Err` with a helpful message.
 fn resolve_book_source<'a>(
-    source: Option<&ExprSpec>,
+    source: Option<&NodeSpec>,
     book: &'a Book,
     portfolio_book: Option<&'a Book>,
 ) -> Result<&'a Book, String> {
     match source {
-        None | Some(ExprSpec::StrategyBook) => Ok(book),
-        Some(ExprSpec::PortfolioBook) => portfolio_book.ok_or_else(|| {
+        None | Some(NodeSpec::StrategyBook) => Ok(book),
+        Some(NodeSpec::PortfolioBook) => portfolio_book.ok_or_else(|| {
             "!portfolio_book: not inside a portfolio weight scope — this \
              source only makes sense in a portfolio's `weights:` expression"
                 .to_string()
@@ -2424,7 +2424,7 @@ fn resolve_book_source<'a>(
     }
 }
 
-impl ExprSpec {
+impl NodeSpec {
     /// Construct the live, runtime-typed source this spec describes as a
     /// `Box<dyn DynIndicator>`. `anchor` is the owning strategy's
     /// [`Position`], shared by any `entry` / `peak` / `trough` leaves in the
@@ -2489,22 +2489,22 @@ impl ExprSpec {
         schema: &Arc<Schema>,
         root: Option<&Selector<String>>,
     ) -> Result<Box<dyn DynIndicator>, String> {
-        use ExprSpec::*;
+        use NodeSpec::*;
         // Recursive-build shorthands: build `s`, view it as a library-typed
         // `Indicator<Input=Snapshot, Output=Real>` (or Candle) so it drops
         // into a concrete library constructor. A type mismatch is attributed to
         // the *child* that produced the wrong output, which is where the author
         // has to look.
-        let real = |s: &ExprSpec| -> Result<AsReal, String> {
+        let real = |s: &NodeSpec| -> Result<AsReal, String> {
             let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
             AsReal::try_new(built).map_err(|e| trail(s, e))
         };
-        let candle = |s: &ExprSpec| -> Result<AsCandle, String> {
+        let candle = |s: &NodeSpec| -> Result<AsCandle, String> {
             let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
             AsCandle::try_new(built).map_err(|e| trail(s, e))
         };
         // The `Pick`-shaped `source:` field on every atom-input leaf.
-        let atom_src = |source: Option<&Box<ExprSpec>>| {
+        let atom_src = |source: Option<&Box<NodeSpec>>| {
             atom_source_of(
                 source.map(|b| &**b),
                 anchor,
@@ -2519,7 +2519,7 @@ impl ExprSpec {
         // than the sole-atom Pick, so a bare `!month` / `!hour` / `!time`
         // (and the cadence sugar `!daily` / `!monthly` / …) works on
         // multi-symbol snapshots — every entry shares atom.time.
-        let atom_src_any = |source: Option<&Box<ExprSpec>>| {
+        let atom_src_any = |source: Option<&Box<NodeSpec>>| {
             atom_source_any_of(
                 source.map(|b| &**b),
                 anchor,
@@ -3090,9 +3090,9 @@ impl ExprSpec {
 /// breadcrumb inside-out as the failure rises through the recursive build.
 ///
 /// The same convention the parse layer uses (see the `!tag > ` prefixing in
-/// [`ExprSpec::try_from`]), so build errors and parse errors render through the
+/// [`NodeSpec::try_from`]), so build errors and parse errors render through the
 /// one [`split_trail`](crate::spec::diagnostics::split_trail) path.
-fn trail(spec: &ExprSpec, message: impl std::fmt::Display) -> String {
+fn trail(spec: &NodeSpec, message: impl std::fmt::Display) -> String {
     format!("{} > {message}", crate::spec::typecheck::tag_name(spec))
 }
 

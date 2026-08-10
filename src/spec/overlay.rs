@@ -1,4 +1,4 @@
-//! Reusable overlay core: a `name → ExprSpec` column set that builds a live
+//! Reusable overlay core: a `name → NodeSpec` column set that builds a live
 //! [`DynIndicator`] per column and computes derived overlay values over a
 //! series, merging the results onto an existing [`Schema`].
 //!
@@ -11,7 +11,7 @@
 //!
 //! ## Compute model
 //!
-//! Overlay indicators built from an [`ExprSpec`] are **snapshot-rooted** — a
+//! Overlay indicators built from an [`NodeSpec`] are **snapshot-rooted** — a
 //! [`Pick`](crate::indicators::Pick) reads the atom out of a `Snapshot`. An
 //! overlay column is written once and instantiated once per `(symbol, freq)`
 //! series, so each instantiation has a **blessed series**: the group key. It's
@@ -53,7 +53,7 @@ use crate::snapshot::Selector;
 use crate::time::Frequency;
 use crate::types::Snapshot;
 
-use super::expr::ExprSpec;
+use super::expr::NodeSpec;
 
 /// One named overlay column: its output column name, its source expression,
 /// and where it was written (a file path or `(inline overlay)`) so a build
@@ -61,7 +61,7 @@ use super::expr::ExprSpec;
 #[derive(Debug, Clone)]
 pub struct OverlayColumn {
     pub name: String,
-    pub spec: ExprSpec,
+    pub spec: NodeSpec,
     pub origin: String,
 }
 
@@ -84,17 +84,17 @@ impl OverlayColumn {
     }
 }
 
-/// Build a live overlay indicator for a bare [`ExprSpec`] against `schema`,
+/// Build a live overlay indicator for a bare [`NodeSpec`] against `schema`,
 /// with the stub anchors overlays always use (no live `Position` / `Book`).
 /// Shared by [`OverlayColumn::build`] and the CLI's scoped `Overlay::build`.
 ///
 /// An overlay expression is ordinary user input, so a `!get` naming a column
 /// the stream doesn't carry, a `!pick` with a malformed frequency, or a
 /// mixed-type `!match` is bad input rather than a broken invariant: it belongs
-/// on the normal error path. [`ExprSpec::try_build`] returns the whole family
+/// on the normal error path. [`NodeSpec::try_build`] returns the whole family
 /// as values, and the caller prefixes the column and source document.
 pub fn build_overlay(
-    spec: &ExprSpec,
+    spec: &NodeSpec,
     schema: &Arc<Schema>,
     root: Option<&Selector<String>>,
 ) -> Result<Box<dyn DynIndicator>> {
@@ -102,7 +102,7 @@ pub fn build_overlay(
         .map_err(|e| anyhow!("{e}"))
 }
 
-/// Parse a flat `name: ExprSpec` JSON map (already `!import`/`!param`-resolved
+/// Parse a flat `name: NodeSpec` JSON map (already `!import`/`!param`-resolved
 /// by the caller) into columns, in JSON-map iteration order. Rejects empty
 /// names. Vocabulary-neutral — reserving OHLCV column names is a CLI policy and
 /// stays in `cli::overlay`.
@@ -115,7 +115,7 @@ pub fn columns_from_value(value: Json, label: &str) -> Result<Vec<OverlayColumn>
         if name.is_empty() {
             bail!("overlay {label}: empty column name");
         }
-        let spec: ExprSpec = serde_json::from_value(expr_value)
+        let spec: NodeSpec = serde_json::from_value(expr_value)
             .map_err(|e| anyhow!("overlay {name:?} in {label}: {e}"))?;
         out.push(OverlayColumn {
             name,
@@ -178,7 +178,7 @@ fn scalar_type(ind: &dyn DynIndicator, name: &str) -> Result<OverlayType> {
 }
 
 /// Build the output schema (existing columns + appended new columns) and the
-/// prepared indicators for a `name: ExprSpec` column set. Each column is built
+/// prepared indicators for a `name: NodeSpec` column set. Each column is built
 /// against `existing`, so a `!get { key }` inside an overlay resolves against
 /// the input schema (and cannot forward-reference a sibling new column).
 pub fn prepare(
@@ -205,7 +205,7 @@ pub fn prepare_for(
 }
 
 /// [`prepare`] for pre-built indicators (the Python carrier path) — no
-/// `ExprSpec` build step. Infers each column's type from `output_type()`,
+/// `NodeSpec` build step. Infers each column's type from `output_type()`,
 /// appends the new columns after the `existing` schema (preserving existing
 /// indexes), and errors on a non-scalar output, a new name colliding with an
 /// existing column, or a duplicate new name.
@@ -440,7 +440,7 @@ mod tests {
             "(test)",
         )
         .unwrap();
-        assert!(matches!(c[0].spec, ExprSpec::Sma { period: 4, .. }));
+        assert!(matches!(c[0].spec, NodeSpec::Sma { period: 4, .. }));
     }
 
     #[test]
@@ -450,7 +450,7 @@ mod tests {
         b.add_real("vol");
         let existing = b.finish();
 
-        // ExprSpec is value-producing: Real (`!sma`) and Str (`!value bull`);
+        // NodeSpec is value-producing: Real (`!sma`) and Str (`!value bull`);
         // Bool overlays come from the pre-built carrier path (see below).
         let c = cols("sma3: !sma { period: 3 }\nlabel: !value bull\n");
         let (out_schema, prepared) = prepare(&existing, &c).unwrap();

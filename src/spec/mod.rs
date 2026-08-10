@@ -8,7 +8,7 @@
 //!
 //! Three layers, mirroring the crate; one per submodule:
 //!
-//! * [`ExprSpec`] (see [`expr`]) → [`crate::spec::dyn_indicator::DynValue`] — a
+//! * [`NodeSpec`] (see [`expr`]) → [`crate::spec::dyn_indicator::DynValue`] — a
 //!   value-producing expression (nominally `Output = Real`, but polymorphic
 //!   over the runtime [`DynType`](crate::spec::dyn_indicator::DynType) — some
 //!   variants yield `Atom` / `Candle` / `Str` / `Time`).
@@ -113,7 +113,7 @@ pub fn load_value_pre_params(
 
 #[allow(unused_imports)]
 pub use basket::{BasketStrategySpec, SelectionRuleSpec};
-pub use expr::ExprSpec;
+pub use expr::NodeSpec;
 #[allow(unused_imports)]
 pub use expr::ValueLit;
 #[allow(unused_imports)]
@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn default_source_is_close() {
-        let spec: ExprSpec = serde_norway::from_str("!ema { period: 3 }").unwrap();
+        let spec: NodeSpec = serde_norway::from_str("!ema { period: 3 }").unwrap();
         let mut ema = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         let mut reference = Ema::new(Current::close(), 3);
         for p in [1.0, 2.0, 3.0, 4.0, 5.0] {
@@ -236,15 +236,15 @@ mod tests {
         // build to the library indicator, matching a hand-wired reference.
         let closes = [10.0, 12.0, 9.0, 14.0, 8.0, 15.0, 11.0];
 
-        let sk: ExprSpec = serde_norway::from_str("!skewness { period: 4 }").unwrap();
+        let sk: NodeSpec = serde_norway::from_str("!skewness { period: 4 }").unwrap();
         let mut sk = sk.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         let mut sk_ref = Skewness::new(Current::close(), 4);
 
-        let ku: ExprSpec = serde_norway::from_str("!kurtosis { period: 4 }").unwrap();
+        let ku: NodeSpec = serde_norway::from_str("!kurtosis { period: 4 }").unwrap();
         let mut ku = ku.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         let mut ku_ref = Kurtosis::new(Current::close(), 4);
 
-        let z: ExprSpec = serde_norway::from_str("!zscore { period: 4 }").unwrap();
+        let z: NodeSpec = serde_norway::from_str("!zscore { period: 4 }").unwrap();
         let mut z = z.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         let mut z_ref = ZScore::new(Current::close(), 4);
 
@@ -259,11 +259,11 @@ mod tests {
     fn percentile_tags_match_reference() {
         let closes = [10.0, 12.0, 9.0, 14.0, 8.0, 15.0, 11.0];
 
-        let p: ExprSpec = serde_norway::from_str("!percentile { period: 4, pct: 0.75 }").unwrap();
+        let p: NodeSpec = serde_norway::from_str("!percentile { period: 4, pct: 0.75 }").unwrap();
         let mut p = p.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         let mut p_ref = Percentile::new(Current::close(), 4, 0.75);
 
-        let r: ExprSpec = serde_norway::from_str("!percentile_rank { period: 4 }").unwrap();
+        let r: NodeSpec = serde_norway::from_str("!percentile_rank { period: 4 }").unwrap();
         let mut r = r.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         let mut r_ref = PercentileRank::new(Current::close(), 4);
 
@@ -275,18 +275,18 @@ mod tests {
 
     #[test]
     fn bars_since_tags_match_reference() {
-        // The signal-input form: `source:` is a SignalSpec, not an ExprSpec.
+        // The signal-input form: `source:` is a SignalSpec, not an NodeSpec.
         let yaml = "!bars_since { source: !above { source: close, level: 12.0 } }";
-        let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
+        let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         let mut reference = BarsSince::new(Current::close().above(12.0));
 
         // And the two rolling-extremum shorthands.
-        let hi: ExprSpec = serde_norway::from_str("!bars_since_high { period: 3 }").unwrap();
+        let hi: NodeSpec = serde_norway::from_str("!bars_since_high { period: 3 }").unwrap();
         let mut hi = hi.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         let mut hi_ref = BarsSinceHigh::new(Current::close(), 3);
 
-        let lo: ExprSpec = serde_norway::from_str("!bars_since_low { period: 3 }").unwrap();
+        let lo: NodeSpec = serde_norway::from_str("!bars_since_low { period: 3 }").unwrap();
         let mut lo = lo.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         let mut lo_ref = BarsSinceLow::new(Current::close(), 3);
 
@@ -304,7 +304,7 @@ mod tests {
     #[test]
     fn correlation_tag_matches_reference() {
         // Lag-1 autocorrelation: lhs close vs. its own previous value.
-        let spec: ExprSpec =
+        let spec: NodeSpec =
             serde_norway::from_str("!correlation { lhs: close, rhs: !lag { period: 1 }, period: 3 }")
                 .unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
@@ -318,7 +318,7 @@ mod tests {
     fn variance_ratio_tag_matches_reference() {
         // `!variance_ratio` defaults its source to close and builds to the
         // library indicator (`> 1` trending, `< 1` mean-reverting).
-        let spec: ExprSpec =
+        let spec: NodeSpec =
             serde_norway::from_str("!variance_ratio { period: 5, lag: 2 }").unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         let mut reference = VarianceRatio::new(Current::close(), 5, 2);
@@ -330,7 +330,7 @@ mod tests {
     #[test]
     fn log_defaults_to_natural_and_accepts_explicit_base() {
         // Default base: natural log (`e`).
-        let bare: ExprSpec = serde_norway::from_str("!log").unwrap();
+        let bare: NodeSpec = serde_norway::from_str("!log").unwrap();
         let mut ln = bare.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         for p in [1.0, std::f64::consts::E, 10.0, 100.0] {
             let got = feed_real(&mut ln, bar(p)).unwrap();
@@ -338,7 +338,7 @@ mod tests {
         }
 
         // Explicit base: 10.
-        let spec: ExprSpec = serde_norway::from_str("!log { base: 10.0 }").unwrap();
+        let spec: NodeSpec = serde_norway::from_str("!log { base: 10.0 }").unwrap();
         let mut log10 = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         for p in [1.0, 10.0, 1000.0] {
             let got = feed_real(&mut log10, bar(p)).unwrap();
@@ -412,7 +412,7 @@ mod tests {
     #[test]
     fn unstable_source_zeroes_unstable_period_but_forwards_output() {
         let yaml = r#"!unstable { source: !ema { period: 5 } }"#;
-        let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
+        let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
         let wrapped = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         let inner_raw = Ema::new(Current::close(), 5);
         assert_eq!(wrapped.warm_up_period(), inner_raw.warm_up_period());
@@ -528,7 +528,7 @@ mod tests {
     fn resample_tag_projects_the_field() {
         // `!resample { every: N, inner: close }` emits the resampled close on
         // the Nth base tick, None between.
-        let spec: ExprSpec =
+        let spec: NodeSpec =
             serde_norway::from_str("!resample { every: 4, inner: close }").unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         for i in 1..=8 {
@@ -545,7 +545,7 @@ mod tests {
     fn latch_tag_holds_the_last_value() {
         // `!latch { source: !resample { every: 3, inner: close } }` — Some on
         // the Nth bar, held on the two between.
-        let spec: ExprSpec = serde_norway::from_str(
+        let spec: NodeSpec = serde_norway::from_str(
             "!latch { source: !resample { every: 3, inner: close } }",
         )
         .unwrap();
@@ -563,7 +563,7 @@ mod tests {
         // Every bar-indicator variant carries a defaulted `source` field
         // pointing to `!current`, so a bare `!obv` / `!ad` / … tag with no
         // map still deserializes and drives the base bar stream.
-        let obv: ExprSpec = serde_norway::from_str("!obv").unwrap();
+        let obv: NodeSpec = serde_norway::from_str("!obv").unwrap();
         let mut built = obv.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         // OBV seeds at first bar's volume.
         assert_eq!(
@@ -572,7 +572,7 @@ mod tests {
         );
 
         // And still parses with an explicit source override.
-        let obv_htf: ExprSpec =
+        let obv_htf: NodeSpec =
             serde_norway::from_str("!obv { source: !resample { every: 2, inner: current } }")
                 .unwrap();
         let _ = obv_htf.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
@@ -581,7 +581,7 @@ mod tests {
     #[test]
     fn atr_tag_parses_with_default_current_source() {
         // `!atr { period: 3 }` without a source keeps its historical form.
-        let spec: ExprSpec = serde_norway::from_str("!atr { period: 3 }").unwrap();
+        let spec: NodeSpec = serde_norway::from_str("!atr { period: 3 }").unwrap();
         let _ = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
     }
 
@@ -598,15 +598,15 @@ mod tests {
             Candle::new(11.5, 14.0, 11.0, 13.0, 1.0),
         ];
 
-        let pk: ExprSpec = serde_norway::from_str("!parkinson { period: 3 }").unwrap();
+        let pk: NodeSpec = serde_norway::from_str("!parkinson { period: 3 }").unwrap();
         let mut pk = pk.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         let mut pk_ref = Parkinson::new(Current::candle(), 3);
 
-        let gk: ExprSpec = serde_norway::from_str("!garman_klass { period: 3 }").unwrap();
+        let gk: NodeSpec = serde_norway::from_str("!garman_klass { period: 3 }").unwrap();
         let mut gk = gk.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         let mut gk_ref = GarmanKlass::new(Current::candle(), 3);
 
-        let rs: ExprSpec = serde_norway::from_str("!rogers_satchell { period: 3 }").unwrap();
+        let rs: NodeSpec = serde_norway::from_str("!rogers_satchell { period: 3 }").unwrap();
         let mut rs = rs.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         let mut rs_ref = RogersSatchell::new(Current::candle(), 3);
 
@@ -622,7 +622,7 @@ mod tests {
         // Keltner's price source defaults to `close`, its candle source to
         // `current` — so a bare `!keltner_upper { ema_period, atr_period,
         // multiplier }` still parses.
-        let spec: ExprSpec = serde_norway::from_str(
+        let spec: NodeSpec = serde_norway::from_str(
             "!keltner_upper { ema_period: 3, atr_period: 3, multiplier: 2.0 }",
         )
         .unwrap();
@@ -635,7 +635,7 @@ mod tests {
         // buy-and-hold on X), drives it against a private wallet, and reads a
         // rolling Sharpe over the resulting equity curve. A strictly rising
         // price → a fully-invested rising equity → a positive trailing Sharpe.
-        let spec: ExprSpec = serde_norway::from_str(
+        let spec: NodeSpec = serde_norway::from_str(
             "!sharpe { strategy: { symbol: X, long: { enter: !gt { lhs: !close, rhs: !value 0.0 } } }, \
              period: 4, bars_per_year: 252 }",
         )
@@ -660,7 +660,7 @@ mod tests {
         // The `strategy:` field takes a catalogue preset tag as well as a full
         // spec — `!ma_crossover { … }` builds the same strategy the Rust
         // `trend::ma_crossover` recipe does.
-        let spec: ExprSpec = serde_norway::from_str(
+        let spec: NodeSpec = serde_norway::from_str(
             "!sharpe { strategy: !ma_crossover { symbol: X, fast: 2, slow: 4 }, \
              period: 4, bars_per_year: 252 }",
         )
@@ -691,10 +691,10 @@ mod tests {
             period: 4
             bars_per_year: 252
         "#;
-        let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
+        let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
         // The `strategy:` field routed to the pairs arm.
         match &spec {
-            ExprSpec::Sharpe { strategy, .. } => {
+            NodeSpec::Sharpe { strategy, .. } => {
                 assert!(matches!(**strategy, AnyStrategyRef::Pairs(_)))
             }
             other => panic!("expected a Sharpe spec, got {other:?}"),
@@ -739,9 +739,9 @@ mod tests {
             bars_per_year: 252
         "#;
         let json = crate::spec::input::parse_value(yaml).unwrap();
-        let spec: ExprSpec = serde_json::from_value(json).unwrap();
+        let spec: NodeSpec = serde_json::from_value(json).unwrap();
         match &spec {
-            ExprSpec::Sharpe { strategy, .. } => {
+            NodeSpec::Sharpe { strategy, .. } => {
                 assert!(matches!(**strategy, AnyStrategyRef::Basket(_)))
             }
             other => panic!("expected a Sharpe spec, got {other:?}"),
@@ -777,9 +777,9 @@ mod tests {
             bars_per_year: 252
         "#;
         let json = crate::spec::input::parse_value(yaml).unwrap();
-        let spec: ExprSpec = serde_json::from_value(json).unwrap();
+        let spec: NodeSpec = serde_json::from_value(json).unwrap();
         match &spec {
-            ExprSpec::Sharpe { strategy, .. } => {
+            NodeSpec::Sharpe { strategy, .. } => {
                 assert!(matches!(**strategy, AnyStrategyRef::Multi(_)))
             }
             other => panic!("expected a Sharpe spec, got {other:?}"),
@@ -800,7 +800,7 @@ mod tests {
     fn max_drawdown_tag_defaults_and_builds() {
         // `!max_drawdown` needs no rf/bpy. Over a rise-then-dip path the
         // trailing drawdown is a defined non-negative fraction.
-        let spec: ExprSpec = serde_norway::from_str(
+        let spec: NodeSpec = serde_norway::from_str(
             "!max_drawdown { strategy: { symbol: X, long: { enter: !gt { lhs: !close, rhs: !value 0.0 } } }, \
              period: 3 }",
         )
@@ -820,12 +820,12 @@ mod tests {
     fn sortino_tag_defaults_risk_free_rate_to_zero() {
         // `risk_free_rate` is optional (defaults to 0), so a bare
         // `!sortino { strategy, period, bars_per_year }` parses and builds.
-        let spec: ExprSpec = serde_norway::from_str(
+        let spec: NodeSpec = serde_norway::from_str(
             "!sortino { strategy: { symbol: X, long: { enter: !gt { lhs: !close, rhs: !value 0.0 } } }, \
              period: 4, bars_per_year: 365 }",
         )
         .unwrap();
-        assert!(matches!(spec, ExprSpec::Sortino { risk_free_rate, .. } if risk_free_rate == 0.0));
+        assert!(matches!(spec, NodeSpec::Sortino { risk_free_rate, .. } if risk_free_rate == 0.0));
         let _ = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
     }
 
@@ -836,7 +836,7 @@ mod tests {
         b.add_real("vol_20");
         let schema = b.finish();
 
-        let spec: ExprSpec = serde_norway::from_str("!get { key: vol_20 }").unwrap();
+        let spec: NodeSpec = serde_norway::from_str("!get { key: vol_20 }").unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &schema, None);
         assert_eq!(built.output_type(), crate::spec::dyn_indicator::DynType::Real);
 
@@ -896,13 +896,13 @@ mod tests {
 
     #[test]
     fn bare_number_list_auto_wraps_as_value_in_expr_position() {
-        // A bare `[0.5, 0.5]` in an ExprSpec position auto-wraps to
+        // A bare `[0.5, 0.5]` in an NodeSpec position auto-wraps to
         // `!value [0.5, 0.5]` — the common case for portfolio weights
         // being cleaner without the `!value` prefix.
-        let spec_bare: ExprSpec = serde_norway::from_str("[0.5, 0.5]").unwrap();
-        let spec_explicit: ExprSpec = serde_norway::from_str("!value [0.5, 0.5]").unwrap();
-        assert!(matches!(spec_bare, ExprSpec::Value(_)));
-        assert!(matches!(spec_explicit, ExprSpec::Value(_)));
+        let spec_bare: NodeSpec = serde_norway::from_str("[0.5, 0.5]").unwrap();
+        let spec_explicit: NodeSpec = serde_norway::from_str("!value [0.5, 0.5]").unwrap();
+        assert!(matches!(spec_bare, NodeSpec::Value(_)));
+        assert!(matches!(spec_explicit, NodeSpec::Value(_)));
     }
 
     #[test]
@@ -1024,12 +1024,12 @@ mod tests {
             ("!value \"70\"", crate::spec::dyn_indicator::DynType::Str),
         ];
         for (yaml, want) in cases {
-            let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
+            let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
             let built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
             assert_eq!(built.output_type(), want, "{yaml}");
         }
 
-        let spec: ExprSpec = serde_norway::from_str("!value bull").unwrap();
+        let spec: NodeSpec = serde_norway::from_str("!value bull").unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         assert_eq!(
             built.update(Payload::Snapshot(snap(bar(100.0)))),
@@ -1041,14 +1041,14 @@ mod tests {
     fn value_accepts_a_bool_and_rejects_a_non_scalar_literal() {
         // A bool is now a valid `!value` payload — a Bool-output leaf (the merged
         // home for what was the signal-side `!value <bool>`).
-        let spec: ExprSpec = serde_norway::from_str("!value true").unwrap();
+        let spec: NodeSpec = serde_norway::from_str("!value true").unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         assert_eq!(
             built.update(Payload::Snapshot(snap(bar(100.0)))),
             Some(Payload::Bool(true)),
         );
         // A non-scalar literal (a mapping) is still rejected.
-        let err = serde_norway::from_str::<ExprSpec>("!value {a: 1}")
+        let err = serde_norway::from_str::<NodeSpec>("!value {a: 1}")
             .unwrap_err()
             .to_string();
         assert!(err.contains("!value takes a number"), "{err}");
@@ -1114,7 +1114,7 @@ mod tests {
     }
 
     /// Build `spec` and return the error message it must fail with.
-    fn expr_build_err(spec: &ExprSpec, schema: &std::sync::Arc<Schema>) -> String {
+    fn expr_build_err(spec: &NodeSpec, schema: &std::sync::Arc<Schema>) -> String {
         // `.expect_err` needs `T: Debug`, and `Box<dyn DynIndicator>` isn't.
         spec.try_build(&Position::new(), &Book::new(1.0), None, schema, None)
             .err()
@@ -1133,7 +1133,7 @@ mod tests {
         let mut b = Schema::builder();
         b.add_real("vol_20");
         let schema = b.finish();
-        let spec: ExprSpec = serde_norway::from_str("!get { key: missing }").unwrap();
+        let spec: NodeSpec = serde_norway::from_str("!get { key: missing }").unwrap();
         let err = expr_build_err(&spec, &schema);
         assert!(err.contains("is not registered"), "{err}");
         assert!(err.contains("vol_20"), "names what is registered: {err}");
@@ -1143,7 +1143,7 @@ mod tests {
 
     #[test]
     fn get_rejects_an_empty_schema_with_a_hint() {
-        let spec: ExprSpec = serde_norway::from_str("!get { key: anything }").unwrap();
+        let spec: NodeSpec = serde_norway::from_str("!get { key: anything }").unwrap();
         let err = expr_build_err(&spec, &Schema::empty());
         assert!(err.contains("no overlay side channel is bound"), "{err}");
     }
@@ -1170,7 +1170,7 @@ mod tests {
 
     #[test]
     fn pick_rejects_a_malformed_frequency() {
-        let spec: ExprSpec = serde_norway::from_str("!pick { symbol: BTC, freq: banana }").unwrap();
+        let spec: NodeSpec = serde_norway::from_str("!pick { symbol: BTC, freq: banana }").unwrap();
         let err = expr_build_err(&spec, &Schema::empty());
         let (trail, message) = crate::spec::diagnostics::split_trail(&err);
         assert_eq!(trail, vec!["!pick"], "{err}");
@@ -1184,7 +1184,7 @@ mod tests {
         // `source:` slot of a book-reading node; standing alone they have no
         // runtime value at all.
         for tag in ["!strategy_book", "!portfolio_book"] {
-            let spec: ExprSpec = serde_norway::from_str(tag).unwrap();
+            let spec: NodeSpec = serde_norway::from_str(tag).unwrap();
             let err = expr_build_err(&spec, &Schema::empty());
             assert!(err.contains("build-time source selector"), "{tag}: {err}");
         }
@@ -1194,7 +1194,7 @@ mod tests {
     fn portfolio_book_outside_a_portfolio_weight_scope_is_rejected() {
         // The `source:` is well-formed here — there just is no aggregate book
         // to resolve it against, which is what the message has to say.
-        let spec: ExprSpec =
+        let spec: NodeSpec =
             serde_norway::from_str("!drawdown { source: !portfolio_book }").unwrap();
         let err = expr_build_err(&spec, &Schema::empty());
         assert!(
@@ -1208,7 +1208,7 @@ mod tests {
         // `!value [..]` is only reachable through `PortfolioSpec::build`, which
         // rewrites it to the child's own element first. Seeing one here means
         // it was used somewhere it has no meaning.
-        let spec: ExprSpec = serde_norway::from_str("!value [0.6, 0.4]").unwrap();
+        let spec: NodeSpec = serde_norway::from_str("!value [0.6, 0.4]").unwrap();
         let err = expr_build_err(&spec, &Schema::empty());
         assert!(err.contains("portfolio weight-share template"), "{err}");
     }
@@ -1241,7 +1241,7 @@ mod tests {
         let mut b = Schema::builder();
         b.add_str("regime");
         let schema = b.finish();
-        let spec: ExprSpec =
+        let spec: NodeSpec =
             serde_norway::from_str("!sma { source: !get { key: regime }, period: 3 }").unwrap();
         let err = expr_build_err(&spec, &schema);
         let (trail, message) = crate::spec::diagnostics::split_trail(&err);
@@ -1273,7 +1273,7 @@ mod tests {
             ("unix_seconds", 1_710_506_096.0),
             ("unix_millis", 1_710_506_096_000.0),
         ] {
-            let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
+            let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
             let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
             assert_eq!(built.output_type(), DynType::Real, "{yaml}: output type");
             assert_eq!(
@@ -1284,7 +1284,7 @@ mod tests {
         }
 
         // `!time` is the raw Timestamp payload, not a scalar.
-        let spec: ExprSpec = serde_norway::from_str("time").unwrap();
+        let spec: NodeSpec = serde_norway::from_str("time").unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         assert_eq!(built.output_type(), DynType::Time);
         assert_eq!(
@@ -1345,7 +1345,7 @@ mod tests {
             ("day_of_week", 5.0),
             ("quarter", 1.0),
         ] {
-            let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
+            let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
             let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
             assert_eq!(
                 built.update(Payload::Snapshot(multi.clone())),
@@ -1427,14 +1427,14 @@ mod tests {
     fn calendar_source_none_on_untimed_atom() {
         // A calendar accessor over a bare Atom (time=None) yields None — same
         // shape as a not-yet-warm indicator.
-        let spec: ExprSpec = serde_norway::from_str("year").unwrap();
+        let spec: NodeSpec = serde_norway::from_str("year").unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         assert_eq!(built.update(Payload::Snapshot(Snapshot::of_atom(bar(1.0).into()))), None);
     }
 
     #[test]
     fn if_else_survives_nested_signals_via_json_bridge() {
-        // Regression: nested `SignalSpec` inside `ExprSpec::IfElse`'s cond
+        // Regression: nested `SignalSpec` inside `NodeSpec::IfElse`'s cond
         // used to fail when the outer document went through the CLI's
         // serde_json → serde_norway::Value bridge (because SignalSpec had
         // no matching `try_from` normaliser). This test hits that path
@@ -1466,7 +1466,7 @@ mod tests {
     fn equal_weight_yields_the_constant_reciprocal() {
         // `!equal_weight 4` is the sugar for the 1/4 = 0.25 constant per
         // leg — the common basket case for a 4-leg balanced strategy.
-        let spec: ExprSpec = serde_norway::from_str("!equal_weight 4").unwrap();
+        let spec: NodeSpec = serde_norway::from_str("!equal_weight 4").unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         assert_eq!(feed_real(&mut built, bar(100.0)), Some(0.25));
         assert_eq!(feed_real(&mut built, bar(50.0)), Some(0.25));
@@ -1484,7 +1484,7 @@ mod tests {
             then: !value 1.0
             otherwise: !value -1.0
         "#;
-        let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
+        let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         // close = 99 → cond false → -1; close = 101 → cond true → 1.
         assert_eq!(feed_real(&mut built, bar(99.0)), Some(-1.0));
@@ -1504,7 +1504,7 @@ mod tests {
             then: !sma { source: close, period: 5 }
             otherwise: !value 99.0
         "#;
-        let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
+        let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         for _ in 0..4 {
             assert_eq!(feed_real(&mut built, bar(100.0)), None);
@@ -1527,7 +1527,7 @@ mod tests {
             then: !sma { source: close, period: 5 }
             otherwise: !value -1.0
         "#;
-        let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
+        let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         // First bar: cond is Some(false), otherwise is Some(-1.0).
         assert_eq!(feed_real(&mut built, bar(100.0)), Some(-1.0));
@@ -1553,7 +1553,7 @@ mod tests {
                 value: !value 2.0
             default: !value -1.0
         "#;
-        let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
+        let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         assert_eq!(feed_real(&mut built, bar(100.0)), Some(1.0));
         assert_eq!(feed_real(&mut built, bar(200.0)), Some(2.0));
@@ -1579,8 +1579,8 @@ mod tests {
             then: !value 1.0
             otherwise: !value 0.0
         "#;
-        let spec_match: ExprSpec = serde_norway::from_str(yaml_match).unwrap();
-        let spec_if_else: ExprSpec = serde_norway::from_str(yaml_if_else).unwrap();
+        let spec_match: NodeSpec = serde_norway::from_str(yaml_match).unwrap();
+        let spec_if_else: NodeSpec = serde_norway::from_str(yaml_if_else).unwrap();
         let mut m = spec_match.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         let mut e = spec_if_else.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         for px in [41.0, 42.0, 43.0, 42.0, 100.0] {
@@ -1606,7 +1606,7 @@ mod tests {
             cases: []
             default: !value 0.0
         "#;
-        let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
+        let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
         let err = expr_build_err(&spec, &Schema::empty());
         assert!(err.contains("`cases` must not be empty"), "{err}");
     }
@@ -1626,7 +1626,7 @@ mod tests {
                 value: !value 2.0
             default: !value 0.0
         "#;
-        let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
+        let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
         let err = expr_build_err(&spec, &Schema::empty());
         assert!(err.contains("same type"), "{err}");
     }
@@ -1645,7 +1645,7 @@ mod tests {
                 value: !value 999.0
             default: !value 0.0
         "#;
-        let spec: ExprSpec = serde_norway::from_str(yaml).unwrap();
+        let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         assert_eq!(feed_real(&mut built, bar(100.0)), Some(1.0));
     }
@@ -1655,7 +1655,7 @@ mod tests {
         // The composition-order regression at the YAML surface: an EMA-3
         // running inside !resample, wrapped in !latch, agrees numerically
         // with Ema(Resample.close, 3) at every boundary.
-        let spec: ExprSpec = serde_norway::from_str(
+        let spec: NodeSpec = serde_norway::from_str(
             "!latch { source: !resample { every: 4, inner: !ema { period: 3, source: close } } }",
         )
         .unwrap();
@@ -1674,7 +1674,7 @@ mod tests {
 /// Rendering helpers for spec-parse diagnostics.
 ///
 /// Parse errors accumulate a ` > `-separated tag path as they rise through the
-/// nested `ExprSpec` / `SignalSpec` bridges (`!above > !add > !mul > …`). That
+/// nested `NodeSpec` / `SignalSpec` bridges (`!above > !add > !mul > …`). That
 /// keeps the mechanism trivial — each level prepends its own tag — but a raw
 /// chain in front of every message is noise for whoever reads it, human or
 /// agent. [`split_trail`] separates the two so the CLI can print the failure

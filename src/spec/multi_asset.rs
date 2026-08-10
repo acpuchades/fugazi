@@ -44,7 +44,7 @@ use crate::strategies::MultiAssetStrategy;
 use crate::types::Snapshot;
 
 use super::basket::UniverseSpec;
-use super::expr::ExprSpec;
+use super::expr::NodeSpec;
 use super::signal::SignalSpec;
 use super::template::SpecTemplate;
 use crate::spec::dyn_indicator::{self, AsBool, AsReal, DynIndicator};
@@ -70,12 +70,12 @@ pub struct MultiSideSpec {
     /// at build time, so `!entry` / `!peak` / `!trough` inside compose as
     /// they do on [`SingleStrategySpec`](super::SingleStrategySpec).
     #[serde(default)]
-    pub stop_loss: Option<SpecTemplate<ExprSpec>>,
+    pub stop_loss: Option<SpecTemplate<NodeSpec>>,
 
     /// An optional take-profit price level (a per-symbol source). Same
     /// shape as [`stop_loss`](Self::stop_loss).
     #[serde(default)]
-    pub take_profit: Option<SpecTemplate<ExprSpec>>,
+    pub take_profit: Option<SpecTemplate<NodeSpec>>,
 }
 
 /// A whole `multi.yml`: optional long / short sides, optional sizing,
@@ -104,7 +104,7 @@ pub struct MultiAssetStrategySpec {
     /// N-symbol equal-weight portfolio at 100% gross writes
     /// `!equal_weight N`.
     #[serde(default)]
-    pub sizing: Option<SpecTemplate<ExprSpec>>,
+    pub sizing: Option<SpecTemplate<NodeSpec>>,
 
     /// Declared symbol universe — `!all_of [...]` (strict) or `!any_of
     /// [...]` (lax). Omitted means the default floating universe. See
@@ -385,19 +385,19 @@ fn leg_root(sym: &str) -> Selector<String> {
 }
 
 fn build_expr(
-    template: &SpecTemplate<ExprSpec>,
+    template: &SpecTemplate<NodeSpec>,
     sym: &str,
     slot: &'static str,
-) -> ExprSpec {
+) -> NodeSpec {
     try_build_expr(template, sym, slot).unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// The fallible twin of [`build_expr`].
 fn try_build_expr(
-    template: &SpecTemplate<ExprSpec>,
+    template: &SpecTemplate<NodeSpec>,
     sym: &str,
     slot: &'static str,
-) -> Result<ExprSpec, String> {
+) -> Result<NodeSpec, String> {
     let mut args = HashMap::new();
     args.insert("SYM".to_string(), Value::String(sym.to_string()));
     template
@@ -429,7 +429,7 @@ fn probe_signal(
 
 /// [`probe_signal`] for an expression template (protective levels, sizing).
 fn probe_expr(
-    template: &SpecTemplate<ExprSpec>,
+    template: &SpecTemplate<NodeSpec>,
     slot: &'static str,
     anchor: &Position,
     book: &Book,

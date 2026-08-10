@@ -123,8 +123,8 @@ struct DatasetSpec {
     /// Sources as single-key maps `{ provider_name: { params } }`.
     /// Deserialized after `yaml_to_json`, so each entry is already a JSON map.
     sources: Vec<serde_json::Map<String, Json>>,
-    /// Indicator overlays: a YAML mapping of `column_name: ExprSpec`.
-    /// Deserialized as a raw JSON value so the typed ExprSpec parse can reuse
+    /// Indicator overlays: a YAML mapping of `column_name: NodeSpec`.
+    /// Deserialized as a raw JSON value so the typed NodeSpec parse can reuse
     /// the same `serde_json::from_value` path the strategy spec uses.
     #[serde(default)]
     overlays: Option<Json>,

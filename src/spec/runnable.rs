@@ -153,7 +153,7 @@ impl StrategySpec {
 
     /// Build the live strategy, reporting a malformed document as an `Err`
     /// carrying its `!tag > ` breadcrumb (see
-    /// [`ExprSpec::try_build`](super::expr::ExprSpec::try_build)).
+    /// [`NodeSpec::try_build`](super::expr::NodeSpec::try_build)).
     ///
     /// `costs` is only consulted by the portfolio arm, which bakes a bundle
     /// into each sub-wallet at construction rather than priming a wallet

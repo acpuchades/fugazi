@@ -1,4 +1,4 @@
-//! Static type checking for [`ExprSpec`] trees, for `fugazi check`.
+//! Static type checking for [`NodeSpec`] trees, for `fugazi check`.
 //!
 //! Every tag declares what its children must *produce* and what it produces in
 //! turn — `!sma` needs a `Real` source, `!atr` a `Candle` one, `!close` an
@@ -27,16 +27,16 @@
 //!
 //! ## Drift
 //!
-//! This duplicates knowledge that also lives in the [`ExprSpec::build`] arms,
+//! This duplicates knowledge that also lives in the [`NodeSpec::build`] arms,
 //! so the two could drift apart and this one could start lying. Both matches
 //! below are **exhaustive with no wildcard arm**, so adding a variant to
-//! `ExprSpec` fails to compile until it is classified here — the compiler is
+//! `NodeSpec` fails to compile until it is classified here — the compiler is
 //! the drift guard, not a test that might not be run. The tests at the bottom
 //! then pin the classifications that exist against what `build` actually
 //! produces.
 
 use crate::runtime::DynType;
-use crate::spec::expr::{ExprSpec, ValueLit};
+use crate::spec::expr::{NodeSpec, ValueLit};
 use crate::spec::signal::SignalSpec;
 
 /// What a child slot is allowed to produce.
@@ -77,8 +77,8 @@ const REAL_OR_STR: Expect = Expect::OneOf(&[DynType::Real, DynType::Str]);
 
 /// What this expression produces, or `None` when that cannot be known
 /// statically (see the module docs — `None` means *skip*, never *invalid*).
-pub fn output_type(spec: &ExprSpec) -> Option<DynType> {
-    use ExprSpec::*;
+pub fn output_type(spec: &NodeSpec) -> Option<DynType> {
+    use NodeSpec::*;
     match spec {
         // --- the non-Real leaves ---
         Current { .. } => Some(DynType::Candle),
@@ -213,15 +213,15 @@ pub fn output_type(spec: &ExprSpec) -> Option<DynType> {
 /// Only slots whose type `build` constrains appear. A `SignalSpec` child
 /// (`!bars_since`'s source, `!if_else`'s `cond`) is always `Bool` by
 /// construction, so there is nothing to check.
-fn children(spec: &ExprSpec) -> Vec<(&'static str, Expect, &ExprSpec)> {
-    use ExprSpec::*;
+fn children(spec: &NodeSpec) -> Vec<(&'static str, Expect, &NodeSpec)> {
+    use NodeSpec::*;
     // A defaulted `source:` that is absent needs no check — the default root is
     // well-typed by construction.
     fn opt<'a>(
         label: &'static str,
         e: Expect,
-        s: &'a Option<Box<ExprSpec>>,
-    ) -> Vec<(&'static str, Expect, &'a ExprSpec)> {
+        s: &'a Option<Box<NodeSpec>>,
+    ) -> Vec<(&'static str, Expect, &'a NodeSpec)> {
         s.as_deref().map(|c| (label, e, c)).into_iter().collect()
     }
 
@@ -396,7 +396,7 @@ fn children(spec: &ExprSpec) -> Vec<(&'static str, Expect, &ExprSpec)> {
 ///
 /// Exhaustive with no wildcard, for the same reason as [`children`]: a new
 /// `SignalSpec` variant must be classified rather than silently unchecked.
-fn signal_children(spec: &SignalSpec) -> Vec<(&'static str, Expect, &ExprSpec)> {
+fn signal_children(spec: &SignalSpec) -> Vec<(&'static str, Expect, &NodeSpec)> {
     use SignalSpec::*;
     match spec {
         // `!eq` / `!ne` dispatch on the left operand's type and can compare
@@ -419,7 +419,7 @@ fn signal_children(spec: &SignalSpec) -> Vec<(&'static str, Expect, &ExprSpec)> 
         ChangedReal(source) => vec![("source", REAL, source)],
 
         // The string comparisons read a `Str` column on the left; `rhs` is a
-        // `StrOperand`, not an `ExprSpec`.
+        // `StrOperand`, not an `NodeSpec`.
         StrEq { lhs, .. } | StrNe { lhs, .. } => vec![("lhs", Expect::Only(DynType::Str), lhs)],
 
         // Bool-only or leaf variants: no expression child to type.
@@ -475,23 +475,23 @@ pub(crate) fn signal_tag_name(spec: &SignalSpec) -> String {
 /// table: the enum is externally tagged and its variant idents are the tag
 /// names modulo case, so this stays correct for free as variants are added —
 /// which a hand-written table would not.
-pub(crate) fn tag_name(spec: &ExprSpec) -> String {
+pub(crate) fn tag_name(spec: &NodeSpec) -> String {
     snake_tag(&format!("{spec:?}"))
 }
 
-/// Every tag the [`ExprSpec`] layer accepts, in declaration order.
+/// Every tag the [`NodeSpec`] layer accepts, in declaration order.
 ///
 /// Same spirit as [`tag_name`]: read it off what serde already knows rather
 /// than maintaining a parallel table. Feeding the deserializer a tag that
 /// cannot exist makes its derived `unknown variant` error enumerate every
-/// variant it *does* accept — so a new `ExprSpec` variant shows up here with no
+/// variant it *does* accept — so a new `NodeSpec` variant shows up here with no
 /// edit, which is the whole point. A hand-written list is exactly the thing
 /// that silently goes stale.
 ///
 /// Names come back **without** the leading `!`.
 pub fn known_expr_tags() -> Vec<String> {
     let v: serde_norway::Value = serde_norway::from_str(IMPOSSIBLE_TAG).expect("valid YAML");
-    variants_from_error(&ExprSpec::try_from(v).expect_err("the tag cannot exist"))
+    variants_from_error(&NodeSpec::try_from(v).expect_err("the tag cannot exist"))
 }
 
 /// [`known_expr_tags`] for the [`SignalSpec`] layer.
@@ -571,7 +571,7 @@ fn snake_tag(debug: &str) -> String {
 /// each has already validated its own slots by the time this runs — meaning a
 /// deep mismatch surfaces from the innermost node, where the message is most
 /// useful, without this pass recursing.
-pub fn check_immediate(spec: &ExprSpec) -> Result<(), String> {
+pub fn check_immediate(spec: &NodeSpec) -> Result<(), String> {
     for (slot, expect, child) in children(spec) {
         if matches!(expect, Expect::OneOf([])) {
             continue;
@@ -600,16 +600,16 @@ mod tests {
 
     /// Parse **without** the type check, so these tests can construct the
     /// ill-typed trees they exercise — the public parse path rejects them now.
-    fn parse(yaml: &str) -> ExprSpec {
+    fn parse(yaml: &str) -> NodeSpec {
         let value: serde_norway::Value =
             serde_norway::from_str(yaml).unwrap_or_else(|e| panic!("parsing {yaml:?}: {e}"));
-        ExprSpec::parse_unchecked(value).unwrap_or_else(|e| panic!("parsing {yaml:?}: {e}"))
+        NodeSpec::parse_unchecked(value).unwrap_or_else(|e| panic!("parsing {yaml:?}: {e}"))
     }
 
     /// Parse through the **public** path, which applies the check.
-    fn parse_checked(yaml: &str) -> Result<ExprSpec, String> {
+    fn parse_checked(yaml: &str) -> Result<NodeSpec, String> {
         let value: serde_norway::Value = serde_norway::from_str(yaml).expect("valid YAML");
-        ExprSpec::try_from(value)
+        NodeSpec::try_from(value)
     }
 
     /// The drift guard: for a representative of every classification, the type
@@ -748,7 +748,7 @@ mod tests {
     /// Replace `slot` in a tagged-mapping spec with `replacement`, returning the
     /// re-parsed spec. `None` when the representative has no mapping body to
     /// edit (a bare `!obv`), which simply isn't a case this test can mutate.
-    fn with_slot(yaml: &str, slot: &str, replacement: &str) -> Option<ExprSpec> {
+    fn with_slot(yaml: &str, slot: &str, replacement: &str) -> Option<NodeSpec> {
         use serde_norway::Value as Y;
         let Y::Tagged(mut tagged) = serde_norway::from_str::<Y>(yaml).ok()? else {
             return None;
@@ -766,7 +766,7 @@ mod tests {
             }
             _ => return None,
         }
-        ExprSpec::parse_unchecked(Y::Tagged(tagged)).ok()
+        NodeSpec::parse_unchecked(Y::Tagged(tagged)).ok()
     }
 
     /// The undecidable cases must report `None` — *skip*, not a wrong guess.

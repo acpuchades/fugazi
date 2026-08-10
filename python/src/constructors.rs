@@ -1367,7 +1367,7 @@ pub(crate) fn carrier_inner_indicator(
 
 /// The two accepted `overlays` shapes, normalised.
 pub(crate) enum OverlayInput {
-    /// A `name: ExprSpec` YAML doc (built per series against the input schema).
+    /// A `name: NodeSpec` YAML doc (built per series against the input schema).
     Spec(Vec<fugazi_core::spec::overlay::OverlayColumn>),
     /// A dict of pre-built carriers (deep-cloned per series).
     Built(Vec<(String, Box<dyn runtime::DynIndicator>)>),

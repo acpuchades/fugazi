@@ -1,7 +1,7 @@
 //! [`SpecTemplate<T>`]: a raw YAML/JSON tree deferred for later
 //! typed-deserialize into `T`.
 //!
-//! First-class YAML type alongside [`ExprSpec`](super::ExprSpec) and
+//! First-class YAML type alongside [`NodeSpec`](super::NodeSpec) and
 //! [`SignalSpec`](super::SignalSpec). Where those two produce a concrete
 //! indicator eagerly at `spec.build(...)` time, `SpecTemplate<T>` holds a
 //! raw `serde_json::Value` tree that may still contain `!arg NAME`
@@ -39,10 +39,10 @@
 //!     rhs: !adx { source: !current_bar { source: !pick { symbol: !arg SYM } }, period: 14 }
 //! ```
 //!
-//! deserializes as a `SpecTemplate<ExprSpec>` because that's the type of
+//! deserializes as a `SpecTemplate<NodeSpec>` because that's the type of
 //! the `score:` field on its containing spec (e.g.
 //! `BasketStrategySpec`). The same YAML tree under a field typed as
-//! `ExprSpec` would deserialize eagerly and fail on the `!arg` leaves.
+//! `NodeSpec` would deserialize eagerly and fail on the `!arg` leaves.
 
 use std::collections::HashMap;
 use std::marker::PhantomData;

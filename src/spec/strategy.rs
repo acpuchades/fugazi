@@ -13,7 +13,7 @@ use crate::prelude::*;
 use crate::strategies::SingleAssetStrategy;
 
 use super::signal::SignalSpec;
-use super::expr::ExprSpec;
+use super::expr::NodeSpec;
 use crate::spec::dyn_indicator::{self, AsBool, AsReal, DynIndicator};
 
 // ---------------------------------------------------------------------------
@@ -38,11 +38,11 @@ pub struct SideSpec {
     /// adverse extreme of the bar reaches it. A `peak` / `trough` source makes it
     /// a trailing stop.
     #[serde(default)]
-    pub stop_loss: Option<Box<ExprSpec>>,
+    pub stop_loss: Option<Box<NodeSpec>>,
     /// An optional take-profit price level (a source). The side flattens when the
     /// favourable extreme of the bar reaches it.
     #[serde(default)]
-    pub take_profit: Option<Box<ExprSpec>>,
+    pub take_profit: Option<Box<NodeSpec>>,
 }
 
 impl SideSpec {
@@ -85,7 +85,7 @@ pub struct SingleStrategySpec {
     /// reading skips the trade for that bar (safe default — build a well-defined
     /// fallback into the spec if that isn't what you want).
     #[serde(default)]
-    pub sizing: Option<Box<ExprSpec>>,
+    pub sizing: Option<Box<NodeSpec>>,
 
     /// Optional **rebalance gate** — a boolean signal deciding, on each
     /// bar, whether the open position is resized to the current sizing
@@ -166,7 +166,7 @@ impl SingleStrategySpec {
     }
 
     /// The fallible twin of [`build`](Self::build): every slot is built through
-    /// [`ExprSpec::try_build`] / [`SignalSpec::try_build`], so a bad expression
+    /// [`NodeSpec::try_build`] / [`SignalSpec::try_build`], so a bad expression
     /// anywhere in the document comes back as a message with its tag trail
     /// instead of aborting the process.
     pub fn try_build(

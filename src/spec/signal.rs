@@ -14,7 +14,7 @@ use crate::indicators::{
 };
 use crate::prelude::*;
 
-use super::expr::{ExprSpec, default_source};
+use super::expr::{NodeSpec, default_source};
 use crate::spec::dyn_indicator::{self, AsBool, AsReal, AsStr, DynIndicator, DynType};
 
 // The implicit atom roots are shared with the expression layer — one
@@ -27,19 +27,19 @@ use super::expr::{pick_any_root, pick_root};
 ///
 /// A bare YAML string is the literal to match (`rhs: bull`) — the common case,
 /// and the only shape the tag used to take. Anything else deserializes as an
-/// [`ExprSpec`], so both sides of the comparison are symmetric: the same
+/// [`NodeSpec`], so both sides of the comparison are symmetric: the same
 /// constant written the long way (`rhs: !value bull`) or a second `Str` column
 /// read (`rhs: !get { key: prev_regime }`) both build to a `Str`-output source.
 ///
 /// Deserializes through a [`serde_norway::Value`] bridge rather than
-/// `#[serde(untagged)]` because [`ExprSpec`] carries its own `TryFrom`
+/// `#[serde(untagged)]` because [`NodeSpec`] carries its own `TryFrom`
 /// normalisation (bare word / tag / single-key map → tagged), which serde's
 /// untagged content buffering would bypass.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(try_from = "serde_norway::Value")]
 pub enum StrOperand {
     Literal(String),
-    Expr(Box<ExprSpec>),
+    Expr(Box<NodeSpec>),
 }
 
 impl TryFrom<serde_norway::Value> for StrOperand {
@@ -48,7 +48,7 @@ impl TryFrom<serde_norway::Value> for StrOperand {
     fn try_from(v: serde_norway::Value) -> Result<Self, Self::Error> {
         match v {
             serde_norway::Value::String(s) => Ok(StrOperand::Literal(s)),
-            other => ExprSpec::try_from(other).map(|e| StrOperand::Expr(Box::new(e))),
+            other => NodeSpec::try_from(other).map(|e| StrOperand::Expr(Box::new(e))),
         }
     }
 }
@@ -80,7 +80,7 @@ impl StrOperand {
 /// A boolean condition over a candle stream — the YAML form of a `Signal`.
 ///
 /// Deserializes via a [`serde_norway::Value`] bridge, symmetric with
-/// [`ExprSpec`]'s: an incoming [`serde_norway::Value::Mapping`] with a
+/// [`NodeSpec`]'s: an incoming [`serde_norway::Value::Mapping`] with a
 /// single string key (the shape a serde_json → serde_norway::Value bridge
 /// produces for an externally-tagged enum) is normalised into a
 /// [`serde_norway::Value::Tagged`] before deserialization proceeds. This
@@ -93,56 +93,56 @@ impl StrOperand {
 pub enum SignalSpec {
     // --- comparisons ---
     Gt {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
         epsilon: Option<Real>,
     },
     Lt {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
         epsilon: Option<Real>,
     },
     Ge {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
         epsilon: Option<Real>,
     },
     Le {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
         epsilon: Option<Real>,
     },
     Eq {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
         epsilon: Option<Real>,
     },
     Ne {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
         epsilon: Option<Real>,
     },
     /// `source > level` against a constant.
     Above {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         level: Real,
     },
     /// `source < level` against a constant.
     Below {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         level: Real,
     },
 
     // --- crossovers ---
     CrossesAbove {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
     },
     CrossesBelow {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
     },
 
     // --- boolean logic ---
@@ -175,7 +175,7 @@ pub enum SignalSpec {
     /// → 1). Same YAML tag as [`Changed`](Self::Changed) — the CLI's
     /// [`TryFrom<Value>`] tries the Bool-inner shape first and falls back
     /// to this Real-inner shape.
-    ChangedReal(Box<ExprSpec>),
+    ChangedReal(Box<NodeSpec>),
     /// Rising-edge detector for a Bool inner: fires the bar it transitions
     /// `false → true`. Sugar for `!and { <inner>, !changed { source: <inner>
     /// } }` bundled as one primitive so the inner doesn't need to be named
@@ -201,13 +201,13 @@ pub enum SignalSpec {
     /// [`StrOperand`] — a bare string literal (`rhs: bull`) or any
     /// `Str`-output expression (`rhs: !value bull`, `rhs: !get { key: d }`).
     StrEq {
-        lhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
         rhs: StrOperand,
     },
     /// `lhs != rhs` on two `Str`-typed operands. The complement of
     /// [`SignalSpec::StrEq`].
     StrNe {
-        lhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
         rhs: StrOperand,
     },
     /// Passthrough wrapper that reports `unstable_period() = 0`. The output
@@ -217,7 +217,7 @@ pub enum SignalSpec {
     /// every source to be past its unstable tail" safe default; see
     /// [`crate::indicators::Unstable`].
     Unstable { signal: Box<SignalSpec> },
-    /// A constant boolean leaf. Spelled `!value` like [`ExprSpec::Value`] —
+    /// A constant boolean leaf. Spelled `!value` like [`NodeSpec::Value`] —
     /// one tag for "a literal", typed by position (bool here, number there).
     Value(bool),
     /// Sugar for `Value(false)` — reads better on a `rebalance_on` field
@@ -261,52 +261,52 @@ pub enum SignalSpec {
 #[serde(deny_unknown_fields)]
 enum SignalSpecRaw {
     Gt {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
         epsilon: Option<Real>,
     },
     Lt {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
         epsilon: Option<Real>,
     },
     Ge {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
         epsilon: Option<Real>,
     },
     Le {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
         epsilon: Option<Real>,
     },
     Eq {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
         epsilon: Option<Real>,
     },
     Ne {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
         epsilon: Option<Real>,
     },
     Above {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         level: Real,
     },
     Below {
         #[serde(default = "default_source")]
-        source: Box<ExprSpec>,
+        source: Box<NodeSpec>,
         level: Real,
     },
     CrossesAbove {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
     },
     CrossesBelow {
-        lhs: Box<ExprSpec>,
-        rhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
+        rhs: Box<NodeSpec>,
     },
     And {
         lhs: Box<SignalSpec>,
@@ -327,17 +327,17 @@ enum SignalSpecRaw {
     // Real-inner shape of `!changed`. Not exposed at the raw enum tag level
     // (the YAML tag is still `!changed`); populated by the polymorphic
     // dispatch in `SignalSpec::TryFrom<Value>` when the Bool-inner parse
-    // fails and the ExprSpec fallback succeeds.
-    ChangedReal(Box<ExprSpec>),
+    // fails and the NodeSpec fallback succeeds.
+    ChangedReal(Box<NodeSpec>),
     BecameTrue(Box<SignalSpec>),
     BecameFalse(Box<SignalSpec>),
     Get { key: String },
     StrEq {
-        lhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
         rhs: StrOperand,
     },
     StrNe {
-        lhs: Box<ExprSpec>,
+        lhs: Box<NodeSpec>,
         rhs: StrOperand,
     },
     Unstable { signal: Box<SignalSpec> },
@@ -392,7 +392,7 @@ impl TryFrom<serde_norway::Value> for SignalSpec {
     /// Normalise the incoming value into a [`serde_norway::Value::Tagged`],
     /// then deserialize into [`SignalSpecRaw`]. See the module-level doc
     /// for the shape rationale — identical to
-    /// [`ExprSpec`](super::expr::ExprSpec)'s TryFrom, kept in lock-step so
+    /// [`NodeSpec`](super::expr::NodeSpec)'s TryFrom, kept in lock-step so
     /// the two spec surfaces normalise the same way.
     fn try_from(v: serde_norway::Value) -> Result<Self, Self::Error> {
         use serde_norway::value::{Tag, TaggedValue};
@@ -400,13 +400,13 @@ impl TryFrom<serde_norway::Value> for SignalSpec {
         // A `check`-mode hole standing in for a whole signal (a `!param` that
         // resolves to an entire condition). Only present under `check`; a
         // constant `false` is a valid boolean signal, enough to validate the
-        // surrounding shape. (See the mirror `ExprSpec::TryFrom`.)
+        // surrounding shape. (See the mirror `NodeSpec::TryFrom`.)
         if crate::spec::undefined::is_undefined(&v) {
             return Ok(SignalSpec::Value(false));
         }
 
         // Unit-variant tags: their content stays as `Value::Null`
-        // (see the mirror `ExprSpec::TryFrom` for the "why").
+        // (see the mirror `NodeSpec::TryFrom` for the "why").
         const UNIT_VARIANTS: &[&str] = &[
             "is_weekday", "is_weekend", "never",
             // Wall-clock cadence sugar (all unit tags — they rewrite to
@@ -478,13 +478,13 @@ impl TryFrom<serde_norway::Value> for SignalSpec {
         //
         // * `!changed <bool_or_real_inner>` polymorphic dispatch — if the
         //   inner value parses as a `SignalSpec` (Bool), use `Changed`;
-        //   otherwise try `ExprSpec` (Real) and produce `ChangedReal`.
+        //   otherwise try `NodeSpec` (Real) and produce `ChangedReal`.
         let normalised = rewrite_cadence_sugar(normalised);
         if let Some(rewritten) = try_dispatch_edge_polymorphic(&normalised)? {
             return Ok(rewritten);
         }
 
-        // Same error breadcrumb as `ExprSpec::parse_unchecked` — so a trail
+        // Same error breadcrumb as `NodeSpec::parse_unchecked` — so a trail
         // through a mixed signal/source tree stays unbroken across the two
         // bridges (`!all` → `!above` → `!add` → …).
         let tag = match &normalised {
@@ -504,7 +504,7 @@ impl TryFrom<serde_norway::Value> for SignalSpec {
                 None => e.to_string(),
             })?;
         let spec: SignalSpec = raw.into();
-        // Same check the `ExprSpec` bridge applies, for the signal layer's own
+        // Same check the `NodeSpec` bridge applies, for the signal layer's own
         // expression operands. This is where most mismatches land in practice:
         // a comparison or a level test is the first place a source gets used,
         // so `!above { source: !pick { … } }` is a likelier slip than the same
@@ -603,7 +603,7 @@ fn extract_edge_inner(
 /// `!became_false` tag, dispatch its inner:
 ///
 /// * `!changed` — try Bool ([`SignalSpec`]) first; on failure, fall back
-///   to Real ([`ExprSpec`]) and produce [`SignalSpec::ChangedReal`].
+///   to Real ([`NodeSpec`]) and produce [`SignalSpec::ChangedReal`].
 /// * `!became_true` / `!became_false` — Bool inner only; wrap in the
 ///   corresponding rising/falling variant.
 ///
@@ -616,7 +616,7 @@ fn try_dispatch_edge_polymorphic(
     if let Some(inner) = extract_edge_inner(v, "changed") {
         return match SignalSpec::try_from(inner.clone()) {
             Ok(bool_inner) => Ok(Some(SignalSpec::Changed(Box::new(bool_inner)))),
-            Err(bool_err) => match ExprSpec::try_from(inner) {
+            Err(bool_err) => match NodeSpec::try_from(inner) {
                 Ok(real_inner) => Ok(Some(SignalSpec::ChangedReal(Box::new(real_inner)))),
                 Err(_) => Err(bool_err),
             },
@@ -641,7 +641,7 @@ fn eps(epsilon: &Option<Real>) -> Real {
 }
 
 /// Prepend `spec`'s own tag to an error message — the signal-layer twin of
-/// [`ExprSpec`]'s `trail`, building the ` > `-separated breadcrumb inside-out
+/// [`NodeSpec`]'s `trail`, building the ` > `-separated breadcrumb inside-out
 /// as the failure rises through the recursive build.
 fn trail(spec: &SignalSpec, message: impl std::fmt::Display) -> String {
     format!(
@@ -650,8 +650,8 @@ fn trail(spec: &SignalSpec, message: impl std::fmt::Display) -> String {
     )
 }
 
-/// [`trail`] for an [`ExprSpec`] operand nested inside a signal.
-fn expr_trail(spec: &ExprSpec, message: impl std::fmt::Display) -> String {
+/// [`trail`] for an [`NodeSpec`] operand nested inside a signal.
+fn expr_trail(spec: &NodeSpec, message: impl std::fmt::Display) -> String {
     format!("{} > {message}", crate::spec::typecheck::tag_name(spec))
 }
 
@@ -674,7 +674,7 @@ impl SignalSpec {
     }
 
     /// The fallible twin of [`build`](Self::build) — the signal-layer mirror of
-    /// [`ExprSpec::try_build`], carrying the same `!tag > ` breadcrumb
+    /// [`NodeSpec::try_build`], carrying the same `!tag > ` breadcrumb
     /// convention.
     pub fn try_build(
         &self,
@@ -689,7 +689,7 @@ impl SignalSpec {
     }
 
     /// The match itself — wrapped by [`try_build`](Self::try_build), which
-    /// prepends this node's tag. See [`ExprSpec::try_build`].
+    /// prepends this node's tag. See [`NodeSpec::try_build`].
     fn try_build_inner(
         &self,
         anchor: &Position,
@@ -699,7 +699,7 @@ impl SignalSpec {
         root: Option<&Selector<String>>,
     ) -> Result<Box<dyn DynIndicator>, String> {
         use SignalSpec::*;
-        let real = |s: &ExprSpec| -> Result<AsReal, String> {
+        let real = |s: &NodeSpec| -> Result<AsReal, String> {
             let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
             AsReal::try_new(built).map_err(|e| expr_trail(s, e))
         };
@@ -708,7 +708,7 @@ impl SignalSpec {
             AsBool::try_new(built).map_err(|e| trail(s, e))
         };
         // `!str_eq` / `!str_ne` lhs: always a nested expression, viewed as Str.
-        let str_expr = |s: &ExprSpec| -> Result<AsStr, String> {
+        let str_expr = |s: &NodeSpec| -> Result<AsStr, String> {
             let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
             AsStr::try_new(built).map_err(|e| expr_trail(s, e))
         };
@@ -751,7 +751,7 @@ impl SignalSpec {
             // you write `rhs: bear` without a `!value` wrapper); use
             // them when you want the ergonomic bare-string rhs form.
             // Under `!eq { lhs, rhs: !value bear }` both operands are
-            // ExprSpecs, so the string constant must be `!value`-wrapped.
+            // NodeSpecs, so the string constant must be `!value`-wrapped.
             Eq { lhs, rhs, epsilon } => build_polymorphic_eq(
                 lhs, rhs, *epsilon, false, anchor, book, portfolio_book, schema, root,
             ),
@@ -861,8 +861,8 @@ impl SignalSpec {
 /// `negate = false` builds `!eq`; `negate = true` builds `!ne`.
 #[allow(clippy::too_many_arguments)]
 fn build_polymorphic_eq(
-    lhs: &ExprSpec,
-    rhs: &ExprSpec,
+    lhs: &NodeSpec,
+    rhs: &NodeSpec,
     epsilon: Option<Real>,
     negate: bool,
     anchor: &Position,

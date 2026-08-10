@@ -18,7 +18,7 @@
 //!
 //! With a scope, the overlay only runs for matching `(symbol, interval)` fetches;
 //! rows produced by other groups render blanks in that column. Each source
-//! expression is the same [`ExprSpec`] YAML surface the strategy parser
+//! expression is the same [`NodeSpec`] YAML surface the strategy parser
 //! accepts (`close`, `!sma { period: N }`, `!add { lhs, rhs }`, …) — no separate
 //! grammar. `!param { key }` placeholders are resolved from `get --params`
 //! before the typed parse, so `--params FAST=20 -x 'ma=!sma { period: !param FAST }'`
@@ -46,7 +46,7 @@ use crate::dyn_indicator::DynIndicator;
 use crate::calendar::{is_escaped, looks_like_body, parse_interval, parse_scope_parts};
 use crate::input::{self, Source};
 use crate::params;
-use crate::spec::ExprSpec;
+use crate::spec::NodeSpec;
 
 /// Which `(symbol, interval)` fetches an overlay applies to. `None` on either
 /// side means "any" — no scope filter at all is `OverlayScope::default()`.
@@ -69,7 +69,7 @@ impl OverlayScope {
 #[derive(Debug, Clone)]
 pub struct Overlay {
     pub name: String,
-    pub spec: ExprSpec,
+    pub spec: NodeSpec,
     pub scope: OverlayScope,
     pub origin: String,
 }
@@ -125,7 +125,7 @@ impl Overlay {
 /// expression — the same substitution pass the strategy spec applies (see
 /// [`crate::params`]) — so `get --params FAST=20 -x 'ma=!sma { period: !param FAST }'`
 /// works exactly like it does on a strategy document. The pass runs on the
-/// untyped value tree before it deserializes into an [`ExprSpec`].
+/// untyped value tree before it deserializes into an [`NodeSpec`].
 pub fn parse_specs(sources: &[Source], params: &HashMap<String, Json>) -> Result<Vec<Overlay>> {
     let mut out: Vec<Overlay> = Vec::new();
     for src in sources {
@@ -361,8 +361,8 @@ fn parse_file(
 /// How an inline `-x col=expr` overlay names itself in a build error.
 const INLINE_ORIGIN: &str = "(inline overlay)";
 
-/// Parse a bare source expression (the RHS of `col=expr`) into a [`ExprSpec`].
-fn parse_expr(text: &str, params: &HashMap<String, Json>) -> Result<ExprSpec> {
+/// Parse a bare source expression (the RHS of `col=expr`) into a [`NodeSpec`].
+fn parse_expr(text: &str, params: &HashMap<String, Json>) -> Result<NodeSpec> {
     let expr = text.trim();
     if expr.is_empty() {
         bail!("empty source expression");
@@ -414,7 +414,7 @@ fn reject_reserved_name(name: &str) -> Result<()> {
 }
 
 /// Parse overlay columns from an already-converted JSON value (a mapping of column
-/// names to ExprSpec values).
+/// names to NodeSpec values).
 ///
 /// The caller is responsible for the `serde_norway → imports → yaml_to_json` pass
 /// before calling this — it is used by the dataset YAML parser, which has already
@@ -430,7 +430,7 @@ pub fn parse_from_value(
     scoped_from_value(value, OverlayScope::default(), label)
 }
 
-/// Shared adapter: parse a `name: ExprSpec` map via the library core, apply the
+/// Shared adapter: parse a `name: NodeSpec` map via the library core, apply the
 /// CLI's reserved-name policy, and tag every column with `scope`.
 fn scoped_from_value(value: Json, scope: OverlayScope, label: &str) -> Result<Vec<Overlay>> {
     crate::spec::overlay::columns_from_value(value, label)?
@@ -475,7 +475,7 @@ mod tests {
         let src = Source::Inline("c=close".to_string());
         let overlays = parse_specs(std::slice::from_ref(&src)).unwrap();
         assert_eq!(overlays.len(), 1);
-        assert!(matches!(overlays[0].spec, ExprSpec::Close { .. }));
+        assert!(matches!(overlays[0].spec, NodeSpec::Close { .. }));
     }
 
     #[test]
@@ -621,9 +621,9 @@ mod tests {
         let overlays = parse_specs(&[a, b]).unwrap();
         let cols = column_names(&overlays);
         let btc = active_for(&overlays, &cols, "BTC", Interval::Day(1));
-        assert!(matches!(btc[0].map(|o| &o.spec), Some(ExprSpec::Ema { .. })));
+        assert!(matches!(btc[0].map(|o| &o.spec), Some(NodeSpec::Ema { .. })));
         let eth = active_for(&overlays, &cols, "ETH", Interval::Day(1));
-        assert!(matches!(eth[0].map(|o| &o.spec), Some(ExprSpec::Sma { .. })));
+        assert!(matches!(eth[0].map(|o| &o.spec), Some(NodeSpec::Sma { .. })));
     }
 
     #[test]
@@ -654,8 +654,8 @@ mod tests {
         let overlays = vec![
             Overlay {
                 name: "a".to_string(),
-                spec: ExprSpec::Sma {
-                    source: Box::new(ExprSpec::Close { source: None }),
+                spec: NodeSpec::Sma {
+                    source: Box::new(NodeSpec::Close { source: None }),
                     period: 200,
                 },
                 scope: OverlayScope {
@@ -666,8 +666,8 @@ mod tests {
             },
             Overlay {
                 name: "b".to_string(),
-                spec: ExprSpec::Sma {
-                    source: Box::new(ExprSpec::Close { source: None }),
+                spec: NodeSpec::Sma {
+                    source: Box::new(NodeSpec::Close { source: None }),
                     period: 20,
                 },
                 scope: OverlayScope::default(),
@@ -704,7 +704,7 @@ mod tests {
     #[test]
     fn param_substitutes_in_inline_overlay() {
         // `!param FAST` inside an inline overlay expression resolves from the
-        // `--params` table before the typed `ExprSpec` parse, exactly as it
+        // `--params` table before the typed `NodeSpec` parse, exactly as it
         // does in a strategy document.
         let src = Source::Inline("ma=!sma { period: !param FAST }".to_string());
         let table = HashMap::from([("FAST".to_string(), Json::from(20))]);
@@ -712,7 +712,7 @@ mod tests {
         assert_eq!(overlays.len(), 1);
         assert!(matches!(
             overlays[0].spec,
-            ExprSpec::Sma { period: 20, .. }
+            NodeSpec::Sma { period: 20, .. }
         ));
     }
 
@@ -722,7 +722,7 @@ mod tests {
         let overlays = super::parse_specs(std::slice::from_ref(&src), &HashMap::new()).unwrap();
         assert!(matches!(
             overlays[0].spec,
-            ExprSpec::Sma { period: 14, .. }
+            NodeSpec::Sma { period: 14, .. }
         ));
     }
 
@@ -742,7 +742,7 @@ mod tests {
         let overlays = super::parse_specs(std::slice::from_ref(&src), &table).unwrap();
         assert!(matches!(
             overlays[0].spec,
-            ExprSpec::Sma { period: 30, .. }
+            NodeSpec::Sma { period: 30, .. }
         ));
     }
 }

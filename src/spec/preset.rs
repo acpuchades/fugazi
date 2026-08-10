@@ -113,7 +113,7 @@ impl StrategyPreset {
 /// Either a full [`SingleStrategySpec`] document or a [`StrategyPreset`] tag.
 ///
 /// Deserialized through a [`serde_norway::Value`] bridge (like
-/// [`ExprSpec`](super::ExprSpec)): a value whose tag / single map key is one of
+/// [`NodeSpec`](super::NodeSpec)): a value whose tag / single map key is one of
 /// [`PRESET_TAGS`] parses as a preset, anything else as a full spec. Works
 /// through both the YAML (`serde_norway`) path — the trailing indicators'
 /// `strategy:` field — and the `serde_json` load path — a top-level `fugazi run`
@@ -185,7 +185,7 @@ impl TryFrom<serde_norway::Value> for StrategyRef {
         // on the serde_json load path, as a single-key `{ tag: { … } }` mapping.
         // serde_norway only routes an *enum* through Value::Tagged, so a
         // single-key mapping is normalised to Tagged before deserializing the
-        // preset — exactly the ExprSpec pattern.
+        // preset — exactly the NodeSpec pattern.
         let tagged_preset: Option<Value> = match &v {
             Value::Tagged(t) => {
                 let name = t.tag.to_string();

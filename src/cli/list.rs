@@ -688,7 +688,7 @@ mod tests {
     ///
     /// The expected set comes from serde's own variant list (see
     /// [`typecheck::known_expr_tags`]), so it needs no upkeep: add a variant to
-    /// `ExprSpec` or `SignalSpec` and this fails until the catalogue documents
+    /// `NodeSpec` or `SignalSpec` and this fails until the catalogue documents
     /// it.
     #[test]
     fn the_catalogue_documents_every_spec_tag() {
@@ -699,7 +699,7 @@ mod tests {
 
         let mut missing: Vec<String> = Vec::new();
         for (layer, tags) in [
-            ("ExprSpec", known_expr_tags()),
+            ("NodeSpec", known_expr_tags()),
             ("SignalSpec", known_signal_tags()),
         ] {
             for tag in tags {

@@ -247,7 +247,7 @@ fn bench_snapshot_clone_scaling() {
 /// components; the spec builder has no equivalent, so `!macd_line` and
 /// `!macd_signal` build two independent `Macd`s.
 ///
-/// **The duplicate is not where the ~1.9× goes.** Teaching `ExprSpec::build` to
+/// **The duplicate is not where the ~1.9× goes.** Teaching `NodeSpec::build` to
 /// memoise multi-output sub-trees into a `Shared` handle was tried and
 /// measured: the cache hits, one `Macd` genuinely drives both components, and
 /// the total moves ~3% — inside the noise. Four `SharedComponent`s taking a

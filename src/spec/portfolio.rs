@@ -56,7 +56,7 @@ use crate::types::Snapshot;
 use crate::spec::dyn_indicator::{AsBool, AsReal, DynIndicator};
 
 use super::basket::BasketStrategySpec;
-use super::expr::ExprSpec;
+use super::expr::NodeSpec;
 use super::multi_asset::MultiAssetStrategySpec;
 use super::pairs::PairsStrategySpec;
 use super::preset::StrategyRef;
@@ -129,7 +129,7 @@ pub struct PortfolioSpec {
     ///   for aggregate-drawdown-throttled per-child sizing (bare
     ///   `!drawdown_throttle` reads each child's own book; add
     ///   `source: !portfolio_book` to read the aggregate). The whole
-    ///   surface of [`ExprSpec`] is available. `!fixed` and
+    ///   surface of [`NodeSpec`] is available. `!fixed` and
     ///   `!equal_weight` are recognized as sugar and rewritten to the
     ///   corresponding `!value` form at load time.
     ///
@@ -145,7 +145,7 @@ pub struct PortfolioSpec {
     /// Weights are magnitudes and needn't sum to `1.0`; the portfolio
     /// normalizes on use.
     #[serde(default, deserialize_with = "deserialize_weights")]
-    pub weights: Option<SpecTemplate<ExprSpec>>,
+    pub weights: Option<SpecTemplate<NodeSpec>>,
 
     /// The **rebalance gate**: a boolean signal deciding, on each bar,
     /// whether the portfolio runs one rebalance cycle after children
@@ -334,7 +334,7 @@ fn is_preset_tag(name: &str) -> bool {
 /// Deserialize the `weights:` field, rewriting the sugar tags
 /// `!fixed [w0, w1, ...]` and `!equal_weight` to their canonical
 /// `!value` equivalents before wrapping in the deferred
-/// [`SpecTemplate<ExprSpec>`].
+/// [`SpecTemplate<NodeSpec>`].
 ///
 /// The two sugar tags exist so common weight cases stay readable:
 /// - `!fixed [w0, w1, ...]` → `!value [w0, w1, ...]` (per-child indexed
@@ -342,13 +342,13 @@ fn is_preset_tag(name: &str) -> bool {
 /// - `!equal_weight` → `!value 1.0` (any per-child constant normalizes
 ///   to `1/N`).
 ///
-/// Everything else falls through untouched — the whole [`ExprSpec`]
+/// Everything else falls through untouched — the whole [`NodeSpec`]
 /// surface is available under `weights:`, e.g.
 /// `weights: !drawdown_throttle { source: !portfolio_book, max_drawdown: 0.15 }`
 /// to throttle every child's weight by the aggregate drawdown.
 fn deserialize_weights<'de, D>(
     d: D,
-) -> Result<Option<SpecTemplate<ExprSpec>>, D::Error>
+) -> Result<Option<SpecTemplate<NodeSpec>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -359,7 +359,7 @@ where
         None => return Ok(None),
     };
     let rewritten = rewrite_weights_sugar(raw).map_err(D::Error::custom)?;
-    Ok(Some(SpecTemplate::<ExprSpec>::from_tree(rewritten)))
+    Ok(Some(SpecTemplate::<NodeSpec>::from_tree(rewritten)))
 }
 
 /// Rewrite `!fixed`/`!equal_weight` at the top level of a weights
@@ -402,7 +402,7 @@ fn rewrite_weights_sugar(v: Value) -> std::result::Result<Value, String> {
 /// node pass through untouched. An out-of-range `index` leaves the list
 /// alone; the downstream typed parse then rejects the list as an
 /// invalid `!value` payload in a non-per-child context (matches the
-/// panic path in [`ExprSpec::build`]).
+/// panic path in [`NodeSpec::build`]).
 fn rewrite_value_list_by_index(v: Value, index: usize) -> Value {
     match v {
         Value::Object(mut m) => {
@@ -733,7 +733,7 @@ impl PortfolioSpec {
                 let preprocessed_tree =
                     rewrite_value_list_by_index(template.tree().clone(), i);
                 let per_child_template =
-                    SpecTemplate::<ExprSpec>::from_tree(preprocessed_tree);
+                    SpecTemplate::<NodeSpec>::from_tree(preprocessed_tree);
                 let concrete = per_child_template.build(&args).map_err(|e| {
                     format!(
                         "PortfolioSpec::build: weight_share template failed \
@@ -1640,9 +1640,9 @@ mod tests {
         // reads 2.0, the mean-rev leg reads 1.0; normalized 2/3 and
         // 1/3 with `rebalance_on: !every 1` should snap the sub-equities
         // toward those weights. The `!value { arg: CHILD_GROUP }`
-        // wrapper turns the resolved arg into an `ExprSpec::Value(Str)`
+        // wrapper turns the resolved arg into an `NodeSpec::Value(Str)`
         // — the position where `!str_eq`'s lhs takes any
-        // `Str`-emitting ExprSpec.
+        // `Str`-emitting NodeSpec.
         let yaml = r#"
             weights:
               !if_else

@@ -720,7 +720,7 @@ pub type AsCandle = As<Candle>;
 /// want it (`!close`, `!year`, `!current`, …) already builds itself with
 /// `Pick::<String>::new()` baked in, so no intermediate `AsAtom` is
 /// needed. Kept for completeness so a future `!pick { symbol, freq }`
-/// ExprSpec variant can produce an atom-emitting DynIndicator and drop
+/// NodeSpec variant can produce an atom-emitting DynIndicator and drop
 /// it into a downstream atom-consuming source.
 pub type AsAtom = As<Atom>;
 

@@ -5,7 +5,7 @@
 //! trait boundary (both resolve to a `Strategy` with `Input =
 //! Snapshot<String>` and `Symbol = String`), but the score and sizing
 //! sources are **per-symbol templates**: they get a fresh
-//! [`ExprSpec`] built for every symbol the incoming snapshots reveal, with
+//! [`NodeSpec`] built for every symbol the incoming snapshots reveal, with
 //! the symbol name available as `!arg SYM` inside the tree.
 //!
 //! ```yaml
@@ -18,7 +18,7 @@
 //! ```
 //!
 //! Both `score` and `sizing` are typed as
-//! [`SpecTemplate<ExprSpec>`](super::SpecTemplate), so a `!arg SYM` leaf
+//! [`SpecTemplate<NodeSpec>`](super::SpecTemplate), so a `!arg SYM` leaf
 //! survives the load pass and gets resolved once per symbol at build
 //! time. See [`crate::spec::args`] for the placeholder grammar.
 
@@ -37,7 +37,7 @@ use crate::strategies::basket::{
 };
 use crate::types::Snapshot;
 
-use super::expr::ExprSpec;
+use super::expr::NodeSpec;
 use super::signal::SignalSpec;
 use super::template::SpecTemplate;
 use crate::spec::dyn_indicator::{AsBool, AsReal, DynIndicator};
@@ -187,19 +187,19 @@ pub struct BasketStrategySpec {
 
     /// The per-symbol scoring source: a real-valued expression evaluated
     /// once per bar for every symbol in the snapshot. Written as a normal
-    /// `ExprSpec` tree with `!arg SYM` placeholders where the current
+    /// `NodeSpec` tree with `!arg SYM` placeholders where the current
     /// symbol should be substituted.
-    pub score: SpecTemplate<ExprSpec>,
+    pub score: SpecTemplate<NodeSpec>,
 
     /// The per-symbol sizing source: the per-leg `ValueFraction`
     /// magnitude every selected symbol is entered at. Same shape as
-    /// `score` — normal `ExprSpec` with `!arg SYM` placeholders.
+    /// `score` — normal `NodeSpec` with `!arg SYM` placeholders.
     ///
     /// For the equal-weight common case (100% gross across an N-symbol
     /// basket), write `!equal_weight <n_legs>` — the constant `1.0 /
     /// n_legs` per leg. No `!arg` is needed there since equal-weight
     /// doesn't depend on the symbol.
-    pub sizing: SpecTemplate<ExprSpec>,
+    pub sizing: SpecTemplate<NodeSpec>,
 
     /// Declared symbol universe — `!all_of [...]` (strict: error on
     /// absence, wait until every listed symbol is ready) or `!any_of
@@ -234,7 +234,7 @@ pub struct BasketStrategySpec {
     /// Per-leg protective levels — same shape as the single-asset
     /// `long:` / `short:` spec sides but templated (`!arg SYM` for the
     /// current symbol). Each side's `stop_loss` and `take_profit` is an
-    /// `ExprSpec` template built once per new symbol; `!entry` / `!peak`
+    /// `NodeSpec` template built once per new symbol; `!entry` / `!peak`
     /// / `!trough` inside the template read against *that* symbol's
     /// [`Position`], letting fixed / ATR / trailing stops compose
     /// exactly as they do on `SingleAssetStrategy`.
@@ -255,9 +255,9 @@ pub struct BasketStrategySpec {
 #[serde(deny_unknown_fields)]
 pub struct BasketSideSpec {
     #[serde(default)]
-    pub stop_loss: Option<SpecTemplate<ExprSpec>>,
+    pub stop_loss: Option<SpecTemplate<NodeSpec>>,
     #[serde(default)]
-    pub take_profit: Option<SpecTemplate<ExprSpec>>,
+    pub take_profit: Option<SpecTemplate<NodeSpec>>,
 }
 
 impl BasketStrategySpec {
@@ -403,7 +403,7 @@ impl BasketStrategySpec {
         };
 
         // Per-leg protective levels — each side's stop_loss / take_profit
-        // is a `SpecTemplate<ExprSpec>` built per-symbol and anchored
+        // is a `SpecTemplate<NodeSpec>` built per-symbol and anchored
         // against *that* symbol's Position (not a dummy — this is where
         // `!entry` / `!peak` / `!trough` actually mean something in a
         // basket).
@@ -485,24 +485,24 @@ fn leg_root(sym: &str) -> Selector<String> {
     Selector::by_symbol(sym.to_string())
 }
 
-/// Resolve a per-symbol template into a concrete `ExprSpec` by supplying
+/// Resolve a per-symbol template into a concrete `NodeSpec` by supplying
 /// `SYM` from `sym`. Panics with a descriptive message on failure — the
 /// build-time template resolution is a config error, not a runtime
 /// condition to recover from, so a loud panic surfaces the bad YAML.
 fn build_per_symbol(
-    template: &SpecTemplate<ExprSpec>,
+    template: &SpecTemplate<NodeSpec>,
     sym: &str,
     slot: &'static str,
-) -> ExprSpec {
+) -> NodeSpec {
     try_build_per_symbol(template, sym, slot).unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// The fallible twin of [`build_per_symbol`].
 fn try_build_per_symbol(
-    template: &SpecTemplate<ExprSpec>,
+    template: &SpecTemplate<NodeSpec>,
     sym: &str,
     slot: &'static str,
-) -> Result<ExprSpec, String> {
+) -> Result<NodeSpec, String> {
     let mut args = HashMap::new();
     args.insert("SYM".to_string(), Value::String(sym.to_string()));
     template
@@ -529,7 +529,7 @@ const PROBE_SYMBOL: &str = "__fugazi_probe__";
 /// remaining panic into a proven-unreachable invariant — while moving the
 /// diagnostic to load time, where the author can act on it.
 fn probe_template(
-    template: &SpecTemplate<ExprSpec>,
+    template: &SpecTemplate<NodeSpec>,
     slot: &'static str,
     anchor: &Position,
     book: &Book,
@@ -548,7 +548,7 @@ fn probe_template(
 /// The CLI's built-basket handle. Wraps a
 /// [`BasketStrategy<String>`](crate::strategies::BasketStrategy) whose
 /// per-symbol score / sizing factories were assembled from
-/// [`SpecTemplate<ExprSpec>`](SpecTemplate).
+/// [`SpecTemplate<NodeSpec>`](SpecTemplate).
 ///
 /// Implements [`Strategy`](crate::Strategy) by delegation, so it drops
 /// into [`crate::backtest::run`] unchanged (once the CLI dispatch grows

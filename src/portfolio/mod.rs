@@ -251,7 +251,7 @@ pub struct Portfolio<Sym> {
     /// `PortfolioSpec::build` passes it as the `portfolio_book` build
     /// argument for weight-share templates, so a book-reading node with
     /// `source: !portfolio_book` inside a template resolves to it (bare
-    /// nodes default to the child's own book — see [`ExprSpec`]).
+    /// nodes default to the child's own book — see [`NodeSpec`]).
     agg_book: Book<Sym>,
     /// The portfolio's total cash budget, kept so the inherent
     /// [`run`](Self::run) can seed a fresh [`PaperWallet`] at it.

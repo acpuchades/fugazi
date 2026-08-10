@@ -15,7 +15,7 @@ use crate::prelude::*;
 use crate::strategies::PairsStrategy;
 
 use super::signal::SignalSpec;
-use super::expr::ExprSpec;
+use super::expr::NodeSpec;
 use super::strategy::SideSpec;
 use crate::spec::dyn_indicator::{AsBool, AsReal, DynIndicator};
 
@@ -92,11 +92,11 @@ pub struct PairsStrategySpec {
     /// Optional spread stop-loss level — the long-spread side flattens when the
     /// running spread reads at or below this level.
     #[serde(default)]
-    pub stop_loss: Option<Box<ExprSpec>>,
+    pub stop_loss: Option<Box<NodeSpec>>,
     /// Optional spread take-profit level — the long-spread side flattens when
     /// the running spread reads at or above this level.
     #[serde(default)]
-    pub take_profit: Option<Box<ExprSpec>>,
+    pub take_profit: Option<Box<NodeSpec>>,
     /// The **long-spread** side (long `left` / short `right`) as a block — the
     /// symmetric spelling of the four flat keys above.
     #[serde(default)]
@@ -111,7 +111,7 @@ pub struct PairsStrategySpec {
     /// Defaults to a constant `1.0` (1.0 gross, dollar-neutral); a `None`
     /// reading skips the trade for that bar.
     #[serde(default)]
-    pub sizing: Option<Box<ExprSpec>>,
+    pub sizing: Option<Box<NodeSpec>>,
 
     /// Optional **rebalance gate** — a boolean signal deciding, on each
     /// bar, whether both legs are resized to the current sizing target.
@@ -128,7 +128,7 @@ pub struct PairsStrategySpec {
 /// [`PairsStrategySpec::build`], so `fugazi check strategy` — which validates a
 /// document's *shape* without ever building it — catches them too, and so a
 /// spec mistake surfaces as an error rather than a panic. Same reason
-/// `ExprSpec` and `SignalSpec` deserialize through a raw mirror.
+/// `NodeSpec` and `SignalSpec` deserialize through a raw mirror.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PairsStrategySpecRaw {
@@ -139,15 +139,15 @@ struct PairsStrategySpecRaw {
     #[serde(default)]
     exit: Option<SignalSpec>,
     #[serde(default)]
-    stop_loss: Option<Box<ExprSpec>>,
+    stop_loss: Option<Box<NodeSpec>>,
     #[serde(default)]
-    take_profit: Option<Box<ExprSpec>>,
+    take_profit: Option<Box<NodeSpec>>,
     #[serde(default)]
     long_spread: Option<SideSpec>,
     #[serde(default)]
     short_spread: Option<SideSpec>,
     #[serde(default)]
-    sizing: Option<Box<ExprSpec>>,
+    sizing: Option<Box<NodeSpec>>,
     #[serde(default)]
     rebalance_on: Option<SignalSpec>,
 }
