@@ -276,6 +276,11 @@ pub struct MultiAssetStrategy<Sym> {
     rebalance: RebalanceSignal<Sym>,
     universe: Box<dyn Universe<Sym>>,
     book: Book<Sym>,
+    /// Per-symbol run-state awaiting a lazy restore (see
+    /// [`restore_state`](Self::restore_state)). Applied inside
+    /// [`update`](Strategy::update) as each symbol is first seen. `None` on a
+    /// normal run.
+    pending_restore: Option<HashMap<Sym, serde_json::Value>>,
 }
 
 impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrategy<Sym> {
@@ -330,6 +335,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
             rebalance: Box::new(ValueBool::<Snapshot<Sym>>::new(false)),
             universe: Box::new(Floating),
             book: Book::new(initial_equity),
+            pending_restore: None,
         }
     }
 
@@ -587,6 +593,106 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Default for Mul
     }
 }
 
+impl<Sym> MultiAssetStrategy<Sym>
+where
+    Sym: Clone + Hash + Eq + 'static + Send + Sync + serde::Serialize + serde::de::DeserializeOwned,
+{
+    /// Serialize the portfolio's runtime state for run resuming — the shared
+    /// [`Book`] plus each seen symbol's full per-asset chain state, protective
+    /// levels, [`Position`], and bar counter.
+    pub(crate) fn save_state(&self) -> serde_json::Value {
+        let mut symbols: HashMap<Sym, serde_json::Value> = HashMap::new();
+        for (sym, st) in self.states.iter() {
+            let mut entry = serde_json::Map::new();
+            entry.insert("long".into(), st.long.save_state());
+            entry.insert("close_long".into(), st.close_long.save_state());
+            entry.insert("short".into(), st.short.save_state());
+            entry.insert("close_short".into(), st.close_short.save_state());
+            entry.insert("sizing".into(), st.sizing.save_state());
+            entry.insert("position".into(), st.position.snapshot());
+            entry.insert("bars_seen".into(), serde_json::json!(st.bars_seen));
+            for (level, key) in [
+                (&st.long_stop, "long_stop"),
+                (&st.long_target, "long_target"),
+                (&st.short_stop, "short_stop"),
+                (&st.short_target, "short_target"),
+            ] {
+                if let Some(c) = level {
+                    entry.insert(key.into(), c.save_state());
+                }
+            }
+            symbols.insert(sym.clone(), serde_json::Value::Object(entry));
+        }
+        serde_json::json!({
+            "book": self.book.snapshot_state(),
+            "symbols": serde_json::to_value(&symbols).unwrap_or(serde_json::Value::Null),
+        })
+    }
+
+    /// Restore state produced by [`save_state`](Self::save_state). The shared
+    /// book is restored immediately; per-symbol state is stashed and applied
+    /// lazily as each symbol is first seen.
+    pub(crate) fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        let obj = state
+            .as_object()
+            .ok_or_else(|| format!("multi: expected a state object, got {state}"))?;
+        if let Some(v) = obj.get("book") {
+            self.book.restore_state(v).map_err(|e| format!("book > {e}"))?;
+        }
+        if let Some(v) = obj.get("symbols") {
+            let map: HashMap<Sym, serde_json::Value> =
+                serde_json::from_value(v.clone()).map_err(|e| format!("symbols: {e}"))?;
+            self.pending_restore = Some(map);
+        }
+        Ok(())
+    }
+}
+
+impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> MultiAssetStrategy<Sym> {
+    /// Apply a symbol's stashed restore state right after its `PerAssetState` is
+    /// built. Best-effort (see the basket twin).
+    fn apply_pending_restore(&mut self, sym: &Sym) {
+        let Some(state) = self
+            .pending_restore
+            .as_ref()
+            .and_then(|m| m.get(sym))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(obj) = state.as_object() else {
+            return;
+        };
+        let Some(st) = self.states.get_mut(sym) else {
+            return;
+        };
+        let null = serde_json::Value::Null;
+        let _ = st.long.load_state(obj.get("long").unwrap_or(&null));
+        let _ = st.close_long.load_state(obj.get("close_long").unwrap_or(&null));
+        let _ = st.short.load_state(obj.get("short").unwrap_or(&null));
+        let _ = st.close_short.load_state(obj.get("close_short").unwrap_or(&null));
+        let _ = st.sizing.load_state(obj.get("sizing").unwrap_or(&null));
+        if let Some(v) = obj.get("position") {
+            let _ = st.position.restore(v);
+        }
+        if let Some(v) = obj.get("bars_seen").and_then(|v| v.as_u64()) {
+            st.bars_seen = v as usize;
+        }
+        if let (Some(c), Some(v)) = (st.long_stop.as_mut(), obj.get("long_stop")) {
+            let _ = c.load_state(v);
+        }
+        if let (Some(c), Some(v)) = (st.long_target.as_mut(), obj.get("long_target")) {
+            let _ = c.load_state(v);
+        }
+        if let (Some(c), Some(v)) = (st.short_stop.as_mut(), obj.get("short_stop")) {
+            let _ = c.load_state(v);
+        }
+        if let (Some(c), Some(v)) = (st.short_target.as_mut(), obj.get("short_target")) {
+            let _ = c.load_state(v);
+        }
+    }
+}
+
 impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for MultiAssetStrategy<Sym> {
     type Input = Snapshot<Sym>;
     type Symbol = Sym;
@@ -646,7 +752,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Mu
                 .map(|f| f(&sym, &position));
             let sizing = (self.sizing_factory)(&sym);
             self.states.insert(
-                sym,
+                sym.clone(),
                 PerAssetState {
                     long,
                     close_long,
@@ -661,6 +767,9 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Mu
                     bars_seen: 0,
                 },
             );
+            // Lazy restore: this symbol's chains only exist now, so apply its
+            // saved state (if resuming) right after building.
+            self.apply_pending_restore(&sym);
         }
 
         // 2. Advance every known symbol's chains, fold its atom into its

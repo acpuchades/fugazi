@@ -267,6 +267,16 @@ impl DynSingleStrategy {
     pub fn book(&self) -> Book<String> {
         self.inner.book()
     }
+
+    /// Serialize the wrapped strategy's runtime state for run resuming.
+    pub fn save_state(&self) -> serde_json::Value {
+        self.inner.save_state()
+    }
+
+    /// Restore state produced by [`save_state`](Self::save_state).
+    pub fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.inner.restore_state(state)
+    }
 }
 
 impl Strategy for DynSingleStrategy {

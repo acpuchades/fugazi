@@ -513,6 +513,7 @@ dependencies = [
  "clap_complete",
  "console",
  "csv",
+ "fugazi-derive",
  "hmac",
  "indicatif",
  "interim",
@@ -529,6 +530,15 @@ dependencies = [
  "tokio-test",
  "wiremock",
  "zip",
+]
+
+[[package]]
+name = "fugazi-derive"
+version = "0.39.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

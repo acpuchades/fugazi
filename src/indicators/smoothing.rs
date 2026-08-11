@@ -5,6 +5,8 @@
 //! [`Macd`](super::Macd), [`Adx`](super::Adx), …) can embed one or more without
 //! re-deriving the math.
 
+use serde::{Deserialize, Serialize};
+
 use crate::types::Real;
 
 /// Residual seed weight below which a recursive smoother is considered settled
@@ -24,7 +26,7 @@ pub(crate) fn unstable_period(decay: Real) -> usize {
 
 /// EMA recurrence; seeds on the first sample, then
 /// `ema = alpha * x + (1 - alpha) * prev`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct EmaState {
     alpha: Real,
     pub value: Option<Real>,
@@ -64,7 +66,7 @@ impl EmaState {
 
 /// Wilder smoothing (RMA / SMMA) recurrence; seeds with the mean of the first
 /// `period` samples, then `rma = (prev * (period - 1) + x) / period`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WilderState {
     period: usize,
     seen: usize,
@@ -128,6 +130,45 @@ mod tests {
         assert_eq!(unstable_period(0.5), 10);
         // alpha = 1 (no memory): settled immediately.
         assert_eq!(unstable_period(0.0), 0);
+    }
+
+    #[test]
+    fn ema_state_serde_roundtrip_continues_identically() {
+        // Feed half a stream, serialize, restore into a fresh state, and verify
+        // the restored state produces the same tail as one that never paused —
+        // the per-core guarantee the whole resume feature rests on.
+        let mut a = EmaState::new(5);
+        let mut b = EmaState::new(5);
+        for x in [1.0, 2.0, 3.0, 4.0] {
+            a.update(x);
+            b.update(x);
+        }
+        let json = serde_json::to_string(&a).unwrap();
+        let restored: EmaState = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            a.value.map(f64::to_bits),
+            restored.value.map(f64::to_bits),
+            "json f64 round-trip changed the seed: {json}"
+        );
+        let mut restored = restored;
+        for x in [5.0, 4.0, 6.0, 2.0] {
+            assert_eq!(restored.update(x), b.update(x));
+        }
+    }
+
+    #[test]
+    fn wilder_state_serde_roundtrip_continues_identically() {
+        let mut a = WilderState::new(4);
+        let mut b = WilderState::new(4);
+        for x in [1.0, 2.0, 3.0] {
+            a.update(x);
+            b.update(x);
+        }
+        let json = serde_json::to_string(&a).unwrap();
+        let mut restored: WilderState = serde_json::from_str(&json).unwrap();
+        for x in [4.0, 5.0, 6.0, 7.0] {
+            assert_eq!(restored.update(x), b.update(x));
+        }
     }
 
     #[test]

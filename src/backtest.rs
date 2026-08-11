@@ -36,7 +36,7 @@
 //! for multi-asset).
 
 use crate::types::Snapshot;
-use crate::wallet::Rejection;
+use crate::wallet::{OrderId, OrderKind, Rejection, Side};
 use crate::{Order, Real, Strategy, Wallet};
 
 /// One booked order stamped with the bar index it filled on.
@@ -208,6 +208,53 @@ where
         fills,
         rejections,
         initial_equity,
+    }
+}
+
+/// Book a closing fill for every position still open at the end of a run, so a
+/// `--realize-open` run finalizes its open trades into the blotter (and thus the
+/// trade-level metrics via [`reconstruct_trades`](crate::metrics::reconstruct_trades)).
+///
+/// The equity curve is untouched — open positions are already marked to market
+/// on every bar — this only appends the closing legs that turn an open position
+/// into a *closed trade* the metrics count. Each leg closes at the wallet's last
+/// known price for the symbol, on the final bar. Routed through
+/// [`Strategy::on_fill`] too, so the strategy's own book closes the trade as
+/// well. Deliberately terminal: it is mutually exclusive with capturing a
+/// resumable state (a realized run is a finalized one).
+pub fn realize_open_positions<S, W>(
+    strategy: &mut S,
+    wallet: &mut W,
+    snapshots: &[Snapshot<String>],
+    report: &mut RunReport<String>,
+) where
+    S: Strategy<Symbol = String, Input = Snapshot<String>> + ?Sized,
+    W: Wallet<String>,
+{
+    let bar = snapshots.len().saturating_sub(1);
+    for units in wallet.positions() {
+        if units.amount.abs() <= f64::EPSILON {
+            continue;
+        }
+        let Some(price) = wallet.price(&units.symbol) else {
+            continue;
+        };
+        // Sell to flatten a long, buy to flatten a short.
+        let side = if units.amount > 0.0 {
+            Side::Sell
+        } else {
+            Side::Buy
+        };
+        let order = Order::new(
+            units.symbol.clone(),
+            side,
+            units.amount.abs(),
+            price.0,
+            OrderKind::Market,
+            OrderId(u64::MAX),
+        );
+        strategy.on_fill(&order);
+        report.fills.push(Fill { bar, order });
     }
 }
 

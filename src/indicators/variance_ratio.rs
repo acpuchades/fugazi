@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
 
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::stats::MOMENT_EPS;
 use crate::types::Real;
@@ -50,8 +52,9 @@ use crate::types::Real;
 ///
 /// The unbiased overlapping estimator needs at least two distinct `q`-blocks, so
 /// `period` must exceed `lag` by at least two (`period ≥ lag + 2`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct VarianceRatio<S> {
+    #[state(source)]
     source: S,
     window: VecDeque<Real>,
     period: usize,
@@ -160,6 +163,14 @@ impl<S: Indicator<Output = Real>> Indicator for VarianceRatio<S> {
         self.source.reset();
         self.window.clear();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

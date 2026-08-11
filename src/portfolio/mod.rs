@@ -365,6 +365,49 @@ impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
         self.agg_book.clone()
     }
 
+    /// Serialize the portfolio's resumable state — the per-child notional
+    /// [`Ledger`](crate::portfolio) books (cash + positions, the "Σ ledgers ==
+    /// account" invariant) and the aggregate [`Book`].
+    ///
+    /// The children's *own* internal indicator state is not captured here: a
+    /// [`Portfolio`] holds them erased behind `Box<dyn Strategy>`, which does not
+    /// expose the save/restore seam. A resumed portfolio therefore continues
+    /// with the correct cash / positions / aggregate equity, while each child's
+    /// indicator chains re-warm — the one shape whose resume is state-level for
+    /// the account but warm-up-level for the children.
+    pub(crate) fn save_state(&self) -> serde_json::Value
+    where
+        Sym: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        serde_json::json!({
+            "inner": self.inner.lock().expect("Portfolio inner lock poisoned").snapshot(),
+            "agg_book": self.agg_book.snapshot_state(),
+        })
+    }
+
+    /// Restore state produced by [`save_state`](Self::save_state).
+    pub(crate) fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String>
+    where
+        Sym: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        let obj = state
+            .as_object()
+            .ok_or_else(|| format!("portfolio: expected a state object, got {state}"))?;
+        if let Some(v) = obj.get("inner") {
+            self.inner
+                .lock()
+                .expect("Portfolio inner lock poisoned")
+                .restore(v)
+                .map_err(|e| format!("inner > {e}"))?;
+        }
+        if let Some(v) = obj.get("agg_book") {
+            self.agg_book
+                .restore_state(v)
+                .map_err(|e| format!("agg_book > {e}"))?;
+        }
+        Ok(())
+    }
+
     /// Snapshot every sub-wallet's current equity/funds for a
     /// [`WeightPolicy::observe`] call. Kept private because policies
     /// read this indirectly via the trait.

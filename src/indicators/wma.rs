@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::stats::WmaState;
 use crate::types::Real;
@@ -9,8 +11,9 @@ use crate::types::Real;
 /// source, so composition is construction: `Wma::new(Current::close(), 20)`.
 /// Backed by the shared [`WmaState`] core (running simple and weighted sums), so
 /// each update is O(1). Produces `None` until the window is full.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Wma<S> {
+    #[state(source)]
     source: S,
     state: WmaState,
     /// Latest output value; `None` until `period` source values have been seen.
@@ -61,6 +64,14 @@ impl<S: Indicator<Output = Real>> Indicator for Wma<S> {
         self.source.reset();
         self.state.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

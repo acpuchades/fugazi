@@ -35,6 +35,7 @@
 
 use std::marker::PhantomData;
 
+use fugazi_derive::SaveState;
 use time::OffsetDateTime;
 
 use crate::indicator::Indicator;
@@ -59,12 +60,15 @@ pub trait CalendarField {
 /// [`UnixSeconds`], [`UnixMillis`]).
 ///
 /// Generic over the atom-emitting source `S` (default [`Identity<Atom>`]).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Calendar<F, S = Identity<Atom>> {
+    #[state(source)]
     source: S,
     /// Latest extracted value; `None` before the first bar or if the last
     /// bar's `time` was absent.
+    #[state(skip)]
     pub value: Option<Real>,
+    #[state(skip)]
     _field: PhantomData<fn() -> F>,
 }
 
@@ -118,6 +122,14 @@ impl<F: CalendarField, S: Indicator<Output = Atom>> Indicator for Calendar<F, S>
     fn reset(&mut self) {
         self.source.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 
@@ -281,11 +293,13 @@ pub type UnixMillis<S = Identity<Atom>> = Calendar<UnixMillisField, S>;
 /// `Timestamp` every read.
 ///
 /// Generic over the atom-emitting source `S` (default [`Identity<Atom>`]).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct CurrentTime<S = Identity<Atom>> {
+    #[state(source)]
     source: S,
     /// Latest [`Timestamp`] seen; `None` before the first bar or if the last
     /// bar's `time` was absent.
+    #[state(skip)]
     pub value: Option<Timestamp>,
 }
 
@@ -336,6 +350,14 @@ impl<S: Indicator<Output = Atom>> Indicator for CurrentTime<S> {
         self.source.reset();
         self.value = None;
     }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -346,9 +368,11 @@ impl<S: Indicator<Output = Atom>> Indicator for CurrentTime<S> {
 /// bars whose `time` is `None` (matching the `None`-until-warm convention).
 ///
 /// Generic over the atom-emitting source `S` (default [`Identity<Atom>`]).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct IsWeekday<S = Identity<Atom>> {
+    #[state(source)]
     source: S,
+    #[state(skip)]
     pub value: Option<bool>,
 }
 
@@ -404,15 +428,25 @@ impl<S: Indicator<Output = Atom>> Indicator for IsWeekday<S> {
         self.source.reset();
         self.value = None;
     }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
+    }
 }
 
 /// True on Saturday or Sunday, false Monday through Friday. `None` on bars
 /// whose `time` is `None`.
 ///
 /// Generic over the atom-emitting source `S` (default [`Identity<Atom>`]).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct IsWeekend<S = Identity<Atom>> {
+    #[state(source)]
     source: S,
+    #[state(skip)]
     pub value: Option<bool>,
 }
 
@@ -467,6 +501,14 @@ impl<S: Indicator<Output = Atom>> Indicator for IsWeekend<S> {
     fn reset(&mut self) {
         self.source.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

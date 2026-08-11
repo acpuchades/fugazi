@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::stats::WindowStats;
 use crate::types::Real;
@@ -7,8 +9,9 @@ use crate::types::Real;
 /// Owns its input source: `Sma::new(Current::close(), 20)`. Backed by the shared
 /// [`WindowStats`] core (running sum over a ring buffer), so each update is O(1).
 /// Produces `None` until the window is full.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Sma<S> {
+    #[state(source)]
     source: S,
     stats: WindowStats,
     /// Latest output value; `None` until `period` source values have been seen.
@@ -61,6 +64,14 @@ impl<S: Indicator<Output = Real>> Indicator for Sma<S> {
         self.source.reset();
         self.stats.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

@@ -134,7 +134,7 @@ pub use template::SpecTemplate;
 pub use multi_asset::DynMultiAssetStrategy;
 pub use pairs::DynPairsStrategy;
 pub use portfolio::DynPortfolio;
-pub use runnable::{RunnableStrategy, StrategySpec};
+pub use runnable::{RUN_STATE_FORMAT_VERSION, RunState, RunnableStrategy, StrategySpec};
 pub use strategy::{DynSingleStrategy, SideSpec};
 
 pub use input::{Source, StrategyKind, StrategySource};

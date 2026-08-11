@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::smoothing::EmaState;
 use crate::types::Real;
@@ -8,8 +10,9 @@ use crate::types::Real;
 /// `Ema::new(Current::close(), 20)` is the EMA-20 of the close, and
 /// `Ema::new(Sma::new(src, 10), 20)` is the EMA of an SMA. Seeds on the source's
 /// first output, so it is ready as soon as the source is.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Ema<S> {
+    #[state(source)]
     source: S,
     state: EmaState,
     /// Latest output value; `None` until the source produces its first value.
@@ -75,6 +78,14 @@ impl<S: Indicator<Output = Real>> Indicator for Ema<S> {
         self.source.reset();
         self.state.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

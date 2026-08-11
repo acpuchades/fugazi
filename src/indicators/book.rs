@@ -68,13 +68,16 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+
 use crate::indicator::Indicator;
 use crate::indicators::DEFAULT_EPSILON;
 use crate::wallet::Side;
 use crate::types::{Atom, Candle, Real};
 
 /// Per-leg tracked state.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct LegState {
     /// Signed position units for this leg (positive long, negative short,
     /// zero flat).
@@ -105,7 +108,7 @@ impl LegState {
 }
 
 /// The realized outcome of a closed trade.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct TradeClose {
     /// Realized P&L in reference-currency terms (same units as the
     /// [`Book`]'s `initial_equity`), summed across every leg.
@@ -115,7 +118,11 @@ struct TradeClose {
 }
 
 /// The shared running state a [`Book`] carries.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "Sym: Serialize + Eq + Hash",
+    deserialize = "Sym: Deserialize<'de> + Eq + Hash"
+))]
 struct BookState<Sym> {
     initial_equity: Real,
     cash: Real,
@@ -235,6 +242,28 @@ impl<Sym: Hash + Eq + Clone> Book<Sym> {
     pub fn reset(&self) {
         let seed = self.state.lock().expect("Book lock poisoned").initial_equity;
         *self.state.lock().expect("Book lock poisoned") = BookState::seed(seed);
+    }
+
+    /// Serialize the whole book state for run resuming — cash, per-leg units,
+    /// marked equity, running peak, per-bar return, and the closed-trade
+    /// bookkeeping. The strategy serializes this once (not the per-field
+    /// [`BookField`] accessors, which stay stateless).
+    pub fn snapshot_state(&self) -> serde_json::Value
+    where
+        Sym: Serialize,
+    {
+        serde_json::to_value(&*self.state.lock().expect("Book lock poisoned"))
+            .expect("BookState is serializable")
+    }
+
+    /// Restore state produced by [`snapshot_state`](Self::snapshot_state).
+    pub fn restore_state(&self, state: &serde_json::Value) -> Result<(), String>
+    where
+        Sym: DeserializeOwned,
+    {
+        *self.state.lock().expect("Book lock poisoned") =
+            serde_json::from_value(state.clone()).map_err(|e| format!("book: {e}"))?;
+        Ok(())
     }
 
     /// Apply a fill of `units` at `price` on `side`, tagged with the leg's

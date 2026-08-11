@@ -221,6 +221,25 @@ struct RunArgs {
     /// Suppress all console output (the result files are still written).
     #[arg(short, long)]
     quiet: bool,
+
+    /// After the run, write the strategy + wallet state to this JSON file so a
+    /// later `--resume` continues where this run left off. Open positions are
+    /// kept (not realized). Mutually exclusive with `--realize-open`.
+    #[arg(long = "save-state", value_name = "FILE", conflicts_with = "realize_open")]
+    save_state: Option<PathBuf>,
+
+    /// Restore strategy + wallet state from a JSON file written by a previous
+    /// `--save-state`, then continue the run over this invocation's series. The
+    /// document must be the same strategy shape the state was captured from.
+    #[arg(long = "resume", value_name = "FILE")]
+    resume: Option<PathBuf>,
+
+    /// Mark every position still open at the end of the run to close at the
+    /// final bar, booking it into `trades.csv` / the trade metrics (default:
+    /// open positions are carried, unrealized). Mutually exclusive with
+    /// `--save-state`.
+    #[arg(long = "realize-open")]
+    realize_open: bool,
 }
 
 /// What kind of spec `fugazi check` is checking. Nested subcommand so each
@@ -736,6 +755,17 @@ fn run(args: RunArgs) -> Result<()> {
 
     let param_table = params::table(&args.params)?;
     let params_label = params_label(&param_table);
+    // Load a `--resume` state file up front so it outlives the RunOptions borrow.
+    let resume_state = match &args.resume {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("reading resume state {}", path.display()))?;
+            let state: spec::RunState = serde_json::from_str(&text)
+                .with_context(|| format!("parsing resume state {}", path.display()))?;
+            Some(state)
+        }
+        None => None,
+    };
     let opts = run::RunOptions {
         cash: args.cash,
         out_dir: &args.output_dir,
@@ -749,6 +779,9 @@ fn run(args: RunArgs) -> Result<()> {
         frequency: &args.frequency,
         costs_supplied: costs_were_supplied,
         quiet: args.quiet,
+        resume: resume_state.as_ref(),
+        save_state: args.save_state.as_deref(),
+        realize_open: args.realize_open,
     };
     let base = args.strategy.base_dir();
     match args.strategy.kind {

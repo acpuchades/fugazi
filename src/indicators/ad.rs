@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::types::{Candle, Real};
 
@@ -8,8 +10,9 @@ use crate::types::{Candle, Real};
 /// the bar's range, `((close - low) - (high - close)) / (high - low)`, in
 /// `[-1, 1]`. A bar whose high equals its low has no range and contributes
 /// nothing. Seeds at the source's first candle.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Ad<S> {
+    #[state(source)]
     source: S,
     cumulative: Real,
     /// Latest A/D line value; `None` before the source produces its first bar.
@@ -59,6 +62,14 @@ impl<S: Indicator<Output = Candle>> Indicator for Ad<S> {
         self.source.reset();
         self.cumulative = 0.0;
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

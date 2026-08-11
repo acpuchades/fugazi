@@ -484,6 +484,77 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Pair
     }
 }
 
+impl<Sym> PairsStrategy<Sym>
+where
+    Sym: Clone + std::hash::Hash + Eq + 'static + Send + Sync + serde::Serialize + serde::de::DeserializeOwned,
+{
+    /// Serialize the pair's full runtime state for run resuming — both leg
+    /// signal chains, the spread source, the protective / sizing chains, both
+    /// leg [`Position`]s, the shared [`Book`], and the bar counter.
+    pub(crate) fn save_state(&self) -> serde_json::Value {
+        let level = |l: &Option<Level<Sym>>| {
+            l.as_ref()
+                .map(|x| x.save_state())
+                .unwrap_or(serde_json::Value::Null)
+        };
+        serde_json::json!({
+            "long_enter": self.long_enter.save_state(),
+            "long_exit": self.long_exit.save_state(),
+            "short_enter": self.short_enter.save_state(),
+            "short_exit": self.short_exit.save_state(),
+            "spread": self.spread.save_state(),
+            "long_stop": level(&self.long_stop),
+            "long_target": level(&self.long_target),
+            "short_stop": level(&self.short_stop),
+            "short_target": level(&self.short_target),
+            "sizing": self.sizing.save_state(),
+            "rebalance": self.rebalance.save_state(),
+            "left_position": self.left_position.snapshot(),
+            "right_position": self.right_position.snapshot(),
+            "book": self.book.snapshot_state(),
+            "bars_seen": self.bars_seen,
+        })
+    }
+
+    /// Restore state produced by [`save_state`](Self::save_state).
+    pub(crate) fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        let obj = state
+            .as_object()
+            .ok_or_else(|| format!("pairs: expected a state object, got {state}"))?;
+        let null = serde_json::Value::Null;
+        let get = |k: &str| obj.get(k).unwrap_or(&null);
+        self.long_enter.load_state(get("long_enter")).map_err(|e| format!("long_enter > {e}"))?;
+        self.long_exit.load_state(get("long_exit")).map_err(|e| format!("long_exit > {e}"))?;
+        self.short_enter.load_state(get("short_enter")).map_err(|e| format!("short_enter > {e}"))?;
+        self.short_exit.load_state(get("short_exit")).map_err(|e| format!("short_exit > {e}"))?;
+        self.spread.load_state(get("spread")).map_err(|e| format!("spread > {e}"))?;
+        if let Some(l) = self.long_stop.as_mut() {
+            l.load_state(get("long_stop")).map_err(|e| format!("long_stop > {e}"))?;
+        }
+        if let Some(l) = self.long_target.as_mut() {
+            l.load_state(get("long_target")).map_err(|e| format!("long_target > {e}"))?;
+        }
+        if let Some(l) = self.short_stop.as_mut() {
+            l.load_state(get("short_stop")).map_err(|e| format!("short_stop > {e}"))?;
+        }
+        if let Some(l) = self.short_target.as_mut() {
+            l.load_state(get("short_target")).map_err(|e| format!("short_target > {e}"))?;
+        }
+        self.sizing.load_state(get("sizing")).map_err(|e| format!("sizing > {e}"))?;
+        self.rebalance.load_state(get("rebalance")).map_err(|e| format!("rebalance > {e}"))?;
+        self.left_position
+            .restore(get("left_position"))
+            .map_err(|e| format!("left_position > {e}"))?;
+        self.right_position
+            .restore(get("right_position"))
+            .map_err(|e| format!("right_position > {e}"))?;
+        self.book.restore_state(get("book")).map_err(|e| format!("book > {e}"))?;
+        self.bars_seen = serde_json::from_value(get("bars_seen").clone())
+            .map_err(|e| format!("bars_seen: {e}"))?;
+        Ok(())
+    }
+}
+
 impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Strategy for PairsStrategy<Sym> {
     type Input = Snapshot<Sym>;
     type Symbol = Sym;

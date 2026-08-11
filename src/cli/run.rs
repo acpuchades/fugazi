@@ -97,6 +97,14 @@ pub struct RunOptions<'a> {
     pub costs_supplied: bool,
     /// Suppress all console output (the result files are still written).
     pub quiet: bool,
+    /// `--resume`: restore this state before the run (loaded from the file in
+    /// `main`). `None` for a cold start.
+    pub resume: Option<&'a fugazi::spec::RunState>,
+    /// `--save-state`: write the run's final state to this path afterwards.
+    pub save_state: Option<&'a Path>,
+    /// `--realize-open`: finalize open positions into the trade blotter at the
+    /// last bar (mutually exclusive with `save_state`).
+    pub realize_open: bool,
 }
 
 /// Headline numbers returned from a run.
@@ -107,6 +115,40 @@ pub struct Summary {
     /// [`crate::metrics::Metrics::trades`]`.total`, which counts closed legs.
     pub fills: usize,
     pub bars: usize,
+}
+
+/// Drive one iteration, honoring `--resume` / `--save-state` / `--realize-open`.
+///
+/// When any of those is set it goes through the resumable path (restoring first,
+/// finalizing open positions if asked, and writing the run's final state to
+/// `--save-state`); otherwise it is the plain cold-start iteration. Shared by
+/// every shape's runner so the resume plumbing lives in one place.
+fn iterate(
+    spec: &fugazi::spec::StrategySpec,
+    bars: Vec<String>,
+    snapshots: &[fugazi::types::Snapshot<String>],
+    inputs: &backtest::EvalContext,
+    opts: &RunOptions,
+) -> Result<backtest::IterationResult> {
+    if opts.resume.is_none() && opts.save_state.is_none() && !opts.realize_open {
+        return backtest::run_iteration_any(spec, bars, snapshots, inputs)
+            .map_err(backtest::build_error);
+    }
+    let (iter, state) = backtest::run_iteration_resumable(
+        spec,
+        bars,
+        snapshots,
+        inputs,
+        opts.resume,
+        opts.realize_open,
+    )
+    .map_err(backtest::build_error)?;
+    if let Some(path) = opts.save_state {
+        let json = serde_json::to_string_pretty(&state).context("serializing run state")?;
+        std::fs::write(path, json)
+            .with_context(|| format!("writing state file {}", path.display()))?;
+    }
+    Ok(iter)
 }
 
 /// Run `spec` over `frame` per `opts` — resolve inputs, delegate the pure
@@ -172,8 +214,7 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
         .collect();
     let bars: Vec<String> = atoms.iter().map(|(t, _)| t.clone()).collect();
     let spec = StrategySpec::Single(Box::new(strategy.clone()));
-    let iter = backtest::run_iteration_any(&spec, bars, &snapshots, &inputs)
-        .map_err(backtest::build_error)?;
+    let iter = iterate(&spec, bars, &snapshots, &inputs, opts)?;
 
     // Emit `fills.csv` and echo each fill in the same order the wallet booked
     // them. The console stream matches the CSV row-for-row.
@@ -310,8 +351,7 @@ pub fn run_pairs(
         })
         .collect();
     let any = StrategySpec::Pairs(Box::new(spec.clone()));
-    let iter = backtest::run_iteration_any(&any, bars.clone(), &snapshots, &inputs)
-        .map_err(backtest::build_error)?;
+    let iter = iterate(&any, bars.clone(), &snapshots, &inputs, opts)?;
 
     write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
     if !opts.quiet {
@@ -459,8 +499,7 @@ pub fn run_basket(
     }
 
     let any = StrategySpec::Basket(Box::new(spec.clone()));
-    let iter = backtest::run_iteration_any(&any, bars.clone(), &snapshots, &inputs)
-        .map_err(backtest::build_error)?;
+    let iter = iterate(&any, bars.clone(), &snapshots, &inputs, opts)?;
 
     write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
     if !opts.quiet {
@@ -598,8 +637,7 @@ pub fn run_multi(
     }
 
     let any = StrategySpec::Multi(Box::new(spec.clone()));
-    let iter = backtest::run_iteration_any(&any, bars.clone(), &snapshots, &inputs)
-        .map_err(backtest::build_error)?;
+    let iter = iterate(&any, bars.clone(), &snapshots, &inputs, opts)?;
 
     write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
     if !opts.quiet {
@@ -743,8 +781,7 @@ pub fn run_portfolio(
     }
 
     let any = StrategySpec::Portfolio(Box::new(spec.clone()));
-    let iter = backtest::run_iteration_any(&any, bars.clone(), &snapshots, &inputs)
-        .map_err(backtest::build_error)?;
+    let iter = iterate(&any, bars.clone(), &snapshots, &inputs, opts)?;
 
     write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
     if !opts.quiet {

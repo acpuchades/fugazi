@@ -314,6 +314,15 @@ pub trait DynIndicator: Send + Sync {
             .saturating_add(self.unstable_period())
     }
     fn reset(&mut self);
+    /// Serialize this node's mutable state for run resuming — the erased twin of
+    /// [`Indicator::save_state`](crate::Indicator::save_state). No default: each
+    /// of the four carriers ([`Adapter`], [`As`], [`Chain`], [`UnstableWrap`])
+    /// supplies it, threading the recursion across the `Indicator`/`DynIndicator`
+    /// boundary so the whole runtime tree is covered.
+    fn save_state(&self) -> serde_json::Value;
+    /// Restore state produced by [`save_state`](DynIndicator::save_state) on an
+    /// identically-constructed tree.
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String>;
     /// Deep-clone the box. Threads `Clone` through the trait object the way the
     /// older `CloneableValue` supertrait did — needed because some concrete
     /// indicators internally clone their source (multi-output component
@@ -418,6 +427,12 @@ where
     }
     fn reset(&mut self) {
         self.inner.reset();
+    }
+    fn save_state(&self) -> serde_json::Value {
+        self.inner.save_state()
+    }
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.inner.load_state(state)
     }
     fn dyn_clone(&self) -> Box<dyn DynIndicator> {
         Box::new(self.clone())
@@ -541,6 +556,29 @@ impl DynIndicator for Chain {
         self.inner.reset();
         self.value = None;
     }
+    fn save_state(&self) -> serde_json::Value {
+        // The cached `value` is deliberately not serialized: it is recomputed on
+        // the next `update` (which the driver always calls before the next
+        // `value()` read), so restoring it would only add a `DynValue`/`Atom`
+        // serde surface for a field that is overwritten before it is read.
+        serde_json::json!({
+            "outer": self.outer.save_state(),
+            "inner": self.inner.save_state(),
+        })
+    }
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        let obj = state
+            .as_object()
+            .ok_or_else(|| format!("chain: expected a state object, got {state}"))?;
+        self.outer
+            .load_state(obj.get("outer").unwrap_or(&serde_json::Value::Null))
+            .map_err(|e| format!("outer > {e}"))?;
+        self.inner
+            .load_state(obj.get("inner").unwrap_or(&serde_json::Value::Null))
+            .map_err(|e| format!("inner > {e}"))?;
+        self.value = None;
+        Ok(())
+    }
     fn dyn_clone(&self) -> Box<dyn DynIndicator> {
         Box::new(Chain {
             outer: self.outer.dyn_clone(),
@@ -588,6 +626,14 @@ impl DynIndicator for UnstableWrap {
     }
     fn reset(&mut self) {
         self.inner.reset();
+    }
+    fn save_state(&self) -> serde_json::Value {
+        // Transparent wrapper — its only effect is zeroing `unstable_period`, so
+        // state is entirely the inner's.
+        self.inner.save_state()
+    }
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.inner.load_state(state)
     }
     fn dyn_clone(&self) -> Box<dyn DynIndicator> {
         Box::new(UnstableWrap {
@@ -693,6 +739,14 @@ where
     }
     fn reset(&mut self) {
         self.0.reset();
+    }
+    fn save_state(&self) -> serde_json::Value {
+        // The hop from the `Indicator` side back into the boxed `DynIndicator`,
+        // so `Ema<As<Real>>` reaches the box under its typed source.
+        self.0.save_state()
+    }
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.0.load_state(state)
     }
 }
 
@@ -872,6 +926,35 @@ mod tests {
             clone.update(DynValue::Atom(bar(20.0).into())),
             Some(DynValue::Real(15.0))
         );
+    }
+
+    #[test]
+    fn save_restore_continues_identically_through_the_carriers() {
+        // Exercises the alternating recursion end to end: a Chain over an
+        // Adapter<Ema> — Chain::save_state → Adapter::save_state →
+        // Ema::save_state (derive) → EmaState serde. Feed half a stream, snapshot
+        // via the erased seam, rebuild an identical tree, restore, and verify the
+        // tail matches an uninterrupted run.
+        use crate::indicators::{Ema, Identity};
+        let build = || -> Box<dyn DynIndicator> {
+            chain(
+                wrap(Identity::<Real>::new()),
+                wrap(Ema::new(Identity::<Real>::new(), 3)),
+            )
+        };
+        let mut paused = build();
+        let mut whole = build();
+        let feed = |d: &mut Box<dyn DynIndicator>, x: Real| d.update(DynValue::Real(x));
+        for x in [10.0, 12.0, 11.0, 13.0] {
+            feed(&mut paused, x);
+            feed(&mut whole, x);
+        }
+        let saved = paused.save_state();
+        let mut restored = build();
+        restored.load_state(&saved).unwrap();
+        for x in [14.0, 9.0, 15.0, 8.0] {
+            assert_eq!(feed(&mut restored, x), feed(&mut whole, x));
+        }
     }
 
     #[test]

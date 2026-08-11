@@ -12,6 +12,8 @@
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::types::Real;
 
@@ -127,9 +129,12 @@ pub(crate) use component_accessors;
 /// accessors and the duplicate work matters.
 ///
 /// [`crosses_above`]: crate::indicators::IndicatorExt::crosses_above
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Component<I: Indicator> {
+    #[state(source)]
     source: I,
+    // A pure projection function, fixed by construction from the spec.
+    #[state(skip)]
     select: fn(I::Output) -> Real,
     /// Latest projected component; `None` until the source is warmed up.
     pub value: Option<Real>,
@@ -176,10 +181,26 @@ impl<I: Indicator> Indicator for Component<I> {
         self.source.reset();
         self.value = None;
     }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Shared source: one indicator, many accessors, one advance per bar.
+//
+// `Shared`/`SharedComponent` deliberately keep the default no-op
+// `Indicator::save_state`/`load_state`: the spec builders never use `.shared()`
+// (see CLAUDE.md — YAML `!macd_line`/… build independent `Component`s), so no
+// spec/Python/CLI-resumed tree ever contains one. Serializing the Arc-shared
+// inner correctly (exactly once across the N accessors that borrow it) would be
+// a bespoke effort with no consumer on the resume path, so it is left for the
+// day a shared source needs to survive a resume in a hand-written strategy.
 // ---------------------------------------------------------------------------
 
 /// The inner cell every [`SharedComponent`] built from one [`Shared`] borrows

@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::types::{Candle, Real};
 
@@ -8,8 +10,9 @@ use crate::types::{Candle, Real};
 /// down-close, and leaves it unchanged when the close is flat. Following
 /// TA-Lib, it seeds at the first bar's volume, so it is ready as soon as the
 /// source is.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Obv<S> {
+    #[state(source)]
     source: S,
     prev_close: Option<Real>,
     /// Latest OBV value; `None` before the source produces its first bar.
@@ -70,6 +73,14 @@ impl<S: Indicator<Output = Candle>> Indicator for Obv<S> {
         self.source.reset();
         self.prev_close = None;
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

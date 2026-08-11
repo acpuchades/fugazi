@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::{Atr, Ema};
 use crate::types::{Candle, Real};
@@ -22,9 +24,11 @@ pub struct KeltnerValue {
 /// `Keltner::new(Current::close(), Current::candle(), 20, 10, 2.0)`. Ready once
 /// the ATR has warmed up (after `atr_period` bars); the EMA seeds on the first
 /// bar.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Keltner<P, C> {
+    #[state(source)]
     ema: Ema<P>,
+    #[state(source)]
     atr: Atr<C>,
     multiplier: Real,
     /// Latest upper channel.
@@ -133,6 +137,14 @@ where
         self.upper = None;
         self.middle = None;
         self.lower = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

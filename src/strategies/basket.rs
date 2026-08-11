@@ -719,6 +719,12 @@ pub struct BasketStrategy<Sym> {
     /// `Σ long_sizes == Σ short_sizes` (dollar-neutral). Set via
     /// [`dollar_neutral`](Self::dollar_neutral); defaults to `false`.
     dollar_neutral: bool,
+    /// Per-symbol run-state awaiting a lazy restore. Set by
+    /// [`restore_state`](Self::restore_state); each symbol's saved state is
+    /// applied inside [`update`](Strategy::update) right after that symbol's
+    /// chains are first built (they don't exist until the symbol is seen), then
+    /// removed. `None` on a normal run.
+    pending_restore: Option<HashMap<Sym, serde_json::Value>>,
 }
 
 impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> BasketStrategy<Sym> {
@@ -772,6 +778,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> BasketStrategy<
             universe: Box::new(Floating),
             book: Book::new(initial_equity),
             dollar_neutral: false,
+            pending_restore: None,
         }
     }
 
@@ -1088,6 +1095,104 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Default for Bas
     }
 }
 
+impl<Sym> BasketStrategy<Sym>
+where
+    Sym: Clone + Hash + Eq + 'static + Send + Sync + serde::Serialize + serde::de::DeserializeOwned,
+{
+    /// Serialize the basket's runtime state for run resuming — the shared
+    /// [`Book`], plus each seen symbol's score / sizing / protective chains and
+    /// its [`Position`]. Symbols not yet discovered carry no state (they build
+    /// fresh when first seen after resume).
+    pub(crate) fn save_state(&self) -> serde_json::Value {
+        let mut symbols: HashMap<Sym, serde_json::Value> = HashMap::new();
+        for sym in self.scores.keys() {
+            let mut entry = serde_json::Map::new();
+            if let Some(c) = self.scores.get(sym) {
+                entry.insert("score".into(), c.save_state());
+            }
+            if let Some(c) = self.sizes.get(sym) {
+                entry.insert("size".into(), c.save_state());
+            }
+            if let Some(p) = self.positions.get(sym) {
+                entry.insert("position".into(), p.snapshot());
+            }
+            for (map, key) in [
+                (&self.long_stops, "long_stop"),
+                (&self.long_targets, "long_target"),
+                (&self.short_stops, "short_stop"),
+                (&self.short_targets, "short_target"),
+            ] {
+                if let Some(c) = map.get(sym) {
+                    entry.insert(key.into(), c.save_state());
+                }
+            }
+            symbols.insert(sym.clone(), serde_json::Value::Object(entry));
+        }
+        serde_json::json!({
+            "book": self.book.snapshot_state(),
+            "symbols": serde_json::to_value(&symbols).unwrap_or(serde_json::Value::Null),
+        })
+    }
+
+    /// Restore state produced by [`save_state`](Self::save_state). The shared
+    /// book is restored immediately; per-symbol state is stashed and applied
+    /// lazily as each symbol is first seen (its chains don't exist until then).
+    pub(crate) fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        let obj = state
+            .as_object()
+            .ok_or_else(|| format!("basket: expected a state object, got {state}"))?;
+        if let Some(v) = obj.get("book") {
+            self.book.restore_state(v).map_err(|e| format!("book > {e}"))?;
+        }
+        if let Some(v) = obj.get("symbols") {
+            let map: HashMap<Sym, serde_json::Value> =
+                serde_json::from_value(v.clone()).map_err(|e| format!("symbols: {e}"))?;
+            self.pending_restore = Some(map);
+        }
+        Ok(())
+    }
+}
+
+impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> BasketStrategy<Sym> {
+    /// Apply a symbol's stashed restore state right after its chains are built.
+    /// Best-effort: a per-symbol shape mismatch is skipped rather than aborting
+    /// the run (the top-level [`RunState`] already validated version + kind).
+    fn apply_pending_restore(&mut self, sym: &Sym) {
+        let Some(state) = self
+            .pending_restore
+            .as_ref()
+            .and_then(|m| m.get(sym))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(obj) = state.as_object() else {
+            return;
+        };
+        if let (Some(c), Some(v)) = (self.scores.get_mut(sym), obj.get("score")) {
+            let _ = c.load_state(v);
+        }
+        if let (Some(c), Some(v)) = (self.sizes.get_mut(sym), obj.get("size")) {
+            let _ = c.load_state(v);
+        }
+        if let (Some(p), Some(v)) = (self.positions.get(sym), obj.get("position")) {
+            let _ = p.restore(v);
+        }
+        if let (Some(c), Some(v)) = (self.long_stops.get_mut(sym), obj.get("long_stop")) {
+            let _ = c.load_state(v);
+        }
+        if let (Some(c), Some(v)) = (self.long_targets.get_mut(sym), obj.get("long_target")) {
+            let _ = c.load_state(v);
+        }
+        if let (Some(c), Some(v)) = (self.short_stops.get_mut(sym), obj.get("short_stop")) {
+            let _ = c.load_state(v);
+        }
+        if let (Some(c), Some(v)) = (self.short_targets.get_mut(sym), obj.get("short_target")) {
+            let _ = c.load_state(v);
+        }
+    }
+}
+
 impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for BasketStrategy<Sym> {
     type Input = Snapshot<Sym>;
     type Symbol = Sym;
@@ -1146,7 +1251,10 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Ba
             }
             self.scores.insert(sym.clone(), score);
             self.sizes.insert(sym.clone(), size);
-            self.positions.insert(sym, position);
+            self.positions.insert(sym.clone(), position);
+            // Lazy restore: a symbol's chains only exist now that it has been
+            // seen, so apply its saved state (if resuming) right after building.
+            self.apply_pending_restore(&sym);
         }
 
         // 2. Advance every known chain against the whole snapshot; the

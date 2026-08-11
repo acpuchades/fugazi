@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::{RollingMax, RollingMin};
 use crate::types::Real;
@@ -20,9 +22,11 @@ pub struct DonchianValue {
 /// usage: `Donchian::new(Current::high(), Current::low(), 20)`. Both sources are
 /// fed the same input each step (hence `Input: Clone`); produces `None` until
 /// the window is full.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Donchian<H, L> {
+    #[state(source)]
     high: RollingMax<H>,
+    #[state(source)]
     low: RollingMin<L>,
     /// Latest upper channel.
     pub upper: Option<Real>,
@@ -118,6 +122,14 @@ where
         self.upper = None;
         self.middle = None;
         self.lower = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

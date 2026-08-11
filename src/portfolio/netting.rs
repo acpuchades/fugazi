@@ -41,6 +41,9 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
 use crate::types::Real;
 use crate::wallet::{
     Ack, Order, OrderId, OrderKind, Reference, Rejection, Side, Size, Units, Wallet, WalletError,
@@ -99,6 +102,41 @@ pub(super) struct PortfolioInner<Sym> {
 
     /// Per-child seed cash, kept for `reset` (rebuild ledgers).
     seeds: Vec<Real>,
+}
+
+impl<Sym: Clone + Eq + Hash + Serialize + DeserializeOwned> PortfolioInner<Sym> {
+    /// Serialize the persistent, cross-bar portfolio state for run resuming: the
+    /// per-child notional ledgers (cash + positions — the "Σ ledgers == account"
+    /// invariant), the marks cache, and the id counter. The per-bar transient
+    /// state (this bar's intents, the resting protective levels re-submitted
+    /// every bar, and any last-bar flow still awaiting settlement) is not
+    /// persisted — a portfolio should be resumed at a settled bar boundary.
+    pub(super) fn snapshot(&self) -> serde_json::Value {
+        serde_json::json!({
+            "ledgers": self.ledgers,
+            "marks": self.marks,
+            "next_pf_id": self.next_pf_id,
+        })
+    }
+
+    /// Restore state produced by [`snapshot`](Self::snapshot).
+    pub(super) fn restore(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        let obj = state
+            .as_object()
+            .ok_or_else(|| format!("portfolio inner: expected a state object, got {state}"))?;
+        if let Some(v) = obj.get("ledgers") {
+            self.ledgers =
+                serde_json::from_value(v.clone()).map_err(|e| format!("ledgers: {e}"))?;
+        }
+        if let Some(v) = obj.get("marks") {
+            self.marks = serde_json::from_value(v.clone()).map_err(|e| format!("marks: {e}"))?;
+        }
+        if let Some(v) = obj.get("next_pf_id") {
+            self.next_pf_id =
+                serde_json::from_value(v.clone()).map_err(|e| format!("next_pf_id: {e}"))?;
+        }
+        Ok(())
+    }
 }
 
 impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {

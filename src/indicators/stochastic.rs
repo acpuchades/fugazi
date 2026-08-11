@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::Rsi;
 use crate::indicators::ops::{MaxOp, MinOp};
@@ -11,8 +13,9 @@ use crate::types::Real;
 /// window min and max. When the window is flat (`max == min`) it yields `0.0`.
 /// Applied to an [`Rsi`] source this is StochRSI — see the [`StochRsi`] alias
 /// and `IndicatorExt::stoch_rsi`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Stochastic<S> {
+    #[state(source)]
     source: S,
     min: WindowExtreme<MinOp>,
     max: WindowExtreme<MaxOp>,
@@ -68,6 +71,14 @@ impl<S: Indicator<Output = Real>> Indicator for Stochastic<S> {
         self.min.reset();
         self.max.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

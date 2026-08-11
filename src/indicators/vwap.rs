@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
 
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::types::{Candle, Real};
 
@@ -15,8 +17,9 @@ use crate::types::{Candle, Real};
 /// across the 24/7 markets it targets. Ready once `period` bars have been
 /// observed *and* the retained window carries non-zero volume (a stretch of
 /// zero-volume bars in the window returns `None`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Vwap<S> {
+    #[state(source)]
     source: S,
     period: usize,
     window: VecDeque<(Real, Real)>,
@@ -77,6 +80,14 @@ impl<S: Indicator<Output = Candle>> Indicator for Vwap<S> {
         self.sum_pv = 0.0;
         self.sum_volume = 0.0;
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

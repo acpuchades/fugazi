@@ -38,6 +38,8 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::{Arc, Mutex};
 
+use serde::{Deserialize, Serialize};
+
 use crate::types::{Candle, Real};
 use crate::wallet::{
     Ack, Order, OrderId, Reference, Rejection, Side, Size, Units, Wallet, WalletError,
@@ -52,7 +54,11 @@ use super::netting::PortfolioInner;
 /// blotter. Those live on the substrate wallet, which is the only thing that
 /// actually trades. A ledger is moved only by
 /// [`attribute`](super::netting::PortfolioInner::attribute), from real fills.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "Sym: Serialize + Eq + Hash",
+    deserialize = "Sym: Deserialize<'de> + Eq + Hash"
+))]
 pub(super) struct Ledger<Sym> {
     /// This child's share of the account's cash.
     pub(super) cash: Real,

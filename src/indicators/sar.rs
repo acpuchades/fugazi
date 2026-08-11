@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::types::{Candle, Real};
 
@@ -19,8 +21,9 @@ const DEFAULT_MAX: Real = 0.2;
 /// two bars' directional movement, the stop is clamped within the prior two
 /// bars' range so it never lands inside them, and the first value is produced on
 /// the **second** bar.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Sar<S> {
+    #[state(source)]
     source: S,
     step: Real,
     max: Real,
@@ -185,6 +188,14 @@ impl<S: Indicator<Output = Candle>> Indicator for Sar<S> {
         self.prev_high = 0.0;
         self.prev_low = 0.0;
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

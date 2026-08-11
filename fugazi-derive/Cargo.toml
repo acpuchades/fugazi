@@ -1,0 +1,17 @@
+[package]
+name = "fugazi-derive"
+version = "0.39.0"
+edition = "2024"
+license = "MIT"
+description = "Internal derive macros for the fugazi crate (SaveState — run-state serialization)."
+repository = "https://github.com/acpuchades/fugazi"
+
+# A proc-macro crate: it emits code that compiles inside `fugazi`, has no
+# runtime of its own, and links nowhere near the pyo3 cdylib.
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"

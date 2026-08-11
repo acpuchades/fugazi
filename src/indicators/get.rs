@@ -12,6 +12,8 @@
 
 use std::sync::Arc;
 
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::Identity;
 use crate::types::{Atom, OverlayInfo, OverlayType, Real, Schema};
@@ -145,13 +147,18 @@ fn read_slot<'a>(
 /// let atom = Atom::with_overlays(candle, overlays);
 /// assert_eq!(vol.update(atom), Some(0.12));
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct GetReal<S = Identity<Atom>> {
+    // Schema + resolved column index are build-time config, rebuilt identically
+    // from the spec; `value` is a per-bar cache re-read on the next `update`.
+    #[state(skip)]
     schema: Arc<Schema>,
     index: usize,
+    #[state(source)]
     source: S,
     /// Latest extracted value; `None` before the first bar (and `None` on any
     /// atom whose `overlays` is absent or bound to a different schema).
+    #[state(skip)]
     pub value: Option<Real>,
 }
 
@@ -232,6 +239,14 @@ impl<S: Indicator<Output = Atom>> Indicator for GetReal<S> {
         self.source.reset();
         self.value = None;
     }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -242,13 +257,16 @@ impl<S: Indicator<Output = Atom>> Indicator for GetReal<S> {
 ///
 /// The bool twin of [`GetReal`]; see that type's docs for the construction and
 /// error semantics.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct GetBool<S = Identity<Atom>> {
+    #[state(skip)]
     schema: Arc<Schema>,
     index: usize,
+    #[state(source)]
     source: S,
     /// Latest extracted value; `None` before the first bar (and `None` on any
     /// atom whose `overlays` is absent or bound to a different schema).
+    #[state(skip)]
     pub value: Option<bool>,
 }
 
@@ -320,6 +338,14 @@ impl<S: Indicator<Output = Atom>> Indicator for GetBool<S> {
         self.source.reset();
         self.value = None;
     }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -331,13 +357,16 @@ impl<S: Indicator<Output = Atom>> Indicator for GetBool<S> {
 /// The string twin of [`GetReal`]; see that type's docs for the construction
 /// and error semantics. Outputs `Arc<str>` so the shared backing storage of
 /// the underlying overlay value is preserved (no allocation per bar).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct GetStr<S = Identity<Atom>> {
+    #[state(skip)]
     schema: Arc<Schema>,
     index: usize,
+    #[state(source)]
     source: S,
     /// Latest extracted value; `None` before the first bar (and `None` on any
     /// atom whose `overlays` is absent or bound to a different schema).
+    #[state(skip)]
     pub value: Option<Arc<str>>,
 }
 
@@ -408,6 +437,14 @@ impl<S: Indicator<Output = Atom>> Indicator for GetStr<S> {
     fn reset(&mut self) {
         self.source.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::types::{Candle, Real};
 
@@ -9,8 +11,9 @@ use crate::types::{Candle, Real};
 /// wrapping [`Resample`](super::Resample) reads higher-timeframe bars instead.
 /// On the first bar there is no previous close, so it falls back to
 /// `high - low`. Ready as soon as the source is (typically the first bar).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct TrueRange<S> {
+    #[state(source)]
     source: S,
     prev_close: Option<Real>,
     /// Latest true range; `None` before the source produces its first candle.
@@ -65,5 +68,13 @@ impl<S: Indicator<Output = Candle>> Indicator for TrueRange<S> {
         self.source.reset();
         self.prev_close = None;
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }

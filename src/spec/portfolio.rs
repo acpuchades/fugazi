@@ -925,6 +925,17 @@ impl DynPortfolio {
     pub fn warm_up_period(&self) -> usize {
         self.warm_up_period
     }
+
+    /// Serialize the wrapped portfolio's resumable state (per-child ledgers +
+    /// aggregate book). See [`Portfolio::save_state`] for the children caveat.
+    pub fn save_state(&self) -> serde_json::Value {
+        self.inner.save_state()
+    }
+
+    /// Restore state produced by [`save_state`](Self::save_state).
+    pub fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.inner.restore_state(state)
+    }
 }
 
 #[cfg(test)]

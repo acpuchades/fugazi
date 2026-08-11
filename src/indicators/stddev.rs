@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::stats::WindowStats;
 use crate::types::Real;
@@ -7,8 +9,9 @@ use crate::types::Real;
 /// Owns its input source: `StdDev::new(Current::close(), 20)`. Backed by the
 /// shared [`WindowStats`] core, so each update is O(1). Produces `None` until
 /// the window is full.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct StdDev<S> {
+    #[state(source)]
     source: S,
     stats: WindowStats,
     /// Latest standard deviation; `None` until the window is full.
@@ -59,6 +62,14 @@ impl<S: Indicator<Output = Real>> Indicator for StdDev<S> {
         self.source.reset();
         self.stats.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

@@ -17,6 +17,8 @@
 
 use std::marker::PhantomData;
 
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::Identity;
 use crate::types::{Atom, Candle, Real};
@@ -31,10 +33,12 @@ use crate::types::{Atom, Candle, Real};
 /// stream itself and the resample-then-project step happens further up the chain.
 ///
 /// Generic over the atom-emitting source `S` (default [`Identity<Atom>`]).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct CurrentBar<S = Identity<Atom>> {
+    #[state(source)]
     source: S,
     /// Latest bar seen; `None` before the first update.
+    #[state(skip)]
     pub value: Option<Candle>,
 }
 
@@ -87,6 +91,14 @@ impl<S: Indicator<Output = Atom>> Indicator for CurrentBar<S> {
         self.source.reset();
         self.value = None;
     }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
+    }
 }
 
 /// Selects a scalar field from a [`Candle`].
@@ -101,11 +113,14 @@ pub trait CandleField {
 ///
 /// Generic over the atom-emitting source `S` (default [`Identity<Atom>`]),
 /// so a `Field<CloseField, Pick<K>>` reads a close from a cross-asset frame.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Field<F, S = Identity<Atom>> {
+    #[state(source)]
     source: S,
     /// Latest extracted value; `None` before the first bar.
+    #[state(skip)]
     pub value: Option<Real>,
+    #[state(skip)]
     _field: PhantomData<fn() -> F>,
 }
 
@@ -159,6 +174,14 @@ impl<F: CandleField, S: Indicator<Output = Atom>> Indicator for Field<F, S> {
     fn reset(&mut self) {
         self.source.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

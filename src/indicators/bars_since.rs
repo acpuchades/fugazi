@@ -8,6 +8,8 @@
 //! that fired recently), time-stops (`bars_since(entry_condition) > 20`), and
 //! the Aroon identity (`100·(period − bars_since_high)/period`).
 
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::ops::{MaxOp, MinOp};
 use crate::indicators::stats::WindowExtreme;
@@ -56,8 +58,9 @@ use crate::types::Real;
 /// assert_eq!(bars.update(1.0), Some(2.0));
 /// assert_eq!(bars.update(99.0), Some(0.0));  // fires again, counter resets
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct BarsSince<S> {
+    #[state(source)]
     source: S,
     /// `None` until the source has fired once; `Some(n)` thereafter.
     count: Option<usize>,
@@ -114,6 +117,14 @@ impl<S: Indicator<Output = bool>> Indicator for BarsSince<S> {
         self.count = None;
         self.value = None;
     }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
+    }
 }
 
 /// Bars elapsed since `source` last set a new `period`-bar high — `0` on the
@@ -140,8 +151,9 @@ impl<S: Indicator<Output = bool>> Indicator for BarsSince<S> {
 /// assert_eq!(bars.update(1.0), Some(2.0));  // the high (5.0) was 2 bars ago
 /// assert_eq!(bars.update(9.0), Some(0.0));  // new high, now
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct BarsSinceHigh<S> {
+    #[state(source)]
     source: S,
     extreme: WindowExtreme<MaxOp>,
     /// Latest bars-since-high; `None` until the window is full.
@@ -151,8 +163,9 @@ pub struct BarsSinceHigh<S> {
 /// Bars elapsed since `source` last set a new `period`-bar low.
 ///
 /// The low-side twin of [`BarsSinceHigh`]; see there for the full contract.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct BarsSinceLow<S> {
+    #[state(source)]
     source: S,
     extreme: WindowExtreme<MinOp>,
     /// Latest bars-since-low; `None` until the window is full.
@@ -212,6 +225,14 @@ macro_rules! bars_since_extreme {
                 self.source.reset();
                 self.extreme.reset();
                 self.value = None;
+            }
+
+            fn save_state(&self) -> serde_json::Value {
+                self.save_state_fields()
+            }
+
+            fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+                self.load_state_fields(state)
             }
         }
     };

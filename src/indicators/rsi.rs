@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::smoothing::WilderState;
 use crate::types::Real;
@@ -8,8 +10,9 @@ use crate::types::Real;
 /// down-moves of the source's output with two Wilder averages and forms
 /// `RSI = 100 - 100 / (1 + avg_gain / avg_loss)`. Produces `None` until
 /// `period + 1` source values have been seen.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Rsi<S> {
+    #[state(source)]
     source: S,
     prev: Option<Real>,
     gain: WilderState,
@@ -96,6 +99,14 @@ impl<S: Indicator<Output = Real>> Indicator for Rsi<S> {
         self.gain.reset();
         self.loss.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::stats::WindowStats;
 use crate::types::Real;
@@ -15,8 +17,9 @@ use crate::types::Real;
 /// shared [`WindowStats`] core. Produces `None` until the window is full; once
 /// full, a dispersion-free window reads `0.0` (kurtosis is undefined without
 /// spread). A fat-tailed / jump-prone window reads well above `3`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Kurtosis<S> {
+    #[state(source)]
     source: S,
     stats: WindowStats,
     /// Latest kurtosis; `None` until the window is full.
@@ -67,6 +70,14 @@ impl<S: Indicator<Output = Real>> Indicator for Kurtosis<S> {
         self.source.reset();
         self.stats.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

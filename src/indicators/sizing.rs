@@ -15,6 +15,8 @@
 
 use std::marker::PhantomData;
 
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::stats::WindowStats;
 use crate::indicators::{
@@ -345,8 +347,9 @@ impl<Sym: std::hash::Hash + Eq + Clone, In> Indicator for DrawdownThrottle<Sym, 
 /// A rolling Kelly-fraction sizer. Owns the source (a
 /// [`Book::trade_return`] accessor) and a shared [`WindowStats`] core
 /// that computes the rolling mean and variance of trade returns.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 struct FractionalKelly<S> {
+    #[state(source)]
     source: S,
     stats: WindowStats,
     kelly_fraction: Real,
@@ -391,6 +394,14 @@ impl<S: Indicator<Output = Real>> Indicator for FractionalKelly<S> {
         self.source.reset();
         self.stats.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

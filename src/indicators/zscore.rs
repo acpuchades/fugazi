@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::stats::{MOMENT_EPS, WindowStats};
 use crate::types::Real;
@@ -15,8 +17,9 @@ use crate::types::Real;
 /// This is the standard per-series normalization every cross-sectional feature
 /// needs before pooling across instruments — one transform tag in place of the
 /// hand-written `!div { !sub { x, !sma {…} }, !stddev {…} }`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct ZScore<S> {
+    #[state(source)]
     source: S,
     stats: WindowStats,
     /// Latest z-score; `None` until the window is full.
@@ -74,6 +77,14 @@ impl<S: Indicator<Output = Real>> Indicator for ZScore<S> {
         self.source.reset();
         self.stats.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

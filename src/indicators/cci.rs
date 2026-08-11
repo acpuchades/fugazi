@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::stats::WindowStats;
 use crate::types::Real;
@@ -14,8 +16,9 @@ const CCI_FACTOR: Real = 0.015;
 /// the mean and the dispersion; the deviation term scans the window, so each
 /// update is O(period). When the window has zero dispersion it yields `0.0`.
 /// Ready after `period` samples.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Cci<S> {
+    #[state(source)]
     source: S,
     stats: WindowStats,
     /// Latest output value; `None` until the window is full.
@@ -73,6 +76,14 @@ impl<S: Indicator<Output = Real>> Indicator for Cci<S> {
         self.source.reset();
         self.stats.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

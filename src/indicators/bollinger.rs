@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::stats::WindowStats;
 use crate::types::Real;
@@ -21,8 +23,9 @@ pub struct BollingerValue {
 /// provides both the mean and the dispersion over the same window.
 ///
 /// Bands are exposed as public fields and refreshed every update.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Bollinger<S> {
+    #[state(source)]
     source: S,
     stats: WindowStats,
     k: Real,
@@ -121,6 +124,14 @@ impl<S: Indicator<Output = Real>> Indicator for Bollinger<S> {
         self.upper = None;
         self.middle = None;
         self.lower = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

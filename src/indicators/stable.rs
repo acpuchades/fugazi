@@ -3,6 +3,8 @@
 
 use std::marker::PhantomData;
 
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 
 /// A `bool`-output signal that reports whether **enough samples have elapsed
@@ -35,10 +37,11 @@ use crate::indicator::Indicator;
 /// // Feed 11 candles (Ema-3's stable_period) — the 11th update flips true.
 /// # let _ = &mut ready;
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Stable<In> {
     stable_period: usize,
     samples: usize,
+    #[state(skip)]
     _in: PhantomData<fn(In)>,
 }
 
@@ -89,6 +92,14 @@ impl<In> Indicator for Stable<In> {
 
     fn reset(&mut self) {
         self.samples = 0;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

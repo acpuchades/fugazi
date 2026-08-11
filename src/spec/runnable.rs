@@ -26,11 +26,45 @@
 
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use crate::costs::TradingCosts;
 use crate::market::{Real, Schema};
 use crate::types::Snapshot;
 use crate::wallet::{PaperWallet, Wallet};
 use crate::{RunReport, Strategy};
+
+/// The on-disk format version of a [`RunState`]. Bumped when the serialized
+/// shape changes so a stale snapshot is rejected with a clear message rather
+/// than mis-parsed.
+pub const RUN_STATE_FORMAT_VERSION: u32 = 1;
+
+/// A persisted run — everything needed to rebuild a strategy from its spec and
+/// continue it over new bars with identical behavior.
+///
+/// The strategy *structure* is not stored here; it is rebuilt from the spec
+/// document. What is stored is the runtime *state*: the strategy's serialized
+/// indicator/position/book state and the wallet's cash / positions / resting
+/// orders. Written as JSON (via [`serde_json`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunState {
+    /// Schema version; see [`RUN_STATE_FORMAT_VERSION`].
+    pub format_version: u32,
+    /// The strategy shape (`StrategySpec::kind`) this state was captured from.
+    /// A resume into a different shape is rejected.
+    pub kind: String,
+    /// Timestamp (UTC ms) of the last bar processed when the state was
+    /// captured, when known — used to warn about a gap/overlap on resume.
+    pub last_bar: Option<i64>,
+    /// Total bars the strategy had seen at capture (informational).
+    pub bars_seen: usize,
+    /// The strategy's serialized state (see
+    /// [`RunnableStrategy::save_state`]).
+    pub strategy: serde_json::Value,
+    /// The wallet's serialized state (see
+    /// [`PaperWallet::snapshot_state`](crate::wallet::PaperWallet::snapshot_state)).
+    pub wallet: serde_json::Value,
+}
 
 use super::basket::{BasketStrategySpec, DynBasketStrategy};
 use super::multi_asset::{DynMultiAssetStrategy, MultiAssetStrategySpec};
@@ -66,14 +100,91 @@ pub trait RunnableStrategy: Strategy<Input = Snapshot<String>, Symbol = String> 
         cash: Real,
         per_symbol_costs: &[(String, TradingCosts)],
     ) -> RunReport<String> {
+        // Resume-free path: no state to restore, no state to surface. `None` can
+        // never produce a restore error, so the unwrap is unreachable.
+        self.drive_resumable(snapshots, cash, per_symbol_costs, None, false)
+            .expect("drive with no resume state cannot fail")
+            .0
+    }
+
+    /// Serialize this strategy's full runtime state for run resuming — every
+    /// wired indicator/signal chain plus the shared `Position`(s) and `Book`(s).
+    /// The default is [`Null`](serde_json::Value::Null) (a strategy that opts
+    /// out of resuming); every spec-built shape overrides it.
+    fn save_state(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
+    /// Restore state produced by [`save_state`](Self::save_state) into this
+    /// freshly-built strategy. Default: accept and ignore.
+    fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        let _ = state;
+        Ok(())
+    }
+
+    /// Drive this strategy, optionally restoring `resume` state first and
+    /// surfacing the final [`RunState`] after — the resumable superset of
+    /// [`drive`](Self::drive).
+    ///
+    /// With `resume = Some(state)`, the wallet and strategy are restored from it
+    /// before the first bar. With `realize_open = true`, any position still open
+    /// at the end is marked to close at the last bar and booked into the report
+    /// so `reconstruct_trades`/metrics count it (mutually exclusive with saving
+    /// state — a realized run is a finalized one).
+    fn drive_resumable(
+        &mut self,
+        snapshots: &[Snapshot<String>],
+        cash: Real,
+        per_symbol_costs: &[(String, TradingCosts)],
+        resume: Option<&RunState>,
+        realize_open: bool,
+    ) -> Result<(RunReport<String>, RunState), String> {
         let mut wallet: PaperWallet<String> = PaperWallet::new(cash);
         for (sym, costs) in per_symbol_costs {
-            // Always Ok on a PaperWallet; the Result exists for wallets
-            // whose fees the venue owns.
             let _ = wallet.set_costs_for(sym.clone(), costs.clone());
         }
-        crate::backtest::run(self, &mut wallet, snapshots.iter().cloned())
+        if let Some(state) = resume {
+            if state.format_version != RUN_STATE_FORMAT_VERSION {
+                return Err(format!(
+                    "!resume > state format version {} does not match this build's {}",
+                    state.format_version, RUN_STATE_FORMAT_VERSION
+                ));
+            }
+            if state.kind != self.spec_kind() {
+                return Err(format!(
+                    "!resume > state is for a `{}` strategy but this document is `{}`",
+                    state.kind,
+                    self.spec_kind()
+                ));
+            }
+            self.restore_state(&state.strategy)
+                .map_err(|e| format!("!resume > strategy > {e}"))?;
+            wallet
+                .restore_state(&state.wallet)
+                .map_err(|e| format!("!resume > wallet > {e}"))?;
+        }
+        let mut report = crate::backtest::run(self, &mut wallet, snapshots.iter().cloned());
+        if realize_open {
+            crate::backtest::realize_open_positions(self, &mut wallet, snapshots, &mut report);
+        }
+        let last_bar = snapshots
+            .last()
+            .and_then(|snap| snap.iter().find_map(|(_, _, atom)| atom.time))
+            .map(|t| t.0);
+        let final_state = RunState {
+            format_version: RUN_STATE_FORMAT_VERSION,
+            kind: self.spec_kind().to_string(),
+            last_bar,
+            bars_seen: resume.map(|r| r.bars_seen).unwrap_or(0) + snapshots.len(),
+            strategy: self.save_state(),
+            wallet: wallet.snapshot_state(),
+        };
+        Ok((report, final_state))
     }
+
+    /// The shape's name, used to stamp and validate a [`RunState`]. Mirrors
+    /// [`StrategySpec::kind`].
+    fn spec_kind(&self) -> &'static str;
 }
 
 impl RunnableStrategy for DynSingleStrategy {
@@ -82,6 +193,15 @@ impl RunnableStrategy for DynSingleStrategy {
     }
     fn warm_up_period(&self) -> usize {
         DynSingleStrategy::warm_up_period(self)
+    }
+    fn spec_kind(&self) -> &'static str {
+        "single"
+    }
+    fn save_state(&self) -> serde_json::Value {
+        DynSingleStrategy::save_state(self)
+    }
+    fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        DynSingleStrategy::restore_state(self, state)
     }
 }
 
@@ -92,6 +212,15 @@ impl RunnableStrategy for DynPairsStrategy {
     fn warm_up_period(&self) -> usize {
         DynPairsStrategy::warm_up_period(self)
     }
+    fn spec_kind(&self) -> &'static str {
+        "pairs"
+    }
+    fn save_state(&self) -> serde_json::Value {
+        DynPairsStrategy::save_state(self)
+    }
+    fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        DynPairsStrategy::restore_state(self, state)
+    }
 }
 
 impl RunnableStrategy for DynBasketStrategy {
@@ -101,6 +230,18 @@ impl RunnableStrategy for DynBasketStrategy {
     fn warm_up_period(&self) -> usize {
         DynBasketStrategy::warm_up_period(self)
     }
+    fn spec_kind(&self) -> &'static str {
+        "basket"
+    }
+    fn save_state(&self) -> serde_json::Value {
+        DynBasketStrategy::save_state(self)
+    }
+    fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        DynBasketStrategy::restore_state(self, state)
+    }
+    // Basket lazy-builds per-symbol chains on first sight, so restore also
+    // restores per-symbol state as each symbol reappears — see
+    // [`DynBasketStrategy::restore_state`].
 }
 
 impl RunnableStrategy for DynMultiAssetStrategy {
@@ -109,6 +250,15 @@ impl RunnableStrategy for DynMultiAssetStrategy {
     }
     fn warm_up_period(&self) -> usize {
         DynMultiAssetStrategy::warm_up_period(self)
+    }
+    fn spec_kind(&self) -> &'static str {
+        "multi"
+    }
+    fn save_state(&self) -> serde_json::Value {
+        DynMultiAssetStrategy::save_state(self)
+    }
+    fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        DynMultiAssetStrategy::restore_state(self, state)
     }
 }
 
@@ -119,9 +269,18 @@ impl RunnableStrategy for DynPortfolio {
     fn warm_up_period(&self) -> usize {
         DynPortfolio::warm_up_period(self)
     }
-    // Uses the default `drive`: a portfolio is now an ordinary strategy that
-    // trades the wallet it is handed, so it takes the same `PaperWallet` primed
-    // with per-symbol costs as the other four shapes.
+    fn spec_kind(&self) -> &'static str {
+        "portfolio"
+    }
+    fn save_state(&self) -> serde_json::Value {
+        DynPortfolio::save_state(self)
+    }
+    fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        DynPortfolio::restore_state(self, state)
+    }
+    // Uses the default `drive`/`drive_resumable`: a portfolio is now an ordinary
+    // strategy that trades the wallet it is handed, so it takes the same
+    // `PaperWallet` primed with per-symbol costs as the other four shapes.
 }
 
 /// The five spec shapes as one type, so a driver takes a strategy document

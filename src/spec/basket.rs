@@ -590,6 +590,16 @@ impl DynBasketStrategy {
         self.inner.book()
     }
 
+    /// Serialize the wrapped basket's runtime state for run resuming.
+    pub fn save_state(&self) -> serde_json::Value {
+        self.inner.save_state()
+    }
+
+    /// Restore state produced by [`save_state`](Self::save_state).
+    pub fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.inner.restore_state(state)
+    }
+
     /// Grid-wide readiness across the currently-built per-symbol score /
     /// sizing chains and the rebalance gate — pass-through to
     /// [`BasketStrategy::stable_period`](crate::strategies::BasketStrategy::stable_period).

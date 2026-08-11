@@ -5,6 +5,8 @@
 //! shape without needing a bespoke source: `adx.gt(25.0).if_else(roc,
 //! Value::new(0.0))` reads exactly like the English sentence.
 
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::types::Real;
 
@@ -56,10 +58,13 @@ use crate::types::Real;
 /// ```
 ///
 /// [`Combine`]: crate::indicators::Combine
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct IfElse<Cond, T, F> {
+    #[state(source)]
     cond: Cond,
+    #[state(source)]
     then: T,
+    #[state(source)]
     otherwise: F,
     /// Latest selected value. `None` while the condition is `None`, or
     /// while the currently-selected branch is `None`.
@@ -133,6 +138,14 @@ where
         self.then.reset();
         self.otherwise.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

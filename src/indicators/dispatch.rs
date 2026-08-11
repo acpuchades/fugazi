@@ -144,6 +144,41 @@ where
         self.default.reset();
         self.value = None;
     }
+
+    // Hand-written (not `#[derive(SaveState)]`) because `cases` is a `Vec` of
+    // child indicators — the derive handles single source fields, not a
+    // collection of them. Recurses into `on`, each case branch, and `default`;
+    // the `value` cache is dropped (recomputed on the next `update`).
+    fn save_state(&self) -> serde_json::Value {
+        serde_json::json!({
+            "on": self.on.save_state(),
+            "cases": self
+                .cases
+                .iter()
+                .map(|(_, br)| br.save_state())
+                .collect::<Vec<_>>(),
+            "default": self.default.save_state(),
+        })
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        let obj = state
+            .as_object()
+            .ok_or_else(|| format!("match: expected a state object, got {state}"))?;
+        self.on
+            .load_state(obj.get("on").unwrap_or(&serde_json::Value::Null))
+            .map_err(|e| format!("on > {e}"))?;
+        self.default
+            .load_state(obj.get("default").unwrap_or(&serde_json::Value::Null))
+            .map_err(|e| format!("default > {e}"))?;
+        if let Some(arr) = obj.get("cases").and_then(|v| v.as_array()) {
+            for (i, (_, br)) in self.cases.iter_mut().enumerate() {
+                br.load_state(arr.get(i).unwrap_or(&serde_json::Value::Null))
+                    .map_err(|e| format!("case[{i}] > {e}"))?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

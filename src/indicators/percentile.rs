@@ -7,6 +7,8 @@
 //! and moves with it. [`PercentileRank`] is the inverse question — not "what
 //! value sits at 80%?" but "what percentage does today's value sit at?".
 
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::stats::WindowQuantile;
 use crate::types::Real;
@@ -37,8 +39,9 @@ use crate::types::Real;
 /// assert_eq!(med.update(5.0), None);
 /// assert_eq!(med.update(3.0), Some(3.0));
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Percentile<S> {
+    #[state(source)]
     source: S,
     window: WindowQuantile,
     pct: Real,
@@ -100,6 +103,14 @@ impl<S: Indicator<Output = Real>> Indicator for Percentile<S> {
         self.window.reset();
         self.value = None;
     }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
+    }
 }
 
 /// Where the current sample sits within its own trailing distribution, as
@@ -130,8 +141,9 @@ impl<S: Indicator<Output = Real>> Indicator for Percentile<S> {
 /// // 25 is above 10 and 20, plus itself: 3 of 4.
 /// assert_eq!(rank.update(25.0), Some(0.75));
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct PercentileRank<S> {
+    #[state(source)]
     source: S,
     window: WindowQuantile,
     /// Latest rank in `(0, 1]`; `None` until the window is full.
@@ -182,6 +194,14 @@ impl<S: Indicator<Output = Real>> Indicator for PercentileRank<S> {
         self.source.reset();
         self.window.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

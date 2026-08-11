@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::TrueRange;
 use crate::indicators::smoothing::WilderState;
@@ -10,8 +12,9 @@ use crate::types::{Candle, Real};
 /// ATR of the base stream. Equivalent to
 /// `Rma::new(TrueRange::new(source), period)`. Ready `period` bars after the
 /// source is.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Atr<S> {
+    #[state(source)]
     true_range: TrueRange<S>,
     state: WilderState,
     /// Latest ATR value; `None` until warmed up.
@@ -58,6 +61,14 @@ impl<S: Indicator<Output = Candle>> Indicator for Atr<S> {
         self.true_range.reset();
         self.state.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

@@ -483,6 +483,16 @@ impl DynMultiAssetStrategy {
         self.inner.book()
     }
 
+    /// Serialize the wrapped multi-asset strategy's runtime state for resuming.
+    pub fn save_state(&self) -> serde_json::Value {
+        self.inner.save_state()
+    }
+
+    /// Restore state produced by [`save_state`](Self::save_state).
+    pub fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.inner.restore_state(state)
+    }
+
     /// Grid-wide readiness across the currently-discovered per-symbol
     /// states and the rebalance gate — pass-through to
     /// [`MultiAssetStrategy::stable_period`](crate::strategies::MultiAssetStrategy::stable_period).

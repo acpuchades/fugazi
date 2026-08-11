@@ -401,6 +401,82 @@ impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> SingleAssetStrategy<Sym> {
     }
 }
 
+impl<Sym> SingleAssetStrategy<Sym>
+where
+    Sym: Clone + Hash + Eq + 'static + Send + Sync + serde::Serialize + serde::de::DeserializeOwned,
+{
+    /// Serialize the strategy's full runtime state for run resuming — every
+    /// wired signal / protective level / sizing chain, plus the shared
+    /// [`Position`] and [`Book`] and the bar counter. The `symbol` and the
+    /// tree *shape* are not serialized; they are rebuilt from the spec before
+    /// [`restore_state`](Self::restore_state) replays these values in.
+    pub(crate) fn save_state(&self) -> serde_json::Value {
+        let level = |l: &Option<Level<Sym>>| {
+            l.as_ref()
+                .map(|x| x.save_state())
+                .unwrap_or(serde_json::Value::Null)
+        };
+        serde_json::json!({
+            "long": self.long.save_state(),
+            "close_long": self.close_long.save_state(),
+            "short": self.short.save_state(),
+            "close_short": self.close_short.save_state(),
+            "long_stop": level(&self.long_stop),
+            "long_target": level(&self.long_target),
+            "short_stop": level(&self.short_stop),
+            "short_target": level(&self.short_target),
+            "sizing": self.sizing.save_state(),
+            "rebalance": self.rebalance.save_state(),
+            "position": self.position.snapshot(),
+            "book": self.book.snapshot_state(),
+            "bars_seen": self.bars_seen,
+        })
+    }
+
+    /// Restore state produced by [`save_state`](Self::save_state) into this
+    /// freshly-built strategy.
+    pub(crate) fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        let obj = state
+            .as_object()
+            .ok_or_else(|| format!("single: expected a state object, got {state}"))?;
+        let null = serde_json::Value::Null;
+        let get = |k: &str| obj.get(k).unwrap_or(&null);
+        self.long.load_state(get("long")).map_err(|e| format!("long > {e}"))?;
+        self.close_long
+            .load_state(get("close_long"))
+            .map_err(|e| format!("close_long > {e}"))?;
+        self.short.load_state(get("short")).map_err(|e| format!("short > {e}"))?;
+        self.close_short
+            .load_state(get("close_short"))
+            .map_err(|e| format!("close_short > {e}"))?;
+        if let Some(l) = self.long_stop.as_mut() {
+            l.load_state(get("long_stop")).map_err(|e| format!("long_stop > {e}"))?;
+        }
+        if let Some(l) = self.long_target.as_mut() {
+            l.load_state(get("long_target")).map_err(|e| format!("long_target > {e}"))?;
+        }
+        if let Some(l) = self.short_stop.as_mut() {
+            l.load_state(get("short_stop")).map_err(|e| format!("short_stop > {e}"))?;
+        }
+        if let Some(l) = self.short_target.as_mut() {
+            l.load_state(get("short_target")).map_err(|e| format!("short_target > {e}"))?;
+        }
+        self.sizing.load_state(get("sizing")).map_err(|e| format!("sizing > {e}"))?;
+        self.rebalance
+            .load_state(get("rebalance"))
+            .map_err(|e| format!("rebalance > {e}"))?;
+        self.position
+            .restore(get("position"))
+            .map_err(|e| format!("position > {e}"))?;
+        self.book
+            .restore_state(get("book"))
+            .map_err(|e| format!("book > {e}"))?;
+        self.bars_seen = serde_json::from_value(get("bars_seen").clone())
+            .map_err(|e| format!("bars_seen: {e}"))?;
+        Ok(())
+    }
+}
+
 impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for SingleAssetStrategy<Sym> {
     type Input = Snapshot<Sym>;
     type Symbol = Sym;

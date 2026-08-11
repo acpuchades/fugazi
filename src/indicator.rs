@@ -83,4 +83,30 @@ pub trait Indicator {
     /// Clear all state, returning the indicator to its freshly-constructed
     /// condition.
     fn reset(&mut self);
+
+    /// Serialize this indicator's mutable internal state as a JSON value, for
+    /// **run resuming** — persisting a run and continuing it later with
+    /// bit-identical behavior.
+    ///
+    /// The default is [`Null`](serde_json::Value::Null): a *stateless* leaf
+    /// (`Value`, `Identity`, `Pick`, the `Current*` accessors, …) has nothing to
+    /// save. Every indicator that carries state overrides this — in practice via
+    /// `#[derive(SaveState)]` (see the `fugazi-derive` crate), which generates a
+    /// `save_state_fields` this method forwards to. The payload's *shape* mirrors
+    /// the indicator tree (each node keyed by field name, children nested), and
+    /// the structure is always rebuilt from the spec before
+    /// [`load_state`](Indicator::load_state) replays the values in — so there are
+    /// no type tags, position in the tree is the key.
+    fn save_state(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
+    /// Restore state produced by [`save_state`](Indicator::save_state) on an
+    /// identically-constructed indicator. Default: accept and ignore (the
+    /// stateless-leaf case). Returns an `Err` describing the mismatch when the
+    /// payload doesn't fit this node's shape.
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        let _ = state;
+        Ok(())
+    }
 }

@@ -18,6 +18,8 @@ use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::stats::WindowExtreme;
 use crate::types::Real;
@@ -50,13 +52,21 @@ pub trait BinaryOp {
 /// [`compare`](super::compare), the logic ops in [`logic`](super::logic)) or the
 /// `IndicatorExt`/`BoolIndicatorExt` builders. Feeds the same input to both sources
 /// (hence `Input: Clone`) and yields `None` until both are warmed up.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Combine<L, R, Op: BinaryOp> {
+    #[state(source)]
     lhs: L,
+    #[state(source)]
     rhs: R,
+    // Config, rebuilt identically from the spec (comparisons carry only an
+    // `epsilon`), and not serde-serializable in general.
+    #[state(skip)]
     op: Op,
     /// Latest combined value; `None` until both sources are ready (and the
-    /// operation is defined).
+    /// operation is defined). A recomputed cache — `update` refreshes it before
+    /// the next `value()` read — so it is not part of the saved state (which also
+    /// avoids constraining `Op::Output: Serialize`).
+    #[state(skip)]
     pub value: Option<Op::Output>,
 }
 
@@ -118,6 +128,14 @@ where
         self.lhs.reset();
         self.rhs.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 
@@ -196,13 +214,15 @@ pub trait LookbackOp {
 /// builders (`a.lag(1)`, `a.diff(1)`, `a.ratio(1)`). Buffers the last
 /// `period` outputs, so each update is O(1); yields `None` for the first
 /// `period` updates.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Lookback<I, Op> {
+    #[state(source)]
     source: I,
     period: usize,
     buffer: VecDeque<Option<Real>>,
     /// Latest value; `None` until `period` updates have elapsed.
     pub value: Option<Real>,
+    #[state(skip)]
     _op: PhantomData<fn() -> Op>,
 }
 
@@ -267,6 +287,14 @@ where
         self.source.reset();
         self.buffer.clear();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 
@@ -357,8 +385,9 @@ impl ExtremeOp for MinOp {
 ///
 /// Use the aliases ([`RollingMax`], [`RollingMin`]) or the `IndicatorExt`
 /// builders (`a.rolling_max(20)`). Produces `None` until the window is full.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Extreme<S, Op> {
+    #[state(source)]
     source: S,
     inner: WindowExtreme<Op>,
     /// Latest extremum; `None` until warmed up.
@@ -416,6 +445,14 @@ where
         self.source.reset();
         self.inner.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

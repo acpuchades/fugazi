@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::smoothing::EmaState;
 use crate::types::Real;
@@ -21,8 +23,9 @@ pub struct MacdValue {
 /// as soon as the source is; the values simply stabilise with more data.
 ///
 /// Individual outputs are exposed as public fields and refreshed every update.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Macd<S> {
+    #[state(source)]
     source: S,
     fast: EmaState,
     slow: EmaState,
@@ -134,6 +137,14 @@ impl<S: Indicator<Output = Real>> Indicator for Macd<S> {
         self.macd = None;
         self.signal = None;
         self.histogram = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

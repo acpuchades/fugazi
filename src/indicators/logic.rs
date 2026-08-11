@@ -9,6 +9,8 @@
 
 use std::marker::PhantomData;
 
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::ops::{BinaryOp, Combine};
 
@@ -59,8 +61,9 @@ pub type Xor<L, R> = Combine<L, R, XorOp>;
 /// [`BoolIndicatorExt::not`](crate::indicators::BoolIndicatorExt::not).
 ///
 /// Stateless: `None` while the source is unwarmed, `Some(!b)` once it is ready.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Not<S> {
+    #[state(source)]
     inner: S,
     value: Option<bool>,
 }
@@ -98,6 +101,14 @@ impl<S: Indicator<Output = bool>> Indicator for Not<S> {
         self.inner.reset();
         self.value = None;
     }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
+    }
 }
 
 /// Toggle (change) detector. Created via
@@ -127,12 +138,21 @@ impl<S: Indicator<Output = bool>> Indicator for Not<S> {
 /// over bar. Ideal for calendar rollovers (`!month`, `!week_of_year`) where
 /// every transition is a real "rollover" event and no rising/falling
 /// distinction applies.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Change<S: Indicator>
 where
     S::Output: PartialEq + Clone,
 {
+    #[state(source)]
     inner: S,
+    // `S::Output` is an unbounded associated type, so it can't be serialized in
+    // general. `prev` is therefore skipped: on resume, a change/toggle detector
+    // re-warms for a single bar (it emits `None` on the first post-resume bar,
+    // then resumes normally), so a transition landing exactly on the resume
+    // boundary can be missed. The dedicated crossover primitives
+    // (`CrossesAbove`/`CrossesBelow`) carry concrete-typed prev slots and do not
+    // have this artifact.
+    #[state(skip)]
     prev: Option<S::Output>,
     value: Option<bool>,
 }
@@ -187,6 +207,14 @@ where
         self.prev = None;
         self.value = None;
     }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
+    }
 }
 
 /// Rising-edge detector for a `bool`-output source: fires (`Some(true)`) on
@@ -197,8 +225,9 @@ where
 ///
 /// Created via
 /// [`BoolIndicatorExt::became_true`](crate::indicators::BoolIndicatorExt::became_true).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct BecameTrue<S> {
+    #[state(source)]
     inner: S,
     prev: Option<bool>,
     value: Option<bool>,
@@ -245,6 +274,14 @@ impl<S: Indicator<Output = bool>> Indicator for BecameTrue<S> {
         self.prev = None;
         self.value = None;
     }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
+    }
 }
 
 /// Falling-edge detector for a `bool`-output source: fires (`Some(true)`) on
@@ -254,8 +291,9 @@ impl<S: Indicator<Output = bool>> Indicator for BecameTrue<S> {
 ///
 /// Created via
 /// [`BoolIndicatorExt::became_false`](crate::indicators::BoolIndicatorExt::became_false).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct BecameFalse<S> {
+    #[state(source)]
     inner: S,
     prev: Option<bool>,
     value: Option<bool>,
@@ -301,6 +339,14 @@ impl<S: Indicator<Output = bool>> Indicator for BecameFalse<S> {
         self.inner.reset();
         self.prev = None;
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 
@@ -360,7 +406,7 @@ impl<In> Indicator for ValueBool<In> {
 /// Generic over its input like [`ValueBool`] — the timing depends only on
 /// the number of [`update`](Indicator::update) calls, not on their
 /// contents.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, SaveState)]
 pub struct Every<In> {
     period: usize,
     /// Total bars seen so far. On update N (1-indexed) we fire iff
@@ -368,6 +414,7 @@ pub struct Every<In> {
     /// documented above.
     seen: usize,
     last: Option<bool>,
+    #[state(skip)]
     _input: PhantomData<fn(In)>,
 }
 
@@ -415,6 +462,14 @@ impl<In> Indicator for Every<In> {
     fn reset(&mut self) {
         self.seen = 0;
         self.last = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

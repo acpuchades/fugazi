@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::smoothing::WilderState;
 use crate::types::Real;
@@ -8,8 +10,9 @@ use crate::types::Real;
 /// `Rma::new(TrueRange::new(), 14)` — the latter is exactly the ATR. Seeds with
 /// the mean of the source's first `period` outputs, then applies Wilder's
 /// recursion. Produces `None` until `period` source values have been seen.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Rma<S> {
+    #[state(source)]
     source: S,
     state: WilderState,
     /// Latest output value; `None` until warmed up.
@@ -62,6 +65,14 @@ impl<S: Indicator<Output = Real>> Indicator for Rma<S> {
         self.source.reset();
         self.state.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

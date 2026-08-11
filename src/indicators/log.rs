@@ -4,6 +4,8 @@
 //! source; the output tracks the source one-for-one *except* on samples where
 //! the input is non-positive (log domain) — those emit `None`.
 
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::types::Real;
 
@@ -31,8 +33,9 @@ use crate::types::Real;
 /// assert_eq!(Log::new(Identity::new(), 10.0).update(-1.0), None);
 /// assert_eq!(Log::new(Identity::new(), 10.0).update(0.0), None);
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Log<S> {
+    #[state(source)]
     source: S,
     base: Real,
     /// Latest logarithm; `None` until the source is warmed *and* the input is
@@ -105,6 +108,14 @@ where
     fn reset(&mut self) {
         self.source.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

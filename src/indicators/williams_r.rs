@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::ops::{MaxOp, MinOp};
 use crate::indicators::stats::WindowExtreme;
@@ -12,8 +14,9 @@ use crate::types::{Candle, Real};
 /// and lowest low share the same rolling-extremum core as
 /// [`Stochastic`](super::Stochastic). When the window is flat
 /// (`highest_high == lowest_low`) it yields `0.0`. Ready after `period` bars.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct WilliamsR<S> {
+    #[state(source)]
     source: S,
     highest: WindowExtreme<MaxOp>,
     lowest: WindowExtreme<MinOp>,
@@ -78,6 +81,14 @@ impl<S: Indicator<Output = Candle>> Indicator for WilliamsR<S> {
         self.highest.reset();
         self.lowest.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

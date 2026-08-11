@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::smoothing::WilderState;
 use crate::indicators::Dmi;
@@ -25,8 +27,9 @@ pub struct AdxValue {
 /// follows after a further `period` bars. The directional fields are exposed
 /// individually; [`value`](Indicator::value) / [`update`](Indicator::update)
 /// only yield a value once `adx` itself is ready.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Adx<S> {
+    #[state(source)]
     dmi: Dmi<S>,
     dx: WilderState,
     /// Latest `+DI`.
@@ -115,6 +118,14 @@ impl<S: Indicator<Output = Candle>> Indicator for Adx<S> {
         self.plus_di = None;
         self.minus_di = None;
         self.adx = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

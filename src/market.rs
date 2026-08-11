@@ -7,6 +7,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use crate::time::Timestamp;
 
 /// The scalar type used throughout the crate for prices and indicator outputs.
@@ -21,7 +23,7 @@ pub type Real = f64;
 /// stream take [`Real`] directly; those that need the full bar (true range,
 /// typical price, volume-weighted values, …) take an [`Atom`] and read its
 /// [`candle`](Atom::candle).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Candle {
     pub open: Real,
     pub high: Real,

@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::stats::WindowStats;
 use crate::types::{Candle, Real};
@@ -14,8 +16,9 @@ use crate::types::{Candle, Real};
 /// Reuses the shared [`WindowStats`] core to keep the positive/negative flow
 /// sums in O(1). Produces `None` until `period + 1` bars have been seen — one to
 /// seed the first typical-price move, then a full window of `period` flows.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Mfi<S> {
+    #[state(source)]
     source: S,
     prev_typical: Option<Real>,
     positive: WindowStats,
@@ -105,6 +108,14 @@ impl<S: Indicator<Output = Candle>> Indicator for Mfi<S> {
         self.positive.reset();
         self.negative.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

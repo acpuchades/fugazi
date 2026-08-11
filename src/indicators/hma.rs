@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::Wma;
 use crate::indicators::stats::WmaState;
@@ -13,9 +15,11 @@ use crate::types::Real;
 /// The half-length WMA reacts quickly while `2·half − full` cancels much of the
 /// lag; the final `√n` WMA smooths the result. Ready after `n + round(√n) − 1`
 /// samples — the longer inner `WMA(n)` plus the final `√n` smoothing window.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Hma<S> {
+    #[state(source)]
     half: Wma<S>,
+    #[state(source)]
     full: Wma<S>,
     smooth: WmaState,
     /// Latest output value; `None` until warmed up.
@@ -75,6 +79,14 @@ where
         self.full.reset();
         self.smooth.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

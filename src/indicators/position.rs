@@ -16,13 +16,15 @@
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
+use serde::{Deserialize, Serialize};
+
 use crate::indicator::Indicator;
 use crate::indicators::DEFAULT_EPSILON;
 use crate::wallet::Side;
 use crate::types::{Atom, Candle, Real};
 
 /// The running state a [`Position`] shares.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct PositionState {
     /// Signed position size (positive long, negative short, zero flat).
     size: Real,
@@ -109,6 +111,21 @@ impl Position {
     /// Reset to flat.
     pub fn reset(&self) {
         *self.0.lock().expect("Position lock poisoned") = PositionState::default();
+    }
+
+    /// Serialize the shared position state for run resuming — signed size, entry
+    /// price, and the extremes since entry. The strategy serializes this once
+    /// (not the per-field [`PositionField`] accessors, which stay stateless).
+    pub fn snapshot(&self) -> serde_json::Value {
+        serde_json::to_value(&*self.0.lock().expect("Position lock poisoned"))
+            .expect("PositionState is serializable")
+    }
+
+    /// Restore state produced by [`snapshot`](Self::snapshot).
+    pub fn restore(&self, state: &serde_json::Value) -> Result<(), String> {
+        *self.0.lock().expect("Position lock poisoned") =
+            serde_json::from_value(state.clone()).map_err(|e| format!("position: {e}"))?;
+        Ok(())
     }
 
     /// The signed position size (positive long, negative short, zero flat).

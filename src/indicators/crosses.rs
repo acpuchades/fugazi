@@ -18,6 +18,8 @@
 //! `IndicatorExt::crosses_above` / `crosses_below` now return these
 //! primitives directly — see [`IndicatorExt`](crate::indicators::IndicatorExt).
 
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::compare::DEFAULT_EPSILON;
 use crate::types::Real;
@@ -28,9 +30,11 @@ use crate::types::Real;
 /// `lhs.gt(rhs).and(lhs.gt(rhs).changed())` composition. The comparison is
 /// tolerance-aware: `lhs > rhs` reads as true only when `lhs - rhs > epsilon`
 /// (default [`DEFAULT_EPSILON`]).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct CrossesAbove<L, R> {
+    #[state(source)]
     lhs: L,
+    #[state(source)]
     rhs: R,
     epsilon: Real,
     prev: Option<bool>,
@@ -114,6 +118,14 @@ where
         self.prev = None;
         self.value = None;
     }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
+    }
 }
 
 /// `lhs < rhs` on this step and the strict comparison just flipped upward.
@@ -167,6 +179,14 @@ where
 
     fn reset(&mut self) {
         self.0.reset();
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.0.save_state()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.0.load_state(state)
     }
 }
 

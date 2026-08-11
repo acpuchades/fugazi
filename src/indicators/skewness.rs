@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::stats::WindowStats;
 use crate::types::Real;
@@ -14,8 +16,9 @@ use crate::types::Real;
 ///
 /// A negatively-skewed window (crash-skewed returns: occasional large drops)
 /// reads negative; a positively-skewed one (rally-skewed) reads positive.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Skewness<S> {
+    #[state(source)]
     source: S,
     stats: WindowStats,
     /// Latest skewness; `None` until the window is full.
@@ -66,6 +69,14 @@ impl<S: Indicator<Output = Real>> Indicator for Skewness<S> {
         self.source.reset();
         self.stats.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

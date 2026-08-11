@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::smoothing::WilderState;
 use crate::types::{Candle, Real};
@@ -23,8 +25,9 @@ pub struct DmiValue {
 ///
 /// The first bar only seeds the previous high/low/close, so `+DI` / `-DI` become
 /// available after `period` further (directional) bars.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Dmi<S> {
+    #[state(source)]
     source: S,
     // Previous bar's high, low and close.
     prev: Option<(Real, Real, Real)>,
@@ -140,6 +143,14 @@ impl<S: Indicator<Output = Candle>> Indicator for Dmi<S> {
         self.true_range.reset();
         self.plus_di = None;
         self.minus_di = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

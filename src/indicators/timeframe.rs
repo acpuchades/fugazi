@@ -25,6 +25,8 @@
 //! );
 //! ```
 
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::component::Component;
 use crate::types::{Candle, Real};
@@ -70,8 +72,9 @@ use crate::types::{Candle, Real};
 ///
 /// # Panics
 /// Constructor panics when `every == 0`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Resample<S> {
+    #[state(source)]
     inner: S,
     every: usize,
     count: usize,
@@ -81,6 +84,10 @@ pub struct Resample<S> {
     close: Real,
     volume: Real,
     /// Latest emitted higher-timeframe candle; `None` on any non-boundary tick.
+    /// A recomputed cache — set every `update` from the (restored) bucket
+    /// accumulators — so it is not part of the saved state (which also avoids
+    /// a `Candle` serde dependency here).
+    #[state(skip)]
     pub value: Option<Candle>,
 }
 
@@ -215,6 +222,14 @@ impl<S: Indicator<Output = Candle>> Indicator for Resample<S> {
         self.open = None;
         self.value = None;
     }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -238,10 +253,19 @@ impl<S: Indicator<Output = Candle>> Indicator for Resample<S> {
 /// Warm-up and unstable-period are pure passthroughs — `Latch` doesn't add
 /// delay, and (crucially) doesn't mask an unsettled inner value into looking
 /// stable to [`Stable`](super::Stable) or the CLI's gate.
-#[derive(Clone)]
+#[derive(Clone, SaveState)]
 pub struct Latch<S: Indicator> {
+    #[state(source)]
     inner: S,
     /// The last emitted output; `None` until the inner source has produced one.
+    ///
+    /// `S::Output` is an unbounded associated type, so the held value can't be
+    /// serialized in general and is skipped. A resumed `Latch` therefore holds
+    /// `None` until the inner source next emits `Some` — between higher-timeframe
+    /// boundaries it re-warms rather than re-emitting the pre-resume value. This
+    /// is the one bounded, self-healing fidelity gap in the resume path (shared
+    /// with the generic `Change` toggle detector).
+    #[state(skip)]
     pub value: Option<S::Output>,
 }
 
@@ -280,6 +304,14 @@ impl<S: Indicator> Indicator for Latch<S> {
     fn reset(&mut self) {
         self.inner.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

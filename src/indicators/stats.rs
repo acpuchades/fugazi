@@ -9,10 +9,12 @@
 use std::collections::VecDeque;
 use std::marker::PhantomData;
 
+use serde::{Deserialize, Serialize};
+
 use crate::indicators::ops::ExtremeOp;
 use crate::types::Real;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WindowStats {
     period: usize,
     window: VecDeque<Real>,
@@ -173,7 +175,7 @@ pub(crate) const MOMENT_EPS: Real = 1e-12;
 /// [`Correlation`](super::Correlation); the shared covariance machinery also
 /// makes rolling beta a one-line composition (`corr · σ_y / σ_x`) without a
 /// second core.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WindowCovariance {
     period: usize,
     window: VecDeque<(Real, Real)>,
@@ -259,7 +261,7 @@ impl WindowCovariance {
 /// on a plain `Real` stream (no source, no `Indicator` impl) so [`Wma`](super::Wma)
 /// can wrap a source while [`Hma`](super::Hma) reuses it to smooth a value it
 /// computes internally.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WmaState {
     period: usize,
     window: VecDeque<Real>,
@@ -362,7 +364,7 @@ pub(crate) fn quantile_of_sorted(sorted: &[Real], p: Real) -> Real {
 ///
 /// Ordering is `NaN`-tolerant via [`cmp_asc`]; a `NaN` in the window sorts
 /// wherever it lands rather than panicking.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WindowQuantile {
     period: usize,
     /// Arrival order — the front is the next sample to evict.
@@ -430,12 +432,14 @@ impl WindowQuantile {
 /// each update is O(1) amortised. The direction (max/min) is the [`ExtremeOp`]
 /// marker. Embedded by [`Extreme`](super::ops::Extreme) (→ `RollingMax`/
 /// `RollingMin`) and by [`Stochastic`](super::Stochastic).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(bound = "")]
 pub(crate) struct WindowExtreme<Op> {
     period: usize,
     // (index, value), kept monotonic so the front is always the extremum.
     deque: VecDeque<(usize, Real)>,
     count: usize,
+    #[serde(skip)]
     _op: PhantomData<fn() -> Op>,
 }
 

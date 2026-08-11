@@ -296,11 +296,36 @@ pub fn run_iteration_any(
     snapshots: &[crate::types::Snapshot<String>],
     ctx: &EvalContext,
 ) -> Result<IterationResult, String> {
+    Ok(run_iteration_resumable(spec, bars, snapshots, ctx, None, false)?.0)
+}
+
+/// The resumable superset of [`run_iteration_any`]: optionally restore `resume`
+/// state before the priced run, optionally finalize open positions with
+/// `realize_open`, and surface the run's final [`RunState`] alongside the
+/// metrics so the CLI can persist it (`--save-state`).
+///
+/// The zero-cost gross twin is never resumed or realized — it is a
+/// costs-attribution shadow of the priced run, not a run in its own right.
+pub fn run_iteration_resumable(
+    spec: &StrategySpec,
+    bars: Vec<String>,
+    snapshots: &[crate::types::Snapshot<String>],
+    ctx: &EvalContext,
+    resume: Option<&crate::spec::runnable::RunState>,
+    realize_open: bool,
+) -> Result<(IterationResult, crate::spec::runnable::RunState), String> {
     assert_eq!(
         bars.len(),
         snapshots.len(),
         "run: `bars` labels must match the snapshot stream length"
     );
+    if resume.is_some_and(|r| r.kind != spec.kind()) {
+        return Err(format!(
+            "!resume > state is for a `{}` strategy but this document is `{}`",
+            resume.map(|r| r.kind.as_str()).unwrap_or(""),
+            spec.kind()
+        ));
+    }
     let schema = schema_from_snapshots(snapshots);
     let universe = spec.universe(snapshots);
     let per_symbol_costs = ctx.costs_for(&universe);
@@ -318,7 +343,8 @@ pub fn run_iteration_any(
         ctx.effective_freq,
         &universe,
     )?;
-    let report = priced.drive(snapshots, ctx.cash, &per_symbol_costs);
+    let (report, final_state) =
+        priced.drive_resumable(snapshots, ctx.cash, &per_symbol_costs, resume, realize_open)?;
 
     let gross_report = if costs_active {
         let mut gross = spec.try_build(ctx.cash, &schema, None)?;
@@ -327,12 +353,9 @@ pub fn run_iteration_any(
         None
     };
 
-    Ok(reduce_iteration(
-        report,
-        gross_report,
-        bars,
-        costs_active,
-        ctx,
+    Ok((
+        reduce_iteration(report, gross_report, bars, costs_active, ctx),
+        final_state,
     ))
 }
 

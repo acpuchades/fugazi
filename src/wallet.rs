@@ -7,13 +7,16 @@ use std::collections::HashMap;
 use std::fmt;
 use std::hash::Hash;
 
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+
 use crate::costs::TradingCosts;
 use crate::indicators::DEFAULT_EPSILON;
 use crate::types::{Candle, Real};
 
 /// Which way an [`Order`] trades, and the direction a [`set`](Wallet::set)
 /// targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Side {
     /// Increase the position (target/trade long).
     Buy,
@@ -37,7 +40,7 @@ impl Side {
 ///
 /// A distinct type from [`Units`] so a reference amount and a count of some
 /// instrument's units can never be silently mixed.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct Reference(pub Real);
 
 /// A signed quantity of one instrument's units (positive long, negative short),
@@ -46,7 +49,7 @@ pub struct Reference(pub Real);
 /// Returned by [`position`](Wallet::position) and taken by
 /// [`set_position`](Wallet::set_position); distinct from a [`Reference`] amount
 /// so instrument units and quote currency never silently mix.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Units<Sym> {
     /// The instrument these units count.
     pub symbol: Sym,
@@ -62,7 +65,7 @@ pub struct Units<Sym> {
 /// market), or the symbol's current **position** — the first two converted to
 /// units at the current price. Fractions and unit counts are taken as magnitudes
 /// (the sign comes from the trade's [`Side`]).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Size {
     /// An absolute number of units.
     Units(Real),
@@ -124,7 +127,7 @@ impl Size {
 /// A wallet-minted identifier for a submitted order, handed back in an [`Ack`] so
 /// a later fill (carried on the resulting [`Order`]) can be correlated to the
 /// submission that caused it. Unique within one wallet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct OrderId(pub u64);
 
 /// What kind of order produced a fill: a plain **market** order, or one of the
@@ -133,7 +136,7 @@ pub struct OrderId(pub u64);
 ///
 /// Recorded on every [`Order`] so a backtest's blotter can tell an ordinary
 /// next-open market fill apart from a stop/take-profit trigger fill.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderKind {
     /// A market order (filled at the market — the next bar's `open` on a
     /// [`PaperWallet`]).
@@ -160,7 +163,7 @@ pub enum OrderKind {
 /// it, the [`OrderId`] of the submission it fills, and the per-fill
 /// `commission` paid on top of the notional (in reference currency; `0.0`
 /// unless a cost model set it).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Order<Sym> {
     pub symbol: Sym,
     pub side: Side,
@@ -263,7 +266,7 @@ pub enum Ack<Sym> {
 }
 
 /// Why a [`Wallet`] movement could not be carried out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WalletError {
     /// No price has been fed for the symbol (see [`Wallet::update`]), so the
     /// movement can't be valued or booked.
@@ -619,7 +622,7 @@ pub trait Wallet<Sym> {
 /// resolved against the fill (`open`) price — so an all-in
 /// [`value_frac(1.0)`](Size::value_frac) stays affordable even when the bar gaps.
 /// Each carries the [`OrderId`] minted when it was submitted.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 enum Pending {
     /// Drive to an absolute signed-unit target (from [`set_position`](Wallet::set_position)).
     Target(Real, OrderId),
@@ -636,7 +639,7 @@ enum Pending {
 /// is the whole-position exit every single-asset strategy wants; an explicit
 /// [`Size::Units`] is what lets one account carry several owners' exits on the
 /// same symbol.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct Leg {
     trigger: Real,
     size: Size,
@@ -646,7 +649,7 @@ struct Leg {
 /// The resting protective bracket for a symbol — a stop-loss and/or take-profit
 /// leg. Holding both together makes them one-cancels-the-other: a fill on either
 /// (or a market exit/reversal) drops the whole record.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 struct Protective {
     stop: Option<Leg>,
     take_profit: Option<Leg>,
@@ -687,7 +690,7 @@ fn half_spread_for(costs: &TradingCosts, kind: OrderKind, price: Real, bar: &Can
 /// The [`Size`] is stored unresolved and resolved at the fill price, so an
 /// all-in sizes against the equity at the moment the limit is actually hit
 /// rather than at submission — the same reason [`Pending::Sized`] defers.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct RestingLimit {
     side: Side,
     size: Size,
@@ -704,7 +707,7 @@ struct RestingLimit {
 /// `Size::Units` buy larger than cash on hand, after the shrink helper
 /// exempts fractional sizings). Query with
 /// [`PaperWallet::rejections`](PaperWallet::rejections).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Rejection<Sym> {
     pub symbol: Sym,
     pub id: OrderId,
@@ -824,6 +827,73 @@ impl<Sym> PaperWallet<Sym> {
         let id = OrderId(self.next_id);
         self.next_id += 1;
         id
+    }
+}
+
+/// The serializable slice of a [`PaperWallet`]'s state, for run resuming.
+///
+/// Everything the wallet needs to continue a run except the cost models, which
+/// are configuration re-primed from the caller (the CLI's `--costs`, the
+/// strategy spec) rather than persisted — a venue owns its own fees.
+#[derive(Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "Sym: Serialize + Eq + Hash",
+    deserialize = "Sym: Deserialize<'de> + Eq + Hash"
+))]
+struct WalletSnapshot<Sym> {
+    positions: HashMap<Sym, Real>,
+    bars: HashMap<Sym, Candle>,
+    pending: HashMap<Sym, Pending>,
+    protective: HashMap<Sym, Protective>,
+    limits: HashMap<Sym, RestingLimit>,
+    funds: Real,
+    initial_funds: Real,
+    blotter: Vec<Order<Sym>>,
+    rejections: Vec<Rejection<Sym>>,
+    rejections_drained: usize,
+    next_id: u64,
+}
+
+impl<Sym: Clone + Eq + Hash + Serialize + DeserializeOwned> PaperWallet<Sym> {
+    /// Serialize the wallet's resumable state — cash, positions, fed prices,
+    /// queued and resting orders, the blotter, and the id counter. The cost
+    /// models are deliberately excluded (see [`WalletSnapshot`]); a resumed run
+    /// re-primes them from the caller.
+    pub fn snapshot_state(&self) -> serde_json::Value {
+        let snapshot = WalletSnapshot {
+            positions: self.positions.clone(),
+            bars: self.bars.clone(),
+            pending: self.pending.clone(),
+            protective: self.protective.clone(),
+            limits: self.limits.clone(),
+            funds: self.funds,
+            initial_funds: self.initial_funds,
+            blotter: self.blotter.clone(),
+            rejections: self.rejections.clone(),
+            rejections_drained: self.rejections_drained,
+            next_id: self.next_id,
+        };
+        serde_json::to_value(&snapshot).expect("WalletSnapshot is serializable")
+    }
+
+    /// Restore state produced by [`snapshot_state`](Self::snapshot_state). Leaves
+    /// the cost models untouched — they were set by the freshly-constructed
+    /// wallet (via `--costs` / the spec) before this call.
+    pub fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        let snapshot: WalletSnapshot<Sym> =
+            serde_json::from_value(state.clone()).map_err(|e| format!("wallet: {e}"))?;
+        self.positions = snapshot.positions;
+        self.bars = snapshot.bars;
+        self.pending = snapshot.pending;
+        self.protective = snapshot.protective;
+        self.limits = snapshot.limits;
+        self.funds = snapshot.funds;
+        self.initial_funds = snapshot.initial_funds;
+        self.blotter = snapshot.blotter;
+        self.rejections = snapshot.rejections;
+        self.rejections_drained = snapshot.rejections_drained;
+        self.next_id = snapshot.next_id;
+        Ok(())
     }
 }
 

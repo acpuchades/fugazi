@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::stats::WindowCovariance;
 use crate::types::Real;
@@ -19,9 +21,11 @@ use crate::types::Real;
 ///   lag-`n` serial correlation, a trending-vs-mean-reverting signal.
 /// - **Rolling beta** — `corr · σ_y / σ_x`, composed with [`StdDev`](super::StdDev),
 ///   no extra primitive needed.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Correlation<L, R> {
+    #[state(source)]
     lhs: L,
+    #[state(source)]
     rhs: R,
     cov: WindowCovariance,
     /// Latest correlation; `None` until ready.
@@ -89,6 +93,14 @@ where
         self.rhs.reset();
         self.cov.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

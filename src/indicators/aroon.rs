@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::ops::{MaxOp, MinOp};
 use crate::indicators::stats::WindowExtreme;
@@ -22,8 +24,9 @@ pub struct AroonValue {
 /// newer high appears (and symmetrically for Aroon Down on lows). Their
 /// difference is the Aroon Oscillator. Both rolling extrema reuse the shared
 /// [`WindowExtreme`] core via its `since` query. Ready after `period + 1` bars.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct Aroon<S> {
+    #[state(source)]
     source: S,
     period: usize,
     highest: WindowExtreme<MaxOp>,
@@ -132,6 +135,14 @@ impl<S: Indicator<Output = Candle>> Indicator for Aroon<S> {
         self.up = None;
         self.down = None;
         self.oscillator = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 

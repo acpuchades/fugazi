@@ -1,3 +1,5 @@
+use fugazi_derive::SaveState;
+
 use crate::indicator::Indicator;
 use crate::indicators::stats::WindowStats;
 use crate::types::{Candle, Real};
@@ -18,8 +20,9 @@ use crate::types::{Candle, Real};
 /// is construction: `GarmanKlass::new(Current::candle(), 20)` is the 20-bar
 /// estimator of the base stream. Backed by the shared [`WindowStats`] core;
 /// O(1) per bar. Produces `None` until the window is full.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, SaveState)]
 pub struct GarmanKlass<S> {
+    #[state(source)]
     source: S,
     stats: WindowStats,
     /// Latest estimate; `None` until the window is full.
@@ -81,6 +84,14 @@ impl<S: Indicator<Output = Candle>> Indicator for GarmanKlass<S> {
         self.source.reset();
         self.stats.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
     }
 }
 
