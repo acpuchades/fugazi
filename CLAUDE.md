@@ -11,20 +11,21 @@ is the architecture; that one is the procedure.
 
 `fugazi` is a Rust library (edition 2024) of **incremental** technical-analysis primitives. Every primitive owns its state and advances one sample at a time via `update()` in ~O(1) — same code for live streaming and batch backtesting.
 
-Unconditional deps: `serde`+`serde_json`, `time`, `statrs` (Φ/Φ⁻¹ for PSR/DSR). Default-on features: **`sources`** (remote providers), **`runtime`** (type-erasure vocabulary in `fugazi::runtime`), **`cli`** (binary; implies both). New unconditional deps are judgment calls — reach for closed-form first.
+Unconditional deps: `serde`+`serde_json` (with the **`float_roundtrip`** feature — load-bearing for run resuming; without it a restored f64 seed drifts 1 ULP and the resumed equity curve diverges), `time`, `statrs` (Φ/Φ⁻¹ for PSR/DSR), and the internal **`fugazi-derive`** proc-macro crate (a workspace member providing `#[derive(SaveState)]` — see *Run resuming* below). Default-on features: **`sources`** (remote providers), **`runtime`** (type-erasure vocabulary in `fugazi::runtime`), **`cli`** (binary; implies both). New unconditional deps are judgment calls — reach for closed-form first.
 
 ## Commands
 
 - Build: `cargo build`; Test: `cargo test`; Lint: `cargo clippy --all-targets` (keep clean); Docs: `cargo doc --open`
 
-### Bumping the version — sync **four** places (`cargo check` only catches Rust drift)
+### Bumping the version — sync **six** places (`cargo check` only catches Rust drift)
 
-1. `Cargo.toml` (workspace root, `X.Y.Z`)
-2. `python/Cargo.toml` (pyo3 cdylib, `X.Y.Z`)
-3. `python/pyproject.toml` (wheel metadata, `X.Y.Z` — what `pip install fugazi` sees)
-4. `README.md` — `## Install` snippet, `fugazi = "X.Y"` (major.minor)
+1. `Cargo.toml` (workspace root, `X.Y.Z`) — **and** the `fugazi-derive = { …, version = "X.Y.Z" }` dependency line in the same file
+2. `fugazi-derive/Cargo.toml` (the proc-macro crate, `X.Y.Z`)
+3. `python/Cargo.toml` (pyo3 cdylib, `X.Y.Z`)
+4. `python/pyproject.toml` (wheel metadata, `X.Y.Z` — what `pip install fugazi` sees)
+5. `README.md` — `## Install` snippet, `fugazi = "X.Y"` (major.minor)
 
-Then **`cargo check --workspace`** (updates `Cargo.lock`), commit five files (three manifests + README + Lock), tag `vX.Y.Z`, push. `python/README.md` has no version string.
+Then **`cargo check --workspace`** (updates `Cargo.lock`), commit the manifests + README + Lock, tag `vX.Y.Z`, push. `python/README.md` has no version string. The `fugazi-derive` version and the root's dependency pin on it must match, or `cargo` errors.
 
 **Not `cargo build --workspace`** — it links the pyo3 cdylib, which needs a Python interpreter to resolve `_PyBaseObject_Type` & co. and fails locally with a wall of `ld:` output that looks like a broken release but isn't (`maturin develop` is what links it properly). `check` refreshes the lock just the same and type-checks *both* crates, so it verifies strictly more of what a bump can break.
 
@@ -34,7 +35,7 @@ Three composable layers: indicators (numeric sources), signals (`Indicator<Outpu
 
 ### Indicators — numeric sources (`src/indicator.rs`, `src/indicators/`)
 
-`Indicator` has `Input`/`Output`, `update(&mut self, Input) -> Option<Output>`, `value()`, `is_ready()`, `reset()`, plus:
+`Indicator` has `Input`/`Output`, `update(&mut self, Input) -> Option<Output>`, `value()`, `is_ready()`, `reset()`, `save_state()`/`load_state()` (default no-op; for run resuming — see *Run resuming*), plus:
 
 - **`warm_up_period()`** — *exact* samples before first `Some`. Wrappers add on top; binary carriers take max. `tests/warm_up.rs` asserts exactness — add new indicators to that battery.
 - **`unstable_period()`** (default `0`) — extra samples IIR smoothers need for seed's residual to decay below `SETTLE_TOLERANCE = 1e-3`. Wrappers sum into source's.
@@ -175,6 +176,29 @@ Each bar the driver: feed each symbol to wallet, route each fill to every strate
 **Per-bar.** For each tagged entry in `Snapshot<Sym>` (`(symbol, freq, atom)` where `symbol: Some`): `wallet.update(symbol, atom.candle)`, route fills to `on_fill`, append bar-tagged to blotter. Untagged entries skipped for wallet pricing but visible to strategy. Then drain `wallet.take_rejections()` → `on_reject` (before `update`, alongside the fills they accompany) → `strategy.update(snap)` → `strategy.trade(wallet)` iff `is_ready()` (then drain again, for a synchronously-rejecting live wallet) → push `wallet.equity().0` to curve.
 
 `run<Sym, S, W, I, A>` where `A: Into<Snapshot<Sym>>`. `Vec<Atom>`/`Vec<Candle>` produce untagged size-1 snapshots; single-series callers use `Snapshot::single(sym, atom)`. `RunReport<Sym> { equity_curve, fills, rejections, initial_equity }` — `fills` are `Fill<Sym> { bar, order }`, `rejections` are `Rejected<Sym> { bar, rejection }` (non-empty ⇒ the curve/metrics describe a different strategy than the one written; `report_slice` rebases them like fills, `optimize`'s walk-forward stitches `composite_rejections`, CLI `run` prints a post-run `warn` banner grouped by reason+kind). `Fill`/`Rejected`/`RunReport` re-exported at crate root; `run` namespaced.
+
+### Run resuming — full-state serialization (`fugazi::spec::RunState`, `src/runtime.rs`, `fugazi-derive/`)
+
+Persist a run's **entire runtime state** to JSON and continue it later over new bars with **bit-identical** behavior. **Full-state serialization, not replay** — a spec-built strategy is a tree that *interleaves* concrete indicator structs with type-erased trait-object boxes (`!ema { source: !close }` → `Adapter<Ema<As<Real>>>`: an `Ema` holding an `EmaState` whose `source: As<Real>` holds a `Box<dyn DynIndicator>`), so plain `#[derive(Serialize)]` can't traverse it and `typetag` can't (the generic instantiations are open-ended). The *structure* is rebuilt from the spec; only the *values* are replayed in, keyed positionally by tree shape.
+
+**The mechanism.** `save_state(&self) -> serde_json::Value` / `load_state(&mut self, &Value) -> Result<(), String>` on:
+- **`Indicator`** (default no-op — stateless leaves need nothing) and **`DynIndicator`** (no default; the four runtime carriers — `Adapter`/`As`/`Chain`/`UnstableWrap` — each supply it, threading the recursion across the `Indicator`/`DynIndicator` boundary so the whole tree is covered; `Chain` drops its cached `value`, recomputed on the next `update`).
+- **`Strategy`** (default no-op) — so a strategy *embedded inside an indicator* (the `!sharpe`/`!sortino`/… trailing metrics drive one over a private wallet) is reachable through the `Strategy` handle the metric holds.
+- **`#[derive(SaveState)]`** (`fugazi-derive`) generates the per-indicator bodies: default = plain serde state, `#[state(source)]` = a child indicator (recurse via `crate::Indicator::save_state`), `#[state(skip)]` = `PhantomData` / config / `Arc<Mutex>` shared handles. Each stateful concrete indicator adds the derive + two forwarding lines in its `impl Indicator`. Default-is-state is deliberate: forgetting `#[state(source)]` on a new box field is a **compile error** (a box isn't `Serialize`), not silent loss.
+
+**Shared/path-dependent state** is serialized once at the strategy level, never per-indicator: `Position::snapshot`/`restore`, `Book::snapshot_state`/`restore_state`, `PaperWallet::snapshot_state`/`restore_state` (positions/cash/pending/resting/blotter — **not** costs, which are re-primed), `PortfolioInner`/`Ledger`. **`PositionField`/`BookField` keep the no-op default** — they hold a clone of the shared handle, and serializing per-accessor would double-count.
+
+**Driving.** `RunnableStrategy::{save_state, restore_state, drive_resumable}` + `RunState { format_version, kind, last_bar, bars_seen, strategy, wallet }`. `drive_resumable(snaps, cash, costs, resume: Option<&RunState>, flatten: bool) -> Result<(RunReport, RunState), String>` restores before the run (rejecting a `format_version` / `kind` mismatch), optionally flattens open positions at the end, and surfaces the final `RunState`. `drive` is the thin `(…, None, false).0` wrapper. `backtest::run_iteration_resumable` is the CLI/spec-shape entry (`run_iteration_any` delegates to it with `None`/`false`).
+
+**Per-shape fidelity.** single / pairs = exact. basket / multi = exact via **lazy per-symbol restore** (a `pending_restore: Option<HashMap<Sym, Value>>` stash applied inside `update` right after a symbol's chains are first built — they don't exist until the symbol is seen; a symbol first seen only post-resume builds fresh, which is correct). portfolio = ledgers + aggregate `Book` restore exactly; children (erased `Box<dyn Strategy>`) re-warm their chains. **Trailing metrics** (`Sharpe<S>` et al.) serialize the embedded strategy + private wallet + `prev_equity` + the rolling window — full fidelity; their `Indicator` impls therefore require `Sym: Serialize + DeserializeOwned` (always `String` in practice).
+
+**Flatten toggle.** `backtest::flatten_open_positions` books a closing fill for every still-open position at the last bar so `reconstruct_trades`/metrics count the realized P&L (equity curve untouched — positions were already marked each bar). Terminal, mutually exclusive with saving state.
+
+**Surfaces.** CLI `fugazi run … --save-state <file>` / `--resume <file>` / `--flatten` (the last two of those wired once in `run.rs`'s `iterate` helper over all five shapes). Python `spec.run_resumable(wallet, snapshots, resume=None, flatten=False) -> (report, state_json)` (`run_spec_resumable`, PaperWallet-only like `.run`).
+
+**Adding a stateful indicator ⇒ add `#[derive(SaveState)]` + field annotations + the two `impl Indicator` forwarding lines**, or its state is silently lost on resume. tests/resume.rs is the acceptance gate (golden equivalence per shape, incl. a mid-warm-up split that proves the IIR seed survives).
+
+**Bounded, documented limitations:** the generic-typed prior of `Change` (toggle detector) and the held value of `Latch` are skipped (their `S::Output` is unbounded) → a one-bar / until-next-emit re-warm at the resume boundary; `Shared`/`SharedComponent` are no-op (the spec layer never uses `.shared()`). There is **no per-field config-drift guard** — resuming a same-shape spec with changed params silently loads the saved config (only `kind` + `format_version` are checked).
 
 ### Metrics — one function per metric (`src/metrics.rs`)
 
@@ -377,7 +401,7 @@ CLI layout by concern:
 
 **Not bound** (don't add without asking): position-anchored protective levels (the per-leg `Position` isn't passed to Python factories), `BasketStrategy::selection(closure)` escape hatch (top-bottom / threshold / quantile only), per-child weight-share indicators (`weights:` as an expression — the YAML path has it). (A live portfolio account is reachable directly: `Portfolio().run(okx_wallet, snaps)` — the portfolio trades the passed wallet.)
 
-**Bound — YAML spec loading + run/evaluate/optimize/walkforward.** `ta.load_spec(text, params={}, base_dir=".", kind="auto")` parses a YAML document through the same `spec::load_value` pipeline the CLI uses (`!import` → `!param` → typed parse) and auto-detects the strategy shape from top-level keys (`children:` → portfolio; `left:`+`right:` → pairs; `selection:` → basket; `symbol:` or preset tag → single; else multi). Returns a `StrategySpec` pyclass wrapping an internal 5-variant enum with the **same `.run(wallet, snapshots)` / `.evaluate(wallet, snapshots, ...)` shape as the manual `PyStrategy` / `PyPairsStrategy` / etc. builders** — the wallet's `equity()` seeds the strategy, and any costs pre-installed on the wallet apply naturally (except for portfolio, whose composite wallet is owned internally). `ta.optimize(text, snapshots, ...)` wraps `spec::optimize::optimize` with a `Sweep` return; passing `walkforward=(is, oos[, embargo])` switches to the walk-forward kernel and returns `WalkForwardResult` (per-fold `WalkForwardFold` objects + composite OOS artifacts). `windowed=N` and `walkforward=` are mutually exclusive. `ta.TradingCostsConfig({...})` wraps `CostConfig` — accepts flat leg mappings or the nested `default/by_symbol/by_interval/scoped` shape; `optimize(costs=...)` accepts either an instance or a raw dict.
+**Bound — YAML spec loading + run/evaluate/optimize/walkforward.** `ta.load_spec(text, params={}, base_dir=".", kind="auto")` parses a YAML document through the same `spec::load_value` pipeline the CLI uses (`!import` → `!param` → typed parse) and auto-detects the strategy shape from top-level keys (`children:` → portfolio; `left:`+`right:` → pairs; `selection:` → basket; `symbol:` or preset tag → single; else multi). Returns a `StrategySpec` pyclass wrapping an internal 5-variant enum with the **same `.run(wallet, snapshots)` / `.evaluate(wallet, snapshots, ...)` shape as the manual `PyStrategy` / `PyPairsStrategy` / etc. builders** — the wallet's `equity()` seeds the strategy, and any costs pre-installed on the wallet apply naturally (except for portfolio, whose composite wallet is owned internally). `ta.optimize(text, snapshots, ...)` wraps `spec::optimize::optimize` with a `Sweep` return; passing `walkforward=(is, oos[, embargo])` switches to the walk-forward kernel and returns `WalkForwardResult` (per-fold `WalkForwardFold` objects + composite OOS artifacts). `windowed=N` and `walkforward=` are mutually exclusive. `ta.TradingCostsConfig({...})` wraps `CostConfig` — accepts flat leg mappings or the nested `default/by_symbol/by_interval/scoped` shape; `optimize(costs=...)` accepts either an instance or a raw dict. **Run resuming:** `spec.run_resumable(wallet, snapshots, resume=None, flatten=False) -> (report, state_json)` (`run_spec_resumable` in `python/src/spec.rs`) restores prior state before the run, optionally flattens open positions, and returns the final `RunState` as a JSON string to persist and resume from — PaperWallet-only, like `.run` (see *Run resuming*).
 
 **Bound — overlay calculation (the dataset "overlays" step).** `ta.compute_overlays(series, overlays, params=None) -> (schema, augmented)` computes derived overlay columns from indicator specs and attaches them onto a `Sequence[Atom]` (single series) or `Sequence[Snapshot]` (multi-symbol). `overlays` is a YAML doc (`name: !expr { ... }`, the fugazi-web overlay-file shape) or a dict `{name: Indicator|Signal|StrSource}`; the reusable parse+build+compute core lives in `src/spec/overlay.rs` (`OverlayColumn` / `columns_from_yaml` / `prepare` / `compute_series`) shared with the CLI's `-x`. Output schema = existing columns (same indexes) + new columns appended; every augmented atom binds to the **one returned schema `Arc`** (`get.rs`'s `Arc::ptr_eq` guard requires it — **use the returned schema for downstream `ta.get`**). A computed column reads `None` while warming up — this is why `OverlayInfo` slots are `Option<OverlayValue>` (constructor twin `OverlayInfo::sparse`; `OverlayInfo::new` stays the all-present convenience). Snapshot mode computes per (symbol, freq) series driven by size-1 snapshots, so an overlay derives from its **own** series (cross-asset references read `None`). Bool overlays come from the dict/`Signal` path (NodeSpec is value-producing — Real/Str, plus Bool via `!get` on a bool column).
 
@@ -415,6 +439,8 @@ Cargo: `python/Cargo.toml` depends on `fugazi_core = { package = "fugazi", … d
 | Auto-detect bar cadence | `calendar::detect_frequency_from_atoms(...)` | `src/spec/calendar.rs` |
 | Parse `-w` / `--walkforward` | `WindowSpec::from_str` + `.resolve(bar_freq, class)`; `WalkForwardSpec::from_str` + `.resolve(...) -> (is,oos,emb)` | `src/spec/calendar.rs` |
 | Built-strategy readiness + full `RunReport` | `DynSingleStrategy::{stable_period, warm_up_period}` (→ `SingleAssetStrategy`); `backtest::measured_report(spec, atoms, cash, costs)` | `src/spec/strategy.rs`, `src/spec/backtest.rs` |
+| Persist / resume a run's full state | `RunnableStrategy::{save_state, restore_state, drive_resumable}` + `RunState`; `backtest::run_iteration_resumable` (CLI/spec path); `backtest::flatten_open_positions` (the `--flatten` toggle). See *Run resuming* | `src/spec/runnable.rs`, `src/spec/backtest.rs`, `src/backtest.rs` |
+| Serialize one indicator's state (adding a stateful indicator) | `#[derive(SaveState)]` + `#[state(source)]`/`#[state(skip)]` + two `impl Indicator` forwarding lines; snapshot the shared handles via `Position::snapshot`/`Book::snapshot_state`/`PaperWallet::snapshot_state` (their `restore*` twins) | `fugazi-derive/src/lib.rs`, `src/indicators/{position,book}.rs`, `src/wallet.rs` |
 | Trading seconds a bar of `freq` spans | `class.trading_seconds_per_bar(freq)` | `src/spec/calendar.rs` |
 | Shared overlay schema of atom stream | `fugazi::sources::schema_of(&atoms)` | `src/sources/mod.rs` |
 | Fetch any series (candles *or* price-less) | `SeriesSource::atoms(...)` — `Binance`, `Yahoo`, `CoinGecko`, `BinanceVision`. `Atom::candle` is `Option`, so one method covers both; `schema()` is the fixed overlay schema when known before the fetch | `src/sources/mod.rs` |
