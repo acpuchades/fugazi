@@ -212,7 +212,7 @@ where
 }
 
 /// Book a closing fill for every position still open at the end of a run, so a
-/// `--realize-open` run finalizes its open trades into the blotter (and thus the
+/// `--flatten` run finalizes its open trades into the blotter (and thus the
 /// trade-level metrics via [`reconstruct_trades`](crate::metrics::reconstruct_trades)).
 ///
 /// The equity curve is untouched — open positions are already marked to market
@@ -221,8 +221,8 @@ where
 /// known price for the symbol, on the final bar. Routed through
 /// [`Strategy::on_fill`] too, so the strategy's own book closes the trade as
 /// well. Deliberately terminal: it is mutually exclusive with capturing a
-/// resumable state (a realized run is a finalized one).
-pub fn realize_open_positions<S, W>(
+/// resumable state (a flattened run is a finalized one).
+pub fn flatten_open_positions<S, W>(
     strategy: &mut S,
     wallet: &mut W,
     snapshots: &[Snapshot<String>],

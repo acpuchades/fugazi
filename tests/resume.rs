@@ -230,32 +230,32 @@ fn buy_and_hold_spec() -> SingleStrategySpec {
 }
 
 #[test]
-fn realize_open_books_a_closing_trade() {
+fn flatten_books_a_closing_trade() {
     let sch = schema();
     let snaps = single_snaps(40);
 
-    // Without --realize-open: an open position at the end is unrealized (no
+    // Without --flatten: an open position at the end is unrealized (no
     // closing fill for it in the blotter).
     let mut carried = buy_and_hold_spec().build(CASH, &sch);
     let (carried_report, _) = carried
         .drive_resumable(&snaps, CASH, &[], None, false)
         .expect("carried run");
 
-    // With --realize-open: the open position is booked closed at the last bar,
+    // With --flatten: the open position is booked closed at the last bar,
     // so the blotter gains exactly one more fill.
-    let mut realized = buy_and_hold_spec().build(CASH, &sch);
-    let (realized_report, _) = realized
+    let mut flattened = buy_and_hold_spec().build(CASH, &sch);
+    let (flattened_report, _) = flattened
         .drive_resumable(&snaps, CASH, &[], None, true)
-        .expect("realized run");
+        .expect("flattened run");
 
     assert_eq!(
-        realized_report.fills.len(),
+        flattened_report.fills.len(),
         carried_report.fills.len() + 1,
-        "realize-open should book exactly one closing fill for the open long"
+        "flatten should book exactly one closing fill for the open long"
     );
     // And the equity curve is untouched (open positions were already marked to
     // market every bar).
-    assert_eq!(carried_report.equity_curve, realized_report.equity_curve);
+    assert_eq!(carried_report.equity_curve, flattened_report.equity_curve);
 }
 
 #[test]

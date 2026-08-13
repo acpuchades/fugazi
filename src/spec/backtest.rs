@@ -301,10 +301,10 @@ pub fn run_iteration_any(
 
 /// The resumable superset of [`run_iteration_any`]: optionally restore `resume`
 /// state before the priced run, optionally finalize open positions with
-/// `realize_open`, and surface the run's final [`RunState`] alongside the
+/// `flatten`, and surface the run's final [`RunState`] alongside the
 /// metrics so the CLI can persist it (`--save-state`).
 ///
-/// The zero-cost gross twin is never resumed or realized — it is a
+/// The zero-cost gross twin is never resumed or flattened — it is a
 /// costs-attribution shadow of the priced run, not a run in its own right.
 pub fn run_iteration_resumable(
     spec: &StrategySpec,
@@ -312,7 +312,7 @@ pub fn run_iteration_resumable(
     snapshots: &[crate::types::Snapshot<String>],
     ctx: &EvalContext,
     resume: Option<&crate::spec::runnable::RunState>,
-    realize_open: bool,
+    flatten: bool,
 ) -> Result<(IterationResult, crate::spec::runnable::RunState), String> {
     assert_eq!(
         bars.len(),
@@ -344,7 +344,7 @@ pub fn run_iteration_resumable(
         &universe,
     )?;
     let (report, final_state) =
-        priced.drive_resumable(snapshots, ctx.cash, &per_symbol_costs, resume, realize_open)?;
+        priced.drive_resumable(snapshots, ctx.cash, &per_symbol_costs, resume, flatten)?;
 
     let gross_report = if costs_active {
         let mut gross = spec.try_build(ctx.cash, &schema, None)?;

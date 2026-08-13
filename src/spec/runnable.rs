@@ -127,17 +127,17 @@ pub trait RunnableStrategy: Strategy<Input = Snapshot<String>, Symbol = String> 
     /// [`drive`](Self::drive).
     ///
     /// With `resume = Some(state)`, the wallet and strategy are restored from it
-    /// before the first bar. With `realize_open = true`, any position still open
+    /// before the first bar. With `flatten = true`, any position still open
     /// at the end is marked to close at the last bar and booked into the report
     /// so `reconstruct_trades`/metrics count it (mutually exclusive with saving
-    /// state — a realized run is a finalized one).
+    /// state — a flattened run is a finalized one).
     fn drive_resumable(
         &mut self,
         snapshots: &[Snapshot<String>],
         cash: Real,
         per_symbol_costs: &[(String, TradingCosts)],
         resume: Option<&RunState>,
-        realize_open: bool,
+        flatten: bool,
     ) -> Result<(RunReport<String>, RunState), String> {
         let mut wallet: PaperWallet<String> = PaperWallet::new(cash);
         for (sym, costs) in per_symbol_costs {
@@ -164,8 +164,8 @@ pub trait RunnableStrategy: Strategy<Input = Snapshot<String>, Symbol = String> 
                 .map_err(|e| format!("!resume > wallet > {e}"))?;
         }
         let mut report = crate::backtest::run(self, &mut wallet, snapshots.iter().cloned());
-        if realize_open {
-            crate::backtest::realize_open_positions(self, &mut wallet, snapshots, &mut report);
+        if flatten {
+            crate::backtest::flatten_open_positions(self, &mut wallet, snapshots, &mut report);
         }
         let last_bar = snapshots
             .last()

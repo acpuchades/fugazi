@@ -415,7 +415,7 @@ pub(crate) fn run_spec(
 }
 
 /// The resumable superset of [`run_spec`]: optionally restore `resume` state
-/// before the run, optionally finalize open positions with `realize_open`, and
+/// before the run, optionally finalize open positions with `flatten`, and
 /// return the run's final [`RunState`](fugazi_core::spec::RunState) alongside the
 /// report so Python can persist it and resume later.
 pub(crate) fn run_spec_resumable(
@@ -423,7 +423,7 @@ pub(crate) fn run_spec_resumable(
     snapshots: &[Snapshot<String>],
     wallet: &mut PaperWallet<String>,
     resume: Option<&fugazi_core::spec::RunState>,
-    realize_open: bool,
+    flatten: bool,
 ) -> PyResult<(RunReport<String>, fugazi_core::spec::RunState)> {
     use fugazi_core::spec::{RUN_STATE_FORMAT_VERSION, RunState};
     let cash = <PaperWallet<String> as Wallet<String>>::equity(wallet).0;
@@ -434,7 +434,7 @@ pub(crate) fn run_spec_resumable(
     // `drive_resumable` (which restores/saves internally and finalizes if asked).
     if matches!(loaded, CoreStrategySpec::Portfolio(_)) {
         return built
-            .drive_resumable(snapshots, cash, &[], resume, realize_open)
+            .drive_resumable(snapshots, cash, &[], resume, flatten)
             .map_err(build_err);
     }
 
@@ -457,8 +457,8 @@ pub(crate) fn run_spec_resumable(
     }
 
     let mut report = fugazi_core::backtest::run(&mut *built, wallet, snapshots.iter().cloned());
-    if realize_open {
-        fugazi_core::backtest::realize_open_positions(&mut *built, wallet, snapshots, &mut report);
+    if flatten {
+        fugazi_core::backtest::flatten_open_positions(&mut *built, wallet, snapshots, &mut report);
     }
     let last_bar = snapshots
         .last()
@@ -561,20 +561,20 @@ impl PyStrategySpec {
 
     /// Drive the spec with **run resuming**: optionally restore `resume` (a JSON
     /// string previously returned here) before the run, optionally finalize open
-    /// positions with `realize_open`, and return `(report, state_json)` — the
+    /// positions with `flatten`, and return `(report, state_json)` — the
     /// run report plus the final state to persist and resume from later.
     ///
-    /// `resume` and `realize_open=True` are mutually exclusive in spirit (a
-    /// realized run is finalized); passing a realized run's state to a later
+    /// `resume` and `flatten=True` are mutually exclusive in spirit (a
+    /// flattened run is finalized); passing a flattened run's state to a later
     /// `resume` simply continues from a flat book. PaperWallet only, like
     /// [`Self::run`].
-    #[pyo3(signature = (wallet, snapshots, resume = None, realize_open = false))]
+    #[pyo3(signature = (wallet, snapshots, resume = None, flatten = false))]
     pub(crate) fn run_resumable(
         &self,
         mut wallet: PyRefMut<'_, PyWallet>,
         snapshots: &Bound<'_, PyAny>,
         resume: Option<String>,
-        realize_open: bool,
+        flatten: bool,
     ) -> PyResult<(PyRunReport, String)> {
         let snaps = snapshots_from_sequence(snapshots)?;
         let resume_state = match resume {
@@ -589,7 +589,7 @@ impl PyStrategySpec {
             &snaps,
             &mut wallet.inner,
             resume_state.as_ref(),
-            realize_open,
+            flatten,
         )?;
         let state_json = serde_json::to_string(&state)
             .map_err(|e| PyValueError::new_err(format!("serializing run state: {e}")))?;

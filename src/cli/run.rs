@@ -102,9 +102,9 @@ pub struct RunOptions<'a> {
     pub resume: Option<&'a fugazi::spec::RunState>,
     /// `--save-state`: write the run's final state to this path afterwards.
     pub save_state: Option<&'a Path>,
-    /// `--realize-open`: finalize open positions into the trade blotter at the
+    /// `--flatten`: finalize open positions into the trade blotter at the
     /// last bar (mutually exclusive with `save_state`).
-    pub realize_open: bool,
+    pub flatten: bool,
 }
 
 /// Headline numbers returned from a run.
@@ -117,7 +117,7 @@ pub struct Summary {
     pub bars: usize,
 }
 
-/// Drive one iteration, honoring `--resume` / `--save-state` / `--realize-open`.
+/// Drive one iteration, honoring `--resume` / `--save-state` / `--flatten`.
 ///
 /// When any of those is set it goes through the resumable path (restoring first,
 /// finalizing open positions if asked, and writing the run's final state to
@@ -130,7 +130,7 @@ fn iterate(
     inputs: &backtest::EvalContext,
     opts: &RunOptions,
 ) -> Result<backtest::IterationResult> {
-    if opts.resume.is_none() && opts.save_state.is_none() && !opts.realize_open {
+    if opts.resume.is_none() && opts.save_state.is_none() && !opts.flatten {
         return backtest::run_iteration_any(spec, bars, snapshots, inputs)
             .map_err(backtest::build_error);
     }
@@ -140,7 +140,7 @@ fn iterate(
         snapshots,
         inputs,
         opts.resume,
-        opts.realize_open,
+        opts.flatten,
     )
     .map_err(backtest::build_error)?;
     if let Some(path) = opts.save_state {

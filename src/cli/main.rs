@@ -224,8 +224,8 @@ struct RunArgs {
 
     /// After the run, write the strategy + wallet state to this JSON file so a
     /// later `--resume` continues where this run left off. Open positions are
-    /// kept (not realized). Mutually exclusive with `--realize-open`.
-    #[arg(long = "save-state", value_name = "FILE", conflicts_with = "realize_open")]
+    /// kept (not flattened). Mutually exclusive with `--flatten`.
+    #[arg(long = "save-state", value_name = "FILE", conflicts_with = "flatten")]
     save_state: Option<PathBuf>,
 
     /// Restore strategy + wallet state from a JSON file written by a previous
@@ -238,8 +238,8 @@ struct RunArgs {
     /// final bar, booking it into `trades.csv` / the trade metrics (default:
     /// open positions are carried, unrealized). Mutually exclusive with
     /// `--save-state`.
-    #[arg(long = "realize-open")]
-    realize_open: bool,
+    #[arg(long = "flatten")]
+    flatten: bool,
 }
 
 /// What kind of spec `fugazi check` is checking. Nested subcommand so each
@@ -781,7 +781,7 @@ fn run(args: RunArgs) -> Result<()> {
         quiet: args.quiet,
         resume: resume_state.as_ref(),
         save_state: args.save_state.as_deref(),
-        realize_open: args.realize_open,
+        flatten: args.flatten,
     };
     let base = args.strategy.base_dir();
     match args.strategy.kind {
