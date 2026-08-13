@@ -189,6 +189,14 @@ impl Indicator for RebuildIndicator {
     fn reset(&mut self) {
         self.inner.reset();
     }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.inner.save_state()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.inner.load_state(state)
+    }
 }
 
 /// Wrap a freshly-built strategy in the trailing indicator `metric` selects,

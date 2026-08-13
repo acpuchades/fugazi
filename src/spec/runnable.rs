@@ -176,7 +176,7 @@ pub trait RunnableStrategy: Strategy<Input = Snapshot<String>, Symbol = String> 
             kind: self.spec_kind().to_string(),
             last_bar,
             bars_seen: resume.map(|r| r.bars_seen).unwrap_or(0) + snapshots.len(),
-            strategy: self.save_state(),
+            strategy: RunnableStrategy::save_state(self),
             wallet: wallet.snapshot_state(),
         };
         Ok((report, final_state))

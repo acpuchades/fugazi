@@ -59,6 +59,9 @@
 use std::collections::VecDeque;
 use std::hash::Hash;
 
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
 use crate::indicator::Indicator;
 use crate::indicators::stats::WindowStats;
 use crate::strategy::Strategy;
@@ -201,6 +204,46 @@ where
     }
 }
 
+impl<Sym, S> StrategyEngine<S>
+where
+    Sym: Clone + Eq + Hash + Serialize + DeserializeOwned,
+    S: Strategy<Symbol = Sym, Input = Snapshot<Sym>>,
+{
+    /// Serialize the embedded strategy's state, its private wallet, and the
+    /// running `prev_equity` — everything needed to continue the embedded
+    /// backtest that feeds a trailing metric. `seed` / `fallback_symbol` are
+    /// config, rebuilt from the spec.
+    fn save_state(&self) -> serde_json::Value {
+        serde_json::json!({
+            "strategy": self.strategy.save_state(),
+            "wallet": self.wallet.snapshot_state(),
+            "prev_equity": self.prev_equity,
+        })
+    }
+
+    /// Restore state produced by [`save_state`](Self::save_state).
+    fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        let obj = state
+            .as_object()
+            .ok_or_else(|| format!("engine: expected a state object, got {state}"))?;
+        if let Some(v) = obj.get("strategy") {
+            self.strategy
+                .load_state(v)
+                .map_err(|e| format!("strategy > {e}"))?;
+        }
+        if let Some(v) = obj.get("wallet") {
+            self.wallet
+                .restore_state(v)
+                .map_err(|e| format!("wallet > {e}"))?;
+        }
+        if let Some(v) = obj.get("prev_equity") {
+            self.prev_equity =
+                serde_json::from_value(v.clone()).map_err(|e| format!("prev_equity: {e}"))?;
+        }
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Return-window metrics: Sharpe, Sortino, Volatility.
 // ---------------------------------------------------------------------------
@@ -249,7 +292,7 @@ where
 
 impl<Sym, S> Indicator for Sharpe<S>
 where
-    Sym: Clone + Eq + Hash,
+    Sym: Clone + Eq + Hash + Serialize + DeserializeOwned,
     S: Strategy<Symbol = Sym, Input = Snapshot<Sym>>,
 {
     type Input = Snapshot<Sym>;
@@ -280,6 +323,27 @@ where
         self.engine.reset();
         self.stats.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        serde_json::json!({
+            "engine": self.engine.save_state(),
+            "stats": serde_json::to_value(&self.stats).unwrap_or(serde_json::Value::Null),
+        })
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        let obj = state
+            .as_object()
+            .ok_or_else(|| format!("trailing: expected a state object, got {state}"))?;
+        if let Some(v) = obj.get("engine") {
+            self.engine.restore_state(v).map_err(|e| format!("engine > {e}"))?;
+        }
+        if let Some(v) = obj.get("stats") {
+            self.stats = serde_json::from_value(v.clone()).map_err(|e| format!("stats: {e}"))?;
+        }
+        self.value = None;
+        Ok(())
     }
 }
 
@@ -323,7 +387,7 @@ where
 
 impl<Sym, S> Indicator for Sortino<S>
 where
-    Sym: Clone + Eq + Hash,
+    Sym: Clone + Eq + Hash + Serialize + DeserializeOwned,
     S: Strategy<Symbol = Sym, Input = Snapshot<Sym>>,
 {
     type Input = Snapshot<Sym>;
@@ -360,6 +424,27 @@ where
         self.stats.reset();
         self.value = None;
     }
+
+    fn save_state(&self) -> serde_json::Value {
+        serde_json::json!({
+            "engine": self.engine.save_state(),
+            "stats": serde_json::to_value(&self.stats).unwrap_or(serde_json::Value::Null),
+        })
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        let obj = state
+            .as_object()
+            .ok_or_else(|| format!("trailing: expected a state object, got {state}"))?;
+        if let Some(v) = obj.get("engine") {
+            self.engine.restore_state(v).map_err(|e| format!("engine > {e}"))?;
+        }
+        if let Some(v) = obj.get("stats") {
+            self.stats = serde_json::from_value(v.clone()).map_err(|e| format!("stats: {e}"))?;
+        }
+        self.value = None;
+        Ok(())
+    }
 }
 
 /// **Trailing annualized volatility** of an owned [`Strategy`]'s equity curve,
@@ -391,7 +476,7 @@ where
 
 impl<Sym, S> Indicator for Volatility<S>
 where
-    Sym: Clone + Eq + Hash,
+    Sym: Clone + Eq + Hash + Serialize + DeserializeOwned,
     S: Strategy<Symbol = Sym, Input = Snapshot<Sym>>,
 {
     type Input = Snapshot<Sym>;
@@ -420,6 +505,27 @@ where
         self.engine.reset();
         self.stats.reset();
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        serde_json::json!({
+            "engine": self.engine.save_state(),
+            "stats": serde_json::to_value(&self.stats).unwrap_or(serde_json::Value::Null),
+        })
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        let obj = state
+            .as_object()
+            .ok_or_else(|| format!("trailing: expected a state object, got {state}"))?;
+        if let Some(v) = obj.get("engine") {
+            self.engine.restore_state(v).map_err(|e| format!("engine > {e}"))?;
+        }
+        if let Some(v) = obj.get("stats") {
+            self.stats = serde_json::from_value(v.clone()).map_err(|e| format!("stats: {e}"))?;
+        }
+        self.value = None;
+        Ok(())
     }
 }
 
@@ -463,7 +569,7 @@ where
 
 impl<Sym, S> Indicator for MaxDrawdown<S>
 where
-    Sym: Clone + Eq + Hash,
+    Sym: Clone + Eq + Hash + Serialize + DeserializeOwned,
     S: Strategy<Symbol = Sym, Input = Snapshot<Sym>>,
 {
     type Input = Snapshot<Sym>;
@@ -497,6 +603,27 @@ where
         self.equity.clear();
         self.equity.push_back(self.engine.seed);
         self.value = None;
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        serde_json::json!({
+            "engine": self.engine.save_state(),
+            "equity": serde_json::to_value(&self.equity).unwrap_or(serde_json::Value::Null),
+        })
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        let obj = state
+            .as_object()
+            .ok_or_else(|| format!("trailing: expected a state object, got {state}"))?;
+        if let Some(v) = obj.get("engine") {
+            self.engine.restore_state(v).map_err(|e| format!("engine > {e}"))?;
+        }
+        if let Some(v) = obj.get("equity") {
+            self.equity = serde_json::from_value(v.clone()).map_err(|e| format!("equity: {e}"))?;
+        }
+        self.value = None;
+        Ok(())
     }
 }
 
@@ -535,7 +662,7 @@ where
 
 impl<Sym, S> Indicator for Calmar<S>
 where
-    Sym: Clone + Eq + Hash,
+    Sym: Clone + Eq + Hash + Serialize + DeserializeOwned,
     S: Strategy<Symbol = Sym, Input = Snapshot<Sym>>,
 {
     type Input = Snapshot<Sym>;
@@ -577,6 +704,27 @@ where
         self.equity.push_back(self.engine.seed);
         self.value = None;
     }
+
+    fn save_state(&self) -> serde_json::Value {
+        serde_json::json!({
+            "engine": self.engine.save_state(),
+            "equity": serde_json::to_value(&self.equity).unwrap_or(serde_json::Value::Null),
+        })
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        let obj = state
+            .as_object()
+            .ok_or_else(|| format!("trailing: expected a state object, got {state}"))?;
+        if let Some(v) = obj.get("engine") {
+            self.engine.restore_state(v).map_err(|e| format!("engine > {e}"))?;
+        }
+        if let Some(v) = obj.get("equity") {
+            self.equity = serde_json::from_value(v.clone()).map_err(|e| format!("equity: {e}"))?;
+        }
+        self.value = None;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -587,7 +735,7 @@ mod tests {
     use crate::strategies::SingleAssetStrategy;
     use crate::types::{Atom, Candle};
 
-    const SYM: &str = "X";
+    fn sym() -> String { "X".to_string() }
     const SEED: Real = 1_000.0;
     const BPY: Real = 252.0;
 
@@ -595,8 +743,8 @@ mod tests {
         Candle::new(close, close, close, close, 0.0)
     }
 
-    fn snap(close: Real) -> Snapshot<&'static str> {
-        Snapshot::single(SYM, Atom::new(bar(close)))
+    fn snap(close: Real) -> Snapshot<String> {
+        Snapshot::single(sym(), Atom::new(bar(close)))
     }
 
     /// A rising-then-wobbling price path long enough to fill a window and
@@ -608,13 +756,13 @@ mod tests {
         ]
     }
 
-    fn buy_and_hold() -> SingleAssetStrategy<&'static str> {
-        SingleAssetStrategy::buy_and_hold(SYM)
+    fn buy_and_hold() -> SingleAssetStrategy<String> {
+        SingleAssetStrategy::buy_and_hold(sym())
     }
 
     #[test]
     fn sharpe_is_none_until_window_fills_then_some() {
-        let mut s = Sharpe::new(buy_and_hold(), SYM, SEED, 5, 0.0, BPY);
+        let mut s = Sharpe::new(buy_and_hold(), sym(), SEED, 5, 0.0, BPY);
         assert_eq!(s.warm_up_period(), 5);
         let px = prices();
         for &p in &px[..4] {
@@ -634,13 +782,13 @@ mod tests {
         // Standalone backtest to get the reference equity curve + metric.
         let mut strat = buy_and_hold();
         let mut wallet = PaperWallet::new(SEED);
-        let snaps: Vec<Snapshot<&'static str>> = px.iter().map(|&p| snap(p)).collect();
+        let snaps: Vec<Snapshot<String>> = px.iter().map(|&p| snap(p)).collect();
         let report = backtest::run(&mut strat, &mut wallet, snaps.iter().cloned());
         let returns = metrics::per_bar_returns(&report.equity_curve, report.initial_equity);
         let expected = metrics::sharpe(&returns, 0.0, BPY).expect("reference sharpe defined");
 
         // Rolling Sharpe with period = n, read at the last bar.
-        let mut s = Sharpe::new(buy_and_hold(), SYM, SEED, n, 0.0, BPY);
+        let mut s = Sharpe::new(buy_and_hold(), sym(), SEED, n, 0.0, BPY);
         let mut last = None;
         for &p in &px {
             last = s.update(snap(p));
@@ -659,12 +807,12 @@ mod tests {
 
         let mut strat = buy_and_hold();
         let mut wallet = PaperWallet::new(SEED);
-        let snaps: Vec<Snapshot<&'static str>> = px.iter().map(|&p| snap(p)).collect();
+        let snaps: Vec<Snapshot<String>> = px.iter().map(|&p| snap(p)).collect();
         let report = backtest::run(&mut strat, &mut wallet, snaps.iter().cloned());
         let returns = metrics::per_bar_returns(&report.equity_curve, report.initial_equity);
         let expected = metrics::annualized_volatility(&returns, BPY);
 
-        let mut v = Volatility::new(buy_and_hold(), SYM, SEED, n, BPY);
+        let mut v = Volatility::new(buy_and_hold(), sym(), SEED, n, BPY);
         let mut last = None;
         for &p in &px {
             last = v.update(snap(p));
@@ -675,7 +823,7 @@ mod tests {
     #[test]
     fn sortino_is_defined_and_positive_on_rising_path() {
         let px = prices();
-        let mut s = Sortino::new(buy_and_hold(), SYM, SEED, 6, 0.0, BPY);
+        let mut s = Sortino::new(buy_and_hold(), sym(), SEED, 6, 0.0, BPY);
         let mut last = None;
         for &p in &px {
             last = s.update(snap(p));
@@ -688,7 +836,7 @@ mod tests {
     fn max_drawdown_tracks_the_trailing_dip() {
         // Rise to 120, then a clean 20% dip to 96, over a window that spans it.
         let px = [100.0, 110.0, 120.0, 108.0, 96.0];
-        let mut m = MaxDrawdown::new(buy_and_hold(), SYM, SEED, px.len());
+        let mut m = MaxDrawdown::new(buy_and_hold(), sym(), SEED, px.len());
         let mut last = None;
         for &p in &px {
             last = m.update(snap(p));
@@ -703,7 +851,7 @@ mod tests {
     fn calmar_is_none_without_a_drawdown() {
         // Strictly rising equity → zero trailing drawdown → Calmar undefined.
         let px = [100.0, 101.0, 102.0, 103.0, 104.0];
-        let mut c = Calmar::new(buy_and_hold(), SYM, SEED, px.len(), BPY);
+        let mut c = Calmar::new(buy_and_hold(), sym(), SEED, px.len(), BPY);
         let mut last = Some(0.0);
         for &p in &px {
             last = c.update(snap(p));
@@ -713,7 +861,7 @@ mod tests {
 
     #[test]
     fn reset_restores_first_bar_behaviour() {
-        let mut s = Sharpe::new(buy_and_hold(), SYM, SEED, 4, 0.0, BPY);
+        let mut s = Sharpe::new(buy_and_hold(), sym(), SEED, 4, 0.0, BPY);
         for &p in &prices() {
             s.update(snap(p));
         }
@@ -736,20 +884,20 @@ mod tests {
     /// (like `MaCross` in `backtest.rs`) so it needs no signals. Used to prove
     /// the trailing engine prices *both* legs from a 2-entry snapshot.
     struct LongShortPair {
-        a: &'static str,
-        b: &'static str,
+        a: String,
+        b: String,
     }
 
     impl Strategy for LongShortPair {
-        type Input = Snapshot<&'static str>;
-        type Symbol = &'static str;
-        fn update(&mut self, _snap: Snapshot<&'static str>) {}
-        fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
+        type Input = Snapshot<String>;
+        type Symbol = String;
+        fn update(&mut self, _snap: Snapshot<String>) {}
+        fn trade(&self, wallet: &mut dyn Wallet<String>) {
             if wallet.position(&self.a).amount.abs() < 1e-9 {
-                let _ = wallet.set(self.a, Side::Buy, Size::value_frac(0.5));
+                let _ = wallet.set(self.a.clone(), Side::Buy, Size::value_frac(0.5));
             }
             if wallet.position(&self.b).amount.abs() < 1e-9 {
-                let _ = wallet.set(self.b, Side::Sell, Size::value_frac(0.5));
+                let _ = wallet.set(self.b.clone(), Side::Sell, Size::value_frac(0.5));
             }
         }
         fn reset(&mut self) {}
@@ -757,10 +905,10 @@ mod tests {
 
     /// A 2-entry snapshot tagging both legs — the shape the old `sole_atom`
     /// path would panic on.
-    fn pair_snap(a_px: Real, b_px: Real) -> Snapshot<&'static str> {
+    fn pair_snap(a_px: Real, b_px: Real) -> Snapshot<String> {
         let mut s = Snapshot::new();
-        s.push(Some("A"), None, Atom::new(bar(a_px)));
-        s.push(Some("B"), None, Atom::new(bar(b_px)));
+        s.push(Some("A".to_string()), None, Atom::new(bar(a_px)));
+        s.push(Some("B".to_string()), None, Atom::new(bar(b_px)));
         s
     }
 
@@ -772,8 +920,8 @@ mod tests {
         let a = [100.0, 102.0, 101.0, 104.0, 106.0, 105.0, 108.0, 110.0];
         let b = [100.0, 99.0, 100.0, 97.0, 96.0, 97.0, 95.0, 93.0];
 
-        let mut vol = Volatility::new(LongShortPair { a: "A", b: "B" }, "A", SEED, 5, BPY);
-        let mut sharpe = Sharpe::new(LongShortPair { a: "A", b: "B" }, "A", SEED, 5, 0.0, BPY);
+        let mut vol = Volatility::new(LongShortPair { a: "A".to_string(), b: "B".to_string() }, "A".to_string(), SEED, 5, BPY);
+        let mut sharpe = Sharpe::new(LongShortPair { a: "A".to_string(), b: "B".to_string() }, "A".to_string(), SEED, 5, 0.0, BPY);
 
         let mut last_vol = None;
         let mut last_sharpe = None;

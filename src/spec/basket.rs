@@ -579,6 +579,12 @@ impl Strategy for DynBasketStrategy {
     fn reset(&mut self) {
         self.inner.reset();
     }
+    fn save_state(&self) -> serde_json::Value {
+        self.inner.save_state()
+    }
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.inner.restore_state(state)
+    }
 }
 
 impl DynBasketStrategy {

@@ -308,6 +308,45 @@ fn resuming_a_stale_format_version_is_rejected() {
 }
 
 #[test]
+fn single_asset_gated_on_trailing_sharpe_resumes_identically() {
+    // A `!sharpe` gate embeds a whole sub-strategy + its own wallet inside the
+    // indicator — the deepest state in the crate. Resuming must restore that
+    // embedded engine exactly, not re-warm it.
+    let yaml = r#"
+        symbol: X
+        long:
+          enter: !gt
+            lhs: !sharpe
+              period: 5
+              bars_per_year: 252.0
+              strategy:
+                symbol: X
+                long:
+                  enter: !gt { lhs: !close, rhs: !value 0.0 }
+            rhs: !value -1000.0
+          exit: !lt
+            lhs: !sharpe
+              period: 5
+              bars_per_year: 252.0
+              strategy:
+                symbol: X
+                long:
+                  enter: !gt { lhs: !close, rhs: !value 0.0 }
+            rhs: !value -1000.0
+    "#;
+    let spec = SingleStrategySpec::from_text_with_params_in(
+        yaml,
+        &Default::default(),
+        std::path::Path::new("."),
+        "(resume)",
+    )
+    .expect("parse trailing-gated spec");
+    let sch = schema();
+    let snaps = single_snaps(60);
+    assert_resume_matches(|| spec.build(CASH, &sch), &snaps, 30);
+}
+
+#[test]
 fn basket_resumes_identically() {
     let yaml = r#"
         selection: !top_bottom { longs: 1, shorts: 1 }

@@ -109,4 +109,24 @@ pub trait Strategy {
     /// Clear the strategy's own state (its signals/indicators), returning it to
     /// its freshly-constructed condition. Does not touch any wallet.
     fn reset(&mut self);
+
+    /// Serialize this strategy's runtime state for run resuming — the object-safe
+    /// twin of [`RunnableStrategy::save_state`](crate::spec::RunnableStrategy).
+    ///
+    /// Default [`Null`](serde_json::Value::Null). It exists on the base
+    /// [`Strategy`] trait (not only `RunnableStrategy`) so a strategy *embedded
+    /// inside an indicator* — the [`Sharpe`](crate::indicators::Sharpe) /
+    /// [`Sortino`](crate::indicators::Sortino) / … trailing metrics drive one
+    /// over a private wallet — can have its state captured through the `Strategy`
+    /// handle the metric holds. The concrete spec-built wrappers override it.
+    fn save_state(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
+    /// Restore state produced by [`save_state`](Strategy::save_state). Default:
+    /// accept and ignore.
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        let _ = state;
+        Ok(())
+    }
 }
