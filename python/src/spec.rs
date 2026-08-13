@@ -414,6 +414,67 @@ pub(crate) fn run_spec(
     ))
 }
 
+/// The resumable superset of [`run_spec`]: optionally restore `resume` state
+/// before the run, optionally finalize open positions with `realize_open`, and
+/// return the run's final [`RunState`](fugazi_core::spec::RunState) alongside the
+/// report so Python can persist it and resume later.
+pub(crate) fn run_spec_resumable(
+    loaded: &CoreStrategySpec,
+    snapshots: &[Snapshot<String>],
+    wallet: &mut PaperWallet<String>,
+    resume: Option<&fugazi_core::spec::RunState>,
+    realize_open: bool,
+) -> PyResult<(RunReport<String>, fugazi_core::spec::RunState)> {
+    use fugazi_core::spec::{RUN_STATE_FORMAT_VERSION, RunState};
+    let cash = <PaperWallet<String> as Wallet<String>>::equity(wallet).0;
+    let schema = spec_backtest::schema_from_snapshots(snapshots);
+    let mut built = loaded.try_build(cash, &schema, None).map_err(build_err)?;
+
+    // Portfolio owns its composite wallet, so delegate wholesale to
+    // `drive_resumable` (which restores/saves internally and finalizes if asked).
+    if matches!(loaded, CoreStrategySpec::Portfolio(_)) {
+        return built
+            .drive_resumable(snapshots, cash, &[], resume, realize_open)
+            .map_err(build_err);
+    }
+
+    if let Some(rs) = resume {
+        if rs.format_version != RUN_STATE_FORMAT_VERSION {
+            return Err(PyValueError::new_err(format!(
+                "resume: state format version {} does not match this build's {}",
+                rs.format_version, RUN_STATE_FORMAT_VERSION
+            )));
+        }
+        if rs.kind != loaded.kind() {
+            return Err(PyValueError::new_err(format!(
+                "resume: state is for a `{}` strategy but this document is `{}`",
+                rs.kind,
+                loaded.kind()
+            )));
+        }
+        built.restore_state(&rs.strategy).map_err(build_err)?;
+        wallet.restore_state(&rs.wallet).map_err(build_err)?;
+    }
+
+    let mut report = fugazi_core::backtest::run(&mut *built, wallet, snapshots.iter().cloned());
+    if realize_open {
+        fugazi_core::backtest::realize_open_positions(&mut *built, wallet, snapshots, &mut report);
+    }
+    let last_bar = snapshots
+        .last()
+        .and_then(|s| s.iter().find_map(|(_, _, a)| a.time))
+        .map(|t| t.0);
+    let final_state = RunState {
+        format_version: RUN_STATE_FORMAT_VERSION,
+        kind: loaded.kind().to_string(),
+        last_bar,
+        bars_seen: resume.map(|r| r.bars_seen).unwrap_or(0) + snapshots.len(),
+        strategy: fugazi_core::spec::RunnableStrategy::save_state(&*built),
+        wallet: wallet.snapshot_state(),
+    };
+    Ok((report, final_state))
+}
+
 /// Typed-parse an already-`!param`-substituted document as `kind`.
 ///
 /// The optimize kernel substitutes a fresh params table per grid row, so the
@@ -496,6 +557,43 @@ impl PyStrategySpec {
         let snaps = snapshots_from_sequence(snapshots)?;
         let report = run_spec(&self.inner, &snaps, &mut wallet.inner)?;
         Ok(PyRunReport { inner: report })
+    }
+
+    /// Drive the spec with **run resuming**: optionally restore `resume` (a JSON
+    /// string previously returned here) before the run, optionally finalize open
+    /// positions with `realize_open`, and return `(report, state_json)` — the
+    /// run report plus the final state to persist and resume from later.
+    ///
+    /// `resume` and `realize_open=True` are mutually exclusive in spirit (a
+    /// realized run is finalized); passing a realized run's state to a later
+    /// `resume` simply continues from a flat book. PaperWallet only, like
+    /// [`Self::run`].
+    #[pyo3(signature = (wallet, snapshots, resume = None, realize_open = false))]
+    pub(crate) fn run_resumable(
+        &self,
+        mut wallet: PyRefMut<'_, PyWallet>,
+        snapshots: &Bound<'_, PyAny>,
+        resume: Option<String>,
+        realize_open: bool,
+    ) -> PyResult<(PyRunReport, String)> {
+        let snaps = snapshots_from_sequence(snapshots)?;
+        let resume_state = match resume {
+            Some(text) => Some(
+                serde_json::from_str::<fugazi_core::spec::RunState>(&text)
+                    .map_err(|e| PyValueError::new_err(format!("parsing resume state: {e}")))?,
+            ),
+            None => None,
+        };
+        let (report, state) = run_spec_resumable(
+            &self.inner,
+            &snaps,
+            &mut wallet.inner,
+            resume_state.as_ref(),
+            realize_open,
+        )?;
+        let state_json = serde_json::to_string(&state)
+            .map_err(|e| PyValueError::new_err(format!("serializing run state: {e}")))?;
+        Ok((PyRunReport { inner: report }, state_json))
     }
 
     /// Drive the spec over `snapshots` against `wallet`, reduce the run

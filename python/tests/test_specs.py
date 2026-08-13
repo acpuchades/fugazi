@@ -537,3 +537,67 @@ def test_portfolio_builder_accepts_every_child_shape():
         .add("multi", ta.MultiAssetStrategy())
     )
     assert repr(pf) == "Portfolio(children=[single, pairs, basket, multi])"
+
+
+# ---------------------------------------------------------------------------
+# Run resuming: run_resumable round-trips state and continues identically.
+# ---------------------------------------------------------------------------
+
+
+_RESUME_YAML = """
+symbol: X
+long:
+  enter: !crosses_above
+    lhs: !ema { period: 3, source: !close }
+    rhs: !ema { period: 8, source: !close }
+  exit: !crosses_below
+    lhs: !ema { period: 3, source: !close }
+    rhs: !ema { period: 8, source: !close }
+"""
+
+
+def _wobbly(n):
+    import math
+    return [100.0 + 10.0 * math.sin(i * 0.35) + 0.05 * i for i in range(n)]
+
+
+def test_run_resumable_matches_uninterrupted_run():
+    """A run split in two with a save/restore in between matches the whole run."""
+    spec = ta.load_spec(_RESUME_YAML)
+    snaps = _snaps_single("X", _wobbly(60))
+    split = 30
+
+    # Uninterrupted 60-bar run.
+    whole_rep, _ = ta.load_spec(_RESUME_YAML).run_resumable(ta.PaperWallet(1000.0), snaps)
+
+    # First half → capture the state JSON.
+    _first, state = spec.run_resumable(ta.PaperWallet(1000.0), snaps[:split])
+
+    # Rebuild fresh, resume from the state, run the second half.
+    second_rep, _ = ta.load_spec(_RESUME_YAML).run_resumable(
+        ta.PaperWallet(1000.0), snaps[split:], resume=state
+    )
+
+    tail = whole_rep.equity_curve[split:]
+    assert len(second_rep.equity_curve) == len(tail)
+    # Exact (serde float_roundtrip keeps f64 bit-identical through JSON).
+    assert second_rep.equity_curve == tail
+
+
+def test_run_resumable_rejects_mismatched_shape():
+    """Resuming a single-shape state into a pairs spec is rejected."""
+    snaps = _snaps_single("X", _wobbly(20))
+    _rep, state = ta.load_spec(_RESUME_YAML).run_resumable(ta.PaperWallet(1000.0), snaps)
+
+    pairs = ta.load_spec(
+        """
+        left: A
+        right: B
+        long_spread:
+          enter: !lt { lhs: !close { source: !pick { symbol: A } }, rhs: !value 0.0 }
+          exit: !gt { lhs: !close { source: !pick { symbol: A } }, rhs: !value 5.0 }
+        """
+    )
+    pair_snaps = _snaps_multi({"A": [1.0, 2.0], "B": [1.0, 2.0]})
+    with pytest.raises(ValueError, match="resume"):
+        pairs.run_resumable(ta.PaperWallet(1000.0), pair_snaps, resume=state)
