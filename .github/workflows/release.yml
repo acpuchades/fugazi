@@ -103,12 +103,36 @@ jobs:
       # Skip when the version is already on crates.io, so re-running a tag
       # whose wheels failed (crates.io publishes are irrevocable) republishes
       # PyPI without failing this leg.
+      #
+      # `fugazi` depends on `fugazi-derive` via a registry version pin (not
+      # just the workspace path), so `fugazi-derive` must be live on crates.io
+      # *first* — `cargo publish -p fugazi` resolves that dependency against
+      # the registry, not the local path, and fails with "no matching package"
+      # otherwise. Publish it, wait for the index to catch up, then publish
+      # `fugazi`. Same skip-if-already-published guard on each.
       - name: cargo publish
         run: |
-          version=$(cargo pkgid -p fugazi | sed 's/.*[@#]//')
           # crates.io rejects requests without a User-Agent
-          if curl -fsS -A "fugazi-release-ci (github.com/acpuchades/fugazi)" \
-              "https://crates.io/api/v1/crates/fugazi/${version}" > /dev/null 2>&1; then
+          ua="fugazi-release-ci (github.com/acpuchades/fugazi)"
+          published() {
+            curl -fsS -A "$ua" "https://crates.io/api/v1/crates/$1/$2" > /dev/null 2>&1
+          }
+
+          derive_version=$(cargo pkgid -p fugazi-derive | sed 's/.*[@#]//')
+          if published fugazi-derive "$derive_version"; then
+            echo "fugazi-derive ${derive_version} already on crates.io — skipping"
+          else
+            cargo publish -p fugazi-derive
+            # The sparse index can lag a few seconds behind a fresh publish;
+            # `fugazi`'s dependency resolution needs to see it.
+            for i in $(seq 1 30); do
+              published fugazi-derive "$derive_version" && break
+              sleep 5
+            done
+          fi
+
+          version=$(cargo pkgid -p fugazi | sed 's/.*[@#]//')
+          if published fugazi "$version"; then
             echo "fugazi ${version} already on crates.io — skipping"
           else
             cargo publish -p fugazi
