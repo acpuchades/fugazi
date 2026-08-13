@@ -259,6 +259,7 @@ fn run_single(
             effective_freq,
             windowed: None,
             seconds_per_bar,
+            mc: None,
         };
         let ctx_ref = &ctx;
         let probe = |params: &HashMap<String, Value>| -> Result<usize> {
@@ -319,6 +320,7 @@ fn run_single(
         effective_freq,
         windowed: windowed_bars,
         seconds_per_bar,
+        mc: None,
     };
     let ctx_ref = &ctx;
     let evaluate_row = move |params: &HashMap<String, Value>| -> Result<Evaluation> {
@@ -520,6 +522,7 @@ fn run_multi_symbol(
         effective_freq,
         windowed: windowed_bars,
         seconds_per_bar,
+        mc: None,
     };
     let ctx_ref = &ctx;
 
@@ -655,6 +658,7 @@ fn run_multi_symbol_walkforward(
         effective_freq,
         windowed: None,
         seconds_per_bar,
+        mc: None,
     };
     let ctx_ref = &ctx;
 

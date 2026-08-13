@@ -42,7 +42,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 
 use input::{Source, StrategyKind, StrategySource};
@@ -240,6 +240,71 @@ struct RunArgs {
     /// `--save-state`.
     #[arg(long = "flatten")]
     flatten: bool,
+
+    /// Compute Monte Carlo significance analysis after the run — bootstrap
+    /// confidence intervals and empirical-null p-values for a handful of
+    /// headline metrics, written to a `montecarlo:` block in `metrics.yml` and
+    /// the per-resample values to `montecarlo.csv`. Opt-in because the re-run
+    /// null (`--mc-null rerun`/`both`) re-drives the whole backtest once per
+    /// permutation.
+    #[arg(long = "montecarlo")]
+    montecarlo: bool,
+
+    /// Number of resamples per estimator (see `--montecarlo`). Default 1000.
+    #[arg(long = "mc-permutations", value_name = "N", default_value_t = 1000)]
+    mc_permutations: usize,
+
+    /// Resampling scheme. `stationary` (default) draws geometric random block
+    /// lengths (Politis–Romano); `moving-block` uses fixed-length blocks;
+    /// `iid` is a plain per-observation bootstrap (block length 1). Block
+    /// resampling preserves the short-range serial dependence IID destroys.
+    #[arg(long = "mc-scheme", value_enum, default_value_t = McSchemeArg::Stationary)]
+    mc_scheme: McSchemeArg,
+
+    /// Block length for `--mc-scheme moving-block` (literal length) or
+    /// `stationary` (expected length). Ignored for `iid`. Default 10.
+    #[arg(long = "mc-block", value_name = "L", default_value_t = 10.0)]
+    mc_block: f64,
+
+    /// RNG seed for the resampling — change it to draw an independent set of
+    /// permutations. Reproducible across platforms. Default 0.
+    #[arg(long = "mc-seed", value_name = "S", default_value_t = 0)]
+    mc_seed: u64,
+
+    /// Which empirical null to test for p-values. `cheap` (default) holds the
+    /// realized positions fixed and re-pairs them with resampled market
+    /// returns (single-asset only); `rerun` re-trades the strategy on
+    /// resampled synthetic price paths (all shapes, expensive); `both` runs
+    /// both; `none` computes only the bootstrap confidence intervals.
+    #[arg(long = "mc-null", value_enum, default_value_t = McNullArg::Cheap)]
+    mc_null: McNullArg,
+
+    /// Two-sided confidence level for the bootstrap intervals. Default 0.95.
+    #[arg(long = "mc-ci", value_name = "LEVEL", default_value_t = 0.95)]
+    mc_ci: f64,
+
+    /// Metrics to analyze (comma-separated short or dotted names, e.g.
+    /// `sharpe,calmar,drawdown.max_pct`). Default: a headline set
+    /// (Sharpe/Sortino/Calmar/total return/annualized return/max drawdown).
+    #[arg(long = "mc-metrics", value_name = "NAMES", value_delimiter = ',')]
+    mc_metrics: Vec<String>,
+}
+
+/// The `--mc-scheme` choices, mapped to [`fugazi::montecarlo::ResampleScheme`].
+#[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
+enum McSchemeArg {
+    Iid,
+    MovingBlock,
+    Stationary,
+}
+
+/// The `--mc-null` choices.
+#[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
+enum McNullArg {
+    None,
+    Cheap,
+    Rerun,
+    Both,
 }
 
 /// What kind of spec `fugazi check` is checking. Nested subcommand so each
@@ -766,6 +831,34 @@ fn run(args: RunArgs) -> Result<()> {
         }
         None => None,
     };
+    let montecarlo = args.montecarlo.then(|| {
+        use fugazi::montecarlo::ResampleScheme;
+        use fugazi::spec::montecarlo::McConfig;
+        let scheme = match args.mc_scheme {
+            McSchemeArg::Iid => ResampleScheme::Iid,
+            McSchemeArg::MovingBlock => ResampleScheme::MovingBlock {
+                block: args.mc_block.max(1.0) as usize,
+            },
+            McSchemeArg::Stationary => ResampleScheme::Stationary {
+                mean_block: args.mc_block,
+            },
+        };
+        let (cheap_null, rerun_null) = match args.mc_null {
+            McNullArg::None => (false, false),
+            McNullArg::Cheap => (true, false),
+            McNullArg::Rerun => (false, true),
+            McNullArg::Both => (true, true),
+        };
+        McConfig {
+            permutations: args.mc_permutations,
+            scheme,
+            seed: args.mc_seed,
+            ci_level: args.mc_ci,
+            cheap_null,
+            rerun_null,
+            metrics: args.mc_metrics.clone(),
+        }
+    });
     let opts = run::RunOptions {
         cash: args.cash,
         out_dir: &args.output_dir,
@@ -782,6 +875,7 @@ fn run(args: RunArgs) -> Result<()> {
         resume: resume_state.as_ref(),
         save_state: args.save_state.as_deref(),
         flatten: args.flatten,
+        montecarlo: montecarlo.as_ref(),
     };
     let base = args.strategy.base_dir();
     match args.strategy.kind {

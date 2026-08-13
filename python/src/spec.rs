@@ -180,6 +180,87 @@ impl PyCostConfig {
     }
 }
 
+/// Monte Carlo significance configuration for
+/// `StrategySpec.evaluate(montecarlo=...)`. Mirrors the CLI's `--mc-*` flags:
+/// bootstrap confidence intervals plus empirical-null p-values, over a chosen
+/// resampling scheme. `scheme` is one of `iid` / `moving-block` / `stationary`
+/// (default), `block` its (expected) block length, `null` one of
+/// `none` / `cheap` / `rerun` / `both` (which empirical null to test), and
+/// `metrics` an optional list of metric names (default: a headline set).
+#[pyclass(name = "MonteCarloConfig", module = "fugazi", from_py_object)]
+#[derive(Clone)]
+pub(crate) struct PyMonteCarloConfig {
+    pub(crate) inner: McConfig,
+}
+
+#[pymethods]
+impl PyMonteCarloConfig {
+    #[new]
+    #[pyo3(signature = (
+        permutations = 1000,
+        scheme = "stationary",
+        block = 10.0,
+        seed = 0,
+        ci_level = 0.95,
+        null = "cheap",
+        metrics = None,
+    ))]
+    fn new(
+        permutations: usize,
+        scheme: &str,
+        block: f64,
+        seed: u64,
+        ci_level: f64,
+        null: &str,
+        metrics: Option<Vec<String>>,
+    ) -> PyResult<Self> {
+        let scheme = match scheme {
+            "iid" => ResampleScheme::Iid,
+            "moving-block" | "moving_block" => ResampleScheme::MovingBlock {
+                block: block.max(1.0) as usize,
+            },
+            "stationary" => ResampleScheme::Stationary { mean_block: block },
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown scheme `{other}` (expected iid | moving-block | stationary)"
+                )));
+            }
+        };
+        let (cheap_null, rerun_null) = match null {
+            "none" => (false, false),
+            "cheap" => (true, false),
+            "rerun" => (false, true),
+            "both" => (true, true),
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown null `{other}` (expected none | cheap | rerun | both)"
+                )));
+            }
+        };
+        Ok(Self {
+            inner: McConfig {
+                permutations,
+                scheme,
+                seed,
+                ci_level,
+                cheap_null,
+                rerun_null,
+                metrics: metrics.unwrap_or_default(),
+            },
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "MonteCarloConfig(permutations={}, scheme={}, seed={}, ci_level={})",
+            self.inner.permutations,
+            self.inner.scheme.label(),
+            self.inner.seed,
+            self.inner.ci_level
+        )
+    }
+}
+
 #[pymethods]
 impl PyCostConfig {
     /// Build a config from a Python dict mirroring the CLI's YAML shape:
@@ -508,25 +589,6 @@ pub(crate) fn build_err(e: String) -> PyErr {
     }
 }
 
-/// Reduce a run report to a `SpecMetrics` document. Uses the caller's wallet
-/// (matching [`run_spec`]) — cash comes from `wallet.equity()`.
-pub(crate) fn evaluate_spec(
-    loaded: &CoreStrategySpec,
-    snapshots: &[Snapshot<String>],
-    wallet: &mut PaperWallet<String>,
-    bars_per_year: Real,
-    risk_free_rate: Real,
-    seconds_per_bar: Option<Real>,
-) -> PyResult<SpecMetrics> {
-    let report = run_spec(loaded, snapshots, wallet)?;
-    Ok(spec_metrics::from_report(
-        &report,
-        bars_per_year,
-        risk_free_rate,
-        seconds_per_bar,
-    ))
-}
-
 /// Serialize a `SpecMetrics` document into a Python dict via serde_json.
 pub(crate) fn metrics_to_py(py: Python<'_>, m: &SpecMetrics) -> PyResult<Py<PyAny>> {
     let value = serde_json::to_value(m)
@@ -600,12 +662,20 @@ impl PyStrategySpec {
     /// report to a metrics document, and return it as a nested dict (mirroring
     /// `metrics.yml`). Convenience over calling `.run(...)` then feeding the
     /// report to `fugazi.metrics.*` — same wallet-first shape as [`Self::run`].
+    /// Passing `montecarlo=MonteCarloConfig(...)` additionally runs the Monte
+    /// Carlo significance pass and embeds its result under a `montecarlo` key
+    /// in the returned dict (bootstrap CIs + empirical-null p-values, exactly
+    /// as `metrics.yml`'s `montecarlo:` block). The synthetic re-run-null paths
+    /// are driven frictionlessly (the wallet's costs stay on the observed run
+    /// and its CIs, not on the resampled re-drives).
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (
         wallet,
         snapshots,
         bars_per_year = 252.0,
         risk_free_rate = 0.0,
         seconds_per_bar = None,
+        montecarlo = None,
     ))]
     pub(crate) fn evaluate(
         &self,
@@ -615,16 +685,34 @@ impl PyStrategySpec {
         bars_per_year: Real,
         risk_free_rate: Real,
         seconds_per_bar: Option<Real>,
+        montecarlo: Option<PyMonteCarloConfig>,
     ) -> PyResult<Py<PyAny>> {
         let snaps = snapshots_from_sequence(snapshots)?;
-        let metrics = evaluate_spec(
-            &self.inner,
-            &snaps,
-            &mut wallet.inner,
-            bars_per_year,
-            risk_free_rate,
-            seconds_per_bar,
-        )?;
+        // Drive once for the observed report, reduce to metrics.
+        let report = run_spec(&self.inner, &snaps, &mut wallet.inner)?;
+        let mut metrics =
+            spec_metrics::from_report(&report, bars_per_year, risk_free_rate, seconds_per_bar);
+        if let Some(mc) = montecarlo {
+            // The Python surface installs costs on the wallet, not via a
+            // `CostConfig`, so the re-run null's synthetic re-drives are
+            // frictionless; the observed run (and its CIs) still reflects them.
+            let empty_costs: CostConfig = serde_json::from_str("{}")
+                .map_err(|e| PyValueError::new_err(format!("cost config: {e}")))?;
+            let ctx = spec_backtest::EvalContext {
+                cash: report.initial_equity,
+                bars_per_year,
+                risk_free_rate,
+                cost_config: &empty_costs,
+                effective_freq: None,
+                windowed: None,
+                seconds_per_bar,
+                mc: None,
+            };
+            let outcome = py
+                .detach(|| run_montecarlo(&self.inner, &snaps, &ctx, &report, &mc.inner))
+                .map_err(build_err)?;
+            metrics.montecarlo = Some(outcome.section);
+        }
         metrics_to_py(py, &metrics)
     }
 
@@ -927,6 +1015,7 @@ pub(crate) fn optimize(
             effective_freq: None,
             windowed: windowed.and_then(std::num::NonZeroUsize::new),
             seconds_per_bar,
+            mc: None,
         };
         let ctx_ref = &ctx;
         let evaluate_row = |params: &std::collections::HashMap<String, JsonValue>|
@@ -1216,6 +1305,7 @@ pub(crate) fn run_walkforward(
                 effective_freq: None,
                 windowed: None,
                 seconds_per_bar,
+                mc: None,
             };
             let wf_ctx_ref = &wf_ctx;
             let wf_schema = spec_backtest::schema_from_snapshots(snaps);

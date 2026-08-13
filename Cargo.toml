@@ -1,6 +1,6 @@
 [package]
 name = "fugazi"
-version = "0.40.0"
+version = "0.41.0"
 edition = "2024"
 description = "A library of incremental technical-analysis indicators, signals and strategies"
 license = "MIT"
@@ -77,9 +77,20 @@ live = ["sources", "dep:hmac", "dep:sha2", "dep:base64"]
 # in, structured errors out); the CLI-only bits (indicatif progress bars,
 # console styling, csv output, interim date parsing) stay behind `cli`.
 spec = ["runtime", "parallel", "dep:serde_norway", "dep:anyhow"]
+# `montecarlo` compiles the resampling-based significance layer
+# (`fugazi::montecarlo` + `fugazi::spec::montecarlo`): block/stationary
+# bootstrap of returns for confidence intervals and empirical-null p-values.
+# Off by default — it is the crate's only source of (seeded, reproducible)
+# randomness, so `rand` + `rand_chacha` stay out of a build that doesn't ask
+# for it. The empirical-null re-run path drives whole backtests, so the
+# spec-layer half needs `spec`; the `cli` feature turns it on so the
+# `run --montecarlo` flag always exists (runtime-gated by the flag, which is
+# the user-facing opt-in for the expensive computation).
+montecarlo = ["dep:rand", "dep:rand_chacha"]
 cli = [
     "spec",
     "sources",
+    "montecarlo",
     "dep:clap",
     "dep:clap_complete",
     "dep:indicatif",
@@ -94,7 +105,7 @@ clap_complete = { version = "4", optional = true }
 # per-indicator run-state save/load bodies for run resuming. It is a normal
 # proc-macro dependency (no runtime, no linkage), so it does not affect the
 # pyo3 cdylib build.
-fugazi-derive = { path = "fugazi-derive", version = "0.40.0" }
+fugazi-derive = { path = "fugazi-derive", version = "0.41.0" }
 serde = { version = "1", features = ["derive"] }
 serde_norway = { version = "0.9", optional = true }
 # `float_roundtrip` makes f64 parse back bit-for-bit identical to what was
@@ -107,6 +118,12 @@ anyhow = { version = "1", optional = true }
 indicatif = { version = "0.18", optional = true }
 console = { version = "0.16", optional = true }
 rayon = { version = "1", optional = true }
+# Seeded, reproducible RNG for the `montecarlo` feature. `rand_chacha`'s
+# ChaCha8Rng is a portable, deterministic stream given a `u64` seed — the
+# same permutation set on every platform, so a reported p-value/CI reproduces.
+# `default-features = false` drops `getrandom` (we never seed from the OS).
+rand = { version = "0.9", default-features = false, features = ["std"], optional = true }
+rand_chacha = { version = "0.9", default-features = false, optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls", "gzip"], optional = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros"], optional = true }
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }

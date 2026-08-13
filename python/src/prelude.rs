@@ -52,6 +52,8 @@ pub(crate) use fugazi_core::spec::StrategySpec as CoreStrategySpec;
 pub(crate) use fugazi_core::spec::backtest as spec_backtest;
 pub(crate) use fugazi_core::spec::costs::CostConfig;
 pub(crate) use fugazi_core::spec::metrics::{self as spec_metrics, Metrics as SpecMetrics};
+pub(crate) use fugazi_core::montecarlo::ResampleScheme;
+pub(crate) use fugazi_core::spec::montecarlo::{McConfig, run_montecarlo};
 pub(crate) use fugazi_core::spec::optimize as spec_optimize;
 pub(crate) use fugazi_core::spec::{
     BasketStrategySpec, MultiAssetStrategySpec, PairsStrategySpec, PortfolioSpec, StrategyRef,

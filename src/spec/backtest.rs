@@ -144,6 +144,10 @@ pub struct IterationResult {
     /// True when a cost model was active — governs `commission` column
     /// emission in `fills.csv` and gross/net console rows.
     pub costs_active: bool,
+    /// Per-resample Monte Carlo values, when `EvalContext::mc` was set (and the
+    /// `montecarlo` feature is on). The CLI writes these to `montecarlo.csv`;
+    /// the summary lands in `metrics.montecarlo`.
+    pub mc_samples: Option<crate::spec::montecarlo::McSamples>,
 }
 
 /// Precomputed inside [`run_iteration`] so IO callers don't reduce the
@@ -185,6 +189,13 @@ pub struct EvalContext<'a> {
     /// cadence; the fields are omitted from the YAML then and stay empty in
     /// the windowed CSV.
     pub seconds_per_bar: Option<Real>,
+    /// Monte Carlo significance analysis to run *after* the backtest: when
+    /// `Some`, [`run_iteration_resumable`] resamples the run and attaches a
+    /// `montecarlo:` block to the metrics document (plus the raw samples on
+    /// [`IterationResult`]). `None` skips it — the default for `optimize`,
+    /// where per-grid-cell resampling would be pathological. Requires the
+    /// `montecarlo` feature to actually compute; ignored without it.
+    pub mc: Option<crate::spec::montecarlo::McConfig>,
 }
 
 impl EvalContext<'_> {
@@ -353,10 +364,10 @@ pub fn run_iteration_resumable(
         None
     };
 
-    Ok((
-        reduce_iteration(report, gross_report, bars, costs_active, ctx),
-        final_state,
-    ))
+    let iter = reduce_iteration(report, gross_report, bars, costs_active, ctx);
+    #[cfg(feature = "montecarlo")]
+    let iter = attach_montecarlo(iter, spec, snapshots, ctx)?;
+    Ok((iter, final_state))
 }
 
 /// Reduce a priced run (plus its zero-cost twin, when costs were active) to a
@@ -428,5 +439,25 @@ fn reduce_iteration(
         rolling,
         summary,
         costs_active,
+        mc_samples: None,
     }
+}
+
+/// Run the Monte Carlo analysis (`EvalContext::mc`) over a completed iteration
+/// and fold its summary + samples onto the result. Only compiled with the
+/// `montecarlo` feature; a no-op when `ctx.mc` is `None`.
+#[cfg(feature = "montecarlo")]
+fn attach_montecarlo(
+    mut iter: IterationResult,
+    spec: &StrategySpec,
+    snapshots: &[crate::types::Snapshot<String>],
+    ctx: &EvalContext,
+) -> Result<IterationResult, String> {
+    if let Some(config) = &ctx.mc {
+        let outcome =
+            crate::spec::montecarlo::run_montecarlo(spec, snapshots, ctx, &iter.report, config)?;
+        iter.metrics.montecarlo = Some(outcome.section);
+        iter.mc_samples = Some(outcome.samples);
+    }
+    Ok(iter)
 }

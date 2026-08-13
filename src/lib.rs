@@ -66,6 +66,10 @@ pub mod indicators;
 pub mod live;
 pub mod market;
 pub mod metrics;
+// The plain-data resampling vocabulary (`ResampleScheme`, config) compiles
+// unconditionally so `EvalContext` can carry a Monte Carlo config in any build;
+// the `rand`-backed resampling itself is gated on `montecarlo` *inside*.
+pub mod montecarlo;
 pub mod portfolio;
 #[cfg(feature = "runtime")]
 pub mod runtime;

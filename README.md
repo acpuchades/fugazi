@@ -14,7 +14,7 @@ and signal owns its internal state and is advanced one sample at a time via
 
 ```toml
 [dependencies]
-fugazi = "0.40"
+fugazi = "0.41"
 ```
 
 ## Concepts
@@ -586,6 +586,23 @@ each grid point by `K` standard deviations before sorting (`mean − K·std` for
 higher-is-better metrics, `mean + K·std` for lower-is-better ones), so
 `sharpe 2.0 ± 3.0` no longer outranks `1.8 ± 0.2`. Output files are
 `,`-delimited.
+
+`run --montecarlo` adds a Monte Carlo significance pass after the backtest: is
+the result real, or luck? It writes a `montecarlo:` block into `metrics.yml`
+(and a `montecarlo.csv` of every resample) with, per headline metric, a
+**bootstrap confidence interval** and empirical-null **p-values**. Two nulls are
+available via `--mc-null`: `cheap` (default — holds the run's realized
+positions fixed and re-pairs them with resampled market returns; single-asset
+only) and `rerun` (re-trades the strategy on resampled synthetic price paths —
+honest across every shape but runs one backtest per permutation; `both` runs
+both, `none` gives only the CIs). Resampling preserves the serial dependence a
+naive shuffle would destroy: `--mc-scheme stationary` (default) draws geometric
+random block lengths (Politis–Romano), `moving-block` uses fixed blocks, `iid`
+is a plain bootstrap; `--mc-block <L>` sets the (expected) block length.
+`--mc-permutations <N>` (default 1000), `--mc-seed <S>` (reproducible across
+platforms), `--mc-ci <level>` (default 0.95), and `--mc-metrics a,b,…` (default
+a Sharpe/Sortino/Calmar/return/drawdown headline set) round out the knobs. It's
+opt-in because the re-run null is expensive.
 
 `optimize --walkforward IS,OS[,Embargo]` rolls a walk-forward loop instead: on
 each fold the grid is scored on the IS window, the `--best-by` winner is

@@ -39,6 +39,64 @@ pub struct Metrics {
     /// zero-cost `metrics.yml` matches the pre-costs schema byte-for-byte.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub costs: Option<CostSection>,
+    /// Monte Carlo significance analysis — bootstrap confidence intervals and
+    /// empirical-null p-values for a handful of headline metrics. Populated
+    /// only under `run --montecarlo` (see [`crate::spec::montecarlo`]); omitted
+    /// otherwise so a plain `metrics.yml` keeps its shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub montecarlo: Option<McSection>,
+}
+
+/// The `montecarlo:` block of `metrics.yml`: the resampling configuration that
+/// produced it, then one [`McMetric`] row per analyzed metric.
+///
+/// A plain-data struct (no `rand` dependency) so it compiles into the metrics
+/// document unconditionally; it is *filled in* only when the `montecarlo`
+/// feature is on and the user passes `--montecarlo`.
+#[derive(Clone, Debug, Serialize)]
+pub struct McSection {
+    /// Number of resamples per estimator.
+    pub permutations: usize,
+    /// The resampling scheme, e.g. `stationary(mean_block=10)`.
+    pub scheme: String,
+    /// The RNG seed — change it to draw an independent set of resamples.
+    pub seed: u64,
+    /// Two-sided confidence level of the intervals below (e.g. `0.95`).
+    pub ci_level: Real,
+    pub metrics: Vec<McMetric>,
+}
+
+/// One metric's Monte Carlo summary: the observed point estimate, a bootstrap
+/// confidence interval and standard error, and — when a null was requested —
+/// the empirical p-value(s).
+#[derive(Clone, Debug, Serialize)]
+pub struct McMetric {
+    /// Canonical dotted metric path, e.g. `risk_adjusted.sharpe`.
+    pub name: String,
+    /// The metric on the actual (un-resampled) run. `None` when the metric is
+    /// degenerate on this run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed: Option<Real>,
+    /// Lower / upper bounds of the bootstrap CI at `ci_level`. `None` when the
+    /// metric could not be recomputed from resampled returns (e.g. a
+    /// trade-level metric, which has no meaning on a resampled return path).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_lower: Option<Real>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_upper: Option<Real>,
+    /// Bootstrap standard error (stddev of the resampled estimates).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub std_error: Option<Real>,
+    /// One-sided p-value against the *cheap* null (realized positions held
+    /// against resampled market returns — single-asset only). Small = the
+    /// strategy's positions are aligned with genuine return structure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p_value_cheap: Option<Real>,
+    /// One-sided p-value against the *re-run* null (the strategy re-traded on
+    /// resampled synthetic price paths). Small = the edge survives when the
+    /// exploitable serial structure is (block-)randomized away.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p_value_rerun: Option<Real>,
 }
 
 /// Non-metric context echoed at the top of `metrics.yml` so a numbers-only
@@ -345,6 +403,7 @@ pub fn from_report<Sym>(
             recovery_factor: crate::metrics::recovery_factor(equity, initial),
         },
         costs: None,
+        montecarlo: None,
         trades: TradeSection {
             total: crate::metrics::total_trades(&trades),
             wins: crate::metrics::winning_trades(&trades),

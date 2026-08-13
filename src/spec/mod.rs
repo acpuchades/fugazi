@@ -63,6 +63,13 @@ pub mod backtest;
 // helpers on top of the library's `metrics` module.
 pub mod metrics;
 
+// Monte Carlo significance analysis (bootstrap CIs + empirical-null p-values)
+// over a completed backtest. The config vocabulary compiles unconditionally so
+// `EvalContext` can carry it in any build; the `rand`-backed `run_montecarlo`
+// (and the re-run null that re-drives the strategy) is gated on `montecarlo`
+// *inside* the module.
+pub mod montecarlo;
+
 // The optimize kernel — pure sweep enumeration, ranking, walk-forward
 // scaffolding — reachable without pulling in the CLI's clap / csv / progress
 // stack.
@@ -135,6 +142,9 @@ pub use multi_asset::DynMultiAssetStrategy;
 pub use pairs::DynPairsStrategy;
 pub use portfolio::DynPortfolio;
 pub use runnable::{RUN_STATE_FORMAT_VERSION, RunState, RunnableStrategy, StrategySpec};
+pub use montecarlo::{McConfig, McOutcome, McSampleSet, McSamples};
+#[cfg(feature = "montecarlo")]
+pub use montecarlo::run_montecarlo;
 pub use strategy::{DynSingleStrategy, SideSpec};
 
 pub use input::{Source, StrategyKind, StrategySource};

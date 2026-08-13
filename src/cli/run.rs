@@ -105,6 +105,10 @@ pub struct RunOptions<'a> {
     /// `--flatten`: finalize open positions into the trade blotter at the
     /// last bar (mutually exclusive with `save_state`).
     pub flatten: bool,
+    /// `--montecarlo`: when set, run the significance analysis after the
+    /// backtest and attach a `montecarlo:` block to `metrics.yml` plus a
+    /// `montecarlo.csv` of the per-resample values. `None` skips it entirely.
+    pub montecarlo: Option<&'a fugazi::spec::montecarlo::McConfig>,
 }
 
 /// Headline numbers returned from a run.
@@ -149,6 +153,86 @@ fn iterate(
             .with_context(|| format!("writing state file {}", path.display()))?;
     }
     Ok(iter)
+}
+
+/// Emit the Monte Carlo results the backtest layer already computed (when
+/// `--montecarlo` was set on the `EvalContext`): write `montecarlo.csv` and
+/// narrate the console block. The computation itself lives in
+/// [`backtest::run_iteration_resumable`], so every driver — not just the CLI —
+/// gets the `montecarlo:` block on its metrics; this is the CLI's IO half.
+fn emit_montecarlo(iter: &backtest::IterationResult, opts: &RunOptions) -> Result<()> {
+    if opts.montecarlo.is_none() {
+        return Ok(());
+    }
+    if let Some(samples) = &iter.mc_samples {
+        write_montecarlo_csv(samples, &opts.out_dir.join("montecarlo.csv"))?;
+    }
+    if !opts.quiet
+        && let Some(section) = &iter.metrics.montecarlo
+    {
+        print_montecarlo_block(section);
+    }
+    Ok(())
+}
+
+/// Write the per-resample metric values to `montecarlo.csv`: one row per
+/// (estimator, permutation), columns `estimator,permutation,<metric...>`.
+fn write_montecarlo_csv(samples: &fugazi::spec::montecarlo::McSamples, path: &Path) -> Result<()> {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    out.push_str("estimator,permutation");
+    for name in &samples.metric_names {
+        let _ = write!(out, ",{name}");
+    }
+    out.push('\n');
+    for set in &samples.sets {
+        for (p, row) in set.rows.iter().enumerate() {
+            let _ = write!(out, "{},{}", set.estimator, p);
+            for cell in row {
+                match cell {
+                    Some(v) => {
+                        let _ = write!(out, ",{v}");
+                    }
+                    None => out.push(','),
+                }
+            }
+            out.push('\n');
+        }
+    }
+    std::fs::write(path, out).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+/// Narrate the Monte Carlo block: the resampling config, then one line per
+/// metric with its observed value, bootstrap CI, and any p-values.
+fn print_montecarlo_block(section: &fugazi::spec::metrics::McSection) {
+    use std::fmt::Write as _;
+    println!();
+    style::print_section("montecarlo");
+    println!(
+        "  {} resamples · {} · seed {} · {:.0}% CI",
+        section.permutations,
+        section.scheme,
+        section.seed,
+        section.ci_level * 100.0
+    );
+    let fmt = |v: Option<Real>| v.map(|x| format!("{x:.4}")).unwrap_or_else(|| "—".to_string());
+    for m in &section.metrics {
+        let mut line = format!(
+            "  {:<28} obs {:>10}  CI [{}, {}]",
+            m.name,
+            fmt(m.observed),
+            fmt(m.ci_lower),
+            fmt(m.ci_upper),
+        );
+        if let Some(p) = m.p_value_cheap {
+            let _ = write!(line, "  p(cheap) {p:.4}");
+        }
+        if let Some(p) = m.p_value_rerun {
+            let _ = write!(line, "  p(rerun) {p:.4}");
+        }
+        println!("{line}");
+    }
 }
 
 /// Run `spec` over `frame` per `opts` — resolve inputs, delegate the pure
@@ -196,6 +280,7 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
         effective_freq,
         windowed: windowed_bars,
         seconds_per_bar,
+        mc: opts.montecarlo.cloned(),
     };
     // Print the inputs block up front so a long-running run still shows the
     // user what they asked for while it's working.
@@ -215,6 +300,7 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
     let bars: Vec<String> = atoms.iter().map(|(t, _)| t.clone()).collect();
     let spec = StrategySpec::Single(Box::new(strategy.clone()));
     let iter = iterate(&spec, bars, &snapshots, &inputs, opts)?;
+    emit_montecarlo(&iter, opts)?;
 
     // Emit `fills.csv` and echo each fill in the same order the wallet booked
     // them. The console stream matches the CSV row-for-row.
@@ -325,6 +411,7 @@ pub fn run_pairs(
         effective_freq,
         windowed: windowed_bars,
         seconds_per_bar,
+        mc: opts.montecarlo.cloned(),
     };
     if !opts.quiet {
         let costs_active = !opts
@@ -352,6 +439,7 @@ pub fn run_pairs(
         .collect();
     let any = StrategySpec::Pairs(Box::new(spec.clone()));
     let iter = iterate(&any, bars.clone(), &snapshots, &inputs, opts)?;
+    emit_montecarlo(&iter, opts)?;
 
     write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
     if !opts.quiet {
@@ -488,6 +576,7 @@ pub fn run_basket(
         effective_freq,
         windowed: windowed_bars,
         seconds_per_bar,
+        mc: opts.montecarlo.cloned(),
     };
     if !opts.quiet {
         let costs_active = universe
@@ -500,6 +589,7 @@ pub fn run_basket(
 
     let any = StrategySpec::Basket(Box::new(spec.clone()));
     let iter = iterate(&any, bars.clone(), &snapshots, &inputs, opts)?;
+    emit_montecarlo(&iter, opts)?;
 
     write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
     if !opts.quiet {
@@ -623,6 +713,7 @@ pub fn run_multi(
         effective_freq,
         windowed: windowed_bars,
         seconds_per_bar,
+        mc: opts.montecarlo.cloned(),
     };
     if !opts.quiet {
         let costs_active = universe
@@ -638,6 +729,7 @@ pub fn run_multi(
 
     let any = StrategySpec::Multi(Box::new(spec.clone()));
     let iter = iterate(&any, bars.clone(), &snapshots, &inputs, opts)?;
+    emit_montecarlo(&iter, opts)?;
 
     write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
     if !opts.quiet {
@@ -764,6 +856,7 @@ pub fn run_portfolio(
         effective_freq,
         windowed: windowed_bars,
         seconds_per_bar,
+        mc: opts.montecarlo.cloned(),
     };
     if !opts.quiet {
         // Costs are active if the unscoped default is non-empty or any
@@ -782,6 +875,7 @@ pub fn run_portfolio(
 
     let any = StrategySpec::Portfolio(Box::new(spec.clone()));
     let iter = iterate(&any, bars.clone(), &snapshots, &inputs, opts)?;
+    emit_montecarlo(&iter, opts)?;
 
     write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
     if !opts.quiet {
