@@ -401,6 +401,9 @@ impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> SingleAssetStrategy<Sym> {
     }
 }
 
+// Consumed only by the `spec`-gated `DynSingleStrategy` wrapper; unreachable
+// (but still compiled + type-checked) when the `spec` feature is off.
+#[cfg_attr(not(feature = "spec"), allow(dead_code))]
 impl<Sym> SingleAssetStrategy<Sym>
 where
     Sym: Clone + Hash + Eq + 'static + Send + Sync + serde::Serialize + serde::de::DeserializeOwned,

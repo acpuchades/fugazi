@@ -1095,6 +1095,8 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Default for Bas
     }
 }
 
+// Consumed only by the `spec`-gated `DynBasketStrategy` wrapper.
+#[cfg_attr(not(feature = "spec"), allow(dead_code))]
 impl<Sym> BasketStrategy<Sym>
 where
     Sym: Clone + Hash + Eq + 'static + Send + Sync + serde::Serialize + serde::de::DeserializeOwned,

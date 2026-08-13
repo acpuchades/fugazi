@@ -484,6 +484,8 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Pair
     }
 }
 
+// Consumed only by the `spec`-gated `DynPairsStrategy` wrapper.
+#[cfg_attr(not(feature = "spec"), allow(dead_code))]
 impl<Sym> PairsStrategy<Sym>
 where
     Sym: Clone + std::hash::Hash + Eq + 'static + Send + Sync + serde::Serialize + serde::de::DeserializeOwned,

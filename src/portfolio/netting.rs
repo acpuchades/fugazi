@@ -104,6 +104,10 @@ pub(super) struct PortfolioInner<Sym> {
     seeds: Vec<Real>,
 }
 
+// `snapshot`/`restore` are consumed only by `Portfolio::{save_state,restore_state}`,
+// which the `spec`-gated `DynPortfolio` wrapper drives — unreachable when `spec`
+// is off.
+#[cfg_attr(not(feature = "spec"), allow(dead_code))]
 impl<Sym: Clone + Eq + Hash + Serialize + DeserializeOwned> PortfolioInner<Sym> {
     /// Serialize the persistent, cross-bar portfolio state for run resuming: the
     /// per-child notional ledgers (cash + positions — the "Σ ledgers == account"

@@ -375,6 +375,8 @@ impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
     /// with the correct cash / positions / aggregate equity, while each child's
     /// indicator chains re-warm — the one shape whose resume is state-level for
     /// the account but warm-up-level for the children.
+    // Consumed only by the `spec`-gated `DynPortfolio` wrapper.
+    #[cfg_attr(not(feature = "spec"), allow(dead_code))]
     pub(crate) fn save_state(&self) -> serde_json::Value
     where
         Sym: serde::Serialize + serde::de::DeserializeOwned,
@@ -386,6 +388,7 @@ impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
     }
 
     /// Restore state produced by [`save_state`](Self::save_state).
+    #[cfg_attr(not(feature = "spec"), allow(dead_code))]
     pub(crate) fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String>
     where
         Sym: serde::Serialize + serde::de::DeserializeOwned,

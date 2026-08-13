@@ -593,6 +593,8 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Default for Mul
     }
 }
 
+// Consumed only by the `spec`-gated `DynMultiAssetStrategy` wrapper.
+#[cfg_attr(not(feature = "spec"), allow(dead_code))]
 impl<Sym> MultiAssetStrategy<Sym>
 where
     Sym: Clone + Hash + Eq + 'static + Send + Sync + serde::Serialize + serde::de::DeserializeOwned,
