@@ -130,6 +130,13 @@ fn single_asset_ema_crossover_resumes_identically() {
     let sch = schema();
     let snaps = single_snaps(60);
     assert_resume_matches(|| spec.build(CASH, &sch), &snaps, 30);
+
+    // Split *during* warm-up (before the EMA-8 seed has settled): proves the IIR
+    // seed itself is serialized and restored exactly — the whole reason for
+    // serde_json's `float_roundtrip`. A replay-based scheme couldn't do this
+    // without re-feeding the pre-split bars.
+    let sch2 = schema();
+    assert_resume_matches(|| spec.build(CASH, &sch2), &snaps, 4);
 }
 
 #[test]
