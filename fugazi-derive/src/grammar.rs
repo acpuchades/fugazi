@@ -63,27 +63,36 @@ fn variant_tag(
     let doc = doc_string(&variant.attrs);
     let (kind, output, since) = variant_grammar(variant)?;
 
-    let (shape, field_exprs) = match &variant.fields {
-        Fields::Unit => ("unit", Vec::new()),
+    // `payload` is the grammar type of the single positional value on a
+    // `newtype` / `seq` tag (which has no named fields) — the schema layer needs
+    // it to know whether `!not <node>`, `!every <uint>`, or `!value <literal>`.
+    // `None` for `unit` / `map`.
+    let (shape, field_exprs, payload) = match &variant.fields {
+        Fields::Unit => ("unit", Vec::new(), None),
         Fields::Named(named) => {
             let mut fields = Vec::new();
             for field in &named.named {
                 fields.push(field_expr(field)?);
             }
-            ("map", fields)
+            ("map", fields, None)
         }
         Fields::Unnamed(unnamed) => {
+            let payload = unnamed
+                .unnamed
+                .first()
+                .map(|f| grammar_type(&type_string(&f.ty)).to_owned());
             // A single positional payload. `seq` when it's a list, else `newtype`.
             let is_seq = unnamed
                 .unnamed
                 .first()
                 .map(|f| type_string(&f.ty).starts_with("Vec"))
                 .unwrap_or(false);
-            (if is_seq { "seq" } else { "newtype" }, Vec::new())
+            (if is_seq { "seq" } else { "newtype" }, Vec::new(), payload)
         }
     };
 
     let doc_expr = opt_string(doc);
+    let payload_expr = opt_string(payload);
     Ok(quote! {
         crate::spec::grammar::GrammarTag {
             name: #tag_name.to_owned(),
@@ -93,6 +102,7 @@ fn variant_tag(
             fields: ::std::vec![ #(#field_exprs),* ],
             output: #output.to_owned(),
             projections: ::std::vec::Vec::new(),
+            payload: #payload_expr,
             doc: #doc_expr,
             since: #since.to_owned(),
         }
@@ -151,6 +161,9 @@ fn grammar_type(ty_str: &str) -> &'static str {
         }
     } else if inner.contains("SelectionRuleSpec") {
         "selection"
+    } else if inner.contains("ValueLit") {
+        // A constant leaf: number | string | bool | list-of-number.
+        "literal"
     } else if inner.contains("MatchCase") {
         "match_cases"
     } else if inner.contains("AnyStrategyRef") {

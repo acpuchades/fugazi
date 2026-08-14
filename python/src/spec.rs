@@ -808,6 +808,38 @@ pub(crate) fn spec_grammar(py: Python<'_>) -> PyResult<Py<PyAny>> {
     json_to_py(py, &doc)
 }
 
+/// A JSON Schema (draft 2020-12) for the spec's expression grammar, derived from
+/// the same serde definitions as [`spec_grammar`] — the one artifact `load_spec`
+/// validation, an editor form, and external tooling can all key off.
+///
+/// Validates the **JSON bridge form** of an expression: the single-key
+/// `{ "<tag>": { <fields> } }` objects the dict path accepts, plus the
+/// bare-literal shorthands (`70`, `"close"`). The root `$ref`s `#/$defs/node`;
+/// `#/$defs/selection` covers the `basket:` `selection:` vocabulary. It checks
+/// *structure* — the Real/Bool/Str type discipline stays in the build-time type
+/// checker. (Phase 1: the expression grammar; the whole-document envelope is a
+/// planned follow-up.)
+#[pyfunction]
+pub(crate) fn spec_json_schema(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let schema = fugazi_core::spec::grammar::spec_json_schema();
+    json_to_py(py, &schema)
+}
+
+/// A JSON Schema (draft 2020-12) for a whole **spec document** — the five
+/// strategy shapes (single / pairs / basket / multi / portfolio) and their
+/// slots — `$ref`-ing the same expression grammar as [`spec_json_schema`] for
+/// every signal / level / score / sizing / weight slot.
+///
+/// The root is a `oneOf` over the five shapes (disjoint by their required keys).
+/// Same caveats: validates the JSON bridge form, checks *structure*, and
+/// complements `fugazi check` rather than replacing it. Nested portfolio-child
+/// strategies are validated only as non-empty mappings.
+#[pyfunction]
+pub(crate) fn spec_document_json_schema(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let schema = fugazi_core::spec::grammar::spec_document_json_schema();
+    json_to_py(py, &schema)
+}
+
 /// Every tag the YAML spec layer accepts, grouped by the vocabulary it belongs
 /// to: `"node"` (the one composable expression enum — numeric sources, boolean
 /// predicates, and string comparisons together) and `"selection"` (a `basket:`

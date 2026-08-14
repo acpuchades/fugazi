@@ -123,7 +123,8 @@ pub fn load_value_pre_params(
 pub use basket::{BasketStrategySpec, SelectionRuleSpec};
 pub use expr::NodeSpec;
 pub use grammar::{
-    GrammarField, GrammarTag, SCHEMA_VERSION, SINCE_BASELINE, spec_grammar, spec_grammar_document,
+    GrammarField, GrammarTag, SCHEMA_VERSION, SINCE_BASELINE, spec_document_json_schema,
+    spec_grammar, spec_grammar_document, spec_json_schema,
 };
 #[allow(unused_imports)]
 pub use expr::ValueLit;

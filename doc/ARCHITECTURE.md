@@ -1001,6 +1001,16 @@ descriptor, and (test-pinned) the pyo3 signatures. **Multi-output indicators are
 separate scalar tags** (`macd_line`, `bb_upper`, …), so `output` is `scalar` and
 `projections` is empty for them — there are no `struct`-output node tags today.
 
+`spec_json_schema()` (`fugazi.spec_json_schema()`) is a second projection of the same
+descriptor: a JSON Schema (draft 2020-12) for the expression grammar's **JSON bridge form**
+(single-key `{tag: body}` objects + bare-literal shorthands + authored load-time
+placeholders), for structural validation by consumers without the Rust build path.
+`spec_document_json_schema()` extends it to the whole document — the five strategy shapes as
+a `oneOf`, each `$ref`-ing the same node/selection grammar for every expression slot. Both are
+**complementary to `fugazi check`**, not a replacement — `check` (the typed parse) remains the
+authority, validating the type discipline and build-time semantics the schema can't express.
+See [proposals/spec-json-schema.md](proposals/spec-json-schema.md).
+
 - **New indicator/signal/operator** → `#[pyfunction]`, register in `#[pymodule] fn
   fugazi`, smoke test in `python/tests/test_fugazi.py`. Single-output real-source use
   `src_period!`; bar-only `bar_period!`/`bar_noarg!`; multi-output `bar_period_multi!`

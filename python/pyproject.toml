@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "fugazi"
-version = "0.47.0"
+version = "0.48.0"
 description = "Python bindings for the fugazi incremental technical-analysis library"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -20,7 +20,7 @@ classifiers = [
 Repository = "https://github.com/acpuchades/fugazi"
 
 [project.optional-dependencies]
-test = ["pytest", "numpy", "pandas", "polars"]
+test = ["pytest", "numpy", "pandas", "polars", "jsonschema", "pyyaml"]
 
 [tool.maturin]
 # The crate's `[lib] name = "fugazi"` produces the importable module.

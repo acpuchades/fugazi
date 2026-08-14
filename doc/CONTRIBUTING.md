@@ -119,6 +119,10 @@ Foo { source, period } => dyn_indicator::wrap(
   from its `#[serde(default = "…")]`, so a canonical numeric default belongs in
   a const-backed default fn (see `MACD_FAST` & co. in `expr.rs`), not hard-coded
   in the Python signature — the parity test pins the two together.
+  `spec_json_schema()` is a further projection of the descriptor, so a
+  correctly-annotated tag flows into the JSON Schema for free (a brand-new
+  *field type* is the one exception — it lands as `"other"` until you add its
+  fragment to `type_fragment` in `spec::grammar` and to the test's `FIELD_TYPES`).
 - **Report bad input with `Err`, never `panic!`.** See
   [Build errors are values](../CLAUDE.md#build-errors-are-values).
 

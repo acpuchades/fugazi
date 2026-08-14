@@ -75,6 +75,7 @@ fn every_tag_is_well_formed() {
         "match_cases",
         "str_operand",
         "selection",
+        "literal",
         "other",
     ];
 
@@ -93,9 +94,19 @@ fn every_tag_is_well_formed() {
             tag.name,
             tag.output
         );
-        // Only `map` tags carry fields.
+        // Only `map` tags carry fields; only `newtype`/`seq` carry a payload.
         if tag.shape != "map" {
             assert!(tag.fields.is_empty(), "!{}: non-map tag has fields", tag.name);
+        }
+        match tag.shape.as_str() {
+            "newtype" | "seq" => assert!(
+                tag.payload.as_deref().is_some_and(|p| FIELD_TYPES.contains(&p)),
+                "!{}: {} tag needs a known payload type, got {:?}",
+                tag.name,
+                tag.shape,
+                tag.payload
+            ),
+            _ => assert!(tag.payload.is_none(), "!{}: {} tag has a payload", tag.name, tag.shape),
         }
         for f in &tag.fields {
             assert!(
