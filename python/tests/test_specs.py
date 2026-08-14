@@ -630,7 +630,7 @@ def test_evaluate_embeds_montecarlo_block():
     spec = ta.load_spec(_MC_YAML)
     snaps = _snaps_single("X", _wobbly(120))
     cfg = ta.MonteCarloConfig(
-        permutations=200, scheme="stationary", block=8.0, seed=7, null="both"
+        permutations=200, scheme="stationary", block=8.0, seed=7, null="rerun"
     )
     m = spec.evaluate(ta.PaperWallet(1000.0), snaps, bars_per_year=365.0, montecarlo=cfg)
 
@@ -641,8 +641,6 @@ def test_evaluate_embeds_montecarlo_block():
     assert len(mc["metrics"]) >= 1
     row = mc["metrics"][0]
     assert row["ci_lower"] <= row["ci_upper"]
-    # `null="both"` requests the (single-asset) cheap null and the re-run null.
-    assert 0.0 < row["p_value_cheap"] <= 1.0
     assert 0.0 < row["p_value_rerun"] <= 1.0
 
 
@@ -656,8 +654,8 @@ def test_evaluate_without_montecarlo_has_no_block():
 def test_montecarlo_reproducible_across_calls():
     spec = ta.load_spec(_MC_YAML)
     snaps = _snaps_single("X", _wobbly(100))
-    cfg = ta.MonteCarloConfig(permutations=150, seed=42, null="cheap", metrics=["sharpe"])
+    cfg = ta.MonteCarloConfig(permutations=150, seed=42, null="rerun", metrics=["sharpe"])
     a = spec.evaluate(ta.PaperWallet(1000.0), snaps, montecarlo=cfg)["montecarlo"]
     b = spec.evaluate(ta.PaperWallet(1000.0), snaps, montecarlo=cfg)["montecarlo"]
     assert a["metrics"][0]["ci_lower"] == b["metrics"][0]["ci_lower"]
-    assert a["metrics"][0]["p_value_cheap"] == b["metrics"][0]["p_value_cheap"]
+    assert a["metrics"][0]["p_value_rerun"] == b["metrics"][0]["p_value_rerun"]

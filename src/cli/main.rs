@@ -245,7 +245,7 @@ struct RunArgs {
     /// confidence intervals and empirical-null p-values for a handful of
     /// headline metrics, written to a `montecarlo:` block in `metrics.yml` and
     /// the per-resample values to `montecarlo.csv`. Opt-in because the re-run
-    /// null (`--mc-null rerun`/`both`) re-drives the whole backtest once per
+    /// null (see `--mc-null`) re-drives the whole backtest once per
     /// permutation.
     #[arg(long = "montecarlo")]
     montecarlo: bool,
@@ -271,12 +271,11 @@ struct RunArgs {
     #[arg(long = "mc-seed", value_name = "S", default_value_t = 0)]
     mc_seed: u64,
 
-    /// Which empirical null to test for p-values. `cheap` (default) holds the
-    /// realized positions fixed and re-pairs them with resampled market
-    /// returns (single-asset only); `rerun` re-trades the strategy on
-    /// resampled synthetic price paths (all shapes, expensive); `both` runs
-    /// both; `none` computes only the bootstrap confidence intervals.
-    #[arg(long = "mc-null", value_enum, default_value_t = McNullArg::Cheap)]
+    /// Which empirical null to test for p-values. `rerun` (default) re-trades
+    /// the strategy on resampled synthetic price paths (all shapes,
+    /// expensive — one full backtest per permutation); `none` computes only
+    /// the bootstrap confidence intervals.
+    #[arg(long = "mc-null", value_enum, default_value_t = McNullArg::Rerun)]
     mc_null: McNullArg,
 
     /// Two-sided confidence level for the bootstrap intervals. Default 0.95.
@@ -302,9 +301,7 @@ enum McSchemeArg {
 #[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
 enum McNullArg {
     None,
-    Cheap,
     Rerun,
-    Both,
 }
 
 /// What kind of spec `fugazi check` is checking. Nested subcommand so each
@@ -843,18 +840,15 @@ fn run(args: RunArgs) -> Result<()> {
                 mean_block: args.mc_block,
             },
         };
-        let (cheap_null, rerun_null) = match args.mc_null {
-            McNullArg::None => (false, false),
-            McNullArg::Cheap => (true, false),
-            McNullArg::Rerun => (false, true),
-            McNullArg::Both => (true, true),
+        let rerun_null = match args.mc_null {
+            McNullArg::None => false,
+            McNullArg::Rerun => true,
         };
         McConfig {
             permutations: args.mc_permutations,
             scheme,
             seed: args.mc_seed,
             ci_level: args.mc_ci,
-            cheap_null,
             rerun_null,
             metrics: args.mc_metrics.clone(),
         }

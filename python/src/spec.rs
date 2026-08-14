@@ -185,7 +185,7 @@ impl PyCostConfig {
 /// bootstrap confidence intervals plus empirical-null p-values, over a chosen
 /// resampling scheme. `scheme` is one of `iid` / `moving-block` / `stationary`
 /// (default), `block` its (expected) block length, `null` one of
-/// `none` / `cheap` / `rerun` / `both` (which empirical null to test), and
+/// `none` / `rerun` (default; which empirical null to test), and
 /// `metrics` an optional list of metric names (default: a headline set).
 #[pyclass(name = "MonteCarloConfig", module = "fugazi", from_py_object)]
 #[derive(Clone)]
@@ -202,7 +202,7 @@ impl PyMonteCarloConfig {
         block = 10.0,
         seed = 0,
         ci_level = 0.95,
-        null = "cheap",
+        null = "rerun",
         metrics = None,
     ))]
     fn new(
@@ -226,14 +226,12 @@ impl PyMonteCarloConfig {
                 )));
             }
         };
-        let (cheap_null, rerun_null) = match null {
-            "none" => (false, false),
-            "cheap" => (true, false),
-            "rerun" => (false, true),
-            "both" => (true, true),
+        let rerun_null = match null {
+            "none" => false,
+            "rerun" => true,
             other => {
                 return Err(PyValueError::new_err(format!(
-                    "unknown null `{other}` (expected none | cheap | rerun | both)"
+                    "unknown null `{other}` (expected none | rerun)"
                 )));
             }
         };
@@ -243,7 +241,6 @@ impl PyMonteCarloConfig {
                 scheme,
                 seed,
                 ci_level,
-                cheap_null,
                 rerun_null,
                 metrics: metrics.unwrap_or_default(),
             },

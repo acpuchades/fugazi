@@ -700,25 +700,27 @@ unasked. Two layers:
   short-range serial dependence an IID bootstrap destroys; **stationary is the
   default**.
 - **`src/spec/montecarlo.rs`** (`montecarlo` + `spec`; `spec ⇒ parallel`, so rayon)
-  — the three estimators over a completed `RunReport`. `McConfig { permutations,
-  scheme, seed, ci_level, cheap_null, rerun_null, metrics }`; `run_montecarlo(spec,
+  — the two estimators over a completed `RunReport`. `McConfig { permutations,
+  scheme, seed, ci_level, rerun_null, metrics }`; `run_montecarlo(spec,
   snapshots, ctx, observed, config) -> McOutcome { section, samples }`:
   1. **Bootstrap CIs** (shape-agnostic) — resample the run's realized per-bar
      returns, rebuild the equity path, reduce via `EvalContext::reduce`, take a
      percentile CI + bootstrap std error per metric. **Trade-level metrics come back
      `None`** (no fills on a resampled return path).
-  2. **Cheap null p-values** (**single-asset only**) — reconstruct per-bar signed
-     *exposure* and the symbol's market returns, block-resample the market returns,
-     recompute `exposure · resampled_return`. Skipped silently for multi-symbol.
-  3. **Re-run null p-values** (all shapes) — block-resample the input **price paths**
+  2. **Re-run null p-values** (all shapes) — block-resample the input **price paths**
      (candle reconstruction preserving intrabar OHLC geometry; joint bar-index order
      keeps the cross-section aligned) and re-drive the strategy via
      `measured_report_any` once per permutation, **in parallel** (index sequences
      drawn up front, sequentially, so the parallel map stays deterministic).
 
-  A single seed drives every estimator (drawn CI → cheap → rerun). p-values are
+  A single seed drives every estimator (drawn CI → rerun). p-values are
   one-sided `(1 + #extreme) / (1 + N)` with a per-metric direction
-  (`metric_is_maximize`).
+  (`metric_is_maximize`). Superseded, do not reintroduce: a "cheap" null that froze
+  the run's realized per-bar exposure and re-paired it with resampled *market*
+  returns without re-trading — single-asset only, and it answered a narrower
+  question (was the realized position sequence well-timed) than the strategy-level
+  claim ("would this edge survive a shuffle of the underlying order of events")
+  that `--montecarlo` is meant to answer.
 
 - **Where it runs — the backtest layer, not the CLI.** The config rides on
   **`EvalContext::mc: Option<McConfig>`**. `McConfig`/`ResampleScheme`/`McSamples`
@@ -732,7 +734,7 @@ unasked. Two layers:
 - **Output.** `McSection` (plain data) is an `Option<McSection>` field on the
   `Metrics` document. CLI flags: `--montecarlo`, `--mc-permutations N` (1000),
   `--mc-scheme iid|moving-block|stationary`, `--mc-block L` (10), `--mc-seed S` (0),
-  `--mc-null none|cheap|rerun|both` (cheap), `--mc-ci LEVEL` (0.95), `--mc-metrics`.
+  `--mc-null none|rerun` (rerun), `--mc-ci LEVEL` (0.95), `--mc-metrics`.
   **Not on `optimize`**. **Python:** `StrategySpec.evaluate(montecarlo=ta.MonteCarloConfig(...))`.
   `tests/montecarlo.rs` + `python/tests/test_specs.py` are the gates.
 

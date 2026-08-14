@@ -1,12 +1,11 @@
 //! Acceptance gate for the Monte Carlo significance feature.
 //!
 //! Covers the whole surface at the library level: the resampling core, the
-//! bootstrap CIs, and both empirical-null p-values (cheap + re-run). The
-//! headline promise the tests pin is **reproducibility** — a fixed seed
-//! reproduces every CI and p-value bit-for-bit — plus the statistical
-//! invariants (CIs ordered and bracketing the point estimate's neighbourhood,
-//! p-values in `(0, 1]`) and a power/size sanity check on a constructed
-//! no-edge series.
+//! bootstrap CIs, and the re-run empirical-null p-value. The headline promise
+//! the tests pin is **reproducibility** — a fixed seed reproduces every CI and
+//! p-value bit-for-bit — plus the statistical invariants (CIs ordered and
+//! bracketing the point estimate's neighbourhood, p-values in `(0, 1]`) and a
+//! power/size sanity check on a constructed no-edge series.
 
 use fugazi::market::Real;
 use fugazi::montecarlo::ResampleScheme;
@@ -90,7 +89,6 @@ fn same_seed_reproduces_every_number() {
         scheme: ResampleScheme::Stationary { mean_block: 8.0 },
         seed: 123,
         ci_level: 0.95,
-        cheap_null: true,
         rerun_null: true,
         metrics: Vec::new(),
     };
@@ -104,7 +102,6 @@ fn same_seed_reproduces_every_number() {
         assert_eq!(x.observed, y.observed, "observed drifted for {}", x.name);
         assert_eq!(x.ci_lower, y.ci_lower, "ci_lower drifted for {}", x.name);
         assert_eq!(x.ci_upper, y.ci_upper, "ci_upper drifted for {}", x.name);
-        assert_eq!(x.p_value_cheap, y.p_value_cheap, "p(cheap) drifted for {}", x.name);
         assert_eq!(x.p_value_rerun, y.p_value_rerun, "p(rerun) drifted for {}", x.name);
     }
 }
@@ -118,7 +115,6 @@ fn a_different_seed_moves_the_numbers() {
         scheme: ResampleScheme::Stationary { mean_block: 8.0 },
         seed: 1,
         ci_level: 0.95,
-        cheap_null: true,
         rerun_null: false,
         metrics: vec!["sharpe".to_string()],
     };
@@ -142,7 +138,6 @@ fn invariants_hold_ci_ordered_and_pvalues_in_unit_interval() {
         scheme: ResampleScheme::MovingBlock { block: 10 },
         seed: 42,
         ci_level: 0.9,
-        cheap_null: true,
         rerun_null: true,
         metrics: Vec::new(),
     };
@@ -152,16 +147,17 @@ fn invariants_hold_ci_ordered_and_pvalues_in_unit_interval() {
         if let (Some(lo), Some(hi)) = (m.ci_lower, m.ci_upper) {
             assert!(lo <= hi, "{} CI inverted: [{lo}, {hi}]", m.name);
         }
-        for p in [m.p_value_cheap, m.p_value_rerun].into_iter().flatten() {
+        if let Some(p) = m.p_value_rerun {
             assert!(p > 0.0 && p <= 1.0, "{} p-value out of (0,1]: {p}", m.name);
         }
     }
 }
 
 #[test]
-fn multi_symbol_skips_cheap_null_but_still_reruns() {
-    // The cheap null is single-asset only; a multi-symbol basket must leave
-    // p(cheap) unset while the re-run null still produces p-values.
+fn multi_symbol_still_produces_a_rerun_pvalue() {
+    // The re-run null works on every shape (unlike the old positions-held
+    // null it replaced, which was single-asset only); a multi-symbol basket
+    // must still produce p(rerun).
     let yaml = r#"
         selection: !top_bottom { longs: 1, shorts: 1 }
         score: !roc { source: !close, period: 3 }
@@ -193,13 +189,11 @@ fn multi_symbol_skips_cheap_null_but_still_reruns() {
         scheme: ResampleScheme::Stationary { mean_block: 6.0 },
         seed: 5,
         ci_level: 0.95,
-        cheap_null: true,
         rerun_null: true,
         metrics: vec!["sharpe".to_string()],
     };
     let section = run_mc(&spec, &snaps, &config).section;
     let m = &section.metrics[0];
-    assert!(m.p_value_cheap.is_none(), "cheap null must be skipped for multi-symbol");
     assert!(m.p_value_rerun.is_some(), "re-run null should still produce a p-value");
 }
 
@@ -219,7 +213,6 @@ fn backtest_layer_populates_montecarlo_not_just_the_cli() {
         scheme: ResampleScheme::Stationary { mean_block: 8.0 },
         seed: 11,
         ci_level: 0.95,
-        cheap_null: true,
         rerun_null: true,
         metrics: vec!["sharpe".to_string()],
     });
@@ -229,7 +222,7 @@ fn backtest_layer_populates_montecarlo_not_just_the_cli() {
     assert_eq!(section.metrics.len(), 1);
     assert_eq!(section.metrics[0].name, "risk_adjusted.sharpe");
     let samples = iter.mc_samples.expect("samples surfaced on IterationResult");
-    assert_eq!(samples.sets.len(), 3); // ci + cheap + rerun
+    assert_eq!(samples.sets.len(), 2); // ci + rerun
 }
 
 #[test]
@@ -241,13 +234,12 @@ fn samples_csv_shape_matches_estimators() {
         scheme: ResampleScheme::Iid,
         seed: 9,
         ci_level: 0.95,
-        cheap_null: true,
         rerun_null: true,
         metrics: Vec::new(),
     };
     let outcome = run_mc(&spec, &snaps, &config);
-    // bootstrap_ci + null_cheap + null_rerun, each with `permutations` rows.
-    assert_eq!(outcome.samples.sets.len(), 3);
+    // bootstrap_ci + null_rerun, each with `permutations` rows.
+    assert_eq!(outcome.samples.sets.len(), 2);
     for set in &outcome.samples.sets {
         assert_eq!(set.rows.len(), 50, "estimator {} row count", set.estimator);
         for row in &set.rows {

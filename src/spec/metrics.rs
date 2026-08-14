@@ -87,11 +87,6 @@ pub struct McMetric {
     /// Bootstrap standard error (stddev of the resampled estimates).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub std_error: Option<Real>,
-    /// One-sided p-value against the *cheap* null (realized positions held
-    /// against resampled market returns — single-asset only). Small = the
-    /// strategy's positions are aligned with genuine return structure.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub p_value_cheap: Option<Real>,
     /// One-sided p-value against the *re-run* null (the strategy re-traded on
     /// resampled synthetic price paths). Small = the edge survives when the
     /// exploitable serial structure is (block-)randomized away.

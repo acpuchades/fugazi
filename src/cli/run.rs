@@ -225,9 +225,6 @@ fn print_montecarlo_block(section: &fugazi::spec::metrics::McSection) {
             fmt(m.ci_lower),
             fmt(m.ci_upper),
         );
-        if let Some(p) = m.p_value_cheap {
-            let _ = write!(line, "  p(cheap) {p:.4}");
-        }
         if let Some(p) = m.p_value_rerun {
             let _ = write!(line, "  p(rerun) {p:.4}");
         }

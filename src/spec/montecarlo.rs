@@ -1,6 +1,6 @@
 //! Monte Carlo significance analysis over a completed backtest.
 //!
-//! Three estimators, all built on the seeded resampling core in
+//! Two estimators, both built on the seeded resampling core in
 //! [`crate::montecarlo`]:
 //!
 //! 1. **Bootstrap confidence intervals** — resample the run's realized per-bar
@@ -9,16 +9,11 @@
 //!    metric recomputable from a return path (Sharpe, Sortino, Calmar, total
 //!    return, drawdown, …). Trade-level metrics have no meaning on a resampled
 //!    return path and are left `None`.
-//! 2. **Cheap empirical-null p-values** (single-asset only) — hold the run's
-//!    realized per-bar exposure fixed and re-pair it with block-resampled
-//!    *market* returns. Small p = the strategy was positioned in step with
-//!    genuine return structure rather than by luck. No strategy re-run.
-//! 3. **Re-run empirical-null p-values** (all shapes) — block-resample the
+//! 2. **Re-run empirical-null p-values** (all shapes) — block-resample the
 //!    input price paths (chaining each symbol's own returns so intrabar OHLC
 //!    geometry survives) and re-trade the strategy on each synthetic path.
 //!    Small p = the edge survives when the exploitable serial structure is
-//!    randomized away. This is the honest but expensive null; the resamples run
-//!    in parallel.
+//!    randomized away. The resamples run in parallel.
 //!
 //! The resampling *scheme* (IID / moving-block / stationary) is orthogonal to
 //! which estimator runs — see [`crate::montecarlo::ResampleScheme`]. A single
@@ -79,9 +74,6 @@ pub struct McConfig {
     pub seed: u64,
     /// Two-sided confidence level for the bootstrap CIs (e.g. `0.95`).
     pub ci_level: Real,
-    /// Compute the cheap (positions-held-fixed) null p-values. Single-asset
-    /// only; silently skipped for multi-symbol runs.
-    pub cheap_null: bool,
     /// Compute the re-run (re-trade on synthetic paths) null p-values.
     pub rerun_null: bool,
     /// Metric names to analyze (short or dotted; resolved against the run's
@@ -96,8 +88,7 @@ impl Default for McConfig {
             scheme: ResampleScheme::Stationary { mean_block: 10.0 },
             seed: 0,
             ci_level: 0.95,
-            cheap_null: true,
-            rerun_null: false,
+            rerun_null: true,
             metrics: Vec::new(),
         }
     }
@@ -176,30 +167,7 @@ pub fn run_montecarlo(
         rows: ci_rows,
     });
 
-    // --- (2) Cheap null (single-asset) ---------------------------------------
-    let universe = spec.universe(snapshots);
-    let mut p_cheap: Vec<Option<Real>> = vec![None; keys.len()];
-    if config.cheap_null
-        && universe.len() == 1
-        && let Some((exposure, market)) = exposure_and_market(observed, snapshots, &universe[0])
-    {
-        let rows = resampled_metric_rows(n, &mut rng, scheme, &keys, |rng| {
-            let m_star = resample_slice(&market, scheme, rng);
-            let r_star: Vec<Real> = exposure
-                .iter()
-                .zip(m_star.iter())
-                .map(|(e, m)| e * m)
-                .collect();
-            metrics_from_returns(&r_star, observed.initial_equity, ctx)
-        });
-        p_cheap = column_pvalues(&rows, &keys, &observed_values);
-        sample_sets.push(McSampleSet {
-            estimator: "null_cheap",
-            rows,
-        });
-    }
-
-    // --- (3) Re-run null (all shapes, parallel) ------------------------------
+    // --- (2) Re-run null (all shapes, parallel) -------------------------------
     let mut p_rerun: Vec<Option<Real>> = vec![None; keys.len()];
     if config.rerun_null {
         // Draw all index sequences up front (sequential = deterministic), then
@@ -238,7 +206,6 @@ pub fn run_montecarlo(
             ci_lower: ci_stats[i].0,
             ci_upper: ci_stats[i].1,
             std_error: ci_stats[i].2,
-            p_value_cheap: p_cheap[i],
             p_value_rerun: p_rerun[i],
         })
         .collect();
@@ -359,68 +326,6 @@ fn metric_is_maximize(dotted: &str) -> bool {
         "worst",
     ];
     !MINIMIZE.iter().any(|k| dotted.contains(k))
-}
-
-/// Reconstruct the single-asset run's per-bar exposure fraction (held entering
-/// each bar) and the symbol's per-bar market return. `None` if the symbol's
-/// price series can't be recovered from the snapshots.
-#[cfg(feature = "montecarlo")]
-fn exposure_and_market(
-    observed: &crate::RunReport<String>,
-    snapshots: &[Snapshot<String>],
-    symbol: &str,
-) -> Option<(Vec<Real>, Vec<Real>)> {
-    let n = observed.equity_curve.len();
-    if n == 0 || snapshots.len() < n {
-        return None;
-    }
-    // Symbol close per bar.
-    let mut closes = Vec::with_capacity(n);
-    for snap in &snapshots[..n] {
-        let close = snap.iter().find_map(|(s, _f, atom)| {
-            if s.map(|s| s.as_str() == symbol).unwrap_or(true) {
-                atom.candle.map(|c| c.close)
-            } else {
-                None
-            }
-        })?;
-        closes.push(close);
-    }
-    // Signed units established *before* each bar (decided last bar, held this
-    // bar), from the fill blotter.
-    let mut delta = vec![0.0; n];
-    for fill in &observed.fills {
-        if fill.bar < n {
-            let signed = match fill.order.side {
-                crate::wallet::Side::Buy => fill.order.units,
-                crate::wallet::Side::Sell => -fill.order.units,
-            };
-            delta[fill.bar] += signed;
-        }
-    }
-    let mut exposure = vec![0.0; n];
-    let mut market = vec![0.0; n];
-    let mut units_entering = 0.0;
-    for t in 0..n {
-        let equity_prev = if t == 0 {
-            observed.initial_equity
-        } else {
-            observed.equity_curve[t - 1]
-        };
-        let mark_prev = if t == 0 { closes[0] } else { closes[t - 1] };
-        exposure[t] = if equity_prev != 0.0 {
-            units_entering * mark_prev / equity_prev
-        } else {
-            0.0
-        };
-        market[t] = if t == 0 || closes[t - 1] == 0.0 {
-            0.0
-        } else {
-            closes[t] / closes[t - 1] - 1.0
-        };
-        units_entering += delta[t];
-    }
-    Some((exposure, market))
 }
 
 // ---------------------------------------------------------------------------
