@@ -435,6 +435,7 @@ pub fn from_report<Sym>(
 
 /// The [`Metrics`] document of one non-overlapping window of a run, tagged with
 /// the window's bar span so a caller can map it back to times.
+#[derive(Clone, Debug, Serialize)]
 pub struct WindowMetrics {
     /// Zero-based bar index of the window's first bar.
     pub start_bar: usize,

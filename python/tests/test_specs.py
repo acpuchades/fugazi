@@ -668,3 +668,47 @@ def test_montecarlo_reproducible_across_calls():
     b = spec.evaluate(ta.PaperWallet(1000.0), snaps, montecarlo=cfg)["montecarlo"]
     assert a["metrics"][0]["ci_lower"] == b["metrics"][0]["ci_lower"]
     assert a["metrics"][0]["p_value_rerun"] == b["metrics"][0]["p_value_rerun"]
+
+
+# ---------------------------------------------------------------------------
+# evaluate(windowed=...): windowed/rolling reductions for a plain backtest.
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_windowed_embeds_windowed_and_rolling():
+    spec = ta.load_spec(_MC_YAML)
+    bars = 120
+    snaps = _snaps_single("X", _wobbly(bars))
+    m = spec.evaluate(ta.PaperWallet(1000.0), snaps, windowed=30)
+
+    assert "windowed" in m and "rolling" in m
+    windowed = m["windowed"]
+    rolling = m["rolling"]
+
+    # Non-overlapping: ceil(120/30) == 4 independent spans covering every bar.
+    assert len(windowed) == 4
+    assert windowed[0]["start_bar"] == 0
+    assert windowed[0]["end_bar"] == 29
+    assert windowed[-1]["end_bar"] == bars - 1
+    assert "sharpe" in windowed[0]["metrics"]["risk_adjusted"]
+
+    # Rolling: stride-1, so bars - window + 1 overlapping spans.
+    assert len(rolling) == bars - 30 + 1
+    assert rolling[0]["start_bar"] == 0
+    assert rolling[0]["end_bar"] == 29
+    assert rolling[1]["start_bar"] == 1
+
+
+def test_evaluate_without_windowed_has_no_block():
+    spec = ta.load_spec(_MC_YAML)
+    snaps = _snaps_single("X", _wobbly(60))
+    m = spec.evaluate(ta.PaperWallet(1000.0), snaps)
+    assert "windowed" not in m
+    assert "rolling" not in m
+
+
+def test_evaluate_windowed_rejects_zero():
+    spec = ta.load_spec(_MC_YAML)
+    snaps = _snaps_single("X", _wobbly(60))
+    with pytest.raises(ValueError, match="windowed"):
+        spec.evaluate(ta.PaperWallet(1000.0), snaps, windowed=0)

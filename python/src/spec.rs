@@ -672,6 +672,16 @@ impl PyStrategySpec {
     /// report to a metrics document, and return it as a nested dict (mirroring
     /// `metrics.yml`). Convenience over calling `.run(...)` then feeding the
     /// report to `fugazi.metrics.*` — same wallet-first shape as [`Self::run`].
+    ///
+    /// Passing `windowed=N` additionally slices the run into `N`-bar spans —
+    /// exactly `run -w N`'s `metrics.csv`/`rolling.csv` — and embeds them as
+    /// `windowed`/`rolling` list-of-dict keys in the returned dict, each entry
+    /// `{"start_bar", "end_bar", "metrics": {...}}`. `windowed` is
+    /// non-overlapping (independent spans, for cross-window statistics);
+    /// `rolling` advances one bar at a time (heavily autocorrelated, for a
+    /// continuous rolling-Sharpe-style curve). Unlike the CLI's `-w`, this
+    /// takes a plain bar count — no duration/asset-class resolution.
+    ///
     /// Passing `montecarlo=MonteCarloConfig(...)` additionally runs the Monte
     /// Carlo significance pass and embeds its result under a `montecarlo` key
     /// in the returned dict (bootstrap CIs + empirical-null p-values, exactly
@@ -690,6 +700,7 @@ impl PyStrategySpec {
         bars_per_year = 252.0,
         risk_free_rate = 0.0,
         seconds_per_bar = None,
+        windowed = None,
         montecarlo = None,
     ))]
     pub(crate) fn evaluate(
@@ -700,6 +711,7 @@ impl PyStrategySpec {
         bars_per_year: Real,
         risk_free_rate: Real,
         seconds_per_bar: Option<Real>,
+        windowed: Option<usize>,
         montecarlo: Option<PyMonteCarloConfig>,
     ) -> PyResult<Py<PyAny>> {
         let snaps = snapshots_from_sequence(snapshots)?;
@@ -707,6 +719,9 @@ impl PyStrategySpec {
         let report = run_spec(&self.inner, &snaps, &mut wallet.inner)?;
         let mut metrics =
             spec_metrics::from_report(&report, bars_per_year, risk_free_rate, seconds_per_bar);
+        if let Some(0) = windowed {
+            return Err(PyValueError::new_err("`windowed` must be positive"));
+        }
         let mut samples = None;
         if let Some(mc) = montecarlo {
             // The Python surface installs costs on the wallet, not via a
@@ -736,6 +751,23 @@ impl PyStrategySpec {
             && let Some(obj) = value.get_mut("montecarlo").and_then(JsonValue::as_object_mut)
         {
             obj.insert("samples".to_string(), mc_samples_to_json(&samples));
+        }
+        if let Some(w) = windowed {
+            let win_rows =
+                spec_metrics::windowed_from_report(&report, w, bars_per_year, risk_free_rate, seconds_per_bar);
+            let roll_rows =
+                spec_metrics::rolling_from_report(&report, w, bars_per_year, risk_free_rate, seconds_per_bar);
+            let obj = value.as_object_mut().expect("metrics document serializes to an object");
+            obj.insert(
+                "windowed".to_string(),
+                serde_json::to_value(&win_rows)
+                    .map_err(|e| PyValueError::new_err(format!("serializing windowed metrics: {e}")))?,
+            );
+            obj.insert(
+                "rolling".to_string(),
+                serde_json::to_value(&roll_rows)
+                    .map_err(|e| PyValueError::new_err(format!("serializing rolling metrics: {e}")))?,
+            );
         }
         json_to_py(py, &value)
     }

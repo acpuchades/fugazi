@@ -643,6 +643,14 @@ report = spec.run(wallet, snaps)              # -> RunReport
 metrics = spec.evaluate(ta.PaperWallet(1000.0), snaps)  # -> nested dict mirroring metrics.yml
 ```
 
+Pass `windowed=N` to `.evaluate(...)` for the same windowed/rolling reductions
+`run -w N` writes to `metrics.csv`/`rolling.csv`: the returned dict gains
+`windowed` (non-overlapping N-bar spans — independent, for cross-window
+statistics) and `rolling` (stride-1 spans — heavily autocorrelated, for a
+continuous rolling-Sharpe-style curve) keys, each a list of `{"start_bar",
+"end_bar", "metrics"}`. Unlike the CLI's `-w`, this takes a plain bar count —
+no duration/asset-class resolution.
+
 Preset tags (`!buy_and_hold`, `!ma_crossover`, `!rsi_reversal`,
 `!donchian_breakout`, `!keltner_breakout`) work directly:
 
