@@ -85,8 +85,8 @@ fn extract_self_atom<Sym: PartialEq + Clone>(snap: &Snapshot<Sym>, symbol: &Sym)
 /// transition, not mid-position.
 ///
 /// Entries and signal exits are **market orders**: they fill a bar *after* the
-/// signal, at the next bar's `open` (the [`Wallet`](crate::Wallet) queues them —
-/// see [`PaperWallet`](crate::PaperWallet)), so the bar whose `close` triggered
+/// signal, at the next bar's `open` (the [`Wallet`] queues them —
+/// see [`PaperWallet`]), so the bar whose `close` triggered
 /// the signal is never also the bar it fills on. The strategy tracks its own
 /// [`Position`] from the wallet's fill stream (via [`on_fill`](Strategy::on_fill)),
 /// so its side, size and entry price are always the *actual* fills — it never

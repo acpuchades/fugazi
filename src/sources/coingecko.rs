@@ -32,7 +32,7 @@
 //!   The 5-minutely tier only exists for windows too short to backtest over,
 //!   and silently returning daily data for a `5m` request is exactly the kind
 //!   of quietly-wrong number this crate refuses to produce.
-//! * Paginates hourly requests in [`HOURLY_WINDOW_DAYS`]-day windows, keeping
+//! * Paginates hourly requests in `HOURLY_WINDOW_DAYS`-day windows, keeping
 //!   each one inside CoinGecko's hourly tier however long the caller's overall
 //!   range is.
 //! * Buckets whatever samples come back onto the requested interval's bar-open

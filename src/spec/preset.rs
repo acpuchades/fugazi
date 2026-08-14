@@ -114,7 +114,7 @@ impl StrategyPreset {
 ///
 /// Deserialized through a [`serde_norway::Value`] bridge (like
 /// [`NodeSpec`](super::NodeSpec)): a value whose tag / single map key is one of
-/// [`PRESET_TAGS`] parses as a preset, anything else as a full spec. Works
+/// `PRESET_TAGS` parses as a preset, anything else as a full spec. Works
 /// through both the YAML (`serde_norway`) path — the trailing indicators'
 /// `strategy:` field — and the `serde_json` load path — a top-level `fugazi run`
 /// document.

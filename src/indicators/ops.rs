@@ -12,7 +12,7 @@
 //!   steps ago ([`LookbackOp`]): `Lag`, `Diff`, `Ratio`.
 //! * [`Extreme`] — a rolling extremum over a window ([`ExtremeOp`]).
 //!
-//! Candle field accessors live in [`candle`](super::candle).
+//! Candle field accessors live in `candle`.
 
 use std::collections::VecDeque;
 use std::fmt::Debug;

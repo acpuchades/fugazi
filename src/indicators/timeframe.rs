@@ -252,7 +252,7 @@ impl<S: Indicator<Output = Candle>> Indicator for Resample<S> {
 ///
 /// Warm-up and unstable-period are pure passthroughs — `Latch` doesn't add
 /// delay, and (crucially) doesn't mask an unsettled inner value into looking
-/// stable to [`Stable`](super::Stable) or the CLI's gate.
+/// stable to `Stable` or the CLI's gate.
 #[derive(Clone, SaveState)]
 pub struct Latch<S: Indicator> {
     #[state(source)]

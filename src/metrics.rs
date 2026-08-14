@@ -1,6 +1,6 @@
 //! Standalone performance metrics — one function per metric — reducing a
-//! backtest's [`equity_curve`](crate::BacktestReport::equity_curve) and
-//! [`fills`](crate::BacktestReport::fills) to the numbers a reader cares about
+//! backtest's [`equity_curve`](crate::RunReport::equity_curve) and
+//! [`fills`](crate::RunReport::fills) to the numbers a reader cares about
 //! (return moments, Sharpe/Sortino/Calmar, drawdown analytics, round-trip trade
 //! statistics).
 //!
@@ -540,7 +540,7 @@ const EULER_MASCHERONI: Real = 0.577_215_664_901_532_9;
 /// higher-moment adjustment denominator vanishes.
 ///
 /// If your caller already has the observed Sharpe, skewness, and kurtosis
-/// pre-aggregated (e.g. the `optimize` grid where every row's [`Metrics`]
+/// pre-aggregated (e.g. the `optimize` grid where every row's `Metrics`
 /// carries them), use [`probabilistic_sharpe_from_stats`] to skip re-scanning
 /// the returns vector.
 pub fn probabilistic_sharpe(

@@ -19,7 +19,7 @@ pub struct BollingerValue {
 ///
 /// Owns its input source: `Bollinger::new(Current::close(), 20, 2.0)`. The
 /// middle band is the simple moving average; the upper/lower bands sit `k`
-/// (population) standard deviations away. A single shared [`WindowStats`] core
+/// (population) standard deviations away. A single shared `WindowStats` core
 /// provides both the mean and the dispersion over the same window.
 ///
 /// Bands are exposed as public fields and refreshed every update.

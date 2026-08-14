@@ -315,8 +315,8 @@ pub trait DynIndicator: Send + Sync {
     }
     fn reset(&mut self);
     /// Serialize this node's mutable state for run resuming — the erased twin of
-    /// [`Indicator::save_state`](crate::Indicator::save_state). No default: each
-    /// of the four carriers ([`Adapter`], [`As`], [`Chain`], [`UnstableWrap`])
+    /// [`Indicator::save_state`]. No default: each
+    /// of the four carriers ([`Adapter`], [`As`], `Chain`, `UnstableWrap`)
     /// supplies it, threading the recursion across the `Indicator`/`DynIndicator`
     /// boundary so the whole runtime tree is covered.
     fn save_state(&self) -> serde_json::Value;

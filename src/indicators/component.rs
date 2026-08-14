@@ -63,7 +63,7 @@ macro_rules! component_accessors {
                 }
             )+
 
-            /// Wrap this indicator in a [`Shared`] handle so every component
+            /// Wrap this indicator in a [`Shared`](crate::indicators::Shared) handle so every component
             /// accessor called on the handle drives the same underlying
             /// computation — advancing it once per bar regardless of how many
             /// accessors the surrounding expression tree contains.

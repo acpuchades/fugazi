@@ -12,9 +12,9 @@
 //! comparison operators live in [`compare`] and the boolean connectives /
 //! edge detectors in [`logic`].
 //!
-//! Shared lower-level cores keep the math in one place: [`smoothing`]'s
+//! Shared lower-level cores keep the math in one place: `smoothing`'s
 //! `EmaState`/`WilderState` back [`Ema`]/[`Macd`] and [`Rma`]/[`Rsi`]/[`Atr`]/
-//! [`Adx`]; [`stats`]'s `WindowStats` backs [`Sma`]/[`StdDev`]/[`Bollinger`] and
+//! [`Adx`]; `stats`'s `WindowStats` backs [`Sma`]/[`StdDev`]/[`Bollinger`] and
 //! its `WindowExtreme` backs the rolling extremum and [`Stochastic`].
 
 pub mod compare;

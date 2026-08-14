@@ -75,7 +75,7 @@ use super::template::SpecTemplate;
 /// ```
 ///
 /// Omitted (`rebalance_policy:` absent) defaults to
-/// [`Proportional`](crate::portfolio::rebalance::Proportional), matching
+/// [`Proportional`], matching
 /// the [`PortfolioBuilder`](crate::portfolio::PortfolioBuilder) default.
 /// A CLI-only discriminator; at build it constructs the corresponding
 /// [`PositionRebalancer`](crate::portfolio::rebalance::PositionRebalancer)
@@ -88,13 +88,13 @@ use super::template::SpecTemplate;
 pub enum RebalancePolicySpec {
     /// Scale every held leg by the same fraction to cover the shortfall.
     /// The default — matches
-    /// [`Proportional`](crate::portfolio::rebalance::Proportional).
+    /// [`Proportional`].
     Proportional,
 
     /// Fully liquidate biggest positions (by `|units| * price`) first,
     /// walking down until the shortfall is covered. The last position
     /// touched is partially scaled if fully closing it would overshoot.
-    /// Wraps [`LargestFirst`](crate::portfolio::rebalance::LargestFirst).
+    /// Wraps [`LargestFirst`].
     LargestFirst,
 }
 
@@ -529,7 +529,7 @@ impl PortfolioSpec {
     /// the pool rather than the aggregate.
     ///
     /// `costs` is the [`TradingCosts`] bundle installed on every child's
-    /// sub-wallet — [`Portfolio`](crate::portfolio::Portfolio) applies the
+    /// sub-wallet — [`Portfolio`] applies the
     /// same bundle uniformly (v1 constraint: no per-symbol dispatch
     /// through the composite wallet). Pass `None` to skip cost wiring
     /// (matches the zero-cost paper-wallet default the other specs use for
@@ -927,7 +927,7 @@ impl DynPortfolio {
     }
 
     /// Serialize the wrapped portfolio's resumable state (per-child ledgers +
-    /// aggregate book). See [`Portfolio::save_state`] for the children caveat.
+    /// aggregate book). See `Portfolio::save_state` for the children caveat.
     pub fn save_state(&self) -> serde_json::Value {
         self.inner.save_state()
     }

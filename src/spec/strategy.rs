@@ -165,7 +165,7 @@ impl SingleStrategySpec {
     }
 
     /// The fallible twin of [`build`](Self::build): every slot is built through
-    /// [`NodeSpec::try_build`] / [`NodeSpec::try_build`], so a bad expression
+    /// [`NodeSpec::try_build`](crate::spec::expr::NodeSpec::try_build) / [`NodeSpec::try_build`](crate::spec::expr::NodeSpec::try_build), so a bad expression
     /// anywhere in the document comes back as a message with its tag trail
     /// instead of aborting the process.
     pub fn try_build(
@@ -226,10 +226,10 @@ impl SingleStrategySpec {
 
 /// The CLI's built-strategy handle. Wraps a [`SingleAssetStrategy<String>`]
 /// whose entry/exit signals and protective levels came from runtime-typed
-/// [`DynIndicator`]s (bridged into typed [`Signal`](crate::Signal) / real
+/// [`DynIndicator`]s (bridged into typed [`Signal`] / real
 /// levels by the private [`AsBool`] / [`AsReal`] adapters at construction).
 ///
-/// Implements [`Strategy`](crate::Strategy) by delegation, so it drops into
+/// Implements [`Strategy`] by delegation, so it drops into
 /// [`crate::backtest::run`] unchanged.
 pub struct DynSingleStrategy {
     inner: SingleAssetStrategy<String>,

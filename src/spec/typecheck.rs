@@ -14,7 +14,7 @@
 //! skip**, never "invalid". Three things are genuinely undecidable without
 //! data or a driver:
 //!
-//! * `!get { key }` resolves its type against the overlay [`Schema`], which
+//! * `!get { key }` resolves its type against the overlay [`Schema`](crate::Schema), which
 //!   `check` has no access to (there is no `--series` at check time). Any
 //!   expression rooted in a `!get` is therefore unchecked.
 //! * A `!param` / `!arg` placeholder standing in for a whole expression parses
@@ -462,7 +462,7 @@ pub(crate) fn tag_name(spec: &NodeSpec) -> String {
 
 /// Every tag the [`NodeSpec`] layer accepts, in declaration order.
 ///
-/// Same spirit as [`tag_name`]: read it off what serde already knows rather
+/// Same spirit as `tag_name`: read it off what serde already knows rather
 /// than maintaining a parallel table. Feeding the deserializer a tag that
 /// cannot exist makes its derived `unknown variant` error enumerate every
 /// variant it *does* accept — so a new `NodeSpec` variant shows up here with no
@@ -493,7 +493,7 @@ pub fn known_selection_tags() -> Vec<String> {
 /// `!undefined` placeholders resolved by the load passes. They're legitimately
 /// documented in `fugazi list` without appearing in any variant list — so
 /// anything that cross-checks the catalogue against
-/// [`known_expr_tags`] has to know about them.
+/// `known_expr_tags` has to know about them.
 pub const REWRITTEN_TAGS: &[&str] = &["equal_weight", "param", "undefined", "import", "arg"];
 
 /// A tag no variant will ever be named, used to provoke serde's

@@ -1,8 +1,8 @@
-//! The netting layer: N notional [`Ledger`]s over one account, and the
+//! The netting layer: N notional `Ledger`s over one account, and the
 //! arithmetic that keeps them in step.
 //!
-//! [`PortfolioInner`] is the interior a [`Portfolio`](super::Portfolio) shares
-//! with its children (via [`LedgerWallet`]). It owns one ledger per child and a
+//! `PortfolioInner` is the interior a [`Portfolio`](super::Portfolio) shares
+//! with its children (via `LedgerWallet`). It owns one ledger per child and a
 //! per-symbol `marks` cache, but **not** the account: the account is the wallet
 //! [`Portfolio::trade`](super::Portfolio) is handed by the driver, exactly like
 //! every other strategy shape.
@@ -12,19 +12,19 @@
 //! For every symbol, the sum of the children's ledger positions equals the
 //! account's position; the sum of their ledger cash equals the account's cash.
 //! Ledgers are never moved by intent, only by real fills, which is what keeps
-//! that true — and [`check_invariants`](PortfolioInner::check_invariants)
+//! that true — and `check_invariants`
 //! asserts it in tests rather than trusting it.
 //!
 //! # One bar
 //!
 //! 1. The driver feeds the account the bar; the resulting fills reach
 //!    [`Portfolio::on_fill`](super::Portfolio), which calls
-//!    [`attribute_fill`](PortfolioInner::attribute_fill) to move the ledgers
+//!    `attribute_fill` to move the ledgers
 //!    that caused them.
 //! 2. [`Portfolio::update`](super::Portfolio) refreshes `marks` from the
 //!    snapshot and books any fully-crossed flow at that bar's open.
-//! 3. Children trade into [`LedgerWallet`]s, recording intent, then
-//!    [`net_and_submit`](PortfolioInner::net_and_submit) turns every child's
+//! 3. Children trade into `LedgerWallet`s, recording intent, then
+//!    `net_and_submit` turns every child's
 //!    intent into one order per symbol on the passed wallet, and rests the most
 //!    urgent protective leg.
 //!

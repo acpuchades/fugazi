@@ -61,10 +61,10 @@ use crate::spec::dyn_indicator::{AsBool, AsReal, DynIndicator};
 ///
 /// A CLI-only discriminator; at build it constructs the corresponding
 /// [`crate::strategies::basket::Selection`] chain (one of
-/// [`Everything`](crate::strategies::basket::Everything) /
-/// [`TopBottom`](crate::strategies::basket::TopBottom) /
-/// [`Threshold`](crate::strategies::basket::Threshold) /
-/// [`Quantile`](crate::strategies::basket::Quantile)) and installs it via
+/// [`Everything`] /
+/// [`TopBottom`] /
+/// [`Threshold`] /
+/// [`Quantile`]) and installs it via
 /// [`BasketStrategy::selection`](crate::strategies::BasketStrategy::selection).
 /// Rust-side callers with a custom rule build their own `Selection`
 /// impl and install it directly — no CLI-side wiring needed.
@@ -320,7 +320,7 @@ impl BasketStrategySpec {
     /// The eager parts (the rebalance gate) are built through `try_build`
     /// directly. The per-symbol `score` / `sizing` / protective-level templates
     /// can't be, because their factories run lazily inside the driver — so each
-    /// is validated once here against a probe symbol (see [`probe_template`]),
+    /// is validated once here against a probe symbol (see `probe_template`),
     /// which is what makes those closures' remaining panic unreachable.
     pub fn try_build(
         &self,
@@ -549,7 +549,7 @@ fn probe_template(
 /// per-symbol score / sizing factories were assembled from
 /// [`SpecTemplate<NodeSpec>`](SpecTemplate).
 ///
-/// Implements [`Strategy`](crate::Strategy) by delegation, so it drops
+/// Implements [`Strategy`] by delegation, so it drops
 /// into [`crate::backtest::run`] unchanged (once the CLI dispatch grows
 /// a `basket:` prefix — a follow-up).
 pub struct DynBasketStrategy {

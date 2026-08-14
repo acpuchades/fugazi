@@ -10,7 +10,7 @@ use crate::types::Real;
 /// mean, stddev and third moment all taken over the *same* `period` window (a
 /// genuine fixed-window statistic, not a causal running-mean approximation).
 /// Owns its input source: `Skewness::new(Current::close(), 20)`. Backed by the
-/// shared [`WindowStats`] core. Produces `None` until the window is full; once
+/// shared `WindowStats` core. Produces `None` until the window is full; once
 /// full, a dispersion-free window reads `0.0` (skewness is undefined without
 /// spread).
 ///

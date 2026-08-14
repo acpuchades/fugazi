@@ -119,7 +119,7 @@ impl Clone for Box<dyn SlippageModel> {
 /// The three cost models a [`PaperWallet`](crate::PaperWallet) applies to every
 /// fill. Bundles cheaply into a caller-owned [`Clone`] so one bundle can seed
 /// multiple wallets (a portfolio of N sub-wallets, per-symbol overrides via
-/// [`PaperWallet::set_costs_for`](crate::PaperWallet::set_costs_for)). See
+/// [`Wallet::set_costs_for`](crate::Wallet::set_costs_for)). See
 /// the trait docs for the [`clone_box`](CommissionModel::clone_box) contract.
 #[derive(Clone)]
 /// fill, bundled together so the wallet holds one field and a caller passes one

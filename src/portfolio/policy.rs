@@ -2,7 +2,7 @@
 //! fraction of aggregate equity each child should hold, plus the two
 //! stateless built-ins ([`Fixed`], [`EqualWeight`]).
 //!
-//! A weight policy is polled twice per bar by [`Portfolio`]: once as
+//! A weight policy is polled twice per bar by [`Portfolio`](super::Portfolio): once as
 //! [`observe`](WeightPolicy::observe) — every child's per-bar equity /
 //! funds so the policy can accumulate whatever state it needs — and once
 //! as [`weights`](WeightPolicy::weights) — the current target weights,

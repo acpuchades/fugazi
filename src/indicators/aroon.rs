@@ -23,7 +23,7 @@ pub struct AroonValue {
 /// fresh high pins Aroon Up at `100`, decaying by `100/period` per bar until a
 /// newer high appears (and symmetrically for Aroon Down on lows). Their
 /// difference is the Aroon Oscillator. Both rolling extrema reuse the shared
-/// [`WindowExtreme`] core via its `since` query. Ready after `period + 1` bars.
+/// `WindowExtreme` core via its `since` query. Ready after `period + 1` bars.
 #[derive(Debug, Clone, SaveState)]
 pub struct Aroon<S> {
     #[state(source)]

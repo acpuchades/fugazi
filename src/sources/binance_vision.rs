@@ -109,7 +109,7 @@ const DEFAULT_MAX_IN_FLIGHT: usize = 8;
 /// The columns a client exposes, by market.
 ///
 /// The spot schema is a **prefix** of the futures one, so a slot index means
-/// the same column in both and [`Archive::columns`] can name one set of
+/// the same column in both and `Archive::columns` can name one set of
 /// indexes. Order is the contract those indexes rest on; the two must be
 /// changed together.
 pub fn binance_vision_schema(market: Market) -> &'static Arc<Schema> {
@@ -149,7 +149,7 @@ pub fn binance_vision_schema(market: Market) -> &'static Arc<Schema> {
 ///
 /// The `symbol` is a **perpetual contract** symbol (`BTCUSDT`, `ETHUSDT`) —
 /// which mostly coincides with the spot vocabulary but is not the same list.
-/// Enumerate it with [`OverlaySource::tickers`]
+/// Enumerate it with [`SeriesSource::tickers`]
 /// (`fugazi list tickers binance-vision`).
 #[derive(Debug, Clone)]
 pub struct BinanceVision {

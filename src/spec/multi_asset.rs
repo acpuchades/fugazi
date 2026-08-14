@@ -26,7 +26,7 @@
 //! ```
 //!
 //! `enter` / `exit` / `stop_loss` / `take_profit` / `sizing` are all
-//! typed as [`SpecTemplate`](super::SpecTemplate), so their `!arg SYM`
+//! typed as [`SpecTemplate`], so their `!arg SYM`
 //! leaves survive the load pass and get resolved once per symbol at
 //! build time. See [`crate::spec::args`] for the placeholder grammar.
 
@@ -65,7 +65,7 @@ pub struct MultiSideSpec {
     pub exit: Option<SpecTemplate<NodeSpec>>,
 
     /// An optional stop-loss price level (a per-symbol source). The
-    /// per-symbol [`Position`](crate::indicators::Position) is provided
+    /// per-symbol [`Position`] is provided
     /// at build time, so `!entry` / `!peak` / `!trough` inside compose as
     /// they do on [`SingleStrategySpec`](super::SingleStrategySpec).
     #[serde(default)]
@@ -171,7 +171,7 @@ impl MultiAssetStrategySpec {
 
     /// The fallible twin of [`build`](Self::build). Every per-symbol template is
     /// probed once against a stand-in symbol before any factory is wired — see
-    /// [`probe_signal`].
+    /// `probe_signal`.
     pub fn try_build(
         &self,
         initial_equity: Real,
@@ -447,7 +447,7 @@ fn probe_expr(
 /// The CLI's built multi-asset strategy handle. Wraps a
 /// [`MultiAssetStrategy<String>`] whose per-symbol signal / level /
 /// sizing factories were assembled from
-/// [`SpecTemplate`](SpecTemplate)s. Implements [`Strategy`] by
+/// [`SpecTemplate`]s. Implements [`Strategy`] by
 /// delegation so it drops into [`crate::backtest::run`] unchanged.
 pub struct DynMultiAssetStrategy {
     inner: MultiAssetStrategy<String>,

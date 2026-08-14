@@ -25,8 +25,9 @@
 //!
 //! Uses the same [`Universe`] trait knob as
 //! [`BasketStrategy`](crate::strategies::BasketStrategy) — declare
-//! [`all_of`](Self::all_of) (strict), [`any_of`](Self::any_of) (lax),
-//! or [`universe(custom)`](Self::universe) to plug in an arbitrary
+//! [`all_of`](MultiAssetStrategy::all_of) (strict),
+//! [`any_of`](MultiAssetStrategy::any_of) (lax), or
+//! [`universe(custom)`](MultiAssetStrategy::universe) to plug in an arbitrary
 //! [`Universe`] impl. Leaving the default [`Floating`] picks up every
 //! symbol the snapshot carries.
 
@@ -164,7 +165,7 @@ impl<Sym> PerAssetState<Sym> {
 /// the whole [`Snapshot<Sym>`](crate::types::Snapshot), folds each
 /// symbol's atom into its own [`Position`], and — for each symbol whose
 /// state is past its own warm-up — runs the identical trade logic as
-/// [`SingleAssetStrategy`]: sizing skip on `None`, entry / reversal,
+/// [`SingleAssetStrategy`](crate::strategies::SingleAssetStrategy): sizing skip on `None`, entry / reversal,
 /// signal-driven flatten, then rest the active side's protective level.
 ///
 /// ## Independent, not cross-sectional
@@ -187,7 +188,7 @@ impl<Sym> PerAssetState<Sym> {
 /// Protective-level factories additionally receive the per-symbol
 /// [`Position`] (see [`long_stop_loss`](Self::long_stop_loss) et al.),
 /// so `position.entry()` etc. compose as they do on
-/// [`SingleAssetStrategy`].
+/// [`SingleAssetStrategy`](crate::strategies::SingleAssetStrategy).
 ///
 /// A caller who wants a *declared* universe uses [`all_of`](Self::all_of)
 /// (strict — panics on absence, gates
@@ -204,7 +205,7 @@ impl<Sym> PerAssetState<Sym> {
 /// [`trade`](Strategy::trade) (a symbol whose own state hasn't settled
 /// simply doesn't trade this bar); under `all_of` it stays `false` until
 /// every listed symbol has passed its own
-/// [`stable_period`](PerAssetState::stable_period) so the driver skips
+/// `stable_period` so the driver skips
 /// [`trade`](Strategy::trade) entirely while the declared universe warms.
 ///
 /// ## Book anchor
@@ -500,7 +501,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
     /// (an absent symbol panics from [`update`](Strategy::update)), and
     /// [`is_ready`](Strategy::is_ready) stays `false` until every listed
     /// symbol has passed its own
-    /// [`stable_period`](PerAssetState::stable_period). Non-listed
+    /// `stable_period`. Non-listed
     /// symbols are filtered out at discovery — no per-symbol state is
     /// built for them.
     ///

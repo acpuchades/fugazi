@@ -152,7 +152,7 @@ pub enum OrderKind {
     ///
     /// A limit fill is **passive**: it provides liquidity rather than taking
     /// it, so it crosses no spread and suffers no slippage (see
-    /// [`PaperWallet::fill_at`] and `costs::kind_multiplier`). Anything else
+    /// `PaperWallet::fill_at` and `costs::kind_multiplier`). Anything else
     /// would let the cost pipeline fill it worse than the price the caller
     /// named, which is the one thing a limit order guarantees.
     Limit,
@@ -857,7 +857,7 @@ struct WalletSnapshot<Sym> {
 impl<Sym: Clone + Eq + Hash + Serialize + DeserializeOwned> PaperWallet<Sym> {
     /// Serialize the wallet's resumable state — cash, positions, fed prices,
     /// queued and resting orders, the blotter, and the id counter. The cost
-    /// models are deliberately excluded (see [`WalletSnapshot`]); a resumed run
+    /// models are deliberately excluded (see `WalletSnapshot`); a resumed run
     /// re-primes them from the caller.
     pub fn snapshot_state(&self) -> serde_json::Value {
         let snapshot = WalletSnapshot {

@@ -9,7 +9,7 @@ use crate::types::Real;
 /// The newest sample carries weight `period`, the next `period - 1`, …, down to
 /// `1` for the oldest, normalised by `period·(period + 1)/2`. Owns its input
 /// source, so composition is construction: `Wma::new(Current::close(), 20)`.
-/// Backed by the shared [`WmaState`] core (running simple and weighted sums), so
+/// Backed by the shared `WmaState` core (running simple and weighted sums), so
 /// each update is O(1). Produces `None` until the window is full.
 #[derive(Debug, Clone, SaveState)]
 pub struct Wma<S> {

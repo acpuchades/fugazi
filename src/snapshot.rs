@@ -16,7 +16,7 @@ use crate::time::Frequency;
 /// frequency, `Selector::by_freq(Frequency::Hour(1))` matches every hourly
 /// entry regardless of symbol, `Selector::exact(sym, freq)` matches a single
 /// tagged entry. A fully-empty selector (both fields `None`, the [`Default`])
-/// is legal — it stands for "no query at all" and drives [`Pick`] onto the
+/// is legal — it stands for "no query at all" and drives [`Pick`](crate::indicators::Pick) onto the
 /// [`Snapshot::sole_atom`] path (see [`Selector::is_empty`]) rather than a
 /// structural match.
 ///
@@ -29,7 +29,7 @@ use crate::time::Frequency;
 /// `pick(freq=1h)` matches `{symbol=Some(BTC), freq=1h}` without knowing
 /// the symbol. An empty selector matches every entry; a *fully-empty*
 /// query is semantically "no query" — the caller almost certainly meant
-/// "single-entry unpack", so [`Pick`] dispatches on [`is_empty`](Self::is_empty)
+/// "single-entry unpack", so [`Pick`](crate::indicators::Pick) dispatches on [`is_empty`](Self::is_empty)
 /// and never runs [`Snapshot::find`] on an empty query.
 ///
 /// # Selector as a matcher, not a key
@@ -57,7 +57,7 @@ impl<Sym> Default for Selector<Sym> {
 
 impl<Sym> Selector<Sym> {
     /// Build a selector. Both fields may be `None` — the empty selector is
-    /// legal and stands for the [`Pick`] single-entry-unpack path (see
+    /// legal and stands for the [`Pick`](crate::indicators::Pick) single-entry-unpack path (see
     /// [`Selector::is_empty`]).
     pub fn new(symbol: Option<Sym>, freq: Option<Frequency>) -> Self {
         Self { symbol, freq }
@@ -89,7 +89,7 @@ impl<Sym> Selector<Sym> {
         }
     }
 
-    /// True when both fields are `None` — the "no query" case that [`Pick`]
+    /// True when both fields are `None` — the "no query" case that [`Pick`](crate::indicators::Pick)
     /// treats as a single-entry unpack ([`Snapshot::sole_atom`]) rather than
     /// a structural match.
     pub fn is_empty(&self) -> bool {

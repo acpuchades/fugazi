@@ -1,21 +1,21 @@
 //! Pure per-iteration evaluation. No IO, no console output, no clock.
 //!
 //! This module owns the "run one backtest, reduce it to a metrics
-//! document" work — [`crate::run::run`] wraps it with IO. Writing the
+//! document" work — `crate::run::run` wraps it with IO. Writing the
 //! results (CSV files, YAML summaries, console banners) is deliberately
 //! kept out of here; that's a concern of the `run` subcommand driver, and
 //! this module never returns a `Path`, opens a file, or calls `println!`.
 //!
 //! ## The three pure entry points
 //!
-//! * [`run_iteration`] — the "full" pure evaluation: drives one backtest
+//! * `run_iteration` — the "full" pure evaluation: drives one backtest
 //!   over `atoms` through a paper wallet, produces the whole-run
 //!   [`metrics::Metrics`] document, optionally the gross twin under active
 //!   costs, and (when `-w N` is set) the windowed + rolling reductions.
 //!   Returns everything the driver needs to write files and print
 //!   summaries via the [`IterationResult`] payload.
-//! * [`evaluate`] — a thin metrics-only wrapper for `optimize`'s grid loop.
-//! * [`evaluate_windowed`] — the same shape but with a windowed reduction.
+//! * `evaluate` — a thin metrics-only wrapper for `optimize`'s grid loop.
+//! * `evaluate_windowed` — the same shape but with a windowed reduction.
 //!
 //! ## Warm-up and stability
 //!
@@ -75,7 +75,7 @@ pub fn build_error(e: String) -> anyhow::Error {
 }
 
 /// Extract the shared overlay schema from an atom stream — every atom is built
-/// against the same [`Schema`] `Arc` in the loader ([`crate::data`]), so any
+/// against the same [`Schema`] `Arc` in the loader (`crate::data`), so any
 /// atom that carries `overlays` gives us it. Falls back to
 /// [`Schema::empty()`] when the stream is empty or none of the atoms are
 /// overlay-bearing (i.e. no side channel), so a `!get { key }` in the spec
@@ -123,7 +123,7 @@ pub fn universe_from_snapshots(snapshots: &[crate::types::Snapshot<String>]) -> 
 }
 
 /// Everything one iteration of a backtest produces — consumed by
-/// [`crate::run::run`]. Deliberately owns no IO — the driver decides how
+/// `crate::run::run`. Deliberately owns no IO — the driver decides how
 /// (and whether) to persist the payload.
 pub struct IterationResult {
     /// One time label per bar, borrowed from the input atoms' time column
@@ -150,7 +150,7 @@ pub struct IterationResult {
     pub mc_samples: Option<crate::spec::montecarlo::McSamples>,
 }
 
-/// Precomputed inside [`run_iteration`] so IO callers don't reduce the
+/// Precomputed inside `run_iteration` so IO callers don't reduce the
 /// report to these numbers twice.
 pub struct SummaryRow {
     pub final_equity: Real,
@@ -162,10 +162,10 @@ pub struct SummaryRow {
 }
 
 /// The resolved-once inputs every measurement in this module consumes —
-/// [`evaluate`] and its per-shape twins, and [`run_iteration`] and its.
+/// `evaluate` and its per-shape twins, and `run_iteration` and its.
 ///
 /// Kept separate from the driver's option struct (see
-/// [`crate::run::RunOptions`]) so the pure-work layer doesn't carry
+/// `crate::run::RunOptions`) so the pure-work layer doesn't carry
 /// `out_dir`, `strategy_label`, etc. — the knobs that only make sense to the
 /// IO layer.
 ///
@@ -205,7 +205,7 @@ impl EvalContext<'_> {
     }
 
     /// Resolve a per-symbol cost bundle for each of `symbols` — the shape
-    /// [`measured_report_from_strategy`] primes its wallet with. Pairs pass
+    /// `measured_report_from_strategy` primes its wallet with. Pairs pass
     /// their two legs, basket / multi their whole universe.
     pub fn costs_for<S: AsRef<str>>(
         &self,
@@ -252,7 +252,7 @@ impl EvalContext<'_> {
 /// report.
 ///
 /// One function for all five shapes — the wallet difference lives on
-/// [`RunnableStrategy::drive`], and the cost-application difference on
+/// [`RunnableStrategy::drive`](crate::spec::runnable::RunnableStrategy::drive), and the cost-application difference on
 /// [`StrategySpec::try_build_priced`].
 pub fn measured_report_any(
     spec: &StrategySpec,
@@ -312,7 +312,7 @@ pub fn run_iteration_any(
 
 /// The resumable superset of [`run_iteration_any`]: optionally restore `resume`
 /// state before the priced run, optionally finalize open positions with
-/// `flatten`, and surface the run's final [`RunState`] alongside the
+/// `flatten`, and surface the run's final [`RunState`](crate::spec::runnable::RunState) alongside the
 /// metrics so the CLI can persist it (`--save-state`).
 ///
 /// The zero-cost gross twin is never resumed or flattened — it is a

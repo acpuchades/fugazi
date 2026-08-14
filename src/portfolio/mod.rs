@@ -1,11 +1,11 @@
-//! [`Portfolio`]: a top-level composite [`Strategy`](crate::Strategy) that
+//! [`Portfolio`]: a top-level composite [`Strategy`] that
 //! runs N child strategies against one cash pool, each through its own
 //! per-child sub-wallet.
 //!
 //! # Motivation
 //!
 //! Two backtests that run "a trend follower plus a mean-reverter" side by
-//! side each on their own [`PaperWallet`](crate::PaperWallet) tell you what
+//! side each on their own [`PaperWallet`] tell you what
 //! each strategy did in isolation. Neither answers "what would this
 //! combination *as a portfolio* have earned?" — that requires (a) a single
 //! aggregate equity curve marked to market across every child, (b) a way to
@@ -22,7 +22,7 @@
 //!
 //! `Portfolio` implements `Strategy<Input = Snapshot<Sym>, Symbol = Sym>` —
 //! the same shape as [`BasketStrategy`](crate::strategies::BasketStrategy) —
-//! and internally owns a [`PortfolioWallet`] carrying one sub-wallet per
+//! and internally owns a `PortfolioInner` carrying one notional ledger per
 //! child. The pair share their interior via `Arc<Mutex<_>>`. A caller that
 //! wants to drive a portfolio:
 //!
@@ -43,7 +43,7 @@
 //!
 //! [`Portfolio::run`] is the entry point to prefer.
 //! [`backtest::run`](crate::backtest::run) still works — pass
-//! [`wallet_view`](Portfolio::wallet_view) as the wallet — and is what you
+//! the account wallet — and is what you
 //! want when you need to inspect the wallet mid-run. But `Portfolio` is the
 //! one [`Strategy`] that ignores the wallet it is handed (a composite needs N
 //! sub-wallets and the trait offers one), so pairing it with any *other*
@@ -54,7 +54,7 @@
 //! refuses it.
 //!
 //! Per bar the driver:
-//! 1. calls `wallet.update(sym, candle)` — [`PortfolioWallet::update`] fans
+//! 1. calls `wallet.update(sym, candle)` — `PortfolioInner` fans
 //!    to every sub, so each child's own [`PaperWallet`] queues, fills, and
 //!    marks-to-market on the same bar.
 //! 2. routes returned fills through [`Portfolio::on_fill`] — which uses the
@@ -63,7 +63,7 @@
 //!    child A's position never leaks to child B's `on_fill`).
 //! 3. calls [`Portfolio::update`] — which fans the snapshot to every child.
 //! 4. calls [`Portfolio::trade`] — which hands each child its own
-//!    [`SubWalletHandle`](wallet::SubWalletHandle), a per-child
+//!    `LedgerWallet`, a per-child
 //!    [`Wallet`] view whose `equity()` / `funds()` / `position()` read
 //!    the child's own sub-wallet (so `value_frac(1.0)` sizes against the
 //!    child's allocated equity, not the aggregate) and whose mutation
@@ -72,14 +72,14 @@
 //!
 //! # Sub-wallets, paper and live
 //!
-//! Each child's wallet comes from a [`SubWalletFactory`], installed with
-//! [`sub_wallets`](PortfolioBuilder::sub_wallets) and defaulting to an
-//! in-memory [`PaperWallet`](crate::PaperWallet) carrying whatever
-//! [`costs`](PortfolioBuilder::costs) bundle was set. The subs are held as
+//! Each child's wallet comes from a `SubWalletFactory`, installed with
+//! `sub_wallets` and defaulting to an
+//! in-memory [`PaperWallet`] carrying whatever
+//! `costs` bundle was set. The subs are held as
 //! `Box<dyn Wallet<Sym> + Send>`, so a portfolio can be driven against **live
 //! sub-accounts** — the composite performs only [`Wallet`] trait operations on
 //! them, and a child reaches its venue through the same
-//! [`SubWalletHandle`](wallet::SubWalletHandle) path it reaches paper through.
+//! `LedgerWallet` path it reaches paper through.
 //!
 //! Two constraints come with that. **The sub-wallets must be disjoint**: the
 //! aggregate reads are sums over the subs and the rebalance moves value
@@ -91,14 +91,14 @@
 //!
 //! [`reset`](Strategy::reset) rebuilds every sub from the factory at its
 //! original seed and replays any per-symbol cost bundles installed via
-//! [`install_costs_for`](Portfolio::install_costs_for). That is why [`Wallet`]
+//! `install_costs_for`. That is why [`Wallet`]
 //! carries no `reset`: a live venue has no "restore to freshly-constructed",
 //! and a defaulted no-op on the seam would silently leave a stale wallet
 //! driving the second run of an `optimize` sweep.
 //!
 //! # Weight policy and rebalancing
 //!
-//! [`WeightPolicy`](policy::WeightPolicy) governs both the **initial cash
+//! [`WeightPolicy`] governs both the **initial cash
 //! allocation** at build time (each child i gets `initial_equity *
 //! weights[i] / sum(weights)` seeded into its sub-wallet) *and* the
 //! **rebalance target** on each fire bar of the
@@ -121,7 +121,7 @@
 //!    works with any wallet impl that supports programmatic cash
 //!    adjustment (paper always does; live-broker impls plug into their
 //!    venue's deposit / withdrawal / sub-account transfer API, or return
-//!    [`WalletError::UnsupportedOperation`]).
+//!    [`WalletError::UnsupportedOperation`](crate::WalletError::UnsupportedOperation)).
 //!    Debit refusals fold into the contributor's shortfall for the
 //!    position phase; receiver credit refusals trigger a symmetric
 //!    refund back to contributors so total equity stays conserved.
@@ -158,14 +158,13 @@
 //!   [`Portfolio::on_reject`].
 //! - `initial_equity` is the sum of every seeded sub-wallet.
 //!
-//! Per-child equity reads are on [`PortfolioWallet::sub_equity`].
+//! Per-child equity reads are on [`Portfolio::sub_equity`].
 //! Trade-level metrics computed off the aggregate `fills` mix owners —
 //! two children opening the same symbol on the same bar reconstruct as a
 //! scale-in rather than two trades. For clean per-child trade metrics,
 //! read each child's own book / positions directly (a `sub_report(i)`
 //! surface can come later).
 //!
-//! [`PortfolioWallet`]: crate::portfolio::PortfolioWallet
 
 pub mod ledger;
 pub mod netting;
@@ -795,7 +794,7 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
     /// # Panics
     /// Panics if `strategy` is itself a [`Portfolio`]. A nested portfolio
     /// would satisfy the bounds here and compile, but it can never work: only
-    /// the *outer* [`PortfolioWallet::update`] fans bars out, and it fans
+    /// the *outer* `PortfolioInner` fans bars out, and it fans
     /// them to the outer portfolio's sub-wallets — the inner portfolio's own
     /// interior is invisible to it and would never be priced. Flatten the
     /// children into one portfolio, or run them as separate portfolios.
@@ -870,7 +869,7 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
     /// This is the seam for adaptive weighting — an inverse-vol,
     /// Kelly-fraction, or drawdown-throttled weighting is just a matter
     /// of writing the right indicator per child. The
-    /// [`YAML surface`](crate::cli) exposes this via
+    /// YAML surface (via the `cli` module) exposes this via
     /// `weights: !indicator <template>` where the template is
     /// instantiated per-child with `!arg SYM` / `!arg CHILD_NAME`
     /// substitution.
@@ -916,7 +915,7 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
     ///
     /// Defaults to [`Proportional`] — every leg contributes in
     /// proportion to its value, matching the original hardcoded
-    /// behavior. Alternatives ship as [`LargestFirst`] (liquidates
+    /// behavior. Alternatives ship as [`LargestFirst`](crate::portfolio::rebalance::LargestFirst) (liquidates
     /// biggest positions first) and any user-supplied impl of the
     /// trait ("sell losers first", "keep hedges intact", etc.).
     pub fn position_rebalancer<R>(mut self, rebalancer: R) -> Self
@@ -929,7 +928,7 @@ impl<Sym: Clone + Eq + Hash + Send + Sync + 'static> PortfolioBuilder<Sym> {
 
     /// Realize the [`Portfolio`] — resolve the initial weight vector from
     /// the policy, split `initial_equity` across children accordingly,
-    /// seed one [`PaperWallet`](crate::PaperWallet) per child at that
+    /// seed one [`PaperWallet`] per child at that
     /// share of cash, and hand back a ready-to-drive portfolio.
     ///
     /// # Panics

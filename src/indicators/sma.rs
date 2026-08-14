@@ -7,7 +7,7 @@ use crate::types::Real;
 /// Simple Moving Average of a source over a fixed window.
 ///
 /// Owns its input source: `Sma::new(Current::close(), 20)`. Backed by the shared
-/// [`WindowStats`] core (running sum over a ring buffer), so each update is O(1).
+/// `WindowStats` core (running sum over a ring buffer), so each update is O(1).
 /// Produces `None` until the window is full.
 #[derive(Debug, Clone, SaveState)]
 pub struct Sma<S> {

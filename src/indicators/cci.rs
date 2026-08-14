@@ -12,7 +12,7 @@ const CCI_FACTOR: Real = 0.015;
 /// `(x − SMA(x)) / (0.015 · mean_abs_dev(x))`, measuring how far the source sits
 /// from its moving average in units of mean absolute deviation. Conventionally
 /// the source is the typical price, so `Cci::new(Current::typical(), 20)` matches
-/// TA-Lib's `CCI(high, low, close)`. A single [`WindowStats`] core supplies both
+/// TA-Lib's `CCI(high, low, close)`. A single `WindowStats` core supplies both
 /// the mean and the dispersion; the deviation term scans the window, so each
 /// update is O(period). When the window has zero dispersion it yields `0.0`.
 /// Ready after `period` samples.

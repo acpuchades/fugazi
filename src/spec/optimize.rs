@@ -11,7 +11,7 @@
 //! is the disjoint **union** of the subgrids' point sets, useful when a
 //! parameter only makes sense conditionally on another (e.g. one subgrid
 //! sweeps `slow` around a slow entry, another sweeps `atr_mult` around a stop).
-//! For each grid point we drive [`crate::backtest::evaluate`] and record its
+//! For each grid point we drive `crate::backtest::evaluate` and record its
 //! [`crate::metrics`] document.
 //!
 //! Output is one `,`-delimited CSV file (`-o/--output`) with one row per grid
@@ -87,7 +87,7 @@ pub fn probe_params(subgrid: &Subgrid) -> HashMap<String, Value> {
 /// and rank the rows by `best_by`'s ranking value — direction-aware, with
 /// `risk_aversion` shifting a windowed row's mean *against* it by k·std
 /// so dispersion is always penalized. Pure: no filesystem, no printing.
-/// The CLI's [`run`] wraps it with argument marshaling + CSV write +
+/// The CLI's `run` wraps it with argument marshaling + CSV write +
 /// console output.
 ///
 /// `evaluate_row` owns everything strategy-specific — the base YAML
@@ -311,7 +311,7 @@ pub fn build_any_spec(
     })
 }
 
-/// [`build_spec`]'s preset-tolerant twin: parses as a [`StrategyRef`], so a
+/// [`build_spec`]'s preset-tolerant twin: parses as a [`StrategyRef`](crate::spec::preset::StrategyRef), so a
 /// `!ma_crossover { … }` document sweeps like a spelled-out one.
 pub fn build_strategy_ref(
     base: &Value,
@@ -811,7 +811,7 @@ pub fn sort_by_metric(rows: &mut Vec<Row>, path: &str, direction: Direction, k: 
 }
 
 /// Position of a metric column inside the `metrics::flatten` output — the
-/// output ordering is fixed and shared across every [`Metrics`] document, so a
+/// output ordering is fixed and shared across every [`Metrics`](crate::spec::metrics::Metrics) document, so a
 /// name resolves to a stable index which can be looked up in `O(1)` per row.
 pub type ColumnPos = usize;
 

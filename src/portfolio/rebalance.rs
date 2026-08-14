@@ -4,7 +4,7 @@
 //! Each rebalance-fire runs two phases:
 //! 1. **Cash phase** — free cash is shifted between sub-wallets to hit
 //!    per-child equity targets. Handled by
-//!    [`PortfolioInner::rebalance_cash_to`](super::wallet::PortfolioInner)
+//!    `PortfolioInner::rebalance_cash_to`
 //!    and doesn't need customization (the algorithm is symmetric and
 //!    respects `Wallet::adjust_funds` support).
 //! 2. **Position phase** — for each contributor whose cash phase

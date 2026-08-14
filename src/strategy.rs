@@ -1,7 +1,7 @@
 //! The core [`Strategy`] trait — the decision layer above indicators and
-//! signals. The [`Wallet`](crate::Wallet) it trades into and the surrounding
+//! signals. The [`Wallet`] it trades into and the surrounding
 //! vocabulary ([`Side`](crate::Side), [`Size`](crate::Size),
-//! [`Order`](crate::Order), the unit-tagged [`Reference`](crate::Reference) /
+//! [`Order`], the unit-tagged [`Reference`](crate::Reference) /
 //! [`Units`](crate::Units) amounts, [`WalletError`](crate::WalletError), and the
 //! built-in in-memory [`PaperWallet`](crate::PaperWallet)) live in
 //! [`crate::wallet`].

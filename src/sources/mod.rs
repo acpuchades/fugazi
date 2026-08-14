@@ -109,7 +109,7 @@ pub(crate) fn floor_to_bucket(ms: i64, interval: Interval) -> i64 {
 /// Every atom in one fetch shares the same `Arc<Schema>` (the provider builds
 /// it once and clones the pointer into each atom's overlay side channel), so
 /// a consumer only needs to peek at any timestamped atom to know what fields
-/// the batch carries. Consumed by [`crate::cli::backtest::schema_from_atoms`]
+/// the batch carries. Consumed by `crate::cli::backtest::schema_from_atoms`
 /// and by the `fugazi get` overlay pipeline to decide the vocabulary
 /// available to `!get { key }` references.
 pub fn schema_of(atoms: &[Atom]) -> Arc<Schema> {

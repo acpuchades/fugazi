@@ -273,7 +273,7 @@ impl<Sym: Hash + Eq + Clone> Book<Sym> {
     /// Opening from all-legs-flat → any-leg-non-flat *opens* an aggregate
     /// trade (records `trade_open_equity` from the current equity).
     /// Returning to all-legs-flat *closes* the aggregate trade and stages
-    /// a [`TradeClose`] (visible on the next [`Book::update`] and drained
+    /// a `TradeClose` (visible on the next [`Book::update`] and drained
     /// the bar after). A single-leg cross-zero (single-asset reversal)
     /// closes the current trade at `price` and opens a new one at the
     /// same fill — matching the pre-refactor single-leg semantics.
@@ -412,7 +412,7 @@ impl<Sym: Hash + Eq + Clone> Book<Sym> {
     ///
     /// Intended for **externally-marked** books whose equity is computed
     /// outside the leg/cash accounting the ordinary
-    /// [`apply_fill`] / [`update`] cycle maintains — the aggregate book
+    /// [`apply_fill`](Self::apply_fill) / [`update`](Self::update) cycle maintains — the aggregate book
     /// [`Portfolio`](crate::portfolio::Portfolio) publishes for weight-share
     /// templates, live-broker seams that report a single equity number
     /// rather than a fill/mark stream, etc.

@@ -14,7 +14,7 @@ use crate::types::Real;
 /// moment are all taken over the *same* `period` window.
 ///
 /// Owns its input source: `Kurtosis::new(Current::close(), 20)`. Backed by the
-/// shared [`WindowStats`] core. Produces `None` until the window is full; once
+/// shared `WindowStats` core. Produces `None` until the window is full; once
 /// full, a dispersion-free window reads `0.0` (kurtosis is undefined without
 /// spread). A fat-tailed / jump-prone window reads well above `3`.
 #[derive(Debug, Clone, SaveState)]

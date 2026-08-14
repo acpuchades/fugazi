@@ -3,7 +3,7 @@
 //! Same shape as `--params`/`--overlay`: a `,`-separated list of terms, each of
 //! which is either a whole-file loader (`@file.yml`), an explicit-none literal
 //! (`none`), or a `key=value` setter — optionally prefixed with a `SYMBOL[FREQ]:`
-//! scope (a subset of the [`crate::overlay`] grammar). Multiple `--costs` flags
+//! scope (a subset of the `crate::overlay` grammar). Multiple `--costs` flags
 //! are folded left-to-right; later terms override earlier ones at the same
 //! specificity, and more-specific scopes win over less-specific ones at
 //! resolution time.
@@ -22,7 +22,7 @@
 //! deep-merge into it, and the final tree is deserialized to a typed
 //! [`CostConfig`] via serde. [`CostConfig::resolve`] then picks the winning
 //! model per leg for a given `(symbol, frequency)` and returns a live
-//! [`TradingCosts`] the wallet consumes.
+//! [`TradingCosts`](crate::costs::TradingCosts) the wallet consumes.
 //!
 //! Models are **externally tagged** — a variant is spelled `!percentage { rate:
 //! 0.001 }`, the same YAML tag vocabulary the strategy spec uses. A dotted
@@ -32,7 +32,7 @@
 //!
 //! Split across two submodules:
 //!
-//! * [`spec`] — `--costs` argument parsing into a [`CostSpec`] term list.
+//! * `spec` — `--costs` argument parsing into a [`CostSpec`] term list.
 //! * [`config`] — folding into [`CostConfig`] and resolving to a runtime
 //!   [`crate::costs::TradingCosts`].
 

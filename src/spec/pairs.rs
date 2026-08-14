@@ -194,7 +194,7 @@ impl PairsStrategySpec {
     /// Parse a YAML pairs-strategy document, resolving `param` placeholders
     /// against `params` first (see [`crate::spec::params`]).
     ///
-    /// Same two-pass shape as [`super::SingleStrategySpec::from_text_with_params`]:
+    /// Same two-pass shape as `SingleStrategySpec::from_text_with_params`:
     /// the document is normalized to an untyped [`serde_json::Value`], every
     /// placeholder node is rewritten to its resolved value, and only then is
     /// the result deserialized into the typed spec.
@@ -359,7 +359,7 @@ impl PairsStrategySpec {
 /// [`PairsStrategy<String>`](crate::strategies::PairsStrategy) whose signals
 /// and levels came from runtime-typed [`DynIndicator`]s.
 ///
-/// Implements [`Strategy`](crate::Strategy) by delegation, so it drops into
+/// Implements [`Strategy`] by delegation, so it drops into
 /// [`crate::backtest::run`] unchanged.
 pub struct DynPairsStrategy {
     inner: PairsStrategy<String>,

@@ -405,8 +405,8 @@ pub struct MatchCase {
 /// The bare-word / bare-tag forms use the implicit `Pick` root; the tagged
 /// map form threads the given atom source through the leaf. The custom
 /// [`TryFrom<serde_norway::Value>`] impl below normalises the string and
-/// tagged shapes into the map shape [`NodeSpecRaw`] expects, and
-/// [`NodeSpecRaw`] carries the derived externally-tagged deserialization
+/// tagged shapes into the map shape `NodeSpecRaw` expects, and
+/// `NodeSpecRaw` carries the derived externally-tagged deserialization
 /// logic.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(try_from = "serde_norway::Value")]
@@ -470,7 +470,7 @@ pub enum NodeSpec {
     /// [`ValueLit`].
     Value(ValueLit),
 
-    /// The current position's entry price — a [`SingleAssetStrategy`] anchor,
+    /// The current position's entry price — a [`SingleAssetStrategy`](crate::strategies::SingleAssetStrategy) anchor,
     /// for building stop-loss / take-profit levels.
     Entry,
     /// The running high since entry (a long trailing-stop anchor).
@@ -1360,7 +1360,7 @@ enum NodeSpecRaw {
     /// [`ValueLit`].
     Value(ValueLit),
 
-    /// The current position's entry price — a [`SingleAssetStrategy`] anchor,
+    /// The current position's entry price — a [`SingleAssetStrategy`](crate::strategies::SingleAssetStrategy) anchor,
     /// for building stop-loss / take-profit levels.
     Entry,
     /// The running high since entry (a long trailing-stop anchor).
@@ -2347,7 +2347,7 @@ impl TryFrom<serde_norway::Value> for NodeSpec {
     type Error = String;
 
     /// Normalise the incoming YAML value into a [`serde_norway::Value::Tagged`],
-    /// then deserialize into [`NodeSpecRaw`].
+    /// then deserialize into `NodeSpecRaw`.
     ///
     /// `serde_norway`'s `Value` deserializer only routes an *enum* input
     /// through its `Value::Tagged` variant — a plain single-key `Mapping`
@@ -3007,7 +3007,7 @@ impl NodeSpec {
     /// `!get { key }` to look up the column's declared [`OverlayType`] and
     /// dispatch to the right typed leaf; `root` is the **blessed series** —
     /// which asset a `source:`-omitted leaf reads out of the snapshot (see
-    /// [`pick_root`]). Pass `None` from a context with no single blessed
+    /// `pick_root`). Pass `None` from a context with no single blessed
     /// series and every price leaf must name its asset.
     pub fn build(
         &self,

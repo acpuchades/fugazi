@@ -13,7 +13,7 @@ use crate::types::{Candle, Real};
 /// over the rolling `period` window (equivalently
 /// `100 * positive / (positive + negative)`).
 ///
-/// Reuses the shared [`WindowStats`] core to keep the positive/negative flow
+/// Reuses the shared `WindowStats` core to keep the positive/negative flow
 /// sums in O(1). Produces `None` until `period + 1` bars have been seen — one to
 /// seed the first typical-price move, then a full window of `period` flows.
 #[derive(Debug, Clone, SaveState)]

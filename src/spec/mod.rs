@@ -107,7 +107,7 @@ pub fn load_value(
 /// [`load_value`] through the `!import` splice, stopping short of `!param`
 /// substitution. Split out for `fugazi check`, which substitutes with
 /// [`params::substitute_for_check`] instead — marking a required-but-unset
-/// placeholder as [undefined](crate::spec::undefined) to validate around rather
+/// placeholder as [undefined] to validate around rather
 /// than erroring on.
 pub fn load_value_pre_params(
     text: &str,
@@ -1731,7 +1731,7 @@ mod tests {
 /// nested `NodeSpec` / `NodeSpec` bridges (`!above > !add > !mul > …`). That
 /// keeps the mechanism trivial — each level prepends its own tag — but a raw
 /// chain in front of every message is noise for whoever reads it, human or
-/// agent. [`split_trail`] separates the two so the CLI can print the failure
+/// agent. [`split_trail`](crate::spec::diagnostics::split_trail) separates the two so the CLI can print the failure
 /// once and the location once.
 pub mod diagnostics {
     /// Split an accumulated message into `(tag path, message)`.

@@ -251,7 +251,7 @@ where
 /// **Trailing annualized Sharpe ratio** of an owned [`Strategy`]'s equity
 /// curve, `(mean·bpy − rf) / (sample_stddev·√bpy)` over the last `period`
 /// per-bar returns. `None` while the window is filling and whenever the
-/// windowed return volatility is zero. See the [module docs](self).
+/// windowed return volatility is zero. See the module docs.
 pub struct Sharpe<S: Strategy> {
     engine: StrategyEngine<S>,
     stats: WindowStats,
@@ -351,7 +351,7 @@ where
 /// curve, `(mean·bpy − rf) / (downside_dev·√bpy)` over the last `period`
 /// per-bar returns, where the downside deviation uses the per-bar rf as its
 /// minimum acceptable return. `None` while filling and when no return in the
-/// window falls below the threshold. See the [module docs](self).
+/// window falls below the threshold. See the module docs.
 pub struct Sortino<S: Strategy> {
     engine: StrategyEngine<S>,
     stats: WindowStats,
@@ -449,7 +449,7 @@ where
 
 /// **Trailing annualized volatility** of an owned [`Strategy`]'s equity curve,
 /// `sample_stddev·√bpy` over the last `period` per-bar returns. Always `Some`
-/// (and `>= 0`) once the window fills. See the [module docs](self).
+/// (and `>= 0`) once the window fills. See the module docs.
 pub struct Volatility<S: Strategy> {
     engine: StrategyEngine<S>,
     stats: WindowStats,
@@ -536,7 +536,7 @@ where
 /// **Trailing maximum drawdown** of an owned [`Strategy`]'s equity curve — the
 /// largest peak-to-trough decline over the trailing window, as a non-negative
 /// fraction (`0.20` = a 20% drawdown). Always `Some` once the window fills
-/// (`0.0` on a flat or monotonically-rising window). See the [module docs](self).
+/// (`0.0` on a flat or monotonically-rising window). See the module docs.
 pub struct MaxDrawdown<S: Strategy> {
     engine: StrategyEngine<S>,
     period: usize,
@@ -630,7 +630,7 @@ where
 /// **Trailing Calmar ratio** of an owned [`Strategy`]'s equity curve —
 /// windowed CAGR over trailing max drawdown. `None` while filling, when the
 /// window has no drawdown (zero denominator), or when the CAGR endpoints are
-/// non-positive. See the [module docs](self).
+/// non-positive. See the module docs.
 pub struct Calmar<S: Strategy> {
     engine: StrategyEngine<S>,
     period: usize,

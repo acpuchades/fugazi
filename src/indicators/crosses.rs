@@ -26,7 +26,7 @@ use crate::types::Real;
 
 /// `lhs > rhs` on this step and the strict comparison just flipped upward.
 ///
-/// See the [module doc](self) for the equivalence with the historical
+/// See the module doc for the equivalence with the historical
 /// `lhs.gt(rhs).and(lhs.gt(rhs).changed())` composition. The comparison is
 /// tolerance-aware: `lhs > rhs` reads as true only when `lhs - rhs > epsilon`
 /// (default [`DEFAULT_EPSILON`]).

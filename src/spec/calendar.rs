@@ -26,11 +26,11 @@
 //! call [`detect_frequency_from_atoms`] on the loaded atoms to guess the
 //! cadence from the median inter-bar gap — snapped to the nearest well-known
 //! [`Frequency`] variant. The atoms' `time` field is populated at load by the
-//! [`--series` loader](crate::data), so no re-parse of the time-column
+//! `--series` loader, so no re-parse of the time-column
 //! strings is needed.
 //!
 //! `--bars-per-year` itself is repeatable and each entry may carry a
-//! `SYMBOL[FREQ]:` scope prefix — the `[`crate::costs`] grammar — so a
+//! `SYMBOL[FREQ]:` scope prefix — the [`crate::costs`] grammar — so a
 //! preset file can pre-declare per-series overrides (e.g. `BTC[1h]:8760`
 //! alongside `AAPL[1d]:252`). [`pick_bars_per_year`] resolves which entry
 //! (if any) wins for a run's `(symbol, effective_freq)`; no match falls
@@ -451,7 +451,7 @@ pub fn parse_time_to_millis(raw: &str) -> Option<i64> {
 
 /// A `SYMBOL[FREQ]:` scope prefix. Either half is optional; both empty is the
 /// unscoped "default" entry. Same grammar as the `--costs` and `--overlay`
-/// prefixes (see [`crate::costs`], [`crate::overlay`]).
+/// prefixes (see [`crate::costs`], `crate::overlay`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Scope {
     pub symbol: Option<String>,
@@ -510,7 +510,7 @@ fn split_scope(text: &str) -> Result<(Scope, &str), String> {
 /// Rejects `SYMBOL[]`, an unclosed bracket, and the empty-both case.
 ///
 /// The raw shared bracket grammar behind [`parse_scope`] and
-/// [`crate::overlay::OverlayScope`]'s parser.
+/// `crate::overlay::OverlayScope`'s parser.
 pub fn parse_scope_parts(text: &str) -> Result<(Option<String>, Option<&str>), String> {
     let text = text.trim();
     if text.is_empty() {
@@ -721,7 +721,7 @@ impl FromStr for ScopedFrequency {
 /// `--frequency` entries. A symbol-scoped `SYM:CODE` wins over the
 /// unscoped default; ties break to the last-declared entry so later flags
 /// override earlier ones. Returns `None` when no entry matches — the
-/// caller then falls back to auto-detection (see [`detect_frequency`]).
+/// caller then falls back to auto-detection (see [`detect_frequency_from_atoms`]).
 pub fn pick_frequency(specs: &[ScopedFrequency], symbol: &str) -> Option<Frequency> {
     specs
         .iter()

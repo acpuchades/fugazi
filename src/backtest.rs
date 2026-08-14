@@ -14,7 +14,7 @@
 //! [`run`] name.
 //!
 //! Bars enter as [`Snapshot<Sym>`](crate::types::Snapshot)s — a per-bar
-//! keyed collection of tagged [`Atom`]s. Each snapshot represents "all ticks
+//! keyed collection of tagged [`Atom`](crate::Atom)s. Each snapshot represents "all ticks
 //! at time `t`" — an entry per symbol that traded at that time, tagged with
 //! its symbol and (optionally) frequency. Per bar, in order: walk every
 //! `(symbol, atom)` entry the snapshot carries and feed the wallet
@@ -118,7 +118,7 @@ pub struct RunReport<Sym> {
 /// `snapshots` is any iterable over anything convertible to
 /// [`Snapshot<S::Symbol>`] — pass `Vec<Snapshot<Sym>>` directly, or a
 /// `Vec<Atom>` / `Vec<Candle>` for a single-series run (each lifts into an
-/// **untagged** size-1 snapshot via [`Atom::from`], which the strategy sees
+/// **untagged** size-1 snapshot via `Atom::from`, which the strategy sees
 /// but the wallet skips). The size hint (when available) pre-sizes the
 /// equity curve.
 pub fn run<Sym, S, W, I, A>(

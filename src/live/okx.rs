@@ -130,7 +130,7 @@ struct RestingLimit {
     local: OrderId,
 }
 
-/// A live [`Wallet`] over OKX V5 perpetual swaps. See the [module docs](self)
+/// A live [`Wallet`] over OKX V5 perpetual swaps. See the module-level docs
 /// for the trait-to-venue mapping and the contracts↔units convention.
 ///
 /// Construct with [`demo`](Self::demo) / [`mainnet`](Self::mainnet), then drive
@@ -769,7 +769,7 @@ impl Wallet<String> for OkxWallet {
     /// Idempotent per symbol: re-submitting the same side / price / size is a
     /// no-op that returns the existing order's id; any other change cancels the
     /// previous venue order before placing the replacement — the convention
-    /// [`rest_protective`](Self::rest_protective) uses, so a strategy can walk its
+    /// `rest_protective` uses, so a strategy can walk its
     /// limit every bar without piling up orders.
     fn set_limit(
         &mut self,

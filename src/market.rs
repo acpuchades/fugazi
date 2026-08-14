@@ -388,7 +388,7 @@ impl OverlayInfo {
 /// (`atom.candle.unwrap().close`); overlay access goes through an index resolved once at
 /// construction against the schema; time is read directly via
 /// [`atom.time`](Atom::time) by calendar indicators
-/// (`Year`/`Month`/`Day`/…, in [`crate::indicators::calendar`]). Cheap to
+/// (`Year`/`Month`/`Day`/…, in `crate::indicators::calendar`). Cheap to
 /// clone — a `Candle` memcpy, an `Option<Timestamp>` (also `Copy`), plus, when
 /// overlays are present, two atomic bumps (the shared schema `Arc` and the
 /// per-atom `Arc<[Real]>` values); the overlay pointers are `Arc`, so an atom

@@ -16,7 +16,7 @@
 //!
 //! It *is* visible to serde: at each leaf, the derived `Deserialize` calls the
 //! matching `deserialize_*` method (`deserialize_u64` for a `usize`,
-//! `deserialize_str` for a `String`, …). [`UndefinedDeserializer`] wraps the value
+//! `deserialize_str` for a `String`, …). `UndefinedDeserializer` wraps the value
 //! tree and, at a hole node, answers whichever method serde asks for with a
 //! type-appropriate zero (`0` / `""` / `false`). No guessing, no search — the
 //! type is dictated by the caller.

@@ -2,7 +2,7 @@
 //! `!volatility` / `!max_drawdown` / `!calmar`).
 //!
 //! The library indicators ([`crate::indicators::Sharpe`] and friends) each own
-//! a [`Strategy`](crate::Strategy) and drive it internally. Since the embedded
+//! a [`Strategy`] and drive it internally. Since the embedded
 //! engine forwards the whole snapshot to its strategy, that strategy can be a
 //! single-asset, **pairs**, or **basket** one — the [`AnyStrategyRef`] the
 //! `strategy:` field deserializes to picks which.
@@ -12,12 +12,12 @@
 //! ([`DynSingleStrategy`](super::strategy::DynSingleStrategy) and its pairs /
 //! basket twins) is **not** `Clone` (it holds `Box<dyn Signal>` slots and
 //! `Rc`-shared `Position`/`Book` state). So this module wraps the trailing
-//! indicator in a [`RebuildIndicator`] that carries the strategy *spec* plus a
+//! indicator in a `RebuildIndicator` that carries the strategy *spec* plus a
 //! rebuild closure and mints a **fresh** indicator instance on every clone —
 //! matching the "clone = an independently-advanced instance" convention the
 //! component accessors already use.
 //!
-//! The wallet seed is a fixed [`SEED`]: every metric here is a ratio of
+//! The wallet seed is a fixed `SEED`: every metric here is a ratio of
 //! equity-curve returns, and the returns are scale-invariant in the seed, so
 //! exposing it as a knob would add surface with no effect on the reading. The
 //! embedded strategy's [`Book`](crate::indicators::Book) is seeded to the same
@@ -55,7 +55,7 @@ pub(super) enum TrailingMetric {
 /// single-asset [`StrategyRef`] to also name a **pairs** or **basket** strategy.
 ///
 /// The embedded engine forwards the whole snapshot to its strategy, so any
-/// [`Strategy`](crate::Strategy) over a `Snapshot<String>` drives it:
+/// [`Strategy`] over a `Snapshot<String>` drives it:
 /// `!sharpe { strategy: <single | pairs | basket> }` reads the trailing risk of
 /// whichever one. (A pairs / basket strategy only produces meaningful numbers
 /// when the surrounding run feeds it a tagged multi-asset snapshot each bar —

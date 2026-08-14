@@ -14,7 +14,7 @@
 //! (flattens both legs) when the spread trades **at or below** its level;
 //! `take_profit` fires when the spread trades **at or above** its level.
 //! Levels are ordinary indicator expressions built off the strategy's
-//! [`Position`] anchor, exactly like [`SingleAssetStrategy`]'s per-leg levels.
+//! [`Position`] anchor, exactly like [`SingleAssetStrategy`](crate::strategies::SingleAssetStrategy)'s per-leg levels.
 
 use crate::indicators::{Book, Close, ValueBool, Pick, Position, Value};
 

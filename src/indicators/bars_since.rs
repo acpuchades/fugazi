@@ -131,7 +131,7 @@ impl<S: Indicator<Output = bool>> Indicator for BarsSince<S> {
 /// bar that sets it, up to `period - 1` for a high about to leave the window.
 ///
 /// The O(1) shorthand for `BarsSince::new(source.ge(source.rolling_max(period)))`,
-/// backed by the shared [`WindowExtreme`] core's `since` query — the same core
+/// backed by the shared `WindowExtreme` core's `since` query — the same core
 /// (and the same query) [`Aroon`](super::Aroon) is built on. Unlike the general
 /// [`BarsSince`], the window's high is always attained *somewhere* in the
 /// window, so the first `Some` lands exactly on a full window and the warm-up

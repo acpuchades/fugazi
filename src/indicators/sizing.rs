@@ -32,7 +32,7 @@ use crate::types::{Atom, Real, Snapshot};
 ///
 /// The intended pairing is
 /// [`BasketStrategy`](crate::strategies::BasketStrategy) with a
-/// [`SelectionRule::TopBottom`](crate::strategies::SelectionRule) of the
+/// `SelectionRule::TopBottom` of the
 /// same count: `sized_by(|_| equal_weight(10)).top_bottom(5, 5)` fills a
 /// 5-long / 5-short basket at 10% of equity each, totalling 100% gross.
 /// The helper is deliberately trivial — the crate never auto-normalizes

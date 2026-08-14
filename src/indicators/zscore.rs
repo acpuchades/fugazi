@@ -9,7 +9,7 @@ use crate::types::Real;
 /// `(x - SMA(x, period)) / stddev(x, period)`.
 ///
 /// Owns its input source: `ZScore::new(Current::close(), 20)`. Backed by the
-/// shared [`WindowStats`] core (one window supplies both the mean and the
+/// shared `WindowStats` core (one window supplies both the mean and the
 /// dispersion), so each update is O(1). Produces `None` until the window is
 /// full; once full, a dispersion-free window reads `0.0` (the sample is exactly
 /// the mean, and the z-score is otherwise undefined).

@@ -16,7 +16,7 @@ use crate::types::{Candle, Real};
 ///
 /// A bar indicator — it consumes candles from an owned source, so composition
 /// is construction: `Parkinson::new(Current::candle(), 20)` is the 20-bar
-/// estimator of the base stream. Backed by the shared [`WindowStats`] core;
+/// estimator of the base stream. Backed by the shared `WindowStats` core;
 /// O(1) per bar. Produces `None` until the window is full.
 #[derive(Debug, Clone, SaveState)]
 pub struct Parkinson<S> {

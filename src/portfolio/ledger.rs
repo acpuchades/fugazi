@@ -2,12 +2,12 @@
 //!
 //! A [`Portfolio`](super::Portfolio) running on a single account cannot give
 //! each child its own wallet — the venue holds one balance and one position per
-//! symbol. What it gives each child instead is a [`Ledger`]: pure bookkeeping
+//! symbol. What it gives each child instead is a `Ledger`: pure bookkeeping
 //! saying "this child notionally owns 3 of the account's 10 BTC and $500 of its
 //! $2,000". The ledgers always sum to the account; that identity is the
 //! composite's core invariant, asserted in tests.
 //!
-//! [`LedgerWallet`] is what makes that invisible to the child. It implements
+//! `LedgerWallet` is what makes that invisible to the child. It implements
 //! `Wallet` like any other, but its reads come from the child's ledger rather
 //! than the account — so `value_frac(1.0)` still means "all of *my* equity",
 //! per-child equity stays meaningful, and no strategy code changes. Its writes
