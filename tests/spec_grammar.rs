@@ -129,6 +129,35 @@ fn every_tag_is_well_formed() {
     }
 }
 
+/// Documentation is self-maintaining: every tag and every field must carry
+/// prose, so a new one cannot ship undocumented and silently degrade the
+/// generated reference. This is the CI gate behind the 0.49 prose backfill.
+#[test]
+fn every_tag_and_field_is_documented() {
+    let mut missing_tags = Vec::new();
+    let mut missing_fields = Vec::new();
+    for tag in spec_grammar() {
+        if tag.doc.as_deref().unwrap_or("").trim().is_empty() {
+            missing_tags.push(tag.name.clone());
+        }
+        for f in &tag.fields {
+            if f.doc.as_deref().unwrap_or("").trim().is_empty() {
+                missing_fields.push(format!("{}.{}", tag.name, f.name));
+            }
+        }
+    }
+    assert!(
+        missing_tags.is_empty(),
+        "these tags have no `///` doc — add one next to the variant:\n  {}",
+        missing_tags.join("\n  ")
+    );
+    assert!(
+        missing_fields.is_empty(),
+        "these fields have no `///` doc — add one next to the field:\n  {}",
+        missing_fields.join("\n  ")
+    );
+}
+
 /// The whole document, including native `serde_json::Value` defaults, must be
 /// JSON-serializable — that's the contract for the Python / web consumers.
 #[test]

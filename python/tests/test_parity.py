@@ -173,56 +173,72 @@ def test_the_declared_tables_do_not_go_stale():
 
 
 # --------------------------------------------------------------------------
-# Constructor default parity — against `spec_grammar()`, not just `spec_tags()`.
+# Constructor ↔ descriptor parity (Gap 2, option **(a)** — the full mapping).
 #
-# The canonical numeric defaults (MACD's 12/26/9, Bollinger's k=2.0, …) are
-# single-sourced in the Rust `spec::expr` consts: they back the serde
-# `#[serde(default = …)]` (so YAML may omit them) and the grammar descriptor's
-# `default`. The pyo3 signatures still carry them as literals — pyo3 can't read a
-# const-path default back into `__text_signature__` (it renders as `...`), which
-# would defeat this very check — so they are *test-pinned* here instead. Drift
-# between a Python default and its serde const is now a CI failure.
+# The YAML tags were flattened — `macd_line` / `bb_upper` are top-level tags
+# carrying the full param set — but the Python API kept coarser struct-returning
+# constructors (`macd()` → {line, signal, histogram}). So a constructor maps to a
+# *set* of component tags that share one field list. `CONSTRUCTORS` records that
+# mapping, plus the one genuine param↔field rename (MACD's `*_period` ↔ the terse
+# `fast`/`slow`/`signal`; every other constructor aligns by name).
 #
-# `param_map` records the one intentional YAML↔Python naming difference: MACD's
-# terse `fast`/`slow`/`signal` (YAML house style, like every other tag) vs the
-# explicit `*_period` (Python house style, as with `keltner`). Everything else
-# maps by identity.
-DEFAULT_PINNED = {
-    "macd": ("macd_line", {"fast_period": "fast", "slow_period": "slow", "signal_period": "signal"}),
-    "bollinger": ("bb_upper", {"period": "period", "k": "k"}),
-    "keltner": (
-        "keltner_upper",
-        {"ema_period": "ema_period", "atr_period": "atr_period", "multiplier": "multiplier"},
+# The test then asserts, across the whole mapped set, that each constructor's
+# `inspect.signature` params exist as fields on its tags and that every default
+# equals the descriptor's — which single-sources the duplicated constants
+# (MACD 12/26/9, Bollinger 20/2.0, …). Those live once in the `spec::expr` consts
+# feeding the serde `#[serde(default)]` and the descriptor; pyo3 can't reference a
+# const-path default (it renders `...` in `__text_signature__` and would defeat
+# this check), so the Python literals are *test-pinned* here. Drift is now a CI
+# failure either way.
+CONSTRUCTORS = {
+    # constructor: (component tags, {py_param: tag_field renames})
+    "macd": (
+        ["macd_line", "macd_signal", "macd_histogram"],
+        {"fast_period": "fast", "slow_period": "slow", "signal_period": "signal"},
     ),
-    "sar": ("sar", {"step": "step", "max": "max"}),
-    "stoch_rsi": ("stoch_rsi", {"rsi_period": "rsi_period", "stoch_period": "stoch_period"}),
+    "bollinger": (["bb_upper", "bb_middle", "bb_lower"], {}),
+    "keltner": (["keltner_upper", "keltner_middle", "keltner_lower"], {}),
+    "donchian": (["donchian_upper", "donchian_middle", "donchian_lower"], {}),
+    "adx": (["adx", "plus_di", "minus_di"], {}),
+    "dmi": (["dmi_plus_di", "dmi_minus_di"], {}),
+    "aroon": (["aroon_up", "aroon_down", "aroon_oscillator"], {}),
+    "stoch_rsi": (["stoch_rsi"], {}),
+    "sar": (["sar"], {}),
+    # Same-named single-output constructors align 1:1, no rename.
+    "sma": (["sma"], {}),
+    "ema": (["ema"], {}),
+    "rsi": (["rsi"], {}),
+    "atr": (["atr"], {}),
+    "cci": (["cci"], {}),
+    "stochastic": (["stochastic"], {}),
 }
 
 
-def test_constructor_defaults_match_the_descriptor():
+def test_constructor_signatures_match_the_descriptor():
     grammar = {t["name"]: t for t in ta.spec_grammar()["tags"]}
-    for ctor_name, (tag, param_map) in DEFAULT_PINNED.items():
+    for ctor_name, (tags, renames) in CONSTRUCTORS.items():
         ctor = getattr(ta, ctor_name)
         params = inspect.signature(ctor).parameters
-        fields = {f["name"]: f for f in grammar[tag]["fields"]}
-        for py_param, serde_field in param_map.items():
-            assert py_param in params, f"{ctor_name}() lost parameter {py_param}"
-            py_default = params[py_param].default
-            assert py_default is not inspect.Parameter.empty, (
-                f"{ctor_name}({py_param}) has no default; the descriptor expects one"
-            )
-            assert serde_field in fields, (
-                f"spec_grammar {tag} has no field {serde_field} for {ctor_name}({py_param})"
-            )
-            descriptor_default = fields[serde_field]["default"]
-            assert descriptor_default is not None, (
-                f"spec_grammar {tag}.{serde_field} carries no default to pin against"
-            )
-            assert py_default == descriptor_default, (
-                f"default drift: {ctor_name}({py_param}={py_default!r}) disagrees with "
-                f"spec_grammar {tag}.{serde_field} = {descriptor_default!r}. "
-                "Reconcile the pyo3 literal with the serde const in spec::expr."
-            )
+        for py_param, param in params.items():
+            field_name = renames.get(py_param, py_param)
+            for tag in tags:
+                fields = {f["name"]: f for f in grammar[tag]["fields"]}
+                assert field_name in fields, (
+                    f"{ctor_name}({py_param}) maps to field {field_name!r}, absent from !{tag}"
+                )
+                # Every constructor default must equal the descriptor's, so the
+                # duplicated constant can't drift.
+                if param.default is not inspect.Parameter.empty:
+                    descriptor_default = fields[field_name]["default"]
+                    assert descriptor_default is not None, (
+                        f"{ctor_name}({py_param}={param.default!r}) has a default but "
+                        f"!{tag}.{field_name} carries none in the descriptor"
+                    )
+                    assert param.default == descriptor_default, (
+                        f"default drift: {ctor_name}({py_param}={param.default!r}) vs "
+                        f"!{tag}.{field_name} = {descriptor_default!r} — reconcile the pyo3 "
+                        "literal with the serde const in spec::expr"
+                    )
 
 
 # --------------------------------------------------------------------------

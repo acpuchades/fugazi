@@ -84,8 +84,11 @@ pub enum SelectionRuleSpec {
     /// full universe). See [`crate::strategies::basket::top_bottom`].
     #[grammar(kind = "selection", output = "selection")]
     TopBottom {
+        /// Number of top-ranked symbols to hold long.
         longs: usize,
+        /// Number of bottom-ranked symbols to hold short.
         shorts: usize,
+        /// Inner rule to rank within; defaults to the full universe (`!everything`).
         #[serde(default)]
         of: Box<SelectionRuleSpec>,
     },
@@ -95,8 +98,11 @@ pub enum SelectionRuleSpec {
     /// universe). See [`crate::strategies::basket::threshold`].
     #[grammar(kind = "selection", output = "selection")]
     Threshold {
+        /// Minimum score to hold a symbol long.
         long_min: Real,
+        /// Maximum score to hold a symbol short.
         short_max: Real,
+        /// Inner rule to rank within; defaults to the full universe (`!everything`).
         #[serde(default)]
         of: Box<SelectionRuleSpec>,
     },
@@ -106,8 +112,11 @@ pub enum SelectionRuleSpec {
     /// See [`crate::strategies::basket::quantile`].
     #[grammar(kind = "selection", output = "selection")]
     Quantile {
+        /// Top score-quantile held long, a fraction in `[0, 1]`.
         long_q: Real,
+        /// Bottom score-quantile held short, a fraction in `[0, 1]`.
         short_q: Real,
+        /// Inner rule to rank within; defaults to the full universe (`!everything`).
         #[serde(default)]
         of: Box<SelectionRuleSpec>,
     },

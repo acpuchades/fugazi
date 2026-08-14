@@ -482,38 +482,52 @@ pub struct MatchCase {
 #[grammar(group = "node")]
 pub enum NodeSpec {
     // --- atom-input leaves (candle fields) ---
+    /// The bar's close price.
     #[grammar(kind = "source")]
     Close {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
+    /// The bar's high price.
     #[grammar(kind = "source")]
     High {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
+    /// The bar's low price.
     #[grammar(kind = "source")]
     Low {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
+    /// The bar's open price.
     #[grammar(kind = "source")]
     Open {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
+    /// The bar's traded volume.
     #[grammar(kind = "source")]
     Volume {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
+    /// The typical price, `(high + low + close) / 3`.
     #[grammar(kind = "source")]
     Typical {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
+    /// The median price, `(high + low) / 2`.
     #[grammar(kind = "source")]
     Median {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
@@ -523,6 +537,7 @@ pub enum NodeSpec {
     /// onto a higher timeframe.
     #[grammar(kind = "source", output = "candle")]
     Current {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
@@ -538,8 +553,10 @@ pub enum NodeSpec {
     /// disambiguates via `!pick { symbol: BTC, freq: 1h }`.
     #[grammar(kind = "source", output = "atom")]
     Pick {
+        /// Asset to project from the snapshot; defaults to the blessed series.
         #[serde(default)]
         symbol: Option<String>,
+        /// Bar cadence for a cross-frequency snapshot (e.g. `1h`, `1d`).
         #[serde(default)]
         freq: Option<String>,
     },
@@ -588,6 +605,7 @@ pub enum NodeSpec {
     /// [`crate::indicators::Book::equity`].
     #[grammar(kind = "source")]
     Equity {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
@@ -595,6 +613,7 @@ pub enum NodeSpec {
     /// See [`crate::indicators::Book::equity_peak`].
     #[grammar(kind = "source")]
     EquityPeak {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
@@ -603,6 +622,7 @@ pub enum NodeSpec {
     /// [`crate::indicators::Book::drawdown`].
     #[grammar(kind = "source")]
     Drawdown {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
@@ -612,6 +632,7 @@ pub enum NodeSpec {
     /// [`crate::indicators::Book::return_per_bar`].
     #[grammar(kind = "source")]
     ReturnPerBar {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
@@ -624,6 +645,7 @@ pub enum NodeSpec {
     /// fills, so no "portfolio trade" is defined.
     #[grammar(kind = "source")]
     TradePnl {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
@@ -633,6 +655,7 @@ pub enum NodeSpec {
     /// portfolio aggregate book for the same reason as [`NodeSpec::TradePnl`].
     #[grammar(kind = "source")]
     TradeReturn {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
@@ -653,72 +676,104 @@ pub enum NodeSpec {
     /// type-clashed spec.
     #[grammar(kind = "source", output = "any")]
     Get {
+        /// Overlay column name to read from each bar's side-channel data.
         key: String,
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
 
     // --- price-series indicators (a source + parameters) ---
+    /// Exponential moving average of `source` over `period`.
     #[grammar(kind = "indicator")]
     Ema {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Simple moving average of `source` over `period`.
     #[grammar(kind = "indicator")]
     Sma {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Wilder's smoothed moving average (RMA) of `source` over `period`.
     #[grammar(kind = "indicator")]
     Rma {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Linearly-weighted moving average of `source` over `period`.
     #[grammar(kind = "indicator")]
     Wma {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Hull moving average of `source` over `period` — fast and smooth.
     #[grammar(kind = "indicator")]
     Hma {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Relative Strength Index of `source` over `period`, in `[0, 100]`.
     #[grammar(kind = "indicator")]
     Rsi {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Rolling sample standard deviation of `source` over `period`.
     #[serde(rename = "stddev")]
     #[grammar(kind = "indicator")]
     StdDev {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Rolling sample skewness of `source` over `period`.
     #[grammar(kind = "indicator")]
     Skewness {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Rolling excess kurtosis of `source` over `period`.
     #[grammar(kind = "indicator")]
     Kurtosis {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Rolling z-score of `source` — `(x − mean) / stddev` over `period`.
     #[serde(rename = "zscore")]
     #[grammar(kind = "indicator")]
     ZScore {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
     /// The `pct`-quantile of a source over the trailing `period` bars —
@@ -728,9 +783,12 @@ pub enum NodeSpec {
     /// O(1). See [`crate::indicators::Percentile`].
     #[grammar(kind = "indicator")]
     Percentile {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
+        /// Quantile in `[0, 1]` (`0.5` is the rolling median).
         pct: Real,
     },
     /// Where the current reading sits in its own trailing distribution, as
@@ -738,8 +796,10 @@ pub enum NodeSpec {
     /// [`crate::indicators::PercentileRank`].
     #[grammar(kind = "indicator")]
     PercentileRank {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
     /// Bars elapsed since `source` (a **signal**) last read true — `0` on the
@@ -747,302 +807,434 @@ pub enum NodeSpec {
     /// threshold against it read false until then. See
     /// [`crate::indicators::BarsSince`].
     #[grammar(kind = "indicator")]
-    BarsSince { source: Box<NodeSpec> },
+    BarsSince {
+        /// The source signal this counts the bars since (required).
+        source: Box<NodeSpec>,
+    },
     /// Bars elapsed since `source` last set a new `period`-bar high, in
     /// `[0, period - 1]`. See [`crate::indicators::BarsSinceHigh`].
     #[grammar(kind = "indicator")]
     BarsSinceHigh {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
     /// Bars elapsed since `source` last set a new `period`-bar low.
     /// See [`crate::indicators::BarsSinceLow`].
     #[grammar(kind = "indicator")]
     BarsSinceLow {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
     /// Rolling Pearson correlation between two Real sources. Both operands are
     /// required — there is no single natural default for a two-source stat.
     #[grammar(kind = "indicator")]
     Correlation {
+        /// Left-hand operand.
         lhs: Box<NodeSpec>,
+        /// Right-hand operand.
         rhs: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
     /// Lo-MacKinlay variance-ratio regime classifier (`> 1` trending, `< 1`
     /// mean-reverting) over the source's first differences.
     #[grammar(kind = "indicator")]
     VarianceRatio {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
+        /// Differencing lag, in bars.
         lag: usize,
     },
+    /// Commodity Channel Index of `source` over `period`.
     #[grammar(kind = "indicator")]
     Cci {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Stochastic oscillator %K of `source` over `period`, in `[0, 100]`.
     #[grammar(kind = "indicator")]
     Stochastic {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Stochastic RSI — the stochastic transform of an RSI of `source`.
     #[grammar(kind = "indicator")]
     StochRsi {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Period of the inner RSI.
         #[serde(default = "stoch_rsi_rsi_period_default")]
         rsi_period: usize,
+        /// Stochastic period applied over the RSI.
         #[serde(default = "stoch_rsi_stoch_period_default")]
         stoch_period: usize,
     },
 
     // --- multi-output indicators, one variant per component ---
+    /// MACD line: `EMA(fast) − EMA(slow)` of `source`.
     #[grammar(kind = "indicator")]
     MacdLine {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Fast EMA period.
         #[serde(default = "macd_fast_default")]
         fast: usize,
+        /// Slow EMA period.
         #[serde(default = "macd_slow_default")]
         slow: usize,
+        /// Signal EMA period.
         #[serde(default = "macd_signal_default")]
         signal: usize,
     },
+    /// MACD signal line: the `signal`-period EMA of the MACD line.
     #[grammar(kind = "indicator")]
     MacdSignal {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Fast EMA period.
         #[serde(default = "macd_fast_default")]
         fast: usize,
+        /// Slow EMA period.
         #[serde(default = "macd_slow_default")]
         slow: usize,
+        /// Signal EMA period.
         #[serde(default = "macd_signal_default")]
         signal: usize,
     },
+    /// MACD histogram: the MACD line minus its signal line.
     #[grammar(kind = "indicator")]
     MacdHistogram {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Fast EMA period.
         #[serde(default = "macd_fast_default")]
         fast: usize,
+        /// Slow EMA period.
         #[serde(default = "macd_slow_default")]
         slow: usize,
+        /// Signal EMA period.
         #[serde(default = "macd_signal_default")]
         signal: usize,
     },
+    /// Bollinger upper band: `SMA(period) + k · stddev`.
     #[grammar(kind = "indicator")]
     BbUpper {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         #[serde(default = "bb_period_default")]
         period: usize,
+        /// Band half-width, in standard deviations.
         #[serde(default = "bb_k_default")]
         k: Real,
     },
+    /// Bollinger middle band: the `period`-bar SMA of `source`.
     #[grammar(kind = "indicator")]
     BbMiddle {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         #[serde(default = "bb_period_default")]
         period: usize,
+        /// Band half-width, in standard deviations.
         #[serde(default = "bb_k_default")]
         k: Real,
     },
+    /// Bollinger lower band: `SMA(period) − k · stddev`.
     #[grammar(kind = "indicator")]
     BbLower {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         #[serde(default = "bb_period_default")]
         period: usize,
+        /// Band half-width, in standard deviations.
         #[serde(default = "bb_k_default")]
         k: Real,
     },
+    /// Keltner upper band: the EMA middle plus `multiplier · ATR`.
     #[grammar(kind = "indicator")]
     KeltnerUpper {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
         #[serde(default = "default_bar_source")]
         candle_source: Box<NodeSpec>,
+        /// EMA period of the middle band.
         #[serde(default = "keltner_ema_period_default")]
         ema_period: usize,
+        /// ATR period setting the channel width.
         #[serde(default = "keltner_atr_period_default")]
         atr_period: usize,
+        /// Channel half-width, as a multiple of ATR.
         #[serde(default = "keltner_multiplier_default")]
         multiplier: Real,
     },
+    /// Keltner middle band: the `ema_period` EMA of `source`.
     #[grammar(kind = "indicator")]
     KeltnerMiddle {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
         #[serde(default = "default_bar_source")]
         candle_source: Box<NodeSpec>,
+        /// EMA period of the middle band.
         #[serde(default = "keltner_ema_period_default")]
         ema_period: usize,
+        /// ATR period setting the channel width.
         #[serde(default = "keltner_atr_period_default")]
         atr_period: usize,
+        /// Channel half-width, as a multiple of ATR.
         #[serde(default = "keltner_multiplier_default")]
         multiplier: Real,
     },
+    /// Keltner lower band: the EMA middle minus `multiplier · ATR`.
     #[grammar(kind = "indicator")]
     KeltnerLower {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
         #[serde(default = "default_bar_source")]
         candle_source: Box<NodeSpec>,
+        /// EMA period of the middle band.
         #[serde(default = "keltner_ema_period_default")]
         ema_period: usize,
+        /// ATR period setting the channel width.
         #[serde(default = "keltner_atr_period_default")]
         atr_period: usize,
+        /// Channel half-width, as a multiple of ATR.
         #[serde(default = "keltner_multiplier_default")]
         multiplier: Real,
     },
+    /// Donchian upper channel: the highest `high` over `period` bars.
     #[grammar(kind = "indicator")]
     DonchianUpper {
+        /// The high series; defaults to `!high` when omitted.
         #[serde(default = "default_high")]
         high: Box<NodeSpec>,
+        /// The low series; defaults to `!low` when omitted.
         #[serde(default = "default_low")]
         low: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Donchian middle channel: the mean of the upper and lower bands.
     #[grammar(kind = "indicator")]
     DonchianMiddle {
+        /// The high series; defaults to `!high` when omitted.
         #[serde(default = "default_high")]
         high: Box<NodeSpec>,
+        /// The low series; defaults to `!low` when omitted.
         #[serde(default = "default_low")]
         low: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Donchian lower channel: the lowest `low` over `period` bars.
     #[grammar(kind = "indicator")]
     DonchianLower {
+        /// The high series; defaults to `!high` when omitted.
         #[serde(default = "default_high")]
         high: Box<NodeSpec>,
+        /// The low series; defaults to `!low` when omitted.
         #[serde(default = "default_low")]
         low: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Average Directional Index over `period` — trend strength, in `[0, 100]`.
     #[grammar(kind = "indicator")]
     Adx {
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
         #[serde(default = "default_bar_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Positive Directional Indicator (+DI) over `period`.
     #[grammar(kind = "indicator")]
     PlusDi {
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
         #[serde(default = "default_bar_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Negative Directional Indicator (−DI) over `period`.
     #[grammar(kind = "indicator")]
     MinusDi {
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
         #[serde(default = "default_bar_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Directional Movement +DI over `period` (the DMI system's variant).
     #[grammar(kind = "indicator")]
     DmiPlusDi {
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
         #[serde(default = "default_bar_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Directional Movement −DI over `period` (the DMI system's variant).
     #[grammar(kind = "indicator")]
     DmiMinusDi {
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
         #[serde(default = "default_bar_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Aroon Up over `period`, in `[0, 100]` — recency of the period high.
     #[grammar(kind = "indicator")]
     AroonUp {
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
         #[serde(default = "default_bar_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Aroon Down over `period`, in `[0, 100]` — recency of the period low.
     #[grammar(kind = "indicator")]
     AroonDown {
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
         #[serde(default = "default_bar_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Aroon Oscillator: Aroon Up minus Aroon Down.
     #[grammar(kind = "indicator")]
     AroonOscillator {
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
         #[serde(default = "default_bar_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
 
     // --- single-output bar indicators ---
+    /// Average True Range over `period` — mean bar range in price units.
     #[grammar(kind = "indicator")]
     Atr {
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
         #[serde(default = "default_bar_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
     /// Parkinson high/low range volatility estimator over `period`.
     #[grammar(kind = "indicator")]
     Parkinson {
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
         #[serde(default = "default_bar_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
     /// Garman–Klass OHLC volatility estimator over `period`.
     #[grammar(kind = "indicator")]
     GarmanKlass {
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
         #[serde(default = "default_bar_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
     /// Rogers–Satchell drift-independent OHLC volatility estimator over `period`.
     #[grammar(kind = "indicator")]
     RogersSatchell {
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
         #[serde(default = "default_bar_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Money Flow Index over `period`, in `[0, 100]` — a volume-weighted RSI.
     #[grammar(kind = "indicator")]
     Mfi {
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
         #[serde(default = "default_bar_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Williams %R over `period`, in `[−100, 0]`.
     #[grammar(kind = "indicator")]
     WilliamsR {
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
         #[serde(default = "default_bar_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// On-Balance Volume — the running signed-volume accumulation.
     #[grammar(kind = "indicator")]
     Obv {
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
         #[serde(default = "default_bar_source")]
         source: Box<NodeSpec>,
     },
+    /// Volume-Weighted Average Price over `period`.
     #[grammar(kind = "indicator")]
     Vwap {
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
         #[serde(default = "default_bar_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Accumulation/Distribution line — the running money-flow accumulation.
     #[grammar(kind = "indicator")]
     Ad {
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
         #[serde(default = "default_bar_source")]
         source: Box<NodeSpec>,
     },
+    /// True Range of the current bar, in price units.
     #[grammar(kind = "indicator")]
     TrueRange {
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
         #[serde(default = "default_bar_source")]
         source: Box<NodeSpec>,
     },
+    /// Parabolic SAR — the trailing stop-and-reverse level.
     #[grammar(kind = "indicator")]
     Sar {
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
         #[serde(default = "default_bar_source")]
         source: Box<NodeSpec>,
+        /// Acceleration-factor increment.
         #[serde(default = "sar_step_default")]
         step: Real,
+        /// Acceleration-factor cap.
         #[serde(default = "sar_max_default")]
         max: Real,
     },
@@ -1069,10 +1261,14 @@ pub enum NodeSpec {
     /// [`crate::indicators::sizing::vol_target_of`].
     #[grammar(kind = "function")]
     VolTarget {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
+        /// Target annualized volatility, as a fraction.
         target: Real,
+        /// Lookback window, in bars.
         window: usize,
+        /// Bars per year, for annualizing (252 stocks, 365 crypto).
         bars_per_year: Real,
     },
     /// Fixed per-trade risk sized by ATR —
@@ -1083,10 +1279,14 @@ pub enum NodeSpec {
     /// [`crate::indicators::sizing::atr_risk_of`].
     #[grammar(kind = "function")]
     AtrRisk {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
+        /// Fraction of equity risked per trade.
         risk_frac: Real,
+        /// Lookback window, in bars.
         period: usize,
+        /// Stop distance, as a multiple of ATR.
         atr_multiple: Real,
     },
     /// Drawdown-throttled sizing — `max(0, min(1, 1 + book.drawdown() /
@@ -1095,8 +1295,10 @@ pub enum NodeSpec {
     /// [`crate::indicators::sizing::drawdown_throttle`].
     #[grammar(kind = "function")]
     DrawdownThrottle {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
+        /// Drawdown fraction at which sizing throttles to zero.
         max_drawdown: Real,
     },
     /// Realized-vol targeting on the book's equity return series
@@ -1106,10 +1308,14 @@ pub enum NodeSpec {
     /// [`crate::indicators::sizing::equity_vol_target`].
     #[grammar(kind = "function")]
     EquityVolTarget {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
+        /// Target annualized volatility, as a fraction.
         target: Real,
+        /// Lookback window, in bars.
         window: usize,
+        /// Bars per year, for annualizing (252 stocks, 365 crypto).
         bars_per_year: Real,
     },
     /// Fractional Kelly over the last `window` closed-trade returns —
@@ -1118,9 +1324,12 @@ pub enum NodeSpec {
     /// [`crate::indicators::sizing::fractional_kelly`].
     #[grammar(kind = "function")]
     FractionalKelly {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
+        /// Fraction of the full Kelly stake to take.
         kelly_fraction: Real,
+        /// Lookback window, in bars.
         window: usize,
     },
 
@@ -1136,9 +1345,13 @@ pub enum NodeSpec {
     /// `period` bars. See [`crate::indicators::Sharpe`].
     #[grammar(kind = "indicator")]
     Sharpe {
+        /// The embedded single-asset strategy whose equity curve this measures.
         strategy: Box<AnyStrategyRef>,
+        /// Lookback window, in bars.
         period: usize,
+        /// Bars per year, for annualizing (252 stocks, 365 crypto).
         bars_per_year: Real,
+        /// Annualized risk-free rate; defaults to `0` when omitted.
         #[serde(default = "default_risk_free_rate")]
         risk_free_rate: Real,
     },
@@ -1146,9 +1359,13 @@ pub enum NodeSpec {
     /// [`crate::indicators::Sortino`].
     #[grammar(kind = "indicator")]
     Sortino {
+        /// The embedded single-asset strategy whose equity curve this measures.
         strategy: Box<AnyStrategyRef>,
+        /// Lookback window, in bars.
         period: usize,
+        /// Bars per year, for annualizing (252 stocks, 365 crypto).
         bars_per_year: Real,
+        /// Annualized risk-free rate; defaults to `0` when omitted.
         #[serde(default = "default_risk_free_rate")]
         risk_free_rate: Real,
     },
@@ -1156,45 +1373,65 @@ pub enum NodeSpec {
     /// See [`crate::indicators::Volatility`].
     #[grammar(kind = "indicator")]
     Volatility {
+        /// The embedded single-asset strategy whose equity curve this measures.
         strategy: Box<AnyStrategyRef>,
+        /// Lookback window, in bars.
         period: usize,
+        /// Bars per year, for annualizing (252 stocks, 365 crypto).
         bars_per_year: Real,
     },
     /// Trailing maximum drawdown of `strategy`'s equity curve, as a
     /// non-negative fraction. See [`crate::indicators::MaxDrawdown`].
     #[grammar(kind = "indicator")]
     MaxDrawdown {
+        /// The embedded single-asset strategy whose equity curve this measures.
         strategy: Box<AnyStrategyRef>,
+        /// Lookback window, in bars.
         period: usize,
     },
     /// Trailing Calmar (windowed CAGR / max drawdown) of `strategy`'s equity
     /// curve. See [`crate::indicators::Calmar`].
     #[grammar(kind = "indicator")]
     Calmar {
+        /// The embedded single-asset strategy whose equity curve this measures.
         strategy: Box<AnyStrategyRef>,
+        /// Lookback window, in bars.
         period: usize,
+        /// Bars per year, for annualizing (252 stocks, 365 crypto).
         bars_per_year: Real,
     },
 
     // --- transform operators ---
+    /// Sum of `lhs` and `rhs`.
     #[grammar(kind = "operator")]
     Add {
+        /// Left-hand operand.
         lhs: Box<NodeSpec>,
+        /// Right-hand operand.
         rhs: Box<NodeSpec>,
     },
+    /// `lhs` minus `rhs`.
     #[grammar(kind = "operator")]
     Sub {
+        /// Left-hand operand.
         lhs: Box<NodeSpec>,
+        /// Right-hand operand.
         rhs: Box<NodeSpec>,
     },
+    /// Product of `lhs` and `rhs`.
     #[grammar(kind = "operator")]
     Mul {
+        /// Left-hand operand.
         lhs: Box<NodeSpec>,
+        /// Right-hand operand.
         rhs: Box<NodeSpec>,
     },
+    /// `lhs` divided by `rhs` (`None` when `rhs` is zero).
     #[grammar(kind = "operator")]
     Div {
+        /// Left-hand operand.
         lhs: Box<NodeSpec>,
+        /// Right-hand operand.
         rhs: Box<NodeSpec>,
     },
     /// Three-source ternary: reads `cond` (a bool signal), emits
@@ -1206,8 +1443,11 @@ pub enum NodeSpec {
     /// [`crate::indicators::IfElse`].
     #[grammar(kind = "operator", output = "any")]
     IfElse {
+        /// Boolean condition selecting between `then` and `otherwise`.
         cond: Box<NodeSpec>,
+        /// Value emitted when `cond` is true.
         then: Box<NodeSpec>,
+        /// Value emitted when `cond` is false.
         otherwise: Box<NodeSpec>,
     },
     /// N-way dispatch by value equality — reads `on` once per bar and
@@ -1224,52 +1464,75 @@ pub enum NodeSpec {
     /// [`crate::indicators::Match`].
     #[grammar(kind = "operator", output = "any")]
     Match {
+        /// Value dispatched on, matched against each case's pattern.
         on: Box<NodeSpec>,
+        /// Ordered cases; the first whose pattern equals `on` wins.
         cases: Vec<MatchCase>,
+        /// Fallback value when no case matches.
         default: Box<NodeSpec>,
     },
+    /// The value of `source` from `period` bars ago.
     #[grammar(kind = "operator")]
     Lag {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// `source` minus its value `period` bars ago.
     #[grammar(kind = "operator")]
     Diff {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// `source` divided by its value `period` bars ago.
     #[grammar(kind = "operator")]
     Ratio {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Rate of change of `source` over `period` bars, as a fraction.
     #[grammar(kind = "operator")]
     Roc {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Rolling maximum of `source` over `period` bars.
     #[grammar(kind = "operator")]
     RollingMax {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
+    /// Rolling minimum of `source` over `period` bars.
     #[grammar(kind = "operator")]
     RollingMin {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Lookback window, in bars.
         period: usize,
     },
     /// Logarithm of `source` in `base` (defaults to natural log, `e`).
     /// Emits `None` on samples where the source's output is non-positive.
     #[grammar(kind = "operator")]
     Log {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Logarithm base; defaults to `e` (natural log) when omitted.
         #[serde(default = "default_log_base")]
         base: Real,
     },
@@ -1279,7 +1542,10 @@ pub enum NodeSpec {
     /// finished higher-timeframe value between boundaries — see
     /// [`crate::indicators::Latch`].
     #[grammar(kind = "operator", output = "any")]
-    Latch { source: Box<NodeSpec> },
+    Latch {
+        /// The source whose last `Some` output is held between ticks (required).
+        source: Box<NodeSpec>,
+    },
     /// Aggregates `every` base candles into one higher-timeframe candle and
     /// runs the `inner` source over it, emitting `inner`'s output on each
     /// completed bucket and `None` in between. `inner` is any source that
@@ -1294,8 +1560,11 @@ pub enum NodeSpec {
     /// finished value between boundaries.
     #[grammar(kind = "operator")]
     Resample {
+        /// Number of base bars aggregated into each higher-timeframe bar.
         every: usize,
+        /// Source run over each completed higher-timeframe bar.
         inner: Box<NodeSpec>,
+        /// Bar source — the whole candle; defaults to the current bar when omitted.
         #[serde(default = "default_bar_source")]
         source: Box<NodeSpec>,
     },
@@ -1306,7 +1575,10 @@ pub enum NodeSpec {
     /// every source to be past its unstable tail" safe default; see
     /// [`crate::indicators::Unstable`].
     #[grammar(kind = "operator", output = "any")]
-    Unstable { source: Box<NodeSpec> },
+    Unstable {
+        /// The source whose unstable settling tail is ignored (required).
+        source: Box<NodeSpec>,
+    },
 
     // --- calendar accessors (read `atom.time`, emit Real; None when time is
     // absent). Each takes an optional `source` for cross-asset use — the
@@ -1315,72 +1587,84 @@ pub enum NodeSpec {
     /// The Gregorian year (e.g. `2024.0`).
     #[grammar(kind = "source")]
     Year {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// The Gregorian month, `1.0` (Jan) through `12.0` (Dec).
     #[grammar(kind = "source")]
     Month {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// The day of the month, `1.0` through `31.0`.
     #[grammar(kind = "source")]
     Day {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// The hour of the day (UTC), `0.0` through `23.0`.
     #[grammar(kind = "source")]
     Hour {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// The minute of the hour, `0.0` through `59.0`.
     #[grammar(kind = "source")]
     Minute {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// The second of the minute, `0.0` through `59.0`.
     #[grammar(kind = "source")]
     Second {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// ISO 8601 weekday, `1.0` (Monday) through `7.0` (Sunday).
     #[grammar(kind = "source")]
     DayOfWeek {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// Day of the year, `1.0` through `366.0`.
     #[grammar(kind = "source")]
     DayOfYear {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// ISO 8601 week of the year, `1.0` through `53.0`.
     #[grammar(kind = "source")]
     WeekOfYear {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// Calendar quarter, `1.0` through `4.0`.
     #[grammar(kind = "source")]
     Quarter {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// Unix seconds since the epoch (as a Real).
     #[grammar(kind = "source")]
     UnixSeconds {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// Unix milliseconds since the epoch (as a Real).
     #[grammar(kind = "source")]
     UnixMillis {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
@@ -1389,6 +1673,7 @@ pub enum NodeSpec {
     /// [`NodeSpec::Current`].
     #[grammar(kind = "source", output = "time")]
     Time {
+        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
@@ -1396,80 +1681,122 @@ pub enum NodeSpec {
     // --- boolean signals (absorbed from the former SignalSpec; every one
     // produces `Bool`). Comparisons carry an optional absolute `epsilon`
     // (default `DEFAULT_EPSILON`).
+    /// True when `lhs` is greater than `rhs` (beyond `epsilon`).
     #[grammar(kind = "predicate", output = "bool")]
     Gt {
+        /// Left-hand operand.
         lhs: Box<NodeSpec>,
+        /// Right-hand operand.
         rhs: Box<NodeSpec>,
+        /// Absolute comparison tolerance; defaults to `DEFAULT_EPSILON` when omitted.
         epsilon: Option<Real>,
     },
+    /// True when `lhs` is less than `rhs` (beyond `epsilon`).
     #[grammar(kind = "predicate", output = "bool")]
     Lt {
+        /// Left-hand operand.
         lhs: Box<NodeSpec>,
+        /// Right-hand operand.
         rhs: Box<NodeSpec>,
+        /// Absolute comparison tolerance; defaults to `DEFAULT_EPSILON` when omitted.
         epsilon: Option<Real>,
     },
+    /// True when `lhs` is greater than or equal to `rhs` (within `epsilon`).
     #[grammar(kind = "predicate", output = "bool")]
     Ge {
+        /// Left-hand operand.
         lhs: Box<NodeSpec>,
+        /// Right-hand operand.
         rhs: Box<NodeSpec>,
+        /// Absolute comparison tolerance; defaults to `DEFAULT_EPSILON` when omitted.
         epsilon: Option<Real>,
     },
+    /// True when `lhs` is less than or equal to `rhs` (within `epsilon`).
     #[grammar(kind = "predicate", output = "bool")]
     Le {
+        /// Left-hand operand.
         lhs: Box<NodeSpec>,
+        /// Right-hand operand.
         rhs: Box<NodeSpec>,
+        /// Absolute comparison tolerance; defaults to `DEFAULT_EPSILON` when omitted.
         epsilon: Option<Real>,
     },
     /// Polymorphic equality — Real or Str, dispatched on the lhs at build.
     #[grammar(kind = "predicate", output = "bool")]
     Eq {
+        /// Left-hand operand.
         lhs: Box<NodeSpec>,
+        /// Right-hand operand.
         rhs: Box<NodeSpec>,
+        /// Absolute comparison tolerance; defaults to `DEFAULT_EPSILON` when omitted.
         epsilon: Option<Real>,
     },
+    /// True when `lhs` and `rhs` differ by more than `epsilon`.
     #[grammar(kind = "predicate", output = "bool")]
     Ne {
+        /// Left-hand operand.
         lhs: Box<NodeSpec>,
+        /// Right-hand operand.
         rhs: Box<NodeSpec>,
+        /// Absolute comparison tolerance; defaults to `DEFAULT_EPSILON` when omitted.
         epsilon: Option<Real>,
     },
     /// `source > level` against a constant.
     #[grammar(kind = "predicate", output = "bool")]
     Above {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Constant threshold `source` is compared against.
         level: Real,
     },
     /// `source < level` against a constant.
     #[grammar(kind = "predicate", output = "bool")]
     Below {
+        /// Series to read; defaults to the bar's `!close` when omitted.
         #[serde(default = "default_source")]
         source: Box<NodeSpec>,
+        /// Constant threshold `source` is compared against.
         level: Real,
     },
+    /// Fires on the bar `lhs` crosses from below to above `rhs`.
     #[grammar(kind = "predicate", output = "bool")]
     CrossesAbove {
+        /// Left-hand operand.
         lhs: Box<NodeSpec>,
+        /// Right-hand operand.
         rhs: Box<NodeSpec>,
     },
+    /// Fires on the bar `lhs` crosses from above to below `rhs`.
     #[grammar(kind = "predicate", output = "bool")]
     CrossesBelow {
+        /// Left-hand operand.
         lhs: Box<NodeSpec>,
+        /// Right-hand operand.
         rhs: Box<NodeSpec>,
     },
+    /// Logical AND — true when both `lhs` and `rhs` are true.
     #[grammar(kind = "operator", output = "bool")]
     And {
+        /// Left-hand operand.
         lhs: Box<NodeSpec>,
+        /// Right-hand operand.
         rhs: Box<NodeSpec>,
     },
+    /// Logical OR — true when either `lhs` or `rhs` is true.
     #[grammar(kind = "operator", output = "bool")]
     Or {
+        /// Left-hand operand.
         lhs: Box<NodeSpec>,
+        /// Right-hand operand.
         rhs: Box<NodeSpec>,
     },
+    /// Logical XOR — true when exactly one of `lhs` / `rhs` is true.
     #[grammar(kind = "operator", output = "bool")]
     Xor {
+        /// Left-hand operand.
         lhs: Box<NodeSpec>,
+        /// Right-hand operand.
         rhs: Box<NodeSpec>,
     },
     /// AND-fold of a list (empty ⇒ constant `true`).
@@ -1478,6 +1805,7 @@ pub enum NodeSpec {
     /// OR-fold of a list (empty ⇒ constant `false`).
     #[grammar(kind = "operator", output = "bool")]
     Any(Vec<NodeSpec>),
+    /// Logical negation of the inner signal.
     #[grammar(kind = "operator", output = "bool")]
     Not(Box<NodeSpec>),
     /// Toggle detector — fires on either edge. Dispatches on the child's
@@ -1495,13 +1823,17 @@ pub enum NodeSpec {
     /// `lhs == rhs` on two `Str`-typed operands.
     #[grammar(kind = "predicate", output = "bool")]
     StrEq {
+        /// Left-hand operand.
         lhs: Box<NodeSpec>,
+        /// Right-hand operand — a string literal or a `Str`-typed expression.
         rhs: StrOperand,
     },
     /// `lhs != rhs` on two `Str`-typed operands.
     #[grammar(kind = "predicate", output = "bool")]
     StrNe {
+        /// Left-hand operand.
         lhs: Box<NodeSpec>,
+        /// Right-hand operand — a string literal or a `Str`-typed expression.
         rhs: StrOperand,
     },
     /// Sugar for `!value false` — reads better on a `rebalance_on:` field
@@ -1520,7 +1852,10 @@ pub enum NodeSpec {
     IsWeekend,
     /// Schema-level check: `true` if the overlay column `name` exists.
     #[grammar(kind = "predicate", output = "bool")]
-    HasColumn { name: String },
+    HasColumn {
+        /// Overlay column name to test for existence.
+        name: String,
+    },
 }
 
 // Mirror enum: identical shape as NodeSpec but with derived Deserialize —
@@ -1768,7 +2103,10 @@ enum NodeSpecRaw {
     /// firing bar. `None` until it has fired at least once, which makes every
     /// threshold against it read false until then. See
     /// [`crate::indicators::BarsSince`].
-    BarsSince { source: Box<NodeSpec> },
+    BarsSince {
+        /// The source signal this counts the bars since (required).
+        source: Box<NodeSpec>,
+    },
     /// Bars elapsed since `source` last set a new `period`-bar high, in
     /// `[0, period - 1]`. See [`crate::indicators::BarsSinceHigh`].
     BarsSinceHigh {
@@ -2238,7 +2576,10 @@ enum NodeSpecRaw {
     /// smoother of a resampled pipeline so per-base-tick consumers see the
     /// finished higher-timeframe value between boundaries — see
     /// [`crate::indicators::Latch`].
-    Latch { source: Box<NodeSpec> },
+    Latch {
+        /// The source whose last `Some` output is held between ticks (required).
+        source: Box<NodeSpec>,
+    },
     /// Aggregates `every` base candles into one higher-timeframe candle and
     /// runs the `inner` source over it, emitting `inner`'s output on each
     /// completed bucket and `None` in between. `inner` is any source that
@@ -2263,7 +2604,10 @@ enum NodeSpecRaw {
     /// subtree's IIR settling tail. The explicit opt-out to the "wait for
     /// every source to be past its unstable tail" safe default; see
     /// [`crate::indicators::Unstable`].
-    Unstable { source: Box<NodeSpec> },
+    Unstable {
+        /// The source whose unstable settling tail is ignored (required).
+        source: Box<NodeSpec>,
+    },
 
     // --- calendar accessors (read `atom.time`, emit Real; None when time is
     // absent). Each takes an optional `source` for cross-asset use — the
@@ -2419,7 +2763,10 @@ enum NodeSpecRaw {
     Every(usize),
     IsWeekday,
     IsWeekend,
-    HasColumn { name: String },
+    HasColumn {
+        /// Overlay column name to test for existence.
+        name: String,
+    },
 }
 
 impl From<NodeSpecRaw> for NodeSpec {

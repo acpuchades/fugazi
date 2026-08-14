@@ -108,6 +108,12 @@ Foo { source, period } => dyn_indicator::wrap(
   atom-input leaf takes.
 - Give the `source:` field a `#[serde(default = "default_source")]` so a bare
   `!foo { period: 20 }` means "of the close".
+- **Document it** *(test-enforced)*. Every variant **and every field** needs a
+  one-line `///` doc — `spec_grammar()`'s prose is the generated end-user
+  reference, and `spec_grammar::tests::every_tag_and_field_is_documented` fails
+  until both are present. Say what a field defaults to when it's
+  `#[serde(default)]` (e.g. `period` → "lookback in bars"; `source` → "…defaults
+  to `!close`").
 - **Classify the variant with `#[grammar(kind = "…")]`** *(compiler-enforced)*.
   `#[derive(SpecGrammar)]` on `NodeSpec` reflects the variant into
   `spec_grammar()` (names, shape, fields, defaults, and `///` prose all come
