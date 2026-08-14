@@ -643,6 +643,15 @@ def test_evaluate_embeds_montecarlo_block():
     assert row["ci_lower"] <= row["ci_upper"]
     assert 0.0 < row["p_value_rerun"] <= 1.0
 
+    samples = mc["samples"]
+    assert samples["metric_names"] == [m["name"] for m in mc["metrics"]]
+    estimators = {s["estimator"] for s in samples["sets"]}
+    assert estimators == {"bootstrap_ci", "null_rerun"}
+    for s in samples["sets"]:
+        assert len(s["rows"]) == 200
+        for row in s["rows"]:
+            assert len(row) == len(samples["metric_names"])
+
 
 def test_evaluate_without_montecarlo_has_no_block():
     spec = ta.load_spec(_MC_YAML)

@@ -593,6 +593,19 @@ pub(crate) fn metrics_to_py(py: Python<'_>, m: &SpecMetrics) -> PyResult<Py<PyAn
     json_to_py(py, &value)
 }
 
+/// The raw per-resample values behind a Monte Carlo summary — the same shape
+/// the CLI writes to `montecarlo.csv`, one entry per estimator (`bootstrap_ci`,
+/// `null_rerun`).
+fn mc_samples_to_json(samples: &fugazi_core::spec::montecarlo::McSamples) -> JsonValue {
+    serde_json::json!({
+        "metric_names": samples.metric_names,
+        "sets": samples.sets.iter().map(|s| serde_json::json!({
+            "estimator": s.estimator,
+            "rows": s.rows,
+        })).collect::<Vec<_>>(),
+    })
+}
+
 #[pymethods]
 impl PyStrategySpec {
     /// The strategy kind, one of `single`, `pairs`, `basket`, `multi`,
@@ -662,9 +675,14 @@ impl PyStrategySpec {
     /// Passing `montecarlo=MonteCarloConfig(...)` additionally runs the Monte
     /// Carlo significance pass and embeds its result under a `montecarlo` key
     /// in the returned dict (bootstrap CIs + empirical-null p-values, exactly
-    /// as `metrics.yml`'s `montecarlo:` block). The synthetic re-run-null paths
-    /// are driven frictionlessly (the wallet's costs stay on the observed run
-    /// and its CIs, not on the resampled re-drives).
+    /// as `metrics.yml`'s `montecarlo:` block), plus the raw per-resample
+    /// values under `montecarlo["samples"]` — the same data the CLI writes to
+    /// `montecarlo.csv` (`{"metric_names": [...], "sets": [{"estimator":
+    /// "bootstrap_ci"|"null_rerun", "rows": [[...], ...]}, ...]}`), for
+    /// plotting the sampling/null distributions directly in Python. The
+    /// synthetic re-run-null paths are driven frictionlessly (the wallet's
+    /// costs stay on the observed run and its CIs, not on the resampled
+    /// re-drives).
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (
         wallet,
@@ -689,6 +707,7 @@ impl PyStrategySpec {
         let report = run_spec(&self.inner, &snaps, &mut wallet.inner)?;
         let mut metrics =
             spec_metrics::from_report(&report, bars_per_year, risk_free_rate, seconds_per_bar);
+        let mut samples = None;
         if let Some(mc) = montecarlo {
             // The Python surface installs costs on the wallet, not via a
             // `CostConfig`, so the re-run null's synthetic re-drives are
@@ -709,8 +728,16 @@ impl PyStrategySpec {
                 .detach(|| run_montecarlo(&self.inner, &snaps, &ctx, &report, &mc.inner))
                 .map_err(build_err)?;
             metrics.montecarlo = Some(outcome.section);
+            samples = Some(outcome.samples);
         }
-        metrics_to_py(py, &metrics)
+        let mut value = serde_json::to_value(&metrics)
+            .map_err(|e| PyValueError::new_err(format!("serializing metrics: {e}")))?;
+        if let Some(samples) = samples
+            && let Some(obj) = value.get_mut("montecarlo").and_then(JsonValue::as_object_mut)
+        {
+            obj.insert("samples".to_string(), mc_samples_to_json(&samples));
+        }
+        json_to_py(py, &value)
     }
 
     pub(crate) fn __repr__(&self) -> String {
