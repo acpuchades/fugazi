@@ -70,9 +70,15 @@ macro_rules! run_over_wallet {
                 .refresh_account()
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
             run_prepared!(cell, OkxWallet::demo("", "", ""), $snaps, $seed => $strat)
+        } else if let Ok(cell) = wallet.cast::<PyCoinbaseWallet>() {
+            cell.borrow_mut()
+                .inner
+                .refresh_account()
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            run_prepared!(cell, CoinbaseWallet::placeholder(), $snaps, $seed => $strat)
         } else {
             Err(PyTypeError::new_err(
-                "wallet must be a PaperWallet or an OkxWallet",
+                "wallet must be a PaperWallet, an OkxWallet, or a CoinbaseWallet",
             ))
         }
     }};
@@ -641,6 +647,223 @@ impl PyOkxWallet {
     }
 }
 
+/// A live [`Wallet`] over Coinbase Advanced Trade **spot** — the same order-flow
+/// surface as [`PaperWallet`](PyWallet), but routed to Coinbase's REST API and
+/// authenticated with a per-request ES256 JWT. Construct with
+/// [`CoinbaseWallet.mainnet`](Self::mainnet) (**real funds**), passing the CDP
+/// key name and its EC private-key PEM (and an optional `quote_ccy`, `USD` by
+/// default).
+///
+/// Spot, not swaps: a `position` is a base-asset **balance** (never negative),
+/// `funds` is the quote-currency balance, and `set_position` diffs the target
+/// against the held balance and market-orders the difference. A negative target
+/// can't be shorted — the wallet sells to flat and records a rejection for the
+/// remainder (drained like any other, through the strategy driver).
+///
+/// Drive it exactly like the paper wallet: [`update`](Self::update) each bar
+/// marks price and returns fills; [`set_position`](Self::set_position) /
+/// [`set`](Self::set) / [`close`](Self::close) send market orders;
+/// [`set_stop`](Self::set_stop) / [`set_take_profit`](Self::set_take_profit) /
+/// [`set_limit`](Self::set_limit) rest legs. Submitting returns `None` (working)
+/// — the fill lands later, surfaced by a subsequent [`update`](Self::update) or
+/// [`poll_fills`](Self::poll_fills). A REST failure surfaces as a `ValueError`
+/// (detail also on [`errors`](Self::errors)).
+///
+/// It owns a private async runtime and blocks on each request, so it must be
+/// driven from synchronous Python, one bar at a time.
+#[pyclass(name = "CoinbaseWallet")]
+pub(crate) struct PyCoinbaseWallet {
+    pub(crate) inner: CoinbaseWallet,
+}
+
+#[pymethods]
+impl PyCoinbaseWallet {
+    /// A wallet against Coinbase **production** (`api.coinbase.com`). This trades
+    /// **real funds** — supply live CDP credentials deliberately. `key_name` is
+    /// the CDP key name (`organizations/{org}/apiKeys/{key}`); `private_key_pem`
+    /// is that key's EC private key in PEM form. Raises `ValueError` if the PEM
+    /// does not parse as a P-256 key.
+    #[staticmethod]
+    #[pyo3(signature = (key_name, private_key_pem, quote_ccy = None))]
+    pub(crate) fn mainnet(
+        key_name: String,
+        private_key_pem: String,
+        quote_ccy: Option<String>,
+    ) -> PyResult<Self> {
+        let mut inner = CoinbaseWallet::mainnet(key_name, &private_key_pem)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if let Some(ccy) = quote_ccy {
+            inner = inner.with_quote_ccy(ccy);
+        }
+        Ok(PyCoinbaseWallet { inner })
+    }
+
+    /// The available cash balance (the quote-currency balance), from the cache.
+    #[getter]
+    pub(crate) fn funds(&self) -> f64 {
+        self.inner.funds().0
+    }
+
+    /// The base-asset balance held for `symbol` (never negative on spot), from
+    /// the cache.
+    pub(crate) fn position(&self, symbol: &str) -> f64 {
+        self.inner.position(&symbol.to_string()).amount
+    }
+
+    /// The last price fed for `symbol` via `update`, or `None` if never fed.
+    pub(crate) fn price(&self, symbol: &str) -> Option<f64> {
+        self.inner.price(&symbol.to_string()).map(|p| p.0)
+    }
+
+    /// Mark-to-market account equity (quote balance plus marked base balances),
+    /// from the cache.
+    pub(crate) fn equity(&self) -> f64 {
+        self.inner.equity().0
+    }
+
+    /// Force an account-state refresh (balances) now. Raises `ValueError` on a
+    /// REST failure. `update` calls this each bar; call it directly for a one-off
+    /// sync (e.g. right after construction).
+    pub(crate) fn refresh_account(&mut self) -> PyResult<()> {
+        self.inner
+            .refresh_account()
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// The live errors this wallet has recorded, in order — every REST failure
+    /// (the detail behind a raised `ValueError`, plus best-effort refresh /
+    /// fill-poll failures that have no return channel), as strings.
+    pub(crate) fn errors(&self) -> Vec<String> {
+        self.inner.errors().iter().map(|e| e.to_string()).collect()
+    }
+
+    /// Feed `symbol`'s current bar (whose `close` marks price) and return any
+    /// fills polled for it. Accepts a `Candle` or a bare price `float`. Refreshes
+    /// the account cache first.
+    pub(crate) fn update(&mut self, symbol: String, bar: &Bound<'_, PyAny>) -> PyResult<Vec<PyOrder>> {
+        let candle = if let Ok(candle) = bar.cast::<PyCandle>() {
+            candle.borrow().inner
+        } else {
+            let price: f64 = bar.extract()?;
+            Candle::new(price, price, price, price, 0.0)
+        };
+        Ok(self
+            .inner
+            .update(symbol, candle)
+            .into_iter()
+            .map(|inner| PyOrder { inner })
+            .collect())
+    }
+
+    /// Send a market order driving `symbol` to `target` base units (spot: a
+    /// negative target sells to flat). Returns `None` (working — the fill
+    /// surfaces from a later `update` / `poll_fills`).
+    pub(crate) fn set_position(&mut self, symbol: String, target: f64) -> PyResult<Option<PyOrder>> {
+        wrap_ack(self.inner.set_position(Units {
+            symbol,
+            amount: target,
+        }))
+    }
+
+    /// Send a market order targeting `side` `size` of `symbol`. Returns `None`.
+    pub(crate) fn set(
+        &mut self,
+        symbol: String,
+        side: &str,
+        size: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<PyOrder>> {
+        wrap_ack(
+            self.inner
+                .set(symbol, parse_side(side)?, coerce_size(size)?),
+        )
+    }
+
+    /// Send a market order flattening `symbol`. Returns `None`.
+    pub(crate) fn close(&mut self, symbol: String) -> PyResult<Option<PyOrder>> {
+        wrap_ack(self.inner.close(symbol))
+    }
+
+    /// Rest a reduce-only stop-loss on `symbol` at `trigger` (a `stop_limit`
+    /// sell). Idempotent, latest-wins per symbol; re-submit to trail. `size` is
+    /// how much of the holding the leg takes off, defaulting to all of it.
+    /// Returns `None` (working until it triggers).
+    #[pyo3(signature = (symbol, trigger, size = None))]
+    pub(crate) fn set_stop(
+        &mut self,
+        symbol: String,
+        trigger: f64,
+        size: Option<PySize>,
+    ) -> PyResult<Option<PyOrder>> {
+        let size = size.map_or(Size::position_frac(1.0), |s| s.inner);
+        wrap_ack(self.inner.set_stop(symbol, Reference(trigger), size))
+    }
+
+    /// Rest a reduce-only take-profit on `symbol` at `trigger` — the favourable
+    /// twin of `set_stop`, same reduce-only `size` semantics. Returns `None`.
+    #[pyo3(signature = (symbol, trigger, size = None))]
+    pub(crate) fn set_take_profit(
+        &mut self,
+        symbol: String,
+        trigger: f64,
+        size: Option<PySize>,
+    ) -> PyResult<Option<PyOrder>> {
+        let size = size.map_or(Size::position_frac(1.0), |s| s.inner);
+        wrap_ack(self.inner.set_take_profit(symbol, Reference(trigger), size))
+    }
+
+    /// Cancel both resting protective legs (stop and take-profit) on `symbol`.
+    pub(crate) fn cancel_protective(&mut self, symbol: String) -> PyResult<()> {
+        self.inner
+            .cancel_protective(&symbol)
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    /// Rest a limit order on `symbol`: drive the position to `side · size` once
+    /// the market trades through `limit`, filling at that price or better.
+    /// Idempotent, latest-wins per symbol. Returns `None` (working until it
+    /// triggers).
+    pub(crate) fn set_limit(
+        &mut self,
+        symbol: String,
+        side: &str,
+        size: &Bound<'_, PyAny>,
+        limit: f64,
+    ) -> PyResult<Option<PyOrder>> {
+        wrap_ack(self.inner.set_limit(
+            symbol,
+            parse_side(side)?,
+            coerce_size(size)?,
+            Reference(limit),
+        ))
+    }
+
+    /// Cancel any resting limit order on `symbol`. A no-op when none rests.
+    pub(crate) fn cancel_limit(&mut self, symbol: String) -> PyResult<()> {
+        self.inner
+            .cancel_limit(&symbol)
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    /// Cancel a working order by its `id` (see `Order.id`). An unknown id is a
+    /// no-op.
+    pub(crate) fn cancel(&mut self, id: u64) -> PyResult<()> {
+        self.inner
+            .cancel(OrderId(id))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    /// Poll every traded symbol for fills booked out of band (not on a specific
+    /// `update`) and return them — a fill on a symbol that didn't tick this bar
+    /// still reaches the caller here.
+    pub(crate) fn poll_fills(&mut self) -> Vec<PyOrder> {
+        self.inner
+            .poll_fills()
+            .into_iter()
+            .map(|inner| PyOrder { inner })
+            .collect()
+    }
+}
+
 
 /// Map a wallet `Ack` to Python: the fill if it filled synchronously, `None` if it
 /// is merely working, or a `ValueError`.
@@ -943,8 +1166,8 @@ impl PyStrategy {
         Ok(s)
     }
 
-    /// Drive the strategy over `candles` against `wallet` (a `PaperWallet` or an
-    /// `OkxWallet`), returning the [`RunReport`](PyRunReport). `candles` is a
+    /// Drive the strategy over `candles` against `wallet` (a `PaperWallet`, an
+    /// `OkxWallet`, or a `CoinbaseWallet`), returning the [`RunReport`](PyRunReport). `candles` is a
     /// DataFrame / dict of OHLCV columns (same shape as `Indicator.feed`). Passing
     /// an `OkxWallet` drives the strategy **live**, one bar at a time. The book is
     /// seeded to the wallet's opening equity, so book-anchored sizing reads
@@ -1346,8 +1569,8 @@ impl PyMultiAssetStrategy {
         s
     }
 
-    /// Drive the strategy over `snapshots` against `wallet` (a `PaperWallet` or
-    /// an `OkxWallet`), returning the [`RunReport`](PyRunReport). The book is
+    /// Drive the strategy over `snapshots` against `wallet` (a `PaperWallet`, an `OkxWallet`, or
+    /// a `CoinbaseWallet`), returning the [`RunReport`](PyRunReport). The book is
     /// seeded to the wallet's opening equity. The wallet is mutated in place. Any
     /// positions the wallet already holds are left untouched and sizing is against
     /// our own capital (see `Strategy.run`).
@@ -1701,8 +1924,8 @@ impl PyBasketStrategy {
         s
     }
 
-    /// Drive the basket over `snapshots` against `wallet` (a `PaperWallet` or an
-    /// `OkxWallet`), returning the [`RunReport`](PyRunReport). The book is seeded
+    /// Drive the basket over `snapshots` against `wallet` (a `PaperWallet`, an
+    /// `OkxWallet`, or a `CoinbaseWallet`), returning the [`RunReport`](PyRunReport). The book is seeded
     /// to the wallet's opening equity. The wallet is mutated in place. Any
     /// positions the wallet already holds are left untouched and sizing is against
     /// our own capital (see `Strategy.run`).
@@ -2280,8 +2503,8 @@ impl PyPortfolio {
         Ok(next)
     }
 
-    /// Drive the portfolio over `snapshots` against `wallet` (a `PaperWallet` or
-    /// an `OkxWallet`), returning the aggregate report.
+    /// Drive the portfolio over `snapshots` against `wallet` (a `PaperWallet`, an `OkxWallet`, or
+    /// a `CoinbaseWallet`), returning the aggregate report.
     ///
     /// A portfolio is an ordinary strategy that trades the wallet it is handed,
     /// exactly like the other four shapes: it nets its children's intents onto
@@ -2289,8 +2512,9 @@ impl PyPortfolio {
     /// per-child `Ledger`s), fills settle on it, and it is handed back **mutated**
     /// — positions, cash, and blotter applied — so the caller's Python wallet
     /// reflects what happened. Its opening equity seeds the per-child cash split.
-    /// Passing an `OkxWallet` therefore trades the whole netted portfolio **live**.
-    /// Costs pre-installed on the wallet apply (it *is* the account).
+    /// Passing an `OkxWallet` or `CoinbaseWallet` therefore trades the whole
+    /// netted portfolio **live**. Costs pre-installed on the wallet apply (it
+    /// *is* the account).
     ///
     /// Whatever the account already holds at start is treated as the user's own,
     /// externally-managed book (see `Strategy.run`): the children size against our

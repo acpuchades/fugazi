@@ -1,6 +1,6 @@
 [package]
 name = "fugazi"
-version = "0.45.0"
+version = "0.46.0"
 edition = "2024"
 description = "A library of incremental technical-analysis indicators, signals and strategies"
 license = "MIT"
@@ -62,10 +62,11 @@ parallel = ["dep:rayon"]
 # `Wallet` impls that route orders to a real broker instead of an in-memory
 # paper book. It builds on `sources` (which already pulls in the async
 # `reqwest`/`tokio` stack the REST clients use) and adds the request signing
-# every private venue endpoint requires: `hmac` + `sha2` for HMAC-SHA256 and
-# `base64` for OKX's base64 signatures. Not default-on: `cargo build` and the
-# Python wheel are unaffected.
-live = ["sources", "dep:hmac", "dep:sha2", "dep:base64"]
+# every private venue endpoint requires: `hmac` + `sha2` for OKX's
+# HMAC-SHA256, `base64` for its base64 signatures, and `p256` for Coinbase
+# Advanced Trade's ES256 (ECDSA P-256) JWTs. Not default-on: `cargo build` and
+# the Python wheel are unaffected.
+live = ["sources", "dep:hmac", "dep:sha2", "dep:base64", "dep:p256"]
 # `spec` compiles the YAML-driven declarative surface (`fugazi::spec`) — the
 # `*Spec` types, `evaluate*` / `measured_report*` / `optimize` kernel,
 # `Metrics` document + `MetricKey`, `CostConfig`, `WindowSpec`, and the
@@ -105,7 +106,7 @@ clap_complete = { version = "4", optional = true }
 # per-indicator run-state save/load bodies for run resuming. It is a normal
 # proc-macro dependency (no runtime, no linkage), so it does not affect the
 # pyo3 cdylib build.
-fugazi-derive = { path = "fugazi-derive", version = "0.45.0" }
+fugazi-derive = { path = "fugazi-derive", version = "0.46.0" }
 serde = { version = "1", features = ["derive"] }
 serde_norway = { version = "0.9", optional = true }
 # `float_roundtrip` makes f64 parse back bit-for-bit identical to what was
@@ -132,11 +133,18 @@ thiserror = { version = "2", optional = true }
 hmac = { version = "0.12", optional = true }
 sha2 = { version = "0.10", optional = true }
 base64 = { version = "0.22", optional = true }
+# ECDSA P-256 signing for Coinbase Advanced Trade's ES256 JWTs (the `live`
+# feature). Pure-Rust, no OS RNG: signatures use deterministic RFC 6979, so no
+# `getrandom`. `pem`/`pkcs8` parse the CDP key file's PEM private key.
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem", "pkcs8", "std"], optional = true }
 interim = { version = "0.2.1", default-features = false, features = ["std", "time_0_3"], optional = true }
 
 [dev-dependencies]
 wiremock = "0.6"
 tokio-test = "0.4"
+# The `live` Coinbase wallet test builds a throwaway P-256 key to construct the
+# wallet (the mock doesn't verify the JWT, but construction parses a real key).
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem", "pkcs8", "std"] }
 
 # The Python bindings live in their own workspace member (`python/`), which is
 # the only crate that pulls in PyO3 — see that crate's README for build

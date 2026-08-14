@@ -878,10 +878,10 @@ metrics.exposure_ratio(fills, total_bars=len(candles))
 
 ## Fetching data
 
-Three remote candle providers ship built in — `Binance` and `Okx` (crypto spot
-klines) and `Yahoo` (stocks, ETFs, indices, FX). Each is a client class with one
-method, `candles(...)`, returning a `polars`/`pandas` `DataFrame` (or a `dict` of
-lists with `output="numpy"`):
+Four remote candle providers ship built in — `Binance`, `Okx`, and `Coinbase`
+(crypto spot klines) and `Yahoo` (stocks, ETFs, indices, FX). Each is a client
+class with one method, `fetch(...)`, returning a `polars`/`pandas` `DataFrame`
+(or a `dict` of lists with `output="numpy"`):
 
 ```python
 import fugazi as ta
@@ -892,6 +892,9 @@ df = binance.fetch(symbol="BTCUSDT", freq="1d",
 
 okx = ta.Okx()                             # symbols are dash-separated
 df = okx.fetch(symbol="BTC-USDT", freq="1d", since="2020-01-01")
+
+coinbase = ta.Coinbase()                   # dash-separated product ids
+df = coinbase.fetch(symbol="BTC-USD", freq="1d", since="2020-01-01")
 
 yahoo = ta.Yahoo()
 df = yahoo.fetch(symbol="AAPL", freq="1d", since="2020-01-01")
@@ -904,7 +907,8 @@ and defaults to now. The returned frame has `time` (ISO 8601 UTC), `open`,
 `high`, `low`, `close`, `volume`, and — carried through from each provider's
 own API — Binance's `quote_volume`, `n_trades`, `taker_buy_base_volume`,
 `taker_buy_quote_volume`; OKX's `vol_ccy` and `quote_volume` (its
-day/week/month bars are UTC-aligned). Yahoo candles are **split/dividend-adjusted by
+day/week/month bars are UTC-aligned). Coinbase carries no extras — OHLCV only,
+and only the fixed cadences `1m`/`5m`/`15m`/`30m`/`1h`/`2h`/`6h`/`1d`. Yahoo candles are **split/dividend-adjusted by
 default** (`ta.Yahoo(adjusted=False)` to opt out): `close` is the adjusted
 price and the extra column is `raw_close` (the untouched close), or with
 `adjusted=False` the OHLCV are raw and the extra is `adj_close`.

@@ -540,8 +540,12 @@ Priced **from outside**: `update(symbol, candle) -> Vec<Order>` feeds a bar per 
   (`f·|position|`, adjust-only). Direction from `Side`.
 - No `Market` trait: the wallet holds prices. Python binds `PaperWallet`, the live
   `OkxWallet` (constructors `demo` / `mainnet` + `refresh_account` / `errors`; same
-  order-flow surface), `Order`, and `Size` (sides `"buy"`/`"sell"`; `WalletError` →
-  `ValueError`).
+  order-flow surface) and `CoinbaseWallet` (`mainnet` only; spot, so a `position` is
+  a base balance and `set_position` diffs it, market-ordering the difference — a
+  short target sells to flat and reports the un-shortable remainder), `Order`, and
+  `Size` (sides `"buy"`/`"sell"`; `WalletError` → `ValueError`). The live wallets
+  differ only in signing: `OkxWallet` HMAC-SHA256, `CoinbaseWallet` an ES256
+  (ECDSA P-256) JWT per request.
 
 ## Run driver (`src/backtest.rs`)
 

@@ -512,6 +512,75 @@ impl PyOkx {
     }
 }
 
+/// A Coinbase Advanced Trade candles client (spot).
+///
+/// ```python
+/// c = fugazi.Coinbase()                 # public endpoint, defaults
+/// df = c.fetch(symbol="BTC-USD", freq="1d",
+///              since="2020-01-01", until="today")
+/// ```
+///
+/// One call = one (symbol, freq) fetch = one DataFrame. Batch multiple
+/// symbols or frequencies by looping in Python.
+#[pyclass(name = "Coinbase", frozen)]
+pub(crate) struct PyCoinbase {
+    pub(crate) inner: Coinbase,
+}
+
+#[pymethods]
+impl PyCoinbase {
+    /// Construct a client. `base_url` overrides the API endpoint (default
+    /// `https://api.coinbase.com`), useful for local test servers.
+    #[new]
+    #[pyo3(signature = (base_url = None))]
+    pub(crate) fn new(base_url: Option<String>) -> Self {
+        let mut inner = Coinbase::new();
+        if let Some(url) = base_url {
+            inner = inner.with_base_url(url);
+        }
+        Self { inner }
+    }
+
+    /// Fetch OHLCV candles for one `(symbol, freq)` window.
+    ///
+    /// * `symbol` — dash-separated product id, e.g. `"BTC-USD"`, `"ETH-USD"`.
+    ///   Sent verbatim to Coinbase.
+    /// * `freq` — bar cadence. Coinbase exposes a fixed, sparse set:
+    ///   `"1m"`/`"5m"`/`"15m"`/`"30m"`, `"1h"`/`"2h"`/`"6h"`, `"1d"`. Other
+    ///   cadences raise `ValueError`.
+    /// * `since` / `until` — dates. Formats: ISO `"YYYY-MM-DD"`, EU
+    ///   `"D-M-YYYY"`, or relative (`"today"`, `"yesterday"`, `"Nd ago"`,
+    ///   `"Nw ago"`). `until` is exclusive; `None` means "up to now".
+    /// * `output` — `"polars"` (default), `"pandas"`, or `"numpy"` (dict of arrays).
+    ///
+    /// Returned DataFrame columns: `time` (ISO 8601 UTC), `open`, `high`,
+    /// `low`, `close`, `volume`. Coinbase candles carry no overlay extras.
+    #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
+    pub(crate) fn fetch(
+        &self,
+        py: Python<'_>,
+        symbol: &str,
+        freq: &str,
+        since: &str,
+        until: Option<&str>,
+        output: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let interval = parse_interval_token(freq)?;
+        let (since_ts, until_ts) = resolve_since_until(since, until)?;
+        let out = CandlesOutput::from_kwarg(output)?;
+        fetch_frame(py, &self.inner, out, symbol, interval, since_ts, until_ts)
+    }
+
+    /// Every spot product id Coinbase currently lists as online + tradable, sorted.
+    pub(crate) fn tickers(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        let client = self.inner.clone();
+        py.detach(|| {
+            sources_runtime().block_on(async move { SeriesSource::tickers(&client).await })
+        })
+        .map_err(source_error_to_py)
+    }
+}
+
 /// A Yahoo Finance chart-API client (stocks, ETFs, indices, FX).
 ///
 /// ```python
@@ -777,7 +846,7 @@ impl PyBinanceVision {
 /// price-less one (`time` + its own columns), and the frame builder omits the
 /// OHLCV block when no row carries a bar.
 ///
-/// Providers: `"binance"`, `"okx"`, `"yfinance"`, `"cg"` (CoinGecko).
+/// Providers: `"binance"`, `"okx"`, `"coinbase"`, `"yfinance"`, `"cg"` (CoinGecko).
 /// `BinanceVision` needs a `market` (`"spot"`/`"futures"`) that this flat
 /// signature can't carry — construct it explicitly
 /// (`BinanceVision(market=...).fetch(...)`).
@@ -798,6 +867,7 @@ pub(crate) fn fetch(
     match provider {
         "binance" => fetch_frame(py, &Binance::new(), out, symbol, interval, since_ts, until_ts),
         "okx" => fetch_frame(py, &Okx::new(), out, symbol, interval, since_ts, until_ts),
+        "coinbase" => fetch_frame(py, &Coinbase::new(), out, symbol, interval, since_ts, until_ts),
         "yfinance" => fetch_frame(py, &Yahoo::new(), out, symbol, interval, since_ts, until_ts),
         "cg" => fetch_frame(py, &CoinGecko::new(), out, symbol, interval, since_ts, until_ts),
         "binance-vision" => Err(PyValueError::new_err(
@@ -805,7 +875,7 @@ pub(crate) fn fetch(
              can't carry. Construct it explicitly: BinanceVision(market='futures').fetch(...).",
         )),
         other => Err(PyValueError::new_err(format!(
-            "unknown provider {other:?}. Known providers: binance, okx, yfinance, cg"
+            "unknown provider {other:?}. Known providers: binance, okx, coinbase, yfinance, cg"
         ))),
     }
 }

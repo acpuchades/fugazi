@@ -47,7 +47,7 @@ use tokio::task::JoinSet;
 
 use fugazi::prelude::*;
 use fugazi::sources::{
-    self, Binance, BinanceVision, CoinGecko, Interval, Okx, SeriesSource,
+    self, Binance, BinanceVision, Coinbase, CoinGecko, Interval, Okx, SeriesSource,
     Timestamp, Yahoo, binance::binance_schema, okx::okx_schema, yahoo::yahoo_schema,
 };
 
@@ -271,6 +271,12 @@ pub(crate) const KNOWN_PROVIDERS: &[(&str, &str)] = &[
         "okx",
         "OKX spot candlesticks endpoint (symbols are dash-separated: `BTC-USDT`, \
          `ETH-USDT`). Day/week/month bars are UTC-aligned",
+    ),
+    (
+        "coinbase",
+        "Coinbase Advanced Trade candles endpoint (symbols are dash-separated \
+         product ids: `BTC-USD`, `ETH-USD`). Fixed cadences only: 1m/5m/15m/30m, \
+         1h/2h/6h, 1d",
     ),
     (
         "cg",
@@ -1213,6 +1219,9 @@ async fn fetch(
         "okx" => Ok(Okx::new()
             .atoms(symbol, interval, since, Some(until))
             .await?),
+        "coinbase" => Ok(Coinbase::new()
+            .atoms(symbol, interval, since, Some(until))
+            .await?),
         "yfinance" => Ok(Yahoo::new()
             .atoms(symbol, interval, since, Some(until))
             .await?),
@@ -1238,6 +1247,7 @@ pub(crate) async fn tickers_of(provider: &str) -> Result<Vec<String>> {
         "binance-vision" => Ok(BinanceVision::new().tickers().await?),
         "binance-vision-futures" => Ok(BinanceVision::futures().tickers().await?),
         "okx" => Ok(Okx::new().tickers().await?),
+        "coinbase" => Ok(Coinbase::new().tickers().await?),
         "cg" => Ok(CoinGecko::new().tickers().await?),
         "yfinance" => Ok(Yahoo::new().tickers().await?),
         "csv" => bail!(

@@ -90,7 +90,7 @@ pub use costs::{CommissionModel, SlippageModel, SpreadModel, TradingCosts};
 pub use indicator::Indicator;
 pub use indicators::BoolIndicatorExt;
 #[cfg(feature = "live")]
-pub use live::OkxWallet;
+pub use live::{CoinbaseWallet, OkxWallet};
 pub use market::{Atom, Candle, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder};
 pub use metrics::{DrawdownSegment, Trade};
 pub use portfolio::{Portfolio, PortfolioBuilder};

@@ -14,7 +14,7 @@ and signal owns its internal state and is advanced one sample at a time via
 
 ```toml
 [dependencies]
-fugazi = "0.45"
+fugazi = "0.46"
 ```
 
 ## Concepts
@@ -883,7 +883,7 @@ subcommands — briefly listed here, fully documented in
 - `fugazi optimize <STRATEGY> --params NAME=<axis>...` — sweep the strategy
   over a parameter grid and rank combinations by a metric.
 - `fugazi get <PROVIDER>:<SYMBOL>[<FREQ>] --since ... -o candles.csv` — fetch
-  OHLCV bars from `binance` or `yfinance` into a `run`-ready CSV, or
+  OHLCV bars from `binance`, `okx`, `coinbase`, or `yfinance` into a `run`-ready CSV, or
   re-process an existing CSV with `csv:PATH`. `-x/--overlay col=<source>`
   appends indicator columns computed on the fetched bars; `--params` resolves
   `!param` placeholders inside those overlay expressions. The **overlay-only**
@@ -904,9 +904,10 @@ subcommands — briefly listed here, fully documented in
 ## Live trading
 
 The same `Wallet` a backtest trades into is the seam to a live broker: the
-`live` feature ships `OkxWallet`, a `Wallet<String>` that routes orders to OKX
-V5 perpetual swaps over its signed REST API. A strategy driven by
-`backtest::run` needs no change — swap the `PaperWallet` for a live one:
+`live` feature ships `OkxWallet` (OKX V5 perpetual swaps, HMAC-signed REST) and
+`CoinbaseWallet` (Coinbase Advanced Trade **spot**, ES256-JWT-signed REST), each
+a `Wallet<String>`. A strategy driven by `backtest::run` needs no change — swap
+the `PaperWallet` for a live one:
 
 ```rust,ignore
 use fugazi::live::OkxWallet;
@@ -927,6 +928,13 @@ OKX sizes a swap in **contracts** (one `BTC-USDT-SWAP` contract is `0.01 BTC`),
 while the trait — and every strategy — speaks base-asset units. `OkxWallet`
 converts at the boundary, so a `0.03 BTC` target goes out as `3` contracts and a
 fill comes back as `0.03` units; nothing above the wallet ever sees a contract.
+
+`CoinbaseWallet` is **spot**, so a `position` is a base-asset balance that can't
+go negative: `set_position` market-buys or -sells the difference to reach the
+target, and a negative (short) target sells to flat and reports the un-shortable
+remainder through `take_rejections()`. Construct it with
+`CoinbaseWallet::mainnet(key_name, private_key_pem)` (a CDP API key name plus its
+EC private-key PEM).
 
 A whole `Portfolio` runs live the same way — it is an ordinary strategy that
 nets its children's intents onto the one wallet it is handed, so pass it a live

@@ -50,6 +50,7 @@
 
 pub mod binance;
 pub mod binance_vision;
+pub mod coinbase;
 pub mod coingecko;
 pub mod okx;
 pub mod yahoo;
@@ -63,6 +64,7 @@ pub use crate::types::Timestamp;
 
 pub use binance::Binance;
 pub use binance_vision::BinanceVision;
+pub use coinbase::Coinbase;
 pub use coingecko::CoinGecko;
 pub use okx::Okx;
 pub use yahoo::Yahoo;

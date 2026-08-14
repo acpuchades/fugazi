@@ -26,14 +26,14 @@ pub(crate) use fugazi_core::indicators::{
 };
 pub(crate) use fugazi_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
 pub(crate) use fugazi_core::sources::{
-    Binance, BinanceVision, CoinGecko, Interval, Okx, SeriesSource,
+    Binance, BinanceVision, Coinbase, CoinGecko, Interval, Okx, SeriesSource,
     SourceError, Timestamp, Yahoo,
 };
 pub(crate) use fugazi_core::wallet::{
     Ack, SleeveWallet, Order, OrderId, OrderKind, PaperWallet, Reference, Side, Size, Units,
     Wallet, WalletError, external_baseline, own_equity,
 };
-pub(crate) use fugazi_core::live::{LiveError, OkxWallet};
+pub(crate) use fugazi_core::live::{CoinbaseWallet, LiveError, OkxWallet};
 pub(crate) use fugazi_core::types::{
     Atom, Candle, Frequency, OverlayInfo, OverlayType, OverlayValue, Real, Schema, SchemaBuilder,
     Selector, Snapshot,

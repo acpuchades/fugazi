@@ -234,8 +234,8 @@ If you're about to write a private helper whose name looks like something here, 
 | Serialize one indicator's state | `#[derive(SaveState)]` + `#[state(source)]`/`#[state(skip)]` + two `impl Indicator` forwarding lines; snapshot shared handles via `Position::snapshot`/`Book::snapshot_state`/`PaperWallet::snapshot_state` | `fugazi-derive/src/lib.rs`, `src/indicators/{position,book}.rs`, `src/wallet.rs` |
 | Trading seconds a bar of `freq` spans | `class.trading_seconds_per_bar(freq)` | `src/spec/calendar.rs` |
 | Shared overlay schema of atom stream | `fugazi::sources::schema_of(&atoms)` | `src/sources/mod.rs` |
-| Fetch any series (candles *or* price-less) | `SeriesSource::atoms(...)` — `Binance`, `Yahoo`, `CoinGecko`, `BinanceVision`. `schema()` = fixed overlay schema when known before the fetch | `src/sources/mod.rs` |
-| Provider schemas | `*::*_schema()` (`OnceLock`) | `src/sources/{binance,binance_vision,yahoo,coingecko}.rs` |
+| Fetch any series (candles *or* price-less) | `SeriesSource::atoms(...)` — `Binance`, `Okx`, `Coinbase`, `Yahoo`, `CoinGecko`, `BinanceVision`. `schema()` = fixed overlay schema when known before the fetch (`Coinbase` has none — OHLCV only) | `src/sources/mod.rs` |
+| Provider schemas | `*::*_schema()` (`OnceLock`) | `src/sources/{binance,binance_vision,yahoo,coingecko,okx}.rs` |
 | Bucket an irregular sample stream onto a cadence | `sources::floor_to_bucket(ms, interval)` — Monday weeks, 1st-of-month months, epoch modulo otherwise | `src/sources/mod.rs` |
 | Join overlay CSV onto price CSV | Two `get` → two `-s`; `DataFrame::insert` full-joins | `src/cli/data.rs` |
 | Compute overlay columns from `name: NodeSpec` + attach | `spec::overlay::{OverlayColumn, columns_from_value, columns_from_yaml, prepare, prepare_for, prepare_built, compute_series, compute_snapshots}` (Python: `ta.compute_overlays`; CLI `-x` via `build_overlay`). `compute_snapshots` is the multi-symbol path | `src/spec/overlay.rs`, `python/src/lib.rs`, `src/cli/overlay.rs` |

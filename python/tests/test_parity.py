@@ -261,6 +261,51 @@ def test_okx_wallet_surface_matches_the_ledger():
     )
 
 
+# --------------------------------------------------------------------------
+# The Coinbase live wallet mirrors the same order-flow surface as the OKX one,
+# minus the OKX-only demo constructor (Coinbase has no demo environment) — it is
+# spot, so it constructs only via `mainnet`. Same ledger discipline.
+# --------------------------------------------------------------------------
+
+COINBASE_WALLET_BOUND = {
+    # Constructor (staticmethod). No `demo`: Coinbase has no demo environment.
+    "mainnet",
+    # Wallet reads.
+    "funds", "position", "price", "equity",
+    # Order flow.
+    "update", "set", "set_position", "close",
+    "set_stop", "set_take_profit", "cancel_protective",
+    "set_limit", "cancel_limit", "cancel", "poll_fills",
+    # Live-only extras.
+    "refresh_account", "errors",
+}
+
+COINBASE_WALLET_NOT_BOUND = {
+    "positions": (
+        "the Rust wallet enumerates only marked products, so a dict view would "
+        "mislead; read one symbol at a time via position(symbol)"
+    ),
+    "orders": "no in-memory blotter on a live venue (paper-only convenience)",
+    "reset": "a live venue has no freshly-constructed state to restore",
+    "adjust_funds": "Coinbase takes the trait default (UnsupportedOperation)",
+    "take_rejections": (
+        "needs a bar-less rejection type; errors() surfaces REST-failure detail"
+    ),
+    "set_costs_for": "a live venue owns its own fees",
+}
+
+
+def test_coinbase_wallet_surface_matches_the_ledger():
+    actual = {n for n in dir(ta.CoinbaseWallet) if not n.startswith("_")}
+    missing = COINBASE_WALLET_BOUND - actual
+    extra = actual - COINBASE_WALLET_BOUND - set(COINBASE_WALLET_NOT_BOUND)
+    assert not missing, f"ledger claims these are bound but they aren't: {sorted(missing)}"
+    assert not extra, (
+        f"CoinbaseWallet gained methods the ledger doesn't record: {sorted(extra)} — "
+        "add them to COINBASE_WALLET_BOUND, or to COINBASE_WALLET_NOT_BOUND with a reason"
+    )
+
+
 def test_protective_legs_expose_their_size():
     """The specific regression the ledger above exists to prevent."""
     w = ta.PaperWallet(1_000.0)
