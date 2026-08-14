@@ -44,6 +44,7 @@ pub(crate) mod strategy;
 pub(crate) mod constructors;
 pub(crate) mod sources;
 pub(crate) mod metrics;
+pub(crate) mod montecarlo;
 pub(crate) mod spec;
 pub(crate) mod prelude;
 
@@ -61,6 +62,8 @@ use crate::constructors::*;
 use crate::sources::*;
 #[allow(unused_imports)]
 use crate::metrics::*;
+#[allow(unused_imports)]
+use crate::montecarlo::*;
 #[allow(unused_imports)]
 use crate::spec::*;
 // `wrap_pyfunction!` resolves a hidden item pyo3 generates beside each
@@ -174,6 +177,19 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         .import("sys")?
         .getattr("modules")?
         .set_item("fugazi.metrics", &metrics)?;
+
+    // `fugazi.montecarlo` — the deterministic resampling primitive behind the
+    // significance layer, exposed so consumers can rebuild resampled paths (e.g.
+    // an equity fan chart) themselves. Same submodule + `sys.modules` dance as
+    // `fugazi.metrics` so `from fugazi.montecarlo import resample_index_matrix`
+    // works.
+    let montecarlo = PyModule::new(m.py(), "montecarlo")?;
+    register_montecarlo_module(&montecarlo)?;
+    m.add_submodule(&montecarlo)?;
+    m.py()
+        .import("sys")?
+        .getattr("modules")?
+        .set_item("fugazi.montecarlo", &montecarlo)?;
 
     Ok(())
 }

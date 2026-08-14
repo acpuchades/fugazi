@@ -671,6 +671,61 @@ def test_montecarlo_reproducible_across_calls():
 
 
 # ---------------------------------------------------------------------------
+# fugazi.montecarlo: the deterministic resampling primitive behind the fan chart
+# ---------------------------------------------------------------------------
+
+
+def test_resample_index_matrix_shape_range_and_determinism():
+    a = ta.montecarlo.resample_index_matrix(50, 10, scheme="stationary", block=8.0, seed=3)
+    b = ta.montecarlo.resample_index_matrix(50, 10, scheme="stationary", block=8.0, seed=3)
+    assert a == b, "same seed must reproduce the whole matrix"
+    assert len(a) == 10 and all(len(row) == 50 for row in a)
+    assert all(0 <= i < 50 for row in a for i in row)
+    c = ta.montecarlo.resample_index_matrix(50, 10, scheme="stationary", block=8.0, seed=4)
+    assert c != a, "a different seed must diverge"
+    # The scalar draw is permutation 0 of the matrix with the same arguments.
+    scalar = ta.montecarlo.resample_indices(50, scheme="stationary", block=8.0, seed=3)
+    assert scalar == a[0]
+    with pytest.raises(ValueError, match="scheme"):
+        ta.montecarlo.resample_index_matrix(10, 5, scheme="nope")
+
+
+def test_resample_index_matrix_reproduces_bootstrap_ci_paths():
+    """The index matrix rebuilds exactly the bootstrap-CI estimator's equity
+    paths: gathering the observed returns by each permutation's indices and
+    cum-producting must reproduce the CI row for `returns.total_pct` (a pure
+    function of the resampled path's final equity, so no annualization to match).
+    """
+    spec = ta.load_spec(_MC_YAML)
+    snaps = _snaps_single("X", _wobbly(100))
+    perms, seed, block = 120, 11, 8.0
+
+    # The observed run evaluate() drives internally, reproduced here for its curve.
+    rep = spec.run(ta.PaperWallet(1000.0), snaps)
+    returns = ta.metrics.per_bar_returns(rep.equity_curve, rep.initial_equity)
+
+    cfg = ta.MonteCarloConfig(
+        permutations=perms, scheme="stationary", block=block, seed=seed,
+        null="none", metrics=["returns.total_pct"],
+    )
+    mc = spec.evaluate(ta.PaperWallet(1000.0), snaps, montecarlo=cfg)["montecarlo"]
+    samples = mc["samples"]
+    col = samples["metric_names"].index("returns.total_pct")
+    ci_rows = next(s["rows"] for s in samples["sets"] if s["estimator"] == "bootstrap_ci")
+
+    idx = ta.montecarlo.resample_index_matrix(
+        len(returns), perms, scheme="stationary", block=block, seed=seed
+    )
+    for p, row_idx in enumerate(idx):
+        equity, prev = [], rep.initial_equity
+        for i in row_idx:
+            prev *= 1.0 + returns[i]
+            equity.append(prev)
+        total_pct = ta.metrics.total_return(equity, rep.initial_equity) * 100.0
+        assert total_pct == pytest.approx(ci_rows[p][col]), f"permutation {p} diverged"
+
+
+# ---------------------------------------------------------------------------
 # evaluate(windowed=...): windowed/rolling reductions for a plain backtest.
 # ---------------------------------------------------------------------------
 

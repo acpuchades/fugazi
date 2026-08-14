@@ -651,6 +651,57 @@ continuous rolling-Sharpe-style curve) keys, each a list of `{"start_bar",
 "end_bar", "metrics"}`. Unlike the CLI's `-w`, this takes a plain bar count —
 no duration/asset-class resolution.
 
+#### Monte Carlo significance and the resampling primitive
+
+Pass `montecarlo=ta.MonteCarloConfig(...)` to `.evaluate(...)` for the
+significance pass — bootstrap confidence intervals plus empirical-null p-values
+over a resampling scheme (`iid` / `moving-block` / `stationary`). The returned
+dict gains a `montecarlo` block (mirroring `metrics.yml`'s), plus the raw
+per-resample metric values under `montecarlo["samples"]`.
+
+The significance layer reduces every resample to metric rows and discards the
+resampled *paths*. To draw a Monte Carlo **equity fan chart** (percentile bands
+of the resampled equity paths over time) you rebuild the paths yourself from one
+generic knob — the deterministic resampling index draws, exposed as
+`fugazi.montecarlo`:
+
+```text
+resample_index_matrix(n, permutations, *, scheme="stationary", block=10.0, seed=0)
+    -> list[list[int]]              # permutations × n, every index in 0..n
+resample_indices(n, *, scheme="stationary", block=10.0, seed=0)
+    -> list[int]                    # one sequence == permutation 0 of the matrix
+```
+
+The bootstrap-CI estimator draws first from the run's seed stream via the same
+primitive, so calling `resample_index_matrix` with `n = len(returns)` and the
+run's `permutations`/`scheme`/`block`/`seed` reproduces exactly the permutations
+behind the CIs. Every scheme yields a same-length synthetic series, so each
+rebuilt path is the same length as the source and maps 1:1 onto the original bar
+timestamps. Nothing large crosses a process boundary — you feed scalars and
+rebuild wherever you like:
+
+```python
+import numpy as np
+import fugazi as ta
+
+spec = ta.load_spec("symbol: BTC\nlong:\n  enter: !crosses_above"
+                    " { lhs: !sma { period: 3 }, rhs: !sma { period: 10 } }")
+snaps = [ta.Snapshot({"BTC": ta.Candle(v, v, v, v, 1.0)})
+         for v in [10, 9, 8, 7, 6, 7, 9, 12, 15, 18, 21, 22, 21, 20, 18, 15, 12, 10, 8, 6]]
+
+rep = spec.run(ta.PaperWallet(1000.0), snaps)
+r   = np.array(ta.metrics.per_bar_returns(rep.equity_curve, rep.initial_equity))
+idx = np.array(ta.montecarlo.resample_index_matrix(
+        len(r), 1000, scheme="stationary", block=10, seed=0))
+paths = rep.initial_equity * np.cumprod(1 + r[idx], axis=1)   # (permutations × bars)
+bands = {f"p{q}": np.percentile(paths, q, axis=0).tolist() for q in (5, 25, 50, 75, 95)}
+spaghetti = paths[:200].tolist()                              # optional capped overlay
+```
+
+Bar `k`'s band shares the *time axis* (position `k` ↔ `times[k]`) but is the
+k-th step of a synthetic return walk — a Monte Carlo fan, not a forecast
+conditioned on the real market at `times[k]`.
+
 Preset tags (`!buy_and_hold`, `!ma_crossover`, `!rsi_reversal`,
 `!donchian_breakout`, `!keltner_breakout`) work directly:
 
