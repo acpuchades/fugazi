@@ -485,49 +485,49 @@ pub enum NodeSpec {
     /// The bar's close price.
     #[grammar(kind = "source")]
     Close {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// The bar's high price.
     #[grammar(kind = "source")]
     High {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// The bar's low price.
     #[grammar(kind = "source")]
     Low {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// The bar's open price.
     #[grammar(kind = "source")]
     Open {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// The bar's traded volume.
     #[grammar(kind = "source")]
     Volume {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// The typical price, `(high + low + close) / 3`.
     #[grammar(kind = "source")]
     Typical {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// The median price, `(high + low) / 2`.
     #[grammar(kind = "source")]
     Median {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
@@ -537,7 +537,7 @@ pub enum NodeSpec {
     /// onto a higher timeframe.
     #[grammar(kind = "source", output = "candle")]
     Current {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
@@ -605,7 +605,7 @@ pub enum NodeSpec {
     /// [`crate::indicators::Book::equity`].
     #[grammar(kind = "source")]
     Equity {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
@@ -613,7 +613,7 @@ pub enum NodeSpec {
     /// See [`crate::indicators::Book::equity_peak`].
     #[grammar(kind = "source")]
     EquityPeak {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
@@ -622,7 +622,7 @@ pub enum NodeSpec {
     /// [`crate::indicators::Book::drawdown`].
     #[grammar(kind = "source")]
     Drawdown {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
@@ -632,7 +632,7 @@ pub enum NodeSpec {
     /// [`crate::indicators::Book::return_per_bar`].
     #[grammar(kind = "source")]
     ReturnPerBar {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
@@ -645,7 +645,7 @@ pub enum NodeSpec {
     /// fills, so no "portfolio trade" is defined.
     #[grammar(kind = "source")]
     TradePnl {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
@@ -655,7 +655,7 @@ pub enum NodeSpec {
     /// portfolio aggregate book for the same reason as [`NodeSpec::TradePnl`].
     #[grammar(kind = "source")]
     TradeReturn {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
@@ -678,7 +678,7 @@ pub enum NodeSpec {
     Get {
         /// Overlay column name to read from each bar's side-channel data.
         key: String,
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
@@ -1261,7 +1261,7 @@ pub enum NodeSpec {
     /// [`crate::indicators::sizing::vol_target_of`].
     #[grammar(kind = "function")]
     VolTarget {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
         /// Target annualized volatility, as a fraction.
@@ -1279,7 +1279,7 @@ pub enum NodeSpec {
     /// [`crate::indicators::sizing::atr_risk_of`].
     #[grammar(kind = "function")]
     AtrRisk {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
         /// Fraction of equity risked per trade.
@@ -1295,7 +1295,7 @@ pub enum NodeSpec {
     /// [`crate::indicators::sizing::drawdown_throttle`].
     #[grammar(kind = "function")]
     DrawdownThrottle {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
         /// Drawdown fraction at which sizing throttles to zero.
@@ -1308,7 +1308,7 @@ pub enum NodeSpec {
     /// [`crate::indicators::sizing::equity_vol_target`].
     #[grammar(kind = "function")]
     EquityVolTarget {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
         /// Target annualized volatility, as a fraction.
@@ -1324,7 +1324,7 @@ pub enum NodeSpec {
     /// [`crate::indicators::sizing::fractional_kelly`].
     #[grammar(kind = "function")]
     FractionalKelly {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
         /// Fraction of the full Kelly stake to take.
@@ -1587,84 +1587,84 @@ pub enum NodeSpec {
     /// The Gregorian year (e.g. `2024.0`).
     #[grammar(kind = "source")]
     Year {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// The Gregorian month, `1.0` (Jan) through `12.0` (Dec).
     #[grammar(kind = "source")]
     Month {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// The day of the month, `1.0` through `31.0`.
     #[grammar(kind = "source")]
     Day {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// The hour of the day (UTC), `0.0` through `23.0`.
     #[grammar(kind = "source")]
     Hour {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// The minute of the hour, `0.0` through `59.0`.
     #[grammar(kind = "source")]
     Minute {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// The second of the minute, `0.0` through `59.0`.
     #[grammar(kind = "source")]
     Second {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// ISO 8601 weekday, `1.0` (Monday) through `7.0` (Sunday).
     #[grammar(kind = "source")]
     DayOfWeek {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// Day of the year, `1.0` through `366.0`.
     #[grammar(kind = "source")]
     DayOfYear {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// ISO 8601 week of the year, `1.0` through `53.0`.
     #[grammar(kind = "source")]
     WeekOfYear {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// Calendar quarter, `1.0` through `4.0`.
     #[grammar(kind = "source")]
     Quarter {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// Unix seconds since the epoch (as a Real).
     #[grammar(kind = "source")]
     UnixSeconds {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
     /// Unix milliseconds since the epoch (as a Real).
     #[grammar(kind = "source")]
     UnixMillis {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },
@@ -1673,7 +1673,7 @@ pub enum NodeSpec {
     /// [`NodeSpec::Current`].
     #[grammar(kind = "source", output = "time")]
     Time {
-        /// Optional cross-asset source (e.g. `!pick {{ symbol }}`); defaults to the strategy's own series.
+        /// Optional cross-asset source (e.g. `!pick { symbol: … }`); defaults to the strategy's own series.
         #[serde(default)]
         source: Option<Box<NodeSpec>>,
     },

@@ -793,6 +793,8 @@ impl PyStrategySpec {
 /// fields       [ {name, type, required, default, doc} ]  (map tags only)
 /// output       what it evaluates to: "scalar" | "bool" | "str" | ...
 /// projections  struct-output accessors (empty for fugazi's flattened tags)
+/// payload      positional payload type of a newtype/seq tag ("node" |
+///              "literal" | "node_list"); null for unit/map tags
 /// doc          the variant's `///`
 /// since        release it first shipped in
 /// ```
@@ -801,7 +803,8 @@ impl PyStrategySpec {
 /// flows from the serde definitions via `#[derive(SpecGrammar)]`, so downstream
 /// consumers (these very Python constructors, editor tooling, docs, external
 /// grammar tables) generate from one artifact rather than re-encoding by hand.
-/// Guard on `schema_version` for shape changes.
+/// Guard on `schema_version` for shape changes (`payload` and its `"literal"`
+/// field type were added in schema_version 2).
 #[pyfunction]
 pub(crate) fn spec_grammar(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let doc = fugazi_core::spec::grammar::spec_grammar_document();

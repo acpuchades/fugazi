@@ -16,6 +16,7 @@ expected side of this comparison needs no upkeep.
 """
 
 import inspect
+import re
 
 import fugazi as ta
 
@@ -150,6 +151,27 @@ def test_every_node_tag_is_bound_or_declared_unbound():
         + "\n  ".join(f"!{t}" for t in unclassified)
         + "\nBind them in python/src/lib.rs, or add them to NOT_BOUND here with "
         "a reason."
+    )
+
+
+def test_grammar_docstring_documents_every_record_key():
+    """`spec_grammar()`'s docstring must list exactly the keys a real record
+    carries. It tells consumers to guard on `schema_version` for shape changes,
+    so the self-documentation has to track the shape — `payload` (schema_version
+    2) was the one that slipped. Pinned here so it can't recur."""
+    block = re.search(r"```text\n(.*?)```", ta.spec_grammar.__doc__, re.S)
+    assert block, "spec_grammar() docstring has no ```text``` key block"
+    # Each key line begins with the key as a lowercase identifier; continuation
+    # lines (e.g. wrapped enum values) start with a quote/indent and are skipped.
+    documented = {
+        line.split()[0]
+        for line in block.group(1).splitlines()
+        if line.split() and re.fullmatch(r"[a-z_]+", line.split()[0])
+    }
+    record_keys = set(ta.spec_grammar()["tags"][0].keys())
+    assert documented == record_keys, (
+        f"docstring keys {sorted(documented)} != record keys {sorted(record_keys)} — "
+        "update the spec_grammar() docstring in python/src/spec.rs"
     )
 
 

@@ -156,6 +156,20 @@ fn every_tag_and_field_is_documented() {
         "these fields have no `///` doc — add one next to the field:\n  {}",
         missing_fields.join("\n  ")
     );
+
+    // No unrendered template artifacts in the prose that ships to consumers.
+    let mut artifacts = Vec::new();
+    for tag in spec_grammar() {
+        for doc in std::iter::once(&tag.doc).chain(tag.fields.iter().map(|f| &f.doc)) {
+            if doc.as_deref().unwrap_or("").contains("{{") {
+                artifacts.push(tag.name.clone());
+            }
+        }
+    }
+    assert!(
+        artifacts.is_empty(),
+        "these tags' prose contains a `{{{{` template artifact: {artifacts:?}"
+    );
 }
 
 /// The whole document, including native `serde_json::Value` defaults, must be
