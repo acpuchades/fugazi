@@ -17,9 +17,28 @@ struct Artefacts {
     metrics: String,
 }
 
+/// A unique temp path per call. Never a fixed name in the shared `/tmp`: a fixed
+/// name collides with a parallel run or another user's leftovers — an
+/// unreadable, unremovable dir that surfaces as `PermissionDenied`. Any
+/// extension is preserved so `--series @path` still sees a `.csv` / `.yml`.
+fn unique_path(name: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    let token = format!("{}_{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed));
+    let p = std::path::Path::new(name);
+    let unique = match (
+        p.file_stem().and_then(|s| s.to_str()),
+        p.extension().and_then(|e| e.to_str()),
+    ) {
+        (Some(stem), Some(ext)) => format!("{stem}_{token}.{ext}"),
+        _ => format!("{name}_{token}"),
+    };
+    std::env::temp_dir().join(unique)
+}
+
 fn run_with(costs_flags: &[&str], out_name: &str) -> Artefacts {
     let manifest = env!("CARGO_MANIFEST_DIR");
-    let out = std::env::temp_dir().join(out_name);
+    let out = unique_path(out_name);
     let _ = std::fs::remove_dir_all(&out);
 
     let mut args: Vec<String> = vec![
@@ -191,7 +210,7 @@ fn scope_precedence_applies_at_run_time() {
 
     // With `-f 4h` the effective cadence is 4h → BTC[1d] doesn't match, so the
     // default (0.01%) fires.
-    let out_mismatch = std::env::temp_dir().join("fugazi_costs_scope_mismatch");
+    let out_mismatch = unique_path("fugazi_costs_scope_mismatch");
     let _ = std::fs::remove_dir_all(&out_mismatch);
     let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
         .args([
@@ -214,7 +233,7 @@ fn scope_precedence_applies_at_run_time() {
         std::fs::read_to_string(out_mismatch.join("metrics.yml")).expect("metrics.yml");
 
     // With `-f 1d`, the BTC[1d] scoped model wins → commission > 0.
-    let out_daily = std::env::temp_dir().join("fugazi_costs_scope_daily");
+    let out_daily = unique_path("fugazi_costs_scope_daily");
     let _ = std::fs::remove_dir_all(&out_daily);
     let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
         .args([
@@ -238,7 +257,7 @@ fn scope_precedence_applies_at_run_time() {
 
     // Omitting `--frequency` altogether lets the detector pick 1d from the
     // daily-cadence CSV — same total commission as the explicit 1d run.
-    let out_detected = std::env::temp_dir().join("fugazi_costs_scope_detected");
+    let out_detected = unique_path("fugazi_costs_scope_detected");
     let _ = std::fs::remove_dir_all(&out_detected);
     let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
         .args([
@@ -285,12 +304,12 @@ fn scope_precedence_applies_at_run_time() {
 /// leg's model to its own fills.
 #[test]
 fn pairs_run_applies_per_leg_costs() {
-    let out = std::env::temp_dir().join("fugazi_pairs_per_leg_costs");
+    let out = unique_path("fugazi_pairs_per_leg_costs");
     let _ = std::fs::remove_dir_all(&out);
 
     // Two-symbol series: A stays flat at 100, B mean-reverts around 90.
     // The strategy trades whenever the spread crosses ±3, so both legs fill.
-    let csv = out.parent().unwrap().join("pairs_per_leg_costs.csv");
+    let csv = unique_path("pairs_per_leg_costs.csv");
     let mut rows = String::from("symbol;time;open;high;low;close;volume\n");
     let a_series = [100.0; 20];
     let b_series = [
@@ -313,7 +332,7 @@ fn pairs_run_applies_per_leg_costs() {
 
     // A pairs spec that enters when spread crosses out and exits when it
     // reverts. Signals rooted through `!pick { symbol: <SYM> }`.
-    let pairs_yaml = out.parent().unwrap().join("pairs_per_leg_costs.yml");
+    let pairs_yaml = unique_path("pairs_per_leg_costs.yml");
     std::fs::write(
         &pairs_yaml,
         r#"
@@ -395,7 +414,7 @@ exit: !below
 /// commission rates (`commission / notional`) as a `(Vec<f64>, Vec<f64>)`
 /// keyed on `A`/`B`.
 fn run_pairs_with_costs(out_name: &str, costs: &str) -> (Vec<f64>, Vec<f64>) {
-    let out = std::env::temp_dir().join(out_name);
+    let out = unique_path(out_name);
     let _ = std::fs::remove_dir_all(&out);
     // Same fixture as `pairs_run_applies_per_leg_costs`: A flat, B mean-reverts.
     let csv = out
@@ -542,8 +561,8 @@ fn pairs_run_mixes_global_default_with_symbol_override() {
 #[test]
 fn later_term_wins_at_same_scope() {
     let manifest = env!("CARGO_MANIFEST_DIR");
-    let out_first = std::env::temp_dir().join("fugazi_costs_first");
-    let out_second = std::env::temp_dir().join("fugazi_costs_second");
+    let out_first = unique_path("fugazi_costs_first");
+    let out_second = unique_path("fugazi_costs_second");
     let _ = std::fs::remove_dir_all(&out_first);
     let _ = std::fs::remove_dir_all(&out_second);
 

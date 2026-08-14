@@ -4,6 +4,25 @@
 
 use std::process::Command;
 
+/// A unique temp path per call. Never a fixed name in the shared `/tmp`: a fixed
+/// name collides with a parallel run or another user's leftovers — an
+/// unreadable, unremovable dir that surfaces as `PermissionDenied`. Any
+/// extension is preserved so `--series @path` still sees a `.csv`.
+fn unique_path(name: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    let token = format!("{}_{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed));
+    let p = std::path::Path::new(name);
+    let unique = match (
+        p.file_stem().and_then(|s| s.to_str()),
+        p.extension().and_then(|e| e.to_str()),
+    ) {
+        (Some(stem), Some(ext)) => format!("{stem}_{token}.{ext}"),
+        _ => format!("{name}_{token}"),
+    };
+    std::env::temp_dir().join(unique)
+}
+
 /// The result artefacts a run writes into its `--output-dir`.
 struct Artefacts {
     fills: String,
@@ -16,7 +35,7 @@ struct Artefacts {
 /// scratch dir, asserting success, and return its result files.
 fn run_backtest(out_name: &str, strategy: &str) -> Artefacts {
     let manifest = env!("CARGO_MANIFEST_DIR");
-    let out = std::env::temp_dir().join(out_name);
+    let out = unique_path(out_name);
     let _ = std::fs::remove_dir_all(&out);
 
     let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
@@ -93,7 +112,7 @@ fn runs_an_at_file_strategy() {
 #[test]
 fn runs_windowed_metrics() {
     let manifest = env!("CARGO_MANIFEST_DIR");
-    let out = std::env::temp_dir().join("fugazi_e2e_windowed");
+    let out = unique_path("fugazi_e2e_windowed");
     let _ = std::fs::remove_dir_all(&out);
 
     let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
@@ -162,7 +181,7 @@ fn runs_windowed_metrics() {
 #[test]
 fn runs_windowed_metrics_with_time_suffix() {
     let manifest = env!("CARGO_MANIFEST_DIR");
-    let out = std::env::temp_dir().join("fugazi_e2e_windowed_time");
+    let out = unique_path("fugazi_e2e_windowed_time");
     let _ = std::fs::remove_dir_all(&out);
 
     let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
@@ -222,10 +241,10 @@ fn latch_resample_entry_gated_by_readiness_runs_end_to_end() {
             c = close
         ));
     }
-    let csv_path = std::env::temp_dir().join("fugazi_e2e_latch_resample_candles.csv");
+    let csv_path = unique_path("fugazi_e2e_latch_resample_candles.csv");
     std::fs::write(&csv_path, csv).expect("write synthetic candles");
 
-    let out_dir = std::env::temp_dir().join("fugazi_e2e_latch_resample");
+    let out_dir = unique_path("fugazi_e2e_latch_resample");
     let _ = std::fs::remove_dir_all(&out_dir);
 
     let strategy = r#"symbol: BTC
