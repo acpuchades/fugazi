@@ -500,7 +500,7 @@ def test_portfolio_run_adopts_and_mutates_the_wallet():
 
 def test_portfolio_run_rejects_a_non_wallet():
     snaps = _snaps_multi({"A": [100, 101]})
-    with pytest.raises(TypeError, match="PaperWallet or an OkxWallet"):
+    with pytest.raises(TypeError, match="must be a PaperWallet"):
         ta.Portfolio().add("a", ta.Strategy("A")).run("not a wallet", snaps)
 
 

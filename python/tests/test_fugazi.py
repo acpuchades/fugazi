@@ -738,10 +738,11 @@ def test_okx_wallet_constructs_and_reads_empty_cache():
 
 
 def test_run_rejects_a_non_wallet():
-    # `.run(...)` now accepts either a PaperWallet or an OkxWallet; anything else
-    # is a clear TypeError from the wallet-dispatch (not a downstream failure).
+    # `.run(...)` accepts one of the supported wallet types; anything else is a
+    # clear TypeError from the wallet-dispatch (not a downstream failure). Match
+    # the stable stem so adding a wallet kind doesn't break this.
     strat = ta.Strategy("X")
-    with pytest.raises(TypeError, match="PaperWallet or an OkxWallet"):
+    with pytest.raises(TypeError, match="must be a PaperWallet"):
         strat.run("not a wallet", {"open": [], "high": [], "low": [], "close": [], "volume": []})
 
 
