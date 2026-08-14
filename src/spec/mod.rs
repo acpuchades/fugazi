@@ -23,6 +23,7 @@
 
 // Spec-tree submodules.
 pub mod basket;
+pub mod grammar;
 pub mod runnable;
 pub mod expr;
 pub mod multi_asset;
@@ -121,6 +122,9 @@ pub fn load_value_pre_params(
 #[allow(unused_imports)]
 pub use basket::{BasketStrategySpec, SelectionRuleSpec};
 pub use expr::NodeSpec;
+pub use grammar::{
+    GrammarField, GrammarTag, SCHEMA_VERSION, SINCE_BASELINE, spec_grammar, spec_grammar_document,
+};
 #[allow(unused_imports)]
 pub use expr::ValueLit;
 #[allow(unused_imports)]

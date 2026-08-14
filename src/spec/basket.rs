@@ -26,6 +26,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+use fugazi_derive::SpecGrammar;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -68,17 +69,20 @@ use crate::spec::dyn_indicator::{AsBool, AsReal, DynIndicator};
 /// [`BasketStrategy::selection`](crate::strategies::BasketStrategy::selection).
 /// Rust-side callers with a custom rule build their own `Selection`
 /// impl and install it directly — no CLI-side wiring needed.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, SpecGrammar)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[grammar(group = "selection")]
 pub enum SelectionRuleSpec {
     /// The leaf: every scored symbol eligible for either side (the full
     /// universe). The implicit `of:` default; rarely written explicitly.
     /// See [`crate::strategies::basket::Everything`].
+    #[grammar(kind = "selection", output = "selection")]
     Everything,
 
     /// Take the `longs` highest-scoring symbols long, the `shorts`
     /// lowest-scoring short — ranked within [`of`](Self) (default the
     /// full universe). See [`crate::strategies::basket::top_bottom`].
+    #[grammar(kind = "selection", output = "selection")]
     TopBottom {
         longs: usize,
         shorts: usize,
@@ -89,6 +93,7 @@ pub enum SelectionRuleSpec {
     /// Long every symbol scoring at/above `long_min`; short at/below
     /// `short_max` — applied within [`of`](Self) (default the full
     /// universe). See [`crate::strategies::basket::threshold`].
+    #[grammar(kind = "selection", output = "selection")]
     Threshold {
         long_min: Real,
         short_max: Real,
@@ -99,6 +104,7 @@ pub enum SelectionRuleSpec {
     /// Long the top `long_q` fraction, short the bottom `short_q` — of
     /// [`of`](Self)'s per-side candidate sets (default the full universe).
     /// See [`crate::strategies::basket::quantile`].
+    #[grammar(kind = "selection", output = "selection")]
     Quantile {
         long_q: Real,
         short_q: Real,

@@ -108,6 +108,17 @@ Foo { source, period } => dyn_indicator::wrap(
   atom-input leaf takes.
 - Give the `source:` field a `#[serde(default = "default_source")]` so a bare
   `!foo { period: 20 }` means "of the close".
+- **Classify the variant with `#[grammar(kind = "…")]`** *(compiler-enforced)*.
+  `#[derive(SpecGrammar)]` on `NodeSpec` reflects the variant into
+  `spec_grammar()` (names, shape, fields, defaults, and `///` prose all come
+  from the definition), but it cannot infer the semantic family — so `kind`
+  (`source` / `indicator` / `operator` / `predicate` / `function`) is mandatory
+  and the crate will not compile without it. Add `output = "bool"` (etc.) when
+  the tag isn't a scalar, and `since = "X.Y"` on the new variant (existing tags
+  carry the baseline). The descriptor's `default` for a scalar field is read
+  from its `#[serde(default = "…")]`, so a canonical numeric default belongs in
+  a const-backed default fn (see `MACD_FAST` & co. in `expr.rs`), not hard-coded
+  in the Python signature — the parity test pins the two together.
 - **Report bad input with `Err`, never `panic!`.** See
   [Build errors are values](../CLAUDE.md#build-errors-are-values).
 

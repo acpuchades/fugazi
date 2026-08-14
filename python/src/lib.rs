@@ -93,7 +93,7 @@ use crate::sources::{
     fetch,
 };
 use crate::spec::{
-    load_spec, optimize, spec_tags,
+    load_spec, optimize, spec_grammar, spec_tags,
 };
 
 // ---------------------------------------------------------------------------
@@ -165,7 +165,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         is_weekday, is_weekend, pick, everything, top_bottom, threshold,
         quantile, buy_and_hold, ma_crossover, rsi_reversal, donchian_breakout, keltner_breakout,
         sharpe_of, sortino_of, volatility_of, max_drawdown_of, calmar_of, fetch,
-        load_spec, optimize, spec_tags,
+        load_spec, optimize, spec_grammar, spec_tags,
     );
 
     // `fugazi.metrics` — mirror of `fugazi::metrics::*`. Registered as a

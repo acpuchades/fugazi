@@ -34,6 +34,8 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
+mod grammar;
+
 /// How a field participates in state save/load.
 enum FieldRole {
     /// Plain data: serialize/deserialize in place via serde.
@@ -190,4 +192,23 @@ fn expand(input: DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error> {
             }
         }
     })
+}
+
+/// `#[derive(SpecGrammar)]` — reflect a spec enum into a JSON-serializable
+/// grammar descriptor. See the [`grammar`] module and `src/spec/grammar.rs`
+/// in the `fugazi` crate.
+///
+/// Emits `pub(crate) fn grammar_tags() -> Vec<crate::spec::grammar::GrammarTag>`
+/// on the enum, one `GrammarTag` per variant. Names, shapes, fields, defaults,
+/// and prose come from the serde attrs and `///` docs already on the variant;
+/// the three things serde cannot know come from a per-variant
+/// `#[grammar(kind = "…", output = "…", since = "…")]` (and a container-level
+/// `#[grammar(group = "…")]`). `kind` is mandatory.
+#[proc_macro_derive(SpecGrammar, attributes(grammar))]
+pub fn derive_spec_grammar(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match grammar::expand(input) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
 }

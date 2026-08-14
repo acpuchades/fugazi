@@ -777,24 +777,57 @@ impl PyStrategySpec {
     }
 }
 
+/// The complete, machine-readable **grammar descriptor** — one JSON record per
+/// YAML tag, reflected straight off serde's variant definitions. The single
+/// authority for the spec's presentation metadata: names, groups, kinds,
+/// shapes, fields (with types, required-ness, defaults, and prose), outputs,
+/// and `since`.
+///
+/// Returns `{ "schema_version": <int>, "tags": [ {tag}, ... ] }`. Each tag:
+///
+/// ```text
+/// name         variant name, no leading `!` (a stable public contract)
+/// group        "node" | "selection"
+/// kind         "source" | "indicator" | "operator" | "predicate" | "function" | "selection"
+/// shape        "unit" | "newtype" | "seq" | "map"  (how it's written in YAML)
+/// fields       [ {name, type, required, default, doc} ]  (map tags only)
+/// output       what it evaluates to: "scalar" | "bool" | "str" | ...
+/// projections  struct-output accessors (empty for fugazi's flattened tags)
+/// doc          the variant's `///`
+/// since        release it first shipped in
+/// ```
+///
+/// Same anti-drift guarantee as [`spec_tags`], one level deeper: everything
+/// flows from the serde definitions via `#[derive(SpecGrammar)]`, so downstream
+/// consumers (these very Python constructors, editor tooling, docs, external
+/// grammar tables) generate from one artifact rather than re-encoding by hand.
+/// Guard on `schema_version` for shape changes.
+#[pyfunction]
+pub(crate) fn spec_grammar(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let doc = fugazi_core::spec::grammar::spec_grammar_document();
+    json_to_py(py, &doc)
+}
+
 /// Every tag the YAML spec layer accepts, grouped by the vocabulary it belongs
 /// to: `"node"` (the one composable expression enum — numeric sources, boolean
 /// predicates, and string comparisons together) and `"selection"` (a `basket:`
 /// document's `selection:` rules). Names come back without the leading `!`.
 ///
-/// Read off serde's own variant list rather than a hand-maintained table, so it
-/// cannot go stale. Useful for discovery (`"sma" in ta.spec_tags()["node"]`),
-/// for editor tooling, and for the parity test that keeps this module's
-/// constructors in step with the tags.
+/// A thin projection of [`spec_grammar`] — the names of each group — kept as a
+/// convenience for discovery (`"sma" in ta.spec_tags()["node"]`) and the parity
+/// test. Reach for [`spec_grammar`] when you need fields, defaults, or prose.
 #[pyfunction]
 pub(crate) fn spec_tags(py: Python<'_>) -> PyResult<Py<PyAny>> {
-    use fugazi_core::spec::typecheck::{known_node_tags, known_selection_tags};
+    let grammar = fugazi_core::spec::grammar::spec_grammar();
     let out = pyo3::types::PyDict::new(py);
-    // The value/signal split was merged into one `NodeSpec` vocabulary, so
-    // there is a single `"node"` group (numeric sources, boolean predicates,
-    // and string comparisons all together) plus the `selection:` enum.
-    out.set_item("node", known_node_tags())?;
-    out.set_item("selection", known_selection_tags())?;
+    for group in ["node", "selection"] {
+        let names: Vec<&str> = grammar
+            .iter()
+            .filter(|t| t.group == group)
+            .map(|t| t.name.as_str())
+            .collect();
+        out.set_item(group, names)?;
+    }
     Ok(out.into_any().unbind())
 }
 

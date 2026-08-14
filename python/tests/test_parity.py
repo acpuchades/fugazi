@@ -15,6 +15,8 @@ until someone classifies it, which is the point.
 expected side of this comparison needs no upkeep.
 """
 
+import inspect
+
 import fugazi as ta
 
 # --- tags reached through a method rather than a module function -------------
@@ -168,6 +170,59 @@ def test_the_declared_tables_do_not_go_stale():
     assert not stale, (
         f"these tags are classified here but no longer exist in the spec layer: {stale}"
     )
+
+
+# --------------------------------------------------------------------------
+# Constructor default parity — against `spec_grammar()`, not just `spec_tags()`.
+#
+# The canonical numeric defaults (MACD's 12/26/9, Bollinger's k=2.0, …) are
+# single-sourced in the Rust `spec::expr` consts: they back the serde
+# `#[serde(default = …)]` (so YAML may omit them) and the grammar descriptor's
+# `default`. The pyo3 signatures still carry them as literals — pyo3 can't read a
+# const-path default back into `__text_signature__` (it renders as `...`), which
+# would defeat this very check — so they are *test-pinned* here instead. Drift
+# between a Python default and its serde const is now a CI failure.
+#
+# `param_map` records the one intentional YAML↔Python naming difference: MACD's
+# terse `fast`/`slow`/`signal` (YAML house style, like every other tag) vs the
+# explicit `*_period` (Python house style, as with `keltner`). Everything else
+# maps by identity.
+DEFAULT_PINNED = {
+    "macd": ("macd_line", {"fast_period": "fast", "slow_period": "slow", "signal_period": "signal"}),
+    "bollinger": ("bb_upper", {"period": "period", "k": "k"}),
+    "keltner": (
+        "keltner_upper",
+        {"ema_period": "ema_period", "atr_period": "atr_period", "multiplier": "multiplier"},
+    ),
+    "sar": ("sar", {"step": "step", "max": "max"}),
+    "stoch_rsi": ("stoch_rsi", {"rsi_period": "rsi_period", "stoch_period": "stoch_period"}),
+}
+
+
+def test_constructor_defaults_match_the_descriptor():
+    grammar = {t["name"]: t for t in ta.spec_grammar()["tags"]}
+    for ctor_name, (tag, param_map) in DEFAULT_PINNED.items():
+        ctor = getattr(ta, ctor_name)
+        params = inspect.signature(ctor).parameters
+        fields = {f["name"]: f for f in grammar[tag]["fields"]}
+        for py_param, serde_field in param_map.items():
+            assert py_param in params, f"{ctor_name}() lost parameter {py_param}"
+            py_default = params[py_param].default
+            assert py_default is not inspect.Parameter.empty, (
+                f"{ctor_name}({py_param}) has no default; the descriptor expects one"
+            )
+            assert serde_field in fields, (
+                f"spec_grammar {tag} has no field {serde_field} for {ctor_name}({py_param})"
+            )
+            descriptor_default = fields[serde_field]["default"]
+            assert descriptor_default is not None, (
+                f"spec_grammar {tag}.{serde_field} carries no default to pin against"
+            )
+            assert py_default == descriptor_default, (
+                f"default drift: {ctor_name}({py_param}={py_default!r}) disagrees with "
+                f"spec_grammar {tag}.{serde_field} = {descriptor_default!r}. "
+                "Reconcile the pyo3 literal with the serde const in spec::expr."
+            )
 
 
 # --------------------------------------------------------------------------

@@ -988,6 +988,19 @@ tag is bound, or listed with a reason) and
 list indicators`). Both derive the expected set from **`spec::typecheck::known_node_tags`
 / `known_selection_tags`** (serde's own variant list). Everything below is still on you:
 
+**The grammar descriptor (`spec::grammar`, `fugazi.spec_grammar()`).** `#[derive(SpecGrammar)]`
+(the `fugazi-derive` crate) reflects `NodeSpec` / `SelectionRuleSpec` into one
+JSON-serializable record per tag — names, shape, fields (types, required-ness, defaults),
+prose, plus a per-variant `kind` / `output` / `since`. It is the single authority for the
+spec's *presentation* metadata, the way `known_*_tags` is for its *names*: `spec_tags()` is
+now a projection of it, `test_parity.py` pins each Python constructor's defaults against it,
+and external tooling (docs, editor LSP, the web grammar table) generates from it rather than
+re-encoding by hand. Canonical numeric defaults (MACD's 12/26/9, …) live once as
+const-backed `#[serde(default)]` fns in `spec::expr` — feeding YAML deserialization, the
+descriptor, and (test-pinned) the pyo3 signatures. **Multi-output indicators are modelled as
+separate scalar tags** (`macd_line`, `bb_upper`, …), so `output` is `scalar` and
+`projections` is empty for them — there are no `struct`-output node tags today.
+
 - **New indicator/signal/operator** → `#[pyfunction]`, register in `#[pymodule] fn
   fugazi`, smoke test in `python/tests/test_fugazi.py`. Single-output real-source use
   `src_period!`; bar-only `bar_period!`/`bar_noarg!`; multi-output `bar_period_multi!`
