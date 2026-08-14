@@ -47,8 +47,8 @@ use tokio::task::JoinSet;
 
 use fugazi::prelude::*;
 use fugazi::sources::{
-    self, Binance, BinanceVision, CoinGecko, Interval, SeriesSource,
-    Timestamp, Yahoo, binance::binance_schema, yahoo::yahoo_schema,
+    self, Binance, BinanceVision, CoinGecko, Interval, Okx, SeriesSource,
+    Timestamp, Yahoo, binance::binance_schema, okx::okx_schema, yahoo::yahoo_schema,
 };
 
 use serde_json::Value as Json;
@@ -266,6 +266,11 @@ pub(crate) const KNOWN_PROVIDERS: &[(&str, &str)] = &[
          channels only a derivative has: funding rate (summed within a bar, so \
          `[1d]` is that day's carry), premium index, open interest and the \
          long/short ratios. Hourly to daily only",
+    ),
+    (
+        "okx",
+        "OKX spot candlesticks endpoint (symbols are dash-separated: `BTC-USDT`, \
+         `ETH-USDT`). Day/week/month bars are UTC-aligned",
     ),
     (
         "cg",
@@ -574,6 +579,7 @@ fn run_candles(
                 // `OverlayInfo::new(schema, ...)`.
                 let schema = match provider.as_str() {
                     "binance" => binance_schema().clone(),
+                    "okx" => okx_schema().clone(),
                     // The CLI fetches Yahoo with the provider default (adjusted
                     // candles + `raw_close` overlay).
                     "yfinance" => yahoo_schema(true).clone(),
@@ -1204,6 +1210,9 @@ async fn fetch(
         "binance" => Ok(Binance::new()
             .atoms(symbol, interval, since, Some(until))
             .await?),
+        "okx" => Ok(Okx::new()
+            .atoms(symbol, interval, since, Some(until))
+            .await?),
         "yfinance" => Ok(Yahoo::new()
             .atoms(symbol, interval, since, Some(until))
             .await?),
@@ -1228,6 +1237,7 @@ pub(crate) async fn tickers_of(provider: &str) -> Result<Vec<String>> {
         "binance" => Ok(Binance::new().tickers().await?),
         "binance-vision" => Ok(BinanceVision::new().tickers().await?),
         "binance-vision-futures" => Ok(BinanceVision::futures().tickers().await?),
+        "okx" => Ok(Okx::new().tickers().await?),
         "cg" => Ok(CoinGecko::new().tickers().await?),
         "yfinance" => Ok(Yahoo::new().tickers().await?),
         "csv" => bail!(

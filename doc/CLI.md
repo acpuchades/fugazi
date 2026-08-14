@@ -16,7 +16,7 @@ Six subcommands:
 - [`optimize`](#optimize) — sweep a strategy over a parameter grid in
   parallel; write one CSV row per combination and rank by a metric.
 - [`get`](#get) — fetch OHLCV bars from a remote provider (`binance`,
-  `yfinance`) or re-process a local CSV (`csv:PATH`) into a `run`-ready
+  `okx`, `yfinance`) or re-process a local CSV (`csv:PATH`) into a `run`-ready
   file, optionally with `-x/--overlay` columns computed on top.
 - [`list`](#list) — printed catalogue of what the CLI knows about
   (indicator/signal YAML tags, remote providers, and — via HTTP — a
@@ -578,6 +578,7 @@ Frequency tokens have no remap form — each is parsed as a real cadence and the
 | Provider | Grammar | Description |
 | --- | --- | --- |
 | `binance` | `binance:BTCUSDT[1d,1h],ETHUSDT[1d]` | Binance spot klines. Frequencies: `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d`, `1w`, `1M`. |
+| `okx` | `okx:BTC-USDT[1d,1h],ETH-USDT[1d]` | OKX spot candlesticks. Symbols are dash-separated instrument ids (`BTC-USDT`, not `BTCUSDT`). Frequencies: `1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `6h`, `12h`, `1d`, `2d`, `3d`, `1w`, `1M`, `3M` — day/week/month bars are UTC-aligned. |
 | `yfinance` | `yfinance:SPY[1d],AAPL[1h]` | Yahoo Finance chart endpoint (stocks/ETFs/indices/FX). Rejects multiples the provider doesn't advertise (e.g. `Day(3)`). |
 | `cg` | `cg:BTCUSDT=bitcoin[1d]` | **CoinGecko — overlay-only, no OHLCV.** Market cap / volume / supply columns; symbols are coin ids (`bitcoin`, not `BTC`). Join onto a price series via `--series`. Frequencies: `1h`…`12h`, `1d`, `1w`, `1M`. |
 | `binance-funding` | `binance-funding:BTCUSDT[1d]` | **Binance perpetual funding rate — overlay-only, no OHLCV.** One `funding_rate` column, from `fapi.binance.com` (the perp host, a different listing set from spot). Settlements land every 4–8h; those inside one bar are **summed**, so `[1d]` is that day's total carry and `[8h]` is one settlement per row. Hourly and coarser only. |

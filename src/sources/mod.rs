@@ -7,7 +7,7 @@
 //! The pieces are:
 //!
 //! * [`SeriesSource`] — every provider, whatever it returns. Fetches yield
-//!   **`Vec<Atom>`**. A price provider ([`Binance`], [`Yahoo`]) fills each
+//!   **`Vec<Atom>`**. A price provider ([`Binance`], [`Okx`], [`Yahoo`]) fills each
 //!   atom's candle; a provider of side-channel columns with no OHLCV
 //!   ([`CoinGecko`], [`BinanceVision`] — market capitalisation, supply, open
 //!   interest, funding rates) leaves it `None` and carries only the overlay
@@ -51,6 +51,7 @@
 pub mod binance;
 pub mod binance_vision;
 pub mod coingecko;
+pub mod okx;
 pub mod yahoo;
 
 use std::fmt;
@@ -63,6 +64,7 @@ pub use crate::types::Timestamp;
 pub use binance::Binance;
 pub use binance_vision::BinanceVision;
 pub use coingecko::CoinGecko;
+pub use okx::Okx;
 pub use yahoo::Yahoo;
 
 /// Floor a millisecond timestamp onto the bar-open boundary of `interval`.

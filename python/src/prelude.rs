@@ -26,7 +26,7 @@ pub(crate) use fugazi_core::indicators::{
 };
 pub(crate) use fugazi_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
 pub(crate) use fugazi_core::sources::{
-    Binance, BinanceVision, CoinGecko, Interval, SeriesSource,
+    Binance, BinanceVision, CoinGecko, Interval, Okx, SeriesSource,
     SourceError, Timestamp, Yahoo,
 };
 pub(crate) use fugazi_core::wallet::{
