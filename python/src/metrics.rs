@@ -133,6 +133,7 @@ impl PyTrade {
         self.inner.return_ratio
     }
     /// Bar count from entry to exit — `exit_bar - entry_bar`.
+    #[getter]
     pub(crate) fn bars_held(&self) -> usize {
         self.inner.bars_held()
     }
@@ -678,6 +679,25 @@ pub(crate) fn exposure_ratio(fills: Vec<PyFill>, total_bars: usize) -> Real {
 
 /// Register every metric function on the `fugazi.metrics` submodule.
 pub(crate) fn register_metrics_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Mirrors the *Closed system* note on the Rust `metrics` module — the one
+    // assumption a caller can violate without any function here complaining.
+    m.setattr(
+        "__doc__",
+        "Standalone performance metrics, one function per metric.\n\n\
+         Every function assumes the equity curve is a **closed system**: that all\n\
+         of its movement is P&L, and that no value entered or left the account\n\
+         from outside. That holds for a backtest by construction. It does not\n\
+         hold for an account a human can pay into, and the failure is silent — a\n\
+         withdrawal is shaped exactly like a trading loss in an equity curve, and\n\
+         a deposit exactly like a gain, so an unrecorded flow corrupts\n\
+         total_return, cagr, sharpe, sortino and max_drawdown alike.\n\n\
+         Tracking flows is portfolio accounting, which this module deliberately\n\
+         does not do. A caller whose account takes external flows must neutralize\n\
+         them first — the standard treatment is a chain-linked time-weighted\n\
+         return, r_i = (E_i - F_i) / E_{i-1} - 1 for a flow F_i landing in period\n\
+         i, yielding a flow-neutral curve these functions then reduce correctly.",
+    )?;
+
     m.add_class::<PyTrade>()?;
     m.add_class::<PyDrawdownSegment>()?;
 

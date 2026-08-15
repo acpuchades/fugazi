@@ -134,6 +134,20 @@ impl PySize {
 }
 
 /// A filled order: `symbol`, `side` ("buy"/"sell"), and a positive `units`.
+///
+/// A wallet produces these on `update()`, but they are plain data and can be
+/// built directly — which is how fills that were *stored* (a Parquet blotter, a
+/// resumed run, a database) get back into
+/// [`metrics.reconstruct_trades`](reconstruct_trades) and
+/// [`metrics.exposure_ratio`](exposure_ratio):
+///
+/// ```python
+/// order = fugazi.Order(symbol="BTC", side="buy", units=1.0, price=100.0)
+/// trades = fugazi.metrics.reconstruct_trades([fugazi.Fill(bar=0, order=order)])
+/// ```
+///
+/// Only `symbol`, `side`, `units` and `price` are required; `kind` defaults to
+/// `"market"`, and `id` / `commission` to `0`.
 #[pyclass(name = "Order", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyOrder {
@@ -142,6 +156,31 @@ pub(crate) struct PyOrder {
 
 #[pymethods]
 impl PyOrder {
+    /// A `side` order for `units` units of `symbol`, filled at `price`.
+    #[new]
+    #[pyo3(signature = (symbol, side, units, price, kind = "market", id = 0, commission = 0.0))]
+    pub(crate) fn new(
+        symbol: String,
+        side: &str,
+        units: f64,
+        price: f64,
+        kind: &str,
+        id: u64,
+        commission: f64,
+    ) -> PyResult<Self> {
+        Ok(PyOrder {
+            inner: Order::new(
+                symbol,
+                parse_side(side)?,
+                units,
+                price,
+                parse_kind(kind)?,
+                OrderId(id),
+            )
+            .with_commission(commission),
+        })
+    }
+
     #[getter]
     pub(crate) fn symbol(&self) -> String {
         self.inner.symbol.clone()
@@ -170,19 +209,35 @@ impl PyOrder {
     pub(crate) fn id(&self) -> u64 {
         self.inner.id.0
     }
+    /// Commission paid on this fill, in reference currency. Zero on a wallet
+    /// built with `PaperWallet(funds)`; populated when the wallet was built with
+    /// a non-trivial `commission` leg in its `TradingCostsConfig`.
+    #[getter]
+    pub(crate) fn commission(&self) -> f64 {
+        self.inner.commission
+    }
     /// `+units` for a buy, `-units` for a sell.
+    #[getter]
     pub(crate) fn signed_units(&self) -> f64 {
         self.inner.signed_units()
     }
     pub(crate) fn __repr__(&self) -> String {
+        // `commission` is elided when zero — the common case — so the repr of an
+        // uncosted fill stays short, and the costed one stays `eval`-able.
+        let commission = if self.inner.commission == 0.0 {
+            String::new()
+        } else {
+            format!(", commission={}", self.inner.commission)
+        };
         format!(
-            "Order(symbol='{}', side='{}', units={}, price={}, kind='{}', id={})",
+            "Order(symbol='{}', side='{}', units={}, price={}, kind='{}', id={}{})",
             self.inner.symbol,
             self.side(),
             self.inner.units,
             self.inner.price,
             self.kind(),
             self.inner.id.0,
+            commission,
         )
     }
 }
@@ -255,6 +310,42 @@ impl PyWallet {
             .collect()
     }
 
+    /// Install the trading costs applied to `symbol`'s fills — commission,
+    /// spread and slippage. Without this a wallet is frictionless, which
+    /// flatters every backtest run through it.
+    ///
+    /// `costs` is a `TradingCostsConfig` or the equivalent dict (the same shape
+    /// `optimize(costs=...)` and the CLI's YAML take). `freq` is the bar cadence
+    /// as a token (`"1d"`, `"4h"`, …) or a `Frequency`, needed only by
+    /// cadence-dependent models such as funding rates; leave it `None`
+    /// otherwise. Call once per symbol before driving — the resolution honours
+    /// the config's `by_symbol` scoping, so the same config can be installed on
+    /// every leg and still give each its own bundle:
+    ///
+    /// ```python
+    /// wallet = ta.PaperWallet(10_000.0)
+    /// wallet.set_costs_for("BTC", {"commission": {"percentage": {"rate": 0.001}}})
+    /// report = strat.run(wallet, candles)
+    /// report.fills[0].order.commission     # what that fill actually paid
+    /// ```
+    #[pyo3(signature = (symbol, costs, freq = None))]
+    pub(crate) fn set_costs_for(
+        &mut self,
+        symbol: &str,
+        costs: &Bound<'_, PyAny>,
+        freq: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let config = coerce_cost_config(Some(costs))?;
+        let freq = freq
+            .filter(|f| !f.is_none())
+            .map(coerce_frequency)
+            .transpose()?;
+        let resolved = config.resolve(symbol, freq);
+        self.inner
+            .set_costs_for(symbol.to_string(), resolved)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
     /// Restore the wallet to its freshly-constructed state — the seed funds it
     /// was built with, no positions, no fed prices, no pending or resting
     /// orders, and an empty blotter.
@@ -263,6 +354,7 @@ impl PyWallet {
     }
 
     /// Mark-to-market equity: funds plus each position valued at its fed price.
+    #[getter]
     pub(crate) fn equity(&self) -> f64 {
         self.inner.equity().0
     }
@@ -502,6 +594,7 @@ impl PyOkxWallet {
     }
 
     /// Mark-to-market account equity (`totalEq`), from the cache.
+    #[getter]
     pub(crate) fn equity(&self) -> f64 {
         self.inner.equity().0
     }
@@ -717,6 +810,7 @@ impl PyCoinbaseWallet {
 
     /// Mark-to-market account equity (quote balance plus marked base balances),
     /// from the cache.
+    #[getter]
     pub(crate) fn equity(&self) -> f64 {
         self.inner.equity().0
     }
@@ -881,6 +975,20 @@ pub(crate) fn parse_side(side: &str) -> PyResult<Side> {
         "buy" | "long" => Ok(Side::Buy),
         "sell" | "short" => Ok(Side::Sell),
         _ => Err(PyValueError::new_err("side must be 'buy' or 'sell'")),
+    }
+}
+
+/// Parse an order-kind string into an [`OrderKind`] — the inverse of
+/// [`kind_str`], so `Order(kind=o.kind)` round-trips a fill read back out.
+pub(crate) fn parse_kind(kind: &str) -> PyResult<OrderKind> {
+    match kind.to_ascii_lowercase().as_str() {
+        "market" => Ok(OrderKind::Market),
+        "stop" => Ok(OrderKind::Stop),
+        "take_profit" => Ok(OrderKind::TakeProfit),
+        "limit" => Ok(OrderKind::Limit),
+        _ => Err(PyValueError::new_err(
+            "kind must be 'market', 'stop', 'take_profit' or 'limit'",
+        )),
     }
 }
 
@@ -1103,6 +1211,7 @@ pub(crate) struct PyStrategy {
     pub(crate) short_enter: Option<SignalBox<Snapshot<String>>>,
     pub(crate) short_exit: Option<SignalBox<Snapshot<String>>>,
     pub(crate) sizing: Option<Source<Snapshot<String>>>,
+    pub(crate) rebalance: Option<SignalBox<Snapshot<String>>>,
     pub(crate) preset: Option<PresetSpec>,
 }
 
@@ -1118,6 +1227,7 @@ impl PyStrategy {
             short_enter: None,
             short_exit: None,
             sizing: None,
+            rebalance: None,
             preset: None,
         }
     }
@@ -1163,6 +1273,20 @@ impl PyStrategy {
         }
         let mut s = self.clone();
         s.sizing = Some(snapshot_source(source)?);
+        Ok(s)
+    }
+
+    /// Install the rebalance gate — on bars where `signal` fires, the open
+    /// position is resized to the current sizing target. **Defaults to never**,
+    /// so without this the position is sized only on entry and then drifts with
+    /// P&L. Unlike `position_sizing`, this composes with a preset.
+    ///
+    /// A `None` reading is treated as `False` (the safe default). Pair it with
+    /// `ta.value(...)`-style periodic gates or a book-anchored signal for
+    /// event-driven rebalancing.
+    pub(crate) fn rebalance_on(&self, signal: &PySignal) -> PyResult<PyStrategy> {
+        let mut s = self.clone();
+        s.rebalance = Some(snapshot_signal(signal)?);
         Ok(s)
     }
 
@@ -1229,6 +1353,12 @@ impl PyStrategy {
         }
         if let Some(sizing) = &self.sizing {
             strat = strat.position_sizing(sizing.clone());
+        }
+        // Applied unconditionally: a rebalance gate is orthogonal to how the
+        // sides were wired, so it composes with a preset as well as a
+        // hand-built strategy.
+        if let Some(rebalance) = &self.rebalance {
+            strat = strat.rebalance_on(rebalance.clone());
         }
         strat
     }
@@ -1994,6 +2124,7 @@ pub(crate) fn buy_and_hold(symbol: String) -> PyStrategy {
         short_enter: None,
         short_exit: None,
         sizing: None,
+        rebalance: None,
         preset: Some(PresetSpec::BuyAndHold { symbol }),
     }
 }
@@ -2010,6 +2141,7 @@ pub(crate) fn ma_crossover(symbol: String, fast: usize, slow: usize) -> PyStrate
         short_enter: None,
         short_exit: None,
         sizing: None,
+        rebalance: None,
         preset: Some(PresetSpec::MaCrossover { symbol, fast, slow }),
     }
 }
@@ -2032,6 +2164,7 @@ pub(crate) fn rsi_reversal(
         short_enter: None,
         short_exit: None,
         sizing: None,
+        rebalance: None,
         preset: Some(PresetSpec::RsiReversal {
             symbol,
             period,
@@ -2052,6 +2185,7 @@ pub(crate) fn donchian_breakout(symbol: String, period: usize) -> PyStrategy {
         short_enter: None,
         short_exit: None,
         sizing: None,
+        rebalance: None,
         preset: Some(PresetSpec::DonchianBreakout { symbol, period }),
     }
 }
@@ -2073,6 +2207,7 @@ pub(crate) fn keltner_breakout(
         short_enter: None,
         short_exit: None,
         sizing: None,
+        rebalance: None,
         preset: Some(PresetSpec::KeltnerBreakout {
             symbol,
             ema_period,
@@ -2349,6 +2484,22 @@ impl PyRejected {
 /// The result of [`Strategy.run`](PyStrategy::run): the per-bar equity curve, the
 /// fill blotter, the refused orders, and the pre-run seed equity — everything the
 /// `fugazi.metrics` functions reduce to numbers.
+///
+/// It is also plain data, so a caller holding an equity curve that no `run()` in
+/// this process produced — a live account's accrued equity, a resumed run, an
+/// externally-computed series — can build one and hand it to
+/// [`evaluate_report`](evaluate_report) for the whole metric tree rather than
+/// composing a dozen `fugazi.metrics` calls and reproducing the dotted key names
+/// by hand:
+///
+/// ```python
+/// report = fugazi.RunReport(equity_curve=curve, initial_equity=10_000.0)
+/// metrics = fugazi.evaluate_report(report, bars_per_year=252.0)
+/// ```
+///
+/// Pass `fills` too (see [`Order`](PyOrder)) to get the trade-statistics section
+/// populated; without them `trades.*` reads as a run that never traded, and
+/// `rejections` is always empty on a hand-built report.
 #[pyclass(name = "RunReport", frozen)]
 pub(crate) struct PyRunReport {
     pub(crate) inner: RunReport<String>,
@@ -2356,6 +2507,32 @@ pub(crate) struct PyRunReport {
 
 #[pymethods]
 impl PyRunReport {
+    /// A report over `equity_curve` (one marked-to-market equity per bar) seeded
+    /// from `initial_equity`, optionally carrying the `fills` that produced it.
+    #[new]
+    #[pyo3(signature = (equity_curve, initial_equity, fills = None))]
+    pub(crate) fn new(
+        equity_curve: Vec<f64>,
+        initial_equity: f64,
+        fills: Option<Vec<PyFill>>,
+    ) -> Self {
+        PyRunReport {
+            inner: RunReport {
+                equity_curve,
+                fills: fills
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|f| f.inner)
+                    .collect(),
+                // A rejection carries a `WalletError`, which only a wallet can
+                // raise — there is nothing for a caller to reconstruct one from,
+                // so a hand-built report is by definition a clean one.
+                rejections: Vec::new(),
+                initial_equity,
+            },
+        }
+    }
+
     /// One marked-to-market equity value per input bar.
     #[getter]
     pub(crate) fn equity_curve(&self) -> Vec<f64> {

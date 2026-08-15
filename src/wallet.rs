@@ -485,6 +485,14 @@ pub trait Wallet<Sym> {
     /// available to any caller that wants to represent an external funding
     /// event (initial deposit, broker margin adjustment).
     ///
+    /// **A credit that is not an internal transfer breaks the metrics.** The
+    /// [`metrics`](crate::metrics) module assumes a closed equity curve, in
+    /// which a deposit is indistinguishable from a gain and a withdrawal from a
+    /// loss. A caller representing a genuine external flow must neutralize it
+    /// before reducing the curve — see the *Closed system* note on that module.
+    /// The portfolio rebalance is exempt: it moves cash *between* sub-wallets,
+    /// so the aggregate curve stays closed.
+    ///
     /// **Support is optional.** The default impl returns
     /// [`WalletError::UnsupportedOperation`] — an in-memory paper wallet
     /// overrides it directly, while a live-broker impl selectively wires

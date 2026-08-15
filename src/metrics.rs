@@ -27,6 +27,33 @@
 //! non-positive endpoints for CAGR, …). Metrics that are always well-defined
 //! (total return, max drawdown, positive-bars fraction, …) return `Real` and
 //! read `0.0` on empty input.
+//!
+//! # Closed system
+//!
+//! **Every function here assumes the equity curve is a closed system** — that
+//! all of its movement is P&L, and that no value entered or left the account
+//! from outside. That holds by construction for a backtest, which is what these
+//! functions were written to reduce.
+//!
+//! It does *not* hold for an account a human can pay into, and the failure is
+//! silent: a withdrawal is shaped exactly like a trading loss in an equity
+//! curve, and a deposit exactly like a gain. There is nothing in a bare curve
+//! to distinguish them, so an unrecorded external flow corrupts
+//! [`total_return`], [`cagr`], [`sharpe`], [`sortino`] and [`max_drawdown`]
+//! alike, and the corrupting bar stays in the series permanently.
+//!
+//! Tracking flows is portfolio accounting, and this module deliberately does
+//! not do it: the flow series would have to be threaded through
+//! [`per_bar_returns`], the one intermediate every other metric consumes.
+//! **A caller whose account takes external flows must neutralize them before
+//! calling** — the standard treatment is a chain-linked time-weighted return,
+//! `r_i = (E_i − F_i) / E_{i−1} − 1` for a flow `F_i` landing in period `i`,
+//! which yields a flow-neutral curve the functions here then reduce correctly.
+//! (Attributing `F_i` to period start rather than end gives
+//! `r_i = E_i / (E_{i−1} + F_i) − 1`; pick one and hold to it.)
+//!
+//! [`Wallet::adjust_funds`](crate::Wallet::adjust_funds) is the operation that
+//! most often introduces such a flow.
 
 use crate::backtest::Fill;
 use crate::{Real, Side};

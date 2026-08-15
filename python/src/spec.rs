@@ -593,6 +593,49 @@ pub(crate) fn metrics_to_py(py: Python<'_>, m: &SpecMetrics) -> PyResult<Py<PyAn
     json_to_py(py, &value)
 }
 
+/// Reduce a [`RunReport`](PyRunReport) to the full metric document — the same
+/// nested dict `Strategy.evaluate` / `StrategySpec.evaluate` return, under the
+/// same dotted key names, but without running anything.
+///
+/// This is the entry point for metrics over a curve that no `run()` in this
+/// process produced: a live account's accrued equity, a resumed run, an
+/// externally-computed series. Build the report, reduce it:
+///
+/// ```python
+/// report = fugazi.RunReport(equity_curve=curve, initial_equity=10_000.0)
+/// metrics = fugazi.evaluate_report(report, bars_per_year=252.0)
+/// metrics["risk_adjusted"]["sharpe"]
+/// ```
+///
+/// `bars_per_year` scales per-bar return moments to annual figures;
+/// `risk_free_rate` is the annualized rf as a fraction (`0.045` = 4.5% p.a.);
+/// `seconds_per_bar`, when given, populates the trades' `*_seconds` twins of the
+/// `*_bars` fields.
+///
+/// The `trades.*` section is reconstructed from the report's fills, so a report
+/// built from a bare curve reads there as a run that never traded — pass `fills`
+/// to `RunReport` for the whole tree. The `costs.*` section is absent either
+/// way: it is a property of the wallet that executed the run, not of the report.
+///
+/// Metrics assume a **closed system** — see the note on `fugazi.metrics`.
+#[pyfunction]
+#[pyo3(signature = (report, bars_per_year = 252.0, risk_free_rate = 0.0, seconds_per_bar = None))]
+pub(crate) fn evaluate_report(
+    py: Python<'_>,
+    report: &PyRunReport,
+    bars_per_year: Real,
+    risk_free_rate: Real,
+    seconds_per_bar: Option<Real>,
+) -> PyResult<Py<PyAny>> {
+    let metrics = spec_metrics::from_report(
+        &report.inner,
+        bars_per_year,
+        risk_free_rate,
+        seconds_per_bar,
+    );
+    metrics_to_py(py, &metrics)
+}
+
 /// The raw per-resample values behind a Monte Carlo summary — the same shape
 /// the CLI writes to `montecarlo.csv`, one entry per estimator (`bootstrap_ci`,
 /// `null_rerun`).

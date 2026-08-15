@@ -728,7 +728,7 @@ def test_okx_wallet_constructs_and_reads_empty_cache():
     # this exercises the binding surface without touching the network.
     w = ta.OkxWallet.demo("key", "secret", "passphrase")
     assert w.funds == 0.0
-    assert w.equity() == 0.0
+    assert w.equity == 0.0
     assert w.position("BTC-USDT-SWAP") == 0.0
     assert w.price("BTC-USDT-SWAP") is None
     assert w.errors() == []
@@ -780,7 +780,7 @@ def test_wallet_close_and_equity():
     w.set("X", "buy", 4.0)
     w.update("X", 100.0)  # fill: funds 600, +4 units
     w.update("X", 120.0)
-    assert w.equity() == pytest.approx(600.0 + 4.0 * 120.0)
+    assert w.equity == pytest.approx(600.0 + 4.0 * 120.0)
     w.close("X")
     w.update("X", 120.0)  # fills the close at the open 120
     assert not w.positions()
@@ -1935,11 +1935,193 @@ def test_reconstruct_trades_round_trip_through_wallet():
     trades = metrics.reconstruct_trades(fills)
     assert metrics.total_trades(trades) == 1
     assert trades[0].pnl == pytest.approx(10.0)
-    assert trades[0].bars_held() == 1
+    assert trades[0].bars_held == 1
     assert metrics.win_rate(trades) == 1.0
     assert metrics.profit_factor(trades) is None  # no losing trade
     assert metrics.average_bars_held(trades) == pytest.approx(1.0)
     assert metrics.exposure_ratio(fills, total_bars=2) == pytest.approx(0.5)
+
+
+def test_single_strategy_rebalance_on_resizes_the_open_position():
+    """Mirrors SingleAssetStrategy::rebalance_on — off by default, resizes on fire."""
+    prices = [100.0 + i for i in range(20)]
+    always = ta.close().above(0.0)
+    strat = ta.Strategy("BTC").long_on(always).position_sizing(ta.value(0.5))
+
+    base = strat.run(ta.PaperWallet(10_000.0), _ohlcv(prices))
+    gated = strat.rebalance_on(ta.close().above(0.0)).run(
+        ta.PaperWallet(10_000.0), _ohlcv(prices)
+    )
+    # Ungated: sized once at entry, then the position drifts with P&L.
+    assert len(base.fills) == 1
+    # Gated: re-sized to the half-equity target as equity moves.
+    assert len(gated.fills) > len(base.fills)
+
+
+def test_order_is_constructible_and_feeds_metrics():
+    """Stored fills — ones no wallet in this process produced — go back in."""
+    from fugazi import metrics
+
+    # The blotter as a consumer would have persisted it and read it back.
+    rows = [(0, "buy", 1.0, 100.0), (1, "sell", 1.0, 110.0)]
+    fills = [
+        ta.Fill(bar=bar, order=ta.Order(symbol="BTC", side=side, units=u, price=p))
+        for bar, side, u, p in rows
+    ]
+    trades = metrics.reconstruct_trades(fills)
+    assert metrics.total_trades(trades) == 1
+    assert trades[0].pnl == pytest.approx(10.0)
+    assert metrics.exposure_ratio(fills, total_bars=2) == pytest.approx(0.5)
+
+
+def test_order_constructor_defaults_and_round_trips():
+    o = ta.Order(symbol="BTC", side="buy", units=2.0, price=50.0)
+    assert (o.symbol, o.side, o.units, o.price) == ("BTC", "buy", 2.0, 50.0)
+    assert o.kind == "market" and o.id == 0 and o.commission == 0.0
+    assert o.signed_units == 2.0
+    # Every field a getter reports is a field the constructor accepts back.
+    full = ta.Order(
+        symbol="ETH", side="sell", units=1.5, price=20.0,
+        kind="stop", id=7, commission=0.25,
+    )
+    again = ta.Order(
+        symbol=full.symbol, side=full.side, units=full.units, price=full.price,
+        kind=full.kind, id=full.id, commission=full.commission,
+    )
+    assert repr(again) == repr(full)
+    assert again.signed_units == -1.5
+    assert "commission=0.25" in repr(full)
+
+
+def test_order_constructor_rejects_bad_side_and_kind():
+    with pytest.raises(ValueError):
+        ta.Order(symbol="BTC", side="hold", units=1.0, price=1.0)
+    with pytest.raises(ValueError):
+        ta.Order(symbol="BTC", side="buy", units=1.0, price=1.0, kind="iceberg")
+
+
+def test_wallet_fills_expose_commission():
+    """The commission leg is readable — zero on an uncosted wallet, not absent."""
+    w = ta.PaperWallet(1000.0)
+    w.update("BTC", 100.0)
+    w.set_position("BTC", 1.0)
+    fills = w.update("BTC", 100.0)
+    assert len(fills) == 1
+    assert fills[0].commission == 0.0
+
+
+def test_set_costs_for_stamps_commission_on_fills():
+    """A costed wallet charges the fill and reports what it charged."""
+    w = ta.PaperWallet(1000.0)
+    w.set_costs_for("BTC", {"commission": {"percentage": {"rate": 0.001}}})
+    w.update("BTC", 100.0)
+    w.set_position("BTC", 1.0)
+    fills = w.update("BTC", 100.0)
+    assert len(fills) == 1
+    assert fills[0].commission == pytest.approx(0.1)   # 1 unit * 100 * 0.1%
+    # The charge came out of the account, not just the record.
+    assert w.funds == pytest.approx(1000.0 - 100.0 - 0.1)
+
+
+def test_set_costs_for_accepts_a_config_object_and_a_frequency():
+    costs = ta.TradingCostsConfig({"commission": {"percentage": {"rate": 0.002}}})
+    w = ta.PaperWallet(1000.0)
+    w.set_costs_for("BTC", costs, freq="1d")
+    w.set_costs_for("ETH", costs, freq=ta.Frequency("4h"))
+    w.update("BTC", 100.0)
+    w.set_position("BTC", 1.0)
+    assert w.update("BTC", 100.0)[0].commission == pytest.approx(0.2)
+
+
+def test_set_costs_for_is_per_symbol():
+    """Only the symbol it was installed for pays."""
+    w = ta.PaperWallet(10_000.0)
+    w.set_costs_for("BTC", {"commission": {"percentage": {"rate": 0.01}}})
+    for sym in ("BTC", "ETH"):
+        w.update(sym, 100.0)
+        w.set_position(sym, 1.0)
+    charged = {f.symbol: f.commission for f in w.update("BTC", 100.0)}
+    charged.update({f.symbol: f.commission for f in w.update("ETH", 100.0)})
+    assert charged["BTC"] == pytest.approx(1.0)
+    assert charged["ETH"] == 0.0
+
+
+def test_every_is_a_delayed_periodic_pulse():
+    """ta.every(N) mirrors !every N: fires on bar N-1, then every N bars."""
+    pulse = ta.every(3)
+    fired = [bool(pulse.update(ta.Candle(1.0, 1.0, 1.0, 1.0, 1.0))) for _ in range(9)]
+    assert fired == [False, False, True, False, False, True, False, False, True]
+    with pytest.raises(ValueError):
+        ta.every(0)
+
+
+def test_every_gates_a_strategy_rebalance():
+    """The pulse lifts into a snapshot-rooted rebalance slot on every shape."""
+    prices = [100.0 + i for i in range(20)]
+    strat = (
+        ta.Strategy("BTC")
+        .long_on(ta.close().above(0.0))
+        .position_sizing(ta.value(0.5))
+    )
+    often = strat.rebalance_on(ta.every(1)).run(
+        ta.PaperWallet(10_000.0), _ohlcv(prices)
+    )
+    rarely = strat.rebalance_on(ta.every(10)).run(
+        ta.PaperWallet(10_000.0), _ohlcv(prices)
+    )
+    assert len(often.fills) > len(rarely.fills) >= 1
+
+
+def test_evaluate_report_from_a_bare_equity_curve():
+    """A curve no run() produced reduces to the same tree evaluate() returns."""
+    from fugazi import metrics
+
+    curve = [101.0, 103.0, 99.0, 105.0, 108.0]
+    report = ta.RunReport(equity_curve=curve, initial_equity=100.0)
+    assert report.equity_curve == curve
+    assert report.initial_equity == 100.0
+    assert report.fills == [] and report.rejections == []
+
+    m = ta.evaluate_report(report, bars_per_year=252.0)
+    # Same keys, same values as calling the individual metrics by hand.
+    returns = metrics.per_bar_returns(curve, 100.0)
+    segments = metrics.drawdown_segments(curve)
+    assert m["run"]["bars"] == 5
+    assert m["run"]["initial_equity"] == 100.0
+    assert m["run"]["final_equity"] == 108.0
+    assert m["returns"]["total"] == pytest.approx(metrics.total_return(curve, 100.0))
+    assert m["drawdown"]["max"] == pytest.approx(metrics.max_drawdown(segments))
+    assert m["risk_adjusted"]["sharpe"] == pytest.approx(
+        metrics.sharpe(returns, 0.0, 252.0)
+    )
+    # No fills — the trades section reads as a run that never traded.
+    assert m["trades"]["total"] == 0
+
+
+def test_evaluate_report_round_trips_a_real_run():
+    """A report rebuilt from its own parts reduces to the same metric tree."""
+    from fugazi import metrics
+
+    enter = ta.sma(ta.close(), 2).crosses_above(ta.sma(ta.close(), 4))
+    down = ta.sma(ta.close(), 2).crosses_below(ta.sma(ta.close(), 4))
+    strat = ta.Strategy("BTC").long_on(enter, down).short_on(down, enter)
+    prices = [14, 13, 12, 11, 10, 11, 13, 15, 17, 15, 12, 9, 7, 9, 12, 15]
+    report = strat.run(ta.PaperWallet(10_000.0), _ohlcv(prices))
+    assert len(report.fills) >= 1
+
+    direct = ta.evaluate_report(report, bars_per_year=252.0)
+    rebuilt = ta.RunReport(
+        equity_curve=report.equity_curve,
+        initial_equity=report.initial_equity,
+        fills=report.fills,
+    )
+    assert ta.evaluate_report(rebuilt, bars_per_year=252.0) == direct
+    # Fills carried through, so the trades section is populated — the whole
+    # point of accepting them rather than only a bare curve.
+    assert direct["trades"]["total"] == metrics.total_trades(
+        metrics.reconstruct_trades(report.fills)
+    )
+    assert direct["trades"]["total"] >= 1
 
 
 def test_trade_and_drawdown_segment_are_frozen_readonly():

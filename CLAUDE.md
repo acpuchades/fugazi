@@ -41,7 +41,7 @@ calls — reach for closed-form first.
 - Build: `cargo build`; Test: `cargo test`; Lint: `cargo clippy --all-targets` (keep
   clean); Docs: `cargo doc --open`
 
-### Bumping the version — sync **six** places (`cargo check` only catches Rust drift)
+### Bumping the version — sync **seven** places (`cargo check` only catches Rust drift)
 
 1. `Cargo.toml` (workspace root, `X.Y.Z`) — **and** the `fugazi-derive = { …, version =
    "X.Y.Z" }` dependency line in the same file
@@ -49,6 +49,9 @@ calls — reach for closed-form first.
 3. `python/Cargo.toml` (pyo3 cdylib, `X.Y.Z`)
 4. `python/pyproject.toml` (wheel metadata, `X.Y.Z` — what `pip install fugazi` sees)
 5. `README.md` — `## Install` snippet, `fugazi = "X.Y"` (major.minor)
+6. `python/uv.lock` — the `[[package]] name = "fugazi"` entry's `version`. Nothing reads
+   it (CI installs via `maturin` + `pip`, not `uv`), so it drifts silently — it sat at
+   `0.42.0` through nine releases. One line; keep it honest.
 
 Then **`cargo check --workspace`** (updates `Cargo.lock`), commit the manifests + README
 + Lock, tag `vX.Y.Z`, push. Then **publish a GitHub Release** for that tag (`gh release

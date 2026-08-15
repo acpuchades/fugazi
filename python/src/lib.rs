@@ -82,7 +82,7 @@ use crate::constructors::{
     get_real, get_bool, get_str, compute_overlays, str_eq, str_ne,
     year, month, day, hour, minute, second,
     day_of_week, day_of_year, week_of_year, quarter, unix_seconds, unix_millis,
-    is_weekday, is_weekend, pick,
+    is_weekday, is_weekend, every, pick,
 };
 use crate::strategy::{
     everything, top_bottom, threshold, quantile, buy_and_hold, ma_crossover,
@@ -162,11 +162,11 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         get_real, get_bool, get_str, compute_overlays, str_eq, str_ne,
         year, month, day, hour, minute, second,
         day_of_week, day_of_year, week_of_year, quarter, unix_seconds, unix_millis,
-        is_weekday, is_weekend, pick, everything, top_bottom, threshold,
+        is_weekday, is_weekend, pick, everything, every, top_bottom, threshold,
         quantile, buy_and_hold, ma_crossover, rsi_reversal, donchian_breakout, keltner_breakout,
         sharpe_of, sortino_of, volatility_of, max_drawdown_of, calmar_of, fetch,
         load_spec, optimize, spec_document_json_schema, spec_grammar, spec_json_schema,
-        spec_tags,
+        spec_tags, evaluate_report,
     );
 
     // `fugazi.metrics` — mirror of `fugazi::metrics::*`. Registered as a

@@ -495,7 +495,7 @@ def test_portfolio_run_adopts_and_mutates_the_wallet():
     # driven, not merely read for a seed.
     assert w.position("A") > 0.0
     assert w.orders(), "the adopted wallet should carry the run's blotter"
-    assert w.equity() == pytest.approx(report.equity_curve[-1])
+    assert w.equity == pytest.approx(report.equity_curve[-1])
 
 
 def test_portfolio_run_rejects_a_non_wallet():

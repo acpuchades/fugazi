@@ -92,8 +92,12 @@ jobs:
           pip install maturin
           maturin build --release --out dist
           pip install --no-index --find-links dist fugazi
+      # Mirrors the `test` extra in python/pyproject.toml. `jsonschema` and
+      # `pyyaml` are load-bearing: the two schema test files `importorskip`
+      # them, so leaving them out makes those files skip silently rather than
+      # fail — the schema tests then pass by not running.
       - name: Install test deps
-        run: pip install pytest numpy pandas polars
+        run: pip install pytest numpy pandas polars jsonschema pyyaml
       - name: pytest
         working-directory: python
         run: pytest

@@ -174,6 +174,7 @@ node.reset()                   # call reset() to start a fresh, independent pass
 | `resample(every, inner)` | `inner`'s output every `every` bars (aggregated HTF candle fed to `inner`), `None` between |
 | `latch(source)` | `source`'s last `Some` output, held across `None` ticks (works on indicators and signals) |
 | `unstable(x)` | Passthrough that reports `unstable_period() = 0` for its subtree (also `.unstable()` on any Indicator or Signal) |
+| `every(period)` | Signal: a pulse every `period` bars, first fire delayed to bar `period-1` — the usual [`rebalance_on`](#the-declarative-strategy-builder) gate |
 
 Multi-line indicators return a `dict` of their named lines (or `None` while
 warming up).
@@ -454,12 +455,23 @@ wallet.set_position("AAPL", 4)                      # drive straight to 4 units
 wallet.close("AAPL")                                # flatten
 
 wallet.funds                 # cash balance
+wallet.equity                # funds + positions marked at the fed prices
 wallet.position("AAPL")      # signed position (negative = short)
 wallet.price("AAPL")         # last fed price (or None)
 wallet.positions()           # {symbol: units}
-wallet.equity()              # funds + positions marked at the fed prices
 wallet.orders()              # the blotter: list of Order(symbol, side, units)
 ```
+
+> **Getters vs methods.** State a wallet or a frozen value object *already
+> holds* is an attribute, not a call: `wallet.funds`, `wallet.equity`,
+> `trade.bars_held`, `order.signed_units` — including derived readings like the
+> last two, which are attributes because they describe the object rather than do
+> anything. Anything that takes an argument (`position(sym)`, `price(sym)`),
+> materializes a collection (`positions()`, `orders()`), advances or mutates
+> state (`update()`, `reset()`), or builds a new object (`shared()`,
+> `unstable()`, `not_()`) is a method. The streaming reads on indicators and
+> signals — `value()`, `is_true()`, `is_ready()`, `warm_up_period()` — are
+> methods too: they belong to a live object being advanced, not to a value.
 
 The wallet is fed each symbol's price with `update(symbol, price)` and is
 otherwise market-agnostic. Sizes are an absolute number of units, or
@@ -526,10 +538,34 @@ sharpe(rets, 0.0, 252.0)
 The builder mirrors Rust's `SingleAssetStrategy`: `long_on` / `short_on` (a
 missing `exit` never fires — right for an always-in reversal), `position_sizing`
 (scales the value-fraction magnitude; a `None` reading skips that bar's trade),
-and the strategy's book is seeded to the wallet's opening equity. Signals must be
-candle- or snapshot-rooted (a bare-value signal is rejected). Not bound yet:
-position-anchored protective stops and the Rust recipe catalogue — drop to the
-wallet loop above for those.
+`rebalance_on` (below), and the strategy's book is seeded to the wallet's opening
+equity. Signals must be candle- or snapshot-rooted (a bare-value signal is
+rejected). Not bound yet: position-anchored protective stops and the Rust recipe
+catalogue — drop to the wallet loop above for those.
+
+`position_sizing` answers "what size?"; **`rebalance_on` answers "act on that
+size right now?"**. It is **off by default** on `Strategy`, `PairsStrategy`,
+`MultiAssetStrategy` and `Portfolio` — sizing reads only on transitions, so an
+open position drifts with P&L — and **on by default, every bar, on
+`BasketStrategy`**, whose cross-sectional ranking *is* its sizing decision.
+Not calling the method is therefore not the same as gating it off; only on a
+basket do the two coincide in spirit, and there the default is the opposite one.
+
+`ta.every(N)` is the periodic pulse these gates are usually built from — the
+binding of the spec's `!every N`. Its first fire is **delayed**, so `every(5)`
+fires on bar 4 (0-indexed) and every 5th bar after, each pulse closing a full
+block rather than firing immediately and again 5 bars later. Any other boolean
+signal works too — compose with drawdown, calendar or weight-drift conditions
+for event-driven rebalancing.
+
+```python
+gated = (
+    ta.Strategy("AAPL")
+    .long_on(ta.close().above(0.0))
+    .position_sizing(ta.value(0.5))
+    .rebalance_on(ta.every(20))    # hold the half-equity target ~monthly on daily bars
+)
+```
 
 ### Portfolios
 
@@ -821,9 +857,25 @@ costs = ta.TradingCostsConfig({
 ```
 
 `costs=` accepts either a `TradingCostsConfig` or a raw dict on `ta.optimize(...)`.
-For `.run(wallet, snapshots)` and `.evaluate(wallet, snapshots)`, costs come
-from what's pre-installed on the wallet (matching how the manual
-[`Strategy`](#the-declarative-strategy-builder) builder works).
+For `.run(wallet, snapshots)` and `.evaluate(wallet, snapshots)`, costs come from
+what's pre-installed on the wallet — install them per symbol with
+`set_costs_for`, before driving:
+
+```python
+wallet = ta.PaperWallet(10_000.0)
+wallet.set_costs_for("BTC", {"commission": {"percentage": {"rate": 0.001}}})
+
+wallet.update("BTC", 100.0)
+wallet.set_position("BTC", 1.0)
+filled = wallet.update("BTC", 100.0)
+filled[0].commission          # 0.1 — what that fill actually paid
+```
+
+Resolution honours the config's `by_symbol` / `by_interval` scoping, so the same
+config object can be installed on every leg and still give each its own bundle.
+Pass `freq="1d"` (or a `Frequency`) as the third argument for cadence-dependent
+models such as funding rates; omit it otherwise. **A wallet with no costs
+installed is frictionless**, which flatters every backtest run through it.
 
 ## Metrics
 
@@ -875,6 +927,57 @@ metrics.win_rate(trades)                   # win fraction | None
 metrics.profit_factor(trades)              # Σwins / |Σlosses| | None
 metrics.exposure_ratio(fills, total_bars=len(candles))
 ```
+
+### Measuring fills and curves this process didn't produce
+
+`Order`, `Fill` and `RunReport` are plain data, so nothing requires the fills to
+have come out of a live wallet loop in the same process. A blotter you *stored*
+— a Parquet file, a database, a resumed run — goes straight back in:
+
+```python
+from fugazi import metrics
+
+# rows as you persisted them: (bar, side, units, price)
+rows = [(0, "buy", 1.0, 100.0), (5, "sell", 1.0, 110.0)]
+fills = [
+    ta.Fill(bar=bar, order=ta.Order(symbol="BTC", side=side, units=u, price=p))
+    for bar, side, u, p in rows
+]
+trades = metrics.reconstruct_trades(fills)   # -> one closed round trip
+```
+
+`Order`'s remaining fields are optional: `kind` (`"market"` / `"stop"` /
+`"take_profit"` / `"limit"`) defaults to `"market"`, and `id` / `commission`
+to `0` / `0.0`.
+
+Likewise a bare equity curve reduces to the **whole** metric tree — the same
+nested dict, under the same dotted key names `evaluate()` produces — without
+running anything:
+
+```python
+curve = [10_050.0, 10_100.0, 9_900.0, 10_200.0, 10_300.0]
+report = ta.RunReport(equity_curve=curve, initial_equity=10_000.0)
+
+m = ta.evaluate_report(report, bars_per_year=252.0)
+m["risk_adjusted"]["sharpe"]
+m["drawdown"]["max_pct"]
+m["returns"]["cagr_pct"]
+```
+
+That is the entry point for a curve no `run()` in this process produced: a live
+account's accrued equity, a resumed run, an externally-computed series. Pass
+`fills=` as well to populate the `trades.*` section — without them a hand-built
+report reads there as a run that never traded. `rejections` is always empty on a
+hand-built report (a rejection carries a wallet error, which only a wallet can
+raise), and the `costs.*` section is absent either way: it is a property of the
+wallet that executed the run, not of the report.
+
+> **Metrics assume a closed system.** Every function above reads the equity
+> curve as pure P&L. A deposit is indistinguishable from a gain in a curve, and
+> a withdrawal from a loss, so an account that takes external cash flows must
+> have them neutralized — chain-linked, `r_i = (E_i - F_i) / E_{i-1} - 1` —
+> before measuring. See *Cross-cutting caveats* in
+> [METRICS.md](https://github.com/acpuchades/fugazi/blob/main/doc/METRICS.md).
 
 ## Fetching data
 

@@ -1838,6 +1838,13 @@ pub enum NodeSpec {
     },
     /// Sugar for `!value false` — reads better on a `rebalance_on:` field
     /// where the intent is "never".
+    ///
+    /// **Writing `!never` is not the same as omitting the field.** Each shape
+    /// has its own default: `single:` / `pairs:` / `multi:` default to `!never`,
+    /// but `basket:` defaults to `!every 1` — every bar, the *most* active
+    /// setting. On a basket, omitting `rebalance_on:` and writing `!never` are
+    /// opposite ends of the range. See the Defaults table under *Rebalance* in
+    /// `doc/STRATEGIES.md`.
     #[grammar(kind = "predicate", output = "bool")]
     Never,
     /// A periodic pulse — [`Every(N)`](crate::indicators::Every) with a

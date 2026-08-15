@@ -826,7 +826,7 @@ calendar signals to trigger event-driven rebalancing.
 
 | Tag | Fires |
 | --- | --- |
-| `!never` | never (sugar for `!value false`) |
+| `!never` | never (sugar for `!value false`) — **not** what omitting the field means; see [Defaults](#defaults) |
 | `!every N` | on bar `N-1` (0-indexed), then every `N` bars — delayed first fire so `!every 5` at end of every 5-bar block |
 | `!value true` / `!value false` | constants — for programmatic overrides |
 | composite: `!and`, `!or`, `!xor`, `!not`, `!all`, `!any` | boolean logic over any of the above and any other signal |

@@ -207,6 +207,36 @@ n_returns, bpy, n_trials, trial_var)`.
 
 ## Cross-cutting caveats
 
+### Every metric assumes a closed system
+
+The equity curve is read as **pure P&L**: all of its movement came from
+trading, and no value entered or left the account from outside. That holds
+by construction for a backtest, which is what these metrics were written
+to reduce.
+
+It does not hold for an account a human can pay into, and the failure is
+silent. A withdrawal is shaped *exactly* like a trading loss in an equity
+curve, and a deposit exactly like a gain — there is nothing in the series
+to tell them apart. One unrecorded flow corrupts `returns.total`,
+`returns.cagr_pct`, `risk_adjusted.sharpe`, `risk_adjusted.sortino` and
+`drawdown.max` alike, and the corrupting bar stays in the series
+permanently: every window that spans it is wrong, and no later bar
+repairs it.
+
+fugazi does not track flows — that is portfolio accounting, and the flow
+series would have to be threaded through `per_bar_returns`, the one
+intermediate every other metric consumes. **A caller whose account takes
+external flows must neutralize them before measuring.** The standard
+treatment is a chain-linked time-weighted return — for a flow `F_i`
+landing in period `i`, `r_i = (E_i − F_i) / E_{i−1} − 1` — which yields a
+flow-neutral curve the metrics then reduce correctly. (Attributing `F_i`
+to the period start instead gives `r_i = E_i / (E_{i−1} + F_i) − 1`; pick
+one convention and hold to it.)
+
+`Wallet::adjust_funds` is the operation that most often introduces such a
+flow. The portfolio rebalance is exempt — it moves cash *between*
+sub-wallets, so the aggregate curve stays closed.
+
 ### Warm-up and readiness
 
 The strategy layer's readiness gate holds the first trade until every

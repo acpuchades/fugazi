@@ -630,6 +630,25 @@ pub(crate) fn value(value: f64) -> PyIndicator {
     PyIndicator::wrap(AnySource::Const(value))
 }
 
+/// Signal: a periodic pulse that fires every `period` bars — the canonical
+/// `rebalance_on` gate. Mirrors Rust's `Every` and the spec's `!every N`.
+///
+/// The first fire is **delayed**, not immediate: `every(5)` fires on bar 4
+/// (0-indexed) and every 5th bar after, so each pulse closes a full 5-bar block
+/// rather than firing on the first bar and then again 5 bars later. `every(1)`
+/// is every bar. Candle-rooted, so it lifts into any snapshot-rooted slot:
+///
+/// ```python
+/// strat.rebalance_on(ta.every(20))     # resize about monthly on daily bars
+/// ```
+#[pyfunction]
+pub(crate) fn every(period: usize) -> PyResult<PySignal> {
+    ensure_period(period)?;
+    Ok(PySignal::wrap(AnySignal::Candle(SignalBox::new(
+        Every::<Atom>::new(period),
+    ))))
+}
+
 macro_rules! src_period {
     ($name:ident, $ty:ident, $doc:literal) => {
         #[doc = $doc]

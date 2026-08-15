@@ -105,7 +105,6 @@ NOT_BOUND = {
     "became_true": "rising edge; compose .changed() with the condition",
     "became_false": "falling edge; compose .changed() with the condition",
     "never": "constant-false signal; use value(False)",
-    "every": "periodic pulse; only meaningful as a rebalance_on: gate in a spec",
     "has_column": "schema predicate; resolved at build time in a spec",
 }
 
@@ -281,7 +280,7 @@ WALLET_BOUND = {
     "set", "set_position", "close",
     "set_stop", "set_take_profit", "cancel_protective",
     "set_limit", "cancel_limit", "cancel",
-    "adjust_funds", "poll_fills",
+    "adjust_funds", "poll_fills", "set_costs_for",
     # Inherent PaperWallet extras, not trait methods.
     "orders", "reset",
 }
@@ -290,10 +289,6 @@ WALLET_NOT_BOUND = {
     "take_rejections": (
         "needs a bar-less rejection type; the run path already exposes the same "
         "entries on RunReport.rejections"
-    ),
-    "set_costs_for": (
-        "needs a frequency argument to resolve a bundle; the spec path covers it "
-        "via TradingCostsConfig"
     ),
 }
 
