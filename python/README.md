@@ -460,7 +460,15 @@ wallet.position("AAPL")      # signed position (negative = short)
 wallet.price("AAPL")         # last fed price (or None)
 wallet.positions()           # {symbol: units}
 wallet.orders()              # the blotter: list of Order(symbol, side, units)
+wallet.can_short             # can this account hold a negative position?
 ```
+
+`can_short` is what an account *can* do, asked before trading: `True` on a
+`PaperWallet` (a sell credits cash) and on `OkxWallet` (net-mode swaps), `False`
+on the spot `CoinbaseWallet`, whose positions are owned base-asset balances. It
+informs rather than enforces — a spot wallet still clamps a short target to flat
+on its own — so a long/short strategy can pick a long-only path up front instead
+of learning the limit from a clamped order.
 
 > **Getters vs methods.** State a wallet or a frozen value object *already
 > holds* is an attribute, not a call: `wallet.funds`, `wallet.equity`,

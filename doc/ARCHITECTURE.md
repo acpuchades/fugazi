@@ -516,6 +516,16 @@ Priced **from outside**: `update(symbol, candle) -> Vec<Order>` feeds a bar per 
   "holds nothing") and **`set_costs_for(sym, costs)`** (default
   `UnsupportedOperation` — a live venue owns its own fees). Both moved onto the trait
   for the portfolio's erased sub-wallets; no inherent twin remains.
+- **`can_short() -> bool`** — capability **introspection**, default `true` (a
+  position is signed `Units`, so shorting is the baseline; `PaperWallet` states it
+  explicitly, `OkxWallet` says `true` for net-mode swaps). A spot venue overrides to
+  `false` — `CoinbaseWallet` does, and still clamps a negative target to flat and
+  books a `Rejection` for the remainder: **the flag informs, it does not enforce**.
+  Wrappers delegate to what they wrap (`SleeveWallet` → inner; `LedgerWallet` → the
+  account's answer, cached into `PortfolioInner::account_can_short` by
+  `Portfolio::trade` before children run, since a child holds no handle on the
+  account). Lets a caller degrade to long-only *before* trading instead of learning
+  the limit one rejection at a time.
 - **`take_rejections() -> Vec<Rejection<Sym>>`** — the **failure stream**, twin of
   `update`'s fill stream. `Rejection { symbol, id, error, kind }`. Default empty;
   **any impl that can drop an order must override**. `PaperWallet` books all three

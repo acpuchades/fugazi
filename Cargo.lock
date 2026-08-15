@@ -591,7 +591,7 @@ checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 
 [[package]]
 name = "fugazi"
-version = "0.52.0"
+version = "0.53.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -623,7 +623,7 @@ dependencies = [
 
 [[package]]
 name = "fugazi-derive"
-version = "0.52.0"
+version = "0.53.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -632,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "fugazi-python"
-version = "0.52.0"
+version = "0.53.0"
 dependencies = [
  "anyhow",
  "fugazi",

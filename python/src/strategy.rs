@@ -300,6 +300,17 @@ impl PyWallet {
         Ok(dict)
     }
 
+    /// Whether this wallet can carry a short (negative) position — `True` here:
+    /// a paper sell credits cash, so a position may go as negative as the
+    /// strategy asks. The live wallets answer for their venue (`OkxWallet`
+    /// trades swaps and says `True`; the spot `CoinbaseWallet` says `False`), so
+    /// a caller can pick a long-only path before trading rather than after a
+    /// clamped order.
+    #[getter]
+    pub(crate) fn can_short(&self) -> bool {
+        self.inner.can_short()
+    }
+
     /// Every order executed so far (the trade blotter).
     pub(crate) fn orders(&self) -> Vec<PyOrder> {
         self.inner
@@ -599,6 +610,14 @@ impl PyOkxWallet {
         self.inner.equity().0
     }
 
+    /// `True` — these are perpetual swaps in net position mode, so the venue
+    /// carries one signed position per instrument and a short is an ordinary
+    /// negative target.
+    #[getter]
+    pub(crate) fn can_short(&self) -> bool {
+        self.inner.can_short()
+    }
+
     /// Force an account-state refresh (balance + positions) now. Raises
     /// `ValueError` on a REST failure. `update` calls this each bar; call it
     /// directly for a one-off sync (e.g. right after construction).
@@ -813,6 +832,15 @@ impl PyCoinbaseWallet {
     #[getter]
     pub(crate) fn equity(&self) -> f64 {
         self.inner.equity().0
+    }
+
+    /// `False` — Advanced Trade is spot, so a position is an owned base-asset
+    /// balance that cannot go negative. `set_position` clamps a negative target
+    /// to flat and reports the un-shortable remainder; read this first to take a
+    /// long-only path instead.
+    #[getter]
+    pub(crate) fn can_short(&self) -> bool {
+        self.inner.can_short()
     }
 
     /// Force an account-state refresh (balances) now. Raises `ValueError` on a

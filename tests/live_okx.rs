@@ -74,6 +74,14 @@ fn wallet(uri: String) -> OkxWallet {
     OkxWallet::with_base_url(uri, "key", "secret", "pass")
 }
 
+/// Swaps in net position mode carry one signed position, so a short is an
+/// ordinary target — the opposite of the spot `CoinbaseWallet`, which reports
+/// `false` and clamps. Needs no mock: it's a statement about the venue.
+#[test]
+fn a_swap_account_reports_that_it_can_short() {
+    assert!(wallet("http://127.0.0.1:1".to_string()).can_short());
+}
+
 #[test]
 fn set_position_places_a_market_order_and_update_reports_the_fill_in_base_units() {
     use std::sync::Arc;

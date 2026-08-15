@@ -1973,3 +1973,109 @@ fn a_sleeve_lets_a_portfolio_coexist_with_external_positions() {
     );
     assert!(account.position(&"A").amount > 0.0, "the portfolio opened its own A position");
 }
+
+/// A child trades a `LedgerWallet`, which holds no handle on the account — so
+/// `can_short()` on that handle has to carry the account's answer across, or a
+/// child would size a short the account can never hold.
+#[test]
+fn a_child_reads_the_accounts_can_short_through_its_ledger_handle() {
+    use std::sync::{Arc, Mutex};
+
+    /// Records what its wallet handle reported, each bar it trades.
+    struct AsksCanShort {
+        seen: Arc<Mutex<Option<bool>>>,
+    }
+    impl Strategy for AsksCanShort {
+        type Input = Snapshot<&'static str>;
+        type Symbol = &'static str;
+        fn update(&mut self, _snap: Snapshot<&'static str>) {}
+        fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
+            *self.seen.lock().unwrap() = Some(wallet.can_short());
+        }
+        fn reset(&mut self) {
+            *self.seen.lock().unwrap() = None;
+        }
+    }
+
+    /// A spot-shaped account: it cannot hold a negative position and says so.
+    struct SpotAccount(PaperWallet<&'static str>);
+    impl Wallet<&'static str> for SpotAccount {
+        fn can_short(&self) -> bool {
+            false
+        }
+        fn funds(&self) -> Reference {
+            self.0.funds()
+        }
+        fn position(&self, s: &&'static str) -> fugazi::wallet::Units<&'static str> {
+            self.0.position(s)
+        }
+        fn positions(&self) -> Vec<fugazi::wallet::Units<&'static str>> {
+            self.0.positions()
+        }
+        fn price(&self, s: &&'static str) -> Option<Reference> {
+            self.0.price(s)
+        }
+        fn equity(&self) -> Reference {
+            self.0.equity()
+        }
+        fn update(&mut self, s: &'static str, c: Candle) -> Vec<Order<&'static str>> {
+            self.0.update(s, c)
+        }
+        fn set_position(
+            &mut self,
+            t: fugazi::wallet::Units<&'static str>,
+        ) -> Result<fugazi::wallet::Ack<&'static str>, fugazi::wallet::WalletError> {
+            self.0.set_position(fugazi::wallet::Units {
+                symbol: t.symbol,
+                amount: t.amount.max(0.0),
+            })
+        }
+        fn set_stop(
+            &mut self,
+            s: &'static str,
+            t: Reference,
+            size: fugazi::wallet::Size,
+        ) -> Result<fugazi::wallet::Ack<&'static str>, fugazi::wallet::WalletError> {
+            self.0.set_stop(s, t, size)
+        }
+        fn set_take_profit(
+            &mut self,
+            s: &'static str,
+            t: Reference,
+            size: fugazi::wallet::Size,
+        ) -> Result<fugazi::wallet::Ack<&'static str>, fugazi::wallet::WalletError> {
+            self.0.set_take_profit(s, t, size)
+        }
+        fn cancel_protective(
+            &mut self,
+            s: &&'static str,
+        ) -> Result<(), fugazi::wallet::WalletError> {
+            self.0.cancel_protective(s)
+        }
+    }
+
+    let seen = Arc::new(Mutex::new(None));
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(1_000.0)
+        .add("asks", AsksCanShort { seen: Arc::clone(&seen) })
+        .weights(EqualWeight)
+        .build();
+    let mut spot = SpotAccount(PaperWallet::new(1_000.0));
+    let _ = backtest::run(&mut portfolio, &mut spot, a_rising_b_flat_snapshots());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        Some(false),
+        "the spot account's answer reaches the child",
+    );
+
+    // Over an ordinary paper account the same child sees the permissive answer.
+    let seen = Arc::new(Mutex::new(None));
+    let mut portfolio: Portfolio<&'static str> = PortfolioBuilder::default()
+        .with_initial_equity(1_000.0)
+        .add("asks", AsksCanShort { seen: Arc::clone(&seen) })
+        .weights(EqualWeight)
+        .build();
+    let mut paper = PaperWallet::new(1_000.0);
+    let _ = backtest::run(&mut portfolio, &mut paper, a_rising_b_flat_snapshots());
+    assert_eq!(*seen.lock().unwrap(), Some(true));
+}

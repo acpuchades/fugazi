@@ -652,6 +652,14 @@ impl Wallet<String> for OkxWallet {
             .collect()
     }
 
+    /// `true` — these are perpetual **swaps** in net position mode, where the
+    /// venue carries one signed position per instrument, so a short is an
+    /// ordinary negative target. Stated explicitly to mark the contrast with the
+    /// spot `CoinbaseWallet`, which answers `false`.
+    fn can_short(&self) -> bool {
+        true
+    }
+
     fn price(&self, symbol: &String) -> Option<Reference> {
         self.marks.get(symbol).map(|&p| Reference(p))
     }

@@ -389,6 +389,10 @@ fn a_short_target_sells_to_flat_and_reports_the_unshortable_remainder() {
     // Prime the balance cache: the account holds 0.03 BTC.
     w.update(SYMBOL.to_string(), Candle::new(27000.0, 27100.0, 26900.0, 27000.0, 1.0));
 
+    // The limit is introspectable up front, so a caller can pick a long-only
+    // path instead of learning it from the rejection below.
+    assert!(!w.can_short(), "spot cannot hold a negative position");
+
     // Ask for a short (-0.02): spot can only sell down to flat.
     let ack = w
         .set_position(Units { symbol: SYMBOL.to_string(), amount: -0.02 })

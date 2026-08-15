@@ -276,7 +276,7 @@ def test_constructor_signatures_match_the_descriptor():
 # --------------------------------------------------------------------------
 
 WALLET_BOUND = {
-    "funds", "position", "positions", "price", "equity", "update",
+    "funds", "position", "positions", "price", "equity", "can_short", "update",
     "set", "set_position", "close",
     "set_stop", "set_take_profit", "cancel_protective",
     "set_limit", "cancel_limit", "cancel",
@@ -314,7 +314,7 @@ OKX_WALLET_BOUND = {
     # Constructors (staticmethods).
     "demo", "mainnet",
     # Wallet reads.
-    "funds", "position", "price", "equity",
+    "funds", "position", "price", "equity", "can_short",
     # Order flow.
     "update", "set", "set_position", "close",
     "set_stop", "set_take_profit", "cancel_protective",
@@ -359,7 +359,7 @@ COINBASE_WALLET_BOUND = {
     # Constructor (staticmethod). No `demo`: Coinbase has no demo environment.
     "mainnet",
     # Wallet reads.
-    "funds", "position", "price", "equity",
+    "funds", "position", "price", "equity", "can_short",
     # Order flow.
     "update", "set", "set_position", "close",
     "set_stop", "set_take_profit", "cancel_protective",

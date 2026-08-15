@@ -14,7 +14,7 @@ and signal owns its internal state and is advanced one sample at a time via
 
 ```toml
 [dependencies]
-fugazi = "0.52"
+fugazi = "0.53"
 ```
 
 ## Concepts
@@ -935,6 +935,14 @@ target, and a negative (short) target sells to flat and reports the un-shortable
 remainder through `take_rejections()`. Construct it with
 `CoinbaseWallet::mainnet(key_name, private_key_pem)` (a CDP API key name plus its
 EC private-key PEM).
+
+That limit is also **introspectable**: `Wallet::can_short()` answers `false` on
+`CoinbaseWallet` and `true` on `OkxWallet` and `PaperWallet`, so a caller can
+degrade to a long-only path before trading rather than after a clamped order.
+It reports, it doesn't enforce — a wallet that can't short still has to clamp or
+refuse one itself. Wrappers delegate: a `SleeveWallet` answers for the account it
+wraps, and a portfolio child's handle answers for the account the portfolio nets
+onto.
 
 A whole `Portfolio` runs live the same way — it is an ordinary strategy that
 nets its children's intents onto the one wallet it is handed, so pass it a live

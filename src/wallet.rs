@@ -532,6 +532,29 @@ pub trait Wallet<Sym> {
         Vec::new()
     }
 
+    /// Whether this wallet can carry a **short** (negative) position.
+    ///
+    /// A position is signed [`Units`] throughout the trait, so shorting is the
+    /// baseline and the default is `true` — what [`PaperWallet`] takes (a sell
+    /// there credits cash, so it is always feasible; see
+    /// [`InsufficientFunds`](WalletError::InsufficientFunds)). A wallet whose
+    /// venue cannot hold a negative position — a **spot** account, where a
+    /// position is an owned base-asset balance — overrides it to `false`.
+    ///
+    /// This is **introspection, not enforcement**. Answering `false` does not
+    /// by itself refuse a negative target: an impl that can't short must still
+    /// clamp or reject one itself (`CoinbaseWallet` clamps to flat and books a
+    /// [`Rejection`] for the un-shortable remainder). The point is that a
+    /// caller can ask *before* trading — a long/short strategy, a CLI preflight,
+    /// or a driver picking between wallets can degrade to long-only, or warn,
+    /// instead of discovering the limit one rejection at a time.
+    ///
+    /// A wrapper delegates to what it wraps: capability is a fact about the
+    /// account underneath, not about the view onto it.
+    fn can_short(&self) -> bool {
+        true
+    }
+
     /// Install a per-symbol [`TradingCosts`] override — every fill on
     /// `symbol` thereafter books through this bundle instead of the wallet's
     /// default. Latest-wins per symbol.
@@ -1305,6 +1328,14 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
         Ok(())
     }
 
+    /// `true` — the paper account has no spot restriction: a sell credits cash,
+    /// so a position may go as negative as the strategy asks. Stated explicitly
+    /// (rather than left to the trait default) because this is the reference
+    /// answer every backtest reads.
+    fn can_short(&self) -> bool {
+        true
+    }
+
     fn price(&self, symbol: &Sym) -> Option<Reference> {
         self.bars.get(symbol).map(|c| Reference(c.close))
     }
@@ -1654,6 +1685,13 @@ impl<Sym: Clone + Eq + Hash, W: Wallet<Sym>> Wallet<Sym> for SleeveWallet<Sym, W
     }
     fn equity(&self) -> Reference {
         Reference(self.inner.equity().0 - self.external_value())
+    }
+    /// Delegates: shorting is a property of the account underneath, and the
+    /// sleeve is only a view onto it. (A sleeve over a spot wallet can still
+    /// *sell* down to its baseline — that reduces our share of a long, it
+    /// doesn't open a short.)
+    fn can_short(&self) -> bool {
+        self.inner.can_short()
     }
     fn update(&mut self, symbol: Sym, candle: Candle) -> Vec<Order<Sym>> {
         self.inner.update(symbol, candle)
@@ -2006,6 +2044,84 @@ mod tests {
             Err(WalletError::UnsupportedOperation)
         );
         assert!(w.cancel_limit(&"X").is_ok());
+        // Same default-shape question for the capability read: signed positions
+        // are the trait's model, so an impl that says nothing can short.
+        assert!(w.can_short());
+    }
+
+    #[test]
+    fn can_short_is_introspected_and_a_sleeve_delegates_it() {
+        // The paper account is the permissive reference: a sell credits cash.
+        let paper: PaperWallet<&str> = PaperWallet::new(1_000.0);
+        assert!(paper.can_short());
+
+        // A spot-shaped wallet — the shape `CoinbaseWallet` has — reports the
+        // limit up front instead of leaving it to be discovered one clamped
+        // order at a time.
+        struct SpotOnly(PaperWallet<&'static str>);
+        impl Wallet<&'static str> for SpotOnly {
+            fn can_short(&self) -> bool {
+                false
+            }
+            fn funds(&self) -> Reference {
+                self.0.funds()
+            }
+            fn position(&self, s: &&'static str) -> Units<&'static str> {
+                self.0.position(s)
+            }
+            fn positions(&self) -> Vec<Units<&'static str>> {
+                self.0.positions()
+            }
+            fn price(&self, s: &&'static str) -> Option<Reference> {
+                self.0.price(s)
+            }
+            fn equity(&self) -> Reference {
+                self.0.equity()
+            }
+            fn update(&mut self, s: &'static str, c: Candle) -> Vec<Order<&'static str>> {
+                self.0.update(s, c)
+            }
+            fn set_position(
+                &mut self,
+                t: Units<&'static str>,
+            ) -> Result<Ack<&'static str>, WalletError> {
+                // Spot: clamp a short to flat, as a real spot venue must.
+                self.0.set_position(Units {
+                    symbol: t.symbol,
+                    amount: t.amount.max(0.0),
+                })
+            }
+            fn set_stop(
+                &mut self,
+                s: &'static str,
+                t: Reference,
+                size: Size,
+            ) -> Result<Ack<&'static str>, WalletError> {
+                self.0.set_stop(s, t, size)
+            }
+            fn set_take_profit(
+                &mut self,
+                s: &'static str,
+                t: Reference,
+                size: Size,
+            ) -> Result<Ack<&'static str>, WalletError> {
+                self.0.set_take_profit(s, t, size)
+            }
+            fn cancel_protective(&mut self, s: &&'static str) -> Result<(), WalletError> {
+                self.0.cancel_protective(s)
+            }
+        }
+
+        let spot = SpotOnly(PaperWallet::new(1_000.0));
+        assert!(!spot.can_short());
+
+        // A sleeve is a view, not an account: it answers for what it wraps,
+        // either way.
+        let over_spot = SleeveWallet::new(spot, HashMap::new());
+        assert!(!over_spot.can_short());
+        let over_paper: SleeveWallet<&str, PaperWallet<&str>> =
+            SleeveWallet::new(PaperWallet::new(1_000.0), HashMap::new());
+        assert!(over_paper.can_short());
     }
 
     #[test]

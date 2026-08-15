@@ -559,6 +559,14 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
         // inner (recording intent against their notional slice); the intents are
         // then netted into one order per symbol on this `wallet`.
 
+        // Cache the account's shorting capability before anything trades, so a
+        // child querying its `LedgerWallet` — which has no handle on the account
+        // — gets the account's answer, not the trait default.
+        self.inner
+            .lock()
+            .expect("portfolio lock poisoned")
+            .account_can_short = wallet.can_short();
+
         // Ordering: children trade first (against their own pre-rebalance
         // equity for `value_frac` sizing), then — if the gate fires — the
         // rebalance runs. Children on the fire bar therefore see a stable

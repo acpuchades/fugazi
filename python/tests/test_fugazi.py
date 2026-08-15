@@ -737,6 +737,15 @@ def test_okx_wallet_constructs_and_reads_empty_cache():
     ta.OkxWallet.mainnet("key", "secret", "passphrase")
 
 
+def test_can_short_reports_what_each_account_can_hold():
+    # Introspection, not enforcement: the paper account shorts freely, an OKX
+    # swap account does too, and Coinbase spot says so up front instead of
+    # leaving a caller to discover it from a clamped order.
+    assert ta.PaperWallet(10_000.0).can_short is True
+    assert ta.OkxWallet.demo("key", "secret", "passphrase").can_short is True
+    assert "can_short" in dir(ta.CoinbaseWallet)
+
+
 def test_run_rejects_a_non_wallet():
     # `.run(...)` accepts one of the supported wallet types; anything else is a
     # clear TypeError from the wallet-dispatch (not a downstream failure). Match

@@ -285,6 +285,7 @@ If you're about to write a private helper whose name looks like something here, 
 | Externally-mark a `Book`'s equity | `Book::mark_equity(value)` — updates equity + peak + per-bar return; leaves cash/legs/trade tracking untouched | `src/indicators/book.rs` |
 | Portfolio two-phase rebalance | `Portfolio::builder().rebalance_on(signal)` — cash phase (`PortfolioInner::rebalance_ledgers_to`) then position phase (`LedgerWallet::set_position`) | `src/portfolio/mod.rs::rebalance_now`, `src/portfolio/netting.rs` |
 | Pluggable position-phase policy | `portfolio::rebalance::PositionRebalancer<Sym>` trait; built-ins `Proportional` (default) / `LargestFirst`; install via `PortfolioBuilder::position_rebalancer(...)` | `src/portfolio/rebalance.rs`, `src/portfolio/mod.rs` |
+| Ask whether an account can hold a short | `Wallet::can_short()` — default `true`; `false` on spot (`CoinbaseWallet`); wrappers delegate (`SleeveWallet` → inner, `LedgerWallet` → the account, cached in `PortfolioInner::account_can_short`). Informs, never enforces | `src/wallet.rs`, `src/live/coinbase.rs`, `src/portfolio/{mod,ledger,netting}.rs` |
 | Clone a `TradingCosts` bundle | `TradingCosts::clone()` (every model impls `clone_box`) | `src/costs/mod.rs` |
 | Partial `!param` pass | `params::substitute_partial(value, &table)` — used by `imports::resolve` for `!import`'s inline `params:` | `src/spec/params.rs` |
 | Resolve metric name once, reuse | `MetricKey::from_name(name, sample)` + `.resolve(&metrics)` | `src/spec/metrics.rs` |

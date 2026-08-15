@@ -645,6 +645,14 @@ impl Wallet<String> for CoinbaseWallet {
             .collect()
     }
 
+    /// `false` — Advanced Trade is **spot**: a position is an owned base-asset
+    /// balance, which cannot go negative. [`set_position`](Wallet::set_position)
+    /// clamps a negative target to flat and books a [`Rejection`] for the
+    /// un-shortable remainder; this lets a caller find that out beforehand.
+    fn can_short(&self) -> bool {
+        false
+    }
+
     fn price(&self, symbol: &String) -> Option<Reference> {
         self.marks.get(symbol).map(|&p| Reference(p))
     }

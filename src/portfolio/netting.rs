@@ -102,6 +102,14 @@ pub(super) struct PortfolioInner<Sym> {
 
     /// Per-child seed cash, kept for `reset` (rebuild ledgers).
     seeds: Vec<Real>,
+
+    /// The account wallet's [`can_short`](Wallet::can_short), cached each bar by
+    /// [`Portfolio::trade`](super::Portfolio) before the children run — a child
+    /// only ever holds a `LedgerWallet`, which has no handle on the account, so
+    /// the capability has to be carried across. `true` until the first bar
+    /// (matching the trait default), so a child asking before any account has
+    /// been seen gets the permissive answer rather than a spurious `false`.
+    pub(super) account_can_short: bool,
 }
 
 // `snapshot`/`restore` are consumed only by `Portfolio::{save_state,restore_state}`,
@@ -157,6 +165,7 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
             next_pf_id: 0,
             rejections: Vec::new(),
             seeds,
+            account_can_short: true,
         }
     }
 
@@ -205,6 +214,9 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
         self.owners.clear();
         self.rejections.clear();
         self.next_pf_id = 0;
+        // Back to the permissive default: the next run's account re-caches it on
+        // its first `trade`.
+        self.account_can_short = true;
     }
 
     // ---- intent recording (called from LedgerWallet) --------------------

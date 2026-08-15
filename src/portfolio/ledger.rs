@@ -172,6 +172,16 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for LedgerWallet<Sym> {
         Reference(inner.ledgers[self.idx].equity(|s| inner.price_of(s)))
     }
 
+    /// The **account's** answer, cached by `Portfolio::trade` before the
+    /// children run: a ledger records notional intent, but that intent is netted
+    /// onto the one real account, so what can be shorted is decided there.
+    fn can_short(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("portfolio lock poisoned")
+            .account_can_short
+    }
+
     fn update(&mut self, _symbol: Sym, _candle: Candle) -> Vec<Order<Sym>> {
         // The driver feeds the account wallet the portfolio trades, not a child
         // handle. A handle receiving update() means the caller wired the driver
