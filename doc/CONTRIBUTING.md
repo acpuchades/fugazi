@@ -417,9 +417,11 @@ Four manifests must agree; `cargo check` only catches the Rust drift.
 4. `README.md` — the `## Install` snippet, `fugazi = "X.Y"` (major.minor only)
 
 Then `cargo check --workspace` to refresh `Cargo.lock`, commit the five files,
-tag `vX.Y.Z`, and push the tag. **A GitHub workflow publishes to crates.io and
-PyPI** — never run `cargo publish` or `maturin publish` by hand.
-`python/README.md` carries no version string.
+tag `vX.Y.Z`, and push the tag. Then **publish a GitHub Release** for that tag
+(`gh release create vX.Y.Z --generate-notes`, or Releases → Draft a new release).
+**Publishing the release triggers a GitHub workflow that publishes to crates.io
+and PyPI** — pushing the tag alone does nothing, and you should never run `cargo
+publish` or `maturin publish` by hand. `python/README.md` carries no version string.
 
 Use `check`, not `build --workspace`. Building the workspace links the pyo3
 cdylib, which needs a Python interpreter to resolve `_PyBaseObject_Type` and

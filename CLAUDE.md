@@ -51,8 +51,11 @@ calls — reach for closed-form first.
 5. `README.md` — `## Install` snippet, `fugazi = "X.Y"` (major.minor)
 
 Then **`cargo check --workspace`** (updates `Cargo.lock`), commit the manifests + README
-+ Lock, tag `vX.Y.Z`, push. `python/README.md` has no version string. The `fugazi-derive`
-version and the root's dependency pin on it must match, or `cargo` errors.
++ Lock, tag `vX.Y.Z`, push. Then **publish a GitHub Release** for that tag (`gh release
+create vX.Y.Z --generate-notes`) — the release-publish event is what triggers the
+publish workflow; pushing the tag alone does not. `python/README.md` has no version
+string. The `fugazi-derive` version and the root's dependency pin on it must match, or
+`cargo` errors.
 
 **Not `cargo build --workspace`** — it links the pyo3 cdylib, which needs a Python
 interpreter and fails locally with a wall of `ld:` output that looks like a broken

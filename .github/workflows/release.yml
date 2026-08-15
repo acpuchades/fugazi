@@ -1,12 +1,12 @@
 name: Release
 
-# Publishes on a version tag, e.g. `git tag v0.1.0 && git push origin v0.1.0`.
+# Publishes when a GitHub Release is published (Releases → Draft/New release, or
+# `gh release create vX.Y.Z ...`). Pushing a bare tag does NOT publish.
 # Builds multi-platform wheels + sdist, then publishes to PyPI (Trusted
 # Publishing / OIDC, no token) and the core crate to crates.io (token secret).
 on:
-  push:
-    tags:
-      - "v*"
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
