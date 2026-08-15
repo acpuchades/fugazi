@@ -175,17 +175,20 @@ impl SelectionRuleSpec {
 /// Omitted (`universe:` absent from the spec) means the default floating
 /// universe — every symbol seen in the snapshot is picked up on first
 /// sight.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, SpecGrammar)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[grammar(group = "universe")]
 pub enum UniverseSpec {
     /// Strict declared universe: every listed symbol must be present on
     /// every bar (absence panics); readiness gates on all listed symbols
     /// scoring `Some`. Wraps [`crate::strategies::basket::AllOf`].
+    #[grammar(kind = "universe", output = "none")]
     AllOf(Vec<String>),
 
     /// Lax declared universe: restrict to the listed subset but silently
     /// skip absent or still-unready members. Wraps
     /// [`crate::strategies::basket::AnyOf`].
+    #[grammar(kind = "universe", output = "none")]
     AnyOf(Vec<String>),
 }
 

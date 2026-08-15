@@ -71,6 +71,10 @@ def test_every_tag_has_a_valid_minimal_instance():
     }
     failures = []
     for tag in tags:
+        # Only the expression vocabularies are in this schema; the document-level
+        # groups (universe / weighting / document) are directives, not nodes.
+        if tag["group"] not in validators:
+            continue
         instance = _valid_instance(tag)
         errors = list(validators[tag["group"]].iter_errors(instance))
         if errors:

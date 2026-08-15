@@ -3,13 +3,23 @@
 //!
 //! [`spec_tags`](crate::spec::typecheck::known_node_tags) already reads the tag
 //! *names* off serde's own variant list so it cannot go stale. This module
-//! carries the same anti-drift guarantee one level deeper: names, shapes,
-//! fields, defaults, and prose all flow from the `#[derive(SpecGrammar)]` on
-//! [`NodeSpec`](crate::spec::NodeSpec) and
-//! [`SelectionRuleSpec`](crate::spec::basket::SelectionRuleSpec), so downstream
-//! consumers (fugazi's own Python constructors, editor tooling, docs, the web
-//! service's grammar table) generate from one authority instead of
-//! re-encoding each tag by hand.
+//! carries the same anti-drift guarantee one level deeper: for every tag that
+//! *is* a serde variant, names, shapes, fields, defaults, and prose all flow
+//! from the `#[derive(SpecGrammar)]` on
+//! [`NodeSpec`](crate::spec::NodeSpec),
+//! [`SelectionRuleSpec`](crate::spec::basket::SelectionRuleSpec), and
+//! [`UniverseSpec`](crate::spec::basket::UniverseSpec), so downstream consumers
+//! (fugazi's own Python constructors, editor tooling, docs, the web service's
+//! grammar table) generate from one authority instead of re-encoding each tag
+//! by hand.
+//!
+//! The one exception is the load-time `weighting` / `document` tags
+//! (`!fixed`/`!equal_weight`/`!import`/`!param`/`!arg`/`!undefined`): these are
+//! never serde variants — a `Value` pass rewrites each away before the typed
+//! parse — so [`document_grammar_tags`] hand-authors their records. Even there
+//! the *name set* is pinned to the parser's own
+//! [`REWRITTEN_TAGS`](crate::spec::typecheck::REWRITTEN_TAGS) by a test, so a
+//! new load-time tag can't ship without a row.
 //!
 //! The derive fills every field except the three that serde cannot know —
 //! `kind`, `output`, and `since` — which are declared next to each variant via
@@ -28,6 +38,13 @@ use serde::Serialize;
 /// - v1 (0.47): initial descriptor.
 /// - v2 (0.48): added [`GrammarTag::payload`]; `literal` joined the field-type
 ///   vocabulary; `spec_json_schema()` shipped.
+///
+/// **Not** a bump: 0.50 added the `universe` / `weighting` / `document` groups
+/// (and the `none` output, `str_list` / `number_list` field types). New *rows*
+/// and new *legend values* don't change the record *shape*, so the version
+/// stays 2 — a bump would trip downstream version guards for no shape change. A
+/// consumer with an exhaustive `group` / `kind` switch should treat unknown
+/// values as inert, not as an error.
 pub const SCHEMA_VERSION: u32 = 2;
 
 /// The `since` stamped on every tag that shipped at or before this release —
@@ -42,9 +59,10 @@ pub struct GrammarField {
     /// The YAML key, exactly as written under the tag.
     pub name: String,
     /// The value's grammar type: `node` (a nested expression) · `node_list` ·
-    /// `uint` · `number` · `str` · `bool` · `strategy` (an embedded strategy
-    /// document) · `match_cases` · `str_operand`. A closed vocabulary the
-    /// derive maps each Rust field type onto.
+    /// `str_list` · `number_list` · `uint` · `number` · `str` · `bool` ·
+    /// `strategy` (an embedded strategy document) · `match_cases` ·
+    /// `str_operand`. A closed vocabulary the derive maps each Rust field type
+    /// onto.
     #[serde(rename = "type")]
     pub ty: String,
     /// `false` when the key may be omitted — either the Rust field is an
@@ -66,11 +84,17 @@ pub struct GrammarTag {
     /// codegens off it and anchors docs at `#tag-<name>`. Identical to the
     /// corresponding entry of `spec_tags()`.
     pub name: String,
-    /// `node` (the composable expression vocabulary) or `selection` (a
-    /// `basket:` document's `selection:` rules).
+    /// Which vocabulary the tag belongs to: `node` (the composable expression
+    /// enum) · `selection` (a `basket:` document's `selection:` rules) ·
+    /// `universe` (`!all_of`/`!any_of`) · `weighting` (portfolio `weights:`
+    /// sugar) · `document` (load-time `!import`/`!param`/`!arg`/`!undefined`).
+    /// Only `node` and `selection` are slot-fillable expressions; the other
+    /// three are document-level directives. Consumers that filtered on
+    /// `group == "node"` before these were added keep working unchanged.
     pub group: String,
     /// `source` · `indicator` · `operator` · `predicate` · `function` ·
-    /// `selection`. The semantic family; declared per variant.
+    /// `selection` · `universe` · `weighting` · `document`. The semantic family;
+    /// declared per variant (or per hand-authored row).
     pub kind: String,
     /// How the tag is written in YAML: `unit` (bare `!foo`) · `newtype`
     /// (`!foo <x>`) · `seq` (`!foo [ … ]`) · `map` (`!foo { … }`).
@@ -79,8 +103,10 @@ pub struct GrammarTag {
     pub fields: Vec<GrammarField>,
     /// What the tag evaluates to: `scalar` (a `Real`) · `bool` · `str` ·
     /// `time` · `candle` · `atom` · `book` · `any` (schema- or
-    /// operand-dependent) · `selection` (a `selection`-group rule) · `struct`.
-    /// Declared per variant; defaults to `scalar`.
+    /// operand-dependent) · `selection` (a `selection`-group rule) · `struct` ·
+    /// `none` (a document-level directive that resolves to another node, or
+    /// nothing, at load — it doesn't itself evaluate). Declared per variant;
+    /// defaults to `scalar`.
     pub output: String,
     /// Field accessors for a `struct` output. Empty for fugazi today — its
     /// multi-output indicators are modelled as separate scalar tags
@@ -98,13 +124,112 @@ pub struct GrammarTag {
     pub since: String,
 }
 
-/// Every tag in both vocabularies, reflected off the serde definitions. The one
-/// authority `spec_tags()`, the Python constructors, and downstream tooling all
-/// derive from.
+/// Every tag in every document vocabulary. The one authority `spec_tags()`, the
+/// Python constructors, and downstream tooling all derive from.
+///
+/// Five `group`s, in two tiers:
+///
+/// - **Reflected off serde** via `#[derive(SpecGrammar)]`, so they cannot drift:
+///   `node` (the composable expression enum), `selection` (a `basket:`
+///   document's `selection:` rules), and `universe` (`!all_of`/`!any_of`).
+/// - **Hand-authored** ([`document_grammar_tags`]) for the load-time tags that
+///   are *not* serde variants — they're `Value` rewrites resolved before the
+///   typed parse, so there is no variant for the derive to read. `weighting`
+///   (`!fixed`/`!equal_weight`) and `document` (`!import`/`!param`/`!arg`/
+///   `!undefined`). Their name set is pinned to the parser's own
+///   [`REWRITTEN_TAGS`](crate::spec::typecheck::REWRITTEN_TAGS) (plus `fixed`) by
+///   a test, the same anti-drift guarantee one rung lower.
+///
+/// The expression JSON schema ([`spec_json_schema`]) draws only on the `node`
+/// and `selection` groups; the other three are document-level directives, not
+/// slot-fillable expressions.
+///
+/// **Not** covered, by design: the nested config sub-documents
+/// (`TradingCostsConfig`, a portfolio child's embedded strategy) — these are
+/// whole documents, not slot-level tags. The Python `spec_grammar()` docstring
+/// records this so the contract is explicit.
 pub fn spec_grammar() -> Vec<GrammarTag> {
     let mut tags = crate::spec::expr::NodeSpec::grammar_tags();
     tags.extend(crate::spec::basket::SelectionRuleSpec::grammar_tags());
+    tags.extend(crate::spec::basket::UniverseSpec::grammar_tags());
+    tags.extend(document_grammar_tags());
     tags
+}
+
+/// The hand-authored records for the load-time rewrite tags — the one place in
+/// the descriptor that is *not* reflected off a serde variant, because these
+/// tags never reach the typed parse: a `Value` pass rewrites each away first
+/// (`!fixed`/`!equal_weight` → `!value`, `!import`/`!param`/`!arg` → their
+/// resolved subtree, `!undefined` a check-mode stand-in).
+///
+/// Their `name` set is pinned to [`REWRITTEN_TAGS`](crate::spec::typecheck::REWRITTEN_TAGS)
+/// (plus `fixed`, which the portfolio `weights:` sugar recognises but which
+/// isn't a placeholder) by `tests/spec_grammar.rs`, so a new load-time tag can't
+/// ship without a row here. `output` is `none`: none of them evaluate to a
+/// runtime value — they resolve to another node (or nothing) at load.
+fn document_grammar_tags() -> Vec<GrammarTag> {
+    fn tag(
+        name: &str,
+        group: &str,
+        kind: &str,
+        shape: &str,
+        payload: Option<&str>,
+        doc: &str,
+    ) -> GrammarTag {
+        GrammarTag {
+            name: name.to_owned(),
+            group: group.to_owned(),
+            kind: kind.to_owned(),
+            shape: shape.to_owned(),
+            fields: Vec::new(),
+            output: "none".to_owned(),
+            projections: Vec::new(),
+            payload: payload.map(str::to_owned),
+            doc: Some(doc.to_owned()),
+            since: SINCE_BASELINE.to_owned(),
+        }
+    }
+    vec![
+        // --- weighting: portfolio `weights:` sugar --------------------------
+        tag(
+            "fixed", "weighting", "weighting", "seq", Some("number_list"),
+            "Portfolio `weights:` sugar. `!fixed [w0, w1, …]` assigns a literal \
+             weight per child by position; rewritten to `!value [w0, w1, …]` \
+             (per-child indexed) at load.",
+        ),
+        tag(
+            "equal_weight", "weighting", "weighting", "newtype", Some("uint"),
+            "Equal-weight sugar. Bare `!equal_weight` in a portfolio `weights:` \
+             template lowers to `!value 1.0` (each child normalises to 1/N at \
+             rebalance); as sizing, `!equal_weight <N>` lowers to `!value <1/N>`. \
+             Resolved before the typed parse.",
+        ),
+        // --- document: load-time composition / substitution -----------------
+        tag(
+            "import", "document", "document", "newtype", Some("str"),
+            "Document composition. `!import <path>` splices another YAML spec at \
+             load time (an extended `!import { path, params: … }` form passes \
+             inline params); resolved by `imports::resolve` before parse.",
+        ),
+        tag(
+            "param", "document", "document", "newtype", Some("str"),
+            "Load-time substitution placeholder. `!param <name>` is replaced from \
+             the `--param` / `params:` table by `params::substitute` before the \
+             typed parse.",
+        ),
+        tag(
+            "arg", "document", "document", "newtype", Some("str"),
+            "Build-time substitution placeholder. `!arg <name>` (e.g. `!arg SYM`, \
+             `!arg CHILD_NAME`, `!arg CHILD_INDEX`) is substituted per symbol / \
+             child by `args::substitute` when a per-leg template is built.",
+        ),
+        tag(
+            "undefined", "document", "document", "unit", None,
+            "Internal check-mode stand-in for a not-yet-substituted `!arg` / \
+             `!param`, letting a `SpecTemplate` type-check with its placeholders \
+             held undefined. Never authored by hand.",
+        ),
+    ]
 }
 
 /// [`spec_grammar`] wrapped with its [`SCHEMA_VERSION`] as the top-level
@@ -193,11 +318,13 @@ fn expression_defs() -> serde_json::Map<String, serde_json::Value> {
     let mut node_variants: Vec<Value> = Vec::new();
     let mut selection_variants: Vec<Value> = Vec::new();
     for tag in spec_grammar() {
-        let schema = tag_schema(&tag);
-        if tag.group == "selection" {
-            selection_variants.push(schema);
-        } else {
-            node_variants.push(schema);
+        // Only the two *expression* vocabularies belong in this schema; the
+        // `universe` / `weighting` / `document` groups are document-level
+        // directives, not slot-fillable nodes.
+        match tag.group.as_str() {
+            "node" => node_variants.push(tag_schema(&tag)),
+            "selection" => selection_variants.push(tag_schema(&tag)),
+            _ => {}
         }
     }
     // Bare-literal shorthands accepted anywhere a node is (normalised to `!value`).
@@ -477,6 +604,11 @@ fn type_fragment(ty: &str) -> serde_json::Value {
     match ty {
         "node" => node_ref(),
         "node_list" => json!({ "type": "array", "items": node_ref() }),
+        // List leaves carried by document-level tags (universe / weighting
+        // sugar). Present for completeness; those tags are excluded from the
+        // expression schema, so these arms aren't reached through `node`.
+        "str_list" => json!({ "type": "array", "items": { "type": "string" } }),
+        "number_list" => json!({ "type": "array", "items": { "type": "number" } }),
         // `> 0` is asserted at construction; the schema stays lax (`longs`/`shorts`
         // and `every` admit 0). See the proposal's open question.
         "uint" => or_placeholder(json!({ "type": "integer", "minimum": 0 })),

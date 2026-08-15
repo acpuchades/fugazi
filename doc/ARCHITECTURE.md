@@ -989,7 +989,7 @@ list indicators`). Both derive the expected set from **`spec::typecheck::known_n
 / `known_selection_tags`** (serde's own variant list). Everything below is still on you:
 
 **The grammar descriptor (`spec::grammar`, `fugazi.spec_grammar()`).** `#[derive(SpecGrammar)]`
-(the `fugazi-derive` crate) reflects `NodeSpec` / `SelectionRuleSpec` into one
+(the `fugazi-derive` crate) reflects `NodeSpec` / `SelectionRuleSpec` / `UniverseSpec` into one
 JSON-serializable record per tag — names, shape, fields (types, required-ness, defaults),
 prose, plus a per-variant `kind` / `output` / `since`. It is the single authority for the
 spec's *presentation* metadata, the way `known_*_tags` is for its *names*: `spec_tags()` is
@@ -1000,6 +1000,19 @@ const-backed `#[serde(default)]` fns in `spec::expr` — feeding YAML deserializ
 descriptor, and (test-pinned) the pyo3 signatures. **Multi-output indicators are modelled as
 separate scalar tags** (`macd_line`, `bb_upper`, …), so `output` is `scalar` and
 `projections` is empty for them — there are no `struct`-output node tags today.
+
+Records carry a **`group`**: `node` / `selection` / `universe` (all reflected off serde) are
+the expression + basket-selection + universe-declaration vocabularies; `weighting`
+(`!fixed`/`!equal_weight`) and `document` (`!import`/`!param`/`!arg`/`!undefined`) are
+**hand-authored** in `grammar::document_grammar_tags`, because these load-time tags are
+`Value` rewrites that never reach the typed parse (there's no variant for the derive to read).
+Their *name set* is still pinned — to `typecheck::REWRITTEN_TAGS` (∪ `fixed`) by
+`document_level_groups_are_pinned` — so a new load-time tag can't ship without a row.
+`output` is `none` for all five document-level tags (they resolve to another node, or nothing,
+at load). **Adding a group / kind / output / field-type value does *not* bump `SCHEMA_VERSION`**
+— the record *shape* is unchanged; a consumer with an exhaustive `group` switch treats unknown
+values as inert. Deliberately **out of scope**: the nested config sub-documents (`costs:`,
+a portfolio child's embedded strategy), documented as such in the `spec_grammar()` docstring.
 
 `spec_json_schema()` (`fugazi.spec_json_schema()`) is a second projection of the same
 descriptor: a JSON Schema (draft 2020-12) for the expression grammar's **JSON bridge form**

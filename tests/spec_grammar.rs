@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 
 use fugazi::spec::grammar::{SCHEMA_VERSION, spec_grammar, spec_grammar_document};
-use fugazi::spec::typecheck::{known_node_tags, known_selection_tags};
+use fugazi::spec::typecheck::{REWRITTEN_TAGS, known_node_tags, known_selection_tags};
 
 /// The one authority for *names* is serde's variant list. The descriptor's
 /// names, per group, must equal it exactly — this is what lets `spec_tags()`
@@ -40,6 +40,44 @@ fn names_match_serde_variant_list() {
     );
 }
 
+/// The document-level groups the derive can't reach. `universe` is reflected
+/// off `UniverseSpec`, but `weighting` / `document` are hand-authored (their
+/// tags never reach the typed parse), so their name set is pinned here to the
+/// parser's own rewrite list — a new load-time tag can't ship without a row.
+#[test]
+fn document_level_groups_are_pinned() {
+    let grammar = spec_grammar();
+    let group_names = |g: &str| -> BTreeSet<String> {
+        grammar
+            .iter()
+            .filter(|t| t.group == g)
+            .map(|t| t.name.clone())
+            .collect()
+    };
+
+    // `universe` mirrors the two `UniverseSpec` variants exactly.
+    assert_eq!(
+        group_names("universe"),
+        BTreeSet::from(["all_of".to_string(), "any_of".to_string()]),
+        "universe group drifted from UniverseSpec",
+    );
+
+    // `weighting` ∪ `document` == the parser's rewrite tags ∪ `fixed` (the one
+    // weights-sugar tag that isn't a load-time placeholder). If a tag joins
+    // `REWRITTEN_TAGS`, it must gain a descriptor row here.
+    let hand_authored: BTreeSet<String> = group_names("weighting")
+        .union(&group_names("document"))
+        .cloned()
+        .collect();
+    let mut want: BTreeSet<String> = REWRITTEN_TAGS.iter().map(|s| s.to_string()).collect();
+    want.insert("fixed".to_string());
+    assert_eq!(
+        hand_authored, want,
+        "hand-authored weighting/document tags drifted from REWRITTEN_TAGS ∪ {{fixed}} — \
+         add or remove a row in grammar::document_grammar_tags",
+    );
+}
+
 /// Every record is classified and drawn from the closed legend vocabularies.
 #[test]
 fn every_tag_is_well_formed() {
@@ -50,6 +88,11 @@ fn every_tag_is_well_formed() {
         "predicate",
         "function",
         "selection",
+        // Document-level families (universe declaration, portfolio weight sugar,
+        // load-time composition/substitution).
+        "universe",
+        "weighting",
+        "document",
     ];
     const SHAPES: &[&str] = &["unit", "newtype", "seq", "map"];
     const OUTPUTS: &[&str] = &[
@@ -63,10 +106,14 @@ fn every_tag_is_well_formed() {
         "any",
         "selection",
         "struct",
+        // A document-level directive that resolves at load, not an expression.
+        "none",
     ];
     const FIELD_TYPES: &[&str] = &[
         "node",
         "node_list",
+        "str_list",
+        "number_list",
         "uint",
         "number",
         "str",

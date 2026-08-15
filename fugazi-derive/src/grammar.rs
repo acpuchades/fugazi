@@ -159,6 +159,11 @@ fn grammar_type(ty_str: &str) -> &'static str {
         } else {
             "node"
         }
+    } else if inner.starts_with("Vec<String>") || inner.starts_with("Vec<str>") {
+        // A raw list of names, e.g. `!all_of [BTC, ETH]` (`UniverseSpec`).
+        "str_list"
+    } else if inner.starts_with("Vec<Real>") || inner.starts_with("Vec<f64>") {
+        "number_list"
     } else if inner.contains("SelectionRuleSpec") {
         "selection"
     } else if inner.contains("ValueLit") {

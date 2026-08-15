@@ -787,24 +787,42 @@ impl PyStrategySpec {
 ///
 /// ```text
 /// name         variant name, no leading `!` (a stable public contract)
-/// group        "node" | "selection"
-/// kind         "source" | "indicator" | "operator" | "predicate" | "function" | "selection"
+/// group        "node" | "selection" | "universe" | "weighting" | "document"
+/// kind         "source" | "indicator" | "operator" | "predicate" | "function" |
+///              "selection" | "universe" | "weighting" | "document"
 /// shape        "unit" | "newtype" | "seq" | "map"  (how it's written in YAML)
 /// fields       [ {name, type, required, default, doc} ]  (map tags only)
-/// output       what it evaluates to: "scalar" | "bool" | "str" | ...
+/// output       what it evaluates to: "scalar" | "bool" | "str" | ... | "none"
 /// projections  struct-output accessors (empty for fugazi's flattened tags)
 /// payload      positional payload type of a newtype/seq tag ("node" |
-///              "literal" | "node_list"); null for unit/map tags
+///              "literal" | "node_list" | "str_list" | "number_list"); null for
+///              unit/map tags
 /// doc          the variant's `///`
 /// since        release it first shipped in
 /// ```
 ///
-/// Same anti-drift guarantee as [`spec_tags`], one level deeper: everything
-/// flows from the serde definitions via `#[derive(SpecGrammar)]`, so downstream
-/// consumers (these very Python constructors, editor tooling, docs, external
-/// grammar tables) generate from one artifact rather than re-encoding by hand.
-/// Guard on `schema_version` for shape changes (`payload` and its `"literal"`
-/// field type were added in schema_version 2).
+/// **What this covers.** Every tag in five vocabularies, keyed by `group`:
+/// `node` and `selection` are the slot-fillable *expression* grammars; `universe`
+/// (`!all_of`/`!any_of`), `weighting` (portfolio `weights:` sugar
+/// `!fixed`/`!equal_weight`), and `document` (load-time
+/// `!import`/`!param`/`!arg`/`!undefined`) are document-level directives.
+/// Consumers that filtered on `group == "node"` keep working unchanged.
+///
+/// **What it does not cover**, by design: the nested config *sub-documents* —
+/// `costs:` (`TradingCostsConfig`) and a portfolio child's embedded strategy —
+/// which are whole documents, not slot-level tags.
+///
+/// Same anti-drift guarantee as [`spec_tags`], one level deeper. The `node` /
+/// `selection` / `universe` groups flow from the serde definitions via
+/// `#[derive(SpecGrammar)]`; the load-time `weighting` / `document` tags aren't
+/// serde variants (a `Value` pass rewrites them before the typed parse), so
+/// their records are hand-authored with their *name set* pinned to the parser's
+/// own rewrite list by a test. Either way downstream consumers (these very
+/// Python constructors, editor tooling, docs, external grammar tables) generate
+/// from one artifact rather than re-encoding by hand. Guard on `schema_version`
+/// for *shape* changes (`payload` and its `"literal"` field type were added in
+/// schema_version 2); the 0.50 group additions did **not** bump it — new groups
+/// and legend values leave the record shape unchanged.
 #[pyfunction]
 pub(crate) fn spec_grammar(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let doc = fugazi_core::spec::grammar::spec_grammar_document();
@@ -843,19 +861,33 @@ pub(crate) fn spec_document_json_schema(py: Python<'_>) -> PyResult<Py<PyAny>> {
     json_to_py(py, &schema)
 }
 
-/// Every tag the YAML spec layer accepts, grouped by the vocabulary it belongs
-/// to: `"node"` (the one composable expression enum — numeric sources, boolean
-/// predicates, and string comparisons together) and `"selection"` (a `basket:`
-/// document's `selection:` rules). Names come back without the leading `!`.
+/// Every tag the YAML spec layer accepts, keyed by the vocabulary it belongs to.
+/// Five groups: `"node"` (the one composable expression enum — numeric sources,
+/// boolean predicates, and string comparisons together), `"selection"` (a
+/// `basket:` document's `selection:` rules), `"universe"` (`!all_of`/`!any_of`),
+/// `"weighting"` (portfolio `weights:` sugar `!fixed`/`!equal_weight`), and
+/// `"document"` (load-time `!import`/`!param`/`!arg`/`!undefined`). Only `node`
+/// and `selection` are slot-fillable expressions; the rest are document-level
+/// directives. Names come back without the leading `!`.
 ///
 /// A thin projection of [`spec_grammar`] — the names of each group — kept as a
 /// convenience for discovery (`"sma" in ta.spec_tags()["node"]`) and the parity
 /// test. Reach for [`spec_grammar`] when you need fields, defaults, or prose.
+/// The group set is derived from the descriptor, so a new group flows in here
+/// with no edit; a consumer that switched exhaustively on the old two-key dict
+/// should treat unknown keys as inert.
 #[pyfunction]
 pub(crate) fn spec_tags(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let grammar = fugazi_core::spec::grammar::spec_grammar();
+    // Distinct groups in first-seen order (node, selection, universe, …).
+    let mut groups: Vec<&str> = Vec::new();
+    for tag in &grammar {
+        if !groups.contains(&tag.group.as_str()) {
+            groups.push(tag.group.as_str());
+        }
+    }
     let out = pyo3::types::PyDict::new(py);
-    for group in ["node", "selection"] {
+    for group in groups {
         let names: Vec<&str> = grammar
             .iter()
             .filter(|t| t.group == group)
