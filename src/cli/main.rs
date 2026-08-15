@@ -18,6 +18,7 @@ mod csv_source;
 mod data;
 mod get;
 mod glob;
+mod grammar;
 mod list;
 mod optimize;
 mod overlay;
@@ -93,6 +94,11 @@ enum Command {
     },
     /// Print a printed catalogue of what the CLI knows about.
     ///
+    /// This is the **human** front door — a curated, grouped, TTY-styled
+    /// catalogue. For the **machine-readable** form of the same tag vocabulary
+    /// (generated off the serde definitions, one JSON record per tag) use
+    /// `fugazi grammar`; for a JSON Schema, `fugazi schema`.
+    ///
     /// `fugazi list indicators` enumerates the strategy-YAML tag vocabulary
     /// (real-valued sources, boolean signals, the `!param` placeholder);
     /// `fugazi list sources` enumerates the remote candle providers the `get`
@@ -105,6 +111,36 @@ enum Command {
         #[command(subcommand)]
         cmd: list::ListCmd,
     },
+    /// Print the machine-readable grammar descriptor as JSON to stdout.
+    ///
+    /// One record per YAML tag — name, group, kind, shape, fields (types,
+    /// required-ness, defaults, prose), output, payload, and `since` — wrapped
+    /// as `{ schema_version, tags }`. This is the CLI face of the library's
+    /// `spec_grammar()`: the descriptor is reflected off the serde definitions,
+    /// so it never drifts from what the parser accepts. Emits only JSON on
+    /// stdout — pipe into `jq`, or feed it to tooling that generates docs,
+    /// autocomplete, or conformance checks. This is the machine sibling of
+    /// `fugazi list indicators` (the curated human catalogue of the same
+    /// vocabulary); pair with `schema` for the JSON Schema projection, and
+    /// `check` for the semantic (type) authority.
+    Grammar,
+    /// Print a JSON Schema (draft 2020-12) for the spec to stdout.
+    ///
+    /// Validates the JSON bridge form of a single expression by default, or a
+    /// whole strategy document (single / pairs / basket / multi / portfolio as a
+    /// `oneOf`) with `--document`. A second projection of the same descriptor
+    /// `grammar` prints. Structure only — the Real/Bool/Str type discipline
+    /// stays in `fugazi check`, so this complements `check`, it doesn't replace
+    /// it.
+    Schema(SchemaArgs),
+}
+
+#[derive(Args)]
+struct SchemaArgs {
+    /// Emit the whole-document schema (the five strategy shapes) instead of the
+    /// single-expression schema.
+    #[arg(long)]
+    document: bool,
 }
 
 #[derive(Args)]
@@ -549,6 +585,8 @@ fn main() -> std::process::ExitCode {
         Command::Get(args) => get::run(args),
         Command::Completions { shell } => completions::run(shell),
         Command::List { cmd } => list::run(cmd),
+        Command::Grammar => grammar::descriptor(),
+        Command::Schema(args) => grammar::schema(args.document),
     };
     match outcome {
         Ok(()) => std::process::ExitCode::SUCCESS,

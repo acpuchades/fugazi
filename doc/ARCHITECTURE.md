@@ -1014,6 +1014,19 @@ at load). **Adding a group / kind / output / field-type value does *not* bump `S
 values as inert. Deliberately **out of scope**: the nested config sub-documents (`costs:`,
 a portfolio child's embedded strategy), documented as such in the `spec_grammar()` docstring.
 
+Records also carry a **`category`** (v3, 0.51) — the fine conceptual sub-group (`moving
+averages`, `oscillators`, `bands`, `trend / directional`, …), one rung finer than `kind`, for
+consumers that present the vocabulary in curated sections. It's editorial (not reflectable off
+the type), so `grammar::spec_grammar` *stamps* it from the `pub CATEGORIES` taxonomy table —
+the single authority for both the classification and its curated order — after reflection; a
+test pins the table to cover every tag exactly once, so nothing ships uncategorised. The CLI
+`fugazi list indicators` catalogue is now a **pure projection** of the descriptor (signatures
+derived from `shape`/`fields`/`payload`, prose from the stamped records, grouping + order from
+`CATEGORIES`) rather than a hand-maintained parallel table — the drift-prone duplication the
+descriptor exists to kill. Prose is stripped of rustdoc link markup (`` [`Type`] ``,
+`[text](url)`) in the derive's `doc_string` so it reads as clean presentation text for every
+consumer. `category` is a new *field*, so it **did** bump `SCHEMA_VERSION` to 3.
+
 `spec_json_schema()` (`fugazi.spec_json_schema()`) is a second projection of the same
 descriptor: a JSON Schema (draft 2020-12) for the expression grammar's **JSON bridge form**
 (single-key `{tag: body}` objects + bare-literal shorthands + authored load-time

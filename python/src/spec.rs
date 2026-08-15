@@ -797,7 +797,9 @@ impl PyStrategySpec {
 /// payload      positional payload type of a newtype/seq tag ("node" |
 ///              "literal" | "node_list" | "str_list" | "number_list"); null for
 ///              unit/map tags
-/// doc          the variant's `///`
+/// category     fine conceptual sub-group ("moving averages", "oscillators",
+///              "bands", …) — one rung finer than kind, for curated grouping
+/// doc          the variant's `///`, as clean presentation prose
 /// since        release it first shipped in
 /// ```
 ///
@@ -820,9 +822,10 @@ impl PyStrategySpec {
 /// own rewrite list by a test. Either way downstream consumers (these very
 /// Python constructors, editor tooling, docs, external grammar tables) generate
 /// from one artifact rather than re-encoding by hand. Guard on `schema_version`
-/// for *shape* changes (`payload` and its `"literal"` field type were added in
-/// schema_version 2); the 0.50 group additions did **not** bump it — new groups
-/// and legend values leave the record shape unchanged.
+/// for *shape* changes: `payload` + its `"literal"` field type landed in v2, and
+/// `category` in v3 (0.51). The 0.50 group additions did **not** bump it — new
+/// groups and legend values leave the record shape unchanged, only a new *field*
+/// does.
 #[pyfunction]
 pub(crate) fn spec_grammar(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let doc = fugazi_core::spec::grammar::spec_grammar_document();

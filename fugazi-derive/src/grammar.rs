@@ -103,6 +103,10 @@ fn variant_tag(
             output: #output.to_owned(),
             projections: ::std::vec::Vec::new(),
             payload: #payload_expr,
+            // The conceptual sub-group is editorial and can't be reflected off
+            // the type — `spec::grammar::spec_grammar` stamps it from the
+            // `CATEGORIES` taxonomy table after reflection.
+            category: ::std::string::String::new(),
             doc: #doc_expr,
             since: #since.to_owned(),
         }
@@ -376,7 +380,56 @@ fn doc_string(attrs: &[Attribute]) -> Option<String> {
         return None;
     }
     let joined = lines.join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
+    let joined = strip_doc_links(&joined);
     if joined.is_empty() { None } else { Some(joined) }
+}
+
+/// Strip rustdoc intra-doc / markdown links from prose so the descriptor carries
+/// clean **presentation** text, not doc-source markup. A `///` comment is
+/// authored for rustdoc, but the same string is the end-user reference every
+/// grammar consumer renders (the CLI catalogue, editor tooling, docs), where
+/// `` [`crate::foo::Bar`] `` reads as noise.
+///
+/// Two forms are rewritten to their display text (the final `::` path segment
+/// for a code-span link): the shortcut `` [`Bar`] `` and the explicit
+/// `` [`Bar`](target) `` / `[text](url)`. A **bare** `[…]` with neither a code
+/// span nor a `(…)` target is left untouched — it's prose (`[0, period - 1]`),
+/// not a link.
+fn strip_doc_links(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(open) = rest.find('[') {
+        out.push_str(&rest[..open]);
+        let tail = &rest[open..]; // starts at '['
+        let Some(close_rel) = tail.find(']') else {
+            // No closing bracket at all — copy the '[' and move on.
+            out.push('[');
+            rest = &tail[1..];
+            continue;
+        };
+        let inner = &tail[1..close_rel];
+        let after = &tail[close_rel + 1..]; // just past ']'
+        let is_code_span = inner.len() >= 2 && inner.starts_with('`') && inner.ends_with('`');
+        let has_target = after.starts_with('(');
+        if is_code_span || has_target {
+            let text = inner.trim_matches('`');
+            // Rustdoc paths (`crate::a::B`) render best as their final segment.
+            let display = text.rsplit("::").next().unwrap_or(text);
+            out.push_str(display);
+            // Consume a trailing `(target)` if this was an explicit link.
+            if has_target && let Some(pclose) = after.find(')') {
+                rest = &after[pclose + 1..];
+                continue;
+            }
+            rest = after;
+        } else {
+            // A bare `[…]` in prose — not a link. Keep it verbatim.
+            out.push('[');
+            rest = &tail[1..];
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// `Some(s)` -> `Some(s.to_owned())`, `None` -> `None`, as tokens.

@@ -128,6 +128,7 @@ fn every_tag_is_well_formed() {
 
     for tag in spec_grammar() {
         assert!(!tag.name.is_empty(), "empty tag name");
+        assert!(!tag.category.trim().is_empty(), "!{}: empty category", tag.name);
         assert!(KINDS.contains(&tag.kind.as_str()), "!{}: bad kind {}", tag.name, tag.kind);
         assert!(
             SHAPES.contains(&tag.shape.as_str()),
@@ -204,18 +205,21 @@ fn every_tag_and_field_is_documented() {
         missing_fields.join("\n  ")
     );
 
-    // No unrendered template artifacts in the prose that ships to consumers.
+    // No doc-source markup in the prose that ships to consumers: neither a `{{`
+    // template artifact nor rustdoc/markdown link syntax (`[`Type`]`, `](url)`),
+    // which the derive strips so the descriptor reads as presentation text.
     let mut artifacts = Vec::new();
     for tag in spec_grammar() {
         for doc in std::iter::once(&tag.doc).chain(tag.fields.iter().map(|f| &f.doc)) {
-            if doc.as_deref().unwrap_or("").contains("{{") {
+            let d = doc.as_deref().unwrap_or("");
+            if d.contains("{{") || d.contains("[`") || d.contains("](") {
                 artifacts.push(tag.name.clone());
             }
         }
     }
     assert!(
         artifacts.is_empty(),
-        "these tags' prose contains a `{{{{` template artifact: {artifacts:?}"
+        "these tags' prose contains template or rustdoc-link markup: {artifacts:?}"
     );
 }
 

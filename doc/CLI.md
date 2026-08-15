@@ -718,6 +718,41 @@ wc -l` counts exactly what the grid would have shown. On a terminal, a pattern
 that matches nothing says so (and, when the pattern is anchored at both ends,
 points at the `*…*` substring form) instead of printing a blank screen.
 
+### `grammar` / `schema`
+
+Where `list` is the **human** catalogue, `grammar` and `schema` are its
+**machine-readable** siblings — the CLI face of the library's `spec_grammar()`,
+`spec_json_schema()`, and `spec_document_json_schema()`. They emit **only JSON on
+stdout** (no banner, even on a TTY), so they pipe straight into `jq` or a
+consumer, and they handle a closed pipe (`| head`, an early-exiting `jq`) as a
+clean exit rather than an error.
+
+```sh
+fugazi grammar             # the grammar descriptor: { schema_version, tags: [ … ] }
+fugazi schema              # JSON Schema (draft 2020-12) for a single expression
+fugazi schema --document   # JSON Schema for a whole strategy document (five shapes)
+```
+
+`grammar` prints one record per YAML tag — `name`, `group` (`node` / `selection`
+/ `universe` / `weighting` / `document`), `kind`, `shape`, `fields` (with types,
+required-ness, defaults, and prose), `output`, `payload`, `category` (the fine
+conceptual sub-group — `moving averages`, `oscillators`, … — that `list
+indicators` groups by), and `since` — all reflected off the serde definitions,
+so it never drifts from what the parser accepts. It's what downstream tooling
+generates docs, editor autocomplete, and conformance checks from (`list
+indicators` itself is one such consumer). Guard on `schema_version` for
+record-*shape* changes.
+
+`schema` is a second projection of that descriptor for consumers that want to
+validate structure without the library build path. It checks *shape* only — the
+Real/Bool/Str type discipline and build-time semantics stay in [`check`](#check),
+which it complements rather than replaces. A couple of quick uses:
+
+```sh
+fugazi grammar | jq '.tags[] | select(.kind == "predicate") | .name'   # every boolean tag
+fugazi schema --document | jq '.oneOf | length'                        # 5
+```
+
 ## Common flags
 
 The flags below have the same shape across every subcommand that accepts

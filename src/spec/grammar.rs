@@ -38,14 +38,18 @@ use serde::Serialize;
 /// - v1 (0.47): initial descriptor.
 /// - v2 (0.48): added [`GrammarTag::payload`]; `literal` joined the field-type
 ///   vocabulary; `spec_json_schema()` shipped.
+/// - v3 (0.51): added [`GrammarTag::category`], the fine conceptual sub-group
+///   (a new field ⇒ a record-shape change ⇒ a bump). Consumers keyed on the
+///   old shape keep working — the field is additive — but a generator that
+///   hard-guards on the version needs to accept 3.
 ///
 /// **Not** a bump: 0.50 added the `universe` / `weighting` / `document` groups
 /// (and the `none` output, `str_list` / `number_list` field types). New *rows*
-/// and new *legend values* don't change the record *shape*, so the version
-/// stays 2 — a bump would trip downstream version guards for no shape change. A
-/// consumer with an exhaustive `group` / `kind` switch should treat unknown
-/// values as inert, not as an error.
-pub const SCHEMA_VERSION: u32 = 2;
+/// and new *legend values* don't change the record *shape*, so that stayed at 2
+/// — a bump would trip downstream version guards for no shape change. A consumer
+/// with an exhaustive `group` / `kind` switch should treat unknown values as
+/// inert, not as an error.
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// The `since` stamped on every tag that shipped at or before this release —
 /// the baseline. Tags added afterwards carry their own real `since` via
@@ -117,6 +121,14 @@ pub struct GrammarTag {
     /// for `!every <n>`, `node_list` for `!all [ … ]`, `literal` for
     /// `!value <x>`. `None` for `unit` / `map` tags.
     pub payload: Option<String>,
+    /// The fine **conceptual sub-group** — `moving averages`, `oscillators`,
+    /// `bands`, `trend / directional`, … — one rung finer than `kind`, for
+    /// consumers that present the vocabulary in curated sections (the CLI
+    /// `list indicators` catalogue, editor autocomplete groups, doc headings).
+    /// Editorial, so it can't be reflected off the type: it's stamped from the
+    /// [`CATEGORIES`] taxonomy, which a test pins to cover every tag exactly
+    /// once. Never empty in a `spec_grammar()` record.
+    pub category: String,
     /// The variant's `///` doc, if any.
     pub doc: Option<String>,
     /// The release the tag first shipped in. [`SINCE_BASELINE`] for everything
@@ -153,7 +165,116 @@ pub fn spec_grammar() -> Vec<GrammarTag> {
     tags.extend(crate::spec::basket::SelectionRuleSpec::grammar_tags());
     tags.extend(crate::spec::basket::UniverseSpec::grammar_tags());
     tags.extend(document_grammar_tags());
+    // Stamp the editorial `category` the derive left blank. `CATEGORIES` is the
+    // one authority for the taxonomy (and its curated order); a test pins it to
+    // cover every tag exactly once, so a missing stamp is a test failure, not a
+    // silent empty string shipped to consumers.
+    for tag in &mut tags {
+        tag.category = category_of(&tag.name).to_owned();
+    }
     tags
+}
+
+/// The fine conceptual **sub-group** of every tag, in curated order — the
+/// taxonomy one rung finer than [`GrammarTag::kind`]. The single source both the
+/// descriptor's `category` field and the CLI `list indicators` catalogue draw
+/// from; `list` renders sections in this order, and each tag within a section in
+/// this order, so the curation lives here rather than being re-encoded per
+/// consumer.
+///
+/// Pinned by `categories_cover_every_tag_once` to name exactly the
+/// [`spec_grammar`] tag set, each once — a new tag fails the tests until it's
+/// placed. Sections are alphabetical by label (a test checks it), so a new one
+/// lands predictably. Public so consumers (the CLI catalogue, external tooling)
+/// can render the curated grouping and order directly, not just the per-tag
+/// `category` string.
+pub const CATEGORIES: &[(&str, &[&str])] = &[
+    ("arithmetic operators", &["add", "sub", "mul", "div", "log"]),
+    (
+        "bands",
+        &[
+            "bb_upper", "bb_middle", "bb_lower", "keltner_upper", "keltner_middle",
+            "keltner_lower", "donchian_upper", "donchian_middle", "donchian_lower",
+        ],
+    ),
+    (
+        "bar indicators",
+        &[
+            "atr", "mfi", "vwap", "true_range", "obv", "ad", "parkinson", "garman_klass",
+            "rogers_satchell",
+        ],
+    ),
+    ("basket selection", &["everything", "top_bottom", "threshold", "quantile"]),
+    ("basket universe", &["all_of", "any_of"]),
+    ("boolean logic", &["and", "or", "xor", "all", "any", "not"]),
+    (
+        "calendar",
+        &[
+            "year", "month", "day", "hour", "minute", "second", "day_of_week", "day_of_year",
+            "week_of_year", "quarter", "unix_seconds", "unix_millis", "time", "is_weekday",
+            "is_weekend",
+        ],
+    ),
+    (
+        "candle leaves",
+        &["close", "high", "low", "open", "volume", "typical", "median", "current", "pick"],
+    ),
+    ("comparisons", &["str_eq", "str_ne", "gt", "lt", "ge", "le", "eq", "ne"]),
+    ("conditional", &["if_else", "match"]),
+    ("constants", &["value", "never", "every"]),
+    ("cross-timeframe composition", &["resample", "latch"]),
+    ("crossovers", &["crosses_above", "crosses_below"]),
+    ("edge detectors", &["changed", "became_true", "became_false"]),
+    ("event timing", &["bars_since", "bars_since_high", "bars_since_low"]),
+    ("level comparisons", &["above", "below"]),
+    ("load-time placeholders", &["param", "arg", "import", "undefined"]),
+    ("lookback operators", &["lag", "diff", "ratio", "roc"]),
+    ("macd", &["macd_line", "macd_signal", "macd_histogram"]),
+    ("moving averages", &["sma", "ema", "rma", "wma", "hma"]),
+    ("oscillators", &["rsi", "stddev", "cci", "stochastic", "stoch_rsi", "williams_r"]),
+    ("overlay side channel", &["get", "has_column"]),
+    ("portfolio weighting", &["equal_weight", "fixed"]),
+    ("position anchors", &["entry", "peak", "trough"]),
+    ("rolling extrema", &["rolling_max", "rolling_min"]),
+    (
+        "rolling statistics",
+        &[
+            "correlation", "kurtosis", "percentile", "percentile_rank", "skewness",
+            "variance_ratio", "zscore",
+        ],
+    ),
+    (
+        "sizing helpers",
+        &["vol_target", "atr_risk", "drawdown_throttle", "equity_vol_target", "fractional_kelly"],
+    ),
+    (
+        "strategy book",
+        &[
+            "equity", "equity_peak", "drawdown", "return_per_bar", "trade_pnl", "trade_return",
+            "strategy_book", "portfolio_book",
+        ],
+    ),
+    ("trailing strategy risk", &["sharpe", "sortino", "volatility", "max_drawdown", "calmar"]),
+    (
+        "trend / directional",
+        &[
+            "adx", "plus_di", "minus_di", "dmi_plus_di", "dmi_minus_di", "aroon_up", "aroon_down",
+            "aroon_oscillator", "sar",
+        ],
+    ),
+    ("unstable pass-through", &["unstable"]),
+];
+
+/// The category a tag belongs to, from [`CATEGORIES`]. `""` if unclassified —
+/// which the taxonomy test forbids, so a `spec_grammar()` record never carries
+/// an empty one.
+fn category_of(name: &str) -> &'static str {
+    for (label, tags) in CATEGORIES {
+        if tags.contains(&name) {
+            return label;
+        }
+    }
+    ""
 }
 
 /// The hand-authored records for the load-time rewrite tags — the one place in
@@ -185,6 +306,8 @@ fn document_grammar_tags() -> Vec<GrammarTag> {
             output: "none".to_owned(),
             projections: Vec::new(),
             payload: payload.map(str::to_owned),
+            // Stamped by `spec_grammar` from `CATEGORIES`, like every other tag.
+            category: String::new(),
             doc: Some(doc.to_owned()),
             since: SINCE_BASELINE.to_owned(),
         }
@@ -630,5 +753,62 @@ fn type_fragment(ty: &str) -> serde_json::Value {
         // `other` means a field type the mapper doesn't model yet — permissive,
         // never wrong. Driven toward zero by the grammar test.
         _ => json!(true),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::{CATEGORIES, spec_grammar};
+
+    /// The taxonomy must name exactly the descriptor's tag set — each tag once,
+    /// no unknown names. This is what lets `category` be a total, drift-proof
+    /// function of the tag: a new tag can't ship uncategorised (it fails here),
+    /// and a renamed/removed tag can't linger in the table.
+    #[test]
+    fn categories_cover_every_tag_once() {
+        let mut flat: Vec<&str> = Vec::new();
+        for (_, tags) in CATEGORIES {
+            flat.extend(*tags);
+        }
+        let unique: BTreeSet<&str> = flat.iter().copied().collect();
+        assert_eq!(
+            flat.len(),
+            unique.len(),
+            "a tag is listed under two categories: {:?}",
+            {
+                let mut seen = BTreeSet::new();
+                flat.iter().filter(|t| !seen.insert(**t)).collect::<Vec<_>>()
+            }
+        );
+
+        let want: BTreeSet<String> = spec_grammar().iter().map(|t| t.name.clone()).collect();
+        let got: BTreeSet<String> = unique.iter().map(|s| s.to_string()).collect();
+        let missing: Vec<_> = want.difference(&got).collect();
+        let extra: Vec<_> = got.difference(&want).collect();
+        assert!(missing.is_empty(), "tags with no category — add each to CATEGORIES: {missing:?}");
+        assert!(extra.is_empty(), "CATEGORIES names tags the grammar doesn't have: {extra:?}");
+    }
+
+    /// Sections render in table order; keeping the labels alphabetical means a
+    /// new one lands predictably rather than wherever it was appended.
+    #[test]
+    fn categories_are_alphabetical() {
+        let labels: Vec<String> = CATEGORIES.iter().map(|(l, _)| l.to_lowercase()).collect();
+        let mut sorted = labels.clone();
+        sorted.sort();
+        assert_eq!(labels, sorted, "CATEGORIES is not in alphabetical order of label");
+    }
+
+    /// Every stamped record carries its category — the contract consumers rely on.
+    #[test]
+    fn every_record_is_categorised() {
+        let blank: Vec<String> = spec_grammar()
+            .into_iter()
+            .filter(|t| t.category.trim().is_empty())
+            .map(|t| t.name)
+            .collect();
+        assert!(blank.is_empty(), "records with an empty category: {blank:?}");
     }
 }
