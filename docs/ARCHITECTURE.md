@@ -1008,7 +1008,9 @@ kernel), `get.rs`, `overlay.rs`, `data.rs`, `csv_source.rs`, `list.rs`,
   `DynValue` (`Real | Bool | Atom | Candle | Str | Time | Snapshot<String>`) + `DynType`
   + `Adapter` blanket + `AsReal`/`AsBool`/`AsCandle`/`AsAtom`/`AsStr` + `chain`/
   `unstable_wrap`). **New YAML-visible indicators plug in via `dyn_indicator::wrap(...)`.**
-- **`csv_source.rs`** — local CSV candle source for `fugazi get csv:PATH`.
+- **`csv_source.rs`** — the CSV reader behind `fugazi get file:PATH`. The provider
+  is named for its transport (`file:`), not its format; a second format would be a
+  sibling reader here, dispatched off the path's extension.
 - **`data.rs`** — `--series` data frame (`@file.csv` + inline, full-joined on `symbol`
   +`time`).
 - **`overlay.rs`** — `--overlay` parsing for `fugazi get`.

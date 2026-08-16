@@ -94,7 +94,7 @@ struct DatasetMeta {
 /// sources:
 ///   - binance:
 ///       symbols: [BTCUSDT, ETHUSDT]
-///   - csv:
+///   - file:
 ///       path: /data/extra.csv
 /// ```
 ///
@@ -165,12 +165,17 @@ fn parse_dataset(path: &str) -> Result<(Vec<FetchSpec>, DatasetMeta)> {
                 );
             }
             let (provider, params) = src_map.into_iter().next().unwrap();
-            if provider == "csv" {
-                let csv_path = params
+            if provider_info(&provider).is_none() {
+                bail!("dataset {path:?}: {}", unknown_provider_error(&provider));
+            }
+            if provider == "file" {
+                let file_path = params
                     .get("path")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow!("dataset {path:?}: csv source requires a `path` field"))?;
-                Ok(FetchSpec::Csv { path: PathBuf::from(csv_path) })
+                    .ok_or_else(|| {
+                        anyhow!("dataset {path:?}: file source requires a `path` field")
+                    })?;
+                Ok(FetchSpec::File { path: PathBuf::from(file_path) })
             } else {
                 let symbols_raw = params
                     .get("symbols")
@@ -256,7 +261,7 @@ pub(crate) struct ProviderInfo {
     pub description: &'static str,
     /// The provider's canonical overlay [`Schema`], when it is knowable
     /// before the fetch. `None` means "OHLCV only, or discovered from the
-    /// data" — Coinbase publishes no extras, and `csv:` takes its columns
+    /// data" — Coinbase publishes no extras, and `file:` takes its columns
     /// from the file.
     pub schema: Option<fn() -> Arc<Schema>>,
 }
@@ -319,8 +324,9 @@ pub(crate) const KNOWN_PROVIDERS: &[ProviderInfo] = &[
         schema: Some(|| coingecko_schema().clone()),
     },
     ProviderInfo {
-        name: "csv",
-        description: "Local OHLCV CSV — spec is `csv:PATH` (no `[freq]` bracket)",
+        name: "file",
+        description: "Local OHLCV file — spec is `file:PATH` (no `[freq]` bracket). \
+                      CSV today; the format is read off the path, not the scheme",
         schema: None,
     },
     ProviderInfo {
@@ -372,7 +378,7 @@ struct SymbolSpec {
 ///
 /// Remote providers share the same
 /// `<provider>:<symbol>[<freq>,...],<symbol>[<freq>,...]`
-/// grammar; `csv:PATH` is its own variant, since the file already carries
+/// grammar; `file:PATH` is its own variant, since the file already carries
 /// symbol+freq per row and the bracket doesn't apply.
 #[derive(Debug, Clone, PartialEq)]
 enum FetchSpec {
@@ -380,7 +386,7 @@ enum FetchSpec {
         provider: String,
         symbols: Vec<SymbolSpec>,
     },
-    Csv {
+    File {
         path: PathBuf,
     },
 }
@@ -624,8 +630,8 @@ fn run_candles(
     // Expand each `FetchSpec` into one `Series` per `(symbol, interval)` — the
     // unit of parallelism. Per-series overlay warm-up is folded in here so
     // `fetch_series` can push `since` back accordingly and each task builds
-    // its own indicator instances. `csv:` specs are read once up front and
-    // their bar list is shared into each derived Series' `csv_bars` so the
+    // its own indicator instances. `file:` specs are read once up front and
+    // their bar list is shared into each derived Series' `file_bars` so the
     // async pipeline can filter without re-reading.
     let mut series: Vec<Series> = Vec::new();
     let mut n_symbols: usize = 0;
@@ -653,13 +659,13 @@ fn run_candles(
                             symbol: sym.symbol.clone(),
                             interval: freq,
                             stable,
-                            csv_bars: None,
-                            csv_path: None,
+                            file_bars: None,
+                            file_path: None,
                         });
                     }
                 }
             }
-            FetchSpec::Csv { path } => {
+            FetchSpec::File { path } => {
                 let bars = CsvSource::new(path.clone())
                     .read()
                     .with_context(|| format!("reading {}", path.display()))?;
@@ -688,15 +694,15 @@ fn run_candles(
                         interval,
                         &file_schema,
                     )?;
-                    // A `csv:` file already carries its own `symbol` and
+                    // A `file:` source already carries its own `symbol` and
                     // `freq` columns, so there is nothing to remap.
                     series.push(Series {
-                        provider: "csv".into(),
+                        provider: "file".into(),
                         symbol: sym,
                         interval,
                         stable,
-                        csv_bars: Some(shared.clone()),
-                        csv_path: Some(path.clone()),
+                        file_bars: Some(shared.clone()),
+                        file_path: Some(path.clone()),
                     });
                 }
                 n_symbols += seen_symbols.len();
@@ -722,7 +728,7 @@ fn run_candles(
     // Async: download every series in parallel — no overlay state crosses task
     // boundaries. Overlays are applied synchronously below, per (symbol,
     // interval) group, so `DynValue`'s non-Send `Rc`-backed `Position` stub
-    // stays on one thread. `csv:` series short-circuit inside `fetch_series`.
+    // stays on one thread. `file:` series short-circuit inside `fetch_series`.
     let result = rt.block_on(fetch_all(
         series.clone(),
         since_ts,
@@ -764,7 +770,7 @@ fn run_candles(
 /// One row of output: which symbol + interval it came from, the timed candle,
 /// the per-`-x`-column overlay values (aligned with the CLI's overlay column
 /// layout — `None` for a column no applicable overlay covers this row's
-/// group), and the pass-through extras from a `csv:` source (per-row
+/// group), and the pass-through extras from a `file:` source (per-row
 /// non-OHLCV cells classified as `Real`/`Bool`/`Str`).
 struct Row {
     symbol: String,
@@ -784,8 +790,8 @@ struct Row {
 /// across the overlays that apply to this `(symbol, interval)`). The unit of
 /// parallelism — each series gets its own fetch task and progress bar.
 ///
-/// For `csv:` specs, the pre-read bar list is threaded through as
-/// [`Series::csv_bars`], and [`fetch_series`] short-circuits into an
+/// For `file:` specs, the pre-read bar list is threaded through as
+/// [`Series::file_bars`], and [`fetch_series`] short-circuits into an
 /// in-memory filter instead of an HTTP fetch.
 #[derive(Clone)]
 struct Series {
@@ -799,16 +805,16 @@ struct Series {
     stable: usize,
     /// The file's pre-read bar list, shared between every series that reads
     /// from the same file. `None` for remote-provider series.
-    csv_bars: Option<Arc<Vec<CsvBar>>>,
-    /// The originating path — kept for the progress-bar label (`csv:./data.csv`).
-    csv_path: Option<PathBuf>,
+    file_bars: Option<Arc<Vec<CsvBar>>>,
+    /// The originating path — kept for the progress-bar label (`file:./data.csv`).
+    file_path: Option<PathBuf>,
 }
 
 impl Series {
     fn label(&self) -> String {
-        if let Some(path) = &self.csv_path {
+        if let Some(path) = &self.file_path {
             return format!(
-                "csv:{}[{}:{}]",
+                "file:{}[{}:{}]",
                 path.display(),
                 self.symbol,
                 self.interval.as_token()
@@ -914,8 +920,8 @@ async fn fetch_all(
 /// provider-agnostic one on top. Series still run concurrently (one task each,
 /// see [`fetch_all`]).
 ///
-/// A `csv:` series short-circuits: the file has already been read into
-/// [`Series::csv_bars`] up front, so this is just an in-memory filter to the
+/// A `file:` series short-circuits: the file has already been read into
+/// [`Series::file_bars`] up front, so this is just an in-memory filter to the
 /// series' `(symbol, interval)` and the `[fetch_since, until)` window.
 async fn fetch_series(
     series: Series,
@@ -923,8 +929,8 @@ async fn fetch_series(
     until: Timestamp,
     progress: ProgressBar,
 ) -> Result<Vec<RawBar>> {
-    if let Some(csv_bars) = series.csv_bars.clone() {
-        let rows: Vec<RawBar> = csv_bars
+    if let Some(file_bars) = series.file_bars.clone() {
+        let rows: Vec<RawBar> = file_bars
             .iter()
             .filter(|b| {
                 b.symbol == series.symbol
@@ -1340,8 +1346,8 @@ pub(crate) async fn tickers_of(provider: &str) -> Result<Vec<String>> {
         "coinbase" => Ok(Coinbase::new().tickers().await?),
         "cg" => Ok(CoinGecko::new().tickers().await?),
         "yfinance" => Ok(Yahoo::new().tickers().await?),
-        "csv" => bail!(
-            "`csv:` reads a local CSV — the ticker list is whatever `symbol` \
+        "file" => bail!(
+            "`file:` reads a local file — the ticker list is whatever `symbol` \
              values the file itself contains; there is no canonical enumeration \
              endpoint"
         ),
@@ -1447,7 +1453,7 @@ fn format_date(t: Timestamp) -> String {
 /// `symbol,freq,time,open,high,low,close,volume`, followed by one column per
 /// overlay column name (unique, in first-appearance order across the
 /// `--overlay` args) and one column per source-provided extra (`n_trades`,
-/// `adj_close`, or a `csv:` file's own non-OHLCV columns — union across all
+/// `adj_close`, or a `file:` source's own non-OHLCV columns — union across all
 /// rows, first-appearance order). Extras whose names clash with a requested
 /// `--overlay` column are skipped: the computed overlay wins that slot.
 /// A `None` overlay value or a missing extra cell renders as blank; other
@@ -1586,7 +1592,7 @@ fn format_f64(v: f64) -> String {
 // ---------------------------------------------------------------------------
 
 /// Parse a `<provider>:<symbol>[<freq>,...](,<symbol>[<freq>,...])*` spec — or
-/// the `csv:PATH` short form (no bracket; the file's own `symbol` + `freq`
+/// the `file:PATH` short form (no bracket; the file's own `symbol` + `freq`
 /// columns drive the output).
 fn parse_spec(spec: &str) -> Result<FetchSpec> {
     let (provider, rest) = spec
@@ -1596,12 +1602,19 @@ fn parse_spec(spec: &str) -> Result<FetchSpec> {
     if provider.is_empty() {
         bail!("{spec:?}: empty provider");
     }
-    if provider == "csv" {
+    // Reject an unknown provider *here* rather than letting it fall through to
+    // symbol parsing. Without this the diagnosis lands on whatever the rest of
+    // the spec happens to violate first — `csv:./candles.csv` reports a missing
+    // `[freq,...]` bracket, which says nothing about the actual mistake.
+    if provider_info(provider).is_none() {
+        bail!("{spec:?}: {}", unknown_provider_error(provider));
+    }
+    if provider == "file" {
         let path = rest.trim();
         if path.is_empty() {
-            bail!("{spec:?}: `csv:` needs a path (e.g. `csv:./candles.csv`)");
+            bail!("{spec:?}: `file:` needs a path (e.g. `file:./candles.csv`)");
         }
-        return Ok(FetchSpec::Csv {
+        return Ok(FetchSpec::File {
             path: PathBuf::from(path),
         });
     }
@@ -1774,11 +1787,11 @@ mod tests {
     }
 
     /// Helper: unwrap the remote variant, panicking otherwise. All the
-    /// non-`csv:` parse tests below use it.
+    /// non-`file:` parse tests below use it.
     fn remote(spec: &str) -> (String, Vec<SymbolSpec>) {
         match parse_spec(spec).unwrap() {
             FetchSpec::Remote { provider, symbols } => (provider, symbols),
-            FetchSpec::Csv { path } => panic!("expected Remote, got Csv({})", path.display()),
+            FetchSpec::File { path } => panic!("expected Remote, got File({})", path.display()),
         }
     }
 
@@ -1839,8 +1852,8 @@ mod tests {
             symbol: "EURUSD=X".into(),
             interval: Interval::Day(1),
             stable: 0,
-            csv_bars: None,
-            csv_path: None,
+            file_bars: None,
+            file_path: None,
         };
         // Verbatim: with no `=`-delimited grammar left in a spec head, the
         // ticker needs no escaping to parse back.
@@ -1920,27 +1933,45 @@ mod tests {
     }
 
     #[test]
-    fn parses_csv_spec_without_bracket() {
-        let got = parse_spec("csv:./candles.csv").unwrap();
+    fn parses_file_spec_without_bracket() {
+        let got = parse_spec("file:./candles.csv").unwrap();
         match got {
-            FetchSpec::Csv { path } => assert_eq!(path, PathBuf::from("./candles.csv")),
-            other => panic!("expected Csv, got {other:?}"),
+            FetchSpec::File { path } => assert_eq!(path, PathBuf::from("./candles.csv")),
+            other => panic!("expected File, got {other:?}"),
         }
     }
 
     #[test]
-    fn parses_csv_spec_with_absolute_path() {
-        let got = parse_spec("csv:/tmp/data.csv").unwrap();
+    fn parses_file_spec_with_absolute_path() {
+        let got = parse_spec("file:/tmp/data.csv").unwrap();
         match got {
-            FetchSpec::Csv { path } => assert_eq!(path, PathBuf::from("/tmp/data.csv")),
-            other => panic!("expected Csv, got {other:?}"),
+            FetchSpec::File { path } => assert_eq!(path, PathBuf::from("/tmp/data.csv")),
+            other => panic!("expected File, got {other:?}"),
         }
     }
 
     #[test]
-    fn rejects_empty_csv_path() {
-        assert!(parse_spec("csv:").is_err());
-        assert!(parse_spec("csv:   ").is_err());
+    fn rejects_empty_file_path() {
+        assert!(parse_spec("file:").is_err());
+        assert!(parse_spec("file:   ").is_err());
+    }
+
+    /// The old `csv:` spelling is gone, not aliased. It has to fail as an
+    /// *unknown provider* — that message names `file`, which is the only way
+    /// the reader learns the new spelling. Falling through to symbol parsing
+    /// would blame the missing `[freq,...]` bracket instead.
+    #[test]
+    fn old_csv_scheme_reports_an_unknown_provider_naming_file() {
+        let err = parse_spec("csv:./candles.csv").unwrap_err().to_string();
+        assert!(err.contains("unknown provider"), "{err}");
+        assert!(err.contains("file"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_provider_is_rejected_before_the_symbol_grammar() {
+        // A well-formed symbol entry, so only the provider can be at fault.
+        let err = parse_spec("nope:BTCUSDT[1d]").unwrap_err().to_string();
+        assert!(err.contains("unknown provider"), "{err}");
     }
 
     #[test]
@@ -2082,8 +2113,8 @@ mod tests {
 
     #[test]
     fn providers_without_extras_resolve_to_an_empty_schema() {
-        // Coinbase is OHLCV-only; `csv:` takes its columns from the file.
-        for provider in ["coinbase", "csv"] {
+        // Coinbase is OHLCV-only; `file:` takes its columns from the file.
+        for provider in ["coinbase", "file"] {
             assert!(provider_schema(provider).is_empty(), "{provider}");
         }
         // An unknown name resolves to empty rather than aborting — the fetch

@@ -4491,7 +4491,7 @@ fn build_pick(
 /// Returns `Err` with a helpful message if `key` isn't registered — the message
 /// lists the schema's registered keys so a typo is easy to spot. The message
 /// distinguishes the empty-schema case ("no overlay side channel — feed
-/// `--series` or `csv:` data with additional columns to attach overlays")
+/// `--series` or `file:` data with additional columns to attach overlays")
 /// from the non-empty case ("registered: a, b, c").
 fn build_get(
     schema: &Arc<Schema>,
@@ -4507,7 +4507,7 @@ fn build_get(
             if registered.is_empty() {
                 Err(format!(
                     "overlay column {key:?}: no overlay side channel is bound — feed \
-                     `--series` data or a `csv:` source that carries additional \
+                     `--series` data or a `file:` source that carries additional \
                      (non-OHLCV) columns to attach overlays",
                 ))
             } else {

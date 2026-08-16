@@ -19,7 +19,7 @@ Eight subcommands:
   parallel; write one CSV row per combination and rank by a metric.
 - [`get`](#get) — fetch OHLCV bars from a remote provider (`binance`,
   `binance-vision`, `binance-vision-futures`, `okx`, `coinbase`, `yfinance`,
-  `cg`) or re-process a local CSV (`csv:PATH`) into a `run`-ready file,
+  `cg`) or re-process a local file (`file:PATH`) into a `run`-ready file,
   optionally with `-x/--overlay` columns computed on top. `fugazi list sources`
   prints the current table.
 - [`list`](#list) — printed catalogue of what the CLI knows about
@@ -512,16 +512,16 @@ stretch) but do not eliminate it — the grid is still ranked on the same
 data it was fit on.
 
 The recommended workflow is therefore an **explicit train / validate
-split**, with `get` and `csv:` doing the plumbing:
+split**, with `get` and `file:` doing the plumbing:
 
 ```sh
 # 1. Fetch the raw candles once, into a persistent CSV.
 fugazi get binance:BTCUSDT[1d] --since 2018-01-01 --until today -o btc.csv
 
 # 2. Split the CSV into a training slice (past) and a validation slice
-#    (recent) with `csv:` + --since/--until. Nothing new is fetched.
-fugazi get csv:./btc.csv --since 2018-01-01 --until 2023-01-01 -o btc_train.csv
-fugazi get csv:./btc.csv --since 2023-01-01 --until today       -o btc_validate.csv
+#    (recent) with `file:` + --since/--until. Nothing new is fetched.
+fugazi get file:./btc.csv --since 2018-01-01 --until 2023-01-01 -o btc_train.csv
+fugazi get file:./btc.csv --since 2023-01-01 --until today       -o btc_validate.csv
 
 # 3. Optimize on the training slice. Prefer `-w` (+ optional `-k`) so the
 #    ranking rewards parameter sets that held up across sub-windows of the
@@ -702,7 +702,7 @@ mismatched series as separate fetches and separate strategies.
 #### Fetch specs
 
 The common shape is `<provider>:[<out>=]<symbol>[<freq>,<freq>...](,[<out>=]<symbol>[<freq>,...])*`
-— several symbols and several frequencies per spec are one download. `csv:`
+— several symbols and several frequencies per spec are one download. `file:`
 is the one exception; see below.
 
 A symbol is taken verbatim: the provider is split off at the **first** colon,
@@ -722,7 +722,7 @@ Frequency tokens have no remap form — each is parsed as a real cadence and the
 | `cg` | `cg:BTCUSDT=bitcoin[1d]` | **CoinGecko — overlay-only, no OHLCV.** Market cap / volume / supply columns; symbols are coin ids (`bitcoin`, not `BTC`). Join onto a price series via `--series`. Frequencies: `1h`…`12h`, `1d`, `1w`, `1M`. |
 | `binance-vision` | `binance-vision:BTCUSDT[1d]` | Binance spot klines from the public archive (`data.binance.vision`) — deeper and cheaper than the live endpoint (one request per month, no rate limit), at the cost of a ~2-day lag: a fetch running to now stops at the last published file. Same columns as `binance`. Frequencies: `1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `6h`, `8h`, `12h`, `1d`, `1w`, `1M`. |
 | `binance-vision-futures` | `binance-vision-futures:BTCUSDT[1d]` | Binance USDⓈ-M perpetual klines from the same archive — **OHLCV plus** the side channels only a derivative has: `funding_rate`, `premium_index`, `open_interest`, `open_interest_value` and the long/short ratios. No join needed; they ride alongside the bar. Funding settles every 4–8h and settlements inside one bar are **summed**, so `[1d]` is that day's total carry and `[8h]` is one settlement per row; the rest are levels, so a bar keeps its last sample. Frequencies: `1h`…`12h`, `1d` — the range `premiumIndexKlines` publishes. |
-| `csv` | `csv:./candles.csv` | **No `[freq]` bracket.** Reads a local OHLCV CSV (delimiter autodetected: `;`, `,`, `\t`, `|`) — typically a previous `fugazi get` output. Each row's `symbol` + `freq` columns drive the output; `--since` / `--until` filter by `time`; overlays apply the same way. `symbol`, `freq`, `time`, `open`, `high`, `low`, `close` are required, `volume` optional. |
+| `file` | `file:./candles.csv` | **No `[freq]` bracket.** Reads a local OHLCV file — CSV today, with the delimiter autodetected (`;`, `,`, `\t`, `|`); the format is read off the path, not the scheme. Typically a previous `fugazi get` output. Each row's `symbol` + `freq` columns drive the output; `--since` / `--until` filter by `time`; overlays apply the same way. `symbol`, `freq`, `time`, `open`, `high`, `low`, `close` are required, `volume` optional. |
 
 Frequency tokens are case-sensitive: `m` = minute, `M` = month. `fugazi list
 sources` prints the same table.
@@ -773,7 +773,7 @@ fugazi get binance:BTCUSDT[1d] --since 2020-01-01 \
     -o btc.csv
 
 # Re-process an existing CSV to add an ATR column without re-downloading.
-fugazi get csv:./btc.csv -x 'atr14=!atr { period: 14 }' -o btc_atr.csv
+fugazi get file:./btc.csv -x 'atr14=!atr { period: 14 }' -o btc_atr.csv
 
 # Different overlays per symbol (BTC gets an EMA, ETH gets an RSI).
 fugazi get binance:BTCUSDT[1d],ETHUSDT[1d] \
