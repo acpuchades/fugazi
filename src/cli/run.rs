@@ -37,7 +37,7 @@
 //! `!all [<entry>, !stable { signal: <entry> }]`.
 
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use fugazi::prelude::*;
@@ -284,7 +284,7 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
     if !opts.quiet {
         let costs_active = !opts.cost_config.resolve(&symbol, effective_freq).is_none();
         style::print_header("run", "backtest a strategy over CSV series");
-        style::print_warns(&collect_warnings(&skipped_overlay_columns, no_cost_warning));
+        style::print_warns(&style::collect_warnings(&skipped_overlay_columns, no_cost_warning, "results"));
         print_inputs_block(opts, start, end, atoms.len(), costs_active);
     }
 
@@ -420,7 +420,7 @@ pub fn run_pairs(
                 .resolve(&spec.right, effective_freq)
                 .is_none();
         style::print_header("run", "pair-trade a two-leg strategy over CSV series");
-        style::print_warns(&collect_warnings(&[], no_cost_warning));
+        style::print_warns(&style::collect_warnings(&[], no_cost_warning, "results"));
         print_pairs_inputs_block(opts, spec, start, end, bars.len(), costs_active);
     }
 
@@ -580,7 +580,7 @@ pub fn run_basket(
             .iter()
             .any(|s| !opts.cost_config.resolve(s, effective_freq).is_none());
         style::print_header("run", "trade a basket across an N-symbol universe");
-        style::print_warns(&collect_warnings(&[], no_cost_warning));
+        style::print_warns(&style::collect_warnings(&[], no_cost_warning, "results"));
         print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active);
     }
 
@@ -720,7 +720,7 @@ pub fn run_multi(
             "run",
             "trade a multi-asset portfolio across an N-symbol universe",
         );
-        style::print_warns(&collect_warnings(&[], no_cost_warning));
+        style::print_warns(&style::collect_warnings(&[], no_cost_warning, "results"));
         print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active);
     }
 
@@ -866,7 +866,7 @@ pub fn run_portfolio(
             "run",
             "trade a composite portfolio of heterogeneous child strategies",
         );
-        style::print_warns(&collect_warnings(&[], no_cost_warning));
+        style::print_warns(&style::collect_warnings(&[], no_cost_warning, "results"));
         print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active);
     }
 
@@ -969,20 +969,20 @@ fn print_basket_inputs_block(
     costs_active: bool,
 ) {
     style::print_section("inputs");
-    print_field("strategy", opts.strategy_label);
-    print_field(
+    style::field("strategy", opts.strategy_label);
+    style::field(
         "universe",
         &format!("{} symbols ({})", universe.len(), universe.join(", ")),
     );
-    print_field("params", opts.params);
-    print_field("period", &format!("{start} → {end} ({bars} bars)"));
-    print_field("capital", &format!("{:.2}", opts.cash));
+    style::field("params", opts.params);
+    style::field("period", &format!("{start} → {end} ({bars} bars)"));
+    style::field("capital", &format!("{:.2}", opts.cash));
     if costs_active {
-        print_field("costs", "active (commission/spread/slippage applied)");
+        style::field("costs", "active (commission/spread/slippage applied)");
     } else if opts.costs_supplied {
-        print_field("costs", "none (explicit)");
+        style::field("costs", "none (explicit)");
     }
-    print_field("output", &opts.out_dir.display().to_string());
+    style::field("output", &opts.out_dir.display().to_string());
 }
 
 /// Inner-join the two legs' atom streams on their `time` label. Returns
@@ -1021,17 +1021,17 @@ fn print_pairs_inputs_block(
     costs_active: bool,
 ) {
     style::print_section("inputs");
-    print_field("strategy", opts.strategy_label);
-    print_field("pair", &format!("{} / {}", spec.left, spec.right));
-    print_field("params", opts.params);
-    print_field("period", &format!("{start} → {end} ({bars} bars)"));
-    print_field("capital", &format!("{:.2}", opts.cash));
+    style::field("strategy", opts.strategy_label);
+    style::field("pair", &format!("{} / {}", spec.left, spec.right));
+    style::field("params", opts.params);
+    style::field("period", &format!("{start} → {end} ({bars} bars)"));
+    style::field("capital", &format!("{:.2}", opts.cash));
     if costs_active {
-        print_field("costs", "active (commission/spread/slippage applied)");
+        style::field("costs", "active (commission/spread/slippage applied)");
     } else if opts.costs_supplied {
-        print_field("costs", "none (explicit)");
+        style::field("costs", "none (explicit)");
     }
-    print_field("output", &opts.out_dir.display().to_string());
+    style::field("output", &opts.out_dir.display().to_string());
 }
 
 // ---------------------------------------------------------------------------
@@ -1288,39 +1288,16 @@ fn writer(path: &Path) -> Result<csv::Writer<std::fs::File>> {
 /// in the result block, since it's not an input.
 fn print_inputs_block(opts: &RunOptions, start: &str, end: &str, bars: usize, costs_active: bool) {
     style::print_section("inputs");
-    print_field("strategy", opts.strategy_label);
-    print_field("params", opts.params);
-    print_field("period", &format!("{start} → {end} ({bars} bars)"));
-    print_field("capital", &format!("{:.2}", opts.cash));
+    style::field("strategy", opts.strategy_label);
+    style::field("params", opts.params);
+    style::field("period", &format!("{start} → {end} ({bars} bars)"));
+    style::field("capital", &format!("{:.2}", opts.cash));
     if costs_active {
-        print_field("costs", "active (commission/spread/slippage applied)");
+        style::field("costs", "active (commission/spread/slippage applied)");
     } else if opts.costs_supplied {
-        print_field("costs", "none (explicit)");
+        style::field("costs", "none (explicit)");
     }
-    print_field("output", &opts.out_dir.display().to_string());
-}
-
-/// Collect the top-of-run warnings — skipped overlay columns and the no-cost
-/// notice — into one list so [`style::print_warns`] can emit them at column 0
-/// above the `inputs` section (with a trailing blank line only when at least
-/// one fires). Keeps `warn` from masquerading as an input field.
-fn collect_warnings(skipped: &[String], no_cost: bool) -> Vec<String> {
-    let mut w = Vec::new();
-    if !skipped.is_empty() {
-        w.push(format!(
-            "skipped non-numeric overlay column{}: {} — not accessible via `!get`",
-            if skipped.len() == 1 { "" } else { "s" },
-            skipped.join(", "),
-        ));
-    }
-    if no_cost {
-        w.push(
-            "no cost model set — commission, spread, and slippage are zero; \
-             results are frictionless"
-                .to_string(),
-        );
-    }
-    w
+    style::field("output", &opts.out_dir.display().to_string());
 }
 
 /// The post-run "orders were refused" banner.
@@ -1370,8 +1347,8 @@ fn kind_label(kind: fugazi::OrderKind) -> &'static str {
 fn print_result_block(opts: &RunOptions, s: &Summary, started: SystemTime, finished: SystemTime) {
     println!();
     style::print_section("result");
-    print_field("bars", &s.bars.to_string());
-    print_field("fills", &s.fills.to_string());
+    style::field("bars", &s.bars.to_string());
+    style::field("fills", &s.fills.to_string());
     let delta = s.final_equity - opts.cash;
     let change = format!("{delta:+.2}, {:+.2}%", s.return_pct);
     let change = if delta >= 0.0 {
@@ -1379,15 +1356,15 @@ fn print_result_block(opts: &RunOptions, s: &Summary, started: SystemTime, finis
     } else {
         style::red(&change)
     };
-    print_field(
+    style::field(
         "capital",
         &format!("{:.2} → {:.2}  ({change})", opts.cash, s.final_equity),
     );
     let elapsed = finished.duration_since(started).unwrap_or_default();
-    print_field("started", &format_utc(started));
-    print_field(
+    style::field("started", &style::format_utc(started));
+    style::field(
         "finished",
-        &format!("{} ({})", format_utc(finished), format_elapsed(elapsed)),
+        &format!("{} ({})", style::format_utc(finished), style::format_elapsed(elapsed)),
     );
 }
 
@@ -1405,14 +1382,14 @@ fn print_metrics_block(
     println!();
     style::print_section("metrics");
     if let Some(measured) = measured {
-        print_field("measured", measured);
+        style::field("measured", measured);
     }
     if let Some(g) = gross {
         let net = m.returns.cagr_pct.map_or("—".to_string(), |v| format!("{v:+.2}%"));
         let gross = g.returns.cagr_pct.map_or("—".to_string(), |v| format!("{v:+.2}%"));
-        print_field("cagr", &format!("net {net} · gross {gross}"));
+        style::field("cagr", &format!("net {net} · gross {gross}"));
     }
-    print_field(
+    style::field(
         "return",
         &format!(
             "{:+.2}% ann · vol {:.2}%",
@@ -1422,21 +1399,21 @@ fn print_metrics_block(
     if let Some(g) = gross {
         let net = format_ratio(m.risk_adjusted.sharpe);
         let gross = format_ratio(g.risk_adjusted.sharpe);
-        print_field("sharpe", &format!("net {net} · gross {gross}"));
+        style::field("sharpe", &format!("net {net} · gross {gross}"));
     } else {
-        print_field("sharpe", &format_ratio(m.risk_adjusted.sharpe));
+        style::field("sharpe", &format_ratio(m.risk_adjusted.sharpe));
     }
-    print_field("sortino", &format_ratio(m.risk_adjusted.sortino));
-    print_field("omega", &format_ratio(m.risk_adjusted.omega));
-    print_field(
+    style::field("sortino", &format_ratio(m.risk_adjusted.sortino));
+    style::field("omega", &format_ratio(m.risk_adjusted.omega));
+    style::field(
         "max_dd",
         &format!(
             "{:.2}% ({} bars)",
             m.drawdown.max_pct, m.drawdown.max_duration_bars
         ),
     );
-    print_field("exposure", &format!("{:.1}%", m.trades.exposure_pct));
-    print_field(
+    style::field("exposure", &format!("{:.1}%", m.trades.exposure_pct));
+    style::field(
         "trades",
         &format!(
             "{} · win {} · pf {}",
@@ -1446,7 +1423,7 @@ fn print_metrics_block(
         ),
     );
     if let Some(text) = format_holding_line(m, bar_freq) {
-        print_field("holding", &text);
+        style::field("holding", &text);
     }
 }
 
@@ -1532,7 +1509,7 @@ fn format_pct(v: Option<Real>) -> String {
 fn print_windowed_metrics_block(windows: &[metrics::WindowMetrics]) {
     println!();
     style::print_section("windowed metrics");
-    print_field(
+    style::field(
         "windows",
         &format!(
             "{} × {} bars (non-overlapping)",
@@ -1542,7 +1519,7 @@ fn print_windowed_metrics_block(windows: &[metrics::WindowMetrics]) {
     );
     let ann_mean = mean_std_of(windows, |m| Some(m.returns.annualized_mean_pct));
     let ann_vol = mean_std_of(windows, |m| Some(m.returns.annualized_volatility_pct));
-    print_field(
+    style::field(
         "return",
         &format!(
             "{} ann · vol {}",
@@ -1550,21 +1527,21 @@ fn print_windowed_metrics_block(windows: &[metrics::WindowMetrics]) {
             format_ms_unsigned_pct(ann_vol),
         ),
     );
-    print_field(
+    style::field(
         "sharpe",
         &format_ms_ratio(mean_std_of(windows, |m| m.risk_adjusted.sharpe)),
     );
-    print_field(
+    style::field(
         "sortino",
         &format_ms_ratio(mean_std_of(windows, |m| m.risk_adjusted.sortino)),
     );
-    print_field(
+    style::field(
         "omega",
         &format_ms_ratio(mean_std_of(windows, |m| m.risk_adjusted.omega)),
     );
     let max_dd = mean_std_of(windows, |m| Some(m.drawdown.max_pct));
     let max_dur = mean_std_of(windows, |m| Some(m.drawdown.max_duration_bars as Real));
-    print_field(
+    style::field(
         "max_dd",
         &format!(
             "{} ({} bars)",
@@ -1572,14 +1549,14 @@ fn print_windowed_metrics_block(windows: &[metrics::WindowMetrics]) {
             format_ms_count(max_dur, 0),
         ),
     );
-    print_field(
+    style::field(
         "exposure",
         &format_ms_unsigned_pct(mean_std_of(windows, |m| Some(m.trades.exposure_pct))),
     );
     let trades = mean_std_of(windows, |m| Some(m.trades.total as Real));
     let win_rate = mean_std_of(windows, |m| m.trades.win_rate_pct);
     let pf = mean_std_of(windows, |m| m.trades.profit_factor);
-    print_field(
+    style::field(
         "trades",
         &format!(
             "{} · win {} · pf {}",
@@ -1628,37 +1605,5 @@ fn format_ms_count(pair: Option<(Real, Real)>, precision: usize) -> String {
     )
 }
 
-fn format_elapsed(d: Duration) -> String {
-    let secs = d.as_secs_f64();
-    if secs < 1.0 {
-        format!("{} ms", d.as_millis())
-    } else if secs < 60.0 {
-        format!("{secs:.2} s")
-    } else {
-        format!("{}m {:02}s", d.as_secs() / 60, d.as_secs() % 60)
-    }
-}
 
-fn print_field(label: &str, value: &str) {
-    style::print_field(label, value, 9);
-}
 
-/// Format a [`SystemTime`] as `YYYY-MM-DD HH:MM:SS UTC`, without pulling in
-/// a date library (Howard Hinnant's civil-from-days algorithm).
-fn format_utc(t: SystemTime) -> String {
-    let secs = t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let (days, rem) = (secs / 86_400, secs % 86_400);
-    let (hour, min, sec) = (rem / 3_600, (rem % 3_600) / 60, rem % 60);
-
-    let z = days as i64 + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-
-    format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}:{sec:02} UTC")
-}
