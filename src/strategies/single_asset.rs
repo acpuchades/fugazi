@@ -2,6 +2,7 @@
 //! this catalogue specialises.
 
 use std::hash::Hash;
+use std::sync::OnceLock;
 
 use crate::indicators::{Book, ValueBool, Position, Value};
 use crate::prelude::*;
@@ -173,6 +174,27 @@ pub struct SingleAssetStrategy<Sym> {
     position: Position,
     book: Book<Sym>,
     bars_seen: usize,
+    /// Memoised [`stable_bars`](Self::stable_bars), the threshold
+    /// [`is_ready`](Strategy::is_ready) compares `bars_seen` against.
+    ///
+    /// `stable_bars()` is a walk of the whole indicator tree, and `is_ready` is
+    /// called once per bar by the driver — so the walk was being repeated on
+    /// every bar of every run. Worse than linear: `Combine::unstable_bars` asks
+    /// both children for `stable_bars()` *and* then asks itself for
+    /// `warm_up_bars()`, which walks both children again, so the visit count
+    /// grows exponentially with tree depth. Through `Box<dyn Signal>` the calls
+    /// are opaque and the compiler cannot fold the repetition away; measured at
+    /// tree depth 8 it was 40% of total run time (`benches/tree.rs`).
+    ///
+    /// The value is a structural property — it depends on the shape of the
+    /// wired slots, not on the samples fed through them — so it is fixed once
+    /// the last builder call has returned. Every method that replaces a slot
+    /// clears this, as does [`reset`](Strategy::reset).
+    ///
+    /// `OnceLock` rather than `Cell` because `is_ready` takes `&self` and the
+    /// strategy must stay `Send + Sync` (the `parallel` feature's `run_many`
+    /// fans these across a rayon pool).
+    ready_at: OnceLock<usize>,
 }
 
 impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> SingleAssetStrategy<Sym> {
@@ -213,6 +235,7 @@ impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> SingleAssetStrategy<Sym> {
             position: Position::new(),
             book: Book::new(initial_equity),
             bars_seen: 0,
+            ready_at: OnceLock::new(),
         }
     }
 
@@ -231,6 +254,7 @@ impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> SingleAssetStrategy<Sym> {
         signal: impl Indicator<Input = Snapshot<Sym>, Output = bool> + 'static + Send + Sync,
     ) -> Self {
         self.rebalance = Box::new(signal);
+        self.ready_at = OnceLock::new();
         self
     }
 
@@ -256,6 +280,7 @@ impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> SingleAssetStrategy<Sym> {
     ) -> Self {
         self.long = Box::new(enter);
         self.close_long = Box::new(exit);
+        self.ready_at = OnceLock::new();
         self
     }
 
@@ -268,6 +293,7 @@ impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> SingleAssetStrategy<Sym> {
     ) -> Self {
         self.short = Box::new(enter);
         self.close_short = Box::new(exit);
+        self.ready_at = OnceLock::new();
         self
     }
 
@@ -296,6 +322,7 @@ impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> SingleAssetStrategy<Sym> {
         level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     ) -> Self {
         self.long_stop = Some(Box::new(level));
+        self.ready_at = OnceLock::new();
         self
     }
 
@@ -306,6 +333,7 @@ impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> SingleAssetStrategy<Sym> {
         level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     ) -> Self {
         self.long_target = Some(Box::new(level));
+        self.ready_at = OnceLock::new();
         self
     }
 
@@ -316,6 +344,7 @@ impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> SingleAssetStrategy<Sym> {
         level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     ) -> Self {
         self.short_stop = Some(Box::new(level));
+        self.ready_at = OnceLock::new();
         self
     }
 
@@ -326,6 +355,7 @@ impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> SingleAssetStrategy<Sym> {
         level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     ) -> Self {
         self.short_target = Some(Box::new(level));
+        self.ready_at = OnceLock::new();
         self
     }
 
@@ -347,6 +377,7 @@ impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> SingleAssetStrategy<Sym> {
         sizing: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     ) -> Self {
         self.sizing = Box::new(sizing);
+        self.ready_at = OnceLock::new();
         self
     }
 
@@ -518,7 +549,9 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Si
     }
 
     fn is_ready(&self) -> bool {
-        self.bars_seen >= self.stable_bars()
+        // Memoised: `stable_bars()` is an exponential-in-depth tree walk and
+        // this runs once per bar. See the `ready_at` field.
+        self.bars_seen >= *self.ready_at.get_or_init(|| self.stable_bars())
     }
 
     fn on_fill(&mut self, order: &Order<Sym>) {
@@ -582,6 +615,10 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Si
         self.position.reset();
         self.book.reset();
         self.bars_seen = 0;
+        // `reset` clears state, not structure, so the threshold is in fact
+        // unchanged — cleared anyway so the memo has exactly one lifetime rule
+        // ("valid until something touches the strategy") rather than two.
+        self.ready_at = OnceLock::new();
     }
 }
 

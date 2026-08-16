@@ -85,6 +85,21 @@ struct PerAssetState<Sym> {
     sizing: Chain<Sym>,
     position: Position,
     bars_seen: usize,
+    /// This leg's [`stable_bars`](Self::stable_bars), computed once when the
+    /// leg is built.
+    ///
+    /// `is_ready` is consulted per symbol per bar inside
+    /// [`MultiAssetStrategy::trade`], and `stable_bars()` is a walk of this
+    /// leg's whole chain set whose visit count grows exponentially with
+    /// expression depth (`Combine::unstable_bars` asks both children for
+    /// `stable_bars()` and then asks itself for `warm_up_bars()`, walking them
+    /// again). An N-symbol universe paid that N times a bar.
+    ///
+    /// A plain field rather than a `OnceLock`: unlike the single-asset and
+    /// pairs shapes there are no builders here — a leg is constructed whole by
+    /// [`MultiAssetStrategy::build_state`] and its chains are never replaced —
+    /// so the value is known at construction and can never go stale.
+    stable_bars: usize,
 }
 
 impl<Sym> PerAssetState<Sym> {
@@ -92,7 +107,10 @@ impl<Sym> PerAssetState<Sym> {
     /// (optional) protective levels, and sizing — same aggregation as
     /// [`SingleAssetStrategy::stable_bars`](crate::strategies::SingleAssetStrategy::stable_bars),
     /// applied per leg.
-    fn stable_bars(&self) -> usize {
+    /// Recompute this leg's stable-bar threshold from its chains. Called once,
+    /// at construction, into the [`stable_bars`](Self::stable_bars) field —
+    /// read that instead on any hot path.
+    fn compute_stable_bars(&self) -> usize {
         let mut n = self.long.stable_bars();
         n = n.max(self.close_long.stable_bars());
         n = n.max(self.short.stable_bars());
@@ -140,7 +158,7 @@ impl<Sym> PerAssetState<Sym> {
     /// [`Universe`](crate::strategies::universe::Universe) impl (e.g.
     /// [`AllOf`](crate::strategies::universe::AllOf)).
     fn is_ready(&self) -> bool {
-        self.bars_seen >= self.stable_bars()
+        self.bars_seen >= self.stable_bars
     }
 }
 
@@ -543,7 +561,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
     pub fn stable_bars(&self) -> usize {
         let mut n = self.rebalance.stable_bars();
         for state in self.states.values() {
-            n = n.max(state.stable_bars());
+            n = n.max(state.stable_bars);
         }
         n
     }
@@ -727,7 +745,7 @@ impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> MultiAssetStrategy<Sym> {
     fn build_state(&self, sym: &Sym) -> PerAssetState<Sym> {
         let position = Position::new();
         let level = |f: &Option<LevelFactory<Sym>>| f.as_ref().map(|f| f(sym, &position));
-        PerAssetState {
+        let mut state = PerAssetState {
             long: (self.long_factory)(sym),
             close_long: (self.close_long_factory)(sym),
             short: (self.short_factory)(sym),
@@ -739,7 +757,12 @@ impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> MultiAssetStrategy<Sym> {
             sizing: (self.sizing_factory)(sym),
             position,
             bars_seen: 0,
-        }
+            // Filled in below: the threshold is derived from the chains, so it
+            // cannot be computed until they are in place.
+            stable_bars: 0,
+        };
+        state.stable_bars = state.compute_stable_bars();
+        state
     }
 }
 
