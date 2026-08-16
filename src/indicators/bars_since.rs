@@ -11,7 +11,7 @@
 use fugazi_derive::SaveState;
 
 use crate::indicator::Indicator;
-use crate::indicators::ops::{MaxOp, MinOp};
+use crate::indicators::ops::{ExtremeOp, MaxOp, MinOp};
 use crate::indicators::stats::WindowExtreme;
 use crate::types::Real;
 
@@ -152,94 +152,78 @@ impl<S: Indicator<Output = bool>> Indicator for BarsSince<S> {
 /// assert_eq!(bars.update(9.0), Some(0.0));  // new high, now
 /// ```
 #[derive(Debug, Clone, SaveState)]
-pub struct BarsSinceHigh<S> {
+pub struct BarsSinceExtreme<S, Op> {
     #[state(source)]
     source: S,
-    extreme: WindowExtreme<MaxOp>,
-    /// Latest bars-since-high; `None` until the window is full.
+    extreme: WindowExtreme<Op>,
+    /// Latest bars-since-extremum; `None` until the window is full.
     pub value: Option<Real>,
 }
 
+/// Bars elapsed since `source` last set a new `period`-bar high.
+pub type BarsSinceHigh<S> = BarsSinceExtreme<S, MaxOp>;
 /// Bars elapsed since `source` last set a new `period`-bar low.
-///
-/// The low-side twin of [`BarsSinceHigh`]; see there for the full contract.
-#[derive(Debug, Clone, SaveState)]
-pub struct BarsSinceLow<S> {
-    #[state(source)]
-    source: S,
-    extreme: WindowExtreme<MinOp>,
-    /// Latest bars-since-low; `None` until the window is full.
-    pub value: Option<Real>,
+pub type BarsSinceLow<S> = BarsSinceExtreme<S, MinOp>;
+
+impl<S, Op: ExtremeOp> BarsSinceExtreme<S, Op> {
+    /// Build a bars-since-extremum counter over the last `period` samples.
+    ///
+    /// # Panics
+    /// Panics if `period` is zero.
+    pub fn new(source: S, period: usize) -> Self {
+        Self {
+            source,
+            extreme: WindowExtreme::new(period),
+            value: None,
+        }
+    }
+
+    pub fn period(&self) -> usize {
+        self.extreme.period()
+    }
 }
 
-// The two extremum shorthands differ only in the `ExtremeOp` marker, so their
-// bodies are generated rather than written twice.
-macro_rules! bars_since_extreme {
-    ($ty:ident, $op:ident, $what:literal) => {
-        impl<S> $ty<S> {
-            #[doc = concat!("Build a bars-since-", $what, " counter over the last `period` samples.")]
-            ///
-            /// # Panics
-            /// Panics if `period` is zero.
-            pub fn new(source: S, period: usize) -> Self {
-                Self {
-                    source,
-                    extreme: WindowExtreme::new(period),
-                    value: None,
-                }
-            }
+impl<S: Indicator<Output = Real>, Op: ExtremeOp> Indicator for BarsSinceExtreme<S, Op> {
+    type Input = S::Input;
+    type Output = Real;
 
-            pub fn period(&self) -> usize {
-                self.extreme.period()
+    fn update(&mut self, input: Self::Input) -> Option<Real> {
+        self.value = match self.source.update(input) {
+            Some(x) => {
+                self.extreme.update(x);
+                self.extreme.since().map(|n| n as Real)
             }
-        }
+            None => None,
+        };
+        self.value
+    }
 
-        impl<S: Indicator<Output = Real>> Indicator for $ty<S> {
-            type Input = S::Input;
-            type Output = Real;
+    fn value(&self) -> Option<Real> {
+        self.value
+    }
 
-            fn update(&mut self, input: Self::Input) -> Option<Real> {
-                self.value = match self.source.update(input) {
-                    Some(x) => {
-                        self.extreme.update(x);
-                        self.extreme.since().map(|n| n as Real)
-                    }
-                    None => None,
-                };
-                self.value
-            }
+    fn warm_up_period(&self) -> usize {
+        self.source.warm_up_period().max(1) + self.extreme.period() - 1
+    }
 
-            fn value(&self) -> Option<Real> {
-                self.value
-            }
+    fn unstable_period(&self) -> usize {
+        self.source.unstable_period()
+    }
 
-            fn warm_up_period(&self) -> usize {
-                self.source.warm_up_period().max(1) + self.extreme.period() - 1
-            }
+    fn reset(&mut self) {
+        self.source.reset();
+        self.extreme.reset();
+        self.value = None;
+    }
 
-            fn unstable_period(&self) -> usize {
-                self.source.unstable_period()
-            }
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
 
-            fn reset(&mut self) {
-                self.source.reset();
-                self.extreme.reset();
-                self.value = None;
-            }
-
-            fn save_state(&self) -> serde_json::Value {
-                self.save_state_fields()
-            }
-
-            fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
-                self.load_state_fields(state)
-            }
-        }
-    };
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
+    }
 }
-
-bars_since_extreme!(BarsSinceHigh, MaxOp, "high");
-bars_since_extreme!(BarsSinceLow, MinOp, "low");
 
 #[cfg(test)]
 mod tests {
