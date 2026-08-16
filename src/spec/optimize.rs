@@ -55,10 +55,7 @@ use serde_json::Value;
 
 use crate::spec::metrics;
 use crate::spec::params;
-use crate::spec::{
-    BasketStrategySpec, MultiAssetStrategySpec, PairsStrategySpec, PortfolioSpec,
-    SingleStrategySpec,
-};
+use crate::spec::SingleStrategySpec;
 
 /// Sort direction of a `--best-by` optimization: descending = higher is better
 /// (Sharpe, CAGR, …); ascending = lower is better (drawdown, volatility, VaR, …).
@@ -258,40 +255,6 @@ pub fn sample_metrics(eval: &Evaluation) -> Option<&metrics::Metrics> {
     }
 }
 
-/// Substitute a params table into the base strategy value, then typed-parse
-/// as a [`PairsStrategySpec`]. Pairs twin of [`build_spec`].
-pub fn build_pairs_spec(base: &Value, params: &HashMap<String, Value>) -> Result<PairsStrategySpec> {
-    let value = params::substitute(base.clone(), params)?;
-    Ok(serde_json::from_value(value)?)
-}
-
-/// Substitute a params table into the base strategy value, then typed-parse
-/// as a [`BasketStrategySpec`]. Basket twin of [`build_spec`].
-pub fn build_basket_spec(base: &Value, params: &HashMap<String, Value>) -> Result<BasketStrategySpec> {
-    let value = params::substitute(base.clone(), params)?;
-    Ok(serde_json::from_value(value)?)
-}
-
-/// Substitute a params table into the base strategy value, then typed-parse
-/// as a [`MultiAssetStrategySpec`]. Multi-asset twin of [`build_spec`].
-pub fn build_multi_spec(
-    base: &Value,
-    params: &HashMap<String, Value>,
-) -> Result<MultiAssetStrategySpec> {
-    let value = params::substitute(base.clone(), params)?;
-    Ok(serde_json::from_value(value)?)
-}
-
-/// Substitute a params table into the base strategy value, then typed-parse
-/// as a [`PortfolioSpec`]. Portfolio twin of [`build_spec`].
-pub fn build_portfolio_spec(
-    base: &Value,
-    params: &HashMap<String, Value>,
-) -> Result<PortfolioSpec> {
-    let value = params::substitute(base.clone(), params)?;
-    Ok(serde_json::from_value(value)?)
-}
-
 /// Substitute a params table into the base strategy value, then typed-parse as
 /// whichever shape `kind` names — the one builder every driver needs, replacing
 /// a five-arm match at each call site.
@@ -303,22 +266,12 @@ pub fn build_any_spec(
     use crate::spec::StrategySpec as S;
     use crate::spec::input::StrategyKind as K;
     Ok(match kind {
-        K::Single => S::Single(Box::new(build_strategy_ref(base, params)?)),
-        K::Pairs => S::Pairs(Box::new(build_pairs_spec(base, params)?)),
-        K::Basket => S::Basket(Box::new(build_basket_spec(base, params)?)),
-        K::Multi => S::Multi(Box::new(build_multi_spec(base, params)?)),
-        K::Portfolio => S::Portfolio(Box::new(build_portfolio_spec(base, params)?)),
+        K::Single => S::Single(Box::new(build_typed(base, params)?)),
+        K::Pairs => S::Pairs(Box::new(build_typed(base, params)?)),
+        K::Basket => S::Basket(Box::new(build_typed(base, params)?)),
+        K::Multi => S::Multi(Box::new(build_typed(base, params)?)),
+        K::Portfolio => S::Portfolio(Box::new(build_typed(base, params)?)),
     })
-}
-
-/// [`build_spec`]'s preset-tolerant twin: parses as a [`StrategyRef`](crate::spec::preset::StrategyRef), so a
-/// `!ma_crossover { … }` document sweeps like a spelled-out one.
-pub fn build_strategy_ref(
-    base: &Value,
-    params: &HashMap<String, Value>,
-) -> Result<crate::spec::StrategyRef> {
-    let value = params::substitute(base.clone(), params)?;
-    Ok(serde_json::from_value(value)?)
 }
 
 /// The union of axis-column names across every subgrid: every axis name, plus
@@ -706,6 +659,21 @@ pub fn combine_params(
 
 /// Substitute a params table into the base strategy value, then typed-parse.
 pub fn build_spec(base: &Value, params: &HashMap<String, Value>) -> Result<SingleStrategySpec> {
+    build_typed(base, params)
+}
+
+/// Substitute a params table into the base strategy value, then typed-parse as
+/// `T`.
+///
+/// This replaces six byte-identical two-line functions that differed only in
+/// return type (`build_pairs_spec`, `build_basket_spec`, `build_multi_spec`,
+/// `build_portfolio_spec`, `build_strategy_ref` and `build_spec`'s body), four
+/// of which were `pub` and called exactly once — from `build_any_spec`, one
+/// line below.
+pub fn build_typed<T: serde::de::DeserializeOwned>(
+    base: &Value,
+    params: &HashMap<String, Value>,
+) -> Result<T> {
     let value = params::substitute(base.clone(), params)?;
     Ok(serde_json::from_value(value)?)
 }

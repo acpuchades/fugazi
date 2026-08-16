@@ -26,13 +26,15 @@ use crate::metrics;
 use crate::run::join_universe_by_time;
 use crate::style;
 
+use fugazi::spec::pairs::PairsStrategySpec;
+
 // Kernel imports from the library — types, ranking, walk-forward layout.
 // Re-exported publicly so `crate::optimize::reject_axes_in_params` (called
 // from `main.rs`) and other library-side items keep resolving through this
 // module.
 pub use fugazi::spec::optimize::{
     ColumnPos, Direction, Evaluation, Row, Subgrid,
-    build_any_spec, build_pairs_spec, build_spec, cartesian, format_number,
+    build_any_spec, build_spec, build_typed, cartesian, format_number,
     format_value, lookup, lookup_windowed,
     mean_std_of, optimize, probe_params, ranking_value, reject_axes_in_params,
     row_dsr_inputs, split_axes,
@@ -422,11 +424,11 @@ fn run_multi_symbol(
     // Basket / multi / portfolio take the frame's whole symbol set.
     let universe: Vec<String> = match opts.strategy_kind {
         StrategyKind::Pairs => {
-            let probe = build_pairs_spec(base_value, &probe_params(&subgrids[0]))?;
+            let probe = build_typed::<PairsStrategySpec>(base_value, &probe_params(&subgrids[0]))?;
             let left = probe.left.clone();
             let right = probe.right.clone();
             for (idx, subgrid) in subgrids.iter().enumerate().skip(1) {
-                let other = build_pairs_spec(base_value, &probe_params(subgrid))?;
+                let other = build_typed::<PairsStrategySpec>(base_value, &probe_params(subgrid))?;
                 if other.left != left || other.right != right {
                     bail!(
                         "--grid #{} resolves to pair `{}`/`{}`, but --grid #1 resolves to \
