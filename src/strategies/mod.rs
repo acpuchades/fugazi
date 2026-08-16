@@ -61,8 +61,37 @@ pub use multi_asset::MultiAssetStrategy;
 pub use pairs::PairsStrategy;
 pub use single_asset::SingleAssetStrategy;
 
-use crate::indicators::{Close, CurrentBar, High, Low, Pick};
-use crate::types::Real;
+use crate::indicators::{Close, CurrentBar, High, Low, Pick, Position};
+use crate::types::{Real, Snapshot};
+use crate::Indicator;
+
+/// A boxed real-valued chain over a per-bar snapshot — what a per-symbol
+/// factory produces.
+///
+/// `basket.rs` called this `Chain` and `multi_asset.rs` called it
+/// `LevelChain`; they were the same type, written twice.
+pub(crate) type Chain<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real> + Send + Sync>;
+
+/// A per-symbol, position-aware factory for a protective level.
+pub(crate) type LevelFactory<Sym> = Box<dyn Fn(&Sym, &Position) -> Chain<Sym> + Send + Sync>;
+
+/// Box a user-supplied protective-level factory into a [`LevelFactory`].
+///
+/// The four builders (`long_stop_loss`, `long_take_profit`,
+/// `short_stop_loss`, `short_take_profit`) existed on both the basket and
+/// multi-asset shapes with byte-identical bodies — eight copies of the same
+/// five lines, differing only in a local binding name and which of the two
+/// spellings of `Chain` they named.
+pub(crate) fn level_factory<Sym, F, L>(factory: F) -> LevelFactory<Sym>
+where
+    F: Fn(&Sym, &Position) -> L + 'static + Send + Sync,
+    L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
+{
+    Box::new(move |sym: &Sym, pos: &Position| {
+        let chain: Chain<Sym> = Box::new(factory(sym, pos));
+        chain
+    })
+}
 
 /// Shorthand for `Close::of(Pick::<Sym>::new())` — read the strategy's own
 /// asset's close out of the incoming [`Snapshot`](crate::types::Snapshot).

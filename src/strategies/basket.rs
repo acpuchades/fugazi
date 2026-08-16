@@ -35,22 +35,13 @@ use std::hash::Hash;
 use crate::indicators::{Book, Every, Position, Value};
 use crate::prelude::*;
 use crate::types::Snapshot;
+use super::{Chain, LevelFactory};
 
-/// A per-symbol score / sizing chain: a boxed real-valued indicator over the
-/// basket's [`Snapshot<Sym>`](crate::types::Snapshot). One instance is built
-/// per symbol on first sight, so every leaf inside is free to root itself on
-/// the symbol via [`Pick`](crate::indicators::Pick).
-type Chain<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real> + Send + Sync>;
 
 /// A per-symbol factory: builds a fresh [`Chain`] for the given symbol. Called
 /// exactly once per symbol the first time it appears in a snapshot.
 type Factory<Sym> = Box<dyn Fn(&Sym) -> Chain<Sym> + Send + Sync>;
 
-/// A per-symbol protective-level factory: receives both the symbol and the
-/// per-symbol [`Position`] so `position.entry()` / `.peak()` / `.trough()`
-/// leaves can anchor themselves inside the returned chain. Called once per
-/// symbol first sight, same as [`Factory`].
-type LevelFactory<Sym> = Box<dyn Fn(&Sym, &Position) -> Chain<Sym> + Send + Sync>;
 
 // The `Selection` algebra and the `Universe` trait moved to sibling
 // modules — they are independent of this shape (multi-asset uses the
@@ -294,10 +285,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> BasketStrategy<
         F: Fn(&Sym, &Position) -> L + 'static + Send + Sync,
         L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
-        self.long_stop_factory = Some(Box::new(move |sym: &Sym, pos: &Position| {
-            let ind: Chain<Sym> = Box::new(factory(sym, pos));
-            ind
-        }));
+        self.long_stop_factory = Some(super::level_factory(factory));
         self
     }
 
@@ -308,10 +296,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> BasketStrategy<
         F: Fn(&Sym, &Position) -> L + 'static + Send + Sync,
         L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
-        self.long_target_factory = Some(Box::new(move |sym: &Sym, pos: &Position| {
-            let ind: Chain<Sym> = Box::new(factory(sym, pos));
-            ind
-        }));
+        self.long_target_factory = Some(super::level_factory(factory));
         self
     }
 
@@ -322,10 +307,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> BasketStrategy<
         F: Fn(&Sym, &Position) -> L + 'static + Send + Sync,
         L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
-        self.short_stop_factory = Some(Box::new(move |sym: &Sym, pos: &Position| {
-            let ind: Chain<Sym> = Box::new(factory(sym, pos));
-            ind
-        }));
+        self.short_stop_factory = Some(super::level_factory(factory));
         self
     }
 
@@ -336,10 +318,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> BasketStrategy<
         F: Fn(&Sym, &Position) -> L + 'static + Send + Sync,
         L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
-        self.short_target_factory = Some(Box::new(move |sym: &Sym, pos: &Position| {
-            let ind: Chain<Sym> = Box::new(factory(sym, pos));
-            ind
-        }));
+        self.short_target_factory = Some(super::level_factory(factory));
         self
     }
 

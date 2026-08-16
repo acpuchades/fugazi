@@ -38,6 +38,7 @@ use crate::indicators::{Book, ValueBool, Position, Value};
 use crate::prelude::*;
 use crate::strategies::universe::{AllOf, AnyOf, Floating, Universe};
 use crate::types::Snapshot;
+use super::{Chain, LevelFactory};
 
 // ---------------------------------------------------------------------------
 // Chain type aliases
@@ -46,25 +47,17 @@ use crate::types::Snapshot;
 /// A per-symbol boolean chain — one of the four signal slots.
 type SignalChain<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool> + Send + Sync>;
 
-/// A per-symbol real chain — the sizing multiplier and each of the four
-/// protective levels.
-type LevelChain<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real> + Send + Sync>;
 
 /// A per-symbol signal factory: `Fn(&Sym) -> SignalChain<Sym>`.
 type SignalFactory<Sym> = Box<dyn Fn(&Sym) -> SignalChain<Sym> + Send + Sync>;
 
-/// A per-symbol level factory that receives the per-symbol
-/// [`Position`] so `position.entry()` / `.peak()` / `.trough()` inside
-/// the chain resolves against the strategy's actual entry for that
-/// symbol.
-type LevelFactory<Sym> = Box<dyn Fn(&Sym, &Position) -> LevelChain<Sym> + Send + Sync>;
 
-/// A per-symbol sizing factory: `Fn(&Sym) -> LevelChain<Sym>`. The sizing
+/// A per-symbol sizing factory: `Fn(&Sym) -> Chain<Sym>`. The sizing
 /// slot doesn't take a [`Position`] because a size that reads back the
 /// entry price for its own leg is unusual — most sizing recipes are
 /// symbol-agnostic magnitudes (equal weight, ATR risk, drawdown throttle
 /// on the shared [`Book`]).
-type SizingFactory<Sym> = Box<dyn Fn(&Sym) -> LevelChain<Sym> + Send + Sync>;
+type SizingFactory<Sym> = Box<dyn Fn(&Sym) -> Chain<Sym> + Send + Sync>;
 
 /// The **rebalance gate** — a boolean signal decided on the whole
 /// snapshot (not per symbol). On bars where it reads `true`,
@@ -85,11 +78,11 @@ struct PerAssetState<Sym> {
     close_long: SignalChain<Sym>,
     short: SignalChain<Sym>,
     close_short: SignalChain<Sym>,
-    long_stop: Option<LevelChain<Sym>>,
-    long_target: Option<LevelChain<Sym>>,
-    short_stop: Option<LevelChain<Sym>>,
-    short_target: Option<LevelChain<Sym>>,
-    sizing: LevelChain<Sym>,
+    long_stop: Option<Chain<Sym>>,
+    long_target: Option<Chain<Sym>>,
+    short_stop: Option<Chain<Sym>>,
+    short_target: Option<Chain<Sym>>,
+    sizing: Chain<Sym>,
     position: Position,
     bars_seen: usize,
 }
@@ -329,7 +322,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
             short_stop_factory: None,
             short_target_factory: None,
             sizing_factory: Box::new(|_sym: &Sym| {
-                let s: LevelChain<Sym> = Box::new(Value::<Snapshot<Sym>>::new(1.0));
+                let s: Chain<Sym> = Box::new(Value::<Snapshot<Sym>>::new(1.0));
                 s
             }),
             states: HashMap::new(),
@@ -424,10 +417,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
         F: Fn(&Sym, &Position) -> L + 'static + Send + Sync,
         L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
-        self.long_stop_factory = Some(Box::new(move |sym: &Sym, pos: &Position| {
-            let l: LevelChain<Sym> = Box::new(factory(sym, pos));
-            l
-        }));
+        self.long_stop_factory = Some(super::level_factory(factory));
         self
     }
 
@@ -438,10 +428,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
         F: Fn(&Sym, &Position) -> L + 'static + Send + Sync,
         L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
-        self.long_target_factory = Some(Box::new(move |sym: &Sym, pos: &Position| {
-            let l: LevelChain<Sym> = Box::new(factory(sym, pos));
-            l
-        }));
+        self.long_target_factory = Some(super::level_factory(factory));
         self
     }
 
@@ -453,10 +440,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
         F: Fn(&Sym, &Position) -> L + 'static + Send + Sync,
         L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
-        self.short_stop_factory = Some(Box::new(move |sym: &Sym, pos: &Position| {
-            let l: LevelChain<Sym> = Box::new(factory(sym, pos));
-            l
-        }));
+        self.short_stop_factory = Some(super::level_factory(factory));
         self
     }
 
@@ -467,10 +451,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
         F: Fn(&Sym, &Position) -> L + 'static + Send + Sync,
         L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
-        self.short_target_factory = Some(Box::new(move |sym: &Sym, pos: &Position| {
-            let l: LevelChain<Sym> = Box::new(factory(sym, pos));
-            l
-        }));
+        self.short_target_factory = Some(super::level_factory(factory));
         self
     }
 
@@ -490,7 +471,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
         S: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
         self.sizing_factory = Box::new(move |sym: &Sym| {
-            let l: LevelChain<Sym> = Box::new(factory(sym));
+            let l: Chain<Sym> = Box::new(factory(sym));
             l
         });
         self
