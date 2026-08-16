@@ -40,8 +40,16 @@
 //! 8-hourly settlements inside a day add up to that day's total carry.
 //! **Everything else is a level** — the premium index is the basis
 //! `(mark - index) / index`, open interest is a stock, the ratios are
-//! proportions — so a bar keeps the last sample it saw, the number that was
-//! true when the bar ended.
+//! proportions — so a bar keeps its **latest sample by that sample's own
+//! timestamp**, the number that was true when the bar ended.
+//!
+//! "Latest by timestamp" rather than "last one folded in" is load-bearing,
+//! because the archives do not partition cleanly by bucket: a `metrics` file
+//! for day *D* runs from `D 00:05` to a closing row stamped a second or two
+//! into *D+1*, so the bucket at each midnight is written by two different
+//! files. The fetches run concurrently, so which of the two lands first is
+//! whatever the network decided — and a fold that took the last writer handed
+//! back a different series on every run.
 //!
 //! A bar may carry some columns and not others: at `[1h]` only every eighth bar
 //! sees a funding settlement, and `metrics` begins years after `fundingRate`
@@ -284,66 +292,114 @@ impl SeriesSource for BinanceVision {
             }
 
             let fetched = fetch_concurrently(&client, jobs, max_in_flight, min_delay).await?;
-
-            // One `bucket -> value` map per schema column, plus the bars the
-            // kline archive contributes.
-            let mut columns: Vec<BTreeMap<i64, Real>> = vec![BTreeMap::new(); schema.len()];
-            let mut bars: BTreeMap<i64, Candle> = BTreeMap::new();
-            for (kind, url, csv) in &fetched {
-                if *kind != Archive::Klines {
-                    continue;
-                }
-                for (time, candle) in parse_candles(csv, url)? {
-                    if time < since.0 || time >= until_ms {
-                        continue;
-                    }
-                    bars.insert(floor_to_bucket(time, interval), candle);
-                }
-            }
-            for (kind, url, csv) in fetched {
-                for (time, slot, value) in parse_archive(kind, &csv, &url)? {
-                    if time < since.0 || time >= until_ms {
-                        continue;
-                    }
-                    let bucket = floor_to_bucket(time, interval);
-                    match kind.aggregation() {
-                        // An accrual: samples inside one bar add up.
-                        Aggregation::Sum => *columns[slot].entry(bucket).or_insert(0.0) += value,
-                        // A level: the bar keeps the last value it saw.
-                        Aggregation::Last => {
-                            columns[slot].insert(bucket, value);
-                        }
-                    }
-                }
-            }
-
-            let mut buckets: Vec<i64> = columns
-                .iter()
-                .flat_map(|c| c.keys().copied())
-                .chain(bars.keys().copied())
-                .collect();
-            buckets.sort_unstable();
-            buckets.dedup();
-
-            Ok(buckets
-                .into_iter()
-                .map(|time| Atom {
-                    // A bar when the kline archive covered this bucket; `None`
-                    // for a bucket only the overlay archives reached — early
-                    // funding history predates nothing, but `metrics` and the
-                    // klines start at different dates.
-                    candle: bars.get(&time).copied(),
-                    time: Some(Timestamp(time)),
-                    overlays: Some(OverlayInfo::sparse(
-                        schema.clone(),
-                        columns
-                            .iter()
-                            .map(|c| c.get(&time).copied().map(OverlayValue::Real)),
-                    )),
-                })
-                .collect())
+            assemble(&fetched, &schema, interval, since.0, until_ms)
         }
     }
+}
+
+/// One bucket's value for one column, tagged with the timestamp of the sample
+/// that set it.
+///
+/// The tag is what lets [`Aggregation::Last`] mean *newest sample* rather than
+/// *last one folded in*. The two are different questions whenever a bucket is
+/// written by more than one archive, which at every UTC midnight it is: a
+/// `metrics` file for day *D* closes with a row stamped a second or two into
+/// *D+1*, so both that file and *D+1*'s own contribute to *D+1*'s first bucket.
+/// Fetches complete out of order, so the last writer is the network's choice
+/// and the newest sample is not.
+///
+/// [`Aggregation::Sum`] doesn't consult it — addition doesn't care which
+/// sample came last — but still keeps it current, so the field means the same
+/// thing in every cell.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Cell {
+    /// Sample timestamp, in epoch milliseconds, before bucketing.
+    at: i64,
+    value: Real,
+}
+
+/// Fold every fetched archive into one [`Atom`] per bucket of `interval`,
+/// keeping only samples inside `[since, until)`.
+///
+/// Split out of [`SeriesSource::atoms`] so the assembly can be exercised
+/// against a fixed set of archives in an arbitrary order — which is exactly
+/// what the concurrent fetch hands it.
+fn assemble(
+    fetched: &[(Archive, String, String)],
+    schema: &Arc<Schema>,
+    interval: Interval,
+    since: i64,
+    until: i64,
+) -> Result<Vec<Atom>, SourceError> {
+    // One `bucket -> cell` map per schema column, plus the bars the kline
+    // archive contributes.
+    let mut columns: Vec<BTreeMap<i64, Cell>> = vec![BTreeMap::new(); schema.len()];
+    let mut bars: BTreeMap<i64, Candle> = BTreeMap::new();
+    for (kind, url, csv) in fetched {
+        if *kind != Archive::Klines {
+            continue;
+        }
+        for (time, candle) in parse_candles(csv, url)? {
+            if time < since || time >= until {
+                continue;
+            }
+            bars.insert(floor_to_bucket(time, interval), candle);
+        }
+    }
+    for (kind, url, csv) in fetched {
+        for (time, slot, value) in parse_archive(*kind, csv, url)? {
+            if time < since || time >= until {
+                continue;
+            }
+            let bucket = floor_to_bucket(time, interval);
+            let cell = columns[slot].entry(bucket).or_insert(Cell {
+                at: i64::MIN,
+                value: 0.0,
+            });
+            match kind.aggregation() {
+                // An accrual: samples inside one bar add up, whatever order
+                // they arrive in.
+                Aggregation::Sum => {
+                    cell.value += value;
+                    cell.at = cell.at.max(time);
+                }
+                // A level: the bar keeps its newest sample. `>=` so that two
+                // archives carrying the same instant resolve to the later of
+                // them in job order, which `fetch_concurrently` fixes.
+                Aggregation::Last => {
+                    if time >= cell.at {
+                        *cell = Cell { at: time, value };
+                    }
+                }
+            }
+        }
+    }
+
+    let mut buckets: Vec<i64> = columns
+        .iter()
+        .flat_map(|c| c.keys().copied())
+        .chain(bars.keys().copied())
+        .collect();
+    buckets.sort_unstable();
+    buckets.dedup();
+
+    Ok(buckets
+        .into_iter()
+        .map(|time| Atom {
+            // A bar when the kline archive covered this bucket; `None` for a
+            // bucket only the overlay archives reached — early funding history
+            // predates nothing, but `metrics` and the klines start at
+            // different dates.
+            candle: bars.get(&time).copied(),
+            time: Some(Timestamp(time)),
+            overlays: Some(OverlayInfo::sparse(
+                schema.clone(),
+                columns
+                    .iter()
+                    .map(|c| c.get(&time).map(|cell| OverlayValue::Real(cell.value))),
+            )),
+        })
+        .collect())
 }
 
 /// How a column's samples collapse into one bar.
@@ -567,28 +623,39 @@ fn unzip_single(bytes: &[u8]) -> Result<String, String> {
 /// by round-trip latency. `min_delay` paces the *launches*, not the requests,
 /// so a burst does not all leave at once.
 ///
-/// Results come back unordered — every caller merges them into bucket-keyed
-/// maps, so order carries no information. One failed fetch abandons the rest:
-/// a partial series would be indistinguishable from a genuinely sparse one.
+/// Results come back in **job order**, not completion order. The fold that
+/// consumes them is order-sensitive — floating-point addition isn't
+/// associative, and [`Aggregation::Last`] has to break ties between two
+/// archives carrying the same instant — so handing it whatever order the
+/// network happened to settle in would make the assembled series depend on
+/// that. Re-ordering a few thousand already-downloaded results costs nothing
+/// against the requests that produced them.
+///
+/// One failed fetch abandons the rest: a partial series would be
+/// indistinguishable from a genuinely sparse one.
 async fn fetch_concurrently(
     client: &reqwest::Client,
     jobs: Vec<(Archive, String)>,
     max_in_flight: usize,
     min_delay: Duration,
 ) -> Result<Vec<(Archive, String, String)>, SourceError> {
-    let mut pending = jobs.into_iter();
-    let mut set: tokio::task::JoinSet<(Archive, String, Result<Option<String>, SourceError>)> =
-        tokio::task::JoinSet::new();
+    /// What one fetch task resolves to: the job's index — which is what fixes
+    /// the order results are folded in — then what was asked for and what came
+    /// back.
+    type Fetched = (usize, Archive, String, Result<Option<String>, SourceError>);
+
+    let mut pending = jobs.into_iter().enumerate();
+    let mut set: tokio::task::JoinSet<Fetched> = tokio::task::JoinSet::new();
     let mut out = Vec::new();
 
     let mut spawn_next = |set: &mut tokio::task::JoinSet<_>| -> bool {
-        let Some((kind, url)) = pending.next() else {
+        let Some((nth, (kind, url))) = pending.next() else {
             return false;
         };
         let client = client.clone();
         set.spawn(async move {
             let got = fetch_archive(&client, &url).await;
-            (kind, url, got)
+            (nth, kind, url, got)
         });
         true
     };
@@ -600,17 +667,22 @@ async fn fetch_concurrently(
     }
 
     while let Some(joined) = set.join_next().await {
-        let (kind, url, got) =
+        let (nth, kind, url, got) =
             joined.map_err(|e| SourceError::Decode(format!("archive task panicked: {e}")))?;
         if let Some(csv) = got? {
-            out.push((kind, url, csv));
+            out.push((nth, kind, url, csv));
         }
         if !min_delay.is_zero() {
             tokio::time::sleep(min_delay).await;
         }
         spawn_next(&mut set);
     }
-    Ok(out)
+
+    out.sort_unstable_by_key(|&(nth, ..)| nth);
+    Ok(out
+        .into_iter()
+        .map(|(_, kind, url, csv)| (kind, url, csv))
+        .collect())
 }
 
 /// Normalise an archive timestamp to milliseconds.
@@ -1169,5 +1241,256 @@ mod tests {
         // pull that day's archive.
         assert_eq!(days_between(start, start + day), vec!["2024-03-01"]);
         assert!(days_between(start, start).is_empty());
+    }
+
+    // ---- assembly order-independence -----------------------------------
+    //
+    // The fixtures below are real rows from
+    // `BTCUSDT-metrics-2024-04-0{5,6}.zip`, trimmed to the ones that decide a
+    // bucket. Note where each file starts and stops: `…-04-05` runs from
+    // `04-05 00:05` to a closing row stamped `04-06 00:00:02`, so it and
+    // `…-04-06` both write the 2024-04-06 bucket. That overlap is what made a
+    // fold on arrival order non-deterministic.
+
+    const METRICS_HEADER: &str = "create_time,symbol,sum_open_interest,\
+        sum_open_interest_value,count_toptrader_long_short_ratio,\
+        sum_toptrader_long_short_ratio,count_long_short_ratio,\
+        sum_taker_long_short_vol_ratio\n";
+
+    const METRICS_04_05: &str = "2024-04-05 00:05:00,BTCUSDT,78432.716,5360432578.13101,\
+         1.42340146,1.20394800,1.47815614,0.37383300\n\
+         2024-04-05 23:55:00,BTCUSDT,75257.616,5112326469.8017235,\
+         1.77040313,1.22562400,1.62500662,0.66955500\n\
+         2024-04-06 00:00:02,BTCUSDT,75172.170,5098412003.9472,\
+         1.77730106,1.22438300,1.62792057,0.30651700\n";
+
+    const METRICS_04_06: &str = "2024-04-06 00:05:00,BTCUSDT,75190.008,5092690472.907608,\
+         1.77050439,1.22454500,1.62308548,0.63514900\n\
+         2024-04-06 23:55:00,BTCUSDT,76614.894,5279801107.328188,\
+         1.39970506,1.19442500,1.33473734,0.94815600\n\
+         2024-04-07 00:00:00,BTCUSDT,76496.262,5270382006.24284,\
+         1.40269659,1.19779800,1.33616894,0.89304100\n";
+
+    fn metrics(day: &str, rows: &str) -> (Archive, String, String) {
+        (
+            Archive::Metrics,
+            format!("metrics-{day}"),
+            format!("{METRICS_HEADER}{rows}"),
+        )
+    }
+
+    /// Every archive a `[1d]` futures fetch of 2024-04-05..08 would collect:
+    /// the two overlapping `metrics` days, the perpetual's own klines, the
+    /// three funding settlements on 2024-04-06, and the premium index.
+    fn every_archive() -> Vec<(Archive, String, String)> {
+        vec![
+            (
+                Archive::Klines,
+                "klines-2024-04".to_string(),
+                "open_time,open,high,low,close,volume,close_time,quote_volume,count,\
+                 taker_buy_volume,taker_buy_quote_volume,ignore\n\
+                 1712361600000,68896.0,69700.0,68050.0,69362.6,100.0,1712447999999,\
+                 7000000.0,1234,50.0,3500000.0,0\n"
+                    .to_string(),
+            ),
+            (
+                Archive::Funding,
+                "funding-2024-04".to_string(),
+                "calc_time,funding_interval_hours,last_funding_rate\n\
+                 1712361600000,8,0.00010000\n\
+                 1712390400000,8,0.00002000\n\
+                 1712419200000,8,0.00000500\n"
+                    .to_string(),
+            ),
+            (
+                Archive::Premium,
+                "premium-2024-04".to_string(),
+                "open_time,open,high,low,close,volume,close_time,quote_volume,count,\
+                 taker_buy_volume,taker_buy_quote_volume,ignore\n\
+                 1712361600000,0.00082094,0.00233507,0.00017569,0.00117217,0,\
+                 1712447999999,0,17280,0,0,0\n"
+                    .to_string(),
+            ),
+            metrics("2024-04-05", METRICS_04_05),
+            metrics("2024-04-06", METRICS_04_06),
+        ]
+    }
+
+    /// `assemble` over 2024-04-05..08 at `[1d]`, projected into something
+    /// comparable — `Atom` carries `Arc`s and no `PartialEq`.
+    type Row = (i64, Option<Candle>, Vec<Option<Real>>);
+    fn assembled(fetched: &[(Archive, String, String)]) -> Vec<Row> {
+        let schema = binance_vision_schema(Market::UsdMFutures).clone();
+        assemble(
+            fetched,
+            &schema,
+            Interval::Day(1),
+            1712275200000, // 2024-04-05
+            1712534400000, // 2024-04-08
+        )
+        .expect("fixtures parse")
+        .into_iter()
+        .map(|atom| {
+            let values = atom
+                .overlays
+                .expect("every atom carries the provider schema")
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Some(OverlayValue::Real(r)) => Some(*r),
+                    _ => None,
+                })
+                .collect();
+            (atom.time.expect("bucketed").0, atom.candle, values)
+        })
+        .collect()
+    }
+
+    #[test]
+    fn a_bucket_keeps_its_newest_sample_not_the_file_that_landed_last() {
+        // The 2024-04-06 bucket is written by both daily files: `04-06`'s own
+        // 23:55 print, and `04-05`'s closing row two seconds past midnight.
+        // The one that describes the end of 2024-04-06 is the 23:55 print, so
+        // that is what the bar keeps — whichever file the fold saw first.
+        for order in [
+            vec![
+                metrics("2024-04-05", METRICS_04_05),
+                metrics("2024-04-06", METRICS_04_06),
+            ],
+            vec![
+                metrics("2024-04-06", METRICS_04_06),
+                metrics("2024-04-05", METRICS_04_05),
+            ],
+        ] {
+            let rows = assembled(&order);
+            let bucket = rows
+                .iter()
+                .find(|(time, ..)| *time == 1712361600000)
+                .expect("2024-04-06");
+            // Slots 6..=11 — the six that moved together in the bug report.
+            assert_eq!(bucket.2[6], Some(76614.894), "open_interest");
+            assert_eq!(bucket.2[7], Some(5279801107.328188), "open_interest_value");
+            assert_eq!(bucket.2[8], Some(1.33473734), "long_short_ratio");
+            assert_eq!(bucket.2[9], Some(1.39970506), "top_trader_account_ratio");
+            assert_eq!(bucket.2[10], Some(1.194425), "top_trader_position_ratio");
+            assert_eq!(bucket.2[11], Some(0.948156), "taker_long_short_ratio");
+        }
+    }
+
+    #[test]
+    fn assembly_does_not_depend_on_the_order_archives_arrive_in() {
+        // A concurrent fetch settles in whatever order the network chose, so
+        // the fold has to be a function of the archives alone.
+        let expected = assembled(&every_archive());
+        let n = every_archive().len();
+        for skip in 0..n {
+            let mut rotated = every_archive();
+            rotated.rotate_left(skip);
+            assert_eq!(assembled(&rotated), expected, "rotated by {skip}");
+        }
+        let mut reversed = every_archive();
+        reversed.reverse();
+        assert_eq!(assembled(&reversed), expected, "reversed");
+
+        // And the fold is still doing its job: the bar has its candle, its
+        // three funding settlements summed into one day's carry, and the
+        // premium index alongside.
+        let (time, candle, values) = expected
+            .iter()
+            .find(|(time, ..)| *time == 1712361600000)
+            .expect("2024-04-06");
+        assert_eq!(*time, 1712361600000);
+        assert_eq!(candle.expect("kline archive covered it").close, 69362.6);
+        assert!(
+            (values[4].expect("funding_rate") - 0.000125).abs() < 1e-12,
+            "three settlements accrue: {:?}",
+            values[4],
+        );
+        assert_eq!(values[5], Some(0.00117217), "premium_index");
+    }
+
+    #[test]
+    fn fetches_are_returned_in_job_order_not_completion_order() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Hold the first job back so it cannot possibly complete first. Job
+        // order has to survive that, or the fold's tie-breaking — and the
+        // floating-point sum — depend on the network.
+        let body = |csv: &str| {
+            let mut buf = Vec::new();
+            {
+                let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+                w.start_file::<_, ()>("a.csv", zip::write::SimpleFileOptions::default())
+                    .expect("zip entry");
+                std::io::Write::write_all(&mut w, csv.as_bytes()).expect("write");
+                w.finish().expect("finish");
+            }
+            buf
+        };
+
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime.block_on(async {
+            let server = MockServer::start().await;
+            for (n, delay_ms) in [(0u32, 300u64), (1, 0), (2, 0)] {
+                Mock::given(method("GET"))
+                    .and(path(format!("/{n}")))
+                    .respond_with(
+                        ResponseTemplate::new(200)
+                            .set_body_bytes(body(&format!("row-{n}")))
+                            .set_delay(Duration::from_millis(delay_ms)),
+                    )
+                    .mount(&server)
+                    .await;
+            }
+
+            let jobs = (0..3)
+                .map(|n| (Archive::Metrics, format!("{}/{n}", server.uri())))
+                .collect();
+            let got = fetch_concurrently(&reqwest::Client::new(), jobs, 8, Duration::ZERO)
+                .await
+                .expect("all three fetch");
+            let csvs: Vec<&str> = got.iter().map(|(_, _, csv)| csv.as_str()).collect();
+            assert_eq!(csvs, vec!["row-0", "row-1", "row-2"]);
+        });
+    }
+
+    #[test]
+    fn a_missing_archive_is_no_data_and_anything_else_is_an_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // A 404 is the normal shape of both the pre-listing past and the
+        // not-yet-published present, so it folds in as an empty period. A 5xx
+        // is not: swallowing it would drop a mid-history day silently, and
+        // differently on every run.
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime.block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/missing"))
+                .respond_with(ResponseTemplate::new(404))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/broken"))
+                .respond_with(ResponseTemplate::new(503))
+                .mount(&server)
+                .await;
+
+            let client = reqwest::Client::new();
+            let absent = fetch_archive(&client, &format!("{}/missing", server.uri()))
+                .await
+                .expect("404 is not an error");
+            assert!(absent.is_none());
+
+            let err = fetch_archive(&client, &format!("{}/broken", server.uri()))
+                .await
+                .expect_err("a 503 must not read as an empty period");
+            assert!(
+                matches!(err, SourceError::Http { status: 503, .. }),
+                "got {err:?}",
+            );
+        });
     }
 }
