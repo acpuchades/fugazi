@@ -119,6 +119,11 @@ impl<Sym: Clone + Eq + Hash, W: Wallet<Sym>> Wallet<Sym> for SleeveWallet<Sym, W
     fn can_short(&self) -> bool {
         self.inner.can_short()
     }
+    /// Delegates, for the same reason: a sleeve carves a share out of one
+    /// account's cash, it does not redenominate it.
+    fn quote_ccy(&self) -> Option<&str> {
+        self.inner.quote_ccy()
+    }
     fn update(&mut self, symbol: Sym, candle: Candle) -> Vec<Order<Sym>> {
         self.inner.update(symbol, candle)
     }

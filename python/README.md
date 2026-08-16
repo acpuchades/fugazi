@@ -462,6 +462,7 @@ wallet.price("AAPL")         # last fed price (or None)
 wallet.positions()           # {symbol: units}
 wallet.orders()              # the blotter: list of Order(symbol, side, units)
 wallet.can_short             # can this account hold a negative position?
+wallet.quote_ccy             # what currency are these numbers in? (or None)
 ```
 
 `can_short` is what an account *can* do, asked before trading: `True` on a
@@ -470,6 +471,24 @@ on the spot `CoinbaseWallet`, whose positions are owned base-asset balances. It
 informs rather than enforces — a spot wallet still clamps a short target to flat
 on its own — so a long/short strategy can pick a long-only path up front instead
 of learning the limit from a clamped order.
+
+`quote_ccy` is the same shape of question about the account's *unit*: `"USDT"` on
+`OkxWallet` (the margin currency a linear USDⓈ-M swap settles in), whatever the
+`CoinbaseWallet` was built against (`"USD"` by default), and `None` on a
+`PaperWallet` unless you pass one — simulated money has no venue to ask:
+
+```python
+wallet = ta.PaperWallet(10_000.0, quote_ccy="EUR")
+wallet.quote_ccy             # "EUR"
+```
+
+**`None` means "unlabelled", never "no currency".** Every amount in this API is a
+bare number in *some* unit, and fugazi does no FX anywhere: a run is sound only if
+every price fed to it shares one numeraire. `quote_ccy` reports what that
+numeraire is — to label a balance, refuse a mixed-currency universe, or reconcile
+against a venue — and answering does not make mixing safe. One caveat on
+`OkxWallet`: `funds` is in `quote_ccy`, but `equity` is OKX's own USD valuation of
+the account, so the two differ by the USDT peg.
 
 > **Getters vs methods.** State a wallet or a frozen value object *already
 > holds* is an attribute, not a call: `wallet.funds`, `wallet.equity`,

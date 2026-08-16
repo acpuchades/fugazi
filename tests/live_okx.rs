@@ -70,6 +70,18 @@ fn a_swap_account_reports_that_it_can_short() {
     assert!(wallet("http://127.0.0.1:1".to_string()).can_short());
 }
 
+/// The margin currency a linear USDⓈ-M swap settles in — fixed by the instrument
+/// type rather than read off the account, so this needs no mock either. It is
+/// what `funds` (the `USDT` row's `availBal`) is denominated in; `equity` is
+/// OKX's own USD valuation, which is the one asymmetry a caller has to know.
+#[test]
+fn a_swap_account_reports_the_currency_its_funds_are_in() {
+    assert_eq!(
+        wallet("http://127.0.0.1:1".to_string()).quote_ccy(),
+        Some("USDT")
+    );
+}
+
 #[test]
 fn set_position_places_a_market_order_and_update_reports_the_fill_in_base_units() {
     use std::sync::Arc;

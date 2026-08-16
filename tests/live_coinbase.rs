@@ -67,6 +67,23 @@ fn wallet(uri: String) -> CoinbaseWallet {
     CoinbaseWallet::with_base_url(uri, KEY_NAME, &test_pem()).expect("key parses")
 }
 
+/// Unlike OKX's, this one is genuinely per-account — Advanced Trade quotes the
+/// same base against several currencies, so the answer follows the wallet's own
+/// configured quote leg rather than the venue. Needs no mock: it is read back
+/// from construction, not from the balance endpoint.
+#[test]
+fn a_spot_account_reports_the_quote_currency_it_was_built_against() {
+    let dead = || "http://127.0.0.1:1".to_string();
+    // The default is what `DEFAULT_QUOTE_CCY` names, and it is stated rather
+    // than left implicit — the whole point is that a caller never has to assume.
+    assert_eq!(wallet(dead()).quote_ccy(), Some("USD"));
+    // And it follows the override, since `funds` reads that currency's balance.
+    assert_eq!(
+        wallet(dead()).with_quote_ccy("EUR").quote_ccy(),
+        Some("EUR")
+    );
+}
+
 #[test]
 fn set_position_market_buys_the_difference_and_update_reports_the_fill() {
     use std::sync::Arc;

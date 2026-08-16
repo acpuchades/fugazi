@@ -182,6 +182,21 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for LedgerWallet<Sym> {
             .account_can_short
     }
 
+    /// Takes the trait default (`None`) deliberately, unlike
+    /// [`can_short`](Wallet::can_short) right above.
+    ///
+    /// Every read here goes through the portfolio mutex, and `Option<&str>`
+    /// cannot outlive the guard it would be borrowed from — so delegating would
+    /// mean either an owned `String` on the trait (an allocation on every call,
+    /// on every wallet, for one caller) or caching a clone on each handle. The
+    /// account's denomination is worth neither: `can_short` earned its cached
+    /// copy because `Portfolio::trade` needs it per-bar to gate child intent,
+    /// and nothing reads a child ledger's currency at all. Ask the account
+    /// wallet, which is where the fact lives.
+    fn quote_ccy(&self) -> Option<&str> {
+        None
+    }
+
     fn update(&mut self, _symbol: Sym, _candle: Candle) -> Vec<Order<Sym>> {
         // The driver feeds the account wallet the portfolio trades, not a child
         // handle. A handle receiving update() means the caller wired the driver

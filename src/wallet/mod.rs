@@ -292,6 +292,33 @@ pub trait Wallet<Sym> {
         true
     }
 
+    /// The currency this wallet's [`funds`](Wallet::funds) and quote leg are
+    /// denominated in — `"USDT"` for a linear USDⓈ-M swap account, `"USD"` or
+    /// `"EUR"` for a spot one.
+    ///
+    /// **`None` means "this wallet does not say", never "no currency".** Same
+    /// shape as [`positions`](Self::positions)'s empty default: every amount in
+    /// this trait is a bare [`Real`] in *some* unit, and a caller must read the
+    /// default as an absent label rather than as an absent currency. A
+    /// [`PaperWallet`] answers `None` unless it was told
+    /// ([`with_quote_ccy`](PaperWallet::with_quote_ccy)) — simulated money has
+    /// no venue to ask.
+    ///
+    /// This is **introspection, not conversion**, the same line
+    /// [`can_short`](Self::can_short) draws. fugazi does no FX anywhere: a run
+    /// is sound only if every price fed to it shares one numeraire, and this
+    /// method reports what that numeraire *is* so a caller can label a balance,
+    /// refuse a mixed-currency universe, or reconcile against a venue — never so
+    /// that anything here can convert between two. Answering does not make
+    /// mixing safe.
+    ///
+    /// A wrapper delegates to what it wraps, for `can_short`'s reason: the
+    /// denomination is a fact about the account underneath, not about the view
+    /// onto it.
+    fn quote_ccy(&self) -> Option<&str> {
+        None
+    }
+
     /// Install a per-symbol [`TradingCosts`] override — every fill on
     /// `symbol` thereafter books through this bundle instead of the wallet's
     /// default. Latest-wins per symbol.

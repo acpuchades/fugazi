@@ -654,6 +654,17 @@ impl Wallet<String> for CoinbaseWallet {
         false
     }
 
+    /// The quote currency this wallet was built against — [`DEFAULT_QUOTE_CCY`]
+    /// unless [`with_quote_ccy`](CoinbaseWallet::with_quote_ccy) changed it.
+    ///
+    /// Unlike OKX's, this is genuinely per-account: Advanced Trade quotes the
+    /// same base against several currencies, so it is the caller's choice of
+    /// product leg rather than a property of the venue. Both
+    /// [`funds`](Wallet::funds) and [`equity`](Wallet::equity) are in it.
+    fn quote_ccy(&self) -> Option<&str> {
+        Some(&self.quote_ccy)
+    }
+
     fn price(&self, symbol: &String) -> Option<Reference> {
         self.marks.get(symbol).map(|&p| Reference(p))
     }

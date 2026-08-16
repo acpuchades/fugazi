@@ -141,6 +141,11 @@ pub struct PaperWallet<Sym> {
     next_id: u64,
     costs: TradingCosts,
     per_symbol_costs: HashMap<Sym, TradingCosts>,
+    /// The label reported by [`quote_ccy`](Wallet::quote_ccy), or `None` when
+    /// the caller never said. Purely descriptive — nothing in the fill or
+    /// pricing path reads it, because simulated money has no venue to check it
+    /// against.
+    quote_ccy: Option<String>,
 }
 
 impl<Sym> PaperWallet<Sym> {
@@ -171,7 +176,20 @@ impl<Sym> PaperWallet<Sym> {
             next_id: 0,
             costs,
             per_symbol_costs: HashMap::new(),
+            quote_ccy: None,
         }
+    }
+
+    /// Label the currency this wallet's cash is denominated in, reported back
+    /// through [`quote_ccy`](Wallet::quote_ccy).
+    ///
+    /// Descriptive only: nothing here converts, and a labelled wallet trades
+    /// identically to an unlabelled one. It exists so a paper account can carry
+    /// the same fact a live one reports from its venue — a simulation of a EUR
+    /// book can say so, instead of leaving every caller to assume dollars.
+    pub fn with_quote_ccy(mut self, ccy: impl Into<String>) -> Self {
+        self.quote_ccy = Some(ccy.into());
+        self
     }
 
     /// Every order executed so far, in order (the trade blotter).
@@ -687,6 +705,13 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
     /// answer every backtest reads.
     fn can_short(&self) -> bool {
         true
+    }
+
+    /// Whatever [`with_quote_ccy`](PaperWallet::with_quote_ccy) was told, and
+    /// `None` otherwise — simulated money has no venue to ask, so an unlabelled
+    /// paper wallet genuinely does not know what unit it is counting in.
+    fn quote_ccy(&self) -> Option<&str> {
+        self.quote_ccy.as_deref()
     }
 
     fn price(&self, symbol: &Sym) -> Option<Reference> {
@@ -1238,6 +1263,10 @@ mod tests {
         // Same default-shape question for the capability read: signed positions
         // are the trait's model, so an impl that says nothing can short.
         assert!(w.can_short());
+        // The denomination default goes the other way, and deliberately: there
+        // is no numeraire it would be safe to assume, so silence reads as "does
+        // not say" rather than as a guess at dollars.
+        assert_eq!(w.quote_ccy(), None);
     }
 
     #[test]
@@ -1313,6 +1342,29 @@ mod tests {
         let over_paper: SleeveWallet<&str, PaperWallet<&str>> =
             SleeveWallet::new(PaperWallet::new(1_000.0), HashMap::new());
         assert!(over_paper.can_short());
+    }
+
+    #[test]
+    fn quote_ccy_is_unlabelled_until_told_and_a_sleeve_delegates_it() {
+        // Simulated money has no venue to ask, so the paper wallet says nothing
+        // rather than assuming. `None` is "unlabelled", not "no currency" — the
+        // funds below are in *some* unit either way.
+        let plain: PaperWallet<&str> = PaperWallet::new(1_000.0);
+        assert_eq!(plain.quote_ccy(), None);
+        assert_eq!(plain.funds().0, 1_000.0);
+
+        // Labelling is descriptive only: same funds, same fills, one more fact.
+        let eur: PaperWallet<&str> = PaperWallet::new(1_000.0).with_quote_ccy("EUR");
+        assert_eq!(eur.quote_ccy(), Some("EUR"));
+        assert_eq!(eur.funds().0, 1_000.0);
+
+        // A sleeve carves a share out of one account's cash; it does not
+        // redenominate it. Both directions, as for `can_short`.
+        let over_eur = SleeveWallet::new(eur, HashMap::new());
+        assert_eq!(over_eur.quote_ccy(), Some("EUR"));
+        let over_plain: SleeveWallet<&str, PaperWallet<&str>> =
+            SleeveWallet::new(PaperWallet::new(1_000.0), HashMap::new());
+        assert_eq!(over_plain.quote_ccy(), None);
     }
 
     #[test]

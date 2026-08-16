@@ -746,6 +746,21 @@ def test_can_short_reports_what_each_account_can_hold():
     assert "can_short" in dir(ta.CoinbaseWallet)
 
 
+def test_quote_ccy_reports_the_unit_each_account_counts_in():
+    # `None` is "unlabelled", never "no currency": simulated money has no venue
+    # to ask, so the paper wallet declines to guess rather than assuming dollars.
+    assert ta.PaperWallet(10_000.0).quote_ccy is None
+    # Labelling is descriptive only — same funds, same behaviour, one more fact.
+    labelled = ta.PaperWallet(10_000.0, quote_ccy="EUR")
+    assert labelled.quote_ccy == "EUR"
+    assert labelled.funds == 10_000.0
+    # The old positional call is untouched, which is what keeps this additive.
+    assert ta.PaperWallet(10_000.0).funds == 10_000.0
+    # A live account answers from its venue: USDⓈ-M swaps settle in USDT.
+    assert ta.OkxWallet.demo("key", "secret", "passphrase").quote_ccy == "USDT"
+    assert "quote_ccy" in dir(ta.CoinbaseWallet)
+
+
 def test_run_rejects_a_non_wallet():
     # `.run(...)` accepts one of the supported wallet types; anything else is a
     # clear TypeError from the wallet-dispatch (not a downstream failure). Match

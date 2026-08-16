@@ -661,10 +661,26 @@ impl Wallet<String> for OkxWallet {
         true
     }
 
+    /// [`QUOTE_CCY`] — the margin currency a linear USDⓈ-M swap settles in, and
+    /// the balance whose `availBal` [`funds`](Wallet::funds) reports.
+    ///
+    /// Static rather than read from the account: the instrument type fixes it.
+    /// Note the mismatch documented on [`equity`](Wallet::equity) — that figure
+    /// is OKX's own USD valuation, not this.
+    fn quote_ccy(&self) -> Option<&str> {
+        Some(QUOTE_CCY)
+    }
+
     fn price(&self, symbol: &String) -> Option<Reference> {
         self.marks.get(symbol).map(|&p| Reference(p))
     }
 
+    /// The account's `totalEq`, which OKX reports as a **USD** valuation of every
+    /// holding — *not* [`quote_ccy`](Wallet::quote_ccy)'s `USDT`, which is what
+    /// [`funds`](Wallet::funds) is in. The two differ by the USDT peg, so they
+    /// agree to well within a tick in practice and this is reported as the venue
+    /// states it rather than silently converted (fugazi does no FX). A caller
+    /// reconciling to the last cent should read the balance detail itself.
     fn equity(&self) -> Reference {
         Reference(self.equity)
     }

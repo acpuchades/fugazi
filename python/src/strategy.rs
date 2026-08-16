@@ -287,10 +287,21 @@ pub(crate) struct PyWallet {
 #[pymethods]
 impl PyWallet {
     /// A wallet seeded with `funds` of cash and no positions.
+    ///
+    /// `quote_ccy` labels the currency that cash is in (`"USD"`, `"EUR"`,
+    /// `"USDT"`), readable back off `.quote_ccy`. Purely descriptive — nothing
+    /// converts, and a labelled wallet trades identically to an unlabelled one;
+    /// it is there so a simulation can carry the fact a live wallet reports from
+    /// its venue instead of leaving a caller to assume dollars.
     #[new]
-    pub(crate) fn new(funds: f64) -> Self {
+    #[pyo3(signature = (funds, quote_ccy=None))]
+    pub(crate) fn new(funds: f64, quote_ccy: Option<String>) -> Self {
+        let inner = PaperWallet::new(funds);
         PyWallet {
-            inner: PaperWallet::new(funds),
+            inner: match quote_ccy {
+                Some(ccy) => inner.with_quote_ccy(ccy),
+                None => inner,
+            },
         }
     }
 
@@ -328,6 +339,16 @@ impl PyWallet {
     #[getter]
     pub(crate) fn can_short(&self) -> bool {
         self.inner.can_short()
+    }
+
+    /// The currency `funds` and `equity` are counted in, or `None` when nobody
+    /// said — which is the default for a paper wallet, since simulated money has
+    /// no venue to ask. `None` means "unlabelled", never "no currency": the
+    /// numbers are always in *some* unit. Pass `quote_ccy=` to the constructor
+    /// to set it.
+    #[getter]
+    pub(crate) fn quote_ccy(&self) -> Option<&str> {
+        self.inner.quote_ccy()
     }
 
     /// Every order executed so far (the trade blotter).
@@ -637,6 +658,15 @@ impl PyOkxWallet {
         self.inner.can_short()
     }
 
+    /// `"USDT"` — the margin currency a linear USDⓈ-M swap settles in, and what
+    /// `funds` reports. Note `equity` is OKX's own USD valuation of the account
+    /// rather than this; the two differ by the USDT peg, and nothing here
+    /// converts between them.
+    #[getter]
+    pub(crate) fn quote_ccy(&self) -> Option<&str> {
+        self.inner.quote_ccy()
+    }
+
     /// Force an account-state refresh (balance + positions) now. Raises
     /// `ValueError` on a REST failure. `update` calls this each bar; call it
     /// directly for a one-off sync (e.g. right after construction).
@@ -860,6 +890,15 @@ impl PyCoinbaseWallet {
     #[getter]
     pub(crate) fn can_short(&self) -> bool {
         self.inner.can_short()
+    }
+
+    /// The quote currency this wallet was built against — `"USD"` unless the
+    /// constructor's `quote_ccy` said otherwise. Both `funds` and `equity` are
+    /// in it. Unlike OKX's, this is genuinely per-account: Advanced Trade quotes
+    /// the same base against several currencies.
+    #[getter]
+    pub(crate) fn quote_ccy(&self) -> Option<&str> {
+        self.inner.quote_ccy()
     }
 
     /// Force an account-state refresh (balances) now. Raises `ValueError` on a
