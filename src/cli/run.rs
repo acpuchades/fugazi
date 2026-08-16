@@ -282,7 +282,7 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
     // Print the inputs block up front so a long-running run still shows the
     // user what they asked for while it's working.
     if !opts.quiet {
-        let costs_active = !opts.cost_config.resolve(&symbol, effective_freq).is_none();
+        let costs_active = costs_active(opts.cost_config, [symbol.as_str()], effective_freq);
         style::print_header("run", "backtest a strategy over CSV series");
         style::print_warns(&style::collect_warnings(&skipped_overlay_columns, no_cost_warning, "results"));
         print_inputs_block(opts, start, end, atoms.len(), costs_active);
@@ -411,14 +411,11 @@ pub fn run_pairs(
         mc: opts.montecarlo.cloned(),
     };
     if !opts.quiet {
-        let costs_active = !opts
-            .cost_config
-            .resolve(&spec.left, effective_freq)
-            .is_none()
-            || !opts
-                .cost_config
-                .resolve(&spec.right, effective_freq)
-                .is_none();
+        let costs_active = costs_active(
+            opts.cost_config,
+            [spec.left.as_str(), spec.right.as_str()],
+            effective_freq,
+        );
         style::print_header("run", "pair-trade a two-leg strategy over CSV series");
         style::print_warns(&style::collect_warnings(&[], no_cost_warning, "results"));
         print_pairs_inputs_block(opts, spec, start, end, bars.len(), costs_active);
@@ -576,9 +573,8 @@ pub fn run_basket(
         mc: opts.montecarlo.cloned(),
     };
     if !opts.quiet {
-        let costs_active = universe
-            .iter()
-            .any(|s| !opts.cost_config.resolve(s, effective_freq).is_none());
+        let costs_active =
+            costs_active(opts.cost_config, universe.iter().map(String::as_str), effective_freq);
         style::print_header("run", "trade a basket across an N-symbol universe");
         style::print_warns(&style::collect_warnings(&[], no_cost_warning, "results"));
         print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active);
@@ -713,9 +709,8 @@ pub fn run_multi(
         mc: opts.montecarlo.cloned(),
     };
     if !opts.quiet {
-        let costs_active = universe
-            .iter()
-            .any(|s| !opts.cost_config.resolve(s, effective_freq).is_none());
+        let costs_active =
+            costs_active(opts.cost_config, universe.iter().map(String::as_str), effective_freq);
         style::print_header(
             "run",
             "trade a multi-asset portfolio across an N-symbol universe",
@@ -858,10 +853,12 @@ pub fn run_portfolio(
     if !opts.quiet {
         // Costs are active if the unscoped default is non-empty or any
         // per-symbol scoped bundle in the universe is non-empty.
-        let costs_active = !opts.cost_config.resolve("", effective_freq).is_none()
-            || universe
-                .iter()
-                .any(|s| !opts.cost_config.resolve(s, effective_freq).is_none());
+        // `""` probes the `default:` leg — see `costs_active`.
+        let costs_active = costs_active(
+            opts.cost_config,
+            std::iter::once("").chain(universe.iter().map(String::as_str)),
+            effective_freq,
+        );
         style::print_header(
             "run",
             "trade a composite portfolio of heterogeneous child strategies",
@@ -926,6 +923,29 @@ pub fn run_portfolio(
 /// snapshots)` where each snapshot carries only the symbols with a bar at
 /// that time — sparse per bar is normal. Each per-symbol series is already
 /// sorted (BTreeMap invariant), so a single N-way merge over cursors
+/// Whether a cost model is active for **any** of `symbols` at `freq`.
+///
+/// Every runner needs this to decide whether the console blocks say "gross" or
+/// "net", and each had grown its own spelling: a bare `resolve(&symbol)` for
+/// single-asset, an `||` of the two legs for pairs, an `any()` over the
+/// universe for basket and multi, and — for portfolio — an `any()` *plus* a
+/// separate probe of the `""` default leg.
+///
+/// That last term is redundant whenever the universe is non-empty, since a
+/// configured `default:` resolves for every symbol too. It is preserved rather
+/// than dropped: the portfolio runner passes `""` as an extra probe symbol, so
+/// the behaviour is identical and the asymmetry is visible at the call site
+/// instead of buried in a fifth copy of the expression.
+fn costs_active<'a>(
+    cost_config: &fugazi::spec::costs::CostConfig,
+    symbols: impl IntoIterator<Item = &'a str>,
+    freq: Option<Frequency>,
+) -> bool {
+    symbols
+        .into_iter()
+        .any(|s| !cost_config.resolve(s, freq).is_none())
+}
+
 /// suffices.
 pub(crate) fn join_universe_by_time(
     per_symbol: &[(String, Vec<(String, Atom)>)],
