@@ -257,28 +257,7 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
     let bars_per_year = calendar::pick_bars_per_year(opts.bars_per_year, &symbol, effective_freq)
         .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
     let no_cost_warning = !opts.costs_supplied;
-    let windowed_bars = opts
-        .windowed
-        .map(|w| {
-            w.resolve(effective_freq, opts.asset_class)
-                .map_err(anyhow::Error::msg)
-        })
-        .transpose()
-        .context("resolving `-w/--windowed`")?;
-    let seconds_per_bar = opts
-        .asset_class
-        .zip(effective_freq)
-        .map(|(class, freq)| class.trading_seconds_per_bar(freq));
-    let inputs = EvalContext {
-        cash: opts.cash,
-        bars_per_year,
-        risk_free_rate: opts.risk_free_rate,
-        cost_config: opts.cost_config,
-        effective_freq,
-        windowed: windowed_bars,
-        seconds_per_bar,
-        mc: opts.montecarlo.cloned(),
-    };
+    let inputs = eval_context(opts, effective_freq, bars_per_year)?;
     // Print the inputs block up front so a long-running run still shows the
     // user what they asked for while it's working.
     if !opts.quiet {
@@ -301,54 +280,7 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
 
     // Emit `fills.csv` and echo each fill in the same order the wallet booked
     // them. The console stream matches the CSV row-for-row.
-    write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
-    if !opts.quiet {
-        println!();
-        style::print_section("fills");
-        stream_fills(&iter);
-    }
-    if !opts.quiet {
-        print_rejection_warning(&iter.report);
-    }
-    write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
-
-    write_returns_csv(&iter, &opts.out_dir.join("returns.csv"))?;
-
-    metrics::write_yaml(&iter.metrics, &opts.out_dir.join("metrics.yml"))?;
-
-    if let Some(ws) = iter.windowed.as_deref() {
-        let dsr_context = metrics::windows_dsr_context(ws);
-        write_windowed_csv(ws, &iter.bars, dsr_context, &opts.out_dir.join("metrics.csv"))?;
-    }
-    if let Some(rs) = iter.rolling.as_deref() {
-        write_windowed_csv(rs, &iter.bars, None, &opts.out_dir.join("rolling.csv"))?;
-    }
-
-    let summary = Summary {
-        final_equity: iter.summary.final_equity,
-        return_pct: if opts.cash != 0.0 {
-            (iter.summary.final_equity - opts.cash) / opts.cash * 100.0
-        } else {
-            0.0
-        },
-        fills: iter.summary.fills,
-        bars: iter.summary.bars,
-    };
-
-    let finished = SystemTime::now();
-    if !opts.quiet {
-        print_result_block(opts, &summary, started, finished);
-        print_metrics_block(
-            &iter.metrics,
-            None,
-            iter.gross_metrics.as_ref(),
-            effective_freq,
-        );
-        if let Some(windows) = iter.windowed.as_deref() {
-            print_windowed_metrics_block(windows);
-        }
-    }
-    Ok(summary)
+    emit_run(&iter, opts, started, effective_freq)
 }
 
 /// The pairs twin of [`run`]: drive a
@@ -388,28 +320,7 @@ pub fn run_pairs(
             .or_else(|| calendar::pick_bars_per_year(opts.bars_per_year, &spec.right, effective_freq))
             .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
     let no_cost_warning = !opts.costs_supplied;
-    let windowed_bars = opts
-        .windowed
-        .map(|w| {
-            w.resolve(effective_freq, opts.asset_class)
-                .map_err(anyhow::Error::msg)
-        })
-        .transpose()
-        .context("resolving `-w/--windowed`")?;
-    let seconds_per_bar = opts
-        .asset_class
-        .zip(effective_freq)
-        .map(|(class, freq)| class.trading_seconds_per_bar(freq));
-    let inputs = EvalContext {
-        cash: opts.cash,
-        bars_per_year,
-        risk_free_rate: opts.risk_free_rate,
-        cost_config: opts.cost_config,
-        effective_freq,
-        windowed: windowed_bars,
-        seconds_per_bar,
-        mc: opts.montecarlo.cloned(),
-    };
+    let inputs = eval_context(opts, effective_freq, bars_per_year)?;
     if !opts.quiet {
         let costs_active = costs_active(
             opts.cost_config,
@@ -435,54 +346,7 @@ pub fn run_pairs(
     let iter = iterate(&any, bars.clone(), &snapshots, &inputs, opts)?;
     emit_montecarlo(&iter, opts)?;
 
-    write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
-    if !opts.quiet {
-        println!();
-        style::print_section("fills");
-        stream_fills(&iter);
-    }
-    if !opts.quiet {
-        print_rejection_warning(&iter.report);
-    }
-    write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
-
-    write_returns_csv(&iter, &opts.out_dir.join("returns.csv"))?;
-
-    metrics::write_yaml(&iter.metrics, &opts.out_dir.join("metrics.yml"))?;
-
-    if let Some(ws) = iter.windowed.as_deref() {
-        let dsr_context = metrics::windows_dsr_context(ws);
-        write_windowed_csv(ws, &iter.bars, dsr_context, &opts.out_dir.join("metrics.csv"))?;
-    }
-    if let Some(rs) = iter.rolling.as_deref() {
-        write_windowed_csv(rs, &iter.bars, None, &opts.out_dir.join("rolling.csv"))?;
-    }
-
-    let summary = Summary {
-        final_equity: iter.summary.final_equity,
-        return_pct: if opts.cash != 0.0 {
-            (iter.summary.final_equity - opts.cash) / opts.cash * 100.0
-        } else {
-            0.0
-        },
-        fills: iter.summary.fills,
-        bars: iter.summary.bars,
-    };
-
-    let finished = SystemTime::now();
-    if !opts.quiet {
-        print_result_block(opts, &summary, started, finished);
-        print_metrics_block(
-            &iter.metrics,
-            None,
-            iter.gross_metrics.as_ref(),
-            effective_freq,
-        );
-        if let Some(windows) = iter.windowed.as_deref() {
-            print_windowed_metrics_block(windows);
-        }
-    }
-    Ok(summary)
+    emit_run(&iter, opts, started, effective_freq)
 }
 
 /// The basket runner: drive a [`BasketStrategy`](fugazi::strategies::BasketStrategy)
@@ -535,43 +399,9 @@ pub fn run_basket(
     // per-symbol cadences (that's a follow-up if mixed cadences become a
     // real need); typical baskets are homogeneous.
     let representative = &universe[0];
-    let effective_freq = calendar::pick_frequency(opts.frequency, representative).or_else(|| {
-        per_symbol
-            .iter()
-            .find(|(s, _)| s == representative)
-            .and_then(|(_, atoms)| {
-                calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a))
-            })
-    });
-    let bars_per_year = calendar::pick_bars_per_year(
-        opts.bars_per_year,
-        representative,
-        effective_freq,
-    )
-    .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
+    let (effective_freq, bars_per_year) = universe_calendar(opts, representative, &per_symbol);
     let no_cost_warning = !opts.costs_supplied;
-    let windowed_bars = opts
-        .windowed
-        .map(|w| {
-            w.resolve(effective_freq, opts.asset_class)
-                .map_err(anyhow::Error::msg)
-        })
-        .transpose()
-        .context("resolving `-w/--windowed`")?;
-    let seconds_per_bar = opts
-        .asset_class
-        .zip(effective_freq)
-        .map(|(class, freq)| class.trading_seconds_per_bar(freq));
-    let inputs = EvalContext {
-        cash: opts.cash,
-        bars_per_year,
-        risk_free_rate: opts.risk_free_rate,
-        cost_config: opts.cost_config,
-        effective_freq,
-        windowed: windowed_bars,
-        seconds_per_bar,
-        mc: opts.montecarlo.cloned(),
-    };
+    let inputs = eval_context(opts, effective_freq, bars_per_year)?;
     if !opts.quiet {
         let costs_active =
             costs_active(opts.cost_config, universe.iter().map(String::as_str), effective_freq);
@@ -584,54 +414,7 @@ pub fn run_basket(
     let iter = iterate(&any, bars.clone(), &snapshots, &inputs, opts)?;
     emit_montecarlo(&iter, opts)?;
 
-    write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
-    if !opts.quiet {
-        println!();
-        style::print_section("fills");
-        stream_fills(&iter);
-    }
-    if !opts.quiet {
-        print_rejection_warning(&iter.report);
-    }
-    write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
-
-    write_returns_csv(&iter, &opts.out_dir.join("returns.csv"))?;
-
-    metrics::write_yaml(&iter.metrics, &opts.out_dir.join("metrics.yml"))?;
-
-    if let Some(ws) = iter.windowed.as_deref() {
-        let dsr_context = metrics::windows_dsr_context(ws);
-        write_windowed_csv(ws, &iter.bars, dsr_context, &opts.out_dir.join("metrics.csv"))?;
-    }
-    if let Some(rs) = iter.rolling.as_deref() {
-        write_windowed_csv(rs, &iter.bars, None, &opts.out_dir.join("rolling.csv"))?;
-    }
-
-    let summary = Summary {
-        final_equity: iter.summary.final_equity,
-        return_pct: if opts.cash != 0.0 {
-            (iter.summary.final_equity - opts.cash) / opts.cash * 100.0
-        } else {
-            0.0
-        },
-        fills: iter.summary.fills,
-        bars: iter.summary.bars,
-    };
-
-    let finished = SystemTime::now();
-    if !opts.quiet {
-        print_result_block(opts, &summary, started, finished);
-        print_metrics_block(
-            &iter.metrics,
-            None,
-            iter.gross_metrics.as_ref(),
-            effective_freq,
-        );
-        if let Some(windows) = iter.windowed.as_deref() {
-            print_windowed_metrics_block(windows);
-        }
-    }
-    Ok(summary)
+    emit_run(&iter, opts, started, effective_freq)
 }
 
 /// The multi-asset runner: drive a
@@ -671,43 +454,9 @@ pub fn run_multi(
     let start = bars.first().map_or("", |t| t.as_str());
     let end = bars.last().map_or("", |t| t.as_str());
     let representative = &universe[0];
-    let effective_freq = calendar::pick_frequency(opts.frequency, representative).or_else(|| {
-        per_symbol
-            .iter()
-            .find(|(s, _)| s == representative)
-            .and_then(|(_, atoms)| {
-                calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a))
-            })
-    });
-    let bars_per_year = calendar::pick_bars_per_year(
-        opts.bars_per_year,
-        representative,
-        effective_freq,
-    )
-    .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
+    let (effective_freq, bars_per_year) = universe_calendar(opts, representative, &per_symbol);
     let no_cost_warning = !opts.costs_supplied;
-    let windowed_bars = opts
-        .windowed
-        .map(|w| {
-            w.resolve(effective_freq, opts.asset_class)
-                .map_err(anyhow::Error::msg)
-        })
-        .transpose()
-        .context("resolving `-w/--windowed`")?;
-    let seconds_per_bar = opts
-        .asset_class
-        .zip(effective_freq)
-        .map(|(class, freq)| class.trading_seconds_per_bar(freq));
-    let inputs = EvalContext {
-        cash: opts.cash,
-        bars_per_year,
-        risk_free_rate: opts.risk_free_rate,
-        cost_config: opts.cost_config,
-        effective_freq,
-        windowed: windowed_bars,
-        seconds_per_bar,
-        mc: opts.montecarlo.cloned(),
-    };
+    let inputs = eval_context(opts, effective_freq, bars_per_year)?;
     if !opts.quiet {
         let costs_active =
             costs_active(opts.cost_config, universe.iter().map(String::as_str), effective_freq);
@@ -723,52 +472,7 @@ pub fn run_multi(
     let iter = iterate(&any, bars.clone(), &snapshots, &inputs, opts)?;
     emit_montecarlo(&iter, opts)?;
 
-    write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
-    if !opts.quiet {
-        println!();
-        style::print_section("fills");
-        stream_fills(&iter);
-    }
-    if !opts.quiet {
-        print_rejection_warning(&iter.report);
-    }
-    write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
-    write_returns_csv(&iter, &opts.out_dir.join("returns.csv"))?;
-    metrics::write_yaml(&iter.metrics, &opts.out_dir.join("metrics.yml"))?;
-
-    if let Some(ws) = iter.windowed.as_deref() {
-        let dsr_context = metrics::windows_dsr_context(ws);
-        write_windowed_csv(ws, &iter.bars, dsr_context, &opts.out_dir.join("metrics.csv"))?;
-    }
-    if let Some(rs) = iter.rolling.as_deref() {
-        write_windowed_csv(rs, &iter.bars, None, &opts.out_dir.join("rolling.csv"))?;
-    }
-
-    let summary = Summary {
-        final_equity: iter.summary.final_equity,
-        return_pct: if opts.cash != 0.0 {
-            (iter.summary.final_equity - opts.cash) / opts.cash * 100.0
-        } else {
-            0.0
-        },
-        fills: iter.summary.fills,
-        bars: iter.summary.bars,
-    };
-
-    let finished = SystemTime::now();
-    if !opts.quiet {
-        print_result_block(opts, &summary, started, finished);
-        print_metrics_block(
-            &iter.metrics,
-            None,
-            iter.gross_metrics.as_ref(),
-            effective_freq,
-        );
-        if let Some(windows) = iter.windowed.as_deref() {
-            print_windowed_metrics_block(windows);
-        }
-    }
-    Ok(summary)
+    emit_run(&iter, opts, started, effective_freq)
 }
 
 /// The portfolio runner: drive a composite [`Portfolio`](fugazi::portfolio::Portfolio)
@@ -813,43 +517,9 @@ pub fn run_portfolio(
     let start = bars.first().map_or("", |t| t.as_str());
     let end = bars.last().map_or("", |t| t.as_str());
     let representative = &universe[0];
-    let effective_freq = calendar::pick_frequency(opts.frequency, representative).or_else(|| {
-        per_symbol
-            .iter()
-            .find(|(s, _)| s == representative)
-            .and_then(|(_, atoms)| {
-                calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a))
-            })
-    });
-    let bars_per_year = calendar::pick_bars_per_year(
-        opts.bars_per_year,
-        representative,
-        effective_freq,
-    )
-    .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
+    let (effective_freq, bars_per_year) = universe_calendar(opts, representative, &per_symbol);
     let no_cost_warning = !opts.costs_supplied;
-    let windowed_bars = opts
-        .windowed
-        .map(|w| {
-            w.resolve(effective_freq, opts.asset_class)
-                .map_err(anyhow::Error::msg)
-        })
-        .transpose()
-        .context("resolving `-w/--windowed`")?;
-    let seconds_per_bar = opts
-        .asset_class
-        .zip(effective_freq)
-        .map(|(class, freq)| class.trading_seconds_per_bar(freq));
-    let inputs = EvalContext {
-        cash: opts.cash,
-        bars_per_year,
-        risk_free_rate: opts.risk_free_rate,
-        cost_config: opts.cost_config,
-        effective_freq,
-        windowed: windowed_bars,
-        seconds_per_bar,
-        mc: opts.montecarlo.cloned(),
-    };
+    let inputs = eval_context(opts, effective_freq, bars_per_year)?;
     if !opts.quiet {
         // Costs are active if the unscoped default is non-empty or any
         // per-symbol scoped bundle in the universe is non-empty.
@@ -871,17 +541,99 @@ pub fn run_portfolio(
     let iter = iterate(&any, bars.clone(), &snapshots, &inputs, opts)?;
     emit_montecarlo(&iter, opts)?;
 
-    write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
+    emit_run(&iter, opts, started, effective_freq)
+}
+
+/// The bar cadence and annualization factor for an N-symbol run, read off a
+/// representative symbol.
+///
+/// Shared verbatim by the basket, multi-asset and portfolio runners — the three
+/// shapes whose universe is discovered from the stream rather than declared, so
+/// none of them has a single symbol whose calendar is authoritative. A
+/// scope-matching `-f/--frequency` wins; otherwise the cadence is detected from
+/// the representative's own atoms.
+fn universe_calendar(
+    opts: &RunOptions<'_>,
+    representative: &str,
+    per_symbol: &[(String, Vec<(String, fugazi::types::Atom)>)],
+) -> (Option<Frequency>, Real) {
+    let effective_freq = calendar::pick_frequency(opts.frequency, representative).or_else(|| {
+        per_symbol
+            .iter()
+            .find(|(s, _)| s == representative)
+            .and_then(|(_, atoms)| {
+                calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a))
+            })
+    });
+    let bars_per_year =
+        calendar::pick_bars_per_year(opts.bars_per_year, representative, effective_freq)
+            .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
+    (effective_freq, bars_per_year)
+}
+
+/// Assemble the resolved-once run inputs the driver takes.
+///
+/// All five runners built this identically — the `-w/--windowed` resolution,
+/// the per-bar trading seconds, and the eight-field `EvalContext` literal, 21
+/// lines apiece. Only the two arguments differ per shape, because a
+/// single-asset run reads its own symbol's cadence, pairs tries both legs, and
+/// the N-symbol shapes use a representative.
+fn eval_context<'a>(
+    opts: &RunOptions<'a>,
+    effective_freq: Option<Frequency>,
+    bars_per_year: Real,
+) -> Result<EvalContext<'a>> {
+    let windowed_bars = opts
+        .windowed
+        .map(|w| {
+            w.resolve(effective_freq, opts.asset_class)
+                .map_err(anyhow::Error::msg)
+        })
+        .transpose()
+        .context("resolving `-w/--windowed`")?;
+    let seconds_per_bar = opts
+        .asset_class
+        .zip(effective_freq)
+        .map(|(class, freq)| class.trading_seconds_per_bar(freq));
+    Ok(EvalContext {
+        cash: opts.cash,
+        bars_per_year,
+        risk_free_rate: opts.risk_free_rate,
+        cost_config: opts.cost_config,
+        effective_freq,
+        windowed: windowed_bars,
+        seconds_per_bar,
+        mc: opts.montecarlo.cloned(),
+    })
+}
+
+/// Write every artefact a `run` produces and print its closing console blocks.
+///
+/// All five runners ended with a byte-identical 47-line block: `fills.csv`,
+/// the fill stream, the rejection banner, `trades.csv`, `returns.csv`,
+/// `metrics.yml`, the two windowed CSVs, the summary arithmetic, and the
+/// result / metrics / windowed-metrics blocks. Five copies of the output
+/// contract meant any change to it had to be made five times, with nothing
+/// checking that it was.
+fn emit_run(
+    iter: &IterationResult,
+    opts: &RunOptions,
+    started: SystemTime,
+    effective_freq: Option<Frequency>,
+) -> Result<Summary> {
+    write_fills_csv(iter, &opts.out_dir.join("fills.csv"))?;
     if !opts.quiet {
         println!();
         style::print_section("fills");
-        stream_fills(&iter);
+        stream_fills(iter);
     }
     if !opts.quiet {
         print_rejection_warning(&iter.report);
     }
-    write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
-    write_returns_csv(&iter, &opts.out_dir.join("returns.csv"))?;
+    write_trades_csv(iter, &opts.out_dir.join("trades.csv"))?;
+
+    write_returns_csv(iter, &opts.out_dir.join("returns.csv"))?;
+
     metrics::write_yaml(&iter.metrics, &opts.out_dir.join("metrics.yml"))?;
 
     if let Some(ws) = iter.windowed.as_deref() {
