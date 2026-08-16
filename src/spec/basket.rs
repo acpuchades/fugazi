@@ -609,7 +609,6 @@ impl DynBasketStrategy {
     /// A clone of the shared [`Book`] anchor — for downstream book-side
     /// diagnostics and (once CLI dispatch grows a basket path) initial
     /// equity assertions.
-    #[allow(dead_code)]
     pub fn book(&self) -> Book<String> {
         self.inner.book()
     }

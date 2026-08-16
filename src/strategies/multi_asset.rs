@@ -36,8 +36,9 @@ use std::hash::Hash;
 
 use crate::indicators::{Book, ValueBool, Position, Value};
 use crate::prelude::*;
-use crate::strategies::basket::{AllOf, AnyOf, Floating, Universe};
+use crate::strategies::universe::{AllOf, AnyOf, Floating, Universe};
 use crate::types::Snapshot;
+use super::{Chain, LevelFactory};
 
 // ---------------------------------------------------------------------------
 // Chain type aliases
@@ -46,25 +47,17 @@ use crate::types::Snapshot;
 /// A per-symbol boolean chain — one of the four signal slots.
 type SignalChain<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool> + Send + Sync>;
 
-/// A per-symbol real chain — the sizing multiplier and each of the four
-/// protective levels.
-type LevelChain<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real> + Send + Sync>;
 
 /// A per-symbol signal factory: `Fn(&Sym) -> SignalChain<Sym>`.
 type SignalFactory<Sym> = Box<dyn Fn(&Sym) -> SignalChain<Sym> + Send + Sync>;
 
-/// A per-symbol level factory that receives the per-symbol
-/// [`Position`] so `position.entry()` / `.peak()` / `.trough()` inside
-/// the chain resolves against the strategy's actual entry for that
-/// symbol.
-type LevelFactory<Sym> = Box<dyn Fn(&Sym, &Position) -> LevelChain<Sym> + Send + Sync>;
 
-/// A per-symbol sizing factory: `Fn(&Sym) -> LevelChain<Sym>`. The sizing
+/// A per-symbol sizing factory: `Fn(&Sym) -> Chain<Sym>`. The sizing
 /// slot doesn't take a [`Position`] because a size that reads back the
 /// entry price for its own leg is unusual — most sizing recipes are
 /// symbol-agnostic magnitudes (equal weight, ATR risk, drawdown throttle
 /// on the shared [`Book`]).
-type SizingFactory<Sym> = Box<dyn Fn(&Sym) -> LevelChain<Sym> + Send + Sync>;
+type SizingFactory<Sym> = Box<dyn Fn(&Sym) -> Chain<Sym> + Send + Sync>;
 
 /// The **rebalance gate** — a boolean signal decided on the whole
 /// snapshot (not per symbol). On bars where it reads `true`,
@@ -85,11 +78,11 @@ struct PerAssetState<Sym> {
     close_long: SignalChain<Sym>,
     short: SignalChain<Sym>,
     close_short: SignalChain<Sym>,
-    long_stop: Option<LevelChain<Sym>>,
-    long_target: Option<LevelChain<Sym>>,
-    short_stop: Option<LevelChain<Sym>>,
-    short_target: Option<LevelChain<Sym>>,
-    sizing: LevelChain<Sym>,
+    long_stop: Option<Chain<Sym>>,
+    long_target: Option<Chain<Sym>>,
+    short_stop: Option<Chain<Sym>>,
+    short_target: Option<Chain<Sym>>,
+    sizing: Chain<Sym>,
     position: Position,
     bars_seen: usize,
 }
@@ -144,8 +137,8 @@ impl<Sym> PerAssetState<Sym> {
     /// Whether this leg has seen enough bars for its own decision to be
     /// safe to act on. Consulted at trade time; also folded into the
     /// [`MultiAssetStrategy::is_ready`] gate under a strict
-    /// [`Universe`](crate::strategies::basket::Universe) impl (e.g.
-    /// [`AllOf`](crate::strategies::basket::AllOf)).
+    /// [`Universe`](crate::strategies::universe::Universe) impl (e.g.
+    /// [`AllOf`](crate::strategies::universe::AllOf)).
     fn is_ready(&self) -> bool {
         self.bars_seen >= self.stable_period()
     }
@@ -329,7 +322,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
             short_stop_factory: None,
             short_target_factory: None,
             sizing_factory: Box::new(|_sym: &Sym| {
-                let s: LevelChain<Sym> = Box::new(Value::<Snapshot<Sym>>::new(1.0));
+                let s: Chain<Sym> = Box::new(Value::<Snapshot<Sym>>::new(1.0));
                 s
             }),
             states: HashMap::new(),
@@ -424,10 +417,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
         F: Fn(&Sym, &Position) -> L + 'static + Send + Sync,
         L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
-        self.long_stop_factory = Some(Box::new(move |sym: &Sym, pos: &Position| {
-            let l: LevelChain<Sym> = Box::new(factory(sym, pos));
-            l
-        }));
+        self.long_stop_factory = Some(super::level_factory(factory));
         self
     }
 
@@ -438,10 +428,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
         F: Fn(&Sym, &Position) -> L + 'static + Send + Sync,
         L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
-        self.long_target_factory = Some(Box::new(move |sym: &Sym, pos: &Position| {
-            let l: LevelChain<Sym> = Box::new(factory(sym, pos));
-            l
-        }));
+        self.long_target_factory = Some(super::level_factory(factory));
         self
     }
 
@@ -453,10 +440,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
         F: Fn(&Sym, &Position) -> L + 'static + Send + Sync,
         L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
-        self.short_stop_factory = Some(Box::new(move |sym: &Sym, pos: &Position| {
-            let l: LevelChain<Sym> = Box::new(factory(sym, pos));
-            l
-        }));
+        self.short_stop_factory = Some(super::level_factory(factory));
         self
     }
 
@@ -467,10 +451,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
         F: Fn(&Sym, &Position) -> L + 'static + Send + Sync,
         L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
-        self.short_target_factory = Some(Box::new(move |sym: &Sym, pos: &Position| {
-            let l: LevelChain<Sym> = Box::new(factory(sym, pos));
-            l
-        }));
+        self.short_target_factory = Some(super::level_factory(factory));
         self
     }
 
@@ -490,7 +471,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
         S: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     {
         self.sizing_factory = Box::new(move |sym: &Sym| {
-            let l: LevelChain<Sym> = Box::new(factory(sym));
+            let l: Chain<Sym> = Box::new(factory(sym));
             l
         });
         self
@@ -848,8 +829,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Mu
     }
 
     fn trade(&self, wallet: &mut dyn Wallet<Sym>) {
-        // The rebalance gate is read once per bar and applied per symbol
-        // below. Default is `false` (matches pre-refactor behavior).
+        // The rebalance gate is read once per bar and applied per symbol below.
         let rebalancing = self.rebalance.value().unwrap_or(false);
         for (sym, state) in self.states.iter() {
             // Per-symbol readiness gate — a leg whose own chains haven't
@@ -857,66 +837,28 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Mu
             if !state.is_ready() {
                 continue;
             }
-            // Sizing is read once per bar per symbol; a None reading
-            // skips this symbol's trade this bar (safe default).
+            // A `None` sizing skips this symbol for this bar (safe default).
             let Some(size) = state.sizing.value() else {
                 continue;
             };
-            let long = state.position.is_long();
-            let short = state.position.is_short();
-
-            // Entries first (magnitude = sizing, reversal-capable). Cancel
-            // any resting bracket on entry / reversal.
-            if state.long.value().unwrap_or(false) && !long {
-                let _ = wallet.set(sym.clone(), Side::Buy, Size::value_frac(size));
-                let _ = wallet.cancel_protective(sym);
-                continue;
-            }
-            if state.short.value().unwrap_or(false) && !short {
-                let _ = wallet.set(sym.clone(), Side::Sell, Size::value_frac(size));
-                let _ = wallet.cancel_protective(sym);
-                continue;
-            }
-            // Signal-driven flatten-to-flat exits.
-            let close_long = state.close_long.value().unwrap_or(false) && long;
-            let close_short = state.close_short.value().unwrap_or(false) && short;
-            if close_long || close_short {
-                let _ = wallet.close(sym.clone());
-                let _ = wallet.cancel_protective(sym);
-                continue;
-            }
-            // Rebalance gate: on bars where the gate fires, resize the
-            // held position (if any) to the current sizing target. A
-            // `wallet.set(sym, held_side, value_frac(size))` at the
-            // current side is idempotent when the target already
-            // matches, and queues a market resize otherwise. Protective
-            // levels stay in place across the resize (position stays on
-            // the same side so the anchor point / peak / trough carry
-            // through — see the `Position::apply` merge convention).
-            if rebalancing {
-                if long {
-                    let _ = wallet.set(sym.clone(), Side::Buy, Size::value_frac(size));
-                } else if short {
-                    let _ = wallet.set(sym.clone(), Side::Sell, Size::value_frac(size));
-                }
-            }
-            // Rest the active side's protective levels — re-submitted
-            // every bar so a trailing level cancel/replaces.
-            if long {
-                if let Some(level) = state.long_stop.as_ref().and_then(|l| l.value()) {
-                    let _ = wallet.set_stop(sym.clone(), Reference(level), Size::position_frac(1.0));
-                }
-                if let Some(level) = state.long_target.as_ref().and_then(|l| l.value()) {
-                    let _ = wallet.set_take_profit(sym.clone(), Reference(level), Size::position_frac(1.0));
-                }
-            } else if short {
-                if let Some(level) = state.short_stop.as_ref().and_then(|l| l.value()) {
-                    let _ = wallet.set_stop(sym.clone(), Reference(level), Size::position_frac(1.0));
-                }
-                if let Some(level) = state.short_target.as_ref().and_then(|l| l.value()) {
-                    let _ = wallet.set_take_profit(sym.clone(), Reference(level), Size::position_frac(1.0));
-                }
-            }
+            super::trade_leg(
+                &super::Leg {
+                    symbol: sym,
+                    size,
+                    is_long: state.position.is_long(),
+                    is_short: state.position.is_short(),
+                    enter_long: state.long.value().unwrap_or(false),
+                    enter_short: state.short.value().unwrap_or(false),
+                    close_long: state.close_long.value().unwrap_or(false),
+                    close_short: state.close_short.value().unwrap_or(false),
+                    rebalancing,
+                    long_stop: state.long_stop.as_ref().and_then(|l| l.value()),
+                    long_target: state.long_target.as_ref().and_then(|l| l.value()),
+                    short_stop: state.short_stop.as_ref().and_then(|l| l.value()),
+                    short_target: state.short_target.as_ref().and_then(|l| l.value()),
+                },
+                wallet,
+            );
         }
     }
 

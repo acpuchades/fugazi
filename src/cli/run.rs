@@ -37,7 +37,7 @@
 //! `!all [<entry>, !stable { signal: <entry> }]`.
 
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use fugazi::prelude::*;
@@ -257,34 +257,13 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
     let bars_per_year = calendar::pick_bars_per_year(opts.bars_per_year, &symbol, effective_freq)
         .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
     let no_cost_warning = !opts.costs_supplied;
-    let windowed_bars = opts
-        .windowed
-        .map(|w| {
-            w.resolve(effective_freq, opts.asset_class)
-                .map_err(anyhow::Error::msg)
-        })
-        .transpose()
-        .context("resolving `-w/--windowed`")?;
-    let seconds_per_bar = opts
-        .asset_class
-        .zip(effective_freq)
-        .map(|(class, freq)| class.trading_seconds_per_bar(freq));
-    let inputs = EvalContext {
-        cash: opts.cash,
-        bars_per_year,
-        risk_free_rate: opts.risk_free_rate,
-        cost_config: opts.cost_config,
-        effective_freq,
-        windowed: windowed_bars,
-        seconds_per_bar,
-        mc: opts.montecarlo.cloned(),
-    };
+    let inputs = eval_context(opts, effective_freq, bars_per_year)?;
     // Print the inputs block up front so a long-running run still shows the
     // user what they asked for while it's working.
     if !opts.quiet {
-        let costs_active = !opts.cost_config.resolve(&symbol, effective_freq).is_none();
+        let costs_active = costs_active(opts.cost_config, [symbol.as_str()], effective_freq);
         style::print_header("run", "backtest a strategy over CSV series");
-        style::print_warns(&collect_warnings(&skipped_overlay_columns, no_cost_warning));
+        style::print_warns(&style::collect_warnings(&skipped_overlay_columns, no_cost_warning, "results"));
         print_inputs_block(opts, start, end, atoms.len(), costs_active);
     }
 
@@ -301,54 +280,7 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
 
     // Emit `fills.csv` and echo each fill in the same order the wallet booked
     // them. The console stream matches the CSV row-for-row.
-    write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
-    if !opts.quiet {
-        println!();
-        style::print_section("fills");
-        stream_fills(&iter);
-    }
-    if !opts.quiet {
-        print_rejection_warning(&iter.report);
-    }
-    write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
-
-    write_returns_csv(&iter, &opts.out_dir.join("returns.csv"))?;
-
-    metrics::write_yaml(&iter.metrics, &opts.out_dir.join("metrics.yml"))?;
-
-    if let Some(ws) = iter.windowed.as_deref() {
-        let dsr_context = metrics::windows_dsr_context(ws);
-        write_windowed_csv(ws, &iter.bars, dsr_context, &opts.out_dir.join("metrics.csv"))?;
-    }
-    if let Some(rs) = iter.rolling.as_deref() {
-        write_windowed_csv(rs, &iter.bars, None, &opts.out_dir.join("rolling.csv"))?;
-    }
-
-    let summary = Summary {
-        final_equity: iter.summary.final_equity,
-        return_pct: if opts.cash != 0.0 {
-            (iter.summary.final_equity - opts.cash) / opts.cash * 100.0
-        } else {
-            0.0
-        },
-        fills: iter.summary.fills,
-        bars: iter.summary.bars,
-    };
-
-    let finished = SystemTime::now();
-    if !opts.quiet {
-        print_result_block(opts, &summary, started, finished);
-        print_metrics_block(
-            &iter.metrics,
-            None,
-            iter.gross_metrics.as_ref(),
-            effective_freq,
-        );
-        if let Some(windows) = iter.windowed.as_deref() {
-            print_windowed_metrics_block(windows);
-        }
-    }
-    Ok(summary)
+    emit_run(&iter, opts, started, effective_freq)
 }
 
 /// The pairs twin of [`run`]: drive a
@@ -388,39 +320,15 @@ pub fn run_pairs(
             .or_else(|| calendar::pick_bars_per_year(opts.bars_per_year, &spec.right, effective_freq))
             .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
     let no_cost_warning = !opts.costs_supplied;
-    let windowed_bars = opts
-        .windowed
-        .map(|w| {
-            w.resolve(effective_freq, opts.asset_class)
-                .map_err(anyhow::Error::msg)
-        })
-        .transpose()
-        .context("resolving `-w/--windowed`")?;
-    let seconds_per_bar = opts
-        .asset_class
-        .zip(effective_freq)
-        .map(|(class, freq)| class.trading_seconds_per_bar(freq));
-    let inputs = EvalContext {
-        cash: opts.cash,
-        bars_per_year,
-        risk_free_rate: opts.risk_free_rate,
-        cost_config: opts.cost_config,
-        effective_freq,
-        windowed: windowed_bars,
-        seconds_per_bar,
-        mc: opts.montecarlo.cloned(),
-    };
+    let inputs = eval_context(opts, effective_freq, bars_per_year)?;
     if !opts.quiet {
-        let costs_active = !opts
-            .cost_config
-            .resolve(&spec.left, effective_freq)
-            .is_none()
-            || !opts
-                .cost_config
-                .resolve(&spec.right, effective_freq)
-                .is_none();
+        let costs_active = costs_active(
+            opts.cost_config,
+            [spec.left.as_str(), spec.right.as_str()],
+            effective_freq,
+        );
         style::print_header("run", "pair-trade a two-leg strategy over CSV series");
-        style::print_warns(&collect_warnings(&[], no_cost_warning));
+        style::print_warns(&style::collect_warnings(&[], no_cost_warning, "results"));
         print_pairs_inputs_block(opts, spec, start, end, bars.len(), costs_active);
     }
 
@@ -438,54 +346,75 @@ pub fn run_pairs(
     let iter = iterate(&any, bars.clone(), &snapshots, &inputs, opts)?;
     emit_montecarlo(&iter, opts)?;
 
-    write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
-    if !opts.quiet {
-        println!();
-        style::print_section("fills");
-        stream_fills(&iter);
+    emit_run(&iter, opts, started, effective_freq)
+}
+
+/// The shared driver for the three shapes whose universe is **discovered from
+/// the stream** rather than declared up front.
+///
+/// Basket, multi-asset and portfolio ran identical bodies: resolve the symbol
+/// set from the frame, build per-symbol atom streams, outer-join them on
+/// `time`, read the calendar off a representative symbol, print the inputs
+/// block, drive, and emit. They differed in five spots — the spec variant, two
+/// strings, and whether the cost probe includes the unscoped `default:` leg —
+/// so those are parameters and the bodies are one.
+///
+/// Cadence is read from the representative symbol: none of these shapes
+/// declares per-symbol cadences, and a mixed-cadence universe is a follow-up if
+/// it becomes a real need. Typical universes are homogeneous.
+fn run_universe(
+    any: StrategySpec,
+    noun: &str,
+    headline: &str,
+    probe_default_costs: bool,
+    frame: &DataFrame,
+    opts: &RunOptions,
+) -> Result<Summary> {
+    let started = SystemTime::now();
+    let universe = frame.symbols();
+    if universe.is_empty() {
+        anyhow::bail!("no symbols found in the input series — {noun} needs at least one traded asset");
     }
-    if !opts.quiet {
-        print_rejection_warning(&iter.report);
-    }
-    write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
-
-    write_returns_csv(&iter, &opts.out_dir.join("returns.csv"))?;
-
-    metrics::write_yaml(&iter.metrics, &opts.out_dir.join("metrics.yml"))?;
-
-    if let Some(ws) = iter.windowed.as_deref() {
-        let dsr_context = metrics::windows_dsr_context(ws);
-        write_windowed_csv(ws, &iter.bars, dsr_context, &opts.out_dir.join("metrics.csv"))?;
-    }
-    if let Some(rs) = iter.rolling.as_deref() {
-        write_windowed_csv(rs, &iter.bars, None, &opts.out_dir.join("rolling.csv"))?;
-    }
-
-    let summary = Summary {
-        final_equity: iter.summary.final_equity,
-        return_pct: if opts.cash != 0.0 {
-            (iter.summary.final_equity - opts.cash) / opts.cash * 100.0
-        } else {
-            0.0
-        },
-        fills: iter.summary.fills,
-        bars: iter.summary.bars,
-    };
-
-    let finished = SystemTime::now();
-    if !opts.quiet {
-        print_result_block(opts, &summary, started, finished);
-        print_metrics_block(
-            &iter.metrics,
-            None,
-            iter.gross_metrics.as_ref(),
-            effective_freq,
+    // Per-symbol atom streams, sorted by time (DataFrame::atoms walks a
+    // BTreeMap so ascending order is guaranteed by construction).
+    let per_symbol: Vec<(String, Vec<(String, Atom)>)> = universe
+        .iter()
+        .map(|sym| Ok::<_, anyhow::Error>((sym.clone(), frame.atoms(sym)?.atoms)))
+        .collect::<Result<_>>()?;
+    let (bars, snapshots) = join_universe_by_time(&per_symbol);
+    if bars.is_empty() {
+        anyhow::bail!(
+            "no bars found in the input series across the {} discovered symbol(s)",
+            universe.len()
         );
-        if let Some(windows) = iter.windowed.as_deref() {
-            print_windowed_metrics_block(windows);
-        }
     }
-    Ok(summary)
+
+    std::fs::create_dir_all(opts.out_dir)
+        .with_context(|| format!("creating output dir `{}`", opts.out_dir.display()))?;
+
+    let start = bars.first().map_or("", |t| t.as_str());
+    let end = bars.last().map_or("", |t| t.as_str());
+    let representative = &universe[0];
+    let (effective_freq, bars_per_year) = universe_calendar(opts, representative, &per_symbol);
+    let no_cost_warning = !opts.costs_supplied;
+    let inputs = eval_context(opts, effective_freq, bars_per_year)?;
+    if !opts.quiet {
+        // A portfolio also probes the unscoped `default:` leg with `""` — see
+        // `costs_active`.
+        let probes = probe_default_costs
+            .then_some("")
+            .into_iter()
+            .chain(universe.iter().map(String::as_str));
+        let costs_active = costs_active(opts.cost_config, probes, effective_freq);
+        style::print_header("run", headline);
+        style::print_warns(&style::collect_warnings(&[], no_cost_warning, "results"));
+        print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active);
+    }
+
+    let iter = iterate(&any, bars.clone(), &snapshots, &inputs, opts)?;
+    emit_montecarlo(&iter, opts)?;
+
+    emit_run(&iter, opts, started, effective_freq)
 }
 
 /// The basket runner: drive a [`BasketStrategy`](fugazi::strategies::BasketStrategy)
@@ -507,135 +436,14 @@ pub fn run_basket(
     frame: &DataFrame,
     opts: &RunOptions,
 ) -> Result<Summary> {
-    let started = SystemTime::now();
-    let universe = frame.symbols();
-    if universe.is_empty() {
-        anyhow::bail!(
-            "no symbols found in the input series — a basket needs at least one traded asset"
-        );
-    }
-    // Per-symbol atom streams, sorted by time (DataFrame::atoms walks a
-    // BTreeMap so ascending order is guaranteed by construction).
-    let per_symbol: Vec<(String, Vec<(String, Atom)>)> = universe
-        .iter()
-        .map(|sym| Ok::<_, anyhow::Error>((sym.clone(), frame.atoms(sym)?.atoms)))
-        .collect::<Result<_>>()?;
-    let (bars, snapshots) = join_universe_by_time(&per_symbol);
-    if bars.is_empty() {
-        anyhow::bail!(
-            "no bars found in the input series across the {} discovered symbol(s)",
-            universe.len()
-        );
-    }
-
-    std::fs::create_dir_all(opts.out_dir)
-        .with_context(|| format!("creating output dir `{}`", opts.out_dir.display()))?;
-
-    let start = bars.first().map_or("", |t| t.as_str());
-    let end = bars.last().map_or("", |t| t.as_str());
-    // Cadence: try the first symbol's --frequency scope, then fall back to
-    // detection from that symbol's timestamps. Basket YAML doesn't declare
-    // per-symbol cadences (that's a follow-up if mixed cadences become a
-    // real need); typical baskets are homogeneous.
-    let representative = &universe[0];
-    let effective_freq = calendar::pick_frequency(opts.frequency, representative).or_else(|| {
-        per_symbol
-            .iter()
-            .find(|(s, _)| s == representative)
-            .and_then(|(_, atoms)| {
-                calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a))
-            })
-    });
-    let bars_per_year = calendar::pick_bars_per_year(
-        opts.bars_per_year,
-        representative,
-        effective_freq,
+    run_universe(
+        StrategySpec::Basket(Box::new(spec.clone())),
+        "a basket",
+        "trade a basket across an N-symbol universe",
+        false,
+        frame,
+        opts,
     )
-    .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
-    let no_cost_warning = !opts.costs_supplied;
-    let windowed_bars = opts
-        .windowed
-        .map(|w| {
-            w.resolve(effective_freq, opts.asset_class)
-                .map_err(anyhow::Error::msg)
-        })
-        .transpose()
-        .context("resolving `-w/--windowed`")?;
-    let seconds_per_bar = opts
-        .asset_class
-        .zip(effective_freq)
-        .map(|(class, freq)| class.trading_seconds_per_bar(freq));
-    let inputs = EvalContext {
-        cash: opts.cash,
-        bars_per_year,
-        risk_free_rate: opts.risk_free_rate,
-        cost_config: opts.cost_config,
-        effective_freq,
-        windowed: windowed_bars,
-        seconds_per_bar,
-        mc: opts.montecarlo.cloned(),
-    };
-    if !opts.quiet {
-        let costs_active = universe
-            .iter()
-            .any(|s| !opts.cost_config.resolve(s, effective_freq).is_none());
-        style::print_header("run", "trade a basket across an N-symbol universe");
-        style::print_warns(&collect_warnings(&[], no_cost_warning));
-        print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active);
-    }
-
-    let any = StrategySpec::Basket(Box::new(spec.clone()));
-    let iter = iterate(&any, bars.clone(), &snapshots, &inputs, opts)?;
-    emit_montecarlo(&iter, opts)?;
-
-    write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
-    if !opts.quiet {
-        println!();
-        style::print_section("fills");
-        stream_fills(&iter);
-    }
-    if !opts.quiet {
-        print_rejection_warning(&iter.report);
-    }
-    write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
-
-    write_returns_csv(&iter, &opts.out_dir.join("returns.csv"))?;
-
-    metrics::write_yaml(&iter.metrics, &opts.out_dir.join("metrics.yml"))?;
-
-    if let Some(ws) = iter.windowed.as_deref() {
-        let dsr_context = metrics::windows_dsr_context(ws);
-        write_windowed_csv(ws, &iter.bars, dsr_context, &opts.out_dir.join("metrics.csv"))?;
-    }
-    if let Some(rs) = iter.rolling.as_deref() {
-        write_windowed_csv(rs, &iter.bars, None, &opts.out_dir.join("rolling.csv"))?;
-    }
-
-    let summary = Summary {
-        final_equity: iter.summary.final_equity,
-        return_pct: if opts.cash != 0.0 {
-            (iter.summary.final_equity - opts.cash) / opts.cash * 100.0
-        } else {
-            0.0
-        },
-        fills: iter.summary.fills,
-        bars: iter.summary.bars,
-    };
-
-    let finished = SystemTime::now();
-    if !opts.quiet {
-        print_result_block(opts, &summary, started, finished);
-        print_metrics_block(
-            &iter.metrics,
-            None,
-            iter.gross_metrics.as_ref(),
-            effective_freq,
-        );
-        if let Some(windows) = iter.windowed.as_deref() {
-            print_windowed_metrics_block(windows);
-        }
-    }
-    Ok(summary)
 }
 
 /// The multi-asset runner: drive a
@@ -650,130 +458,14 @@ pub fn run_multi(
     frame: &DataFrame,
     opts: &RunOptions,
 ) -> Result<Summary> {
-    let started = SystemTime::now();
-    let universe = frame.symbols();
-    if universe.is_empty() {
-        anyhow::bail!(
-            "no symbols found in the input series — a multi-asset strategy needs at least one traded asset"
-        );
-    }
-    let per_symbol: Vec<(String, Vec<(String, Atom)>)> = universe
-        .iter()
-        .map(|sym| Ok::<_, anyhow::Error>((sym.clone(), frame.atoms(sym)?.atoms)))
-        .collect::<Result<_>>()?;
-    let (bars, snapshots) = join_universe_by_time(&per_symbol);
-    if bars.is_empty() {
-        anyhow::bail!(
-            "no bars found in the input series across the {} discovered symbol(s)",
-            universe.len()
-        );
-    }
-
-    std::fs::create_dir_all(opts.out_dir)
-        .with_context(|| format!("creating output dir `{}`", opts.out_dir.display()))?;
-
-    let start = bars.first().map_or("", |t| t.as_str());
-    let end = bars.last().map_or("", |t| t.as_str());
-    let representative = &universe[0];
-    let effective_freq = calendar::pick_frequency(opts.frequency, representative).or_else(|| {
-        per_symbol
-            .iter()
-            .find(|(s, _)| s == representative)
-            .and_then(|(_, atoms)| {
-                calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a))
-            })
-    });
-    let bars_per_year = calendar::pick_bars_per_year(
-        opts.bars_per_year,
-        representative,
-        effective_freq,
+    run_universe(
+        StrategySpec::Multi(Box::new(spec.clone())),
+        "a multi-asset strategy",
+        "trade a multi-asset portfolio across an N-symbol universe",
+        false,
+        frame,
+        opts,
     )
-    .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
-    let no_cost_warning = !opts.costs_supplied;
-    let windowed_bars = opts
-        .windowed
-        .map(|w| {
-            w.resolve(effective_freq, opts.asset_class)
-                .map_err(anyhow::Error::msg)
-        })
-        .transpose()
-        .context("resolving `-w/--windowed`")?;
-    let seconds_per_bar = opts
-        .asset_class
-        .zip(effective_freq)
-        .map(|(class, freq)| class.trading_seconds_per_bar(freq));
-    let inputs = EvalContext {
-        cash: opts.cash,
-        bars_per_year,
-        risk_free_rate: opts.risk_free_rate,
-        cost_config: opts.cost_config,
-        effective_freq,
-        windowed: windowed_bars,
-        seconds_per_bar,
-        mc: opts.montecarlo.cloned(),
-    };
-    if !opts.quiet {
-        let costs_active = universe
-            .iter()
-            .any(|s| !opts.cost_config.resolve(s, effective_freq).is_none());
-        style::print_header(
-            "run",
-            "trade a multi-asset portfolio across an N-symbol universe",
-        );
-        style::print_warns(&collect_warnings(&[], no_cost_warning));
-        print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active);
-    }
-
-    let any = StrategySpec::Multi(Box::new(spec.clone()));
-    let iter = iterate(&any, bars.clone(), &snapshots, &inputs, opts)?;
-    emit_montecarlo(&iter, opts)?;
-
-    write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
-    if !opts.quiet {
-        println!();
-        style::print_section("fills");
-        stream_fills(&iter);
-    }
-    if !opts.quiet {
-        print_rejection_warning(&iter.report);
-    }
-    write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
-    write_returns_csv(&iter, &opts.out_dir.join("returns.csv"))?;
-    metrics::write_yaml(&iter.metrics, &opts.out_dir.join("metrics.yml"))?;
-
-    if let Some(ws) = iter.windowed.as_deref() {
-        let dsr_context = metrics::windows_dsr_context(ws);
-        write_windowed_csv(ws, &iter.bars, dsr_context, &opts.out_dir.join("metrics.csv"))?;
-    }
-    if let Some(rs) = iter.rolling.as_deref() {
-        write_windowed_csv(rs, &iter.bars, None, &opts.out_dir.join("rolling.csv"))?;
-    }
-
-    let summary = Summary {
-        final_equity: iter.summary.final_equity,
-        return_pct: if opts.cash != 0.0 {
-            (iter.summary.final_equity - opts.cash) / opts.cash * 100.0
-        } else {
-            0.0
-        },
-        fills: iter.summary.fills,
-        bars: iter.summary.bars,
-    };
-
-    let finished = SystemTime::now();
-    if !opts.quiet {
-        print_result_block(opts, &summary, started, finished);
-        print_metrics_block(
-            &iter.metrics,
-            None,
-            iter.gross_metrics.as_ref(),
-            effective_freq,
-        );
-        if let Some(windows) = iter.windowed.as_deref() {
-            print_windowed_metrics_block(windows);
-        }
-    }
-    Ok(summary)
 }
 
 /// The portfolio runner: drive a composite [`Portfolio`](fugazi::portfolio::Portfolio)
@@ -793,31 +485,29 @@ pub fn run_portfolio(
     frame: &DataFrame,
     opts: &RunOptions,
 ) -> Result<Summary> {
-    let started = SystemTime::now();
-    let universe = frame.symbols();
-    if universe.is_empty() {
-        anyhow::bail!(
-            "no symbols found in the input series — a portfolio needs at least one traded asset"
-        );
-    }
-    let per_symbol: Vec<(String, Vec<(String, Atom)>)> = universe
-        .iter()
-        .map(|sym| Ok::<_, anyhow::Error>((sym.clone(), frame.atoms(sym)?.atoms)))
-        .collect::<Result<_>>()?;
-    let (bars, snapshots) = join_universe_by_time(&per_symbol);
-    if bars.is_empty() {
-        anyhow::bail!(
-            "no bars found in the input series across the {} discovered symbol(s)",
-            universe.len()
-        );
-    }
+    run_universe(
+        StrategySpec::Portfolio(Box::new(spec.clone())),
+        "a portfolio",
+        "trade a composite portfolio of heterogeneous child strategies",
+        true,
+        frame,
+        opts,
+    )
+}
 
-    std::fs::create_dir_all(opts.out_dir)
-        .with_context(|| format!("creating output dir `{}`", opts.out_dir.display()))?;
-
-    let start = bars.first().map_or("", |t| t.as_str());
-    let end = bars.last().map_or("", |t| t.as_str());
-    let representative = &universe[0];
+/// The bar cadence and annualization factor for an N-symbol run, read off a
+/// representative symbol.
+///
+/// Shared verbatim by the basket, multi-asset and portfolio runners — the three
+/// shapes whose universe is discovered from the stream rather than declared, so
+/// none of them has a single symbol whose calendar is authoritative. A
+/// scope-matching `-f/--frequency` wins; otherwise the cadence is detected from
+/// the representative's own atoms.
+fn universe_calendar(
+    opts: &RunOptions<'_>,
+    representative: &str,
+    per_symbol: &[(String, Vec<(String, fugazi::types::Atom)>)],
+) -> (Option<Frequency>, Real) {
     let effective_freq = calendar::pick_frequency(opts.frequency, representative).or_else(|| {
         per_symbol
             .iter()
@@ -826,13 +516,24 @@ pub fn run_portfolio(
                 calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a))
             })
     });
-    let bars_per_year = calendar::pick_bars_per_year(
-        opts.bars_per_year,
-        representative,
-        effective_freq,
-    )
-    .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
-    let no_cost_warning = !opts.costs_supplied;
+    let bars_per_year =
+        calendar::pick_bars_per_year(opts.bars_per_year, representative, effective_freq)
+            .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
+    (effective_freq, bars_per_year)
+}
+
+/// Assemble the resolved-once run inputs the driver takes.
+///
+/// All five runners built this identically — the `-w/--windowed` resolution,
+/// the per-bar trading seconds, and the eight-field `EvalContext` literal, 21
+/// lines apiece. Only the two arguments differ per shape, because a
+/// single-asset run reads its own symbol's cadence, pairs tries both legs, and
+/// the N-symbol shapes use a representative.
+fn eval_context<'a>(
+    opts: &RunOptions<'a>,
+    effective_freq: Option<Frequency>,
+    bars_per_year: Real,
+) -> Result<EvalContext<'a>> {
     let windowed_bars = opts
         .windowed
         .map(|w| {
@@ -845,7 +546,7 @@ pub fn run_portfolio(
         .asset_class
         .zip(effective_freq)
         .map(|(class, freq)| class.trading_seconds_per_bar(freq));
-    let inputs = EvalContext {
+    Ok(EvalContext {
         cash: opts.cash,
         bars_per_year,
         risk_free_rate: opts.risk_free_rate,
@@ -854,37 +555,36 @@ pub fn run_portfolio(
         windowed: windowed_bars,
         seconds_per_bar,
         mc: opts.montecarlo.cloned(),
-    };
-    if !opts.quiet {
-        // Costs are active if the unscoped default is non-empty or any
-        // per-symbol scoped bundle in the universe is non-empty.
-        let costs_active = !opts.cost_config.resolve("", effective_freq).is_none()
-            || universe
-                .iter()
-                .any(|s| !opts.cost_config.resolve(s, effective_freq).is_none());
-        style::print_header(
-            "run",
-            "trade a composite portfolio of heterogeneous child strategies",
-        );
-        style::print_warns(&collect_warnings(&[], no_cost_warning));
-        print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active);
-    }
+    })
+}
 
-    let any = StrategySpec::Portfolio(Box::new(spec.clone()));
-    let iter = iterate(&any, bars.clone(), &snapshots, &inputs, opts)?;
-    emit_montecarlo(&iter, opts)?;
-
-    write_fills_csv(&iter, &opts.out_dir.join("fills.csv"))?;
+/// Write every artefact a `run` produces and print its closing console blocks.
+///
+/// All five runners ended with a byte-identical 47-line block: `fills.csv`,
+/// the fill stream, the rejection banner, `trades.csv`, `returns.csv`,
+/// `metrics.yml`, the two windowed CSVs, the summary arithmetic, and the
+/// result / metrics / windowed-metrics blocks. Five copies of the output
+/// contract meant any change to it had to be made five times, with nothing
+/// checking that it was.
+fn emit_run(
+    iter: &IterationResult,
+    opts: &RunOptions,
+    started: SystemTime,
+    effective_freq: Option<Frequency>,
+) -> Result<Summary> {
+    write_fills_csv(iter, &opts.out_dir.join("fills.csv"))?;
     if !opts.quiet {
         println!();
         style::print_section("fills");
-        stream_fills(&iter);
+        stream_fills(iter);
     }
     if !opts.quiet {
         print_rejection_warning(&iter.report);
     }
-    write_trades_csv(&iter, &opts.out_dir.join("trades.csv"))?;
-    write_returns_csv(&iter, &opts.out_dir.join("returns.csv"))?;
+    write_trades_csv(iter, &opts.out_dir.join("trades.csv"))?;
+
+    write_returns_csv(iter, &opts.out_dir.join("returns.csv"))?;
+
     metrics::write_yaml(&iter.metrics, &opts.out_dir.join("metrics.yml"))?;
 
     if let Some(ws) = iter.windowed.as_deref() {
@@ -926,6 +626,29 @@ pub fn run_portfolio(
 /// snapshots)` where each snapshot carries only the symbols with a bar at
 /// that time — sparse per bar is normal. Each per-symbol series is already
 /// sorted (BTreeMap invariant), so a single N-way merge over cursors
+/// Whether a cost model is active for **any** of `symbols` at `freq`.
+///
+/// Every runner needs this to decide whether the console blocks say "gross" or
+/// "net", and each had grown its own spelling: a bare `resolve(&symbol)` for
+/// single-asset, an `||` of the two legs for pairs, an `any()` over the
+/// universe for basket and multi, and — for portfolio — an `any()` *plus* a
+/// separate probe of the `""` default leg.
+///
+/// That last term is redundant whenever the universe is non-empty, since a
+/// configured `default:` resolves for every symbol too. It is preserved rather
+/// than dropped: the portfolio runner passes `""` as an extra probe symbol, so
+/// the behaviour is identical and the asymmetry is visible at the call site
+/// instead of buried in a fifth copy of the expression.
+fn costs_active<'a>(
+    cost_config: &fugazi::spec::costs::CostConfig,
+    symbols: impl IntoIterator<Item = &'a str>,
+    freq: Option<Frequency>,
+) -> bool {
+    symbols
+        .into_iter()
+        .any(|s| !cost_config.resolve(s, freq).is_none())
+}
+
 /// suffices.
 pub(crate) fn join_universe_by_time(
     per_symbol: &[(String, Vec<(String, Atom)>)],
@@ -969,20 +692,20 @@ fn print_basket_inputs_block(
     costs_active: bool,
 ) {
     style::print_section("inputs");
-    print_field("strategy", opts.strategy_label);
-    print_field(
+    style::field("strategy", opts.strategy_label);
+    style::field(
         "universe",
         &format!("{} symbols ({})", universe.len(), universe.join(", ")),
     );
-    print_field("params", opts.params);
-    print_field("period", &format!("{start} → {end} ({bars} bars)"));
-    print_field("capital", &format!("{:.2}", opts.cash));
+    style::field("params", opts.params);
+    style::field("period", &format!("{start} → {end} ({bars} bars)"));
+    style::field("capital", &format!("{:.2}", opts.cash));
     if costs_active {
-        print_field("costs", "active (commission/spread/slippage applied)");
+        style::field("costs", "active (commission/spread/slippage applied)");
     } else if opts.costs_supplied {
-        print_field("costs", "none (explicit)");
+        style::field("costs", "none (explicit)");
     }
-    print_field("output", &opts.out_dir.display().to_string());
+    style::field("output", &opts.out_dir.display().to_string());
 }
 
 /// Inner-join the two legs' atom streams on their `time` label. Returns
@@ -1021,17 +744,17 @@ fn print_pairs_inputs_block(
     costs_active: bool,
 ) {
     style::print_section("inputs");
-    print_field("strategy", opts.strategy_label);
-    print_field("pair", &format!("{} / {}", spec.left, spec.right));
-    print_field("params", opts.params);
-    print_field("period", &format!("{start} → {end} ({bars} bars)"));
-    print_field("capital", &format!("{:.2}", opts.cash));
+    style::field("strategy", opts.strategy_label);
+    style::field("pair", &format!("{} / {}", spec.left, spec.right));
+    style::field("params", opts.params);
+    style::field("period", &format!("{start} → {end} ({bars} bars)"));
+    style::field("capital", &format!("{:.2}", opts.cash));
     if costs_active {
-        print_field("costs", "active (commission/spread/slippage applied)");
+        style::field("costs", "active (commission/spread/slippage applied)");
     } else if opts.costs_supplied {
-        print_field("costs", "none (explicit)");
+        style::field("costs", "none (explicit)");
     }
-    print_field("output", &opts.out_dir.display().to_string());
+    style::field("output", &opts.out_dir.display().to_string());
 }
 
 // ---------------------------------------------------------------------------
@@ -1288,39 +1011,16 @@ fn writer(path: &Path) -> Result<csv::Writer<std::fs::File>> {
 /// in the result block, since it's not an input.
 fn print_inputs_block(opts: &RunOptions, start: &str, end: &str, bars: usize, costs_active: bool) {
     style::print_section("inputs");
-    print_field("strategy", opts.strategy_label);
-    print_field("params", opts.params);
-    print_field("period", &format!("{start} → {end} ({bars} bars)"));
-    print_field("capital", &format!("{:.2}", opts.cash));
+    style::field("strategy", opts.strategy_label);
+    style::field("params", opts.params);
+    style::field("period", &format!("{start} → {end} ({bars} bars)"));
+    style::field("capital", &format!("{:.2}", opts.cash));
     if costs_active {
-        print_field("costs", "active (commission/spread/slippage applied)");
+        style::field("costs", "active (commission/spread/slippage applied)");
     } else if opts.costs_supplied {
-        print_field("costs", "none (explicit)");
+        style::field("costs", "none (explicit)");
     }
-    print_field("output", &opts.out_dir.display().to_string());
-}
-
-/// Collect the top-of-run warnings — skipped overlay columns and the no-cost
-/// notice — into one list so [`style::print_warns`] can emit them at column 0
-/// above the `inputs` section (with a trailing blank line only when at least
-/// one fires). Keeps `warn` from masquerading as an input field.
-fn collect_warnings(skipped: &[String], no_cost: bool) -> Vec<String> {
-    let mut w = Vec::new();
-    if !skipped.is_empty() {
-        w.push(format!(
-            "skipped non-numeric overlay column{}: {} — not accessible via `!get`",
-            if skipped.len() == 1 { "" } else { "s" },
-            skipped.join(", "),
-        ));
-    }
-    if no_cost {
-        w.push(
-            "no cost model set — commission, spread, and slippage are zero; \
-             results are frictionless"
-                .to_string(),
-        );
-    }
-    w
+    style::field("output", &opts.out_dir.display().to_string());
 }
 
 /// The post-run "orders were refused" banner.
@@ -1370,8 +1070,8 @@ fn kind_label(kind: fugazi::OrderKind) -> &'static str {
 fn print_result_block(opts: &RunOptions, s: &Summary, started: SystemTime, finished: SystemTime) {
     println!();
     style::print_section("result");
-    print_field("bars", &s.bars.to_string());
-    print_field("fills", &s.fills.to_string());
+    style::field("bars", &s.bars.to_string());
+    style::field("fills", &s.fills.to_string());
     let delta = s.final_equity - opts.cash;
     let change = format!("{delta:+.2}, {:+.2}%", s.return_pct);
     let change = if delta >= 0.0 {
@@ -1379,15 +1079,15 @@ fn print_result_block(opts: &RunOptions, s: &Summary, started: SystemTime, finis
     } else {
         style::red(&change)
     };
-    print_field(
+    style::field(
         "capital",
         &format!("{:.2} → {:.2}  ({change})", opts.cash, s.final_equity),
     );
     let elapsed = finished.duration_since(started).unwrap_or_default();
-    print_field("started", &format_utc(started));
-    print_field(
+    style::field("started", &style::format_utc(started));
+    style::field(
         "finished",
-        &format!("{} ({})", format_utc(finished), format_elapsed(elapsed)),
+        &format!("{} ({})", style::format_utc(finished), style::format_elapsed(elapsed)),
     );
 }
 
@@ -1405,14 +1105,14 @@ fn print_metrics_block(
     println!();
     style::print_section("metrics");
     if let Some(measured) = measured {
-        print_field("measured", measured);
+        style::field("measured", measured);
     }
     if let Some(g) = gross {
         let net = m.returns.cagr_pct.map_or("—".to_string(), |v| format!("{v:+.2}%"));
         let gross = g.returns.cagr_pct.map_or("—".to_string(), |v| format!("{v:+.2}%"));
-        print_field("cagr", &format!("net {net} · gross {gross}"));
+        style::field("cagr", &format!("net {net} · gross {gross}"));
     }
-    print_field(
+    style::field(
         "return",
         &format!(
             "{:+.2}% ann · vol {:.2}%",
@@ -1422,21 +1122,21 @@ fn print_metrics_block(
     if let Some(g) = gross {
         let net = format_ratio(m.risk_adjusted.sharpe);
         let gross = format_ratio(g.risk_adjusted.sharpe);
-        print_field("sharpe", &format!("net {net} · gross {gross}"));
+        style::field("sharpe", &format!("net {net} · gross {gross}"));
     } else {
-        print_field("sharpe", &format_ratio(m.risk_adjusted.sharpe));
+        style::field("sharpe", &format_ratio(m.risk_adjusted.sharpe));
     }
-    print_field("sortino", &format_ratio(m.risk_adjusted.sortino));
-    print_field("omega", &format_ratio(m.risk_adjusted.omega));
-    print_field(
+    style::field("sortino", &format_ratio(m.risk_adjusted.sortino));
+    style::field("omega", &format_ratio(m.risk_adjusted.omega));
+    style::field(
         "max_dd",
         &format!(
             "{:.2}% ({} bars)",
             m.drawdown.max_pct, m.drawdown.max_duration_bars
         ),
     );
-    print_field("exposure", &format!("{:.1}%", m.trades.exposure_pct));
-    print_field(
+    style::field("exposure", &format!("{:.1}%", m.trades.exposure_pct));
+    style::field(
         "trades",
         &format!(
             "{} · win {} · pf {}",
@@ -1446,7 +1146,7 @@ fn print_metrics_block(
         ),
     );
     if let Some(text) = format_holding_line(m, bar_freq) {
-        print_field("holding", &text);
+        style::field("holding", &text);
     }
 }
 
@@ -1532,7 +1232,7 @@ fn format_pct(v: Option<Real>) -> String {
 fn print_windowed_metrics_block(windows: &[metrics::WindowMetrics]) {
     println!();
     style::print_section("windowed metrics");
-    print_field(
+    style::field(
         "windows",
         &format!(
             "{} × {} bars (non-overlapping)",
@@ -1542,7 +1242,7 @@ fn print_windowed_metrics_block(windows: &[metrics::WindowMetrics]) {
     );
     let ann_mean = mean_std_of(windows, |m| Some(m.returns.annualized_mean_pct));
     let ann_vol = mean_std_of(windows, |m| Some(m.returns.annualized_volatility_pct));
-    print_field(
+    style::field(
         "return",
         &format!(
             "{} ann · vol {}",
@@ -1550,21 +1250,21 @@ fn print_windowed_metrics_block(windows: &[metrics::WindowMetrics]) {
             format_ms_unsigned_pct(ann_vol),
         ),
     );
-    print_field(
+    style::field(
         "sharpe",
         &format_ms_ratio(mean_std_of(windows, |m| m.risk_adjusted.sharpe)),
     );
-    print_field(
+    style::field(
         "sortino",
         &format_ms_ratio(mean_std_of(windows, |m| m.risk_adjusted.sortino)),
     );
-    print_field(
+    style::field(
         "omega",
         &format_ms_ratio(mean_std_of(windows, |m| m.risk_adjusted.omega)),
     );
     let max_dd = mean_std_of(windows, |m| Some(m.drawdown.max_pct));
     let max_dur = mean_std_of(windows, |m| Some(m.drawdown.max_duration_bars as Real));
-    print_field(
+    style::field(
         "max_dd",
         &format!(
             "{} ({} bars)",
@@ -1572,14 +1272,14 @@ fn print_windowed_metrics_block(windows: &[metrics::WindowMetrics]) {
             format_ms_count(max_dur, 0),
         ),
     );
-    print_field(
+    style::field(
         "exposure",
         &format_ms_unsigned_pct(mean_std_of(windows, |m| Some(m.trades.exposure_pct))),
     );
     let trades = mean_std_of(windows, |m| Some(m.trades.total as Real));
     let win_rate = mean_std_of(windows, |m| m.trades.win_rate_pct);
     let pf = mean_std_of(windows, |m| m.trades.profit_factor);
-    print_field(
+    style::field(
         "trades",
         &format!(
             "{} · win {} · pf {}",
@@ -1628,37 +1328,5 @@ fn format_ms_count(pair: Option<(Real, Real)>, precision: usize) -> String {
     )
 }
 
-fn format_elapsed(d: Duration) -> String {
-    let secs = d.as_secs_f64();
-    if secs < 1.0 {
-        format!("{} ms", d.as_millis())
-    } else if secs < 60.0 {
-        format!("{secs:.2} s")
-    } else {
-        format!("{}m {:02}s", d.as_secs() / 60, d.as_secs() % 60)
-    }
-}
 
-fn print_field(label: &str, value: &str) {
-    style::print_field(label, value, 9);
-}
 
-/// Format a [`SystemTime`] as `YYYY-MM-DD HH:MM:SS UTC`, without pulling in
-/// a date library (Howard Hinnant's civil-from-days algorithm).
-fn format_utc(t: SystemTime) -> String {
-    let secs = t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let (days, rem) = (secs / 86_400, secs % 86_400);
-    let (hour, min, sec) = (rem / 3_600, (rem % 3_600) / 60, rem % 60);
-
-    let z = days as i64 + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-
-    format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}:{sec:02} UTC")
-}

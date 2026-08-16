@@ -493,7 +493,7 @@ pub fn known_selection_tags() -> Vec<String> {
 /// `!undefined` placeholders resolved by the load passes. They're legitimately
 /// documented in `fugazi list` without appearing in any variant list — so
 /// anything that cross-checks the catalogue against
-/// `known_expr_tags` has to know about them.
+/// `known_node_tags` has to know about them.
 pub const REWRITTEN_TAGS: &[&str] = &["equal_weight", "param", "undefined", "import", "arg"];
 
 /// A tag no variant will ever be named, used to provoke serde's

@@ -16,7 +16,7 @@
 # Run it (every param has a default, so all are optional). candles.csv carries
 # its own `symbol` column — if you override SYM here, point --series at a file
 # whose symbol matches:
-#   fugazi run --strategy @examples/strategy.params.yml \
+#   fugazi run @examples/strategy.params.yml \
 #              --params @examples/params.yml,FAST=5 \
 #              --series @examples/candles.csv \
 #              --output-dir out/

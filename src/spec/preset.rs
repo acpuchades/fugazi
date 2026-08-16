@@ -62,7 +62,7 @@ pub enum StrategyPreset {
 /// The lowercase tag names [`StrategyRef`] uses to tell a preset from a full
 /// [`SingleStrategySpec`] map. Kept in lock-step with [`StrategyPreset`]'s
 /// variants by [`preset_variants_are_listed`](tests::preset_variants_are_listed).
-const PRESET_TAGS: &[&str] = &[
+pub(crate) const PRESET_TAGS: &[&str] = &[
     "buy_and_hold",
     "ma_crossover",
     "rsi_reversal",

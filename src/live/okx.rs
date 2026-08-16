@@ -73,6 +73,7 @@ use crate::types::{Candle, Real};
 use crate::wallet::{Ack, Order, OrderId, OrderKind, Reference, Rejection, Side, Size, Units, Wallet, WalletError};
 
 use super::LiveError;
+use super::venue::{decimals_of, floor_to_step, format_decimals, parse_num, round_to_tick, with_query};
 
 const MAINNET_BASE_URL: &str = "https://www.okx.com";
 /// The margin / quote currency a linear USDⓈ-M swap settles in — the balance
@@ -949,19 +950,6 @@ fn side_token(side: Side) -> &'static str {
     }
 }
 
-/// Append `params` to `path` as a query string, verbatim (no re-encoding), so
-/// the string we sign is byte-for-byte the string we send.
-fn with_query(path: &str, params: &[(&str, String)]) -> String {
-    if params.is_empty() {
-        return path.to_string();
-    }
-    let q = params
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect::<Vec<_>>()
-        .join("&");
-    format!("{path}?{q}")
-}
 
 /// Build, sign, and send a private request, returning the parsed JSON body.
 ///
@@ -1060,54 +1048,15 @@ fn is_gone_code(s_code: &str) -> bool {
     matches!(s_code, "51400" | "51401" | "51402" | "51503")
 }
 
-/// An OKX number that may be a JSON string (`"27000.5"`), empty string, or a
-/// bare number.
-fn parse_num(v: &serde_json::Value) -> Option<Real> {
-    match v {
-        serde_json::Value::String(s) if s.is_empty() => None,
-        serde_json::Value::String(s) => s.parse::<Real>().ok(),
-        serde_json::Value::Number(n) => n.as_f64(),
-        _ => None,
-    }
-}
 
 /// Read a named numeric field off a JSON object (string-or-number).
 fn num_field(value: &serde_json::Value, key: &str) -> Option<Real> {
     value.get(key).and_then(parse_num)
 }
 
-/// Round a size **down** to a multiple of `step` (so we never submit more than
-/// the diff we intend). A non-positive step leaves the value untouched.
-fn floor_to_step(value: Real, step: Real) -> Real {
-    if step <= 0.0 {
-        return value;
-    }
-    (value / step).floor() * step
-}
 
-/// Round a price to the nearest multiple of `tick`. A non-positive tick leaves
-/// the value untouched.
-fn round_to_tick(value: Real, tick: Real) -> Real {
-    if tick <= 0.0 {
-        return value;
-    }
-    (value / tick).round() * tick
-}
 
-/// Format a value with a fixed number of decimals — the string form OKX wants
-/// for size / price (no scientific notation, matches the instrument grid).
-fn format_decimals(value: Real, decimals: usize) -> String {
-    format!("{value:.decimals$}")
-}
 
-/// Count the significant decimal places in a grid string (`"0.001"` → 3,
-/// `"1"` → 0), the precision to format that field to.
-fn decimals_of(s: &str) -> usize {
-    match s.split_once('.') {
-        Some((_, frac)) => frac.trim_end_matches('0').len(),
-        None => 0,
-    }
-}
 
 /// Pull one swap's grid + contract value out of `/api/v5/public/instruments`.
 fn parse_instrument_spec(value: &serde_json::Value, symbol: &str) -> Option<InstrumentSpec> {
@@ -1189,15 +1138,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn decimals_and_step_rounding() {
-        assert_eq!(decimals_of("0.001"), 3);
-        assert_eq!(decimals_of("1"), 0);
-        assert_eq!(decimals_of("0.10"), 1);
-        assert!((floor_to_step(0.0037, 0.001) - 0.003).abs() < 1e-9);
-        assert_eq!(format_decimals(0.003, 3), "0.003");
-        assert_eq!(format_decimals(27000.5, 1), "27000.5");
-    }
 
     #[test]
     fn parses_instrument_spec_with_contract_value() {

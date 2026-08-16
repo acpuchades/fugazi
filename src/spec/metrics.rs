@@ -841,7 +841,6 @@ impl MetricKey {
     }
 
     /// The canonical dotted path (e.g. `risk_adjusted.sharpe`).
-    #[allow(dead_code)]
     pub fn dotted(&self) -> String {
         self.path.join(".")
     }

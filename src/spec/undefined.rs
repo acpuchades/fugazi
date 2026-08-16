@@ -18,8 +18,9 @@
 //! matching `deserialize_*` method (`deserialize_u64` for a `usize`,
 //! `deserialize_str` for a `String`, …). `UndefinedDeserializer` wraps the value
 //! tree and, at a hole node, answers whichever method serde asks for with a
-//! type-appropriate zero (`0` / `""` / `false`). No guessing, no search — the
-//! type is dictated by the caller.
+//! type-appropriate placeholder (`1` / `0.0` / `""` / `false`). No guessing, no
+//! search — the type is dictated by the caller. Integers answer `1` rather than
+//! `0` so a `NonZeroUsize` period field still parses.
 //!
 //! ## Wiring
 //!
@@ -286,18 +287,23 @@ impl<'de> Deserializer<'de> for UndefinedDeserializer {
         self.0.deserialize_any(visitor)
     }
 
+    // Integer holes answer `1`, not `0`. The value is arbitrary — a hole is
+    // never built, only counted and type-reported — but it has to *parse*, and
+    // the period family is `NonZeroUsize`, which rejects 0. `1` satisfies both
+    // a plain `usize` and every `NonZero*`, so it's the placeholder that keeps
+    // `fugazi check` working across the whole field vocabulary.
     scalar_methods! {
         deserialize_bool => visit_bool(false) as RequiredType::Bool,
-        deserialize_i8 => visit_i64(0) as RequiredType::Number,
-        deserialize_i16 => visit_i64(0) as RequiredType::Number,
-        deserialize_i32 => visit_i64(0) as RequiredType::Number,
-        deserialize_i64 => visit_i64(0) as RequiredType::Number,
-        deserialize_i128 => visit_i128(0) as RequiredType::Number,
-        deserialize_u8 => visit_u64(0) as RequiredType::Number,
-        deserialize_u16 => visit_u64(0) as RequiredType::Number,
-        deserialize_u32 => visit_u64(0) as RequiredType::Number,
-        deserialize_u64 => visit_u64(0) as RequiredType::Number,
-        deserialize_u128 => visit_u128(0) as RequiredType::Number,
+        deserialize_i8 => visit_i64(1) as RequiredType::Number,
+        deserialize_i16 => visit_i64(1) as RequiredType::Number,
+        deserialize_i32 => visit_i64(1) as RequiredType::Number,
+        deserialize_i64 => visit_i64(1) as RequiredType::Number,
+        deserialize_i128 => visit_i128(1) as RequiredType::Number,
+        deserialize_u8 => visit_u64(1) as RequiredType::Number,
+        deserialize_u16 => visit_u64(1) as RequiredType::Number,
+        deserialize_u32 => visit_u64(1) as RequiredType::Number,
+        deserialize_u64 => visit_u64(1) as RequiredType::Number,
+        deserialize_u128 => visit_u128(1) as RequiredType::Number,
         deserialize_f32 => visit_f64(0.0) as RequiredType::Number,
         deserialize_f64 => visit_f64(0.0) as RequiredType::Number,
         deserialize_char => visit_char('\0') as RequiredType::Str,
@@ -571,7 +577,9 @@ mod tests {
     #[test]
     fn a_hole_satisfies_every_scalar_field_type() {
         // One sentinel per field; each field's deserialize_* method decides the
-        // type it becomes — no value is guessed.
+        // type it becomes — no value is guessed. Integers answer `1` so that a
+        // `NonZeroUsize` field (the whole period family) still parses; the
+        // value is inert either way, since a hole is counted, not built.
         let json = serde_json::json!({
             "period": sentinel("P"),
             "name": sentinel("N"),
@@ -583,7 +591,7 @@ mod tests {
         assert_eq!(
             leaf,
             Leaf {
-                period: 0,
+                period: 1,
                 name: String::new(),
                 flag: false,
                 ratio: 0.0,
@@ -630,9 +638,9 @@ mod tests {
         });
         let _guard = check_mode();
         let nested: Nested = from_value(to_yaml(json)).unwrap();
-        assert_eq!(nested.inner.period, 0);
+        assert_eq!(nested.inner.period, 1);
         assert_eq!(nested.inner.ratio, 0.0);
-        assert_eq!(nested.periods, vec![0, 3, 0]);
+        assert_eq!(nested.periods, vec![1, 3, 1]);
     }
 
     #[test]

@@ -60,8 +60,10 @@ Three repo-specific rules:
 ## Add an indicator
 
 The worked example is a rolling `Real → Real` indicator, the most common shape.
-Nine places, in dependency order. Three are enforced (you cannot get them wrong
-silently); the rest are not, so do them deliberately.
+Nine places, in dependency order. Steps 2–6 and 9 are enforced — the compiler or
+a test stops you. Steps 7 and 8 (the warm-up battery and the reference battery)
+are **opt-in by nature**: a battery only asserts what is in it, so a case you
+don't add is a case nobody checks. Do those two deliberately.
 
 ### 1. The indicator itself — `src/indicators/<name>.rs`
 
@@ -105,14 +107,25 @@ Not an estimate — `tests/warm_up.rs` asserts it sample by sample.
 ### 3. The YAML tag — `src/spec/expr.rs`
 
 Add a variant to `NodeSpec` **and** to the private `NodeSpecRaw` mirror, then a
-`try_build` arm. The recursive-build shorthands are already in scope:
+`try_build` arm. (`tests/hand_maintained_mirrors.rs` guards the mirror — the
+compiler catches a missing variant via `typecheck.rs` and a missing *named*
+default via the field's type, but a dropped bare `#[serde(default)]` on an
+`Option` field compiles clean and silently makes the key required.)
+
+The recursive-build shorthands are already in scope:
 
 ```rust
 Foo { source, period } => dyn_indicator::wrap(
-    crate::indicators::Foo::new(real(source)?, *period),
+    crate::indicators::Foo::new(real(source)?, period.get()),
 ),
 ```
 
+- **A period field is a `NonZeroUsize`**, so serde rejects `period: 0` at parse
+  and `fugazi check` catches it — no build-time guard needed, and `.get()` hands
+  the `usize` to the constructor. Use a plain `usize` only where 0 is genuinely
+  meaningful (`longs` / `shorts` on a selection rule). A constraint *between*
+  two fields still needs a build-arm check returning `Err` — see
+  `!variance_ratio`, whose `period >= lag + 2` no type can express.
 - `real(s)?` / `candle(s)?` build a child and view it as `Real` / `Candle`.
 - `atom_src(source.as_ref())?` is the `Pick`-shaped `source:` slot every
   atom-input leaf takes.
@@ -149,15 +162,20 @@ and `children` (what each slot demands). **The crate will not compile until you
 classify the new variant**, which is the point — this is the one drift guard
 that cannot be skipped.
 
-### 5. The catalogue — `src/cli/list.rs`  *(test-enforced)*
+### 5. The catalogue — nothing to write  *(test-enforced)*
 
-Add an `Entry` to the matching `Group` in `GROUPS`. Groups are kept in
-alphabetical order of title.
+`fugazi list indicators` renders itself from the grammar descriptor, so a tag
+correctly annotated in step 3 appears automatically. There is no hand-written
+entry to add — what you *do* owe it is a `category`, which comes from the
+`CATEGORIES` taxonomy in `src/spec/grammar.rs`.
 
-`list::tests::the_catalogue_documents_every_spec_tag` fails until you do. Its
-expected set comes from serde's own variant list, so it needs no upkeep.
+`spec::grammar::tests::categories_cover_every_tag_once` fails until your tag is
+in exactly one category, and `categories_are_alphabetical` keeps the list
+ordered. `cli::list::tests::the_output_renders_every_category_and_tag` then
+checks the rendering. All three read serde's own variant list, so they need no
+upkeep.
 
-### 6. The Python binding — `python/src/lib.rs`  *(test-enforced)*
+### 6. The Python binding — `python/src/constructors.rs`  *(test-enforced)*
 
 For the common shapes there is a macro; use it rather than naming a concrete
 nested type like `Ema<Sma<Current, …>>`, which Python cannot carry across FFI:
@@ -169,8 +187,15 @@ nested type like `Ema<Sma<Current, …>>`, which Python cannot carry across FFI:
 | whole-candle, no args | `bar_noarg!(foo, Foo, "doc")` |
 | multi-output + period | `bar_period_multi!(foo, Foo, "doc")` |
 
-Then register the name in the `reg!(...)` list inside `#[pymodule] fn fugazi`,
-and add a smoke test to `python/tests/test_fugazi.py`.
+All four live in `constructors.rs` alongside the constructors they generate.
+(`python/src/macros.rs` is a different set — the domain-preserving `map_source!`
+/ `combine_sources!` combinators.)
+
+Then, in `python/src/lib.rs`, add the name **both** to the
+`use crate::constructors::{…}` list and to the `reg!(...)` list inside
+`#[pymodule] fn fugazi` — a glob import doesn't carry a `#[pyfunction]`, which
+is why every registered function is named explicitly. Finally add a smoke test
+to `python/tests/test_fugazi.py`.
 
 `python/tests/test_parity.py` fails until the tag is either bound or listed in
 `NOT_BOUND` **with a reason**. "Not worth binding" is a fine reason; leaving it
@@ -213,10 +238,15 @@ another library's convention (TA-Lib's ADX seeding, say), it belongs in
 `tests/talib_validation.rs` instead — with a column added to
 `tools/gen_talib_fixtures.py` and to that file's `REQUIRED` list.
 
-### 9. Docs
+### 9. Docs — `doc/STRATEGIES.md`  *(test-enforced)*
 
 `doc/STRATEGIES.md` for the tag reference, `README.md` if it's headline-worthy,
 `python/README.md` if the Python call shape is non-obvious.
+
+`spec_grammar::every_tag_appears_in_the_strategies_reference` fails until your
+tag is named there — as `!name`, or as a `name` code span if it reads as a bare
+word. This step used to be enforced by nothing, and 15 tags had slipped
+through.
 
 ### Checklist
 
@@ -309,8 +339,11 @@ yourself wanting to, the difference probably belongs on `RunnableStrategy` or
 4. Add the field to the CLI `Metrics` document (`src/spec/metrics.rs`) and
    populate it in `metrics::from_report`. The serde name is the YAML/CSV column
    name, so it is user-visible.
-5. Bind it: `#[pyfunction]` plus the name in `register_metrics_module`'s
-   `reg!(...)`. `Option<Real>` maps to `Optional[float]`; `Real` to `float`.
+5. Bind it *(test-enforced)*: `#[pyfunction]` plus the name in
+   `register_metrics_module`'s `reg!(...)`. `Option<Real>` maps to
+   `Optional[float]`; `Real` to `float`.
+   `hand_maintained_mirrors::every_rust_metric_is_bound_on_the_python_module`
+   fails until the name is there.
 6. Document it in `doc/METRICS.md`.
 
 New numeric leaves on the `Metrics` document become `optimize --metrics` /
@@ -441,21 +474,11 @@ Each answer is a different product, and the crate deliberately has no
 
 ## Release a version
 
-**Six** places must agree; `cargo check` only catches the Rust drift. (Keep this
-list in step with the one in [CLAUDE.md](../CLAUDE.md#bumping-the-version--sync-seven-places-cargo-check-only-catches-rust-drift),
-which is the copy read every session.)
-
-1. `Cargo.toml` — the workspace root, `X.Y.Z`
-2. `Cargo.toml` — **and** its `fugazi-derive = { …, version = "X.Y.Z" }` pin,
-   which must match (4) or `cargo` errors
-3. `fugazi-derive/Cargo.toml` — the proc-macro crate, `X.Y.Z`
-4. `python/Cargo.toml` — `X.Y.Z`
-5. `python/pyproject.toml` — `X.Y.Z`
-6. `README.md` — the `## Install` snippet, `fugazi = "X.Y"` (major.minor only)
-
-Plus `python/uv.lock`'s `[[package]] name = "fugazi"` entry. Nothing reads it
-(CI installs via `maturin` + `pip`), so it drifts silently — it sat at `0.42.0`
-through nine releases. One line; keep it honest.
+**The list of places that must agree lives in
+[CLAUDE.md](../CLAUDE.md#bumping-the-version--sync-seven-places-cargo-check-only-catches-rust-drift)**
+— one copy, because two drifted (this file said "six", that one "seven", for the
+same set of files). CI's `version-sync` job checks them, so a mismatch fails the
+build rather than shipping.
 
 Then `cargo check --workspace` to refresh `Cargo.lock`, commit the manifests,
 tag `vX.Y.Z`, and push the tag. Then **publish a GitHub Release** for that tag
@@ -483,8 +506,13 @@ When one of these fails, it is telling you something specific:
 | `src/spec/typecheck.rs` won't compile | A new `NodeSpec` variant is unclassified. Add it to both matches. |
 | `declared_output_type_matches_what_build_produces` | The type table claims a tag produces something `build` doesn't. |
 | `declared_child_expectations_match_what_build_demands` | The table claims a slot is typed, but `build` accepts the wrong type there. |
-| `the_catalogue_documents_every_spec_tag` | A tag is invisible to `fugazi list indicators`. |
-| `the_catalogue_documents_nothing_the_parser_rejects` | The catalogue advertises a tag that errors — typo, or a removed variant. |
+| `categories_cover_every_tag_once` | A tag has no `CATEGORIES` entry (or two), so `fugazi list indicators` can't place it. |
+| `categories_are_alphabetical` | The `CATEGORIES` taxonomy went out of order. |
+| `the_output_renders_every_category_and_tag` | A tag is invisible to `fugazi list indicators`. |
+| `every_tag_appears_in_the_strategies_reference` | A tag has no entry in the `doc/STRATEGIES.md` prose reference. |
+| `the_mirror_has_every_variant` | `NodeSpecRaw` doesn't mirror a `NodeSpec` variant. |
+| `the_mirror_repeats_every_serde_default` | A `#[serde(default)]` on an `Option` field wasn't copied to the mirror — the key silently becomes required. |
+| `every_rust_metric_is_bound_on_the_python_module` | A `src/metrics.rs` function isn't in `register_metrics_module`'s `reg!(...)`. |
 | `test_parity.py::test_every_*_tag_is_bound_or_declared_unbound` | A tag has no Python counterpart and no recorded reason. |
 | `test_parity.py::test_the_declared_tables_do_not_go_stale` | A tag left the spec layer but its parity entry didn't. |
 | `warm_up_is_exact_for_*` | `warm_up_period()` disagrees with when the first `Some` actually lands. |
@@ -505,7 +533,7 @@ commit the fixture or CI will tell you. `tests/indicator_reference.rs` is the
 unconditional battery underneath — hand-derived values, no fixture needed.
 
 The expected side of the catalogue and parity tests is read off **serde's own
-variant list** (`spec::typecheck::known_expr_tags` and friends), so it stays
+variant list** (`spec::typecheck::known_node_tags` and friends), so it stays
 correct for free — do not replace it with a hand-written list.
 
 ---

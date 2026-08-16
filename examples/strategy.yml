@@ -1,9 +1,10 @@
 # An always-in SMA(3)/SMA(8) crossover on BTC: go long on the golden cross
 # (fast SMA crosses above slow), reverse into a short on the death cross.
 #
-# Run it with (candles.csv carries its own `symbol` column, so no `symbol=`
-# literal is needed in --series; `@` loads a file for both --strategy and --series):
-#   fugazi run --strategy @examples/strategy.yml \
+# Run it with (the strategy is positional; candles.csv carries its own
+# `symbol` column, so no `symbol=` literal is needed in --series; `@` loads a
+# file for both):
+#   fugazi run @examples/strategy.yml \
 #              --series @examples/candles.csv \
 #              --output-dir out/ \
 #              --crypto -f 1d

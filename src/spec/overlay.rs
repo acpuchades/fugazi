@@ -165,7 +165,12 @@ impl PreparedColumn {
 }
 
 /// Resolve an indicator's scalar overlay type, erroring on a non-scalar output.
-fn scalar_type(ind: &dyn DynIndicator, name: &str) -> Result<OverlayType> {
+///
+/// Public because the CLI's `get -x` path builds overlays through
+/// [`crate::spec::overlay::build_overlay`] directly rather than through
+/// [`prepare`], and needs the same guard — an overlay that emits an `Atom`
+/// or a `Candle` cannot be a CSV cell.
+pub fn scalar_type(ind: &dyn DynIndicator, name: &str) -> Result<OverlayType> {
     Ok(match ind.output_type() {
         DynType::Real => OverlayType::Real,
         DynType::Bool => OverlayType::Bool,
@@ -440,7 +445,7 @@ mod tests {
             "(test)",
         )
         .unwrap();
-        assert!(matches!(c[0].spec, NodeSpec::Sma { period: 4, .. }));
+        assert!(matches!(&c[0].spec, NodeSpec::Sma { period, .. } if period.get() == 4));
     }
 
     #[test]

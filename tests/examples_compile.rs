@@ -30,8 +30,14 @@ fn all_examples_compile() {
     // `--examples` compiles every example target in one pass. Use the same cargo
     // that is running this test (`$CARGO`); the outer invocation has released
     // the build lock by the time test binaries run, so the nested build is safe.
+    //
+    // `--all-features` is load-bearing, not belt-and-braces. `okx_demo` declares
+    // `required-features = ["live"]` and `live` is not a default, so a plain
+    // `--examples` silently *excludes* it — while the discovery above still
+    // lists it among "examples found". The file whose whole job is preventing
+    // example rot was reporting a pass on an example it never compiled.
     let status = Command::new(env!("CARGO"))
-        .args(["build", "--examples", "--quiet"])
+        .args(["build", "--examples", "--all-features", "--quiet"])
         .current_dir(manifest_dir)
         .status()
         .expect("failed to invoke cargo build --examples");

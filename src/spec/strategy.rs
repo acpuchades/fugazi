@@ -115,7 +115,6 @@ impl SingleStrategySpec {
     /// [`StrategyRef::from_text_with_params_in`](super::preset::StrategyRef::from_text_with_params_in)
     /// (which also accepts a preset tag) rather than this directly; kept as
     /// the typed single-spec loader the spec tests use.
-    #[allow(dead_code)]
     pub fn from_text_with_params_in(
         text: &str,
         params: &std::collections::HashMap<String, serde_json::Value>,

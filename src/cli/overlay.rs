@@ -89,8 +89,7 @@ impl Overlay {
     /// …; Yahoo's `adj_close`) — see each `sources/*.rs` for the specific
     /// vocabulary. An overlay can then reference an existing column
     /// (`!ema { source: !get { key: adj_close } }`); a `!get { key }` on an
-    /// unknown key panics at build time with the schema's registered-keys
-    /// list.
+    /// unknown key is a build error listing the schema's registered keys.
     /// `root` is the blessed series this instance reads for any
     /// `source:`-omitted leaf — the `(symbol, freq)` fetch group it's being
     /// built for. A bare `!close` reads that group's own bar;
@@ -109,8 +108,15 @@ impl Overlay {
         // Overlays don't run inside a strategy, so there's no live Position
         // or Book — using them here (`entry`, `peak`, book-anchored sizing)
         // never fires. The shared library core installs the stub anchors.
-        crate::spec::overlay::build_overlay(&self.spec, schema, root)
-            .map_err(|e| anyhow!("overlay {:?} in {}: {e}", self.name, self.origin))
+        let built = crate::spec::overlay::build_overlay(&self.spec, schema, root)
+            .map_err(|e| anyhow!("overlay {:?} in {}: {e}", self.name, self.origin))?;
+        // A column that emits an `Atom` or a `Candle` has no CSV cell to
+        // widen into. Reject it here, where the column name and origin are
+        // in hand — otherwise it reaches `dyn_value_to_overlay` mid-stream
+        // and there is no error path left to return through.
+        crate::spec::overlay::scalar_type(built.as_ref(), &self.name)
+            .map_err(|e| anyhow!("{e} (in {})", self.origin))?;
+        Ok(built)
     }
 }
 
@@ -451,6 +457,12 @@ fn scoped_from_value(value: Json, scope: OverlayScope, label: &str) -> Result<Ve
 mod tests {
     use super::*;
 
+    /// Period fields are `NonZeroUsize`, so a literal needs wrapping to build
+    /// a `NodeSpec` by hand.
+    fn nz(n: usize) -> std::num::NonZeroUsize {
+        std::num::NonZeroUsize::new(n).expect("test period is non-zero")
+    }
+
     /// Most tests don't exercise `!param`, so wrap the two-arg `parse_specs`
     /// with an empty table — the bare name shadows the `super::*` glob import.
     fn parse_specs(sources: &[Source]) -> Result<Vec<Overlay>> {
@@ -656,7 +668,7 @@ mod tests {
                 name: "a".to_string(),
                 spec: NodeSpec::Sma {
                     source: Box::new(NodeSpec::Close { source: None }),
-                    period: 200,
+                    period: nz(200),
                 },
                 scope: OverlayScope {
                     symbol: Some("BTC".to_string()),
@@ -668,7 +680,7 @@ mod tests {
                 name: "b".to_string(),
                 spec: NodeSpec::Sma {
                     source: Box::new(NodeSpec::Close { source: None }),
-                    period: 20,
+                    period: nz(20),
                 },
                 scope: OverlayScope::default(),
                 origin: "(test)".to_string(),
@@ -711,8 +723,8 @@ mod tests {
         let overlays = super::parse_specs(std::slice::from_ref(&src), &table).unwrap();
         assert_eq!(overlays.len(), 1);
         assert!(matches!(
-            overlays[0].spec,
-            NodeSpec::Sma { period: 20, .. }
+            &overlays[0].spec,
+            NodeSpec::Sma { period, .. } if period.get() == 20
         ));
     }
 
@@ -721,8 +733,8 @@ mod tests {
         let src = Source::Inline("ma=!sma { period: !param { key: FAST, default: 14 } }".to_string());
         let overlays = super::parse_specs(std::slice::from_ref(&src), &HashMap::new()).unwrap();
         assert!(matches!(
-            overlays[0].spec,
-            NodeSpec::Sma { period: 14, .. }
+            &overlays[0].spec,
+            NodeSpec::Sma { period, .. } if period.get() == 14
         ));
     }
 
@@ -741,8 +753,8 @@ mod tests {
         let table = HashMap::from([("FAST".to_string(), Json::from(30))]);
         let overlays = super::parse_specs(std::slice::from_ref(&src), &table).unwrap();
         assert!(matches!(
-            overlays[0].spec,
-            NodeSpec::Sma { period: 30, .. }
+            &overlays[0].spec,
+            NodeSpec::Sma { period, .. } if period.get() == 30
         ));
     }
 }

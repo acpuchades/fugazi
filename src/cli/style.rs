@@ -113,3 +113,82 @@ pub fn print_warns(warns: &[String]) {
     }
     println!();
 }
+
+// ---------------------------------------------------------------------------
+// Shared result-block formatting
+// ---------------------------------------------------------------------------
+//
+// `run` and `optimize` both close with a result block, and both grew their own
+// copy of these. `format_utc` in particular was ~25 lines of civil-from-days
+// arithmetic duplicated byte-for-byte, under a comment declining to lift it —
+// which is exactly the kind of calendar code where a fix reaching one copy and
+// not the other is invisible until someone reads a wrong date.
+
+/// A result-block field at the standard 9-character label column.
+pub fn field(label: &str, value: &str) {
+    print_field(label, value, 9);
+}
+
+/// A hangover line under a [`field`], indented to the value column.
+pub fn field_continuation(text: &str) {
+    print_field_continuation(text, 9);
+}
+
+/// Human-readable elapsed time: milliseconds under a second, seconds under a
+/// minute, `MMm SSs` beyond.
+pub fn format_elapsed(d: std::time::Duration) -> String {
+    let secs = d.as_secs_f64();
+    if secs < 1.0 {
+        format!("{} ms", d.as_millis())
+    } else if secs < 60.0 {
+        format!("{secs:.2} s")
+    } else {
+        format!("{}m {:02}s", d.as_secs() / 60, d.as_secs() % 60)
+    }
+}
+
+/// Format a [`SystemTime`](std::time::SystemTime) as `YYYY-MM-DD HH:MM:SS UTC`,
+/// without pulling in a date library (Howard Hinnant's civil-from-days).
+pub fn format_utc(t: std::time::SystemTime) -> String {
+    let secs = t
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let (days, rem) = (secs / 86_400, secs % 86_400);
+    let (hour, min, sec) = (rem / 3_600, (rem % 3_600) / 60, rem % 60);
+
+    let z = days as i64 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}:{sec:02} UTC")
+}
+
+/// The console warning list shared by the `run` and `optimize` result blocks:
+/// non-numeric overlay columns that were dropped, then the frictionless notice.
+///
+/// `what` names the thing the missing cost model affects — `"results"` for a
+/// single run, `"grid results"` for a sweep. That one word was the *only*
+/// difference between the two copies this replaces.
+pub fn collect_warnings(skipped: &[String], no_cost: bool, what: &str) -> Vec<String> {
+    let mut w = Vec::new();
+    if !skipped.is_empty() {
+        w.push(format!(
+            "skipped non-numeric overlay column{}: {} — not accessible via `!get`",
+            if skipped.len() == 1 { "" } else { "s" },
+            skipped.join(", "),
+        ));
+    }
+    if no_cost {
+        w.push(format!(
+            "no cost model set — commission, spread, and slippage are zero; \
+             {what} are frictionless"
+        ));
+    }
+    w
+}

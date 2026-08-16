@@ -45,6 +45,8 @@
 //! * [`composite`] — multi-condition (trend gated by strength, dip-in-uptrend).
 
 pub mod basket;
+pub mod selection;
+pub mod universe;
 pub mod composite;
 pub mod mean_reversion;
 pub mod momentum;
@@ -59,7 +61,37 @@ pub use multi_asset::MultiAssetStrategy;
 pub use pairs::PairsStrategy;
 pub use single_asset::SingleAssetStrategy;
 
-use crate::indicators::{Close, CurrentBar, High, Low, Pick, Volume};
+use crate::indicators::{Close, CurrentBar, High, Low, Pick, Position};
+use crate::types::{Real, Snapshot};
+use crate::Indicator;
+
+/// A boxed real-valued chain over a per-bar snapshot — what a per-symbol
+/// factory produces.
+///
+/// `basket.rs` called this `Chain` and `multi_asset.rs` called it
+/// `LevelChain`; they were the same type, written twice.
+pub(crate) type Chain<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real> + Send + Sync>;
+
+/// A per-symbol, position-aware factory for a protective level.
+pub(crate) type LevelFactory<Sym> = Box<dyn Fn(&Sym, &Position) -> Chain<Sym> + Send + Sync>;
+
+/// Box a user-supplied protective-level factory into a [`LevelFactory`].
+///
+/// The four builders (`long_stop_loss`, `long_take_profit`,
+/// `short_stop_loss`, `short_take_profit`) existed on both the basket and
+/// multi-asset shapes with byte-identical bodies — eight copies of the same
+/// five lines, differing only in a local binding name and which of the two
+/// spellings of `Chain` they named.
+pub(crate) fn level_factory<Sym, F, L>(factory: F) -> LevelFactory<Sym>
+where
+    F: Fn(&Sym, &Position) -> L + 'static + Send + Sync,
+    L: Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
+{
+    Box::new(move |sym: &Sym, pos: &Position| {
+        let chain: Chain<Sym> = Box::new(factory(sym, pos));
+        chain
+    })
+}
 
 /// Shorthand for `Close::of(Pick::<Sym>::new())` — read the strategy's own
 /// asset's close out of the incoming [`Snapshot`](crate::types::Snapshot).
@@ -79,15 +111,107 @@ pub(crate) fn self_low<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static +
     Low::of(Pick::<Sym>::new())
 }
 
-/// Shorthand for `Volume::of(Pick::<Sym>::new())` — see [`self_close`].
-#[allow(dead_code)]
-pub(crate) fn self_volume<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>() -> Volume<Pick<Sym>> {
-    Volume::of(Pick::<Sym>::new())
-}
-
 /// Shorthand for `CurrentBar::of(Pick::<Sym>::new())` — read the strategy's
 /// own asset's whole [`Candle`](crate::types::Candle) out of the snapshot;
 /// used to root the bar indicators (`Atr`, `Adx`, `Obv`, …).
 pub(crate) fn self_bar<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>() -> CurrentBar<Pick<Sym>> {
     CurrentBar::of(Pick::<Sym>::new())
+}
+
+// ---------------------------------------------------------------------------
+// The shared per-leg decision
+// ---------------------------------------------------------------------------
+
+/// One leg's resolved inputs for [`trade_leg`] — every slot already read to a
+/// plain value, so the caller owns *how* it reads them and this owns *what to
+/// do* with them.
+///
+/// That split is what lets the single-asset and multi-asset shapes share the
+/// decision: the former reads `Signal::is_true()` on its own fields, the latter
+/// `.value().unwrap_or(false)` on a per-symbol state, and those are the same
+/// thing (`is_true` is defined as exactly that) once resolved.
+pub(crate) struct Leg<'a, Sym> {
+    pub symbol: &'a Sym,
+    /// The `value_frac` magnitude for entries and rebalance resizes.
+    pub size: Real,
+    pub is_long: bool,
+    pub is_short: bool,
+    pub enter_long: bool,
+    pub enter_short: bool,
+    pub close_long: bool,
+    pub close_short: bool,
+    /// Whether this bar's rebalance gate fired.
+    pub rebalancing: bool,
+    pub long_stop: Option<Real>,
+    pub long_target: Option<Real>,
+    pub short_stop: Option<Real>,
+    pub short_target: Option<Real>,
+}
+
+/// Drive one leg's wallet interaction for one bar.
+///
+/// `SingleAssetStrategy::trade` and `MultiAssetStrategy::trade` ran this
+/// algorithm as two independent copies — the same order, the same comments, the
+/// same `set` / `cancel_protective` / `close` / rebalance-gate / rest-protective
+/// sequence, differing only in `self.x` vs `state.x`, a fixed symbol vs a loop
+/// variable, and `return` vs `continue`. ARCHITECTURE.md describes multi-asset
+/// as "every symbol runs the same `SingleAssetStrategy`-shaped decision in
+/// isolation"; the code had forked, with nothing to keep the two aligned.
+///
+/// The order matters and is load-bearing:
+///
+/// 1. **Entries first**, magnitude from `size`, reversal-capable. The fill lands
+///    next bar at the open, so any resting bracket is cancelled now — a reversal
+///    voids the old one.
+/// 2. **Signal-driven exits** to flat, also filling next bar at the open.
+/// 3. **The rebalance gate**: resize a held position to the current sizing
+///    target. `set` at the side already held is idempotent when the target
+///    matches, so an unchanged target queues no fill. Protective levels survive,
+///    because the position stays on the same side and its anchor / peak / trough
+///    carry through the `Position::apply` merge.
+/// 4. **Rest the active side's protective levels**, re-submitted every bar so a
+///    trailing level cancel/replaces. The wallet reads the side from the
+///    position, so a stop is always the adverse level and a take-profit the
+///    favourable one.
+///
+/// Steps 1 and 2 are terminal for the leg — they return early, exactly as the
+/// two originals did.
+pub(crate) fn trade_leg<Sym: Clone>(leg: &Leg<'_, Sym>, wallet: &mut dyn crate::Wallet<Sym>) {
+    use crate::wallet::{Reference, Side, Size};
+
+    if leg.enter_long && !leg.is_long {
+        let _ = wallet.set(leg.symbol.clone(), Side::Buy, Size::value_frac(leg.size));
+        let _ = wallet.cancel_protective(leg.symbol);
+        return;
+    }
+    if leg.enter_short && !leg.is_short {
+        let _ = wallet.set(leg.symbol.clone(), Side::Sell, Size::value_frac(leg.size));
+        let _ = wallet.cancel_protective(leg.symbol);
+        return;
+    }
+    if (leg.close_long && leg.is_long) || (leg.close_short && leg.is_short) {
+        let _ = wallet.close(leg.symbol.clone());
+        let _ = wallet.cancel_protective(leg.symbol);
+        return;
+    }
+    if leg.rebalancing {
+        if leg.is_long {
+            let _ = wallet.set(leg.symbol.clone(), Side::Buy, Size::value_frac(leg.size));
+        } else if leg.is_short {
+            let _ = wallet.set(leg.symbol.clone(), Side::Sell, Size::value_frac(leg.size));
+        }
+    }
+    let (stop, target) = if leg.is_long {
+        (leg.long_stop, leg.long_target)
+    } else if leg.is_short {
+        (leg.short_stop, leg.short_target)
+    } else {
+        (None, None)
+    };
+    if let Some(level) = stop {
+        let _ = wallet.set_stop(leg.symbol.clone(), Reference(level), Size::position_frac(1.0));
+    }
+    if let Some(level) = target {
+        let _ = wallet.set_take_profit(leg.symbol.clone(), Reference(level), Size::position_frac(1.0));
+    }
 }

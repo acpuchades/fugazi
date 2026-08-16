@@ -1,7 +1,7 @@
 # A params file for examples/strategy.params.yml: a plain NAME: value mapping
 # resolving that strategy's `!param` placeholders. Load it with `@`:
 #
-#   fugazi run --strategy @examples/strategy.params.yml \
+#   fugazi run @examples/strategy.params.yml \
 #              --params @examples/params.yml \
 #              --series @examples/candles.csv \
 #              --output-dir out/

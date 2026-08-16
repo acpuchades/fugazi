@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 use fugazi::prelude::*;
@@ -26,13 +26,15 @@ use crate::metrics;
 use crate::run::join_universe_by_time;
 use crate::style;
 
+use fugazi::spec::pairs::PairsStrategySpec;
+
 // Kernel imports from the library — types, ranking, walk-forward layout.
 // Re-exported publicly so `crate::optimize::reject_axes_in_params` (called
 // from `main.rs`) and other library-side items keep resolving through this
 // module.
 pub use fugazi::spec::optimize::{
     ColumnPos, Direction, Evaluation, Row, Subgrid,
-    build_any_spec, build_pairs_spec, build_spec, cartesian, format_number,
+    build_any_spec, build_spec, build_typed, cartesian, format_number,
     format_value, lookup, lookup_windowed,
     mean_std_of, optimize, probe_params, ranking_value, reject_axes_in_params,
     row_dsr_inputs, split_axes,
@@ -364,7 +366,7 @@ fn run_single(
             atoms.len(),
         );
         style::print_header("optimize", "sweep a strategy over a parameter grid");
-        style::print_warns(&collect_warnings(&skipped_overlay_columns, !opts.costs_supplied));
+        style::print_warns(&style::collect_warnings(&skipped_overlay_columns, !opts.costs_supplied, "grid results"));
         print_inputs_block(
             opts,
             windowed_bars,
@@ -422,11 +424,11 @@ fn run_multi_symbol(
     // Basket / multi / portfolio take the frame's whole symbol set.
     let universe: Vec<String> = match opts.strategy_kind {
         StrategyKind::Pairs => {
-            let probe = build_pairs_spec(base_value, &probe_params(&subgrids[0]))?;
+            let probe = build_typed::<PairsStrategySpec>(base_value, &probe_params(&subgrids[0]))?;
             let left = probe.left.clone();
             let right = probe.right.clone();
             for (idx, subgrid) in subgrids.iter().enumerate().skip(1) {
-                let other = build_pairs_spec(base_value, &probe_params(subgrid))?;
+                let other = build_typed::<PairsStrategySpec>(base_value, &probe_params(subgrid))?;
                 if other.left != left || other.right != right {
                     bail!(
                         "--grid #{} resolves to pair `{}`/`{}`, but --grid #1 resolves to \
@@ -566,7 +568,7 @@ fn run_multi_symbol(
         let finished = SystemTime::now();
         let period = bar_period_line(bars.first().map(String::as_str), bars.last().map(String::as_str), bars.len());
         style::print_header("optimize", "sweep a strategy over a parameter grid");
-        style::print_warns(&collect_warnings(&[], !opts.costs_supplied));
+        style::print_warns(&style::collect_warnings(&[], !opts.costs_supplied, "grid results"));
         print_inputs_block(
             opts,
             windowed_bars,
@@ -849,16 +851,16 @@ fn print_inputs_block(
     period: Option<&str>,
 ) {
     style::print_section("inputs");
-    print_field("strategy", opts.strategy_label);
+    style::field("strategy", opts.strategy_label);
     if subgrid_summaries.len() == 1 {
         // Compact form when there's only one subgrid — matches the pre-stack
         // shape, so a single-`--grid` invocation reads the same as before.
-        print_field(
+        style::field(
             "grid",
             &format!("{} points · {}", rows.len(), subgrid_summaries[0].0),
         );
     } else {
-        print_field(
+        style::field(
             "grid",
             &format!(
                 "{} points across {} subgrids",
@@ -867,22 +869,22 @@ fn print_inputs_block(
             ),
         );
         for (i, (label, n)) in subgrid_summaries.iter().enumerate() {
-            print_indented(&format!("[{}] {n} pts · {label}", i + 1));
+            style::field_continuation(&format!("[{}] {n} pts · {label}", i + 1));
         }
     }
     if let Some(p) = period {
-        print_field("period", p);
+        style::field("period", p);
     }
-    print_field("capital", &format!("{:.2}", opts.cash));
+    style::field("capital", &format!("{:.2}", opts.cash));
     // Costs summary — same treatment as `run`: name it explicitly if a model is
     // set, note `none (explicit)` if the user opted in silently. The
     // no-cost warning has been hoisted above the block by `collect_warnings`.
     if !opts.cost_config.is_none() {
-        print_field("costs", "active (commission/spread/slippage applied)");
+        style::field("costs", "active (commission/spread/slippage applied)");
     } else if opts.costs_supplied {
-        print_field("costs", "none (explicit)");
+        style::field("costs", "none (explicit)");
     }
-    print_field("output", &opts.output.display().to_string());
+    style::field("output", &opts.output.display().to_string());
     if let (Some(spec), Some(bars)) = (opts.windowed, windowed_bars) {
         let msg = match spec {
             WindowSpec::Bars(_) => format!("{bars}-bar windows (mean ± std per metric)"),
@@ -890,11 +892,11 @@ fn print_inputs_block(
                 format!("{spec} → {bars}-bar windows (mean ± std per metric)")
             }
         };
-        print_field("windowed", &msg);
+        style::field("windowed", &msg);
     }
     if let Some(name) = &opts.best_by {
         if opts.risk_aversion > 0.0 {
-            print_field(
+            style::field(
                 "best-by",
                 &format!(
                     "{name} (risk-aversion k={}: mean shifted k·std against)",
@@ -902,7 +904,7 @@ fn print_inputs_block(
                 ),
             );
         } else {
-            print_field("best-by", name);
+            style::field("best-by", name);
         }
     }
 }
@@ -913,33 +915,13 @@ fn print_inputs_block(
 fn print_result_block(points: usize, started: SystemTime, finished: SystemTime) {
     println!();
     style::print_section("result");
-    print_field("points", &points.to_string());
+    style::field("points", &points.to_string());
     let elapsed = finished.duration_since(started).unwrap_or_default();
-    print_field("started", &format_utc(started));
-    print_field(
+    style::field("started", &style::format_utc(started));
+    style::field(
         "finished",
-        &format!("{} ({})", format_utc(finished), format_elapsed(elapsed)),
+        &format!("{} ({})", style::format_utc(finished), style::format_elapsed(elapsed)),
     );
-}
-
-/// Collect the top-of-run warnings for `optimize` — same shape as `run`'s.
-fn collect_warnings(skipped: &[String], no_cost: bool) -> Vec<String> {
-    let mut w = Vec::new();
-    if !skipped.is_empty() {
-        w.push(format!(
-            "skipped non-numeric overlay column{}: {} — not accessible via `!get`",
-            if skipped.len() == 1 { "" } else { "s" },
-            skipped.join(", "),
-        ));
-    }
-    if no_cost {
-        w.push(
-            "no cost model set — commission, spread, and slippage are zero; \
-             grid results are frictionless"
-                .to_string(),
-        );
-    }
-    w
 }
 
 /// `start → end (N bars)` when the atom stream has at least one entry, else
@@ -971,7 +953,7 @@ fn print_best_block(
     println!();
     style::print_section("best");
     let Some(best) = rows.first() else {
-        print_field("params", "(no grid points)");
+        style::field("params", "(no grid points)");
         return;
     };
 
@@ -984,7 +966,7 @@ fn print_best_block(
         .filter_map(|(name, v)| v.as_ref().map(|v| format!("{name}={}", format_value(v))))
         .collect::<Vec<_>>()
         .join(", ");
-    print_field("params", &params_label);
+    style::field("params", &params_label);
 
     if let Some((_name, path, direction)) = best_by {
         let mut value = format_metric(&best.eval, path);
@@ -997,14 +979,14 @@ fn print_best_block(
             value = format!("{value} · score {score:.4}");
         }
         // Friendly label for the console; the CSV column keeps the dotted path.
-        print_field(&friendly_metric_label(path), &value);
+        style::field(&friendly_metric_label(path), &value);
     }
     for (_name, path) in metric_columns {
         // Skip a metric already printed as the best-by row.
         if best_by.map(|(_, p, _)| p.as_str()) == Some(path.as_str()) {
             continue;
         }
-        print_field(&friendly_metric_label(path), &format_metric(&best.eval, path));
+        style::field(&friendly_metric_label(path), &format_metric(&best.eval, path));
     }
     // Best-row headline metrics from the run block for context — cross-window
     // mean ± std under `-w`, matching the metric rows above.
@@ -1041,7 +1023,7 @@ fn print_best_block(
             )
         }
     };
-    print_field("return", &headline);
+    style::field("return", &headline);
 }
 
 /// One metric value for the best block: `1.2345` for a whole-run evaluation,
@@ -1058,47 +1040,9 @@ fn format_metric(eval: &Evaluation, path: &str) -> String {
     }
 }
 
-fn print_field(label: &str, value: &str) {
-    style::print_field(label, value, 9);
-}
 
-/// A trailing hangover line under a `print_field` — indented to sit under the
-/// value column (2 leading spaces + 9-char label column = 11 spaces).
-fn print_indented(text: &str) {
-    style::print_field_continuation(text, 9);
-}
 
-fn format_elapsed(d: Duration) -> String {
-    let secs = d.as_secs_f64();
-    if secs < 1.0 {
-        format!("{} ms", d.as_millis())
-    } else if secs < 60.0 {
-        format!("{secs:.2} s")
-    } else {
-        format!("{}m {:02}s", d.as_secs() / 60, d.as_secs() % 60)
-    }
-}
 
-/// Format a [`SystemTime`] as `YYYY-MM-DD HH:MM:SS UTC` — same as `run.rs`.
-/// Kept here (not lifted to `style.rs`) since the caller is inside this
-/// module's result-block flow.
-fn format_utc(t: SystemTime) -> String {
-    let secs = t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let (days, rem) = (secs / 86_400, secs % 86_400);
-    let (hour, min, sec) = (rem / 3_600, (rem % 3_600) / 60, rem % 60);
-
-    let z = days as i64 + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-
-    format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}:{sec:02} UTC")
-}
 // ---------------------------------------------------------------------------
 // Walk-forward (rolling)
 // ---------------------------------------------------------------------------
@@ -1193,7 +1137,7 @@ where
 
     if !quiet {
         style::print_header("optimize", "walk-forward optimization");
-        style::print_warns(&collect_warnings(skipped_overlay_columns, false));
+        style::print_warns(&style::collect_warnings(skipped_overlay_columns, false, "grid results"));
         print_walkforward_inputs(
             &spec,
             (result.is_bars, result.oos_bars, result.embargo_bars),
@@ -1342,21 +1286,21 @@ fn print_walkforward_inputs(
 ) {
     let (is_b, oos_b, emb_b) = resolved;
     style::print_section("inputs");
-    print_field("windows", &format!("{spec}  →  IS={is_b}, OS={oos_b}, embargo={emb_b} (bars)"));
-    print_field(
+    style::field("windows", &format!("{spec}  →  IS={is_b}, OS={oos_b}, embargo={emb_b} (bars)"));
+    style::field(
         "prefix",
         &format!(
             "{prefix_skip} bars ({})",
             if keep_unstable { "keep_unstable → max(warm_up)" } else { "safe → max(stable)" }
         ),
     );
-    print_field("folds", &format!("{n_folds}  (over {n_bars} bars)"));
-    print_field("output", &format!("{}", output.display()));
-    print_indented(&format!(
+    style::field("folds", &format!("{n_folds}  (over {n_bars} bars)"));
+    style::field("output", &format!("{}", output.display()));
+    style::field_continuation(&format!(
         "+ {}",
         derive_sibling(output, "composite_oos_equity", "csv").display()
     ));
-    print_indented(&format!(
+    style::field_continuation(&format!(
         "+ {}",
         derive_sibling(output, "composite_oos_metrics", "yml").display()
     ));
@@ -1383,7 +1327,7 @@ fn print_walkforward_summary(
                 .filter_map(|v| v.as_ref().map(format_value))
                 .collect::<Vec<_>>()
                 .join(", ");
-            print_field(
+            style::field(
                 &format!("#{}", row.fold),
                 &format!(
                     "[{}..{})/[{}..{})  {label}_is={} _oos={} _wfe={}  params: {params_label}",
@@ -1408,7 +1352,7 @@ fn print_walkforward_summary(
                 ),
                 None => ("—".into(), "—".into()),
             };
-            print_field(
+            style::field(
                 &format!("#{}", row.fold),
                 &format!(
                     "[{}..{})/[{}..{})  is={is_str} oos={oos_str}",

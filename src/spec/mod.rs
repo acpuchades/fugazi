@@ -31,6 +31,7 @@ pub mod overlay;
 pub mod pairs;
 pub mod portfolio;
 pub mod preset;
+mod shape;
 pub mod strategy;
 pub mod template;
 pub mod trailing;
@@ -119,29 +120,20 @@ pub fn load_value_pre_params(
     crate::spec::imports::resolve(value, base)
 }
 
-#[allow(unused_imports)]
 pub use basket::{BasketStrategySpec, SelectionRuleSpec};
 pub use expr::NodeSpec;
 pub use grammar::{
     GrammarField, GrammarTag, SCHEMA_VERSION, SINCE_BASELINE, spec_document_json_schema,
     spec_grammar, spec_grammar_document, spec_json_schema,
 };
-#[allow(unused_imports)]
 pub use expr::ValueLit;
-#[allow(unused_imports)]
 pub use multi_asset::MultiAssetStrategySpec;
-#[allow(unused_imports)]
 pub use pairs::PairsStrategySpec;
-#[allow(unused_imports)]
 pub use portfolio::{PortfolioSpec, PortfolioChildSpec, PortfolioChildStrategy};
-#[allow(unused_imports)]
 pub use preset::{StrategyPreset, StrategyRef};
-#[allow(unused_imports)]
 pub use expr::StrOperand;
-#[allow(unused_imports)]
 pub use expr::{BoolNode, RealNode};
 pub use strategy::SingleStrategySpec;
-#[allow(unused_imports)]
 pub use template::SpecTemplate;
 pub use multi_asset::DynMultiAssetStrategy;
 pub use pairs::DynPairsStrategy;
@@ -734,6 +726,24 @@ mod tests {
     }
 
     #[test]
+    fn sharpe_accepts_a_preset_strategy_through_the_json_bridge() {
+        // `sharpe_accepts_a_preset_strategy` reads the document with
+        // `serde_norway::from_str`, which yields a `Value::Tagged`. Every real
+        // load path (`spec::load_value` -> `convert::yaml_to_json`) normalises
+        // `!tag v` to `{tag: v}` *first*, so `AnyStrategyRef` sees a bare
+        // single-key mapping — no `symbol:`, no `left`/`right`, no
+        // `selection:`. That is the shape the multi-asset arm swallows.
+        let yaml = "!sharpe { strategy: !ma_crossover { symbol: X, fast: 2, slow: 4 }, \
+                    period: 4, bars_per_year: 252 }";
+        let value: serde_norway::Value = serde_norway::from_str(yaml).unwrap();
+        let json = crate::spec::convert::yaml_to_json(value).unwrap();
+        let spec: NodeSpec = serde_json::from_value(json)
+            .expect("a preset under `strategy:` must survive the JSON bridge");
+        let built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        assert_eq!(built.output_type(), crate::spec::dyn_indicator::DynType::Real);
+    }
+
+    #[test]
     fn sharpe_accepts_a_pairs_strategy() {
         // The widened `strategy:` field routes a `left`/`right` map to a pairs
         // strategy. Fed tagged 2-entry snapshots (the shape the old single-asset
@@ -1270,6 +1280,80 @@ mod tests {
         let spec: NodeSpec = serde_norway::from_str("!value [0.6, 0.4]").unwrap();
         let err = expr_build_err(&spec, &Schema::empty());
         assert!(err.contains("portfolio weight-share template"), "{err}");
+    }
+
+    #[test]
+    fn a_zero_period_is_rejected_at_parse_not_at_construction() {
+        // Period fields are `NonZeroUsize`, so serde refuses 0 before a
+        // `NodeSpec` exists. That is what makes `fugazi check` catch it —
+        // previously it parsed clean and tripped an `assert!` inside the
+        // library constructor at run time.
+        for text in [
+            "!ema { period: 0 }",
+            "!sma { period: 0 }",
+            "!rsi { period: 0 }",
+            "!atr { period: 0 }",
+            "!bollinger { period: 0 }",
+            "!every 0",
+        ] {
+            assert!(
+                serde_norway::from_str::<NodeSpec>(text).is_err(),
+                "`{text}` must not parse",
+            );
+        }
+        // ... and the same fields still accept a positive value.
+        assert!(serde_norway::from_str::<NodeSpec>("!ema { period: 1 }").is_ok());
+    }
+
+    #[test]
+    fn variance_ratio_reports_its_relational_bounds_as_values() {
+        // `NonZeroUsize` gets these past 0; the remaining constraints are
+        // between two fields, so they stay build-time checks — but they are
+        // values now, not `assert!`s.
+        let spec: NodeSpec =
+            serde_norway::from_str("!variance_ratio { period: 10, lag: 1 }").unwrap();
+        let err = expr_build_err(&spec, &Schema::empty());
+        assert!(err.contains("`lag` must be at least 2"), "{err}");
+
+        let spec: NodeSpec =
+            serde_norway::from_str("!variance_ratio { period: 5, lag: 4 }").unwrap();
+        let err = expr_build_err(&spec, &Schema::empty());
+        assert!(err.contains("at least `lag` + 2"), "{err}");
+    }
+
+    #[test]
+    fn resample_rejects_a_zero_period_instead_of_aborting() {
+        // `every: 0` used to trip an `assert!` inside the build match and take
+        // the process with it. Now that `every` is a `NonZeroUsize` the
+        // rejection happens one step earlier still — at parse, so `fugazi
+        // check` catches it without building anything. The breadcrumb survives
+        // either way.
+        let err = serde_norway::from_str::<NodeSpec>("!resample { every: 0, inner: !close }")
+            .expect_err("`every: 0` must not parse")
+            .to_string();
+        assert!(err.starts_with("!resample > "), "{err}");
+        assert!(err.contains("nonzero"), "{err}");
+    }
+
+    #[test]
+    fn an_embedded_strategy_reports_a_bad_subtree_instead_of_aborting() {
+        // `!sharpe` and its four siblings build a whole strategy behind a
+        // rebuild-on-clone wrapper. The first construction is the one that can
+        // fail on bad input, and it has to come back as a value.
+        let yaml = r#"
+            !sharpe
+            period: 20
+            bars_per_year: 252
+            strategy:
+              symbol: BTCUSDT
+              long:
+                enter: !gt { lhs: !get { key: nope }, rhs: !value 1.0 }
+                exit: !value false
+        "#;
+        let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
+        let err = expr_build_err(&spec, &Schema::empty());
+        assert!(err.starts_with("!sharpe > "), "{err}");
+        assert!(err.contains("no overlay side channel is bound"), "{err}");
     }
 
     #[test]

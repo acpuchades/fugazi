@@ -16,7 +16,7 @@
 //! The one exception is the load-time `weighting` / `document` tags
 //! (`!fixed`/`!equal_weight`/`!import`/`!param`/`!arg`/`!undefined`): these are
 //! never serde variants — a `Value` pass rewrites each away before the typed
-//! parse — so [`document_grammar_tags`] hand-authors their records. Even there
+//! parse — so `document_grammar_tags` hand-authors their records. Even there
 //! the *name set* is pinned to the parser's own
 //! [`REWRITTEN_TAGS`](crate::spec::typecheck::REWRITTEN_TAGS) by a test, so a
 //! new load-time tag can't ship without a row.
@@ -144,7 +144,7 @@ pub struct GrammarTag {
 /// - **Reflected off serde** via `#[derive(SpecGrammar)]`, so they cannot drift:
 ///   `node` (the composable expression enum), `selection` (a `basket:`
 ///   document's `selection:` rules), and `universe` (`!all_of`/`!any_of`).
-/// - **Hand-authored** ([`document_grammar_tags`]) for the load-time tags that
+/// - **Hand-authored** (`document_grammar_tags`) for the load-time tags that
 ///   are *not* serde variants — they're `Value` rewrites resolved before the
 ///   typed parse, so there is no variant for the derive to read. `weighting`
 ///   (`!fixed`/`!equal_weight`) and `document` (`!import`/`!param`/`!arg`/
@@ -732,9 +732,13 @@ fn type_fragment(ty: &str) -> serde_json::Value {
         // expression schema, so these arms aren't reached through `node`.
         "str_list" => json!({ "type": "array", "items": { "type": "string" } }),
         "number_list" => json!({ "type": "array", "items": { "type": "number" } }),
-        // `> 0` is asserted at construction; the schema stays lax (`longs`/`shorts`
-        // and `every` admit 0). See the proposal's open question.
+        // A plain count that may legitimately be 0 (`longs` / `shorts` on a
+        // selection rule).
         "uint" => or_placeholder(json!({ "type": "integer", "minimum": 0 })),
+        // A period or window length. The spec field is a `NonZeroUsize`, so
+        // serde rejects 0 at parse time and the schema can say so — this used
+        // to advertise `minimum: 0` while the constructor asserted `> 0`.
+        "positive_uint" => or_placeholder(json!({ "type": "integer", "minimum": 1 })),
         "number" => or_placeholder(json!({ "type": "number" })),
         "str" => or_placeholder(json!({ "type": "string" })),
         "bool" => or_placeholder(json!({ "type": "boolean" })),

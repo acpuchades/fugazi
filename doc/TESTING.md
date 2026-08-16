@@ -23,7 +23,7 @@ places belongs in the narrower one.
 |---|---|---|---|
 | **Unit** | `#[cfg(test)] mod tests` beside the code | `pub(crate)` internals | `cargo test --lib` |
 | **Integration** | `tests/*.rs`, one crate per file | the public API only | `cargo test` |
-| **End-to-end** | `tests/{run,costs}.rs` | the `fugazi` binary via `Command` | `cargo test` (needs the `cli` feature) |
+| **End-to-end** | `tests/{run,costs,optimize,examples_validate}.rs` | the `fugazi` binary via `Command` | `cargo test` (needs the `cli` feature) |
 | **Cross-validation** | `tests/{talib,metrics}_validation.rs` | an external reference library's numbers | `cargo test` (both fixtures committed; skips only if one is removed) |
 
 Plus **doctests** (37 of them, mostly in `README.md` and the strategy-shape
@@ -88,7 +88,9 @@ they are also the two suites that can silently disable themselves.
 | `backtest::run` | `tests/driver_contract.rs` |
 | Wallet order flow | unit tests in `src/wallet.rs`; live venues in `tests/live_<venue>.rs` against `wiremock` |
 | A metric | a unit test in `src/metrics.rs`, plus the generator + fixture if it's cross-checkable |
-| A CLI flag | `tests/run.rs` or `tests/costs.rs` via `common::cli::Cmd` |
+| A CLI flag | `tests/run.rs`, `tests/costs.rs` or `tests/optimize.rs` via `common::cli::Cmd` |
+| An `examples/` file | nothing — `tests/examples_compile.rs` (Rust) and `tests/examples_validate.rs` (YAML) cover the directory, and each refuses to let a new file in uncovered |
+| A hand-maintained mirror (`NodeSpecRaw`, the `fugazi.metrics` registration) | `tests/hand_maintained_mirrors.rs` |
 | A remote provider | `tests/sources_<venue>.rs` against `wiremock` — **never** the live API |
 | Anything with a Python mirror | `python/tests/` in the same PR (see the parity discipline in [ARCHITECTURE](ARCHITECTURE.md#parity-discipline)) |
 
@@ -134,7 +136,7 @@ each failure *means*; the architectural point is how they're built:
 
 **Derive the expected side, never hand-write it.** The catalogue and parity
 guards read their expected set off serde's own variant list
-(`spec::typecheck::known_expr_tags` and friends), so they stay correct for free.
+(`spec::typecheck::known_node_tags` and friends), so they stay correct for free.
 A hand-maintained list is the thing they exist to replace.
 
 **Make omission a compile error where you can.** `src/spec/typecheck.rs`'s two

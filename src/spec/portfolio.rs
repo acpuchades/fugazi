@@ -195,7 +195,7 @@ pub struct PortfolioChildSpec {
     /// reporting. Defaults internally to `child_<idx>` when omitted
     /// (used as the sub-wallet key inside [`Portfolio`]). Must be
     /// unique across the portfolio after defaulting;
-    /// [`PortfolioSpec::build`] panics on collisions.
+    /// [`PortfolioSpec::try_build`] reports a collision as a build error.
     ///
     /// Surfaced to `weights:` as `!arg CHILD_NAME` **only when
     /// explicitly set** — a template referencing `!arg CHILD_NAME`
@@ -248,86 +248,31 @@ impl TryFrom<serde_norway::Value> for PortfolioChildStrategy {
     type Error = String;
 
     fn try_from(v: serde_norway::Value) -> Result<Self, Self::Error> {
-        use serde_norway::Value as YV;
-
-        // A preset arrives either as a YAML `!tag { … }` (Value::Tagged)
-        // or, on the serde_json load path, as a single-key `{ tag: { … } }`
-        // mapping. Either shape routes to `StrategyRef` — which owns the
-        // preset-name gate — before we consider the other strategy shapes.
-        //
-        // Ordering matters: `{"buy_and_hold": {...}}` is a bare mapping
-        // without `symbol:` at the top, so the multi-asset arm would
-        // otherwise swallow it and fail on the unknown `buy_and_hold`
-        // field. Routing presets first sidesteps that.
-        let is_preset_shape = matches!(&v, YV::Tagged(_))
-            || matches!(&v, YV::Mapping(m) if m.len() == 1 && matches!(
-                m.iter().next(),
-                Some((YV::String(k), _)) if is_preset_tag(k)
-            ));
-        if is_preset_shape {
-            return StrategyRef::try_from(v)
-                .map(|s| PortfolioChildStrategy::Single(Box::new(s)));
-        }
-
-        // Detect shape by distinctive top-level key. `left`+`right` picks
-        // pairs; `selection` picks basket; `symbol:` picks single-asset
-        // (spec map); a bare map with none of those goes to multi-asset
-        // (`long`/`short`/`sizing` per-symbol templates).
-        let (is_pairs, is_basket, has_symbol) = match &v {
-            YV::Mapping(m) => {
-                let has = |key: &str| {
-                    m.iter()
-                        .any(|(k, _)| matches!(k, YV::String(s) if s == key))
-                };
-                (has("left") && has("right"), has("selection"), has("symbol"))
-            }
-            _ => (false, false, false),
-        };
+        use crate::spec::shape::{ShapeHint, detect_shape};
 
         // The tag-normalising JSON bridge is required by `BasketStrategySpec`
         // (its `SpecTemplate` captures `serde_json::Value` — the raw
         // `serde_norway::Value` path can't feed it) and by
         // `MultiAssetStrategySpec` (same reason). Kept consistent for pairs
         // too so all three go through one path.
-        if is_pairs {
-            let json = crate::spec::convert::yaml_to_json(v).map_err(|e| e.to_string())?;
-            return serde_json::from_value::<PairsStrategySpec>(json)
-                .map(|p| PortfolioChildStrategy::Pairs(Box::new(p)))
-                .map_err(|e| e.to_string());
-        }
-        if is_basket {
-            let json = crate::spec::convert::yaml_to_json(v).map_err(|e| e.to_string())?;
-            return serde_json::from_value::<BasketStrategySpec>(json)
-                .map(|b| PortfolioChildStrategy::Basket(Box::new(b)))
-                .map_err(|e| e.to_string());
-        }
-        // A bare mapping without `symbol:` (and without pairs/basket keys)
-        // is multi-asset — the shape with no upfront symbol declaration.
-        if matches!(&v, YV::Mapping(_)) && !has_symbol {
-            let json = crate::spec::convert::yaml_to_json(v).map_err(|e| e.to_string())?;
-            return serde_json::from_value::<MultiAssetStrategySpec>(json)
-                .map(|m| PortfolioChildStrategy::Multi(Box::new(m)))
-                .map_err(|e| e.to_string());
-        }
-        // Fall through: a `symbol:`-carrying single-asset spec map that
-        // `StrategyRef` handles (presets already routed above).
-        StrategyRef::try_from(v).map(|s| PortfolioChildStrategy::Single(Box::new(s)))
-    }
-}
+        let via_json = |v| crate::spec::convert::yaml_to_json(v).map_err(|e: anyhow::Error| e.to_string());
 
-/// Whether `name` is one of [`preset::PRESET_TAGS`]. Kept in sync with
-/// that constant by [`preset_tags_match`](tests::preset_tags_match) —
-/// duplicating the check here avoids exposing the private constant
-/// through the `preset` module.
-fn is_preset_tag(name: &str) -> bool {
-    matches!(
-        name,
-        "buy_and_hold"
-            | "ma_crossover"
-            | "rsi_reversal"
-            | "donchian_breakout"
-            | "keltner_breakout"
-    )
+        match detect_shape(&v) {
+            // `StrategyRef` owns the preset-name gate.
+            ShapeHint::Preset | ShapeHint::Single => {
+                StrategyRef::try_from(v).map(|s| PortfolioChildStrategy::Single(Box::new(s)))
+            }
+            ShapeHint::Pairs => serde_json::from_value::<PairsStrategySpec>(via_json(v)?)
+                .map(|p| PortfolioChildStrategy::Pairs(Box::new(p)))
+                .map_err(|e| e.to_string()),
+            ShapeHint::Basket => serde_json::from_value::<BasketStrategySpec>(via_json(v)?)
+                .map(|b| PortfolioChildStrategy::Basket(Box::new(b)))
+                .map_err(|e| e.to_string()),
+            ShapeHint::Multi => serde_json::from_value::<MultiAssetStrategySpec>(via_json(v)?)
+                .map(|m| PortfolioChildStrategy::Multi(Box::new(m)))
+                .map_err(|e| e.to_string()),
+        }
+    }
 }
 
 /// Deserialize the `weights:` field, rewriting the sugar tags
@@ -469,12 +414,9 @@ fn extract_top_level_value_list(tree: &Value) -> Option<Vec<Real>> {
 /// this is *not* the `!arg CHILD_NAME` injection value — that arg is
 /// only injected when `name:` was declared explicitly.
 ///
-/// # Panics
-/// Panics with a listing of the collided name(s) if any duplicate is
-/// detected. Matches the "loud on bad YAML" convention already used by
-/// [`PortfolioSpec::build`] for empty `children:` and out-of-range list
-/// indices.
-fn resolve_child_names(children: &[PortfolioChildSpec]) -> Vec<String> {
+/// A duplicate is bad **input**, not a broken invariant, so it comes back
+/// as an `Err` listing the collided name(s) rather than aborting the run.
+fn resolve_child_names(children: &[PortfolioChildSpec]) -> Result<Vec<String>, String> {
     let resolved: Vec<String> = children
         .iter()
         .enumerate()
@@ -488,13 +430,14 @@ fn resolve_child_names(children: &[PortfolioChildSpec]) -> Vec<String> {
             collisions.push(name.as_str());
         }
     }
-    assert!(
-        collisions.is_empty(),
-        "PortfolioSpec::build: duplicate child name(s) after defaulting: {collisions:?} \
-         — every child's resolved `name:` (or the auto-generated `child_<index>` \
-         fallback) must be unique across the portfolio",
-    );
-    resolved
+    if !collisions.is_empty() {
+        return Err(format!(
+            "duplicate child name(s) after defaulting: {collisions:?} \
+             — every child's resolved `name:` (or the auto-generated `child_<index>` \
+             fallback) must be unique across the portfolio",
+        ));
+    }
+    Ok(resolved)
 }
 
 impl PortfolioSpec {
@@ -567,7 +510,7 @@ impl PortfolioSpec {
             );
         }
         let n = self.children.len();
-        let resolved_names = resolve_child_names(&self.children);
+        let resolved_names = resolve_child_names(&self.children)?;
         let allocations = self.resolve_allocations(total_initial_equity, n);
 
         // Track each child's readiness periods at build. We inspect the
@@ -623,14 +566,14 @@ impl PortfolioSpec {
                     builder.add(name, built)
                 }
                 PortfolioChildStrategy::Basket(b) => {
-                    let built = b.build(child_equity, schema);
+                    let built = b.try_build(child_equity, schema)?;
                     stable = built.stable_period();
                     warm_up = built.warm_up_period();
                     child_books.push(built.book());
                     builder.add(name, built)
                 }
                 PortfolioChildStrategy::Multi(m) => {
-                    let built = m.build(child_equity, schema);
+                    let built = m.try_build(child_equity, schema)?;
                     stable = built.stable_period();
                     warm_up = built.warm_up_period();
                     child_books.push(built.book());
@@ -882,27 +825,23 @@ impl Strategy for DynPortfolio {
 
 impl DynPortfolio {
     /// The number of children the portfolio holds, in `.add(...)` order.
-    #[allow(dead_code)]
     pub fn child_count(&self) -> usize {
         self.inner.child_count()
     }
 
     /// Child `idx`'s mark-to-market equity — see [`Portfolio::sub_equity`].
-    #[allow(dead_code)]
     pub fn sub_equity(&self, idx: usize) -> Real {
         self.inner.sub_equity(idx)
     }
 
     /// Child `idx`'s signed ledger position in `symbol` — see
     /// [`Portfolio::sub_position`].
-    #[allow(dead_code)]
     pub fn sub_position(&self, idx: usize, symbol: &str) -> Real {
         self.inner.sub_position(idx, &symbol.to_string())
     }
 
     /// Assert the netting identity against the account — see
     /// [`Portfolio::assert_books_balance`].
-    #[allow(dead_code)]
     pub fn assert_books_balance(&self, wallet: &dyn Wallet<String>) {
         self.inner.assert_books_balance(wallet);
     }
@@ -1795,7 +1734,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "duplicate child name")]
     fn duplicate_child_names_panic_at_build() {
-        // Two children declaring the same name — build fails.
+        // Two children declaring the same name. This pins the *shim's*
+        // contract — `build` unwraps whatever `try_build` returns, so it
+        // still aborts. The fallible path is covered by
+        // `duplicate_child_names_are_a_build_error_not_an_abort`.
         let yaml = r#"
             children:
               - name: dup
@@ -1821,6 +1763,48 @@ mod tests {
         "#;
         let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let _ = spec.build(1_000.0, &Schema::empty(), None);
+    }
+
+    #[test]
+    fn duplicate_child_names_are_a_build_error_not_an_abort() {
+        // Two children resolving to the same name makes sub-wallet lookups
+        // ambiguous, so it must be refused — but as a value. It used to
+        // `assert!`, taking the CLI down without a breadcrumb.
+        let yaml = r#"
+            children:
+              - name: momentum
+                strategy: !buy_and_hold { symbol: A }
+              - name: momentum
+                strategy: !buy_and_hold { symbol: B }
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let err = spec
+            .try_build(1_000.0, &Schema::empty(), None)
+            .err()
+            .expect("a duplicate child name must be rejected");
+        assert!(err.contains("duplicate child name"), "{err}");
+        assert!(err.contains("momentum"), "names the collision: {err}");
+    }
+
+    #[test]
+    fn a_basket_child_reports_a_bad_expression_instead_of_aborting() {
+        // The Single and Pairs arms of this match always propagated their
+        // child's error; the Basket and Multi arms called the panicking
+        // `build` shim, so a bad expression under either aborted the process.
+        let yaml = r#"
+            children:
+              - name: b
+                strategy:
+                  score: !sma { source: !get { key: nope }, period: 3 }
+                  selection: !top_bottom { longs: 1, shorts: 1 }
+                  sizing: !equal_weight 2
+        "#;
+        let spec = PortfolioSpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
+        let err = spec
+            .try_build(1_000.0, &Schema::empty(), None)
+            .err()
+            .expect("a basket child's bad `!get` must be rejected");
+        assert!(err.contains("no overlay side channel is bound"), "{err}");
     }
 
     #[test]

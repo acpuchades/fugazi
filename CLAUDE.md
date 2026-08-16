@@ -19,6 +19,9 @@ lives elsewhere; reach for it on demand:
 - **[doc/STRATEGIES.md](doc/STRATEGIES.md)** (YAML spec) · **[doc/CLI.md](doc/CLI.md)**
   · **[doc/COSTS.md](doc/COSTS.md)** · **[doc/METRICS.md](doc/METRICS.md)** ·
   **[doc/PYTHON.md](doc/PYTHON.md)** — user-facing surface docs.
+- **[TODO.md](TODO.md)** — a *decision log*, not a backlog. An entry records a
+  judgment already made and what would change it. Don't burn it down; do read it
+  before re-litigating something it already settled.
 
 ## What this is
 
@@ -47,8 +50,10 @@ calls — reach for closed-form first.
   clean); Docs: `cargo doc --open`
 - `FUGAZI_REQUIRE_FIXTURES=1 cargo test` — makes the two cross-validation suites
   (`talib_validation`, `metrics_validation`) **fail** instead of skipping when their
-  generated fixture is missing or stale. `talib_expected.csv` isn't committed, so on a
-  clean checkout that suite compares nothing by default. See [doc/TESTING.md](doc/TESTING.md).
+  generated fixture is missing or stale. Both fixtures are committed under
+  `tests/data/` (`.gitignore` carries an explicit note not to re-ignore
+  `talib_expected.csv`), and CI's Rust job sets this — so a stale fixture fails
+  rather than silently comparing nothing. See [doc/TESTING.md](doc/TESTING.md).
 
 ### Bumping the version — sync **seven** places (`cargo check` only catches Rust drift)
 
@@ -146,10 +151,11 @@ what used to be five-of-everything (`src/spec/runnable.rs`):
 - **`StrategySpec`** — the sum over the five spec types, with one `try_build` /
   `try_build_priced` / `universe` / `kind`.
 
-**The two genuine per-shape differences live behind those, not at call sites**: `drive`'s
-default body is the `PaperWallet` path and `DynPortfolio` overrides it; `try_build_priced`
-is `try_build` for four shapes and bakes costs into sub-wallets for portfolio. Anything
-else that looks shape-specific in a driver is a smell. **Adding a sixth shape** = a
+**The one genuine per-shape difference lives behind those, not at call sites**: `drive`'s
+default body is the `PaperWallet` path and `DynPortfolio` overrides it. Anything
+else that looks shape-specific in a driver is a smell. (`try_build_priced` is *not* a
+second one — costs ride on the wallet now, so three of its five params are `_`-prefixed
+and its body is `self.try_build(cash, schema, None)` for all five shapes.) **Adding a sixth shape** = a
 `StrategySpec` variant + a `RunnableStrategy` impl + an arm in `optimize::build_any_spec`
 and Python's `spec_from_value`. Not ten new functions.
 
@@ -230,7 +236,9 @@ Adding a knob that touches unsettled data: safest default, one opt-out.
 - The crate has **one** quantile convention (`stats::quantile_of_sorted`, R type-7). Don't
   add a second.
 - **Parity discipline.** When a Rust API is added/extended/renamed, mirror it in
-  `python/src/lib.rs` **in the same PR**. Two tests catch the common cases; the `Wallet`
+  `python/src/` **in the same PR** (`lib.rs` is just module wiring — the code is in
+  `constructors.rs` / `classes.rs` / `strategy.rs` / `metrics.rs` / `spec.rs` /
+  `sources.rs` / `macros.rs`). Two tests catch the common cases; the `Wallet`
   trait and the per-tag ledger are hand-maintained (`python/tests/test_parity.py`). See the
   Python section of ARCHITECTURE.
 
@@ -245,7 +253,7 @@ If you're about to write a private helper whose name looks like something here, 
 | Interval token / Frequency / time-column ms | `calendar::parse_interval` / `Frequency::from_str` / `parse_time_to_millis` | `src/spec/calendar.rs` |
 | Auto-detect bar cadence | `calendar::detect_frequency_from_atoms(...)` | `src/spec/calendar.rs` |
 | Parse `-w` / `--walkforward` | `WindowSpec::from_str` + `.resolve(bar_freq, class)`; `WalkForwardSpec::from_str` + `.resolve(...)` | `src/spec/calendar.rs` |
-| Built-strategy readiness + full `RunReport` | `DynSingleStrategy::{stable_period, warm_up_period}`; `backtest::measured_report(spec, atoms, cash, costs)` | `src/spec/strategy.rs`, `src/spec/backtest.rs` |
+| Built-strategy readiness + full `RunReport` | `DynSingleStrategy::{stable_period, warm_up_period}`; `backtest::measured_report_any(&StrategySpec, &[Snapshot], &EvalContext)` | `src/spec/strategy.rs`, `src/spec/backtest.rs` |
 | Persist / resume a run's full state | `RunnableStrategy::{save_state, restore_state, drive_resumable}` + `RunState`; `backtest::run_iteration_resumable`; `backtest::flatten_open_positions` (`--flatten`). See ARCHITECTURE *Run resuming* | `src/spec/runnable.rs`, `src/spec/backtest.rs`, `src/backtest.rs` |
 | Serialize one indicator's state | `#[derive(SaveState)]` + `#[state(source)]`/`#[state(skip)]` + two `impl Indicator` forwarding lines; snapshot shared handles via `Position::snapshot`/`Book::snapshot_state`/`PaperWallet::snapshot_state` | `fugazi-derive/src/lib.rs`, `src/indicators/{position,book}.rs`, `src/wallet.rs` |
 | Trading seconds a bar of `freq` spans | `class.trading_seconds_per_bar(freq)` | `src/spec/calendar.rs` |
@@ -254,7 +262,7 @@ If you're about to write a private helper whose name looks like something here, 
 | Provider schemas | `*::*_schema()` (`OnceLock`) | `src/sources/{binance,binance_vision,yahoo,coingecko,okx}.rs` |
 | Bucket an irregular sample stream onto a cadence | `sources::floor_to_bucket(ms, interval)` — Monday weeks, 1st-of-month months, epoch modulo otherwise | `src/sources/mod.rs` |
 | Join overlay CSV onto price CSV | Two `get` → two `-s`; `DataFrame::insert` full-joins | `src/cli/data.rs` |
-| Compute overlay columns from `name: NodeSpec` + attach | `spec::overlay::{OverlayColumn, columns_from_value, columns_from_yaml, prepare, prepare_for, prepare_built, compute_series, compute_snapshots}` (Python: `ta.compute_overlays`; CLI `-x` via `build_overlay`). `compute_snapshots` is the multi-symbol path | `src/spec/overlay.rs`, `python/src/lib.rs`, `src/cli/overlay.rs` |
+| Compute overlay columns from `name: NodeSpec` + attach | `spec::overlay::{OverlayColumn, columns_from_value, columns_from_yaml, prepare, prepare_for, prepare_built, compute_series, compute_snapshots}` (Python: `ta.compute_overlays`; CLI `-x` via `build_overlay`). `compute_snapshots` is the multi-symbol path | `src/spec/overlay.rs`, `python/src/constructors.rs`, `src/cli/overlay.rs` |
 | Blessed series of an overlay group / basket leg | `cli::overlay::group_root(symbol, interval)`; `spec::basket::leg_root(sym)` / `spec::multi_asset::leg_root(sym)` | `src/cli/overlay.rs`, `src/spec/{basket,multi_asset}.rs` |
 | Build a spec, reporting a bad document instead of aborting | `NodeSpec::try_build` and each shape's `*Spec::try_build` — `Err(String)` with the `!tag > ` breadcrumb. `spec::backtest::build_error(e)` renders as `anyhow`; `spec::backtest::validated(...)` is the discard-value form | `src/spec/expr.rs`, `src/spec/backtest.rs` |
 | Overlay build that errors instead of aborting | `spec::overlay::build_overlay(spec, schema, root) -> Result<..>` | `src/spec/overlay.rs` |
@@ -282,7 +290,7 @@ If you're about to write a private helper whose name looks like something here, 
 | Declared basket universe (strict vs. lax) | `BasketStrategy::{all_of, any_of, universe}`; trait `strategies::basket::Universe` with impls `Floating`/`AllOf<Sym>`/`AnyOf<Sym>`; YAML `universe: !all_of [...] \| !any_of [...]` | `src/strategies/basket.rs`, `src/spec/basket.rs` |
 | Strategy-lifetime equity/trade tracking | `SingleAssetStrategy::book()`/`PairsStrategy::book()`/`BasketStrategy::book()` + `BookField` accessors | `src/indicators/book.rs`, `src/strategies/*.rs` |
 | Composite Strategy over N heterogeneous children netted onto one account | `Portfolio::builder().add(name, strategy).weights(policy).rebalance_on(signal).build()`, then `backtest::run(&mut portfolio, &mut wallet, snapshots)` (any `Wallet`), or `portfolio.run(snapshots)`. Per-child reads: `sub_equity(i)` / `sub_position(i, sym)` / `assert_books_balance(&wallet)` | `src/portfolio/mod.rs`, `src/portfolio/netting.rs` |
-| Portfolio YAML surface | `PortfolioSpec` (`children`, `weights: Option<SpecTemplate<NodeSpec>>`, `rebalance_on`) + `PortfolioChildSpec` + `PortfolioChildStrategy`; `portfolio:` prefix; driven through `backtest::{measured_report_any, evaluate_any, evaluate_windowed_any, run_iteration_any}`; runner `run::run_portfolio` | `src/spec/portfolio.rs`, `src/cli/{backtest,run,optimize,input,main}.rs` |
+| Portfolio YAML surface | `PortfolioSpec` (`children`, `weights: Option<SpecTemplate<NodeSpec>>`, `rebalance_on`) + `PortfolioChildSpec` + `PortfolioChildStrategy`; `portfolio:` prefix; driven through `backtest::{measured_report_any, evaluate_any, evaluate_windowed_any, run_iteration_any}`; runner `run::run_portfolio` | `src/spec/portfolio.rs`, `src/cli/{run,optimize,main}.rs` |
 | The account a portfolio trades (paper or live) | the wallet passed to `backtest::run(&mut portfolio, &mut wallet, snaps)` — any `Wallet<Sym>`. Must be the portfolio's **alone** | `src/portfolio/mod.rs` |
 | Per-child notional book + the handle a child trades | `portfolio::ledger::{Ledger, LedgerWallet}`; netting/attribution in `portfolio::netting::PortfolioInner::{net_and_submit, attribute_fill, book_crosses, book}`; `Portfolio::assert_books_balance(&wallet)` | `src/portfolio/ledger.rs`, `src/portfolio/netting.rs` |
 | Portfolio weight policies | `portfolio::policy::{WeightPolicy, Fixed, EqualWeight, ChildSample}` | `src/portfolio/policy.rs` |
@@ -300,12 +308,12 @@ If you're about to write a private helper whose name looks like something here, 
 | Partial `!param` pass | `params::substitute_partial(value, &table)` — used by `imports::resolve` for `!import`'s inline `params:` | `src/spec/params.rs` |
 | Resolve metric name once, reuse | `MetricKey::from_name(name, sample)` + `.resolve(&metrics)` | `src/spec/metrics.rs` |
 | Wrap indicator as `DynIndicator` / zero unstable / typed view / chain | `runtime::{wrap, unstable_wrap, AsReal/AsBool/AsCandle/AsAtom/AsStr, chain}` | `src/runtime.rs` |
-| Full-run backtest → `Metrics`; slice a report | `backtest::{evaluate, evaluate_windowed, run_iteration}` (+ `_pairs`/`_basket`/`_multi`/`_portfolio` twins), all taking `&EvalContext`; `metrics::report_slice` | `src/spec/backtest.rs`, `src/spec/metrics.rs` |
+| Full-run backtest → `Metrics`; slice a report | `backtest::{evaluate_any, evaluate_windowed_any, run_iteration_any}`, all taking `&EvalContext`; `metrics::report_slice`. **There are no per-shape twins** — one `_any` family covers all five | `src/spec/backtest.rs`, `src/spec/metrics.rs` |
 | Resolved-once run inputs; per-symbol cost bundles; report → metrics | **`EvalContext`** + `.costs_for_one(sym)` / `.costs_for(syms)` / `.reduce(&report)` / `.reduce_windowed(&report, n)` | `src/spec/backtest.rs` |
 | Whole-run report for any spec shape | `backtest::measured_report_any(&StrategySpec, ..)` — `evaluate_any` / `evaluate_windowed_any` are thin `ctx.reduce(...)` wrappers | `src/spec/backtest.rs` |
 | Returns / trades / drawdown segments from a report | `metrics::{per_bar_returns, reconstruct_trades, drawdown_segments}` | `src/metrics.rs` |
 | Seeded resampling (IID / moving-block / stationary bootstrap) | `montecarlo::{ResampleScheme, resample_indices, resample_slice, rng_from_seed, percentile, std_dev}` — pure, `rand`-only, behind `montecarlo` | `src/montecarlo.rs` |
 | Monte Carlo CIs + empirical-null p-values over a run | `spec::montecarlo::{McConfig, run_montecarlo, McOutcome}`; runs in the backtest layer via `EvalContext::mc` → `attach_montecarlo`; CLI `run::emit_montecarlo` is IO-only | `src/spec/montecarlo.rs`, `src/spec/backtest.rs`, `src/cli/run.rs` |
-| Python: read an overlay column, optionally from another series | `get(schema, key, source=None)` / `get_real` / `get_bool` / `get_str` — `source=pick(sym)` re-roots | `python/src/lib.rs` |
-| Python: domain-preserving wrap / combine / bool build | `map_source!`, `combine_sources!`/`sources_to_signal!`/`combine_signals!`/`combine_multi!`, `source_to_signal!` | `python/src/lib.rs` |
-| Python: register metric on `fugazi.metrics` | Add to `reg!(...)` in `register_metrics_module` | `python/src/lib.rs` |
+| Python: read an overlay column, optionally from another series | `get(schema, key, source=None)` / `get_real` / `get_bool` / `get_str` — `source=pick(sym)` re-roots | `python/src/constructors.rs` |
+| Python: domain-preserving wrap / combine / bool build | `map_source!`, `combine_sources!`/`sources_to_signal!`/`combine_signals!`/`combine_multi!`, `source_to_signal!` | `python/src/macros.rs` (the per-shape `src_period!`/`bar_period!` builders are in `constructors.rs`) |
+| Python: register metric on `fugazi.metrics` | Add to `reg!(...)` in `register_metrics_module` | `python/src/metrics.rs` |

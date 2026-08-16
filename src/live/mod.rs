@@ -25,8 +25,10 @@
 
 mod coinbase;
 mod okx;
+mod venue;
 
 pub use coinbase::CoinbaseWallet;
+
 pub use okx::OkxWallet;
 
 use std::fmt;
