@@ -48,7 +48,7 @@ use crate::types::Real;
 use crate::wallet::{
     Ack, Order, OrderId, OrderKind, Reference, Rejection, Side, Size, Units, Wallet, WalletError,
 };
-use crate::indicators::DEFAULT_EPSILON;
+use crate::wallet::{POSITION_EPSILON, cash_tolerance};
 
 use super::ledger::{Intent, Ledger, ProtectiveIntent, rejection};
 
@@ -242,7 +242,7 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
         let cash = self.ledgers[idx].cash;
         if delta > 0.0 {
             let cost = delta * price;
-            let tolerance = DEFAULT_EPSILON * cash.abs().max(1.0);
+            let tolerance = cash_tolerance(cash);
             if cost - cash > tolerance {
                 return Err(self.refuse(idx, symbol, WalletError::InsufficientFunds));
             }
@@ -313,7 +313,7 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
                 continue;
             };
             let delta = intent.target - self.ledgers[idx].position(symbol);
-            if delta.abs() > DEFAULT_EPSILON {
+            if delta.abs() > POSITION_EPSILON {
                 legs.push(Leg {
                     idx,
                     delta,
@@ -326,7 +326,7 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
         }
         let market_delta: Real = legs.iter().map(|l| l.delta).sum();
 
-        if market_delta.abs() > DEFAULT_EPSILON {
+        if market_delta.abs() > POSITION_EPSILON {
             // One order for the imbalance. The rest crosses internally.
             let current = wallet.position(symbol).amount;
             let amount = current + market_delta;
@@ -420,7 +420,7 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
         }
         for symbol in symbols {
             let net = wallet.position(&symbol).amount;
-            if net.abs() <= DEFAULT_EPSILON {
+            if net.abs() <= POSITION_EPSILON {
                 self.protective_owner.remove(&symbol);
                 let _ = wallet.cancel_protective(&symbol);
                 continue;
@@ -434,7 +434,7 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
                 let own = self.ledgers[idx].position(&symbol);
                 // A child on the opposite side of the net position can't be
                 // protected by a reduce-only leg on it.
-                if own.abs() <= DEFAULT_EPSILON || (own > 0.0) != long {
+                if own.abs() <= POSITION_EPSILON || (own > 0.0) != long {
                     continue;
                 }
                 let Some(levels) = self.protective[idx].get(&symbol) else {
@@ -517,7 +517,7 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
         let crossed: Vec<Sym> = self
             .pending
             .iter()
-            .filter(|(_, flow)| flow.market_delta.abs() <= DEFAULT_EPSILON)
+            .filter(|(_, flow)| flow.market_delta.abs() <= POSITION_EPSILON)
             .map(|(sym, _)| sym.clone())
             .collect();
         let mut out = Vec::new();
@@ -575,7 +575,7 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
         let signed = fill.side.sign() * fill.units;
         // Partial fills scale the whole bar's flow proportionally, which keeps
         // `Σ ledger delta == substrate delta` exactly.
-        let fraction = if flow.market_delta.abs() > DEFAULT_EPSILON {
+        let fraction = if flow.market_delta.abs() > POSITION_EPSILON {
             (signed / flow.market_delta).clamp(0.0, 1.0)
         } else {
             1.0
@@ -611,7 +611,7 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
         let majority_is_buy = gross_buy >= gross_sell;
         let gross_majority = if majority_is_buy { gross_buy } else { gross_sell };
         // Of the majority side's flow, this share reached the market.
-        let market_share = if gross_majority > DEFAULT_EPSILON {
+        let market_share = if gross_majority > POSITION_EPSILON {
             (gross_majority - crossed) / gross_majority
         } else {
             0.0
@@ -626,15 +626,15 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
         let mut out = Vec::new();
         for leg in &flow.legs {
             let delta = leg.delta * fraction;
-            if delta.abs() <= DEFAULT_EPSILON {
+            if delta.abs() <= POSITION_EPSILON {
                 continue;
             }
             let on_majority = (leg.delta > 0.0) == majority_is_buy;
             // The minority side is entirely crossed; the majority side splits.
             let market_part = if on_majority { delta * market_share } else { 0.0 };
             let crossed_part = delta - market_part;
-            let comm = if market_units > DEFAULT_EPSILON {
-                commission * (market_part.abs() * fraction) / (market_units * fraction).max(DEFAULT_EPSILON)
+            let comm = if market_units > POSITION_EPSILON {
+                commission * (market_part.abs() * fraction) / (market_units * fraction).max(POSITION_EPSILON)
             } else {
                 0.0
             };
@@ -642,14 +642,14 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
             let ledger = &mut self.ledgers[leg.idx];
             let entry = ledger.positions.entry(flow.symbol.clone()).or_insert(0.0);
             *entry += delta;
-            if entry.abs() <= DEFAULT_EPSILON {
+            if entry.abs() <= POSITION_EPSILON {
                 ledger.positions.remove(&flow.symbol);
             }
             ledger.cash -= cash_out + comm;
 
             // The price this child actually experienced, blended across its
             // crossed and market parts — what its own book should record.
-            let effective = if delta.abs() > DEFAULT_EPSILON {
+            let effective = if delta.abs() > POSITION_EPSILON {
                 cash_out / delta
             } else {
                 market_price
@@ -723,7 +723,7 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
             }
         }
         let demand: Real = deltas.iter().filter(|&&d| d > 0.0).sum();
-        if demand > DEFAULT_EPSILON {
+        if demand > POSITION_EPSILON {
             let scale = pot / demand;
             for (i, &delta) in deltas.iter().enumerate() {
                 if delta > 0.0 {

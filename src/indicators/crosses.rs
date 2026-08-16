@@ -21,44 +21,48 @@
 use fugazi_derive::SaveState;
 
 use crate::indicator::Indicator;
-use crate::indicators::compare::DEFAULT_EPSILON;
+use crate::indicators::compare::{DEFAULT_TOLERANCE, Tolerance};
 use crate::types::Real;
 
 /// `lhs > rhs` on this step and the strict comparison just flipped upward.
 ///
 /// See the module doc for the equivalence with the historical
 /// `lhs.gt(rhs).and(lhs.gt(rhs).changed())` composition. The comparison is
-/// tolerance-aware: `lhs > rhs` reads as true only when `lhs - rhs > epsilon`
-/// (default [`DEFAULT_EPSILON`]).
+/// tolerance-aware: `lhs > rhs` reads as true only when `lhs - rhs` exceeds the
+/// [`Tolerance`] band (default [`DEFAULT_TOLERANCE`]).
 #[derive(Debug, Clone, SaveState)]
 pub struct CrossesAbove<L, R> {
     #[state(source)]
     lhs: L,
     #[state(source)]
     rhs: R,
-    epsilon: Real,
+    tolerance: Tolerance,
     prev: Option<bool>,
     value: Option<bool>,
 }
 
 impl<L, R> CrossesAbove<L, R> {
-    /// Build with the default absolute tolerance [`DEFAULT_EPSILON`].
+    /// Build with the default tolerance [`DEFAULT_TOLERANCE`].
     pub fn new(lhs: L, rhs: R) -> Self {
-        Self::with_epsilon(lhs, rhs, DEFAULT_EPSILON)
+        Self::with_tolerance(lhs, rhs, DEFAULT_TOLERANCE)
     }
 
-    /// Build with an explicit absolute tolerance — the same knob
-    /// [`Gt::with_epsilon`](crate::indicators::Gt) exposes on the underlying
-    /// comparison. Use at very large or very small numeric scales where
-    /// [`DEFAULT_EPSILON`] doesn't fit.
-    pub fn with_epsilon(lhs: L, rhs: R, epsilon: Real) -> Self {
+    /// Build with an explicit [`Tolerance`], absolute and/or relative.
+    pub fn with_tolerance(lhs: L, rhs: R, tolerance: Tolerance) -> Self {
         Self {
             lhs,
             rhs,
-            epsilon,
+            tolerance,
             prev: None,
             value: None,
         }
+    }
+
+    /// Build with an explicit **absolute** tolerance — the same knob
+    /// [`Gt::with_epsilon`](crate::indicators::Gt) exposes on the underlying
+    /// comparison. Use when the deadband is a quantity you mean literally.
+    pub fn with_epsilon(lhs: L, rhs: R, epsilon: Real) -> Self {
+        Self::with_tolerance(lhs, rhs, Tolerance::absolute(epsilon))
     }
 }
 
@@ -77,7 +81,7 @@ where
         // The comparison is Some once both operands have warmed up; matches
         // the tolerance-aware `Gt::apply` (l - r > epsilon).
         let now = match (l, r) {
-            (Some(lv), Some(rv)) => Some(lv - rv > self.epsilon),
+            (Some(lv), Some(rv)) => Some(lv - rv > self.tolerance.band(lv, rv)),
             _ => None,
         };
         // A cross fires on the transition false → true. Every other combined
@@ -140,7 +144,7 @@ where
 pub struct CrossesBelow<L, R>(CrossesAbove<R, L>);
 
 impl<L, R> CrossesBelow<L, R> {
-    /// Build with the default absolute tolerance [`DEFAULT_EPSILON`].
+    /// Build with the default absolute tolerance [`DEFAULT_TOLERANCE`].
     pub fn new(lhs: L, rhs: R) -> Self {
         Self(CrossesAbove::new(rhs, lhs))
     }

@@ -1679,8 +1679,9 @@ pub enum NodeSpec {
     },
 
     // --- boolean signals (absorbed from the former SignalSpec; every one
-    // produces `Bool`). Comparisons carry an optional absolute `epsilon`
-    // (default `DEFAULT_EPSILON`).
+    // produces `Bool`). Comparisons carry an optional *absolute* `epsilon`;
+    // omitting it uses the hybrid `DEFAULT_TOLERANCE`, which scales with the
+    // operands (see `indicators::compare`).
     /// True when `lhs` is greater than `rhs` (beyond `epsilon`).
     #[grammar(kind = "predicate", output = "bool")]
     Gt {
@@ -1688,7 +1689,9 @@ pub enum NodeSpec {
         lhs: Box<NodeSpec>,
         /// Right-hand operand.
         rhs: Box<NodeSpec>,
-        /// Absolute comparison tolerance; defaults to `DEFAULT_EPSILON` when omitted.
+        /// Absolute comparison tolerance, in the operands' own units — a deadband
+        /// you mean literally. Omit it for the scale-aware default, which is a
+        /// `1e-12` floor plus `1e-9` of the larger operand.
         epsilon: Option<Real>,
     },
     /// True when `lhs` is less than `rhs` (beyond `epsilon`).
@@ -1698,7 +1701,9 @@ pub enum NodeSpec {
         lhs: Box<NodeSpec>,
         /// Right-hand operand.
         rhs: Box<NodeSpec>,
-        /// Absolute comparison tolerance; defaults to `DEFAULT_EPSILON` when omitted.
+        /// Absolute comparison tolerance, in the operands' own units — a deadband
+        /// you mean literally. Omit it for the scale-aware default, which is a
+        /// `1e-12` floor plus `1e-9` of the larger operand.
         epsilon: Option<Real>,
     },
     /// True when `lhs` is greater than or equal to `rhs` (within `epsilon`).
@@ -1708,7 +1713,9 @@ pub enum NodeSpec {
         lhs: Box<NodeSpec>,
         /// Right-hand operand.
         rhs: Box<NodeSpec>,
-        /// Absolute comparison tolerance; defaults to `DEFAULT_EPSILON` when omitted.
+        /// Absolute comparison tolerance, in the operands' own units — a deadband
+        /// you mean literally. Omit it for the scale-aware default, which is a
+        /// `1e-12` floor plus `1e-9` of the larger operand.
         epsilon: Option<Real>,
     },
     /// True when `lhs` is less than or equal to `rhs` (within `epsilon`).
@@ -1718,7 +1725,9 @@ pub enum NodeSpec {
         lhs: Box<NodeSpec>,
         /// Right-hand operand.
         rhs: Box<NodeSpec>,
-        /// Absolute comparison tolerance; defaults to `DEFAULT_EPSILON` when omitted.
+        /// Absolute comparison tolerance, in the operands' own units — a deadband
+        /// you mean literally. Omit it for the scale-aware default, which is a
+        /// `1e-12` floor plus `1e-9` of the larger operand.
         epsilon: Option<Real>,
     },
     /// Polymorphic equality — Real or Str, dispatched on the lhs at build.
@@ -1728,7 +1737,9 @@ pub enum NodeSpec {
         lhs: Box<NodeSpec>,
         /// Right-hand operand.
         rhs: Box<NodeSpec>,
-        /// Absolute comparison tolerance; defaults to `DEFAULT_EPSILON` when omitted.
+        /// Absolute comparison tolerance, in the operands' own units — a deadband
+        /// you mean literally. Omit it for the scale-aware default, which is a
+        /// `1e-12` floor plus `1e-9` of the larger operand.
         epsilon: Option<Real>,
     },
     /// True when `lhs` and `rhs` differ by more than `epsilon`.
@@ -1738,7 +1749,9 @@ pub enum NodeSpec {
         lhs: Box<NodeSpec>,
         /// Right-hand operand.
         rhs: Box<NodeSpec>,
-        /// Absolute comparison tolerance; defaults to `DEFAULT_EPSILON` when omitted.
+        /// Absolute comparison tolerance, in the operands' own units — a deadband
+        /// you mean literally. Omit it for the scale-aware default, which is a
+        /// `1e-12` floor plus `1e-9` of the larger operand.
         epsilon: Option<Real>,
     },
     /// `source > level` against a constant.
@@ -3347,9 +3360,18 @@ fn try_dispatch_wrappers(v: &serde_norway::Value) -> Result<Option<NodeSpec>, St
     Ok(None)
 }
 
-/// Resolve an optional tolerance to its concrete value.
-fn eps(epsilon: &Option<Real>) -> Real {
-    epsilon.unwrap_or(crate::indicators::DEFAULT_EPSILON)
+/// Resolve a spec's optional `epsilon:` into a concrete [`Tolerance`].
+///
+/// An explicitly-written `epsilon:` is **absolute**, in the operands' own units
+/// — the user is stating a deadband they mean literally ("ignore moves under a
+/// tick"). Omitting it yields
+/// [`DEFAULT_TOLERANCE`](crate::indicators::DEFAULT_TOLERANCE), which is hybrid,
+/// because the default has to work at every scale an expression can produce.
+fn eps(epsilon: &Option<Real>) -> crate::indicators::Tolerance {
+    epsilon.map_or(
+        crate::indicators::DEFAULT_TOLERANCE,
+        crate::indicators::Tolerance::absolute,
+    )
 }
 
 /// Build the polymorphic `!eq` / `!ne` — the Real-or-Str dispatcher. Inspects
@@ -3376,9 +3398,9 @@ fn build_polymorphic_eq(
                 .map_err(|e| trail(rhs, e))?;
             let e = eps(&epsilon);
             if negate {
-                dyn_indicator::wrap(compare::Ne::with_epsilon(l, r, e))
+                dyn_indicator::wrap(compare::Ne::with_tolerance(l, r, e))
             } else {
-                dyn_indicator::wrap(compare::Eq::with_epsilon(l, r, e))
+                dyn_indicator::wrap(compare::Eq::with_tolerance(l, r, e))
             }
         }
         DynType::Str => {
@@ -4286,22 +4308,22 @@ impl NodeSpec {
             }
 
             // --- absorbed boolean signals ---
-            Gt { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Gt::with_epsilon(
+            Gt { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Gt::with_tolerance(
                 real(lhs)?,
                 real(rhs)?,
                 eps(epsilon),
             )),
-            Lt { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Lt::with_epsilon(
+            Lt { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Lt::with_tolerance(
                 real(lhs)?,
                 real(rhs)?,
                 eps(epsilon),
             )),
-            Ge { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Ge::with_epsilon(
+            Ge { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Ge::with_tolerance(
                 real(lhs)?,
                 real(rhs)?,
                 eps(epsilon),
             )),
-            Le { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Le::with_epsilon(
+            Le { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Le::with_tolerance(
                 real(lhs)?,
                 real(rhs)?,
                 eps(epsilon),

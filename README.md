@@ -524,8 +524,12 @@ a same-named **accessor** (`macd.line()`/`.signal()`/`.histogram()`,
 composable `Indicator<Output = Real>` — so any one line can feed the comparison
 and arithmetic builders above (see [Composition](#composition)).
 
-Comparisons are tolerance-aware (default `1e-8`, overridable via
-`Gt::with_epsilon(..)`) so floating-point noise doesn't cause spurious flips.
+Comparisons are tolerance-aware so floating-point noise doesn't cause spurious
+flips. The default band is **scale-aware** — `max(1e-12, 1e-9 · larger operand)` —
+because operands range from per-bar returns to five-figure prices and no single
+absolute number is right for both. Override with `Gt::with_epsilon(a, b, eps)` for
+a literal deadband in the operands' own units, or `Gt::with_tolerance(a, b, t)`
+for an explicit [`Tolerance`].
 
 ## Command-line backtester
 

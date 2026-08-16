@@ -97,7 +97,8 @@ pub use candle::{
 };
 pub use cci::Cci;
 pub use compare::{
-    ComparisonOp, DEFAULT_EPSILON, Eq, Ge, Gt, Le, Lt, Ne, StrEq, StrEqOp, StrNe, StrNeOp,
+    ComparisonOp, DEFAULT_TOLERANCE, Eq, Ge, Gt, Le, Lt, Ne, StrEq, StrEqOp, StrNe, StrNeOp,
+    Tolerance,
 };
 pub use component::{Component, Shared, SharedComponent, SharedHandle};
 pub use correlation::Correlation;

@@ -11,8 +11,33 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::costs::TradingCosts;
-use crate::indicators::DEFAULT_EPSILON;
 use crate::types::{Candle, Real};
+
+/// Position/order size below which a holding counts as **flat** and an order as
+/// **empty**, in the instrument's own units.
+///
+/// Absolute on purpose: it is a quantity, not a float-noise guard, and the unit
+/// is fixed by the instrument rather than by whatever an expression produced.
+/// (Contrast [`DEFAULT_TOLERANCE`](crate::indicators::DEFAULT_TOLERANCE), which
+/// compares expression outputs of unbounded scale and is therefore relative.)
+pub const POSITION_EPSILON: Real = 1e-8;
+
+/// Slack when checking a computed fill price against the bar's `[low, high]`,
+/// in price units — absorbs the rounding in a spread/slippage adjustment
+/// without letting a genuinely out-of-range fill through.
+pub const PRICE_EPSILON: Real = 1e-8;
+
+/// Cash amount below which a balance counts as zero, and the relative term used
+/// when the amount is large — see the crate-internal `cash_tolerance` helper.
+pub const CASH_EPSILON: Real = 1e-8;
+
+/// The tolerance for a cash comparison at `scale`: `CASH_EPSILON` near zero,
+/// growing with the balance beyond that. Money spans many orders of magnitude
+/// across accounts, so an all-in `value_frac(1.0)` on a large balance rounds by
+/// more than a fixed `1e-8` and would otherwise read as insufficient funds.
+pub(crate) fn cash_tolerance(scale: Real) -> Real {
+    CASH_EPSILON * scale.abs().max(1.0)
+}
 
 /// Which way an [`Order`] trades, and the direction a [`set`](Wallet::set)
 /// targets.
@@ -218,7 +243,7 @@ impl<Sym> Order<Sym> {
     /// The order that moves `symbol`'s position by `delta` units, filled at
     /// `price` as `kind` for submission `id` — [`Buy`] for a positive delta,
     /// [`Sell`] for a negative one — or `None` when the delta is negligible
-    /// (within [`DEFAULT_EPSILON`]). Commission defaults to `0.0`.
+    /// (within [`POSITION_EPSILON`]). Commission defaults to `0.0`.
     ///
     /// [`Buy`]: Side::Buy
     /// [`Sell`]: Side::Sell
@@ -229,7 +254,7 @@ impl<Sym> Order<Sym> {
         kind: OrderKind,
         id: OrderId,
     ) -> Option<Self> {
-        if delta.abs() <= DEFAULT_EPSILON {
+        if delta.abs() <= POSITION_EPSILON {
             None
         } else if delta > 0.0 {
             Some(Order::new(symbol, Side::Buy, delta, price, kind, id))
@@ -951,7 +976,7 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
     ) -> Result<Option<Order<Sym>>, WalletError> {
         let current = self.positions.get(&symbol).copied().unwrap_or(0.0);
         let delta = target - current;
-        if delta.abs() <= DEFAULT_EPSILON {
+        if delta.abs() <= POSITION_EPSILON {
             return Ok(None);
         }
         let bar = *self.bars.get(&symbol).ok_or(WalletError::UnknownPrice)?;
@@ -962,8 +987,8 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         // adjustments (spread, slippage) may push the *final* fill price
         // outside the bar's range and that is fine — a real market fill can
         // execute above the tape.
-        if theoretical_price < bar.low - DEFAULT_EPSILON
-            || theoretical_price > bar.high + DEFAULT_EPSILON
+        if theoretical_price < bar.low - PRICE_EPSILON
+            || theoretical_price > bar.high + PRICE_EPSILON
         {
             return Err(WalletError::PriceOutOfRange);
         }
@@ -998,19 +1023,19 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         // whose cost equals funds when zero-cost).
         if delta > 0.0 {
             let cost = delta * final_price + commission;
-            let tolerance = DEFAULT_EPSILON * self.funds.abs().max(1.0);
+            let tolerance = cash_tolerance(self.funds);
             if cost - self.funds > tolerance {
                 return Err(WalletError::InsufficientFunds);
             }
         }
         let order = Order::from_delta(symbol.clone(), delta, final_price, kind, id)
-            .expect("delta exceeds DEFAULT_EPSILON, so the order is non-empty")
+            .expect("delta exceeds POSITION_EPSILON, so the order is non-empty")
             .with_commission(commission);
         // Pay for a buy, receive for a sell — and pay commission out of cash
         // on both sides.
         self.funds -= order.signed_units() * final_price + commission;
         let new_position = current + delta;
-        if new_position.abs() <= DEFAULT_EPSILON {
+        if new_position.abs() <= POSITION_EPSILON {
             self.positions.remove(&symbol);
         } else {
             self.positions.insert(symbol.clone(), new_position);
@@ -1018,7 +1043,7 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         // A fill that flattens or flips the sign voids any resting bracket (so a
         // bare market exit / reversal drops a now-stale stop even without an
         // explicit cancel).
-        if new_position.abs() <= DEFAULT_EPSILON || current * new_position < 0.0 {
+        if new_position.abs() <= POSITION_EPSILON || current * new_position < 0.0 {
             self.protective.remove(&symbol);
         }
         self.blotter.push(order.clone());
@@ -1065,7 +1090,7 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
             return magnitude;
         }
         let costs = self.per_symbol_costs.get(symbol).unwrap_or(&self.costs);
-        let tolerance = DEFAULT_EPSILON * self.funds.abs().max(1.0);
+        let tolerance = cash_tolerance(self.funds);
         let mut m = magnitude;
         for _ in 0..8 {
             let delta = side.sign() * m - current;
@@ -1089,7 +1114,7 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
             // in one step; for a non-linear one it monotonically decreases.
             let scale = (self.funds / cost).clamp(0.0, 1.0);
             let next = m * scale;
-            if (m - next).abs() <= DEFAULT_EPSILON * m.abs().max(1.0) {
+            if (m - next).abs() <= cash_tolerance(m) {
                 return next.max(0.0);
             }
             m = next;
@@ -1149,7 +1174,7 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
             return Ok(());
         }
         let cost = delta * price;
-        let tolerance = DEFAULT_EPSILON * self.funds.abs().max(1.0);
+        let tolerance = cash_tolerance(self.funds);
         if cost - self.funds > tolerance {
             return Err(WalletError::InsufficientFunds);
         }
@@ -1179,10 +1204,10 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
     fn match_limit(&mut self, symbol: &Sym, candle: &Candle) -> Option<Order<Sym>> {
         let resting = *self.limits.get(symbol)?;
         let fill = match resting.side {
-            Side::Buy if candle.low <= resting.limit + DEFAULT_EPSILON => {
+            Side::Buy if candle.low <= resting.limit + POSITION_EPSILON => {
                 resting.limit.min(candle.open)
             }
-            Side::Sell if candle.high >= resting.limit - DEFAULT_EPSILON => {
+            Side::Sell if candle.high >= resting.limit - POSITION_EPSILON => {
                 resting.limit.max(candle.open)
             }
             _ => return None,
@@ -1245,25 +1270,25 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         // Downside exits (long stop, short target) fill at the level, or lower at
         // the open on a gap: `min(level, open)`. Upside exits are `max`. Either way
         // the fill stays within the bar's range.
-        let (leg, fill, kind) = if pos > DEFAULT_EPSILON {
+        let (leg, fill, kind) = if pos > POSITION_EPSILON {
             if let Some(leg) = prot.stop
-                && candle.low <= leg.trigger + DEFAULT_EPSILON
+                && candle.low <= leg.trigger + POSITION_EPSILON
             {
                 (leg, leg.trigger.min(candle.open), OrderKind::Stop)
             } else if let Some(leg) = prot.take_profit
-                && candle.high >= leg.trigger - DEFAULT_EPSILON
+                && candle.high >= leg.trigger - POSITION_EPSILON
             {
                 (leg, leg.trigger.max(candle.open), OrderKind::TakeProfit)
             } else {
                 return None;
             }
-        } else if pos < -DEFAULT_EPSILON {
+        } else if pos < -POSITION_EPSILON {
             if let Some(leg) = prot.stop
-                && candle.high >= leg.trigger - DEFAULT_EPSILON
+                && candle.high >= leg.trigger - POSITION_EPSILON
             {
                 (leg, leg.trigger.max(candle.open), OrderKind::Stop)
             } else if let Some(leg) = prot.take_profit
-                && candle.low <= leg.trigger + DEFAULT_EPSILON
+                && candle.low <= leg.trigger + POSITION_EPSILON
             {
                 (leg, leg.trigger.min(candle.open), OrderKind::TakeProfit)
             } else {
@@ -1673,7 +1698,7 @@ impl<Sym: Clone + Eq + Hash, W: Wallet<Sym>> Wallet<Sym> for SleeveWallet<Sym, W
             .into_iter()
             .filter_map(|u| {
                 let amount = u.amount - self.base(&u.symbol);
-                (amount.abs() > DEFAULT_EPSILON).then_some(Units {
+                (amount.abs() > POSITION_EPSILON).then_some(Units {
                     symbol: u.symbol,
                     amount,
                 })
@@ -1715,7 +1740,7 @@ impl<Sym: Clone + Eq + Hash, W: Wallet<Sym>> Wallet<Sym> for SleeveWallet<Sym, W
         let translated = match size {
             Size::ValueFraction(f) => {
                 let inner_eq = self.inner.equity().0;
-                if inner_eq.abs() > DEFAULT_EPSILON {
+                if inner_eq.abs() > POSITION_EPSILON {
                     Size::value_frac(f * self.equity().0 / inner_eq)
                 } else {
                     size
@@ -1795,7 +1820,7 @@ pub fn external_baseline<Sym: Clone + Eq + Hash>(
     wallet
         .positions()
         .into_iter()
-        .filter(|u| u.amount.abs() > DEFAULT_EPSILON)
+        .filter(|u| u.amount.abs() > POSITION_EPSILON)
         .map(|u| (u.symbol, u.amount))
         .collect()
 }
@@ -2623,7 +2648,7 @@ mod tests {
             self.exit.update(snap);
         }
         fn trade(&self, wallet: &mut dyn Wallet<&'static str>) {
-            let flat = wallet.position(&self.symbol).amount.abs() <= DEFAULT_EPSILON;
+            let flat = wallet.position(&self.symbol).amount.abs() <= POSITION_EPSILON;
             if self.enter.is_true() && flat {
                 let _ = wallet.set(self.symbol, Side::Buy, Size::value_frac(1.0));
             } else if self.exit.is_true() && !flat {

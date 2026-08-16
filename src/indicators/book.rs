@@ -72,8 +72,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::indicator::Indicator;
-use crate::indicators::DEFAULT_EPSILON;
-use crate::wallet::Side;
+use crate::wallet::{CASH_EPSILON, POSITION_EPSILON, Side};
 use crate::types::{Atom, Candle, Real};
 
 /// Per-leg tracked state.
@@ -103,7 +102,7 @@ impl LegState {
     }
 
     fn is_flat(&self) -> bool {
-        self.units.abs() <= DEFAULT_EPSILON
+        self.units.abs() <= POSITION_EPSILON
     }
 }
 
@@ -172,7 +171,7 @@ impl<Sym: Hash + Eq> BookState<Sym> {
     fn stage_trade_close(&mut self) {
         let total_pnl = self.trade_pnl_accum;
         let equity_at_open = self.trade_open_equity.take().unwrap_or(self.equity);
-        let return_ratio = if equity_at_open.abs() > DEFAULT_EPSILON {
+        let return_ratio = if equity_at_open.abs() > CASH_EPSILON {
             total_pnl / equity_at_open
         } else {
             0.0
@@ -297,9 +296,9 @@ impl<Sym: Hash + Eq + Clone> Book<Sym> {
         leg.units = new_leg_units;
         let leg_entry_before = leg.entry_price;
 
-        let leg_was_flat = prev_leg_units.abs() <= DEFAULT_EPSILON;
-        let leg_now_flat = new_leg_units.abs() <= DEFAULT_EPSILON;
-        let leg_crossed_zero = prev_leg_units * new_leg_units < -DEFAULT_EPSILON;
+        let leg_was_flat = prev_leg_units.abs() <= POSITION_EPSILON;
+        let leg_now_flat = new_leg_units.abs() <= POSITION_EPSILON;
+        let leg_crossed_zero = prev_leg_units * new_leg_units < -POSITION_EPSILON;
 
         // ---- Per-leg P&L banking + entry-price bookkeeping ----
         if leg_was_flat && !leg_now_flat {
@@ -383,7 +382,7 @@ impl<Sym: Hash + Eq + Clone> Book<Sym> {
         if s.first_update {
             s.first_update = false;
             s.active_return = None;
-        } else if prev_equity.abs() > DEFAULT_EPSILON {
+        } else if prev_equity.abs() > CASH_EPSILON {
             s.active_return = Some((s.equity - prev_equity) / prev_equity);
         } else {
             s.active_return = None;
@@ -441,7 +440,7 @@ impl<Sym: Hash + Eq + Clone> Book<Sym> {
         if s.first_update {
             s.first_update = false;
             s.active_return = None;
-        } else if prev_equity.abs() > DEFAULT_EPSILON {
+        } else if prev_equity.abs() > CASH_EPSILON {
             s.active_return = Some((s.equity - prev_equity) / prev_equity);
         } else {
             s.active_return = None;
@@ -466,7 +465,7 @@ impl<Sym: Hash + Eq + Clone> Book<Sym> {
     /// `<= 0` (and `0` at a new peak).
     pub fn drawdown<In>(&self) -> BookField<Sym, In> {
         BookField::new(self.clone(), 0, |s| {
-            if s.equity_peak.abs() > DEFAULT_EPSILON {
+            if s.equity_peak.abs() > CASH_EPSILON {
                 Some((s.equity - s.equity_peak) / s.equity_peak)
             } else {
                 None

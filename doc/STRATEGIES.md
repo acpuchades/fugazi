@@ -1107,9 +1107,21 @@ up, so an edge coinciding with warm-up never fires a spurious first-bar trade.
 
 ### Comparisons — `{ lhs, rhs, epsilon? }`
 
-`!gt`, `!lt`, `!ge`, `!le`, `!eq`, `!ne` compare two **sources**. `epsilon` is an
-optional absolute tolerance (default `1e-8`) so floating-point noise doesn't cause
-spurious flips.
+`!gt`, `!lt`, `!ge`, `!le`, `!eq`, `!ne` compare two **sources**, with a tolerance
+band so floating-point noise doesn't cause spurious flips.
+
+Omit `epsilon` and the band is **scale-aware**: `max(1e-12, 1e-9 · larger operand)`.
+That matters because a comparison's operands can be anything the grammar produces
+— a five-figure price, a `[0, 1]` stochastic, a per-bar return — and a single
+absolute number cannot mean the right thing for all three. At price scale a fixed
+`1e-8` sits below what an f64 can even represent, so it gave no protection at all.
+
+Set `epsilon` when you want a deadband you mean **literally**, in the operands'
+own units — "ignore moves under a tick". It is absolute and is not rescaled:
+
+```yaml
+enter: !gt { lhs: !close, rhs: !sma { period: 20 }, epsilon: 0.5 }   # ignore sub-50c crossings
+```
 
 ### Threshold comparisons — `{ source = close, level }`
 

@@ -44,7 +44,7 @@ use crate::types::{Candle, Real};
 use crate::wallet::{
     Ack, Order, OrderId, Reference, Rejection, Side, Size, Units, Wallet, WalletError,
 };
-use crate::indicators::DEFAULT_EPSILON;
+use crate::wallet::{CASH_EPSILON, POSITION_EPSILON};
 
 use super::netting::PortfolioInner;
 
@@ -84,7 +84,7 @@ impl<Sym: Clone + Eq + Hash> Ledger<Sym> {
     pub(super) fn apply(&mut self, symbol: &Sym, delta: Real, price: Real, commission: Real) {
         let entry = self.positions.entry(symbol.clone()).or_insert(0.0);
         *entry += delta;
-        if entry.abs() <= DEFAULT_EPSILON {
+        if entry.abs() <= POSITION_EPSILON {
             self.positions.remove(symbol);
         }
         self.cash -= delta * price + commission;
@@ -251,7 +251,7 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for LedgerWallet<Sym> {
         // nothing here.
         let mut inner = self.inner.lock().expect("portfolio lock poisoned");
         let ledger = &mut inner.ledgers[self.idx];
-        if ledger.cash + delta < -DEFAULT_EPSILON {
+        if ledger.cash + delta < -CASH_EPSILON {
             return Err(WalletError::InsufficientFunds);
         }
         ledger.cash += delta;

@@ -28,9 +28,10 @@ use crate::types::Real;
 /// let _rising = Ema::new(Current::close(), 20).ratio(1).above(1.0);
 /// ```
 ///
-/// Comparison builders use [`DEFAULT_EPSILON`](super::DEFAULT_EPSILON); for a
-/// custom tolerance build the comparison explicitly, e.g.
-/// `Gt::with_epsilon(a, b, 1e-4)`.
+/// Comparison builders use [`DEFAULT_TOLERANCE`](super::DEFAULT_TOLERANCE),
+/// whose band scales with the operands. For a deadband you mean literally,
+/// build the comparison explicitly: `Gt::with_epsilon(a, b, 1e-4)` (absolute)
+/// or `Gt::with_tolerance(a, b, t)`.
 pub trait IndicatorExt: Indicator<Output = Real> + Sized {
     /// `self > rhs`.
     fn gt<R>(self, rhs: R) -> Gt<Self, R>

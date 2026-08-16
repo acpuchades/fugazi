@@ -144,7 +144,11 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWalkForwardResult>()?;
     m.add_class::<PyWalkForwardFold>()?;
 
-    m.add("DEFAULT_EPSILON", DEFAULT_EPSILON)?;
+    // The default comparison tolerance is hybrid (absolute floor + relative
+    // term), so it is exposed as its two components rather than one scalar. An
+    // `epsilon=` argument stays absolute — a deadband the caller means literally.
+    m.add("DEFAULT_TOLERANCE_ABS", DEFAULT_TOLERANCE.abs)?;
+    m.add("DEFAULT_TOLERANCE_REL", DEFAULT_TOLERANCE.rel)?;
 
     macro_rules! reg {
         ($($f:ident),* $(,)?) => { $( m.add_function(wrap_pyfunction!($f, m)?)?; )* };

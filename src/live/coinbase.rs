@@ -59,7 +59,7 @@ use base64::Engine as _;
 use p256::ecdsa::{Signature, SigningKey, signature::Signer};
 use reqwest::Method;
 
-use crate::indicators::DEFAULT_EPSILON;
+use crate::wallet::{POSITION_EPSILON, PRICE_EPSILON};
 use crate::types::{Candle, Real};
 use crate::wallet::{
     Ack, Order, OrderId, OrderKind, Reference, Rejection, Side, Size, Units, Wallet, WalletError,
@@ -551,7 +551,7 @@ impl CoinbaseWallet {
             )
             .min(held);
         let base_size = floor_to_step(units, spec.base_increment);
-        if base_size < spec.base_min || base_size <= DEFAULT_EPSILON {
+        if base_size < spec.base_min || base_size <= POSITION_EPSILON {
             return Err(self.refuse(
                 &symbol,
                 local,
@@ -567,8 +567,8 @@ impl CoinbaseWallet {
             _ => p.stop.clone(),
         });
         if let Some(leg) = existing {
-            if (leg.price - price).abs() <= DEFAULT_EPSILON
-                && (leg.base_size - base_size).abs() <= DEFAULT_EPSILON
+            if (leg.price - price).abs() <= PRICE_EPSILON
+                && (leg.base_size - base_size).abs() <= POSITION_EPSILON
             {
                 return Ok(Ack::Working(leg.local));
             }
@@ -637,7 +637,7 @@ impl Wallet<String> for CoinbaseWallet {
             .keys()
             .filter_map(|symbol| {
                 let amount = self.base_balance(symbol);
-                (amount.abs() > DEFAULT_EPSILON).then(|| Units {
+                (amount.abs() > POSITION_EPSILON).then(|| Units {
                     symbol: symbol.clone(),
                     amount,
                 })
@@ -695,7 +695,7 @@ impl Wallet<String> for CoinbaseWallet {
         // Spot can't hold a short: a negative target is clamped to flat, and the
         // un-shortable remainder is reported so the strategy isn't misled.
         let effective_target = target.amount.max(0.0);
-        if target.amount < -DEFAULT_EPSILON {
+        if target.amount < -POSITION_EPSILON {
             self.rejections.push(Rejection {
                 symbol: symbol.clone(),
                 id,
@@ -706,7 +706,7 @@ impl Wallet<String> for CoinbaseWallet {
         let delta = effective_target - current;
         let side = if delta >= 0.0 { Side::Buy } else { Side::Sell };
         let base_size = floor_to_step(delta.abs(), spec.base_increment);
-        if base_size < spec.base_min || base_size <= DEFAULT_EPSILON {
+        if base_size < spec.base_min || base_size <= POSITION_EPSILON {
             // Below the venue's minimum tradable size: accept but place nothing.
             return Ok(Ack::Working(id));
         }
@@ -785,15 +785,15 @@ impl Wallet<String> for CoinbaseWallet {
         let order_side = if delta >= 0.0 { Side::Buy } else { Side::Sell };
         let base_size = floor_to_step(delta.abs(), spec.base_increment);
         let price = round_to_tick(limit.0, spec.quote_increment);
-        if base_size < spec.base_min || base_size <= DEFAULT_EPSILON {
+        if base_size < spec.base_min || base_size <= POSITION_EPSILON {
             return Ok(Ack::Working(local));
         }
 
         // Idempotent re-submit: an unchanged order stays where it is.
         if let Some(existing) = self.limits.get(&symbol).cloned() {
             if existing.side == order_side
-                && (existing.price - price).abs() <= DEFAULT_EPSILON
-                && (existing.base_size - base_size).abs() <= DEFAULT_EPSILON
+                && (existing.price - price).abs() <= PRICE_EPSILON
+                && (existing.base_size - base_size).abs() <= POSITION_EPSILON
             {
                 return Ok(Ack::Working(existing.local));
             }

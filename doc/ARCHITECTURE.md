@@ -151,8 +151,16 @@ the **`component_accessors!` macro** — don't hand-write.
 as `bool` (false until ready) via `BoolIndicatorExt::is_true`.
 
 - **Comparisons**: aliases `Gt`/`Lt`/`Ge`/`Le`/`Eq`/`Ne` for `Combine<L, R,
-  GtOp>` etc. The op carries an absolute `epsilon` (default `1e-8`);
-  `Gt::with_epsilon(a, b, eps)` overrides.
+  GtOp>` etc. The op carries a **`Tolerance { abs, rel }`**, whose band is
+  `max(abs, rel · max(|lhs|, |rhs|))`; the default `DEFAULT_TOLERANCE` is
+  `(1e-12, 1e-9)`. Relative on purpose: an absolute `1e-8` was `1e-13` relative at
+  a five-figure price — below f64 resolution there, so it gave no noise protection
+  at all — and `1e-4` relative on a per-bar return. `Gt::with_epsilon(a, b, eps)`
+  overrides with an **absolute** band (a deadband the caller means literally);
+  `Gt::with_tolerance(a, b, t)` takes both terms. YAML `epsilon:` is the absolute
+  form. The execution-side quantity epsilons are separate and live in
+  `src/wallet.rs`: `POSITION_EPSILON` (units), `PRICE_EPSILON` (price),
+  `CASH_EPSILON` / `cash_tolerance(scale)` (money).
 - **Boolean logic**: `And`/`Or`/`Xor` are `Combine<...>`; `Not` and `Change` are
   dedicated unary carriers; `Const<In>` is a constant-bool leaf; `Every<In>(period)`
   is a **periodic pulse** — fires `true` every `period` bars with a *delayed* first
@@ -761,8 +769,8 @@ type):
 
 - **`Combine<L, R, Op>`** (binary, `BinaryOp`): one carrier for all binary ops, op
   **by value**. Serves arithmetic `Add`/`Sub`/`Mul`/`Div` (`Div` → `None` on /0),
-  comparisons (op carries epsilon), boolean logic. Needs `Op: Default`; comparisons
-  get `with_epsilon`. Feeds the *same* input to both sides, requires `Input: Clone`;
+  comparisons (op carries a `Tolerance`), boolean logic. Needs `Op: Default`;
+  comparisons get `with_epsilon` / `with_tolerance`. Feeds the *same* input to both sides, requires `Input: Clone`;
   use `lhs`/`rhs` naming.
 - **`Lookback<I, Op>`** (unary, `LookbackOp`, zero-sized markers): `Lag`, `Diff`,
   `Ratio`, `Roc`.

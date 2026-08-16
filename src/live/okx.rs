@@ -68,7 +68,7 @@ use sha2::Sha256;
 use time::OffsetDateTime;
 use time::macros::format_description;
 
-use crate::indicators::DEFAULT_EPSILON;
+use crate::wallet::{POSITION_EPSILON, PRICE_EPSILON};
 use crate::types::{Candle, Real};
 use crate::wallet::{Ack, Order, OrderId, OrderKind, Reference, Rejection, Side, Size, Units, Wallet, WalletError};
 
@@ -285,7 +285,7 @@ impl OkxWallet {
                 continue;
             };
             let contracts = num_field(p, "pos").unwrap_or(0.0);
-            if contracts.abs() <= DEFAULT_EPSILON {
+            if contracts.abs() <= POSITION_EPSILON {
                 continue;
             }
             // Convert contracts to base units; needs the instrument's ctVal.
@@ -514,7 +514,7 @@ impl OkxWallet {
             Err(e) => return Err(self.refuse(symbol, local, kind, e)),
         };
         let pos = self.positions.get(symbol).copied().unwrap_or(0.0);
-        if pos.abs() <= DEFAULT_EPSILON {
+        if pos.abs() <= POSITION_EPSILON {
             // Nothing to protect — our own guard, not a venue refusal; log it but
             // don't buffer a per-bar rejection for a flat re-submit.
             return Err(self.fail(LiveError::Decode(format!(
@@ -593,7 +593,7 @@ impl OkxWallet {
             )
             .min(pos.abs());
         let contracts = floor_to_step(units / spec.ct_val, spec.lot_sz);
-        if contracts <= DEFAULT_EPSILON {
+        if contracts <= POSITION_EPSILON {
             let id = self.mint();
             return Err(self.refuse(
                 &symbol,
@@ -607,8 +607,8 @@ impl OkxWallet {
             _ => p.stop.clone(),
         });
         if let Some(leg) = existing {
-            if (leg.trigger - trigger).abs() <= DEFAULT_EPSILON
-                && (leg.contracts - contracts).abs() <= DEFAULT_EPSILON
+            if (leg.trigger - trigger).abs() <= PRICE_EPSILON
+                && (leg.contracts - contracts).abs() <= POSITION_EPSILON
             {
                 return Ok(Ack::Working(leg.local));
             }
@@ -700,7 +700,7 @@ impl Wallet<String> for OkxWallet {
         let current = self.positions.get(&symbol).copied().unwrap_or(0.0);
         let delta = target.amount - current;
         let contracts = floor_to_step(delta.abs() / spec.ct_val, spec.lot_sz);
-        if contracts < spec.min_sz || contracts <= DEFAULT_EPSILON {
+        if contracts < spec.min_sz || contracts <= POSITION_EPSILON {
             // Below the venue's minimum tradable size: accept the submission but
             // place nothing (no fill will arrive under this id).
             return Ok(Ack::Working(id));
@@ -805,7 +805,7 @@ impl Wallet<String> for OkxWallet {
         let delta = side.sign() * units - current;
         let contracts = floor_to_step(delta.abs() / spec.ct_val, spec.lot_sz);
         let price = round_to_tick(limit.0, spec.tick);
-        if contracts < spec.min_sz || contracts <= DEFAULT_EPSILON {
+        if contracts < spec.min_sz || contracts <= POSITION_EPSILON {
             // Below the venue's minimum tradable size: accept the submission but
             // place nothing, exactly as `set_position` does.
             return Ok(Ack::Working(local));
@@ -815,8 +815,8 @@ impl Wallet<String> for OkxWallet {
         // Idempotent re-submit: an unchanged order stays where it is.
         if let Some(existing) = self.limits.get(&symbol).cloned() {
             if existing.side == order_side
-                && (existing.limit - price).abs() <= DEFAULT_EPSILON
-                && (existing.contracts - contracts).abs() <= DEFAULT_EPSILON
+                && (existing.limit - price).abs() <= POSITION_EPSILON
+                && (existing.contracts - contracts).abs() <= POSITION_EPSILON
             {
                 return Ok(Ack::Working(existing.local));
             }

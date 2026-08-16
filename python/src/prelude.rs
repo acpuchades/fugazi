@@ -25,7 +25,9 @@ pub(crate) use fugazi_core::indicators::{
     Typical, UnixMillis, UnixSeconds, Value, ValueStr, VarianceRatio, Volume, Vwap, WeekOfYear,
     WilliamsR, Wma, Year, ZScore,
 };
-pub(crate) use fugazi_core::indicators::{BoolIndicatorExt, Combine, DEFAULT_EPSILON, IndicatorExt};
+pub(crate) use fugazi_core::indicators::{
+    BoolIndicatorExt, Combine, DEFAULT_TOLERANCE, IndicatorExt, Tolerance,
+};
 pub(crate) use fugazi_core::sources::{
     Binance, BinanceVision, Coinbase, CoinGecko, Interval, Okx, SeriesSource,
     SourceError, Timestamp, Yahoo,

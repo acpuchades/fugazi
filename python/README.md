@@ -394,7 +394,8 @@ ta.close().rolling_max(20)   # also: rolling_min
 ...or into **signals** (booleans):
 
 ```python
-fast.gt(slow)                        # also: lt, ge, le, eq, ne  (optional epsilon=...)
+fast.gt(slow)                        # also: lt, ge, le, eq, ne
+fast.gt(slow, epsilon=0.5)           # absolute deadband; omit for the scale-aware default
 ta.rsi(ta.close(), 14).above(70.0)   # also: below(level)
 fast.crosses_above(slow)             # also: crosses_below
 ```

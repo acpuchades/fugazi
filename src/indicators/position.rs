@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::indicator::Indicator;
-use crate::indicators::DEFAULT_EPSILON;
+use crate::wallet::POSITION_EPSILON;
 use crate::wallet::Side;
 use crate::types::{Atom, Candle, Real};
 
@@ -78,7 +78,7 @@ impl Position {
         let mut s = self.0.lock().expect("Position lock poisoned");
         let new_size = s.size + side.sign() * units;
         let crossed_zero = s.size * new_size < 0.0;
-        if new_size.abs() <= DEFAULT_EPSILON {
+        if new_size.abs() <= POSITION_EPSILON {
             *s = PositionState::default();
         } else if s.entry.is_none() || crossed_zero {
             s.size = new_size;
@@ -135,17 +135,17 @@ impl Position {
 
     /// Whether the position is meaningfully long.
     pub fn is_long(&self) -> bool {
-        self.size() > DEFAULT_EPSILON
+        self.size() > POSITION_EPSILON
     }
 
     /// Whether the position is meaningfully short.
     pub fn is_short(&self) -> bool {
-        self.size() < -DEFAULT_EPSILON
+        self.size() < -POSITION_EPSILON
     }
 
     /// Whether the position is flat.
     pub fn is_flat(&self) -> bool {
-        self.size().abs() <= DEFAULT_EPSILON
+        self.size().abs() <= POSITION_EPSILON
     }
 
     /// The entry price of the current position, `None` while flat.

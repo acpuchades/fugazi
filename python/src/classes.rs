@@ -1068,66 +1068,66 @@ impl PyIndicator {
     #[pyo3(signature = (other, epsilon = None))]
     pub(crate) fn gt(&self, other: &Bound<'_, PyAny>, epsilon: Option<f64>) -> PyResult<PySignal> {
         let rhs = coerce_operand(other)?;
-        let eps = epsilon.unwrap_or(DEFAULT_EPSILON);
+        let eps = epsilon.map_or(DEFAULT_TOLERANCE, Tolerance::absolute);
         Ok(PySignal::wrap(sources_to_signal!(
             self.src.clone(),
             rhs,
-            |l, r| Combine::<_, _, GtOp>::with_epsilon(l, r, eps)
+            |l, r| Combine::<_, _, GtOp>::with_tolerance(l, r, eps)
         )?))
     }
 
     #[pyo3(signature = (other, epsilon = None))]
     pub(crate) fn lt(&self, other: &Bound<'_, PyAny>, epsilon: Option<f64>) -> PyResult<PySignal> {
         let rhs = coerce_operand(other)?;
-        let eps = epsilon.unwrap_or(DEFAULT_EPSILON);
+        let eps = epsilon.map_or(DEFAULT_TOLERANCE, Tolerance::absolute);
         Ok(PySignal::wrap(sources_to_signal!(
             self.src.clone(),
             rhs,
-            |l, r| Combine::<_, _, LtOp>::with_epsilon(l, r, eps)
+            |l, r| Combine::<_, _, LtOp>::with_tolerance(l, r, eps)
         )?))
     }
 
     #[pyo3(signature = (other, epsilon = None))]
     pub(crate) fn ge(&self, other: &Bound<'_, PyAny>, epsilon: Option<f64>) -> PyResult<PySignal> {
         let rhs = coerce_operand(other)?;
-        let eps = epsilon.unwrap_or(DEFAULT_EPSILON);
+        let eps = epsilon.map_or(DEFAULT_TOLERANCE, Tolerance::absolute);
         Ok(PySignal::wrap(sources_to_signal!(
             self.src.clone(),
             rhs,
-            |l, r| Combine::<_, _, GeOp>::with_epsilon(l, r, eps)
+            |l, r| Combine::<_, _, GeOp>::with_tolerance(l, r, eps)
         )?))
     }
 
     #[pyo3(signature = (other, epsilon = None))]
     pub(crate) fn le(&self, other: &Bound<'_, PyAny>, epsilon: Option<f64>) -> PyResult<PySignal> {
         let rhs = coerce_operand(other)?;
-        let eps = epsilon.unwrap_or(DEFAULT_EPSILON);
+        let eps = epsilon.map_or(DEFAULT_TOLERANCE, Tolerance::absolute);
         Ok(PySignal::wrap(sources_to_signal!(
             self.src.clone(),
             rhs,
-            |l, r| Combine::<_, _, LeOp>::with_epsilon(l, r, eps)
+            |l, r| Combine::<_, _, LeOp>::with_tolerance(l, r, eps)
         )?))
     }
 
     #[pyo3(signature = (other, epsilon = None))]
     pub(crate) fn eq(&self, other: &Bound<'_, PyAny>, epsilon: Option<f64>) -> PyResult<PySignal> {
         let rhs = coerce_operand(other)?;
-        let eps = epsilon.unwrap_or(DEFAULT_EPSILON);
+        let eps = epsilon.map_or(DEFAULT_TOLERANCE, Tolerance::absolute);
         Ok(PySignal::wrap(sources_to_signal!(
             self.src.clone(),
             rhs,
-            |l, r| Combine::<_, _, EqOp>::with_epsilon(l, r, eps)
+            |l, r| Combine::<_, _, EqOp>::with_tolerance(l, r, eps)
         )?))
     }
 
     #[pyo3(signature = (other, epsilon = None))]
     pub(crate) fn ne(&self, other: &Bound<'_, PyAny>, epsilon: Option<f64>) -> PyResult<PySignal> {
         let rhs = coerce_operand(other)?;
-        let eps = epsilon.unwrap_or(DEFAULT_EPSILON);
+        let eps = epsilon.map_or(DEFAULT_TOLERANCE, Tolerance::absolute);
         Ok(PySignal::wrap(sources_to_signal!(
             self.src.clone(),
             rhs,
-            |l, r| Combine::<_, _, NeOp>::with_epsilon(l, r, eps)
+            |l, r| Combine::<_, _, NeOp>::with_tolerance(l, r, eps)
         )?))
     }
 

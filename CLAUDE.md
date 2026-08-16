@@ -94,7 +94,7 @@ builders. Use the internal cores (`EmaState`/`WilderState`, `WindowStats`/
 
 A `*Op` type impl'ing the relevant trait (`BinaryOp`/`LookbackOp`/`ExtremeOp`) plus a
 type alias — **never a macro**. Arithmetic/boolean/lookback are zero-sized `Default`
-markers; comparisons carry `epsilon`. `Combine` feeds the *same* input to both sides
+markers; comparisons carry a `Tolerance { abs, rel }` (band = `max(abs, rel·max|operand|)`, default `(1e-12, 1e-9)` — **relative, because operand scale is unbounded**; the execution-side quantity epsilons live in `src/wallet.rs`). `Combine` feeds the *same* input to both sides
 (requires `Input: Clone`; use `lhs`/`rhs` naming), holds op by value; `Lookback`/`Extreme`
 hold a zero-sized op as `PhantomData<fn() -> Op>`. `Change` is a **bidirectional** toggle
 detector; directional events come from pairing it with a comparison.
