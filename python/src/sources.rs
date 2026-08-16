@@ -224,8 +224,8 @@ pub(crate) fn format_ts_iso(ms: i64) -> String {
 /// Columns: `time` (ISO 8601 UTC str), then the OHLCV block **only when at
 /// least one atom carries a bar**, then one column per `schema` key. A provider
 /// whose atoms are all price-less — an overlay series like CoinGecko's market
-/// caps or Binance-Vision's funding — yields a frame with no `open`/`high`/
-/// `low`/`close`/`volume`, meant to be joined onto a price frame on `time`.
+/// caps — yields a frame with no `open`/`high`/`low`/`close`/`volume`, meant to
+/// be joined onto a price frame on `time`.
 /// This mirrors the CLI's single `get` pipeline, where `Atom::candle` is
 /// optional and the writer omits the OHLCV block when no row has a bar.
 pub(crate) fn build_series_frame(
@@ -747,24 +747,44 @@ impl PyCoinGecko {
     }
 }
 
-/// Binance perpetual **funding rate** — an overlay provider, not a candle one.
+/// Binance Vision — the public historical archive — as a **candle** provider.
 ///
-/// The funding rate is the periodic payment between the two sides of a
-/// perpetual swap (positive = longs pay shorts), the primary carry signal in
-/// crypto. It is not a price, so the frame has `time` plus `funding_rate` and
-/// no `open`/`high`/`low`/`close`. Join it onto a price frame on `time` to use
-/// both.
+/// Binance publishes its own market data as dated ZIP-of-CSV files at
+/// `data.binance.vision`, addressed by path rather than behind a query API. For
+/// a multi-year range that is deeper and cheaper than the REST endpoint: one
+/// request per month instead of one per thousand rows, and no rate limit. The
+/// cost is a ~2-day lag — an archive appears about two days after the period it
+/// covers, so a fetch running to `now` stops at the last published file rather
+/// than at the current bar.
 ///
-/// `symbol` is a **perpetual contract** symbol (`"BTCUSDT"`), served from
-/// `fapi.binance.com` — a different host and a different listing set from the
-/// spot vocabulary `Binance` uses. `.symbols()` enumerates it.
+/// `market` picks which of the archive's two trees is read. They are different
+/// instruments, not two spellings of one:
 ///
-/// Binance settles funding every 4–8 hours. Those are events, not bars, so a
-/// coarser `freq` covers several of them and **their rates are summed**:
-/// `freq="1d"` gives that day's total carry, which is the number a daily-bar
-/// strategy wants. At `freq="8h"` each bucket holds one settlement. Sub-hourly
-/// `freq` values are rejected — they would be empty on almost every bar, which
-/// reads as "no carry" rather than "no data".
+/// * `"spot"` (the default) — the cash market: OHLCV plus the kline's own
+///   order-flow extras (`quote_volume`, `n_trades`, `taker_buy_base_volume`,
+///   `taker_buy_quote_volume`), the same columns the live `Binance` client
+///   returns. Admits the whole kline vocabulary, `"1m"` through `"1M"`.
+/// * `"futures"` — USDⓈ-M perpetuals: everything spot carries, plus the side
+///   channels only a derivative has — `funding_rate`, `premium_index`,
+///   `open_interest`, `open_interest_value` and the long/short ratios.
+///   `"1h"` through `"1d"` only, the range `premiumIndexKlines` publishes.
+///
+/// Both markets return an ordinary OHLCV frame; the extra columns ride
+/// alongside the bar, so there is nothing to join.
+///
+/// The derivative columns aggregate differently within a bar, because they are
+/// different kinds of quantity. **Funding is summed** — it is a cost that
+/// accrues, so the three 8-hourly settlements inside a day add up to that day's
+/// total carry, which is the number a daily-bar strategy wants. Everything else
+/// is a **level** (the premium index is a basis, open interest is a stock, the
+/// ratios are proportions), so a bar keeps the last sample it saw. A bar may
+/// carry some columns and not others: at `"1h"` only every eighth bar sees a
+/// settlement, and the `metrics` archive starts years after `fundingRate` does.
+/// An absent column reads as an absent sample rather than as a zero.
+///
+/// `symbol` is a contract symbol (`"BTCUSDT"`), which mostly coincides with the
+/// spot vocabulary but is not the same list. `.symbols()` enumerates it — read
+/// from the live exchange, since the archive has no index endpoint.
 #[pyclass(name = "BinanceVision", frozen)]
 pub(crate) struct PyBinanceVision {
     pub(crate) inner: BinanceVision,
@@ -795,17 +815,19 @@ impl PyBinanceVision {
         Ok(Self { inner })
     }
 
-    /// Fetch the funding-rate column for one `(symbol, freq)` window.
+    /// Fetch one `(symbol, freq)` window from the archive.
     ///
-    /// * `symbol` — a perpetual contract symbol: `"BTCUSDT"`, `"ETHUSDT"`.
-    /// * `freq` — bar cadence, hourly or coarser (`"8h"`, `"1d"`, `"1w"`,
-    ///   `"1M"`). Settlements inside a bar are summed.
-    /// * `since` / `until` — dates, same grammar as the candle providers.
-    ///   `until` is exclusive; `None` means "up to now".
+    /// * `symbol` — a contract symbol: `"BTCUSDT"`, `"ETHUSDT"`.
+    /// * `freq` — bar cadence. Spot admits the whole kline vocabulary (`"1m"`
+    ///   through `"1M"`); futures is `"1h"` through `"1d"`, and a cadence
+    ///   outside that is rejected rather than handed back part-empty.
+    /// * `since` / `until` — dates, same grammar as the other providers.
+    ///   `until` is exclusive; `None` means "up to now", which in practice
+    ///   stops at the last published archive.
     /// * `output` — `"polars"` (default), `"pandas"`, or `"numpy"`.
     ///
-    /// Returned columns: `time` (ISO 8601 UTC) and `funding_rate` (f64).
-    /// **No OHLCV columns** — see the class docs.
+    /// Returned columns: `time` (ISO 8601 UTC), the OHLCV block, then the
+    /// market's own columns — see the class docs for the two sets.
     #[pyo3(signature = (symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
     pub(crate) fn fetch(
         &self,

@@ -1059,29 +1059,46 @@ CoinGecko only samples that finely over windows too short to backtest on. The
 provider-generic `ta.fetch(provider="cg", ...)` works too — it returns the same
 price-less frame.
 
-`BinanceVision` is the same shape, for the perpetual **funding rate** — the
-periodic payment between the two sides of a perp (positive = longs pay shorts),
-the primary carry signal in crypto:
+`BinanceVision` is a different shape — a **candle** provider, reading Binance's
+public historical archive at `data.binance.vision`. It returns an ordinary OHLCV
+frame, deeper and cheaper than the live endpoint (one request per month, no rate
+limit), at the cost of a ~2-day lag: an archive appears about two days after the
+period it covers, so a fetch running to now stops at the last published file.
+
+`market` picks which of the archive's two trees is read:
 
 ```python
-fund = ta.BinanceVision(market="futures")
-rates = fund.fetch(symbol="BTCUSDT", freq="1d", since="90d ago")
-# columns: time, funding_rate
+spot = ta.BinanceVision()                  # market="spot" is the default
+bars = spot.fetch(symbol="BTCUSDT", freq="1d", since="90d ago")
+# columns: time, open, high, low, close, volume, quote_volume, n_trades,
+#          taker_buy_base_volume, taker_buy_quote_volume
+
+perp = ta.BinanceVision(market="futures")
+bars = perp.fetch(symbol="BTCUSDT", freq="1d", since="90d ago")
+# ... the same columns, plus funding_rate, premium_index, open_interest,
+#     open_interest_value and the long/short ratios
 ```
 
-`symbol` is a **perpetual contract** symbol, served from `fapi.binance.com` — a
-different host and listing set from the spot vocabulary `Binance` uses;
-`fund.symbols()` enumerates it.
+They are different instruments, not two spellings of one — a perp's funding rate
+belongs to the contract it is charged on, and pairing it with a spot bar would
+quietly assert the two are the same thing. Spot admits the whole kline
+vocabulary (`"1m"` through `"1M"`); futures is `"1h"` through `"1d"`, the range
+`premiumIndexKlines` publishes. `symbol` is a contract symbol, which mostly
+coincides with the spot vocabulary but is not the same list; `spot.symbols()`
+enumerates it.
 
-Binance settles funding every 4–8 hours. Those are events, not bars, so a
-coarser `freq` covers several of them and **their rates are summed**:
-`freq="1d"` is that day's total carry, `freq="8h"` is one settlement per row.
-That is the right aggregation because funding is an accrual rather than a level
-(contrast CoinGecko's market cap, where the first sample in the bucket wins),
-and it means there is nothing to forward-fill — request the cadence you trade.
-Sub-hourly is rejected: those buckets would be empty on almost every bar, which
-reads as "no carry" rather than "no data". The flat `ta.fetch` carries both
-archive trees as their own provider ids — `provider="binance-vision"` for spot
-klines and `provider="binance-vision-futures"` for the USD-M tree — matching the
-CLI. The explicit `ta.BinanceVision(market=...)` constructor stays for the
-`base_url` override.
+Unlike CoinGecko's, these columns need no join — they ride alongside the bar.
+They do aggregate differently within it, because they are different kinds of
+quantity. **Funding is summed**: Binance settles it every 4–8 hours, so
+`freq="1d"` is that day's total carry and `freq="8h"` is one settlement per row.
+That is right because funding is an accrual rather than a level, and it means
+there is nothing to forward-fill — request the cadence you trade. The rest are
+levels (the premium index is a basis, open interest is a stock, the ratios are
+proportions), so a bar keeps the last sample it saw. A bar may carry some and
+not others — at `"1h"` only every eighth bar sees a settlement — and an absent
+column reads as an absent sample rather than as a zero.
+
+The flat `ta.fetch` carries both trees as their own provider ids —
+`provider="binance-vision"` for spot and `provider="binance-vision-futures"` for
+the USD-M tree — matching the CLI. The explicit `ta.BinanceVision(market=...)`
+constructor stays for the `base_url` override.

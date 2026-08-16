@@ -887,14 +887,16 @@ subcommands — briefly listed here, fully documented in
 - `fugazi optimize <STRATEGY> --params NAME=<axis>...` — sweep the strategy
   over a parameter grid and rank combinations by a metric.
 - `fugazi get <PROVIDER>:<SYMBOL>[<FREQ>] --since ... -o candles.csv` — fetch
-  OHLCV bars from `binance`, `okx`, `coinbase`, or `yfinance` into a `run`-ready CSV, or
+  OHLCV bars from `binance`, `binance-vision`, `binance-vision-futures`, `okx`,
+  `coinbase`, or `yfinance` into a `run`-ready CSV, or
   re-process an existing CSV with `csv:PATH`. `-x/--overlay col=<source>`
   appends indicator columns computed on the fetched bars; `--params` resolves
-  `!param` placeholders inside those overlay expressions. The **overlay-only**
-  providers (`cg` for CoinGecko market cap / volume / supply,
-  `binance-funding` for the perpetual funding rate) carry side-channel columns
-  and no OHLCV; fetch those to their own file and `--series` both into a run,
-  then read a column with `!get { key: funding_rate }`.
+  `!param` placeholders inside those overlay expressions. `cg` (CoinGecko market
+  cap / volume / supply) is **overlay-only** — side-channel columns and no
+  OHLCV; fetch it to its own file and `--series` both into a run.
+  `binance-vision-futures` needs no such join: it returns perpetual bars *and*
+  `funding_rate`, `open_interest` and the rest in one frame. Either way a
+  column is read with `!get { key: funding_rate }`.
 - `fugazi list indicators` / `list sources` / `list tickers <PROVIDER> [PATTERN]`
   — the YAML tag catalogue, the `get`-provider table, and (via HTTP) the
   provider's ticker vocabulary. A provider lists thousands of symbols, so

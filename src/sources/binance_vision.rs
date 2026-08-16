@@ -18,6 +18,12 @@
 //!
 //! # Columns
 //!
+//! Both markets are **candle** sources: every atom carries an OHLCV bar plus
+//! the kline's own order-flow extras (`quote_volume`, `n_trades`,
+//! `taker_buy_base_volume`, `taker_buy_quote_volume`), the same columns the
+//! live [`Binance`](super::Binance) provider exposes. `UsdMFutures` adds the
+//! side channels below, which ride alongside the bar rather than replacing it:
+//!
 //! | column | archive | cadence |
 //! |---|---|---|
 //! | `funding_rate` | `monthly/fundingRate` | settlement events, every 4–8h |

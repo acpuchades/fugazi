@@ -287,3 +287,53 @@ fn every_grammar_field_type_has_a_python_dummy_value() {
          field type needs a sample there or its `pytest` run fails with a KeyError",
     );
 }
+
+/// `doc/CLI.md`'s provider table repeats `KNOWN_PROVIDERS` with nothing linking
+/// them, and `fugazi list sources` prints the array rather than the table — so
+/// the two drift silently in both directions. A documented id that isn't in the
+/// array is a command that fails with `unknown provider`; an array entry that
+/// isn't documented is undiscoverable outside `--help`.
+///
+/// Textual on both sides: `KNOWN_PROVIDERS` is `pub(crate)` in the binary, so
+/// an integration test cannot read the array itself.
+#[test]
+fn the_cli_doc_lists_exactly_the_providers_get_accepts() {
+    const GET_RS: &str = include_str!("../src/cli/get.rs");
+    const CLI_MD: &str = include_str!("../doc/CLI.md");
+
+    let array = {
+        let start = GET_RS
+            .find("KNOWN_PROVIDERS: &[ProviderInfo] = &[")
+            .expect("src/cli/get.rs must define KNOWN_PROVIDERS");
+        let end = GET_RS[start..]
+            .find("\n];")
+            .expect("KNOWN_PROVIDERS must end in `];` at column 0")
+            + start;
+        &GET_RS[start..end]
+    };
+    let known: BTreeSet<&str> = array
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("name: \""))
+        .filter_map(|rest| rest.split_once('"'))
+        .map(|(name, _)| name)
+        .collect();
+    assert!(!known.is_empty(), "parsed no provider names out of KNOWN_PROVIDERS");
+
+    let documented: BTreeSet<&str> = {
+        let start = CLI_MD
+            .find("| Provider | Grammar | Description |")
+            .expect("doc/CLI.md must carry the provider table");
+        CLI_MD[start..]
+            .lines()
+            .skip(2) // header row, separator row
+            .take_while(|l| l.starts_with("| `"))
+            .filter_map(|l| l.trim_start_matches("| `").split_once('`'))
+            .map(|(name, _)| name)
+            .collect()
+    };
+
+    assert_eq!(
+        known, documented,
+        "doc/CLI.md's provider table and `KNOWN_PROVIDERS` in src/cli/get.rs have drifted",
+    );
+}
