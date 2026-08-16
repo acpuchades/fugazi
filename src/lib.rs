@@ -1,3 +1,12 @@
+// A doc comment that loses its item — because a second one was written
+// between it and the `struct` — silently reattaches to whatever comes next.
+// That happened to `Portfolio`, the crate's most complex type: it went
+// undocumented while its prose landed on a private type alias and kept
+// pointing at `wallet_view` / `PortfolioWallet`, both long superseded. Either
+// lint below catches that class at `cargo doc` time.
+#![warn(rustdoc::broken_intra_doc_links)]
+#![warn(rustdoc::private_intra_doc_links)]
+
 //! # Fugazi
 //!
 //! A library of technical-analysis (TA) building blocks designed around

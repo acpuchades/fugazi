@@ -197,19 +197,11 @@ use self::netting::{PortfolioInner, allocate_funds};
 /// keys on the numeric index the child was added at, which is stable for
 /// the life of the portfolio.
 struct PortfolioChild<Sym> {
-    #[allow(dead_code)] // reserved for future per-child reporting.
+    /// Read back by [`Portfolio::child_name`].
     name: String,
     strategy: Box<dyn Strategy<Input = Snapshot<Sym>, Symbol = Sym> + Send>,
 }
 
-/// The composite [`Strategy`] documented on the module. Own it, hand its
-/// [`wallet_view`](Self::wallet_view) to [`backtest::run`](crate::backtest::run),
-/// read the resulting [`RunReport`](crate::RunReport).
-///
-/// The public surface is intentionally small — builder in, `Strategy` +
-/// `wallet_view` out — because everything else (per-bar plumbing, fill
-/// routing, aggregate reporting) is on the composed [`PortfolioWallet`]
-/// and the [`Strategy`] impl.
 /// A boolean chain over the portfolio's `Snapshot<Sym>` — the shape used
 /// by the [`rebalance_on`](PortfolioBuilder::rebalance_on) gate.
 type RebalanceSignal<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bool> + Send>;
@@ -220,6 +212,22 @@ type RebalanceSignal<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = bo
 /// at each rebalance-fire.
 type WeightShareChain<Sym> = Box<dyn Indicator<Input = Snapshot<Sym>, Output = Real> + Send>;
 
+/// The composite [`Strategy`] documented on the module: N heterogeneous
+/// children netted onto **one** account.
+///
+/// Build it with [`Portfolio::builder`], then drive it like any other
+/// strategy — `backtest::run(&mut portfolio, &mut wallet, snapshots)` over
+/// any [`Wallet`], or [`run`](Self::run) for the paper case. The wallet
+/// passed in must be the portfolio's alone: each child trades a
+/// `LedgerWallet` view whose notional book only balances against the real
+/// account if nothing else writes to it
+/// ([`assert_books_balance`](Self::assert_books_balance) checks exactly
+/// that).
+///
+/// Per-child reads are by the index the child was added at:
+/// [`sub_equity`](Self::sub_equity), [`sub_position`](Self::sub_position),
+/// [`child_name`](Self::child_name). The aggregate mark-to-market view is
+/// [`book`](Self::book).
 pub struct Portfolio<Sym> {
     children: Vec<PortfolioChild<Sym>>,
     inner: Arc<Mutex<PortfolioInner<Sym>>>,

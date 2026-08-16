@@ -825,27 +825,23 @@ impl Strategy for DynPortfolio {
 
 impl DynPortfolio {
     /// The number of children the portfolio holds, in `.add(...)` order.
-    #[allow(dead_code)]
     pub fn child_count(&self) -> usize {
         self.inner.child_count()
     }
 
     /// Child `idx`'s mark-to-market equity — see [`Portfolio::sub_equity`].
-    #[allow(dead_code)]
     pub fn sub_equity(&self, idx: usize) -> Real {
         self.inner.sub_equity(idx)
     }
 
     /// Child `idx`'s signed ledger position in `symbol` — see
     /// [`Portfolio::sub_position`].
-    #[allow(dead_code)]
     pub fn sub_position(&self, idx: usize, symbol: &str) -> Real {
         self.inner.sub_position(idx, &symbol.to_string())
     }
 
     /// Assert the netting identity against the account — see
     /// [`Portfolio::assert_books_balance`].
-    #[allow(dead_code)]
     pub fn assert_books_balance(&self, wallet: &dyn Wallet<String>) {
         self.inner.assert_books_balance(wallet);
     }

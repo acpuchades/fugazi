@@ -1459,7 +1459,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Ba
 mod tests {
     use super::*;
     use crate::indicators::sizing::equal_weight;
-    use crate::indicators::{Close, IndicatorExt, Pick};
+    use crate::indicators::{Close, Pick};
     use crate::wallet::PaperWallet;
     use crate::types::{Atom, Selector};
 
@@ -2058,13 +2058,6 @@ mod tests {
                 })
                 .sized_by(|_sym: &String| equal_weight::<String>(4))
                 .top_bottom(2, 2);
-    }
-
-    // Silence "unused" for helpers only reached from IndicatorExt-derived
-    // Roc chains in the doctest / above.
-    #[allow(dead_code)]
-    fn _touch_indicator_ext() {
-        let _ = Close::<Pick<&'static str>>::of(Pick::<&'static str>::new()).roc(5);
     }
 
     // ---------------- Universe (all_of / any_of) -------------------------

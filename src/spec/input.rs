@@ -21,7 +21,6 @@ use anyhow::{Context, Result, anyhow};
 /// [`parse_value_at`] instead so the origin lands in the message. Kept for the
 /// spec / imports / template tests that pass literal YAML with no meaningful
 /// origin — the bin never calls it, which is why the `dead_code` allow is here.
-#[allow(dead_code)]
 pub fn parse_value(text: &str) -> Result<serde_json::Value> {
     parse_value_at(text, "(input)")
 }

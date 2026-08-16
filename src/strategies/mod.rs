@@ -59,7 +59,7 @@ pub use multi_asset::MultiAssetStrategy;
 pub use pairs::PairsStrategy;
 pub use single_asset::SingleAssetStrategy;
 
-use crate::indicators::{Close, CurrentBar, High, Low, Pick, Volume};
+use crate::indicators::{Close, CurrentBar, High, Low, Pick};
 
 /// Shorthand for `Close::of(Pick::<Sym>::new())` — read the strategy's own
 /// asset's close out of the incoming [`Snapshot`](crate::types::Snapshot).
@@ -77,12 +77,6 @@ pub(crate) fn self_high<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static 
 /// Shorthand for `Low::of(Pick::<Sym>::new())` — see [`self_close`].
 pub(crate) fn self_low<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>() -> Low<Pick<Sym>> {
     Low::of(Pick::<Sym>::new())
-}
-
-/// Shorthand for `Volume::of(Pick::<Sym>::new())` — see [`self_close`].
-#[allow(dead_code)]
-pub(crate) fn self_volume<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync>() -> Volume<Pick<Sym>> {
-    Volume::of(Pick::<Sym>::new())
 }
 
 /// Shorthand for `CurrentBar::of(Pick::<Sym>::new())` — read the strategy's
