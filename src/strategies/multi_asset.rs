@@ -36,7 +36,7 @@ use std::hash::Hash;
 
 use crate::indicators::{Book, ValueBool, Position, Value};
 use crate::prelude::*;
-use crate::strategies::basket::{AllOf, AnyOf, Floating, Universe};
+use crate::strategies::universe::{AllOf, AnyOf, Floating, Universe};
 use crate::types::Snapshot;
 
 // ---------------------------------------------------------------------------
@@ -144,8 +144,8 @@ impl<Sym> PerAssetState<Sym> {
     /// Whether this leg has seen enough bars for its own decision to be
     /// safe to act on. Consulted at trade time; also folded into the
     /// [`MultiAssetStrategy::is_ready`] gate under a strict
-    /// [`Universe`](crate::strategies::basket::Universe) impl (e.g.
-    /// [`AllOf`](crate::strategies::basket::AllOf)).
+    /// [`Universe`](crate::strategies::universe::Universe) impl (e.g.
+    /// [`AllOf`](crate::strategies::universe::AllOf)).
     fn is_ready(&self) -> bool {
         self.bars_seen >= self.stable_period()
     }

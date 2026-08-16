@@ -45,6 +45,8 @@
 //! * [`composite`] — multi-condition (trend gated by strength, dip-in-uptrend).
 
 pub mod basket;
+pub mod selection;
+pub mod universe;
 pub mod composite;
 pub mod mean_reversion;
 pub mod momentum;
