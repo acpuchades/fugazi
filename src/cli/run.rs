@@ -349,31 +349,31 @@ pub fn run_pairs(
     emit_run(&iter, opts, started, effective_freq)
 }
 
-/// The basket runner: drive a [`BasketStrategy`](fugazi::strategies::BasketStrategy)
-/// over every symbol discovered in `frame`, time-aligning per-symbol atom
-/// streams by outer-joining on `time` (a symbol without a bar at some
-/// time simply doesn't appear in that bar's snapshot — the strategy's
-/// per-symbol `Pick` reads `None` and its score chain propagates it up).
+/// The shared driver for the three shapes whose universe is **discovered from
+/// the stream** rather than declared up front.
 ///
-/// The tradeable **universe is the set of symbols in the frame** — no
-/// explicit declaration in the YAML; the basket rebuilds its
-/// score/sizing chains lazily as symbols appear (see
-/// [`BasketStrategySpec`] for the `!arg SYM` substitution model). A
-/// per-symbol cost bundle is resolved from `--costs` for each symbol
-/// (via [`fugazi::PaperWallet::set_costs_for`]) so a scoped rule like
-/// `BTC:0.001,ETH:0.0005` applies per leg; symbols not scoped fall back
-/// to the wallet's zero-cost default.
-pub fn run_basket(
-    spec: &BasketStrategySpec,
+/// Basket, multi-asset and portfolio ran identical bodies: resolve the symbol
+/// set from the frame, build per-symbol atom streams, outer-join them on
+/// `time`, read the calendar off a representative symbol, print the inputs
+/// block, drive, and emit. They differed in five spots — the spec variant, two
+/// strings, and whether the cost probe includes the unscoped `default:` leg —
+/// so those are parameters and the bodies are one.
+///
+/// Cadence is read from the representative symbol: none of these shapes
+/// declares per-symbol cadences, and a mixed-cadence universe is a follow-up if
+/// it becomes a real need. Typical universes are homogeneous.
+fn run_universe(
+    any: StrategySpec,
+    noun: &str,
+    headline: &str,
+    probe_default_costs: bool,
     frame: &DataFrame,
     opts: &RunOptions,
 ) -> Result<Summary> {
     let started = SystemTime::now();
     let universe = frame.symbols();
     if universe.is_empty() {
-        anyhow::bail!(
-            "no symbols found in the input series — a basket needs at least one traded asset"
-        );
+        anyhow::bail!("no symbols found in the input series — {noun} needs at least one traded asset");
     }
     // Per-symbol atom streams, sorted by time (DataFrame::atoms walks a
     // BTreeMap so ascending order is guaranteed by construction).
@@ -394,27 +394,56 @@ pub fn run_basket(
 
     let start = bars.first().map_or("", |t| t.as_str());
     let end = bars.last().map_or("", |t| t.as_str());
-    // Cadence: try the first symbol's --frequency scope, then fall back to
-    // detection from that symbol's timestamps. Basket YAML doesn't declare
-    // per-symbol cadences (that's a follow-up if mixed cadences become a
-    // real need); typical baskets are homogeneous.
     let representative = &universe[0];
     let (effective_freq, bars_per_year) = universe_calendar(opts, representative, &per_symbol);
     let no_cost_warning = !opts.costs_supplied;
     let inputs = eval_context(opts, effective_freq, bars_per_year)?;
     if !opts.quiet {
-        let costs_active =
-            costs_active(opts.cost_config, universe.iter().map(String::as_str), effective_freq);
-        style::print_header("run", "trade a basket across an N-symbol universe");
+        // A portfolio also probes the unscoped `default:` leg with `""` — see
+        // `costs_active`.
+        let probes = probe_default_costs
+            .then_some("")
+            .into_iter()
+            .chain(universe.iter().map(String::as_str));
+        let costs_active = costs_active(opts.cost_config, probes, effective_freq);
+        style::print_header("run", headline);
         style::print_warns(&style::collect_warnings(&[], no_cost_warning, "results"));
         print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active);
     }
 
-    let any = StrategySpec::Basket(Box::new(spec.clone()));
     let iter = iterate(&any, bars.clone(), &snapshots, &inputs, opts)?;
     emit_montecarlo(&iter, opts)?;
 
     emit_run(&iter, opts, started, effective_freq)
+}
+
+/// The basket runner: drive a [`BasketStrategy`](fugazi::strategies::BasketStrategy)
+/// over every symbol discovered in `frame`, time-aligning per-symbol atom
+/// streams by outer-joining on `time` (a symbol without a bar at some
+/// time simply doesn't appear in that bar's snapshot — the strategy's
+/// per-symbol `Pick` reads `None` and its score chain propagates it up).
+///
+/// The tradeable **universe is the set of symbols in the frame** — no
+/// explicit declaration in the YAML; the basket rebuilds its
+/// score/sizing chains lazily as symbols appear (see
+/// [`BasketStrategySpec`] for the `!arg SYM` substitution model). A
+/// per-symbol cost bundle is resolved from `--costs` for each symbol
+/// (via [`fugazi::PaperWallet::set_costs_for`]) so a scoped rule like
+/// `BTC:0.001,ETH:0.0005` applies per leg; symbols not scoped fall back
+/// to the wallet's zero-cost default.
+pub fn run_basket(
+    spec: &BasketStrategySpec,
+    frame: &DataFrame,
+    opts: &RunOptions,
+) -> Result<Summary> {
+    run_universe(
+        StrategySpec::Basket(Box::new(spec.clone())),
+        "a basket",
+        "trade a basket across an N-symbol universe",
+        false,
+        frame,
+        opts,
+    )
 }
 
 /// The multi-asset runner: drive a
@@ -429,50 +458,14 @@ pub fn run_multi(
     frame: &DataFrame,
     opts: &RunOptions,
 ) -> Result<Summary> {
-    let started = SystemTime::now();
-    let universe = frame.symbols();
-    if universe.is_empty() {
-        anyhow::bail!(
-            "no symbols found in the input series — a multi-asset strategy needs at least one traded asset"
-        );
-    }
-    let per_symbol: Vec<(String, Vec<(String, Atom)>)> = universe
-        .iter()
-        .map(|sym| Ok::<_, anyhow::Error>((sym.clone(), frame.atoms(sym)?.atoms)))
-        .collect::<Result<_>>()?;
-    let (bars, snapshots) = join_universe_by_time(&per_symbol);
-    if bars.is_empty() {
-        anyhow::bail!(
-            "no bars found in the input series across the {} discovered symbol(s)",
-            universe.len()
-        );
-    }
-
-    std::fs::create_dir_all(opts.out_dir)
-        .with_context(|| format!("creating output dir `{}`", opts.out_dir.display()))?;
-
-    let start = bars.first().map_or("", |t| t.as_str());
-    let end = bars.last().map_or("", |t| t.as_str());
-    let representative = &universe[0];
-    let (effective_freq, bars_per_year) = universe_calendar(opts, representative, &per_symbol);
-    let no_cost_warning = !opts.costs_supplied;
-    let inputs = eval_context(opts, effective_freq, bars_per_year)?;
-    if !opts.quiet {
-        let costs_active =
-            costs_active(opts.cost_config, universe.iter().map(String::as_str), effective_freq);
-        style::print_header(
-            "run",
-            "trade a multi-asset portfolio across an N-symbol universe",
-        );
-        style::print_warns(&style::collect_warnings(&[], no_cost_warning, "results"));
-        print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active);
-    }
-
-    let any = StrategySpec::Multi(Box::new(spec.clone()));
-    let iter = iterate(&any, bars.clone(), &snapshots, &inputs, opts)?;
-    emit_montecarlo(&iter, opts)?;
-
-    emit_run(&iter, opts, started, effective_freq)
+    run_universe(
+        StrategySpec::Multi(Box::new(spec.clone())),
+        "a multi-asset strategy",
+        "trade a multi-asset portfolio across an N-symbol universe",
+        false,
+        frame,
+        opts,
+    )
 }
 
 /// The portfolio runner: drive a composite [`Portfolio`](fugazi::portfolio::Portfolio)
@@ -492,56 +485,14 @@ pub fn run_portfolio(
     frame: &DataFrame,
     opts: &RunOptions,
 ) -> Result<Summary> {
-    let started = SystemTime::now();
-    let universe = frame.symbols();
-    if universe.is_empty() {
-        anyhow::bail!(
-            "no symbols found in the input series — a portfolio needs at least one traded asset"
-        );
-    }
-    let per_symbol: Vec<(String, Vec<(String, Atom)>)> = universe
-        .iter()
-        .map(|sym| Ok::<_, anyhow::Error>((sym.clone(), frame.atoms(sym)?.atoms)))
-        .collect::<Result<_>>()?;
-    let (bars, snapshots) = join_universe_by_time(&per_symbol);
-    if bars.is_empty() {
-        anyhow::bail!(
-            "no bars found in the input series across the {} discovered symbol(s)",
-            universe.len()
-        );
-    }
-
-    std::fs::create_dir_all(opts.out_dir)
-        .with_context(|| format!("creating output dir `{}`", opts.out_dir.display()))?;
-
-    let start = bars.first().map_or("", |t| t.as_str());
-    let end = bars.last().map_or("", |t| t.as_str());
-    let representative = &universe[0];
-    let (effective_freq, bars_per_year) = universe_calendar(opts, representative, &per_symbol);
-    let no_cost_warning = !opts.costs_supplied;
-    let inputs = eval_context(opts, effective_freq, bars_per_year)?;
-    if !opts.quiet {
-        // Costs are active if the unscoped default is non-empty or any
-        // per-symbol scoped bundle in the universe is non-empty.
-        // `""` probes the `default:` leg — see `costs_active`.
-        let costs_active = costs_active(
-            opts.cost_config,
-            std::iter::once("").chain(universe.iter().map(String::as_str)),
-            effective_freq,
-        );
-        style::print_header(
-            "run",
-            "trade a composite portfolio of heterogeneous child strategies",
-        );
-        style::print_warns(&style::collect_warnings(&[], no_cost_warning, "results"));
-        print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active);
-    }
-
-    let any = StrategySpec::Portfolio(Box::new(spec.clone()));
-    let iter = iterate(&any, bars.clone(), &snapshots, &inputs, opts)?;
-    emit_montecarlo(&iter, opts)?;
-
-    emit_run(&iter, opts, started, effective_freq)
+    run_universe(
+        StrategySpec::Portfolio(Box::new(spec.clone())),
+        "a portfolio",
+        "trade a composite portfolio of heterogeneous child strategies",
+        true,
+        frame,
+        opts,
+    )
 }
 
 /// The bar cadence and annualization factor for an N-symbol run, read off a
