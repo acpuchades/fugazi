@@ -1273,6 +1273,41 @@ mod tests {
     }
 
     #[test]
+    fn resample_rejects_a_zero_period_instead_of_aborting() {
+        // `every: 0` is bad input, not a broken invariant — it used to trip an
+        // `assert!` inside the build match and take the process with it.
+        let spec: NodeSpec =
+            serde_norway::from_str("!resample { every: 0, inner: !close }").unwrap();
+        let err = expr_build_err(&spec, &Schema::empty());
+        let (trail, message) = crate::spec::diagnostics::split_trail(&err);
+        assert_eq!(trail, vec!["!resample"], "{err}");
+        assert!(message.contains("greater than zero"), "{err}");
+        // The message must not repeat its own tag — the trail already carries it.
+        assert!(!message.contains("!resample"), "{err}");
+    }
+
+    #[test]
+    fn an_embedded_strategy_reports_a_bad_subtree_instead_of_aborting() {
+        // `!sharpe` and its four siblings build a whole strategy behind a
+        // rebuild-on-clone wrapper. The first construction is the one that can
+        // fail on bad input, and it has to come back as a value.
+        let yaml = r#"
+            !sharpe
+            period: 20
+            bars_per_year: 252
+            strategy:
+              symbol: BTCUSDT
+              long:
+                enter: !gt { lhs: !get { key: nope }, rhs: !value 1.0 }
+                exit: !value false
+        "#;
+        let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
+        let err = expr_build_err(&spec, &Schema::empty());
+        assert!(err.starts_with("!sharpe > "), "{err}");
+        assert!(err.contains("no overlay side channel is bound"), "{err}");
+    }
+
+    #[test]
     fn a_nested_failure_carries_the_whole_tag_path() {
         // The reason the breadcrumb exists: the offending `!get` is three
         // levels down, and the message has to say where it is.

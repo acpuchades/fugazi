@@ -89,8 +89,7 @@ impl Overlay {
     /// …; Yahoo's `adj_close`) — see each `sources/*.rs` for the specific
     /// vocabulary. An overlay can then reference an existing column
     /// (`!ema { source: !get { key: adj_close } }`); a `!get { key }` on an
-    /// unknown key panics at build time with the schema's registered-keys
-    /// list.
+    /// unknown key is a build error listing the schema's registered keys.
     /// `root` is the blessed series this instance reads for any
     /// `source:`-omitted leaf — the `(symbol, freq)` fetch group it's being
     /// built for. A bare `!close` reads that group's own bar;
@@ -109,8 +108,15 @@ impl Overlay {
         // Overlays don't run inside a strategy, so there's no live Position
         // or Book — using them here (`entry`, `peak`, book-anchored sizing)
         // never fires. The shared library core installs the stub anchors.
-        crate::spec::overlay::build_overlay(&self.spec, schema, root)
-            .map_err(|e| anyhow!("overlay {:?} in {}: {e}", self.name, self.origin))
+        let built = crate::spec::overlay::build_overlay(&self.spec, schema, root)
+            .map_err(|e| anyhow!("overlay {:?} in {}: {e}", self.name, self.origin))?;
+        // A column that emits an `Atom` or a `Candle` has no CSV cell to
+        // widen into. Reject it here, where the column name and origin are
+        // in hand — otherwise it reaches `dyn_value_to_overlay` mid-stream
+        // and there is no error path left to return through.
+        crate::spec::overlay::scalar_type(built.as_ref(), &self.name)
+            .map_err(|e| anyhow!("{e} (in {})", self.origin))?;
+        Ok(built)
     }
 }
 

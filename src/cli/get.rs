@@ -1438,17 +1438,16 @@ fn collect_extra_columns(rows: &[Row], overlay_columns: &[String]) -> Vec<String
 }
 
 /// Convert a `DynIndicator`'s emitted `DynValue` (an overlay-spec output) into
-/// the widened cell type. Overlay chains that produce an unspottable `Atom` or
-/// `Candle` reach the `unreachable!` arm — they can't be a CSV cell.
+/// the widened cell type. A non-scalar payload (`Atom` / `Candle`) has no CSV
+/// cell and yields `None` — an empty cell rather than an abort. `Overlay::build`
+/// already rejects such a column up front via
+/// [`crate::spec::overlay::scalar_type`], so this arm is defence in depth.
 fn dyn_value_to_overlay(v: DynValue) -> Option<OverlayValue> {
     match v {
         DynValue::Real(x) => Some(OverlayValue::Real(x)),
         DynValue::Bool(b) => Some(OverlayValue::Bool(b)),
         DynValue::Str(s) => Some(OverlayValue::Str(s)),
-        other => unreachable!(
-            "overlay's DynIndicator produced a non-scalar payload {other:?} — the spec should \
-             never build one that isn't Real/Bool/Str",
-        ),
+        _ => None,
     }
 }
 

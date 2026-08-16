@@ -583,7 +583,7 @@ pub enum NodeSpec {
     // a book-reading node (a bare book leaf like `!drawdown`, or a
     // book-anchored recipe like `!drawdown_throttle`) picks up via its
     // `source:` field. Bare (used as an expression on its own) is invalid
-    // and panics at build.
+    // and reports a build error.
     /// The **strategy book** — the `Book` owned by the enclosing strategy
     /// scope (single/pairs/basket/multi/the current per-child instance of
     /// a portfolio's `weights:` expression). This is the default source of
@@ -592,8 +592,8 @@ pub enum NodeSpec {
     StrategyBook,
     /// The **portfolio aggregate book** — the mark-to-market view of the
     /// composite [`Portfolio`](crate::portfolio::Portfolio). Only meaningful
-    /// inside a portfolio's `weights:` expression; panics at build if
-    /// referenced elsewhere.
+    /// inside a portfolio's `weights:` expression; reported as a build
+    /// error if referenced elsewhere.
     #[grammar(kind = "source", output = "book")]
     PortfolioBook,
 
@@ -1964,7 +1964,7 @@ enum NodeSpecRaw {
     // a book-reading node (a bare book leaf like `!drawdown`, or a
     // book-anchored recipe like `!drawdown_throttle`) picks up via its
     // `source:` field. Bare (used as an expression on its own) is invalid
-    // and panics at build.
+    // and reports a build error.
     /// The **strategy book** — the `Book` owned by the enclosing strategy
     /// scope (single/pairs/basket/multi/the current per-child instance of
     /// a portfolio's `weights:` expression). This is the default source of
@@ -1972,8 +1972,8 @@ enum NodeSpecRaw {
     StrategyBook,
     /// The **portfolio aggregate book** — the mark-to-market view of the
     /// composite [`Portfolio`](crate::portfolio::Portfolio). Only meaningful
-    /// inside a portfolio's `weights:` expression; panics at build if
-    /// referenced elsewhere.
+    /// inside a portfolio's `weights:` expression; reported as a build
+    /// error if referenced elsewhere.
     PortfolioBook,
 
     // --- book-anchored leaves. Each takes an optional `source:` that
@@ -4154,7 +4154,7 @@ impl NodeSpec {
                 *risk_free_rate,
                 *bars_per_year,
                 schema,
-            ),
+            )?,
             Sortino {
                 strategy,
                 period,
@@ -4167,7 +4167,7 @@ impl NodeSpec {
                 *risk_free_rate,
                 *bars_per_year,
                 schema,
-            ),
+            )?,
             Volatility {
                 strategy,
                 period,
@@ -4179,7 +4179,7 @@ impl NodeSpec {
                 0.0,
                 *bars_per_year,
                 schema,
-            ),
+            )?,
             MaxDrawdown { strategy, period } => trailing::build(
                 TrailingMetric::MaxDrawdown,
                 strategy,
@@ -4187,7 +4187,7 @@ impl NodeSpec {
                 0.0,
                 0.0,
                 schema,
-            ),
+            )?,
             Calmar {
                 strategy,
                 period,
@@ -4199,7 +4199,7 @@ impl NodeSpec {
                 0.0,
                 *bars_per_year,
                 schema,
-            ),
+            )?,
 
             Add { lhs, rhs } => dyn_indicator::wrap(real(lhs)?.add(real(rhs)?)),
             Sub { lhs, rhs } => dyn_indicator::wrap(real(lhs)?.sub(real(rhs)?)),
@@ -4244,7 +4244,9 @@ impl NodeSpec {
                 inner,
                 source,
             } => {
-                assert!(*every > 0, "resample every must be greater than zero");
+                if *every == 0 {
+                    return Err("`every` must be greater than zero".to_string());
+                }
                 let candle_src = candle(source)?;
                 let resample_dyn = dyn_indicator::wrap(self::Resample::new(candle_src, *every));
                 let inner_dyn = inner.try_build(anchor, book, portfolio_book, schema, root)?;

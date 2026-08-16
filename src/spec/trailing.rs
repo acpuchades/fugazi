@@ -266,52 +266,69 @@ pub(super) fn build(
     risk_free_rate: Real,
     bars_per_year: Real,
     schema: &Arc<Schema>,
-) -> Box<dyn DynIndicator> {
+) -> Result<Box<dyn DynIndicator>, String> {
     let spec = Arc::new(strategy.clone());
     let schema = Arc::clone(schema);
     let fallback = strategy.fallback_symbol();
 
+    let try_build_fn: Arc<dyn Fn() -> Result<BoxedReal, String> + Send + Sync> =
+        Arc::new(move || {
+            let sym = fallback.clone();
+            Ok(match &*spec {
+                AnyStrategyRef::Single(s) => make(
+                    metric,
+                    s.try_build(SEED, &schema)?,
+                    sym,
+                    period,
+                    risk_free_rate,
+                    bars_per_year,
+                ),
+                AnyStrategyRef::Pairs(p) => make(
+                    metric,
+                    p.try_build(SEED, &schema)?,
+                    sym,
+                    period,
+                    risk_free_rate,
+                    bars_per_year,
+                ),
+                AnyStrategyRef::Basket(b) => make(
+                    metric,
+                    b.try_build(SEED, &schema)?,
+                    sym,
+                    period,
+                    risk_free_rate,
+                    bars_per_year,
+                ),
+                AnyStrategyRef::Multi(m) => make(
+                    metric,
+                    m.try_build(SEED, &schema)?,
+                    sym,
+                    period,
+                    risk_free_rate,
+                    bars_per_year,
+                ),
+            })
+        });
+
+    // The first construction is fallible: a malformed embedded `strategy:`
+    // subtree is bad *input*, and the caller wraps this `Err` with the
+    // enclosing `!sharpe` / `!sortino` / … tag to extend the breadcrumb.
+    let inner = try_build_fn()?;
+
+    // `RebuildIndicator` needs an infallible factory — it rebuilds on
+    // `reset()` and on `Clone`, neither of which has an error path to return
+    // through. The build above already succeeded against this exact spec and
+    // schema, and nothing about either changes afterwards, so every later
+    // rebuild succeeds too. Same argument as the basket/multi per-symbol
+    // factories, which are probed once at build time for the same reason.
     let build_fn: Arc<dyn Fn() -> BoxedReal + Send + Sync> = Arc::new(move || {
-        let sym = fallback.clone();
-        match &*spec {
-            AnyStrategyRef::Single(s) => make(
-                metric,
-                s.build(SEED, &schema),
-                sym,
-                period,
-                risk_free_rate,
-                bars_per_year,
-            ),
-            AnyStrategyRef::Pairs(p) => make(
-                metric,
-                p.build(SEED, &schema),
-                sym,
-                period,
-                risk_free_rate,
-                bars_per_year,
-            ),
-            AnyStrategyRef::Basket(b) => make(
-                metric,
-                b.build(SEED, &schema),
-                sym,
-                period,
-                risk_free_rate,
-                bars_per_year,
-            ),
-            AnyStrategyRef::Multi(m) => make(
-                metric,
-                m.build(SEED, &schema),
-                sym,
-                period,
-                risk_free_rate,
-                bars_per_year,
-            ),
-        }
+        try_build_fn().unwrap_or_else(|e| {
+            panic!("trailing metric rebuild failed after a successful first build: {e}")
+        })
     });
 
-    let inner = build_fn();
-    dyn_indicator::wrap(RebuildIndicator {
+    Ok(dyn_indicator::wrap(RebuildIndicator {
         build: build_fn,
         inner,
-    })
+    }))
 }
