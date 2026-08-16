@@ -191,17 +191,23 @@ harness = false
 # (`Combine<L, R, Op>` over sources defined elsewhere) plus trait objects, so
 # cross-CGU inlining is worth more here than it is for the average crate.
 #
-# **`codegen-units = 1` is the setting that matters, not the LTO.** Measured on
-# the `benches/` suite (see `docs/PERFORMANCE.md`), against an untuned profile:
+# Compile cost, which is solid (wall-clock of an incremental rebuild after
+# touching `src/lib.rs`, so contention-tolerant):
 #
-#   | config                    | rebuild | driver/sma/yaml | tree/update |
-#   |---------------------------|--------:|----------------:|------------:|
-#   | (untuned)                 |     42s |               — |           — |
-#   | lto = "thin"              |     45s |           -3.1% |  +3 … +14%  |
-#   | lto = "thin", cgu = 1     |     68s |          -19.9% |  -5 … -9%   |
+#   (untuned) 42s   ·   lto = "thin" 45s   ·   lto = "thin" + cgu = 1  68s
 #
-# Thin LTO on its own is not worth having — it *regressed* `tree/update` at
-# every depth. Keep the pair or drop both; don't split them without re-measuring.
+# **The runtime half of this comparison is NOT yet trustworthy.** It was taken on
+# a machine with other builds running, and the two configurations were measured
+# in different windows. The reading was "cgu = 1 carries the win; thin LTO alone
+# regressed `tree/update` by up to 14%" — but a 14% *slowdown* from thin LTO is
+# not a plausible compiler effect, so that is most likely contention, not signal.
+#
+# Both settings are kept for now on the general argument (the per-bar hot path is
+# generic code crossing module boundaries plus trait objects, so cross-CGU
+# inlining should pay), not on a measurement. Before relying on either: re-run on
+# a quiet machine, and prefer `scripts/perf-compare.sh icount` — callgrind
+# instruction counts are immune to CPU contention, which wall-clock is not.
+# See `docs/PERFORMANCE.md`.
 #
 # `panic = "abort"` is deliberately *not* set: `Snapshot::sole_atom` panics as a
 # documented diagnostic, and the test suite catches it with `catch_unwind`.

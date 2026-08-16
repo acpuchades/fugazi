@@ -42,6 +42,27 @@ instrument, at the cost of a ~50× slowdown.
 | `metrics` | `RunReport` → `Metrics`, which `optimize` pays once per grid row per fold. |
 | `footprint` | Allocation count, bytes, and peak RSS. Not criterion — it installs a counting global allocator, which inside a criterion target would also tally criterion's own bookkeeping. |
 
+## ⚠ Measurement conditions for the v0.58.0 → v0.59.0 numbers
+
+Everything below was measured on a machine that had **other builds and test runs
+executing concurrently** for part of the window. Wall-clock benchmarks are not
+robust to that. Treat the numbers by tier:
+
+| Tier | Result | Why it survives (or doesn't) |
+|---|---|---|
+| **Solid** | `tree/is_ready` 2.59 ms → 1.1 µs, flat across depths 1–8 | A 2 000× ratio, and *flatness across depth* is a structural signature no amount of CPU contention produces. |
+| **Solid** | `metrics/from_report/200000` −57.7% | Arithmetically self-checking: baseline 22.85 ms, one sort ≈ 4.2 ms, removing 3 sorts + 2 `drawdown_segments` predicts ≈ 13.3 ms saved; observed 13.2 ms. That check uses only *within-run* ratios. |
+| **Solid** | `tree/drive` −19.7 → −49.6% monotone in depth | Monotone in the parameter the mechanism predicts. Contention adds noise, not monotone structure. |
+| **Probably sound** | F2 ≈ −38%, from `macd_crossover/rust` vs `sma_crossover/rust` | A *differential* between two benchmarks in the same run under the same conditions, so contention largely cancels. |
+| **Not trustworthy** | F7 (`lto` / `codegen-units`) runtime split | The two configs were measured in different windows; the "thin LTO regresses `tree/update` by 14%" reading is not a plausible compiler effect. Re-measure. |
+| **Not trustworthy** | all `multi_asset` numbers | Swung from −1.0% to +86.2% across runs on a benchmark the change cannot affect (`multi_asset/update` never calls `is_ready`). |
+
+**When re-measuring, prefer `scripts/perf-compare.sh icount`.** Callgrind
+instruction counts are deterministic and immune to CPU contention; wall-clock is
+not. Instruction count misses cache and ILP effects, so it is a complement to a
+quiet-machine wall-clock run, not a replacement — but it is the right first
+instrument on a shared box.
+
 ## Baseline — v0.58.0 (`da252ff`)
 
 <!-- BASELINE:START -->
