@@ -25,11 +25,11 @@
 //! parameterizes an overlay just like a strategy document.
 //!
 //! To keep the first output bar's overlays already warmed up, `fugazi get` fetches
-//! [`stable_period_for`] extra leading bars before `--since` for each
-//! `(symbol, interval)` group (the max `stable_period()` across the overlays
+//! [`stable_bars_for`] extra leading bars before `--since` for each
+//! `(symbol, interval)` group (the max `stable_bars()` across the overlays
 //! that apply to that group), and drops them from the output (unless
 //! `--keep-unstable` is set). The bound comes straight from
-//! [`Indicator::stable_period`](fugazi::Indicator::stable_period), so it stays
+//! [`Indicator::stable_bars`](fugazi::Indicator::stable_bars), so it stays
 //! correct as new indicators enter the library.
 
 use std::collections::HashMap;
@@ -186,10 +186,10 @@ pub fn active_for<'a>(
 /// those overlays are ready on the first output row.
 ///
 /// The per-overlay figure comes from
-/// [`Indicator::stable_period`](fugazi::Indicator::stable_period) on a freshly-
+/// [`Indicator::stable_bars`](fugazi::Indicator::stable_bars) on a freshly-
 /// built instance — so this stays correct as new indicators land in the
 /// library, without a spec-side lookup table to maintain in lockstep.
-pub fn stable_period_for(
+pub fn stable_bars_for(
     overlays: &[Overlay],
     columns: &[String],
     symbol: &str,
@@ -202,7 +202,7 @@ pub fn stable_period_for(
         .into_iter()
         .flatten()
     {
-        max = max.max(o.build(schema, Some(&root))?.stable_period());
+        max = max.max(o.build(schema, Some(&root))?.stable_bars());
     }
     Ok(max)
 }
@@ -662,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn stable_period_for_only_counts_applicable_overlays() {
+    fn stable_bars_for_only_counts_applicable_overlays() {
         let overlays = vec![
             Overlay {
                 name: "a".to_string(),
@@ -687,30 +687,30 @@ mod tests {
             },
         ];
         let cols = column_names(&overlays);
-        assert_eq!(stable_period_for(&overlays, &cols, "BTC", Interval::Day(1), &Schema::empty()).unwrap(), 200);
-        assert_eq!(stable_period_for(&overlays, &cols, "ETH", Interval::Day(1), &Schema::empty()).unwrap(), 20);
+        assert_eq!(stable_bars_for(&overlays, &cols, "BTC", Interval::Day(1), &Schema::empty()).unwrap(), 200);
+        assert_eq!(stable_bars_for(&overlays, &cols, "ETH", Interval::Day(1), &Schema::empty()).unwrap(), 20);
     }
 
     #[test]
-    fn stable_period_uses_active_override_not_the_shadowed_global() {
+    fn stable_bars_uses_active_override_not_the_shadowed_global() {
         // Global `ma=SMA(200)` shadowed for BTC by `ma=SMA(30)`. BTC's warm-up
         // must reflect the BTC override (30), not the shadowed 200.
         let a = Source::Inline("ma=!sma { period: 200 }".to_string());
         let b = Source::Inline("BTC:ma=!sma { period: 30 }".to_string());
         let overlays = parse_specs(&[a, b]).unwrap();
         let cols = column_names(&overlays);
-        assert_eq!(stable_period_for(&overlays, &cols, "BTC", Interval::Day(1), &Schema::empty()).unwrap(), 30);
-        assert_eq!(stable_period_for(&overlays, &cols, "ETH", Interval::Day(1), &Schema::empty()).unwrap(), 200);
+        assert_eq!(stable_bars_for(&overlays, &cols, "BTC", Interval::Day(1), &Schema::empty()).unwrap(), 30);
+        assert_eq!(stable_bars_for(&overlays, &cols, "ETH", Interval::Day(1), &Schema::empty()).unwrap(), 200);
     }
 
     #[test]
-    fn stable_period_derives_from_library() {
-        // Sanity check: the value comes straight from Indicator::stable_period()
+    fn stable_bars_derives_from_library() {
+        // Sanity check: the value comes straight from Indicator::stable_bars()
         // on the freshly-built DynValue.
         let src = Source::Inline("s=!sma { period: 14 }".to_string());
         let overlays = parse_specs(std::slice::from_ref(&src)).unwrap();
         let cols = column_names(&overlays);
-        assert_eq!(stable_period_for(&overlays, &cols, "X", Interval::Day(1), &Schema::empty()).unwrap(), 14);
+        assert_eq!(stable_bars_for(&overlays, &cols, "X", Interval::Day(1), &Schema::empty()).unwrap(), 14);
     }
 
     #[test]

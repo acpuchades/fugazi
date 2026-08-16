@@ -167,14 +167,14 @@ impl<I: Indicator> Indicator for Component<I> {
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         // `max(1)` guards a `warm_up = 0` inner (e.g. `Value`) — projection
         // still needs one `update` to advance the source.
-        self.source.warm_up_period().max(1)
+        self.source.warm_up_bars().max(1)
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {
@@ -425,12 +425,12 @@ where
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
-        self.handle.lock().expect("Shared lock poisoned").source.warm_up_period().max(1)
+    fn warm_up_bars(&self) -> usize {
+        self.handle.lock().expect("Shared lock poisoned").source.warm_up_bars().max(1)
     }
 
-    fn unstable_period(&self) -> usize {
-        self.handle.lock().expect("Shared lock poisoned").source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.handle.lock().expect("Shared lock poisoned").source.unstable_bars()
     }
 
     fn reset(&mut self) {
@@ -578,7 +578,7 @@ mod tests {
             fn value(&self) -> Option<Pair> {
                 self.last
             }
-            fn warm_up_period(&self) -> usize {
+            fn warm_up_bars(&self) -> usize {
                 1
             }
             fn reset(&mut self) {
@@ -668,7 +668,7 @@ mod tests {
             fn value(&self) -> Option<Pair> {
                 self.last
             }
-            fn warm_up_period(&self) -> usize {
+            fn warm_up_bars(&self) -> usize {
                 1
             }
             fn reset(&mut self) {
@@ -738,7 +738,7 @@ mod tests {
             fn value(&self) -> Option<Pair> {
                 self.last
             }
-            fn warm_up_period(&self) -> usize {
+            fn warm_up_bars(&self) -> usize {
                 1
             }
             fn reset(&mut self) {
@@ -816,7 +816,7 @@ mod tests {
             fn value(&self) -> Option<Pair> {
                 self.last
             }
-            fn warm_up_period(&self) -> usize {
+            fn warm_up_bars(&self) -> usize {
                 1
             }
             fn reset(&mut self) {

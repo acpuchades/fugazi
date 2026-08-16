@@ -97,12 +97,12 @@ where
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
-        self.source.warm_up_period()
+    fn warm_up_bars(&self) -> usize {
+        self.source.warm_up_bars()
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {
@@ -163,11 +163,11 @@ mod tests {
     #[test]
     fn delegates_warm_up_and_unstable_to_source() {
         let inner = Sma::new(Identity::new(), 5);
-        let inner_warm = inner.warm_up_period();
-        let inner_unstable = inner.unstable_period();
+        let inner_warm = inner.warm_up_bars();
+        let inner_unstable = inner.unstable_bars();
         let log = Log::natural(Sma::new(Identity::new(), 5));
-        assert_eq!(log.warm_up_period(), inner_warm);
-        assert_eq!(log.unstable_period(), inner_unstable);
+        assert_eq!(log.warm_up_bars(), inner_warm);
+        assert_eq!(log.unstable_bars(), inner_unstable);
     }
 
     #[test]

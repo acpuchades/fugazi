@@ -223,7 +223,7 @@ impl<In> Indicator for PositionField<In> {
 
     /// `0`: readiness tracks the live [`Position`] (open vs flat), not how many
     /// samples this field has seen.
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         0
     }
 

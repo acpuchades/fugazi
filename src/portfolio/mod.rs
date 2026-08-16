@@ -141,7 +141,7 @@
 //! natural follow-up: the trait already carries an
 //! [`observe`](policy::WeightPolicy::observe) hook that's called every
 //! bar with per-child equity / funds samples, and a
-//! [`warm_up_period`](policy::WeightPolicy::warm_up_period) knob for
+//! [`warm_up_bars`](policy::WeightPolicy::warm_up_bars) knob for
 //! rolling-window policies to gate readiness through. Ship one when a
 //! concrete use case shows up.
 //!
@@ -515,9 +515,9 @@ impl<Sym: Clone + PartialEq + Eq + Hash + 'static> Strategy for Portfolio<Sym> {
         let shares_ready = self
             .share_indicators
             .iter()
-            .all(|c| self.bars_seen >= c.stable_period());
-        self.bars_seen >= self.policy.warm_up_period()
-            && self.bars_seen >= self.rebalance.stable_period()
+            .all(|c| self.bars_seen >= c.stable_bars());
+        self.bars_seen >= self.policy.warm_up_bars()
+            && self.bars_seen >= self.rebalance.stable_bars()
             && shares_ready
             && self.children.iter().all(|c| c.strategy.is_ready())
     }

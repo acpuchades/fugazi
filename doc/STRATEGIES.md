@@ -307,7 +307,7 @@ like any other axis.
 Two caveats:
 
 - **Every branch is built and advanced, not just the selected one.** So the
-  readiness gate takes the **max `stable_period` across all branches** — a run
+  readiness gate takes the **max `stable_bars` across all branches** — a run
   that selects a cheap branch still waits for the slowest one to warm up. On a
   short series that can suppress trading entirely: a `!value 1.0` branch sitting
   next to a `!vol_target { window: 10 }` branch inherits the latter's warm-up.
@@ -1171,10 +1171,10 @@ long:
 **The resample's clock stays base-timeframe.** It's fed one base candle per
 tick and reports at that same cadence — the emitted `Option<Real>` marks
 *whether* the inner just produced a value on a completed bucket. Warm-up and
-unstable-period pass through as raw composition arithmetic — higher-timeframe
+unstable bar counts pass through as raw composition arithmetic — higher-timeframe
 sample counts, not base-bar-scaled. For an EMA-P over a resample-`every`
-chain, `stable_period() = every + settle_period(P)` (not
-`every * (1 + settle_period(P))`); if a strategy needs base-bar-correct
+chain, `stable_bars() = every + settle_bars(P)` (not
+`every * (1 + settle_bars(P))`); if a strategy needs base-bar-correct
 stability accounting, it must feed the pipeline enough leading history for
 the recursive tail to decay in HTF-sample terms.
 
@@ -1244,7 +1244,7 @@ those behind a comparison or `!str_eq` instead). The signal-side form takes only
 | `!became_true` | `<signal>` | rising edge only (`false → true`) |
 | `!became_false` | `<signal>` | falling edge only (`true → false`) |
 | `!has_column` | `{ name }` | schema-level check: true if the overlay column `name` exists. Lets one document run against series with and without an optional side channel |
-| `!unstable` | `{ signal: <signal> }` | passthrough wrapper that forces the reported `unstable_period()` to `0` for the wrapped subtree. Opt-in override of the safe-by-default strategy-readiness gate (which waits for every source's `stable_period()` before allowing a trade). A source-side twin `!unstable { source: <source> }` does the same for real-valued sources. |
+| `!unstable` | `{ signal: <signal> }` | passthrough wrapper that forces the reported `unstable_bars()` to `0` for the wrapped subtree. Opt-in override of the safe-by-default strategy-readiness gate (which waits for every source's `stable_bars()` before allowing a trade). A source-side twin `!unstable { source: <source> }` does the same for real-valued sources. |
 | `!value` | `<bool>` | a constant boolean leaf — `!value true` / `!value false` (same tag as the numeric `!value`; typed by position) |
 
 ```yaml

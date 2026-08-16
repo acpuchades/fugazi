@@ -37,7 +37,7 @@ use crate::types::Real;
 ///
 /// # Warm-up
 ///
-/// [`warm_up_period`](Indicator::warm_up_period) reports the source's own
+/// [`warm_up_bars`](Indicator::warm_up_bars) reports the source's own
 /// warm-up, which is a **lower bound** on the first `Some` rather than the
 /// exact position — the true first `Some` lands on the source's first `true`,
 /// which is data-dependent and unbounded. Like [`IfElse`](super::IfElse) and
@@ -100,14 +100,14 @@ impl<S: Indicator<Output = bool>> Indicator for BarsSince<S> {
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         // A lower bound — see the type-level docs. The earliest possible first
         // `Some` is the bar the source itself first reads `Some(true)`.
-        self.source.warm_up_period()
+        self.source.warm_up_bars()
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {
@@ -202,12 +202,12 @@ impl<S: Indicator<Output = Real>, Op: ExtremeOp> Indicator for BarsSinceExtreme<
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
-        self.source.warm_up_period().max(1) + self.extreme.period() - 1
+    fn warm_up_bars(&self) -> usize {
+        self.source.warm_up_bars().max(1) + self.extreme.period() - 1
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {

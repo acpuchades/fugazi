@@ -69,7 +69,7 @@ pub trait WeightPolicy: 'static {
     ///
     /// The portfolio adds this to its own bars-seen count when computing
     /// [`is_ready`](crate::Strategy::is_ready).
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         0
     }
 

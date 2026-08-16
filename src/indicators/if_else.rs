@@ -26,24 +26,24 @@ use crate::types::Real;
 ///
 /// # Warm-up
 ///
-/// [`warm_up_period`](Indicator::warm_up_period) is the max of all three
+/// [`warm_up_bars`](Indicator::warm_up_bars) is the max of all three
 /// sources' warm-ups (the *conservative worst case* — safe regardless of
-/// which branch a condition happens to select). [`stable_period`] is
+/// which branch a condition happens to select). [`stable_bars`] is
 /// likewise the max of the three, so a downstream consumer waiting for
 /// full readiness (e.g. a strategy's `is_ready()`) waits long enough for
 /// any branch to have settled.
 ///
-/// **The actual first `Some` can arrive earlier than `warm_up_period()`**:
+/// **The actual first `Some` can arrive earlier than `warm_up_bars()`**:
 /// when the condition is settled and the *selected* branch is settled
 /// (both cases even if the *unselected* branch isn't). The ternary
 /// deliberately doesn't gate on a `bars_seen` counter — output is
 /// available as soon as the currently-active path can produce it.
-/// `warm_up_period()` is therefore an *upper bound* on the first-`Some`
+/// `warm_up_bars()` is therefore an *upper bound* on the first-`Some`
 /// sample, not the exact position, so this indicator is
 /// intentionally excluded from the `tests/warm_up.rs` exact-warm-up
 /// battery (which asserts "first `Some` at exactly sample N").
 ///
-/// [`stable_period`]: Indicator::stable_period
+/// [`stable_bars`]: Indicator::stable_bars
 ///
 /// # Example
 ///
@@ -114,23 +114,23 @@ where
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         self.cond
-            .warm_up_period()
-            .max(self.then.warm_up_period())
-            .max(self.otherwise.warm_up_period())
+            .warm_up_bars()
+            .max(self.then.warm_up_bars())
+            .max(self.otherwise.warm_up_bars())
     }
 
-    fn unstable_period(&self) -> usize {
+    fn unstable_bars(&self) -> usize {
         // Same shape as `Combine`: total stable = max of the three sources'
         // stable periods; the unstable-period we return is the excess above
         // our own warm-up.
         let stable = self
             .cond
-            .stable_period()
-            .max(self.then.stable_period())
-            .max(self.otherwise.stable_period());
-        stable - self.warm_up_period()
+            .stable_bars()
+            .max(self.then.stable_bars())
+            .max(self.otherwise.stable_bars());
+        stable - self.warm_up_bars()
     }
 
     fn reset(&mut self) {
@@ -171,7 +171,7 @@ mod tests {
         fn value(&self) -> Option<bool> {
             Some(self.seen >= self.fires_on)
         }
-        fn warm_up_period(&self) -> usize {
+        fn warm_up_bars(&self) -> usize {
             1
         }
         fn reset(&mut self) {
@@ -218,7 +218,7 @@ mod tests {
             fn value(&self) -> Option<bool> {
                 if self.n >= 3 { Some(true) } else { None }
             }
-            fn warm_up_period(&self) -> usize {
+            fn warm_up_bars(&self) -> usize {
                 3
             }
             fn reset(&mut self) {
@@ -274,15 +274,15 @@ mod tests {
     #[test]
     fn publishes_early_when_selected_branch_warms_before_the_max() {
         // Cond is fast (ValueBool true), then is slow (SMA-5), otherwise is
-        // fast (Value). `warm_up_period()` is 5, but the ternary picks
+        // fast (Value). `warm_up_bars()` is 5, but the ternary picks
         // `otherwise` and can publish on bar 1 — the "actual first Some
-        // can arrive earlier than warm_up_period" contract.
+        // can arrive earlier than warm_up_bars" contract.
         let mut ind = IfElse::new(
             Value::<Real>::new(1.0).below(0.5), // ValueBool false
             Sma::new(crate::indicators::Identity::<Real>::new(), 5),
             Value::<Real>::new(-1.0),
         );
-        assert_eq!(ind.warm_up_period(), 5);
+        assert_eq!(ind.warm_up_bars(), 5);
         assert_eq!(ind.update(1.0), Some(-1.0));
     }
 
@@ -294,7 +294,7 @@ mod tests {
             Sma::new(crate::indicators::Identity::<Real>::new(), 5), // 5
             Sma::new(crate::indicators::Identity::<Real>::new(), 2), // 2
         );
-        assert_eq!(ind.warm_up_period(), 5);
+        assert_eq!(ind.warm_up_bars(), 5);
     }
 
     #[test]

@@ -141,7 +141,7 @@ fn extract_self_atom<Sym: PartialEq + Clone>(snap: &Snapshot<Sym>, symbol: &Sym)
 /// ## Readiness
 ///
 /// [`is_ready`](Strategy::is_ready) returns `true` only once `bars_seen` reaches
-/// the largest `stable_period()` across every wired signal (`long`,
+/// the largest `stable_bars()` across every wired signal (`long`,
 /// `close_long`, `short`, `close_short`), every attached protective level, and
 /// the sizing indicator — so the driver skips [`trade`](Strategy::trade) until
 /// every source a decision could consult is past both its warm-up **and** its
@@ -150,7 +150,7 @@ fn extract_self_atom<Sym: PartialEq + Clone>(snap: &Snapshot<Sym>, symbol: &Sym)
 /// their seed-dependent early output. A caller who is happy to trade through a
 /// subtree's unstable tail opts out explicitly by wrapping it in
 /// [`Unstable`](crate::indicators::Unstable) (which zeroes that subtree's
-/// `unstable_period()`).
+/// `unstable_bars()`).
 // The protective-level fields use the terse `_stop`/`_target` names, while
 // their builder methods use the longer `_stop_loss`/`_take_profit` forms for
 // discoverability at construction. The pair is intentional — keep them
@@ -351,18 +351,18 @@ impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> SingleAssetStrategy<Sym> {
     }
 
     /// The number of bars that must be fed before [`is_ready`](Strategy::is_ready)
-    /// reports `true`: the largest `stable_period()` across every wired signal
+    /// reports `true`: the largest `stable_bars()` across every wired signal
     /// (`long`, `close_long`, `short`, `close_short`) and every attached
     /// protective level. Unwired slots contribute `0`
     /// ([`ValueBool::<Atom>::new(false)`](crate::indicators::ValueBool) has zero
     /// stable-period). Wrap a subtree in [`Unstable`](crate::indicators::Unstable)
     /// to zero out its IIR settling contribution and only wait for the
     /// warm-up.
-    pub fn stable_period(&self) -> usize {
-        let mut needed = self.long.stable_period();
-        needed = needed.max(self.close_long.stable_period());
-        needed = needed.max(self.short.stable_period());
-        needed = needed.max(self.close_short.stable_period());
+    pub fn stable_bars(&self) -> usize {
+        let mut needed = self.long.stable_bars();
+        needed = needed.max(self.close_long.stable_bars());
+        needed = needed.max(self.short.stable_bars());
+        needed = needed.max(self.close_short.stable_bars());
         for level in [
             &self.long_stop,
             &self.long_target,
@@ -372,20 +372,20 @@ impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> SingleAssetStrategy<Sym> {
         .into_iter()
         .flatten()
         {
-            needed = needed.max(level.stable_period());
+            needed = needed.max(level.stable_bars());
         }
-        needed.max(self.sizing.stable_period())
+        needed.max(self.sizing.stable_bars())
     }
 
-    /// The largest `warm_up_period()` across every wired signal and attached
+    /// The largest `warm_up_bars()` across every wired signal and attached
     /// protective level — the readiness threshold *ignoring* IIR settling
     /// (matching `optimize --walkforward --keep-unstable`). Same aggregation
-    /// shape as [`stable_period`](Self::stable_period).
-    pub fn warm_up_period(&self) -> usize {
-        let mut needed = self.long.warm_up_period();
-        needed = needed.max(self.close_long.warm_up_period());
-        needed = needed.max(self.short.warm_up_period());
-        needed = needed.max(self.close_short.warm_up_period());
+    /// shape as [`stable_bars`](Self::stable_bars).
+    pub fn warm_up_bars(&self) -> usize {
+        let mut needed = self.long.warm_up_bars();
+        needed = needed.max(self.close_long.warm_up_bars());
+        needed = needed.max(self.short.warm_up_bars());
+        needed = needed.max(self.close_short.warm_up_bars());
         for level in [
             &self.long_stop,
             &self.long_target,
@@ -395,9 +395,9 @@ impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> SingleAssetStrategy<Sym> {
         .into_iter()
         .flatten()
         {
-            needed = needed.max(level.warm_up_period());
+            needed = needed.max(level.warm_up_bars());
         }
-        needed.max(self.sizing.warm_up_period())
+        needed.max(self.sizing.warm_up_bars())
     }
 }
 
@@ -518,7 +518,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Si
     }
 
     fn is_ready(&self) -> bool {
-        self.bars_seen >= self.stable_period()
+        self.bars_seen >= self.stable_bars()
     }
 
     fn on_fill(&mut self, order: &Order<Sym>) {
@@ -821,7 +821,7 @@ mod tests {
             fn value(&self) -> Option<bool> {
                 self.last
             }
-            fn warm_up_period(&self) -> usize {
+            fn warm_up_bars(&self) -> usize {
                 0
             }
             fn reset(&mut self) {

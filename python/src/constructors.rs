@@ -1113,9 +1113,9 @@ pub(crate) fn latch<'py>(py: Python<'py>, source: &Bound<'py, PyAny>) -> PyResul
     ))
 }
 
-/// Passthrough wrapper that forces the argument's reported `unstable_period()`
-/// to `0`. Same output, same `warm_up_period()`; a downstream reader of
-/// `stable_period()` no longer waits for this subtree's IIR settling tail.
+/// Passthrough wrapper that forces the argument's reported `unstable_bars()`
+/// to `0`. Same output, same `warm_up_bars()`; a downstream reader of
+/// `stable_bars()` no longer waits for this subtree's IIR settling tail.
 /// Accepts either an `Indicator` or a `Signal` and returns the same kind. The
 /// explicit opt-out of the safe default that waits for the tail:
 ///

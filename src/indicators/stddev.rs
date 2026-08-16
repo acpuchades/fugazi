@@ -51,12 +51,12 @@ impl<S: Indicator<Output = Real>> Indicator for StdDev<S> {
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
-        self.source.warm_up_period().max(1) + self.stats.period() - 1
+    fn warm_up_bars(&self) -> usize {
+        self.source.warm_up_bars().max(1) + self.stats.period() - 1
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {

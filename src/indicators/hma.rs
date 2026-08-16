@@ -64,14 +64,14 @@ where
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         // The raw series starts when the longer inner WMA does, then the final
         // √n window must fill.
-        self.full.warm_up_period().max(self.half.warm_up_period()) + self.smooth.period() - 1
+        self.full.warm_up_bars().max(self.half.warm_up_bars()) + self.smooth.period() - 1
     }
 
-    fn unstable_period(&self) -> usize {
-        self.full.unstable_period().max(self.half.unstable_period())
+    fn unstable_bars(&self) -> usize {
+        self.full.unstable_bars().max(self.half.unstable_bars())
     }
 
     fn reset(&mut self) {

@@ -309,7 +309,7 @@ fn account_costs_apply_to_every_child_fill() {
 
 #[test]
 fn is_ready_gates_trade_until_every_child_is_ready() {
-    // A portfolio with a child whose stable_period is high should keep
+    // A portfolio with a child whose stable_bars is high should keep
     // is_ready() false through the warm-up, and pass once every child
     // is settled. Buy-and-hold + a SMA-crossover strategy suffices —
     // the crossover needs at least the slow window filled.
@@ -337,7 +337,7 @@ fn is_ready_gates_trade_until_every_child_is_ready() {
     // both children to warm up. Buy-and-hold is ready from bar 0; the
     // SMA-crossover needs 10 samples of the slow window plus its
     // crossover edge (which we approximate by feeding well over the
-    // stable_period).
+    // stable_bars).
     let snaps = a_rising_b_flat_snapshots();
     for snap in snaps.iter().take(15) {
         portfolio.update(snap.clone());

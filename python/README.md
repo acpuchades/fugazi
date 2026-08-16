@@ -173,7 +173,7 @@ node.reset()                   # call reset() to start a fresh, independent pass
 | `aroon(period)` | dict `{up, down, oscillator}` |
 | `resample(every, inner)` | `inner`'s output every `every` bars (aggregated HTF candle fed to `inner`), `None` between |
 | `latch(source)` | `source`'s last `Some` output, held across `None` ticks (works on indicators and signals) |
-| `unstable(x)` | Passthrough that reports `unstable_period() = 0` for its subtree (also `.unstable()` on any Indicator or Signal) |
+| `unstable(x)` | Passthrough that reports `unstable_bars() = 0` for its subtree (also `.unstable()` on any Indicator or Signal) |
 | `every(period)` | Signal: a pulse every `period` bars, first fire delayed to bar `period-1` — the usual [`rebalance_on`](#the-declarative-strategy-builder) gate |
 
 Multi-line indicators return a `dict` of their named lines (or `None` while
@@ -230,7 +230,7 @@ smoother as the resample's `inner` — then `latch` on the outside; latching
 base tick, distorting the recurrence.
 
 `unstable(x)` wraps an indicator or signal as a passthrough that reports
-`unstable_period() = 0`, telling a downstream reader of `stable_period()`
+`unstable_bars() = 0`, telling a downstream reader of `stable_bars()`
 (a strategy-readiness gate, an overlay trim) "trade through this subtree's
 IIR settling tail". Available as a free function and as a method on any
 Indicator or Signal — same output, same warm-up, only the reported unstable
@@ -238,12 +238,12 @@ tail changes:
 
 ```python
 raw = ta.ema(ta.close(), 20)
-fast = raw.unstable()           # method form; unstable_period() -> 0
+fast = raw.unstable()           # method form; unstable_bars() -> 0
 fast = ta.unstable(raw)         # equivalent free-function form
 ```
 
 Safe by default, override per subtree: fugazi's readiness machinery waits for
-`stable_period()` by default (`SingleAssetStrategy::is_ready` in Rust; the
+`stable_bars()` by default (`SingleAssetStrategy::is_ready` in Rust; the
 CLI's per-overlay CSV trim in `fugazi get`) — `unstable(...)` is the single
 opt-out.
 
@@ -479,7 +479,7 @@ of learning the limit from a clamped order.
 > materializes a collection (`positions()`, `orders()`), advances or mutates
 > state (`update()`, `reset()`), or builds a new object (`shared()`,
 > `unstable()`, `not_()`) is a method. The streaming reads on indicators and
-> signals — `value()`, `is_true()`, `is_ready()`, `warm_up_period()` — are
+> signals — `value()`, `is_true()`, `is_ready()`, `warm_up_bars()` — are
 > methods too: they belong to a live object being advanced, not to a value.
 
 The wallet is fed each symbol's price with `update(symbol, price)` and is
@@ -1080,6 +1080,8 @@ That is the right aggregation because funding is an accrual rather than a level
 (contrast CoinGecko's market cap, where the first sample in the bucket wins),
 and it means there is nothing to forward-fill — request the cadence you trade.
 Sub-hourly is rejected: those buckets would be empty on almost every bar, which
-reads as "no carry" rather than "no data". As with CoinGecko,
-`ta.fetch(provider="binance-vision", ...)` redirects rather than returning a
-candle-less frame.
+reads as "no carry" rather than "no data". The flat `ta.fetch` carries both
+archive trees as their own provider ids — `provider="binance-vision"` for spot
+klines and `provider="binance-vision-futures"` for the USD-M tree — matching the
+CLI. The explicit `ta.BinanceVision(market=...)` constructor stays for the
+`base_url` override.

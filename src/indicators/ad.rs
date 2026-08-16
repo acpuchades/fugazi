@@ -50,12 +50,12 @@ impl<S: Indicator<Output = Candle>> Indicator for Ad<S> {
 
     /// Ready as soon as the source is; the cumulative line is anchored rather
     /// than unstable.
-    fn warm_up_period(&self) -> usize {
-        self.source.warm_up_period().max(1)
+    fn warm_up_bars(&self) -> usize {
+        self.source.warm_up_bars().max(1)
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {

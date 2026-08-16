@@ -176,12 +176,12 @@ where
         self.value.clone()
     }
 
-    fn warm_up_period(&self) -> usize {
-        self.source.warm_up_period().max(1)
+    fn warm_up_bars(&self) -> usize {
+        self.source.warm_up_bars().max(1)
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {
@@ -270,12 +270,12 @@ where
         self.value.clone()
     }
 
-    fn warm_up_period(&self) -> usize {
-        self.source.warm_up_period().max(1)
+    fn warm_up_bars(&self) -> usize {
+        self.source.warm_up_bars().max(1)
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {
@@ -368,9 +368,9 @@ mod tests {
 
     #[test]
     fn warm_up_delegates_to_source() {
-        assert_eq!(Pick::<String>::new().warm_up_period(), 1);
+        assert_eq!(Pick::<String>::new().warm_up_bars(), 1);
         assert_eq!(
-            Pick::<String>::matching(Selector::by_symbol("BTC")).warm_up_period(),
+            Pick::<String>::matching(Selector::by_symbol("BTC")).warm_up_bars(),
             1
         );
     }

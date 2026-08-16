@@ -246,17 +246,17 @@ impl DynSingleStrategy {
 
     /// Grid-wide readiness across the wired signals, protective levels, and
     /// sizing indicator — pass-through to
-    /// [`SingleAssetStrategy::stable_period`].
-    pub fn stable_period(&self) -> usize {
-        self.inner.stable_period()
+    /// [`SingleAssetStrategy::stable_bars`].
+    pub fn stable_bars(&self) -> usize {
+        self.inner.stable_bars()
     }
 
     /// Warm-up-only readiness (ignoring IIR settling) — pass-through to
-    /// [`SingleAssetStrategy::warm_up_period`]. Used by
+    /// [`SingleAssetStrategy::warm_up_bars`]. Used by
     /// `optimize --walkforward --keep-unstable` to compute the prefix skip
     /// under the opt-out.
-    pub fn warm_up_period(&self) -> usize {
-        self.inner.warm_up_period()
+    pub fn warm_up_bars(&self) -> usize {
+        self.inner.warm_up_bars()
     }
 
     /// The strategy's shared [`Book<String>`] — hand-off point for

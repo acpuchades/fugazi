@@ -97,7 +97,7 @@ pub trait Strategy {
     /// sources with unstable tails (EMA, RSI, ATR, …) should override it to
     /// hold entries until those tails have settled; see
     /// [`SingleAssetStrategy::is_ready`](crate::strategies::SingleAssetStrategy)
-    /// for a concrete implementation gated on the `stable_period()` of every
+    /// for a concrete implementation gated on the `stable_bars()` of every
     /// entry signal and protective level. Users who explicitly accept the
     /// unstable output on a particular subtree wrap it in
     /// [`Unstable`](crate::indicators::Unstable) — the safe default is to wait,

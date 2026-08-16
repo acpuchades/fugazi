@@ -119,13 +119,13 @@ impl<S: Indicator<Output = Candle>> Indicator for Aroon<S> {
         }
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         // The lookback spans the current bar plus the `period` before it.
-        self.source.warm_up_period().max(1) + self.period
+        self.source.warm_up_bars().max(1) + self.period
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {

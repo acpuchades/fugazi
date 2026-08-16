@@ -47,7 +47,7 @@
 //!
 //! # Warm-up
 //!
-//! [`warm_up_period`](Indicator::warm_up_period) reports `period` (the bars
+//! [`warm_up_bars`](Indicator::warm_up_bars) reports `period` (the bars
 //! needed to fill the return / equity window). Note this is a **lower bound**
 //! on the first `Some`, not exact: the embedded strategy is flat (zero-variance
 //! equity → `None` for Sharpe/Sortino/Calmar) until its own readiness gate
@@ -315,7 +315,7 @@ where
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         self.stats.period()
     }
 
@@ -415,7 +415,7 @@ where
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         self.stats.period()
     }
 
@@ -497,7 +497,7 @@ where
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         self.stats.period()
     }
 
@@ -594,7 +594,7 @@ where
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         self.period
     }
 
@@ -694,7 +694,7 @@ where
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         self.period
     }
 
@@ -763,7 +763,7 @@ mod tests {
     #[test]
     fn sharpe_is_none_until_window_fills_then_some() {
         let mut s = Sharpe::new(buy_and_hold(), sym(), SEED, 5, 0.0, BPY);
-        assert_eq!(s.warm_up_period(), 5);
+        assert_eq!(s.warm_up_bars(), 5);
         let px = prices();
         for &p in &px[..4] {
             assert_eq!(s.update(snap(p)), None);

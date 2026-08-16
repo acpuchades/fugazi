@@ -629,7 +629,7 @@ pub enum NodeSpec {
     },
     /// The just-completed bar's equity return —
     /// `(equity - prev_equity) / prev_equity`. `None` on the first bar
-    /// (`warm_up_period() = 2`). See
+    /// (`warm_up_bars() = 2`). See
     /// [`crate::indicators::Book::return_per_bar`].
     #[grammar(kind = "source")]
     ReturnPerBar {
@@ -1569,9 +1569,9 @@ pub enum NodeSpec {
         #[serde(default = "default_bar_source")]
         source: Box<NodeSpec>,
     },
-    /// Passthrough wrapper that reports `unstable_period() = 0`. The output
+    /// Passthrough wrapper that reports `unstable_bars() = 0`. The output
     /// and warm-up of `source` are unchanged; the strategy-readiness gate
-    /// (which counts up to `stable_period()`) no longer waits for this
+    /// (which counts up to `stable_bars()`) no longer waits for this
     /// subtree's IIR settling tail. The explicit opt-out to the "wait for
     /// every source to be past its unstable tail" safe default; see
     /// [`crate::indicators::Unstable`].
@@ -2002,7 +2002,7 @@ enum NodeSpecRaw {
     },
     /// The just-completed bar's equity return —
     /// `(equity - prev_equity) / prev_equity`. `None` on the first bar
-    /// (`warm_up_period() = 2`). See
+    /// (`warm_up_bars() = 2`). See
     /// [`crate::indicators::Book::return_per_bar`].
     ReturnPerBar {
         #[serde(default)]
@@ -2619,9 +2619,9 @@ enum NodeSpecRaw {
         #[serde(default = "default_bar_source")]
         source: Box<NodeSpec>,
     },
-    /// Passthrough wrapper that reports `unstable_period() = 0`. The output
+    /// Passthrough wrapper that reports `unstable_bars() = 0`. The output
     /// and warm-up of `source` are unchanged; the strategy-readiness gate
-    /// (which counts up to `stable_period()`) no longer waits for this
+    /// (which counts up to `stable_bars()`) no longer waits for this
     /// subtree's IIR settling tail. The explicit opt-out to the "wait for
     /// every source to be past its unstable tail" safe default; see
     /// [`crate::indicators::Unstable`].

@@ -133,7 +133,7 @@ fn assert_catalogue_contract(name: &str, make: impl Fn() -> Box<Catalogue>, cand
     );
 
     // The safe-by-default readiness gate: nothing may fill before the strategy
-    // declares itself ready. This is the invariant the whole `stable_period`
+    // declares itself ready. This is the invariant the whole `stable_bars`
     // machinery exists to enforce, and driving through `backtest::run` is what
     // makes it observable at all.
     let ready = first_ready_bar(&mut *make(), candles)

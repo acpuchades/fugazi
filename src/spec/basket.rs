@@ -625,24 +625,24 @@ impl DynBasketStrategy {
 
     /// Grid-wide readiness across the currently-built per-symbol score /
     /// sizing chains and the rebalance gate — pass-through to
-    /// [`BasketStrategy::stable_period`](crate::strategies::BasketStrategy::stable_period).
+    /// [`BasketStrategy::stable_bars`](crate::strategies::BasketStrategy::stable_bars).
     ///
     /// **Lazy readiness contract**: a basket's per-symbol chains are
     /// built on first sight, so a freshly-built strategy reports the
     /// rebalance-signal period only. Feed one representative snapshot
     /// via [`update`](Strategy::update) before probing so the per-symbol
     /// chains exist. See the underlying method for details.
-    pub fn stable_period(&self) -> usize {
-        self.inner.stable_period()
+    pub fn stable_bars(&self) -> usize {
+        self.inner.stable_bars()
     }
 
     /// Warm-up-only readiness (ignoring IIR settling) — pass-through to
-    /// [`BasketStrategy::warm_up_period`](crate::strategies::BasketStrategy::warm_up_period).
+    /// [`BasketStrategy::warm_up_bars`](crate::strategies::BasketStrategy::warm_up_bars).
     /// Used by `optimize --walkforward --keep-unstable`.
     ///
-    /// Same lazy-readiness caveat as [`stable_period`](Self::stable_period).
-    pub fn warm_up_period(&self) -> usize {
-        self.inner.warm_up_period()
+    /// Same lazy-readiness caveat as [`stable_bars`](Self::stable_bars).
+    pub fn warm_up_bars(&self) -> usize {
+        self.inner.warm_up_bars()
     }
 }
 

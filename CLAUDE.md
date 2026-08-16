@@ -146,7 +146,7 @@ Five document shapes (single / pairs / basket / multi / portfolio). Two types co
 what used to be five-of-everything (`src/spec/runnable.rs`):
 
 - **`RunnableStrategy`** — object-safe trait over every built strategy: `Strategy<Input =
-  Snapshot<String>, Symbol = String>` plus `stable_period()` / `warm_up_period()` /
+  Snapshot<String>, Symbol = String>` plus `stable_bars()` / `warm_up_bars()` /
   `drive()`. Every `Dyn*Strategy` implements it.
 - **`StrategySpec`** — the sum over the five spec types, with one `try_build` /
   `try_build_priced` / `universe` / `kind`.
@@ -159,7 +159,7 @@ and its body is `self.try_build(cash, schema, None)` for all five shapes.) **Add
 `StrategySpec` variant + a `RunnableStrategy` impl + an arm in `optimize::build_any_spec`
 and Python's `spec_from_value`. Not ten new functions.
 
-One asymmetry: basket and multi build per-symbol chains **lazily**, so `stable_period()`
+One asymmetry: basket and multi build per-symbol chains **lazily**, so `stable_bars()`
 only reads true after one snapshot has gone through — hence the `needs_probe_feed` flag in
 the walk-forward probes. The eager shapes must *not* be fed a probe snapshot (a pairs leaf
 that didn't name its asset would trip the sole-atom guard).
@@ -208,7 +208,7 @@ unsettled bar biases toward **waiting**, with one named opt-out:
   in `fugazi::indicators::sizing` (see the table below). The three book-anchored tags take
   an optional `source:` resolving to the book they read — `!strategy_book` (default) or
   `!portfolio_book` (aggregate; only meaningful in a portfolio weight template).
-- **`fugazi get` overlays.** CLI trims each column's pre-`stable_period()` cells. Opt-out:
+- **`fugazi get` overlays.** CLI trims each column's pre-`stable_bars()` cells. Opt-out:
   `--keep-unstable`.
 - **`-w/--windowed` duration form.** `-w 1d`/`-w 1w`/… demands explicit `AssetClass`
   (`--stocks`/`--forex`/`--crypto`) and resolvable bar cadence. Opt-out: plain bar-count
@@ -220,8 +220,8 @@ Adding a knob that touches unsettled data: safest default, one opt-out.
 
 ### Conventions and gotchas
 
-- Constructors `assert!(period > 0, ...)`; document warm-up; implement `warm_up_period()` to
-  match exactly (plus `unstable_period()` when smoothing recursively). Add new indicators to
+- Constructors `assert!(period > 0, ...)`; document warm-up; implement `warm_up_bars()` to
+  match exactly (plus `unstable_bars()` when smoothing recursively). Add new indicators to
   `tests/warm_up.rs`.
 - Comparison/edge is **`None` until** every source is warmed; `And`/`Or` are `None` until
   both ready — so an edge coincident with warm-up isn't detected (no spurious first-bar
@@ -253,7 +253,7 @@ If you're about to write a private helper whose name looks like something here, 
 | Interval token / Frequency / time-column ms | `calendar::parse_interval` / `Frequency::from_str` / `parse_time_to_millis` | `src/spec/calendar.rs` |
 | Auto-detect bar cadence | `calendar::detect_frequency_from_atoms(...)` | `src/spec/calendar.rs` |
 | Parse `-w` / `--walkforward` | `WindowSpec::from_str` + `.resolve(bar_freq, class)`; `WalkForwardSpec::from_str` + `.resolve(...)` | `src/spec/calendar.rs` |
-| Built-strategy readiness + full `RunReport` | `DynSingleStrategy::{stable_period, warm_up_period}`; `backtest::measured_report_any(&StrategySpec, &[Snapshot], &EvalContext)` | `src/spec/strategy.rs`, `src/spec/backtest.rs` |
+| Built-strategy readiness + full `RunReport` | `DynSingleStrategy::{stable_bars, warm_up_bars}`; `backtest::measured_report_any(&StrategySpec, &[Snapshot], &EvalContext)` | `src/spec/strategy.rs`, `src/spec/backtest.rs` |
 | Persist / resume a run's full state | `RunnableStrategy::{save_state, restore_state, drive_resumable}` + `RunState`; `backtest::run_iteration_resumable`; `backtest::flatten_open_positions` (`--flatten`). See ARCHITECTURE *Run resuming* | `src/spec/runnable.rs`, `src/spec/backtest.rs`, `src/backtest.rs` |
 | Serialize one indicator's state | `#[derive(SaveState)]` + `#[state(source)]`/`#[state(skip)]` + two `impl Indicator` forwarding lines; snapshot shared handles via `Position::snapshot`/`Book::snapshot_state`/`PaperWallet::snapshot_state` | `fugazi-derive/src/lib.rs`, `src/indicators/{position,book}.rs`, `src/wallet.rs` |
 | Trading seconds a bar of `freq` spans | `class.trading_seconds_per_bar(freq)` | `src/spec/calendar.rs` |

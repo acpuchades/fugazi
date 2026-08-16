@@ -428,7 +428,7 @@ pub struct GetArgs {
     /// If omitted, bars are fetched from the fugazi default (`2020-01-01`) and,
     /// unless `--keep-unstable` is set, any leading rows where the overlays
     /// have not yet warmed up are dropped from the output. When `--since` is
-    /// set, `stable_period` extra leading bars are fetched instead so the
+    /// set, `stable_bars` extra leading bars are fetched instead so the
     /// first row emitted at `--since` already has the overlays stable.
     #[arg(long, value_name = "DATE")]
     since: Option<String>,
@@ -640,7 +640,7 @@ fn run_candles(
                 let schema = provider_schema(provider);
                 for sym in symbols {
                     for &freq in &sym.freqs {
-                        let stable = overlay::stable_period_for(
+                        let stable = overlay::stable_bars_for(
                             &overlays,
                             &overlay_columns,
                             &sym.symbol,
@@ -680,7 +680,7 @@ fn run_candles(
                     if !seen_symbols.contains(&sym) {
                         seen_symbols.push(sym.clone());
                     }
-                    let stable = overlay::stable_period_for(
+                    let stable = overlay::stable_bars_for(
                         &overlays,
                         &overlay_columns,
                         &sym,
@@ -775,7 +775,7 @@ struct Row {
 }
 
 /// One downloadable (or file-backed) series: a `(provider, symbol, interval)`
-/// triple plus the per-series overlay warm-up length (max `stable_period`
+/// triple plus the per-series overlay warm-up length (max `stable_bars`
 /// across the overlays that apply to this `(symbol, interval)`). The unit of
 /// parallelism — each series gets its own fetch task and progress bar.
 ///

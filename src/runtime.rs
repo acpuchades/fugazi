@@ -307,11 +307,11 @@ pub trait DynIndicator: Send + Sync {
     fn output_type(&self) -> DynType;
     fn update(&mut self, input: DynValue) -> Option<DynValue>;
     fn value(&self) -> Option<DynValue>;
-    fn warm_up_period(&self) -> usize;
-    fn unstable_period(&self) -> usize;
-    fn stable_period(&self) -> usize {
-        self.warm_up_period()
-            .saturating_add(self.unstable_period())
+    fn warm_up_bars(&self) -> usize;
+    fn unstable_bars(&self) -> usize;
+    fn stable_bars(&self) -> usize {
+        self.warm_up_bars()
+            .saturating_add(self.unstable_bars())
     }
     fn reset(&mut self);
     /// Serialize this node's mutable state for run resuming — the erased twin of
@@ -419,11 +419,11 @@ where
     fn value(&self) -> Option<DynValue> {
         self.inner.value().map(Into::into)
     }
-    fn warm_up_period(&self) -> usize {
-        self.inner.warm_up_period()
+    fn warm_up_bars(&self) -> usize {
+        self.inner.warm_up_bars()
     }
-    fn unstable_period(&self) -> usize {
-        self.inner.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.inner.unstable_bars()
     }
     fn reset(&mut self) {
         self.inner.reset();
@@ -475,7 +475,7 @@ where
 /// The composed warm-up and unstable-period are the plain sum of the two —
 /// the same arithmetic the library uses when composing statically, in
 /// `outer`-emission units for `inner` — so `!stable { signal }` (or any
-/// downstream reader of `stable_period()`) is on the same convention as a
+/// downstream reader of `stable_bars()`) is on the same convention as a
 /// pure-library composition and doesn't get base-bar-scaled for free.
 ///
 /// # Panics
@@ -535,21 +535,21 @@ impl DynIndicator for Chain {
     fn value(&self) -> Option<DynValue> {
         self.value.clone()
     }
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         // Plain library-style composition: outer needs its warm-up, then
-        // inner needs `inner.warm_up_period() - 1` more outer-emissions (one
+        // inner needs `inner.warm_up_bars() - 1` more outer-emissions (one
         // coincides with outer's first emit). The unit is outer-samples for
         // outer's part and outer-emissions for inner's part, i.e. the same
         // undifferentiated arithmetic as `Ema::new(Resample.close(), P)` in
         // pure Rust.
         self.outer
-            .warm_up_period()
-            .saturating_add(self.inner.warm_up_period().saturating_sub(1))
+            .warm_up_bars()
+            .saturating_add(self.inner.warm_up_bars().saturating_sub(1))
     }
-    fn unstable_period(&self) -> usize {
+    fn unstable_bars(&self) -> usize {
         self.outer
-            .unstable_period()
-            .saturating_add(self.inner.unstable_period())
+            .unstable_bars()
+            .saturating_add(self.inner.unstable_bars())
     }
     fn reset(&mut self) {
         self.outer.reset();
@@ -589,12 +589,12 @@ impl DynIndicator for Chain {
 }
 
 // ---------------------------------------------------------------------------
-// unstable_wrap: runtime-typed passthrough that zeroes unstable_period()
+// unstable_wrap: runtime-typed passthrough that zeroes unstable_bars()
 // (mirrors the library's Unstable)
 // ---------------------------------------------------------------------------
 
 /// A [`DynIndicator`] wrapper that forwards every method to `inner` *except*
-/// [`unstable_period`](DynIndicator::unstable_period), which it forces to `0` —
+/// [`unstable_bars`](DynIndicator::unstable_bars), which it forces to `0` —
 /// the runtime twin of [`Unstable`](crate::indicators::Unstable). Use to opt a
 /// subtree out of the strategy-readiness wait for its IIR settling tail.
 pub fn unstable_wrap(inner: Box<dyn DynIndicator>) -> Box<dyn DynIndicator> {
@@ -618,17 +618,17 @@ impl DynIndicator for UnstableWrap {
     fn value(&self) -> Option<DynValue> {
         self.inner.value()
     }
-    fn warm_up_period(&self) -> usize {
-        self.inner.warm_up_period()
+    fn warm_up_bars(&self) -> usize {
+        self.inner.warm_up_bars()
     }
-    fn unstable_period(&self) -> usize {
+    fn unstable_bars(&self) -> usize {
         0
     }
     fn reset(&mut self) {
         self.inner.reset();
     }
     fn save_state(&self) -> serde_json::Value {
-        // Transparent wrapper — its only effect is zeroing `unstable_period`, so
+        // Transparent wrapper — its only effect is zeroing `unstable_bars`, so
         // state is entirely the inner's.
         self.inner.save_state()
     }
@@ -731,11 +731,11 @@ where
             )
         }))
     }
-    fn warm_up_period(&self) -> usize {
-        self.0.warm_up_period()
+    fn warm_up_bars(&self) -> usize {
+        self.0.warm_up_bars()
     }
-    fn unstable_period(&self) -> usize {
-        self.0.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.0.unstable_bars()
     }
     fn reset(&mut self) {
         self.0.reset();
@@ -823,17 +823,17 @@ mod tests {
     #[test]
     fn unstable_wrap_zeroes_unstable_but_forwards_output() {
         let raw = Ema::new(Current::close(), 3);
-        let warm = raw.warm_up_period();
-        let settle = raw.unstable_period();
+        let warm = raw.warm_up_bars();
+        let settle = raw.unstable_bars();
         assert!(settle > 0, "Ema-3 should have a real unstable tail");
 
         let mut wrapped = unstable_wrap(wrap(Ema::new(Current::close(), 3)));
         let mut plain = wrap(Ema::new(Current::close(), 3));
         assert_eq!(wrapped.input_type(), DynType::Atom);
         assert_eq!(wrapped.output_type(), DynType::Real);
-        assert_eq!(wrapped.warm_up_period(), warm);
-        assert_eq!(wrapped.unstable_period(), 0);
-        assert_eq!(wrapped.stable_period(), warm);
+        assert_eq!(wrapped.warm_up_bars(), warm);
+        assert_eq!(wrapped.unstable_bars(), 0);
+        assert_eq!(wrapped.stable_bars(), warm);
 
         let bar = |v: Real| DynValue::Atom(Candle::new(v, v, v, v, 0.0).into());
         for i in 1..=5 {
@@ -842,11 +842,11 @@ mod tests {
     }
 
     #[test]
-    fn stable_period_defaults_to_warm_up_plus_unstable() {
+    fn stable_bars_defaults_to_warm_up_plus_unstable() {
         let ema = wrap(Ema::new(Current::close(), 3));
         assert_eq!(
-            ema.stable_period(),
-            ema.warm_up_period() + ema.unstable_period()
+            ema.stable_bars(),
+            ema.warm_up_bars() + ema.unstable_bars()
         );
     }
 

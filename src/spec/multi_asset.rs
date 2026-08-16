@@ -501,24 +501,24 @@ impl DynMultiAssetStrategy {
 
     /// Grid-wide readiness across the currently-discovered per-symbol
     /// states and the rebalance gate — pass-through to
-    /// [`MultiAssetStrategy::stable_period`](crate::strategies::MultiAssetStrategy::stable_period).
+    /// [`MultiAssetStrategy::stable_bars`](crate::strategies::MultiAssetStrategy::stable_bars).
     ///
     /// **Lazy readiness contract**: a multi-asset strategy's per-symbol
     /// chains are built on first sight, so a freshly-built strategy
     /// reports the rebalance-signal period only. Feed one representative
     /// snapshot via [`update`](Strategy::update) before probing so the
     /// per-symbol chains exist. See the underlying method for details.
-    pub fn stable_period(&self) -> usize {
-        self.inner.stable_period()
+    pub fn stable_bars(&self) -> usize {
+        self.inner.stable_bars()
     }
 
     /// Warm-up-only readiness (ignoring IIR settling) — pass-through to
-    /// [`MultiAssetStrategy::warm_up_period`](crate::strategies::MultiAssetStrategy::warm_up_period).
+    /// [`MultiAssetStrategy::warm_up_bars`](crate::strategies::MultiAssetStrategy::warm_up_bars).
     /// Used by `optimize --walkforward --keep-unstable`.
     ///
-    /// Same lazy-readiness caveat as [`stable_period`](Self::stable_period).
-    pub fn warm_up_period(&self) -> usize {
-        self.inner.warm_up_period()
+    /// Same lazy-readiness caveat as [`stable_bars`](Self::stable_bars).
+    pub fn warm_up_bars(&self) -> usize {
+        self.inner.warm_up_bars()
     }
 }
 

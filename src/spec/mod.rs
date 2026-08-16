@@ -399,9 +399,9 @@ mod tests {
     }
 
     #[test]
-    fn unstable_signal_zeroes_unstable_period_but_forwards_output() {
+    fn unstable_signal_zeroes_unstable_bars_but_forwards_output() {
         // `!unstable` is a passthrough over *any* output type — same output,
-        // same warm-up, but `unstable_period()` reports 0 so a strategy's
+        // same warm-up, but `unstable_bars()` reports 0 so a strategy's
         // readiness gate stops waiting for the IIR settling tail underneath.
         // Since the value/signal split was merged, a boolean child rides the
         // one `source:` field — the removed `signal:` field is now a parse
@@ -413,10 +413,10 @@ mod tests {
         let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
         let wrapped = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         let inner_raw = Ema::new(Current::close(), 3).above(0.0);
-        assert_eq!(wrapped.warm_up_period(), inner_raw.warm_up_period());
-        assert_eq!(wrapped.unstable_period(), 0);
-        assert_eq!(wrapped.stable_period(), inner_raw.warm_up_period());
-        assert!(inner_raw.stable_period() > inner_raw.warm_up_period());
+        assert_eq!(wrapped.warm_up_bars(), inner_raw.warm_up_bars());
+        assert_eq!(wrapped.unstable_bars(), 0);
+        assert_eq!(wrapped.stable_bars(), inner_raw.warm_up_bars());
+        assert!(inner_raw.stable_bars() > inner_raw.warm_up_bars());
     }
 
     #[test]
@@ -460,14 +460,14 @@ mod tests {
     }
 
     #[test]
-    fn unstable_source_zeroes_unstable_period_but_forwards_output() {
+    fn unstable_source_zeroes_unstable_bars_but_forwards_output() {
         let yaml = r#"!unstable { source: !ema { period: 5 } }"#;
         let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
         let wrapped = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
         let inner_raw = Ema::new(Current::close(), 5);
-        assert_eq!(wrapped.warm_up_period(), inner_raw.warm_up_period());
-        assert_eq!(wrapped.unstable_period(), 0);
-        assert_eq!(wrapped.stable_period(), inner_raw.warm_up_period());
+        assert_eq!(wrapped.warm_up_bars(), inner_raw.warm_up_bars());
+        assert_eq!(wrapped.unstable_bars(), 0);
+        assert_eq!(wrapped.stable_bars(), inner_raw.warm_up_bars());
     }
 
     #[test]
@@ -1662,7 +1662,7 @@ mod tests {
         // false, so the ternary picks `otherwise` — a Value with warm-up 0,
         // so a `Some` shows up on the very first bar even though the
         // *unselected* branch (SMA-5) has a warm-up of 5. Reported
-        // `stable_period()` is still the max, so a downstream consumer
+        // `stable_bars()` is still the max, so a downstream consumer
         // that waits on it still waits long enough.
         let yaml = r#"
             !if_else
@@ -1675,10 +1675,10 @@ mod tests {
         // First bar: cond is Some(false), otherwise is Some(-1.0).
         assert_eq!(feed_real(&mut built, bar(100.0)), Some(-1.0));
         // The reported stability window still covers the slowest source
-        // (SMA-5 → warm-up 5), so callers waiting on `stable_period()`
+        // (SMA-5 → warm-up 5), so callers waiting on `stable_bars()`
         // don't act on this early Some until the whole tree could
         // theoretically be ready.
-        assert!(built.stable_period() >= 5);
+        assert!(built.stable_bars() >= 5);
     }
 
     #[test]

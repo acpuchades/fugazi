@@ -87,14 +87,14 @@ impl<S: Indicator<Output = bool>> Indicator for Not<S> {
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         // `max(1)` guards a `warm_up = 0` inner (e.g. `ValueBool`) — negation
         // still needs one `update` to observe the source.
-        self.inner.warm_up_period().max(1)
+        self.inner.warm_up_bars().max(1)
     }
 
-    fn unstable_period(&self) -> usize {
-        self.inner.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.inner.unstable_bars()
     }
 
     fn reset(&mut self) {
@@ -191,15 +191,15 @@ where
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         // Two consecutive warmed source values: the first never fires.
         // `max(1)` so a `warm_up = 0` inner still needs a first update
         // before a second can compare against it.
-        self.inner.warm_up_period().max(1) + 1
+        self.inner.warm_up_bars().max(1) + 1
     }
 
-    fn unstable_period(&self) -> usize {
-        self.inner.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.inner.unstable_bars()
     }
 
     fn reset(&mut self) {
@@ -261,12 +261,12 @@ impl<S: Indicator<Output = bool>> Indicator for BecameTrue<S> {
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
-        self.inner.warm_up_period().max(1) + 1
+    fn warm_up_bars(&self) -> usize {
+        self.inner.warm_up_bars().max(1) + 1
     }
 
-    fn unstable_period(&self) -> usize {
-        self.inner.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.inner.unstable_bars()
     }
 
     fn reset(&mut self) {
@@ -327,12 +327,12 @@ impl<S: Indicator<Output = bool>> Indicator for BecameFalse<S> {
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
-        self.inner.warm_up_period().max(1) + 1
+    fn warm_up_bars(&self) -> usize {
+        self.inner.warm_up_bars().max(1) + 1
     }
 
-    fn unstable_period(&self) -> usize {
-        self.inner.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.inner.unstable_bars()
     }
 
     fn reset(&mut self) {
@@ -386,7 +386,7 @@ impl<In> Indicator for ValueBool<In> {
         Some(self.value)
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         0
     }
 
@@ -455,7 +455,7 @@ impl<In> Indicator for Every<In> {
     /// [`Unstable`](crate::indicators::Unstable) if you need to opt an
     /// enclosing strategy's readiness gate out of the pulse's contribution
     /// (not usually needed since it's zero already).
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         0
     }
 
@@ -504,7 +504,7 @@ mod every_tests {
     #[test]
     fn every_warm_up_is_zero_but_first_reading_can_be_false() {
         let mut e: Every<()> = Every::new(3);
-        assert_eq!(e.warm_up_period(), 0);
+        assert_eq!(e.warm_up_bars(), 0);
         assert_eq!(e.update(()), Some(false));
         assert_eq!(e.update(()), Some(false));
         assert_eq!(e.update(()), Some(true));

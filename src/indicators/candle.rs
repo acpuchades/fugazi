@@ -79,12 +79,12 @@ impl<S: Indicator<Output = Atom>> Indicator for CurrentBar<S> {
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
-        self.source.warm_up_period().max(1)
+    fn warm_up_bars(&self) -> usize {
+        self.source.warm_up_bars().max(1)
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {
@@ -163,12 +163,12 @@ impl<F: CandleField, S: Indicator<Output = Atom>> Indicator for Field<F, S> {
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
-        self.source.warm_up_period().max(1)
+    fn warm_up_bars(&self) -> usize {
+        self.source.warm_up_bars().max(1)
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {

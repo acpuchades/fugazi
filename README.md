@@ -14,7 +14,7 @@ and signal owns its internal state and is advanced one sample at a time via
 
 ```toml
 [dependencies]
-fugazi = "0.55"
+fugazi = "0.56"
 ```
 
 ## Concepts
@@ -46,23 +46,23 @@ The crate has three composable layers:
 
 The first two layers are *pure* value-producers sharing one shape: state lives
 inside, `update(input)` advances one step, outputs are `None` until warmed up.
-Every indicator also reports its exact `warm_up_period()` (samples until the
+Every indicator also reports its exact `warm_up_bars()` (samples until the
 first output, accounting for the whole composed chain) and its
-`unstable_period()` — `0` for windowed indicators, and for the recursive ones
+`unstable_bars()` — `0` for windowed indicators, and for the recursive ones
 (EMA, RSI, ATR, ADX, …) the extra samples until the seeding's influence has
-decayed below 0.1%. `stable_period()` is their sum: how much history to feed
+decayed below 0.1%. `stable_bars()` is their sum: how much history to feed
 before trusting the output. The **default is safe**: a
 `SingleAssetStrategy`'s `is_ready()` compares its bar count against the
-largest `stable_period()` across every wired signal and every attached
+largest `stable_bars()` across every wired signal and every attached
 protective level, and the run driver skips its `trade()` until that clears —
 so no trade fires on a seed-contaminated value. The explicit opt-out is
 [`Unstable`](https://docs.rs/fugazi/latest/fugazi/indicators/struct.Unstable.html):
 `.unstable()` on any source *or* signal (in YAML, `!unstable { source: <s> }`
 / `!unstable { signal: <s> }`) is a passthrough that reports
-`unstable_period() = 0`, telling the readiness gate "I'm happy to trade
+`unstable_bars() = 0`, telling the readiness gate "I'm happy to trade
 through this subtree's IIR settling tail". Safe by default, overridable per
 subtree — the same shape as `fugazi get`'s `--keep-unstable` flag (default
-trims each overlay's pre-`stable_period()` cells; the flag opts out).
+trims each overlay's pre-`stable_bars()` cells; the flag opts out).
 
 ## Quick start
 
@@ -399,17 +399,17 @@ single-name **flag / wrapper / period** for the caller who has considered the
 tradeoff and would rather trade through it.
 
 - **Strategy readiness.** `SingleAssetStrategy::is_ready()` returns `true`
-  only once `bars_seen` reaches the largest `stable_period()` across every
+  only once `bars_seen` reaches the largest `stable_bars()` across every
   wired signal and every attached protective level, and
   `fugazi::backtest::run` skips `trade()` until then. Wrap a subtree in
   [`Unstable`](https://docs.rs/fugazi/latest/fugazi/indicators/struct.Unstable.html)
   (`.unstable()` in Rust/Python, `!unstable { source }` / `!unstable { signal
-  }` in YAML) to zero its reported `unstable_period()` and skip the wait for
+  }` in YAML) to zero its reported `unstable_bars()` and skip the wait for
   its IIR tail. `update()` and `on_fill()` still run every bar so the warm-up
   progresses; a custom `Strategy` inherits the default `is_ready() = true` and
   can override for the same effect.
 - **`fugazi get` overlays.** By default the CLI trims each overlay column's
-  pre-`stable_period()` cells before writing the CSV, so no downstream reader
+  pre-`stable_bars()` cells before writing the CSV, so no downstream reader
   sees an unsettled value. `--keep-unstable` emits every sample from bar 1 —
   useful when you want the full trace for debugging or plotting.
 - **Explicit periods.** Every windowed indicator takes a `period` argument
@@ -612,21 +612,21 @@ recorded together with its OOS realization (with a per-fold `_wfe = OOS/IS`
 column), and a composite OOS equity curve is stitched from every fold's winner —
 a run that is genuinely out-of-sample at every bar. Emits three sibling files
 (per-fold table, composite OOS equity CSV, composite OOS metrics YAML).
-Grid-wide `max(stable_period)` is skipped at the head by default;
+Grid-wide `max(stable_bars)` is skipped at the head by default;
 `--keep-unstable` opts out. Mutually exclusive with `-w`.
 
 `run` and `optimize` measure the whole run. The strategy layer's readiness
 default holds entries until every wired signal *and* every attached
-protective level is past its `stable_period()` (see
+protective level is past its `stable_bars()` (see
 [`SingleAssetStrategy::is_ready`](https://docs.rs/fugazi/latest/fugazi/strategies/struct.SingleAssetStrategy.html)),
 so a seed-contaminated bar never fires a trade. Purely windowed (FIR)
-strategies — SMA crossovers and the like — have `unstable_period() = 0`
+strategies — SMA crossovers and the like — have `unstable_bars() = 0`
 throughout, so the gate elapses on the last warm-up bar and never lags them.
 Users who explicitly accept the IIR settling tail on a subtree opt out by
 wrapping it in `!unstable`: `!unstable { source: !ema { … } }` /
-`!unstable { signal: !crosses_above { … } }` reports `unstable_period() = 0`
+`!unstable { signal: !crosses_above { … } }` reports `unstable_bars() = 0`
 for that subtree while forwarding the underlying output. Same shape as
-`fugazi get`'s `--keep-unstable` (default trims pre-`stable_period()` cells
+`fugazi get`'s `--keep-unstable` (default trims pre-`stable_bars()` cells
 from each overlay CSV column; the flag opts out) — see [Safe defaults, opt-in
 overrides](#safe-defaults-opt-in-overrides).
 
@@ -691,7 +691,7 @@ to `close`. The vocabulary mirrors the library one-to-one:
   `!above`/`!below { source, level }`; `!crosses_above`/`!crosses_below
   { lhs, rhs }`; `!and`/`!or`/`!xor { lhs, rhs }`, `!all [ … ]`, `!any [ … ]`,
   `!not <signal>`, `!changed <signal>`, `!unstable { signal: <signal> }`
-  (passthrough that reports `unstable_period() = 0` for the wrapped subtree —
+  (passthrough that reports `unstable_bars() = 0` for the wrapped subtree —
   opt-in override of the "wait for the IIR tail" readiness default; there is
   also a `!unstable { source: <source> }` twin on the source side),
   `!value <bool>`; `!str_eq`/`!str_ne { lhs, rhs }` compare a `Str` overlay

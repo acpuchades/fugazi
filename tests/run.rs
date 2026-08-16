@@ -216,7 +216,7 @@ fn a_window_longer_than_the_run_collapses_to_the_whole_run() {
 /// End-to-end wiring for a cross-timeframe entry.
 ///
 /// The user relies on the safe-by-default strategy-readiness gate to hold the
-/// entry until the composed latch/resample/ema chain is past its stable_period,
+/// entry until the composed latch/resample/ema chain is past its stable_bars,
 /// so the entry signal is just the plain comparison:
 ///
 /// ```yaml

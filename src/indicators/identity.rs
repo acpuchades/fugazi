@@ -47,7 +47,7 @@ impl<I: Clone> Indicator for Identity<I> {
         self.value.clone()
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         1
     }
 

@@ -101,15 +101,15 @@ impl<S: Indicator<Output = Candle>> Indicator for Adx<S> {
         }
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         // DX values start with the DMI; the second Wilder pass then consumes a
         // full period of them before `adx` is ready.
-        self.dmi.warm_up_period() + self.dx.period() - 1
+        self.dmi.warm_up_bars() + self.dx.period() - 1
     }
 
-    fn unstable_period(&self) -> usize {
+    fn unstable_bars(&self) -> usize {
         // The DI lines must settle, then the DX smoothing settles on top.
-        self.dmi.unstable_period() + self.dx.unstable_period()
+        self.dmi.unstable_bars() + self.dx.unstable_bars()
     }
 
     fn reset(&mut self) {

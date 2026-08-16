@@ -1082,11 +1082,11 @@ impl<S: Indicator<Input = Atom>> Indicator for AtomLift<S> {
     fn value(&self) -> Option<S::Output> {
         self.0.value()
     }
-    fn warm_up_period(&self) -> usize {
-        self.0.warm_up_period()
+    fn warm_up_bars(&self) -> usize {
+        self.0.warm_up_bars()
     }
-    fn unstable_period(&self) -> usize {
-        self.0.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.0.unstable_bars()
     }
     fn reset(&mut self) {
         self.0.reset()
@@ -2297,11 +2297,11 @@ impl Indicator for RebuildOnClone {
     fn value(&self) -> Option<Real> {
         self.inner.value()
     }
-    fn warm_up_period(&self) -> usize {
-        self.inner.warm_up_period()
+    fn warm_up_bars(&self) -> usize {
+        self.inner.warm_up_bars()
     }
-    fn unstable_period(&self) -> usize {
-        self.inner.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.inner.unstable_bars()
     }
     fn reset(&mut self) {
         self.inner.reset();

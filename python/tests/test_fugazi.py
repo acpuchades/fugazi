@@ -1279,32 +1279,32 @@ def test_resting_stop_gaps_to_the_open():
     assert w.update("X", ta.Candle(105.0, 115.0, 104.0, 108.0, 0.0)) == []
 
 
-def test_warm_up_and_unstable_periods():
+def test_warm_up_and_unstable_bars():
     # Windowed: exact warm-up, no unstable tail.
     sma = ta.sma(ta.close(), 20)
-    assert sma.warm_up_period() == 20
-    assert sma.unstable_period() == 0
-    assert sma.stable_period() == 20
+    assert sma.warm_up_bars() == 20
+    assert sma.unstable_bars() == 0
+    assert sma.stable_bars() == 20
     # Recursive: the EMA seeds immediately but takes time to converge.
     ema = ta.ema(ta.close(), 20)
-    assert ema.warm_up_period() == 1
-    assert ema.unstable_period() > 0
-    assert ema.stable_period() == ema.warm_up_period() + ema.unstable_period()
+    assert ema.warm_up_bars() == 1
+    assert ema.unstable_bars() > 0
+    assert ema.stable_bars() == ema.warm_up_bars() + ema.unstable_bars()
     # Composition accounts for the whole chain, through signals too.
     chained = ta.ema(ta.sma(ta.close(), 10), 20)
-    assert chained.warm_up_period() == 10
+    assert chained.warm_up_bars() == 10
     sig = ta.close().crosses_above(ta.sma(ta.close(), 10))
-    assert sig.warm_up_period() == 11  # comparison plus its edge detector
-    assert sig.unstable_period() == 0
+    assert sig.warm_up_bars() == 11  # comparison plus its edge detector
+    assert sig.unstable_bars() == 0
     # Multi-output indicators report the slowest line.
     macd = ta.macd(ta.close(), 12, 26, 9)
-    assert macd.warm_up_period() == 1
-    assert macd.unstable_period() > 0
+    assert macd.warm_up_bars() == 1
+    assert macd.unstable_bars() > 0
 
 
 def test_warm_up_matches_first_output():
     node = ta.rsi(ta.close(), 14)
-    w = node.warm_up_period()
+    w = node.warm_up_bars()
     out = feed(node, closes([100.0 + 0.5 * i + (i % 3) for i in range(w + 3)]))
     assert all(v is None for v in out[: w - 1])
     assert all(v is not None for v in out[w - 1 :])
@@ -1393,27 +1393,27 @@ def test_if_else_publishes_early_when_selected_branch_is_fast():
     # Same shape but the condition picks the fast branch: close < 0 is
     # always false, so we pick otherwise (a constant). The ternary reads
     # Some on bar 1 even though the UNSELECTED SMA-5 hasn't warmed —
-    # `warm_up_period()` is still 5 (upper bound for downstream stability
+    # `warm_up_bars()` is still 5 (upper bound for downstream stability
     # gates), but the actual first Some can arrive earlier.
     branch = ta.if_else(
         ta.close().lt(ta.value(0.0)),
         ta.sma(ta.close(), 5),
         ta.value(-1.0),
     )
-    assert branch.warm_up_period() == 5
+    assert branch.warm_up_bars() == 5
     assert branch.update(ta.Candle(100.0, 100.0, 100.0, 100.0, 0.0)) == -1.0
 
 
-def test_unstable_signal_zeroes_unstable_period_but_forwards_output():
+def test_unstable_signal_zeroes_unstable_bars_but_forwards_output():
     entry = ta.close().crosses_above(ta.ema(ta.close(), 3))
-    raw_stable = entry.stable_period()
-    raw_warm = entry.warm_up_period()
+    raw_stable = entry.stable_bars()
+    raw_warm = entry.warm_up_bars()
     assert raw_stable > raw_warm  # ema has a real IIR tail
     wrapped = ta.unstable(entry)
     assert isinstance(wrapped, ta.Signal)
-    assert wrapped.warm_up_period() == raw_warm
-    assert wrapped.unstable_period() == 0
-    assert wrapped.stable_period() == raw_warm
+    assert wrapped.warm_up_bars() == raw_warm
+    assert wrapped.unstable_bars() == 0
+    assert wrapped.stable_bars() == raw_warm
 
     # The wrapper is a passthrough — same boolean state per bar as the raw.
     bars = closes([100.0 + 0.5 * i + (i % 5) for i in range(raw_stable * 2)])
@@ -1827,30 +1827,30 @@ def test_str_source_returns_none_on_bare_candle():
 
 def test_indicator_unstable_method_matches_free_function():
     src = ta.ema(ta.close(), 5)
-    warm = src.warm_up_period()
-    settle = src.unstable_period()
+    warm = src.warm_up_bars()
+    settle = src.unstable_bars()
     assert settle > 0
     m = src.unstable()
     f = ta.unstable(ta.ema(ta.close(), 5))
     assert isinstance(m, ta.Indicator)
     assert isinstance(f, ta.Indicator)
-    assert m.warm_up_period() == warm
-    assert m.unstable_period() == 0
-    assert m.stable_period() == warm
+    assert m.warm_up_bars() == warm
+    assert m.unstable_bars() == 0
+    assert m.stable_bars() == warm
     # Method and free-function forms are the same wrapper.
-    assert f.warm_up_period() == warm
-    assert f.unstable_period() == 0
+    assert f.warm_up_bars() == warm
+    assert f.unstable_bars() == 0
 
 
 def test_signal_unstable_method_matches_free_function():
     entry = ta.close().crosses_above(ta.ema(ta.close(), 3))
-    warm = entry.warm_up_period()
+    warm = entry.warm_up_bars()
     m = entry.unstable()
     f = ta.unstable(ta.close().crosses_above(ta.ema(ta.close(), 3)))
-    assert m.warm_up_period() == warm
-    assert m.unstable_period() == 0
-    assert f.warm_up_period() == warm
-    assert f.unstable_period() == 0
+    assert m.warm_up_bars() == warm
+    assert m.unstable_bars() == 0
+    assert f.warm_up_bars() == warm
+    assert f.unstable_bars() == 0
     # The wrappers pass through — same boolean state per bar as the plain entry.
     plain = ta.close().crosses_above(ta.ema(ta.close(), 3))
     bars = closes([float(i + 1) for i in range(warm + 5)])
@@ -2294,9 +2294,9 @@ def test_cross_domain_mismatch_is_typeerror():
 
 def test_atom_source_metadata():
     src = ta.pick("BTC")
-    assert src.warm_up_period() == 1
-    assert src.unstable_period() == 0
-    assert src.stable_period() == 1
+    assert src.warm_up_bars() == 1
+    assert src.unstable_bars() == 0
+    assert src.stable_bars() == 1
     assert src.value() is None
     src.update(_snap({"BTC": 100.0}))
     assert src.value() is not None
@@ -2554,12 +2554,19 @@ def test_binance_vision_constructs():
     assert ta.BinanceVision(base_url="http://localhost:1") is not None
 
 
-def test_fetch_binance_vision_needs_explicit_market():
-    # binance-vision is fetchable like any other provider, but it needs a market
-    # ('spot'/'futures') that fetch()'s flat signature can't carry — so it points
-    # the caller at the explicit constructor rather than guessing.
-    with pytest.raises(ValueError, match="needs a market"):
-        ta.fetch(provider="binance-vision", symbol="BTCUSDT")
+def test_fetch_advertises_both_binance_vision_ids():
+    # The market rides in the provider id rather than a `market` kwarg, so the
+    # flat fetch() carries both trees the way the CLI does.
+    with pytest.raises(ValueError, match="binance-vision, binance-vision-futures"):
+        ta.fetch(provider="nope", symbol="BTCUSDT")
+
+
+def test_fetch_binance_vision_futures_id_routes_to_the_futures_tree():
+    # Reaching the futures tree's own sub-hourly guard proves the id routed
+    # there — spot has no such constraint, and an unknown id would have failed
+    # earlier with "unknown provider".
+    with pytest.raises(ValueError, match="unsupported interval"):
+        ta.fetch(provider="binance-vision-futures", symbol="BTCUSDT", freq="15m")
 
 
 def test_binance_vision_futures_rejects_sub_hourly():

@@ -60,13 +60,13 @@ impl<S: Indicator<Output = Candle>> Indicator for Obv<S> {
 
     /// Ready as soon as the source is; the cumulative total is *anchored*, not
     /// unstable — where it starts is part of its meaning, so
-    /// [`unstable_period`](Indicator::unstable_period) stays `0`.
-    fn warm_up_period(&self) -> usize {
-        self.source.warm_up_period().max(1)
+    /// [`unstable_bars`](Indicator::unstable_bars) stays `0`.
+    fn warm_up_bars(&self) -> usize {
+        self.source.warm_up_bars().max(1)
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {

@@ -82,15 +82,15 @@ impl<S: Indicator<Output = Real>> Indicator for Rsi<S> {
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         // One source output to seed the diff, then a full period of deltas.
         // `max(1)` so a `warm_up = 0` source still needs the seed update.
-        self.source.warm_up_period().max(1) + self.gain.period()
+        self.source.warm_up_bars().max(1) + self.gain.period()
     }
 
-    fn unstable_period(&self) -> usize {
+    fn unstable_bars(&self) -> usize {
         // Both Wilder states share the period, so they settle together.
-        self.source.unstable_period() + self.gain.unstable_period()
+        self.source.unstable_bars() + self.gain.unstable_bars()
     }
 
     fn reset(&mut self) {

@@ -404,7 +404,7 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
 | `--best-by <METRIC>` | Sort rows by this metric (direction hardcoded per metric — see [Best-by directions](#best-by-directions)). Omit to keep cartesian order and skip the "best" console block. |
 | `-w`, `--windowed <LEN>` | Evaluate each grid point in non-overlapping windows of `LEN`: every `-m` metric becomes two CSV columns (`<name>_mean` / `<name>_std`) and `--best-by` ranks by the windowed mean. Same `LEN` shape as `run -w` — a bar count (`10`, `252`) or a duration (`1d`, `1w`, `1M`); the duration form requires `--stocks`/`--forex`/`--crypto` and a resolvable bar cadence. See [Windowed metrics](#windowed-metrics). Mutually exclusive with `--walkforward`. |
 | `--walkforward <IS,OS[,E]>` | Rolling **walk-forward optimization**: for each fold the grid is scored on the IS window, the `--best-by` winner is applied on the OOS window, and results are written as one row per fold (with `_is`/`_oos`/`_wfe` triples per `-m` metric) plus a composite OOS artifact stitched from every fold's winner. Each component uses the `-w` grammar (bar count or duration). Embargo defaults to `0` bars and only affects OOS metric evaluation (state still flows through). See [Walk-forward optimization](#walk-forward-optimization). Mutually exclusive with `-w`. |
-| `--keep-unstable` | Under `--walkforward`, skip only the grid-wide `max(warm_up_period)` at the head of the series — letting the IIR settling tail bleed into the first IS window — instead of the safe default `max(stable_period)`. Opt-out; no-op without `--walkforward`. |
+| `--keep-unstable` | Under `--walkforward`, skip only the grid-wide `max(warm_up_bars)` at the head of the series — letting the IIR settling tail bleed into the first IS window — instead of the safe default `max(stable_bars)`. Opt-out; no-op without `--walkforward`. |
 | `-k`, `--risk-aversion <K>` | Rank `--best-by` conservatively: shift each grid point's cross-window mean *against* it by `K` standard deviations before sorting. Requires `-w` and `--best-by`; `K >= 0`. See [Best-by directions](#best-by-directions). |
 | `--costs <SPEC>` | Trading-cost model applied uniformly to every grid point. Repeatable. See [--costs](#--costs). |
 | `-j`, `--jobs <N>` | Rayon worker count. Default: one worker per logical CPU. |
@@ -556,10 +556,10 @@ OOS tiling:
                                     └── OOS at IS end + Embargo … IS end + OS
 ```
 
-The prefix is the grid-wide `max(stable_period)` of every combination's
+The prefix is the grid-wide `max(stable_bars)` of every combination's
 built strategy — computed once, before the fold layout, so every row's
 IS/OOS ranges are identical and directly comparable. `--keep-unstable`
-switches this to the grid-wide `max(warm_up_period)` instead (letting
+switches this to the grid-wide `max(warm_up_bars)` instead (letting
 the IIR settling tail leak into the first IS window). The final fold's
 OOS extends to the end of the input, so trailing bars aren't dropped
 (the IS/OOS sizes are minimums, not exact widths).
@@ -680,7 +680,7 @@ strategy. See [--params](#--params).
 
 Warm-up handling: unless `--keep-unstable` is set, each `(symbol, interval)`
 group's leading unready rows are dropped (each overlay reaches its
-`stable_period()` before its cell first prints a value); when `--since` is
+`stable_bars()` before its cell first prints a value); when `--since` is
 set, extra leading bars are fetched (or read from the file) instead so the
 first row at `--since` already has the overlays stable.
 Validate an overlay spec without fetching via
@@ -1108,7 +1108,7 @@ them — start emitting values at their warm-up but stay influenced by their
 seed for a while after (their *unstable period*).
 
 The default is **safe**: `SingleAssetStrategy::is_ready()` reports `true`
-only once the strategy has been fed at least the largest `stable_period()`
+only once the strategy has been fed at least the largest `stable_bars()`
 across every wired signal (`enter` / `exit` on each side) *and* every
 attached protective level, and `fugazi::backtest::run` skips `trade()` until
 then. So the plain form —
@@ -1120,14 +1120,14 @@ long:
 
 — fires its first entry only once both EMAs are past their unstable tail; no
 explicit gate on the signal is needed. Purely windowed (FIR) chains — SMA
-crossovers and the like — have `unstable_period() = 0`, so the gate elapses
+crossovers and the like — have `unstable_bars() = 0`, so the gate elapses
 on the last warm-up bar and never lags them.
 
 To **opt out** on a subtree, wrap it in `!unstable`: `!unstable { source: <s> }`
 (real source) or `!unstable { signal: <s> }` (boolean signal) is a
-passthrough that reports `unstable_period() = 0` for the wrapped subtree
+passthrough that reports `unstable_bars() = 0` for the wrapped subtree
 while forwarding the underlying output. The readiness gate then only waits
-for the wrapped chain's `warm_up_period()`. Use it when you're comfortable
+for the wrapped chain's `warm_up_bars()`. Use it when you're comfortable
 trading through that subtree's IIR settling tail:
 
 ```yaml
@@ -1138,7 +1138,7 @@ long:
 ```
 
 `fugazi get`'s `--keep-unstable` flag is the same pattern one level up — the
-overlay CSV trims each column's pre-`stable_period()` cells by default; the
+overlay CSV trims each column's pre-`stable_bars()` cells by default; the
 flag opts out. See the library's [safe-defaults][safe-defaults] note.
 
 [safe-defaults]: README.md#safe-defaults-opt-in-overrides
@@ -1309,7 +1309,7 @@ Boolean-valued nodes:
   `!any [signal, …]`, `!not <signal>`, `!changed <signal>` (fires on any
   transition).
 - **Unstable-tail override**: `!unstable { signal: <signal> }` — passthrough
-  that reports `unstable_period() = 0` for the wrapped subtree while
+  that reports `unstable_bars() = 0` for the wrapped subtree while
   forwarding its output. The explicit opt-out to the safe-by-default
   strategy-readiness gate; see [Stability gating](#stability-gating).
   (`!unstable { source: <source> }` is the source-side twin.)

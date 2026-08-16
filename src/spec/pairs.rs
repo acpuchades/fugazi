@@ -367,17 +367,17 @@ pub struct DynPairsStrategy {
 
 impl DynPairsStrategy {
     /// Grid-wide readiness — pass-through to
-    /// [`PairsStrategy::stable_period`]. All chains are held eagerly, so
+    /// [`PairsStrategy::stable_bars`]. All chains are held eagerly, so
     /// this reads directly (no lazy-probe needed like basket / multi).
-    pub fn stable_period(&self) -> usize {
-        self.inner.stable_period()
+    pub fn stable_bars(&self) -> usize {
+        self.inner.stable_bars()
     }
 
     /// Warm-up-only readiness (ignoring IIR settling) — pass-through to
-    /// [`PairsStrategy::warm_up_period`]. Used by
+    /// [`PairsStrategy::warm_up_bars`]. Used by
     /// `optimize --walkforward --keep-unstable`.
-    pub fn warm_up_period(&self) -> usize {
-        self.inner.warm_up_period()
+    pub fn warm_up_bars(&self) -> usize {
+        self.inner.warm_up_bars()
     }
 
     /// The strategy's shared [`Book<String>`] — hand-off point for

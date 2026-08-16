@@ -24,10 +24,10 @@ use crate::types::Real;
 ///
 /// # Warm-up
 ///
-/// [`warm_up_period`](Indicator::warm_up_period) is the max across `on`,
+/// [`warm_up_bars`](Indicator::warm_up_bars) is the max across `on`,
 /// every case's branch, and `default` — the conservative worst case,
 /// safe regardless of which branch a given `on` reading happens to
-/// select. [`stable_period`](Indicator::stable_period) is likewise the
+/// select. [`stable_bars`](Indicator::stable_bars) is likewise the
 /// max, so a downstream consumer waiting for full readiness waits long
 /// enough for every branch to have settled.
 ///
@@ -117,23 +117,23 @@ where
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         let mut w = self
             .on
-            .warm_up_period()
-            .max(self.default.warm_up_period());
+            .warm_up_bars()
+            .max(self.default.warm_up_bars());
         for (_, br) in &self.cases {
-            w = w.max(br.warm_up_period());
+            w = w.max(br.warm_up_bars());
         }
         w
     }
 
-    fn unstable_period(&self) -> usize {
-        let mut s = self.on.stable_period().max(self.default.stable_period());
+    fn unstable_bars(&self) -> usize {
+        let mut s = self.on.stable_bars().max(self.default.stable_bars());
         for (_, br) in &self.cases {
-            s = s.max(br.stable_period());
+            s = s.max(br.stable_bars());
         }
-        s - self.warm_up_period()
+        s - self.warm_up_bars()
     }
 
     fn reset(&mut self) {
@@ -263,7 +263,7 @@ mod tests {
             ],
             Sma::new(Identity::<Real>::new(), 7), // default: warm-up 7
         );
-        assert_eq!(ind.warm_up_period(), 7);
+        assert_eq!(ind.warm_up_bars(), 7);
     }
 
     #[test]
@@ -294,7 +294,7 @@ mod tests {
             fn value(&self) -> Option<String> {
                 Some(self.0.clone())
             }
-            fn warm_up_period(&self) -> usize {
+            fn warm_up_bars(&self) -> usize {
                 0
             }
             fn reset(&mut self) {}
@@ -309,7 +309,7 @@ mod tests {
             fn value(&self) -> Option<Real> {
                 Some(self.0)
             }
-            fn warm_up_period(&self) -> usize {
+            fn warm_up_bars(&self) -> usize {
                 0
             }
             fn reset(&mut self) {}

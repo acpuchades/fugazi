@@ -95,8 +95,8 @@ pub struct OptimizeOptions<'a> {
     /// with `windowed` (enforced at clap parse time).
     pub walkforward: Option<WalkForwardSpec>,
     /// `--keep-unstable`: under `--walkforward`, skip only the grid-wide
-    /// `max(warm_up_period)` at the head of the atom slice, not
-    /// `max(stable_period)`. Lets IIR settling bleed into the first IS window.
+    /// `max(warm_up_bars)` at the head of the atom slice, not
+    /// `max(stable_bars)`. Lets IIR settling bleed into the first IS window.
     /// No-op without `walkforward`.
     pub keep_unstable: bool,
     /// `-k/--risk-aversion`: shift each grid point's `--best-by` cross-window
@@ -270,9 +270,9 @@ fn run_single(
                 .try_build(cash, schema_ref, None)
                 .map_err(backtest::build_error)?;
             Ok(if keep_unstable {
-                built.warm_up_period()
+                built.warm_up_bars()
             } else {
-                built.stable_period()
+                built.stable_bars()
             })
         };
         let run_backtest =
@@ -596,12 +596,12 @@ fn run_multi_symbol(
 ///
 /// **Lazy readiness probing.** Basket / multi strategies build per-symbol
 /// chains on first sight of a snapshot — a freshly-constructed strategy
-/// has no chains yet and `stable_period()` reports only the rebalance
+/// has no chains yet and `stable_bars()` reports only the rebalance
 /// signal's period. To reveal the grid-wide max the walk-forward layout
 /// needs, we feed each throwaway probe strategy one *synthetic* snapshot
 /// containing every universe symbol with a dummy [`Atom`], triggering the
-/// factories on every symbol before reading `stable_period()` /
-/// `warm_up_period()`. The dummy atom carries no overlays and a zero
+/// factories on every symbol before reading `stable_bars()` /
+/// `warm_up_bars()`. The dummy atom carries no overlays and a zero
 /// candle — safe because the probe never trades, only exercises chain
 /// construction.
 #[allow(clippy::too_many_arguments)]
@@ -644,7 +644,7 @@ fn run_multi_symbol_walkforward(
     let snapshots_ref = snapshots;
 
     // Basket and multi build their per-symbol chains lazily, on first sight of
-    // a symbol, so `stable_period()` only reads true once a snapshot has gone
+    // a symbol, so `stable_bars()` only reads true once a snapshot has gone
     // through — hence the probe feed. The other shapes build eagerly and must
     // *not* be fed it: a pairs leaf that didn't name its asset would hit the
     // sole-atom guard on a multi-symbol snapshot.
@@ -673,9 +673,9 @@ fn run_multi_symbol_walkforward(
             built.update(probe_snap_ref.clone());
         }
         Ok(if keep_unstable {
-            built.warm_up_period()
+            built.warm_up_bars()
         } else {
-            built.stable_period()
+            built.stable_bars()
         })
     };
 
@@ -1061,13 +1061,13 @@ fn format_metric(eval: &Evaluation, path: &str) -> String {
 /// Strategy-agnostic: two closures inject the strategy-specific work.
 ///
 /// * `probe_readiness(params) -> usize` — build the strategy for one grid
-///   row's params and return its `stable_period()` (or `warm_up_period()`
+///   row's params and return its `stable_bars()` (or `warm_up_bars()`
 ///   under `--keep-unstable`). The grid-wide max is the fold-layout's
 ///   prefix skip. For basket / multi strategies the caller is responsible
 ///   for feeding one representative snapshot to trigger lazy per-symbol
 ///   chain discovery before reading the period — see the
-///   [`DynBasketStrategy::stable_period`](crate::spec::DynBasketStrategy::stable_period)
-///   / [`DynMultiAssetStrategy::stable_period`](crate::spec::DynMultiAssetStrategy::stable_period)
+///   [`DynBasketStrategy::stable_bars`](crate::spec::DynBasketStrategy::stable_bars)
+///   / [`DynMultiAssetStrategy::stable_bars`](crate::spec::DynMultiAssetStrategy::stable_bars)
 ///   rustdoc for the contract.
 /// * `run_backtest(params) -> RunReport` — build the strategy and drive it
 ///   through a fresh paper wallet over the whole run, returning the report.

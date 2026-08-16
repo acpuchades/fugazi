@@ -108,12 +108,12 @@ where
         }
     }
 
-    fn warm_up_period(&self) -> usize {
-        self.high.warm_up_period().max(self.low.warm_up_period())
+    fn warm_up_bars(&self) -> usize {
+        self.high.warm_up_bars().max(self.low.warm_up_bars())
     }
 
-    fn unstable_period(&self) -> usize {
-        self.high.stable_period().max(self.low.stable_period()) - self.warm_up_period()
+    fn unstable_bars(&self) -> usize {
+        self.high.stable_bars().max(self.low.stable_bars()) - self.warm_up_bars()
     }
 
     fn reset(&mut self) {

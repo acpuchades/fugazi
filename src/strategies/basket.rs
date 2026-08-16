@@ -507,7 +507,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> BasketStrategy<
         self.book.clone()
     }
 
-    /// The largest `stable_period()` across every currently-built score /
+    /// The largest `stable_bars()` across every currently-built score /
     /// sizing chain and the rebalance gate — the number of bars the driver
     /// waits before treating the strategy as ready.
     ///
@@ -520,14 +520,14 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> BasketStrategy<
     /// caller that wants the "worst case across every symbol" number),
     /// feed the strategy one representative snapshot with
     /// [`update`](Strategy::update) first so the chains exist, then read
-    /// `stable_period()`.
-    pub fn stable_period(&self) -> usize {
-        let mut n = self.rebalance.stable_period();
+    /// `stable_bars()`.
+    pub fn stable_bars(&self) -> usize {
+        let mut n = self.rebalance.stable_bars();
         for score in self.scores.values() {
-            n = n.max(score.stable_period());
+            n = n.max(score.stable_bars());
         }
         for size in self.sizes.values() {
-            n = n.max(size.stable_period());
+            n = n.max(size.stable_bars());
         }
         for level in self
             .long_stops
@@ -536,24 +536,24 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> BasketStrategy<
             .chain(self.short_stops.values())
             .chain(self.short_targets.values())
         {
-            n = n.max(level.stable_period());
+            n = n.max(level.stable_bars());
         }
         n
     }
 
-    /// The warm-up-only twin of [`stable_period`](Self::stable_period) —
+    /// The warm-up-only twin of [`stable_bars`](Self::stable_bars) —
     /// ignores IIR unstable settling. Used by
     /// `optimize --walkforward --keep-unstable`.
     ///
     /// Same lazy-readiness caveat: feed one snapshot before probing so
     /// per-symbol chains exist.
-    pub fn warm_up_period(&self) -> usize {
-        let mut n = self.rebalance.warm_up_period();
+    pub fn warm_up_bars(&self) -> usize {
+        let mut n = self.rebalance.warm_up_bars();
         for score in self.scores.values() {
-            n = n.max(score.warm_up_period());
+            n = n.max(score.warm_up_bars());
         }
         for size in self.sizes.values() {
-            n = n.max(size.warm_up_period());
+            n = n.max(size.warm_up_bars());
         }
         for level in self
             .long_stops
@@ -562,7 +562,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> BasketStrategy<
             .chain(self.short_stops.values())
             .chain(self.short_targets.values())
         {
-            n = n.max(level.warm_up_period());
+            n = n.max(level.warm_up_bars());
         }
         n
     }

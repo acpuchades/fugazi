@@ -84,8 +84,8 @@ impl<S: Indicator<Output = Real>> Indicator for Foo<S> {
     type Output = Real;
     fn update(&mut self, input: Self::Input) -> Option<Real> { /* ... */ }
     fn value(&self) -> Option<Real> { self.value }
-    fn warm_up_period(&self) -> usize { /* EXACT — see below */ }
-    fn unstable_period(&self) -> usize { /* 0 unless you carry a seed forward */ }
+    fn warm_up_bars(&self) -> usize { /* EXACT — see below */ }
+    fn unstable_bars(&self) -> usize { /* 0 unless you carry a seed forward */ }
     fn reset(&mut self) { /* ... */ }
 }
 ```
@@ -96,8 +96,8 @@ Reuse the shared cores rather than another indicator's public type:
 (recursive smoothing). They live in `src/indicators/{stats,smoothing}.rs` and
 have no `Indicator` impl on purpose.
 
-**`warm_up_period()` must be exact**: `update` returns `None` for the first
-`warm_up_period() - 1` samples and `Some` from sample `warm_up_period()` onward.
+**`warm_up_bars()` must be exact**: `update` returns `None` for the first
+`warm_up_bars() - 1` samples and `Some` from sample `warm_up_bars()` onward.
 Not an estimate — `tests/warm_up.rs` asserts it sample by sample.
 
 ### 2. Re-export — `src/indicators/mod.rs`
@@ -316,7 +316,7 @@ strategy; everything downstream is generic over
 
 1. The strategy in `src/strategies/` (or `src/portfolio/` for a composite).
 2. Its `*StrategySpec` + `Dyn*Strategy` wrapper in `src/spec/`, with `try_build`.
-3. `impl RunnableStrategy for Dyn*Strategy` — `stable_period` / `warm_up_period`,
+3. `impl RunnableStrategy for Dyn*Strategy` — `stable_bars` / `warm_up_bars`,
    and override `drive` **only** if it can't use a plain `PaperWallet` (the
    portfolio does, because its fills route through a composite wallet).
 4. A `StrategySpec` variant, and arms in `kind` / `try_build` /
@@ -519,7 +519,7 @@ When one of these fails, it is telling you something specific:
 | `every_grammar_field_type_has_a_python_dummy_value` | A new grammar field type has no sample in `test_spec_json_schema.py::_dummy` — that `pytest` file would fail with a `KeyError`, which `cargo test` alone would not show. |
 | `test_parity.py::test_every_*_tag_is_bound_or_declared_unbound` | A tag has no Python counterpart and no recorded reason. |
 | `test_parity.py::test_the_declared_tables_do_not_go_stale` | A tag left the spec layer but its parity entry didn't. |
-| `warm_up_is_exact_for_*` | `warm_up_period()` disagrees with when the first `Some` actually lands. |
+| `warm_up_is_exact_for_*` | `warm_up_bars()` disagrees with when the first `Some` actually lands. |
 | `tests/indicator_reference.rs` | An indicator's numbers drifted from its own definition. Always runs. |
 | `tests/talib_validation.rs` | An indicator's numbers drifted from the TA-Lib reference. |
 | `tests/driver_contract.rs` | `backtest::run`'s per-bar order or readiness gating changed. |

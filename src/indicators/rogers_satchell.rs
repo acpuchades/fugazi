@@ -68,14 +68,14 @@ impl<S: Indicator<Output = Candle>> Indicator for RogersSatchell<S> {
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         // The per-bar estimate is ready as soon as the source produces a candle;
         // the rolling window then consumes a full `period` of them.
-        self.source.warm_up_period().max(1) + self.stats.period() - 1
+        self.source.warm_up_bars().max(1) + self.stats.period() - 1
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {

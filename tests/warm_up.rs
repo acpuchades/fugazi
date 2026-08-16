@@ -1,11 +1,11 @@
 //! Warm-up / unstable-period introspection.
 //!
-//! `warm_up_period` is exact: for every indicator, `update` yields `None` for
-//! the first `warm_up_period() - 1` samples and `Some` from sample
-//! `warm_up_period()` onwards (given non-degenerate data). `unstable_period`
+//! `warm_up_bars` is exact: for every indicator, `update` yields `None` for
+//! the first `warm_up_bars() - 1` samples and `Some` from sample
+//! `warm_up_bars()` onwards (given non-degenerate data). `unstable_bars`
 //! is `0` for windowed indicators and, for the recursive ones, counts the
 //! samples until the seed's residual weight decays below 0.1% — checked here
-//! by replaying only the last `stable_period()` samples and comparing against
+//! by replaying only the last `stable_bars()` samples and comparing against
 //! an instance that saw the full history.
 
 use fugazi::indicators::{
@@ -36,9 +36,9 @@ fn bars(n: usize) -> Vec<Candle> {
 }
 
 /// Drive `ind` over `inputs` and assert the first `Some` lands exactly on
-/// sample `warm_up_period()`.
+/// sample `warm_up_bars()`.
 fn assert_exact_warm_up<I: Indicator>(mut ind: I, inputs: Vec<I::Input>, name: &str) {
-    let w = ind.warm_up_period();
+    let w = ind.warm_up_bars();
     if w == 0 {
         assert!(ind.is_ready(), "{name}: warm-up 0 should be ready untouched");
         return;
@@ -53,13 +53,13 @@ fn assert_exact_warm_up<I: Indicator>(mut ind: I, inputs: Vec<I::Input>, name: &
         assert_eq!(
             ready,
             sample >= w,
-            "{name}: readiness at sample {sample} contradicts warm_up_period() = {w}"
+            "{name}: readiness at sample {sample} contradicts warm_up_bars() = {w}"
         );
     }
 }
 
 fn candle_case(ind: impl Indicator<Input = Atom>, name: &str) {
-    let n = ind.warm_up_period() + 5;
+    let n = ind.warm_up_bars() + 5;
     let atoms: Vec<Atom> = bars(n).into_iter().map(Atom::from).collect();
     assert_exact_warm_up(ind, atoms, name);
 }
@@ -69,7 +69,7 @@ fn candle_case(ind: impl Indicator<Input = Atom>, name: &str) {
 /// timestamp to decompose.
 fn timed_candle_case(ind: impl Indicator<Input = Atom>, name: &str) {
     let base = 1_704_067_200_000i64; // 2024-01-01 00:00:00 UTC in ms
-    let n = ind.warm_up_period() + 5;
+    let n = ind.warm_up_bars() + 5;
     let atoms: Vec<Atom> = bars(n)
         .into_iter()
         .enumerate()
@@ -79,7 +79,7 @@ fn timed_candle_case(ind: impl Indicator<Input = Atom>, name: &str) {
 }
 
 fn real_case(ind: impl Indicator<Input = Real>, name: &str) {
-    let n = ind.warm_up_period() + 5;
+    let n = ind.warm_up_bars() + 5;
     let series = bars(n).iter().map(|b| b.close).collect();
     assert_exact_warm_up(ind, series, name);
 }
@@ -196,7 +196,7 @@ fn warm_up_is_exact_for_composition() {
     candle_case(Current::close().roc(5), "roc");
     candle_case(Current::close().rolling_max(10), "rolling_max");
     // NB: `IfElse` is deliberately not part of the exact-warm-up battery.
-    // Its `warm_up_period()` reports the max of the three sources (safe
+    // Its `warm_up_bars()` reports the max of the three sources (safe
     // upper bound for downstream stability gates), but the actual first
     // `Some` can arrive earlier — as soon as the condition and the
     // *selected* branch are both settled. That's the natural semantics
@@ -204,7 +204,7 @@ fn warm_up_is_exact_for_composition() {
     // sample N" contract this battery asserts. `IfElse` is covered by
     // the unit tests in `src/indicators/if_else.rs`.
     //
-    // `BarsSince` is excluded on the same footing. Its `warm_up_period()`
+    // `BarsSince` is excluded on the same footing. Its `warm_up_bars()`
     // reports the source's own warm-up, but the first `Some` lands on the
     // source's first `true` — data-dependent and, for a source that never
     // fires, never. (The `!bars_since_high` / `!bars_since_low` shorthands
@@ -215,7 +215,7 @@ fn warm_up_is_exact_for_composition() {
     // The trailing risk indicators (`Sharpe` / `Sortino` / `Volatility` /
     // `MaxDrawdown` / `Calmar`) are excluded on the same footing: they own an
     // embedded strategy whose equity is flat (zero-variance → `None` for the
-    // ratio metrics) until its own readiness gate elapses, so `warm_up_period()`
+    // ratio metrics) until its own readiness gate elapses, so `warm_up_bars()`
     // (= `period`) is a lower bound on the first `Some`, not exact — and they
     // need a `Strategy`, not the plain atom/ramp inputs this battery feeds.
     // Covered by the unit tests in `src/indicators/trailing.rs`.
@@ -249,103 +249,103 @@ fn warm_up_is_exact_for_composition() {
 #[test]
 fn warm_up_from_a_warm_up_zero_source_is_exact() {
     // Sanity: Value itself is ready without input.
-    assert_eq!(Value::<Real>::new(1.0).warm_up_period(), 0);
+    assert_eq!(Value::<Real>::new(1.0).warm_up_bars(), 0);
 
     // Windowed / lookback: source.warm_up.max(1) + period − 1 (or + period).
-    assert_eq!(Sma::new(Value::<Real>::new(1.0), 3).warm_up_period(), 3);
-    assert_eq!(Wma::new(Value::<Real>::new(1.0), 3).warm_up_period(), 3);
-    assert_eq!(StdDev::new(Value::<Real>::new(1.0), 3).warm_up_period(), 3);
-    assert_eq!(Skewness::new(Value::<Real>::new(1.0), 3).warm_up_period(), 3);
-    assert_eq!(Kurtosis::new(Value::<Real>::new(1.0), 3).warm_up_period(), 3);
-    assert_eq!(ZScore::new(Value::<Real>::new(1.0), 3).warm_up_period(), 3);
+    assert_eq!(Sma::new(Value::<Real>::new(1.0), 3).warm_up_bars(), 3);
+    assert_eq!(Wma::new(Value::<Real>::new(1.0), 3).warm_up_bars(), 3);
+    assert_eq!(StdDev::new(Value::<Real>::new(1.0), 3).warm_up_bars(), 3);
+    assert_eq!(Skewness::new(Value::<Real>::new(1.0), 3).warm_up_bars(), 3);
+    assert_eq!(Kurtosis::new(Value::<Real>::new(1.0), 3).warm_up_bars(), 3);
+    assert_eq!(ZScore::new(Value::<Real>::new(1.0), 3).warm_up_bars(), 3);
     assert_eq!(
-        Percentile::new(Value::<Real>::new(1.0), 3, 0.5).warm_up_period(),
+        Percentile::new(Value::<Real>::new(1.0), 3, 0.5).warm_up_bars(),
         3
     );
     assert_eq!(
-        PercentileRank::new(Value::<Real>::new(1.0), 3).warm_up_period(),
+        PercentileRank::new(Value::<Real>::new(1.0), 3).warm_up_bars(),
         3
     );
     assert_eq!(
-        BarsSinceHigh::new(Value::<Real>::new(1.0), 3).warm_up_period(),
+        BarsSinceHigh::new(Value::<Real>::new(1.0), 3).warm_up_bars(),
         3
     );
     assert_eq!(
-        BarsSinceLow::new(Value::<Real>::new(1.0), 3).warm_up_period(),
+        BarsSinceLow::new(Value::<Real>::new(1.0), 3).warm_up_bars(),
         3
     );
     assert_eq!(
-        Correlation::new(Value::<Real>::new(1.0), Value::<Real>::new(2.0), 3).warm_up_period(),
+        Correlation::new(Value::<Real>::new(1.0), Value::<Real>::new(2.0), 3).warm_up_bars(),
         3
     );
     assert_eq!(
-        VarianceRatio::new(Value::<Real>::new(1.0), 4, 2).warm_up_period(),
+        VarianceRatio::new(Value::<Real>::new(1.0), 4, 2).warm_up_bars(),
         4
     );
     assert_eq!(
-        Bollinger::new(Value::<Real>::new(1.0), 3, 2.0).warm_up_period(),
+        Bollinger::new(Value::<Real>::new(1.0), 3, 2.0).warm_up_bars(),
         3
     );
     assert_eq!(
-        Stochastic::new(Value::<Real>::new(1.0), 3).warm_up_period(),
+        Stochastic::new(Value::<Real>::new(1.0), 3).warm_up_bars(),
         3
     );
     // Cci sources a real-valued indicator; project the typical price via a
     // constant to exercise the same path.
-    assert_eq!(Cci::new(Value::<Real>::new(1.0), 3).warm_up_period(), 3);
-    assert_eq!(Value::<Real>::new(1.0).rolling_max(3).warm_up_period(), 3);
-    assert_eq!(Value::<Real>::new(1.0).rolling_min(3).warm_up_period(), 3);
-    assert_eq!(Value::<Real>::new(1.0).lag(3).warm_up_period(), 4);
-    assert_eq!(Value::<Real>::new(1.0).diff(3).warm_up_period(), 4);
+    assert_eq!(Cci::new(Value::<Real>::new(1.0), 3).warm_up_bars(), 3);
+    assert_eq!(Value::<Real>::new(1.0).rolling_max(3).warm_up_bars(), 3);
+    assert_eq!(Value::<Real>::new(1.0).rolling_min(3).warm_up_bars(), 3);
+    assert_eq!(Value::<Real>::new(1.0).lag(3).warm_up_bars(), 4);
+    assert_eq!(Value::<Real>::new(1.0).diff(3).warm_up_bars(), 4);
 
     // Recursive: source.warm_up.max(1) [+ …]. Ema/Macd need one update to
     // seed; Rma needs a full period; Rsi one seed + a full period of deltas.
-    assert_eq!(Ema::new(Value::<Real>::new(1.0), 3).warm_up_period(), 1);
-    assert_eq!(Rma::new(Value::<Real>::new(1.0), 3).warm_up_period(), 3);
-    assert_eq!(Rsi::new(Value::<Real>::new(1.0), 3).warm_up_period(), 4);
+    assert_eq!(Ema::new(Value::<Real>::new(1.0), 3).warm_up_bars(), 1);
+    assert_eq!(Rma::new(Value::<Real>::new(1.0), 3).warm_up_bars(), 3);
+    assert_eq!(Rsi::new(Value::<Real>::new(1.0), 3).warm_up_bars(), 4);
 }
 
 #[test]
 fn windowed_indicators_are_stable_once_ready() {
-    assert_eq!(Sma::new(Current::close(), 20).unstable_period(), 0);
-    assert_eq!(Wma::new(Current::close(), 20).unstable_period(), 0);
-    assert_eq!(Skewness::new(Current::close(), 20).unstable_period(), 0);
-    assert_eq!(Kurtosis::new(Current::close(), 20).unstable_period(), 0);
-    assert_eq!(ZScore::new(Current::close(), 20).unstable_period(), 0);
+    assert_eq!(Sma::new(Current::close(), 20).unstable_bars(), 0);
+    assert_eq!(Wma::new(Current::close(), 20).unstable_bars(), 0);
+    assert_eq!(Skewness::new(Current::close(), 20).unstable_bars(), 0);
+    assert_eq!(Kurtosis::new(Current::close(), 20).unstable_bars(), 0);
+    assert_eq!(ZScore::new(Current::close(), 20).unstable_bars(), 0);
     assert_eq!(
-        Percentile::new(Current::close(), 20, 0.8).unstable_period(),
+        Percentile::new(Current::close(), 20, 0.8).unstable_bars(),
         0
     );
     assert_eq!(
-        PercentileRank::new(Current::close(), 20).unstable_period(),
+        PercentileRank::new(Current::close(), 20).unstable_bars(),
         0
     );
     assert_eq!(
-        BarsSinceHigh::new(Current::close(), 20).unstable_period(),
+        BarsSinceHigh::new(Current::close(), 20).unstable_bars(),
         0
     );
     assert_eq!(
-        Correlation::new(Current::close(), Current::open(), 20).unstable_period(),
+        Correlation::new(Current::close(), Current::open(), 20).unstable_bars(),
         0
     );
     assert_eq!(
-        VarianceRatio::new(Current::close(), 20, 2).unstable_period(),
+        VarianceRatio::new(Current::close(), 20, 2).unstable_bars(),
         0
     );
-    assert_eq!(Bollinger::new(Current::close(), 20, 2.0).unstable_period(), 0);
-    assert_eq!(Stochastic::new(Current::close(), 14).unstable_period(), 0);
-    assert_eq!(Aroon::new(Current::candle(), 25).unstable_period(), 0);
-    assert_eq!(WilliamsR::new(Current::candle(), 14).unstable_period(), 0);
-    assert_eq!(Mfi::new(Current::candle(), 14).unstable_period(), 0);
-    assert_eq!(Parkinson::new(Current::candle(), 20).unstable_period(), 0);
-    assert_eq!(GarmanKlass::new(Current::candle(), 20).unstable_period(), 0);
+    assert_eq!(Bollinger::new(Current::close(), 20, 2.0).unstable_bars(), 0);
+    assert_eq!(Stochastic::new(Current::close(), 14).unstable_bars(), 0);
+    assert_eq!(Aroon::new(Current::candle(), 25).unstable_bars(), 0);
+    assert_eq!(WilliamsR::new(Current::candle(), 14).unstable_bars(), 0);
+    assert_eq!(Mfi::new(Current::candle(), 14).unstable_bars(), 0);
+    assert_eq!(Parkinson::new(Current::candle(), 20).unstable_bars(), 0);
+    assert_eq!(GarmanKlass::new(Current::candle(), 20).unstable_bars(), 0);
     assert_eq!(
-        RogersSatchell::new(Current::candle(), 20).unstable_period(),
+        RogersSatchell::new(Current::candle(), 20).unstable_bars(),
         0
     );
-    assert_eq!(Current::close().rolling_max(10).unstable_period(), 0);
+    assert_eq!(Current::close().rolling_max(10).unstable_bars(), 0);
     assert_eq!(
-        Donchian::new(Current::high(), Current::low(), 20).unstable_period(),
+        Donchian::new(Current::high(), Current::low(), 20).unstable_bars(),
         0
     );
 }
@@ -353,42 +353,42 @@ fn windowed_indicators_are_stable_once_ready() {
 #[test]
 fn recursive_indicators_report_their_settling() {
     // EMA period 3 has alpha 0.5: 0.5^10 is the first power below 0.1%.
-    assert_eq!(Ema::new(Identity::new(), 3).unstable_period(), 10);
+    assert_eq!(Ema::new(Identity::new(), 3).unstable_bars(), 10);
     // Wilder period 14 decays by 13/14 per sample: settles at 94.
-    assert_eq!(Rma::new(Identity::new(), 14).unstable_period(), 94);
-    assert_eq!(Rsi::new(Identity::new(), 14).unstable_period(), 94);
-    assert_eq!(Atr::new(Current::candle(), 14).unstable_period(), 94);
+    assert_eq!(Rma::new(Identity::new(), 14).unstable_bars(), 94);
+    assert_eq!(Rsi::new(Identity::new(), 14).unstable_bars(), 94);
+    assert_eq!(Atr::new(Current::candle(), 14).unstable_bars(), 94);
     // ADX stacks a second Wilder pass on the DI lines.
-    assert_eq!(Adx::new(Current::candle(), 14).unstable_period(), 188);
+    assert_eq!(Adx::new(Current::candle(), 14).unstable_bars(), 188);
     // Instability propagates through composition and operators.
     let sig = Current::close().crosses_above(Ema::new(Current::close(), 20));
     assert_eq!(
-        sig.unstable_period(),
-        Ema::new(Current::close(), 20).unstable_period()
+        sig.unstable_bars(),
+        Ema::new(Current::close(), 20).unstable_bars()
     );
     assert_eq!(
-        Sma::new(Current::close(), 5).unstable_period(),
+        Sma::new(Current::close(), 5).unstable_bars(),
         0,
         "windowed stays exact"
     );
     let stacked = Sma::new(Ema::new(Current::close(), 20), 5);
     assert_eq!(
-        stacked.unstable_period(),
-        Ema::new(Current::close(), 20).unstable_period()
+        stacked.unstable_bars(),
+        Ema::new(Current::close(), 20).unstable_bars()
     );
 }
 
-/// Replaying only the last `stable_period()` samples reproduces the
+/// Replaying only the last `stable_bars()` samples reproduces the
 /// full-history output to within the documented 0.1% seed weight.
 #[test]
-fn stable_period_bounds_the_seeding_error() {
+fn stable_bars_bounds_the_seeding_error() {
     let history = bars(500);
 
     fn converged_output<I>(mut full: I, mut tail_only: I, history: &[Candle]) -> (Real, Real)
     where
         I: Indicator<Input = Atom, Output = Real>,
     {
-        let tail = history.len() - tail_only.stable_period();
+        let tail = history.len() - tail_only.stable_bars();
         for (i, bar) in history.iter().enumerate() {
             full.update((*bar).into());
             if i >= tail {

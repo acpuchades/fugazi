@@ -1,5 +1,5 @@
 //! Signal reporting whether a source has been fed at least its
-//! `stable_period()` samples.
+//! `stable_bars()` samples.
 
 use std::marker::PhantomData;
 
@@ -11,7 +11,7 @@ use crate::indicator::Indicator;
 /// for a source to be past its unstable tail**.
 ///
 /// Doesn't hold the source it's checking — captures the source's
-/// [`stable_period`](Indicator::stable_period) at construction and then just
+/// [`stable_bars`](Indicator::stable_bars) at construction and then just
 /// counts the samples fed to itself. So an `!and`-composed entry like
 ///
 /// ```yaml
@@ -21,11 +21,11 @@ use crate::indicator::Indicator;
 /// ```
 ///
 /// fires only once the crossover signal is both currently true *and* has been
-/// fed at least its own `stable_period()` samples.
+/// fed at least its own `stable_bars()` samples.
 ///
-/// Once at least `stable_period()` samples have arrived, [`update`](Indicator::update)
-/// returns `Some(true)`; before that it returns `Some(false)`. `warm_up_period()`
-/// is `0` and `unstable_period()` is `0` — the check is always available.
+/// Once at least `stable_bars()` samples have arrived, [`update`](Indicator::update)
+/// returns `Some(true)`; before that it returns `Some(false)`. `warm_up_bars()`
+/// is `0` and `unstable_bars()` is `0` — the check is always available.
 ///
 /// ```
 /// use fugazi::prelude::*;
@@ -34,12 +34,12 @@ use crate::indicator::Indicator;
 /// let ema = Ema::new(Current::close(), 3);
 /// // "true from the bar the Ema is past its unstable tail":
 /// let mut ready = Stable::<fugazi::Candle>::from_source(&ema);
-/// // Feed 11 candles (Ema-3's stable_period) — the 11th update flips true.
+/// // Feed 11 candles (Ema-3's stable_bars) — the 11th update flips true.
 /// # let _ = &mut ready;
 /// ```
 #[derive(Debug, Clone, SaveState)]
 pub struct Stable<In> {
-    stable_period: usize,
+    stable_bars: usize,
     samples: usize,
     #[state(skip)]
     _in: PhantomData<fn(In)>,
@@ -47,25 +47,25 @@ pub struct Stable<In> {
 
 impl<In> Stable<In> {
     /// Construct from an explicit sample threshold. `update` returns
-    /// `Some(true)` from the `stable_period`-th sample onwards.
-    pub fn from_period(stable_period: usize) -> Self {
+    /// `Some(true)` from the `stable_bars`-th sample onwards.
+    pub fn from_bars(stable_bars: usize) -> Self {
         Self {
-            stable_period,
+            stable_bars,
             samples: 0,
             _in: PhantomData,
         }
     }
 
-    /// Capture `source`'s [`stable_period`](Indicator::stable_period) and
+    /// Capture `source`'s [`stable_bars`](Indicator::stable_bars) and
     /// build a check against it. `source` is only read once — the resulting
     /// `Stable` doesn't hold it.
     pub fn from_source<S: Indicator>(source: &S) -> Self {
-        Self::from_period(source.stable_period())
+        Self::from_bars(source.stable_bars())
     }
 
     /// The captured threshold, in samples.
     pub fn threshold(&self) -> usize {
-        self.stable_period
+        self.stable_bars
     }
 }
 
@@ -75,18 +75,18 @@ impl<In> Indicator for Stable<In> {
 
     fn update(&mut self, _input: In) -> Option<bool> {
         self.samples = self.samples.saturating_add(1);
-        Some(self.samples >= self.stable_period)
+        Some(self.samples >= self.stable_bars)
     }
 
     fn value(&self) -> Option<bool> {
-        Some(self.samples >= self.stable_period)
+        Some(self.samples >= self.stable_bars)
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         0
     }
 
-    fn unstable_period(&self) -> usize {
+    fn unstable_bars(&self) -> usize {
         0
     }
 
@@ -114,9 +114,9 @@ mod tests {
     }
 
     #[test]
-    fn flips_true_after_stable_period_samples() {
+    fn flips_true_after_stable_bars() {
         let ema = Ema::new(Current::close(), 3);
-        let period = ema.stable_period();
+        let period = ema.stable_bars();
         assert!(period > 1, "Ema-3 must have a real settling tail");
         let mut check: Stable<Candle> = Stable::from_source(&ema);
 
@@ -127,14 +127,14 @@ mod tests {
                 "sample {i} should still report unstable"
             );
         }
-        // The `stable_period`-th sample flips the check.
+        // The `stable_bars`-th sample flips the check.
         assert_eq!(check.update(bar(period as Real)), Some(true));
         assert_eq!(check.update(bar((period + 1) as Real)), Some(true));
     }
 
     #[test]
     fn value_matches_update_return() {
-        let mut check: Stable<Real> = Stable::from_period(3);
+        let mut check: Stable<Real> = Stable::from_bars(3);
         assert_eq!(check.value(), Some(false));
         check.update(0.0);
         assert_eq!(check.value(), Some(false));
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn reset_zeros_the_counter() {
-        let mut check: Stable<Real> = Stable::from_period(2);
+        let mut check: Stable<Real> = Stable::from_bars(2);
         check.update(0.0);
         check.update(0.0);
         assert_eq!(check.value(), Some(true));

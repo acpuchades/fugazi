@@ -111,12 +111,12 @@ impl<F: CalendarField, S: Indicator<Output = Atom>> Indicator for Calendar<F, S>
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
-        self.source.warm_up_period().max(1)
+    fn warm_up_bars(&self) -> usize {
+        self.source.warm_up_bars().max(1)
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {
@@ -338,12 +338,12 @@ impl<S: Indicator<Output = Atom>> Indicator for CurrentTime<S> {
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
-        self.source.warm_up_period().max(1)
+    fn warm_up_bars(&self) -> usize {
+        self.source.warm_up_bars().max(1)
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {
@@ -416,12 +416,12 @@ impl<S: Indicator<Output = Atom>> Indicator for IsWeekday<S> {
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
-        self.source.warm_up_period().max(1)
+    fn warm_up_bars(&self) -> usize {
+        self.source.warm_up_bars().max(1)
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {
@@ -490,12 +490,12 @@ impl<S: Indicator<Output = Atom>> Indicator for IsWeekend<S> {
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
-        self.source.warm_up_period().max(1)
+    fn warm_up_bars(&self) -> usize {
+        self.source.warm_up_bars().max(1)
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {
@@ -620,7 +620,7 @@ mod tests {
     #[test]
     fn warm_up_and_reset() {
         let mut y = Year::new();
-        assert_eq!(y.warm_up_period(), 1);
+        assert_eq!(y.warm_up_bars(), 1);
         y.update(bar_at(REF_MS));
         assert_eq!(y.value(), Some(2024.0));
         y.reset();

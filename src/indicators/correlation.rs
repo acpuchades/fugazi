@@ -73,20 +73,20 @@ where
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         // Both legs must be warm before the covariance window starts filling, so
         // the join point is the later of the two warm-ups; the window then needs
         // `period` more samples.
         self.lhs
-            .warm_up_period()
-            .max(self.rhs.warm_up_period())
+            .warm_up_bars()
+            .max(self.rhs.warm_up_bars())
             .max(1)
             + self.cov.period()
             - 1
     }
 
-    fn unstable_period(&self) -> usize {
-        self.lhs.unstable_period().max(self.rhs.unstable_period())
+    fn unstable_bars(&self) -> usize {
+        self.lhs.unstable_bars().max(self.rhs.unstable_bars())
     }
 
     fn reset(&mut self) {
@@ -143,6 +143,6 @@ mod tests {
     fn warm_up_accounts_for_both_legs_and_window() {
         // lhs SMA(2) warms at 2, window 3 → 2 + 3 − 1 = 4.
         let c = Correlation::new(Sma::new(Identity::new(), 2), Identity::new(), 3);
-        assert_eq!(c.warm_up_period(), 4);
+        assert_eq!(c.warm_up_bars(), 4);
     }
 }

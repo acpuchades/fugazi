@@ -47,14 +47,14 @@ impl<S: Indicator<Output = Candle>> Indicator for Atr<S> {
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         // The true range is ready as soon as the source is; the Wilder seed then
         // consumes a full period of them.
-        self.true_range.warm_up_period() + self.state.period() - 1
+        self.true_range.warm_up_bars() + self.state.period() - 1
     }
 
-    fn unstable_period(&self) -> usize {
-        self.true_range.unstable_period() + self.state.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.true_range.unstable_bars() + self.state.unstable_bars()
     }
 
     fn reset(&mut self) {

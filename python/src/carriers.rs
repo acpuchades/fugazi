@@ -104,12 +104,12 @@ where
         ))
     }
 
-    fn warm_up_period(&self) -> usize {
-        self.0.warm_up_period()
+    fn warm_up_bars(&self) -> usize {
+        self.0.warm_up_bars()
     }
 
-    fn unstable_period(&self) -> usize {
-        self.0.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.0.unstable_bars()
     }
 
     fn reset(&mut self) {
@@ -166,11 +166,11 @@ where
     fn value(&self) -> Option<bool> {
         Some(self.0.value().unwrap_or(false))
     }
-    fn warm_up_period(&self) -> usize {
-        self.0.warm_up_period()
+    fn warm_up_bars(&self) -> usize {
+        self.0.warm_up_bars()
     }
-    fn unstable_period(&self) -> usize {
-        self.0.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.0.unstable_bars()
     }
     fn reset(&mut self) {
         self.0.reset()
@@ -258,8 +258,8 @@ pub(crate) trait DynMulti<I>: Send + Sync {
     fn names(&self) -> &'static [&'static str];
     fn update(&mut self, input: I) -> Option<Vec<Real>>;
     fn value(&self) -> Option<Vec<Real>>;
-    fn warm_up_period(&self) -> usize;
-    fn unstable_period(&self) -> usize;
+    fn warm_up_bars(&self) -> usize;
+    fn unstable_bars(&self) -> usize;
     fn reset(&mut self);
     /// Deep-clone the erased indicator into a fresh box. Used by [`PyMulti::shared`]
     /// to hand its concrete multi off to a shared-cell carrier without losing
@@ -281,11 +281,11 @@ where
     fn value(&self) -> Option<Vec<Real>> {
         Indicator::value(self).map(|o| o.values())
     }
-    fn warm_up_period(&self) -> usize {
-        Indicator::warm_up_period(self)
+    fn warm_up_bars(&self) -> usize {
+        Indicator::warm_up_bars(self)
     }
-    fn unstable_period(&self) -> usize {
-        Indicator::unstable_period(self)
+    fn unstable_bars(&self) -> usize {
+        Indicator::unstable_bars(self)
     }
     fn reset(&mut self) {
         Indicator::reset(self)
@@ -339,19 +339,19 @@ impl Indicator for ResampleThen {
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         // Plain library-style composition: resample's own warm-up (`every`)
-        // plus `inner.warm_up_period() - 1` more HTF-emissions for the inner
+        // plus `inner.warm_up_bars() - 1` more HTF-emissions for the inner
         // to be ready (one emission coincides with resample's first). The
         // inner side is in HTF-sample units, not base-bar units — same
         // arithmetic as `Ema::new(Resample.close(), P)` in pure Rust.
-        Indicator::warm_up_period(&self.resample)
-            .saturating_add(Indicator::warm_up_period(&self.inner).saturating_sub(1))
+        Indicator::warm_up_bars(&self.resample)
+            .saturating_add(Indicator::warm_up_bars(&self.inner).saturating_sub(1))
     }
 
-    fn unstable_period(&self) -> usize {
-        Indicator::unstable_period(&self.resample)
-            .saturating_add(Indicator::unstable_period(&self.inner))
+    fn unstable_bars(&self) -> usize {
+        Indicator::unstable_bars(&self.resample)
+            .saturating_add(Indicator::unstable_bars(&self.inner))
     }
 
     fn reset(&mut self) {
@@ -441,23 +441,23 @@ impl<I: Clone + Send + Sync + 'static> Indicator for SharedProjector<I> {
         self.last_value
     }
 
-    fn warm_up_period(&self) -> usize {
-        // Match `SharedComponent::warm_up_period`: the projection still needs
+    fn warm_up_bars(&self) -> usize {
+        // Match `SharedComponent::warm_up_bars`: the projection still needs
         // one update to advance the source when the inner reports 0.
         self.cell
             .lock()
             .expect("shared multi-output cell mutex poisoned")
             .multi
-            .warm_up_period()
+            .warm_up_bars()
             .max(1)
     }
 
-    fn unstable_period(&self) -> usize {
+    fn unstable_bars(&self) -> usize {
         self.cell
             .lock()
             .expect("shared multi-output cell mutex poisoned")
             .multi
-            .unstable_period()
+            .unstable_bars()
     }
 
     fn reset(&mut self) {
@@ -558,19 +558,19 @@ impl AnySource {
             AnySource::Const(c) => Some(*c),
         }
     }
-    pub(crate) fn warm_up_period(&self) -> usize {
+    pub(crate) fn warm_up_bars(&self) -> usize {
         match self {
-            AnySource::Candle(s) => Indicator::warm_up_period(s),
-            AnySource::Real(s) => Indicator::warm_up_period(s),
-            AnySource::Snapshot(s) => Indicator::warm_up_period(s),
+            AnySource::Candle(s) => Indicator::warm_up_bars(s),
+            AnySource::Real(s) => Indicator::warm_up_bars(s),
+            AnySource::Snapshot(s) => Indicator::warm_up_bars(s),
             AnySource::Const(_) => 0,
         }
     }
-    pub(crate) fn unstable_period(&self) -> usize {
+    pub(crate) fn unstable_bars(&self) -> usize {
         match self {
-            AnySource::Candle(s) => Indicator::unstable_period(s),
-            AnySource::Real(s) => Indicator::unstable_period(s),
-            AnySource::Snapshot(s) => Indicator::unstable_period(s),
+            AnySource::Candle(s) => Indicator::unstable_bars(s),
+            AnySource::Real(s) => Indicator::unstable_bars(s),
+            AnySource::Snapshot(s) => Indicator::unstable_bars(s),
             AnySource::Const(_) => 0,
         }
     }
@@ -664,18 +664,18 @@ impl AnySignal {
             AnySignal::Snapshot(s) => BoolIndicatorExt::is_true(s),
         }
     }
-    pub(crate) fn warm_up_period(&self) -> usize {
+    pub(crate) fn warm_up_bars(&self) -> usize {
         match self {
-            AnySignal::Candle(s) => Indicator::warm_up_period(s),
-            AnySignal::Real(s) => Indicator::warm_up_period(s),
-            AnySignal::Snapshot(s) => Indicator::warm_up_period(s),
+            AnySignal::Candle(s) => Indicator::warm_up_bars(s),
+            AnySignal::Real(s) => Indicator::warm_up_bars(s),
+            AnySignal::Snapshot(s) => Indicator::warm_up_bars(s),
         }
     }
-    pub(crate) fn unstable_period(&self) -> usize {
+    pub(crate) fn unstable_bars(&self) -> usize {
         match self {
-            AnySignal::Candle(s) => Indicator::unstable_period(s),
-            AnySignal::Real(s) => Indicator::unstable_period(s),
-            AnySignal::Snapshot(s) => Indicator::unstable_period(s),
+            AnySignal::Candle(s) => Indicator::unstable_bars(s),
+            AnySignal::Real(s) => Indicator::unstable_bars(s),
+            AnySignal::Snapshot(s) => Indicator::unstable_bars(s),
         }
     }
     pub(crate) fn reset(&mut self) {
@@ -734,17 +734,17 @@ impl AnyStrSource {
             AnyStrSource::Const(c) => Some(c.clone()),
         }
     }
-    pub(crate) fn warm_up_period(&self) -> usize {
+    pub(crate) fn warm_up_bars(&self) -> usize {
         match self {
-            AnyStrSource::Candle(s) => Indicator::warm_up_period(s),
-            AnyStrSource::Snapshot(s) => Indicator::warm_up_period(s),
+            AnyStrSource::Candle(s) => Indicator::warm_up_bars(s),
+            AnyStrSource::Snapshot(s) => Indicator::warm_up_bars(s),
             AnyStrSource::Const(_) => 0,
         }
     }
-    pub(crate) fn unstable_period(&self) -> usize {
+    pub(crate) fn unstable_bars(&self) -> usize {
         match self {
-            AnyStrSource::Candle(s) => Indicator::unstable_period(s),
-            AnyStrSource::Snapshot(s) => Indicator::unstable_period(s),
+            AnyStrSource::Candle(s) => Indicator::unstable_bars(s),
+            AnyStrSource::Snapshot(s) => Indicator::unstable_bars(s),
             AnyStrSource::Const(_) => 0,
         }
     }
@@ -811,18 +811,18 @@ impl AnyMulti {
             AnyMulti::Snapshot(m) => m.0.value(),
         }
     }
-    pub(crate) fn warm_up_period(&self) -> usize {
+    pub(crate) fn warm_up_bars(&self) -> usize {
         match self {
-            AnyMulti::Candle(m) => m.0.warm_up_period(),
-            AnyMulti::Real(m) => m.0.warm_up_period(),
-            AnyMulti::Snapshot(m) => m.0.warm_up_period(),
+            AnyMulti::Candle(m) => m.0.warm_up_bars(),
+            AnyMulti::Real(m) => m.0.warm_up_bars(),
+            AnyMulti::Snapshot(m) => m.0.warm_up_bars(),
         }
     }
-    pub(crate) fn unstable_period(&self) -> usize {
+    pub(crate) fn unstable_bars(&self) -> usize {
         match self {
-            AnyMulti::Candle(m) => m.0.unstable_period(),
-            AnyMulti::Real(m) => m.0.unstable_period(),
-            AnyMulti::Snapshot(m) => m.0.unstable_period(),
+            AnyMulti::Candle(m) => m.0.unstable_bars(),
+            AnyMulti::Real(m) => m.0.unstable_bars(),
+            AnyMulti::Snapshot(m) => m.0.unstable_bars(),
         }
     }
     pub(crate) fn reset(&mut self) {

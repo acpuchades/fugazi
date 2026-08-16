@@ -38,8 +38,8 @@ pub trait Indicator {
     /// [`update`](Indicator::update) before the first output can appear.
     ///
     /// The exact warm-up: `update` returns `None` for the first
-    /// `warm_up_period() - 1` samples and (data permitting) `Some` from sample
-    /// `warm_up_period()` onwards. Composed indicators account for their
+    /// `warm_up_bars() - 1` samples and (data permitting) `Some` from sample
+    /// `warm_up_bars()` onwards. Composed indicators account for their
     /// sources, so `Ema::new(Sma::new(src, 10), 20)` reports the warm-up of the
     /// whole chain. `0` means ready without any input (e.g.
     /// [`Value`](crate::indicators::Value)).
@@ -50,10 +50,10 @@ pub trait Indicator {
     /// position-anchored sources ([`PositionField`](crate::indicators::PositionField))
     /// report `0` because their readiness tracks the live position, not the
     /// sample count.
-    fn warm_up_period(&self) -> usize;
+    fn warm_up_bars(&self) -> usize;
 
     /// The number of *additional* samples after
-    /// [`warm_up_period`](Indicator::warm_up_period) before the output has
+    /// [`warm_up_bars`](Indicator::warm_up_bars) before the output has
     /// effectively converged.
     ///
     /// Windowed (FIR) indicators — SMA, rolling extrema, Bollinger, Stochastic,
@@ -66,18 +66,18 @@ pub trait Indicator {
     /// output no longer meaningfully depends on the seeding (the same idea as
     /// TA-Lib's "unstable period"). Composed indicators propagate their
     /// sources' instability.
-    fn unstable_period(&self) -> usize {
+    fn unstable_bars(&self) -> usize {
         0
     }
 
     /// Total samples before the output is both available and converged:
-    /// `warm_up_period() + unstable_period()`.
+    /// `warm_up_bars() + unstable_bars()`.
     ///
     /// The amount of history to feed before trusting the output — e.g. how many
     /// bars to replay ahead of a live stream, or how many leading outputs of a
     /// backtest to discard.
-    fn stable_period(&self) -> usize {
-        self.warm_up_period().saturating_add(self.unstable_period())
+    fn stable_bars(&self) -> usize {
+        self.warm_up_bars().saturating_add(self.unstable_bars())
     }
 
     /// Clear all state, returning the indicator to its freshly-constructed

@@ -1463,7 +1463,7 @@ impl PyWalkForwardResult {
 
 /// Drive the walk-forward kernel — same argument shape as [`optimize`] for
 /// the plain sweep path, minus the mode toggles (walkforward is a distinct
-/// mode). Wraps every strategy shape's `stable_period` + full-run backtest
+/// mode). Wraps every strategy shape's `stable_bars` + full-run backtest
 /// in the two closures the library's [`spec_optimize::walkforward`] takes.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_walkforward(
@@ -1523,7 +1523,7 @@ pub(crate) fn run_walkforward(
                 if needs_probe_feed {
                     built.update(probe_snapshot.clone());
                 }
-                Ok(built.stable_period())
+                Ok(built.stable_bars())
             };
 
             let run_backtest = |params: &std::collections::HashMap<String, JsonValue>|

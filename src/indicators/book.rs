@@ -475,7 +475,7 @@ impl<Sym: Hash + Eq + Clone> Book<Sym> {
 
     /// The just-completed bar's equity return —
     /// `(equity - prev_equity) / prev_equity`. [`None`] on the first bar
-    /// (`warm_up_period() = 2`).
+    /// (`warm_up_bars() = 2`).
     pub fn return_per_bar<In>(&self) -> BookField<Sym, In> {
         BookField::new(self.clone(), 2, |s| s.active_return)
     }
@@ -548,7 +548,7 @@ impl<Sym, In> Indicator for BookField<Sym, In> {
         (self.select)(&self.book.state.lock().expect("Book lock poisoned"))
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         self.warm_up
     }
 

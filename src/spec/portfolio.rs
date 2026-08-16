@@ -515,14 +515,14 @@ impl PortfolioSpec {
 
         // Track each child's readiness periods at build. We inspect the
         // typed child *before* boxing into `Box<dyn Strategy>` — the
-        // erased trait doesn't expose `stable_period` / `warm_up_period`,
+        // erased trait doesn't expose `stable_bars` / `warm_up_bars`,
         // so this is the only chance to capture them for
-        // [`DynPortfolio::stable_period`] to aggregate later.
+        // [`DynPortfolio::stable_bars`] to aggregate later.
         //
         // Multi / basket children with lazy per-symbol chains report only
         // their rebalance signal's period at this point (chains build on
         // first snapshot). A portfolio containing them may under-report
-        // stable_period slightly at build time — accurate for the common
+        // stable_bars slightly at build time — accurate for the common
         // case of a portfolio of single-asset strategies, understated for
         // portfolios of basket / multi children. The `optimize
         // --walkforward` layout uses this reading to skip the initial
@@ -553,29 +553,29 @@ impl PortfolioSpec {
             builder = match &c.strategy {
                 PortfolioChildStrategy::Single(s) => {
                     let built = s.try_build(child_equity, schema)?;
-                    stable = built.stable_period();
-                    warm_up = built.warm_up_period();
+                    stable = built.stable_bars();
+                    warm_up = built.warm_up_bars();
                     child_books.push(built.book());
                     builder.add(name, built)
                 }
                 PortfolioChildStrategy::Pairs(p) => {
                     let built = p.try_build(child_equity, schema)?;
-                    stable = built.stable_period();
-                    warm_up = built.warm_up_period();
+                    stable = built.stable_bars();
+                    warm_up = built.warm_up_bars();
                     child_books.push(built.book());
                     builder.add(name, built)
                 }
                 PortfolioChildStrategy::Basket(b) => {
                     let built = b.try_build(child_equity, schema)?;
-                    stable = built.stable_period();
-                    warm_up = built.warm_up_period();
+                    stable = built.stable_bars();
+                    warm_up = built.warm_up_bars();
                     child_books.push(built.book());
                     builder.add(name, built)
                 }
                 PortfolioChildStrategy::Multi(m) => {
                     let built = m.try_build(child_equity, schema)?;
-                    stable = built.stable_period();
-                    warm_up = built.warm_up_period();
+                    stable = built.stable_bars();
+                    warm_up = built.warm_up_bars();
                     child_books.push(built.book());
                     builder.add(name, built)
                 }
@@ -702,8 +702,8 @@ impl PortfolioSpec {
                     child_root.as_ref(),
                 )?;
                 let real_ind = AsReal::try_new(dyn_ind)?;
-                max_stable = max_stable.max(real_ind.stable_period());
-                max_warm_up = max_warm_up.max(real_ind.warm_up_period());
+                max_stable = max_stable.max(real_ind.stable_bars());
+                max_warm_up = max_warm_up.max(real_ind.warm_up_bars());
                 shares.push(Box::new(real_ind));
             }
             builder = builder.weight_shares(shares);
@@ -727,8 +727,8 @@ impl PortfolioSpec {
             let dyn_ind: Box<dyn DynIndicator> =
                 rebalance_spec.try_build(&anchor, &agg_book, Some(&agg_book), schema, None)?;
             let signal = AsBool::try_new(dyn_ind)?;
-            max_stable = max_stable.max(signal.stable_period());
-            max_warm_up = max_warm_up.max(signal.warm_up_period());
+            max_stable = max_stable.max(signal.stable_bars());
+            max_warm_up = max_warm_up.max(signal.warm_up_bars());
             builder = builder.rebalance_on(signal);
         }
         // Install the position-phase policy — omitted `rebalance_policy:`
@@ -742,8 +742,8 @@ impl PortfolioSpec {
         let built = builder.build();
         Ok(DynPortfolio {
             inner: built,
-            stable_period: max_stable,
-            warm_up_period: max_warm_up,
+            stable_bars: max_stable,
+            warm_up_bars: max_warm_up,
         })
     }
 
@@ -791,9 +791,9 @@ pub struct DynPortfolio {
     inner: Portfolio<String>,
     /// Max child stable-period captured at build (see
     /// [`PortfolioSpec::build`] for the lazy-child caveat).
-    stable_period: usize,
+    stable_bars: usize,
     /// Max child warm-up-period captured at build.
-    warm_up_period: usize,
+    warm_up_bars: usize,
 }
 
 impl Strategy for DynPortfolio {
@@ -854,15 +854,15 @@ impl DynPortfolio {
     /// containing basket / multi children under-report this at build time
     /// (only the child's rebalance signal period), since lazy per-symbol
     /// chains haven't built yet.
-    pub fn stable_period(&self) -> usize {
-        self.stable_period
+    pub fn stable_bars(&self) -> usize {
+        self.stable_bars
     }
 
     /// Warm-up-only aggregate (ignoring IIR settling) — the walkforward
-    /// twin of [`stable_period`](Self::stable_period), used under
+    /// twin of [`stable_bars`](Self::stable_bars), used under
     /// `--keep-unstable`.
-    pub fn warm_up_period(&self) -> usize {
-        self.warm_up_period
+    pub fn warm_up_bars(&self) -> usize {
+        self.warm_up_bars
     }
 
     /// Serialize the wrapped portfolio's resumable state (per-child ledgers +
@@ -1221,7 +1221,7 @@ mod tests {
         // Should build cleanly — !never resolves to ValueBool::false, which
         // has zero warm-up / stable period.
         let portfolio = spec.build(1_000.0, &Schema::empty(), None);
-        assert_eq!(portfolio.stable_period(), 0);
+        assert_eq!(portfolio.stable_bars(), 0);
     }
 
     #[test]

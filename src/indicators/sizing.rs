@@ -71,7 +71,7 @@ pub fn equal_weight<Sym: Clone + PartialEq + 'static>(
 /// bars, etc.
 ///
 /// Warm-up is `window + 1` samples (one extra bar for the first log-return
-/// `diff(1)`). The sizing indicator's `stable_period()` folds into the
+/// `diff(1)`). The sizing indicator's `stable_bars()` folds into the
 /// strategy's readiness gate, so no trade fires while it is still warming.
 ///
 /// # Basket usage
@@ -337,7 +337,7 @@ impl<Sym: std::hash::Hash + Eq + Clone, In> Indicator for DrawdownThrottle<Sym, 
         Some(raw.clamp(0.0, 1.0))
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         0
     }
 
@@ -386,7 +386,7 @@ impl<S: Indicator<Output = Real>> Indicator for FractionalKelly<S> {
     /// bar counts. Until the window fills, the recipe emits `None`, and
     /// the strategy's "sizing None ⇒ skip trade" safe default holds
     /// entries.
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         0
     }
 

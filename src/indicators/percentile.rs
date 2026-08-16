@@ -90,12 +90,12 @@ impl<S: Indicator<Output = Real>> Indicator for Percentile<S> {
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
-        self.source.warm_up_period().max(1) + self.window.period() - 1
+    fn warm_up_bars(&self) -> usize {
+        self.source.warm_up_bars().max(1) + self.window.period() - 1
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {
@@ -182,12 +182,12 @@ impl<S: Indicator<Output = Real>> Indicator for PercentileRank<S> {
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
-        self.source.warm_up_period().max(1) + self.window.period() - 1
+    fn warm_up_bars(&self) -> usize {
+        self.source.warm_up_bars().max(1) + self.window.period() - 1
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {
@@ -311,9 +311,9 @@ mod tests {
     fn warm_up_is_the_window_over_a_ready_source() {
         let p = || Percentile::new(Identity::<Real>::new(), 20, 0.8);
         let r = || PercentileRank::new(Identity::<Real>::new(), 20);
-        assert_eq!(p().warm_up_period(), 20);
-        assert_eq!(r().warm_up_period(), 20);
-        assert_eq!(p().unstable_period(), 0);
+        assert_eq!(p().warm_up_bars(), 20);
+        assert_eq!(r().warm_up_bars(), 20);
+        assert_eq!(p().unstable_bars(), 0);
     }
 
     #[test]

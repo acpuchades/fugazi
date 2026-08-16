@@ -47,11 +47,11 @@ use crate::types::{Candle, Real};
 /// **The clock stays base-timeframe.** `Resample` is fed one base candle per
 /// `update()` call and reports results at that same base cadence — the
 /// emitted `Option<Candle>` marks *whether* a bucket has just completed. It
-/// carries no internal notion of "an HTF tick"; `warm_up_period()` is
+/// carries no internal notion of "an HTF tick"; `warm_up_bars()` is
 /// measured in **base samples**, not HTF ones, and matches the base index of
-/// the first emission (`inner.warm_up_period() + every - 1`). Any recursive
+/// the first emission (`inner.warm_up_bars() + every - 1`). Any recursive
 /// downstream indicator (EMA/RSI/ATR/…) reasons in HTF-sample units of its
-/// own, so its `warm_up_period()` and `unstable_period()` composed with a
+/// own, so its `warm_up_bars()` and `unstable_bars()` composed with a
 /// `Resample` are also in HTF-sample units — feed the pipeline enough
 /// leading history for the recursive tail to decay if you need base-bar-
 /// correct stability accounting.
@@ -201,19 +201,19 @@ impl<S: Indicator<Output = Candle>> Indicator for Resample<S> {
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         // The k-th inner-emitted candle arrives at input sample
-        // `inner.warm_up_period() + k - 1`. The first bucket completes on the
-        // `every`-th inner emission — sample `inner.warm_up_period() + every - 1`.
-        self.inner.warm_up_period() + self.every - 1
+        // `inner.warm_up_bars() + k - 1`. The first bucket completes on the
+        // `every`-th inner emission — sample `inner.warm_up_bars() + every - 1`.
+        self.inner.warm_up_bars() + self.every - 1
     }
 
-    fn unstable_period(&self) -> usize {
+    fn unstable_bars(&self) -> usize {
         // Windowed / FIR: no additional instability of its own; downstream
         // recursive smoothers reason in inner-emit units, so any base-bar
-        // interpretation of `stable_period()` is only correct in higher-timeframe
+        // interpretation of `stable_bars()` is only correct in higher-timeframe
         // sample counts — not in base bars.
-        self.inner.unstable_period()
+        self.inner.unstable_bars()
     }
 
     fn reset(&mut self) {
@@ -291,14 +291,14 @@ impl<S: Indicator> Indicator for Latch<S> {
         self.value.clone()
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         // `max(1)` guards a `warm_up = 0` inner — Latch holds nothing before
         // its first `update`, so its first `Some` is at update ≥ 1.
-        self.inner.warm_up_period().max(1)
+        self.inner.warm_up_bars().max(1)
     }
 
-    fn unstable_period(&self) -> usize {
-        self.inner.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.inner.unstable_bars()
     }
 
     fn reset(&mut self) {
@@ -374,7 +374,7 @@ mod tests {
     #[test]
     fn resample_warm_up_lands_on_the_first_emit() {
         let mut r = Resample::new(Current::candle(), 4);
-        assert_eq!(r.warm_up_period(), 4);
+        assert_eq!(r.warm_up_bars(), 4);
         for (i, c) in bars().into_iter().enumerate() {
             let sample = i + 1;
             let ready = r.update(c.into()).is_some();
@@ -431,11 +431,11 @@ mod tests {
     }
 
     #[test]
-    fn latch_unstable_period_passes_through() {
+    fn latch_unstable_bars_passes_through() {
         let raw = Ema::new(Current::close(), 20);
         let latched = Latch::new(Ema::new(Current::close(), 20));
-        assert_eq!(latched.unstable_period(), raw.unstable_period());
-        assert_eq!(latched.warm_up_period(), raw.warm_up_period());
+        assert_eq!(latched.unstable_bars(), raw.unstable_bars());
+        assert_eq!(latched.warm_up_bars(), raw.warm_up_bars());
     }
 
     #[test]

@@ -15,13 +15,13 @@ wallet).
 `value()`, `is_ready()`, `reset()`, `save_state()`/`load_state()` (default no-op;
 see *Run resuming*), plus:
 
-- **`warm_up_period()`** — *exact* samples before first `Some`. Wrappers add on
+- **`warm_up_bars()`** — *exact* samples before first `Some`. Wrappers add on
   top; binary carriers take max. `tests/warm_up.rs` asserts exactness — add new
   indicators to that battery.
-- **`unstable_period()`** (default `0`) — extra samples IIR smoothers need for
+- **`unstable_bars()`** (default `0`) — extra samples IIR smoothers need for
   the seed's residual to decay below `SETTLE_TOLERANCE = 1e-3`. Wrappers sum into
   the source's.
-- **`stable_period()`** = warm-up + unstable.
+- **`stable_bars()`** = warm-up + unstable.
 
 Output is `Option` (warm-up → `None`).
 
@@ -120,7 +120,7 @@ leaves (`!close`/`!high`/…) resolve through the **blessed root** instead (see
 
 ### `Unstable<S>` (`indicators/unstable.rs`)
 
-Passthrough forwarding everything to `S` *except* `unstable_period() = 0`. Fluent
+Passthrough forwarding everything to `S` *except* `unstable_bars() = 0`. Fluent
 `.unstable()` on both extension traits. YAML: `!unstable { source }`. Opt-in
 override for the readiness gate.
 
@@ -203,7 +203,7 @@ The concrete `Strategy` (Input = Candle) — long/flat/short driven by boolean
 signals, sized against equity. Four `Box<dyn Signal>` slots (open/close long,
 open/close short), default `Const::<Candle>::new(false)`.
 
-- **Readiness gate.** `is_ready()` = `bars_seen >= max(stable_period())` across
+- **Readiness gate.** `is_ready()` = `bars_seen >= max(stable_bars())` across
   every wired signal, protective level, and sizing indicator. Wrap a subtree in
   `Unstable` to contribute `0`.
 - **Builders.** `long_on(enter, exit)`, `short_on(enter, exit)` (opposite-side
@@ -354,7 +354,7 @@ not on how it ranks against the rest.
   `.any_of([...])` lax / `.universe(custom_impl)` / floating default.
 - **Per-symbol readiness.** Under floating / `any_of`: a symbol trades once *its
   own* chains have settled (gated inside `trade`); under `all_of`: `is_ready()`
-  blocks until every listed leg is past its own `stable_period`.
+  blocks until every listed leg is past its own `stable_bars`.
 - **State.** Per-symbol `Position` + shared `Book<Sym>` (aggregate equity).
 - **`rebalance_on(signal)`** (default `Const::false` — never). On fire, resizes
   every held per-symbol position to its current sizing target. Entry/exit signals
@@ -420,7 +420,7 @@ normal `Wallet<Sym>` in, normal `RunReport<Sym>` out — so every metric / windo
   `on_fill` (market fill: pro-rata by intent; protective fill: wholly the child
   whose leg was rested). The raw account fill lands in `report.fills`.
 - **`WeightPolicy` (`portfolio::policy`).** `trait WeightPolicy { observe;
-  weights(&self, n) -> Vec<Real>; warm_up_period; reset }`. Two built-ins:
+  weights(&self, n) -> Vec<Real>; warm_up_bars; reset }`. Two built-ins:
   **`Fixed(Vec<Real>)`** and **`EqualWeight`**. `weights(n)` splits the initial cash
   budget across children and, when no per-child weight-share indicators are
   installed, is re-queried at each rebalance-fire.
@@ -462,8 +462,8 @@ normal `Wallet<Sym>` in, normal `RunReport<Sym>` out — so every metric / windo
   debits fold into the contributor's shortfall for the position phase; a failed
   receiver credit refunds the pot symmetrically. Position phase is universally
   supported (`set_position` only).
-- **Readiness.** `is_ready() = bars_seen >= policy.warm_up_period() && bars_seen >=
-  rebalance.stable_period() && every child is ready`.
+- **Readiness.** `is_ready() = bars_seen >= policy.warm_up_bars() && bars_seen >=
+  rebalance.stable_bars() && every child is ready`.
 - **YAML.** `portfolio:` prefix + `PortfolioSpec` (`src/spec/portfolio.rs`).
   `children:` is an ordered list of `{ name, strategy }` slots; `strategy:` accepts
   any of the four shapes routed by distinctive top-level key (`left`+`right` →
@@ -778,7 +778,7 @@ type):
 
 **`IfElse<Cond, T, F>`** — three-source ternary. `Cond: Indicator<Output=bool>`
 picks: `Some(true)` → `if_true`, `Some(false)` → `if_false`, `None` propagates. All
-three advanced every bar (never short-circuited). `warm_up_period()`/`stable_period()`
+three advanced every bar (never short-circuited). `warm_up_bars()`/`stable_bars()`
 report the max across three (safe worst case), but **first `Some` can arrive
 earlier** — cond + the selected branch settled is enough. `IfElse` is excluded from
 `tests/warm_up.rs`. Fluent `.if_else(t, f)` on `BoolIndicatorExt`. YAML: `!if_else {

@@ -100,20 +100,20 @@ where
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         // Same as the composed `And<Gt, Change<Gt>>`: max of the operands,
         // clamped to 1 so a `warm_up = 0` operand (e.g. a `ValueBool`) still
         // needs one update before the prev slot can be compared against,
         // plus 1 for the edge detection.
         self.lhs
-            .warm_up_period()
-            .max(self.rhs.warm_up_period())
+            .warm_up_bars()
+            .max(self.rhs.warm_up_bars())
             .max(1)
             + 1
     }
 
-    fn unstable_period(&self) -> usize {
-        self.lhs.unstable_period().max(self.rhs.unstable_period())
+    fn unstable_bars(&self) -> usize {
+        self.lhs.unstable_bars().max(self.rhs.unstable_bars())
     }
 
     fn reset(&mut self) {
@@ -173,12 +173,12 @@ where
         self.0.value()
     }
 
-    fn warm_up_period(&self) -> usize {
-        self.0.warm_up_period()
+    fn warm_up_bars(&self) -> usize {
+        self.0.warm_up_bars()
     }
 
-    fn unstable_period(&self) -> usize {
-        self.0.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.0.unstable_bars()
     }
 
     fn reset(&mut self) {
@@ -208,9 +208,9 @@ mod tests {
         samples: &[Real],
     ) {
         assert_eq!(
-            native.warm_up_period(),
-            composed.warm_up_period(),
-            "warm_up_period mismatch",
+            native.warm_up_bars(),
+            composed.warm_up_bars(),
+            "warm_up_bars mismatch",
         );
         for &x in samples {
             let n = native.update(x);

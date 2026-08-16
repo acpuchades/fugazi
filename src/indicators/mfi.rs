@@ -93,13 +93,13 @@ impl<S: Indicator<Output = Candle>> Indicator for Mfi<S> {
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         // One bar seeds the typical-price move, then a full window of flows.
-        self.source.warm_up_period().max(1) + self.positive.period()
+        self.source.warm_up_bars().max(1) + self.positive.period()
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {

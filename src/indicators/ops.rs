@@ -114,14 +114,14 @@ where
         self.value.clone()
     }
 
-    fn warm_up_period(&self) -> usize {
-        self.lhs.warm_up_period().max(self.rhs.warm_up_period())
+    fn warm_up_bars(&self) -> usize {
+        self.lhs.warm_up_bars().max(self.rhs.warm_up_bars())
     }
 
-    fn unstable_period(&self) -> usize {
+    fn unstable_bars(&self) -> usize {
         // Settled once the later-settling side is, expressed relative to this
         // indicator's own (max-of-both) warm-up.
-        self.lhs.stable_period().max(self.rhs.stable_period()) - self.warm_up_period()
+        self.lhs.stable_bars().max(self.rhs.stable_bars()) - self.warm_up_bars()
     }
 
     fn reset(&mut self) {
@@ -272,15 +272,15 @@ where
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         // The lagged operand needs a source output `period` steps before the
         // current one. `max(1)` so a `warm_up = 0` source (e.g. `Value`) still
         // requires the full period of updates.
-        self.source.warm_up_period().max(1) + self.period
+        self.source.warm_up_bars().max(1) + self.period
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {
@@ -430,15 +430,15 @@ where
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         // A full window of source outputs, the first of which arrives at the
         // source's own warm-up. `max(1)` so a `warm_up = 0` source (e.g.
         // `Value`) still requires the full window of updates.
-        self.source.warm_up_period().max(1) + self.inner.period() - 1
+        self.source.warm_up_bars().max(1) + self.inner.period() - 1
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {

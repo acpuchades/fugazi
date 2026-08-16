@@ -110,9 +110,9 @@ fn level_value<Sym>(level: &Option<Level<Sym>>) -> Option<Real> {
 /// ## Readiness
 ///
 /// [`is_ready`](Strategy::is_ready) returns `true` once `bars_seen` reaches the
-/// largest `stable_period()` across every wired signal, any attached spread
+/// largest `stable_bars()` across every wired signal, any attached spread
 /// level, and the sizing indicator. Because the internal spread is a raw
-/// close-of-left − close-of-right expression, its own `stable_period()` is `0`
+/// close-of-left − close-of-right expression, its own `stable_bars()` is `0`
 /// and it never dominates.
 ///
 /// ```
@@ -383,16 +383,16 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Pair
     }
 
     /// The number of bars that must be fed before [`is_ready`](Strategy::is_ready)
-    /// reports `true`: the largest `stable_period()` across `enter`, `exit`, any
+    /// reports `true`: the largest `stable_bars()` across `enter`, `exit`, any
     /// attached spread level, and the sizing indicator. Same aggregation shape as
-    /// [`SingleAssetStrategy::stable_period`](crate::strategies::SingleAssetStrategy::stable_period).
-    pub fn stable_period(&self) -> usize {
+    /// [`SingleAssetStrategy::stable_bars`](crate::strategies::SingleAssetStrategy::stable_bars).
+    pub fn stable_bars(&self) -> usize {
         let mut needed = self
             .long_enter
-            .stable_period()
-            .max(self.long_exit.stable_period())
-            .max(self.short_enter.stable_period())
-            .max(self.short_exit.stable_period());
+            .stable_bars()
+            .max(self.long_exit.stable_bars())
+            .max(self.short_enter.stable_bars())
+            .max(self.short_exit.stable_bars());
         for level in [
             &self.long_stop,
             &self.long_target,
@@ -402,24 +402,24 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Pair
         .into_iter()
         .flatten()
         {
-            needed = needed.max(level.stable_period());
+            needed = needed.max(level.stable_bars());
         }
-        needed = needed.max(self.sizing.stable_period());
+        needed = needed.max(self.sizing.stable_bars());
         needed
     }
 
-    /// The largest `warm_up_period()` across every wired signal, attached
+    /// The largest `warm_up_bars()` across every wired signal, attached
     /// spread level, and the sizing indicator — the readiness threshold
     /// *ignoring* IIR settling (matching `optimize --walkforward
     /// --keep-unstable`). Same aggregation shape as
-    /// [`stable_period`](Self::stable_period).
-    pub fn warm_up_period(&self) -> usize {
+    /// [`stable_bars`](Self::stable_bars).
+    pub fn warm_up_bars(&self) -> usize {
         let mut needed = self
             .long_enter
-            .warm_up_period()
-            .max(self.long_exit.warm_up_period())
-            .max(self.short_enter.warm_up_period())
-            .max(self.short_exit.warm_up_period());
+            .warm_up_bars()
+            .max(self.long_exit.warm_up_bars())
+            .max(self.short_enter.warm_up_bars())
+            .max(self.short_exit.warm_up_bars());
         for level in [
             &self.long_stop,
             &self.long_target,
@@ -429,9 +429,9 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Pair
         .into_iter()
         .flatten()
         {
-            needed = needed.max(level.warm_up_period());
+            needed = needed.max(level.warm_up_bars());
         }
-        needed = needed.max(self.sizing.warm_up_period());
+        needed = needed.max(self.sizing.warm_up_bars());
         needed
     }
 
@@ -609,7 +609,7 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Stra
     }
 
     fn is_ready(&self) -> bool {
-        self.bars_seen >= self.stable_period()
+        self.bars_seen >= self.stable_bars()
     }
 
     fn on_fill(&mut self, order: &Order<Sym>) {
@@ -810,7 +810,7 @@ mod tests {
             fn value(&self) -> Option<bool> {
                 self.last
             }
-            fn warm_up_period(&self) -> usize {
+            fn warm_up_bars(&self) -> usize {
                 0
             }
             fn reset(&mut self) {
@@ -1043,7 +1043,7 @@ mod tests {
             fn value(&self) -> Option<bool> {
                 self.last
             }
-            fn warm_up_period(&self) -> usize {
+            fn warm_up_bars(&self) -> usize {
                 0
             }
             fn reset(&mut self) {

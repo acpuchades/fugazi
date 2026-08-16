@@ -114,19 +114,19 @@ impl<S: Indicator<Output = Real>> Indicator for Macd<S> {
         }
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         // All three EMAs seed on their first sample, so the whole triple is
         // ready as soon as the source is. `max(1)` because seeding needs at
         // least one `update` call.
-        self.source.warm_up_period().max(1)
+        self.source.warm_up_bars().max(1)
     }
 
-    fn unstable_period(&self) -> usize {
+    fn unstable_bars(&self) -> usize {
         // The MACD line settles once the slower-settling of the two price EMAs
         // has; the signal EMA then re-smooths it, adding its own settling.
-        self.source.unstable_period()
-            + self.fast.unstable_period().max(self.slow.unstable_period())
-            + self.signal_ema.unstable_period()
+        self.source.unstable_bars()
+            + self.fast.unstable_bars().max(self.slow.unstable_bars())
+            + self.signal_ema.unstable_bars()
     }
 
     fn reset(&mut self) {

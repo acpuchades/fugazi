@@ -88,15 +88,15 @@ struct PerAssetState<Sym> {
 }
 
 impl<Sym> PerAssetState<Sym> {
-    /// Largest `stable_period()` across this symbol's four signals, four
+    /// Largest `stable_bars()` across this symbol's four signals, four
     /// (optional) protective levels, and sizing — same aggregation as
-    /// [`SingleAssetStrategy::stable_period`](crate::strategies::SingleAssetStrategy::stable_period),
+    /// [`SingleAssetStrategy::stable_bars`](crate::strategies::SingleAssetStrategy::stable_bars),
     /// applied per leg.
-    fn stable_period(&self) -> usize {
-        let mut n = self.long.stable_period();
-        n = n.max(self.close_long.stable_period());
-        n = n.max(self.short.stable_period());
-        n = n.max(self.close_short.stable_period());
+    fn stable_bars(&self) -> usize {
+        let mut n = self.long.stable_bars();
+        n = n.max(self.close_long.stable_bars());
+        n = n.max(self.short.stable_bars());
+        n = n.max(self.close_short.stable_bars());
         for level in [
             &self.long_stop,
             &self.long_target,
@@ -106,20 +106,20 @@ impl<Sym> PerAssetState<Sym> {
         .into_iter()
         .flatten()
         {
-            n = n.max(level.stable_period());
+            n = n.max(level.stable_bars());
         }
-        n.max(self.sizing.stable_period())
+        n.max(self.sizing.stable_bars())
     }
 
-    /// Largest `warm_up_period()` across this symbol's four signals, four
+    /// Largest `warm_up_bars()` across this symbol's four signals, four
     /// (optional) protective levels, and sizing — the warm-up-only twin of
-    /// [`stable_period`](Self::stable_period), ignoring IIR unstable
+    /// [`stable_bars`](Self::stable_bars), ignoring IIR unstable
     /// settling.
-    fn warm_up_period(&self) -> usize {
-        let mut n = self.long.warm_up_period();
-        n = n.max(self.close_long.warm_up_period());
-        n = n.max(self.short.warm_up_period());
-        n = n.max(self.close_short.warm_up_period());
+    fn warm_up_bars(&self) -> usize {
+        let mut n = self.long.warm_up_bars();
+        n = n.max(self.close_long.warm_up_bars());
+        n = n.max(self.short.warm_up_bars());
+        n = n.max(self.close_short.warm_up_bars());
         for level in [
             &self.long_stop,
             &self.long_target,
@@ -129,9 +129,9 @@ impl<Sym> PerAssetState<Sym> {
         .into_iter()
         .flatten()
         {
-            n = n.max(level.warm_up_period());
+            n = n.max(level.warm_up_bars());
         }
-        n.max(self.sizing.warm_up_period())
+        n.max(self.sizing.warm_up_bars())
     }
 
     /// Whether this leg has seen enough bars for its own decision to be
@@ -140,7 +140,7 @@ impl<Sym> PerAssetState<Sym> {
     /// [`Universe`](crate::strategies::universe::Universe) impl (e.g.
     /// [`AllOf`](crate::strategies::universe::AllOf)).
     fn is_ready(&self) -> bool {
-        self.bars_seen >= self.stable_period()
+        self.bars_seen >= self.stable_bars()
     }
 }
 
@@ -198,7 +198,7 @@ impl<Sym> PerAssetState<Sym> {
 /// [`trade`](Strategy::trade) (a symbol whose own state hasn't settled
 /// simply doesn't trade this bar); under `all_of` it stays `false` until
 /// every listed symbol has passed its own
-/// `stable_period` so the driver skips
+/// `stable_bars` so the driver skips
 /// [`trade`](Strategy::trade) entirely while the declared universe warms.
 ///
 /// ## Book anchor
@@ -482,7 +482,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
     /// (an absent symbol panics from [`update`](Strategy::update)), and
     /// [`is_ready`](Strategy::is_ready) stays `false` until every listed
     /// symbol has passed its own
-    /// `stable_period`. Non-listed
+    /// `stable_bars`. Non-listed
     /// symbols are filtered out at discovery — no per-symbol state is
     /// built for them.
     ///
@@ -532,7 +532,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
         self.book.clone()
     }
 
-    /// The largest `stable_period()` across every currently-discovered
+    /// The largest `stable_bars()` across every currently-discovered
     /// symbol's per-asset chains and the rebalance gate — the number of
     /// bars the driver waits before treating the strategy as ready.
     ///
@@ -545,25 +545,25 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
     /// or any caller that wants the "worst case across every symbol"
     /// number), feed the strategy one representative snapshot with
     /// [`update`](Strategy::update) first so the per-symbol chains exist,
-    /// then read `stable_period()`.
-    pub fn stable_period(&self) -> usize {
-        let mut n = self.rebalance.stable_period();
+    /// then read `stable_bars()`.
+    pub fn stable_bars(&self) -> usize {
+        let mut n = self.rebalance.stable_bars();
         for state in self.states.values() {
-            n = n.max(state.stable_period());
+            n = n.max(state.stable_bars());
         }
         n
     }
 
-    /// The warm-up-only twin of [`stable_period`](Self::stable_period) —
+    /// The warm-up-only twin of [`stable_bars`](Self::stable_bars) —
     /// ignores IIR unstable settling. Used by
     /// `optimize --walkforward --keep-unstable`.
     ///
     /// Same lazy-readiness caveat: feed one snapshot before probing so
     /// per-symbol chains exist.
-    pub fn warm_up_period(&self) -> usize {
-        let mut n = self.rebalance.warm_up_period();
+    pub fn warm_up_bars(&self) -> usize {
+        let mut n = self.rebalance.warm_up_bars();
         for state in self.states.values() {
-            n = n.max(state.warm_up_period());
+            n = n.max(state.warm_up_bars());
         }
         n
     }
@@ -819,7 +819,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Mu
         // the strategy is always ready to try.
         //
         // all_of: strict — the driver skips trade() until every listed
-        // symbol has been discovered and is past its own stable_period,
+        // symbol has been discovered and is past its own stable_bars,
         // so the whole portfolio sits through warm-up rather than trading
         // a partial universe.
         self.universe
@@ -984,10 +984,10 @@ mod tests {
     }
 
     #[test]
-    fn all_of_is_ready_gates_on_every_listed_symbol_past_stable_period() {
+    fn all_of_is_ready_gates_on_every_listed_symbol_past_stable_bars() {
         // SMA-3 on close: first two bars unready per symbol. Under all_of,
         // is_ready waits until every listed symbol has passed its own
-        // stable_period.
+        // stable_bars.
         let mut strat: MultiAssetStrategy<&'static str> =
             MultiAssetStrategy::with_initial_equity(1_000.0)
                 .long_on(
@@ -1001,7 +1001,7 @@ mod tests {
         strat.update(snap(&[("A", 101.0), ("B", 51.0)]));
         assert!(!strat.is_ready());
         strat.update(snap(&[("A", 102.0), ("B", 52.0)]));
-        assert!(strat.is_ready(), "both listed have hit their stable_period");
+        assert!(strat.is_ready(), "both listed have hit their stable_bars");
     }
 
     #[test]

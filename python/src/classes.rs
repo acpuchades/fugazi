@@ -944,22 +944,22 @@ impl PyAtomSource {
         Ok(out.map(|inner| PyAtom { inner }))
     }
 
-    pub(crate) fn warm_up_period(&self) -> usize {
+    pub(crate) fn warm_up_bars(&self) -> usize {
         match &self.inner {
-            AnyAtomSource::Atom(s) => Indicator::warm_up_period(s),
-            AnyAtomSource::Snapshot(s) => Indicator::warm_up_period(s),
+            AnyAtomSource::Atom(s) => Indicator::warm_up_bars(s),
+            AnyAtomSource::Snapshot(s) => Indicator::warm_up_bars(s),
         }
     }
 
-    pub(crate) fn unstable_period(&self) -> usize {
+    pub(crate) fn unstable_bars(&self) -> usize {
         match &self.inner {
-            AnyAtomSource::Atom(s) => Indicator::unstable_period(s),
-            AnyAtomSource::Snapshot(s) => Indicator::unstable_period(s),
+            AnyAtomSource::Atom(s) => Indicator::unstable_bars(s),
+            AnyAtomSource::Snapshot(s) => Indicator::unstable_bars(s),
         }
     }
 
-    pub(crate) fn stable_period(&self) -> usize {
-        self.warm_up_period() + self.unstable_period()
+    pub(crate) fn stable_bars(&self) -> usize {
+        self.warm_up_bars() + self.unstable_bars()
     }
 
     pub(crate) fn reset(&mut self) {
@@ -1043,20 +1043,20 @@ impl PyIndicator {
     }
 
     /// The number of samples needed before the first value can appear.
-    pub(crate) fn warm_up_period(&self) -> usize {
-        self.src.warm_up_period()
+    pub(crate) fn warm_up_bars(&self) -> usize {
+        self.src.warm_up_bars()
     }
 
     /// Extra samples after warm-up before a recursive indicator (EMA, RSI, …)
     /// has effectively converged; `0` for windowed indicators.
-    pub(crate) fn unstable_period(&self) -> usize {
-        self.src.unstable_period()
+    pub(crate) fn unstable_bars(&self) -> usize {
+        self.src.unstable_bars()
     }
 
-    /// `warm_up_period() + unstable_period()`: how much history to feed before
+    /// `warm_up_bars() + unstable_bars()`: how much history to feed before
     /// trusting the output.
-    pub(crate) fn stable_period(&self) -> usize {
-        self.src.warm_up_period() + self.src.unstable_period()
+    pub(crate) fn stable_bars(&self) -> usize {
+        self.src.warm_up_bars() + self.src.unstable_bars()
     }
 
     /// Reset all internal state to freshly-constructed.
@@ -1286,9 +1286,9 @@ impl PyIndicator {
         ))
     }
 
-    /// Passthrough that forces this indicator's reported `unstable_period()` to
-    /// `0`. Output and `warm_up_period()` are unchanged; a downstream reader of
-    /// `stable_period()` (a strategy readiness gate, an overlay trim) no longer
+    /// Passthrough that forces this indicator's reported `unstable_bars()` to
+    /// `0`. Output and `warm_up_bars()` are unchanged; a downstream reader of
+    /// `stable_bars()` (a strategy readiness gate, an overlay trim) no longer
     /// waits for this subtree's IIR settling tail. Use to explicitly opt out of
     /// the safe default that waits for it.
     pub(crate) fn unstable(&self) -> PyIndicator {
@@ -1352,20 +1352,20 @@ impl PySignal {
 
     /// The number of samples needed before the signal can produce a real state
     /// (it reads `False` while warming up).
-    pub(crate) fn warm_up_period(&self) -> usize {
-        self.sig.warm_up_period()
+    pub(crate) fn warm_up_bars(&self) -> usize {
+        self.sig.warm_up_bars()
     }
 
     /// Extra samples after warm-up before any recursive sources inside the
     /// signal have effectively converged; `0` for windowed ones.
-    pub(crate) fn unstable_period(&self) -> usize {
-        self.sig.unstable_period()
+    pub(crate) fn unstable_bars(&self) -> usize {
+        self.sig.unstable_bars()
     }
 
-    /// `warm_up_period() + unstable_period()`: how much history to feed before
+    /// `warm_up_bars() + unstable_bars()`: how much history to feed before
     /// trusting the signal.
-    pub(crate) fn stable_period(&self) -> usize {
-        self.sig.warm_up_period() + self.sig.unstable_period()
+    pub(crate) fn stable_bars(&self) -> usize {
+        self.sig.warm_up_bars() + self.sig.unstable_bars()
     }
 
     /// Reset all internal state.
@@ -1406,9 +1406,9 @@ impl PySignal {
         PySignal::wrap(map_signal!(self.sig.clone(), |s| s.changed()))
     }
 
-    /// Passthrough that forces this signal's reported `unstable_period()` to
-    /// `0`. Output and `warm_up_period()` are unchanged; a downstream reader of
-    /// `stable_period()` (a strategy readiness gate) no longer waits for this
+    /// Passthrough that forces this signal's reported `unstable_bars()` to
+    /// `0`. Output and `warm_up_bars()` are unchanged; a downstream reader of
+    /// `stable_bars()` (a strategy readiness gate) no longer waits for this
     /// subtree's IIR settling tail. Mirrors the free `unstable(x)` function; use
     /// to explicitly opt out of the safe default that waits for the tail.
     pub(crate) fn unstable(&self) -> PySignal {
@@ -1482,16 +1482,16 @@ impl PyStrSource {
         self.src.value().is_some()
     }
 
-    pub(crate) fn warm_up_period(&self) -> usize {
-        self.src.warm_up_period()
+    pub(crate) fn warm_up_bars(&self) -> usize {
+        self.src.warm_up_bars()
     }
 
-    pub(crate) fn unstable_period(&self) -> usize {
-        self.src.unstable_period()
+    pub(crate) fn unstable_bars(&self) -> usize {
+        self.src.unstable_bars()
     }
 
-    pub(crate) fn stable_period(&self) -> usize {
-        self.src.warm_up_period() + self.src.unstable_period()
+    pub(crate) fn stable_bars(&self) -> usize {
+        self.src.warm_up_bars() + self.src.unstable_bars()
     }
 
     pub(crate) fn reset(&mut self) {
@@ -1609,20 +1609,20 @@ impl PyMulti {
 
     /// The number of samples needed before the first value can appear (for the
     /// slowest output line).
-    pub(crate) fn warm_up_period(&self) -> usize {
-        self.inner.warm_up_period()
+    pub(crate) fn warm_up_bars(&self) -> usize {
+        self.inner.warm_up_bars()
     }
 
     /// Extra samples after warm-up before a recursive indicator (MACD, ADX, …)
     /// has effectively converged; `0` for windowed indicators.
-    pub(crate) fn unstable_period(&self) -> usize {
-        self.inner.unstable_period()
+    pub(crate) fn unstable_bars(&self) -> usize {
+        self.inner.unstable_bars()
     }
 
-    /// `warm_up_period() + unstable_period()`: how much history to feed before
+    /// `warm_up_bars() + unstable_bars()`: how much history to feed before
     /// trusting the output.
-    pub(crate) fn stable_period(&self) -> usize {
-        self.inner.warm_up_period() + self.inner.unstable_period()
+    pub(crate) fn stable_bars(&self) -> usize {
+        self.inner.warm_up_bars() + self.inner.unstable_bars()
     }
 
     /// Reset all internal state.

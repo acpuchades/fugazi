@@ -980,8 +980,8 @@ pub struct WalkForwardResult {
 /// `probe_readiness`), computes the fold layout, and per fold ranks by
 /// IS-metric to pick a winner whose OOS slice contributes to the composite.
 ///
-/// `probe_readiness` should return the row's `stable_period()` (or
-/// `warm_up_period()` under a keep-unstable opt-out).
+/// `probe_readiness` should return the row's `stable_bars()` (or
+/// `warm_up_bars()` under a keep-unstable opt-out).
 ///
 /// `run_backtest` should return the full-run [`RunReport`](crate::RunReport) —
 /// per-fold slicing happens inside via [`metrics::report_slice`].

@@ -846,10 +846,12 @@ impl PyBinanceVision {
 /// price-less one (`time` + its own columns), and the frame builder omits the
 /// OHLCV block when no row carries a bar.
 ///
-/// Providers: `"binance"`, `"okx"`, `"coinbase"`, `"yfinance"`, `"cg"` (CoinGecko).
-/// `BinanceVision` needs a `market` (`"spot"`/`"futures"`) that this flat
-/// signature can't carry — construct it explicitly
-/// (`BinanceVision(market=...).fetch(...)`).
+/// Providers: `"binance"`, `"okx"`, `"coinbase"`, `"yfinance"`, `"cg"`
+/// (CoinGecko), `"binance-vision"` (public archive, spot) and
+/// `"binance-vision-futures"` (the same archive's USD-M tree, which adds the
+/// funding rate and positioning columns). The market rides in the provider id
+/// rather than a `market` kwarg, matching the CLI's ids; `BinanceVision(market=
+/// ...)` remains for the explicit form and for `base_url` overrides.
 #[pyfunction]
 #[pyo3(signature = (provider, symbol, freq = "1d", since = "2020-01-01", until = None, output = "polars"))]
 pub(crate) fn fetch(
@@ -870,12 +872,27 @@ pub(crate) fn fetch(
         "coinbase" => fetch_frame(py, &Coinbase::new(), out, symbol, interval, since_ts, until_ts),
         "yfinance" => fetch_frame(py, &Yahoo::new(), out, symbol, interval, since_ts, until_ts),
         "cg" => fetch_frame(py, &CoinGecko::new(), out, symbol, interval, since_ts, until_ts),
-        "binance-vision" => Err(PyValueError::new_err(
-            "binance-vision needs a market ('spot' or 'futures') that fetch()'s flat signature \
-             can't carry. Construct it explicitly: BinanceVision(market='futures').fetch(...).",
-        )),
+        "binance-vision" => fetch_frame(
+            py,
+            &BinanceVision::new(),
+            out,
+            symbol,
+            interval,
+            since_ts,
+            until_ts,
+        ),
+        "binance-vision-futures" => fetch_frame(
+            py,
+            &BinanceVision::futures(),
+            out,
+            symbol,
+            interval,
+            since_ts,
+            until_ts,
+        ),
         other => Err(PyValueError::new_err(format!(
-            "unknown provider {other:?}. Known providers: binance, okx, coinbase, yfinance, cg"
+            "unknown provider {other:?}. Known providers: binance, okx, coinbase, yfinance, cg, \
+             binance-vision, binance-vision-futures"
         ))),
     }
 }

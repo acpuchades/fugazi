@@ -4,7 +4,7 @@
 //! each build to their own `Dyn*Strategy` wrapper. Those wrappers already have
 //! the same surface: each implements
 //! `Strategy<Input = Snapshot<String>, Symbol = String>` and exposes
-//! `stable_period()` / `warm_up_period()`. The only genuine divergence is how a
+//! `stable_bars()` / `warm_up_bars()`. The only genuine divergence is how a
 //! run is *driven*: four go through a plain [`PaperWallet`] primed with
 //! per-symbol costs, while a portfolio owns a composite wallet with one
 //! sub-wallet per child and takes its costs at build time instead.
@@ -81,11 +81,11 @@ use super::strategy::DynSingleStrategy;
 pub trait RunnableStrategy: Strategy<Input = Snapshot<String>, Symbol = String> {
     /// Samples before every wired chain is both warmed and settled — what
     /// `optimize --walkforward` skips at the head of the series.
-    fn stable_period(&self) -> usize;
+    fn stable_bars(&self) -> usize;
 
     /// Warm-up only, ignoring IIR settling tails. The `--keep-unstable`
-    /// twin of [`stable_period`](Self::stable_period).
-    fn warm_up_period(&self) -> usize;
+    /// twin of [`stable_bars`](Self::stable_bars).
+    fn warm_up_bars(&self) -> usize;
 
     /// Drive this strategy over `snapshots` to completion and return the run
     /// report.
@@ -188,11 +188,11 @@ pub trait RunnableStrategy: Strategy<Input = Snapshot<String>, Symbol = String> 
 }
 
 impl RunnableStrategy for DynSingleStrategy {
-    fn stable_period(&self) -> usize {
-        DynSingleStrategy::stable_period(self)
+    fn stable_bars(&self) -> usize {
+        DynSingleStrategy::stable_bars(self)
     }
-    fn warm_up_period(&self) -> usize {
-        DynSingleStrategy::warm_up_period(self)
+    fn warm_up_bars(&self) -> usize {
+        DynSingleStrategy::warm_up_bars(self)
     }
     fn spec_kind(&self) -> &'static str {
         "single"
@@ -206,11 +206,11 @@ impl RunnableStrategy for DynSingleStrategy {
 }
 
 impl RunnableStrategy for DynPairsStrategy {
-    fn stable_period(&self) -> usize {
-        DynPairsStrategy::stable_period(self)
+    fn stable_bars(&self) -> usize {
+        DynPairsStrategy::stable_bars(self)
     }
-    fn warm_up_period(&self) -> usize {
-        DynPairsStrategy::warm_up_period(self)
+    fn warm_up_bars(&self) -> usize {
+        DynPairsStrategy::warm_up_bars(self)
     }
     fn spec_kind(&self) -> &'static str {
         "pairs"
@@ -224,11 +224,11 @@ impl RunnableStrategy for DynPairsStrategy {
 }
 
 impl RunnableStrategy for DynBasketStrategy {
-    fn stable_period(&self) -> usize {
-        DynBasketStrategy::stable_period(self)
+    fn stable_bars(&self) -> usize {
+        DynBasketStrategy::stable_bars(self)
     }
-    fn warm_up_period(&self) -> usize {
-        DynBasketStrategy::warm_up_period(self)
+    fn warm_up_bars(&self) -> usize {
+        DynBasketStrategy::warm_up_bars(self)
     }
     fn spec_kind(&self) -> &'static str {
         "basket"
@@ -245,11 +245,11 @@ impl RunnableStrategy for DynBasketStrategy {
 }
 
 impl RunnableStrategy for DynMultiAssetStrategy {
-    fn stable_period(&self) -> usize {
-        DynMultiAssetStrategy::stable_period(self)
+    fn stable_bars(&self) -> usize {
+        DynMultiAssetStrategy::stable_bars(self)
     }
-    fn warm_up_period(&self) -> usize {
-        DynMultiAssetStrategy::warm_up_period(self)
+    fn warm_up_bars(&self) -> usize {
+        DynMultiAssetStrategy::warm_up_bars(self)
     }
     fn spec_kind(&self) -> &'static str {
         "multi"
@@ -263,11 +263,11 @@ impl RunnableStrategy for DynMultiAssetStrategy {
 }
 
 impl RunnableStrategy for DynPortfolio {
-    fn stable_period(&self) -> usize {
-        DynPortfolio::stable_period(self)
+    fn stable_bars(&self) -> usize {
+        DynPortfolio::stable_bars(self)
     }
-    fn warm_up_period(&self) -> usize {
-        DynPortfolio::warm_up_period(self)
+    fn warm_up_bars(&self) -> usize {
+        DynPortfolio::warm_up_bars(self)
     }
     fn spec_kind(&self) -> &'static str {
         "portfolio"

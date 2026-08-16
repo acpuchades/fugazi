@@ -170,12 +170,12 @@ impl<S: Indicator<Output = Candle>> Indicator for Sar<S> {
     /// reports no unstable period: each stop-and-reverse re-anchors the
     /// recursion, so the seed's influence ends at the first reversal rather
     /// than decaying gradually.
-    fn warm_up_period(&self) -> usize {
-        self.source.warm_up_period().max(1) + 1
+    fn warm_up_bars(&self) -> usize {
+        self.source.warm_up_bars().max(1) + 1
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {

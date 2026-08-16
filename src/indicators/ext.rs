@@ -165,9 +165,9 @@ pub trait IndicatorExt: Indicator<Output = Real> + Sized {
         RollingMin::new(self, period)
     }
 
-    /// Wrap `self` so its [`unstable_period`](Indicator::unstable_period)
+    /// Wrap `self` so its [`unstable_bars`](Indicator::unstable_bars)
     /// reports `0` — see [`Unstable`]. The output and warm-up are unchanged; a
-    /// caller counting off `stable_period()` samples (e.g. a strategy's
+    /// caller counting off `stable_bars()` samples (e.g. a strategy's
     /// [`is_ready`](crate::Strategy::is_ready)) treats the IIR settling tail as
     /// already converged. Use when you're comfortable trading through this
     /// subtree's unstable tail (the safe default is to wait for it).
@@ -310,9 +310,9 @@ pub trait BoolIndicatorExt: Indicator<Output = bool> {
         BecameFalse::new(self)
     }
 
-    /// Wrap `self` so its [`unstable_period`](Indicator::unstable_period)
+    /// Wrap `self` so its [`unstable_bars`](Indicator::unstable_bars)
     /// reports `0` — see [`Unstable`]. The output and warm-up are unchanged; a
-    /// caller counting off `stable_period()` samples (e.g. a strategy's
+    /// caller counting off `stable_bars()` samples (e.g. a strategy's
     /// [`is_ready`](crate::Strategy::is_ready)) treats the IIR settling tail as
     /// already converged. The safe default is to wait for it — this is the
     /// explicit opt-out.
@@ -379,7 +379,7 @@ mod tests {
         fn value(&self) -> Option<bool> {
             self.value
         }
-        fn warm_up_period(&self) -> usize {
+        fn warm_up_bars(&self) -> usize {
             1
         }
         fn reset(&mut self) {

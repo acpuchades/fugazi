@@ -1,25 +1,25 @@
-//! Passthrough wrapper that zeroes a source's `unstable_period()`.
+//! Passthrough wrapper that zeroes a source's `unstable_bars()`.
 //!
 //! `Unstable<S>` is the opt-in override for the "wait until every source is
 //! past its unstable tail" default a strategy or driver applies from a chain's
-//! `stable_period()`. The wrapper delegates every method to its inner source
-//! *except* [`unstable_period`](Indicator::unstable_period), which it forces to
+//! `stable_bars()`. The wrapper delegates every method to its inner source
+//! *except* [`unstable_bars`](Indicator::unstable_bars), which it forces to
 //! zero — telling the world "I accept this source's IIR settling as ready".
-//! `warm_up_period()` is untouched, so the FIR head still has to fill.
+//! `warm_up_bars()` is untouched, so the FIR head still has to fill.
 
 use crate::indicator::Indicator;
 
-/// A transparent wrapper over `S` that reports `unstable_period() = 0`.
+/// A transparent wrapper over `S` that reports `unstable_bars() = 0`.
 ///
 /// Wraps any indicator (real- or bool-valued, any input type) and forwards
 /// every update and value read to it unchanged. The only lie it tells is about
 /// stability: the wrapped source's IIR unstable tail is treated as already
-/// settled, so a caller counting off `stable_period()` samples (e.g.
+/// settled, so a caller counting off `stable_bars()` samples (e.g.
 /// [`SingleAssetStrategy::is_ready`](crate::strategies::SingleAssetStrategy))
-/// only waits for the source's `warm_up_period()`.
+/// only waits for the source's `warm_up_bars()`.
 ///
 /// This is the counterpart to the strategy layer's "safe default": readiness
-/// gates trading until every consulted source's `stable_period()` has elapsed,
+/// gates trading until every consulted source's `stable_bars()` has elapsed,
 /// and `Unstable` is the explicit way to opt out for a subtree whose settling
 /// tail the caller is happy to trade through.
 ///
@@ -30,10 +30,10 @@ use crate::indicator::Indicator;
 /// let raw = Ema::new(Current::close(), 20);
 /// let wrapped = Unstable::new(Ema::new(Current::close(), 20));
 /// // Same warm-up, same output — only the reported unstable tail changes.
-/// assert_eq!(wrapped.warm_up_period(), raw.warm_up_period());
-/// assert_eq!(wrapped.unstable_period(), 0);
-/// assert_eq!(wrapped.stable_period(), raw.warm_up_period());
-/// assert!(raw.stable_period() > raw.warm_up_period());
+/// assert_eq!(wrapped.warm_up_bars(), raw.warm_up_bars());
+/// assert_eq!(wrapped.unstable_bars(), 0);
+/// assert_eq!(wrapped.stable_bars(), raw.warm_up_bars());
+/// assert!(raw.stable_bars() > raw.warm_up_bars());
 /// ```
 #[derive(Debug, Clone)]
 pub struct Unstable<S> {
@@ -41,7 +41,7 @@ pub struct Unstable<S> {
 }
 
 impl<S> Unstable<S> {
-    /// Wrap `source` so it reports `unstable_period() = 0` while otherwise
+    /// Wrap `source` so it reports `unstable_bars() = 0` while otherwise
     /// behaving identically.
     pub fn new(source: S) -> Self {
         Self { source }
@@ -74,11 +74,11 @@ impl<S: Indicator> Indicator for Unstable<S> {
         self.source.is_ready()
     }
 
-    fn warm_up_period(&self) -> usize {
-        self.source.warm_up_period()
+    fn warm_up_bars(&self) -> usize {
+        self.source.warm_up_bars()
     }
 
-    fn unstable_period(&self) -> usize {
+    fn unstable_bars(&self) -> usize {
         0
     }
 
@@ -98,16 +98,16 @@ mod tests {
     }
 
     #[test]
-    fn zeros_unstable_period_and_forwards_the_rest() {
+    fn zeros_unstable_bars_and_forwards_the_rest() {
         let raw = Ema::new(Current::close(), 5);
-        let warm = raw.warm_up_period();
-        let settle = raw.unstable_period();
+        let warm = raw.warm_up_bars();
+        let settle = raw.unstable_bars();
         assert!(settle > 0, "Ema-5 should have a real unstable tail");
 
         let wrapped = Unstable::new(Ema::new(Current::close(), 5));
-        assert_eq!(wrapped.warm_up_period(), warm);
-        assert_eq!(wrapped.unstable_period(), 0);
-        assert_eq!(wrapped.stable_period(), warm);
+        assert_eq!(wrapped.warm_up_bars(), warm);
+        assert_eq!(wrapped.unstable_bars(), 0);
+        assert_eq!(wrapped.stable_bars(), warm);
     }
 
     #[test]

@@ -22,7 +22,7 @@ use fugazi::{Atom, Candle, Real, Timestamp};
 /// A minimal atom-emitting source used to prove warm-up delegation.
 ///
 /// Emits `None` for the first `delay` bars, then passes every subsequent atom
-/// through unchanged. Its `warm_up_period() == delay + 1`, so wrapping it in a
+/// through unchanged. Its `warm_up_bars() == delay + 1`, so wrapping it in a
 /// leaf shifts the leaf's own warm-up by exactly that much.
 #[derive(Debug, Clone)]
 struct DelayedAtoms {
@@ -59,7 +59,7 @@ impl Indicator for DelayedAtoms {
         self.latest.clone()
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         self.delay + 1
     }
 
@@ -83,7 +83,7 @@ fn close_of_identity_matches_close_new() {
     let mut rhs = Close::of(Identity::<Atom>::new());
     assert_eq!(lhs.update(atom.clone()), Some(4.25));
     assert_eq!(rhs.update(atom), Some(4.25));
-    assert_eq!(lhs.warm_up_period(), rhs.warm_up_period());
+    assert_eq!(lhs.warm_up_bars(), rhs.warm_up_bars());
 }
 
 #[test]
@@ -134,10 +134,10 @@ fn is_weekend_of_identity_matches_is_weekend_new() {
 
 #[test]
 fn close_over_delayed_source_shifts_warmup_and_emissions() {
-    // A 2-bar delay in the source means `Close` reports warm_up_period = 3
+    // A 2-bar delay in the source means `Close` reports warm_up_bars = 3
     // (source's warm-up), and emits `None` for the first two bars.
     let mut c = Close::of(DelayedAtoms::new(2));
-    assert_eq!(c.warm_up_period(), 3);
+    assert_eq!(c.warm_up_bars(), 3);
     assert_eq!(c.update(bar_at(MONDAY_MS, 10.0)), None);
     assert_eq!(c.update(bar_at(MONDAY_MS + 60_000, 11.0)), None);
     assert_eq!(c.update(bar_at(MONDAY_MS + 120_000, 12.0)), Some(12.0));
@@ -147,7 +147,7 @@ fn close_over_delayed_source_shifts_warmup_and_emissions() {
 #[test]
 fn calendar_over_delayed_source_shifts_warmup() {
     let mut dow = DayOfWeek::of(DelayedAtoms::new(1));
-    assert_eq!(dow.warm_up_period(), 2);
+    assert_eq!(dow.warm_up_bars(), 2);
     assert_eq!(dow.update(bar_at(MONDAY_MS, 1.0)), None);
     assert_eq!(dow.update(bar_at(MONDAY_MS + 60_000, 1.0)), Some(1.0));
 }

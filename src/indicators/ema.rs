@@ -61,17 +61,17 @@ impl<S: Indicator<Output = Real>> Indicator for Ema<S> {
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         // Seeds on the source's first output. `max(1)` because we can't seed
         // before the first `update` — even a `warm_up = 0` source has to be
         // called once for the seed to happen.
-        self.source.warm_up_period().max(1)
+        self.source.warm_up_bars().max(1)
     }
 
-    fn unstable_period(&self) -> usize {
+    fn unstable_bars(&self) -> usize {
         // Recursive: the seed's weight must decay, on top of any source
         // instability.
-        self.source.unstable_period() + self.state.unstable_period()
+        self.source.unstable_bars() + self.state.unstable_bars()
     }
 
     fn reset(&mut self) {

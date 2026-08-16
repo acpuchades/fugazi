@@ -55,13 +55,13 @@ impl<S: Indicator<Output = Candle>> Indicator for TrueRange<S> {
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         // Ready as soon as the source is (typically the first bar).
-        self.source.warm_up_period().max(1)
+        self.source.warm_up_bars().max(1)
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {

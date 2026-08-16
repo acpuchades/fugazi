@@ -42,7 +42,7 @@ impl<I> Indicator for Value<I> {
         Some(self.constant)
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         0
     }
 
@@ -86,7 +86,7 @@ impl<I> Indicator for ValueStr<I> {
         Some(self.constant.clone())
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         0
     }
 

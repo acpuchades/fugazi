@@ -50,14 +50,14 @@ impl<S: Indicator<Output = Real>> Indicator for Sma<S> {
         self.value
     }
 
-    fn warm_up_period(&self) -> usize {
+    fn warm_up_bars(&self) -> usize {
         // `max(1)` so a `warm_up = 0` source (e.g. `Value`) still requires the
         // full window: our first `update` is at sample 1, not sample 0.
-        self.source.warm_up_period().max(1) + self.stats.period() - 1
+        self.source.warm_up_bars().max(1) + self.stats.period() - 1
     }
 
-    fn unstable_period(&self) -> usize {
-        self.source.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.source.unstable_bars()
     }
 
     fn reset(&mut self) {

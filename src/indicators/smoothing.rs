@@ -11,12 +11,12 @@ use crate::types::Real;
 
 /// Residual seed weight below which a recursive smoother is considered settled
 /// (0.1%) — the tolerance behind every
-/// [`unstable_period`](crate::Indicator::unstable_period) in the crate.
+/// [`unstable_bars`](crate::Indicator::unstable_bars) in the crate.
 pub(crate) const SETTLE_TOLERANCE: Real = 1e-3;
 
 /// Samples until a geometric decay factor falls below [`SETTLE_TOLERANCE`]:
 /// the smallest `k` with `decay^k <= SETTLE_TOLERANCE`.
-pub(crate) fn unstable_period(decay: Real) -> usize {
+pub(crate) fn unstable_bars(decay: Real) -> usize {
     if decay <= 0.0 {
         0
     } else {
@@ -54,9 +54,9 @@ impl EmaState {
 
     /// Samples after seeding until the seed's weight, `(1 - alpha)^k`, decays
     /// below [`SETTLE_TOLERANCE`] — this state's contribution to an
-    /// [`unstable_period`](crate::Indicator::unstable_period).
-    pub fn unstable_period(&self) -> usize {
-        unstable_period(1.0 - self.alpha)
+    /// [`unstable_bars`](crate::Indicator::unstable_bars).
+    pub fn unstable_bars(&self) -> usize {
+        unstable_bars(1.0 - self.alpha)
     }
 
     pub fn reset(&mut self) {
@@ -108,9 +108,9 @@ impl WilderState {
 
     /// Samples after seeding until the seed's weight, `((period - 1)/period)^k`,
     /// decays below [`SETTLE_TOLERANCE`] — this state's contribution to an
-    /// [`unstable_period`](crate::Indicator::unstable_period).
-    pub fn unstable_period(&self) -> usize {
-        unstable_period((self.period as Real - 1.0) / self.period as Real)
+    /// [`unstable_bars`](crate::Indicator::unstable_bars).
+    pub fn unstable_bars(&self) -> usize {
+        unstable_bars((self.period as Real - 1.0) / self.period as Real)
     }
 
     pub fn reset(&mut self) {
@@ -127,9 +127,9 @@ mod tests {
     #[test]
     fn settle_counts_decay_steps() {
         // decay 0.5: 0.5^10 ≈ 9.8e-4 <= 1e-3 < 0.5^9.
-        assert_eq!(unstable_period(0.5), 10);
+        assert_eq!(unstable_bars(0.5), 10);
         // alpha = 1 (no memory): settled immediately.
-        assert_eq!(unstable_period(0.0), 0);
+        assert_eq!(unstable_bars(0.0), 0);
     }
 
     #[test]
@@ -174,12 +174,12 @@ mod tests {
     #[test]
     fn ema_and_wilder_settle_match_their_decay() {
         // EMA period 3: alpha = 0.5, so decay 0.5 -> 10 steps.
-        assert_eq!(EmaState::new(3).unstable_period(), 10);
+        assert_eq!(EmaState::new(3).unstable_bars(), 10);
         // Degenerate alpha = 1 keeps no seed at all.
-        assert_eq!(EmaState::with_alpha(1.0).unstable_period(), 0);
+        assert_eq!(EmaState::with_alpha(1.0).unstable_bars(), 0);
         // Wilder period 1 averages nothing (alpha = 1).
-        assert_eq!(WilderState::new(1).unstable_period(), 0);
+        assert_eq!(WilderState::new(1).unstable_bars(), 0);
         // Wilder period 14: (13/14)^k <= 1e-3 at k = 94.
-        assert_eq!(WilderState::new(14).unstable_period(), 94);
+        assert_eq!(WilderState::new(14).unstable_bars(), 94);
     }
 }

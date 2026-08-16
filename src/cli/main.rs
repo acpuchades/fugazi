@@ -535,7 +535,7 @@ struct OptimizeArgs {
     /// out-of-sample window, and results are emitted per fold plus a composite
     /// OOS artifact.
     ///
-    /// Skips grid-wide `max(stable_period)` at the head of the series before
+    /// Skips grid-wide `max(stable_bars)` at the head of the series before
     /// laying out folds; pass `--keep-unstable` to skip only `max(warm_up)`
     /// (letting the IIR settling tail bleed into the first IS window). Embargo
     /// defaults to 0 bars — it removes the first N bars of each fold's OOS
@@ -546,7 +546,7 @@ struct OptimizeArgs {
     walkforward: Option<calendar::WalkForwardSpec>,
 
     /// Under `--walkforward`, skip only `max(warm_up)` at the head of the
-    /// series (not `max(stable_period)`), including the IIR settling tail in
+    /// series (not `max(stable_bars)`), including the IIR settling tail in
     /// the first IS window. Opt-out for the safe default. No-op without
     /// `--walkforward`.
     #[arg(long = "keep-unstable", requires = "walkforward")]

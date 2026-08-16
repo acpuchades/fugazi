@@ -162,12 +162,12 @@ impl Indicator for RebuildIndicator {
         self.inner.value()
     }
 
-    fn warm_up_period(&self) -> usize {
-        self.inner.warm_up_period()
+    fn warm_up_bars(&self) -> usize {
+        self.inner.warm_up_bars()
     }
 
-    fn unstable_period(&self) -> usize {
-        self.inner.unstable_period()
+    fn unstable_bars(&self) -> usize {
+        self.inner.unstable_bars()
     }
 
     fn reset(&mut self) {
