@@ -118,7 +118,7 @@ pub(super) struct Intent {
 /// The account holds only one bracket per symbol, so when several children want
 /// stops on the same symbol the portfolio rests whichever is nearest to
 /// triggering — see [`PortfolioInner::rest_protective`](super::netting::PortfolioInner).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub(super) struct ProtectiveIntent {
     pub(super) stop: Option<Real>,
     pub(super) take_profit: Option<Real>,

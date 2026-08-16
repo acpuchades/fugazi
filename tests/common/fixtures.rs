@@ -12,7 +12,7 @@
 //!
 //! That is a reasonable default and a terrible guarantee: a skip is
 //! indistinguishable from a pass in CI, so a cross-check can rot for months
-//! without a single red build. `doc/CONTRIBUTING.md` lists
+//! without a single red build. `docs/CONTRIBUTING.md` lists
 //! `tests/talib_validation.rs` as a **drift guard**; a drift guard that
 //! silently disables itself guards nothing.
 //!

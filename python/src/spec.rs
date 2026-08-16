@@ -449,39 +449,21 @@ pub(crate) struct PyStrategySpec {
     pub(crate) inner: CoreStrategySpec,
 }
 
-/// Drive one already-loaded spec through the user-supplied `PaperWallet` and
-/// return the run report. Same shape as [`PyStrategy::run`] and its siblings —
-/// the wallet's `equity()` seeds the strategy, and any costs the caller
-/// pre-installed via `wallet.set_costs_for(sym, ...)` apply naturally.
+/// Drive one already-loaded spec against `wallet` and return the run report.
 ///
-/// The one non-conformant variant is `Portfolio`: `Portfolio::trade` ignores
-/// the external wallet by design (a composite needs one sub-wallet per child
-/// and the `Strategy` trait offers one, so it drives its own composite
-/// `PortfolioWallet` internally — see `fugazi::portfolio` in the Rust
-/// library). The external wallet's `equity()` is still used as the cash seed,
-/// but its installed costs are *not* propagated to the portfolio's
-/// sub-wallets; the caller must install portfolio-wide costs via the spec's
-/// own facilities (currently `None` — a documented follow-up).
-///
-/// This is safe here because the portfolio arm below drives through the
-/// portfolio's own wallet rather than the one passed in; handing a portfolio
-/// some other wallet is caught at runtime on the Rust side.
-pub(crate) fn run_spec(
+/// Same shape as [`PyStrategy::run`] and its siblings — the wallet's `equity()`
+/// seeds the strategy, and any costs the caller pre-installed via
+/// `wallet.set_costs_for(sym, ...)` apply naturally. Every shape trades the
+/// wallet it is handed, portfolio included: a portfolio is an ordinary
+/// `Strategy` that nets its children onto one account.
+pub(crate) fn run_spec<W: Wallet<String>>(
     loaded: &CoreStrategySpec,
     snapshots: &[Snapshot<String>],
-    wallet: &mut PaperWallet<String>,
+    wallet: &mut W,
 ) -> PyResult<RunReport<String>> {
-    let cash = <PaperWallet<String> as Wallet<String>>::equity(wallet).0;
+    let cash = wallet.equity().0;
     let schema = spec_backtest::schema_from_snapshots(snapshots);
-    let mut built = loaded
-        .try_build(cash, &schema, None)
-        .map_err(build_err)?;
-    // Portfolio drives its own composite wallet and ignores the one passed
-    // here (see `RunnableStrategy::drive`); the other shapes trade into the
-    // caller's, keeping any costs it was primed with.
-    if matches!(loaded, CoreStrategySpec::Portfolio(_)) {
-        return Ok(built.drive(snapshots, cash, &[]));
-    }
+    let mut built = loaded.try_build(cash, &schema, None).map_err(build_err)?;
     // `&mut *built` rather than `&mut built`: `run` takes `S: Strategy + ?Sized`,
     // and it is `dyn RunnableStrategy` that carries the `Strategy` supertrait,
     // not the `Box` around it.
@@ -493,64 +475,59 @@ pub(crate) fn run_spec(
 }
 
 /// The resumable superset of [`run_spec`]: optionally restore `resume` state
-/// before the run, optionally finalize open positions with `flatten`, and
-/// return the run's final [`RunState`](fugazi_core::spec::RunState) alongside the
-/// report so Python can persist it and resume later.
-pub(crate) fn run_spec_resumable(
+/// before the run, optionally flatten open positions at the end, and return the
+/// run's final [`RunState`](fugazi_core::spec::RunState) alongside the report so
+/// Python can persist it and resume later.
+///
+/// A thin adapter over the library's `drive_over` rather than a second
+/// implementation of it — the version and kind checks, the flatten path and the
+/// state capture all live in one place, so the Python and CLI surfaces cannot
+/// drift apart.
+pub(crate) fn run_spec_resumable<W: Wallet<String>>(
     loaded: &CoreStrategySpec,
     snapshots: &[Snapshot<String>],
-    wallet: &mut PaperWallet<String>,
+    wallet: &mut W,
     resume: Option<&fugazi_core::spec::RunState>,
     flatten: bool,
 ) -> PyResult<(RunReport<String>, fugazi_core::spec::RunState)> {
-    use fugazi_core::spec::{RUN_STATE_FORMAT_VERSION, RunState};
-    let cash = <PaperWallet<String> as Wallet<String>>::equity(wallet).0;
+    let cash = wallet.equity().0;
     let schema = spec_backtest::schema_from_snapshots(snapshots);
     let mut built = loaded.try_build(cash, &schema, None).map_err(build_err)?;
+    fugazi_core::spec::drive_over(&mut *built, snapshots, wallet, resume, flatten)
+        .map_err(build_err)
+}
 
-    // Portfolio owns its composite wallet, so delegate wholesale to
-    // `drive_resumable` (which restores/saves internally and finalizes if asked).
-    if matches!(loaded, CoreStrategySpec::Portfolio(_)) {
-        return built
-            .drive_resumable(snapshots, cash, &[], resume, flatten)
-            .map_err(build_err);
-    }
+/// Parse the JSON string Python hands back as a resume state.
+fn parse_resume(resume: Option<String>) -> PyResult<Option<fugazi_core::spec::RunState>> {
+    resume
+        .map(|text| {
+            serde_json::from_str::<fugazi_core::spec::RunState>(&text)
+                .map_err(|e| PyValueError::new_err(format!("parsing resume state: {e}")))
+        })
+        .transpose()
+}
 
-    if let Some(rs) = resume {
-        if rs.format_version != RUN_STATE_FORMAT_VERSION {
-            return Err(PyValueError::new_err(format!(
-                "resume: state format version {} does not match this build's {}",
-                rs.format_version, RUN_STATE_FORMAT_VERSION
-            )));
-        }
-        if rs.kind != loaded.kind() {
-            return Err(PyValueError::new_err(format!(
-                "resume: state is for a `{}` strategy but this document is `{}`",
-                rs.kind,
-                loaded.kind()
-            )));
-        }
-        built.restore_state(&rs.strategy).map_err(build_err)?;
-        wallet.restore_state(&rs.wallet).map_err(build_err)?;
-    }
+/// Serialize a state back to the JSON string Python persists.
+fn state_json(state: &fugazi_core::spec::RunState) -> PyResult<String> {
+    serde_json::to_string(state)
+        .map_err(|e| PyValueError::new_err(format!("serializing run state: {e}")))
+}
 
-    let mut report = fugazi_core::backtest::run(&mut *built, wallet, snapshots.iter().cloned());
-    if flatten {
-        fugazi_core::backtest::flatten_open_positions(&mut *built, wallet, snapshots, &mut report);
-    }
-    let last_bar = snapshots
-        .last()
-        .and_then(|s| s.iter().find_map(|(_, _, a)| a.time))
-        .map(|t| t.0);
-    let final_state = RunState {
-        format_version: RUN_STATE_FORMAT_VERSION,
-        kind: loaded.kind().to_string(),
-        last_bar,
-        bars_seen: resume.map(|r| r.bars_seen).unwrap_or(0) + snapshots.len(),
-        strategy: fugazi_core::spec::RunnableStrategy::save_state(&*built),
-        wallet: wallet.snapshot_state(),
-    };
-    Ok((report, final_state))
+/// Advance a spec over `snapshots` without trading, returning the state to
+/// resume from. See `StrategySpec.warm_up` for what it is for.
+pub(crate) fn warm_up_spec<W: Wallet<String>>(
+    loaded: &CoreStrategySpec,
+    snapshots: &[Snapshot<String>],
+    wallet: &mut W,
+    resume: Option<&fugazi_core::spec::RunState>,
+) -> PyResult<fugazi_core::spec::RunState> {
+    use fugazi_core::spec::RunnableStrategyExt;
+    let cash = wallet.equity().0;
+    let schema = spec_backtest::schema_from_snapshots(snapshots);
+    let mut built = loaded.try_build(cash, &schema, None).map_err(build_err)?;
+    built
+        .warm_up_over(snapshots, wallet, resume)
+        .map_err(build_err)
 }
 
 /// Typed-parse an already-`!param`-substituted document as `kind`.
@@ -659,56 +636,85 @@ impl PyStrategySpec {
     }
 
     /// Drive the spec over `snapshots` against `wallet`, returning the full
-    /// run report. Matches the [`PyStrategy::run`] shape: the wallet's
-    /// `equity()` seeds the strategy, and any costs the caller pre-installed
-    /// via `wallet.set_costs_for(sym, ...)` apply naturally (except for
-    /// portfolio, whose composite wallet is owned internally — see
-    /// [`run_spec`]).
+    /// run report.
+    ///
+    /// `wallet` is a `PaperWallet`, an `OkxWallet` or a `CoinbaseWallet` —
+    /// the same three `Strategy.run` accepts. Every shape trades the wallet it
+    /// is handed, portfolio included, so the wallet's `equity()` seeds the
+    /// strategy and any costs pre-installed via `wallet.set_costs_for(sym, ...)`
+    /// apply naturally. Positions the account already holds are treated as the
+    /// user's own and left untouched (the run trades a sleeve on top).
     pub(crate) fn run(
         &self,
-        mut wallet: PyRefMut<'_, PyWallet>,
+        wallet: &Bound<'_, PyAny>,
         snapshots: &Bound<'_, PyAny>,
     ) -> PyResult<PyRunReport> {
         let snaps = snapshots_from_sequence(snapshots)?;
-        let report = run_spec(&self.inner, &snaps, &mut wallet.inner)?;
-        Ok(PyRunReport { inner: report })
+        over_any_wallet!(wallet, _py, _seed, w => {
+            let report = run_spec(&self.inner, &snaps, w)?;
+            Ok(PyRunReport { inner: report })
+        })
     }
 
     /// Drive the spec with **run resuming**: optionally restore `resume` (a JSON
-    /// string previously returned here) before the run, optionally finalize open
-    /// positions with `flatten`, and return `(report, state_json)` — the
+    /// string previously returned here) before the run, optionally close out
+    /// open positions with `flatten`, and return `(report, state_json)` — the
     /// run report plus the final state to persist and resume from later.
     ///
-    /// `resume` and `flatten=True` are mutually exclusive in spirit (a
-    /// flattened run is finalized); passing a flattened run's state to a later
-    /// `resume` simply continues from a flat book. PaperWallet only, like
-    /// [`Self::run`].
+    /// `flatten=True` closes every open position **in the account**, through
+    /// the normal cost pipeline, so the returned state holds a genuinely flat
+    /// book and passing it to a later `resume` continues from flat.
+    ///
+    /// Takes the same three wallet types as [`Self::run`]. Against a live
+    /// wallet the returned state's `wallet` field is `null`: the venue owns the
+    /// positions and cash, so only the strategy's own state is carried and the
+    /// account is re-read on resume.
     #[pyo3(signature = (wallet, snapshots, resume = None, flatten = false))]
     pub(crate) fn run_resumable(
         &self,
-        mut wallet: PyRefMut<'_, PyWallet>,
+        wallet: &Bound<'_, PyAny>,
         snapshots: &Bound<'_, PyAny>,
         resume: Option<String>,
         flatten: bool,
     ) -> PyResult<(PyRunReport, String)> {
         let snaps = snapshots_from_sequence(snapshots)?;
-        let resume_state = match resume {
-            Some(text) => Some(
-                serde_json::from_str::<fugazi_core::spec::RunState>(&text)
-                    .map_err(|e| PyValueError::new_err(format!("parsing resume state: {e}")))?,
-            ),
-            None => None,
-        };
-        let (report, state) = run_spec_resumable(
-            &self.inner,
-            &snaps,
-            &mut wallet.inner,
-            resume_state.as_ref(),
-            flatten,
-        )?;
-        let state_json = serde_json::to_string(&state)
-            .map_err(|e| PyValueError::new_err(format!("serializing run state: {e}")))?;
-        Ok((PyRunReport { inner: report }, state_json))
+        let resume_state = parse_resume(resume)?;
+        over_any_wallet!(wallet, _py, _seed, w => {
+            let (report, state) =
+                run_spec_resumable(&self.inner, &snaps, w, resume_state.as_ref(), flatten)?;
+            Ok((PyRunReport { inner: report }, state_json(&state)?))
+        })
+    }
+
+    /// Advance the spec over `snapshots` **without trading**, returning the
+    /// state to resume from.
+    ///
+    /// Indicators warm and the account is marked to market exactly as in a real
+    /// run, but no order is ever submitted. That is what closes a *pause gap*:
+    /// bars that elapsed while a deployment was stopped should warm the
+    /// strategy without booking trades at prices nobody could have traded at.
+    /// Replay the gap here, hand the returned state to
+    /// [`run_resumable`](Self::run_resumable), and go live — instead of
+    /// dropping the state and re-serving a long-period indicator's whole
+    /// warm-up after every pause.
+    ///
+    /// Returns the state JSON only; there is no report, because no run
+    /// happened. A fill that arrives anyway (a resting order left from before
+    /// the pause) still reaches the strategy, so its position cannot drift from
+    /// the account's.
+    #[pyo3(signature = (wallet, snapshots, resume = None))]
+    pub(crate) fn warm_up(
+        &self,
+        wallet: &Bound<'_, PyAny>,
+        snapshots: &Bound<'_, PyAny>,
+        resume: Option<String>,
+    ) -> PyResult<String> {
+        let snaps = snapshots_from_sequence(snapshots)?;
+        let resume_state = parse_resume(resume)?;
+        over_any_wallet!(wallet, _py, _seed, w => {
+            let state = warm_up_spec(&self.inner, &snaps, w, resume_state.as_ref())?;
+            state_json(&state)
+        })
     }
 
     /// Drive the spec over `snapshots` against `wallet`, reduce the run

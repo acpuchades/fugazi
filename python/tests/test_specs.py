@@ -584,6 +584,177 @@ def test_run_resumable_matches_uninterrupted_run():
     assert second_rep.equity_curve == tail
 
 
+_RESUME_PAIRS_YAML = """
+left: A
+right: B
+long_spread:
+  enter: !lt
+    lhs: !sub { lhs: !close { source: !pick { symbol: A } }, rhs: !close { source: !pick { symbol: B } } }
+    rhs: !value -2.0
+  exit: !gt
+    lhs: !sub { lhs: !close { source: !pick { symbol: A } }, rhs: !close { source: !pick { symbol: B } } }
+    rhs: !value 0.0
+"""
+
+_RESUME_MULTI_YAML = """
+long:
+  enter: !crosses_above
+    lhs: !ema { period: 3, source: !close }
+    rhs: !ema { period: 8, source: !close }
+  exit: !crosses_below
+    lhs: !ema { period: 3, source: !close }
+    rhs: !ema { period: 8, source: !close }
+sizing: !value 0.5
+rebalance_on: !every 7
+"""
+
+_RESUME_BASKET_YAML = """
+selection: !top_bottom { longs: 1, shorts: 1 }
+score: !rsi { period: 5, source: !close }
+sizing: !value 0.5
+"""
+
+_RESUME_PORTFOLIO_YAML = """
+weights: !value [0.6, 0.4]
+rebalance_on: !every 7
+children:
+  - name: fast_a
+    strategy:
+      symbol: A
+      long:
+        enter: !crosses_above
+          lhs: !ema { period: 3, source: !close }
+          rhs: !ema { period: 8, source: !close }
+        exit: !crosses_below
+          lhs: !ema { period: 3, source: !close }
+          rhs: !ema { period: 8, source: !close }
+  - name: slow_b
+    strategy:
+      symbol: B
+      long:
+        enter: !lt { lhs: !rsi { period: 5, source: !close }, rhs: !value 35.0 }
+        exit: !gt { lhs: !rsi { period: 5, source: !close }, rhs: !value 65.0 }
+"""
+
+
+def _wobbly_b(n):
+    import math
+    return [100.0 + 8.0 * math.cos(i * 0.27) + 0.03 * i for i in range(n)]
+
+
+def _two_symbol_snaps(n):
+    return _snaps_multi({"A": _wobbly(n), "B": _wobbly_b(n)})
+
+
+def _assert_chunked_resume(case, yaml, snaps, splits, cash=10_000.0):
+    """N-way chunked resume must be indistinguishable from one uninterrupted run.
+
+    Rebuilds the spec **and a fresh wallet** for every chunk — the calling
+    convention a live deployment actually uses, where each chunk is a separate
+    process with nothing but the state JSON carried across.
+
+    Three chunks, not two: a two-way split exercises save then restore but never
+    restore then *re*-save, which is where state a resumed strategy fails to
+    carry forward goes missing.
+    """
+    whole, _ = ta.load_spec(yaml).run_resumable(ta.PaperWallet(cash), snaps)
+
+    bounds = [0, *splits, len(snaps)]
+    state = None
+    curve = []
+    fills = 0
+    for i, (start, end) in enumerate(zip(bounds, bounds[1:])):
+        rep, state = ta.load_spec(yaml).run_resumable(
+            ta.PaperWallet(cash), snaps[start:end], resume=state
+        )
+        curve.extend(rep.equity_curve)
+        fills += len(rep.fills)
+
+    assert len(curve) == len(whole.equity_curve), f"{case}: curve length"
+    # Exact: serde's float_roundtrip keeps every f64 bit-identical through JSON.
+    assert curve == whole.equity_curve, f"{case}: chunked run diverged"
+    assert fills == len(whole.fills), f"{case}: fill count"
+
+
+@pytest.mark.parametrize(
+    "case,yaml,multi",
+    [
+        ("single", _RESUME_YAML, False),
+        ("pairs", _RESUME_PAIRS_YAML, True),
+        ("multi", _RESUME_MULTI_YAML, True),
+        ("basket", _RESUME_BASKET_YAML, True),
+        ("portfolio", _RESUME_PORTFOLIO_YAML, True),
+    ],
+    # The YAML would otherwise become the test id, several lines of it.
+    ids=["single", "pairs", "multi", "basket", "portfolio"],
+)
+def test_run_resumable_matches_uninterrupted_run_across_three_chunks(case, yaml, multi):
+    """Every spec shape, not just single — the property is what the feature is for."""
+    snaps = _two_symbol_snaps(60) if multi else _snaps_single("X", _wobbly(60))
+    _assert_chunked_resume(case, yaml, snaps, [20, 40])
+
+
+def test_flatten_closes_the_position_in_the_wallet():
+    """`flatten=True` must leave a genuinely flat book, not just a flat report."""
+    hold = """
+    symbol: X
+    long:
+      enter: !gt { lhs: !close, rhs: !value 0.0 }
+    """
+    snaps = _snaps_single("X", _wobbly(40))
+
+    carried_wallet = ta.PaperWallet(1000.0)
+    carried, _ = ta.load_spec(hold).run_resumable(carried_wallet, snaps)
+    flat_wallet = ta.PaperWallet(1000.0)
+    flat, state = ta.load_spec(hold).run_resumable(flat_wallet, snaps, flatten=True)
+
+    assert len(flat.fills) == len(carried.fills) + 1, "one closing leg"
+    assert abs(carried_wallet.position("X")) > 0.0, "the carried run still holds"
+    assert flat_wallet.position("X") == 0.0, "the flattened wallet must be flat"
+
+    # And resuming from that state continues from flat: it has to re-enter.
+    resumed, _ = ta.load_spec(hold).run_resumable(
+        ta.PaperWallet(1000.0), _snaps_single("X", _wobbly(20)), resume=state
+    )
+    assert resumed.fills, "a resume from a flattened state should re-enter"
+
+
+def test_warm_up_advances_state_without_trading():
+    """A pause gap warms the indicators but books nothing."""
+    snaps = _snaps_single("X", _wobbly(60))
+    wallet = ta.PaperWallet(1000.0)
+
+    # Replay the first 30 bars as a gap: no trades, but the EMAs warm.
+    state = ta.load_spec(_RESUME_YAML).warm_up(wallet, snaps[:30])
+    assert wallet.funds == 1000.0, "warm_up must not spend anything"
+    assert wallet.position("X") == 0.0, "warm_up must not open a position"
+
+    # Resuming from it behaves as though those bars had been seen: a strategy
+    # that had to re-warm from scratch would sit out its whole warm-up instead.
+    warmed, _ = ta.load_spec(_RESUME_YAML).run_resumable(
+        ta.PaperWallet(1000.0), snaps[30:], resume=state
+    )
+    cold, _ = ta.load_spec(_RESUME_YAML).run_resumable(ta.PaperWallet(1000.0), snaps[30:])
+    assert len(warmed.fills) != len(cold.fills) or warmed.equity_curve != cold.equity_curve, (
+        "a warmed resume should differ from a cold start over the same bars"
+    )
+
+
+def test_run_resumable_rejects_a_stale_format_version():
+    """A state file from another build is refused, not mis-parsed."""
+    import json
+
+    snaps = _snaps_single("X", _wobbly(20))
+    _rep, state = ta.load_spec(_RESUME_YAML).run_resumable(ta.PaperWallet(1000.0), snaps)
+    stale = json.loads(state)
+    stale["format_version"] += 1
+
+    with pytest.raises(ValueError, match="format version"):
+        ta.load_spec(_RESUME_YAML).run_resumable(
+            ta.PaperWallet(1000.0), snaps, resume=json.dumps(stale)
+        )
+
+
 def test_run_resumable_rejects_mismatched_shape():
     """Resuming a single-shape state into a pairs spec is rejected."""
     snaps = _snaps_single("X", _wobbly(20))

@@ -4,21 +4,25 @@ Guidance for Claude Code in this repo. This file is the **invariants, convention
 and quick-reference** — the load-bearing summary read every session. The depth
 lives elsewhere; reach for it on demand:
 
-- **[doc/ARCHITECTURE.md](doc/ARCHITECTURE.md)** — the full subsystem internals
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — the full subsystem internals
   (indicator taxonomy, every strategy shape, wallet, run resuming, Monte Carlo,
   the spec/optimize kernel, Python parity). When a section below says "see
   ARCHITECTURE", that's where the detail moved.
-- **[doc/CONTRIBUTING.md](doc/CONTRIBUTING.md)** — the *procedure*. Adding an
+- **[docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)** — the *procedure*. Adding an
   indicator / signal / operator / metric / provider? It lists every place each
   change has to touch, in order, and which are compiler- or test-enforced.
-- **[doc/TESTING.md](doc/TESTING.md)** — the test suite's *map*: the four layers
+- **[docs/TESTING.md](docs/TESTING.md)** — the test suite's *map*: the four layers
   and what each is for, where a given change's test goes, the shared
   `tests/common/` harness, how the drift guards are built, and the
   skip-vs-fail fixture policy (`FUGAZI_REQUIRE_FIXTURES=1`). Read it before
   adding a test file or a test helper.
-- **[doc/STRATEGIES.md](doc/STRATEGIES.md)** (YAML spec) · **[doc/CLI.md](doc/CLI.md)**
-  · **[doc/COSTS.md](doc/COSTS.md)** · **[doc/METRICS.md](doc/METRICS.md)** ·
-  **[doc/PYTHON.md](doc/PYTHON.md)** — user-facing surface docs.
+- **[docs/TRADING.md](docs/TRADING.md)** — the *execution path*, end to end: bar →
+  submission → queue/rest → fill → the three books that record it → closed trade.
+  The ordering rules and their rationale (why nothing fills on the bar that caused
+  it, why fills precede `update`), plus the caveats each step carries.
+- **[docs/STRATEGIES.md](docs/STRATEGIES.md)** (YAML spec) · **[docs/CLI.md](docs/CLI.md)**
+  · **[docs/COSTS.md](docs/COSTS.md)** · **[docs/METRICS.md](docs/METRICS.md)** ·
+  **[docs/PYTHON.md](docs/PYTHON.md)** — user-facing surface docs.
 - **[TODO.md](TODO.md)** — a *decision log*, not a backlog. An entry records a
   judgment already made and what would change it. Don't burn it down; do read it
   before re-litigating something it already settled.
@@ -31,7 +35,7 @@ primitives. Every primitive owns its state and advances one sample at a time via
 
 Three composable layers: **indicators** (numeric sources), **signals**
 (`Indicator<Output = bool>`), **strategies** (decision layer trading into a wallet).
-See [doc/ARCHITECTURE.md](doc/ARCHITECTURE.md) for each.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for each.
 
 **Dependencies.** Unconditional: `serde`+`serde_json` (with the **`float_roundtrip`**
 feature — load-bearing for run resuming; without it a restored f64 seed drifts 1 ULP
@@ -53,7 +57,7 @@ calls — reach for closed-form first.
   generated fixture is missing or stale. Both fixtures are committed under
   `tests/data/` (`.gitignore` carries an explicit note not to re-ignore
   `talib_expected.csv`), and CI's Rust job sets this — so a stale fixture fails
-  rather than silently comparing nothing. See [doc/TESTING.md](doc/TESTING.md).
+  rather than silently comparing nothing. See [docs/TESTING.md](docs/TESTING.md).
 
 ### Bumping the version — sync **seven** places (`cargo check` only catches Rust drift)
 
@@ -151,18 +155,32 @@ what used to be five-of-everything (`src/spec/runnable.rs`):
 - **`StrategySpec`** — the sum over the five spec types, with one `try_build` /
   `try_build_priced` / `universe` / `kind`.
 
-**The one genuine per-shape difference lives behind those, not at call sites**: `drive`'s
-default body is the `PaperWallet` path and `DynPortfolio` overrides it. Anything
-else that looks shape-specific in a driver is a smell. (`try_build_priced` is *not* a
-second one — costs ride on the wallet now, so three of its five params are `_`-prefixed
-and its body is `self.try_build(cash, schema, None)` for all five shapes.) **Adding a sixth shape** = a
-`StrategySpec` variant + a `RunnableStrategy` impl + an arm in `optimize::build_any_spec`
-and Python's `spec_from_value`. Not ten new functions.
+**There is no per-shape difference left in the driver** — a portfolio is an ordinary
+strategy that trades the wallet it is handed, so no shape overrides `drive` /
+`drive_resumable` and anything that looks shape-specific in a driver is a smell.
+(`try_build_priced` is not one either — costs ride on the wallet, so three of its five
+params are `_`-prefixed and its body is `self.try_build(cash, schema, None)` for all
+five.) **Adding a sixth shape** = a `StrategySpec` variant + a `RunnableStrategy` impl +
+an arm in `optimize::build_any_spec` and Python's `spec_from_value`. Not ten new
+functions.
+
+- **`RunnableStrategyExt`** — the wallet-generic half, blanket-impl'd over every
+  `RunnableStrategy` (`?Sized` included, so it works on the `Box<dyn …>` `try_build`
+  returns). `drive_resumable_with(snaps, wallet, resume, flatten)` and
+  `warm_up_over(snaps, wallet, resume)` are how a spec runs against an account you
+  supply — a primed `PaperWallet`, or a live `OkxWallet` / `CoinbaseWallet`. It is a
+  separate trait purely because generic methods would cost `RunnableStrategy` its
+  object safety; both spellings share one body, `runnable::drive_over`.
 
 One asymmetry: basket and multi build per-symbol chains **lazily**, so `stable_bars()`
 only reads true after one snapshot has gone through — hence the `needs_probe_feed` flag in
 the walk-forward probes. The eager shapes must *not* be fed a probe snapshot (a pairs leaf
-that didn't name its asset would trip the sole-atom guard).
+that didn't name its asset would trip the sole-atom guard). **Restoring is the exception
+to the laziness**: `restore_state` builds every symbol in the blob up front, because
+`backtest::run` routes fills through `on_fill` *before* `update`, so a resumed run's
+first-bar fill would otherwise land on the shared `Book` with no `Position` yet built to
+receive it — and a symbol that doesn't quote during a chunk would have its state dropped
+at that chunk's save rather than carried.
 
 ### Build errors are values
 
@@ -248,13 +266,16 @@ If you're about to write a private helper whose name looks like something here, 
 
 | Concern | Reuse | Location |
 |---|---|---|
-| Integration-test harness (bars, snapshot streams, temp paths, running the binary, a `wiremock` server) | `mod common;` + `common::{bars,cli,net,fixtures}` — each `tests/*.rs` is its own crate, so this is included, not imported. See [doc/TESTING.md](doc/TESTING.md) | `tests/common/` |
+| Integration-test harness (bars, snapshot streams, temp paths, running the binary, a `wiremock` server) | `mod common;` + `common::{bars,cli,net,fixtures}` — each `tests/*.rs` is its own crate, so this is included, not imported. See [docs/TESTING.md](docs/TESTING.md) | `tests/common/` |
 | Bracket-split `SYMBOL[FREQ]:` / full scope | `calendar::parse_scope_parts(text)` / `parse_scope(text)` | `src/spec/calendar.rs` |
 | Interval token / Frequency / time-column ms | `calendar::parse_interval` / `Frequency::from_str` / `parse_time_to_millis` | `src/spec/calendar.rs` |
 | Auto-detect bar cadence | `calendar::detect_frequency_from_atoms(...)` | `src/spec/calendar.rs` |
 | Parse `-w` / `--walkforward` | `WindowSpec::from_str` + `.resolve(bar_freq, class)`; `WalkForwardSpec::from_str` + `.resolve(...)` | `src/spec/calendar.rs` |
 | Built-strategy readiness + full `RunReport` | `DynSingleStrategy::{stable_bars, warm_up_bars}`; `backtest::measured_report_any(&StrategySpec, &[Snapshot], &EvalContext)` | `src/spec/strategy.rs`, `src/spec/backtest.rs` |
 | Persist / resume a run's full state | `RunnableStrategy::{save_state, restore_state, drive_resumable}` + `RunState`; `backtest::run_iteration_resumable`; `backtest::flatten_open_positions` (`--flatten`). See ARCHITECTURE *Run resuming* | `src/spec/runnable.rs`, `src/spec/backtest.rs`, `src/backtest.rs` |
+| Run a spec against a **caller-supplied** wallet (primed paper, or a live venue) | `RunnableStrategyExt::drive_resumable_with`; shared body `runnable::drive_over`. Python: `StrategySpec.run` / `.run_resumable` take any of the three wallet pyclasses via `over_any_wallet!` | `src/spec/runnable.rs`, `python/src/{strategy,spec}.rs` |
+| Warm indicators over a pause gap without trading | `backtest::warm_up` (`run` with the `trade` step gated); `RunnableStrategyExt::warm_up_over`; Python `StrategySpec.warm_up` → state JSON, no report | `src/backtest.rs`, `src/spec/runnable.rs` |
+| Close every open position **now**, through the cost pipeline | `Wallet::flatten` (default = cancel + `close` + `poll_fills`; `PaperWallet` overrides it synchronously via `fill_at`, since its queued moves would never settle) | `src/wallet/{mod,paper}.rs` |
 | Serialize one indicator's state | `#[derive(SaveState)]` + `#[state(source)]`/`#[state(skip)]` + two `impl Indicator` forwarding lines; snapshot shared handles via `Position::snapshot`/`Book::snapshot_state`/`PaperWallet::snapshot_state` | `fugazi-derive/src/lib.rs`, `src/indicators/{position,book}.rs`, `src/wallet.rs` |
 | Trading seconds a bar of `freq` spans | `class.trading_seconds_per_bar(freq)` | `src/spec/calendar.rs` |
 | Shared overlay schema of atom stream | `fugazi::sources::schema_of(&atoms)` | `src/sources/mod.rs` |

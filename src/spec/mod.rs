@@ -138,7 +138,10 @@ pub use template::SpecTemplate;
 pub use multi_asset::DynMultiAssetStrategy;
 pub use pairs::DynPairsStrategy;
 pub use portfolio::DynPortfolio;
-pub use runnable::{RUN_STATE_FORMAT_VERSION, RunState, RunnableStrategy, StrategySpec};
+pub use runnable::{
+    RUN_STATE_FORMAT_VERSION, RunState, RunnableStrategy, RunnableStrategyExt, StrategySpec,
+    drive_over,
+};
 pub use montecarlo::{McConfig, McOutcome, McSampleSet, McSamples};
 #[cfg(feature = "montecarlo")]
 pub use montecarlo::run_montecarlo;

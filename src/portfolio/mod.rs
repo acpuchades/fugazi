@@ -372,16 +372,23 @@ impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
         self.agg_book.clone()
     }
 
-    /// Serialize the portfolio's resumable state — the per-child notional
+    /// Serialize the portfolio's resumable state: the per-child notional
     /// [`Ledger`](crate::portfolio) books (cash + positions, the "Σ ledgers ==
-    /// account" invariant) and the aggregate [`Book`].
+    /// account" invariant) and in-flight netting state, the aggregate [`Book`],
+    /// the rebalance gate, the per-child weight-share chains, the bar counter,
+    /// and **every child's own state**.
     ///
-    /// The children's *own* internal indicator state is not captured here: a
-    /// [`Portfolio`] holds them erased behind `Box<dyn Strategy>`, which does not
-    /// expose the save/restore seam. A resumed portfolio therefore continues
-    /// with the correct cash / positions / aggregate equity, while each child's
-    /// indicator chains re-warm — the one shape whose resume is state-level for
-    /// the account but warm-up-level for the children.
+    /// Children are reached through [`Strategy::save_state`] — a `Box<dyn
+    /// Strategy>` exposes the seam like any other strategy handle, so a
+    /// portfolio's resume is state-level all the way down rather than
+    /// state-level for the account and warm-up-level for the children.
+    ///
+    /// Children are keyed **positionally**, with the name carried alongside as
+    /// a check. Index is already the identity everywhere else in a portfolio
+    /// ([`sub_equity`](Self::sub_equity), [`sub_position`](Self::sub_position),
+    /// the ledger vector, `!value <list>` weight indexing), and a child's name
+    /// is optional at the spec layer, so keying by name would introduce a
+    /// second identity that can disagree with the first.
     // Consumed only by the `spec`-gated `DynPortfolio` wrapper.
     #[cfg_attr(not(feature = "spec"), allow(dead_code))]
     pub(crate) fn save_state(&self) -> serde_json::Value
@@ -391,10 +398,30 @@ impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
         serde_json::json!({
             "inner": self.inner.lock().expect("Portfolio inner lock poisoned").snapshot(),
             "agg_book": self.agg_book.snapshot_state(),
+            // Gates `is_ready`, so a portfolio that resumes at zero re-serves
+            // its entire warm-up before it will trade again.
+            "bars_seen": self.bars_seen,
+            "rebalance": self.rebalance.save_state(),
+            "share_indicators": self
+                .share_indicators
+                .iter()
+                .map(|c| c.save_state())
+                .collect::<Vec<_>>(),
+            "children": self
+                .children
+                .iter()
+                .map(|c| serde_json::json!({ "name": c.name, "state": c.strategy.save_state() }))
+                .collect::<Vec<_>>(),
         })
     }
 
     /// Restore state produced by [`save_state`](Self::save_state).
+    ///
+    /// A document whose children have changed shape since the state was written
+    /// is rejected rather than partially applied: [`PortfolioInner::restore`]
+    /// would happily take a wrong-length ledger vector and desync
+    /// `ledgers.len()` from `children.len()`, after which the next thing to fire
+    /// is an assertion three layers away with nothing pointing back here.
     #[cfg_attr(not(feature = "spec"), allow(dead_code))]
     pub(crate) fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String>
     where
@@ -414,6 +441,58 @@ impl<Sym: Clone + Eq + Hash + 'static> Portfolio<Sym> {
             self.agg_book
                 .restore_state(v)
                 .map_err(|e| format!("agg_book > {e}"))?;
+        }
+        if let Some(v) = obj.get("bars_seen") {
+            self.bars_seen = serde_json::from_value(v.clone())
+                .map_err(|e| format!("bars_seen: {e}"))?;
+        }
+        if let Some(v) = obj.get("rebalance") {
+            self.rebalance
+                .load_state(v)
+                .map_err(|e| format!("rebalance > {e}"))?;
+        }
+        if let Some(v) = obj.get("share_indicators") {
+            let saved = v
+                .as_array()
+                .ok_or_else(|| format!("share_indicators: expected an array, got {v}"))?;
+            if saved.len() != self.share_indicators.len() {
+                return Err(format!(
+                    "share_indicators: state has {}, this document has {}",
+                    saved.len(),
+                    self.share_indicators.len()
+                ));
+            }
+            for (i, (chain, v)) in self.share_indicators.iter_mut().zip(saved).enumerate() {
+                chain
+                    .load_state(v)
+                    .map_err(|e| format!("share_indicators[{i}] > {e}"))?;
+            }
+        }
+        if let Some(v) = obj.get("children") {
+            let saved = v
+                .as_array()
+                .ok_or_else(|| format!("children: expected an array, got {v}"))?;
+            if saved.len() != self.children.len() {
+                return Err(format!(
+                    "children: state has {} children, this document has {}",
+                    saved.len(),
+                    self.children.len()
+                ));
+            }
+            for (i, (child, entry)) in self.children.iter_mut().zip(saved).enumerate() {
+                let name = entry.get("name").and_then(|n| n.as_str()).unwrap_or_default();
+                if name != child.name {
+                    return Err(format!(
+                        "children[{i}]: state is for child `{name}` but this document has `{}` \
+                         at that position",
+                        child.name
+                    ));
+                }
+                child
+                    .strategy
+                    .load_state(entry.get("state").unwrap_or(&serde_json::Value::Null))
+                    .map_err(|e| format!("children[{i}] `{name}` > {e}"))?;
+            }
         }
         Ok(())
     }

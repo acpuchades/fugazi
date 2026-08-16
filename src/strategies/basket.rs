@@ -210,12 +210,6 @@ pub struct BasketStrategy<Sym> {
     /// `Σ long_sizes == Σ short_sizes` (dollar-neutral). Set via
     /// [`dollar_neutral`](Self::dollar_neutral); defaults to `false`.
     dollar_neutral: bool,
-    /// Per-symbol run-state awaiting a lazy restore. Set by
-    /// [`restore_state`](Self::restore_state); each symbol's saved state is
-    /// applied inside [`update`](Strategy::update) right after that symbol's
-    /// chains are first built (they don't exist until the symbol is seen), then
-    /// removed. `None` on a normal run.
-    pending_restore: Option<HashMap<Sym, serde_json::Value>>,
 }
 
 impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> BasketStrategy<Sym> {
@@ -269,7 +263,6 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> BasketStrategy<
             universe: Box::new(Floating),
             book: Book::new(initial_equity),
             dollar_neutral: false,
-            pending_restore: None,
         }
     }
 
@@ -581,9 +574,9 @@ where
     Sym: Clone + Hash + Eq + 'static + Send + Sync + serde::Serialize + serde::de::DeserializeOwned,
 {
     /// Serialize the basket's runtime state for run resuming — the shared
-    /// [`Book`], plus each seen symbol's score / sizing / protective chains and
-    /// its [`Position`]. Symbols not yet discovered carry no state (they build
-    /// fresh when first seen after resume).
+    /// [`Book`] and rebalance gate, plus each known symbol's score / sizing /
+    /// protective chains and its [`Position`]. Symbols never seen (and never
+    /// restored) carry no state: they build fresh on first sight.
     pub(crate) fn save_state(&self) -> serde_json::Value {
         let mut symbols: HashMap<Sym, serde_json::Value> = HashMap::new();
         for sym in self.scores.keys() {
@@ -611,13 +604,23 @@ where
         }
         serde_json::json!({
             "book": self.book.snapshot_state(),
+            // The gate is state, not config: `Every` carries a bar counter, so
+            // a resumed run that restarts it rebalances on different bars than
+            // an uninterrupted one.
+            "rebalance": self.rebalance.save_state(),
             "symbols": serde_json::to_value(&symbols).unwrap_or(serde_json::Value::Null),
         })
     }
 
-    /// Restore state produced by [`save_state`](Self::save_state). The shared
-    /// book is restored immediately; per-symbol state is stashed and applied
-    /// lazily as each symbol is first seen (its chains don't exist until then).
+    /// Restore state produced by [`save_state`](Self::save_state).
+    ///
+    /// **Eagerly**: every symbol in the blob has its chains built and loaded
+    /// here rather than on its next sighting. See
+    /// [`MultiAssetStrategy::restore_state`](crate::strategies::MultiAssetStrategy)
+    /// for the three failures a deferred restore causes — chief among them that
+    /// `backtest::run` routes fills through [`on_fill`](Strategy::on_fill)
+    /// *before* `update`, so a resumed run's first-bar fill would land on the
+    /// shared [`Book`] with no [`Position`] built to receive it.
     pub(crate) fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
         let obj = state
             .as_object()
@@ -625,52 +628,87 @@ where
         if let Some(v) = obj.get("book") {
             self.book.restore_state(v).map_err(|e| format!("book > {e}"))?;
         }
+        if let Some(v) = obj.get("rebalance") {
+            self.rebalance
+                .load_state(v)
+                .map_err(|e| format!("rebalance > {e}"))?;
+        }
         if let Some(v) = obj.get("symbols") {
-            let map: HashMap<Sym, serde_json::Value> =
+            let saved: HashMap<Sym, serde_json::Value> =
                 serde_json::from_value(v.clone()).map_err(|e| format!("symbols: {e}"))?;
-            self.pending_restore = Some(map);
+            for (sym, entry) in saved {
+                // A universe narrowed since the state was written drops the
+                // symbol the same way a live discovery would.
+                if !self.universe.admits(&sym) {
+                    continue;
+                }
+                self.discover(sym.clone());
+                self.restore_symbol(&sym, &entry)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Load one symbol's saved entry into its already-built chains. Every field
+    /// propagates with a `symbols[sym] > ` breadcrumb: a shape mismatch means
+    /// the document and the blob disagree, which is bad input to report, not
+    /// something to silently resume through.
+    fn restore_symbol(&mut self, sym: &Sym, entry: &serde_json::Value) -> Result<(), String> {
+        let label = serde_json::to_string(sym).unwrap_or_else(|_| "?".into());
+        let obj = entry
+            .as_object()
+            .ok_or_else(|| format!("symbols[{label}]: expected an object, got {entry}"))?;
+        let at = |field: &str, e: String| format!("symbols[{label}] > {field} > {e}");
+
+        for (map, key) in [
+            (&mut self.scores, "score"),
+            (&mut self.sizes, "size"),
+            (&mut self.long_stops, "long_stop"),
+            (&mut self.long_targets, "long_target"),
+            (&mut self.short_stops, "short_stop"),
+            (&mut self.short_targets, "short_target"),
+        ] {
+            if let (Some(c), Some(v)) = (map.get_mut(sym), obj.get(key)) {
+                c.load_state(v).map_err(|e| at(key, e))?;
+            }
+        }
+        if let (Some(p), Some(v)) = (self.positions.get(sym), obj.get("position")) {
+            p.restore(v).map_err(|e| at("position", e))?;
         }
         Ok(())
     }
 }
 
 impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> BasketStrategy<Sym> {
-    /// Apply a symbol's stashed restore state right after its chains are built.
-    /// Best-effort: a per-symbol shape mismatch is skipped rather than aborting
-    /// the run (the top-level [`RunState`] already validated version + kind).
-    fn apply_pending_restore(&mut self, sym: &Sym) {
-        let Some(state) = self
-            .pending_restore
-            .as_ref()
-            .and_then(|m| m.get(sym))
-            .cloned()
-        else {
+    /// Spin up one symbol's chains from the per-symbol factories and register
+    /// it across the seven maps. Idempotent — a symbol already known is left
+    /// alone, so a restore followed by a live sighting doesn't rebuild it.
+    ///
+    /// The single place a basket leg is born: reached from
+    /// [`update`](Strategy::update) on first sight and from
+    /// [`restore_state`](Self::restore_state) for every symbol a resumed blob
+    /// carries. Protective factories take the brand-new [`Position`] so
+    /// `position.entry()` / `.peak()` / `.trough()` anchor correctly.
+    fn discover(&mut self, sym: Sym) {
+        if self.scores.contains_key(&sym) {
             return;
-        };
-        let Some(obj) = state.as_object() else {
-            return;
-        };
-        if let (Some(c), Some(v)) = (self.scores.get_mut(sym), obj.get("score")) {
-            let _ = c.load_state(v);
         }
-        if let (Some(c), Some(v)) = (self.sizes.get_mut(sym), obj.get("size")) {
-            let _ = c.load_state(v);
+        let position = Position::new();
+        if let Some(f) = &self.long_stop_factory {
+            self.long_stops.insert(sym.clone(), f(&sym, &position));
         }
-        if let (Some(p), Some(v)) = (self.positions.get(sym), obj.get("position")) {
-            let _ = p.restore(v);
+        if let Some(f) = &self.long_target_factory {
+            self.long_targets.insert(sym.clone(), f(&sym, &position));
         }
-        if let (Some(c), Some(v)) = (self.long_stops.get_mut(sym), obj.get("long_stop")) {
-            let _ = c.load_state(v);
+        if let Some(f) = &self.short_stop_factory {
+            self.short_stops.insert(sym.clone(), f(&sym, &position));
         }
-        if let (Some(c), Some(v)) = (self.long_targets.get_mut(sym), obj.get("long_target")) {
-            let _ = c.load_state(v);
+        if let Some(f) = &self.short_target_factory {
+            self.short_targets.insert(sym.clone(), f(&sym, &position));
         }
-        if let (Some(c), Some(v)) = (self.short_stops.get_mut(sym), obj.get("short_stop")) {
-            let _ = c.load_state(v);
-        }
-        if let (Some(c), Some(v)) = (self.short_targets.get_mut(sym), obj.get("short_target")) {
-            let _ = c.load_state(v);
-        }
+        self.scores.insert(sym.clone(), (self.score_factory)(&sym));
+        self.sizes.insert(sym.clone(), (self.sizing_factory)(&sym));
+        self.positions.insert(sym, position);
     }
 }
 
@@ -711,31 +749,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Ba
             })
             .collect();
         for sym in new_syms {
-            let position = Position::new();
-            let score = (self.score_factory)(&sym);
-            let size = (self.sizing_factory)(&sym);
-            // Build any per-leg protective chain factories against this
-            // symbol's brand-new Position so `position.entry()` /
-            // `.peak()` / `.trough()` inside the level compose against
-            // the right anchor.
-            if let Some(f) = &self.long_stop_factory {
-                self.long_stops.insert(sym.clone(), f(&sym, &position));
-            }
-            if let Some(f) = &self.long_target_factory {
-                self.long_targets.insert(sym.clone(), f(&sym, &position));
-            }
-            if let Some(f) = &self.short_stop_factory {
-                self.short_stops.insert(sym.clone(), f(&sym, &position));
-            }
-            if let Some(f) = &self.short_target_factory {
-                self.short_targets.insert(sym.clone(), f(&sym, &position));
-            }
-            self.scores.insert(sym.clone(), score);
-            self.sizes.insert(sym.clone(), size);
-            self.positions.insert(sym.clone(), position);
-            // Lazy restore: a symbol's chains only exist now that it has been
-            // seen, so apply its saved state (if resuming) right after building.
-            self.apply_pending_restore(&sym);
+            self.discover(sym);
         }
 
         // 2. Advance every known chain against the whole snapshot; the

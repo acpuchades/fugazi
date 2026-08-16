@@ -124,6 +124,35 @@ pub trait Wallet<Sym> {
         })
     }
 
+    /// Close **every** open position immediately, returning the fills booked.
+    ///
+    /// The terminal twin of [`close`](Wallet::close), and the difference is the
+    /// whole reason it exists: `close` *queues*, and a queued-fill wallet like
+    /// [`PaperWallet`](crate::PaperWallet) settles at the next bar's `open`.
+    /// At the end of a run there is no next bar, so `close` alone would leave
+    /// the position open forever. This finalizes it against the last known
+    /// price instead.
+    ///
+    /// Implementors must route through the same execution path as any other
+    /// fill — costs, commission and blotter included — so a flattened run's
+    /// numbers are comparable with the rest of it. The default body suits a
+    /// venue that fills synchronously or reports asynchronously: cancel the
+    /// resting legs, submit a close per position, then drain
+    /// [`poll_fills`](Wallet::poll_fills). A wallet that cannot enumerate its
+    /// positions (the [`positions`](Wallet::positions) default) flattens
+    /// nothing.
+    fn flatten(&mut self) -> Vec<Order<Sym>> {
+        for units in self.positions() {
+            if units.amount.abs() <= POSITION_EPSILON {
+                continue;
+            }
+            let _ = self.cancel_protective(&units.symbol);
+            let _ = self.cancel_limit(&units.symbol);
+            let _ = self.close(units.symbol);
+        }
+        self.poll_fills()
+    }
+
     /// Rest a **stop-loss** on `symbol` at `trigger`: an adverse level the wallet
     /// fills when a bar trades through it (a long fills when the bar trades down to
     /// `trigger`, a short when it trades up). The side is read from the current
@@ -351,5 +380,45 @@ pub trait Wallet<Sym> {
     fn cancel(&mut self, id: OrderId) -> Result<(), WalletError> {
         let _ = id;
         Err(WalletError::UnsupportedOperation)
+    }
+
+    /// Serialize this account's resumable state, or
+    /// [`Null`](serde_json::Value::Null) for an account that doesn't have any of
+    /// its own.
+    ///
+    /// The default — `Null`, paired with a
+    /// [`restore_state`](Wallet::restore_state) that accepts anything — is the
+    /// right answer for a **live venue**: the broker holds the positions and the
+    /// cash, so a local snapshot could only go stale, and replaying one over a
+    /// resumed session would overwrite reality with a guess. A live wallet
+    /// re-reads its account instead (`refresh_account`) and lets the run's
+    /// strategy state be the only thing the state file carries.
+    /// [`PaperWallet`] overrides both: it *is* the book, so its state must
+    /// round-trip.
+    ///
+    /// `Self: Sized` keeps `dyn Wallet<Sym>` object-safe — [`Strategy::trade`]
+    /// hands out `&mut dyn Wallet<Sym>`, so these two must stay out of the
+    /// vtable. Nothing is lost: the resume driver is generic over a concrete
+    /// wallet type.
+    ///
+    /// [`Strategy::trade`]: crate::Strategy::trade
+    fn snapshot_state(&self) -> serde_json::Value
+    where
+        Self: Sized,
+        Sym: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        serde_json::Value::Null
+    }
+
+    /// Restore state produced by [`snapshot_state`](Wallet::snapshot_state).
+    /// The default accepts and ignores — see there for why that is correct for
+    /// a live venue.
+    fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String>
+    where
+        Self: Sized,
+        Sym: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        let _ = state;
+        Ok(())
     }
 }

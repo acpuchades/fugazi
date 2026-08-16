@@ -15,7 +15,7 @@ use common::cli::{Cmd, at, scratch_file};
 
 /// A sweepable always-in crossover: both periods are `!param` placeholders, so
 /// `--grid` can drive them. Deliberately inline rather than an `examples/` file
-/// — per `doc/TESTING.md`, shapes are shared but series constants are not, and
+/// — per `docs/TESTING.md`, shapes are shared but series constants are not, and
 /// a test that pins grid arithmetic shouldn't break when an example is retuned.
 const SWEEPABLE: &str = "\
 symbol: BTC

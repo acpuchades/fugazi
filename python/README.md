@@ -767,6 +767,85 @@ The five shapes are auto-detected by top-level YAML key:
 Pass `kind="single"` / `"pairs"` / ... to override detection, and
 `params={"NAME": value}` to fill `!param` placeholders in the document.
 
+### Resuming a run, and running against a venue
+
+`.run(wallet, snapshots)` accepts a `PaperWallet`, an `OkxWallet` or a
+`CoinbaseWallet` — the same three the manual `Strategy` builder takes — for every
+shape, portfolio included. Positions the account already holds are treated as the
+user's own and left untouched; the strategy sizes against its own capital.
+
+`.run_resumable(...)` is the same run with its **state** surfaced, so a long backtest
+or a live deployment can stop and pick up exactly where it left off:
+
+```python
+text = """
+symbol: BTC
+long:
+  enter: !crosses_above
+    lhs: !sma { period: 3 }
+    rhs: !sma { period: 10 }
+  exit: !crosses_below
+    lhs: !sma { period: 3 }
+    rhs: !sma { period: 10 }
+"""
+snaps = [ta.Snapshot({"BTC": ta.Candle(v, v, v, v, 1.0)}) for v in prices]
+january, february = snaps[:20], snaps[20:]
+
+rep, state = ta.load_spec(text).run_resumable(ta.PaperWallet(10_000.0), january)
+# `state` is a JSON string — persist it however you like.
+
+# Later, in another process: rebuild from the document, resume from the state.
+rep2, state2 = ta.load_spec(text).run_resumable(
+    ta.PaperWallet(10_000.0), february, resume=state
+)
+
+# Same as never having paused.
+whole, _ = ta.load_spec(text).run_resumable(ta.PaperWallet(10_000.0), snaps)
+assert rep.equity_curve + rep2.equity_curve == whole.equity_curve
+```
+
+The resumed run is **bit-identical** to one that never paused — chunk a series any
+number of ways and the concatenated equity curve and fills match the uninterrupted
+run exactly, for all five shapes. Resuming into a different shape, or from a state
+written by a different build, raises `ValueError` rather than mis-parsing; there is no
+migration between state versions, so regenerate by re-running the history.
+
+`flatten=True` closes every open position at the last bar — a real order through the
+cost pipeline, so it moves cash and pays commission — and books the closing legs into
+the report. The state it returns holds a genuinely flat book.
+
+Against a **live** wallet the state's `wallet` field is `null`: the venue owns the
+positions and the cash, so only the strategy's own indicator state is carried and the
+account is re-read on resume. (`.evaluate(...)`'s Monte Carlo pass re-drives the spec
+against its own paper wallets, so pass a paper wallet there if you use it.)
+
+`.warm_up(wallet, snapshots, resume=None)` advances the strategy **without trading**
+and returns the state alone — no report, because no run happened. It exists for the
+*pause gap*: bars that elapsed while a deployment was stopped have to warm the
+indicators, but must not book trades at prices nobody could have traded at. Replay the
+gap through `warm_up`, hand the state to `run_resumable`, and go live — instead of
+discarding the state and re-serving a long-period indicator's whole warm-up after
+every pause.
+
+```python
+spec = ta.load_spec("""
+symbol: BTC
+long:
+  enter: !crosses_above
+    lhs: !sma { period: 3 }
+    rhs: !sma { period: 10 }
+""")
+snaps = [ta.Snapshot({"BTC": ta.Candle(v, v, v, v, 1.0)}) for v in prices]
+wallet = ta.PaperWallet(10_000.0)
+
+# Bars that elapsed while the deployment was paused: warm the SMAs, trade nothing.
+state = spec.warm_up(wallet, snaps[:20])
+assert wallet.funds == 10_000.0
+
+# Then go live from there, already warmed.
+rep, state = spec.run_resumable(wallet, snaps[20:], resume=state)
+```
+
 ### Parameter-grid optimize
 
 `ta.optimize(text, snapshots, ...)` sweeps a parameter grid, ranks rows by
@@ -986,7 +1065,7 @@ wallet that executed the run, not of the report.
 > a withdrawal from a loss, so an account that takes external cash flows must
 > have them neutralized — chain-linked, `r_i = (E_i - F_i) / E_{i-1} - 1` —
 > before measuring. See *Cross-cutting caveats* in
-> [METRICS.md](https://github.com/acpuchades/fugazi/blob/main/doc/METRICS.md).
+> [METRICS.md](https://github.com/acpuchades/fugazi/blob/main/docs/METRICS.md).
 
 ## Fetching data
 

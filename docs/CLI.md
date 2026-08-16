@@ -212,7 +212,7 @@ fugazi run @strategy.yml -s BTCUSDT=data.csv --crypto \
   --montecarlo --mc-permutations 2000 --mc-metrics sharpe,calmar
 ```
 
-See [doc/ARCHITECTURE.md](ARCHITECTURE.md) for the resampling layer itself.
+See [docs/ARCHITECTURE.md](ARCHITECTURE.md) for the resampling layer itself.
 
 #### Resuming a run
 
@@ -223,11 +223,18 @@ restartable, and what lets a paper run roll forward one batch of bars at a time.
 | Flag | Meaning |
 | --- | --- |
 | `--save-state FILE` | After the run, write strategy + wallet state to `FILE` as JSON. Open positions are **kept**, not flattened. |
-| `--resume FILE` | Restore from a `--save-state` file, then continue over this invocation's series. The document must be the same strategy shape the state was captured from. |
-| `--flatten` | Mark every still-open position to close at the final bar, booking it into `trades.csv` and the trade metrics. Without it, open positions are carried unrealized. |
+| `--resume FILE` | Restore from a `--save-state` file, then continue over this invocation's series. The document must be the same strategy shape the state was captured from, and the file must come from this build (see below). |
+| `--flatten` | **Close** every still-open position at the final bar — a real order through the cost pipeline, so it moves cash, pays commission, and lands in `fills.csv` / `trades.csv` and the trade metrics. The final equity point absorbs the realized cost; the curve keeps one point per bar. Without it, open positions are carried unrealized. |
 
 `--save-state` and `--flatten` are mutually exclusive: flattening ends the run,
-saving continues it.
+saving continues it. (Flattening does leave a genuinely flat book, so a state
+captured from a flattened run resumes from flat rather than silently re-inheriting
+the position — the exclusivity is about intent, not correctness.)
+
+A state file carries a format version, and a file written by a different version is
+**refused** with a clear message rather than mis-parsed. There is no migration path
+between versions: re-run the history to regenerate the state, or finish the run with
+the build that wrote it. Resuming optimizes a re-run; it doesn't replace one.
 
 ```sh
 fugazi run @strategy.yml -s BTCUSDT=jan.csv --crypto --save-state state.json
@@ -236,7 +243,7 @@ fugazi run @strategy.yml -s BTCUSDT=feb.csv --crypto --resume state.json
 
 Fidelity is exact — the crate depends on serde's `float_roundtrip` feature
 precisely so a restored `f64` seed doesn't drift by 1 ULP and diverge the
-resumed equity curve. See [doc/ARCHITECTURE.md](ARCHITECTURE.md) *Run resuming*
+resumed equity curve. See [docs/ARCHITECTURE.md](ARCHITECTURE.md) *Run resuming*
 for what each strategy shape persists.
 
 ### `check`

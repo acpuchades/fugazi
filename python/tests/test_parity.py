@@ -290,6 +290,15 @@ WALLET_NOT_BOUND = {
         "needs a bar-less rejection type; the run path already exposes the same "
         "entries on RunReport.rejections"
     ),
+    "flatten": (
+        "terminal by design — reachable as StrategySpec.run_resumable(flatten=True), "
+        "which books the closing legs into the report as well as the account"
+    ),
+    "snapshot_state": (
+        "reached as the state JSON StrategySpec.run_resumable / .warm_up return; "
+        "a raw snapshot with no run around it has no use from Python"
+    ),
+    "restore_state": "the other half of the same pair — passed back as resume=",
 }
 
 

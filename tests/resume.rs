@@ -1,18 +1,34 @@
 //! Run-resuming: the acceptance gate for the full-state-serialization feature.
 //!
-//! Each test runs a strategy over `2N` bars in one go, then runs it as two
-//! `N`-bar halves with a serialize / rebuild-from-spec / restore in between, and
-//! asserts the second half is **bit-identical** to the tail of the uninterrupted
-//! run. That is the whole promise: a resumed run behaves as if it never paused.
+//! Each test runs a strategy over `N` bars in one go, then runs it as a
+//! sequence of chunks with a serialize / rebuild-from-spec / restore between
+//! each pair, and asserts the chunked run is **bit-identical** to the
+//! uninterrupted one. That is the whole promise: a resumed run behaves as if it
+//! never paused.
+//!
+//! Two chunks is not enough. A two-way split exercises save → restore, but
+//! never restore → *re*-save, so any state that a resumed strategy fails to
+//! carry forward into its own next snapshot is invisible. Every test here
+//! therefore cuts at three or more chunks; [`assert_chunked_resume_matches`]
+//! takes an arbitrary list of split points.
+//!
+//! The series generators stay local (see `tests/common/bars.rs`'s module doc):
+//! these assertions depend on exactly which crossovers the price path fires.
+//! Only the *bar shape* is shared, so the streams carry timestamps and
+//! `RunState::last_bar` is on the critical path.
 
+mod common;
+
+use common::bars;
+use fugazi::backtest::Fill;
 use fugazi::market::{Real, Schema};
 use fugazi::spec::{
-    BasketStrategySpec, MultiAssetStrategySpec, PairsStrategySpec, RunnableStrategy,
-    SingleStrategySpec,
+    BasketStrategySpec, MultiAssetStrategySpec, PairsStrategySpec, PortfolioSpec, RunState,
+    RunnableStrategy, SingleStrategySpec,
 };
-use fugazi::types::{Atom, Candle, Snapshot};
+use fugazi::types::{Atom, Snapshot};
 
-/// A price series with enough swings to trigger crossovers on both halves.
+/// A price series with enough swings to trigger crossovers in every chunk.
 fn prices(n: usize) -> Vec<Real> {
     (0..n)
         .map(|i| {
@@ -22,34 +38,46 @@ fn prices(n: usize) -> Vec<Real> {
         .collect()
 }
 
-fn single_snaps(n: usize) -> Vec<Snapshot<String>> {
-    prices(n)
-        .into_iter()
-        .map(|p| {
-            let c = Candle::new(p, p + 1.0, p - 1.0, p, 1_000.0);
-            Snapshot::single("X".to_string(), Atom::new(c))
-        })
+/// The B-leg: a slower, out-of-phase path so the two symbols disagree about
+/// direction (which is what makes a basket's cross-sectional pick non-trivial).
+fn prices_b(n: usize) -> Vec<Real> {
+    (0..n)
+        .map(|i| 100.0 + 8.0 * ((i as Real) * 0.27).cos() + 0.03 * i as Real)
         .collect()
 }
 
-/// Two-symbol snapshots for the pairs / basket / multi shapes.
+fn single_snaps(n: usize) -> Vec<Snapshot<String>> {
+    bars::daily_series(&[("X", &prices(n))], bars::banded)
+}
+
+/// Two-symbol snapshots for the pairs / basket / multi / portfolio shapes.
 fn multi_snaps(n: usize) -> Vec<Snapshot<String>> {
-    let a = prices(n);
+    bars::daily_series(&[("A", &prices(n)), ("B", &prices_b(n))], bars::banded)
+}
+
+/// [`multi_snaps`] with `B` absent for `gap` — a listing gap, a delisting, a
+/// feed hiccup, or simply a name that doesn't quote every bar.
+///
+/// Hand-built rather than via `bars::daily_series`, which panics on ragged
+/// columns on purpose: *which* bar is missing is the thing being asserted.
+fn multi_snaps_with_gap(n: usize, gap: std::ops::Range<usize>) -> Vec<Snapshot<String>> {
+    let (a, b) = (prices(n), prices_b(n));
     (0..n)
         .map(|i| {
-            let pa = a[i];
-            let pb = 100.0 + 8.0 * ((i as Real) * 0.27).cos() + 0.03 * i as Real;
+            let t = fugazi::types::Timestamp(i as i64 * bars::DAY_MS);
             let mut snap = Snapshot::<String>::new();
             snap.push(
                 Some("A".to_string()),
                 None,
-                Atom::new(Candle::new(pa, pa + 1.0, pa - 1.0, pa, 1_000.0)),
+                Atom::with_time(bars::banded(a[i]), t),
             );
-            snap.push(
-                Some("B".to_string()),
-                None,
-                Atom::new(Candle::new(pb, pb + 1.0, pb - 1.0, pb, 1_000.0)),
-            );
+            if !gap.contains(&i) {
+                snap.push(
+                    Some("B".to_string()),
+                    None,
+                    Atom::with_time(bars::banded(b[i]), t),
+                );
+            }
             snap
         })
         .collect()
@@ -57,60 +85,215 @@ fn multi_snaps(n: usize) -> Vec<Snapshot<String>> {
 
 const CASH: Real = 10_000.0;
 
-/// Drive `build()` over all `snaps` in one run, then over the two halves with a
-/// serialize→rebuild→restore in the middle, and assert the resumed tail matches
-/// the uninterrupted tail exactly (equity curve + fill count).
-fn assert_resume_matches<S, B>(build: B, snaps: &[Snapshot<String>], split: usize)
-where
-    S: RunnableStrategy,
-    B: Fn() -> S,
-{
-    // Uninterrupted 2N-bar run.
-    let mut whole = build();
-    let (whole_report, _) = whole
-        .drive_resumable(snaps, CASH, &[], None, false)
-        .expect("uninterrupted run");
-
-    // First half → capture state.
-    let mut first = build();
-    let (_first_report, state) = first
-        .drive_resumable(&snaps[..split], CASH, &[], None, false)
-        .expect("first half");
-
-    // Round-trip the state through JSON, as a real resume would (via a file).
-    let json = serde_json::to_string(&state).expect("serialize RunState");
-    let restored: fugazi::spec::RunState = serde_json::from_str(&json).expect("deserialize RunState");
-
-    // Rebuild fresh from the spec, restore, and run the second half.
-    let mut second = build();
-    let (second_report, _) = second
-        .drive_resumable(&snaps[split..], CASH, &[], Some(&restored), false)
-        .expect("resumed half");
-
-    // The resumed half's equity curve must match the tail of the whole run,
-    // bit for bit.
-    let tail = &whole_report.equity_curve[split..];
-    assert_eq!(
-        second_report.equity_curve.len(),
-        tail.len(),
-        "resumed curve length"
-    );
-    for (i, (got, want)) in second_report.equity_curve.iter().zip(tail).enumerate() {
-        assert_eq!(
-            got.to_bits(),
-            want.to_bits(),
-            "resumed equity diverged at tail bar {i}: {got} vs {want}"
-        );
-    }
-}
-
 fn schema() -> std::sync::Arc<Schema> {
     Schema::empty()
 }
 
-#[test]
-fn single_asset_ema_crossover_resumes_identically() {
-    let yaml = r#"
+// ---------------------------------------------------------------------------
+// The chunked-resume harness
+// ---------------------------------------------------------------------------
+
+/// What one chunked run produced, alongside the uninterrupted run it must
+/// match. Built once by [`chunked_run`] and consumed by the two assertions
+/// below, which check different properties of the same evidence.
+struct Chunked {
+    whole_equity: Vec<Real>,
+    whole_fills: Vec<Fill<String>>,
+    whole_state: RunState,
+    /// Every chunk's equity points, concatenated in bar order.
+    chunk_equity: Vec<Real>,
+    /// Every chunk's fills, rebased onto whole-run bar indices.
+    chunk_fills: Vec<Fill<String>>,
+    /// The state captured after the final chunk.
+    final_state: RunState,
+}
+
+/// Drive `build()` over all `snaps` in one run, then over the chunks cut at
+/// `splits`, serializing → JSON → rebuilding from spec → restoring between each
+/// pair. A real resume goes through a file, so the JSON round-trip is part of
+/// the path under test, not a convenience.
+fn chunked_run<S, B>(build: B, snaps: &[Snapshot<String>], splits: &[usize]) -> Chunked
+where
+    S: RunnableStrategy,
+    B: Fn() -> S,
+{
+    assert!(
+        splits.windows(2).all(|w| w[0] < w[1])
+            && splits.first().is_some_and(|&s| s > 0)
+            && splits.last().is_some_and(|&s| s < snaps.len()),
+        "splits must be strictly increasing within 1..{}: {splits:?}",
+        snaps.len()
+    );
+
+    let mut whole = build();
+    let (whole_report, whole_state) = whole
+        .drive_resumable(snaps, CASH, &[], None, false)
+        .expect("uninterrupted run");
+
+    let bounds: Vec<usize> = std::iter::once(0)
+        .chain(splits.iter().copied())
+        .chain(std::iter::once(snaps.len()))
+        .collect();
+
+    let mut carried: Option<RunState> = None;
+    let mut chunk_equity = Vec::new();
+    let mut chunk_fills = Vec::new();
+    for (chunk, window) in bounds.windows(2).enumerate() {
+        let (start, end) = (window[0], window[1]);
+        // Rebuild from the spec every chunk: a resume never inherits a live
+        // object, only a document plus a state blob.
+        let mut strat = build();
+        let (report, state) = strat
+            .drive_resumable(&snaps[start..end], CASH, &[], carried.as_ref(), false)
+            .unwrap_or_else(|e| panic!("chunk {chunk} ({start}..{end}) failed: {e}"));
+
+        chunk_equity.extend_from_slice(&report.equity_curve);
+        chunk_fills.extend(report.fills.into_iter().map(|f| Fill {
+            bar: f.bar + start,
+            order: f.order,
+        }));
+
+        let json = serde_json::to_string(&state).expect("serialize RunState");
+        carried = Some(serde_json::from_str(&json).expect("deserialize RunState"));
+    }
+
+    Chunked {
+        whole_equity: whole_report.equity_curve,
+        whole_fills: whole_report.fills,
+        whole_state,
+        chunk_equity,
+        chunk_fills,
+        final_state: carried.expect("at least one chunk"),
+    }
+}
+
+/// A fill's identity for comparison purposes — everything except `OrderId`.
+///
+/// Ids are deliberately excluded: `BasketStrategy::trade` iterates a `HashMap`,
+/// so the order in which a bar's submissions mint ids varies between two map
+/// instances even within one process. That reorders id *assignment* without
+/// changing a single fill's economics, which is exactly what this key captures.
+fn fill_key(f: &Fill<String>) -> (usize, String, String, u64, u64, String, u64) {
+    (
+        f.bar,
+        f.order.symbol.clone(),
+        format!("{:?}", f.order.side),
+        f.order.units.to_bits(),
+        f.order.price.to_bits(),
+        format!("{:?}", f.order.kind),
+        f.order.commission.to_bits(),
+    )
+}
+
+/// The headline property: a run cut into chunks, with a serialize/restore at
+/// every seam, is indistinguishable from the uninterrupted run.
+///
+/// `case` names the shape so a failure identifies which one diverged without
+/// the reader having to map a line number back to a spec.
+#[track_caller]
+fn assert_chunked_resume_matches<S, B>(
+    case: &str,
+    build: B,
+    snaps: &[Snapshot<String>],
+    splits: &[usize],
+) where
+    S: RunnableStrategy,
+    B: Fn() -> S,
+{
+    let run = chunked_run(build, snaps, splits);
+
+    assert_eq!(
+        run.chunk_equity.len(),
+        run.whole_equity.len(),
+        "{case}: chunked curve length"
+    );
+    for (i, (got, want)) in run
+        .chunk_equity
+        .iter()
+        .zip(&run.whole_equity)
+        .enumerate()
+    {
+        assert_eq!(
+            got.to_bits(),
+            want.to_bits(),
+            "{case}: equity diverged at bar {i} (splits {splits:?}): {got} vs {want}"
+        );
+    }
+
+    let got: Vec<_> = run.chunk_fills.iter().map(fill_key).collect();
+    let want: Vec<_> = run.whole_fills.iter().map(fill_key).collect();
+    assert_eq!(
+        got, want,
+        "{case}: fills diverged (splits {splits:?}); chunked {} vs whole {}",
+        got.len(),
+        want.len()
+    );
+
+    assert_eq!(
+        run.final_state.bars_seen,
+        snaps.len(),
+        "{case}: bars_seen must accumulate across resumes"
+    );
+    assert_eq!(
+        run.final_state.bars_seen, run.whole_state.bars_seen,
+        "{case}: bars_seen vs uninterrupted run"
+    );
+    assert_eq!(
+        run.final_state.last_bar, run.whole_state.last_bar,
+        "{case}: last_bar vs uninterrupted run"
+    );
+    assert_eq!(run.final_state.kind, run.whole_state.kind, "{case}: kind");
+}
+
+/// The diagnostic twin: the state a chunked run *ends up holding* must equal
+/// the state the uninterrupted run holds.
+///
+/// Stronger than [`assert_chunked_resume_matches`] and deliberately separate.
+/// State that is silently dropped on the way through a resume often doesn't
+/// move the curve until some later bar — or at all, on this price path — so a
+/// curve assertion alone reports "fine" for a strategy that has quietly lost a
+/// symbol's chains or a child's indicators. This one fails at the drop.
+///
+/// Compares `strategy` only, never `wallet`: the wallet blob carries `next_id`
+/// and a blotter whose ordering is subject to the same `HashMap` caveat as
+/// [`fill_key`].
+#[track_caller]
+fn assert_chunked_state_matches<S, B>(
+    case: &str,
+    build: B,
+    snaps: &[Snapshot<String>],
+    splits: &[usize],
+) where
+    S: RunnableStrategy,
+    B: Fn() -> S,
+{
+    let run = chunked_run(build, snaps, splits);
+    assert_eq!(
+        run.final_state.strategy, run.whole_state.strategy,
+        "{case}: resumed strategy state differs from the uninterrupted run's (splits {splits:?})"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Spec fixtures
+// ---------------------------------------------------------------------------
+
+macro_rules! parse {
+    ($ty:ty, $yaml:expr) => {
+        <$ty>::from_text_with_params_in(
+            $yaml,
+            &Default::default(),
+            std::path::Path::new("."),
+            "(resume)",
+        )
+        .expect(concat!("parse ", stringify!($ty)))
+    };
+}
+
+fn single_ema_spec() -> SingleStrategySpec {
+    parse!(
+        SingleStrategySpec,
+        r#"
         symbol: X
         long:
           enter: !crosses_above
@@ -119,54 +302,14 @@ fn single_asset_ema_crossover_resumes_identically() {
           exit: !crosses_below
             lhs: !ema { period: 3, source: !close }
             rhs: !ema { period: 8, source: !close }
-    "#;
-    let spec = SingleStrategySpec::from_text_with_params_in(
-        yaml,
-        &Default::default(),
-        std::path::Path::new("."),
-        "(resume)",
+    "#
     )
-    .expect("parse single spec");
-    let sch = schema();
-    let snaps = single_snaps(60);
-    assert_resume_matches(|| spec.build(CASH, &sch), &snaps, 30);
-
-    // Split *during* warm-up (before the EMA-8 seed has settled): proves the IIR
-    // seed itself is serialized and restored exactly — the whole reason for
-    // serde_json's `float_roundtrip`. A replay-based scheme couldn't do this
-    // without re-feeding the pre-split bars.
-    let sch2 = schema();
-    assert_resume_matches(|| spec.build(CASH, &sch2), &snaps, 4);
 }
 
-#[test]
-fn single_asset_rsi_reversal_with_atr_stop_resumes_identically() {
-    // Exercises IIR RSI + ATR (Wilder state) + a position-anchored trailing
-    // stop, so the Position/Book restore is on the critical path.
-    let yaml = r#"
-        symbol: X
-        long:
-          enter: !lt { lhs: !rsi { period: 5, source: !close }, rhs: !value 35.0 }
-          exit: !gt { lhs: !rsi { period: 5, source: !close }, rhs: !value 65.0 }
-          stop_loss: !sub
-            lhs: !entry
-            rhs: !mul { lhs: !atr { period: 5 }, rhs: !value 2.0 }
-    "#;
-    let spec = SingleStrategySpec::from_text_with_params_in(
-        yaml,
-        &Default::default(),
-        std::path::Path::new("."),
-        "(resume)",
-    )
-    .expect("parse single spec");
-    let sch = schema();
-    let snaps = single_snaps(60);
-    assert_resume_matches(|| spec.build(CASH, &sch), &snaps, 30);
-}
-
-#[test]
-fn pairs_spread_resumes_identically() {
-    let yaml = r#"
+fn pairs_spec() -> PairsStrategySpec {
+    parse!(
+        PairsStrategySpec,
+        r#"
         left: A
         right: B
         long_spread:
@@ -176,22 +319,14 @@ fn pairs_spread_resumes_identically() {
           exit: !gt
             lhs: !sub { lhs: !close { source: !pick { symbol: A } }, rhs: !close { source: !pick { symbol: B } } }
             rhs: !value 0.0
-    "#;
-    let spec = PairsStrategySpec::from_text_with_params_in(
-        yaml,
-        &Default::default(),
-        std::path::Path::new("."),
-        "(resume)",
+    "#
     )
-    .expect("parse pairs spec");
-    let sch = schema();
-    let snaps = multi_snaps(60);
-    assert_resume_matches(|| spec.build(CASH, &sch), &snaps, 30);
 }
 
-#[test]
-fn multi_asset_resumes_identically() {
-    let yaml = r#"
+fn multi_spec() -> MultiAssetStrategySpec {
+    parse!(
+        MultiAssetStrategySpec,
+        r#"
         long:
           enter: !crosses_above
             lhs: !ema { period: 3, source: !close }
@@ -200,51 +335,384 @@ fn multi_asset_resumes_identically() {
             lhs: !ema { period: 3, source: !close }
             rhs: !ema { period: 8, source: !close }
         sizing: !value 0.5
-    "#;
-    let spec = MultiAssetStrategySpec::from_text_with_params_in(
-        yaml,
-        &Default::default(),
-        std::path::Path::new("."),
-        "(resume)",
+    "#
     )
-    .expect("parse multi spec");
-    let sch = schema();
-    let snaps = multi_snaps(60);
-    assert_resume_matches(|| spec.build(CASH, &sch), &snaps, 30);
 }
 
-/// A always-long strategy that never exits, so a position is open at run end.
+/// [`multi_spec`] with an explicit rebalance cadence.
+///
+/// `Every` carries a bar counter, so its *phase* is state. Cut points at 20/40
+/// are deliberately not multiples of 5: a gate that restarts its count each
+/// chunk fires on different bars than one that carries.
+fn multi_rebalancing_spec() -> MultiAssetStrategySpec {
+    parse!(
+        MultiAssetStrategySpec,
+        r#"
+        long:
+          enter: !crosses_above
+            lhs: !ema { period: 3, source: !close }
+            rhs: !ema { period: 8, source: !close }
+          exit: !crosses_below
+            lhs: !ema { period: 3, source: !close }
+            rhs: !ema { period: 8, source: !close }
+        sizing: !value 0.5
+        rebalance_on: !every 7
+    "#
+    )
+}
+
+fn basket_spec() -> BasketStrategySpec {
+    parse!(
+        BasketStrategySpec,
+        r#"
+        selection: !top_bottom { longs: 1, shorts: 1 }
+        score: !rsi { period: 5, source: !close }
+        sizing: !value 0.5
+    "#
+    )
+}
+
+/// Two children over the two symbols, with *different* indicators per child so
+/// a child-state restore that mixes up which state belongs to whom produces a
+/// wrong answer rather than a coincidentally-right one. `rebalance_on: !every 7`
+/// puts the gate's phase on the critical path.
+fn portfolio_spec() -> PortfolioSpec {
+    parse!(
+        PortfolioSpec,
+        r#"
+        weights: !value [0.6, 0.4]
+        rebalance_on: !every 7
+        children:
+          - name: fast_a
+            strategy:
+              symbol: A
+              long:
+                enter: !crosses_above
+                  lhs: !ema { period: 3, source: !close }
+                  rhs: !ema { period: 8, source: !close }
+                exit: !crosses_below
+                  lhs: !ema { period: 3, source: !close }
+                  rhs: !ema { period: 8, source: !close }
+          - name: slow_b
+            strategy:
+              symbol: B
+              long:
+                enter: !lt { lhs: !rsi { period: 5, source: !close }, rhs: !value 35.0 }
+                exit: !gt { lhs: !rsi { period: 5, source: !close }, rhs: !value 65.0 }
+    "#
+    )
+}
+
+/// [`portfolio_spec`] with a per-child weight *expression* rather than a
+/// constant list, so the `share_indicators` chains carry state that must
+/// survive a resume.
+fn portfolio_weight_shares_spec() -> PortfolioSpec {
+    parse!(
+        PortfolioSpec,
+        r#"
+        weights: !drawdown_throttle { source: !portfolio_book, max_drawdown: 0.15 }
+        rebalance_on: !every 7
+        children:
+          - name: fast_a
+            strategy:
+              symbol: A
+              long:
+                enter: !crosses_above
+                  lhs: !ema { period: 3, source: !close }
+                  rhs: !ema { period: 8, source: !close }
+                exit: !crosses_below
+                  lhs: !ema { period: 3, source: !close }
+                  rhs: !ema { period: 8, source: !close }
+          - name: slow_b
+            strategy:
+              symbol: B
+              long:
+                enter: !lt { lhs: !rsi { period: 5, source: !close }, rhs: !value 35.0 }
+                exit: !gt { lhs: !rsi { period: 5, source: !close }, rhs: !value 65.0 }
+    "#
+    )
+}
+
+/// An always-long strategy that never exits, so a position is open at run end.
 fn buy_and_hold_spec() -> SingleStrategySpec {
-    let yaml = r#"
+    parse!(
+        SingleStrategySpec,
+        r#"
         symbol: X
         long:
           enter: !gt { lhs: !close, rhs: !value 0.0 }
-    "#;
-    SingleStrategySpec::from_text_with_params_in(
-        yaml,
-        &Default::default(),
-        std::path::Path::new("."),
-        "(resume)",
+    "#
     )
-    .expect("parse")
+}
+
+/// The split points every shape is held to. Three chunks, so the middle one
+/// both restores and re-saves.
+const SPLITS: &[usize] = &[20, 40];
+
+// ---------------------------------------------------------------------------
+// Per shape: chunked resume == one shot
+// ---------------------------------------------------------------------------
+
+#[test]
+fn single_asset_ema_crossover_resumes_across_three_chunks() {
+    let spec = single_ema_spec();
+    let sch = schema();
+    let snaps = single_snaps(60);
+    assert_chunked_resume_matches("single/ema", || spec.build(CASH, &sch), &snaps, SPLITS);
+
+    // Cut *during* warm-up (before the EMA-8 seed has settled): proves the IIR
+    // seed itself is serialized and restored exactly — the whole reason for
+    // serde_json's `float_roundtrip`. A replay-based scheme couldn't do this
+    // without re-feeding the pre-split bars.
+    assert_chunked_resume_matches(
+        "single/ema mid-warm-up",
+        || spec.build(CASH, &sch),
+        &snaps,
+        &[2, 4, 7],
+    );
 }
 
 #[test]
-fn flatten_books_a_closing_trade() {
+fn single_asset_rsi_reversal_with_atr_stop_resumes_across_three_chunks() {
+    // Exercises IIR RSI + ATR (Wilder state) + a position-anchored trailing
+    // stop, so the Position/Book restore is on the critical path.
+    let spec = parse!(
+        SingleStrategySpec,
+        r#"
+        symbol: X
+        long:
+          enter: !lt { lhs: !rsi { period: 5, source: !close }, rhs: !value 35.0 }
+          exit: !gt { lhs: !rsi { period: 5, source: !close }, rhs: !value 65.0 }
+          stop_loss: !sub
+            lhs: !entry
+            rhs: !mul { lhs: !atr { period: 5 }, rhs: !value 2.0 }
+    "#
+    );
+    let sch = schema();
+    assert_chunked_resume_matches(
+        "single/rsi+atr-stop",
+        || spec.build(CASH, &sch),
+        &single_snaps(60),
+        SPLITS,
+    );
+}
+
+#[test]
+fn single_asset_gated_on_trailing_sharpe_resumes_across_three_chunks() {
+    // A `!sharpe` gate embeds a whole sub-strategy + its own wallet inside the
+    // indicator — the deepest state in the crate. Resuming must restore that
+    // embedded engine exactly, not re-warm it.
+    let spec = parse!(
+        SingleStrategySpec,
+        r#"
+        symbol: X
+        long:
+          enter: !gt
+            lhs: !sharpe
+              period: 5
+              bars_per_year: 252.0
+              strategy:
+                symbol: X
+                long:
+                  enter: !gt { lhs: !close, rhs: !value 0.0 }
+            rhs: !value -1000.0
+          exit: !lt
+            lhs: !sharpe
+              period: 5
+              bars_per_year: 252.0
+              strategy:
+                symbol: X
+                long:
+                  enter: !gt { lhs: !close, rhs: !value 0.0 }
+            rhs: !value -1000.0
+    "#
+    );
+    let sch = schema();
+    assert_chunked_resume_matches(
+        "single/trailing-sharpe",
+        || spec.build(CASH, &sch),
+        &single_snaps(60),
+        SPLITS,
+    );
+}
+
+#[test]
+fn pairs_spread_resumes_across_three_chunks() {
+    let spec = pairs_spec();
+    let sch = schema();
+    assert_chunked_resume_matches(
+        "pairs/spread",
+        || spec.build(CASH, &sch),
+        &multi_snaps(60),
+        SPLITS,
+    );
+}
+
+#[test]
+fn multi_asset_resumes_across_three_chunks() {
+    let spec = multi_spec();
+    let sch = schema();
+    assert_chunked_resume_matches(
+        "multi/ema",
+        || spec.build(CASH, &sch),
+        &multi_snaps(60),
+        SPLITS,
+    );
+}
+
+#[test]
+fn multi_asset_with_a_rebalance_cadence_resumes_across_three_chunks() {
+    // The default gate (`!never`) is stateless, so the plain multi test above
+    // cannot see a dropped gate. `rebalance_on:` is on the multi spec surface,
+    // and `Every`'s bar counter is state like any other.
+    let spec = multi_rebalancing_spec();
+    let sch = schema();
+    assert_chunked_resume_matches(
+        "multi/rebalancing",
+        || spec.build(CASH, &sch),
+        &multi_snaps(60),
+        SPLITS,
+    );
+}
+
+#[test]
+fn multi_asset_resumes_a_symbol_absent_from_a_middle_chunk() {
+    // B doesn't quote for the whole middle chunk. Its state must survive that
+    // chunk's save — a resumed strategy only rediscovers the symbols it
+    // actually sees, so anything it doesn't see it has to carry forward
+    // untouched rather than drop.
+    let spec = multi_spec();
+    let sch = schema();
+    assert_chunked_resume_matches(
+        "multi/listing-gap",
+        || spec.build(CASH, &sch),
+        &multi_snaps_with_gap(60, 20..40),
+        SPLITS,
+    );
+}
+
+#[test]
+fn basket_resumes_across_three_chunks() {
+    let spec = basket_spec();
+    let sch = schema();
+    assert_chunked_resume_matches(
+        "basket/top-bottom",
+        || spec.build(CASH, &sch),
+        &multi_snaps(60),
+        SPLITS,
+    );
+}
+
+#[test]
+fn basket_resumes_a_symbol_absent_from_a_middle_chunk() {
+    let spec = basket_spec();
+    let sch = schema();
+    assert_chunked_resume_matches(
+        "basket/listing-gap",
+        || spec.build(CASH, &sch),
+        &multi_snaps_with_gap(60, 20..40),
+        SPLITS,
+    );
+}
+
+#[test]
+fn portfolio_resumes_across_three_chunks() {
+    let spec = portfolio_spec();
+    let sch = schema();
+    assert_chunked_resume_matches(
+        "portfolio/fixed-weights",
+        || spec.build(CASH, &sch, None),
+        &multi_snaps(60),
+        SPLITS,
+    );
+}
+
+#[test]
+fn portfolio_with_weight_shares_resumes_across_three_chunks() {
+    let spec = portfolio_weight_shares_spec();
+    let sch = schema();
+    assert_chunked_resume_matches(
+        "portfolio/weight-shares",
+        || spec.build(CASH, &sch, None),
+        &multi_snaps(60),
+        SPLITS,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Per shape: the state itself round-trips, not just the numbers it produced
+// ---------------------------------------------------------------------------
+
+#[test]
+fn single_asset_carries_every_state_field_across_chunks() {
+    let spec = single_ema_spec();
+    let sch = schema();
+    assert_chunked_state_matches("single/ema", || spec.build(CASH, &sch), &single_snaps(60), SPLITS);
+}
+
+#[test]
+fn pairs_carries_every_state_field_across_chunks() {
+    let spec = pairs_spec();
+    let sch = schema();
+    assert_chunked_state_matches("pairs/spread", || spec.build(CASH, &sch), &multi_snaps(60), SPLITS);
+}
+
+#[test]
+fn multi_asset_carries_every_state_field_across_chunks() {
+    let spec = multi_rebalancing_spec();
+    let sch = schema();
+    assert_chunked_state_matches(
+        "multi/rebalancing",
+        || spec.build(CASH, &sch),
+        &multi_snaps(60),
+        SPLITS,
+    );
+}
+
+#[test]
+fn basket_carries_every_state_field_across_chunks() {
+    let spec = basket_spec();
+    let sch = schema();
+    assert_chunked_state_matches(
+        "basket/top-bottom",
+        || spec.build(CASH, &sch),
+        &multi_snaps(60),
+        SPLITS,
+    );
+}
+
+#[test]
+fn portfolio_carries_every_state_field_across_chunks() {
+    let spec = portfolio_spec();
+    let sch = schema();
+    assert_chunked_state_matches(
+        "portfolio/fixed-weights",
+        || spec.build(CASH, &sch, None),
+        &multi_snaps(60),
+        SPLITS,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Flatten, and the two rejection paths
+// ---------------------------------------------------------------------------
+
+#[test]
+fn flatten_closes_the_position_in_the_wallet_not_just_the_report() {
     let sch = schema();
     let snaps = single_snaps(40);
 
     // Without --flatten: an open position at the end is unrealized (no
     // closing fill for it in the blotter).
     let mut carried = buy_and_hold_spec().build(CASH, &sch);
-    let (carried_report, _) = carried
+    let (carried_report, carried_state) = carried
         .drive_resumable(&snaps, CASH, &[], None, false)
         .expect("carried run");
 
-    // With --flatten: the open position is booked closed at the last bar,
-    // so the blotter gains exactly one more fill.
+    // With --flatten: the open position is closed at the last bar, so the
+    // blotter gains exactly one more fill...
     let mut flattened = buy_and_hold_spec().build(CASH, &sch);
-    let (flattened_report, _) = flattened
+    let (flattened_report, flattened_state) = flattened
         .drive_resumable(&snaps, CASH, &[], None, true)
         .expect("flattened run");
 
@@ -253,44 +721,89 @@ fn flatten_books_a_closing_trade() {
         carried_report.fills.len() + 1,
         "flatten should book exactly one closing fill for the open long"
     );
-    // And the equity curve is untouched (open positions were already marked to
-    // market every bar).
-    assert_eq!(carried_report.equity_curve, flattened_report.equity_curve);
+
+    // ...and, unlike the carried run, the wallet it leaves behind is flat.
+    // This is the property the whole feature turns on: a paused deployment
+    // that flattens must not resume holding the position it just closed.
+    let carried_positions = wallet_positions(&carried_state);
+    assert!(
+        carried_positions.iter().any(|(_, units)| units.abs() > 1e-12),
+        "the carried run should still hold its long: {carried_positions:?}"
+    );
+    let flattened_positions = wallet_positions(&flattened_state);
+    assert!(
+        flattened_positions
+            .iter()
+            .all(|(_, units)| units.abs() <= 1e-12),
+        "a flattened run's state must hold no position: {flattened_positions:?}"
+    );
+
+    // The curve agrees everywhere but the final bar, which absorbs the
+    // closing leg's realized cost. (With a zero-cost wallet the two are equal;
+    // the invariant that matters here is the length, which every report
+    // consumer assumes is one point per bar.)
+    assert_eq!(
+        flattened_report.equity_curve.len(),
+        snaps.len(),
+        "flatten must not change the number of equity points"
+    );
+    assert_eq!(
+        carried_report.equity_curve[..snaps.len() - 1],
+        flattened_report.equity_curve[..snaps.len() - 1],
+        "flatten must only touch the final equity point"
+    );
+}
+
+#[test]
+fn resuming_a_flattened_run_continues_from_a_flat_book() {
+    let sch = schema();
+    let snaps = single_snaps(40);
+
+    let mut flattened = buy_and_hold_spec().build(CASH, &sch);
+    let (_, state) = flattened
+        .drive_resumable(&snaps[..20], CASH, &[], None, true)
+        .expect("flattened first chunk");
+
+    // A resume from a flattened state starts flat, so it must re-enter — i.e.
+    // book an opening fill — rather than silently continuing to hold.
+    let mut resumed = buy_and_hold_spec().build(CASH, &sch);
+    let (report, _) = resumed
+        .drive_resumable(&snaps[20..], CASH, &[], Some(&state), false)
+        .expect("resumed chunk");
+    assert!(
+        !report.fills.is_empty(),
+        "resuming from a flattened state should re-enter, but booked no fills"
+    );
+}
+
+/// The `positions` map out of a serialized `PaperWallet` snapshot.
+fn wallet_positions(state: &RunState) -> Vec<(String, Real)> {
+    state
+        .wallet
+        .get("positions")
+        .and_then(|p| p.as_object())
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| (k.clone(), v.as_f64().unwrap_or(0.0)))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[test]
 fn resuming_a_mismatched_shape_is_rejected() {
     let sch = schema();
-    let snaps = single_snaps(20);
 
     // Capture a single-asset state...
     let mut single = buy_and_hold_spec().build(CASH, &sch);
     let (_, state) = single
-        .drive_resumable(&snaps, CASH, &[], None, false)
+        .drive_resumable(&single_snaps(20), CASH, &[], None, false)
         .expect("single run");
     assert_eq!(state.kind, "single");
 
     // ...then try to resume it into a pairs strategy — rejected with a clear
     // `!resume >` message, not a silent mis-parse.
-    let pairs_yaml = r#"
-        left: A
-        right: B
-        long_spread:
-          enter: !lt
-            lhs: !sub { lhs: !close { source: !pick { symbol: A } }, rhs: !close { source: !pick { symbol: B } } }
-            rhs: !value 0.0
-          exit: !gt
-            lhs: !sub { lhs: !close { source: !pick { symbol: A } }, rhs: !close { source: !pick { symbol: B } } }
-            rhs: !value 5.0
-    "#;
-    let pairs = PairsStrategySpec::from_text_with_params_in(
-        pairs_yaml,
-        &Default::default(),
-        std::path::Path::new("."),
-        "(resume)",
-    )
-    .expect("parse pairs");
-    let mut pair_strat = pairs.build(CASH, &sch);
+    let mut pair_strat = pairs_spec().build(CASH, &sch);
     let err = pair_strat
         .drive_resumable(&multi_snaps(20), CASH, &[], Some(&state), false)
         .expect_err("cross-shape resume must fail");
@@ -312,62 +825,4 @@ fn resuming_a_stale_format_version_is_rejected() {
         .drive_resumable(&single_snaps(20), CASH, &[], Some(&state), false)
         .expect_err("stale version must fail");
     assert!(err.contains("format version"), "unexpected error: {err}");
-}
-
-#[test]
-fn single_asset_gated_on_trailing_sharpe_resumes_identically() {
-    // A `!sharpe` gate embeds a whole sub-strategy + its own wallet inside the
-    // indicator — the deepest state in the crate. Resuming must restore that
-    // embedded engine exactly, not re-warm it.
-    let yaml = r#"
-        symbol: X
-        long:
-          enter: !gt
-            lhs: !sharpe
-              period: 5
-              bars_per_year: 252.0
-              strategy:
-                symbol: X
-                long:
-                  enter: !gt { lhs: !close, rhs: !value 0.0 }
-            rhs: !value -1000.0
-          exit: !lt
-            lhs: !sharpe
-              period: 5
-              bars_per_year: 252.0
-              strategy:
-                symbol: X
-                long:
-                  enter: !gt { lhs: !close, rhs: !value 0.0 }
-            rhs: !value -1000.0
-    "#;
-    let spec = SingleStrategySpec::from_text_with_params_in(
-        yaml,
-        &Default::default(),
-        std::path::Path::new("."),
-        "(resume)",
-    )
-    .expect("parse trailing-gated spec");
-    let sch = schema();
-    let snaps = single_snaps(60);
-    assert_resume_matches(|| spec.build(CASH, &sch), &snaps, 30);
-}
-
-#[test]
-fn basket_resumes_identically() {
-    let yaml = r#"
-        selection: !top_bottom { longs: 1, shorts: 1 }
-        score: !rsi { period: 5, source: !close }
-        sizing: !value 0.5
-    "#;
-    let spec = BasketStrategySpec::from_text_with_params_in(
-        yaml,
-        &Default::default(),
-        std::path::Path::new("."),
-        "(resume)",
-    )
-    .expect("parse basket spec");
-    let sch = schema();
-    let snaps = multi_snaps(60);
-    assert_resume_matches(|| spec.build(CASH, &sch), &snaps, 30);
 }

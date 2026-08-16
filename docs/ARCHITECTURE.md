@@ -3,7 +3,7 @@
 Detailed internals for `fugazi`. [CLAUDE.md](../CLAUDE.md) is the load-bearing
 summary — the invariants, conventions, and the "grep before writing" table. This
 file is the depth behind it: read the relevant section before touching a
-subsystem. [doc/CONTRIBUTING.md](CONTRIBUTING.md) is the change procedure.
+subsystem. [docs/CONTRIBUTING.md](CONTRIBUTING.md) is the change procedure.
 
 Three composable layers: **indicators** (numeric sources), **signals**
 (`Indicator<Output = bool>`), **strategies** (decision layer trading into a
@@ -618,10 +618,16 @@ instantiations are open-ended). The *structure* is rebuilt from the spec; only t
 
 **Shared/path-dependent state** is serialized once at the strategy level, never
 per-indicator: `Position::snapshot`/`restore`, `Book::snapshot_state`/`restore_state`,
-`PaperWallet::snapshot_state`/`restore_state` (positions/cash/pending/resting/blotter
-— **not** costs, which are re-primed), `PortfolioInner`/`Ledger`.
+`Wallet::snapshot_state`/`restore_state`, `PortfolioInner`/`Ledger`.
 **`PositionField`/`BookField` keep the no-op default** — they hold a clone of the
 shared handle, and serializing per-accessor would double-count.
+
+`Wallet::snapshot_state`/`restore_state` default to `Null` / accept-and-ignore, which
+is the right answer for a **live venue**: the broker owns the positions and the cash,
+so a local snapshot can only go stale and replaying one would overwrite reality with a
+guess. `PaperWallet` overrides both (positions/cash/pending/resting/blotter — **not**
+costs, which are re-primed by the caller), because it *is* the book. Both carry
+`where Self: Sized` so `dyn Wallet<Sym>` stays object-safe for `Strategy::trade`.
 
 **Driving.** `RunnableStrategy::{save_state, restore_state, drive_resumable}` +
 `RunState { format_version, kind, last_bar, bars_seen, strategy, wallet }`.
@@ -631,21 +637,69 @@ flattens open positions at the end, and surfaces the final `RunState`. `drive` i
 the thin `(…, None, false).0` wrapper. `backtest::run_iteration_resumable` is the
 CLI/spec-shape entry.
 
-**Per-shape fidelity.** single / pairs = exact. basket / multi = exact via **lazy
-per-symbol restore** (a `pending_restore: Option<HashMap<Sym, Value>>` stash applied
-inside `update` right after a symbol's chains are first built). portfolio = ledgers
-+ aggregate `Book` restore exactly; children (erased `Box<dyn Strategy>`) re-warm
-their chains. **Trailing metrics** (`Sharpe<S>` et al.) serialize the embedded
-strategy + private wallet + `prev_equity` + the rolling window — full fidelity; their
-`Indicator` impls therefore require `Sym: Serialize + DeserializeOwned`.
+`RunnableStrategy` is object-safe (`try_build` hands back a `Box<dyn …>`), so its
+driving methods build a `PaperWallet` internally. To supply the account — a primed
+paper wallet, or a live venue — use **`RunnableStrategyExt::drive_resumable_with(snaps,
+wallet, resume, flatten)`**, blanket-impl'd over every `RunnableStrategy` including
+`?Sized` ones. Both spellings share one body, `runnable::drive_over`. Against a live
+wallet `RunState.wallet` is `Null` and the venue is re-read on resume.
 
-**Flatten toggle.** `backtest::flatten_open_positions` books a closing fill for every
-still-open position at the last bar so `reconstruct_trades`/metrics count the realized
-P&L (equity curve untouched). Terminal, mutually exclusive with saving state.
+**`format_version` is 2.** v1 blobs are rejected outright with no migration: a v1
+portfolio blob does not *contain* its children's state, so a migration could only
+fabricate it. Re-run the history (resuming optimizes that, it doesn't replace it) or
+finish on the build that wrote the state.
+
+**Per-shape fidelity: all five are exact.** `tests/resume.rs` holds every shape to
+bit-identical equity *and* fills across a three-way chunked run, plus a separate
+assertion that the state blob itself round-trips.
+
+- single / pairs — a flat field set, restored eagerly, every field error propagated.
+- basket / multi — the same, plus the shared `Book` and the `rebalance` gate (a
+  cadence like `!every 7` carries a bar counter, so its *phase* is state). Per-symbol
+  chains are built **eagerly inside `restore_state`**, not lazily on next sighting:
+  `backtest::run` routes fills through `on_fill` *before* `update`, so a resumed run's
+  first-bar fill — the previous chunk's queued order settling — would otherwise reach
+  the `Book` with no `Position` built to receive it; and `save_state` can only
+  serialize symbols it holds state for, so a symbol that doesn't quote during a chunk
+  would be dropped at that chunk's save rather than carried.
+- portfolio — ledgers, aggregate `Book`, `bars_seen` (it gates `is_ready`), the
+  rebalance gate, the per-child weight-share chains, and **every child's own state**
+  through `Strategy::save_state`. Children are keyed positionally with the name
+  carried as a check; a shape change between save and resume is an error, not a
+  partial apply. `PortfolioInner` also persists in-flight netting state
+  (`pending`/`owners`/`protective`): a `PaperWallet` fills at the *next* bar's open,
+  so a portfolio that traded on a chunk's last bar has flow across the seam by
+  construction, and dropping it would break `Σ ledgers == account` permanently.
+- **Trailing metrics** (`Sharpe<S>` et al.) serialize the embedded strategy + private
+  wallet + `prev_equity` + the rolling window; their `Indicator` impls therefore
+  require `Sym: Serialize + DeserializeOwned`.
+
+**Flatten toggle.** `backtest::flatten_open_positions` delegates to `Wallet::flatten`,
+which closes every open position **in the account** at the last bar — through the
+normal execution path, so costs and commission apply and a real `OrderId` is minted
+per leg — then routes the fills to `on_fill` and the report. `PaperWallet` overrides
+the trait default because its queued moves settle at the *next* bar's open and there
+isn't one; it goes straight to `fill_at`, the engine every other fill uses. The final
+equity point is **overwritten, not appended** (each leg closes at the mark that point
+was computed from, so only the cost drag changes, and
+`equity_curve.len() == snapshots.len()` is an invariant every consumer relies on).
+The zero-cost gross twin is flattened alongside the priced run, or `costs_section`
+would pair net fills against gross fills it doesn't have. The captured `RunState` then
+holds a genuinely flat book, so resuming from a flattened run continues from flat.
+
+**Warming without trading.** `backtest::warm_up` is `run` with the `trade` step gated
+(`DriveMode::WarmUpOnly` — one loop, one branch), surfaced as
+`RunnableStrategyExt::warm_up_over` and Python `spec.warm_up(...) -> state_json`. It
+closes a *pause gap*: bars that elapsed while a deployment was stopped warm the
+indicators without booking trades at prices nobody could have traded at, so a
+long-period indicator keeps its warm-up across a pause. Fills that arrive anyway (a
+resting order left from before) still route to `on_fill`, or the strategy's position
+would drift from the account's.
 
 **Surfaces.** CLI `fugazi run … --save-state <file>` / `--resume <file>` /
 `--flatten`. Python `spec.run_resumable(wallet, snapshots, resume=None, flatten=False)
--> (report, state_json)` (PaperWallet-only like `.run`).
+-> (report, state_json)` and `spec.warm_up(wallet, snapshots, resume=None)
+-> state_json`, both taking a `PaperWallet`, an `OkxWallet` or a `CoinbaseWallet`.
 
 **Adding a stateful indicator ⇒ add `#[derive(SaveState)]` + field annotations + the
 two `impl Indicator` forwarding lines**, or its state is silently lost on resume.
@@ -660,7 +714,7 @@ spec with changed params silently loads the saved config (only `kind` +
 
 ## Metrics — one function per metric (`src/metrics.rs`)
 
-See [doc/METRICS.md](METRICS.md) for the user-facing catalogue and caveats.
+See [docs/METRICS.md](METRICS.md) for the user-facing catalogue and caveats.
 Internals:
 
 **No aggregate `compute`.** Every metric is its own `pub fn`. Three **intermediate
@@ -949,7 +1003,7 @@ kernel), `get.rs`, `overlay.rs`, `data.rs`, `csv_source.rs`, `list.rs`,
 - **`costs/`** — `--costs`. `spec.rs`: CLI-arg parsing into `CostSpec`; `config.rs`:
   `CostConfig`, `LegConfig<T>`, `ScopedEntry<T>`, typed `CommissionSpec`/`SpreadSpec`/
   `SlippageSpec` (**externally tagged** — `!percentage { rate: 0.001 }`, never `kind:
-  percentage`). Dotted `--costs` setter is a *literal* address. See [doc/COSTS.md](COSTS.md).
+  percentage`). Dotted `--costs` setter is a *literal* address. See [docs/COSTS.md](COSTS.md).
 - **`dyn_indicator.rs`** — facade re-exporting **`fugazi::runtime`** (`DynIndicator` +
   `DynValue` (`Real | Bool | Atom | Candle | Str | Time | Snapshot<String>`) + `DynType`
   + `Adapter` blanket + `AsReal`/`AsBool`/`AsCandle`/`AsAtom`/`AsStr` + `chain`/
@@ -988,7 +1042,7 @@ kernel), `get.rs`, `overlay.rs`, `data.rs`, `csv_source.rs`, `list.rs`,
 ## Python bindings (`python/src/`)
 
 **Type-erased mirror** of the Rust library (pyo3 cdylib, `fugazi-python` → `fugazi`).
-See [doc/PYTHON.md](PYTHON.md) for the user-facing API. Python can't carry source
+See [docs/PYTHON.md](PYTHON.md) for the user-facing API. Python can't carry source
 generics across FFI, so everything is erase-then-dispatch via **`fugazi::runtime`**
 (`DynIndicator`+`DynValue`, plus `DynIndicatorSync` subtrait adding `Send + Sync` and
 deep clone via `runtime::wrap_sync`). Output-typed carriers = `TypedSource<In, Out>`
@@ -1078,12 +1132,16 @@ factory slots are per-symbol **Python callables** converted via
 the `Py<PyAny>` callable and calls it once per symbol under the GIL). `PyPortfolio`
 mirrors `Portfolio::builder()`; children are the other four Py builders, each
 **materialized** at its share of the seed via the `materialize(...)` seam. **All five
-shapes share one run seam** (`run_over_wallet!` / `run_prepared!` in
-`python/src/strategy.rs`): `.run(wallet, …)` accepts a `PaperWallet` **or** the live
-`OkxWallet`. The seam handles **external positions automatically** via the core
-`SleeveWallet`. `test_specs.py::test_portfolio_builder_matches_the_equivalent_yaml_document`
-pins the builder against the equivalent `portfolio:` document. (The `load_spec(...).run(wallet)`
-path is still `PaperWallet`-only.)
+shapes share one run seam** (`over_any_wallet!` / `over_prepared_wallet!` in
+`python/src/strategy.rs`): `.run(wallet, …)` accepts a `PaperWallet`, an `OkxWallet`
+or a `CoinbaseWallet`. The seam handles **external positions automatically** via the
+core `SleeveWallet`. `test_specs.py::test_portfolio_builder_matches_the_equivalent_yaml_document`
+pins the builder against the equivalent `portfolio:` document. The **spec** surface
+(`load_spec(...).run` / `.run_resumable` / `.warm_up`) goes through the same seam and
+so takes the same three wallets — that is what makes a *portfolio* spec runnable
+against a venue. `run_spec` / `run_spec_resumable` are thin adapters over the library's
+`drive_over` rather than a second implementation of the driver, so the Python and CLI
+paths cannot drift.
 
 **Not bound** (don't add without asking): position-anchored protective levels,
 `BasketStrategy::selection(closure)` escape hatch, per-child weight-share indicators

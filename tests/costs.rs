@@ -143,6 +143,46 @@ fn costs_drag_the_equity_curve_down() {
     );
 }
 
+/// `--flatten` closes through the cost pipeline, so its closing legs appear in
+/// the priced *and* the zero-cost gross run.
+///
+/// The gross twin exists only to attribute costs: `costs_section` pairs net
+/// fills against gross fills bar-for-bar, so a closing leg present in one and
+/// absent from the other would drop straight out of `total_slippage_cost` and
+/// understate the drag — silently, since nothing else compares the two counts.
+#[test]
+fn flatten_books_its_closing_legs_in_both_the_priced_and_gross_runs() {
+    let flat = Cmd::new("run")
+        .arg(&at("examples/strategy.yml"))
+        .series(&at("examples/candles.csv"))
+        .costs("commission=!percentage { rate: 0.05 }")
+        .arg("--flatten")
+        .arg("--quiet")
+        .output_dir("fugazi_costs_flatten")
+        .ok()
+        .artefacts();
+    let carried = run_with(
+        &["commission=!percentage { rate: 0.05 }"],
+        "fugazi_costs_flatten_carried",
+    );
+
+    // The flattened run books strictly more fills — the closing legs.
+    let count = |a: &Artefacts| a.fills.lines().count();
+    assert!(
+        count(&flat) > count(&carried),
+        "--flatten should book closing legs: {} vs {}",
+        count(&flat),
+        count(&carried)
+    );
+    // And the drag is still attributed: a flatten leg that the gross twin never
+    // booked would leave this at the carried run's value or below.
+    assert!(
+        total_commission(&flat.metrics) >= total_commission(&carried.metrics),
+        "flatten's closing legs must carry commission too:\n{}",
+        flat.metrics
+    );
+}
+
 /// The binance preset — a real-world YAML file with `by_symbol` — parses,
 /// runs, and populates the same fields.
 #[test]

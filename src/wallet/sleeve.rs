@@ -209,6 +209,22 @@ impl<Sym: Clone + Eq + Hash, W: Wallet<Sym>> Wallet<Sym> for SleeveWallet<Sym, W
     fn poll_fills(&mut self) -> Vec<Order<Sym>> {
         self.inner.poll_fills()
     }
+    // Forwarded so a sleeve over a paper wallet still round-trips its book.
+    // The baseline itself is not persisted: it is re-snapshotted from the
+    // account each time a run is prepared, so it always reflects what the user
+    // actually holds now rather than what they held when the state was written.
+    fn snapshot_state(&self) -> serde_json::Value
+    where
+        Sym: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        self.inner.snapshot_state()
+    }
+    fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String>
+    where
+        Sym: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        self.inner.restore_state(state)
+    }
 }
 
 /// Snapshot a wallet's current positions as an external baseline for

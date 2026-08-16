@@ -366,14 +366,22 @@ impl<Sym: Hash + Eq + Clone> Book<Sym> {
         }
 
         // Mark-to-market total equity.
+        //
+        // Summed in a canonical order rather than `legs`' iteration order:
+        // `legs` is a `HashMap` with a per-instance `RandomState`, so two
+        // books holding the same legs would otherwise add them in different
+        // orders and land a ULP apart. That is not academic — `equity` feeds
+        // `!equity` / `!drawdown` / `!return_per_bar` and the book-anchored
+        // sizing recipes, so a ULP either side of a threshold is a different
+        // trade, and it would make a resumed run's bit-identity a coin flip.
         let prev_equity = s.equity;
-        let mut equity = s.cash;
-        for leg in s.legs.values() {
-            if let Some(close) = leg.prev_close {
-                equity += leg.units * close;
-            }
-        }
-        s.equity = equity;
+        let mut values: Vec<Real> = s
+            .legs
+            .values()
+            .filter_map(|leg| leg.prev_close.map(|close| leg.units * close))
+            .collect();
+        values.sort_by(|a, b| a.total_cmp(b));
+        s.equity = values.into_iter().fold(s.cash, |acc, v| acc + v);
         if s.equity > s.equity_peak {
             s.equity_peak = s.equity;
         }

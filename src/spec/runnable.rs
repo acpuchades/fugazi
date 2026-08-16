@@ -4,17 +4,21 @@
 //! each build to their own `Dyn*Strategy` wrapper. Those wrappers already have
 //! the same surface: each implements
 //! `Strategy<Input = Snapshot<String>, Symbol = String>` and exposes
-//! `stable_bars()` / `warm_up_bars()`. The only genuine divergence is how a
-//! run is *driven*: four go through a plain [`PaperWallet`] primed with
-//! per-symbol costs, while a portfolio owns a composite wallet with one
-//! sub-wallet per child and takes its costs at build time instead.
+//! `stable_bars()` / `warm_up_bars()`. Since a portfolio became an ordinary
+//! strategy that trades the wallet it is handed, all five are driven the same
+//! way, and the trait is purely the shared surface plus the save/restore seam.
 //!
-//! [`RunnableStrategy`] captures exactly that: the shared surface as required
-//! methods, and the wallet difference as [`drive`](RunnableStrategy::drive),
-//! whose default body is the `PaperWallet` path and which the portfolio
-//! overrides. The name is for what the trait *enables* — driving a strategy to
-//! completion, the same act [`backtest::run`](crate::backtest::run) performs —
-//! rather than for where the value came from.
+//! [`RunnableStrategy`] captures that surface, and is **object-safe** —
+//! [`StrategySpec::try_build`] hands back a `Box<dyn RunnableStrategy>`, so the
+//! driving methods on it cannot be generic. [`drive`](RunnableStrategy::drive)
+//! and [`drive_resumable`](RunnableStrategy::drive_resumable) therefore build a
+//! [`PaperWallet`] internally, which is what a backtest wants. To drive a spec
+//! against an account you supply — a primed paper wallet, or a live venue —
+//! reach for [`RunnableStrategyExt`], whose methods *are* generic over the
+//! wallet and which is blanket-implemented for every `RunnableStrategy`
+//! (including `dyn` ones). Both spellings share one body,
+//! [`drive_over`].
+//!
 //! [`StrategySpec`] is the matching sum over the five spec types, with one
 //! `try_build`.
 //!
@@ -37,7 +41,15 @@ use crate::{RunReport, Strategy};
 /// The on-disk format version of a [`RunState`]. Bumped when the serialized
 /// shape changes so a stale snapshot is rejected with a clear message rather
 /// than mis-parsed.
-pub const RUN_STATE_FORMAT_VERSION: u32 = 1;
+///
+/// **v2** — basket / multi / portfolio blobs gained required keys (the
+/// rebalance gate on all three; the children, bar counter and weight-share
+/// chains on a portfolio; in-flight netting state under `inner`). There is
+/// deliberately no v1 → v2 migration: a v1 portfolio blob does not *contain*
+/// its children's state, so a migration could only fabricate it. Re-run the
+/// history to regenerate (resuming optimizes that, it doesn't replace it), or
+/// finish the run on the build that wrote the state.
+pub const RUN_STATE_FORMAT_VERSION: u32 = 2;
 
 /// A persisted run — everything needed to rebuild a strategy from its spec and
 /// continue it over new bars with identical behavior.
@@ -61,8 +73,13 @@ pub struct RunState {
     /// The strategy's serialized state (see
     /// [`RunnableStrategy::save_state`]).
     pub strategy: serde_json::Value,
-    /// The wallet's serialized state (see
-    /// [`PaperWallet::snapshot_state`](crate::wallet::PaperWallet::snapshot_state)).
+    /// The account's serialized state (see
+    /// [`Wallet::snapshot_state`](crate::Wallet::snapshot_state)).
+    ///
+    /// [`Null`](serde_json::Value::Null) when the run traded a **live** wallet:
+    /// the venue owns the positions and the cash, so they are re-read on resume
+    /// rather than replayed from a snapshot that may have gone stale. A paper
+    /// run stores the full book.
     pub wallet: serde_json::Value,
 }
 
@@ -87,13 +104,14 @@ pub trait RunnableStrategy: Strategy<Input = Snapshot<String>, Symbol = String> 
     /// twin of [`stable_bars`](Self::stable_bars).
     fn warm_up_bars(&self) -> usize;
 
-    /// Drive this strategy over `snapshots` to completion and return the run
+    /// Drive this strategy over `snapshots` to completion against a fresh
+    /// [`PaperWallet`] primed with `per_symbol_costs`, and return the run
     /// report.
     ///
-    /// The wallet is the strategy's business, not the caller's: four shapes
-    /// want a [`PaperWallet`] primed with `per_symbol_costs` (the default body
-    /// here), and a portfolio must be driven through its own composite view
-    /// with costs already baked into each sub-wallet at build time.
+    /// To supply the account yourself — a pre-primed paper wallet, or a live
+    /// venue — use [`RunnableStrategyExt::drive_resumable_with`]. This spelling
+    /// exists because the trait is object-safe and so cannot carry a method
+    /// generic over the wallet.
     fn drive(
         &mut self,
         snapshots: &[Snapshot<String>],
@@ -122,15 +140,18 @@ pub trait RunnableStrategy: Strategy<Input = Snapshot<String>, Symbol = String> 
         Ok(())
     }
 
-    /// Drive this strategy, optionally restoring `resume` state first and
-    /// surfacing the final [`RunState`] after — the resumable superset of
-    /// [`drive`](Self::drive).
+    /// Drive this strategy against a fresh [`PaperWallet`], optionally restoring
+    /// `resume` state first and surfacing the final [`RunState`] after — the
+    /// resumable superset of [`drive`](Self::drive).
     ///
     /// With `resume = Some(state)`, the wallet and strategy are restored from it
-    /// before the first bar. With `flatten = true`, any position still open
-    /// at the end is marked to close at the last bar and booked into the report
-    /// so `reconstruct_trades`/metrics count it (mutually exclusive with saving
-    /// state — a flattened run is a finalized one).
+    /// before the first bar. With `flatten = true`, any position still open at
+    /// the end is closed at the last bar — in the wallet, not just the report —
+    /// so `reconstruct_trades`/metrics count it and the returned state holds a
+    /// flat book that a later resume continues from.
+    ///
+    /// [`RunnableStrategyExt::drive_resumable_with`] is the same thing over a
+    /// wallet you supply.
     fn drive_resumable(
         &mut self,
         snapshots: &[Snapshot<String>],
@@ -143,48 +164,203 @@ pub trait RunnableStrategy: Strategy<Input = Snapshot<String>, Symbol = String> 
         for (sym, costs) in per_symbol_costs {
             let _ = wallet.set_costs_for(sym.clone(), costs.clone());
         }
-        if let Some(state) = resume {
-            if state.format_version != RUN_STATE_FORMAT_VERSION {
-                return Err(format!(
-                    "!resume > state format version {} does not match this build's {}",
-                    state.format_version, RUN_STATE_FORMAT_VERSION
-                ));
-            }
-            if state.kind != self.spec_kind() {
-                return Err(format!(
-                    "!resume > state is for a `{}` strategy but this document is `{}`",
-                    state.kind,
-                    self.spec_kind()
-                ));
-            }
-            self.restore_state(&state.strategy)
-                .map_err(|e| format!("!resume > strategy > {e}"))?;
-            wallet
-                .restore_state(&state.wallet)
-                .map_err(|e| format!("!resume > wallet > {e}"))?;
-        }
-        let mut report = crate::backtest::run(self, &mut wallet, snapshots.iter().cloned());
-        if flatten {
-            crate::backtest::flatten_open_positions(self, &mut wallet, snapshots, &mut report);
-        }
-        let last_bar = snapshots
-            .last()
-            .and_then(|snap| snap.iter().find_map(|(_, _, atom)| atom.time))
-            .map(|t| t.0);
-        let final_state = RunState {
-            format_version: RUN_STATE_FORMAT_VERSION,
-            kind: self.spec_kind().to_string(),
-            last_bar,
-            bars_seen: resume.map(|r| r.bars_seen).unwrap_or(0) + snapshots.len(),
-            strategy: RunnableStrategy::save_state(self),
-            wallet: wallet.snapshot_state(),
-        };
-        Ok((report, final_state))
+        drive_over(self, snapshots, &mut wallet, resume, flatten)
     }
 
     /// The shape's name, used to stamp and validate a [`RunState`]. Mirrors
     /// [`StrategySpec::kind`].
     fn spec_kind(&self) -> &'static str;
+}
+
+/// Drive `strategy` over `snapshots` against `wallet`, restoring `resume` first
+/// if given and returning the report plus the state to resume from next time.
+///
+/// The one body behind both [`RunnableStrategy::drive_resumable`] (which builds
+/// a [`PaperWallet`] and calls this) and
+/// [`RunnableStrategyExt::drive_resumable_with`] (which passes the caller's).
+/// It is a free function rather than a trait method because it is generic over
+/// the wallet, and `RunnableStrategy` has to stay object-safe.
+///
+/// The caller owns the account: seed it, prime its costs, and — for a live
+/// venue — refresh it from the broker before calling. Nothing here creates or
+/// configures a wallet.
+pub fn drive_over<W>(
+    strategy: &mut (impl RunnableStrategy + ?Sized),
+    snapshots: &[Snapshot<String>],
+    wallet: &mut W,
+    resume: Option<&RunState>,
+    flatten: bool,
+) -> Result<(RunReport<String>, RunState), String>
+where
+    W: Wallet<String>,
+{
+    if let Some(state) = resume {
+        if state.format_version != RUN_STATE_FORMAT_VERSION {
+            return Err(format!(
+                "!resume > state format version {} does not match this build's {}",
+                state.format_version, RUN_STATE_FORMAT_VERSION
+            ));
+        }
+        if state.kind != strategy.spec_kind() {
+            return Err(format!(
+                "!resume > state is for a `{}` strategy but this document is `{}`",
+                state.kind,
+                strategy.spec_kind()
+            ));
+        }
+        strategy
+            .restore_state(&state.strategy)
+            .map_err(|e| format!("!resume > strategy > {e}"))?;
+        // A live wallet's default `restore_state` ignores this and re-reads the
+        // venue — see `Wallet::snapshot_state`.
+        wallet
+            .restore_state(&state.wallet)
+            .map_err(|e| format!("!resume > wallet > {e}"))?;
+    }
+    let mut report = crate::backtest::run(strategy, wallet, snapshots.iter().cloned());
+    if flatten {
+        crate::backtest::flatten_open_positions(strategy, wallet, snapshots, &mut report);
+    }
+    let last_bar = snapshots
+        .last()
+        .and_then(|snap| snap.iter().find_map(|(_, _, atom)| atom.time))
+        .map(|t| t.0);
+    let final_state = RunState {
+        format_version: RUN_STATE_FORMAT_VERSION,
+        kind: strategy.spec_kind().to_string(),
+        last_bar,
+        bars_seen: resume.map(|r| r.bars_seen).unwrap_or(0) + snapshots.len(),
+        strategy: RunnableStrategy::save_state(strategy),
+        wallet: wallet.snapshot_state(),
+    };
+    Ok((report, final_state))
+}
+
+/// The wallet-generic half of [`RunnableStrategy`].
+///
+/// `RunnableStrategy` is object-safe on purpose — [`StrategySpec::try_build`]
+/// returns a `Box<dyn RunnableStrategy>` — which rules out a method generic over
+/// the wallet type. These live here instead, blanket-implemented for every
+/// `RunnableStrategy` including `?Sized` ones, so they are callable straight on
+/// a `Box<dyn RunnableStrategy>`:
+///
+/// ```no_run
+/// # use fugazi::spec::{RunnableStrategyExt, StrategySpec};
+/// # fn go(spec: &StrategySpec, snaps: &[fugazi::Snapshot<String>], wallet: &mut fugazi::PaperWallet<String>) -> Result<(), String> {
+/// let mut built = spec.try_build(10_000.0, &fugazi::market::Schema::empty(), None)?;
+/// let (report, state) = built.drive_resumable_with(snaps, wallet, None, false)?;
+/// # let _ = (report, state);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// This is what makes a spec — a portfolio included — runnable against a live
+/// venue: [`backtest::run`](crate::backtest::run) is already generic over the
+/// wallet and already drains [`Wallet::poll_fills`] each bar, so an
+/// `OkxWallet` / `CoinbaseWallet` drops in with no further plumbing.
+pub trait RunnableStrategyExt: RunnableStrategy {
+    /// [`RunnableStrategy::drive_resumable`] over a wallet you supply — a paper
+    /// wallet primed however you like, or a live venue.
+    ///
+    /// The wallet's own state round-trips through
+    /// [`Wallet::snapshot_state`] / [`Wallet::restore_state`], so a live account
+    /// (whose default is `Null` / accept-and-ignore) resumes its *strategy*
+    /// state while reading positions and cash from the broker.
+    fn drive_resumable_with<W: Wallet<String>>(
+        &mut self,
+        snapshots: &[Snapshot<String>],
+        wallet: &mut W,
+        resume: Option<&RunState>,
+        flatten: bool,
+    ) -> Result<(RunReport<String>, RunState), String>;
+
+    /// Advance this strategy over `snapshots` **without trading**, returning the
+    /// state to resume from — the "warm but don't trade" entry point.
+    ///
+    /// Every chain advances and the wallet is marked to market exactly as in a
+    /// real run, but [`Strategy::trade`](crate::Strategy::trade) is never
+    /// called, so no order is submitted. That is what closes a *pause gap*: bars
+    /// that elapsed while a deployment was stopped should warm indicators
+    /// without booking trades at prices nobody could have traded at. Replay the
+    /// gap through here, then hand the returned state to
+    /// [`drive_resumable_with`](Self::drive_resumable_with) and go live —
+    /// instead of discarding the snapshot and re-serving a long-period
+    /// indicator's whole warm-up after every pause.
+    ///
+    /// No [`RunReport`]: nothing happened worth reporting. Fills that arrive
+    /// anyway (a resting order left over from before the pause) still route to
+    /// [`Strategy::on_fill`](crate::Strategy::on_fill), or the strategy's
+    /// position would drift from the account's.
+    fn warm_up_over<W: Wallet<String>>(
+        &mut self,
+        snapshots: &[Snapshot<String>],
+        wallet: &mut W,
+        resume: Option<&RunState>,
+    ) -> Result<RunState, String>;
+}
+
+impl<T: RunnableStrategy + ?Sized> RunnableStrategyExt for T {
+    fn drive_resumable_with<W: Wallet<String>>(
+        &mut self,
+        snapshots: &[Snapshot<String>],
+        wallet: &mut W,
+        resume: Option<&RunState>,
+        flatten: bool,
+    ) -> Result<(RunReport<String>, RunState), String> {
+        drive_over(self, snapshots, wallet, resume, flatten)
+    }
+
+    fn warm_up_over<W: Wallet<String>>(
+        &mut self,
+        snapshots: &[Snapshot<String>],
+        wallet: &mut W,
+        resume: Option<&RunState>,
+    ) -> Result<RunState, String> {
+        warm_up_over_wallet(self, snapshots, wallet, resume)
+    }
+}
+
+/// The body behind [`RunnableStrategyExt::warm_up_over`]; see there.
+fn warm_up_over_wallet<W: Wallet<String>>(
+    strategy: &mut (impl RunnableStrategy + ?Sized),
+    snapshots: &[Snapshot<String>],
+    wallet: &mut W,
+    resume: Option<&RunState>,
+) -> Result<RunState, String> {
+    if let Some(state) = resume {
+        if state.format_version != RUN_STATE_FORMAT_VERSION {
+            return Err(format!(
+                "!resume > state format version {} does not match this build's {}",
+                state.format_version, RUN_STATE_FORMAT_VERSION
+            ));
+        }
+        if state.kind != strategy.spec_kind() {
+            return Err(format!(
+                "!resume > state is for a `{}` strategy but this document is `{}`",
+                state.kind,
+                strategy.spec_kind()
+            ));
+        }
+        strategy
+            .restore_state(&state.strategy)
+            .map_err(|e| format!("!resume > strategy > {e}"))?;
+        wallet
+            .restore_state(&state.wallet)
+            .map_err(|e| format!("!resume > wallet > {e}"))?;
+    }
+    crate::backtest::warm_up(strategy, wallet, snapshots.iter().cloned());
+    let last_bar = snapshots
+        .last()
+        .and_then(|snap| snap.iter().find_map(|(_, _, atom)| atom.time))
+        .map(|t| t.0);
+    Ok(RunState {
+        format_version: RUN_STATE_FORMAT_VERSION,
+        kind: strategy.spec_kind().to_string(),
+        last_bar,
+        bars_seen: resume.map(|r| r.bars_seen).unwrap_or(0) + snapshots.len(),
+        strategy: RunnableStrategy::save_state(strategy),
+        wallet: wallet.snapshot_state(),
+    })
 }
 
 impl RunnableStrategy for DynSingleStrategy {
@@ -314,10 +490,9 @@ impl StrategySpec {
     /// carrying its `!tag > ` breadcrumb (see
     /// [`NodeSpec::try_build`](super::expr::NodeSpec::try_build)).
     ///
-    /// `costs` is only consulted by the portfolio arm, which bakes a bundle
-    /// into each sub-wallet at construction rather than priming a wallet
-    /// afterwards; the other four ignore it and take their costs through
-    /// [`RunnableStrategy::drive`].
+    /// `costs` is vestigial: every shape now takes its costs from the wallet it
+    /// is driven with (see [`RunnableStrategy::drive`]), portfolio included, so
+    /// all five arms ignore it. Kept for call-site symmetry.
     pub fn try_build(
         &self,
         cash: Real,

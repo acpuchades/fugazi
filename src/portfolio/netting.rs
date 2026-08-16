@@ -41,8 +41,8 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 use crate::types::Real;
 use crate::wallet::{
@@ -53,7 +53,7 @@ use crate::wallet::{POSITION_EPSILON, cash_tolerance};
 use super::ledger::{Intent, Ledger, ProtectiveIntent, rejection};
 
 /// One child's contribution to a symbol's flow this bar.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct Leg {
     idx: usize,
     /// Signed units this child wants to add to its ledger position.
@@ -63,7 +63,7 @@ struct Leg {
 }
 
 /// A symbol's netted flow, submitted and awaiting its fill.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PendingFlow<Sym> {
     symbol: Sym,
     legs: Vec<Leg>,
@@ -117,17 +117,33 @@ pub(super) struct PortfolioInner<Sym> {
 // is off.
 #[cfg_attr(not(feature = "spec"), allow(dead_code))]
 impl<Sym: Clone + Eq + Hash + Serialize + DeserializeOwned> PortfolioInner<Sym> {
-    /// Serialize the persistent, cross-bar portfolio state for run resuming: the
-    /// per-child notional ledgers (cash + positions — the "Σ ledgers == account"
-    /// invariant), the marks cache, and the id counter. The per-bar transient
-    /// state (this bar's intents, the resting protective levels re-submitted
-    /// every bar, and any last-bar flow still awaiting settlement) is not
-    /// persisted — a portfolio should be resumed at a settled bar boundary.
+    /// Serialize the cross-bar portfolio state for run resuming: the per-child
+    /// notional ledgers (cash + positions — the "Σ ledgers == account"
+    /// invariant), the marks cache, the id counter, each child's resting
+    /// protective levels and who owns the one rested on the account, and any
+    /// **flow still awaiting settlement**.
+    ///
+    /// That last one is not optional, however settled the boundary looks. A
+    /// [`PaperWallet`](crate::PaperWallet) fills a submitted market order at the
+    /// *next* bar's open, so a portfolio that traded on the final bar of a chunk
+    /// has flow in flight across the seam by construction — there is no bar to
+    /// pause on that doesn't. Drop `pending`/`owners` and that fill arrives at a
+    /// resumed portfolio with no `PendingFlow` to attribute it to: the account's
+    /// cash and position move, no ledger does, and `Σ ledgers == account` is
+    /// false for the rest of the run.
+    ///
+    /// This bar's `intents` are genuinely transient (recorded and cleared within
+    /// one `trade`), and `rejections` are drained to the children on the next
+    /// bar; neither survives a bar boundary, so neither is persisted.
     pub(super) fn snapshot(&self) -> serde_json::Value {
         serde_json::json!({
             "ledgers": self.ledgers,
             "marks": self.marks,
             "next_pf_id": self.next_pf_id,
+            "pending": self.pending,
+            "owners": self.owners,
+            "protective": self.protective,
+            "protective_owner": self.protective_owner,
         })
     }
 
@@ -136,17 +152,21 @@ impl<Sym: Clone + Eq + Hash + Serialize + DeserializeOwned> PortfolioInner<Sym> 
         let obj = state
             .as_object()
             .ok_or_else(|| format!("portfolio inner: expected a state object, got {state}"))?;
-        if let Some(v) = obj.get("ledgers") {
-            self.ledgers =
-                serde_json::from_value(v.clone()).map_err(|e| format!("ledgers: {e}"))?;
+        macro_rules! field {
+            ($key:literal, $target:expr) => {
+                if let Some(v) = obj.get($key) {
+                    $target = serde_json::from_value(v.clone())
+                        .map_err(|e| format!(concat!($key, ": {}"), e))?;
+                }
+            };
         }
-        if let Some(v) = obj.get("marks") {
-            self.marks = serde_json::from_value(v.clone()).map_err(|e| format!("marks: {e}"))?;
-        }
-        if let Some(v) = obj.get("next_pf_id") {
-            self.next_pf_id =
-                serde_json::from_value(v.clone()).map_err(|e| format!("next_pf_id: {e}"))?;
-        }
+        field!("ledgers", self.ledgers);
+        field!("marks", self.marks);
+        field!("next_pf_id", self.next_pf_id);
+        field!("pending", self.pending);
+        field!("owners", self.owners);
+        field!("protective", self.protective);
+        field!("protective_owner", self.protective_owner);
         Ok(())
     }
 }
@@ -570,7 +590,7 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
     /// Split a netted market fill across the children whose flow produced it.
     fn attribute_market(&mut self, symbol: &Sym, fill: &Order<Sym>, open: Real) -> Vec<Order<Sym>> {
         let Some(flow) = self.pending.get(symbol).cloned() else {
-            return Vec::new();
+            return self.attribute_unmatched(symbol, fill);
         };
         let signed = fill.side.sign() * fill.units;
         // Partial fills scale the whole bar's flow proportionally, which keeps
@@ -662,6 +682,63 @@ impl<Sym: Clone + Eq + Hash> PortfolioInner<Sym> {
                     effective,
                     OrderKind::Market,
                     leg.id,
+                )
+                .with_commission(comm),
+            );
+        }
+        out
+    }
+
+    /// Attribute a market fill that **no child asked for**, pro rata across the
+    /// ledgers holding that symbol.
+    ///
+    /// The case that reaches here is a terminal flatten
+    /// ([`Wallet::flatten`](crate::Wallet::flatten)): the account is closed out
+    /// wholesale at the end of a run, so there is no `PendingFlow` because no
+    /// child submitted anything — and without this the account would go flat
+    /// while every ledger stayed open, breaking `Σ ledgers == account` on the
+    /// last bar and leaving the children's books reporting positions the
+    /// account no longer holds.
+    ///
+    /// Pro rata by held units is the only defensible split: the flatten closed
+    /// each child's exposure in proportion to what it held, because that is
+    /// what "close everything" means. This is **not** a substitute for
+    /// persisting `pending`/`owners` across a resume — there the flow genuinely
+    /// existed and must be replayed, not guessed at.
+    fn attribute_unmatched(&mut self, symbol: &Sym, fill: &Order<Sym>) -> Vec<Order<Sym>> {
+        let holders: Vec<(usize, Real)> = self
+            .ledgers
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, l)| {
+                let units = l.position(symbol);
+                (units.abs() > POSITION_EPSILON).then_some((idx, units))
+            })
+            .collect();
+        let gross: Real = holders.iter().map(|(_, u)| u.abs()).sum();
+        if gross <= POSITION_EPSILON {
+            return Vec::new();
+        }
+        let signed = fill.side.sign() * fill.units;
+        let mut out = Vec::new();
+        for (idx, units) in holders {
+            let share = units.abs() / gross;
+            let delta = signed * share;
+            if delta.abs() <= POSITION_EPSILON {
+                continue;
+            }
+            let comm = fill.commission * share;
+            self.ledgers[idx].apply(symbol, delta, fill.price, comm);
+            let id = self.mint();
+            self.owners.insert(id, idx);
+            out.push(
+                Order::new(
+                    symbol.clone(),
+                    fill.side,
+                    delta.abs(),
+                    fill.price,
+                    fill.kind,
+                    id,
                 )
                 .with_commission(comm),
             );

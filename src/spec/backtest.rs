@@ -315,8 +315,12 @@ pub fn run_iteration_any(
 /// `flatten`, and surface the run's final [`RunState`](crate::spec::runnable::RunState) alongside the
 /// metrics so the CLI can persist it (`--save-state`).
 ///
-/// The zero-cost gross twin is never resumed or flattened — it is a
-/// costs-attribution shadow of the priced run, not a run in its own right.
+/// The zero-cost gross twin is never *resumed* — it is a costs-attribution
+/// shadow of the priced run, not a run in its own right — but it is flattened
+/// alongside it. `costs_section` pairs net fills against gross fills, so a
+/// flatten leg with no gross counterpart would contribute nothing to
+/// `total_slippage_cost` and silently understate the drag, while `cost_drag_pct`
+/// compared a flattened curve against an unflattened one.
 pub fn run_iteration_resumable(
     spec: &StrategySpec,
     bars: Vec<String>,
@@ -359,7 +363,11 @@ pub fn run_iteration_resumable(
 
     let gross_report = if costs_active {
         let mut gross = spec.try_build(ctx.cash, &schema, None)?;
-        Some(gross.drive(snapshots, ctx.cash, &[]))
+        Some(
+            gross
+                .drive_resumable(snapshots, ctx.cash, &[], None, flatten)?
+                .0,
+        )
     } else {
         None
     };

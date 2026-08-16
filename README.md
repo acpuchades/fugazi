@@ -337,7 +337,7 @@ let _orders = wallet.orders();        // the trade blotter
 
 The type above is what a `Strategy` *is*, and worth reading once — but five
 ready-made shapes cover most of what people actually build, each configurable in
-Rust or from a YAML file (see [doc/STRATEGIES.md](doc/STRATEGIES.md)):
+Rust or from a YAML file (see [docs/STRATEGIES.md](docs/STRATEGIES.md)):
 
 | Type | Shape |
 | --- | --- |
@@ -375,7 +375,7 @@ let report = portfolio.run(snapshots());   // aggregate equity curve + blotter
 
 Because children share a book, a few things follow — opposing flow crosses
 internally, one child's stop only takes off its own share — all covered under
-[How capital moves](doc/STRATEGIES.md#how-capital-moves).
+[How capital moves](docs/STRATEGIES.md#how-capital-moves).
 
 ### Working with the wallet
 
@@ -879,7 +879,7 @@ plotting code works on either.
 
 **Other subcommands.** Alongside `run` the binary carries a few utility
 subcommands — briefly listed here, fully documented in
-[doc/CLI.md](doc/CLI.md):
+[docs/CLI.md](docs/CLI.md):
 
 - `fugazi check strategy <STRATEGY>` / `check overlay <SPEC>...` — a spec-only
   lint pass (no data, no wallet). Fails a CI job if the strategy or overlay
@@ -905,7 +905,7 @@ subcommands — briefly listed here, fully documented in
   Matching is case-insensitive and whole-symbol; quote the pattern so your
   shell doesn't try to expand it against your files.
 - `fugazi completions <shell>` — a shell-completion script (see
-  [doc/CLI.md § Shell completion](doc/CLI.md#shell-completion)).
+  [docs/CLI.md § Shell completion](docs/CLI.md#shell-completion)).
 
 ## Live trading
 
@@ -1087,24 +1087,25 @@ metrics.sharpe(returns, risk_free_rate=0.0, bars_per_year=252)   # ratio | None
 
 Install with `pip install fugazi` (prebuilt wheels for Linux, macOS and
 Windows), or build from a checkout with `cd python && maturin develop --release`.
-See the [Python README](doc/PYTHON.md) for the full API.
+See the [Python README](docs/PYTHON.md) for the full API.
 
 ## Documentation
 
 Two ways in. If you want the **backtester**, read
-[doc/CLI.md](doc/CLI.md) for the commands and
-[doc/STRATEGIES.md](doc/STRATEGIES.md) for the strategy-file format — no Rust
+[docs/CLI.md](docs/CLI.md) for the commands and
+[docs/STRATEGIES.md](docs/STRATEGIES.md) for the strategy-file format — no Rust
 required. If you're **building on the library**, the sections above cover the
 shape of it and [docs.rs](https://docs.rs/fugazi) has the API.
 
 | | |
 | --- | --- |
-| [doc/STRATEGIES.md](doc/STRATEGIES.md) | The strategy-file format — every YAML tag, all five document shapes |
-| [doc/CLI.md](doc/CLI.md) | `run`, `optimize`, `get`, `check`, `list` and their flags |
-| [doc/METRICS.md](doc/METRICS.md) | What each metric means and how it's computed |
-| [doc/COSTS.md](doc/COSTS.md) | Commission, spread and slippage models |
-| [doc/PYTHON.md](doc/PYTHON.md) | The Python API |
-| [doc/CONTRIBUTING.md](doc/CONTRIBUTING.md) | Recipes for adding an indicator, signal, metric or provider |
+| [docs/STRATEGIES.md](docs/STRATEGIES.md) | The strategy-file format — every YAML tag, all five document shapes |
+| [docs/CLI.md](docs/CLI.md) | `run`, `optimize`, `get`, `check`, `list` and their flags |
+| [docs/METRICS.md](docs/METRICS.md) | What each metric means and how it's computed |
+| [docs/COSTS.md](docs/COSTS.md) | Commission, spread and slippage models |
+| [docs/TRADING.md](docs/TRADING.md) | The execution path — how a bar becomes an order, a fill, and a closed trade |
+| [docs/PYTHON.md](docs/PYTHON.md) | The Python API |
+| [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Recipes for adding an indicator, signal, metric or provider |
 
 ## License
 

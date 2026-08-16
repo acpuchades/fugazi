@@ -432,3 +432,106 @@ fn live_demo_round_trip() {
         w.errors()
     );
 }
+
+/// A **strategy spec** — a portfolio, the shape that was hardest to reach —
+/// driven straight against the live wallet.
+///
+/// This is the whole point of [`RunnableStrategyExt::drive_resumable_with`]:
+/// `RunnableStrategy` is object-safe, so `drive_resumable` can only ever build
+/// its own `PaperWallet`. Before the extension trait there was no way to run a
+/// spec against a venue at all, portfolio least of all, which blocked
+/// broker-funded deployment outright.
+///
+/// Two things are asserted: an order actually reaches the venue, and the
+/// captured `RunState` carries `wallet: null` — a live account's positions and
+/// cash belong to the broker, so a stale local snapshot must never be replayed
+/// over them on resume.
+#[test]
+#[cfg(feature = "spec")]
+fn a_portfolio_spec_runs_against_a_live_wallet() {
+    use fugazi::market::Schema;
+    use fugazi::spec::{PortfolioSpec, RunnableStrategyExt};
+    use fugazi::types::{Atom, Snapshot};
+
+    let orders = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = orders.clone();
+    let mock = serve(move |server| {
+        let counter = counter.clone();
+        Box::pin(async move {
+            for (p, body) in [
+                ("/api/v5/public/instruments", instruments()),
+                ("/api/v5/account/balance", balance()),
+                ("/api/v5/account/positions", no_positions()),
+                (
+                    "/api/v5/trade/fills",
+                    serde_json::json!({ "code": "0", "data": [] }),
+                ),
+            ] {
+                Mock::given(method("GET"))
+                    .and(path(p))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                    .mount(server)
+                    .await;
+            }
+            Mock::given(method("POST"))
+                .and(path("/api/v5/trade/order"))
+                .respond_with(move |_req: &wiremock::Request| {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "code": "0",
+                        "data": [{ "ordId": "ORD1", "clOrdId": "fugazi0", "sCode": "0" }]
+                    }))
+                })
+                .mount(server)
+                .await;
+        })
+    });
+
+    let yaml = format!(
+        r#"
+        children:
+          - name: hold
+            strategy: !buy_and_hold {{ symbol: {SYMBOL} }}
+    "#
+    );
+    let spec = PortfolioSpec::from_text_with_params_in(
+        &yaml,
+        &Default::default(),
+        std::path::Path::new("."),
+        "(live)",
+    )
+    .expect("parse portfolio spec");
+    let mut built = spec.build(10_000.0, &Schema::empty(), None);
+
+    let snaps: Vec<Snapshot<String>> = [27_000.0, 27_100.0, 27_200.0]
+        .into_iter()
+        .map(|p| {
+            Snapshot::single(
+                SYMBOL.to_string(),
+                Atom::new(Candle::new(p, p + 50.0, p - 50.0, p, 1.0)),
+            )
+        })
+        .collect();
+
+    let mut w = wallet(mock.uri.clone());
+    let (report, state) = built
+        .drive_resumable_with(&snaps, &mut w, None, false)
+        .expect("live spec run");
+
+    assert_eq!(report.equity_curve.len(), snaps.len());
+    assert!(
+        orders.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "the portfolio's child should have reached the venue; errors: {:?}",
+        w.errors()
+    );
+    assert_eq!(state.kind, "portfolio");
+    assert!(
+        state.wallet.is_null(),
+        "a live account's book belongs to the venue, not the state file: {}",
+        state.wallet
+    );
+    assert!(
+        !state.strategy.is_null(),
+        "the strategy's own state must still be captured"
+    );
+}

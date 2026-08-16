@@ -1858,7 +1858,7 @@ pub enum NodeSpec {
     /// but `basket:` defaults to `!every 1` — every bar, the *most* active
     /// setting. On a basket, omitting `rebalance_on:` and writing `!never` are
     /// opposite ends of the range. See the Defaults table under *Rebalance* in
-    /// `doc/STRATEGIES.md`.
+    /// `docs/STRATEGIES.md`.
     #[grammar(kind = "predicate", output = "bool")]
     Never,
     /// A periodic pulse — [`Every(N)`](crate::indicators::Every) with a

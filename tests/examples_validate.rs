@@ -3,7 +3,7 @@
 //! `tests/examples_compile.rs` protects the Rust examples; the YAML ones had no
 //! equivalent, even though they are the surface most exposed to drift — a
 //! renamed tag or a changed field breaks a document without touching a line of
-//! Rust. These are the files the README and `doc/CLI.md` tell a new user to run
+//! Rust. These are the files the README and `docs/CLI.md` tell a new user to run
 //! first, so a broken one is the worst possible first impression.
 //!
 //! Each is checked with the `fugazi check` subcommand that matches its kind:

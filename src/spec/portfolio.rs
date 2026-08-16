@@ -821,6 +821,18 @@ impl Strategy for DynPortfolio {
     fn reset(&mut self) {
         self.inner.reset();
     }
+    // The `Strategy`-level twins of the inherent `save_state`/`restore_state`
+    // below. `RunnableStrategy` routes through the inherent pair, so these are
+    // what a portfolio reached through an *erased* handle uses — nested as
+    // another composite's child, or embedded in a trailing-metric engine. The
+    // other four shapes have carried them since the seam was introduced;
+    // without them a portfolio in either position silently saves `Null`.
+    fn save_state(&self) -> serde_json::Value {
+        self.inner.save_state()
+    }
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.inner.restore_state(state)
+    }
 }
 
 impl DynPortfolio {

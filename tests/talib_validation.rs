@@ -24,7 +24,7 @@
 //! `talib_expected.csv` is generated, and TA-Lib is not a Cargo dependency, so
 //! the suite skips when it isn't there — see `common::fixtures` for the policy
 //! and for `FUGAZI_REQUIRE_FIXTURES=1`, which turns the skip into a failure.
-//! **A skip means this file compared nothing.** `doc/CONTRIBUTING.md` lists this
+//! **A skip means this file compared nothing.** `docs/CONTRIBUTING.md` lists this
 //! suite as a drift guard; [`tests/indicator_reference.rs`] is the always-running
 //! battery that holds the line when the fixture is missing.
 //!

@@ -394,3 +394,81 @@ fn an_empty_stream_produces_an_empty_but_well_formed_report() {
     assert_eq!(report.initial_equity, 250.0);
     assert!(log.lock().expect("log").is_empty(), "no bars, no callbacks");
 }
+
+/// `warm_up` is `run` minus exactly one step: `trade`.
+///
+/// The whole point of the pause-gap facility is that it differs from a real run
+/// in one respect and no other, so this asserts the callback log directly
+/// rather than inferring it from an equity curve. `update` still fires on every
+/// bar (that is what "warm" means), and nothing else moves.
+#[test]
+fn warm_up_advances_state_but_never_trades() {
+    let prices = [100.0, 101.0, 102.0, 103.0];
+
+    let (mut traded, traded_log) = Recorder::new(0, &[0, 1, 2, 3]);
+    let mut traded_wallet = PaperWallet::new(1_000.0);
+    backtest::run(&mut traded, &mut traded_wallet, tagged(&prices));
+
+    let (mut warmed, warmed_log) = Recorder::new(0, &[0, 1, 2, 3]);
+    let mut warmed_wallet = PaperWallet::new(1_000.0);
+    backtest::warm_up(&mut warmed, &mut warmed_wallet, tagged(&prices));
+
+    let traded_events = traded_log.lock().expect("log").clone();
+    let warmed_events = warmed_log.lock().expect("log").clone();
+
+    // Every `update` survives; every `Trade` (and so every `Fill` it caused) is
+    // gone. Dropping the `Trade`/`Fill` entries from the real run's log must
+    // leave precisely the warm-up's log.
+    let expected: Vec<_> = traded_events
+        .iter()
+        .filter(|e| !matches!(e, Event::Trade { .. } | Event::Fill { .. }))
+        .cloned()
+        .collect();
+    assert_eq!(warmed_events, expected, "warm_up must suppress trade() only");
+    assert_eq!(
+        warmed_events.len(),
+        prices.len(),
+        "one update per bar, nothing else"
+    );
+
+    // And the account is untouched: same cash, no position.
+    assert_eq!(warmed_wallet.funds().0, 1_000.0);
+    assert!(warmed_wallet.positions().iter().all(|u| u.amount == 0.0));
+    // The control did trade, so the comparison above is meaningful.
+    assert!(
+        traded_events.iter().any(|e| matches!(e, Event::Fill { .. })),
+        "the control run should have filled something"
+    );
+}
+
+/// A fill that arrives *during* a warm-up still reaches the strategy.
+///
+/// A resting order left over from before a pause can trigger on a gap bar. The
+/// strategy's own position/book must move with the account's or the two drift
+/// apart for the rest of the run — suppressing `trade` must not suppress the
+/// fill stream.
+#[test]
+fn warm_up_still_routes_fills_that_arrive_anyway() {
+    // Bar 0 trades, so the queued buy fills at bar 1's open.
+    let (mut strat, log) = Recorder::new(0, &[0]);
+    let mut wallet = PaperWallet::new(1_000.0);
+    backtest::run(&mut strat, &mut wallet, tagged(&[100.0]));
+    assert!(
+        wallet.positions().iter().all(|u| u.amount == 0.0),
+        "the buy should still be queued, not filled"
+    );
+
+    // Now warm up over the next bar: no new order, but the queued one fills.
+    log.lock().expect("log").clear();
+    backtest::warm_up(&mut strat, &mut wallet, tagged(&[101.0]));
+
+    let events = log.lock().expect("log").clone();
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Fill { .. })),
+        "the pre-existing queued order must still fill and route: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Trade { .. })),
+        "no new orders during a warm-up: {events:?}"
+    );
+}

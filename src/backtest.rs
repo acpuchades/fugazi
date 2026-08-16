@@ -36,7 +36,7 @@
 //! for multi-asset).
 
 use crate::types::Snapshot;
-use crate::wallet::{OrderId, OrderKind, Rejection, Side};
+use crate::wallet::Rejection;
 use crate::{Order, Real, Strategy, Wallet};
 
 /// One booked order stamped with the bar index it filled on.
@@ -133,6 +133,64 @@ where
     I: IntoIterator<Item = A>,
     A: Into<Snapshot<Sym>>,
 {
+    drive(strategy, wallet, snapshots, DriveMode::Trade)
+}
+
+/// Feed `snapshots` through `strategy` **without trading**: chains advance and
+/// the wallet is marked to market exactly as in [`run`], but
+/// [`Strategy::trade`] is never called, so no order is submitted.
+///
+/// The use is a *pause gap*. Bars that elapsed while a live deployment was
+/// stopped have to warm the strategy's indicators, but must not book trades at
+/// prices nobody could have traded at. Replaying the gap through here does the
+/// first without the second, so a long-period indicator keeps its warm-up
+/// across a pause instead of starting over.
+///
+/// Everything else is identical to [`run`], deliberately — same loop, one
+/// branch. Fills still route to [`Strategy::on_fill`] (a resting order left
+/// from before the pause can still trigger, and ignoring it would drift the
+/// strategy's position away from the account's), and rejections still route to
+/// [`Strategy::on_reject`]. No [`RunReport`] is returned: no run happened.
+///
+/// [`Strategy::trade`]: crate::Strategy::trade
+/// [`Strategy::on_fill`]: crate::Strategy::on_fill
+/// [`Strategy::on_reject`]: crate::Strategy::on_reject
+pub fn warm_up<Sym, S, W, I, A>(strategy: &mut S, wallet: &mut W, snapshots: I)
+where
+    Sym: Clone + PartialEq,
+    S: Strategy<Symbol = Sym, Input = Snapshot<Sym>> + ?Sized,
+    W: Wallet<Sym>,
+    I: IntoIterator<Item = A>,
+    A: Into<Snapshot<Sym>>,
+{
+    let _ = drive(strategy, wallet, snapshots, DriveMode::WarmUpOnly);
+}
+
+/// Whether the shared driver loop is allowed to call
+/// [`Strategy::trade`](crate::Strategy::trade).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DriveMode {
+    /// A real run: trade on every bar the strategy reports ready for.
+    Trade,
+    /// [`warm_up`]: advance state, submit nothing.
+    WarmUpOnly,
+}
+
+/// The shared body of [`run`] and [`warm_up`]. See [`run`] for the per-bar
+/// order of operations; `mode` gates the trade step and nothing else.
+fn drive<Sym, S, W, I, A>(
+    strategy: &mut S,
+    wallet: &mut W,
+    snapshots: I,
+    mode: DriveMode,
+) -> RunReport<Sym>
+where
+    Sym: Clone + PartialEq,
+    S: Strategy<Symbol = Sym, Input = Snapshot<Sym>> + ?Sized,
+    W: Wallet<Sym>,
+    I: IntoIterator<Item = A>,
+    A: Into<Snapshot<Sym>>,
+{
     let initial_equity = wallet.equity().0;
     let iter = snapshots.into_iter();
     let (lower, _) = iter.size_hint();
@@ -193,7 +251,8 @@ where
         // update()/on_fill() always run so warm-up progresses; trade() only
         // runs once the strategy reports ready. is_ready() defaults to true,
         // so this is a no-op for strategies that don't override it.
-        if strategy.is_ready() {
+        // `WarmUpOnly` suppresses exactly this step and nothing else.
+        if mode == DriveMode::Trade && strategy.is_ready() {
             strategy.trade(wallet);
             // Refusals from this bar's own submissions — a live wallet rejecting
             // synchronously. (PaperWallet accepts everything at submit time and
@@ -211,17 +270,28 @@ where
     }
 }
 
-/// Book a closing fill for every position still open at the end of a run, so a
-/// `--flatten` run finalizes its open trades into the blotter (and thus the
-/// trade-level metrics via [`reconstruct_trades`](crate::metrics::reconstruct_trades)).
+/// Close every position still open at the end of a run — **in the wallet**, not
+/// only in the report — so a `--flatten` run finalizes its open trades into the
+/// blotter (and thus the trade-level metrics via
+/// [`reconstruct_trades`](crate::metrics::reconstruct_trades)).
 ///
-/// The equity curve is untouched — open positions are already marked to market
-/// on every bar — this only appends the closing legs that turn an open position
-/// into a *closed trade* the metrics count. Each leg closes at the wallet's last
-/// known price for the symbol, on the final bar. Routed through
-/// [`Strategy::on_fill`] too, so the strategy's own book closes the trade as
-/// well. Deliberately terminal: it is mutually exclusive with capturing a
-/// resumable state (a flattened run is a finalized one).
+/// Delegates to [`Wallet::flatten`], so each leg goes through the account's
+/// normal execution path: costs and commission apply, cash and positions move,
+/// and a real [`OrderId`](crate::wallet::OrderId) is minted per leg. The fills
+/// are routed to [`Strategy::on_fill`] and appended to the report at the final
+/// bar's index, and any refusal (a live venue declining a close) to
+/// [`Strategy::on_reject`] and `report.rejections`.
+///
+/// The **final equity point is overwritten**, not appended. Each leg closes at
+/// the same mark that point was computed from, so the only change is the
+/// realized cost drag — and `equity_curve.len() == snapshots.len()` is an
+/// invariant [`run`] establishes and every consumer
+/// (`report_slice`, `per_bar_returns`, the windowed reducers, the CLI writers)
+/// relies on. Appending a point would break all of them quietly.
+///
+/// After this the wallet is genuinely flat: a [`RunState`](crate::spec::RunState)
+/// captured from it holds no position, and resuming from that state continues
+/// from a flat book rather than silently re-inheriting the closed one.
 pub fn flatten_open_positions<S, W>(
     strategy: &mut S,
     wallet: &mut W,
@@ -232,29 +302,16 @@ pub fn flatten_open_positions<S, W>(
     W: Wallet<String>,
 {
     let bar = snapshots.len().saturating_sub(1);
-    for units in wallet.positions() {
-        if units.amount.abs() <= f64::EPSILON {
-            continue;
-        }
-        let Some(price) = wallet.price(&units.symbol) else {
-            continue;
-        };
-        // Sell to flatten a long, buy to flatten a short.
-        let side = if units.amount > 0.0 {
-            Side::Sell
-        } else {
-            Side::Buy
-        };
-        let order = Order::new(
-            units.symbol.clone(),
-            side,
-            units.amount.abs(),
-            price.0,
-            OrderKind::Market,
-            OrderId(u64::MAX),
-        );
+    for order in wallet.flatten() {
         strategy.on_fill(&order);
         report.fills.push(Fill { bar, order });
+    }
+    for rejection in wallet.take_rejections() {
+        strategy.on_reject(&rejection);
+        report.rejections.push(Rejected { bar, rejection });
+    }
+    if let Some(last) = report.equity_curve.last_mut() {
+        *last = wallet.equity().0;
     }
 }
 

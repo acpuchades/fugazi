@@ -27,61 +27,80 @@ use crate::spec::*;
 // one of the two seams below.
 // ---------------------------------------------------------------------------
 
-/// Drive a direct-shape (single / pairs / multi / basket) run over one already
-/// type-resolved wallet cell. Snapshots the baseline, seeds the book from *our*
-/// opening equity (account minus the external value — identical to plain equity
-/// when flat), and either drives the wallet in place (flat, the fast path) or
-/// moves it into an [`SleeveWallet`] for the run and back afterward
-/// (non-flat). `$strat` is the built strategy using the `$seed` the macro binds
-/// (and `py`, in scope, where the shape's `materialize` needs it).
-macro_rules! run_prepared {
-    ($cell:expr, $placeholder:expr, $snaps:expr, $seed:ident => $strat:expr) => {{
+/// Run `$body` over one already type-resolved wallet cell, with `$w` bound to
+/// the wallet to trade. Snapshots the baseline, binds `$seed` to *our* opening
+/// equity (account minus the external value — identical to plain equity when
+/// flat), and either lends out the wallet in place (flat, the fast path) or
+/// moves it into an [`SleeveWallet`] for the duration and back afterward
+/// (non-flat). `$body` may also use `py`, where it is in scope.
+macro_rules! over_prepared_wallet {
+    ($cell:expr, $placeholder:expr, $seed:ident, $w:ident => $body:expr) => {{
         let mut guard = $cell.borrow_mut();
         let baseline = external_baseline(&guard.inner);
         let $seed = own_equity(&guard.inner, &baseline);
-        let mut strat = $strat;
         if baseline.is_empty() {
-            let report = fugazi_core::backtest::run(&mut strat, &mut guard.inner, $snaps);
-            Ok(PyRunReport { inner: report })
+            let $w = &mut guard.inner;
+            $body
         } else {
             let real = std::mem::replace(&mut guard.inner, $placeholder);
-            let mut offset = SleeveWallet::new(real, baseline);
-            let report = fugazi_core::backtest::run(&mut strat, &mut offset, $snaps);
-            guard.inner = offset.into_inner();
-            Ok(PyRunReport { inner: report })
+            let mut sleeve = SleeveWallet::new(real, baseline);
+            let out = {
+                let $w = &mut sleeve;
+                $body
+            };
+            guard.inner = sleeve.into_inner();
+            out
         }
     }};
 }
 
-/// Dispatch a direct-shape run over a wallet that is a [`PaperWallet`](PyWallet)
-/// or an [`OkxWallet`](PyOkxWallet) (any other type is a `TypeError`), then hand
-/// off to [`run_prepared!`]. For the live wallet it first refreshes the account so
-/// `positions()`/`equity()` reflect the venue before the baseline is snapshotted.
-/// `$py` binds the GIL token (pass `_py` when the body doesn't need it).
-macro_rules! run_over_wallet {
-    ($wallet:expr, $py:ident, $snaps:expr, $seed:ident => $strat:expr) => {{
+/// Resolve `$wallet` to one of the three concrete pyclasses — [`PaperWallet`](PyWallet),
+/// [`OkxWallet`](PyOkxWallet), [`CoinbaseWallet`](PyCoinbaseWallet); anything
+/// else is a `TypeError` — and hand off to [`over_prepared_wallet!`]. For a live
+/// wallet it first refreshes the account so `positions()`/`equity()` reflect the
+/// venue before the baseline is snapshotted. `$py` binds the GIL token (pass
+/// `_py` when the body doesn't need it).
+///
+/// This is what lets both the hand-built shapes (via [`run_over_wallet!`]) and
+/// the spec surface (`StrategySpec.run` / `.run_resumable` / `.warm_up`) accept
+/// a live venue: `backtest::run` is generic over the wallet, so each arm
+/// monomorphizes the body for its own concrete type.
+macro_rules! over_any_wallet {
+    ($wallet:expr, $py:ident, $seed:ident, $w:ident => $body:expr) => {{
         let wallet = $wallet;
         let $py = wallet.py();
         if let Ok(cell) = wallet.cast::<PyWallet>() {
-            run_prepared!(cell, PaperWallet::new(0.0), $snaps, $seed => $strat)
+            over_prepared_wallet!(cell, PaperWallet::new(0.0), $seed, $w => $body)
         } else if let Ok(cell) = wallet.cast::<PyOkxWallet>() {
             cell.borrow_mut()
                 .inner
                 .refresh_account()
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            run_prepared!(cell, OkxWallet::demo("", "", ""), $snaps, $seed => $strat)
+            over_prepared_wallet!(cell, OkxWallet::demo("", "", ""), $seed, $w => $body)
         } else if let Ok(cell) = wallet.cast::<PyCoinbaseWallet>() {
             cell.borrow_mut()
                 .inner
                 .refresh_account()
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            run_prepared!(cell, CoinbaseWallet::placeholder(), $snaps, $seed => $strat)
+            over_prepared_wallet!(cell, CoinbaseWallet::placeholder(), $seed, $w => $body)
         } else {
             Err(PyTypeError::new_err(
                 "wallet must be a PaperWallet, an OkxWallet, or a CoinbaseWallet",
             ))
         }
     }};
+}
+
+/// [`over_any_wallet!`] specialized to "build a strategy and run it" — the
+/// original shape, kept so the five hand-built call sites read unchanged.
+macro_rules! run_over_wallet {
+    ($wallet:expr, $py:ident, $snaps:expr, $seed:ident => $strat:expr) => {
+        over_any_wallet!($wallet, $py, $seed, wallet => {
+            let mut strat = $strat;
+            let report = fugazi_core::backtest::run(&mut strat, wallet, $snaps);
+            Ok(PyRunReport { inner: report })
+        })
+    };
 }
 
 // ---------------------------------------------------------------------------

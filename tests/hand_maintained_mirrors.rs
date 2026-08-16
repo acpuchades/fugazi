@@ -180,7 +180,7 @@ fn the_mirror_repeats_every_serde_default() {
 
 /// Every `pub fn` in `src/metrics.rs` must be registered on `fugazi.metrics`.
 ///
-/// `doc/CONTRIBUTING.md`'s "add a metric" step 5 is "bind it: `#[pyfunction]`
+/// `docs/CONTRIBUTING.md`'s "add a metric" step 5 is "bind it: `#[pyfunction]`
 /// plus the name in `register_metrics_module`'s `reg!(...)`", and nothing
 /// checked it. `python/tests/test_parity.py` covers the *tag* vocabulary and
 /// the wallet surface, but has no reference to metrics at all — so a new metric
@@ -288,7 +288,7 @@ fn every_grammar_field_type_has_a_python_dummy_value() {
     );
 }
 
-/// `doc/CLI.md`'s provider table repeats `KNOWN_PROVIDERS` with nothing linking
+/// `docs/CLI.md`'s provider table repeats `KNOWN_PROVIDERS` with nothing linking
 /// them, and `fugazi list sources` prints the array rather than the table — so
 /// the two drift silently in both directions. A documented id that isn't in the
 /// array is a command that fails with `unknown provider`; an array entry that
@@ -299,7 +299,7 @@ fn every_grammar_field_type_has_a_python_dummy_value() {
 #[test]
 fn the_cli_doc_lists_exactly_the_providers_get_accepts() {
     const GET_RS: &str = include_str!("../src/cli/get.rs");
-    const CLI_MD: &str = include_str!("../doc/CLI.md");
+    const CLI_MD: &str = include_str!("../docs/CLI.md");
 
     let array = {
         let start = GET_RS
@@ -322,7 +322,7 @@ fn the_cli_doc_lists_exactly_the_providers_get_accepts() {
     let documented: BTreeSet<&str> = {
         let start = CLI_MD
             .find("| Provider | Grammar | Description |")
-            .expect("doc/CLI.md must carry the provider table");
+            .expect("docs/CLI.md must carry the provider table");
         CLI_MD[start..]
             .lines()
             .skip(2) // header row, separator row
@@ -334,6 +334,6 @@ fn the_cli_doc_lists_exactly_the_providers_get_accepts() {
 
     assert_eq!(
         known, documented,
-        "doc/CLI.md's provider table and `KNOWN_PROVIDERS` in src/cli/get.rs have drifted",
+        "docs/CLI.md's provider table and `KNOWN_PROVIDERS` in src/cli/get.rs have drifted",
     );
 }

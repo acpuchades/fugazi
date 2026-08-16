@@ -40,6 +40,9 @@ pub(crate) mod carriers;
 #[macro_use]
 pub(crate) mod macros;
 pub(crate) mod classes;
+// `#[macro_use]`: `over_prepared_wallet!` / `over_any_wallet!` live here and are
+// consumed by `spec` below, which is declared after it.
+#[macro_use]
 pub(crate) mod strategy;
 pub(crate) mod constructors;
 pub(crate) mod sources;

@@ -885,12 +885,76 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
         Ok(())
     }
 
+    /// Close every open position **synchronously**, at each symbol's last known
+    /// close, and return the fills.
+    ///
+    /// The trait default (queue a `close` per symbol, then drain `poll_fills`)
+    /// is wrong here: a `PaperWallet`'s queued moves settle at the *next* bar's
+    /// open and it reports no out-of-band fills, so the default would flatten
+    /// nothing at all. This goes straight to `fill_at` — the same engine every
+    /// other fill routes through, so spread, slippage and commission apply
+    /// exactly as they would to a strategy-issued exit — and mints a real
+    /// [`OrderId`] per leg, so `reconstruct_trades` pairs them like any other
+    /// close.
+    ///
+    /// Terminal: every queued move, resting bracket and resting limit is
+    /// dropped, since none of them can fill after this.
+    fn flatten(&mut self) -> Vec<Order<Sym>> {
+        // Sorted so a multi-symbol flatten books its legs in a stable order
+        // regardless of `positions`' hash seed.
+        let mut open: Vec<Sym> = self
+            .positions
+            .iter()
+            .filter(|(_, amount)| amount.abs() > POSITION_EPSILON)
+            .map(|(symbol, _)| symbol.clone())
+            .collect();
+        open.sort_by_key(|s| self.bars.get(s).map_or(0, |c| c.close.to_bits()));
+
+        let mut fills = Vec::new();
+        for symbol in open {
+            let Some(price) = self.bars.get(&symbol).map(|c| c.close) else {
+                // No price ever fed for this symbol: nothing to value the close
+                // at, and inventing one would poison the final equity point.
+                continue;
+            };
+            let id = self.mint();
+            match self.fill_at(symbol.clone(), 0.0, price, OrderKind::Market, id) {
+                Ok(Some(order)) => fills.push(order),
+                Ok(None) => {}
+                Err(e) => {
+                    let _ = self.reject_submission(&symbol, e);
+                }
+            }
+        }
+        self.pending.clear();
+        self.protective.clear();
+        self.limits.clear();
+        fills
+    }
+
     fn take_rejections(&mut self) -> Vec<Rejection<Sym>> {
         // Yield the not-yet-drained tail and advance the cursor rather than
         // truncating — `rejections()` still reports the full run history.
         let fresh = self.rejections[self.rejections_drained..].to_vec();
         self.rejections_drained = self.rejections.len();
         fresh
+    }
+
+    // The paper wallet *is* the book, so unlike a live venue it has to
+    // round-trip its own state. Both forward to the inherent pair below, which
+    // predates the trait methods and stays the direct spelling.
+    fn snapshot_state(&self) -> serde_json::Value
+    where
+        Sym: Serialize + DeserializeOwned,
+    {
+        PaperWallet::snapshot_state(self)
+    }
+
+    fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String>
+    where
+        Sym: Serialize + DeserializeOwned,
+    {
+        PaperWallet::restore_state(self, state)
     }
 
     /// Directly credit / debit the cash balance — the paper impl of the

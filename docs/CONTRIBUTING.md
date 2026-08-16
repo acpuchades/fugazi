@@ -16,7 +16,7 @@ Most of the cost of a change is remembering the third and fourth.
 - [Add a metric](#add-a-metric)
 - [Add a remote provider](#add-a-remote-provider)
 - [Add a sizing recipe](#add-a-sizing-recipe)
-- [Where a test goes](TESTING.md#where-a-test-goes) *(in doc/TESTING.md)*
+- [Where a test goes](TESTING.md#where-a-test-goes) *(in docs/TESTING.md)*
 - [Work in progress](#work-in-progress)
 - [Release a version](#release-a-version)
 - [The drift guards](#the-drift-guards)
@@ -34,7 +34,7 @@ cargo clippy -p fugazi --all-targets -- -D warnings # CI gate; keep it clean
 cd python && maturin develop && pytest             # bindings
 ```
 
-[doc/TESTING.md](TESTING.md) is the map of the test suite — the four layers,
+[docs/TESTING.md](TESTING.md) is the map of the test suite — the four layers,
 where a given change's test belongs, the shared `tests/common/` harness, and the
 fixture skip-vs-fail policy. Read it before adding a test file or a helper.
 
@@ -241,9 +241,9 @@ another library's convention (TA-Lib's ADX seeding, say), it belongs in
 `tests/talib_validation.rs` instead — with a column added to
 `tools/gen_talib_fixtures.py` and to that file's `REQUIRED` list.
 
-### 9. Docs — `doc/STRATEGIES.md`  *(test-enforced)*
+### 9. Docs — `docs/STRATEGIES.md`  *(test-enforced)*
 
-`doc/STRATEGIES.md` for the tag reference, `README.md` if it's headline-worthy,
+`docs/STRATEGIES.md` for the tag reference, `README.md` if it's headline-worthy,
 `python/README.md` if the Python call shape is non-obvious.
 
 `spec_grammar::every_tag_appears_in_the_strategies_reference` fails until your
@@ -323,7 +323,7 @@ strategy; everything downstream is generic over
    `try_build_priced` / `universe`.
 5. A `StrategyKind` variant + prefix routing in `src/spec/input.rs`, and an arm
    in `optimize::build_any_spec` and Python's `spec_from_value`.
-6. A section in `doc/STRATEGIES.md`.
+6. A section in `docs/STRATEGIES.md`.
 
 You should **not** need to add anything to `spec/backtest.rs`, the optimize
 kernel, or the CLI's evaluate paths — those are shape-agnostic. If you find
@@ -347,7 +347,7 @@ yourself wanting to, the difference probably belongs on `RunnableStrategy` or
    `Optional[float]`; `Real` to `float`.
    `hand_maintained_mirrors::every_rust_metric_is_bound_on_the_python_module`
    fails until the name is there.
-6. Document it in `doc/METRICS.md`.
+6. Document it in `docs/METRICS.md`.
 
 New numeric leaves on the `Metrics` document become `optimize --metrics` /
 `--best-by` selectors automatically. If the metric has a natural direction
@@ -420,9 +420,11 @@ shape drives it unchanged: `backtest::run(&mut strategy, &mut venue, snaps)`.
 5. Python (mirror `PyOkxWallet` in `python/src/strategy.rs`): a `Py*Wallet`
    pyclass mirroring `PaperWallet`'s order-flow surface plus the venue's
    constructors; register it in `#[pymodule]`; **add its type to the
-   `run_over_wallet!` dispatch's `cast::<…>` chain** so every shape's `.run(...)`
-   accepts it. Enable `"live"` in `python/Cargo.toml`. Record its bound /
-   not-bound methods in `python/tests/test_parity.py` (test-enforced ledger).
+   `over_any_wallet!` dispatch's `cast::<…>` chain** — one edit, and it reaches
+   both the hand-built shapes' `.run(...)` and the spec surface
+   (`StrategySpec.run` / `.run_resumable` / `.warm_up`). Enable `"live"` in
+   `python/Cargo.toml`. Record its bound / not-bound methods in
+   `python/tests/test_parity.py` (test-enforced ledger).
 6. Tests go against a mock HTTP server (`wiremock`) — `tests/live_okx.rs` and the
    `src/live/okx.rs` unit tests — never the live API. A venue's free **demo /
    paper** endpoint (OKX selects it with an `x-simulated-trading` header) is the
@@ -512,7 +514,7 @@ When one of these fails, it is telling you something specific:
 | `categories_cover_every_tag_once` | A tag has no `CATEGORIES` entry (or two), so `fugazi list indicators` can't place it. |
 | `categories_are_alphabetical` | The `CATEGORIES` taxonomy went out of order. |
 | `the_output_renders_every_category_and_tag` | A tag is invisible to `fugazi list indicators`. |
-| `every_tag_appears_in_the_strategies_reference` | A tag has no entry in the `doc/STRATEGIES.md` prose reference. |
+| `every_tag_appears_in_the_strategies_reference` | A tag has no entry in the `docs/STRATEGIES.md` prose reference. |
 | `the_mirror_has_every_variant` | `NodeSpecRaw` doesn't mirror a `NodeSpec` variant. |
 | `the_mirror_repeats_every_serde_default` | A `#[serde(default)]` on an `Option` field wasn't copied to the mirror — the key silently becomes required. |
 | `every_rust_metric_is_bound_on_the_python_module` | A `src/metrics.rs` function isn't in `register_metrics_module`'s `reg!(...)`. |

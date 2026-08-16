@@ -270,11 +270,6 @@ pub struct MultiAssetStrategy<Sym> {
     rebalance: RebalanceSignal<Sym>,
     universe: Box<dyn Universe<Sym>>,
     book: Book<Sym>,
-    /// Per-symbol run-state awaiting a lazy restore (see
-    /// [`restore_state`](Self::restore_state)). Applied inside
-    /// [`update`](Strategy::update) as each symbol is first seen. `None` on a
-    /// normal run.
-    pending_restore: Option<HashMap<Sym, serde_json::Value>>,
 }
 
 impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrategy<Sym> {
@@ -329,7 +324,6 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
             rebalance: Box::new(ValueBool::<Snapshot<Sym>>::new(false)),
             universe: Box::new(Floating),
             book: Book::new(initial_equity),
-            pending_restore: None,
         }
     }
 
@@ -609,13 +603,37 @@ where
         }
         serde_json::json!({
             "book": self.book.snapshot_state(),
+            // The gate carries a bar counter (`Every`) or arbitrary chain
+            // state; without it a resumed run restarts the cadence's phase
+            // mid-run and rebalances on different bars than an uninterrupted
+            // one would.
+            "rebalance": self.rebalance.save_state(),
             "symbols": serde_json::to_value(&symbols).unwrap_or(serde_json::Value::Null),
         })
     }
 
-    /// Restore state produced by [`save_state`](Self::save_state). The shared
-    /// book is restored immediately; per-symbol state is stashed and applied
-    /// lazily as each symbol is first seen.
+    /// Restore state produced by [`save_state`](Self::save_state).
+    ///
+    /// **Eagerly**: every symbol in the blob has its `PerAssetState` built here
+    /// and its state loaded here, rather than waiting for the symbol to be seen
+    /// again. Three things go wrong if this is deferred to
+    /// [`update`](Strategy::update), and all three are silent:
+    ///
+    /// 1. `backtest::run` routes the wallet's fills through
+    ///    [`on_fill`](Strategy::on_fill) *before* `update` on every bar. A
+    ///    resumed run's first bar is exactly where the previous run's queued
+    ///    order fills — and with no `PerAssetState` built yet, that fill lands
+    ///    on the shared [`Book`] but not on the symbol's [`Position`], which
+    ///    then disagrees with the book for the rest of the run.
+    /// 2. [`save_state`](Self::save_state) can only serialize symbols it holds
+    ///    state for, so a symbol that doesn't quote during a resumed chunk
+    ///    would have its state dropped at that chunk's save rather than carried.
+    /// 3. `restore_state` is the only place with an error path to report a
+    ///    malformed blob through; a deferred load can only swallow it.
+    ///
+    /// Building here is safe for the same reason the lazy path was: a
+    /// per-symbol template that builds for one symbol builds for all, which the
+    /// spec layer probes once at build time (`spec::multi_asset::probe_signal`).
     pub(crate) fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
         let obj = state
             .as_object()
@@ -623,56 +641,104 @@ where
         if let Some(v) = obj.get("book") {
             self.book.restore_state(v).map_err(|e| format!("book > {e}"))?;
         }
-        if let Some(v) = obj.get("symbols") {
-            let map: HashMap<Sym, serde_json::Value> =
-                serde_json::from_value(v.clone()).map_err(|e| format!("symbols: {e}"))?;
-            self.pending_restore = Some(map);
+        if let Some(v) = obj.get("rebalance") {
+            self.rebalance
+                .load_state(v)
+                .map_err(|e| format!("rebalance > {e}"))?;
         }
+        if let Some(v) = obj.get("symbols") {
+            let saved: HashMap<Sym, serde_json::Value> =
+                serde_json::from_value(v.clone()).map_err(|e| format!("symbols: {e}"))?;
+            for (sym, entry) in saved {
+                // A universe narrowed since the state was written drops the
+                // symbol the same way a live discovery would.
+                if !self.universe.admits(&sym) {
+                    continue;
+                }
+                if !self.states.contains_key(&sym) {
+                    let st = self.build_state(&sym);
+                    self.states.insert(sym.clone(), st);
+                }
+                self.restore_symbol(&sym, &entry)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Load one symbol's saved entry into its already-built `PerAssetState`.
+    /// Every field propagates its error with a `symbols[sym] > ` breadcrumb —
+    /// a shape mismatch here means the document and the blob disagree, which is
+    /// bad input, not something to resume through.
+    fn restore_symbol(&mut self, sym: &Sym, entry: &serde_json::Value) -> Result<(), String> {
+        let label = serde_json::to_string(sym).unwrap_or_else(|_| "?".into());
+        let obj = entry
+            .as_object()
+            .ok_or_else(|| format!("symbols[{label}]: expected an object, got {entry}"))?;
+        let st = self
+            .states
+            .get_mut(sym)
+            .expect("state built immediately above");
+        let null = serde_json::Value::Null;
+        let at = |field: &str, e: String| format!("symbols[{label}] > {field} > {e}");
+
+        for (chain, key) in [
+            (&mut st.long, "long"),
+            (&mut st.close_long, "close_long"),
+            (&mut st.short, "short"),
+            (&mut st.close_short, "close_short"),
+        ] {
+            chain
+                .load_state(obj.get(key).unwrap_or(&null))
+                .map_err(|e| at(key, e))?;
+        }
+        st.sizing
+            .load_state(obj.get("sizing").unwrap_or(&null))
+            .map_err(|e| at("sizing", e))?;
+        for (level, key) in [
+            (&mut st.long_stop, "long_stop"),
+            (&mut st.long_target, "long_target"),
+            (&mut st.short_stop, "short_stop"),
+            (&mut st.short_target, "short_target"),
+        ] {
+            if let (Some(c), Some(v)) = (level.as_mut(), obj.get(key)) {
+                c.load_state(v).map_err(|e| at(key, e))?;
+            }
+        }
+        if let Some(v) = obj.get("position") {
+            st.position.restore(v).map_err(|e| at("position", e))?;
+        }
+        st.bars_seen = obj
+            .get("bars_seen")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(st.bars_seen as u64) as usize;
         Ok(())
     }
 }
 
 impl<Sym: Clone + Hash + Eq + 'static + Send + Sync> MultiAssetStrategy<Sym> {
-    /// Apply a symbol's stashed restore state right after its `PerAssetState` is
-    /// built. Best-effort (see the basket twin).
-    fn apply_pending_restore(&mut self, sym: &Sym) {
-        let Some(state) = self
-            .pending_restore
-            .as_ref()
-            .and_then(|m| m.get(sym))
-            .cloned()
-        else {
-            return;
-        };
-        let Some(obj) = state.as_object() else {
-            return;
-        };
-        let Some(st) = self.states.get_mut(sym) else {
-            return;
-        };
-        let null = serde_json::Value::Null;
-        let _ = st.long.load_state(obj.get("long").unwrap_or(&null));
-        let _ = st.close_long.load_state(obj.get("close_long").unwrap_or(&null));
-        let _ = st.short.load_state(obj.get("short").unwrap_or(&null));
-        let _ = st.close_short.load_state(obj.get("close_short").unwrap_or(&null));
-        let _ = st.sizing.load_state(obj.get("sizing").unwrap_or(&null));
-        if let Some(v) = obj.get("position") {
-            let _ = st.position.restore(v);
-        }
-        if let Some(v) = obj.get("bars_seen").and_then(|v| v.as_u64()) {
-            st.bars_seen = v as usize;
-        }
-        if let (Some(c), Some(v)) = (st.long_stop.as_mut(), obj.get("long_stop")) {
-            let _ = c.load_state(v);
-        }
-        if let (Some(c), Some(v)) = (st.long_target.as_mut(), obj.get("long_target")) {
-            let _ = c.load_state(v);
-        }
-        if let (Some(c), Some(v)) = (st.short_stop.as_mut(), obj.get("short_stop")) {
-            let _ = c.load_state(v);
-        }
-        if let (Some(c), Some(v)) = (st.short_target.as_mut(), obj.get("short_target")) {
-            let _ = c.load_state(v);
+    /// Spin up one symbol's chains from the per-symbol factories.
+    ///
+    /// The single place a `PerAssetState` is born — reached from
+    /// [`update`](Strategy::update) on first sight of a symbol, and from
+    /// [`restore_state`](Self::restore_state) for every symbol a resumed blob
+    /// carries. The protective-level factories take the brand-new
+    /// [`Position`] so `position.entry()` / `.peak()` inside a level compose
+    /// against the right anchor.
+    fn build_state(&self, sym: &Sym) -> PerAssetState<Sym> {
+        let position = Position::new();
+        let level = |f: &Option<LevelFactory<Sym>>| f.as_ref().map(|f| f(sym, &position));
+        PerAssetState {
+            long: (self.long_factory)(sym),
+            close_long: (self.close_long_factory)(sym),
+            short: (self.short_factory)(sym),
+            close_short: (self.close_short_factory)(sym),
+            long_stop: level(&self.long_stop_factory),
+            long_target: level(&self.long_target_factory),
+            short_stop: level(&self.short_stop_factory),
+            short_target: level(&self.short_target_factory),
+            sizing: (self.sizing_factory)(sym),
+            position,
+            bars_seen: 0,
         }
     }
 }
@@ -713,47 +779,8 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Mu
             })
             .collect();
         for sym in new_syms {
-            let position = Position::new();
-            let long = (self.long_factory)(&sym);
-            let close_long = (self.close_long_factory)(&sym);
-            let short = (self.short_factory)(&sym);
-            let close_short = (self.close_short_factory)(&sym);
-            let long_stop = self
-                .long_stop_factory
-                .as_ref()
-                .map(|f| f(&sym, &position));
-            let long_target = self
-                .long_target_factory
-                .as_ref()
-                .map(|f| f(&sym, &position));
-            let short_stop = self
-                .short_stop_factory
-                .as_ref()
-                .map(|f| f(&sym, &position));
-            let short_target = self
-                .short_target_factory
-                .as_ref()
-                .map(|f| f(&sym, &position));
-            let sizing = (self.sizing_factory)(&sym);
-            self.states.insert(
-                sym.clone(),
-                PerAssetState {
-                    long,
-                    close_long,
-                    short,
-                    close_short,
-                    long_stop,
-                    long_target,
-                    short_stop,
-                    short_target,
-                    sizing,
-                    position,
-                    bars_seen: 0,
-                },
-            );
-            // Lazy restore: this symbol's chains only exist now, so apply its
-            // saved state (if resuming) right after building.
-            self.apply_pending_restore(&sym);
+            let state = self.build_state(&sym);
+            self.states.insert(sym, state);
         }
 
         // 2. Advance every known symbol's chains, fold its atom into its

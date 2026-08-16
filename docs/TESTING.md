@@ -85,7 +85,8 @@ they are also the two suites that can silently disable themselves.
 | A `pub(crate)` core | a differential unit test beside it |
 | A `NodeSpec` tag | the compiler and the catalogue/parity guards will tell you; add grammar coverage in `tests/spec_grammar.rs` |
 | Strategy decision logic | `tests/strategies.rs` (catalogue-wide) or the shape's own file (`pairs.rs`, `portfolio.rs`) |
-| `backtest::run` | `tests/driver_contract.rs` |
+| `backtest::run` / `backtest::warm_up` | `tests/driver_contract.rs` |
+| Run resuming (`save_state`/`restore_state`, `RunState`, `--flatten`) | `tests/resume.rs` — chunked-resume-vs-one-shot for **every** shape, at three or more chunks — **and** `python/tests/test_specs.py`, which drives the same property through the bindings |
 | Wallet order flow | unit tests in `src/wallet.rs`; live venues in `tests/live_<venue>.rs` against `wiremock` |
 | A metric | a unit test in `src/metrics.rs`, plus the generator + fixture if it's cross-checkable |
 | A CLI flag | `tests/run.rs`, `tests/costs.rs` or `tests/optimize.rs` via `common::cli::Cmd` |

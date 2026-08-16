@@ -272,7 +272,7 @@ fn reflects_fields_and_defaults() {
     assert!(!eps.required, "Option field is optional even without serde default");
 }
 
-/// Every tag in the vocabulary must appear in `doc/STRATEGIES.md`, the
+/// Every tag in the vocabulary must appear in `docs/STRATEGIES.md`, the
 /// user-facing tag reference.
 ///
 /// This is the one "add an indicator" step that used to be enforced by nothing
@@ -288,9 +288,9 @@ fn reflects_fields_and_defaults() {
 #[test]
 fn every_tag_appears_in_the_strategies_reference() {
     let doc = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("doc/STRATEGIES.md"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/STRATEGIES.md"),
     )
-    .expect("doc/STRATEGIES.md must be readable");
+    .expect("docs/STRATEGIES.md must be readable");
 
     let grammar = spec_grammar();
     let missing: Vec<&str> = grammar
@@ -304,8 +304,8 @@ fn every_tag_appears_in_the_strategies_reference() {
 
     assert!(
         missing.is_empty(),
-        "doc/STRATEGIES.md documents no `!{}`{}. \
-         Every tag needs a line in the reference — see doc/CONTRIBUTING.md step 9.",
+        "docs/STRATEGIES.md documents no `!{}`{}. \
+         Every tag needs a line in the reference — see docs/CONTRIBUTING.md step 9.",
         missing.join("`, no `!"),
         if missing.len() > 1 { format!(" ({} tags)", missing.len()) } else { String::new() },
     );
