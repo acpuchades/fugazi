@@ -128,7 +128,7 @@ pub trait Wallet<Sym> {
     ///
     /// The terminal twin of [`close`](Wallet::close), and the difference is the
     /// whole reason it exists: `close` *queues*, and a queued-fill wallet like
-    /// [`PaperWallet`](crate::PaperWallet) settles at the next bar's `open`.
+    /// [`PaperWallet`] settles at the next bar's `open`.
     /// At the end of a run there is no next bar, so `close` alone would leave
     /// the position open forever. This finalizes it against the last known
     /// price instead.

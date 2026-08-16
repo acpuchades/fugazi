@@ -74,7 +74,7 @@ pub struct RunState {
     /// [`RunnableStrategy::save_state`]).
     pub strategy: serde_json::Value,
     /// The account's serialized state (see
-    /// [`Wallet::snapshot_state`](crate::Wallet::snapshot_state)).
+    /// [`Wallet::snapshot_state`]).
     ///
     /// [`Null`](serde_json::Value::Null) when the run traded a **live** wallet:
     /// the venue owns the positions and the cash, so they are re-read on resume
@@ -278,7 +278,7 @@ pub trait RunnableStrategyExt: RunnableStrategy {
     /// state to resume from — the "warm but don't trade" entry point.
     ///
     /// Every chain advances and the wallet is marked to market exactly as in a
-    /// real run, but [`Strategy::trade`](crate::Strategy::trade) is never
+    /// real run, but [`Strategy::trade`] is never
     /// called, so no order is submitted. That is what closes a *pause gap*: bars
     /// that elapsed while a deployment was stopped should warm indicators
     /// without booking trades at prices nobody could have traded at. Replay the
@@ -289,7 +289,7 @@ pub trait RunnableStrategyExt: RunnableStrategy {
     ///
     /// No [`RunReport`]: nothing happened worth reporting. Fills that arrive
     /// anyway (a resting order left over from before the pause) still route to
-    /// [`Strategy::on_fill`](crate::Strategy::on_fill), or the strategy's
+    /// [`Strategy::on_fill`], or the strategy's
     /// position would drift from the account's.
     fn warm_up_over<W: Wallet<String>>(
         &mut self,
