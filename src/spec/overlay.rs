@@ -30,7 +30,7 @@
 //! [`GetReal`](crate::indicators::GetReal) guards on `Arc::ptr_eq` against the
 //! schema it was built with, so reading another series' overlay column only
 //! resolves when both series share one schema `Arc` — true within a single
-//! `csv:` source or one provider's fetch, not across two providers.
+//! `file:` source or one provider's fetch, not across two providers.
 //!
 //! The output schema is the input schema's columns (same order, same indexes)
 //! with the new columns **appended**. Every output atom is bound to that one

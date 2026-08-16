@@ -15,7 +15,7 @@
 //! meets, and stays quiet where it does. The measurement itself is unit-tested
 //! in `src/cli/overlap.rs`.
 //!
-//! `csv:` is `get`'s hermetic provider — no network, and the file's own
+//! `file:` is `get`'s hermetic provider — no network, and the file's own
 //! `symbol` / `freq` / `time` columns drive the same assembly path a remote
 //! fetch takes; `run` and `optimize` read the same shape through `--series`.
 
@@ -30,12 +30,12 @@ fn bar(symbol: &str, date: &str, time: &str) -> String {
 
 const HEADER: &str = "symbol,freq,time,open,high,low,close,volume\n";
 
-/// Run `get csv:<file>` over `body` and hand back its stdout + stderr.
+/// Run `get file:<file>` over `body` and hand back its stdout + stderr.
 fn get_over(name: &str, body: String) -> (String, String) {
     let (path, _) = scratch_file(name, &format!("{HEADER}{body}"));
     let out = unique_path("dataset.csv");
     let outcome = Cmd::new("get")
-        .arg(&format!("csv:{}", path.display()))
+        .arg(&format!("file:{}", path.display()))
         .args(&["--since", "2024-01-02", "--until", "2024-01-05"])
         .args(&["-o", out.to_str().expect("utf-8 scratch path")])
         .ok();

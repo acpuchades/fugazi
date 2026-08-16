@@ -222,7 +222,7 @@ pub trait SeriesSource: Send + Sync {
     /// caller can build its output columns before fetching anything.
     ///
     /// `None` means the shape is not known ahead of the fetch — a candle
-    /// provider whose extras depend on the endpoint, or a `csv:` file whose
+    /// provider whose extras depend on the endpoint, or a `file:` source whose
     /// columns come from its header. Pick the schema off the returned atoms
     /// with [`schema_of`] in that case.
     fn schema(&self) -> Option<Arc<Schema>> {

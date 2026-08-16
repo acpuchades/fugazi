@@ -889,7 +889,7 @@ subcommands — briefly listed here, fully documented in
 - `fugazi get <PROVIDER>:<SYMBOL>[<FREQ>] --since ... -o candles.csv` — fetch
   OHLCV bars from `binance`, `binance-vision`, `binance-vision-futures`, `okx`,
   `coinbase`, or `yfinance` into a `run`-ready CSV, or
-  re-process an existing CSV with `csv:PATH`. `-x/--overlay col=<source>`
+  re-process an existing CSV with `file:PATH`. `-x/--overlay col=<source>`
   appends indicator columns computed on the fetched bars; `--params` resolves
   `!param` placeholders inside those overlay expressions. `cg` (CoinGecko market
   cap / volume / supply) is **overlay-only** — side-channel columns and no

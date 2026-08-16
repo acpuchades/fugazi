@@ -83,7 +83,7 @@ impl Overlay {
     /// in just gets an empty column.
     ///
     /// `schema` is derived from the source-provided atom stream. For a
-    /// `csv:` source it holds the input's non-OHLCV columns (column-typed
+    /// `file:` source it holds the input's non-OHLCV columns (column-typed
     /// by [`crate::csv_source`]); for a remote provider it holds whatever
     /// extras that provider exposes (Binance's `quote_volume`, `n_trades`,
     /// …; Yahoo's `adj_close`) — see each `sources/*.rs` for the specific

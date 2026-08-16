@@ -1,4 +1,5 @@
-//! `csv:PATH` provider for `fugazi get` — reads OHLCV bars from a local CSV
+//! The CSV reader behind the `file:PATH` provider for `fugazi get` — reads
+//! OHLCV bars from a local CSV
 //! (typically one previously produced by `fugazi get`). The file's `symbol`,
 //! `freq`, `time`, `open`, `high`, `low`, `close` and `volume` columns become
 //! each bar's [`Candle`]; every other column becomes a `Real`/`Bool`/`Str`
@@ -7,9 +8,9 @@
 //! autodetected from the header (`;`, `,`, `\t`, `|`) — the same rule
 //! `--series` follows.
 //!
-//! Unlike the remote providers, `csv:` doesn't fit the standard
+//! Unlike the remote providers, `file:` doesn't fit the standard
 //! `provider:SYMBOL[freq]` spec grammar (the file already carries symbol+freq
-//! per row), so `get.rs` special-cases the `csv:` prefix: after the colon the
+//! per row), so `get.rs` special-cases the `file:` prefix: after the colon the
 //! whole remainder is the path, and enumeration of the file's own
 //! `(symbol, interval)` combinations drives the per-series pipeline.
 
@@ -302,7 +303,7 @@ fn classified_types(bars: &[CsvBar]) -> Vec<(String, OverlayType)> {
 
 /// Guess a CSV's column delimiter from its header line: whichever of `; , \t |`
 /// occurs most often wins (ties favour earlier in that list); a single-column
-/// file with none of them falls back to `,`. Used by both the `csv:` source
+/// file with none of them falls back to `,`. Used by both the `file:` source
 /// here and the `--series` path in [`crate::data`], so both read the same
 /// files identically.
 pub(crate) fn detect_delimiter(path: &Path) -> Result<u8> {
