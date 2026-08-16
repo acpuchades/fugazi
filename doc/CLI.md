@@ -5,22 +5,29 @@ YAML, one or more CSV data series, and drives them through the same
 [`PaperWallet`](../README.md#strategies) the library exposes to Rust — for a
 single backtest, for a spec-validation pass, or for a parameter-grid sweep.
 
-Six subcommands:
+Eight subcommands:
 
 - [`run`](#run) — backtest one strategy over one dataset. Writes `fills.csv`,
   `trades.csv`, `returns.csv`, and `metrics.yml`; adds `metrics.csv` +
-  `rolling.csv` under [`-w/--windowed`](#windowed-metrics). No charts — plot
+  `rolling.csv` under [`-w/--windowed`](#windowed-metrics), a `montecarlo:`
+  block under [`--montecarlo`](#significance-testing---montecarlo). Can save and
+  resume its own state — see [Resuming a run](#resuming-a-run). No charts — plot
   post-hoc.
 - [`check`](#check) — parse and validate a `strategy.yml` or `get --overlay`
   spec without running it. Nested: `check strategy` / `check overlay`.
 - [`optimize`](#optimize) — sweep a strategy over a parameter grid in
   parallel; write one CSV row per combination and rank by a metric.
 - [`get`](#get) — fetch OHLCV bars from a remote provider (`binance`,
-  `okx`, `coinbase`, `yfinance`) or re-process a local CSV (`csv:PATH`) into a `run`-ready
-  file, optionally with `-x/--overlay` columns computed on top.
+  `binance-vision`, `binance-vision-futures`, `okx`, `coinbase`, `yfinance`,
+  `cg`) or re-process a local CSV (`csv:PATH`) into a `run`-ready file,
+  optionally with `-x/--overlay` columns computed on top. `fugazi list sources`
+  prints the current table.
 - [`list`](#list) — printed catalogue of what the CLI knows about
   (indicator/signal YAML tags, remote providers, and — via HTTP — a
   provider's ticker vocabulary).
+- [`grammar`](#grammar--schema) — emit the machine-readable grammar descriptor
+  (one JSON record per YAML tag).
+- [`schema`](#grammar--schema) — emit a JSON Schema for the expression surface.
 - [`completions`](#shell-completion) — emit a shell-completion script.
 
 The subcommands share their input vocabulary — the `<STRATEGY>` positional,
@@ -177,6 +184,60 @@ dispersion sit side-by-side. Metrics cover the whole run; the strategy
 layer's readiness default (see [Stability gating](#stability-gating)) holds
 the first trade until every source it consults is past its unstable tail —
 no explicit gate on the entry is needed.
+
+#### Significance testing (`--montecarlo`)
+
+A single backtest gives one number per metric and no sense of how much of it is
+luck. `--montecarlo` resamples the run to attach **bootstrap confidence
+intervals** and **empirical-null p-values** to a handful of headline metrics,
+writing a `montecarlo:` block into `metrics.yml` and the per-resample values to
+`montecarlo.csv`.
+
+It is opt-in because the default null re-drives the whole backtest once per
+permutation.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--montecarlo` | off | Run the analysis. |
+| `--mc-permutations N` | `1000` | Resamples per estimator. |
+| `--mc-scheme S` | `stationary` | `stationary` (geometric random block lengths, Politis–Romano), `moving-block` (fixed length), or `iid` (per-observation, block length 1). Block schemes preserve the short-range serial dependence `iid` destroys. |
+| `--mc-block L` | `10` | Block length — literal for `moving-block`, expected for `stationary`. Ignored for `iid`. |
+| `--mc-seed S` | `0` | RNG seed; reproducible across platforms. Change it to draw an independent set. |
+| `--mc-null MODE` | `rerun` | `rerun` re-trades the strategy on resampled synthetic price paths (all shapes, one full backtest per permutation); `none` computes confidence intervals only. |
+| `--mc-ci LEVEL` | `0.95` | Two-sided confidence level. |
+| `--mc-metrics NAMES` | headline set | Comma-separated short or dotted names, e.g. `sharpe,calmar,drawdown.max_pct`. |
+
+```sh
+fugazi run @strategy.yml -s BTCUSDT=data.csv --crypto \
+  --montecarlo --mc-permutations 2000 --mc-metrics sharpe,calmar
+```
+
+See [doc/ARCHITECTURE.md](ARCHITECTURE.md) for the resampling layer itself.
+
+#### Resuming a run
+
+A run can persist its full state — strategy indicators, position, book, and
+wallet — and pick up later where it stopped. That is what makes a long backtest
+restartable, and what lets a paper run roll forward one batch of bars at a time.
+
+| Flag | Meaning |
+| --- | --- |
+| `--save-state FILE` | After the run, write strategy + wallet state to `FILE` as JSON. Open positions are **kept**, not flattened. |
+| `--resume FILE` | Restore from a `--save-state` file, then continue over this invocation's series. The document must be the same strategy shape the state was captured from. |
+| `--flatten` | Mark every still-open position to close at the final bar, booking it into `trades.csv` and the trade metrics. Without it, open positions are carried unrealized. |
+
+`--save-state` and `--flatten` are mutually exclusive: flattening ends the run,
+saving continues it.
+
+```sh
+fugazi run @strategy.yml -s BTCUSDT=jan.csv --crypto --save-state state.json
+fugazi run @strategy.yml -s BTCUSDT=feb.csv --crypto --resume state.json
+```
+
+Fidelity is exact — the crate depends on serde's `float_roundtrip` feature
+precisely so a restored `f64` seed doesn't drift by 1 ULP and diverge the
+resumed equity curve. See [doc/ARCHITECTURE.md](ARCHITECTURE.md) *Run resuming*
+for what each strategy shape persists.
 
 ### `check`
 

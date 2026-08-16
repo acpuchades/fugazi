@@ -134,7 +134,7 @@ each failure *means*; the architectural point is how they're built:
 
 **Derive the expected side, never hand-write it.** The catalogue and parity
 guards read their expected set off serde's own variant list
-(`spec::typecheck::known_expr_tags` and friends), so they stay correct for free.
+(`spec::typecheck::known_node_tags` and friends), so they stay correct for free.
 A hand-maintained list is the thing they exist to replace.
 
 **Make omission a compile error where you can.** `src/spec/typecheck.rs`'s two

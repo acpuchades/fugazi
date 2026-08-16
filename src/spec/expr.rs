@@ -2768,7 +2768,7 @@ enum NodeSpecRaw {
     Not(Box<NodeSpec>),
     // Constructed by the edge dispatch in `parse_unchecked`, never reached via
     // the derived deserialize — present so the variant is enumerated in
-    // `known_expr_tags` and covered by `From`.
+    // `known_node_tags` and covered by `From`.
     Changed(Box<NodeSpec>),
     BecameTrue(Box<NodeSpec>),
     BecameFalse(Box<NodeSpec>),

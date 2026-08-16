@@ -488,6 +488,18 @@ symbol at build), so they compose freely inside one tree:
 | `!top_bottom` | `{ longs, shorts }` | long the `longs` highest scorers, short the `shorts` lowest |
 | `!threshold` | `{ long_min, short_max }` | long every score `>= long_min`, short every score `<= short_max` |
 | `!quantile` | `{ long_q, short_q }` | long the top `long_q` fraction of the distribution, short the bottom `short_q` |
+| `!everything` | — | the leaf: every scored symbol is eligible for either side. The implicit default, rarely written out |
+
+All three ranking rules also take an optional **`of:`** — the candidate set they
+rank *within*, defaulting to `!everything`. That is what makes them compose:
+
+```yaml
+# of the symbols scoring at least 0.5 (or at most -0.5), take the 2 best and 2 worst
+selection: !top_bottom
+  longs: 2
+  shorts: 2
+  of: !threshold { long_min: 0.5, short_max: -0.5 }
+```
 
 `!top_bottom` gives a fixed leg count (so `!equal_weight` is exact);
 `!threshold` and `!quantile` let the leg count float with the data, so the gross
@@ -904,6 +916,69 @@ meaningful inside a side's `stop_loss` / `take_profit` (or a custom `exit`):
 They read as `None` (the level is inactive) while flat, and `peak`/`trough`
 restart on each new entry.
 
+### Book-field leaves
+
+Where the position-anchored leaves read the *open trade*, these read the
+**book** — the strategy's running equity and trade record. Each is a composable
+`Real` source usable anywhere an expression is:
+
+| Tag | Reads |
+| --- | --- |
+| `!equity` | Mark-to-market equity. |
+| `!equity_peak` | The running high-water mark of `!equity`. |
+| `!drawdown` | Current drawdown as a fraction of the peak (`0` at a new high). |
+| `!return_per_bar` | The last bar's return. |
+| `!trade_pnl` | The last closed trade's P&L, in currency. |
+| `!trade_return` | The last closed trade's return, as a fraction. |
+
+Each takes an optional `source:` naming the book it reads:
+
+- `!strategy_book` (the default) — the book of the enclosing strategy scope:
+  the single/pairs/basket/multi strategy, or, inside a portfolio's `weights:`,
+  the current child.
+- `!portfolio_book` — the composite's **aggregate** book. Only meaningful
+  inside a portfolio's `weights:`; a build error anywhere else.
+
+```yaml
+# de-risk this child when the portfolio as a whole is underwater,
+# regardless of how the child itself is doing
+weights: !mul
+  lhs: !value 1.0
+  rhs: !sub { lhs: !value 1.0, rhs: !drawdown { source: !portfolio_book } }
+```
+
+The book-anchored sizing recipes (`!drawdown_throttle`, `!equity_vol_target`,
+`!fractional_kelly`) take the same `source:` — see [Sizing](#sizing).
+
+### Trailing strategy metrics — `{ strategy, period }`
+
+These embed a **whole strategy document** and emit its rolling performance as a
+`Real`, so one strategy can trade on another's recent track record (a
+regime filter, a strategy-of-strategies allocator):
+
+`!sharpe`, `!sortino`, `!calmar`, `!volatility`, `!max_drawdown`.
+
+Each takes a `strategy:` — any of the document shapes, or a preset tag — plus a
+`period:` (the rolling window, in bars). `!sharpe` / `!sortino` additionally
+take `risk_free_rate:`; every one except `!max_drawdown` takes `bars_per_year:`
+to annualize.
+
+```yaml
+symbol: BTCUSDT
+long:
+  # only go long when a simple trend-follower has been working lately
+  enter: !gt
+    lhs: !sharpe
+      period: 60
+      bars_per_year: 365
+      strategy: !ma_crossover { symbol: BTCUSDT, fast: 10, slow: 50 }
+    rhs: !value 0.5
+  exit: !value false
+```
+
+The embedded strategy blesses its own series, so leaves inside `strategy:` read
+the symbol *it* names, not the outer document's.
+
 ### Price-series indicators — `{ source = close, period }`
 
 `!sma`, `!ema`, `!rma` (Wilder/SMMA), `!wma`, `!hma` (Hull), `!rsi`, `!stddev`,
@@ -985,7 +1060,11 @@ Each line of a multi-output indicator is its own source tag:
 ### Bar indicators (consume the whole candle)
 
 `!atr { period }`, `!mfi { period }`, `!williams_r { period }`,
-`!vwap { period }`, `!sar { step, max }`; and the parameterless `!obv`, `!ad`,
+`!vwap { period }`, `!sar { step, max }`; the range-based volatility estimators
+`!parkinson { period }`, `!garman_klass { period }` and
+`!rogers_satchell { period }`, which read more of the bar than a close-to-close
+stddev does (high/low, plus open/close for the latter two, so they estimate the
+same volatility from fewer bars); and the parameterless `!obv`, `!ad`,
 `!true_range` (usable as bare words). Each accepts an optional `source:`
 field for the underlying candle stream, defaulting to `!current` — set it
 when composing across timeframes (e.g. `!atr { period: 14, source:
@@ -1161,7 +1240,10 @@ those behind a comparison or `!str_eq` instead). The signal-side form takes only
 | `!all` | `[ … ]` | AND-fold of a list of signals (empty ⇒ always true) |
 | `!any` | `[ … ]` | OR-fold of a list of signals (empty ⇒ always false) |
 | `!not` | `<signal>` | negation (see the [nesting caveat](#nesting)) |
-| `!changed` | `<signal>` | fires on any transition of the inner signal (the edge primitive) |
+| `!changed` | `<signal>` | fires on **any** transition of the inner signal (the edge primitive) — bidirectional by design; pair it with a comparison for a directional event |
+| `!became_true` | `<signal>` | rising edge only (`false → true`) |
+| `!became_false` | `<signal>` | falling edge only (`true → false`) |
+| `!has_column` | `{ name }` | schema-level check: true if the overlay column `name` exists. Lets one document run against series with and without an optional side channel |
 | `!unstable` | `{ signal: <signal> }` | passthrough wrapper that forces the reported `unstable_period()` to `0` for the wrapped subtree. Opt-in override of the safe-by-default strategy-readiness gate (which waits for every source's `stable_period()` before allowing a trade). A source-side twin `!unstable { source: <source> }` does the same for real-valued sources. |
 | `!value` | `<bool>` | a constant boolean leaf — `!value true` / `!value false` (same tag as the numeric `!value`; typed by position) |
 

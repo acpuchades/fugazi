@@ -985,7 +985,7 @@ kernel), `get.rs`, `overlay.rs`, `data.rs`, `csv_source.rs`, `list.rs`,
   `style.rs`** — auxiliary. `params::substitute` and `args::substitute` share a walker,
   differ only in sentinel key.
 
-## Python bindings (`python/src/lib.rs`)
+## Python bindings (`python/src/`)
 
 **Type-erased mirror** of the Rust library (pyo3 cdylib, `fugazi-python` → `fugazi`).
 See [doc/PYTHON.md](PYTHON.md) for the user-facing API. Python can't carry source
@@ -1001,11 +1001,11 @@ constructors use those macros; never name concrete `Ema<Sma<Current, …>, …>`
 
 ### Parity discipline
 
-**When a Rust API is added/extended/renamed, mirror it in `python/src/lib.rs` in the
+**When a Rust API is added/extended/renamed, mirror it in `python/src/` in the
 same PR.** Two tests catch the common cases: `python/tests/test_parity.py` (every spec
 tag is bound, or listed with a reason) and
-`list::tests::the_catalogue_documents_every_spec_tag` (every tag appears in `fugazi
-list indicators`). Both derive the expected set from **`spec::typecheck::known_node_tags`
+`cli::list::tests::the_output_renders_every_category_and_tag` (every tag appears in
+`fugazi list indicators`). Both derive the expected set from **`spec::typecheck::known_node_tags`
 / `known_selection_tags`** (serde's own variant list). Everything below is still on you:
 
 **The grammar descriptor (`spec::grammar`, `fugazi.spec_grammar()`).** `#[derive(SpecGrammar)]`
@@ -1125,7 +1125,7 @@ per-tag ledger lives in `python/tests/test_parity.py`.
 
 **Spec-loading discipline**: a new YAML tag under `src/spec/` usually needs no Python
 change — the `StrategySpec` wrapper calls the typed-parse machinery. But: (a) a new
-top-level strategy shape needs a `detect_kind` arm (in `python/src/lib.rs`) and a
+top-level strategy shape needs a `detect_kind` arm (in `python/src/spec.rs`) and a
 `LoadedSpec` variant; (b) new per-kind `.run()`/`.evaluate()` plumbing must be threaded.
 `optimize` shares the same dispatch as `.run()`; keep them in sync.
 

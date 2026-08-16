@@ -271,3 +271,42 @@ fn reflects_fields_and_defaults() {
     let eps = gt.fields.iter().find(|f| f.name == "epsilon").unwrap();
     assert!(!eps.required, "Option field is optional even without serde default");
 }
+
+/// Every tag in the vocabulary must appear in `doc/STRATEGIES.md`, the
+/// user-facing tag reference.
+///
+/// This is the one "add an indicator" step that used to be enforced by nothing
+/// — `spec_grammar::tests::every_tag_and_field_is_documented` covers the `///`
+/// prose that feeds `fugazi list indicators` and `fugazi schema`, so the
+/// *machine-readable* reference could never go stale, but the prose reference
+/// silently could. It had: 15 tags were missing, including the whole book-field
+/// family and all five embedded-strategy metrics.
+///
+/// A tag counts as documented if it appears as `!name` or as a `name` code
+/// span — the candle-field and position-anchored leaves are written as bare
+/// words in the doc because that is how they are written in a document.
+#[test]
+fn every_tag_appears_in_the_strategies_reference() {
+    let doc = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("doc/STRATEGIES.md"),
+    )
+    .expect("doc/STRATEGIES.md must be readable");
+
+    let grammar = spec_grammar();
+    let missing: Vec<&str> = grammar
+        .iter()
+        .filter(|t| t.group == "node" || t.group == "selection")
+        .map(|t| t.name.as_str())
+        .filter(|name| {
+            !doc.contains(&format!("!{name}")) && !doc.contains(&format!("`{name}`"))
+        })
+        .collect();
+
+    assert!(
+        missing.is_empty(),
+        "doc/STRATEGIES.md documents no `!{}`{}. \
+         Every tag needs a line in the reference — see doc/CONTRIBUTING.md step 9.",
+        missing.join("`, no `!"),
+        if missing.len() > 1 { format!(" ({} tags)", missing.len()) } else { String::new() },
+    );
+}

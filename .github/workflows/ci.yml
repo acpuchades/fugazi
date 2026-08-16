@@ -39,6 +39,60 @@ jobs:
           FUGAZI_REQUIRE_FIXTURES: "1"
       - name: Clippy
         run: cargo clippy -p fugazi --all-targets -- -D warnings
+      # `fugazi-derive` is an unconditional dependency providing both
+      # `#[derive(SaveState)]` and `#[derive(SpecGrammar)]` — the latter backs
+      # `spec_grammar()`, `fugazi list indicators`, `fugazi schema` and `fugazi
+      # grammar`. It was linted by nothing. Free to add: no Python needed.
+      - name: Clippy (derive crate)
+        run: cargo clippy -p fugazi-derive --all-targets -- -D warnings
+      # The doc lints in src/lib.rs only fire here. A doc comment that loses its
+      # item reattaches to whatever follows, silently — which is how `Portfolio`
+      # ended up undocumented with its prose on a private type alias.
+      - name: Docs
+        run: cargo doc --no-deps -p fugazi
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+  # The seven places a version bump has to touch (CLAUDE.md lists them). `cargo`
+  # enforces exactly one pair — the root's `fugazi-derive` pin against the
+  # derive crate's own version. The rest were hand-maintained, which is how
+  # `python/uv.lock` sat at 0.42.0 through nine releases.
+  version-sync:
+    name: Version sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: All seven places agree
+        run: |
+          set -euo pipefail
+          fail=0
+          root=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          echo "root Cargo.toml: $root"
+          check() { # check <label> <actual> <expected>
+            if [ "$2" != "$3" ]; then
+              echo "::error::$1 is '$2', expected '$3'"
+              fail=1
+            else
+              echo "ok: $1 = $2"
+            fi
+          }
+          check "fugazi-derive/Cargo.toml" \
+            "$(grep -m1 '^version = ' fugazi-derive/Cargo.toml | cut -d'"' -f2)" "$root"
+          check "root fugazi-derive pin" \
+            "$(grep -m1 'fugazi-derive = ' Cargo.toml | sed 's/.*version = "\([^"]*\)".*/\1/')" "$root"
+          check "python/Cargo.toml" \
+            "$(grep -m1 '^version = ' python/Cargo.toml | cut -d'"' -f2)" "$root"
+          check "python/pyproject.toml" \
+            "$(grep -m1 '^version = ' python/pyproject.toml | cut -d'"' -f2)" "$root"
+          # uv.lock pins the exact version; nothing reads it, so it drifts silently.
+          check "python/uv.lock" \
+            "$(grep -A2 '^name = "fugazi"$' python/uv.lock | grep -m1 '^version = ' | cut -d'"' -f2)" \
+            "$root"
+          # README advertises major.minor only.
+          check "README.md install snippet" \
+            "$(grep -m1 'fugazi = "' README.md | cut -d'"' -f2)" \
+            "$(echo "$root" | cut -d. -f1,2)"
+          exit $fail
 
   # `fugazi` is heavily feature-gated, and the default set (`sources` + `cli`)
   # is only one point in the space. Cargo.toml documents each of these as a
@@ -94,7 +148,14 @@ jobs:
         with:
           python-version: "3.13"
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
+      # `python/src` is ~11k lines of Rust that no lint ever saw: every clippy
+      # invocation in this file is scoped `-p fugazi`, and `maturin build`
+      # catches hard errors only.
+      - name: Clippy (bindings)
+        run: cargo clippy -p fugazi-python --all-targets -- -D warnings
       - name: Build + install wheel
         working-directory: python
         run: |
