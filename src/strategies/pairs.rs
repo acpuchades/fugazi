@@ -16,6 +16,8 @@
 //! Levels are ordinary indicator expressions built off the strategy's
 //! [`Position`] anchor, exactly like [`SingleAssetStrategy`](crate::strategies::SingleAssetStrategy)'s per-leg levels.
 
+use std::sync::OnceLock;
+
 use crate::indicators::{Book, Close, ValueBool, Pick, Position, Value};
 
 /// The rebalance-gate signal type — a boolean over the pair's snapshot.
@@ -179,6 +181,10 @@ pub struct PairsStrategy<Sym> {
     right_position: Position,
     book: Book<Sym>,
     bars_seen: usize,
+    /// Memoised [`stable_bars`](Self::stable_bars) — the same per-bar tree-walk
+    /// problem, and the same fix, as
+    /// [`SingleAssetStrategy::ready_at`](crate::strategies::SingleAssetStrategy).
+    ready_at: OnceLock<usize>,
 }
 
 impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> PairsStrategy<Sym> {
@@ -222,6 +228,7 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Pair
             right_position: Position::new(),
             book: Book::new(initial_equity),
             bars_seen: 0,
+            ready_at: OnceLock::new(),
         }
     }
 
@@ -236,6 +243,7 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Pair
         signal: impl Indicator<Input = Snapshot<Sym>, Output = bool> + 'static + Send + Sync,
     ) -> Self {
         self.rebalance = Box::new(signal);
+        self.ready_at = OnceLock::new();
         self
     }
 
@@ -254,6 +262,7 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Pair
     ) -> Self {
         self.long_enter = Box::new(enter);
         self.long_exit = Box::new(exit);
+        self.ready_at = OnceLock::new();
         self
     }
 
@@ -269,6 +278,7 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Pair
     ) -> Self {
         self.short_enter = Box::new(enter);
         self.short_exit = Box::new(exit);
+        self.ready_at = OnceLock::new();
         self
     }
 
@@ -290,6 +300,7 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Pair
         level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     ) -> Self {
         self.long_stop = Some(Box::new(level));
+        self.ready_at = OnceLock::new();
         self
     }
 
@@ -300,6 +311,7 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Pair
         level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     ) -> Self {
         self.long_target = Some(Box::new(level));
+        self.ready_at = OnceLock::new();
         self
     }
 
@@ -311,6 +323,7 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Pair
         level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     ) -> Self {
         self.short_stop = Some(Box::new(level));
+        self.ready_at = OnceLock::new();
         self
     }
 
@@ -321,6 +334,7 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Pair
         level: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     ) -> Self {
         self.short_target = Some(Box::new(level));
+        self.ready_at = OnceLock::new();
         self
     }
 
@@ -358,6 +372,7 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Pair
         sizing: impl Indicator<Input = Snapshot<Sym>, Output = Real> + 'static + Send + Sync,
     ) -> Self {
         self.sizing = Box::new(sizing);
+        self.ready_at = OnceLock::new();
         self
     }
 
@@ -609,7 +624,8 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Stra
     }
 
     fn is_ready(&self) -> bool {
-        self.bars_seen >= self.stable_bars()
+        // Memoised — see `ready_at`.
+        self.bars_seen >= *self.ready_at.get_or_init(|| self.stable_bars())
     }
 
     fn on_fill(&mut self, order: &Order<Sym>) {
@@ -716,6 +732,7 @@ impl<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync> Stra
         self.right_position.reset();
         self.book.reset();
         self.bars_seen = 0;
+        self.ready_at = OnceLock::new();
     }
 }
 
