@@ -31,6 +31,7 @@ pub mod overlay;
 pub mod pairs;
 pub mod portfolio;
 pub mod preset;
+mod shape;
 pub mod strategy;
 pub mod template;
 pub mod trailing;
@@ -731,6 +732,24 @@ mod tests {
             last = built.update(Payload::Snapshot(snap(bar(p))));
         }
         assert!(last.is_some(), "trailing Sharpe over a preset should read once warm");
+    }
+
+    #[test]
+    fn sharpe_accepts_a_preset_strategy_through_the_json_bridge() {
+        // `sharpe_accepts_a_preset_strategy` reads the document with
+        // `serde_norway::from_str`, which yields a `Value::Tagged`. Every real
+        // load path (`spec::load_value` -> `convert::yaml_to_json`) normalises
+        // `!tag v` to `{tag: v}` *first*, so `AnyStrategyRef` sees a bare
+        // single-key mapping — no `symbol:`, no `left`/`right`, no
+        // `selection:`. That is the shape the multi-asset arm swallows.
+        let yaml = "!sharpe { strategy: !ma_crossover { symbol: X, fast: 2, slow: 4 }, \
+                    period: 4, bars_per_year: 252 }";
+        let value: serde_norway::Value = serde_norway::from_str(yaml).unwrap();
+        let json = crate::spec::convert::yaml_to_json(value).unwrap();
+        let spec: NodeSpec = serde_json::from_value(json)
+            .expect("a preset under `strategy:` must survive the JSON bridge");
+        let built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        assert_eq!(built.output_type(), crate::spec::dyn_indicator::DynType::Real);
     }
 
     #[test]

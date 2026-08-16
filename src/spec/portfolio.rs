@@ -248,86 +248,31 @@ impl TryFrom<serde_norway::Value> for PortfolioChildStrategy {
     type Error = String;
 
     fn try_from(v: serde_norway::Value) -> Result<Self, Self::Error> {
-        use serde_norway::Value as YV;
-
-        // A preset arrives either as a YAML `!tag { … }` (Value::Tagged)
-        // or, on the serde_json load path, as a single-key `{ tag: { … } }`
-        // mapping. Either shape routes to `StrategyRef` — which owns the
-        // preset-name gate — before we consider the other strategy shapes.
-        //
-        // Ordering matters: `{"buy_and_hold": {...}}` is a bare mapping
-        // without `symbol:` at the top, so the multi-asset arm would
-        // otherwise swallow it and fail on the unknown `buy_and_hold`
-        // field. Routing presets first sidesteps that.
-        let is_preset_shape = matches!(&v, YV::Tagged(_))
-            || matches!(&v, YV::Mapping(m) if m.len() == 1 && matches!(
-                m.iter().next(),
-                Some((YV::String(k), _)) if is_preset_tag(k)
-            ));
-        if is_preset_shape {
-            return StrategyRef::try_from(v)
-                .map(|s| PortfolioChildStrategy::Single(Box::new(s)));
-        }
-
-        // Detect shape by distinctive top-level key. `left`+`right` picks
-        // pairs; `selection` picks basket; `symbol:` picks single-asset
-        // (spec map); a bare map with none of those goes to multi-asset
-        // (`long`/`short`/`sizing` per-symbol templates).
-        let (is_pairs, is_basket, has_symbol) = match &v {
-            YV::Mapping(m) => {
-                let has = |key: &str| {
-                    m.iter()
-                        .any(|(k, _)| matches!(k, YV::String(s) if s == key))
-                };
-                (has("left") && has("right"), has("selection"), has("symbol"))
-            }
-            _ => (false, false, false),
-        };
+        use crate::spec::shape::{ShapeHint, detect_shape};
 
         // The tag-normalising JSON bridge is required by `BasketStrategySpec`
         // (its `SpecTemplate` captures `serde_json::Value` — the raw
         // `serde_norway::Value` path can't feed it) and by
         // `MultiAssetStrategySpec` (same reason). Kept consistent for pairs
         // too so all three go through one path.
-        if is_pairs {
-            let json = crate::spec::convert::yaml_to_json(v).map_err(|e| e.to_string())?;
-            return serde_json::from_value::<PairsStrategySpec>(json)
-                .map(|p| PortfolioChildStrategy::Pairs(Box::new(p)))
-                .map_err(|e| e.to_string());
-        }
-        if is_basket {
-            let json = crate::spec::convert::yaml_to_json(v).map_err(|e| e.to_string())?;
-            return serde_json::from_value::<BasketStrategySpec>(json)
-                .map(|b| PortfolioChildStrategy::Basket(Box::new(b)))
-                .map_err(|e| e.to_string());
-        }
-        // A bare mapping without `symbol:` (and without pairs/basket keys)
-        // is multi-asset — the shape with no upfront symbol declaration.
-        if matches!(&v, YV::Mapping(_)) && !has_symbol {
-            let json = crate::spec::convert::yaml_to_json(v).map_err(|e| e.to_string())?;
-            return serde_json::from_value::<MultiAssetStrategySpec>(json)
-                .map(|m| PortfolioChildStrategy::Multi(Box::new(m)))
-                .map_err(|e| e.to_string());
-        }
-        // Fall through: a `symbol:`-carrying single-asset spec map that
-        // `StrategyRef` handles (presets already routed above).
-        StrategyRef::try_from(v).map(|s| PortfolioChildStrategy::Single(Box::new(s)))
-    }
-}
+        let via_json = |v| crate::spec::convert::yaml_to_json(v).map_err(|e: anyhow::Error| e.to_string());
 
-/// Whether `name` is one of [`preset::PRESET_TAGS`]. Kept in sync with
-/// that constant by [`preset_tags_match`](tests::preset_tags_match) —
-/// duplicating the check here avoids exposing the private constant
-/// through the `preset` module.
-fn is_preset_tag(name: &str) -> bool {
-    matches!(
-        name,
-        "buy_and_hold"
-            | "ma_crossover"
-            | "rsi_reversal"
-            | "donchian_breakout"
-            | "keltner_breakout"
-    )
+        match detect_shape(&v) {
+            // `StrategyRef` owns the preset-name gate.
+            ShapeHint::Preset | ShapeHint::Single => {
+                StrategyRef::try_from(v).map(|s| PortfolioChildStrategy::Single(Box::new(s)))
+            }
+            ShapeHint::Pairs => serde_json::from_value::<PairsStrategySpec>(via_json(v)?)
+                .map(|p| PortfolioChildStrategy::Pairs(Box::new(p)))
+                .map_err(|e| e.to_string()),
+            ShapeHint::Basket => serde_json::from_value::<BasketStrategySpec>(via_json(v)?)
+                .map(|b| PortfolioChildStrategy::Basket(Box::new(b)))
+                .map_err(|e| e.to_string()),
+            ShapeHint::Multi => serde_json::from_value::<MultiAssetStrategySpec>(via_json(v)?)
+                .map(|m| PortfolioChildStrategy::Multi(Box::new(m)))
+                .map_err(|e| e.to_string()),
+        }
+    }
 }
 
 /// Deserialize the `weights:` field, rewriting the sugar tags
