@@ -14,10 +14,11 @@
 #   scripts/ci-local.sh rust       # one job: rust | version-sync | features | python
 #   FAST=1 scripts/ci-local.sh     # skip the feature matrix and the wheel build
 #
-# The Python job builds and installs a release wheel, which is slow. With an
-# existing dev venv, `FAST=1` runs clippy over the bindings and the tests
-# against whatever is already installed — enough for an inner loop, not enough
-# before a push.
+# The Python job builds and installs a release wheel, which is slow. `FAST=1`
+# runs clippy over the bindings and the tests against whatever is already
+# installed — enough for an inner loop, not enough before a push. It creates
+# `python/.venv` (via `uv`) if the checkout hasn't got one, so a fresh clone
+# runs the same gate as a working tree rather than failing on a missing venv.
 
 set -uo pipefail
 
@@ -123,17 +124,32 @@ fi
 if [[ $job == all || $job == python ]]; then
     run "python / Clippy (bindings)" \
         cargo clippy -p fugazi-python --all-targets -- -D warnings
+    # `python/.venv` is gitignored, so a fresh clone or a throwaway worktree has
+    # none — and "this checkout has no venv" is a fact about the checkout, not a
+    # verdict on the code. Build one instead of failing the gate; CI gets the
+    # equivalent from `setup-python` + `pip install`. Runs before the FAST guard
+    # because pytest needs the venv in both modes.
+    #
+    # The package list mirrors ci.yml's explicit install. `jsonschema` and
+    # `pyyaml` are load-bearing rather than incidental: the two schema test
+    # files `importorskip` them, so a venv built without them makes those tests
+    # skip silently — green by not running, which is the one outcome a gate must
+    # never produce.
+    run "python / Venv" bash -c '
+        cd python
+        [ -x .venv/bin/python ] && exit 0
+        command -v uv >/dev/null || { echo "uv is not installed — see https://docs.astral.sh/uv/"; exit 1; }
+        echo "no python/.venv — creating one"
+        uv venv .venv --python 3.13 &&
+        uv pip install --python .venv/bin/python \
+            maturin pytest numpy pandas polars jsonschema pyyaml
+    '
     if [[ -z ${FAST:-} ]]; then
         # CI builds a release wheel and pip-installs it. Locally the dev venv is
         # the equivalent, and `maturin develop` is the same link path without the
         # release build.
         run "python / Build + install" bash -c '
-            cd python
-            if [ -x .venv/bin/python ]; then
-                uv run --no-project --python .venv/bin/python maturin develop
-            else
-                echo "no python/.venv — create one, or run with FAST=1 to skip"; exit 1
-            fi
+            cd python && uv run --no-project --python .venv/bin/python maturin develop
         '
     fi
     run "python / pytest" bash -c 'cd python && .venv/bin/python -m pytest -q'
