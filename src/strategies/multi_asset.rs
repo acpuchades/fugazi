@@ -34,6 +34,7 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 
+use crate::hash::SymMap;
 use crate::indicators::{Book, ValueBool, Position, Value};
 use crate::prelude::*;
 use crate::strategies::universe::{AllOf, AnyOf, Floating, Universe};
@@ -107,7 +108,8 @@ impl<Sym> PerAssetState<Sym> {
     /// (optional) protective levels, and sizing — same aggregation as
     /// [`SingleAssetStrategy::stable_bars`](crate::strategies::SingleAssetStrategy::stable_bars),
     /// applied per leg.
-    /// Recompute this leg's stable-bar threshold from its chains. Called once,
+    ///
+    /// Recomputes the threshold from the chains. Called once,
     /// at construction, into the [`stable_bars`](Self::stable_bars) field —
     /// read that instead on any hot path.
     fn compute_stable_bars(&self) -> usize {
@@ -288,6 +290,21 @@ pub struct MultiAssetStrategy<Sym> {
     rebalance: RebalanceSignal<Sym>,
     universe: Box<dyn Universe<Sym>>,
     book: Book<Sym>,
+    /// This bar's `(symbol, candle)` pairs, rebuilt at the top of each
+    /// [`update`](Strategy::update) and consumed by both the per-leg position
+    /// fold and the book mark.
+    ///
+    /// A reused scratch buffer, not state: it is cleared and refilled every bar,
+    /// and nothing reads it between bars. Held on the struct purely so the
+    /// allocation is amortised — the previous code built a fresh `Vec` for the
+    /// book marks on every bar, on top of rescanning the snapshot once per
+    /// symbol.
+    ///
+    /// A map rather than a `Vec` because the per-leg loop *looks each symbol
+    /// up*: with a `Vec` that is a linear scan done once per symbol, which is
+    /// the same O(N^2) per bar the snapshot rescan had. Keyed lookup is what
+    /// makes the per-symbol-bar cost flat in universe size.
+    bar_candles: SymMap<Sym, Candle>,
 }
 
 impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrategy<Sym> {
@@ -342,6 +359,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> MultiAssetStrat
             rebalance: Box::new(ValueBool::<Snapshot<Sym>>::new(false)),
             universe: Box::new(Floating),
             book: Book::new(initial_equity),
+            bar_candles: SymMap::default(),
         }
     }
 
@@ -808,11 +826,24 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Mu
 
         // 2. Advance every known symbol's chains, fold its atom into its
         //    Position, and count the bar.
+        //
+        // The snapshot's candles are read into a lookup keyed by symbol *once*
+        // per bar, before the loop. Finding each leg's own bar with a
+        // `snap.iter().find_map(...)` *inside* the loop made the per-bar cost
+        // O(N^2) in the universe size — and it cloned the whole `Atom` to read
+        // one `Copy` candle out of it. Both showed up as the per-symbol-bar
+        // cost climbing with N, which for an independent-legs strategy should
+        // be flat.
+        self.bar_candles.clear();
+        for (s, _, a) in snap.iter() {
+            if let (Some(s), Some(c)) = (s, a.candle) {
+                self.bar_candles.insert(s.clone(), c);
+            }
+        }
+
+        let bar_candles = &self.bar_candles;
         for (sym, state) in self.states.iter_mut() {
-            let self_atom = snap.iter().find_map(|(s, _, a)| {
-                if s == Some(sym) { Some(a.clone()) } else { None }
-            });
-            if let Some(candle) = self_atom.and_then(|a| a.candle) {
+            if let Some(&candle) = bar_candles.get(sym) {
                 state.position.update(candle);
             }
 
@@ -840,14 +871,12 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Mu
         //    close in the snapshot. Non-universe symbols contribute a
         //    price that Book::update no-ops on (their leg was never
         //    registered via apply_fill), so it's cheap.
-        let marks: Vec<(Sym, Candle)> = snap
-            .iter()
-            // `a.candle?` drops the overlay-only entries: they are not
-            // prices, so there is nothing to mark them at.
-            .filter_map(|(s, _, a)| Some((s.cloned()?, a.candle?)))
-            .collect();
-        if !marks.is_empty() {
-            self.book.update(marks);
+        // Reuses the same per-bar lookup built above — it already holds exactly
+        // the tagged, priceable entries (`a.candle` is `None` for an
+        // overlay-only series, which is not a price and has nothing to mark).
+        if !self.bar_candles.is_empty() {
+            self.book
+                .update(self.bar_candles.iter().map(|(s, &c)| (s.clone(), c)));
         }
 
         // 4. Advance the rebalance gate. Reads the same snapshot as the

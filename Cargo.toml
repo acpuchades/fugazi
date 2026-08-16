@@ -195,23 +195,25 @@ harness = false
 # (`Combine<L, R, Op>` over sources defined elsewhere) plus trait objects, so
 # cross-CGU inlining is worth more here than it is for the average crate.
 #
-# Compile cost, which is solid (wall-clock of an incremental rebuild after
-# touching `src/lib.rs`, so contention-tolerant):
+# Measured on one source tree built three ways, quiet machine, both instruments
+# (callgrind instruction counts and criterion wall-clock — see
+# `docs/PERFORMANCE.md`):
 #
-#   (untuned) 42s   ·   lto = "thin" 45s   ·   lto = "thin" + cgu = 1  68s
+#   | config                | rebuild | instructions  | wall-clock (median) |
+#   |-----------------------|--------:|--------------:|--------------------:|
+#   | (untuned)             |     42s |             — |                   — |
+#   | lto = "thin"          |     45s |  -1.7 … -5.0% |               -6.8% |
+#   | lto = "thin", cgu = 1 |     68s |  -8.9 … -20.1%|              -24.1% |
 #
-# **The runtime half of this comparison is NOT yet trustworthy.** It was taken on
-# a machine with other builds running, and the two configurations were measured
-# in different windows. The reading was "cgu = 1 carries the win; thin LTO alone
-# regressed `tree/update` by up to 14%" — but a 14% *slowdown* from thin LTO is
-# not a plausible compiler effect, so that is most likely contention, not signal.
+# `codegen-units = 1` is the setting that carries this, and it earns its +23s:
+# the dyn/YAML paths gain most (-17% instructions on `sma_yaml`, -20% on a
+# depth-8 tree), which is what you would expect when the per-bar hot path is
+# generic code crossing module boundaries plus trait objects.
 #
-# Both settings are kept for now on the general argument (the per-bar hot path is
-# generic code crossing module boundaries plus trait objects, so cross-CGU
-# inlining should pay), not on a measurement. Before relying on either: re-run on
-# a quiet machine, and prefer `scripts/perf-compare.sh icount` — callgrind
-# instruction counts are immune to CPU contention, which wall-clock is not.
-# See `docs/PERFORMANCE.md`.
+# Thin LTO alone is marginal and its wall-clock is mixed in sign (+8% on some
+# `tree/update` sizes) despite a small instruction *reduction* — i.e. layout
+# noise, not a real regression. It is kept because it composes with cgu = 1 at
+# negligible cost, not on its own merit.
 #
 # `panic = "abort"` is deliberately *not* set: `Snapshot::sole_atom` panics as a
 # documented diagnostic, and the test suite catches it with `catch_unwind`.

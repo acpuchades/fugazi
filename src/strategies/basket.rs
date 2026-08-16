@@ -756,11 +756,19 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Ba
         // internal Pick per symbol filters to its own atom. A None reading
         // rolls the symbol off the latest_* maps so it's not considered
         // for selection this bar.
+        //
+        // `get_mut`-then-`insert`: after a symbol's first scoring bar the key is
+        // already in the map, and a bare `insert` would clone the symbol every
+        // bar only to drop the clone. For `Sym = String` that is one heap
+        // allocation per symbol per bar, per map.
         for (sym, chain) in self.scores.iter_mut() {
             match chain.update(snap.clone()) {
-                Some(v) => {
-                    self.latest_score.insert(sym.clone(), v);
-                }
+                Some(v) => match self.latest_score.get_mut(sym) {
+                    Some(slot) => *slot = v,
+                    None => {
+                        self.latest_score.insert(sym.clone(), v);
+                    }
+                },
                 None => {
                     self.latest_score.remove(sym);
                 }
@@ -768,9 +776,12 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Ba
         }
         for (sym, chain) in self.sizes.iter_mut() {
             match chain.update(snap.clone()) {
-                Some(v) => {
-                    self.latest_size.insert(sym.clone(), v);
-                }
+                Some(v) => match self.latest_size.get_mut(sym) {
+                    Some(slot) => *slot = v,
+                    None => {
+                        self.latest_size.insert(sym.clone(), v);
+                    }
+                },
                 None => {
                     self.latest_size.remove(sym);
                 }

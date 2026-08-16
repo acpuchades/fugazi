@@ -69,6 +69,9 @@ struct ReadmeDoctests;
 
 pub mod backtest;
 pub mod costs;
+// A fast non-cryptographic hasher for the crate's internal symbol-keyed maps.
+// Not public: it is an implementation choice, not API.
+pub(crate) mod hash;
 pub mod indicator;
 pub mod indicators;
 #[cfg(feature = "live")]

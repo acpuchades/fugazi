@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 
 use crate::indicators::{Book, ValueBool, Position, Value};
 use crate::prelude::*;
-use crate::types::{Selector, Snapshot};
+use crate::types::Snapshot;
 
 /// A boxed price-level source — the value a stop-loss / take-profit compares
 /// against. Built from the strategy's [`Position`] (see [`Position::entry`],
@@ -38,11 +38,20 @@ fn level_value<Sym>(level: &Option<Level<Sym>>) -> Option<Real> {
 /// triggered on a multi-entry untagged snapshot — that's the same loud
 /// failure the empty-selector [`Pick`](crate::indicators::Pick) uses,
 /// preserved end-to-end.
-fn extract_self_atom<Sym: PartialEq + Clone>(snap: &Snapshot<Sym>, symbol: &Sym) -> Option<Atom> {
-    let by_symbol = Selector::by_symbol(symbol.clone());
-    snap.find(&by_symbol)
-        .cloned()
-        .or_else(|| snap.sole_atom().cloned())
+///
+/// Borrows rather than clones: the caller only reads `atom.candle` (a `Copy`
+/// 40-byte struct), so cloning the whole 88-byte `Atom` — plus an `Arc` bump on
+/// its overlays — was pure waste, once per bar. Matching the symbol inline also
+/// avoids building a `Selector`, which cloned the symbol (a heap allocation per
+/// bar for `Sym = String`).
+fn extract_self_atom<'a, Sym: PartialEq>(
+    snap: &'a Snapshot<Sym>,
+    symbol: &Sym,
+) -> Option<&'a Atom> {
+    snap.iter()
+        .find(|(s, _, _)| *s == Some(symbol))
+        .map(|(_, _, a)| a)
+        .or_else(|| snap.sole_atom())
 }
 
 /// A single-asset, all-in strategy driven by boolean [`Signal`]s — one per state
@@ -524,7 +533,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Si
         let self_atom = extract_self_atom(&snap, &self.symbol);
         if let Some(candle) = self_atom.as_ref().and_then(|a| a.candle) {
             self.position.update(candle);
-            self.book.update([(self.symbol.clone(), candle)]);
+            self.book.update_one(&self.symbol, candle);
         }
 
         self.long.update(snap.clone());

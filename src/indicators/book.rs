@@ -165,6 +165,62 @@ impl<Sym: Hash + Eq> BookState<Sym> {
         self.legs.values().all(|l| l.is_flat())
     }
 
+    /// Mark every registered leg to market: recompute total equity, update the
+    /// running peak, and derive the per-bar return.
+    ///
+    /// Summed in a **canonical order** rather than `legs`' iteration order:
+    /// `legs` is a `HashMap` with a per-instance `RandomState`, so two books
+    /// holding the same legs would otherwise add them in different orders and
+    /// land a ULP apart. That is not academic — `equity` feeds `!equity` /
+    /// `!drawdown` / `!return_per_bar` and the book-anchored sizing recipes, so
+    /// a ULP either side of a threshold is a different trade, and it would make
+    /// a resumed run's bit-identity a coin flip.
+    ///
+    /// Values land in a stack buffer while the book is small, so this
+    /// once-a-bar call does not allocate for a realistic universe.
+    fn remark(&mut self) {
+        /// Legs held before the sum spills to the heap.
+        const INLINE: usize = 32;
+
+        let prev_equity = self.equity;
+        let mut inline = [0.0 as Real; INLINE];
+        let mut spilled: Vec<Real> = Vec::new();
+        let mut n = 0usize;
+        for v in self
+            .legs
+            .values()
+            .filter_map(|leg| leg.prev_close.map(|close| leg.units * close))
+        {
+            if n < INLINE {
+                inline[n] = v;
+            } else {
+                spilled.push(v);
+            }
+            n += 1;
+        }
+        let values: &mut [Real] = if n <= INLINE {
+            &mut inline[..n]
+        } else {
+            spilled.extend_from_slice(&inline);
+            &mut spilled
+        };
+        values.sort_by(|a, b| a.total_cmp(b));
+        self.equity = values.iter().fold(self.cash, |acc, v| acc + v);
+        if self.equity > self.equity_peak {
+            self.equity_peak = self.equity;
+        }
+
+        // Per-bar return: None on the very first bar.
+        if self.first_update {
+            self.first_update = false;
+            self.active_return = None;
+        } else if prev_equity.abs() > CASH_EPSILON {
+            self.active_return = Some((self.equity - prev_equity) / prev_equity);
+        } else {
+            self.active_return = None;
+        }
+    }
+
     /// Stage a [`TradeClose`] from the accumulated `trade_pnl_accum` and
     /// reset all per-trade counters. Called on aggregate close (all legs
     /// flat) or on a leg-level reversal.
@@ -349,6 +405,29 @@ impl<Sym: Hash + Eq + Clone> Book<Sym> {
     /// The strategy calls this once per bar after
     /// [`apply_fill`](Book::apply_fill) has routed the bar's fills. Legs
     /// not present in `marks` retain their previous `prev_close`.
+    /// [`update`](Self::update) for the single-leg case, taking the symbol by
+    /// reference.
+    ///
+    /// `update` consumes `(Sym, Candle)` pairs, so a single-asset strategy —
+    /// which marks exactly one leg per bar, forever — had to clone its symbol
+    /// every bar to satisfy it. The clone is only ever needed for a leg that is
+    /// not yet registered, so this borrows and clones on first sight only.
+    pub fn update_one(&self, symbol: &Sym, candle: Candle)
+    where
+        Sym: Clone,
+    {
+        let mut s = self.state.lock().expect("Book lock poisoned");
+        s.active_trade_close = s.pending_trade_close.take();
+        match s.legs.get_mut(symbol) {
+            Some(leg) => leg.prev_close = Some(candle.close),
+            None => {
+                let leg = s.legs.entry(symbol.clone()).or_insert_with(LegState::flat);
+                leg.prev_close = Some(candle.close);
+            }
+        }
+        s.remark();
+    }
+
     pub fn update<I>(&self, marks: I)
     where
         I: IntoIterator<Item = (Sym, Candle)>,
@@ -365,36 +444,7 @@ impl<Sym: Hash + Eq + Clone> Book<Sym> {
             leg.prev_close = Some(candle.close);
         }
 
-        // Mark-to-market total equity.
-        //
-        // Summed in a canonical order rather than `legs`' iteration order:
-        // `legs` is a `HashMap` with a per-instance `RandomState`, so two
-        // books holding the same legs would otherwise add them in different
-        // orders and land a ULP apart. That is not academic — `equity` feeds
-        // `!equity` / `!drawdown` / `!return_per_bar` and the book-anchored
-        // sizing recipes, so a ULP either side of a threshold is a different
-        // trade, and it would make a resumed run's bit-identity a coin flip.
-        let prev_equity = s.equity;
-        let mut values: Vec<Real> = s
-            .legs
-            .values()
-            .filter_map(|leg| leg.prev_close.map(|close| leg.units * close))
-            .collect();
-        values.sort_by(|a, b| a.total_cmp(b));
-        s.equity = values.into_iter().fold(s.cash, |acc, v| acc + v);
-        if s.equity > s.equity_peak {
-            s.equity_peak = s.equity;
-        }
-
-        // Per-bar return: None on the very first bar.
-        if s.first_update {
-            s.first_update = false;
-            s.active_return = None;
-        } else if prev_equity.abs() > CASH_EPSILON {
-            s.active_return = Some((s.equity - prev_equity) / prev_equity);
-        } else {
-            s.active_return = None;
-        }
+        s.remark();
     }
 
     /// The seed value the book started with.

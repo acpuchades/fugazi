@@ -270,11 +270,17 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
 
     // The unified driver is snapshot-shaped; lift the single-symbol atom
     // stream into one tagged entry per bar.
-    let snapshots: Vec<fugazi::types::Snapshot<String>> = atoms
-        .iter()
-        .map(|(_, a)| fugazi::types::Snapshot::single(symbol.clone(), a.clone()))
-        .collect();
+    //
+    // `bars` is taken first and the atoms are then **consumed** into the
+    // snapshots. Cloning each `Atom` out of a still-live `atoms` held both
+    // representations at once — on a long run that is a second copy of the whole
+    // series resident at peak for no reason, and `Atom` is 88 bytes a bar before
+    // its overlays.
     let bars: Vec<String> = atoms.iter().map(|(t, _)| t.clone()).collect();
+    let snapshots: Vec<fugazi::types::Snapshot<String>> = atoms
+        .into_iter()
+        .map(|(_, a)| fugazi::types::Snapshot::single(symbol.clone(), a))
+        .collect();
     let spec = StrategySpec::Single(Box::new(strategy.clone()));
     let iter = iterate(&spec, bars, &snapshots, &inputs, opts)?;
     emit_montecarlo(&iter, opts)?;

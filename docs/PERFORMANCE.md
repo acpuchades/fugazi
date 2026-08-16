@@ -267,16 +267,30 @@ removing three sorts plus two `drawdown_segments` predicts ≈ 12.6 ms saved
 against 13.2 ms observed. The `metrics/parts/*` benchmarks each moved < 6%,
 confirming the gain is deduplication rather than anything compiler-side.
 
-### The profile change (F7), separately
+### The profile change (F7), settled
 
-Still **not established**. Compile cost is solid — incremental rebuild after
-touching `src/lib.rs`: 42 s untuned, 45 s with `lto = "thin"`, 68 s with both.
-The runtime half was measured across different contention windows and its
-headline reading ("thin LTO alone regresses `tree/update` by up to 14%") is not
-a plausible compiler effect. The settings are kept on the general argument that
-the hot path is generic code crossing module boundaries plus trait objects.
-**To settle it: use `scripts/perf-compare.sh icount` across profile variants of
-the same source** — that removes both contention and layout from the comparison.
+Measured properly: **one source tree built three ways**, quiet machine, both
+instruments. (The first attempt compared configurations across different
+contention windows and reached a partly-wrong conclusion; a second attempt was
+invalidated by `ls | head -1` picking stale bench binaries — it sorts by hash,
+not by time. `scripts/perf-compare.sh` now deletes bench binaries before each
+variant build and fails loudly if more than one matches.)
+
+| config | rebuild | instructions | wall-clock (median) |
+|---|---:|---:|---:|
+| (untuned) | 42 s | — | — |
+| `lto = "thin"` | 45 s | −1.7 … −5.0% | −6.8% |
+| `lto = "thin"`, `codegen-units = 1` | 68 s | **−8.9 … −20.1%** | **−24.1%** |
+
+`codegen-units = 1` carries it, and earns its +23 s. The dyn/YAML paths gain
+most — −17.3% instructions on `sma_yaml`, −20.1% on a depth-8 tree — which is
+what you would expect when the hot path is generic code crossing module
+boundaries plus trait objects.
+
+Thin LTO alone is marginal, and its wall-clock is mixed in sign (+8% on some
+`tree/update` sizes) *despite* a small instruction reduction — layout noise
+again. It is kept because it composes with `codegen-units = 1` at negligible
+cost, not on its own merit.
 
 ### Correction to a previously-recorded conclusion
 
@@ -286,6 +300,86 @@ arithmetic did", and concluded the residual gap was the type-erasure layer. The
 mutex cost was real but **not in `update`** — it was in the readiness walk. That
 note is amended in place rather than deleted; the memo experiment it describes
 still stands.
+
+## Phase 3 — allocations, hashing, and a determinism bug
+
+Same method: quiet machine, identical codegen on both sides.
+
+### What changed
+
+- **A determinism bug in `PaperWallet::equity`.** It summed positions in
+  `HashMap` order, and `RandomState` is seeded per process — so a multi-symbol
+  equity curve could differ by a ULP *between two runs of the same binary on the
+  same data*, and a ULP either side of a threshold is a different trade.
+  `marked_equity` now sums in a canonical (ascending) order, the same fix
+  `Book::update` already applied to its legs. `Book`'s own per-bar `Vec`
+  allocation is gone too — both use a stack buffer up to 32 legs.
+- **A fast in-crate hasher** (`src/hash.rs`, ~30 lines, no new dependency) for
+  the wallet's six symbol-keyed maps. SipHash is the right default for untrusted
+  keys and the wrong one for a handful of symbols the user chose.
+- **Per-bar allocations removed**: `PaperWallet::update` no longer clones the
+  symbol on every bar (`get_mut`-then-`insert`), `extract_self_atom` borrows
+  instead of cloning an 88-byte `Atom` and no longer builds a `Selector`,
+  `Book::update_one` marks a single leg without cloning its symbol, and
+  `BasketStrategy` stops re-cloning symbols into its `latest_*` maps.
+- **`MultiAssetStrategy`'s per-bar symbol lookup** is built once per bar into a
+  keyed map instead of rescanning the snapshot inside the per-leg loop.
+- **`cli::run`** builds `bars` first and then *consumes* the atoms into
+  snapshots, instead of cloning each `Atom` out of a still-live vector.
+
+### Footprint
+
+| | before | after |
+|---|---:|---:|
+| allocations per bar, driving a run | 5.00 | **1.00** |
+| bytes per bar, driving a run | 44.0 | **9.0** |
+
+The remaining one-per-bar allocation is `wallet.update(sym.clone(), candle)` in
+`backtest::drive`, forced by `Wallet::update` taking `Sym` by value. That is a
+public trait signature — see the breaking candidates.
+
+Snapshot *construction* is unchanged at 3.00 allocs/bar and 201 bytes/bar for
+40 bytes of OHLCV; that needs an interned symbol type, also a breaking change.
+
+### Wall-clock
+
+| benchmark | v0.58.0 | now | change |
+|---|---:|---:|---:|
+| `wallet/update/16` | 1.642 ms | 711 µs | **−56.7%** |
+| `wallet/equity/16` | 5.416 ms | 2.591 ms | −52.2% |
+| `wallet/update/1` | 1.464 ms | 709 µs | −51.6% |
+| `wallet/equity/64` | 22.447 ms | 12.717 ms | −43.3% |
+| `driver/macd_crossover/rust` | 33.377 ms | 13.383 ms | **−59.9%** |
+| `wallet/fill_roundtrip` | 6.854 ms | 4.681 ms | −31.7% |
+| `driver/sma_crossover/yaml` | 58.856 ms | 42.749 ms | −27.4% |
+| `tree/drive/8` | 6.133 ms | 3.588 ms | −41.5% |
+| `multi_asset/drive/64` | 110.910 ms | 94.089 ms | −15.2% |
+| `multi_asset/update/64` | 101.030 ms | 84.725 ms | −16.1% |
+
+`driver/sma_crossover/rust` now reads −6.4%, having shown +23.8% in Phase 2 —
+the same binary-layout artefact, moving the other way. Take it as noise in
+either direction; the instruction count is the number to trust there.
+
+### Universe scaling is better but still not flat
+
+Per *symbol-bar* (should be constant in N):
+
+| symbols | 2 | 8 | 16 | 32 | 64 |
+|---|---:|---:|---:|---:|---:|
+| `update`, v0.58.0 | 204 ns | 241 | 345 | 501 | 789 |
+| `update`, now | 227 ns | 248 | 332 | 449 | **662** |
+| `drive`, now | 310 ns | 317 | 398 | 517 | **735** |
+
+Improved at the top end and still climbing, because **the dominant O(N²) is not
+in the strategy loop** — it is `Snapshot::find`, a linear scan, called by every
+`Pick::matching` leaf, once per leaf per symbol per bar. That is rooted in a
+deliberate design decision (`src/snapshot.rs`: "the storage is deliberately a
+sequence rather than a hashmap: `Selector` is a predicate, not a key"), so
+changing it is a design question, not a tuning one. Noted, not attempted.
+
+Small universes pay slightly more for the keyed lookup than a two-element scan
+(`update/2` is +11%); the crossover is around N = 16, and `drive/2` is −7.2%
+because the wallet-side hashing win more than covers it.
 
 ## Known costs, and why they are there
 

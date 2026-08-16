@@ -5,7 +5,6 @@
 //! `Pending` / `Leg` / `Protective` / `FillPricing` / `RestingLimit`, which is
 //! why they are private here rather than in [`super::types`].
 
-use std::collections::HashMap;
 use std::hash::Hash;
 
 use serde::de::DeserializeOwned;
@@ -19,6 +18,7 @@ use super::types::{
     Rejection, Side, Size, Units, WalletError, cash_tolerance,
 };
 use super::Wallet;
+use crate::hash::SymMap;
 
 /// A market order queued on a [`PaperWallet`] to fill at the next bar's `open`.
 ///
@@ -122,13 +122,13 @@ struct RestingLimit {
 /// handles live execution / bus publishing.
 #[derive(Debug)]
 pub struct PaperWallet<Sym> {
-    positions: HashMap<Sym, Real>,
-    bars: HashMap<Sym, Candle>,
-    pending: HashMap<Sym, Pending>,
-    protective: HashMap<Sym, Protective>,
+    positions: SymMap<Sym, Real>,
+    bars: SymMap<Sym, Candle>,
+    pending: SymMap<Sym, Pending>,
+    protective: SymMap<Sym, Protective>,
     /// One resting limit order per symbol, latest-wins — the same convention
     /// `pending` and `protective` use.
-    limits: HashMap<Sym, RestingLimit>,
+    limits: SymMap<Sym, RestingLimit>,
     funds: Real,
     initial_funds: Real,
     blotter: Vec<Order<Sym>>,
@@ -140,7 +140,7 @@ pub struct PaperWallet<Sym> {
     rejections_drained: usize,
     next_id: u64,
     costs: TradingCosts,
-    per_symbol_costs: HashMap<Sym, TradingCosts>,
+    per_symbol_costs: SymMap<Sym, TradingCosts>,
     /// The label reported by [`quote_ccy`](Wallet::quote_ccy), or `None` when
     /// the caller never said. Purely descriptive — nothing in the fill or
     /// pricing path reads it, because simulated money has no venue to check it
@@ -163,11 +163,11 @@ impl<Sym> PaperWallet<Sym> {
     /// zero-cost wallet (equivalent to [`new`](Self::new)).
     pub fn with_costs(funds: Real, costs: TradingCosts) -> Self {
         Self {
-            positions: HashMap::new(),
-            bars: HashMap::new(),
-            pending: HashMap::new(),
-            protective: HashMap::new(),
-            limits: HashMap::new(),
+            positions: SymMap::default(),
+            bars: SymMap::default(),
+            pending: SymMap::default(),
+            protective: SymMap::default(),
+            limits: SymMap::default(),
             funds,
             initial_funds: funds,
             blotter: Vec::new(),
@@ -175,7 +175,7 @@ impl<Sym> PaperWallet<Sym> {
             rejections_drained: 0,
             next_id: 0,
             costs,
-            per_symbol_costs: HashMap::new(),
+            per_symbol_costs: SymMap::default(),
             quote_ccy: None,
         }
     }
@@ -242,12 +242,16 @@ impl<Sym> PaperWallet<Sym> {
     serialize = "Sym: Serialize + Eq + Hash",
     deserialize = "Sym: Deserialize<'de> + Eq + Hash"
 ))]
+// Mirrors the wallet's own map type so save/load is a move rather than a
+// rehash. The persisted shape is unaffected: serde writes either as a JSON
+// object, and `serde_json`'s map is a `BTreeMap`, so the key order on disk is
+// sorted regardless of the hasher. Existing saved states load unchanged.
 struct WalletSnapshot<Sym> {
-    positions: HashMap<Sym, Real>,
-    bars: HashMap<Sym, Candle>,
-    pending: HashMap<Sym, Pending>,
-    protective: HashMap<Sym, Protective>,
-    limits: HashMap<Sym, RestingLimit>,
+    positions: SymMap<Sym, Real>,
+    bars: SymMap<Sym, Candle>,
+    pending: SymMap<Sym, Pending>,
+    protective: SymMap<Sym, Protective>,
+    limits: SymMap<Sym, RestingLimit>,
     funds: Real,
     initial_funds: Real,
     blotter: Vec<Order<Sym>>,
@@ -300,6 +304,49 @@ impl<Sym: Clone + Eq + Hash + Serialize + DeserializeOwned> PaperWallet<Sym> {
 }
 
 impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
+    /// Cash plus every position marked at `mark(symbol)`, summed in a
+    /// **canonical order**.
+    ///
+    /// The order matters and is not cosmetic. `positions` is a `HashMap` with a
+    /// per-process `RandomState`, so iterating it yields the legs in an order
+    /// that varies *between runs of the same binary on the same data*. Floating
+    /// addition is not associative, so summing in that order made a multi-symbol
+    /// equity curve differ by a ULP from one invocation to the next — and a ULP
+    /// either side of a threshold is a different trade, which makes a resumed
+    /// run's bit-identity a coin flip.
+    ///
+    /// Sorting the marked values (rather than the symbols) is the same fix
+    /// [`Book::update`](crate::indicators::Book) already applies to its legs,
+    /// and needs no `Ord` bound on `Sym`. Single-symbol runs — the common case —
+    /// were never affected, which is why this survived so long.
+    ///
+    /// Values land in a stack buffer while the book is small, so the once-a-bar
+    /// `equity()` call does not allocate for a realistic universe.
+    fn marked_equity(&self, mark: impl Fn(&Sym) -> Real) -> Reference {
+        /// Positions held before the sum spills to the heap. Comfortably above
+        /// any realistic single-strategy book.
+        const INLINE: usize = 32;
+
+        let n = self.positions.len();
+        let mut inline = [0.0 as Real; INLINE];
+        let mut spilled: Vec<Real>;
+        let values: &mut [Real] = if n <= INLINE {
+            for (slot, (symbol, &amount)) in inline.iter_mut().zip(self.positions.iter()) {
+                *slot = amount * mark(symbol);
+            }
+            &mut inline[..n]
+        } else {
+            spilled = self
+                .positions
+                .iter()
+                .map(|(symbol, &amount)| amount * mark(symbol))
+                .collect();
+            &mut spilled
+        };
+        values.sort_by(|a, b| a.total_cmp(b));
+        Reference(values.iter().fold(self.funds, |acc, v| acc + v))
+    }
+
     /// Book a fill: drive `symbol` to `target` signed units, using
     /// `theoretical_price` as the pre-cost trigger price (bar `open` for a
     /// market order, the trigger level — or the `open` on a gap — for a stop /
@@ -719,19 +766,24 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
     }
 
     fn equity(&self) -> Reference {
-        let positions_value: Real = self
-            .positions
-            .iter()
-            .map(|(symbol, &amount)| amount * self.bars.get(symbol).map_or(0.0, |c| c.close))
-            .sum();
-        Reference(self.funds + positions_value)
+        self.marked_equity(|symbol| self.bars.get(symbol).map_or(0.0, |c| c.close))
     }
 
     fn update(&mut self, symbol: Sym, candle: Candle) -> Vec<Order<Sym>> {
         // Mark the new bar first so a queued fill validates against *this* bar's
         // range (its `open` is trivially within it), then flush any queued market
         // order at the open, then test the resting protective legs.
-        self.bars.insert(symbol.clone(), candle);
+        // `get_mut`-then-`insert` rather than a bare `insert`: after the first
+        // bar the key is already present, and `insert` would clone the symbol
+        // every bar only to drop the clone again. For `Sym = String` — what the
+        // spec/CLI layer uses — that is one heap allocation per symbol per bar
+        // for the whole run.
+        match self.bars.get_mut(&symbol) {
+            Some(slot) => *slot = candle,
+            None => {
+                self.bars.insert(symbol.clone(), candle);
+            }
+        }
         let mut fills = Vec::new();
         if let Some(pending) = self.pending.remove(&symbol) {
             let (target, id) = match pending {
@@ -742,19 +794,15 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
                 // information from later in this bar.
                 Pending::Sized(side, size, id) => {
                     let position = self.positions.get(&symbol).copied().unwrap_or(0.0);
-                    let equity_at_open = self.funds
-                        + self
-                            .positions
-                            .iter()
-                            .map(|(s, &a)| {
-                                let mark = if *s == symbol {
-                                    candle.open
-                                } else {
-                                    self.bars.get(s).map_or(0.0, |c| c.close)
-                                };
-                                a * mark
-                            })
-                            .sum::<Real>();
+                    let equity_at_open = self
+                        .marked_equity(|s| {
+                            if *s == symbol {
+                                candle.open
+                            } else {
+                                self.bars.get(s).map_or(0.0, |c| c.close)
+                            }
+                        })
+                        .0;
                     let magnitude = size.resolve(candle.open, position, self.funds, equity_at_open);
                     // For a fractional sizing ("as much of my equity/funds as
                     // fits"), shrink a net buy so spread + slippage +
@@ -1056,6 +1104,96 @@ mod tests {
     /// express "traded down to X and back".
     fn ohlc(open: Real, high: Real, low: Real, close: Real) -> Candle {
         Candle::new(open, high, low, close, 1_000.0)
+    }
+
+    /// Equity must not depend on the order legs were *inserted*.
+    ///
+    /// `positions` is a `HashMap`, so its iteration order is a function of the
+    /// insertion history and the per-process hash seed. Summing floats in that
+    /// order made a multi-symbol equity curve differ by a ULP between runs — see
+    /// `PaperWallet::marked_equity`. Values here are deliberately chosen to be
+    /// inexact in binary and to span several magnitudes, so a different addition
+    /// order really does land on a different `f64`.
+    /// Equity must sum the legs in **ascending value order**, not in `HashMap`
+    /// order.
+    ///
+    /// `positions` is a `HashMap` with a per-process `RandomState`, so iterating
+    /// it yields the legs in an order that varies *between runs of the same
+    /// binary on the same data*. Floating addition is not associative, so a
+    /// multi-symbol equity curve drifted by a ULP from one invocation to the
+    /// next, and a ULP either side of a threshold is a different trade.
+    ///
+    /// That cross-process drift cannot be reproduced inside one test process —
+    /// the seed is fixed for the run, and re-inserting the same keys in a
+    /// different order gives the same bucket layout, so "insert forwards vs
+    /// backwards" proves nothing. What *is* testable is the convention itself:
+    /// pin equity to an independently-computed ascending-order fold, built from
+    /// the public `funds` / `position` / `price` accessors. Without the sort in
+    /// `marked_equity` this fails.
+    /// Populate `positions` / `bars` directly with leg values spanning ~16
+    /// decades, then check equity against an independent ascending fold.
+    ///
+    /// The wide magnitude spread is the point: summing ascending accumulates the
+    /// tiny legs into something big enough to survive being added to the large
+    /// ones, whereas any other order absorbs them one at a time. With `n` legs
+    /// scrambled across that range, the probability that `HashMap` order happens
+    /// to coincide with ascending order is negligible, so this fails whenever
+    /// `marked_equity` stops sorting.
+    ///
+    /// Built by hand rather than by trading, so the values can be chosen to
+    /// discriminate — a realistic book of same-magnitude legs sums identically
+    /// in every order and would prove nothing.
+    fn assert_equity_is_canonically_ordered(n: usize) {
+        let mut w: PaperWallet<String> = PaperWallet::new(0.0);
+        for i in 0..n {
+            // Scramble the exponent so neither insertion order nor symbol order
+            // correlates with magnitude.
+            let exp = ((i * 7 + 3) % 17) as i32 - 8; // -8 ..= 8
+            let px = 10.0_f64.powi(exp);
+            let units = 1.0 + (i as Real) * 0.5;
+            let sym = format!("S{i:03}");
+            w.positions.insert(sym.clone(), units);
+            w.bars.insert(sym, bar(px));
+        }
+
+        let mut asc: Vec<Real> = w
+            .positions
+            .iter()
+            .map(|(s, &a)| a * w.bars.get(s).map_or(0.0, |c| c.close))
+            .collect();
+        asc.sort_by(|a, b| a.total_cmp(b));
+        let want = asc.iter().fold(0.0 as Real, |acc, v| acc + v);
+
+        // Guard: if descending gives the same bits, the fixture is not
+        // discriminating and the assertion below would be vacuous.
+        let desc = asc.iter().rev().fold(0.0 as Real, |acc, v| acc + v);
+        assert_ne!(
+            want.to_bits(),
+            desc.to_bits(),
+            "n = {n}: fixture does not discriminate between summation orders",
+        );
+
+        let got = w.equity().0;
+        assert_eq!(
+            got.to_bits(),
+            want.to_bits(),
+            "n = {n}: equity {got:?} is not the ascending-order fold {want:?} \
+             — `marked_equity` must sum in a canonical order",
+        );
+    }
+
+    /// Swept across the `INLINE` spill boundary (32): both the stack and heap
+    /// paths must hold the convention, or crossing the threshold would quietly
+    /// reintroduce the drift on large universes.
+    ///
+    /// Several sizes because a single one can coincide with ascending order by
+    /// luck — at n = 12 it does. Verified to fail when the sort in
+    /// `marked_equity` is removed.
+    #[test]
+    fn equity_sums_legs_in_canonical_order() {
+        for n in [12usize, 31, 32, 33, 64] {
+            assert_equity_is_canonically_ordered(n);
+        }
     }
 
     #[test]
