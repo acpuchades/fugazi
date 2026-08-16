@@ -457,6 +457,12 @@ fn scoped_from_value(value: Json, scope: OverlayScope, label: &str) -> Result<Ve
 mod tests {
     use super::*;
 
+    /// Period fields are `NonZeroUsize`, so a literal needs wrapping to build
+    /// a `NodeSpec` by hand.
+    fn nz(n: usize) -> std::num::NonZeroUsize {
+        std::num::NonZeroUsize::new(n).expect("test period is non-zero")
+    }
+
     /// Most tests don't exercise `!param`, so wrap the two-arg `parse_specs`
     /// with an empty table — the bare name shadows the `super::*` glob import.
     fn parse_specs(sources: &[Source]) -> Result<Vec<Overlay>> {
@@ -662,7 +668,7 @@ mod tests {
                 name: "a".to_string(),
                 spec: NodeSpec::Sma {
                     source: Box::new(NodeSpec::Close { source: None }),
-                    period: 200,
+                    period: nz(200),
                 },
                 scope: OverlayScope {
                     symbol: Some("BTC".to_string()),
@@ -674,7 +680,7 @@ mod tests {
                 name: "b".to_string(),
                 spec: NodeSpec::Sma {
                     source: Box::new(NodeSpec::Close { source: None }),
-                    period: 20,
+                    period: nz(20),
                 },
                 scope: OverlayScope::default(),
                 origin: "(test)".to_string(),
@@ -717,8 +723,8 @@ mod tests {
         let overlays = super::parse_specs(std::slice::from_ref(&src), &table).unwrap();
         assert_eq!(overlays.len(), 1);
         assert!(matches!(
-            overlays[0].spec,
-            NodeSpec::Sma { period: 20, .. }
+            &overlays[0].spec,
+            NodeSpec::Sma { period, .. } if period.get() == 20
         ));
     }
 
@@ -727,8 +733,8 @@ mod tests {
         let src = Source::Inline("ma=!sma { period: !param { key: FAST, default: 14 } }".to_string());
         let overlays = super::parse_specs(std::slice::from_ref(&src), &HashMap::new()).unwrap();
         assert!(matches!(
-            overlays[0].spec,
-            NodeSpec::Sma { period: 14, .. }
+            &overlays[0].spec,
+            NodeSpec::Sma { period, .. } if period.get() == 14
         ));
     }
 
@@ -747,8 +753,8 @@ mod tests {
         let table = HashMap::from([("FAST".to_string(), Json::from(30))]);
         let overlays = super::parse_specs(std::slice::from_ref(&src), &table).unwrap();
         assert!(matches!(
-            overlays[0].spec,
-            NodeSpec::Sma { period: 30, .. }
+            &overlays[0].spec,
+            NodeSpec::Sma { period, .. } if period.get() == 30
         ));
     }
 }

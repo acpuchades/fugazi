@@ -445,7 +445,7 @@ mod tests {
             "(test)",
         )
         .unwrap();
-        assert!(matches!(c[0].spec, NodeSpec::Sma { period: 4, .. }));
+        assert!(matches!(&c[0].spec, NodeSpec::Sma { period, .. } if period.get() == 4));
     }
 
     #[test]

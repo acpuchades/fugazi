@@ -1292,17 +1292,56 @@ mod tests {
     }
 
     #[test]
-    fn resample_rejects_a_zero_period_instead_of_aborting() {
-        // `every: 0` is bad input, not a broken invariant — it used to trip an
-        // `assert!` inside the build match and take the process with it.
+    fn a_zero_period_is_rejected_at_parse_not_at_construction() {
+        // Period fields are `NonZeroUsize`, so serde refuses 0 before a
+        // `NodeSpec` exists. That is what makes `fugazi check` catch it —
+        // previously it parsed clean and tripped an `assert!` inside the
+        // library constructor at run time.
+        for text in [
+            "!ema { period: 0 }",
+            "!sma { period: 0 }",
+            "!rsi { period: 0 }",
+            "!atr { period: 0 }",
+            "!bollinger { period: 0 }",
+            "!every 0",
+        ] {
+            assert!(
+                serde_norway::from_str::<NodeSpec>(text).is_err(),
+                "`{text}` must not parse",
+            );
+        }
+        // ... and the same fields still accept a positive value.
+        assert!(serde_norway::from_str::<NodeSpec>("!ema { period: 1 }").is_ok());
+    }
+
+    #[test]
+    fn variance_ratio_reports_its_relational_bounds_as_values() {
+        // `NonZeroUsize` gets these past 0; the remaining constraints are
+        // between two fields, so they stay build-time checks — but they are
+        // values now, not `assert!`s.
         let spec: NodeSpec =
-            serde_norway::from_str("!resample { every: 0, inner: !close }").unwrap();
+            serde_norway::from_str("!variance_ratio { period: 10, lag: 1 }").unwrap();
         let err = expr_build_err(&spec, &Schema::empty());
-        let (trail, message) = crate::spec::diagnostics::split_trail(&err);
-        assert_eq!(trail, vec!["!resample"], "{err}");
-        assert!(message.contains("greater than zero"), "{err}");
-        // The message must not repeat its own tag — the trail already carries it.
-        assert!(!message.contains("!resample"), "{err}");
+        assert!(err.contains("`lag` must be at least 2"), "{err}");
+
+        let spec: NodeSpec =
+            serde_norway::from_str("!variance_ratio { period: 5, lag: 4 }").unwrap();
+        let err = expr_build_err(&spec, &Schema::empty());
+        assert!(err.contains("at least `lag` + 2"), "{err}");
+    }
+
+    #[test]
+    fn resample_rejects_a_zero_period_instead_of_aborting() {
+        // `every: 0` used to trip an `assert!` inside the build match and take
+        // the process with it. Now that `every` is a `NonZeroUsize` the
+        // rejection happens one step earlier still — at parse, so `fugazi
+        // check` catches it without building anything. The breadcrumb survives
+        // either way.
+        let err = serde_norway::from_str::<NodeSpec>("!resample { every: 0, inner: !close }")
+            .expect_err("`every: 0` must not parse")
+            .to_string();
+        assert!(err.starts_with("!resample > "), "{err}");
+        assert!(err.contains("nonzero"), "{err}");
     }
 
     #[test]

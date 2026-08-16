@@ -732,9 +732,13 @@ fn type_fragment(ty: &str) -> serde_json::Value {
         // expression schema, so these arms aren't reached through `node`.
         "str_list" => json!({ "type": "array", "items": { "type": "string" } }),
         "number_list" => json!({ "type": "array", "items": { "type": "number" } }),
-        // `> 0` is asserted at construction; the schema stays lax (`longs`/`shorts`
-        // and `every` admit 0). See the proposal's open question.
+        // A plain count that may legitimately be 0 (`longs` / `shorts` on a
+        // selection rule).
         "uint" => or_placeholder(json!({ "type": "integer", "minimum": 0 })),
+        // A period or window length. The spec field is a `NonZeroUsize`, so
+        // serde rejects 0 at parse time and the schema can say so — this used
+        // to advertise `minimum: 0` while the constructor asserted `> 0`.
+        "positive_uint" => or_placeholder(json!({ "type": "integer", "minimum": 1 })),
         "number" => or_placeholder(json!({ "type": "number" })),
         "str" => or_placeholder(json!({ "type": "string" })),
         "bool" => or_placeholder(json!({ "type": "boolean" })),

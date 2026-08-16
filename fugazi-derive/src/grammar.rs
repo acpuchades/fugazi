@@ -122,7 +122,7 @@ fn field_expr(field: &syn::Field) -> Result<proc_macro2::TokenStream, syn::Error
     let ty_str = type_string(&field.ty);
     let is_option = ty_str.starts_with("Option");
     let grammar_ty = grammar_type(&ty_str);
-    let is_scalar = matches!(grammar_ty, "uint" | "number" | "str" | "bool");
+    let is_scalar = matches!(grammar_ty, "uint" | "positive_uint" | "number" | "str" | "bool");
 
     let default_kind = serde_default(&field.attrs)?;
     let required = !is_option && matches!(default_kind, SerdeDefault::None);
@@ -179,6 +179,11 @@ fn grammar_type(ty_str: &str) -> &'static str {
         "strategy"
     } else if inner.contains("StrOperand") {
         "str_operand"
+    } else if inner == "NonZeroUsize" {
+        // Periods and window lengths. Distinct from `uint` because serde
+        // rejects 0 at *parse*, so the generated schema can say `minimum: 1`
+        // instead of deferring to a construction-time assert.
+        "positive_uint"
     } else if inner == "usize" {
         "uint"
     } else if inner == "Real" || inner == "f64" {

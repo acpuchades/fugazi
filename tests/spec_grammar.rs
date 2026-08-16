@@ -115,6 +115,7 @@ fn every_tag_is_well_formed() {
         "str_list",
         "number_list",
         "uint",
+        "positive_uint",
         "number",
         "str",
         "bool",
@@ -249,7 +250,9 @@ fn reflects_fields_and_defaults() {
     assert!(!src.required, "sma.source has a default -> optional");
     assert!(src.default.is_none(), "node default is null, not a literal");
     let period = sma.fields.iter().find(|f| f.name == "period").unwrap();
-    assert_eq!(period.ty, "uint");
+    // A period is a `NonZeroUsize`, which the descriptor reports as
+    // `positive_uint` so the generated JSON schema can say `minimum: 1`.
+    assert_eq!(period.ty, "positive_uint");
     assert!(period.required, "sma.period has no default");
 
     // Const-backed defaults surface as literals.
