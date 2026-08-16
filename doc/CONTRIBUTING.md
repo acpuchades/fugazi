@@ -107,7 +107,12 @@ Not an estimate — `tests/warm_up.rs` asserts it sample by sample.
 ### 3. The YAML tag — `src/spec/expr.rs`
 
 Add a variant to `NodeSpec` **and** to the private `NodeSpecRaw` mirror, then a
-`try_build` arm. The recursive-build shorthands are already in scope:
+`try_build` arm. (`tests/hand_maintained_mirrors.rs` guards the mirror — the
+compiler catches a missing variant via `typecheck.rs` and a missing *named*
+default via the field's type, but a dropped bare `#[serde(default)]` on an
+`Option` field compiles clean and silently makes the key required.)
+
+The recursive-build shorthands are already in scope:
 
 ```rust
 Foo { source, period } => dyn_indicator::wrap(
@@ -334,8 +339,11 @@ yourself wanting to, the difference probably belongs on `RunnableStrategy` or
 4. Add the field to the CLI `Metrics` document (`src/spec/metrics.rs`) and
    populate it in `metrics::from_report`. The serde name is the YAML/CSV column
    name, so it is user-visible.
-5. Bind it: `#[pyfunction]` plus the name in `register_metrics_module`'s
-   `reg!(...)`. `Option<Real>` maps to `Optional[float]`; `Real` to `float`.
+5. Bind it *(test-enforced)*: `#[pyfunction]` plus the name in
+   `register_metrics_module`'s `reg!(...)`. `Option<Real>` maps to
+   `Optional[float]`; `Real` to `float`.
+   `hand_maintained_mirrors::every_rust_metric_is_bound_on_the_python_module`
+   fails until the name is there.
 6. Document it in `doc/METRICS.md`.
 
 New numeric leaves on the `Metrics` document become `optimize --metrics` /
@@ -502,6 +510,9 @@ When one of these fails, it is telling you something specific:
 | `categories_are_alphabetical` | The `CATEGORIES` taxonomy went out of order. |
 | `the_output_renders_every_category_and_tag` | A tag is invisible to `fugazi list indicators`. |
 | `every_tag_appears_in_the_strategies_reference` | A tag has no entry in the `doc/STRATEGIES.md` prose reference. |
+| `the_mirror_has_every_variant` | `NodeSpecRaw` doesn't mirror a `NodeSpec` variant. |
+| `the_mirror_repeats_every_serde_default` | A `#[serde(default)]` on an `Option` field wasn't copied to the mirror — the key silently becomes required. |
+| `every_rust_metric_is_bound_on_the_python_module` | A `src/metrics.rs` function isn't in `register_metrics_module`'s `reg!(...)`. |
 | `test_parity.py::test_every_*_tag_is_bound_or_declared_unbound` | A tag has no Python counterpart and no recorded reason. |
 | `test_parity.py::test_the_declared_tables_do_not_go_stale` | A tag left the spec layer but its parity entry didn't. |
 | `warm_up_is_exact_for_*` | `warm_up_period()` disagrees with when the first `Some` actually lands. |
