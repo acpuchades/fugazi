@@ -349,6 +349,17 @@ where
     /// Cached projected value returned by [`Indicator::value`]. Set on every
     /// `update` (whether we advanced the source or read the cache).
     value: Option<Real>,
+    /// The source's `warm_up_bars()` / `unstable_bars()`, read once at
+    /// construction.
+    ///
+    /// Both are structural properties of the source — they depend on its
+    /// *shape* (periods, nesting), which is fixed once built, not on the samples
+    /// fed through it. Reading them live meant taking the shared mutex on every
+    /// call, and `Strategy::is_ready` walks the whole tree calling exactly these
+    /// two on every bar, so the lock traffic was proportional to tree size ×
+    /// bars for a pair of constants.
+    warm_up: usize,
+    unstable: usize,
 }
 
 impl<M: Indicator> SharedComponent<M>
@@ -364,12 +375,21 @@ where
     /// N bars starts in sync with the shared counter and will not spuriously
     /// re-advance on its first `update`.
     pub fn new(shared: &Shared<M>, select: fn(M::Output) -> Real) -> Self {
-        let local_gen = shared.inner.lock().expect("Shared lock poisoned").generation;
+        let (local_gen, warm_up, unstable) = {
+            let inner = shared.inner.lock().expect("Shared lock poisoned");
+            (
+                inner.generation,
+                inner.source.warm_up_bars().max(1),
+                inner.source.unstable_bars(),
+            )
+        };
         Self {
             handle: Arc::clone(&shared.inner),
             select,
             local_gen,
             value: None,
+            warm_up,
+            unstable,
         }
     }
 }
@@ -384,6 +404,8 @@ where
             select: self.select,
             local_gen: self.local_gen,
             value: self.value,
+            warm_up: self.warm_up,
+            unstable: self.unstable,
         }
     }
 }
@@ -426,11 +448,11 @@ where
     }
 
     fn warm_up_bars(&self) -> usize {
-        self.handle.lock().expect("Shared lock poisoned").source.warm_up_bars().max(1)
+        self.warm_up
     }
 
     fn unstable_bars(&self) -> usize {
-        self.handle.lock().expect("Shared lock poisoned").source.unstable_bars()
+        self.unstable
     }
 
     fn reset(&mut self) {

@@ -145,6 +145,75 @@ tokio-test = "0.4"
 # The `live` Coinbase wallet test builds a throwaway P-256 key to construct the
 # wallet (the mock doesn't verify the JWT, but construction parses a real key).
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem", "pkcs8", "std"] }
+# The benchmark harness (`benches/`). `default-features = false` drops the
+# plotting/HTML-report stack — the numbers are read from the terminal and from
+# `scripts/perf-compare.sh`, not from generated charts, and gnuplot/plotters
+# would be a large dependency tree for output nobody reads. Benches are
+# deliberately **not** wired into CI (`scripts/ci-local.sh` /
+# `.github/workflows/ci.yml`, which `tests/ci_mirror.rs` holds in sync): they
+# are a development instrument, not a gate.
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+
+# Benchmark targets. Each needs `harness = false` so criterion's own runner
+# takes over from libtest; `footprint` is not a criterion bench at all but a
+# plain `fn main()` probe that installs a counting global allocator (which it
+# could not do inside a criterion target without also counting criterion's own
+# allocations).
+[[bench]]
+name = "tree"
+harness = false
+
+[[bench]]
+name = "indicators"
+harness = false
+
+[[bench]]
+name = "driver"
+harness = false
+
+[[bench]]
+name = "multi_asset"
+harness = false
+
+[[bench]]
+name = "wallet"
+harness = false
+
+[[bench]]
+name = "metrics"
+harness = false
+
+[[bench]]
+name = "footprint"
+harness = false
+
+# The per-bar hot path is generic code that crosses module boundaries
+# (`Combine<L, R, Op>` over sources defined elsewhere) plus trait objects, so
+# cross-CGU inlining is worth more here than it is for the average crate.
+#
+# **`codegen-units = 1` is the setting that matters, not the LTO.** Measured on
+# the `benches/` suite (see `docs/PERFORMANCE.md`), against an untuned profile:
+#
+#   | config                    | rebuild | driver/sma/yaml | tree/update |
+#   |---------------------------|--------:|----------------:|------------:|
+#   | (untuned)                 |     42s |               — |           — |
+#   | lto = "thin"              |     45s |           -3.1% |  +3 … +14%  |
+#   | lto = "thin", cgu = 1     |     68s |          -19.9% |  -5 … -9%   |
+#
+# Thin LTO on its own is not worth having — it *regressed* `tree/update` at
+# every depth. Keep the pair or drop both; don't split them without re-measuring.
+#
+# `panic = "abort"` is deliberately *not* set: `Snapshot::sole_atom` panics as a
+# documented diagnostic, and the test suite catches it with `catch_unwind`.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# `cargo bench` uses this profile, and a benchmark that isn't built the way a
+# release consumer builds is measuring the wrong thing.
+[profile.bench]
+lto = "thin"
+codegen-units = 1
 
 # The Python bindings live in their own workspace member (`python/`), which is
 # the only crate that pulls in PyO3 — see that crate's README for build

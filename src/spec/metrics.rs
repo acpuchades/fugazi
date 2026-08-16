@@ -323,6 +323,11 @@ pub fn from_report<Sym>(
     let returns = crate::metrics::per_bar_returns(equity, initial);
     let trades = crate::metrics::reconstruct_trades(&report.fills);
     let segments = crate::metrics::drawdown_segments(equity);
+    // The quantile metrics below (median / VaR / CVaR / tail ratio) each sort
+    // their input. Sorting once here and calling their `*_of_sorted` backs is
+    // the difference between four sorts of the return series and one — see
+    // `metrics::sorted_returns`.
+    let sorted_returns = crate::metrics::sorted_asc(&returns);
     let rf_per_bar = if bars_per_year > 0.0 {
         risk_free_rate / bars_per_year
     } else {
@@ -354,23 +359,28 @@ pub fn from_report<Sym>(
             total_pct: total * 100.0,
             cagr_pct: cagr.map(|c| c * 100.0),
             mean_bar: crate::metrics::mean_return(&returns),
-            median_bar: crate::metrics::median_return(&returns),
+            median_bar: crate::metrics::median_of_sorted(&sorted_returns),
             stddev_bar: crate::metrics::stddev_return(&returns),
             best_bar: crate::metrics::best_return(&returns),
             worst_bar: crate::metrics::worst_return(&returns),
             positive_bars_pct: crate::metrics::positive_bars_ratio(&returns) * 100.0,
             skewness: crate::metrics::skewness(&returns),
             kurtosis: crate::metrics::kurtosis(&returns),
-            var_95: crate::metrics::value_at_risk(&returns, 0.95),
-            cvar_95: crate::metrics::conditional_value_at_risk(&returns, 0.95),
-            tail_ratio: crate::metrics::tail_ratio(&returns),
+            var_95: crate::metrics::value_at_risk_of_sorted(&sorted_returns, 0.95),
+            cvar_95: crate::metrics::conditional_value_at_risk_of_sorted(&sorted_returns, 0.95),
+            tail_ratio: crate::metrics::tail_ratio_of_sorted(&sorted_returns),
             annualized_mean_pct: ann_mean * 100.0,
             annualized_volatility_pct: ann_vol * 100.0,
         },
         risk_adjusted: RiskAdjustedSection {
             sharpe: crate::metrics::sharpe(&returns, risk_free_rate, bars_per_year),
             sortino: crate::metrics::sortino(&returns, risk_free_rate, bars_per_year),
-            calmar: crate::metrics::calmar(equity, initial, bars_per_year),
+            calmar: crate::metrics::calmar_with_max_drawdown(
+                equity,
+                initial,
+                bars_per_year,
+                max_dd,
+            ),
             omega: crate::metrics::omega(&returns, rf_per_bar),
             ulcer_index: crate::metrics::ulcer_index(equity),
             ulcer_performance_index: crate::metrics::ulcer_performance_index(
@@ -395,7 +405,11 @@ pub fn from_report<Sym>(
             avg_duration_bars: crate::metrics::average_drawdown_duration(&segments),
             count: crate::metrics::drawdown_count(&segments),
             time_in_drawdown_pct: crate::metrics::time_in_drawdown_ratio(&segments, bars) * 100.0,
-            recovery_factor: crate::metrics::recovery_factor(equity, initial),
+            recovery_factor: crate::metrics::recovery_factor_with_max_drawdown(
+                equity,
+                initial,
+                max_dd,
+            ),
         },
         costs: None,
         montecarlo: None,
