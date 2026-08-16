@@ -251,10 +251,18 @@ fn bench_snapshot_clone_scaling() {
 /// memoise multi-output sub-trees into a `Shared` handle was tried and
 /// measured: the cache hits, one `Macd` genuinely drives both components, and
 /// the total moves ~3% — inside the noise. Four `SharedComponent`s taking a
-/// mutex per bar costs about what the duplicated arithmetic did. The gap is the
-/// type-erasure layer itself — `DynValue` boxing, dynamic dispatch and snapshot
-/// payload wrapping at every node — so that is where to look if this number
-/// ever needs to come down. Don't re-attempt the memo without re-measuring.
+/// mutex per bar costs about what the duplicated arithmetic did. Don't
+/// re-attempt the memo without re-measuring.
+///
+/// **Correction (v0.59.0): those mutexes were not in `update`.** They were in
+/// `SharedComponent::warm_up_bars` / `unstable_bars`, which `Strategy::is_ready`
+/// called — through the whole tree — on *every* bar, for two values that are
+/// fixed at construction. Caching them on the component made the Rust
+/// `macd_crossover` side of this bench **~38% faster** on its own; the YAML side,
+/// which builds two independent `Macd`s and holds no `Shared`, did not move.
+/// So the shared-handle machinery was never the cost — the readiness walk was.
+/// See `docs/PERFORMANCE.md` (F1, F2) and `benches/tree.rs`, which isolates
+/// `is_ready` from `update`.
 #[test]
 #[ignore]
 fn bench_yaml_vs_rust_macd_crossover() {

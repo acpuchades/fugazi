@@ -297,10 +297,15 @@ pub fn mean_return(returns: &[Real]) -> Real {
 /// Median of `returns`. `0.0` on an empty input; the mean of the two middle
 /// values on even-length input.
 pub fn median_return(returns: &[Real]) -> Real {
-    if returns.is_empty() {
+    median_of_sorted(&sorted_asc(returns))
+}
+
+/// [`median_return`] over an already-sorted series. See [`sorted_returns`] for
+/// why this split exists.
+pub(crate) fn median_of_sorted(sorted: &[Real]) -> Real {
+    if sorted.is_empty() {
         return 0.0;
     }
-    let sorted = sorted_asc(returns);
     let n = sorted.len();
     if n.is_multiple_of(2) {
         (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
@@ -378,34 +383,47 @@ pub fn kurtosis(returns: &[Real]) -> Option<Real> {
 ///
 /// `0.0` on empty input.
 pub fn value_at_risk(returns: &[Real], confidence: Real) -> Real {
-    if returns.is_empty() {
+    value_at_risk_of_sorted(&sorted_asc(returns), confidence)
+}
+
+/// [`value_at_risk`] over an already-sorted series. See [`sorted_returns`].
+pub(crate) fn value_at_risk_of_sorted(sorted: &[Real], confidence: Real) -> Real {
+    if sorted.is_empty() {
         return 0.0;
     }
-    let sorted = sorted_asc(returns);
-    -percentile(&sorted, 1.0 - confidence)
+    -percentile(sorted, 1.0 - confidence)
 }
 
 /// Historical Conditional VaR (Expected Shortfall) of `returns` at
 /// `confidence`: mean of the bottom-`(1 - confidence)` return tail, expressed
 /// as a positive loss fraction. `0.0` on empty input.
 pub fn conditional_value_at_risk(returns: &[Real], confidence: Real) -> Real {
-    if returns.is_empty() {
+    conditional_value_at_risk_of_sorted(&sorted_asc(returns), confidence)
+}
+
+/// [`conditional_value_at_risk`] over an already-sorted series. See
+/// [`sorted_returns`].
+pub(crate) fn conditional_value_at_risk_of_sorted(sorted: &[Real], confidence: Real) -> Real {
+    if sorted.is_empty() {
         return 0.0;
     }
-    let sorted = sorted_asc(returns);
-    -tail_mean(&sorted, 1.0 - confidence)
+    -tail_mean(sorted, 1.0 - confidence)
 }
 
 /// `|P95(returns)| / |P5(returns)|` (with 5th/95th percentiles), a coarse
 /// symmetry check on the tails. `None` when the 5th-percentile magnitude is
 /// zero.
 pub fn tail_ratio(returns: &[Real]) -> Option<Real> {
-    if returns.is_empty() {
+    tail_ratio_of_sorted(&sorted_asc(returns))
+}
+
+/// [`tail_ratio`] over an already-sorted series. See [`sorted_returns`].
+pub(crate) fn tail_ratio_of_sorted(sorted: &[Real]) -> Option<Real> {
+    if sorted.is_empty() {
         return None;
     }
-    let sorted = sorted_asc(returns);
-    let p95 = percentile(&sorted, 0.95).abs();
-    let p5 = percentile(&sorted, 0.05).abs();
+    let p95 = percentile(sorted, 0.95).abs();
+    let p5 = percentile(sorted, 0.05).abs();
     safe_div(p95, p5)
 }
 
@@ -479,9 +497,24 @@ pub fn sortino(returns: &[Real], risk_free_rate: Real, bars_per_year: Real) -> O
 /// Calmar ratio: `cagr / max_drawdown`. `None` when the max drawdown is zero
 /// or [`cagr`] is undefined.
 pub fn calmar(equity_curve: &[Real], initial_equity: Real, bars_per_year: Real) -> Option<Real> {
+    calmar_with_max_drawdown(
+        equity_curve,
+        initial_equity,
+        bars_per_year,
+        max_drawdown(&drawdown_segments(equity_curve)),
+    )
+}
+
+/// [`calmar`] against a max drawdown the caller already has. See
+/// [`sorted_returns`] for why these split forms exist.
+pub(crate) fn calmar_with_max_drawdown(
+    equity_curve: &[Real],
+    initial_equity: Real,
+    bars_per_year: Real,
+    max_dd: Real,
+) -> Option<Real> {
     let c = cagr(equity_curve, initial_equity, bars_per_year)?;
-    let dd = max_drawdown(&drawdown_segments(equity_curve));
-    safe_div(c, dd)
+    safe_div(c, max_dd)
 }
 
 /// Omega ratio at `threshold`: `Σ max(r − τ, 0) / Σ max(τ − r, 0)`. `None`
@@ -793,8 +826,21 @@ pub fn time_in_drawdown_ratio(segments: &[DrawdownSegment], total_bars: usize) -
 /// `total_return / max_drawdown` — the non-annualized cousin of Calmar. `None`
 /// when the max drawdown is zero.
 pub fn recovery_factor(equity_curve: &[Real], initial_equity: Real) -> Option<Real> {
-    let dd = max_drawdown(&drawdown_segments(equity_curve));
-    safe_div(total_return(equity_curve, initial_equity), dd)
+    recovery_factor_with_max_drawdown(
+        equity_curve,
+        initial_equity,
+        max_drawdown(&drawdown_segments(equity_curve)),
+    )
+}
+
+/// [`recovery_factor`] against a max drawdown the caller already has. See
+/// [`sorted_returns`].
+pub(crate) fn recovery_factor_with_max_drawdown(
+    equity_curve: &[Real],
+    initial_equity: Real,
+    max_dd: Real,
+) -> Option<Real> {
+    safe_div(total_return(equity_curve, initial_equity), max_dd)
 }
 
 // ---------------------------------------------------------------------------
@@ -1021,7 +1067,27 @@ fn downside_stddev(xs: &[Real], threshold: Real) -> Real {
 }
 
 /// Sorted-ascending copy, `NaN`-tolerant.
-fn sorted_asc(xs: &[Real]) -> Vec<Real> {
+///
+/// `pub(crate)` so a caller that is about to ask *several* quantile questions of
+/// one series can sort it once and pass the result to the `*_of_sorted` backs.
+///
+/// Four public metrics here are quantile reads — [`median_return`],
+/// [`value_at_risk`], [`conditional_value_at_risk`], [`tail_ratio`] — and each
+/// independently sorts its input. Taken one at a time that is the right API;
+/// taken together, as
+/// [`spec::metrics::from_report`](crate::spec::metrics::from_report) takes them,
+/// it was four sorts and four full copies of the same series. Measured on a
+/// 200 000-bar run that was ~16.8 ms of a 22.8 ms reduction — which `optimize`
+/// pays once per grid row per fold.
+///
+/// So each of the four splits into a public front (sorts, then delegates) and a
+/// `*_of_sorted` back the reducer calls against one copy. The same shape as the
+/// existing public [`probabilistic_sharpe_from_stats`] /
+/// [`deflated_sharpe_from_stats`] pairs, but kept crate-private: these are an
+/// internal reuse mechanism, not new user-facing metrics, and every `pub fn` in
+/// this module must be mirrored on the Python `fugazi.metrics` module (enforced
+/// by `tests/hand_maintained_mirrors.rs`).
+pub(crate) fn sorted_asc(xs: &[Real]) -> Vec<Real> {
     let mut v = xs.to_vec();
     v.sort_by(crate::indicators::stats::cmp_asc);
     v
