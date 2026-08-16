@@ -42,26 +42,54 @@ instrument, at the cost of a ~50× slowdown.
 | `metrics` | `RunReport` → `Metrics`, which `optimize` pays once per grid row per fold. |
 | `footprint` | Allocation count, bytes, and peak RSS. Not criterion — it installs a counting global allocator, which inside a criterion target would also tally criterion's own bookkeeping. |
 
-## ⚠ Measurement conditions for the v0.58.0 → v0.59.0 numbers
+## Measurement conditions
 
-Everything below was measured on a machine that had **other builds and test runs
-executing concurrently** for part of the window. Wall-clock benchmarks are not
-robust to that. Treat the numbers by tier:
+The first pass of these numbers was taken on a machine with other builds
+running, and was wrong in an instructive way — see *A measurement that lied*
+below. Everything in the results table was **re-measured on a quiet machine**,
+with the baseline and the current tree built from **identical codegen settings**
+(`CARGO_PROFILE_BENCH_LTO=false CARGO_PROFILE_BENCH_CODEGEN_UNITS=16`) so the
+comparison isolates the code change rather than the profile.
 
-| Tier | Result | Why it survives (or doesn't) |
-|---|---|---|
-| **Solid** | `tree/is_ready` 2.59 ms → 1.1 µs, flat across depths 1–8 | A 2 000× ratio, and *flatness across depth* is a structural signature no amount of CPU contention produces. |
-| **Solid** | `metrics/from_report/200000` −57.7% | Arithmetically self-checking: baseline 22.85 ms, one sort ≈ 4.2 ms, removing 3 sorts + 2 `drawdown_segments` predicts ≈ 13.3 ms saved; observed 13.2 ms. That check uses only *within-run* ratios. |
-| **Solid** | `tree/drive` −19.7 → −49.6% monotone in depth | Monotone in the parameter the mechanism predicts. Contention adds noise, not monotone structure. |
-| **Probably sound** | F2 ≈ −38%, from `macd_crossover/rust` vs `sma_crossover/rust` | A *differential* between two benchmarks in the same run under the same conditions, so contention largely cancels. |
-| **Not trustworthy** | F7 (`lto` / `codegen-units`) runtime split | The two configs were measured in different windows; the "thin LTO regresses `tree/update` by 14%" reading is not a plausible compiler effect. Re-measure. |
-| **Not trustworthy** | all `multi_asset` numbers | Swung from −1.0% to +86.2% across runs on a benchmark the change cannot affect (`multi_asset/update` never calls `is_ready`). |
+Method, if you need to reproduce it:
 
-**When re-measuring, prefer `scripts/perf-compare.sh icount`.** Callgrind
-instruction counts are deterministic and immune to CPU contention; wall-clock is
-not. Instruction count misses cache and ILP effects, so it is a complement to a
-quiet-machine wall-clock run, not a replacement — but it is the right first
-instrument on a shared box.
+```
+git worktree add ../fugazi-base v0.58.0
+cp -r benches ../fugazi-base/            # add the [[bench]] entries too
+# then, with the same CARGO_PROFILE_BENCH_* on both sides:
+cargo bench --bench tree --bench driver --bench metrics --bench multi_asset
+scripts/perf-compare.sh icount ../fugazi-base
+```
+
+## A measurement that lied
+
+`driver/sma_crossover/rust` clocked **+10.9% to +23.8% slower** after the
+readiness change — on a quiet machine, reproducibly, with codegen equalised. It
+looked like a real regression worth chasing.
+
+It was not. Callgrind says that workload executes **1.61% fewer instructions**
+than before:
+
+| workload | v0.58.0 | now | instructions |
+|---|---:|---:|---:|
+| `sma_rust` | 111 733 102 | 109 935 508 | **−1.61%** |
+| `macd_rust` | 175 407 807 | 107 533 113 | −38.69% |
+| `sma_yaml` | 208 016 784 | 178 760 483 | −14.06% |
+| `macd_yaml` | 274 927 805 | 193 674 165 | −29.55% |
+| `tree8` | 456 018 069 | 305 387 829 | −33.03% |
+
+Less work, more wall-clock: that is **code layout** in a separately-linked
+binary, not a regression. Its signature was visible in the wall-clock data —
+the same two binaries re-run gave +23.8% and then +10.9%, while the other three
+benchmarks in the same runs reproduced to within 0.1pp — but signature is not
+proof, and wall-clock alone cannot supply the proof.
+
+Hence `benches/icount.rs` and `scripts/perf-compare.sh icount`. **Reach for it
+whenever a wall-clock delta is under ~25% or varies between runs**, because at
+that scale layout bias and real work are indistinguishable by timing. It is not
+a replacement for timing — instruction count ignores cache, branch prediction
+and ILP — but it answers "is this change doing more work?" exactly, and that is
+usually the question.
 
 ## Baseline — v0.58.0 (`da252ff`)
 
@@ -170,66 +198,94 @@ The Rust and YAML paths allocate **identically**, which is worth noting: the
 2.3–2.8× driver gap above is not allocation, it is the per-bar work.
 <!-- BASELINE:END -->
 
-## Phase 1 — profile, shared-component locks, metrics dedup
+## Results — v0.58.0 → v0.59.0
 
-Three changes, measured together against `v058`. Attribution below is by which
-benchmarks each could possibly touch.
+Quiet machine, identical codegen on both sides, so **the profile change (F7) is
+excluded from this table**; it is measured separately below.
 
 ### What changed
 
-- **F7 — `[profile.release] lto = "thin"`, `codegen-units = 1`.** See the
-  measured config table in `Cargo.toml`: `codegen-units = 1` is the setting that
-  matters; thin LTO on its own *regressed* `tree/update` at every depth. Cost is
-  +26 s on an incremental rebuild (42 s untuned → 45 s thin → 68 s both).
-- **F2 — `SharedComponent::warm_up_bars` / `unstable_bars` no longer lock.**
-  Both are structural properties of the source, fixed once built; they are now
-  read once in `SharedComponent::new` and stored. `Strategy::is_ready` walks the
-  tree calling exactly these two on every bar, so the lock traffic was
-  proportional to tree size × bars for a pair of constants.
-- **F8 — the metrics reduction sorts once.** `spec::metrics::from_report` now
-  builds one `sorted_asc` copy and calls `*_of_sorted` backs, and passes the
-  `max_drawdown` it already has to `calmar` / `recovery_factor` instead of
-  letting each recompute `drawdown_segments`.
+- **F1 — the readiness threshold is memoised.** `Strategy::is_ready` was
+  `bars_seen >= stable_bars()`, and `stable_bars()` walks the whole indicator
+  tree. `Combine::unstable_bars` asks both children for `stable_bars()` and then
+  asks itself for `warm_up_bars()`, walking them again — so visits grow
+  exponentially with expression depth, and the driver did it once per bar to
+  recompute a value fixed at construction.
+- **F2 — `SharedComponent::{warm_up_bars, unstable_bars}` no longer lock.** Both
+  are structural properties of the source, read once at construction. The
+  readiness walk called exactly these two, every bar, through the whole tree.
+- **F8 — the metrics reduction sorts once**, and reuses the `max_drawdown` it
+  already computed instead of letting `calmar` / `recovery_factor` each rebuild
+  `drawdown_segments`.
 
-### Results
+### Wall-clock
 
-| benchmark | before | after | change |
+| benchmark | v0.58.0 | now | change |
 |---|---:|---:|---:|
-| `metrics/from_report/200000` | 22.85 ms | 9.64 ms | **−57.7%** |
-| `metrics/from_report/100000` | 11.42 ms | 4.68 ms | −55.0% |
-| `driver/macd_crossover/rust` | 36.25 ms | 18.93 ms | **−46.1%** |
-| `wallet/equity/1` | 0.54 ms | 0.26 ms | −46.5% |
-| `wallet/equity/64` | 23.83 ms | 14.66 ms | −34.3% |
-| `driver/sma_crossover/yaml` | 63.94 ms | 50.43 ms | −19.9% |
-| `driver/macd_crossover/yaml` | 82.11 ms | 63.85 ms | −17.1% |
-| `driver/sma_crossover/rust` | 23.05 ms | 18.65 ms | −15.9% |
-| `tree/drive/8` | 6.49 ms | 5.97 ms | −10.5% |
-| `indicators/candle/atr_14` | 1.33 ms | 0.42 ms | −67.7% |
-| `indicators/scalar/stddev_20` | 1.03 ms | 0.80 ms | −15.6% |
-| `tree/is_ready/*` | — | — | **unchanged** |
+| `tree/is_ready/8` | 2.344 ms | 3.16 µs | **−99.9%** |
+| `tree/is_ready/1` | 76.60 µs | 3.25 µs | −95.8% |
+| `metrics/from_report/200000` | 22.566 ms | 9.416 ms | **−58.3%** |
+| `metrics/from_report/100000` | 10.977 ms | 4.768 ms | −56.6% |
+| `driver/macd_crossover/rust` | 33.377 ms | 18.888 ms | **−43.4%** |
+| `tree/drive/8` | 6.133 ms | 3.635 ms | −40.7% |
+| `tree/drive/6` | 4.163 ms | 2.918 ms | −29.9% |
+| `driver/macd_crossover/yaml` | 77.003 ms | 54.599 ms | −29.1% |
+| `tree/drive/4` | 2.792 ms | 2.034 ms | −27.2% |
+| `driver/sma_crossover/yaml` | 58.856 ms | 52.025 ms | −11.6% |
+| `tree/drive/1` | 926.06 µs | 875.74 µs | −5.4% |
+| `multi_asset/drive/*` | — | — | −7.0% … +0.1% |
+| `driver/sma_crossover/rust` | 20.282 ms | 25.119 ms | *(+23.8% — layout, see above)* |
 
-**Attribution.** `driver/sma_crossover/rust` (−15.9%) has no `.shared()` and no
-metrics, so it is F7 alone. `driver/macd_crossover/rust` (−46.1%) is the same
-strategy shape with four `SharedComponent`s, so **F2 is worth ≈ −38% on top of
-F7** for a `.shared()`-composed strategy. The YAML MACD side builds two
-independent `Macd`s and holds no `Shared`; it moved only by the F7 amount, which
-confirms the split. `metrics/parts/*` moved only by the F7 amount too, so the
-−57.7% on `from_report` is the deduplication, not the compiler.
+**`tree/is_ready` is now flat across depth** — 3.25 / 3.05 / 3.18 / 3.18 / 3.16 µs
+at depths 1/2/4/6/8, against 76.6 µs → 2.34 ms before. The flatness is the point:
+the tree walk is gone, not merely faster.
 
-**`tree/is_ready` did not move**, at any depth. The compiler cannot devirtualize
-that recursion, which is why F1 needs a code fix rather than a flag.
+`tree/drive` improves monotonically with depth (−5.4 / −9.7 / −27.2 / −29.9 /
+−40.7%), which is what the mechanism predicts, since a deeper tree spent a larger
+share of each bar in `is_ready`.
 
-**Footprint unchanged** — Phase 1 touched compute only (still 3.00 allocs/bar to
-build snapshots, 5.00 allocs/bar to drive, 98.0 MiB peak RSS).
+**`multi_asset` barely moves.** Its legs are shallow SMA crossovers, so the walk
+being removed was cheap; the per-symbol `is_ready` in `trade` was never the
+bottleneck there. The earlier contended runs showed this group swinging −1.0% to
++86.2% and I briefly chased it as a regression — it is neither a regression nor a
+win, just noise around zero.
+
+### Instruction counts
+
+See the table under *A measurement that lied*. `macd_rust` −38.7% and `tree8`
+−33.0% corroborate the wall-clock for F2 and F1 respectively.
+
+### Attribution
+
+`sma_crossover/rust` uses no `.shared()`; `macd_crossover/rust` is the same
+strategy shape with four `SharedComponent`s. The instruction-count gap between
+them (−1.6% vs −38.7%) is F2, cleanly isolated.
+
+`metrics/from_report` −58.3% is arithmetically self-checking: baseline 22.57 ms,
+one sort of the return series ≈ 4.0 ms (`metrics/parts/median_return`), and
+removing three sorts plus two `drawdown_segments` predicts ≈ 12.6 ms saved
+against 13.2 ms observed. The `metrics/parts/*` benchmarks each moved < 6%,
+confirming the gain is deduplication rather than anything compiler-side.
+
+### The profile change (F7), separately
+
+Still **not established**. Compile cost is solid — incremental rebuild after
+touching `src/lib.rs`: 42 s untuned, 45 s with `lto = "thin"`, 68 s with both.
+The runtime half was measured across different contention windows and its
+headline reading ("thin LTO alone regresses `tree/update` by up to 14%") is not
+a plausible compiler effect. The settings are kept on the general argument that
+the hot path is generic code crossing module boundaries plus trait objects.
+**To settle it: use `scripts/perf-compare.sh icount` across profile variants of
+the same source** — that removes both contention and layout from the comparison.
 
 ### Correction to a previously-recorded conclusion
 
 `tests/perf_bench.rs` recorded that the shared-handle memo "moves ~3%" because
 "four `SharedComponent`s taking a mutex per bar costs about what the duplicated
-arithmetic did", and concluded the gap was the type-erasure layer. The mutex
-cost was real but it was **not in `update`** — it was in the readiness walk. That
-note has been amended in place rather than deleted, since the memo experiment
-itself still stands.
+arithmetic did", and concluded the residual gap was the type-erasure layer. The
+mutex cost was real but **not in `update`** — it was in the readiness walk. That
+note is amended in place rather than deleted; the memo experiment it describes
+still stands.
 
 ## Known costs, and why they are there
 

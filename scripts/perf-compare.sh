@@ -68,20 +68,45 @@ footprint)
     ;;
 
 icount)
-    bars="${1:-2000}"
+    # Deterministic instruction counts via callgrind — immune to CPU contention
+    # *and* to code layout, so this is what separates "this change does more
+    # work" from "this binary got an unluckier layout". A ~10% wall-clock swing
+    # on a benchmark whose instruction count went *down* is the latter, and no
+    # amount of re-running wall-clock will tell you that.
+    #
+    # Not a replacement for a quiet-machine criterion run: instruction count
+    # ignores cache misses, branch prediction and ILP, so a real win can raise
+    # it. Read the two together.
+    #
+    #   scripts/perf-compare.sh icount <other-worktree> [workload ...]
+    #
+    # <other-worktree> is a second checkout to compare against, e.g.
+    #   git worktree add ../fugazi-base v0.58.0
+    # (copy `benches/` in and add the `[[bench]]` entries; the probe only uses
+    # public API). Build both with identical codegen settings or you are
+    # measuring the profile, not the change:
+    #   CARGO_PROFILE_BENCH_LTO=false CARGO_PROFILE_BENCH_CODEGEN_UNITS=16
+    other="${1:?usage: perf-compare.sh icount <other-worktree> [workload ...]}"
+    shift || true
+    set -- "${@:-sma_rust macd_rust sma_yaml macd_yaml tree8}"
     if ! command -v valgrind >/dev/null 2>&1; then
-        echo "valgrind not found — install it, or use 'diff' for wall-clock only" >&2
-        exit 127
+        echo "valgrind not found" >&2; exit 127
     fi
-    # Build first so the compile does not land inside the callgrind run.
-    cargo bench --bench tree --no-run 2>/dev/null
-    bin=$(ls -t target/release/deps/tree-* | grep -v '\.d$' | head -1)
-    out=$(mktemp -d)/callgrind.out
-    echo "callgrind: $bin (bars≈$bars, this takes a few minutes)"
-    valgrind --tool=callgrind --callgrind-out-file="$out" \
-        "$bin" --profile-time 1 tree/drive >/dev/null 2>&1
-    echo "total instructions: $(grep -m1 '^summary:' "$out" | awk '{print $2}')"
-    echo "full profile: $out  (open with callgrind_annotate)"
+    cargo bench --bench icount --no-run 2>/dev/null
+    here=$(ls target/release/deps/icount-* | grep -v '\.d$' | head -1)
+    there=$(ls "$other"/target/release/deps/icount-* | grep -v '\.d$' | head -1)
+    export LC_ALL=C
+    printf "%-12s %15s %15s %9s\n" workload base now change
+    for w in $*; do
+        o1=$(mktemp); o2=$(mktemp)
+        valgrind --tool=callgrind --callgrind-out-file="$o1" "$there" "$w" >/dev/null 2>&1
+        valgrind --tool=callgrind --callgrind-out-file="$o2" "$here"  "$w" >/dev/null 2>&1
+        a=$(grep -m1 '^summary:' "$o1" | awk '{print $2}')
+        b=$(grep -m1 '^summary:' "$o2" | awk '{print $2}')
+        printf "%-12s %15s %15s %8.2f%%\n" "$w" "$a" "$b" \
+            "$(python3 -c "print(($b-$a)/$a*100)")"
+        rm -f "$o1" "$o2"
+    done
     ;;
 
 *)
