@@ -73,16 +73,22 @@ pub(super) fn decimals_of(s: &str) -> usize {
 mod tests {
     use super::*;
 
-    /// This case previously existed twice, byte-identical, once in each
-    /// backend's test module.
+    /// Both rounding helpers divide by the increment and multiply back, so the
+    /// result carries representation error — `round_to_tick(100.567, 0.01)` is
+    /// `100.57000000000001`, not `100.57`. That is fine, because the value is
+    /// only ever handed to `format_decimals` before it reaches a venue; but it
+    /// means these must be compared with a tolerance, which is what both
+    /// backends' copies of this case did.
     #[test]
     fn decimals_and_step_rounding() {
         assert_eq!(decimals_of("0.001"), 3);
         assert_eq!(decimals_of("1"), 0);
         assert_eq!(decimals_of("0.100"), 1);
-        assert_eq!(floor_to_step(1.2345, 0.001), 1.234);
-        assert_eq!(round_to_tick(100.567, 0.01), 100.57);
+        assert!((floor_to_step(1.2345, 0.001) - 1.234).abs() < 1e-9);
+        assert!((round_to_tick(100.567, 0.01) - 100.57).abs() < 1e-9);
         assert_eq!(format_decimals(1.5, 3), "1.500");
+        // The formatted form is what actually goes on the wire.
+        assert_eq!(format_decimals(round_to_tick(100.567, 0.01), 2), "100.57");
     }
 
     #[test]
