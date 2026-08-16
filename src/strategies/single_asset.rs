@@ -540,57 +540,24 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Si
         let Some(size) = self.sizing.value() else {
             return;
         };
-        let long = self.position.is_long();
-        let short = self.position.is_short();
-        // Entries first (magnitude = sizing, reversal-capable). The fill lands next
-        // bar at the open; cancel any resting bracket now (a reversal voids the old
-        // one).
-        if self.long.is_true() && !long {
-            let _ = wallet.set(self.symbol.clone(), Side::Buy, Size::value_frac(size));
-            let _ = wallet.cancel_protective(&self.symbol);
-            return;
-        }
-        if self.short.is_true() && !short {
-            let _ = wallet.set(self.symbol.clone(), Side::Sell, Size::value_frac(size));
-            let _ = wallet.cancel_protective(&self.symbol);
-            return;
-        }
-        // Signal-driven flatten-to-flat exits (also fill next bar at the open).
-        if (self.close_long.is_true() && long) || (self.close_short.is_true() && short) {
-            let _ = wallet.close(self.symbol.clone());
-            let _ = wallet.cancel_protective(&self.symbol);
-            return;
-        }
-        // Rebalance gate: on `true`, resize the held position to the
-        // current sizing target. `wallet.set` at the current side is
-        // idempotent when the target already matches, so no spurious
-        // fills. Protective levels stay in place across the resize.
-        if self.rebalance.value().unwrap_or(false) {
-            if long {
-                let _ = wallet.set(self.symbol.clone(), Side::Buy, Size::value_frac(size));
-            } else if short {
-                let _ = wallet.set(self.symbol.clone(), Side::Sell, Size::value_frac(size));
-            }
-        }
-        // Rest the protective levels on the active side. Re-submitted every bar so
-        // a moving (trailing) level cancel/replaces; the wallet triggers and prices
-        // them. The wallet reads the side from the position, so a stop is always the
-        // adverse level and a take-profit the favourable one.
-        if long {
-            if let Some(level) = level_value(&self.long_stop) {
-                let _ = wallet.set_stop(self.symbol.clone(), Reference(level), Size::position_frac(1.0));
-            }
-            if let Some(level) = level_value(&self.long_target) {
-                let _ = wallet.set_take_profit(self.symbol.clone(), Reference(level), Size::position_frac(1.0));
-            }
-        } else if short {
-            if let Some(level) = level_value(&self.short_stop) {
-                let _ = wallet.set_stop(self.symbol.clone(), Reference(level), Size::position_frac(1.0));
-            }
-            if let Some(level) = level_value(&self.short_target) {
-                let _ = wallet.set_take_profit(self.symbol.clone(), Reference(level), Size::position_frac(1.0));
-            }
-        }
+        super::trade_leg(
+            &super::Leg {
+                symbol: &self.symbol,
+                size,
+                is_long: self.position.is_long(),
+                is_short: self.position.is_short(),
+                enter_long: self.long.is_true(),
+                enter_short: self.short.is_true(),
+                close_long: self.close_long.is_true(),
+                close_short: self.close_short.is_true(),
+                rebalancing: self.rebalance.value().unwrap_or(false),
+                long_stop: level_value(&self.long_stop),
+                long_target: level_value(&self.long_target),
+                short_stop: level_value(&self.short_stop),
+                short_target: level_value(&self.short_target),
+            },
+            wallet,
+        );
     }
 
     fn reset(&mut self) {

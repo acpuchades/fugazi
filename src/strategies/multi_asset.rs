@@ -848,8 +848,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Mu
     }
 
     fn trade(&self, wallet: &mut dyn Wallet<Sym>) {
-        // The rebalance gate is read once per bar and applied per symbol
-        // below. Default is `false` (matches pre-refactor behavior).
+        // The rebalance gate is read once per bar and applied per symbol below.
         let rebalancing = self.rebalance.value().unwrap_or(false);
         for (sym, state) in self.states.iter() {
             // Per-symbol readiness gate — a leg whose own chains haven't
@@ -857,66 +856,28 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Mu
             if !state.is_ready() {
                 continue;
             }
-            // Sizing is read once per bar per symbol; a None reading
-            // skips this symbol's trade this bar (safe default).
+            // A `None` sizing skips this symbol for this bar (safe default).
             let Some(size) = state.sizing.value() else {
                 continue;
             };
-            let long = state.position.is_long();
-            let short = state.position.is_short();
-
-            // Entries first (magnitude = sizing, reversal-capable). Cancel
-            // any resting bracket on entry / reversal.
-            if state.long.value().unwrap_or(false) && !long {
-                let _ = wallet.set(sym.clone(), Side::Buy, Size::value_frac(size));
-                let _ = wallet.cancel_protective(sym);
-                continue;
-            }
-            if state.short.value().unwrap_or(false) && !short {
-                let _ = wallet.set(sym.clone(), Side::Sell, Size::value_frac(size));
-                let _ = wallet.cancel_protective(sym);
-                continue;
-            }
-            // Signal-driven flatten-to-flat exits.
-            let close_long = state.close_long.value().unwrap_or(false) && long;
-            let close_short = state.close_short.value().unwrap_or(false) && short;
-            if close_long || close_short {
-                let _ = wallet.close(sym.clone());
-                let _ = wallet.cancel_protective(sym);
-                continue;
-            }
-            // Rebalance gate: on bars where the gate fires, resize the
-            // held position (if any) to the current sizing target. A
-            // `wallet.set(sym, held_side, value_frac(size))` at the
-            // current side is idempotent when the target already
-            // matches, and queues a market resize otherwise. Protective
-            // levels stay in place across the resize (position stays on
-            // the same side so the anchor point / peak / trough carry
-            // through — see the `Position::apply` merge convention).
-            if rebalancing {
-                if long {
-                    let _ = wallet.set(sym.clone(), Side::Buy, Size::value_frac(size));
-                } else if short {
-                    let _ = wallet.set(sym.clone(), Side::Sell, Size::value_frac(size));
-                }
-            }
-            // Rest the active side's protective levels — re-submitted
-            // every bar so a trailing level cancel/replaces.
-            if long {
-                if let Some(level) = state.long_stop.as_ref().and_then(|l| l.value()) {
-                    let _ = wallet.set_stop(sym.clone(), Reference(level), Size::position_frac(1.0));
-                }
-                if let Some(level) = state.long_target.as_ref().and_then(|l| l.value()) {
-                    let _ = wallet.set_take_profit(sym.clone(), Reference(level), Size::position_frac(1.0));
-                }
-            } else if short {
-                if let Some(level) = state.short_stop.as_ref().and_then(|l| l.value()) {
-                    let _ = wallet.set_stop(sym.clone(), Reference(level), Size::position_frac(1.0));
-                }
-                if let Some(level) = state.short_target.as_ref().and_then(|l| l.value()) {
-                    let _ = wallet.set_take_profit(sym.clone(), Reference(level), Size::position_frac(1.0));
-                }
-            }
+            super::trade_leg(
+                &super::Leg {
+                    symbol: sym,
+                    size,
+                    is_long: state.position.is_long(),
+                    is_short: state.position.is_short(),
+                    enter_long: state.long.value().unwrap_or(false),
+                    enter_short: state.short.value().unwrap_or(false),
+                    close_long: state.close_long.value().unwrap_or(false),
+                    close_short: state.close_short.value().unwrap_or(false),
+                    rebalancing,
+                    long_stop: state.long_stop.as_ref().and_then(|l| l.value()),
+                    long_target: state.long_target.as_ref().and_then(|l| l.value()),
+                    short_stop: state.short_stop.as_ref().and_then(|l| l.value()),
+                    short_target: state.short_target.as_ref().and_then(|l| l.value()),
+                },
+                wallet,
+            );
         }
     }
 
