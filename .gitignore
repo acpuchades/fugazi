@@ -3,9 +3,14 @@
 /.python-version
 
 /target
-/tests/data/talib_expected.csv
 
-# TA-Lib fixture generator (Python) internals
+# NB: tests/data/talib_expected.csv is deliberately NOT ignored. It used to be,
+# which is why the TA-Lib cross-check silently skipped on every clean checkout
+# while being listed as a drift guard. It is generated but committed, exactly
+# like metrics_expected.csv beside it — regenerate with
+# `tools/gen_talib_fixtures.py` and commit the result.
+
+# Fixture generator (Python) internals
 __pycache__/
 *.py[cod]
 .mypy_cache/

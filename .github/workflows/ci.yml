@@ -26,8 +26,17 @@ jobs:
       # Scope to the core crate: the `fugazi-python` member links libpython via
       # pyo3's extension-module feature and can't be `cargo test`ed standalone.
       # Its Rust + Python surface is exercised by the `python` job below.
+      # FUGAZI_REQUIRE_FIXTURES turns a missing-or-stale cross-validation
+      # fixture into a failure instead of a skip. Both fixtures
+      # (tests/data/{talib,metrics}_expected.csv) are committed, so this should
+      # always hold — and if someone adds an indicator to the generator without
+      # regenerating, or re-ignores a fixture, CI says so instead of quietly
+      # comparing nothing. A skip is indistinguishable from a pass, which is how
+      # the TA-Lib check sat inert for months.
       - name: Test
         run: cargo test -p fugazi
+        env:
+          FUGAZI_REQUIRE_FIXTURES: "1"
       - name: Clippy
         run: cargo clippy -p fugazi --all-targets -- -D warnings
 

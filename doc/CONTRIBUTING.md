@@ -489,20 +489,20 @@ When one of these fails, it is telling you something specific:
 | `test_parity.py::test_the_declared_tables_do_not_go_stale` | A tag left the spec layer but its parity entry didn't. |
 | `warm_up_is_exact_for_*` | `warm_up_period()` disagrees with when the first `Some` actually lands. |
 | `tests/indicator_reference.rs` | An indicator's numbers drifted from its own definition. Always runs. |
-| `tests/talib_validation.rs` | An indicator's numbers drifted from the TA-Lib reference. **Skips** without the generated fixture — see below. |
+| `tests/talib_validation.rs` | An indicator's numbers drifted from the TA-Lib reference. |
 | `tests/driver_contract.rs` | `backtest::run`'s per-bar order or readiness gating changed. |
 
-**Two of these can disable themselves.** `talib_validation` and
-`metrics_validation` compare against an external library and skip when their
-generated fixture is absent, so `cargo test` stays green for a contributor who
-has neither installed — but a skip is indistinguishable from a pass, and
-`talib_expected.csv` is not committed, so on a clean checkout the TA-Lib
-cross-check compares **nothing**. Run them with `FUGAZI_REQUIRE_FIXTURES=1` to
-turn every missing-or-stale fixture into a failure; that is the mode a CI job
-that provisions the reference libraries should use.
-`tests/indicator_reference.rs` is the unconditional battery that holds the
-numeric line meanwhile — its expected values are hand-derived from each
-indicator's definition, so it needs no fixture.
+**Two of these could disable themselves.** `talib_validation` and
+`metrics_validation` compare against an external library and *skip* when their
+generated fixture is absent — and a skip is indistinguishable from a pass.
+`talib_expected.csv` was in `.gitignore`, so for months the TA-Lib drift guard
+compared nothing on every clean checkout.
+
+Both fixtures are now committed, and **CI runs the test job with
+`FUGAZI_REQUIRE_FIXTURES=1`**, which turns a missing-or-stale fixture into a
+failure. If you add an indicator to `tools/gen_talib_fixtures.py`, regenerate and
+commit the fixture or CI will tell you. `tests/indicator_reference.rs` is the
+unconditional battery underneath — hand-derived values, no fixture needed.
 
 The expected side of the catalogue and parity tests is read off **serde's own
 variant list** (`spec::typecheck::known_expr_tags` and friends), so it stays

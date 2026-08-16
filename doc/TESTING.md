@@ -24,7 +24,7 @@ places belongs in the narrower one.
 | **Unit** | `#[cfg(test)] mod tests` beside the code | `pub(crate)` internals | `cargo test --lib` |
 | **Integration** | `tests/*.rs`, one crate per file | the public API only | `cargo test` |
 | **End-to-end** | `tests/{run,costs}.rs` | the `fugazi` binary via `Command` | `cargo test` (needs the `cli` feature) |
-| **Cross-validation** | `tests/{talib,metrics}_validation.rs` | an external reference library's numbers | `cargo test`, **skips** without its fixture |
+| **Cross-validation** | `tests/{talib,metrics}_validation.rs` | an external reference library's numbers | `cargo test` (both fixtures committed; skips only if one is removed) |
 
 Plus **doctests** (37 of them, mostly in `README.md` and the strategy-shape
 docs), which are the executable half of the user-facing prose. A `no_run` /
@@ -161,13 +161,16 @@ The rule that matters:
 > **A skip is indistinguishable from a pass.** Any suite that can decline to run
 > must be able to be made to fail instead.
 
-`talib_expected.csv` is not committed, so on a clean checkout the TA-Lib
-cross-check compares **nothing** — while being listed as a drift guard. The
-policy that resolves it:
+This bit here: `talib_expected.csv` was in `.gitignore`, so on every clean
+checkout the TA-Lib cross-check compared **nothing** while being listed as a
+drift guard. The policy that resolves it:
 
+0. **Commit the generated fixture.** Both are now committed, so both suites run
+   everywhere by default. This is the part that actually fixed it; the rest is
+   defence in depth.
 1. `FUGAZI_REQUIRE_FIXTURES=1` turns every missing-or-stale fixture from a skip
-   into a failure. That is the mode for a CI job that provisions the reference
-   libraries, and the way to prove locally that a suite really compared.
+   into a failure. **CI's Rust job sets it**, so a re-ignored or stale fixture
+   fails the build rather than quietly narrowing what is checked.
 2. A skip prints a **banner**, not a one-line `eprintln!` lost in the noise.
 3. Each suite asserts it compared a **non-zero** number of cells, so a
    present-but-empty fixture fails rather than passing vacuously.
