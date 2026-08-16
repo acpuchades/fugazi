@@ -23,6 +23,7 @@ use crate::imports;
 use crate::input::StrategyKind;
 use crate::input;
 use crate::metrics;
+use crate::overlap;
 use crate::run::join_universe_by_time;
 use crate::style;
 
@@ -465,6 +466,12 @@ fn run_multi_symbol(
             universe.len()
         );
     }
+    // Warned here rather than alongside the summary blocks below, which print
+    // only once the sweep is done: a fragmented universe means every row of
+    // that sweep measures something other than the universe it names, and that
+    // is worth knowing before the grid runs, not after. See `crate::overlap`.
+    let overlap = overlap::measure_universe(&per_symbol);
+    overlap::warn_if_fragmented(&overlap, overlap.at, overlap::RUN_CONSEQUENCE);
 
     // Cadence: try the representative (first) symbol's --frequency scope, then
     // fall back to detection from that symbol's timestamps. Matches

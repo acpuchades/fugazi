@@ -48,6 +48,7 @@ use crate::calendar::{self, AssetClass, BarsPerYearSpec, ScopedFrequency, Window
 use crate::costs::CostConfig;
 use crate::data::DataFrame;
 use crate::metrics;
+use crate::overlap::{self, Overlap};
 use crate::spec::{
     BasketStrategySpec, MultiAssetStrategySpec, PairsStrategySpec, PortfolioSpec, StrategyRef,
 };
@@ -388,6 +389,11 @@ fn run_universe(
             universe.len()
         );
     }
+    // How much of the discovered universe ever lands on one bar. A `--series`
+    // CSV assembled from differently-timed sessions joins into snapshots that
+    // never hold it all, and every other surface here — the symbol list, the
+    // bar count, the period — still reads correct. See `crate::overlap`.
+    let overlap = overlap::measure_universe(&per_symbol);
 
     std::fs::create_dir_all(opts.out_dir)
         .with_context(|| format!("creating output dir `{}`", opts.out_dir.display()))?;
@@ -408,8 +414,14 @@ fn run_universe(
         let costs_active = costs_active(opts.cost_config, probes, effective_freq);
         style::print_header("run", headline);
         style::print_warns(&style::collect_warnings(&[], no_cost_warning, "results"));
-        print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active);
+        print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active, &overlap);
     }
+    // Deliberately outside the `--quiet` guard, and on stderr rather than in
+    // the block above: the other warnings here are advisory (no cost model, a
+    // dropped column), while this one says the run is about to measure
+    // something other than the universe it names. `--quiet` suppresses the
+    // summary, not a finding about the data.
+    overlap::warn_if_fragmented(&overlap, overlap.at, overlap::RUN_CONSEQUENCE);
 
     let iter = iterate(&any, bars.clone(), &snapshots, &inputs, opts)?;
     emit_montecarlo(&iter, opts)?;
@@ -650,6 +662,16 @@ fn costs_active<'a>(
 }
 
 /// suffices.
+///
+/// **Grouping is on the exact time label**, so series stamped at different
+/// session opens never share a snapshot — deliberately, since folding them by
+/// trading date would manufacture lookahead across time zones. Every caller
+/// should therefore also run [`crate::overlap::measure_universe`] over the same
+/// `per_symbol` and hand the result to
+/// [`warn_if_fragmented`](crate::overlap::warn_if_fragmented): a universe no
+/// snapshot ever holds in full is silent in every other output. Kept as a
+/// convention at the call sites rather than folded in here, so this stays a
+/// pure join.
 pub(crate) fn join_universe_by_time(
     per_symbol: &[(String, Vec<(String, Atom)>)],
 ) -> (Vec<String>, Vec<fugazi::types::Snapshot<String>>) {
@@ -683,6 +705,7 @@ pub(crate) fn join_universe_by_time(
     (times, snaps)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn print_basket_inputs_block(
     opts: &RunOptions,
     universe: &[String],
@@ -690,6 +713,7 @@ fn print_basket_inputs_block(
     end: &str,
     bars: usize,
     costs_active: bool,
+    overlap: &Overlap<&str>,
 ) {
     style::print_section("inputs");
     style::field("strategy", opts.strategy_label);
@@ -697,6 +721,21 @@ fn print_basket_inputs_block(
         "universe",
         &format!("{} symbols ({})", universe.len(), universe.join(", ")),
     );
+    // Printed whether or not it is a problem: `9 of 9` is the positive
+    // confirmation that the universe actually meets, which is what a
+    // cross-sectional run lives or dies on. The loud version of the bad case
+    // is `overlap::warn_if_fragmented`, on stderr.
+    if overlap.total > 1 {
+        let value = overlap.summary();
+        style::field(
+            "overlap",
+            &if overlap.is_fragmented() {
+                style::yellow(&value)
+            } else {
+                value
+            },
+        );
+    }
     style::field("params", opts.params);
     style::field("period", &format!("{start} → {end} ({bars} bars)"));
     style::field("capital", &format!("{:.2}", opts.cash));

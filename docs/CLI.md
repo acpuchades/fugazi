@@ -170,6 +170,21 @@ The strategy positional accepts an optional shape prefix:
 Any other prefix is rejected as an unknown shape. All five shapes work with
 `run` and with `optimize` (sweeps and walk-forward alike).
 
+The three N-symbol shapes (`basket:`, `multi:`, `portfolio:`) time-align their
+`--series` inputs by **exact timestamp**, so the inputs block reports how much
+of the discovered universe ever lands on one bar, and stderr carries a warning
+when no bar holds it all:
+
+```
+inputs
+  universe 4 symbols (AAA, BBB, CCC, DDD)
+  overlap  widest snapshot: 2 of 4 symbols
+```
+
+`optimize` warns the same way, before the sweep starts rather than after. See
+[Snapshot overlap](#snapshot-overlap) under `get` for what the figure means and
+why the alignment is exact.
+
 **Console output** (unless `-q`): a two-line banner, then blocks for
 **inputs** (strategy, params, period, capital, output), **fills**
 (each fill listed after the run completes), **result** (bars, fills, capital
@@ -628,6 +643,61 @@ fugazi get <SPEC> [<SPEC> …] -o <FILE>
 
 Every series across all specs downloads in parallel — one series is a
 `(provider, symbol, interval)` triple with its own progress bar.
+
+#### Snapshot overlap
+
+Bars are grouped into snapshots by **exact timestamp** — here as a dataset is
+assembled, and in `run` / `optimize` as one is read back through `--series`.
+That exactness is deliberate: Tokyo closes before New York opens, so treating a
+`^N225` bar and an `SPY` bar from the same *date* as contemporaneous would hand
+a strategy trading `^N225` an S&P close from thirteen hours in its future. No
+option anywhere joins on the trading date.
+
+The cost is that a universe assembled from differently-timed sessions can
+fragment, and the CSV gives no sign of it: every symbol has its full history and
+the row count is right — only the *joint* occupancy is wrong. Nine index symbols
+stamped at five session opens produce snapshots holding at most four of them, so
+a cross-sectional strategy silently ranks a universe of four, and a `!pick`
+across the boundary resolves to nothing and yields an all-empty column
+(indistinguishable, in the CSV, from an indicator still warming up).
+
+So a multi-symbol fetch reports the widest snapshot it actually observed, next
+to the rows/series summary:
+
+```
+result
+  rows    8514
+  series  9 symbols · 9 interval series
+  overlap widest snapshot: 4 of 9 symbols
+```
+
+and, when that is short of the full universe, says so on stderr (regardless of
+`--quiet`, which governs the success summary rather than correctness warnings):
+
+```
+  warn at most 4 of 9 symbols ever share a bar — no snapshot in this dataset holds
+       them all. […]
+       widest snapshot: EEM, SPY, ^GSPC, ^NDX (2024-01-02 13:30Z)
+       never sharing a bar with any other symbol: ^BVSP, ^HSI, ^N225
+       161 snapshot(s), 96 holding a single symbol
+```
+
+The figure is **observed co-occurrence**, not a per-symbol session signature:
+daylight saving alone gives `^FTSE` `{07:00, 08:00}` against `^GDAXI`
+`{06:00, 07:00, 08:00}` — different signatures for series that share plenty of
+bars, and no warning. Nor does a universe that meets on *some* bars warn:
+listing gaps, holidays and half-days all produce partial snapshots and are
+ordinary. Only `widest < total` — no bar anywhere holds them all — fires.
+
+The same measurement runs in `run` (in the inputs block, for the three N-symbol
+shapes) and in `optimize` (before the sweep starts) — a `--series` CSV that
+never went through `get` fragments exactly the same way. In all three the
+warning ignores `--quiet`, which governs the success summary rather than a
+finding about the data.
+
+The fix is a dataset choice, not a flag: restrict the universe to one session
+(an all-13:30Z ETF set in place of a cross-market index list), or run the
+mismatched series as separate fetches and separate strategies.
 
 #### Fetch specs
 

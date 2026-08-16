@@ -57,6 +57,7 @@ use serde_json::Value as Json;
 use crate::dyn_indicator::{DynIndicator, DynValue};
 use crate::csv_source::{CsvBar, CsvSource};
 use crate::input::Source as InputSource;
+use crate::overlap::{self, Overlap};
 use crate::overlay::{self, Overlay};
 use crate::params;
 use crate::style;
@@ -741,12 +742,16 @@ fn run_candles(
         &overlay_columns,
     )?;
     warn_empty_overlay_columns(&rows, &overlay_columns, args.quiet);
+    // Joint occupancy of the assembled dataset — measured on the rows actually
+    // written, so it reflects the trim as well as the fetch.
+    let overlap = measure_overlap(&rows);
+    warn_fragmented_dataset(&overlap);
 
     write_candles_csv(output, &rows, &overlay_columns)
         .with_context(|| format!("writing {}", output.display()))?;
 
     if !args.quiet {
-        print_result_block(rows.len(), n_symbols, series.len());
+        print_result_block(rows.len(), n_symbols, series.len(), &overlap);
     }
     Ok(())
 }
@@ -1225,6 +1230,44 @@ fn warn_empty_overlay_columns(rows: &[Row], columns: &[String], _quiet: bool) {
     }
 }
 
+/// Measure snapshot co-occurrence over the rows about to be written — how much
+/// of the fetched universe ever lands on one timestamp.
+///
+/// Keyed on UTC millis, the same identity [`snapshots_by_time`] assembles on,
+/// and measured after the overlay pass so the figure reflects the warm-up trim
+/// as well as the fetch. Untimed rows are left out: they can't be aligned with
+/// anything (each gets its own size-1 snapshot above), so counting them would
+/// report a fragmentation that is really a missing-`time` problem. See
+/// [`crate::overlap`] for why this is worth measuring at all.
+fn measure_overlap(rows: &[Row]) -> Overlap<i64> {
+    overlap::measure(
+        rows.iter()
+            .filter_map(|r| r.atom.time.map(|t| (t.0, r.symbol.as_str()))),
+    )
+}
+
+/// Warn when no snapshot in the fetched dataset holds every symbol it carries.
+///
+/// The consequence spelled out here is the one a *dataset* has: it is handed to
+/// consumers, and each of them hits this once, expensively. `run` phrases the
+/// same finding in terms of the run in front of it.
+fn warn_fragmented_dataset(o: &Overlap<i64>) {
+    overlap::warn_if_fragmented(
+        o,
+        o.at.map(|ms| format_stamp(Timestamp(ms))).as_deref(),
+        "a cross-sectional strategy over this dataset ranks only the symbols present on the \
+         bar, and a `!pick` across the boundary yields an all-empty column.",
+    );
+}
+
+/// Format a stamp as `YYYY-MM-DD HH:MMZ` — unlike [`format_date`], the
+/// time-of-day is the whole point here: it is the session boundary the symbols
+/// split along.
+fn format_stamp(t: Timestamp) -> String {
+    let dt = t.to_datetime();
+    format!("{} {:02}:{:02}Z", dt.date(), dt.hour(), dt.minute())
+}
+
 /// Build one **global** fetch-progress bar, denominated in series completed —
 /// each of the `n_series` series is a single `atoms()` call whose internal
 /// pagination the CLI doesn't see, so per-series sub-progress isn't available,
@@ -1358,8 +1401,14 @@ fn print_inputs_block(
     style::print_field("output", &output.display().to_string(), 8);
 }
 
-/// The `get` result block — rows written, symbol/interval-series count.
-fn print_result_block(rows: usize, n_symbols: usize, n_series: usize) {
+/// The `get` result block — rows written, symbol/interval-series count, and
+/// (for a multi-symbol fetch) the widest snapshot observed.
+///
+/// The overlap line is printed whether or not it is a problem: `9 of 9` is the
+/// positive confirmation that the universe actually meets, which is the fact a
+/// cross-sectional dataset lives or dies on. The loud version of the bad case
+/// is [`warn_fragmented_dataset`], on stderr.
+fn print_result_block(rows: usize, n_symbols: usize, n_series: usize, overlap: &Overlap<i64>) {
     println!();
     style::print_section("result");
     style::print_field("rows", &rows.to_string(), 8);
@@ -1371,6 +1420,18 @@ fn print_result_block(rows: usize, n_symbols: usize, n_series: usize) {
         ),
         8,
     );
+    if overlap.total > 1 {
+        let value = overlap.summary();
+        style::print_field(
+            "overlap",
+            &if overlap.is_fragmented() {
+                style::yellow(&value)
+            } else {
+                value
+            },
+            8,
+        );
+    }
 }
 
 /// Format a fetch `Timestamp` as `YYYY-MM-DD` for the console — dates only,
@@ -1795,6 +1856,67 @@ mod tests {
         assert_eq!(symbols.len(), 2);
         assert_eq!(symbols[0].freqs, vec![Interval::Day(1), Interval::Hour(1)]);
         assert_eq!(symbols[1].freqs, vec![Interval::Day(1)]);
+    }
+
+    /// A row at `hour:minute` on 2024-01-02, for the co-occurrence tests. Only
+    /// `symbol` and `atom.time` are read by [`measure_overlap`]; the candle is
+    /// filler.
+    fn row_at(symbol: &str, hour: u8, minute: u8) -> Row {
+        let dt = datetime!(2024-01-02 00:00:00 UTC)
+            + Duration::hours(i64::from(hour))
+            + Duration::minutes(i64::from(minute));
+        Row {
+            symbol: symbol.into(),
+            freq: "1d".into(),
+            atom: Atom::with_time(
+                Candle::new(1.0, 1.0, 1.0, 1.0, 1.0),
+                Timestamp::from_datetime(dt),
+            ),
+            overlays: Vec::new(),
+        }
+    }
+
+    /// The row → `(stamp, symbol)` projection, on the macro-index case that
+    /// motivated it. The measurement itself is tested in `crate::overlap`;
+    /// what is pinned here is that a `Row`'s own time and symbol are what
+    /// reach it, and that a fetch-side stamp renders with its time-of-day —
+    /// the session boundary is the whole point.
+    #[test]
+    fn rows_measure_by_stamp_and_symbol() {
+        let sessions: [(u8, u8, &[&str]); 5] = [
+            (0, 0, &["^N225"]),
+            (1, 30, &["^HSI"]),
+            (7, 0, &["^FTSE", "^GDAXI"]),
+            (13, 0, &["^BVSP"]),
+            (13, 30, &["SPY", "^GSPC", "^NDX", "EEM"]),
+        ];
+        let rows: Vec<Row> = sessions
+            .iter()
+            .flat_map(|(h, m, syms)| syms.iter().map(|s| row_at(s, *h, *m)))
+            .collect();
+
+        let o = measure_overlap(&rows);
+        assert!(o.is_fragmented());
+        assert_eq!((o.total, o.widest), (9, 4));
+        assert_eq!(o.widest_symbols, ["EEM", "SPY", "^GSPC", "^NDX"]);
+        assert_eq!(
+            o.at.map(|ms| format_stamp(Timestamp(ms))).as_deref(),
+            Some("2024-01-02 13:30Z"),
+        );
+    }
+
+    /// Untimed rows can't be aligned with anything, so they never reach the
+    /// measurement — rather than arriving as a symbol that meets nothing.
+    #[test]
+    fn untimed_rows_are_not_counted_as_fragmentation() {
+        let mut rows = vec![row_at("A", 13, 30), row_at("B", 13, 30)];
+        rows.push(Row {
+            atom: Atom::new(Candle::new(1.0, 1.0, 1.0, 1.0, 1.0)),
+            ..row_at("C", 13, 30)
+        });
+        let o = measure_overlap(&rows);
+        assert!(!o.is_fragmented());
+        assert_eq!((o.total, o.widest), (2, 2));
     }
 
     #[test]

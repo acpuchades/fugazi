@@ -96,6 +96,37 @@ did not happen, so a report would be a page of zeros inviting the reader to
 reduce it to metrics. The state is the only output that composes — prime from
 history, hand it to `run_resumable`, go live.
 
+## Datasets
+
+### A fragmented universe is diagnosed, never repaired
+
+`get`, `run` and `optimize` all warn when no snapshot holds every symbol the
+universe carries (`src/cli/overlap.rs`; `get` measures the rows it writes, the
+other two the per-symbol streams `join_universe_by_time` consumes). They report
+and stop there.
+
+**Joining on the trading date was rejected, and should stay rejected.** Tokyo
+closes before New York opens, so folding `^N225 00:00Z` and `SPY 13:30Z` into
+one snapshot because they share a date would hand a strategy trading `^N225` an
+S&P close from thirteen hours in its future. The exact-stamp grouping is what
+stops fugazi manufacturing lookahead across time zones; a `--join-on-date` flag
+would be a lookahead switch with a friendly name. The remedy for a fragmented
+universe is a different universe (one session's worth of symbols), which is a
+dataset choice the consumer makes.
+
+What the warning deliberately does *not* do is compare per-symbol session
+signatures: daylight saving alone gives `^FTSE` `{07:00, 08:00}` against
+`^GDAXI` `{06:00, 07:00, 08:00}`, so signature equality would flag series that
+share nearly every bar. It measures observed co-occurrence, and fires only on
+`widest < total`.
+
+Not extended to the two shapes that don't time-join: `single:` has one symbol,
+and `pairs:` **inner**-joins its two legs (`run::join_pair_by_time`), so a
+disjoint pair yields zero bars and fails loudly already. If a third caller of
+`join_universe_by_time` appears, it needs the two-line measure/warn pair — the
+joiner stays pure rather than printing, so this is a convention, not a
+guarantee.
+
 ## Repo hygiene
 
 ### `python/uv.lock` does not lock the `test` extra
