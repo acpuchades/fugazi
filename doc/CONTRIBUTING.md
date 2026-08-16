@@ -151,7 +151,10 @@ Foo { source, period } => dyn_indicator::wrap(
   `spec_json_schema()` is a further projection of the descriptor, so a
   correctly-annotated tag flows into the JSON Schema for free (a brand-new
   *field type* is the one exception — it lands as `"other"` until you add its
-  fragment to `type_fragment` in `spec::grammar` and to the test's `FIELD_TYPES`).
+  fragment to `type_fragment` in `spec::grammar`, to `tests/spec_grammar.rs`'s
+  `FIELD_TYPES`, **and** to `_dummy` in `python/tests/test_spec_json_schema.py`;
+  `hand_maintained_mirrors` checks the last one from `cargo test`, since
+  forgetting it otherwise only shows up under `pytest`).
 - **Report bad input with `Err`, never `panic!`.** See
   [Build errors are values](../CLAUDE.md#build-errors-are-values).
 
@@ -513,6 +516,7 @@ When one of these fails, it is telling you something specific:
 | `the_mirror_has_every_variant` | `NodeSpecRaw` doesn't mirror a `NodeSpec` variant. |
 | `the_mirror_repeats_every_serde_default` | A `#[serde(default)]` on an `Option` field wasn't copied to the mirror — the key silently becomes required. |
 | `every_rust_metric_is_bound_on_the_python_module` | A `src/metrics.rs` function isn't in `register_metrics_module`'s `reg!(...)`. |
+| `every_grammar_field_type_has_a_python_dummy_value` | A new grammar field type has no sample in `test_spec_json_schema.py::_dummy` — that `pytest` file would fail with a `KeyError`, which `cargo test` alone would not show. |
 | `test_parity.py::test_every_*_tag_is_bound_or_declared_unbound` | A tag has no Python counterpart and no recorded reason. |
 | `test_parity.py::test_the_declared_tables_do_not_go_stale` | A tag left the spec layer but its parity entry didn't. |
 | `warm_up_is_exact_for_*` | `warm_up_period()` disagrees with when the first `Some` actually lands. |

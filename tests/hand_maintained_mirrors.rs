@@ -31,6 +31,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use fugazi::spec::grammar::spec_grammar;
+
 const SOURCE: &str = include_str!("../src/spec/expr.rs");
 
 /// The body of `enum <name> { … }`, from the opening brace to the matching
@@ -227,5 +229,61 @@ fn every_rust_metric_is_bound_on_the_python_module() {
         exported.len() > 40,
         "sanity: found only {} exported metrics",
         exported.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The grammar field-type vocabulary / `python/tests/test_spec_json_schema.py`
+// ---------------------------------------------------------------------------
+
+/// Every field type the grammar descriptor emits must have a dummy value in
+/// `python/tests/test_spec_json_schema.py`.
+///
+/// That test builds a minimal instance of every tag *from the descriptor*, so
+/// it needs one sample value per field type. Adding a type to the vocabulary
+/// therefore breaks it — and only under `pytest`, which a Rust-only change
+/// never runs. Adding `positive_uint` did exactly that: `cargo test` was green,
+/// `tests/spec_json_schema.rs`'s own `FIELD_TYPES` had been updated, and CI's
+/// Python job failed on a `KeyError`.
+///
+/// Checked here, in `cargo test`, so the two lists can't drift again.
+#[test]
+fn every_grammar_field_type_has_a_python_dummy_value() {
+    const PY: &str = include_str!("../python/tests/test_spec_json_schema.py");
+
+    let body = {
+        let start = PY
+            .find("def _dummy(ty):")
+            .expect("test_spec_json_schema.py must define _dummy");
+        let end = PY[start..].find("}[ty]").expect("_dummy must end in `}[ty]`") + start;
+        &PY[start..end]
+    };
+    let known: BTreeSet<&str> = body
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix('"'))
+        .filter_map(|r| r.split_once("\":"))
+        .map(|(k, _)| k)
+        .collect();
+
+    // Mirror the Python test's own filter: it skips the document-level groups,
+    // which aren't expression nodes, and only fills *required* fields.
+    let grammar = spec_grammar();
+    let mut needed: BTreeSet<&str> = BTreeSet::new();
+    for tag in &grammar {
+        if tag.group != "node" && tag.group != "selection" {
+            continue;
+        }
+        needed.extend(tag.fields.iter().filter(|f| f.required).map(|f| f.ty.as_str()));
+        if let Some(p) = tag.payload.as_deref() {
+            needed.insert(p);
+        }
+    }
+
+    let missing: Vec<&&str> = needed.difference(&known).collect();
+    assert!(
+        missing.is_empty(),
+        "python/tests/test_spec_json_schema.py::_dummy has no value for {missing:?} — \
+         that test constructs an instance of every tag from the descriptor, so a new \
+         field type needs a sample there or its `pytest` run fails with a KeyError",
     );
 }

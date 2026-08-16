@@ -19,6 +19,9 @@ def _dummy(ty):
         "node": "close",
         "node_list": ["close"],
         "uint": 1,
+        # A period or window length — `NonZeroUsize` on the spec side, so the
+        # schema says `minimum: 1` and 0 would not be a valid instance.
+        "positive_uint": 1,
         "number": 1.0,
         "str": "x",
         "bool": True,
