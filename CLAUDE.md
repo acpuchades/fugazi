@@ -11,6 +11,11 @@ lives elsewhere; reach for it on demand:
 - **[doc/CONTRIBUTING.md](doc/CONTRIBUTING.md)** — the *procedure*. Adding an
   indicator / signal / operator / metric / provider? It lists every place each
   change has to touch, in order, and which are compiler- or test-enforced.
+- **[doc/TESTING.md](doc/TESTING.md)** — the test suite's *map*: the four layers
+  and what each is for, where a given change's test goes, the shared
+  `tests/common/` harness, how the drift guards are built, and the
+  skip-vs-fail fixture policy (`FUGAZI_REQUIRE_FIXTURES=1`). Read it before
+  adding a test file or a test helper.
 - **[doc/STRATEGIES.md](doc/STRATEGIES.md)** (YAML spec) · **[doc/CLI.md](doc/CLI.md)**
   · **[doc/COSTS.md](doc/COSTS.md)** · **[doc/METRICS.md](doc/METRICS.md)** ·
   **[doc/PYTHON.md](doc/PYTHON.md)** — user-facing surface docs.
@@ -40,6 +45,10 @@ calls — reach for closed-form first.
 
 - Build: `cargo build`; Test: `cargo test`; Lint: `cargo clippy --all-targets` (keep
   clean); Docs: `cargo doc --open`
+- `FUGAZI_REQUIRE_FIXTURES=1 cargo test` — makes the two cross-validation suites
+  (`talib_validation`, `metrics_validation`) **fail** instead of skipping when their
+  generated fixture is missing or stale. `talib_expected.csv` isn't committed, so on a
+  clean checkout that suite compares nothing by default. See [doc/TESTING.md](doc/TESTING.md).
 
 ### Bumping the version — sync **seven** places (`cargo check` only catches Rust drift)
 
@@ -231,6 +240,7 @@ If you're about to write a private helper whose name looks like something here, 
 
 | Concern | Reuse | Location |
 |---|---|---|
+| Integration-test harness (bars, snapshot streams, temp paths, running the binary, a `wiremock` server) | `mod common;` + `common::{bars,cli,net,fixtures}` — each `tests/*.rs` is its own crate, so this is included, not imported. See [doc/TESTING.md](doc/TESTING.md) | `tests/common/` |
 | Bracket-split `SYMBOL[FREQ]:` / full scope | `calendar::parse_scope_parts(text)` / `parse_scope(text)` | `src/spec/calendar.rs` |
 | Interval token / Frequency / time-column ms | `calendar::parse_interval` / `Frequency::from_str` / `parse_time_to_millis` | `src/spec/calendar.rs` |
 | Auto-detect bar cadence | `calendar::detect_frequency_from_atoms(...)` | `src/spec/calendar.rs` |

@@ -13,11 +13,14 @@
 //! `position` is a base-asset balance, `set_position` diffs it and market-orders
 //! the difference, and a fill comes back in base units.
 
+mod common;
+
+use common::net::serve;
 use fugazi::Candle;
 use fugazi::live::CoinbaseWallet;
 use fugazi::wallet::{Ack, Reference, Side, Size, Units, Wallet};
 use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, ResponseTemplate};
 
 const SYMBOL: &str = "BTC-USD";
 const KEY_NAME: &str = "organizations/o/apiKeys/k";
@@ -59,21 +62,6 @@ fn no_fills() -> serde_json::Value {
     serde_json::json!({ "fills": [] })
 }
 
-/// Host the mock server on a kept-alive multi-threaded runtime and return the
-/// runtime + server (both must outlive the wallet calls) and its URI.
-fn serve<F>(setup: F) -> (tokio::runtime::Runtime, MockServer, String)
-where
-    F: for<'a> FnOnce(&'a MockServer) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>>,
-{
-    let rt = tokio::runtime::Runtime::new().expect("multi-thread runtime");
-    let server = rt.block_on(async {
-        let server = MockServer::start().await;
-        setup(&server).await;
-        server
-    });
-    let uri = server.uri();
-    (rt, server, uri)
-}
 
 fn wallet(uri: String) -> CoinbaseWallet {
     CoinbaseWallet::with_base_url(uri, KEY_NAME, &test_pem()).expect("key parses")
@@ -89,7 +77,7 @@ fn set_position_market_buys_the_difference_and_update_reports_the_fill() {
     let fill_calls = Arc::new(AtomicUsize::new(0));
     let counter = fill_calls.clone();
 
-    let (_rt, _server, uri) = serve(move |server| {
+    let mock = serve(move |server| {
         let counter = counter.clone();
         Box::pin(async move {
             Mock::given(method("GET"))
@@ -129,6 +117,7 @@ fn set_position_market_buys_the_difference_and_update_reports_the_fill() {
                 .await;
         })
     });
+    let uri = mock.uri.clone();
 
     let mut w = wallet(uri);
 
@@ -167,7 +156,7 @@ fn a_protective_stop_dedups_an_unchanged_trigger() {
     let cancels = Arc::new(AtomicUsize::new(0));
     let (c_posts, c_cancels) = (order_posts.clone(), cancels.clone());
 
-    let (_rt, _server, uri) = serve(move |server| {
+    let mock = serve(move |server| {
         let (c_posts, c_cancels) = (c_posts.clone(), c_cancels.clone());
         Box::pin(async move {
             Mock::given(method("GET"))
@@ -208,6 +197,7 @@ fn a_protective_stop_dedups_an_unchanged_trigger() {
                 .await;
         })
     });
+    let uri = mock.uri.clone();
 
     let mut w = wallet(uri);
     // Prime the balance cache so the stop knows what it is protecting.
@@ -242,7 +232,7 @@ fn a_limit_order_sends_a_limit_config_and_dedups_an_unchanged_resubmit() {
     let last_body = Arc::new(Mutex::new(String::new()));
     let (c_posts, c_cancels, c_body) = (posts.clone(), cancels.clone(), last_body.clone());
 
-    let (_rt, _server, uri) = serve(move |server| {
+    let mock = serve(move |server| {
         let (c_posts, c_cancels, c_body) = (c_posts.clone(), c_cancels.clone(), c_body.clone());
         Box::pin(async move {
             Mock::given(method("GET"))
@@ -284,6 +274,7 @@ fn a_limit_order_sends_a_limit_config_and_dedups_an_unchanged_resubmit() {
                 .await;
         })
     });
+    let uri = mock.uri.clone();
 
     let mut w = wallet(uri);
     w.update(SYMBOL.to_string(), Candle::new(27000.0, 27100.0, 26900.0, 27000.0, 1.0));
@@ -317,7 +308,7 @@ fn a_limit_order_sends_a_limit_config_and_dedups_an_unchanged_resubmit() {
 
 #[test]
 fn a_venue_rejected_order_surfaces_through_take_rejections() {
-    let (_rt, _server, uri) = serve(|server| {
+    let mock = serve(|server| {
         Box::pin(async move {
             Mock::given(method("GET"))
                 .and(path("/api/v3/brokerage/market/products/BTC-USD"))
@@ -340,6 +331,7 @@ fn a_venue_rejected_order_surfaces_through_take_rejections() {
                 .await;
         })
     });
+    let uri = mock.uri.clone();
 
     let mut w = wallet(uri);
 
@@ -358,7 +350,7 @@ fn a_venue_rejected_order_surfaces_through_take_rejections() {
 
 #[test]
 fn a_short_target_sells_to_flat_and_reports_the_unshortable_remainder() {
-    let (_rt, _server, uri) = serve(|server| {
+    let mock = serve(|server| {
         Box::pin(async move {
             Mock::given(method("GET"))
                 .and(path("/api/v3/brokerage/market/products/BTC-USD"))
@@ -384,6 +376,7 @@ fn a_short_target_sells_to_flat_and_reports_the_unshortable_remainder() {
                 .await;
         })
     });
+    let uri = mock.uri.clone();
 
     let mut w = wallet(uri);
     // Prime the balance cache: the account holds 0.03 BTC.

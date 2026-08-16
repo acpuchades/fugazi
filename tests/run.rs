@@ -2,85 +2,32 @@
 //! candles, asserting it produces non-trivial result files for both an `@file`
 //! strategy and an inline one.
 
-use std::process::Command;
+mod common;
 
-/// A unique temp path per call. Never a fixed name in the shared `/tmp`: a fixed
-/// name collides with a parallel run or another user's leftovers — an
-/// unreadable, unremovable dir that surfaces as `PermissionDenied`. Any
-/// extension is preserved so `--series @path` still sees a `.csv`.
-fn unique_path(name: &str) -> std::path::PathBuf {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static N: AtomicU32 = AtomicU32::new(0);
-    let token = format!("{}_{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed));
-    let p = std::path::Path::new(name);
-    let unique = match (
-        p.file_stem().and_then(|s| s.to_str()),
-        p.extension().and_then(|e| e.to_str()),
-    ) {
-        (Some(stem), Some(ext)) => format!("{stem}_{token}.{ext}"),
-        _ => format!("{name}_{token}"),
-    };
-    std::env::temp_dir().join(unique)
+use common::cli::{Cmd, assert_metrics_shape, at, scratch_file};
+
+const FILLS_HEADER: &str = "time,symbol,side,units,price";
+const TRADES_HEADER: &str =
+    "entry_time,exit_time,side,units,entry_price,exit_price,pnl,return,bars_held";
+
+/// `fugazi run <strategy> --series examples/candles.csv` into a fresh scratch dir.
+fn run_backtest(out_name: &str, strategy: &str) -> common::cli::Artefacts {
+    Cmd::new("run")
+        .arg(strategy)
+        .series(&at("examples/candles.csv"))
+        .output_dir(out_name)
+        .ok()
+        .artefacts()
 }
 
-/// The result artefacts a run writes into its `--output-dir`.
-struct Artefacts {
-    fills: String,
-    trades: String,
-    returns: String,
-    metrics: String,
-}
-
-/// Run the binary with the given `--strategy` value into a fresh `out_name`
-/// scratch dir, asserting success, and return its result files.
-fn run_backtest(out_name: &str, strategy: &str) -> Artefacts {
-    let manifest = env!("CARGO_MANIFEST_DIR");
-    let out = unique_path(out_name);
-    let _ = std::fs::remove_dir_all(&out);
-
-    let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
-        .args([
-            "run",
-            strategy, // positional
-            "--series",
-            &format!("@{manifest}/examples/candles.csv"),
-            "--output-dir",
-            out.to_str().unwrap(),
-        ])
-        .status()
-        .expect("failed to launch the fugazi binary");
-    assert!(status.success(), "fugazi run exited with failure");
-
-    Artefacts {
-        fills: std::fs::read_to_string(out.join("fills.csv")).expect("fills.csv"),
-        trades: std::fs::read_to_string(out.join("trades.csv")).expect("trades.csv"),
-        returns: std::fs::read_to_string(out.join("returns.csv")).expect("returns.csv"),
-        metrics: std::fs::read_to_string(out.join("metrics.yml")).expect("metrics.yml"),
-    }
-}
-
-/// The metrics YAML should be a top-level mapping with every section header the
-/// crate's `compute()` produces — enough to catch a missing section or a rename
-/// without hard-coding the numeric values (which move with the fixture).
-fn assert_metrics_shape(metrics: &str) {
-    for section in ["run:", "returns:", "risk_adjusted:", "drawdown:", "trades:"] {
-        assert!(
-            metrics.contains(section),
-            "metrics.yml missing `{section}` section:\n{metrics}"
-        );
-    }
-}
-
+/// Both spellings of the positional strategy argument — `@file` and inline
+/// YAML — must produce the same four artefacts with the same schema.
 #[test]
 fn runs_an_at_file_strategy() {
-    let manifest = env!("CARGO_MANIFEST_DIR");
-    let out = run_backtest(
-        "fugazi_e2e_file",
-        &format!("@{manifest}/examples/strategy.yml"),
-    );
+    let out = run_backtest("fugazi_e2e_file", &at("examples/strategy.yml"));
 
     assert!(
-        out.fills.starts_with("time,symbol,side,units,price"),
+        out.fills.starts_with(FILLS_HEADER),
         "unexpected fills.csv header: {}",
         out.fills
     );
@@ -90,8 +37,7 @@ fn runs_an_at_file_strategy() {
         out.fills
     );
     assert!(
-        out.trades
-            .starts_with("entry_time,exit_time,side,units,entry_price,exit_price,pnl,return,bars_held"),
+        out.trades.starts_with(TRADES_HEADER),
         "unexpected trades.csv header: {}",
         out.trades
     );
@@ -104,6 +50,33 @@ fn runs_an_at_file_strategy() {
     assert_metrics_shape(&out.metrics);
 }
 
+#[test]
+fn runs_an_inline_strategy() {
+    // A bare (non-`@`) value is the strategy YAML itself.
+    let out = run_backtest(
+        "fugazi_e2e_inline",
+        "symbol: BTC\nlong:\n  enter: !crosses_above { lhs: !sma { source: close, period: 2 }, rhs: !sma { source: close, period: 4 } }\n",
+    );
+
+    assert!(
+        out.fills.starts_with(FILLS_HEADER),
+        "unexpected fills.csv header: {}",
+        out.fills
+    );
+    assert!(
+        out.fills.lines().count() >= 2,
+        "expected at least one fill, got:\n{}",
+        out.fills
+    );
+    assert!(
+        out.trades.starts_with(TRADES_HEADER),
+        "unexpected trades.csv header: {}",
+        out.trades
+    );
+    assert!(out.returns.lines().count() >= 2, "expected an equity curve");
+    assert_metrics_shape(&out.metrics);
+}
+
 /// `-w/--windowed N` keeps writing `metrics.yml` (whole-run) and *also* emits
 /// `metrics.csv` (one row per non-overlapping N-bar window) and `rolling.csv`
 /// (one row per rolling N-bar window). Both CSVs share the same shape — same
@@ -111,33 +84,19 @@ fn runs_an_at_file_strategy() {
 /// consume them interchangeably.
 #[test]
 fn runs_windowed_metrics() {
-    let manifest = env!("CARGO_MANIFEST_DIR");
-    let out = unique_path("fugazi_e2e_windowed");
-    let _ = std::fs::remove_dir_all(&out);
-
-    let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
-        .args([
-            "run",
-            &format!("@{manifest}/examples/strategy.yml"),
-            "--series",
-            &format!("@{manifest}/examples/candles.csv"),
-            "--output-dir",
-            out.to_str().unwrap(),
-            "--windowed",
-            "10",
-        ])
-        .status()
-        .expect("failed to launch the fugazi binary");
-    assert!(status.success(), "fugazi run -w exited with failure");
+    let out = Cmd::new("run")
+        .arg(&at("examples/strategy.yml"))
+        .series(&at("examples/candles.csv"))
+        .args(&["--windowed", "10"])
+        .output_dir("fugazi_e2e_windowed")
+        .ok();
 
     assert!(
-        out.join("metrics.yml").exists(),
+        out.wrote("metrics.yml"),
         "metrics.yml should always be written (whole-run summary)"
     );
 
-    let metrics = std::fs::read_to_string(out.join("metrics.csv")).expect("metrics.csv");
-    let mut lines = metrics.lines();
-    let header = lines.next().expect("metrics.csv header");
+    let header = out.header("metrics.csv");
     assert!(
         header.starts_with("window_start,window_end,run.bars,"),
         "unexpected metrics.csv header: {header}"
@@ -149,28 +108,35 @@ fn runs_windowed_metrics() {
         );
     }
     // 30 bars split into 10 + 10 + 10 → 3 non-overlapping windows.
-    let rows: Vec<&str> = lines.collect();
-    assert_eq!(rows.len(), 3, "expected one row per non-overlapping window:\n{metrics}");
+    let rows = out.rows("metrics.csv");
+    assert_eq!(
+        rows.len(),
+        3,
+        "expected one row per non-overlapping window:\n{}",
+        out.read("metrics.csv")
+    );
     assert!(
         rows[0].starts_with("2024-01-01,"),
         "first window should start at bar 1 of the run: {}",
         rows[0]
     );
 
-    let rolling = std::fs::read_to_string(out.join("rolling.csv")).expect("rolling.csv");
-    let mut rlines = rolling.lines();
-    let rheader = rlines.next().expect("rolling.csv header");
     // rolling.csv shares every column of metrics.csv *except* the trailing
-    // `selection.deflated_sharpe` — DSR isn't emitted for rolling windows because their
-    // overlapping bars break the trial-variance model. See `run.rs` writer.
+    // `selection.deflated_sharpe` — DSR isn't emitted for rolling windows because
+    // their overlapping bars break the trial-variance model. See `run.rs` writer.
+    let rheader = out.header("rolling.csv");
     assert_eq!(
         header,
         format!("{rheader},selection.deflated_sharpe"),
         "metrics.csv should be rolling.csv's columns plus the trailing selection.deflated_sharpe"
     );
     // 30 bars, window 10 → 30 - 10 + 1 = 21 rolling windows.
-    let rrows: Vec<&str> = rlines.collect();
-    assert_eq!(rrows.len(), 21, "expected one row per rolling window:\n{rolling}");
+    assert_eq!(
+        out.rows("rolling.csv").len(),
+        21,
+        "expected one row per rolling window:\n{}",
+        out.read("rolling.csv")
+    );
 }
 
 /// `-w/--windowed` accepts a time suffix (`1w`, `1M`, `4h`, …) — it resolves
@@ -180,31 +146,22 @@ fn runs_windowed_metrics() {
 /// non-overlapping reducer).
 #[test]
 fn runs_windowed_metrics_with_time_suffix() {
-    let manifest = env!("CARGO_MANIFEST_DIR");
-    let out = unique_path("fugazi_e2e_windowed_time");
-    let _ = std::fs::remove_dir_all(&out);
+    let out = Cmd::new("run")
+        .arg(&at("examples/strategy.yml"))
+        .series(&at("examples/candles.csv"))
+        .args(&["--crypto", "--windowed", "1w"])
+        .output_dir("fugazi_e2e_windowed_time")
+        .ok();
 
-    let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
-        .args([
-            "run",
-            &format!("@{manifest}/examples/strategy.yml"),
-            "--series",
-            &format!("@{manifest}/examples/candles.csv"),
-            "--output-dir",
-            out.to_str().unwrap(),
-            "--crypto",
-            "--windowed",
-            "1w",
-        ])
-        .status()
-        .expect("failed to launch the fugazi binary");
-    assert!(status.success(), "fugazi run -w 1w exited with failure");
-
-    let metrics = std::fs::read_to_string(out.join("metrics.csv")).expect("metrics.csv");
     // 30 daily bars, window = 1w = 7 bars → 4 full windows + 1 trailing
     // stub of 2 bars (the reducer keeps the tail).
-    let rows: Vec<&str> = metrics.lines().skip(1).collect();
-    assert_eq!(rows.len(), 5, "expected 4 full 7-bar windows + a 2-bar tail:\n{metrics}");
+    let rows = out.rows("metrics.csv");
+    assert_eq!(
+        rows.len(),
+        5,
+        "expected 4 full 7-bar windows + a 2-bar tail:\n{}",
+        out.read("metrics.csv")
+    );
     assert!(
         rows[0].starts_with("2024-01-01,2024-01-07,"),
         "first window should span Jan 1-7: {}",
@@ -214,6 +171,45 @@ fn runs_windowed_metrics_with_time_suffix() {
         rows[4].starts_with("2024-01-29,2024-01-30,"),
         "last (stub) window should span Jan 29-30: {}",
         rows[4]
+    );
+}
+
+/// The degenerate end of the windowed reducer: a `-w` longer than the run has
+/// bars is **not** an error. It collapses to a single window spanning the whole
+/// run, whose row must agree with the whole-run `metrics.yml` — otherwise the
+/// windowed and whole-run reductions have drifted apart at the one input where
+/// they are provably the same measurement.
+#[test]
+fn a_window_longer_than_the_run_collapses_to_the_whole_run() {
+    let out = Cmd::new("run")
+        .arg(&at("examples/strategy.yml"))
+        .series(&at("examples/candles.csv"))
+        .args(&["--windowed", "10000"])
+        .output_dir("fugazi_e2e_window_too_long")
+        .ok();
+
+    let rows = out.rows("metrics.csv");
+    assert_eq!(rows.len(), 1, "expected exactly one window:\n{rows:?}");
+
+    // Locate `returns.total_pct` by name rather than by index — the column set
+    // grows with every new metric.
+    let header = out.header("metrics.csv");
+    let col = header
+        .split(',')
+        .position(|h| h == "returns.total_pct")
+        .expect("metrics.csv should carry returns.total_pct");
+    let windowed: f64 = rows[0].split(',').nth(col).unwrap().parse().unwrap();
+
+    let whole: f64 = out
+        .read("metrics.yml")
+        .lines()
+        .find_map(|l| l.trim_start().strip_prefix("total_pct:"))
+        .and_then(|s| s.trim().parse().ok())
+        .expect("metrics.yml should carry returns.total_pct");
+
+    assert_eq!(
+        windowed, whole,
+        "the single collapsed window must reproduce the whole-run return"
     );
 }
 
@@ -241,11 +237,7 @@ fn latch_resample_entry_gated_by_readiness_runs_end_to_end() {
             c = close
         ));
     }
-    let csv_path = unique_path("fugazi_e2e_latch_resample_candles.csv");
-    std::fs::write(&csv_path, csv).expect("write synthetic candles");
-
-    let out_dir = unique_path("fugazi_e2e_latch_resample");
-    let _ = std::fs::remove_dir_all(&out_dir);
+    let (_path, series) = scratch_file("fugazi_e2e_latch_resample_candles.csv", &csv);
 
     let strategy = r#"symbol: BTC
 long:
@@ -254,57 +246,16 @@ long:
     rhs: !value 0
 "#;
 
-    let output = Command::new(env!("CARGO_BIN_EXE_fugazi"))
-        .args([
-            "run",
-            strategy,
-            "--series",
-            &format!("@{}", csv_path.to_str().unwrap()),
-            "--output-dir",
-            out_dir.to_str().unwrap(),
-        ])
-        .output()
-        .expect("failed to launch the fugazi binary");
-    assert!(
-        output.status.success(),
-        "fugazi run exited with failure:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let out = Cmd::new("run")
+        .arg(strategy)
+        .series(&series)
+        .output_dir("fugazi_e2e_latch_resample")
+        .ok();
+
     // The fills.csv should show at least one buy after stability.
-    let fills = std::fs::read_to_string(out_dir.join("fills.csv")).expect("fills.csv");
+    let fills = out.read("fills.csv");
     assert!(
         fills.lines().count() >= 2,
         "expected at least one fill line beyond the header:\n{fills}"
     );
-}
-
-#[test]
-fn runs_an_inline_strategy() {
-    // A bare (non-`@`) value is the strategy YAML itself.
-    let out = run_backtest(
-        "fugazi_e2e_inline",
-        "symbol: BTC\nlong:\n  enter: !crosses_above { lhs: !sma { source: close, period: 2 }, rhs: !sma { source: close, period: 4 } }\n",
-    );
-
-    assert!(
-        out.fills.starts_with("time,symbol,side,units,price"),
-        "unexpected fills.csv header: {}",
-        out.fills
-    );
-    assert!(
-        out.fills.lines().count() >= 2,
-        "expected at least one fill, got:\n{}",
-        out.fills
-    );
-    assert!(
-        out.trades
-            .starts_with("entry_time,exit_time,side,units,entry_price,exit_price,pnl,return,bars_held"),
-        "unexpected trades.csv header: {}",
-        out.trades
-    );
-    assert!(
-        out.returns.lines().count() >= 2,
-        "expected an equity curve"
-    );
-    assert_metrics_shape(&out.metrics);
 }

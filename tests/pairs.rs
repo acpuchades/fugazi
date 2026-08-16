@@ -4,6 +4,9 @@
 //! signal, and (c) reset replays byte-identically like the single-asset
 //! strategies do.
 
+mod common;
+
+use fugazi::backtest;
 use fugazi::indicators::{Close, ValueBool, Pick, Sma};
 use fugazi::prelude::*;
 use fugazi::strategies::PairsStrategy;
@@ -30,7 +33,7 @@ fn pair_series() -> Vec<(Candle, Candle)> {
 }
 
 fn flat_bar(p: Real) -> Candle {
-    Candle::new(p, p, p, p, 0.0)
+    common::bars::flat_with_volume(p, 0.0)
 }
 
 fn snapshot(l: Candle, r: Candle) -> Snapshot<&'static str> {
@@ -40,24 +43,30 @@ fn snapshot(l: Candle, r: Candle) -> Snapshot<&'static str> {
     s
 }
 
-/// Drive `strat` over the pair series, feeding each bar to the wallet for
-/// both legs and delivering fills to the strategy before its `update`/`trade`.
+/// Drive `strat` over the pair series through [`fugazi::backtest::run`] — the
+/// same driver the CLI and spec layer use.
+///
+/// Deliberately *not* a hand-rolled bar loop. The driver prices each tagged leg,
+/// routes fills back through `on_fill`, drains rejections, and — the part a
+/// hand-rolled loop always forgets — calls `trade()` **only when `is_ready()`**.
+/// Testing against a loop that trades unconditionally would exercise a path
+/// production never takes.
 fn run(
     mut strat: PairsStrategy<&'static str>,
     bars: &[(Candle, Candle)],
 ) -> PaperWallet<&'static str> {
+    run_reported(&mut strat, bars).0
+}
+
+fn run_reported(
+    strat: &mut PairsStrategy<&'static str>,
+    bars: &[(Candle, Candle)],
+) -> (PaperWallet<&'static str>, fugazi::RunReport<&'static str>) {
+    let snaps: Vec<Snapshot<&'static str>> =
+        bars.iter().map(|&(l, r)| snapshot(l, r)).collect();
     let mut wallet = PaperWallet::new(FUNDS);
-    for &(l, r) in bars {
-        for fill in wallet.update(LEFT, l) {
-            strat.on_fill(&fill);
-        }
-        for fill in wallet.update(RIGHT, r) {
-            strat.on_fill(&fill);
-        }
-        strat.update(snapshot(l, r));
-        strat.trade(&mut wallet);
-    }
-    wallet
+    let report = backtest::run(strat, &mut wallet, snaps);
+    (wallet, report)
 }
 
 #[test]
@@ -81,7 +90,12 @@ fn spread_reversion_strategy_trades_over_the_pair() {
     for order in wallet.orders() {
         assert!(order.symbol == LEFT || order.symbol == RIGHT);
     }
-    assert!(wallet.funds().0.is_finite());
+    // Both legs opened and both flattened, so the account ends flat with its
+    // cash intact rather than merely "finite".
+    assert!(
+        wallet.positions().is_empty(),
+        "the exit signal should flatten both legs by the end of the series"
+    );
 }
 
 #[test]

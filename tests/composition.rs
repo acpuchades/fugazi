@@ -18,17 +18,45 @@ fn rsi_threshold_is_a_single_signal() {
     );
 }
 
+/// `and` is `None` until *both* operands are warm — the documented reason an
+/// edge coincident with warm-up never fires a spurious first-bar trade — and
+/// once warm it is the plain conjunction of the two sides.
 #[test]
 fn compound_signal_with_combinators() {
-    // Enter zone: price above 100 AND RSI not yet overbought.
-    let mut sig = Gt::new(Identity::new(), Value::new(100.0))
-        .and(Lt::new(Rsi::new(Identity::new(), 3), Value::new(70.0)));
+    // Enter zone: price above 100 AND RSI not yet overbought. `Gt` against a
+    // constant is ready immediately; RSI(3) needs four samples, so the
+    // conjunction is gated by the slower side.
+    let build = || {
+        Gt::new(Identity::new(), Value::new(100.0))
+            .and(Lt::new(Rsi::new(Identity::new(), 3), Value::new(70.0)))
+    };
 
-    // First few bars warm up the RSI; just make sure it advances without panic.
-    for price in [101.0, 100.5, 101.2, 102.0] {
-        sig.update(price);
+    // A monotonic rise: price is above 100 throughout, and RSI(3) with no
+    // losing delta reads 100 — so the "not overbought" side is false and the
+    // conjunction must be `Some(false)`, never `Some(true)`.
+    let mut rising = build();
+    let readings: Vec<Option<bool>> = [101.0, 102.0, 103.0, 104.0, 105.0]
+        .into_iter()
+        .map(|p| rising.update(p))
+        .collect();
+    assert_eq!(
+        readings,
+        vec![None, None, None, Some(false), Some(false)],
+        "`and` stays None until RSI(3) is warm, then reports the conjunction"
+    );
+
+    // Same chain, but the price falls back through 100 while RSI cools off.
+    // Both sides now agree, so the zone opens.
+    let mut dipping = build();
+    let mut fired = false;
+    for price in [101.0, 105.0, 103.0, 101.5, 101.0, 100.5, 101.0] {
+        dipping.update(price);
+        fired |= dipping.is_true();
     }
-    let _ = sig.is_true();
+    assert!(
+        fired,
+        "price over 100 with a cooled-off RSI should open the entry zone"
+    );
 }
 
 #[test]

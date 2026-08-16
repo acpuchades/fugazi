@@ -1,5 +1,5 @@
-//! End-to-end tests of the `fugazi run` / `fugazi optimize` / `fugazi check`
-//! subcommands' `--costs` flag over the example candles.
+//! End-to-end tests of the `fugazi run` / `fugazi check` subcommands'
+//! `--costs` flag over the example candles.
 //!
 //! Backward-compat: a run without `--costs` produces the pre-costs `fills.csv`
 //! header shape (no `commission` column) and a `metrics.yml` that omits the
@@ -10,61 +10,39 @@
 //! `metrics.yml` gains a `costs:` block with `total_commission`,
 //! `total_slippage_cost`, and `cost_drag_pct`.
 
-use std::process::Command;
+mod common;
 
-struct Artefacts {
-    fills: String,
-    metrics: String,
-}
+use common::cli::{Artefacts, Cmd, at, scratch_file};
 
-/// A unique temp path per call. Never a fixed name in the shared `/tmp`: a fixed
-/// name collides with a parallel run or another user's leftovers — an
-/// unreadable, unremovable dir that surfaces as `PermissionDenied`. Any
-/// extension is preserved so `--series @path` still sees a `.csv` / `.yml`.
-fn unique_path(name: &str) -> std::path::PathBuf {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static N: AtomicU32 = AtomicU32::new(0);
-    let token = format!("{}_{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed));
-    let p = std::path::Path::new(name);
-    let unique = match (
-        p.file_stem().and_then(|s| s.to_str()),
-        p.extension().and_then(|e| e.to_str()),
-    ) {
-        (Some(stem), Some(ext)) => format!("{stem}_{token}.{ext}"),
-        _ => format!("{name}_{token}"),
-    };
-    std::env::temp_dir().join(unique)
-}
+const NO_COSTS_HEADER: &str = "time,symbol,side,units,price,kind";
+const COSTS_HEADER: &str = "time,symbol,side,units,price,kind,commission";
 
+/// `fugazi run examples/strategy.yml` with zero or more `--costs` terms.
 fn run_with(costs_flags: &[&str], out_name: &str) -> Artefacts {
-    let manifest = env!("CARGO_MANIFEST_DIR");
-    let out = unique_path(out_name);
-    let _ = std::fs::remove_dir_all(&out);
-
-    let mut args: Vec<String> = vec![
-        "run".to_string(),
-        format!("@{manifest}/examples/strategy.yml"),
-        "--series".to_string(),
-        format!("@{manifest}/examples/candles.csv"),
-        "--output-dir".to_string(),
-        out.to_str().unwrap().to_string(),
-        "--quiet".to_string(),
-    ];
+    let mut cmd = Cmd::new("run")
+        .arg(&at("examples/strategy.yml"))
+        .series(&at("examples/candles.csv"))
+        .arg("--quiet")
+        .output_dir(out_name);
     for f in costs_flags {
-        args.push("--costs".to_string());
-        args.push(f.to_string());
+        cmd = cmd.costs(f);
     }
-    let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
-        .args(&args)
-        .status()
-        .expect("failed to launch the fugazi binary");
-    assert!(status.success(), "fugazi run exited with failure");
-
-    Artefacts {
-        fills: std::fs::read_to_string(out.join("fills.csv")).expect("fills.csv"),
-        metrics: std::fs::read_to_string(out.join("metrics.yml")).expect("metrics.yml"),
-    }
+    cmd.ok().artefacts()
 }
+
+/// The `total_commission:` scalar out of a `metrics.yml`.
+#[track_caller]
+fn total_commission(metrics: &str) -> f64 {
+    metrics
+        .lines()
+        .find_map(|l| l.trim_start().strip_prefix("total_commission:"))
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .unwrap_or_else(|| panic!("total_commission not found in:\n{metrics}"))
+}
+
+// ---------------------------------------------------------------------------
+// Single-asset runs
+// ---------------------------------------------------------------------------
 
 /// A run without `--costs` matches the pre-costs schema byte-for-byte: no
 /// `commission` column on `fills.csv`, no `costs:` section on `metrics.yml`.
@@ -73,7 +51,7 @@ fn no_costs_flag_preserves_pre_costs_schema() {
     let out = run_with(&[], "fugazi_costs_absent");
     let header = out.fills.lines().next().expect("fills.csv header");
     assert_eq!(
-        header, "time,symbol,side,units,price,kind",
+        header, NO_COSTS_HEADER,
         "fills.csv header should not include `commission` when no cost flag was passed"
     );
     assert!(
@@ -103,7 +81,7 @@ fn costs_flag_populates_commission_and_costs_section() {
     );
     let header = out.fills.lines().next().expect("fills.csv header");
     assert_eq!(
-        header, "time,symbol,side,units,price,kind,commission",
+        header, COSTS_HEADER,
         "fills.csv header should include `commission` when a cost model is set"
     );
     // At least one fill row should record a positive commission.
@@ -134,15 +112,42 @@ fn costs_flag_populates_commission_and_costs_section() {
     }
 }
 
+/// Costs must *reduce* the run's realized P&L: the same strategy over the same
+/// bars with a 5% round-turn commission cannot finish richer than the
+/// frictionless run. Pins the direction the whole cost pipeline exists to
+/// produce — the shape assertions above would pass just as happily if the
+/// commission column were computed and then never charged.
+#[test]
+fn costs_drag_the_equity_curve_down() {
+    let free = run_with(&["none"], "fugazi_costs_drag_free");
+    let charged = run_with(
+        &["commission=!percentage { rate: 0.05 }"],
+        "fugazi_costs_drag_charged",
+    );
+
+    let final_equity = |m: &str| -> f64 {
+        m.lines()
+            .find_map(|l| l.trim_start().strip_prefix("final_equity:"))
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .unwrap_or_else(|| panic!("final_equity not found in:\n{m}"))
+    };
+    let (free_eq, charged_eq) = (final_equity(&free.metrics), final_equity(&charged.metrics));
+    assert!(
+        charged_eq < free_eq,
+        "a 5% commission should leave less equity than none: {charged_eq} vs {free_eq}"
+    );
+    assert!(
+        total_commission(&charged.metrics) > 0.0,
+        "the charged run should book commission:\n{}",
+        charged.metrics
+    );
+}
+
 /// The binance preset — a real-world YAML file with `by_symbol` — parses,
 /// runs, and populates the same fields.
 #[test]
 fn binance_preset_end_to_end() {
-    let manifest = env!("CARGO_MANIFEST_DIR");
-    let out = run_with(
-        &[&format!("@{manifest}/examples/binance.yml")],
-        "fugazi_costs_binance_preset",
-    );
+    let out = run_with(&[&at("examples/binance.yml")], "fugazi_costs_binance_preset");
     assert!(
         out.fills.lines().next().unwrap().ends_with(",commission"),
         "binance preset should populate the commission column"
@@ -153,35 +158,11 @@ fn binance_preset_end_to_end() {
     );
 }
 
-/// `check costs` accepts a well-formed spec and rejects an unknown model variant
-/// with a non-zero exit code (linting a bad spec at CI time, before a real run).
-#[test]
-fn check_costs_accepts_valid_and_rejects_invalid() {
-    let ok = Command::new(env!("CARGO_BIN_EXE_fugazi"))
-        .args(["check", "costs", "commission=!percentage { rate: 0.001 }"])
-        .status()
-        .expect("failed to launch fugazi");
-    assert!(ok.success(), "well-formed cost spec should pass check");
-
-    let bad = Command::new(env!("CARGO_BIN_EXE_fugazi"))
-        .args(["check", "costs", "commission=!martian { rate: 0.001 }"])
-        .output()
-        .expect("failed to launch fugazi");
-    assert!(
-        !bad.status.success(),
-        "unknown model variant should fail check with non-zero exit"
-    );
-}
-
 /// The `ibkr` preset exercises the nested-model path (`!max` over a `!per_unit`
 /// and a `!fixed`), which the binance preset doesn't reach.
 #[test]
 fn ibkr_preset_end_to_end() {
-    let manifest = env!("CARGO_MANIFEST_DIR");
-    let out = run_with(
-        &[&format!("@{manifest}/examples/ibkr.yml")],
-        "fugazi_costs_ibkr_preset",
-    );
+    let out = run_with(&[&at("examples/ibkr.yml")], "fugazi_costs_ibkr_preset");
     assert!(
         out.fills.lines().next().unwrap().ends_with(",commission"),
         "ibkr preset should populate the commission column"
@@ -192,6 +173,24 @@ fn ibkr_preset_end_to_end() {
     );
 }
 
+/// `check costs` accepts a well-formed spec and rejects an unknown model variant
+/// with a non-zero exit code (linting a bad spec at CI time, before a real run).
+#[test]
+fn check_costs_accepts_valid_and_rejects_invalid() {
+    Cmd::new("check")
+        .args(&["costs", "commission=!percentage { rate: 0.001 }"])
+        .ok();
+
+    let bad = Cmd::new("check")
+        .args(&["costs", "commission=!martian { rate: 0.001 }"])
+        .fails();
+    assert!(
+        format!("{}{}", bad.stderr, bad.stdout).contains("martian"),
+        "the diagnostic should name the unknown variant, got:\n{}",
+        bad.stderr
+    );
+}
+
 /// The `SYMBOL[FREQ]:` scope on `--costs` applies to the resolution used by
 /// the run, matching against the *effective* cadence — user-set
 /// `--frequency` or, absent that, the value auto-detected from the series'
@@ -199,93 +198,37 @@ fn ibkr_preset_end_to_end() {
 /// daily bars (either explicit `-f 1d` or auto-detected); forcing an
 /// unrelated `-f 4h` disqualifies the scope and the run falls back to the
 /// default. Verified by comparing the `total_commission` cell across the
-/// two configurations.
+/// three configurations.
 #[test]
 fn scope_precedence_applies_at_run_time() {
-    let manifest = env!("CARGO_MANIFEST_DIR");
     // The strategy in examples/ trades BTC on daily bars. Set a small default
     // commission and a much larger BTC[1d]-scoped one; only the run whose
     // effective cadence is 1d takes the scoped model.
-    let costs = "commission=!percentage { rate: 0.0001 },BTC[1d]:commission=!percentage { rate: 0.05 }";
+    let costs =
+        "commission=!percentage { rate: 0.0001 },BTC[1d]:commission=!percentage { rate: 0.05 }";
+
+    let run = |name: &str, freq: Option<&str>| -> f64 {
+        let mut cmd = Cmd::new("run")
+            .arg(&at("examples/strategy.yml"))
+            .series(&at("examples/candles.csv"))
+            .arg("--quiet")
+            .costs(costs)
+            .output_dir(name);
+        if let Some(f) = freq {
+            cmd = cmd.args(&["--frequency", f]);
+        }
+        total_commission(&cmd.ok().read("metrics.yml"))
+    };
 
     // With `-f 4h` the effective cadence is 4h → BTC[1d] doesn't match, so the
     // default (0.01%) fires.
-    let out_mismatch = unique_path("fugazi_costs_scope_mismatch");
-    let _ = std::fs::remove_dir_all(&out_mismatch);
-    let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
-        .args([
-            "run",
-            &format!("@{manifest}/examples/strategy.yml"),
-            "--series",
-            &format!("@{manifest}/examples/candles.csv"),
-            "--output-dir",
-            out_mismatch.to_str().unwrap(),
-            "--frequency",
-            "4h",
-            "--quiet",
-            "--costs",
-            costs,
-        ])
-        .status()
-        .expect("failed to launch fugazi");
-    assert!(status.success());
-    let mismatch_metrics =
-        std::fs::read_to_string(out_mismatch.join("metrics.yml")).expect("metrics.yml");
-
+    let mismatch = run("fugazi_costs_scope_mismatch", Some("4h"));
     // With `-f 1d`, the BTC[1d] scoped model wins → commission > 0.
-    let out_daily = unique_path("fugazi_costs_scope_daily");
-    let _ = std::fs::remove_dir_all(&out_daily);
-    let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
-        .args([
-            "run",
-            &format!("@{manifest}/examples/strategy.yml"),
-            "--series",
-            &format!("@{manifest}/examples/candles.csv"),
-            "--output-dir",
-            out_daily.to_str().unwrap(),
-            "--frequency",
-            "1d",
-            "--quiet",
-            "--costs",
-            costs,
-        ])
-        .status()
-        .expect("failed to launch fugazi");
-    assert!(status.success());
-    let daily_metrics =
-        std::fs::read_to_string(out_daily.join("metrics.yml")).expect("metrics.yml");
-
+    let daily = run("fugazi_costs_scope_daily", Some("1d"));
     // Omitting `--frequency` altogether lets the detector pick 1d from the
     // daily-cadence CSV — same total commission as the explicit 1d run.
-    let out_detected = unique_path("fugazi_costs_scope_detected");
-    let _ = std::fs::remove_dir_all(&out_detected);
-    let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
-        .args([
-            "run",
-            &format!("@{manifest}/examples/strategy.yml"),
-            "--series",
-            &format!("@{manifest}/examples/candles.csv"),
-            "--output-dir",
-            out_detected.to_str().unwrap(),
-            "--quiet",
-            "--costs",
-            costs,
-        ])
-        .status()
-        .expect("failed to launch fugazi");
-    assert!(status.success());
-    let detected_metrics =
-        std::fs::read_to_string(out_detected.join("metrics.yml")).expect("metrics.yml");
+    let detected = run("fugazi_costs_scope_detected", None);
 
-    let extract = |m: &str| -> f64 {
-        m.lines()
-            .find_map(|l| l.trim_start().strip_prefix("total_commission:"))
-            .and_then(|s| s.trim().parse::<f64>().ok())
-            .unwrap_or_else(|| panic!("total_commission not found in:\n{m}"))
-    };
-    let mismatch = extract(&mismatch_metrics);
-    let daily = extract(&daily_metrics);
-    let detected = extract(&detected_metrics);
     // Same fill schedule; scoped rate 0.05 vs default 0.0001 → ~500× larger.
     assert!(
         daily > mismatch * 100.0,
@@ -299,43 +242,77 @@ fn scope_precedence_applies_at_run_time() {
     );
 }
 
-/// Per-leg costs for a `pairs:` strategy: `--costs 'A:...,B:...'` scopes each
-/// symbol on its own commission model, so the pairs backtest applies each
-/// leg's model to its own fills.
+/// When two `--costs` terms with the same scope are given, the later one wins
+/// (matching `--params`'s left-to-right override rule).
 #[test]
-fn pairs_run_applies_per_leg_costs() {
-    let out = unique_path("fugazi_pairs_per_leg_costs");
-    let _ = std::fs::remove_dir_all(&out);
+fn later_term_wins_at_same_scope() {
+    // Only the "wins" 5% commission.
+    let alone = run_with(&["commission=!percentage { rate: 0.05 }"], "fugazi_costs_first");
+    // The 0% is set first, then the same 5% overrides it.
+    let overridden = run_with(
+        &[
+            "commission=!percentage { rate: 0.0 }",
+            "commission=!percentage { rate: 0.05 }",
+        ],
+        "fugazi_costs_second",
+    );
+    assert_eq!(
+        total_commission(&alone.metrics),
+        total_commission(&overridden.metrics),
+        "the later term should win, reproducing the alone-5% run"
+    );
+    // Guard the guard: with the terms the other way round the 0% must win, so
+    // the run has to reproduce the zero-rate-alone run rather than the 5% one.
+    // (A zero-rate model books no commission, and the writer omits an empty
+    // `costs:` section entirely — so this compares whole documents rather than
+    // a `total_commission` cell that isn't there.)
+    let reversed = run_with(
+        &[
+            "commission=!percentage { rate: 0.05 }",
+            "commission=!percentage { rate: 0.0 }",
+        ],
+        "fugazi_costs_reversed",
+    );
+    let zero_only = run_with(
+        &["commission=!percentage { rate: 0.0 }"],
+        "fugazi_costs_zero_only",
+    );
+    assert_eq!(
+        reversed.metrics, zero_only.metrics,
+        "a trailing 0% term should win, reproducing the zero-rate-alone run"
+    );
+    assert_ne!(
+        reversed.metrics, alone.metrics,
+        "…and must not silently keep the earlier 5% term"
+    );
+}
 
-    // Two-symbol series: A stays flat at 100, B mean-reverts around 90.
-    // The strategy trades whenever the spread crosses ±3, so both legs fill.
-    let csv = unique_path("pairs_per_leg_costs.csv");
+// ---------------------------------------------------------------------------
+// Pairs runs — per-leg cost resolution
+// ---------------------------------------------------------------------------
+
+/// Two aligned 20-bar series: `A` flat at 100, `B` mean-reverting between 88
+/// and 96. The spread therefore crosses the entry (`> 8`) and exit (`< 2`)
+/// levels repeatedly, so **both legs fill several times** — which is what makes
+/// per-leg commission rates measurable.
+fn pairs_series_csv() -> String {
     let mut rows = String::from("symbol;time;open;high;low;close;volume\n");
-    let a_series = [100.0; 20];
-    let b_series = [
+    let a = [100.0; 20];
+    // `b[0]` is 90 rather than 88 so the run opens inside the band and the
+    // first entry is a genuine crossing rather than a warm-up artefact.
+    let b = [
         90.0, 96.0, 88.0, 96.0, 88.0, 96.0, 88.0, 96.0, 88.0, 96.0, 88.0, 96.0, 88.0, 96.0, 88.0,
         96.0, 88.0, 96.0, 88.0, 96.0,
     ];
-    for (i, &p) in a_series.iter().enumerate() {
-        rows.push_str(&format!(
-            "A;2024-01-{:02};{p};{p};{p};{p};1000\n",
-            i + 1
-        ));
+    for (sym, series) in [("A", &a[..]), ("B", &b[..])] {
+        for (i, &p) in series.iter().enumerate() {
+            rows.push_str(&format!("{sym};2024-01-{:02};{p};{p};{p};{p};1000\n", i + 1));
+        }
     }
-    for (i, &p) in b_series.iter().enumerate() {
-        rows.push_str(&format!(
-            "B;2024-01-{:02};{p};{p};{p};{p};1000\n",
-            i + 1
-        ));
-    }
-    std::fs::write(&csv, rows).expect("write pairs csv");
+    rows
+}
 
-    // A pairs spec that enters when spread crosses out and exits when it
-    // reverts. Signals rooted through `!pick { symbol: <SYM> }`.
-    let pairs_yaml = unique_path("pairs_per_leg_costs.yml");
-    std::fs::write(
-        &pairs_yaml,
-        r#"
+const PAIRS_YAML: &str = r#"
 left: A
 right: B
 enter: !above
@@ -348,160 +325,73 @@ exit: !below
     lhs: !close { source: !pick { symbol: A } }
     rhs: !close { source: !pick { symbol: B } }
   level: 2.0
-"#,
-    )
-    .expect("write pairs yaml");
+"#;
 
-    // Per-leg commissions: A on a 10% rate, B on a 1% rate. If the CLI applied
-    // one bundle to both legs (the pre-refactor behavior) both would carry the
-    // same commission.
-    let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
-        .arg("run")
-        .arg(format!("pairs:@{}", pairs_yaml.to_str().unwrap()))
-        .arg("--series")
-        .arg(format!("@{}", csv.to_str().unwrap()))
-        .args([
-            "--output-dir",
-            out.to_str().unwrap(),
-            "--crypto",
-            "-f",
-            "1d",
-            "--quiet",
-            "--costs",
-            "A:commission=!percentage { rate: 0.10 },B:commission=!percentage { rate: 0.01 }",
-        ])
-        .status()
-        .expect("failed to launch fugazi");
-    let _ = std::fs::remove_file(&csv);
-    let _ = std::fs::remove_file(&pairs_yaml);
-    assert!(status.success(), "fugazi pairs run exited with failure");
+/// Run the pairs fixture with `costs` (verbatim) and return the realized
+/// commission **rate** (`commission / notional`) of every fill, split by leg.
+///
+/// Reading the rate rather than the absolute commission is what makes the
+/// assertions independent of how many times the strategy happened to trade.
+fn pairs_commission_rates(out_name: &str, costs: &str) -> (Vec<f64>, Vec<f64>) {
+    let (_csv, series) = scratch_file(&format!("{out_name}_series.csv"), &pairs_series_csv());
+    let (_yml, strategy) = scratch_file(&format!("{out_name}_strategy.yml"), PAIRS_YAML);
 
-    let fills = std::fs::read_to_string(out.join("fills.csv")).expect("fills.csv");
-    let header = fills.lines().next().unwrap();
-    assert_eq!(header, "time,symbol,side,units,price,kind,commission");
+    let out = Cmd::new("run")
+        .arg(&format!("pairs:{strategy}"))
+        .series(&series)
+        .args(&["--crypto", "-f", "1d", "--quiet"])
+        .costs(costs)
+        .output_dir(out_name)
+        .ok();
 
-    // Collect commission rates (commission / notional) per leg.
-    let mut a_rates = Vec::new();
-    let mut b_rates = Vec::new();
+    let fills = out.read("fills.csv");
+    assert_eq!(
+        fills.lines().next().unwrap(),
+        COSTS_HEADER,
+        "a costed pairs run should emit the commission column"
+    );
+
+    let (mut a, mut b) = (Vec::new(), Vec::new());
     for row in fills.lines().skip(1) {
         let cols: Vec<&str> = row.split(',').collect();
-        assert_eq!(cols.len(), 7);
-        let sym = cols[1];
-        let units: f64 = cols[3].parse().unwrap();
-        let price: f64 = cols[4].parse().unwrap();
-        let commission: f64 = cols[6].parse().unwrap();
-        let notional = units * price;
-        let rate = commission / notional;
-        if sym == "A" {
-            a_rates.push(rate);
-        } else if sym == "B" {
-            b_rates.push(rate);
+        assert_eq!(cols.len(), 7, "unexpected fills.csv row: {row}");
+        let units: f64 = cols[3].parse().expect("units");
+        let price: f64 = cols[4].parse().expect("price");
+        let commission: f64 = cols[6].parse().expect("commission");
+        let rate = commission / (units * price);
+        match cols[1] {
+            "A" => a.push(rate),
+            "B" => b.push(rate),
+            other => panic!("unexpected symbol `{other}` in fills.csv"),
         }
     }
-    assert!(!a_rates.is_empty(), "expected A fills:\n{fills}");
-    assert!(!b_rates.is_empty(), "expected B fills:\n{fills}");
-    for r in &a_rates {
-        assert!((r - 0.10).abs() < 1e-6, "A leg should pay 10%: got {r}");
-    }
-    for r in &b_rates {
-        assert!((r - 0.01).abs() < 1e-6, "B leg should pay 1%: got {r}");
+    assert!(!a.is_empty(), "expected A fills:\n{fills}");
+    assert!(!b.is_empty(), "expected B fills:\n{fills}");
+    (a, b)
+}
+
+#[track_caller]
+fn assert_all_rates(rates: &[f64], want: f64, what: &str) {
+    for r in rates {
+        assert!(
+            (r - want).abs() < 1e-6,
+            "{what}: expected rate {want}, got {r}"
+        );
     }
 }
 
-/// A pairs runtime driver that lets us reuse one CSV fixture across
-/// unscoped / frequency-scoped / symbol-scoped tests. Runs the strategy
-/// with `costs` (verbatim), parses `fills.csv`, returns the per-leg
-/// commission rates (`commission / notional`) as a `(Vec<f64>, Vec<f64>)`
-/// keyed on `A`/`B`.
-fn run_pairs_with_costs(out_name: &str, costs: &str) -> (Vec<f64>, Vec<f64>) {
-    let out = unique_path(out_name);
-    let _ = std::fs::remove_dir_all(&out);
-    // Same fixture as `pairs_run_applies_per_leg_costs`: A flat, B mean-reverts.
-    let csv = out
-        .parent()
-        .unwrap()
-        .join(format!("{out_name}_series.csv"));
-    let mut rows = String::from("symbol;time;open;high;low;close;volume\n");
-    let a_series = [100.0; 20];
-    let b_series = [
-        90.0, 96.0, 88.0, 96.0, 88.0, 96.0, 88.0, 96.0, 88.0, 96.0, 88.0, 96.0, 88.0, 96.0, 88.0,
-        96.0, 88.0, 96.0, 88.0, 96.0,
-    ];
-    for (i, &p) in a_series.iter().enumerate() {
-        rows.push_str(&format!(
-            "A;2024-01-{:02};{p};{p};{p};{p};1000\n",
-            i + 1
-        ));
-    }
-    for (i, &p) in b_series.iter().enumerate() {
-        rows.push_str(&format!(
-            "B;2024-01-{:02};{p};{p};{p};{p};1000\n",
-            i + 1
-        ));
-    }
-    std::fs::write(&csv, rows).expect("write pairs csv");
-
-    let pairs_yaml = out
-        .parent()
-        .unwrap()
-        .join(format!("{out_name}_strategy.yml"));
-    std::fs::write(
-        &pairs_yaml,
-        r#"
-left: A
-right: B
-enter: !above
-  source: !sub
-    lhs: !close { source: !pick { symbol: A } }
-    rhs: !close { source: !pick { symbol: B } }
-  level: 8.0
-exit: !below
-  source: !sub
-    lhs: !close { source: !pick { symbol: A } }
-    rhs: !close { source: !pick { symbol: B } }
-  level: 2.0
-"#,
-    )
-    .expect("write pairs yaml");
-
-    let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
-        .arg("run")
-        .arg(format!("pairs:@{}", pairs_yaml.to_str().unwrap()))
-        .arg("--series")
-        .arg(format!("@{}", csv.to_str().unwrap()))
-        .args([
-            "--output-dir",
-            out.to_str().unwrap(),
-            "--crypto",
-            "-f",
-            "1d",
-            "--quiet",
-            "--costs",
-            costs,
-        ])
-        .status()
-        .expect("failed to launch fugazi");
-    let fills = std::fs::read_to_string(out.join("fills.csv")).expect("fills.csv");
-    let _ = std::fs::remove_file(&csv);
-    let _ = std::fs::remove_file(&pairs_yaml);
-    assert!(status.success(), "fugazi pairs run exited with failure");
-
-    let mut a = Vec::new();
-    let mut b = Vec::new();
-    for row in fills.lines().skip(1) {
-        let cols: Vec<&str> = row.split(',').collect();
-        let sym = cols[1];
-        let units: f64 = cols[3].parse().unwrap();
-        let price: f64 = cols[4].parse().unwrap();
-        let commission: f64 = cols[6].parse().unwrap();
-        let rate = commission / (units * price);
-        if sym == "A" {
-            a.push(rate);
-        } else if sym == "B" {
-            b.push(rate);
-        }
-    }
-    (a, b)
+/// Per-leg costs for a `pairs:` strategy: `--costs 'A:...,B:...'` scopes each
+/// symbol on its own commission model, so the pairs backtest applies each
+/// leg's model to its own fills. If the CLI applied one bundle to both legs
+/// (the pre-refactor behavior) both would carry the same rate.
+#[test]
+fn pairs_run_applies_per_leg_costs() {
+    let (a, b) = pairs_commission_rates(
+        "fugazi_pairs_per_leg_costs",
+        "A:commission=!percentage { rate: 0.10 },B:commission=!percentage { rate: 0.01 }",
+    );
+    assert_all_rates(&a, 0.10, "A leg");
+    assert_all_rates(&b, 0.01, "B leg");
 }
 
 /// An **unscoped** (global) commission applies to *every* traded symbol in a
@@ -509,14 +399,12 @@ exit: !below
 /// through to the default when no scope matches.
 #[test]
 fn pairs_run_applies_global_default_costs_to_every_leg() {
-    let (a_rates, b_rates) = run_pairs_with_costs(
+    let (a, b) = pairs_commission_rates(
         "fugazi_pairs_global_default",
         "commission=!percentage { rate: 0.03 }",
     );
-    assert!(!a_rates.is_empty() && !b_rates.is_empty());
-    for r in a_rates.iter().chain(b_rates.iter()) {
-        assert!((r - 0.03).abs() < 1e-6, "expected 3% everywhere, got {r}");
-    }
+    assert_all_rates(&a, 0.03, "A leg");
+    assert_all_rates(&b, 0.03, "B leg");
 }
 
 /// A **frequency-scoped** commission (`[1d]:commission=...`) fires for every
@@ -525,14 +413,12 @@ fn pairs_run_applies_global_default_costs_to_every_leg() {
 /// a pairs run on daily data.
 #[test]
 fn pairs_run_applies_frequency_scoped_costs_to_every_leg() {
-    let (a_rates, b_rates) = run_pairs_with_costs(
+    let (a, b) = pairs_commission_rates(
         "fugazi_pairs_freq_scope",
         "[1d]:commission=!percentage { rate: 0.05 }",
     );
-    assert!(!a_rates.is_empty() && !b_rates.is_empty());
-    for r in a_rates.iter().chain(b_rates.iter()) {
-        assert!((r - 0.05).abs() < 1e-6, "expected 5% on both legs, got {r}");
-    }
+    assert_all_rates(&a, 0.05, "A leg");
+    assert_all_rates(&b, 0.05, "B leg");
 }
 
 /// **Mixed**: an unscoped default plus a symbol-scoped override for one leg
@@ -540,74 +426,10 @@ fn pairs_run_applies_frequency_scoped_costs_to_every_leg() {
 /// leg falls back to the global default.
 #[test]
 fn pairs_run_mixes_global_default_with_symbol_override() {
-    let (a_rates, b_rates) = run_pairs_with_costs(
+    let (a, b) = pairs_commission_rates(
         "fugazi_pairs_mixed_default",
         "commission=!percentage { rate: 0.001 },A:commission=!percentage { rate: 0.05 }",
     );
-    assert!(!a_rates.is_empty() && !b_rates.is_empty());
-    for r in &a_rates {
-        assert!((r - 0.05).abs() < 1e-6, "A: symbol scope should win, got {r}");
-    }
-    for r in &b_rates {
-        assert!(
-            (r - 0.001).abs() < 1e-6,
-            "B: unscoped default should apply, got {r}"
-        );
-    }
-}
-
-/// When two `--costs` terms with the same scope are given, the later one wins
-/// (matching `--params`'s left-to-right override rule).
-#[test]
-fn later_term_wins_at_same_scope() {
-    let manifest = env!("CARGO_MANIFEST_DIR");
-    let out_first = unique_path("fugazi_costs_first");
-    let out_second = unique_path("fugazi_costs_second");
-    let _ = std::fs::remove_dir_all(&out_first);
-    let _ = std::fs::remove_dir_all(&out_second);
-
-    // First run: only the "wins" 5% commission.
-    let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
-        .args([
-            "run",
-            &format!("@{manifest}/examples/strategy.yml"),
-            "--series",
-            &format!("@{manifest}/examples/candles.csv"),
-            "--output-dir",
-            out_first.to_str().unwrap(),
-            "--quiet",
-            "--costs",
-            "commission=!percentage { rate: 0.05 }",
-        ])
-        .status()
-        .expect("failed to launch fugazi");
-    assert!(status.success());
-    let first = std::fs::read_to_string(out_first.join("metrics.yml")).unwrap();
-
-    // Second run: the 0% is set first, then 5% overrides.
-    let status = Command::new(env!("CARGO_BIN_EXE_fugazi"))
-        .args([
-            "run",
-            &format!("@{manifest}/examples/strategy.yml"),
-            "--series",
-            &format!("@{manifest}/examples/candles.csv"),
-            "--output-dir",
-            out_second.to_str().unwrap(),
-            "--quiet",
-            "--costs",
-            "commission=!percentage { rate: 0.0 }",
-            "--costs",
-            "commission=!percentage { rate: 0.05 }",
-        ])
-        .status()
-        .expect("failed to launch fugazi");
-    assert!(status.success());
-    let second = std::fs::read_to_string(out_second.join("metrics.yml")).unwrap();
-    // Same "wins" commission → same total_commission.
-    let extract = |m: &str| -> Option<String> {
-        m.lines()
-            .find(|l| l.trim_start().starts_with("total_commission:"))
-            .map(|l| l.trim().to_string())
-    };
-    assert_eq!(extract(&first), extract(&second));
+    assert_all_rates(&a, 0.05, "A leg (symbol scope should win)");
+    assert_all_rates(&b, 0.001, "B leg (unscoped default should apply)");
 }

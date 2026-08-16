@@ -1,18 +1,40 @@
 //! Cross-validation of fugazi's indicators against TA-Lib reference values.
 //!
-//! This test consumes two committed CSVs from `tests/data/`:
-//!   * `aapl_monthly.csv`   — offline OHLCV input (see tests/data/README.md).
+//! Consumes two CSVs from `tests/data/`:
+//!   * `aapl_monthly.csv`   — committed OHLCV input (see `tests/data/README.md`).
 //!   * `talib_expected.csv` — TA-Lib outputs for that input, produced by
 //!     `tools/gen_talib_fixtures.py` (run once, needs the TA-Lib library).
 //!
-//! If the expected file is absent the test **skips** (prints how to generate it)
-//! so `cargo test` stays green without TA-Lib installed. When present, fugazi is
-//! run over the identical input and compared cell-by-cell.
+//! # Why the tests are grouped the way they are
+//!
+//! The split is by *tolerance rationale*, not by indicator, because that is the
+//! only axis on which the comparisons genuinely differ:
+//!
+//! - **Exact** — non-recursive windowed math and cumulative sums. fugazi and
+//!   TA-Lib compute the same closed form over the same bars, so they must agree
+//!   to `1e-6` on **every** warmed bar, and where TA-Lib has a value fugazi must
+//!   have one too (aligned warm-up).
+//! - **Converged** — recursive smoothers. fugazi seeds each recurrence from the
+//!   first sample(s); TA-Lib seeds from an SMA (EMA family) or a summed Wilder
+//!   state (ADX family). That difference decays geometrically, so these are
+//!   compared only over the tail, at a looser tolerance.
+//!
+//! # When the fixture is absent
+//!
+//! `talib_expected.csv` is generated, and TA-Lib is not a Cargo dependency, so
+//! the suite skips when it isn't there — see `common::fixtures` for the policy
+//! and for `FUGAZI_REQUIRE_FIXTURES=1`, which turns the skip into a failure.
+//! **A skip means this file compared nothing.** `doc/CONTRIBUTING.md` lists this
+//! suite as a drift guard; [`tests/indicator_reference.rs`] is the always-running
+//! battery that holds the line when the fixture is missing.
 //!
 //! Parameters must match `tools/gen_talib_fixtures.py`.
 
-use std::path::PathBuf;
+mod common;
 
+use std::collections::BTreeMap;
+
+use common::fixtures::{Csv, skip};
 use fugazi::indicators::{
     Ad, Adx, Aroon, Atr, Bollinger, Cci, Current, Dmi, Ema, Hma, Identity, Keltner, Macd, Mfi, Obv,
     RollingMax, RollingMin, Rsi, Sar, Sma, StdDev, Stochastic, TrueRange, WilliamsR, Wma,
@@ -48,122 +70,60 @@ const SAR_MAX: Real = 0.2;
 
 /// Tolerance for indicators that share TA-Lib's exact conventions.
 const EXACT_TOL: Real = 1e-6;
-/// Looser tolerance for EMA/ATR, whose seeding differs from TA-Lib (see below);
-/// only checked over the tail of the series, where the seed difference has
-/// decayed away.
+/// Looser tolerance for the recursively-seeded family, checked over the tail
+/// only, where the differing seed has decayed away.
 const CONVERGED_TOL: Real = 2e-2;
 
-fn data_path(name: &str) -> PathBuf {
-    [env!("CARGO_MANIFEST_DIR"), "tests", "data", name]
-        .iter()
-        .collect()
+/// Every column the fixture must carry. A generated CSV predating a newly added
+/// indicator is *stale*, which skips (or fails) with the same regenerate hint as
+/// an absent one — never a mid-run panic on a missing column.
+const REQUIRED: &[&str] = &[
+    "sma10", "ema10", "rsi14", "atr14", "stddev10", "bb_upper", "bb_mid", "bb_lower", "max10_high",
+    "min10_low", "macd", "macd_signal", "macd_hist", "adx14", "plus_di14", "minus_di14", "trange",
+    "stochf_k14", "obv", "ad", "mfi14", "wma10", "hma16", "roc10", "willr14", "cci20", "aroon_up14",
+    "aroon_dn14", "aroon_osc14", "kc_upper", "kc_mid", "kc_lower", "sar",
+];
+
+const HINT: &str = "  mamba env create -f tools/environment.yml   # or: conda\n  \
+                    mamba run -n fugazi-talib python3 tools/gen_talib_fixtures.py\n  \
+                    cargo test --test talib_validation";
+
+/// fugazi's output for every cross-checked series, keyed by the fixture's
+/// column name, plus the reference CSV itself.
+struct Comparison {
+    fugazi: BTreeMap<&'static str, Vec<Option<Real>>>,
+    expected: Csv,
+    bars: usize,
 }
 
-/// Minimal CSV reader: returns (headers, rows-of-cells). No quoting/escaping —
-/// our fixtures are plain numeric CSV.
-fn read_csv(path: &PathBuf) -> Option<(Vec<String>, Vec<Vec<String>>)> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let mut lines = text.lines();
-    let headers: Vec<String> = lines.next()?.split(',').map(|s| s.trim().to_string()).collect();
-    let rows = lines
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.split(',').map(|s| s.trim().to_string()).collect())
-        .collect();
-    Some((headers, rows))
-}
-
-fn float_col(headers: &[String], rows: &[Vec<String>], name: &str) -> Vec<Real> {
-    let idx = headers.iter().position(|h| h == name).expect("missing column");
-    rows.iter().map(|r| r[idx].parse().expect("numeric")).collect()
-}
-
-/// Column of expected values, `None` for empty (warm-up / NaN) cells.
-fn opt_col(headers: &[String], rows: &[Vec<String>], name: &str) -> Vec<Option<Real>> {
-    let idx = headers.iter().position(|h| h == name).expect("missing column");
-    rows.iter()
-        .map(|r| {
-            let c = &r[idx];
-            (!c.is_empty()).then(|| c.parse().expect("numeric"))
-        })
-        .collect()
-}
-
-fn rel_close(a: Real, b: Real, tol: Real) -> bool {
-    (a - b).abs() <= tol * a.abs().max(b.abs()).max(1.0)
-}
-
-/// Compare fugazi output against the expected column at `tol`, only over indices
-/// `>= start`. Returns the number of cells actually compared.
-fn compare(
-    label: &str,
-    fugazi: &[Option<Real>],
-    expected: &[Option<Real>],
-    tol: Real,
-    start: usize,
-) -> usize {
-    let mut compared = 0;
-    for i in start..expected.len() {
-        let (Some(exp), Some(got)) = (expected[i], fugazi[i]) else {
-            // For exact-convention indicators, warm-up must align: where TA-Lib
-            // has a value, fugazi must too.
-            if expected[i].is_some() && tol == EXACT_TOL {
-                panic!("{label}[{i}]: TA-Lib has {:?} but fugazi is None", expected[i]);
-            }
-            continue;
-        };
-        assert!(
-            rel_close(got, exp, tol),
-            "{label}[{i}]: fugazi {got} vs TA-Lib {exp} (tol {tol})"
+/// Load the fixtures and run every indicator over the input, or `None` when the
+/// reference CSV is absent or stale (which [`skip`] reports or fails on).
+fn load() -> Option<Comparison> {
+    let Some(expected) = Csv::load("talib_expected.csv") else {
+        skip(
+            "talib_validation",
+            "tests/data/talib_expected.csv is not present",
+            HINT,
         );
-        compared += 1;
-    }
-    compared
-}
-
-#[test]
-fn matches_talib_reference() {
-    let expected_path = data_path("talib_expected.csv");
-    let Some((headers, rows)) = read_csv(&expected_path) else {
-        eprintln!(
-            "SKIP talib_validation: {} not found.\n\
-             Generate it with TA-Lib installed:\n  \
-             pip install TA-Lib numpy && python3 tools/gen_talib_fixtures.py\n  \
-             cargo test --test talib_validation",
-            expected_path.display()
-        );
-        return;
+        return None;
     };
-
-    // Guard against a stale fixture: if the committed CSV predates a new
-    // indicator column, skip with the same regenerate hint rather than panicking
-    // on a missing column mid-run.
-    const REQUIRED: &[&str] = &[
-        "sma10", "ema10", "rsi14", "atr14", "stddev10", "bb_upper", "bb_mid", "bb_lower",
-        "max10_high", "min10_low", "macd", "macd_signal", "macd_hist", "adx14", "plus_di14",
-        "minus_di14", "trange", "stochf_k14", "obv", "ad", "mfi14", "wma10", "hma16", "roc10",
-        "willr14", "cci20", "aroon_up14", "aroon_dn14", "aroon_osc14", "kc_upper", "kc_mid",
-        "kc_lower", "sar",
-    ];
-    if let Some(missing) = REQUIRED.iter().find(|c| !headers.iter().any(|h| h == *c)) {
-        eprintln!(
-            "SKIP talib_validation: {} is missing column `{missing}` (stale fixture).\n\
-             Regenerate it with TA-Lib installed:\n  \
-             python3 tools/gen_talib_fixtures.py\n  \
-             cargo test --test talib_validation",
-            expected_path.display()
+    if let Some(missing) = expected.missing(REQUIRED) {
+        skip(
+            "talib_validation",
+            &format!("tests/data/talib_expected.csv has no `{missing}` column (stale fixture)"),
+            HINT,
         );
-        return;
+        return None;
     }
 
-    let (ih, ir) = read_csv(&data_path("aapl_monthly.csv")).expect("input fixture present");
-    let high = float_col(&ih, &ir, "high");
-    let low = float_col(&ih, &ir, "low");
-    let close = float_col(&ih, &ir, "close");
-    let volume = float_col(&ih, &ir, "volume");
-    let n = close.len();
-    assert_eq!(rows.len(), n, "fixture row counts differ");
+    let input = Csv::require("aapl_monthly.csv");
+    let high = input.floats("high");
+    let low = input.floats("low");
+    let close = input.floats("close");
+    let volume = input.floats("volume");
+    let bars = close.len();
+    assert_eq!(expected.len(), bars, "fixture row counts differ");
 
-    // Run each fugazi indicator over the identical input.
     let mut sma = Sma::new(Identity::new(), SMA_P);
     let mut ema = Ema::new(Identity::new(), EMA_P);
     let mut rsi = Rsi::new(Identity::new(), RSI_P);
@@ -189,148 +149,217 @@ fn matches_talib_reference() {
     let mut kc = Keltner::new(Current::close(), Current::candle(), KC_EMA_P, KC_ATR_P, KC_MULT);
     let mut sar = Sar::new(Current::candle(), SAR_STEP, SAR_MAX);
 
-    let mut sma_o = Vec::with_capacity(n);
-    let mut ema_o = Vec::with_capacity(n);
-    let mut rsi_o = Vec::with_capacity(n);
-    let mut atr_o = Vec::with_capacity(n);
-    let mut sd_o = Vec::with_capacity(n);
-    let mut bb_u = Vec::with_capacity(n);
-    let mut bb_m = Vec::with_capacity(n);
-    let mut bb_l = Vec::with_capacity(n);
-    let mut max_o = Vec::with_capacity(n);
-    let mut min_o = Vec::with_capacity(n);
-    let mut macd_o = Vec::with_capacity(n);
-    let mut macd_sig_o = Vec::with_capacity(n);
-    let mut macd_hist_o = Vec::with_capacity(n);
-    let mut adx_o = Vec::with_capacity(n);
-    let mut plus_di_o = Vec::with_capacity(n);
-    let mut minus_di_o = Vec::with_capacity(n);
-    let mut tr_o = Vec::with_capacity(n);
-    let mut stoch_o = Vec::with_capacity(n);
-    let mut obv_o = Vec::with_capacity(n);
-    let mut ad_o = Vec::with_capacity(n);
-    let mut mfi_o = Vec::with_capacity(n);
-    let mut wma_o = Vec::with_capacity(n);
-    let mut hma_o = Vec::with_capacity(n);
-    let mut roc_o = Vec::with_capacity(n);
-    let mut willr_o = Vec::with_capacity(n);
-    let mut cci_o = Vec::with_capacity(n);
-    let mut aroon_up_o = Vec::with_capacity(n);
-    let mut aroon_dn_o = Vec::with_capacity(n);
-    let mut aroon_osc_o = Vec::with_capacity(n);
-    let mut dmi_plus_o = Vec::with_capacity(n);
-    let mut dmi_minus_o = Vec::with_capacity(n);
-    let mut kc_u = Vec::with_capacity(n);
-    let mut kc_m = Vec::with_capacity(n);
-    let mut kc_l = Vec::with_capacity(n);
-    let mut sar_o = Vec::with_capacity(n);
+    let mut out: BTreeMap<&'static str, Vec<Option<Real>>> = BTreeMap::new();
+    let push = |out: &mut BTreeMap<&'static str, Vec<Option<Real>>>, k, v| {
+        out.entry(k).or_default().push(v)
+    };
 
-    for i in 0..n {
-        let candle = Candle::new(close[i], high[i], low[i], close[i], volume[i]);
-        let atom: Atom = candle.into();
-        sma_o.push(sma.update(close[i]));
-        ema_o.push(ema.update(close[i]));
-        rsi_o.push(rsi.update(close[i]));
-        atr_o.push(atr.update(atom.clone()));
-        sd_o.push(sd.update(close[i]));
+    for i in 0..bars {
+        // The fixture's `open` is unused: the generator feeds TA-Lib
+        // (high, low, close, volume) only, so the input candle uses `close` for
+        // `open` to keep the two consumers reading identical numbers.
+        let atom: Atom = Candle::new(close[i], high[i], low[i], close[i], volume[i]).into();
+
+        push(&mut out, "sma10", sma.update(close[i]));
+        push(&mut out, "ema10", ema.update(close[i]));
+        push(&mut out, "rsi14", rsi.update(close[i]));
+        push(&mut out, "atr14", atr.update(atom.clone()));
+        push(&mut out, "stddev10", sd.update(close[i]));
         let b = bb.update(close[i]);
-        bb_u.push(b.map(|v| v.upper));
-        bb_m.push(b.map(|v| v.middle));
-        bb_l.push(b.map(|v| v.lower));
-        max_o.push(rmax.update(high[i]));
-        min_o.push(rmin.update(low[i]));
+        push(&mut out, "bb_upper", b.map(|v| v.upper));
+        push(&mut out, "bb_mid", b.map(|v| v.middle));
+        push(&mut out, "bb_lower", b.map(|v| v.lower));
+        push(&mut out, "max10_high", rmax.update(high[i]));
+        push(&mut out, "min10_low", rmin.update(low[i]));
         let m = macd.update(close[i]);
-        macd_o.push(m.map(|v| v.macd));
-        macd_sig_o.push(m.map(|v| v.signal));
-        macd_hist_o.push(m.map(|v| v.histogram));
+        push(&mut out, "macd", m.map(|v| v.macd));
+        push(&mut out, "macd_signal", m.map(|v| v.signal));
+        push(&mut out, "macd_hist", m.map(|v| v.histogram));
         // +DI/-DI populate (and TA-Lib emits them) `period` bars before `adx`
         // is ready, so read the public fields directly rather than the combined
         // `AdxValue`, which only surfaces once `adx` itself exists.
         adx.update(atom.clone());
-        adx_o.push(adx.adx);
-        plus_di_o.push(adx.plus_di);
-        minus_di_o.push(adx.minus_di);
-        tr_o.push(tr.update(atom.clone()));
+        push(&mut out, "adx14", adx.adx);
+        push(&mut out, "plus_di14", adx.plus_di);
+        push(&mut out, "minus_di14", adx.minus_di);
+        push(&mut out, "trange", tr.update(atom.clone()));
         // fugazi yields the stochastic in [0, 1]; TA-Lib's %K is in [0, 100].
-        stoch_o.push(stoch.update(close[i]).map(|v| v * 100.0));
-        obv_o.push(obv.update(atom.clone()));
-        ad_o.push(ad.update(atom.clone()));
-        mfi_o.push(mfi.update(atom.clone()));
-        wma_o.push(wma.update(close[i]));
-        hma_o.push(hma.update(close[i]));
-        roc_o.push(roc.update(close[i]));
-        willr_o.push(willr.update(atom.clone()));
-        cci_o.push(cci.update(atom.clone()));
+        push(&mut out, "stochf_k14", stoch.update(close[i]).map(|v| v * 100.0));
+        push(&mut out, "obv", obv.update(atom.clone()));
+        push(&mut out, "ad", ad.update(atom.clone()));
+        push(&mut out, "mfi14", mfi.update(atom.clone()));
+        push(&mut out, "wma10", wma.update(close[i]));
+        push(&mut out, "hma16", hma.update(close[i]));
+        push(&mut out, "roc10", roc.update(close[i]));
+        push(&mut out, "willr14", willr.update(atom.clone()));
+        push(&mut out, "cci20", cci.update(atom.clone()));
         let ar = aroon.update(atom.clone());
-        aroon_up_o.push(ar.map(|v| v.up));
-        aroon_dn_o.push(ar.map(|v| v.down));
-        aroon_osc_o.push(ar.map(|v| v.oscillator));
+        push(&mut out, "aroon_up14", ar.map(|v| v.up));
+        push(&mut out, "aroon_dn14", ar.map(|v| v.down));
+        push(&mut out, "aroon_osc14", ar.map(|v| v.oscillator));
+        // `Dmi` is the standalone +DI/-DI core `Adx` embeds, so it is checked
+        // against TA-Lib's PLUS_DI/MINUS_DI columns too.
         dmi.update(atom.clone());
-        dmi_plus_o.push(dmi.plus_di);
-        dmi_minus_o.push(dmi.minus_di);
+        push(&mut out, "dmi_plus", dmi.plus_di);
+        push(&mut out, "dmi_minus", dmi.minus_di);
         let k = kc.update(atom.clone());
-        kc_u.push(k.map(|v| v.upper));
-        kc_m.push(k.map(|v| v.middle));
-        kc_l.push(k.map(|v| v.lower));
-        sar_o.push(sar.update(atom));
+        push(&mut out, "kc_upper", k.map(|v| v.upper));
+        push(&mut out, "kc_mid", k.map(|v| v.middle));
+        push(&mut out, "kc_lower", k.map(|v| v.lower));
+        push(&mut out, "sar", sar.update(atom));
     }
 
-    // Exact-convention indicators: must match to EXACT_TOL across all warmed bars.
-    let mut total = 0;
-    total += compare("sma10", &sma_o, &opt_col(&headers, &rows, "sma10"), EXACT_TOL, 0);
-    total += compare("rsi14", &rsi_o, &opt_col(&headers, &rows, "rsi14"), EXACT_TOL, 0);
-    total += compare("stddev10", &sd_o, &opt_col(&headers, &rows, "stddev10"), EXACT_TOL, 0);
-    total += compare("bb_upper", &bb_u, &opt_col(&headers, &rows, "bb_upper"), EXACT_TOL, 0);
-    total += compare("bb_mid", &bb_m, &opt_col(&headers, &rows, "bb_mid"), EXACT_TOL, 0);
-    total += compare("bb_lower", &bb_l, &opt_col(&headers, &rows, "bb_lower"), EXACT_TOL, 0);
-    total += compare("max10_high", &max_o, &opt_col(&headers, &rows, "max10_high"), EXACT_TOL, 0);
-    total += compare("min10_low", &min_o, &opt_col(&headers, &rows, "min10_low"), EXACT_TOL, 0);
-    total += compare("trange", &tr_o, &opt_col(&headers, &rows, "trange"), EXACT_TOL, 0);
-    total += compare("stochf_k14", &stoch_o, &opt_col(&headers, &rows, "stochf_k14"), EXACT_TOL, 0);
-    // Volume indicators: cumulative (OBV/AD) or windowed (MFI) sums, no recursive
-    // seed, so they match TA-Lib exactly. (VWAP has no TA-Lib counterpart.)
-    total += compare("obv", &obv_o, &opt_col(&headers, &rows, "obv"), EXACT_TOL, 0);
-    total += compare("ad", &ad_o, &opt_col(&headers, &rows, "ad"), EXACT_TOL, 0);
-    total += compare("mfi14", &mfi_o, &opt_col(&headers, &rows, "mfi14"), EXACT_TOL, 0);
-    // WMA/ROC/Williams %R/CCI/Aroon are non-recursive windowed math, and HMA is
-    // pure WMA composition, so all match TA-Lib's conventions exactly. SAR is
-    // recursive but fully deterministic (no smoothed seed), so it matches too.
-    total += compare("wma10", &wma_o, &opt_col(&headers, &rows, "wma10"), EXACT_TOL, 0);
-    total += compare("hma16", &hma_o, &opt_col(&headers, &rows, "hma16"), EXACT_TOL, 0);
-    total += compare("roc10", &roc_o, &opt_col(&headers, &rows, "roc10"), EXACT_TOL, 0);
-    total += compare("willr14", &willr_o, &opt_col(&headers, &rows, "willr14"), EXACT_TOL, 0);
-    total += compare("cci20", &cci_o, &opt_col(&headers, &rows, "cci20"), EXACT_TOL, 0);
-    total += compare("aroon_up14", &aroon_up_o, &opt_col(&headers, &rows, "aroon_up14"), EXACT_TOL, 0);
-    total += compare("aroon_dn14", &aroon_dn_o, &opt_col(&headers, &rows, "aroon_dn14"), EXACT_TOL, 0);
-    total += compare("aroon_osc14", &aroon_osc_o, &opt_col(&headers, &rows, "aroon_osc14"), EXACT_TOL, 0);
-    total += compare("sar", &sar_o, &opt_col(&headers, &rows, "sar"), EXACT_TOL, 0);
-    assert!(total > 0, "no cells were compared — check fixtures");
+    Some(Comparison {
+        fugazi: out,
+        expected,
+        bars,
+    })
+}
 
-    // EMA/ATR: fugazi seeds the recurrence with the first value, whereas TA-Lib
-    // seeds with an SMA of the first `period` samples. That difference decays
-    // geometrically, so we only check the tail of the series (looser tolerance).
-    //
-    // The same applies to every other Wilder/EMA-seeded indicator:
-    //   * MACD — fast/slow/signal are all EMAs.
-    //   * ADX, +DI, -DI — TA-Lib seeds its Wilder sums differently; the gap
-    //     decays geometrically, so fugazi and TA-Lib agree to ~5 figures by the
-    //     tail even though the first warmed bars differ by ~1%.
-    let tail = n * 3 / 4;
-    compare("ema10", &ema_o, &opt_col(&headers, &rows, "ema10"), CONVERGED_TOL, tail);
-    compare("atr14", &atr_o, &opt_col(&headers, &rows, "atr14"), CONVERGED_TOL, tail);
-    compare("macd", &macd_o, &opt_col(&headers, &rows, "macd"), CONVERGED_TOL, tail);
-    compare("macd_signal", &macd_sig_o, &opt_col(&headers, &rows, "macd_signal"), CONVERGED_TOL, tail);
-    compare("macd_hist", &macd_hist_o, &opt_col(&headers, &rows, "macd_hist"), CONVERGED_TOL, tail);
-    compare("adx14", &adx_o, &opt_col(&headers, &rows, "adx14"), CONVERGED_TOL, tail);
-    compare("plus_di14", &plus_di_o, &opt_col(&headers, &rows, "plus_di14"), CONVERGED_TOL, tail);
-    compare("minus_di14", &minus_di_o, &opt_col(&headers, &rows, "minus_di14"), CONVERGED_TOL, tail);
-    // Dmi is the standalone +DI/-DI core Adx embeds; same Wilder seeding, so it
-    // tracks TA-Lib's PLUS_DI/MINUS_DI over the converged tail.
-    compare("dmi_plus", &dmi_plus_o, &opt_col(&headers, &rows, "plus_di14"), CONVERGED_TOL, tail);
-    compare("dmi_minus", &dmi_minus_o, &opt_col(&headers, &rows, "minus_di14"), CONVERGED_TOL, tail);
-    // Keltner bands TA-Lib's EMA with its ATR; both seed recursively, so (like
-    // EMA/ATR) fugazi and TA-Lib agree once the seed difference has decayed.
-    compare("kc_upper", &kc_u, &opt_col(&headers, &rows, "kc_upper"), CONVERGED_TOL, tail);
-    compare("kc_mid", &kc_m, &opt_col(&headers, &rows, "kc_mid"), CONVERGED_TOL, tail);
-    compare("kc_lower", &kc_l, &opt_col(&headers, &rows, "kc_lower"), CONVERGED_TOL, tail);
+impl Comparison {
+    /// Compare fugazi's `series` against the reference `column` from bar
+    /// `start` on, and return how many cells were actually compared.
+    #[track_caller]
+    fn compare(&self, series: &str, column: &str, tol: Real, start: usize) -> usize {
+        let got = self
+            .fugazi
+            .get(series)
+            .unwrap_or_else(|| panic!("no fugazi series `{series}`"));
+        let want = self.expected.optional_floats(column);
+        let mut compared = 0;
+        for i in start..want.len() {
+            let (Some(exp), Some(g)) = (want[i], got[i]) else {
+                // For exact-convention indicators the warm-up must align too:
+                // where TA-Lib has a value, fugazi must have one.
+                if want[i].is_some() && tol == EXACT_TOL {
+                    panic!("{series}[{i}]: TA-Lib has {:?} but fugazi is None", want[i]);
+                }
+                continue;
+            };
+            let scale = g.abs().max(exp.abs()).max(1.0);
+            assert!(
+                (g - exp).abs() <= tol * scale,
+                "{series}[{i}]: fugazi {g} vs TA-Lib {exp} (tol {tol})"
+            );
+            compared += 1;
+        }
+        compared
+    }
+
+    /// Run a batch of `(series, column)` pairs, asserting each one actually
+    /// compared cells — a silently-empty column is the failure mode this whole
+    /// suite is prone to.
+    #[track_caller]
+    fn compare_all(&self, pairs: &[(&str, &str)], tol: Real, start: usize) {
+        for &(series, column) in pairs {
+            let n = self.compare(series, column, tol, start);
+            assert!(
+                n > 0,
+                "{series}: zero cells compared against `{column}` — \
+                 the fixture column is empty or entirely warm-up"
+            );
+        }
+    }
+
+    /// Where the converged comparisons start: three quarters in, by which point
+    /// the seed difference in every recursive family has decayed well below
+    /// [`CONVERGED_TOL`].
+    fn tail(&self) -> usize {
+        self.bars * 3 / 4
+    }
+}
+
+/// Non-recursive windowed math: fugazi and TA-Lib evaluate the same closed
+/// form over the same bars, so every warmed cell must agree to `1e-6`.
+#[test]
+fn windowed_indicators_match_talib_exactly() {
+    let Some(c) = load() else { return };
+    c.compare_all(
+        &[
+            ("sma10", "sma10"),
+            ("rsi14", "rsi14"),
+            ("stddev10", "stddev10"),
+            ("bb_upper", "bb_upper"),
+            ("bb_mid", "bb_mid"),
+            ("bb_lower", "bb_lower"),
+            ("max10_high", "max10_high"),
+            ("min10_low", "min10_low"),
+            ("trange", "trange"),
+            ("stochf_k14", "stochf_k14"),
+            ("wma10", "wma10"),
+            ("hma16", "hma16"),
+            ("roc10", "roc10"),
+            ("willr14", "willr14"),
+            ("cci20", "cci20"),
+            ("aroon_up14", "aroon_up14"),
+            ("aroon_dn14", "aroon_dn14"),
+            ("aroon_osc14", "aroon_osc14"),
+            // Recursive but fully deterministic — no smoothed seed to differ on.
+            ("sar", "sar"),
+        ],
+        EXACT_TOL,
+        0,
+    );
+}
+
+/// Volume indicators: cumulative (OBV/AD) or windowed (MFI) sums with no
+/// recursive seed, so they match TA-Lib exactly. (VWAP has no TA-Lib
+/// counterpart and is covered by unit tests only.)
+#[test]
+fn volume_indicators_match_talib_exactly() {
+    let Some(c) = load() else { return };
+    c.compare_all(
+        &[("obv", "obv"), ("ad", "ad"), ("mfi14", "mfi14")],
+        EXACT_TOL,
+        0,
+    );
+}
+
+/// The recursively-seeded family. fugazi seeds each recurrence from the first
+/// sample(s); TA-Lib uses an SMA (EMA family) or a summed Wilder state (ADX
+/// family). The gap decays geometrically, so these agree over the tail even
+/// though the first warmed bars differ by ~1%.
+#[test]
+fn recursively_seeded_indicators_converge_to_talib() {
+    let Some(c) = load() else { return };
+    let tail = c.tail();
+    c.compare_all(
+        &[
+            ("ema10", "ema10"),
+            ("atr14", "atr14"),
+            ("macd", "macd"),
+            ("macd_signal", "macd_signal"),
+            ("macd_hist", "macd_hist"),
+            ("adx14", "adx14"),
+            ("plus_di14", "plus_di14"),
+            ("minus_di14", "minus_di14"),
+            ("dmi_plus", "plus_di14"),
+            ("dmi_minus", "minus_di14"),
+            ("kc_upper", "kc_upper"),
+            ("kc_mid", "kc_mid"),
+            ("kc_lower", "kc_lower"),
+        ],
+        CONVERGED_TOL,
+        tail,
+    );
+}
+
+/// Every column this suite claims to check must be one the fixture generator
+/// actually writes. Catches a `REQUIRED` entry renamed on one side only —
+/// which would otherwise present as a permanent "stale fixture" skip that
+/// regenerating never fixes.
+#[test]
+fn every_required_column_is_produced_by_the_generator() {
+    let generator = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tools/gen_talib_fixtures.py"
+    ))
+    .expect("tools/gen_talib_fixtures.py is committed");
+    for column in REQUIRED {
+        assert!(
+            generator.contains(&format!("\"{column}\"")) || generator.contains(&format!("'{column}'")),
+            "`{column}` is required by the test but never written by \
+             tools/gen_talib_fixtures.py"
+        );
+    }
 }

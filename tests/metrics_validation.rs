@@ -12,18 +12,22 @@
 //!     figure, produced by `tools/gen_metrics_fixtures.py` (run once, needs
 //!     empyrical installed).
 //!
-//! If the expected file is absent, the test **skips** (prints how to regenerate
-//! it) so `cargo test` stays green without empyrical installed. When present,
-//! fugazi is run over the identical returns and compared field-by-field.
+//! If the expected file is absent, the test **skips** (loudly) so `cargo test`
+//! stays green without empyrical installed — see `common::fixtures` for the
+//! policy and for `FUGAZI_REQUIRE_FIXTURES=1`, which turns the skip into a
+//! failure. When present, fugazi is run over the identical returns and compared
+//! field-by-field.
 //!
 //! Constants (`INITIAL_CASH`, `BARS_PER_YEAR`, `RISK_FREE_RATE`) must match
 //! `tools/gen_metrics_fixtures.py`.
 
+mod common;
+
 use fugazi::spec::metrics;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
+use common::fixtures::{data_path, skip};
 use fugazi::backtest::RunReport;
 use fugazi::prelude::*;
 
@@ -36,16 +40,12 @@ const RISK_FREE_RATE: Real = 0.0;
 /// only slack is float rounding across the two implementations.
 const EXACT_TOL: Real = 1e-9;
 
-fn data_path(name: &str) -> PathBuf {
-    [env!("CARGO_MANIFEST_DIR"), "tests", "data", name]
-        .iter()
-        .collect()
-}
-
 /// Load a two-column CSV `(header1,header2)`; returns `(header1_values,
 /// header2_values)` as parallel `Vec<String>`s. No quoting/escaping — our
-/// fixtures are plain numeric CSV.
-fn read_two_col(path: &PathBuf) -> Option<(Vec<String>, Vec<String>)> {
+/// fixtures are plain numeric CSV. (Kept local rather than moved onto
+/// `common::fixtures::Csv`: this shape is `(key, value)` rows, not a column
+/// table, and only this suite reads it.)
+fn read_two_col(path: &std::path::Path) -> Option<(Vec<String>, Vec<String>)> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut lines = text.lines();
     let _header = lines.next()?;
@@ -129,14 +129,12 @@ fn matches_empyrical_reference() {
     let (keys, values) = match read_two_col(&expected_path) {
         Some(x) => x,
         None => {
-            eprintln!(
-                "SKIP {}: run\n\
-                 \n\
-                 \tmamba env create -f tools/environment.yml   # or: conda\n\
-                 \tmamba run -n fugazi-talib python3 tools/gen_metrics_fixtures.py\n\
-                 \n\
-                 to generate the empyrical reference values.",
-                expected_path.display()
+            skip(
+                "metrics_validation",
+                "tests/data/metrics_expected.csv is not present",
+                "  mamba env create -f tools/environment.yml   # or: conda\n  \
+                 mamba run -n fugazi-talib python3 tools/gen_metrics_fixtures.py\n  \
+                 cargo test --test metrics_validation",
             );
             return;
         }
@@ -159,6 +157,16 @@ fn matches_empyrical_reference() {
         initial_equity: INITIAL_CASH,
     };
     let m = metrics::from_report(&report, BARS_PER_YEAR, RISK_FREE_RATE, None);
+
+    // A present-but-empty fixture would make the comparison loop below a no-op
+    // and the suite pass vacuously — the same silent-rot failure mode the skip
+    // policy exists to prevent, one step further in. The generator writes 28
+    // reference values; require the bulk of them.
+    assert!(
+        expected.len() >= 25,
+        "expected ~28 reference values, got {} — regenerate metrics_expected.csv",
+        expected.len()
+    );
 
     let mut mismatches: Vec<String> = Vec::new();
     for (key, &exp) in &expected {

@@ -512,3 +512,484 @@ impl<Op: ExtremeOp> WindowExtreme<Op> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::indicators::ops::{MaxOp, MinOp};
+
+    /// The four cores in this file are the crate's O(1)-per-bar shortcuts:
+    /// running sums, a monotonic deque, and an incrementally-maintained sorted
+    /// view. Each replaces an obvious O(period) computation, and each is only
+    /// correct as long as its eviction bookkeeping stays in step. These tests
+    /// are therefore **differential**: drive the core and a deliberately naive
+    /// recomputation over the same stream, and require them to agree bar for
+    /// bar. A hand-written expected series would pin one window; this pins the
+    /// eviction logic itself, which is where the bugs live.
+    ///
+    /// The stream is adversarial on purpose: repeats (so tie-breaking and the
+    /// sorted view's duplicate handling are exercised), a run of equal values
+    /// (dispersion-free windows), negatives, and a jump.
+    const STREAM: [Real; 24] = [
+        3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0, 5.0, 3.0, 5.0, 5.0, 5.0, 5.0, -2.0, -7.0, 0.0,
+        0.0, 8.0, 8.0, 8.0, 1.0, -1.0, 100.0,
+    ];
+
+    /// The trailing `period` samples ending at `end` (inclusive), or `None`
+    /// while the window is still filling.
+    fn window(end: usize, period: usize) -> Option<&'static [Real]> {
+        (end + 1 >= period).then(|| &STREAM[end + 1 - period..=end])
+    }
+
+    fn naive_mean(w: &[Real]) -> Real {
+        w.iter().sum::<Real>() / w.len() as Real
+    }
+
+    /// Two-pass population variance — the numerically stable form the O(1)
+    /// running-sums shortcut is standing in for.
+    fn naive_variance(w: &[Real]) -> Real {
+        let m = naive_mean(w);
+        w.iter().map(|x| (x - m) * (x - m)).sum::<Real>() / w.len() as Real
+    }
+
+    fn naive_central_moment(w: &[Real], k: i32) -> Real {
+        let m = naive_mean(w);
+        w.iter().map(|x| (x - m).powi(k)).sum::<Real>() / w.len() as Real
+    }
+
+    #[track_caller]
+    fn close(got: Real, want: Real, what: &str, at: usize) {
+        let scale = got.abs().max(want.abs()).max(1.0);
+        assert!(
+            (got - want).abs() <= 1e-9 * scale,
+            "{what} at sample {at}: got {got}, want {want}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // WindowStats
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn window_stats_matches_a_two_pass_recomputation() {
+        for period in [1usize, 2, 3, 7, 24] {
+            let mut stats = WindowStats::new(period);
+            for (i, &x) in STREAM.iter().enumerate() {
+                let full = stats.update(x);
+                let Some(w) = window(i, period) else {
+                    assert!(!full, "period {period}: reported full at sample {i}");
+                    continue;
+                };
+                assert!(full, "period {period}: not full at sample {i}");
+                close(stats.mean(), naive_mean(w), &format!("mean(p={period})"), i);
+                close(
+                    stats.variance(),
+                    naive_variance(w),
+                    &format!("variance(p={period})"),
+                    i,
+                );
+                close(
+                    stats.stddev(),
+                    naive_variance(w).sqrt(),
+                    &format!("stddev(p={period})"),
+                    i,
+                );
+                close(
+                    stats.mean_abs_dev(),
+                    {
+                        let m = naive_mean(w);
+                        w.iter().map(|x| (x - m).abs()).sum::<Real>() / w.len() as Real
+                    },
+                    &format!("mean_abs_dev(p={period})"),
+                    i,
+                );
+            }
+        }
+    }
+
+    /// `sample_stddev` is the Bessel-corrected (`n − 1`) form the metrics layer
+    /// and the trailing risk indicators use, so a full-window rolling Sharpe
+    /// equals the whole-run one. A single-sample window has no sample variance
+    /// and the documented answer is `0.0`, not a division by zero.
+    #[test]
+    fn sample_stddev_applies_the_bessel_correction_and_degrades_at_period_one() {
+        let mut one = WindowStats::new(1);
+        one.update(42.0);
+        assert_eq!(one.sample_stddev(), 0.0);
+
+        let period = 5;
+        let mut stats = WindowStats::new(period);
+        for (i, &x) in STREAM.iter().enumerate() {
+            stats.update(x);
+            if let Some(w) = window(i, period) {
+                let n = period as Real;
+                let want = (naive_variance(w) * n / (n - 1.0)).sqrt();
+                close(stats.sample_stddev(), want, "sample_stddev", i);
+                assert!(
+                    stats.sample_stddev() >= stats.stddev() - 1e-12,
+                    "the n−1 form must not read below the n form"
+                );
+            }
+        }
+    }
+
+    /// Downside deviation only counts samples *below* the threshold, so raising
+    /// the threshold can only raise it, and a threshold under the window
+    /// minimum makes it zero.
+    #[test]
+    fn downside_dev_counts_only_the_shortfall() {
+        let period = 6;
+        let mut stats = WindowStats::new(period);
+        for (i, &x) in STREAM.iter().enumerate() {
+            stats.update(x);
+            let Some(w) = window(i, period) else { continue };
+            for threshold in [-10.0, 0.0, 1.0, 200.0] {
+                let want = (w
+                    .iter()
+                    .map(|x| (x - threshold).min(0.0).powi(2))
+                    .sum::<Real>()
+                    / period as Real)
+                    .sqrt();
+                close(
+                    stats.downside_dev(threshold),
+                    want,
+                    &format!("downside_dev({threshold})"),
+                    i,
+                );
+            }
+            let floor = w.iter().copied().fold(Real::INFINITY, Real::min);
+            assert_eq!(
+                stats.downside_dev(floor - 1.0),
+                0.0,
+                "nothing is below a threshold under the window minimum"
+            );
+        }
+    }
+
+    #[test]
+    fn skewness_and_kurtosis_match_the_standardized_central_moments() {
+        let period = 8;
+        let mut stats = WindowStats::new(period);
+        for (i, &x) in STREAM.iter().enumerate() {
+            stats.update(x);
+            let Some(w) = window(i, period) else { continue };
+            let m2 = naive_central_moment(w, 2);
+            if m2 < MOMENT_EPS {
+                assert_eq!(stats.skewness(), 0.0);
+                assert_eq!(stats.kurtosis(), 0.0);
+                continue;
+            }
+            close(
+                stats.skewness(),
+                naive_central_moment(w, 3) / m2.powf(1.5),
+                "skewness",
+                i,
+            );
+            close(
+                stats.kurtosis(),
+                naive_central_moment(w, 4) / (m2 * m2),
+                "kurtosis",
+                i,
+            );
+        }
+    }
+
+    /// A window with no dispersion has no defined shape, and the documented
+    /// degradation is `0.0` rather than a division by a vanishing spread.
+    #[test]
+    fn a_dispersion_free_window_reports_zero_rather_than_dividing_by_nothing() {
+        let mut stats = WindowStats::new(4);
+        for _ in 0..4 {
+            stats.update(7.5);
+        }
+        assert_eq!(stats.variance(), 0.0);
+        assert_eq!(stats.stddev(), 0.0);
+        assert_eq!(stats.mean_abs_dev(), 0.0);
+        assert_eq!(stats.skewness(), 0.0);
+        assert_eq!(stats.kurtosis(), 0.0);
+        assert_eq!(stats.mean(), 7.5);
+    }
+
+    /// `variance` is computed as `E[X²] − E[X]²`, which is O(1) but loses
+    /// roughly `(mean/σ)²` in relative precision to cancellation. That is
+    /// invisible on ordinary inputs and severe on extreme ones, so the boundary
+    /// is pinned here rather than left to be discovered.
+    ///
+    /// Measured relative error on a 20-sample window: ratio `1e2` → 2e-12;
+    /// `1e3` → 2e-10; `1e7` → 1e-2. Past `1e11` the result clamps to `0.0` and
+    /// the dispersion vanishes entirely.
+    ///
+    /// **If this test starts failing on the second assertion, that is good
+    /// news** — someone replaced the shortcut with a shift-by-offset or Welford
+    /// form. Delete the assertion and widen the guarantee above it.
+    #[test]
+    fn variance_precision_is_bounded_by_the_mean_to_dispersion_ratio() {
+        let measure = |mean: Real, noise: Real| -> Real {
+            let n = 20;
+            let xs: Vec<Real> = (0..n)
+                .map(|i| mean + noise * ((i as Real * 1.7).sin()))
+                .collect();
+            let mut stats = WindowStats::new(n);
+            for &x in &xs {
+                stats.update(x);
+            }
+            let exact = naive_variance(&xs);
+            (stats.variance() - exact).abs() / exact
+        };
+
+        // Guaranteed: every regime the crate is actually driven in — equity and
+        // crypto prices against their own daily dispersion, and return series
+        // near zero — stays comfortably exact.
+        assert!(
+            measure(100.0, 1.0) < 1e-11,
+            "an equity price against unit dispersion must be exact"
+        );
+        assert!(
+            measure(100_000.0, 100.0) < 1e-9,
+            "a crypto price against 0.1% dispersion must be exact"
+        );
+        assert!(
+            measure(0.0005, 0.01) < 1e-12,
+            "a per-bar return series must be exact"
+        );
+
+        // Known limitation, pinned so it cannot silently worsen: past a ratio of
+        // ~1e7 the shortcut has lost most of its significant digits.
+        assert!(
+            measure(100_000.0, 0.01) > 1e-3,
+            "the cancellation limit moved — if variance is now accurate here, \
+             the shortcut was replaced and this assertion should be deleted"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // WindowCovariance
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn window_covariance_matches_a_two_pass_pearson() {
+        // Pair each sample with a lagged, negated copy so the correlation
+        // sweeps the whole [-1, 1] range rather than sitting near one end.
+        let ys: Vec<Real> = STREAM
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| 2.0 * x - 3.0 * STREAM[i.saturating_sub(2)])
+            .collect();
+
+        let period = 6;
+        let mut cov = WindowCovariance::new(period);
+        for i in 0..STREAM.len() {
+            cov.update(STREAM[i], ys[i]);
+            let Some(xs) = window(i, period) else { continue };
+            let yw = &ys[i + 1 - period..=i];
+            let (mx, my) = (naive_mean(xs), naive_mean(yw));
+            let vx = naive_variance(xs);
+            let vy = naive_variance(yw);
+            if vx < MOMENT_EPS || vy < MOMENT_EPS {
+                assert_eq!(cov.correlation(), 0.0, "flat leg at sample {i}");
+                continue;
+            }
+            let c: Real = xs
+                .iter()
+                .zip(yw)
+                .map(|(x, y)| (x - mx) * (y - my))
+                .sum::<Real>()
+                / period as Real;
+            close(cov.correlation(), c / (vx * vy).sqrt(), "correlation", i);
+        }
+    }
+
+    /// A series correlated with itself is exactly `1`, with its negation
+    /// exactly `-1`, and the result is clamped so round-off can never produce
+    /// a magnitude above one.
+    #[test]
+    fn correlation_of_a_series_with_itself_and_its_negation_saturates() {
+        let period = 5;
+        let (mut same, mut opposite) = (
+            WindowCovariance::new(period),
+            WindowCovariance::new(period),
+        );
+        for &x in &STREAM[..period] {
+            same.update(x, x);
+            opposite.update(x, -x);
+        }
+        assert!((same.correlation() - 1.0).abs() < 1e-12);
+        assert!((opposite.correlation() + 1.0).abs() < 1e-12);
+        assert!(same.correlation() <= 1.0 && opposite.correlation() >= -1.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // WmaState
+    // -----------------------------------------------------------------------
+
+    /// The O(1) slide (`weighted − sum + period·x`) has to reproduce the
+    /// explicit `Σ kᵢ·xᵢ / Σ kᵢ` on every window, including the first full one
+    /// where a different branch runs.
+    #[test]
+    fn wma_state_matches_explicit_linear_weights() {
+        for period in [1usize, 2, 5, 9] {
+            let mut wma = WmaState::new(period);
+            for (i, &x) in STREAM.iter().enumerate() {
+                let got = wma.update(x);
+                match window(i, period) {
+                    None => assert_eq!(got, None, "period {period} at sample {i}"),
+                    Some(w) => {
+                        let denom = (period * (period + 1) / 2) as Real;
+                        let want = w
+                            .iter()
+                            .enumerate()
+                            .map(|(k, x)| (k + 1) as Real * x)
+                            .sum::<Real>()
+                            / denom;
+                        close(got.expect("full window"), want, &format!("wma(p={period})"), i);
+                    }
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // quantile_of_sorted / WindowQuantile
+    // -----------------------------------------------------------------------
+
+    /// R type-7 (numpy's default): `idx = p·(n−1)`, interpolated between the
+    /// bracketing order statistics. These are the values `numpy.percentile`
+    /// returns for the same input — the convention the whole crate shares, so
+    /// an indicator's 5th percentile and a report's 5th percentile agree.
+    #[test]
+    fn quantile_of_sorted_follows_r_type_7() {
+        let xs = [1.0, 2.0, 3.0, 4.0];
+        for (p, want) in [
+            (0.0, 1.0),
+            (0.25, 1.75),
+            (0.5, 2.5),
+            (0.75, 3.25),
+            (1.0, 4.0),
+            (1.0 / 3.0, 2.0),
+        ] {
+            close(quantile_of_sorted(&xs, p), want, &format!("q({p})"), 0);
+        }
+        // Degenerate shapes have defined answers rather than an index panic.
+        assert_eq!(quantile_of_sorted(&[], 0.5), 0.0);
+        assert_eq!(quantile_of_sorted(&[9.0], 0.5), 9.0);
+        assert_eq!(quantile_of_sorted(&[9.0], 0.0), 9.0);
+    }
+
+    /// The incrementally-maintained sorted view must equal a freshly sorted
+    /// copy of the window — the property that eviction by value (a binary
+    /// search for *an* equal element) preserves. The stream's repeated values
+    /// are what make that non-trivial.
+    #[test]
+    fn window_quantile_matches_re_sorting_the_window() {
+        for period in [1usize, 3, 5, 12] {
+            let mut q = WindowQuantile::new(period);
+            for (i, &x) in STREAM.iter().enumerate() {
+                let full = q.update(x);
+                let Some(w) = window(i, period) else {
+                    assert!(!full);
+                    continue;
+                };
+                assert!(full);
+                let mut sorted = w.to_vec();
+                sorted.sort_by(cmp_asc);
+                for p in [0.0, 0.1, 0.5, 0.9, 1.0] {
+                    close(
+                        q.quantile(p),
+                        quantile_of_sorted(&sorted, p),
+                        &format!("quantile(p={p}, period={period})"),
+                        i,
+                    );
+                }
+                for &probe in w {
+                    let below = sorted.iter().filter(|v| **v <= probe).count();
+                    close(
+                        q.rank_of(probe),
+                        below as Real / period as Real,
+                        &format!("rank_of({probe}, period={period})"),
+                        i,
+                    );
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // WindowExtreme
+    // -----------------------------------------------------------------------
+
+    /// The monotonic deque must equal a brute-force scan of the same window,
+    /// and `since()` must report the gap back to the extremum — with the
+    /// **most recent** occurrence winning a tie, which the runs of equal
+    /// values in the stream exercise directly.
+    #[test]
+    fn window_extreme_matches_a_brute_force_scan() {
+        for period in [1usize, 2, 4, 10] {
+            let mut max: WindowExtreme<MaxOp> = WindowExtreme::new(period);
+            let mut min: WindowExtreme<MinOp> = WindowExtreme::new(period);
+            for (i, &x) in STREAM.iter().enumerate() {
+                let (got_max, got_min) = (max.update(x), min.update(x));
+                let Some(w) = window(i, period) else {
+                    assert_eq!(got_max, None, "period {period} at sample {i}");
+                    assert_eq!(got_min, None, "period {period} at sample {i}");
+                    assert_eq!(max.since(), None);
+                    continue;
+                };
+                let want_max = w.iter().copied().fold(Real::NEG_INFINITY, Real::max);
+                let want_min = w.iter().copied().fold(Real::INFINITY, Real::min);
+                assert_eq!(got_max, Some(want_max), "max(p={period}) at {i}");
+                assert_eq!(got_min, Some(want_min), "min(p={period}) at {i}");
+
+                // Ties resolve to the newest occurrence, so `since` is the
+                // smallest gap that attains the extremum.
+                let newest = |target: Real| {
+                    w.len() - 1 - w.iter().rposition(|v| *v == target).expect("in window")
+                };
+                assert_eq!(max.since(), Some(newest(want_max)), "since_max at {i}");
+                assert_eq!(min.since(), Some(newest(want_min)), "since_min at {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn reset_returns_window_extreme_to_its_constructed_state() {
+        let mut ext: WindowExtreme<MaxOp> = WindowExtreme::new(3);
+        for &x in &STREAM[..8] {
+            ext.update(x);
+        }
+        ext.reset();
+        assert_eq!(ext.since(), None);
+        let mut fresh: WindowExtreme<MaxOp> = WindowExtreme::new(3);
+        for &x in &STREAM[..5] {
+            assert_eq!(ext.update(x), fresh.update(x));
+        }
+    }
+
+    /// `cmp_asc` treats `NaN` as equal to everything so the ordered reads never
+    /// panic on a comparator returning `None` — `sort_unstable_by` and
+    /// `binary_search_by` both do.
+    #[test]
+    fn nan_tolerant_ordering_keeps_the_sorted_reads_from_panicking() {
+        assert_eq!(cmp_asc(&1.0, &2.0), std::cmp::Ordering::Less);
+        assert_eq!(cmp_asc(&2.0, &1.0), std::cmp::Ordering::Greater);
+        assert_eq!(cmp_asc(&Real::NAN, &1.0), std::cmp::Ordering::Equal);
+
+        let mut q = WindowQuantile::new(3);
+        for x in [1.0, Real::NAN, 2.0, 3.0] {
+            q.update(x);
+        }
+        // The point is that it did not panic; the value with a NaN in the
+        // window is deliberately unspecified.
+        let _ = q.quantile(0.5);
+    }
+
+    /// Every core asserts a positive period rather than silently producing an
+    /// empty window that would divide by zero downstream.
+    #[test]
+    fn a_zero_period_is_refused_by_every_core() {
+        assert!(std::panic::catch_unwind(|| WindowStats::new(0)).is_err());
+        assert!(std::panic::catch_unwind(|| WindowCovariance::new(0)).is_err());
+        assert!(std::panic::catch_unwind(|| WmaState::new(0)).is_err());
+        assert!(std::panic::catch_unwind(|| WindowQuantile::new(0)).is_err());
+        assert!(std::panic::catch_unwind(|| WindowExtreme::<MaxOp>::new(0)).is_err());
+    }
+}

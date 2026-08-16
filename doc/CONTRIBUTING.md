@@ -16,6 +16,7 @@ Most of the cost of a change is remembering the third and fourth.
 - [Add a metric](#add-a-metric)
 - [Add a remote provider](#add-a-remote-provider)
 - [Add a sizing recipe](#add-a-sizing-recipe)
+- [Where a test goes](TESTING.md#where-a-test-goes) *(in doc/TESTING.md)*
 - [Work in progress](#work-in-progress)
 - [Release a version](#release-a-version)
 - [The drift guards](#the-drift-guards)
@@ -27,13 +28,17 @@ Most of the cost of a change is remembering the third and fourth.
 
 ```sh
 cargo build                                        # library + CLI
-cargo test -p fugazi                               # 960+ tests, incl. doctests
+cargo test -p fugazi                               # 1100+ tests, incl. doctests
 cargo clippy -p fugazi --all-targets -- -D warnings # CI gate; keep it clean
 
 cd python && maturin develop && pytest             # bindings
 ```
 
-Two repo-specific rules:
+[doc/TESTING.md](TESTING.md) is the map of the test suite — the four layers,
+where a given change's test belongs, the shared `tests/common/` harness, and the
+fixture skip-vs-fail policy. Read it before adding a test file or a helper.
+
+Three repo-specific rules:
 
 - **Do not run `cargo fmt` across the repo.** The tree is not rustfmt-clean
   (~95 files differ) and CI does not check formatting. A blanket reformat buries
@@ -44,14 +49,19 @@ Two repo-specific rules:
   already exists. This repo has been bitten by it: six `evaluate*` bodies
   independently inlined a block byte-identical to `schema_from_snapshots`, forty
   lines above them.
+- **The same rule applies in `tests/`.** Each file there is its own crate, so
+  shared harness code is `mod common;`-included, not imported — check
+  `tests/common/` before writing a bar builder, a temp path, a binary
+  invocation, or a mock server. This repo has been bitten by that one too:
+  `unique_path` and `serve` each existed byte-identical in two files.
 
 ---
 
 ## Add an indicator
 
 The worked example is a rolling `Real → Real` indicator, the most common shape.
-Seven places, in dependency order. Three are enforced (you cannot get them wrong
-silently); four are not, so do them deliberately.
+Nine places, in dependency order. Three are enforced (you cannot get them wrong
+silently); the rest are not, so do them deliberately.
 
 ### 1. The indicator itself — `src/indicators/<name>.rs`
 
@@ -181,7 +191,29 @@ from the sample count alone), it does not belong in this battery — `IfElse` an
 in `warm_up_is_exact_for_composition` with a one-line reason, and test its
 readiness some other way. Do not weaken `assert_exact_warm_up` to accommodate it.
 
-### 8. Docs
+### 8. The numeric reference — `tests/indicator_reference.rs`
+
+`warm_up.rs` pins *when* the first value lands; this pins *what it is*. Add a
+case with expected values **derived by hand from your formula**, and put the
+derivation in the doc comment above it, over an input short enough to check by
+eye:
+
+```rust
+/// SMA(3) of `1..5` is the mean of each trailing triple: `(1+2+3)/3 = 2`, …
+#[test]
+fn sma_is_the_mean_of_its_window() {
+    let got = run(Sma::new(Identity::new(), 3), RAMP.to_vec());
+    assert_series(&got, &warm(2, &[2.0, 3.0, 4.0]), "sma3");
+}
+```
+
+**Do not paste in what the implementation currently prints.** A golden master
+agrees with any bug already present. If the value is only defensible against
+another library's convention (TA-Lib's ADX seeding, say), it belongs in
+`tests/talib_validation.rs` instead — with a column added to
+`tools/gen_talib_fixtures.py` and to that file's `REQUIRED` list.
+
+### 9. Docs
 
 `doc/STRATEGIES.md` for the tag reference, `README.md` if it's headline-worthy,
 `python/README.md` if the Python call shape is non-obvious.
@@ -409,14 +441,23 @@ Each answer is a different product, and the crate deliberately has no
 
 ## Release a version
 
-Four manifests must agree; `cargo check` only catches the Rust drift.
+**Six** places must agree; `cargo check` only catches the Rust drift. (Keep this
+list in step with the one in [CLAUDE.md](../CLAUDE.md#bumping-the-version--sync-seven-places-cargo-check-only-catches-rust-drift),
+which is the copy read every session.)
 
-1. `Cargo.toml` — `X.Y.Z`
-2. `python/Cargo.toml` — `X.Y.Z`
-3. `python/pyproject.toml` — `X.Y.Z`
-4. `README.md` — the `## Install` snippet, `fugazi = "X.Y"` (major.minor only)
+1. `Cargo.toml` — the workspace root, `X.Y.Z`
+2. `Cargo.toml` — **and** its `fugazi-derive = { …, version = "X.Y.Z" }` pin,
+   which must match (4) or `cargo` errors
+3. `fugazi-derive/Cargo.toml` — the proc-macro crate, `X.Y.Z`
+4. `python/Cargo.toml` — `X.Y.Z`
+5. `python/pyproject.toml` — `X.Y.Z`
+6. `README.md` — the `## Install` snippet, `fugazi = "X.Y"` (major.minor only)
 
-Then `cargo check --workspace` to refresh `Cargo.lock`, commit the five files,
+Plus `python/uv.lock`'s `[[package]] name = "fugazi"` entry. Nothing reads it
+(CI installs via `maturin` + `pip`), so it drifts silently — it sat at `0.42.0`
+through nine releases. One line; keep it honest.
+
+Then `cargo check --workspace` to refresh `Cargo.lock`, commit the manifests,
 tag `vX.Y.Z`, and push the tag. Then **publish a GitHub Release** for that tag
 (`gh release create vX.Y.Z --generate-notes`, or Releases → Draft a new release).
 **Publishing the release triggers a GitHub workflow that publishes to crates.io
@@ -447,7 +488,21 @@ When one of these fails, it is telling you something specific:
 | `test_parity.py::test_every_*_tag_is_bound_or_declared_unbound` | A tag has no Python counterpart and no recorded reason. |
 | `test_parity.py::test_the_declared_tables_do_not_go_stale` | A tag left the spec layer but its parity entry didn't. |
 | `warm_up_is_exact_for_*` | `warm_up_period()` disagrees with when the first `Some` actually lands. |
-| `tests/talib_validation.rs` | An indicator's numbers drifted from the TA-Lib reference. |
+| `tests/indicator_reference.rs` | An indicator's numbers drifted from its own definition. Always runs. |
+| `tests/talib_validation.rs` | An indicator's numbers drifted from the TA-Lib reference. **Skips** without the generated fixture — see below. |
+| `tests/driver_contract.rs` | `backtest::run`'s per-bar order or readiness gating changed. |
+
+**Two of these can disable themselves.** `talib_validation` and
+`metrics_validation` compare against an external library and skip when their
+generated fixture is absent, so `cargo test` stays green for a contributor who
+has neither installed — but a skip is indistinguishable from a pass, and
+`talib_expected.csv` is not committed, so on a clean checkout the TA-Lib
+cross-check compares **nothing**. Run them with `FUGAZI_REQUIRE_FIXTURES=1` to
+turn every missing-or-stale fixture into a failure; that is the mode a CI job
+that provisions the reference libraries should use.
+`tests/indicator_reference.rs` is the unconditional battery that holds the
+numeric line meanwhile — its expected values are hand-derived from each
+indicator's definition, so it needs no fixture.
 
 The expected side of the catalogue and parity tests is read off **serde's own
 variant list** (`spec::typecheck::known_expr_tags` and friends), so it stays
@@ -481,17 +536,21 @@ through `atom_src`, not `atom_src_any`.
 takes `&self` and a `&mut dyn Wallet`. Don't add a price argument to reach past
 it.
 
-The one exception is `Portfolio`, which ignores the wallet it is handed and
-trades its own — a single **substrate** wallet (`Box<dyn Wallet + Send>`, built
-by a `SubstrateFactory`) that every child's flow is netted onto. Children trade
-notional ledgers over it, so the same composite runs on paper or against a live
-account with nothing else changing. That makes pairing a
-caller obligation, enforced two ways: `Portfolio::run(snapshots)` removes the
-pairing entirely (prefer it), and `Portfolio::trade` panics if a bar the driver
-would have priced went by without this portfolio's own composite wallet seeing
-it — which is also what catches a `Portfolio` used as a child of another
-`Portfolio`. If you add a shape that owns wallets, do the same; a silently flat
-equity curve is the failure mode to design against.
+`Portfolio` bends this the least of anything you might expect. It **trades the
+wallet `backtest::run` hands it** like every other strategy; what it adds is a
+`Ledger` per child, and a `LedgerWallet` seam so a child's `value_frac(1.0)`
+still means "all of *my* equity". Children's intents are netted into one order
+per symbol on that one account. It does **not** own a wallet, and the
+`SubstrateFactory` / `PortfolioWallet` view / mis-pairing guard that an earlier
+design used are gone — see *Superseded, do not reintroduce* in
+[ARCHITECTURE](ARCHITECTURE.md#portfoliosym-srcportfolio) before recreating any
+of them.
+
+The one guard that remains is structural: `PortfolioBuilder::add` **panics on a
+`Portfolio` child**. Nesting compiles (a `Portfolio` satisfies `add`'s bounds)
+but cannot work, and a silently flat equity curve is the failure mode to design
+against. If you add a shape that composes strategies, refuse the impossible
+wiring at build time the same way — loudly, not by producing zeros.
 
 **Not a rule engine.** `SingleAssetStrategy` is four signal slots plus
 protective levels. Don't add `(signal, action)` tables without being asked.
