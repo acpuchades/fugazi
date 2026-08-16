@@ -48,7 +48,8 @@ use tokio::task::JoinSet;
 use fugazi::prelude::*;
 use fugazi::sources::{
     self, Binance, BinanceVision, Coinbase, CoinGecko, Interval, Okx, SeriesSource,
-    Timestamp, Yahoo, binance::binance_schema, okx::okx_schema, yahoo::yahoo_schema,
+    Timestamp, Yahoo, binance::binance_schema, binance_vision::binance_vision_schema,
+    coingecko::coingecko_schema, okx::okx_schema, yahoo::yahoo_schema,
 };
 
 use serde_json::Value as Json;
@@ -246,52 +247,104 @@ fn parse_spec_arg(s: &str) -> Result<(Vec<FetchSpec>, Option<DatasetMeta>)> {
     }
 }
 
-/// The remote candle providers this CLI can fetch from. Kept as `(name,
-/// description)` so `fugazi list sources` and the "unknown provider" error
-/// message both render from the same table — no drift possible.
-pub(crate) const KNOWN_PROVIDERS: &[(&str, &str)] = &[
-    (
-        "binance",
-        "Binance spot klines endpoint (BTC/ETH/... vs. USDT/EUR/...)",
-    ),
-    (
-        "binance-vision",
-        "Binance spot klines from the public archive (data.binance.vision) — \
-         deeper and cheaper than the live endpoint, one request per month and no \
-         rate limit, at the cost of a ~2-day lag. Same columns as `binance`",
-    ),
-    (
-        "binance-vision-futures",
-        "Binance USDⓈ-M perpetual klines from the same archive, plus the side \
-         channels only a derivative has: funding rate (summed within a bar, so \
-         `[1d]` is that day's carry), premium index, open interest and the \
-         long/short ratios. Hourly to daily only",
-    ),
-    (
-        "okx",
-        "OKX spot candlesticks endpoint (symbols are dash-separated: `BTC-USDT`, \
-         `ETH-USDT`). Day/week/month bars are UTC-aligned",
-    ),
-    (
-        "coinbase",
-        "Coinbase Advanced Trade candles endpoint (symbols are dash-separated \
-         product ids: `BTC-USD`, `ETH-USD`). Fixed cadences only: 1m/5m/15m/30m, \
-         1h/2h/6h, 1d",
-    ),
-    (
-        "cg",
-        "CoinGecko market cap / volume / supply — overlay columns only, no OHLCV \
-         (symbols are coin ids: `bitcoin`, not `BTC`)",
-    ),
-    (
-        "csv",
-        "Local OHLCV CSV — spec is `csv:PATH` (no `[freq]` bracket)",
-    ),
-    (
-        "yfinance",
-        "Yahoo Finance chart endpoint (stocks, ETFs, indices, FX)",
-    ),
+/// One row of [`KNOWN_PROVIDERS`].
+pub(crate) struct ProviderInfo {
+    /// The name used in a fetch spec's `provider:` position.
+    pub name: &'static str,
+    /// One-line description, rendered by `fugazi list sources`.
+    pub description: &'static str,
+    /// The provider's canonical overlay [`Schema`], when it is knowable
+    /// before the fetch. `None` means "OHLCV only, or discovered from the
+    /// data" — Coinbase publishes no extras, and `csv:` takes its columns
+    /// from the file.
+    pub schema: Option<fn() -> Arc<Schema>>,
+}
+
+/// The remote candle providers this CLI can fetch from.
+///
+/// Every provider-keyed lookup in this module reads *this* table:
+/// `fugazi list sources`, the "unknown provider" error, [`fetch`],
+/// [`tickers_of`], and the pre-roll schema resolution in [`run_candles`].
+/// They used to be four separate matches on the same strings, and the schema
+/// one had already fallen behind — `binance-vision`, `binance-vision-futures`
+/// and `cg` all publish real overlay columns but resolved to
+/// [`Schema::empty`], so an overlay reading `funding_rate` was rejected as
+/// "no overlay side channel is bound" against the one provider that has it.
+pub(crate) const KNOWN_PROVIDERS: &[ProviderInfo] = &[
+    ProviderInfo {
+        name: "binance",
+        description: "Binance spot klines endpoint (BTC/ETH/... vs. USDT/EUR/...)",
+        schema: Some(|| binance_schema().clone()),
+    },
+    ProviderInfo {
+        name: "binance-vision",
+        description:
+            "Binance spot klines from the public archive (data.binance.vision) — \
+             deeper and cheaper than the live endpoint, one request per month and no \
+             rate limit, at the cost of a ~2-day lag. Same columns as `binance`",
+        schema: Some(|| binance_vision_schema(sources::binance_vision::Market::Spot).clone()),
+    },
+    ProviderInfo {
+        name: "binance-vision-futures",
+        description:
+            "Binance USDⓈ-M perpetual klines from the same archive, plus the side \
+             channels only a derivative has: funding rate (summed within a bar, so \
+             `[1d]` is that day's carry), premium index, open interest and the \
+             long/short ratios. Hourly to daily only",
+        schema: Some(|| {
+            binance_vision_schema(sources::binance_vision::Market::UsdMFutures).clone()
+        }),
+    },
+    ProviderInfo {
+        name: "okx",
+        description:
+            "OKX spot candlesticks endpoint (symbols are dash-separated: `BTC-USDT`, \
+             `ETH-USDT`). Day/week/month bars are UTC-aligned",
+        schema: Some(|| okx_schema().clone()),
+    },
+    ProviderInfo {
+        name: "coinbase",
+        description:
+            "Coinbase Advanced Trade candles endpoint (symbols are dash-separated \
+             product ids: `BTC-USD`, `ETH-USD`). Fixed cadences only: 1m/5m/15m/30m, \
+             1h/2h/6h, 1d",
+        schema: None,
+    },
+    ProviderInfo {
+        name: "cg",
+        description:
+            "CoinGecko market cap / volume / supply — overlay columns only, no OHLCV \
+             (symbols are coin ids: `bitcoin`, not `BTC`)",
+        schema: Some(|| coingecko_schema().clone()),
+    },
+    ProviderInfo {
+        name: "csv",
+        description: "Local OHLCV CSV — spec is `csv:PATH` (no `[freq]` bracket)",
+        schema: None,
+    },
+    ProviderInfo {
+        name: "yfinance",
+        description: "Yahoo Finance chart endpoint (stocks, ETFs, indices, FX)",
+        // The CLI fetches Yahoo with the provider default (adjusted candles
+        // + a `raw_close` overlay).
+        schema: Some(|| yahoo_schema(true).clone()),
+    },
 ];
+
+/// The [`ProviderInfo`] for `name`, if this CLI knows it.
+pub(crate) fn provider_info(name: &str) -> Option<&'static ProviderInfo> {
+    KNOWN_PROVIDERS.iter().find(|p| p.name == name)
+}
+
+/// The canonical overlay schema for `name` — empty when the provider
+/// publishes none, or when the name is unknown (the fetch itself reports
+/// that, with a better message than a schema lookup could).
+fn provider_schema(name: &str) -> Arc<Schema> {
+    provider_info(name)
+        .and_then(|p| p.schema)
+        .map(|f| f())
+        .unwrap_or_else(Schema::empty)
+}
 
 /// One `[OUTPUT=]QUERY[freq,freq,...]` entry in the CLI spec.
 ///
@@ -581,16 +634,10 @@ fn run_candles(
                 n_symbols += symbols.len();
                 // The remote provider's canonical Schema — Binance's four
                 // kline extras, Yahoo's `raw_close` (its candles are adjusted
-                // by default). Every atom in a fetch will bind to this via
+                // by default), the archive's funding/open-interest channels.
+                // Every atom in a fetch will bind to this via
                 // `OverlayInfo::new(schema, ...)`.
-                let schema = match provider.as_str() {
-                    "binance" => binance_schema().clone(),
-                    "okx" => okx_schema().clone(),
-                    // The CLI fetches Yahoo with the provider default (adjusted
-                    // candles + `raw_close` overlay).
-                    "yfinance" => yahoo_schema(true).clone(),
-                    _ => Schema::empty(),
-                };
+                let schema = provider_schema(provider);
                 for sym in symbols {
                     for &freq in &sym.freqs {
                         let stable = overlay::stable_period_for(
@@ -1260,7 +1307,7 @@ pub(crate) async fn tickers_of(provider: &str) -> Result<Vec<String>> {
 }
 
 fn unknown_provider_error(other: &str) -> String {
-    let known: Vec<&str> = KNOWN_PROVIDERS.iter().map(|(n, _)| *n).collect();
+    let known: Vec<&str> = KNOWN_PROVIDERS.iter().map(|p| p.name).collect();
     format!(
         "unknown provider {other:?}. Known providers: {}",
         known.join(", ")
@@ -1885,5 +1932,40 @@ mod tests {
         assert_eq!(format_f64(27000.0), "27000");
         assert_eq!(format_f64(27000.5), "27000.5");
         assert_eq!(format_f64(0.00012345), "0.00012345");
+    }
+
+    #[test]
+    fn every_provider_that_publishes_a_schema_resolves_to_it() {
+        // The regression: this lookup was a separate `match` listing only
+        // binance / okx / yfinance, so the three below fell to `Schema::empty`
+        // and an overlay reading one of their columns was rejected as "no
+        // overlay side channel is bound" — against the very provider that
+        // publishes it.
+        for (provider, column) in [
+            ("binance", "quote_volume"),
+            ("okx", "quote_volume"),
+            ("yfinance", "raw_close"),
+            ("binance-vision", "quote_volume"),
+            ("binance-vision-futures", "funding_rate"),
+            ("cg", "market_cap"),
+        ] {
+            let schema = provider_schema(provider);
+            assert!(
+                schema.contains(column),
+                "provider `{provider}` should publish `{column}`, got {:?}",
+                schema.keys().collect::<Vec<_>>(),
+            );
+        }
+    }
+
+    #[test]
+    fn providers_without_extras_resolve_to_an_empty_schema() {
+        // Coinbase is OHLCV-only; `csv:` takes its columns from the file.
+        for provider in ["coinbase", "csv"] {
+            assert!(provider_schema(provider).is_empty(), "{provider}");
+        }
+        // An unknown name resolves to empty rather than aborting — the fetch
+        // itself reports the bad provider, with a better message.
+        assert!(provider_schema("nope").is_empty());
     }
 }

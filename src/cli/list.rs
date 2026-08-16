@@ -25,7 +25,7 @@ use anyhow::{Context, Result};
 use clap::Subcommand;
 use tokio::runtime::Builder as RuntimeBuilder;
 
-use super::get::{KNOWN_PROVIDERS, tickers_of};
+use super::get::{KNOWN_PROVIDERS, ProviderInfo, tickers_of};
 use crate::glob;
 use crate::style;
 
@@ -297,11 +297,12 @@ fn column_widths(widths: &[usize], cols: usize) -> Vec<usize> {
 /// provider name so the descriptions line up regardless of how the list grows.
 /// No title line of its own — the banner printed by [`run`] already names the
 /// command.
-fn write_sources<W: Write>(w: &mut W, providers: &[(&str, &str)]) -> io::Result<()> {
+fn write_sources<W: Write>(w: &mut W, providers: &[ProviderInfo]) -> io::Result<()> {
     writeln!(w, "  Spec grammar: <provider>:<symbol>[<freq>,...](,<symbol>[<freq>,...])*")?;
     writeln!(w)?;
-    let name_width = providers.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
-    for (name, doc) in providers {
+    let name_width = providers.iter().map(|p| p.name.len()).max().unwrap_or(0);
+    for p in providers {
+        let (name, doc) = (p.name, p.description);
         writeln!(w, "    {name:<name_width$}  {doc}")?;
     }
     Ok(())
@@ -541,7 +542,8 @@ mod tests {
         write_sources(&mut buf, KNOWN_PROVIDERS).unwrap();
         let text = String::from_utf8(buf).unwrap();
         assert!(text.contains("Spec grammar"));
-        for (name, doc) in KNOWN_PROVIDERS {
+        for p in KNOWN_PROVIDERS {
+            let (name, doc) = (p.name, p.description);
             assert!(text.contains(name), "missing provider `{name}` in output");
             assert!(text.contains(doc), "missing description for `{name}` in output");
         }
