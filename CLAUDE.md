@@ -50,6 +50,22 @@ calls — reach for closed-form first.
 
 ## Commands
 
+**Before pushing, run `scripts/ci-local.sh`** — it runs exactly what
+`.github/workflows/ci.yml` runs, in the same order, with the same env. `cargo test`
+plus `cargo clippy` is *not* the gate and never was: three CI checks fire nowhere
+else, and each has already broken a green local tree.
+
+| Only checked by | Command |
+|---|---|
+| rustdoc lints (`redundant_explicit_links`, doc-comment reattachment) | `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p fugazi` |
+| `python/src` — ~11k lines every other clippy scopes past with `-p fugazi` | `cargo clippy -p fugazi-python --all-targets -- -D warnings` |
+| the feature matrix — `live` compiles in no other job | `cargo check/clippy -p fugazi --no-default-features --features <f> --lib` |
+
+`scripts/ci-local.sh [rust|version-sync|features|python]` runs one job;
+`FAST=1` skips the feature matrix and the wheel rebuild for an inner loop — not
+enough before a push. **`tests/ci_mirror.rs` fails if the script and the workflow
+drift**, so adding a CI step means adding it to the script too.
+
 - Build: `cargo build`; Test: `cargo test`; Lint: `cargo clippy --all-targets` (keep
   clean); Docs: `cargo doc --open`
 - `FUGAZI_REQUIRE_FIXTURES=1 cargo test` — makes the two cross-validation suites

@@ -151,6 +151,12 @@ compile rather than silently losing state on resume.
 dropped an entry while refactoring" into a failure rather than a quietly
 narrower sweep.
 
+**Guard the tooling too, not just the code.** `ci_mirror.rs` compares
+`scripts/ci-local.sh` against `.github/workflows/ci.yml` command by command,
+because a local gate that has silently fallen behind CI is worse than no local
+gate: it reports green and the push goes red. It checks one direction only — the
+script may run *more* than CI, never less.
+
 ---
 
 ## Fixtures, and the skip-vs-fail policy

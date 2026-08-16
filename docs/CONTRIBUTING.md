@@ -29,10 +29,26 @@ Most of the cost of a change is remembering the third and fourth.
 ```sh
 cargo build                                        # library + CLI
 cargo test -p fugazi                               # 1100+ tests, incl. doctests
-cargo clippy -p fugazi --all-targets -- -D warnings # CI gate; keep it clean
+cargo clippy -p fugazi --all-targets -- -D warnings # inner loop
 
 cd python && maturin develop && pytest             # bindings
 ```
+
+**The gate is `scripts/ci-local.sh`** — the four commands above are the inner
+loop, not the check. The script runs exactly what `.github/workflows/ci.yml`
+runs, in the same order, and three of those checks fire nowhere else: the
+rustdoc lints (only under `RUSTDOCFLAGS=-D warnings`), clippy over `python/src`
+(~11k lines that `-p fugazi` scopes past), and the feature matrix (`live`
+compiles in no other job). Run it before you push.
+
+```sh
+scripts/ci-local.sh              # all four jobs, ~23 checks
+scripts/ci-local.sh rust         # one job: rust | version-sync | features | python
+FAST=1 scripts/ci-local.sh       # skip the matrix + wheel rebuild (inner loop only)
+```
+
+`tests/ci_mirror.rs` fails if the script stops matching the workflow, so a new
+CI step has to land in both.
 
 [docs/TESTING.md](TESTING.md) is the map of the test suite — the four layers,
 where a given change's test belongs, the shared `tests/common/` harness, and the
@@ -525,6 +541,7 @@ When one of these fails, it is telling you something specific:
 | `tests/indicator_reference.rs` | An indicator's numbers drifted from its own definition. Always runs. |
 | `tests/talib_validation.rs` | An indicator's numbers drifted from the TA-Lib reference. |
 | `tests/driver_contract.rs` | `backtest::run`'s per-bar order or readiness gating changed. |
+| `tests/ci_mirror.rs` | `.github/workflows/ci.yml` gained (or changed) a step that `scripts/ci-local.sh` doesn't run — the local gate has fallen behind CI and would report green on a tree CI rejects. |
 
 **Two of these could disable themselves.** `talib_validation` and
 `metrics_validation` compare against an external library and *skip* when their
