@@ -7,7 +7,8 @@ use crate::types::Real;
 /// Rolling population standard deviation of a source over a fixed window.
 ///
 /// Owns its input source: `StdDev::new(Current::close(), 20)`. Backed by the
-/// shared `WindowStats` core, so each update is O(1). Produces `None` until
+/// shared `WindowStats` core: the update is O(1) and the dispersion read is one
+/// centred O(period) pass (see that core's docs for why). Produces `None` until
 /// the window is full.
 #[derive(Debug, Clone, SaveState)]
 pub struct StdDev<S> {

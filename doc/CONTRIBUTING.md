@@ -89,7 +89,7 @@ impl<S: Indicator<Output = Real>> Indicator for Foo<S> {
 ```
 
 Reuse the shared cores rather than another indicator's public type:
-`WindowStats` (sum / variance / stddev), `WindowExtreme` (monotonic deque),
+`WindowStats` (mean / variance / stddev / higher moments), `WindowExtreme` (monotonic deque),
 `WindowQuantile` (rolling order statistics), `EmaState` / `WilderState`
 (recursive smoothing). They live in `src/indicators/{stats,smoothing}.rs` and
 have no `Indicator` impl on purpose.

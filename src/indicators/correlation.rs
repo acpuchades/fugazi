@@ -8,7 +8,8 @@ use crate::types::Real;
 ///
 /// Feeds the same input to both sources each step (hence `Input: Clone`) and
 /// correlates their outputs over the last `period` samples via the shared
-/// `WindowCovariance` core, so each update is O(1). Produces `None` until both
+/// `WindowCovariance` core: O(1) to update, one centred O(period) pass to read
+/// the correlation (see that core's docs for why). Produces `None` until both
 /// sources are warm *and* the window is full; once ready it reads in `[-1, 1]`,
 /// with a dispersion-free leg (either source constant over the window) reading
 /// `0.0` (correlation is undefined there).

@@ -96,8 +96,10 @@ the crate has no session concept. Yang-Zhang absent — overnight gap meaningles
 
 `Skewness`/`Kurtosis` (standardized moments; kurtosis raw, ~3 for normal),
 `ZScore` (`(x−SMA)/stddev`), two-source `Correlation` (rolling Pearson;
-autocorrelation via `Correlation::new(x.clone(), x.lag(n), period)`). O(1)/bar off
-`WindowStats`/`WindowCovariance`. **`VarianceRatio` is the deliberate exception** —
+autocorrelation via `Correlation::new(x.clone(), x.lag(n), period)`). Off
+`WindowStats`/`WindowCovariance`, which update in O(1) and read dispersion in one
+centred O(period) pass — the `E[X²] − E[X]²` shortcut cancels away `(mean/σ)²`
+significant digits and was unusable at market scale (see that module's docs). **`VarianceRatio` is the deliberate exception** —
 Lo-MacKinlay regime classifier over first differences (`1.0` random-walk null,
 `>1` trending, `<1` mean-reverting), **O(`period`)/bar** (retains window in
 `VecDeque`). Asserts `lag ≥ 2`, `period ≥ lag + 2`.

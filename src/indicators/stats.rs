@@ -1,10 +1,44 @@
 //! Internal rolling-window statistics core shared by the windowed indicators.
 //!
-//! Maintains the last `period` samples plus running sum and sum-of-squares, so
-//! `mean` and (population) `variance`/`stddev` are O(1) per update. Embedded by
-//! [`Sma`](super::Sma), [`StdDev`](super::StdDev) and
+//! Retains the last `period` samples plus a running sum, so `mean` is O(1).
+//! Embedded by [`Sma`](super::Sma), [`StdDev`](super::StdDev) and
 //! [`Bollinger`](super::Bollinger) — anything needing a moving average and/or
 //! dispersion over the same window.
+//!
+//! # Why dispersion scans the window
+//!
+//! Every *dispersion* read here — [`variance`](WindowStats::variance) and what
+//! derives from it, plus `mean_abs_dev` / `downside_dev` / `skewness` /
+//! `kurtosis` and [`WindowCovariance::correlation`] — makes one O(period) pass
+//! over the retained window, centring on the mean.
+//!
+//! The O(1) alternative is the textbook `E[X²] − E[X]²` shortcut, carrying a
+//! running sum-of-squares. It is **numerically unusable at market scale**: the
+//! two terms agree to about `(mean/σ)²`, so the subtraction cancels away that
+//! many significant digits. Measured on a 20-sample window, the shortcut's
+//! relative error in the variance was:
+//!
+//! | mean | σ | relative error |
+//! |---|---|---|
+//! | 100 | 1 | 2e-12 |
+//! | 1e5 | 100 | 2e-10 |
+//! | 1e5 | 0.01 | **1e-2** |
+//! | 1e9 | 0.01 | **clamps to `0.0`** |
+//!
+//! A high-priced instrument against a tight dispersion — a five-figure crypto
+//! pair quoted to the cent — lost most of its digits, and far enough out the
+//! result clamped to zero, which silently reported "no dispersion": `ZScore`
+//! divides by it, and `skewness`/`kurtosis` degrade to `0.0` under
+//! [`MOMENT_EPS`]. The centred pass has no such term, so its error is a few ulps
+//! at any scale, and its result is a sum of squares — **non-negative by
+//! construction**, so no clamp is load-bearing.
+//!
+//! The cost is real but small and lands only on the *query*, never on
+//! [`update`](WindowStats::update): the window is retained either way, so this
+//! is arithmetic on data already in cache, and four of the six statistics were
+//! already computed this way. `Sma` — by far the most-used consumer — reads only
+//! `mean` and stays O(1). See `variance_is_exact_at_market_scale` for the
+//! pinned accuracy guarantee.
 
 use std::collections::VecDeque;
 use std::marker::PhantomData;
@@ -19,7 +53,6 @@ pub(crate) struct WindowStats {
     period: usize,
     window: VecDeque<Real>,
     sum: Real,
-    sum_sq: Real,
 }
 
 impl WindowStats {
@@ -29,7 +62,6 @@ impl WindowStats {
             period,
             window: VecDeque::with_capacity(period),
             sum: 0.0,
-            sum_sq: 0.0,
         }
     }
 
@@ -42,11 +74,9 @@ impl WindowStats {
     pub fn update(&mut self, x: Real) -> bool {
         self.window.push_back(x);
         self.sum += x;
-        self.sum_sq += x * x;
         if self.window.len() > self.period {
             let old = self.window.pop_front().expect("window is non-empty");
             self.sum -= old;
-            self.sum_sq -= old * old;
         }
         self.is_full()
     }
@@ -60,12 +90,22 @@ impl WindowStats {
         self.sum / self.period as Real
     }
 
-    /// Population variance over the window (clamped to non-negative against
-    /// floating-point round-off).
+    /// Population variance over the window: `mean((x − μ)²)`, computed by one
+    /// centred pass (O(period)) rather than the cancelling `E[X²] − E[X]²`
+    /// shortcut — see the module docs for the measured reason. Being a sum of
+    /// squares it is non-negative by construction, so no clamp is needed.
+    /// Only meaningful once [`is_full`](Self::is_full).
     pub fn variance(&self) -> Real {
-        let n = self.period as Real;
-        let mean = self.sum / n;
-        (self.sum_sq / n - mean * mean).max(0.0)
+        let mean = self.mean();
+        let sum_sq: Real = self
+            .window
+            .iter()
+            .map(|x| {
+                let d = x - mean;
+                d * d
+            })
+            .sum();
+        sum_sq / self.period as Real
     }
 
     /// Population standard deviation over the window.
@@ -161,7 +201,6 @@ impl WindowStats {
     pub fn reset(&mut self) {
         self.window.clear();
         self.sum = 0.0;
-        self.sum_sq = 0.0;
     }
 }
 
@@ -170,20 +209,19 @@ impl WindowStats {
 pub(crate) const MOMENT_EPS: Real = 1e-12;
 
 /// Two-variable rolling-window statistics: keeps the last `period` `(x, y)`
-/// pairs plus running sums (`Σx`, `Σy`, `Σx²`, `Σy²`, `Σxy`), so Pearson
-/// correlation over the window is O(1) per update. Backs
-/// [`Correlation`](super::Correlation); the shared covariance machinery also
-/// makes rolling beta a one-line composition (`corr · σ_y / σ_x`) without a
-/// second core.
+/// pairs plus the running sums `Σx` and `Σy`, so both means are O(1); the
+/// Pearson correlation makes one centred O(period) pass, for the same
+/// cancellation reason [`WindowStats::variance`] does (the `Σx²/n − μ²` form
+/// loses `(μ/σ)²` significant digits, and the covariance term cancels the same
+/// way). Backs [`Correlation`](super::Correlation); the shared covariance
+/// machinery also makes rolling beta a one-line composition (`corr · σ_y / σ_x`)
+/// without a second core.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WindowCovariance {
     period: usize,
     window: VecDeque<(Real, Real)>,
     sum_x: Real,
     sum_y: Real,
-    sum_xx: Real,
-    sum_yy: Real,
-    sum_xy: Real,
 }
 
 impl WindowCovariance {
@@ -194,9 +232,6 @@ impl WindowCovariance {
             window: VecDeque::with_capacity(period),
             sum_x: 0.0,
             sum_y: 0.0,
-            sum_xx: 0.0,
-            sum_yy: 0.0,
-            sum_xy: 0.0,
         }
     }
 
@@ -210,16 +245,10 @@ impl WindowCovariance {
         self.window.push_back((x, y));
         self.sum_x += x;
         self.sum_y += y;
-        self.sum_xx += x * x;
-        self.sum_yy += y * y;
-        self.sum_xy += x * y;
         if self.window.len() > self.period {
             let (ox, oy) = self.window.pop_front().expect("window is non-empty");
             self.sum_x -= ox;
             self.sum_y -= oy;
-            self.sum_xx -= ox * ox;
-            self.sum_yy -= oy * oy;
-            self.sum_xy -= ox * oy;
         }
         self.is_full()
     }
@@ -228,20 +257,27 @@ impl WindowCovariance {
         self.window.len() == self.period
     }
 
-    /// Pearson correlation over the window, clamped to `[-1, 1]`. Returns `0.0`
+    /// Pearson correlation over the window, from one centred pass. Returns `0.0`
     /// when either series is dispersion-free (variance below [`MOMENT_EPS`]) —
-    /// correlation is undefined there. Only meaningful once
-    /// [`is_full`](Self::is_full).
+    /// correlation is undefined there. Still clamped to `[-1, 1]`: the centred
+    /// form is far more accurate but `cov/√(varₓ·var_y)` can still land a few
+    /// ulps outside on a perfectly (anti-)correlated window. Only meaningful
+    /// once [`is_full`](Self::is_full).
     pub fn correlation(&self) -> Real {
         let n = self.period as Real;
         let mean_x = self.sum_x / n;
         let mean_y = self.sum_y / n;
-        let var_x = (self.sum_xx / n - mean_x * mean_x).max(0.0);
-        let var_y = (self.sum_yy / n - mean_y * mean_y).max(0.0);
+        let (mut var_x, mut var_y, mut cov) = (0.0, 0.0, 0.0);
+        for (x, y) in &self.window {
+            let (dx, dy) = (x - mean_x, y - mean_y);
+            var_x += dx * dx;
+            var_y += dy * dy;
+            cov += dx * dy;
+        }
+        let (var_x, var_y, cov) = (var_x / n, var_y / n, cov / n);
         if var_x < MOMENT_EPS || var_y < MOMENT_EPS {
             return 0.0;
         }
-        let cov = self.sum_xy / n - mean_x * mean_y;
         (cov / (var_x * var_y).sqrt()).clamp(-1.0, 1.0)
     }
 
@@ -249,9 +285,6 @@ impl WindowCovariance {
         self.window.clear();
         self.sum_x = 0.0;
         self.sum_y = 0.0;
-        self.sum_xx = 0.0;
-        self.sum_yy = 0.0;
-        self.sum_xy = 0.0;
     }
 }
 
@@ -352,8 +385,10 @@ pub(crate) fn quantile_of_sorted(sorted: &[Real], p: Real) -> Real {
 ///
 /// The third shared core, beside [`WindowStats`] (moments) and
 /// [`WindowExtreme`] (extrema). It is deliberately *not* folded into
-/// `WindowStats`: that one's O(1) contract rests on running sum / sum-of-squares,
-/// which say nothing about order, and sorted access would quietly break it.
+/// `WindowStats`: order statistics need a *sorted* view maintained on every
+/// update, which would put an O(period) insert on the update path — where
+/// `WindowStats` keeps O(1), paying its O(period) only on the dispersion
+/// queries.
 ///
 /// Keeps two views of the same window — a [`VecDeque`] in arrival order (to know
 /// what to evict) and a sorted `Vec` (to answer order queries). Each update is
@@ -512,6 +547,7 @@ impl<Op: ExtremeOp> WindowExtreme<Op> {
         }
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -710,20 +746,16 @@ mod tests {
         assert_eq!(stats.mean(), 7.5);
     }
 
-    /// `variance` is computed as `E[X²] − E[X]²`, which is O(1) but loses
-    /// roughly `(mean/σ)²` in relative precision to cancellation. That is
-    /// invisible on ordinary inputs and severe on extreme ones, so the boundary
-    /// is pinned here rather than left to be discovered.
+    /// The centred pass is accurate **at every scale**, which the
+    /// `E[X²] − E[X]²` shortcut it replaced was not: that form agreed with the
+    /// truth to only `(mean/σ)²`, so a five-figure price against a one-cent
+    /// dispersion came out ~1% wrong and a nine-figure one clamped to `0.0`.
     ///
-    /// Measured relative error on a 20-sample window: ratio `1e2` → 2e-12;
-    /// `1e3` → 2e-10; `1e7` → 1e-2. Past `1e11` the result clamps to `0.0` and
-    /// the dispersion vanishes entirely.
-    ///
-    /// **If this test starts failing on the second assertion, that is good
-    /// news** — someone replaced the shortcut with a shift-by-offset or Welford
-    /// form. Delete the assertion and widen the guarantee above it.
+    /// This is the regression guard for that fix. Every row is a
+    /// mean-to-dispersion ratio the crate can plausibly meet, including the two
+    /// that used to be broken, and all of them must now be exact to a few ulps.
     #[test]
-    fn variance_precision_is_bounded_by_the_mean_to_dispersion_ratio() {
+    fn variance_is_exact_at_market_scale() {
         let measure = |mean: Real, noise: Real| -> Real {
             let n = 20;
             let xs: Vec<Real> = (0..n)
@@ -737,29 +769,58 @@ mod tests {
             (stats.variance() - exact).abs() / exact
         };
 
-        // Guaranteed: every regime the crate is actually driven in — equity and
-        // crypto prices against their own daily dispersion, and return series
-        // near zero — stays comfortably exact.
-        assert!(
-            measure(100.0, 1.0) < 1e-11,
-            "an equity price against unit dispersion must be exact"
-        );
-        assert!(
-            measure(100_000.0, 100.0) < 1e-9,
-            "a crypto price against 0.1% dispersion must be exact"
-        );
-        assert!(
-            measure(0.0005, 0.01) < 1e-12,
-            "a per-bar return series must be exact"
-        );
+        for (mean, noise, what) in [
+            (100.0, 1.0, "an equity price against unit dispersion"),
+            (0.0005, 0.01, "a per-bar return series"),
+            (100_000.0, 100.0, "a crypto price against 0.1% dispersion"),
+            // The two the shortcut got wrong: ~1e-2 relative error, then a
+            // clamp to zero that silently reported "no dispersion".
+            (100_000.0, 0.01, "a five-figure price quoted to the cent"),
+            (1e9, 0.01, "a nine-figure notional against a tight spread"),
+        ] {
+            let err = measure(mean, noise);
+            assert!(
+                err < 1e-12,
+                "{what} (mean {mean:e}, σ≈{noise:e}): relative error {err:e}"
+            );
+        }
+    }
 
-        // Known limitation, pinned so it cannot silently worsen: past a ratio of
-        // ~1e7 the shortcut has lost most of its significant digits.
+    /// The same cancellation lived in `WindowCovariance::correlation`, whose
+    /// `Σx²/n − μ²` variance terms and `Σxy/n − μₓμy` covariance term all
+    /// cancelled the same way. Two series that move together at a large offset
+    /// must still read as perfectly correlated.
+    #[test]
+    fn correlation_is_exact_at_market_scale() {
+        let n = 20;
+        let mut cov = WindowCovariance::new(n);
+        for i in 0..n {
+            let d = 0.01 * ((i as Real * 1.7).sin());
+            // Both legs sit at 1e5 with cent-scale wiggle; `y` is `x` shifted
+            // and scaled, so the true correlation is exactly 1.
+            cov.update(100_000.0 + d, 250_000.0 + 3.0 * d);
+        }
         assert!(
-            measure(100_000.0, 0.01) > 1e-3,
-            "the cancellation limit moved — if variance is now accurate here, \
-             the shortcut was replaced and this assertion should be deleted"
+            (cov.correlation() - 1.0).abs() < 1e-9,
+            "a perfectly correlated pair at price scale read {}",
+            cov.correlation()
         );
+    }
+
+    #[test]
+    fn reset_returns_window_stats_to_its_constructed_state() {
+        let mut stats = WindowStats::new(4);
+        for &x in &STREAM[..10] {
+            stats.update(x);
+        }
+        stats.reset();
+        assert!(!stats.is_full());
+        let mut fresh = WindowStats::new(4);
+        for &x in &STREAM[..6] {
+            assert_eq!(stats.update(x), fresh.update(x));
+        }
+        assert_eq!(stats.mean(), fresh.mean());
+        assert_eq!(stats.variance(), fresh.variance());
     }
 
     // -----------------------------------------------------------------------

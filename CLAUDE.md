@@ -272,7 +272,7 @@ If you're about to write a private helper whose name looks like something here, 
 | Three-source ternary | `IfElse::new(cond, t, f)` / `.if_else(t, f)` | `src/indicators/if_else.rs` |
 | Multi-output accessor bodies | `component_accessors!` macro | `src/indicators/component.rs` |
 | Real recurrence for internal smoothing | `EmaState` / `WilderState` | `src/indicators/smoothing.rs` |
-| Windowed sum/variance/stddev; rolling extremum | `WindowStats` / `WindowExtreme<Op>` | `src/indicators/stats.rs` |
+| Windowed sum/variance/stddev; rolling extremum | `WindowStats` / `WindowExtreme<Op>`. **Dispersion reads scan the window** (O(period)); the `E[X²] − E[X]²` shortcut cancels away `(mean/σ)²` digits and was wrong at crypto price scale — don't reintroduce it | `src/indicators/stats.rs` |
 | Rolling quantile / rank-in-window | `WindowQuantile` backing `Percentile` / `PercentileRank` | `src/indicators/stats.rs`, `src/indicators/percentile.rs` |
 | The crate's **one** quantile convention (R type-7) | `stats::quantile_of_sorted(sorted, p)` — don't add a second | `src/indicators/stats.rs` |
 | Bars since an event | `BarsSince` (bool source), `BarsSinceHigh`/`BarsSinceLow` (O(1) over `WindowExtreme::since()`) | `src/indicators/bars_since.rs` |
