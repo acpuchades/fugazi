@@ -37,20 +37,26 @@ OUT = os.path.join(
     "docs", "assets", "performance.svg",
 )
 
-# ns/sample: (indicator, TA-Lib C, talib py, fugazi rs, fugazi py).
+# ns/sample: (indicator, TA-Lib C, fugazi rs, talib py, fugazi py).
 # 200 000 samples, median of 7, best of 3 passes, from `pixi run -e bench bench`.
+#
+# The order is the point: each library is next to its own counterpart, so the
+# two comparisons that mean something read straight off adjacent bars — native
+# against native, then Python against Python. Interleaving them by language
+# instead makes the reader do the pairing.
 ROWS: list[tuple[str, float, float, float, float]] = [
-    ("sma",    1.37, 1.46, 1.37, 4.97),
-    ("ema",    2.06, 2.16, 1.36, 4.86),
-    ("rsi",    4.79, 4.98, 4.69, 8.47),
-    ("atr",    4.77, 5.52, 4.54, 36.56),
-    ("stddev", 3.33, 3.56, 10.61, 12.77),
+    ("sma",    1.37, 1.37, 1.46, 4.97),
+    ("ema",    2.06, 1.36, 2.16, 4.86),
+    ("rsi",    4.79, 4.69, 4.98, 8.47),
+    ("atr",    4.77, 4.54, 5.52, 36.56),
+    ("stddev", 3.33, 10.61, 3.56, 12.77),
 ]
 
+# Must stay aligned with `ROWS`' value order.
 SERIES = [
     ("TA-Lib (C)", "#8b949e"),
-    ("talib (Python)", "#d29922"),
     ("fugazi (Rust)", "#2f81f7"),
+    ("talib (Python)", "#d29922"),
     ("fugazi (Python)", "#a371f7"),
 ]
 
