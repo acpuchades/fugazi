@@ -1195,6 +1195,75 @@ Also checked and **ruled out**: a small-input regime. The ratio is flat at
 not per-call, so `OutputKind::detect`'s per-call `String` and the `numpy` import
 lookup are not worth touching.
 
+#### Phase 9 — the cost of erasure is state placement, not the vtable
+
+The last and largest piece, and the one whose *cause* was mis-identified for
+three phases. Driving an erased chain one sample at a time costs ~21
+instructions/sample more than driving the same concrete indicator. That is not
+the indirect call: a vtable call with a predictable target is about two
+instructions. It is that the indicator's state lives behind the box, so the
+compiler cannot prove it does not alias the caller's output buffer, and must
+reload and store every field on every sample. Held in a local, those fields
+promote to registers for the whole loop.
+
+`DynIndicator::update_slice` folds a slice; `Erased<I>` overrides the default to
+copy the concrete indicator into a local, run, and write back once. That single
+line is the entire win:
+
+| | net instr/sample |
+|---|---:|
+| concrete indicator, no erasure at all | 16.00 |
+| erased, slice, **state copied to a local** | **16.04** |
+| erased, slice, state left behind the box | 37.02 |
+| erased, one `update` per sample | 37.02 |
+| erased, `&mut dyn FnMut` in and out | 46.03 |
+
+Both negative rows matter. Batching **without** the local copy changes nothing —
+which is why it looked like a dead end when measured twice before, at -1.2 and
++1.3. And the samples must arrive as a **slice**: routing them through a closure
+is worse than doing nothing, because a closure's captures are themselves behind
+a pointer, so the aliasing problem simply moves.
+
+`feed()` chunks 128 samples through a stack buffer rather than handing over a
+whole frame, since a whole-frame candle slice would mean rebuilding the 8 MB
+`Vec<Candle>` that Phase 8 removed. That concedes 4.5 of the 21 and keeps the
+allocation gone. Chunking also lifted the candle assembly into a tight loop, so
+the frame paths gained more than the 16.5 the prototype predicted:
+
+| instr/sample | before | after | |
+|---|---:|---:|---:|
+| `close()` | 53.15 | **29.50** | −44% |
+| `sma(close())` | 86.16 | **50.38** | −42% |
+| `ema` | 65.16 | **34.15** | −48% |
+| `rsi` | 116.16 | **70.40** | −39% |
+| `atr` | 95.81 | **49.37** | −48% |
+| `sma(identity())`, 1-D | 54.11 | **39.75** | −27% |
+
+**And unlike fusing, this is big enough for wall-clock to see** — which is the
+whole reason it survives and fusing was nearly reverted. `py vs py`:
+
+| | before | after |
+|---|---:|---:|
+| `sma` | 2.52× | **1.62×** |
+| `ema` | 1.71× | **1.00×** — parity |
+| `rsi` | 1.61× | **1.13×** |
+| `atr` | 0.57× | **0.48×** |
+| `stddev` | 3.37× | 3.23× |
+
+Fusing stays because the two are complementary: a fused chain is one concrete
+struct, so *all* of it promotes to registers, where an unfused chain leaves its
+inner level behind a second pointer that `update_slice` cannot reach into.
+
+The core addition is a **defaulted** method on `runtime::DynIndicator` — the
+erasure vocabulary that exists to serve boundaries. No existing signature
+changes, every current impl keeps compiling untouched, and a Rust caller who
+never calls it sees nothing.
+
+Correctness is the obvious risk, since chunking a stateful fold is exactly where
+an off-by-one hides: `feed()` is verified exact against per-sample `update()` at
+periods 3/14/127/128/129/200 — either side of the 128 boundary — for recursive
+(`rsi`, `ema`) and multi-field (`atr`) state.
+
 #### The methodological lesson, which is the expensive part
 
 The change immediately before this one cut instructions per sample and made

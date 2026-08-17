@@ -1142,11 +1142,11 @@ cross a Python boundary — that is the last column:
 
 | | TA-Lib C | fugazi (Rust) | **rs vs C** | `talib` py | fugazi (Python) | **py vs py** |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `sma` | 1.37 | 1.37 | **1.00×** | 1.42 | 3.57 | 2.52× |
-| `ema` | 2.04 | 1.37 | **0.67×** | 2.10 | 3.58 | 1.71× |
-| `rsi` | 4.73 | 4.60 | **0.97×** | 4.81 | 7.76 | 1.61× |
-| `atr` | 4.73 | 4.27 | **0.90×** | 12.12 | 6.86 | **0.57×** |
-| `stddev` | 3.30 | 9.96 | 3.02× | 3.47 | 11.68 | 3.37× |
+| `sma` | 1.40 | 1.36 | **0.97×** | 1.44 | 2.34 | 1.62× |
+| `ema` | 2.01 | 1.36 | **0.68×** | 2.16 | 2.16 | **1.00×** |
+| `rsi` | 4.72 | 4.61 | **0.98×** | 5.10 | 5.75 | 1.13× |
+| `atr` | 4.68 | 4.58 | **0.98×** | 12.23 | 5.89 | **0.48×** |
+| `stddev` | 3.31 | 9.91 | 2.99× | 3.69 | 11.89 | 3.23× |
 
 ns/sample. The Rust engine is at parity or better on `sma`/`ema`/`rsi`/`atr`
 while staying one-bar-at-a-time, and driving a full backtest allocates **zero
@@ -1160,11 +1160,15 @@ away significant digits. At a five-figure price quoted to the cent that shortcut
 is already wrong by 1%, and at `mean = 1e9` it clamps the variance to zero. The
 tradeoff is [measured, not asserted](docs/PERFORMANCE.md#what-stddev-buys-with-its-2).
 
-The `py vs py` column was between 1.6× and 7.8× until recently. What closed it
-was not the indicator code but the boundary: `feed()` was copying each input
-column out of NumPy into its own buffer, and those copies — not the arithmetic —
-were most of the call. See [docs/PERFORMANCE.md](docs/PERFORMANCE.md) for why
-instruction counting could not see that and wall-clock could.
+The `py vs py` column was 1.6× to 7.8× not long ago; `ema` is now at parity and
+`atr` is twice as fast. Neither gain came from the indicator code. The first was
+that `feed()` copied each input column out of NumPy into its own buffer, and
+those copies — not the arithmetic — were most of the call. The second is subtler:
+an erased chain holds its state behind a box, so the compiler cannot prove it
+does not alias the output buffer and reloads it every sample; folding a *slice*
+with that state in a local removes ~21 instructions/sample. Both stories, and the
+measurement mistakes made on the way to them, are in
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
 Figures from one machine (16 cores, Linux 6.18, rustc 1.95). Re-run them with
 `pixi run -e bench bench` before relying on them —
