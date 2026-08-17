@@ -38,14 +38,14 @@ const REPS: usize = 7;
 /// or the tiers are not comparable; see `tools/bench_talib_native.c`.
 const WARMUP: usize = 2;
 
-fn median(mut xs: Vec<f64>) -> f64 {
-    xs.sort_by(f64::total_cmp);
-    xs[xs.len() / 2]
-}
-
-/// Median ns/sample over `REPS` runs of `f` across `n` samples, after `WARMUP`
-/// discarded ones.
-fn bench(n: usize, mut f: impl FnMut()) -> f64 {
+/// Every per-rep ns/sample for `f`, ascending, after `WARMUP` discarded runs.
+///
+/// All of them, not just the median: the driver keeps the samples so a
+/// distribution can be re-analysed or plotted with error bars without re-running
+/// anything. On a machine where the same fixed workload has been seen to drift
+/// 3x, the spread is not incidental — it is the part that says whether two
+/// numbers can be compared at all.
+fn samples(n: usize, mut f: impl FnMut()) -> Vec<f64> {
     for _ in 0..WARMUP {
         f();
     }
@@ -53,9 +53,15 @@ fn bench(n: usize, mut f: impl FnMut()) -> f64 {
     for _ in 0..REPS {
         let t = Instant::now();
         f();
-        times.push(t.elapsed().as_secs_f64());
+        times.push(t.elapsed().as_secs_f64() * 1e9 / n as f64);
     }
-    median(times) * 1e9 / n as f64
+    times.sort_by(f64::total_cmp);
+    times
+}
+
+/// Alias kept so the call sites below read as measurements rather than plumbing.
+fn bench(n: usize, f: impl FnMut()) -> Vec<f64> {
+    samples(n, f)
 }
 
 /// A `Real -> Real` view over an erased indicator — the shape
@@ -92,7 +98,7 @@ fn main() {
     let candles = synth_candles(n);
     let closes: Vec<Real> = candles.iter().map(|c| c.close).collect();
 
-    let mut out: Vec<(&str, f64)> = Vec::new();
+    let mut out: Vec<(&str, Vec<f64>)> = Vec::new();
 
     out.push(("sma", bench(n, || {
         let mut ind = Sma::new(Identity::new(), SMA_P);
@@ -178,19 +184,30 @@ fn main() {
         black_box(nums.len());
     })));
 
+    let med = |xs: &[f64]| xs[xs.len() / 2];
     if json {
-        for (name, ns) in &out {
-            println!("{{\"name\":\"{name}\",\"ns_per_sample\":{ns:.4}}}");
+        for (name, xs) in &out {
+            let list: Vec<String> = xs.iter().map(|x| format!("{x:.4}")).collect();
+            println!(
+                "{{\"name\":\"{name}\",\"ns_per_sample\":{:.4},\"samples\":[{}]}}",
+                med(xs),
+                list.join(",")
+            );
         }
     } else {
         println!("n = {n} samples, median of {REPS}\n");
         println!(
-            "size_of::<DynValue>() = {} B  (the payload every erased `update` moves)\n",
+            "size_of::<PayloadValue>() = {} B  (the payload every erased `update` moves)\n",
             std::mem::size_of::<DynValue>()
         );
-        println!("{:<20}{:>14}", "indicator", "ns/sample");
-        for (name, ns) in &out {
-            println!("{name:<20}{ns:>14.2}");
+        println!("{:<20}{:>12}{:>12}{:>12}", "indicator", "min", "median", "max");
+        for (name, xs) in &out {
+            println!(
+                "{name:<20}{:>12.2}{:>12.2}{:>12.2}",
+                xs[0],
+                med(xs),
+                xs[xs.len() - 1]
+            );
         }
     }
 }

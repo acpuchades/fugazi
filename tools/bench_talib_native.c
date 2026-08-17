@@ -134,8 +134,15 @@ int main(int argc, char **argv) {
             times[r] = now_sec() - t0;                                        \
         }                                                                     \
         double med = median(times, reps);                                      \
-        printf("{\"name\":\"%s\",\"ns_per_sample\":%.4f}\n", name,            \
+        /* Every sample, not just the summary: the driver keeps them so a       \
+         * distribution can be re-analysed or plotted with error bars later     \
+         * without re-running anything. `times` is sorted by `median` above,    \
+         * so these come out ascending. */                                     \
+        printf("{\"name\":\"%s\",\"ns_per_sample\":%.4f,\"samples\":[", name, \
                med * 1e9 / (double)n);                                        \
+        for (int r = 0; r < reps; r++)                                         \
+            printf("%s%.4f", r ? "," : "", times[r] * 1e9 / (double)n);        \
+        printf("]}\n");                                                       \
     } while (0)
 
     BENCH("sma", TA_SMA(0, n - 1, c, SMA_P, &beg, &cnt, out));

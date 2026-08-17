@@ -63,7 +63,6 @@ from __future__ import annotations
 import gc
 import json
 import os
-import statistics
 import subprocess
 import sys
 import time
@@ -197,16 +196,16 @@ def talib_native(n: int) -> dict[str, float]:
             print("native TA-Lib tier did not run:\n", run.stderr[-800:], file=sys.stderr)
             return {}
 
-    out: dict[str, float] = {}
+    out: dict[str, list[float]] = {}
     for line in run.stdout.splitlines():
         line = line.strip()
         if line.startswith("{") and '"ns_per_sample"' in line:
             rec = json.loads(line)
-            out[rec["name"]] = rec["ns_per_sample"]
+            out[rec["name"]] = rec.get("samples") or [rec["ns_per_sample"]]
     return out
 
 
-def timed(fn, reps: int = REPS, warmup: int = WARMUP) -> float:
+def timed_samples(fn, reps: int = REPS, warmup: int = WARMUP) -> list[float]:
     """Median wall time over `reps` runs, after `warmup` discarded ones.
 
     The warm-up is load-bearing: a cold process on this machine reports TA-Lib's
@@ -223,9 +222,9 @@ def timed(fn, reps: int = REPS, warmup: int = WARMUP) -> float:
         gc.disable()
         t = time.perf_counter()
         fn()
-        times.append(time.perf_counter() - t)
+        times.append((time.perf_counter() - t) * 1e9 / N)
         gc.enable()
-    return statistics.median(times)
+    return sorted(times)
 
 
 def rust_tier(n: int) -> dict[str, float]:
@@ -236,12 +235,12 @@ def rust_tier(n: int) -> dict[str, float]:
         ["cargo", "bench", "--bench", "three_tier", "--", "--emit-json"],
         cwd=ROOT, capture_output=True, text=True, env=env,
     )
-    out: dict[str, float] = {}
+    out: dict[str, list[float]] = {}
     for line in proc.stdout.splitlines():
         line = line.strip()
         if line.startswith("{") and '"ns_per_sample"' in line:
             rec = json.loads(line)
-            out[rec["name"]] = rec["ns_per_sample"]
+            out[rec["name"]] = rec.get("samples") or [rec["ns_per_sample"]]
     if not out:
         print("could not read Rust numbers; cargo said:\n", proc.stderr[-2000:])
     return out
@@ -250,11 +249,11 @@ def rust_tier(n: int) -> dict[str, float]:
 def talib_py_tier(c, h, lo) -> dict[str, float]:
     """TA-Lib through its Cython bindings — the baseline for the Python row."""
     return {
-        "sma": timed(lambda: talib.SMA(c, SMA_P)) * 1e9 / N,
-        "ema": timed(lambda: talib.EMA(c, EMA_P)) * 1e9 / N,
-        "rsi": timed(lambda: talib.RSI(c, RSI_P)) * 1e9 / N,
-        "stddev": timed(lambda: talib.STDDEV(c, STDDEV_P)) * 1e9 / N,
-        "atr": timed(lambda: talib.ATR(h, lo, c, ATR_P)) * 1e9 / N,
+        "sma": timed_samples(lambda: talib.SMA(c, SMA_P)),
+        "ema": timed_samples(lambda: talib.EMA(c, EMA_P)),
+        "rsi": timed_samples(lambda: talib.RSI(c, RSI_P)),
+        "stddev": timed_samples(lambda: talib.STDDEV(c, STDDEV_P)),
+        "atr": timed_samples(lambda: talib.ATR(h, lo, c, ATR_P)),
     }
 
 
@@ -279,22 +278,33 @@ def fugazi_py_tier(c, h, lo, o) -> dict[str, float]:
     frame = {"open": o, "high": h, "low": lo, "close": c}
 
     return {
-        "sma": timed(scalar(lambda: fz.sma(fz.identity(), SMA_P))) * 1e9 / N,
-        "ema": timed(scalar(lambda: fz.ema(fz.identity(), EMA_P))) * 1e9 / N,
-        "rsi": timed(scalar(lambda: fz.rsi(fz.identity(), RSI_P))) * 1e9 / N,
-        "stddev": timed(scalar(lambda: fz.stddev(fz.identity(), STDDEV_P))) * 1e9 / N,
-        "atr": timed(lambda: fz.atr(ATR_P).feed(frame)) * 1e9 / N,
+        "sma": timed_samples(scalar(lambda: fz.sma(fz.identity(), SMA_P))),
+        "ema": timed_samples(scalar(lambda: fz.ema(fz.identity(), EMA_P))),
+        "rsi": timed_samples(scalar(lambda: fz.rsi(fz.identity(), RSI_P))),
+        "stddev": timed_samples(scalar(lambda: fz.stddev(fz.identity(), STDDEV_P))),
+        "atr": timed_samples(lambda: fz.atr(ATR_P).feed(frame)),
     }
 
 
-def best_of(passes: list[dict[str, float]]) -> dict[str, float]:
-    """Per-key minimum across passes. See the note on `repeat` in `main`."""
-    out: dict[str, float] = {}
+def pooled(passes: list[dict[str, list[float]]]) -> dict[str, list[float]]:
+    """Every sample from every pass, per key, ascending."""
+    out: dict[str, list[float]] = {}
     for p in passes:
-        for k, v in p.items():
-            if k not in out or v < out[k]:
-                out[k] = v
-    return out
+        for k, xs in p.items():
+            out.setdefault(k, []).extend(xs)
+    return {k: sorted(v) for k, v in out.items()}
+
+
+def best_of(pool: dict[str, list[float]]) -> dict[str, float]:
+    """The reported figure: the minimum sample.
+
+    Not a mean or a median. Contention and frequency scaling are **one-sided** —
+    they can only make a run slower — so the fastest sample is the one least
+    polluted by them, and more sampling makes it converge. A mean over a drifting
+    window converges on nothing in particular: this machine has produced 5.42,
+    12.04, 13.50 and 17.70 ns/sample for `talib.ATR`, which is fixed C code.
+    """
+    return {k: xs[0] for k, xs in pool.items()}
 
 
 def main() -> int:
@@ -312,24 +322,45 @@ def main() -> int:
     # Minimum rather than median because contention is strictly one-sided: it
     # can only ever make a run slower, so the fastest observation is the least
     # polluted. A median folds the contended passes back in.
-    repeat = int(os.environ.get("FUGAZI_BENCH_REPEAT", "3"))
+    repeat = int(os.environ.get("FUGAZI_BENCH_REPEAT", "5"))
 
     o, h, lo, c = synth(N)
 
-    print(f"n = {N:,} samples, median of {REPS}, best of {repeat} passes\n")
+    print(f"n = {N:,} samples, {REPS} reps x {repeat} passes, reporting the minimum\n")
 
-    native_p, talib_p, rust_p, py_p = [], [], [], []
-    for _ in range(repeat):
-        native_p.append(talib_native(N))
-        talib_p.append(talib_py_tier(c, h, lo))
-        rust_p.append(rust_tier(N))
-        py_p.append(fugazi_py_tier(c, h, lo, o))
-    native_ns = best_of(native_p)
-    talib_ns = best_of(talib_p)
-    rust_ns = best_of(rust_p)
-    py_ns = best_of(py_p)
+    # Round-robin, not tier-by-tier: the machine drifts on a timescale of
+    # minutes, so measuring all of one tier and then all of another compares two
+    # different machines. Interleaving puts every tier in the same conditions.
+    passes: dict[str, list[dict[str, list[float]]]] = {
+        "talib_c": [], "talib_py": [], "fugazi_rs": [], "fugazi_py": [],
+    }
+    for i in range(repeat):
+        print(f"  pass {i + 1}/{repeat}", file=sys.stderr)
+        passes["talib_c"].append(talib_native(N))
+        passes["fugazi_rs"].append(rust_tier(N))
+        passes["talib_py"].append(talib_py_tier(c, h, lo))
+        passes["fugazi_py"].append(fugazi_py_tier(c, h, lo, o))
+
+    pool = {tier: pooled(ps) for tier, ps in passes.items()}
+    native_ns = best_of(pool["talib_c"])
+    talib_ns = best_of(pool["talib_py"])
+    rust_ns = best_of(pool["fugazi_rs"])
+    py_ns = best_of(pool["fugazi_py"])
     if not rust_ns:
         return 1
+
+    # Every sample kept, so the distribution can be re-analysed or re-plotted
+    # without re-running the benchmark — and so the chart is reproducible from
+    # committed data rather than from a number someone typed.
+    raw_path = os.path.join(ROOT, "docs", "assets", "performance-samples.json")
+    os.makedirs(os.path.dirname(raw_path), exist_ok=True)
+    with open(raw_path, "w") as f:
+        json.dump(
+            {"n": N, "reps": REPS, "passes": repeat, "unit": "ns_per_sample",
+             "samples": pool},
+            f, indent=1, sort_keys=True,
+        )
+    print(f"raw samples -> {os.path.relpath(raw_path, ROOT)}\n")
 
     # ---- report -------------------------------------------------------------
     # Each ratio is against the baseline that matches its tier: Rust against
@@ -354,6 +385,14 @@ def main() -> int:
         row += f"{r / nat:>9.2f}x" if (nat and r) else f"{'—':>10}"
         row += f"{p / t:>9.2f}x" if (t and p) else f"{'—':>10}"
         print(row)
+
+    # Spread is reported next to the figures on purpose: it is what says whether
+    # a difference between two of them means anything.
+    print(f"\n{'':<10}{'spread (max/min over all samples)':<40}")
+    for tier, label in (("talib_c", "TA-Lib C"), ("fugazi_rs", "fugazi rs"),
+                        ("talib_py", "TA-Lib py"), ("fugazi_py", "fugazi py")):
+        worst = max((xs[-1] / xs[0]) for xs in pool[tier].values() if xs)
+        print(f"{'':<10}{label:<14}up to {worst:.2f}x")
 
     print(
         "\nTA-Lib is vectorised (one C call per array); fugazi is incremental\n"
