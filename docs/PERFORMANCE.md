@@ -455,7 +455,40 @@ Read the figures as **ceilings**. Each prototype is narrower than the real
 change would be, and a couple of them enjoy inlining that the general case
 would not.
 
-### 1. `Indicator::update(&mut self, input: &Self::Input)`
+### 1. Shrink `DynValue`, and stop nesting erasure — highest value
+
+`std::mem::size_of::<DynValue>()` is **88 bytes**: the enum is as wide as its
+widest variant (`Atom`), so every erased `update` moves 88 bytes in and 88 back
+out even when the payload is one `f64`.
+
+Worse, the Python bindings *nest* the erasure. `sma(identity())` builds
+`Source::new(Sma::new(already_erased_source, 10))` (`map_source!` in
+`python/src/macros.rs`), so one sample crosses the boundary twice in each
+direction — six `DynValue` conversions. Measured (`benches/three_tier.rs`):
+
+| | ns/sample |
+|---|---:|
+| `Sma` native | 1.36 |
+| one erasure boundary | 3.70 |
+| two boundaries (what the bindings build) | **16.95** |
+
+**A 12× tax on the engine, paid before Python is involved**, and it is what
+puts the bindings 10–29× behind TA-Lib's.
+
+Two independent fixes:
+
+- **Box the large variants.** `DynValue::Atom(Box<Atom>)` /
+  `Candle(Box<Candle>)` / `Snapshot` already behind an `Arc` would take the enum
+  to ~16 bytes. Costs an allocation on the *bar-shaped* paths, which is why it
+  needs measuring rather than assuming — but the `Real`/`Bool` paths, which are
+  the hot ones for scalar indicators, become a register move.
+- **Don't re-erase an already-erased source.** When `map_source!` wraps a
+  `Source` that is itself a `Box<dyn DynIndicatorSync>`, the inner box could be
+  composed with `runtime::chain` instead of being wrapped again, halving the
+  conversions. This one is *not* an API break — it is contained entirely in
+  `python/src/`, and should be tried first.
+
+### 2. `Indicator::update(&mut self, input: &Self::Input)`
 
 Prototyped as a by-reference chain computing the same SMA crossover
 (`RefIndicator` in `benches/breaking.rs`).
@@ -478,7 +511,7 @@ feeds the same input to *both* sides, so every binary node clones its input, and
 example. Worth doing only if the ceiling is confirmed on a narrower slice first
 — converting `Pick` and `Combine` alone would test the thesis.
 
-### 2. Index `Snapshot` for lookup
+### 3. Index `Snapshot` for lookup
 
 Per *symbol-bar* cost still climbs with universe size after Phase 3 (227 ns at
 N = 2 to 662 ns at N = 64, where it should be flat). The residual O(N²) is
@@ -499,26 +532,69 @@ irrelevant below ~16 symbols.
 
 ## Three-tier comparison — TA-Lib vs fugazi (Rust) vs fugazi (Python)
 
-`tools/bench_three_tier.py` drives all three from one input. TA-Lib is the bar
-for the Rust engine; the Rust engine is the bar for the bindings.
+`tools/bench_three_tier.py` drives all three from one input, 200 000 samples,
+median of 7, quiet machine.
 
-200 000 samples, median of 7, quiet machine:
+**Read the Python row against TA-Lib, not against Rust.** `talib.SMA(arr, 10)`
+*is* a Python API — a thin Cython wrapper over the C library. So the comparison
+that matters to a Python user is `fugazi py` vs `TA-Lib`, and that is the
+unflattering one:
 
-| indicator | TA-Lib | fugazi rs | fugazi py | rs/TA-Lib | py/rs |
+| indicator | TA-Lib (py) | fugazi rs | fugazi py | **py vs TA-Lib** | rs vs TA-Lib |
 |---|---:|---:|---:|---:|---:|
-| `sma` | 1.37 ns | 1.42 | 40.31 | 1.03× | 28.4× |
-| `ema` | 2.16 ns | **1.46** | 38.24 | **0.67×** | 26.2× |
-| `rsi` | 4.91 ns | 4.92 | 50.33 | 1.00× | 10.2× |
-| `atr` | 11.81 ns | 12.98 | — | 1.10× | — |
-| `stddev` | 3.98 ns | 10.68 | 59.04 | 2.69× | 5.5× |
+| `sma` | 1.37 ns | 1.42 | 40.31 | **29×** | 1.03× |
+| `ema` | 2.16 ns | **1.46** | 38.24 | **18×** | **0.67×** |
+| `rsi` | 4.91 ns | 4.92 | 50.33 | **10×** | 1.00× |
+| `stddev` | 3.98 ns | 10.68 | 59.04 | **15×** | 2.69× |
+| `atr` | 11.81 ns | 12.98 | — | — | 1.10× |
 
-**This is not apples-to-apples, in fugazi's disfavour.** TA-Lib is *vectorised*:
-one C call computes a whole array, with no per-sample dispatch. fugazi is
-*incremental*: one `update()` per bar, which is what lets the same code drive a
-live stream. Matching a vectorised C library on a batch benchmark while staying
-incremental is the result, not a tie.
+The **Rust** engine meets the bar: it matches or beats a vectorised C library on
+`sma`/`ema`/`rsi` and is within 10% on `atr`, while staying *incremental* (one
+`update()` per bar, which is what lets the same code drive a live stream).
 
-`stddev` is the deliberate exception — see below.
+The **Python** bindings do not. A caller who reaches for `fugazi` instead of
+`talib` for a batch computation pays 10–29×.
+
+### Where the Python time goes
+
+Measured rather than assumed — `benches/three_tier.rs` carries the intermediate
+rungs, so each layer is isolated with no Python involved:
+
+| | ns/sample | delta |
+|---|---:|---:|
+| `Sma` native Rust | 1.36 | — |
+| … through **one** erasure boundary (`sma_erased`) | 3.70 | +2.3 |
+| … through **two**, as the bindings build it (`sma_erased_nested`) | 16.95 | **+13.3** |
+| … via `feed()` from Python | 56.72 | +39.8 |
+
+Two separate problems, and the first is the one to name:
+
+**`DynValue` is 88 bytes**, because the enum is as wide as its `Atom` variant.
+Every erased `update` moves that payload in and back out. And the bindings
+*nest*: `sma(identity())` wraps an already-erased source, so a sample crosses
+the boundary twice each way — six `DynValue` conversions per sample. That alone
+takes `Sma` from 1.36 to 16.95 ns, a **12× tax on the engine before Python is
+even involved**. Boxing the large variants would shrink `DynValue` to 16 bytes;
+flattening the nesting would remove conversions outright. See the breaking
+candidates.
+
+**~40 ns/sample remains unattributed** between the nested-erasure figure and
+`feed()`. It is *not* the input conversion — `feed(list)` is only 9 ns/sample
+slower than `feed(numpy)`, so the buffer fast path is not where the time is.
+This needs a profiler rather than another guess, and is deliberately left
+unexplained here rather than filled in with a plausible story.
+
+### A correction
+
+An earlier version of this section reported the Rust engine as "matching
+TA-Lib" and treated the Python number as a separate, softer question. That
+framing flattered the result: TA-Lib's Python bindings are the honest
+comparison for fugazi's Python bindings, and by that measure the gap is 10–29×.
+
+A first attempt at attributing that gap blamed `DynValue` on the strength of a
+single-boundary measurement showing **+2.3 ns** — which does not explain a 39 ns
+gap, and should not have been offered as though it did. The nested measurement
+above is what actually implicates it.
 
 ### What `stddev` buys with its 2.7×
 

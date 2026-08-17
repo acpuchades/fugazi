@@ -17,6 +17,7 @@ use std::time::Instant;
 
 use fugazi::indicators::{Atr, CurrentBar, Ema, Identity, Rsi, Sma, StdDev};
 use fugazi::prelude::*;
+use fugazi::runtime::{self, DynValue};
 
 mod common;
 use common::synth_candles;
@@ -44,6 +45,30 @@ fn bench(n: usize, mut f: impl FnMut()) -> f64 {
         times.push(t.elapsed().as_secs_f64());
     }
     median(times) * 1e9 / n as f64
+}
+
+/// A `Real -> Real` view over an erased indicator — the shape
+/// `python/src/carriers.rs`'s `TypedSource<Real, Real>` has. The library's own
+/// `As<Out>` is `Snapshot`-input only, so it cannot stand in here.
+#[derive(Clone)]
+struct ErasedReal(Box<dyn runtime::DynIndicator>);
+
+impl Indicator for ErasedReal {
+    type Input = Real;
+    type Output = Real;
+    fn update(&mut self, x: Real) -> Option<Real> {
+        let out = self.0.update(DynValue::Real(x))?;
+        Real::try_from(out).ok()
+    }
+    fn value(&self) -> Option<Real> {
+        self.0.value().and_then(|v| Real::try_from(v).ok())
+    }
+    fn warm_up_bars(&self) -> usize {
+        self.0.warm_up_bars()
+    }
+    fn reset(&mut self) {
+        self.0.reset();
+    }
 }
 
 fn main() {
@@ -93,15 +118,44 @@ fn main() {
         }
     })));
 
+    // The same SMA driven through the runtime type-erasure layer — a
+    // `Box<dyn DynIndicator>` exchanging `DynValue` payloads, which is exactly
+    // what the Python bindings hold. Measuring it here, with no Python in
+    // sight, separates the erasure cost from the FFI boundary: whatever this
+    // costs above `sma`, a Python caller pays too and cannot avoid.
+    out.push(("sma_erased", bench(n, || {
+        let mut ind = runtime::wrap(Sma::new(Identity::<Real>::new(), SMA_P));
+        for &p in &closes {
+            black_box(ind.update(DynValue::Real(p)));
+        }
+    })));
+
+    // Faithful to what the Python bindings actually build: `sma(identity())`
+    // wraps an *already erased* source, so the chain is
+    // `Box<dyn> -> Sma -> Box<dyn> -> Identity` and every sample crosses the
+    // `DynValue` boundary twice in each direction. The single-boundary
+    // `sma_erased` above understates it.
+    out.push(("sma_erased_nested", bench(n, || {
+        let inner = ErasedReal(runtime::wrap(Identity::<Real>::new()));
+        let mut ind = runtime::wrap(Sma::new(inner, SMA_P));
+        for &p in &closes {
+            black_box(ind.update(DynValue::Real(p)));
+        }
+    })));
+
     if json {
         for (name, ns) in &out {
             println!("{{\"name\":\"{name}\",\"ns_per_sample\":{ns:.4}}}");
         }
     } else {
         println!("n = {n} samples, median of {REPS}\n");
-        println!("{:<10}{:>14}", "indicator", "ns/sample");
+        println!(
+            "size_of::<DynValue>() = {} B  (the payload every erased `update` moves)\n",
+            std::mem::size_of::<DynValue>()
+        );
+        println!("{:<20}{:>14}", "indicator", "ns/sample");
         for (name, ns) in &out {
-            println!("{name:<10}{ns:>14.2}");
+            println!("{name:<20}{ns:>14.2}");
         }
     }
 }
