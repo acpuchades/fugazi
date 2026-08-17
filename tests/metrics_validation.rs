@@ -132,8 +132,7 @@ fn matches_empyrical_reference() {
             skip(
                 "metrics_validation",
                 "tests/data/metrics_expected.csv is not present",
-                "  mamba env create -f tools/environment.yml   # or: conda\n  \
-                 mamba run -n fugazi-talib python3 tools/gen_metrics_fixtures.py\n  \
+                "  pixi run gen-metrics\n  \
                  cargo test --test metrics_validation",
             );
             return;

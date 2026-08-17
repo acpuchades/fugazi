@@ -255,7 +255,8 @@ fn sma_is_the_mean_of_its_window() {
 agrees with any bug already present. If the value is only defensible against
 another library's convention (TA-Lib's ADX seeding, say), it belongs in
 `tests/talib_validation.rs` instead — with a column added to
-`tools/gen_talib_fixtures.py` and to that file's `REQUIRED` list.
+`tools/gen_talib_fixtures.py` and to that file's `REQUIRED` list, then
+`pixi run gen-talib` to regenerate the committed fixture.
 
 ### 9. Docs — `docs/STRATEGIES.md`  *(test-enforced)*
 
@@ -551,9 +552,15 @@ compared nothing on every clean checkout.
 
 Both fixtures are now committed, and **CI runs the test job with
 `FUGAZI_REQUIRE_FIXTURES=1`**, which turns a missing-or-stale fixture into a
-failure. If you add an indicator to `tools/gen_talib_fixtures.py`, regenerate and
-commit the fixture or CI will tell you. `tests/indicator_reference.rs` is the
-unconditional battery underneath — hand-derived values, no fixture needed.
+failure. If you add an indicator to `tools/gen_talib_fixtures.py`, regenerate
+(`pixi run gen-talib`) and commit the fixture or CI will tell you.
+`tests/indicator_reference.rs` is the unconditional battery underneath —
+hand-derived values, no fixture needed.
+
+The generator environment is pinned by a committed `pixi.lock`, so regenerating
+without changing anything yields an empty `git diff` and any hunk you *do* see
+is attributable to your change. Read that diff before committing — see
+[TESTING.md](TESTING.md#fixtures-and-the-skip-vs-fail-policy).
 
 The expected side of the catalogue and parity tests is read off **serde's own
 variant list** (`spec::typecheck::known_node_tags` and friends), so it stays

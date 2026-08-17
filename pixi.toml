@@ -1,0 +1,80 @@
+# Reference-library environment for fugazi's *tooling* — not for building the
+# crate or the wheel.
+#
+# Scope: the two fixture generators under `tools/` and the three-tier
+# benchmark. Nothing here is a dependency of `cargo build`, `cargo test`, or
+# `maturin develop`; the Rust toolchain and the Python bindings' dev venv are
+# deliberately left alone (see the note at the bottom).
+#
+#   pixi run gen-talib      # tests/data/talib_expected.csv
+#   pixi run gen-metrics    # tests/data/metrics_expected.csv
+#   pixi run gen-returns    # tests/data/metrics_returns.csv  (rarely)
+#   pixi run -e bench bench # tools/bench_three_tier.py
+#
+# Why this exists at all: both generators write CSVs that are **committed** and
+# then compared to 1e-9 by `tests/metrics_validation.rs`. The environment that
+# produces them is therefore part of the reference, and `pixi.lock` pins it to
+# exact package hashes. Its predecessor (`tools/environment.yml`) named four
+# unpinned packages, so a regeneration six months later could move existing
+# values with no way to distinguish that drift from the change you meant to
+# make.
+#
+# conda-forge rather than nixpkgs or pip: it is the one channel that ships all
+# three of the TA-Lib C library, its Python wrapper, and `empyrical` prebuilt.
+
+[workspace]
+name = "fugazi-tooling"
+description = "Reference libraries for fugazi's fixture generators and benchmarks"
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-64", "osx-arm64"]
+
+# The reference libraries themselves. Kept at the same four names
+# `tools/environment.yml` used; `pixi.lock` supplies the pinning it lacked.
+[dependencies]
+python = ">=3.10"
+ta-lib = "*"      # C library + Python wrapper, together
+empyrical = "*"   # unmaintained since 2020 — the lock is what keeps it working
+
+# NumPy 2 removed the `np.NINF` alias, which `empyrical.downside_risk` still
+# calls (stats.py:875). So an unconstrained solve resolves fine and then dies at
+# runtime — which is precisely what `tools/environment.yml` did, since it named
+# `numpy` with no bound. Not a hypothetical: solving this file without the bound
+# picks numpy 2.5.2 and `pixi run gen-metrics` raises AttributeError.
+#
+# The constraint belongs here rather than in a patched generator: empyrical's
+# value is that it is an *independent* implementation of these formulas, and
+# working around its internals to keep a newer numpy would spend that
+# independence for nothing. Nothing else in the repo reads this pin — the
+# bindings' dev venv tracks current numpy separately.
+numpy = "<2"
+
+[tasks]
+gen-talib = { cmd = "python3 tools/gen_talib_fixtures.py", description = "Regenerate tests/data/talib_expected.csv" }
+gen-metrics = { cmd = "python3 tools/gen_metrics_fixtures.py", description = "Regenerate tests/data/metrics_expected.csv" }
+gen-returns = { cmd = "python3 tools/gen_metrics_returns.py", description = "Regenerate the metrics input fixture (rarely — see tests/data/README.md)" }
+gen = { depends-on = ["gen-talib", "gen-metrics"], description = "Regenerate both committed reference fixtures" }
+
+# `bench` is a separate environment because it needs one interpreter holding
+# **both** `talib` and the locally built `fugazi` wheel — that is the whole
+# point of the three-tier comparison. Building the wheel needs a Rust
+# toolchain, which pixi does not provide here; it picks up `cargo` from the
+# ambient PATH, same as `maturin develop` does.
+[feature.bench.pypi-dependencies]
+fugazi = { path = "python", editable = false }
+
+[feature.bench.tasks]
+bench = { cmd = "python3 tools/bench_three_tier.py", description = "TA-Lib vs fugazi (Rust) vs fugazi (Python) throughput" }
+
+[environments]
+bench = ["bench"]
+
+# Not covered here, on purpose:
+#
+#   - The crate. `cargo` comes from your toolchain manager of choice.
+#   - The bindings' dev venv (`python/.venv`, built by `uv` in
+#     `scripts/ci-local.sh`). That env tracks *current* numpy/pandas/polars,
+#     which is what the parity tests should run against; this one is frozen
+#     around a 2020 library. Freezing both together would force one policy on
+#     two environments that want opposite ones.
+#   - CI. `.github/workflows/ci.yml` installs neither TA-Lib nor empyrical —
+#     it consumes the committed CSVs. Nothing in this file belongs in it.

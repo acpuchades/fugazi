@@ -16,9 +16,16 @@ vectorised batch API will always win a batch benchmark; the question is by how
 much, and whether the incremental design is paying an acceptable price for
 what it buys.
 
-Usage (needs TA-Lib importable — see tools/environment.yml):
+Usage:
 
-    LD_LIBRARY_PATH=<gcc-lib>/lib tools/bench_three_tier.py
+    pixi run -e bench bench
+
+The `bench` environment exists because this script needs `talib` *and* a built
+`fugazi` wheel importable from one interpreter. Sourcing them from two package
+managers is what used to require an `LD_LIBRARY_PATH=<gcc-lib>/lib` prefix to
+get conda's `talib` extension to find a compatible libstdc++; one environment
+holding both needs no such prefix. Building the wheel uses `cargo` from the
+ambient PATH, same as `maturin develop`.
 
 Rust numbers come from `cargo bench --bench three_tier`, which this script
 invokes and parses, so both tiers run the same input length.

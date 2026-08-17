@@ -164,7 +164,9 @@ script may run *more* than CI, never less.
 
 `tests/data/` holds committed inputs and generated reference values; the
 generators are in `tools/`, and neither reference library is a Cargo dependency.
-See [tests/data/README.md](../tests/data/README.md) for the file-by-file detail.
+They come from `pixi.toml` at the repo root — `pixi run gen-talib` /
+`pixi run gen-metrics`. See [tests/data/README.md](../tests/data/README.md) for
+the file-by-file detail.
 
 The rule that matters:
 
@@ -192,6 +194,14 @@ drift guard. The policy that resolves it:
 Neither replaces the other: `indicator_reference` pins fugazi against its own
 documented formulas; the cross-checks pin it against an independent
 implementation's conventions.
+
+There is a fifth point, which is about the *other* end of the same guard.
+A committed fixture is only a reference if you can tell what changed it, so the
+environment that generates it is pinned too — `pixi.lock` is committed alongside
+`pixi.toml`. Regenerating without changing anything must produce an empty `git
+diff`; the previous unpinned conda env failed that, and had additionally rotted
+into an outright crash (empyrical calls `np.NINF`, removed in NumPy 2). See
+[tests/data/README.md](../tests/data/README.md#why-the-environment-is-pinned).
 
 The same failure mode is already called out in `.github/workflows/ci.yml`,
 where `jsonschema` and `pyyaml` are installed explicitly because the Python

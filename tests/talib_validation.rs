@@ -84,8 +84,7 @@ const REQUIRED: &[&str] = &[
     "aroon_dn14", "aroon_osc14", "kc_upper", "kc_mid", "kc_lower", "sar",
 ];
 
-const HINT: &str = "  mamba env create -f tools/environment.yml   # or: conda\n  \
-                    mamba run -n fugazi-talib python3 tools/gen_talib_fixtures.py\n  \
+const HINT: &str = "  pixi run gen-talib\n  \
                     cargo test --test talib_validation";
 
 /// fugazi's output for every cross-checked series, keyed by the fixture's

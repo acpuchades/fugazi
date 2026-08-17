@@ -5,11 +5,15 @@ Reads the committed returns fixture and writes one row per (metric, expected
 value) into `tests/data/metrics_expected.csv`, which the Rust test loads and
 compares against `metrics::compute` cell-by-cell.
 
-Usage (conda, recommended — pulls empyrical from conda-forge alongside numpy):
-    mamba env create -f tools/environment.yml   # or: conda env create -f ...
-    mamba run -n fugazi-talib python3 tools/gen_metrics_fixtures.py
+Usage (pixi, recommended):
+    pixi run gen-metrics
 
-Usage (pip): pip install empyrical numpy, then run the script.
+Use pixi rather than a fresh `pip install empyrical numpy` here. empyrical has
+been unmaintained since 2020 and `downside_risk` still calls `np.NINF`, which
+NumPy 2.0 removed — so an unpinned install resolves happily and then dies with
+`AttributeError` partway through this script. `pixi.toml` holds numpy below 2
+for exactly that reason, and `pixi.lock` pins the build that produced the
+committed fixture.
 
 Constants must match `tests/metrics_validation.rs` and the returns fixture.
 """

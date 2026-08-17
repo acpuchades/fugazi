@@ -33,27 +33,48 @@ reference library isn't installed:
 ## Regenerating the reference values
 
 Neither TA-Lib nor empyrical is a Rust dependency; they're external tools used
-once to produce the fixtures. The `tools/environment.yml` env pulls the
-TA-Lib C library + Python wrapper *and* empyrical from conda-forge — use conda,
-mamba, or micromamba:
+once to produce the fixtures. [`pixi.toml`](../../pixi.toml) at the repo root
+defines the environment, from conda-forge — the one channel that ships the
+TA-Lib C library, its Python wrapper, and empyrical all prebuilt:
 
 ```sh
-mamba env create -f tools/environment.yml   # or: conda env create -f ...
-mamba run -n fugazi-talib python3 tools/gen_talib_fixtures.py
-mamba run -n fugazi-talib python3 tools/gen_metrics_fixtures.py
-cargo test --test talib_validation          # now actually compares
+pixi run gen-talib     # tests/data/talib_expected.csv
+pixi run gen-metrics   # tests/data/metrics_expected.csv
+pixi run gen           # both
+
+cargo test --test talib_validation
 cargo test --test metrics_validation
 ```
 
-`mamba run -n <env> …` runs the generator with the env's Python without needing
-to `activate` it first (equivalently: `conda activate fugazi-talib` then run
-`python3 tools/gen_talib_fixtures.py`). If your shell wrapper can't run
-`mamba run`, call the env's interpreter directly:
-`"$(mamba env list | awk '/fugazi-talib/{print $NF}')"/bin/python3
-tools/gen_talib_fixtures.py`.
+`pixi` needs no `activate` step and creates the env on first `run`. Nothing
+else in the repo depends on it: the crate builds with `cargo` alone, and the
+bindings' dev venv is separate (`scripts/ci-local.sh` builds it with `uv`).
 
 (Or with pip, if the TA-Lib C library is already installed: `pip install TA-Lib
-numpy`, then `python3 tools/gen_talib_fixtures.py`.)
+numpy`, then `python3 tools/gen_talib_fixtures.py`. See the warning below.)
+
+### Why the environment is pinned
+
+`pixi.lock` is committed, and that is the point of using pixi at all. These
+CSVs are *reference values* — `metrics_validation.rs` compares against them to
+1e-9 — so the environment that produces them is part of the reference. Its
+predecessor (`tools/environment.yml`, now removed) named four packages with no
+version bounds, which cost real correctness in two ways:
+
+- **It stopped working.** empyrical has been unmaintained since 2020 and
+  `downside_risk` still calls `np.NINF`, removed in NumPy 2.0. Solving those
+  four unpinned names today picks numpy 2.5 and `gen_metrics_fixtures.py` dies
+  with `AttributeError` partway through. `pixi.toml` holds `numpy = "<2"` for
+  this reason, with the rationale in a comment there.
+- **It made fixture diffs unreadable.** Regenerating under the pinned env moved
+  three stddev-derived values (`annualized_volatility_pct`, `sharpe`, `sortino`)
+  in their last 1–2 ULP — an OpenBLAS kernel difference, ~7e-15 relative, well
+  inside the 1e-9 tolerance. Benign, but indistinguishable at a glance from a
+  real regression. With the env pinned, regenerating without changing anything
+  produces an **empty** `git diff`, so anything that does show up is yours.
+
+So: after regenerating, read `git diff tests/data/`. The pip path above is
+unpinned and gives up this property.
 
 ## The skip is opt-out
 

@@ -4,6 +4,11 @@
 
 /target
 
+# pixi's solved environments. `pixi.toml` and `pixi.lock` ARE committed — the
+# lock is the point (see the header in pixi.toml); only the materialised envs
+# under .pixi/ are disposable.
+/.pixi
+
 # NB: tests/data/talib_expected.csv is deliberately NOT ignored. It used to be,
 # which is why the TA-Lib cross-check silently skipped on every clean checkout
 # while being listed as a drift guard. It is generated but committed, exactly

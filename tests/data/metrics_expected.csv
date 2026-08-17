@@ -19,9 +19,9 @@ returns.var_95,0.02456517780176302
 returns.cvar_95,0.03036395531201285
 returns.tail_ratio,0.9685277508294569
 returns.annualized_mean_pct,-38.13323587534416
-returns.annualized_volatility_pct,23.456169020457224
-risk_adjusted.sharpe,-1.6257231026126377
-risk_adjusted.sortino,-2.1344713397663457
+returns.annualized_volatility_pct,23.45616902045722
+risk_adjusted.sharpe,-1.6257231026126384
+risk_adjusted.sortino,-2.134471339766346
 risk_adjusted.calmar,-0.6666142162023894
 risk_adjusted.omega,0.7723679880848116
 risk_adjusted.ulcer_index,0.28005048773515473

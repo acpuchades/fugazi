@@ -74,6 +74,12 @@ drift**, so adding a CI step means adding it to the script too.
   `tests/data/` (`.gitignore` carries an explicit note not to re-ignore
   `talib_expected.csv`), and CI's Rust job sets this — so a stale fixture fails
   rather than silently comparing nothing. See [docs/TESTING.md](docs/TESTING.md).
+- **Regenerating those fixtures: `pixi run gen-talib` / `gen-metrics`** (`pixi run gen`
+  for both). `pixi.toml` + the committed `pixi.lock` are the *tooling* env only — TA-Lib
+  and empyrical, used by nothing in `cargo build`/`cargo test`/CI. The lock is
+  load-bearing: it holds `numpy < 2` because empyrical calls the removed `np.NINF`, and
+  it is what makes a regenerated fixture's `git diff` attributable to your change rather
+  than to a BLAS kernel. `pixi run -e bench bench` for the three-tier benchmark.
 
 ### Bumping the version — sync **seven** places (`cargo check` only catches Rust drift)
 

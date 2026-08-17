@@ -4,15 +4,19 @@
 Reads the offline price fixture and writes one column of expected output per
 indicator, aligned row-for-row with the input. Empty cells mark warm-up / NaN.
 
-Usage (conda, recommended — bundles the TA-Lib C library):
-    conda env create -f tools/environment.yml
-    conda activate fugazi-talib
-    python3 tools/gen_talib_fixtures.py
+Usage (pixi, recommended — bundles the TA-Lib C library, and `pixi.lock` pins
+the exact build that produced the committed fixture):
+    pixi run gen-talib
 
 Usage (pip — needs the TA-Lib C library already installed, e.g.
 `brew install ta-lib` on macOS):
     pip install TA-Lib numpy
     python3 tools/gen_talib_fixtures.py
+
+The pip path is unpinned, so it can reproduce this fixture with a different
+TA-Lib than the one on record. Check `git diff tests/data/talib_expected.csv`
+after regenerating either way: the diff should contain your change and nothing
+else.
 
 Then run the Rust side:
     cargo test --test talib_validation

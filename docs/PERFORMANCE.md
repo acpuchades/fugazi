@@ -533,7 +533,13 @@ irrelevant below ~16 symbols.
 ## Three-tier comparison — TA-Lib vs fugazi (Rust) vs fugazi (Python)
 
 `tools/bench_three_tier.py` drives all three from one input, 200 000 samples,
-median of 7, quiet machine.
+median of 7, quiet machine. Run it with `pixi run -e bench bench` — that
+environment is the one place `talib` and a built `fugazi` wheel are importable
+from the same interpreter, which is what the comparison needs.
+
+The numbers below are a recorded run; re-running reproduces the *shape*, not the
+digits, since they depend on the machine and on which TA-Lib build the lock
+resolves to.
 
 **Read the Python row against TA-Lib, not against Rust.** `talib.SMA(arr, 10)`
 *is* a Python API — a thin Cython wrapper over the C library. So the comparison
