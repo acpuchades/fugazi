@@ -665,6 +665,34 @@ The numbers below are a recorded run; re-running reproduces the *shape*, not the
 digits, since they depend on the machine and on which TA-Lib build the lock
 resolves to.
 
+### Is `talib` a fair stand-in for native TA-Lib?
+
+There is one TA-Lib column, and it is measured through `talib`, the Cython
+bindings — not by calling `TA_SMA` from C. That is worth justifying rather than
+assuming, because if the wrapper were charging a per-sample cost then every
+`rs/TA-Lib` figure below would be flattering fugazi.
+
+It is not. The wrapper's cost is **per call**, not per sample, so it amortises:
+
+| n | total | ns/sample |
+|---:|---:|---:|
+| 1 000 | 18.0 µs | 18.04 |
+| 10 000 | 32.0 µs | 3.20 |
+| 200 000 | 415.2 µs | **2.08** |
+| 2 000 000 | 4 021.5 µs | **2.01** |
+
+A fixed ~15 µs of call overhead, visible at `n = 1 000` and converged by
+`n = 200 000`. The 2.01 asymptote is the C library's own throughput; at the
+200 000 samples these benchmarks use, `talib` reads 2.08 — **3.4% slower than
+native**, which is the whole of the gap.
+
+So the TA-Lib baseline understates the C library by ~3%. Correcting for it moves
+`sma` from 0.67× to 0.70× and changes no conclusion. A separate native tier
+would buy that 3% and a C build dependency; it has not been worth it. **If a
+result ever turns on less than ~5%, add the native tier rather than trusting
+this row** — and note the first two rows of the table above are exactly why a
+benchmark at `n = 1 000` would have been nonsense.
+
 **Read the Python row against TA-Lib, not against Rust.** `talib.SMA(arr, 10)`
 *is* a Python API — a thin Cython wrapper over the C library. So the comparison
 that matters to a Python user is `fugazi py` vs `TA-Lib`, and that is the

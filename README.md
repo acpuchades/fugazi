@@ -1130,6 +1130,12 @@ The **Python** column is against `talib`'s own Python bindings — the honest
 comparison, since those are a thin Cython wrapper over the same C library. 1.2×
 to 2.6× is FFI overhead, not a different algorithm.
 
+The TA-Lib baseline is that same wrapper, whose cost is per *call* rather than
+per sample: at 200 000 samples it measures 2.08 ns/sample against a 2.01
+asymptote, so it understates the C library by ~3%. Correcting for that moves
+`sma` from 0.67× to 0.70× and changes nothing — [the numbers are in the
+record](docs/PERFORMANCE.md#is-talib-a-fair-stand-in-for-native-ta-lib).
+
 For scale rather than ratios: `sma` is **1.41 ns/sample** in Rust and 5.12 in
 Python, and driving a full backtest allocates **zero times per bar** — a
 200 000-bar run performs 29 allocations in total. Those are figures from one
