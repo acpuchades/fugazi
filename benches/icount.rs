@@ -22,6 +22,35 @@
 //! · `chain_candle` · `chain_atom` · `sma_two_levels` · `sma_fused`
 //! · `sma_dyn_per_sample` · `sma_dyn_batch`
 //! · `sma_scalar_none` · `sma_scalar_direct` · `sma_scalar_erased`
+//! · `sma_scalar_fused` · `sma_scalar_fused_batched` · `sma_scalar_boxed_local`
+//! · `sma_scalar_boxed_producer` · `sma_scalar_chunked_local`
+//!
+//! **The outer erased level costs 21 instructions/sample, and it is not the
+//! vtable — it is where the state lives.** `sma_scalar_boxed_local` differs from
+//! `sma_scalar_fused_batched` by one line, `let mut local = self.0.clone()` plus
+//! a write-back, and that line is worth the whole 21: behind a `Box` the
+//! compiler cannot prove the indicator's state does not alias the output buffer,
+//! so `sum`/`head`/`len` reload and store every sample; as a local they promote
+//! to registers for the loop.
+//!
+//! Net of the control, every variant storing an `Option<Real>` per sample:
+//!
+//! | | net instr/sample |
+//! |---|---:|
+//! | `sma_scalar_direct` — local indicator, no erasure | 16.00 |
+//! | `sma_scalar_boxed_local` — boxed, whole slice, state copied local | 16.04 |
+//! | `sma_scalar_chunked_local` — as above but 128-sample stack chunks | **20.56** |
+//! | `sma_scalar_fused` — boxed, per sample (what ships today) | 37.02 |
+//! | `sma_scalar_boxed_producer` — boxed, `&mut dyn FnMut` in and out | 46.03 |
+//!
+//! So batching pays **only** with the local copy; the two earlier attempts
+//! without it measured -1.2 and +1.3, which is why this looked like a dead end
+//! twice. And it must be a *slice*: routing samples through `&mut dyn FnMut`
+//! costs ~30 instructions/sample, worse than doing nothing.
+//!
+//! `chunked_local` is the shippable shape — a whole-frame slice would need the
+//! 8 MB `Vec<Candle>` that streaming removed, so the candle path copies into a
+//! small stack buffer instead. It gives up 4.5 of the 21 to do so.
 //!
 //! **`sma_scalar_*` is the one that says where the Python gap now lives.** Net
 //! of the control, the same `Sma::new(Identity, 14)` costs **20.0
@@ -304,6 +333,54 @@ where
     }
 }
 
+/// Streams through `&mut dyn FnMut` on both sides, so it needs no input slice —
+/// see `sma_scalar_boxed_producer`.
+trait ProducerScalar: Send + Sync {
+    fn fold(
+        &mut self,
+        n: usize,
+        next: &mut dyn FnMut() -> Real,
+        sink: &mut dyn FnMut(Option<Real>),
+    );
+}
+
+struct ProducedScalar<I>(I);
+
+impl<I> ProducerScalar for ProducedScalar<I>
+where
+    I: Indicator<Input = Real, Output = Real> + Clone + Send + Sync,
+{
+    fn fold(
+        &mut self,
+        n: usize,
+        next: &mut dyn FnMut() -> Real,
+        sink: &mut dyn FnMut(Option<Real>),
+    ) {
+        let mut local = self.0.clone();
+        for _ in 0..n {
+            sink(local.update(next()));
+        }
+        self.0 = local;
+    }
+}
+
+/// The same batch, but the indicator is copied to a local for the duration and
+/// written back once — see `sma_scalar_boxed_local`.
+struct BatchedScalarLocal<I>(I);
+
+impl<I> BatchScalar for BatchedScalarLocal<I>
+where
+    I: Indicator<Input = Real, Output = Real> + Clone + Send + Sync,
+{
+    fn many(&mut self, xs: &[Real], out: &mut [Option<Real>]) {
+        let mut local = self.0.clone();
+        for (o, &x) in out.iter_mut().zip(xs) {
+            *o = local.update(x);
+        }
+        self.0 = local;
+    }
+}
+
 /// One erased level over a monomorphised `Sma<Identity<Real>>` — the artifact a
 /// fused plain root would build.
 #[inline(never)]
@@ -320,7 +397,7 @@ fn main() {
             "usage: icount <sma_rust|sma_yaml|macd_rust|macd_yaml|tree8\
              |atr_none|atr_atom|atr_candle|atr_manual_max|chain_candle|chain_atom|chain_atom_direct\
              |sma_two_levels|sma_fused|sma_dyn_per_sample|sma_dyn_batch\
-             |sma_scalar_none|sma_scalar_direct|sma_scalar_erased|sma_scalar_fused|sma_scalar_fused_batched>"
+             |sma_scalar_none|sma_scalar_direct|sma_scalar_erased|sma_scalar_fused|sma_scalar_fused_batched|sma_scalar_boxed_local|sma_scalar_boxed_producer|sma_scalar_chunked_local>"
         );
         std::process::exit(2);
     });
@@ -430,7 +507,9 @@ fn main() {
         // `sma_scalar_none` is the control (same loop, no indicator); the other
         // two are the identical computation monomorphised and erased.
         "sma_scalar_none" | "sma_scalar_direct" | "sma_scalar_erased"
-        | "sma_scalar_fused" | "sma_scalar_fused_batched" => {
+        | "sma_scalar_fused" | "sma_scalar_fused_batched"
+        | "sma_scalar_boxed_local" | "sma_scalar_boxed_producer"
+        | "sma_scalar_chunked_local" => {
             let xs: Vec<Real> = (0..BARS).map(|i| 100.0 + (i % 97) as Real * 0.5).collect();
             match workload.as_str() {
                 "sma_scalar_none" => {
@@ -465,17 +544,89 @@ fn main() {
                 // the loop on its side of the boundary, nothing opaque is left
                 // on the per-sample path and the whole chain can inline.
                 "sma_scalar_fused_batched" => {
-                    const CHUNK: usize = 64;
                     let mut ind: Box<dyn BatchScalar> =
                         Box::new(BatchedScalar(fugazi::indicators::Sma::new(
                             fugazi::indicators::Identity::<Real>::new(),
                             14,
                         )));
-                    let mut out = [None; CHUNK];
-                    for chunk in xs.chunks(CHUNK) {
-                        ind.many(chunk, &mut out[..chunk.len()]);
-                        black_box(&out);
+                    let mut out = vec![None; BARS];
+                    ind.many(&xs, &mut out);
+                    black_box(&out);
+                }
+                // Why does a boxed-but-concrete chain (35.76) still cost twice
+                // a local one (16.00)? Hypothesis: it is not the call, it is
+                // where the *state* lives. Behind a `Box`, the compiler cannot
+                // prove `self.0` does not alias `out`, so `sum`/`head`/`len` are
+                // reloaded and stored every sample; as a local they promote to
+                // registers for the whole loop.
+                //
+                // Same boxed trait object, same whole-slice batch, one change:
+                // copy the indicator into a local, run, write it back once.
+                "sma_scalar_boxed_local" => {
+                    let mut ind: Box<dyn BatchScalar> =
+                        Box::new(BatchedScalarLocal(fugazi::indicators::Sma::new(
+                            fugazi::indicators::Identity::<Real>::new(),
+                            14,
+                        )));
+                    let mut out = vec![None; BARS];
+                    ind.many(&xs, &mut out);
+                    black_box(&out);
+                }
+                // The local-copy trick needs a whole-frame slice, which the
+                // candle path cannot supply without rebuilding the 8 MB
+                // `Vec<Candle>` that streaming removed. So: same trick, but the
+                // samples arrive through a `&mut dyn FnMut` producer and leave
+                // through a `&mut dyn FnMut` sink, which works for any input
+                // shape. Two indirect calls per sample (~2 instructions each)
+                // against the 21 the local copy saves.
+                "sma_scalar_boxed_producer" => {
+                    let mut ind: Box<dyn ProducerScalar> =
+                        Box::new(ProducedScalar(fugazi::indicators::Sma::new(
+                            fugazi::indicators::Identity::<Real>::new(),
+                            14,
+                        )));
+                    let mut out = vec![None; BARS];
+                    let mut i = 0usize;
+                    let mut j = 0usize;
+                    {
+                        let xs = &xs;
+                        let out = &mut out;
+                        let mut next = || {
+                            let v = xs[i];
+                            i += 1;
+                            v
+                        };
+                        let mut sink = |v: Option<Real>| {
+                            out[j] = v;
+                            j += 1;
+                        };
+                        ind.fold(BARS, &mut next, &mut sink);
                     }
+                    black_box(&out);
+                }
+                // The shape that would actually ship. A whole-frame slice is not
+                // available for candles without rebuilding the 8 MB `Vec<Candle>`
+                // streaming removed, so: copy into a small *stack* buffer, hand
+                // that slice over, repeat. The state round-trips once per chunk
+                // instead of once per sample, so the register promotion survives;
+                // the question is whether the buffer shuffling eats the win.
+                "sma_scalar_chunked_local" => {
+                    const CHUNK: usize = 128;
+                    let mut ind: Box<dyn BatchScalar> =
+                        Box::new(BatchedScalarLocal(fugazi::indicators::Sma::new(
+                            fugazi::indicators::Identity::<Real>::new(),
+                            14,
+                        )));
+                    let mut out = vec![None; BARS];
+                    let mut buf = [0.0f64; CHUNK];
+                    let mut got = [None; CHUNK];
+                    for (ci, chunk) in xs.chunks(CHUNK).enumerate() {
+                        buf[..chunk.len()].copy_from_slice(chunk);
+                        ind.many(&buf[..chunk.len()], &mut got[..chunk.len()]);
+                        out[ci * CHUNK..ci * CHUNK + chunk.len()]
+                            .copy_from_slice(&got[..chunk.len()]);
+                    }
+                    black_box(&out);
                 }
                 // Exactly what fusing a plain root would produce: the leaf
                 // monomorphised into `Sma`, the result erased once. Neither
