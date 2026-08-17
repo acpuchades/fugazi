@@ -145,9 +145,9 @@ next to `meta:`, so a service's `meta.tags` can never collide with a `tags:`
 fugazi adds later.
 
 It is accepted by all five strategy shapes, by each `children:` entry of a
-portfolio, by a [costs document](COSTS.md), by a `get` dataset file, and by an
-overlay column file. Read it back with `StrategySpec::meta()` in Rust or
-`spec.meta` in [Python](PYTHON.md); a document that omits it reads `None`.
+portfolio, by a [costs document](COSTS.md), and by a `get` dataset file. Read it
+back with `StrategySpec::meta()` in Rust or `spec.meta` in [Python](PYTHON.md);
+a document that omits it reads `None`.
 
 Three things worth knowing:
 
@@ -160,9 +160,11 @@ Three things worth knowing:
   `strategy:` belongs to the nested document. Unlike `name` / `group`, neither is
   surfaced to the `weights:` expression — `meta` is opaque by contract, and a
   weight that read it would be reading data fugazi promises not to interpret.
-- **In an overlay column file, `meta` is a reserved name.** That document has no
-  envelope — every key *is* a column name — so a top-level `meta:` is the
-  document's metadata and never a column. Name the column something else.
+- **An overlay column file is the exception — it takes no `meta:`.** That
+  document has no envelope: every key *is* a column name, so a `meta:` field
+  could only be carved out of the column namespace, taking the name away from
+  anyone already using it. `meta` there stays an ordinary column. Metadata about
+  a set of overlay columns belongs on the dataset file that declares them.
 
 `meta:` rides the same load pipeline as the rest of the document, so
 `!import` and [`!param`](#parameters--param) resolve inside it —

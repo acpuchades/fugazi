@@ -270,13 +270,16 @@ fn a_costs_document_accepts_meta() {
     assert!(!cfg.is_none(), "the commission leg should still be set");
 }
 
-/// An overlay document has no envelope — every key is a column name — so
-/// `meta` is reserved there. Pinned because it is the one place this feature
-/// took a name away rather than only adding one.
+/// An overlay document is the deliberate exception: it has no envelope — every
+/// key *is* a column name — so `meta` there stays an ordinary column, not
+/// metadata. Widening what parses is cheap; taking a name away is not.
+///
+/// Pinned so nobody "completes" the feature by reserving it later and silently
+/// dropping someone's column.
 #[test]
-fn an_overlay_document_reserves_meta() {
-    let (cols, meta) = fugazi::spec::overlay::columns_and_meta_from_yaml(
-        "meta: { source: strategy-lab }\nsma20: !sma { period: 20 }\n",
+fn an_overlay_document_treats_meta_as_an_ordinary_column() {
+    let cols = fugazi::spec::overlay::columns_from_yaml(
+        "meta: !sma { period: 20 }\nrsi14: !rsi { period: 14 }\n",
         &HashMap::new(),
         Path::new("."),
         "(test)",
@@ -285,10 +288,9 @@ fn an_overlay_document_reserves_meta() {
 
     assert_eq!(
         cols.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
-        ["sma20"],
-        "`meta` must not become a column"
+        ["meta", "rsi14"],
+        "`meta` must stay a column name in an overlay document"
     );
-    assert_eq!(meta.expect("meta present")["source"], json!("strategy-lab"));
 }
 
 /// The published document JSON Schema must allow `meta:` on every shape —

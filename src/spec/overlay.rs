@@ -54,7 +54,6 @@ use crate::time::Frequency;
 use crate::types::Snapshot;
 
 use super::expr::NodeSpec;
-use super::meta::Meta;
 use crate::types::Symbol;
 
 /// One named overlay column: its output column name, its source expression,
@@ -116,37 +115,21 @@ pub fn build_overlay(
 /// names. Vocabulary-neutral — reserving OHLCV column names is a CLI policy and
 /// stays in `cli::overlay`.
 ///
-/// Discards the document's `meta:` — use
-/// [`columns_and_meta_from_value`] to keep it.
+/// **No `meta:` here**, unlike every other fugazi document
+/// ([`spec::meta`](super::meta)). An overlay document has no envelope — every
+/// key *is* a column name — so a `meta:` field could only be carved out of the
+/// column namespace, taking the name away from anyone using it. Widening what
+/// parses is cheap; narrowing it is not, and metadata about a set of columns
+/// has somewhere better to live (the dataset file that declares them, or the
+/// strategy that reads them).
 pub fn columns_from_value(value: Json, label: &str) -> Result<Vec<OverlayColumn>> {
-    columns_and_meta_from_value(value, label).map(|(cols, _)| cols)
-}
-
-/// [`columns_from_value`], also returning the document's free-form `meta:`.
-///
-/// An overlay document has no envelope — every key *is* a column name — so
-/// unlike the strategy shapes there is no place to put a `meta:` field except
-/// the column namespace itself. `meta` is therefore **reserved**: a top-level
-/// `meta:` key is the document's metadata ([`spec::meta`](super::meta)) and
-/// never a column, so a column that genuinely wants that name must be spelled
-/// differently. This is the one place adding `meta:` changed an existing
-/// meaning rather than only widening what parses.
-pub fn columns_and_meta_from_value(
-    value: Json,
-    label: &str,
-) -> Result<(Vec<OverlayColumn>, Option<Meta>)> {
     let Json::Object(map) = value else {
         bail!("overlay {label} must be a mapping of column names to source expressions");
     };
     let mut out = Vec::with_capacity(map.len());
-    let mut meta = None;
     for (name, expr_value) in map {
         if name.is_empty() {
             bail!("overlay {label}: empty column name");
-        }
-        if name == "meta" {
-            meta = Some(expr_value);
-            continue;
         }
         let spec: NodeSpec = serde_json::from_value(expr_value)
             .map_err(|e| anyhow!("overlay {name:?} in {label}: {e}"))?;
@@ -156,7 +139,7 @@ pub fn columns_and_meta_from_value(
             origin: label.to_string(),
         });
     }
-    Ok((out, meta))
+    Ok(out)
 }
 
 /// Full YAML entry point: parse `text` → resolve `!import` → substitute
@@ -168,18 +151,8 @@ pub fn columns_from_yaml(
     base: &std::path::Path,
     label: &str,
 ) -> Result<Vec<OverlayColumn>> {
-    columns_and_meta_from_yaml(text, params, base, label).map(|(cols, _)| cols)
-}
-
-/// [`columns_from_yaml`], also returning the document's free-form `meta:`.
-pub fn columns_and_meta_from_yaml(
-    text: &str,
-    params: &HashMap<String, Json>,
-    base: &std::path::Path,
-    label: &str,
-) -> Result<(Vec<OverlayColumn>, Option<Meta>)> {
     let value = super::load_value(text, params, base, label)?;
-    columns_and_meta_from_value(value, label)
+    columns_from_value(value, label)
 }
 
 /// A prepared, stateful overlay column: its live indicator plus the resolved

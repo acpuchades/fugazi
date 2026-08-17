@@ -130,11 +130,11 @@ history, hand it to `run_resumable`, go live.
 
 ### `meta:` is a named subtree, not a relaxed `deny_unknown_fields`
 
-0.59.0 gave every document (the five strategy shapes, presets, portfolio
-children, costs files, dataset files, overlay files) a free-form `meta:` key so
-an external service can keep its own record next to a strategy it generated.
-The obvious cheaper alternative — drop `deny_unknown_fields` at the document
-root and let any extra key through — was considered and rejected twice over:
+0.60.0 gave every document (the five strategy shapes, presets, portfolio
+children, costs files, dataset files) a free-form `meta:` key so an external
+service can keep its own record next to a strategy it generated. The obvious
+cheaper alternative — drop `deny_unknown_fields` at the document root and let
+any extra key through — was considered and rejected twice over:
 
 - **It trades the typo guard for the feature.** `symbl: BTC` or
   `rebalance_of: !every 5` would parse and silently do nothing, and a strategy
@@ -149,16 +149,21 @@ What would change it: nothing about typo detection — but if a *second*
 uninterpreted namespace is ever wanted (say a separate one owned by the CLI),
 the answer is another named key, not opening the root.
 
-Two consequences are load-bearing and should not be "fixed" without thought.
+**Overlay column files are deliberately excluded.** They are the one document
+with no envelope — every key *is* a column name — so a `meta:` field could only
+be carved out of the column namespace, silently turning an existing column into
+metadata. Widening what parses is cheap and backwards-compatible; narrowing it
+is neither, and metadata about a set of columns has somewhere better to live
+(the dataset file that declares them). `tests/spec_meta.rs` pins `meta` as an
+ordinary column name there, so "completing" the feature can't happen by
+accident.
+
 **`meta:` is substituted like any other subtree**, so `!import` / `!param`
 resolve inside it — deliberate (`meta: !import shared-meta.yml` is useful), at
 the price of a literal `{param: …}` map inside `meta:` being read as a
 placeholder. Excluding `meta` would mean teaching the untyped tree-walkers
 (`params::substitute`, `imports::resolve`) about document structure, which they
-are specifically built not to know. And **`meta` is reserved in an overlay
-column file**, the one document with no envelope — every key there *is* a column
-name, so the metadata has nowhere else to live. That is the only place this
-feature took a name away rather than only widening what parses.
+are specifically built not to know.
 
 ## Datasets
 
