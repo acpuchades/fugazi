@@ -643,6 +643,14 @@ something extra was hiding in `feed()`. There is not; the probe *is* the product
 ### Priorities
 
 **P1 — `Atom` is the boundary type where `Candle` would do. 104 instructions/bar.**
+**Step 1 done** (bar indicators): `fz.atr(14).feed(frame)` went from **9.87× to
+3.08×** `talib.ATR`, measured interleaved in one process, spread 1.07–1.13×.
+`AnySource` now carries a bar-only `Candle` variant beside the `Atom` one, and
+`pair()` **lifts** a bar chain into the atom domain when the two are combined
+rather than rejecting the pair — `close().add(get_real(schema, "adj"))` was valid
+when both were one domain and stays valid. Field leaves (`close()`, `high()`, …)
+are still atom-rooted at 4.21×, which is step 2.
+
 
 *Confirmed by instruction count*, because ~24 ns/sample is ~75 cycles and far more
 than an 88-vs-40-byte move should cost. `benches/icount.rs` grew `chain_candle`

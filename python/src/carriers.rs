@@ -452,6 +452,16 @@ impl AnySharedMulti {
 /// entirely on its own it behaves as candle-rooted.
 #[derive(Clone)]
 pub(crate) enum AnySource {
+    /// Reads the **bar only** — 40 bytes, `Copy`, no drop glue. Where every
+    /// candle field and bar indicator belongs, and the point of P1: an
+    /// `Atom`-rooted chain costs 125.8 instructions per bar against this one's
+    /// ~22, almost all of it moving and dropping 88-byte atoms to read 40 bytes
+    /// of them. See `docs/PERFORMANCE.md`.
+    Candle(Source<Candle>),
+    /// Reads the bar **and its side channels** (`time`, `overlays`) — the
+    /// overlay readers (`get*`) and the calendar leaves. A `Candle` chain lifts
+    /// into this one ([`atom_over_candle`]); the reverse is impossible, since a
+    /// bare candle carries neither a timestamp nor an overlay bundle.
     Atom(Source<Atom>),
     Real(Source<Real>),
     Snapshot(Source<Snapshot<Symbol>>),
@@ -461,6 +471,7 @@ pub(crate) enum AnySource {
 impl AnySource {
     pub(crate) fn value(&self) -> Option<Real> {
         match self {
+            AnySource::Candle(s) => Indicator::value(s),
             AnySource::Atom(s) => Indicator::value(s),
             AnySource::Real(s) => Indicator::value(s),
             AnySource::Snapshot(s) => Indicator::value(s),
@@ -469,6 +480,7 @@ impl AnySource {
     }
     pub(crate) fn warm_up_bars(&self) -> usize {
         match self {
+            AnySource::Candle(s) => Indicator::warm_up_bars(s),
             AnySource::Atom(s) => Indicator::warm_up_bars(s),
             AnySource::Real(s) => Indicator::warm_up_bars(s),
             AnySource::Snapshot(s) => Indicator::warm_up_bars(s),
@@ -477,6 +489,7 @@ impl AnySource {
     }
     pub(crate) fn unstable_bars(&self) -> usize {
         match self {
+            AnySource::Candle(s) => Indicator::unstable_bars(s),
             AnySource::Atom(s) => Indicator::unstable_bars(s),
             AnySource::Real(s) => Indicator::unstable_bars(s),
             AnySource::Snapshot(s) => Indicator::unstable_bars(s),
@@ -485,6 +498,7 @@ impl AnySource {
     }
     pub(crate) fn reset(&mut self) {
         match self {
+            AnySource::Candle(s) => Indicator::reset(s),
             AnySource::Atom(s) => Indicator::reset(s),
             AnySource::Real(s) => Indicator::reset(s),
             AnySource::Snapshot(s) => Indicator::reset(s),
@@ -499,6 +513,14 @@ impl AnySource {
     /// every bar and reads the frame as candles (its neutral default domain).
     pub(crate) fn feed_rows(&mut self, data: &Bound<'_, PyAny>) -> PyResult<Vec<Option<Real>>> {
         Ok(match self {
+            // The bar-only arm: candles go straight in, so no `Atom` is built,
+            // moved through the vtable or dropped. This is where P1's win lands.
+            AnySource::Candle(s) => {
+                let cols = columns_from_frame(data)?;
+                let mut out = Vec::with_capacity(cols.len());
+                cols.for_each(|c| out.push(Indicator::update(s, c)));
+                out
+            }
             // Streamed, not collected: see `CandleColumns`. The `Vec<Candle>`
             // this used to build was 8 MB for a 200 000-bar frame, written and
             // read back for nothing.
@@ -522,9 +544,54 @@ impl AnySource {
     }
 }
 
+/// Lift a bar-only chain into the atom domain, so the two can be combined.
+///
+/// The only sound direction. A `Candle` chain fed an `Atom` just reads the bar
+/// out of it; an `Atom` chain fed a bare `Candle` would be missing the `time`
+/// and `overlays` it exists to read.
+///
+/// `candle` is `None` for an **overlay-only** atom — a series that is not a price
+/// at all. The bar-only chain reads `None` for that bar, matching what
+/// `CurrentBar` already does with the same input.
+#[derive(Clone)]
+pub(crate) struct AtomOverCandle<Out: 'static> {
+    inner: runtime::Chain<Candle, Out>,
+    value: Option<Out>,
+}
+
+impl<Out: Clone + 'static> Indicator for AtomOverCandle<Out> {
+    type Input = Atom;
+    type Output = Out;
+    fn update(&mut self, input: Atom) -> Option<Out> {
+        self.value = input.candle.and_then(|c| self.inner.update(c));
+        self.value.clone()
+    }
+    fn value(&self) -> Option<Out> {
+        self.value.clone()
+    }
+    fn warm_up_bars(&self) -> usize {
+        self.inner.warm_up_bars()
+    }
+    fn unstable_bars(&self) -> usize {
+        self.inner.unstable_bars()
+    }
+    fn reset(&mut self) {
+        self.inner.reset();
+        self.value = None;
+    }
+}
+
+/// Lift `inner` from the bar domain into the atom domain. See [`AtomOverCandle`].
+pub(crate) fn atom_over_candle<Out: Clone + Send + Sync + 'static>(
+    inner: runtime::Chain<Candle, Out>,
+) -> runtime::Chain<Atom, Out> {
+    runtime::erase(AtomOverCandle { inner, value: None })
+}
+
 /// Two sources resolved to a common concrete domain, with any neutral constant
 /// materialised to match its partner.
 pub(crate) enum Pair {
+    Candle(Source<Candle>, Source<Candle>),
     Atom(Source<Atom>, Source<Atom>),
     Real(Source<Real>, Source<Real>),
     Snapshot(Source<Snapshot<Symbol>>, Source<Snapshot<Symbol>>),
@@ -541,8 +608,19 @@ pub(crate) fn pair(lhs: AnySource, rhs: AnySource) -> PyResult<Pair> {
     fn sval(c: Real) -> Source<Snapshot<Symbol>> {
         runtime::erase(Value::<Snapshot<Symbol>>::new(c))
     }
+    fn cval(c: Real) -> Source<Candle> {
+        runtime::erase(Value::<Candle>::new(c))
+    }
     match (lhs, rhs) {
+        (AnySource::Candle(a), AnySource::Candle(b)) => Ok(Pair::Candle(a, b)),
         (AnySource::Atom(a), AnySource::Atom(b)) => Ok(Pair::Atom(a, b)),
+        // Mixed bar/atom: lift the bar side up. Rejecting instead would break
+        // `close().add(get_real(schema, "adj"))`, which worked when both were one
+        // domain — see the cross-domain tests in `python/tests/test_fugazi.py`.
+        (AnySource::Candle(a), AnySource::Atom(b)) => Ok(Pair::Atom(atom_over_candle(a), b)),
+        (AnySource::Atom(a), AnySource::Candle(b)) => Ok(Pair::Atom(a, atom_over_candle(b))),
+        (AnySource::Const(a), AnySource::Candle(b)) => Ok(Pair::Candle(cval(a), b)),
+        (AnySource::Candle(a), AnySource::Const(b)) => Ok(Pair::Candle(a, cval(b))),
         (AnySource::Real(a), AnySource::Real(b)) => Ok(Pair::Real(a, b)),
         (AnySource::Snapshot(a), AnySource::Snapshot(b)) => Ok(Pair::Snapshot(a, b)),
         (AnySource::Const(a), AnySource::Atom(b)) => Ok(Pair::Atom(const_to_atom_source(a), b)),
@@ -554,10 +632,12 @@ pub(crate) fn pair(lhs: AnySource, rhs: AnySource) -> PyResult<Pair> {
         (AnySource::Const(a), AnySource::Const(b)) => {
             Ok(Pair::Atom(const_to_atom_source(a), const_to_atom_source(b)))
         }
-        (AnySource::Atom(_), AnySource::Real(_))
-        | (AnySource::Real(_), AnySource::Atom(_))
-        | (AnySource::Atom(_), AnySource::Snapshot(_))
-        | (AnySource::Snapshot(_), AnySource::Atom(_))
+        // Genuine clashes: a value stream against a bar stream, or either
+        // against a multi-symbol snapshot. Bar-vs-atom is *not* one of these.
+        (AnySource::Atom(_) | AnySource::Candle(_), AnySource::Real(_))
+        | (AnySource::Real(_), AnySource::Atom(_) | AnySource::Candle(_))
+        | (AnySource::Atom(_) | AnySource::Candle(_), AnySource::Snapshot(_))
+        | (AnySource::Snapshot(_), AnySource::Atom(_) | AnySource::Candle(_))
         | (AnySource::Real(_), AnySource::Snapshot(_))
         | (AnySource::Snapshot(_), AnySource::Real(_)) => Err(domain_mismatch()),
     }
@@ -566,6 +646,8 @@ pub(crate) fn pair(lhs: AnySource, rhs: AnySource) -> PyResult<Pair> {
 /// A boolean signal erased to one of the three input domains.
 #[derive(Clone)]
 pub(crate) enum AnySignal {
+    /// Bar-only, the signal twin of [`AnySource::Candle`].
+    Candle(SignalBox<Candle>),
     Atom(SignalBox<Atom>),
     Real(SignalBox<Real>),
     Snapshot(SignalBox<Snapshot<Symbol>>),
@@ -574,6 +656,7 @@ pub(crate) enum AnySignal {
 impl AnySignal {
     pub(crate) fn is_true(&self) -> bool {
         match self {
+            AnySignal::Candle(s) => BoolIndicatorExt::is_true(s),
             AnySignal::Atom(s) => BoolIndicatorExt::is_true(s),
             AnySignal::Real(s) => BoolIndicatorExt::is_true(s),
             AnySignal::Snapshot(s) => BoolIndicatorExt::is_true(s),
@@ -581,6 +664,7 @@ impl AnySignal {
     }
     pub(crate) fn warm_up_bars(&self) -> usize {
         match self {
+            AnySignal::Candle(s) => Indicator::warm_up_bars(s),
             AnySignal::Atom(s) => Indicator::warm_up_bars(s),
             AnySignal::Real(s) => Indicator::warm_up_bars(s),
             AnySignal::Snapshot(s) => Indicator::warm_up_bars(s),
@@ -588,6 +672,7 @@ impl AnySignal {
     }
     pub(crate) fn unstable_bars(&self) -> usize {
         match self {
+            AnySignal::Candle(s) => Indicator::unstable_bars(s),
             AnySignal::Atom(s) => Indicator::unstable_bars(s),
             AnySignal::Real(s) => Indicator::unstable_bars(s),
             AnySignal::Snapshot(s) => Indicator::unstable_bars(s),
@@ -595,6 +680,7 @@ impl AnySignal {
     }
     pub(crate) fn reset(&mut self) {
         match self {
+            AnySignal::Candle(s) => Indicator::reset(s),
             AnySignal::Atom(s) => Indicator::reset(s),
             AnySignal::Real(s) => Indicator::reset(s),
             AnySignal::Snapshot(s) => Indicator::reset(s),
@@ -607,6 +693,14 @@ impl AnySignal {
     /// what the runtime already guarantees for individual updates.
     pub(crate) fn feed_rows(&mut self, data: &Bound<'_, PyAny>) -> PyResult<Vec<bool>> {
         Ok(match self {
+            // The bar-only arm: candles go straight in. No `Atom` is built,
+            // moved or dropped — which is the whole point of the domain.
+            AnySignal::Candle(s) => {
+                let cols = columns_from_frame(data)?;
+                let mut out = Vec::with_capacity(cols.len());
+                cols.for_each(|c| out.push(Indicator::update(s, c).unwrap_or(false)));
+                out
+            }
             AnySignal::Atom(s) => {
                 let cols = columns_from_frame(data)?;
                 let mut out = Vec::with_capacity(cols.len());

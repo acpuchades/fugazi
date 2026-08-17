@@ -1004,6 +1004,12 @@ impl PyIndicator {
     /// identity-rooted one.
     pub(crate) fn update(&mut self, sample: &Bound<'_, PyAny>) -> PyResult<Option<f64>> {
         match &mut self.src {
+            // A bar-only chain still accepts an `Atom` here — the Python
+            // surface takes a Candle/Atom either way — and reads the bar out of
+            // it. An overlay-only atom has no bar, so it reads `None`.
+            AnySource::Candle(s) => Ok(extract_atom(sample)?
+                .candle
+                .and_then(|c| Indicator::update(s, c))),
             AnySource::Atom(s) => Ok(Indicator::update(s, extract_atom(sample)?)),
             AnySource::Real(s) => Ok(Indicator::update(s, extract_real(sample)?)),
             AnySource::Snapshot(s) => Ok(Indicator::update(s, extract_snapshot(sample)?)),
@@ -1325,6 +1331,10 @@ impl PySignal {
     /// for a candle-rooted signal, a `float` for an identity-rooted one.
     pub(crate) fn update(&mut self, sample: &Bound<'_, PyAny>) -> PyResult<bool> {
         match &mut self.sig {
+            AnySignal::Candle(s) => Ok(extract_atom(sample)?
+                .candle
+                .and_then(|c| Indicator::update(s, c))
+                .unwrap_or(false)),
             AnySignal::Atom(s) => {
                 Ok(Indicator::update(s, extract_atom(sample)?).unwrap_or(false))
             }

@@ -403,6 +403,9 @@ fn frame_columns(frame: &Bound<'_, PyAny>) -> PyResult<CandleColumns> {
 /// bars internally, so their source must consume `Candle`s too.
 pub(crate) fn require_candle_source(src: AnySource) -> PyResult<Source<Atom>> {
     match src {
+        // Lifted, not rejected: an indicator that reads OHLC internally is happy
+        // with a bar-only source, it just needs the atom-shaped input type.
+        AnySource::Candle(s) => Ok(atom_over_candle(s)),
         AnySource::Atom(s) => Ok(s),
         AnySource::Const(c) => Ok(runtime::erase(Value::<Atom>::new(c))),
         AnySource::Real(_) | AnySource::Snapshot(_) => Err(PyTypeError::new_err(
@@ -610,6 +613,20 @@ pub(crate) fn build_multi(
 // ---------------------------------------------------------------------------
 
 /// Wrap a candle-consuming indicator (`Input = Atom`) as a candle-rooted source.
+/// Wrap a **bar**-rooted `Real` source: one that reads only the OHLCV bar.
+///
+/// The fast domain. `Candle` is 40 bytes, `Copy`, and needs no drop, so a chain
+/// over it neither retains nor moves the 88-byte `Atom` an atom-rooted chain
+/// does — measured at ~22 instructions per bar against 125.8. Every indicator
+/// that reads the bar and nothing else belongs here; only the overlay readers
+/// and the calendar leaves need [`atom_source`].
+pub(crate) fn bar_source<T>(inner: T) -> PyIndicator
+where
+    T: Indicator<Input = Candle, Output = Real> + Clone + Send + Sync + 'static,
+{
+    PyIndicator::wrap(AnySource::Candle(runtime::erase(inner)))
+}
+
 /// Wrap an **atom**-rooted `Real` source: one that reads the bar *and* its side
 /// channels (`time`, `overlays`).
 ///
@@ -1013,6 +1030,7 @@ pub(crate) fn percentile(source: PyRef<'_, PyIndicator>, period: usize, pct: f64
 #[pyfunction]
 pub(crate) fn bars_since(source: PyRef<'_, PySignal>) -> PyResult<PyIndicator> {
     let out = match source.sig.clone() {
+        AnySignal::Candle(s) => AnySource::Candle(runtime::erase(BarsSince::new(s))),
         AnySignal::Atom(s) => AnySource::Atom(runtime::erase(BarsSince::new(s))),
         AnySignal::Real(s) => AnySource::Real(runtime::erase(BarsSince::new(s))),
         AnySignal::Snapshot(s) => AnySource::Snapshot(runtime::erase(BarsSince::new(s))),
@@ -1103,7 +1121,10 @@ macro_rules! bar_period {
         #[pyfunction]
         pub(crate) fn $name(period: usize) -> PyResult<PyIndicator> {
             ensure_period(period)?;
-            Ok(atom_source($ty::new(CurrentBar::new(), period)))
+            // `Identity::<Candle>` rather than `CurrentBar` (which is
+            // `CurrentBar<Identity<Atom>>`): these read the bar and nothing else,
+            // so they belong in the bar domain. See `bar_source`.
+            Ok(bar_source($ty::new(Identity::<Candle>::new(), period)))
         }
     };
 }
@@ -1149,7 +1170,7 @@ macro_rules! bar_noarg {
         #[doc = $doc]
         #[pyfunction]
         pub(crate) fn $name() -> PyIndicator {
-            atom_source($ty::new(CurrentBar::new()))
+            bar_source($ty::new(Identity::<Candle>::new()))
         }
     };
 }
@@ -1324,6 +1345,7 @@ pub(crate) fn resample(every: usize, inner: PyRef<'_, PyIndicator>) -> PyResult<
 pub(crate) fn latch<'py>(py: Python<'py>, source: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
     if let Ok(ind) = source.cast::<PyIndicator>() {
         let out = match ind.borrow().src.clone() {
+            AnySource::Candle(s) => AnySource::Candle(runtime::erase(Latch::new(s))),
             AnySource::Atom(s) => AnySource::Atom(runtime::erase(Latch::new(s))),
             AnySource::Real(s) => AnySource::Real(runtime::erase(Latch::new(s))),
             AnySource::Snapshot(s) => AnySource::Snapshot(runtime::erase(Latch::new(s))),
@@ -1335,6 +1357,7 @@ pub(crate) fn latch<'py>(py: Python<'py>, source: &Bound<'py, PyAny>) -> PyResul
     }
     if let Ok(sig) = source.cast::<PySignal>() {
         let out = match sig.borrow().sig.clone() {
+            AnySignal::Candle(s) => AnySignal::Candle(SignalBox::new(Latch::new(s))),
             AnySignal::Atom(s) => AnySignal::Atom(SignalBox::new(Latch::new(s))),
             AnySignal::Real(s) => AnySignal::Real(SignalBox::new(Latch::new(s))),
             AnySignal::Snapshot(s) => AnySignal::Snapshot(SignalBox::new(Latch::new(s))),
@@ -1596,6 +1619,9 @@ pub(crate) fn carrier_inner_indicator(
     if let Ok(ind) = v.cast::<PyIndicator>() {
         let ind = ind.borrow();
         let inner: Box<dyn runtime::PayloadIndicator> = match &ind.src {
+            // Overlay columns ride the payload vocabulary; a bar-only chain is
+            // lifted so the column set stays one homogeneous list.
+            AnySource::Candle(s) => runtime::wrap(atom_over_candle(s.clone())),
             AnySource::Atom(s) => runtime::wrap(s.clone()),
             AnySource::Real(s) => runtime::wrap(s.clone()),
             AnySource::Snapshot(s) => runtime::wrap(s.clone()),
@@ -1606,6 +1632,7 @@ pub(crate) fn carrier_inner_indicator(
     if let Ok(sig) = v.cast::<PySignal>() {
         let sig = sig.borrow();
         let inner: Box<dyn runtime::PayloadIndicator> = match &sig.sig {
+            AnySignal::Candle(s) => runtime::wrap(atom_over_candle(s.0.clone())),
             AnySignal::Atom(s) => runtime::wrap(s.0.clone()),
             AnySignal::Real(s) => runtime::wrap(s.0.clone()),
             AnySignal::Snapshot(s) => runtime::wrap(s.0.clone()),
