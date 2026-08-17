@@ -365,7 +365,7 @@ pub fn spec_grammar_document() -> serde_json::Value {
 }
 
 /// A JSON Schema (draft 2020-12) for the spec's **expression grammar**, a second
-/// projection of [`spec_grammar`]. See `docs/proposals/spec-json-schema.md`.
+/// projection of [`spec_grammar`].
 ///
 /// Validates the **JSON bridge encoding** of an expression — the single-key
 /// `{ "<tag>": { <fields> } }` form that `NodeSpec`'s `TryFrom` normalises to

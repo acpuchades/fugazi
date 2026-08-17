@@ -20,3 +20,8 @@ __pycache__/
 *.py[cod]
 .mypy_cache/
 .ruff_cache/
+
+# Internal working notes — design proposals, scratch write-ups, agent output.
+# The repo's docs are the ones a *user* reads; a proposal that shipped belongs
+# in ARCHITECTURE.md or a commit message, not as a file of its own.
+docs/proposals/

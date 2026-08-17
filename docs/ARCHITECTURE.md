@@ -1125,7 +1125,6 @@ placeholders), for structural validation by consumers without the Rust build pat
 a `oneOf`, each `$ref`-ing the same node/selection grammar for every expression slot. Both are
 **complementary to `fugazi check`**, not a replacement — `check` (the typed parse) remains the
 authority, validating the type discipline and build-time semantics the schema can't express.
-See [proposals/spec-json-schema.md](proposals/spec-json-schema.md).
 
 - **New indicator/signal/operator** → `#[pyfunction]`, register in `#[pymodule] fn
   fugazi`, smoke test in `python/tests/test_fugazi.py`. Single-output real-source use
