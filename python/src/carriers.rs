@@ -1064,40 +1064,64 @@ impl AnySignal {
         }
     }
 
-    /// Dispatch a frame of samples through the domain the signal lives in,
-    /// producing one `bool` per bar. `SignalBox` flattens the warm-up `None`
-    /// to `false` at the source, so an unwrap-or-`false` in the loop mirrors
-    /// what the runtime already guarantees for individual updates.
+    /// Fold the frame into one `bool` per bar, a chunk at a time.
+    ///
+    /// `SignalBox` wraps a `Chain<I, bool>`, so it inherits
+    /// `DynIndicator::update_slice` and with it the local-state trick — the same
+    /// ~21 instructions/sample the scalar and multi-output paths get. Warm-up
+    /// `None` flattens to `false` here, which is the `SignalBox` contract.
     pub(crate) fn feed_rows(&mut self, data: &Bound<'_, PyAny>) -> PyResult<Vec<bool>> {
         let py = data.py();
-        Ok(match self {
+        let mut out: Vec<bool> = Vec::new();
+        let mut got = [None; FOLD_CHUNK];
+        macro_rules! flush {
+            ($n:expr) => {
+                out.extend(got[..$n].iter().map(|v| v.unwrap_or(false)))
+            };
+        }
+        match self {
             // The bar-only arm: candles go straight in. No `Atom` is built,
             // moved or dropped — which is the whole point of the domain.
             AnySignal::Candle(s) => {
                 let cols = columns_from_frame(data)?;
-                let mut out = Vec::with_capacity(cols.len(py));
-                cols.for_each(py, |c| out.push(Indicator::update(s, c).unwrap_or(false)));
-                out
+                out.reserve(cols.len(py));
+                let mut buf = [ZERO_BAR; FOLD_CHUNK];
+                cols.for_each_chunk(py, &mut buf, |chunk| {
+                    s.0.update_slice(chunk, &mut got[..chunk.len()]);
+                    flush!(chunk.len());
+                });
             }
             AnySignal::Atom(s) => {
                 let cols = columns_from_frame(data)?;
-                let mut out = Vec::with_capacity(cols.len(py));
-                cols.for_each(py, |c| {
-                    out.push(Indicator::update(s, c.into()).unwrap_or(false))
+                out.reserve(cols.len(py));
+                let mut buf = [ZERO_BAR; FOLD_CHUNK];
+                let mut atoms: Vec<Atom> = Vec::with_capacity(FOLD_CHUNK);
+                cols.for_each_chunk(py, &mut buf, |chunk| {
+                    atoms.clear();
+                    atoms.extend(chunk.iter().map(|c| Atom::from(*c)));
+                    s.0.update_slice(&atoms, &mut got[..chunk.len()]);
+                    flush!(chunk.len());
                 });
-                out
             }
             AnySignal::Real(s) => {
                 let xs = reals_from_series(data)?;
-                let mut out = Vec::with_capacity(xs.len(py));
-                xs.for_each(py, |x| out.push(Indicator::update(s, x).unwrap_or(false)));
-                out
+                out.reserve(xs.len(py));
+                let mut buf = [0.0; FOLD_CHUNK];
+                xs.for_each_chunk(py, &mut buf, |chunk| {
+                    s.0.update_slice(chunk, &mut got[..chunk.len()]);
+                    flush!(chunk.len());
+                });
             }
-            AnySignal::Snapshot(s) => snapshots_from_sequence(data)?
-                .into_iter()
-                .map(|snap| Indicator::update(s, snap).unwrap_or(false))
-                .collect(),
-        })
+            AnySignal::Snapshot(s) => {
+                let snaps = snapshots_from_sequence(data)?;
+                out.reserve(snaps.len());
+                for chunk in snaps.chunks(FOLD_CHUNK) {
+                    s.0.update_slice(chunk, &mut got[..chunk.len()]);
+                    flush!(chunk.len());
+                }
+            }
+        }
+        Ok(out)
     }
 }
 
