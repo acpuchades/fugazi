@@ -154,49 +154,130 @@ pub(crate) fn extract_snapshot_interned(
     extract_snapshot_with(sample, &mut |s: &str| interner.get(s))
 }
 
-/// Collect any 1-D sequence of numbers (`list`, NumPy array, pandas `Series`,
-/// …) into a `Vec<f64>`, attributing failures to the named column.
-pub(crate) fn column_to_vec(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<f64>> {
-    let err = || {
-        PyTypeError::new_err(format!(
-            "'{name}' must be a 1-D sequence of numbers (list, NumPy array, or pandas Series)"
-        ))
-    };
+/// One input column: **borrowed** from Python's own memory when it can be.
+///
+/// # Why borrowing is the whole game
+///
+/// This used to be a plain `Vec<f64>` and the copy that filled it was described
+/// as "one `memcpy`, negligible". It was not negligible — it was the single
+/// largest cost in `feed()`, and instruction counting could not see it:
+///
+/// | | ns/sample |
+/// |---|---:|
+/// | `close().feed(frame)` | 24.51 |
+/// | four 1.6 MB array copies, alone | 15.95 |
+/// | allocating *and touching* the output array | 0.18 |
+///
+/// Two thirds of the call was copying input that was already sitting in a
+/// contiguous `float64` buffer. The cost is not the `memcpy` itself but the
+/// **page faults**: a 1.6 MB allocation is well past glibc's `mmap` threshold, so
+/// each one is fresh anonymous memory that must be faulted in a page at a time
+/// and is returned to the kernel on free, so the next call faults it all again.
+///
+/// The give-away is that *one* copy is nearly free (0.21 ns/sample) while four
+/// cost 16: a single hot buffer gets recycled, four live at once do not. Running
+/// the same benchmark with `MALLOC_MMAP_THRESHOLD_` raised — keeping big blocks
+/// on the heap, where they stay faulted between calls — made `close().feed()`
+/// **7.8× faster** with no code change at all. That is not something a library
+/// can ask of its host process, so the allocation has to go instead.
+///
+/// This also explains an apparent contradiction: the previous change cut
+/// instructions per sample and yet wall-clock got worse. Instruction counts are
+/// blind to faults, which is exactly why both instruments are kept
+/// (`tools/icount_python.py` and `tools/bench_three_tier.py`).
+pub(crate) enum Column {
+    /// A contiguous 1-D `float64` buffer owned by NumPy / pandas / polars /
+    /// `array.array` / a `memoryview`. `PyBuffer` holds a reference to the
+    /// exporting object, so the memory outlives this borrow on its own.
+    Borrowed(pyo3::buffer::PyBuffer<f64>),
+    /// Anything else — a `list` of numbers — walked with the Python iterator
+    /// protocol. One `float` object per element, so this path is ~155 ns/sample
+    /// against ~1-13 ns of indicator work; it exists for correctness, not speed.
+    Owned(Vec<f64>),
+}
 
-    // Fast path: anything exposing a contiguous 1-D `f64` buffer — a NumPy
-    // `float64` array, an `array.array('d')`, a `memoryview` — is copied in one
-    // `memcpy`.
-    //
-    // The general path below walks the object with the Python iterator
-    // protocol, materialising one Python `float` per element. For a
-    // 200 000-sample array that is 200 000 object round-trips at ~155 ns each,
-    // against ~1-13 ns of actual indicator work: without this, `feed()` spends
-    // over 90% of its time at the boundary. Needing `PyBuffer` is why the wheel
-    // is `abi3-py311` (see `python/Cargo.toml`).
-    if let Ok(buf) = pyo3::buffer::PyBuffer::<f64>::get(obj)
-        && buf.dimensions() == 1
-        && buf.is_c_contiguous()
-    {
-        return buf.to_vec(obj.py());
+impl Column {
+    /// Borrow `obj`'s buffer, or materialise it, attributing failures to `name`.
+    pub(crate) fn of(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<Self> {
+        if let Some(buf) = contiguous_f64_buffer(obj) {
+            return Ok(Column::Borrowed(buf));
+        }
+        let err = || {
+            PyTypeError::new_err(format!(
+                "'{name}' must be a 1-D sequence of numbers (list, NumPy array, or pandas Series)"
+            ))
+        };
+        let mut values = Vec::new();
+        for item in obj.try_iter().map_err(|_| err())? {
+            values.push(item?.extract::<f64>().map_err(|_| err())?);
+        }
+        Ok(Column::Owned(values))
     }
-    // pandas / polars `Series` are not buffers themselves but hand one over.
+
+    pub(crate) fn len(&self, py: Python<'_>) -> usize {
+        match self {
+            Column::Borrowed(b) => b.item_count(),
+            Column::Owned(v) => {
+                let _ = py;
+                v.len()
+            }
+        }
+    }
+
+    /// Copy out to a `Vec`, for the few callers that genuinely need ownership.
+    pub(crate) fn to_vec(&self, py: Python<'_>) -> PyResult<Vec<f64>> {
+        match self {
+            Column::Borrowed(b) => b.to_vec(py),
+            Column::Owned(v) => Ok(v.clone()),
+        }
+    }
+
+    /// Feed every value to `f`, reading in place.
+    #[inline]
+    pub(crate) fn for_each(&self, py: Python<'_>, mut f: impl FnMut(f64)) {
+        match self {
+            // `ReadOnlyCell::get` is a plain load; the cell wrapper is pyo3's way
+            // of saying Python could mutate this memory, not an access cost.
+            Column::Borrowed(b) => {
+                if let Some(cells) = b.as_slice(py) {
+                    for cell in cells {
+                        f(cell.get());
+                    }
+                }
+            }
+            Column::Owned(v) => {
+                for &x in v {
+                    f(x);
+                }
+            }
+        }
+    }
+}
+
+/// A 1-D, C-contiguous `float64` buffer over `obj`, if it exposes one — directly,
+/// or via `to_numpy()`/`__array__()` as pandas and polars `Series` do.
+///
+/// Needing `PyBuffer` is why the wheel is `abi3-py311` (see `python/Cargo.toml`).
+fn contiguous_f64_buffer(obj: &Bound<'_, PyAny>) -> Option<pyo3::buffer::PyBuffer<f64>> {
+    let usable = |b: &pyo3::buffer::PyBuffer<f64>| b.dimensions() == 1 && b.is_c_contiguous();
+    if let Ok(b) = pyo3::buffer::PyBuffer::<f64>::get(obj)
+        && usable(&b)
+    {
+        return Some(b);
+    }
     for attr in ["to_numpy", "__array__"] {
         if let Ok(f) = obj.getattr(attr)
             && let Ok(arr) = f.call0()
-            && let Ok(buf) = pyo3::buffer::PyBuffer::<f64>::get(&arr)
-            && buf.dimensions() == 1
-            && buf.is_c_contiguous()
+            && let Ok(b) = pyo3::buffer::PyBuffer::<f64>::get(&arr)
+            && usable(&b)
         {
-            return buf.to_vec(arr.py());
+            // `b` keeps the array `to_numpy()` just produced alive by itself.
+            return Some(b);
         }
     }
-    // General path: any iterable of numbers.
-    let mut values = Vec::new();
-    for item in obj.try_iter().map_err(|_| err())? {
-        values.push(item?.extract::<f64>().map_err(|_| err())?);
-    }
-    Ok(values)
+    None
 }
+
 
 /// Zip OHLCV columns into candles. `close` is the anchor: omitted `open`/`high`/
 /// `low` default to it and omitted `volume` to `0`.
@@ -252,22 +333,46 @@ pub(crate) fn assemble_candles(
 /// straight to `update`, never stored. It also zips slices rather than indexing,
 /// so the five bounds checks per bar go away too.
 ///
-/// Keep the columns owned (not borrowed from Python) — the buffer fast path in
-/// [`column_to_vec`] already copied them, and holding Python buffers alive
-/// across `update` calls would pin the GIL to the whole loop.
+/// The columns are **borrowed** from Python wherever possible — see [`Column`]
+/// for the measurement that forced that, and note that the GIL is held for the
+/// whole of `feed()` regardless, so borrowing costs no extra serialisation.
+/// One column resolved to something readable, for the duration of one `feed()`.
+enum Read<'a> {
+    Cells(&'a [pyo3::buffer::ReadOnlyCell<f64>]),
+    Plain(&'a [f64]),
+}
+
+impl Read<'_> {
+    #[inline(always)]
+    fn get(&self, i: usize) -> f64 {
+        match self {
+            Read::Cells(c) => c[i].get(),
+            Read::Plain(p) => p[i],
+        }
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        match self {
+            Read::Cells(c) => c.len(),
+            Read::Plain(p) => p.len(),
+        }
+    }
+}
+
 pub(crate) struct CandleColumns {
-    close: Vec<f64>,
-    open: Option<Vec<f64>>,
-    high: Option<Vec<f64>>,
-    low: Option<Vec<f64>>,
-    volume: Option<Vec<f64>>,
+    close: Column,
+    open: Option<Column>,
+    high: Option<Column>,
+    low: Option<Column>,
+    volume: Option<Column>,
 }
 
 impl CandleColumns {
     /// Number of bars — `close`'s length, which every other column is validated
     /// against in [`columns_from_frame`].
-    pub(crate) fn len(&self) -> usize {
-        self.close.len()
+    pub(crate) fn len(&self, py: Python<'_>) -> usize {
+        self.close.len(py)
     }
 
     /// Feed every bar to `f`, without materialising a `Vec<Candle>`.
@@ -276,36 +381,50 @@ impl CandleColumns {
     /// close slice rather than copied, so a close-only frame costs no extra
     /// memory. An omitted `volume` reads as `0.0`, which needs its own arm
     /// because there is no slice to alias.
-    /// **Do not "optimise" the zips into an indexed loop.** That was tried, with
-    /// every slice re-cut to `[..n]` first so the bounds checks would provably
-    /// fold away, on the theory that four nested `Zip`s each carrying their own
-    /// exhaustion check must cost something. It compiles to the same machine
-    /// code: `close`, `sma` and `atr` all measured **identical to the hundredth
-    /// of an instruction per sample** (38.57 / 79.58 / 81.23) before and after.
-    /// LLVM already canonicalises both forms to one induction variable.
+    /// The per-column enum is matched *per element*, and that is deliberate: the
+    /// branch is perfectly predicted (a column does not change representation
+    /// mid-loop), so it costs a fraction of a nanosecond against the ~16
+    /// ns/sample of page faults that borrowing removes. Resolving it into two
+    /// fully monomorphised loops was considered and is not worth the duplication
+    /// until something measures it.
     ///
-    /// The ~28 instructions/sample this loop does cost are the `Candle` itself —
-    /// five loads, five stores, and a 40-byte by-value move through the chain's
-    /// vtable — not the iteration.
+    /// An earlier note here warned against replacing the zips with an indexed
+    /// loop, having measured the two as identical. That still holds for the
+    /// *shape* of the loop — indexing is used now only because a `Read` cannot be
+    /// zipped as cheaply as a slice, not because it is faster.
     #[inline]
-    pub(crate) fn for_each(&self, mut f: impl FnMut(Candle)) {
-        let c = self.close.as_slice();
-        let o = self.open.as_deref().unwrap_or(c);
-        let h = self.high.as_deref().unwrap_or(c);
-        let l = self.low.as_deref().unwrap_or(c);
-        match self.volume.as_deref() {
+    pub(crate) fn for_each<'py>(&'py self, py: Python<'py>, mut f: impl FnMut(Candle)) {
+        let c = Self::view(&self.close, py);
+        let open = self.open.as_ref().map(|x| Self::view(x, py));
+        let high = self.high.as_ref().map(|x| Self::view(x, py));
+        let low = self.low.as_ref().map(|x| Self::view(x, py));
+        let volume = self.volume.as_ref().map(|x| Self::view(x, py));
+        // An omitted open/high/low reads as close, aliased rather than copied.
+        let o = open.as_ref().unwrap_or(&c);
+        let h = high.as_ref().unwrap_or(&c);
+        let l = low.as_ref().unwrap_or(&c);
+        let n = c.len();
+        match &volume {
             Some(v) => {
-                for ((((&c, &o), &h), &l), &v) in
-                    c.iter().zip(o).zip(h).zip(l).zip(v)
-                {
-                    f(Candle::new(o, h, l, c, v));
+                for i in 0..n {
+                    f(Candle::new(o.get(i), h.get(i), l.get(i), c.get(i), v.get(i)));
                 }
             }
+            // No volume column to alias, so it reads as zero.
             None => {
-                for (((&c, &o), &h), &l) in c.iter().zip(o).zip(h).zip(l) {
-                    f(Candle::new(o, h, l, c, 0.0));
+                for i in 0..n {
+                    f(Candle::new(o.get(i), h.get(i), l.get(i), c.get(i), 0.0));
                 }
             }
+        }
+    }
+
+    fn view<'py>(col: &'py Column, py: Python<'py>) -> Read<'py> {
+        match col {
+            // `as_slice` only returns `None` for a non-contiguous or unreadable
+            // buffer, both already excluded by `contiguous_f64_buffer`.
+            Column::Borrowed(b) => Read::Cells(b.as_slice(py).unwrap_or(&[])),
+            Column::Owned(v) => Read::Plain(v),
         }
     }
 }
@@ -319,8 +438,9 @@ pub(crate) fn columns_from_frame(data: &Bound<'_, PyAny>) -> PyResult<CandleColu
              To compute over a bare numeric series, root the indicator at identity().",
         ));
     }
+    let py = data.py();
     let cols = frame_columns(data)?;
-    let n = cols.close.len();
+    let n = cols.close.len(py);
     for (name, col) in [
         ("open", &cols.open),
         ("high", &cols.high),
@@ -328,11 +448,11 @@ pub(crate) fn columns_from_frame(data: &Bound<'_, PyAny>) -> PyResult<CandleColu
         ("volume", &cols.volume),
     ] {
         if let Some(col) = col
-            && col.len() != n
+            && col.len(py) != n
         {
             return Err(PyValueError::new_err(format!(
                 "'{name}' has length {} but 'close' has length {n}",
-                col.len()
+                col.len(py)
             )));
         }
     }
@@ -356,29 +476,39 @@ pub(crate) fn candles_from_frame(data: &Bound<'_, PyAny>) -> PyResult<Vec<Candle
 /// Build the value series an identity-rooted `feed()` consumes: a plain 1-D
 /// numeric sequence. A `DataFrame`/`dict` is rejected — it has no single value
 /// stream to read.
-pub(crate) fn reals_from_series(data: &Bound<'_, PyAny>) -> PyResult<Vec<Real>> {
+/// Borrowed, not collected — the 1-D path pays the same page-fault cost the
+/// frame path did (see [`Column`]); it just pays it once instead of five times.
+pub(crate) fn reals_from_series(data: &Bound<'_, PyAny>) -> PyResult<Column> {
     if data.hasattr("columns")? || data.is_instance_of::<PyDict>() {
         return Err(PyTypeError::new_err(
             "an identity-rooted indicator consumes a 1-D numeric series (list, NumPy array, \
              or pandas/polars Series), not a DataFrame or dict.",
         ));
     }
-    column_to_vec(data, "input")
+    Column::of(data, "input")
 }
 
 /// Pull `open`/`high`/`low`/`close`/`volume` columns from a `DataFrame`/`dict`
 /// (only those present; `close` is required). Column names are matched
 /// case-insensitively, so `Close`/`CLOSE`/`close` all work.
 pub(crate) fn frame_to_candles(frame: &Bound<'_, PyAny>) -> PyResult<Vec<Candle>> {
+    let py = frame.py();
     let cols = frame_columns(frame)?;
-    assemble_candles(cols.close, cols.open, cols.high, cols.low, cols.volume)
+    let owned = |c: Option<Column>| c.map(|c| c.to_vec(py)).transpose();
+    assemble_candles(
+        cols.close.to_vec(py)?,
+        owned(cols.open)?,
+        owned(cols.high)?,
+        owned(cols.low)?,
+        owned(cols.volume)?,
+    )
 }
 
 /// Pull the OHLCV columns out of a `DataFrame`/`dict`, matched
 /// case-insensitively (`Close`/`CLOSE`/`close`). `close` is required; the rest
 /// are optional. Shared by [`frame_to_candles`] and [`columns_from_frame`].
 fn frame_columns(frame: &Bound<'_, PyAny>) -> PyResult<CandleColumns> {
-    let col = |name: &str| -> PyResult<Option<Vec<f64>>> {
+    let col = |name: &str| -> PyResult<Option<Column>> {
         let cap = {
             let mut chars = name.chars();
             chars
@@ -390,7 +520,7 @@ fn frame_columns(frame: &Bound<'_, PyAny>) -> PyResult<CandleColumns> {
         };
         for key in [name.to_string(), cap, name.to_uppercase()] {
             if let Ok(series) = frame.get_item(&key) {
-                return Ok(Some(column_to_vec(&series, name)?));
+                return Ok(Some(Column::of(&series, name)?));
             }
         }
         Ok(None)
@@ -608,24 +738,62 @@ pub(crate) fn wrap_floats<'py>(
     }
 }
 
+/// Allocate a 1-D NumPy `bool_` array of `len` and let `fill` write its bytes.
+///
+/// The boolean twin of [`numpy_filled`]. Allocated as `uint8` and returned as a
+/// `.view(bool_)` — a view, so it shares the same memory and stays writable —
+/// because `np.bool_`'s buffer format is `?`, which pyo3's `PyBuffer<u8>` will
+/// not accept. NumPy's `bool_` is one byte with `0`/`1` as its only valid
+/// values, which is exactly Rust's `bool` representation, so the view is free
+/// and not a reinterpretation of anything.
+fn numpy_bools<'py>(
+    py: Python<'py>,
+    len: usize,
+    fill: impl FnOnce(&[std::cell::Cell<u8>]),
+) -> PyResult<Bound<'py, PyAny>> {
+    let np = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", np.getattr("uint8")?)?;
+    let arr = np.getattr("empty")?.call((len,), Some(&kwargs))?;
+    let buf = pyo3::buffer::PyBuffer::<u8>::get(&arr)?;
+    let slice = buf
+        .as_mut_slice(py)
+        .ok_or_else(|| PyTypeError::new_err("numpy array is not writable"))?;
+    fill(slice);
+    arr.call_method1("view", (np.getattr("bool_")?,))
+}
+
 /// Build a boolean output series. Signals never warm up to a missing value.
+///
+/// Writes into NumPy's buffer for the same reason [`numpy_filled`] does. This
+/// path used to be `np.asarray(vec_of_bool)`, which is the one spelling
+/// `ndarray_from_values` documents as rejected — pyo3 turns a `Vec<bool>` into a
+/// Python `list`, so a 200 000-bar signal materialised 200 000 `bool` objects for
+/// NumPy to immediately parse back out. The note explaining why that is wrong was
+/// already in this file, a few lines up, applied only to floats.
 pub(crate) fn build_bools(py: Python<'_>, kind: &OutputKind, values: Vec<bool>) -> PyResult<Py<PyAny>> {
+    let arr = match numpy_bools(py, values.len(), |slice| {
+        for (cell, &v) in slice.iter().zip(&values) {
+            cell.set(u8::from(v));
+        }
+    }) {
+        Ok(arr) => arr,
+        // No NumPy: hand back a plain list of Python bools.
+        Err(_) => return Ok(values.into_pyobject(py)?.into_any().unbind()),
+    };
     match kind {
         OutputKind::Pandas(index) => {
             let series = py.import("pandas")?.getattr("Series")?;
             let kwargs = PyDict::new(py);
             kwargs.set_item("index", index.bind(py))?;
-            Ok(series.call((values,), Some(&kwargs))?.unbind())
+            Ok(series.call((arr,), Some(&kwargs))?.unbind())
         }
         OutputKind::Polars => Ok(py
             .import("polars")?
             .getattr("Series")?
-            .call1((values,))?
+            .call1((arr,))?
             .unbind()),
-        OutputKind::Numpy => match py.import("numpy") {
-            Ok(np) => Ok(np.getattr("asarray")?.call1((values,))?.unbind()),
-            Err(_) => Ok(values.into_pyobject(py)?.into_any().unbind()),
-        },
+        OutputKind::Numpy => Ok(arr.unbind()),
     }
 }
 
@@ -645,41 +813,50 @@ pub(crate) fn build_multi(
         })
         .collect();
 
-    match kind {
-        OutputKind::Pandas(index) => {
-            let data = PyDict::new(py);
+    // One NumPy array per line, filled in place. `np.asarray(col.as_slice())` and
+    // `set_item(name, col.as_slice())` both route a `&[f64]` through pyo3's
+    // sequence conversion — a Python `float` object per element per line, which
+    // for a 3-line indicator over 200 000 bars is 600 000 objects allocated and
+    // thrown away. Same mistake `build_bools` had; see [`numpy_filled`].
+    let arrays: PyResult<Vec<_>> = columns
+        .iter()
+        .map(|col| {
+            numpy_filled(py, col.len(), |slice| {
+                for (cell, &v) in slice.iter().zip(col) {
+                    cell.set(v);
+                }
+            })
+        })
+        .collect();
+
+    let data = PyDict::new(py);
+    match arrays {
+        Ok(arrays) => {
+            for (name, arr) in names.iter().zip(arrays) {
+                data.set_item(name, arr)?;
+            }
+        }
+        // No NumPy: plain lists, which is the only thing left to hand back.
+        Err(_) => {
             for (name, col) in names.iter().zip(&columns) {
                 data.set_item(name, col.as_slice())?;
             }
+        }
+    }
+
+    match kind {
+        OutputKind::Pandas(index) => {
             let frame = py.import("pandas")?.getattr("DataFrame")?;
             let kwargs = PyDict::new(py);
             kwargs.set_item("index", index.bind(py))?;
             Ok(frame.call((data,), Some(&kwargs))?.unbind())
         }
-        OutputKind::Polars => {
-            let data = PyDict::new(py);
-            for (name, col) in names.iter().zip(&columns) {
-                data.set_item(name, col.as_slice())?;
-            }
-            Ok(py
-                .import("polars")?
-                .getattr("DataFrame")?
-                .call1((data,))?
-                .unbind())
-        }
-        OutputKind::Numpy => {
-            let data = PyDict::new(py);
-            let np = py.import("numpy").ok();
-            for (name, col) in names.iter().zip(&columns) {
-                match &np {
-                    Some(np) => {
-                        data.set_item(name, np.getattr("asarray")?.call1((col.as_slice(),))?)?
-                    }
-                    None => data.set_item(name, col.as_slice())?,
-                }
-            }
-            Ok(data.into_any().unbind())
-        }
+        OutputKind::Polars => Ok(py
+            .import("polars")?
+            .getattr("DataFrame")?
+            .call1((data,))?
+            .unbind()),
+        OutputKind::Numpy => Ok(data.into_any().unbind()),
     }
 }
 
@@ -2088,7 +2265,7 @@ pub(crate) fn _bench_feed_stage(
 ) -> PyResult<usize> {
     let xs = reals_from_series(data)?;
     if stage == 0 {
-        return Ok(xs.len());
+        return Ok(xs.len(py));
     }
     // `#[inline(never)]` for the same reason `benches/erasure.rs` needs it: if
     // the concrete types are visible at the `erase` call, LLVM devirtualises
@@ -2111,10 +2288,10 @@ pub(crate) fn _bench_feed_stage(
     } else {
         chain_levels(2, period)
     };
-    let values: Vec<Option<Real>> = xs
-        .into_iter()
-        .map(|x| fugazi_core::Indicator::update(&mut ind, x))
-        .collect();
+    let mut values: Vec<Option<Real>> = Vec::with_capacity(xs.len(py));
+    xs.for_each(py, |x| {
+        values.push(fugazi_core::Indicator::update(&mut ind, x));
+    });
     if stage == 1 {
         return Ok(values.len());
     }
@@ -2147,11 +2324,11 @@ pub(crate) fn _bench_frame_stage(
     use fugazi_core::indicators::{Atr, Identity};
     let cols = columns_from_frame(data)?;
     if stage == 0 {
-        return Ok(cols.len());
+        return Ok(cols.len(py));
     }
     if stage == 1 {
         let mut n = 0usize;
-        cols.for_each(|c| n = n.wrapping_add(c.close.to_bits() as usize));
+        cols.for_each(py, |c| n = n.wrapping_add(c.close.to_bits() as usize));
         return Ok(n);
     }
     if stage == 2 {
@@ -2167,14 +2344,16 @@ pub(crate) fn _bench_frame_stage(
         // 40-byte `Candle` is lifted into an 88-byte `Atom` per bar.
         let mut atom_ind: crate::carriers::Source<Atom> =
             runtime::erase(Atr::new(fugazi_core::indicators::CurrentBar::new(), period));
-        let mut out = Vec::with_capacity(cols.len());
-        cols.for_each(|c| out.push(fugazi_core::Indicator::update(&mut atom_ind, c.into())));
+        let mut out = Vec::with_capacity(cols.len(py));
+        cols.for_each(py, |c| {
+            out.push(fugazi_core::Indicator::update(&mut atom_ind, c.into()))
+        });
         let arr = build_floats(py, &OutputKind::Numpy, out)?;
         return Ok(arr.bind(py).len().unwrap_or(0));
     }
     let values: Vec<Option<Real>> = if stage == 3 {
-        let mut out = Vec::with_capacity(cols.len());
-        cols.for_each(|c| out.push(fugazi_core::Indicator::update(&mut ind, c)));
+        let mut out = Vec::with_capacity(cols.len(py));
+        cols.for_each(py, |c| out.push(fugazi_core::Indicator::update(&mut ind, c)));
         out
     } else {
         frame_to_candles(data)?
@@ -2202,10 +2381,10 @@ pub(crate) fn _bench_feed_built(
     let AnySource::Real(chain) = &mut ind.src else {
         return Err(PyTypeError::new_err("expected a value-rooted indicator"));
     };
-    let values: Vec<Option<Real>> = xs
-        .into_iter()
-        .map(|x| fugazi_core::Indicator::update(chain, x))
-        .collect();
+    let mut values: Vec<Option<Real>> = Vec::with_capacity(xs.len(py));
+    xs.for_each(py, |x| {
+        values.push(fugazi_core::Indicator::update(chain, x));
+    });
     let out = build_floats(py, &OutputKind::Numpy, values)?;
     Ok(out.bind(py).len().unwrap_or(0))
 }

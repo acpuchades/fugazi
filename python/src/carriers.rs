@@ -512,13 +512,14 @@ impl AnySource {
     /// through `Indicator::update`. A `Const` source re-emits its value for
     /// every bar and reads the frame as candles (its neutral default domain).
     pub(crate) fn feed_rows(&mut self, data: &Bound<'_, PyAny>) -> PyResult<Vec<Option<Real>>> {
+        let py = data.py();
         Ok(match self {
             // The bar-only arm: candles go straight in, so no `Atom` is built,
             // moved through the vtable or dropped. This is where P1's win lands.
             AnySource::Candle(s) => {
                 let cols = columns_from_frame(data)?;
-                let mut out = Vec::with_capacity(cols.len());
-                cols.for_each(|c| out.push(Indicator::update(s, c)));
+                let mut out = Vec::with_capacity(cols.len(py));
+                cols.for_each(py, |c| out.push(Indicator::update(s, c)));
                 out
             }
             // Streamed, not collected: see `CandleColumns`. The `Vec<Candle>`
@@ -526,20 +527,22 @@ impl AnySource {
             // read back for nothing.
             AnySource::Atom(s) => {
                 let cols = columns_from_frame(data)?;
-                let mut out = Vec::with_capacity(cols.len());
-                cols.for_each(|c| out.push(Indicator::update(s, c.into())));
+                let mut out = Vec::with_capacity(cols.len(py));
+                cols.for_each(py, |c| out.push(Indicator::update(s, c.into())));
                 out
             }
-            AnySource::Real(s) => reals_from_series(data)?
-                .into_iter()
-                .map(|x| Indicator::update(s, x))
-                .collect(),
+            AnySource::Real(s) => {
+                let xs = reals_from_series(data)?;
+                let mut out = Vec::with_capacity(xs.len(py));
+                xs.for_each(py, |x| out.push(Indicator::update(s, x)));
+                out
+            }
             AnySource::Snapshot(s) => snapshots_from_sequence(data)?
                 .into_iter()
                 .map(|snap| Indicator::update(s, snap))
                 .collect(),
             // A constant reads no input, but the frame still fixes the row count.
-            AnySource::Const(c) => vec![Some(*c); columns_from_frame(data)?.len()],
+            AnySource::Const(c) => vec![Some(*c); columns_from_frame(data)?.len(py)],
         })
     }
 
@@ -566,9 +569,9 @@ impl AnySource {
         match self {
             AnySource::Candle(s) => {
                 let cols = columns_from_frame(data)?;
-                numpy_filled(py, cols.len(), |slice| {
+                numpy_filled(py, cols.len(py), |slice| {
                     let mut cells = slice.iter();
-                    cols.for_each(|c| {
+                    cols.for_each(py, |c| {
                         if let Some(cell) = cells.next() {
                             cell.set(Indicator::update(s, c).unwrap_or(Real::NAN));
                         }
@@ -577,9 +580,9 @@ impl AnySource {
             }
             AnySource::Atom(s) => {
                 let cols = columns_from_frame(data)?;
-                numpy_filled(py, cols.len(), |slice| {
+                numpy_filled(py, cols.len(py), |slice| {
                     let mut cells = slice.iter();
-                    cols.for_each(|c| {
+                    cols.for_each(py, |c| {
                         if let Some(cell) = cells.next() {
                             cell.set(Indicator::update(s, c.into()).unwrap_or(Real::NAN));
                         }
@@ -588,10 +591,13 @@ impl AnySource {
             }
             AnySource::Real(s) => {
                 let xs = reals_from_series(data)?;
-                numpy_filled(py, xs.len(), |slice| {
-                    for (cell, x) in slice.iter().zip(xs) {
-                        cell.set(Indicator::update(s, x).unwrap_or(Real::NAN));
-                    }
+                numpy_filled(py, xs.len(py), |slice| {
+                    let mut cells = slice.iter();
+                    xs.for_each(py, |x| {
+                        if let Some(cell) = cells.next() {
+                            cell.set(Indicator::update(s, x).unwrap_or(Real::NAN));
+                        }
+                    });
                 })
             }
             AnySource::Snapshot(s) => {
@@ -604,7 +610,7 @@ impl AnySource {
             }
             AnySource::Const(c) => {
                 let v = *c;
-                let len = columns_from_frame(data)?.len();
+                let len = columns_from_frame(data)?.len(py);
                 numpy_filled(py, len, |slice| {
                     for cell in slice {
                         cell.set(v);
@@ -838,27 +844,30 @@ impl AnySignal {
     /// to `false` at the source, so an unwrap-or-`false` in the loop mirrors
     /// what the runtime already guarantees for individual updates.
     pub(crate) fn feed_rows(&mut self, data: &Bound<'_, PyAny>) -> PyResult<Vec<bool>> {
+        let py = data.py();
         Ok(match self {
             // The bar-only arm: candles go straight in. No `Atom` is built,
             // moved or dropped — which is the whole point of the domain.
             AnySignal::Candle(s) => {
                 let cols = columns_from_frame(data)?;
-                let mut out = Vec::with_capacity(cols.len());
-                cols.for_each(|c| out.push(Indicator::update(s, c).unwrap_or(false)));
+                let mut out = Vec::with_capacity(cols.len(py));
+                cols.for_each(py, |c| out.push(Indicator::update(s, c).unwrap_or(false)));
                 out
             }
             AnySignal::Atom(s) => {
                 let cols = columns_from_frame(data)?;
-                let mut out = Vec::with_capacity(cols.len());
-                cols.for_each(|c| {
+                let mut out = Vec::with_capacity(cols.len(py));
+                cols.for_each(py, |c| {
                     out.push(Indicator::update(s, c.into()).unwrap_or(false))
                 });
                 out
             }
-            AnySignal::Real(s) => reals_from_series(data)?
-                .into_iter()
-                .map(|x| Indicator::update(s, x).unwrap_or(false))
-                .collect(),
+            AnySignal::Real(s) => {
+                let xs = reals_from_series(data)?;
+                let mut out = Vec::with_capacity(xs.len(py));
+                xs.for_each(py, |x| out.push(Indicator::update(s, x).unwrap_or(false)));
+                out
+            }
             AnySignal::Snapshot(s) => snapshots_from_sequence(data)?
                 .into_iter()
                 .map(|snap| Indicator::update(s, snap).unwrap_or(false))
@@ -995,17 +1004,20 @@ impl AnyMulti {
     /// Dispatch a frame of samples through the domain the multi lives in,
     /// producing one `Option<Vec<Real>>` per bar (`None` while warming up).
     pub(crate) fn feed_rows(&mut self, data: &Bound<'_, PyAny>) -> PyResult<Vec<Option<Vec<Real>>>> {
+        let py = data.py();
         Ok(match self {
             AnyMulti::Atom(m) => {
                 let cols = columns_from_frame(data)?;
-                let mut out = Vec::with_capacity(cols.len());
-                cols.for_each(|c| out.push(m.0.update(c.into())));
+                let mut out = Vec::with_capacity(cols.len(py));
+                cols.for_each(py, |c| out.push(m.0.update(c.into())));
                 out
             }
-            AnyMulti::Real(m) => reals_from_series(data)?
-                .into_iter()
-                .map(|x| m.0.update(x))
-                .collect(),
+            AnyMulti::Real(m) => {
+                let xs = reals_from_series(data)?;
+                let mut out = Vec::with_capacity(xs.len(py));
+                xs.for_each(py, |x| out.push(m.0.update(x)));
+                out
+            }
             AnyMulti::Snapshot(m) => snapshots_from_sequence(data)?
                 .into_iter()
                 .map(|snap| m.0.update(snap))
