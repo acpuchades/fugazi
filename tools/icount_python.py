@@ -131,6 +131,21 @@ WORKLOADS: dict[str, tuple[str, str, str | None]] = {
         "ta.stddev(ta.close(), 14).feed(frame)",
         "talib.STDDEV(close, 14)",
     ),
+    # The bare boundary: read a 1-D array, cross the erased edge once, write a
+    # NumPy array. No indicator work at all, so this is the floor `sma_1d` and
+    # friends are built on top of.
+    "identity_1d": (
+        "",
+        "ta.identity().feed(close)",
+        None,
+    ),
+    # Two erased levels vs three, same shape: the marginal cost of one level of
+    # nesting on the path the benchmark's sma/ema/rsi/stddev rows all use.
+    "sma_of_sma_1d": (
+        "",
+        "ta.sma(ta.sma(ta.identity(), 14), 14).feed(close)",
+        None,
+    ),
     # The scalar path: a 1-D value stream, no bar fields. `talib` sees the same
     # array, so this is the one comparison with no frame handling on either side.
     "sma_1d": (

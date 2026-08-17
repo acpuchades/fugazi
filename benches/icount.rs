@@ -21,6 +21,21 @@
 //! · `atr_none` · `atr_atom` · `atr_candle` · `atr_manual_max`
 //! · `chain_candle` · `chain_atom` · `sma_two_levels` · `sma_fused`
 //! · `sma_dyn_per_sample` · `sma_dyn_batch`
+//! · `sma_scalar_none` · `sma_scalar_direct` · `sma_scalar_erased`
+//!
+//! **`sma_scalar_*` is the one that says where the Python gap now lives.** Net
+//! of the control, the same `Sma::new(Identity, 14)` costs **20.0
+//! instructions/sample monomorphised** and **50.0 erased the way
+//! `ta.sma(ta.identity(), 14)` builds it** — so type erasure costs ~30, half
+//! again as much as the arithmetic it wraps, and more than the entire Python
+//! boundary (17.0, measured separately by `tools/icount_python.py`).
+//!
+//! That reframes an earlier reading. A per-function profile of the Python path
+//! attributes only 4 instructions/sample to the inner `Erased<Identity>::update`,
+//! which looks like an erased level is nearly free. It is not: the call setup,
+//! the argument move and the `Option<Real>` return handling are all charged to
+//! the *caller*, so the marginal cost of a level is ~15, not 4. Vary one level
+//! and subtract — do not read a level's cost off its own callee total.
 //!
 //! **Pick the binary by mtime, not by `ls`.** `cargo` leaves every previously
 //! built `icount-<hash>` in place, the hash is not a timestamp, and this
@@ -262,12 +277,22 @@ fn sma_of_close_fused() -> fugazi::runtime::Chain<fugazi::market::Candle, Real> 
     fugazi::runtime::erase(fugazi::indicators::Sma::new(CloseOf::default(), 14))
 }
 
+/// The exact chain `ta.sma(ta.identity(), 14)` builds: two erased levels.
+/// `#[inline(never)]` for the devirtualisation reason documented above.
+#[inline(never)]
+fn erased_scalar_sma() -> fugazi::runtime::Chain<Real, Real> {
+    let leaf: fugazi::runtime::Chain<Real, Real> =
+        fugazi::runtime::erase(fugazi::indicators::Identity::<Real>::new());
+    fugazi::runtime::erase(fugazi::indicators::Sma::new(leaf, 14))
+}
+
 fn main() {
     let workload = std::env::args().nth(1).unwrap_or_else(|| {
         eprintln!(
             "usage: icount <sma_rust|sma_yaml|macd_rust|macd_yaml|tree8\
              |atr_none|atr_atom|atr_candle|atr_manual_max|chain_candle|chain_atom|chain_atom_direct\
-             |sma_two_levels|sma_fused|sma_dyn_per_sample|sma_dyn_batch>"
+             |sma_two_levels|sma_fused|sma_dyn_per_sample|sma_dyn_batch\
+             |sma_scalar_none|sma_scalar_direct|sma_scalar_erased>"
         );
         std::process::exit(2);
     });
@@ -364,6 +389,41 @@ fn main() {
                 fugazi::runtime::erase(fugazi::indicators::Atr::new(BarOf::default(), 14));
             for c in &candles {
                 black_box(ind.update((*c).into()));
+            }
+            BARS
+        }
+        // Is an erased `Sma` expensive because of the boundary, or is `Sma`
+        // itself expensive? The Python profile puts `Erased<Sma>::update` at 41
+        // instructions/sample while a whole erased level of `Identity` costs 4 —
+        // so the boundary is cheap and the body looks dear. But the Rust tier
+        // runs the same `Sma` at 1.37 ns/sample, which 41 instructions could not
+        // do. One of those two readings has to give.
+        //
+        // `sma_scalar_none` is the control (same loop, no indicator); the other
+        // two are the identical computation monomorphised and erased.
+        "sma_scalar_none" | "sma_scalar_direct" | "sma_scalar_erased" => {
+            let xs: Vec<Real> = (0..BARS).map(|i| 100.0 + (i % 97) as Real * 0.5).collect();
+            match workload.as_str() {
+                "sma_scalar_none" => {
+                    for x in &xs {
+                        black_box(*x);
+                    }
+                }
+                "sma_scalar_direct" => {
+                    let mut ind = fugazi::indicators::Sma::new(
+                        fugazi::indicators::Identity::<Real>::new(),
+                        14,
+                    );
+                    for x in &xs {
+                        black_box(ind.update(black_box(*x)));
+                    }
+                }
+                _ => {
+                    let mut ind = erased_scalar_sma();
+                    for x in &xs {
+                        black_box(ind.update(black_box(*x)));
+                    }
+                }
             }
             BARS
         }

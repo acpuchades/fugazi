@@ -1084,6 +1084,59 @@ That per-bar `Snapshot` allocation is the next thing on this path, and it is a
 core-design question rather than a binding one — see the `Snapshot` entry under
 *Known costs*.
 
+#### Where the remaining Python gap is — erasure, not the boundary
+
+After Phase 8 the bindings are 1.6-2.5x `talib` on the scalar rows and faster on
+`atr`. This is where the rest sits, measured rather than assumed.
+
+Per-function, `ta.sma(ta.identity(), 14).feed(array)`, 4 M samples:
+
+| | instr/sample |
+|---|---:|
+| `PyIndicator::feed` — read the column, write NumPy, loop | 17.0 |
+| `Erased<Sma>::update` | 41.0 |
+| `Erased<Identity>::update` | 4.0 |
+| **total** | **62.0** |
+
+That table invites a wrong conclusion — that an erased level costs 4 — so vary
+one level and subtract instead (`benches/icount.rs`, `sma_scalar_*`, net of a
+control that runs the same loop with no indicator):
+
+| | instr/sample |
+|---|---:|
+| `Sma::new(Identity, 14)` monomorphised | **20.0** |
+| the same, erased as the bindings build it | **50.0** |
+| `talib.SMA`, whole call | 8.1 |
+
+**Erasure costs ~30 instructions/sample** — half again the arithmetic it wraps,
+and more than the entire Python boundary. The call setup, the argument move and
+the `Option<Real>` return handling are charged to the *caller*, which is why the
+per-function view undercounts a level at 4 instead of ~15.
+
+Two consequences worth keeping straight:
+
+* **The boundary is no longer the problem.** 17 of 62. Further work on `feed`
+  itself has little left to win.
+* **fugazi's SMA is 20 instructions where `talib`'s is 8**, because TA-Lib
+  vectorises one pass over the array and an incremental `update()` cannot. Yet
+  the Rust tier and the C library both measure **1.37 ns/sample** — identical.
+  Instruction parity is unreachable by construction; time parity is already
+  there. Do not chase the former.
+
+The unexplored fix is **fusing**: build `Sma<Identity<Real>>` concretely when the
+source is a plain root, so a two-level chain becomes one. Priced at ~15
+instructions/sample here, and separately at 9.0/bar for a candle-field root
+(`sma_two_levels` vs `sma_fused`). Going further — a fully monomorphised carrier
+for common whole-chain shapes — would take the scalar path to ~37 (17 boundary +
+20 work), but needs a constructor-by-root combinatorial expansion, so it wants a
+decision before it is built.
+
+Also checked and **ruled out**: a small-input regime. The ratio is flat at
+2.4-3.0x from N = 200 to N = 200 000, and `talib` pays per-call overhead too
+(7.82 ns/sample at N = 200 against 1.36 at N = 200 000). The gap is per-sample,
+not per-call, so `OutputKind::detect`'s per-call `String` and the `numpy` import
+lookup are not worth touching.
+
 #### The methodological lesson, which is the expensive part
 
 The change immediately before this one cut instructions per sample and made
