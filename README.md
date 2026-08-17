@@ -15,7 +15,7 @@ and signal owns its internal state and is advanced one sample at a time via
 - **Incremental** — feed one bar at a time; no full-history recomputation.
 - **Composable** — indicators own their input source, so you build complex
   signals by nesting constructors. No glue, no remembering what to feed where.
-- **Fast** — matches or beats TA-Lib's vectorised C on the common indicators
+- **Fast** — matches or beats TA-Lib's vectorised C on `sma`/`ema`/`rsi`/`atr`
   while staying one-bar-at-a-time. See [Performance](#performance).
 - **Minimal dependencies**, `edition = "2024"`.
 
@@ -1109,16 +1109,23 @@ C loop over a whole array with no per-sample dispatch, while fugazi pays a
 function call per bar — which is the price of the same code driving a live
 stream. It turns out not to cost anything.
 
-Against [TA-Lib](https://ta-lib.org) on 200 000 samples, median of 7. Lower is
-better; **< 1.00× means fugazi is faster**:
+Against [TA-Lib](https://ta-lib.org) on 200 000 samples. **Each row is compared
+against the baseline that matches it**: the Rust engine against TA-Lib's C
+library, the Python bindings against `talib`, TA-Lib's own Python bindings.
+Lower is better; **< 1.00× means fugazi is faster**:
 
-| | TA-Lib | fugazi (Rust) | fugazi (Python) |
-| --- | ---: | ---: | ---: |
-| `sma` | 1.00× | **0.67×** | 2.4× |
-| `ema` | 1.00× | **0.46×** | 1.6× |
-| `rsi` | 1.00× | **0.67×** | 1.2× |
-| `atr` | 1.00× | **0.69×** | — |
-| `stddev` | 1.00× | 1.95× | 2.6× |
+| | fugazi (Rust)<br>vs TA-Lib **C** | fugazi (Python)<br>vs `talib` **Python** |
+| --- | ---: | ---: |
+| `sma` | **1.00×** | 3.4× |
+| `ema` | **0.68×** | 2.3× |
+| `rsi` | **0.98×** | 1.8× |
+| `atr` | **0.90×** | — |
+| `stddev` | 2.9× | 3.7× |
+
+The Rust engine is at parity or better on `sma`/`ema`/`rsi`/`atr` while staying
+one-bar-at-a-time. In absolute terms that is 1.37 ns/sample for `sma` and 4.33
+for `atr`, and driving a full backtest allocates **zero times per bar** — a
+200 000-bar run performs 29 allocations in total.
 
 `stddev` is the one loss, and it is deliberate: fugazi makes a centred pass over
 the window instead of TA-Lib's O(1) `E[X²] − E[X]²` shortcut, which cancels away
@@ -1126,26 +1133,11 @@ significant digits. At a five-figure price quoted to the cent that shortcut is
 already wrong by 1%, and at `mean = 1e9` it clamps the variance to zero. The
 tradeoff is [measured, not asserted](docs/PERFORMANCE.md#what-stddev-buys-with-its-2).
 
-The **Python** column is against `talib`'s own Python bindings — the honest
-comparison, since those are a thin Cython wrapper over the same C library. 1.2×
-to 2.6× is FFI overhead, not a different algorithm.
-
-The TA-Lib baseline is that same wrapper, whose cost is per *call* rather than
-per sample: at 200 000 samples it measures 2.08 ns/sample against a 2.01
-asymptote, so it understates the C library by ~3%. Correcting for that moves
-`sma` from 0.67× to 0.70× and changes nothing — [the numbers are in the
-record](docs/PERFORMANCE.md#is-talib-a-fair-stand-in-for-native-ta-lib).
-
-For scale rather than ratios: `sma` is **1.41 ns/sample** in Rust and 5.12 in
-Python, and driving a full backtest allocates **zero times per bar** — a
-200 000-bar run performs 29 allocations in total. Those are figures from one
-machine (16 cores, Linux 6.18, rustc 1.95); re-run them with
-`pixi run -e bench bench` before relying on them.
-
-[docs/PERFORMANCE.md](docs/PERFORMANCE.md) has the full record: how to measure,
-what every optimisation bought, which tricks in the code exist for speed and
-must not be "simplified" away, and the measurement traps that produced wrong
-answers here before they were caught.
+Figures from one machine (16 cores, Linux 6.18, rustc 1.95), best of three
+passes. Re-run them with `pixi run -e bench bench` before relying on them —
+and read [docs/PERFORMANCE.md](docs/PERFORMANCE.md) first if you intend to
+benchmark this yourself, because most of that document is the measurement
+mistakes this project has already made and how they were caught.
 
 ## Documentation
 

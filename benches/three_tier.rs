@@ -15,7 +15,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use fugazi::indicators::{Atr, CurrentBar, Ema, Identity, Rsi, Sma, StdDev};
+use fugazi::indicators::{Atr, Ema, Identity, Rsi, Sma, StdDev};
 use fugazi::prelude::*;
 use fugazi::runtime::{self, PayloadValue as DynValue};
 
@@ -30,14 +30,25 @@ const STDDEV_P: usize = 10;
 const ATR_P: usize = 14;
 
 const REPS: usize = 7;
+/// Discarded reps before timing starts.
+///
+/// Load-bearing, not politeness: a cold process on this machine reports TA-Lib's
+/// SMA at 1.99 ns/sample and a warm one at 1.38 — a 44% error from CPU frequency
+/// ramp and cold caches. Every tier of the comparison must discard the same way
+/// or the tiers are not comparable; see `tools/bench_talib_native.c`.
+const WARMUP: usize = 2;
 
 fn median(mut xs: Vec<f64>) -> f64 {
     xs.sort_by(f64::total_cmp);
     xs[xs.len() / 2]
 }
 
-/// Median ns/sample over `REPS` runs of `f` across `n` samples.
+/// Median ns/sample over `REPS` runs of `f` across `n` samples, after `WARMUP`
+/// discarded ones.
 fn bench(n: usize, mut f: impl FnMut()) -> f64 {
+    for _ in 0..WARMUP {
+        f();
+    }
     let mut times = Vec::with_capacity(REPS);
     for _ in 0..REPS {
         let t = Instant::now();
@@ -107,14 +118,22 @@ fn main() {
             black_box(ind.update(p));
         }
     })));
-    // ATR consumes bars, so it is fed pre-built atoms — constructing an `Atom`
-    // inside the timed loop would measure that instead.
-    let atoms: Vec<fugazi::types::Atom> =
-        candles.iter().map(|c| fugazi::types::Atom::new(*c)).collect();
+    // ATR consumes whole bars, so it is fed `Candle`s directly — the analogue of
+    // `TA_ATR` reading three flat `double` arrays, and the only fair shape for
+    // an indicator-throughput comparison.
+    //
+    // It used to hold a `Vec<Atom>` and pass `a.clone()`. That charged fugazi an
+    // 88-byte `Atom` copy per bar which TA-Lib does not pay and which real code
+    // does not either (the driver *moves* the atom out of the snapshot). Measured
+    // with callgrind: 146.5 instructions/bar with the clone against 34.0 without
+    // it, so **77% of the reported ATR cost was the benchmark's own bookkeeping**
+    // — and it was the number that made fugazi's ATR look 2.8x slower than
+    // native TA-Lib when the real figure is 2.2x. `benches/icount.rs` keeps
+    // `atr_atom` / `atr_candle` as workloads so the split stays reproducible.
     out.push(("atr", bench(n, || {
-        let mut ind = Atr::new(CurrentBar::new(), ATR_P);
-        for a in &atoms {
-            black_box(ind.update(a.clone()));
+        let mut ind = Atr::new(Identity::<fugazi::market::Candle>::new(), ATR_P);
+        for c in &candles {
+            black_box(ind.update(*c));
         }
     })));
 

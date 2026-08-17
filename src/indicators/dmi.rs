@@ -1,6 +1,7 @@
 use fugazi_derive::SaveState;
 
 use crate::indicator::Indicator;
+use crate::num::max_finite;
 use crate::indicators::smoothing::WilderState;
 use crate::types::{Candle, Real};
 
@@ -98,7 +99,8 @@ impl<S: Indicator<Output = Candle>> Indicator for Dmi<S> {
         let high_low = candle.high - candle.low;
         let high_close = (candle.high - prev_close).abs();
         let low_close = (candle.low - prev_close).abs();
-        let tr = high_low.max(high_close).max(low_close);
+        // See `crate::num` — same reasoning as `TrueRange`.
+        let tr = max_finite(max_finite(high_low, high_close), low_close);
 
         let smoothed_plus = self.plus_dm.update(plus_dm);
         let smoothed_minus = self.minus_dm.update(minus_dm);

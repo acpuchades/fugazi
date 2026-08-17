@@ -1,6 +1,7 @@
 use fugazi_derive::SaveState;
 
 use crate::indicator::Indicator;
+use crate::num::max_finite;
 use crate::indicators::smoothing::WilderState;
 use crate::types::Real;
 
@@ -63,8 +64,9 @@ impl<S: Indicator<Output = Real>> Indicator for Rsi<S> {
         self.prev = Some(price);
 
         let delta = price - prev;
-        let avg_gain = self.gain.update(delta.max(0.0));
-        let avg_loss = self.loss.update((-delta).max(0.0));
+        // `delta` is a price difference; see `crate::num`.
+        let avg_gain = self.gain.update(max_finite(delta, 0.0));
+        let avg_loss = self.loss.update(max_finite(-delta, 0.0));
 
         self.value = match (avg_gain, avg_loss) {
             (Some(avg_gain), Some(avg_loss)) => Some(if avg_loss == 0.0 {

@@ -665,62 +665,100 @@ The numbers below are a recorded run; re-running reproduces the *shape*, not the
 digits, since they depend on the machine and on which TA-Lib build the lock
 resolves to.
 
-### Is `talib` a fair stand-in for native TA-Lib?
+## Phase 7 — the ATR gap, and what was actually wrong
 
-There is one TA-Lib column, and it is measured through `talib`, the Cython
-bindings — not by calling `TA_SMA` from C. That is worth justifying rather than
-assuming, because if the wrapper were charging a per-sample cost then every
-`rs/TA-Lib` figure below would be flattering fugazi.
+Adding the native tier made fugazi's ATR look **2.8× slower** than TA-Lib. It
+was worth chasing, and chasing it found two different things — one a real
+optimisation, one a benchmark that had been lying for as long as it existed.
 
-It is not. The wrapper's cost is **per call**, not per sample, so it amortises:
+The machine was contended at the time, so none of this was settled by
+wall-clock. `benches/icount.rs` grew `atr_none` / `atr_atom` / `atr_candle` /
+`atr_manual_max` — the same computation with one variable changed each, plus a
+control to subtract — and callgrind settled it deterministically.
 
-| n | total | ns/sample |
-|---:|---:|---:|
-| 1 000 | 18.0 µs | 18.04 |
-| 10 000 | 32.0 µs | 3.20 |
-| 200 000 | 415.2 µs | **2.08** |
-| 2 000 000 | 4 021.5 µs | **2.01** |
-
-A fixed ~15 µs of call overhead, visible at `n = 1 000` and converged by
-`n = 200 000`. The 2.01 asymptote is the C library's own throughput; at the
-200 000 samples these benchmarks use, `talib` reads 2.08 — **3.4% slower than
-native**, which is the whole of the gap.
-
-So the TA-Lib baseline understates the C library by ~3%. Correcting for it moves
-`sma` from 0.67× to 0.70× and changes no conclusion. A separate native tier
-would buy that 3% and a C build dependency; it has not been worth it. **If a
-result ever turns on less than ~5%, add the native tier rather than trusting
-this row** — and note the first two rows of the table above are exactly why a
-benchmark at `n = 1 000` would have been nonsense.
-
-**Read the Python row against TA-Lib, not against Rust.** `talib.SMA(arr, 10)`
-*is* a Python API — a thin Cython wrapper over the C library. So the comparison
-that matters to a Python user is `fugazi py` vs `TA-Lib`, and that is the
-unflattering one:
-
-| indicator | TA-Lib (py) | fugazi rs | fugazi py | **py vs TA-Lib** | rs vs TA-Lib |
-|---|---:|---:|---:|---:|---:|
-| `sma` | 2.11 ns | **1.41** | 5.12 | **2.4×** | **0.67×** |
-| `ema` | 3.08 ns | **1.41** | 5.03 | **1.6×** | **0.46×** |
-| `rsi` | 7.11 ns | **4.79** | 8.73 | **1.2×** | **0.67×** |
-| `stddev` | 5.10 ns | 9.95 | 13.33 | **2.6×** | 1.95× |
-| `atr` | 17.38 ns | **12.04** | — | — | **0.69×** |
-
-The **Rust** engine meets the bar: it beats a vectorised C library on
-`sma`/`ema`/`rsi`/`atr` while staying *incremental* (one `update()` per bar,
-which is what lets the same code drive a live stream). `stddev` is the one loss,
-deliberately — see *What `stddev` buys with its 2×* below.
-
-The **Python** bindings now do too: 1.2–2.6× a vectorised C library, for an
-incremental engine reached across an FFI boundary. Before Phase 6 the same table
-read 10–29×:
-
-| | before Phase 6 | after |
+| workload | instr/bar (net of control) | vs native `TA_ATR` (15.4) |
 |---|---:|---:|
-| `sma` py vs TA-Lib | 29× | **2.4×** |
-| `ema` py vs TA-Lib | 18× | **1.6×** |
-| `rsi` py vs TA-Lib | 10× | **1.2×** |
-| `stddev` py vs TA-Lib | 15× | **2.6×** |
+| `atr_atom` — as the benchmark drove it | 146.5 | 9.5× |
+| `atr_candle` — fed a `Candle` | 34.0 | 2.2× |
+| `atr_manual_max` — and without `f64::max` | 25.0 | 1.6× |
+
+**1. 77% of the number was the benchmark.** `benches/three_tier.rs` held a
+`Vec<Atom>` and passed `a.clone()` per bar — an 88-byte copy TA-Lib does not pay
+(it reads three flat `double` arrays) and that real code does not pay either
+(the driver *moves* the atom out of the snapshot). It now feeds `Candle`s. This
+is not a speedup; it is a measurement that was wrong.
+
+**2. `f64::max` costs 26% of ATR.** Rust specifies it to *ignore* NaN, and that
+contract is not free: the true-range expression compiles to **22 instructions**
+with `cmpunordsd`/`andnpd`/`orpd` fixups, against **10** for `if a > b { a }`,
+which is what TA-Lib's C gets from its `>`. `src/num.rs` is that comparison,
+applied to `TrueRange`, `Dmi`, `Rsi` and `Sar`. ATR: **34.0 → 22.0
+instructions/bar.**
+
+The exchange is documented and pinned rather than waved at. Two divergences from
+`f64::max`, not one:
+
+* **NaN propagates** instead of being suppressed. Deliberate — a NaN high is
+  corrupt input, and an ATR that reports a plausible number from it is worse
+  than one that reports NaN.
+* **`±0.0` ties resolve to the second operand**, where `f64::max` returns `+0.0`.
+  *Not* deliberate: it is the cost, and it was found by an exhaustive test
+  sweeping every pair of finite values rather than by reasoning about it. Every
+  call site has to rule it out; `src/num.rs` lists why each current one can't
+  hit it.
+
+Every expected-value fixture — TA-Lib cross-validation included — passes
+unchanged, because no test feeds a NaN or a negative zero.
+
+**Result:** ATR is **4.33 ns/sample against native TA-Lib's 4.83 — 0.90×.** The
+apparent 2.8× loss was a benchmark artifact stacked on top of a real but much
+smaller gap, and the real half is now closed.
+
+### One baseline per tier
+
+There are **four** tiers, not three, and it took getting it wrong to see why.
+
+The comparison originally measured TA-Lib once, through `talib` (the Cython
+bindings), and used that single number as the baseline for *both* fugazi rows.
+That is right for the Python row — both sides cross a Python boundary — and
+wrong for the Rust row, where the wrapper's cost is credited to fugazi.
+
+Measured cleanly the error is small (`sma` 1.47 vs 1.37 ns/sample, `atr` 5.40 vs
+4.83 — 5–12%), but it is an error in the flattering direction and it costs
+nothing to avoid. `tools/bench_talib_native.c` is the native tier;
+`tools/bench_three_tier.py` builds and runs it, and skips it rather than failing
+when there is no C toolchain.
+
+**A caution about that "measured cleanly".** An earlier revision of this section
+claimed the ATR wrapper cost 2.5× (17.3 ns/sample against 7.0). It does not —
+those runs were taken while the machine was loaded, and the figure was wrong by
+a factor of ten *in the direction that made the argument look more important*.
+Two things came out of that:
+
+* every tier now discards a **warm-up** pass (a cold process reads TA-Lib's SMA
+  at 1.99 ns/sample against a warm 1.38 — a 44% error, and it inflates the
+  baseline, so it flatters fugazi);
+* the driver takes the **best of three full passes** rather than one. Contention
+  is strictly one-sided — it can only make a run slower — so the minimum is the
+  least-polluted observation, where a median folds the contended passes back in.
+
+### Results
+
+| | TA-Lib C | TA-Lib py | fugazi rs | fugazi py | **rs vs C** | **py vs py** |
+|---|---:|---:|---:|---:|---:|---:|
+| `sma` | 1.37 | 1.47 | 1.37 | 5.03 | **1.00×** | 3.43× |
+| `ema` | 2.07 | 2.17 | 1.40 | 5.03 | **0.68×** | 2.32× |
+| `rsi` | 4.80 | 4.92 | 4.69 | 8.80 | **0.98×** | 1.79× |
+| `atr` | 4.83 | 5.40 | 4.33 | — | **0.90×** | — |
+| `stddev` | 3.35 | 3.57 | 9.78 | 13.25 | 2.92× | 3.71× |
+
+ns/sample, 200 000 samples, median of 7, best of 3 passes.
+
+The **Rust** engine is at parity or better on `sma`/`ema`/`rsi`/`atr` against the
+C library itself, while staying incremental. `stddev` is the deliberate loss.
+
+The **Python** bindings cost 1.8–3.7× over the Python API a user would otherwise
+reach for. That is FFI and per-call overhead, not a different algorithm.
 
 ### Where the Python time goes
 

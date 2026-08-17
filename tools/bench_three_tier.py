@@ -1,12 +1,27 @@
 #!/usr/bin/env python3
-"""Three-tier indicator throughput: TA-Lib vs fugazi (Rust) vs fugazi (Python).
+"""Four-tier indicator throughput: TA-Lib (C and Python) vs fugazi (Rust and Python).
 
-Answers two questions the project cares about separately:
+Answers two questions the project cares about separately, and — this is the
+point of having *four* tiers rather than three — gives each question the
+baseline that actually matches it:
 
-  1. Does the **Rust** engine match or beat TA-Lib? TA-Lib is a mature C
-     library and the natural bar for a from-scratch Rust implementation.
-  2. How much does a **Python** caller give up over that Rust engine? That gap
-     is FFI overhead, and keeping it small is what makes the bindings usable.
+  1. Does the **Rust** engine match or beat TA-Lib? Measured against
+     **native TA-Lib C** (`tools/bench_talib_native.c`), because comparing a
+     Rust library against a Python-wrapped C library credits fugazi with the
+     wrapper's overhead.
+  2. How much does a **Python** caller give up? Measured against **`talib`, the
+     Cython bindings**, because both sides cross a Python boundary there. That
+     is the comparison a Python user actually faces.
+
+Using the Python bindings as the baseline for *both* was a real error even so.
+It is a small one — measured cleanly, `talib.ATR` costs 5.40 ns/sample against
+native `TA_ATR`'s 4.83, about 12% — but it is an error in the flattering
+direction, and it is free to not make.
+
+(An earlier revision of this docstring claimed the ATR wrapper cost 2.5x, from
+runs taken while the machine was loaded. It does not. That figure was wrong in
+fugazi's favour when quoted as a reason the comparison mattered, which is why
+the `repeat`/best-of logic in `main` now exists.)
 
 The comparison is deliberately *not* apples-to-apples in one respect, and the
 report says so: TA-Lib is **vectorised** — one call computes a whole array,
@@ -27,8 +42,11 @@ get conda's `talib` extension to find a compatible libstdc++; one environment
 holding both needs no such prefix. Building the wheel uses `cargo` from the
 ambient PATH, same as `maturin develop`.
 
-Rust numbers come from `cargo bench --bench three_tier`, which this script
-invokes and parses, so both tiers run the same input length.
+Rust numbers come from `cargo bench --bench three_tier` and native TA-Lib from a
+`cc` build of `tools/bench_talib_native.c`; this script invokes and parses both,
+so every tier runs the same input length over the same LCG walk. The native tier
+**skips** (rather than fails) when `cc` or TA-Lib's headers are missing, since it
+needs a C toolchain the rest of the project does not.
 
 **The extension is checked for staleness before anything is timed**, and the run
 aborts if it is out of date. `pixi.toml` installs `fugazi` into this environment
@@ -56,6 +74,7 @@ import talib
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 N = 200_000
 REPS = 7
+WARMUP = 2
 
 # Keep in sync with benches/three_tier.rs and tools/gen_talib_fixtures.py.
 SMA_P = 10
@@ -134,7 +153,70 @@ def synth(n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     return o, h, lo, c
 
 
-def timed(fn, reps: int = REPS) -> float:
+def talib_native(n: int) -> dict[str, float]:
+    """Compile and run the native TA-Lib C tier, or `{}` if that isn't possible.
+
+    The baseline for fugazi's **Rust** row. Returns empty rather than raising
+    when `cc` or TA-Lib's headers are absent: a C toolchain is needed by nothing
+    else here, so a missing one should cost this one column, not the whole run.
+
+    Headers and `libta_lib` come from the same environment that provides `talib`,
+    found relative to this interpreter — the conda-style prefix two levels up
+    from `sys.executable`. `LD_LIBRARY_PATH` is set for the child because the
+    library is a shared object outside the default search path.
+    """
+    src = os.path.join(ROOT, "tools", "bench_talib_native.c")
+    if not os.path.exists(src):
+        return {}
+    prefix = os.path.dirname(os.path.dirname(os.path.abspath(sys.executable)))
+    inc, lib = os.path.join(prefix, "include"), os.path.join(prefix, "lib")
+    if not os.path.exists(os.path.join(inc, "ta-lib", "ta_libc.h")):
+        return {}
+
+    import shutil
+    import tempfile
+
+    cc = shutil.which("cc") or shutil.which("gcc")
+    if not cc:
+        return {}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        exe = os.path.join(tmp, "talib_native")
+        build = subprocess.run(
+            [cc, "-O2", "-o", exe, src, f"-I{inc}", f"-L{lib}", "-lta_lib", "-lm"],
+            capture_output=True, text=True,
+        )
+        if build.returncode != 0:
+            print("native TA-Lib tier did not build:\n", build.stderr[-800:],
+                  file=sys.stderr)
+            return {}
+        env = dict(os.environ)
+        env["LD_LIBRARY_PATH"] = lib + os.pathsep + env.get("LD_LIBRARY_PATH", "")
+        run = subprocess.run([exe, f"--n={n}"], capture_output=True, text=True, env=env)
+        if run.returncode != 0:
+            print("native TA-Lib tier did not run:\n", run.stderr[-800:], file=sys.stderr)
+            return {}
+
+    out: dict[str, float] = {}
+    for line in run.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("{") and '"ns_per_sample"' in line:
+            rec = json.loads(line)
+            out[rec["name"]] = rec["ns_per_sample"]
+    return out
+
+
+def timed(fn, reps: int = REPS, warmup: int = WARMUP) -> float:
+    """Median wall time over `reps` runs, after `warmup` discarded ones.
+
+    The warm-up is load-bearing: a cold process on this machine reports TA-Lib's
+    SMA at 1.99 ns/sample against a warm 1.38, a 44% error from CPU frequency
+    ramp and cold caches. Because it inflates the *baseline*, leaving it in
+    flatters fugazi. Every tier discards identically — see
+    `tools/bench_talib_native.c` and `benches/three_tier.rs`.
+    """
+    for _ in range(warmup):
+        fn()
     times = []
     for _ in range(reps):
         gc.collect()
@@ -146,16 +228,28 @@ def timed(fn, reps: int = REPS) -> float:
     return statistics.median(times)
 
 
-def main() -> int:
-    if check_extension_fresh() != 0:
-        return 1
+def rust_tier(n: int) -> dict[str, float]:
+    """fugazi's Rust engine, via `cargo bench --bench three_tier --emit-json`."""
+    env = dict(os.environ)
+    env["FUGAZI_THREE_TIER_N"] = str(n)
+    proc = subprocess.run(
+        ["cargo", "bench", "--bench", "three_tier", "--", "--emit-json"],
+        cwd=ROOT, capture_output=True, text=True, env=env,
+    )
+    out: dict[str, float] = {}
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("{") and '"ns_per_sample"' in line:
+            rec = json.loads(line)
+            out[rec["name"]] = rec["ns_per_sample"]
+    if not out:
+        print("could not read Rust numbers; cargo said:\n", proc.stderr[-2000:])
+    return out
 
-    o, h, lo, c = synth(N)
 
-    print(f"n = {N:,} samples, median of {REPS}\n")
-
-    # ---- tier 1: TA-Lib (vectorised C) --------------------------------------
-    talib_ns = {
+def talib_py_tier(c, h, lo) -> dict[str, float]:
+    """TA-Lib through its Cython bindings — the baseline for the Python row."""
+    return {
         "sma": timed(lambda: talib.SMA(c, SMA_P)) * 1e9 / N,
         "ema": timed(lambda: talib.EMA(c, EMA_P)) * 1e9 / N,
         "rsi": timed(lambda: talib.RSI(c, RSI_P)) * 1e9 / N,
@@ -163,59 +257,99 @@ def main() -> int:
         "atr": timed(lambda: talib.ATR(h, lo, c, ATR_P)) * 1e9 / N,
     }
 
-    # ---- tier 2: fugazi Rust ------------------------------------------------
-    env = dict(os.environ)
-    env["FUGAZI_THREE_TIER_N"] = str(N)
-    proc = subprocess.run(
-        ["cargo", "bench", "--bench", "three_tier", "--", "--emit-json"],
-        cwd=ROOT, capture_output=True, text=True, env=env,
-    )
-    rust_ns: dict[str, float] = {}
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if line.startswith("{") and '"ns_per_sample"' in line:
-            rec = json.loads(line)
-            rust_ns[rec["name"]] = rec["ns_per_sample"]
-    if not rust_ns:
-        print("could not read Rust numbers; cargo said:\n", proc.stderr[-2000:])
-        return 1
 
-    # ---- tier 3: fugazi Python ---------------------------------------------
+def fugazi_py_tier(c) -> dict[str, float]:
+    """fugazi's Python bindings, driven exactly as a user would."""
     import fugazi as fz
 
-    def py_scalar(build):
+    def scalar(build):
         def run():
-            ind = build()
-            ind.feed(c)
+            build().feed(c)
         return run
 
-    py_ns = {
-        "sma": timed(py_scalar(lambda: fz.sma(fz.identity(), SMA_P))) * 1e9 / N,
-        "ema": timed(py_scalar(lambda: fz.ema(fz.identity(), EMA_P))) * 1e9 / N,
-        "rsi": timed(py_scalar(lambda: fz.rsi(fz.identity(), RSI_P))) * 1e9 / N,
-        "stddev": timed(py_scalar(lambda: fz.stddev(fz.identity(), STDDEV_P))) * 1e9 / N,
+    return {
+        "sma": timed(scalar(lambda: fz.sma(fz.identity(), SMA_P))) * 1e9 / N,
+        "ema": timed(scalar(lambda: fz.ema(fz.identity(), EMA_P))) * 1e9 / N,
+        "rsi": timed(scalar(lambda: fz.rsi(fz.identity(), RSI_P))) * 1e9 / N,
+        "stddev": timed(scalar(lambda: fz.stddev(fz.identity(), STDDEV_P))) * 1e9 / N,
     }
 
+
+def best_of(passes: list[dict[str, float]]) -> dict[str, float]:
+    """Per-key minimum across passes. See the note on `repeat` in `main`."""
+    out: dict[str, float] = {}
+    for p in passes:
+        for k, v in p.items():
+            if k not in out or v < out[k]:
+                out[k] = v
+    return out
+
+
+def main() -> int:
+    if check_extension_fresh() != 0:
+        return 1
+
+    # How many full passes to take before reporting the per-cell **minimum**.
+    #
+    # Not paranoia, and not the same job as `WARMUP`. The warm-up handles CPU
+    # frequency ramp *within* a process; this handles contention *between*
+    # processes, which on a shared machine is the larger effect — the first pass
+    # after any other activity reads 30-40% slow on the tiers that are a fresh
+    # subprocess (native C, Rust), while later passes agree to ~2%.
+    #
+    # Minimum rather than median because contention is strictly one-sided: it
+    # can only ever make a run slower, so the fastest observation is the least
+    # polluted. A median folds the contended passes back in.
+    repeat = int(os.environ.get("FUGAZI_BENCH_REPEAT", "3"))
+
+    o, h, lo, c = synth(N)
+
+    print(f"n = {N:,} samples, median of {REPS}, best of {repeat} passes\n")
+
+    native_p, talib_p, rust_p, py_p = [], [], [], []
+    for _ in range(repeat):
+        native_p.append(talib_native(N))
+        talib_p.append(talib_py_tier(c, h, lo))
+        rust_p.append(rust_tier(N))
+        py_p.append(fugazi_py_tier(c))
+    native_ns = best_of(native_p)
+    talib_ns = best_of(talib_p)
+    rust_ns = best_of(rust_p)
+    py_ns = best_of(py_p)
+    if not rust_ns:
+        return 1
+
     # ---- report -------------------------------------------------------------
-    print(f"{'indicator':<10}{'TA-Lib':>12}{'fugazi rs':>12}{'fugazi py':>12}"
-          f"{'rs/TA-Lib':>12}{'py/rs':>9}")
-    print(f"{'':<10}{'ns/sample':>12}{'ns/sample':>12}{'ns/sample':>12}")
+    # Each ratio is against the baseline that matches its tier: Rust against
+    # native C, Python against the Python bindings. Mixing them is what made
+    # fugazi's ATR look like a win when it is a loss.
+    if not native_ns:
+        print("native TA-Lib tier skipped (no C toolchain / TA-Lib headers);\n"
+              "the rs/C column cannot be shown, and rs must NOT be judged\n"
+              "against the Python-binding column instead.\n")
+
+    print(f"{'':<10}{'TA-Lib C':>11}{'TA-Lib py':>11}{'fugazi rs':>11}"
+          f"{'fugazi py':>11}{'rs vs C':>10}{'py vs py':>10}")
+    print(f"{'indicator':<10}{'ns/samp':>11}{'ns/samp':>11}{'ns/samp':>11}"
+          f"{'ns/samp':>11}{'(engine)':>10}{'(bindings)':>10}")
     for k in ("sma", "ema", "rsi", "stddev", "atr"):
+        nat = native_ns.get(k)
         t = talib_ns.get(k)
         r = rust_ns.get(k)
         p = py_ns.get(k)
-        row = f"{k:<10}{t:>12.2f}" if t else f"{k:<10}{'—':>12}"
-        row += f"{r:>12.2f}" if r else f"{'—':>12}"
-        row += f"{p:>12.2f}" if p else f"{'—':>12}"
-        row += f"{r / t:>11.2f}x" if (t and r) else f"{'—':>12}"
-        row += f"{p / r:>8.1f}x" if (r and p) else f"{'—':>9}"
+        cell = lambda v: f"{v:>11.2f}" if v else f"{'—':>11}"
+        row = f"{k:<10}" + cell(nat) + cell(t) + cell(r) + cell(p)
+        row += f"{r / nat:>9.2f}x" if (nat and r) else f"{'—':>10}"
+        row += f"{p / t:>9.2f}x" if (t and p) else f"{'—':>10}"
         print(row)
 
     print(
         "\nTA-Lib is vectorised (one C call per array); fugazi is incremental\n"
         "(one update() per sample), which is what lets the same code drive a\n"
-        "live stream. Read `rs/TA-Lib` as the price of that design, and\n"
-        "`py/rs` as the FFI overhead a Python caller adds on top."
+        "live stream. `rs vs C` is the price of that design, measured against\n"
+        "the C library itself. `py vs py` is what a Python caller gives up\n"
+        "against the Python API they'd otherwise reach for.\n"
+        "\nBoth ratios: lower is better, < 1.00x means fugazi is faster."
     )
     return 0
 

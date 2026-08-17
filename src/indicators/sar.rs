@@ -1,6 +1,7 @@
 use fugazi_derive::SaveState;
 
 use crate::indicator::Indicator;
+use crate::num::{max_finite, min_finite};
 use crate::types::{Candle, Real};
 
 /// TA-Lib's default acceleration step and cap.
@@ -75,10 +76,11 @@ impl<S> Sar<S> {
     /// short).
     fn next_sar(&self, base: Real, high: Real, low: Real) -> Real {
         let sar = base + self.af * (self.ep - base);
+        // Prices, clamped against prices — see `crate::num`.
         if self.is_long {
-            sar.min(self.prev_low).min(low)
+            min_finite(min_finite(sar, self.prev_low), low)
         } else {
-            sar.max(self.prev_high).max(high)
+            max_finite(max_finite(sar, self.prev_high), high)
         }
     }
 }
@@ -130,9 +132,9 @@ impl<S: Indicator<Output = Candle>> Indicator for Sar<S> {
                     self.is_long = !self.is_long;
                     let mut out = self.ep;
                     out = if self.is_long {
-                        out.min(self.prev_low).min(low)
+                        min_finite(min_finite(out, self.prev_low), low)
                     } else {
-                        out.max(self.prev_high).max(high)
+                        max_finite(max_finite(out, self.prev_high), high)
                     };
                     self.af = self.step;
                     self.ep = if self.is_long { high } else { low };
@@ -144,11 +146,11 @@ impl<S: Indicator<Output = Candle>> Indicator for Sar<S> {
                     if self.is_long {
                         if high > self.ep {
                             self.ep = high;
-                            self.af = (self.af + self.step).min(self.max);
+                            self.af = min_finite(self.af + self.step, self.max);
                         }
                     } else if low < self.ep {
                         self.ep = low;
-                        self.af = (self.af + self.step).min(self.max);
+                        self.af = min_finite(self.af + self.step, self.max);
                     }
                     self.sar = self.next_sar(out, high, low);
                     out

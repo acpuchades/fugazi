@@ -1,6 +1,7 @@
 use fugazi_derive::SaveState;
 
 use crate::indicator::Indicator;
+use crate::num::max_finite;
 use crate::types::{Candle, Real};
 
 /// True Range: `max(high - low, |high - prev_close|, |low - prev_close|)`.
@@ -42,7 +43,10 @@ impl<S: Indicator<Output = Candle>> Indicator for TrueRange<S> {
                 let high_low = candle.high - candle.low;
                 let high_close = (candle.high - prev_close).abs();
                 let low_close = (candle.low - prev_close).abs();
-                high_low.max(high_close).max(low_close)
+                // `max_finite`, not `f64::max`: these are price differences, and
+                // the NaN-suppression contract costs 9 of ATR's 34 instructions
+                // per bar. See `crate::num`.
+                max_finite(max_finite(high_low, high_close), low_close)
             }
             None => candle.high - candle.low,
         };
