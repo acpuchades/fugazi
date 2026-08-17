@@ -157,6 +157,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         ($($f:ident),* $(,)?) => { $( m.add_function(wrap_pyfunction!($f, m)?)?; )* };
     }
     reg!(
+        _bench_feed_stage,
         open, high, low, close, volume, typical,
         median, identity, value, value_str, sma, ema,
         rma, wma, hma, rsi, stddev, skewness_indicator,

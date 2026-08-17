@@ -566,32 +566,55 @@ The **Python** bindings do not. A caller who reaches for `fugazi` instead of
 
 ### Where the Python time goes
 
-Measured rather than assumed — `benches/three_tier.rs` carries the intermediate
-rungs, so each layer is isolated with no Python involved:
+Measured, not assumed. `_bench_feed_stage` (a diagnostic hook in
+`python/src/constructors.rs`) runs each prefix of the `feed()` pipeline, so
+every layer is priced separately. One run, so the ratios are internally
+consistent:
 
-| | ns/sample | delta |
+| | ns/sample | vs TA-Lib |
 |---|---:|---:|
-| `Sma` native Rust | 1.36 | — |
-| … through **one** erasure boundary (`sma_erased`) | 3.70 | +2.3 |
-| … through **two**, as the bindings build it (`sma_erased_nested`) | 16.95 | **+13.3** |
-| … via `feed()` from Python | 56.72 | +39.8 |
+| `talib.SMA` | 2.03 | 1.0× |
+| `feed` — input only | 0.32 | |
+| `feed` — input + indicator (**one** erasure) | 7.31 | |
+| `feed` — whole pipeline, one erasure | **8.15** | **4.0×** |
+| `fz.sma(identity())` — two erasures | 50.14 | 24.7× |
+| `fz.sma(ema(identity()))` — three erasures | 79.86 | 39.4× |
 
-Two separate problems, and the first is the one to name:
+The pipeline itself is **not** the problem: end to end, with one erased layer,
+it is 4.0× a vectorised C library — respectable for an incremental engine.
 
-**`DynValue` is 88 bytes**, because the enum is as wide as its `Atom` variant.
-Every erased `update` moves that payload in and back out. And the bindings
-*nest*: `sma(identity())` wraps an already-erased source, so a sample crosses
-the boundary twice each way — six `DynValue` conversions per sample. That alone
-takes `Sma` from 1.36 to 16.95 ns, a **12× tax on the engine before Python is
-even involved**. Boxing the large variants would shrink `DynValue` to 16 bytes;
-flattening the nesting would remove conversions outright. See the breaking
-candidates.
+**Every additional erased layer costs ~30 ns/sample**, and the Python builders
+add one per call: `sma(identity())` wraps an already-erased source, so it has
+two. That is the entire gap.
 
-**~40 ns/sample remains unattributed** between the nested-erasure figure and
-`feed()`. It is *not* the input conversion — `feed(list)` is only 9 ns/sample
-slower than `feed(numpy)`, so the buffer fast path is not where the time is.
-This needs a profiler rather than another guess, and is deliberately left
-unexplained here rather than filled in with a plausible story.
+`size_of::<DynValue>()` is **88 bytes** — the enum is as wide as its `Atom`
+variant — so each layer moves that payload in and back out, with a discriminant
+branch and drop glue on every move. Construction is not the cost (0.009
+ns/sample); input is not (0.32); output is no longer (0.75).
+
+The target is therefore concrete: **get a chain of N indicators down to one
+erasure boundary, or make a boundary cheap.** 4.0× is already demonstrated as
+reachable. Two directions, both in the breaking-candidates list:
+
+* Build the concrete chain and erase **once**, as the spec layer does via
+  `NodeSpec` — the Python builders erase incrementally instead.
+* Shrink `DynValue`. Boxing the wide variants takes it to ~24 bytes but adds an
+  allocation on bar-shaped paths, so it needs measuring on the CLI too, not
+  just here.
+
+`runtime::chain` is *not* the answer — see the tried-and-failed list.
+
+### What was fixed here
+
+| | before | after |
+|---|---:|---:|
+| input conversion | ~155 ns/element | 0.32 ns/sample |
+| output conversion | 19.29 ns/sample | **0.75** |
+| `feed(sma(identity))` overall | ~160 ns/sample | **~50** |
+
+The input fix is the buffer-protocol path (and the reason for `abi3-py311`);
+the output fix fills `np.empty`'s buffer directly instead of building a Python
+list for NumPy to copy back out.
 
 ### What `stddev` buys with its 2.7×
 
@@ -618,6 +641,64 @@ by that. Keep the centred pass.
 There is no free lunch in between: Welford's online algorithm is O(1) and far
 better conditioned than the naive shortcut, but it has no numerically stable
 *removal* step, which a sliding window needs on every sample.
+
+## The tricks in the codebase, and why they are there
+
+Each of these looks like an odd way to write the code until you know what it is
+avoiding. If you are about to "simplify" one, this is the note that tells you
+what it will cost. Every entry was measured, and the measurement is repeatable
+with the benches named.
+
+| # | Where | The trick | What it avoids |
+|---|---|---|---|
+| 1 | `strategies/{single_asset,pairs,multi_asset}.rs` | `is_ready()` reads a cached threshold (`OnceLock` / plain field) instead of calling `stable_bars()` | `stable_bars()` walks the whole tree, and `Combine::unstable_bars` re-walks both children, so visits grow **exponentially with depth**. Recomputed per bar it was 40% of a depth-8 run. |
+| 2 | `indicators/component.rs` | `SharedComponent` stores `warm_up`/`unstable` at construction | Both were behind the shared `Mutex`. The readiness walk called them every bar through the whole tree — ~38% of a `.shared()` strategy's runtime. |
+| 3 | `indicators/stats.rs` | `WindowStats` is a hand-rolled ring buffer, not a `VecDeque` | Deque growth checks and index wrapping on a capacity that never changes. Took `Sma` 5.25 → 1.38 ns/sample, which is what put it level with TA-Lib. |
+| 4 | `indicators/stats.rs` | Hand-written `Serialize`/`Deserialize` emitting `{period, window, sum}` | Lets #3 change representation **without changing the run-state format**. Delete it and every existing resume file breaks. |
+| 5 | `wallet/paper.rs`, `indicators/book.rs` | Equity sums into a **stack buffer**, sorted, folded from cash | Two things at once: `HashMap` order varies per process, so summing in it made the equity curve drift by a ULP *between runs* (a real bug); and the old code allocated a `Vec` per bar to sort one element. |
+| 6 | `hash.rs` | An in-crate FxHash `BuildHasher` for symbol maps | SipHash on `String` keys, several times per bar per symbol, for keys the user chose. ~30 lines beats a dependency here (crate policy: closed form first). |
+| 7 | `snapshot.rs` | `Symbol = Arc<str>`, interned at every boundary | A symbol is cloned constantly and mutated never. Took a 200k-bar run from 200 045 allocations to **37**. |
+| 8 | `strategies/single_asset.rs` | `extract_self_atom` returns `Option<&Atom>` | Cloning an 88-byte `Atom` per bar to read one `Copy` candle out of it. |
+| 9 | `wallet/paper.rs`, `strategies/basket.rs` | `get_mut`-then-`insert` instead of bare `insert` | After the first bar the key is present, so `insert` clones the symbol every bar only to drop it. |
+| 10 | `python/src/constructors.rs` | `column_to_vec` takes a buffer-protocol fast path | Otherwise one Python `float` object per element: ~155 ns/element, against ~1 ns of indicator work. **This is why the wheel is `abi3-py311`.** |
+| 11 | `python/src/constructors.rs` | `ndarray_from_values` fills `np.empty`'s buffer in one pass | `np.asarray(vec)` builds a Python list first (a float object per element). Even `np.frombuffer(bytearray)` needed an intermediate `Vec` plus a `bytearray`. 19.29 → **0.75 ns/sample**. |
+| 12 | `Cargo.toml` | `codegen-units = 1` | Worth −8.9…−20.1% instructions. The thin LTO beside it is nearly free but does little alone — don't split them without re-measuring. |
+| 13 | `spec/metrics.rs` | One `sorted_asc` shared by the four quantile metrics | Four independent sorts of the same series: ~16.8 ms of a 22.8 ms reduction, paid once per `optimize` row per fold. |
+
+### Things that were tried and did **not** work
+
+Recorded so they are not re-attempted:
+
+* **Composing Python sources with `runtime::chain_sync` instead of re-wrapping.**
+  The theory was sound — chaining passes `DynValue` straight through instead of
+  converting in and out at each level. Measured, it made things *worse*
+  (18.2× → 25.0× vs TA-Lib): `Chain` stores and clones an 88-byte `DynValue`
+  every sample, which costs more than the conversions it removes. Reverted.
+* **Memoising multi-output sub-trees into a `Shared` handle** (`tests/perf_bench.rs`).
+  ~3%, inside the noise.
+* **`E[X²] − E[X]²` for variance.** See the `stddev` section — 3.97× faster and
+  wrong by 6000% at high price scale.
+
+### How to measure without fooling yourself
+
+Four traps, each of which produced a wrong answer in this codebase before it
+was caught:
+
+1. **`maturin develop` builds *debug*.** It is 7–10× slower than release and
+   amplifies unrelated changes. One pass of Python numbers taken on debug
+   wheels showed a 33% "regression" that did not exist. Use
+   `maturin develop --release`, or `maturin build --release` + install — and
+   note `scripts/ci-local.sh` silently reinstalls a **debug** wheel over it.
+2. **`pip install --force-reinstall` serves a cached wheel** of the same
+   filename. Add `--no-cache-dir` or you will benchmark the previous build.
+3. **Wall-clock cannot separate "more work" from "unluckier code layout".** A
+   benchmark here clocked +23.8% while executing 1.61% *fewer* instructions.
+   Below ~25%, or when a delta moves between runs, use
+   `scripts/perf-compare.sh icount` (callgrind), which is immune to both
+   contention and layout.
+4. **`ls target/release/deps/x-* | head -1` sorts by hash, not time.** It will
+   hand you a stale binary. `scripts/perf-compare.sh` deletes bench binaries
+   before each variant build and fails if more than one matches.
 
 ## Known costs, and why they are there
 

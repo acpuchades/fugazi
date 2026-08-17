@@ -374,20 +374,19 @@ pub(crate) fn build_floats(
     kind: &OutputKind,
     values: Vec<Option<f64>>,
 ) -> PyResult<Py<PyAny>> {
-    let nums: Vec<f64> = values.iter().map(|v| v.unwrap_or(f64::NAN)).collect();
     match kind {
         OutputKind::Pandas(index) => {
             let series = py.import("pandas")?.getattr("Series")?;
             let kwargs = PyDict::new(py);
             kwargs.set_item("index", index.bind(py))?;
-            let data = ndarray_from_f64(py, &nums)?;
+            let data = ndarray_from_values(py, &values)?;
             Ok(series.call((data,), Some(&kwargs))?.unbind())
         }
         OutputKind::Polars => {
-            let data = ndarray_from_f64(py, &nums)?;
+            let data = ndarray_from_values(py, &values)?;
             Ok(py.import("polars")?.getattr("Series")?.call1((data,))?.unbind())
         }
-        OutputKind::Numpy => match ndarray_from_f64(py, &nums) {
+        OutputKind::Numpy => match ndarray_from_values(py, &values) {
             Ok(arr) => Ok(arr.unbind()),
             // No NumPy: fall back to a plain list, which preserves the
             // warm-up `None`s rather than flattening them to `NaN`.
@@ -396,29 +395,40 @@ pub(crate) fn build_floats(
     }
 }
 
-/// Wrap `xs` as a 1-D `float64` NumPy array in **one memcpy**.
+/// Build a 1-D `float64` NumPy array of `values`, warm-up `None`s as `NaN`,
+/// writing **straight into NumPy's own buffer**.
 ///
-/// The obvious spelling, `np.asarray(vec_of_f64)`, goes through pyo3's
-/// `Vec<f64> -> list` conversion: it materialises one Python `float` object per
-/// element and NumPy then copies out of that list. On a 200 000-sample series
-/// that alone cost ~48 ns per element — more than the entire indicator
-/// computation it was reporting (see `tools/bench_three_tier.py`).
+/// Three earlier spellings, each worse:
 ///
-/// Instead the bytes are handed over as a `bytearray` and `np.frombuffer`
-/// reinterprets them. `bytearray` rather than `bytes` so the result is
-/// writable, which is what a caller expects from an array they were given.
-fn ndarray_from_f64<'py>(py: Python<'py>, xs: &[f64]) -> PyResult<Bound<'py, PyAny>> {
+/// * `np.asarray(vec_of_f64)` — goes through pyo3's `Vec<f64> -> list`, so a
+///   Python `float` object per element for NumPy to copy back out.
+/// * `np.frombuffer(bytearray)` — one `memcpy` into a `bytearray` and a
+///   zero-copy wrap, but still an intermediate `Vec<f64>` (to flatten the
+///   `Option`s) plus a `bytearray` allocation: three passes over the data and
+///   two large allocations. Measured at 19.3 ns/sample.
+/// * this — `np.empty` once, then fill its buffer in a single pass.
+///
+/// The `Option` flattening happens *during* that pass rather than into a
+/// temporary, so the data is touched once.
+fn ndarray_from_values<'py>(
+    py: Python<'py>,
+    values: &[Option<f64>],
+) -> PyResult<Bound<'py, PyAny>> {
     let np = py.import("numpy")?;
-    // SAFETY: `f64` is `Copy`, has no padding and no invalid bit patterns, so
-    // any `[f64]` is a valid `[u8]` of 8x the length. The slice is only read,
-    // and `PyByteArray::new` copies out of it before this returns.
-    let bytes = unsafe {
-        std::slice::from_raw_parts(xs.as_ptr() as *const u8, std::mem::size_of_val(xs))
-    };
-    let buf = pyo3::types::PyByteArray::new(py, bytes);
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", np.getattr("float64")?)?;
-    np.getattr("frombuffer")?.call((buf,), Some(&kwargs))
+    let arr = np.getattr("empty")?.call((values.len(),), Some(&kwargs))?;
+
+    // `np.empty` hands back an owned, writable, C-contiguous `float64` array,
+    // so the buffer request cannot fail for shape reasons.
+    let buf = pyo3::buffer::PyBuffer::<f64>::get(&arr)?;
+    let slice = buf
+        .as_mut_slice(py)
+        .ok_or_else(|| PyTypeError::new_err("numpy array is not writable"))?;
+    for (cell, v) in slice.iter().zip(values) {
+        cell.set(v.unwrap_or(f64::NAN));
+    }
+    Ok(arr)
 }
 
 /// Build a boolean output series. Signals never warm up to a missing value.
@@ -1789,3 +1799,45 @@ pub(crate) fn str_ne(lhs: &PyStrSource, rhs: &Bound<'_, PyAny>) -> PyResult<PySi
     })
 }
 
+
+
+// ---------------------------------------------------------------------------
+// Diagnostic: which stage of `feed()` costs what
+// ---------------------------------------------------------------------------
+
+/// Run one stage of the `feed()` pipeline and return how many samples it
+/// touched. **A measurement hook, not API** — the leading underscore keeps it
+/// out of `dir(fugazi)`'s useful surface, and nothing in the library calls it.
+///
+/// `feed()` is three stages: read the Python input into a `Vec<f64>`, fold it
+/// through the (erased) indicator, and hand the result back as a NumPy array.
+/// Timing the whole thing says only that it is slow; timing each prefix says
+/// *which part*. Stages are cumulative:
+///
+/// * `0` — input conversion only
+/// * `1` — input + indicator
+/// * `2` — input + indicator + output (i.e. all of `feed`)
+#[pyfunction]
+pub(crate) fn _bench_feed_stage(
+    py: Python<'_>,
+    data: &Bound<'_, PyAny>,
+    stage: usize,
+    period: usize,
+) -> PyResult<usize> {
+    let xs = reals_from_series(data)?;
+    if stage == 0 {
+        return Ok(xs.len());
+    }
+    let mut ind = crate::carriers::Source::<Real>::new(
+        fugazi_core::indicators::Sma::new(fugazi_core::indicators::Identity::<Real>::new(), period),
+    );
+    let values: Vec<Option<Real>> = xs
+        .into_iter()
+        .map(|x| fugazi_core::Indicator::update(&mut ind, x))
+        .collect();
+    if stage == 1 {
+        return Ok(values.len());
+    }
+    let out = build_floats(py, &OutputKind::Numpy, values)?;
+    Ok(out.bind(py).len().unwrap_or(0))
+}
