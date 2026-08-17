@@ -1,26 +1,31 @@
 # Reference-library environment for fugazi's *tooling* — not for building the
 # crate or the wheel.
 #
-# Scope: the two fixture generators under `tools/` and the three-tier
-# benchmark. Nothing here is a dependency of `cargo build`, `cargo test`, or
+# Scope: the fixture generators under `tools/` and the three-tier benchmark.
+# Nothing here is a dependency of `cargo build`, `cargo test`, or
 # `maturin develop`; the Rust toolchain and the Python bindings' dev venv are
 # deliberately left alone (see the note at the bottom).
 #
 #   pixi run gen-talib      # tests/data/talib_expected.csv
 #   pixi run gen-metrics    # tests/data/metrics_expected.csv
-#   pixi run gen-returns    # tests/data/metrics_returns.csv  (rarely)
+#   pixi run gen-wallet     # tests/data/wallet_expected.csv
+#   pixi run gen-trades     # tests/data/trade_metrics_{fills,expected}.csv
+#   pixi run gen            # all four
+#   pixi run gen-returns    # tests/data/metrics_returns.csv   (rarely)
+#   pixi run gen-bars       # tests/data/wallet_bars.csv       (rarely)
 #   pixi run -e bench bench # tools/bench_three_tier.py
 #
-# Why this exists at all: both generators write CSVs that are **committed** and
-# then compared to 1e-9 by `tests/metrics_validation.rs`. The environment that
+# Why this exists at all: every generator writes CSVs that are **committed** and
+# then compared to 1e-9 by the cross-validation suites. The environment that
 # produces them is therefore part of the reference, and `pixi.lock` pins it to
 # exact package hashes. Its predecessor (`tools/environment.yml`) named four
 # unpinned packages, so a regeneration six months later could move existing
 # values with no way to distinguish that drift from the change you meant to
 # make.
 #
-# conda-forge rather than nixpkgs or pip: it is the one channel that ships all
-# three of the TA-Lib C library, its Python wrapper, and `empyrical` prebuilt.
+# conda-forge rather than nixpkgs or pip: it is the one channel that ships the
+# TA-Lib C library, its Python wrapper, `empyrical` and `vectorbt` all prebuilt.
+# Only `backtesting` is missing there, so it alone comes from PyPI (below).
 
 [workspace]
 name = "fugazi-tooling"
@@ -28,12 +33,29 @@ description = "Reference libraries for fugazi's fixture generators and benchmark
 channels = ["conda-forge"]
 platforms = ["linux-64", "osx-64", "osx-arm64"]
 
-# The reference libraries themselves. Kept at the same four names
-# `tools/environment.yml` used; `pixi.lock` supplies the pinning it lacked.
+# The reference libraries themselves. `pixi.lock` supplies the pinning that
+# `tools/environment.yml` lacked. Each covers a different layer of the crate,
+# and no one of them covers two:
+#
+#   ta-lib      indicators          → tests/talib_validation.rs
+#   empyrical   equity-curve maths  → tests/metrics_validation.rs
+#   vectorbt    the wallet          → tests/wallet_validation.rs
+#   backtesting trade-level maths   → tests/trade_metrics_validation.rs
+#
+# `tests/metrics_coverage.rs` asserts that every field of `metrics::Metrics` is
+# covered by one of these or carries a written exemption, so a new metric cannot
+# quietly arrive with no external reference.
+#
 [dependencies]
 python = ">=3.10"
 ta-lib = "*"      # C library + Python wrapper, together
 empyrical = "*"   # unmaintained since 2020 — the lock is what keeps it working
+
+# vectorbt validates `PaperWallet`, not metrics: `Portfolio.from_orders` takes
+# explicit per-bar size/price/fee arrays and has *no* decision layer of its own,
+# so the fugazi order schedule can be replayed into it exactly rather than
+# approximated by a strategy that happens to trade similarly.
+vectorbt = "*"
 
 # NumPy 2 removed the `np.NINF` alias, which `empyrical.downside_risk` still
 # calls (stats.py:875). So an unconstrained solve resolves fine and then dies at
@@ -48,11 +70,31 @@ empyrical = "*"   # unmaintained since 2020 — the lock is what keeps it workin
 # bindings' dev venv tracks current numpy separately.
 numpy = "<2"
 
+# backtesting.py is the one reference here that conda-forge does not ship, so it
+# comes from PyPI. It is the only library of the four that reports *trade-level*
+# statistics (win rate, profit factor, payoff, Kelly, exposure, durations) from a
+# fill blotter, which is the half of `metrics.rs` empyrical cannot reach.
+#
+# It resolves against numpy < 2 without complaint — checked, not assumed. If a
+# future bump makes it demand numpy >= 2, it moves to its own `[feature]` rather
+# than the pin being relaxed: empyrical is the constraint holder and it is
+# unmaintained, so it can never follow.
+[pypi-dependencies]
+backtesting = "*"
+
 [tasks]
 gen-talib = { cmd = "python3 tools/gen_talib_fixtures.py", description = "Regenerate tests/data/talib_expected.csv" }
 gen-metrics = { cmd = "python3 tools/gen_metrics_fixtures.py", description = "Regenerate tests/data/metrics_expected.csv" }
+gen-wallet = { cmd = "python3 tools/gen_wallet_fixtures.py", description = "Regenerate tests/data/wallet_expected.csv" }
+gen-trades = { cmd = "python3 tools/gen_trade_metrics_fixtures.py", description = "Regenerate tests/data/trade_metrics_{fills,expected}.csv" }
 gen-returns = { cmd = "python3 tools/gen_metrics_returns.py", description = "Regenerate the metrics input fixture (rarely — see tests/data/README.md)" }
-gen = { depends-on = ["gen-talib", "gen-metrics"], description = "Regenerate both committed reference fixtures" }
+gen-bars = { cmd = "python3 tools/gen_wallet_bars.py", description = "Regenerate the wallet input fixture (rarely — see tests/data/README.md)" }
+gen = { depends-on = [
+  "gen-talib",
+  "gen-metrics",
+  "gen-wallet",
+  "gen-trades",
+], description = "Regenerate every committed reference fixture" }
 
 # `bench` is a separate environment because it needs one interpreter holding
 # **both** `talib` and the locally built `fugazi` wheel — that is the whole

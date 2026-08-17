@@ -3,11 +3,12 @@
 //!
 //! # The skip-vs-fail policy
 //!
-//! Two cross-validation suites (`talib_validation.rs`, `metrics_validation.rs`)
-//! compare fugazi against an external reference library. Neither library is a
-//! Cargo dependency, so the fixtures they consume are produced once by
+//! Four cross-validation suites (`talib_validation.rs`, `metrics_validation.rs`,
+//! `wallet_validation.rs`, `trade_metrics_validation.rs`) compare fugazi against
+//! an external reference library. None of those libraries is a Cargo
+//! dependency, so the fixtures they consume are produced once by
 //! `tools/gen_*.py` and committed. When a fixture is absent the suite **skips**,
-//! so `cargo test` stays green for a contributor who has neither library
+//! so `cargo test` stays green for a contributor who has none of them
 //! installed.
 //!
 //! That is a reasonable default and a terrible guarantee: a skip is
@@ -21,6 +22,11 @@
 //! job that *does* provision the reference libraries should run in, and the way
 //! to prove locally that a suite is really comparing rather than returning
 //! early. [`require_fixtures`] reads the switch; [`skip`] honours it.
+//!
+//! One hole the switch does not cover: it fires on a fixture that went
+//! *missing*, not on a metric that was never written into one. That is
+//! `tests/metrics_coverage.rs`'s job — it reads these fixtures for their key
+//! sets alone, so it needs no reference library and deliberately never skips.
 
 use std::path::PathBuf;
 
@@ -122,6 +128,17 @@ impl Csv {
             .unwrap_or_else(|| {
                 panic!("no column `{column}`; have {:?}", self.headers)
             })
+    }
+
+    /// A column read verbatim, without parsing.
+    ///
+    /// For the `(metric, expected)` fixtures, whose key column is the metric's
+    /// dotted path rather than a number. Pair it with [`floats`](Self::floats)
+    /// on the value column.
+    #[track_caller]
+    pub fn strings(&self, column: &str) -> Vec<String> {
+        let idx = self.index_of(column);
+        self.rows.iter().map(|row| row[idx].clone()).collect()
     }
 
     /// A fully-populated numeric column.

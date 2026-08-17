@@ -24,7 +24,8 @@ places belongs in the narrower one.
 | **Unit** | `#[cfg(test)] mod tests` beside the code | `pub(crate)` internals | `cargo test --lib` |
 | **Integration** | `tests/*.rs`, one crate per file | the public API only | `cargo test` |
 | **End-to-end** | `tests/{run,costs,optimize,overlap,examples_validate}.rs` | the `fugazi` binary via `Command` | `cargo test` (needs the `cli` feature) |
-| **Cross-validation** | `tests/{talib,metrics}_validation.rs` | an external reference library's numbers | `cargo test` (both fixtures committed; skips only if one is removed) |
+| **Cross-validation** | `tests/{talib,metrics,wallet,trade_metrics}_validation.rs` | an external reference library's numbers | `cargo test` (every fixture committed; skips only if one is removed) |
+| **Coverage guard** | `tests/metrics_coverage.rs` | which metrics have a reference at all | `cargo test` (reads key sets only — never skips) |
 | **Performance guards** | `tests/perf_guard.rs` | allocation counts and type widths | `cargo test` |
 
 Plus **doctests** (37 of them, mostly in `README.md` and the strategy-shape
@@ -78,11 +79,42 @@ where a failure names the function rather than the subcommand.
 
 ### Cross-validation
 
-fugazi's numbers against an independent implementation's — TA-Lib for
-indicators, empyrical for metrics. These pin *conventions* (which seed, which
-divisor, which quantile rule), which is the one thing a self-consistent test
-can never catch. See [the fixture policy](#fixtures-and-the-skip-vs-fail-policy);
-they are also the two suites that can silently disable themselves.
+fugazi's numbers against an independent implementation's. These pin
+*conventions* (which seed, which divisor, which quantile rule, which bar a fill
+lands on), which is the one thing a self-consistent test can never catch. One
+suite per layer, because no reference library spans two:
+
+| Suite | Layer | Reference |
+|---|---|---|
+| `talib_validation.rs` | indicators | TA-Lib |
+| `metrics_validation.rs` | equity-curve metrics | empyrical |
+| `wallet_validation.rs` | `PaperWallet` execution | vectorbt |
+| `trade_metrics_validation.rs` | trade-level metrics | backtesting.py |
+
+`wallet_validation.rs` is the one that reaches below the equity curve: it
+replays a fixed order schedule and compares cash, position and equity bar by
+bar, which is what pins the **fill-timing rule** (queue at bar N, fill at bar
+N+1's open — the difference between a backtest and a lookahead). The other three
+all start from numbers a fill already produced.
+
+Two things a cross-check cannot do, and the guards for each:
+
+- **Disable itself.** All four skip when their fixture is missing — see
+  [the fixture policy](#fixtures-and-the-skip-vs-fail-policy) and
+  `FUGAZI_REQUIRE_FIXTURES=1`.
+- **Notice what it never covered.** A new metric with no reference value is not
+  a stale fixture; nothing above goes red for it. `tests/metrics_coverage.rs`
+  walks `metrics::flatten` and demands every field carry either a reference
+  value or a written exemption naming what does cover it. It reads fixtures for
+  their key sets only, so it needs no reference library and cannot skip.
+
+**Where the two disagree, say so in the generator.** backtesting.py's
+`Profit Factor`, `Avg. Trade [%]`, `Exposure Time [%]` and two duration fields
+each answer a different question from the fugazi field sharing their name. Those
+divergences are documented and *asserted* in
+`tools/gen_trade_metrics_fixtures.py`, so a future version quietly changing
+convention fails the generator rather than silently re-baselining the fixture.
+A cross-check whose disagreements are undocumented decays into a golden master.
 
 ---
 
@@ -98,7 +130,8 @@ they are also the two suites that can silently disable themselves.
 | `backtest::run` / `backtest::warm_up` | `tests/driver_contract.rs` |
 | Run resuming (`save_state`/`restore_state`, `RunState`, `--flatten`) | `tests/resume.rs` — chunked-resume-vs-one-shot for **every** shape, at three or more chunks — **and** `python/tests/test_specs.py`, which drives the same property through the bindings |
 | Wallet order flow | unit tests in `src/wallet.rs`; live venues in `tests/live_<venue>.rs` against `wiremock` |
-| A metric | a unit test in `src/metrics.rs`, plus the generator + fixture if it's cross-checkable |
+| `PaperWallet` fill pricing, cash or cost arithmetic | `tests/wallet_validation.rs` — extend the schedule in `tools/gen_wallet_bars.py` or add a cost configuration, then `pixi run gen-wallet` |
+| A metric | a unit test in `src/metrics.rs`, **plus** a reference value in one of the two `(metric, expected)` generators — `tests/metrics_coverage.rs` fails until it has one or an exemption |
 | A CLI flag | `tests/run.rs`, `tests/costs.rs` or `tests/optimize.rs` via `common::cli::Cmd` |
 | A diagnostic one subcommand prints | the file named for that command; one spanning several (like the snapshot-overlap warning) gets a feature-named file — `tests/overlap.rs`, as `tests/costs.rs` already does for `--costs` |
 | An `examples/` file | nothing — `tests/examples_compile.rs` (Rust) and `tests/examples_validate.rs` (YAML) cover the directory, and each refuses to let a new file in uncovered |

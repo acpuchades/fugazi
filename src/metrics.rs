@@ -771,17 +771,24 @@ pub fn max_drawdown(segments: &[DrawdownSegment]) -> Real {
         .fold(0.0, |a, b| if b > a { b } else { a })
 }
 
-/// Peak-to-trough duration of the **deepest** drawdown segment (not the longest
-/// duration overall). `0` on empty input.
+/// The **longest** time spent below a prior peak, in bars — the worst recovery
+/// wait, independent of how deep the drawdown that caused it was. `0` on empty
+/// input.
+///
+/// Reads each segment's `underwater_bars` (peak → recovery), not its
+/// `duration_bars` (peak → trough): a drawdown is not over when it stops
+/// falling, it is over when the curve gets back to where it started. The two
+/// coincide only for a drawdown that never recovers.
+///
+/// Deepest-and-longest are different drawdowns in general, and this is the
+/// longest. A shallow drift that takes 200 bars to work off is the one that
+/// exhausts an allocator's patience; a sharp 30% dip recovered in 5 bars is
+/// not, and `drawdown.max` already reports that one's severity.
 pub fn max_drawdown_duration(segments: &[DrawdownSegment]) -> usize {
     segments
         .iter()
-        .max_by(|a, b| {
-            a.depth_ratio
-                .partial_cmp(&b.depth_ratio)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .map(|s| s.duration_bars)
+        .map(|s| s.underwater_bars)
+        .max()
         .unwrap_or(0)
 }
 
@@ -795,13 +802,22 @@ pub fn average_drawdown(segments: &[DrawdownSegment]) -> Option<Real> {
     }
 }
 
-/// Mean peak-to-trough duration across all segments; `None` for empty input.
+/// Mean time spent below a prior peak, in bars, across all segments; `None` for
+/// empty input.
+///
+/// Reads `underwater_bars` (peak → recovery), matching
+/// [`max_drawdown_duration`]. The two are siblings in `drawdown.*` and must
+/// measure the same span, or `avg_duration_bars > max_duration_bars` becomes
+/// reachable on ordinary input and neither number means what its name says.
 pub fn average_drawdown_duration(segments: &[DrawdownSegment]) -> Option<Real> {
     if segments.is_empty() {
         None
     } else {
         Some(
-            segments.iter().map(|s| s.duration_bars as Real).sum::<Real>()
+            segments
+                .iter()
+                .map(|s| s.underwater_bars as Real)
+                .sum::<Real>()
                 / segments.len() as Real,
         )
     }
@@ -1233,7 +1249,11 @@ mod tests {
         assert_eq!(segs[1].underwater_bars, 1); // bar 6
 
         assert!((max_drawdown(&segs) - (110.0 - 90.0) / 110.0).abs() < 1e-9);
-        assert_eq!(max_drawdown_duration(&segs), 2);
+        // The longest *recovery*, not the deepest drop's fall: segment 0 spends
+        // bars 2, 3 and 4 below its peak, segment 1 only bar 6. Peak-to-trough
+        // for segment 0 is 2 bars, so this deliberately reads 3 rather than 2 —
+        // a drawdown ends when the curve recovers, not when it stops falling.
+        assert_eq!(max_drawdown_duration(&segs), 3);
         let avg = average_drawdown(&segs).unwrap();
         let expected = ((110.0 - 90.0) / 110.0 + (120.0 - 100.0) / 120.0) / 2.0;
         assert!((avg - expected).abs() < 1e-9);

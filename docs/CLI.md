@@ -1599,9 +1599,9 @@ Non-metric inputs echoed at the top of the file.
 | Field | Meaning |
 | --- | --- |
 | `max` / `max_pct` | Worst peak-to-trough drop (fractional / percent). |
-| `max_duration_bars` | Bars from the peak to that trough. |
+| `max_duration_bars` | Longest stretch below a prior peak (peak→recovery), whichever drawdown that was — not necessarily the deepest one's. |
 | `avg` / `avg_pct` | Mean drawdown depth across all segments. |
-| `avg_duration_bars` | Mean peak-to-trough bars. |
+| `avg_duration_bars` | Mean bars below a prior peak (peak→recovery), matching `max_duration_bars`. |
 | `count` | Segment count. |
 | `time_in_drawdown_pct` | Percentage of bars the curve was below a prior peak. |
 | `recovery_factor` | `total_return / max_drawdown`. |

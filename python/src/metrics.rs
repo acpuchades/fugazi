@@ -490,8 +490,9 @@ pub(crate) fn max_drawdown(segments: Vec<PyDrawdownSegment>) -> Real {
     core_metrics::max_drawdown(&native)
 }
 
-/// Peak-to-trough duration of the **deepest** drawdown segment (not the
-/// longest duration overall). `0` on empty input.
+/// The **longest** time spent below a prior peak, in bars — the worst recovery
+/// wait, independent of the depth of the drawdown that caused it. `0` on empty
+/// input.
 #[pyfunction]
 pub(crate) fn max_drawdown_duration(segments: Vec<PyDrawdownSegment>) -> usize {
     let native: Vec<DrawdownSegment> = segments.iter().map(|s| s.inner).collect();
@@ -505,7 +506,9 @@ pub(crate) fn average_drawdown(segments: Vec<PyDrawdownSegment>) -> Option<Real>
     core_metrics::average_drawdown(&native)
 }
 
-/// Mean peak-to-trough duration across all segments; `None` on empty input.
+/// Mean time spent below a prior peak, in bars, across all segments; `None` on
+/// empty input. Measures peak → recovery, matching `max_drawdown_duration` —
+/// not peak → trough.
 #[pyfunction]
 pub(crate) fn average_drawdown_duration(segments: Vec<PyDrawdownSegment>) -> Option<Real> {
     let native: Vec<DrawdownSegment> = segments.iter().map(|s| s.inner).collect();

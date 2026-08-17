@@ -106,9 +106,9 @@ Computed from `drawdown_segments(equity)` — one segment per drop
 | Column | Meaning | Notes |
 |---|---|---|
 | `drawdown.max` / `max_pct` | Deepest single drawdown. | Always defined. |
-| `drawdown.max_duration_bars` | Peak-to-trough duration of the deepest drop. | Always defined. |
+| `drawdown.max_duration_bars` | Longest stretch below a prior peak — the worst recovery wait. | Always defined. Independent of depth: not necessarily the deepest drawdown's, and measured peak→recovery, not peak→trough. |
 | `drawdown.avg` / `avg_pct` | Mean depth across all segments. | `None` for a monotone-non-decreasing equity curve. |
-| `drawdown.avg_duration_bars` | Mean peak-to-trough duration across segments. | `None` when there are no segments. |
+| `drawdown.avg_duration_bars` | Mean time below a prior peak across segments. | `None` when there are no segments. Peak→recovery, matching `max_duration_bars`. |
 | `drawdown.count` | Number of drawdown segments. | |
 | `drawdown.time_in_drawdown_pct` | Fraction of bars strictly below the running peak. | |
 | `drawdown.recovery_factor` | `total_return / max_drawdown`. | Non-annualized cousin of Calmar. `None` when max DD is zero. |

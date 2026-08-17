@@ -2149,7 +2149,9 @@ def test_drawdown_pipeline():
     assert len(segs) == 2
     assert isinstance(segs[0], metrics.DrawdownSegment)
     assert metrics.max_drawdown(segs) == pytest.approx((110.0 - 90.0) / 110.0)
-    assert metrics.max_drawdown_duration(segs) == 2
+    # Longest recovery, not the deepest drop's fall: segment 0 is underwater for
+    # bars 2, 3 and 4. Mirrors `drawdown_segments_cover_multiple_stretches`.
+    assert metrics.max_drawdown_duration(segs) == 3
     assert metrics.average_drawdown(segs) is not None
     assert metrics.time_in_drawdown_ratio(segs, 7) == pytest.approx(4.0 / 7.0)
     assert metrics.recovery_factor(equity, 100.0) is not None

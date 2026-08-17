@@ -193,6 +193,9 @@ pub struct RiskAdjustedSection {
 pub struct DrawdownSection {
     pub max: Real,
     pub max_pct: Real,
+    /// The longest stretch spent below a prior peak, in bars — the worst
+    /// recovery wait, independent of that drawdown's depth. Not necessarily the
+    /// deepest drawdown's, and not a peak-to-trough distance.
     pub max_duration_bars: usize,
     /// Mean drawdown depth across all segments; `None` for a monotonically
     /// non-decreasing equity curve.
@@ -200,8 +203,9 @@ pub struct DrawdownSection {
     pub avg: Option<Real>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_pct: Option<Real>,
-    /// Mean peak-to-trough bars across all segments; `None` when there are no
-    /// segments.
+    /// Mean bars spent below a prior peak across all segments; `None` when
+    /// there are no segments. Measures peak → recovery, matching
+    /// `max_duration_bars` — not peak → trough.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_duration_bars: Option<Real>,
     pub count: usize,

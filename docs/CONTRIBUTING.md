@@ -373,7 +373,15 @@ yourself wanting to, the difference probably belongs on `RunnableStrategy` or
    `Optional[float]`; `Real` to `float`.
    `hand_maintained_mirrors::every_rust_metric_is_bound_on_the_python_module`
    fails until the name is there.
-6. Document it in `docs/METRICS.md`.
+6. **Give it an external reference** *(test-enforced)*. Add a row to whichever
+   `(metric, expected)` generator fits — `tools/gen_metrics_fixtures.py`
+   (empyrical, equity-curve maths) or `tools/gen_trade_metrics_fixtures.py`
+   (backtesting.py, anything trade- or drawdown-shaped) — then `pixi run gen`
+   and commit the fixture. If no reference library has an opinion, add the field
+   to `EXEMPT` in `tests/metrics_coverage.rs` with the reason and the test that
+   does cover it. `metrics_coverage::every_metric_is_cross_validated_or_exempt`
+   fails until you have done one or the other.
+7. Document it in `docs/METRICS.md`.
 
 New numeric leaves on the `Metrics` document become `optimize --metrics` /
 `--best-by` selectors automatically. If the metric has a natural direction
@@ -551,21 +559,31 @@ When one of these fails, it is telling you something specific:
 | `warm_up_is_exact_for_*` | `warm_up_bars()` disagrees with when the first `Some` actually lands. |
 | `tests/indicator_reference.rs` | An indicator's numbers drifted from its own definition. Always runs. |
 | `tests/talib_validation.rs` | An indicator's numbers drifted from the TA-Lib reference. |
+| `tests/metrics_validation.rs` | An equity-curve metric drifted from the empyrical reference. |
+| `tests/wallet_validation.rs` | `PaperWallet`'s cash, position, equity or cost arithmetic drifted from the vectorbt reference — **including the bar a market order fills on**. |
+| `tests/trade_metrics_validation.rs` | A `trades.*` or drawdown-duration metric drifted from the backtesting.py reference. |
+| `tests/metrics_coverage.rs` | A metric exists with no reference value and no written exemption — or an exemption went stale. Never skips. |
 | `tests/driver_contract.rs` | `backtest::run`'s per-bar order or readiness gating changed. |
 | `tests/ci_mirror.rs` | `.github/workflows/ci.yml` gained (or changed) a step that `scripts/ci-local.sh` doesn't run — the local gate has fallen behind CI and would report green on a tree CI rejects. |
 
-**Two of these could disable themselves.** `talib_validation` and
-`metrics_validation` compare against an external library and *skip* when their
-generated fixture is absent — and a skip is indistinguishable from a pass.
-`talib_expected.csv` was in `.gitignore`, so for months the TA-Lib drift guard
-compared nothing on every clean checkout.
+**Four of these could disable themselves.** The cross-validation suites compare
+against an external library and *skip* when their generated fixture is absent —
+and a skip is indistinguishable from a pass. `talib_expected.csv` was in
+`.gitignore`, so for months the TA-Lib drift guard compared nothing on every
+clean checkout.
 
-Both fixtures are now committed, and **CI runs the test job with
+Every fixture is now committed, and **CI runs the test job with
 `FUGAZI_REQUIRE_FIXTURES=1`**, which turns a missing-or-stale fixture into a
 failure. If you add an indicator to `tools/gen_talib_fixtures.py`, regenerate
 (`pixi run gen-talib`) and commit the fixture or CI will tell you.
 `tests/indicator_reference.rs` is the unconditional battery underneath —
 hand-derived values, no fixture needed.
+
+That switch fires on a fixture that went *missing*, though, not on a metric that
+was never put in one — those are different failures. `tests/metrics_coverage.rs`
+is the second: it reads the fixtures for their key sets alone, so it needs no
+reference library, never skips, and fails when a field of `metrics::Metrics` has
+neither a reference value nor a written exemption.
 
 The generator environment is pinned by a committed `pixi.lock`, so regenerating
 without changing anything yields an empty `git diff` and any hunk you *do* see

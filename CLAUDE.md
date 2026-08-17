@@ -68,18 +68,33 @@ drift**, so adding a CI step means adding it to the script too.
 
 - Build: `cargo build`; Test: `cargo test`; Lint: `cargo clippy --all-targets` (keep
   clean); Docs: `cargo doc --open`
-- `FUGAZI_REQUIRE_FIXTURES=1 cargo test` — makes the two cross-validation suites
-  (`talib_validation`, `metrics_validation`) **fail** instead of skipping when their
-  generated fixture is missing or stale. Both fixtures are committed under
-  `tests/data/` (`.gitignore` carries an explicit note not to re-ignore
-  `talib_expected.csv`), and CI's Rust job sets this — so a stale fixture fails
-  rather than silently comparing nothing. See [docs/TESTING.md](docs/TESTING.md).
-- **Regenerating those fixtures: `pixi run gen-talib` / `gen-metrics`** (`pixi run gen`
-  for both). `pixi.toml` + the committed `pixi.lock` are the *tooling* env only — TA-Lib
-  and empyrical, used by nothing in `cargo build`/`cargo test`/CI. The lock is
+- `FUGAZI_REQUIRE_FIXTURES=1 cargo test` — makes the **four** cross-validation suites
+  **fail** instead of skipping when their generated fixture is missing or stale. One
+  per layer, because no reference library spans two: `talib_validation` (indicators /
+  TA-Lib), `metrics_validation` (equity-curve metrics / empyrical), `wallet_validation`
+  (`PaperWallet` execution / vectorbt), `trade_metrics_validation` (trade-level metrics /
+  backtesting.py). Every fixture is committed under `tests/data/` (`.gitignore` carries
+  an explicit note not to re-ignore `talib_expected.csv`), and CI's Rust job sets this —
+  so a stale fixture fails rather than silently comparing nothing.
+  **`tests/metrics_coverage.rs` covers the hole the switch cannot**: a *new metric* with
+  no reference value isn't a stale fixture, so nothing else goes red for it. That guard
+  walks `metrics::flatten` and demands a reference value or a written exemption; it reads
+  key sets only, needs no reference library, and never skips. See
+  [docs/TESTING.md](docs/TESTING.md).
+- **Regenerating: `pixi run gen`** (or `gen-talib` / `gen-metrics` / `gen-wallet` /
+  `gen-trades` individually; `gen-returns` and `gen-bars` rebuild the *inputs* and are
+  rare). `pixi.toml` + the committed `pixi.lock` are the *tooling* env only — the four
+  reference libraries, used by nothing in `cargo build`/`cargo test`/CI. The lock is
   load-bearing: it holds `numpy < 2` because empyrical calls the removed `np.NINF`, and
   it is what makes a regenerated fixture's `git diff` attributable to your change rather
   than to a BLAS kernel. `pixi run -e bench bench` for the three-tier benchmark.
+- **Where fugazi and a reference disagree, the divergence is asserted, not absorbed.**
+  Five of backtesting.py's headline stats answer a different question from the fugazi
+  field sharing their name (`Profit Factor` sums ReturnPct not PnL; `Avg. Trade [%]` is
+  geometric; `Exposure Time` counts entry *and* exit bar; two durations round or include
+  the recovery bar). `tools/gen_trade_metrics_fixtures.py` documents each and asserts the
+  relationship still holds, so a library that changes convention fails the generator
+  instead of quietly re-baselining the fixture.
 
 ### Bumping the version — sync **seven** places (`cargo check` only catches Rust drift)
 
