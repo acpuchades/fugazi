@@ -60,6 +60,54 @@ use crate::time::Timestamp;
 pub trait DynIndicator<In, Out>: Indicator<Input = In, Output = Out> + Send + Sync {
     /// Deep-clone behind the trait object.
     fn dyn_clone(&self) -> Box<dyn DynIndicator<In, Out>>;
+
+    /// Fold a **slice** of samples, writing one output per input.
+    ///
+    /// Semantically identical to calling [`update`](Indicator::update) once per
+    /// element, and the default body is exactly that. [`Erased`] overrides it
+    /// with a version that is materially faster, for a reason worth stating
+    /// because it is not the obvious one.
+    ///
+    /// # Why this exists
+    ///
+    /// Driving an erased chain one sample at a time costs ~21 instructions/sample
+    /// more than driving the same concrete indicator, and **that is not the
+    /// vtable** — an indirect call with a predictable target is about two
+    /// instructions. It is that the indicator's state lives behind the box, so
+    /// the compiler cannot prove it does not alias the caller's output buffer and
+    /// must reload and store every field on every sample. Held in a local, those
+    /// fields promote to registers for the whole loop.
+    ///
+    /// `Erased::update_slice` copies the concrete indicator into a local, runs
+    /// the loop, and writes it back once. Measured (`benches/icount.rs`,
+    /// `sma_scalar_*`, net of a control):
+    ///
+    /// | | instr/sample |
+    /// |---|---:|
+    /// | concrete indicator, no erasure at all | 16.00 |
+    /// | erased, this, whole slice | **16.04** |
+    /// | erased, this, 128-sample chunks | 20.56 |
+    /// | erased, one `update` per sample | 37.02 |
+    ///
+    /// Two shapes that do **not** work, both measured, so they are not retried:
+    /// batching without the local copy (37.02 — no change), and streaming the
+    /// samples through `&mut dyn FnMut` instead of a slice (46.03 — worse than
+    /// doing nothing, because a closure's captures are themselves behind a
+    /// pointer). The win requires a slice *and* the local copy together.
+    ///
+    /// # Contract
+    ///
+    /// `out` is written for `min(inputs.len(), out.len())` elements and the rest
+    /// is left alone. Warm-up is reported as `None`, exactly as `update` does.
+    /// A caller that needs per-sample state between samples must not use this.
+    fn update_slice(&mut self, inputs: &[In], out: &mut [Option<Out>])
+    where
+        In: Clone,
+    {
+        for (o, i) in out.iter_mut().zip(inputs) {
+            *o = self.update(i.clone());
+        }
+    }
 }
 
 /// Wraps a concrete [`Indicator`] so it can be held as a [`Chain`].
@@ -118,6 +166,20 @@ where
 {
     fn dyn_clone(&self) -> Box<dyn DynIndicator<In, Out>> {
         Box::new(self.clone())
+    }
+
+    /// The point of the whole method — see the trait. `local` is what lets the
+    /// indicator's state live in registers for the loop instead of round-tripping
+    /// through memory once per sample.
+    fn update_slice(&mut self, inputs: &[In], out: &mut [Option<Out>])
+    where
+        In: Clone,
+    {
+        let mut local = self.0.clone();
+        for (o, i) in out.iter_mut().zip(inputs) {
+            *o = local.update(i.clone());
+        }
+        self.0 = local;
     }
 }
 

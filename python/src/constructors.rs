@@ -232,6 +232,41 @@ impl Column {
         }
     }
 
+    /// Feed values to `f` a **slice at a time**, through the caller's scratch.
+    ///
+    /// The chunked twin of [`for_each`](Self::for_each), for
+    /// `DynIndicator::update_slice` — which is only faster than per-sample
+    /// updates when it is handed a contiguous slice (see that method). An owned
+    /// column already is one and is passed through with no copy; a borrowed one
+    /// is `ReadOnlyCell`s, so it is copied into `buf` a chunk at a time.
+    ///
+    /// A whole-column slice would avoid even that, but the candle path cannot
+    /// produce one without rebuilding the `Vec<Candle>` that streaming removed,
+    /// so both paths chunk and stay symmetrical. 128 samples is enough to
+    /// amortise the state write-back to ~0.04 instructions/sample.
+    #[inline]
+    pub(crate) fn for_each_chunk(&self, py: Python<'_>, buf: &mut [f64], mut f: impl FnMut(&[f64])) {
+        match self {
+            Column::Borrowed(b) => {
+                if let Some(cells) = b.as_slice(py) {
+                    for chunk in cells.chunks(buf.len()) {
+                        let into = &mut buf[..chunk.len()];
+                        for (dst, cell) in into.iter_mut().zip(chunk) {
+                            *dst = cell.get();
+                        }
+                        f(into);
+                    }
+                }
+            }
+            // Already contiguous `f64`: hand it straight over.
+            Column::Owned(v) => {
+                for chunk in v.chunks(buf.len()) {
+                    f(chunk);
+                }
+            }
+        }
+    }
+
     /// Feed every value to `f`, reading in place.
     #[inline]
     pub(crate) fn for_each(&self, py: Python<'_>, mut f: impl FnMut(f64)) {
@@ -412,6 +447,42 @@ impl CandleColumns {
                     f(Candle::new(o.get(i), h.get(i), l.get(i), c.get(i), 0.0));
                 }
             }
+        }
+    }
+
+    /// Assemble candles into `buf` a chunk at a time — the candle twin of
+    /// [`Column::for_each_chunk`], for `DynIndicator::update_slice`.
+    #[inline]
+    pub(crate) fn for_each_chunk<'py>(
+        &'py self,
+        py: Python<'py>,
+        buf: &mut [Candle],
+        mut f: impl FnMut(&[Candle]),
+    ) {
+        let c = Self::view(&self.close, py);
+        let open = self.open.as_ref().map(|x| Self::view(x, py));
+        let high = self.high.as_ref().map(|x| Self::view(x, py));
+        let low = self.low.as_ref().map(|x| Self::view(x, py));
+        let volume = self.volume.as_ref().map(|x| Self::view(x, py));
+        let o = open.as_ref().unwrap_or(&c);
+        let h = high.as_ref().unwrap_or(&c);
+        let l = low.as_ref().unwrap_or(&c);
+        let n = c.len();
+        let mut i = 0;
+        while i < n {
+            let take = buf.len().min(n - i);
+            for (k, slot) in buf[..take].iter_mut().enumerate() {
+                let j = i + k;
+                *slot = Candle::new(
+                    o.get(j),
+                    h.get(j),
+                    l.get(j),
+                    c.get(j),
+                    volume.as_ref().map_or(0.0, |v| v.get(j)),
+                );
+            }
+            f(&buf[..take]);
+            i += take;
         }
     }
 

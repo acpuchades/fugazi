@@ -41,6 +41,29 @@ use crate::spec::*;
 // it needs the *names* alongside the values, which no generic carrier carries.
 // ---------------------------------------------------------------------------
 
+/// How many samples `feed()` hands to `DynIndicator::update_slice` at once.
+///
+/// The slice form is worth ~21 instructions/sample over per-sample `update`
+/// (see that method), but only for a *contiguous* slice — and the candle path
+/// cannot produce a whole-frame one without rebuilding the `Vec<Candle>` that
+/// streaming removed. So it chunks through a stack buffer, which gives back 4.5
+/// of the 21 and keeps the 8 MB allocation gone.
+///
+/// 128 puts the per-chunk state write-back at ~0.04 instructions/sample while
+/// keeping the buffers small: 1 KB of `Real`, 5 KB of `Candle`. Raising it has
+/// nothing left to win and starts to matter on a thread with a small stack.
+pub(crate) const FOLD_CHUNK: usize = 128;
+
+/// A neutral bar for initialising a chunk buffer; every slot is overwritten
+/// before it is read.
+pub(crate) const ZERO_BAR: Candle = Candle {
+    open: 0.0,
+    high: 0.0,
+    low: 0.0,
+    close: 0.0,
+    volume: 0.0,
+};
+
 /// A boxed `I -> Real` indicator. Semantics match the library: `None` until
 /// warm, `Some(Real)` afterwards — no bool-signal-style flattening.
 pub(crate) type Source<I> = runtime::Chain<I, Real>;
@@ -634,10 +657,16 @@ impl AnySource {
             AnySource::Candle(s) => {
                 let cols = columns_from_frame(data)?;
                 numpy_filled(py, cols.len(py), |slice| {
+                    let mut buf = [ZERO_BAR; FOLD_CHUNK];
+                    let mut got = [None; FOLD_CHUNK];
                     let mut cells = slice.iter();
-                    cols.for_each(py, |c| {
-                        if let Some(cell) = cells.next() {
-                            cell.set(Indicator::update(s, c).unwrap_or(Real::NAN));
+                    cols.for_each_chunk(py, &mut buf, |chunk| {
+                        let got = &mut got[..chunk.len()];
+                        s.update_slice(chunk, got);
+                        for v in got.iter() {
+                            if let Some(cell) = cells.next() {
+                                cell.set(v.unwrap_or(Real::NAN));
+                            }
                         }
                     });
                 })
@@ -656,10 +685,16 @@ impl AnySource {
             AnySource::Real(s) => {
                 let xs = reals_from_series(data)?;
                 numpy_filled(py, xs.len(py), |slice| {
+                    let mut buf = [0.0; FOLD_CHUNK];
+                    let mut got = [None; FOLD_CHUNK];
                     let mut cells = slice.iter();
-                    xs.for_each(py, |x| {
-                        if let Some(cell) = cells.next() {
-                            cell.set(Indicator::update(s, x).unwrap_or(Real::NAN));
+                    xs.for_each_chunk(py, &mut buf, |chunk| {
+                        let got = &mut got[..chunk.len()];
+                        s.update_slice(chunk, got);
+                        for v in got.iter() {
+                            if let Some(cell) = cells.next() {
+                                cell.set(v.unwrap_or(Real::NAN));
+                            }
                         }
                     });
                 })
