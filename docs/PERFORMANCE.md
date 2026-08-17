@@ -654,7 +654,27 @@ the boundary type — and net of the control, over 20 000 bars:
 | `Chain<Candle, Real>` | **22.0** |
 | `Chain<Atom, Real>` + the per-bar lift | **126.0** |
 
-5.7× the work, so it is work and not layout. The reason is in `Atom`'s layout:
+5.7× the work, so it is work and not layout. `callgrind_annotate` puts 109 of
+those instructions inside `Atr::update` itself — the *callee* — not in the
+caller's construction, and a third workload (`chain_atom_direct`: same `Atom`
+input, but a leaf that keeps only the 40-byte `Candle`) splits it in two:
+
+| | instr/bar |
+|---|---:|
+| `Chain<Candle, _>` | 21.8 |
+| `Chain<Atom, _>`, Atom passed but not retained | 78.8 |
+| `Chain<Atom, _>` via `CurrentBar<Identity<Atom>>` — today | 125.8 |
+
+* **47 instr/bar is `Identity<Atom>`.** Its `update` is
+  `self.value = Some(input); self.value.clone()` — an 88-byte store *and* an
+  88-byte clone every bar, after which `CurrentBar` takes the 40-byte candle out
+  and drops the rest. `CurrentBar::new()` is `CurrentBar::of(Identity::new())`,
+  so every candle-rooted chain pays this.
+* **57 instr/bar is the by-value boundary.** `update(&mut self, input: Atom)`
+  moves 88 bytes into the vtable call and runs drop glue on the far side. This is
+  the same cost the `update(&Input)` breaking candidate would remove globally.
+
+The reason `Atom` is expensive to move at all is its layout:
 `overlays` is `Option<OverlayInfo>` **inlined**, not `Option<Arc<OverlayInfo>>`,
 and `OverlayInfo` holds two `Arc`s. So `Atom` is 88 bytes, `needs_drop` is
 `true`, and per bar the path builds the struct, memcpy's it into the vtable call

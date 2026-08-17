@@ -144,7 +144,7 @@ fn main() {
     let workload = std::env::args().nth(1).unwrap_or_else(|| {
         eprintln!(
             "usage: icount <sma_rust|sma_yaml|macd_rust|macd_yaml|tree8\
-             |atr_none|atr_atom|atr_candle|atr_manual_max|chain_candle|chain_atom>"
+             |atr_none|atr_atom|atr_candle|atr_manual_max|chain_candle|chain_atom|chain_atom_direct>"
         );
         std::process::exit(2);
     });
@@ -208,6 +208,39 @@ fn main() {
                 for c in &candles {
                     black_box(ind.update((*c).into()));
                 }
+            }
+            BARS
+        }
+        // Is the Atom cost the *boundary*, or `Identity<Atom>`'s store-and-clone
+        // inside it? This roots ATR on a leaf that reads `atom.candle` and keeps
+        // only the 40-byte Candle — same Atom input, no Atom retained.
+        "chain_atom_direct" => {
+            #[derive(Clone, Default)]
+            struct BarOf {
+                value: Option<fugazi::market::Candle>,
+            }
+            impl Indicator for BarOf {
+                type Input = fugazi::types::Atom;
+                type Output = fugazi::market::Candle;
+                fn update(&mut self, input: fugazi::types::Atom) -> Option<Self::Output> {
+                    self.value = input.candle;
+                    self.value
+                }
+                fn value(&self) -> Option<Self::Output> {
+                    self.value
+                }
+                fn warm_up_bars(&self) -> usize {
+                    1
+                }
+                fn reset(&mut self) {
+                    self.value = None;
+                }
+            }
+            let candles = common::synth_candles(BARS);
+            let mut ind: fugazi::runtime::Chain<fugazi::types::Atom, Real> =
+                fugazi::runtime::erase(fugazi::indicators::Atr::new(BarOf::default(), 14));
+            for c in &candles {
+                black_box(ind.update((*c).into()));
             }
             BARS
         }
