@@ -487,6 +487,80 @@ def test_signal_combinators_refuse_to_cross_domains():
             getattr(candle_sig, combine)(value_sig)
 
 
+# ---------------------------------------------------------------------------
+# Bar-only vs side-channel sources must stay combinable
+#
+# These pin behaviour that a planned optimisation could silently break, so they
+# are written to fail loudly rather than to describe the present implementation.
+#
+# Every candle-rooted source is currently fed a whole `Atom` — the bar plus its
+# side channels (`time`, `overlays`) — even though only the overlay readers
+# (`get*`) and the calendar leaves need those. The plan (docs/PERFORMANCE.md, P1)
+# is to carry the bar alone where that is all a chain reads, which splits today's
+# single candle domain in two.
+#
+# The hazard is *combination*. `close()` and `get_real(...)` are the same domain
+# today, so pairing them just works; afterwards they are different domains and
+# the bar-only side has to be lifted to the atom side rather than rejected.
+# Reject it and previously-valid user code starts raising — which is why these
+# assert on *values*, not merely that construction succeeds.
+#
+# That failure mode is not hypothetical: `test_operators_refuse_to_cross_domains`
+# below shows the rejection path is live today for a genuine clash
+# (`close()` against `identity()`). A split that forgot to lift would route these
+# pairings down that same path, and these tests would raise `TypeError`.
+# ---------------------------------------------------------------------------
+
+
+def _overlay_frame():
+    """Two bars carrying one Real overlay column, plus the schema for it."""
+    b = ta.SchemaBuilder()
+    b.add_real("adj")
+    schema = b.finish()
+    bars = [
+        ta.Atom(ta.Candle(10.0, 10.0, 10.0, 10.0, 1.0), ta.OverlayInfo(schema, [2.0])),
+        ta.Atom(ta.Candle(20.0, 20.0, 20.0, 20.0, 1.0), ta.OverlayInfo(schema, [5.0])),
+    ]
+    return schema, bars
+
+
+@pytest.mark.parametrize("op,want", [("add", [12.0, 25.0]), ("sub", [8.0, 15.0])])
+def test_bar_field_combines_with_overlay_column(op, want):
+    """`close() <op> get_real(adj)` — a bar-only source against a side-channel one."""
+    schema, bars = _overlay_frame()
+    combined = getattr(ta.close(), op)(ta.get_real(schema, "adj"))
+    got = [combined.update(bar) for bar in bars]
+    assert got == pytest.approx(want)
+
+
+def test_overlay_column_combines_with_bar_field_in_either_order():
+    """Order must not matter: the lift has to work from both operand positions."""
+    schema, bars = _overlay_frame()
+    left = ta.get_real(schema, "adj").add(ta.close())
+    right = ta.close().add(ta.get_real(schema, "adj"))
+    assert [left.update(b) for b in bars] == pytest.approx(
+        [right.update(b) for b in bars]
+    )
+
+
+def test_bar_field_compares_against_overlay_column():
+    """The signal side of the same pairing, which takes a different code path."""
+    schema, bars = _overlay_frame()
+    sig = ta.close().gt(ta.get_real(schema, "adj"))
+    assert [sig.update(b) for b in bars] == [True, True]
+
+
+def test_bar_field_combines_with_calendar_leaf():
+    """Calendar leaves read `atom.time`, so they stay on the side-channel side.
+
+    `close() + year()` is the tightest form of the hazard: the left operand needs
+    only the bar, the right needs a field of the atom that a bar cannot carry.
+    """
+    ts = 1_710_506_096_000  # 2024-03-15T14:34:56Z
+    bar = ta.Atom(ta.Candle(7.0, 7.0, 7.0, 7.0, 1.0), None, ts)
+    assert ta.close().add(ta.year()).update(bar) == pytest.approx(2031.0)
+
+
 def test_value_is_domain_neutral():
     """A constant adopts its partner's domain on either side; never clashes."""
     # right operand, both domains
