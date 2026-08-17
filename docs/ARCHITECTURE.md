@@ -625,9 +625,23 @@ shared handle, and serializing per-accessor would double-count.
 `Wallet::snapshot_state`/`restore_state` default to `Null` / accept-and-ignore, which
 is the right answer for a **live venue**: the broker owns the positions and the cash,
 so a local snapshot can only go stale and replaying one would overwrite reality with a
-guess. `PaperWallet` overrides both (positions/cash/pending/resting/blotter — **not**
+guess. `PaperWallet` overrides both (positions/cash/pending/resting — **not**
 costs, which are re-primed by the caller), because it *is* the book. Both carry
 `where Self: Sized` so `dyn Wallet<Sym>` stays object-safe for `Strategy::trade`.
+
+**The blotter and the rejection log are excluded, because history is not state.**
+Nothing in the fill, pricing or restore path reads either — `orders()`/`rejections()`
+are observability accessors, and `RunReport::fills` is built from `Wallet::update`'s
+return value, not from the blotter. Persisting them made the state grow linearly in
+bars forever: on a 1500-bar 8-symbol basket they were **98%** of the file (253 KB of
+258 KB), and dropping them took it to 10.6 KB and made it flat in run length. So a
+resumed wallet's `orders()` covers the resumed chunk — which is what the per-chunk
+`RunReport` always did. The keys were simply dropped from `WalletSnapshot`; serde
+ignores unknown fields, so an older state still resumes and `RUN_STATE_FORMAT_VERSION`
+stays at 2. The same reasoning bounds them *in memory*: they retain
+`wallet::DEFAULT_RETENTION` entries, with `PaperWallet::with_retention(None)` as the
+named opt-out, so a strategy driven live for years doesn't accumulate every fill it
+ever booked.
 
 **Driving.** `RunnableStrategy::{save_state, restore_state, drive_resumable}` +
 `RunState { format_version, kind, last_bar, bars_seen, strategy, wallet }`.

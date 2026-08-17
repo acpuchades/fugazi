@@ -282,7 +282,7 @@ WALLET_BOUND = {
     "set_limit", "cancel_limit", "cancel",
     "adjust_funds", "poll_fills", "set_costs_for",
     # Inherent PaperWallet extras, not trait methods.
-    "orders", "reset",
+    "orders", "reset", "retention",
 }
 
 WALLET_NOT_BOUND = {

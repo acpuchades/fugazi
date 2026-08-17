@@ -659,6 +659,37 @@ def test_wallet_set_position_is_absolute_and_books_funds():
     assert w.funds == pytest.approx(1_000.0 - 5.0 * 100.0)
 
 
+def test_wallet_blotter_retention_is_bounded_with_an_opt_out():
+    # The blotter is a reporting artifact, so it is bounded by default rather
+    # than growing forever in a long-lived run.
+    assert ta.PaperWallet(1_000.0).retention is not None
+
+    def churn(w, n):
+        # set_position takes a *target*, so the sign has to alternate for each
+        # call to book a fill.
+        w.update("AAPL", 100.0)
+        for i in range(n):
+            w.set_position("AAPL", 1.0 if i % 2 == 0 else -1.0)
+            w.update("AAPL", 100.0)
+
+    bounded = ta.PaperWallet(1_000_000.0)
+    bounded.retention = 4
+    churn(bounded, 40)
+    assert len(bounded.orders()) <= 8, "blotter grew past the trim threshold"
+    assert bounded.orders()[-1].units == pytest.approx(2.0), "newest fill must survive"
+
+    # None is the named opt-out: keep the whole in-process history.
+    unbounded = ta.PaperWallet(1_000_000.0)
+    unbounded.retention = None
+    assert unbounded.retention is None
+    churn(unbounded, 40)
+    assert len(unbounded.orders()) == 40
+
+    # Tightening the limit trims on the spot.
+    unbounded.retention = 0
+    assert unbounded.orders() == []
+
+
 def test_wallet_poll_fills_and_cancel():
     w = ta.PaperWallet(1_000.0)
     w.update("AAPL", 100.0)

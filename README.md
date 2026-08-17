@@ -337,8 +337,12 @@ for candle in feed {
     strat.update(Snapshot::of_atom(candle.into()));         // advance signals
     strat.trade(&mut wallet);                                // act
 }
-let _orders = wallet.orders();        // the trade blotter
+let _orders = wallet.orders();        // the trade blotter — recent fills, for reporting
 ```
+
+The blotter is an observability accessor, not a ledger: it keeps the last
+`wallet::DEFAULT_RETENTION` fills (opt out with `.with_retention(None)`) and is not
+carried across a run-resume, so keep your own store if you need durable trade history.
 
 ### You don't have to write one from scratch
 

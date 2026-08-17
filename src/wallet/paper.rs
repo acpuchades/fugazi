@@ -120,6 +120,19 @@ struct RestingLimit {
 /// prices them itself, filling at the level or — when the bar gaps past it — at
 /// the `open`. Use it for backtests and dry runs; a downstream `Wallet` impl
 /// handles live execution / bus publishing.
+/// How many blotter / rejection entries a [`PaperWallet`] keeps by default.
+///
+/// The two logs are **reporting artifacts**, not state: nothing in the fill,
+/// pricing or resume path reads them. Left unbounded they are a slow leak in
+/// exactly the deployment the resumable driver exists for — a strategy driven
+/// live for years records every fill it ever books and frees none of them.
+///
+/// 10k entries is far more than a report needs and costs on the order of a
+/// megabyte. A caller who genuinely wants the whole history says so with
+/// [`with_retention(None)`](PaperWallet::with_retention) — and a caller who
+/// needs it to survive a restart wants their own durable store, not this.
+pub const DEFAULT_RETENTION: usize = 10_000;
+
 #[derive(Debug)]
 pub struct PaperWallet<Sym> {
     positions: SymMap<Sym, Real>,
@@ -134,10 +147,14 @@ pub struct PaperWallet<Sym> {
     blotter: Vec<Order<Sym>>,
     rejections: Vec<Rejection<Sym>>,
     /// How many of `rejections` have already been yielded by
-    /// [`take_rejections`](Wallet::take_rejections). The vec is never truncated,
-    /// so [`rejections`](Self::rejections) keeps reporting the full run history
-    /// while the drain still yields each entry exactly once.
+    /// [`take_rejections`](Wallet::take_rejections), so the drain yields each
+    /// entry exactly once. Counted against the *current* head of the vec:
+    /// [`trim`](Self::trim) drops entries off the front once the log passes
+    /// `retention`, and shifts this cursor by the same amount.
     rejections_drained: usize,
+    /// How many blotter / rejection entries to keep, or `None` for every one
+    /// ever recorded. See [`with_retention`](Self::with_retention).
+    retention: Option<usize>,
     next_id: u64,
     costs: TradingCosts,
     per_symbol_costs: SymMap<Sym, TradingCosts>,
@@ -173,6 +190,7 @@ impl<Sym> PaperWallet<Sym> {
             blotter: Vec::new(),
             rejections: Vec::new(),
             rejections_drained: 0,
+            retention: Some(DEFAULT_RETENTION),
             next_id: 0,
             costs,
             per_symbol_costs: SymMap::default(),
@@ -192,7 +210,77 @@ impl<Sym> PaperWallet<Sym> {
         self
     }
 
-    /// Every order executed so far, in order (the trade blotter).
+    /// How many blotter / rejection entries to retain, or `None` to keep every
+    /// one ever recorded. Defaults to [`DEFAULT_RETENTION`].
+    ///
+    /// Both logs are reporting artifacts that no fill, pricing or resume path
+    /// reads, so the default bounds them rather than growing forever in a
+    /// long-lived run. `None` restores the unbounded behavior for a caller who
+    /// wants the full in-process history and knows the run is finite.
+    ///
+    /// Retention is *configuration*, like the cost models: it is not carried in
+    /// [`snapshot_state`](Self::snapshot_state), so a resumed wallet takes the
+    /// limit of the wallet the caller constructed.
+    pub fn with_retention(mut self, entries: Option<usize>) -> Self {
+        self.set_retention(entries);
+        self
+    }
+
+    /// [`with_retention`](Self::with_retention) on an existing wallet. Tightening
+    /// the limit trims on the spot rather than waiting for the next fill.
+    pub fn set_retention(&mut self, entries: Option<usize>) {
+        self.retention = entries;
+        self.trim();
+    }
+
+    /// How many blotter / rejection entries this wallet retains, or `None` if it
+    /// keeps every one.
+    pub fn retention(&self) -> Option<usize> {
+        self.retention
+    }
+
+    /// Drop the oldest blotter / rejection entries once either log has grown to
+    /// twice [`retention`](Self::with_retention), bringing it back down to the
+    /// limit.
+    ///
+    /// Trimming in batches at `2 × limit` rather than on every push keeps this
+    /// amortized O(1) — a `drain` from the front is O(n), so trimming one entry
+    /// per push past the limit would make a long run quadratic.
+    fn trim(&mut self) {
+        let Some(limit) = self.retention else {
+            return;
+        };
+        // A zero limit means "keep nothing", so it has no slack to amortize
+        // against; clear on the spot instead of waiting for `2 * 0`.
+        if limit == 0 {
+            self.blotter.clear();
+            self.rejections_drained = 0;
+            self.rejections.clear();
+            return;
+        }
+        if self.blotter.len() >= limit * 2 {
+            let excess = self.blotter.len() - limit;
+            self.blotter.drain(..excess);
+        }
+        if self.rejections.len() >= limit * 2 {
+            let excess = self.rejections.len() - limit;
+            self.rejections.drain(..excess);
+            // The drain cursor indexes the vec's head, which just moved. Any
+            // dropped entry that had not been drained yet is gone for good —
+            // inherent to a bounded log — but saturating here keeps every
+            // *surviving* undrained entry reachable rather than skipping past
+            // them.
+            self.rejections_drained = self.rejections_drained.saturating_sub(excess);
+        }
+    }
+
+    /// The most recent executed orders, oldest first (the trade blotter).
+    ///
+    /// Bounded by [`with_retention`](Self::with_retention) — by default the last
+    /// [`DEFAULT_RETENTION`] — and **not** carried across a
+    /// [`restore_state`](Self::restore_state), so after a resume this reports
+    /// the resumed chunk. It is an observability accessor; durable trade history
+    /// is the caller's to keep.
     pub fn orders(&self) -> &[Order<Sym>] {
         &self.blotter
     }
@@ -204,6 +292,8 @@ impl<Sym> PaperWallet<Sym> {
     /// or `InvalidPrice` on a zero-opening bar. Lets a driver report why a
     /// bar produced no fill instead of the silent drop the pre-fix wallet
     /// left callers with.
+    ///
+    /// Bounded and resume-scoped exactly like [`orders`](Self::orders).
     pub fn rejections(&self) -> &[Rejection<Sym>] {
         &self.rejections
     }
@@ -237,6 +327,23 @@ impl<Sym> PaperWallet<Sym> {
 /// Everything the wallet needs to continue a run except the cost models, which
 /// are configuration re-primed from the caller (the CLI's `--costs`, the
 /// strategy spec) rather than persisted — a venue owns its own fees.
+///
+/// **History is not state.** The blotter and the rejection log used to be
+/// persisted too, and they dominated the file: on a 1500-bar 8-symbol basket
+/// they were 98% of it (253 KB of 258 KB), growing without bound in the number
+/// of bars while everything else here stays bounded by the universe and the
+/// indicators' periods. Nothing reads them across the seam — no logic consults
+/// the blotter at all ([`orders`](PaperWallet::orders) is an observability
+/// accessor), the [`RunReport`](crate::RunReport)'s fills come from
+/// [`Wallet::update`]'s return value rather than from here, and
+/// [`take_rejections`](Wallet::take_rejections) only needs "everything so far
+/// has been drained", which an empty log with a zero cursor states exactly. So
+/// a resumed wallet starts both fresh, and `orders()` reports the resumed
+/// chunk — which is what the per-chunk `RunReport` already did.
+///
+/// Reading an older state that still carries those keys is unaffected: serde
+/// ignores unknown fields, so a pre-existing snapshot resumes identically and
+/// the format version does not move.
 #[derive(Serialize, Deserialize)]
 #[serde(bound(
     serialize = "Sym: Serialize + Eq + Hash",
@@ -254,17 +361,15 @@ struct WalletSnapshot<Sym> {
     limits: SymMap<Sym, RestingLimit>,
     funds: Real,
     initial_funds: Real,
-    blotter: Vec<Order<Sym>>,
-    rejections: Vec<Rejection<Sym>>,
-    rejections_drained: usize,
     next_id: u64,
 }
 
 impl<Sym: Clone + Eq + Hash + Serialize + DeserializeOwned> PaperWallet<Sym> {
     /// Serialize the wallet's resumable state — cash, positions, fed prices,
-    /// queued and resting orders, the blotter, and the id counter. The cost
-    /// models are deliberately excluded (see `WalletSnapshot`); a resumed run
-    /// re-primes them from the caller.
+    /// queued and resting orders, and the id counter. The cost models are
+    /// deliberately excluded (see `WalletSnapshot`); a resumed run re-primes
+    /// them from the caller. So are the blotter and the rejection log, which are
+    /// history rather than state — see `WalletSnapshot` for why.
     pub fn snapshot_state(&self) -> serde_json::Value {
         let snapshot = WalletSnapshot {
             positions: self.positions.clone(),
@@ -274,9 +379,6 @@ impl<Sym: Clone + Eq + Hash + Serialize + DeserializeOwned> PaperWallet<Sym> {
             limits: self.limits.clone(),
             funds: self.funds,
             initial_funds: self.initial_funds,
-            blotter: self.blotter.clone(),
-            rejections: self.rejections.clone(),
-            rejections_drained: self.rejections_drained,
             next_id: self.next_id,
         };
         serde_json::to_value(&snapshot).expect("WalletSnapshot is serializable")
@@ -285,6 +387,10 @@ impl<Sym: Clone + Eq + Hash + Serialize + DeserializeOwned> PaperWallet<Sym> {
     /// Restore state produced by [`snapshot_state`](Self::snapshot_state). Leaves
     /// the cost models untouched — they were set by the freshly-constructed
     /// wallet (via `--costs` / the spec) before this call.
+    ///
+    /// The blotter and rejection log are left as the fresh wallet has them —
+    /// empty, with the drain cursor at zero — so the resumed run reports its own
+    /// fills rather than replaying the previous chunk's.
     pub fn restore_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
         let snapshot: WalletSnapshot<Sym> =
             serde_json::from_value(state.clone()).map_err(|e| format!("wallet: {e}"))?;
@@ -295,9 +401,6 @@ impl<Sym: Clone + Eq + Hash + Serialize + DeserializeOwned> PaperWallet<Sym> {
         self.limits = snapshot.limits;
         self.funds = snapshot.funds;
         self.initial_funds = snapshot.initial_funds;
-        self.blotter = snapshot.blotter;
-        self.rejections = snapshot.rejections;
-        self.rejections_drained = snapshot.rejections_drained;
         self.next_id = snapshot.next_id;
         Ok(())
     }
@@ -440,6 +543,7 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
             self.protective.remove(&symbol);
         }
         self.blotter.push(order.clone());
+        self.trim();
         Ok(Some(order))
     }
 
@@ -553,13 +657,21 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
     /// submission, even though no order was ever queued.
     fn reject_submission(&mut self, symbol: &Sym, error: WalletError) -> WalletError {
         let id = self.mint();
+        self.push_rejection(symbol, id, error, OrderKind::Market);
+        error
+    }
+
+    /// Record one refused order on the rejection log, honoring the retention
+    /// bound. Every rejection goes through here so the trim can't be forgotten
+    /// at a new refusal site.
+    fn push_rejection(&mut self, symbol: &Sym, id: OrderId, error: WalletError, kind: OrderKind) {
         self.rejections.push(Rejection {
             symbol: symbol.clone(),
             id,
             error,
-            kind: OrderKind::Market,
+            kind,
         });
-        error
+        self.trim();
     }
 
     fn check_buy_affordability(&self, delta: Real, price: Real) -> Result<(), WalletError> {
@@ -646,12 +758,7 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         match self.fill_at(symbol.clone(), target, fill, OrderKind::Limit, resting.id) {
             Ok(order) => order,
             Err(error) => {
-                self.rejections.push(Rejection {
-                    symbol: symbol.clone(),
-                    id: resting.id,
-                    error,
-                    kind: OrderKind::Limit,
-                });
+                self.push_rejection(symbol, resting.id, error, OrderKind::Limit);
                 None
             }
         }
@@ -707,12 +814,7 @@ impl<Sym: Clone + Eq + Hash> PaperWallet<Sym> {
         match self.fill_at(symbol.clone(), target, fill, kind, leg.id) {
             Ok(order) => order,
             Err(error) => {
-                self.rejections.push(Rejection {
-                    symbol: symbol.clone(),
-                    id: leg.id,
-                    error,
-                    kind,
-                });
+                self.push_rejection(symbol, leg.id, error, kind);
                 None
             }
         }
@@ -835,12 +937,7 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
             match self.fill_at(symbol.clone(), target, candle.open, OrderKind::Market, id) {
                 Ok(Some(order)) => fills.push(order),
                 Ok(None) => {}
-                Err(error) => self.rejections.push(Rejection {
-                    symbol: symbol.clone(),
-                    id,
-                    error,
-                    kind: OrderKind::Market,
-                }),
+                Err(error) => self.push_rejection(&symbol, id, error, OrderKind::Market),
             }
         }
         if let Some(order) = self.match_protective(&symbol, &candle) {
@@ -2319,5 +2416,85 @@ mod tests {
         let through_tp = w.update("X", Candle::new(115.0, 125.0, 114.0, 121.0, 0.0));
         assert_eq!(through_tp.len(), 1, "take-profit leg should still fire");
         assert_fill(&through_tp[0], Side::Sell, 10.0, 120.0, OrderKind::TakeProfit);
+    }
+
+    // -- retention -------------------------------------------------------
+
+    /// Book `n` fills. `set` takes a *target* position, so the side has to
+    /// alternate — repeating one target is a no-op after the first fill.
+    fn churn(w: &mut PaperWallet<&'static str>, n: usize) {
+        w.update("X", bar(100.0)); // prime the price
+        for i in 0..n {
+            let side = if i % 2 == 0 { Side::Buy } else { Side::Sell };
+            w.set("X", side, Size::units(1.0)).unwrap();
+            w.update("X", bar(100.0));
+        }
+    }
+
+    /// The blotter is a reporting artifact, so it is bounded: a strategy driven
+    /// live for years must not accumulate every fill it ever booked.
+    #[test]
+    fn the_blotter_is_bounded_by_retention() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(1e12).with_retention(Some(4));
+        churn(&mut w, 50);
+        assert!(
+            w.orders().len() <= 8,
+            "blotter grew past the 2x trim threshold: {}",
+            w.orders().len()
+        );
+        // Trimming drops the *oldest*, so the newest fill is always retained.
+        let newest = w.orders().last().expect("a retained fill");
+        assert_eq!(newest.id.0, w.next_id - 1, "the newest fill must survive");
+    }
+
+    /// `None` is the named opt-out: the caller asked for the whole history and
+    /// gets it.
+    #[test]
+    fn retention_none_keeps_every_order() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(1e12).with_retention(None);
+        churn(&mut w, 50);
+        assert_eq!(w.orders().len(), 50, "opting out must retain everything");
+    }
+
+    /// Lowering the limit on an already-populated wallet trims it immediately,
+    /// rather than waiting for the next push.
+    #[test]
+    fn tightening_retention_trims_on_the_spot() {
+        let mut w: PaperWallet<&str> = PaperWallet::new(1e12).with_retention(None);
+        churn(&mut w, 50);
+        let w = w.with_retention(Some(0));
+        assert!(w.orders().is_empty(), "a zero limit keeps nothing");
+    }
+
+    /// Trimming the rejection log moves the drain cursor with it, so
+    /// `take_rejections` still yields each surviving entry exactly once instead
+    /// of mis-slicing past the new head.
+    #[test]
+    fn trimming_rejections_keeps_the_drain_cursor_aligned() {
+        // Buy far more than the wallet can afford, in units, so each submission
+        // is refused rather than shrunk to fit.
+        let mut w: PaperWallet<&str> = PaperWallet::new(100.0).with_retention(Some(3));
+        w.update("X", bar(100.0));
+        for _ in 0..20 {
+            let _ = w.set("X", Side::Buy, Size::units(1e6));
+            w.update("X", bar(100.0));
+        }
+        assert!(!w.rejections().is_empty(), "expected refused submissions");
+        assert!(
+            w.rejections().len() <= 6,
+            "rejection log grew past the trim threshold: {}",
+            w.rejections().len()
+        );
+
+        let drained = w.take_rejections();
+        assert_eq!(
+            drained.len(),
+            w.rejections().len(),
+            "a drain after trimming must yield every surviving entry"
+        );
+        assert!(
+            w.take_rejections().is_empty(),
+            "a second drain must yield nothing"
+        );
     }
 }

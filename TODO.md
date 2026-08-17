@@ -75,6 +75,36 @@ process-to-process handoffs — a deployment that cannot afford to replay months
 bars would justify a `v1 → v2` shim for the three shapes whose v1 blob *is*
 complete (single, pairs, and any portfolio that never traded).
 
+### The resume file drops the blotter and the rejection log
+
+A `RunState` carries state, not history. `PaperWallet`'s fill blotter and
+rejection log used to ride along in it and **dominated** the file — on a
+1500-bar 8-symbol basket, 253 KB of 258 KB (98%), growing linearly in bars while
+everything else stays bounded by the universe and the indicators' periods.
+Dropping them took that file to 10.6 KB and made it flat in run length.
+
+They were removed rather than trimmed because nothing reads them across the seam:
+no fill, pricing or restore path consults the blotter at all, `RunReport::fills`
+comes from `Wallet::update`'s return value, and `take_rejections` needs only
+"everything so far has been drained", which an empty log with a zero cursor
+states exactly. A resume file's job is resumption; a blotter in it does the
+caller's job badly, and anyone needing full history across restarts needs their
+own durable store. The visible consequence is that a resumed wallet's `orders()`
+covers the resumed chunk — already true of the per-chunk `RunReport`.
+
+No version bump: the keys were dropped from `WalletSnapshot` and serde ignores
+unknown fields, so a state written by an older build still resumes identically
+(pinned by `a_state_carrying_legacy_history_keys_still_resumes`).
+
+The same reasoning bounds both logs *in memory* at `wallet::DEFAULT_RETENTION`
+(10k entries), since a strategy driven live for years would otherwise never free
+a fill; `PaperWallet::with_retention(None)` is the named opt-out.
+
+What would change this: a caller with a real need for `orders()` to span a
+restart. The answer then is still their own store, not the resume file — unless
+the retention bound itself proves wrong for a legitimate workload, in which case
+the default is one constant.
+
 ### A live wallet's `RunState.wallet` is `Null`, not a snapshot
 
 `Wallet::snapshot_state` defaults to `Null` and `OkxWallet` / `CoinbaseWallet`

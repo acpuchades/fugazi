@@ -826,3 +826,154 @@ fn resuming_a_stale_format_version_is_rejected() {
         .expect_err("stale version must fail");
     assert!(err.contains("format version"), "unexpected error: {err}");
 }
+
+// ---------------------------------------------------------------------------
+// The resume file holds *state*, not history
+// ---------------------------------------------------------------------------
+//
+// A `RunState` exists to resume a run. Reporting history — the wallet's fill
+// blotter and its rejection log — is not state: nothing in the fill, pricing or
+// restore path reads either one, and `RunReport::fills` is built from
+// `Wallet::update`'s return value rather than from the blotter. Persisting them
+// anyway made the file grow linearly in bars forever; on a 1500-bar 8-symbol
+// basket they were 98% of it. These tests pin the three properties that keeps.
+
+/// The serialized size of a `RunState` must not scale with how long the run is.
+///
+/// This is the regression that would otherwise creep back silently: everything
+/// still *works* when history rides along in the state, it just costs more every
+/// bar. A 4x longer run over the same spec and universe warms the same chains
+/// into the same shape, so the state it saves must stay within a constant factor
+/// — while the fill count it discards grows with the bars.
+#[test]
+fn state_size_does_not_grow_with_run_length() {
+    let sch = schema();
+
+    let measure = |bars: usize| -> (usize, usize) {
+        let mut strat = single_ema_spec().build(CASH, &sch);
+        let (report, state) = strat
+            .drive_resumable(&single_snaps(bars), CASH, &[], None, false)
+            .expect("run");
+        let size = serde_json::to_string(&state).expect("serialize state").len();
+        (size, report.fills.len())
+    };
+
+    let (short_size, short_fills) = measure(100);
+    let (long_size, long_fills) = measure(400);
+
+    // The premise: the longer run really does book more fills, so a
+    // history-carrying state would have grown.
+    assert!(
+        long_fills > short_fills,
+        "test is vacuous unless the longer run trades more: {short_fills} -> {long_fills}"
+    );
+
+    assert!(
+        long_size < short_size * 2,
+        "state grew with run length: {short_size} bytes over 100 bars -> {long_size} over 400 \
+         ({short_fills} -> {long_fills} fills). The resume file is carrying history again."
+    );
+}
+
+/// A resumed wallet's blotter covers the resumed chunk, not the whole run.
+///
+/// `orders()` is an observability accessor, and this is the semantic that pins
+/// it: history does not survive a restore. It already matched `RunReport`, which
+/// has always been per-chunk.
+#[test]
+fn a_resumed_wallet_reports_only_its_own_fills() {
+    use fugazi::spec::RunnableStrategyExt;
+
+    let sch = schema();
+    // Long enough that each half clears the EMA(8) warm-up and trades — the
+    // assertions below are vacuous otherwise, so both halves are guarded.
+    let snaps = single_snaps(160);
+    let cut = 80;
+
+    let mut first = single_ema_spec().build(CASH, &sch);
+    let mut wallet = fugazi::PaperWallet::new(CASH);
+    let (first_report, state) = first
+        .drive_resumable_with(&snaps[..cut], &mut wallet, None, false)
+        .expect("first chunk");
+    assert_eq!(
+        wallet.orders().len(),
+        first_report.fills.len(),
+        "a cold wallet's blotter is its own fills"
+    );
+    assert!(
+        !first_report.fills.is_empty(),
+        "test is vacuous unless the first chunk trades"
+    );
+
+    let mut second = single_ema_spec().build(CASH, &sch);
+    let mut resumed = fugazi::PaperWallet::new(CASH);
+    let (second_report, _) = second
+        .drive_resumable_with(&snaps[cut..], &mut resumed, Some(&state), false)
+        .expect("resumed chunk");
+    assert!(
+        !second_report.fills.is_empty(),
+        "test is vacuous unless the resumed chunk trades"
+    );
+
+    assert_eq!(
+        resumed.orders().len(),
+        second_report.fills.len(),
+        "a resumed wallet's blotter is the resumed chunk's fills, not the run's"
+    );
+    assert!(
+        resumed.orders().len() < first_report.fills.len() + second_report.fills.len(),
+        "the resumed blotter must not carry the first chunk's fills forward"
+    );
+}
+
+/// A state written before history was dropped still resumes, unchanged.
+///
+/// `WalletSnapshot` simply stopped naming those keys, and serde ignores unknown
+/// fields — which is why `RUN_STATE_FORMAT_VERSION` did not have to move. This
+/// test is what makes that claim safe to rely on.
+#[test]
+fn a_state_carrying_legacy_history_keys_still_resumes() {
+    let sch = schema();
+    let snaps = single_snaps(60);
+
+    let mut cold = single_ema_spec().build(CASH, &sch);
+    let (_, mut state) = cold
+        .drive_resumable(&snaps[..30], CASH, &[], None, false)
+        .expect("first chunk");
+
+    // Re-attach the keys a pre-change build wrote.
+    let wallet = state.wallet.as_object_mut().expect("wallet object");
+    wallet.insert(
+        "blotter".into(),
+        serde_json::json!([{
+            "id": 0, "symbol": "X", "side": "Buy", "kind": "Market",
+            "units": 1.0, "price": 100.0, "commission": 0.0
+        }]),
+    );
+    wallet.insert("rejections".into(), serde_json::json!([]));
+    wallet.insert("rejections_drained".into(), serde_json::json!(0));
+
+    let mut legacy = single_ema_spec().build(CASH, &sch);
+    let (legacy_report, _) = legacy
+        .drive_resumable(&snaps[30..], CASH, &[], Some(&state), false)
+        .expect("a legacy state must still resume");
+
+    // And it resumes to the same place a current state does.
+    let mut current = single_ema_spec().build(CASH, &sch);
+    let (current_report, _) = current
+        .drive_resumable(&snaps[30..], CASH, &[], Some(&state.clone()), false)
+        .expect("current state");
+    assert_eq!(
+        legacy_report.equity_curve.len(),
+        current_report.equity_curve.len(),
+        "legacy state resumed to a different curve length"
+    );
+    for (i, (a, b)) in legacy_report
+        .equity_curve
+        .iter()
+        .zip(&current_report.equity_curve)
+        .enumerate()
+    {
+        assert_eq!(a.to_bits(), b.to_bits(), "legacy state diverged at bar {i}");
+    }
+}

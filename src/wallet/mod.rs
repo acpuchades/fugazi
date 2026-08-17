@@ -12,7 +12,7 @@ mod paper;
 mod sleeve;
 mod types;
 
-pub use paper::PaperWallet;
+pub use paper::{DEFAULT_RETENTION, PaperWallet};
 pub use sleeve::{SleeveWallet, external_baseline, own_equity};
 pub use types::{
     Ack, CASH_EPSILON, POSITION_EPSILON, PRICE_EPSILON, Order, OrderId, OrderKind, Reference,

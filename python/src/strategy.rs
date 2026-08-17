@@ -351,7 +351,28 @@ impl PyWallet {
         self.inner.quote_ccy()
     }
 
-    /// Every order executed so far (the trade blotter).
+    /// How many blotter / rejection entries this wallet keeps, or `None` if it
+    /// keeps every one.
+    ///
+    /// Both logs are reporting artifacts that nothing in the fill, pricing or
+    /// resume path reads, so they are bounded by default rather than growing
+    /// forever in a long-lived run. Set to `None` to opt out and retain the full
+    /// in-process history.
+    #[getter]
+    pub(crate) fn retention(&self) -> Option<usize> {
+        self.inner.retention()
+    }
+
+    #[setter]
+    pub(crate) fn set_retention(&mut self, entries: Option<usize>) {
+        self.inner.set_retention(entries);
+    }
+
+    /// The most recent executed orders, oldest first (the trade blotter).
+    ///
+    /// Bounded by `.retention`, and not carried across a run-resume — after
+    /// resuming, this reports the resumed chunk. It is for reporting; durable
+    /// trade history is the caller's to keep.
     pub(crate) fn orders(&self) -> Vec<PyOrder> {
         self.inner
             .orders()
