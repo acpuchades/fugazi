@@ -162,6 +162,35 @@ pub(crate) fn column_to_vec(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<
             "'{name}' must be a 1-D sequence of numbers (list, NumPy array, or pandas Series)"
         ))
     };
+
+    // Fast path: anything exposing a contiguous 1-D `f64` buffer — a NumPy
+    // `float64` array, an `array.array('d')`, a `memoryview` — is copied in one
+    // `memcpy`.
+    //
+    // The general path below walks the object with the Python iterator
+    // protocol, materialising one Python `float` per element. For a
+    // 200 000-sample array that is 200 000 object round-trips at ~155 ns each,
+    // against ~1-13 ns of actual indicator work: without this, `feed()` spends
+    // over 90% of its time at the boundary. Needing `PyBuffer` is why the wheel
+    // is `abi3-py311` (see `python/Cargo.toml`).
+    if let Ok(buf) = pyo3::buffer::PyBuffer::<f64>::get(obj)
+        && buf.dimensions() == 1
+        && buf.is_c_contiguous()
+    {
+        return buf.to_vec(obj.py());
+    }
+    // pandas / polars `Series` are not buffers themselves but hand one over.
+    for attr in ["to_numpy", "__array__"] {
+        if let Ok(f) = obj.getattr(attr)
+            && let Ok(arr) = f.call0()
+            && let Ok(buf) = pyo3::buffer::PyBuffer::<f64>::get(&arr)
+            && buf.dimensions() == 1
+            && buf.is_c_contiguous()
+        {
+            return buf.to_vec(arr.py());
+        }
+    }
+    // General path: any iterable of numbers.
     let mut values = Vec::new();
     for item in obj.try_iter().map_err(|_| err())? {
         values.push(item?.extract::<f64>().map_err(|_| err())?);
@@ -351,18 +380,45 @@ pub(crate) fn build_floats(
             let series = py.import("pandas")?.getattr("Series")?;
             let kwargs = PyDict::new(py);
             kwargs.set_item("index", index.bind(py))?;
-            Ok(series.call((nums,), Some(&kwargs))?.unbind())
+            let data = ndarray_from_f64(py, &nums)?;
+            Ok(series.call((data,), Some(&kwargs))?.unbind())
         }
-        OutputKind::Polars => Ok(py
-            .import("polars")?
-            .getattr("Series")?
-            .call1((nums,))?
-            .unbind()),
-        OutputKind::Numpy => match py.import("numpy") {
-            Ok(np) => Ok(np.getattr("asarray")?.call1((nums,))?.unbind()),
+        OutputKind::Polars => {
+            let data = ndarray_from_f64(py, &nums)?;
+            Ok(py.import("polars")?.getattr("Series")?.call1((data,))?.unbind())
+        }
+        OutputKind::Numpy => match ndarray_from_f64(py, &nums) {
+            Ok(arr) => Ok(arr.unbind()),
+            // No NumPy: fall back to a plain list, which preserves the
+            // warm-up `None`s rather than flattening them to `NaN`.
             Err(_) => Ok(values.into_pyobject(py)?.into_any().unbind()),
         },
     }
+}
+
+/// Wrap `xs` as a 1-D `float64` NumPy array in **one memcpy**.
+///
+/// The obvious spelling, `np.asarray(vec_of_f64)`, goes through pyo3's
+/// `Vec<f64> -> list` conversion: it materialises one Python `float` object per
+/// element and NumPy then copies out of that list. On a 200 000-sample series
+/// that alone cost ~48 ns per element — more than the entire indicator
+/// computation it was reporting (see `tools/bench_three_tier.py`).
+///
+/// Instead the bytes are handed over as a `bytearray` and `np.frombuffer`
+/// reinterprets them. `bytearray` rather than `bytes` so the result is
+/// writable, which is what a caller expects from an array they were given.
+fn ndarray_from_f64<'py>(py: Python<'py>, xs: &[f64]) -> PyResult<Bound<'py, PyAny>> {
+    let np = py.import("numpy")?;
+    // SAFETY: `f64` is `Copy`, has no padding and no invalid bit patterns, so
+    // any `[f64]` is a valid `[u8]` of 8x the length. The slice is only read,
+    // and `PyByteArray::new` copies out of it before this returns.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(xs.as_ptr() as *const u8, std::mem::size_of_val(xs))
+    };
+    let buf = pyo3::types::PyByteArray::new(py, bytes);
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", np.getattr("float64")?)?;
+    np.getattr("frombuffer")?.call((buf,), Some(&kwargs))
 }
 
 /// Build a boolean output series. Signals never warm up to a missing value.

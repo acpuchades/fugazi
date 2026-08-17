@@ -48,11 +48,60 @@ use serde::{Deserialize, Serialize};
 use crate::indicators::ops::ExtremeOp;
 use crate::types::Real;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A fixed-capacity ring buffer of the last `period` samples.
+///
+/// A `VecDeque` would do the same job, and did. The window's capacity is known
+/// at construction and never changes, so the deque's growth checks and its
+/// `push_back`/`pop_front` bookkeeping were paid on every sample for a
+/// flexibility this never uses. Measured against TA-Lib's vectorised C, `Sma`
+/// sat at 2.5x; a plain ring closes most of that (see `docs/PERFORMANCE.md`).
+///
+/// **The serialized shape is unchanged** — see the `Serialize`/`Deserialize`
+/// impls below, which emit the same `{period, window, sum}` object with the
+/// window in logical (oldest-first) order that the `VecDeque` derive produced.
+/// Run-state files written by earlier versions still load.
+#[derive(Debug, Clone)]
 pub(crate) struct WindowStats {
     period: usize,
-    window: VecDeque<Real>,
+    /// `period` slots. Only the `len` samples starting at `head` (wrapping) are
+    /// live; the rest are stale.
+    buf: Box<[Real]>,
+    /// Index of the oldest live sample.
+    head: usize,
+    len: usize,
     sum: Real,
+}
+
+/// The on-the-wire shape of a [`WindowStats`], identical to what the old
+/// `VecDeque`-backed derive produced.
+#[derive(Serialize, Deserialize)]
+struct WindowStatsRepr {
+    period: usize,
+    window: Vec<Real>,
+    sum: Real,
+}
+
+impl Serialize for WindowStats {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        WindowStatsRepr {
+            period: self.period,
+            window: self.iter().collect(),
+            sum: self.sum,
+        }
+        .serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for WindowStats {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let r = WindowStatsRepr::deserialize(d)?;
+        let mut out = WindowStats::new(r.period);
+        for x in r.window {
+            out.push(x);
+        }
+        out.sum = r.sum;
+        Ok(out)
+    }
 }
 
 impl WindowStats {
@@ -60,7 +109,9 @@ impl WindowStats {
         assert!(period > 0, "window period must be greater than zero");
         Self {
             period,
-            window: VecDeque::with_capacity(period),
+            buf: vec![0.0; period].into_boxed_slice(),
+            head: 0,
+            len: 0,
             sum: 0.0,
         }
     }
@@ -72,17 +123,61 @@ impl WindowStats {
     /// Push a sample, evicting the oldest once the window is full. Returns
     /// whether the window is now full (i.e. statistics are valid).
     pub fn update(&mut self, x: Real) -> bool {
-        self.window.push_back(x);
-        self.sum += x;
-        if self.window.len() > self.period {
-            let old = self.window.pop_front().expect("window is non-empty");
-            self.sum -= old;
+        if self.len == self.period {
+            // Full: overwrite the oldest slot and advance. One store, one
+            // branch, no bounds juggling.
+            self.sum -= self.buf[self.head];
+            self.buf[self.head] = x;
+            self.head += 1;
+            if self.head == self.period {
+                self.head = 0;
+            }
+        } else {
+            let at = self.head + self.len;
+            let at = if at >= self.period { at - self.period } else { at };
+            self.buf[at] = x;
+            self.len += 1;
         }
+        self.sum += x;
         self.is_full()
     }
 
+    /// Push without touching `sum` — used only by `Deserialize`, which restores
+    /// the sum verbatim so a reloaded window is bit-identical to the saved one
+    /// rather than a re-accumulation of it.
+    fn push(&mut self, x: Real) {
+        let at = self.head + self.len;
+        let at = if at >= self.period { at - self.period } else { at };
+        self.buf[at] = x;
+        if self.len == self.period {
+            self.head = if self.head + 1 == self.period { 0 } else { self.head + 1 };
+        } else {
+            self.len += 1;
+        }
+    }
+
+    /// The live samples, oldest first.
+    pub fn iter(&self) -> impl Iterator<Item = Real> + '_ {
+        let (a, b) = self.slices();
+        a.iter().copied().chain(b.iter().copied())
+    }
+
+    /// The live samples as up to two contiguous slices, oldest first. Contiguous
+    /// halves are what let the O(period) dispersion scans vectorise.
+    fn slices(&self) -> (&[Real], &[Real]) {
+        if self.len == 0 {
+            return (&[], &[]);
+        }
+        let end = self.head + self.len;
+        if end <= self.period {
+            (&self.buf[self.head..end], &[])
+        } else {
+            (&self.buf[self.head..], &self.buf[..end - self.period])
+        }
+    }
+
     pub fn is_full(&self) -> bool {
-        self.window.len() == self.period
+        self.len == self.period
     }
 
     /// Mean over the window. Only meaningful once [`is_full`](Self::is_full).
@@ -98,7 +193,6 @@ impl WindowStats {
     pub fn variance(&self) -> Real {
         let mean = self.mean();
         let sum_sq: Real = self
-            .window
             .iter()
             .map(|x| {
                 let d = x - mean;
@@ -138,7 +232,6 @@ impl WindowStats {
     /// Only meaningful once [`is_full`](Self::is_full).
     pub fn downside_dev(&self, threshold: Real) -> Real {
         let sum_sq: Real = self
-            .window
             .iter()
             .map(|x| (x - threshold).min(0.0).powi(2))
             .sum();
@@ -150,7 +243,7 @@ impl WindowStats {
     /// [`Cci`](super::Cci). Only meaningful once [`is_full`](Self::is_full).
     pub fn mean_abs_dev(&self) -> Real {
         let mean = self.mean();
-        let sum: Real = self.window.iter().map(|x| (x - mean).abs()).sum();
+        let sum: Real = self.iter().map(|x| (x - mean).abs()).sum();
         sum / self.period as Real
     }
 
@@ -188,7 +281,7 @@ impl WindowStats {
         let mean = self.mean();
         let n = self.period as Real;
         let (mut m2, mut m3, mut m4) = (0.0, 0.0, 0.0);
-        for x in &self.window {
+        for x in self.iter() {
             let d = x - mean;
             let d2 = d * d;
             m2 += d2;
@@ -199,7 +292,8 @@ impl WindowStats {
     }
 
     pub fn reset(&mut self) {
-        self.window.clear();
+        self.head = 0;
+        self.len = 0;
         self.sum = 0.0;
     }
 }

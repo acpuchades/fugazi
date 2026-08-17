@@ -1226,4 +1226,5 @@ pyo3 generates beside each `#[pyfunction]` that a glob import doesn't carry.
 
 Cargo: `python/Cargo.toml` depends on `fugazi_core = { package = "fugazi", …
 default-features = false, features = ["sources", "runtime", "spec"] }`. `pyo3 = "0.29"`
-with `abi3-py39`. Test: `maturin develop` then `pytest python/tests/`.
+with `abi3-py311` (the buffer protocol needs it — see `docs/PERFORMANCE.md`).
+Test: `maturin develop` then `pytest python/tests/`.
