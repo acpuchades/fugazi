@@ -458,38 +458,54 @@ Read the figures as **ceilings**. Each prototype is narrower than the real
 change would be, and a couple of them enjoy inlining that the general case
 would not.
 
-### 1. Shrink `DynValue`, and stop nesting erasure — highest value
+### 1. A narrow `Real → Real` erasure vocabulary — highest value, **not breaking**
 
-`std::mem::size_of::<DynValue>()` is **88 bytes**: the enum is as wide as its
-widest variant (`Atom`), so every erased `update` moves 88 bytes in and 88 back
-out even when the payload is one `f64`.
+Both runtime-typed builders erase at *every* level of an expression:
 
-Worse, the Python bindings *nest* the erasure. `sma(identity())` builds
-`Source::new(Sma::new(already_erased_source, 10))` (`map_source!` in
-`python/src/macros.rs`), so one sample crosses the boundary twice in each
-direction — six `DynValue` conversions. Measured (`benches/three_tier.rs`):
+* spec/YAML — `NodeSpec::build` does `wrap(Sma::new(AsReal::try_new(child)?, p))`
+* Python — `Source::new(Sma::new(source, p))` over an already-erased source
 
-| | ns/sample |
-|---|---:|
-| `Sma` native | 1.36 |
-| one erasure boundary | 3.70 |
-| two boundaries (what the bindings build) | **16.95** |
+So a sample crosses a `DynValue` boundary once per node, and
+`size_of::<DynValue>()` is **88 bytes** — the enum is as wide as its `Atom`
+variant — with a discriminant branch and drop glue on every move. **This costs
+the CLI as much as it costs Python**; it is not a bindings problem.
 
-**A 12× tax on the engine, paid before Python is involved**, and it is what
-puts the bindings 10–29× behind TA-Lib's.
+`cargo bench --bench erasure` prices the alternative. The overwhelming majority
+of expression nodes are `Real → Real`; a trait narrowed to that carries an
+`f64` (16 bytes with the `Option`) instead of the 88-byte enum:
 
-Two independent fixes:
+| chain | ns/sample | vs concrete |
+|---|---:|---:|
+| concrete, no erasure, 2 nodes | 1.36 | 1.0× |
+| `DynValue` erasure, 2 levels | 16.00 | 11.8× |
+| `DynValue` erasure, 3 levels | 28.89 | 21.2× |
+| **narrow `f64` erasure, 2 levels** | **3.79** | **2.8×** |
+| **narrow `f64` erasure, 3 levels** | **4.20** | **3.1×** |
 
-- **Box the large variants.** `DynValue::Atom(Box<Atom>)` /
-  `Candle(Box<Candle>)` / `Snapshot` already behind an `Arc` would take the enum
-  to ~16 bytes. Costs an allocation on the *bar-shaped* paths, which is why it
-  needs measuring rather than assuming — but the `Real`/`Bool` paths, which are
-  the hot ones for scalar indicators, become a register move.
-- **Don't re-erase an already-erased source.** When `map_source!` wraps a
-  `Source` that is itself a `Box<dyn DynIndicatorSync>`, the inner box could be
-  composed with `runtime::chain` instead of being wrapped again, halving the
-  conversions. This one is *not* an API break — it is contained entirely in
-  `python/src/`, and should be tried first.
+**Marginal cost per extra level: `DynValue` +12.9 ns, narrow +0.4 ns.** Depth
+stops being a tax at all — which matters because real expressions are deep.
+
+**Implications.**
+
+*It is additive.* A narrow trait sits *beside* `DynIndicator`, it does not
+replace it. `DynValue` is still needed for bar-shaped (`Atom`, `Candle`),
+string-shaped and snapshot-shaped nodes, and for any chain that mixes domains.
+No public signature changes, so this is **not** one of the breaking candidates —
+which is why it ranks above them.
+
+*The cost is a second vocabulary.* Every builder gains a narrow-or-wide
+decision and a fallback, and a subtree only qualifies if it is scalar all the
+way down. That is real maintenance surface, and the honest trade: ~4× on both
+the CLI and Python paths against one more concept in the runtime layer.
+
+*Scope.* `src/runtime.rs` (the trait plus adapters), the `Real`-output arms of
+`src/spec/expr.rs`, and `python/src/{carriers,macros}.rs`. Bar-rooted leaves
+(`!close`, `!atr`) keep the wide path and pay a single conversion where the
+scalar chain begins.
+
+*Expected end state.* The Python pipeline already measures **4.0×** TA-Lib with
+one erased layer, and this removes the per-layer penalty that takes it to 25×.
+`fz.sma(identity())` should land near 10–12 ns/sample.
 
 ### 2. `Indicator::update(&mut self, input: &Self::Input)`
 
