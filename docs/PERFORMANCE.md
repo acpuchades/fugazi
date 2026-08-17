@@ -1102,16 +1102,32 @@ That table invites a wrong conclusion — that an erased level costs 4 — so va
 one level and subtract instead (`benches/icount.rs`, `sma_scalar_*`, net of a
 control that runs the same loop with no indicator):
 
-| | instr/sample |
-|---|---:|
-| `Sma::new(Identity, 14)` monomorphised | **20.0** |
-| the same, erased as the bindings build it | **50.0** |
-| `talib.SMA`, whole call | 8.1 |
+| erased levels | | net instr/sample |
+|---:|---|---:|
+| 0 | `Sma::new(Identity, 14)` monomorphised | **16.0** |
+| 1 | the leaf fused into `Sma`, erased once | **37.0** |
+| 2 | as the bindings build it today | **45.0** |
+| — | `talib.SMA`, whole call | 8.1 |
 
-**Erasure costs ~30 instructions/sample** — half again the arithmetic it wraps,
-and more than the entire Python boundary. The call setup, the argument move and
-the `Option<Real>` return handling are charged to the *caller*, which is why the
-per-function view undercounts a level at 4 instead of ~15.
+**Erasure costs ~29 instructions/sample in total, and it is very unevenly
+split**: the inner level costs **8**, the outer one **21**. The outer is dearer
+because removing the *last* erasure is what lets LLVM inline the chain into the
+driving loop and keep `Sma`'s state in registers across samples; with any
+erasure at all, that state round-trips through memory every update.
+
+Two corrections to earlier readings, both of which flattered a conclusion:
+
+* A per-function profile of the Python path charges only 4 instructions/sample to
+  the inner `Erased<Identity>::update`, which makes a level look nearly free. The
+  call setup, argument move and `Option<Real>` return are charged to the
+  *caller*. Vary one level and subtract; do not read a level's cost off its own
+  callee total.
+* The first version of this table put the monomorphised baseline at 20.0 and
+  erasure at ~30. That baseline **discarded its output** while the erased
+  variants stored theirs, so it was measuring less I/O, not just less
+  indirection. With all variants writing an `Option<Real>` per sample the
+  baseline is 16.0. The headline number barely moved, which is luck rather than
+  vindication — the per-level split it implied was wrong.
 
 Two consequences worth keeping straight:
 
@@ -1123,13 +1139,20 @@ Two consequences worth keeping straight:
   Instruction parity is unreachable by construction; time parity is already
   there. Do not chase the former.
 
-The unexplored fix is **fusing**: build `Sma<Identity<Real>>` concretely when the
-source is a plain root, so a two-level chain becomes one. Priced at ~15
-instructions/sample here, and separately at 9.0/bar for a candle-field root
-(`sma_two_levels` vs `sma_fused`). Going further — a fully monomorphised carrier
-for common whole-chain shapes — would take the scalar path to ~37 (17 boundary +
-20 work), but needs a constructor-by-root combinatorial expansion, so it wants a
-decision before it is built.
+**Fusing** — building `Sma<Identity<Real>>` concretely when the source is a plain
+root, so a two-level chain becomes one — is therefore worth **8.0
+instructions/sample**, not the ~15 first estimated, and separately 9.0/bar for a
+candle-field root (`sma_two_levels` vs `sma_fused`). About 13% of the scalar
+path. Thin on its own; its real value is that it is the *mechanism* a fully
+monomorphised carrier would need, since that also requires the root's concrete
+type to survive to the wrapping constructor.
+
+**Batching still does not pay, now confirmed against the fused shape.** The
+theory was that fusing and batching are complementary — a concrete chain inside
+the box, the loop on its side of the boundary, nothing opaque left per sample, so
+the whole thing inlines. Measured: 35.76 against fused's 37.02, i.e. 1.3, nowhere
+near the 21 that removing the outer level buys. Two independent attempts now say
+the same thing, so the batch idea is closed.
 
 Also checked and **ruled out**: a small-input regime. The ratio is flat at
 2.4-3.0x from N = 200 to N = 200 000, and `talib` pays per-call overhead too

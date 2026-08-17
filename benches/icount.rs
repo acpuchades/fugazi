@@ -286,13 +286,41 @@ fn erased_scalar_sma() -> fugazi::runtime::Chain<Real, Real> {
     fugazi::runtime::erase(fugazi::indicators::Sma::new(leaf, 14))
 }
 
+/// The scalar twin of `BatchIndicator`, for the fused+batched probe.
+trait BatchScalar: Send + Sync {
+    fn many(&mut self, xs: &[Real], out: &mut [Option<Real>]);
+}
+
+struct BatchedScalar<I>(I);
+
+impl<I> BatchScalar for BatchedScalar<I>
+where
+    I: Indicator<Input = Real, Output = Real> + Send + Sync,
+{
+    fn many(&mut self, xs: &[Real], out: &mut [Option<Real>]) {
+        for (o, &x) in out.iter_mut().zip(xs) {
+            *o = self.0.update(x);
+        }
+    }
+}
+
+/// One erased level over a monomorphised `Sma<Identity<Real>>` — the artifact a
+/// fused plain root would build.
+#[inline(never)]
+fn fused_scalar_sma() -> fugazi::runtime::Chain<Real, Real> {
+    fugazi::runtime::erase(fugazi::indicators::Sma::new(
+        fugazi::indicators::Identity::<Real>::new(),
+        14,
+    ))
+}
+
 fn main() {
     let workload = std::env::args().nth(1).unwrap_or_else(|| {
         eprintln!(
             "usage: icount <sma_rust|sma_yaml|macd_rust|macd_yaml|tree8\
              |atr_none|atr_atom|atr_candle|atr_manual_max|chain_candle|chain_atom|chain_atom_direct\
              |sma_two_levels|sma_fused|sma_dyn_per_sample|sma_dyn_batch\
-             |sma_scalar_none|sma_scalar_direct|sma_scalar_erased>"
+             |sma_scalar_none|sma_scalar_direct|sma_scalar_erased|sma_scalar_fused|sma_scalar_fused_batched>"
         );
         std::process::exit(2);
     });
@@ -401,28 +429,65 @@ fn main() {
         //
         // `sma_scalar_none` is the control (same loop, no indicator); the other
         // two are the identical computation monomorphised and erased.
-        "sma_scalar_none" | "sma_scalar_direct" | "sma_scalar_erased" => {
+        "sma_scalar_none" | "sma_scalar_direct" | "sma_scalar_erased"
+        | "sma_scalar_fused" | "sma_scalar_fused_batched" => {
             let xs: Vec<Real> = (0..BARS).map(|i| 100.0 + (i % 97) as Real * 0.5).collect();
             match workload.as_str() {
                 "sma_scalar_none" => {
-                    for x in &xs {
-                        black_box(*x);
+                    let mut out = vec![None; BARS];
+                    for (o, &x) in out.iter_mut().zip(&xs) {
+                        *o = Some(black_box(x));
                     }
+                    black_box(&out);
                 }
                 "sma_scalar_direct" => {
                     let mut ind = fugazi::indicators::Sma::new(
                         fugazi::indicators::Identity::<Real>::new(),
                         14,
                     );
-                    for x in &xs {
-                        black_box(ind.update(black_box(*x)));
+                    let mut out = vec![None; BARS];
+                    for (o, &x) in out.iter_mut().zip(&xs) {
+                        *o = ind.update(x);
+                    }
+                    black_box(&out);
+                }
+                "sma_scalar_erased" => {
+                    let mut ind = erased_scalar_sma();
+                    let mut out = vec![None; BARS];
+                    for (o, &x) in out.iter_mut().zip(&xs) {
+                        *o = ind.update(x);
+                    }
+                    black_box(&out);
+                }
+                // Fusing *and* batching together. Batching alone was measured
+                // slower and fusing alone saves 8; the question is whether they
+                // are complementary — with a concrete chain inside the box and
+                // the loop on its side of the boundary, nothing opaque is left
+                // on the per-sample path and the whole chain can inline.
+                "sma_scalar_fused_batched" => {
+                    const CHUNK: usize = 64;
+                    let mut ind: Box<dyn BatchScalar> =
+                        Box::new(BatchedScalar(fugazi::indicators::Sma::new(
+                            fugazi::indicators::Identity::<Real>::new(),
+                            14,
+                        )));
+                    let mut out = [None; CHUNK];
+                    for chunk in xs.chunks(CHUNK) {
+                        ind.many(chunk, &mut out[..chunk.len()]);
+                        black_box(&out);
                     }
                 }
+                // Exactly what fusing a plain root would produce: the leaf
+                // monomorphised into `Sma`, the result erased once. Neither
+                // `_direct` (no erasure at all) nor `_erased` (two levels) is
+                // this shape, so the saving has to be measured, not subtracted.
                 _ => {
-                    let mut ind = erased_scalar_sma();
-                    for x in &xs {
-                        black_box(ind.update(black_box(*x)));
+                    let mut ind = fused_scalar_sma();
+                    let mut out = vec![None; BARS];
+                    for (o, &x) in out.iter_mut().zip(&xs) {
+                        *o = ind.update(x);
                     }
+                    black_box(&out);
                 }
             }
             BARS
