@@ -203,6 +203,10 @@ harness = false
 name = "three_tier"
 harness = false
 
+[[bench]]
+name = "stddev_tradeoff"
+harness = false
+
 # The per-bar hot path is generic code that crosses module boundaries
 # (`Combine<L, R, Op>` over sources defined elsewhere) plus trait objects, so
 # cross-CGU inlining is worth more here than it is for the average crate.

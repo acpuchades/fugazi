@@ -497,6 +497,55 @@ the scan otherwise.
 needs a design decision rather than a patch. Worth it for large universes and
 irrelevant below ~16 symbols.
 
+## Three-tier comparison — TA-Lib vs fugazi (Rust) vs fugazi (Python)
+
+`tools/bench_three_tier.py` drives all three from one input. TA-Lib is the bar
+for the Rust engine; the Rust engine is the bar for the bindings.
+
+200 000 samples, median of 7, quiet machine:
+
+| indicator | TA-Lib | fugazi rs | fugazi py | rs/TA-Lib | py/rs |
+|---|---:|---:|---:|---:|---:|
+| `sma` | 1.37 ns | 1.42 | 40.31 | 1.03× | 28.4× |
+| `ema` | 2.16 ns | **1.46** | 38.24 | **0.67×** | 26.2× |
+| `rsi` | 4.91 ns | 4.92 | 50.33 | 1.00× | 10.2× |
+| `atr` | 11.81 ns | 12.98 | — | 1.10× | — |
+| `stddev` | 3.98 ns | 10.68 | 59.04 | 2.69× | 5.5× |
+
+**This is not apples-to-apples, in fugazi's disfavour.** TA-Lib is *vectorised*:
+one C call computes a whole array, with no per-sample dispatch. fugazi is
+*incremental*: one `update()` per bar, which is what lets the same code drive a
+live stream. Matching a vectorised C library on a batch benchmark while staying
+incremental is the result, not a tie.
+
+`stddev` is the deliberate exception — see below.
+
+### What `stddev` buys with its 2.7×
+
+`cargo bench --bench stddev_tradeoff` re-derives both halves of the choice
+`src/indicators/stats.rs` documents, so it rests on numbers rather than on a
+comment. Relative error against a Kahan-compensated reference, period 20:
+
+| mean | σ | centred (ours) | shortcut (TA-Lib's) |
+|---:|---:|---:|---:|
+| 1e2 | 1 | 1.3e-16 | 1.3e-11 |
+| 1e2 | 0.01 | exact | 1.3e-7 |
+| 1e5 | 100 | exact | 1.1e-10 |
+| 1e5 | 0.01 | exact | **9.6e-3** |
+| 1e9 | 1 | 2.4e-13 | **6e1** |
+| 1e9 | 0.01 | 9.7e-10 | **1e0** |
+
+Cost, same window: 14.34 ns/sample centred vs 3.62 shortcut — **3.97×**.
+
+So the trade is ~10.7 ns/sample for a result that stays correct to ~1e-13 where
+the shortcut is wrong by **6000%**. A five-figure instrument quoted to the cent
+(1e5 / 0.01) already costs the shortcut 1% of its answer, and `ZScore` divides
+by that. Keep the centred pass.
+
+There is no free lunch in between: Welford's online algorithm is O(1) and far
+better conditioned than the naive shortcut, but it has no numerically stable
+*removal* step, which a sliding window needs on every sample.
+
 ## Known costs, and why they are there
 
 Some slow things are deliberate. Before "fixing" one, check here.
