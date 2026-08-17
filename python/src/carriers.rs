@@ -387,7 +387,7 @@ impl<I: Clone + Send + Sync + 'static> Indicator for SharedProjector<I> {
 /// Python analogue of `Shared<M>` in Rust. Component accessors return
 /// [`PyIndicator`]s that borrow into the same underlying multi.
 pub(crate) enum AnySharedMulti {
-    Candle(Arc<Mutex<SharedMultiCell<Atom>>>),
+    Atom(Arc<Mutex<SharedMultiCell<Atom>>>),
     Real(Arc<Mutex<SharedMultiCell<Real>>>),
     Snapshot(Arc<Mutex<SharedMultiCell<Snapshot<Symbol>>>>),
 }
@@ -395,7 +395,7 @@ pub(crate) enum AnySharedMulti {
 impl AnySharedMulti {
     pub(crate) fn names(&self) -> &'static [&'static str] {
         match self {
-            AnySharedMulti::Candle(c) => c.lock().expect("mutex poisoned").names,
+            AnySharedMulti::Atom(c) => c.lock().expect("mutex poisoned").names,
             AnySharedMulti::Real(c) => c.lock().expect("mutex poisoned").names,
             AnySharedMulti::Snapshot(c) => c.lock().expect("mutex poisoned").names,
         }
@@ -413,8 +413,8 @@ impl AnySharedMulti {
     pub(crate) fn project(&self, name: &str) -> PyResult<PyIndicator> {
         let idx = self.field_index(name)?;
         Ok(match self {
-            AnySharedMulti::Candle(cell) => PyIndicator {
-                src: AnySource::Candle(runtime::erase(SharedProjector::<Atom> {
+            AnySharedMulti::Atom(cell) => PyIndicator {
+                src: AnySource::Atom(runtime::erase(SharedProjector::<Atom> {
                     cell: Arc::clone(cell),
                     field_index: idx,
                     local_gen: cell.lock().expect("mutex poisoned").generation,
@@ -452,7 +452,7 @@ impl AnySharedMulti {
 /// entirely on its own it behaves as candle-rooted.
 #[derive(Clone)]
 pub(crate) enum AnySource {
-    Candle(Source<Atom>),
+    Atom(Source<Atom>),
     Real(Source<Real>),
     Snapshot(Source<Snapshot<Symbol>>),
     Const(Real),
@@ -461,7 +461,7 @@ pub(crate) enum AnySource {
 impl AnySource {
     pub(crate) fn value(&self) -> Option<Real> {
         match self {
-            AnySource::Candle(s) => Indicator::value(s),
+            AnySource::Atom(s) => Indicator::value(s),
             AnySource::Real(s) => Indicator::value(s),
             AnySource::Snapshot(s) => Indicator::value(s),
             AnySource::Const(c) => Some(*c),
@@ -469,7 +469,7 @@ impl AnySource {
     }
     pub(crate) fn warm_up_bars(&self) -> usize {
         match self {
-            AnySource::Candle(s) => Indicator::warm_up_bars(s),
+            AnySource::Atom(s) => Indicator::warm_up_bars(s),
             AnySource::Real(s) => Indicator::warm_up_bars(s),
             AnySource::Snapshot(s) => Indicator::warm_up_bars(s),
             AnySource::Const(_) => 0,
@@ -477,7 +477,7 @@ impl AnySource {
     }
     pub(crate) fn unstable_bars(&self) -> usize {
         match self {
-            AnySource::Candle(s) => Indicator::unstable_bars(s),
+            AnySource::Atom(s) => Indicator::unstable_bars(s),
             AnySource::Real(s) => Indicator::unstable_bars(s),
             AnySource::Snapshot(s) => Indicator::unstable_bars(s),
             AnySource::Const(_) => 0,
@@ -485,7 +485,7 @@ impl AnySource {
     }
     pub(crate) fn reset(&mut self) {
         match self {
-            AnySource::Candle(s) => Indicator::reset(s),
+            AnySource::Atom(s) => Indicator::reset(s),
             AnySource::Real(s) => Indicator::reset(s),
             AnySource::Snapshot(s) => Indicator::reset(s),
             AnySource::Const(_) => {}
@@ -502,7 +502,7 @@ impl AnySource {
             // Streamed, not collected: see `CandleColumns`. The `Vec<Candle>`
             // this used to build was 8 MB for a 200 000-bar frame, written and
             // read back for nothing.
-            AnySource::Candle(s) => {
+            AnySource::Atom(s) => {
                 let cols = columns_from_frame(data)?;
                 let mut out = Vec::with_capacity(cols.len());
                 cols.for_each(|c| out.push(Indicator::update(s, c.into())));
@@ -525,7 +525,7 @@ impl AnySource {
 /// Two sources resolved to a common concrete domain, with any neutral constant
 /// materialised to match its partner.
 pub(crate) enum Pair {
-    Candle(Source<Atom>, Source<Atom>),
+    Atom(Source<Atom>, Source<Atom>),
     Real(Source<Real>, Source<Real>),
     Snapshot(Source<Snapshot<Symbol>>, Source<Snapshot<Symbol>>),
 }
@@ -542,22 +542,22 @@ pub(crate) fn pair(lhs: AnySource, rhs: AnySource) -> PyResult<Pair> {
         runtime::erase(Value::<Snapshot<Symbol>>::new(c))
     }
     match (lhs, rhs) {
-        (AnySource::Candle(a), AnySource::Candle(b)) => Ok(Pair::Candle(a, b)),
+        (AnySource::Atom(a), AnySource::Atom(b)) => Ok(Pair::Atom(a, b)),
         (AnySource::Real(a), AnySource::Real(b)) => Ok(Pair::Real(a, b)),
         (AnySource::Snapshot(a), AnySource::Snapshot(b)) => Ok(Pair::Snapshot(a, b)),
-        (AnySource::Const(a), AnySource::Candle(b)) => Ok(Pair::Candle(const_to_candle_source(a), b)),
-        (AnySource::Candle(a), AnySource::Const(b)) => Ok(Pair::Candle(a, const_to_candle_source(b))),
+        (AnySource::Const(a), AnySource::Atom(b)) => Ok(Pair::Atom(const_to_atom_source(a), b)),
+        (AnySource::Atom(a), AnySource::Const(b)) => Ok(Pair::Atom(a, const_to_atom_source(b))),
         (AnySource::Const(a), AnySource::Real(b)) => Ok(Pair::Real(rval(a), b)),
         (AnySource::Real(a), AnySource::Const(b)) => Ok(Pair::Real(a, rval(b))),
         (AnySource::Const(a), AnySource::Snapshot(b)) => Ok(Pair::Snapshot(sval(a), b)),
         (AnySource::Snapshot(a), AnySource::Const(b)) => Ok(Pair::Snapshot(a, sval(b))),
         (AnySource::Const(a), AnySource::Const(b)) => {
-            Ok(Pair::Candle(const_to_candle_source(a), const_to_candle_source(b)))
+            Ok(Pair::Atom(const_to_atom_source(a), const_to_atom_source(b)))
         }
-        (AnySource::Candle(_), AnySource::Real(_))
-        | (AnySource::Real(_), AnySource::Candle(_))
-        | (AnySource::Candle(_), AnySource::Snapshot(_))
-        | (AnySource::Snapshot(_), AnySource::Candle(_))
+        (AnySource::Atom(_), AnySource::Real(_))
+        | (AnySource::Real(_), AnySource::Atom(_))
+        | (AnySource::Atom(_), AnySource::Snapshot(_))
+        | (AnySource::Snapshot(_), AnySource::Atom(_))
         | (AnySource::Real(_), AnySource::Snapshot(_))
         | (AnySource::Snapshot(_), AnySource::Real(_)) => Err(domain_mismatch()),
     }
@@ -566,7 +566,7 @@ pub(crate) fn pair(lhs: AnySource, rhs: AnySource) -> PyResult<Pair> {
 /// A boolean signal erased to one of the three input domains.
 #[derive(Clone)]
 pub(crate) enum AnySignal {
-    Candle(SignalBox<Atom>),
+    Atom(SignalBox<Atom>),
     Real(SignalBox<Real>),
     Snapshot(SignalBox<Snapshot<Symbol>>),
 }
@@ -574,28 +574,28 @@ pub(crate) enum AnySignal {
 impl AnySignal {
     pub(crate) fn is_true(&self) -> bool {
         match self {
-            AnySignal::Candle(s) => BoolIndicatorExt::is_true(s),
+            AnySignal::Atom(s) => BoolIndicatorExt::is_true(s),
             AnySignal::Real(s) => BoolIndicatorExt::is_true(s),
             AnySignal::Snapshot(s) => BoolIndicatorExt::is_true(s),
         }
     }
     pub(crate) fn warm_up_bars(&self) -> usize {
         match self {
-            AnySignal::Candle(s) => Indicator::warm_up_bars(s),
+            AnySignal::Atom(s) => Indicator::warm_up_bars(s),
             AnySignal::Real(s) => Indicator::warm_up_bars(s),
             AnySignal::Snapshot(s) => Indicator::warm_up_bars(s),
         }
     }
     pub(crate) fn unstable_bars(&self) -> usize {
         match self {
-            AnySignal::Candle(s) => Indicator::unstable_bars(s),
+            AnySignal::Atom(s) => Indicator::unstable_bars(s),
             AnySignal::Real(s) => Indicator::unstable_bars(s),
             AnySignal::Snapshot(s) => Indicator::unstable_bars(s),
         }
     }
     pub(crate) fn reset(&mut self) {
         match self {
-            AnySignal::Candle(s) => Indicator::reset(s),
+            AnySignal::Atom(s) => Indicator::reset(s),
             AnySignal::Real(s) => Indicator::reset(s),
             AnySignal::Snapshot(s) => Indicator::reset(s),
         }
@@ -607,7 +607,7 @@ impl AnySignal {
     /// what the runtime already guarantees for individual updates.
     pub(crate) fn feed_rows(&mut self, data: &Bound<'_, PyAny>) -> PyResult<Vec<bool>> {
         Ok(match self {
-            AnySignal::Candle(s) => {
+            AnySignal::Atom(s) => {
                 let cols = columns_from_frame(data)?;
                 let mut out = Vec::with_capacity(cols.len());
                 cols.for_each(|c| {
@@ -634,7 +634,7 @@ impl AnySignal {
 /// here.
 #[derive(Clone)]
 pub(crate) enum AnyStrSource {
-    Candle(StrSource<Atom>),
+    Atom(StrSource<Atom>),
     /// Snapshot-rooted — a `Str` overlay column read through an explicit
     /// atom source (`get_str(schema, key, source=pick("M"))`). The candle
     /// domain cannot express that: picking one asset out of a multi-symbol
@@ -648,28 +648,28 @@ pub(crate) enum AnyStrSource {
 impl AnyStrSource {
     pub(crate) fn value(&self) -> Option<Arc<str>> {
         match self {
-            AnyStrSource::Candle(s) => Indicator::value(s),
+            AnyStrSource::Atom(s) => Indicator::value(s),
             AnyStrSource::Snapshot(s) => Indicator::value(s),
             AnyStrSource::Const(c) => Some(c.clone()),
         }
     }
     pub(crate) fn warm_up_bars(&self) -> usize {
         match self {
-            AnyStrSource::Candle(s) => Indicator::warm_up_bars(s),
+            AnyStrSource::Atom(s) => Indicator::warm_up_bars(s),
             AnyStrSource::Snapshot(s) => Indicator::warm_up_bars(s),
             AnyStrSource::Const(_) => 0,
         }
     }
     pub(crate) fn unstable_bars(&self) -> usize {
         match self {
-            AnyStrSource::Candle(s) => Indicator::unstable_bars(s),
+            AnyStrSource::Atom(s) => Indicator::unstable_bars(s),
             AnyStrSource::Snapshot(s) => Indicator::unstable_bars(s),
             AnyStrSource::Const(_) => 0,
         }
     }
     pub(crate) fn reset(&mut self) {
         match self {
-            AnyStrSource::Candle(s) => Indicator::reset(s),
+            AnyStrSource::Atom(s) => Indicator::reset(s),
             AnyStrSource::Snapshot(s) => Indicator::reset(s),
             AnyStrSource::Const(_) => {}
         }
@@ -679,29 +679,29 @@ impl AnyStrSource {
 /// Two string sources resolved to the candle domain, with any neutral constant
 /// materialised via [`ValueStr`]. Both sides end up as `StrSource<Atom>`.
 pub(crate) enum StrPair {
-    Candle(StrSource<Atom>, StrSource<Atom>),
+    Atom(StrSource<Atom>, StrSource<Atom>),
     Snapshot(StrSource<Snapshot<Symbol>>, StrSource<Snapshot<Symbol>>),
 }
 
 pub(crate) fn str_pair(lhs: AnyStrSource, rhs: AnyStrSource) -> PyResult<StrPair> {
     use AnyStrSource as A;
-    fn lift_candle(c: Arc<str>) -> StrSource<Atom> {
+    fn lift_atom(c: Arc<str>) -> StrSource<Atom> {
         runtime::erase(ValueStr::<Atom>::new(c))
     }
     fn lift_snapshot(c: Arc<str>) -> StrSource<Snapshot<Symbol>> {
         runtime::erase(ValueStr::<Snapshot<Symbol>>::new(c))
     }
     Ok(match (lhs, rhs) {
-        (A::Candle(l), A::Candle(r)) => StrPair::Candle(l, r),
+        (A::Atom(l), A::Atom(r)) => StrPair::Atom(l, r),
         (A::Snapshot(l), A::Snapshot(r)) => StrPair::Snapshot(l, r),
         // A neutral constant adopts its partner's domain, exactly as on the
         // Real side — so `str_eq(get_str(.., source=pick("M")), "bull")` works
         // without the caller having to say which domain the literal is in.
-        (A::Candle(l), A::Const(c)) => StrPair::Candle(l, lift_candle(c)),
-        (A::Const(c), A::Candle(r)) => StrPair::Candle(lift_candle(c), r),
+        (A::Atom(l), A::Const(c)) => StrPair::Atom(l, lift_atom(c)),
+        (A::Const(c), A::Atom(r)) => StrPair::Atom(lift_atom(c), r),
         (A::Snapshot(l), A::Const(c)) => StrPair::Snapshot(l, lift_snapshot(c)),
         (A::Const(c), A::Snapshot(r)) => StrPair::Snapshot(lift_snapshot(c), r),
-        (A::Const(l), A::Const(r)) => StrPair::Candle(lift_candle(l), lift_candle(r)),
+        (A::Const(l), A::Const(r)) => StrPair::Atom(lift_atom(l), lift_atom(r)),
         // A genuine clash: one side reads a single atom stream, the other picks
         // out of a multi-symbol snapshot.
         _ => return Err(domain_mismatch()),
@@ -710,7 +710,7 @@ pub(crate) fn str_pair(lhs: AnyStrSource, rhs: AnyStrSource) -> PyResult<StrPair
 
 /// A multi-output indicator erased to one of the three input domains.
 pub(crate) enum AnyMulti {
-    Candle(MultiBox<Atom>),
+    Atom(MultiBox<Atom>),
     Real(MultiBox<Real>),
     Snapshot(MultiBox<Snapshot<Symbol>>),
 }
@@ -718,35 +718,35 @@ pub(crate) enum AnyMulti {
 impl AnyMulti {
     pub(crate) fn names(&self) -> &'static [&'static str] {
         match self {
-            AnyMulti::Candle(m) => m.0.names(),
+            AnyMulti::Atom(m) => m.0.names(),
             AnyMulti::Real(m) => m.0.names(),
             AnyMulti::Snapshot(m) => m.0.names(),
         }
     }
     pub(crate) fn value(&self) -> Option<Vec<Real>> {
         match self {
-            AnyMulti::Candle(m) => m.0.value(),
+            AnyMulti::Atom(m) => m.0.value(),
             AnyMulti::Real(m) => m.0.value(),
             AnyMulti::Snapshot(m) => m.0.value(),
         }
     }
     pub(crate) fn warm_up_bars(&self) -> usize {
         match self {
-            AnyMulti::Candle(m) => m.0.warm_up_bars(),
+            AnyMulti::Atom(m) => m.0.warm_up_bars(),
             AnyMulti::Real(m) => m.0.warm_up_bars(),
             AnyMulti::Snapshot(m) => m.0.warm_up_bars(),
         }
     }
     pub(crate) fn unstable_bars(&self) -> usize {
         match self {
-            AnyMulti::Candle(m) => m.0.unstable_bars(),
+            AnyMulti::Atom(m) => m.0.unstable_bars(),
             AnyMulti::Real(m) => m.0.unstable_bars(),
             AnyMulti::Snapshot(m) => m.0.unstable_bars(),
         }
     }
     pub(crate) fn reset(&mut self) {
         match self {
-            AnyMulti::Candle(m) => m.0.reset(),
+            AnyMulti::Atom(m) => m.0.reset(),
             AnyMulti::Real(m) => m.0.reset(),
             AnyMulti::Snapshot(m) => m.0.reset(),
         }
@@ -756,7 +756,7 @@ impl AnyMulti {
     /// producing one `Option<Vec<Real>>` per bar (`None` while warming up).
     pub(crate) fn feed_rows(&mut self, data: &Bound<'_, PyAny>) -> PyResult<Vec<Option<Vec<Real>>>> {
         Ok(match self {
-            AnyMulti::Candle(m) => {
+            AnyMulti::Atom(m) => {
                 let cols = columns_from_frame(data)?;
                 let mut out = Vec::with_capacity(cols.len());
                 cols.for_each(|c| out.push(m.0.update(c.into())));
@@ -785,6 +785,6 @@ pub(crate) fn domain_mismatch() -> PyErr {
 /// the single-source dispatch macros can feed it into a source-slot builder.
 /// The candle domain is neutral (matches the enum's own default), so a bare
 /// constant used on its own reads as a per-bar constant candle stream.
-pub(crate) fn const_to_candle_source(c: Real) -> Source<Atom> {
+pub(crate) fn const_to_atom_source(c: Real) -> Source<Atom> {
     runtime::erase(Value::<Atom>::new(c))
 }

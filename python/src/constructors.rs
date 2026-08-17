@@ -403,7 +403,7 @@ fn frame_columns(frame: &Bound<'_, PyAny>) -> PyResult<CandleColumns> {
 /// bars internally, so their source must consume `Candle`s too.
 pub(crate) fn require_candle_source(src: AnySource) -> PyResult<Source<Atom>> {
     match src {
-        AnySource::Candle(s) => Ok(s),
+        AnySource::Atom(s) => Ok(s),
         AnySource::Const(c) => Ok(runtime::erase(Value::<Atom>::new(c))),
         AnySource::Real(_) | AnySource::Snapshot(_) => Err(PyTypeError::new_err(
             "this indicator reads OHLC bars internally, so its source must be \
@@ -610,11 +610,18 @@ pub(crate) fn build_multi(
 // ---------------------------------------------------------------------------
 
 /// Wrap a candle-consuming indicator (`Input = Atom`) as a candle-rooted source.
-pub(crate) fn candle_source<T>(inner: T) -> PyIndicator
+/// Wrap an **atom**-rooted `Real` source: one that reads the bar *and* its side
+/// channels (`time`, `overlays`).
+///
+/// Named for the input it takes. The old name, `candle_source`, described what
+/// callers meant rather than what the chain consumed — every one of these is fed
+/// a whole 88-byte `Atom` even when it only ever looks at the 40-byte candle
+/// inside it. See `docs/PERFORMANCE.md`, P1.
+pub(crate) fn atom_source<T>(inner: T) -> PyIndicator
 where
     T: Indicator<Input = Atom, Output = Real> + Clone + Send + Sync + 'static,
 {
-    PyIndicator::wrap(AnySource::Candle(runtime::erase(inner)))
+    PyIndicator::wrap(AnySource::Atom(runtime::erase(inner)))
 }
 
 /// Every atom-input source leaf on the Python side follows the same shape:
@@ -629,9 +636,9 @@ macro_rules! atom_leaf_source {
         #[pyo3(signature = (source = None))]
         pub(crate) fn $name(source: Option<PyRef<'_, PyAtomSource>>) -> PyIndicator {
             match source.map(|s| s.inner.clone()) {
-                None => PyIndicator::wrap(AnySource::Candle(runtime::erase($default_ctor))),
+                None => PyIndicator::wrap(AnySource::Atom(runtime::erase($default_ctor))),
                 Some(AnyAtomSource::Atom(s)) => {
-                    PyIndicator::wrap(AnySource::Candle(runtime::erase($of_ctor(s))))
+                    PyIndicator::wrap(AnySource::Atom(runtime::erase($of_ctor(s))))
                 }
                 Some(AnyAtomSource::Snapshot(s)) => {
                     PyIndicator::wrap(AnySource::Snapshot(runtime::erase($of_ctor(s))))
@@ -650,9 +657,9 @@ macro_rules! atom_leaf_signal {
         #[pyo3(signature = (source = None))]
         pub(crate) fn $name(source: Option<PyRef<'_, PyAtomSource>>) -> PySignal {
             match source.map(|s| s.inner.clone()) {
-                None => PySignal::wrap(AnySignal::Candle(SignalBox::new($default_ctor))),
+                None => PySignal::wrap(AnySignal::Atom(SignalBox::new($default_ctor))),
                 Some(AnyAtomSource::Atom(s)) => {
-                    PySignal::wrap(AnySignal::Candle(SignalBox::new($of_ctor(s))))
+                    PySignal::wrap(AnySignal::Atom(SignalBox::new($of_ctor(s))))
                 }
                 Some(AnyAtomSource::Snapshot(s)) => {
                     PySignal::wrap(AnySignal::Snapshot(SignalBox::new($of_ctor(s))))
@@ -870,7 +877,7 @@ pub(crate) fn value(value: f64) -> PyIndicator {
 #[pyfunction]
 pub(crate) fn every(period: usize) -> PyResult<PySignal> {
     ensure_period(period)?;
-    Ok(PySignal::wrap(AnySignal::Candle(SignalBox::new(
+    Ok(PySignal::wrap(AnySignal::Atom(SignalBox::new(
         Every::<Atom>::new(period),
     ))))
 }
@@ -1006,7 +1013,7 @@ pub(crate) fn percentile(source: PyRef<'_, PyIndicator>, period: usize, pct: f64
 #[pyfunction]
 pub(crate) fn bars_since(source: PyRef<'_, PySignal>) -> PyResult<PyIndicator> {
     let out = match source.sig.clone() {
-        AnySignal::Candle(s) => AnySource::Candle(runtime::erase(BarsSince::new(s))),
+        AnySignal::Atom(s) => AnySource::Atom(runtime::erase(BarsSince::new(s))),
         AnySignal::Real(s) => AnySource::Real(runtime::erase(BarsSince::new(s))),
         AnySignal::Snapshot(s) => AnySource::Snapshot(runtime::erase(BarsSince::new(s))),
     };
@@ -1096,7 +1103,7 @@ macro_rules! bar_period {
         #[pyfunction]
         pub(crate) fn $name(period: usize) -> PyResult<PyIndicator> {
             ensure_period(period)?;
-            Ok(candle_source($ty::new(CurrentBar::new(), period)))
+            Ok(atom_source($ty::new(CurrentBar::new(), period)))
         }
     };
 }
@@ -1142,7 +1149,7 @@ macro_rules! bar_noarg {
         #[doc = $doc]
         #[pyfunction]
         pub(crate) fn $name() -> PyIndicator {
-            candle_source($ty::new(CurrentBar::new()))
+            atom_source($ty::new(CurrentBar::new()))
         }
     };
 }
@@ -1166,7 +1173,7 @@ macro_rules! bar_period_multi {
         pub(crate) fn $name(period: usize) -> PyResult<PyMulti> {
             ensure_period(period)?;
             Ok(PyMulti {
-                inner: AnyMulti::Candle(MultiBox::new($ty::new(CurrentBar::new(), period))),
+                inner: AnyMulti::Atom(MultiBox::new($ty::new(CurrentBar::new(), period))),
             })
         }
     };
@@ -1184,7 +1191,7 @@ bar_period_multi!(aroon, Aroon, "Aroon indicator: {up, down, oscillator}.");
 #[pyfunction]
 #[pyo3(signature = (step = 0.02, max = 0.2))]
 pub(crate) fn sar(step: f64, max: f64) -> PyIndicator {
-    candle_source(Sar::new(CurrentBar::new(), step, max))
+    atom_source(Sar::new(CurrentBar::new(), step, max))
 }
 
 /// MACD of `source`: {macd, signal, histogram}.
@@ -1232,7 +1239,7 @@ pub(crate) fn keltner(
     ensure_period(atr_period)?;
     let s = require_candle_source(source.src.clone())?;
     Ok(PyMulti {
-        inner: AnyMulti::Candle(MultiBox::new(Keltner::new(
+        inner: AnyMulti::Atom(MultiBox::new(Keltner::new(
             s,
             CurrentBar::new(),
             ema_period,
@@ -1303,7 +1310,7 @@ pub(crate) fn resample(every: usize, inner: PyRef<'_, PyIndicator>) -> PyResult<
     // domain — it will just ignore the bar and emit its constant on every
     // HTF boundary).
     let inner_candle = require_candle_source(inner.src.clone())?;
-    Ok(PyIndicator::wrap(AnySource::Candle(runtime::erase(
+    Ok(PyIndicator::wrap(AnySource::Atom(runtime::erase(
         ResampleThen::new(every, inner_candle),
     ))))
 }
@@ -1317,7 +1324,7 @@ pub(crate) fn resample(every: usize, inner: PyRef<'_, PyIndicator>) -> PyResult<
 pub(crate) fn latch<'py>(py: Python<'py>, source: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
     if let Ok(ind) = source.cast::<PyIndicator>() {
         let out = match ind.borrow().src.clone() {
-            AnySource::Candle(s) => AnySource::Candle(runtime::erase(Latch::new(s))),
+            AnySource::Atom(s) => AnySource::Atom(runtime::erase(Latch::new(s))),
             AnySource::Real(s) => AnySource::Real(runtime::erase(Latch::new(s))),
             AnySource::Snapshot(s) => AnySource::Snapshot(runtime::erase(Latch::new(s))),
             // A latched constant is still that constant — the source never
@@ -1328,7 +1335,7 @@ pub(crate) fn latch<'py>(py: Python<'py>, source: &Bound<'py, PyAny>) -> PyResul
     }
     if let Ok(sig) = source.cast::<PySignal>() {
         let out = match sig.borrow().sig.clone() {
-            AnySignal::Candle(s) => AnySignal::Candle(SignalBox::new(Latch::new(s))),
+            AnySignal::Atom(s) => AnySignal::Atom(SignalBox::new(Latch::new(s))),
             AnySignal::Real(s) => AnySignal::Real(SignalBox::new(Latch::new(s))),
             AnySignal::Snapshot(s) => AnySignal::Snapshot(SignalBox::new(Latch::new(s))),
         };
@@ -1389,8 +1396,8 @@ pub(crate) fn if_else(cond: PyRef<'_, PySignal>, then: PyRef<'_, PyIndicator>, o
     let branches = pair(then.src.clone(), otherwise.src.clone())?;
     let cond_sig = cond.sig.clone();
     let out = match (cond_sig, branches) {
-        (AnySignal::Candle(c), Pair::Candle(t, f)) => {
-            AnySource::Candle(runtime::erase(IfElse::new(c, t, f)))
+        (AnySignal::Atom(c), Pair::Atom(t, f)) => {
+            AnySource::Atom(runtime::erase(IfElse::new(c, t, f)))
         }
         (AnySignal::Real(c), Pair::Real(t, f)) => {
             AnySource::Real(runtime::erase(IfElse::new(c, t, f)))
@@ -1502,8 +1509,8 @@ pub(crate) fn build_get_real(
     let checked =
         GetReal::try_new(&schema.inner, key).map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(match source {
-        None => PyIndicator::wrap(AnySource::Candle(runtime::erase(checked))),
-        Some(AnyAtomSource::Atom(s)) => PyIndicator::wrap(AnySource::Candle(runtime::erase(
+        None => PyIndicator::wrap(AnySource::Atom(runtime::erase(checked))),
+        Some(AnyAtomSource::Atom(s)) => PyIndicator::wrap(AnySource::Atom(runtime::erase(
             GetReal::of(&schema.inner, key, s),
         ))),
         Some(AnyAtomSource::Snapshot(s)) => PyIndicator::wrap(AnySource::Snapshot(runtime::erase(
@@ -1520,8 +1527,8 @@ pub(crate) fn build_get_bool(
     let checked =
         GetBool::try_new(&schema.inner, key).map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(match source {
-        None => PySignal::wrap(AnySignal::Candle(SignalBox::new(checked))),
-        Some(AnyAtomSource::Atom(s)) => PySignal::wrap(AnySignal::Candle(SignalBox::new(
+        None => PySignal::wrap(AnySignal::Atom(SignalBox::new(checked))),
+        Some(AnyAtomSource::Atom(s)) => PySignal::wrap(AnySignal::Atom(SignalBox::new(
             GetBool::of(&schema.inner, key, s),
         ))),
         Some(AnyAtomSource::Snapshot(s)) => PySignal::wrap(AnySignal::Snapshot(SignalBox::new(
@@ -1538,8 +1545,8 @@ pub(crate) fn build_get_str(
     let checked =
         GetStr::try_new(&schema.inner, key).map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(match source {
-        None => PyStrSource::wrap(AnyStrSource::Candle(runtime::erase(checked))),
-        Some(AnyAtomSource::Atom(s)) => PyStrSource::wrap(AnyStrSource::Candle(runtime::erase(
+        None => PyStrSource::wrap(AnyStrSource::Atom(runtime::erase(checked))),
+        Some(AnyAtomSource::Atom(s)) => PyStrSource::wrap(AnyStrSource::Atom(runtime::erase(
             GetStr::of(&schema.inner, key, s),
         ))),
         Some(AnyAtomSource::Snapshot(s)) => PyStrSource::wrap(AnyStrSource::Snapshot(
@@ -1589,7 +1596,7 @@ pub(crate) fn carrier_inner_indicator(
     if let Ok(ind) = v.cast::<PyIndicator>() {
         let ind = ind.borrow();
         let inner: Box<dyn runtime::PayloadIndicator> = match &ind.src {
-            AnySource::Candle(s) => runtime::wrap(s.clone()),
+            AnySource::Atom(s) => runtime::wrap(s.clone()),
             AnySource::Real(s) => runtime::wrap(s.clone()),
             AnySource::Snapshot(s) => runtime::wrap(s.clone()),
             AnySource::Const(c) => runtime::wrap(Value::<Atom>::new(*c)),
@@ -1599,7 +1606,7 @@ pub(crate) fn carrier_inner_indicator(
     if let Ok(sig) = v.cast::<PySignal>() {
         let sig = sig.borrow();
         let inner: Box<dyn runtime::PayloadIndicator> = match &sig.sig {
-            AnySignal::Candle(s) => runtime::wrap(s.0.clone()),
+            AnySignal::Atom(s) => runtime::wrap(s.0.clone()),
             AnySignal::Real(s) => runtime::wrap(s.0.clone()),
             AnySignal::Snapshot(s) => runtime::wrap(s.0.clone()),
         };
@@ -1608,7 +1615,7 @@ pub(crate) fn carrier_inner_indicator(
     if let Ok(ss) = v.cast::<PyStrSource>() {
         let ss = ss.borrow();
         let inner: Box<dyn runtime::PayloadIndicator> = match &ss.src {
-            AnyStrSource::Candle(s) => runtime::wrap(s.clone()),
+            AnyStrSource::Atom(s) => runtime::wrap(s.clone()),
             AnyStrSource::Snapshot(s) => runtime::wrap(s.clone()),
             AnyStrSource::Const(c) => runtime::wrap(ValueStr::<Atom>::new(c.clone())),
         };
@@ -1882,7 +1889,7 @@ pub(crate) fn value_str(s: &str) -> PyStrSource {
 pub(crate) fn str_eq(lhs: &PyStrSource, rhs: &Bound<'_, PyAny>) -> PyResult<PySignal> {
     let rhs = coerce_str_operand(rhs)?;
     Ok(match str_pair(lhs.src.clone(), rhs)? {
-        StrPair::Candle(l, r) => PySignal::wrap(AnySignal::Candle(SignalBox::new(
+        StrPair::Atom(l, r) => PySignal::wrap(AnySignal::Atom(SignalBox::new(
             Combine::<_, _, StrEqOp>::new(l, r),
         ))),
         StrPair::Snapshot(l, r) => PySignal::wrap(AnySignal::Snapshot(SignalBox::new(
@@ -1896,7 +1903,7 @@ pub(crate) fn str_eq(lhs: &PyStrSource, rhs: &Bound<'_, PyAny>) -> PyResult<PySi
 pub(crate) fn str_ne(lhs: &PyStrSource, rhs: &Bound<'_, PyAny>) -> PyResult<PySignal> {
     let rhs = coerce_str_operand(rhs)?;
     Ok(match str_pair(lhs.src.clone(), rhs)? {
-        StrPair::Candle(l, r) => PySignal::wrap(AnySignal::Candle(SignalBox::new(
+        StrPair::Atom(l, r) => PySignal::wrap(AnySignal::Atom(SignalBox::new(
             Combine::<_, _, StrNeOp>::new(l, r),
         ))),
         StrPair::Snapshot(l, r) => PySignal::wrap(AnySignal::Snapshot(SignalBox::new(
@@ -2014,7 +2021,7 @@ pub(crate) fn _bench_frame_stage(
     let mut ind: runtime::Chain<Candle, Real> =
         runtime::erase(Atr::new(Identity::<Candle>::new(), period));
     if stage == 5 {
-        // What `AnySource::Candle` actually holds: an Atom-rooted chain, so each
+        // What `AnySource::Atom` actually holds: an Atom-rooted chain, so each
         // 40-byte `Candle` is lifted into an 88-byte `Atom` per bar.
         let mut atom_ind: crate::carriers::Source<Atom> =
             runtime::erase(Atr::new(fugazi_core::indicators::CurrentBar::new(), period));

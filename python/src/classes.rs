@@ -1004,7 +1004,7 @@ impl PyIndicator {
     /// identity-rooted one.
     pub(crate) fn update(&mut self, sample: &Bound<'_, PyAny>) -> PyResult<Option<f64>> {
         match &mut self.src {
-            AnySource::Candle(s) => Ok(Indicator::update(s, extract_atom(sample)?)),
+            AnySource::Atom(s) => Ok(Indicator::update(s, extract_atom(sample)?)),
             AnySource::Real(s) => Ok(Indicator::update(s, extract_real(sample)?)),
             AnySource::Snapshot(s) => Ok(Indicator::update(s, extract_snapshot(sample)?)),
             // A bare constant defaults to candle-rooted; it ignores the bar.
@@ -1325,7 +1325,7 @@ impl PySignal {
     /// for a candle-rooted signal, a `float` for an identity-rooted one.
     pub(crate) fn update(&mut self, sample: &Bound<'_, PyAny>) -> PyResult<bool> {
         match &mut self.sig {
-            AnySignal::Candle(s) => {
+            AnySignal::Atom(s) => {
                 Ok(Indicator::update(s, extract_atom(sample)?).unwrap_or(false))
             }
             AnySignal::Real(s) => Ok(Indicator::update(s, extract_real(sample)?).unwrap_or(false)),
@@ -1464,7 +1464,7 @@ impl PyStrSource {
     /// `None`).
     pub(crate) fn update(&mut self, sample: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
         let out = match &mut self.src {
-            AnyStrSource::Candle(s) => Indicator::update(s, extract_atom(sample)?),
+            AnyStrSource::Atom(s) => Indicator::update(s, extract_atom(sample)?),
             AnyStrSource::Snapshot(s) => Indicator::update(s, extract_snapshot(sample)?),
             AnyStrSource::Const(c) => {
                 // Still validate the sample so a constant behaves like any
@@ -1507,7 +1507,7 @@ impl PyStrSource {
     pub(crate) fn eq(&self, other: &Bound<'_, PyAny>) -> PyResult<PySignal> {
         let rhs = coerce_str_operand(other)?;
         Ok(match str_pair(self.src.clone(), rhs)? {
-            StrPair::Candle(l, r) => PySignal::wrap(AnySignal::Candle(SignalBox::new(
+            StrPair::Atom(l, r) => PySignal::wrap(AnySignal::Atom(SignalBox::new(
                 Combine::<_, _, StrEqOp>::new(l, r),
             ))),
             StrPair::Snapshot(l, r) => PySignal::wrap(AnySignal::Snapshot(SignalBox::new(
@@ -1520,7 +1520,7 @@ impl PyStrSource {
     pub(crate) fn ne(&self, other: &Bound<'_, PyAny>) -> PyResult<PySignal> {
         let rhs = coerce_str_operand(other)?;
         Ok(match str_pair(self.src.clone(), rhs)? {
-            StrPair::Candle(l, r) => PySignal::wrap(AnySignal::Candle(SignalBox::new(
+            StrPair::Atom(l, r) => PySignal::wrap(AnySignal::Atom(SignalBox::new(
                 Combine::<_, _, StrNeOp>::new(l, r),
             ))),
             StrPair::Snapshot(l, r) => PySignal::wrap(AnySignal::Snapshot(SignalBox::new(
@@ -1571,7 +1571,7 @@ impl PyMulti {
     ) -> PyResult<Option<Bound<'py, PyDict>>> {
         let names = self.inner.names();
         let out = match &mut self.inner {
-            AnyMulti::Candle(m) => m.0.update(extract_atom(sample)?),
+            AnyMulti::Atom(m) => m.0.update(extract_atom(sample)?),
             AnyMulti::Real(m) => m.0.update(extract_real(sample)?),
             AnyMulti::Snapshot(m) => m.0.update(extract_snapshot(sample)?),
         };
@@ -1648,7 +1648,7 @@ impl PyMulti {
     /// ```
     pub(crate) fn shared(&self) -> PySharedMulti {
         let cloned = match &self.inner {
-            AnyMulti::Candle(m) => AnySharedMulti::Candle(Arc::new(Mutex::new(SharedMultiCell {
+            AnyMulti::Atom(m) => AnySharedMulti::Atom(Arc::new(Mutex::new(SharedMultiCell {
                 names: m.0.names(),
                 multi: m.0.clone_box(),
                 generation: 0,

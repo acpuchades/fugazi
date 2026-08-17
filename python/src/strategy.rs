@@ -1176,7 +1176,7 @@ impl<S: Indicator<Input = Atom>> Indicator for AtomLift<S> {
 /// form a strategy consumes. A bare-value (Real) signal is a domain error.
 pub(crate) fn snapshot_signal(sig: &PySignal) -> PyResult<SignalBox<Snapshot<Symbol>>> {
     match &sig.sig {
-        AnySignal::Candle(s) => Ok(SignalBox::new(AtomLift(s.clone()))),
+        AnySignal::Atom(s) => Ok(SignalBox::new(AtomLift(s.clone()))),
         AnySignal::Snapshot(s) => Ok(s.clone()),
         AnySignal::Real(_) => Err(PyValueError::new_err(
             "a strategy signal must be candle- or snapshot-rooted, not a bare value (Real) signal",
@@ -1188,7 +1188,7 @@ pub(crate) fn snapshot_signal(sig: &PySignal) -> PyResult<SignalBox<Snapshot<Sym
 /// into the snapshot-rooted sizing multiplier a strategy consumes.
 pub(crate) fn snapshot_source(ind: &PyIndicator) -> PyResult<Source<Snapshot<Symbol>>> {
     match &ind.src {
-        AnySource::Candle(s) => Ok(runtime::erase(AtomLift(s.clone()))),
+        AnySource::Atom(s) => Ok(runtime::erase(AtomLift(s.clone()))),
         AnySource::Snapshot(s) => Ok(s.clone()),
         AnySource::Const(c) => Ok(runtime::erase(Value::<Snapshot<Symbol>>::new(*c))),
         AnySource::Real(_) => Err(PyValueError::new_err(
