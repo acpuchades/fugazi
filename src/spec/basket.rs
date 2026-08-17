@@ -698,6 +698,56 @@ mod tests {
         assert!(err.contains("!get"), "carries the tag trail: {err}");
     }
 
+    /// A typo inside a deferred template is a *load* error, like a typo in any
+    /// eagerly-parsed slot.
+    ///
+    /// The template's shape doesn't depend on which symbol the driver binds, so
+    /// `SpecTemplate`'s `Deserialize` typed-parses a probe copy with `!arg SYM`
+    /// held as a hole. Before that, `score:` was captured as an untyped tree and
+    /// a misspelled tag survived the load, `fugazi check`, and everything else
+    /// until the first bar that instantiated it.
+    #[test]
+    fn a_misspelled_tag_inside_a_template_fails_the_load() {
+        let yaml = r#"
+            selection: !top_bottom { longs: 1, shorts: 1 }
+            score: !smaa { source: !close { source: !pick { symbol: !arg SYM } }, period: 20 }
+            sizing: !value 1.0
+        "#;
+        let err = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new())
+            .expect_err("a misspelled tag must not load");
+        let err = format!("{err:#}");
+        assert!(err.contains("smaa"), "{err}");
+    }
+
+    /// The same eagerness, one level in: a well-spelled tag with a field that
+    /// isn't its own.
+    #[test]
+    fn an_unknown_field_inside_a_template_fails_the_load() {
+        let yaml = r#"
+            selection: !top_bottom { longs: 1, shorts: 1 }
+            score: !sma { source: !close { source: !pick { symbol: !arg SYM } }, perid: 20 }
+            sizing: !value 1.0
+        "#;
+        let err = BasketStrategySpec::from_text_with_params(yaml, &HashMap::new())
+            .expect_err("a misspelled field must not load");
+        let err = format!("{err:#}");
+        assert!(err.contains("perid"), "{err}");
+    }
+
+    /// …and the eager parse must not reject what the driver will happily build:
+    /// `!arg SYM` stands in a `symbol:` (string) position here, and the probe
+    /// answers it with a string rather than failing the typed parse.
+    #[test]
+    fn a_templated_arg_still_loads() {
+        let yaml = r#"
+            selection: !top_bottom { longs: 1, shorts: 1 }
+            score: !sma { source: !close { source: !pick { symbol: !arg SYM } }, period: 20 }
+            sizing: !value 1.0
+        "#;
+        BasketStrategySpec::from_text_with_params(yaml, &HashMap::new())
+            .expect("a well-formed template loads");
+    }
+
     #[test]
     fn deserializes_a_full_basket_spec() {
         let yaml = r#"

@@ -569,6 +569,23 @@ mod tests {
         assert!(err.contains("no_such_column"), "{err}");
     }
 
+    /// The multi-asset twin of basket's load-time template parse: a typo in a
+    /// per-side `enter:` fails the load, not the first bar of a run. See
+    /// `SpecTemplate`'s `Deserialize`.
+    #[test]
+    fn a_misspelled_tag_inside_a_side_template_fails_the_load() {
+        let yaml = r#"
+            long:
+              enter: !crosses_abov
+                lhs: !close { source: !pick { symbol: !arg SYM } }
+                rhs: !value 50
+        "#;
+        let err = MultiAssetStrategySpec::from_text_with_params(yaml, &HashMap::new())
+            .expect_err("a misspelled tag must not load");
+        let err = format!("{err:#}");
+        assert!(err.contains("crosses_abov"), "{err}");
+    }
+
     #[test]
     fn deserializes_a_full_multi_asset_spec() {
         let yaml = r#"

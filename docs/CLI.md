@@ -299,7 +299,12 @@ Within that constraint it is as strict as it can be. It catches:
   including inside a basket's `score:` / `sizing:`, a multi-asset side's
   `enter:`, and a portfolio's `weights:`. Those are deferred templates that only
   instantiate per-symbol at run time, but their *shape* doesn't depend on the
-  symbol, so `check` parses each with its `!arg`s held undefined.
+  symbol, so each is parsed with its `!arg`s held undefined. Like the type check
+  below, this is **not** exclusive to `check`: it happens on every load, so `run`,
+  `optimize` and the library loaders report the same typo before the first bar.
+  The one thing held back is an error a placeholder itself caused — `!value !arg
+  CHILD_GROUP` is a legitimate weight expression, and refusing to load it would
+  be a false verdict — so a template body goes unvalidated past such a node.
 - **Input/output type mismatches between tags.** `!sma` needs a `Real` source,
   `!atr` a `Candle` one, `!close` an `Atom`; a violation is reported against the
   innermost offending node, with a trail of the enclosing tags, rather than

@@ -223,10 +223,65 @@ impl Drop for CheckModeGuard {
 /// Whether a [`check_mode`] guard is currently held on this thread.
 ///
 /// Read by [`from_value`] to pick the hole-aware path, and by
-/// [`SpecTemplate`](crate::spec::SpecTemplate)'s `Deserialize` to decide
-/// whether to typed-parse its deferred body for shape errors.
+/// [`parse_probe`] to decide whether the observations a probe parse records
+/// belong to a `check` report or to nobody.
 pub fn in_check_mode() -> bool {
     CHECK_MODE.with(Cell::get)
+}
+
+/// Hole-aware typed parse of a **probe** copy of a subtree, whether or not a
+/// `check` run is in flight. The parsed value is discarded; only the verdict
+/// matters.
+///
+/// [`SpecTemplate`](crate::spec::SpecTemplate)'s `Deserialize` calls this on a
+/// copy of its deferred body with every `!arg` marked as a hole, so a typo
+/// inside a basket's `score:` or a multi-asset side's `enter:` is a parse error
+/// at *load*, exactly as it is for the eagerly-parsed single/pairs slots.
+///
+/// ## An error that names a hole is not a verdict
+///
+/// A hole is a wildcard for every serde-driven leaf — it answers whichever
+/// `deserialize_*` method its position calls. The hand-rolled parses can't be
+/// asked that: `!value`'s [`TryFrom`] reads a raw `serde_norway::Value` with no
+/// type demand to answer, so a hole reaches it as the sentinel mapping and it
+/// reports "expected a number, a bool, a string or a list". That is a statement
+/// about the placeholder, not about the document, so it is **not** reported —
+/// the probe returns `Ok`, the same skip rule [`crate::spec::typecheck`] applies
+/// to what it cannot decide. Sentinel keys are reserved and can't occur in a
+/// real document, so recognizing them in the message is unambiguous.
+///
+/// The cost of skipping is a template body that goes unvalidated past its first
+/// placeholder-shaped failure — `run` still reports it, from the build. The cost
+/// of *not* skipping would be refusing to load a document that runs fine.
+///
+/// ## Observations
+///
+/// Inside `check` the type observations this parse records are part of the
+/// report — a `!param` used inside a template still needs a value — so they are
+/// left for [`take_observations`]. Outside `check` nobody drains that ledger,
+/// and an API consumer loading specs in a loop would grow it without bound, so a
+/// self-entered probe drops what it recorded.
+pub fn parse_probe<T: DeserializeOwned>(value: Json) -> Result<(), String> {
+    let reporting = in_check_mode();
+    let _guard = (!reporting).then(check_mode);
+    let outcome = from_json_value::<T>(value)
+        .map(|_| ())
+        .map_err(|e| e.to_string());
+    if !reporting {
+        let _ = take_observations();
+    }
+    match outcome {
+        Err(message) if names_a_hole(&message) => Ok(()),
+        outcome => outcome,
+    }
+}
+
+/// Does this parse error mention one of the reserved sentinel keys — i.e. did a
+/// placeholder, rather than the document, cause it? See [`parse_probe`].
+fn names_a_hole(message: &str) -> bool {
+    [UNSET_PARAM_KEY, UNSET_ARG_KEY, UNDEFINED_KEY]
+        .iter()
+        .any(|key| message.contains(key))
 }
 
 /// Deserialize `value` into `T`. Inside a [`check_mode`] guard this is
@@ -654,5 +709,83 @@ mod tests {
             "ratio": 1.0,
         });
         assert!(from_value::<Leaf>(to_yaml(json)).is_err());
+    }
+
+    #[test]
+    fn a_probe_is_hole_aware_without_a_guard_of_its_own() {
+        // The load-time entry point: no `check` run in flight, holes still
+        // answered. This is what lets a template body be validated at load.
+        let json = serde_json::json!({
+            "period": arg_sentinel("SYM"),
+            "name": "x",
+            "flag": false,
+            "ratio": 1.0,
+        });
+        assert!(!in_check_mode());
+        parse_probe::<Leaf>(json).expect("a hole must not fail the probe");
+        // And the guard is released again, so an ordinary parse afterwards is
+        // still strict.
+        assert!(!in_check_mode());
+    }
+
+    #[test]
+    fn a_probe_reports_a_real_shape_error() {
+        let json = serde_json::json!({
+            "period": 14,
+            "name": "x",
+            "flag": false,
+            // `ratio` misspelled: nothing to do with placeholders, so the
+            // probe's whole job is to report it.
+            "ration": 1.0,
+        });
+        let err = parse_probe::<Leaf>(json).expect_err("a missing field is decidable");
+        assert!(err.contains("ratio"), "{err}");
+    }
+
+    #[test]
+    fn a_probe_skips_an_error_that_only_a_hole_could_have_caused() {
+        // `!value`'s hand-rolled `TryFrom` reads the raw tree, so a hole
+        // reaches it as the sentinel mapping and it reports a type error. The
+        // document is fine — `!value !arg CHILD_GROUP` is how a portfolio
+        // dispatches weights by group — so the probe must not report it.
+        let json = serde_json::json!({"value": arg_sentinel("CHILD_GROUP")});
+        parse_probe::<crate::spec::NodeSpec>(json)
+            .expect("a placeholder-shaped failure is not a verdict");
+
+        // The same node with a real typo *is* reported.
+        let json = serde_json::json!({"valu": 1.0});
+        assert!(parse_probe::<crate::spec::NodeSpec>(json).is_err());
+    }
+
+    #[test]
+    fn a_probe_outside_check_leaves_no_observations() {
+        let json = serde_json::json!({
+            "period": arg_sentinel("SYM"),
+            "name": sentinel("N"),
+            "flag": false,
+            "ratio": 1.0,
+        });
+        parse_probe::<Leaf>(json).unwrap();
+        assert!(
+            take_observations().is_empty(),
+            "observations belong to a `check` report, and this was not one",
+        );
+    }
+
+    #[test]
+    fn a_probe_inside_check_keeps_its_observations() {
+        // Inside `check` the same parse feeds the report: a `!param` used only
+        // inside a template body is still a value the user has to supply.
+        let json = serde_json::json!({
+            "period": sentinel("PERIOD"),
+            "name": "x",
+            "flag": false,
+            "ratio": 1.0,
+        });
+        let _guard = check_mode();
+        parse_probe::<Leaf>(json).unwrap();
+        let seen = take_observations();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].1, "PERIOD");
     }
 }

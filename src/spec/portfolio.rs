@@ -322,7 +322,13 @@ where
         None => return Ok(None),
     };
     let rewritten = rewrite_weights_sugar(raw).map_err(D::Error::custom)?;
-    Ok(Some(SpecTemplate::<NodeSpec>::from_tree(rewritten)))
+    // `checked`, not `from_tree`: the sugar rewrite bypasses `SpecTemplate`'s
+    // own `Deserialize`, and with it the probe parse that makes a typo in a
+    // deferred body a load error. Without this the `weights:` template is the
+    // one template still validated only at build.
+    SpecTemplate::<NodeSpec>::checked(rewritten)
+        .map(Some)
+        .map_err(D::Error::custom)
 }
 
 /// Rewrite `!fixed`/`!equal_weight` at the top level of a weights
@@ -959,6 +965,26 @@ mod tests {
         let list = extract_top_level_value_list(spec.weights.as_ref().unwrap().tree())
             .expect("!fixed should have lowered to !value <list>");
         assert_eq!(list, vec![0.6, 0.4]);
+    }
+
+    /// `weights:` is a deferred template like a basket's `score:`, so a typo
+    /// inside it is a load error too.
+    ///
+    /// It reaches `SpecTemplate` through `deserialize_weights` (the `!fixed` /
+    /// `!equal_weight` sugar rewrite) rather than the plain `Deserialize`, so
+    /// this pins that path against dropping the probe parse.
+    #[test]
+    fn a_misspelled_tag_inside_the_weights_template_fails_the_load() {
+        let yaml = r#"
+            weights: !drawdown_throtle { source: !portfolio_book, max_drawdown: 0.15 }
+            children:
+              - strategy: !buy_and_hold { symbol: A }
+              - strategy: !buy_and_hold { symbol: B }
+        "#;
+        let err = PortfolioSpec::from_text_with_params(yaml, &HashMap::new())
+            .expect_err("a misspelled tag must not load");
+        let err = format!("{err:#}");
+        assert!(err.contains("drawdown_throtle"), "{err}");
     }
 
     #[test]

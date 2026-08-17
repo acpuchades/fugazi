@@ -112,6 +112,29 @@ def test_load_basket_and_run():
     assert len(rep.fills) >= 2
 
 
+def test_a_typo_inside_a_per_symbol_template_raises_at_load():
+    """A basket's `score:` is deferred per symbol, but its *shape* isn't.
+
+    The template body is typed-parsed at load with `!arg SYM` held as a hole,
+    so a misspelled tag raises here — not on the first bar of a `run()` that
+    happens to quote a symbol. Same rule for a multi-asset side's `enter:`.
+    """
+    basket = """
+    selection: !top_bottom { longs: 1, shorts: 1 }
+    score: !smaa { source: !close { source: !pick { symbol: !arg SYM } }, period: 2 }
+    sizing: !value 1.0
+    """
+    with pytest.raises(Exception, match="smaa"):
+        ta.load_spec(basket)
+
+    multi = """
+    long:
+      enter: !gt { lhs: !close { source: !pick { symbol: !arg SYM } }, rsh: 50 }
+    """
+    with pytest.raises(Exception, match="rsh"):
+        ta.load_spec(multi)
+
+
 def test_load_multi_and_run():
     yaml = """
     long:

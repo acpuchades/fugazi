@@ -230,6 +230,17 @@ Each template is therefore **probed once at build time** against `PROBE_SYMBOL`
 template that builds for the probe builds for every symbol. **If you add a per-symbol slot,
 add it to the probe.**
 
+**A template defers its value, not its shape.** One step earlier than that probe,
+`SpecTemplate`'s `Deserialize` typed-parses a copy of the deferred body at **load**, with
+every `!arg` held as an `undefined` hole — so a typo inside a basket's `score:`, a
+multi-asset side's `enter:`, or a portfolio's `weights:` is a parse error like any other,
+for `check`, `run`, the Rust `*Spec::from_text_*` constructors and Python's `load_spec`
+alike. Preprocessing a tree before wrapping it? Use `SpecTemplate::checked`, not
+`from_tree` (which skips the probe — right only for a tree derived from an
+already-validated template). A probe error that names a hole sentinel is **skipped, not
+reported**: `!value !arg CHILD_GROUP` is a legitimate portfolio weight, and `!value`'s
+hand-rolled `TryFrom` has no type demand to answer a hole with (`undefined::parse_probe`).
+
 **Driver-level validation.** `spec::backtest::validated(|| spec.try_build(..))` builds once
 up front so the run machinery (which still goes through the infallible shim) never sees a
 bad spec. The CLI runners and every optimize row call it; `build_error(e)` is the `anyhow`
@@ -319,7 +330,7 @@ If you're about to write a private helper whose name looks like something here, 
 | Load-time `!param` / `!import` substitution | `params::substitute` / `imports::resolve(value, base)` | `src/cli/{params,imports}.rs` |
 | Dir relative `!import` resolves against | `input::Source::base_dir()` | `src/spec/input.rs` |
 | Build-time `!arg` substitution | `args::substitute(value, &args)` | `src/spec/args.rs` |
-| Defer spec subtree until args ready | `SpecTemplate<T>` + `.build(&args)` (typed-parses a copy with args held undefined in check mode) | `src/spec/template.rs`, `src/spec/args.rs` |
+| Defer spec subtree until args ready | `SpecTemplate<T>` + `.build(&args)`; `SpecTemplate::checked(tree)` wraps a preprocessed tree *and* probes it (every load typed-parses a copy with args held undefined) | `src/spec/template.rs`, `src/spec/args.rs` |
 | Static type check of an expression tree (`check` only) | `typecheck::{output_type, check_immediate}` — `None` output type means *skip*, never *invalid* | `src/spec/typecheck.rs` |
 | Constant leaf: number or string | `!value 70` / `!value bull` | `src/spec/expr.rs` |
 | Three-source ternary | `IfElse::new(cond, t, f)` / `.if_else(t, f)` | `src/indicators/if_else.rs` |

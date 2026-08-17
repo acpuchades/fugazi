@@ -540,6 +540,16 @@ symbol at build), so they compose freely inside one tree:
 
 `SYM` is the only argument the basket driver supplies.
 
+**Only the value is deferred, not the shape.** A template body is typed-parsed
+at load with each `!arg` held as a placeholder, so a misspelled tag or field
+inside `score:` / `sizing:` (or a multi-asset side's `enter:`, or a portfolio's
+`weights:`) is a parse error like any other — reported by `fugazi check`, by
+`fugazi run` before the first bar, and by `load_spec` in Python. What the parse
+can't decide is left to the build, which happens up front too: each template is
+built once against a stand-in symbol when the strategy is constructed, so an
+unknown `!get` column or a mistyped slot fails at start-up rather than on the
+first bar that quotes a symbol.
+
 ### Selection rules
 
 | Tag | Fields | Meaning |

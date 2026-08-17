@@ -692,6 +692,13 @@ portfolio), and returns a `StrategySpec` that implements the same
 builder. `.evaluate(...)` is a bonus method that runs + reduces to a metrics
 dict in one call.
 
+`load_spec` validates as it loads: an unknown tag, a misspelled field or a
+decidably-wrong slot type raises here, not on some later bar. That includes the
+per-symbol templates — a basket's `score:` / `sizing:`, a multi-asset side's
+`enter:`, a portfolio's `weights:` — whose *values* are deferred until the driver
+binds a symbol but whose shape is checked up front, with each `!arg` held as a
+placeholder.
+
 ```python
 import fugazi as ta
 

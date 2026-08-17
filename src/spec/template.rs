@@ -26,6 +26,16 @@
 //! singleton-object keys (`param` vs. `arg`), so a leftover `!arg` after
 //! the load-time pass survives untouched.
 //!
+//! # Deferred value, eager shape
+//!
+//! Only the *value* is deferred. A template's shape — which tags, which
+//! fields, which types — does not depend on the symbol (or child index, or
+//! group) the driver eventually binds, so the [`Deserialize`] impl below
+//! typed-parses a probe copy of the body at load, with every `!arg` held as a
+//! hole. A misspelled tag inside a basket's `score:` is therefore a parse error
+//! at load, exactly like one inside a single-asset `enter:` — not a surprise on
+//! the first bar that quotes the symbol which instantiates it.
+//!
 //! # YAML surface
 //!
 //! **Untagged** — a `SpecTemplate<T>` field just captures its subtree
@@ -67,11 +77,19 @@ pub struct SpecTemplate<T> {
 }
 
 impl<T> SpecTemplate<T> {
-    /// Wrap a raw JSON tree as a template. Any load-time `!param`
-    /// substitutions should already be applied to `tree` (the standard
-    /// path is via the [`Deserialize`] impl below, after a caller runs
-    /// [`params::substitute`](crate::spec::params::substitute) on the whole
+    /// Wrap a raw JSON tree as a template **without validating its shape**.
+    ///
+    /// Any load-time `!param` substitutions should already be applied to `tree`
+    /// (the standard path is via the [`Deserialize`] impl below, after a caller
+    /// runs [`params::substitute`](crate::spec::params::substitute) on the whole
     /// document first).
+    ///
+    /// Prefer [`checked`](Self::checked) when the tree comes from a document:
+    /// this one defers every shape error to the eventual
+    /// [`build`](Self::build), which for the per-symbol slots is inside the
+    /// driver. It is the right call only when the tree is derived from an
+    /// already-validated template (the per-child `!value <list>` rewrite in
+    /// `PortfolioSpec::build` is the one such caller).
     pub fn from_tree(tree: Value) -> Self {
         Self {
             tree,
@@ -87,7 +105,20 @@ impl<T> SpecTemplate<T> {
     }
 }
 
-impl<T: for<'de> Deserialize<'de>> SpecTemplate<T> {
+impl<T: DeserializeOwned> SpecTemplate<T> {
+    /// Wrap a raw JSON tree as a template, **typed-parsing a probe copy first**
+    /// so a shape error in the deferred body is reported here.
+    ///
+    /// What the [`Deserialize`] impl below does, exposed for the callers that
+    /// preprocess a tree before wrapping it (the `weights:` sugar rewrite) and
+    /// for API consumers assembling a template programmatically. See that impl
+    /// for what the probe can and can't decide.
+    pub fn checked(tree: Value) -> std::result::Result<Self, String> {
+        let probe = args::substitute_for_check(tree.clone());
+        crate::spec::undefined::parse_probe::<T>(probe)?;
+        Ok(Self::from_tree(tree))
+    }
+
     /// Resolve `!arg` placeholders against `args` and deserialize into
     /// `T`. Errors if an `!arg` references a name that isn't in `args`
     /// and has no `default`, or if the resulting tree doesn't
@@ -98,31 +129,33 @@ impl<T: for<'de> Deserialize<'de>> SpecTemplate<T> {
     }
 }
 
-/// Deserialization captures the raw tree without trying to typed-parse it
-/// into `T` — that's deferred to [`build`](SpecTemplate::build), so any
-/// `!arg` placeholders inside the tree survive the load pass.
+/// Deserialization stores the raw tree — the `!arg` placeholders inside it have
+/// to survive the load pass, so what [`build`](SpecTemplate::build) resolves
+/// later is the original — but it **typed-parses a probe copy first**, so a
+/// template body is validated as eagerly as an ordinary slot.
 ///
-/// **Except under `fugazi check`.** Deferring the typed parse means a template
-/// body is otherwise never validated by `check`: an unknown tag or a
-/// misspelled field inside a basket's `score:`, a multi-asset side's `enter:`,
-/// or a portfolio's `weights:` would pass and only fail once a run reached the
-/// symbol that instantiates it. A template's *shape* doesn't depend on which
-/// symbol the driver eventually binds, so while a
-/// [`check_mode`](crate::spec::undefined::check_mode) guard is held this
-/// additionally parses a copy of the tree with every `!arg` marked as a hole,
-/// surfacing those errors at check time. The stored tree is the original,
-/// untouched — `build` still resolves real args later.
+/// Deferring the typed parse entirely would mean a template body is never
+/// validated by *anything* until a run reaches the symbol that instantiates it:
+/// an unknown tag or a misspelled field inside a basket's `score:`, a
+/// multi-asset side's `enter:`, or a portfolio's `weights:` would load clean,
+/// pass `fugazi check`, and then abort a run mid-flight. A template's *shape*
+/// doesn't depend on which symbol (or child index, or group) the driver
+/// eventually binds, so it can be decided here: this parses a copy of the tree
+/// with every `!arg` marked as a hole sentinel
+/// ([`args::substitute_for_check`]) through
+/// [`undefined::parse_probe`](crate::spec::undefined::parse_probe), which
+/// answers each hole with a value of whatever type its position demands.
+///
+/// The effect is that a typo in a deferred body is a parse error like every
+/// other, for every consumer of the loader — `run`, `optimize`, `check`, the
+/// Rust `*Spec::from_text_*` constructors, and Python's `load_spec`.
 impl<'de, T: DeserializeOwned> Deserialize<'de> for SpecTemplate<T> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let tree = Value::deserialize(deserializer)?;
-        if crate::spec::undefined::in_check_mode() {
-            let probe = args::substitute_for_check(tree.clone());
-            crate::spec::undefined::from_json_value::<T>(probe).map_err(serde::de::Error::custom)?;
-        }
-        Ok(Self::from_tree(tree))
+        Self::checked(tree).map_err(serde::de::Error::custom)
     }
 }
 
@@ -149,7 +182,44 @@ mod tests {
     fn deserialize_captures_raw_tree() {
         let value = json!({"symbol": {"arg": "SYM"}, "period": 20});
         let template: SpecTemplate<Toy> = serde_json::from_value(value.clone()).unwrap();
+        // Captured verbatim: the probe parse runs on a *copy*, so the `!arg`
+        // leaf is still there for `build` to resolve.
         assert_eq!(template.tree(), &value);
+    }
+
+    #[test]
+    fn deserialize_rejects_a_body_that_cannot_typed_parse() {
+        // `period` is missing. Deferring the typed parse used to make this a
+        // build-time failure — inside the driver, for the per-symbol slots.
+        let value = json!({"symbol": {"arg": "SYM"}});
+        let err = serde_json::from_value::<SpecTemplate<Toy>>(value)
+            .expect_err("a body that can't parse must not load");
+        assert!(err.to_string().contains("period"), "{err}");
+    }
+
+    #[test]
+    fn deserialize_answers_an_arg_hole_with_the_type_its_position_demands() {
+        // The probe knows nothing about the values a driver will bind, so each
+        // `!arg` answers as whatever its position needs: a string for
+        // `symbol:`, a number for `period:`. Neither is a parse failure.
+        let value = json!({"symbol": {"arg": "SYM"}, "period": {"arg": "CHILD_INDEX"}});
+        serde_json::from_value::<SpecTemplate<Toy>>(value).expect("both holes are answerable");
+    }
+
+    #[test]
+    fn a_load_time_probe_leaves_no_check_state_behind() {
+        // The probe borrows `check`'s hole machinery, which records what type
+        // each placeholder was required to have. Outside `check` nobody drains
+        // that ledger, so a long-lived API consumer loading specs in a loop
+        // would grow it without bound — and the next `check` in the process
+        // would report placeholders from a document it never read.
+        let value = json!({"symbol": {"arg": "SYM"}, "period": 20});
+        serde_json::from_value::<SpecTemplate<Toy>>(value).unwrap();
+        assert!(!crate::spec::undefined::in_check_mode());
+        assert!(
+            crate::spec::undefined::take_observations().is_empty(),
+            "a load-time probe must not leave observations for `check` to report",
+        );
     }
 
     #[test]

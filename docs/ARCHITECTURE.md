@@ -984,6 +984,13 @@ kernel), `get.rs`, `overlay.rs`, `data.rs`, `csv_source.rs`, `list.rs`,
   slots stay plain `NodeSpec`.
 - `template.rs` — `SpecTemplate<T>`: captures raw `serde_json::Value`; `.build(&args)`
   runs `!arg` then typed-parses. Two-pass: `!param` at load, `!arg` each `.build()`.
+  **Deferred value, eager shape**: `Deserialize` (and `SpecTemplate::checked`, for the
+  callers that preprocess a tree first) typed-parses a *probe* copy at load with every
+  `!arg` held as an `undefined` hole, so a typo in a deferred body is a parse error like
+  any other, for every consumer of the loader. A probe error naming a hole sentinel is
+  *skipped*, not reported — `!value`'s hand-rolled `TryFrom` has no type demand to answer
+  a hole with, and refusing to load `!value !arg CHILD_GROUP` would be a false verdict
+  (`undefined::parse_probe`).
 - `strategy.rs` — `SideSpec`, `SingleStrategySpec`, `DynSingleStrategy`.
 - `preset.rs` — `StrategyPreset` (`!buy_and_hold`/`!ma_crossover`/`!rsi_reversal`/
   `!donchian_breakout`/`!keltner_breakout`) and `StrategyRef`. `optimize` =
