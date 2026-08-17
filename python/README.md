@@ -1,5 +1,11 @@
 # fugazi (Python)
 
+[![CI](https://img.shields.io/github/actions/workflow/status/acpuchades/fugazi/ci.yml?branch=main&label=CI)](https://github.com/acpuchades/fugazi/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/fugazi.svg)](https://pypi.org/project/fugazi/)
+[![Python versions](https://img.shields.io/pypi/pyversions/fugazi.svg)](https://pypi.org/project/fugazi/)
+[![License: MIT](https://img.shields.io/pypi/l/fugazi.svg)](https://github.com/acpuchades/fugazi/blob/main/LICENSE)
+[![Sponsor](https://img.shields.io/badge/sponsor-%E2%9D%A4-db61a2)](https://github.com/sponsors/acpuchades)
+
 Python bindings for [`fugazi`](..), a library of **incremental**,
 **composable** technical-analysis primitives.
 

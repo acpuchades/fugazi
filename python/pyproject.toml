@@ -13,11 +13,21 @@ keywords = ["trading", "technical-analysis", "indicators", "finance", "increment
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
+    # The wheel is abi3-py39 (see `pyo3`'s features in Cargo.toml), so one
+    # binary serves every version below. These are metadata only — PyPI's
+    # sidebar and the `pypi/pyversions` README badge read them, nothing
+    # enforces them; `requires-python` above is the real floor.
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Office/Business :: Financial :: Investment",
 ]
 
 [project.urls]
 Repository = "https://github.com/acpuchades/fugazi"
+Funding = "https://github.com/sponsors/acpuchades"
 
 [project.optional-dependencies]
 test = ["pytest", "numpy", "pandas", "polars", "jsonschema", "pyyaml"]

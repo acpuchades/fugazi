@@ -1,5 +1,12 @@
 # fugazi
 
+[![CI](https://img.shields.io/github/actions/workflow/status/acpuchades/fugazi/ci.yml?branch=main&label=CI)](https://github.com/acpuchades/fugazi/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/fugazi.svg)](https://crates.io/crates/fugazi)
+[![docs.rs](https://img.shields.io/docsrs/fugazi)](https://docs.rs/fugazi)
+[![PyPI](https://img.shields.io/pypi/v/fugazi.svg)](https://pypi.org/project/fugazi/)
+[![License: MIT](https://img.shields.io/crates/l/fugazi.svg)](LICENSE)
+[![Sponsor](https://img.shields.io/badge/sponsor-%E2%9D%A4-db61a2)](https://github.com/sponsors/acpuchades)
+
 A Rust library of **incremental** technical-analysis primitives. Every indicator
 and signal owns its internal state and is advanced one sample at a time via
 `update()`, carrying just enough intermediate state to produce the next output in
@@ -1106,6 +1113,12 @@ shape of it and [docs.rs](https://docs.rs/fugazi) has the API.
 | [docs/TRADING.md](docs/TRADING.md) | The execution path — how a bar becomes an order, a fill, and a closed trade |
 | [docs/PYTHON.md](docs/PYTHON.md) | The Python API |
 | [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Recipes for adding an indicator, signal, metric or provider |
+
+## Sponsor
+
+fugazi is MIT-licensed and developed in the open. If it saves you time, or if
+you'd like to see a particular provider, metric or strategy shape land sooner,
+you can support the work through [GitHub Sponsors](https://github.com/sponsors/acpuchades).
 
 ## License
 
