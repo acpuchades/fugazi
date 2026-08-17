@@ -511,6 +511,27 @@ impl AnySource {
     /// from `data` (OHLCV frame / 1-D series / snapshot sequence) and folds it
     /// through `Indicator::update`. A `Const` source re-emits its value for
     /// every bar and reads the frame as candles (its neutral default domain).
+    ///
+    /// # Kept in step with [`feed_into_numpy`](Self::feed_into_numpy) by hand
+    ///
+    /// **A new `AnySource` variant needs an arm in both.** These two hold the
+    /// same five-arm dispatch and differ only in where each value goes: a `Vec`
+    /// here, NumPy's own buffer there. That is duplication, and it is deliberate
+    /// — merging them was tried and is worse:
+    ///
+    /// * A shared fold taking `&mut dyn FnMut(Option<Real>)` puts an indirect
+    ///   call on the per-sample path. Measured at this granularity (`icount`'s
+    ///   `sma_dyn_*` pair) that costs more than it saves.
+    /// * A `Sink` trait cannot hold the NumPy buffer *and* a slice borrowed from
+    ///   it — that is self-referential. Scoping the borrow in a closure
+    ///   ([`numpy_filled`]) is what avoids it, and a closure needs the row count
+    ///   up front, which is exactly what forces the split.
+    ///
+    /// This one exists only for the **no-NumPy** path: NumPy is an optional
+    /// dependency, and without it `feed()` returns a plain list that keeps the
+    /// warm-up `None`s rather than flattening them to `NaN`. So it is cold code
+    /// that must stay correct, which is the worst combination — hence the note
+    /// rather than a silent divergence.
     pub(crate) fn feed_rows(&mut self, data: &Bound<'_, PyAny>) -> PyResult<Vec<Option<Real>>> {
         let py = data.py();
         Ok(match self {
@@ -554,6 +575,9 @@ impl AnySource {
     /// importable, which is every real deployment). `feed_rows` stays for the
     /// no-NumPy fallback, where the `Option`s must survive to become a Python
     /// list of `None`s rather than being flattened to `NaN`.
+    ///
+    /// **A new `AnySource` variant needs an arm here *and* in `feed_rows`** — see
+    /// that method for why the two are not merged.
     ///
     /// Warm-up `None` becomes `NaN` here, at the point of production — the same
     /// convention `ndarray_from_values` applies, just without the round trip.

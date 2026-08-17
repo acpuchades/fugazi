@@ -529,8 +529,12 @@ last row is the floor — the least an erased scalar boundary can cost — and
 
 ### Python — the point of the exercise
 
-Per-level cost measured three ways, all agreeing (`_bench_feed_stage` /
-`_bench_feed_built`, the diagnostic hooks in `python/src/constructors.rs`):
+Per-level cost measured three ways, all agreeing, via `_bench_feed_stage` /
+`_bench_feed_built` — diagnostic hooks that were in `python/src/constructors.rs`
+at the time and have since been **removed** (they routed through the output path
+this document's Phase 8 replaced, so they had stopped emulating `feed()`; see
+"Things that were tried"). Rebuild an equivalent probe if you need to re-derive
+this table:
 
 | levels | Rust-built chain | Python-built, driven from Rust | Python-built, via `.feed()` |
 |---:|---:|---:|---:|
@@ -1098,10 +1102,10 @@ measurable, and it stopped anyone asking why.
 
 ### Where the Python time goes
 
-Measured, not assumed. `_bench_feed_stage` (a diagnostic hook in
-`python/src/constructors.rs`) runs each prefix of the `feed()` pipeline, so
-every layer is priced separately. One run, so the ratios are internally
-consistent:
+Measured, not assumed, with `_bench_feed_stage` — a diagnostic hook, since
+removed (see "Things that were tried"), that ran each prefix of the `feed()`
+pipeline so every layer could be priced separately. One run, so the ratios are
+internally consistent:
 
 | | ns/sample | vs TA-Lib |
 |---|---:|---:|
@@ -1220,6 +1224,17 @@ Recorded so they are not re-attempted:
   measured identical to the hundredth of an instruction per sample (38.57 / 79.58
   / 81.23) before and after. LLVM already canonicalises both forms to one
   induction variable.
+* **Shipping the measurement scaffolding.** Three `_bench_*` `#[pyfunction]`s
+  (`_bench_feed_stage`, `_bench_feed_built`, `_bench_frame_stage`) were
+  registered in the `fugazi` module so each prefix of `feed()` could be priced
+  from Python. They earned their keep — several tables above came from them — and
+  then rotted: Phase 8 rewrote the output path and the probes kept routing
+  through the old one, so they no longer emulated the product they existed to
+  emulate. **Removed.** A probe that silently stops matching the code under it is
+  worse than no probe, and these were in a user-facing namespace with no test or
+  tool referencing them. If you need this again, write it, measure with it, and
+  delete it in the same session — or put it behind a Cargo feature so it cannot
+  ship. The underscore prefix is not a substitute for either.
 * **Batching the erasure boundary** — handing the erased chain a *slice* of
   candles so the loop runs on its side of the vtable, one indirect call per 64
   bars instead of per bar. **1.2 instructions/bar slower**
