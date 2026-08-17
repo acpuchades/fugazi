@@ -19,7 +19,32 @@
 //!
 //! Workloads: `sma_rust` · `sma_yaml` · `macd_rust` · `macd_yaml` · `tree8`
 //! · `atr_none` · `atr_atom` · `atr_candle` · `atr_manual_max`
-//! · `chain_candle` · `chain_atom`
+//! · `chain_candle` · `chain_atom` · `sma_two_levels` · `sma_fused`
+//! · `sma_dyn_per_sample` · `sma_dyn_batch`
+//!
+//! **Pick the binary by mtime, not by `ls`.** `cargo` leaves every previously
+//! built `icount-<hash>` in place, the hash is not a timestamp, and this
+//! machine's `ls -t` is `eza` (which ignores `--time-style`). Selecting the
+//! wrong one has twice produced confident numbers for code that was never
+//! compiled — once reporting a +37% regression in a workload the change could
+//! not touch. `scripts/perf-compare.sh` has `pick_icount()` for this; by hand:
+//!
+//!   find target/release/deps -name 'icount-*' ! -name '*.d' \
+//!       -printf '%T@ %p\n' | sort -rn | head -1
+//!
+//! The last four workloads price the two candidate fixes for the Python
+//! bindings' commonest shape, `ta.sma(ta.close(), 14)`, which erases twice:
+//!
+//! * `sma_two_levels` vs `sma_fused` — monomorphising the field leaf into `Sma`
+//!   instead of boxing it. **Worth 9.0 instructions/bar** (129.38 → 120.36).
+//! * `sma_dyn_per_sample` vs `sma_dyn_batch` — handing the erased chain a
+//!   *slice* of candles so the loop runs on its side of the boundary, one
+//!   indirect call per 64 bars instead of per bar. **Worth −1.2 instructions/bar
+//!   — it is slower**, and that result is why no such method exists in `src`.
+//!   An indirect call with a predictable target is about two instructions; the
+//!   cost of an erased level is its wrapper, its `Option` handling and the
+//!   40-byte `Candle` move, none of which batching removes. The chunk
+//!   bookkeeping then costs slightly more than the calls it saves.
 //!
 //! `chain_candle` vs `chain_atom` prices P1 of the Python plan: the bindings
 //! carry a `Chain<Atom, _>` for candle-rooted sources, so every 40-byte `Candle`
@@ -140,11 +165,109 @@ fn atr_manual(candles: &[fugazi::market::Candle], period: usize) -> usize {
     seen
 }
 
+// ---------------------------------------------------------------------------
+// Batching the erasure boundary — a local prototype, deliberately not in `src`
+// ---------------------------------------------------------------------------
+//
+// Today `feed()` costs one *indirect* call per sample: the frame loop lives in
+// the Python crate and calls `Chain::update` per bar, so the chain's body can
+// never be inlined into the loop that drives it, and a 40-byte `Candle` is moved
+// through the boundary each time.
+//
+// The alternative is to put the loop on the other side of the boundary: hand the
+// erased chain a *slice* of candles and let it fold them itself. One indirect
+// call per chunk, and inside it the concrete `I::update` inlines into a tight
+// monomorphised loop.
+//
+// This is modelled here first, with a throwaway trait, so the win is a number
+// before it is an API. Chunked through a fixed stack buffer rather than one call
+// per frame, so nothing has to materialise a `Vec<Candle>` — that allocation is
+// exactly what the streaming `CandleColumns` removed.
+trait BatchIndicator: Send + Sync {
+    fn one(&mut self, c: fugazi::market::Candle) -> Option<Real>;
+    fn many(&mut self, xs: &[fugazi::market::Candle], out: &mut [Option<Real>]);
+}
+
+struct Batched<I>(I);
+
+impl<I> BatchIndicator for Batched<I>
+where
+    I: Indicator<Input = fugazi::market::Candle, Output = Real> + Send + Sync,
+{
+    fn one(&mut self, c: fugazi::market::Candle) -> Option<Real> {
+        self.0.update(c)
+    }
+    // Monomorphised per `I`, so `I::update` inlines into this loop even though
+    // the *caller* reaches it through a vtable.
+    fn many(&mut self, xs: &[fugazi::market::Candle], out: &mut [Option<Real>]) {
+        for (o, &x) in out.iter_mut().zip(xs) {
+            *o = self.0.update(x);
+        }
+    }
+}
+
+/// The chain shape `ta.sma(ta.close(), 14)` actually builds: two erased levels.
+#[inline(never)]
+fn boxed_sma_two_levels() -> Box<dyn BatchIndicator> {
+    let leaf: fugazi::runtime::Chain<fugazi::market::Candle, Real> =
+        fugazi::runtime::erase(CloseOf::default());
+    Box::new(Batched(fugazi::indicators::Sma::new(leaf, 14)))
+}
+
+/// A `CloseOf`-leaf chain reading one field, standing in for the bindings'
+/// `BarField<BarClose>` (which lives in `python/src` and cannot be used here).
+#[derive(Clone, Default)]
+struct CloseOf {
+    value: Option<Real>,
+}
+
+impl Indicator for CloseOf {
+    type Input = fugazi::market::Candle;
+    type Output = Real;
+    fn update(&mut self, input: fugazi::market::Candle) -> Option<Real> {
+        self.value = Some(input.close);
+        self.value
+    }
+    fn value(&self) -> Option<Real> {
+        self.value
+    }
+    fn warm_up_bars(&self) -> usize {
+        1
+    }
+    fn reset(&mut self) {
+        self.value = None;
+    }
+}
+
+// `#[inline(never)]`, and that is load-bearing rather than tidiness.
+//
+// With the chain built inline in the match arm, LLVM sees the concrete type at
+// the `erase` call, devirtualises the whole thing and inlines it — so the two
+// variants compiled to *identical* code and the pair measured 464,955 vs
+// 464,880 instructions, a 0.004/bar difference that is pure noise. That is the
+// same trap `benches/erasure.rs` documents, and it flatters erasure by
+// measuring a chain that is not erased at run time at all.
+//
+// Returning the erased type from a function that cannot be inlined is what
+// forces the indirect call a real Python-built chain always pays.
+#[inline(never)]
+fn sma_of_close_two_levels() -> fugazi::runtime::Chain<fugazi::market::Candle, Real> {
+    let leaf: fugazi::runtime::Chain<fugazi::market::Candle, Real> =
+        fugazi::runtime::erase(CloseOf::default());
+    fugazi::runtime::erase(fugazi::indicators::Sma::new(leaf, 14))
+}
+
+#[inline(never)]
+fn sma_of_close_fused() -> fugazi::runtime::Chain<fugazi::market::Candle, Real> {
+    fugazi::runtime::erase(fugazi::indicators::Sma::new(CloseOf::default(), 14))
+}
+
 fn main() {
     let workload = std::env::args().nth(1).unwrap_or_else(|| {
         eprintln!(
             "usage: icount <sma_rust|sma_yaml|macd_rust|macd_yaml|tree8\
-             |atr_none|atr_atom|atr_candle|atr_manual_max|chain_candle|chain_atom|chain_atom_direct>"
+             |atr_none|atr_atom|atr_candle|atr_manual_max|chain_candle|chain_atom|chain_atom_direct\
+             |sma_two_levels|sma_fused|sma_dyn_per_sample|sma_dyn_batch>"
         );
         std::process::exit(2);
     });
@@ -241,6 +364,49 @@ fn main() {
                 fugazi::runtime::erase(fugazi::indicators::Atr::new(BarOf::default(), 14));
             for c in &candles {
                 black_box(ind.update((*c).into()));
+            }
+            BARS
+        }
+        // Prices fusing the Python bindings' commonest shape. `ta.sma(ta.close(),
+        // 14)` erases **twice** — `Sma` over a `Chain<Candle, Real>` holding the
+        // field leaf — so every sample crosses a vtable boundary it does not need
+        // to, carrying a 40-byte `Candle` by value each way.
+        //
+        // `sma_fused` is the same computation with the leaf monomorphised into
+        // `Sma`, which is what an `AnySource::Field` carrier variant would let the
+        // bindings build. The pair is here rather than in the Python harness
+        // because it answers "is fusing worth the plumbing?" in one `cargo bench`
+        // instead of a wheel rebuild.
+        "sma_two_levels" | "sma_fused" => {
+            let candles = common::synth_candles(BARS);
+            let mut ind = if workload == "sma_fused" {
+                sma_of_close_fused()
+            } else {
+                sma_of_close_two_levels()
+            };
+            for c in &candles {
+                black_box(ind.update(black_box(*c)));
+            }
+            BARS
+        }
+        // The same two-level chain driven per-sample vs in chunks, so the delta
+        // is the cost of crossing the erasure boundary 20 000 times instead of
+        // 20 000/64 times. Both go through `Box<dyn BatchIndicator>`, so the
+        // boundary itself is identical — only the granularity differs.
+        "sma_dyn_per_sample" | "sma_dyn_batch" => {
+            const CHUNK: usize = 64;
+            let candles = common::synth_candles(BARS);
+            let mut ind = boxed_sma_two_levels();
+            let mut out = [None; CHUNK];
+            if workload == "sma_dyn_batch" {
+                for chunk in candles.chunks(CHUNK) {
+                    ind.many(chunk, &mut out[..chunk.len()]);
+                    black_box(&out);
+                }
+            } else {
+                for c in &candles {
+                    black_box(ind.one(black_box(*c)));
+                }
             }
             BARS
         }

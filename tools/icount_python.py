@@ -254,6 +254,38 @@ def measure(setup: str, body: str, mode: str, n: int, samples: int, reps: int) -
     return (hi - lo) / (n * samples)
 
 
+def check_extension_fresh() -> None:
+    """Refuse to measure a build that predates the source.
+
+    This has produced a fictional result twice. The bench environment installs
+    the wheel non-editable, so nothing rebuilds it implicitly; and because the
+    wheel's filename carries the version, a `maturin build` after a version bump
+    lands under a *new* name while the old wheel sits beside it, so an
+    `unzip fugazi-<old>.whl` still succeeds and silently installs the previous
+    build. Comparing mtimes is the only check that catches both.
+    """
+    import fugazi  # noqa: PLC0415 — imported here so --list works without it
+
+    so = os.path.join(os.path.dirname(fugazi.__file__), "fugazi.abi3.so")
+    built = os.path.getmtime(so)
+    newest, newest_path = 0.0, ""
+    for root, _, files in os.walk(os.path.join(REPO, "python", "src")):
+        for name in files:
+            if name.endswith(".rs"):
+                p = os.path.join(root, name)
+                t = os.path.getmtime(p)
+                if t > newest:
+                    newest, newest_path = t, p
+    if newest > built:
+        raise SystemExit(
+            f"the installed extension is older than {os.path.relpath(newest_path, REPO)}\n"
+            f"  {so}\n"
+            "rebuild it before measuring, e.g.\n"
+            "  cd python && maturin build --release -o /tmp/fz_wheels\n"
+            "then unzip *the wheel that build just printed* over the installed .so."
+        )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default="", help="comma-separated workload names")
@@ -274,6 +306,7 @@ def main() -> int:
     unknown = [n for n in names if n not in WORKLOADS]
     if unknown:
         raise SystemExit(f"unknown workload(s): {', '.join(unknown)}")
+    check_extension_fresh()
 
     print(f"# callgrind instructions/sample, {args.samples} samples, "
           f"{args.n} vs {2 * args.n} iterations, best of {args.reps}")

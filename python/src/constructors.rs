@@ -276,6 +276,17 @@ impl CandleColumns {
     /// close slice rather than copied, so a close-only frame costs no extra
     /// memory. An omitted `volume` reads as `0.0`, which needs its own arm
     /// because there is no slice to alias.
+    /// **Do not "optimise" the zips into an indexed loop.** That was tried, with
+    /// every slice re-cut to `[..n]` first so the bounds checks would provably
+    /// fold away, on the theory that four nested `Zip`s each carrying their own
+    /// exhaustion check must cost something. It compiles to the same machine
+    /// code: `close`, `sma` and `atr` all measured **identical to the hundredth
+    /// of an instruction per sample** (38.57 / 79.58 / 81.23) before and after.
+    /// LLVM already canonicalises both forms to one induction variable.
+    ///
+    /// The ~28 instructions/sample this loop does cost are the `Candle` itself —
+    /// five loads, five stores, and a 40-byte by-value move through the chain's
+    /// vtable — not the iteration.
     #[inline]
     pub(crate) fn for_each(&self, mut f: impl FnMut(Candle)) {
         let c = self.close.as_slice();
