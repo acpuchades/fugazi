@@ -258,8 +258,17 @@ def talib_py_tier(c, h, lo) -> dict[str, float]:
     }
 
 
-def fugazi_py_tier(c) -> dict[str, float]:
-    """fugazi's Python bindings, driven exactly as a user would."""
+def fugazi_py_tier(c, h, lo, o) -> dict[str, float]:
+    """fugazi's Python bindings, driven exactly as a user would.
+
+    Scalar indicators take a 1-D series; `atr` consumes whole bars, so it takes a
+    dict of OHLCV columns — the same shape `talib.ATR`'s three arrays carry, and
+    what `frame_to_candles` accepts.
+
+    ATR was missing from this tier for a while, which read as "the binding does
+    not exist". It does; the tier only fed 1-D series and a candle-rooted
+    indicator rejects those.
+    """
     import fugazi as fz
 
     def scalar(build):
@@ -267,11 +276,14 @@ def fugazi_py_tier(c) -> dict[str, float]:
             build().feed(c)
         return run
 
+    frame = {"open": o, "high": h, "low": lo, "close": c}
+
     return {
         "sma": timed(scalar(lambda: fz.sma(fz.identity(), SMA_P))) * 1e9 / N,
         "ema": timed(scalar(lambda: fz.ema(fz.identity(), EMA_P))) * 1e9 / N,
         "rsi": timed(scalar(lambda: fz.rsi(fz.identity(), RSI_P))) * 1e9 / N,
         "stddev": timed(scalar(lambda: fz.stddev(fz.identity(), STDDEV_P))) * 1e9 / N,
+        "atr": timed(lambda: fz.atr(ATR_P).feed(frame)) * 1e9 / N,
     }
 
 
@@ -311,7 +323,7 @@ def main() -> int:
         native_p.append(talib_native(N))
         talib_p.append(talib_py_tier(c, h, lo))
         rust_p.append(rust_tier(N))
-        py_p.append(fugazi_py_tier(c))
+        py_p.append(fugazi_py_tier(c, h, lo, o))
     native_ns = best_of(native_p)
     talib_ns = best_of(talib_p)
     rust_ns = best_of(rust_p)

@@ -26,6 +26,25 @@ and signal owns its internal state and is advanced one sample at a time via
 fugazi = "0.59"
 ```
 
+## Documentation
+
+Two ways in. If you want the **backtester**, read
+[docs/CLI.md](docs/CLI.md) for the commands and
+[docs/STRATEGIES.md](docs/STRATEGIES.md) for the strategy-file format — no Rust
+required. If you're **building on the library**, the sections above cover the
+shape of it and [docs.rs](https://docs.rs/fugazi) has the API.
+
+| | |
+| --- | --- |
+| [docs/STRATEGIES.md](docs/STRATEGIES.md) | The strategy-file format — every YAML tag, all five document shapes |
+| [docs/CLI.md](docs/CLI.md) | `run`, `optimize`, `get`, `check`, `list` and their flags |
+| [docs/METRICS.md](docs/METRICS.md) | What each metric means and how it's computed |
+| [docs/COSTS.md](docs/COSTS.md) | Commission, spread and slippage models |
+| [docs/TRADING.md](docs/TRADING.md) | The execution path — how a bar becomes an order, a fill, and a closed trade |
+| [docs/PYTHON.md](docs/PYTHON.md) | The Python API |
+| [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Recipes for adding an indicator, signal, metric or provider |
+| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | How to measure, what each optimisation bought, and which code is fast on purpose |
+
 ## Concepts
 
 The crate has three composable layers:
@@ -1109,23 +1128,37 @@ C loop over a whole array with no per-sample dispatch, while fugazi pays a
 function call per bar — which is the price of the same code driving a live
 stream. It turns out not to cost anything.
 
-Against [TA-Lib](https://ta-lib.org) on 200 000 samples. **Each row is compared
-against the baseline that matches it**: the Rust engine against TA-Lib's C
-library, the Python bindings against `talib`, TA-Lib's own Python bindings.
-Lower is better; **< 1.00× means fugazi is faster**:
+Against [TA-Lib](https://ta-lib.org), every bar relative to TA-Lib's **C**
+library so all four sit on one scale:
 
-| | fugazi (Rust)<br>vs TA-Lib **C** | fugazi (Python)<br>vs `talib` **Python** |
-| --- | ---: | ---: |
-| `sma` | **1.00×** | 3.4× |
-| `ema` | **0.68×** | 2.3× |
-| `rsi` | **0.98×** | 1.8× |
-| `atr` | **0.90×** | — |
-| `stddev` | 2.9× | 3.7× |
+![Indicator throughput: fugazi and TA-Lib, relative to native TA-Lib C](docs/assets/performance.svg)
 
-The Rust engine is at parity or better on `sma`/`ema`/`rsi`/`atr` while staying
-one-bar-at-a-time. In absolute terms that is 1.37 ns/sample for `sma` and 4.33
-for `atr`, and driving a full backtest allocates **zero times per bar** — a
-200 000-bar run performs 29 allocations in total.
+*Lower is better. 200 000 samples, best of three passes.*
+
+The chart's common baseline is the C library. For a **Python** user the
+like-for-like comparison is against `talib`, TA-Lib's own bindings, since both
+cross a Python boundary — that is the last column:
+
+| | TA-Lib C | fugazi (Rust) | **rs vs C** | `talib` py | fugazi (Python) | **py vs py** |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `sma` | 1.37 | 1.37 | **1.00×** | 1.46 | 4.97 | 3.4× |
+| `ema` | 2.06 | 1.36 | **0.66×** | 2.16 | 4.86 | 2.3× |
+| `rsi` | 4.79 | 4.69 | **0.98×** | 4.98 | 8.47 | 1.7× |
+| `atr` | 4.77 | 4.54 | **0.95×** | 5.52 | 36.56 | 6.6× |
+| `stddev` | 3.33 | 10.61 | 3.19× | 3.56 | 12.77 | 3.6× |
+
+ns/sample. The Rust engine is at parity or better on `sma`/`ema`/`rsi`/`atr`
+while staying one-bar-at-a-time, and driving a full backtest allocates **zero
+times per bar** — a 200 000-bar run performs 29 allocations in total.
+
+Two rows are worse, and both are honest:
+
+`atr` **through the Python bindings** is the outlier at 6.6×, and it is not ATR's
+fault — it is the only row fed a *frame* of OHLC columns rather than a 1-D
+series, and that input path never got the buffer-protocol treatment the 1-D one
+did. Measured: `fz.close().feed(frame)` costs 24.3 ns/sample with a trivial
+indicator, against 5.6 for the whole 1-D pipeline. A known, located, unfixed
+gap rather than a mystery.
 
 `stddev` is the one loss, and it is deliberate: fugazi makes a centred pass over
 the window instead of TA-Lib's O(1) `E[X²] − E[X]²` shortcut, which cancels away
@@ -1138,25 +1171,6 @@ passes. Re-run them with `pixi run -e bench bench` before relying on them —
 and read [docs/PERFORMANCE.md](docs/PERFORMANCE.md) first if you intend to
 benchmark this yourself, because most of that document is the measurement
 mistakes this project has already made and how they were caught.
-
-## Documentation
-
-Two ways in. If you want the **backtester**, read
-[docs/CLI.md](docs/CLI.md) for the commands and
-[docs/STRATEGIES.md](docs/STRATEGIES.md) for the strategy-file format — no Rust
-required. If you're **building on the library**, the sections above cover the
-shape of it and [docs.rs](https://docs.rs/fugazi) has the API.
-
-| | |
-| --- | --- |
-| [docs/STRATEGIES.md](docs/STRATEGIES.md) | The strategy-file format — every YAML tag, all five document shapes |
-| [docs/CLI.md](docs/CLI.md) | `run`, `optimize`, `get`, `check`, `list` and their flags |
-| [docs/METRICS.md](docs/METRICS.md) | What each metric means and how it's computed |
-| [docs/COSTS.md](docs/COSTS.md) | Commission, spread and slippage models |
-| [docs/TRADING.md](docs/TRADING.md) | The execution path — how a bar becomes an order, a fill, and a closed trade |
-| [docs/PYTHON.md](docs/PYTHON.md) | The Python API |
-| [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Recipes for adding an indicator, signal, metric or provider |
-| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | How to measure, what each optimisation bought, and which code is fast on purpose |
 
 ## Sponsor
 

@@ -748,19 +748,51 @@ Two things came out of that:
 
 | | TA-Lib C | TA-Lib py | fugazi rs | fugazi py | **rs vs C** | **py vs py** |
 |---|---:|---:|---:|---:|---:|---:|
-| `sma` | 1.37 | 1.47 | 1.37 | 5.03 | **1.00×** | 3.43× |
-| `ema` | 2.07 | 2.17 | 1.40 | 5.03 | **0.68×** | 2.32× |
-| `rsi` | 4.80 | 4.92 | 4.69 | 8.80 | **0.98×** | 1.79× |
-| `atr` | 4.83 | 5.40 | 4.33 | — | **0.90×** | — |
-| `stddev` | 3.35 | 3.57 | 9.78 | 13.25 | 2.92× | 3.71× |
+| `sma` | 1.37 | 1.46 | 1.37 | 4.97 | **1.00×** | 3.4× |
+| `ema` | 2.06 | 2.16 | 1.36 | 4.86 | **0.66×** | 2.3× |
+| `rsi` | 4.79 | 4.98 | 4.69 | 8.47 | **0.98×** | 1.7× |
+| `atr` | 4.77 | 5.52 | 4.54 | 36.56 | **0.95×** | 6.6× |
+| `stddev` | 3.33 | 3.56 | 10.61 | 12.77 | 3.19× | 3.6× |
 
-ns/sample, 200 000 samples, median of 7, best of 3 passes.
+ns/sample, 200 000 samples, median of 7, best of 3 passes. `docs/assets/performance.svg`
+is this table as a chart (`tools/plot_performance.py`), normalised to the C column.
 
 The **Rust** engine is at parity or better on `sma`/`ema`/`rsi`/`atr` against the
 C library itself, while staying incremental. `stddev` is the deliberate loss.
 
-The **Python** bindings cost 1.8–3.7× over the Python API a user would otherwise
-reach for. That is FFI and per-call overhead, not a different algorithm.
+### The candle-frame input path — 24 ns/sample, unfixed
+
+The `atr` row through the Python bindings is 6.6×, against 1.7–3.6× for
+everything else. It is not ATR's fault, and finding out why took asking why the
+chart had a bar missing: `atr` is the only row fed a **frame** of OHLC columns
+rather than a 1-D series, and `feed()`'s frame path never got the
+buffer-protocol treatment the 1-D path did.
+
+Isolated by giving the frame path a trivial indicator, so only the conversion
+remains:
+
+| | ns/sample |
+|---|---:|
+| `fz.sma(fz.identity(), 10).feed(1-D array)` — whole pipeline | 5.61 |
+| `fz.close().feed(frame)` — **frame in, one projection out** | 24.32 |
+| `fz.sma(fz.close(), 10).feed(frame)` | 25.81 |
+| `fz.atr(14).feed(frame)` | 43.03 |
+
+So ~24 ns/sample is the frame conversion itself, and the indicator on top of it
+is 1.5–19. `frame_to_candles` reads each column through `column_to_vec` (which
+*does* take the fast path) and then materialises a `Vec<Candle>` — 8 MB for
+200 000 bars — which is then walked again, lifting each `Candle` into an 88-byte
+`Atom`. The suspects are that intermediate `Vec` and the per-bar `Atom`, in that
+order, but it has not been attributed properly yet.
+
+**Next win on the Python side**, and larger than anything left in the engine: it
+would take `atr` from 6.6× to roughly 2×, and improve every candle-rooted
+indicator a Python caller uses.
+
+Note the shape of the mistake that hid it. The ATR row was simply *absent* from
+the Python tier, which read as "the binding doesn't exist" — it does. A blank in
+a results table is not a neutral gap; it is a claim that something was not
+measurable, and it stopped anyone asking why.
 
 ### Where the Python time goes
 
