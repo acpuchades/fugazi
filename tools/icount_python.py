@@ -146,6 +146,13 @@ WORKLOADS: dict[str, tuple[str, str, str | None]] = {
         "ta.sma(ta.sma(ta.identity(), 14), 14).feed(close)",
         None,
     ),
+    # Multi-output, O(1) per sample — the same class of work as `atr`, so the
+    # difference between the two is the multi-output path itself.
+    "dmi": (
+        "",
+        "ta.dmi(14).feed(frame)",
+        None,
+    ),
     # The scalar path: a 1-D value stream, no bar fields. `talib` sees the same
     # array, so this is the one comparison with no frame handling on either side.
     "sma_1d": (

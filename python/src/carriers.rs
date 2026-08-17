@@ -209,6 +209,16 @@ pub(crate) trait DynMulti<I>: Send + Sync {
     /// and returning whether there were any. `out` is the caller's reused
     /// scratch — see [`MultiOutput`] for why this is not `-> Option<Vec<Real>>`.
     fn update_into(&mut self, input: I, out: &mut Vec<Real>) -> bool;
+
+    /// Fold a **slice**, writing `lines` values per sample row-major into `out`
+    /// and `NaN` for warm-up rows.
+    ///
+    /// The multi-output twin of `DynIndicator::update_slice`, and it exists for
+    /// the same reason: the implementation copies the concrete indicator into a
+    /// local first, so its state lives in registers for the loop instead of
+    /// being reloaded and stored every sample because the compiler cannot prove
+    /// it does not alias `out`. See that method for the measurement.
+    fn update_slice_flat(&mut self, inputs: &[I], out: &mut [Real], lines: usize);
     fn value(&self) -> Option<Vec<Real>>;
     fn warm_up_bars(&self) -> usize;
     fn unstable_bars(&self) -> usize;
@@ -223,6 +233,7 @@ impl<I, T> DynMulti<I> for T
 where
     T: Indicator<Input = I> + Clone + Send + Sync + 'static,
     T::Output: MultiOutput,
+    I: Clone,
 {
     fn names(&self) -> &'static [&'static str] {
         <T::Output as MultiOutput>::names()
@@ -236,6 +247,23 @@ where
             }
             None => false,
         }
+    }
+
+    fn update_slice_flat(&mut self, inputs: &[I], out: &mut [Real], lines: usize) {
+        // `local` is the whole point — see the trait.
+        let mut local = self.clone();
+        let mut scratch: Vec<Real> = Vec::with_capacity(lines);
+        for (row, x) in out.chunks_mut(lines).zip(inputs) {
+            scratch.clear();
+            match Indicator::update(&mut local, x.clone()) {
+                Some(o) => {
+                    o.write_into(&mut scratch);
+                    row.copy_from_slice(&scratch);
+                }
+                None => row.fill(Real::NAN),
+            }
+        }
+        *self = local;
     }
     fn value(&self) -> Option<Vec<Real>> {
         Indicator::value(self).map(|o| o.values())
@@ -323,7 +351,7 @@ impl Indicator for ResampleThen {
 /// A boxed multi-output indicator (terminal: not usable as a source).
 pub(crate) struct MultiBox<I>(pub(crate) Box<dyn DynMulti<I>>);
 
-impl<I> MultiBox<I> {
+impl<I: Clone> MultiBox<I> {
     pub(crate) fn new<T>(inner: T) -> Self
     where
         T: Indicator<Input = I> + Clone + Send + Sync + 'static,
@@ -1251,7 +1279,6 @@ impl AnyMulti {
         data: &Bound<'py, PyAny>,
     ) -> PyResult<Vec<Bound<'py, PyAny>>> {
         let lines = self.names().len();
-        let mut scratch: Vec<Real> = Vec::with_capacity(lines);
 
         // Allocate every column first, then borrow all of their buffers at once.
         // The buffers must outlive the slices, hence the two bindings.
@@ -1271,32 +1298,53 @@ impl AnyMulti {
             })
             .collect::<PyResult<Vec<_>>>()?;
 
-        // `row` is bumped by the closure, so the write index is shared across
-        // every column and stays in step with the input.
+        // Folded a chunk at a time with the indicator's state held in a local —
+        // the same reason `DynIndicator::update_slice` exists, and worth ~21
+        // instructions/sample here too. `flat` takes the chunk row-major and is
+        // scattered into the column buffers after; over 128 rows that transpose
+        // stays in L1.
+        let mut flat = vec![0.0; FOLD_CHUNK * lines.max(1)];
         let mut row = 0usize;
-        macro_rules! drive {
-            ($m:expr, $input:expr) => {{
-                let ok = $m.update_into($input, &mut scratch);
+        let scatter = |flat: &[Real], n: usize, row: &mut usize| {
+            for r in 0..n {
                 for (j, col) in columns.iter().enumerate() {
-                    if row < col.len() {
-                        col[row].set(if ok { scratch[j] } else { Real::NAN });
+                    if *row + r < col.len() {
+                        col[*row + r].set(flat[r * lines + j]);
                     }
                 }
-                row += 1;
-            }};
-        }
+            }
+            *row += n;
+        };
         match self {
             AnyMulti::Atom(m) => {
                 let cols = columns_from_frame(data)?;
-                cols.for_each(py, |c| drive!(m.0, c.into()));
+                let mut buf = [ZERO_BAR; FOLD_CHUNK];
+                // `AnyMulti` has no bar-only domain, so each candle still lifts
+                // to an 88-byte `Atom` (step 3 of the Python plan, still open).
+                let mut atoms: Vec<Atom> = Vec::with_capacity(FOLD_CHUNK);
+                cols.for_each_chunk(py, &mut buf, |chunk| {
+                    atoms.clear();
+                    atoms.extend(chunk.iter().map(|c| Atom::from(*c)));
+                    let flat = &mut flat[..chunk.len() * lines];
+                    m.0.update_slice_flat(&atoms, flat, lines);
+                    scatter(flat, chunk.len(), &mut row);
+                });
             }
             AnyMulti::Real(m) => {
                 let xs = reals_from_series(data)?;
-                xs.for_each(py, |x| drive!(m.0, x));
+                let mut buf = [0.0; FOLD_CHUNK];
+                xs.for_each_chunk(py, &mut buf, |chunk| {
+                    let flat = &mut flat[..chunk.len() * lines];
+                    m.0.update_slice_flat(chunk, flat, lines);
+                    scatter(flat, chunk.len(), &mut row);
+                });
             }
             AnyMulti::Snapshot(m) => {
-                for snap in snapshots_from_sequence(data)? {
-                    drive!(m.0, snap);
+                let snaps = snapshots_from_sequence(data)?;
+                for chunk in snaps.chunks(FOLD_CHUNK) {
+                    let flat = &mut flat[..chunk.len() * lines];
+                    m.0.update_slice_flat(chunk, flat, lines);
+                    scatter(flat, chunk.len(), &mut row);
                 }
             }
         }
