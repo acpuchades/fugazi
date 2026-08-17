@@ -397,7 +397,7 @@ fn main() {
             "usage: icount <sma_rust|sma_yaml|macd_rust|macd_yaml|tree8\
              |atr_none|atr_atom|atr_candle|atr_manual_max|chain_candle|chain_atom|chain_atom_direct\
              |sma_two_levels|sma_fused|sma_dyn_per_sample|sma_dyn_batch\
-             |sma_scalar_none|sma_scalar_direct|sma_scalar_erased|sma_scalar_fused|sma_scalar_fused_batched|sma_scalar_boxed_local|sma_scalar_boxed_producer|sma_scalar_chunked_local>"
+             |sma_scalar_none|sma_scalar_direct|sma_scalar_erased|sma_scalar_fused|sma_scalar_fused_batched|sma_scalar_boxed_local|sma_scalar_boxed_producer|sma_scalar_chunked_local|stddev_scan>"
         );
         std::process::exit(2);
     });
@@ -509,7 +509,7 @@ fn main() {
         "sma_scalar_none" | "sma_scalar_direct" | "sma_scalar_erased"
         | "sma_scalar_fused" | "sma_scalar_fused_batched"
         | "sma_scalar_boxed_local" | "sma_scalar_boxed_producer"
-        | "sma_scalar_chunked_local" => {
+        | "sma_scalar_chunked_local" | "stddev_scan" => {
             let xs: Vec<Real> = (0..BARS).map(|i| 100.0 + (i % 97) as Real * 0.5).collect();
             match workload.as_str() {
                 "sma_scalar_none" => {
@@ -625,6 +625,22 @@ fn main() {
                         ind.many(&buf[..chunk.len()], &mut got[..chunk.len()]);
                         out[ci * CHUNK..ci * CHUNK + chunk.len()]
                             .copy_from_slice(&got[..chunk.len()]);
+                    }
+                    black_box(&out);
+                }
+                // Isolates `WindowStats::variance`'s O(period) centred pass —
+                // the deliberate accuracy-for-speed trade, and the largest
+                // remaining engine gap against TA-Lib C. Shares the control and
+                // the input with the `sma_scalar_*` family so the numbers are
+                // directly comparable.
+                "stddev_scan" => {
+                    let mut ind = fugazi::indicators::StdDev::new(
+                        fugazi::indicators::Identity::<Real>::new(),
+                        20,
+                    );
+                    let mut out = vec![None; BARS];
+                    for (o, &x) in out.iter_mut().zip(&xs) {
+                        *o = ind.update(x);
                     }
                     black_box(&out);
                 }

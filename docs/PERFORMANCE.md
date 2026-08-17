@@ -1454,6 +1454,21 @@ Recorded so they are not re-attempted:
   tool referencing them. If you need this again, write it, measure with it, and
   delete it in the same session — or put it behind a Cargo feature so it cannot
   ship. The underscore prefix is not a substitute for either.
+* **Hand-rolling `WindowStats::variance`'s centred pass.** The O(period) scan
+  goes through `self.iter().map(..).sum()`, and `iter()` is `a.chain(b)` — which
+  looks like it must test which half it is in on every element, so a `for` loop
+  over the two slices should be strictly cheaper. It is **68% worse**: 187.45 →
+  315.18 instructions/sample (`benches/icount.rs`, `stddev_scan`, period 20, net
+  of a control). `Sum for f64` goes through `fold`, and std **specialises
+  `Chain::fold` into two tight loops** with no per-element test; a `for` loop
+  drives `Iterator::next()`, which keeps it. The idiomatic spelling was already
+  the fast one.
+
+  A second trap sits next to it: summing each half separately and adding them is
+  **not bit-identical**, because `(Σa) + (Σb)` groups differently from one
+  running total whenever the ring wraps. The core suite passes that version — the
+  fixtures do not happen to exercise a wrapped window where the last ULP shows —
+  so green tests are not evidence here.
 * **Batching the erasure boundary** — handing the erased chain a *slice* of
   candles so the loop runs on its side of the vtable, one indirect call per 64
   bars instead of per bar. **1.2 instructions/bar slower**

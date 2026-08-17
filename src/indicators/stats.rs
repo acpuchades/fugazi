@@ -190,6 +190,22 @@ impl WindowStats {
     /// shortcut — see the module docs for the measured reason. Being a sum of
     /// squares it is non-negative by construction, so no clamp is needed.
     /// Only meaningful once [`is_full`](Self::is_full).
+    ///
+    /// **Leave the `.iter().map(..).sum()` alone.** It looks like it should be
+    /// beaten by a hand-written loop over the window's two halves, since
+    /// [`iter`](Self::iter) is `a.chain(b)` and a chain tests which half it is
+    /// in on every element. It is not: `Sum for f64` goes through `fold`, and
+    /// std **specialises `Chain::fold` into two tight loops** with no such test,
+    /// while a `for` loop drives `Iterator::next()`, which keeps it. Replacing
+    /// this with an explicit accumulator loop measured **187.45 → 315.18
+    /// instructions/sample**, 68% worse (`benches/icount.rs`, `stddev_scan`,
+    /// period 20, net of a control).
+    ///
+    /// Summing the halves separately and adding them is a different trap: it is
+    /// not bit-identical, because `(Σa) + (Σb)` groups differently from one
+    /// running total whenever the ring wraps — and the core suite does not catch
+    /// it, since the fixtures happen not to exercise a wrapped window where the
+    /// last ULP differs.
     pub fn variance(&self) -> Real {
         let mean = self.mean();
         let sum_sq: Real = self
