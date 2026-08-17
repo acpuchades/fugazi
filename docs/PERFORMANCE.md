@@ -41,6 +41,8 @@ instrument, at the cost of a ~50× slowdown.
 | `wallet` | `PaperWallet::update` / `equity` / a submit→fill round-trip, swept over held-position count. |
 | `metrics` | `RunReport` → `Metrics`, which `optimize` pays once per grid row per fold. |
 | `footprint` | Allocation count, bytes, and peak RSS. Not criterion — it installs a counting global allocator, which inside a criterion target would also tally criterion's own bookkeeping. |
+| `icount` | A fixed workload run exactly once, for callgrind. Answers "does this change do more work?" immune to contention and to code layout. |
+| `breaking` | Prototypes for the proposed breaking changes, so each is a measured number rather than an argument. |
 
 ## Measurement conditions
 
@@ -380,6 +382,82 @@ changing it is a design question, not a tuning one. Noted, not attempted.
 Small universes pay slightly more for the keyed lookup than a two-element scan
 (`update/2` is +11%); the crossover is around N = 16, and `drive/2` is −7.2%
 because the wallet-side hashing win more than covers it.
+
+## Breaking candidates — measured, not yet done
+
+Three changes that would break the public API. Each is **prototyped and
+measured** rather than argued for, so the cost/benefit is a number. None is
+implemented; `benches/breaking.rs` holds the prototypes.
+
+Read the figures as **ceilings**. Each prototype is narrower than the real
+change would be, and a couple of them enjoy inlining that the general case
+would not.
+
+### 1. `Sym = Arc<str>` instead of `String` — recommended first
+
+Needs no prototype at all: `Snapshot`, `PaperWallet` and `MultiAssetStrategy`
+are already generic over `Sym`, and `Arc<str>` satisfies every bound. So the
+same workload simply runs both ways today.
+
+| | `String` | `Arc<str>` | change |
+|---|---:|---:|---:|
+| snapshot construction (allocs/bar) | 3.00 | **2.00** | −33% |
+| snapshot construction (bytes/bar) | 201.0 | **160.0** | −20% |
+| snapshot construction (wall-clock) | 818 µs | 476 µs | **−41.9%** |
+| 8-symbol run | 5.375 ms | 4.542 ms | −15.5% |
+| 32-symbol run | 32.405 ms | 26.254 ms | −19.0% |
+| 64-symbol run | 90.551 ms | 84.466 ms | −6.7% |
+
+Cloning a symbol becomes a refcount bump instead of a heap allocation, which is
+what the driver does once per symbol per bar. It would also let
+`Wallet::update` keep its by-value signature cheaply — that call is the *last
+remaining* per-bar allocation after Phase 3.
+
+**Cost.** `Snapshot<String>` is spelled explicitly across `runtime::DynValue`,
+the five spec shapes, `python/src/`, and the CLI. Mechanical, but wide. A type
+alias (`pub type Symbol = Arc<str>`) would contain most of the churn.
+
+### 2. `Indicator::update(&mut self, input: &Self::Input)`
+
+Prototyped as a by-reference chain computing the same SMA crossover
+(`RefIndicator` in `benches/breaking.rs`).
+
+| | per 2 000 bars |
+|---|---:|
+| library, by value | 121.6 µs |
+| prototype, by reference | **35.0 µs** |
+
+−71%, but **do not take that at face value**. The prototype is monomorphic,
+and it fuses `Pick` + `Close` into one node, so it avoids the `Atom` round-trip
+entirely rather than merely avoiding the clone. It bounds the win; it does not
+predict it. What is certain from the code is the traffic removed: `Combine`
+feeds the same input to *both* sides, so every binary node clones its input, and
+`Pick` clones the projected 88-byte `Atom` twice per bar (once into
+`Pick::value`, once for the return).
+
+**Cost.** The largest of the three: ~60 indicators, `fugazi-derive`,
+`runtime::DynIndicator`, all five strategy shapes, `python/src/`, and every doc
+example. Worth doing only if the ceiling is confirmed on a narrower slice first
+— converting `Pick` and `Combine` alone would test the thesis.
+
+### 3. Index `Snapshot` for lookup
+
+Per *symbol-bar* cost still climbs with universe size after Phase 3 (227 ns at
+N = 2 to 662 ns at N = 64, where it should be flat). The residual O(N²) is
+`Snapshot::find` — a linear scan, run by every `Pick::matching` leaf, once per
+leaf per symbol per bar.
+
+This is not an oversight. `src/snapshot.rs` states it: *"the storage is
+deliberately a sequence rather than a hashmap: `Selector` is a predicate, not a
+key"*, which is what lets a snapshot avoid `Sym: Eq + Hash` and permits
+duplicate tags with first-match-wins. Any fix has to keep those properties —
+e.g. an optional lazily-built `symbol → first index` side table, used only when
+the selector names a symbol and the entry count justifies it, falling back to
+the scan otherwise.
+
+**Cost.** Contained (one module), but it touches a documented invariant, so it
+needs a design decision rather than a patch. Worth it for large universes and
+irrelevant below ~16 symbols.
 
 ## Known costs, and why they are there
 

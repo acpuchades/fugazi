@@ -52,6 +52,24 @@ fn main() {
         std::mem::size_of::<Candle>(),
     );
 
+    // What an interned symbol type would cost instead — see the breaking
+    // candidates in docs/PERFORMANCE.md. `Snapshot` is already generic over
+    // `Sym`, so this needs no change to the library, only to the caller.
+    {
+        use std::sync::Arc;
+        let syms: Vec<Arc<str>> = (0..1).map(|i| Arc::from(format!("X{i}").as_str())).collect();
+        let candles = common::synth_candles(BARS);
+        let (v, allocs, bytes) = alloc_count::measure(|| {
+            (0..BARS)
+                .map(|b| {
+                    fugazi::types::Snapshot::single(syms[0].clone(), Atom::new(candles[b]))
+                })
+                .collect::<Vec<fugazi::types::Snapshot<Arc<str>>>>()
+        });
+        row("single-asset, Sym = Arc<str>", BARS, allocs, bytes);
+        drop(v);
+    }
+
     for n in [8usize, 32] {
         let bars = BARS / 20;
         let (multi, allocs, bytes) = alloc_count::measure(|| multi_snapshots(n, bars));
