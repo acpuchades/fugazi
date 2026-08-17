@@ -597,6 +597,95 @@ Not everything should move, and two things deliberately have not:
   so a builder compares what a subtree declared against what it built with no
   translation step. Nothing is paid for this at run time.
 
+## Plan — making the Python bindings efficient
+
+The bindings are the crate's primary interface and its worst tier: 3.4x `talib`
+on the scalar path and 6.5-9.9x on the candle path. This is the prioritised
+account of *why*, measured rather than guessed, and what to do in what order.
+
+### How these numbers were obtained
+
+Every case below was timed **in one process, round-robin, interleaved**, and the
+minimum of 21 rounds is reported. That is not fussiness: this machine has
+produced 5.42, 8.64, 12.04, 13.50 and 17.70 ns/sample for `talib.ATR` — fixed C
+code — within one session at load below 1. Numbers from separate runs cannot be
+compared here at all, and the first attempt at this analysis reached the opposite
+conclusion by doing exactly that.
+
+Per-case spread is 1.24-1.68x even interleaved, so **differences under ~2
+ns/sample in this table are not resolved**. Every item below is larger than that.
+
+### The decomposition
+
+Scalar path, `fz.sma(fz.identity(), 10).feed(1-D array)`:
+
+| | ns/sample |
+|---|---:|
+| `talib.SMA` | 1.50 |
+| input conversion alone | 0.69 |
+| whole `feed()` | **5.06** |
+| the same with a third erased level | 5.99 |
+
+Candle path, `fz.atr(14).feed(dict of OHLC)`:
+
+| | ns/sample | marginal |
+|---|---:|---:|
+| `talib.ATR` | 8.64 | |
+| read the frame's columns | 7.50 | +7.50 |
+| stream candles out of them | 15.09 | +7.59 |
+| ATR over a `Candle` chain, to a NumPy array | 34.51 | +19.42 |
+| the same over an `Atom` chain (what the carriers hold) | 58.82 | **+24.31** |
+| `fz.atr(14).feed(frame)` | 56.04 | — |
+
+The last two agree within spread, which settles an earlier suspicion that
+something extra was hiding in `feed()`. There is not; the probe *is* the product.
+
+### Priorities
+
+**P1 — `Atom` is the boundary type where `Candle` would do. ~24 ns/sample.**
+`AnySource::Candle` holds a `Chain<Atom, _>`, so each 40-byte `Candle` read from
+the frame is lifted into an 88-byte `Atom` and moved through the erased boundary
+per bar. `Atom` exists because overlay-reading leaves (`get`, `get_str`) need the
+overlay bundle — but the overwhelming majority of candle-rooted chains never read
+one. The fix is to carry `Chain<Candle, _>` when no overlay leaf is present and
+lift only when one is, which means the domain tag has to record that. Biggest
+single item, and it is the whole of the `atr` outlier.
+
+**P2 — `Vec<Option<Real>>` between the indicator and NumPy. ~10-19 ns/sample.**
+`feed_rows` collects into `Vec<Option<Real>>` (16 bytes/bar, 3.2 MB for 200 000
+bars) which `build_floats` then walks into the NumPy buffer. The output side
+already writes straight into `np.empty`; the intermediate is what is left.
+Streaming `update` results directly into that buffer removes a 3.2 MB write and
+read. Touches every `feed`, scalar and candle alike.
+
+**P3 — reading the columns costs 7.5 ns/sample.** With the buffer fast path a
+`memcpy` of 4 columns should be nearer 1. The suspects are four separate 1.6 MB
+allocations (with first-touch page faults on each call) and the up-to-three
+`get_item` probes per column name — each miss raising and discarding a Python
+`KeyError`. Cheap to attribute, so do it before assuming.
+
+**P4 — candle construction from columns costs 7.6 ns/sample.** Four strided
+reads and a 40-byte struct build per bar. Suggests the zip is not vectorising;
+worth an `icount` look before touching.
+
+**P5 — erasure depth on the scalar path, ~0.9 ns/level** (5.06 -> 5.99 for a
+third level). Already at the floor measured in *Phase 6*; nothing to win without
+fusing common shapes, and at this size it is below the noise. **Do not start
+here** — it is the item that looks most like "optimising the bindings" and is
+worth the least.
+
+### Sequence, and what would change it
+
+P1 then P2, because both are architectural and P1 is the larger; P3 and P4 are
+attribution tasks first and may turn out to be one shared cause (allocation and
+page-faulting the column buffers). Re-measure after each — the estimates above
+are marginal costs from one decomposition, and removing one item can change
+another's.
+
+Expected end state if P1 and P2 land: `atr` from 9.9x to roughly 2-3x `talib`,
+and the scalar path from 3.4x to nearer 2x. That would make the bindings' worst
+row better than their current best.
+
 ## Breaking candidates — measured, not yet done
 
 Changes that would break the public API, **prototyped and measured** rather
