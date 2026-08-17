@@ -1037,6 +1037,17 @@ impl PyIndicator {
     /// state — call `reset()` first for a clean pass.
     pub(crate) fn feed(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let kind = OutputKind::detect(data)?;
+        // NumPy present — the normal case — means the values can be produced
+        // directly into its buffer, with no `Vec<Option<f64>>` in between. The
+        // import is checked up front rather than inside the fill, because the
+        // fallback has to feed the data a different way and there is no
+        // rewinding a consumed frame.
+        if py.import("numpy").is_ok() {
+            let arr = self.src.feed_into_numpy(py, data)?;
+            return wrap_floats(py, &kind, arr);
+        }
+        // No NumPy: collect, and hand back a plain list that keeps the warm-up
+        // `None`s instead of flattening them to `NaN`.
         let values = self.src.feed_rows(data)?;
         build_floats(py, &kind, values)
     }

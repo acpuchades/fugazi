@@ -542,6 +542,77 @@ impl AnySource {
             AnySource::Const(c) => vec![Some(*c); columns_from_frame(data)?.len()],
         })
     }
+
+    /// The same fold as [`feed_rows`](Self::feed_rows), writing each value
+    /// **straight into a NumPy buffer** instead of collecting a
+    /// `Vec<Option<Real>>` for someone else to copy out.
+    ///
+    /// This is the whole of `feed()`'s output path for the normal case (NumPy
+    /// importable, which is every real deployment). `feed_rows` stays for the
+    /// no-NumPy fallback, where the `Option`s must survive to become a Python
+    /// list of `None`s rather than being flattened to `NaN`.
+    ///
+    /// Warm-up `None` becomes `NaN` here, at the point of production — the same
+    /// convention `ndarray_from_values` applies, just without the round trip.
+    pub(crate) fn feed_into_numpy<'py>(
+        &mut self,
+        py: Python<'py>,
+        data: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        // Each arm parses its input first (that is what fixes the row count),
+        // then allocates. The cells are walked with an iterator rather than an
+        // index so the write is not bounds-checked per sample; `cells.next()`
+        // cannot run dry, because the count came from the same parsed input.
+        match self {
+            AnySource::Candle(s) => {
+                let cols = columns_from_frame(data)?;
+                numpy_filled(py, cols.len(), |slice| {
+                    let mut cells = slice.iter();
+                    cols.for_each(|c| {
+                        if let Some(cell) = cells.next() {
+                            cell.set(Indicator::update(s, c).unwrap_or(Real::NAN));
+                        }
+                    });
+                })
+            }
+            AnySource::Atom(s) => {
+                let cols = columns_from_frame(data)?;
+                numpy_filled(py, cols.len(), |slice| {
+                    let mut cells = slice.iter();
+                    cols.for_each(|c| {
+                        if let Some(cell) = cells.next() {
+                            cell.set(Indicator::update(s, c.into()).unwrap_or(Real::NAN));
+                        }
+                    });
+                })
+            }
+            AnySource::Real(s) => {
+                let xs = reals_from_series(data)?;
+                numpy_filled(py, xs.len(), |slice| {
+                    for (cell, x) in slice.iter().zip(xs) {
+                        cell.set(Indicator::update(s, x).unwrap_or(Real::NAN));
+                    }
+                })
+            }
+            AnySource::Snapshot(s) => {
+                let snaps = snapshots_from_sequence(data)?;
+                numpy_filled(py, snaps.len(), |slice| {
+                    for (cell, snap) in slice.iter().zip(snaps) {
+                        cell.set(Indicator::update(s, snap).unwrap_or(Real::NAN));
+                    }
+                })
+            }
+            AnySource::Const(c) => {
+                let v = *c;
+                let len = columns_from_frame(data)?.len();
+                numpy_filled(py, len, |slice| {
+                    for cell in slice {
+                        cell.set(v);
+                    }
+                })
+            }
+        }
+    }
 }
 
 /// One field of a [`Candle`], read straight off the bar.

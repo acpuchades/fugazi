@@ -533,6 +533,70 @@ fn ndarray_from_values<'py>(
     Ok(arr)
 }
 
+/// Allocate a 1-D `float64` NumPy array of `len` cells and let `fill` write them.
+///
+/// The zero-intermediate output path: the indicator's values land in NumPy's own
+/// buffer as they are produced, so nothing is staged in between.
+/// [`ndarray_from_values`] is the same idea one step later — it still has to read
+/// a `Vec<Option<f64>>` that somebody already built and paid for.
+///
+/// What the `Vec` cost, per sample, is not obvious until it is gone: a 16-byte
+/// `Option<f64>` store with a capacity check on the way in, then a re-read,
+/// unwrap and 8-byte store on the way out — two passes over 3.2 MB for a
+/// 200 000-bar frame, and 3.2 MB of allocation that peaks alongside NumPy's own
+/// 1.6 MB.
+///
+/// `fill` gets `&[Cell<f64>]` rather than `&mut [f64]` because the buffer is
+/// aliasable from Python's side; that is pyo3's `PyBuffer` contract, not a
+/// choice here. Every cell must be written — `np.empty` does not zero, so a
+/// skipped cell reads as whatever was in that page.
+pub(crate) fn numpy_filled<'py>(
+    py: Python<'py>,
+    len: usize,
+    fill: impl FnOnce(&[std::cell::Cell<f64>]),
+) -> PyResult<Bound<'py, PyAny>> {
+    let np = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", np.getattr("float64")?)?;
+    let arr = np.getattr("empty")?.call((len,), Some(&kwargs))?;
+
+    // `np.empty` hands back an owned, writable, C-contiguous `float64` array, so
+    // the buffer request cannot fail for shape reasons.
+    let buf = pyo3::buffer::PyBuffer::<f64>::get(&arr)?;
+    let slice = buf
+        .as_mut_slice(py)
+        .ok_or_else(|| PyTypeError::new_err("numpy array is not writable"))?;
+    fill(slice);
+    Ok(arr)
+}
+
+/// Wrap an already-built NumPy array in whatever the input library was.
+///
+/// The tail of the fast path: [`numpy_filled`] has produced the data, and this
+/// only decides what Python type it arrives as. Split out from
+/// [`build_floats`] so the array can be filled *before* this runs — that
+/// ordering is the entire point of the zero-intermediate path.
+pub(crate) fn wrap_floats<'py>(
+    py: Python<'py>,
+    kind: &OutputKind,
+    arr: Bound<'py, PyAny>,
+) -> PyResult<Py<PyAny>> {
+    match kind {
+        OutputKind::Pandas(index) => {
+            let series = py.import("pandas")?.getattr("Series")?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("index", index.bind(py))?;
+            Ok(series.call((arr,), Some(&kwargs))?.unbind())
+        }
+        OutputKind::Polars => Ok(py
+            .import("polars")?
+            .getattr("Series")?
+            .call1((arr,))?
+            .unbind()),
+        OutputKind::Numpy => Ok(arr.unbind()),
+    }
+}
+
 /// Build a boolean output series. Signals never warm up to a missing value.
 pub(crate) fn build_bools(py: Python<'_>, kind: &OutputKind, values: Vec<bool>) -> PyResult<Py<PyAny>> {
     match kind {
