@@ -143,6 +143,22 @@ fn main() {
         }
     })));
 
+    // Everything `PyIndicator::feed` does on the Rust side of the boundary,
+    // with no Python at all: the nested erased chain, the `Vec<Option<Real>>`
+    // it collects into, and the `Vec<f64>` `build_floats` maps that to. If this
+    // lands near the measured `feed()` cost the problem is ours; if it lands
+    // far below, the rest is pyo3/NumPy and has to be chased there.
+    out.push(("feed_rust_side", bench(n, || {
+        let inner = ErasedReal(runtime::wrap(Identity::<Real>::new()));
+        let mut ind = runtime::wrap(Sma::new(inner, SMA_P));
+        let values: Vec<Option<Real>> = closes
+            .iter()
+            .map(|&p| ind.update(DynValue::Real(p)).and_then(|v| Real::try_from(v).ok()))
+            .collect();
+        let nums: Vec<Real> = values.iter().map(|v| v.unwrap_or(Real::NAN)).collect();
+        black_box(nums.len());
+    })));
+
     if json {
         for (name, ns) in &out {
             println!("{{\"name\":\"{name}\",\"ns_per_sample\":{ns:.4}}}");
