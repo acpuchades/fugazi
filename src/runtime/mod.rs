@@ -23,8 +23,8 @@
 pub mod chain;
 
 pub use chain::{
-    any, AnyChain, AtomChain, BoolChain, CandleChain, Chain, ChainDomain, DynIndicator, RealChain,
-    StrChain, TimeChain,
+    any, erase, AnyChain, AtomChain, BoolChain, CandleChain, Chain, ChainDomain, DynIndicator,
+    Erased, RealChain, StrChain, TimeChain,
 };
 
 use std::fmt;

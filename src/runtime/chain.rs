@@ -85,6 +85,12 @@ impl<I: Indicator> Indicator for Erased<I> {
     fn unstable_bars(&self) -> usize {
         self.0.unstable_bars()
     }
+    fn stable_bars(&self) -> usize {
+        self.0.stable_bars()
+    }
+    fn is_ready(&self) -> bool {
+        self.0.is_ready()
+    }
     fn reset(&mut self) {
         self.0.reset();
     }
@@ -118,6 +124,59 @@ impl<In: 'static, Out: Clone + 'static> Clone for Box<dyn DynIndicator<In, Out>>
     fn clone(&self) -> Self {
         (**self).dyn_clone()
     }
+}
+
+/// A [`Chain`] is itself an [`Indicator`], so it drops straight into any
+/// constructor's source slot: `Sma::new(chain, 10)` needs no adapter.
+///
+/// This is what makes the migration off the payload vocabulary mechanical. The
+/// old carrier had to be a newtype (`TypedSource`, `As<Out>`) purely to attach
+/// `Input`/`Output` associated types to a payload box that had erased them; here
+/// they are already in the type, so the newtype has nothing left to do.
+impl<In, Out: Clone> Indicator for Box<dyn DynIndicator<In, Out>> {
+    type Input = In;
+    type Output = Out;
+    fn update(&mut self, input: In) -> Option<Out> {
+        (**self).update(input)
+    }
+    fn value(&self) -> Option<Out> {
+        (**self).value()
+    }
+    fn warm_up_bars(&self) -> usize {
+        (**self).warm_up_bars()
+    }
+    fn unstable_bars(&self) -> usize {
+        (**self).unstable_bars()
+    }
+    fn stable_bars(&self) -> usize {
+        (**self).stable_bars()
+    }
+    fn is_ready(&self) -> bool {
+        (**self).is_ready()
+    }
+    fn reset(&mut self) {
+        (**self).reset();
+    }
+    fn save_state(&self) -> serde_json::Value {
+        (**self).save_state()
+    }
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        (**self).load_state(state)
+    }
+}
+
+/// Erase a concrete indicator into a [`Chain`], keeping its domain in the type.
+///
+/// The narrow counterpart of [`wrap`](super::wrap) / [`wrap_sync`](super::wrap_sync):
+/// same role, but the input and output types survive, so the result needs no
+/// typed view to be usable again.
+pub fn erase<I, In, Out>(inner: I) -> Chain<In, Out>
+where
+    I: Indicator<Input = In, Output = Out> + Clone + Send + Sync + 'static,
+    In: 'static,
+    Out: Clone + 'static,
+{
+    Box::new(Erased::new(inner))
 }
 
 /// A chain over a per-bar snapshot producing a real number — by far the common

@@ -15,149 +15,61 @@ use crate::metrics::*;
 use crate::spec::*;
 
 // ---------------------------------------------------------------------------
-// Shared type-erasure vocabulary (fugazi::runtime)
+// Shared type-erasure vocabulary (fugazi::runtime::chain)
 //
-// The core library's `runtime::PayloadIndicatorSync` adds `Send + Sync` and an
-// autotrait-preserving deep clone on top of `PayloadIndicator` — exactly what pyo3
-// pyclasses need on every field. Every wrapper in Python that used to hold its
-// own erased trait object (Source<I> for Real, SignalBox<I> for bool,
-// StrSource<I> for Arc<str>, AtomBox<I> for Atom) collapses to a single
-// generic `TypedSource<In, Out>` that carries the runtime handle and
-// compile-time markers for the input and output types.
+// Every wrapper in Python that used to hold its own erased trait object
+// (Source<I> for Real, SignalBox<I> for bool, StrSource<I> for Arc<str>,
+// AtomBox<I> for Atom) is one `runtime::Chain<In, Out>` — a
+// `Box<dyn DynIndicator<In, Out>>`, which is `Send + Sync + Clone` (what pyo3
+// pyclass fields need) and implements `Indicator<Input = In, Output = Out>`
+// directly.
+//
+// PERFORMANCE — this is the hot boundary, and the reason `Chain` exists.
+// These carriers used to hold a `Box<dyn PayloadIndicatorSync>` exchanging
+// `PayloadValue`, an enum 88 bytes wide (as wide as its `Atom` variant). Every
+// Python-built expression erases at *every* level — `sma(identity(), 10)` is
+// two boxes — so a sample crossed that 88-byte boundary once per level in each
+// direction, plus a discriminant branch and drop glue. Measured
+// (`cargo bench --bench erasure`): +12.9 ns/sample per level of nesting with a
+// payload, +0.4 ns with a `Chain`. Do not reintroduce a payload enum here to
+// recover self-description; the domain is already in the type, and the `Any*`
+// enums below are how the bindings recover it when they need to.
 //
 // The one exception is `MultiBox<I>` / `DynMulti<I>`: multi-output indicators
 // emit a value struct (MacdValue, BollingerValue, …) that maps to `Vec<Real>`
-// + `&'static [&'static str]` at the Python boundary, a shape that doesn't
-// fit the runtime's `PayloadValue` payload enum. Unifying it would need a `Multi`
-// variant on `PayloadValue` plus a `multi_names()` method on the trait — a
-// library API expansion for negligible savings, so `DynMulti` intentionally
-// stays local.
+// + `&'static [&'static str]` at the Python boundary. It stays local because
+// it needs the *names* alongside the values, which no generic carrier carries.
 // ---------------------------------------------------------------------------
 
-/// A runtime-typed handle carrying compile-time `In`/`Out` markers so it
-/// implements `Indicator<Input = In, Output = Out>` cleanly. The single
-/// carrier that replaces Python's per-input-domain / per-output-type boxes.
+/// A boxed `I -> Real` indicator. Semantics match the library: `None` until
+/// warm, `Some(Real)` afterwards — no bool-signal-style flattening.
+pub(crate) type Source<I> = runtime::Chain<I, Real>;
+
+/// A boxed `I`-input signal (bool-out) that adds the "always-Some" semantics
+/// Python's bool combinators depend on: warm-up `None` on the underlying source
+/// is flattened to `Some(false)` at every update/value read, so a `.not_()` of a
+/// warming-up signal reads as `true` (matching the Python API's promise that a
+/// signal has a definite `bool` at every step).
 ///
-/// Construction takes a concrete `T: Indicator<Input = In, Output = Out> +
-/// Clone + Send + Sync + 'static` and wraps it through
-/// [`runtime::wrap_sync`]; every subsequent method call routes through the
-/// runtime's `PayloadValue` payload but the surface `Indicator` impl below keeps
-/// `In`/`Out` typed at every call site.
-pub(crate) struct TypedSource<In, Out>(
-    pub(crate) Box<dyn runtime::PayloadIndicatorSync>,
-    pub(crate) std::marker::PhantomData<fn(In) -> Out>,
-);
+/// The only carrier that is still a newtype, and only for that flattening.
+pub(crate) struct SignalBox<I>(pub(crate) runtime::Chain<I, bool>);
 
-impl<In, Out> TypedSource<In, Out>
-where
-    In: TryFrom<PayloadValue, Error = PayloadType>
-        + TypeOf
-        + Into<PayloadValue>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-    Out: TryFrom<PayloadValue, Error = PayloadType>
-        + TypeOf
-        + Into<PayloadValue>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-{
-    pub(crate) fn new<T>(inner: T) -> Self
-    where
-        T: Indicator<Input = In, Output = Out> + Clone + Send + Sync + 'static,
-    {
-        Self(runtime::wrap_sync(inner), std::marker::PhantomData)
-    }
-}
-
-impl<In, Out> Clone for TypedSource<In, Out> {
-    fn clone(&self) -> Self {
-        Self(self.0.clone(), std::marker::PhantomData)
-    }
-}
-
-impl<In, Out> Indicator for TypedSource<In, Out>
-where
-    In: Into<PayloadValue>,
-    Out: TryFrom<PayloadValue> + Clone,
-{
-    type Input = In;
-    type Output = Out;
-
-    fn update(&mut self, input: In) -> Option<Out> {
-        let payload = self.0.update(input.into())?;
-        // Out's compile-time TypeOf matches the runtime output_type() by
-        // construction (Adapter blanket + TypedSource::new bounds), so the
-        // TryFrom back is always Ok.
-        Some(Out::try_from(payload).ok().expect(
-            "TypedSource: runtime output type doesn't match compile-time Out",
-        ))
-    }
-
-    fn value(&self) -> Option<Out> {
-        let payload = self.0.value()?;
-        Some(Out::try_from(payload).ok().expect(
-            "TypedSource: runtime output type doesn't match compile-time Out",
-        ))
-    }
-
-    fn warm_up_bars(&self) -> usize {
-        self.0.warm_up_bars()
-    }
-
-    fn unstable_bars(&self) -> usize {
-        self.0.unstable_bars()
-    }
-
-    fn reset(&mut self) {
-        self.0.reset()
-    }
-}
-
-/// A boxed `I -> Real` indicator — a type alias over the shared
-/// [`TypedSource`] carrier. The dedicated `PayloadIndicator<I>` trait +
-/// blanket impl it used to have collapsed into [`runtime::Adapter`]'s
-/// coverage. Semantics match the library: `None` until warm, `Some(Real)`
-/// afterwards — no bool-signal-style flattening.
-pub(crate) type Source<I> = TypedSource<I, Real>;
-
-/// A boxed `I`-input signal (bool-out). Wraps the shared [`TypedSource`]
-/// carrier and adds the "always-Some" semantics Python's bool combinators
-/// depend on: warm-up `None` on the underlying source is flattened to
-/// `Some(false)` at every update/value read, so a `.not_()` of a warming-up
-/// signal reads as `true` (matching the Python API's promise that a signal
-/// has a definite `bool` at every step).
-///
-/// The dedicated `DynSignal<I>` trait + blanket impl it used to have
-/// collapsed into [`runtime::Adapter`]'s coverage; only the flattening
-/// wrapper survives here.
-pub(crate) struct SignalBox<I>(pub(crate) TypedSource<I, bool>);
-
-impl<I> SignalBox<I>
-where
-    I: TryFrom<PayloadValue, Error = PayloadType> + TypeOf + Into<PayloadValue> + Clone + Send + Sync + 'static,
-{
+impl<I: 'static> SignalBox<I> {
     pub(crate) fn new<T>(inner: T) -> Self
     where
         T: Indicator<Input = I, Output = bool> + Clone + Send + Sync + 'static,
     {
-        Self(TypedSource::new(inner))
+        Self(runtime::erase(inner))
     }
 }
 
-impl<I> Clone for SignalBox<I> {
+impl<I: 'static> Clone for SignalBox<I> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
 
-impl<I> Indicator for SignalBox<I>
-where
-    I: Into<PayloadValue>,
-{
+impl<I> Indicator for SignalBox<I> {
     type Input = I;
     type Output = bool;
     fn update(&mut self, input: I) -> Option<bool> {
@@ -177,14 +89,11 @@ where
     }
 }
 
-/// A boxed `I -> Arc<str>` indicator — the string twin of `Source<I>`. Now a
-/// type alias over the shared [`TypedSource`] carrier; the dedicated
-/// `DynStr<I>` trait + blanket impl it used to have collapsed into
-/// [`runtime::Adapter`]'s coverage.
+/// A boxed `I -> Arc<str>` indicator — the string twin of `Source<I>`.
 ///
 /// Backs the `GetStr` overlay-column reader and the `ValueStr` string
 /// constant leaf, which compose into `str_eq` / `str_ne` signals.
-pub(crate) type StrSource<I> = TypedSource<I, Arc<str>>;
+pub(crate) type StrSource<I> = runtime::Chain<I, Arc<str>>;
 
 /// Maps a multi-output value struct to its line names and their values (in the
 /// same order). The names are available without an instance so warm-up rows can
@@ -505,7 +414,7 @@ impl AnySharedMulti {
         let idx = self.field_index(name)?;
         Ok(match self {
             AnySharedMulti::Candle(cell) => PyIndicator {
-                src: AnySource::Candle(Source::new(SharedProjector::<Atom> {
+                src: AnySource::Candle(runtime::erase(SharedProjector::<Atom> {
                     cell: Arc::clone(cell),
                     field_index: idx,
                     local_gen: cell.lock().expect("mutex poisoned").generation,
@@ -513,7 +422,7 @@ impl AnySharedMulti {
                 })),
             },
             AnySharedMulti::Real(cell) => PyIndicator {
-                src: AnySource::Real(Source::new(SharedProjector::<Real> {
+                src: AnySource::Real(runtime::erase(SharedProjector::<Real> {
                     cell: Arc::clone(cell),
                     field_index: idx,
                     local_gen: cell.lock().expect("mutex poisoned").generation,
@@ -521,7 +430,7 @@ impl AnySharedMulti {
                 })),
             },
             AnySharedMulti::Snapshot(cell) => PyIndicator {
-                src: AnySource::Snapshot(Source::new(SharedProjector::<Snapshot<Symbol>> {
+                src: AnySource::Snapshot(runtime::erase(SharedProjector::<Snapshot<Symbol>> {
                     cell: Arc::clone(cell),
                     field_index: idx,
                     local_gen: cell.lock().expect("mutex poisoned").generation,
@@ -621,10 +530,10 @@ pub(crate) enum Pair {
 /// equivalent — they ignore input).
 pub(crate) fn pair(lhs: AnySource, rhs: AnySource) -> PyResult<Pair> {
     fn rval(c: Real) -> Source<Real> {
-        Source::new(Value::<Real>::new(c))
+        runtime::erase(Value::<Real>::new(c))
     }
     fn sval(c: Real) -> Source<Snapshot<Symbol>> {
-        Source::new(Value::<Snapshot<Symbol>>::new(c))
+        runtime::erase(Value::<Snapshot<Symbol>>::new(c))
     }
     match (lhs, rhs) {
         (AnySource::Candle(a), AnySource::Candle(b)) => Ok(Pair::Candle(a, b)),
@@ -767,10 +676,10 @@ pub(crate) enum StrPair {
 pub(crate) fn str_pair(lhs: AnyStrSource, rhs: AnyStrSource) -> PyResult<StrPair> {
     use AnyStrSource as A;
     fn lift_candle(c: Arc<str>) -> StrSource<Atom> {
-        StrSource::new(ValueStr::<Atom>::new(c))
+        runtime::erase(ValueStr::<Atom>::new(c))
     }
     fn lift_snapshot(c: Arc<str>) -> StrSource<Snapshot<Symbol>> {
-        StrSource::new(ValueStr::<Snapshot<Symbol>>::new(c))
+        runtime::erase(ValueStr::<Snapshot<Symbol>>::new(c))
     }
     Ok(match (lhs, rhs) {
         (A::Candle(l), A::Candle(r)) => StrPair::Candle(l, r),
@@ -865,5 +774,5 @@ pub(crate) fn domain_mismatch() -> PyErr {
 /// The candle domain is neutral (matches the enum's own default), so a bare
 /// constant used on its own reads as a per-bar constant candle stream.
 pub(crate) fn const_to_candle_source(c: Real) -> Source<Atom> {
-    Source::new(Value::<Atom>::new(c))
+    runtime::erase(Value::<Atom>::new(c))
 }

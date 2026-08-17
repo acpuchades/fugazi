@@ -892,10 +892,7 @@ impl PySnapshot {
 // ---------------------------------------------------------------------------
 
 /// A boxed `I -> Atom` indicator — the atom-emitting twin of `Source<I>`.
-/// Now a type alias over the shared [`TypedSource`] carrier; the dedicated
-/// `DynAtomIndicator<I>` trait + blanket impl it used to have collapsed
-/// into [`runtime::Adapter`]'s coverage.
-pub(crate) type AtomBox<I> = TypedSource<I, Atom>;
+pub(crate) type AtomBox<I> = runtime::Chain<I, Atom>;
 
 /// An atom-emitting source erased to one of the two input domains it can be
 /// rooted in on the Python side: `Atom` (the identity passthrough) or

@@ -305,7 +305,7 @@ pub(crate) fn frame_to_candles(frame: &Bound<'_, PyAny>) -> PyResult<Vec<Candle>
 pub(crate) fn require_candle_source(src: AnySource) -> PyResult<Source<Atom>> {
     match src {
         AnySource::Candle(s) => Ok(s),
-        AnySource::Const(c) => Ok(Source::new(Value::<Atom>::new(c))),
+        AnySource::Const(c) => Ok(runtime::erase(Value::<Atom>::new(c))),
         AnySource::Real(_) | AnySource::Snapshot(_) => Err(PyTypeError::new_err(
             "this indicator reads OHLC bars internally, so its source must be \
              candle-rooted (e.g. close()), not identity- or snapshot-rooted",
@@ -515,7 +515,7 @@ pub(crate) fn candle_source<T>(inner: T) -> PyIndicator
 where
     T: Indicator<Input = Atom, Output = Real> + Clone + Send + Sync + 'static,
 {
-    PyIndicator::wrap(AnySource::Candle(Source::new(inner)))
+    PyIndicator::wrap(AnySource::Candle(runtime::erase(inner)))
 }
 
 /// Every atom-input source leaf on the Python side follows the same shape:
@@ -530,12 +530,12 @@ macro_rules! atom_leaf_source {
         #[pyo3(signature = (source = None))]
         pub(crate) fn $name(source: Option<PyRef<'_, PyAtomSource>>) -> PyIndicator {
             match source.map(|s| s.inner.clone()) {
-                None => PyIndicator::wrap(AnySource::Candle(Source::new($default_ctor))),
+                None => PyIndicator::wrap(AnySource::Candle(runtime::erase($default_ctor))),
                 Some(AnyAtomSource::Atom(s)) => {
-                    PyIndicator::wrap(AnySource::Candle(Source::new($of_ctor(s))))
+                    PyIndicator::wrap(AnySource::Candle(runtime::erase($of_ctor(s))))
                 }
                 Some(AnyAtomSource::Snapshot(s)) => {
-                    PyIndicator::wrap(AnySource::Snapshot(Source::new($of_ctor(s))))
+                    PyIndicator::wrap(AnySource::Snapshot(runtime::erase($of_ctor(s))))
                 }
             }
         }
@@ -735,7 +735,7 @@ pub(crate) fn pick(symbol: Option<&Bound<'_, PyAny>>, freq: Option<&Bound<'_, Py
         Pick::matching(selector)
     };
     Ok(PyAtomSource {
-        inner: AnyAtomSource::Snapshot(AtomBox::new(pick)),
+        inner: AnyAtomSource::Snapshot(runtime::erase(pick)),
     })
 }
 
@@ -744,7 +744,7 @@ pub(crate) fn pick(symbol: Option<&Bound<'_, PyAny>>, freq: Option<&Bound<'_, Py
 /// — `update(float)` and `feed([...])` rather than candles.
 #[pyfunction]
 pub(crate) fn identity() -> PyIndicator {
-    PyIndicator::wrap(AnySource::Real(Source::new(Identity::new())))
+    PyIndicator::wrap(AnySource::Real(runtime::erase(Identity::new())))
 }
 
 /// Source: a constant value, ignoring the input. Mirrors Rust's `Value`, which
@@ -907,9 +907,9 @@ pub(crate) fn percentile(source: PyRef<'_, PyIndicator>, period: usize, pct: f64
 #[pyfunction]
 pub(crate) fn bars_since(source: PyRef<'_, PySignal>) -> PyResult<PyIndicator> {
     let out = match source.sig.clone() {
-        AnySignal::Candle(s) => AnySource::Candle(Source::new(BarsSince::new(s))),
-        AnySignal::Real(s) => AnySource::Real(Source::new(BarsSince::new(s))),
-        AnySignal::Snapshot(s) => AnySource::Snapshot(Source::new(BarsSince::new(s))),
+        AnySignal::Candle(s) => AnySource::Candle(runtime::erase(BarsSince::new(s))),
+        AnySignal::Real(s) => AnySource::Real(runtime::erase(BarsSince::new(s))),
+        AnySignal::Snapshot(s) => AnySource::Snapshot(runtime::erase(BarsSince::new(s))),
     };
     Ok(PyIndicator::wrap(out))
 }
@@ -1204,7 +1204,7 @@ pub(crate) fn resample(every: usize, inner: PyRef<'_, PyIndicator>) -> PyResult<
     // domain — it will just ignore the bar and emit its constant on every
     // HTF boundary).
     let inner_candle = require_candle_source(inner.src.clone())?;
-    Ok(PyIndicator::wrap(AnySource::Candle(Source::new(
+    Ok(PyIndicator::wrap(AnySource::Candle(runtime::erase(
         ResampleThen::new(every, inner_candle),
     ))))
 }
@@ -1218,9 +1218,9 @@ pub(crate) fn resample(every: usize, inner: PyRef<'_, PyIndicator>) -> PyResult<
 pub(crate) fn latch<'py>(py: Python<'py>, source: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
     if let Ok(ind) = source.cast::<PyIndicator>() {
         let out = match ind.borrow().src.clone() {
-            AnySource::Candle(s) => AnySource::Candle(Source::new(Latch::new(s))),
-            AnySource::Real(s) => AnySource::Real(Source::new(Latch::new(s))),
-            AnySource::Snapshot(s) => AnySource::Snapshot(Source::new(Latch::new(s))),
+            AnySource::Candle(s) => AnySource::Candle(runtime::erase(Latch::new(s))),
+            AnySource::Real(s) => AnySource::Real(runtime::erase(Latch::new(s))),
+            AnySource::Snapshot(s) => AnySource::Snapshot(runtime::erase(Latch::new(s))),
             // A latched constant is still that constant — the source never
             // emits `None`, so the latch never fires. Return as-is.
             other @ AnySource::Const(_) => other,
@@ -1291,13 +1291,13 @@ pub(crate) fn if_else(cond: PyRef<'_, PySignal>, then: PyRef<'_, PyIndicator>, o
     let cond_sig = cond.sig.clone();
     let out = match (cond_sig, branches) {
         (AnySignal::Candle(c), Pair::Candle(t, f)) => {
-            AnySource::Candle(Source::new(IfElse::new(c, t, f)))
+            AnySource::Candle(runtime::erase(IfElse::new(c, t, f)))
         }
         (AnySignal::Real(c), Pair::Real(t, f)) => {
-            AnySource::Real(Source::new(IfElse::new(c, t, f)))
+            AnySource::Real(runtime::erase(IfElse::new(c, t, f)))
         }
         (AnySignal::Snapshot(c), Pair::Snapshot(t, f)) => {
-            AnySource::Snapshot(Source::new(IfElse::new(c, t, f)))
+            AnySource::Snapshot(runtime::erase(IfElse::new(c, t, f)))
         }
         _ => return Err(domain_mismatch()),
     };
@@ -1403,11 +1403,11 @@ pub(crate) fn build_get_real(
     let checked =
         GetReal::try_new(&schema.inner, key).map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(match source {
-        None => PyIndicator::wrap(AnySource::Candle(Source::new(checked))),
-        Some(AnyAtomSource::Atom(s)) => PyIndicator::wrap(AnySource::Candle(Source::new(
+        None => PyIndicator::wrap(AnySource::Candle(runtime::erase(checked))),
+        Some(AnyAtomSource::Atom(s)) => PyIndicator::wrap(AnySource::Candle(runtime::erase(
             GetReal::of(&schema.inner, key, s),
         ))),
-        Some(AnyAtomSource::Snapshot(s)) => PyIndicator::wrap(AnySource::Snapshot(Source::new(
+        Some(AnyAtomSource::Snapshot(s)) => PyIndicator::wrap(AnySource::Snapshot(runtime::erase(
             GetReal::of(&schema.inner, key, s),
         ))),
     })
@@ -1439,12 +1439,12 @@ pub(crate) fn build_get_str(
     let checked =
         GetStr::try_new(&schema.inner, key).map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(match source {
-        None => PyStrSource::wrap(AnyStrSource::Candle(StrSource::new(checked))),
-        Some(AnyAtomSource::Atom(s)) => PyStrSource::wrap(AnyStrSource::Candle(StrSource::new(
+        None => PyStrSource::wrap(AnyStrSource::Candle(runtime::erase(checked))),
+        Some(AnyAtomSource::Atom(s)) => PyStrSource::wrap(AnyStrSource::Candle(runtime::erase(
             GetStr::of(&schema.inner, key, s),
         ))),
         Some(AnyAtomSource::Snapshot(s)) => PyStrSource::wrap(AnyStrSource::Snapshot(
-            StrSource::new(GetStr::of(&schema.inner, key, s)),
+            runtime::erase(GetStr::of(&schema.inner, key, s)),
         )),
     })
 }
@@ -1475,17 +1475,24 @@ pub(crate) fn unknown_key_error(schema: &PySchema, key: &str) -> PyErr {
 /// carrier (`Indicator` → Real, `Signal` → Bool, `StrSource` → Str). Returns
 /// `None` if `v` is none of those. The handle is deep-cloned so the caller's
 /// carrier is untouched; a domain-neutral `Const` carrier synthesises a
-/// constant leaf. The raw inner handle (not the `SignalBox` wrapper) is taken
+/// constant leaf. The raw inner chain (not the `SignalBox` wrapper) is taken
 /// on purpose — a warming bool overlay then reads `None`, not `false`.
+///
+/// This is the one place the bindings still hand a *payload* box out: the
+/// overlay-column API takes a heterogeneous list whose members differ in input
+/// domain (atom-rooted, value-rooted, snapshot-rooted), which a domain-typed
+/// `Chain` cannot express in one `Vec`. Re-wrapping costs one `Box` per column
+/// at build time and nothing per bar, so it stays until
+/// `spec::overlay` itself moves over.
 pub(crate) fn carrier_inner_indicator(
     v: &Bound<'_, PyAny>,
 ) -> PyResult<Option<(Box<dyn runtime::PayloadIndicator>, OverlayType)>> {
     if let Ok(ind) = v.cast::<PyIndicator>() {
         let ind = ind.borrow();
         let inner: Box<dyn runtime::PayloadIndicator> = match &ind.src {
-            AnySource::Candle(s) => s.0.clone(),
-            AnySource::Real(s) => s.0.clone(),
-            AnySource::Snapshot(s) => s.0.clone(),
+            AnySource::Candle(s) => runtime::wrap(s.clone()),
+            AnySource::Real(s) => runtime::wrap(s.clone()),
+            AnySource::Snapshot(s) => runtime::wrap(s.clone()),
             AnySource::Const(c) => runtime::wrap(Value::<Atom>::new(*c)),
         };
         return Ok(Some((inner, OverlayType::Real)));
@@ -1493,17 +1500,17 @@ pub(crate) fn carrier_inner_indicator(
     if let Ok(sig) = v.cast::<PySignal>() {
         let sig = sig.borrow();
         let inner: Box<dyn runtime::PayloadIndicator> = match &sig.sig {
-            AnySignal::Candle(s) => s.0.0.clone(),
-            AnySignal::Real(s) => s.0.0.clone(),
-            AnySignal::Snapshot(s) => s.0.0.clone(),
+            AnySignal::Candle(s) => runtime::wrap(s.0.clone()),
+            AnySignal::Real(s) => runtime::wrap(s.0.clone()),
+            AnySignal::Snapshot(s) => runtime::wrap(s.0.clone()),
         };
         return Ok(Some((inner, OverlayType::Bool)));
     }
     if let Ok(ss) = v.cast::<PyStrSource>() {
         let ss = ss.borrow();
         let inner: Box<dyn runtime::PayloadIndicator> = match &ss.src {
-            AnyStrSource::Candle(s) => s.0.clone(),
-            AnyStrSource::Snapshot(s) => s.0.clone(),
+            AnyStrSource::Candle(s) => runtime::wrap(s.clone()),
+            AnyStrSource::Snapshot(s) => runtime::wrap(s.clone()),
             AnyStrSource::Const(c) => runtime::wrap(ValueStr::<Atom>::new(c.clone())),
         };
         return Ok(Some((inner, OverlayType::Str)));
@@ -1817,6 +1824,13 @@ pub(crate) fn str_ne(lhs: &PyStrSource, rhs: &Bound<'_, PyAny>) -> PyResult<PySi
 /// * `0` — input conversion only
 /// * `1` — input + indicator
 /// * `2` — input + indicator + output (i.e. all of `feed`)
+/// * `10 + k` — all of `feed`, over a **Rust-built** chain `k` levels deep
+///
+/// The `10 + k` stages exist to separate two costs that look identical from
+/// Python: what an erased level costs, and what the *builders* put around it.
+/// They assemble exactly what `sma(ema(…))` assembles, but from Rust, so a
+/// difference between `10 + k` and the equivalent Python expression is the
+/// binding layer and nothing else.
 #[pyfunction]
 pub(crate) fn _bench_feed_stage(
     py: Python<'_>,
@@ -1828,9 +1842,27 @@ pub(crate) fn _bench_feed_stage(
     if stage == 0 {
         return Ok(xs.len());
     }
-    let mut ind = crate::carriers::Source::<Real>::new(
-        fugazi_core::indicators::Sma::new(fugazi_core::indicators::Identity::<Real>::new(), period),
-    );
+    // `#[inline(never)]` for the same reason `benches/erasure.rs` needs it: if
+    // the concrete types are visible at the `erase` call, LLVM devirtualises
+    // the chain and the measurement stops describing a runtime-built one.
+    #[inline(never)]
+    fn chain_levels(levels: usize, period: usize) -> crate::carriers::Source<Real> {
+        use fugazi_core::indicators::{Ema, Identity, Sma};
+        let mut c: crate::carriers::Source<Real> = runtime::erase(Identity::<Real>::new());
+        for i in 1..levels {
+            c = if i % 2 == 1 {
+                runtime::erase(Sma::new(c, period))
+            } else {
+                runtime::erase(Ema::new(c, period))
+            };
+        }
+        c
+    }
+    let mut ind = if stage >= 10 {
+        chain_levels(stage - 10, period)
+    } else {
+        chain_levels(2, period)
+    };
     let values: Vec<Option<Real>> = xs
         .into_iter()
         .map(|x| fugazi_core::Indicator::update(&mut ind, x))
@@ -1838,6 +1870,30 @@ pub(crate) fn _bench_feed_stage(
     if stage == 1 {
         return Ok(values.len());
     }
+    let out = build_floats(py, &OutputKind::Numpy, values)?;
+    Ok(out.bind(py).len().unwrap_or(0))
+}
+
+/// Drive a **Python-built** indicator through the same loop [`_bench_feed_stage`]
+/// uses for its Rust-built one. **A measurement hook, not API.**
+///
+/// The pair bisects the Python gap: same input conversion, same fold, same
+/// output — the only difference is who assembled the chain.
+#[pyfunction]
+pub(crate) fn _bench_feed_built(
+    py: Python<'_>,
+    ind: &Bound<'_, PyIndicator>,
+    data: &Bound<'_, PyAny>,
+) -> PyResult<usize> {
+    let xs = reals_from_series(data)?;
+    let mut ind = ind.borrow_mut();
+    let AnySource::Real(chain) = &mut ind.src else {
+        return Err(PyTypeError::new_err("expected a value-rooted indicator"));
+    };
+    let values: Vec<Option<Real>> = xs
+        .into_iter()
+        .map(|x| fugazi_core::Indicator::update(chain, x))
+        .collect();
     let out = build_floats(py, &OutputKind::Numpy, values)?;
     Ok(out.bind(py).len().unwrap_or(0))
 }

@@ -11,12 +11,12 @@
 macro_rules! map_source {
     ($src:expr, |$s:ident| $build:expr) => {
         match $src {
-            AnySource::Candle($s) => AnySource::Candle(Source::new($build)),
-            AnySource::Real($s) => AnySource::Real(Source::new($build)),
-            AnySource::Snapshot($s) => AnySource::Snapshot(Source::new($build)),
+            AnySource::Candle($s) => AnySource::Candle(runtime::erase($build)),
+            AnySource::Real($s) => AnySource::Real(runtime::erase($build)),
+            AnySource::Snapshot($s) => AnySource::Snapshot(runtime::erase($build)),
             AnySource::Const(c) => {
                 let $s = const_to_candle_source(c);
-                AnySource::Candle(Source::new($build))
+                AnySource::Candle(runtime::erase($build))
             }
         }
     };
@@ -27,9 +27,9 @@ macro_rules! map_source {
 macro_rules! combine_sources {
     ($lhs:expr, $rhs:expr, |$l:ident, $r:ident| $build:expr) => {
         pair($lhs, $rhs).map(|p| match p {
-            Pair::Candle($l, $r) => AnySource::Candle(Source::new($build)),
-            Pair::Real($l, $r) => AnySource::Real(Source::new($build)),
-            Pair::Snapshot($l, $r) => AnySource::Snapshot(Source::new($build)),
+            Pair::Candle($l, $r) => AnySource::Candle(runtime::erase($build)),
+            Pair::Real($l, $r) => AnySource::Real(runtime::erase($build)),
+            Pair::Snapshot($l, $r) => AnySource::Snapshot(runtime::erase($build)),
         })
     };
 }

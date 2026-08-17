@@ -43,6 +43,9 @@ instrument, at the cost of a ~50× slowdown.
 | `footprint` | Allocation count, bytes, and peak RSS. Not criterion — it installs a counting global allocator, which inside a criterion target would also tally criterion's own bookkeeping. |
 | `icount` | A fixed workload run exactly once, for callgrind. Answers "does this change do more work?" immune to contention and to code layout. |
 | `breaking` | Prototypes for the proposed breaking changes, so each is a measured number rather than an argument. |
+| `erasure` | What one level of type erasure costs, `PayloadValue` vs `Chain`, at 2/3/5 levels. The bench that justified Phase 6 — and that has to keep justifying it. |
+| `stddev_tradeoff` | Accuracy *and* cost of the centred variance against TA-Lib's `E[X²] − E[X]²` shortcut, so the choice rests on numbers. |
+| `three_tier` | The Rust tier of the TA-Lib comparison. Not criterion: it emits machine-readable ns/sample for `tools/bench_three_tier.py` to line up against the other two tiers. |
 
 ## Measurement conditions
 
@@ -446,6 +449,100 @@ than the engine**. At 32 symbols, snapshot conversion is 4.78 µs/bar against
 1.81 µs/bar for the whole run. Optimising the engine further has a ceiling for
 Python users that boundary work does not.
 
+## Phase 6 — `runtime::Chain`, a domain-typed erasure vocabulary
+
+The largest single win in this whole pass, and the one that finally made the
+Python bindings competitive. Not breaking: the new vocabulary was added beside
+the old one, the consumers moved over, and nothing in the public surface changed
+shape.
+
+### The problem
+
+Both runtime-driven builders erase at *every* level of an expression:
+
+* spec/YAML — `NodeSpec::build` does `wrap(Sma::new(AsReal::try_new(child)?, p))`
+* Python — `Source::new(Sma::new(source, p))` over an already-erased source
+
+The old handle, `Box<dyn PayloadIndicator>`, exchanged a `PayloadValue` — an enum
+**88 bytes** wide, because it is as wide as its `Atom` variant. Every level moved
+that payload in and back out, with a discriminant branch and drop glue on each
+move. **This cost the CLI as much as it cost Python**; it was never a bindings
+problem.
+
+### The change
+
+`src/runtime/chain.rs`. The domain stays in the type instead of being carried
+alongside the value:
+
+```rust
+pub trait DynIndicator<In, Out>: Indicator<Input = In, Output = Out> + Send + Sync {
+    fn dyn_clone(&self) -> Box<dyn DynIndicator<In, Out>>;
+}
+pub type Chain<In, Out> = Box<dyn DynIndicator<In, Out>>;
+```
+
+`Chain` implements `Indicator` itself, so it drops into any constructor's source
+slot with no adapter — which is what made the migration mechanical. `AnyChain` is
+the sum over the six domains, for the one thing a payload box could do that a
+`Chain` cannot: let a builder *discover* a domain it did not know statically.
+`any(inner)` picks the variant from the indicator's `Output` type.
+
+The retiring vocabulary was renamed after its mechanism first
+(`DynIndicator` → `PayloadIndicator`, `DynValue` → `PayloadValue`, …), as a
+mechanical commit that kept the tree green, so the two could coexist during the
+migration.
+
+### Measured — `cargo bench -p fugazi --bench erasure`
+
+| chain | ns/sample | vs concrete |
+|---|---:|---:|
+| concrete, no erasure, 1 node | 1.36 | 1.0× |
+| `PayloadValue`, 2 levels | 24.77 | 18.2× |
+| `PayloadValue`, 3 levels | 37.64 | 27.6× |
+| `PayloadValue`, 5 levels | 65.83 | 48.3× |
+| **`Chain`, 2 levels** | **3.81** | **2.8×** |
+| **`Chain`, 3 levels** | **5.40** | **4.0×** |
+| **`Chain`, 5 levels** | **11.18** | **8.2×** |
+| hand-rolled single-method trait, 2 levels | 3.66 | 2.7× |
+
+**Marginal cost per extra level: `PayloadValue` +13.7 ns, `Chain` +2.5 ns.** The
+last row is the floor — the least an erased scalar boundary can cost — and
+`Chain` sits on it, so there is nothing further to win here.
+
+### Python — the point of the exercise
+
+Per-level cost measured three ways, all agreeing (`_bench_feed_stage` /
+`_bench_feed_built`, the diagnostic hooks in `python/src/constructors.rs`):
+
+| levels | Rust-built chain | Python-built, driven from Rust | Python-built, via `.feed()` |
+|---:|---:|---:|---:|
+| 1 | 4.03 | 3.11 | 4.07 |
+| 2 | 6.32 | 6.27 | 6.43 |
+| 3 | 7.77 | 8.42 | 7.59 |
+| 4 | 11.54 | 11.29 | 11.02 |
+| 6 | 18.19 | 19.09 | 17.80 |
+
+Three independent paths landing on the same ~2.8 ns/level is the check that
+matters: it says the bindings add **nothing** per level beyond the erasure
+itself, so `feed()` and the constructors are both off the hook.
+
+### Scope of the migration
+
+`python/src/{carriers,classes,constructors,macros,strategy}.rs`. `TypedSource<In,
+Out>` — the newtype that existed purely to reattach `Input`/`Output` to a payload
+box — is gone; `Source<I>`, `StrSource<I>` and `AtomBox<I>` are now plain aliases
+for `Chain<I, _>`, and `SignalBox<I>` survives only because it flattens a
+warming-up `None` to `false`.
+
+One payload hand-off remains, at `carrier_inner_indicator`: the overlay-column
+API takes a heterogeneous list whose members differ in *input* domain, which one
+`Vec<Chain<_, _>>` cannot express. It costs one box per column at build time and
+nothing per bar. It goes when `spec::overlay` moves over.
+
+**Still to migrate:** the spec/YAML layer (`src/spec/expr.rs` and friends,
+~150 `wrap` sites). It nests erasure exactly the same way, so it stands to gain
+the same ~4× on deep expressions — which is the CLI's `optimize` path.
+
 ## Breaking candidates — measured, not yet done
 
 Changes that would break the public API, **prototyped and measured** rather
@@ -458,56 +555,10 @@ Read the figures as **ceilings**. Each prototype is narrower than the real
 change would be, and a couple of them enjoy inlining that the general case
 would not.
 
-### 1. A narrow `Real → Real` erasure vocabulary — highest value, **not breaking**
+(The narrow-erasure vocabulary was the fourth and highest-value entry here. It
+turned out not to be breaking at all, and it is **done** — see *Phase 6* below.)
 
-Both runtime-typed builders erase at *every* level of an expression:
-
-* spec/YAML — `NodeSpec::build` does `wrap(Sma::new(AsReal::try_new(child)?, p))`
-* Python — `Source::new(Sma::new(source, p))` over an already-erased source
-
-So a sample crosses a `DynValue` boundary once per node, and
-`size_of::<DynValue>()` is **88 bytes** — the enum is as wide as its `Atom`
-variant — with a discriminant branch and drop glue on every move. **This costs
-the CLI as much as it costs Python**; it is not a bindings problem.
-
-`cargo bench --bench erasure` prices the alternative. The overwhelming majority
-of expression nodes are `Real → Real`; a trait narrowed to that carries an
-`f64` (16 bytes with the `Option`) instead of the 88-byte enum:
-
-| chain | ns/sample | vs concrete |
-|---|---:|---:|
-| concrete, no erasure, 2 nodes | 1.36 | 1.0× |
-| `DynValue` erasure, 2 levels | 16.00 | 11.8× |
-| `DynValue` erasure, 3 levels | 28.89 | 21.2× |
-| **narrow `f64` erasure, 2 levels** | **3.79** | **2.8×** |
-| **narrow `f64` erasure, 3 levels** | **4.20** | **3.1×** |
-
-**Marginal cost per extra level: `DynValue` +12.9 ns, narrow +0.4 ns.** Depth
-stops being a tax at all — which matters because real expressions are deep.
-
-**Implications.**
-
-*It is additive.* A narrow trait sits *beside* `DynIndicator`, it does not
-replace it. `DynValue` is still needed for bar-shaped (`Atom`, `Candle`),
-string-shaped and snapshot-shaped nodes, and for any chain that mixes domains.
-No public signature changes, so this is **not** one of the breaking candidates —
-which is why it ranks above them.
-
-*The cost is a second vocabulary.* Every builder gains a narrow-or-wide
-decision and a fallback, and a subtree only qualifies if it is scalar all the
-way down. That is real maintenance surface, and the honest trade: ~4× on both
-the CLI and Python paths against one more concept in the runtime layer.
-
-*Scope.* `src/runtime.rs` (the trait plus adapters), the `Real`-output arms of
-`src/spec/expr.rs`, and `python/src/{carriers,macros}.rs`. Bar-rooted leaves
-(`!close`, `!atr`) keep the wide path and pay a single conversion where the
-scalar chain begins.
-
-*Expected end state.* The Python pipeline already measures **4.0×** TA-Lib with
-one erased layer, and this removes the per-layer penalty that takes it to 25×.
-`fz.sma(identity())` should land near 10–12 ns/sample.
-
-### 2. `Indicator::update(&mut self, input: &Self::Input)`
+### 1. `Indicator::update(&mut self, input: &Self::Input)`
 
 Prototyped as a by-reference chain computing the same SMA crossover
 (`RefIndicator` in `benches/breaking.rs`).
@@ -530,7 +581,7 @@ feeds the same input to *both* sides, so every binary node clones its input, and
 example. Worth doing only if the ceiling is confirmed on a narrower slice first
 — converting `Pick` and `Combine` alone would test the thesis.
 
-### 3. Index `Snapshot` for lookup
+### 2. Index `Snapshot` for lookup
 
 Per *symbol-bar* cost still climbs with universe size after Phase 3 (227 ns at
 N = 2 to 662 ns at N = 64, where it should be flat). The residual O(N²) is
@@ -567,18 +618,27 @@ unflattering one:
 
 | indicator | TA-Lib (py) | fugazi rs | fugazi py | **py vs TA-Lib** | rs vs TA-Lib |
 |---|---:|---:|---:|---:|---:|
-| `sma` | 1.37 ns | 1.42 | 40.31 | **29×** | 1.03× |
-| `ema` | 2.16 ns | **1.46** | 38.24 | **18×** | **0.67×** |
-| `rsi` | 4.91 ns | 4.92 | 50.33 | **10×** | 1.00× |
-| `stddev` | 3.98 ns | 10.68 | 59.04 | **15×** | 2.69× |
-| `atr` | 11.81 ns | 12.98 | — | — | 1.10× |
+| `sma` | 2.11 ns | **1.41** | 5.12 | **2.4×** | **0.67×** |
+| `ema` | 3.08 ns | **1.41** | 5.03 | **1.6×** | **0.46×** |
+| `rsi` | 7.11 ns | **4.79** | 8.73 | **1.2×** | **0.67×** |
+| `stddev` | 5.10 ns | 9.95 | 13.33 | **2.6×** | 1.95× |
+| `atr` | 17.38 ns | **12.04** | — | — | **0.69×** |
 
-The **Rust** engine meets the bar: it matches or beats a vectorised C library on
-`sma`/`ema`/`rsi` and is within 10% on `atr`, while staying *incremental* (one
-`update()` per bar, which is what lets the same code drive a live stream).
+The **Rust** engine meets the bar: it beats a vectorised C library on
+`sma`/`ema`/`rsi`/`atr` while staying *incremental* (one `update()` per bar,
+which is what lets the same code drive a live stream). `stddev` is the one loss,
+deliberately — see *What `stddev` buys with its 2×* below.
 
-The **Python** bindings do not. A caller who reaches for `fugazi` instead of
-`talib` for a batch computation pays 10–29×.
+The **Python** bindings now do too: 1.2–2.6× a vectorised C library, for an
+incremental engine reached across an FFI boundary. Before Phase 6 the same table
+read 10–29×:
+
+| | before Phase 6 | after |
+|---|---:|---:|
+| `sma` py vs TA-Lib | 29× | **2.4×** |
+| `ema` py vs TA-Lib | 18× | **1.6×** |
+| `rsi` py vs TA-Lib | 10× | **1.2×** |
+| `stddev` py vs TA-Lib | 15× | **2.6×** |
 
 ### Where the Python time goes
 
@@ -596,29 +656,23 @@ consistent:
 | `fz.sma(identity())` — two erasures | 50.14 | 24.7× |
 | `fz.sma(ema(identity()))` — three erasures | 79.86 | 39.4× |
 
-The pipeline itself is **not** the problem: end to end, with one erased layer,
-it is 4.0× a vectorised C library — respectable for an incremental engine.
+That decomposition is what identified the target, and it held up: the pipeline
+was never the problem — end to end with one erased layer it was already 4.0× a
+vectorised C library — while **each additional erased layer cost ~30 ns/sample**,
+and the Python builders add one per call.
 
-**Every additional erased layer costs ~30 ns/sample**, and the Python builders
-add one per call: `sma(identity())` wraps an already-erased source, so it has
-two. That is the entire gap.
+Phase 6 removed it. The same measurement now reads:
 
-`size_of::<DynValue>()` is **88 bytes** — the enum is as wide as its `Atom`
-variant — so each layer moves that payload in and back out, with a discriminant
-branch and drop glue on every move. Construction is not the cost (0.009
-ns/sample); input is not (0.32); output is no longer (0.75).
+| | ns/sample | vs TA-Lib |
+|---|---:|---:|
+| `talib.SMA` | 2.11 | 1.0× |
+| `fz.sma(identity())` — two levels | **6.43** | **3.0×** |
+| `fz.sma(ema(identity()))` — three levels | **7.59** | **3.6×** |
+| six levels | 17.80 | 8.4× |
 
-The target is therefore concrete: **get a chain of N indicators down to one
-erasure boundary, or make a boundary cheap.** 4.0× is already demonstrated as
-reachable. Two directions, both in the breaking-candidates list:
-
-* Build the concrete chain and erase **once**, as the spec layer does via
-  `NodeSpec` — the Python builders erase incrementally instead.
-* Shrink `DynValue`. Boxing the wide variants takes it to ~24 bytes but adds an
-  allocation on bar-shaped paths, so it needs measuring on the CLI too, not
-  just here.
-
-`runtime::chain` is *not* the answer — see the tried-and-failed list.
+Per level: **~30 ns → ~2.8 ns**. Construction was never the cost (0.009
+ns/sample), input is not (0.32), output is not (0.75), and depth now costs about
+what an indirect call costs.
 
 ### What was fixed here
 
@@ -626,13 +680,14 @@ reachable. Two directions, both in the breaking-candidates list:
 |---|---:|---:|
 | input conversion | ~155 ns/element | 0.32 ns/sample |
 | output conversion | 19.29 ns/sample | **0.75** |
-| `feed(sma(identity))` overall | ~160 ns/sample | **~50** |
+| per erased level | ~30 ns/sample | **~2.8** |
+| `feed(sma(identity))` overall | ~160 ns/sample | **~5** |
 
-The input fix is the buffer-protocol path (and the reason for `abi3-py311`);
-the output fix fills `np.empty`'s buffer directly instead of building a Python
-list for NumPy to copy back out.
+The input fix is the buffer-protocol path (and the reason for `abi3-py311`); the
+output fix fills `np.empty`'s buffer directly instead of building a Python list
+for NumPy to copy back out; the per-level fix is `runtime::Chain` (Phase 6).
 
-### What `stddev` buys with its 2.7×
+### What `stddev` buys with its 2×
 
 `cargo bench --bench stddev_tradeoff` re-derives both halves of the choice
 `src/indicators/stats.rs` documents, so it rests on numbers rather than on a
@@ -647,7 +702,7 @@ comment. Relative error against a Kahan-compensated reference, period 20:
 | 1e9 | 1 | 2.4e-13 | **6e1** |
 | 1e9 | 0.01 | 9.7e-10 | **1e0** |
 
-Cost, same window: 14.34 ns/sample centred vs 3.62 shortcut — **3.97×**.
+Cost, same window: 13.71 ns/sample centred vs 3.37 shortcut — **4.06×**.
 
 So the trade is ~10.7 ns/sample for a result that stays correct to ~1e-13 where
 the shortcut is wrong by **6000%**. A five-figure instrument quoted to the cent
@@ -680,25 +735,32 @@ with the benches named.
 | 11 | `python/src/constructors.rs` | `ndarray_from_values` fills `np.empty`'s buffer in one pass | `np.asarray(vec)` builds a Python list first (a float object per element). Even `np.frombuffer(bytearray)` needed an intermediate `Vec` plus a `bytearray`. 19.29 → **0.75 ns/sample**. |
 | 12 | `Cargo.toml` | `codegen-units = 1` | Worth −8.9…−20.1% instructions. The thin LTO beside it is nearly free but does little alone — don't split them without re-measuring. |
 | 13 | `spec/metrics.rs` | One `sorted_asc` shared by the four quantile metrics | Four independent sorts of the same series: ~16.8 ms of a 22.8 ms reduction, paid once per `optimize` row per fold. |
+| 14 | `runtime/chain.rs` | `Chain<In, Out>` keeps the domain **in the type** instead of in the value | `PayloadValue` is 88 bytes (as wide as its `Atom` variant) and crossed the boundary twice per expression level: **+13.7 ns/level**, against +2.5 for a `Chain`. Adding a payload enum back to recover self-description undoes the whole of Phase 6. |
+| 15 | `runtime/chain.rs` | `Erased<I>` is an explicit adapter, not a blanket `impl<T: Indicator> DynIndicator for T` | A blanket impl shadows the compiler's automatic `impl Trait for dyn Trait`, and `Clone for Chain` needs that to reach `dyn_clone` through the vtable. The retiring `Adapter` sidesteps the same problem the same way. |
+| 16 | `runtime/chain.rs` | `impl Indicator for Box<dyn DynIndicator<In, Out>>` | Without it every consumer needs a newtype (`TypedSource`, `As<Out>`) just to reattach the associated types — which is the only reason those existed. It is what made a ~150-site migration mechanical. |
 
 ### Things that were tried and did **not** work
 
 Recorded so they are not re-attempted:
 
 * **Composing Python sources with `runtime::chain_sync` instead of re-wrapping.**
-  The theory was sound — chaining passes `DynValue` straight through instead of
-  converting in and out at each level. Measured, it made things *worse*
-  (18.2× → 25.0× vs TA-Lib): `Chain` stores and clones an 88-byte `DynValue`
-  every sample, which costs more than the conversions it removes. Reverted.
+  (This is `PayloadChain`, the payload-layer combinator — *not* `runtime::Chain`,
+  which is Phase 6 and did work.) The theory was sound: chaining passes a
+  `PayloadValue` straight through instead of converting in and out at each level.
+  Measured, it made things *worse* (18.2× → 25.0× vs TA-Lib) — `PayloadChain`
+  stores and clones an 88-byte payload every sample, which costs more than the
+  conversions it removes. Reverted. The lesson generalises: the payload's *width*
+  was the cost, so nothing that keeps carrying one can fix it.
 * **Memoising multi-output sub-trees into a `Shared` handle** (`tests/perf_bench.rs`).
   ~3%, inside the noise.
-* **`E[X²] − E[X]²` for variance.** See the `stddev` section — 3.97× faster and
+* **`E[X²] − E[X]²` for variance.** See the `stddev` section — 4.06× faster and
   wrong by 6000% at high price scale.
 
 ### How to measure without fooling yourself
 
-Four traps, each of which produced a wrong answer in this codebase before it
-was caught:
+Seven traps, each of which produced a wrong answer in this codebase before it
+was caught. Note that **four of the seven are "you measured a stale binary"** —
+by far the most common way to be confidently wrong here.
 
 1. **`maturin develop` builds *debug*.** It is 7–10× slower than release and
    amplifies unrelated changes. One pass of Python numbers taken on debug
@@ -707,14 +769,40 @@ was caught:
    note `scripts/ci-local.sh` silently reinstalls a **debug** wheel over it.
 2. **`pip install --force-reinstall` serves a cached wheel** of the same
    filename. Add `--no-cache-dir` or you will benchmark the previous build.
-3. **Wall-clock cannot separate "more work" from "unluckier code layout".** A
+3. **The `pixi` bench environment has its own, separate `fugazi`.**
+   `pixi.toml` installs it with `editable = false`, so it is built once and
+   cached; `maturin develop` refreshes `python/.venv` and leaves the bench
+   interpreter on the old binary. This produced a complete, plausible, entirely
+   fictional set of numbers — a 15 ns/sample per-level erasure cost, measured
+   against a build predating the change that removed it, together with a
+   two-hour hunt for where the "extra" cost was hiding. It also means the two
+   interpreters can disagree, which is the tell.
+   `tools/bench_three_tier.py` now refuses to run when the extension is older
+   than any `.rs` file, and prints the reinstall command.
+4. **`cargo`/`maturin` can skip a rebuild** when a file's mtime does not advance
+   (this is a networked/encrypted working tree). `Finished in 0.16s` after an
+   edit means nothing was rebuilt — `touch` the file and build again.
+5. **A microbenchmark of a *boxed* chain must build it opaquely.** If the
+   concrete types are visible at the erase call, LLVM devirtualises the whole
+   chain and the benchmark measures something no runtime builder can produce.
+   The first version of `benches/erasure.rs` did exactly this and reported
+   **+0.4 ns/level** for a vocabulary that costs +2.5 — flattering the proposal
+   by 6×. Build behind `#[inline(never)]` *and* `black_box`, and sanity-check
+   that the cost grows with depth at all.
+6. **Wall-clock cannot separate "more work" from "unluckier code layout".** A
    benchmark here clocked +23.8% while executing 1.61% *fewer* instructions.
    Below ~25%, or when a delta moves between runs, use
    `scripts/perf-compare.sh icount` (callgrind), which is immune to both
    contention and layout.
-4. **`ls target/release/deps/x-* | head -1` sorts by hash, not time.** It will
+7. **`ls target/release/deps/x-* | head -1` sorts by hash, not time.** It will
    hand you a stale binary. `scripts/perf-compare.sh` deletes bench binaries
    before each variant build and fails if more than one matches.
+
+The general defence, and the one that actually caught trap 3: **measure the same
+quantity by paths that share as little as possible.** Phase 6's per-level cost
+was confirmed by a Rust bench, a Rust-built chain inside the extension, and a
+Python-built chain driven two different ways. Agreement across four paths is
+evidence; one number is an anecdote.
 
 ## Known costs, and why they are there
 

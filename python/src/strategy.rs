@@ -1188,9 +1188,9 @@ pub(crate) fn snapshot_signal(sig: &PySignal) -> PyResult<SignalBox<Snapshot<Sym
 /// into the snapshot-rooted sizing multiplier a strategy consumes.
 pub(crate) fn snapshot_source(ind: &PyIndicator) -> PyResult<Source<Snapshot<Symbol>>> {
     match &ind.src {
-        AnySource::Candle(s) => Ok(Source::new(AtomLift(s.clone()))),
+        AnySource::Candle(s) => Ok(runtime::erase(AtomLift(s.clone()))),
         AnySource::Snapshot(s) => Ok(s.clone()),
-        AnySource::Const(c) => Ok(Source::new(Value::<Snapshot<Symbol>>::new(*c))),
+        AnySource::Const(c) => Ok(runtime::erase(Value::<Snapshot<Symbol>>::new(*c))),
         AnySource::Real(_) => Err(PyValueError::new_err(
             "a sizing source must be candle- or snapshot-rooted (or a constant), not a bare value (Real) source",
         )),
@@ -2402,7 +2402,7 @@ where
         build,
         inner,
     };
-    PyIndicator::wrap(AnySource::Snapshot(Source::new(carrier)))
+    PyIndicator::wrap(AnySource::Snapshot(runtime::erase(carrier)))
 }
 
 /// Rolling annualized Sharpe over the equity curve of an embedded

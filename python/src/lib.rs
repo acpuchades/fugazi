@@ -4,15 +4,19 @@
 //! price-series indicator owns its input source and is generic over it, so an
 //! "EMA of an SMA of the close" is just `Ema::new(Sma::new(Current::close(),
 //! 10), 20)`. Those generics are monomorphised at compile time and cannot cross
-//! the Python boundary directly, so this crate erases them behind the shared
-//! [`fugazi::runtime`](fugazi_core::runtime) vocabulary — a single
-//! `PayloadIndicator` trait exchanging `PayloadValue` payloads — plus a Python-local
-//! `TypedSource<In, Out>` newtype that carries compile-time `In`/`Out` markers
-//! so the Rust API's per-input, per-output typing survives across the boundary.
-//! `Source<I>` / `SignalBox<I>` / `StrSource<I>` / `AtomBox<I>` are the
-//! output-specialised faces of that one carrier; only [`MultiBox`] keeps its
-//! own trait, because its `Vec<Real>` + `&'static [&'static str]` shape
-//! doesn't fit the runtime's payload enum.
+//! the Python boundary directly, so this crate erases them behind
+//! [`fugazi::runtime::Chain`](fugazi_core::runtime::Chain) — a
+//! `Box<dyn DynIndicator<In, Out>>` that keeps the input and output types while
+//! dropping the concrete one, so the Rust API's per-input, per-output typing
+//! survives the boundary at no per-sample cost. `Source<I>` / `StrSource<I>` /
+//! `AtomBox<I>` are output-specialised aliases of it; `SignalBox<I>` is the one
+//! newtype, and only because it flattens a warming-up `None` to `false`. Only
+//! [`MultiBox`] keeps its own trait, because its `Vec<Real>` +
+//! `&'static [&'static str]` shape needs the line *names* alongside the values.
+//!
+//! Erasing this way rather than through the older payload vocabulary is what
+//! makes the bindings fast: see the Phase 6 section of `docs/PERFORMANCE.md`,
+//! and the note at the top of `carriers.rs` before changing it.
 //!
 //! Erasing a trait object throws away its associated `Input` type, so we keep
 //! the one bit that matters — the input *domain* — as an explicit runtime tag.
@@ -158,6 +162,7 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     reg!(
         _bench_feed_stage,
+        _bench_feed_built,
         open, high, low, close, volume, typical,
         median, identity, value, value_str, sma, ema,
         rma, wma, hma, rsi, stddev, skewness_indicator,

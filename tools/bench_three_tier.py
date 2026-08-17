@@ -29,6 +29,15 @@ ambient PATH, same as `maturin develop`.
 
 Rust numbers come from `cargo bench --bench three_tier`, which this script
 invokes and parses, so both tiers run the same input length.
+
+**The extension is checked for staleness before anything is timed**, and the run
+aborts if it is out of date. `pixi.toml` installs `fugazi` into this environment
+with `editable = false`, so the wheel is built once and cached — a later
+`maturin develop` refreshes `python/.venv` and leaves *this* interpreter on the
+old binary. That has already produced a full set of plausible, entirely
+fictional numbers (a 15 ns/sample per-erasure-level cost measured against a
+build that predated the fix removing it). Timestamps are a blunt check, but the
+failure they catch is silent and total, and the fix is one command.
 """
 
 from __future__ import annotations
@@ -54,6 +63,53 @@ EMA_P = 10
 RSI_P = 14
 STDDEV_P = 10
 ATR_P = 14
+
+
+def newest_source_mtime() -> tuple[float, str]:
+    """The most recently touched Rust source the extension is built from."""
+    newest, where = 0.0, ""
+    for sub in ("src", "python/src", "fugazi-derive/src"):
+        for dirpath, _, files in os.walk(os.path.join(ROOT, sub)):
+            for f in files:
+                if not f.endswith(".rs"):
+                    continue
+                p = os.path.join(dirpath, f)
+                m = os.path.getmtime(p)
+                if m > newest:
+                    newest, where = m, os.path.relpath(p, ROOT)
+    return newest, where
+
+
+def check_extension_fresh() -> int:
+    """Abort unless the imported `fugazi` extension is newer than its sources.
+
+    See the module docstring: a cached non-editable wheel in this environment is
+    invisible from the Python side and silently invalidates every number below.
+    """
+    import fugazi as fz
+
+    so = fz.__file__
+    pkg = os.path.dirname(so)
+    built = max(
+        (os.path.getmtime(os.path.join(pkg, f)) for f in os.listdir(pkg) if f.endswith(".so")),
+        default=0.0,
+    )
+    newest, where = newest_source_mtime()
+    if built >= newest:
+        return 0
+    age = (newest - built) / 60.0
+    print(
+        f"the `fugazi` extension in this environment is stale — {where} is "
+        f"{age:.0f} min newer than the installed binary.\n"
+        f"  installed: {pkg}\n\n"
+        "Rebuild and reinstall it here before benchmarking:\n\n"
+        "    cd python && uv run --no-project --python .venv/bin/python \\\n"
+        "        maturin build --release\n"
+        "    uv pip install --python .pixi/envs/bench/bin/python --no-deps \\\n"
+        "        --force-reinstall --no-cache-dir target/wheels/fugazi-*.whl\n",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def synth(n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -91,6 +147,9 @@ def timed(fn, reps: int = REPS) -> float:
 
 
 def main() -> int:
+    if check_extension_fresh() != 0:
+        return 1
+
     o, h, lo, c = synth(N)
 
     print(f"n = {N:,} samples, median of {REPS}\n")
