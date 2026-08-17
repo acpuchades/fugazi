@@ -45,6 +45,7 @@ use crate::types::Snapshot;
 
 use super::basket::UniverseSpec;
 use super::expr::NodeSpec;
+use super::meta::Meta;
 use super::template::SpecTemplate;
 use crate::runtime::{any, AnyChain};
 use crate::types::Symbol;
@@ -123,6 +124,11 @@ pub struct MultiAssetStrategySpec {
     /// exit signals still fire every bar independently of the gate.
     #[serde(default)]
     pub rebalance_on: Option<NodeSpec>,
+
+    /// Free-form document metadata for external tooling. Parsed, carried, and
+    /// never interpreted — see [`spec::meta`](crate::spec::meta).
+    #[serde(default)]
+    pub meta: Option<Meta>,
 }
 
 impl MultiAssetStrategySpec {

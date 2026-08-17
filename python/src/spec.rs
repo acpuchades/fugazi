@@ -635,6 +635,20 @@ impl PyStrategySpec {
         self.inner.kind()
     }
 
+    /// The document's free-form `meta:`, as plain Python data (`dict` / `list`
+    /// / scalar), or `None` when the document set none.
+    ///
+    /// fugazi never interprets it — it is the open-schema slot for whatever
+    /// service produced or stores this strategy. Mirrors Rust's
+    /// `StrategySpec::meta`.
+    #[getter]
+    pub(crate) fn meta(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match self.inner.meta() {
+            Some(v) => json_to_py(py, v),
+            None => Ok(py.None()),
+        }
+    }
+
     /// Drive the spec over `snapshots` against `wallet`, returning the full
     /// run report.
     ///

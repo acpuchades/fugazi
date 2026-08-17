@@ -131,6 +131,15 @@ struct DatasetSpec {
     /// the same `serde_json::from_value` path the strategy spec uses.
     #[serde(default)]
     overlays: Option<Json>,
+    /// Free-form metadata for external tooling — see
+    /// [`spec::meta`](fugazi::spec::meta). Declared so the key is part of the
+    /// documented surface rather than one of the unknown fields this
+    /// (non-`deny_unknown_fields`) struct happens to tolerate. Unread by
+    /// design: a dataset produces a CSV of columns, and there is no dataset
+    /// handle for a caller to read it back off — same as `description` above.
+    #[allow(dead_code)]
+    #[serde(default)]
+    meta: Option<crate::spec::meta::Meta>,
 }
 
 /// Parse a `@path/to/dataset.yml` spec argument into one [`FetchSpec`] per

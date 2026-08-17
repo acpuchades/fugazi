@@ -566,7 +566,18 @@ fn portfolio_child_def() -> serde_json::Value {
             serde_json::json!({ "type": "object", "minProperties": 1 }),
             true,
         ),
+        ("meta", meta_ref(), false),
     ])
+}
+
+/// The `meta:` slot every document shape carries: any value, uninterpreted.
+/// `true` is JSON Schema's always-valid schema — exactly the open contract
+/// [`spec::meta`](crate::spec::meta) promises, so a service's payload can never
+/// fail document validation.
+fn meta_ref() -> serde_json::Value {
+    serde_json::json!({
+        "$comment": "Free-form metadata; fugazi never interprets it.",
+    })
 }
 
 fn doc_single() -> serde_json::Value {
@@ -576,6 +587,7 @@ fn doc_single() -> serde_json::Value {
         ("short", def_ref("side"), false),
         ("sizing", node_ref(), false),
         ("rebalance_on", node_ref(), false),
+        ("meta", meta_ref(), false),
     ])
 }
 
@@ -591,6 +603,7 @@ fn doc_pairs() -> serde_json::Value {
         ("short_spread", def_ref("side"), false),
         ("sizing", node_ref(), false),
         ("rebalance_on", node_ref(), false),
+        ("meta", meta_ref(), false),
     ])
 }
 
@@ -604,6 +617,7 @@ fn doc_basket() -> serde_json::Value {
         ("dollar_neutral", serde_json::json!({ "type": "boolean" }), false),
         ("long", def_ref("basket_side"), false),
         ("short", def_ref("basket_side"), false),
+        ("meta", meta_ref(), false),
     ])
 }
 
@@ -614,6 +628,7 @@ fn doc_multi() -> serde_json::Value {
         ("sizing", node_ref(), false),
         ("universe", def_ref("universe"), false),
         ("rebalance_on", node_ref(), false),
+        ("meta", meta_ref(), false),
     ])
 }
 
@@ -627,6 +642,7 @@ fn doc_portfolio() -> serde_json::Value {
         ("weights", node_ref(), false),
         ("rebalance_on", node_ref(), false),
         ("rebalance_policy", serde_json::json!(true), false),
+        ("meta", meta_ref(), false),
     ])
 }
 

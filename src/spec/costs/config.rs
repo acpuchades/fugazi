@@ -18,6 +18,7 @@ use serde_json::{Map, Value};
 
 use crate::spec::calendar::{Frequency, Scope};
 use crate::spec::input;
+use crate::spec::meta::Meta;
 
 use super::spec::{CostSpec, CostTerm};
 
@@ -97,15 +98,25 @@ fn apply_term(tree: &mut Map<String, Value>, term: &CostTerm) -> Result<()> {
 /// Turn a user-facing preset into the canonical structured form. A leg whose
 /// value is a flat model (`!percentage { … }`) is hoisted into `default:`. A
 /// leg that already has `default:`/`by_symbol:`/`by_interval:` stays as-is.
+///
+/// `meta:` passes through untouched — it is not a leg and carries no model, so
+/// leg normalization would be nonsense on it. See
+/// [`spec::meta`](crate::spec::meta). Note that a `--costs none` term resets the
+/// whole accumulator, `meta` included; layer the file *after* `none` to keep it.
 fn normalize_preset(value: Value) -> Result<Map<String, Value>> {
     let Value::Object(map) = value else {
         bail!("cost preset must be a mapping (got {})", value_kind(&value));
     };
     let mut out = Map::new();
     for (leg, node) in map {
+        if leg == "meta" {
+            out.insert(leg, node);
+            continue;
+        }
         if !matches!(leg.as_str(), "commission" | "spread" | "slippage") {
             bail!(
-                "cost preset has unknown leg `{leg}` (expected commission/spread/slippage)"
+                "cost preset has unknown leg `{leg}` (expected commission/spread/slippage, \
+                 or `meta` for free-form metadata)"
             );
         }
         out.insert(leg, normalize_leg(node)?);
@@ -375,6 +386,10 @@ pub struct CostConfig {
     pub(super) spread: LegConfig<SpreadSpec>,
     #[serde(default)]
     pub(super) slippage: LegConfig<SlippageSpec>,
+    /// Free-form document metadata for external tooling — see
+    /// [`spec::meta`](crate::spec::meta). Read back with [`CostConfig::meta`].
+    #[serde(default)]
+    pub(super) meta: Option<Meta>,
 }
 
 /// One leg's configuration: a default and any per-scope overrides.
@@ -560,6 +575,12 @@ impl CostConfig {
         self.commission.default.is_some()
             || self.spread.default.is_some()
             || self.slippage.default.is_some()
+    }
+
+    /// The document's free-form `meta:`, if it set one — never read by the
+    /// resolution above. See [`spec::meta`](crate::spec::meta).
+    pub fn meta(&self) -> Option<&Meta> {
+        self.meta.as_ref()
     }
 
     /// The count of scoped entries across every leg, for diagnostic printing.

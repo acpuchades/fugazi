@@ -26,6 +26,7 @@ pub mod basket;
 pub mod grammar;
 pub mod runnable;
 pub mod expr;
+pub mod meta;
 pub mod multi_asset;
 pub mod overlay;
 pub mod pairs;
@@ -127,6 +128,7 @@ pub use grammar::{
     spec_grammar, spec_grammar_document, spec_json_schema,
 };
 pub use expr::ValueLit;
+pub use meta::Meta;
 pub use multi_asset::MultiAssetStrategySpec;
 pub use pairs::PairsStrategySpec;
 pub use portfolio::{PortfolioSpec, PortfolioChildSpec, PortfolioChildStrategy};

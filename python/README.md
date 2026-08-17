@@ -713,6 +713,25 @@ report = spec.run(wallet, snaps)              # -> RunReport
 metrics = spec.evaluate(ta.PaperWallet(1000.0), snaps)  # -> nested dict mirroring metrics.yml
 ```
 
+`spec.meta` returns the document's free-form
+[`meta:`](../docs/STRATEGIES.md#metadata--meta) block as ordinary Python data —
+dicts, lists, and scalars — or `None` when the document sets none. fugazi never
+interprets it; it is the open-schema slot for whatever service produced or
+stores the strategy, and it is available on all five shapes:
+
+```python
+spec = ta.load_spec("""
+symbol: BTC
+meta:
+  service: strategy-lab
+  id: 4f1c-9a2b
+  tags: [momentum, crypto]
+long:
+  enter: !value true
+""")
+assert spec.meta["tags"] == ["momentum", "crypto"]
+```
+
 Pass `windowed=N` to `.evaluate(...)` for the same windowed/rolling reductions
 `run -w N` writes to `metrics.csv`/`rolling.csv`: the returned dict gains
 `windowed` (non-overlapping N-bar spans — independent, for cross-window

@@ -118,6 +118,60 @@ enter: !not
 enter: !not !below { source: !rsi { period: 14 }, level: 30 }
 ```
 
+## Metadata — `meta:`
+
+Every fugazi document rejects unknown fields, deliberately: a typo'd `symbl:` or
+`rebalance_of:` that silently became a no-op would be a much worse failure than
+a rejected load. That leaves nowhere for an external service — a UI, a
+scheduler, a strategy registry — to keep its own record next to a strategy it
+generated or stores. **`meta:` is that place.**
+
+```yaml
+symbol: BTC/USDT
+meta:
+  service: strategy-lab
+  id: 4f1c-9a2b
+  revision: 17
+  tags: [momentum, crypto]
+  owner: { desk: systematic, contact: quant@example.invalid }
+long:
+  enter: !gt { lhs: !close, rhs: !sma { period: 20 } }
+```
+
+Its contents are **arbitrary and never interpreted**. No key under `meta:` is
+reserved, none affects a build, a run, or a metric — adding one cannot change a
+backtest. In the other direction, future fugazi fields go at the document root
+next to `meta:`, so a service's `meta.tags` can never collide with a `tags:`
+fugazi adds later.
+
+It is accepted by all five strategy shapes, by each `children:` entry of a
+portfolio, by a [costs document](COSTS.md), by a `get` dataset file, and by an
+overlay column file. Read it back with `StrategySpec::meta()` in Rust or
+`spec.meta` in [Python](PYTHON.md); a document that omits it reads `None`.
+
+Three things worth knowing:
+
+- **On a preset, `meta:` goes *inside* the tag.** A preset document *is* the tag
+  (`!buy_and_hold { … }`), so there is no sibling position for a second key —
+  write `!buy_and_hold { symbol: BTC, meta: { … } }`. A sibling `meta:` would
+  stop the document being recognized as a preset at all.
+- **A portfolio child has two of them.** `meta:` on the child entry describes
+  the *slot* (why this child is in this portfolio); `meta:` inside its
+  `strategy:` belongs to the nested document. Unlike `name` / `group`, neither is
+  surfaced to the `weights:` expression — `meta` is opaque by contract, and a
+  weight that read it would be reading data fugazi promises not to interpret.
+- **In an overlay column file, `meta` is a reserved name.** That document has no
+  envelope — every key *is* a column name — so a top-level `meta:` is the
+  document's metadata and never a column. Name the column something else.
+
+`meta:` rides the same load pipeline as the rest of the document, so
+`!import` and [`!param`](#parameters--param) resolve inside it —
+handy for sharing one metadata block across a family of strategies
+(`meta: !import shared-meta.yml`). The flip side: a *literal* single-key map
+spelled `{param: …}`, `{import: …}`, `{arg: …}` or `{undefined: …}` inside
+`meta:` is read as a placeholder rather than as data. Nest external data one
+level under a vendor key and the question never comes up.
+
 ## Single-asset documents
 
 The default shape (no prefix, or `single:`). A mapping with these fields
@@ -130,6 +184,7 @@ The default shape (no prefix, or `single:`). A mapping with these fields
 | `short` | side | none | the short entry/exit |
 | `sizing` | source | `!value 1.0` | position-size multiplier (see [Sizing](#sizing)) |
 | `rebalance_on` | signal | `!never` | resize the open position when this fires (see [Rebalance](#rebalance)) |
+| `meta` | any | none | free-form metadata, never interpreted — see [Metadata](#metadata--meta) |
 
 The strategy wires up whichever of `long`/`short` you provide; omitting both
 yields a strategy that never trades.
@@ -348,6 +403,7 @@ flattens both.
 | `take_profit` | source | none | flat spelling of `long_spread.take_profit` |
 | `sizing` | source | `!value 1.0` | gross-exposure multiplier (see [Sizing](#sizing)) |
 | `rebalance_on` | signal | `!never` | resize both legs when this fires (see [Rebalance](#rebalance)) |
+| `meta` | any | none | free-form metadata, never interpreted — see [Metadata](#metadata--meta) |
 
 At least one side must be wired. The flat top-level keys are a shorthand for the
 long-spread side, so every pre-existing pairs document keeps working unchanged;
@@ -442,6 +498,7 @@ symbol — the classic cross-sectional momentum / value / carry shape.
 | `sizing` | source *(template)* | — (**required**) | the per-leg size, as a fraction of equity |
 | `universe` | universe rule | *floating* (every symbol seen) | which symbols the basket is willing to trade — see [Universe](#universe) |
 | `rebalance_on` | signal | `!every 1` (every bar) | re-rank + resize when this fires (see [Rebalance](#rebalance)) |
+| `meta` | any | none | free-form metadata, never interpreted — see [Metadata](#metadata--meta) |
 
 **By default the universe is not declared in the file** — it is exactly the set
 of symbols the `--series` inputs carry. The basket builds a fresh score and
@@ -603,6 +660,7 @@ signals fired).
 | `sizing` | source *(template)* | `!value 1` (all-in per leg) | the per-leg size, as a fraction of equity |
 | `universe` | universe rule | *floating* (every symbol in the series) | which symbols the portfolio is willing to trade — see [Universe](#universe) (shared with `basket:`) |
 | `rebalance_on` | signal | `!never` | resize every held position when this fires (see [Rebalance](#rebalance)) |
+| `meta` | any | none | free-form metadata, never interpreted — see [Metadata](#metadata--meta) |
 
 `long` and `short` mirror the [single-asset side](#single-asset-documents)
 grammar exactly (`enter`, `exit`, `stop_loss`, `take_profit`); the
@@ -668,11 +726,14 @@ symbols, `multi:` is smaller and cheaper; if you want a cross-sectional rank,
 | `weights` | expression | equal (`1/N`) | how capital is split — see [Weights](#weights) |
 | `rebalance_on` | signal | `!never` | when to pull capital back to target — see [Rebalance](#rebalance) |
 | `rebalance_policy` | `!proportional` \| `!largest_first` | `!proportional` | how positions are scaled down when cash alone can't fund a rebalance |
+| `meta` | any | none | free-form metadata, never interpreted — see [Metadata](#metadata--meta) |
 
-Each child is `{ name?, group?, strategy }`, where `strategy` is **any of the
-other four document shapes**, routed by its distinctive top-level key
+Each child is `{ name?, group?, meta?, strategy }`, where `strategy` is **any of
+the other four document shapes**, routed by its distinctive top-level key
 (`left`+`right` → pairs, `selection` → basket, `symbol` or a preset tag →
-single, otherwise multi):
+single, otherwise multi). The child's `meta` describes the *slot*; a `meta:`
+inside its `strategy:` belongs to the nested document — see
+[Metadata](#metadata--meta):
 
 ```yaml
 children:

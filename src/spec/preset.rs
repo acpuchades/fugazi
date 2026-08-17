@@ -21,22 +21,34 @@ use serde::Deserialize;
 use crate::prelude::*;
 use crate::strategies::{SingleAssetStrategy, composite, mean_reversion, trend};
 
+use super::meta::Meta;
 use super::strategy::{DynSingleStrategy, SingleStrategySpec};
 
 /// The externally-tagged catalogue of ready-made single-asset strategies.
 /// Each variant maps one-to-one onto a `crate::strategies` recipe.
+///
+/// Every variant carries the same optional `meta` as a spelled-out document
+/// ([`spec::meta`](crate::spec::meta)) — a preset is a strategy document too,
+/// and an external service shouldn't discover that one of the six shapes it can
+/// emit is the one that rejects its metadata.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum StrategyPreset {
     /// Go all-in long on the first bar and hold. See
     /// [`SingleAssetStrategy::buy_and_hold`].
-    BuyAndHold { symbol: String },
+    BuyAndHold {
+        symbol: String,
+        #[serde(default)]
+        meta: Option<Meta>,
+    },
     /// Always-in SMA fast/slow crossover. See
     /// [`crate::strategies::trend::ma_crossover`].
     MaCrossover {
         symbol: String,
         fast: usize,
         slow: usize,
+        #[serde(default)]
+        meta: Option<Meta>,
     },
     /// RSI mean-reversion, long/flat: buy when RSI crosses below `oversold`,
     /// exit when it crosses back above `exit`. See
@@ -46,10 +58,17 @@ pub enum StrategyPreset {
         period: usize,
         oversold: Real,
         exit: Real,
+        #[serde(default)]
+        meta: Option<Meta>,
     },
     /// Always-in Donchian channel breakout. See
     /// [`crate::strategies::trend::donchian_breakout`].
-    DonchianBreakout { symbol: String, period: usize },
+    DonchianBreakout {
+        symbol: String,
+        period: usize,
+        #[serde(default)]
+        meta: Option<Meta>,
+    },
     /// Always-in Keltner channel breakout. See
     /// [`crate::strategies::composite::keltner_breakout`].
     KeltnerBreakout {
@@ -57,6 +76,8 @@ pub enum StrategyPreset {
         ema_period: usize,
         atr_period: usize,
         multiplier: Real,
+        #[serde(default)]
+        meta: Option<Meta>,
     },
 }
 
@@ -75,7 +96,7 @@ impl StrategyPreset {
     /// The instrument this preset trades.
     pub fn symbol(&self) -> &str {
         match self {
-            StrategyPreset::BuyAndHold { symbol }
+            StrategyPreset::BuyAndHold { symbol, .. }
             | StrategyPreset::MaCrossover { symbol, .. }
             | StrategyPreset::RsiReversal { symbol, .. }
             | StrategyPreset::DonchianBreakout { symbol, .. }
@@ -83,13 +104,25 @@ impl StrategyPreset {
         }
     }
 
+    /// This preset's free-form `meta:`, if the document set one. See
+    /// [`spec::meta`](crate::spec::meta).
+    pub fn meta(&self) -> Option<&Meta> {
+        match self {
+            StrategyPreset::BuyAndHold { meta, .. }
+            | StrategyPreset::MaCrossover { meta, .. }
+            | StrategyPreset::RsiReversal { meta, .. }
+            | StrategyPreset::DonchianBreakout { meta, .. }
+            | StrategyPreset::KeltnerBreakout { meta, .. } => meta.as_ref(),
+        }
+    }
+
     /// Build the live strategy by delegating to the `crate::strategies` recipe.
     fn build_strategy(&self) -> SingleAssetStrategy<Symbol> {
         match self {
-            StrategyPreset::BuyAndHold { symbol } => {
+            StrategyPreset::BuyAndHold { symbol, .. } => {
                 SingleAssetStrategy::buy_and_hold(crate::types::symbol(symbol))
             }
-            StrategyPreset::MaCrossover { symbol, fast, slow } => {
+            StrategyPreset::MaCrossover { symbol, fast, slow, .. } => {
                 trend::ma_crossover(crate::types::symbol(symbol), *fast, *slow)
             }
             StrategyPreset::RsiReversal {
@@ -97,8 +130,9 @@ impl StrategyPreset {
                 period,
                 oversold,
                 exit,
+                ..
             } => mean_reversion::rsi_reversal(crate::types::symbol(symbol), *period, *oversold, *exit),
-            StrategyPreset::DonchianBreakout { symbol, period } => {
+            StrategyPreset::DonchianBreakout { symbol, period, .. } => {
                 trend::donchian_breakout(crate::types::symbol(symbol), *period)
             }
             StrategyPreset::KeltnerBreakout {
@@ -106,6 +140,7 @@ impl StrategyPreset {
                 ema_period,
                 atr_period,
                 multiplier,
+                ..
             } => composite::keltner_breakout(crate::types::symbol(symbol), *ema_period, *atr_period, *multiplier),
         }
     }
@@ -132,6 +167,15 @@ impl StrategyRef {
         match self {
             StrategyRef::Spec(s) => &s.symbol,
             StrategyRef::Preset(p) => p.symbol(),
+        }
+    }
+
+    /// This document's free-form `meta:`, if it set one — the same key in both
+    /// spellings. See [`spec::meta`](crate::spec::meta).
+    pub fn meta(&self) -> Option<&Meta> {
+        match self {
+            StrategyRef::Spec(s) => s.meta.as_ref(),
+            StrategyRef::Preset(p) => p.meta(),
         }
     }
 

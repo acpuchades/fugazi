@@ -13,6 +13,7 @@ use crate::prelude::*;
 use crate::strategies::SingleAssetStrategy;
 
 use super::expr::{BoolNode, RealNode};
+use super::meta::Meta;
 use crate::runtime::{any, AnyChain};
 use crate::types::Symbol;
 
@@ -95,6 +96,11 @@ pub struct SingleStrategySpec {
     /// position when the target drifts.
     #[serde(default)]
     pub rebalance_on: Option<BoolNode>,
+
+    /// Free-form document metadata for external tooling. Parsed, carried, and
+    /// never interpreted — see [`spec::meta`](crate::spec::meta).
+    #[serde(default)]
+    pub meta: Option<Meta>,
 }
 
 impl SingleStrategySpec {

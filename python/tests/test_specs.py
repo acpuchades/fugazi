@@ -174,6 +174,81 @@ def test_load_spec_explicit_kind_override():
 
 
 # ---------------------------------------------------------------------------
+# meta: the open-schema key fugazi carries but never interprets
+# ---------------------------------------------------------------------------
+
+
+def test_spec_meta_round_trips_as_plain_python():
+    """`meta:` comes back as ordinary dicts/lists/scalars, not an opaque handle."""
+    yaml = """
+    symbol: BTC
+    meta:
+      service: strategy-lab
+      revision: 17
+      live: true
+      tags: [momentum, crypto]
+      owner: {desk: systematic}
+    long:
+      enter: !value true
+    """
+    spec = ta.load_spec(yaml)
+    assert spec.meta == {
+        "service": "strategy-lab",
+        "revision": 17,
+        "live": True,
+        "tags": ["momentum", "crypto"],
+        "owner": {"desk": "systematic"},
+    }
+
+
+def test_spec_meta_is_none_when_absent():
+    """Absent `meta:` reads None — not an empty dict a caller has to disambiguate."""
+    spec = ta.load_spec("symbol: BTC\nlong:\n  enter: !value true\n")
+    assert spec.meta is None
+
+
+def test_spec_meta_is_available_on_every_shape():
+    """All five shapes carry it, so a caller never has to branch on `kind`."""
+    docs = {
+        "single": "symbol: BTC\nmeta: {tag: x}\nlong:\n  enter: !value true\n",
+        "pairs": (
+            "left: BTC\nright: ETH\nmeta: {tag: x}\n"
+            "enter: !gt {lhs: !close {source: !pick {symbol: BTC}}, rhs: !value 0}\n"
+        ),
+        "basket": (
+            "meta: {tag: x}\nselection: !top_bottom {longs: 1, shorts: 1}\n"
+            "score: !close\nsizing: !value 1.0\n"
+        ),
+        "multi": "meta: {tag: x}\nlong:\n  enter: !value true\n",
+        "portfolio": (
+            "meta: {tag: x}\nchildren:\n"
+            "  - name: c1\n    strategy: !buy_and_hold {symbol: BTC}\n"
+        ),
+    }
+    for kind, yaml in docs.items():
+        spec = ta.load_spec(yaml)
+        assert spec.kind == kind, yaml
+        assert spec.meta == {"tag": "x"}, kind
+
+
+def test_spec_meta_does_not_change_a_run():
+    """The whole contract: adding `meta:` cannot move a number."""
+    body = "symbol: BTC\nlong:\n  enter: !value true\n"
+    snaps = _snaps_single("BTC", [100.0, 101.0, 99.0, 104.0, 108.0])
+
+    def equity(yaml):
+        return ta.load_spec(yaml).run(ta.PaperWallet(1000.0), snaps).equity_curve
+
+    assert equity(body) == equity(body + "meta: {service: strategy-lab}\n")
+
+
+def test_a_misspelled_field_is_still_an_error():
+    """`meta:` widens the surface by exactly one key, not by everything."""
+    with pytest.raises(ValueError, match="sizng"):
+        ta.load_spec("symbol: BTC\nsizng: !value 1.0\nlong:\n  enter: !value true\n")
+
+
+# ---------------------------------------------------------------------------
 # TradingCostsConfig
 # ---------------------------------------------------------------------------
 

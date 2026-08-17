@@ -247,6 +247,33 @@ and have separate slippage models.
 The full grammar is documented under
 [`--costs`](CLI.md#--costs) in `CLI.md`.
 
+## Metadata — `meta:`
+
+A costs file takes the same free-form `meta:` key every fugazi document does
+([STRATEGIES.md](STRATEGIES.md#metadata--meta)) — a place for an external
+service to record where a fee schedule came from and when it was last checked,
+next to the numbers rather than in a sibling file that drifts:
+
+```yaml
+meta:
+  venue: binance
+  source: https://www.binance.com/en/fee/schedule
+  reviewed: 2026-01-31
+commission: !percentage { rate: 0.001 }
+spread: !bps { bps: 1 }
+```
+
+It is never read by cost resolution — every key besides `commission`, `spread`,
+`slippage` and `meta` is still rejected, so a misspelled leg name stays an
+error. Read it back with `CostConfig::meta()`.
+
+Two notes on how it composes with layering: `meta:` merges across `--costs`
+layers exactly like the legs do (a later file's `meta` overrides an earlier
+one's, key by key), and a `--costs none` term resets the *whole* accumulator,
+`meta` included — put the file after `none`, not before, if you want to keep it.
+`meta` is a file-only key; there is no inline `--costs meta=…` setter, since the
+inline grammar addresses cost legs.
+
 ## Presets shipped in `examples/`
 
 Two starter presets ship in the repo. Both are approximations of the

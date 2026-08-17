@@ -84,6 +84,7 @@ pub struct RunState {
 }
 
 use super::basket::{BasketStrategySpec, DynBasketStrategy};
+use super::meta::Meta;
 use super::multi_asset::{DynMultiAssetStrategy, MultiAssetStrategySpec};
 use super::pairs::{DynPairsStrategy, PairsStrategySpec};
 use super::portfolio::{DynPortfolio, PortfolioSpec};
@@ -485,6 +486,20 @@ impl StrategySpec {
             StrategySpec::Basket(_) => "basket",
             StrategySpec::Multi(_) => "multi",
             StrategySpec::Portfolio(_) => "portfolio",
+        }
+    }
+
+    /// The document's free-form `meta:`, whatever shape it is — the one place
+    /// a caller that took "any strategy document" can read the metadata an
+    /// external service attached. fugazi never reads it itself; see
+    /// [`spec::meta`](super::meta).
+    pub fn meta(&self) -> Option<&Meta> {
+        match self {
+            StrategySpec::Single(s) => s.meta(),
+            StrategySpec::Pairs(s) => s.meta.as_ref(),
+            StrategySpec::Basket(s) => s.meta.as_ref(),
+            StrategySpec::Multi(s) => s.meta.as_ref(),
+            StrategySpec::Portfolio(s) => s.meta.as_ref(),
         }
     }
 

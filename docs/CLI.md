@@ -749,7 +749,11 @@ Each `-x` argument is `[SCOPE:]BODY`, where:
   YAML mapping of column name → source expression.
 
 The base OHLCV column names (`open`, `high`, `low`, `close`, `volume`,
-`symbol`, `freq`, `time`) are reserved.
+`symbol`, `freq`, `time`) are reserved. So is **`meta`** in an `@file.yml`
+body: an overlay file has no envelope — every key *is* a column name — so a
+top-level `meta:` there is the file's free-form
+[metadata](STRATEGIES.md#metadata--meta) rather than a column. Name the column
+something else if you want one called `meta`.
 
 An overlay body may carry `!param` placeholders resolved from `--params`,
 exactly like a strategy document — so `--params FAST=20 -x 'ma=!sma { period:

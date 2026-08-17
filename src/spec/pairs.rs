@@ -15,6 +15,7 @@ use crate::prelude::*;
 use crate::strategies::PairsStrategy;
 
 use super::expr::{BoolNode, RealNode};
+use super::meta::Meta;
 use super::strategy::SideSpec;
 use crate::runtime::AnyChain;
 use crate::types::Symbol;
@@ -119,6 +120,11 @@ pub struct PairsStrategySpec {
     /// pre-refactor behavior.
     #[serde(default)]
     pub rebalance_on: Option<BoolNode>,
+
+    /// Free-form document metadata for external tooling. Parsed, carried, and
+    /// never interpreted — see [`spec::meta`](crate::spec::meta).
+    #[serde(default)]
+    pub meta: Option<Meta>,
 }
 
 /// Deserialization mirror of [`PairsStrategySpec`], carrying the same fields
@@ -150,6 +156,8 @@ struct PairsStrategySpecRaw {
     sizing: Option<Box<RealNode>>,
     #[serde(default)]
     rebalance_on: Option<BoolNode>,
+    #[serde(default)]
+    meta: Option<Meta>,
 }
 
 impl TryFrom<PairsStrategySpecRaw> for PairsStrategySpec {
@@ -187,6 +195,7 @@ impl TryFrom<PairsStrategySpecRaw> for PairsStrategySpec {
             short_spread: raw.short_spread,
             sizing: raw.sizing,
             rebalance_on: raw.rebalance_on,
+            meta: raw.meta,
         })
     }
 }

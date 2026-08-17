@@ -39,6 +39,7 @@ use crate::strategies::basket::{
 use crate::types::Snapshot;
 
 use super::expr::NodeSpec;
+use super::meta::Meta;
 use super::template::SpecTemplate;
 use crate::runtime::AnyChain;
 use crate::types::Symbol;
@@ -263,6 +264,11 @@ pub struct BasketStrategySpec {
     pub long: Option<BasketSideSpec>,
     #[serde(default)]
     pub short: Option<BasketSideSpec>,
+
+    /// Free-form document metadata for external tooling. Parsed, carried, and
+    /// never interpreted — see [`spec::meta`](crate::spec::meta).
+    #[serde(default)]
+    pub meta: Option<Meta>,
 }
 
 /// Per-leg protective template for a [`BasketStrategySpec`] side. Only

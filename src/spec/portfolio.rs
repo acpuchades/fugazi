@@ -57,6 +57,7 @@ use crate::runtime::AnyChain;
 
 use super::basket::BasketStrategySpec;
 use super::expr::NodeSpec;
+use super::meta::Meta;
 use super::multi_asset::MultiAssetStrategySpec;
 use super::pairs::PairsStrategySpec;
 use super::preset::StrategyRef;
@@ -180,6 +181,12 @@ pub struct PortfolioSpec {
     /// `PortfolioBuilder` default). See [`RebalancePolicySpec`].
     #[serde(default)]
     pub rebalance_policy: Option<RebalancePolicySpec>,
+
+    /// Free-form document metadata for external tooling. Parsed, carried, and
+    /// never interpreted — see [`spec::meta`](crate::spec::meta). Each child
+    /// carries its own [`meta`](PortfolioChildSpec::meta) independently.
+    #[serde(default)]
+    pub meta: Option<Meta>,
 }
 
 /// One child slot: optional identity metadata (`name`, `group`) plus the
@@ -219,6 +226,17 @@ pub struct PortfolioChildSpec {
     /// The nested strategy — of any shape. Routed by distinctive top-level
     /// key on the child's `strategy:` map (see [`PortfolioChildStrategy`]).
     pub strategy: PortfolioChildStrategy,
+
+    /// Free-form metadata for this child slot — see
+    /// [`spec::meta`](crate::spec::meta). Distinct from any `meta:` inside
+    /// `strategy:`, which belongs to the nested document: this one describes
+    /// the *slot* (why this child is in this portfolio), that one describes the
+    /// strategy. Neither is read by fugazi, and unlike `name` / `group` it is
+    /// **not** surfaced to the `weights:` expression — `meta` is opaque by
+    /// contract, and a weight that read it would be reading data fugazi
+    /// promises not to interpret.
+    #[serde(default)]
+    pub meta: Option<Meta>,
 }
 
 /// A strategy spec of any of fugazi's four shapes, used as a
