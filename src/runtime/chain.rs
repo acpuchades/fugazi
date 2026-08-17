@@ -14,19 +14,27 @@
 //! moved in and back out at **every level** of an expression, with a
 //! discriminant branch and drop glue on each move.
 //!
-//! Measured (`cargo bench --bench erasure`), on a two-node scalar chain:
+//! Measured (`cargo bench -p fugazi --bench erasure`), on a scalar chain:
 //!
 //! | | ns/sample |
 //! |---|---:|
-//! | concrete, no erasure | 1.36 |
-//! | payload erasure, 2 levels | 16.00 |
-//! | payload erasure, 3 levels | 28.89 |
-//! | **this vocabulary, 2 levels** | **3.79** |
-//! | **this vocabulary, 3 levels** | **4.20** |
+//! | concrete, no erasure, 1 node | 1.36 |
+//! | payload erasure, 2 levels | 24.77 |
+//! | payload erasure, 5 levels | 65.83 |
+//! | **this vocabulary, 2 levels** | **3.81** |
+//! | **this vocabulary, 5 levels** | **11.18** |
+//! | hand-rolled single-method trait, 2 levels (the floor) | 3.66 |
 //!
-//! Marginal cost of one more level: **+12.9 ns** with a payload, **+0.4 ns**
-//! here. Depth stops being a tax, which matters because real expressions are
-//! deep.
+//! Marginal cost of one more level: **+13.7 ns** with a payload, **+2.5 ns**
+//! here — and the last row says +2.5 is the floor, not a starting point. Depth
+//! stops being a tax, which matters because real expressions are deep: the
+//! YAML layer's depth-8 benchmark executes **39% fewer instructions** on this
+//! vocabulary than on the payload one.
+//!
+//! If you re-run that benchmark, note that it builds its chains behind
+//! `#[inline(never)]` deliberately. An earlier version did not, LLVM
+//! devirtualised the whole chain, and it reported +0.4 ns/level — flattering
+//! this design by 6×.
 //!
 //! The trade is that a `Chain` cannot describe itself — its domain lives in the
 //! type, so a builder that needs to *discover* the domain matches on
