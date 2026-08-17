@@ -1,5 +1,5 @@
 //! Reusable overlay core: a `name → NodeSpec` column set that builds a live
-//! [`DynIndicator`] per column and computes derived overlay values over a
+//! [`PayloadIndicator`] per column and computes derived overlay values over a
 //! series, merging the results onto an existing [`Schema`].
 //!
 //! This is the shape the CLI's `fugazi get -x` overlays and the Python
@@ -48,7 +48,7 @@ use serde_json::Value as Json;
 
 use crate::indicators::{Book, Position};
 use crate::market::{Atom, OverlayInfo, OverlayType, OverlayValue, Schema};
-use crate::runtime::{DynIndicator, DynType, DynValue};
+use crate::runtime::{PayloadIndicator, PayloadType, PayloadValue};
 use crate::snapshot::Selector;
 use crate::time::Frequency;
 use crate::types::Snapshot;
@@ -79,7 +79,7 @@ impl OverlayColumn {
         &self,
         schema: &Arc<Schema>,
         root: Option<&Selector<Symbol>>,
-    ) -> Result<Box<dyn DynIndicator>> {
+    ) -> Result<Box<dyn PayloadIndicator>> {
         build_overlay(&self.spec, schema, root)
             .map_err(|e| anyhow!("overlay {:?} in {}: {e}", self.name, self.origin))
     }
@@ -98,7 +98,7 @@ pub fn build_overlay(
     spec: &NodeSpec,
     schema: &Arc<Schema>,
     root: Option<&Selector<Symbol>>,
-) -> Result<Box<dyn DynIndicator>> {
+) -> Result<Box<dyn PayloadIndicator>> {
     spec.try_build(&Position::new(), &Book::new(1.0), None, schema, root)
         .map_err(|e| anyhow!("{e}"))
 }
@@ -149,7 +149,7 @@ pub fn columns_from_yaml(
 #[derive(Clone)]
 pub struct PreparedColumn {
     name: String,
-    ind: Box<dyn DynIndicator>,
+    ind: Box<dyn PayloadIndicator>,
     ty: OverlayType,
 }
 
@@ -171,11 +171,11 @@ impl PreparedColumn {
 /// [`crate::spec::overlay::build_overlay`] directly rather than through
 /// [`prepare`], and needs the same guard — an overlay that emits an `Atom`
 /// or a `Candle` cannot be a CSV cell.
-pub fn scalar_type(ind: &dyn DynIndicator, name: &str) -> Result<OverlayType> {
+pub fn scalar_type(ind: &dyn PayloadIndicator, name: &str) -> Result<OverlayType> {
     Ok(match ind.output_type() {
-        DynType::Real => OverlayType::Real,
-        DynType::Bool => OverlayType::Bool,
-        DynType::Str => OverlayType::Str,
+        PayloadType::Real => OverlayType::Real,
+        PayloadType::Bool => OverlayType::Bool,
+        PayloadType::Str => OverlayType::Str,
         other => bail!(
             "overlay column {name:?} produces {other}, \
              not a scalar (Real / Bool / Str) column"
@@ -203,7 +203,7 @@ pub fn prepare_for(
     columns: &[OverlayColumn],
     root: Option<&Selector<Symbol>>,
 ) -> Result<(Arc<Schema>, Vec<PreparedColumn>)> {
-    let named: Vec<(String, Box<dyn DynIndicator>)> = columns
+    let named: Vec<(String, Box<dyn PayloadIndicator>)> = columns
         .iter()
         .map(|c| Ok((c.name.clone(), c.build(existing, root)?)))
         .collect::<Result<_>>()?;
@@ -217,7 +217,7 @@ pub fn prepare_for(
 /// existing column, or a duplicate new name.
 pub fn prepare_built(
     existing: &Arc<Schema>,
-    named: Vec<(String, Box<dyn DynIndicator>)>,
+    named: Vec<(String, Box<dyn PayloadIndicator>)>,
 ) -> Result<(Arc<Schema>, Vec<PreparedColumn>)> {
     let mut builder = Schema::builder();
     let existing_names: HashSet<&str> = existing.keys().collect();
@@ -360,18 +360,18 @@ fn drive(
 
     for pc in prepared.iter_mut() {
         let input = match pc.ind.input_type() {
-            DynType::Snapshot => DynValue::Snapshot(snap.clone()),
-            DynType::Atom => DynValue::Atom(atom.clone()),
+            PayloadType::Snapshot => PayloadValue::Snapshot(snap.clone()),
+            PayloadType::Atom => PayloadValue::Atom(atom.clone()),
             // A candle-rooted overlay over an overlay-only series has
             // nothing to read; hand it the atom so the column warms up as
             // absent rather than fabricating a bar.
-            DynType::Candle => match atom.candle {
-                Some(candle) => DynValue::Candle(candle),
-                None => DynValue::Atom(atom.clone()),
+            PayloadType::Candle => match atom.candle {
+                Some(candle) => PayloadValue::Candle(candle),
+                None => PayloadValue::Atom(atom.clone()),
             },
             // Overlay roots are Snapshot/Atom/Candle; anything else (a
             // scalar-input carrier) gets the atom as a best effort.
-            _ => DynValue::Atom(atom.clone()),
+            _ => PayloadValue::Atom(atom.clone()),
         };
         let produced = pc.ind.update(input).and_then(|dv| to_overlay_value(pc.ty, dv));
         slots.push(produced);
@@ -384,11 +384,11 @@ fn drive(
     }
 }
 
-fn to_overlay_value(ty: OverlayType, dv: DynValue) -> Option<OverlayValue> {
+fn to_overlay_value(ty: OverlayType, dv: PayloadValue) -> Option<OverlayValue> {
     match (ty, dv) {
-        (OverlayType::Real, DynValue::Real(x)) => Some(OverlayValue::Real(x)),
-        (OverlayType::Bool, DynValue::Bool(b)) => Some(OverlayValue::Bool(b)),
-        (OverlayType::Str, DynValue::Str(s)) => Some(OverlayValue::Str(s)),
+        (OverlayType::Real, PayloadValue::Real(x)) => Some(OverlayValue::Real(x)),
+        (OverlayType::Bool, PayloadValue::Bool(b)) => Some(OverlayValue::Bool(b)),
+        (OverlayType::Str, PayloadValue::Str(s)) => Some(OverlayValue::Str(s)),
         _ => None,
     }
 }
@@ -398,7 +398,7 @@ fn to_overlay_value(ty: OverlayType, dv: DynValue) -> Option<OverlayValue> {
 /// [`prepare_built`] kept for symmetry with [`prepare`].
 pub fn prepare_from_indicators(
     existing: &Arc<Schema>,
-    named: Vec<(String, Box<dyn DynIndicator>)>,
+    named: Vec<(String, Box<dyn PayloadIndicator>)>,
 ) -> Result<(Arc<Schema>, Vec<PreparedColumn>)> {
     prepare_built(existing, named)
 }

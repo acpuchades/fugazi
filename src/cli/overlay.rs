@@ -43,7 +43,7 @@ use std::str::FromStr;
 use fugazi::sources::Interval;
 use fugazi::{Frequency, Schema, Selector};
 
-use crate::dyn_indicator::DynIndicator;
+use crate::dyn_indicator::PayloadIndicator;
 use crate::calendar::{is_escaped, looks_like_body, parse_interval, parse_scope_parts};
 use crate::input::{self, Source};
 use crate::params;
@@ -105,7 +105,7 @@ impl Overlay {
         &self,
         schema: &std::sync::Arc<Schema>,
         root: Option<&Selector<Symbol>>,
-    ) -> Result<Box<dyn DynIndicator>> {
+    ) -> Result<Box<dyn PayloadIndicator>> {
         // Overlays don't run inside a strategy, so there's no live Position
         // or Book — using them here (`entry`, `peak`, book-anchored sizing)
         // never fires. The shared library core installs the stub anchors.
@@ -707,7 +707,7 @@ mod tests {
     #[test]
     fn stable_bars_derives_from_library() {
         // Sanity check: the value comes straight from Indicator::stable_bars()
-        // on the freshly-built DynValue.
+        // on the freshly-built PayloadValue.
         let src = Source::Inline("s=!sma { period: 14 }".to_string());
         let overlays = parse_specs(std::slice::from_ref(&src)).unwrap();
         let cols = column_names(&overlays);

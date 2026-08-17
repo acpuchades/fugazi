@@ -52,7 +52,7 @@ pub(crate) use fugazi_core::strategies::{
 };
 pub(crate) use fugazi_core::metrics as core_metrics;
 pub(crate) use fugazi_core::metrics::{DrawdownSegment, Trade};
-pub(crate) use fugazi_core::runtime::{self, DynType, DynValue, TypeOf};
+pub(crate) use fugazi_core::runtime::{self, PayloadType, PayloadValue, TypeOf};
 // Spec-driven surface: YAML load, evaluate, optimize.
 pub(crate) use fugazi_core::spec::StrategySpec as CoreStrategySpec;
 pub(crate) use fugazi_core::spec::backtest as spec_backtest;

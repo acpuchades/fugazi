@@ -36,7 +36,7 @@ use crate::types::Snapshot;
 
 use super::trailing::{self, AnyStrategyRef, TrailingMetric};
 use crate::indicators::compare;
-use crate::spec::dyn_indicator::{self, AsAtom, AsBool, AsCandle, AsReal, AsStr, DynIndicator, DynType};
+use crate::spec::dyn_indicator::{self, AsAtom, AsBool, AsCandle, AsReal, AsStr, PayloadIndicator, PayloadType};
 
 use crate::{Frequency, Selector};
 use std::str::FromStr;
@@ -219,7 +219,7 @@ impl StrOperand {
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
         root: Option<&Selector<Symbol>>,
-    ) -> Result<Box<dyn DynIndicator>, String> {
+    ) -> Result<Box<dyn PayloadIndicator>, String> {
         match self {
             StrOperand::Literal(s) => Ok(dyn_indicator::wrap(
                 ValueStr::<crate::types::Snapshot<Symbol>>::new(s.as_str()),
@@ -234,7 +234,7 @@ impl StrOperand {
 /// **skipped**, exactly as [`crate::spec::typecheck::check_immediate`] skips
 /// it: those defer to the build-time `AsReal` / `AsBool` view. The message
 /// names the offending tag, the same convention the breadcrumb uses.
-fn expect_output(node: &NodeSpec, want: DynType) -> Result<(), String> {
+fn expect_output(node: &NodeSpec, want: PayloadType) -> Result<(), String> {
     if let Some(got) = crate::spec::typecheck::output_type(node)
         && got != want
     {
@@ -283,7 +283,7 @@ impl TryFrom<serde_norway::Value> for RealNode {
     type Error = String;
     fn try_from(v: serde_norway::Value) -> Result<Self, Self::Error> {
         let node = NodeSpec::try_from(v)?;
-        expect_output(&node, DynType::Real)?;
+        expect_output(&node, PayloadType::Real)?;
         Ok(RealNode(node))
     }
 }
@@ -291,7 +291,7 @@ impl TryFrom<serde_norway::Value> for BoolNode {
     type Error = String;
     fn try_from(v: serde_norway::Value) -> Result<Self, Self::Error> {
         let node = NodeSpec::try_from(v)?;
-        expect_output(&node, DynType::Bool)?;
+        expect_output(&node, PayloadType::Bool)?;
         Ok(BoolNode(node))
     }
 }
@@ -308,7 +308,7 @@ impl RealNode {
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
         root: Option<&Selector<Symbol>>,
-    ) -> Box<dyn DynIndicator> {
+    ) -> Box<dyn PayloadIndicator> {
         self.0.build(anchor, book, portfolio_book, schema, root)
     }
     pub fn try_build(
@@ -318,7 +318,7 @@ impl RealNode {
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
         root: Option<&Selector<Symbol>>,
-    ) -> Result<Box<dyn DynIndicator>, String> {
+    ) -> Result<Box<dyn PayloadIndicator>, String> {
         self.0.try_build(anchor, book, portfolio_book, schema, root)
     }
 }
@@ -333,7 +333,7 @@ impl BoolNode {
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
         root: Option<&Selector<Symbol>>,
-    ) -> Box<dyn DynIndicator> {
+    ) -> Box<dyn PayloadIndicator> {
         self.0.build(anchor, book, portfolio_book, schema, root)
     }
     pub fn try_build(
@@ -343,7 +343,7 @@ impl BoolNode {
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
         root: Option<&Selector<Symbol>>,
-    ) -> Result<Box<dyn DynIndicator>, String> {
+    ) -> Result<Box<dyn PayloadIndicator>, String> {
         self.0.try_build(anchor, book, portfolio_book, schema, root)
     }
 }
@@ -1671,7 +1671,7 @@ pub enum NodeSpec {
         source: Option<Box<NodeSpec>>,
     },
     /// The raw bar-open [`Timestamp`] payload (yields
-    /// `DynType::Time`, not a scalar). The `Timestamp` twin of
+    /// `PayloadType::Time`, not a scalar). The `Timestamp` twin of
     /// [`NodeSpec::Current`].
     #[grammar(kind = "source", output = "time")]
     Time {
@@ -2696,7 +2696,7 @@ enum NodeSpecRaw {
         source: Option<Box<NodeSpec>>,
     },
     /// The raw bar-open [`Timestamp`] payload (yields
-    /// `DynType::Time`, not a scalar). The `Timestamp` twin of
+    /// `PayloadType::Time`, not a scalar). The `Timestamp` twin of
     /// [`NodeSpec::Current`].
     Time {
         #[serde(default)]
@@ -3391,10 +3391,10 @@ fn build_polymorphic_eq(
     portfolio_book: Option<&Book>,
     schema: &Arc<Schema>,
     root: Option<&Selector<Symbol>>,
-) -> Result<Box<dyn DynIndicator>, String> {
+) -> Result<Box<dyn PayloadIndicator>, String> {
     let lhs_built = lhs.try_build(anchor, book, portfolio_book, schema, root)?;
     Ok(match lhs_built.output_type() {
-        DynType::Real => {
+        PayloadType::Real => {
             let l = AsReal::new(lhs_built);
             let r = AsReal::try_new(rhs.try_build(anchor, book, portfolio_book, schema, root)?)
                 .map_err(|e| trail(rhs, e))?;
@@ -3405,7 +3405,7 @@ fn build_polymorphic_eq(
                 dyn_indicator::wrap(compare::Eq::with_tolerance(l, r, e))
             }
         }
-        DynType::Str => {
+        PayloadType::Str => {
             let l = AsStr::new(lhs_built);
             let r = AsStr::try_new(rhs.try_build(anchor, book, portfolio_book, schema, root)?)
                 .map_err(|e| trail(rhs, e))?;
@@ -3456,7 +3456,7 @@ fn build_match(
     portfolio_book: Option<&Book>,
     schema: &Arc<Schema>,
     root: Option<&Selector<Symbol>>,
-) -> Result<Box<dyn DynIndicator>, String> {
+) -> Result<Box<dyn PayloadIndicator>, String> {
     if cases.is_empty() {
         return Err("`cases` must not be empty (use `!if_else` for a single branch, \
                     or reduce to `default` if there's nothing to match)"
@@ -3636,7 +3636,7 @@ fn resolve_book_source<'a>(
 
 impl NodeSpec {
     /// Construct the live, runtime-typed source this spec describes as a
-    /// `Box<dyn DynIndicator>`. `anchor` is the owning strategy's
+    /// `Box<dyn PayloadIndicator>`. `anchor` is the owning strategy's
     /// [`Position`], shared by any `entry` / `peak` / `trough` leaves in the
     /// tree; `book` is the owning strategy's [`Book`], the default source of
     /// any book-reading node (`!drawdown`, `!equity`, `!drawdown_throttle`,
@@ -3658,7 +3658,7 @@ impl NodeSpec {
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
         root: Option<&Selector<Symbol>>,
-    ) -> Box<dyn DynIndicator> {
+    ) -> Box<dyn PayloadIndicator> {
         self.try_build(anchor, book, portfolio_book, schema, root)
             .unwrap_or_else(|e| panic!("{e}"))
     }
@@ -3683,7 +3683,7 @@ impl NodeSpec {
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
         root: Option<&Selector<Symbol>>,
-    ) -> Result<Box<dyn DynIndicator>, String> {
+    ) -> Result<Box<dyn PayloadIndicator>, String> {
         self.try_build_inner(anchor, book, portfolio_book, schema, root)
             .map_err(|e| trail(self, e))
     }
@@ -3698,7 +3698,7 @@ impl NodeSpec {
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
         root: Option<&Selector<Symbol>>,
-    ) -> Result<Box<dyn DynIndicator>, String> {
+    ) -> Result<Box<dyn PayloadIndicator>, String> {
         use NodeSpec::*;
         // Recursive-build shorthands: build `s`, view it as a library-typed
         // `Indicator<Input=Snapshot, Output=Real>` (or Candle) so it drops
@@ -4396,8 +4396,8 @@ impl NodeSpec {
             Changed(inner) => {
                 let built = inner.try_build(anchor, book, portfolio_book, schema, root)?;
                 match built.output_type() {
-                    DynType::Bool => dyn_indicator::wrap(AsBool::new(built).changed()),
-                    DynType::Real => dyn_indicator::wrap(AsReal::new(built).changed()),
+                    PayloadType::Bool => dyn_indicator::wrap(AsBool::new(built).changed()),
+                    PayloadType::Real => dyn_indicator::wrap(AsReal::new(built).changed()),
                     other => {
                         return Err(trail(
                             inner,
@@ -4456,7 +4456,7 @@ fn build_pick(
     symbol: Option<&str>,
     freq: Option<&str>,
     root: Option<&Selector<Symbol>>,
-) -> Result<Box<dyn DynIndicator>, String> {
+) -> Result<Box<dyn PayloadIndicator>, String> {
     let named = symbol.is_some();
     // The document gives a `&str`; interning happens here, once at build time,
     // so the resulting `Selector` clones as a refcount bump for the whole run.
@@ -4500,7 +4500,7 @@ fn build_get(
     schema: &Arc<Schema>,
     key: &str,
     source: AsAtom,
-) -> Result<Box<dyn DynIndicator>, String> {
+) -> Result<Box<dyn PayloadIndicator>, String> {
     match schema.type_of_key(key) {
         Some(OverlayType::Real) => Ok(dyn_indicator::wrap(GetReal::of(schema, key, source))),
         Some(OverlayType::Bool) => Ok(dyn_indicator::wrap(GetBool::of(schema, key, source))),

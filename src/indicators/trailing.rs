@@ -26,7 +26,7 @@
 //! [`Pick::matching`](crate::indicators::Pick::matching)) prices and trades every
 //! leg. Any **untagged** entry is first tagged with the strategy's own `symbol`,
 //! so a single-asset strategy fed the untagged size-1 snapshot of the CLI
-//! overlay path (a `DynValue::Atom` lift) prices its wallet and reads its
+//! overlay path (a `PayloadValue::Atom` lift) prices its wallet and reads its
 //! sole-atom leaves exactly as before — the symbol demotes from a forced re-tag
 //! to a fallback for untagged input.
 //!

@@ -27,7 +27,7 @@ use std::time::Instant;
 
 use fugazi::indicators::{Ema, Identity, Sma};
 use fugazi::prelude::*;
-use fugazi::runtime::{self, DynValue};
+use fugazi::runtime::{self, PayloadValue as DynValue};
 
 const SMA_P: usize = 10;
 const EMA_P: usize = 5;
@@ -78,7 +78,7 @@ impl Indicator for NarrowSource {
 /// The `DynValue` twin of [`NarrowSource`], so the two chains differ only in
 /// the payload they carry.
 #[derive(Clone)]
-struct WideSource(Box<dyn runtime::DynIndicatorSync>);
+struct WideSource(Box<dyn runtime::PayloadIndicatorSync>);
 
 impl Indicator for WideSource {
     type Input = Real;

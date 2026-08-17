@@ -13,7 +13,7 @@ use crate::prelude::*;
 use crate::strategies::SingleAssetStrategy;
 
 use super::expr::{BoolNode, RealNode};
-use crate::spec::dyn_indicator::{self, AsBool, AsReal, DynIndicator};
+use crate::spec::dyn_indicator::{self, AsBool, AsReal, PayloadIndicator};
 use crate::types::Symbol;
 
 // ---------------------------------------------------------------------------
@@ -54,7 +54,7 @@ impl SideSpec {
         book: &Book,
         schema: &Arc<Schema>,
         root: Option<&Selector<Symbol>>,
-    ) -> Result<Box<dyn DynIndicator>, String> {
+    ) -> Result<Box<dyn PayloadIndicator>, String> {
         match &self.exit {
             Some(s) => s.try_build(anchor, book, None, schema, root),
             None => Ok(dyn_indicator::wrap(ValueBool::<
@@ -226,7 +226,7 @@ impl SingleStrategySpec {
 
 /// The CLI's built-strategy handle. Wraps a [`SingleAssetStrategy<Symbol>`]
 /// whose entry/exit signals and protective levels came from runtime-typed
-/// [`DynIndicator`]s (bridged into typed [`Signal`] / real
+/// [`PayloadIndicator`]s (bridged into typed [`Signal`] / real
 /// levels by the private [`AsBool`] / [`AsReal`] adapters at construction).
 ///
 /// Implements [`Strategy`] by delegation, so it drops into

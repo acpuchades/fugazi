@@ -6,7 +6,7 @@
 //! 10), 20)`. Those generics are monomorphised at compile time and cannot cross
 //! the Python boundary directly, so this crate erases them behind the shared
 //! [`fugazi::runtime`](fugazi_core::runtime) vocabulary — a single
-//! `DynIndicator` trait exchanging `DynValue` payloads — plus a Python-local
+//! `PayloadIndicator` trait exchanging `PayloadValue` payloads — plus a Python-local
 //! `TypedSource<In, Out>` newtype that carries compile-time `In`/`Out` markers
 //! so the Rust API's per-input, per-output typing survives across the boundary.
 //! `Source<I>` / `SignalBox<I>` / `StrSource<I>` / `AtomBox<I>` are the

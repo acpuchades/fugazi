@@ -46,7 +46,7 @@ use crate::types::Snapshot;
 use super::basket::UniverseSpec;
 use super::expr::NodeSpec;
 use super::template::SpecTemplate;
-use crate::spec::dyn_indicator::{self, AsBool, AsReal, DynIndicator};
+use crate::spec::dyn_indicator::{self, AsBool, AsReal, PayloadIndicator};
 use crate::types::Symbol;
 
 /// One side of a [`MultiAssetStrategySpec`]: the entry condition, an
@@ -228,7 +228,7 @@ impl MultiAssetStrategySpec {
                     AsBool::new(concrete.build(&anchor, &book_l, None, &schema_l, Some(&leg_root(sym))))
                 },
                 move |sym: &Symbol| {
-                    let dyn_ind: Box<dyn DynIndicator> = match &exit_template {
+                    let dyn_ind: Box<dyn PayloadIndicator> = match &exit_template {
                         Some(t) => {
                             let concrete = build_signal(t, sym, "long exit");
                             let anchor = Position::new();
@@ -276,7 +276,7 @@ impl MultiAssetStrategySpec {
                     AsBool::new(concrete.build(&anchor, &book_s, None, &schema_s, Some(&leg_root(sym))))
                 },
                 move |sym: &Symbol| {
-                    let dyn_ind: Box<dyn DynIndicator> = match &exit_template {
+                    let dyn_ind: Box<dyn PayloadIndicator> = match &exit_template {
                         Some(t) => {
                             let concrete = build_signal(t, sym, "short exit");
                             let anchor = Position::new();
@@ -339,7 +339,7 @@ impl MultiAssetStrategySpec {
             // `root: None` — the gate is portfolio-wide, not per-leg, so
             // there is no "this series" for it to mean. Cadence / calendar
             // signals need no asset; one that reads a price must name it.
-            let dyn_ind: Box<dyn DynIndicator> =
+            let dyn_ind: Box<dyn PayloadIndicator> =
                 rebalance_spec.try_build(&anchor, &book, None, schema, None)?;
             strat.rebalance_on(AsBool::try_new(dyn_ind)?)
         } else {

@@ -1479,10 +1479,10 @@ pub(crate) fn unknown_key_error(schema: &PySchema, key: &str) -> PyErr {
 /// on purpose — a warming bool overlay then reads `None`, not `false`.
 pub(crate) fn carrier_inner_indicator(
     v: &Bound<'_, PyAny>,
-) -> PyResult<Option<(Box<dyn runtime::DynIndicator>, OverlayType)>> {
+) -> PyResult<Option<(Box<dyn runtime::PayloadIndicator>, OverlayType)>> {
     if let Ok(ind) = v.cast::<PyIndicator>() {
         let ind = ind.borrow();
-        let inner: Box<dyn runtime::DynIndicator> = match &ind.src {
+        let inner: Box<dyn runtime::PayloadIndicator> = match &ind.src {
             AnySource::Candle(s) => s.0.clone(),
             AnySource::Real(s) => s.0.clone(),
             AnySource::Snapshot(s) => s.0.clone(),
@@ -1492,7 +1492,7 @@ pub(crate) fn carrier_inner_indicator(
     }
     if let Ok(sig) = v.cast::<PySignal>() {
         let sig = sig.borrow();
-        let inner: Box<dyn runtime::DynIndicator> = match &sig.sig {
+        let inner: Box<dyn runtime::PayloadIndicator> = match &sig.sig {
             AnySignal::Candle(s) => s.0.0.clone(),
             AnySignal::Real(s) => s.0.0.clone(),
             AnySignal::Snapshot(s) => s.0.0.clone(),
@@ -1501,7 +1501,7 @@ pub(crate) fn carrier_inner_indicator(
     }
     if let Ok(ss) = v.cast::<PyStrSource>() {
         let ss = ss.borrow();
-        let inner: Box<dyn runtime::DynIndicator> = match &ss.src {
+        let inner: Box<dyn runtime::PayloadIndicator> = match &ss.src {
             AnyStrSource::Candle(s) => s.0.clone(),
             AnyStrSource::Snapshot(s) => s.0.clone(),
             AnyStrSource::Const(c) => runtime::wrap(ValueStr::<Atom>::new(c.clone())),
@@ -1516,7 +1516,7 @@ pub(crate) enum OverlayInput {
     /// A `name: NodeSpec` YAML doc (built per series against the input schema).
     Spec(Vec<fugazi_core::spec::overlay::OverlayColumn>),
     /// A dict of pre-built carriers (deep-cloned per series).
-    Built(Vec<(String, Box<dyn runtime::DynIndicator>)>),
+    Built(Vec<(String, Box<dyn runtime::PayloadIndicator>)>),
 }
 
 /// Parse the `overlays` argument: a YAML string (the fugazi-web overlay-file
@@ -1570,7 +1570,7 @@ pub(crate) fn build_overlay_prepared(
     let result = match input {
         OverlayInput::Spec(cols) => ov::prepare(existing, cols),
         OverlayInput::Built(named) => {
-            let cloned: Vec<(String, Box<dyn runtime::DynIndicator>)> =
+            let cloned: Vec<(String, Box<dyn runtime::PayloadIndicator>)> =
                 named.iter().map(|(n, i)| (n.clone(), i.clone())).collect();
             ov::prepare_built(existing, cloned)
         }

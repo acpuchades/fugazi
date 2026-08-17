@@ -17,8 +17,8 @@ use crate::spec::*;
 // ---------------------------------------------------------------------------
 // Shared type-erasure vocabulary (fugazi::runtime)
 //
-// The core library's `runtime::DynIndicatorSync` adds `Send + Sync` and an
-// autotrait-preserving deep clone on top of `DynIndicator` — exactly what pyo3
+// The core library's `runtime::PayloadIndicatorSync` adds `Send + Sync` and an
+// autotrait-preserving deep clone on top of `PayloadIndicator` — exactly what pyo3
 // pyclasses need on every field. Every wrapper in Python that used to hold its
 // own erased trait object (Source<I> for Real, SignalBox<I> for bool,
 // StrSource<I> for Arc<str>, AtomBox<I> for Atom) collapses to a single
@@ -28,8 +28,8 @@ use crate::spec::*;
 // The one exception is `MultiBox<I>` / `DynMulti<I>`: multi-output indicators
 // emit a value struct (MacdValue, BollingerValue, …) that maps to `Vec<Real>`
 // + `&'static [&'static str]` at the Python boundary, a shape that doesn't
-// fit the runtime's `DynValue` payload enum. Unifying it would need a `Multi`
-// variant on `DynValue` plus a `multi_names()` method on the trait — a
+// fit the runtime's `PayloadValue` payload enum. Unifying it would need a `Multi`
+// variant on `PayloadValue` plus a `multi_names()` method on the trait — a
 // library API expansion for negligible savings, so `DynMulti` intentionally
 // stays local.
 // ---------------------------------------------------------------------------
@@ -41,25 +41,25 @@ use crate::spec::*;
 /// Construction takes a concrete `T: Indicator<Input = In, Output = Out> +
 /// Clone + Send + Sync + 'static` and wraps it through
 /// [`runtime::wrap_sync`]; every subsequent method call routes through the
-/// runtime's `DynValue` payload but the surface `Indicator` impl below keeps
+/// runtime's `PayloadValue` payload but the surface `Indicator` impl below keeps
 /// `In`/`Out` typed at every call site.
 pub(crate) struct TypedSource<In, Out>(
-    pub(crate) Box<dyn runtime::DynIndicatorSync>,
+    pub(crate) Box<dyn runtime::PayloadIndicatorSync>,
     pub(crate) std::marker::PhantomData<fn(In) -> Out>,
 );
 
 impl<In, Out> TypedSource<In, Out>
 where
-    In: TryFrom<DynValue, Error = DynType>
+    In: TryFrom<PayloadValue, Error = PayloadType>
         + TypeOf
-        + Into<DynValue>
+        + Into<PayloadValue>
         + Clone
         + Send
         + Sync
         + 'static,
-    Out: TryFrom<DynValue, Error = DynType>
+    Out: TryFrom<PayloadValue, Error = PayloadType>
         + TypeOf
-        + Into<DynValue>
+        + Into<PayloadValue>
         + Clone
         + Send
         + Sync
@@ -81,8 +81,8 @@ impl<In, Out> Clone for TypedSource<In, Out> {
 
 impl<In, Out> Indicator for TypedSource<In, Out>
 where
-    In: Into<DynValue>,
-    Out: TryFrom<DynValue> + Clone,
+    In: Into<PayloadValue>,
+    Out: TryFrom<PayloadValue> + Clone,
 {
     type Input = In;
     type Output = Out;
@@ -118,7 +118,7 @@ where
 }
 
 /// A boxed `I -> Real` indicator — a type alias over the shared
-/// [`TypedSource`] carrier. The dedicated `DynIndicator<I>` trait +
+/// [`TypedSource`] carrier. The dedicated `PayloadIndicator<I>` trait +
 /// blanket impl it used to have collapsed into [`runtime::Adapter`]'s
 /// coverage. Semantics match the library: `None` until warm, `Some(Real)`
 /// afterwards — no bool-signal-style flattening.
@@ -138,7 +138,7 @@ pub(crate) struct SignalBox<I>(pub(crate) TypedSource<I, bool>);
 
 impl<I> SignalBox<I>
 where
-    I: TryFrom<DynValue, Error = DynType> + TypeOf + Into<DynValue> + Clone + Send + Sync + 'static,
+    I: TryFrom<PayloadValue, Error = PayloadType> + TypeOf + Into<PayloadValue> + Clone + Send + Sync + 'static,
 {
     pub(crate) fn new<T>(inner: T) -> Self
     where
@@ -156,7 +156,7 @@ impl<I> Clone for SignalBox<I> {
 
 impl<I> Indicator for SignalBox<I>
 where
-    I: Into<DynValue>,
+    I: Into<PayloadValue>,
 {
     type Input = I;
     type Output = bool;

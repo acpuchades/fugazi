@@ -54,7 +54,7 @@ use fugazi::sources::{
 
 use serde_json::Value as Json;
 
-use crate::dyn_indicator::{DynIndicator, DynValue};
+use crate::dyn_indicator::{PayloadIndicator, PayloadValue};
 use crate::csv_source::{CsvBar, CsvSource};
 use crate::input::Source as InputSource;
 use crate::overlap::{self, Overlap};
@@ -728,7 +728,7 @@ fn run_candles(
 
     // Async: download every series in parallel — no overlay state crosses task
     // boundaries. Overlays are applied synchronously below, per (symbol,
-    // interval) group, so `DynValue`'s non-Send `Rc`-backed `Position` stub
+    // interval) group, so `PayloadValue`'s non-Send `Rc`-backed `Position` stub
     // stays on one thread. `file:` series short-circuit inside `fetch_series`.
     let result = rt.block_on(fetch_all(
         series.clone(),
@@ -887,7 +887,7 @@ struct RawBar {
 
 /// Download every series concurrently (one task per series) and return the
 /// merged raw bars. Overlay computation is deliberately kept synchronous
-/// (`apply_overlays`), since [`DynValue`]'s stub `Position` uses `Rc` and can't
+/// (`apply_overlays`), since [`PayloadValue`]'s stub `Position` uses `Rc` and can't
 /// cross task boundaries.
 async fn fetch_all(
     series: Vec<Series>,
@@ -1063,7 +1063,7 @@ fn apply_overlays(
 
         let active: Vec<Option<&Overlay>> =
             overlay::active_for(overlays, columns, &symbol, interval);
-        let mut instances: Vec<Option<Box<dyn DynIndicator>>> = Vec::with_capacity(active.len());
+        let mut instances: Vec<Option<Box<dyn PayloadIndicator>>> = Vec::with_capacity(active.len());
         for slot in &active {
             instances.push(match slot {
                 Some(o) => Some(o.build(&schema, Some(&root))?),
@@ -1088,7 +1088,7 @@ fn apply_overlays(
                     .iter_mut()
                     .map(|slot| {
                         slot.as_mut().and_then(|inst| {
-                            dyn_value_to_overlay(inst.update(DynValue::Snapshot(snap.clone()))?)
+                            dyn_value_to_overlay(inst.update(PayloadValue::Snapshot(snap.clone()))?)
                         })
                     })
                     .collect();
@@ -1560,16 +1560,16 @@ fn collect_extra_columns(rows: &[Row], overlay_columns: &[String]) -> Vec<String
     out
 }
 
-/// Convert a `DynIndicator`'s emitted `DynValue` (an overlay-spec output) into
+/// Convert a `PayloadIndicator`'s emitted `PayloadValue` (an overlay-spec output) into
 /// the widened cell type. A non-scalar payload (`Atom` / `Candle`) has no CSV
 /// cell and yields `None` — an empty cell rather than an abort. `Overlay::build`
 /// already rejects such a column up front via
 /// [`crate::spec::overlay::scalar_type`], so this arm is defence in depth.
-fn dyn_value_to_overlay(v: DynValue) -> Option<OverlayValue> {
+fn dyn_value_to_overlay(v: PayloadValue) -> Option<OverlayValue> {
     match v {
-        DynValue::Real(x) => Some(OverlayValue::Real(x)),
-        DynValue::Bool(b) => Some(OverlayValue::Bool(b)),
-        DynValue::Str(s) => Some(OverlayValue::Str(s)),
+        PayloadValue::Real(x) => Some(OverlayValue::Real(x)),
+        PayloadValue::Bool(b) => Some(OverlayValue::Bool(b)),
+        PayloadValue::Str(s) => Some(OverlayValue::Str(s)),
         _ => None,
     }
 }

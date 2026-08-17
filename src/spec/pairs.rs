@@ -16,7 +16,7 @@ use crate::strategies::PairsStrategy;
 
 use super::expr::{BoolNode, RealNode};
 use super::strategy::SideSpec;
-use crate::spec::dyn_indicator::{AsBool, AsReal, DynIndicator};
+use crate::spec::dyn_indicator::{AsBool, AsReal, PayloadIndicator};
 use crate::types::Symbol;
 
 /// A whole `pairs.yml`: the two traded symbols plus one enter/exit signal pair
@@ -249,7 +249,7 @@ impl PairsStrategySpec {
         anchor: &Position,
         book: &Book,
         schema: &Arc<Schema>,
-    ) -> Result<Box<dyn DynIndicator>, String> {
+    ) -> Result<Box<dyn PayloadIndicator>, String> {
         match side.and_then(|s| s.exit.as_ref()) {
             Some(s) => s.try_build(anchor, book, None, schema, None),
             None => Ok(crate::spec::dyn_indicator::wrap(ValueBool::<
@@ -265,7 +265,7 @@ impl PairsStrategySpec {
         anchor: &Position,
         book: &Book,
         schema: &Arc<Schema>,
-    ) -> Result<Box<dyn DynIndicator>, String> {
+    ) -> Result<Box<dyn PayloadIndicator>, String> {
         match side {
             Some(s) => s.enter.try_build(anchor, book, None, schema, None),
             None => Ok(crate::spec::dyn_indicator::wrap(ValueBool::<
@@ -360,7 +360,7 @@ impl PairsStrategySpec {
 
 /// The CLI's built pairs-strategy handle. Wraps a
 /// [`PairsStrategy<Symbol>`](crate::strategies::PairsStrategy) whose signals
-/// and levels came from runtime-typed [`DynIndicator`]s.
+/// and levels came from runtime-typed [`PayloadIndicator`]s.
 ///
 /// Implements [`Strategy`] by delegation, so it drops into
 /// [`crate::backtest::run`] unchanged.

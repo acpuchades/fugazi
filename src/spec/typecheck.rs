@@ -10,7 +10,7 @@
 //!
 //! ## What it cannot decide
 //!
-//! [`output_type`] returns `Option<DynType>`, and `None` means **unknown —
+//! [`output_type`] returns `Option<PayloadType>`, and `None` means **unknown —
 //! skip**, never "invalid". Three things are genuinely undecidable without
 //! data or a driver:
 //!
@@ -35,20 +35,20 @@
 //! then pin the classifications that exist against what `build` actually
 //! produces.
 
-use crate::runtime::DynType;
+use crate::runtime::PayloadType;
 use crate::spec::expr::{NodeSpec, ValueLit};
 
 /// What a child slot is allowed to produce.
 #[derive(Debug, Clone, Copy)]
 enum Expect {
     /// Exactly this type.
-    Only(DynType),
+    Only(PayloadType),
     /// Any of these — `!match`'s `on:` dispatches on a number *or* a string.
-    OneOf(&'static [DynType]),
+    OneOf(&'static [PayloadType]),
 }
 
 impl Expect {
-    fn admits(self, ty: DynType) -> bool {
+    fn admits(self, ty: PayloadType) -> bool {
         match self {
             Expect::Only(t) => t == ty,
             Expect::OneOf(ts) => ts.contains(&ty),
@@ -67,30 +67,30 @@ impl Expect {
     }
 }
 
-const REAL: Expect = Expect::Only(DynType::Real);
-const CANDLE: Expect = Expect::Only(DynType::Candle);
-const ATOM: Expect = Expect::Only(DynType::Atom);
-const BOOL: Expect = Expect::Only(DynType::Bool);
+const REAL: Expect = Expect::Only(PayloadType::Real);
+const CANDLE: Expect = Expect::Only(PayloadType::Candle);
+const ATOM: Expect = Expect::Only(PayloadType::Atom);
+const BOOL: Expect = Expect::Only(PayloadType::Bool);
 /// `!changed` accepts either a Bool inner (toggle) or a Real inner (any-change).
-const BOOL_OR_REAL: Expect = Expect::OneOf(&[DynType::Bool, DynType::Real]);
+const BOOL_OR_REAL: Expect = Expect::OneOf(&[PayloadType::Bool, PayloadType::Real]);
 /// A string comparison's `lhs` reads a `Str` column.
-const STR: Expect = Expect::Only(DynType::Str);
+const STR: Expect = Expect::Only(PayloadType::Str);
 /// `!match`'s `on:` — numeric or string dispatch (the two are not mixable
 /// within one `!match`, but that is a build-time check against the cases).
-const REAL_OR_STR: Expect = Expect::OneOf(&[DynType::Real, DynType::Str]);
+const REAL_OR_STR: Expect = Expect::OneOf(&[PayloadType::Real, PayloadType::Str]);
 
 /// What this expression produces, or `None` when that cannot be known
 /// statically (see the module docs — `None` means *skip*, never *invalid*).
-pub fn output_type(spec: &NodeSpec) -> Option<DynType> {
+pub fn output_type(spec: &NodeSpec) -> Option<PayloadType> {
     use NodeSpec::*;
     match spec {
         // --- the non-Real leaves ---
-        Current { .. } => Some(DynType::Candle),
-        Pick { .. } => Some(DynType::Atom),
-        Time { .. } => Some(DynType::Time),
-        Value(ValueLit::Str(_)) => Some(DynType::Str),
-        Value(ValueLit::Real(_)) => Some(DynType::Real),
-        Value(ValueLit::Bool(_)) => Some(DynType::Bool),
+        Current { .. } => Some(PayloadType::Candle),
+        Pick { .. } => Some(PayloadType::Atom),
+        Time { .. } => Some(PayloadType::Time),
+        Value(ValueLit::Str(_)) => Some(PayloadType::Str),
+        Value(ValueLit::Real(_)) => Some(PayloadType::Real),
+        Value(ValueLit::Bool(_)) => Some(PayloadType::Bool),
         // A list literal is rewritten to a scalar per child before any build
         // reaches it; outside a portfolio weight template it is invalid, which
         // `build` reports. Nothing useful to say about its type here.
@@ -131,7 +131,7 @@ pub fn output_type(spec: &NodeSpec) -> Option<DynType> {
         | Every(_)
         | IsWeekday
         | IsWeekend
-        | HasColumn { .. } => Some(DynType::Bool),
+        | HasColumn { .. } => Some(PayloadType::Bool),
 
         // --- everything else is Real ---
         Close { .. }
@@ -236,7 +236,7 @@ pub fn output_type(spec: &NodeSpec) -> Option<DynType> {
         | WeekOfYear { .. }
         | Quarter { .. }
         | UnixSeconds { .. }
-        | UnixMillis { .. } => Some(DynType::Real),
+        | UnixMillis { .. } => Some(PayloadType::Real),
     }
 }
 
@@ -695,7 +695,7 @@ mod tests {
                     continue;
                 }
                 // A tag whose output the slot forbids.
-                let wrong = if expect.admits(DynType::Real) {
+                let wrong = if expect.admits(PayloadType::Real) {
                     "!current {}" // Candle
                 } else {
                     "!value 1.0" // Real

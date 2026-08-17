@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use fugazi::indicators::{Atr, CurrentBar, Ema, Identity, Rsi, Sma, StdDev};
 use fugazi::prelude::*;
-use fugazi::runtime::{self, DynValue};
+use fugazi::runtime::{self, PayloadValue as DynValue};
 
 mod common;
 use common::synth_candles;
@@ -51,7 +51,7 @@ fn bench(n: usize, mut f: impl FnMut()) -> f64 {
 /// `python/src/carriers.rs`'s `TypedSource<Real, Real>` has. The library's own
 /// `As<Out>` is `Snapshot`-input only, so it cannot stand in here.
 #[derive(Clone)]
-struct ErasedReal(Box<dyn runtime::DynIndicator>);
+struct ErasedReal(Box<dyn runtime::PayloadIndicator>);
 
 impl Indicator for ErasedReal {
     type Input = Real;

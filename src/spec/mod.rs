@@ -8,9 +8,9 @@
 //!
 //! Three layers, mirroring the crate; one per submodule:
 //!
-//! * [`NodeSpec`] (see [`expr`]) → [`crate::spec::dyn_indicator::DynValue`] — the
+//! * [`NodeSpec`] (see [`expr`]) → [`crate::spec::dyn_indicator::PayloadValue`] — the
 //!   one composable expression enum, polymorphic over the runtime
-//!   [`DynType`](crate::spec::dyn_indicator::DynType): most variants yield
+//!   [`PayloadType`](crate::spec::dyn_indicator::PayloadType): most variants yield
 //!   `Real`, but some yield `Atom` / `Candle` / `Str` / `Time`, and the boolean
 //!   predicates (`!gt`, `!and`, `!crosses_above`, `!changed`, …) yield `Bool`.
 //!   A "signal" is just a `NodeSpec` whose `output_type()` is `Bool`.
@@ -153,7 +153,7 @@ pub use input::{Source, StrategyKind, StrategySource};
 mod tests {
     use crate::types::Symbol;
     use super::*;
-    use crate::spec::dyn_indicator::{DynIndicator, DynValue as Payload};
+    use crate::spec::dyn_indicator::{PayloadIndicator, PayloadValue as Payload};
     use crate::indicators::{
         BarsSince, BarsSinceHigh, BarsSinceLow, Book, Correlation, Current, Ema, GarmanKlass,
         Kurtosis, Parkinson, Percentile, PercentileRank, Position, RogersSatchell, Skewness,
@@ -184,8 +184,8 @@ mod tests {
         s
     }
 
-    /// Feed a `Box<dyn DynIndicator>` a candle and unwrap the payload as `Real`.
-    fn feed_real(source: &mut Box<dyn DynIndicator>, c: Candle) -> Option<Real> {
+    /// Feed a `Box<dyn PayloadIndicator>` a candle and unwrap the payload as `Real`.
+    fn feed_real(source: &mut Box<dyn PayloadIndicator>, c: Candle) -> Option<Real> {
         match source.update(Payload::Snapshot(snap(c)))? {
             Payload::Real(x) => Some(x),
             other => panic!("expected Real payload, got {other:?}"),
@@ -193,7 +193,7 @@ mod tests {
     }
 
     /// Feed and unwrap as `bool` — for signal-side tests.
-    fn feed_bool(source: &mut Box<dyn DynIndicator>, c: Candle) -> Option<bool> {
+    fn feed_bool(source: &mut Box<dyn PayloadIndicator>, c: Candle) -> Option<bool> {
         match source.update(Payload::Snapshot(snap(c)))? {
             Payload::Bool(b) => Some(b),
             other => panic!("expected Bool payload, got {other:?}"),
@@ -695,7 +695,7 @@ mod tests {
         )
         .unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
-        assert_eq!(built.output_type(), crate::spec::dyn_indicator::DynType::Real);
+        assert_eq!(built.output_type(), crate::spec::dyn_indicator::PayloadType::Real);
 
         let mut last = None;
         for p in [100.0, 102.0, 105.0, 108.0, 112.0, 116.0, 121.0, 127.0] {
@@ -720,7 +720,7 @@ mod tests {
         )
         .unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
-        assert_eq!(built.output_type(), crate::spec::dyn_indicator::DynType::Real);
+        assert_eq!(built.output_type(), crate::spec::dyn_indicator::PayloadType::Real);
         // Drives a golden-then-death cross without panicking; reads Some once warm.
         let mut last = None;
         for p in [14.0, 13.0, 12.0, 11.0, 12.0, 14.0, 16.0, 18.0, 15.0, 12.0] {
@@ -744,7 +744,7 @@ mod tests {
         let spec: NodeSpec = serde_json::from_value(json)
             .expect("a preset under `strategy:` must survive the JSON bridge");
         let built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
-        assert_eq!(built.output_type(), crate::spec::dyn_indicator::DynType::Real);
+        assert_eq!(built.output_type(), crate::spec::dyn_indicator::PayloadType::Real);
     }
 
     #[test]
@@ -773,7 +773,7 @@ mod tests {
         }
 
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
-        assert_eq!(built.output_type(), crate::spec::dyn_indicator::DynType::Real);
+        assert_eq!(built.output_type(), crate::spec::dyn_indicator::PayloadType::Real);
 
         // BTC drifts up, ETH drifts down: long-BTC / short-ETH earns on both
         // legs → a rising, variable equity curve → a positive trailing Sharpe.
@@ -822,7 +822,7 @@ mod tests {
         // Builds and drives a 3-symbol universe without panicking (the embedded
         // basket ranks per-symbol ROC, longs the top / shorts the bottom).
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
-        assert_eq!(built.output_type(), crate::spec::dyn_indicator::DynType::Real);
+        assert_eq!(built.output_type(), crate::spec::dyn_indicator::PayloadType::Real);
         for i in 0..8 {
             let f = i as Real;
             let _ = built.update(Payload::Snapshot(multi_snap(&[
@@ -858,7 +858,7 @@ mod tests {
         }
         // Builds without panicking; drives on a small 2-symbol path.
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
-        assert_eq!(built.output_type(), crate::spec::dyn_indicator::DynType::Real);
+        assert_eq!(built.output_type(), crate::spec::dyn_indicator::PayloadType::Real);
         for i in 0..6 {
             let f = i as Real;
             let _ = built.update(Payload::Snapshot(multi_snap(&[
@@ -910,7 +910,7 @@ mod tests {
 
         let spec: NodeSpec = serde_norway::from_str("!get { key: vol_20 }").unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &schema, None);
-        assert_eq!(built.output_type(), crate::spec::dyn_indicator::DynType::Real);
+        assert_eq!(built.output_type(), crate::spec::dyn_indicator::PayloadType::Real);
 
         let ov = OverlayInfo::new(schema.clone(), vec![OverlayValue::Real(0.42)]);
         let atom = Atom::with_overlays(bar(100.0), ov);
@@ -927,7 +927,7 @@ mod tests {
 
         let spec: NodeSpec = serde_norway::from_str("!get { key: risk_on }").unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &schema, None);
-        assert_eq!(built.output_type(), crate::spec::dyn_indicator::DynType::Bool);
+        assert_eq!(built.output_type(), crate::spec::dyn_indicator::PayloadType::Bool);
 
         let ov = OverlayInfo::new(schema.clone(), vec![OverlayValue::Bool(true)]);
         let atom = Atom::with_overlays(bar(100.0), ov);
@@ -1028,7 +1028,7 @@ mod tests {
         )
         .unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &schema, None);
-        assert_eq!(built.output_type(), crate::spec::dyn_indicator::DynType::Bool);
+        assert_eq!(built.output_type(), crate::spec::dyn_indicator::PayloadType::Bool);
 
         let bull = OverlayInfo::new(
             schema.clone(),
@@ -1091,9 +1091,9 @@ mod tests {
         // `!value 70` is the scalar constant; `!value bull` the string one.
         // Quoting decides when the two would collide: `!value "70"` is a string.
         let cases = [
-            ("!value 70", crate::spec::dyn_indicator::DynType::Real),
-            ("!value bull", crate::spec::dyn_indicator::DynType::Str),
-            ("!value \"70\"", crate::spec::dyn_indicator::DynType::Str),
+            ("!value 70", crate::spec::dyn_indicator::PayloadType::Real),
+            ("!value bull", crate::spec::dyn_indicator::PayloadType::Str),
+            ("!value \"70\"", crate::spec::dyn_indicator::PayloadType::Str),
         ];
         for (yaml, want) in cases {
             let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
@@ -1187,7 +1187,7 @@ mod tests {
 
     /// Build `spec` and return the error message it must fail with.
     fn expr_build_err(spec: &NodeSpec, schema: &std::sync::Arc<Schema>) -> String {
-        // `.expect_err` needs `T: Debug`, and `Box<dyn DynIndicator>` isn't.
+        // `.expect_err` needs `T: Debug`, and `Box<dyn PayloadIndicator>` isn't.
         spec.try_build(&Position::new(), &Book::new(1.0), None, schema, None)
             .err()
             .expect("expected the build to be rejected")
@@ -1225,7 +1225,7 @@ mod tests {
         let schema = b.finish();
         let spec: NodeSpec = serde_norway::from_str("!get { key: vol_20 }").unwrap();
         let built = spec.build(&Position::new(), &Book::new(1.0), None, &schema, None);
-        assert_eq!(built.output_type(), crate::runtime::DynType::Real);
+        assert_eq!(built.output_type(), crate::runtime::PayloadType::Real);
         assert!(AsBool::try_new(built).is_err());
     }
 
@@ -1237,7 +1237,7 @@ mod tests {
         let schema = b.finish();
         let spec: NodeSpec = serde_norway::from_str("!get { key: regime }").unwrap();
         let built = spec.build(&Position::new(), &Book::new(1.0), None, &schema, None);
-        assert_eq!(built.output_type(), crate::runtime::DynType::Str);
+        assert_eq!(built.output_type(), crate::runtime::PayloadType::Str);
         assert!(AsBool::try_new(built).is_err());
     }
 
@@ -1401,7 +1401,7 @@ mod tests {
     fn calendar_source_tags_decompose_atom_time() {
         // Each bare calendar tag parses, builds, and emits the expected
         // component on a timed atom.
-        use crate::spec::dyn_indicator::DynType;
+        use crate::spec::dyn_indicator::PayloadType;
         use crate::types::Timestamp;
 
         // 2024-03-15 12:34:56 UTC — Friday, Q1, DOY 75.
@@ -1422,7 +1422,7 @@ mod tests {
         ] {
             let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
             let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
-            assert_eq!(built.output_type(), DynType::Real, "{yaml}: output type");
+            assert_eq!(built.output_type(), PayloadType::Real, "{yaml}: output type");
             assert_eq!(
                 built.update(Payload::Snapshot(Snapshot::of_atom(atom.clone()))),
                 Some(Payload::Real(want)),
@@ -1433,7 +1433,7 @@ mod tests {
         // `!time` is the raw Timestamp payload, not a scalar.
         let spec: NodeSpec = serde_norway::from_str("time").unwrap();
         let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
-        assert_eq!(built.output_type(), DynType::Time);
+        assert_eq!(built.output_type(), PayloadType::Time);
         assert_eq!(
             built.update(Payload::Snapshot(Snapshot::of_atom(atom.clone()))),
             Some(Payload::Time(Timestamp(1_710_506_096_000))),

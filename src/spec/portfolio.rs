@@ -53,7 +53,7 @@ use crate::portfolio::Portfolio;
 use crate::prelude::*;
 use crate::types::Snapshot;
 
-use crate::spec::dyn_indicator::{AsBool, AsReal, DynIndicator};
+use crate::spec::dyn_indicator::{AsBool, AsReal, PayloadIndicator};
 
 use super::basket::BasketStrategySpec;
 use super::expr::NodeSpec;
@@ -695,7 +695,7 @@ impl PortfolioSpec {
                     }
                     _ => None,
                 };
-                let dyn_ind: Box<dyn DynIndicator> = concrete.try_build(
+                let dyn_ind: Box<dyn PayloadIndicator> = concrete.try_build(
                     &anchor,
                     &child_books[i],
                     Some(&agg_book),
@@ -725,7 +725,7 @@ impl PortfolioSpec {
             // `root: None` — a portfolio-level gate spans every child, so
             // "this series" is undefined; a price leaf inside one must name
             // its asset with `!pick { symbol: ... }`.
-            let dyn_ind: Box<dyn DynIndicator> =
+            let dyn_ind: Box<dyn PayloadIndicator> =
                 rebalance_spec.try_build(&anchor, &agg_book, Some(&agg_book), schema, None)?;
             let signal = AsBool::try_new(dyn_ind)?;
             max_stable = max_stable.max(signal.stable_bars());

@@ -232,7 +232,7 @@ mod tests {
         // a branch isn't picked on a given bar, its warm-up progresses so
         // the next time it's selected it can emit `Some`.
         // All branches must share a type in the raw `Vec<(K, T)>`
-        // constructor — the CLI erases through `Box<dyn DynIndicator>`
+        // constructor — the CLI erases through `Box<dyn PayloadIndicator>`
         // when composing heterogeneous chains.
         let mut ind = Match::new(
             Identity::<Real>::new(),
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn warm_up_is_max_across_all_sources() {
         // All-Sma branches so the Vec's `T` is a single type (mixed
-        // types require boxing — the CLI does that via DynIndicator).
+        // types require boxing — the CLI does that via PayloadIndicator).
         let ind = Match::new(
             Sma::new(Identity::<Real>::new(), 4), // on: warm-up 4
             vec![
