@@ -32,14 +32,19 @@
 //! it is worse than one that reports NaN. `f64::max` hides the bug; this
 //! surfaces it.
 //!
-//! **2. `±0.0` ties resolve to the second operand, not to `+0.0`.**
-//! `f64::max(0.0, -0.0)` is specified to give `+0.0`; `0.0 > -0.0` is false, so
-//! this gives `-0.0`. *This one is not deliberate — it is the cost.* It was
-//! caught by the exhaustive test below rather than by reasoning, which is why
-//! the test sweeps every pair instead of spot-checking.
+//! **2. `±0.0` ties resolve to the second operand.** `0.0 > -0.0` is false, so
+//! `max_finite(0.0, -0.0)` is `-0.0`.
 //!
-//! Exception 2 is why every call site has to be checked rather than swept. At
-//! the sites that use these today it cannot fire:
+//! This one turns out **not to be a divergence from any guarantee**, which took
+//! two goes to establish. `f64::max`'s own documentation says that when the
+//! inputs compare equal — exactly the `±0.0` case — *"either input may be
+//! returned non-deterministically"*. And it is: this machine returns `+0.0`,
+//! CI's returns `-0.0`, from the same source. So `max_finite` is inside what
+//! `f64::max` already permits here, and code that depended on the sign was
+//! already broken.
+//!
+//! It is still worth knowing, because it is the case a call site could care
+//! about. At the sites that use these today it cannot fire:
 //!
 //! * `TrueRange` / `Dmi` — operands are `high - low` (`a - a` is `+0.0`, never
 //!   `-0.0`) and two `.abs()` results (`.abs()` never returns `-0.0`).
@@ -47,18 +52,18 @@
 //!   of `±0.0` arrives, the answer is `+0.0` either way.
 //! * `Sar` — prices and acceleration factors, none of which reach `-0.0`.
 //!
-//! So: use these on values that are finite by construction **and** cannot be a
-//! signed zero whose sign you care about. Anywhere else, reach for `f64::max`
-//! and say why.
+//! So: use these on values that are finite by construction. If you need a
+//! defined answer for a `±0.0` tie, neither these *nor* `f64::max` will give
+//! you one — write the comparison you actually mean.
 
 use crate::types::Real;
 
 /// The larger of two **finite** operands, by the plain `>` ordering.
 ///
-/// Bit-identical to [`f64::max`] except on NaN (propagates rather than
-/// suppresses) and on a `±0.0` tie (returns `b`, where `f64::max` returns
-/// `+0.0`). **Read the module docs before adding a call site** — the zero case
-/// has to be ruled out at each one.
+/// Bit-identical to [`f64::max`] on finite operands, except that a `±0.0` tie
+/// returns `b` — where `f64::max` is documented to return either input
+/// non-deterministically, so neither is a guarantee. Differs on NaN, which this
+/// propagates rather than suppresses. See the module docs.
 #[inline(always)]
 pub(crate) fn max_finite(a: Real, b: Real) -> Real {
     if a > b { a } else { b }
@@ -126,16 +131,21 @@ mod tests {
         }
     }
 
-    /// Divergence 2: a `±0.0` tie resolves to the second operand rather than to
-    /// `+0.0`. The unintended half of the trade, pinned so that a call site
-    /// which *would* care about the sign of zero fails a review rather than a
-    /// user's backtest.
+    /// A `±0.0` tie resolves to the second operand — deterministically, which is
+    /// more than `f64::max` offers.
+    ///
+    /// **The std side is deliberately not asserted.** An earlier version of this
+    /// test pinned `0.0f64.max(-0.0) == +0.0`, which passed locally and failed
+    /// on CI: `f64::max` documents that when the inputs compare equal *"either
+    /// input may be returned non-deterministically"*, and two machines disagreed
+    /// from the same source. That is the whole finding — there is no guarantee
+    /// here to diverge from.
     #[test]
     fn signed_zero_ties_resolve_to_the_second_operand() {
         assert_eq!(max_finite(0.0, -0.0).to_bits(), (-0.0f64).to_bits());
-        assert_eq!(0.0f64.max(-0.0).to_bits(), 0.0f64.to_bits(), "std differs");
+        assert_eq!(max_finite(-0.0, 0.0).to_bits(), 0.0f64.to_bits());
         assert_eq!(min_finite(-0.0, 0.0).to_bits(), 0.0f64.to_bits());
-        assert_eq!((-0.0f64).min(0.0).to_bits(), (-0.0f64).to_bits(), "std differs");
+        assert_eq!(min_finite(0.0, -0.0).to_bits(), (-0.0f64).to_bits());
     }
 
     /// Divergence 1, pinned so it is a decision rather than a surprise: NaN

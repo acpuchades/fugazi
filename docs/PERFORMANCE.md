@@ -701,11 +701,13 @@ The exchange is documented and pinned rather than waved at. Two divergences from
 * **NaN propagates** instead of being suppressed. Deliberate — a NaN high is
   corrupt input, and an ATR that reports a plausible number from it is worse
   than one that reports NaN.
-* **`±0.0` ties resolve to the second operand**, where `f64::max` returns `+0.0`.
-  *Not* deliberate: it is the cost, and it was found by an exhaustive test
-  sweeping every pair of finite values rather than by reasoning about it. Every
-  call site has to rule it out; `src/num.rs` lists why each current one can't
-  hit it.
+* **`±0.0` ties resolve to the second operand.** Found by an exhaustive test
+  sweeping every pair of finite values, not by reasoning — and then found to be
+  a non-issue by CI, which disagreed with this machine about what `f64::max`
+  does there. `f64::max` documents that for equal inputs *"either input may be
+  returned non-deterministically"*, so there was no guarantee to diverge from.
+  Two rounds of being wrong about one line, both caught by tests rather than by
+  argument.
 
 Every expected-value fixture — TA-Lib cross-validation included — passes
 unchanged, because no test feeds a NaN or a negative zero.
