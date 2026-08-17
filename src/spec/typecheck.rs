@@ -35,8 +35,12 @@
 //! then pin the classifications that exist against what `build` actually
 //! produces.
 
+use std::collections::BTreeMap;
+use std::sync::OnceLock;
+
 use crate::runtime::PayloadType;
 use crate::spec::expr::{NodeSpec, ValueLit};
+use crate::spec::grammar::GrammarTag;
 
 /// What a child slot is allowed to produce.
 #[derive(Debug, Clone, Copy)]
@@ -63,6 +67,15 @@ impl Expect {
                 .map(|t| t.to_string())
                 .collect::<Vec<_>>()
                 .join(" or "),
+        }
+    }
+
+    /// The admitted types as a list. Empty for `OneOf(&[])` — a passthrough
+    /// slot that constrains nothing (see [`slot_demand`]).
+    fn types(self) -> Vec<PayloadType> {
+        match self {
+            Expect::Only(t) => vec![t],
+            Expect::OneOf(ts) => ts.to_vec(),
         }
     }
 }
@@ -376,8 +389,14 @@ fn children(spec: &NodeSpec) -> Vec<(&'static str, Expect, &NodeSpec)> {
         ],
 
         IfElse {
-            then, otherwise, ..
-        } => vec![("then", REAL, then), ("otherwise", REAL, otherwise)],
+            cond,
+            then,
+            otherwise,
+        } => vec![
+            ("cond", BOOL, cond),
+            ("then", REAL, then),
+            ("otherwise", REAL, otherwise),
+        ],
 
         Match { on, cases, default } => {
             let mut out = vec![("on", REAL_OR_STR, &**on), ("default", REAL, &**default)];
@@ -408,6 +427,9 @@ fn children(spec: &NodeSpec) -> Vec<(&'static str, Expect, &NodeSpec)> {
         }
         All(specs) | Any(specs) => specs.iter().map(|s| ("item", BOOL, s)).collect(),
         Not(inner) | BecameTrue(inner) | BecameFalse(inner) => vec![("source", BOOL, inner)],
+        // Counts bars since a *signal* fired — `build` views it through
+        // `into_bool`, exactly like `!if_else`'s `cond`.
+        BarsSince { source } => vec![("source", BOOL, source)],
         // Polymorphic: a Bool inner (toggle) or a Real inner (any-change).
         Changed(inner) => vec![("source", BOOL_OR_REAL, inner)],
         // The string comparisons read a `Str` column on the left; `rhs` is a
@@ -434,7 +456,6 @@ fn children(spec: &NodeSpec) -> Vec<(&'static str, Expect, &NodeSpec)> {
         | ReturnPerBar { .. }
         | TradePnl { .. }
         | TradeReturn { .. }
-        | BarsSince { .. }
         | Sharpe { .. }
         | Sortino { .. }
         | Volatility { .. }
@@ -566,6 +587,156 @@ pub fn check_immediate(spec: &NodeSpec) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The tag-keyed view of the same table
+// ---------------------------------------------------------------------------
+//
+// [`children`] answers "what does *this node* demand of its children", which is
+// what `check_immediate` needs but not what a tooling consumer does: an editor
+// completing `!and { lhs: ` has a tag and a slot name, not a tree. The demands
+// are a property of the *variant* — every arm above returns a fixed list of
+// constants — so the same table answers the tag-keyed question too, if you can
+// get from a tag name to a node.
+//
+// Rather than hand-write a second table (which would drift, and lose the
+// exhaustive-match guard that makes the first one trustworthy), synthesise one
+// **prototype** node per tag from its own grammar record and run `children` on
+// that. `spec::grammar` already knows every tag's shape, fields, and field
+// types; filling each expression slot with a `!get` — whose `output_type` is
+// `None`, so it satisfies any demand — makes a prototype that parses regardless
+// of what the slot wants. One authority, no duplication.
+
+/// A prototype value for a grammar field of type `ty`, as YAML source.
+///
+/// `None` for a field this cannot fabricate — today only `strategy` (an
+/// embedded strategy document). Every tag carrying one is in `children`'s
+/// "no typed expression child" arm, so there is nothing to observe on it
+/// anyway, and `demand_table_covers_every_node_slot` pins that.
+fn prototype_filler(ty: &str) -> Option<&'static str> {
+    Some(match ty {
+        // `!get`'s output is schema-dependent, hence undecidable, hence
+        // accepted in every slot — the point of the filler is to parse, not to
+        // typecheck. Spelled in the untagged single-key form (`{ get: … }`
+        // rather than `!get …`) because YAML forbids two tags on one node, so
+        // the tagged spelling would not parse in a `!not`/`!changed` payload.
+        "node" => "{ get: { key: probe } }",
+        "node_list" => "[{ get: { key: probe } }]",
+        "match_cases" => "[{ when: 1, value: { get: { key: probe } } }]",
+        "positive_uint" | "number" | "literal" => "1",
+        "str" | "str_operand" => "probe",
+        _ => return None,
+    })
+}
+
+/// Build the minimal node that exercises every expression slot of `tag`.
+///
+/// Optional *node* fields are filled even though they could be omitted:
+/// `children`'s `opt` helper reports nothing for an absent one, and an
+/// unreported slot is exactly what this is trying to avoid.
+fn prototype(tag: &GrammarTag) -> Option<NodeSpec> {
+    let body = match tag.shape.as_str() {
+        "unit" => String::new(),
+        "newtype" | "seq" => format!(" {}", prototype_filler(tag.payload.as_deref()?)?),
+        "map" => {
+            let mut parts = Vec::new();
+            for field in &tag.fields {
+                let is_node = matches!(field.ty.as_str(), "node" | "node_list" | "match_cases");
+                if !field.required && !is_node {
+                    continue;
+                }
+                parts.push(format!("{}: {}", field.name, prototype_filler(&field.ty)?));
+            }
+            format!(" {{ {} }}", parts.join(", "))
+        }
+        _ => return None,
+    };
+    let text = format!("!{}{body}", tag.name);
+    let value: serde_norway::Value = serde_norway::from_str(&text).ok()?;
+    // `parse_unchecked`, not the `TryFrom` path: a prototype only has to have
+    // the right *shape* for `children` to read its slots off, and running the
+    // type check on a tree of `!get`s would just skip every one anyway.
+    NodeSpec::parse_unchecked(value).ok()
+}
+
+/// One tag's expression slots, each with the output types it admits — the value
+/// [`slot_demands`] returns and the demand table stores.
+pub type SlotDemands = Vec<(&'static str, Vec<PayloadType>)>;
+
+/// Every `(tag, slot) → demand` [`children`] encodes, keyed by tag name.
+///
+/// Built once. Reads `NodeSpec::grammar_tags()` — the derive's raw output —
+/// rather than [`crate::spec::grammar::spec_grammar`], which calls back into
+/// this to stamp its `node_output` fields.
+fn demand_table() -> &'static BTreeMap<String, SlotDemands> {
+    static TABLE: OnceLock<BTreeMap<String, SlotDemands>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut table = BTreeMap::new();
+        for tag in NodeSpec::grammar_tags() {
+            let Some(proto) = prototype(&tag) else {
+                continue;
+            };
+            let mut slots: SlotDemands = Vec::new();
+            for (slot, expect, _) in children(&proto) {
+                // A variadic slot repeats — `!all`'s `item`, `!match`'s
+                // `case value` — with the same demand each time. One entry.
+                if !slots.iter().any(|(s, _)| *s == slot) {
+                    slots.push((slot, expect.types()));
+                }
+            }
+            table.insert(tag.name.clone(), slots);
+        }
+        table
+    })
+}
+
+/// What `tag` requires the expression in `slot` to produce.
+///
+/// The tag-keyed face of the same type discipline `check` enforces — the
+/// answer to "`!and`'s `lhs:` has to be *what*?" without a tree in hand.
+/// `tag` may be written with or without its leading `!`; `slot` is the YAML
+/// key (`source`, `lhs`, `high`, …), or the pseudo-slot a tag with no named
+/// fields uses for its positional payload — `source` for `!not` / `!changed`,
+/// `item` for `!all` / `!any`, `case value` for `!match`'s cases.
+///
+/// Three distinct answers:
+///
+/// * `None` — no such expression slot (an unknown tag, a scalar field like
+///   `period:`, or a slot that holds no expression).
+/// * `Some(&[])` — the slot holds an expression but demands nothing of its
+///   output: `!unstable`'s `source` and `!resample`'s `inner` are
+///   passthroughs, so any type is fine.
+/// * `Some(types)` — one entry for an exact demand (`!and`'s `lhs` → `Bool`),
+///   several for a slot admitting alternatives (`!changed`'s `source` →
+///   `Bool` or `Real`, `!match`'s `on` → `Real` or `Str`).
+///
+/// ```
+/// use fugazi::runtime::PayloadType;
+/// use fugazi::spec::typecheck::slot_demand;
+///
+/// assert_eq!(slot_demand("and", "lhs"), Some(vec![PayloadType::Bool]));
+/// assert_eq!(slot_demand("!sma", "source"), Some(vec![PayloadType::Real]));
+/// assert_eq!(slot_demand("atr", "source"), Some(vec![PayloadType::Candle]));
+/// assert_eq!(slot_demand("unstable", "source"), Some(vec![]));
+/// assert_eq!(slot_demand("sma", "period"), None);
+/// ```
+pub fn slot_demand(tag: &str, slot: &str) -> Option<Vec<PayloadType>> {
+    slot_demands(tag)
+        .into_iter()
+        .find(|(name, _)| *name == slot)
+        .map(|(_, types)| types)
+}
+
+/// Every expression slot `tag` has, with each one's demand — the whole-tag
+/// form of [`slot_demand`], in the order `children` reports them. Empty for a
+/// tag with no expression slots (`!entry`, `!is_weekday`) and for an unknown
+/// tag.
+pub fn slot_demands(tag: &str) -> SlotDemands {
+    demand_table()
+        .get(tag.strip_prefix('!').unwrap_or(tag))
+        .cloned()
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -873,4 +1044,121 @@ mod tests {
         // `!get`'s type needs the schema, so this must pass rather than guess.
         assert!(parse_checked("!sma { period: 3, source: !get { key: x } }").is_ok());
     }
+
+    // --- the tag-keyed view ------------------------------------------------
+
+    /// The `source:` slots that take a **book selector** (`!strategy_book` /
+    /// `!portfolio_book`), not a value expression. `children` excludes them on
+    /// purpose, so `slot_demand` reports `None` — "not an expression slot" —
+    /// rather than `Some(&[])`, which would read as "any type is fine".
+    const BOOK_SELECTOR_SLOTS: &[&str] = &[
+        "equity",
+        "equity_peak",
+        "drawdown",
+        "return_per_bar",
+        "trade_pnl",
+        "trade_return",
+        "drawdown_throttle",
+        "equity_vol_target",
+        "fractional_kelly",
+    ];
+
+    #[test]
+    fn slot_demand_answers_the_tag_keyed_question() {
+        use PayloadType::*;
+        // An exact demand, with and without the leading `!`.
+        assert_eq!(slot_demand("and", "lhs"), Some(vec![Bool]));
+        assert_eq!(slot_demand("!and", "rhs"), Some(vec![Bool]));
+        assert_eq!(slot_demand("sma", "source"), Some(vec![Real]));
+        assert_eq!(slot_demand("atr", "source"), Some(vec![Candle]));
+        assert_eq!(slot_demand("close", "source"), Some(vec![Atom]));
+        assert_eq!(slot_demand("str_eq", "lhs"), Some(vec![Str]));
+        // Alternatives.
+        assert_eq!(slot_demand("changed", "source"), Some(vec![Bool, Real]));
+        assert_eq!(slot_demand("match", "on"), Some(vec![Real, Str]));
+        // Passthrough — an expression slot that demands nothing.
+        assert_eq!(slot_demand("unstable", "source"), Some(vec![]));
+        assert_eq!(slot_demand("resample", "inner"), Some(vec![]));
+        // Not an expression slot at all.
+        assert_eq!(slot_demand("sma", "period"), None);
+        assert_eq!(slot_demand("drawdown", "source"), None);
+        assert_eq!(slot_demand("no_such_tag", "source"), None);
+        // The positional-payload pseudo-slots.
+        assert_eq!(slot_demand("not", "source"), Some(vec![Bool]));
+        assert_eq!(slot_demand("all", "item"), Some(vec![Bool]));
+        assert_eq!(slot_demand("match", "case value"), Some(vec![Real]));
+    }
+
+    /// The prototype pass is only as good as its coverage: a tag whose
+    /// prototype fails to build reports *no* demands, which looks exactly like
+    /// a tag that has none. Pin it — every expression-holding field of every
+    /// node tag must either carry a demand or be a known book selector.
+    #[test]
+    fn demand_table_covers_every_node_slot() {
+        let mut unreported = Vec::new();
+        for tag in NodeSpec::grammar_tags() {
+            let slots = slot_demands(&tag.name);
+            for field in &tag.fields {
+                let slot = match field.ty.as_str() {
+                    "node" | "node_list" => field.name.as_str(),
+                    "match_cases" => "case value",
+                    _ => continue,
+                };
+                if slots.iter().any(|(s, _)| *s == slot) {
+                    continue;
+                }
+                if BOOK_SELECTOR_SLOTS.contains(&tag.name.as_str()) && slot == "source" {
+                    continue;
+                }
+                unreported.push(format!("!{} `{}`", tag.name, field.name));
+            }
+            if matches!(tag.payload.as_deref(), Some("node" | "node_list")) && slots.is_empty() {
+                unreported.push(format!("!{} payload", tag.name));
+            }
+        }
+        assert!(
+            unreported.is_empty(),
+            "expression slots with no reported demand — either `children` is \
+             missing an arm, or `prototype` cannot build these tags:\n  {}",
+            unreported.join("\n  "),
+        );
+    }
+
+    /// Every demand the tag-keyed table reports has to be the one `children`
+    /// reports for a real tree — the prototypes are a shortcut to the same
+    /// table, not a second copy of it.
+    #[test]
+    fn the_tag_keyed_table_agrees_with_children() {
+        for (spec, slot, want) in [
+            ("!and { lhs: !is_weekday, rhs: !is_weekend }", "lhs", "Bool"),
+            ("!ema { source: !close {}, period: 3 }", "source", "Real"),
+            ("!adx { source: !current {}, period: 3 }", "source", "Candle"),
+        ] {
+            let node = parse(spec);
+            let from_tree = children(&node)
+                .into_iter()
+                .find(|(s, _, _)| *s == slot)
+                .map(|(_, e, _)| e.describe())
+                .expect("slot present");
+            assert_eq!(from_tree, want);
+            let from_tag = slot_demand(&tag_name(&node), slot).expect("slot present");
+            assert_eq!(from_tag.iter().map(|t| t.to_string()).collect::<Vec<_>>(), vec![want]);
+        }
+    }
+
+    /// Both were absent from `children` while `build` demanded a Bool through
+    /// `into_bool` — so a real mistake surfaced only mid-build.
+    #[test]
+    fn bool_slots_that_used_to_slip_through_are_checked() {
+        let err = parse_checked("!bars_since { source: !sma { period: 3 } }").unwrap_err();
+        assert!(err.contains("expects a Bool source"), "{err}");
+        let err = parse_checked(
+            "!if_else { cond: !sma { period: 3 }, then: !close {}, otherwise: !close {} }",
+        )
+        .unwrap_err();
+        assert!(err.contains("expects a Bool source"), "{err}");
+        // The valid spellings still parse.
+        assert!(parse_checked("!bars_since { source: !is_weekday }").is_ok());
+    }
 }
+

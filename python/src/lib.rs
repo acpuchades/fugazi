@@ -100,7 +100,8 @@ use crate::sources::{
     fetch,
 };
 use crate::spec::{
-    load_spec, optimize, spec_document_json_schema, spec_grammar, spec_json_schema, spec_tags,
+    load_spec, optimize, slot_demand, slot_demands, spec_document_json_schema, spec_grammar,
+    spec_json_schema, spec_tags,
 };
 
 // ---------------------------------------------------------------------------
@@ -176,8 +177,8 @@ fn fugazi(m: &Bound<'_, PyModule>) -> PyResult<()> {
         is_weekday, is_weekend, pick, everything, every, top_bottom, threshold,
         quantile, buy_and_hold, ma_crossover, rsi_reversal, donchian_breakout, keltner_breakout,
         sharpe_of, sortino_of, volatility_of, max_drawdown_of, calmar_of, fetch,
-        load_spec, optimize, spec_document_json_schema, spec_grammar, spec_json_schema,
-        spec_tags, evaluate_report,
+        load_spec, optimize, slot_demand, slot_demands, spec_document_json_schema, spec_grammar,
+        spec_json_schema, spec_tags, evaluate_report,
     );
 
     // `fugazi.metrics` — mirror of `fugazi::metrics::*`. Registered as a

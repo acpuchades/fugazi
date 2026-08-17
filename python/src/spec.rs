@@ -854,17 +854,31 @@ impl PyStrategySpec {
 /// kind         "source" | "indicator" | "operator" | "predicate" | "function" |
 ///              "selection" | "universe" | "weighting" | "document"
 /// shape        "unit" | "newtype" | "seq" | "map"  (how it's written in YAML)
-/// fields       [ {name, type, required, default, doc} ]  (map tags only)
+/// fields       [ {name, type, required, default, node_output?, doc} ]
+///              (map tags only)
 /// output       what it evaluates to: "scalar" | "bool" | "str" | ... | "none"
 /// projections  struct-output accessors (empty for fugazi's flattened tags)
 /// payload      positional payload type of a newtype/seq tag ("node" |
 ///              "literal" | "node_list" | "str_list" | "number_list"); null for
 ///              unit/map tags
+/// payload_output  node_output for that positional payload (v4)
 /// category     fine conceptual sub-group ("moving averages", "oscillators",
 ///              "bands", …) — one rung finer than kind, for curated grouping
 /// doc          the variant's `///`, as clean presentation prose
 /// since        release it first shipped in
 /// ```
+///
+/// **`node_output` — what a slot must be filled *with*.** `type: "node"` says a
+/// field holds a nested expression; `node_output` says which expressions are
+/// admissible there, as `output` values you can match by string equality:
+/// `!and`'s `lhs` is `["bool"]`, `!sma`'s `source` `["scalar"]`, `!changed`'s
+/// payload `["bool", "scalar"]`. Three states — **absent** when the field holds
+/// no free expression (a scalar field, or a book selector like `!drawdown`'s
+/// `source`, which takes only `!strategy_book` / `!portfolio_book`), `[]` for a
+/// passthrough that demands nothing (`!unstable`, `!resample`'s `inner`), else
+/// the admitted set. This is the one part of the descriptor **not** reflected
+/// off serde: it comes from the same table `check` enforces, so it is the type
+/// discipline the JSON Schema deliberately omits.
 ///
 /// **What this covers.** Every tag in five vocabularies, keyed by `group`:
 /// `node` and `selection` are the slot-fillable *expression* grammars; `universe`
@@ -885,10 +899,11 @@ impl PyStrategySpec {
 /// own rewrite list by a test. Either way downstream consumers (these very
 /// Python constructors, editor tooling, docs, external grammar tables) generate
 /// from one artifact rather than re-encoding by hand. Guard on `schema_version`
-/// for *shape* changes: `payload` + its `"literal"` field type landed in v2, and
-/// `category` in v3 (0.51). The 0.50 group additions did **not** bump it — new
-/// groups and legend values leave the record shape unchanged, only a new *field*
-/// does.
+/// for *shape* changes: `payload` + its `"literal"` field type landed in v2,
+/// `category` in v3 (0.51), and `node_output` / `payload_output` in v4 (0.61).
+/// The 0.50 group additions did **not** bump it — new groups and legend values
+/// leave the record shape unchanged, only a new *field* does. Both v4 fields are
+/// omitted when absent, so a v3 consumer reads an unchanged record.
 #[pyfunction]
 pub(crate) fn spec_grammar(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let doc = fugazi_core::spec::grammar::spec_grammar_document();
@@ -960,6 +975,85 @@ pub(crate) fn spec_tags(py: Python<'_>) -> PyResult<Py<PyAny>> {
             .map(|t| t.name.as_str())
             .collect();
         out.set_item(group, names)?;
+    }
+    Ok(out.into_any().unbind())
+}
+
+/// What `tag` requires the expression in `slot` to **produce**.
+///
+/// The tag-keyed face of the type discipline `fugazi check` enforces — the
+/// answer to "`!and`'s `lhs:` has to be *what*?" without a spec in hand. The
+/// same datum the [`spec_grammar`] descriptor carries as a field's
+/// `node_output`, reachable directly when you have a tag and a slot name rather
+/// than a whole record.
+///
+/// `tag` may be written with or without its leading `!`. `slot` is the YAML key
+/// (`source`, `lhs`, `high`, …), or the pseudo-slot a tag with no named fields
+/// uses for its positional payload — `source` for `!not` / `!changed`, `item`
+/// for `!all` / `!any`, `case value` for `!match`'s cases.
+///
+/// Three distinct answers:
+///
+/// * `None` — no such expression slot: an unknown tag, a scalar field like
+///   `period:`, or a *book selector* like `!drawdown`'s `source`, which admits
+///   only `!strategy_book` / `!portfolio_book`.
+/// * `[]` — an expression slot that demands nothing of its output.
+///   `!unstable`'s `source` and `!resample`'s `inner` are passthroughs.
+/// * a non-empty list — the admitted `output` values, in the same vocabulary
+///   [`spec_grammar`] uses, so they compare to a candidate tag's `output` by
+///   string equality.
+///
+/// ```python
+/// >>> ta.slot_demand("and", "lhs")
+/// ['bool']
+/// >>> ta.slot_demand("atr", "source")
+/// ['candle']
+/// >>> ta.slot_demand("changed", "source")     # either is accepted
+/// ['bool', 'scalar']
+/// >>> ta.slot_demand("unstable", "source")    # passthrough
+/// []
+/// >>> ta.slot_demand("sma", "period") is None
+/// True
+///
+/// >>> # every tag that could legally fill !and's lhs
+/// >>> want = ta.slot_demand("and", "lhs")
+/// >>> [t["name"] for t in ta.spec_grammar()["tags"]
+/// ...  if t["group"] == "node" and t["output"] in want][:3]
+/// ['gt', 'lt', 'ge']
+/// ```
+#[pyfunction]
+pub(crate) fn slot_demand(tag: &str, slot: &str) -> Option<Vec<&'static str>> {
+    fugazi_core::spec::typecheck::slot_demand(tag, slot).map(|types| {
+        types
+            .into_iter()
+            .map(fugazi_core::spec::grammar::output_label)
+            .collect()
+    })
+}
+
+/// Every expression slot `tag` has, with each one's demand — the whole-tag form
+/// of [`slot_demand`], as a `{slot: [output, ...]}` dict.
+///
+/// Empty for a tag with no expression slots (`!entry`, `!is_weekday`) and for an
+/// unknown tag. A slot present here with an empty list is a passthrough; a slot
+/// *absent* from it holds no free expression. Iteration order is the order the
+/// type checker reports the slots in.
+///
+/// ```python
+/// >>> ta.slot_demands("if_else")
+/// {'cond': ['bool'], 'then': ['scalar'], 'otherwise': ['scalar']}
+/// >>> ta.slot_demands("is_weekday")
+/// {}
+/// ```
+#[pyfunction]
+pub(crate) fn slot_demands(py: Python<'_>, tag: &str) -> PyResult<Py<PyAny>> {
+    let out = pyo3::types::PyDict::new(py);
+    for (slot, types) in fugazi_core::spec::typecheck::slot_demands(tag) {
+        let labels: Vec<&str> = types
+            .into_iter()
+            .map(fugazi_core::spec::grammar::output_label)
+            .collect();
+        out.set_item(slot, labels)?;
     }
     Ok(out.into_any().unbind())
 }

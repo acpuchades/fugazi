@@ -887,6 +887,25 @@ generates docs, editor autocomplete, and conformance checks from (`list
 indicators` itself is one such consumer). Guard on `schema_version` for
 record-*shape* changes.
 
+Each expression-holding field also carries **`node_output`** — what the nested
+expression must *produce*, as `output` values you can match by string equality.
+This is the one part that doesn't come from serde: it's read from the same type
+table [`check`](#check) enforces.
+
+```sh
+# what does !and's lhs have to be filled with?
+fugazi grammar | jq -r '.tags[] | select(.name=="and") | .fields[] | "\(.name): \(.node_output)"'
+# lhs: ["bool"]
+# rhs: ["bool"]
+
+# every tag you could legally put there
+fugazi grammar | jq -r '.tags[] | select(.group=="node" and .output=="bool") | .name'
+```
+
+Absent means the field holds no free expression (a scalar like `period:`, or a
+book selector like `!drawdown`'s `source`); `[]` means a passthrough that demands
+nothing (`!unstable`, `!resample`'s `inner`).
+
 `schema` is a second projection of that descriptor for consumers that want to
 validate structure without the library build path. It checks *shape* only — the
 Real/Bool/Str type discipline and build-time semantics stay in [`check`](#check),

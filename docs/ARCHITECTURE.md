@@ -1124,6 +1124,29 @@ descriptor exists to kill. Prose is stripped of rustdoc link markup (`` [`Type`]
 `[text](url)`) in the derive's `doc_string` so it reads as clean presentation text for every
 consumer. `category` is a new *field*, so it **did** bump `SCHEMA_VERSION` to 3.
 
+Records carry one datum that is **not** reflected off serde: **`node_output`** (v4, 0.61), on
+every field whose `type` is `node` / `node_list` / `match_cases`, plus **`payload_output`** for
+a newtype/seq tag's positional payload. `type: "node"` says a slot holds a nested expression;
+`node_output` says *which* expressions belong there, spelled in the same vocabulary as
+`output` so a consumer matches by string equality — `!and`'s `lhs` is `["bool"]`, `!sma`'s
+`source` `["scalar"]`, `!changed`'s payload `["bool", "scalar"]`. Three states, mirroring
+`typecheck::slot_demand`: **absent** = not a free-expression slot (a scalar field, or a *book
+selector* like `!drawdown`'s `source`, which takes only `!strategy_book` / `!portfolio_book`);
+`[]` = a passthrough that demands nothing (`!unstable`'s `source`, `!resample`'s `inner`);
+otherwise the admitted set. Both are omitted when absent, so a v3 consumer reads an unchanged
+record.
+
+The demand lives in **`spec::typecheck`**, whose `children()` table is keyed on a *node*, not a
+tag — so `spec_grammar` can't read it directly. Rather than hand-write a second table (which
+would drift, and lose the exhaustive-match guard that makes the first trustworthy),
+`typecheck::slot_demand(tag, slot)` synthesises one **prototype** node per tag from that tag's
+own grammar record — filling every expression slot with a `!get`, whose `output_type()` is
+`None` and therefore satisfies any demand — and runs `children()` on it. One authority, no
+duplication. `demand_table_covers_every_node_slot` pins the coverage, since a tag whose
+prototype failed to build would silently report *no* demands. Building it caught two slots
+`build` constrained via `into_bool()` but `children()` never listed — `!bars_since`'s `source`
+and `!if_else`'s `cond` — which now fail at parse rather than mid-build.
+
 `spec_json_schema()` (`fugazi.spec_json_schema()`) is a second projection of the same
 descriptor: a JSON Schema (draft 2020-12) for the expression grammar's **JSON bridge form**
 (single-key `{tag: body}` objects + bare-literal shorthands + authored load-time

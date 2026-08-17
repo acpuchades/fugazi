@@ -42,6 +42,11 @@ use serde::Serialize;
 ///   (a new field ⇒ a record-shape change ⇒ a bump). Consumers keyed on the
 ///   old shape keep working — the field is additive — but a generator that
 ///   hard-guards on the version needs to accept 3.
+/// - v4 (0.61): added [`GrammarField::node_output`] and
+///   [`GrammarTag::payload_output`] — the output type each expression slot
+///   demands, the first part of the descriptor sourced from `check`'s type
+///   table rather than reflected off serde. Both are omitted when absent, so a
+///   v3 consumer reads an unchanged record.
 ///
 /// **Not** a bump: 0.50 added the `universe` / `weighting` / `document` groups
 /// (and the `none` output, `str_list` / `number_list` field types). New *rows*
@@ -49,7 +54,7 @@ use serde::Serialize;
 /// — a bump would trip downstream version guards for no shape change. A consumer
 /// with an exhaustive `group` / `kind` switch should treat unknown values as
 /// inert, not as an error.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// The `since` stamped on every tag that shipped at or before this release —
 /// the baseline. Tags added afterwards carry their own real `since` via
@@ -77,6 +82,25 @@ pub struct GrammarField {
     /// for node-typed fields (whose default is a blessed-series fallback, not
     /// a literal).
     pub default: Option<serde_json::Value>,
+    /// For an expression-holding field (`ty` = `node` / `node_list` /
+    /// `match_cases`), what the nested expression must **produce** — the
+    /// `output` legend value(s) a filler is allowed to have. `!and`'s `lhs` is
+    /// `["bool"]`, `!sma`'s `source` `["scalar"]`, `!atr`'s `["candle"]`,
+    /// `!changed`'s `["bool", "scalar"]` (either is accepted).
+    ///
+    /// Three states, matching
+    /// [`slot_demand`](crate::spec::typecheck::slot_demand)'s three answers:
+    /// absent (`None`) for a field that holds no free expression — a scalar
+    /// field, or a *book selector* like `!drawdown`'s `source`, which takes
+    /// only `!strategy_book` / `!portfolio_book`; `[]` for a **passthrough**
+    /// that demands nothing (`!unstable`'s `source`, `!resample`'s `inner`);
+    /// otherwise the admitted set.
+    ///
+    /// This is the one part of the descriptor that is *not* reflected off
+    /// serde — the type discipline lives in `check`'s own table, which this
+    /// reads. It closes the gap `fugazi schema` documents as "structure only".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_output: Option<Vec<String>>,
     /// The field's `///` doc, if any.
     pub doc: Option<String>,
 }
@@ -121,6 +145,11 @@ pub struct GrammarTag {
     /// for `!every <n>`, `node_list` for `!all [ … ]`, `literal` for
     /// `!value <x>`. `None` for `unit` / `map` tags.
     pub payload: Option<String>,
+    /// [`GrammarField::node_output`] for the positional [`payload`](Self::payload)
+    /// — `["bool"]` for `!not` / `!all` / `!any`, `["bool", "scalar"]` for
+    /// `!changed`. Absent unless `payload` is `node` / `node_list`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_output: Option<Vec<String>>,
     /// The fine **conceptual sub-group** — `moving averages`, `oscillators`,
     /// `bands`, `trend / directional`, … — one rung finer than `kind`, for
     /// consumers that present the vocabulary in curated sections (the CLI
@@ -171,8 +200,65 @@ pub fn spec_grammar() -> Vec<GrammarTag> {
     // silent empty string shipped to consumers.
     for tag in &mut tags {
         tag.category = category_of(&tag.name).to_owned();
+        stamp_node_outputs(tag);
     }
     tags
+}
+
+/// Stamp the output demand on every expression slot of `tag`, read from
+/// `check`'s own table via [`slot_demand`](crate::spec::typecheck::slot_demand).
+///
+/// Only the `node` group: the `selection` / `universe` / `weighting` /
+/// `document` vocabularies have no expression slots the type checker rules on,
+/// so their fields stay unstamped rather than being reported as unconstrained.
+fn stamp_node_outputs(tag: &mut GrammarTag) {
+    use crate::spec::typecheck::slot_demand;
+    if tag.group != "node" {
+        return;
+    }
+    for field in &mut tag.fields {
+        // `!match`'s `cases:` holds one expression per case, all under the same
+        // demand; the table names that pseudo-slot `case value`.
+        let slot = match field.ty.as_str() {
+            "node" | "node_list" => field.name.as_str(),
+            "match_cases" => "case value",
+            _ => continue,
+        };
+        field.node_output = slot_demand(&tag.name, slot).map(demand_labels);
+    }
+    // A `newtype` / `seq` tag has no named fields, so its payload's demand is
+    // the tag's only slot — `source` for the unary wrappers, `item` for the
+    // folds. Take whichever the table reports rather than re-deriving it.
+    if matches!(tag.payload.as_deref(), Some("node" | "node_list")) {
+        tag.payload_output = crate::spec::typecheck::slot_demands(&tag.name)
+            .into_iter()
+            .next()
+            .map(|(_, types)| demand_labels(types));
+    }
+}
+
+/// A runtime type spelled in the descriptor's own [`GrammarTag::output`]
+/// vocabulary, so a slot's demand can be compared against a candidate tag's
+/// `output` by string equality.
+///
+/// The descriptor calls a `Real` output `scalar`; the rest are `PayloadType`'s
+/// own names, lowercased.
+pub fn output_label(ty: crate::runtime::PayloadType) -> &'static str {
+    use crate::runtime::PayloadType as P;
+    match ty {
+        P::Real => "scalar",
+        P::Bool => "bool",
+        P::Str => "str",
+        P::Atom => "atom",
+        P::Candle => "candle",
+        P::Time => "time",
+        P::Snapshot => "snapshot",
+    }
+}
+
+/// [`output_label`] over a whole demand.
+fn demand_labels(types: Vec<crate::runtime::PayloadType>) -> Vec<String> {
+    types.into_iter().map(output_label).map(str::to_owned).collect()
 }
 
 /// The fine conceptual **sub-group** of every tag, in curated order — the
@@ -306,6 +392,10 @@ fn document_grammar_tags() -> Vec<GrammarTag> {
             output: "none".to_owned(),
             projections: Vec::new(),
             payload: payload.map(str::to_owned),
+            // These are the load-time `document` / `weighting` tags, resolved
+            // away before the typed parse — the type checker never sees one, so
+            // there is no demand to report on their payloads.
+            payload_output: None,
             // Stamped by `spec_grammar` from `CATEGORIES`, like every other tag.
             category: String::new(),
             doc: Some(doc.to_owned()),

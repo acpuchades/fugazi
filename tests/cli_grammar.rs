@@ -29,7 +29,7 @@ fn run_json(args: &[&str]) -> serde_json::Value {
 #[test]
 fn grammar_emits_the_descriptor_document() {
     let doc = run_json(&["grammar"]);
-    assert_eq!(doc["schema_version"], 3, "schema_version");
+    assert_eq!(doc["schema_version"], 4, "schema_version");
     let tags = doc["tags"].as_array().expect("tags is an array");
     assert!(!tags.is_empty(), "tags non-empty");
 
@@ -49,6 +49,33 @@ fn grammar_emits_the_descriptor_document() {
     ] {
         assert!(first.get(key).is_some(), "record missing key {key}");
     }
+
+    // The v4 addition: an expression slot says what it must be filled with, so
+    // a consumer can offer only the tags whose `output` matches.
+    let and = tags
+        .iter()
+        .find(|t| t["name"] == "and")
+        .expect("!and is a node tag");
+    let lhs = and["fields"]
+        .as_array()
+        .expect("fields")
+        .iter()
+        .find(|f| f["name"] == "lhs")
+        .expect("!and has an lhs");
+    assert_eq!(lhs["node_output"], serde_json::json!(["bool"]), "!and lhs");
+    // Omitted, not null, on a slot that holds no free expression — so a v3
+    // consumer sees the record it always saw.
+    let sma = tags
+        .iter()
+        .find(|t| t["name"] == "sma")
+        .expect("!sma is a node tag");
+    let period = sma["fields"]
+        .as_array()
+        .expect("fields")
+        .iter()
+        .find(|f| f["name"] == "period")
+        .expect("!sma has a period");
+    assert!(period.get("node_output").is_none(), "scalar field unstamped");
 }
 
 #[test]

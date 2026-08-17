@@ -116,7 +116,9 @@ enum Command {
     ///
     /// One record per YAML tag — name, group, kind, shape, fields (types,
     /// required-ness, defaults, prose), output, payload, and `since` — wrapped
-    /// as `{ schema_version, tags }`. This is the CLI face of the library's
+    /// as `{ schema_version, tags }`. Each expression-holding field also
+    /// carries `node_output`: what the nested expression must *produce*, read
+    /// from the same type table `check` enforces. This is the CLI face of the library's
     /// `spec_grammar()`: the descriptor is reflected off the serde definitions,
     /// so it never drifts from what the parser accepts. Emits only JSON on
     /// stdout — pipe into `jq`, or feed it to tooling that generates docs,

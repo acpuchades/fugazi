@@ -181,6 +181,15 @@ and `children` (what each slot demands). **The crate will not compile until you
 classify the new variant**, which is the point — this is the one drift guard
 that cannot be skipped.
 
+`children` feeds two consumers now. The parse-time check (`check_immediate`) is
+one; the other is `slot_demand(tag, slot)`, the tag-keyed view that stamps
+`node_output` onto the grammar descriptor for editor tooling. It reads the same
+table through a **prototype** node synthesised from your tag's own grammar
+record, so there is nothing extra to write — but `demand_table_covers_every_node_slot`
+fails if a tag with an expression slot reports no demand, which happens when
+`children` is missing an arm *or* when `prototype` can't build the tag (a new
+field type needs a case in `prototype_filler`).
+
 ### 5. The catalogue — nothing to write  *(test-enforced)*
 
 `fugazi list indicators` renders itself from the grammar descriptor, so a tag

@@ -1036,3 +1036,82 @@ def test_evaluate_windowed_rejects_zero():
     snaps = _snaps_single("X", _wobbly(60))
     with pytest.raises(ValueError, match="windowed"):
         spec.evaluate(ta.PaperWallet(1000.0), snaps, windowed=0)
+
+
+# ---------------------------------------------------------------------------
+# slot_demand / slot_demands — the tag-keyed view of `check`'s type discipline
+# ---------------------------------------------------------------------------
+
+
+def test_slot_demand_reports_the_output_a_slot_requires():
+    assert ta.slot_demand("and", "lhs") == ["bool"]
+    assert ta.slot_demand("and", "rhs") == ["bool"]
+    assert ta.slot_demand("sma", "source") == ["scalar"]
+    assert ta.slot_demand("atr", "source") == ["candle"]
+    assert ta.slot_demand("close", "source") == ["atom"]
+    assert ta.slot_demand("str_eq", "lhs") == ["str"]
+    # A leading `!` is accepted, since that is how the tag is written in YAML.
+    assert ta.slot_demand("!ema", "source") == ["scalar"]
+
+
+def test_slot_demand_reports_alternatives_and_passthroughs():
+    # Either output is accepted here.
+    assert ta.slot_demand("changed", "source") == ["bool", "scalar"]
+    assert ta.slot_demand("match", "on") == ["scalar", "str"]
+    # A passthrough demands nothing — an empty list, not None.
+    assert ta.slot_demand("unstable", "source") == []
+    assert ta.slot_demand("resample", "inner") == []
+
+
+def test_slot_demand_is_none_when_the_slot_holds_no_expression():
+    assert ta.slot_demand("sma", "period") is None
+    assert ta.slot_demand("sma", "no_such_slot") is None
+    assert ta.slot_demand("no_such_tag", "source") is None
+    # A book selector takes `!strategy_book` / `!portfolio_book`, not a value.
+    assert ta.slot_demand("drawdown", "source") is None
+
+
+def test_slot_demand_covers_the_positional_payload_pseudo_slots():
+    assert ta.slot_demand("not", "source") == ["bool"]
+    assert ta.slot_demand("all", "item") == ["bool"]
+    assert ta.slot_demand("match", "case value") == ["scalar"]
+
+
+def test_slot_demands_returns_every_slot_of_a_tag():
+    assert ta.slot_demands("if_else") == {
+        "cond": ["bool"],
+        "then": ["scalar"],
+        "otherwise": ["scalar"],
+    }
+    assert ta.slot_demands("keltner_upper") == {
+        "source": ["scalar"],
+        "candle_source": ["candle"],
+    }
+    # No expression slots at all.
+    assert ta.slot_demands("is_weekday") == {}
+    assert ta.slot_demands("no_such_tag") == {}
+
+
+def test_slot_demand_agrees_with_the_grammar_descriptor():
+    """Same datum, two surfaces — the descriptor's `node_output` is stamped from
+    `slot_demand`, so a consumer can use either and get the same answer."""
+    for tag in ta.spec_grammar()["tags"]:
+        if tag["group"] != "node":
+            continue
+        for field in tag["fields"]:
+            slot = "case value" if field["type"] == "match_cases" else field["name"]
+            assert field.get("node_output") == ta.slot_demand(tag["name"], slot), (
+                f"!{tag['name']} `{field['name']}`"
+            )
+
+
+def test_slot_demand_names_the_tags_that_can_fill_a_slot():
+    """The use it exists for: given a slot, offer only the admissible tags."""
+    want = ta.slot_demand("and", "lhs")
+    fillable = {
+        t["name"]
+        for t in ta.spec_grammar()["tags"]
+        if t["group"] == "node" and t["output"] in want
+    }
+    assert {"gt", "crosses_above", "and", "not"} <= fillable
+    assert "sma" not in fillable and "atr" not in fillable

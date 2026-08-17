@@ -167,7 +167,9 @@ def test_grammar_docstring_documents_every_record_key():
         for line in block.group(1).splitlines()
         if line.split() and re.fullmatch(r"[a-z_]+", line.split()[0])
     }
-    record_keys = set(ta.spec_grammar()["tags"][0].keys())
+    # Union over every record, not just the first: `payload_output` (v4) is
+    # omitted when absent, so no single tag carries the full key set.
+    record_keys = {k for tag in ta.spec_grammar()["tags"] for k in tag}
     assert documented == record_keys, (
         f"docstring keys {sorted(documented)} != record keys {sorted(record_keys)} — "
         "update the spec_grammar() docstring in python/src/spec.rs"

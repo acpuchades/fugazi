@@ -103,6 +103,10 @@ fn variant_tag(
             output: #output.to_owned(),
             projections: ::std::vec::Vec::new(),
             payload: #payload_expr,
+            // Stamped after reflection by `spec::grammar::spec_grammar`, from
+            // `check`'s own demand table — serde knows a slot holds a nested
+            // expression, not what that expression has to produce.
+            payload_output: ::std::option::Option::None,
             // The conceptual sub-group is editorial and can't be reflected off
             // the type — `spec::grammar::spec_grammar` stamps it from the
             // `CATEGORIES` taxonomy table after reflection.
@@ -148,6 +152,8 @@ fn field_expr(field: &syn::Field) -> Result<proc_macro2::TokenStream, syn::Error
             ty: #grammar_ty.to_owned(),
             required: #required,
             default: #default_expr,
+            // Stamped after reflection — see `payload_output` above.
+            node_output: ::std::option::Option::None,
             doc: #doc_expr,
         }
     })

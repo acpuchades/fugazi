@@ -332,6 +332,7 @@ If you're about to write a private helper whose name looks like something here, 
 | Build-time `!arg` substitution | `args::substitute(value, &args)` | `src/spec/args.rs` |
 | Defer spec subtree until args ready | `SpecTemplate<T>` + `.build(&args)`; `SpecTemplate::checked(tree)` wraps a preprocessed tree *and* probes it (every load typed-parses a copy with args held undefined) | `src/spec/template.rs`, `src/spec/args.rs` |
 | Static type check of an expression tree (`check` only) | `typecheck::{output_type, check_immediate}` — `None` output type means *skip*, never *invalid* | `src/spec/typecheck.rs` |
+| What a tag requires a given slot to *produce*, without a tree in hand | `typecheck::{slot_demand, slot_demands}` (`None` = not a free-expression slot · `Some(&[])` = passthrough · else the admitted set). Surfaced on the descriptor as `GrammarField::node_output` / `GrammarTag::payload_output`. Backed by prototypes synthesised per tag — **don't hand-write a second demand table** | `src/spec/typecheck.rs`, `src/spec/grammar.rs` |
 | Constant leaf: number or string | `!value 70` / `!value bull` | `src/spec/expr.rs` |
 | Three-source ternary | `IfElse::new(cond, t, f)` / `.if_else(t, f)` | `src/indicators/if_else.rs` |
 | Multi-output accessor bodies | `component_accessors!` macro | `src/indicators/component.rs` |
