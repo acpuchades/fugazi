@@ -82,7 +82,21 @@ macro_rules! map_signal {
 macro_rules! combine_signals {
     ($lhs:expr, $rhs:expr, |$l:ident, $r:ident| $build:expr) => {
         match ($lhs, $rhs) {
+            (AnySignal::Candle($l), AnySignal::Candle($r)) => {
+                Ok(AnySignal::Candle(SignalBox::new($build)))
+            }
             (AnySignal::Atom($l), AnySignal::Atom($r)) => {
+                Ok(AnySignal::Atom(SignalBox::new($build)))
+            }
+            // Mixed bar/atom: lift the bar side. Rejecting would break
+            // `close().above(1).and_(get(schema,"f").above(0))`, which was valid
+            // when the two were one domain.
+            (AnySignal::Candle($l), AnySignal::Atom($r)) => {
+                let $l = atom_signal_over_candle($l);
+                Ok(AnySignal::Atom(SignalBox::new($build)))
+            }
+            (AnySignal::Atom($l), AnySignal::Candle($r)) => {
+                let $r = atom_signal_over_candle($r);
                 Ok(AnySignal::Atom(SignalBox::new($build)))
             }
             (AnySignal::Real($l), AnySignal::Real($r)) => {

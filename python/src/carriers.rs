@@ -544,6 +544,74 @@ impl AnySource {
     }
 }
 
+/// One field of a [`Candle`], read straight off the bar.
+///
+/// The bar-domain twin of core's `Field`, which cannot serve here because it
+/// requires an `S: Indicator<Output = Atom>` source — there is no
+/// `Candle -> Real` accessor in the core. `ta.close()` and friends default to
+/// this, so the most common root in the Python API stays in the cheap domain;
+/// `ta.close(source=...)` still builds core's atom- or snapshot-rooted `Field`.
+///
+/// The markers below delegate to the same public `Candle` accessors core's own
+/// markers do, so no formula is duplicated — `typical()` and `median()` in
+/// particular are core's methods, not reimplementations.
+#[derive(Debug, Clone)]
+pub(crate) struct BarField<F: 'static> {
+    value: Option<Real>,
+    _field: std::marker::PhantomData<fn() -> F>,
+}
+
+impl<F: 'static> BarField<F> {
+    pub(crate) fn new() -> Self {
+        Self {
+            value: None,
+            _field: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<F> Indicator for BarField<F>
+where
+    F: fugazi_core::indicators::CandleField + Send + Sync + 'static,
+{
+    type Input = Candle;
+    type Output = Real;
+    fn update(&mut self, input: Candle) -> Option<Real> {
+        self.value = Some(F::get(&input));
+        self.value
+    }
+    fn value(&self) -> Option<Real> {
+        self.value
+    }
+    fn warm_up_bars(&self) -> usize {
+        1
+    }
+    fn reset(&mut self) {
+        self.value = None;
+    }
+}
+
+macro_rules! bar_field_marker {
+    ($name:ident, $get:expr) => {
+        #[derive(Debug, Clone, Copy)]
+        pub(crate) struct $name;
+        impl fugazi_core::indicators::CandleField for $name {
+            fn get(candle: &Candle) -> Real {
+                let f: fn(&Candle) -> Real = $get;
+                f(candle)
+            }
+        }
+    };
+}
+
+bar_field_marker!(BarOpen, |c| c.open);
+bar_field_marker!(BarHigh, |c| c.high);
+bar_field_marker!(BarLow, |c| c.low);
+bar_field_marker!(BarClose, |c| c.close);
+bar_field_marker!(BarVolume, |c| c.volume);
+bar_field_marker!(BarTypical, |c| c.typical());
+bar_field_marker!(BarMedian, |c| c.median());
+
 /// Lift a bar-only chain into the atom domain, so the two can be combined.
 ///
 /// The only sound direction. A `Candle` chain fed an `Atom` just reads the bar
@@ -579,6 +647,13 @@ impl<Out: Clone + 'static> Indicator for AtomOverCandle<Out> {
         self.inner.reset();
         self.value = None;
     }
+}
+
+/// Lift a bar-only **signal** into the atom domain. The `SignalBox` wrapper is
+/// rebuilt around the lifted chain so the warming-`None`-to-`false` flattening
+/// is preserved.
+pub(crate) fn atom_signal_over_candle(s: SignalBox<Candle>) -> SignalBox<Atom> {
+    SignalBox(atom_over_candle(s.0))
 }
 
 /// Lift `inner` from the bar domain into the atom domain. See [`AtomOverCandle`].

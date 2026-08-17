@@ -561,6 +561,32 @@ def test_bar_field_combines_with_calendar_leaf():
     assert ta.close().add(ta.year()).update(bar) == pytest.approx(2031.0)
 
 
+@pytest.mark.parametrize(
+    "leaf,want",
+    [("open", 10.0), ("high", 14.0), ("low", 8.0), ("close", 12.0),
+     ("volume", 100.0), ("typical", (14.0 + 8.0 + 12.0) / 3.0),
+     ("median", (14.0 + 8.0) / 2.0)],
+)
+def test_bar_rooted_and_atom_rooted_fields_agree(leaf, want):
+    """`ta.close()` and `ta.close(source=...)` are now *different* code paths.
+
+    The `source=`-omitted form reads the bar directly (the cheap domain); an
+    explicit `source=` goes through the core's atom-rooted `Field`. They must
+    produce identical numbers, so this pins them against each other and against
+    a hand-computed value — a divergence in one accessor would otherwise show up
+    only as a wrong backtest.
+    """
+    candle = ta.Candle(10.0, 14.0, 8.0, 12.0, 100.0)
+    bar = ta.Atom(candle)
+    snap = ta.Snapshot({"X": bar})
+
+    bar_rooted = getattr(ta, leaf)()
+    atom_rooted = getattr(ta, leaf)(source=ta.pick("X"))
+
+    assert bar_rooted.update(bar) == pytest.approx(want)
+    assert atom_rooted.update(snap) == pytest.approx(want)
+
+
 def test_value_is_domain_neutral():
     """A constant adopts its partner's domain on either side; never clashes."""
     # right operand, both domains

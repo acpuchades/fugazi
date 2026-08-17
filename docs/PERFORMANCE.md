@@ -649,7 +649,30 @@ something extra was hiding in `feed()`. There is not; the probe *is* the product
 `pair()` **lifts** a bar chain into the atom domain when the two are combined
 rather than rejecting the pair — `close().add(get_real(schema, "adj"))` was valid
 when both were one domain and stays valid. Field leaves (`close()`, `high()`, …)
-are still atom-rooted at 4.21×, which is step 2.
+followed in **step 2**, via a `BarField` accessor in `python/src` (the core's
+`Field` requires an atom-emitting source, so there is no `Candle -> Real`
+accessor to reuse). Measured by instruction count, which is contention-immune:
+
+| | instr/sample |
+|---|---:|
+| `close()` on a frame, before | 125.3 |
+| `close()` on a frame, after | **48.4** |
+| `atr(14)` on a frame (control, unchanged) | 89.5 → 90.4 |
+
+**2.6× less work for the most common root in the API.** Note `close()` had become
+the *slowest* of the three after step 1 — it was the only one still atom-rooted —
+which is what a negative marginal in an earlier wall-clock run was trying to say
+before it got dismissed as noise.
+
+**Measurement note.** Attributing this by wall-clock failed repeatedly: on this
+machine `sma(identity())` read 5.06, 5.26 and 8.40 ns/sample across runs, and one
+derived marginal came out *negative* (ATR appearing cheaper than the trivial
+indicator it wraps — which turned out to be true, and was dismissed). Instruction
+counts through the Python interpreter work, but only when the measured work
+dominates: 200 iterations of a 200 000-sample feed gives a 4–6 G signal against a
+~0.9 G interpreter-startup control. The same approach **fails for `talib`**, whose
+vectorised C is so cheap that its signal sits under the startup noise — do not
+try to read a talib baseline this way.
 
 
 *Confirmed by instruction count*, because ~24 ns/sample is ~75 cycles and far more

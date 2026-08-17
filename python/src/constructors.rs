@@ -665,6 +665,34 @@ macro_rules! atom_leaf_source {
     };
 }
 
+/// Candle-field leaves (`close`, `high`, …), which read the bar and nothing else.
+///
+/// Identical to [`atom_leaf_source!`] except for the `source=`-omitted case: that
+/// roots on the **bar** domain rather than lifting every candle into an 88-byte
+/// `Atom` first. `ta.close()` is the most common root in the API, so this is the
+/// one that matters most. An explicit `source=` still selects core's atom- or
+/// snapshot-rooted `Field`, because then the atom is what the caller has.
+macro_rules! bar_leaf_source {
+    ($name:ident, $field:ty, $of_ctor:path, $doc:literal) => {
+        #[doc = $doc]
+        #[pyfunction]
+        #[pyo3(signature = (source = None))]
+        pub(crate) fn $name(source: Option<PyRef<'_, PyAtomSource>>) -> PyIndicator {
+            match source.map(|s| s.inner.clone()) {
+                None => PyIndicator::wrap(AnySource::Candle(runtime::erase(
+                    BarField::<$field>::new(),
+                ))),
+                Some(AnyAtomSource::Atom(s)) => {
+                    PyIndicator::wrap(AnySource::Atom(runtime::erase($of_ctor(s))))
+                }
+                Some(AnyAtomSource::Snapshot(s)) => {
+                    PyIndicator::wrap(AnySource::Snapshot(runtime::erase($of_ctor(s))))
+                }
+            }
+        }
+    };
+}
+
 /// Twin of [`atom_leaf_source!`] for the boolean signal leaves (`is_weekday`,
 /// `is_weekend`).
 macro_rules! atom_leaf_signal {
@@ -686,30 +714,30 @@ macro_rules! atom_leaf_signal {
     };
 }
 
-atom_leaf_source!(open, Open::new(), Open::of, "Source: the bar's open price.");
-atom_leaf_source!(high, High::new(), High::of, "Source: the bar's high price.");
-atom_leaf_source!(low, Low::new(), Low::of, "Source: the bar's low price.");
-atom_leaf_source!(
+bar_leaf_source!(open, BarOpen, Open::of, "Source: the bar's open price.");
+bar_leaf_source!(high, BarHigh, High::of, "Source: the bar's high price.");
+bar_leaf_source!(low, BarLow, Low::of, "Source: the bar's low price.");
+bar_leaf_source!(
     close,
-    Close::new(),
+    BarClose,
     Close::of,
     "Source: the bar's close price. Pass `source=ta.pick(key)` to read a specific asset's close out of a `Snapshot`."
 );
-atom_leaf_source!(
+bar_leaf_source!(
     volume,
-    Volume::new(),
+    BarVolume,
     Volume::of,
     "Source: the bar's volume."
 );
-atom_leaf_source!(
+bar_leaf_source!(
     typical,
-    Typical::new(),
+    BarTypical,
     Typical::of,
     "Source: the bar's typical price, (high + low + close) / 3."
 );
-atom_leaf_source!(
+bar_leaf_source!(
     median,
-    Median::new(),
+    BarMedian,
     Median::of,
     "Source: the bar's median price, (high + low) / 2."
 );
@@ -1419,9 +1447,21 @@ pub(crate) fn if_else(cond: PyRef<'_, PySignal>, then: PyRef<'_, PyIndicator>, o
     let branches = pair(then.src.clone(), otherwise.src.clone())?;
     let cond_sig = cond.sig.clone();
     let out = match (cond_sig, branches) {
+        (AnySignal::Candle(c), Pair::Candle(t, f)) => {
+            AnySource::Candle(runtime::erase(IfElse::new(c, t, f)))
+        }
         (AnySignal::Atom(c), Pair::Atom(t, f)) => {
             AnySource::Atom(runtime::erase(IfElse::new(c, t, f)))
         }
+        // The condition and the branches can land in different domains — a
+        // bar-rooted `close()` test over atom-rooted `get()` branches, say. Lift
+        // whichever side is bar-only.
+        (AnySignal::Candle(c), Pair::Atom(t, f)) => AnySource::Atom(runtime::erase(
+            IfElse::new(atom_signal_over_candle(c), t, f),
+        )),
+        (AnySignal::Atom(c), Pair::Candle(t, f)) => AnySource::Atom(runtime::erase(
+            IfElse::new(c, atom_over_candle(t), atom_over_candle(f)),
+        )),
         (AnySignal::Real(c), Pair::Real(t, f)) => {
             AnySource::Real(runtime::erase(IfElse::new(c, t, f)))
         }
