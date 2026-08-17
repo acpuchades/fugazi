@@ -1142,11 +1142,11 @@ cross a Python boundary — that is the last column:
 
 | | TA-Lib C | fugazi (Rust) | **rs vs C** | `talib` py | fugazi (Python) | **py vs py** |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `sma` | 1.36 | 1.37 | **1.01×** | 1.43 | 3.65 | 2.56× |
-| `ema` | 2.03 | 1.35 | **0.66×** | 2.11 | 3.55 | 1.69× |
-| `rsi` | 4.67 | 4.65 | **1.00×** | 4.81 | 7.79 | 1.62× |
-| `atr` | 4.74 | 4.38 | **0.92×** | 12.35 | 7.08 | **0.57×** |
-| `stddev` | 3.31 | 9.73 | 2.94× | 3.47 | 11.79 | 3.40× |
+| `sma` | 1.37 | 1.37 | **1.00×** | 1.42 | 3.57 | 2.52× |
+| `ema` | 2.04 | 1.37 | **0.67×** | 2.10 | 3.58 | 1.71× |
+| `rsi` | 4.73 | 4.60 | **0.97×** | 4.81 | 7.76 | 1.61× |
+| `atr` | 4.73 | 4.27 | **0.90×** | 12.12 | 6.86 | **0.57×** |
+| `stddev` | 3.30 | 9.96 | 3.02× | 3.47 | 11.68 | 3.37× |
 
 ns/sample. The Rust engine is at parity or better on `sma`/`ema`/`rsi`/`atr`
 while staying one-bar-at-a-time, and driving a full backtest allocates **zero
