@@ -19,6 +19,13 @@
 //!
 //! Workloads: `sma_rust` · `sma_yaml` · `macd_rust` · `macd_yaml` · `tree8`
 //! · `atr_none` · `atr_atom` · `atr_candle` · `atr_manual_max`
+//! · `chain_candle` · `chain_atom`
+//!
+//! `chain_candle` vs `chain_atom` prices P1 of the Python plan: the bindings
+//! carry a `Chain<Atom, _>` for candle-rooted sources, so every 40-byte `Candle`
+//! is lifted into an 88-byte `Atom` per bar. Wall-clock put that at ~24
+//! ns/sample, which is ~75 cycles and far more than the move should cost, so it
+//! needs a contention-immune second opinion before anything is restructured.
 //!
 //! The three `atr_*` workloads exist to attribute a measured gap against native
 //! TA-Lib, on a contended machine where wall-clock cannot. They are the same
@@ -137,7 +144,7 @@ fn main() {
     let workload = std::env::args().nth(1).unwrap_or_else(|| {
         eprintln!(
             "usage: icount <sma_rust|sma_yaml|macd_rust|macd_yaml|tree8\
-             |atr_none|atr_atom|atr_candle|atr_manual_max>"
+             |atr_none|atr_atom|atr_candle|atr_manual_max|chain_candle|chain_atom>"
         );
         std::process::exit(2);
     });
@@ -177,6 +184,32 @@ fn main() {
             fugazi::backtest::run(&mut s, &mut w, snaps().iter().cloned())
                 .equity_curve
                 .len()
+        }
+        // Same ATR, same one erased level, differing only in the boundary type:
+        // `Chain<Candle, Real>` against `Chain<Atom, Real>` plus the per-bar
+        // lift. Mirrors `_bench_frame_stage` stages 3 and 5.
+        "chain_candle" | "chain_atom" => {
+            let candles = common::synth_candles(BARS);
+            if workload == "chain_candle" {
+                let mut ind: fugazi::runtime::Chain<fugazi::market::Candle, Real> =
+                    fugazi::runtime::erase(fugazi::indicators::Atr::new(
+                        fugazi::indicators::Identity::<fugazi::market::Candle>::new(),
+                        14,
+                    ));
+                for c in &candles {
+                    black_box(ind.update(*c));
+                }
+            } else {
+                let mut ind: fugazi::runtime::Chain<fugazi::types::Atom, Real> =
+                    fugazi::runtime::erase(fugazi::indicators::Atr::new(
+                        fugazi::indicators::CurrentBar::new(),
+                        14,
+                    ));
+                for c in &candles {
+                    black_box(ind.update((*c).into()));
+                }
+            }
+            BARS
         }
         // `atr_none` is the control: identical setup, no indicator. Subtract it
         // from the others and what remains is the ATR work itself, which is what

@@ -642,7 +642,25 @@ something extra was hiding in `feed()`. There is not; the probe *is* the product
 
 ### Priorities
 
-**P1 — `Atom` is the boundary type where `Candle` would do. ~24 ns/sample.**
+**P1 — `Atom` is the boundary type where `Candle` would do. 104 instructions/bar.**
+
+*Confirmed by instruction count*, because ~24 ns/sample is ~75 cycles and far more
+than an 88-vs-40-byte move should cost. `benches/icount.rs` grew `chain_candle`
+and `chain_atom` — the same ATR, the same single erased level, differing only in
+the boundary type — and net of the control, over 20 000 bars:
+
+| | instr/bar |
+|---|---:|
+| `Chain<Candle, Real>` | **22.0** |
+| `Chain<Atom, Real>` + the per-bar lift | **126.0** |
+
+5.7× the work, so it is work and not layout. The reason is in `Atom`'s layout:
+`overlays` is `Option<OverlayInfo>` **inlined**, not `Option<Arc<OverlayInfo>>`,
+and `OverlayInfo` holds two `Arc`s. So `Atom` is 88 bytes, `needs_drop` is
+`true`, and per bar the path builds the struct, memcpy's it into the vtable call
+by value, and then runs drop glue branching on two `Arc`s that are *always*
+`None` here. A `Candle` is 40 bytes and `needs_drop` is `false`.
+
 `AnySource::Candle` holds a `Chain<Atom, _>`, so each 40-byte `Candle` read from
 the frame is lifted into an 88-byte `Atom` and moved through the erased boundary
 per bar. `Atom` exists because overlay-reading leaves (`get`, `get_str`) need the
