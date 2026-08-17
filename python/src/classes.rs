@@ -1606,6 +1606,12 @@ impl PyMulti {
         // One `Vec` per call, which is a per-sample API and not a bulk path.
         let mut values: Vec<Real> = Vec::new();
         let ok = match &mut self.inner {
+            // The Python surface takes a Candle or an Atom either way; a bar
+            // chain reads the bar out of whichever arrived.
+            AnyMulti::Candle(m) => match extract_atom(sample)?.candle {
+                Some(c) => m.0.update_into(c, &mut values),
+                None => false,
+            },
             AnyMulti::Atom(m) => m.0.update_into(extract_atom(sample)?, &mut values),
             AnyMulti::Real(m) => m.0.update_into(extract_real(sample)?, &mut values),
             AnyMulti::Snapshot(m) => m.0.update_into(extract_snapshot(sample)?, &mut values),
@@ -1689,6 +1695,13 @@ impl PyMulti {
     /// ```
     pub(crate) fn shared(&self) -> PySharedMulti {
         let cloned = match &self.inner {
+            AnyMulti::Candle(m) => AnySharedMulti::Candle(Arc::new(Mutex::new(SharedMultiCell {
+                names: m.0.names(),
+                multi: m.0.clone_box(),
+                generation: 0,
+                last_output: Vec::new(),
+                last_valid: false,
+            }))),
             AnyMulti::Atom(m) => AnySharedMulti::Atom(Arc::new(Mutex::new(SharedMultiCell {
                 names: m.0.names(),
                 multi: m.0.clone_box(),

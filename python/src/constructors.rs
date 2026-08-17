@@ -1589,7 +1589,13 @@ macro_rules! bar_period_multi {
         pub(crate) fn $name(period: usize) -> PyResult<PyMulti> {
             ensure_period(period)?;
             Ok(PyMulti {
-                inner: AnyMulti::Atom(MultiBox::new($ty::new(CurrentBar::new(), period))),
+                // `Identity<Candle>`, not `CurrentBar<Identity<Atom>>`: the bar
+                // goes straight in rather than being wrapped in an `Atom` and
+                // read back out. See `AnyMulti::Candle`.
+                inner: AnyMulti::Candle(MultiBox::new($ty::new(
+                    Identity::<Candle>::new(),
+                    period,
+                ))),
             })
         }
     };

@@ -475,6 +475,7 @@ impl<I: Clone + Send + Sync + 'static> Indicator for SharedProjector<I> {
 /// Python analogue of `Shared<M>` in Rust. Component accessors return
 /// [`PyIndicator`]s that borrow into the same underlying multi.
 pub(crate) enum AnySharedMulti {
+    Candle(Arc<Mutex<SharedMultiCell<Candle>>>),
     Atom(Arc<Mutex<SharedMultiCell<Atom>>>),
     Real(Arc<Mutex<SharedMultiCell<Real>>>),
     Snapshot(Arc<Mutex<SharedMultiCell<Snapshot<Symbol>>>>),
@@ -483,6 +484,7 @@ pub(crate) enum AnySharedMulti {
 impl AnySharedMulti {
     pub(crate) fn names(&self) -> &'static [&'static str] {
         match self {
+            AnySharedMulti::Candle(c) => c.lock().expect("mutex poisoned").names,
             AnySharedMulti::Atom(c) => c.lock().expect("mutex poisoned").names,
             AnySharedMulti::Real(c) => c.lock().expect("mutex poisoned").names,
             AnySharedMulti::Snapshot(c) => c.lock().expect("mutex poisoned").names,
@@ -501,6 +503,15 @@ impl AnySharedMulti {
     pub(crate) fn project(&self, name: &str) -> PyResult<PyIndicator> {
         let idx = self.field_index(name)?;
         Ok(match self {
+            AnySharedMulti::Candle(cell) => PyIndicator {
+                src: AnySource::Candle(runtime::erase(SharedProjector::<Candle> {
+                    cell: Arc::clone(cell),
+                    field_index: idx,
+                    local_gen: cell.lock().expect("mutex poisoned").generation,
+                    last_value: None,
+                })),
+                root: None,
+            },
             AnySharedMulti::Atom(cell) => PyIndicator {
                 src: AnySource::Atom(runtime::erase(SharedProjector::<Atom> {
                     cell: Arc::clone(cell),
@@ -1173,6 +1184,15 @@ pub(crate) fn str_pair(lhs: AnyStrSource, rhs: AnyStrSource) -> PyResult<StrPair
 
 /// A multi-output indicator erased to one of the three input domains.
 pub(crate) enum AnyMulti {
+    /// Reads the **bar only** — 40 bytes, `Copy`, no drop glue. Where every
+    /// bar-rooted multi belongs, and the multi-output half of P1.
+    ///
+    /// Without it, `ta.dmi(14)` rooted at `CurrentBar<Identity<Atom>>` spent
+    /// **97 instructions/sample** — `Identity<Atom>` 42, `CurrentBar` 55 — doing
+    /// nothing but storing an 88-byte `Atom` and reading a 40-byte `Candle` back
+    /// out of it. `AnySource` got this treatment early; this is the same fix,
+    /// for the path `dmi`, `adx`, `aroon`, `macd` and `bollinger` run on.
+    Candle(MultiBox<Candle>),
     Atom(MultiBox<Atom>),
     Real(MultiBox<Real>),
     Snapshot(MultiBox<Snapshot<Symbol>>),
@@ -1181,6 +1201,7 @@ pub(crate) enum AnyMulti {
 impl AnyMulti {
     pub(crate) fn names(&self) -> &'static [&'static str] {
         match self {
+            AnyMulti::Candle(m) => m.0.names(),
             AnyMulti::Atom(m) => m.0.names(),
             AnyMulti::Real(m) => m.0.names(),
             AnyMulti::Snapshot(m) => m.0.names(),
@@ -1188,6 +1209,7 @@ impl AnyMulti {
     }
     pub(crate) fn value(&self) -> Option<Vec<Real>> {
         match self {
+            AnyMulti::Candle(m) => m.0.value(),
             AnyMulti::Atom(m) => m.0.value(),
             AnyMulti::Real(m) => m.0.value(),
             AnyMulti::Snapshot(m) => m.0.value(),
@@ -1195,6 +1217,7 @@ impl AnyMulti {
     }
     pub(crate) fn warm_up_bars(&self) -> usize {
         match self {
+            AnyMulti::Candle(m) => m.0.warm_up_bars(),
             AnyMulti::Atom(m) => m.0.warm_up_bars(),
             AnyMulti::Real(m) => m.0.warm_up_bars(),
             AnyMulti::Snapshot(m) => m.0.warm_up_bars(),
@@ -1202,6 +1225,7 @@ impl AnyMulti {
     }
     pub(crate) fn unstable_bars(&self) -> usize {
         match self {
+            AnyMulti::Candle(m) => m.0.unstable_bars(),
             AnyMulti::Atom(m) => m.0.unstable_bars(),
             AnyMulti::Real(m) => m.0.unstable_bars(),
             AnyMulti::Snapshot(m) => m.0.unstable_bars(),
@@ -1209,6 +1233,7 @@ impl AnyMulti {
     }
     pub(crate) fn reset(&mut self) {
         match self {
+            AnyMulti::Candle(m) => m.0.reset(),
             AnyMulti::Atom(m) => m.0.reset(),
             AnyMulti::Real(m) => m.0.reset(),
             AnyMulti::Snapshot(m) => m.0.reset(),
@@ -1239,6 +1264,11 @@ impl AnyMulti {
             }};
         }
         match self {
+            AnyMulti::Candle(m) => {
+                let cols = columns_from_frame(data)?;
+                rows.reserve(cols.len(py));
+                cols.for_each(py, |c| drive!(m.0, c));
+            }
             AnyMulti::Atom(m) => {
                 let cols = columns_from_frame(data)?;
                 rows.reserve(cols.len(py));
@@ -1316,6 +1346,17 @@ impl AnyMulti {
             *row += n;
         };
         match self {
+            // The bar arm: candles go straight to the multi, so no `Atom` is
+            // built, moved or dropped — 97 instructions/sample of P1 gone.
+            AnyMulti::Candle(m) => {
+                let cols = columns_from_frame(data)?;
+                let mut buf = [ZERO_BAR; FOLD_CHUNK];
+                cols.for_each_chunk(py, &mut buf, |chunk| {
+                    let flat = &mut flat[..chunk.len() * lines];
+                    m.0.update_slice_flat(chunk, flat, lines);
+                    scatter(flat, chunk.len(), &mut row);
+                });
+            }
             AnyMulti::Atom(m) => {
                 let cols = columns_from_frame(data)?;
                 let mut buf = [ZERO_BAR; FOLD_CHUNK];
@@ -1355,6 +1396,7 @@ impl AnyMulti {
     /// Cheap: the column readers borrow rather than copy (see `Column`).
     fn row_count(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<usize> {
         Ok(match self {
+            AnyMulti::Candle(_) => columns_from_frame(data)?.len(py),
             AnyMulti::Atom(_) => columns_from_frame(data)?.len(py),
             AnyMulti::Real(_) => reals_from_series(data)?.len(py),
             AnyMulti::Snapshot(_) => snapshots_from_sequence(data)?.len(),
