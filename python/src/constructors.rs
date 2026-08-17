@@ -237,6 +237,97 @@ pub(crate) fn assemble_candles(
         .collect())
 }
 
+/// A frame's OHLCV columns, held **as columns**.
+///
+/// PERFORMANCE — the reason this exists instead of a `Vec<Candle>`.
+///
+/// `feed()` on a candle-rooted indicator used to go
+/// columns -> `Vec<Candle>` -> iterate, which for 200 000 bars writes 8 MB of
+/// candles and reads them straight back, purely to change the layout. Measured,
+/// the frame input path cost **24.3 ns/sample** with a trivial indicator on top
+/// of it, against 5.6 for the *entire* 1-D pipeline — so the conversion, not the
+/// indicator, was the whole cost of a candle-rooted `feed()`.
+///
+/// [`Self::for_each`] streams candles instead: built in a register, handed
+/// straight to `update`, never stored. It also zips slices rather than indexing,
+/// so the five bounds checks per bar go away too.
+///
+/// Keep the columns owned (not borrowed from Python) — the buffer fast path in
+/// [`column_to_vec`] already copied them, and holding Python buffers alive
+/// across `update` calls would pin the GIL to the whole loop.
+pub(crate) struct CandleColumns {
+    close: Vec<f64>,
+    open: Option<Vec<f64>>,
+    high: Option<Vec<f64>>,
+    low: Option<Vec<f64>>,
+    volume: Option<Vec<f64>>,
+}
+
+impl CandleColumns {
+    /// Number of bars — `close`'s length, which every other column is validated
+    /// against in [`columns_from_frame`].
+    pub(crate) fn len(&self) -> usize {
+        self.close.len()
+    }
+
+    /// Feed every bar to `f`, without materialising a `Vec<Candle>`.
+    ///
+    /// An omitted `open`/`high`/`low` reads as `close` — and is *aliased* to the
+    /// close slice rather than copied, so a close-only frame costs no extra
+    /// memory. An omitted `volume` reads as `0.0`, which needs its own arm
+    /// because there is no slice to alias.
+    #[inline]
+    pub(crate) fn for_each(&self, mut f: impl FnMut(Candle)) {
+        let c = self.close.as_slice();
+        let o = self.open.as_deref().unwrap_or(c);
+        let h = self.high.as_deref().unwrap_or(c);
+        let l = self.low.as_deref().unwrap_or(c);
+        match self.volume.as_deref() {
+            Some(v) => {
+                for ((((&c, &o), &h), &l), &v) in
+                    c.iter().zip(o).zip(h).zip(l).zip(v)
+                {
+                    f(Candle::new(o, h, l, c, v));
+                }
+            }
+            None => {
+                for (((&c, &o), &h), &l) in c.iter().zip(o).zip(h).zip(l) {
+                    f(Candle::new(o, h, l, c, 0.0));
+                }
+            }
+        }
+    }
+}
+
+/// Read a frame's OHLCV columns without zipping them into candles — the
+/// streaming counterpart of [`candles_from_frame`]. See [`CandleColumns`].
+pub(crate) fn columns_from_frame(data: &Bound<'_, PyAny>) -> PyResult<CandleColumns> {
+    if !(data.hasattr("columns")? || data.is_instance_of::<PyDict>()) {
+        return Err(PyTypeError::new_err(
+            "this indicator consumes candles: pass a DataFrame or dict with OHLCV columns. \
+             To compute over a bare numeric series, root the indicator at identity().",
+        ));
+    }
+    let cols = frame_columns(data)?;
+    let n = cols.close.len();
+    for (name, col) in [
+        ("open", &cols.open),
+        ("high", &cols.high),
+        ("low", &cols.low),
+        ("volume", &cols.volume),
+    ] {
+        if let Some(col) = col
+            && col.len() != n
+        {
+            return Err(PyValueError::new_err(format!(
+                "'{name}' has length {} but 'close' has length {n}",
+                col.len()
+            )));
+        }
+    }
+    Ok(cols)
+}
+
 /// Build the candle series a candle-rooted `feed()` consumes from its `data`
 /// argument: a pandas/polars `DataFrame` or a `dict` of OHLCV columns. A bare
 /// numeric series is rejected — root the indicator at `identity()` for that.
@@ -268,6 +359,14 @@ pub(crate) fn reals_from_series(data: &Bound<'_, PyAny>) -> PyResult<Vec<Real>> 
 /// (only those present; `close` is required). Column names are matched
 /// case-insensitively, so `Close`/`CLOSE`/`close` all work.
 pub(crate) fn frame_to_candles(frame: &Bound<'_, PyAny>) -> PyResult<Vec<Candle>> {
+    let cols = frame_columns(frame)?;
+    assemble_candles(cols.close, cols.open, cols.high, cols.low, cols.volume)
+}
+
+/// Pull the OHLCV columns out of a `DataFrame`/`dict`, matched
+/// case-insensitively (`Close`/`CLOSE`/`close`). `close` is required; the rest
+/// are optional. Shared by [`frame_to_candles`] and [`columns_from_frame`].
+fn frame_columns(frame: &Bound<'_, PyAny>) -> PyResult<CandleColumns> {
     let col = |name: &str| -> PyResult<Option<Vec<f64>>> {
         let cap = {
             let mut chars = name.chars();
@@ -288,13 +387,13 @@ pub(crate) fn frame_to_candles(frame: &Bound<'_, PyAny>) -> PyResult<Vec<Candle>
     let close = col("close")?.ok_or_else(|| {
         PyValueError::new_err("a DataFrame/dict passed to feed() must have a 'close' column")
     })?;
-    assemble_candles(
+    Ok(CandleColumns {
         close,
-        col("open")?,
-        col("high")?,
-        col("low")?,
-        col("volume")?,
-    )
+        open: col("open")?,
+        high: col("high")?,
+        low: col("low")?,
+        volume: col("volume")?,
+    })
 }
 
 /// Turn a Python argument into an [`AnySource`] in the requested domain: either
@@ -1870,6 +1969,70 @@ pub(crate) fn _bench_feed_stage(
     if stage == 1 {
         return Ok(values.len());
     }
+    let out = build_floats(py, &OutputKind::Numpy, values)?;
+    Ok(out.bind(py).len().unwrap_or(0))
+}
+
+/// A/B the two candle-frame input paths in one process. **A measurement hook.**
+///
+/// Stages, cumulative where it makes sense:
+/// * `0` — read the frame's columns and stop
+/// * `1` — stream candles out of them ([`CandleColumns::for_each`])
+/// * `2` — materialise a `Vec<Candle>` instead (the older shape)
+/// * `3` — streamed, through an indicator, to a NumPy array (the whole `feed`)
+/// * `4` — the same via `Vec<Candle>`
+/// * `5` — streamed, but through a `Chain<Atom, Real>` with the per-bar
+///   `Candle -> Atom` lift, which is what the real carriers do. 5 against 3
+///   isolates the cost of `Atom` being the boundary type.
+///
+/// 3 against 4 is the comparison that matters, and it has to happen inside one
+/// process: two wheels measured minutes apart on a shared machine cannot resolve
+/// a 30% difference, which is how a regression here got mistaken for a win.
+#[pyfunction]
+pub(crate) fn _bench_frame_stage(
+    py: Python<'_>,
+    data: &Bound<'_, PyAny>,
+    stage: usize,
+    period: usize,
+) -> PyResult<usize> {
+    use fugazi_core::indicators::{Atr, Identity};
+    let cols = columns_from_frame(data)?;
+    if stage == 0 {
+        return Ok(cols.len());
+    }
+    if stage == 1 {
+        let mut n = 0usize;
+        cols.for_each(|c| n = n.wrapping_add(c.close.to_bits() as usize));
+        return Ok(n);
+    }
+    if stage == 2 {
+        let v = frame_to_candles(data)?;
+        return Ok(v.len());
+    }
+    // `Chain<Candle, Real>`, not `Source<Atom>`: this probe measures the input
+    // path, so it feeds candles straight in rather than lifting each to an Atom.
+    let mut ind: runtime::Chain<Candle, Real> =
+        runtime::erase(Atr::new(Identity::<Candle>::new(), period));
+    if stage == 5 {
+        // What `AnySource::Candle` actually holds: an Atom-rooted chain, so each
+        // 40-byte `Candle` is lifted into an 88-byte `Atom` per bar.
+        let mut atom_ind: crate::carriers::Source<Atom> =
+            runtime::erase(Atr::new(fugazi_core::indicators::CurrentBar::new(), period));
+        let mut out = Vec::with_capacity(cols.len());
+        cols.for_each(|c| out.push(fugazi_core::Indicator::update(&mut atom_ind, c.into())));
+        let arr = build_floats(py, &OutputKind::Numpy, out)?;
+        return Ok(arr.bind(py).len().unwrap_or(0));
+    }
+    let values: Vec<Option<Real>> = if stage == 3 {
+        let mut out = Vec::with_capacity(cols.len());
+        cols.for_each(|c| out.push(fugazi_core::Indicator::update(&mut ind, c)));
+        out
+    } else {
+        frame_to_candles(data)?
+            .into_iter()
+            .map(|c| fugazi_core::Indicator::update(&mut ind, c))
+            .collect()
+    };
     let out = build_floats(py, &OutputKind::Numpy, values)?;
     Ok(out.bind(py).len().unwrap_or(0))
 }

@@ -499,10 +499,15 @@ impl AnySource {
     /// every bar and reads the frame as candles (its neutral default domain).
     pub(crate) fn feed_rows(&mut self, data: &Bound<'_, PyAny>) -> PyResult<Vec<Option<Real>>> {
         Ok(match self {
-            AnySource::Candle(s) => candles_from_frame(data)?
-                .into_iter()
-                .map(|c| Indicator::update(s, c.into()))
-                .collect(),
+            // Streamed, not collected: see `CandleColumns`. The `Vec<Candle>`
+            // this used to build was 8 MB for a 200 000-bar frame, written and
+            // read back for nothing.
+            AnySource::Candle(s) => {
+                let cols = columns_from_frame(data)?;
+                let mut out = Vec::with_capacity(cols.len());
+                cols.for_each(|c| out.push(Indicator::update(s, c.into())));
+                out
+            }
             AnySource::Real(s) => reals_from_series(data)?
                 .into_iter()
                 .map(|x| Indicator::update(s, x))
@@ -511,7 +516,8 @@ impl AnySource {
                 .into_iter()
                 .map(|snap| Indicator::update(s, snap))
                 .collect(),
-            AnySource::Const(c) => candles_from_frame(data)?.iter().map(|_| Some(*c)).collect(),
+            // A constant reads no input, but the frame still fixes the row count.
+            AnySource::Const(c) => vec![Some(*c); columns_from_frame(data)?.len()],
         })
     }
 }
@@ -601,10 +607,14 @@ impl AnySignal {
     /// what the runtime already guarantees for individual updates.
     pub(crate) fn feed_rows(&mut self, data: &Bound<'_, PyAny>) -> PyResult<Vec<bool>> {
         Ok(match self {
-            AnySignal::Candle(s) => candles_from_frame(data)?
-                .into_iter()
-                .map(|c| Indicator::update(s, c.into()).unwrap_or(false))
-                .collect(),
+            AnySignal::Candle(s) => {
+                let cols = columns_from_frame(data)?;
+                let mut out = Vec::with_capacity(cols.len());
+                cols.for_each(|c| {
+                    out.push(Indicator::update(s, c.into()).unwrap_or(false))
+                });
+                out
+            }
             AnySignal::Real(s) => reals_from_series(data)?
                 .into_iter()
                 .map(|x| Indicator::update(s, x).unwrap_or(false))
@@ -746,10 +756,12 @@ impl AnyMulti {
     /// producing one `Option<Vec<Real>>` per bar (`None` while warming up).
     pub(crate) fn feed_rows(&mut self, data: &Bound<'_, PyAny>) -> PyResult<Vec<Option<Vec<Real>>>> {
         Ok(match self {
-            AnyMulti::Candle(m) => candles_from_frame(data)?
-                .into_iter()
-                .map(|c| m.0.update(c.into()))
-                .collect(),
+            AnyMulti::Candle(m) => {
+                let cols = columns_from_frame(data)?;
+                let mut out = Vec::with_capacity(cols.len());
+                cols.for_each(|c| out.push(m.0.update(c.into())));
+                out
+            }
             AnyMulti::Real(m) => reals_from_series(data)?
                 .into_iter()
                 .map(|x| m.0.update(x))
