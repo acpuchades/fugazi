@@ -254,6 +254,42 @@ impl Column {
     }
 }
 
+/// A numeric series **argument**, extracted through the buffer protocol.
+///
+/// `#[pyfunction] fn sharpe(returns: Vec<Real>, ..)` looks harmless and is not:
+/// pyo3 fills a `Vec<f64>` by walking the object with the Python sequence
+/// protocol and calling `extract` per element, so a NumPy array is taken apart
+/// one `float` object at a time. Measured on a 200 000-point series,
+/// `metrics.sharpe` cost **44.79 ns/sample** — against ~2 ns of actual
+/// arithmetic — and a `list` cost 45.68, i.e. *the same*, which is the tell:
+/// there was no fast path for the array at all.
+///
+/// This does one `memcpy` out of the buffer instead. Still a copy — unlike
+/// [`CandleColumns`], which borrows — because the metrics take `&[Real]` and a
+/// borrowed column arrives as `&[ReadOnlyCell<f64>]`; bridging that safely would
+/// need either a `transmute` or a signature change across ~30 core functions,
+/// and a single 1.6 MB copy costs ~0.21 ns/sample (see [`Column`]). The
+/// element-by-element extraction was the whole cost, not the copy.
+///
+/// `Deref<Target = [Real]>` is what keeps this a type-only change: every body
+/// stays `core_metrics::sharpe(&returns, ..)`.
+pub(crate) struct Series(Vec<Real>);
+
+impl std::ops::Deref for Series {
+    type Target = [Real];
+    fn deref(&self) -> &[Real] {
+        &self.0
+    }
+}
+
+impl<'a, 'py> pyo3::FromPyObject<'a, 'py> for Series {
+    type Error = PyErr;
+
+    fn extract(obj: pyo3::Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        Ok(Series(Column::of(&obj, "series")?.to_vec(obj.py())?))
+    }
+}
+
 /// A 1-D, C-contiguous `float64` buffer over `obj`, if it exposes one — directly,
 /// or via `to_numpy()`/`__array__()` as pandas and polars `Series` do.
 ///

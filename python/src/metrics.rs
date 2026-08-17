@@ -210,7 +210,7 @@ impl PyDrawdownSegment {
 /// `initial_equity`. Zero-denominator bars contribute `0.0`. The returned list
 /// has the same length as `equity_curve`.
 #[pyfunction]
-pub(crate) fn per_bar_returns(equity_curve: Vec<Real>, initial_equity: Real) -> Vec<Real> {
+pub(crate) fn per_bar_returns(equity_curve: Series, initial_equity: Real) -> Vec<Real> {
     core_metrics::per_bar_returns(&equity_curve, initial_equity)
 }
 
@@ -230,7 +230,7 @@ pub(crate) fn reconstruct_trades(fills: Vec<PyFill>) -> Vec<PyTrade> {
 /// trough → recovery-or-end stretch. A monotone-non-decreasing curve produces
 /// an empty list.
 #[pyfunction]
-pub(crate) fn drawdown_segments(equity_curve: Vec<Real>) -> Vec<PyDrawdownSegment> {
+pub(crate) fn drawdown_segments(equity_curve: Series) -> Vec<PyDrawdownSegment> {
     core_metrics::drawdown_segments(&equity_curve)
         .into_iter()
         .map(|inner| PyDrawdownSegment { inner })
@@ -241,46 +241,46 @@ pub(crate) fn drawdown_segments(equity_curve: Vec<Real>) -> Vec<PyDrawdownSegmen
 
 /// Arithmetic mean of `returns`. `0.0` on empty input.
 #[pyfunction]
-pub(crate) fn mean_return(returns: Vec<Real>) -> Real {
+pub(crate) fn mean_return(returns: Series) -> Real {
     core_metrics::mean_return(&returns)
 }
 
 /// Median of `returns`. `0.0` on empty input; the mean of the two middle
 /// values on even-length input.
 #[pyfunction]
-pub(crate) fn median_return(returns: Vec<Real>) -> Real {
+pub(crate) fn median_return(returns: Series) -> Real {
     core_metrics::median_return(&returns)
 }
 
 /// Sample (Bessel-corrected, `ddof=1`) standard deviation of `returns`. `0.0`
 /// on empty or single-sample input.
 #[pyfunction]
-pub(crate) fn stddev_return(returns: Vec<Real>) -> Real {
+pub(crate) fn stddev_return(returns: Series) -> Real {
     core_metrics::stddev_return(&returns)
 }
 
 /// Largest single-bar return, or `0.0` on empty input.
 #[pyfunction]
-pub(crate) fn best_return(returns: Vec<Real>) -> Real {
+pub(crate) fn best_return(returns: Series) -> Real {
     core_metrics::best_return(&returns)
 }
 
 /// Smallest single-bar return, or `0.0` on empty input.
 #[pyfunction]
-pub(crate) fn worst_return(returns: Vec<Real>) -> Real {
+pub(crate) fn worst_return(returns: Series) -> Real {
     core_metrics::worst_return(&returns)
 }
 
 /// Fraction of bars with a strictly positive return. `0.0` on empty input.
 #[pyfunction]
-pub(crate) fn positive_bars_ratio(returns: Vec<Real>) -> Real {
+pub(crate) fn positive_bars_ratio(returns: Series) -> Real {
     core_metrics::positive_bars_ratio(&returns)
 }
 
 /// Biased (population) skewness `g1 = m3 / m2^(3/2)`. Matches
 /// `scipy.stats.skew(bias=True)`. `None` when the second moment is zero.
 #[pyfunction]
-pub(crate) fn skewness(returns: Vec<Real>) -> Option<Real> {
+pub(crate) fn skewness(returns: Series) -> Option<Real> {
     core_metrics::skewness(&returns)
 }
 
@@ -288,27 +288,27 @@ pub(crate) fn skewness(returns: Vec<Real>) -> Option<Real> {
 /// `scipy.stats.kurtosis(bias=True, fisher=True)`. `None` when the second
 /// moment is zero.
 #[pyfunction]
-pub(crate) fn kurtosis(returns: Vec<Real>) -> Option<Real> {
+pub(crate) fn kurtosis(returns: Series) -> Option<Real> {
     core_metrics::kurtosis(&returns)
 }
 
 /// Historical VaR at `confidence` (e.g. `0.95`) as a positive loss fraction.
 #[pyfunction]
-pub(crate) fn value_at_risk(returns: Vec<Real>, confidence: Real) -> Real {
+pub(crate) fn value_at_risk(returns: Series, confidence: Real) -> Real {
     core_metrics::value_at_risk(&returns, confidence)
 }
 
 /// Historical Conditional VaR (Expected Shortfall) at `confidence` as a
 /// positive loss fraction.
 #[pyfunction]
-pub(crate) fn conditional_value_at_risk(returns: Vec<Real>, confidence: Real) -> Real {
+pub(crate) fn conditional_value_at_risk(returns: Series, confidence: Real) -> Real {
     core_metrics::conditional_value_at_risk(&returns, confidence)
 }
 
 /// `|P95| / |P5|` — a coarse symmetry check on the tails. `None` when the
 /// P5-magnitude is zero.
 #[pyfunction]
-pub(crate) fn tail_ratio(returns: Vec<Real>) -> Option<Real> {
+pub(crate) fn tail_ratio(returns: Series) -> Option<Real> {
     core_metrics::tail_ratio(&returns)
 }
 
@@ -317,26 +317,26 @@ pub(crate) fn tail_ratio(returns: Vec<Real>) -> Option<Real> {
 /// Total return as a fraction: `(final - initial) / initial`. `0.0` when the
 /// initial equity is zero.
 #[pyfunction]
-pub(crate) fn total_return(equity_curve: Vec<Real>, initial_equity: Real) -> Real {
+pub(crate) fn total_return(equity_curve: Series, initial_equity: Real) -> Real {
     core_metrics::total_return(&equity_curve, initial_equity)
 }
 
 /// Compound annual growth rate as a fraction. `None` when the equity path is
 /// non-positive at either endpoint, the run is empty, or `bars_per_year <= 0`.
 #[pyfunction]
-pub(crate) fn cagr(equity_curve: Vec<Real>, initial_equity: Real, bars_per_year: Real) -> Option<Real> {
+pub(crate) fn cagr(equity_curve: Series, initial_equity: Real, bars_per_year: Real) -> Option<Real> {
     core_metrics::cagr(&equity_curve, initial_equity, bars_per_year)
 }
 
 /// Arithmetic mean of `returns` scaled by `bars_per_year`.
 #[pyfunction]
-pub(crate) fn annualized_return(returns: Vec<Real>, bars_per_year: Real) -> Real {
+pub(crate) fn annualized_return(returns: Series, bars_per_year: Real) -> Real {
     core_metrics::annualized_return(&returns, bars_per_year)
 }
 
 /// Sample stddev of `returns` scaled by `sqrt(bars_per_year)`.
 #[pyfunction]
-pub(crate) fn annualized_volatility(returns: Vec<Real>, bars_per_year: Real) -> Real {
+pub(crate) fn annualized_volatility(returns: Series, bars_per_year: Real) -> Real {
     core_metrics::annualized_volatility(&returns, bars_per_year)
 }
 
@@ -345,20 +345,20 @@ pub(crate) fn annualized_volatility(returns: Vec<Real>, bars_per_year: Real) -> 
 /// Annualized Sharpe ratio. `risk_free_rate` is the annualized rf as a
 /// fraction. `None` when the annualized volatility is zero.
 #[pyfunction]
-pub(crate) fn sharpe(returns: Vec<Real>, risk_free_rate: Real, bars_per_year: Real) -> Option<Real> {
+pub(crate) fn sharpe(returns: Series, risk_free_rate: Real, bars_per_year: Real) -> Option<Real> {
     core_metrics::sharpe(&returns, risk_free_rate, bars_per_year)
 }
 
 /// Annualized Sortino ratio (downside deviation, `n` divisor). `None` when
 /// every bar clears the threshold or `returns` is empty.
 #[pyfunction]
-pub(crate) fn sortino(returns: Vec<Real>, risk_free_rate: Real, bars_per_year: Real) -> Option<Real> {
+pub(crate) fn sortino(returns: Series, risk_free_rate: Real, bars_per_year: Real) -> Option<Real> {
     core_metrics::sortino(&returns, risk_free_rate, bars_per_year)
 }
 
 /// Calmar ratio: `cagr / max_drawdown`. `None` when either is undefined.
 #[pyfunction]
-pub(crate) fn calmar(equity_curve: Vec<Real>, initial_equity: Real, bars_per_year: Real) -> Option<Real> {
+pub(crate) fn calmar(equity_curve: Series, initial_equity: Real, bars_per_year: Real) -> Option<Real> {
     core_metrics::calmar(&equity_curve, initial_equity, bars_per_year)
 }
 
@@ -366,14 +366,14 @@ pub(crate) fn calmar(equity_curve: Vec<Real>, initial_equity: Real, bars_per_yea
 /// per-bar rate (`rf / bars_per_year`) as `threshold`. `None` when every
 /// return clears the threshold (no downside).
 #[pyfunction]
-pub(crate) fn omega(returns: Vec<Real>, threshold: Real) -> Option<Real> {
+pub(crate) fn omega(returns: Series, threshold: Real) -> Option<Real> {
     core_metrics::omega(&returns, threshold)
 }
 
 /// Peter Martin's Ulcer Index, in fractional form. `0.0` on a monotone-
 /// non-decreasing curve.
 #[pyfunction]
-pub(crate) fn ulcer_index(equity_curve: Vec<Real>) -> Real {
+pub(crate) fn ulcer_index(equity_curve: Series) -> Real {
     core_metrics::ulcer_index(&equity_curve)
 }
 
@@ -381,7 +381,7 @@ pub(crate) fn ulcer_index(equity_curve: Vec<Real>) -> Real {
 /// when either input is degenerate.
 #[pyfunction]
 pub(crate) fn ulcer_performance_index(
-    equity_curve: Vec<Real>,
+    equity_curve: Series,
     initial_equity: Real,
     risk_free_rate: Real,
     bars_per_year: Real,
@@ -403,7 +403,7 @@ pub(crate) fn ulcer_performance_index(
 /// skew / kurtosis is undefined.
 #[pyfunction]
 pub(crate) fn probabilistic_sharpe(
-    returns: Vec<Real>,
+    returns: Series,
     risk_free_rate: Real,
     bars_per_year: Real,
     benchmark_sharpe: Real,
@@ -441,7 +441,7 @@ pub(crate) fn probabilistic_sharpe_from_stats(
 /// strictly positive, or the underlying PSR is undefined.
 #[pyfunction]
 pub(crate) fn deflated_sharpe(
-    returns: Vec<Real>,
+    returns: Series,
     risk_free_rate: Real,
     bars_per_year: Real,
     n_trials: usize,
@@ -529,7 +529,7 @@ pub(crate) fn time_in_drawdown_ratio(segments: Vec<PyDrawdownSegment>, total_bar
 /// `total_return / max_drawdown` — the non-annualized cousin of Calmar.
 /// `None` when the max drawdown is zero.
 #[pyfunction]
-pub(crate) fn recovery_factor(equity_curve: Vec<Real>, initial_equity: Real) -> Option<Real> {
+pub(crate) fn recovery_factor(equity_curve: Series, initial_equity: Real) -> Option<Real> {
     core_metrics::recovery_factor(&equity_curve, initial_equity)
 }
 
