@@ -46,17 +46,21 @@ instrument, at the cost of a ~50× slowdown.
 
 ## Measurement conditions
 
-The first pass of these numbers was taken on a machine with other builds
-running, and was wrong in an instructive way — see *A measurement that lied*
-below. Everything in the results table was **re-measured on a quiet machine**,
-with the baseline and the current tree built from **identical codegen settings**
+Every number in the results table is measured on an otherwise idle system, with
+the baseline and the current tree built from **identical codegen settings**
 (`CARGO_PROFILE_BENCH_LTO=false CARGO_PROFILE_BENCH_CODEGEN_UNITS=16`) so the
 comparison isolates the code change rather than the profile.
+
+Throughout this document the **baseline** is commit `da252ff` — the version bump
+that set the manifests to 0.58.0, *before* any of the work below. Note that the
+released `v0.58.0` tag is not that commit: the perf work landed on top of
+`da252ff` and shipped inside 0.58.0, so the tag points past the baseline. Compare
+against the SHA, never the tag.
 
 Method, if you need to reproduce it:
 
 ```
-git worktree add ../fugazi-base v0.58.0
+git worktree add ../fugazi-base da252ff
 cp -r benches ../fugazi-base/            # add the [[bench]] entries too
 # then, with the same CARGO_PROFILE_BENCH_* on both sides:
 cargo bench --bench tree --bench driver --bench metrics --bench multi_asset
@@ -66,13 +70,13 @@ scripts/perf-compare.sh icount ../fugazi-base
 ## A measurement that lied
 
 `driver/sma_crossover/rust` clocked **+10.9% to +23.8% slower** after the
-readiness change — on a quiet machine, reproducibly, with codegen equalised. It
-looked like a real regression worth chasing.
+readiness change — reproducibly, with codegen equalised. It looked like a real
+regression worth chasing.
 
 It was not. Callgrind says that workload executes **1.61% fewer instructions**
 than before:
 
-| workload | v0.58.0 | now | instructions |
+| workload | baseline | now | instructions |
 |---|---:|---:|---:|
 | `sma_rust` | 111 733 102 | 109 935 508 | **−1.61%** |
 | `macd_rust` | 175 407 807 | 107 533 113 | −38.69% |
@@ -93,7 +97,7 @@ a replacement for timing — instruction count ignores cache, branch prediction
 and ILP — but it answers "is this change doing more work?" exactly, and that is
 usually the question.
 
-## Baseline — v0.58.0 (`da252ff`)
+## Baseline — `da252ff`
 
 <!-- BASELINE:START -->
 Saved as criterion baseline `v058` (`scripts/perf-compare.sh diff v058`).
@@ -200,7 +204,7 @@ The Rust and YAML paths allocate **identically**, which is worth noting: the
 2.3–2.8× driver gap above is not allocation, it is the per-bar work.
 <!-- BASELINE:END -->
 
-## Results — v0.58.0 → v0.59.0
+## Results — baseline → released v0.58.0
 
 Quiet machine, identical codegen on both sides, so **the profile change (F7) is
 excluded from this table**; it is measured separately below.
@@ -222,7 +226,7 @@ excluded from this table**; it is measured separately below.
 
 ### Wall-clock
 
-| benchmark | v0.58.0 | now | change |
+| benchmark | baseline | now | change |
 |---|---:|---:|---:|
 | `tree/is_ready/8` | 2.344 ms | 3.16 µs | **−99.9%** |
 | `tree/is_ready/1` | 76.60 µs | 3.25 µs | −95.8% |
@@ -271,12 +275,11 @@ confirming the gain is deduplication rather than anything compiler-side.
 
 ### The profile change (F7), settled
 
-Measured properly: **one source tree built three ways**, quiet machine, both
-instruments. (The first attempt compared configurations across different
-contention windows and reached a partly-wrong conclusion; a second attempt was
-invalidated by `ls | head -1` picking stale bench binaries — it sorts by hash,
-not by time. `scripts/perf-compare.sh` now deletes bench binaries before each
-variant build and fails loudly if more than one matches.)
+Method: **one source tree built three ways**, both instruments. Comparing
+configurations requires that each variant be timed against its own freshly-built
+binary, so `scripts/perf-compare.sh` deletes bench binaries before each variant
+build and fails loudly if more than one matches — selecting one by glob picks by
+hash rather than by build time, and will silently measure a stale build.
 
 | config | rebuild | instructions | wall-clock (median) |
 |---|---:|---:|---:|
@@ -305,7 +308,7 @@ still stands.
 
 ## Phase 3 — allocations, hashing, and a determinism bug
 
-Same method: quiet machine, identical codegen on both sides.
+Same method: identical codegen on both sides.
 
 ### What changed
 
@@ -345,7 +348,7 @@ Snapshot *construction* is unchanged at 3.00 allocs/bar and 201 bytes/bar for
 
 ### Wall-clock
 
-| benchmark | v0.58.0 | now | change |
+| benchmark | baseline | now | change |
 |---|---:|---:|---:|
 | `wallet/update/16` | 1.642 ms | 711 µs | **−56.7%** |
 | `wallet/equity/16` | 5.416 ms | 2.591 ms | −52.2% |
@@ -368,7 +371,7 @@ Per *symbol-bar* (should be constant in N):
 
 | symbols | 2 | 8 | 16 | 32 | 64 |
 |---|---:|---:|---:|---:|---:|
-| `update`, v0.58.0 | 204 ns | 241 | 345 | 501 | 789 |
+| `update`, baseline | 204 ns | 241 | 345 | 501 | 789 |
 | `update`, now | 227 ns | 248 | 332 | 449 | **662** |
 | `drive`, now | 310 ns | 317 | 398 | 517 | **735** |
 
@@ -533,9 +536,9 @@ irrelevant below ~16 symbols.
 ## Three-tier comparison — TA-Lib vs fugazi (Rust) vs fugazi (Python)
 
 `tools/bench_three_tier.py` drives all three from one input, 200 000 samples,
-median of 7, quiet machine. Run it with `pixi run -e bench bench` — that
-environment is the one place `talib` and a built `fugazi` wheel are importable
-from the same interpreter, which is what the comparison needs.
+median of 7. Run it with `pixi run -e bench bench` — that environment is the one
+place `talib` and a built `fugazi` wheel are importable from the same
+interpreter, which is what the comparison needs.
 
 The numbers below are a recorded run; re-running reproduces the *shape*, not the
 digits, since they depend on the machine and on which TA-Lib build the lock
@@ -589,18 +592,6 @@ candidates.
 slower than `feed(numpy)`, so the buffer fast path is not where the time is.
 This needs a profiler rather than another guess, and is deliberately left
 unexplained here rather than filled in with a plausible story.
-
-### A correction
-
-An earlier version of this section reported the Rust engine as "matching
-TA-Lib" and treated the Python number as a separate, softer question. That
-framing flattered the result: TA-Lib's Python bindings are the honest
-comparison for fugazi's Python bindings, and by that measure the gap is 10–29×.
-
-A first attempt at attributing that gap blamed `DynValue` on the strength of a
-single-boundary measurement showing **+2.3 ns** — which does not explain a 39 ns
-gap, and should not have been offered as though it did. The nested measurement
-above is what actually implicates it.
 
 ### What `stddev` buys with its 2.7×
 

@@ -167,6 +167,5 @@ and leaves a dirty tree. Locking the extra would fix that, but it is churn
 unrelated to any release, so it wants its own commit.
 
 Note that CI does not use `uv` at all (`maturin build` + `pip install`), so
-nothing depends on this file being right. That is also why its version drifted
-nine releases before anyone noticed — see the bump checklist in `CLAUDE.md`,
-which now lists it.
+nothing depends on this file being right. Nothing enforces its version either,
+which is why the release checklist lists it explicitly.

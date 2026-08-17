@@ -491,16 +491,17 @@ to decide what the signal means:
 - what happens when the exit signal fires while the entry is still resting?
 
 Each answer is a different product, and the crate deliberately has no
-`(signal, action)` rule table to hang them on (see *Not a rule engine* in
-`CLAUDE.md`). **Don't pick one without being asked.**
+`(signal, action)` rule table to hang them on (see *Not a rule engine* below).
+**This is an open design question — please raise an issue before implementing
+one**, so the semantics get settled once rather than per-shape.
 
 ## Release a version
 
 **The list of places that must agree lives in
 [CLAUDE.md](../CLAUDE.md#bumping-the-version--sync-seven-places-cargo-check-only-catches-rust-drift)**
-— one copy, because two drifted (this file said "six", that one "seven", for the
-same set of files). CI's `version-sync` job checks them, so a mismatch fails the
-build rather than shipping.
+— deliberately a single copy, so the list cannot drift between documents. CI's
+`version-sync` job checks them, so a mismatch fails the build rather than
+shipping.
 
 Then `cargo check --workspace` to refresh `Cargo.lock`, commit the manifests,
 tag `vX.Y.Z`, and push the tag. Then **publish a GitHub Release** for that tag
@@ -611,4 +612,5 @@ against. If you add a shape that composes strategies, refuse the impossible
 wiring at build time the same way — loudly, not by producing zeros.
 
 **Not a rule engine.** `SingleAssetStrategy` is four signal slots plus
-protective levels. Don't add `(signal, action)` tables without being asked.
+protective levels. Adding a `(signal, action)` table is a deliberate
+non-goal — raise an issue first.

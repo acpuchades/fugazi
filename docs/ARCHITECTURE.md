@@ -226,7 +226,7 @@ open/close short), default `Const::<Candle>::new(false)`.
   orders the wallet owns; the strategy re-submits each bar (idempotent, latest-wins);
   the wallet triggers and prices them (at level, or `open` on gap). Trailing tracks
   *completed* bars.
-- **Not a rule engine.** Don't add `(signal, action)` tables without being asked.
+- **Not a rule engine.** `(signal, action)` tables are a deliberate non-goal.
 
 **`src/strategies/` catalogue** = free functions returning `SingleAssetStrategy`
 (`ma_crossover`, `rsi_reversal`, `donchian_breakout`, `keltner_breakout`, … under
@@ -507,8 +507,8 @@ Priced **from outside**: `update(symbol, candle) -> Vec<Order>` feeds a bar per 
   yet: the four shapes still enter at market, so limits are reachable only from a
   hand-written `Strategy` or directly from Python via `PaperWallet.set_limit`.
   Wiring them into the signal slots is a **design question** (what an entry signal
-  firing *means* when the limit may never fill) — don't add a `(signal, action)`
-  table without being asked.
+  firing *means* when the limit may never fill), not missing plumbing; a
+  `(signal, action)` table remains a deliberate non-goal.
 - **`PaperWallet` timing.** Queues market moves, fills at *next* bar's `open`;
   protective fill when the bar trades through the trigger (at level, or `open` on
   gap). A backtest never fills on the signal's own bar. Market moves queue one per
