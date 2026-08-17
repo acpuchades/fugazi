@@ -1140,12 +1140,47 @@ Two consequences worth keeping straight:
   there. Do not chase the former.
 
 **Fusing** — building `Sma<Identity<Real>>` concretely when the source is a plain
-root, so a two-level chain becomes one — is therefore worth **8.0
-instructions/sample**, not the ~15 first estimated, and separately 9.0/bar for a
-candle-field root (`sma_two_levels` vs `sma_fused`). About 13% of the scalar
-path. Thin on its own; its real value is that it is the *mechanism* a fully
-monomorphised carrier would need, since that also requires the root's concrete
-type to survive to the wrapping constructor.
+root, so a two-level chain becomes one — is worth **8.0 instructions/sample**,
+not the ~15 first estimated. **Done** (`PendingRoot` in `python/src/carriers.rs`),
+and it delivered exactly that on both shapes:
+
+| instr/sample | before | after |
+|---|---:|---:|
+| `sma(identity())`, 1-D | 62.11 | **54.11** |
+| `sma(close())`, frame | 94.16 | **86.16** |
+| `close()` alone — nothing wraps it | 53.15 | 53.15 |
+| `atr(14)` — takes no source | 95.81 | 95.81 |
+
+The two rows that cannot fuse are unchanged to the hundredth, which is the
+control: fusing moved what it should and nothing else.
+
+**Wall-clock cannot see it, and that is expected.** 8 instructions is ~0.3
+ns/sample; this machine's minimum-of-35 reproduces to about ±0.4. The run after
+the change put `sma` at 3.92 ns against 3.57 before, `rsi` at 6.99 against 7.76
+and `stddev` at 11.23 against 11.79 — scattered both ways, i.e. trap 6 (wall-clock
+conflates work with code layout) at exactly the granularity it was written for.
+The README table was therefore **not** re-cut from that run: substituting one
+noise sample for another is not an update. Instruction count is the instrument
+that resolves a change this size, and it is unambiguous.
+
+Two design notes worth keeping, both of which cost a rebuild to learn:
+
+* **The root is metadata on `PyIndicator`, not two new `AnySource` variants.**
+  The variant version works and is worse: `AnySource` is what ~15 unrelated
+  matches dispatch on, so widening it meant either an arm in each or a
+  `settle()` normaliser plus six `unreachable!()` arms the compiler cannot verify
+  away. Not a good trade for 8 instructions. As carrier metadata every existing
+  match is untouched and only the fusing constructors know roots exist.
+* **The bar field stays a *type* parameter.** Making it a runtime enum would
+  collapse seven monomorphisations into one, and costs ~5 instructions/sample on
+  every field read: `ta.close().feed(frame)` went 53.2 → 58.2, a 9% regression on
+  the commonest root in the API, and it gave back most of the 8 when fused. The
+  seven typed instantiations cost **+0.9% of extension size** (15.75 → 15.89 MB),
+  which is the cheaper side of that trade.
+
+Its other value is being the *mechanism* a fully monomorphised carrier would
+need, since that also requires the root's concrete type to survive to the
+wrapping constructor.
 
 **Batching still does not pay, now confirmed against the fused shape.** The
 theory was that fusing and batching are complementary — a concrete chain inside
