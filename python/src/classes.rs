@@ -989,11 +989,23 @@ impl PyAtomSource {
 #[pyclass(name = "Indicator")]
 pub(crate) struct PyIndicator {
     pub(crate) src: AnySource,
+    /// The chain's root, kept **concrete** when it is a plain leaf, purely so a
+    /// wrapping constructor can absorb it. See [`PendingRoot`].
+    pub(crate) root: Option<PendingRoot>,
 }
 
 impl PyIndicator {
     pub(crate) fn wrap(src: AnySource) -> Self {
-        PyIndicator { src }
+        PyIndicator { src, root: None }
+    }
+
+    /// A leaf that a wrapper may fuse over. `src` must be the erased form of
+    /// `root` and nothing else — that equivalence is what makes fusing invisible.
+    pub(crate) fn rooted(src: AnySource, root: PendingRoot) -> Self {
+        PyIndicator {
+            src,
+            root: Some(root),
+        }
     }
 }
 
@@ -1267,32 +1279,32 @@ impl PyIndicator {
     // --- lookback / rolling -> Indicator --------------------------------------
     /// `self` delayed by `period` steps.
     pub(crate) fn lag(&self, period: usize) -> PyIndicator {
-        PyIndicator::wrap(map_source!(self.src.clone(), |s| s.lag(period)))
+        PyIndicator::wrap(map_rooted!(self, |s| s.lag(period)))
     }
     /// Discrete difference over `period` steps (`x[t] - x[t-n]`).
     pub(crate) fn diff(&self, period: usize) -> PyIndicator {
-        PyIndicator::wrap(map_source!(self.src.clone(), |s| s.diff(period)))
+        PyIndicator::wrap(map_rooted!(self, |s| s.diff(period)))
     }
     /// Ratio to the value `period` steps ago (`x[t] / x[t-n]`).
     pub(crate) fn ratio(&self, period: usize) -> PyIndicator {
-        PyIndicator::wrap(map_source!(self.src.clone(), |s| s.ratio(period)))
+        PyIndicator::wrap(map_rooted!(self, |s| s.ratio(period)))
     }
     /// Percentage rate of change over `period` steps.
     pub(crate) fn roc(&self, period: usize) -> PyIndicator {
-        PyIndicator::wrap(map_source!(self.src.clone(), |s| s.roc(period)))
+        PyIndicator::wrap(map_rooted!(self, |s| s.roc(period)))
     }
     /// Rolling maximum over `period` steps.
     pub(crate) fn rolling_max(&self, period: usize) -> PyResult<PyIndicator> {
         ensure_period(period)?;
         Ok(PyIndicator::wrap(
-            map_source!(self.src.clone(), |s| s.rolling_max(period))
+            map_rooted!(self, |s| s.rolling_max(period))
         ))
     }
     /// Rolling minimum over `period` steps.
     pub(crate) fn rolling_min(&self, period: usize) -> PyResult<PyIndicator> {
         ensure_period(period)?;
         Ok(PyIndicator::wrap(
-            map_source!(self.src.clone(), |s| s.rolling_min(period))
+            map_rooted!(self, |s| s.rolling_min(period))
         ))
     }
 
@@ -1302,7 +1314,7 @@ impl PyIndicator {
     pub(crate) fn log(&self, base: f64) -> PyResult<PyIndicator> {
         ensure_log_base(base)?;
         Ok(PyIndicator::wrap(
-            map_source!(self.src.clone(), |s| Log::new(s, base))
+            map_rooted!(self, |s| Log::new(s, base))
         ))
     }
 
@@ -1312,7 +1324,7 @@ impl PyIndicator {
     /// waits for this subtree's IIR settling tail. Use to explicitly opt out of
     /// the safe default that waits for it.
     pub(crate) fn unstable(&self) -> PyIndicator {
-        PyIndicator::wrap(map_source!(self.src.clone(), |s| s.unstable()))
+        PyIndicator::wrap(map_rooted!(self, |s| s.unstable()))
     }
 
     pub(crate) fn __repr__(&self) -> String {

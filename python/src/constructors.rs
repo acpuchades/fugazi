@@ -955,15 +955,19 @@ macro_rules! atom_leaf_source {
 /// one that matters most. An explicit `source=` still selects core's atom- or
 /// snapshot-rooted `Field`, because then the atom is what the caller has.
 macro_rules! bar_leaf_source {
-    ($name:ident, $field:ty, $of_ctor:path, $doc:literal) => {
+    ($name:ident, $field:expr, $marker:ty, $of_ctor:path, $doc:literal) => {
         #[doc = $doc]
         #[pyfunction]
         #[pyo3(signature = (source = None))]
         pub(crate) fn $name(source: Option<PyRef<'_, PyAtomSource>>) -> PyIndicator {
             match source.map(|s| s.inner.clone()) {
-                None => PyIndicator::wrap(AnySource::Candle(runtime::erase(
-                    BarField::<$field>::new(),
-                ))),
+                // `rooted`: the erased form for anyone who just drives it, plus
+                // the concrete leaf so a wrapper can fuse over it instead.
+                // See `PendingRoot`.
+                None => PyIndicator::rooted(
+                    AnySource::Candle(runtime::erase(BarField::<$marker>::new())),
+                    PendingRoot::Field($field),
+                ),
                 Some(AnyAtomSource::Atom(s)) => {
                     PyIndicator::wrap(AnySource::Atom(runtime::erase($of_ctor(s))))
                 }
@@ -996,29 +1000,33 @@ macro_rules! atom_leaf_signal {
     };
 }
 
-bar_leaf_source!(open, BarOpen, Open::of, "Source: the bar's open price.");
-bar_leaf_source!(high, BarHigh, High::of, "Source: the bar's high price.");
-bar_leaf_source!(low, BarLow, Low::of, "Source: the bar's low price.");
+bar_leaf_source!(open, BarFieldKind::Open, BarOpen, Open::of, "Source: the bar's open price.");
+bar_leaf_source!(high, BarFieldKind::High, BarHigh, High::of, "Source: the bar's high price.");
+bar_leaf_source!(low, BarFieldKind::Low, BarLow, Low::of, "Source: the bar's low price.");
 bar_leaf_source!(
     close,
+    BarFieldKind::Close,
     BarClose,
     Close::of,
     "Source: the bar's close price. Pass `source=ta.pick(key)` to read a specific asset's close out of a `Snapshot`."
 );
 bar_leaf_source!(
     volume,
+    BarFieldKind::Volume,
     BarVolume,
     Volume::of,
     "Source: the bar's volume."
 );
 bar_leaf_source!(
     typical,
+    BarFieldKind::Typical,
     BarTypical,
     Typical::of,
     "Source: the bar's typical price, (high + low + close) / 3."
 );
 bar_leaf_source!(
     median,
+    BarFieldKind::Median,
     BarMedian,
     Median::of,
     "Source: the bar's median price, (high + low) / 2."
@@ -1177,7 +1185,13 @@ pub(crate) fn pick(symbol: Option<&Bound<'_, PyAny>>, freq: Option<&Bound<'_, Py
 /// — `update(float)` and `feed([...])` rather than candles.
 #[pyfunction]
 pub(crate) fn identity() -> PyIndicator {
-    PyIndicator::wrap(AnySource::Real(runtime::erase(Identity::new())))
+    // Rooted: the erased form for anyone who just drives it, plus the concrete
+    // leaf so a wrapper can fuse over it. See `PendingRoot`.
+    let root = Identity::<Real>::new();
+    PyIndicator::rooted(
+        AnySource::Real(runtime::erase(root.clone())),
+        PendingRoot::Real(root),
+    )
 }
 
 /// Source: a constant value, ignoring the input. Mirrors Rust's `Value`, which
@@ -1215,7 +1229,7 @@ macro_rules! src_period {
         #[pyfunction]
         pub(crate) fn $name(source: PyRef<'_, PyIndicator>, period: usize) -> PyResult<PyIndicator> {
             ensure_period(period)?;
-            Ok(PyIndicator::wrap(map_source!(source.src.clone(), |s| {
+            Ok(PyIndicator::wrap(map_rooted!(&*source, |s| {
                 $ty::new(s, period)
             })))
         }
@@ -1258,7 +1272,7 @@ src_period!(
 #[pyfunction(name = "skewness")]
 pub(crate) fn skewness_indicator(source: PyRef<'_, PyIndicator>, period: usize) -> PyResult<PyIndicator> {
     ensure_period(period)?;
-    Ok(PyIndicator::wrap(map_source!(source.src.clone(), |s| {
+    Ok(PyIndicator::wrap(map_rooted!(&*source, |s| {
         Skewness::new(s, period)
     })))
 }
@@ -1267,7 +1281,7 @@ pub(crate) fn skewness_indicator(source: PyRef<'_, PyIndicator>, period: usize) 
 #[pyfunction(name = "kurtosis")]
 pub(crate) fn kurtosis_indicator(source: PyRef<'_, PyIndicator>, period: usize) -> PyResult<PyIndicator> {
     ensure_period(period)?;
-    Ok(PyIndicator::wrap(map_source!(source.src.clone(), |s| {
+    Ok(PyIndicator::wrap(map_rooted!(&*source, |s| {
         Kurtosis::new(s, period)
     })))
 }
@@ -1319,7 +1333,7 @@ pub(crate) fn percentile(source: PyRef<'_, PyIndicator>, period: usize, pct: f64
             "percentile pct must lie in [0.0, 1.0], got {pct}"
         )));
     }
-    Ok(PyIndicator::wrap(map_source!(source.src.clone(), |s| {
+    Ok(PyIndicator::wrap(map_rooted!(&*source, |s| {
         Percentile::new(s, period, pct)
     })))
 }
@@ -1388,7 +1402,7 @@ pub(crate) fn variance_ratio(
             "period must be at least lag + 2 (need >1 overlapping block)",
         ));
     }
-    Ok(PyIndicator::wrap(map_source!(source.src.clone(), |s| {
+    Ok(PyIndicator::wrap(map_rooted!(&*source, |s| {
         VarianceRatio::new(s, period, lag)
     })))
 }
@@ -1410,7 +1424,7 @@ src_period!(
 #[pyo3(signature = (source, base = std::f64::consts::E))]
 pub(crate) fn log(source: PyRef<'_, PyIndicator>, base: f64) -> PyResult<PyIndicator> {
     ensure_log_base(base)?;
-    Ok(PyIndicator::wrap(map_source!(source.src.clone(), |s| {
+    Ok(PyIndicator::wrap(map_rooted!(&*source, |s| {
         Log::new(s, base)
     })))
 }
@@ -1607,7 +1621,7 @@ pub(crate) fn stoch_rsi(
 ) -> PyResult<PyIndicator> {
     ensure_period(rsi_period)?;
     ensure_period(stoch_period)?;
-    Ok(PyIndicator::wrap(map_source!(source.src.clone(), |s| {
+    Ok(PyIndicator::wrap(map_rooted!(&*source, |s| {
         Stochastic::new(Rsi::new(s, rsi_period), stoch_period)
     })))
 }

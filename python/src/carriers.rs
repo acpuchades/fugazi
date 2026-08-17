@@ -457,6 +457,7 @@ impl AnySharedMulti {
                     local_gen: cell.lock().expect("mutex poisoned").generation,
                     last_value: None,
                 })),
+                root: None,
             },
             AnySharedMulti::Real(cell) => PyIndicator {
                 src: AnySource::Real(runtime::erase(SharedProjector::<Real> {
@@ -465,6 +466,7 @@ impl AnySharedMulti {
                     local_gen: cell.lock().expect("mutex poisoned").generation,
                     last_value: None,
                 })),
+                root: None,
             },
             AnySharedMulti::Snapshot(cell) => PyIndicator {
                 src: AnySource::Snapshot(runtime::erase(SharedProjector::<Snapshot<Symbol>> {
@@ -473,6 +475,7 @@ impl AnySharedMulti {
                     local_gen: cell.lock().expect("mutex poisoned").generation,
                     last_value: None,
                 })),
+                root: None,
             },
         })
     }
@@ -690,6 +693,23 @@ impl AnySource {
 /// this, so the most common root in the Python API stays in the cheap domain;
 /// `ta.close(source=...)` still builds core's atom- or snapshot-rooted `Field`.
 ///
+/// # The field is a type parameter, and that was measured
+///
+/// It was briefly an enum with the field chosen at run time, so that fusing
+/// (see [`PendingRoot`]) would need one monomorphisation per constructor
+/// instead of seven. The branch is not free:
+///
+/// | instr/sample | typed | runtime enum |
+/// |---|---:|---:|
+/// | `ta.close().feed(frame)` | **53.2** | 58.2 |
+/// | `ta.sma(ta.close(), 14).feed(frame)` | 94.2 | 92.2 |
+///
+/// ~5 instructions/sample, paid on *every* bar-field read. Unfused — a bare
+/// `ta.close()` — that is pure loss, and it made the commonest root in the API
+/// 9% worse. Fused it ate most of the 8 that fusing saves. Seven
+/// instantiations is the cheaper side of that trade; see [`PendingRoot`] for
+/// what it costs in binary size.
+///
 /// The markers below delegate to the same public `Candle` accessors core's own
 /// markers do, so no formula is duplicated — `typical()` and `median()` in
 /// particular are core's methods, not reimplementations.
@@ -749,6 +769,76 @@ bar_field_marker!(BarClose, |c| c.close);
 bar_field_marker!(BarVolume, |c| c.volume);
 bar_field_marker!(BarTypical, |c| c.typical());
 bar_field_marker!(BarMedian, |c| c.median());
+
+/// Which bar field a [`PendingRoot::Field`] root reads. A tag, not a reader:
+/// `map_rooted!` matches it to pick the typed [`BarField`] to fuse over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BarFieldKind {
+    Open,
+    High,
+    Low,
+    Close,
+    Volume,
+    Typical,
+    Median,
+}
+
+/// A chain root kept in its concrete type, so a wrapping constructor can be
+/// monomorphised over it instead of over a `Box<dyn …>`.
+///
+/// # What this is for
+///
+/// `ta.sma(ta.close(), 14)` used to erase twice: `close()` handed back an
+/// already-boxed source, so by the time `sma()` saw it the leaf was opaque and
+/// could only be boxed again. Carrying the leaf's concrete type alongside its
+/// erased form lets `map_rooted!` build `Sma<BarFieldDyn>` — **one** erased level
+/// rather than two.
+///
+/// Measured (`benches/icount.rs`, `sma_scalar_*`, net of a control, every variant
+/// storing an `Option<Real>` per sample):
+///
+/// | erased levels | | instr/sample |
+/// |---:|---|---:|
+/// | 2 | as it was | 45.0 |
+/// | 1 | fused, this | **37.0** |
+/// | 0 | unreachable — the carrier must erase something | 16.0 |
+///
+/// So this is worth **8.0 instructions/sample**. The lopsided split is the
+/// useful part: the *outer* level costs 21, because dropping the last erasure is
+/// what lets the chain inline into the driving loop and hold its state in
+/// registers. Only a fully monomorphised carrier could take that one, which is a
+/// much larger change and deliberately not attempted here.
+///
+/// # Why this lives on `PyIndicator` and not in `AnySource`
+///
+/// The first attempt added `RootReal`/`RootField` variants to [`AnySource`].
+/// That works, and it is worse: `AnySource` is the vocabulary *every* consumer
+/// matches on, so two extra variants meant either an arm in ~15 unrelated
+/// matches or a `settle()` normaliser plus six `unreachable!()` arms the compiler
+/// could not verify away. Neither is a good trade for 8 instructions.
+///
+/// Here the root is **metadata on the carrier**. `AnySource` keeps exactly the
+/// five domains it always had, every existing match is untouched, and the only
+/// code that knows roots exist is the handful of constructors that fuse. The
+/// cost is that a rooted leaf holds its root twice — once erased in `src`, once
+/// concrete here — which is a few dozen bytes at construction and nothing per
+/// sample.
+///
+/// # The invariant
+///
+/// `PyIndicator::src` **must** be the erased form of `PyIndicator::root`
+/// whenever `root` is `Some`. Fusing swaps one for the other, so if they ever
+/// disagree the fused chain computes something different from the unfused one.
+/// Only [`PyIndicator::rooted`] sets them, and only from the same value.
+#[derive(Debug, Clone)]
+pub(crate) enum PendingRoot {
+    /// `ta.identity()` — a raw value stream.
+    Real(Identity<Real>),
+    /// `ta.close()`, `ta.high()`, … — which bar field, as a tag. `map_rooted!`
+    /// turns it back into a typed [`BarField`] so the fused wrapper gets a
+    /// direct field load rather than a branch.
+    Field(BarFieldKind),
+}
 
 /// Lift a bar-only chain into the atom domain, so the two can be combined.
 ///

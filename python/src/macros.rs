@@ -23,6 +23,52 @@ macro_rules! map_source {
     };
 }
 
+/// Apply a source-wrapping constructor, **fusing a plain root** when there is
+/// one.
+///
+/// The fusing twin of [`map_source!`], and the only place roots are observed.
+/// Takes the whole `PyIndicator` rather than its `src`, because the root lives
+/// beside `src` on the carrier — see [`PendingRoot`] for why it lives there and
+/// what it is worth.
+///
+/// The two extra arms monomorphise `$build` over the concrete root, so each
+/// wrapping constructor gains two instantiations. That is the price of fusing,
+/// and it is why the bar root is one `BarFieldDyn` with a runtime field rather
+/// than seven typed markers: seven would have multiplied, two only add.
+///
+/// The `None` arm is exactly `map_source!`, so an unrooted chain behaves as it
+/// always did.
+macro_rules! map_rooted {
+    ($ind:expr, |$s:ident| $build:expr) => {{
+        let ind = $ind;
+        match ind.root.clone() {
+            Some(PendingRoot::Real($s)) => AnySource::Real(runtime::erase($build)),
+            // Seven arms, one per field, so `$build` monomorphises over a typed
+            // `BarField<F>` and the fused chain does a direct load. A runtime
+            // field enum would collapse these into one instantiation and cost ~5
+            // instructions/sample doing it — measured, see `BarField`.
+            Some(PendingRoot::Field(k)) => {
+                macro_rules! fuse_field {
+                    ($marker:ty) => {{
+                        let $s = BarField::<$marker>::new();
+                        AnySource::Candle(runtime::erase($build))
+                    }};
+                }
+                match k {
+                    BarFieldKind::Open => fuse_field!(BarOpen),
+                    BarFieldKind::High => fuse_field!(BarHigh),
+                    BarFieldKind::Low => fuse_field!(BarLow),
+                    BarFieldKind::Close => fuse_field!(BarClose),
+                    BarFieldKind::Volume => fuse_field!(BarVolume),
+                    BarFieldKind::Typical => fuse_field!(BarTypical),
+                    BarFieldKind::Median => fuse_field!(BarMedian),
+                }
+            }
+            None => map_source!(ind.src.clone(), |$s| $build),
+        }
+    }};
+}
+
 /// Combine two sources into a new source; resolves a constant against its
 /// partner, errors on a genuine domain clash.
 macro_rules! combine_sources {

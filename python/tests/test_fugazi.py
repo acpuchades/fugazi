@@ -280,6 +280,88 @@ def test_identity_streams_raw_floats():
     assert out[2] == pytest.approx(2.0) and out[3] == pytest.approx(3.0)
 
 
+# ---------------------------------------------------------------------------
+# Root fusing
+#
+# A leaf built by `ta.close()` / `ta.identity()` is carried both erased (in
+# `src`) and concrete (in `root`), so a wrapping constructor can rebuild itself
+# over the concrete leaf and save an erasure level. The whole optimisation is
+# sound only if the two describe the same leaf, so what needs pinning is that
+# fusing is *invisible*: same field, same numbers, same readiness.
+# ---------------------------------------------------------------------------
+
+# Every field distinct on every bar, so a fused root that reads the wrong one
+# gives a wrong number instead of an accidental match.
+FUSABLE_BARS = [
+    ta.Candle(10.0, 40.0, 5.0, 30.0, 1000.0),
+    ta.Candle(11.0, 41.0, 6.0, 31.0, 1100.0),
+    ta.Candle(12.0, 42.0, 7.0, 32.0, 1200.0),
+]
+
+BAR_FIELDS = {
+    "open": lambda c: c.open,
+    "high": lambda c: c.high,
+    "low": lambda c: c.low,
+    "close": lambda c: c.close,
+    "volume": lambda c: c.volume,
+    "typical": lambda c: c.typical(),
+    "median": lambda c: c.median(),
+}
+
+
+@pytest.mark.parametrize("field", list(BAR_FIELDS))
+def test_a_fused_bar_root_reads_the_field_it_names(field):
+    """Fusing dispatches on a field *tag*, one arm per field — so the arms are
+    exactly the kind of table that can be miswired. Every field is checked
+    through both a free-function constructor and a method."""
+    values = [BAR_FIELDS[field](c) for c in FUSABLE_BARS]
+    leaf = getattr(ta, field)
+
+    averaged = feed(ta.sma(leaf(), 2), FUSABLE_BARS)
+    assert averaged[2] == pytest.approx((values[1] + values[2]) / 2.0)
+
+    lagged = feed(leaf().lag(1), FUSABLE_BARS)
+    assert lagged[2] == pytest.approx(values[1])
+
+
+@pytest.mark.parametrize("field", list(BAR_FIELDS))
+def test_fusing_a_bar_root_changes_nothing_a_caller_can_see(field):
+    """The unfused path, for the same numbers.
+
+    `+ 0.0` is exact and its node is not a fusable root, so the same
+    constructor takes its `None` arm — the pre-fusing behaviour.
+    """
+    leaf = getattr(ta, field)
+    for build in (lambda s: ta.sma(s, 2), lambda s: s.lag(1), lambda s: s.roc(1)):
+        fused = build(leaf())
+        unfused = build(leaf() + 0.0)
+        assert feed(fused, FUSABLE_BARS) == feed(unfused, FUSABLE_BARS), field
+        assert fused.warm_up_bars() == unfused.warm_up_bars(), field
+        assert fused.stable_bars() == unfused.stable_bars(), field
+
+
+def test_fusing_an_identity_root_changes_nothing_a_caller_can_see():
+    """`ta.identity()` is the other fusable root, and the only `Real`-domain
+    one — it feeds raw floats rather than candles."""
+    values = [1.0, 2.0, 3.0, 4.0]
+    fused = ta.sma(ta.identity(), 2)
+    unfused = ta.sma(ta.identity() + 0.0, 2)
+    assert [fused.update(x) for x in values] == [unfused.update(x) for x in values]
+    assert fused.warm_up_bars() == unfused.warm_up_bars()
+
+
+def test_a_fused_root_is_still_reusable_as_a_source():
+    """Fusing rebuilds over a *clone* of the root, so the leaf a caller holds
+    is untouched and can go into a second chain."""
+    leaf = ta.close()
+    fast = ta.sma(leaf, 2)
+    slow = ta.sma(leaf, 3)
+    assert feed(fast, FUSABLE_BARS)[2] == pytest.approx(31.5)
+    assert feed(slow, FUSABLE_BARS)[2] == pytest.approx(31.0)
+    # And the leaf itself still reads closes.
+    assert feed(leaf, FUSABLE_BARS) == [30.0, 31.0, 32.0]
+
+
 def test_candle_rooted_feed_rejects_bare_series():
     """The old leniency is gone: a candle indicator needs a frame, not an array."""
     with pytest.raises(TypeError):
