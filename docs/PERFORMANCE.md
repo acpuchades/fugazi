@@ -752,15 +752,39 @@ Prototyped as a by-reference chain computing the same SMA crossover
 −71%, but **do not take that at face value**. The prototype is monomorphic,
 and it fuses `Pick` + `Close` into one node, so it avoids the `Atom` round-trip
 entirely rather than merely avoiding the clone. It bounds the win; it does not
-predict it. What is certain from the code is the traffic removed: `Combine`
-feeds the same input to *both* sides, so every binary node clones its input, and
-`Pick` clones the projected 88-byte `Atom` twice per bar (once into
-`Pick::value`, once for the return).
+predict it.
 
-**Cost.** The largest of the three: ~60 indicators, `fugazi-derive`,
-`runtime::DynIndicator`, all five strategy shapes, `python/src/`, and every doc
-example. Worth doing only if the ceiling is confirmed on a narrower slice first
-— converting `Pick` and `Combine` alone would test the thesis.
+**The sharpest reason to want it is `Pick`, and it is the reason this is the only
+candidate that helps the YAML path at all.** Every spec-built leaf is rooted on a
+`Pick`, whose `update` is:
+
+```rust
+self.value = self.source.update(input).and_then(|snap| snap.find(..).cloned()); // clone 1
+self.value.clone()                                                             // clone 2
+```
+
+**Two 88-byte `Atom` clones per leaf per bar** — a depth-8 tree pays sixteen. And
+`Pick` can avoid neither: the first because the snapshot owns the atom, the second
+because it must return an owned `Atom` while keeping one for `value()`. That is the
+same constraint that makes `Identity<Atom>` unfixable in place, and the reason a
+`FromInput`-style dodge does not generalise: an `Indicator` owes callers a stored
+value, so anything in a chain position must retain one. By reference, `Pick` hands
+back an `&Atom` borrowed from the snapshot and both clones disappear.
+
+Also removed: `Combine` feeds the same input to *both* sides, so every binary node
+clones its input.
+
+**Why the alternatives do not reach it.** The `Atom`-vs-`Candle` domain question
+that the Python carriers can answer (P1 of the plan above) has no analogue here —
+`AnyChain`'s variants are keyed by *output* domain and every one of them has
+`Input = Snapshot<Symbol>`, because a YAML strategy is inherently multi-symbol and
+therefore always roots on a `Pick`. There is no `Atom` input to narrow.
+
+**Cost.** The largest of the candidates: ~60 indicators, `fugazi-derive`,
+`runtime`'s erasure vocabulary, all five strategy shapes, `python/src/`, and every
+doc example. Worth doing only if the ceiling is confirmed on a narrower slice
+first — converting `Pick` and `Combine` alone would test the thesis, and `Pick`
+alone would price the paragraph above.
 
 ### 2. Index `Snapshot` for lookup
 
