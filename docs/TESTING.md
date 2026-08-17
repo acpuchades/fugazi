@@ -16,7 +16,7 @@ adding a thing; this is the *map* of where its tests go.
 
 ## The layers
 
-Four, from narrowest to widest. Each has one job; a test that could live in two
+Five, from narrowest to widest. Each has one job; a test that could live in two
 places belongs in the narrower one.
 
 | Layer | Lives in | Sees | Runs under |
@@ -25,11 +25,21 @@ places belongs in the narrower one.
 | **Integration** | `tests/*.rs`, one crate per file | the public API only | `cargo test` |
 | **End-to-end** | `tests/{run,costs,optimize,overlap,examples_validate}.rs` | the `fugazi` binary via `Command` | `cargo test` (needs the `cli` feature) |
 | **Cross-validation** | `tests/{talib,metrics}_validation.rs` | an external reference library's numbers | `cargo test` (both fixtures committed; skips only if one is removed) |
+| **Performance guards** | `tests/perf_guard.rs` | allocation counts and type widths | `cargo test` |
 
 Plus **doctests** (37 of them, mostly in `README.md` and the strategy-shape
 docs), which are the executable half of the user-facing prose. A `no_run` /
 `ignore` doctest is a compile check only — say so in the fence when that is
 deliberate.
+
+The performance layer is last for a reason: it asserts **only what is exact**.
+Nothing in it is timed, because a wall-clock assertion on a shared CI runner
+fails on contention rather than on regressions. What it does check —
+allocation counts that must not scale with bar count, and the `size_of` facts
+the erasure design rests on — is deterministic across machines, allocators and
+rustc versions. Timed comparisons live in `benches/` and
+`scripts/perf-compare.sh`, run by a human against a baseline; see
+[PERFORMANCE](PERFORMANCE.md).
 
 ### Unit tests
 
@@ -93,6 +103,7 @@ they are also the two suites that can silently disable themselves.
 | A diagnostic one subcommand prints | the file named for that command; one spanning several (like the snapshot-overlap warning) gets a feature-named file — `tests/overlap.rs`, as `tests/costs.rs` already does for `--costs` |
 | An `examples/` file | nothing — `tests/examples_compile.rs` (Rust) and `tests/examples_validate.rs` (YAML) cover the directory, and each refuses to let a new file in uncovered |
 | A hand-maintained mirror (`NodeSpecRaw`, the `fugazi.metrics` registration) | `tests/hand_maintained_mirrors.rs` |
+| Anything on the per-bar path (`update`, `trade`, `on_fill`, the driver) | nothing new — `tests/perf_guard.rs` already asserts that path allocates a constant number of times regardless of bar count, and will fail if you add a per-bar allocation |
 | A remote provider | `tests/sources_<venue>.rs` against `wiremock` — **never** the live API |
 | Anything with a Python mirror | `python/tests/` in the same PR (see the parity discipline in [ARCHITECTURE](ARCHITECTURE.md#parity-discipline)) |
 

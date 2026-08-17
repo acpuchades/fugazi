@@ -15,6 +15,8 @@ and signal owns its internal state and is advanced one sample at a time via
 - **Incremental** — feed one bar at a time; no full-history recomputation.
 - **Composable** — indicators own their input source, so you build complex
   signals by nesting constructors. No glue, no remembering what to feed where.
+- **Fast** — matches or beats TA-Lib's vectorised C on the common indicators
+  while staying one-bar-at-a-time. See [Performance](#performance).
 - **Minimal dependencies**, `edition = "2024"`.
 
 ## Install
@@ -1100,6 +1102,45 @@ Install with `pip install fugazi` (prebuilt wheels for Linux, macOS and
 Windows), or build from a checkout with `cd python && maturin develop --release`.
 See the [Python README](docs/PYTHON.md) for the full API.
 
+## Performance
+
+An incremental engine is usually the slow choice: a vectorised library runs one
+C loop over a whole array with no per-sample dispatch, while fugazi pays a
+function call per bar — which is the price of the same code driving a live
+stream. It turns out not to cost anything.
+
+Against [TA-Lib](https://ta-lib.org) on 200 000 samples, median of 7. Lower is
+better; **< 1.00× means fugazi is faster**:
+
+| | TA-Lib | fugazi (Rust) | fugazi (Python) |
+| --- | ---: | ---: | ---: |
+| `sma` | 1.00× | **0.67×** | 2.4× |
+| `ema` | 1.00× | **0.46×** | 1.6× |
+| `rsi` | 1.00× | **0.67×** | 1.2× |
+| `atr` | 1.00× | **0.69×** | — |
+| `stddev` | 1.00× | 1.95× | 2.6× |
+
+`stddev` is the one loss, and it is deliberate: fugazi makes a centred pass over
+the window instead of TA-Lib's O(1) `E[X²] − E[X]²` shortcut, which cancels away
+significant digits. At a five-figure price quoted to the cent that shortcut is
+already wrong by 1%, and at `mean = 1e9` it clamps the variance to zero. The
+tradeoff is [measured, not asserted](docs/PERFORMANCE.md#what-stddev-buys-with-its-2).
+
+The **Python** column is against `talib`'s own Python bindings — the honest
+comparison, since those are a thin Cython wrapper over the same C library. 1.2×
+to 2.6× is FFI overhead, not a different algorithm.
+
+For scale rather than ratios: `sma` is **1.41 ns/sample** in Rust and 5.12 in
+Python, and driving a full backtest allocates **zero times per bar** — a
+200 000-bar run performs 29 allocations in total. Those are figures from one
+machine (16 cores, Linux 6.18, rustc 1.95); re-run them with
+`pixi run -e bench bench` before relying on them.
+
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md) has the full record: how to measure,
+what every optimisation bought, which tricks in the code exist for speed and
+must not be "simplified" away, and the measurement traps that produced wrong
+answers here before they were caught.
+
 ## Documentation
 
 Two ways in. If you want the **backtester**, read
@@ -1117,6 +1158,7 @@ shape of it and [docs.rs](https://docs.rs/fugazi) has the API.
 | [docs/TRADING.md](docs/TRADING.md) | The execution path — how a bar becomes an order, a fill, and a closed trade |
 | [docs/PYTHON.md](docs/PYTHON.md) | The Python API |
 | [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Recipes for adding an indicator, signal, metric or provider |
+| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | How to measure, what each optimisation bought, and which code is fast on purpose |
 
 ## Sponsor
 

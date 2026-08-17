@@ -15,6 +15,16 @@ it is wired into CI — `scripts/ci-local.sh` and `.github/workflows/ci.yml` are
 held in sync by `tests/ci_mirror.rs`, and benchmarks are a development
 instrument, not a gate.
 
+**What *is* in CI is `tests/perf_guard.rs`**, and it is deliberately narrow: it
+asserts only things that are exact — that the per-bar path's allocation count
+does not scale with bar count, and the `size_of` facts the erasure design rests
+on. Nothing there is timed. A wall-clock assertion on a shared runner fails on
+contention, and an absolute instruction count drifts every time `stable` rustc
+moves; neither would catch a regression more often than it cried wolf. The
+guard also feeds itself a deliberately-allocating workload and requires the
+check to fire, so a passing run means the measurement still works rather than
+that the assertion has been quietly hollowed out.
+
 | Want | Run |
 |---|---|
 | A/B a change | `scripts/perf-compare.sh save before` on the base, then `scripts/perf-compare.sh diff before` on your branch |

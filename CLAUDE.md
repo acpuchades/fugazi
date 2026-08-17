@@ -11,7 +11,7 @@ lives elsewhere; reach for it on demand:
 - **[docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)** — the *procedure*. Adding an
   indicator / signal / operator / metric / provider? It lists every place each
   change has to touch, in order, and which are compiler- or test-enforced.
-- **[docs/TESTING.md](docs/TESTING.md)** — the test suite's *map*: the four layers
+- **[docs/TESTING.md](docs/TESTING.md)** — the test suite's *map*: the five layers
   and what each is for, where a given change's test goes, the shared
   `tests/common/` harness, how the drift guards are built, and the
   skip-vs-fail fixture policy (`FUGAZI_REQUIRE_FIXTURES=1`). Read it before

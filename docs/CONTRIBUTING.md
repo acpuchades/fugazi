@@ -50,7 +50,7 @@ FAST=1 scripts/ci-local.sh       # skip the matrix + wheel rebuild (inner loop o
 `tests/ci_mirror.rs` fails if the script stops matching the workflow, so a new
 CI step has to land in both.
 
-[docs/TESTING.md](TESTING.md) is the map of the test suite — the four layers,
+[docs/TESTING.md](TESTING.md) is the map of the test suite — the five layers,
 where a given change's test belongs, the shared `tests/common/` harness, and the
 fixture skip-vs-fail policy. Read it before adding a test file or a helper.
 
