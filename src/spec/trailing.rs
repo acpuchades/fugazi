@@ -7,7 +7,7 @@
 //! single-asset, **pairs**, or **basket** one — the [`AnyStrategyRef`] the
 //! `strategy:` field deserializes to picks which.
 //!
-//! The runtime type-erasure layer ([`PayloadIndicator`]) requires the wrapped
+//! The runtime type-erasure layer ([`AnyChain`]) requires the wrapped
 //! indicator to be [`Clone`], but a built strategy
 //! ([`DynSingleStrategy`](super::strategy::DynSingleStrategy) and its pairs /
 //! basket twins) is **not** `Clone` (it holds `Box<dyn Signal>` slots and
@@ -35,7 +35,7 @@ use super::basket::BasketStrategySpec;
 use super::multi_asset::MultiAssetStrategySpec;
 use super::pairs::PairsStrategySpec;
 use super::preset::StrategyRef;
-use crate::spec::dyn_indicator::{self, PayloadIndicator};
+use crate::runtime::{any, AnyChain};
 use crate::types::Symbol;
 
 /// The wallet / book seed for every embedded strategy. Arbitrary and positive
@@ -251,7 +251,7 @@ pub(super) fn build(
     risk_free_rate: Real,
     bars_per_year: Real,
     schema: &Arc<Schema>,
-) -> Result<Box<dyn PayloadIndicator>, String> {
+) -> Result<AnyChain, String> {
     let spec = Arc::new(strategy.clone());
     let schema = Arc::clone(schema);
     let fallback = strategy.fallback_symbol();
@@ -312,7 +312,7 @@ pub(super) fn build(
         })
     });
 
-    Ok(dyn_indicator::wrap(RebuildIndicator {
+    Ok(any(RebuildIndicator {
         build: build_fn,
         inner,
     }))

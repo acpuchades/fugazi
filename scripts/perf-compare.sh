@@ -93,8 +93,29 @@ icount)
         echo "valgrind not found" >&2; exit 127
     fi
     cargo bench --bench icount --no-run 2>/dev/null
-    here=$(ls target/release/deps/icount-* | grep -v '\.d$' | head -1)
-    there=$(ls "$other"/target/release/deps/icount-* | grep -v '\.d$' | head -1)
+    # `ls | head -1` sorts by cargo's metadata hash, not by time, so with two
+    # binaries present it silently hands back whichever hash sorts first —
+    # typically one built with different codegen settings. That produced a
+    # table showing +37% instructions on a workload the change could not touch.
+    # Refuse to guess: one binary, or say which ones are there.
+    pick_icount() {
+        local dir="$1" found n
+        found=$(ls "$dir"/target/release/deps/icount-* 2>/dev/null | grep -v '\.d$' || true)
+        n=$(printf '%s' "$found" | grep -c . || true)
+        if [ "$n" -eq 0 ]; then
+            echo "no icount binary in $dir — run: (cd $dir && cargo bench --bench icount --no-run)" >&2
+            exit 1
+        fi
+        if [ "$n" -gt 1 ]; then
+            echo "$n icount binaries in $dir/target/release/deps — cannot tell which" >&2
+            echo "$found" >&2
+            echo "these differ in codegen settings; delete them and rebuild both sides" >&2
+            exit 1
+        fi
+        printf '%s' "$found"
+    }
+    here=$(pick_icount .)
+    there=$(pick_icount "$other")
     export LC_ALL=C
     printf "%-12s %15s %15s %9s\n" workload base now change
     for w in $*; do

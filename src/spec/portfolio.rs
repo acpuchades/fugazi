@@ -53,7 +53,7 @@ use crate::portfolio::Portfolio;
 use crate::prelude::*;
 use crate::types::Snapshot;
 
-use crate::spec::dyn_indicator::{AsBool, AsReal, PayloadIndicator};
+use crate::runtime::AnyChain;
 
 use super::basket::BasketStrategySpec;
 use super::expr::NodeSpec;
@@ -695,14 +695,14 @@ impl PortfolioSpec {
                     }
                     _ => None,
                 };
-                let dyn_ind: Box<dyn PayloadIndicator> = concrete.try_build(
+                let dyn_ind: AnyChain = concrete.try_build(
                     &anchor,
                     &child_books[i],
                     Some(&agg_book),
                     schema,
                     child_root.as_ref(),
                 )?;
-                let real_ind = AsReal::try_new(dyn_ind)?;
+                let real_ind = (dyn_ind).into_real()?;
                 max_stable = max_stable.max(real_ind.stable_bars());
                 max_warm_up = max_warm_up.max(real_ind.warm_up_bars());
                 shares.push(Box::new(real_ind));
@@ -725,9 +725,9 @@ impl PortfolioSpec {
             // `root: None` — a portfolio-level gate spans every child, so
             // "this series" is undefined; a price leaf inside one must name
             // its asset with `!pick { symbol: ... }`.
-            let dyn_ind: Box<dyn PayloadIndicator> =
+            let dyn_ind: AnyChain =
                 rebalance_spec.try_build(&anchor, &agg_book, Some(&agg_book), schema, None)?;
-            let signal = AsBool::try_new(dyn_ind)?;
+            let signal = (dyn_ind).into_bool()?;
             max_stable = max_stable.max(signal.stable_bars());
             max_warm_up = max_warm_up.max(signal.warm_up_bars());
             builder = builder.rebalance_on(signal);

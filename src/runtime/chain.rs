@@ -211,9 +211,64 @@ pub enum AnyChain {
     Time(TimeChain),
 }
 
+/// Call one `Indicator` reader on whichever variant is present.
+///
+/// A closure would need a trait object common to all six `Chain` types, and
+/// `dyn DynIndicator<In, Out>` cannot unsize-coerce to one — so the dispatch is
+/// a macro instead of a higher-order function.
+macro_rules! readiness {
+    ($self:expr, $method:ident) => {
+        match $self {
+            AnyChain::Real(c) => c.$method(),
+            AnyChain::Bool(c) => c.$method(),
+            AnyChain::Atom(c) => c.$method(),
+            AnyChain::Candle(c) => c.$method(),
+            AnyChain::Str(c) => c.$method(),
+            AnyChain::Time(c) => c.$method(),
+        }
+    };
+}
+
 impl AnyChain {
-    /// The domain this node produces, for diagnostics. Matches the spelling
-    /// `PayloadType`'s `Display` used, so error messages are unchanged.
+    /// The domain this node produces.
+    ///
+    /// Reuses [`PayloadType`](super::PayloadType) rather than introducing a
+    /// second tag enum: that type is also the *static* type vocabulary
+    /// `spec::typecheck` works in, so a builder can compare what a subtree
+    /// declared against what it built without a translation step. Nothing here
+    /// carries a payload — only the tag is shared.
+    pub fn output_type(&self) -> super::PayloadType {
+        use super::PayloadType as T;
+        match self {
+            AnyChain::Real(_) => T::Real,
+            AnyChain::Bool(_) => T::Bool,
+            AnyChain::Atom(_) => T::Atom,
+            AnyChain::Candle(_) => T::Candle,
+            AnyChain::Str(_) => T::Str,
+            AnyChain::Time(_) => T::Time,
+        }
+    }
+
+    /// Readiness of the built node, without having to name its domain first —
+    /// the numbers a caller wants before deciding how much history to replay.
+    pub fn warm_up_bars(&self) -> usize {
+        readiness!(self, warm_up_bars)
+    }
+
+    /// Extra samples after warm-up before any recursive source inside has
+    /// converged. See [`Indicator::unstable_bars`].
+    pub fn unstable_bars(&self) -> usize {
+        readiness!(self, unstable_bars)
+    }
+
+    /// `warm_up_bars() + unstable_bars()`, as the node itself reports it —
+    /// which is *not* always the sum, since `!unstable` forces the tail to `0`.
+    pub fn stable_bars(&self) -> usize {
+        readiness!(self, stable_bars)
+    }
+
+    /// The domain's name, for diagnostics. Matches `PayloadType`'s `Display`,
+    /// so error messages are unchanged.
     pub fn kind(&self) -> &'static str {
         match self {
             AnyChain::Real(_) => "Real",
@@ -289,14 +344,185 @@ macro_rules! into_domain {
             pub fn $name(self) -> Result<Chain<Snapshot<Symbol>, $ty>, String> {
                 match self {
                     AnyChain::$variant(c) => Ok(c),
+                    // Word-for-word what the `As<Out>` views reported, so a
+                    // migrated build error is byte-identical to the old one.
                     other => Err(format!(
-                        concat!("expected a ", $what, "-valued expression, got {}"),
+                        concat!("expected a ", $what, " expression, got {}"),
                         other.kind()
                     )),
                 }
             }
         }
     };
+}
+
+impl AnyChain {
+    /// Opt this subtree out of the strategy-readiness wait for its IIR settling
+    /// tail — the `!unstable { source }` tag, and the narrow twin of
+    /// [`unstable_wrap`](super::unstable_wrap).
+    ///
+    /// Nothing runtime-typed is needed: [`Unstable`](crate::indicators::Unstable) is an ordinary library
+    /// wrapper and a [`Chain`] is an ordinary [`Indicator`], so this is the same
+    /// `.unstable()` a hand-written strategy calls, applied per domain.
+    pub fn unstable(self) -> AnyChain {
+        use crate::indicators::Unstable;
+        match self {
+            AnyChain::Real(c) => AnyChain::Real(erase(Unstable::new(c))),
+            AnyChain::Bool(c) => AnyChain::Bool(erase(Unstable::new(c))),
+            AnyChain::Atom(c) => AnyChain::Atom(erase(Unstable::new(c))),
+            AnyChain::Candle(c) => AnyChain::Candle(erase(Unstable::new(c))),
+            AnyChain::Str(c) => AnyChain::Str(erase(Unstable::new(c))),
+            AnyChain::Time(c) => AnyChain::Time(erase(Unstable::new(c))),
+        }
+    }
+}
+
+macro_rules! probed {
+    ($name:ident, $variant:ident, $ty:ty, $what:literal) => {
+        impl AnyChain {
+            #[doc = concat!("Take this node as a ", $what, " chain, panicking if it is not.")]
+            ///
+            /// **Only for the per-symbol lazy factories** in `BasketStrategy` /
+            /// `MultiAssetStrategy`. Those build their chains inside `update`,
+            /// where there is no error path to return through — so instead each
+            /// template is probed once at build time against `PROBE_SYMBOL`
+            /// (`spec::basket::probe_template`,
+            /// `spec::multi_asset::probe_signal`/`probe_expr`), and a template
+            /// that builds for the probe builds for every symbol.
+            ///
+            /// Reaching this panic therefore means a per-symbol slot was added
+            /// without being added to the probe. Everywhere else, use the
+            /// `into_*` twin and report the error.
+            pub fn $name(self, slot: &str) -> Chain<Snapshot<Symbol>, $ty> {
+                match self {
+                    AnyChain::$variant(c) => c,
+                    other => panic!(
+                        concat!("`{}` built a {} chain, expected ", $what,
+                                " — the per-symbol template was not probed at build time"),
+                        slot,
+                        other.kind(),
+                    ),
+                }
+            }
+        }
+    };
+}
+
+probed!(probed_real, Real, Real, "Real");
+probed!(probed_bool, Bool, bool, "Bool");
+
+impl AnyChain {
+    /// Re-erase into the payload vocabulary.
+    ///
+    /// The bridge for the one consumer that genuinely needs self-description:
+    /// `spec::overlay` drives a column set whose members differ in *input*
+    /// domain — spec-built columns read the whole snapshot, while a Python
+    /// carrier can be rooted on a single bar — and asks each column what it
+    /// wants before feeding it. A `Vec<AnyChain>` cannot express that, since
+    /// every `AnyChain` is snapshot-rooted by construction.
+    ///
+    /// Costs one `Box` per column at build time and re-introduces the payload's
+    /// per-bar cost *for overlay columns only*. Everything upstream of here
+    /// stays narrow.
+    pub fn into_payload(self) -> Box<dyn super::PayloadIndicator> {
+        match self {
+            AnyChain::Real(c) => super::wrap(c),
+            AnyChain::Bool(c) => super::wrap(c),
+            AnyChain::Atom(c) => super::wrap(c),
+            AnyChain::Candle(c) => super::wrap(c),
+            AnyChain::Str(c) => super::wrap(c),
+            AnyChain::Time(c) => super::wrap(c),
+        }
+    }
+}
+
+/// Feed a candle-producing chain's output into a snapshot-rooted one.
+///
+/// The shape `!resample { every, inner }` needs: `Resample` aggregates base bars
+/// into a higher-timeframe [`Candle`], and on the bars that complete a bucket
+/// that candle drives `inner`, which was built as an ordinary snapshot-rooted
+/// subtree. Between the two sits the same lift the payload vocabulary spelled as
+/// a `TryFrom` arm — a candle becomes an **untagged size-1 snapshot**, which is
+/// what an empty-selector `!pick` unpacks.
+///
+/// `None` from the outer means "no bucket completed this bar", so `inner` is not
+/// advanced at all — that is the whole point of the node, and why this cannot be
+/// an ordinary source slot.
+#[derive(Clone)]
+struct CandleOver<Out: 'static> {
+    outer: CandleChain,
+    inner: Chain<Snapshot<Symbol>, Out>,
+    value: Option<Out>,
+}
+
+impl<Out: Clone + 'static> Indicator for CandleOver<Out> {
+    type Input = Snapshot<Symbol>;
+    type Output = Out;
+    fn update(&mut self, input: Snapshot<Symbol>) -> Option<Out> {
+        self.value = match self.outer.update(input) {
+            Some(candle) => self.inner.update(Snapshot::<Symbol>::of_atom(candle.into())),
+            None => None,
+        };
+        self.value.clone()
+    }
+    fn value(&self) -> Option<Out> {
+        self.value.clone()
+    }
+    fn warm_up_bars(&self) -> usize {
+        // Both stages count in *base* bars: the outer's own warm-up, plus the
+        // extra higher-timeframe emissions the inner still needs (one of which
+        // coincides with the outer's first).
+        self.outer
+            .warm_up_bars()
+            .saturating_add(self.inner.warm_up_bars().saturating_sub(1))
+    }
+    fn unstable_bars(&self) -> usize {
+        self.outer
+            .unstable_bars()
+            .saturating_add(self.inner.unstable_bars())
+    }
+    fn reset(&mut self) {
+        self.outer.reset();
+        self.inner.reset();
+        self.value = None;
+    }
+    fn save_state(&self) -> serde_json::Value {
+        serde_json::json!({ "outer": self.outer.save_state(), "inner": self.inner.save_state() })
+    }
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        let obj = state
+            .as_object()
+            .ok_or_else(|| "expected an object with `outer` and `inner`".to_string())?;
+        if let Some(v) = obj.get("outer") {
+            self.outer.load_state(v)?;
+        }
+        if let Some(v) = obj.get("inner") {
+            self.inner.load_state(v)?;
+        }
+        Ok(())
+    }
+}
+
+/// Chain a candle-producing `outer` into a snapshot-rooted `inner`, preserving
+/// `inner`'s output domain — the shape `!resample { every, inner }` needs.
+pub fn chain_over_candle(outer: CandleChain, inner: AnyChain) -> AnyChain {
+    macro_rules! over {
+        ($variant:ident, $inner:expr) => {
+            AnyChain::$variant(erase(CandleOver {
+                outer,
+                inner: $inner,
+                value: None,
+            }))
+        };
+    }
+    match inner {
+        AnyChain::Real(c) => over!(Real, c),
+        AnyChain::Bool(c) => over!(Bool, c),
+        AnyChain::Atom(c) => over!(Atom, c),
+        AnyChain::Candle(c) => over!(Candle, c),
+        AnyChain::Str(c) => over!(Str, c),
+        AnyChain::Time(c) => over!(Time, c),
+    }
 }
 
 into_domain!(into_real, Real, Real, "Real");
@@ -328,7 +554,7 @@ mod tests {
         let Err(err) = any(Sma::new(close(), 3)).into_bool() else {
             panic!("Real is not Bool");
         };
-        assert!(err.contains("expected a Bool-valued expression"), "{err}");
+        assert!(err.contains("expected a Bool expression"), "{err}");
         assert!(err.contains("got Real"), "{err}");
     }
 

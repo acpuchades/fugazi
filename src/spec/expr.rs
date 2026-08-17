@@ -36,7 +36,8 @@ use crate::types::Snapshot;
 
 use super::trailing::{self, AnyStrategyRef, TrailingMetric};
 use crate::indicators::compare;
-use crate::spec::dyn_indicator::{self, AsAtom, AsBool, AsCandle, AsReal, AsStr, PayloadIndicator, PayloadType};
+use crate::spec::dyn_indicator::PayloadType;
+use crate::runtime::{any, AnyChain, AtomChain, BoolChain, CandleChain, RealChain, StrChain};
 
 use crate::{Frequency, Selector};
 use std::str::FromStr;
@@ -219,9 +220,9 @@ impl StrOperand {
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
         root: Option<&Selector<Symbol>>,
-    ) -> Result<Box<dyn PayloadIndicator>, String> {
+    ) -> Result<AnyChain, String> {
         match self {
-            StrOperand::Literal(s) => Ok(dyn_indicator::wrap(
+            StrOperand::Literal(s) => Ok(any(
                 ValueStr::<crate::types::Snapshot<Symbol>>::new(s.as_str()),
             )),
             StrOperand::Expr(e) => e.try_build(anchor, book, portfolio_book, schema, root),
@@ -308,7 +309,7 @@ impl RealNode {
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
         root: Option<&Selector<Symbol>>,
-    ) -> Box<dyn PayloadIndicator> {
+    ) -> AnyChain {
         self.0.build(anchor, book, portfolio_book, schema, root)
     }
     pub fn try_build(
@@ -318,7 +319,7 @@ impl RealNode {
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
         root: Option<&Selector<Symbol>>,
-    ) -> Result<Box<dyn PayloadIndicator>, String> {
+    ) -> Result<AnyChain, String> {
         self.0.try_build(anchor, book, portfolio_book, schema, root)
     }
 }
@@ -333,7 +334,7 @@ impl BoolNode {
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
         root: Option<&Selector<Symbol>>,
-    ) -> Box<dyn PayloadIndicator> {
+    ) -> AnyChain {
         self.0.build(anchor, book, portfolio_book, schema, root)
     }
     pub fn try_build(
@@ -343,7 +344,7 @@ impl BoolNode {
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
         root: Option<&Selector<Symbol>>,
-    ) -> Result<Box<dyn PayloadIndicator>, String> {
+    ) -> Result<AnyChain, String> {
         self.0.try_build(anchor, book, portfolio_book, schema, root)
     }
 }
@@ -3391,28 +3392,28 @@ fn build_polymorphic_eq(
     portfolio_book: Option<&Book>,
     schema: &Arc<Schema>,
     root: Option<&Selector<Symbol>>,
-) -> Result<Box<dyn PayloadIndicator>, String> {
+) -> Result<AnyChain, String> {
     let lhs_built = lhs.try_build(anchor, book, portfolio_book, schema, root)?;
     Ok(match lhs_built.output_type() {
         PayloadType::Real => {
-            let l = AsReal::new(lhs_built);
-            let r = AsReal::try_new(rhs.try_build(anchor, book, portfolio_book, schema, root)?)
-                .map_err(|e| trail(rhs, e))?;
+            let l = lhs_built.into_real()?;
+            let r = (rhs.try_build(anchor, book, portfolio_book, schema, root)?)
+                .into_real().map_err(|e| trail(rhs, e))?;
             let e = eps(&epsilon);
             if negate {
-                dyn_indicator::wrap(compare::Ne::with_tolerance(l, r, e))
+                any(compare::Ne::with_tolerance(l, r, e))
             } else {
-                dyn_indicator::wrap(compare::Eq::with_tolerance(l, r, e))
+                any(compare::Eq::with_tolerance(l, r, e))
             }
         }
         PayloadType::Str => {
-            let l = AsStr::new(lhs_built);
-            let r = AsStr::try_new(rhs.try_build(anchor, book, portfolio_book, schema, root)?)
-                .map_err(|e| trail(rhs, e))?;
+            let l = lhs_built.into_str()?;
+            let r = (rhs.try_build(anchor, book, portfolio_book, schema, root)?)
+                .into_str().map_err(|e| trail(rhs, e))?;
             if negate {
-                dyn_indicator::wrap(compare::StrNe::new(l, r))
+                any(compare::StrNe::new(l, r))
             } else {
-                dyn_indicator::wrap(compare::StrEq::new(l, r))
+                any(compare::StrEq::new(l, r))
             }
         }
         other => {
@@ -3456,7 +3457,7 @@ fn build_match(
     portfolio_book: Option<&Book>,
     schema: &Arc<Schema>,
     root: Option<&Selector<Symbol>>,
-) -> Result<Box<dyn PayloadIndicator>, String> {
+) -> Result<AnyChain, String> {
     if cases.is_empty() {
         return Err("`cases` must not be empty (use `!if_else` for a single branch, \
                     or reduce to `default` if there's nothing to match)"
@@ -3511,17 +3512,17 @@ fn build_match(
         }
     }
 
-    let as_real_branch = |s: &NodeSpec| -> Result<AsReal, String> {
+    let as_real_branch = |s: &NodeSpec| -> Result<RealChain, String> {
         let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
-        AsReal::try_new(built).map_err(|e| trail(s, e))
+        built.into_real().map_err(|e| trail(s, e))
     };
 
     let default_ind = as_real_branch(default)?;
 
     if is_str {
         let on_built = on.try_build(anchor, book, portfolio_book, schema, root)?;
-        let on_ind = AsStr::try_new(on_built).map_err(|e| trail(on, e))?;
-        let pairs: Vec<(Arc<str>, AsReal)> = cases
+        let on_ind = on_built.into_str().map_err(|e| trail(on, e))?;
+        let pairs: Vec<(Arc<str>, RealChain)> = cases
             .iter()
             .map(|c| {
                 let pattern: Arc<str> = match &c.when {
@@ -3531,14 +3532,14 @@ fn build_match(
                 Ok((pattern, as_real_branch(&c.value)?))
             })
             .collect::<Result<_, String>>()?;
-        Ok(dyn_indicator::wrap(MatchIndicator::new(
+        Ok(any(MatchIndicator::new(
             on_ind,
             pairs,
             default_ind,
         )))
     } else {
         let on_ind = as_real_branch(on)?;
-        let pairs: Vec<(Real, AsReal)> = cases
+        let pairs: Vec<(Real, RealChain)> = cases
             .iter()
             .map(|c| {
                 let pattern: Real = match &c.when {
@@ -3548,7 +3549,7 @@ fn build_match(
                 Ok((pattern, as_real_branch(&c.value)?))
             })
             .collect::<Result<_, String>>()?;
-        Ok(dyn_indicator::wrap(MatchIndicator::new(
+        Ok(any(MatchIndicator::new(
             on_ind,
             pairs,
             default_ind,
@@ -3563,12 +3564,12 @@ fn atom_source_of(
     portfolio_book: Option<&Book>,
     schema: &Arc<Schema>,
     root: Option<&Selector<Symbol>>,
-) -> Result<AsAtom, String> {
+) -> Result<AtomChain, String> {
     match source {
-        None => Ok(AsAtom::new(dyn_indicator::wrap(pick_root(root)))),
+        None => Ok(crate::runtime::erase(pick_root(root))),
         Some(s) => {
             let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
-            AsAtom::try_new(built).map_err(|e| trail(s, e))
+            built.into_atom().map_err(|e| trail(s, e))
         }
     }
 }
@@ -3591,12 +3592,12 @@ fn atom_source_any_of(
     portfolio_book: Option<&Book>,
     schema: &Arc<Schema>,
     root: Option<&Selector<Symbol>>,
-) -> Result<AsAtom, String> {
+) -> Result<AtomChain, String> {
     match source {
-        None => Ok(AsAtom::new(dyn_indicator::wrap(pick_any_root()))),
+        None => Ok(crate::runtime::erase(pick_any_root())),
         Some(s) => {
             let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
-            AsAtom::try_new(built).map_err(|e| trail(s, e))
+            built.into_atom().map_err(|e| trail(s, e))
         }
     }
 }
@@ -3658,7 +3659,7 @@ impl NodeSpec {
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
         root: Option<&Selector<Symbol>>,
-    ) -> Box<dyn PayloadIndicator> {
+    ) -> AnyChain {
         self.try_build(anchor, book, portfolio_book, schema, root)
             .unwrap_or_else(|e| panic!("{e}"))
     }
@@ -3683,7 +3684,7 @@ impl NodeSpec {
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
         root: Option<&Selector<Symbol>>,
-    ) -> Result<Box<dyn PayloadIndicator>, String> {
+    ) -> Result<AnyChain, String> {
         self.try_build_inner(anchor, book, portfolio_book, schema, root)
             .map_err(|e| trail(self, e))
     }
@@ -3698,33 +3699,33 @@ impl NodeSpec {
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
         root: Option<&Selector<Symbol>>,
-    ) -> Result<Box<dyn PayloadIndicator>, String> {
+    ) -> Result<AnyChain, String> {
         use NodeSpec::*;
         // Recursive-build shorthands: build `s`, view it as a library-typed
         // `Indicator<Input=Snapshot, Output=Real>` (or Candle) so it drops
         // into a concrete library constructor. A type mismatch is attributed to
         // the *child* that produced the wrong output, which is where the author
         // has to look.
-        let real = |s: &NodeSpec| -> Result<AsReal, String> {
+        let real = |s: &NodeSpec| -> Result<RealChain, String> {
             let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
-            AsReal::try_new(built).map_err(|e| trail(s, e))
+            built.into_real().map_err(|e| trail(s, e))
         };
-        let candle = |s: &NodeSpec| -> Result<AsCandle, String> {
+        let candle = |s: &NodeSpec| -> Result<CandleChain, String> {
             let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
-            AsCandle::try_new(built).map_err(|e| trail(s, e))
+            built.into_candle().map_err(|e| trail(s, e))
         };
         // Boolean-signal shorthands, for the absorbed signal variants.
-        let boolean = |s: &NodeSpec| -> Result<AsBool, String> {
+        let boolean = |s: &NodeSpec| -> Result<BoolChain, String> {
             let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
-            AsBool::try_new(built).map_err(|e| trail(s, e))
+            built.into_bool().map_err(|e| trail(s, e))
         };
-        let str_view = |s: &NodeSpec| -> Result<AsStr, String> {
+        let str_view = |s: &NodeSpec| -> Result<StrChain, String> {
             let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
-            AsStr::try_new(built).map_err(|e| trail(s, e))
+            built.into_str().map_err(|e| trail(s, e))
         };
-        let str_operand = |s: &StrOperand| -> Result<AsStr, String> {
+        let str_operand = |s: &StrOperand| -> Result<StrChain, String> {
             let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
-            AsStr::try_new(built).map_err(|e| match s {
+            built.into_str().map_err(|e| match s {
                 StrOperand::Expr(e2) => trail(e2, e),
                 StrOperand::Literal(_) => e,
             })
@@ -3760,45 +3761,45 @@ impl NodeSpec {
             // --- atom-input leaves ---
             Close { source } => {
                 let s = atom_src(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::Close::of(s))
+                any(crate::indicators::Close::of(s))
             }
             High { source } => {
                 let s = atom_src(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::High::of(s))
+                any(crate::indicators::High::of(s))
             }
             Low { source } => {
                 let s = atom_src(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::Low::of(s))
+                any(crate::indicators::Low::of(s))
             }
             Open { source } => {
                 let s = atom_src(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::Open::of(s))
+                any(crate::indicators::Open::of(s))
             }
             Volume { source } => {
                 let s = atom_src(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::Volume::of(s))
+                any(crate::indicators::Volume::of(s))
             }
             Typical { source } => {
                 let s = atom_src(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::Typical::of(s))
+                any(crate::indicators::Typical::of(s))
             }
             Median { source } => {
                 let s = atom_src(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::Median::of(s))
+                any(crate::indicators::Median::of(s))
             }
             Current { source } => {
                 let s = atom_src(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::CurrentBar::of(s))
+                any(crate::indicators::CurrentBar::of(s))
             }
 
             Pick { symbol, freq } => build_pick(symbol.as_deref(), freq.as_deref(), root)?,
 
-            Value(ValueLit::Real(x)) => dyn_indicator::wrap(self::Value::<Snapshot<Symbol>>::new(*x)),
+            Value(ValueLit::Real(x)) => any(self::Value::<Snapshot<Symbol>>::new(*x)),
             Value(ValueLit::Bool(b)) => {
-                dyn_indicator::wrap(crate::indicators::ValueBool::<Snapshot<Symbol>>::new(*b))
+                any(crate::indicators::ValueBool::<Snapshot<Symbol>>::new(*b))
             }
             Value(ValueLit::Str(s)) => {
-                dyn_indicator::wrap(ValueStr::<Snapshot<Symbol>>::new(s.as_str()))
+                any(ValueStr::<Snapshot<Symbol>>::new(s.as_str()))
             }
             Value(ValueLit::List(_)) => {
                 return Err("a list literal is only meaningful in a \
@@ -3809,9 +3810,9 @@ impl NodeSpec {
                             to install the CHILD_INDEX arg."
                     .to_string());
             }
-            Entry => dyn_indicator::wrap(anchor.entry::<Snapshot<Symbol>>()),
-            Peak => dyn_indicator::wrap(anchor.peak::<Snapshot<Symbol>>()),
-            Trough => dyn_indicator::wrap(anchor.trough::<Snapshot<Symbol>>()),
+            Entry => any(anchor.entry::<Snapshot<Symbol>>()),
+            Peak => any(anchor.peak::<Snapshot<Symbol>>()),
+            Trough => any(anchor.trough::<Snapshot<Symbol>>()),
 
             StrategyBook | PortfolioBook => {
                 return Err("a build-time source selector — it only makes \
@@ -3823,27 +3824,27 @@ impl NodeSpec {
 
             Equity { source } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book)?;
-                dyn_indicator::wrap(b.equity::<Snapshot<Symbol>>())
+                any(b.equity::<Snapshot<Symbol>>())
             }
             EquityPeak { source } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book)?;
-                dyn_indicator::wrap(b.equity_peak::<Snapshot<Symbol>>())
+                any(b.equity_peak::<Snapshot<Symbol>>())
             }
             Drawdown { source } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book)?;
-                dyn_indicator::wrap(b.drawdown::<Snapshot<Symbol>>())
+                any(b.drawdown::<Snapshot<Symbol>>())
             }
             ReturnPerBar { source } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book)?;
-                dyn_indicator::wrap(b.return_per_bar::<Snapshot<Symbol>>())
+                any(b.return_per_bar::<Snapshot<Symbol>>())
             }
             TradePnl { source } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book)?;
-                dyn_indicator::wrap(b.trade_pnl::<Snapshot<Symbol>>())
+                any(b.trade_pnl::<Snapshot<Symbol>>())
             }
             TradeReturn { source } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book)?;
-                dyn_indicator::wrap(b.trade_return::<Snapshot<Symbol>>())
+                any(b.trade_return::<Snapshot<Symbol>>())
             }
 
             Get { key, source } => {
@@ -3851,49 +3852,49 @@ impl NodeSpec {
                 build_get(schema, key, s)?
             }
 
-            Ema { source, period } => dyn_indicator::wrap(self::Ema::new(real(source)?, period.get())),
-            Sma { source, period } => dyn_indicator::wrap(self::Sma::new(real(source)?, period.get())),
-            Rma { source, period } => dyn_indicator::wrap(self::Rma::new(real(source)?, period.get())),
-            Wma { source, period } => dyn_indicator::wrap(self::Wma::new(real(source)?, period.get())),
-            Hma { source, period } => dyn_indicator::wrap(self::Hma::new(real(source)?, period.get())),
-            Rsi { source, period } => dyn_indicator::wrap(self::Rsi::new(real(source)?, period.get())),
+            Ema { source, period } => any(self::Ema::new(real(source)?, period.get())),
+            Sma { source, period } => any(self::Sma::new(real(source)?, period.get())),
+            Rma { source, period } => any(self::Rma::new(real(source)?, period.get())),
+            Wma { source, period } => any(self::Wma::new(real(source)?, period.get())),
+            Hma { source, period } => any(self::Hma::new(real(source)?, period.get())),
+            Rsi { source, period } => any(self::Rsi::new(real(source)?, period.get())),
             StdDev { source, period } => {
-                dyn_indicator::wrap(self::StdDev::new(real(source)?, period.get()))
+                any(self::StdDev::new(real(source)?, period.get()))
             }
             Skewness { source, period } => {
-                dyn_indicator::wrap(self::Skewness::new(real(source)?, period.get()))
+                any(self::Skewness::new(real(source)?, period.get()))
             }
             Kurtosis { source, period } => {
-                dyn_indicator::wrap(self::Kurtosis::new(real(source)?, period.get()))
+                any(self::Kurtosis::new(real(source)?, period.get()))
             }
             ZScore { source, period } => {
-                dyn_indicator::wrap(self::ZScore::new(real(source)?, period.get()))
+                any(self::ZScore::new(real(source)?, period.get()))
             }
             Percentile {
                 source,
                 period,
                 pct,
-            } => dyn_indicator::wrap(self::Percentile::new(real(source)?, period.get(), *pct)),
+            } => any(self::Percentile::new(real(source)?, period.get(), *pct)),
             PercentileRank { source, period } => {
-                dyn_indicator::wrap(self::PercentileRank::new(real(source)?, period.get()))
+                any(self::PercentileRank::new(real(source)?, period.get()))
             }
             BarsSince { source } => {
                 // Same shape as `IfElse`'s `cond`: a signal leg is built
                 // a boolean-output NodeSpec, viewed as bool.
                 let sig = {
                     let built = source.try_build(anchor, book, portfolio_book, schema, root)?;
-                    AsBool::try_new(built).map_err(|e| trail(source, e))?
+                    built.into_bool().map_err(|e| trail(source, e))?
                 };
-                dyn_indicator::wrap(self::BarsSince::new(sig))
+                any(self::BarsSince::new(sig))
             }
             BarsSinceHigh { source, period } => {
-                dyn_indicator::wrap(self::BarsSinceHigh::new(real(source)?, period.get()))
+                any(self::BarsSinceHigh::new(real(source)?, period.get()))
             }
             BarsSinceLow { source, period } => {
-                dyn_indicator::wrap(self::BarsSinceLow::new(real(source)?, period.get()))
+                any(self::BarsSinceLow::new(real(source)?, period.get()))
             }
             Correlation { lhs, rhs, period } => {
-                dyn_indicator::wrap(self::Correlation::new(real(lhs)?, real(rhs)?, period.get()))
+                any(self::Correlation::new(real(lhs)?, real(rhs)?, period.get()))
             }
             VarianceRatio {
                 source,
@@ -3914,17 +3915,17 @@ impl NodeSpec {
                          — a shorter window has no overlapping blocks to compare"
                     ));
                 }
-                dyn_indicator::wrap(self::VarianceRatio::new(real(source)?, period, lag))
+                any(self::VarianceRatio::new(real(source)?, period, lag))
             }
-            Cci { source, period } => dyn_indicator::wrap(self::Cci::new(real(source)?, period.get())),
+            Cci { source, period } => any(self::Cci::new(real(source)?, period.get())),
             Stochastic { source, period } => {
-                dyn_indicator::wrap(self::Stochastic::new(real(source)?, period.get()))
+                any(self::Stochastic::new(real(source)?, period.get()))
             }
             StochRsi {
                 source,
                 rsi_period,
                 stoch_period,
-            } => dyn_indicator::wrap(self::StochRsi::new(
+            } => any(self::StochRsi::new(
                 self::Rsi::new(real(source)?, rsi_period.get()),
                 stoch_period.get(),
             )),
@@ -3934,7 +3935,7 @@ impl NodeSpec {
                 fast,
                 slow,
                 signal,
-            } => dyn_indicator::wrap(Component::new(
+            } => any(Component::new(
                 Macd::new(real(source)?, fast.get(), slow.get(), signal.get()),
                 |v: MacdValue| v.macd,
             )),
@@ -3943,7 +3944,7 @@ impl NodeSpec {
                 fast,
                 slow,
                 signal,
-            } => dyn_indicator::wrap(Component::new(
+            } => any(Component::new(
                 Macd::new(real(source)?, fast.get(), slow.get(), signal.get()),
                 |v: MacdValue| v.signal,
             )),
@@ -3952,20 +3953,20 @@ impl NodeSpec {
                 fast,
                 slow,
                 signal,
-            } => dyn_indicator::wrap(Component::new(
+            } => any(Component::new(
                 Macd::new(real(source)?, fast.get(), slow.get(), signal.get()),
                 |v: MacdValue| v.histogram,
             )),
 
-            BbUpper { source, period, k } => dyn_indicator::wrap(Component::new(
+            BbUpper { source, period, k } => any(Component::new(
                 Bollinger::new(real(source)?, period.get(), *k),
                 |v: BollingerValue| v.upper,
             )),
-            BbMiddle { source, period, k } => dyn_indicator::wrap(Component::new(
+            BbMiddle { source, period, k } => any(Component::new(
                 Bollinger::new(real(source)?, period.get(), *k),
                 |v: BollingerValue| v.middle,
             )),
-            BbLower { source, period, k } => dyn_indicator::wrap(Component::new(
+            BbLower { source, period, k } => any(Component::new(
                 Bollinger::new(real(source)?, period.get(), *k),
                 |v: BollingerValue| v.lower,
             )),
@@ -3976,7 +3977,7 @@ impl NodeSpec {
                 ema_period,
                 atr_period,
                 multiplier,
-            } => dyn_indicator::wrap(Component::new(
+            } => any(Component::new(
                 Keltner::new(
                     real(source)?,
                     candle(candle_source)?,
@@ -3992,7 +3993,7 @@ impl NodeSpec {
                 ema_period,
                 atr_period,
                 multiplier,
-            } => dyn_indicator::wrap(Component::new(
+            } => any(Component::new(
                 Keltner::new(
                     real(source)?,
                     candle(candle_source)?,
@@ -4008,7 +4009,7 @@ impl NodeSpec {
                 ema_period,
                 atr_period,
                 multiplier,
-            } => dyn_indicator::wrap(Component::new(
+            } => any(Component::new(
                 Keltner::new(
                     real(source)?,
                     candle(candle_source)?,
@@ -4019,75 +4020,75 @@ impl NodeSpec {
                 |v: KeltnerValue| v.lower,
             )),
 
-            DonchianUpper { high, low, period } => dyn_indicator::wrap(Component::new(
+            DonchianUpper { high, low, period } => any(Component::new(
                 Donchian::new(real(high)?, real(low)?, period.get()),
                 |v: DonchianValue| v.upper,
             )),
-            DonchianMiddle { high, low, period } => dyn_indicator::wrap(Component::new(
+            DonchianMiddle { high, low, period } => any(Component::new(
                 Donchian::new(real(high)?, real(low)?, period.get()),
                 |v: DonchianValue| v.middle,
             )),
-            DonchianLower { high, low, period } => dyn_indicator::wrap(Component::new(
+            DonchianLower { high, low, period } => any(Component::new(
                 Donchian::new(real(high)?, real(low)?, period.get()),
                 |v: DonchianValue| v.lower,
             )),
 
-            Adx { source, period } => dyn_indicator::wrap(Component::new(
+            Adx { source, period } => any(Component::new(
                 self::Adx::new(candle(source)?, period.get()),
                 |v: AdxValue| v.adx,
             )),
-            PlusDi { source, period } => dyn_indicator::wrap(Component::new(
+            PlusDi { source, period } => any(Component::new(
                 self::Adx::new(candle(source)?, period.get()),
                 |v: AdxValue| v.plus_di,
             )),
-            MinusDi { source, period } => dyn_indicator::wrap(Component::new(
+            MinusDi { source, period } => any(Component::new(
                 self::Adx::new(candle(source)?, period.get()),
                 |v: AdxValue| v.minus_di,
             )),
-            DmiPlusDi { source, period } => dyn_indicator::wrap(Component::new(
+            DmiPlusDi { source, period } => any(Component::new(
                 self::Dmi::new(candle(source)?, period.get()),
                 |v: DmiValue| v.plus_di,
             )),
-            DmiMinusDi { source, period } => dyn_indicator::wrap(Component::new(
+            DmiMinusDi { source, period } => any(Component::new(
                 self::Dmi::new(candle(source)?, period.get()),
                 |v: DmiValue| v.minus_di,
             )),
 
-            AroonUp { source, period } => dyn_indicator::wrap(Component::new(
+            AroonUp { source, period } => any(Component::new(
                 self::Aroon::new(candle(source)?, period.get()),
                 |v: AroonValue| v.up,
             )),
-            AroonDown { source, period } => dyn_indicator::wrap(Component::new(
+            AroonDown { source, period } => any(Component::new(
                 self::Aroon::new(candle(source)?, period.get()),
                 |v: AroonValue| v.down,
             )),
-            AroonOscillator { source, period } => dyn_indicator::wrap(Component::new(
+            AroonOscillator { source, period } => any(Component::new(
                 self::Aroon::new(candle(source)?, period.get()),
                 |v: AroonValue| v.oscillator,
             )),
 
-            Atr { source, period } => dyn_indicator::wrap(self::Atr::new(candle(source)?, period.get())),
+            Atr { source, period } => any(self::Atr::new(candle(source)?, period.get())),
             Parkinson { source, period } => {
-                dyn_indicator::wrap(self::Parkinson::new(candle(source)?, period.get()))
+                any(self::Parkinson::new(candle(source)?, period.get()))
             }
             GarmanKlass { source, period } => {
-                dyn_indicator::wrap(self::GarmanKlass::new(candle(source)?, period.get()))
+                any(self::GarmanKlass::new(candle(source)?, period.get()))
             }
             RogersSatchell { source, period } => {
-                dyn_indicator::wrap(self::RogersSatchell::new(candle(source)?, period.get()))
+                any(self::RogersSatchell::new(candle(source)?, period.get()))
             }
-            Mfi { source, period } => dyn_indicator::wrap(self::Mfi::new(candle(source)?, period.get())),
+            Mfi { source, period } => any(self::Mfi::new(candle(source)?, period.get())),
             WilliamsR { source, period } => {
-                dyn_indicator::wrap(self::WilliamsR::new(candle(source)?, period.get()))
+                any(self::WilliamsR::new(candle(source)?, period.get()))
             }
-            Obv { source } => dyn_indicator::wrap(self::Obv::new(candle(source)?)),
+            Obv { source } => any(self::Obv::new(candle(source)?)),
             Vwap { source, period } => {
-                dyn_indicator::wrap(self::Vwap::new(candle(source)?, period.get()))
+                any(self::Vwap::new(candle(source)?, period.get()))
             }
-            Ad { source } => dyn_indicator::wrap(self::Ad::new(candle(source)?)),
-            TrueRange { source } => dyn_indicator::wrap(self::TrueRange::new(candle(source)?)),
+            Ad { source } => any(self::Ad::new(candle(source)?)),
+            TrueRange { source } => any(self::TrueRange::new(candle(source)?)),
             Sar { source, step, max } => {
-                dyn_indicator::wrap(self::Sar::new(candle(source)?, *step, *max))
+                any(self::Sar::new(candle(source)?, *step, *max))
             }
 
             VolTarget {
@@ -4097,7 +4098,7 @@ impl NodeSpec {
                 bars_per_year,
             } => {
                 let s = atom_src(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::sizing::vol_target_of::<Symbol, _>(
+                any(crate::indicators::sizing::vol_target_of::<Symbol, _>(
                     s,
                     *target,
                     window.get(),
@@ -4111,7 +4112,7 @@ impl NodeSpec {
                 atr_multiple,
             } => {
                 let s = atom_src(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::sizing::atr_risk_of::<Symbol, _>(
+                any(crate::indicators::sizing::atr_risk_of::<Symbol, _>(
                     s,
                     *risk_frac,
                     period.get(),
@@ -4123,7 +4124,7 @@ impl NodeSpec {
                 max_drawdown,
             } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book)?;
-                dyn_indicator::wrap(crate::indicators::sizing::drawdown_throttle::<Symbol>(
+                any(crate::indicators::sizing::drawdown_throttle::<Symbol>(
                     b,
                     *max_drawdown,
                 ))
@@ -4135,7 +4136,7 @@ impl NodeSpec {
                 bars_per_year,
             } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book)?;
-                dyn_indicator::wrap(
+                any(
                     crate::indicators::sizing::equity_vol_target::<Symbol>(
                         b,
                         *target,
@@ -4150,7 +4151,7 @@ impl NodeSpec {
                 window,
             } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book)?;
-                dyn_indicator::wrap(crate::indicators::sizing::fractional_kelly::<Symbol>(
+                any(crate::indicators::sizing::fractional_kelly::<Symbol>(
                     b,
                     *kelly_fraction,
                     window.get(),
@@ -4219,10 +4220,10 @@ impl NodeSpec {
                 schema,
             )?,
 
-            Add { lhs, rhs } => dyn_indicator::wrap(real(lhs)?.add(real(rhs)?)),
-            Sub { lhs, rhs } => dyn_indicator::wrap(real(lhs)?.sub(real(rhs)?)),
-            Mul { lhs, rhs } => dyn_indicator::wrap(real(lhs)?.mul(real(rhs)?)),
-            Div { lhs, rhs } => dyn_indicator::wrap(real(lhs)?.div(real(rhs)?)),
+            Add { lhs, rhs } => any(real(lhs)?.add(real(rhs)?)),
+            Sub { lhs, rhs } => any(real(lhs)?.sub(real(rhs)?)),
+            Mul { lhs, rhs } => any(real(lhs)?.mul(real(rhs)?)),
+            Div { lhs, rhs } => any(real(lhs)?.div(real(rhs)?)),
             IfElse {
                 cond,
                 then,
@@ -4230,32 +4231,32 @@ impl NodeSpec {
             } => {
                 let cond_ind = {
                     let built = cond.try_build(anchor, book, portfolio_book, schema, root)?;
-                    AsBool::try_new(built).map_err(|e| trail(cond, e))?
+                    built.into_bool().map_err(|e| trail(cond, e))?
                 };
                 let t_ind = real(then)?;
                 let f_ind = real(otherwise)?;
-                dyn_indicator::wrap(self::IfElse::new(cond_ind, t_ind, f_ind))
+                any(self::IfElse::new(cond_ind, t_ind, f_ind))
             }
             Match { on, cases, default } => {
                 build_match(on, cases, default, anchor, book, portfolio_book, schema, root)?
             }
-            Lag { source, period } => dyn_indicator::wrap(real(source)?.lag(period.get())),
-            Diff { source, period } => dyn_indicator::wrap(real(source)?.diff(period.get())),
-            Ratio { source, period } => dyn_indicator::wrap(real(source)?.ratio(period.get())),
-            Roc { source, period } => dyn_indicator::wrap(real(source)?.roc(period.get())),
+            Lag { source, period } => any(real(source)?.lag(period.get())),
+            Diff { source, period } => any(real(source)?.diff(period.get())),
+            Ratio { source, period } => any(real(source)?.ratio(period.get())),
+            Roc { source, period } => any(real(source)?.roc(period.get())),
             RollingMax { source, period } => {
-                dyn_indicator::wrap(real(source)?.rolling_max(period.get()))
+                any(real(source)?.rolling_max(period.get()))
             }
             RollingMin { source, period } => {
-                dyn_indicator::wrap(real(source)?.rolling_min(period.get()))
+                any(real(source)?.rolling_min(period.get()))
             }
-            Log { source, base } => dyn_indicator::wrap(self::Log::new(real(source)?, *base)),
+            Log { source, base } => any(self::Log::new(real(source)?, *base)),
             Latch { source } => {
                 let inner = {
                     let built = source.try_build(anchor, book, portfolio_book, schema, root)?;
-                    AsReal::try_new(built).map_err(|e| trail(source, e))?
+                    built.into_real().map_err(|e| trail(source, e))?
                 };
-                dyn_indicator::wrap(self::Latch::new(inner))
+                any(self::Latch::new(inner))
             }
             Resample {
                 every,
@@ -4265,84 +4266,84 @@ impl NodeSpec {
                 // No zero guard: `every` is a `NonZeroUsize`, so serde rejected
                 // 0 before this node existed.
                 let candle_src = candle(source)?;
-                let resample_dyn = dyn_indicator::wrap(self::Resample::new(candle_src, every.get()));
+                let resampled = crate::runtime::erase(self::Resample::new(candle_src, every.get()));
                 let inner_dyn = inner.try_build(anchor, book, portfolio_book, schema, root)?;
-                dyn_indicator::try_chain(resample_dyn, inner_dyn).map_err(|e| trail(inner, e))?
+                crate::runtime::chain_over_candle(resampled, inner_dyn)
             }
-            Unstable { source } => {
-                dyn_indicator::unstable_wrap(source.try_build(anchor, book, portfolio_book, schema, root)?)
-            }
+            Unstable { source } => source
+                .try_build(anchor, book, portfolio_book, schema, root)?
+                .unstable(),
 
             Year { source } => {
                 let s = atom_src_any(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::Year::of(s))
+                any(crate::indicators::Year::of(s))
             }
             Month { source } => {
                 let s = atom_src_any(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::Month::of(s))
+                any(crate::indicators::Month::of(s))
             }
             Day { source } => {
                 let s = atom_src_any(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::Day::of(s))
+                any(crate::indicators::Day::of(s))
             }
             Hour { source } => {
                 let s = atom_src_any(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::Hour::of(s))
+                any(crate::indicators::Hour::of(s))
             }
             Minute { source } => {
                 let s = atom_src_any(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::Minute::of(s))
+                any(crate::indicators::Minute::of(s))
             }
             Second { source } => {
                 let s = atom_src_any(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::Second::of(s))
+                any(crate::indicators::Second::of(s))
             }
             DayOfWeek { source } => {
                 let s = atom_src_any(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::DayOfWeek::of(s))
+                any(crate::indicators::DayOfWeek::of(s))
             }
             DayOfYear { source } => {
                 let s = atom_src_any(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::DayOfYear::of(s))
+                any(crate::indicators::DayOfYear::of(s))
             }
             WeekOfYear { source } => {
                 let s = atom_src_any(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::WeekOfYear::of(s))
+                any(crate::indicators::WeekOfYear::of(s))
             }
             Quarter { source } => {
                 let s = atom_src_any(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::Quarter::of(s))
+                any(crate::indicators::Quarter::of(s))
             }
             UnixSeconds { source } => {
                 let s = atom_src_any(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::UnixSeconds::of(s))
+                any(crate::indicators::UnixSeconds::of(s))
             }
             UnixMillis { source } => {
                 let s = atom_src_any(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::UnixMillis::of(s))
+                any(crate::indicators::UnixMillis::of(s))
             }
             Time { source } => {
                 let s = atom_src_any(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::CurrentTime::of(s))
+                any(crate::indicators::CurrentTime::of(s))
             }
 
             // --- absorbed boolean signals ---
-            Gt { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Gt::with_tolerance(
+            Gt { lhs, rhs, epsilon } => any(compare::Gt::with_tolerance(
                 real(lhs)?,
                 real(rhs)?,
                 eps(epsilon),
             )),
-            Lt { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Lt::with_tolerance(
+            Lt { lhs, rhs, epsilon } => any(compare::Lt::with_tolerance(
                 real(lhs)?,
                 real(rhs)?,
                 eps(epsilon),
             )),
-            Ge { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Ge::with_tolerance(
+            Ge { lhs, rhs, epsilon } => any(compare::Ge::with_tolerance(
                 real(lhs)?,
                 real(rhs)?,
                 eps(epsilon),
             )),
-            Le { lhs, rhs, epsilon } => dyn_indicator::wrap(compare::Le::with_tolerance(
+            Le { lhs, rhs, epsilon } => any(compare::Le::with_tolerance(
                 real(lhs)?,
                 real(rhs)?,
                 eps(epsilon),
@@ -4353,51 +4354,51 @@ impl NodeSpec {
             Ne { lhs, rhs, epsilon } => build_polymorphic_eq(
                 lhs, rhs, *epsilon, true, anchor, book, portfolio_book, schema, root,
             )?,
-            Above { source, level } => dyn_indicator::wrap(real(source)?.above(*level)),
-            Below { source, level } => dyn_indicator::wrap(real(source)?.below(*level)),
+            Above { source, level } => any(real(source)?.above(*level)),
+            Below { source, level } => any(real(source)?.below(*level)),
             CrossesAbove { lhs, rhs } => {
                 let (l, r) = (real(lhs)?, real(rhs)?);
                 let cmp = l.gt(r);
-                dyn_indicator::wrap(cmp.clone().and(cmp.changed()))
+                any(cmp.clone().and(cmp.changed()))
             }
             CrossesBelow { lhs, rhs } => {
                 let (l, r) = (real(lhs)?, real(rhs)?);
                 let cmp = l.lt(r);
-                dyn_indicator::wrap(cmp.clone().and(cmp.changed()))
+                any(cmp.clone().and(cmp.changed()))
             }
-            And { lhs, rhs } => dyn_indicator::wrap(boolean(lhs)?.and(boolean(rhs)?)),
-            Or { lhs, rhs } => dyn_indicator::wrap(boolean(lhs)?.or(boolean(rhs)?)),
-            Xor { lhs, rhs } => dyn_indicator::wrap(boolean(lhs)?.xor(boolean(rhs)?)),
+            And { lhs, rhs } => any(boolean(lhs)?.and(boolean(rhs)?)),
+            Or { lhs, rhs } => any(boolean(lhs)?.or(boolean(rhs)?)),
+            Xor { lhs, rhs } => any(boolean(lhs)?.xor(boolean(rhs)?)),
             All(specs) => {
                 if specs.is_empty() {
-                    dyn_indicator::wrap(crate::indicators::ValueBool::<Snapshot<Symbol>>::new(true))
+                    any(crate::indicators::ValueBool::<Snapshot<Symbol>>::new(true))
                 } else {
                     let mut acc = boolean(&specs[0])?;
                     for s in &specs[1..] {
                         let next = boolean(s)?;
-                        acc = AsBool::new(dyn_indicator::wrap(acc.and(next)));
+                        acc = crate::runtime::erase(acc.and(next));
                     }
-                    dyn_indicator::wrap(acc)
+                    any(acc)
                 }
             }
             Any(specs) => {
                 if specs.is_empty() {
-                    dyn_indicator::wrap(crate::indicators::ValueBool::<Snapshot<Symbol>>::new(false))
+                    any(crate::indicators::ValueBool::<Snapshot<Symbol>>::new(false))
                 } else {
                     let mut acc = boolean(&specs[0])?;
                     for s in &specs[1..] {
                         let next = boolean(s)?;
-                        acc = AsBool::new(dyn_indicator::wrap(acc.or(next)));
+                        acc = crate::runtime::erase(acc.or(next));
                     }
-                    dyn_indicator::wrap(acc)
+                    any(acc)
                 }
             }
-            Not(inner) => dyn_indicator::wrap(boolean(inner)?.not()),
+            Not(inner) => any(boolean(inner)?.not()),
             Changed(inner) => {
                 let built = inner.try_build(anchor, book, portfolio_book, schema, root)?;
                 match built.output_type() {
-                    PayloadType::Bool => dyn_indicator::wrap(AsBool::new(built).changed()),
-                    PayloadType::Real => dyn_indicator::wrap(AsReal::new(built).changed()),
+                    PayloadType::Bool => any(built.into_bool()?.changed()),
+                    PayloadType::Real => any(built.into_real()?.changed()),
                     other => {
                         return Err(trail(
                             inner,
@@ -4406,25 +4407,25 @@ impl NodeSpec {
                     }
                 }
             }
-            BecameTrue(inner) => dyn_indicator::wrap(boolean(inner)?.became_true()),
-            BecameFalse(inner) => dyn_indicator::wrap(boolean(inner)?.became_false()),
+            BecameTrue(inner) => any(boolean(inner)?.became_true()),
+            BecameFalse(inner) => any(boolean(inner)?.became_false()),
             StrEq { lhs, rhs } => {
-                dyn_indicator::wrap(compare::StrEq::new(str_view(lhs)?, str_operand(rhs)?))
+                any(compare::StrEq::new(str_view(lhs)?, str_operand(rhs)?))
             }
             StrNe { lhs, rhs } => {
-                dyn_indicator::wrap(compare::StrNe::new(str_view(lhs)?, str_operand(rhs)?))
+                any(compare::StrNe::new(str_view(lhs)?, str_operand(rhs)?))
             }
             Never => {
-                dyn_indicator::wrap(crate::indicators::ValueBool::<Snapshot<Symbol>>::new(false))
+                any(crate::indicators::ValueBool::<Snapshot<Symbol>>::new(false))
             }
             Every(n) => {
-                dyn_indicator::wrap(crate::indicators::Every::<Snapshot<Symbol>>::new(n.get()))
+                any(crate::indicators::Every::<Snapshot<Symbol>>::new(n.get()))
             }
-            IsWeekday => dyn_indicator::wrap(crate::indicators::IsWeekday::of(pick_any_root())),
-            IsWeekend => dyn_indicator::wrap(crate::indicators::IsWeekend::of(pick_any_root())),
+            IsWeekday => any(crate::indicators::IsWeekday::of(pick_any_root())),
+            IsWeekend => any(crate::indicators::IsWeekend::of(pick_any_root())),
             HasColumn { name } => {
                 let exists = schema.index_of(name.as_str()).is_some();
-                dyn_indicator::wrap(crate::indicators::ValueBool::<Snapshot<Symbol>>::new(exists))
+                any(crate::indicators::ValueBool::<Snapshot<Symbol>>::new(exists))
             }
         })
     }
@@ -4456,7 +4457,7 @@ fn build_pick(
     symbol: Option<&str>,
     freq: Option<&str>,
     root: Option<&Selector<Symbol>>,
-) -> Result<Box<dyn PayloadIndicator>, String> {
+) -> Result<AnyChain, String> {
     let named = symbol.is_some();
     // The document gives a `&str`; interning happens here, once at build time,
     // so the resulting `Selector` clones as a refcount bump for the whole run.
@@ -4474,14 +4475,14 @@ fn build_pick(
         freq: f,
     };
     Ok(if selector.is_empty() {
-        dyn_indicator::wrap(Pick::<Symbol>::new())
+        any(Pick::<Symbol>::new())
     } else if named {
-        dyn_indicator::wrap(Pick::<Symbol>::matching(selector))
+        any(Pick::<Symbol>::matching(selector))
     } else {
         // Symbol came from the root, so this is still the implicit
         // "this series" read — keep the sole-atom fallback that makes an
         // untagged single-entry snapshot resolve. See `Pick::rooted`.
-        dyn_indicator::wrap(Pick::<Symbol>::rooted(selector))
+        any(Pick::<Symbol>::rooted(selector))
     })
 }
 
@@ -4499,12 +4500,12 @@ fn build_pick(
 fn build_get(
     schema: &Arc<Schema>,
     key: &str,
-    source: AsAtom,
-) -> Result<Box<dyn PayloadIndicator>, String> {
+    source: AtomChain,
+) -> Result<AnyChain, String> {
     match schema.type_of_key(key) {
-        Some(OverlayType::Real) => Ok(dyn_indicator::wrap(GetReal::of(schema, key, source))),
-        Some(OverlayType::Bool) => Ok(dyn_indicator::wrap(GetBool::of(schema, key, source))),
-        Some(OverlayType::Str) => Ok(dyn_indicator::wrap(GetStr::of(schema, key, source))),
+        Some(OverlayType::Real) => Ok(any(GetReal::of(schema, key, source))),
+        Some(OverlayType::Bool) => Ok(any(GetBool::of(schema, key, source))),
+        Some(OverlayType::Str) => Ok(any(GetStr::of(schema, key, source))),
         None => {
             let registered: Vec<&str> = schema.keys().collect();
             if registered.is_empty() {

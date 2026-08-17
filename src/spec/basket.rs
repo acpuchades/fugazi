@@ -40,7 +40,7 @@ use crate::types::Snapshot;
 
 use super::expr::NodeSpec;
 use super::template::SpecTemplate;
-use crate::spec::dyn_indicator::{AsBool, AsReal, PayloadIndicator};
+use crate::runtime::AnyChain;
 use crate::types::Symbol;
 
 /// YAML surface for the ranking rule. Externally tagged
@@ -379,9 +379,9 @@ impl BasketStrategySpec {
         let strat = strat.scored_by(move |sym: &Symbol| {
             let concrete = build_per_symbol(&score_template, sym, "score");
             let anchor = Position::new();
-            let dyn_ind: Box<dyn PayloadIndicator> =
+            let dyn_ind: AnyChain =
                 concrete.build(&anchor, &book_score, None, &schema_score, Some(&leg_root(sym)));
-            AsReal::new(dyn_ind)
+            dyn_ind.probed_real("score")
         });
 
         let sizing_template = self.sizing.clone();
@@ -390,9 +390,9 @@ impl BasketStrategySpec {
         let strat = strat.sized_by(move |sym: &Symbol| {
             let concrete = build_per_symbol(&sizing_template, sym, "sizing");
             let anchor = Position::new();
-            let dyn_ind: Box<dyn PayloadIndicator> =
+            let dyn_ind: AnyChain =
                 concrete.build(&anchor, &book_sizing, None, &schema_sizing, Some(&leg_root(sym)));
-            AsReal::new(dyn_ind)
+            dyn_ind.probed_real("sizing")
         });
 
         let strat = strat.selection(DynSelection(self.selection.build()));
@@ -413,9 +413,9 @@ impl BasketStrategySpec {
             // no "this series" for it to mean. Cadence / calendar signals
             // (`!every`, `!monthly`) need no asset; one that reads a price
             // must name it with `!pick { symbol: ... }`.
-            let dyn_ind: Box<dyn PayloadIndicator> =
+            let dyn_ind: AnyChain =
                 rebalance_spec.try_build(&anchor, &book, None, schema, None)?;
-            strat.rebalance_on(AsBool::try_new(dyn_ind)?)
+            strat.rebalance_on(dyn_ind.into_bool()?)
         } else {
             strat
         };
@@ -432,9 +432,9 @@ impl BasketStrategySpec {
                 let schema_c = schema.clone();
                 strat = strat.long_stop_loss(move |sym: &Symbol, pos: &Position| {
                     let concrete = build_per_symbol(&t, sym, "long.stop_loss");
-                    let dyn_ind: Box<dyn PayloadIndicator> =
+                    let dyn_ind: AnyChain =
                         concrete.build(pos, &book_c, None, &schema_c, Some(&leg_root(sym)));
-                    AsReal::new(dyn_ind)
+                    dyn_ind.probed_real("long.stop_loss")
                 });
             }
             if let Some(t) = long.take_profit.clone() {
@@ -442,9 +442,9 @@ impl BasketStrategySpec {
                 let schema_c = schema.clone();
                 strat = strat.long_take_profit(move |sym: &Symbol, pos: &Position| {
                     let concrete = build_per_symbol(&t, sym, "long.take_profit");
-                    let dyn_ind: Box<dyn PayloadIndicator> =
+                    let dyn_ind: AnyChain =
                         concrete.build(pos, &book_c, None, &schema_c, Some(&leg_root(sym)));
-                    AsReal::new(dyn_ind)
+                    dyn_ind.probed_real("long.take_profit")
                 });
             }
             strat
@@ -458,9 +458,9 @@ impl BasketStrategySpec {
                 let schema_c = schema.clone();
                 strat = strat.short_stop_loss(move |sym: &Symbol, pos: &Position| {
                     let concrete = build_per_symbol(&t, sym, "short.stop_loss");
-                    let dyn_ind: Box<dyn PayloadIndicator> =
+                    let dyn_ind: AnyChain =
                         concrete.build(pos, &book_c, None, &schema_c, Some(&leg_root(sym)));
-                    AsReal::new(dyn_ind)
+                    dyn_ind.probed_real("short.stop_loss")
                 });
             }
             if let Some(t) = short.take_profit.clone() {
@@ -468,9 +468,9 @@ impl BasketStrategySpec {
                 let schema_c = schema.clone();
                 strat = strat.short_take_profit(move |sym: &Symbol, pos: &Position| {
                     let concrete = build_per_symbol(&t, sym, "short.take_profit");
-                    let dyn_ind: Box<dyn PayloadIndicator> =
+                    let dyn_ind: AnyChain =
                         concrete.build(pos, &book_c, None, &schema_c, Some(&leg_root(sym)));
-                    AsReal::new(dyn_ind)
+                    dyn_ind.probed_real("short.take_profit")
                 });
             }
             strat

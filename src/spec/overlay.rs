@@ -48,7 +48,7 @@ use serde_json::Value as Json;
 
 use crate::indicators::{Book, Position};
 use crate::market::{Atom, OverlayInfo, OverlayType, OverlayValue, Schema};
-use crate::runtime::{PayloadIndicator, PayloadType, PayloadValue};
+use crate::runtime::{AnyChain, PayloadIndicator, PayloadType, PayloadValue};
 use crate::snapshot::Selector;
 use crate::time::Frequency;
 use crate::types::Snapshot;
@@ -99,7 +99,14 @@ pub fn build_overlay(
     schema: &Arc<Schema>,
     root: Option<&Selector<Symbol>>,
 ) -> Result<Box<dyn PayloadIndicator>> {
+    // Overlay columns are the one consumer that still rides the payload
+    // vocabulary: `drive` asks each column what *input* it wants (a whole
+    // snapshot for a spec-built column, a single bar for a Python carrier), and
+    // a `Vec<AnyChain>` cannot hold both — every `AnyChain` is snapshot-rooted.
+    // The subtree below this point is narrow; only the column handle is not.
+    // See `AnyChain::into_payload`.
     spec.try_build(&Position::new(), &Book::new(1.0), None, schema, root)
+        .map(AnyChain::into_payload)
         .map_err(|e| anyhow!("{e}"))
 }
 

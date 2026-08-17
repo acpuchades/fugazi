@@ -16,7 +16,7 @@ use crate::strategies::PairsStrategy;
 
 use super::expr::{BoolNode, RealNode};
 use super::strategy::SideSpec;
-use crate::spec::dyn_indicator::{AsBool, AsReal, PayloadIndicator};
+use crate::runtime::AnyChain;
 use crate::types::Symbol;
 
 /// A whole `pairs.yml`: the two traded symbols plus one enter/exit signal pair
@@ -249,10 +249,10 @@ impl PairsStrategySpec {
         anchor: &Position,
         book: &Book,
         schema: &Arc<Schema>,
-    ) -> Result<Box<dyn PayloadIndicator>, String> {
+    ) -> Result<AnyChain, String> {
         match side.and_then(|s| s.exit.as_ref()) {
             Some(s) => s.try_build(anchor, book, None, schema, None),
-            None => Ok(crate::spec::dyn_indicator::wrap(ValueBool::<
+            None => Ok(crate::runtime::any(ValueBool::<
                 crate::types::Snapshot<Symbol>,
             >::new(false))),
         }
@@ -265,10 +265,10 @@ impl PairsStrategySpec {
         anchor: &Position,
         book: &Book,
         schema: &Arc<Schema>,
-    ) -> Result<Box<dyn PayloadIndicator>, String> {
+    ) -> Result<AnyChain, String> {
         match side {
             Some(s) => s.enter.try_build(anchor, book, None, schema, None),
-            None => Ok(crate::spec::dyn_indicator::wrap(ValueBool::<
+            None => Ok(crate::runtime::any(ValueBool::<
                 crate::types::Snapshot<Symbol>,
             >::new(false))),
         }
@@ -323,36 +323,36 @@ impl PairsStrategySpec {
         let short = self.short_spread.as_ref();
 
         let mut strat = strat.long_spread_on(
-            AsBool::try_new(Self::enter_of(long, &anchor, &book, schema)?)?,
-            AsBool::try_new(Self::exit_of(long, &anchor, &book, schema)?)?,
+            (Self::enter_of(long, &anchor, &book, schema)?).into_bool()?,
+            (Self::exit_of(long, &anchor, &book, schema)?).into_bool()?,
         );
         if short.is_some() {
             strat = strat.short_spread_on(
-                AsBool::try_new(Self::enter_of(short, &anchor, &book, schema)?)?,
-                AsBool::try_new(Self::exit_of(short, &anchor, &book, schema)?)?,
+                (Self::enter_of(short, &anchor, &book, schema)?).into_bool()?,
+                (Self::exit_of(short, &anchor, &book, schema)?).into_bool()?,
             );
         }
         if let Some(sl) = long.and_then(|s| s.stop_loss.as_ref()) {
             strat =
-                strat.long_spread_stop_loss(AsReal::try_new(sl.try_build(&anchor, &book, None, schema, None)?)?);
+                strat.long_spread_stop_loss((sl.try_build(&anchor, &book, None, schema, None)?).into_real()?);
         }
         if let Some(tp) = long.and_then(|s| s.take_profit.as_ref()) {
             strat =
-                strat.long_spread_take_profit(AsReal::try_new(tp.try_build(&anchor, &book, None, schema, None)?)?);
+                strat.long_spread_take_profit((tp.try_build(&anchor, &book, None, schema, None)?).into_real()?);
         }
         if let Some(sl) = short.and_then(|s| s.stop_loss.as_ref()) {
             strat =
-                strat.short_spread_stop_loss(AsReal::try_new(sl.try_build(&anchor, &book, None, schema, None)?)?);
+                strat.short_spread_stop_loss((sl.try_build(&anchor, &book, None, schema, None)?).into_real()?);
         }
         if let Some(tp) = short.and_then(|s| s.take_profit.as_ref()) {
             strat =
-                strat.short_spread_take_profit(AsReal::try_new(tp.try_build(&anchor, &book, None, schema, None)?)?);
+                strat.short_spread_take_profit((tp.try_build(&anchor, &book, None, schema, None)?).into_real()?);
         }
         if let Some(sizing) = &self.sizing {
-            strat = strat.position_sizing(AsReal::try_new(sizing.try_build(&anchor, &book, None, schema, None)?)?);
+            strat = strat.position_sizing((sizing.try_build(&anchor, &book, None, schema, None)?).into_real()?);
         }
         if let Some(rebalance) = &self.rebalance_on {
-            strat = strat.rebalance_on(AsBool::try_new(rebalance.try_build(&anchor, &book, None, schema, None)?)?);
+            strat = strat.rebalance_on((rebalance.try_build(&anchor, &book, None, schema, None)?).into_bool()?);
         }
         Ok(DynPairsStrategy { inner: strat })
     }
@@ -360,7 +360,7 @@ impl PairsStrategySpec {
 
 /// The CLI's built pairs-strategy handle. Wraps a
 /// [`PairsStrategy<Symbol>`](crate::strategies::PairsStrategy) whose signals
-/// and levels came from runtime-typed [`PayloadIndicator`]s.
+/// and levels came from runtime-typed [`AnyChain`]s.
 ///
 /// Implements [`Strategy`] by delegation, so it drops into
 /// [`crate::backtest::run`] unchanged.

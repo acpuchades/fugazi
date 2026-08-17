@@ -41,7 +41,7 @@ instrument, at the cost of a ~50× slowdown.
 | `wallet` | `PaperWallet::update` / `equity` / a submit→fill round-trip, swept over held-position count. |
 | `metrics` | `RunReport` → `Metrics`, which `optimize` pays once per grid row per fold. |
 | `footprint` | Allocation count, bytes, and peak RSS. Not criterion — it installs a counting global allocator, which inside a criterion target would also tally criterion's own bookkeeping. |
-| `icount` | A fixed workload run exactly once, for callgrind. Answers "does this change do more work?" immune to contention and to code layout. |
+| `icount` | A fixed workload run exactly once, for callgrind. Answers "does this change do more work?" immune to contention and to code layout. Keep `sma_rust`/`macd_rust` in every run even when a change cannot touch them: a control reading 0.00% is what makes a −31% elsewhere in the same table believable. |
 | `breaking` | Prototypes for the proposed breaking changes, so each is a measured number rather than an argument. |
 | `erasure` | What one level of type erasure costs, `PayloadValue` vs `Chain`, at 2/3/5 levels. The bench that justified Phase 6 — and that has to keep justifying it. |
 | `stddev_tradeoff` | Accuracy *and* cost of the centred variance against TA-Lib's `E[X²] − E[X]²` shortcut, so the choice rests on numbers. |
@@ -539,9 +539,53 @@ API takes a heterogeneous list whose members differ in *input* domain, which one
 `Vec<Chain<_, _>>` cannot express. It costs one box per column at build time and
 nothing per bar. It goes when `spec::overlay` moves over.
 
-**Still to migrate:** the spec/YAML layer (`src/spec/expr.rs` and friends,
-~150 `wrap` sites). It nests erasure exactly the same way, so it stands to gain
-the same ~4× on deep expressions — which is the CLI's `optimize` path.
+### The spec/YAML layer
+
+Migrated too, and it is the same win: `NodeSpec::try_build` returns an
+[`AnyChain`] instead of a payload box, and the `AsReal`/`AsBool`/… views it used
+to coerce through are now `into_real()`/`into_bool()`/… on that enum.
+
+Instruction counts against the commit before the migration
+(`scripts/perf-compare.sh icount`, callgrind — deterministic, so these are exact
+rather than sampled):
+
+| workload | before | after | change |
+|---|---:|---:|---:|
+| `sma_rust` | 72 629 569 | 72 629 862 | **0.00%** |
+| `macd_rust` | 67 139 942 | 67 140 185 | **0.00%** |
+| `sma_yaml` | 120 858 828 | 83 224 424 | **−31.14%** |
+| `macd_yaml` | 130 420 152 | 93 110 954 | **−28.61%** |
+| `tree8` (depth-8 expression) | 214 228 698 | 129 873 952 | **−39.38%** |
+
+The two hand-written Rust strategies are the **control**: this change cannot
+touch them, and they read 0.00%. That is what makes the rest of the column
+believable. Depth-8 gains most, which is the prediction the erasure model makes.
+
+Wall-clock agrees where it is large enough to trust
+(`cargo bench --bench driver`, 50 000 bars):
+
+| | before | after | YAML ÷ Rust |
+|---|---:|---:|---:|
+| SMA crossover, YAML | 35.38 ms | **16.79 ms** | 2.76× → **1.38×** |
+| MACD crossover, YAML | 37.34 ms | **21.36 ms** | 3.46× → **1.71×** |
+
+In the same run the *unchanged* Rust paths moved +15.8% and −4.8% — pure code
+layout, as the 0.00% instruction counts prove. This is trap 6 in the list below,
+caught by the instrument that exists for it.
+
+### What still rides the payload vocabulary
+
+Not everything should move, and two things deliberately have not:
+
+* **Overlay columns** (`spec::overlay`). `drive` asks each column what *input* it
+  wants — a whole snapshot for a spec-built column, a single bar for a Python
+  carrier — and one `Vec<AnyChain>` cannot hold both, since every `AnyChain` is
+  snapshot-rooted. `AnyChain::into_payload` bridges at the build boundary; the
+  subtree below it is narrow.
+* **`spec::typecheck`.** `PayloadType` is also the *static* type vocabulary, and
+  it is a plain tag enum with no payload. `AnyChain::output_type()` returns it,
+  so a builder compares what a subtree declared against what it built with no
+  translation step. Nothing is paid for this at run time.
 
 ## Breaking candidates — measured, not yet done
 
@@ -795,8 +839,13 @@ by far the most common way to be confidently wrong here.
    `scripts/perf-compare.sh icount` (callgrind), which is immune to both
    contention and layout.
 7. **`ls target/release/deps/x-* | head -1` sorts by hash, not time.** It will
-   hand you a stale binary. `scripts/perf-compare.sh` deletes bench binaries
-   before each variant build and fails if more than one matches.
+   hand you a stale binary — one built with different codegen settings, most
+   likely. This has now bitten twice: once on the criterion binaries, and again
+   on `icount`, where it reported **+37% instructions on `sma_rust`**, a
+   workload the change could not touch. (That impossibility is the tell: always
+   include a workload the change *cannot* affect, and check it reads zero.)
+   `scripts/perf-compare.sh` now deletes bench binaries before each variant
+   build and refuses to guess when more than one matches, on every subcommand.
 
 The general defence, and the one that actually caught trap 3: **measure the same
 quantity by paths that share as little as possible.** Phase 6's per-level cost

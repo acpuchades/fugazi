@@ -13,7 +13,7 @@ use crate::prelude::*;
 use crate::strategies::SingleAssetStrategy;
 
 use super::expr::{BoolNode, RealNode};
-use crate::spec::dyn_indicator::{self, AsBool, AsReal, PayloadIndicator};
+use crate::runtime::{any, AnyChain};
 use crate::types::Symbol;
 
 // ---------------------------------------------------------------------------
@@ -54,10 +54,10 @@ impl SideSpec {
         book: &Book,
         schema: &Arc<Schema>,
         root: Option<&Selector<Symbol>>,
-    ) -> Result<Box<dyn PayloadIndicator>, String> {
+    ) -> Result<AnyChain, String> {
         match &self.exit {
             Some(s) => s.try_build(anchor, book, None, schema, root),
-            None => Ok(dyn_indicator::wrap(ValueBool::<
+            None => Ok(any(ValueBool::<
                 crate::types::Snapshot<Symbol>,
             >::new(false))),
         }
@@ -188,33 +188,33 @@ impl SingleStrategySpec {
         let root = Some(&root);
         if let Some(long) = &self.long {
             strat = strat.long_on(
-                AsBool::try_new(long.enter.try_build(&anchor, &book, None, schema, root)?)?,
-                AsBool::try_new(long.exit(&anchor, &book, schema, root)?)?,
+                (long.enter.try_build(&anchor, &book, None, schema, root)?).into_bool()?,
+                (long.exit(&anchor, &book, schema, root)?).into_bool()?,
             );
             if let Some(sl) = &long.stop_loss {
-                strat = strat.long_stop_loss(AsReal::try_new(sl.try_build(&anchor, &book, None, schema, root)?)?);
+                strat = strat.long_stop_loss((sl.try_build(&anchor, &book, None, schema, root)?).into_real()?);
             }
             if let Some(tp) = &long.take_profit {
-                strat = strat.long_take_profit(AsReal::try_new(tp.try_build(&anchor, &book, None, schema, root)?)?);
+                strat = strat.long_take_profit((tp.try_build(&anchor, &book, None, schema, root)?).into_real()?);
             }
         }
         if let Some(short) = &self.short {
             strat = strat.short_on(
-                AsBool::try_new(short.enter.try_build(&anchor, &book, None, schema, root)?)?,
-                AsBool::try_new(short.exit(&anchor, &book, schema, root)?)?,
+                (short.enter.try_build(&anchor, &book, None, schema, root)?).into_bool()?,
+                (short.exit(&anchor, &book, schema, root)?).into_bool()?,
             );
             if let Some(sl) = &short.stop_loss {
-                strat = strat.short_stop_loss(AsReal::try_new(sl.try_build(&anchor, &book, None, schema, root)?)?);
+                strat = strat.short_stop_loss((sl.try_build(&anchor, &book, None, schema, root)?).into_real()?);
             }
             if let Some(tp) = &short.take_profit {
-                strat = strat.short_take_profit(AsReal::try_new(tp.try_build(&anchor, &book, None, schema, root)?)?);
+                strat = strat.short_take_profit((tp.try_build(&anchor, &book, None, schema, root)?).into_real()?);
             }
         }
         if let Some(sizing) = &self.sizing {
-            strat = strat.position_sizing(AsReal::try_new(sizing.try_build(&anchor, &book, None, schema, root)?)?);
+            strat = strat.position_sizing((sizing.try_build(&anchor, &book, None, schema, root)?).into_real()?);
         }
         if let Some(rebalance) = &self.rebalance_on {
-            strat = strat.rebalance_on(AsBool::try_new(rebalance.try_build(&anchor, &book, None, schema, root)?)?);
+            strat = strat.rebalance_on((rebalance.try_build(&anchor, &book, None, schema, root)?).into_bool()?);
         }
         Ok(DynSingleStrategy { inner: strat })
     }
@@ -226,8 +226,8 @@ impl SingleStrategySpec {
 
 /// The CLI's built-strategy handle. Wraps a [`SingleAssetStrategy<Symbol>`]
 /// whose entry/exit signals and protective levels came from runtime-typed
-/// [`PayloadIndicator`]s (bridged into typed [`Signal`] / real
-/// levels by the private [`AsBool`] / [`AsReal`] adapters at construction).
+/// [`AnyChain`]s (coerced into typed [`Signal`] /
+/// real levels by `into_bool` / `into_real` at construction).
 ///
 /// Implements [`Strategy`] by delegation, so it drops into
 /// [`crate::backtest::run`] unchanged.

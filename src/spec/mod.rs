@@ -153,7 +153,7 @@ pub use input::{Source, StrategyKind, StrategySource};
 mod tests {
     use crate::types::Symbol;
     use super::*;
-    use crate::spec::dyn_indicator::{PayloadIndicator, PayloadValue as Payload};
+    use crate::runtime::{PayloadIndicator, PayloadValue as Payload};
     use crate::indicators::{
         BarsSince, BarsSinceHigh, BarsSinceLow, Book, Correlation, Current, Ema, GarmanKlass,
         Kurtosis, Parkinson, Percentile, PercentileRank, Position, RogersSatchell, Skewness,
@@ -184,7 +184,12 @@ mod tests {
         s
     }
 
-    /// Feed a `Box<dyn PayloadIndicator>` a candle and unwrap the payload as `Real`.
+    /// Feed a built node a candle and unwrap the payload as `Real`.
+    ///
+    /// These tests drive nodes through [`AnyChain::into_payload`] rather than
+    /// matching each one's domain first: a spec test asserts *behaviour*, and
+    /// one `update` signature across all six domains keeps that readable. The
+    /// bridge re-erases the same chain, so what is driven is what was built.
     fn feed_real(source: &mut Box<dyn PayloadIndicator>, c: Candle) -> Option<Real> {
         match source.update(Payload::Snapshot(snap(c)))? {
             Payload::Real(x) => Some(x),
@@ -208,7 +213,7 @@ mod tests {
             rhs: !sma { source: close, period: 4 }
         "#;
         let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
-        let mut sig = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut sig = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         let mut fired = false;
         for p in [10.0, 9.0, 8.0, 7.0, 8.0, 10.0, 12.0, 14.0, 16.0] {
             fired |= feed_bool(&mut sig, bar(p)).unwrap_or(false);
@@ -234,7 +239,7 @@ mod tests {
     #[test]
     fn default_source_is_close() {
         let spec: NodeSpec = serde_norway::from_str("!ema { period: 3 }").unwrap();
-        let mut ema = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut ema = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         let mut reference = Ema::new(Current::close(), 3);
         for p in [1.0, 2.0, 3.0, 4.0, 5.0] {
             assert_eq!(feed_real(&mut ema, bar(p)), reference.update(bar(p).into()));
@@ -248,15 +253,15 @@ mod tests {
         let closes = [10.0, 12.0, 9.0, 14.0, 8.0, 15.0, 11.0];
 
         let sk: NodeSpec = serde_norway::from_str("!skewness { period: 4 }").unwrap();
-        let mut sk = sk.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut sk = sk.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         let mut sk_ref = Skewness::new(Current::close(), 4);
 
         let ku: NodeSpec = serde_norway::from_str("!kurtosis { period: 4 }").unwrap();
-        let mut ku = ku.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut ku = ku.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         let mut ku_ref = Kurtosis::new(Current::close(), 4);
 
         let z: NodeSpec = serde_norway::from_str("!zscore { period: 4 }").unwrap();
-        let mut z = z.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut z = z.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         let mut z_ref = ZScore::new(Current::close(), 4);
 
         for p in closes {
@@ -271,11 +276,11 @@ mod tests {
         let closes = [10.0, 12.0, 9.0, 14.0, 8.0, 15.0, 11.0];
 
         let p: NodeSpec = serde_norway::from_str("!percentile { period: 4, pct: 0.75 }").unwrap();
-        let mut p = p.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut p = p.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         let mut p_ref = Percentile::new(Current::close(), 4, 0.75);
 
         let r: NodeSpec = serde_norway::from_str("!percentile_rank { period: 4 }").unwrap();
-        let mut r = r.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut r = r.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         let mut r_ref = PercentileRank::new(Current::close(), 4);
 
         for c in closes {
@@ -289,16 +294,16 @@ mod tests {
         // The signal-input form: `source:` is a NodeSpec, not an NodeSpec.
         let yaml = "!bars_since { source: !above { source: close, level: 12.0 } }";
         let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         let mut reference = BarsSince::new(Current::close().above(12.0));
 
         // And the two rolling-extremum shorthands.
         let hi: NodeSpec = serde_norway::from_str("!bars_since_high { period: 3 }").unwrap();
-        let mut hi = hi.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut hi = hi.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         let mut hi_ref = BarsSinceHigh::new(Current::close(), 3);
 
         let lo: NodeSpec = serde_norway::from_str("!bars_since_low { period: 3 }").unwrap();
-        let mut lo = lo.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut lo = lo.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         let mut lo_ref = BarsSinceLow::new(Current::close(), 3);
 
         let mut saw_some = false;
@@ -318,7 +323,7 @@ mod tests {
         let spec: NodeSpec =
             serde_norway::from_str("!correlation { lhs: close, rhs: !lag { period: 1 }, period: 3 }")
                 .unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         let mut reference = Correlation::new(Current::close(), Current::close().lag(1), 3);
         for p in [10.0, 12.0, 9.0, 14.0, 8.0, 15.0] {
             assert_eq!(feed_real(&mut built, bar(p)), reference.update(bar(p).into()));
@@ -331,7 +336,7 @@ mod tests {
         // library indicator (`> 1` trending, `< 1` mean-reverting).
         let spec: NodeSpec =
             serde_norway::from_str("!variance_ratio { period: 5, lag: 2 }").unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         let mut reference = VarianceRatio::new(Current::close(), 5, 2);
         for p in [10.0, 12.0, 9.0, 14.0, 8.0, 15.0, 11.0] {
             assert_eq!(feed_real(&mut built, bar(p)), reference.update(bar(p).into()));
@@ -342,7 +347,7 @@ mod tests {
     fn log_defaults_to_natural_and_accepts_explicit_base() {
         // Default base: natural log (`e`).
         let bare: NodeSpec = serde_norway::from_str("!log").unwrap();
-        let mut ln = bare.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut ln = bare.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         for p in [1.0, std::f64::consts::E, 10.0, 100.0] {
             let got = feed_real(&mut ln, bar(p)).unwrap();
             assert!((got - p.ln()).abs() < 1e-12, "ln({p})");
@@ -350,7 +355,7 @@ mod tests {
 
         // Explicit base: 10.
         let spec: NodeSpec = serde_norway::from_str("!log { base: 10.0 }").unwrap();
-        let mut log10 = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut log10 = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         for p in [1.0, 10.0, 1000.0] {
             let got = feed_real(&mut log10, bar(p)).unwrap();
             assert!((got - p.log10()).abs() < 1e-12, "log10({p})");
@@ -426,7 +431,7 @@ mod tests {
     #[test]
     fn strategy_slots_reject_a_decidably_wrong_output_type_at_parse() {
         // The RealNode / BoolNode slot newtypes reject a decidably-wrong node
-        // when the document is *read*, not at build inside an AsReal / AsBool
+        // when the document is *read*, not at build inside an RealChain / BoolChain
         // view — a Real expression in an `enter:` (Bool) slot, and a Bool
         // expression in a `stop_loss:` (Real) slot.
         let bool_slot_got_real =
@@ -584,7 +589,7 @@ mod tests {
         // the Nth base tick, None between.
         let spec: NodeSpec =
             serde_norway::from_str("!resample { every: 4, inner: close }").unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         for i in 1..=8 {
             let out = feed_real(&mut built, bar(i as Real));
             if i % 4 == 0 {
@@ -603,7 +608,7 @@ mod tests {
             "!latch { source: !resample { every: 3, inner: close } }",
         )
         .unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         assert_eq!(feed_real(&mut built, bar(1.0)), None);
         assert_eq!(feed_real(&mut built, bar(2.0)), None);
         assert_eq!(feed_real(&mut built, bar(3.0)), Some(3.0));
@@ -618,7 +623,7 @@ mod tests {
         // pointing to `!current`, so a bare `!obv` / `!ad` / … tag with no
         // map still deserializes and drives the base bar stream.
         let obv: NodeSpec = serde_norway::from_str("!obv").unwrap();
-        let mut built = obv.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = obv.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         // OBV seeds at first bar's volume.
         assert_eq!(
             feed_real(&mut built, Candle::new(1.0, 1.0, 1.0, 1.0, 100.0)),
@@ -653,15 +658,15 @@ mod tests {
         ];
 
         let pk: NodeSpec = serde_norway::from_str("!parkinson { period: 3 }").unwrap();
-        let mut pk = pk.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut pk = pk.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         let mut pk_ref = Parkinson::new(Current::candle(), 3);
 
         let gk: NodeSpec = serde_norway::from_str("!garman_klass { period: 3 }").unwrap();
-        let mut gk = gk.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut gk = gk.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         let mut gk_ref = GarmanKlass::new(Current::candle(), 3);
 
         let rs: NodeSpec = serde_norway::from_str("!rogers_satchell { period: 3 }").unwrap();
-        let mut rs = rs.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut rs = rs.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         let mut rs_ref = RogersSatchell::new(Current::candle(), 3);
 
         for c in ohlc {
@@ -694,18 +699,16 @@ mod tests {
              period: 4, bars_per_year: 252 }",
         )
         .unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         assert_eq!(built.output_type(), crate::spec::dyn_indicator::PayloadType::Real);
 
         let mut last = None;
         for p in [100.0, 102.0, 105.0, 108.0, 112.0, 116.0, 121.0, 127.0] {
-            last = built.update(Payload::Snapshot(snap(bar(p))));
+            last = feed_real(&mut built, bar(p));
         }
         match last {
-            Some(Payload::Real(s)) => {
-                assert!(s > 0.0, "rising equity should give a positive Sharpe, got {s}")
-            }
-            other => panic!("expected Some(Real), got {other:?}"),
+            Some(s) => assert!(s > 0.0, "rising equity should give a positive Sharpe, got {s}"),
+            None => panic!("expected a value"),
         }
     }
 
@@ -719,7 +722,7 @@ mod tests {
              period: 4, bars_per_year: 252 }",
         )
         .unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         assert_eq!(built.output_type(), crate::spec::dyn_indicator::PayloadType::Real);
         // Drives a golden-then-death cross without panicking; reads Some once warm.
         let mut last = None;
@@ -772,7 +775,7 @@ mod tests {
             other => panic!("expected a Sharpe spec, got {other:?}"),
         }
 
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         assert_eq!(built.output_type(), crate::spec::dyn_indicator::PayloadType::Real);
 
         // BTC drifts up, ETH drifts down: long-BTC / short-ETH earns on both
@@ -821,7 +824,7 @@ mod tests {
 
         // Builds and drives a 3-symbol universe without panicking (the embedded
         // basket ranks per-symbol ROC, longs the top / shorts the bottom).
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         assert_eq!(built.output_type(), crate::spec::dyn_indicator::PayloadType::Real);
         for i in 0..8 {
             let f = i as Real;
@@ -857,7 +860,7 @@ mod tests {
             other => panic!("expected a Sharpe spec, got {other:?}"),
         }
         // Builds without panicking; drives on a small 2-symbol path.
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         assert_eq!(built.output_type(), crate::spec::dyn_indicator::PayloadType::Real);
         for i in 0..6 {
             let f = i as Real;
@@ -877,7 +880,7 @@ mod tests {
              period: 3 }",
         )
         .unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         let mut last = None;
         for p in [100.0, 110.0, 120.0, 108.0, 96.0] {
             last = built.update(Payload::Snapshot(snap(bar(p))));
@@ -909,7 +912,7 @@ mod tests {
         let schema = b.finish();
 
         let spec: NodeSpec = serde_norway::from_str("!get { key: vol_20 }").unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &schema, None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &schema, None).into_payload();
         assert_eq!(built.output_type(), crate::spec::dyn_indicator::PayloadType::Real);
 
         let ov = OverlayInfo::new(schema.clone(), vec![OverlayValue::Real(0.42)]);
@@ -926,7 +929,7 @@ mod tests {
         let schema = b.finish();
 
         let spec: NodeSpec = serde_norway::from_str("!get { key: risk_on }").unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &schema, None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &schema, None).into_payload();
         assert_eq!(built.output_type(), crate::spec::dyn_indicator::PayloadType::Bool);
 
         let ov = OverlayInfo::new(schema.clone(), vec![OverlayValue::Bool(true)]);
@@ -943,8 +946,8 @@ mod tests {
             serde_norway::from_str("!gt { lhs: close, rhs: 100 }").unwrap();
         let spec_explicit: NodeSpec =
             serde_norway::from_str("!gt { lhs: close, rhs: !value 100 }").unwrap();
-        let mut b1 = spec_bare.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
-        let mut b2 = spec_explicit.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut b1 = spec_bare.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
+        let mut b2 = spec_explicit.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         for px in [99.0, 100.0, 101.0] {
             assert_eq!(
                 feed_bool(&mut b1, bar(px)),
@@ -961,8 +964,8 @@ mod tests {
         // the boilerplate from constant signal slots.
         let spec_bare: NodeSpec = serde_norway::from_str("true").unwrap();
         let spec_explicit: NodeSpec = serde_norway::from_str("!value true").unwrap();
-        let mut b1 = spec_bare.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
-        let mut b2 = spec_explicit.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut b1 = spec_bare.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
+        let mut b2 = spec_explicit.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         assert_eq!(feed_bool(&mut b1, bar(1.0)), feed_bool(&mut b2, bar(1.0)));
     }
 
@@ -989,7 +992,7 @@ mod tests {
             "!eq { lhs: !get { key: regime }, rhs: !value bull }",
         )
         .unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &schema, None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &schema, None).into_payload();
         let bull = OverlayInfo::new(
             schema.clone(),
             vec![OverlayValue::Str(std::sync::Arc::from("bull"))],
@@ -1010,7 +1013,7 @@ mod tests {
         // change in shape needed.
         let spec: NodeSpec =
             serde_norway::from_str("!eq { lhs: close, rhs: !value 100.0 }").unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         assert_eq!(feed_bool(&mut built, bar(100.0)), Some(true));
         assert_eq!(feed_bool(&mut built, bar(99.9)), Some(false));
     }
@@ -1027,7 +1030,7 @@ mod tests {
             "!str_eq { lhs: !get { key: regime }, rhs: bull }",
         )
         .unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &schema, None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &schema, None).into_payload();
         assert_eq!(built.output_type(), crate::spec::dyn_indicator::PayloadType::Bool);
 
         let bull = OverlayInfo::new(
@@ -1102,7 +1105,7 @@ mod tests {
         }
 
         let spec: NodeSpec = serde_norway::from_str("!value bull").unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         assert_eq!(
             built.update(Payload::Snapshot(snap(bar(100.0)))),
             Some(Payload::Str(std::sync::Arc::from("bull"))),
@@ -1114,7 +1117,7 @@ mod tests {
         // A bool is now a valid `!value` payload — a Bool-output leaf (the merged
         // home for what was the signal-side `!value <bool>`).
         let spec: NodeSpec = serde_norway::from_str("!value true").unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         assert_eq!(
             built.update(Payload::Snapshot(snap(bar(100.0)))),
             Some(Payload::Bool(true)),
@@ -1136,6 +1139,7 @@ mod tests {
         let build = |yaml: &str| {
             let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
             spec.build(&Position::new(), &Book::new(1.0), None, &schema, None)
+                .into_payload()
         };
         // The bare literal (the original shape), the same constant written the
         // long way, and a second Str column — "the regime is unchanged".
@@ -1187,7 +1191,7 @@ mod tests {
 
     /// Build `spec` and return the error message it must fail with.
     fn expr_build_err(spec: &NodeSpec, schema: &std::sync::Arc<Schema>) -> String {
-        // `.expect_err` needs `T: Debug`, and `Box<dyn PayloadIndicator>` isn't.
+        // `.expect_err` needs `T: Debug`, and `AnyChain` isn't.
         spec.try_build(&Position::new(), &Book::new(1.0), None, schema, None)
             .err()
             .expect("expected the build to be rejected")
@@ -1217,28 +1221,26 @@ mod tests {
     fn get_on_real_column_builds_a_real_node_rejected_in_a_bool_slot() {
         // After the NodeSpec merge, `!get` on a Real column *is* a Real-output
         // node — it builds fine on its own. It only fails when placed in a
-        // boolean position, and that rejection is the slot's `AsBool` check,
+        // boolean position, and that rejection is the slot's `BoolChain` check,
         // uniform with every other type clash (no bespoke signal-layer hint).
-        use crate::spec::dyn_indicator::AsBool;
         let mut b = Schema::builder();
         b.add_real("vol_20");
         let schema = b.finish();
         let spec: NodeSpec = serde_norway::from_str("!get { key: vol_20 }").unwrap();
         let built = spec.build(&Position::new(), &Book::new(1.0), None, &schema, None);
         assert_eq!(built.output_type(), crate::runtime::PayloadType::Real);
-        assert!(AsBool::try_new(built).is_err());
+        assert!(built.into_bool().is_err());
     }
 
     #[test]
     fn get_on_str_column_builds_a_str_node_rejected_in_a_bool_slot() {
-        use crate::spec::dyn_indicator::AsBool;
         let mut b = Schema::builder();
         b.add_str("regime");
         let schema = b.finish();
         let spec: NodeSpec = serde_norway::from_str("!get { key: regime }").unwrap();
         let built = spec.build(&Position::new(), &Book::new(1.0), None, &schema, None);
         assert_eq!(built.output_type(), crate::runtime::PayloadType::Str);
-        assert!(AsBool::try_new(built).is_err());
+        assert!(built.into_bool().is_err());
     }
 
     #[test]
@@ -1421,7 +1423,7 @@ mod tests {
             ("unix_millis", 1_710_506_096_000.0),
         ] {
             let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
-            let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+            let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
             assert_eq!(built.output_type(), PayloadType::Real, "{yaml}: output type");
             assert_eq!(
                 built.update(Payload::Snapshot(Snapshot::of_atom(atom.clone()))),
@@ -1432,7 +1434,7 @@ mod tests {
 
         // `!time` is the raw Timestamp payload, not a scalar.
         let spec: NodeSpec = serde_norway::from_str("time").unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         assert_eq!(built.output_type(), PayloadType::Time);
         assert_eq!(
             built.update(Payload::Snapshot(Snapshot::of_atom(atom.clone()))),
@@ -1450,7 +1452,7 @@ mod tests {
 
         let mut wd = serde_norway::from_str::<NodeSpec>("is_weekday")
             .unwrap()
-            .build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+            .build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         assert_eq!(
             wd.update(Payload::Snapshot(Snapshot::of_atom(fri.clone()))),
             Some(Payload::Bool(true)),
@@ -1462,7 +1464,7 @@ mod tests {
 
         let mut we = serde_norway::from_str::<NodeSpec>("is_weekend")
             .unwrap()
-            .build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+            .build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         assert_eq!(we.update(Payload::Snapshot(Snapshot::of_atom(fri.clone()))), Some(Payload::Bool(false)));
         assert_eq!(we.update(Payload::Snapshot(Snapshot::of_atom(sat.clone()))), Some(Payload::Bool(true)));
     }
@@ -1493,7 +1495,7 @@ mod tests {
             ("quarter", 1.0),
         ] {
             let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
-            let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+            let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
             assert_eq!(
                 built.update(Payload::Snapshot(multi.clone())),
                 Some(Payload::Real(want)),
@@ -1528,7 +1530,7 @@ mod tests {
         // !changed is None on the warm-up bar (it needs a prior value to
         // compare against), so we only assert on the second bar's edge.
         let spec: NodeSpec = serde_norway::from_str("daily").unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         let _ = built.update(Payload::Snapshot(mk(day1)));
         assert_eq!(
             built.update(Payload::Snapshot(mk(day2))),
@@ -1537,7 +1539,7 @@ mod tests {
         );
 
         let spec: NodeSpec = serde_norway::from_str("monthly").unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         let _ = built.update(Payload::Snapshot(mk(day1)));
         assert_eq!(
             built.update(Payload::Snapshot(mk(day2))),
@@ -1565,7 +1567,7 @@ mod tests {
         };
 
         let spec: NodeSpec = serde_norway::from_str("is_weekday").unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         assert_eq!(built.update(Payload::Snapshot(mk(fri))), Some(Payload::Bool(true)));
         assert_eq!(built.update(Payload::Snapshot(mk(sat))), Some(Payload::Bool(false)));
     }
@@ -1575,7 +1577,7 @@ mod tests {
         // A calendar accessor over a bare Atom (time=None) yields None — same
         // shape as a not-yet-warm indicator.
         let spec: NodeSpec = serde_norway::from_str("year").unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         assert_eq!(built.update(Payload::Snapshot(Snapshot::of_atom(bar(1.0).into()))), None);
     }
 
@@ -1614,7 +1616,7 @@ mod tests {
         // `!equal_weight 4` is the sugar for the 1/4 = 0.25 constant per
         // leg — the common basket case for a 4-leg balanced strategy.
         let spec: NodeSpec = serde_norway::from_str("!equal_weight 4").unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         assert_eq!(feed_real(&mut built, bar(100.0)), Some(0.25));
         assert_eq!(feed_real(&mut built, bar(50.0)), Some(0.25));
     }
@@ -1632,7 +1634,7 @@ mod tests {
             otherwise: !value -1.0
         "#;
         let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         // close = 99 → cond false → -1; close = 101 → cond true → 1.
         assert_eq!(feed_real(&mut built, bar(99.0)), Some(-1.0));
         assert_eq!(feed_real(&mut built, bar(101.0)), Some(1.0));
@@ -1652,7 +1654,7 @@ mod tests {
             otherwise: !value 99.0
         "#;
         let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         for _ in 0..4 {
             assert_eq!(feed_real(&mut built, bar(100.0)), None);
         }
@@ -1675,7 +1677,7 @@ mod tests {
             otherwise: !value -1.0
         "#;
         let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         // First bar: cond is Some(false), otherwise is Some(-1.0).
         assert_eq!(feed_real(&mut built, bar(100.0)), Some(-1.0));
         // The reported stability window still covers the slowest source
@@ -1701,7 +1703,7 @@ mod tests {
             default: !value -1.0
         "#;
         let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         assert_eq!(feed_real(&mut built, bar(100.0)), Some(1.0));
         assert_eq!(feed_real(&mut built, bar(200.0)), Some(2.0));
         assert_eq!(feed_real(&mut built, bar(150.0)), Some(-1.0));
@@ -1728,8 +1730,8 @@ mod tests {
         "#;
         let spec_match: NodeSpec = serde_norway::from_str(yaml_match).unwrap();
         let spec_if_else: NodeSpec = serde_norway::from_str(yaml_if_else).unwrap();
-        let mut m = spec_match.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
-        let mut e = spec_if_else.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut m = spec_match.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
+        let mut e = spec_if_else.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         for px in [41.0, 42.0, 43.0, 42.0, 100.0] {
             assert_eq!(
                 feed_real(&mut m, bar(px)),
@@ -1793,7 +1795,7 @@ mod tests {
             default: !value 0.0
         "#;
         let spec: NodeSpec = serde_norway::from_str(yaml).unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         assert_eq!(feed_real(&mut built, bar(100.0)), Some(1.0));
     }
 
@@ -1806,7 +1808,7 @@ mod tests {
             "!latch { source: !resample { every: 4, inner: !ema { period: 3, source: close } } }",
         )
         .unwrap();
-        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None);
+        let mut built = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), None).into_payload();
         let mut reference = crate::indicators::Latch::new(Ema::new(
             crate::indicators::Resample::new(crate::indicators::CurrentBar::new(), 4).close(),
             3,
