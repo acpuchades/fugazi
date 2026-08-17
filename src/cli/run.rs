@@ -36,6 +36,7 @@
 //! consults has settled composes the check at the entry with `!stable`, i.e.
 //! `!all [<entry>, !stable { signal: <entry> }]`.
 
+use fugazi::types::Symbol;
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -131,7 +132,7 @@ pub struct Summary {
 fn iterate(
     spec: &fugazi::spec::StrategySpec,
     bars: Vec<String>,
-    snapshots: &[fugazi::types::Snapshot<String>],
+    snapshots: &[fugazi::types::Snapshot<Symbol>],
     inputs: &backtest::EvalContext,
     opts: &RunOptions,
 ) -> Result<backtest::IterationResult> {
@@ -277,9 +278,11 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
     // series resident at peak for no reason, and `Atom` is 88 bytes a bar before
     // its overlays.
     let bars: Vec<String> = atoms.iter().map(|(t, _)| t.clone()).collect();
-    let snapshots: Vec<fugazi::types::Snapshot<String>> = atoms
+    // Interned once; each bar's tag is then a refcount bump.
+    let sym = fugazi::types::symbol(&symbol);
+    let snapshots: Vec<fugazi::types::Snapshot<Symbol>> = atoms
         .into_iter()
-        .map(|(_, a)| fugazi::types::Snapshot::single(symbol.clone(), a))
+        .map(|(_, a)| fugazi::types::Snapshot::single(sym.clone(), a))
         .collect();
     let spec = StrategySpec::Single(Box::new(strategy.clone()));
     let iter = iterate(&spec, bars, &snapshots, &inputs, opts)?;
@@ -339,13 +342,16 @@ pub fn run_pairs(
         print_pairs_inputs_block(opts, spec, start, end, bars.len(), costs_active);
     }
 
-    let snapshots: Vec<fugazi::types::Snapshot<String>> = left_atoms
+    // Both leg names interned once; each bar then tags with a refcount bump.
+    let left_sym = fugazi::types::symbol(&spec.left);
+    let right_sym = fugazi::types::symbol(&spec.right);
+    let snapshots: Vec<fugazi::types::Snapshot<Symbol>> = left_atoms
         .iter()
         .zip(right_atoms.iter())
         .map(|(l, r)| {
             let mut snap = fugazi::types::Snapshot::new();
-            snap.push(Some(spec.left.clone()), None, l.clone());
-            snap.push(Some(spec.right.clone()), None, r.clone());
+            snap.push(Some(left_sym.clone()), None, l.clone());
+            snap.push(Some(right_sym.clone()), None, r.clone());
             snap
         })
         .collect();
@@ -378,13 +384,14 @@ fn run_universe(
     opts: &RunOptions,
 ) -> Result<Summary> {
     let started = SystemTime::now();
-    let universe = frame.symbols();
+    // Interned once per distinct symbol for the whole run.
+    let universe: Vec<Symbol> = frame.symbols().iter().map(fugazi::types::symbol).collect();
     if universe.is_empty() {
         anyhow::bail!("no symbols found in the input series — {noun} needs at least one traded asset");
     }
     // Per-symbol atom streams, sorted by time (DataFrame::atoms walks a
     // BTreeMap so ascending order is guaranteed by construction).
-    let per_symbol: Vec<(String, Vec<(String, Atom)>)> = universe
+    let per_symbol: Vec<(Symbol, Vec<(String, Atom)>)> = universe
         .iter()
         .map(|sym| Ok::<_, anyhow::Error>((sym.clone(), frame.atoms(sym)?.atoms)))
         .collect::<Result<_>>()?;
@@ -416,7 +423,7 @@ fn run_universe(
         let probes = probe_default_costs
             .then_some("")
             .into_iter()
-            .chain(universe.iter().map(String::as_str));
+            .chain(universe.iter().map(|s| s.as_ref()));
         let costs_active = costs_active(opts.cost_config, probes, effective_freq);
         style::print_header("run", headline);
         style::print_warns(&style::collect_warnings(&[], no_cost_warning, "results"));
@@ -524,12 +531,12 @@ pub fn run_portfolio(
 fn universe_calendar(
     opts: &RunOptions<'_>,
     representative: &str,
-    per_symbol: &[(String, Vec<(String, fugazi::types::Atom)>)],
+    per_symbol: &[(Symbol, Vec<(String, fugazi::types::Atom)>)],
 ) -> (Option<Frequency>, Real) {
     let effective_freq = calendar::pick_frequency(opts.frequency, representative).or_else(|| {
         per_symbol
             .iter()
-            .find(|(s, _)| s == representative)
+            .find(|(s, _)| s.as_ref() == representative)
             .and_then(|(_, atoms)| {
                 calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a))
             })
@@ -679,12 +686,12 @@ fn costs_active<'a>(
 /// convention at the call sites rather than folded in here, so this stays a
 /// pure join.
 pub(crate) fn join_universe_by_time(
-    per_symbol: &[(String, Vec<(String, Atom)>)],
-) -> (Vec<String>, Vec<fugazi::types::Snapshot<String>>) {
+    per_symbol: &[(Symbol, Vec<(String, Atom)>)],
+) -> (Vec<String>, Vec<fugazi::types::Snapshot<Symbol>>) {
     // Cursor per symbol.
     let mut cursors = vec![0usize; per_symbol.len()];
     let mut times: Vec<String> = Vec::new();
-    let mut snaps: Vec<fugazi::types::Snapshot<String>> = Vec::new();
+    let mut snaps: Vec<fugazi::types::Snapshot<Symbol>> = Vec::new();
     loop {
         // Find the smallest time head across all live cursors.
         let next_time: Option<&str> = per_symbol
@@ -696,7 +703,7 @@ pub(crate) fn join_universe_by_time(
             break;
         };
         let next_owned = next.to_string();
-        let mut snap = fugazi::types::Snapshot::<String>::new();
+        let mut snap = fugazi::types::Snapshot::<Symbol>::new();
         for ((sym, atoms), cursor) in per_symbol.iter().zip(cursors.iter_mut()) {
             if let Some((t, atom)) = atoms.get(*cursor)
                 && t == &next_owned
@@ -714,7 +721,7 @@ pub(crate) fn join_universe_by_time(
 #[allow(clippy::too_many_arguments)]
 fn print_basket_inputs_block(
     opts: &RunOptions,
-    universe: &[String],
+    universe: &[Symbol],
     start: &str,
     end: &str,
     bars: usize,
@@ -832,7 +839,7 @@ fn write_fills_csv(iter: &IterationResult, path: &Path) -> Result<()> {
         };
         let mut row: Vec<String> = vec![
             time.clone(),
-            order.symbol.clone(),
+            order.symbol.to_string(),
             side.to_string(),
             order.units.to_string(),
             order.price.to_string(),

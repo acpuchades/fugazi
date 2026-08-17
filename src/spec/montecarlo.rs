@@ -44,7 +44,7 @@ use crate::spec::metrics::{McMetric, MetricKey, Metrics};
 #[cfg(feature = "montecarlo")]
 use crate::spec::runnable::StrategySpec;
 #[cfg(feature = "montecarlo")]
-use crate::types::Snapshot;
+use crate::types::{Snapshot, Symbol};
 
 /// The headline metrics analyzed when the caller doesn't narrow the set. Each
 /// is recomputable from a return path (so it gets a CI) and has an unambiguous
@@ -122,9 +122,9 @@ pub struct McOutcome {
 #[cfg(feature = "montecarlo")]
 pub fn run_montecarlo(
     spec: &StrategySpec,
-    snapshots: &[Snapshot<String>],
+    snapshots: &[Snapshot<Symbol>],
     ctx: &EvalContext,
-    observed: &crate::RunReport<String>,
+    observed: &crate::RunReport<Symbol>,
     config: &McConfig,
 ) -> Result<McOutcome, String> {
     let names = if config.metrics.is_empty() {
@@ -360,7 +360,7 @@ impl RebuildPlan {
     /// Each output bar takes its cross-section from source bar `idx[k]`, but
     /// every symbol's price is re-chained onto its own running synthetic price;
     /// the output bar's timestamp is the original bar `k`'s (monotone axis).
-    fn rebuild(&self, snapshots: &[Snapshot<String>], idx: &[usize]) -> Vec<Snapshot<String>> {
+    fn rebuild(&self, snapshots: &[Snapshot<Symbol>], idx: &[usize]) -> Vec<Snapshot<Symbol>> {
         let mut running = self.anchor.clone();
         let mut out = Vec::with_capacity(idx.len());
         for (k, &source) in idx.iter().enumerate() {
@@ -371,7 +371,7 @@ impl RebuildPlan {
                 new_atom.time = time;
                 if let Some(sym) = sym
                     && atom.candle.is_some()
-                    && let Some(shape) = self.shapes.get(sym).and_then(|m| m.get(&source))
+                    && let Some(shape) = self.shapes.get(sym.as_ref()).and_then(|m| m.get(&source))
                 {
                     let price = running.entry(sym.to_string()).or_insert(1.0);
                     *price *= shape.gross;
@@ -394,7 +394,7 @@ impl RebuildPlan {
 
 /// Scan the snapshots once and build the [`RebuildPlan`].
 #[cfg(feature = "montecarlo")]
-fn precompute_rebuild(snapshots: &[Snapshot<String>]) -> RebuildPlan {
+fn precompute_rebuild(snapshots: &[Snapshot<Symbol>]) -> RebuildPlan {
     // Gather each symbol's (bar, candle) in chronological order.
     let mut series: HashMap<String, Vec<(usize, Candle)>> = HashMap::new();
     for (k, snap) in snapshots.iter().enumerate() {

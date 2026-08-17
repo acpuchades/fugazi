@@ -877,7 +877,7 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
         // order at the open, then test the resting protective legs.
         // `get_mut`-then-`insert` rather than a bare `insert`: after the first
         // bar the key is already present, and `insert` would clone the symbol
-        // every bar only to drop the clone again. For `Sym = String` — what the
+        // every bar only to drop the clone again. For `Sym = Symbol` — what the
         // spec/CLI layer uses — that is one heap allocation per symbol per bar
         // for the whole run.
         match self.bars.get_mut(&symbol) {
@@ -1176,6 +1176,7 @@ impl<Sym: Clone + Eq + Hash> Wallet<Sym> for PaperWallet<Sym> {
 
 #[cfg(test)]
 mod tests {
+    use crate::types::Symbol;
     use std::collections::HashMap;
 
     use super::*;
@@ -1241,14 +1242,14 @@ mod tests {
     /// discriminate — a realistic book of same-magnitude legs sums identically
     /// in every order and would prove nothing.
     fn assert_equity_is_canonically_ordered(n: usize) {
-        let mut w: PaperWallet<String> = PaperWallet::new(0.0);
+        let mut w: PaperWallet<Symbol> = PaperWallet::new(0.0);
         for i in 0..n {
             // Scramble the exponent so neither insertion order nor symbol order
             // correlates with magnitude.
             let exp = ((i * 7 + 3) % 17) as i32 - 8; // -8 ..= 8
             let px = 10.0_f64.powi(exp);
             let units = 1.0 + (i as Real) * 0.5;
-            let sym = format!("S{i:03}");
+            let sym = crate::types::symbol(format!("S{i:03}"));
             w.positions.insert(sym.clone(), units);
             w.bars.insert(sym, bar(px));
         }

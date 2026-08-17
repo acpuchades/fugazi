@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use fugazi::indicators::{Combine, GetBool, GetReal, GetStr, StrEqOp, Value, ValueStr};
 use fugazi::prelude::*;
+use fugazi::types::{Symbol, symbol as intern};
 use fugazi::Snapshot;
 
 /// Build the shared schema: one column of each type.
@@ -144,7 +145,7 @@ fn signal_is_none_before_overlays_arrive() {
 /// composes through the strategy layer as expected — the trip that the
 /// standalone signal tests don't cover.
 ///
-/// The signal chain is snapshot-rooted through `Pick::<String>::new()`
+/// The signal chain is snapshot-rooted through `Pick::<Symbol>::new()`
 /// (the empty-selector single-entry unpack), so the strategy's own atom is
 /// projected out of every incoming size-1 snapshot before the overlay
 /// readers see it.
@@ -154,30 +155,30 @@ fn overlay_signal_drives_a_backtest_end_to_end() {
     use fugazi::strategies::SingleAssetStrategy;
 
     let schema = schema();
-    // Every overlay leaf sits on top of `Pick::<String>::new()` — the same
+    // Every overlay leaf sits on top of `Pick::<Symbol>::new()` — the same
     // single-entry unpack the source-generic Field/Calendar leaves use, so
-    // GetReal/GetBool/GetStr become `Input = Snapshot<String>` instead of
+    // GetReal/GetBool/GetStr become `Input = Snapshot<Symbol>` instead of
     // `Input = Atom` and the whole signal chain composes into the
     // Snapshot-input strategy.
     let make_enter = || {
         let regime_bull = Combine::<_, _, StrEqOp>::new(
-            GetStr::of(&schema, "regime", Pick::<String>::new()),
-            ValueStr::<Snapshot<String>>::new("bull"),
+            GetStr::of(&schema, "regime", Pick::<Symbol>::new()),
+            ValueStr::<Snapshot<Symbol>>::new("bull"),
         );
-        let vol_high = GetReal::of(&schema, "vol_20", Pick::<String>::new())
+        let vol_high = GetReal::of(&schema, "vol_20", Pick::<Symbol>::new())
             .gt(Value::new(0.15));
-        GetBool::of(&schema, "risk_on", Pick::<String>::new())
+        GetBool::of(&schema, "risk_on", Pick::<Symbol>::new())
             .and(regime_bull)
             .and(vol_high)
     };
     let make_exit = || {
         Combine::<_, _, StrEqOp>::new(
-            GetStr::of(&schema, "regime", Pick::<String>::new()),
-            ValueStr::<Snapshot<String>>::new("bear"),
+            GetStr::of(&schema, "regime", Pick::<Symbol>::new()),
+            ValueStr::<Snapshot<Symbol>>::new("bear"),
         )
     };
 
-    let symbol = "TEST".to_string();
+    let symbol = intern("TEST");
     let mut strategy = SingleAssetStrategy::new(symbol.clone())
         .long_on(make_enter(), make_exit());
 
@@ -189,14 +190,14 @@ fn overlay_signal_drives_a_backtest_end_to_end() {
         Fixture { close: 110.0, vol: 0.20, risk_on: true, regime: "bear" },
     ];
 
-    // The strategy consumes `Snapshot<String>`; wrap each atom in a
+    // The strategy consumes `Snapshot<Symbol>`; wrap each atom in a
     // symbol-tagged size-1 snapshot so `fugazi::backtest::run` prices the
     // wallet each bar.
-    let snapshots: Vec<Snapshot<String>> = bars
+    let snapshots: Vec<Snapshot<Symbol>> = bars
         .iter()
-        .map(|f| Snapshot::<String>::single(symbol.clone(), atom(&schema, f)))
+        .map(|f| Snapshot::<Symbol>::single(symbol.clone(), atom(&schema, f)))
         .collect();
-    let mut wallet: PaperWallet<String> = PaperWallet::new(10_000.0);
+    let mut wallet: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
     let report = fugazi::backtest::run(&mut strategy, &mut wallet, snapshots);
 
     // Expect two fills: a Buy (the entry) then a Sell (the regime-flip exit).

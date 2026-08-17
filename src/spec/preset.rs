@@ -13,6 +13,7 @@
 //! top-level `fugazi run` strategy document and the `strategy:` field of the
 //! trailing risk indicators (`!sharpe { strategy: !buy_and_hold { symbol: X }, … }`).
 
+use crate::types::Symbol;
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -83,29 +84,29 @@ impl StrategyPreset {
     }
 
     /// Build the live strategy by delegating to the `crate::strategies` recipe.
-    fn build_strategy(&self) -> SingleAssetStrategy<String> {
+    fn build_strategy(&self) -> SingleAssetStrategy<Symbol> {
         match self {
             StrategyPreset::BuyAndHold { symbol } => {
-                SingleAssetStrategy::buy_and_hold(symbol.clone())
+                SingleAssetStrategy::buy_and_hold(crate::types::symbol(symbol))
             }
             StrategyPreset::MaCrossover { symbol, fast, slow } => {
-                trend::ma_crossover(symbol.clone(), *fast, *slow)
+                trend::ma_crossover(crate::types::symbol(symbol), *fast, *slow)
             }
             StrategyPreset::RsiReversal {
                 symbol,
                 period,
                 oversold,
                 exit,
-            } => mean_reversion::rsi_reversal(symbol.clone(), *period, *oversold, *exit),
+            } => mean_reversion::rsi_reversal(crate::types::symbol(symbol), *period, *oversold, *exit),
             StrategyPreset::DonchianBreakout { symbol, period } => {
-                trend::donchian_breakout(symbol.clone(), *period)
+                trend::donchian_breakout(crate::types::symbol(symbol), *period)
             }
             StrategyPreset::KeltnerBreakout {
                 symbol,
                 ema_period,
                 atr_period,
                 multiplier,
-            } => composite::keltner_breakout(symbol.clone(), *ema_period, *atr_period, *multiplier),
+            } => composite::keltner_breakout(crate::types::symbol(symbol), *ema_period, *atr_period, *multiplier),
         }
     }
 }

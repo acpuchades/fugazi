@@ -3,7 +3,7 @@
 //! Five document shapes — single-asset, pairs, basket, multi-asset, portfolio —
 //! each build to their own `Dyn*Strategy` wrapper. Those wrappers already have
 //! the same surface: each implements
-//! `Strategy<Input = Snapshot<String>, Symbol = String>` and exposes
+//! `Strategy<Input = Snapshot<Symbol>, Symbol = Symbol>` and exposes
 //! `stable_bars()` / `warm_up_bars()`. Since a portfolio became an ordinary
 //! strategy that trades the wallet it is handed, all five are driven the same
 //! way, and the trait is purely the shared surface plus the save/restore seam.
@@ -89,13 +89,14 @@ use super::pairs::{DynPairsStrategy, PairsStrategySpec};
 use super::portfolio::{DynPortfolio, PortfolioSpec};
 use super::preset::StrategyRef;
 use super::strategy::DynSingleStrategy;
+use crate::types::Symbol;
 
 /// A strategy of any shape, ready to be driven over a snapshot stream.
 ///
 /// Object-safe: the associated types of [`Strategy`] are pinned to the
 /// `String`-keyed snapshot space every spec-driven strategy runs in, so
 /// `Box<dyn RunnableStrategy>` is a usable handle.
-pub trait RunnableStrategy: Strategy<Input = Snapshot<String>, Symbol = String> {
+pub trait RunnableStrategy: Strategy<Input = Snapshot<Symbol>, Symbol = Symbol> {
     /// Samples before every wired chain is both warmed and settled — what
     /// `optimize --walkforward` skips at the head of the series.
     fn stable_bars(&self) -> usize;
@@ -114,10 +115,10 @@ pub trait RunnableStrategy: Strategy<Input = Snapshot<String>, Symbol = String> 
     /// generic over the wallet.
     fn drive(
         &mut self,
-        snapshots: &[Snapshot<String>],
+        snapshots: &[Snapshot<Symbol>],
         cash: Real,
         per_symbol_costs: &[(String, TradingCosts)],
-    ) -> RunReport<String> {
+    ) -> RunReport<Symbol> {
         // Resume-free path: no state to restore, no state to surface. `None` can
         // never produce a restore error, so the unwrap is unreachable.
         self.drive_resumable(snapshots, cash, per_symbol_costs, None, false)
@@ -154,15 +155,15 @@ pub trait RunnableStrategy: Strategy<Input = Snapshot<String>, Symbol = String> 
     /// wallet you supply.
     fn drive_resumable(
         &mut self,
-        snapshots: &[Snapshot<String>],
+        snapshots: &[Snapshot<Symbol>],
         cash: Real,
         per_symbol_costs: &[(String, TradingCosts)],
         resume: Option<&RunState>,
         flatten: bool,
-    ) -> Result<(RunReport<String>, RunState), String> {
-        let mut wallet: PaperWallet<String> = PaperWallet::new(cash);
+    ) -> Result<(RunReport<Symbol>, RunState), String> {
+        let mut wallet: PaperWallet<Symbol> = PaperWallet::new(cash);
         for (sym, costs) in per_symbol_costs {
-            let _ = wallet.set_costs_for(sym.clone(), costs.clone());
+            let _ = wallet.set_costs_for(crate::types::symbol(sym), costs.clone());
         }
         drive_over(self, snapshots, &mut wallet, resume, flatten)
     }
@@ -186,13 +187,13 @@ pub trait RunnableStrategy: Strategy<Input = Snapshot<String>, Symbol = String> 
 /// configures a wallet.
 pub fn drive_over<W>(
     strategy: &mut (impl RunnableStrategy + ?Sized),
-    snapshots: &[Snapshot<String>],
+    snapshots: &[Snapshot<Symbol>],
     wallet: &mut W,
     resume: Option<&RunState>,
     flatten: bool,
-) -> Result<(RunReport<String>, RunState), String>
+) -> Result<(RunReport<Symbol>, RunState), String>
 where
-    W: Wallet<String>,
+    W: Wallet<Symbol>,
 {
     if let Some(state) = resume {
         if state.format_version != RUN_STATE_FORMAT_VERSION {
@@ -246,7 +247,8 @@ where
 ///
 /// ```no_run
 /// # use fugazi::spec::{RunnableStrategyExt, StrategySpec};
-/// # fn go(spec: &StrategySpec, snaps: &[fugazi::Snapshot<String>], wallet: &mut fugazi::PaperWallet<String>) -> Result<(), String> {
+/// # use fugazi::types::Symbol;
+/// # fn go(spec: &StrategySpec, snaps: &[fugazi::Snapshot<Symbol>], wallet: &mut fugazi::PaperWallet<Symbol>) -> Result<(), String> {
 /// let mut built = spec.try_build(10_000.0, &fugazi::market::Schema::empty(), None)?;
 /// let (report, state) = built.drive_resumable_with(snaps, wallet, None, false)?;
 /// # let _ = (report, state);
@@ -266,13 +268,13 @@ pub trait RunnableStrategyExt: RunnableStrategy {
     /// [`Wallet::snapshot_state`] / [`Wallet::restore_state`], so a live account
     /// (whose default is `Null` / accept-and-ignore) resumes its *strategy*
     /// state while reading positions and cash from the broker.
-    fn drive_resumable_with<W: Wallet<String>>(
+    fn drive_resumable_with<W: Wallet<Symbol>>(
         &mut self,
-        snapshots: &[Snapshot<String>],
+        snapshots: &[Snapshot<Symbol>],
         wallet: &mut W,
         resume: Option<&RunState>,
         flatten: bool,
-    ) -> Result<(RunReport<String>, RunState), String>;
+    ) -> Result<(RunReport<Symbol>, RunState), String>;
 
     /// Advance this strategy over `snapshots` **without trading**, returning the
     /// state to resume from — the "warm but don't trade" entry point.
@@ -291,28 +293,28 @@ pub trait RunnableStrategyExt: RunnableStrategy {
     /// anyway (a resting order left over from before the pause) still route to
     /// [`Strategy::on_fill`], or the strategy's
     /// position would drift from the account's.
-    fn warm_up_over<W: Wallet<String>>(
+    fn warm_up_over<W: Wallet<Symbol>>(
         &mut self,
-        snapshots: &[Snapshot<String>],
+        snapshots: &[Snapshot<Symbol>],
         wallet: &mut W,
         resume: Option<&RunState>,
     ) -> Result<RunState, String>;
 }
 
 impl<T: RunnableStrategy + ?Sized> RunnableStrategyExt for T {
-    fn drive_resumable_with<W: Wallet<String>>(
+    fn drive_resumable_with<W: Wallet<Symbol>>(
         &mut self,
-        snapshots: &[Snapshot<String>],
+        snapshots: &[Snapshot<Symbol>],
         wallet: &mut W,
         resume: Option<&RunState>,
         flatten: bool,
-    ) -> Result<(RunReport<String>, RunState), String> {
+    ) -> Result<(RunReport<Symbol>, RunState), String> {
         drive_over(self, snapshots, wallet, resume, flatten)
     }
 
-    fn warm_up_over<W: Wallet<String>>(
+    fn warm_up_over<W: Wallet<Symbol>>(
         &mut self,
-        snapshots: &[Snapshot<String>],
+        snapshots: &[Snapshot<Symbol>],
         wallet: &mut W,
         resume: Option<&RunState>,
     ) -> Result<RunState, String> {
@@ -321,9 +323,9 @@ impl<T: RunnableStrategy + ?Sized> RunnableStrategyExt for T {
 }
 
 /// The body behind [`RunnableStrategyExt::warm_up_over`]; see there.
-fn warm_up_over_wallet<W: Wallet<String>>(
+fn warm_up_over_wallet<W: Wallet<Symbol>>(
     strategy: &mut (impl RunnableStrategy + ?Sized),
-    snapshots: &[Snapshot<String>],
+    snapshots: &[Snapshot<Symbol>],
     wallet: &mut W,
     resume: Option<&RunState>,
 ) -> Result<RunState, String> {
@@ -522,7 +524,7 @@ impl StrategySpec {
         schema: &Arc<Schema>,
         _cost_config: &super::costs::CostConfig,
         _frequency: Option<crate::time::Frequency>,
-        _universe: &[String],
+        _universe: &[Symbol],
     ) -> Result<Box<dyn RunnableStrategy>, String> {
         self.try_build(cash, schema, None)
     }
@@ -533,10 +535,12 @@ impl StrategySpec {
     /// The two shapes that name their symbols up front say so exactly; the
     /// N-symbol shapes discover theirs from the stream, which is also what
     /// their runners already did.
-    pub fn universe(&self, snapshots: &[Snapshot<String>]) -> Vec<String> {
+    pub fn universe(&self, snapshots: &[Snapshot<Symbol>]) -> Vec<Symbol> {
         match self {
-            StrategySpec::Single(s) => vec![s.symbol().to_string()],
-            StrategySpec::Pairs(s) => vec![s.left.clone(), s.right.clone()],
+            StrategySpec::Single(s) => vec![crate::types::symbol(s.symbol())],
+            StrategySpec::Pairs(s) => {
+                vec![crate::types::symbol(&s.left), crate::types::symbol(&s.right)]
+            }
             StrategySpec::Basket(_) | StrategySpec::Multi(_) | StrategySpec::Portfolio(_) => {
                 super::backtest::universe_from_snapshots(snapshots)
             }

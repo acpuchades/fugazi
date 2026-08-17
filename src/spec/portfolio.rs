@@ -1,6 +1,6 @@
 //! YAML-deserializable [`PortfolioSpec`] — a top-level composite strategy
 //! that runs N heterogeneous child strategies against one shared cash pool
-//! through a [`Portfolio<String>`](crate::portfolio::Portfolio).
+//! through a [`Portfolio<Symbol>`](crate::portfolio::Portfolio).
 //!
 //! Each child slot names a child (for reporting) and a nested strategy of
 //! any shape — single-asset, pairs, basket, or multi-asset — routed by
@@ -61,6 +61,7 @@ use super::multi_asset::MultiAssetStrategySpec;
 use super::pairs::PairsStrategySpec;
 use super::preset::StrategyRef;
 use super::template::SpecTemplate;
+use crate::types::Symbol;
 
 /// YAML surface for the **position-phase rebalance policy** — the impl
 /// picked from [`rebalance`](crate::portfolio::rebalance) that decides
@@ -537,15 +538,15 @@ impl PortfolioSpec {
         // to it whenever `source: !portfolio_book` is given. Also handed to
         // `PortfolioBuilder::aggregate_book` so the built portfolio
         // shares the exact same handle — one state, one truth.
-        let agg_book: Book<String> = Book::new(total_initial_equity);
-        let mut builder = Portfolio::<String>::builder()
+        let agg_book: Book<Symbol> = Book::new(total_initial_equity);
+        let mut builder = Portfolio::<Symbol>::builder()
             .with_initial_equity(total_initial_equity)
             .aggregate_book(agg_book.clone());
         // Capture each child's Book at build so each per-child weight-share
         // template can be built with that child's book as its `strategy_book`
         // — bare `!drawdown` / `!return_per_bar` / etc. inside a template
         // resolves to the child's own state.
-        let mut child_books: Vec<Book<String>> = Vec::with_capacity(self.children.len());
+        let mut child_books: Vec<Book<Symbol>> = Vec::with_capacity(self.children.len());
         for (i, c) in self.children.iter().enumerate() {
             let name = resolved_names[i].clone();
             let child_equity = allocations[i];
@@ -622,7 +623,7 @@ impl PortfolioSpec {
             let mut shares: Vec<
                 Box<
                     dyn crate::indicator::Indicator<
-                        Input = Snapshot<String>,
+                        Input = Snapshot<Symbol>,
                         Output = Real,
                     > + Send,
                 >,
@@ -709,7 +710,7 @@ impl PortfolioSpec {
             builder = builder.weight_shares(shares);
         }
         // Install the rebalance gate — a boolean signal over
-        // `Snapshot<String>`. Built against a dummy `Position` because a
+        // `Snapshot<Symbol>`. Built against a dummy `Position` because a
         // portfolio-level rebalance signal has no per-child position to
         // anchor to (a signal using `!entry` will read the empty dummy).
         // The strategy-book slot is the aggregate book itself (bare book
@@ -780,7 +781,7 @@ impl PortfolioSpec {
 }
 
 // ---------------------------------------------------------------------------
-// DynPortfolio: CLI-owned wrapper around Portfolio<String>
+// DynPortfolio: CLI-owned wrapper around Portfolio<Symbol>
 // ---------------------------------------------------------------------------
 
 /// The CLI's built portfolio handle. Implements [`Strategy`] by delegation so
@@ -788,7 +789,7 @@ impl PortfolioSpec {
 /// trades the wallet it is handed, netting its children's intents onto that one
 /// account.
 pub struct DynPortfolio {
-    inner: Portfolio<String>,
+    inner: Portfolio<Symbol>,
     /// Max child stable-period captured at build (see
     /// [`PortfolioSpec::build`] for the lazy-child caveat).
     stable_bars: usize,
@@ -797,19 +798,19 @@ pub struct DynPortfolio {
 }
 
 impl Strategy for DynPortfolio {
-    type Input = Snapshot<String>;
-    type Symbol = String;
+    type Input = Snapshot<Symbol>;
+    type Symbol = Symbol;
 
-    fn update(&mut self, input: Snapshot<String>) {
+    fn update(&mut self, input: Snapshot<Symbol>) {
         self.inner.update(input);
     }
-    fn trade(&self, wallet: &mut dyn Wallet<String>) {
+    fn trade(&self, wallet: &mut dyn Wallet<Symbol>) {
         self.inner.trade(wallet);
     }
-    fn on_fill(&mut self, order: &Order<String>) {
+    fn on_fill(&mut self, order: &Order<Symbol>) {
         self.inner.on_fill(order);
     }
-    fn on_reject(&mut self, rejection: &Rejection<String>) {
+    fn on_reject(&mut self, rejection: &Rejection<Symbol>) {
         // Must be forwarded explicitly: without this the whole rejection
         // path below (sub-wallet drain → owner lookup → child) is invisible
         // to the CLI and Python, which only ever see a `DynPortfolio`.
@@ -849,12 +850,12 @@ impl DynPortfolio {
     /// Child `idx`'s signed ledger position in `symbol` — see
     /// [`Portfolio::sub_position`].
     pub fn sub_position(&self, idx: usize, symbol: &str) -> Real {
-        self.inner.sub_position(idx, &symbol.to_string())
+        self.inner.sub_position(idx, &crate::types::symbol(symbol))
     }
 
     /// Assert the netting identity against the account — see
     /// [`Portfolio::assert_books_balance`].
-    pub fn assert_books_balance(&self, wallet: &dyn Wallet<String>) {
+    pub fn assert_books_balance(&self, wallet: &dyn Wallet<Symbol>) {
         self.inner.assert_books_balance(wallet);
     }
 
@@ -898,11 +899,11 @@ mod tests {
         Candle::new(price, price, price, price, 0.0)
     }
 
-    fn snap_of(entries: &[(&'static str, Real)]) -> Snapshot<String> {
+    fn snap_of(entries: &[(&'static str, Real)]) -> Snapshot<Symbol> {
         let mut s = Snapshot::new();
         for &(sym, close) in entries {
             let atom = Atom::new(candle(close));
-            s.push(Some(sym.to_string()), None, atom);
+            s.push(Some(crate::types::symbol(sym)), None, atom);
         }
         s
     }
@@ -910,11 +911,11 @@ mod tests {
     fn snap_of_at(
         entries: &[(&'static str, Real)],
         ts: crate::types::Timestamp,
-    ) -> Snapshot<String> {
+    ) -> Snapshot<Symbol> {
         let mut s = Snapshot::new();
         for &(sym, close) in entries {
             let atom = Atom::with_time(candle(close), ts);
-            s.push(Some(sym.to_string()), None, atom);
+            s.push(Some(crate::types::symbol(sym)), None, atom);
         }
         s
     }
@@ -1020,10 +1021,10 @@ mod tests {
         // the update to every sub, so each child's own PaperWallet marks +
         // fills its own leg.
         for _ in 0..2 {
-            for fill in wallet.update("A".to_string(), candle(100.0)) {
+            for fill in wallet.update(crate::types::symbol("A"), candle(100.0)) {
                 portfolio.on_fill(&fill);
             }
-            for fill in wallet.update("B".to_string(), candle(50.0)) {
+            for fill in wallet.update(crate::types::symbol("B"), candle(50.0)) {
                 portfolio.on_fill(&fill);
             }
             portfolio.update(snap_of(&[("A", 100.0), ("B", 50.0)]));
@@ -1033,8 +1034,8 @@ mod tests {
         // move in prices → no P&L).
         assert!((wallet.equity().0 - 10_000.0).abs() < 1e-6);
         // Both legs are long — each child bought its own symbol.
-        assert!(wallet.position(&"A".to_string()).amount > 0.0);
-        assert!(wallet.position(&"B".to_string()).amount > 0.0);
+        assert!(wallet.position(&crate::types::symbol("A")).amount > 0.0);
+        assert!(wallet.position(&crate::types::symbol("B")).amount > 0.0);
     }
 
     #[test]
@@ -1150,10 +1151,10 @@ mod tests {
         for bar in 0..4usize {
             let px_a = if bar < 2 { 100.0 } else { 1000.0 };
             let px_b = 100.0;
-            for fill in wallet.update("A".to_string(), candle(px_a)) {
+            for fill in wallet.update(crate::types::symbol("A"), candle(px_a)) {
                 portfolio.on_fill(&fill);
             }
-            for fill in wallet.update("B".to_string(), candle(px_b)) {
+            for fill in wallet.update(crate::types::symbol("B"), candle(px_b)) {
                 portfolio.on_fill(&fill);
             }
             portfolio.update(snap_of(&[("A", px_a), ("B", px_b)]));
@@ -1284,10 +1285,10 @@ mod tests {
         for (bar_i, ts) in [jan_31, feb_01, feb_02].into_iter().enumerate() {
             let px_a = 100.0 + (bar_i as Real);
             let px_b = 200.0 + (bar_i as Real);
-            for fill in wallet.update("A".to_string(), candle(px_a)) {
+            for fill in wallet.update(crate::types::symbol("A"), candle(px_a)) {
                 portfolio.on_fill(&fill);
             }
-            for fill in wallet.update("B".to_string(), candle(px_b)) {
+            for fill in wallet.update(crate::types::symbol("B"), candle(px_b)) {
                 portfolio.on_fill(&fill);
             }
             portfolio.update(snap_of_at(&[("A", px_a), ("B", px_b)], ts));
@@ -1337,10 +1338,10 @@ mod tests {
         for bar in 0..4usize {
             let px_a = if bar < 2 { 100.0 } else { 200.0 };
             let px_b = 100.0;
-            for fill in wallet.update("A".to_string(), candle(px_a)) {
+            for fill in wallet.update(crate::types::symbol("A"), candle(px_a)) {
                 portfolio.on_fill(&fill);
             }
-            for fill in wallet.update("B".to_string(), candle(px_b)) {
+            for fill in wallet.update(crate::types::symbol("B"), candle(px_b)) {
                 portfolio.on_fill(&fill);
             }
             portfolio.update(snap_of(&[("A", px_a), ("B", px_b)]));
@@ -1388,10 +1389,10 @@ mod tests {
         assert!((portfolio.sub_equity(1) - 250.0).abs() < 1e-6);
         // Run a few bars — rebalance keeps ratios locked to 75/25.
         for _ in 0..4 {
-            for fill in wallet.update("A".to_string(), candle(100.0)) {
+            for fill in wallet.update(crate::types::symbol("A"), candle(100.0)) {
                 portfolio.on_fill(&fill);
             }
-            for fill in wallet.update("B".to_string(), candle(100.0)) {
+            for fill in wallet.update(crate::types::symbol("B"), candle(100.0)) {
                 portfolio.on_fill(&fill);
             }
             portfolio.update(snap_of(&[("A", 100.0), ("B", 100.0)]));
@@ -1483,10 +1484,10 @@ mod tests {
         let mut wallet = PaperWallet::new(1_000.0);
 
         for _ in 0..4usize {
-            for fill in wallet.update("A".to_string(), candle(100.0)) {
+            for fill in wallet.update(crate::types::symbol("A"), candle(100.0)) {
                 portfolio.on_fill(&fill);
             }
-            for fill in wallet.update("B".to_string(), candle(100.0)) {
+            for fill in wallet.update(crate::types::symbol("B"), candle(100.0)) {
                 portfolio.on_fill(&fill);
             }
             portfolio.update(snap_of(&[("A", 100.0), ("B", 100.0)]));
@@ -1633,10 +1634,10 @@ mod tests {
         let mut portfolio = spec.build(1_500.0, &Schema::empty(), None);
         let mut wallet = PaperWallet::new(1_500.0);
         for _ in 0..4 {
-            for fill in wallet.update("A".to_string(), candle(100.0)) {
+            for fill in wallet.update(crate::types::symbol("A"), candle(100.0)) {
                 portfolio.on_fill(&fill);
             }
-            for fill in wallet.update("B".to_string(), candle(100.0)) {
+            for fill in wallet.update(crate::types::symbol("B"), candle(100.0)) {
                 portfolio.on_fill(&fill);
             }
             portfolio.update(snap_of(&[("A", 100.0), ("B", 100.0)]));
@@ -1724,10 +1725,10 @@ mod tests {
         let mut portfolio = spec.build(1_500.0, &Schema::empty(), None);
         let mut wallet = PaperWallet::new(1_500.0);
         for _ in 0..4 {
-            for fill in wallet.update("A".to_string(), candle(100.0)) {
+            for fill in wallet.update(crate::types::symbol("A"), candle(100.0)) {
                 portfolio.on_fill(&fill);
             }
-            for fill in wallet.update("B".to_string(), candle(100.0)) {
+            for fill in wallet.update(crate::types::symbol("B"), candle(100.0)) {
                 portfolio.on_fill(&fill);
             }
             portfolio.update(snap_of(&[("A", 100.0), ("B", 100.0)]));
@@ -1847,7 +1848,7 @@ mod tests {
 
         // Bars 0-1 open and fill the short at 100; bar 2 gaps to 100_000, so
         // the stop triggers at a price the child cannot pay to cover.
-        let snaps: Vec<Snapshot<String>> = vec![
+        let snaps: Vec<Snapshot<Symbol>> = vec![
             snap_of(&[("A", 100.0)]),
             snap_of(&[("A", 100.0)]),
             snap_of(&[("A", 100_000.0)]),

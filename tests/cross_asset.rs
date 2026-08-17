@@ -9,6 +9,7 @@
 use fugazi::indicator::Indicator;
 use fugazi::indicators::{Atr, Close, CurrentBar, Pick, Year};
 use fugazi::prelude::*;
+use fugazi::types::{Symbol, symbol as intern};
 use fugazi::{Frequency, Selector, Snapshot, Timestamp};
 
 fn atom_at(ms: i64, close: Real) -> Atom {
@@ -20,8 +21,8 @@ fn atom(close: Real) -> Atom {
 }
 
 fn snap(
-    pairs: &[(Option<String>, Option<Frequency>, Atom)],
-) -> Snapshot<String> {
+    pairs: &[(Option<Symbol>, Option<Frequency>, Atom)],
+) -> Snapshot<Symbol> {
     let mut s = Snapshot::new();
     for (sym, freq, a) in pairs {
         s.push(sym.clone(), *freq, a.clone());
@@ -29,15 +30,15 @@ fn snap(
     s
 }
 
-fn s(sym: &str) -> Option<String> {
-    Some(sym.to_string())
+fn s(sym: &str) -> Option<Symbol> {
+    Some(intern(sym))
 }
 
 const T0: i64 = 1_710_506_096_000; // 2024-03-15 12:34:56 UTC — a Friday.
 
 #[test]
 fn pick_projects_the_named_asset() {
-    let mut btc = Pick::<String>::matching(Selector::by_symbol("BTC"));
+    let mut btc = Pick::<Symbol>::matching(Selector::by_symbol("BTC"));
     let s_ = snap(&[
         (s("BTC"), None, atom(100.0)),
         (s("ETH"), None, atom(50.0)),
@@ -49,7 +50,7 @@ fn pick_projects_the_named_asset() {
 #[test]
 fn close_of_pick_reads_the_projected_close() {
     let mut btc_close =
-        Close::of(Pick::<String>::matching(Selector::by_symbol("BTC")));
+        Close::of(Pick::<Symbol>::matching(Selector::by_symbol("BTC")));
     let s_ = snap(&[
         (s("BTC"), None, atom(101.5)),
         (s("ETH"), None, atom(4.25)),
@@ -60,8 +61,8 @@ fn close_of_pick_reads_the_projected_close() {
 #[test]
 fn btc_eth_close_spread_composes_from_two_picks() {
     let mut spread =
-        Close::of(Pick::<String>::matching(Selector::by_symbol("BTC")))
-            .sub(Close::of(Pick::<String>::matching(Selector::by_symbol("ETH"))));
+        Close::of(Pick::<Symbol>::matching(Selector::by_symbol("BTC")))
+            .sub(Close::of(Pick::<Symbol>::matching(Selector::by_symbol("ETH"))));
     let s_ = snap(&[
         (s("BTC"), None, atom(100.0)),
         (s("ETH"), None, atom(60.0)),
@@ -72,7 +73,7 @@ fn btc_eth_close_spread_composes_from_two_picks() {
 #[test]
 fn bar_indicator_stacks_on_a_pick() {
     let mut atr = Atr::new(
-        CurrentBar::of(Pick::<String>::matching(Selector::by_symbol("BTC"))),
+        CurrentBar::of(Pick::<Symbol>::matching(Selector::by_symbol("BTC"))),
         3,
     );
     for i in 0..10 {
@@ -87,7 +88,7 @@ fn bar_indicator_stacks_on_a_pick() {
 
 #[test]
 fn calendar_source_over_pick_reads_projected_time() {
-    let mut year = Year::of(Pick::<String>::matching(Selector::by_symbol("BTC")));
+    let mut year = Year::of(Pick::<Symbol>::matching(Selector::by_symbol("BTC")));
     let s_ = snap(&[
         (s("BTC"), None, atom_at(T0, 100.0)),
         (s("ETH"), None, atom_at(T0 + 60_000, 50.0)),
@@ -98,8 +99,8 @@ fn calendar_source_over_pick_reads_projected_time() {
 #[test]
 fn missing_asset_stays_none_downstream() {
     let mut spread =
-        Close::of(Pick::<String>::matching(Selector::by_symbol("BTC")))
-            .sub(Close::of(Pick::<String>::matching(Selector::by_symbol("ETH"))));
+        Close::of(Pick::<Symbol>::matching(Selector::by_symbol("BTC")))
+            .sub(Close::of(Pick::<Symbol>::matching(Selector::by_symbol("ETH"))));
     let s_ = snap(&[
         (s("SOL"), None, atom(20.0)),
         (s("ETH"), None, atom(10.0)),
@@ -110,7 +111,7 @@ fn missing_asset_stays_none_downstream() {
 #[test]
 fn pick_by_freq_wildcards_symbol() {
     let mut hourly =
-        Pick::<String>::matching(Selector::by_freq(Frequency::Hour(1)));
+        Pick::<Symbol>::matching(Selector::by_freq(Frequency::Hour(1)));
     let s_ = snap(&[
         (s("BTC"), Some(Frequency::Hour(1)), atom(100.0)),
         (s("ETH"), Some(Frequency::Day(1)), atom(50.0)),
@@ -121,7 +122,7 @@ fn pick_by_freq_wildcards_symbol() {
 
 #[test]
 fn pick_exact_disambiguates_between_frequencies() {
-    let mut btc_hour = Pick::<String>::matching(Selector::exact(
+    let mut btc_hour = Pick::<Symbol>::matching(Selector::exact(
         "BTC",
         Frequency::Hour(1),
     ));
@@ -135,13 +136,13 @@ fn pick_exact_disambiguates_between_frequencies() {
 #[test]
 fn empty_selector_unpacks_a_single_entry_snapshot() {
     // Single-series ergonomics: an empty Selector on Pick unpacks the sole atom.
-    let mut close = Close::of(Pick::<String>::new());
+    let mut close = Close::of(Pick::<Symbol>::new());
     // Tagged size-1 works.
     let s_ = snap(&[(s("BTC"), None, atom(42.0))]);
     assert_eq!(close.update(s_), Some(42.0));
     // Untagged size-1 (Snapshot::of_atom / From<Atom>) also works.
     close.reset();
-    let s_ = Snapshot::<String>::of_atom(atom(7.0));
+    let s_ = Snapshot::<Symbol>::of_atom(atom(7.0));
     assert_eq!(close.update(s_), Some(7.0));
 }
 
@@ -150,7 +151,7 @@ fn empty_selector_unpacks_a_single_entry_snapshot() {
 fn empty_selector_panics_on_multi_entry_snapshot() {
     // The loud-failure guard: a no-query Pick fed a multi-asset snapshot is
     // almost always a wiring bug — panic rather than silently pick.
-    let mut close = Close::of(Pick::<String>::new());
+    let mut close = Close::of(Pick::<Symbol>::new());
     close.update(snap(&[
         (s("BTC"), None, atom(100.0)),
         (s("ETH"), None, atom(60.0)),

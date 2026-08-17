@@ -3,7 +3,7 @@
 //!
 //! Mirrors [`super::StrategySpec`] and [`super::PairsStrategySpec`] at the
 //! trait boundary (both resolve to a `Strategy` with `Input =
-//! Snapshot<String>` and `Symbol = String`), but the score and sizing
+//! Snapshot<Symbol>` and `Symbol = Symbol`), but the score and sizing
 //! sources are **per-symbol templates**: they get a fresh
 //! [`NodeSpec`] built for every symbol the incoming snapshots reveal, with
 //! the symbol name available as `!arg SYM` inside the tree.
@@ -41,6 +41,7 @@ use crate::types::Snapshot;
 use super::expr::NodeSpec;
 use super::template::SpecTemplate;
 use crate::spec::dyn_indicator::{AsBool, AsReal, DynIndicator};
+use crate::types::Symbol;
 
 /// YAML surface for the ranking rule. Externally tagged
 /// (`!top_bottom { longs, shorts }` / `!threshold { long_min, short_max }`
@@ -139,7 +140,7 @@ impl SelectionRuleSpec {
     /// threshold survivors.
     ///
     /// [`Everything`]: crate::strategies::basket::Everything
-    fn build(&self) -> Box<dyn Selection<String>> {
+    fn build(&self) -> Box<dyn Selection<Symbol>> {
         match self {
             SelectionRuleSpec::Everything => Box::new(Everything),
             SelectionRuleSpec::TopBottom { longs, shorts, of } => {
@@ -345,7 +346,7 @@ impl BasketStrategySpec {
         initial_equity: Real,
         schema: &Arc<Schema>,
     ) -> Result<DynBasketStrategy, String> {
-        let strat = BasketStrategy::<String>::with_initial_equity(initial_equity);
+        let strat = BasketStrategy::<Symbol>::with_initial_equity(initial_equity);
         let book = strat.book();
 
         // Probe every lazily-built template before wiring any of them.
@@ -375,7 +376,7 @@ impl BasketStrategySpec {
         let score_template = self.score.clone();
         let book_score = book.clone();
         let schema_score = schema.clone();
-        let strat = strat.scored_by(move |sym: &String| {
+        let strat = strat.scored_by(move |sym: &Symbol| {
             let concrete = build_per_symbol(&score_template, sym, "score");
             let anchor = Position::new();
             let dyn_ind: Box<dyn DynIndicator> =
@@ -386,7 +387,7 @@ impl BasketStrategySpec {
         let sizing_template = self.sizing.clone();
         let book_sizing = book.clone();
         let schema_sizing = schema.clone();
-        let strat = strat.sized_by(move |sym: &String| {
+        let strat = strat.sized_by(move |sym: &Symbol| {
             let concrete = build_per_symbol(&sizing_template, sym, "sizing");
             let anchor = Position::new();
             let dyn_ind: Box<dyn DynIndicator> =
@@ -397,8 +398,8 @@ impl BasketStrategySpec {
         let strat = strat.selection(DynSelection(self.selection.build()));
 
         let strat = match &self.universe {
-            Some(UniverseSpec::AllOf(syms)) => strat.all_of(syms.iter().cloned()),
-            Some(UniverseSpec::AnyOf(syms)) => strat.any_of(syms.iter().cloned()),
+            Some(UniverseSpec::AllOf(syms)) => strat.all_of(syms.iter().map(crate::types::symbol)),
+            Some(UniverseSpec::AnyOf(syms)) => strat.any_of(syms.iter().map(crate::types::symbol)),
             None => strat,
         };
 
@@ -429,7 +430,7 @@ impl BasketStrategySpec {
             if let Some(t) = long.stop_loss.clone() {
                 let book_c = book.clone();
                 let schema_c = schema.clone();
-                strat = strat.long_stop_loss(move |sym: &String, pos: &Position| {
+                strat = strat.long_stop_loss(move |sym: &Symbol, pos: &Position| {
                     let concrete = build_per_symbol(&t, sym, "long.stop_loss");
                     let dyn_ind: Box<dyn DynIndicator> =
                         concrete.build(pos, &book_c, None, &schema_c, Some(&leg_root(sym)));
@@ -439,7 +440,7 @@ impl BasketStrategySpec {
             if let Some(t) = long.take_profit.clone() {
                 let book_c = book.clone();
                 let schema_c = schema.clone();
-                strat = strat.long_take_profit(move |sym: &String, pos: &Position| {
+                strat = strat.long_take_profit(move |sym: &Symbol, pos: &Position| {
                     let concrete = build_per_symbol(&t, sym, "long.take_profit");
                     let dyn_ind: Box<dyn DynIndicator> =
                         concrete.build(pos, &book_c, None, &schema_c, Some(&leg_root(sym)));
@@ -455,7 +456,7 @@ impl BasketStrategySpec {
             if let Some(t) = short.stop_loss.clone() {
                 let book_c = book.clone();
                 let schema_c = schema.clone();
-                strat = strat.short_stop_loss(move |sym: &String, pos: &Position| {
+                strat = strat.short_stop_loss(move |sym: &Symbol, pos: &Position| {
                     let concrete = build_per_symbol(&t, sym, "short.stop_loss");
                     let dyn_ind: Box<dyn DynIndicator> =
                         concrete.build(pos, &book_c, None, &schema_c, Some(&leg_root(sym)));
@@ -465,7 +466,7 @@ impl BasketStrategySpec {
             if let Some(t) = short.take_profit.clone() {
                 let book_c = book.clone();
                 let schema_c = schema.clone();
-                strat = strat.short_take_profit(move |sym: &String, pos: &Position| {
+                strat = strat.short_take_profit(move |sym: &Symbol, pos: &Position| {
                     let concrete = build_per_symbol(&t, sym, "short.take_profit");
                     let dyn_ind: Box<dyn DynIndicator> =
                         concrete.build(pos, &book_c, None, &schema_c, Some(&leg_root(sym)));
@@ -498,8 +499,8 @@ impl BasketStrategySpec {
 /// through [`build_per_symbol`] exactly as before), and stays the way to read
 /// a *different* symbol per leg — a hedge ratio against a common benchmark,
 /// say — which the implicit root can't express.
-fn leg_root(sym: &str) -> Selector<String> {
-    Selector::by_symbol(sym.to_string())
+fn leg_root(sym: &str) -> Selector<Symbol> {
+    Selector::by_symbol(crate::types::symbol(sym))
 }
 
 /// Resolve a per-symbol template into a concrete `NodeSpec` by supplying
@@ -559,11 +560,11 @@ fn probe_template(
 }
 
 // ---------------------------------------------------------------------------
-// DynBasketStrategy: CLI-owned wrapper around BasketStrategy<String>
+// DynBasketStrategy: CLI-owned wrapper around BasketStrategy<Symbol>
 // ---------------------------------------------------------------------------
 
 /// The CLI's built-basket handle. Wraps a
-/// [`BasketStrategy<String>`](crate::strategies::BasketStrategy) whose
+/// [`BasketStrategy<Symbol>`](crate::strategies::BasketStrategy) whose
 /// per-symbol score / sizing factories were assembled from
 /// [`SpecTemplate<NodeSpec>`](SpecTemplate).
 ///
@@ -571,22 +572,22 @@ fn probe_template(
 /// into [`crate::backtest::run`] unchanged (once the CLI dispatch grows
 /// a `basket:` prefix — a follow-up).
 pub struct DynBasketStrategy {
-    inner: BasketStrategy<String>,
+    inner: BasketStrategy<Symbol>,
 }
 
 impl Strategy for DynBasketStrategy {
-    type Input = Snapshot<String>;
-    type Symbol = String;
+    type Input = Snapshot<Symbol>;
+    type Symbol = Symbol;
 
-    fn update(&mut self, input: Snapshot<String>) {
+    fn update(&mut self, input: Snapshot<Symbol>) {
         self.inner.update(input);
     }
 
-    fn trade(&self, wallet: &mut dyn Wallet<String>) {
+    fn trade(&self, wallet: &mut dyn Wallet<Symbol>) {
         self.inner.trade(wallet);
     }
 
-    fn on_fill(&mut self, order: &Order<String>) {
+    fn on_fill(&mut self, order: &Order<Symbol>) {
         self.inner.on_fill(order);
     }
 
@@ -609,7 +610,7 @@ impl DynBasketStrategy {
     /// A clone of the shared [`Book`] anchor — for downstream book-side
     /// diagnostics and (once CLI dispatch grows a basket path) initial
     /// equity assertions.
-    pub fn book(&self) -> Book<String> {
+    pub fn book(&self) -> Book<Symbol> {
         self.inner.book()
     }
 
@@ -656,11 +657,11 @@ mod tests {
         Candle::new(price, price, price, price, 0.0)
     }
 
-    fn snap_of(entries: &[(&'static str, Real)]) -> Snapshot<String> {
+    fn snap_of(entries: &[(&'static str, Real)]) -> Snapshot<Symbol> {
         let mut s = Snapshot::new();
         for &(sym, close) in entries {
             let atom = Atom::new(candle(close));
-            s.push(Some(sym.to_string()), None, atom);
+            s.push(Some(crate::types::symbol(sym)), None, atom);
         }
         s
     }
@@ -778,11 +779,11 @@ mod tests {
         let spec =
             BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut strat = spec.build(10_000.0, &schema());
-        let mut wallet: PaperWallet<String> = PaperWallet::new(10_000.0);
+        let mut wallet: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
 
         for _ in 0..2 {
             for (sym, px) in [("A", 100.0), ("B", 90.0), ("C", 80.0), ("D", 10.0)] {
-                for fill in wallet.update(sym.to_string(), candle(px)) {
+                for fill in wallet.update(crate::types::symbol(sym), candle(px)) {
                     strat.on_fill(&fill);
                 }
             }
@@ -794,13 +795,13 @@ mod tests {
             ]));
             strat.trade(&mut wallet);
         }
-        assert!(wallet.position(&"A".to_string()).amount > 0.0, "A long");
-        assert!(wallet.position(&"B".to_string()).amount > 0.0, "B long");
+        assert!(wallet.position(&crate::types::symbol("A")).amount > 0.0, "A long");
+        assert!(wallet.position(&crate::types::symbol("B")).amount > 0.0, "B long");
         assert!(
-            wallet.position(&"C".to_string()).amount.abs() < 1e-9,
+            wallet.position(&crate::types::symbol("C")).amount.abs() < 1e-9,
             "C gated out by threshold → flat"
         );
-        assert!(wallet.position(&"D".to_string()).amount < 0.0, "D short");
+        assert!(wallet.position(&crate::types::symbol("D")).amount < 0.0, "D short");
     }
 
     #[test]
@@ -817,30 +818,30 @@ mod tests {
         let spec =
             BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut strat = spec.build(10_000.0, &schema());
-        let mut wallet: PaperWallet<String> = PaperWallet::new(10_000.0);
+        let mut wallet: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
 
         for _ in 0..2 {
             let bar_a = candle(100.0);
             let bar_b = candle(50.0);
             let bar_c = candle(25.0);
-            for fill in wallet.update("A".to_string(), bar_a) {
+            for fill in wallet.update(crate::types::symbol("A"), bar_a) {
                 strat.on_fill(&fill);
             }
-            for fill in wallet.update("B".to_string(), bar_b) {
+            for fill in wallet.update(crate::types::symbol("B"), bar_b) {
                 strat.on_fill(&fill);
             }
-            for fill in wallet.update("C".to_string(), bar_c) {
+            for fill in wallet.update(crate::types::symbol("C"), bar_c) {
                 strat.on_fill(&fill);
             }
             strat.update(snap_of(&[("A", 100.0), ("B", 50.0), ("C", 25.0)]));
             strat.trade(&mut wallet);
         }
         assert!(
-            wallet.position(&"A".to_string()).amount > 0.0,
+            wallet.position(&crate::types::symbol("A")).amount > 0.0,
             "A should be long"
         );
         assert!(
-            wallet.position(&"C".to_string()).amount < 0.0,
+            wallet.position(&crate::types::symbol("C")).amount < 0.0,
             "C should be short"
         );
     }
@@ -862,19 +863,19 @@ mod tests {
         let mut strat = spec.build(10_000.0, &schema());
 
         // Two-bar prime + fill on symbols {X, Y}; X's close > Y's, so X wins.
-        let mut wallet: PaperWallet<String> = PaperWallet::new(10_000.0);
+        let mut wallet: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
         for _ in 0..2 {
-            for fill in wallet.update("X".to_string(), candle(200.0)) {
+            for fill in wallet.update(crate::types::symbol("X"), candle(200.0)) {
                 strat.on_fill(&fill);
             }
-            for fill in wallet.update("Y".to_string(), candle(100.0)) {
+            for fill in wallet.update(crate::types::symbol("Y"), candle(100.0)) {
                 strat.on_fill(&fill);
             }
             strat.update(snap_of(&[("X", 200.0), ("Y", 100.0)]));
             strat.trade(&mut wallet);
         }
-        assert!(wallet.position(&"X".to_string()).amount > 0.0);
-        assert!(wallet.position(&"Y".to_string()).amount.abs() < 1e-9);
+        assert!(wallet.position(&crate::types::symbol("X")).amount > 0.0);
+        assert!(wallet.position(&crate::types::symbol("Y")).amount.abs() < 1e-9);
         // Sanity: A separate `Selector::by_symbol("X")` `find` on the same
         // shape retrieves X's atom.
         let snap = snap_of(&[("X", 200.0), ("Y", 100.0)]);
@@ -942,25 +943,25 @@ mod tests {
         let spec =
             BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut strat = spec.build(10_000.0, &schema());
-        let mut wallet: PaperWallet<String> = PaperWallet::new(10_000.0);
+        let mut wallet: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
 
         for _ in 0..2 {
-            for fill in wallet.update("X".to_string(), candle(200.0)) {
+            for fill in wallet.update(crate::types::symbol("X"), candle(200.0)) {
                 strat.on_fill(&fill);
             }
-            for fill in wallet.update("Y".to_string(), candle(100.0)) {
+            for fill in wallet.update(crate::types::symbol("Y"), candle(100.0)) {
                 strat.on_fill(&fill);
             }
-            for fill in wallet.update("Z".to_string(), candle(500.0)) {
+            for fill in wallet.update(crate::types::symbol("Z"), candle(500.0)) {
                 strat.on_fill(&fill);
             }
             strat.update(snap_of(&[("X", 200.0), ("Y", 100.0), ("Z", 500.0)]));
             strat.trade(&mut wallet);
         }
-        assert!(wallet.position(&"X".to_string()).amount > 0.0, "X long");
-        assert!(wallet.position(&"Y".to_string()).amount < 0.0, "Y short");
+        assert!(wallet.position(&crate::types::symbol("X")).amount > 0.0, "X long");
+        assert!(wallet.position(&crate::types::symbol("Y")).amount < 0.0, "Y short");
         assert!(
-            wallet.position(&"Z".to_string()).amount.abs() < 1e-9,
+            wallet.position(&crate::types::symbol("Z")).amount.abs() < 1e-9,
             "Z is outside the declared universe: no trade"
         );
     }
@@ -1010,12 +1011,12 @@ mod tests {
         let spec =
             BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut strat = spec.build(10_000.0, &schema());
-        let mut wallet: PaperWallet<String> = PaperWallet::new(10_000.0);
+        let mut wallet: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
         for _ in 0..4 {
-            for fill in wallet.update("A".to_string(), candle(100.0)) {
+            for fill in wallet.update(crate::types::symbol("A"), candle(100.0)) {
                 strat.on_fill(&fill);
             }
-            for fill in wallet.update("B".to_string(), candle(50.0)) {
+            for fill in wallet.update(crate::types::symbol("B"), candle(50.0)) {
                 strat.on_fill(&fill);
             }
             strat.update(snap_of(&[("A", 100.0), ("B", 50.0)]));
@@ -1024,17 +1025,17 @@ mod tests {
         assert!(wallet.orders().is_empty(), "no orders in the first 4 off-cycle bars");
         // Bar 5: gate fires. Bar 6: order fills.
         for _ in 0..2 {
-            for fill in wallet.update("A".to_string(), candle(100.0)) {
+            for fill in wallet.update(crate::types::symbol("A"), candle(100.0)) {
                 strat.on_fill(&fill);
             }
-            for fill in wallet.update("B".to_string(), candle(50.0)) {
+            for fill in wallet.update(crate::types::symbol("B"), candle(50.0)) {
                 strat.on_fill(&fill);
             }
             strat.update(snap_of(&[("A", 100.0), ("B", 50.0)]));
             strat.trade(&mut wallet);
         }
         assert!(
-            wallet.position(&"A".to_string()).amount > 0.0,
+            wallet.position(&crate::types::symbol("A")).amount > 0.0,
             "A long after the first rebalance fires"
         );
     }
@@ -1051,12 +1052,12 @@ mod tests {
         let spec =
             BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut strat = spec.build(10_000.0, &schema());
-        let mut wallet: PaperWallet<String> = PaperWallet::new(10_000.0);
+        let mut wallet: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
         for _ in 0..8 {
-            for fill in wallet.update("A".to_string(), candle(100.0)) {
+            for fill in wallet.update(crate::types::symbol("A"), candle(100.0)) {
                 strat.on_fill(&fill);
             }
-            for fill in wallet.update("B".to_string(), candle(50.0)) {
+            for fill in wallet.update(crate::types::symbol("B"), candle(50.0)) {
                 strat.on_fill(&fill);
             }
             strat.update(snap_of(&[("A", 100.0), ("B", 50.0)]));
@@ -1084,16 +1085,16 @@ mod tests {
         let spec =
             BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut strat = spec.build(10_000.0, &schema());
-        let mut wallet: PaperWallet<String> = PaperWallet::new(10_000.0);
+        let mut wallet: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
         // Drive a few bars over two symbols with varying prices so the
         // sizing chain settles and the top/bottom selection alternates.
         for i in 0..8 {
             let a = 100.0 + (i as Real);
             let b = 50.0 - (i as Real);
-            for fill in wallet.update("A".to_string(), candle(a)) {
+            for fill in wallet.update(crate::types::symbol("A"), candle(a)) {
                 strat.on_fill(&fill);
             }
-            for fill in wallet.update("B".to_string(), candle(b)) {
+            for fill in wallet.update(crate::types::symbol("B"), candle(b)) {
                 strat.on_fill(&fill);
             }
             strat.update(snap_of(&[("A", a), ("B", b)]));
@@ -1117,14 +1118,14 @@ mod tests {
         let spec =
             BasketStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut strat = spec.build(10_000.0, &schema());
-        let mut wallet: PaperWallet<String> = PaperWallet::new(10_000.0);
+        let mut wallet: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
         for i in 0..8 {
             let a = 100.0 + (i as Real);
             let b = 50.0 - (i as Real);
-            for fill in wallet.update("A".to_string(), candle(a)) {
+            for fill in wallet.update(crate::types::symbol("A"), candle(a)) {
                 strat.on_fill(&fill);
             }
-            for fill in wallet.update("B".to_string(), candle(b)) {
+            for fill in wallet.update(crate::types::symbol("B"), candle(b)) {
                 strat.on_fill(&fill);
             }
             strat.update(snap_of(&[("A", a), ("B", b)]));

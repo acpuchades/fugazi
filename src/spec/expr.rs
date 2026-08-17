@@ -40,6 +40,7 @@ use crate::spec::dyn_indicator::{self, AsAtom, AsBool, AsCandle, AsReal, AsStr, 
 
 use crate::{Frequency, Selector};
 use std::str::FromStr;
+use crate::types::Symbol;
 
 /// The implicit atom root of every `source:`-omitted leaf.
 ///
@@ -55,10 +56,10 @@ use std::str::FromStr;
 /// `None` and gets the empty-selector [`Pick::new`], whose sole-atom unpack
 /// panics on a multi-symbol snapshot rather than guessing. Those specs name
 /// their asset explicitly with `!pick { symbol: ... }`.
-pub(super) fn pick_root(root: Option<&Selector<String>>) -> Pick<String> {
+pub(super) fn pick_root(root: Option<&Selector<Symbol>>) -> Pick<Symbol> {
     match root {
-        Some(selector) => Pick::<String>::rooted(selector.clone()),
-        None => Pick::<String>::new(),
+        Some(selector) => Pick::<Symbol>::rooted(selector.clone()),
+        None => Pick::<Symbol>::new(),
     }
 }
 
@@ -82,8 +83,8 @@ pub(super) fn pick_root(root: Option<&Selector<String>>) -> Pick<String> {
 /// symbol would make it read `None` on a bar where that symbol happens to be
 /// absent, when the answer it wants — the bar's time — is right there on every
 /// other entry.
-pub(super) fn pick_any_root() -> PickAny<String> {
-    PickAny::<String>::new()
+pub(super) fn pick_any_root() -> PickAny<Symbol> {
+    PickAny::<Symbol>::new()
 }
 
 pub(super) fn default_source() -> Box<NodeSpec> {
@@ -217,11 +218,11 @@ impl StrOperand {
         book: &Book,
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
-        root: Option<&Selector<String>>,
+        root: Option<&Selector<Symbol>>,
     ) -> Result<Box<dyn DynIndicator>, String> {
         match self {
             StrOperand::Literal(s) => Ok(dyn_indicator::wrap(
-                ValueStr::<crate::types::Snapshot<String>>::new(s.as_str()),
+                ValueStr::<crate::types::Snapshot<Symbol>>::new(s.as_str()),
             )),
             StrOperand::Expr(e) => e.try_build(anchor, book, portfolio_book, schema, root),
         }
@@ -306,7 +307,7 @@ impl RealNode {
         book: &Book,
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
-        root: Option<&Selector<String>>,
+        root: Option<&Selector<Symbol>>,
     ) -> Box<dyn DynIndicator> {
         self.0.build(anchor, book, portfolio_book, schema, root)
     }
@@ -316,7 +317,7 @@ impl RealNode {
         book: &Book,
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
-        root: Option<&Selector<String>>,
+        root: Option<&Selector<Symbol>>,
     ) -> Result<Box<dyn DynIndicator>, String> {
         self.0.try_build(anchor, book, portfolio_book, schema, root)
     }
@@ -331,7 +332,7 @@ impl BoolNode {
         book: &Book,
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
-        root: Option<&Selector<String>>,
+        root: Option<&Selector<Symbol>>,
     ) -> Box<dyn DynIndicator> {
         self.0.build(anchor, book, portfolio_book, schema, root)
     }
@@ -341,7 +342,7 @@ impl BoolNode {
         book: &Book,
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
-        root: Option<&Selector<String>>,
+        root: Option<&Selector<Symbol>>,
     ) -> Result<Box<dyn DynIndicator>, String> {
         self.0.try_build(anchor, book, portfolio_book, schema, root)
     }
@@ -455,7 +456,7 @@ pub struct MatchCase {
 /// Every atom-input leaf (`!close`, `!high`, …, all calendar accessors, and
 /// `!get`) carries a **defaulted optional `source: Option<Box<NodeSpec>>`**
 /// field. When omitted, the leaf reads its atom from the implicit
-/// empty-selector [`Pick::<String>::new()`] — the single-entry snapshot
+/// empty-selector [`Pick::<Symbol>::new()`] — the single-entry snapshot
 /// unpack that keeps single-series strategies working. When provided
 /// (typically a `!pick { symbol, freq }`), the leaf reads from that
 /// atom-emitting subtree, which is how cross-asset composition is spelled:
@@ -580,7 +581,7 @@ pub enum NodeSpec {
     Trough,
 
     // --- book source-selectors. These are build-time only — they carry no
-    // runtime value; they resolve, at build, to a `Book<String>` handle that
+    // runtime value; they resolve, at build, to a `Book<Symbol>` handle that
     // a book-reading node (a bare book leaf like `!drawdown`, or a
     // book-anchored recipe like `!drawdown_throttle`) picks up via its
     // `source:` field. Bare (used as an expression on its own) is invalid
@@ -1961,7 +1962,7 @@ enum NodeSpecRaw {
     Trough,
 
     // --- book source-selectors. These are build-time only — they carry no
-    // runtime value; they resolve, at build, to a `Book<String>` handle that
+    // runtime value; they resolve, at build, to a `Book<Symbol>` handle that
     // a book-reading node (a bare book leaf like `!drawdown`, or a
     // book-anchored recipe like `!drawdown_throttle`) picks up via its
     // `source:` field. Bare (used as an expression on its own) is invalid
@@ -3389,7 +3390,7 @@ fn build_polymorphic_eq(
     book: &Book,
     portfolio_book: Option<&Book>,
     schema: &Arc<Schema>,
-    root: Option<&Selector<String>>,
+    root: Option<&Selector<Symbol>>,
 ) -> Result<Box<dyn DynIndicator>, String> {
     let lhs_built = lhs.try_build(anchor, book, portfolio_book, schema, root)?;
     Ok(match lhs_built.output_type() {
@@ -3454,7 +3455,7 @@ fn build_match(
     book: &Book,
     portfolio_book: Option<&Book>,
     schema: &Arc<Schema>,
-    root: Option<&Selector<String>>,
+    root: Option<&Selector<Symbol>>,
 ) -> Result<Box<dyn DynIndicator>, String> {
     if cases.is_empty() {
         return Err("`cases` must not be empty (use `!if_else` for a single branch, \
@@ -3561,7 +3562,7 @@ fn atom_source_of(
     book: &Book,
     portfolio_book: Option<&Book>,
     schema: &Arc<Schema>,
-    root: Option<&Selector<String>>,
+    root: Option<&Selector<Symbol>>,
 ) -> Result<AsAtom, String> {
     match source {
         None => Ok(AsAtom::new(dyn_indicator::wrap(pick_root(root)))),
@@ -3589,7 +3590,7 @@ fn atom_source_any_of(
     book: &Book,
     portfolio_book: Option<&Book>,
     schema: &Arc<Schema>,
-    root: Option<&Selector<String>>,
+    root: Option<&Selector<Symbol>>,
 ) -> Result<AsAtom, String> {
     match source {
         None => Ok(AsAtom::new(dyn_indicator::wrap(pick_any_root()))),
@@ -3656,7 +3657,7 @@ impl NodeSpec {
         book: &Book,
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
-        root: Option<&Selector<String>>,
+        root: Option<&Selector<Symbol>>,
     ) -> Box<dyn DynIndicator> {
         self.try_build(anchor, book, portfolio_book, schema, root)
             .unwrap_or_else(|e| panic!("{e}"))
@@ -3681,7 +3682,7 @@ impl NodeSpec {
         book: &Book,
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
-        root: Option<&Selector<String>>,
+        root: Option<&Selector<Symbol>>,
     ) -> Result<Box<dyn DynIndicator>, String> {
         self.try_build_inner(anchor, book, portfolio_book, schema, root)
             .map_err(|e| trail(self, e))
@@ -3696,7 +3697,7 @@ impl NodeSpec {
         book: &Book,
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
-        root: Option<&Selector<String>>,
+        root: Option<&Selector<Symbol>>,
     ) -> Result<Box<dyn DynIndicator>, String> {
         use NodeSpec::*;
         // Recursive-build shorthands: build `s`, view it as a library-typed
@@ -3792,12 +3793,12 @@ impl NodeSpec {
 
             Pick { symbol, freq } => build_pick(symbol.as_deref(), freq.as_deref(), root)?,
 
-            Value(ValueLit::Real(x)) => dyn_indicator::wrap(self::Value::<Snapshot<String>>::new(*x)),
+            Value(ValueLit::Real(x)) => dyn_indicator::wrap(self::Value::<Snapshot<Symbol>>::new(*x)),
             Value(ValueLit::Bool(b)) => {
-                dyn_indicator::wrap(crate::indicators::ValueBool::<Snapshot<String>>::new(*b))
+                dyn_indicator::wrap(crate::indicators::ValueBool::<Snapshot<Symbol>>::new(*b))
             }
             Value(ValueLit::Str(s)) => {
-                dyn_indicator::wrap(ValueStr::<Snapshot<String>>::new(s.as_str()))
+                dyn_indicator::wrap(ValueStr::<Snapshot<Symbol>>::new(s.as_str()))
             }
             Value(ValueLit::List(_)) => {
                 return Err("a list literal is only meaningful in a \
@@ -3808,9 +3809,9 @@ impl NodeSpec {
                             to install the CHILD_INDEX arg."
                     .to_string());
             }
-            Entry => dyn_indicator::wrap(anchor.entry::<Snapshot<String>>()),
-            Peak => dyn_indicator::wrap(anchor.peak::<Snapshot<String>>()),
-            Trough => dyn_indicator::wrap(anchor.trough::<Snapshot<String>>()),
+            Entry => dyn_indicator::wrap(anchor.entry::<Snapshot<Symbol>>()),
+            Peak => dyn_indicator::wrap(anchor.peak::<Snapshot<Symbol>>()),
+            Trough => dyn_indicator::wrap(anchor.trough::<Snapshot<Symbol>>()),
 
             StrategyBook | PortfolioBook => {
                 return Err("a build-time source selector — it only makes \
@@ -3822,27 +3823,27 @@ impl NodeSpec {
 
             Equity { source } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book)?;
-                dyn_indicator::wrap(b.equity::<Snapshot<String>>())
+                dyn_indicator::wrap(b.equity::<Snapshot<Symbol>>())
             }
             EquityPeak { source } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book)?;
-                dyn_indicator::wrap(b.equity_peak::<Snapshot<String>>())
+                dyn_indicator::wrap(b.equity_peak::<Snapshot<Symbol>>())
             }
             Drawdown { source } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book)?;
-                dyn_indicator::wrap(b.drawdown::<Snapshot<String>>())
+                dyn_indicator::wrap(b.drawdown::<Snapshot<Symbol>>())
             }
             ReturnPerBar { source } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book)?;
-                dyn_indicator::wrap(b.return_per_bar::<Snapshot<String>>())
+                dyn_indicator::wrap(b.return_per_bar::<Snapshot<Symbol>>())
             }
             TradePnl { source } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book)?;
-                dyn_indicator::wrap(b.trade_pnl::<Snapshot<String>>())
+                dyn_indicator::wrap(b.trade_pnl::<Snapshot<Symbol>>())
             }
             TradeReturn { source } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book)?;
-                dyn_indicator::wrap(b.trade_return::<Snapshot<String>>())
+                dyn_indicator::wrap(b.trade_return::<Snapshot<Symbol>>())
             }
 
             Get { key, source } => {
@@ -4096,7 +4097,7 @@ impl NodeSpec {
                 bars_per_year,
             } => {
                 let s = atom_src(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::sizing::vol_target_of::<String, _>(
+                dyn_indicator::wrap(crate::indicators::sizing::vol_target_of::<Symbol, _>(
                     s,
                     *target,
                     window.get(),
@@ -4110,7 +4111,7 @@ impl NodeSpec {
                 atr_multiple,
             } => {
                 let s = atom_src(source.as_ref())?;
-                dyn_indicator::wrap(crate::indicators::sizing::atr_risk_of::<String, _>(
+                dyn_indicator::wrap(crate::indicators::sizing::atr_risk_of::<Symbol, _>(
                     s,
                     *risk_frac,
                     period.get(),
@@ -4122,7 +4123,7 @@ impl NodeSpec {
                 max_drawdown,
             } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book)?;
-                dyn_indicator::wrap(crate::indicators::sizing::drawdown_throttle::<String>(
+                dyn_indicator::wrap(crate::indicators::sizing::drawdown_throttle::<Symbol>(
                     b,
                     *max_drawdown,
                 ))
@@ -4135,7 +4136,7 @@ impl NodeSpec {
             } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book)?;
                 dyn_indicator::wrap(
-                    crate::indicators::sizing::equity_vol_target::<String>(
+                    crate::indicators::sizing::equity_vol_target::<Symbol>(
                         b,
                         *target,
                         window.get(),
@@ -4149,7 +4150,7 @@ impl NodeSpec {
                 window,
             } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book)?;
-                dyn_indicator::wrap(crate::indicators::sizing::fractional_kelly::<String>(
+                dyn_indicator::wrap(crate::indicators::sizing::fractional_kelly::<Symbol>(
                     b,
                     *kelly_fraction,
                     window.get(),
@@ -4369,7 +4370,7 @@ impl NodeSpec {
             Xor { lhs, rhs } => dyn_indicator::wrap(boolean(lhs)?.xor(boolean(rhs)?)),
             All(specs) => {
                 if specs.is_empty() {
-                    dyn_indicator::wrap(crate::indicators::ValueBool::<Snapshot<String>>::new(true))
+                    dyn_indicator::wrap(crate::indicators::ValueBool::<Snapshot<Symbol>>::new(true))
                 } else {
                     let mut acc = boolean(&specs[0])?;
                     for s in &specs[1..] {
@@ -4381,7 +4382,7 @@ impl NodeSpec {
             }
             Any(specs) => {
                 if specs.is_empty() {
-                    dyn_indicator::wrap(crate::indicators::ValueBool::<Snapshot<String>>::new(false))
+                    dyn_indicator::wrap(crate::indicators::ValueBool::<Snapshot<Symbol>>::new(false))
                 } else {
                     let mut acc = boolean(&specs[0])?;
                     for s in &specs[1..] {
@@ -4414,16 +4415,16 @@ impl NodeSpec {
                 dyn_indicator::wrap(compare::StrNe::new(str_view(lhs)?, str_operand(rhs)?))
             }
             Never => {
-                dyn_indicator::wrap(crate::indicators::ValueBool::<Snapshot<String>>::new(false))
+                dyn_indicator::wrap(crate::indicators::ValueBool::<Snapshot<Symbol>>::new(false))
             }
             Every(n) => {
-                dyn_indicator::wrap(crate::indicators::Every::<Snapshot<String>>::new(n.get()))
+                dyn_indicator::wrap(crate::indicators::Every::<Snapshot<Symbol>>::new(n.get()))
             }
             IsWeekday => dyn_indicator::wrap(crate::indicators::IsWeekday::of(pick_any_root())),
             IsWeekend => dyn_indicator::wrap(crate::indicators::IsWeekend::of(pick_any_root())),
             HasColumn { name } => {
                 let exists = schema.index_of(name.as_str()).is_some();
-                dyn_indicator::wrap(crate::indicators::ValueBool::<Snapshot<String>>::new(exists))
+                dyn_indicator::wrap(crate::indicators::ValueBool::<Snapshot<Symbol>>::new(exists))
             }
         })
     }
@@ -4454,11 +4455,13 @@ fn trail(spec: &NodeSpec, message: impl std::fmt::Display) -> String {
 fn build_pick(
     symbol: Option<&str>,
     freq: Option<&str>,
-    root: Option<&Selector<String>>,
+    root: Option<&Selector<Symbol>>,
 ) -> Result<Box<dyn DynIndicator>, String> {
     let named = symbol.is_some();
+    // The document gives a `&str`; interning happens here, once at build time,
+    // so the resulting `Selector` clones as a refcount bump for the whole run.
     let sym = symbol
-        .map(String::from)
+        .map(crate::types::symbol)
         .or_else(|| root.and_then(|r| r.symbol.clone()));
     let f = match freq {
         Some(s) => Some(Frequency::from_str(s).map_err(|e| {
@@ -4466,19 +4469,19 @@ fn build_pick(
         })?),
         None => None,
     };
-    let selector = Selector::<String> {
+    let selector = Selector::<Symbol> {
         symbol: sym,
         freq: f,
     };
     Ok(if selector.is_empty() {
-        dyn_indicator::wrap(Pick::<String>::new())
+        dyn_indicator::wrap(Pick::<Symbol>::new())
     } else if named {
-        dyn_indicator::wrap(Pick::<String>::matching(selector))
+        dyn_indicator::wrap(Pick::<Symbol>::matching(selector))
     } else {
         // Symbol came from the root, so this is still the implicit
         // "this series" read — keep the sole-atom fallback that makes an
         // untagged single-entry snapshot resolve. See `Pick::rooted`.
-        dyn_indicator::wrap(Pick::<String>::rooted(selector))
+        dyn_indicator::wrap(Pick::<Symbol>::rooted(selector))
     })
 }
 

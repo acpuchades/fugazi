@@ -38,6 +38,7 @@
 use crate::types::Snapshot;
 use crate::wallet::Rejection;
 use crate::{Order, Real, Strategy, Wallet};
+use crate::types::Symbol;
 
 /// One booked order stamped with the bar index it filled on.
 ///
@@ -295,11 +296,11 @@ where
 pub fn flatten_open_positions<S, W>(
     strategy: &mut S,
     wallet: &mut W,
-    snapshots: &[Snapshot<String>],
-    report: &mut RunReport<String>,
+    snapshots: &[Snapshot<Symbol>],
+    report: &mut RunReport<Symbol>,
 ) where
-    S: Strategy<Symbol = String, Input = Snapshot<String>> + ?Sized,
-    W: Wallet<String>,
+    S: Strategy<Symbol = Symbol, Input = Snapshot<Symbol>> + ?Sized,
+    W: Wallet<Symbol>,
 {
     let bar = snapshots.len().saturating_sub(1);
     for order in wallet.flatten() {

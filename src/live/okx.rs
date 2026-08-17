@@ -69,6 +69,7 @@ use time::OffsetDateTime;
 use time::macros::format_description;
 
 use crate::wallet::{POSITION_EPSILON, PRICE_EPSILON};
+use crate::types::Symbol;
 use crate::types::{Candle, Real};
 use crate::wallet::{Ack, Order, OrderId, OrderKind, Reference, Rejection, Side, Size, Units, Wallet, WalletError};
 
@@ -154,9 +155,9 @@ pub struct OkxWallet {
     available_balance: Real,
     equity: Real,
     /// Signed positions in **base units** (converted from the venue's contracts).
-    positions: HashMap<String, Real>,
-    marks: HashMap<String, Real>,
-    specs: HashMap<String, InstrumentSpec>,
+    positions: HashMap<Symbol, Real>,
+    marks: HashMap<Symbol, Real>,
+    specs: HashMap<Symbol, InstrumentSpec>,
 
     // Order-id bookkeeping: wallet-minted local ids <-> venue order/algo ids,
     // and the kind each venue order was placed as (so a polled fill is tagged
@@ -167,16 +168,16 @@ pub struct OkxWallet {
     order_kind: HashMap<String, OrderKind>,
 
     // Resting protective legs, for idempotent re-submit / cancel-on-change.
-    protective: HashMap<String, ProtectiveState>,
+    protective: HashMap<Symbol, ProtectiveState>,
     // Resting limit orders, one per symbol — same convention as `protective`.
-    limits: HashMap<String, RestingLimit>,
+    limits: HashMap<Symbol, RestingLimit>,
 
     // Fill polling: per-symbol last-seen billId, and the accumulated errors.
-    trade_cursor: HashMap<String, i64>,
+    trade_cursor: HashMap<Symbol, i64>,
     errors: Vec<LiveError>,
     // Refused orders awaiting a drain through take_rejections (the trait's
     // failure stream — the twin of the fill stream update()/poll_fills return).
-    rejections: Vec<Rejection<String>>,
+    rejections: Vec<Rejection<Symbol>>,
 }
 
 impl OkxWallet {
@@ -297,7 +298,7 @@ impl OkxWallet {
                     continue;
                 }
             };
-            self.positions.insert(inst.to_string(), contracts * ct_val);
+            self.positions.insert(crate::types::symbol(inst), contracts * ct_val);
         }
         Ok(())
     }
@@ -326,7 +327,7 @@ impl OkxWallet {
         let value = self.public_get("/api/v5/public/instruments", params)?;
         let spec = parse_instrument_spec(&value, symbol)
             .ok_or_else(|| LiveError::Decode(format!("no instrument spec for {symbol}")))?;
-        self.specs.insert(symbol.to_string(), spec);
+        self.specs.insert(crate::types::symbol(symbol), spec);
         Ok(spec)
     }
 
@@ -339,7 +340,7 @@ impl OkxWallet {
         }
         let trades = self.fetch_fills(symbol)?;
         let max = trades.iter().map(|t| t.bill_id).max().unwrap_or(0);
-        self.trade_cursor.insert(symbol.to_string(), max);
+        self.trade_cursor.insert(crate::types::symbol(symbol), max);
         Ok(())
     }
 
@@ -347,7 +348,7 @@ impl OkxWallet {
     /// return them as [`Order`]s in base units. A venue order we placed maps back
     /// to its local [`OrderId`] and recorded [`OrderKind`]; a fill on an order we
     /// don't know (placed out-of-band) gets a fresh local id and `Market` kind.
-    fn poll_symbol(&mut self, symbol: &str) -> Result<Vec<Order<String>>, LiveError> {
+    fn poll_symbol(&mut self, symbol: &str) -> Result<Vec<Order<Symbol>>, LiveError> {
         let ct_val = self.ensure_spec(symbol)?.ct_val;
         let cursor = self.trade_cursor.get(symbol).copied().unwrap_or(0);
         // Pull the recent fills (OKX returns the last few days, most-recent
@@ -368,11 +369,11 @@ impl OkxWallet {
                 None => self.mint(),
             };
             let kind = self.order_kind.get(&t.ord_id).copied().unwrap_or(OrderKind::Market);
-            let order = Order::new(symbol.to_string(), t.side, t.contracts * ct_val, t.price, kind, local)
+            let order = Order::new(crate::types::symbol(symbol), t.side, t.contracts * ct_val, t.price, kind, local)
                 .with_commission(t.commission);
             out.push(order);
         }
-        self.trade_cursor.insert(symbol.to_string(), max);
+        self.trade_cursor.insert(crate::types::symbol(symbol), max);
         Ok(out)
     }
 
@@ -393,7 +394,7 @@ impl OkxWallet {
     fn refuse(&mut self, symbol: &str, id: OrderId, kind: OrderKind, err: LiveError) -> WalletError {
         self.errors.push(err);
         self.rejections.push(Rejection {
-            symbol: symbol.to_string(),
+            symbol: crate::types::symbol(symbol),
             id,
             error: WalletError::Venue,
             kind,
@@ -569,11 +570,11 @@ impl OkxWallet {
     /// order before placing the new one.
     fn rest_protective(
         &mut self,
-        symbol: String,
+        symbol: Symbol,
         kind: OrderKind,
         trigger: Real,
         size: Size,
-    ) -> Result<Ack<String>, WalletError> {
+    ) -> Result<Ack<Symbol>, WalletError> {
         let spec = match self.ensure_spec(&symbol) {
             Ok(s) => s,
             Err(e) => {
@@ -626,12 +627,12 @@ impl OkxWallet {
     }
 }
 
-impl Wallet<String> for OkxWallet {
+impl Wallet<Symbol> for OkxWallet {
     fn funds(&self) -> Reference {
         Reference(self.available_balance)
     }
 
-    fn position(&self, symbol: &String) -> Units<String> {
+    fn position(&self, symbol: &Symbol) -> Units<Symbol> {
         Units {
             symbol: symbol.clone(),
             amount: self.positions.get(symbol).copied().unwrap_or(0.0),
@@ -643,7 +644,7 @@ impl Wallet<String> for OkxWallet {
     /// [`update`](Wallet::update) runs each bar). Overrides the trait default so a
     /// caller — e.g. a portfolio or a baseline snapshot of externally-held
     /// positions — can enumerate what the account holds, not just query one symbol.
-    fn positions(&self) -> Vec<Units<String>> {
+    fn positions(&self) -> Vec<Units<Symbol>> {
         self.positions
             .iter()
             .map(|(symbol, &amount)| Units {
@@ -671,7 +672,7 @@ impl Wallet<String> for OkxWallet {
         Some(QUOTE_CCY)
     }
 
-    fn price(&self, symbol: &String) -> Option<Reference> {
+    fn price(&self, symbol: &Symbol) -> Option<Reference> {
         self.marks.get(symbol).map(|&p| Reference(p))
     }
 
@@ -685,7 +686,7 @@ impl Wallet<String> for OkxWallet {
         Reference(self.equity)
     }
 
-    fn update(&mut self, symbol: String, candle: Candle) -> Vec<Order<String>> {
+    fn update(&mut self, symbol: Symbol, candle: Candle) -> Vec<Order<Symbol>> {
         self.marks.insert(symbol.clone(), candle.close);
         // Refresh account state best-effort; a failure just leaves the cache
         // stale (logged) rather than breaking the bar.
@@ -705,7 +706,7 @@ impl Wallet<String> for OkxWallet {
         }
     }
 
-    fn set_position(&mut self, target: Units<String>) -> Result<Ack<String>, WalletError> {
+    fn set_position(&mut self, target: Units<Symbol>) -> Result<Ack<Symbol>, WalletError> {
         let symbol = target.symbol;
         // Mint the id up front so a refusal before the POST still carries the
         // submission's id into its Rejection.
@@ -751,23 +752,23 @@ impl Wallet<String> for OkxWallet {
 
     fn set_stop(
         &mut self,
-        symbol: String,
+        symbol: Symbol,
         trigger: Reference,
         size: Size,
-    ) -> Result<Ack<String>, WalletError> {
+    ) -> Result<Ack<Symbol>, WalletError> {
         self.rest_protective(symbol, OrderKind::Stop, trigger.0, size)
     }
 
     fn set_take_profit(
         &mut self,
-        symbol: String,
+        symbol: Symbol,
         trigger: Reference,
         size: Size,
-    ) -> Result<Ack<String>, WalletError> {
+    ) -> Result<Ack<Symbol>, WalletError> {
         self.rest_protective(symbol, OrderKind::TakeProfit, trigger.0, size)
     }
 
-    fn cancel_protective(&mut self, symbol: &String) -> Result<(), WalletError> {
+    fn cancel_protective(&mut self, symbol: &Symbol) -> Result<(), WalletError> {
         if let Some(state) = self.protective.remove(symbol) {
             if let Some(leg) = state.stop {
                 self.cancel_algo(symbol, &leg.algo_id)?;
@@ -798,11 +799,11 @@ impl Wallet<String> for OkxWallet {
     /// limit every bar without piling up orders.
     fn set_limit(
         &mut self,
-        symbol: String,
+        symbol: Symbol,
         side: Side,
         size: Size,
         limit: Reference,
-    ) -> Result<Ack<String>, WalletError> {
+    ) -> Result<Ack<Symbol>, WalletError> {
         let local = self.mint();
         if limit.0 <= 0.0 {
             return Err(self.refuse(
@@ -872,19 +873,19 @@ impl Wallet<String> for OkxWallet {
         Ok(Ack::Working(local))
     }
 
-    fn cancel_limit(&mut self, symbol: &String) -> Result<(), WalletError> {
+    fn cancel_limit(&mut self, symbol: &Symbol) -> Result<(), WalletError> {
         if let Some(resting) = self.limits.remove(symbol) {
             self.cancel_order(symbol, &resting.ord_id)?;
         }
         Ok(())
     }
 
-    fn take_rejections(&mut self) -> Vec<Rejection<String>> {
+    fn take_rejections(&mut self) -> Vec<Rejection<Symbol>> {
         std::mem::take(&mut self.rejections)
     }
 
-    fn poll_fills(&mut self) -> Vec<Order<String>> {
-        let symbols: Vec<String> = self.trade_cursor.keys().cloned().collect();
+    fn poll_fills(&mut self) -> Vec<Order<Symbol>> {
+        let symbols: Vec<Symbol> = self.trade_cursor.keys().cloned().collect();
         let mut out = Vec::new();
         for symbol in symbols {
             match self.poll_symbol(&symbol) {

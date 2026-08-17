@@ -17,6 +17,7 @@ use crate::strategies::PairsStrategy;
 use super::expr::{BoolNode, RealNode};
 use super::strategy::SideSpec;
 use crate::spec::dyn_indicator::{AsBool, AsReal, DynIndicator};
+use crate::types::Symbol;
 
 /// A whole `pairs.yml`: the two traded symbols plus one enter/exit signal pair
 /// and optional spread levels.
@@ -252,7 +253,7 @@ impl PairsStrategySpec {
         match side.and_then(|s| s.exit.as_ref()) {
             Some(s) => s.try_build(anchor, book, None, schema, None),
             None => Ok(crate::spec::dyn_indicator::wrap(ValueBool::<
-                crate::types::Snapshot<String>,
+                crate::types::Snapshot<Symbol>,
             >::new(false))),
         }
     }
@@ -268,7 +269,7 @@ impl PairsStrategySpec {
         match side {
             Some(s) => s.enter.try_build(anchor, book, None, schema, None),
             None => Ok(crate::spec::dyn_indicator::wrap(ValueBool::<
-                crate::types::Snapshot<String>,
+                crate::types::Snapshot<Symbol>,
             >::new(false))),
         }
     }
@@ -299,9 +300,11 @@ impl PairsStrategySpec {
         initial_equity: Real,
         schema: &Arc<Schema>,
     ) -> Result<DynPairsStrategy, String> {
+        // The document holds the leg names as `String`; interning here means
+        // every later clone of them (per bar, per fill) is a refcount bump.
         let strat = PairsStrategy::with_initial_equity(
-            self.left.clone(),
-            self.right.clone(),
+            crate::types::symbol(&self.left),
+            crate::types::symbol(&self.right),
             initial_equity,
         );
         // Anchor level expressions on the left leg's position (see doc note).
@@ -356,13 +359,13 @@ impl PairsStrategySpec {
 }
 
 /// The CLI's built pairs-strategy handle. Wraps a
-/// [`PairsStrategy<String>`](crate::strategies::PairsStrategy) whose signals
+/// [`PairsStrategy<Symbol>`](crate::strategies::PairsStrategy) whose signals
 /// and levels came from runtime-typed [`DynIndicator`]s.
 ///
 /// Implements [`Strategy`] by delegation, so it drops into
 /// [`crate::backtest::run`] unchanged.
 pub struct DynPairsStrategy {
-    inner: PairsStrategy<String>,
+    inner: PairsStrategy<Symbol>,
 }
 
 impl DynPairsStrategy {
@@ -380,11 +383,11 @@ impl DynPairsStrategy {
         self.inner.warm_up_bars()
     }
 
-    /// The strategy's shared [`Book<String>`] — hand-off point for
+    /// The strategy's shared [`Book<Symbol>`] — hand-off point for
     /// portfolio-level weight-share templates that want to read
     /// `!drawdown` / `!return_per_bar` / `!trade_return` against this
     /// child's aggregate two-leg book.
-    pub fn book(&self) -> Book<String> {
+    pub fn book(&self) -> Book<Symbol> {
         self.inner.book()
     }
 
@@ -400,19 +403,19 @@ impl DynPairsStrategy {
 }
 
 impl Strategy for DynPairsStrategy {
-    type Input = crate::types::Snapshot<String>;
-    type Symbol = String;
+    type Input = crate::types::Snapshot<Symbol>;
+    type Symbol = Symbol;
 
-    fn update(&mut self, snap: crate::types::Snapshot<String>) {
+    fn update(&mut self, snap: crate::types::Snapshot<Symbol>) {
         self.inner.update(snap);
     }
-    fn on_fill(&mut self, order: &Order<String>) {
+    fn on_fill(&mut self, order: &Order<Symbol>) {
         self.inner.on_fill(order);
     }
     fn is_ready(&self) -> bool {
         self.inner.is_ready()
     }
-    fn trade(&self, wallet: &mut dyn Wallet<String>) {
+    fn trade(&self, wallet: &mut dyn Wallet<Symbol>) {
         self.inner.trade(wallet);
     }
     fn reset(&mut self) {

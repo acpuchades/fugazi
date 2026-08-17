@@ -8,7 +8,7 @@
 //! silently retune the others.
 
 use fugazi::prelude::*;
-use fugazi::types::Snapshot;
+use fugazi::types::{Snapshot, Symbol, symbol as intern};
 
 /// One day in milliseconds — the cadence [`daily_series`] stamps.
 pub const DAY_MS: i64 = 86_400_000;
@@ -55,10 +55,12 @@ pub fn series(
     symbol: &str,
     closes: &[Real],
     shape: fn(Real) -> Candle,
-) -> Vec<Snapshot<String>> {
+) -> Vec<Snapshot<Symbol>> {
+    // Interned once for the whole series; each bar's tag is a refcount bump.
+    let sym = intern(symbol);
     closes
         .iter()
-        .map(|&px| Snapshot::single(symbol.to_string(), Atom::new(shape(px))))
+        .map(|&px| Snapshot::single(sym.clone(), Atom::new(shape(px))))
         .collect()
 }
 
@@ -73,7 +75,7 @@ pub fn series(
 pub fn daily_series(
     columns: &[(&str, &[Real])],
     shape: fn(Real) -> Candle,
-) -> Vec<Snapshot<String>> {
+) -> Vec<Snapshot<Symbol>> {
     let bars = columns.first().map_or(0, |(_, c)| c.len());
     assert!(
         columns.iter().all(|(_, c)| c.len() == bars),
@@ -83,10 +85,10 @@ pub fn daily_series(
     (0..bars)
         .map(|i| {
             let t = Timestamp(i as i64 * DAY_MS);
-            let mut snap = Snapshot::<String>::new();
+            let mut snap = Snapshot::<Symbol>::new();
             for (symbol, closes) in columns {
                 snap.push(
-                    Some((*symbol).to_string()),
+                    Some(intern(*symbol)),
                     None,
                     Atom::with_time(shape(closes[i]), t),
                 );

@@ -8,6 +8,40 @@ use std::sync::Arc;
 use crate::market::Atom;
 use crate::time::Frequency;
 
+/// The symbol type the spec, runtime, CLI and Python layers key assets by.
+///
+/// `Arc<str>` rather than `String` because a symbol is **cloned constantly and
+/// mutated never**: the driver clones one per symbol per bar to price the
+/// wallet, every `Snapshot` entry holds one, and each spec-built leaf carries
+/// one in its `Selector`. With `String` each of those is a heap allocation and a
+/// memcpy of the same handful of bytes; with `Arc<str>` it is a refcount bump,
+/// and a run interns one allocation per *distinct* symbol rather than one per
+/// symbol per bar.
+///
+/// Measured (`docs/PERFORMANCE.md`): snapshot construction went from 3.00 to
+/// 2.00 allocations per bar and 201 to 160 bytes per bar. The Python bindings
+/// gain most, because they rebuild symbols across the FFI boundary on every
+/// call — see `python/bench/bench_run.py`.
+///
+/// The indicator and strategy layers stay **generic** over `Sym`; this alias is
+/// only what the runtime-typed layers pick. A pure-Rust caller can still use
+/// `&'static str` and pay nothing at all.
+///
+/// `Arc<str>` derefs to `str` and implements `Borrow<str>`, so a
+/// `HashMap<Symbol, _>` is still queryable with a plain `&str` and comparisons
+/// against string literals work unchanged.
+pub type Symbol = Arc<str>;
+
+/// Intern `name` into a [`Symbol`].
+///
+/// A free function rather than a `From` impl so call sites read as a deliberate
+/// conversion — the point of [`Symbol`] is that you allocate once and clone
+/// thereafter, and a conversion buried in an `.into()` inside a per-bar loop
+/// defeats it.
+pub fn symbol(name: impl AsRef<str>) -> Symbol {
+    Arc::from(name.as_ref())
+}
+
 /// A **selector**: a matching predicate naming *which* asset in a [`Snapshot`]
 /// a [`Pick`](crate::indicators::Pick) should read.
 ///
@@ -147,7 +181,7 @@ impl<Sym: PartialEq> Selector<Sym> {
 /// use fugazi::indicators::{Close, Pick};
 /// use fugazi::prelude::*;
 /// // BTC/ETH close spread as a first-class Real-output indicator over a
-/// // Snapshot<String>.
+/// // Snapshot<Symbol>.
 /// let spread = Close::of(Pick::matching(Selector::by_symbol("BTC")))
 ///     .sub(Close::of(Pick::matching(Selector::by_symbol("ETH"))));
 /// ```
@@ -383,7 +417,7 @@ mod overlay_only_tests {
         // The point of the whole change: stacking a funding series next to a
         // price series must not break a single-asset strategy's bare `!close`,
         // which reaches its bar through the implicit no-arg unpack.
-        let mut snap: Snapshot<String> = Snapshot::new();
+        let mut snap: Snapshot<Symbol> = Snapshot::new();
         snap.push(Some("BTC".into()), None, Atom::new(Candle::new(1.0, 2.0, 0.5, 1.5, 10.0)));
         snap.push(Some("BTC.funding".into()), None, funding_atom(0.0003));
 
@@ -395,7 +429,7 @@ mod overlay_only_tests {
     fn sole_atom_still_panics_on_two_real_bars() {
         // The ambiguity it exists to catch is unchanged: two *priceable*
         // entries remain a programming error, not a silent arbitrary pick.
-        let mut snap: Snapshot<String> = Snapshot::new();
+        let mut snap: Snapshot<Symbol> = Snapshot::new();
         snap.push(Some("BTC".into()), None, Atom::new(Candle::new(1.0, 2.0, 0.5, 1.5, 10.0)));
         snap.push(Some("ETH".into()), None, Atom::new(Candle::new(2.0, 3.0, 1.5, 2.5, 20.0)));
         assert!(std::panic::catch_unwind(|| snap.sole_atom()).is_err());
@@ -403,7 +437,7 @@ mod overlay_only_tests {
 
     #[test]
     fn an_all_overlay_snapshot_has_no_sole_atom() {
-        let mut snap: Snapshot<String> = Snapshot::new();
+        let mut snap: Snapshot<Symbol> = Snapshot::new();
         snap.push(Some("BTC.funding".into()), None, funding_atom(0.0003));
         assert!(snap.sole_atom().is_none());
     }

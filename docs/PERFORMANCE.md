@@ -383,41 +383,79 @@ Small universes pay slightly more for the keyed lookup than a two-element scan
 (`update/2` is +11%); the crossover is around N = 16, and `drive/2` is −7.2%
 because the wallet-side hashing win more than covers it.
 
+## Phase 5 — `Symbol = Arc<str>`
+
+The symbol type the spec / runtime / CLI / Python layers key assets by is now
+`Arc<str>` (`fugazi::Symbol`) instead of `String`. A symbol is cloned constantly
+and mutated never — once per symbol per bar by the driver alone — so cloning
+should be a refcount bump, not an allocation. The indicator and strategy layers
+stay **generic** over `Sym`; a pure-Rust caller can still use `&'static str`.
+
+Interning happens at each boundary where a document, a CSV or a Python `str`
+becomes a symbol, and once per run rather than once per bar.
+
+### Footprint
+
+| | before | after |
+|---|---:|---:|
+| driving a run — allocs/bar | 1.00 | **0.00** |
+| driving a run — bytes/bar | 9.0 | 8.0 |
+| snapshot build, 1 symbol — allocs/bar | 3.00 | **2.00** |
+| snapshot build, 8 symbols — allocs/bar | 11.00 | **3.00** |
+| snapshot build, 32 symbols — allocs/bar | 37.01 | **5.01** |
+| peak RSS (200k bars) | 98.0 MiB | **87.0 MiB** |
+
+A 200 000-bar run now performs **37 allocations in total**, against 200 045
+before: the last per-bar allocation was `wallet.update(sym.clone(), candle)`,
+which the by-value `Wallet::update` signature forced and which is now free.
+
+### Python — where this was aimed
+
+The Python bindings gain most, because they rebuild symbols across the FFI
+boundary. `snapshots_from_sequence` now carries a `SymbolInterner`, so a
+20 000-bar × 32-symbol series allocates 32 `Arc`s rather than 640 000.
+
+Measured with `python/bench/bench_run.py`, **release wheels on both sides**:
+
+| case | before | after | change |
+|---|---:|---:|---:|
+| run, 32 symbols | 2.20 µs/bar | 1.81 | **−18%** |
+| run, 8 symbols | 1.41 µs/bar | 1.21 | −14% |
+| snapshot conversion, 1 symbol | 0.43 µs/bar | 0.39 | −9% |
+| snapshot conversion, 32 symbols | 5.06 µs/bar | 4.78 | −6% |
+
+**Measure the Python side with a release wheel.** `maturin develop` builds in
+*debug*, which is 7–10× slower and amplifies unrelated changes out of all
+proportion — a first pass at these numbers, taken on debug wheels, showed a 33%
+"regression" that did not exist. Use `maturin develop --release`, or build a
+wheel and install it.
+
+The interner also has to be scoped correctly: an early version built one per
+*snapshot*, trading a per-symbol string allocation for a whole hash table per
+bar, and cost +86% on a 32-symbol conversion. It now exists only for the
+sequence path, where the cache can actually hit.
+
+### What the Python profile actually looks like
+
+Worth recording, because it is not what the Rust benchmarks suggest: for a
+Python caller driving a multi-symbol backtest, **the FFI boundary costs more
+than the engine**. At 32 symbols, snapshot conversion is 4.78 µs/bar against
+1.81 µs/bar for the whole run. Optimising the engine further has a ceiling for
+Python users that boundary work does not.
+
 ## Breaking candidates — measured, not yet done
 
-Three changes that would break the public API. Each is **prototyped and
-measured** rather than argued for, so the cost/benefit is a number. None is
-implemented; `benches/breaking.rs` holds the prototypes.
+Changes that would break the public API, **prototyped and measured** rather
+than argued for. `benches/breaking.rs` holds the prototypes.
+
+(`Sym = Arc<str>` was the third; it has since been implemented as
+`fugazi::Symbol` — see *Phase 5* below.)
 
 Read the figures as **ceilings**. Each prototype is narrower than the real
 change would be, and a couple of them enjoy inlining that the general case
 would not.
 
-### 1. `Sym = Arc<str>` instead of `String` — recommended first
-
-Needs no prototype at all: `Snapshot`, `PaperWallet` and `MultiAssetStrategy`
-are already generic over `Sym`, and `Arc<str>` satisfies every bound. So the
-same workload simply runs both ways today.
-
-| | `String` | `Arc<str>` | change |
-|---|---:|---:|---:|
-| snapshot construction (allocs/bar) | 3.00 | **2.00** | −33% |
-| snapshot construction (bytes/bar) | 201.0 | **160.0** | −20% |
-| snapshot construction (wall-clock) | 818 µs | 476 µs | **−41.9%** |
-| 8-symbol run | 5.375 ms | 4.542 ms | −15.5% |
-| 32-symbol run | 32.405 ms | 26.254 ms | −19.0% |
-| 64-symbol run | 90.551 ms | 84.466 ms | −6.7% |
-
-Cloning a symbol becomes a refcount bump instead of a heap allocation, which is
-what the driver does once per symbol per bar. It would also let
-`Wallet::update` keep its by-value signature cheaply — that call is the *last
-remaining* per-bar allocation after Phase 3.
-
-**Cost.** `Snapshot<String>` is spelled explicitly across `runtime::DynValue`,
-the five spec shapes, `python/src/`, and the CLI. Mechanical, but wide. A type
-alias (`pub type Symbol = Arc<str>`) would contain most of the churn.
-
-### 2. `Indicator::update(&mut self, input: &Self::Input)`
+### 1. `Indicator::update(&mut self, input: &Self::Input)`
 
 Prototyped as a by-reference chain computing the same SMA crossover
 (`RefIndicator` in `benches/breaking.rs`).
@@ -440,7 +478,7 @@ feeds the same input to *both* sides, so every binary node clones its input, and
 example. Worth doing only if the ceiling is confirmed on a narrower slice first
 — converting `Pick` and `Combine` alone would test the thesis.
 
-### 3. Index `Snapshot` for lookup
+### 2. Index `Snapshot` for lookup
 
 Per *symbol-bar* cost still climbs with universe size after Phase 3 (227 ns at
 N = 2 to 662 ns at N = 64, where it should be flat). The residual O(N²) is

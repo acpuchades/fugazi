@@ -107,7 +107,11 @@ clap_complete = { version = "4", optional = true }
 # proc-macro dependency (no runtime, no linkage), so it does not affect the
 # pyo3 cdylib build.
 fugazi-derive = { path = "fugazi-derive", version = "0.58.0" }
-serde = { version = "1", features = ["derive"] }
+# `rc` provides `Serialize`/`Deserialize` for `Arc<str>` — the crate's `Symbol`
+# type. serde gates it because deserializing two `Arc`s that were shared at
+# serialize time yields two independent allocations; that is fine here, since a
+# `RunState`'s symbols are re-interned on load anyway.
+serde = { version = "1", features = ["derive", "rc"] }
 serde_norway = { version = "0.9", optional = true }
 # `float_roundtrip` makes f64 parse back bit-for-bit identical to what was
 # serialized — load-bearing for run resuming, where a 1-ULP drift in a restored

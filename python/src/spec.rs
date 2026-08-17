@@ -456,11 +456,11 @@ pub(crate) struct PyStrategySpec {
 /// `wallet.set_costs_for(sym, ...)` apply naturally. Every shape trades the
 /// wallet it is handed, portfolio included: a portfolio is an ordinary
 /// `Strategy` that nets its children onto one account.
-pub(crate) fn run_spec<W: Wallet<String>>(
+pub(crate) fn run_spec<W: Wallet<Symbol>>(
     loaded: &CoreStrategySpec,
-    snapshots: &[Snapshot<String>],
+    snapshots: &[Snapshot<Symbol>],
     wallet: &mut W,
-) -> PyResult<RunReport<String>> {
+) -> PyResult<RunReport<Symbol>> {
     let cash = wallet.equity().0;
     let schema = spec_backtest::schema_from_snapshots(snapshots);
     let mut built = loaded.try_build(cash, &schema, None).map_err(build_err)?;
@@ -483,13 +483,13 @@ pub(crate) fn run_spec<W: Wallet<String>>(
 /// implementation of it — the version and kind checks, the flatten path and the
 /// state capture all live in one place, so the Python and CLI surfaces cannot
 /// drift apart.
-pub(crate) fn run_spec_resumable<W: Wallet<String>>(
+pub(crate) fn run_spec_resumable<W: Wallet<Symbol>>(
     loaded: &CoreStrategySpec,
-    snapshots: &[Snapshot<String>],
+    snapshots: &[Snapshot<Symbol>],
     wallet: &mut W,
     resume: Option<&fugazi_core::spec::RunState>,
     flatten: bool,
-) -> PyResult<(RunReport<String>, fugazi_core::spec::RunState)> {
+) -> PyResult<(RunReport<Symbol>, fugazi_core::spec::RunState)> {
     let cash = wallet.equity().0;
     let schema = spec_backtest::schema_from_snapshots(snapshots);
     let mut built = loaded.try_build(cash, &schema, None).map_err(build_err)?;
@@ -515,9 +515,9 @@ fn state_json(state: &fugazi_core::spec::RunState) -> PyResult<String> {
 
 /// Advance a spec over `snapshots` without trading, returning the state to
 /// resume from. See `StrategySpec.warm_up` for what it is for.
-pub(crate) fn warm_up_spec<W: Wallet<String>>(
+pub(crate) fn warm_up_spec<W: Wallet<Symbol>>(
     loaded: &CoreStrategySpec,
-    snapshots: &[Snapshot<String>],
+    snapshots: &[Snapshot<Symbol>],
     wallet: &mut W,
     resume: Option<&fugazi_core::spec::RunState>,
 ) -> PyResult<fugazi_core::spec::RunState> {
@@ -1399,7 +1399,7 @@ pub(crate) struct PyWalkForwardResult {
     pub(crate) prefix_skip: usize,
     pub(crate) folds: Vec<Py<PyWalkForwardFold>>,
     pub(crate) composite_equity: Vec<Real>,
-    pub(crate) composite_fills: Vec<fugazi_core::Fill<String>>,
+    pub(crate) composite_fills: Vec<fugazi_core::Fill<Symbol>>,
     pub(crate) composite_metrics: SpecMetrics,
     pub(crate) columns: Vec<String>,
     pub(crate) metric_columns: Vec<(String, String)>,
@@ -1476,7 +1476,7 @@ pub(crate) fn run_walkforward(
     py: Python<'_>,
     detected: &str,
     base_value: &JsonValue,
-    snaps: &[Snapshot<String>],
+    snaps: &[Snapshot<Symbol>],
     cost_config: &fugazi_core::spec::costs::CostConfig,
     subgrids: Vec<spec_optimize::Subgrid>,
     is_bars: usize,
@@ -1533,7 +1533,7 @@ pub(crate) fn run_walkforward(
             };
 
             let run_backtest = |params: &std::collections::HashMap<String, JsonValue>|
-                -> anyhow::Result<fugazi_core::RunReport<String>>
+                -> anyhow::Result<fugazi_core::RunReport<Symbol>>
             {
                 let value = fugazi_core::spec::params::substitute(base_value.clone(), params)?;
                 let spec = spec_from_value(value, detected)?;

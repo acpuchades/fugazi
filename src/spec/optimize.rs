@@ -56,6 +56,7 @@ use serde_json::Value;
 use crate::spec::metrics;
 use crate::spec::params;
 use crate::spec::SingleStrategySpec;
+use crate::types::Symbol;
 
 /// Sort direction of a `--best-by` optimization: descending = higher is better
 /// (Sharpe, CAGR, …); ascending = lower is better (drawdown, volatility, VaR, …).
@@ -961,10 +962,10 @@ pub struct WalkForwardResult {
     /// into the running composite so mode-switches don't create jumps.
     pub composite_equity: Vec<Real>,
     /// Fills from the stitched composite, with per-fold bar offsets applied.
-    pub composite_fills: Vec<crate::Fill<String>>,
+    pub composite_fills: Vec<crate::Fill<Symbol>>,
     /// Orders refused during the stitched OOS segments, on the same composite
     /// bar axis as `composite_fills`.
-    pub composite_rejections: Vec<crate::Rejected<String>>,
+    pub composite_rejections: Vec<crate::Rejected<Symbol>>,
     /// The composite equity curve reduced through the full metrics catalogue.
     pub composite_metrics: metrics::Metrics,
     /// The resolved IS / OOS / embargo bar counts (post-`WalkForwardSpec::resolve`).
@@ -1007,7 +1008,7 @@ pub fn walkforward<P, R>(
 ) -> Result<WalkForwardResult>
 where
     P: Fn(&HashMap<String, Value>) -> Result<usize> + Sync,
-    R: Fn(&HashMap<String, Value>) -> Result<crate::RunReport<String>> + Sync,
+    R: Fn(&HashMap<String, Value>) -> Result<crate::RunReport<Symbol>> + Sync,
 {
     assert!(!subgrids.is_empty(), "walkforward: called with zero subgrids");
 
@@ -1044,7 +1045,7 @@ where
     // Main pass: one full backtest per row. Store the reports so per-fold
     // slicing is a bounded-cost operation.
     let run_ref = &run_backtest;
-    let reports: Vec<crate::RunReport<String>> = pool.install(|| {
+    let reports: Vec<crate::RunReport<Symbol>> = pool.install(|| {
         plan_ref
             .par_iter()
             .map(|&(si, ci)| {
@@ -1099,8 +1100,8 @@ where
     // slice for the composite.
     let mut fold_rows: Vec<WalkForwardRow> = Vec::with_capacity(folds.len());
     let mut composite_equity: Vec<Real> = Vec::new();
-    let mut composite_fills: Vec<crate::Fill<String>> = Vec::new();
-    let mut composite_rejections: Vec<crate::Rejected<String>> = Vec::new();
+    let mut composite_fills: Vec<crate::Fill<Symbol>> = Vec::new();
+    let mut composite_rejections: Vec<crate::Rejected<Symbol>> = Vec::new();
     let mut running_equity: Real = cash;
 
     for (fold_idx, fold) in folds.iter().enumerate() {
@@ -1236,7 +1237,7 @@ mod tests {
     #[test]
     fn windowed_lookup_aggregates_mean_and_std() {
         // Two 2-bar windows: +10% (100 → 110) then +20% (110 → 132).
-        let report: RunReport<String> = RunReport {
+        let report: RunReport<Symbol> = RunReport {
             equity_curve: vec![110.0, 110.0, 132.0, 132.0],
             fills: vec![],
             rejections: Vec::new(),
@@ -1457,7 +1458,7 @@ mod tests {
             e *= 1.0 + 0.0002 + 0.01 * n;
             equity.push(e);
         }
-        let report: RunReport<String> = RunReport {
+        let report: RunReport<Symbol> = RunReport {
             equity_curve: equity,
             fills: vec![],
             rejections: Vec::new(),
@@ -1538,7 +1539,7 @@ mod tests {
             e *= 1.0 + 0.0002 + 0.01 * n;
             equity.push(e);
         }
-        let report: RunReport<String> = RunReport {
+        let report: RunReport<Symbol> = RunReport {
             equity_curve: equity,
             fills: vec![],
             rejections: Vec::new(),

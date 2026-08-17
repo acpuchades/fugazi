@@ -103,7 +103,7 @@ fn bench_drive(c: &mut Criterion) {
         g.bench_with_input(BenchmarkId::from_parameter(depth), &depth, |b, &depth| {
             b.iter(|| {
                 let mut strat = build(depth);
-                let mut w: PaperWallet<String> = PaperWallet::new(10_000.0);
+                let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
                 let rep = fugazi::backtest::run(&mut strat, &mut w, snaps.iter().cloned());
                 black_box(rep.equity_curve.len());
             });

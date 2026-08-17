@@ -15,6 +15,7 @@
 
 mod common;
 
+use fugazi::types::{Symbol, symbol as intern};
 use common::net::serve;
 use fugazi::Candle;
 use fugazi::live::OkxWallet;
@@ -145,12 +146,12 @@ fn set_position_places_a_market_order_and_update_reports_the_fill_in_base_units(
 
     // Target 0.03 BTC — the venue should see 3 contracts.
     let ack = w
-        .set_position(Units { symbol: SYMBOL.to_string(), amount: 0.03 })
+        .set_position(Units { symbol: intern(SYMBOL), amount: 0.03 })
         .expect("submission accepted");
     assert!(matches!(ack, Ack::Working(_)), "market order returns Working");
 
     // Next bar: account refresh shows the position, poll returns the fill.
-    let fills = w.update(SYMBOL.to_string(), Candle::new(27000.0, 27100.0, 26900.0, 27050.0, 1.0));
+    let fills = w.update(intern(SYMBOL), Candle::new(27000.0, 27100.0, 26900.0, 27050.0, 1.0));
     assert_eq!(fills.len(), 1, "expected one fill; errors: {:?}", w.errors());
     let fill = &fills[0];
     assert_eq!(fill.side, Side::Buy);
@@ -159,10 +160,10 @@ fn set_position_places_a_market_order_and_update_reports_the_fill_in_base_units(
     assert!((fill.commission - 0.08).abs() < 1e-9);
 
     // Reads reflect the refreshed account state (contracts converted to units).
-    assert!((w.position(&SYMBOL.to_string()).amount - 0.03).abs() < 1e-9);
+    assert!((w.position(&intern(SYMBOL)).amount - 0.03).abs() < 1e-9);
     assert!((w.funds().0 - 10000.0).abs() < 1e-9);
     assert!((w.equity().0 - 10000.0).abs() < 1e-9);
-    assert!((w.price(&SYMBOL.to_string()).unwrap().0 - 27050.0).abs() < 1e-9);
+    assert!((w.price(&intern(SYMBOL)).unwrap().0 - 27050.0).abs() < 1e-9);
 
     // Polling again is idempotent: the cursor advanced past the fill.
     assert!(w.poll_fills().is_empty(), "fill must not be re-reported");
@@ -225,11 +226,11 @@ fn a_protective_stop_dedups_an_unchanged_trigger() {
 
     let mut w = wallet(uri);
     // Prime the position cache (account refresh) so the stop knows the side.
-    w.update(SYMBOL.to_string(), Candle::new(27000.0, 27100.0, 26900.0, 27000.0, 1.0));
+    w.update(intern(SYMBOL), Candle::new(27000.0, 27100.0, 26900.0, 27000.0, 1.0));
 
     // Rest the same stop three bars running — only the first should hit the venue.
     for _ in 0..3 {
-        w.set_stop(SYMBOL.to_string(), Reference(26000.0), Size::position_frac(1.0))
+        w.set_stop(intern(SYMBOL), Reference(26000.0), Size::position_frac(1.0))
             .expect("stop accepted");
     }
     assert_eq!(
@@ -239,7 +240,7 @@ fn a_protective_stop_dedups_an_unchanged_trigger() {
     );
 
     // Moving the trigger cancels + replaces: one more algo POST.
-    w.set_stop(SYMBOL.to_string(), Reference(26500.0), Size::position_frac(1.0))
+    w.set_stop(intern(SYMBOL), Reference(26500.0), Size::position_frac(1.0))
         .expect("moved stop accepted");
     assert_eq!(algo_posts.load(Ordering::SeqCst), 2, "a moved trigger re-submits");
 }
@@ -308,10 +309,10 @@ fn a_limit_order_places_a_limit_and_dedups_an_unchanged_resubmit() {
     let uri = mock.uri.clone();
 
     let mut w = wallet(uri);
-    w.update(SYMBOL.to_string(), Candle::new(27000.0, 27100.0, 26900.0, 27000.0, 1.0));
+    w.update(intern(SYMBOL), Candle::new(27000.0, 27100.0, 26900.0, 27000.0, 1.0));
 
     // 0.05 BTC at 26000 → 5 contracts.
-    w.set_limit(SYMBOL.to_string(), Side::Buy, Size::units(0.05), Reference(26000.0))
+    w.set_limit(intern(SYMBOL), Side::Buy, Size::units(0.05), Reference(26000.0))
         .expect("limit accepted");
 
     let body = last_body.lock().unwrap().clone();
@@ -322,19 +323,19 @@ fn a_limit_order_places_a_limit_and_dedups_an_unchanged_resubmit() {
 
     // Re-submitting the same order every bar must not pile up venue orders.
     for _ in 0..3 {
-        w.set_limit(SYMBOL.to_string(), Side::Buy, Size::units(0.05), Reference(26000.0))
+        w.set_limit(intern(SYMBOL), Side::Buy, Size::units(0.05), Reference(26000.0))
             .expect("unchanged limit accepted");
     }
     assert_eq!(posts.load(Ordering::SeqCst), 1, "an unchanged limit must not re-submit each bar");
 
     // Moving the price cancels and replaces.
-    w.set_limit(SYMBOL.to_string(), Side::Buy, Size::units(0.05), Reference(26500.0))
+    w.set_limit(intern(SYMBOL), Side::Buy, Size::units(0.05), Reference(26500.0))
         .expect("moved limit accepted");
     assert_eq!(posts.load(Ordering::SeqCst), 2, "a moved limit re-submits");
     assert_eq!(cancels.load(Ordering::SeqCst), 1, "and cancels the old one");
 
     // And an explicit cancel withdraws it.
-    w.cancel_limit(&SYMBOL.to_string()).expect("cancel ok");
+    w.cancel_limit(&intern(SYMBOL)).expect("cancel ok");
     assert_eq!(cancels.load(Ordering::SeqCst), 2);
 }
 
@@ -369,7 +370,7 @@ fn a_venue_rejected_order_surfaces_through_take_rejections() {
 
     // The submission fails synchronously with the Venue category …
     let err = w
-        .set_position(Units { symbol: SYMBOL.to_string(), amount: 0.03 })
+        .set_position(Units { symbol: intern(SYMBOL), amount: 0.03 })
         .expect_err("venue refuses the order");
     assert_eq!(err, fugazi::wallet::WalletError::Venue);
 
@@ -377,7 +378,7 @@ fn a_venue_rejected_order_surfaces_through_take_rejections() {
     // failure stream so a driver can route it to `Strategy::on_reject`.
     let refused = w.take_rejections();
     assert_eq!(refused.len(), 1, "one refused order; errors: {:?}", w.errors());
-    assert_eq!(refused[0].symbol, SYMBOL);
+    assert_eq!(refused[0].symbol.as_ref(), SYMBOL);
     assert_eq!(refused[0].kind, fugazi::wallet::OrderKind::Market);
     assert_eq!(refused[0].error, fugazi::wallet::WalletError::Venue);
     // Draining is destructive: a second call yields nothing.
@@ -409,7 +410,7 @@ fn live_demo_round_trip() {
         return;
     };
 
-    let symbol = SYMBOL.to_string();
+    let symbol = intern(SYMBOL);
     let mut w = OkxWallet::demo(key, secret, passphrase);
     w.refresh_account().expect("account reachable on demo trading");
 
@@ -515,11 +516,11 @@ fn a_portfolio_spec_runs_against_a_live_wallet() {
     .expect("parse portfolio spec");
     let mut built = spec.build(10_000.0, &Schema::empty(), None);
 
-    let snaps: Vec<Snapshot<String>> = [27_000.0, 27_100.0, 27_200.0]
+    let snaps: Vec<Snapshot<Symbol>> = [27_000.0, 27_100.0, 27_200.0]
         .into_iter()
         .map(|p| {
             Snapshot::single(
-                SYMBOL.to_string(),
+                intern(SYMBOL),
                 Atom::new(Candle::new(p, p + 50.0, p - 50.0, p, 1.0)),
             )
         })

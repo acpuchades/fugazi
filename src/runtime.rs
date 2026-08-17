@@ -27,6 +27,7 @@ use crate::Indicator;
 use crate::market::{Atom, Candle, Real};
 use crate::snapshot::Snapshot;
 use crate::time::Timestamp;
+use crate::types::Symbol;
 
 // ---------------------------------------------------------------------------
 // Payload enum + type descriptor
@@ -49,7 +50,7 @@ pub enum DynValue {
     Candle(Candle),
     Str(Arc<str>),
     Time(Timestamp),
-    Snapshot(Snapshot<String>),
+    Snapshot(Snapshot<Symbol>),
 }
 
 // `Atom` doesn't implement `PartialEq` (the overlay `Arc`s aren't compared by
@@ -132,7 +133,7 @@ impl fmt::Display for DynType {
 ///
 /// **Single source of truth for coercion compatibility.** Both this table
 /// *and* the corresponding lift arms on the `TryFrom<DynValue>` impls (for
-/// `Atom` and `Snapshot<String>`) list the same three lifts, and a lift-parity
+/// `Atom` and `Snapshot<Symbol>`) list the same three lifts, and a lift-parity
 /// test in this module holds them in sync — adding a new lift on either side
 /// without the other fails that test.
 ///
@@ -180,8 +181,8 @@ impl From<Timestamp> for DynValue {
         DynValue::Time(v)
     }
 }
-impl From<Snapshot<String>> for DynValue {
-    fn from(v: Snapshot<String>) -> Self {
+impl From<Snapshot<Symbol>> for DynValue {
+    fn from(v: Snapshot<Symbol>) -> Self {
         DynValue::Snapshot(v)
     }
 }
@@ -244,17 +245,17 @@ impl TryFrom<DynValue> for Timestamp {
         }
     }
 }
-impl TryFrom<DynValue> for Snapshot<String> {
+impl TryFrom<DynValue> for Snapshot<Symbol> {
     type Error = DynType;
-    fn try_from(v: DynValue) -> Result<Snapshot<String>, DynType> {
+    fn try_from(v: DynValue) -> Result<Snapshot<Symbol>, DynType> {
         match v {
             DynValue::Snapshot(s) => Ok(s),
             // A Candle or Atom lifts into an untagged size-1 snapshot — the
             // key that lets a Resample's Candle output (or any Atom-emitting
             // source's output) feed a downstream Snapshot-rooted chain via
             // the sole-atom unpack that empty-selector `!pick` uses.
-            DynValue::Candle(c) => Ok(Snapshot::<String>::of_atom(c.into())),
-            DynValue::Atom(a) => Ok(Snapshot::<String>::of_atom(a)),
+            DynValue::Candle(c) => Ok(Snapshot::<Symbol>::of_atom(c.into())),
+            DynValue::Atom(a) => Ok(Snapshot::<Symbol>::of_atom(a)),
             other => Err(other.dyn_type()),
         }
     }
@@ -285,7 +286,7 @@ impl TypeOf for Arc<str> {
 impl TypeOf for Timestamp {
     const TYPE: DynType = DynType::Time;
 }
-impl TypeOf for Snapshot<String> {
+impl TypeOf for Snapshot<Symbol> {
     const TYPE: DynType = DynType::Snapshot;
 }
 
@@ -296,7 +297,7 @@ impl TypeOf for Snapshot<String> {
 /// A runtime-typed [`Indicator`]-like object exchanging [`DynValue`] payloads.
 ///
 /// Any concrete library `Indicator<Input = X, Output = Y>` where `X` /
-/// `Y ∈ { Real, bool, Candle, Atom, Arc<str>, Timestamp, Snapshot<String> }`
+/// `Y ∈ { Real, bool, Candle, Atom, Arc<str>, Timestamp, Snapshot<Symbol> }`
 /// becomes a `DynIndicator` via the [`Adapter`] blanket. To feed a
 /// `Box<dyn DynIndicator>` back into a library constructor use the [`AsReal`] /
 /// [`AsBool`] / [`AsCandle`] / [`AsAtom`] / [`AsStr`] typed views. Payload
@@ -644,11 +645,11 @@ impl DynIndicator for UnstableWrap {
 
 // ---------------------------------------------------------------------------
 // Typed views: reconstitute a Box<dyn DynIndicator> as a library-typed
-// Indicator<Input=Snapshot<String>, Output=Out> so it can drop into library
+// Indicator<Input=Snapshot<Symbol>, Output=Out> so it can drop into library
 // constructors (Ema::new(source, period), IndicatorExt::gt(...),
 // SingleAssetStrategy slots). Callers whose whole indicator chain is
 // snapshot-rooted — every atom-input leaf is wrapped in a `!pick` on parse,
-// so every DynIndicator in the tree consumes `Snapshot<String>` — use these.
+// so every DynIndicator in the tree consumes `Snapshot<Symbol>` — use these.
 //
 // One generic [`As<Out>`] carrier covers every supported output type; the
 // per-type names ([`AsReal`], [`AsBool`], [`AsCandle`], [`AsAtom`], [`AsStr`])
@@ -656,7 +657,7 @@ impl DynIndicator for UnstableWrap {
 // ---------------------------------------------------------------------------
 
 /// Views a `Box<dyn DynIndicator>` with `output_type == Out::TYPE` as a
-/// library-typed `Indicator<Input = Snapshot<String>, Output = Out>` so it
+/// library-typed `Indicator<Input = Snapshot<Symbol>, Output = Out>` so it
 /// drops into any source-wrapping library constructor (Ema, Sma, arithmetic
 /// ops, comparisons, `SingleAssetStrategy` slots).
 ///
@@ -707,9 +708,9 @@ impl<Out> Indicator for As<Out>
 where
     Out: TypeOf + TryFrom<DynValue, Error = DynType> + Clone,
 {
-    type Input = Snapshot<String>;
+    type Input = Snapshot<Symbol>;
     type Output = Out;
-    fn update(&mut self, snap: Snapshot<String>) -> Option<Out> {
+    fn update(&mut self, snap: Snapshot<Symbol>) -> Option<Out> {
         let payload = self.0.update(DynValue::Snapshot(snap))?;
         Some(Out::try_from(payload).unwrap_or_else(|got| {
             unreachable!(
@@ -756,7 +757,7 @@ where
 pub type AsReal = As<Real>;
 
 /// `bool`-output typed view — i.e. a
-/// [`Signal<Snapshot<String>>`](crate::Signal).
+/// [`Signal<Snapshot<Symbol>>`](crate::Signal).
 pub type AsBool = As<bool>;
 
 /// `Candle`-output typed view — the shape a bar indicator (`Atr`, `Adx`,
@@ -766,13 +767,13 @@ pub type AsCandle = As<Candle>;
 /// `Atom`-output typed view — the atom-emitting bridge every source-generic
 /// atom-input leaf (`Close::of(source)`, `Year::of(source)`,
 /// `Atr::new(CurrentBar::of(source), period)`, …) uses. The typical concrete
-/// source is `Pick::<String>::new()` — the empty selector's
+/// source is `Pick::<Symbol>::new()` — the empty selector's
 /// `Snapshot::sole_atom` unpack — but any snapshot-rooted atom-emitting
 /// chain works.
 ///
 /// Not currently constructed by the CLI spec builder — every leaf that would
 /// want it (`!close`, `!year`, `!current`, …) already builds itself with
-/// `Pick::<String>::new()` baked in, so no intermediate `AsAtom` is
+/// `Pick::<Symbol>::new()` baked in, so no intermediate `AsAtom` is
 /// needed. Kept for completeness so a future `!pick { symbol, freq }`
 /// NodeSpec variant can produce an atom-emitting DynIndicator and drop
 /// it into a downstream atom-consuming source.
@@ -882,7 +883,7 @@ mod tests {
                 DynType::Candle => Candle::try_from(v).is_ok(),
                 DynType::Str => Arc::<str>::try_from(v).is_ok(),
                 DynType::Time => Timestamp::try_from(v).is_ok(),
-                DynType::Snapshot => crate::snapshot::Snapshot::<String>::try_from(v).is_ok(),
+                DynType::Snapshot => crate::snapshot::Snapshot::<Symbol>::try_from(v).is_ok(),
             }
         };
         let all = [

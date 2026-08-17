@@ -32,6 +32,7 @@
 //! [`Indicator::stable_bars`](fugazi::Indicator::stable_bars), so it stays
 //! correct as new indicators enter the library.
 
+use fugazi::types::Symbol;
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -103,7 +104,7 @@ impl Overlay {
     pub fn build(
         &self,
         schema: &std::sync::Arc<Schema>,
-        root: Option<&Selector<String>>,
+        root: Option<&Selector<Symbol>>,
     ) -> Result<Box<dyn DynIndicator>> {
         // Overlays don't run inside a strategy, so there's no live Position
         // or Book — using them here (`entry`, `peak`, book-anchored sizing)
@@ -217,9 +218,9 @@ pub fn stable_bars_for(
 /// somehow doesn't parse degrades to a symbol-only selector rather than
 /// failing the fetch — matching on symbol alone is still right whenever a
 /// symbol appears at one cadence, which is the overwhelmingly common case.
-pub fn group_root(symbol: &str, interval: Interval) -> Selector<String> {
-    Selector::<String> {
-        symbol: Some(symbol.to_string()),
+pub fn group_root(symbol: &str, interval: Interval) -> Selector<Symbol> {
+    Selector::<Symbol> {
+        symbol: Some(fugazi::types::symbol(symbol)),
         freq: Frequency::from_str(&interval.as_token()).ok(),
     }
 }

@@ -2,7 +2,7 @@
 //! [`SingleStrategySpec`](super::SingleStrategySpec).
 //!
 //! Mirrors [`super::StrategySpec`] at the trait boundary (resolves to a
-//! `Strategy` with `Input = Snapshot<String>` and `Symbol = String`), but
+//! `Strategy` with `Input = Snapshot<Symbol>` and `Symbol = Symbol`), but
 //! every signal / level / sizing subtree is a **per-symbol template**: a
 //! fresh concrete tree is built for every symbol the incoming snapshots
 //! reveal (or the [`UniverseSpec`] declares), with the symbol name
@@ -47,6 +47,7 @@ use super::basket::UniverseSpec;
 use super::expr::NodeSpec;
 use super::template::SpecTemplate;
 use crate::spec::dyn_indicator::{self, AsBool, AsReal, DynIndicator};
+use crate::types::Symbol;
 
 /// One side of a [`MultiAssetStrategySpec`]: the entry condition, an
 /// optional exit, and optional per-leg protective levels. Mirrors
@@ -177,7 +178,7 @@ impl MultiAssetStrategySpec {
         initial_equity: Real,
         schema: &Arc<Schema>,
     ) -> Result<DynMultiAssetStrategy, String> {
-        let mut strat = MultiAssetStrategy::<String>::with_initial_equity(initial_equity);
+        let mut strat = MultiAssetStrategy::<Symbol>::with_initial_equity(initial_equity);
         let book = strat.book();
 
         // Probe every lazily-built template before wiring any of them.
@@ -218,7 +219,7 @@ impl MultiAssetStrategySpec {
             let book_lx = book.clone();
             let schema_lx = schema.clone();
             strat = strat.long_on(
-                move |sym: &String| {
+                move |sym: &Symbol| {
                     let concrete = build_signal(&enter_template, sym, "long enter");
                     // Long signals don't read the position directly (they're
                     // decoupled from entry — that's the level layer's job), so
@@ -226,7 +227,7 @@ impl MultiAssetStrategySpec {
                     let anchor = Position::new();
                     AsBool::new(concrete.build(&anchor, &book_l, None, &schema_l, Some(&leg_root(sym))))
                 },
-                move |sym: &String| {
+                move |sym: &Symbol| {
                     let dyn_ind: Box<dyn DynIndicator> = match &exit_template {
                         Some(t) => {
                             let concrete = build_signal(t, sym, "long exit");
@@ -234,7 +235,7 @@ impl MultiAssetStrategySpec {
                             concrete.build(&anchor, &book_lx, None, &schema_lx, Some(&leg_root(sym)))
                         }
                         None => {
-                            dyn_indicator::wrap(ValueBool::<Snapshot<String>>::new(false))
+                            dyn_indicator::wrap(ValueBool::<Snapshot<Symbol>>::new(false))
                         }
                     };
                     AsBool::new(dyn_ind)
@@ -244,7 +245,7 @@ impl MultiAssetStrategySpec {
                 let sl = sl.clone();
                 let book_sl = book.clone();
                 let schema_sl = schema.clone();
-                strat = strat.long_stop_loss(move |sym: &String, position: &Position| {
+                strat = strat.long_stop_loss(move |sym: &Symbol, position: &Position| {
                     let concrete = build_expr(&sl, sym, "long stop_loss");
                     AsReal::new(concrete.build(position, &book_sl, None, &schema_sl, Some(&leg_root(sym))))
                 });
@@ -253,7 +254,7 @@ impl MultiAssetStrategySpec {
                 let tp = tp.clone();
                 let book_tp = book.clone();
                 let schema_tp = schema.clone();
-                strat = strat.long_take_profit(move |sym: &String, position: &Position| {
+                strat = strat.long_take_profit(move |sym: &Symbol, position: &Position| {
                     let concrete = build_expr(&tp, sym, "long take_profit");
                     AsReal::new(concrete.build(position, &book_tp, None, &schema_tp, Some(&leg_root(sym))))
                 });
@@ -269,12 +270,12 @@ impl MultiAssetStrategySpec {
             let book_sx = book.clone();
             let schema_sx = schema.clone();
             strat = strat.short_on(
-                move |sym: &String| {
+                move |sym: &Symbol| {
                     let concrete = build_signal(&enter_template, sym, "short enter");
                     let anchor = Position::new();
                     AsBool::new(concrete.build(&anchor, &book_s, None, &schema_s, Some(&leg_root(sym))))
                 },
-                move |sym: &String| {
+                move |sym: &Symbol| {
                     let dyn_ind: Box<dyn DynIndicator> = match &exit_template {
                         Some(t) => {
                             let concrete = build_signal(t, sym, "short exit");
@@ -282,7 +283,7 @@ impl MultiAssetStrategySpec {
                             concrete.build(&anchor, &book_sx, None, &schema_sx, Some(&leg_root(sym)))
                         }
                         None => {
-                            dyn_indicator::wrap(ValueBool::<Snapshot<String>>::new(false))
+                            dyn_indicator::wrap(ValueBool::<Snapshot<Symbol>>::new(false))
                         }
                     };
                     AsBool::new(dyn_ind)
@@ -292,7 +293,7 @@ impl MultiAssetStrategySpec {
                 let sl = sl.clone();
                 let book_sl = book.clone();
                 let schema_sl = schema.clone();
-                strat = strat.short_stop_loss(move |sym: &String, position: &Position| {
+                strat = strat.short_stop_loss(move |sym: &Symbol, position: &Position| {
                     let concrete = build_expr(&sl, sym, "short stop_loss");
                     AsReal::new(concrete.build(position, &book_sl, None, &schema_sl, Some(&leg_root(sym))))
                 });
@@ -301,7 +302,7 @@ impl MultiAssetStrategySpec {
                 let tp = tp.clone();
                 let book_tp = book.clone();
                 let schema_tp = schema.clone();
-                strat = strat.short_take_profit(move |sym: &String, position: &Position| {
+                strat = strat.short_take_profit(move |sym: &Symbol, position: &Position| {
                     let concrete = build_expr(&tp, sym, "short take_profit");
                     AsReal::new(concrete.build(position, &book_tp, None, &schema_tp, Some(&leg_root(sym))))
                 });
@@ -313,7 +314,7 @@ impl MultiAssetStrategySpec {
             let sizing = sizing.clone();
             let book_sz = book.clone();
             let schema_sz = schema.clone();
-            strat = strat.position_sizing(move |sym: &String| {
+            strat = strat.position_sizing(move |sym: &Symbol| {
                 let concrete = build_expr(&sizing, sym, "sizing");
                 // Sizing doesn't attach to a per-symbol position (recipes
                 // are symbol-agnostic magnitudes), so a fresh anchor is fine
@@ -325,8 +326,8 @@ impl MultiAssetStrategySpec {
 
         // --- universe -----------------------------------------------------
         let strat = match &self.universe {
-            Some(UniverseSpec::AllOf(syms)) => strat.all_of(syms.iter().cloned()),
-            Some(UniverseSpec::AnyOf(syms)) => strat.any_of(syms.iter().cloned()),
+            Some(UniverseSpec::AllOf(syms)) => strat.all_of(syms.iter().map(crate::types::symbol)),
+            Some(UniverseSpec::AnyOf(syms)) => strat.any_of(syms.iter().map(crate::types::symbol)),
             None => strat,
         };
 
@@ -379,8 +380,8 @@ fn try_build_signal(
 /// per-symbol signal / level / sizing template reads *that leg's* symbol.
 /// Makes `!arg SYM` optional here for the same reason it does in a basket;
 /// see `crate::spec::basket::leg_root`.
-fn leg_root(sym: &str) -> Selector<String> {
-    Selector::by_symbol(sym.to_string())
+fn leg_root(sym: &str) -> Selector<Symbol> {
+    Selector::by_symbol(crate::types::symbol(sym))
 }
 
 fn build_expr(
@@ -441,29 +442,29 @@ fn probe_expr(
 }
 
 // ---------------------------------------------------------------------------
-// DynMultiAssetStrategy: CLI-owned wrapper around MultiAssetStrategy<String>
+// DynMultiAssetStrategy: CLI-owned wrapper around MultiAssetStrategy<Symbol>
 // ---------------------------------------------------------------------------
 
 /// The CLI's built multi-asset strategy handle. Wraps a
-/// [`MultiAssetStrategy<String>`] whose per-symbol signal / level /
+/// [`MultiAssetStrategy<Symbol>`] whose per-symbol signal / level /
 /// sizing factories were assembled from
 /// [`SpecTemplate`]s. Implements [`Strategy`] by
 /// delegation so it drops into [`crate::backtest::run`] unchanged.
 pub struct DynMultiAssetStrategy {
-    inner: MultiAssetStrategy<String>,
+    inner: MultiAssetStrategy<Symbol>,
 }
 
 impl Strategy for DynMultiAssetStrategy {
-    type Input = Snapshot<String>;
-    type Symbol = String;
+    type Input = Snapshot<Symbol>;
+    type Symbol = Symbol;
 
-    fn update(&mut self, input: Snapshot<String>) {
+    fn update(&mut self, input: Snapshot<Symbol>) {
         self.inner.update(input);
     }
-    fn trade(&self, wallet: &mut dyn Wallet<String>) {
+    fn trade(&self, wallet: &mut dyn Wallet<Symbol>) {
         self.inner.trade(wallet);
     }
-    fn on_fill(&mut self, order: &Order<String>) {
+    fn on_fill(&mut self, order: &Order<Symbol>) {
         self.inner.on_fill(order);
     }
     fn is_ready(&self) -> bool {
@@ -485,7 +486,7 @@ impl DynMultiAssetStrategy {
     /// portfolio-level weight-share templates that want to read
     /// `!drawdown` / `!return_per_bar` / `!trade_return` against this
     /// child's aggregate multi-asset book.
-    pub fn book(&self) -> Book<String> {
+    pub fn book(&self) -> Book<Symbol> {
         self.inner.book()
     }
 
@@ -532,11 +533,11 @@ mod tests {
         Candle::new(price, price, price, price, 0.0)
     }
 
-    fn snap_of(entries: &[(&'static str, Real)]) -> Snapshot<String> {
+    fn snap_of(entries: &[(&'static str, Real)]) -> Snapshot<Symbol> {
         let mut s = Snapshot::new();
         for &(sym, close) in entries {
             let atom = Atom::new(candle(close));
-            s.push(Some(sym.to_string()), None, atom);
+            s.push(Some(crate::types::symbol(sym)), None, atom);
         }
         s
     }
@@ -610,21 +611,21 @@ mod tests {
         "#;
         let spec = MultiAssetStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut strat = spec.build(10_000.0, &schema());
-        let mut wallet: PaperWallet<String> = PaperWallet::new(10_000.0);
+        let mut wallet: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
 
         for _ in 0..2 {
-            for fill in wallet.update("A".to_string(), candle(100.0)) {
+            for fill in wallet.update(crate::types::symbol("A"), candle(100.0)) {
                 strat.on_fill(&fill);
             }
-            for fill in wallet.update("B".to_string(), candle(20.0)) {
+            for fill in wallet.update(crate::types::symbol("B"), candle(20.0)) {
                 strat.on_fill(&fill);
             }
             strat.update(snap_of(&[("A", 100.0), ("B", 20.0)]));
             strat.trade(&mut wallet);
         }
-        assert!(wallet.position(&"A".to_string()).amount > 0.0, "A long");
+        assert!(wallet.position(&crate::types::symbol("A")).amount > 0.0, "A long");
         assert!(
-            wallet.position(&"B".to_string()).amount.abs() < 1e-9,
+            wallet.position(&crate::types::symbol("B")).amount.abs() < 1e-9,
             "B never triggered its own signal"
         );
     }
@@ -644,36 +645,36 @@ mod tests {
         "#;
         let spec = MultiAssetStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut strat = spec.build(10_000.0, &schema());
-        let mut wallet: PaperWallet<String> = PaperWallet::new(10_000.0);
+        let mut wallet: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
         // Bar 1: signal / queue entry.
-        for fill in wallet.update("A".to_string(), candle(100.0)) {
+        for fill in wallet.update(crate::types::symbol("A"), candle(100.0)) {
             strat.on_fill(&fill);
         }
-        for fill in wallet.update("B".to_string(), candle(50.0)) {
+        for fill in wallet.update(crate::types::symbol("B"), candle(50.0)) {
             strat.on_fill(&fill);
         }
         strat.update(snap_of(&[("A", 100.0), ("B", 50.0)]));
         strat.trade(&mut wallet);
         // Bar 2: fill at open. A entry=100 → stop=90; B entry=50 → stop=45.
-        for fill in wallet.update("A".to_string(), candle(100.0)) {
+        for fill in wallet.update(crate::types::symbol("A"), candle(100.0)) {
             strat.on_fill(&fill);
         }
-        for fill in wallet.update("B".to_string(), candle(50.0)) {
+        for fill in wallet.update(crate::types::symbol("B"), candle(50.0)) {
             strat.on_fill(&fill);
         }
         strat.update(snap_of(&[("A", 100.0), ("B", 50.0)]));
         strat.trade(&mut wallet);
-        assert!(wallet.position(&"A".to_string()).amount > 0.0);
-        assert!(wallet.position(&"B".to_string()).amount > 0.0);
+        assert!(wallet.position(&crate::types::symbol("A")).amount > 0.0);
+        assert!(wallet.position(&crate::types::symbol("B")).amount > 0.0);
         // Bar 3: A drops through 90 (opens 95, low 88); B holds. Only A stops.
-        let mut s = Snapshot::<String>::new();
+        let mut s = Snapshot::<Symbol>::new();
         s.push(
-            Some("A".to_string()),
+            Some(crate::types::symbol("A")),
             None,
             Atom::new(Candle::new(95.0, 96.0, 88.0, 89.0, 0.0)),
         );
         s.push(
-            Some("B".to_string()),
+            Some(crate::types::symbol("B")),
             None,
             Atom::new(candle(50.0)),
         );
@@ -687,11 +688,11 @@ mod tests {
         strat.update(s);
         strat.trade(&mut wallet);
         assert!(
-            wallet.position(&"A".to_string()).amount.abs() < 1e-9,
+            wallet.position(&crate::types::symbol("A")).amount.abs() < 1e-9,
             "A stopped at 90"
         );
         assert!(
-            wallet.position(&"B".to_string()).amount > 0.0,
+            wallet.position(&crate::types::symbol("B")).amount > 0.0,
             "B held (didn't hit its 45 stop)"
         );
         // The exit's fill price on A is exactly the stop level.
@@ -699,7 +700,7 @@ mod tests {
             .orders()
             .iter()
             .rev()
-            .find(|o| o.symbol == "A" && o.side == Side::Sell)
+            .find(|o| o.symbol.as_ref() == "A" && o.side == Side::Sell)
             .expect("A exit order");
         assert_eq!(a_exit.price, 90.0);
     }
@@ -774,27 +775,27 @@ mod tests {
         "#;
         let spec = MultiAssetStrategySpec::from_text_with_params(yaml, &HashMap::new()).unwrap();
         let mut strat = spec.build(10_000.0, &schema());
-        let mut wallet: PaperWallet<String> = PaperWallet::new(10_000.0);
+        let mut wallet: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
         // Bar 1: entry queues; Bar 2: fill.
         for _ in 0..2 {
-            for fill in wallet.update("A".to_string(), candle(100.0)) {
+            for fill in wallet.update(crate::types::symbol("A"), candle(100.0)) {
                 strat.on_fill(&fill);
             }
             strat.update(snap_of(&[("A", 100.0)]));
             strat.trade(&mut wallet);
         }
-        let after_entry = wallet.position(&"A".to_string()).amount;
+        let after_entry = wallet.position(&crate::types::symbol("A")).amount;
         assert!(after_entry > 0.0, "entry filled");
         // Bars 3-6: idempotent resize.
         for _ in 0..4 {
-            for fill in wallet.update("A".to_string(), candle(100.0)) {
+            for fill in wallet.update(crate::types::symbol("A"), candle(100.0)) {
                 strat.on_fill(&fill);
             }
             strat.update(snap_of(&[("A", 100.0)]));
             strat.trade(&mut wallet);
         }
         assert!(
-            (wallet.position(&"A".to_string()).amount - after_entry).abs() < 1e-6,
+            (wallet.position(&crate::types::symbol("A")).amount - after_entry).abs() < 1e-6,
             "same-target resize is a no-op"
         );
     }
@@ -812,9 +813,9 @@ mod tests {
         assert!(spec.rebalance_on.is_some());
         // Build the strategy — sanity check that !never doesn't blow up.
         let mut strat = spec.build(10_000.0, &schema());
-        let mut wallet: PaperWallet<String> = PaperWallet::new(10_000.0);
+        let mut wallet: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
         for _ in 0..3 {
-            for fill in wallet.update("A".to_string(), candle(100.0)) {
+            for fill in wallet.update(crate::types::symbol("A"), candle(100.0)) {
                 strat.on_fill(&fill);
             }
             strat.update(snap_of(&[("A", 100.0)]));

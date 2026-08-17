@@ -759,7 +759,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Ba
         //
         // `get_mut`-then-`insert`: after a symbol's first scoring bar the key is
         // already in the map, and a bare `insert` would clone the symbol every
-        // bar only to drop the clone. For `Sym = String` that is one heap
+        // bar only to drop the clone. For `Sym = Symbol` that is one heap
         // allocation per symbol per bar, per map.
         for (sym, chain) in self.scores.iter_mut() {
             match chain.update(snap.clone()) {

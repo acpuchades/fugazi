@@ -10,6 +10,7 @@
 //! Every expected value below is arithmetic on the literal closes in
 //! [`stream`], so a wrong answer is a wrong number rather than a missing one.
 
+use fugazi::types::{Symbol, symbol as intern};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -35,18 +36,18 @@ fn bar(close: Real) -> Candle {
 }
 
 /// Six two-entry snapshots, `A` then `B`, one per day.
-fn stream() -> Vec<Snapshot<String>> {
+fn stream() -> Vec<Snapshot<Symbol>> {
     (0..6)
         .map(|i| {
             let t = Timestamp(i as i64 * DAY_MS);
-            let mut s = Snapshot::<String>::new();
+            let mut s = Snapshot::<Symbol>::new();
             s.push(
-                Some("A".to_string()),
+                Some(intern("A")),
                 None,
                 Atom::with_time(bar(A_CLOSES[i]), t),
             );
             s.push(
-                Some("B".to_string()),
+                Some(intern("B")),
                 None,
                 Atom::with_time(bar(B_CLOSES[i]), t),
             );
@@ -68,7 +69,7 @@ fn column(name: &str, yaml: &str) -> OverlayColumn {
 
 /// Read column `name` off every entry tagged `symbol`, in bar order.
 fn read(
-    snaps: &[Snapshot<String>],
+    snaps: &[Snapshot<Symbol>],
     schema: &Arc<Schema>,
     symbol: &str,
     name: &str,
@@ -79,7 +80,7 @@ fn read(
         .map(|s| {
             let atom = s
                 .iter()
-                .find(|(sym, _, _)| sym.map(String::as_str) == Some(symbol))
+                .find(|(sym, _, _)| sym.map(|s| s.as_ref()) == Some(symbol))
                 .map(|(_, _, a)| a)
                 .expect("symbol present in snapshot");
             atom.overlays.as_ref().and_then(|ov| ov.get_real(idx))
@@ -214,12 +215,12 @@ fn overlay_cross_symbol_correlation_reaches_minus_one_when_returns_oppose() {
     // is -1 to floating point over any window.
     let a = [100.0, 200.0, 100.0, 200.0, 100.0, 200.0];
     let b = [200.0, 100.0, 200.0, 100.0, 200.0, 100.0];
-    let snaps: Vec<Snapshot<String>> = (0..6)
+    let snaps: Vec<Snapshot<Symbol>> = (0..6)
         .map(|i| {
             let t = Timestamp(i as i64 * DAY_MS);
-            let mut s = Snapshot::<String>::new();
-            s.push(Some("A".to_string()), None, Atom::with_time(bar(a[i]), t));
-            s.push(Some("B".to_string()), None, Atom::with_time(bar(b[i]), t));
+            let mut s = Snapshot::<Symbol>::new();
+            s.push(Some(intern("A")), None, Atom::with_time(bar(a[i]), t));
+            s.push(Some(intern("B")), None, Atom::with_time(bar(b[i]), t));
             s
         })
         .collect();
@@ -286,7 +287,7 @@ fn overlay_build_failure_is_an_error_naming_the_column_and_document() {
 // ---------------------------------------------------------------------------
 
 /// Build and run a single-asset spec over [`stream`], returning the fills.
-fn run_spec(yaml: &str) -> Vec<fugazi::Fill<String>> {
+fn run_spec(yaml: &str) -> Vec<fugazi::Fill<Symbol>> {
     let spec = SingleStrategySpec::from_text_with_params_in(
         yaml,
         &HashMap::new(),
@@ -295,7 +296,7 @@ fn run_spec(yaml: &str) -> Vec<fugazi::Fill<String>> {
     )
     .expect("spec parses");
     let mut strat = spec.build(1_000.0, &Schema::empty());
-    let mut wallet = PaperWallet::<String>::new(1_000.0);
+    let mut wallet = PaperWallet::<Symbol>::new(1_000.0);
     fugazi::backtest::run(&mut strat, &mut wallet, stream()).fills
 }
 
@@ -311,7 +312,7 @@ fn single_strategy_bare_leaf_reads_its_declared_symbol_in_a_multi_symbol_frame()
         "symbol: A\nlong:\n  enter: !gt { lhs: !close, rhs: !value 35 }\n  exit: !never\n",
     );
     assert_eq!(fills.len(), 1, "expected one entry fill, got {fills:?}");
-    assert_eq!(fills[0].order.symbol, "A");
+    assert_eq!(fills[0].order.symbol.as_ref(), "A");
     assert_eq!(fills[0].bar, 4);
     assert_eq!(fills[0].order.price, 50.0);
 }
@@ -325,7 +326,7 @@ fn single_strategy_enters_on_another_symbols_price() {
         "symbol: A\nlong:\n  enter: !lt { lhs: !close { source: !pick { symbol: B } }, rhs: !value 75 }\n  exit: !never\n",
     );
     assert_eq!(fills.len(), 1, "expected one entry fill, got {fills:?}");
-    assert_eq!(fills[0].order.symbol, "A", "must trade A, not the symbol it read");
+    assert_eq!(fills[0].order.symbol.as_ref(), "A", "must trade A, not the symbol it read");
     assert_eq!(fills[0].bar, 4);
     assert_eq!(
         fills[0].order.price, 50.0,

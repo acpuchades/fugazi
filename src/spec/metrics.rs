@@ -956,12 +956,13 @@ fn lookup_number(root: &serde_json::Value, path: &[String]) -> Option<Real> {
 
 #[cfg(test)]
 mod tests {
+    use crate::types::Symbol;
     use super::*;
     use crate::Fill;
 
-    fn order(side: Side, units: Real, price: Real) -> Order<String> {
+    fn order(side: Side, units: Real, price: Real) -> Order<Symbol> {
         Order::new(
-            "BTC".to_string(),
+            crate::types::symbol("BTC"),
             side,
             units,
             price,
@@ -979,7 +980,7 @@ mod tests {
             order(Side::Buy, 1.0, 108.0),
             order(Side::Sell, 1.0, 103.0),
         ];
-        let fills: Vec<Fill<String>> = orders
+        let fills: Vec<Fill<Symbol>> = orders
             .into_iter()
             .enumerate()
             .map(|(bar, order)| Fill { bar, order })
@@ -1135,7 +1136,7 @@ mod tests {
 
     #[test]
     fn rolling_from_report_empty_when_window_exceeds_bars() {
-        let report: RunReport<String> = RunReport {
+        let report: RunReport<Symbol> = RunReport {
             equity_curve: vec![100.0, 105.0],
             fills: Vec::new(),
             rejections: Vec::new(),
@@ -1163,7 +1164,7 @@ mod tests {
             e *= 1.0 + 0.0002 + 0.01 * noise;
             equity.push(e);
         }
-        let report: RunReport<String> = RunReport {
+        let report: RunReport<Symbol> = RunReport {
             equity_curve: equity,
             fills: vec![],
             rejections: Vec::new(),

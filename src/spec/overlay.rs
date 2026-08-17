@@ -54,6 +54,7 @@ use crate::time::Frequency;
 use crate::types::Snapshot;
 
 use super::expr::NodeSpec;
+use crate::types::Symbol;
 
 /// One named overlay column: its output column name, its source expression,
 /// and where it was written (a file path or `(inline overlay)`) so a build
@@ -77,7 +78,7 @@ impl OverlayColumn {
     pub fn build(
         &self,
         schema: &Arc<Schema>,
-        root: Option<&Selector<String>>,
+        root: Option<&Selector<Symbol>>,
     ) -> Result<Box<dyn DynIndicator>> {
         build_overlay(&self.spec, schema, root)
             .map_err(|e| anyhow!("overlay {:?} in {}: {e}", self.name, self.origin))
@@ -96,7 +97,7 @@ impl OverlayColumn {
 pub fn build_overlay(
     spec: &NodeSpec,
     schema: &Arc<Schema>,
-    root: Option<&Selector<String>>,
+    root: Option<&Selector<Symbol>>,
 ) -> Result<Box<dyn DynIndicator>> {
     spec.try_build(&Position::new(), &Book::new(1.0), None, schema, root)
         .map_err(|e| anyhow!("{e}"))
@@ -200,7 +201,7 @@ pub fn prepare(
 pub fn prepare_for(
     existing: &Arc<Schema>,
     columns: &[OverlayColumn],
-    root: Option<&Selector<String>>,
+    root: Option<&Selector<Symbol>>,
 ) -> Result<(Arc<Schema>, Vec<PreparedColumn>)> {
     let named: Vec<(String, Box<dyn DynIndicator>)> = columns
         .iter()
@@ -271,8 +272,8 @@ pub fn compute_series(
     atoms
         .iter()
         .map(|atom| {
-            let snap: Snapshot<String> = match symbol {
-                Some(s) => Snapshot::single(s.to_string(), atom.clone()),
+            let snap: Snapshot<Symbol> = match symbol {
+                Some(s) => Snapshot::single(crate::types::symbol(s), atom.clone()),
                 None => Snapshot::of_atom(atom.clone()),
             };
             drive(prepared, &snap, atom, out_schema, existing_len)
@@ -295,23 +296,23 @@ pub fn compute_series(
 pub fn compute_snapshots(
     existing: &Arc<Schema>,
     columns: &[OverlayColumn],
-    snaps: &[Snapshot<String>],
-) -> Result<(Arc<Schema>, Vec<Snapshot<String>>)> {
+    snaps: &[Snapshot<Symbol>],
+) -> Result<(Arc<Schema>, Vec<Snapshot<Symbol>>)> {
     // The output schema doesn't depend on which series drives a column — every
     // instantiation has the same shape — so resolve it once, unrooted.
     let (out_schema, _) = prepare_for(existing, columns, None)?;
     let existing_len = existing.len();
 
-    type Key = (Option<String>, Option<Frequency>);
+    type Key = (Option<Symbol>, Option<Frequency>);
     let mut sets: HashMap<Key, Vec<PreparedColumn>> = HashMap::new();
     let mut out = Vec::with_capacity(snaps.len());
 
     for snap in snaps {
-        let mut rebuilt = Snapshot::<String>::new();
+        let mut rebuilt = Snapshot::<Symbol>::new();
         for (sym, freq, atom) in snap.iter() {
             let key: Key = (sym.cloned(), freq);
             if !sets.contains_key(&key) {
-                let root = Selector::<String> {
+                let root = Selector::<Symbol> {
                     symbol: key.0.clone(),
                     freq: key.1,
                 };
@@ -341,7 +342,7 @@ pub fn compute_snapshots(
 /// supply.
 fn drive(
     prepared: &mut [PreparedColumn],
-    snap: &Snapshot<String>,
+    snap: &Snapshot<Symbol>,
     atom: &Atom,
     out_schema: &Arc<Schema>,
     existing_len: usize,

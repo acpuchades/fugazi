@@ -480,7 +480,7 @@ impl<I: Clone + Send + Sync + 'static> Indicator for SharedProjector<I> {
 pub(crate) enum AnySharedMulti {
     Candle(Arc<Mutex<SharedMultiCell<Atom>>>),
     Real(Arc<Mutex<SharedMultiCell<Real>>>),
-    Snapshot(Arc<Mutex<SharedMultiCell<Snapshot<String>>>>),
+    Snapshot(Arc<Mutex<SharedMultiCell<Snapshot<Symbol>>>>),
 }
 
 impl AnySharedMulti {
@@ -521,7 +521,7 @@ impl AnySharedMulti {
                 })),
             },
             AnySharedMulti::Snapshot(cell) => PyIndicator {
-                src: AnySource::Snapshot(Source::new(SharedProjector::<Snapshot<String>> {
+                src: AnySource::Snapshot(Source::new(SharedProjector::<Snapshot<Symbol>> {
                     cell: Arc::clone(cell),
                     field_index: idx,
                     local_gen: cell.lock().expect("mutex poisoned").generation,
@@ -545,7 +545,7 @@ impl AnySharedMulti {
 pub(crate) enum AnySource {
     Candle(Source<Atom>),
     Real(Source<Real>),
-    Snapshot(Source<Snapshot<String>>),
+    Snapshot(Source<Snapshot<Symbol>>),
     Const(Real),
 }
 
@@ -612,7 +612,7 @@ impl AnySource {
 pub(crate) enum Pair {
     Candle(Source<Atom>, Source<Atom>),
     Real(Source<Real>, Source<Real>),
-    Snapshot(Source<Snapshot<String>>, Source<Snapshot<String>>),
+    Snapshot(Source<Snapshot<Symbol>>, Source<Snapshot<Symbol>>),
 }
 
 /// Resolve two sources to a shared domain so they can be combined. A neutral
@@ -623,8 +623,8 @@ pub(crate) fn pair(lhs: AnySource, rhs: AnySource) -> PyResult<Pair> {
     fn rval(c: Real) -> Source<Real> {
         Source::new(Value::<Real>::new(c))
     }
-    fn sval(c: Real) -> Source<Snapshot<String>> {
-        Source::new(Value::<Snapshot<String>>::new(c))
+    fn sval(c: Real) -> Source<Snapshot<Symbol>> {
+        Source::new(Value::<Snapshot<Symbol>>::new(c))
     }
     match (lhs, rhs) {
         (AnySource::Candle(a), AnySource::Candle(b)) => Ok(Pair::Candle(a, b)),
@@ -653,7 +653,7 @@ pub(crate) fn pair(lhs: AnySource, rhs: AnySource) -> PyResult<Pair> {
 pub(crate) enum AnySignal {
     Candle(SignalBox<Atom>),
     Real(SignalBox<Real>),
-    Snapshot(SignalBox<Snapshot<String>>),
+    Snapshot(SignalBox<Snapshot<Symbol>>),
 }
 
 impl AnySignal {
@@ -720,7 +720,7 @@ pub(crate) enum AnyStrSource {
     /// atom source (`get_str(schema, key, source=pick("M"))`). The candle
     /// domain cannot express that: picking one asset out of a multi-symbol
     /// bar needs the whole snapshot as input.
-    Snapshot(StrSource<Snapshot<String>>),
+    Snapshot(StrSource<Snapshot<Symbol>>),
     /// A constant string (the `ValueStr` leaf), domain-neutral. Adopts a
     /// candle-rooted partner when composed against one (see [`str_pair`]).
     Const(Arc<str>),
@@ -761,7 +761,7 @@ impl AnyStrSource {
 /// materialised via [`ValueStr`]. Both sides end up as `StrSource<Atom>`.
 pub(crate) enum StrPair {
     Candle(StrSource<Atom>, StrSource<Atom>),
-    Snapshot(StrSource<Snapshot<String>>, StrSource<Snapshot<String>>),
+    Snapshot(StrSource<Snapshot<Symbol>>, StrSource<Snapshot<Symbol>>),
 }
 
 pub(crate) fn str_pair(lhs: AnyStrSource, rhs: AnyStrSource) -> PyResult<StrPair> {
@@ -769,8 +769,8 @@ pub(crate) fn str_pair(lhs: AnyStrSource, rhs: AnyStrSource) -> PyResult<StrPair
     fn lift_candle(c: Arc<str>) -> StrSource<Atom> {
         StrSource::new(ValueStr::<Atom>::new(c))
     }
-    fn lift_snapshot(c: Arc<str>) -> StrSource<Snapshot<String>> {
-        StrSource::new(ValueStr::<Snapshot<String>>::new(c))
+    fn lift_snapshot(c: Arc<str>) -> StrSource<Snapshot<Symbol>> {
+        StrSource::new(ValueStr::<Snapshot<Symbol>>::new(c))
     }
     Ok(match (lhs, rhs) {
         (A::Candle(l), A::Candle(r)) => StrPair::Candle(l, r),
@@ -793,7 +793,7 @@ pub(crate) fn str_pair(lhs: AnyStrSource, rhs: AnyStrSource) -> PyResult<StrPair
 pub(crate) enum AnyMulti {
     Candle(MultiBox<Atom>),
     Real(MultiBox<Real>),
-    Snapshot(MultiBox<Snapshot<String>>),
+    Snapshot(MultiBox<Snapshot<Symbol>>),
 }
 
 impl AnyMulti {

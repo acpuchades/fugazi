@@ -36,6 +36,7 @@ use super::multi_asset::MultiAssetStrategySpec;
 use super::pairs::PairsStrategySpec;
 use super::preset::StrategyRef;
 use crate::spec::dyn_indicator::{self, DynIndicator};
+use crate::types::Symbol;
 
 /// The wallet / book seed for every embedded strategy. Arbitrary and positive
 /// — the ratio metrics are scale-invariant in it (see the module docs).
@@ -55,7 +56,7 @@ pub(super) enum TrailingMetric {
 /// single-asset [`StrategyRef`] to also name a **pairs** or **basket** strategy.
 ///
 /// The embedded engine forwards the whole snapshot to its strategy, so any
-/// [`Strategy`] over a `Snapshot<String>` drives it:
+/// [`Strategy`] over a `Snapshot<Symbol>` drives it:
 /// `!sharpe { strategy: <single | pairs | basket> }` reads the trailing risk of
 /// whichever one. (A pairs / basket strategy only produces meaningful numbers
 /// when the surrounding run feeds it a tagged multi-asset snapshot each bar —
@@ -82,11 +83,11 @@ impl AnyStrategyRef {
     /// names no symbol upfront (its universe floats), so it has none — but
     /// they're only ever fed tagged multi-asset snapshots, where the fallback
     /// is never consulted.
-    fn fallback_symbol(&self) -> String {
+    fn fallback_symbol(&self) -> Symbol {
         match self {
-            AnyStrategyRef::Single(s) => s.symbol().to_string(),
-            AnyStrategyRef::Pairs(p) => p.left.clone(),
-            AnyStrategyRef::Basket(_) | AnyStrategyRef::Multi(_) => String::new(),
+            AnyStrategyRef::Single(s) => crate::types::symbol(s.symbol()),
+            AnyStrategyRef::Pairs(p) => crate::types::symbol(&p.left),
+            AnyStrategyRef::Basket(_) | AnyStrategyRef::Multi(_) => crate::types::symbol(""),
         }
     }
 }
@@ -130,7 +131,7 @@ impl TryFrom<serde_norway::Value> for AnyStrategyRef {
 
 /// A boxed real-valued source over the single-asset snapshot stream — the
 /// erased form every trailing indicator collapses to.
-type BoxedReal = Box<dyn Indicator<Input = Snapshot<String>, Output = Real> + Send + Sync>;
+type BoxedReal = Box<dyn Indicator<Input = Snapshot<Symbol>, Output = Real> + Send + Sync>;
 
 /// A `Clone`-able wrapper around a non-`Clone` trailing indicator: it holds the
 /// closure that builds a fresh instance (rebuilding the embedded strategy from
@@ -151,10 +152,10 @@ impl Clone for RebuildIndicator {
 }
 
 impl Indicator for RebuildIndicator {
-    type Input = Snapshot<String>;
+    type Input = Snapshot<Symbol>;
     type Output = Real;
 
-    fn update(&mut self, input: Snapshot<String>) -> Option<Real> {
+    fn update(&mut self, input: Snapshot<Symbol>) -> Option<Real> {
         self.inner.update(input)
     }
 
@@ -190,13 +191,13 @@ impl Indicator for RebuildIndicator {
 fn make<S>(
     metric: TrailingMetric,
     strat: S,
-    fallback_symbol: String,
+    fallback_symbol: Symbol,
     period: usize,
     risk_free_rate: Real,
     bars_per_year: Real,
 ) -> BoxedReal
 where
-    S: crate::Strategy<Symbol = String, Input = Snapshot<String>> + Send + Sync + 'static,
+    S: crate::Strategy<Symbol = Symbol, Input = Snapshot<Symbol>> + Send + Sync + 'static,
 {
     match metric {
         TrailingMetric::Sharpe => Box::new(Sharpe::new(

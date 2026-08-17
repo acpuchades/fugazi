@@ -18,9 +18,11 @@ use common::synth_candles;
 const BARS: usize = 20_000;
 const HELD: [usize; 4] = [1, 4, 16, 64];
 
-fn primed(n_symbols: usize) -> (PaperWallet<String>, Vec<String>) {
-    let syms: Vec<String> = (0..n_symbols).map(|i| format!("S{i:03}")).collect();
-    let mut w: PaperWallet<String> = PaperWallet::new(1_000_000.0);
+fn primed(n_symbols: usize) -> (PaperWallet<Symbol>, Vec<Symbol>) {
+    let syms: Vec<Symbol> = (0..n_symbols)
+        .map(|i| fugazi::types::symbol(format!("S{i:03}")))
+        .collect();
+    let mut w: PaperWallet<Symbol> = PaperWallet::new(1_000_000.0);
     // Prime each symbol with a bar and a position so the maps are populated and
     // `equity` has real work to do.
     for s in &syms {
@@ -73,8 +75,8 @@ fn bench_fill_roundtrip(c: &mut Criterion) {
     g.throughput(Throughput::Elements(BARS as u64));
     g.bench_function("alternating_value_frac", |b| {
         b.iter(|| {
-            let mut w: PaperWallet<String> = PaperWallet::new(100_000.0);
-            let sym = "X".to_string();
+            let mut w: PaperWallet<Symbol> = PaperWallet::new(100_000.0);
+            let sym = fugazi::types::symbol("X");
             for (i, &c) in candles.iter().enumerate() {
                 black_box(w.update(sym.clone(), c));
                 let side = if i % 2 == 0 { Side::Buy } else { Side::Sell };

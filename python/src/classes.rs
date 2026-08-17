@@ -622,7 +622,7 @@ impl PyFrequency {
 #[pyclass(name = "Selector", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PySelector {
-    pub(crate) inner: Selector<String>,
+    pub(crate) inner: Selector<Symbol>,
 }
 
 #[pymethods]
@@ -635,13 +635,13 @@ impl PySelector {
     pub(crate) fn new(symbol: Option<String>, freq: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
         let freq = freq.map(coerce_frequency).transpose()?;
         Ok(Self {
-            inner: Selector::<String>::new(symbol, freq),
+            inner: Selector::<Symbol>::new(symbol.map(intern), freq),
         })
     }
 
     #[getter]
     pub(crate) fn symbol(&self) -> Option<String> {
-        self.inner.symbol.clone()
+        self.inner.symbol.as_ref().map(|s| s.to_string())
     }
 
     #[getter]
@@ -720,22 +720,28 @@ pub(crate) fn coerce_frequency(obj: &Bound<'_, PyAny>) -> PyResult<Frequency> {
 /// - `str` — parsed as a symbol (`Selector::by_symbol`).
 /// - `PyFrequency` — parsed as a frequency (`Selector::by_freq`).
 /// - `(str, Frequency | str | None)` tuple — a `(symbol, freq)` pair.
-pub(crate) fn coerce_selector(obj: &Bound<'_, PyAny>) -> PyResult<Selector<String>> {
+pub(crate) fn coerce_selector(obj: &Bound<'_, PyAny>) -> PyResult<Selector<Symbol>> {
     if let Ok(sel) = obj.cast::<PySelector>() {
         return Ok(sel.borrow().inner.clone());
     }
     if let Ok(f) = obj.cast::<PyFrequency>() {
         return Ok(Selector::by_freq(f.borrow().inner));
     }
-    if let Ok(s) = obj.extract::<String>() {
-        return Ok(Selector::by_symbol(s));
+    if let Ok(s) = obj.cast::<pyo3::types::PyString>()
+        && let Ok(s) = s.to_cow()
+    {
+        // Straight to a `Symbol`: extracting a `String` first would allocate
+        // twice (once for the `String`, once for the `Arc`) and throw the first
+        // away. Callers converting a whole series should go through
+        // `SymbolInterner` instead, which allocates once per *distinct* symbol.
+        return Ok(Selector::by_symbol(intern(s.as_ref())));
     }
     if let Ok((sym, freq)) = obj.extract::<(String, Option<Py<PyAny>>)>() {
         let freq = match freq {
             None => None,
             Some(f) => Some(coerce_frequency(f.bind(obj.py()))?),
         };
-        return Ok(Selector::new(Some(sym), freq));
+        return Ok(Selector::new(Some(intern(sym)), freq));
     }
     Err(PyTypeError::new_err(
         "Snapshot keys must be a Selector, a str (symbol), a Frequency, or a (symbol, freq) tuple",
@@ -752,7 +758,7 @@ pub(crate) fn coerce_selector(obj: &Bound<'_, PyAny>) -> PyResult<Selector<Strin
 #[pyclass(name = "Snapshot", unsendable, skip_from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PySnapshot {
-    pub(crate) inner: Snapshot<String>,
+    pub(crate) inner: Snapshot<Symbol>,
 }
 
 #[pymethods]
@@ -761,7 +767,7 @@ impl PySnapshot {
     #[pyo3(signature = (mapping = None))]
     pub(crate) fn new(mapping: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
         let inner = match mapping {
-            None => Snapshot::<String>::new(),
+            None => Snapshot::<Symbol>::new(),
             Some(m) => extract_snapshot(m)?,
         };
         Ok(Self { inner })
@@ -893,7 +899,7 @@ pub(crate) type AtomBox<I> = TypedSource<I, Atom>;
 
 /// An atom-emitting source erased to one of the two input domains it can be
 /// rooted in on the Python side: `Atom` (the identity passthrough) or
-/// `Snapshot<String>` (a `Pick`). Feeds the optional `source=` argument every
+/// `Snapshot<Symbol>` (a `Pick`). Feeds the optional `source=` argument every
 /// atom-input leaf pyfunction accepts (`close(source=...)`, `year(source=...)`, …).
 #[derive(Clone)]
 pub(crate) enum AnyAtomSource {
@@ -904,7 +910,7 @@ pub(crate) enum AnyAtomSource {
     /// returns).
     #[allow(dead_code)]
     Atom(AtomBox<Atom>),
-    Snapshot(AtomBox<Snapshot<String>>),
+    Snapshot(AtomBox<Snapshot<Symbol>>),
 }
 
 /// A source that emits `Atom`s per bar — the intermediate between a raw

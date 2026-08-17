@@ -9,6 +9,7 @@ use std::time::Instant;
 use fugazi::backtest::run;
 use fugazi::indicators::Macd;
 use fugazi::prelude::*;
+use fugazi::types::{Symbol, symbol as intern};
 use fugazi::strategies::trend::macd_crossover;
 
 const BARS: usize = 200_000;
@@ -114,15 +115,15 @@ fn bench_macd_crossover_components() {
 
     let mut baseline = vec![];
     for _ in 0..REPS {
-        let mut strat = macd_crossover("X", 12, 26, 9);
-        let mut w: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
+        let mut strat = macd_crossover(intern("X"), 12, 26, 9);
+        let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
         let t = Instant::now();
         let rep = run(
             &mut strat,
             &mut w,
             candles
                 .iter()
-                .map(|c| fugazi::types::Snapshot::single("X", (*c).into())),
+                .map(|c| fugazi::types::Snapshot::single(intern("X"), (*c).into())),
         );
         let el = t.elapsed().as_secs_f64();
         baseline.push(el);
@@ -131,15 +132,15 @@ fn bench_macd_crossover_components() {
 
     let mut manual = vec![];
     for _ in 0..REPS {
-        let mut strat = MacdCrossoverManual::new("X", 12, 26, 9);
-        let mut w: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
+        let mut strat = MacdCrossoverManual::new(intern("X"), 12, 26, 9);
+        let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
         let t = Instant::now();
         let rep = run(
             &mut strat,
             &mut w,
             candles
                 .iter()
-                .map(|c| fugazi::types::Snapshot::single("X", (*c).into())),
+                .map(|c| fugazi::types::Snapshot::single(intern("X"), (*c).into())),
         );
         let el = t.elapsed().as_secs_f64();
         manual.push(el);
@@ -172,9 +173,11 @@ fn bench_macd_crossover_components() {
 // per-symbol chains still have to run).
 // ---------------------------------------------------------------------------
 
-fn multi_snapshots(n_symbols: usize, bars: usize) -> Vec<fugazi::types::Snapshot<String>> {
+fn multi_snapshots(n_symbols: usize, bars: usize) -> Vec<fugazi::types::Snapshot<Symbol>> {
     let candles = synth_candles(bars);
-    let syms: Vec<String> = (0..n_symbols).map(|i| format!("S{i:03}")).collect();
+    let syms: Vec<Symbol> = (0..n_symbols)
+        .map(|i| fugazi::types::symbol(format!("S{i:03}")))
+        .collect();
     (0..bars)
         .map(|b| {
             let mut snap = fugazi::types::Snapshot::new();
@@ -203,9 +206,9 @@ fn bench_snapshot_clone_scaling() {
         for _ in 0..REPS {
             // One SMA-crossover decision per symbol: four signal slots, each
             // fed a clone of the whole snapshot every bar.
-            let mut strat = MultiAssetStrategy::<String>::with_initial_equity(10_000.0)
+            let mut strat = MultiAssetStrategy::<Symbol>::with_initial_equity(10_000.0)
                 .long_on(
-                    |sym: &String| {
+                    |sym: &Symbol| {
                         use fugazi::indicators::{Close, Pick, Sma};
                         let close = || {
                             Close::of(Pick::matching(fugazi::types::Selector::by_symbol(
@@ -214,7 +217,7 @@ fn bench_snapshot_clone_scaling() {
                         };
                         Sma::new(close(), 5).crosses_above(Sma::new(close(), 20))
                     },
-                    |sym: &String| {
+                    |sym: &Symbol| {
                         use fugazi::indicators::{Close, Pick, Sma};
                         let close = || {
                             Close::of(Pick::matching(fugazi::types::Selector::by_symbol(
@@ -224,7 +227,7 @@ fn bench_snapshot_clone_scaling() {
                         Sma::new(close(), 5).crosses_below(Sma::new(close(), 20))
                     },
                 );
-            let mut w: PaperWallet<String> = PaperWallet::new(10_000.0);
+            let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
             let t = Instant::now();
             let rep = run(&mut strat, &mut w, snaps.iter().cloned());
             times.push(t.elapsed().as_secs_f64());
@@ -268,9 +271,9 @@ fn bench_snapshot_clone_scaling() {
 fn bench_yaml_vs_rust_macd_crossover() {
     use fugazi::spec::SingleStrategySpec;
     let candles = synth_candles(BARS);
-    let snaps: Vec<fugazi::types::Snapshot<String>> = candles
+    let snaps: Vec<fugazi::types::Snapshot<Symbol>> = candles
         .iter()
-        .map(|c| fugazi::types::Snapshot::single("X".to_string(), (*c).into()))
+        .map(|c| fugazi::types::Snapshot::single(fugazi::types::symbol("X"), (*c).into()))
         .collect();
 
     let yaml = r#"
@@ -292,7 +295,7 @@ fn bench_yaml_vs_rust_macd_crossover() {
     let mut yaml_times = vec![];
     for _ in 0..REPS {
         let mut strat = spec.build(10_000.0, &schema);
-        let mut w: PaperWallet<String> = PaperWallet::new(10_000.0);
+        let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
         let t = Instant::now();
         let rep = run(&mut strat, &mut w, snaps.iter().cloned());
         yaml_times.push(t.elapsed().as_secs_f64());
@@ -301,8 +304,8 @@ fn bench_yaml_vs_rust_macd_crossover() {
 
     let mut rust_times = vec![];
     for _ in 0..REPS {
-        let mut strat = fugazi::strategies::trend::macd_crossover("X".to_string(), 12, 26, 9);
-        let mut w: PaperWallet<String> = PaperWallet::new(10_000.0);
+        let mut strat = fugazi::strategies::trend::macd_crossover(fugazi::types::symbol("X"), 12, 26, 9);
+        let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
         let t = Instant::now();
         let rep = run(&mut strat, &mut w, snaps.iter().cloned());
         rust_times.push(t.elapsed().as_secs_f64());

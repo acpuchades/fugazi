@@ -1158,12 +1158,13 @@ fn longest_streak(trades: &[Trade], predicate: impl Fn(&Trade) -> bool) -> usize
 
 #[cfg(test)]
 mod tests {
+    use crate::types::Symbol;
     use super::*;
     use crate::{Order, OrderId, OrderKind};
 
-    fn order(side: Side, units: Real, price: Real) -> Order<String> {
+    fn order(side: Side, units: Real, price: Real) -> Order<Symbol> {
         Order::new(
-            "BTC".to_string(),
+            crate::types::symbol("BTC"),
             side,
             units,
             price,
@@ -1172,7 +1173,7 @@ mod tests {
         )
     }
 
-    fn tagged_fills(orders: Vec<Order<String>>) -> Vec<Fill<String>> {
+    fn tagged_fills(orders: Vec<Order<Symbol>>) -> Vec<Fill<Symbol>> {
         orders
             .into_iter()
             .enumerate()
@@ -1180,7 +1181,7 @@ mod tests {
             .collect()
     }
 
-    fn indexed_fills(pairs: Vec<(usize, Order<String>)>) -> Vec<Fill<String>> {
+    fn indexed_fills(pairs: Vec<(usize, Order<Symbol>)>) -> Vec<Fill<Symbol>> {
         pairs
             .into_iter()
             .map(|(bar, order)| Fill { bar, order })

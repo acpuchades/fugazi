@@ -56,34 +56,86 @@ pub(crate) fn extract_real(sample: &Bound<'_, PyAny>) -> PyResult<Real> {
         .map_err(|_| PyTypeError::new_err("this indicator consumes a value stream; pass a float"))
 }
 
+/// A per-conversion symbol cache.
+///
+/// A Python caller hands the same handful of symbol strings once per bar, so a
+/// 20 000-bar × 32-symbol series presents 640 000 `str` keys drawn from 32
+/// distinct values. Interning each one independently would allocate 640 000
+/// `Arc`s; this allocates 32 and hands out refcount bumps.
+///
+/// Scoped to one conversion rather than global on purpose: a process-wide
+/// intern table would need locking and would never release symbols from a
+/// finished run.
+#[derive(Default)]
+pub(crate) struct SymbolInterner {
+    seen: std::collections::HashMap<String, Symbol>,
+}
+
+impl SymbolInterner {
+    fn get(&mut self, name: &str) -> Symbol {
+        if let Some(s) = self.seen.get(name) {
+            return s.clone();
+        }
+        let s = intern(name);
+        self.seen.insert(name.to_owned(), s.clone());
+        s
+    }
+}
+
 /// Iterate a Python sequence of snapshots (`list[Snapshot]` or `list[dict]`)
-/// into a native `Vec<Snapshot<String>>` for a snapshot-rooted node's `feed`.
-pub(crate) fn snapshots_from_sequence(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Snapshot<String>>> {
+/// into a native `Vec<Snapshot<Symbol>>` for a snapshot-rooted node's `feed`.
+///
+/// Symbols are interned across the whole sequence — see [`SymbolInterner`].
+pub(crate) fn snapshots_from_sequence(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Snapshot<Symbol>>> {
     let mut out = Vec::new();
+    let mut interner = SymbolInterner::default();
     let iter = obj.try_iter().map_err(|_| {
         PyTypeError::new_err(
             "snapshot-rooted feed(): expected an iterable of Snapshot (or dict) values",
         )
     })?;
     for item in iter {
-        out.push(extract_snapshot(&item?)?);
+        out.push(extract_snapshot_interned(&item?, &mut interner)?);
     }
     Ok(out)
 }
 
-/// Extract a `Snapshot<String>` for a snapshot-rooted node's `update`.
+/// Extract a `Snapshot<Symbol>` for a snapshot-rooted node's `update`.
 /// Accepts a `PySnapshot` directly, or a Python `dict` whose keys are coerced
 /// via [`coerce_selector`] (str → symbol, Frequency → freq, Selector as-is,
 /// (str, freq) tuple → both fields).
-pub(crate) fn extract_snapshot(sample: &Bound<'_, PyAny>) -> PyResult<Snapshot<String>> {
+pub(crate) fn extract_snapshot(sample: &Bound<'_, PyAny>) -> PyResult<Snapshot<Symbol>> {
+    // Deliberately *not* via `SymbolInterner`: for a single snapshot the cache
+    // can never hit, so building one would trade a per-symbol string allocation
+    // for a whole hash table — measurably worse (it cost +86% on a 32-symbol
+    // conversion before this was split out). The interner only pays across a
+    // sequence, which is what `snapshots_from_sequence` uses it for.
+    extract_snapshot_with(sample, &mut |s: &str| intern(s))
+}
+
+/// The body shared by [`extract_snapshot`] and [`extract_snapshot_interned`],
+/// parameterised by how a `str` key becomes a [`Symbol`].
+fn extract_snapshot_with(
+    sample: &Bound<'_, PyAny>,
+    to_symbol: &mut dyn FnMut(&str) -> Symbol,
+) -> PyResult<Snapshot<Symbol>> {
     if let Ok(snap) = sample.cast::<PySnapshot>() {
+        // Already native: cloning is a refcount bump on the entries `Arc`.
         return Ok(snap.borrow().inner.clone());
     }
     if let Ok(dict) = sample.cast::<pyo3::types::PyDict>() {
-        let mut out = Snapshot::<String>::new();
+        let mut out = Snapshot::<Symbol>::new();
         for (k, v) in dict.iter() {
-            let key = coerce_selector(&k)?;
             let atom = extract_atom(&v)?;
+            // Fast path: a bare `str` key, which is what a dict-shaped snapshot
+            // almost always uses.
+            if let Ok(s) = k.cast::<pyo3::types::PyString>()
+                && let Ok(s) = s.to_cow()
+            {
+                out.push(Some(to_symbol(s.as_ref())), None, atom);
+                continue;
+            }
+            let key = coerce_selector(&k)?;
             out.push(key.symbol, key.freq, atom);
         }
         return Ok(out);
@@ -91,6 +143,15 @@ pub(crate) fn extract_snapshot(sample: &Bound<'_, PyAny>) -> PyResult<Snapshot<S
     Err(PyTypeError::new_err(
         "this indicator consumes a Snapshot; pass a Snapshot or a dict[str, Atom|Candle]",
     ))
+}
+
+/// [`extract_snapshot`] reusing a caller-owned [`SymbolInterner`], so a whole
+/// series shares one `Arc` per distinct symbol.
+pub(crate) fn extract_snapshot_interned(
+    sample: &Bound<'_, PyAny>,
+    interner: &mut SymbolInterner,
+) -> PyResult<Snapshot<Symbol>> {
+    extract_snapshot_with(sample, &mut |s: &str| interner.get(s))
 }
 
 /// Collect any 1-D sequence of numbers (`list`, NumPy array, pandas `Series`,
@@ -1585,7 +1646,7 @@ pub(crate) fn compute_overlays_snapshots<'py>(
     let existing_len = existing.len();
 
     // Pass 1: collect each (symbol, freq) series in first-appearance order.
-    type Key = (Option<String>, Option<Frequency>);
+    type Key = (Option<Symbol>, Option<Frequency>);
     let mut order: Vec<Key> = Vec::new();
     let mut index: HashMap<Key, usize> = HashMap::new();
     let mut series_atoms: Vec<Vec<Atom>> = Vec::new();
@@ -1619,7 +1680,7 @@ pub(crate) fn compute_overlays_snapshots<'py>(
     let mut cursor: HashMap<Key, usize> = HashMap::new();
     let list = pyo3::types::PyList::empty(py);
     for snap in &snaps {
-        let mut rebuilt = Snapshot::<String>::new();
+        let mut rebuilt = Snapshot::<Symbol>::new();
         for (sym, freq, _) in snap.iter() {
             let key = (sym.cloned(), freq);
             let i = index[&key];

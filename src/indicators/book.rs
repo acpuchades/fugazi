@@ -27,7 +27,7 @@
 //!
 //! The running peak, per-bar return, and closed-trade metadata all fall
 //! out of that. `Book` is generic over the symbol type `Sym` (default
-//! [`String`]), so a single-asset strategy holds `Book<Sym>` with one
+//! [`Symbol`](crate::types::Symbol)), so a single-asset strategy holds `Book<Sym>` with one
 //! leg and a two-leg pair holds `Book<Sym>` with two legs — the same
 //! `BookField` accessors work in both.
 //!
@@ -254,7 +254,7 @@ impl<Sym: Hash + Eq> BookState<Sym> {
 /// that don't care about the sym type can write `Book` and let the
 /// default apply. Requires `Sym: Hash + Eq + Clone` so it can key an
 /// internal `HashMap<Sym, LegState>` for per-leg accounting.
-pub struct Book<Sym = String> {
+pub struct Book<Sym = crate::types::Symbol> {
     state: Arc<Mutex<BookState<Sym>>>,
 }
 

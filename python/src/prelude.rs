@@ -13,6 +13,9 @@ pub(crate) use pyo3::types::PyDict;
 pub(crate) use std::sync::{Arc, Mutex};
 
 pub(crate) use fugazi_core::Indicator;
+// The symbol type the whole spec/runtime layer keys assets by. Python hands us
+// `str`; `intern` is the single boundary where that becomes a `Symbol`.
+pub(crate) use fugazi_core::types::{Symbol, symbol as intern};
 pub(crate) use fugazi_core::indicators::compare::{EqOp, GeOp, GtOp, LeOp, LtOp, NeOp, StrEqOp, StrNeOp};
 pub(crate) use fugazi_core::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, BarsSince, BarsSinceHigh, BarsSinceLow, Bollinger,

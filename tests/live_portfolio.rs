@@ -8,7 +8,7 @@
 //!
 //! These tests **construct** the pieces and never drive them — no network, no
 //! credentials. What they pin is the part that can break silently at a distance:
-//! that a live wallet is a `Wallet<String>` a portfolio can be driven against,
+//! that a live wallet is a `Wallet<Symbol>` a portfolio can be driven against,
 //! and that both the portfolio and the account are `Send` (what lets
 //! `backtest::run_many` / a rayon worker carry a live portfolio across a thread
 //! boundary — a live impl that picked up a non-`Send` client would fail here
@@ -17,32 +17,33 @@
 //! Behind the off-by-default `live` feature, so this file is empty without it.
 #![cfg(feature = "live")]
 
+use fugazi::types::{Symbol, symbol as intern};
 use fugazi::Wallet;
 use fugazi::live::OkxWallet;
 use fugazi::portfolio::Portfolio;
 use fugazi::strategies::SingleAssetStrategy;
 
-fn two_child_portfolio() -> Portfolio<String> {
+fn two_child_portfolio() -> Portfolio<Symbol> {
     Portfolio::builder()
         .with_initial_equity(1_000.0)
         .add(
             "btc",
-            SingleAssetStrategy::<String>::buy_and_hold("BTCUSDT".to_string()),
+            SingleAssetStrategy::<Symbol>::buy_and_hold(intern("BTCUSDT")),
         )
         .add(
             "eth",
-            SingleAssetStrategy::<String>::buy_and_hold("ETHUSDT".to_string()),
+            SingleAssetStrategy::<Symbol>::buy_and_hold(intern("ETHUSDT")),
         )
         .build()
 }
 
 #[test]
 fn a_live_wallet_can_drive_a_portfolio() {
-    // An `OkxWallet` is a `Wallet<String>`, which is exactly what
+    // An `OkxWallet` is a `Wallet<Symbol>`, which is exactly what
     // `backtest::run(&mut portfolio, &mut account, snaps)` requires — the same
     // call a `PaperWallet` takes. Construct-only (no network); the type bound is
     // what we're pinning.
-    fn drives<W: Wallet<String>>(_: &W) {}
+    fn drives<W: Wallet<Symbol>>(_: &W) {}
     let portfolio = two_child_portfolio();
     let account = OkxWallet::demo("key", "secret", "pass");
     drives(&account);

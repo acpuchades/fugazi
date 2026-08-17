@@ -22,12 +22,12 @@ use common::multi_snapshots;
 const BARS: usize = 2_000;
 const SYMBOLS: [usize; 5] = [2, 8, 16, 32, 64];
 
-fn strategy() -> MultiAssetStrategy<String> {
+fn strategy() -> MultiAssetStrategy<Symbol> {
     use fugazi::indicators::{Close, Pick, Sma};
-    let close = |sym: &String| Close::of(Pick::matching(Selector::by_symbol(sym.clone())));
-    MultiAssetStrategy::<String>::with_initial_equity(10_000.0).long_on(
-        move |sym: &String| Sma::new(close(sym), 5).crosses_above(Sma::new(close(sym), 20)),
-        move |sym: &String| Sma::new(close(sym), 5).crosses_below(Sma::new(close(sym), 20)),
+    let close = |sym: &Symbol| Close::of(Pick::matching(Selector::by_symbol(sym.clone())));
+    MultiAssetStrategy::<Symbol>::with_initial_equity(10_000.0).long_on(
+        move |sym: &Symbol| Sma::new(close(sym), 5).crosses_above(Sma::new(close(sym), 20)),
+        move |sym: &Symbol| Sma::new(close(sym), 5).crosses_below(Sma::new(close(sym), 20)),
     )
 }
 
@@ -41,7 +41,7 @@ fn bench_scaling(c: &mut Criterion) {
         g.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let mut strat = strategy();
-                let mut w: PaperWallet<String> = PaperWallet::new(10_000.0);
+                let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
                 let rep = fugazi::backtest::run(&mut strat, &mut w, snaps.iter().cloned());
                 black_box(rep.equity_curve.len());
             });

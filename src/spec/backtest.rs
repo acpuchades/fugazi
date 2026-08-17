@@ -32,6 +32,7 @@ use crate::spec::runnable::StrategySpec;
 use crate::spec::calendar::Frequency;
 use crate::spec::costs::CostConfig;
 use crate::spec::metrics;
+use crate::types::Symbol;
 
 
 /// Build a strategy once and discard it, turning a malformed document into an
@@ -93,7 +94,7 @@ pub fn schema_from_atoms(atoms: &[(String, Atom)]) -> std::sync::Arc<Schema> {
 /// overlay [`Schema`] `Arc`. Falls back to [`Schema::empty()`] under the
 /// same conditions.
 pub fn schema_from_snapshots(
-    snapshots: &[crate::types::Snapshot<String>],
+    snapshots: &[crate::types::Snapshot<Symbol>],
 ) -> std::sync::Arc<Schema> {
     snapshots
         .iter()
@@ -108,7 +109,7 @@ pub fn schema_from_snapshots(
 /// Discover the tradeable universe from a snapshot stream — the distinct
 /// symbols carried across every bar, sorted so the resulting per-symbol
 /// cost install order is deterministic.
-pub fn universe_from_snapshots(snapshots: &[crate::types::Snapshot<String>]) -> Vec<String> {
+pub fn universe_from_snapshots(snapshots: &[crate::types::Snapshot<Symbol>]) -> Vec<Symbol> {
     let mut set = std::collections::HashSet::new();
     for snap in snapshots {
         for (sym, _, _) in snap.iter() {
@@ -130,7 +131,7 @@ pub struct IterationResult {
     /// and cloned so the result is `Send + 'static`.
     pub bars: Vec<String>,
     /// The priced (net) run report from `crate::backtest::run`.
-    pub report: crate::RunReport<String>,
+    pub report: crate::RunReport<Symbol>,
     /// Whole-run metrics document.
     pub metrics: metrics::Metrics,
     /// Whole-run metrics for the gross twin, when it exists.
@@ -221,7 +222,7 @@ impl EvalContext<'_> {
     }
 
     /// Reduce a whole run to one [`metrics::Metrics`] document.
-    pub fn reduce(&self, report: &crate::RunReport<String>) -> metrics::Metrics {
+    pub fn reduce(&self, report: &crate::RunReport<Symbol>) -> metrics::Metrics {
         metrics::from_report(
             report,
             self.bars_per_year,
@@ -234,7 +235,7 @@ impl EvalContext<'_> {
     /// `window`-bar span.
     pub fn reduce_windowed(
         &self,
-        report: &crate::RunReport<String>,
+        report: &crate::RunReport<Symbol>,
         window: usize,
     ) -> Vec<metrics::WindowMetrics> {
         metrics::windowed_from_report(
@@ -256,9 +257,9 @@ impl EvalContext<'_> {
 /// [`StrategySpec::try_build_priced`].
 pub fn measured_report_any(
     spec: &StrategySpec,
-    snapshots: &[crate::types::Snapshot<String>],
+    snapshots: &[crate::types::Snapshot<Symbol>],
     ctx: &EvalContext,
-) -> Result<crate::RunReport<String>, String> {
+) -> Result<crate::RunReport<Symbol>, String> {
     let schema = schema_from_snapshots(snapshots);
     let universe = spec.universe(snapshots);
     let per_symbol_costs = ctx.costs_for(&universe);
@@ -276,7 +277,7 @@ pub fn measured_report_any(
 /// — what `optimize` calls per grid combination, for every shape.
 pub fn evaluate_any(
     spec: &StrategySpec,
-    snapshots: &[crate::types::Snapshot<String>],
+    snapshots: &[crate::types::Snapshot<Symbol>],
     ctx: &EvalContext,
 ) -> Result<metrics::Metrics, String> {
     Ok(ctx.reduce(&measured_report_any(spec, snapshots, ctx)?))
@@ -286,7 +287,7 @@ pub fn evaluate_any(
 /// `window`-bar span.
 pub fn evaluate_windowed_any(
     spec: &StrategySpec,
-    snapshots: &[crate::types::Snapshot<String>],
+    snapshots: &[crate::types::Snapshot<Symbol>],
     ctx: &EvalContext,
     window: usize,
 ) -> Result<Vec<metrics::WindowMetrics>, String> {
@@ -304,7 +305,7 @@ pub fn evaluate_windowed_any(
 pub fn run_iteration_any(
     spec: &StrategySpec,
     bars: Vec<String>,
-    snapshots: &[crate::types::Snapshot<String>],
+    snapshots: &[crate::types::Snapshot<Symbol>],
     ctx: &EvalContext,
 ) -> Result<IterationResult, String> {
     Ok(run_iteration_resumable(spec, bars, snapshots, ctx, None, false)?.0)
@@ -324,7 +325,7 @@ pub fn run_iteration_any(
 pub fn run_iteration_resumable(
     spec: &StrategySpec,
     bars: Vec<String>,
-    snapshots: &[crate::types::Snapshot<String>],
+    snapshots: &[crate::types::Snapshot<Symbol>],
     ctx: &EvalContext,
     resume: Option<&crate::spec::runnable::RunState>,
     flatten: bool,
@@ -385,8 +386,8 @@ pub fn run_iteration_resumable(
 /// produced the reports: whole-run metrics, the costs section, and the
 /// windowed / rolling reductions under `-w`.
 fn reduce_iteration(
-    report: crate::RunReport<String>,
-    gross_report: Option<crate::RunReport<String>>,
+    report: crate::RunReport<Symbol>,
+    gross_report: Option<crate::RunReport<Symbol>>,
     bars: Vec<String>,
     costs_active: bool,
     inputs: &EvalContext,
@@ -458,7 +459,7 @@ fn reduce_iteration(
 fn attach_montecarlo(
     mut iter: IterationResult,
     spec: &StrategySpec,
-    snapshots: &[crate::types::Snapshot<String>],
+    snapshots: &[crate::types::Snapshot<Symbol>],
     ctx: &EvalContext,
 ) -> Result<IterationResult, String> {
     if let Some(config) = &ctx.mc {

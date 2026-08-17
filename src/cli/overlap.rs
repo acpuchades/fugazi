@@ -152,11 +152,13 @@ pub fn measure<'a, K: Ord>(pairs: impl IntoIterator<Item = (K, &'a str)>) -> Ove
 ///
 /// Generic in the atom type so this module stays free of the market vocabulary;
 /// only the label and the symbol are read.
-pub fn measure_universe<T>(per_symbol: &[(String, Vec<(String, T)>)]) -> Overlap<&str> {
+pub fn measure_universe<S: AsRef<str>, T>(
+    per_symbol: &[(S, Vec<(String, T)>)],
+) -> Overlap<&str> {
     measure(per_symbol.iter().flat_map(|(sym, atoms)| {
         atoms
             .iter()
-            .map(move |(label, _)| (label.as_str(), sym.as_str()))
+            .map(move |(label, _)| (label.as_str(), sym.as_ref()))
     }))
 }
 

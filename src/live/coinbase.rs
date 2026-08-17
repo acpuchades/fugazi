@@ -60,6 +60,7 @@ use p256::ecdsa::{Signature, SigningKey, signature::Signer};
 use reqwest::Method;
 
 use crate::wallet::{POSITION_EPSILON, PRICE_EPSILON};
+use crate::types::Symbol;
 use crate::types::{Candle, Real};
 use crate::wallet::{
     Ack, Order, OrderId, OrderKind, Reference, Rejection, Side, Size, Units, Wallet, WalletError,
@@ -131,8 +132,8 @@ pub struct CoinbaseWallet {
 
     // Cached account state, refreshed from the accounts endpoint.
     balances: HashMap<String, Real>,
-    marks: HashMap<String, Real>,
-    specs: HashMap<String, ProductSpec>,
+    marks: HashMap<Symbol, Real>,
+    specs: HashMap<Symbol, ProductSpec>,
 
     // Order-id bookkeeping: wallet-minted local ids <-> venue order ids, and the
     // kind each venue order was placed as (so a polled fill is tagged).
@@ -143,14 +144,14 @@ pub struct CoinbaseWallet {
     order_kind: HashMap<String, OrderKind>,
 
     // Resting orders, for idempotent re-submit / cancel-on-change.
-    protective: HashMap<String, ProtectiveState>,
-    limits: HashMap<String, RestingOrder>,
+    protective: HashMap<Symbol, ProtectiveState>,
+    limits: HashMap<Symbol, RestingOrder>,
 
     // Fill polling: per-symbol set of already-reported trade ids, and the log.
     seen_trades: HashMap<String, HashSet<String>>,
     errors: Vec<LiveError>,
     // Refused orders awaiting a drain through take_rejections.
-    rejections: Vec<Rejection<String>>,
+    rejections: Vec<Rejection<Symbol>>,
 }
 
 impl CoinbaseWallet {
@@ -349,7 +350,7 @@ impl CoinbaseWallet {
         let value = self.public_get(&path)?;
         let spec = parse_product_spec(&value)
             .ok_or_else(|| LiveError::Decode(format!("no product spec for {symbol}")))?;
-        self.specs.insert(symbol.to_string(), spec);
+        self.specs.insert(crate::types::symbol(symbol), spec);
         Ok(spec)
     }
 
@@ -370,7 +371,7 @@ impl CoinbaseWallet {
     /// return them as [`Order`]s. A venue order we placed maps back to its local
     /// [`OrderId`] and recorded [`OrderKind`]; a fill on an order we don't know
     /// (placed out-of-band) gets a fresh local id and `Market` kind.
-    fn poll_symbol(&mut self, symbol: &str) -> Result<Vec<Order<String>>, LiveError> {
+    fn poll_symbol(&mut self, symbol: &str) -> Result<Vec<Order<Symbol>>, LiveError> {
         let mut fills = self.fetch_fills(symbol)?;
         // Oldest-first, so partial fills reach the strategy in execution order.
         fills.sort_by(|a, b| a.sequence.cmp(&b.sequence));
@@ -386,7 +387,7 @@ impl CoinbaseWallet {
                 None => self.mint(),
             };
             let kind = self.order_kind.get(&f.order_id).copied().unwrap_or(OrderKind::Market);
-            let order = Order::new(symbol.to_string(), f.side, f.size, f.price, kind, local)
+            let order = Order::new(crate::types::symbol(symbol), f.side, f.size, f.price, kind, local)
                 .with_commission(f.commission);
             out.push(order);
         }
@@ -406,7 +407,7 @@ impl CoinbaseWallet {
     fn refuse(&mut self, symbol: &str, id: OrderId, kind: OrderKind, err: LiveError) -> WalletError {
         self.errors.push(err);
         self.rejections.push(Rejection {
-            symbol: symbol.to_string(),
+            symbol: crate::types::symbol(symbol),
             id,
             error: WalletError::Venue,
             kind,
@@ -522,11 +523,11 @@ impl CoinbaseWallet {
     /// with idempotent dedup, mirroring [`set_limit`](Wallet::set_limit).
     fn rest_protective(
         &mut self,
-        symbol: String,
+        symbol: Symbol,
         kind: OrderKind,
         trigger: Real,
         size: Size,
-    ) -> Result<Ack<String>, WalletError> {
+    ) -> Result<Ack<Symbol>, WalletError> {
         let local = self.mint();
         if trigger <= 0.0 {
             return Err(self.refuse(
@@ -617,12 +618,12 @@ impl CoinbaseWallet {
     }
 }
 
-impl Wallet<String> for CoinbaseWallet {
+impl Wallet<Symbol> for CoinbaseWallet {
     fn funds(&self) -> Reference {
         Reference(self.quote_balance())
     }
 
-    fn position(&self, symbol: &String) -> Units<String> {
+    fn position(&self, symbol: &Symbol) -> Units<Symbol> {
         Units {
             symbol: symbol.clone(),
             amount: self.base_balance(symbol),
@@ -633,7 +634,7 @@ impl Wallet<String> for CoinbaseWallet {
     /// product id for (a bare currency balance we've never fed a candle for has
     /// no product to key on). Overrides the trait default so a portfolio /
     /// baseline snapshot can enumerate what the account holds.
-    fn positions(&self) -> Vec<Units<String>> {
+    fn positions(&self) -> Vec<Units<Symbol>> {
         self.marks
             .keys()
             .filter_map(|symbol| {
@@ -665,7 +666,7 @@ impl Wallet<String> for CoinbaseWallet {
         Some(&self.quote_ccy)
     }
 
-    fn price(&self, symbol: &String) -> Option<Reference> {
+    fn price(&self, symbol: &Symbol) -> Option<Reference> {
         self.marks.get(symbol).map(|&p| Reference(p))
     }
 
@@ -678,7 +679,7 @@ impl Wallet<String> for CoinbaseWallet {
         Reference(eq)
     }
 
-    fn update(&mut self, symbol: String, candle: Candle) -> Vec<Order<String>> {
+    fn update(&mut self, symbol: Symbol, candle: Candle) -> Vec<Order<Symbol>> {
         self.marks.insert(symbol.clone(), candle.close);
         if let Err(e) = self.refresh_account() {
             self.errors.push(e);
@@ -696,7 +697,7 @@ impl Wallet<String> for CoinbaseWallet {
         }
     }
 
-    fn set_position(&mut self, target: Units<String>) -> Result<Ack<String>, WalletError> {
+    fn set_position(&mut self, target: Units<Symbol>) -> Result<Ack<Symbol>, WalletError> {
         let symbol = target.symbol;
         let id = self.mint();
         let spec = match self.ensure_spec(&symbol) {
@@ -728,23 +729,23 @@ impl Wallet<String> for CoinbaseWallet {
 
     fn set_stop(
         &mut self,
-        symbol: String,
+        symbol: Symbol,
         trigger: Reference,
         size: Size,
-    ) -> Result<Ack<String>, WalletError> {
+    ) -> Result<Ack<Symbol>, WalletError> {
         self.rest_protective(symbol, OrderKind::Stop, trigger.0, size)
     }
 
     fn set_take_profit(
         &mut self,
-        symbol: String,
+        symbol: Symbol,
         trigger: Reference,
         size: Size,
-    ) -> Result<Ack<String>, WalletError> {
+    ) -> Result<Ack<Symbol>, WalletError> {
         self.rest_protective(symbol, OrderKind::TakeProfit, trigger.0, size)
     }
 
-    fn cancel_protective(&mut self, symbol: &String) -> Result<(), WalletError> {
+    fn cancel_protective(&mut self, symbol: &Symbol) -> Result<(), WalletError> {
         if let Some(state) = self.protective.remove(symbol) {
             if let Some(leg) = state.stop {
                 self.cancel_order(&leg.order_id)?;
@@ -769,11 +770,11 @@ impl Wallet<String> for CoinbaseWallet {
     /// Idempotent per symbol, like the protective legs.
     fn set_limit(
         &mut self,
-        symbol: String,
+        symbol: Symbol,
         side: Side,
         size: Size,
         limit: Reference,
-    ) -> Result<Ack<String>, WalletError> {
+    ) -> Result<Ack<Symbol>, WalletError> {
         let local = self.mint();
         if limit.0 <= 0.0 {
             return Err(self.refuse(
@@ -842,18 +843,18 @@ impl Wallet<String> for CoinbaseWallet {
         Ok(Ack::Working(local))
     }
 
-    fn cancel_limit(&mut self, symbol: &String) -> Result<(), WalletError> {
+    fn cancel_limit(&mut self, symbol: &Symbol) -> Result<(), WalletError> {
         if let Some(resting) = self.limits.remove(symbol) {
             self.cancel_order(&resting.order_id)?;
         }
         Ok(())
     }
 
-    fn take_rejections(&mut self) -> Vec<Rejection<String>> {
+    fn take_rejections(&mut self) -> Vec<Rejection<Symbol>> {
         std::mem::take(&mut self.rejections)
     }
 
-    fn poll_fills(&mut self) -> Vec<Order<String>> {
+    fn poll_fills(&mut self) -> Vec<Order<Symbol>> {
         let symbols: Vec<String> = self.seen_trades.keys().cloned().collect();
         let mut out = Vec::new();
         for symbol in symbols {

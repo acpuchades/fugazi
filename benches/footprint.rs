@@ -80,8 +80,8 @@ fn main() {
     header(&format!("driving a run ({BARS} bars, snapshots pre-built)"));
 
     let rust_run = || {
-        let mut strat = fugazi::strategies::trend::ma_crossover("X".to_string(), 5, 20);
-        let mut w: PaperWallet<String> = PaperWallet::new(10_000.0);
+        let mut strat = fugazi::strategies::trend::ma_crossover(fugazi::types::symbol("X"), 5, 20);
+        let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
         let rep = fugazi::backtest::run(&mut strat, &mut w, snaps.iter().cloned());
         rep.equity_curve.len()
     };
@@ -104,7 +104,7 @@ fn main() {
     let schema = fugazi::market::Schema::empty();
     let yaml_run = || {
         let mut strat = spec.try_build(10_000.0, &schema).expect("probe spec builds");
-        let mut w: PaperWallet<String> = PaperWallet::new(10_000.0);
+        let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
         let rep = fugazi::backtest::run(&mut strat, &mut w, snaps.iter().cloned());
         rep.equity_curve.len()
     };

@@ -61,6 +61,7 @@ use crate::overlap::{self, Overlap};
 use crate::overlay::{self, Overlay};
 use crate::params;
 use crate::style;
+use fugazi::types::Symbol;
 
 /// Metadata extracted from a `@file.yml` spec: the dataset name, any default
 /// time-range hints declared in the YAML, and overlay columns to compute.
@@ -983,18 +984,26 @@ async fn fetch_series(
 ///
 /// Atoms with no timestamp can't be aligned with anything and are left out;
 /// the caller falls back to a size-1 snapshot for those.
-fn snapshots_by_time(raw: &[RawBar]) -> HashMap<i64, Snapshot<String>> {
+fn snapshots_by_time(raw: &[RawBar]) -> HashMap<i64, Snapshot<Symbol>> {
     let mut ordered: Vec<&RawBar> = raw.iter().filter(|b| b.atom.time.is_some()).collect();
     ordered.sort_by(|a, b| {
         (a.atom.time, a.symbol.as_str(), a.interval.as_token())
             .cmp(&(b.atom.time, b.symbol.as_str(), b.interval.as_token()))
     });
 
-    let mut by_time: HashMap<i64, Snapshot<String>> = HashMap::new();
+    // One interned `Symbol` per distinct name, reused across every bar that
+    // carries it. Without the cache this loop would allocate a fresh copy of
+    // the same handful of symbols once per bar per symbol.
+    let mut interned: HashMap<&str, Symbol> = HashMap::new();
+    let mut by_time: HashMap<i64, Snapshot<Symbol>> = HashMap::new();
     for bar in ordered {
         let t = bar.atom.time.expect("filtered to timestamped bars").0;
+        let sym = interned
+            .entry(bar.symbol.as_str())
+            .or_insert_with(|| fugazi::types::symbol(&bar.symbol))
+            .clone();
         by_time.entry(t).or_default().push(
-            Some(bar.symbol.clone()),
+            Some(sym),
             Frequency::from_str(&bar.interval.as_token()).ok(),
             bar.atom.clone(),
         );
@@ -1074,7 +1083,7 @@ fn apply_overlays(
                     .time
                     .and_then(|t| by_time.get(&t.0))
                     .cloned()
-                    .unwrap_or_else(|| Snapshot::single(b.symbol.clone(), b.atom.clone()));
+                    .unwrap_or_else(|| Snapshot::single(fugazi::types::symbol(&b.symbol), b.atom.clone()));
                 let values: Vec<Option<OverlayValue>> = instances
                     .iter_mut()
                     .map(|slot| {

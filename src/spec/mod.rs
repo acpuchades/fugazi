@@ -151,6 +151,7 @@ pub use input::{Source, StrategyKind, StrategySource};
 
 #[cfg(test)]
 mod tests {
+    use crate::types::Symbol;
     use super::*;
     use crate::spec::dyn_indicator::{DynIndicator, DynValue as Payload};
     use crate::indicators::{
@@ -165,20 +166,20 @@ mod tests {
         Candle::new(close, close, close, close, 0.0)
     }
 
-    /// Wrap a candle into the single-entry `Snapshot<String>` the CLI's
+    /// Wrap a candle into the single-entry `Snapshot<Symbol>` the CLI's
     /// built DynIndicators consume — the same shape the CLI driver feeds
     /// end-to-end via `!pick`-rooted leaves.
-    fn snap(c: Candle) -> Snapshot<String> {
-        Snapshot::<String>::of_atom(c.into())
+    fn snap(c: Candle) -> Snapshot<Symbol> {
+        Snapshot::<Symbol>::of_atom(c.into())
     }
 
     /// A multi-asset snapshot tagging each `(symbol, close)` — the shape a
     /// pairs / basket strategy reads (and the shape the widened trailing tags
     /// forward whole to their embedded strategy).
-    fn multi_snap(entries: &[(&str, Real)]) -> Snapshot<String> {
-        let mut s = Snapshot::<String>::new();
+    fn multi_snap(entries: &[(&str, Real)]) -> Snapshot<Symbol> {
+        let mut s = Snapshot::<Symbol>::new();
         for (sym, px) in entries {
-            s.push(Some((*sym).to_string()), None, bar(*px).into());
+            s.push(Some(crate::types::symbol(*sym)), None, bar(*px).into());
         }
         s
     }
@@ -391,7 +392,7 @@ mod tests {
             Candle::new(100.0, 100.0, 100.0, 100.0, 0.0),
             Candle::new(95.0, 96.0, 88.0, 89.0, 0.0),
         ] {
-            for fill in w.update("BTC".to_string(), c) {
+            for fill in w.update(crate::types::symbol("BTC"), c) {
                 strat.on_fill(&fill);
             }
             strat.update(snap(c));
@@ -1480,9 +1481,9 @@ mod tests {
         let ts = Timestamp(1_710_506_096_000); // 2024-03-15 12:34:56 UTC
         let atom_btc = Atom::with_time(bar(1.0), ts);
         let atom_eth = Atom::with_time(bar(2.0), ts);
-        let mut multi = Snapshot::<String>::new();
-        multi.push(Some("BTC".to_string()), None, atom_btc);
-        multi.push(Some("ETH".to_string()), None, atom_eth);
+        let mut multi = Snapshot::<Symbol>::new();
+        multi.push(Some(crate::types::symbol("BTC")), None, atom_btc);
+        multi.push(Some(crate::types::symbol("ETH")), None, atom_eth);
 
         for (yaml, want) in [
             ("month", 3.0),
@@ -1518,9 +1519,9 @@ mod tests {
         let mk = |ts: Timestamp| {
             let a = Atom::with_time(bar(1.0), ts);
             let b = Atom::with_time(bar(2.0), ts);
-            let mut s = Snapshot::<String>::new();
-            s.push(Some("BTC".to_string()), None, a);
-            s.push(Some("ETH".to_string()), None, b);
+            let mut s = Snapshot::<Symbol>::new();
+            s.push(Some(crate::types::symbol("BTC")), None, a);
+            s.push(Some(crate::types::symbol("ETH")), None, b);
             s
         };
 
@@ -1557,9 +1558,9 @@ mod tests {
         let mk = |ts: Timestamp| {
             let a = Atom::with_time(bar(1.0), ts);
             let b = Atom::with_time(bar(2.0), ts);
-            let mut s = Snapshot::<String>::new();
-            s.push(Some("BTC".to_string()), None, a);
-            s.push(Some("ETH".to_string()), None, b);
+            let mut s = Snapshot::<Symbol>::new();
+            s.push(Some(crate::types::symbol("BTC")), None, a);
+            s.push(Some(crate::types::symbol("ETH")), None, b);
             s
         };
 

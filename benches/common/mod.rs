@@ -10,7 +10,7 @@
 
 #![allow(dead_code)] // each bench target uses a different subset
 
-use fugazi::types::{Atom, Candle, Snapshot};
+use fugazi::types::{Atom, Candle, Snapshot, Symbol, symbol as intern};
 
 /// Deterministic geometric random walk — the same LCG and coefficients as
 /// `tests/perf_bench.rs::synth_candles`, so a bench here and a probe there are
@@ -41,19 +41,22 @@ pub fn synth_candles(n: usize) -> Vec<Candle> {
 
 /// One tagged single-asset snapshot per bar — what `fugazi run` feeds the
 /// driver (`src/cli/run.rs`).
-pub fn single_snapshots(symbol: &str, bars: usize) -> Vec<Snapshot<String>> {
+pub fn single_snapshots(symbol: &str, bars: usize) -> Vec<Snapshot<Symbol>> {
+    // Interned once; each bar's tag is a refcount bump, matching what the CLI
+    // and the Python bindings now do.
+    let sym = intern(symbol);
     synth_candles(bars)
         .into_iter()
-        .map(|c| Snapshot::single(symbol.to_string(), Atom::new(c)))
+        .map(|c| Snapshot::single(sym.clone(), Atom::new(c)))
         .collect()
 }
 
 /// An `n_symbols`-wide snapshot per bar, each symbol on a phase-shifted slice of
 /// the same walk so every per-symbol chain does real work. Mirrors
 /// `tests/perf_bench.rs::multi_snapshots`.
-pub fn multi_snapshots(n_symbols: usize, bars: usize) -> Vec<Snapshot<String>> {
+pub fn multi_snapshots(n_symbols: usize, bars: usize) -> Vec<Snapshot<Symbol>> {
     let candles = synth_candles(bars);
-    let syms: Vec<String> = (0..n_symbols).map(|i| format!("S{i:03}")).collect();
+    let syms: Vec<Symbol> = (0..n_symbols).map(|i| intern(format!("S{i:03}"))).collect();
     (0..bars)
         .map(|b| {
             let mut snap = Snapshot::new();

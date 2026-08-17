@@ -30,8 +30,8 @@ fn names_match_serde_variant_list() {
     let want_node: BTreeSet<String> = known_node_tags().into_iter().collect();
     let want_selection: BTreeSet<String> = known_selection_tags().into_iter().collect();
 
-    let want_node: BTreeSet<&str> = want_node.iter().map(String::as_str).collect();
-    let want_selection: BTreeSet<&str> = want_selection.iter().map(String::as_str).collect();
+    let want_node: BTreeSet<&str> = want_node.iter().map(|s| s.as_ref()).collect();
+    let want_selection: BTreeSet<&str> = want_selection.iter().map(|s| s.as_ref()).collect();
 
     assert_eq!(node, want_node, "node tag names drifted from serde");
     assert_eq!(

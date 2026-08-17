@@ -729,13 +729,14 @@ where
 
 #[cfg(test)]
 mod tests {
+    use crate::types::Symbol;
     use super::*;
     use crate::backtest;
     use crate::metrics;
     use crate::strategies::SingleAssetStrategy;
     use crate::types::{Atom, Candle};
 
-    fn sym() -> String { "X".to_string() }
+    fn sym() -> Symbol { crate::types::symbol("X") }
     const SEED: Real = 1_000.0;
     const BPY: Real = 252.0;
 
@@ -743,7 +744,7 @@ mod tests {
         Candle::new(close, close, close, close, 0.0)
     }
 
-    fn snap(close: Real) -> Snapshot<String> {
+    fn snap(close: Real) -> Snapshot<Symbol> {
         Snapshot::single(sym(), Atom::new(bar(close)))
     }
 
@@ -756,7 +757,7 @@ mod tests {
         ]
     }
 
-    fn buy_and_hold() -> SingleAssetStrategy<String> {
+    fn buy_and_hold() -> SingleAssetStrategy<Symbol> {
         SingleAssetStrategy::buy_and_hold(sym())
     }
 
@@ -782,7 +783,7 @@ mod tests {
         // Standalone backtest to get the reference equity curve + metric.
         let mut strat = buy_and_hold();
         let mut wallet = PaperWallet::new(SEED);
-        let snaps: Vec<Snapshot<String>> = px.iter().map(|&p| snap(p)).collect();
+        let snaps: Vec<Snapshot<Symbol>> = px.iter().map(|&p| snap(p)).collect();
         let report = backtest::run(&mut strat, &mut wallet, snaps.iter().cloned());
         let returns = metrics::per_bar_returns(&report.equity_curve, report.initial_equity);
         let expected = metrics::sharpe(&returns, 0.0, BPY).expect("reference sharpe defined");
@@ -807,7 +808,7 @@ mod tests {
 
         let mut strat = buy_and_hold();
         let mut wallet = PaperWallet::new(SEED);
-        let snaps: Vec<Snapshot<String>> = px.iter().map(|&p| snap(p)).collect();
+        let snaps: Vec<Snapshot<Symbol>> = px.iter().map(|&p| snap(p)).collect();
         let report = backtest::run(&mut strat, &mut wallet, snaps.iter().cloned());
         let returns = metrics::per_bar_returns(&report.equity_curve, report.initial_equity);
         let expected = metrics::annualized_volatility(&returns, BPY);
@@ -884,15 +885,15 @@ mod tests {
     /// (like `MaCross` in `backtest.rs`) so it needs no signals. Used to prove
     /// the trailing engine prices *both* legs from a 2-entry snapshot.
     struct LongShortPair {
-        a: String,
-        b: String,
+        a: Symbol,
+        b: Symbol,
     }
 
     impl Strategy for LongShortPair {
-        type Input = Snapshot<String>;
-        type Symbol = String;
-        fn update(&mut self, _snap: Snapshot<String>) {}
-        fn trade(&self, wallet: &mut dyn Wallet<String>) {
+        type Input = Snapshot<Symbol>;
+        type Symbol = Symbol;
+        fn update(&mut self, _snap: Snapshot<Symbol>) {}
+        fn trade(&self, wallet: &mut dyn Wallet<Symbol>) {
             if wallet.position(&self.a).amount.abs() < 1e-9 {
                 let _ = wallet.set(self.a.clone(), Side::Buy, Size::value_frac(0.5));
             }
@@ -905,10 +906,10 @@ mod tests {
 
     /// A 2-entry snapshot tagging both legs — the shape the old `sole_atom`
     /// path would panic on.
-    fn pair_snap(a_px: Real, b_px: Real) -> Snapshot<String> {
+    fn pair_snap(a_px: Real, b_px: Real) -> Snapshot<Symbol> {
         let mut s = Snapshot::new();
-        s.push(Some("A".to_string()), None, Atom::new(bar(a_px)));
-        s.push(Some("B".to_string()), None, Atom::new(bar(b_px)));
+        s.push(Some(crate::types::symbol("A")), None, Atom::new(bar(a_px)));
+        s.push(Some(crate::types::symbol("B")), None, Atom::new(bar(b_px)));
         s
     }
 
@@ -920,8 +921,8 @@ mod tests {
         let a = [100.0, 102.0, 101.0, 104.0, 106.0, 105.0, 108.0, 110.0];
         let b = [100.0, 99.0, 100.0, 97.0, 96.0, 97.0, 95.0, 93.0];
 
-        let mut vol = Volatility::new(LongShortPair { a: "A".to_string(), b: "B".to_string() }, "A".to_string(), SEED, 5, BPY);
-        let mut sharpe = Sharpe::new(LongShortPair { a: "A".to_string(), b: "B".to_string() }, "A".to_string(), SEED, 5, 0.0, BPY);
+        let mut vol = Volatility::new(LongShortPair { a: crate::types::symbol("A"), b: crate::types::symbol("B") }, crate::types::symbol("A"), SEED, 5, BPY);
+        let mut sharpe = Sharpe::new(LongShortPair { a: crate::types::symbol("A"), b: crate::types::symbol("B") }, crate::types::symbol("A"), SEED, 5, 0.0, BPY);
 
         let mut last_vol = None;
         let mut last_sharpe = None;

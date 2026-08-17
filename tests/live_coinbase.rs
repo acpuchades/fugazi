@@ -15,6 +15,7 @@
 
 mod common;
 
+use fugazi::types::symbol as intern;
 use common::net::serve;
 use fugazi::Candle;
 use fugazi::live::CoinbaseWallet;
@@ -140,12 +141,12 @@ fn set_position_market_buys_the_difference_and_update_reports_the_fill() {
 
     // From flat, target 0.03 BTC → a market buy of 0.03.
     let ack = w
-        .set_position(Units { symbol: SYMBOL.to_string(), amount: 0.03 })
+        .set_position(Units { symbol: intern(SYMBOL), amount: 0.03 })
         .expect("submission accepted");
     assert!(matches!(ack, Ack::Working(_)), "market order returns Working");
 
     // Next bar: account refresh shows the balance, poll returns the fill.
-    let fills = w.update(SYMBOL.to_string(), Candle::new(27000.0, 27100.0, 26900.0, 27050.0, 1.0));
+    let fills = w.update(intern(SYMBOL), Candle::new(27000.0, 27100.0, 26900.0, 27050.0, 1.0));
     assert_eq!(fills.len(), 1, "expected one fill; errors: {:?}", w.errors());
     let fill = &fills[0];
     assert_eq!(fill.side, Side::Buy);
@@ -154,11 +155,11 @@ fn set_position_market_buys_the_difference_and_update_reports_the_fill() {
     assert!((fill.commission - 0.08).abs() < 1e-9);
 
     // Reads reflect the refreshed account state (spot balances).
-    assert!((w.position(&SYMBOL.to_string()).amount - 0.03).abs() < 1e-9);
+    assert!((w.position(&intern(SYMBOL)).amount - 0.03).abs() < 1e-9);
     assert!((w.funds().0 - 10000.0).abs() < 1e-9, "funds = quote balance");
     // Equity = quote + base marked at the last close (10000 + 0.03 * 27050).
     assert!((w.equity().0 - 10811.5).abs() < 1e-6, "equity = {}", w.equity().0);
-    assert!((w.price(&SYMBOL.to_string()).unwrap().0 - 27050.0).abs() < 1e-9);
+    assert!((w.price(&intern(SYMBOL)).unwrap().0 - 27050.0).abs() < 1e-9);
 
     // Polling again is idempotent: the trade id is already seen.
     assert!(w.poll_fills().is_empty(), "fill must not be re-reported");
@@ -218,11 +219,11 @@ fn a_protective_stop_dedups_an_unchanged_trigger() {
 
     let mut w = wallet(uri);
     // Prime the balance cache so the stop knows what it is protecting.
-    w.update(SYMBOL.to_string(), Candle::new(27000.0, 27100.0, 26900.0, 27000.0, 1.0));
+    w.update(intern(SYMBOL), Candle::new(27000.0, 27100.0, 26900.0, 27000.0, 1.0));
 
     // Rest the same stop three bars running — only the first hits the venue.
     for _ in 0..3 {
-        w.set_stop(SYMBOL.to_string(), Reference(26000.0), Size::position_frac(1.0))
+        w.set_stop(intern(SYMBOL), Reference(26000.0), Size::position_frac(1.0))
             .expect("stop accepted");
     }
     assert_eq!(
@@ -232,7 +233,7 @@ fn a_protective_stop_dedups_an_unchanged_trigger() {
     );
 
     // Moving the trigger cancels + replaces: one more POST, one cancel.
-    w.set_stop(SYMBOL.to_string(), Reference(26500.0), Size::position_frac(1.0))
+    w.set_stop(intern(SYMBOL), Reference(26500.0), Size::position_frac(1.0))
         .expect("moved stop accepted");
     assert_eq!(order_posts.load(Ordering::SeqCst), 2, "a moved trigger re-submits");
     assert_eq!(cancels.load(Ordering::SeqCst), 1, "and cancels the old leg");
@@ -294,9 +295,9 @@ fn a_limit_order_sends_a_limit_config_and_dedups_an_unchanged_resubmit() {
     let uri = mock.uri.clone();
 
     let mut w = wallet(uri);
-    w.update(SYMBOL.to_string(), Candle::new(27000.0, 27100.0, 26900.0, 27000.0, 1.0));
+    w.update(intern(SYMBOL), Candle::new(27000.0, 27100.0, 26900.0, 27000.0, 1.0));
 
-    w.set_limit(SYMBOL.to_string(), Side::Buy, Size::units(0.05), Reference(26000.0))
+    w.set_limit(intern(SYMBOL), Side::Buy, Size::units(0.05), Reference(26000.0))
         .expect("limit accepted");
 
     let body = last_body.lock().unwrap().clone();
@@ -307,19 +308,19 @@ fn a_limit_order_sends_a_limit_config_and_dedups_an_unchanged_resubmit() {
 
     // Re-submitting the same order every bar must not pile up venue orders.
     for _ in 0..3 {
-        w.set_limit(SYMBOL.to_string(), Side::Buy, Size::units(0.05), Reference(26000.0))
+        w.set_limit(intern(SYMBOL), Side::Buy, Size::units(0.05), Reference(26000.0))
             .expect("unchanged limit accepted");
     }
     assert_eq!(posts.load(Ordering::SeqCst), 1, "an unchanged limit must not re-submit each bar");
 
     // Moving the price cancels and replaces.
-    w.set_limit(SYMBOL.to_string(), Side::Buy, Size::units(0.05), Reference(26500.0))
+    w.set_limit(intern(SYMBOL), Side::Buy, Size::units(0.05), Reference(26500.0))
         .expect("moved limit accepted");
     assert_eq!(posts.load(Ordering::SeqCst), 2, "a moved limit re-submits");
     assert_eq!(cancels.load(Ordering::SeqCst), 1, "and cancels the old one");
 
     // And an explicit cancel withdraws it.
-    w.cancel_limit(&SYMBOL.to_string()).expect("cancel ok");
+    w.cancel_limit(&intern(SYMBOL)).expect("cancel ok");
     assert_eq!(cancels.load(Ordering::SeqCst), 2);
 }
 
@@ -353,13 +354,13 @@ fn a_venue_rejected_order_surfaces_through_take_rejections() {
     let mut w = wallet(uri);
 
     let err = w
-        .set_position(Units { symbol: SYMBOL.to_string(), amount: 0.03 })
+        .set_position(Units { symbol: intern(SYMBOL), amount: 0.03 })
         .expect_err("venue refuses the order");
     assert_eq!(err, fugazi::wallet::WalletError::Venue);
 
     let refused = w.take_rejections();
     assert_eq!(refused.len(), 1, "one refused order; errors: {:?}", w.errors());
-    assert_eq!(refused[0].symbol, SYMBOL);
+    assert_eq!(refused[0].symbol.as_ref(), SYMBOL);
     assert_eq!(refused[0].kind, fugazi::wallet::OrderKind::Market);
     assert_eq!(refused[0].error, fugazi::wallet::WalletError::Venue);
     assert!(w.take_rejections().is_empty(), "already drained");
@@ -397,7 +398,7 @@ fn a_short_target_sells_to_flat_and_reports_the_unshortable_remainder() {
 
     let mut w = wallet(uri);
     // Prime the balance cache: the account holds 0.03 BTC.
-    w.update(SYMBOL.to_string(), Candle::new(27000.0, 27100.0, 26900.0, 27000.0, 1.0));
+    w.update(intern(SYMBOL), Candle::new(27000.0, 27100.0, 26900.0, 27000.0, 1.0));
 
     // The limit is introspectable up front, so a caller can pick a long-only
     // path instead of learning it from the rejection below.
@@ -405,7 +406,7 @@ fn a_short_target_sells_to_flat_and_reports_the_unshortable_remainder() {
 
     // Ask for a short (-0.02): spot can only sell down to flat.
     let ack = w
-        .set_position(Units { symbol: SYMBOL.to_string(), amount: -0.02 })
+        .set_position(Units { symbol: intern(SYMBOL), amount: -0.02 })
         .expect("sell-to-flat accepted");
     assert!(matches!(ack, Ack::Working(_)));
 

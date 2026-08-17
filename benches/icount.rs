@@ -89,15 +89,15 @@ fn main() {
 
     let bars = match workload.as_str() {
         "sma_rust" => {
-            let mut s = fugazi::strategies::trend::ma_crossover("X".to_string(), 5, 20);
-            let mut w: PaperWallet<String> = PaperWallet::new(10_000.0);
+            let mut s = fugazi::strategies::trend::ma_crossover(fugazi::types::symbol("X"), 5, 20);
+            let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
             fugazi::backtest::run(&mut s, &mut w, snaps.iter().cloned())
                 .equity_curve
                 .len()
         }
         "macd_rust" => {
-            let mut s = fugazi::strategies::trend::macd_crossover("X".to_string(), 12, 26, 9);
-            let mut w: PaperWallet<String> = PaperWallet::new(10_000.0);
+            let mut s = fugazi::strategies::trend::macd_crossover(fugazi::types::symbol("X"), 12, 26, 9);
+            let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
             fugazi::backtest::run(&mut s, &mut w, snaps.iter().cloned())
                 .equity_curve
                 .len()
@@ -111,7 +111,7 @@ fn main() {
             let mut s = spec_of(&doc)
                 .try_build(10_000.0, &schema)
                 .expect("icount spec builds");
-            let mut w: PaperWallet<String> = PaperWallet::new(10_000.0);
+            let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
             fugazi::backtest::run(&mut s, &mut w, snaps.iter().cloned())
                 .equity_curve
                 .len()

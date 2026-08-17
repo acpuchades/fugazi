@@ -14,6 +14,7 @@ use crate::strategies::SingleAssetStrategy;
 
 use super::expr::{BoolNode, RealNode};
 use crate::spec::dyn_indicator::{self, AsBool, AsReal, DynIndicator};
+use crate::types::Symbol;
 
 // ---------------------------------------------------------------------------
 // Strategy
@@ -52,12 +53,12 @@ impl SideSpec {
         anchor: &Position,
         book: &Book,
         schema: &Arc<Schema>,
-        root: Option<&Selector<String>>,
+        root: Option<&Selector<Symbol>>,
     ) -> Result<Box<dyn DynIndicator>, String> {
         match &self.exit {
             Some(s) => s.try_build(anchor, book, None, schema, root),
             None => Ok(dyn_indicator::wrap(ValueBool::<
-                crate::types::Snapshot<String>,
+                crate::types::Snapshot<Symbol>,
             >::new(false))),
         }
     }
@@ -173,7 +174,7 @@ impl SingleStrategySpec {
         schema: &Arc<Schema>,
     ) -> Result<DynSingleStrategy, String> {
         let mut strat =
-            SingleAssetStrategy::with_initial_equity(self.symbol.clone(), initial_equity);
+            SingleAssetStrategy::with_initial_equity(crate::types::symbol(&self.symbol), initial_equity);
         // One position + book per strategy, shared by every `entry`/`peak`/`trough`
         // leaf (position) and every book-anchored sizing recipe (book).
         let anchor = strat.position();
@@ -220,10 +221,10 @@ impl SingleStrategySpec {
 }
 
 // ---------------------------------------------------------------------------
-// DynSingleStrategy: CLI-owned wrapper around SingleAssetStrategy<String>
+// DynSingleStrategy: CLI-owned wrapper around SingleAssetStrategy<Symbol>
 // ---------------------------------------------------------------------------
 
-/// The CLI's built-strategy handle. Wraps a [`SingleAssetStrategy<String>`]
+/// The CLI's built-strategy handle. Wraps a [`SingleAssetStrategy<Symbol>`]
 /// whose entry/exit signals and protective levels came from runtime-typed
 /// [`DynIndicator`]s (bridged into typed [`Signal`] / real
 /// levels by the private [`AsBool`] / [`AsReal`] adapters at construction).
@@ -231,16 +232,16 @@ impl SingleStrategySpec {
 /// Implements [`Strategy`] by delegation, so it drops into
 /// [`crate::backtest::run`] unchanged.
 pub struct DynSingleStrategy {
-    inner: SingleAssetStrategy<String>,
+    inner: SingleAssetStrategy<Symbol>,
 }
 
 impl DynSingleStrategy {
-    /// Wrap an already-built [`SingleAssetStrategy<String>`] — the seam the
+    /// Wrap an already-built [`SingleAssetStrategy<Symbol>`] — the seam the
     /// [`StrategyPreset`](super::preset::StrategyPreset) catalogue tags use to
     /// hand a ready-made strategy (built by the `crate::strategies` free
     /// functions) into the same `DynSingleStrategy` the YAML `SingleStrategySpec`
     /// path produces.
-    pub(crate) fn from_single(inner: SingleAssetStrategy<String>) -> Self {
+    pub(crate) fn from_single(inner: SingleAssetStrategy<Symbol>) -> Self {
         Self { inner }
     }
 
@@ -259,11 +260,11 @@ impl DynSingleStrategy {
         self.inner.warm_up_bars()
     }
 
-    /// The strategy's shared [`Book<String>`] — hand-off point for
+    /// The strategy's shared [`Book<Symbol>`] — hand-off point for
     /// portfolio-level weight-share templates that want to read
     /// `!drawdown` / `!return_per_bar` / `!trade_return` against this
     /// child's book.
-    pub fn book(&self) -> Book<String> {
+    pub fn book(&self) -> Book<Symbol> {
         self.inner.book()
     }
 
@@ -279,19 +280,19 @@ impl DynSingleStrategy {
 }
 
 impl Strategy for DynSingleStrategy {
-    type Input = crate::types::Snapshot<String>;
-    type Symbol = String;
+    type Input = crate::types::Snapshot<Symbol>;
+    type Symbol = Symbol;
 
-    fn update(&mut self, snap: crate::types::Snapshot<String>) {
+    fn update(&mut self, snap: crate::types::Snapshot<Symbol>) {
         self.inner.update(snap);
     }
-    fn on_fill(&mut self, order: &Order<String>) {
+    fn on_fill(&mut self, order: &Order<Symbol>) {
         self.inner.on_fill(order);
     }
     fn is_ready(&self) -> bool {
         self.inner.is_ready()
     }
-    fn trade(&self, wallet: &mut dyn Wallet<String>) {
+    fn trade(&self, wallet: &mut dyn Wallet<Symbol>) {
         self.inner.trade(wallet);
     }
     fn reset(&mut self) {

@@ -7,6 +7,7 @@
 //! bracketing the point estimate's neighbourhood, p-values in `(0, 1]`) and a
 //! power/size sanity check on a constructed no-edge series.
 
+use fugazi::types::Symbol;
 use fugazi::market::Real;
 use fugazi::montecarlo::ResampleScheme;
 use fugazi::spec::backtest::{EvalContext, measured_report_any, run_iteration_any};
@@ -53,12 +54,12 @@ fn crossover_spec() -> StrategySpec {
     StrategySpec::Single(Box::new(strat))
 }
 
-fn snaps_from_prices(prices: &[Real]) -> Vec<Snapshot<String>> {
+fn snaps_from_prices(prices: &[Real]) -> Vec<Snapshot<Symbol>> {
     prices
         .iter()
         .map(|&p| {
             let c = Candle::new(p, p + 1.0, p - 1.0, p, 1_000.0);
-            Snapshot::single("X".to_string(), Atom::new(c))
+            Snapshot::single(fugazi::types::symbol("X"), Atom::new(c))
         })
         .collect()
 }
@@ -73,7 +74,7 @@ fn trending(n: usize) -> Vec<Real> {
         .collect()
 }
 
-fn run_mc(spec: &StrategySpec, snaps: &[Snapshot<String>], config: &McConfig) -> fugazi::spec::McOutcome {
+fn run_mc(spec: &StrategySpec, snaps: &[Snapshot<Symbol>], config: &McConfig) -> fugazi::spec::McOutcome {
     let costs = empty_costs();
     let ctx = ctx(&costs);
     let report = measured_report_any(spec, snaps, &ctx).expect("drive strategy");
@@ -173,11 +174,11 @@ fn multi_symbol_still_produces_a_rerun_pvalue() {
     let spec = StrategySpec::Basket(Box::new(strat));
 
     let a = trending(80);
-    let snaps: Vec<Snapshot<String>> = (0..80)
+    let snaps: Vec<Snapshot<Symbol>> = (0..80)
         .map(|i| {
             let pa = a[i];
             let pb = 100.0 + 9.0 * ((i as Real) * 0.25).cos() + 0.1 * i as Real;
-            let mut s = Snapshot::<String>::new();
+            let mut s = Snapshot::<Symbol>::new();
             s.push(Some("A".into()), None, Atom::new(Candle::new(pa, pa + 1.0, pa - 1.0, pa, 1_000.0)));
             s.push(Some("B".into()), None, Atom::new(Candle::new(pb, pb + 1.0, pb - 1.0, pb, 1_000.0)));
             s

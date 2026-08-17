@@ -4,13 +4,12 @@
 //! form that does not require making the change — an upper bound on the win,
 //! paid for in bench code rather than in a refactor nobody has agreed to.
 //!
-//! 1. **`Sym = Arc<str>`** needs no prototype at all: `Snapshot`, `PaperWallet`
-//!    and `MultiAssetStrategy` are already generic over `Sym`, and `Arc<str>`
-//!    satisfies every bound. The same workload is simply run both ways. What a
-//!    real change would add is *interning* — one `Arc` per distinct symbol for
-//!    the whole run — which this approximates by cloning from a fixed set.
+//! (`Sym = Arc<str>` used to be measured here too. It has since been
+//! implemented — `fugazi::Symbol` — so its numbers live in the results section
+//! of `docs/PERFORMANCE.md` rather than here. This file is for candidates that
+//! have *not* been done.)
 //!
-//! 2. **`Indicator::update(&Self::Input)`** is prototyped as a parallel
+//! **`Indicator::update(&Self::Input)`** is prototyped as a parallel
 //!    by-reference chain (`RefIndicator`) computing the same SMA crossover as
 //!    the library's by-value one. The gap is the clone traffic the signature
 //!    forces: `Combine` feeds the same input to both sides, so every binary node
@@ -20,97 +19,16 @@
 //! shallow, so it also enjoys inlining a `Box<dyn Indicator>` tree would not.
 
 use std::hint::black_box;
-use std::sync::Arc;
-
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
 use fugazi::indicators::{Close, Pick, Sma};
 use fugazi::prelude::*;
-use fugazi::strategies::MultiAssetStrategy;
 use fugazi::types::{Atom, Selector, Snapshot};
 
 mod common;
 use common::synth_candles;
 
 const BARS: usize = 2_000;
-const SYMBOLS: [usize; 3] = [8, 32, 64];
-
-// ---------------------------------------------------------------------------
-// Candidate 1 — Sym = Arc<str> vs Sym = String
-// ---------------------------------------------------------------------------
-
-/// Snapshots keyed by a caller-chosen symbol type, built from one fixed symbol
-/// set — so `Arc<str>` clones are refcount bumps and `String` clones are
-/// allocations, which is exactly the difference under test.
-fn snapshots_keyed<S: Clone>(syms: &[S], bars: usize) -> Vec<Snapshot<S>> {
-    let candles = synth_candles(bars);
-    (0..bars)
-        .map(|b| {
-            let mut snap = Snapshot::new();
-            for (i, s) in syms.iter().enumerate() {
-                snap.push(Some(s.clone()), None, Atom::new(candles[(b + i * 7) % bars]));
-            }
-            snap
-        })
-        .collect()
-}
-
-fn strategy_for<S>() -> MultiAssetStrategy<S>
-where
-    S: Clone + PartialEq + std::hash::Hash + Eq + 'static + Send + Sync,
-{
-    let close = |sym: &S| Close::of(Pick::matching(Selector::by_symbol(sym.clone())));
-    MultiAssetStrategy::<S>::with_initial_equity(10_000.0).long_on(
-        move |sym: &S| Sma::new(close(sym), 5).crosses_above(Sma::new(close(sym), 20)),
-        move |sym: &S| Sma::new(close(sym), 5).crosses_below(Sma::new(close(sym), 20)),
-    )
-}
-
-fn bench_symbol_type(c: &mut Criterion) {
-    let mut g = c.benchmark_group("breaking/symbol_type");
-    for n in SYMBOLS {
-        let owned: Vec<String> = (0..n).map(|i| format!("SYMBOL{i:04}")).collect();
-        let shared: Vec<Arc<str>> = owned.iter().map(|s| Arc::from(s.as_str())).collect();
-        let snaps_owned = snapshots_keyed(&owned, BARS);
-        let snaps_shared = snapshots_keyed(&shared, BARS);
-
-        g.throughput(Throughput::Elements((BARS * n) as u64));
-        g.bench_with_input(BenchmarkId::new("String", n), &n, |b, _| {
-            b.iter(|| {
-                let mut s = strategy_for::<String>();
-                let mut w: PaperWallet<String> = PaperWallet::new(10_000.0);
-                let r = fugazi::backtest::run(&mut s, &mut w, snaps_owned.iter().cloned());
-                black_box(r.equity_curve.len());
-            });
-        });
-        g.bench_with_input(BenchmarkId::new("Arc_str", n), &n, |b, _| {
-            b.iter(|| {
-                let mut s = strategy_for::<Arc<str>>();
-                let mut w: PaperWallet<Arc<str>> = PaperWallet::new(10_000.0);
-                let r = fugazi::backtest::run(&mut s, &mut w, snaps_shared.iter().cloned());
-                black_box(r.equity_curve.len());
-            });
-        });
-    }
-    g.finish();
-}
-
-/// Snapshot *construction* — the 3-allocations-per-bar, 201-bytes-per-bar figure
-/// from `benches/footprint.rs` is dominated by the per-entry symbol clone.
-fn bench_snapshot_build(c: &mut Criterion) {
-    let mut g = c.benchmark_group("breaking/snapshot_build");
-    let n = 8usize;
-    let owned: Vec<String> = (0..n).map(|i| format!("SYMBOL{i:04}")).collect();
-    let shared: Vec<Arc<str>> = owned.iter().map(|s| Arc::from(s.as_str())).collect();
-    g.throughput(Throughput::Elements((BARS * n) as u64));
-    g.bench_function("String", |b| {
-        b.iter(|| black_box(snapshots_keyed(&owned, BARS).len()));
-    });
-    g.bench_function("Arc_str", |b| {
-        b.iter(|| black_box(snapshots_keyed(&shared, BARS).len()));
-    });
-    g.finish();
-}
 
 // ---------------------------------------------------------------------------
 // Candidate 2 — update(&Input) vs update(Input)
@@ -128,12 +46,12 @@ trait RefIndicator {
 /// **without cloning the `Atom`**. The library pair clones it twice per bar
 /// (once into `Pick::value`, once for the return) to satisfy `Output = Atom`.
 struct RefClose {
-    symbol: String,
+    symbol: Symbol,
 }
 impl RefIndicator for RefClose {
-    type Input = Snapshot<String>;
+    type Input = Snapshot<Symbol>;
     type Output = Real;
-    fn update(&mut self, snap: &Snapshot<String>) -> Option<Real> {
+    fn update(&mut self, snap: &Snapshot<Symbol>) -> Option<Real> {
         snap.iter()
             .find(|(s, _, _)| *s == Some(&self.symbol))
             .and_then(|(_, _, a)| a.candle)
@@ -189,9 +107,9 @@ where
     }
 }
 
-fn ref_chain(symbol: &str, fast: usize, slow: usize) -> impl RefIndicator<Input = Snapshot<String>> {
+fn ref_chain(symbol: &Symbol, fast: usize, slow: usize) -> impl RefIndicator<Input = Snapshot<Symbol>> {
     let sma = |p: usize| RefSma {
-        source: RefClose { symbol: symbol.to_string() },
+        source: RefClose { symbol: symbol.clone() },
         period: p,
         window: std::collections::VecDeque::with_capacity(p),
         sum: 0.0,
@@ -200,15 +118,23 @@ fn ref_chain(symbol: &str, fast: usize, slow: usize) -> impl RefIndicator<Input 
 }
 
 fn bench_input_by_reference(c: &mut Criterion) {
-    let syms: Vec<String> = vec!["SYMBOL0000".to_string()];
-    let snaps = snapshots_keyed(&syms, BARS);
+    let syms: Vec<Symbol> = vec![fugazi::types::symbol("SYMBOL0000")];
+    let candles = synth_candles(BARS);
+    let snaps: Vec<Snapshot<Symbol>> = candles
+        .iter()
+        .map(|c| {
+            let mut s = Snapshot::new();
+            s.push(Some(syms[0].clone()), None, Atom::new(*c));
+            s
+        })
+        .collect();
 
     let mut g = c.benchmark_group("breaking/input_by_ref");
     g.throughput(Throughput::Elements(BARS as u64));
 
     g.bench_function("by_value_library", |b| {
         b.iter(|| {
-            let close = || Close::of(Pick::matching(Selector::by_symbol("SYMBOL0000".to_string())));
+            let close = || Close::of(Pick::matching(Selector::by_symbol(syms[0].clone())));
             let mut chain = Sma::new(close(), 5).crosses_above(Sma::new(close(), 20));
             for s in &snaps {
                 black_box(chain.update(s.clone()));
@@ -218,7 +144,7 @@ fn bench_input_by_reference(c: &mut Criterion) {
 
     g.bench_function("by_reference_proto", |b| {
         b.iter(|| {
-            let mut chain = ref_chain("SYMBOL0000", 5, 20);
+            let mut chain = ref_chain(&syms[0], 5, 20);
             for s in &snaps {
                 black_box(chain.update(s));
             }
@@ -227,10 +153,5 @@ fn bench_input_by_reference(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_symbol_type,
-    bench_snapshot_build,
-    bench_input_by_reference
-);
+criterion_group!(benches, bench_input_by_reference);
 criterion_main!(benches);

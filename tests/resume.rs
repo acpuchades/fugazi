@@ -19,6 +19,7 @@
 
 mod common;
 
+use fugazi::types::{Symbol, symbol as intern};
 use common::bars;
 use fugazi::backtest::Fill;
 use fugazi::market::{Real, Schema};
@@ -46,12 +47,12 @@ fn prices_b(n: usize) -> Vec<Real> {
         .collect()
 }
 
-fn single_snaps(n: usize) -> Vec<Snapshot<String>> {
+fn single_snaps(n: usize) -> Vec<Snapshot<Symbol>> {
     bars::daily_series(&[("X", &prices(n))], bars::banded)
 }
 
 /// Two-symbol snapshots for the pairs / basket / multi / portfolio shapes.
-fn multi_snaps(n: usize) -> Vec<Snapshot<String>> {
+fn multi_snaps(n: usize) -> Vec<Snapshot<Symbol>> {
     bars::daily_series(&[("A", &prices(n)), ("B", &prices_b(n))], bars::banded)
 }
 
@@ -60,20 +61,20 @@ fn multi_snaps(n: usize) -> Vec<Snapshot<String>> {
 ///
 /// Hand-built rather than via `bars::daily_series`, which panics on ragged
 /// columns on purpose: *which* bar is missing is the thing being asserted.
-fn multi_snaps_with_gap(n: usize, gap: std::ops::Range<usize>) -> Vec<Snapshot<String>> {
+fn multi_snaps_with_gap(n: usize, gap: std::ops::Range<usize>) -> Vec<Snapshot<Symbol>> {
     let (a, b) = (prices(n), prices_b(n));
     (0..n)
         .map(|i| {
             let t = fugazi::types::Timestamp(i as i64 * bars::DAY_MS);
-            let mut snap = Snapshot::<String>::new();
+            let mut snap = Snapshot::<Symbol>::new();
             snap.push(
-                Some("A".to_string()),
+                Some(intern("A")),
                 None,
                 Atom::with_time(bars::banded(a[i]), t),
             );
             if !gap.contains(&i) {
                 snap.push(
-                    Some("B".to_string()),
+                    Some(intern("B")),
                     None,
                     Atom::with_time(bars::banded(b[i]), t),
                 );
@@ -98,12 +99,12 @@ fn schema() -> std::sync::Arc<Schema> {
 /// below, which check different properties of the same evidence.
 struct Chunked {
     whole_equity: Vec<Real>,
-    whole_fills: Vec<Fill<String>>,
+    whole_fills: Vec<Fill<Symbol>>,
     whole_state: RunState,
     /// Every chunk's equity points, concatenated in bar order.
     chunk_equity: Vec<Real>,
     /// Every chunk's fills, rebased onto whole-run bar indices.
-    chunk_fills: Vec<Fill<String>>,
+    chunk_fills: Vec<Fill<Symbol>>,
     /// The state captured after the final chunk.
     final_state: RunState,
 }
@@ -112,7 +113,7 @@ struct Chunked {
 /// `splits`, serializing → JSON → rebuilding from spec → restoring between each
 /// pair. A real resume goes through a file, so the JSON round-trip is part of
 /// the path under test, not a convenience.
-fn chunked_run<S, B>(build: B, snaps: &[Snapshot<String>], splits: &[usize]) -> Chunked
+fn chunked_run<S, B>(build: B, snaps: &[Snapshot<Symbol>], splits: &[usize]) -> Chunked
 where
     S: RunnableStrategy,
     B: Fn() -> S,
@@ -173,10 +174,10 @@ where
 /// so the order in which a bar's submissions mint ids varies between two map
 /// instances even within one process. That reorders id *assignment* without
 /// changing a single fill's economics, which is exactly what this key captures.
-fn fill_key(f: &Fill<String>) -> (usize, String, String, u64, u64, String, u64) {
+fn fill_key(f: &Fill<Symbol>) -> (usize, String, String, u64, u64, String, u64) {
     (
         f.bar,
-        f.order.symbol.clone(),
+        f.order.symbol.to_string(),
         format!("{:?}", f.order.side),
         f.order.units.to_bits(),
         f.order.price.to_bits(),
@@ -194,7 +195,7 @@ fn fill_key(f: &Fill<String>) -> (usize, String, String, u64, u64, String, u64) 
 fn assert_chunked_resume_matches<S, B>(
     case: &str,
     build: B,
-    snaps: &[Snapshot<String>],
+    snaps: &[Snapshot<Symbol>],
     splits: &[usize],
 ) where
     S: RunnableStrategy,
@@ -261,7 +262,7 @@ fn assert_chunked_resume_matches<S, B>(
 fn assert_chunked_state_matches<S, B>(
     case: &str,
     build: B,
-    snaps: &[Snapshot<String>],
+    snaps: &[Snapshot<Symbol>],
     splits: &[usize],
 ) where
     S: RunnableStrategy,

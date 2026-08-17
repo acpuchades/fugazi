@@ -22,17 +22,17 @@ const SIZES: [usize; 3] = [10_000, 100_000, 200_000];
 
 /// A synthetic report: an equity curve from the price walk, plus an alternating
 /// fill every 50 bars so the trade-level metrics have real input.
-fn report(bars: usize) -> RunReport<String> {
+fn report(bars: usize) -> RunReport<Symbol> {
     let candles = synth_candles(bars);
     let equity_curve: Vec<Real> = candles.iter().map(|c| c.close * 100.0).collect();
-    let fills: Vec<Fill<String>> = (0..bars)
+    let fills: Vec<Fill<Symbol>> = (0..bars)
         .step_by(50)
         .enumerate()
         .map(|(i, bar)| Fill {
             bar,
             order: Order {
                 id: OrderId(i as u64),
-                symbol: "X".to_string(),
+                symbol: fugazi::types::symbol("X"),
                 side: if i % 2 == 0 { Side::Buy } else { Side::Sell },
                 units: 1.0,
                 price: candles[bar].close,

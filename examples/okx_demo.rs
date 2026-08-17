@@ -17,6 +17,7 @@
 
 use std::time::Duration;
 
+use fugazi::types::Symbol;
 use fugazi::Candle;
 use fugazi::live::OkxWallet;
 use fugazi::wallet::{Units, Wallet};
@@ -42,7 +43,7 @@ fn main() {
         }
     };
 
-    let symbol = SYMBOL.to_string();
+    let symbol = fugazi::types::symbol(SYMBOL);
     let mut wallet = OkxWallet::demo(key, secret, passphrase);
 
     wallet.refresh_account().expect("account reachable on demo trading");
@@ -76,12 +77,12 @@ fn main() {
 
 /// Poll a few times (feeding a bar each round so the wallet refreshes account
 /// state and drains fills) until the position reaches `want`, printing fills.
-fn settle_to(wallet: &mut OkxWallet, symbol: &str, want: f64, ok_msg: &str) {
+fn settle_to(wallet: &mut OkxWallet, symbol: &Symbol, want: f64, ok_msg: &str) {
     for _ in 0..12 {
         std::thread::sleep(Duration::from_millis(500));
         // A synthetic bar only carries a mark; the position comes from the
         // account refresh `update` performs.
-        for fill in wallet.update(symbol.to_string(), Candle::new(0.0, 0.0, 0.0, 0.0, 0.0)) {
+        for fill in wallet.update(symbol.clone(), Candle::new(0.0, 0.0, 0.0, 0.0, 0.0)) {
             println!(
                 "  fill: {:<4} {:.4} @ {:.2}  (order #{})",
                 format!("{:?}", fill.side).to_uppercase(),
@@ -90,8 +91,8 @@ fn settle_to(wallet: &mut OkxWallet, symbol: &str, want: f64, ok_msg: &str) {
                 fill.id.0,
             );
         }
-        if (wallet.position(&symbol.to_string()).amount - want).abs() < 1e-6 {
-            println!("  {ok_msg}: position {:+.4}", wallet.position(&symbol.to_string()).amount);
+        if (wallet.position(symbol).amount - want).abs() < 1e-6 {
+            println!("  {ok_msg}: position {:+.4}", wallet.position(symbol).amount);
             return;
         }
     }

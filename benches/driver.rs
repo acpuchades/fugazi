@@ -61,8 +61,8 @@ fn bench_macd(c: &mut Criterion) {
 
     g.bench_function("rust", |b| {
         b.iter(|| {
-            let mut strat = fugazi::strategies::trend::macd_crossover("X".to_string(), 12, 26, 9);
-            let mut w: PaperWallet<String> = PaperWallet::new(10_000.0);
+            let mut strat = fugazi::strategies::trend::macd_crossover(fugazi::types::symbol("X"), 12, 26, 9);
+            let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
             let rep = fugazi::backtest::run(&mut strat, &mut w, snaps.iter().cloned());
             black_box(rep.equity_curve.len());
         });
@@ -73,7 +73,7 @@ fn bench_macd(c: &mut Criterion) {
             let mut strat = spec
                 .try_build(10_000.0, &schema)
                 .expect("bench spec builds");
-            let mut w: PaperWallet<String> = PaperWallet::new(10_000.0);
+            let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
             let rep = fugazi::backtest::run(&mut strat, &mut w, snaps.iter().cloned());
             black_box(rep.equity_curve.len());
         });
@@ -93,8 +93,8 @@ fn bench_sma(c: &mut Criterion) {
 
     g.bench_function("rust", |b| {
         b.iter(|| {
-            let mut strat = fugazi::strategies::trend::ma_crossover("X".to_string(), 5, 20);
-            let mut w: PaperWallet<String> = PaperWallet::new(10_000.0);
+            let mut strat = fugazi::strategies::trend::ma_crossover(fugazi::types::symbol("X"), 5, 20);
+            let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
             let rep = fugazi::backtest::run(&mut strat, &mut w, snaps.iter().cloned());
             black_box(rep.equity_curve.len());
         });
@@ -105,7 +105,7 @@ fn bench_sma(c: &mut Criterion) {
             let mut strat = spec
                 .try_build(10_000.0, &schema)
                 .expect("bench spec builds");
-            let mut w: PaperWallet<String> = PaperWallet::new(10_000.0);
+            let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
             let rep = fugazi::backtest::run(&mut strat, &mut w, snaps.iter().cloned());
             black_box(rep.equity_curve.len());
         });

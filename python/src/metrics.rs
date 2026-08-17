@@ -39,7 +39,7 @@ use crate::spec::*;
 #[pyclass(name = "Fill", frozen, from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyFill {
-    pub(crate) inner: Fill<String>,
+    pub(crate) inner: Fill<Symbol>,
 }
 
 #[pymethods]
@@ -219,7 +219,7 @@ pub(crate) fn per_bar_returns(equity_curve: Vec<Real>, initial_equity: Real) -> 
 /// leg and reopens the remainder at the same fill price as a fresh trade.
 #[pyfunction]
 pub(crate) fn reconstruct_trades(fills: Vec<PyFill>) -> Vec<PyTrade> {
-    let native: Vec<Fill<String>> = fills.into_iter().map(|f| f.inner).collect();
+    let native: Vec<Fill<Symbol>> = fills.into_iter().map(|f| f.inner).collect();
     core_metrics::reconstruct_trades(&native)
         .into_iter()
         .map(|inner| PyTrade { inner })
@@ -673,7 +673,7 @@ pub(crate) fn max_bars_held(trades: Vec<PyTrade>) -> Option<usize> {
 /// when `total_bars == 0`.
 #[pyfunction]
 pub(crate) fn exposure_ratio(fills: Vec<PyFill>, total_bars: usize) -> Real {
-    let native: Vec<Fill<String>> = fills.into_iter().map(|f| f.inner).collect();
+    let native: Vec<Fill<Symbol>> = fills.into_iter().map(|f| f.inner).collect();
     core_metrics::exposure_ratio(&native, total_bars)
 }
 

@@ -4,6 +4,7 @@
 //! The pure sweep kernel — `optimize()`, walkforward layout, ranking, `Sweep` /
 //! `Row` / `Evaluation` / `Subgrid` types — lives in `fugazi::spec::optimize`.
 
+use fugazi::types::Symbol;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -248,8 +249,10 @@ fn run_single(
         let schema_ref = &schema;
         // Same lift as the sweep path: the unified measurement is
         // snapshot-shaped, so tag each bar with the strategy's symbol once.
-        let wf_symbol = probe_symbol.clone();
-        let wf_snapshots: Vec<fugazi::types::Snapshot<String>> = atoms
+        // Interned once: every bar's `Snapshot::single` then clones a refcount
+        // rather than allocating a fresh copy of the same symbol.
+        let wf_symbol = fugazi::types::symbol(&probe_symbol);
+        let wf_snapshots: Vec<fugazi::types::Snapshot<Symbol>> = atoms
             .iter()
             .map(|(_, a)| fugazi::types::Snapshot::single(wf_symbol.clone(), a.clone()))
             .collect();
@@ -277,7 +280,7 @@ fn run_single(
             })
         };
         let run_backtest =
-            |params: &HashMap<String, Value>| -> Result<fugazi::RunReport<String>> {
+            |params: &HashMap<String, Value>| -> Result<fugazi::RunReport<Symbol>> {
                 let spec = build_any_spec(StrategyKind::Single, base_value, params)?;
                 backtest::measured_report_any(&spec, wf_snapshots_ref, ctx_ref)
                     .map_err(backtest::build_error)
@@ -309,8 +312,9 @@ fn run_single(
     // The unified evaluator is snapshot-shaped, so lift the single-asset atom
     // stream once here rather than per grid row (`run_iteration` used to do
     // this inside every call).
-    let symbol = probe_symbol.clone();
-    let snapshots: Vec<fugazi::types::Snapshot<String>> = atoms
+    // Interned once — see the walk-forward branch above.
+    let symbol = fugazi::types::symbol(&probe_symbol);
+    let snapshots: Vec<fugazi::types::Snapshot<Symbol>> = atoms
         .iter()
         .map(|(_, a)| fugazi::types::Snapshot::single(symbol.clone(), a.clone()))
         .collect();
@@ -423,7 +427,7 @@ fn run_multi_symbol(
     // resolve `left`/`right` and validate every other subgrid picks the same
     // pair (loading multiple pair slices from one frame isn't supported).
     // Basket / multi / portfolio take the frame's whole symbol set.
-    let universe: Vec<String> = match opts.strategy_kind {
+    let universe: Vec<Symbol> = match opts.strategy_kind {
         StrategyKind::Pairs => {
             let probe = build_typed::<PairsStrategySpec>(base_value, &probe_params(&subgrids[0]))?;
             let left = probe.left.clone();
@@ -442,9 +446,9 @@ fn run_multi_symbol(
                     );
                 }
             }
-            vec![left, right]
+            vec![fugazi::types::symbol(&left), fugazi::types::symbol(&right)]
         }
-        _ => frame.symbols(),
+        _ => frame.symbols().iter().map(fugazi::types::symbol).collect(),
     };
     if universe.is_empty() {
         bail!(
@@ -455,7 +459,7 @@ fn run_multi_symbol(
     // Per-symbol atom streams, sorted by time. `DataFrame::atoms` walks a
     // BTreeMap so each per-symbol stream is already ascending; the joiner
     // then N-way merges them into shared bar-tagged snapshots.
-    let per_symbol: Vec<(String, Vec<(String, Atom)>)> = universe
+    let per_symbol: Vec<(Symbol, Vec<(String, Atom)>)> = universe
         .iter()
         .map(|sym| Ok::<_, anyhow::Error>((sym.clone(), frame.atoms(sym)?.atoms)))
         .collect::<Result<_>>()?;
@@ -480,7 +484,7 @@ fn run_multi_symbol(
     let effective_freq = calendar::pick_frequency(opts.frequency, representative).or_else(|| {
         per_symbol
             .iter()
-            .find(|(s, _)| s == representative)
+            .find(|(s, _)| s.as_ref() == representative.as_ref())
             .and_then(|(_, atoms)| {
                 calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a))
             })
@@ -616,8 +620,8 @@ fn run_multi_symbol_walkforward(
     opts: &OptimizeOptions,
     subgrids: Vec<Subgrid>,
     base_value: &Value,
-    snapshots: &[fugazi::types::Snapshot<String>],
-    universe: &[String],
+    snapshots: &[fugazi::types::Snapshot<Symbol>],
+    universe: &[Symbol],
     walkforward_spec: WalkForwardSpec,
     bars_per_year: Real,
     effective_freq: Option<Frequency>,
@@ -632,8 +636,8 @@ fn run_multi_symbol_walkforward(
     // Synthetic single-snapshot probe: one dummy atom per universe symbol
     // so the strategy's per-symbol factories fire on the first update() call.
     // The probe strategy never trades — just exposes stable/warm-up state.
-    let probe_snapshot: fugazi::types::Snapshot<String> = {
-        let mut s = fugazi::types::Snapshot::<String>::new();
+    let probe_snapshot: fugazi::types::Snapshot<Symbol> = {
+        let mut s = fugazi::types::Snapshot::<Symbol>::new();
         let dummy_atom = Atom::new(Candle::new(0.0, 0.0, 0.0, 0.0, 0.0));
         for sym in universe {
             s.push(Some(sym.clone()), None, dummy_atom.clone());
@@ -687,7 +691,7 @@ fn run_multi_symbol_walkforward(
     };
 
     let run_backtest =
-        |params: &HashMap<String, Value>| -> Result<fugazi::RunReport<String>> {
+        |params: &HashMap<String, Value>| -> Result<fugazi::RunReport<Symbol>> {
             let spec = build_any_spec(kind, base_value, params)?;
             backtest::measured_report_any(&spec, snapshots_ref, ctx_ref)
                 .map_err(backtest::build_error)
@@ -1107,7 +1111,7 @@ fn walkforward_run<P, R>(
 ) -> Result<()>
 where
     P: Fn(&HashMap<String, Value>) -> Result<usize> + Sync,
-    R: Fn(&HashMap<String, Value>) -> Result<fugazi::RunReport<String>> + Sync,
+    R: Fn(&HashMap<String, Value>) -> Result<fugazi::RunReport<Symbol>> + Sync,
 {
     let (is_bars, oos_bars, embargo_bars) = spec
         .resolve(effective_freq, asset_class)
