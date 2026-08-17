@@ -1133,7 +1133,8 @@ library so all four sit on one scale:
 
 ![Indicator throughput: fugazi and TA-Lib, relative to native TA-Lib C](docs/assets/performance.svg)
 
-*Lower is better. 200 000 samples, best of three passes.*
+*Lower is better. 200 000 samples, minimum of 7 reps × 5 interleaved passes;
+whiskers run up to the 25th percentile, since contention only ever adds time.*
 
 The chart's common baseline is the C library. For a **Python** user the
 like-for-like comparison is against `talib`, TA-Lib's own bindings, since both
@@ -1141,33 +1142,32 @@ cross a Python boundary — that is the last column:
 
 | | TA-Lib C | fugazi (Rust) | **rs vs C** | `talib` py | fugazi (Python) | **py vs py** |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `sma` | 1.37 | 1.37 | **1.00×** | 1.46 | 4.97 | 3.4× |
-| `ema` | 2.06 | 1.36 | **0.66×** | 2.16 | 4.86 | 2.3× |
-| `rsi` | 4.79 | 4.69 | **0.98×** | 4.98 | 8.47 | 1.7× |
-| `atr` | 4.77 | 4.54 | **0.95×** | 5.52 | 36.56 | 6.6× |
-| `stddev` | 3.33 | 10.61 | 3.19× | 3.56 | 12.77 | 3.6× |
+| `sma` | 1.36 | 1.37 | **1.01×** | 1.43 | 3.65 | 2.56× |
+| `ema` | 2.03 | 1.35 | **0.66×** | 2.11 | 3.55 | 1.69× |
+| `rsi` | 4.67 | 4.65 | **1.00×** | 4.81 | 7.79 | 1.62× |
+| `atr` | 4.74 | 4.38 | **0.92×** | 12.35 | 7.08 | **0.57×** |
+| `stddev` | 3.31 | 9.73 | 2.94× | 3.47 | 11.79 | 3.40× |
 
 ns/sample. The Rust engine is at parity or better on `sma`/`ema`/`rsi`/`atr`
 while staying one-bar-at-a-time, and driving a full backtest allocates **zero
-times per bar** — a 200 000-bar run performs 29 allocations in total.
+times per bar** — a 200 000-bar run performs 29 allocations in total. Through the
+bindings `atr` is **faster than `talib`**, because a frame of OHLC columns is read
+in place and folded once, rather than three arrays being scanned separately.
 
-Two rows are worse, and both are honest:
-
-`atr` **through the Python bindings** is the outlier at 6.6×, and it is not ATR's
-fault — it is the only row fed a *frame* of OHLC columns rather than a 1-D
-series, and that input path never got the buffer-protocol treatment the 1-D one
-did. Measured: `fz.close().feed(frame)` costs 24.3 ns/sample with a trivial
-indicator, against 5.6 for the whole 1-D pipeline. A known, located, unfixed
-gap rather than a mystery.
-
-`stddev` is the one loss, and it is deliberate: fugazi makes a centred pass over
-the window instead of TA-Lib's O(1) `E[X²] − E[X]²` shortcut, which cancels away
-significant digits. At a five-figure price quoted to the cent that shortcut is
-already wrong by 1%, and at `mean = 1e9` it clamps the variance to zero. The
+`stddev` is the one real loss, and it is deliberate: fugazi makes a centred pass
+over the window instead of TA-Lib's O(1) `E[X²] − E[X]²` shortcut, which cancels
+away significant digits. At a five-figure price quoted to the cent that shortcut
+is already wrong by 1%, and at `mean = 1e9` it clamps the variance to zero. The
 tradeoff is [measured, not asserted](docs/PERFORMANCE.md#what-stddev-buys-with-its-2).
 
-Figures from one machine (16 cores, Linux 6.18, rustc 1.95), best of three
-passes. Re-run them with `pixi run -e bench bench` before relying on them —
+The `py vs py` column was between 1.6× and 7.8× until recently. What closed it
+was not the indicator code but the boundary: `feed()` was copying each input
+column out of NumPy into its own buffer, and those copies — not the arithmetic —
+were most of the call. See [docs/PERFORMANCE.md](docs/PERFORMANCE.md) for why
+instruction counting could not see that and wall-clock could.
+
+Figures from one machine (16 cores, Linux 6.18, rustc 1.95). Re-run them with
+`pixi run -e bench bench` before relying on them —
 and read [docs/PERFORMANCE.md](docs/PERFORMANCE.md) first if you intend to
 benchmark this yourself, because most of that document is the measurement
 mistakes this project has already made and how they were caught.

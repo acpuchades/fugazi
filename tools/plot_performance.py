@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Render the TA-Lib comparison as an SVG bar chart for the README.
 
-Run after `pixi run -e bench bench`, with the numbers from that run pasted into
-`ROWS` below:
+    pixi run -e bench bench            # writes docs/assets/performance-samples.json
+    python3 tools/plot_performance.py  # reads it, writes docs/assets/performance.svg
 
-    python3 tools/plot_performance.py
+**The numbers are read from the samples file, never typed here.** An earlier
+version held a hand-pasted `ROWS` table, which drifted: it still claimed 4.97
+ns/sample for `sma` through the bindings long after the real figure had moved,
+and comparing against it manufactured a phantom regression. The benchmark already
+writes every raw sample; the chart reads the same file.
 
-Why hand-rolled SVG rather than matplotlib: no dependency (this has to run from
-a bare checkout), no fonts baked into paths, and full control over the two things
+Why hand-rolled SVG rather than matplotlib: no dependency (this has to run from a
+bare checkout), no fonts baked into paths, and full control over the two things
 that actually matter for a README image —
 
   * **Dark mode.** GitHub serves the same file on a white and a near-black
@@ -15,50 +19,41 @@ that actually matter for a README image —
     background fill, and every label uses one mid-grey (`#8b949e`) that stays
     legible on both. Do not "fix" it to a darker grey; it will vanish for half
     the readers.
-  * **Being diffable.** The input is a literal table and the output is text, so a
-    number changing shows up in review as a number changing.
+  * **Being diffable.** The output is text, so a number changing shows up in
+    review as a number changing.
 
 All four bars are normalised to **native TA-Lib C**, so every tier sits on one
 scale and `1.0x` reads as "as fast as the C library". Note this is *not* the
 like-for-like ratio for the Python bindings — a Python user should compare
 against `talib`, which is the `py vs py` column of the README table. The chart
 answers "where does everything sit?"; the table answers "what do I give up?".
-
-`ROWS` holds **absolute ns/sample** and the ratios are derived here, on purpose:
-hand-typed ratios are a second place for a number to be wrong.
 """
 
 from __future__ import annotations
 
+import json
 import os
 
-OUT = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "docs", "assets", "performance.svg",
-)
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SAMPLES = os.path.join(REPO, "docs", "assets", "performance-samples.json")
+OUT = os.path.join(REPO, "docs", "assets", "performance.svg")
 
-# ns/sample: (indicator, TA-Lib C, fugazi rs, talib py, fugazi py).
-# 200 000 samples, median of 7, best of 3 passes, from `pixi run -e bench bench`.
+# Row order, and the order bars appear within a row. Each library sits next to
+# its own counterpart, so the two comparisons that mean something read straight
+# off adjacent bars — native against native, then Python against Python.
+# Interleaving them by language instead makes the reader do the pairing.
 #
-# The order is the point: each library is next to its own counterpart, so the
-# two comparisons that mean something read straight off adjacent bars — native
-# against native, then Python against Python. Interleaving them by language
-# instead makes the reader do the pairing.
-ROWS: list[tuple[str, float, float, float, float]] = [
-    ("sma",    1.37, 1.37, 1.46, 4.97),
-    ("ema",    2.06, 1.36, 2.16, 4.86),
-    ("rsi",    4.79, 4.69, 4.98, 8.47),
-    ("atr",    4.77, 4.54, 5.52, 36.56),
-    ("stddev", 3.33, 10.61, 3.56, 12.77),
-]
-
-# Must stay aligned with `ROWS`' value order.
+# Colour is by *library*, not by tier: one hue for TA-Lib, one for fugazi, the
+# native build darker than the Python binding in each. So "which library" is the
+# hue and "native or bindings" is the shade, and the eye groups the pairs without
+# consulting the legend.
 SERIES = [
-    ("TA-Lib (C)", "#8b949e"),
-    ("fugazi (Rust)", "#2f81f7"),
-    ("talib (Python)", "#d29922"),
-    ("fugazi (Python)", "#a371f7"),
+    ("talib_c", "TA-Lib (C)", "#9e6a03"),
+    ("fugazi_rs", "fugazi (Rust)", "#1f6feb"),
+    ("talib_py", "talib (Python)", "#e3b341"),
+    ("fugazi_py", "fugazi (Python)", "#79c0ff"),
 ]
+INDICATORS = ["sma", "ema", "rsi", "atr", "stddev"]
 
 W = 780
 LEFT, RIGHT, TOP = 78, 40, 76
@@ -66,22 +61,58 @@ BAR_H, GAP = 11, 3
 ROW_H = len(SERIES) * (BAR_H + GAP) + 15
 
 INK = "#8b949e"          # legible on white and on #0d1117
-MARK = "#d29922"
 
-# Clipped rather than scaled to the maximum: `atr` through the Python bindings is
-# 7.7x, and letting it set the axis would squash every other bar into
-# illegibility. A clipped bar keeps its real number and gets a caret.
-XMAX = 4.5
+# No clipping needed at the current numbers (the largest bar is ~3.6x), but the
+# caret logic stays: a future regression should read as clipped rather than as
+# exactly XMAX.
+XMAX = 4.0
 PLOT_W = W - LEFT - RIGHT
-H = TOP + len(ROWS) * ROW_H + 34
 
 
 def x(ratio: float) -> float:
     return LEFT + min(ratio, XMAX) / XMAX * PLOT_W
 
 
+def percentile(sorted_vals: list[float], p: float) -> float:
+    """Linear-interpolated percentile, `p` in [0, 1]. Matches R type 7."""
+    if not sorted_vals:
+        return 0.0
+    if len(sorted_vals) == 1:
+        return sorted_vals[0]
+    h = (len(sorted_vals) - 1) * p
+    lo = int(h)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    return sorted_vals[lo] + (h - lo) * (sorted_vals[hi] - sorted_vals[lo])
+
+
 def main() -> int:
-    os.makedirs(os.path.dirname(OUT), exist_ok=True)
+    if not os.path.exists(SAMPLES):
+        raise SystemExit(
+            f"{os.path.relpath(SAMPLES, REPO)} not found — run `pixi run -e bench bench` first"
+        )
+    with open(SAMPLES) as f:
+        blob = json.load(f)
+    data = blob["samples"]
+    n = blob["n"]
+
+    # The benchmark reports the *minimum*: contention only ever adds time, so the
+    # fastest observation is the closest to the machine's actual capability.
+    # The whisker therefore runs one way only — from that minimum up to the 25th
+    # percentile, i.e. "the bar is the best case, a quarter of runs land by here".
+    # A symmetric error bar would imply the mean is the estimate, which it is not.
+    stat: dict[str, dict[str, tuple[float, float]]] = {}
+    for key, _, _ in SERIES:
+        stat[key] = {}
+        for ind in INDICATORS:
+            vals = sorted(data.get(key, {}).get(ind, []))
+            if vals:
+                stat[key][ind] = (vals[0], percentile(vals, 0.25))
+
+    rows = [i for i in INDICATORS if i in stat["talib_c"]]
+    if not rows:
+        raise SystemExit("no overlapping indicators in the samples file")
+
+    H = TOP + len(rows) * ROW_H + 34
     p: list[str] = []
     add = p.append
 
@@ -91,7 +122,7 @@ def main() -> int:
     add('<title>fugazi vs TA-Lib throughput, lower is better</title>')
 
     # Legend: two rows of two. Four on one line does not fit at this width.
-    for i, (label, colour) in enumerate(SERIES):
+    for i, (_, label, colour) in enumerate(SERIES):
         cx = LEFT + (i % 2) * 200
         cy = 14 + (i // 2) * 20
         add(f'<rect x="{cx}" y="{cy}" width="10" height="10" rx="2" fill="{colour}"/>')
@@ -100,48 +131,77 @@ def main() -> int:
     # at the top and with the axis labels at the bottom, and as markdown beside
     # the image it is selectable, translatable and readable by a screen reader.
 
-    # Gridlines + x labels
+    # Plain gridlines. The 1.0x line used to be drawn dashed and highlighted as
+    # "= TA-Lib C"; with the TA-Lib C bar itself in every row that was labelling
+    # the same fact twice, so it is an ordinary gridline now.
     for g in (1, 2, 3, 4):
         gx = x(g)
-        is_ref = g == 1
         add(f'<line x1="{gx:.1f}" y1="{TOP - 8}" x2="{gx:.1f}" y2="{H - 30}" '
-            f'stroke="{MARK if is_ref else INK}" stroke-width="{1.5 if is_ref else 0.5}" '
-            f'{"stroke-dasharray=\"4 3\"" if is_ref else "opacity=\"0.35\""}/>')
-        label = "1.0x = TA-Lib C" if is_ref else f"{g}.0x"
-        add(f'<text x="{gx:.1f}" y="{H - 14}" fill="{MARK if is_ref else INK}" '
-            f'text-anchor="middle">{label}</text>')
+            f'stroke="{INK}" stroke-width="0.5" opacity="0.35"/>')
+        add(f'<text x="{gx:.1f}" y="{H - 14}" fill="{INK}" '
+            f'text-anchor="middle">{g}.0x</text>')
 
-    for i, (name, *vals) in enumerate(ROWS):
+    for i, name in enumerate(rows):
         y0 = TOP + i * ROW_H
-        base = vals[0]
+        base = stat["talib_c"][name][0]
         add(f'<text x="{LEFT - 10}" y="{y0 + 2 * (BAR_H + GAP) + 2}" fill="{INK}" '
             f'text-anchor="end" font-family="ui-monospace,SFMono-Regular,'
             f'Consolas,monospace">{name}</text>')
 
-        for j, (ns, (_, colour)) in enumerate(zip(vals, SERIES)):
-            val = ns / base
+        for j, (key, _, colour) in enumerate(SERIES):
+            if name not in stat[key]:
+                continue
+            lo, p25 = stat[key][name]
+            val = lo / base
             by = y0 + j * (BAR_H + GAP)
             w = max(x(val) - LEFT, 1.0)
             add(f'<rect x="{LEFT}" y="{by}" width="{w:.1f}" height="{BAR_H}" '
                 f'rx="2" fill="{colour}"/>')
-            # Clipped bars get a caret so a value past the axis reads as clipped
-            # rather than as exactly 4.0.
+
+            # Upward whisker to the 25th percentile, drawn only when it is wide
+            # enough to mean anything at this scale.
+            wx = x(p25 / base)
+            if wx - (LEFT + w) > 1.5:
+                cy = by + BAR_H / 2
+                add(f'<line x1="{LEFT + w:.1f}" y1="{cy:.1f}" x2="{wx:.1f}" y2="{cy:.1f}" '
+                    f'stroke="{INK}" stroke-width="1" opacity="0.8"/>')
+                add(f'<line x1="{wx:.1f}" y1="{by + 2:.1f}" x2="{wx:.1f}" '
+                    f'y2="{by + BAR_H - 2:.1f}" stroke="{INK}" stroke-width="1" '
+                    f'opacity="0.8"/>')
+
             clipped = val > XMAX
             text = f'{val:.2f}x{" &#8250;" if clipped else ""}'
             # Inside the bar when it is wide enough, outside when it is not.
-            # Outside-only put short bars' labels on top of the parity line.
             if w > 52:
                 add(f'<text x="{LEFT + w - 5:.1f}" y="{by + BAR_H - 1}" '
                     f'fill="#ffffff" text-anchor="end" font-size="11">{text}</text>')
             else:
-                add(f'<text x="{LEFT + w + 5:.1f}" y="{by + BAR_H - 1}" '
+                add(f'<text x="{max(wx, LEFT + w) + 5:.1f}" y="{by + BAR_H - 1}" '
                     f'fill="{INK}" font-size="11">{text}</text>')
 
     add('</svg>')
 
     with open(OUT, "w") as f:
         f.write("\n".join(p) + "\n")
-    print(f"wrote {OUT}")
+    print(f"wrote {OUT} from {len(rows)} indicators, n = {n:,}")
+
+    # Echo the table so the README can be updated from the same source of truth.
+    print()
+    hdr = f"{'indicator':10s}" + "".join(f"{label:>16s}" for _, label, _ in SERIES)
+    print(hdr)
+    for name in rows:
+        line = f"{name:10s}"
+        for key, _, _ in SERIES:
+            line += f"{stat[key][name][0]:16.2f}" if name in stat[key] else f"{'--':>16s}"
+        print(line)
+    print()
+    print(f"{'indicator':10s}{'rs vs C':>10s}{'py vs py':>10s}")
+    for name in rows:
+        c = stat["talib_c"][name][0]
+        rs = stat["fugazi_rs"][name][0]
+        tp = stat["talib_py"][name][0]
+        fp = stat["fugazi_py"][name][0]
+        print(f"{name:10s}{rs / c:9.2f}x{fp / tp:9.2f}x")
     return 0
 
 

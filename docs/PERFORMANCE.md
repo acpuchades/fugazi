@@ -31,6 +31,14 @@ that the assertion has been quietly hollowed out.
 | One bench group | `cargo bench --bench tree` |
 | Allocations/bar, bytes/bar, peak RSS | `cargo bench --bench footprint` |
 | Instruction counts (deterministic) | `scripts/perf-compare.sh icount` |
+| Instructions/sample **through Python**, vs `talib` | `pixi run -e bench python3 tools/icount_python.py` |
+| Wall-clock, all four tiers | `pixi run -e bench bench`, then `python3 tools/plot_performance.py` |
+
+**The two Python instruments answer different questions and will not agree.**
+`icount_python.py` is deterministic and contention-immune but cannot see page
+faults; `bench_three_tier.py` sees time but needs a quiet machine. Phase 8 below
+is the case where they pointed opposite ways and the time-based one was right —
+read that before trusting either alone.
 
 criterion prints a significance verdict per benchmark against a saved baseline,
 so a move inside the noise reads as "No change in performance" rather than as a
@@ -599,6 +607,12 @@ Not everything should move, and two things deliberately have not:
 
 ## Plan — making the Python bindings efficient
 
+> **Superseded by Phase 8**, which found that most of what this plan set out to
+> attribute was page faults from copying the input columns. P1 and P2 below did
+> land and did help; P3 was measured and dismissed as negligible on an
+> instruction count that could not see the real cost. Kept as the record of how
+> the reasoning went, not as a to-do list.
+
 The bindings are the crate's primary interface and its worst tier: 3.4x `talib`
 on the scalar path and 6.5-9.9x on the candle path. This is the prioritised
 account of *why*, measured rather than guessed, and what to do in what order.
@@ -942,7 +956,113 @@ is this table as a chart (`tools/plot_performance.py`), normalised to the C colu
 The **Rust** engine is at parity or better on `sma`/`ema`/`rsi`/`atr` against the
 C library itself, while staying incremental. `stddev` is the deliberate loss.
 
-### The candle-frame input path — 24 ns/sample, unfixed
+### Phase 8 — the input columns were being copied, and that was most of the cost
+
+**This is the largest single win on the Python side, and the one that had been
+sitting in plain sight the longest.** Everything in the two sections below it was
+measured before it and remains true as history; the numbers there are superseded.
+
+`feed()` asked Python for each column's contiguous `float64` buffer and then
+copied it into a Rust `Vec<f64>` — five copies for an OHLCV frame. It now reads
+Python's memory in place ([`Column`] in `python/src/constructors.rs`).
+
+The copy had a written justification, and the justification was false:
+
+> Keep the columns owned (not borrowed from Python) — the buffer fast path in
+> `column_to_vec` already copied them, and holding Python buffers alive across
+> `update` calls would pin the GIL to the whole loop.
+
+`feed` is a `#[pyfunction]`. It holds the GIL for its entire duration either way.
+A constraint that never existed was written down as a reason, and then nobody —
+including me, for most of two sessions — went back and checked it.
+
+#### What it cost
+
+| | ns/sample |
+|---|---:|
+| `close().feed(frame)` | 24.51 |
+| four 1.6 MB array copies, alone | 15.95 |
+| allocating **and touching** the output array | 0.18 |
+
+Two thirds of the call. And **not the `memcpy`** — the page faults. A 1.6 MB
+allocation is well past glibc's `mmap` threshold, so each is fresh anonymous
+memory the kernel faults in a page at a time and reclaims on free, to be faulted
+again on the next call. The give-away is that *one* copy is nearly free (0.21
+ns/sample — glibc recycles a single hot block) while *four* cost 16.
+
+The confirming experiment, before any code changed: re-running with
+`MALLOC_MMAP_THRESHOLD_` raised, so big blocks stay on the heap and stay faulted
+between calls, made `close().feed(frame)` **7.8× faster on its own**. That is not
+something a library may ask of its host process, so the allocation had to go
+instead.
+
+#### Result
+
+| ns/sample | before | after | |
+|---|---:|---:|---:|
+| `close()` on a frame | 27.16 | **4.38** | 6.2× |
+| `sma(close())` on a frame | 30.04 | **7.72** | 3.9× |
+| `sma(identity())` on a 1-D array | 13.61 | **5.15** | 2.6× |
+| `atr(14)` on a frame | 36.90 | **14.62** | 2.5× |
+
+`py vs py`, against `talib`'s own bindings:
+
+| | before | after |
+|---|---:|---:|
+| `sma` | 7.81× | **2.56×** |
+| `ema` | 5.17× | **1.69×** |
+| `rsi` | 3.08× | **1.62×** |
+| `stddev` | 5.42× | **3.40×** |
+| `atr` | 2.07× | **0.57×** — faster than `talib` |
+
+#### Two more instances of the same mistake
+
+Found by asking "where else?" rather than by profiling:
+
+* **`build_bools`** was `np.asarray(vec_of_bool)`, and **`build_multi`** was
+  `asarray(&[f64])` per line. Both route through pyo3's sequence conversion, so a
+  200 000-bar signal materialised 200 000 Python `bool` objects and a three-line
+  indicator 600 000 `float`s — for NumPy to parse straight back out. That exact
+  spelling was **already documented as rejected a few lines above**, for floats
+  only. Both now fill a NumPy buffer directly.
+* **`fugazi.metrics`** took `Vec<Real>` arguments. pyo3 fills a `Vec<f64>` by
+  walking the object with the sequence protocol and calling `extract` per
+  element, so a NumPy array was taken apart one `float` at a time. The tell was
+  that an `ndarray` and a `list` cost *the same* — 44.79 vs 45.68 ns/sample —
+  which means there was no fast path for the array at all. A `Series` newtype
+  with a `FromPyObject` impl fixed 26 signatures at once:
+
+  | | before | after | |
+  |---|---:|---:|---:|
+  | `metrics.sharpe(ndarray)` | 44.79 | **2.54** | 17.6× |
+  | `metrics.ulcer_index(ndarray)` | 42.81 | **1.62** | 26.4× |
+  | `metrics.sharpe(list)` | 45.68 | 39.85 | 1.1× |
+
+  A `list` has no buffer to borrow and still goes element-wise; that path is for
+  correctness, not speed. The array/list gap *appearing* is the confirmation.
+
+#### The methodological lesson, which is the expensive part
+
+The change immediately before this one cut instructions per sample and made
+wall-clock **worse**, and I spent real effort trying to reconcile that as a
+contradiction. It is not one: **instruction counting is blind to page faults.**
+A fault retires almost no instructions and burns thousands of cycles.
+`close().feed(frame)` was running at an IPC of roughly 0.4 — the CPU was stalled,
+not working — and no amount of `callgrind` would have said so.
+
+That is why both instruments are kept, and why they disagree by design:
+
+* `tools/icount_python.py` — deterministic, contention-immune, sees *work*.
+  Use it for "did this change the amount of computing".
+* `tools/bench_three_tier.py` — noisy, needs a quiet machine, sees *time*.
+  Use it for "does this help a user".
+
+The deeper miss is that none of it needed a profiler. Copying 8 MB per call, to
+read data that was already contiguous and already in memory, is visibly wrong on
+inspection. I ranked it third on the strength of an instruction count that said
+5.1/sample, when reading the code should have ranked it first.
+
+### The candle-frame input path — 24 ns/sample (superseded by Phase 8)
 
 The `atr` row through the Python bindings is 6.6×, against 1.7–3.6× for
 everything else. It is not ATR's fault, and finding out why took asking why the
@@ -1074,6 +1194,9 @@ with the benches named.
 | 14 | `runtime/chain.rs` | `Chain<In, Out>` keeps the domain **in the type** instead of in the value | `PayloadValue` is 88 bytes (as wide as its `Atom` variant) and crossed the boundary twice per expression level: **+13.7 ns/level**, against +2.5 for a `Chain`. Adding a payload enum back to recover self-description undoes the whole of Phase 6. |
 | 15 | `runtime/chain.rs` | `Erased<I>` is an explicit adapter, not a blanket `impl<T: Indicator> DynIndicator for T` | A blanket impl shadows the compiler's automatic `impl Trait for dyn Trait`, and `Clone for Chain` needs that to reach `dyn_clone` through the vtable. The retiring `Adapter` sidesteps the same problem the same way. |
 | 16 | `runtime/chain.rs` | `impl Indicator for Box<dyn DynIndicator<In, Out>>` | Without it every consumer needs a newtype (`TypedSource`, `As<Out>`) just to reattach the associated types — which is the only reason those existed. It is what made a ~150-site migration mechanical. |
+| 17 | `python/src/constructors.rs` | `Column` **borrows** NumPy's buffer; nothing copies an input column | Copying five 1.6 MB columns per `feed()` was two thirds of the call — as page faults, not `memcpy` (a 1.6 MB block is past glibc's `mmap` threshold, so it is faulted in fresh and reclaimed on free every call). Phase 8. The GIL is held for all of `feed` regardless, so borrowing costs nothing. |
+| 18 | `python/src/constructors.rs` | Every output array is `np.empty` + fill-in-place (`numpy_filled` / `numpy_bools`) | `np.asarray(vec)` routes through pyo3's sequence conversion — one Python `float`/`bool` object per element for NumPy to immediately parse back out. Three separate places had this; `build_bools` and `build_multi` kept it for a year *below* the comment explaining why it was wrong for floats. |
+| 19 | `python/src/constructors.rs` | `Series` newtype for bulk numeric **arguments**, not `Vec<Real>` | Same failure on the way in: pyo3 fills a `Vec<f64>` element-by-element via the sequence protocol, so `metrics.sharpe` spent 44.79 ns/sample of a ~2 ns computation at the boundary. The tell was `ndarray` and `list` costing the same. |
 
 ### Things that were tried and did **not** work
 
@@ -1091,11 +1214,31 @@ Recorded so they are not re-attempted:
   ~3%, inside the noise.
 * **`E[X²] − E[X]²` for variance.** See the `stddev` section — 4.06× faster and
   wrong by 6000% at high price scale.
+* **Replacing `CandleColumns::for_each`'s nested zips with an indexed loop**, every
+  slice re-cut to `[..n]` first so the five bounds checks would provably fold
+  away. It compiles to the *same machine code*: `close`, `sma` and `atr` all
+  measured identical to the hundredth of an instruction per sample (38.57 / 79.58
+  / 81.23) before and after. LLVM already canonicalises both forms to one
+  induction variable.
+* **Batching the erasure boundary** — handing the erased chain a *slice* of
+  candles so the loop runs on its side of the vtable, one indirect call per 64
+  bars instead of per bar. **1.2 instructions/bar slower**
+  (`benches/icount.rs`, `sma_dyn_per_sample` vs `sma_dyn_batch`). An indirect call
+  with a predictable target is about two instructions; what an erased level
+  actually costs is its wrapper, its `Option` handling and the 40-byte `Candle`
+  move, none of which batching removes — and the chunk bookkeeping then exceeds
+  the calls it saves. This is why no such method exists on `DynIndicator`.
+
+  Worth contrasting with **fusing** the field leaf into its wrapper
+  (`sma_two_levels` vs `sma_fused`), which *is* worth 9.0 instructions/bar,
+  because it deletes a level rather than re-arranging when it is entered. Not
+  implemented: it needs an `AnySource::Field` carrier variant threaded through
+  every constructor macro, for ~11% on chains rooted directly at a bar field.
 
 ### How to measure without fooling yourself
 
-Seven traps, each of which produced a wrong answer in this codebase before it
-was caught. Note that **four of the seven are "you measured a stale binary"** —
+Nine traps, each of which produced a wrong answer in this codebase before it
+was caught. Note that **five of the nine are "you measured a stale binary"** —
 by far the most common way to be confidently wrong here.
 
 1. **`maturin develop` builds *debug*.** It is 7–10× slower than release and
@@ -1138,6 +1281,28 @@ by far the most common way to be confidently wrong here.
    include a workload the change *cannot* affect, and check it reads zero.)
    `scripts/perf-compare.sh` now deletes bench binaries before each variant
    build and refuses to guess when more than one matches, on every subcommand.
+
+8. **Instruction counting is blind to page faults**, and page faults were the
+   largest cost in the Python bindings for the whole of Phases 1–7. A fault
+   retires almost no instructions and burns thousands of cycles, so `callgrind`
+   sees an allocation-heavy boundary as nearly free. The symptom that finally
+   gave it away: a change that *reduced* instructions per sample made wall-clock
+   *worse*, which read as a contradiction for far too long. If a workload's
+   instruction count and its time disagree in direction, suspect memory —
+   `/usr/bin/time -v` minor faults, or re-run with `MALLOC_MMAP_THRESHOLD_`
+   raised and see whether the difference evaporates.
+9. **Sizing a differential against its noise floor.** `tools/icount_python.py`
+   subtracts two runs of the same script at `n` and `2n` iterations, which
+   cancels interpreter startup exactly. Two identical Python processes still
+   differ by ~1 M instructions out of ~834 M with `PYTHONHASHSEED` fixed, and
+   ~7 M without — so a workload contributing less than that yields nonsense. The
+   first version reported **−42.50 instructions/sample for `talib.SMA`**, a
+   negative number, because at `n=4` its whole contribution was the size of the
+   noise. Two things had to be pinned to get 0.00 on the control: the hash seed,
+   and OpenBLAS's spinning thread pool — `blas_thread_server` was retiring
+   **36.7% of the entire profile** doing nothing, and worse, it grows with how
+   long the process lives, so it landed in the differential as if it were the
+   measured code.
 
 The general defence, and the one that actually caught trap 3: **measure the same
 quantity by paths that share as little as possible.** Phase 6's per-level cost
