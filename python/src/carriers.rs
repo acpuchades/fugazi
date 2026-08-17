@@ -98,74 +98,94 @@ pub(crate) type StrSource<I> = runtime::Chain<I, Arc<str>>;
 /// Maps a multi-output value struct to its line names and their values (in the
 /// same order). The names are available without an instance so warm-up rows can
 /// still be placed in the right column.
+///
+/// `write_into` rather than `-> Vec<Real>` because this is called **once per
+/// bar**: a `vec![self.macd, self.signal, self.histogram]` per bar is 200 000
+/// heap allocations for a 200 000-bar frame, of three `f64` each. That is the
+/// same allocator pressure that turned out to dominate the scalar path (see
+/// `Column` in `constructors.rs`), just spread over many small blocks instead of
+/// a few large ones. The caller keeps one scratch buffer and reuses it.
 pub(crate) trait MultiOutput {
     fn names() -> &'static [&'static str]
     where
         Self: Sized;
-    fn values(&self) -> Vec<Real>;
+
+    /// Append this value's lines to `out`, in `names()` order.
+    fn write_into(&self, out: &mut Vec<Real>);
+
+    /// Allocating form, for the one-shot `value()` accessor where a per-call
+    /// `Vec` is not on any hot path.
+    fn values(&self) -> Vec<Real> {
+        let mut out = Vec::new();
+        self.write_into(&mut out);
+        out
+    }
 }
 
 impl MultiOutput for MacdValue {
     fn names() -> &'static [&'static str] {
         &["macd", "signal", "histogram"]
     }
-    fn values(&self) -> Vec<Real> {
-        vec![self.macd, self.signal, self.histogram]
+    fn write_into(&self, out: &mut Vec<Real>) {
+        out.extend_from_slice(&[self.macd, self.signal, self.histogram]);
     }
 }
 impl MultiOutput for BollingerValue {
     fn names() -> &'static [&'static str] {
         &["upper", "middle", "lower"]
     }
-    fn values(&self) -> Vec<Real> {
-        vec![self.upper, self.middle, self.lower]
+    fn write_into(&self, out: &mut Vec<Real>) {
+        out.extend_from_slice(&[self.upper, self.middle, self.lower]);
     }
 }
 impl MultiOutput for KeltnerValue {
     fn names() -> &'static [&'static str] {
         &["upper", "middle", "lower"]
     }
-    fn values(&self) -> Vec<Real> {
-        vec![self.upper, self.middle, self.lower]
+    fn write_into(&self, out: &mut Vec<Real>) {
+        out.extend_from_slice(&[self.upper, self.middle, self.lower]);
     }
 }
 impl MultiOutput for DonchianValue {
     fn names() -> &'static [&'static str] {
         &["upper", "middle", "lower"]
     }
-    fn values(&self) -> Vec<Real> {
-        vec![self.upper, self.middle, self.lower]
+    fn write_into(&self, out: &mut Vec<Real>) {
+        out.extend_from_slice(&[self.upper, self.middle, self.lower]);
     }
 }
 impl MultiOutput for AdxValue {
     fn names() -> &'static [&'static str] {
         &["plus_di", "minus_di", "adx"]
     }
-    fn values(&self) -> Vec<Real> {
-        vec![self.plus_di, self.minus_di, self.adx]
+    fn write_into(&self, out: &mut Vec<Real>) {
+        out.extend_from_slice(&[self.plus_di, self.minus_di, self.adx]);
     }
 }
 impl MultiOutput for DmiValue {
     fn names() -> &'static [&'static str] {
         &["plus_di", "minus_di"]
     }
-    fn values(&self) -> Vec<Real> {
-        vec![self.plus_di, self.minus_di]
+    fn write_into(&self, out: &mut Vec<Real>) {
+        out.extend_from_slice(&[self.plus_di, self.minus_di]);
     }
 }
 impl MultiOutput for AroonValue {
     fn names() -> &'static [&'static str] {
         &["up", "down", "oscillator"]
     }
-    fn values(&self) -> Vec<Real> {
-        vec![self.up, self.down, self.oscillator]
+    fn write_into(&self, out: &mut Vec<Real>) {
+        out.extend_from_slice(&[self.up, self.down, self.oscillator]);
     }
 }
 
 /// Object-safe shim over any multi-output `I`-input indicator.
 pub(crate) trait DynMulti<I>: Send + Sync {
     fn names(&self) -> &'static [&'static str];
-    fn update(&mut self, input: I) -> Option<Vec<Real>>;
+    /// Advance one sample, writing the produced lines into `out` (cleared first)
+    /// and returning whether there were any. `out` is the caller's reused
+    /// scratch — see [`MultiOutput`] for why this is not `-> Option<Vec<Real>>`.
+    fn update_into(&mut self, input: I, out: &mut Vec<Real>) -> bool;
     fn value(&self) -> Option<Vec<Real>>;
     fn warm_up_bars(&self) -> usize;
     fn unstable_bars(&self) -> usize;
@@ -184,8 +204,15 @@ where
     fn names(&self) -> &'static [&'static str] {
         <T::Output as MultiOutput>::names()
     }
-    fn update(&mut self, input: I) -> Option<Vec<Real>> {
-        Indicator::update(self, input).map(|o| o.values())
+    fn update_into(&mut self, input: I, out: &mut Vec<Real>) -> bool {
+        out.clear();
+        match Indicator::update(self, input) {
+            Some(o) => {
+                o.write_into(out);
+                true
+            }
+            None => false,
+        }
     }
     fn value(&self) -> Option<Vec<Real>> {
         Indicator::value(self).map(|o| o.values())
@@ -299,7 +326,11 @@ impl<I> MultiBox<I> {
 pub(crate) struct SharedMultiCell<I> {
     pub(crate) multi: Box<dyn DynMulti<I>>,
     pub(crate) generation: u64,
-    pub(crate) last_output: Option<Vec<Real>>,
+    /// The last output's lines, and whether there were any. Kept as a reused
+    /// buffer rather than `Option<Vec<Real>>` so driving the underlying multi
+    /// does not allocate once per bar; `Vec::clear` retains the capacity.
+    pub(crate) last_output: Vec<Real>,
+    pub(crate) last_valid: bool,
     pub(crate) names: &'static [&'static str],
 }
 
@@ -337,12 +368,17 @@ impl<I: Clone + Send + Sync + 'static> Indicator for SharedProjector<I> {
             .expect("shared multi-output cell mutex poisoned");
         if self.local_gen == cell.generation {
             // First projector-of-this-bar drives the underlying multi.
-            let out = cell.multi.update(input);
-            cell.last_output = out;
+            // One deref of the guard, then three disjoint field borrows.
+            let cell = &mut *cell;
+            cell.last_valid = cell.multi.update_into(input, &mut cell.last_output);
             cell.generation = cell.generation.wrapping_add(1);
         }
         self.local_gen = cell.generation;
-        self.last_value = cell.last_output.as_ref().map(|v| v[self.field_index]);
+        self.last_value = if cell.last_valid {
+            Some(cell.last_output[self.field_index])
+        } else {
+            None
+        };
         self.last_value
     }
 
@@ -375,7 +411,8 @@ impl<I: Clone + Send + Sync + 'static> Indicator for SharedProjector<I> {
             .lock()
             .expect("shared multi-output cell mutex poisoned");
         cell.multi.reset();
-        cell.last_output = None;
+        cell.last_output.clear();
+        cell.last_valid = false;
         // Leave `generation` alone; all sibling projectors will re-sync via
         // the usual `local_gen < generation → read cached` path.
         self.local_gen = cell.generation;
@@ -1027,25 +1064,127 @@ impl AnyMulti {
 
     /// Dispatch a frame of samples through the domain the multi lives in,
     /// producing one `Option<Vec<Real>>` per bar (`None` while warming up).
+    ///
+    /// **A new `AnyMulti` variant needs an arm here *and* in
+    /// [`feed_into_columns`](Self::feed_into_columns)** — same standing
+    /// duplication as `AnySource`, same reason, and this one likewise exists only
+    /// for the no-NumPy fallback.
     pub(crate) fn feed_rows(&mut self, data: &Bound<'_, PyAny>) -> PyResult<Vec<Option<Vec<Real>>>> {
         let py = data.py();
-        Ok(match self {
+        // One scratch buffer, cloned per produced row. The clone is unavoidable
+        // here because the caller wants owned rows; the *repeated allocation
+        // inside the multi* is what `update_into` removes.
+        let mut scratch: Vec<Real> = Vec::new();
+        let mut rows = Vec::new();
+        macro_rules! drive {
+            ($m:expr, $input:expr) => {{
+                if $m.update_into($input, &mut scratch) {
+                    rows.push(Some(scratch.clone()));
+                } else {
+                    rows.push(None);
+                }
+            }};
+        }
+        match self {
             AnyMulti::Atom(m) => {
                 let cols = columns_from_frame(data)?;
-                let mut out = Vec::with_capacity(cols.len(py));
-                cols.for_each(py, |c| out.push(m.0.update(c.into())));
-                out
+                rows.reserve(cols.len(py));
+                cols.for_each(py, |c| drive!(m.0, c.into()));
             }
             AnyMulti::Real(m) => {
                 let xs = reals_from_series(data)?;
-                let mut out = Vec::with_capacity(xs.len(py));
-                xs.for_each(py, |x| out.push(m.0.update(x)));
-                out
+                rows.reserve(xs.len(py));
+                xs.for_each(py, |x| drive!(m.0, x));
             }
-            AnyMulti::Snapshot(m) => snapshots_from_sequence(data)?
-                .into_iter()
-                .map(|snap| m.0.update(snap))
-                .collect(),
+            AnyMulti::Snapshot(m) => {
+                for snap in snapshots_from_sequence(data)? {
+                    drive!(m.0, snap);
+                }
+            }
+        }
+        Ok(rows)
+    }
+
+    /// Fold the frame straight into **one NumPy array per output line**.
+    ///
+    /// The multi-output twin of `AnySource::feed_into_numpy`, and it removes two
+    /// costs rather than one:
+    ///
+    /// * **A heap allocation per bar.** Each `update` used to return a fresh
+    ///   `Vec<Real>` of two or three `f64` — 200 000 tiny allocations for a
+    ///   200 000-bar frame. See [`MultiOutput`].
+    /// * **The transpose.** `build_multi` collected row-major
+    ///   `Vec<Option<Vec<Real>>>` and then rebuilt it column-major, so the whole
+    ///   result was materialised twice before NumPy saw any of it. Writing
+    ///   column-major as values are produced skips both copies.
+    ///
+    /// Warm-up rows become `NaN` in every column, which is what `build_multi`
+    /// did with its `None`s.
+    pub(crate) fn feed_into_columns<'py>(
+        &mut self,
+        py: Python<'py>,
+        data: &Bound<'py, PyAny>,
+    ) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        let lines = self.names().len();
+        let mut scratch: Vec<Real> = Vec::with_capacity(lines);
+
+        // Allocate every column first, then borrow all of their buffers at once.
+        // The buffers must outlive the slices, hence the two bindings.
+        let n = self.row_count(py, data)?;
+        let arrays = (0..lines)
+            .map(|_| empty_f64_array(py, n))
+            .collect::<PyResult<Vec<_>>>()?;
+        let buffers = arrays
+            .iter()
+            .map(pyo3::buffer::PyBuffer::<f64>::get)
+            .collect::<PyResult<Vec<_>>>()?;
+        let columns = buffers
+            .iter()
+            .map(|b| {
+                b.as_mut_slice(py)
+                    .ok_or_else(|| PyTypeError::new_err("numpy array is not writable"))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+
+        // `row` is bumped by the closure, so the write index is shared across
+        // every column and stays in step with the input.
+        let mut row = 0usize;
+        macro_rules! drive {
+            ($m:expr, $input:expr) => {{
+                let ok = $m.update_into($input, &mut scratch);
+                for (j, col) in columns.iter().enumerate() {
+                    if row < col.len() {
+                        col[row].set(if ok { scratch[j] } else { Real::NAN });
+                    }
+                }
+                row += 1;
+            }};
+        }
+        match self {
+            AnyMulti::Atom(m) => {
+                let cols = columns_from_frame(data)?;
+                cols.for_each(py, |c| drive!(m.0, c.into()));
+            }
+            AnyMulti::Real(m) => {
+                let xs = reals_from_series(data)?;
+                xs.for_each(py, |x| drive!(m.0, x));
+            }
+            AnyMulti::Snapshot(m) => {
+                for snap in snapshots_from_sequence(data)? {
+                    drive!(m.0, snap);
+                }
+            }
+        }
+        Ok(arrays)
+    }
+
+    /// How many rows `data` holds, in whichever shape this multi consumes it.
+    /// Cheap: the column readers borrow rather than copy (see `Column`).
+    fn row_count(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<usize> {
+        Ok(match self {
+            AnyMulti::Atom(_) => columns_from_frame(data)?.len(py),
+            AnyMulti::Real(_) => reals_from_series(data)?.len(py),
+            AnyMulti::Snapshot(_) => snapshots_from_sequence(data)?.len(),
         })
     }
 }

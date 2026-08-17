@@ -314,46 +314,6 @@ fn contiguous_f64_buffer(obj: &Bound<'_, PyAny>) -> Option<pyo3::buffer::PyBuffe
     None
 }
 
-
-/// Zip OHLCV columns into candles. `close` is the anchor: omitted `open`/`high`/
-/// `low` default to it and omitted `volume` to `0`.
-pub(crate) fn assemble_candles(
-    close: Vec<f64>,
-    open: Option<Vec<f64>>,
-    high: Option<Vec<f64>>,
-    low: Option<Vec<f64>>,
-    volume: Option<Vec<f64>>,
-) -> PyResult<Vec<Candle>> {
-    let n = close.len();
-    for (name, col) in [
-        ("open", &open),
-        ("high", &high),
-        ("low", &low),
-        ("volume", &volume),
-    ] {
-        if let Some(col) = col
-            && col.len() != n
-        {
-            return Err(PyValueError::new_err(format!(
-                "'{name}' has length {} but 'close' has length {n}",
-                col.len()
-            )));
-        }
-    }
-    Ok((0..n)
-        .map(|i| {
-            let c = close[i];
-            Candle::new(
-                open.as_ref().map_or(c, |a| a[i]),
-                high.as_ref().map_or(c, |a| a[i]),
-                low.as_ref().map_or(c, |a| a[i]),
-                c,
-                volume.as_ref().map_or(0.0, |a| a[i]),
-            )
-        })
-        .collect())
-}
-
 /// A frame's OHLCV columns, held **as columns**.
 ///
 /// PERFORMANCE — the reason this exists instead of a `Vec<Candle>`.
@@ -495,18 +455,24 @@ pub(crate) fn columns_from_frame(data: &Bound<'_, PyAny>) -> PyResult<CandleColu
     Ok(cols)
 }
 
-/// Build the candle series a candle-rooted `feed()` consumes from its `data`
-/// argument: a pandas/polars `DataFrame` or a `dict` of OHLCV columns. A bare
-/// numeric series is rejected — root the indicator at `identity()` for that.
-pub(crate) fn candles_from_frame(data: &Bound<'_, PyAny>) -> PyResult<Vec<Candle>> {
-    if data.hasattr("columns")? || data.is_instance_of::<PyDict>() {
-        frame_to_candles(data)
-    } else {
-        Err(PyTypeError::new_err(
-            "this indicator consumes candles: pass a DataFrame or dict with OHLCV columns. \
-             To compute over a bare numeric series, root the indicator at identity().",
-        ))
-    }
+/// One single-symbol `Snapshot` per row of an OHLCV frame, streamed.
+///
+/// What a strategy run consumes. This used to go through a `Vec<Candle>`
+/// intermediate — read the columns (copying each), zip them into 8 MB of candles
+/// for a 200 000-bar frame, then walk that again turning each into a `Snapshot`.
+/// The columns are borrowed now and the candles are never materialised, so the
+/// only allocation left is the `Vec<Snapshot>` the driver actually needs.
+pub(crate) fn single_snapshots_from_frame(
+    data: &Bound<'_, PyAny>,
+    symbol: &Symbol,
+) -> PyResult<Vec<Snapshot<Symbol>>> {
+    let py = data.py();
+    let cols = columns_from_frame(data)?;
+    let mut out = Vec::with_capacity(cols.len(py));
+    cols.for_each(py, |c| {
+        out.push(Snapshot::single(symbol.clone(), Atom::from(c)));
+    });
+    Ok(out)
 }
 
 /// Build the value series an identity-rooted `feed()` consumes: a plain 1-D
@@ -524,25 +490,9 @@ pub(crate) fn reals_from_series(data: &Bound<'_, PyAny>) -> PyResult<Column> {
     Column::of(data, "input")
 }
 
-/// Pull `open`/`high`/`low`/`close`/`volume` columns from a `DataFrame`/`dict`
-/// (only those present; `close` is required). Column names are matched
-/// case-insensitively, so `Close`/`CLOSE`/`close` all work.
-pub(crate) fn frame_to_candles(frame: &Bound<'_, PyAny>) -> PyResult<Vec<Candle>> {
-    let py = frame.py();
-    let cols = frame_columns(frame)?;
-    let owned = |c: Option<Column>| c.map(|c| c.to_vec(py)).transpose();
-    assemble_candles(
-        cols.close.to_vec(py)?,
-        owned(cols.open)?,
-        owned(cols.high)?,
-        owned(cols.low)?,
-        owned(cols.volume)?,
-    )
-}
-
 /// Pull the OHLCV columns out of a `DataFrame`/`dict`, matched
 /// case-insensitively (`Close`/`CLOSE`/`close`). `close` is required; the rest
-/// are optional. Shared by [`frame_to_candles`] and [`columns_from_frame`].
+/// are optional. Backs [`columns_from_frame`].
 fn frame_columns(frame: &Bound<'_, PyAny>) -> PyResult<CandleColumns> {
     let col = |name: &str| -> PyResult<Option<Column>> {
         let cap = {
@@ -732,10 +682,7 @@ pub(crate) fn numpy_filled<'py>(
     len: usize,
     fill: impl FnOnce(&[std::cell::Cell<f64>]),
 ) -> PyResult<Bound<'py, PyAny>> {
-    let np = py.import("numpy")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", np.getattr("float64")?)?;
-    let arr = np.getattr("empty")?.call((len,), Some(&kwargs))?;
+    let arr = empty_f64_array(py, len)?;
 
     // `np.empty` hands back an owned, writable, C-contiguous `float64` array, so
     // the buffer request cannot fail for shape reasons.
@@ -745,6 +692,18 @@ pub(crate) fn numpy_filled<'py>(
         .ok_or_else(|| PyTypeError::new_err("numpy array is not writable"))?;
     fill(slice);
     Ok(arr)
+}
+
+/// An uninitialised 1-D `float64` NumPy array of `len` elements.
+///
+/// Split out of [`numpy_filled`] because the multi-output path needs *several*
+/// arrays live at once (one per output line) before it can start writing, so it
+/// cannot use the fill-in-a-closure form.
+pub(crate) fn empty_f64_array<'py>(py: Python<'py>, len: usize) -> PyResult<Bound<'py, PyAny>> {
+    let np = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", np.getattr("float64")?)?;
+    np.getattr("empty")?.call((len,), Some(&kwargs))
 }
 
 /// Wrap an already-built NumPy array in whatever the input library was.
@@ -833,7 +792,42 @@ pub(crate) fn build_bools(py: Python<'_>, kind: &OutputKind, values: Vec<bool>) 
     }
 }
 
+/// Assemble already-built per-line NumPy arrays into the caller's library shape.
+///
+/// The multi-output twin of [`wrap_floats`]: `AnyMulti::feed_into_columns` has
+/// already produced one filled array per output line, so this only decides what
+/// Python type they arrive in. [`build_multi`] is the same destination reached the
+/// slow way, and survives for the no-NumPy fallback.
+pub(crate) fn wrap_multi<'py>(
+    py: Python<'py>,
+    kind: &OutputKind,
+    names: &[&str],
+    arrays: Vec<Bound<'py, PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    let data = PyDict::new(py);
+    for (name, arr) in names.iter().zip(arrays) {
+        data.set_item(name, arr)?;
+    }
+    match kind {
+        OutputKind::Pandas(index) => {
+            let frame = py.import("pandas")?.getattr("DataFrame")?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("index", index.bind(py))?;
+            Ok(frame.call((data,), Some(&kwargs))?.unbind())
+        }
+        OutputKind::Polars => Ok(py
+            .import("polars")?
+            .getattr("DataFrame")?
+            .call1((data,))?
+            .unbind()),
+        OutputKind::Numpy => Ok(data.into_any().unbind()),
+    }
+}
+
 /// Build a multi-line output: a column per line. Warm-up rows become `NaN`.
+///
+/// The no-NumPy path. `PyMulti::feed` prefers `feed_into_columns` + [`wrap_multi`],
+/// which skips both this transpose and a `Vec` per bar.
 pub(crate) fn build_multi(
     py: Python<'_>,
     kind: &OutputKind,

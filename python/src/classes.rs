@@ -1591,12 +1591,14 @@ impl PyMulti {
         sample: &Bound<'_, PyAny>,
     ) -> PyResult<Option<Bound<'py, PyDict>>> {
         let names = self.inner.names();
-        let out = match &mut self.inner {
-            AnyMulti::Atom(m) => m.0.update(extract_atom(sample)?),
-            AnyMulti::Real(m) => m.0.update(extract_real(sample)?),
-            AnyMulti::Snapshot(m) => m.0.update(extract_snapshot(sample)?),
+        // One `Vec` per call, which is a per-sample API and not a bulk path.
+        let mut values: Vec<Real> = Vec::new();
+        let ok = match &mut self.inner {
+            AnyMulti::Atom(m) => m.0.update_into(extract_atom(sample)?, &mut values),
+            AnyMulti::Real(m) => m.0.update_into(extract_real(sample)?, &mut values),
+            AnyMulti::Snapshot(m) => m.0.update_into(extract_snapshot(sample)?, &mut values),
         };
-        match out {
+        match ok.then_some(values) {
             Some(values) => Ok(Some(values_to_dict(py, names, &values)?)),
             None => Ok(None),
         }
@@ -1613,6 +1615,12 @@ impl PyMulti {
     pub(crate) fn feed(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let kind = OutputKind::detect(data)?;
         let names = self.inner.names();
+        // NumPy present — the normal case — means each output line can be folded
+        // straight into its own array: no `Vec` per bar, and no transpose.
+        if py.import("numpy").is_ok() {
+            let arrays = self.inner.feed_into_columns(py, data)?;
+            return wrap_multi(py, &kind, names, arrays);
+        }
         let rows = self.inner.feed_rows(data)?;
         build_multi(py, &kind, names, rows)
     }
@@ -1673,20 +1681,23 @@ impl PyMulti {
                 names: m.0.names(),
                 multi: m.0.clone_box(),
                 generation: 0,
-                last_output: None,
+                last_output: Vec::new(),
+                last_valid: false,
             }))),
             AnyMulti::Real(m) => AnySharedMulti::Real(Arc::new(Mutex::new(SharedMultiCell {
                 names: m.0.names(),
                 multi: m.0.clone_box(),
                 generation: 0,
-                last_output: None,
+                last_output: Vec::new(),
+                last_valid: false,
             }))),
             AnyMulti::Snapshot(m) => {
                 AnySharedMulti::Snapshot(Arc::new(Mutex::new(SharedMultiCell {
                     names: m.0.names(),
                     multi: m.0.clone_box(),
                     generation: 0,
-                    last_output: None,
+                    last_output: Vec::new(),
+                last_valid: false,
                 })))
             }
         };

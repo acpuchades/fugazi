@@ -1045,6 +1045,45 @@ Found by asking "where else?" rather than by profiling:
   A `list` has no buffer to borrow and still goes element-wise; that path is for
   correctness, not speed. The array/list gap *appearing* is the confirmation.
 
+#### The two corners the first sweep missed
+
+Found by asking "where else does this shape appear?" after the fact, not by
+measuring. One paid, one did not.
+
+**Multi-output indicators allocated once per bar.** `MultiOutput::values()`
+returned `vec![self.macd, self.signal, self.histogram]` — a fresh three-`f64`
+heap block **every bar**, 200 000 of them for a 200 000-bar frame. Then
+`build_multi` collected them row-major into `Vec<Option<Vec<Real>>>` and rebuilt
+the whole thing column-major, materialising the result twice before NumPy saw
+any of it. `write_into(&mut Vec<Real>)` against one reused scratch buffer removes
+the per-bar allocation; `feed_into_columns` folds straight into one NumPy array
+per line, removing the transpose. Interleaved, minimum of three passes:
+
+| ns/sample | before | after | |
+|---|---:|---:|---:|
+| `macd` (3 lines) | 55.90 | **20.53** | 2.7× |
+| `bollinger` (3 lines) | 85.76 | **52.36** | 1.6× |
+| `dmi` (2 lines) | 83.51 | **58.40** | 1.4× |
+
+**The strategy path was the same shape and it bought nothing.**
+`PyStrategy.run` went through `candles_from_frame`, which copied every column and
+zipped them into a `Vec<Candle>` — 8 MB for 200 000 bars — which was then walked
+again to build snapshots. Streaming it removes the copies and the intermediate,
+and deletes `frame_to_candles` / `assemble_candles` outright as the last users of
+the `Vec<Candle>` path. Measured: **274.63 → 270.10 ns/sample, i.e. nothing.**
+
+The reason is worth recording, because it is the counterexample to the section
+above: input conversion is now **3.41 ns/sample of a 285 ns/sample call — 1.2%.**
+`run` is dominated by the backtest itself and by building one `Snapshot` per bar,
+each of which is an `Arc<Vec<…>>` allocation. Fixing an inefficiency that is real
+but is 1% of its call site does not show up, however bad it looks in isolation.
+The change was kept for the ~60 lines of code and the 8 MB of peak memory it
+removes, not for speed, and it should not be cited as a performance win.
+
+That per-bar `Snapshot` allocation is the next thing on this path, and it is a
+core-design question rather than a binding one — see the `Snapshot` entry under
+*Known costs*.
+
 #### The methodological lesson, which is the expensive part
 
 The change immediately before this one cut instructions per sample and made

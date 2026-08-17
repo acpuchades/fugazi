@@ -1420,10 +1420,7 @@ impl PyStrategy {
         wallet: &Bound<'_, PyAny>,
         candles: &Bound<'_, PyAny>,
     ) -> PyResult<PyRunReport> {
-        let snaps: Vec<Snapshot<Symbol>> = candles_from_frame(candles)?
-            .into_iter()
-            .map(|c| Snapshot::single(self.symbol.clone(), Atom::from(c)))
-            .collect();
+        let snaps = single_snapshots_from_frame(candles, &self.symbol)?;
 
         run_over_wallet!(wallet, _py, snaps, seed => self.materialize(seed))
     }
