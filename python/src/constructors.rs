@@ -373,6 +373,29 @@ enum Read<'a> {
     Plain(&'a [f64]),
 }
 
+/// Write one field of every candle in `slots` from `read`, starting at `from`.
+///
+/// The match on [`Read`] happens once here rather than once per sample inside
+/// the caller's loop — see `CandleColumns::for_each_chunk`, which is the only
+/// caller and the reason this exists. `set` is a distinct closure per call site,
+/// so each instantiation is a straight load-and-store loop.
+#[inline]
+fn fill(read: &Read<'_>, from: usize, slots: &mut [Candle], set: impl Fn(&mut Candle, f64)) {
+    let take = slots.len();
+    match read {
+        Read::Cells(cells) => {
+            for (slot, cell) in slots.iter_mut().zip(&cells[from..from + take]) {
+                set(slot, cell.get());
+            }
+        }
+        Read::Plain(plain) => {
+            for (slot, v) in slots.iter_mut().zip(&plain[from..from + take]) {
+                set(slot, *v);
+            }
+        }
+    }
+}
+
 impl Read<'_> {
     #[inline(always)]
     fn get(&self, i: usize) -> f64 {
@@ -471,15 +494,32 @@ impl CandleColumns {
         let mut i = 0;
         while i < n {
             let take = buf.len().min(n - i);
-            for (k, slot) in buf[..take].iter_mut().enumerate() {
-                let j = i + k;
-                *slot = Candle::new(
-                    o.get(j),
-                    h.get(j),
-                    l.get(j),
-                    c.get(j),
-                    volume.as_ref().map_or(0.0, |v| v.get(j)),
-                );
+            let slots = &mut buf[..take];
+            // **One pass per column, not per bar.** The obvious loop builds each
+            // `Candle` from five `Read::get(j)` calls, and `Read` is an enum — so
+            // that is five discriminant branches and five bounds checks *per
+            // sample*. `#[inline]` on this method is only a hint, and when the
+            // caller is `feed_into_columns` LLVM declines it, leaving those
+            // branches in the loop: callgrind measured this function at **48.2
+            // instructions/sample** there against ~24 when it does get inlined
+            // into the scalar `feed`. Filling a field at a time hoists the match
+            // to once per column per chunk, so the inner loops are a load and a
+            // store, and it costs no extra buffer — the writes go straight into
+            // `slots`, which is already the caller's scratch.
+            fill(o, i, slots, |b, v| b.open = v);
+            fill(h, i, slots, |b, v| b.high = v);
+            fill(l, i, slots, |b, v| b.low = v);
+            fill(&c, i, slots, |b, v| b.close = v);
+            match &volume {
+                Some(v) => fill(v, i, slots, |b, x| b.volume = x),
+                // No volume column to alias, so it reads as zero. Written
+                // explicitly because `buf` is the caller's scratch and carries
+                // the previous chunk's values.
+                None => {
+                    for b in slots.iter_mut() {
+                        b.volume = 0.0;
+                    }
+                }
             }
             f(&buf[..take]);
             i += take;
