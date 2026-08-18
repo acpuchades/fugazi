@@ -15,6 +15,14 @@
 //!    forces: `Combine` feeds the same input to both sides, so every binary node
 //!    clones, and `Pick` clones the projected `Atom` twice per bar.
 //!
+//! **`Indicator::value()`** is prototyped as three MACDs that differ only in
+//!    what they write back. The trait promises a `value()` that re-reads the
+//!    last output without advancing, so every indicator stores what it just
+//!    returned; the multi-output ones store it *per line*, as separate
+//!    `Option<Real>` fields, and reconstruct the value struct on demand. The
+//!    question is what that write-back costs on an indicator cheap enough for it
+//!    to matter — MACD is three EMA updates, so it is close to the floor.
+//!
 //! These are ceilings, not promises: the by-reference chain is monomorphic and
 //! shallow, so it also enjoys inlining a `Box<dyn Indicator>` tree would not.
 
@@ -153,5 +161,194 @@ fn bench_input_by_reference(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_input_by_reference);
+// ---------------------------------------------------------------------------
+// Candidate 3 — what `Indicator::value()` costs a multi-output indicator
+// ---------------------------------------------------------------------------
+//
+// Three MACDs over the same arithmetic, differing only in the write-back:
+//
+//   `stored_lines`  the library's shape — one `Option<Real>` per line, and a
+//                   `value()` that rebuilds the struct by matching all three.
+//   `stored_struct` one `Option<MacdValue>`. Same contract, half the stores,
+//                   and `value()` becomes a copy instead of a three-way match.
+//   `no_store`      `update` returns and keeps nothing. This is the shape the
+//                   trait would have without `value()`, and it is the ceiling:
+//                   no contract fugazi could adopt beats it.
+//
+// The arithmetic is identical in all three and is *not* the library's — a
+// hand-rolled EMA recurrence, so the three differ in nothing but the stores.
+
+/// One EMA recurrence, seeded on its first sample. Shared by all three
+/// prototypes so the write-back is the only difference between them.
+#[derive(Clone, Copy)]
+struct Ema3 {
+    alpha: Real,
+    value: Option<Real>,
+}
+
+impl Ema3 {
+    fn new(period: usize) -> Self {
+        Self { alpha: 2.0 / (period as Real + 1.0), value: None }
+    }
+    #[inline]
+    fn update(&mut self, x: Real) -> Real {
+        let out = match self.value {
+            Some(prev) => prev + self.alpha * (x - prev),
+            None => x,
+        };
+        self.value = Some(out);
+        out
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Lines {
+    macd: Real,
+    signal: Real,
+    histogram: Real,
+}
+
+/// Common core: advance the three EMAs and produce the three lines.
+#[inline]
+fn macd_step(fast: &mut Ema3, slow: &mut Ema3, sig: &mut Ema3, x: Real) -> Lines {
+    let macd = fast.update(x) - slow.update(x);
+    let signal = sig.update(macd);
+    Lines { macd, signal, histogram: macd - signal }
+}
+
+/// The library's shape: one `Option<Real>` per line.
+struct StoredLines {
+    fast: Ema3,
+    slow: Ema3,
+    sig: Ema3,
+    macd: Option<Real>,
+    signal: Option<Real>,
+    histogram: Option<Real>,
+}
+
+impl StoredLines {
+    fn new() -> Self {
+        Self {
+            fast: Ema3::new(12), slow: Ema3::new(26), sig: Ema3::new(9),
+            macd: None, signal: None, histogram: None,
+        }
+    }
+    #[inline]
+    fn update(&mut self, x: Real) -> Option<Lines> {
+        let l = macd_step(&mut self.fast, &mut self.slow, &mut self.sig, x);
+        self.macd = Some(l.macd);
+        self.signal = Some(l.signal);
+        self.histogram = Some(l.histogram);
+        Some(l)
+    }
+    /// The three-way match `value()` costs on this shape.
+    #[inline]
+    fn value(&self) -> Option<Lines> {
+        match (self.macd, self.signal, self.histogram) {
+            (Some(macd), Some(signal), Some(histogram)) => {
+                Some(Lines { macd, signal, histogram })
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Same contract, one stored struct.
+struct StoredStruct {
+    fast: Ema3,
+    slow: Ema3,
+    sig: Ema3,
+    last: Option<Lines>,
+}
+
+impl StoredStruct {
+    fn new() -> Self {
+        Self { fast: Ema3::new(12), slow: Ema3::new(26), sig: Ema3::new(9), last: None }
+    }
+    #[inline]
+    fn update(&mut self, x: Real) -> Option<Lines> {
+        let l = macd_step(&mut self.fast, &mut self.slow, &mut self.sig, x);
+        self.last = Some(l);
+        self.last
+    }
+    #[inline]
+    fn value(&self) -> Option<Lines> {
+        self.last
+    }
+}
+
+/// No `value()`, nothing stored — the ceiling.
+struct NoStore {
+    fast: Ema3,
+    slow: Ema3,
+    sig: Ema3,
+}
+
+impl NoStore {
+    fn new() -> Self {
+        Self { fast: Ema3::new(12), slow: Ema3::new(26), sig: Ema3::new(9) }
+    }
+    #[inline]
+    fn update(&mut self, x: Real) -> Option<Lines> {
+        Some(macd_step(&mut self.fast, &mut self.slow, &mut self.sig, x))
+    }
+}
+
+fn bench_value_write_back(c: &mut Criterion) {
+    let closes: Vec<Real> = synth_candles(BARS).iter().map(|c| c.close).collect();
+
+    let mut g = c.benchmark_group("breaking/value_write_back");
+    g.throughput(Throughput::Elements(BARS as u64));
+
+    // `update` only — what a chain that consumes the returned value pays.
+    g.bench_function("stored_lines", |b| {
+        b.iter(|| {
+            let mut m = StoredLines::new();
+            for &x in &closes {
+                black_box(m.update(x));
+            }
+        })
+    });
+    g.bench_function("stored_struct", |b| {
+        b.iter(|| {
+            let mut m = StoredStruct::new();
+            for &x in &closes {
+                black_box(m.update(x));
+            }
+        })
+    });
+    g.bench_function("no_store", |b| {
+        b.iter(|| {
+            let mut m = NoStore::new();
+            for &x in &closes {
+                black_box(m.update(x));
+            }
+        })
+    });
+
+    // `update` then `value()` — what the readiness walk and every `Component`
+    // accessor actually do, and where the three-way match shows up.
+    g.bench_function("stored_lines_with_value", |b| {
+        b.iter(|| {
+            let mut m = StoredLines::new();
+            for &x in &closes {
+                black_box(m.update(x));
+                black_box(m.value());
+            }
+        })
+    });
+    g.bench_function("stored_struct_with_value", |b| {
+        b.iter(|| {
+            let mut m = StoredStruct::new();
+            for &x in &closes {
+                black_box(m.update(x));
+                black_box(m.value());
+            }
+        })
+    });
+
+    g.finish();
+}
+
+criterion_group!(benches, bench_input_by_reference, bench_value_write_back);
 criterion_main!(benches);

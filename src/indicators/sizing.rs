@@ -363,8 +363,7 @@ impl<S: Indicator<Output = Real>> Indicator for FractionalKelly<S> {
     fn update(&mut self, input: S::Input) -> Option<Real> {
         self.value = match self.source.update(input) {
             Some(x) if self.stats.update(x) => {
-                let mean = self.stats.mean();
-                let var = self.stats.variance();
+                let (mean, var) = self.stats.mean_and_variance();
                 if var > 0.0 {
                     Some((self.kelly_fraction * mean / var).max(0.0))
                 } else {

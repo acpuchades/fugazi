@@ -289,6 +289,13 @@ Adding a knob that touches unsettled data: safest default, one opt-out.
 - Constructors `assert!(period > 0, ...)`; document warm-up; implement `warm_up_bars()` to
   match exactly (plus `unstable_bars()` when smoothing recursively). Add new indicators to
   `tests/warm_up.rs`.
+- **Writing a new indicator? Read *Writing one that is fast without trying* in
+  [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)** before the first line of `update`. Eight
+  rules, each one a mistake that shipped and cost 25–60% of an indicator: never allocate in
+  `update`, reuse a core rather than writing a fifth window, ask a core for a shared
+  intermediate once, take the narrowest input domain, `num::max_finite` over `f64::max`,
+  reduce window scans on `LANES` accumulators, don't reach for `.shared()`, and keep
+  `value()` (storing the output is free — measured at +1.1%).
 - Comparison/edge is **`None` until** every source is warmed; `And`/`Or` are `None` until
   both ready — so an edge coincident with warm-up isn't detected (no spurious first-bar
   trade).
@@ -352,7 +359,7 @@ If you're about to write a private helper whose name looks like something here, 
 | Three-source ternary | `IfElse::new(cond, t, f)` / `.if_else(t, f)` | `src/indicators/if_else.rs` |
 | Multi-output accessor bodies | `component_accessors!` macro | `src/indicators/component.rs` |
 | Real recurrence for internal smoothing | `EmaState` / `WilderState` | `src/indicators/smoothing.rs` |
-| Windowed sum/variance/stddev; rolling extremum | `WindowStats` / `WindowExtreme<Op>`. **Dispersion reads scan the window** (O(period)); the `E[X²] − E[X]²` shortcut cancels away `(mean/σ)²` digits and was wrong at crypto price scale — don't reintroduce it | `src/indicators/stats.rs` |
+| Windowed sum/variance/stddev; rolling extremum | `WindowStats` / `WindowExtreme<Op>` — **both fixed rings**, not `VecDeque`s. **Dispersion reads scan the window** (O(period), on four accumulators; `LANES`); the `E[X²] − E[X]²` shortcut cancels away `(mean/σ)²` digits and was wrong at crypto price scale — don't reintroduce it. Want the mean *and* the dispersion? `mean_and_stddev` / `mean_and_variance`, not both calls | `src/indicators/stats.rs` |
 | Rolling quantile / rank-in-window | `WindowQuantile` backing `Percentile` / `PercentileRank` | `src/indicators/stats.rs`, `src/indicators/percentile.rs` |
 | The crate's **one** quantile convention (R type-7) | `stats::quantile_of_sorted(sorted, p)` — don't add a second | `src/indicators/stats.rs` |
 | Bars since an event | `BarsSince` (bool source), `BarsSinceHigh`/`BarsSinceLow` (O(1) over `WindowExtreme::since()`) | `src/indicators/bars_since.rs` |

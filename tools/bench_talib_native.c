@@ -38,6 +38,16 @@
 #define RSI_P 14
 #define STDDEV_P 10
 #define ATR_P 14
+/* Multi-output. TA-Lib emits every line of these in one call, which is the
+ * shape fugazi's own multi-output `update` has — so the comparison is like for
+ * like. The two exceptions are noted at their BENCH lines. */
+#define MACD_FAST 12
+#define MACD_SLOW 26
+#define MACD_SIGNAL 9
+#define BBANDS_P 20
+#define BBANDS_K 2.0
+#define AROON_P 14
+#define DMI_P 14
 
 #define REPS 7
 
@@ -102,8 +112,12 @@ int main(int argc, char **argv) {
     double *l = malloc((size_t)n * sizeof(double));
     double *c = malloc((size_t)n * sizeof(double));
     double *out = malloc((size_t)n * sizeof(double));
+    /* Multi-output calls write one array per line, so they need their own
+     * buffers: TA-Lib will not alias them and a real caller would not either. */
+    double *out2 = malloc((size_t)n * sizeof(double));
+    double *out3 = malloc((size_t)n * sizeof(double));
     double *times = malloc((size_t)reps * sizeof(double));
-    if (!o || !h || !l || !c || !out || !times) return 1;
+    if (!o || !h || !l || !c || !out || !out2 || !out3 || !times) return 1;
 
     synth(n, o, h, l, c);
     TA_Initialize();
@@ -151,7 +165,38 @@ int main(int argc, char **argv) {
     BENCH("stddev", TA_STDDEV(0, n - 1, c, STDDEV_P, 1.0, &beg, &cnt, out));
     BENCH("atr", TA_ATR(0, n - 1, h, l, c, ATR_P, &beg, &cnt, out));
 
+    /* ---- multi-output ---------------------------------------------------
+     *
+     * One call, every line. That is the fair shape to put against a fugazi
+     * multi-output `update`, which also produces the whole value struct per
+     * bar — and it is what a caller who wants two lines of the same indicator
+     * actually writes on both sides.
+     */
+    BENCH("macd", TA_MACD(0, n - 1, c, MACD_FAST, MACD_SLOW, MACD_SIGNAL,
+                          &beg, &cnt, out, out2, out3));
+    BENCH("bbands", TA_BBANDS(0, n - 1, c, BBANDS_P, BBANDS_K, BBANDS_K,
+                              TA_MAType_SMA, &beg, &cnt, out, out2, out3));
+    BENCH("aroon", TA_AROON(0, n - 1, h, l, AROON_P, &beg, &cnt, out, out2));
+
+    /* `dmi` and `adx` are the two workloads where TA-Lib has no combined
+     * entry point and fugazi does, so the call *counts* differ. That is the
+     * measurement, not a flaw in it: TA-Lib's PLUS_DI and MINUS_DI each
+     * re-derive the same Wilder-smoothed true range from scratch, and ADX
+     * re-derives both DI lines on top of that, while `Dmi`/`Adx` carry one set
+     * of Wilder states and emit the lines together. A caller wanting the pair
+     * pays for both calls, so both calls are timed. */
+    BENCH("dmi", do {
+        TA_PLUS_DI(0, n - 1, h, l, c, DMI_P, &beg, &cnt, out);
+        TA_MINUS_DI(0, n - 1, h, l, c, DMI_P, &beg, &cnt, out2);
+    } while (0));
+    BENCH("adx", do {
+        TA_PLUS_DI(0, n - 1, h, l, c, DMI_P, &beg, &cnt, out);
+        TA_MINUS_DI(0, n - 1, h, l, c, DMI_P, &beg, &cnt, out2);
+        TA_ADX(0, n - 1, h, l, c, DMI_P, &beg, &cnt, out3);
+    } while (0));
+
     TA_Shutdown();
-    free(o); free(h); free(l); free(c); free(out); free(times);
+    free(o); free(h); free(l); free(c); free(out); free(out2); free(out3);
+    free(times);
     return 0;
 }

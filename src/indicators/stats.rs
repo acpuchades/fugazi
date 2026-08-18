@@ -48,6 +48,45 @@ use serde::{Deserialize, Serialize};
 use crate::indicators::ops::ExtremeOp;
 use crate::types::Real;
 
+/// Independent accumulators the centred dispersion scans run on.
+///
+/// The scans are `Σ f(x − μ)` over the retained window, and with one accumulator
+/// each add waits on the one before it: the loop's cost is `period` × the FPU's
+/// add latency no matter how tight the rest of it is. Splitting the sum across
+/// four running totals cuts that chain to a quarter and gives LLVM a shape it
+/// can put in one vector register.
+///
+/// Four rather than eight because it is the width of one AVX register at `f64`,
+/// and the windows this serves are short — a `period` of 10 or 20 is typical, so
+/// eight lanes would spend more of the window in the scalar remainder than in
+/// the vector body.
+const LANES: usize = 4;
+
+/// `Σ(x − mean)²` over `xs`, on [`LANES`] independent accumulators.
+///
+/// Free rather than a method so both the full-window and the partial-window
+/// paths reduce a run of samples the same way.
+#[inline]
+fn lanes_sum_sq(xs: &[Real], mean: Real) -> Real {
+    let mut acc = [0.0 as Real; LANES];
+    let mut chunks = xs.chunks_exact(LANES);
+    for chunk in &mut chunks {
+        for (a, &x) in acc.iter_mut().zip(chunk) {
+            let d = x - mean;
+            *a += d * d;
+        }
+    }
+    // The tail folds into lane 0. Which lane it lands in is arbitrary — it only
+    // has to be the same one every call, so a given window always reduces the
+    // same way.
+    for &x in chunks.remainder() {
+        let d = x - mean;
+        acc[0] += d * d;
+    }
+    // Pairwise, not left-to-right: one more halving of the rounding, free.
+    (acc[0] + acc[1]) + (acc[2] + acc[3])
+}
+
 /// A fixed-capacity ring buffer of the last `period` samples.
 ///
 /// A `VecDeque` would do the same job, and did. The window's capacity is known
@@ -191,36 +230,83 @@ impl WindowStats {
     /// squares it is non-negative by construction, so no clamp is needed.
     /// Only meaningful once [`is_full`](Self::is_full).
     ///
-    /// **Leave the `.iter().map(..).sum()` alone.** It looks like it should be
-    /// beaten by a hand-written loop over the window's two halves, since
-    /// [`iter`](Self::iter) is `a.chain(b)` and a chain tests which half it is
-    /// in on every element. It is not: `Sum for f64` goes through `fold`, and
-    /// std **specialises `Chain::fold` into two tight loops** with no such test,
-    /// while a `for` loop drives `Iterator::next()`, which keeps it. Replacing
-    /// this with an explicit accumulator loop measured **187.45 → 315.18
-    /// instructions/sample**, 68% worse (`benches/icount.rs`, `stddev_scan`,
-    /// period 20, net of a control).
+    /// The pass runs on [`LANES`] independent accumulators rather than one, and
+    /// that is the whole of its speed. A single running total makes every add
+    /// wait on the previous one — a chain of `period` × the FPU's add latency,
+    /// which is *all* this used to cost: at period 20 the dependency chain alone
+    /// accounted for essentially the entire 20 ns/sample, and no amount of
+    /// iterator tuning touches it because the chain is a property of the
+    /// arithmetic, not of the loop. Four accumulators cut the chain to
+    /// `period / 4` and let the multiplies issue in parallel with it; it also
+    /// lets LLVM emit one vector FMA per group. See `docs/PERFORMANCE.md`.
     ///
-    /// Summing the halves separately and adding them is a different trap: it is
-    /// not bit-identical, because `(Σa) + (Σb)` groups differently from one
-    /// running total whenever the ring wraps — and the core suite does not catch
-    /// it, since the fixtures happen not to exercise a wrapped window where the
-    /// last ULP differs.
+    /// **This is not bit-identical to a single running total**, and cannot be:
+    /// floating-point addition does not reassociate. It is, if anything, the
+    /// *more* accurate arrangement — four partial sums each accumulate a quarter
+    /// of the rounding a single one does, which is why pairwise summation is the
+    /// standard remedy — and `variance_is_exact_at_market_scale` pins the result
+    /// against a two-pass reference at every scale the crate cares about. What
+    /// changed is the last ulp, not the guarantee.
+    ///
+    /// **Leave the iteration shape alone**, though: this reads the window's two
+    /// contiguous halves ([`slices`](Self::slices)) directly. Going back through
+    /// [`iter`](Self::iter) — `a.chain(b)` — reintroduces a per-element test of
+    /// which half we are in, unless the consumer is one std specialises
+    /// `Chain::fold` for. A plain `for` loop over the chain is not: that measured
+    /// **187.45 → 315.18 instructions/sample**, 68% worse (`benches/icount.rs`,
+    /// `stddev_scan`, period 20, net of a control).
     pub fn variance(&self) -> Real {
         let mean = self.mean();
-        let sum_sq: Real = self
-            .iter()
-            .map(|x| {
-                let d = x - mean;
-                d * d
-            })
-            .sum();
-        sum_sq / self.period as Real
+        self.centred_sum_sq(mean) / self.period as Real
+    }
+
+    /// `Σ(x − mean)²` over the window, on [`LANES`] accumulators. Split out
+    /// because [`variance`](Self::variance) is not its only caller — the
+    /// centring is identical for anything that needs the second central moment.
+    fn centred_sum_sq(&self, mean: Real) -> Real {
+        // A **full** window is the state every dispersion read here is
+        // documented to be meaningful in, and in it every slot of the ring is
+        // live — so the whole buffer is one contiguous run of exactly `period`
+        // samples, rotated. Rotation is irrelevant to a sum, and handing the
+        // pass one run instead of two short halves is what makes the lanes work
+        // at all: at period 10 the split halves put six of ten samples in the
+        // scalar remainder, back on a serial chain, and the lanes bought
+        // nothing. Measured, that was the difference between no improvement and
+        // most of one — see `docs/PERFORMANCE.md`.
+        if self.len == self.period {
+            return lanes_sum_sq(&self.buf, mean);
+        }
+        // Partial window: not a meaningful read, but a defined one, so it still
+        // has to be right. Two halves, each reduced the same way.
+        let (a, b) = self.slices();
+        lanes_sum_sq(a, mean) + lanes_sum_sq(b, mean)
     }
 
     /// Population standard deviation over the window.
     pub fn stddev(&self) -> Real {
         self.variance().sqrt()
+    }
+
+    /// The window mean and its population variance, from one pass — the same
+    /// saving [`mean_and_stddev`](Self::mean_and_stddev) makes, for the callers
+    /// that want the variance itself (they test it against a floor before taking
+    /// a root, so they cannot go through the `stddev` form).
+    pub fn mean_and_variance(&self) -> (Real, Real) {
+        let mean = self.mean();
+        (mean, self.centred_sum_sq(mean) / self.period as Real)
+    }
+
+    /// The window mean and its population standard deviation, from one pass.
+    ///
+    /// Exists for [`Bollinger`](super::Bollinger), which needs both every bar
+    /// and got them by calling [`mean`](Self::mean) and [`stddev`](Self::stddev)
+    /// in turn — and [`stddev`](Self::stddev) computes the mean again to centre
+    /// on it. That is two `divsd`s per bar for one quotient, and a divide is
+    /// long-latency enough on the critical path (~15 cycles, unpipelined) to
+    /// show up next to a 20-element scan. Returning the pair drops one.
+    pub fn mean_and_stddev(&self) -> (Real, Real) {
+        let (mean, var) = self.mean_and_variance();
+        (mean, var.sqrt())
     }
 
     /// **Sample** (`n − 1` divisor) standard deviation over the window — the
@@ -576,16 +662,67 @@ impl WindowQuantile {
 /// Rolling extremum over the last `period` samples via a monotonic deque, so
 /// each update is O(1) amortised. The direction (max/min) is the [`ExtremeOp`]
 /// marker. Embedded by [`Extreme`](super::ops::Extreme) (→ `RollingMax`/
-/// `RollingMin`) and by [`Stochastic`](super::Stochastic).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(bound = "")]
+/// `RollingMin`), by [`Stochastic`](super::Stochastic), by
+/// [`Donchian`](super::Donchian) and — through [`since`](Self::since) — by
+/// [`Aroon`](super::Aroon).
+///
+/// The monotonic deque is backed by a **fixed ring of `period` slots**, for the
+/// same reason [`WindowStats`] is: it can never hold more than `period` entries
+/// (every entry is a distinct sample index inside the window), so the capacity
+/// is known at construction and a growable `VecDeque` was paying growth checks
+/// and an allocation for flexibility that is never used. The gap this closed was
+/// not marginal — see `docs/PERFORMANCE.md`, where `Aroon` (two of these) went
+/// from losing to `TA_AROON` to beating it on the strength of this change alone.
+///
+/// **The serialized shape is unchanged** — the `Serialize`/`Deserialize` impls
+/// below emit the same `{period, deque, count}` object, with the deque in
+/// logical (front-first) order, that the `VecDeque`-backed derive produced. Run
+/// states written by earlier versions still load.
+#[derive(Debug, Clone)]
 pub(crate) struct WindowExtreme<Op> {
     period: usize,
-    // (index, value), kept monotonic so the front is always the extremum.
-    deque: VecDeque<(usize, Real)>,
+    /// `period` slots holding `(index, value)` pairs, kept monotonic so the
+    /// front is always the extremum. Only the `len` entries starting at `head`
+    /// (wrapping) are live.
+    buf: Box<[(usize, Real)]>,
+    head: usize,
+    len: usize,
     count: usize,
-    #[serde(skip)]
     _op: PhantomData<fn() -> Op>,
+}
+
+/// The on-the-wire shape of a [`WindowExtreme`], identical to what the old
+/// `VecDeque`-backed derive produced.
+#[derive(Serialize, Deserialize)]
+struct WindowExtremeRepr {
+    period: usize,
+    deque: Vec<(usize, Real)>,
+    count: usize,
+}
+
+impl<Op> Serialize for WindowExtreme<Op> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        WindowExtremeRepr {
+            period: self.period,
+            deque: self.iter().collect(),
+            count: self.count,
+        }
+        .serialize(s)
+    }
+}
+
+impl<'de, Op> Deserialize<'de> for WindowExtreme<Op> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let r = WindowExtremeRepr::deserialize(d)?;
+        let mut out = WindowExtreme::new(r.period);
+        // A saved deque can never exceed `period` entries, but the blob is
+        // caller-supplied: truncate rather than write out of bounds.
+        for e in r.deque.into_iter().take(r.period) {
+            out.push_back(e);
+        }
+        out.count = r.count;
+        Ok(out)
+    }
 }
 
 impl<Op> WindowExtreme<Op> {
@@ -593,10 +730,55 @@ impl<Op> WindowExtreme<Op> {
         assert!(period > 0, "window period must be greater than zero");
         Self {
             period,
-            deque: VecDeque::new(),
+            buf: vec![(0, 0.0); period].into_boxed_slice(),
+            head: 0,
+            len: 0,
             count: 0,
             _op: PhantomData,
         }
+    }
+
+    /// Index of slot `i` counting from the front, wrapping.
+    #[inline]
+    fn slot(&self, i: usize) -> usize {
+        let at = self.head + i;
+        if at >= self.period { at - self.period } else { at }
+    }
+
+    #[inline]
+    fn front(&self) -> Option<(usize, Real)> {
+        (self.len > 0).then(|| self.buf[self.head])
+    }
+
+    #[inline]
+    fn back(&self) -> Option<(usize, Real)> {
+        (self.len > 0).then(|| self.buf[self.slot(self.len - 1)])
+    }
+
+    #[inline]
+    fn push_back(&mut self, e: (usize, Real)) {
+        debug_assert!(self.len < self.period, "monotonic deque cannot exceed the window");
+        let at = self.slot(self.len);
+        self.buf[at] = e;
+        self.len += 1;
+    }
+
+    #[inline]
+    fn pop_back(&mut self) {
+        debug_assert!(self.len > 0);
+        self.len -= 1;
+    }
+
+    #[inline]
+    fn pop_front(&mut self) {
+        debug_assert!(self.len > 0);
+        self.head = if self.head + 1 == self.period { 0 } else { self.head + 1 };
+        self.len -= 1;
+    }
+
+    /// The live entries, front (extremum) first. Serialization only.
+    fn iter(&self) -> impl Iterator<Item = (usize, Real)> + '_ {
+        (0..self.len).map(|i| self.buf[self.slot(i)])
     }
 
     pub fn period(&self) -> usize {
@@ -604,7 +786,8 @@ impl<Op> WindowExtreme<Op> {
     }
 
     pub fn reset(&mut self) {
-        self.deque.clear();
+        self.head = 0;
+        self.len = 0;
         self.count = 0;
     }
 
@@ -616,7 +799,7 @@ impl<Op> WindowExtreme<Op> {
     pub fn since(&self) -> Option<usize> {
         if self.count >= self.period {
             let current = self.count - 1;
-            self.deque.front().map(|&(idx, _)| current - idx)
+            self.front().map(|(idx, _)| current - idx)
         } else {
             None
         }
@@ -630,28 +813,39 @@ impl<Op: ExtremeOp> WindowExtreme<Op> {
         let idx = self.count;
         self.count += 1;
 
+        // Drop the front once it has fallen out of the window. Done *before* the
+        // tail pass, not after, so the deque is never longer than `period` and
+        // the fixed ring can be exactly `period` slots: with the eviction last,
+        // a full deque could momentarily hold `period + 1` entries.
+        //
+        // The two passes are independent — the front is evicted on age and the
+        // tail on dominance — so this reordering cannot change which entries
+        // survive, only the instant at which the stale one leaves.
+        // At most one entry ages out per sample once the invariant holds, so the
+        // loop body runs at most once in a steady stream; it stays a loop so a
+        // `load_state` blob carrying several stale entries drains rather than
+        // overflowing the ring.
+        while let Some((front_idx, _)) = self.front() {
+            if front_idx + self.period <= idx {
+                self.pop_front();
+            } else {
+                break;
+            }
+        }
+
         // Drop tail entries that `x` dominates: they can never be the extremum
         // while `x` is in the window.
-        while let Some(&(_, back)) = self.deque.back() {
+        while let Some((_, back)) = self.back() {
             if Op::dominates(x, back) {
-                self.deque.pop_back();
+                self.pop_back();
             } else {
                 break;
             }
         }
-        self.deque.push_back((idx, x));
-
-        // Drop the front once it has fallen out of the window.
-        while let Some(&(front_idx, _)) = self.deque.front() {
-            if front_idx + self.period <= idx {
-                self.deque.pop_front();
-            } else {
-                break;
-            }
-        }
+        self.push_back((idx, x));
 
         if self.count >= self.period {
-            Some(self.deque.front().expect("deque is non-empty").1)
+            Some(self.front().expect("deque is non-empty").1)
         } else {
             None
         }

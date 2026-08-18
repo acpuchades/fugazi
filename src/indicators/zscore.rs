@@ -50,11 +50,13 @@ impl<S: Indicator<Output = Real>> Indicator for ZScore<S> {
     fn update(&mut self, input: Self::Input) -> Option<Real> {
         self.value = match self.source.update(input) {
             Some(x) if self.stats.update(x) => {
-                let var = self.stats.variance();
+                // One pass for both: `variance` centres on the mean, so asking
+                // for the mean separately divides for it twice.
+                let (mean, var) = self.stats.mean_and_variance();
                 if var < MOMENT_EPS {
                     Some(0.0)
                 } else {
-                    Some((x - self.stats.mean()) / var.sqrt())
+                    Some((x - mean) / var.sqrt())
                 }
             }
             _ => None,

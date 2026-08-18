@@ -81,6 +81,16 @@ EMA_P = 10
 RSI_P = 14
 STDDEV_P = 10
 ATR_P = 14
+# Multi-output. Keep in sync with tools/bench_talib_native.c.
+MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
+BBANDS_P, BBANDS_K = 20, 2.0
+AROON_P = 14
+DMI_P = 14
+
+# The rows the report prints, in order. Scalar first, then the multi-output
+# block this comparison exists for.
+SCALAR = ("sma", "ema", "rsi", "stddev", "atr")
+MULTI = ("macd", "bbands", "aroon", "dmi", "adx")
 
 
 def newest_source_mtime() -> tuple[float, str]:
@@ -254,6 +264,22 @@ def talib_py_tier(c, h, lo) -> dict[str, float]:
         "rsi": timed_samples(lambda: talib.RSI(c, RSI_P)),
         "stddev": timed_samples(lambda: talib.STDDEV(c, STDDEV_P)),
         "atr": timed_samples(lambda: talib.ATR(h, lo, c, ATR_P)),
+        # One call, every line — the shape a fugazi multi-output `update` has.
+        "macd": timed_samples(lambda: talib.MACD(
+            c, fastperiod=MACD_FAST, slowperiod=MACD_SLOW, signalperiod=MACD_SIGNAL)),
+        "bbands": timed_samples(lambda: talib.BBANDS(
+            c, timeperiod=BBANDS_P, nbdevup=BBANDS_K, nbdevdn=BBANDS_K, matype=0)),
+        "aroon": timed_samples(lambda: talib.AROON(h, lo, AROON_P)),
+        # TA-Lib has no combined DI pair and no combined ADX triple, so a caller
+        # who wants them pays for each call — and each re-derives the same
+        # Wilder-smoothed true range. `Dmi`/`Adx` carry one set of Wilder states
+        # and emit the lines together. Timing both calls is the comparison, not
+        # a distortion of it; see the note in tools/bench_talib_native.c.
+        "dmi": timed_samples(lambda: (
+            talib.PLUS_DI(h, lo, c, DMI_P), talib.MINUS_DI(h, lo, c, DMI_P))),
+        "adx": timed_samples(lambda: (
+            talib.PLUS_DI(h, lo, c, DMI_P), talib.MINUS_DI(h, lo, c, DMI_P),
+            talib.ADX(h, lo, c, DMI_P))),
     }
 
 
@@ -283,6 +309,15 @@ def fugazi_py_tier(c, h, lo, o) -> dict[str, float]:
         "rsi": timed_samples(scalar(lambda: fz.rsi(fz.identity(), RSI_P))),
         "stddev": timed_samples(scalar(lambda: fz.stddev(fz.identity(), STDDEV_P))),
         "atr": timed_samples(lambda: fz.atr(ATR_P).feed(frame)),
+        # `PyMulti.feed` returns every line as its own column from one pass, so
+        # these are the same unit of work as the `talib` calls above.
+        "macd": timed_samples(lambda: fz.macd(
+            fz.identity(), MACD_FAST, MACD_SLOW, MACD_SIGNAL).feed(c)),
+        "bbands": timed_samples(lambda: fz.bollinger(
+            fz.identity(), BBANDS_P, BBANDS_K).feed(c)),
+        "aroon": timed_samples(lambda: fz.aroon(AROON_P).feed(frame)),
+        "dmi": timed_samples(lambda: fz.dmi(DMI_P).feed(frame)),
+        "adx": timed_samples(lambda: fz.adx(DMI_P).feed(frame)),
     }
 
 
@@ -375,7 +410,9 @@ def main() -> int:
           f"{'fugazi py':>11}{'rs vs C':>10}{'py vs py':>10}")
     print(f"{'indicator':<10}{'ns/samp':>11}{'ns/samp':>11}{'ns/samp':>11}"
           f"{'ns/samp':>11}{'(engine)':>10}{'(bindings)':>10}")
-    for k in ("sma", "ema", "rsi", "stddev", "atr"):
+    for k in SCALAR + MULTI:
+        if k == MULTI[0]:
+            print(f"{'-- multi-output ' + '-' * 48}")
         nat = native_ns.get(k)
         t = talib_ns.get(k)
         r = rust_ns.get(k)

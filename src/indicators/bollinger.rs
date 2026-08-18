@@ -79,8 +79,10 @@ impl<S: Indicator<Output = Real>> Indicator for Bollinger<S> {
         };
 
         if ready {
-            let middle = self.stats.mean();
-            let band = self.k * self.stats.stddev();
+            // One pass for both: `stddev` centres on the mean, so asking for it
+            // separately divides for the mean twice. See `mean_and_stddev`.
+            let (middle, sd) = self.stats.mean_and_stddev();
+            let band = self.k * sd;
             let upper = middle + band;
             let lower = middle - band;
             self.upper = Some(upper);

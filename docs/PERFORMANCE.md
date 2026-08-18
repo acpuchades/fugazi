@@ -60,10 +60,10 @@ instrument, at the cost of a ~50× slowdown.
 | `metrics` | `RunReport` → `Metrics`, which `optimize` pays once per grid row per fold. |
 | `footprint` | Allocation count, bytes, and peak RSS. Not criterion — it installs a counting global allocator, which inside a criterion target would also tally criterion's own bookkeeping. |
 | `icount` | A fixed workload run exactly once, for callgrind. Answers "does this change do more work?" immune to contention and to code layout. Keep `sma_rust`/`macd_rust` in every run even when a change cannot touch them: a control reading 0.00% is what makes a −31% elsewhere in the same table believable. |
-| `breaking` | Prototypes for the proposed breaking changes, so each is a measured number rather than an argument. |
+| `breaking` | Prototypes for the proposed breaking changes, so each is a measured number rather than an argument. Currently `update(&Input)` and dropping `Indicator::value()`. |
 | `erasure` | What one level of type erasure costs, `PayloadValue` vs `Chain`, at 2/3/5 levels. The bench that justified Phase 6 — and that has to keep justifying it. |
 | `stddev_tradeoff` | Accuracy *and* cost of the centred variance against TA-Lib's `E[X²] − E[X]²` shortcut, so the choice rests on numbers. |
-| `three_tier` | The Rust tier of the TA-Lib comparison. Not criterion: it emits machine-readable ns/sample for `tools/bench_three_tier.py` to line up against the other two tiers. |
+| `three_tier` | The Rust tier of the TA-Lib comparison, scalar **and** multi-output. Not criterion: it emits machine-readable ns/sample for `tools/bench_three_tier.py` to line up against the other tiers. Also carries the `Component`-vs-`Shared` pair (Phase 10). |
 
 ## Measurement conditions
 
@@ -1381,7 +1381,8 @@ comment. Relative error against a Kahan-compensated reference, period 20:
 | 1e9 | 1 | 2.4e-13 | **6e1** |
 | 1e9 | 0.01 | 9.7e-10 | **1e0** |
 
-Cost, same window: 13.71 ns/sample centred vs 3.37 shortcut — **4.06×**.
+Cost, same window: 12.29 ns/sample centred vs 3.62 shortcut — **3.39×** (it was
+15.18 / 3.99× before the lanes; see Phase 10).
 
 So the trade is ~10.7 ns/sample for a result that stays correct to ~1e-13 where
 the shortcut is wrong by **6000%**. A five-figure instrument quoted to the cent
@@ -1391,6 +1392,199 @@ by that. Keep the centred pass.
 There is no free lunch in between: Welford's online algorithm is O(1) and far
 better conditioned than the naive shortcut, but it has no numerically stable
 *removal* step, which a sliding window needs on every sample.
+
+## Phase 10 — multi-output indicators
+
+The comparison had never covered a multi-output indicator. Every row above is a
+single line of output, and the multi-output ones (`Macd`, `Bollinger`, `Aroon`,
+`Dmi`, `Adx`, `Keltner`, `Donchian`) are a different shape: they emit a value
+struct, several `WindowStats` / `WindowExtreme` cores run inside one `update`,
+and the Python boundary has to produce one array per line rather than one array.
+
+### Making it a fair question
+
+TA-Lib emits every line of `MACD` / `BBANDS` / `AROON` in **one call**, and a
+fugazi multi-output `update` returns the whole value struct. That is the
+like-for-like unit of work, and it is what the new rows time on both sides.
+
+Two workloads are deliberately asymmetric in *call count*, and that asymmetry is
+the measurement rather than a flaw in it. TA-Lib has no combined DI pair and no
+combined ADX triple, so `TA_PLUS_DI` and `TA_MINUS_DI` each re-derive the same
+Wilder-smoothed true range from scratch, and `TA_ADX` re-derives both DI lines on
+top. `Dmi`/`Adx` carry one set of Wilder states and emit the lines together. A
+caller who wants the pair pays for both calls, so both calls are timed.
+
+### Results
+
+200 000 samples, best of 5 passes. `rs vs C` is against native TA-Lib C,
+`py vs py` against the `talib` Cython bindings — one baseline per tier, as above.
+
+| | TA-Lib C | fugazi rs before | fugazi rs after | **rs vs C** | TA-Lib py | fugazi py before | fugazi py after | **py vs py** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `macd` | 13.54 | 1.76 | **1.60** | **0.12×** | 21.89 | 24.04 | **22.25** | **1.02×** |
+| `dmi` | 9.20 | 6.72 | **5.80** | **0.63×** | 16.23 | 28.76 | **27.13** | 1.67× |
+| `adx` | 14.09 | 10.19 | **8.71** | **0.62×** | 21.04 | 43.97 | **42.52** | 2.02× |
+| `aroon` | 8.41 | 17.31 | **9.63** | 1.15× | 14.92 | 40.06 | **37.85** | 2.54× |
+| `bbands` | 4.13 | 20.40 | **13.85** | 3.36× | 11.29 | 46.40 | **44.68** | 3.96× |
+
+The Rust engine **beats native TA-Lib C on three of the five** — by 8× on `macd`,
+where TA-Lib's own `TA_MACD` is slow (it allocates and fills two temporary
+buffers internally), and by ~1.6× on `dmi`/`adx`, where the win is structural:
+one pass over shared Wilder states against two and three full re-derivations.
+
+`aroon` was the one indicator that lost outright and no longer does. `bbands` is
+the deliberate loss, and it is the only one — see below.
+
+**Read the `aroon` row with the spread column in mind.** That pass reported
+`fugazi rs` spread up to 2.49×, and an earlier, quieter pass put the same binary
+at 9.30 against a C tier of 9.03 — i.e. parity. The honest claim is "no longer
+behind", not a specific ratio.
+
+### What changed — the engine
+
+**1. `WindowExtreme` was still a heap `VecDeque`.** `WindowStats` was converted
+to a fixed ring years ago and the note explaining why is still in the file; the
+rolling-extremum core beside it never got the same treatment. Its monotonic deque
+can never hold more than `period` entries — every entry is a distinct sample index
+inside the window — so the capacity was known at construction all along, and the
+growth checks and the allocation were paid per bar for flexibility nothing uses.
+`Aroon` runs two of them. **17.31 → 10.72 ns/sample, the single largest win here**,
+and it is why `aroon` flipped. `Donchian`, `Stochastic`, `RollingMax`/`RollingMin`
+and `BarsSinceHigh`/`BarsSinceLow` all sit on the same core.
+
+The conversion reorders the two eviction passes — the aged-out front is dropped
+*before* the dominated tail rather than after. The passes are independent (one
+evicts on age, the other on dominance) so the surviving set is identical; doing it
+in this order is what keeps the deque at `period` entries rather than momentarily
+`period + 1`, which is what lets the ring be exactly `period` slots.
+
+**2. The centred dispersion pass runs on four accumulators.** One running total
+makes every add wait on the one before it, so the loop costs `period` × the FPU's
+add latency however tight the rest of it is — and at period 20 that chain was
+essentially the whole cost. Four accumulators cut it to `period / 4`.
+
+This one took two attempts, and the failed one is the instructive part. The
+obvious implementation reduces the window's **two contiguous halves** (the ring is
+rotated, so `slices()` returns a head and a tail). At period 10 that puts six of
+ten samples in the scalar remainder, back on a serial chain, and it measured **no
+improvement at all**. But a *full* window — the only state these reads are
+documented to be meaningful in — has every ring slot live, so the whole buffer is
+one contiguous run and rotation is irrelevant to a sum. Scanning the buffer
+instead of the halves is what made the lanes work: **15.18 → 12.29 ns/sample at
+period 20** (`cargo bench --bench stddev_tradeoff`, which carries the O(1)
+shortcut in the same binary as a control).
+
+This is **not bit-identical** to a single running total, and cannot be —
+floating-point addition does not reassociate. It is the *more* accurate
+arrangement (four partial sums each carry a quarter of the rounding, which is why
+pairwise summation is the standard remedy), and
+`variance_is_exact_at_market_scale` pins the result against a two-pass reference
+at every scale the crate cares about. What moved is the last ulp.
+
+**3. `Bollinger` asked for the mean twice.** `stats.mean()` then
+`stats.stddev()`, and `stddev` computes the mean again to centre on it — two
+`divsd`s for one quotient, and a divide is long-latency enough to show up beside
+a 20-element scan. `WindowStats::mean_and_stddev` / `mean_and_variance` return the
+pair from one pass; `ZScore` and the Kelly sizer had the same duplication.
+
+### What changed — the Python bindings
+
+The multi-output boundary cost was **~25–33 ns/sample** against ~1–1.6 for the
+scalar path — twenty times the price for three columns instead of one. Two causes,
+both in `python/src/carriers.rs`:
+
+**4. Every row was bounced through a `Vec`.** `update_slice_flat` holds a
+`chunks_mut(lines)` destination row that is already exactly the right length, and
+was writing into a scratch `Vec` (a `clear`, a capacity check per line) and then
+`copy_from_slice`-ing back out of it. `MultiOutput`'s primitive is now
+`write_row(&mut [Real])`, writing in place; the `Vec`-shaped `write_into` survives
+as a default for the per-bar `update_into`, which genuinely wants one.
+
+**5. The scatter was column-interleaved with a bounds check per element.** It
+walked the flat chunk in production order — one element into each of `lines`
+arrays megabytes apart, then on to the next row — so every column was touched on a
+fresh cache line every sample. Column-outer / row-inner gives each column one
+contiguous run per chunk and checks its bound once for the run; the strided read
+is off the 3 KB `flat` buffer, which stays in L1.
+
+| | before | after |
+|---|---:|---:|
+| `macd` (3 lines, series in) | 30.29 | **19.00** |
+| `adx` (3 lines, frame in) | 56.66 | **35.10** |
+| `aroon` (3 lines, frame in) | 50.61 | **32.59** |
+| `dmi` (2 lines, frame in) | 36.72 | **30.36** |
+| `bbands` (3 lines, series in) | 42.42 | **35.48** |
+
+**About 9.5 ns/sample of what is left is not ours**: allocating and first-touching
+three 1.6 MB NumPy arrays costs that on its own (0.24 ns/sample for one array,
+9.47 for three — the jump is page-fault, not arithmetic). TA-Lib's Python bindings
+pay it too, which is why `py vs py` on `macd` lands at parity while the absolute
+number stays large.
+
+### `bbands` is the deliberate loss, and the benchmark's own data proves it
+
+`Bollinger` inherits the O(period) centred variance, so it stays ~3.4× behind
+`TA_BBANDS`, which uses the `E[X²] − E[X]²` shortcut. The accuracy table above
+argues that trade from synthetic windows. The benchmark's own price series
+settles it:
+
+| over 4 981 twenty-bar windows of the benchmark walk | |
+|---|---|
+| fugazi, vs an exact float64 reference | **5.5e-15** relative error |
+| `talib.STDDEV`, same windows | **1.0** — it returns exactly `0.0` on **896 of them** |
+
+Not a synthetic corner: the walk drifts down through four orders of magnitude,
+and past a point the shortcut's two terms cancel completely and TA-Lib silently
+reports *no dispersion*. `ZScore` divides by that number. The 9.7 ns/sample is
+buying something.
+
+### Two things that were measured and left alone
+
+**`Indicator::value()` does not cost anything worth a breaking change.** The trait
+promises a `value()` that re-reads the last output without advancing, so every
+indicator stores what it just returned — and the multi-output ones store it per
+line, as separate `Option<Real>` fields. `benches/breaking.rs` prototypes three
+MACDs over identical arithmetic, differing only in the write-back:
+
+| variant | ns/bar | vs ceiling |
+|---|---:|---:|
+| `no_store` — returns and keeps nothing (the ceiling) | 2.351 | — |
+| `stored_lines` — the library's shape | 2.354 | +0.1% |
+| `stored_lines` + a `value()` read every bar | 2.379 | **+1.1%** |
+| `stored_struct` — one `Option<MacdValue>` | 2.289 | −2.6% |
+| `stored_struct` + a `value()` read every bar | 2.315 | −1.6% |
+
+**+1.1% is the ceiling**, and it already includes a `value()` read per bar that
+only the readiness walk performs. The stores are free because the loop is
+latency-bound: three dependent EMA recurrences pace it and the store ports idle in
+that shadow. Removing `value()` would touch `is_ready`, `Component`, every shared
+accessor and the whole Python carrier layer to buy noise.
+
+(The `stored_struct` rows come out *faster than storing nothing*, which cannot be
+a real effect. That is code layout — the same ~2.5% band "A measurement that
+lied" is about. All five sit inside one noise band. It does suggest collapsing the
+per-line `Option<Real>` fields into one `Option<MacdValue>` is free-to-positive if
+`value()` should stop being an N-way match, but that is a tidiness argument, not a
+performance one.)
+
+**`Shared` is a pessimisation for cheap sources.** `Shared`/`SharedComponent`
+exist so several accessors of one multi-output indicator advance it once per bar
+instead of once each. Measured on two MACD lines:
+
+| | ns/sample |
+|---|---:|
+| two independent `Component`s — what `src/spec/expr.rs` builds | 1.64 |
+| the same two lines off a `.shared()` handle | 21.88 |
+
+The shared cell is an `Arc<Mutex<_>>`, so each accessor pays an uncontended
+lock/unlock per bar — about 12 ns — and the mutex is not optional: `Clone` on the
+handle is an `Arc::clone`, so a strategy cloned onto another thread would
+otherwise race. **`Shared` only pays when the source costs more per bar than the
+lock**, which no leaf indicator in this crate does (`Macd` 1.6, `Bollinger` 13.9,
+`Adx` 8.7). The spec layer's choice to build independent `Component`s is therefore
+the right default, and is now measured rather than assumed. Both workloads stay in
+`benches/three_tier.rs` so the crossover can be re-checked if the cell ever stops
+being a mutex.
 
 ## The tricks in the codebase, and why they are there
 
@@ -1486,8 +1680,8 @@ Recorded so they are not re-attempted:
 
 ### How to measure without fooling yourself
 
-Nine traps, each of which produced a wrong answer in this codebase before it
-was caught. Note that **five of the nine are "you measured a stale binary"** —
+Ten traps, each of which produced a wrong answer in this codebase before it
+was caught. Note that **five of the ten are "you measured a stale binary"** —
 by far the most common way to be confidently wrong here.
 
 1. **`maturin develop` builds *debug*.** It is 7–10× slower than release and
@@ -1552,6 +1746,21 @@ by far the most common way to be confidently wrong here.
    **36.7% of the entire profile** doing nothing, and worse, it grows with how
    long the process lives, so it landed in the differential as if it were the
    measured code.
+
+10. **A disassembled symbol may be a dead out-of-line copy.** Phase 10 split the
+   centred variance across four accumulators, and `objdump` of
+   `WindowStats::variance` showed a single serial add chain unrolled by four —
+   i.e. exactly the code the change was supposed to remove. The conclusion
+   ("LLVM re-linearised my lanes") was wrong: the hot path is *inlined* into
+   `StdDev::update`, and the out-of-line symbol that keeps the name is whatever
+   copy some cold caller needed. The A/B on `stddev_tradeoff` — which carries
+   the O(1) shortcut in the same binary as a control — said 15.18 → 12.29
+   ns/sample, matching an isolated `rustc -O` probe of the two loop shapes to
+   within a few tenths. **Two independent measurements agreed and the reading of
+   the assembly did not; the assembly was what was wrong.** If you want to
+   confirm a transform applied, put a control in the same binary and A/B it, or
+   disassemble the caller you actually benchmarked. A symbol that merely shares
+   the function's name proves nothing.
 
 The general defence, and the one that actually caught trap 3: **measure the same
 quantity by paths that share as little as possible.** Phase 6's per-level cost

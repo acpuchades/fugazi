@@ -15,7 +15,9 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use fugazi::indicators::{Atr, Ema, Identity, Rsi, Sma, StdDev};
+use fugazi::indicators::{
+    Adx, Aroon, Atr, Bollinger, Dmi, Ema, Identity, Macd, Rsi, Sma, StdDev,
+};
 use fugazi::prelude::*;
 use fugazi::runtime::{self, PayloadValue as DynValue};
 
@@ -28,6 +30,14 @@ const EMA_P: usize = 10;
 const RSI_P: usize = 14;
 const STDDEV_P: usize = 10;
 const ATR_P: usize = 14;
+/// Multi-output. Keep in sync with `tools/bench_talib_native.c`.
+const MACD_FAST: usize = 12;
+const MACD_SLOW: usize = 26;
+const MACD_SIGNAL: usize = 9;
+const BBANDS_P: usize = 20;
+const BBANDS_K: Real = 2.0;
+const AROON_P: usize = 14;
+const DMI_P: usize = 14;
 
 const REPS: usize = 7;
 /// Discarded reps before timing starts.
@@ -140,6 +150,78 @@ fn main() {
         let mut ind = Atr::new(Identity::<fugazi::market::Candle>::new(), ATR_P);
         for c in &candles {
             black_box(ind.update(*c));
+        }
+    })));
+
+    // ---- multi-output ----------------------------------------------------
+    //
+    // Every line, once per bar — the shape `TA_MACD` / `TA_BBANDS` / `TA_AROON`
+    // have, where one call fills every output array. A fugazi multi-output
+    // `update` returns the whole value struct, so this is the like-for-like
+    // comparison; the per-*line* cost is measured separately below.
+    //
+    // Each is fed the domain it consumes: `Macd` and `Bollinger` take a `Real`
+    // series, the three bar indicators take `Candle`s by value. Same reason
+    // `atr` above does — a `Vec<Atom>` clone per bar is the benchmark's own
+    // bookkeeping and TA-Lib pays no analogue of it.
+    out.push(("macd", bench(n, || {
+        let mut ind = Macd::new(Identity::new(), MACD_FAST, MACD_SLOW, MACD_SIGNAL);
+        for &p in &closes {
+            black_box(ind.update(p));
+        }
+    })));
+    out.push(("bbands", bench(n, || {
+        let mut ind = Bollinger::new(Identity::new(), BBANDS_P, BBANDS_K);
+        for &p in &closes {
+            black_box(ind.update(p));
+        }
+    })));
+    out.push(("aroon", bench(n, || {
+        let mut ind = Aroon::new(Identity::<fugazi::market::Candle>::new(), AROON_P);
+        for c in &candles {
+            black_box(ind.update(*c));
+        }
+    })));
+    out.push(("dmi", bench(n, || {
+        let mut ind = Dmi::new(Identity::<fugazi::market::Candle>::new(), DMI_P);
+        for c in &candles {
+            black_box(ind.update(*c));
+        }
+    })));
+    out.push(("adx", bench(n, || {
+        let mut ind = Adx::new(Identity::<fugazi::market::Candle>::new(), DMI_P);
+        for c in &candles {
+            black_box(ind.update(*c));
+        }
+    })));
+
+    // What a *strategy* pays for two lines of one MACD, which is the question
+    // the whole-struct rows above do not answer.
+    //
+    // `Component` clones its source, so this is two independent MACDs advanced
+    // side by side — exactly what `src/spec/expr.rs` builds for a document
+    // naming `!macd_line` and `!macd_signal`, and what `macd.line()` /
+    // `macd.signal()` build in hand-written Rust. TA-Lib's single `TA_MACD`
+    // call is the baseline for both, so whatever this costs above `macd` is
+    // duplicated work fugazi is doing and TA-Lib is not.
+    out.push(("macd_two_lines", bench(n, || {
+        let macd = Macd::new(Identity::<Real>::new(), MACD_FAST, MACD_SLOW, MACD_SIGNAL);
+        let (mut line, mut signal) = (macd.line(), macd.signal());
+        for &p in &closes {
+            black_box(line.update(p));
+            black_box(signal.update(p));
+        }
+    })));
+
+    // The same two lines off a `Shared` handle: one MACD, advanced once per bar,
+    // both accessors projecting out of the cached output. The library has had
+    // this since the beginning; nothing that builds from a spec uses it.
+    out.push(("macd_two_lines_shared", bench(n, || {
+        let macd = Macd::new(Identity::<Real>::new(), MACD_FAST, MACD_SLOW, MACD_SIGNAL).shared();
+        let (mut line, mut signal) = (macd.line(), macd.signal());
+        for &p in &closes {
+            black_box(line.update(p));
+            black_box(signal.update(p));
         }
     })));
 

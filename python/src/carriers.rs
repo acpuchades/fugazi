@@ -122,23 +122,46 @@ pub(crate) type StrSource<I> = runtime::Chain<I, Arc<str>>;
 /// same order). The names are available without an instance so warm-up rows can
 /// still be placed in the right column.
 ///
-/// `write_into` rather than `-> Vec<Real>` because this is called **once per
-/// bar**: a `vec![self.macd, self.signal, self.histogram]` per bar is 200 000
-/// heap allocations for a 200 000-bar frame, of three `f64` each. That is the
-/// same allocator pressure that turned out to dominate the scalar path (see
-/// `Column` in `constructors.rs`), just spread over many small blocks instead of
-/// a few large ones. The caller keeps one scratch buffer and reuses it.
+/// The primitive is [`write_row`](MultiOutput::write_row), writing into a
+/// caller-owned **slice**, because this is called **once per bar**: a
+/// `vec![self.macd, self.signal, self.histogram]` per bar is 200 000 heap
+/// allocations for a 200 000-bar frame, of three `f64` each. That is the same
+/// allocator pressure that turned out to dominate the scalar path (see `Column`
+/// in `constructors.rs`), just spread over many small blocks instead of a few
+/// large ones.
+///
+/// A slice rather than the `&mut Vec` this used to take, because the batch path
+/// already owns the destination row — `update_slice_flat` holds a
+/// `chunks_mut(lines)` row that is exactly the right length. Going through a
+/// `Vec` there meant a `clear`, a capacity check per line, and then a
+/// `copy_from_slice` out of it again, for a destination that was ready to be
+/// written in place. [`write_into`](MultiOutput::write_into) survives as the
+/// `Vec`-shaped form the per-bar `update_into` still wants.
 pub(crate) trait MultiOutput {
     fn names() -> &'static [&'static str]
     where
         Self: Sized;
 
-    /// Append this value's lines to `out`, in `names()` order.
-    fn write_into(&self, out: &mut Vec<Real>);
+    /// Write this value's lines into `out`, in `names()` order. `out` is
+    /// exactly `names().len()` long.
+    fn write_row(&self, out: &mut [Real]);
+
+    /// Replace `out`'s contents with this value's lines, in `names()` order.
+    fn write_into(&self, out: &mut Vec<Real>)
+    where
+        Self: Sized,
+    {
+        out.clear();
+        out.resize(Self::names().len(), 0.0);
+        self.write_row(out);
+    }
 
     /// Allocating form, for the one-shot `value()` accessor where a per-call
     /// `Vec` is not on any hot path.
-    fn values(&self) -> Vec<Real> {
+    fn values(&self) -> Vec<Real>
+    where
+        Self: Sized,
+    {
         let mut out = Vec::new();
         self.write_into(&mut out);
         out
@@ -149,56 +172,56 @@ impl MultiOutput for MacdValue {
     fn names() -> &'static [&'static str] {
         &["macd", "signal", "histogram"]
     }
-    fn write_into(&self, out: &mut Vec<Real>) {
-        out.extend_from_slice(&[self.macd, self.signal, self.histogram]);
+    fn write_row(&self, out: &mut [Real]) {
+        out.copy_from_slice(&[self.macd, self.signal, self.histogram]);
     }
 }
 impl MultiOutput for BollingerValue {
     fn names() -> &'static [&'static str] {
         &["upper", "middle", "lower"]
     }
-    fn write_into(&self, out: &mut Vec<Real>) {
-        out.extend_from_slice(&[self.upper, self.middle, self.lower]);
+    fn write_row(&self, out: &mut [Real]) {
+        out.copy_from_slice(&[self.upper, self.middle, self.lower]);
     }
 }
 impl MultiOutput for KeltnerValue {
     fn names() -> &'static [&'static str] {
         &["upper", "middle", "lower"]
     }
-    fn write_into(&self, out: &mut Vec<Real>) {
-        out.extend_from_slice(&[self.upper, self.middle, self.lower]);
+    fn write_row(&self, out: &mut [Real]) {
+        out.copy_from_slice(&[self.upper, self.middle, self.lower]);
     }
 }
 impl MultiOutput for DonchianValue {
     fn names() -> &'static [&'static str] {
         &["upper", "middle", "lower"]
     }
-    fn write_into(&self, out: &mut Vec<Real>) {
-        out.extend_from_slice(&[self.upper, self.middle, self.lower]);
+    fn write_row(&self, out: &mut [Real]) {
+        out.copy_from_slice(&[self.upper, self.middle, self.lower]);
     }
 }
 impl MultiOutput for AdxValue {
     fn names() -> &'static [&'static str] {
         &["plus_di", "minus_di", "adx"]
     }
-    fn write_into(&self, out: &mut Vec<Real>) {
-        out.extend_from_slice(&[self.plus_di, self.minus_di, self.adx]);
+    fn write_row(&self, out: &mut [Real]) {
+        out.copy_from_slice(&[self.plus_di, self.minus_di, self.adx]);
     }
 }
 impl MultiOutput for DmiValue {
     fn names() -> &'static [&'static str] {
         &["plus_di", "minus_di"]
     }
-    fn write_into(&self, out: &mut Vec<Real>) {
-        out.extend_from_slice(&[self.plus_di, self.minus_di]);
+    fn write_row(&self, out: &mut [Real]) {
+        out.copy_from_slice(&[self.plus_di, self.minus_di]);
     }
 }
 impl MultiOutput for AroonValue {
     fn names() -> &'static [&'static str] {
         &["up", "down", "oscillator"]
     }
-    fn write_into(&self, out: &mut Vec<Real>) {
-        out.extend_from_slice(&[self.up, self.down, self.oscillator]);
+    fn write_row(&self, out: &mut [Real]) {
+        out.copy_from_slice(&[self.up, self.down, self.oscillator]);
     }
 }
 
@@ -252,14 +275,13 @@ where
     fn update_slice_flat(&mut self, inputs: &[I], out: &mut [Real], lines: usize) {
         // `local` is the whole point — see the trait.
         let mut local = self.clone();
-        let mut scratch: Vec<Real> = Vec::with_capacity(lines);
         for (row, x) in out.chunks_mut(lines).zip(inputs) {
-            scratch.clear();
+            // Straight into the destination row: it is already exactly `lines`
+            // long, so the `Vec` this used to bounce through was a `clear`, a
+            // capacity check per line and a `copy_from_slice` back out, for a
+            // buffer that was ready to be written.
             match Indicator::update(&mut local, x.clone()) {
-                Some(o) => {
-                    o.write_into(&mut scratch);
-                    row.copy_from_slice(&scratch);
-                }
+                Some(o) => o.write_row(row),
                 None => row.fill(Real::NAN),
             }
         }
@@ -1359,12 +1381,22 @@ impl AnyMulti {
         // stays in L1.
         let mut flat = vec![0.0; FOLD_CHUNK * lines.max(1)];
         let mut row = 0usize;
+        // Column-outer, row-inner. The obvious nesting is the other way round —
+        // walk the flat chunk in the order it was produced — but that writes
+        // one element to each of `lines` arrays megabytes apart before moving
+        // on, so every column is touched on a fresh cache line every sample and
+        // the bounds check is re-paid per element. This way each column gets
+        // one contiguous run per chunk, the bound is checked once for the run,
+        // and the strided read is off `flat`, which is 3 KB and stays in L1.
         let scatter = |flat: &[Real], n: usize, row: &mut usize| {
-            for r in 0..n {
-                for (j, col) in columns.iter().enumerate() {
-                    if *row + r < col.len() {
-                        col[*row + r].set(flat[r * lines + j]);
-                    }
+            for (j, col) in columns.iter().enumerate() {
+                // Clamp once per column per chunk. A caller-supplied frame whose
+                // length disagrees with `row_count` is the only way this bites,
+                // and it truncates rather than panicking, as before.
+                let end = (*row + n).min(col.len());
+                let dst = &col[(*row).min(end)..end];
+                for (r, cell) in dst.iter().enumerate() {
+                    cell.set(flat[r * lines + j]);
                 }
             }
             *row += n;

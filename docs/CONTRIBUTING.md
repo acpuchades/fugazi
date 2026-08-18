@@ -116,6 +116,67 @@ have no `Indicator` impl on purpose.
 `warm_up_bars() - 1` samples and `Some` from sample `warm_up_bars()` onward.
 Not an estimate — `tests/warm_up.rs` asserts it sample by sample.
 
+#### Writing one that is fast without trying
+
+None of this is micro-optimisation, and none of it is optional-but-nice: each
+line below is a mistake that shipped, was measured, and cost between 25% and 60%
+of an indicator. The full numbers are in `docs/PERFORMANCE.md`; this is the
+short form, in the order you will hit them.
+
+* **Do not allocate in `update`.** No `Vec`, no `Box`, no `String`, no
+  `VecDeque` — not per bar, not per *anything*. If you need a window, it has a
+  fixed capacity known at construction, so it is a `Box<[T]>` ring built in
+  `new`. This is what the shared cores are; `WindowExtreme` was itself still a
+  growable `VecDeque` until Phase 10, which cost `Aroon` **38% of its runtime**
+  for a flexibility nothing used. `tests/perf_guard.rs` asserts allocations do
+  not scale with bar count, and it is in CI.
+* **Reuse a core; do not write a fifth window.** `WindowStats`, `WindowExtreme`,
+  `WindowQuantile`, `EmaState`, `WilderState`. A new one starts out with the
+  bugs and the costs these have already had fixed.
+* **Ask a core for everything you need in one call.** `WindowStats::mean()`
+  followed by `stddev()` computes the mean twice, and a `divsd` is ~15 cycles,
+  unpipelined, on the critical path. `mean_and_stddev()` / `mean_and_variance()`
+  exist for that; if you add a pair with a shared intermediate, add the combined
+  reader too. `Bollinger`, `ZScore` and the Kelly sizer all had this.
+* **Take the narrowest input domain the indicator actually consumes.** A bar
+  indicator's source is `Indicator<Output = Candle>`, not `Atom`. Lifting a
+  40-byte `Candle` into an 88-byte `Atom` per bar was **97 instructions/sample**
+  on the Python bar path and 77% of what the ATR benchmark was reporting.
+* **`crate::num::max_finite`, never `f64::max`.** Rust specifies `f64::max` to
+  *ignore* NaN, and the fixups cost 22 instructions against 10 — 26% of ATR.
+  `src/num.rs` exists for this; the divergence (NaN propagates) is deliberate
+  and documented.
+* **If a query has to scan the window, reduce it on `LANES` accumulators over
+  one contiguous run** — see `lanes_sum_sq` in `src/indicators/stats.rs`. A
+  single running total makes every add wait on the one before it, so the scan
+  costs `period` × FPU add latency regardless of how tight the loop is. Reduce
+  the *full ring* when the window is full, not the two halves `slices()`
+  returns: at short periods the halves put most of the window in the scalar
+  remainder and the lanes buy nothing.
+* **Do not reach for `.shared()`.** `Shared`/`SharedComponent` advance a source
+  once per bar across several accessors, but the cell is an `Arc<Mutex<_>>` and
+  each accessor pays an uncontended lock — ~12 ns. Every leaf indicator in this
+  crate is cheaper than that, so two independent `Component`s (what
+  `src/spec/expr.rs` builds, and what `macd.line()` / `macd.signal()` build)
+  measure **13× faster** than the shared pair. It pays only for a genuinely
+  expensive source.
+* **Storing the output is free — keep `value()`.** The obvious worry is that
+  `pub value: Option<Real>` costs a store per bar. Measured, it is **+1.1% at
+  the ceiling**, because these loops are latency-bound and the store ports idle
+  in the shadow of the recurrence. Do not invent a no-store variant.
+* **If TA-Lib has an equivalent, add it to `benches/three_tier.rs`** — and to
+  `tools/bench_talib_native.c` and `tools/bench_three_tier.py`, which carry the
+  other tiers. That is how `Aroon` was found to be losing to `TA_AROON`; an
+  indicator nothing compares stays slow quietly. Match the *unit of work*: a
+  multi-output indicator's `update` produces every line, so it goes against the
+  one TA-Lib call that fills every output array.
+
+**Multi-output indicators** (`Output` is a value struct) carry three extras:
+`component_accessors!` for the per-line `Component` accessors (step 1),
+a `MultiOutput` impl in `python/src/carriers.rs`, and a `PyMulti` constructor
+(step 6). `MultiOutput`'s primitive is `write_row(&mut [Real])` — write the lines
+straight into the caller's row; do not build a `Vec` per bar.
+
 ### 2. Re-export — `src/indicators/mod.rs`
 
 `mod foo;` plus `pub use foo::Foo;`.
