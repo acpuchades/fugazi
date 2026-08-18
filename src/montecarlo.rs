@@ -27,7 +27,7 @@
 //! the same number of observations as the original.
 
 #[cfg(feature = "montecarlo")]
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 #[cfg(feature = "montecarlo")]
 use rand_chacha::ChaCha8Rng;
 

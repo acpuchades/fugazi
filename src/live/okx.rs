@@ -62,7 +62,7 @@
 use std::collections::HashMap;
 
 use base64::Engine as _;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use reqwest::Method;
 use sha2::Sha256;
 use time::OffsetDateTime;

@@ -1,6 +1,6 @@
 [package]
 name = "fugazi"
-version = "0.63.0"
+version = "0.63.1"
 edition = "2024"
 description = "A library of incremental technical-analysis indicators, signals and strategies"
 license = "MIT"
@@ -106,7 +106,7 @@ clap_complete = { version = "4", optional = true }
 # per-indicator run-state save/load bodies for run resuming. It is a normal
 # proc-macro dependency (no runtime, no linkage), so it does not affect the
 # pyo3 cdylib build.
-fugazi-derive = { path = "fugazi-derive", version = "0.63.0" }
+fugazi-derive = { path = "fugazi-derive", version = "0.63.1" }
 # `rc` provides `Serialize`/`Deserialize` for `Arc<str>` — the crate's `Symbol`
 # type. serde gates it because deserializing two `Arc`s that were shared at
 # serialize time yields two independent allocations; that is fine here, since a
@@ -127,20 +127,23 @@ rayon = { version = "1", optional = true }
 # ChaCha8Rng is a portable, deterministic stream given a `u64` seed — the
 # same permutation set on every platform, so a reported p-value/CI reproduces.
 # `default-features = false` drops `getrandom` (we never seed from the OS).
-rand = { version = "0.9", default-features = false, features = ["std"], optional = true }
-rand_chacha = { version = "0.9", default-features = false, optional = true }
+rand = { version = "0.10", default-features = false, features = ["std"], optional = true }
+rand_chacha = { version = "0.10", default-features = false, optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls", "gzip"], optional = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros"], optional = true }
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
-statrs = { version = "0.18", default-features = false }
+statrs = { version = "0.19", default-features = false }
 thiserror = { version = "2", optional = true }
-hmac = { version = "0.12", optional = true }
-sha2 = { version = "0.10", optional = true }
-base64 = { version = "0.22", optional = true }
+hmac = { version = "0.13", optional = true }
+sha2 = { version = "0.11", optional = true }
+base64 = { version = "0.23", optional = true }
 # ECDSA P-256 signing for Coinbase Advanced Trade's ES256 JWTs (the `live`
-# feature). Pure-Rust, no OS RNG: signatures use deterministic RFC 6979, so no
-# `getrandom`. `pem`/`pkcs8` parse the CDP key file's PEM private key.
-p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem", "pkcs8", "std"], optional = true }
+# feature). Pure Rust, and the signing path draws no randomness: signatures are
+# deterministic RFC 6979. (`getrandom` does appear in the `live` tree from 0.14
+# on — the RustCrypto 0.14 stack takes it unconditionally through
+# `crypto-bigint`/`crypto-common` — but nothing on the signing path calls it.)
+# `pem`/`pkcs8` parse the CDP key file's PEM private key.
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "pem", "pkcs8", "std"], optional = true }
 interim = { version = "0.2.1", default-features = false, features = ["std", "time_0_3"], optional = true }
 
 [dev-dependencies]
@@ -148,7 +151,7 @@ wiremock = "0.6"
 tokio-test = "0.4"
 # The `live` Coinbase wallet test builds a throwaway P-256 key to construct the
 # wallet (the mock doesn't verify the JWT, but construction parses a real key).
-p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem", "pkcs8", "std"] }
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "pem", "pkcs8", "std"] }
 # The benchmark harness (`benches/`). `default-features = false` drops the
 # plotting/HTML-report stack — the numbers are read from the terminal and from
 # `scripts/perf-compare.sh`, not from generated charts, and gnuplot/plotters

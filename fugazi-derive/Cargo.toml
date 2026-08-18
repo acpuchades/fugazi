@@ -1,6 +1,6 @@
 [package]
 name = "fugazi-derive"
-version = "0.63.0"
+version = "0.63.1"
 edition = "2024"
 license = "MIT"
 description = "Internal derive macros for the fugazi crate (SaveState — run-state serialization)."
@@ -12,6 +12,6 @@ repository = "https://github.com/acpuchades/fugazi"
 proc-macro = true
 
 [dependencies]
-syn = { version = "2", features = ["full"] }
+syn = { version = "3", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
