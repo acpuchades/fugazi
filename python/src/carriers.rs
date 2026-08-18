@@ -1395,8 +1395,14 @@ impl AnyMulti {
                 // and it truncates rather than panicking, as before.
                 let end = (*row + n).min(col.len());
                 let dst = &col[(*row).min(end)..end];
-                for (r, cell) in dst.iter().enumerate() {
-                    cell.set(flat[r * lines + j]);
+                // Both sides walked as iterators, for the reason
+                // `feed_into_numpy` walks its output with `cells.next()`: an
+                // indexed read of `flat` is bounds-checked once per *element*,
+                // and neither iterator can run dry — `flat` holds exactly
+                // `n * lines` values and `dst` at most `n`.
+                let src = flat[j..].iter().step_by(lines);
+                for (cell, v) in dst.iter().zip(src) {
+                    cell.set(*v);
                 }
             }
             *row += n;
