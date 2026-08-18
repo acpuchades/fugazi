@@ -1417,7 +1417,7 @@ caller who wants the pair pays for both calls, so both calls are timed.
 
 ### Results
 
-200 000 samples, **sampled to convergence** — 11 interleaved passes, after which
+200 000 samples, **sampled to convergence** — 27 interleaved passes, after which
 no figure had improved by more than 1% for three consecutive passes. `rs vs C` is
 against native TA-Lib C, `py vs py` against the `talib` Cython bindings — one
 baseline per tier, as above.
@@ -1430,11 +1430,11 @@ column — `after` against `TA-Lib C`, both from the same 11-pass run.
 
 | | TA-Lib C | fugazi rs before | fugazi rs after | **rs vs C** | TA-Lib py | fugazi py before | fugazi py after | **py vs py** |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `macd` | 12.33 | 1.76 | **1.45** | **0.12×** | 20.51 | 24.04 | **22.15** | 1.08× |
-| `dmi` | 8.82 | 6.72 | **5.24** | **0.59×** | 15.92 | 28.76 | **29.80** | 1.87× |
-| `adx` | 13.46 | 10.19 | **8.43** | **0.63×** | 20.14 | 43.97 | **40.11** | 1.99× |
-| `aroon` | 7.55 | 17.31 | **8.71** | 1.15× | 14.52 | 40.06 | **35.87** | 2.47× |
-| `bbands` | 3.69 | 20.40 | **12.73** | 3.45× | 10.88 | 46.40 | **42.31** | 3.89× |
+| `macd` | 12.69 | 1.76 | **1.52** | **0.12×** | 21.75 | 24.04 | **23.03** | 1.06× |
+| `dmi` | 9.59 | 6.72 | **5.33** | **0.56×** | 16.44 | 28.76 | **26.90** | 1.64× |
+| `adx` | 14.16 | 10.19 | **8.59** | **0.61×** | 20.44 | 43.97 | **40.99** | 2.01× |
+| `aroon` | 8.64 | 17.31 | **8.92** | 1.03× | 15.33 | 40.06 | **38.00** | 2.48× |
+| `bbands` | 3.87 | 20.40 | **12.83** | 3.32× | 11.32 | 46.40 | **44.24** | 3.91× |
 
 The Rust engine **beats native TA-Lib C on three of the five** — by 8.5× on
 `macd`, where TA-Lib's own `TA_MACD` is slow (it allocates and fills two
@@ -1445,7 +1445,8 @@ re-derivations.
 **`aroon` does not win, and an earlier draft of this section said it did.** That
 claim came from a five-pass run in which the C tier happened to read 9.03 and the
 Rust tier 9.30 — close enough to call parity, and wrong. Sampled to convergence
-the gap is stable at **1.15×**: real, small, and on the losing side. What is true
+the gap is stable and small — **1.15×** on an 11-pass run, **1.03×** on a
+27-pass one, so somewhere between "just behind" and "level", and never ahead. What is true
 is that it was roughly *twice* the C library before the ring-buffer change, so
 that change closed most of a 2× gap without closing all of it.
 
@@ -1634,18 +1635,22 @@ in the binding, not a property of the design.
 
 From the converged run above:
 
-| | `py vs py` | |
-|---|---:|---|
-| `atr` | 0.47× | passes — the frame is read in place and folded once |
-| `ema` | 0.97× | passes |
-| `macd` | 1.08× | passes |
-| `rsi` | 1.14× | passes |
-| `sma` | 1.55× | **over** |
-| `dmi` | 1.87× | **over** |
-| `adx` | 1.99× | **over** |
-| `aroon` | 2.47× | **over** (and see the caveat on this figure above) |
-| `stddev` | 3.72× | **exempt** |
-| `bbands` | 3.89× | **exempt** |
+| | `py vs py` | was | |
+|---|---:|---:|---|
+| `atr` | 0.47× | 0.47× | passes — the frame is read in place and folded once |
+| `ema` | 0.94× | 0.97× | passes |
+| `macd` | 1.06× | 1.08× | passes |
+| `rsi` | 1.15× | 1.14× | passes |
+| `sma` | 1.58× | 1.55× | **over** |
+| `dmi` | **1.64×** | 1.87× | **over**, but the iterator scatter moved it |
+| `adx` | 2.01× | 1.99× | **over** |
+| `aroon` | 2.48× | 2.47× | **over** |
+| `stddev` | 3.74× | 3.72× | **exempt** |
+| `bbands` | 3.91× | 3.91× | **exempt** |
+
+Both columns are converged runs (27 passes and 11). The `was` column predates
+the iterator scatter in `feed_into_columns`; everything else about the two runs
+is the same.
 
 ### The exemption, and why it is one
 
@@ -1719,6 +1724,28 @@ Measured, not yet fixed — the reason this is a section and not a changelog ent
   confirmed, and this document has a standing record of what happens when a cost
   here is reasoned about rather than measured — see *How to measure without
   fooling yourself*.
+
+### The iterator scatter — what it bought, and what it did not
+
+`feed_into_columns` scattered its flat chunk into the output columns with an
+indexed read, `flat[r * lines + j]`, bounds-checked once per element; the scalar
+path has walked its output with `cells.next()` since Phase 8 for exactly that
+reason. Both sides are iterators now.
+
+Converged, it moved **`dmi` from 1.87× to 1.64×** and left `adx` (1.99 → 2.01)
+and `aroon` (2.47 → 2.48) where they were. `dmi` writes two output columns and
+the other two write three, so "fewer bounds checks" does not explain the split —
+whatever the three-column path is paying, it is not this, and it is worth
+understanding before the next change is attempted.
+
+**The commit that landed this claimed more.** It quoted `adx` 2.01× → 1.66× and
+`aroon` 2.33× → 2.07× from the decomposition probe — a single script, run once,
+comparing against a `talib` baseline taken in the same script minutes apart on a
+warm machine. The converged four-tier run says those two did not move. The probe
+was not lying about its own numbers; it was measuring a different thing (one
+process, one pass, no convergence) and being read as if it were the table. **A
+figure from a diagnostic probe is a hypothesis. Only the converged run is a
+result.**
 
 `sma` is a different shape of problem: at 2.17 ns/sample against `talib`'s 1.40
 the whole budget is 1.75 ns and the engine alone is 1.35, so the binding has
