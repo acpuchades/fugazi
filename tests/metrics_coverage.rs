@@ -38,6 +38,13 @@ use common::fixtures::Csv;
 /// Shrinking this list is the point. Adding to it is a decision, not a
 /// formality: prefer finding a reference over writing a line here.
 const EXEMPT: &[(&str, &str)] = &[
+    // Run context that describes the slice rather than measuring it.
+    (
+        "run.warmup_bars",
+        "bookkeeping, not a measurement: how many bars `--from` read back to \
+         warm the chains before evaluation began. No reference library models \
+         a warm-up prefix at all. Covered by tests/date_range.rs",
+    ),
     // Trade fields no reference library reports.
     (
         "trades.flat",

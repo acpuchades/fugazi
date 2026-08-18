@@ -268,6 +268,7 @@ fn run_single(
             windowed: None,
             seconds_per_bar,
             mc: None,
+            warmup_bars: None,
         };
         let ctx_ref = &ctx;
         let probe = |params: &HashMap<String, Value>| -> Result<usize> {
@@ -330,6 +331,7 @@ fn run_single(
         windowed: windowed_bars,
         seconds_per_bar,
         mc: None,
+        warmup_bars: None,
     };
     let ctx_ref = &ctx;
     let evaluate_row = move |params: &HashMap<String, Value>| -> Result<Evaluation> {
@@ -541,6 +543,7 @@ fn run_multi_symbol(
         windowed: windowed_bars,
         seconds_per_bar,
         mc: None,
+        warmup_bars: None,
     };
     let ctx_ref = &ctx;
 
@@ -677,6 +680,7 @@ fn run_multi_symbol_walkforward(
         windowed: None,
         seconds_per_bar,
         mc: None,
+        warmup_bars: None,
     };
     let ctx_ref = &ctx;
 

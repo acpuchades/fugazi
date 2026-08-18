@@ -594,6 +594,7 @@ fn eval_context<'a>(
         windowed: windowed_bars,
         seconds_per_bar,
         mc: opts.montecarlo.cloned(),
+        warmup_bars: None,
     })
 }
 

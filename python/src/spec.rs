@@ -801,6 +801,7 @@ impl PyStrategySpec {
                 windowed: None,
                 seconds_per_bar,
                 mc: None,
+                warmup_bars: None,
             };
             let outcome = py
                 .detach(|| run_montecarlo(&self.inner, &snaps, &ctx, &report, &mc.inner))
@@ -1332,6 +1333,7 @@ pub(crate) fn optimize(
             windowed: windowed.and_then(std::num::NonZeroUsize::new),
             seconds_per_bar,
             mc: None,
+            warmup_bars: None,
         };
         let ctx_ref = &ctx;
         let evaluate_row = |params: &std::collections::HashMap<String, JsonValue>|
@@ -1622,6 +1624,7 @@ pub(crate) fn run_walkforward(
                 windowed: None,
                 seconds_per_bar,
                 mc: None,
+                warmup_bars: None,
             };
             let wf_ctx_ref = &wf_ctx;
             let wf_schema = spec_backtest::schema_from_snapshots(snaps);

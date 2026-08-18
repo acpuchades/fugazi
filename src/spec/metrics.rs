@@ -99,6 +99,23 @@ pub struct McMetric {
 #[derive(Clone, Debug, Serialize)]
 pub struct RunSection {
     pub bars: usize,
+    /// Label of the first **evaluated** bar — after `--from` / `--until`
+    /// slicing and after any warm-up prefix, so it names the period the
+    /// numbers below actually describe rather than the period the input
+    /// covers. `None` when the reduction had no bar labels in hand: the
+    /// library entry points take a bare [`RunReport`], which carries equity
+    /// but no timestamps. Every CLI run populates it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub period_start: Option<String>,
+    /// Label of the last evaluated bar, inclusive. See [`Self::period_start`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub period_end: Option<String>,
+    /// Bars consumed warming indicators before evaluation began, and therefore
+    /// *excluded* from `bars` and from every metric here. Non-zero only under
+    /// `--from`, which reads bars before its own boundary to warm the chains
+    /// without trading on them. `None` when nothing tracked a warm-up prefix.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warmup_bars: Option<usize>,
     pub initial_equity: Real,
     pub final_equity: Real,
     pub bars_per_year: Real,
@@ -373,6 +390,12 @@ pub fn from_report<Sym>(
     Metrics {
         run: RunSection {
             bars,
+            // A `RunReport` carries no timestamps, so the period is not
+            // knowable here; whoever holds the bar labels stamps it after the
+            // fact via `stamp_period`.
+            period_start: None,
+            period_end: None,
+            warmup_bars: None,
             initial_equity: initial,
             final_equity,
             bars_per_year,
@@ -473,6 +496,24 @@ pub fn from_report<Sym>(
             min_seconds: seconds_per_bar.and_then(|s| min_bars.map(|b| b as Real * s)),
             max_seconds: seconds_per_bar.and_then(|s| max_bars.map(|b| b as Real * s)),
         },
+    }
+}
+
+/// Record which period `m` covers, from the bar labels of the range it was
+/// reduced over.
+///
+/// [`from_report`] cannot do this itself — a [`RunReport`] is equity and fills,
+/// with no timestamps anywhere in it — so the caller holding the label stream
+/// stamps the document afterwards. `labels` is the *evaluated* range's labels,
+/// so `warmup_bars` is reported separately rather than inferred from it.
+///
+/// A no-op on an empty range: a window with no bars has no period to name, and
+/// `None` is the honest answer rather than a degenerate one.
+pub fn stamp_period(m: &mut Metrics, labels: &[String], warmup_bars: Option<usize>) {
+    m.run.warmup_bars = warmup_bars;
+    if let (Some(first), Some(last)) = (labels.first(), labels.last()) {
+        m.run.period_start = Some(first.clone());
+        m.run.period_end = Some(last.clone());
     }
 }
 
@@ -696,6 +737,7 @@ pub fn flatten(m: &Metrics) -> Vec<(&'static str, Option<Real>)> {
     let count = |v: usize| Some(v as Real);
     vec![
         ("run.bars", count(m.run.bars)),
+        ("run.warmup_bars", m.run.warmup_bars.map(|b| b as Real)),
         ("run.initial_equity", real(m.run.initial_equity)),
         ("run.final_equity", real(m.run.final_equity)),
         ("run.bars_per_year", real(m.run.bars_per_year)),
