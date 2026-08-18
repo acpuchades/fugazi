@@ -28,7 +28,6 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://fugazitrade.com"
 Documentation = "https://github.com/acpuchades/fugazi/blob/main/docs/PYTHON.md"
 Repository = "https://github.com/acpuchades/fugazi"
 Issues = "https://github.com/acpuchades/fugazi/issues"

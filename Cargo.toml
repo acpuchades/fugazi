@@ -5,7 +5,9 @@ edition = "2024"
 description = "A library of incremental technical-analysis indicators, signals and strategies"
 license = "MIT"
 repository = "https://github.com/acpuchades/fugazi"
-homepage = "https://fugazitrade.com"
+# No `homepage` until fugazitrade.com serves a public page: `/` there redirects
+# into the authenticated app, and crates.io's Homepage link should not open a
+# login wall. Restore it the moment a landing route exists.
 documentation = "https://docs.rs/fugazi"
 readme = "README.md"
 keywords = ["trading", "technical-analysis", "indicators", "finance", "incremental"]
