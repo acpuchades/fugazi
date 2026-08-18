@@ -334,3 +334,372 @@ fn a_misspelled_metric_is_still_unknown() {
         out.stderr
     );
 }
+
+// ---------------------------------------------------------------------------
+// Neighbourhood smoothing (`--smooth`)
+// ---------------------------------------------------------------------------
+//
+// The numeric truth — kernel weights, edge renormalization, subgrid and
+// categorical partitioning, `None` handling — is pinned by unit tests on
+// `smooth_keys` in `src/spec/optimize.rs`, where a failure names the function.
+// `examples/candles.csv` is 30 bars, so a spike-vs-plateau *surface* is not
+// constructible out of a real backtest here and pretending otherwise would pin
+// the price fixture rather than the kernel. What belongs at this layer is
+// wiring: flag parsing, column emission, ordering, and the axis→lattice
+// mapping surviving the sort.
+
+/// Split a CSV line on `,`.
+fn cells(line: &str) -> Vec<&str> {
+    line.split(',').collect()
+}
+
+fn column(header: &str, name: &str) -> usize {
+    cells(header)
+        .iter()
+        .position(|c| *c == name)
+        .unwrap_or_else(|| panic!("no `{name}` column in {header}"))
+}
+
+#[test]
+fn without_smooth_the_csv_shape_is_untouched() {
+    // The regression guard: `--smooth` is opt-in, so a sweep that doesn't ask
+    // for it must emit exactly the columns it always did — including across a
+    // stacked multi-subgrid sweep with a categorical axis, which is where the
+    // sparse union-column projection is most likely to shift under a change to
+    // the row struct.
+    let (_, csv) = sweep(
+        "fugazi_opt_nosmooth_shape",
+        &[
+            "--grid",
+            "FAST=[2,3],SLOW=[6,8]",
+            "--grid",
+            // A categorical axis needs JSON-quoted values — a bare `[a,b]`
+            // parses as the scalar string it looks like, not as a list.
+            r#"FAST=[4],SLOW=[10],MODE=["a","b"]"#,
+            "-m",
+            "total_pct",
+            "--best-by",
+            "total_pct",
+        ],
+    );
+    let lines = read_csv(&csv);
+    let header = &lines[0];
+    assert!(
+        !header.contains("_smoothed") && !header.contains("_support"),
+        "smoothing columns leaked into a sweep that never asked for them: {header}"
+    );
+    // Axis columns name-sorted, then the metric, then the DSR cell.
+    assert!(
+        header.starts_with("FAST,MODE,SLOW,returns.total_pct"),
+        "column order changed: {header}"
+    );
+    assert_eq!(lines.len(), 1 + 4 + 2, "header + (2x2) + (1x1x2) points");
+}
+
+#[test]
+fn smooth_appends_two_columns_without_reordering_the_others() {
+    let (out, csv) = sweep(
+        "fugazi_opt_smooth_columns",
+        &[
+            "--grid",
+            "FAST=[2,3,4],SLOW=[6,8,10]",
+            "-m",
+            "total_pct",
+            "--best-by",
+            "total_pct",
+            "--smooth",
+        ],
+    );
+    let lines = read_csv(&csv);
+    let header = &lines[0];
+    assert!(
+        header.starts_with("FAST,SLOW,returns.total_pct"),
+        "existing columns were reordered: {header}"
+    );
+    assert!(
+        header.ends_with("returns.total_pct_smoothed,returns.total_pct_support"),
+        "the smoothing columns are not appended last: {header}"
+    );
+    // Bare `--smooth` is the Moore neighbourhood, and the console says so.
+    assert!(
+        out.stdout.contains("box:1"),
+        "the inputs block should echo the default kernel:\n{}",
+        out.stdout
+    );
+    // Support is a fraction of a fully-interior neighbourhood: 0 < s <= 1.
+    let sup = column(header, "returns.total_pct_support");
+    let supports: Vec<f64> = lines[1..]
+        .iter()
+        .map(|l| cells(l)[sup].parse::<f64>().expect("support is always defined"))
+        .collect();
+    assert_eq!(supports.len(), 9);
+    assert!(supports.iter().all(|s| *s > 0.0 && *s <= 1.0 + 1e-12), "{supports:?}");
+    // A 3x3 box:1 lattice has exactly one fully interior cell.
+    assert_eq!(
+        supports.iter().filter(|s| (**s - 1.0).abs() < 1e-9).count(),
+        1,
+        "expected exactly one interior cell in a 3x3 grid: {supports:?}"
+    );
+}
+
+#[test]
+fn the_smoothed_column_is_the_neighbourhood_mean_of_the_raw_column() {
+    // The centrepiece. Rather than engineer a surface, recompute the kernel
+    // from the CSV's own raw column and demand agreement. Rows are indexed by
+    // their axis *cells*, not by row order — which simultaneously proves the
+    // axis→lattice mapping survived the sort by the smoothed key.
+    //
+    // `total_pct` rather than `sharpe`: it is defined on every point of a
+    // 30-bar run, so the assertion tests the kernel and not the `None` path
+    // (which the unit tests cover directly).
+    let fasts = [2.0, 3.0, 4.0];
+    let slows = [6.0, 8.0, 10.0];
+    let (_, csv) = sweep(
+        "fugazi_opt_smooth_recompute",
+        &[
+            "--grid",
+            "FAST=[2,3,4],SLOW=[6,8,10]",
+            "-m",
+            "total_pct",
+            "--best-by",
+            "total_pct",
+            "--smooth=box:1",
+            "--smooth-min-support",
+            "0",
+        ],
+    );
+    let lines = read_csv(&csv);
+    let header = &lines[0];
+    let (cf, cs) = (column(header, "FAST"), column(header, "SLOW"));
+    let craw = column(header, "returns.total_pct");
+    let csm = column(header, "returns.total_pct_smoothed");
+    let csup = column(header, "returns.total_pct_support");
+
+    // raw[i][j] for FAST=fasts[i], SLOW=slows[j].
+    let mut raw = [[f64::NAN; 3]; 3];
+    let mut got = [[f64::NAN; 3]; 3];
+    let mut support = [[f64::NAN; 3]; 3];
+    for line in &lines[1..] {
+        let c = cells(line);
+        let i = fasts.iter().position(|v| *v == c[cf].parse::<f64>().unwrap()).unwrap();
+        let j = slows.iter().position(|v| *v == c[cs].parse::<f64>().unwrap()).unwrap();
+        raw[i][j] = c[craw].parse().unwrap();
+        got[i][j] = c[csm].parse().unwrap();
+        support[i][j] = c[csup].parse().unwrap();
+    }
+
+    for i in 0..3 {
+        for j in 0..3 {
+            // box:1 over the Chebyshev ball, renormalized over the cells that
+            // exist — no padding, no reflection.
+            let mut sum = 0.0;
+            let mut n = 0.0;
+            for di in -1i32..=1 {
+                for dj in -1i32..=1 {
+                    let (ni, nj) = (i as i32 + di, j as i32 + dj);
+                    if (0..3).contains(&ni) && (0..3).contains(&nj) {
+                        sum += raw[ni as usize][nj as usize];
+                        n += 1.0;
+                    }
+                }
+            }
+            assert!(
+                (got[i][j] - sum / n).abs() < 1e-9,
+                "FAST={} SLOW={}: smoothed {} != neighbourhood mean {}",
+                fasts[i],
+                slows[j],
+                got[i][j],
+                sum / n
+            );
+            assert!(
+                (support[i][j] - n / 9.0).abs() < 1e-9,
+                "FAST={} SLOW={}: support {} != {n}/9",
+                fasts[i],
+                slows[j],
+                support[i][j]
+            );
+        }
+    }
+
+    // And the CSV really is ordered by the smoothed key, not the raw one.
+    let smoothed_in_order: Vec<f64> =
+        lines[1..].iter().map(|l| cells(l)[csm].parse().unwrap()).collect();
+    assert!(
+        smoothed_in_order.windows(2).all(|w| w[0] >= w[1]),
+        "rows are not sorted best-first by the smoothed key: {smoothed_in_order:?}"
+    );
+}
+
+#[test]
+fn min_support_empties_the_smoothed_cell_but_keeps_the_support_cell() {
+    let (_, csv) = sweep(
+        "fugazi_opt_smooth_minsupport",
+        &[
+            "--grid",
+            "FAST=[2,3,4],SLOW=[6,8,10]",
+            "-m",
+            "total_pct",
+            "--best-by",
+            "total_pct",
+            "--smooth=box:1",
+            "--smooth-min-support",
+            "1.0",
+        ],
+    );
+    let lines = read_csv(&csv);
+    let header = &lines[0];
+    let csm = column(header, "returns.total_pct_smoothed");
+    let csup = column(header, "returns.total_pct_support");
+    let kept = lines[1..].iter().filter(|l| !cells(l)[csm].is_empty()).count();
+    assert_eq!(kept, 1, "only the interior cell of a 3x3 clears full support");
+    assert!(
+        lines[1..].iter().all(|l| !cells(l)[csup].is_empty()),
+        "support must be reported even for the rows it rejected — that is the diagnostic"
+    );
+}
+
+#[test]
+fn smooth_without_best_by_is_refused() {
+    // There is no ranking key to average over the neighbourhood. Clap enforces
+    // it, the same way it enforces `-k`'s dependencies.
+    let (path, _) = scratch_file("fugazi_opt_smooth_nobestby_strategy.yml", SWEEPABLE);
+    let out = Cmd::new("optimize")
+        .arg(&format!("@{}", path.display()))
+        .series(&at("examples/candles.csv"))
+        .args(&["--grid", "FAST=[2,3],SLOW=[9]"])
+        .args(&["--smooth", "--output", "/dev/null"])
+        .fails();
+    assert!(
+        out.stderr.contains("--best-by"),
+        "the refusal should name the missing flag, got: {}",
+        out.stderr
+    );
+}
+
+#[test]
+fn an_unknown_smoothing_kernel_names_the_forms_it_accepts() {
+    let (path, _) = scratch_file("fugazi_opt_smooth_badkernel_strategy.yml", SWEEPABLE);
+    let out = Cmd::new("optimize")
+        .arg(&format!("@{}", path.display()))
+        .series(&at("examples/candles.csv"))
+        .args(&["--grid", "FAST=[2,3],SLOW=[9]"])
+        .args(&["--best-by", "total_pct", "--smooth=parabola:2"])
+        .args(&["--output", "/dev/null"])
+        .fails();
+    assert!(
+        out.stderr.contains("box:R") && out.stderr.contains("gaussian:S"),
+        "the refusal should name the accepted forms, got: {}",
+        out.stderr
+    );
+}
+
+#[test]
+fn smoothing_composes_with_windowing_and_risk_aversion() {
+    // `-k` shifts each point's cross-window mean against it *before* ranking;
+    // `--smooth` then averages that shifted key over the neighbourhood. The two
+    // penalties are orthogonal — dispersion across time, dispersion across the
+    // parameter neighbourhood — and they have to compose.
+    //
+    // `-w 10` rather than the documentation's `-w 252`: the example series is
+    // 30 bars, so 252-bar windows would leave a single degenerate window.
+    let (out, csv) = sweep(
+        "fugazi_opt_smooth_with_k",
+        &[
+            "--grid",
+            "FAST=[2,3,4],SLOW=[6,8,10]",
+            "-m",
+            "total_pct",
+            "--best-by",
+            "total_pct",
+            "-w",
+            "10",
+            "-k",
+            "1.0",
+            "--smooth=box:1",
+        ],
+    );
+    let lines = read_csv(&csv);
+    let header = &lines[0];
+    // Windowed sweeps emit `_mean`/`_std` pairs; the smoothed column sits after.
+    assert!(header.contains("returns.total_pct_mean"), "{header}");
+    let cmean = column(header, "returns.total_pct_mean");
+    let cstd = column(header, "returns.total_pct_std");
+    let csm = column(header, "returns.total_pct_smoothed");
+
+    // What is smoothed is `mean − k·std`, not `mean`. Rebuild both candidate
+    // neighbourhood averages for the winning row and demand the shifted one.
+    let win = cells(&lines[1]);
+    let (mean, std) = (
+        win[cmean].parse::<f64>().unwrap(),
+        win[cstd].parse::<f64>().unwrap(),
+    );
+    let smoothed: f64 = win[csm].parse().unwrap();
+    assert!(
+        std > 0.0,
+        "this fixture needs a metric with cross-window spread for the test to bite"
+    );
+    // The smoothed key averages `mean − 1.0·std` over the neighbourhood, so it
+    // must land below the raw windowed mean of the same neighbourhood.
+    assert!(
+        smoothed < mean,
+        "the risk-aversion shift was not folded in before smoothing: smoothed {smoothed} vs mean {mean}"
+    );
+    assert!(
+        out.stdout.contains("risk-aversion") && out.stdout.contains("box:1"),
+        "the inputs block should echo both knobs:\n{}",
+        out.stdout
+    );
+}
+
+#[test]
+fn an_ascending_best_by_sorts_the_smoothed_column_ascending() {
+    let (_, csv) = sweep(
+        "fugazi_opt_smooth_ascending",
+        &[
+            "--grid",
+            "FAST=[2,3,4],SLOW=[6,8,10]",
+            "-m",
+            "max_pct",
+            "--best-by",
+            "max_pct",
+            "--smooth=box:1",
+        ],
+    );
+    let lines = read_csv(&csv);
+    let csm = column(&lines[0], "drawdown.max_pct_smoothed");
+    let values: Vec<f64> = lines[1..]
+        .iter()
+        .filter_map(|l| cells(l)[csm].parse::<f64>().ok())
+        .collect();
+    assert!(values.len() >= 2, "{values:?}");
+    assert!(
+        values.windows(2).all(|w| w[0] <= w[1]),
+        "a minimize metric must sort smallest-first on the smoothed key: {values:?}"
+    );
+}
+
+#[test]
+fn walkforward_folds_carry_the_smoothed_is_key() {
+    let (path, _) = scratch_file("fugazi_opt_smooth_wf_strategy.yml", SWEEPABLE);
+    let out_csv = common::cli::unique_path("fugazi_opt_smooth_wf").with_extension("csv");
+    let out_str = out_csv.to_string_lossy().into_owned();
+    Cmd::new("optimize")
+        .arg(&format!("@{}", path.display()))
+        .series(&at("examples/candles.csv"))
+        .args(&["--grid", "FAST=[2,3,4],SLOW=[6,8,10]"])
+        .args(&["-m", "total_pct", "--best-by", "total_pct"])
+        .args(&["--walkforward", "12,6", "--smooth=box:1"])
+        .args(&["--output", &out_str])
+        .ok();
+    let lines = read_csv(&out_str);
+    let header = &lines[0];
+    assert!(
+        header.ends_with("returns.total_pct_is_smoothed,returns.total_pct_is_support"),
+        "fold rows should carry the key each fold was actually selected on: {header}"
+    );
+    let csm = column(header, "returns.total_pct_is_smoothed");
+    assert!(
+        lines[1..].iter().all(|l| cells(l)[csm].parse::<f64>().is_ok()),
+        "every fold should report its smoothed IS key:\n{lines:#?}"
+    );
+}

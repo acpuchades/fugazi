@@ -1123,10 +1123,29 @@ pub(crate) struct PySweepRow {
     pub(crate) metric_values: Vec<Option<Real>>,
     // If windowed, one Metrics dict per window.
     pub(crate) windowed_metrics: Option<Vec<SpecMetrics>>,
+    // Under `smooth=`, the neighbourhood average this row was ranked by and the
+    // support behind it. `None` when smoothing didn't run.
+    pub(crate) smoothed: Option<Real>,
+    pub(crate) support: Option<Real>,
 }
 
 #[pymethods]
 impl PySweepRow {
+    /// The `smooth=` neighbourhood average of this row's ranking key, in the
+    /// metric's native orientation. `None` when smoothing didn't run, when the
+    /// row's own metric was undefined, or when `smooth_min_support` rejected it.
+    #[getter]
+    pub(crate) fn smoothed(&self) -> Option<Real> {
+        self.smoothed
+    }
+
+    /// The neighbourhood weight actually found, as a fraction of a fully
+    /// interior point's. `None` when smoothing didn't run.
+    #[getter]
+    pub(crate) fn support(&self) -> Option<Real> {
+        self.support
+    }
+
     #[getter]
     pub(crate) fn values(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
         let d = pyo3::types::PyDict::new(py);
@@ -1267,6 +1286,8 @@ pub(crate) fn build_subgrids(
     windowed = None,
     walkforward = None,
     risk_aversion = 0.0,
+    smooth = None,
+    smooth_min_support = 0.0,
     jobs = None,
     bars_per_year = 252.0,
     risk_free_rate = 0.0,
@@ -1288,6 +1309,8 @@ pub(crate) fn optimize(
     windowed: Option<usize>,
     walkforward: Option<&Bound<'_, PyAny>>,
     risk_aversion: Real,
+    smooth: Option<&str>,
+    smooth_min_support: Real,
     jobs: Option<usize>,
     bars_per_year: Real,
     risk_free_rate: Real,
@@ -1302,6 +1325,18 @@ pub(crate) fn optimize(
             "`walkforward=` and `windowed=` are mutually exclusive",
         ));
     }
+    // `smooth=` mirrors the CLI's `--smooth` grammar: "box:1", "triangle:2",
+    // "gaussian:1.5". Presence is what turns smoothing on; `smooth_min_support`
+    // only tunes it, exactly as `--smooth-min-support` does.
+    let smoothing = smooth
+        .map(|spec| {
+            let kernel: spec_optimize::SmoothKernel = spec
+                .parse()
+                .map_err(|e| PyValueError::new_err(format!("`smooth`: {e}")))?;
+            spec_optimize::Smoothing::new(kernel, smooth_min_support)
+                .map_err(|e| PyValueError::new_err(format!("`smooth_min_support`: {e}")))
+        })
+        .transpose()?;
     let snaps = snapshots_from_sequence(snapshots)?;
     let params_table = extract_params(params)?;
     spec_optimize::reject_axes_in_params(&params_table)
@@ -1344,6 +1379,7 @@ pub(crate) fn optimize(
             embargo_bars,
             &metric_names_vec,
             best_by_str.as_deref(),
+            smoothing.as_ref(),
             jobs,
             cash,
             bars_per_year,
@@ -1390,6 +1426,7 @@ pub(crate) fn optimize(
             &metric_names_vec,
             best_by_str.as_deref(),
             risk_aversion,
+            smoothing.as_ref(),
             jobs,
             evaluate_row,
         )
@@ -1428,6 +1465,8 @@ pub(crate) fn optimize(
                 metric_columns: metric_columns.clone(),
                 metric_values,
                 windowed_metrics,
+                smoothed: row.smoothed.and_then(|s| s.value),
+                support: row.smoothed.map(|s| s.support),
             },
         )?;
         row_objs.push(py_row);
@@ -1486,10 +1525,25 @@ pub(crate) struct PyWalkForwardFold {
     pub(crate) axis_values: Vec<Option<JsonValue>>,
     pub(crate) is_metrics: SpecMetrics,
     pub(crate) oos_metrics: SpecMetrics,
+    pub(crate) is_smoothed: Option<Real>,
+    pub(crate) is_support: Option<Real>,
 }
 
 #[pymethods]
 impl PyWalkForwardFold {
+    /// Under `smooth=`, the neighbourhood average of the winning row's IS
+    /// ranking key — the value this fold was actually selected on.
+    #[getter]
+    pub(crate) fn is_smoothed(&self) -> Option<Real> {
+        self.is_smoothed
+    }
+
+    /// The neighbourhood support behind [`Self::is_smoothed`].
+    #[getter]
+    pub(crate) fn is_support(&self) -> Option<Real> {
+        self.is_support
+    }
+
     #[getter]
     pub(crate) fn fold(&self) -> usize {
         self.fold
@@ -1625,6 +1679,7 @@ pub(crate) fn run_walkforward(
     embargo_bars: usize,
     metric_names: &[String],
     best_by: Option<&str>,
+    smoothing: Option<&spec_optimize::Smoothing>,
     jobs: Option<usize>,
     cash: Real,
     bars_per_year: Real,
@@ -1696,6 +1751,7 @@ pub(crate) fn run_walkforward(
                 embargo_bars,
                 metric_names,
                 best_by,
+                smoothing,
                 jobs,
                 cash,
             )
@@ -1717,6 +1773,8 @@ pub(crate) fn run_walkforward(
                 axis_values: row.values.clone(),
                 is_metrics: row.is_metrics.clone(),
                 oos_metrics: row.oos_metrics.clone(),
+                is_smoothed: row.is_smoothed.and_then(|s| s.value),
+                is_support: row.is_smoothed.map(|s| s.support),
             },
         )?;
         fold_objs.push(fold);

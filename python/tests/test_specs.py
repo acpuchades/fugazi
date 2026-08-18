@@ -362,6 +362,95 @@ def test_optimize_two_axis_grid():
     assert all(len(pair) == 2 for pair in sweep.metric_columns)
 
 
+def test_optimize_smooth_ranks_by_the_neighbourhood_average():
+    """`smooth=` populates `row.smoothed` / `row.support` and reorders by them."""
+    sweep = ta.optimize(
+        _trend_yaml(),
+        _trend_snaps(),
+        cash=1000.0,
+        grid=[{"FAST": [3, 5, 7], "SLOW": [10, 15, 20]}],
+        metric_names=["returns.total_pct"],
+        best_by="returns.total_pct",
+        smooth="box:1",
+    )
+    assert len(sweep.rows) == 9
+    supports = [row.support for row in sweep.rows]
+    assert all(s is not None and 0.0 < s <= 1.0 + 1e-12 for s in supports)
+    # A 3x3 box:1 lattice has exactly one fully interior cell.
+    assert sum(abs(s - 1.0) < 1e-9 for s in supports) == 1
+    # Rows come back ranked by the smoothed key, best first.
+    smoothed = [row.smoothed for row in sweep.rows]
+    assert all(v is not None for v in smoothed)
+    assert smoothed == sorted(smoothed, reverse=True)
+    # Every row's smoothed value is the renormalized mean of its neighbours'
+    # raw values — recomputed here from the axis cells, so it also pins that
+    # the axis-to-lattice mapping survived the sort.
+    fasts, slows = [3, 5, 7], [10, 15, 20]
+    raw = {}
+    got = {}
+    for row in sweep.rows:
+        cell = (fasts.index(row.values["FAST"]), slows.index(row.values["SLOW"]))
+        raw[cell] = row.metrics["returns.total_pct"]
+        got[cell] = row.smoothed
+    for i in range(3):
+        for j in range(3):
+            near = [
+                raw[(i + di, j + dj)]
+                for di in (-1, 0, 1)
+                for dj in (-1, 0, 1)
+                if 0 <= i + di < 3 and 0 <= j + dj < 3
+            ]
+            assert got[(i, j)] == pytest.approx(sum(near) / len(near))
+
+
+def test_optimize_smooth_min_support_drops_thin_neighbourhoods():
+    sweep = ta.optimize(
+        _trend_yaml(),
+        _trend_snaps(),
+        cash=1000.0,
+        grid=[{"FAST": [3, 5, 7], "SLOW": [10, 15, 20]}],
+        metric_names=["returns.total_pct"],
+        best_by="returns.total_pct",
+        smooth="box:1",
+        smooth_min_support=1.0,
+    )
+    kept = [row for row in sweep.rows if row.smoothed is not None]
+    assert len(kept) == 1, "only the interior cell of a 3x3 clears full support"
+    # Support is still reported for the rows it rejected.
+    assert all(row.support is not None for row in sweep.rows)
+
+
+def test_optimize_smooth_rejects_an_unknown_kernel():
+    with pytest.raises(ValueError, match="box:R"):
+        ta.optimize(
+            _trend_yaml(),
+            _trend_snaps(),
+            cash=1000.0,
+            grid=[{"FAST": [3, 5]}],
+            metric_names=["returns.total_pct"],
+            best_by="returns.total_pct",
+            smooth="parabola:2",
+        )
+
+
+def test_optimize_walkforward_folds_carry_the_smoothed_is_key():
+    result = ta.optimize(
+        _trend_yaml(),
+        _trend_snaps(),
+        cash=1000.0,
+        params={"SLOW": 15},
+        grid=[{"FAST": [3, 5, 7]}],
+        metric_names=["returns.total_pct"],
+        best_by="returns.total_pct",
+        walkforward=(20, 10),
+        smooth="box:1",
+    )
+    assert len(result.folds) >= 1
+    for fold in result.folds:
+        assert fold.is_smoothed is not None
+        assert fold.is_support is not None
+
+
 def test_optimize_stacked_subgrids_union_columns():
     """Two subgrids with disjoint axis names produce a sparse union."""
     sweep = ta.optimize(

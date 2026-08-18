@@ -777,6 +777,15 @@ plotting. CLI emits data files only: `fills.csv`, `trades.csv`, `returns.csv`,
   stitched winners' OOS slices, running-total scaled. Emits `wf.csv` + sibling
   `.composite_oos_equity.csv` + `.composite_oos_metrics.yml`. Embargo drops OOS-metric
   bars only. Pairs/basket rejected.
+- **`optimize --smooth[=KERNEL]`** — neighbourhood-kernel ranking, the parameter-
+  space counterpart to `-k`'s time-space penalty. `spec::optimize::smooth_keys` is
+  the one neighbour walk, shared by the grid sweep and the per-fold walk-forward
+  selection; it reads each subgrid's `combos` as a mixed-radix lattice (last axis
+  fastest, `Subgrid::{axis_lens, strides, digits}`), smooths only numeric axes
+  (non-numeric ones partition), renormalizes at edges and reports the realized
+  `support`. Direction-agnostic: it averages the already-directed `ranking_value`,
+  so `-k` composes for free. Runs between the row rejoin and the sort, while
+  `rows[i] ↔ plan[i]` still holds. Adds `<best-by>_smoothed`/`_support` columns.
 - **`selection.deflated_sharpe` on `optimize`** — per-row DSR against the grid-wide
   null (`N` = trials, `Var[SR]` = sample variance of the grid's annualized Sharpes).
   Omitted if <2 rows have defined Sharpe or trial variance is zero.

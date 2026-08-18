@@ -18,7 +18,12 @@ what it means, and calls out the caveats that shape how it should be read.
 - **Grid CSV** (`fugazi optimize -o …`) — one row per parameter combination;
   columns are `axes… + metrics… (+ selection.deflated_sharpe)`. Under
   `-w LEN`, each requested metric becomes a `<name>_mean` / `<name>_std`
-  pair aggregated across the row's own non-overlapping windows.
+  pair aggregated across the row's own non-overlapping windows. Under
+  `--smooth`, two further columns are appended — `<best-by>_smoothed` and
+  `<best-by>_support`, the parameter-neighbourhood average the rows are ranked
+  by and the weight behind it. `selection.deflated_sharpe` is computed from the
+  **raw** per-row Sharpes and is unaffected by smoothing: `--smooth` changes
+  which row sorts first, not what any row is worth.
 
 Everything downstream — CSVs, `optimize`'s ranking, `run -w`'s per-window
 CSV — flattens the same `Metrics` document. Metric names in this file use

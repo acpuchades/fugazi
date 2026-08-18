@@ -36,11 +36,11 @@ use fugazi::spec::pairs::PairsStrategySpec;
 // from `main.rs`) and other library-side items keep resolving through this
 // module.
 pub use fugazi::spec::optimize::{
-    ColumnPos, Direction, Evaluation, Row, Subgrid,
+    ColumnPos, Direction, Evaluation, Row, SmoothKernel, Smoothing, Subgrid, Sweep,
     build_any_spec, build_spec, build_typed, cartesian, combine_params, format_number,
     format_value, lookup, lookup_windowed,
-    mean_std_of, optimize, probe_params, ranking_value, reject_axes_in_params,
-    row_dsr_inputs, split_axes,
+    PLATEAU_TOLERANCE, mean_std_of, optimize, probe_params, rank_positions, ranking_value,
+    reject_axes_in_params, row_dsr_inputs, split_axes,
 };
 
 
@@ -107,6 +107,13 @@ pub struct OptimizeOptions<'a> {
     /// (direction-aware: `mean − k·std` descending, `mean + k·std` ascending).
     /// `0.0` = rank by the plain mean. Only meaningful with `windowed`.
     pub risk_aversion: Real,
+    /// `--smooth` / `--smooth-min-support`: rank `--best-by` by a kernel-
+    /// weighted average of each grid point's ranking key over its *parameter
+    /// neighbourhood*, so a broad plateau outranks a lone spike. `None` when
+    /// `--smooth` wasn't passed — the sweep then ranks on the point estimate
+    /// exactly as before. Composes with `risk_aversion`, which is folded into
+    /// the key before it is smoothed. See [`fugazi::spec::optimize::smooth_keys`].
+    pub smoothing: Option<Smoothing>,
     /// Cost model configured via `--costs`. Every grid point resolves against
     /// the same config for its (strategy symbol, frequency) pair.
     pub cost_config: &'a CostConfig,
@@ -439,6 +446,7 @@ fn run_single(
             seconds_per_bar,
             &opts.metrics,
             opts.best_by.as_deref(),
+            opts.smoothing.as_ref(),
             opts.output,
             opts.jobs,
             opts.quiet,
@@ -493,18 +501,12 @@ fn run_single(
         &opts.metrics,
         opts.best_by.as_deref(),
         opts.risk_aversion,
+        opts.smoothing.as_ref(),
         opts.jobs,
         evaluate_row,
     )?;
 
-    write_grid_csv(
-        opts.output,
-        &sweep.union_columns,
-        &sweep.metric_columns,
-        sweep.windowed,
-        sweep.deflated_sharpe_context,
-        &sweep.rows,
-    )?;
+    write_grid_csv(opts.output, &sweep)?;
 
     if !opts.quiet {
         let finished = SystemTime::now();
@@ -522,13 +524,7 @@ fn run_single(
         // A "best" row only means something when the user gave us a metric to
         // rank by. Without one, the sweep has produced a CSV but no verdict.
         if sweep.best_by.is_some() {
-            print_best_block(
-                &sweep.union_columns,
-                &sweep.metric_columns,
-                sweep.best_by.as_ref(),
-                opts.risk_aversion,
-                &sweep.rows,
-            );
+            print_best_block(&sweep, opts.risk_aversion);
         }
         warn_if_nothing_traded(&sweep.rows);
         print_result_block(sweep.rows.len(), started, finished);
@@ -759,18 +755,12 @@ fn run_multi_symbol(
         &opts.metrics,
         opts.best_by.as_deref(),
         opts.risk_aversion,
+        opts.smoothing.as_ref(),
         opts.jobs,
         evaluate_row,
     )?;
 
-    write_grid_csv(
-        opts.output,
-        &sweep.union_columns,
-        &sweep.metric_columns,
-        sweep.windowed,
-        sweep.deflated_sharpe_context,
-        &sweep.rows,
-    )?;
+    write_grid_csv(opts.output, &sweep)?;
 
     if !opts.quiet {
         let finished = SystemTime::now();
@@ -785,13 +775,7 @@ fn run_multi_symbol(
             period.as_deref(),
         );
         if sweep.best_by.is_some() {
-            print_best_block(
-                &sweep.union_columns,
-                &sweep.metric_columns,
-                sweep.best_by.as_ref(),
-                opts.risk_aversion,
-                &sweep.rows,
-            );
+            print_best_block(&sweep, opts.risk_aversion);
         }
         warn_if_nothing_traded(&sweep.rows);
         print_result_block(sweep.rows.len(), started, finished);
@@ -908,6 +892,7 @@ fn run_multi_symbol_walkforward(
         seconds_per_bar,
         &opts.metrics,
         opts.best_by.as_deref(),
+        opts.smoothing.as_ref(),
         opts.output,
         opts.jobs,
         opts.quiet,
@@ -925,17 +910,32 @@ fn run_multi_symbol_walkforward(
 /// metric (`<name>_mean` / `<name>_std`, the cross-window aggregate). Whole-run
 /// sweeps also get a trailing `selection.deflated_sharpe` column when the grid has
 /// enough spread in Sharpes for the multiple-testing correction to be defined.
+/// Under `--smooth`, two further columns are appended — `<best_by>_smoothed`
+/// and `<best_by>_support`, the neighbourhood average the rows are ranked by
+/// and the fraction of a fully-interior neighbourhood that average rests on.
+/// Existing columns keep their position and their values; smoothing changes
+/// row *order*, never a cell.
+///
 /// `,`-delimited to match `fills.csv` / `trades.csv` / `returns.csv`. Axis cells that the
 /// row's subgrid doesn't touch, and missing (omitted) metric values, are both
 /// written as an empty cell.
-fn write_grid_csv(
-    path: &Path,
-    union_columns: &[String],
-    metric_columns: &[(String, String)],
-    windowed: bool,
-    deflated_sharpe_context: Option<(usize, Real)>,
-    rows: &[Row],
-) -> Result<()> {
+fn write_grid_csv(path: &Path, sweep: &Sweep) -> Result<()> {
+    let Sweep {
+        union_columns,
+        metric_columns,
+        windowed,
+        deflated_sharpe_context,
+        rows,
+        ..
+    } = sweep;
+    let (windowed, deflated_sharpe_context) = (*windowed, *deflated_sharpe_context);
+    // The smoothed columns are named after the metric they average, so the CSV
+    // reads `risk_adjusted.sharpe` next to `risk_adjusted.sharpe_smoothed`.
+    let smoothed_path = sweep
+        .smoothing
+        .as_ref()
+        .and(sweep.best_by.as_ref())
+        .map(|(_, path, _)| path.as_str());
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -959,6 +959,10 @@ fn write_grid_csv(
     if deflated_sharpe_context.is_some() {
         header.push("selection.deflated_sharpe".to_string());
     }
+    if let Some(path) = smoothed_path {
+        header.push(format!("{path}_smoothed"));
+        header.push(format!("{path}_support"));
+    }
     writer.write_record(&header)?;
 
     // Precompute the flatten position of each metric column against a sample
@@ -966,7 +970,10 @@ fn write_grid_csv(
     // Metrics **once** and read the columns by indexed access — turning
     // `rows * cols` full-metrics scans into `rows * 1` flattens + `rows * cols`
     // vec[i] lookups. Empirically ~325× faster on a 50k×5 grid.
-    let sample_metrics = rows.first().and_then(|r| match &r.eval {
+    // Any row will do — `metrics::flatten`'s ordering is document-shape
+    // invariant. Scanning rather than taking `rows[0]` keeps this independent
+    // of which row sorted first, and skips a windowed row with no windows.
+    let sample_metrics = rows.iter().find_map(|r| match &r.eval {
         Evaluation::Whole(m) => Some(m.as_ref()),
         Evaluation::Windowed(ws) => ws.first().map(|w| &w.metrics),
     });
@@ -1035,6 +1042,14 @@ fn write_grid_csv(
                 trial_var,
             );
             record.push(cell(dsr));
+        }
+        if smoothed_path.is_some() {
+            // `support` is written even when the value was dropped by
+            // `--smooth-min-support` — a blank smoothed cell next to a low
+            // support number is the whole diagnostic.
+            let smoothed = row.smoothed.as_ref();
+            record.push(cell(smoothed.and_then(|s| s.value)));
+            record.push(cell(smoothed.map(|s| s.support)));
         }
         writer.write_record(&record)?;
     }
@@ -1108,6 +1123,13 @@ fn print_inputs_block(
             );
         } else {
             style::field("best-by", name);
+        }
+        if let Some(sm) = &opts.smoothing {
+            let mut msg = format!("{} over the parameter neighbourhood", sm.kernel);
+            if sm.min_support > 0.0 {
+                msg.push_str(&format!(" (min support {})", sm.min_support));
+            }
+            style::field("smooth", &msg);
         }
     }
 }
@@ -1190,13 +1212,65 @@ fn friendly_metric_label(dotted_or_short: &str) -> String {
         .unwrap_or_else(|| dotted_or_short.to_string())
 }
 
-fn print_best_block(
-    union_columns: &[String],
-    metric_columns: &[(String, String)],
-    best_by: Option<&(String, String, Direction)>,
+/// The `--smooth` half of the best block: the winner's smoothed value, and the
+/// gap between the raw argmax and the smoothed ordering.
+///
+/// That gap is the diagnostic the flag exists to surface. A raw argmax that
+/// falls to rank 40 of 50 once its neighbourhood is taken into account was a
+/// noise spike, and the console is where a user finds that out — the CSV shows
+/// the numbers but not the disagreement.
+fn print_smoothing_lines(
+    sweep: &Sweep,
+    path: &str,
+    direction: Direction,
     k: Real,
-    rows: &[Row],
+    smoothing: Smoothing,
 ) {
+    let rows = &sweep.rows;
+    let winner = match rows.first().and_then(|r| r.smoothed) {
+        Some(s) => s,
+        None => return,
+    };
+    let smoothed_label = match winner.value {
+        Some(v) => format!("{v:.4} · support {:.2} · {}", winner.support, smoothing.kernel),
+        None => format!("— · support {:.2} · {}", winner.support, smoothing.kernel),
+    };
+    style::field("smoothed", &smoothed_label);
+
+    // Rows arrive sorted by the smoothed key, so a row's smoothed rank is its
+    // position; its raw rank needs the raw keys recomputed over the same rows.
+    let raw_keys: Vec<Option<Real>> = rows
+        .iter()
+        .map(|r| ranking_value(&r.eval, path, direction, k))
+        .collect();
+    let raw_ranks = rank_positions(&raw_keys, direction);
+    let n = rows.len();
+    if let Some(raw_argmax) = raw_ranks.iter().position(|&r| r == 1) {
+        style::field(
+            "ranks",
+            &format!(
+                "raw argmax #{}/{n} smoothed · smoothed winner #{}/{n} raw",
+                raw_argmax + 1,
+                raw_ranks[0]
+            ),
+        );
+    }
+
+    // The grid's shape is the result; its maximum is not. Measured in the
+    // kernel, before the sort — the lattice is gone by the time we get here.
+    if let Some(cells) = sweep.plateau {
+        let pct = PLATEAU_TOLERANCE * 100.0;
+        style::field(
+            "plateau",
+            &format!("{cells} of {n} cells connected within {pct:.0}% of the best smoothed value"),
+        );
+    }
+}
+
+fn print_best_block(sweep: &Sweep, k: Real) {
+    let (union_columns, metric_columns, rows) =
+        (&sweep.union_columns, &sweep.metric_columns, &sweep.rows);
+    let best_by = sweep.best_by.as_ref();
     println!();
     style::print_section("best");
     let Some(best) = rows.first() else {
@@ -1227,6 +1301,9 @@ fn print_best_block(
         }
         // Friendly label for the console; the CSV column keeps the dotted path.
         style::field(&friendly_metric_label(path), &value);
+        if let Some(smoothing) = sweep.smoothing {
+            print_smoothing_lines(sweep, path, *direction, k, smoothing);
+        }
     }
     for (_name, path) in metric_columns {
         // Skip a metric already printed as the best-by row.
@@ -1339,6 +1416,7 @@ fn walkforward_run<P, R>(
     seconds_per_bar: Option<Real>,
     metric_names: &[String],
     best_by: Option<&str>,
+    smoothing: Option<&Smoothing>,
     output: &Path,
     jobs: Option<usize>,
     quiet: bool,
@@ -1370,12 +1448,19 @@ where
         embargo_bars,
         metric_names,
         best_by,
+        smoothing,
         jobs,
         cash,
     )?;
 
     // Output — three sibling files.
-    write_walkforward_csv(output, &result.union_columns, &result.metric_columns, &result.fold_rows)?;
+    write_walkforward_csv(
+        output,
+        &result.union_columns,
+        &result.metric_columns,
+        smoothing.and(result.best_by.as_ref()).map(|(_, path, _)| path.as_str()),
+        &result.fold_rows,
+    )?;
     write_composite_equity_csv(&derive_sibling(output, "composite_oos_equity", "csv"), &result.composite_equity)?;
     write_composite_metrics_yaml(
         &derive_sibling(output, "composite_oos_metrics", "yml"),
@@ -1415,6 +1500,7 @@ fn write_walkforward_csv(
     path: &Path,
     union_columns: &[String],
     metric_columns: &[(String, String)],
+    smoothed_path: Option<&str>,
     rows: &[crate::spec::optimize::WalkForwardRow],
 ) -> Result<()> {
     if let Some(parent) = path.parent()
@@ -1440,6 +1526,13 @@ fn write_walkforward_csv(
         header.push(format!("{name}_is"));
         header.push(format!("{name}_oos"));
         header.push(format!("{name}_wfe"));
+    }
+    // Under `--smooth` the IS argmax is no longer what selected the fold — the
+    // neighbourhood average is. Emit it, and the support behind it, so the
+    // per-fold choice is auditable against the raw `_is` column beside it.
+    if let Some(path) = smoothed_path {
+        header.push(format!("{path}_is_smoothed"));
+        header.push(format!("{path}_is_support"));
     }
     writer.write_record(&header)?;
 
@@ -1482,6 +1575,10 @@ fn write_walkforward_csv(
             record.push(cell(is_v));
             record.push(cell(oos_v));
             record.push(cell(wfe));
+        }
+        if smoothed_path.is_some() {
+            record.push(cell(row.is_smoothed.and_then(|s| s.value)));
+            record.push(cell(row.is_smoothed.map(|s| s.support)));
         }
         writer.write_record(&record)?;
     }

@@ -1186,6 +1186,46 @@ result.composite_equity                 # stitched OOS curve
 result.composite_metrics                # composite metrics doc
 ```
 
+`smooth=` mirrors the CLI's `--smooth`: rank `best_by` by a kernel-weighted
+average over each grid point's *parameter neighbourhood* rather than by the
+point estimate, so a broad plateau outranks a lone spike. `"box:R"`,
+`"triangle:R"` or `"gaussian:S"`, with radii in lattice steps (adjacent
+declared positions on an axis, not parameter units). Non-numeric axes
+partition rather than smooth, each subgrid is its own lattice, and boundary
+points renormalize over the neighbours they have — `smooth_min_support=`
+discards a row whose realized support falls below a fraction of a fully
+interior point's. It composes with `risk_aversion=` (which is folded into the
+key first) and applies per fold under `walkforward=`.
+
+```python
+smooth_yaml = """
+symbol: BTC
+long:
+  enter: !crosses_above
+    lhs: !sma { period: !param FAST }
+    rhs: !sma { period: !param SLOW }
+"""
+smooth_snaps = [
+    ta.Snapshot({"BTC": ta.Candle(v, v, v, v, 1.0)})
+    for v in [100 + i * 0.5 for i in range(40)]
+]
+
+sweep = ta.optimize(
+    smooth_yaml,
+    smooth_snaps,
+    cash=1000.0,
+    grid=[{"FAST": [3, 5, 7], "SLOW": [10, 15, 20]}],
+    metric_names=["returns.total_pct"],
+    best_by="returns.total_pct",
+    smooth="box:1",
+    smooth_min_support=0.5,
+)
+sweep.rows[0].smoothed   # -> neighbourhood average, native orientation
+sweep.rows[0].support    # -> 1.0 for a fully interior point, less at an edge
+# Under walkforward=, each fold reports the key it was actually selected on:
+# fold.is_smoothed / fold.is_support
+```
+
 ### Costs
 
 Trading costs load from a Python dict matching the CLI's YAML shape

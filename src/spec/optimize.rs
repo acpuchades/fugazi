@@ -94,12 +94,14 @@ pub fn probe_params(subgrid: &Subgrid) -> HashMap<String, Value> {
 /// Basket / Multi share — the sweep loop itself is strategy-type-agnostic.
 /// `windowed` mirrors the closure's mode (used only to shape column
 /// headers and DSR aggregation).
+#[allow(clippy::too_many_arguments)]
 pub fn optimize<F>(
     subgrids: Vec<Subgrid>,
     windowed: Option<usize>,
     metric_names: &[String],
     best_by: Option<&str>,
     risk_aversion: Real,
+    smooth: Option<&Smoothing>,
     jobs: Option<usize>,
     evaluate_row: F,
 ) -> Result<Sweep>
@@ -110,6 +112,12 @@ where
     // is for. (Presence alongside `-w`/`--best-by` is enforced by clap.)
     if risk_aversion < 0.0 {
         bail!("--risk-aversion must be >= 0 (got {risk_aversion})");
+    }
+    // Smoothing averages the `--best-by` ranking key over a neighbourhood;
+    // without a key to rank by there is nothing to average. (Enforced by clap
+    // for the CLI; this catches the library and Python callers.)
+    if smooth.is_some() && best_by.is_none() {
+        bail!("--smooth needs --best-by: there is no ranking key to average over the neighbourhood");
     }
     // `run` has already validated the subgrid list; `optimize` still asserts
     // the invariants it relies on (non-empty list, non-empty combos in each).
@@ -208,6 +216,7 @@ where
                 Ok::<_, anyhow::Error>(Row {
                     values: project_row(subgrid, combo, union_ref),
                     eval,
+                    smoothed: None,
                 })
             })
             .collect::<Result<Vec<_>>>()
@@ -221,12 +230,40 @@ where
             &union_columns,
         ),
         eval: first_eval,
+        smoothed: None,
     });
     rows.extend(remaining);
 
     // Sort by --best-by, direction-aware; None cells sort last regardless.
+    //
+    // `rows[i]` still corresponds to `plan[i]` at this point — subgrid-major,
+    // then combo order — which is exactly the layout `smooth_keys` needs to
+    // read a subgrid's lattice out of a contiguous slice. So smoothing has to
+    // happen *here*, between the rejoin and the sort that destroys it.
+    let smoothing = smooth.copied();
+    let mut plateau: Option<usize> = None;
     if let Some((_, ref path, direction)) = best_by {
-        sort_by_metric(&mut rows, path, direction, risk_aversion);
+        let keys: Vec<Option<Real>> = rows
+            .iter()
+            .map(|r| ranking_value(&r.eval, path, direction, risk_aversion))
+            .collect();
+        match smooth {
+            // Rank by the neighbourhood average instead of the point estimate.
+            // `-k` composes for free: it is already folded into `keys`, so what
+            // gets smoothed is the risk-adjusted key, not the raw mean.
+            Some(cfg) => {
+                let smoothed = smooth_keys(&subgrids, &keys, cfg)?;
+                // Measure the plateau here, while the vector is still in
+                // lattice order — the sort below is what destroys that.
+                plateau = Some(plateau_size(&subgrids, &smoothed, direction, PLATEAU_TOLERANCE));
+                let smooth_keys_vec: Vec<Option<Real>> = smoothed.iter().map(|s| s.value).collect();
+                for (row, key) in rows.iter_mut().zip(smoothed) {
+                    row.smoothed = Some(key);
+                }
+                sort_by_keys(&mut rows, &smooth_keys_vec, direction);
+            }
+            None => sort_by_keys(&mut rows, &keys, direction),
+        }
     }
 
     // Grid-wide DSR context — computed the same way for whole-run and windowed
@@ -241,6 +278,8 @@ where
         rows,
         windowed: windowed.is_some(),
         deflated_sharpe_context,
+        smoothing,
+        plateau,
     })
 }
 
@@ -452,6 +491,14 @@ pub enum Evaluation {
 /// `--grid` scalars, minus any name carved out as an axis) plus its axes
 /// (name-sorted) and cartesian combos over those axes. A `--grid` flag with
 /// only scalars yields one combo (the empty tuple) — a single grid point.
+///
+/// **`combos` is a mixed-radix enumeration over `axes` with the last axis
+/// varying fastest** — that is [`cartesian`]'s contract, and every construction
+/// site pairs name-sorted [`split_axes`] output with `cartesian` of those same
+/// axes. So a combo index is a lattice coordinate: digit `j` of `ci` is
+/// `(ci / strides()[j]) % axis_lens()[j]`, and stepping one place along axis `j`
+/// is `ci ± strides()[j]`. [`smooth_keys`] and [`plateau_size`] rely on this;
+/// `subgrid_index_space_is_mixed_radix` pins it.
 pub struct Subgrid {
     pub fixed: HashMap<String, Value>,
     pub axes: Vec<Axis>,
@@ -462,6 +509,32 @@ impl Subgrid {
     pub fn points(&self) -> usize {
         self.combos.len()
     }
+
+    /// Point count along each axis, in axis order — the lattice's radices.
+    pub fn axis_lens(&self) -> Vec<usize> {
+        self.axes.iter().map(|(_, values)| values.len()).collect()
+    }
+
+    /// Combo-index stride per axis: `strides[j] = Π axis_lens()[j+1..]`, so the
+    /// last axis has stride 1 (it varies fastest).
+    pub fn strides(&self) -> Vec<usize> {
+        let lens = self.axis_lens();
+        let mut strides = vec![1usize; lens.len()];
+        for j in (0..lens.len().saturating_sub(1)).rev() {
+            strides[j] = strides[j + 1] * lens[j + 1];
+        }
+        strides
+    }
+
+    /// Lattice coordinate of combo `ci` — its position along each axis.
+    pub fn digits(&self, ci: usize) -> Vec<usize> {
+        let lens = self.axis_lens();
+        self.strides()
+            .iter()
+            .zip(&lens)
+            .map(|(stride, len)| (ci / stride) % len)
+            .collect()
+    }
 }
 
 /// One row of the grid, sparse across the union of every subgrid's axis
@@ -471,10 +544,15 @@ impl Subgrid {
 pub struct Row {
     pub values: Vec<Option<Value>>,
     pub eval: Evaluation,
+    /// The `--smooth` neighbourhood average of this row's ranking key, or
+    /// `None` when smoothing didn't run at all. Populated *before* the sort, so
+    /// it rides the permutation with its row. See [`smooth_keys`].
+    pub smoothed: Option<SmoothedKey>,
 }
 
 /// Rows and metadata produced by [`optimize`], ready for the CLI to write out.
-/// `rows` is sorted by `best_by`'s ranking value when `best_by` is `Some`,
+/// `rows` is sorted by `best_by`'s ranking value when `best_by` is `Some` — or
+/// by its `--smooth` neighbourhood average when `smoothing` is also set —
 /// otherwise it follows the subgrid-then-cartesian enumeration order.
 pub struct Sweep {
     /// The union of every subgrid's axis names, plus every scalar name whose
@@ -512,6 +590,16 @@ pub struct Sweep {
     /// windowed CSV columns already summarize their metrics, so the number
     /// stays comparable to the other `_mean` cells.
     pub deflated_sharpe_context: Option<(usize, Real)>,
+    /// The `--smooth` configuration that produced each [`Row::smoothed`], or
+    /// `None` when smoothing didn't run. The CSV writer keys the two extra
+    /// columns off this; the console block echoes the kernel.
+    pub smoothing: Option<Smoothing>,
+    /// Under `--smooth`, the size of the largest connected region of grid
+    /// points within [`PLATEAU_TOLERANCE`] of the best smoothed value —
+    /// measured in lattice space, before `rows` was sorted. The grid's shape is
+    /// the result; its maximum is not, and a one-cell plateau under a wide
+    /// kernel says the peak is an artifact of this sample.
+    pub plateau: Option<usize>,
 }
 
 /// True iff `v` is axis-shaped — a JSON array or a `start..end[:step]`
@@ -754,29 +842,78 @@ pub fn sort_by_metric(rows: &mut Vec<Row>, path: &str, direction: Direction, k: 
         .iter()
         .map(|r| ranking_value(&r.eval, path, direction, k))
         .collect();
-    let mut order: Vec<usize> = (0..rows.len()).collect();
-    order.sort_by(|&i, &j| {
-        let (av, bv) = (keys[i], keys[j]);
-        match (av, bv) {
-            (Some(x), Some(y)) => {
-                let cmp = x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal);
-                if direction == Direction::Descending {
-                    cmp.reverse()
-                } else {
-                    cmp
-                }
+    sort_by_keys(rows, &keys, direction);
+}
+
+/// Order two ranking keys under `direction` — better first, `None` last
+/// regardless. The single definition of "better", shared by [`sort_by_keys`]
+/// and [`rank_positions`] so a smoothed ordering and a raw ordering can never
+/// disagree about direction.
+fn compare_keys(a: Option<Real>, b: Option<Real>, direction: Direction) -> std::cmp::Ordering {
+    match (a, b) {
+        (Some(x), Some(y)) => {
+            let cmp = x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal);
+            if direction == Direction::Descending {
+                cmp.reverse()
+            } else {
+                cmp
             }
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
         }
-    });
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+/// Sort `rows` by a caller-supplied key vector (parallel to `rows`), best
+/// first, `None` last. Split out of [`sort_by_metric`] so a `--smooth`
+/// neighbourhood average sorts through the identical permutation machinery
+/// rather than a second comparator that could drift from it.
+pub fn sort_by_keys(rows: &mut Vec<Row>, keys: &[Option<Real>], direction: Direction) {
+    assert_eq!(keys.len(), rows.len(), "sort_by_keys: key vector must be parallel to rows");
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by(|&i, &j| compare_keys(keys[i], keys[j], direction));
     // Apply the permutation in-place with an `Option` scratch buffer — cheap
     // and avoids cloning the (~50-field) Metrics documents held in each Row.
     let mut slots: Vec<Option<Row>> = std::mem::take(rows).into_iter().map(Some).collect();
     for i in order {
         rows.push(slots[i].take().expect("permutation visits each row exactly once"));
     }
+}
+
+/// Index of the best key under `direction`, or `None` when every key is
+/// `None`.
+///
+/// **On an exact tie the later grid point wins.** That is `Iterator::max_by`'s
+/// convention, which is what the walk-forward fold winner was selected with
+/// before this was factored out, and every existing fold table was built
+/// against it — so it is pinned here rather than left to whichever iterator
+/// adapter happens to be in the call site.
+pub fn argbest(keys: &[Option<Real>], direction: Direction) -> Option<usize> {
+    keys.iter()
+        .enumerate()
+        .filter_map(|(i, k)| k.map(|k| (i, k)))
+        .fold(None::<(usize, Real)>, |acc, (i, k)| match acc {
+            Some((bi, bk)) if compare_keys(Some(k), Some(bk), direction) == std::cmp::Ordering::Greater => {
+                Some((bi, bk))
+            }
+            _ => Some((i, k)),
+        })
+        .map(|(i, _)| i)
+}
+
+/// The 1-based rank of every key under `direction`, parallel to `keys`. Rank 1
+/// is the best; `None` keys rank last. Lets the console report the gap between
+/// the raw argmax and the smoothed ordering — the diagnostic `--smooth` exists
+/// to surface — without a second copy of the direction rules.
+pub fn rank_positions(keys: &[Option<Real>], direction: Direction) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..keys.len()).collect();
+    order.sort_by(|&i, &j| compare_keys(keys[i], keys[j], direction));
+    let mut ranks = vec![0usize; keys.len()];
+    for (pos, &i) in order.iter().enumerate() {
+        ranks[i] = pos + 1;
+    }
+    ranks
 }
 
 /// Position of a metric column inside the `metrics::flatten` output — the
@@ -827,6 +964,409 @@ pub fn ranking_value(eval: &Evaluation, path: &str, direction: Direction, k: Rea
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Neighbourhood smoothing
+// ---------------------------------------------------------------------------
+
+/// How neighbourhood weight falls off with lattice distance.
+///
+/// Distance is measured in **declared-position units along an axis**, never in
+/// parameter units — see [`smooth_keys`] for why that is the only scale-free
+/// choice. All three kernels are *separable*: the weight of an offset vector is
+/// the product of its per-axis weights, which makes [`SmoothKernel::Box`]'s
+/// tensor product exactly the Chebyshev ball of radius `R`.
+///
+/// Parsed from the `--smooth` grammar via [`FromStr`](std::str::FromStr): `box:R`, `triangle:R`,
+/// `gaussian:S`. A bare kernel name takes the default parameter (`box` →
+/// `box:1`, the Moore neighbourhood).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SmoothKernel {
+    /// Uniform over the Chebyshev ball of radius `R`. `box:0` is the identity.
+    Box { radius: usize },
+    /// `Π (1 − |dⱼ|/(R+1))` — linear falloff, zero outside radius `R`.
+    Triangle { radius: usize },
+    /// `Π exp(−dⱼ²/2S²)`, truncated at `⌈3S⌉` lattice steps per axis. `S` is a
+    /// bandwidth in **grid steps**, not in the axis' parameter units.
+    Gaussian { bandwidth: Real },
+}
+
+impl SmoothKernel {
+    /// Per-axis stencil radius: the largest `|d|` that can carry weight.
+    pub fn radius(&self) -> usize {
+        match self {
+            SmoothKernel::Box { radius } | SmoothKernel::Triangle { radius } => *radius,
+            // Truncate at 3σ — beyond it the weight is < 1.2% of the peak and
+            // the stencil cost grows linearly for nothing.
+            SmoothKernel::Gaussian { bandwidth } => (3.0 * bandwidth).ceil() as usize,
+        }
+    }
+
+    /// The one-dimensional weight at lattice offset `d`. Zero outside
+    /// [`radius`](Self::radius); exactly `1.0` at `d = 0` for every kernel.
+    pub fn weight_1d(&self, d: i64) -> Real {
+        let a = d.unsigned_abs() as Real;
+        match self {
+            SmoothKernel::Box { radius } => {
+                if d.unsigned_abs() as usize <= *radius { 1.0 } else { 0.0 }
+            }
+            SmoothKernel::Triangle { radius } => {
+                if d.unsigned_abs() as usize <= *radius {
+                    1.0 - a / (*radius as Real + 1.0)
+                } else {
+                    0.0
+                }
+            }
+            SmoothKernel::Gaussian { bandwidth } => {
+                if d.unsigned_abs() as usize <= self.radius() {
+                    (-(a * a) / (2.0 * bandwidth * bandwidth)).exp()
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+
+    /// `Σ_{d=−R..R} w(d)` — the weight one axis contributes to a *fully
+    /// interior* point. Deliberately boundary-ignoring: it is the denominator
+    /// [`SmoothedKey::support`] is expressed against, so an interior point
+    /// scores exactly `1.0`.
+    fn ideal_axis_weight(&self) -> Real {
+        let r = self.radius() as i64;
+        (-r..=r).map(|d| self.weight_1d(d)).sum()
+    }
+}
+
+impl std::str::FromStr for SmoothKernel {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let (name, arg) = match s.split_once(':') {
+            Some((n, a)) => (n.trim(), Some(a.trim())),
+            None => (s.trim(), None),
+        };
+        let radius = |default: usize| -> std::result::Result<usize, String> {
+            match arg {
+                None => Ok(default),
+                Some(a) => a
+                    .parse::<usize>()
+                    .map_err(|_| format!("`{name}` takes a whole-number radius in lattice steps, got `{a}`")),
+            }
+        };
+        match name {
+            "box" => Ok(SmoothKernel::Box { radius: radius(1)? }),
+            "triangle" => Ok(SmoothKernel::Triangle { radius: radius(1)? }),
+            "gaussian" => {
+                let bandwidth = match arg {
+                    None => 1.0,
+                    Some(a) => a
+                        .parse::<Real>()
+                        .map_err(|_| format!("`gaussian` takes a bandwidth in lattice steps, got `{a}`"))?,
+                };
+                if !(bandwidth > 0.0 && bandwidth.is_finite()) {
+                    return Err(format!("`gaussian` bandwidth must be > 0 (got {bandwidth})"));
+                }
+                Ok(SmoothKernel::Gaussian { bandwidth })
+            }
+            other => Err(format!(
+                "unknown smoothing kernel `{other}` — expected `box:R`, `triangle:R` or `gaussian:S` \
+                 (R a radius in lattice steps, S a bandwidth in lattice steps)"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for SmoothKernel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SmoothKernel::Box { radius } => write!(f, "box:{radius}"),
+            SmoothKernel::Triangle { radius } => write!(f, "triangle:{radius}"),
+            SmoothKernel::Gaussian { bandwidth } => write!(f, "gaussian:{bandwidth}"),
+        }
+    }
+}
+
+/// A configured `--smooth` pass: the kernel plus the `--smooth-min-support`
+/// floor below which a row's smoothed value is discarded.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Smoothing {
+    pub kernel: SmoothKernel,
+    /// Minimum realized [`support`](SmoothedKey::support), in `0..=1`. `0.0`
+    /// (the default) keeps every row.
+    pub min_support: Real,
+}
+
+impl Smoothing {
+    /// Validated constructor. `min_support` outside `0..=1` is refused — above
+    /// `1` would discard every row including the fully interior ones, which is
+    /// never what a caller means.
+    pub fn new(kernel: SmoothKernel, min_support: Real) -> Result<Self> {
+        if !(0.0..=1.0).contains(&min_support) {
+            bail!("--smooth-min-support must be in 0..=1 (got {min_support})");
+        }
+        Ok(Smoothing { kernel, min_support })
+    }
+}
+
+/// One grid point's smoothed ranking key and the neighbourhood evidence
+/// behind it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SmoothedKey {
+    /// The kernel-weighted mean of the ranking keys in this point's
+    /// neighbourhood, in the metric's **native orientation** (so it is directly
+    /// comparable to the raw metric column). `None` when the point's own raw
+    /// key is `None`, or when [`support`](Self::support) fell below the
+    /// configured floor — either way it sorts last, exactly like a `None`
+    /// metric.
+    pub value: Option<Real>,
+    /// The weight actually available, as a fraction of the weight a fully
+    /// interior point with no `None` neighbours would have. `1.0` = fully
+    /// supported. Always reported, even when `value` was discarded — that is
+    /// the diagnostic.
+    pub support: Real,
+}
+
+/// True iff every value on this axis is a JSON number. Only a numeric axis is
+/// smoothed: `SL_MODE=[none,atr,chandelier]` has no ordering, so lattice
+/// distance along it is meaningless.
+fn axis_is_numeric(axis: &Axis) -> bool {
+    !axis.1.is_empty() && axis.1.iter().all(Value::is_number)
+}
+
+/// Kernel-weighted neighbourhood average of a grid's ranking keys.
+///
+/// `keys` must be in `plan` order — subgrid-major, then each subgrid's combo
+/// order — which is exactly the order [`optimize`] builds its rows in *before*
+/// sorting, and the order [`walkforward`]'s per-fold key vector is in. The
+/// return value is parallel to `keys`.
+///
+/// **Index space, not value space.** Distance along an axis is `|i − j|` in
+/// declared-position units. This is the only scale-free choice: a grid mixing
+/// `PERIOD=[10,20,50]` with `ATR_MULT=1.0..4.0:0.5` has no common metric in
+/// value space, and an irregular list like `[10,20,50,200]` should weight each
+/// declared neighbour equally. The tradeoff is real and deliberate — an
+/// irregularly-spaced axis smooths over unequal parameter distances by
+/// construction, and a `gaussian:1.5` bandwidth means 1.5 *grid steps*, not 1.5
+/// units of the parameter.
+///
+/// **Non-numeric axes partition, they do not smooth.** An axis whose values
+/// aren't all numbers has its offset pinned to zero, so each combination of its
+/// levels forms an independent lattice for free.
+///
+/// **Each subgrid is its own lattice.** `--grid` is repeatable and the point
+/// sets are a disjoint union; neighbours are computed within a subgrid's own
+/// `axes`/`combos`, never across the sparse `union_columns` projection. Two
+/// rows from different subgrids are never neighbours even if their union-column
+/// cells happen to be adjacent — which also means a point named by two
+/// overlapping `--grid` flags is evaluated twice and gets two independent
+/// smoothed values, one per lattice.
+///
+/// **Edges renormalize (Nadaraya–Watson), they do not pad or reflect.** A
+/// boundary point divides by the weight it actually found, and reports that
+/// weight as [`SmoothedKey::support`] — because grid maxima like to sit on
+/// edges, and an edge estimate resting on a quarter of the samples should be
+/// visible rather than silently equal-footed. A neighbour whose raw key is
+/// `None` contributes no weight and reduces support without dragging the mean
+/// toward zero.
+///
+/// **Direction-agnostic.** Smoothing is the same averaging operation for
+/// [`Direction::Descending`] and [`Direction::Ascending`]: [`ranking_value`]
+/// has already folded `-k/--risk-aversion` in the correct direction, and
+/// [`sort_by_keys`] owns the comparison. Do not special-case direction here.
+///
+/// Cost is `O(N · |stencil|)` — the stencil is built once per subgrid and the
+/// walk is index arithmetic, never a search.
+pub fn smooth_keys(
+    subgrids: &[Subgrid],
+    keys: &[Option<Real>],
+    smoothing: &Smoothing,
+) -> Result<Vec<SmoothedKey>> {
+    let total: usize = subgrids.iter().map(Subgrid::points).sum();
+    if keys.len() != total {
+        bail!(
+            "smooth_keys: got {} ranking keys for {total} grid points — the key vector must be \
+             in `plan` order (subgrid-major, then combo order)",
+            keys.len()
+        );
+    }
+
+    let kernel = &smoothing.kernel;
+    let mut out: Vec<SmoothedKey> = Vec::with_capacity(total);
+    let mut base = 0usize;
+
+    for sg in subgrids {
+        let n = sg.points();
+        let lens = sg.axis_lens();
+        let strides = sg.strides();
+        // Numeric axes are the ones that smooth; every other axis keeps its
+        // offset at zero and therefore partitions the lattice.
+        let numeric: Vec<usize> = (0..sg.axes.len()).filter(|&j| axis_is_numeric(&sg.axes[j])).collect();
+
+        // The stencil: every offset vector over the numeric axes that carries
+        // weight, built once. Per-axis offsets are clipped to `len - 1` (a
+        // larger offset can never land inside the lattice), which keeps a wide
+        // `gaussian:S` from generating a stencil the grid could never use.
+        // `ideal` is deliberately *not* clipped — it is the boundary-ignoring
+        // reference an interior point is measured against.
+        let ideal: Real = kernel.ideal_axis_weight().powi(numeric.len() as i32);
+        let mut stencil: Vec<(Vec<i64>, Real)> = vec![(vec![0; numeric.len()], 1.0)];
+        for (slot, &j) in numeric.iter().enumerate() {
+            let reach = kernel.radius().min(lens[j].saturating_sub(1)) as i64;
+            let mut next = Vec::with_capacity(stencil.len() * (2 * reach as usize + 1));
+            for (deltas, w) in &stencil {
+                for d in -reach..=reach {
+                    let wd = kernel.weight_1d(d);
+                    if wd == 0.0 {
+                        continue;
+                    }
+                    let mut deltas = deltas.clone();
+                    deltas[slot] = d;
+                    next.push((deltas, w * wd));
+                }
+            }
+            stencil = next;
+        }
+
+        let slice = &keys[base..base + n];
+        let mut digits = vec![0usize; sg.axes.len()];
+        for (ci, own) in slice.iter().enumerate() {
+            for (j, digit) in digits.iter_mut().enumerate() {
+                *digit = (ci / strides[j]) % lens[j];
+            }
+            let mut numerator = 0.0;
+            let mut weight = 0.0;
+            'stencil: for (deltas, w) in &stencil {
+                let mut nci = ci as i64;
+                for (slot, &j) in numeric.iter().enumerate() {
+                    let target = digits[j] as i64 + deltas[slot];
+                    if target < 0 || target >= lens[j] as i64 {
+                        continue 'stencil;
+                    }
+                    nci += deltas[slot] * strides[j] as i64;
+                }
+                if let Some(v) = slice[nci as usize] {
+                    numerator += w * v;
+                    weight += w;
+                }
+            }
+            // A row whose own raw key is `None` is `None` regardless of how
+            // healthy its neighbourhood looks — smoothing reweights evidence,
+            // it does not manufacture it.
+            let support = if ideal > 0.0 { weight / ideal } else { 0.0 };
+            let value = match own {
+                None => None,
+                // The epsilon keeps `--smooth-min-support 1.0` from rejecting a
+                // genuinely interior point over a last-ULP division.
+                Some(_) if support + 1e-12 < smoothing.min_support => None,
+                Some(_) if weight > 0.0 => Some(numerator / weight),
+                Some(_) => None,
+            };
+            out.push(SmoothedKey { value, support });
+        }
+        base += n;
+    }
+
+    // Silently returning all-`None` would hand the caller a grid whose "winner"
+    // is just the first point in enumeration order, presented as a verdict.
+    if smoothing.min_support > 0.0
+        && keys.iter().any(Option::is_some)
+        && !out.iter().any(|s| s.value.is_some())
+    {
+        let best = out.iter().map(|s| s.support).fold(0.0, Real::max);
+        bail!(
+            "--smooth-min-support {} discarded every grid point (best realized support was {best:.3}). \
+             Lower it, shrink the kernel radius, or widen the grid — an axis shorter than the \
+             kernel's diameter leaves no fully interior point.",
+            smoothing.min_support
+        );
+    }
+
+    Ok(out)
+}
+
+/// Band [`plateau_size`] is conventionally measured at: cells within 5% of the
+/// best smoothed value. A readout, not a knob — one more `--smooth-*` spelling
+/// would buy nothing.
+pub const PLATEAU_TOLERANCE: Real = 0.05;
+
+/// Size of the largest connected region of grid points whose smoothed value is
+/// within `tol` (a fraction, e.g. `0.05`) of the best smoothed value.
+///
+/// Connectivity is `±1` along exactly one numeric axis, so non-numeric axes and
+/// separate subgrids bound a region exactly as they bound the smoothing itself.
+/// The band is measured against the *directed* key, so it means "no worse than"
+/// under either [`Direction`]. Scaled by `|best|`, which is the caveat: a best
+/// value near zero gives a near-zero band.
+///
+/// The grid's shape is the result; its maximum is not. A one-cell plateau under
+/// a wide kernel says the peak is an artifact.
+pub fn plateau_size(
+    subgrids: &[Subgrid],
+    smoothed: &[SmoothedKey],
+    direction: Direction,
+    tol: Real,
+) -> usize {
+    let best = smoothed
+        .iter()
+        .filter_map(|s| s.value)
+        .fold(None::<Real>, |acc, v| {
+            Some(match (acc, direction) {
+                (None, _) => v,
+                (Some(b), Direction::Descending) => b.max(v),
+                (Some(b), Direction::Ascending) => b.min(v),
+            })
+        });
+    let Some(best) = best else { return 0 };
+    let band = tol * best.abs();
+    let in_band = |v: Option<Real>| match (v, direction) {
+        (Some(v), Direction::Descending) => v >= best - band,
+        (Some(v), Direction::Ascending) => v <= best + band,
+        (None, _) => false,
+    };
+
+    let mut largest = 0usize;
+    let mut base = 0usize;
+    for sg in subgrids {
+        let n = sg.points();
+        let lens = sg.axis_lens();
+        let strides = sg.strides();
+        let numeric: Vec<usize> = (0..sg.axes.len()).filter(|&j| axis_is_numeric(&sg.axes[j])).collect();
+
+        let mut seen = vec![false; n];
+        let mut digits = vec![0usize; sg.axes.len()];
+        for start in 0..n {
+            if seen[start] || !in_band(smoothed[base + start].value) {
+                continue;
+            }
+            // Flood fill from `start` over the ±1 numeric-axis neighbourhood.
+            let mut region = 0usize;
+            let mut stack = vec![start];
+            seen[start] = true;
+            while let Some(ci) = stack.pop() {
+                region += 1;
+                for (j, digit) in digits.iter_mut().enumerate() {
+                    *digit = (ci / strides[j]) % lens[j];
+                }
+                for &j in &numeric {
+                    for step in [-1i64, 1] {
+                        let target = digits[j] as i64 + step;
+                        if target < 0 || target >= lens[j] as i64 {
+                            continue;
+                        }
+                        let nci = (ci as i64 + step * strides[j] as i64) as usize;
+                        if !seen[nci] && in_band(smoothed[base + nci].value) {
+                            seen[nci] = true;
+                            stack.push(nci);
+                        }
+                    }
+                }
+            }
+            largest = largest.max(region);
+        }
+        base += n;
+    }
+    largest
+}
 
 /// Format a grid axis value as it appears in the CSV. Integers stay integer-
 /// looking (`5` not `5.0`); strings drop their JSON quotes.
@@ -934,6 +1474,10 @@ pub struct WalkForwardRow {
     pub values: Vec<Option<Value>>,
     pub is_metrics: metrics::Metrics,
     pub oos_metrics: metrics::Metrics,
+    /// Under `--smooth`, the winner's smoothed IS ranking key and the support
+    /// behind it — the value this fold was actually selected on. `None` when
+    /// smoothing didn't run (or when there was no `--best-by` to rank by).
+    pub is_smoothed: Option<SmoothedKey>,
 }
 
 /// The full result of a walk-forward run: per-fold rows plus the stitched
@@ -1003,6 +1547,7 @@ pub fn walkforward<P, R>(
     embargo_bars: usize,
     metric_names: &[String],
     best_by: Option<&str>,
+    smooth: Option<&Smoothing>,
     jobs: Option<usize>,
     cash: Real,
 ) -> Result<WalkForwardResult>
@@ -1105,6 +1650,7 @@ where
     let mut running_equity: Real = cash;
 
     for (fold_idx, fold) in folds.iter().enumerate() {
+        let mut fold_smoothed: Option<Vec<SmoothedKey>> = None;
         let per_row: Vec<(metrics::Metrics, metrics::Metrics)> = pool.install(|| {
             reports
                 .par_iter()
@@ -1132,23 +1678,32 @@ where
         // Winner selection. Without --best-by we still emit a row per fold, but
         // the "winner" is just the first grid point in enumeration order (same
         // convention the plain grid sweep uses when --best-by is absent).
+        //
+        // `per_row` is in `plan` order — subgrid-major, then combo order — the
+        // same layout `smooth_keys` reads its lattices out of. Keys stay in the
+        // metric's *native* orientation (`compare_keys` owns direction), so a
+        // smoothed `drawdown.max_pct` reads as a drawdown, not as its negation.
+        let mut winner_smoothed: Option<SmoothedKey> = None;
         let winner_idx: usize = match &best_by {
             Some((_, path, direction)) => {
-                let keys: Vec<Option<Real>> = per_row
-                    .iter()
-                    .map(|(is_m, _)| {
-                        lookup(is_m, path).map(|v| match direction {
-                            Direction::Descending => v,
-                            Direction::Ascending => -v,
-                        })
-                    })
-                    .collect();
-                keys.iter()
-                    .enumerate()
-                    .filter_map(|(i, k)| k.map(|k| (i, k)))
-                    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-                    .map(|(i, _)| i)
-                    .unwrap_or(0)
+                let keys: Vec<Option<Real>> =
+                    per_row.iter().map(|(is_m, _)| lookup(is_m, path)).collect();
+                let ranked: Vec<Option<Real>> = match smooth {
+                    // This is the selection rule whose out-of-sample behaviour
+                    // the composite measures — so smoothing it changes what the
+                    // composite is an estimate *of*. That is the point: the
+                    // per-fold argmax is exactly the biased rule.
+                    Some(cfg) => {
+                        let smoothed = smooth_keys(&subgrids, &keys, cfg)?;
+                        let values = smoothed.iter().map(|s| s.value).collect();
+                        fold_smoothed = Some(smoothed);
+                        values
+                    }
+                    None => keys,
+                };
+                let idx = argbest(&ranked, *direction).unwrap_or(0);
+                winner_smoothed = fold_smoothed.as_ref().map(|s| s[idx]);
+                idx
             }
             None => 0,
         };
@@ -1193,6 +1748,7 @@ where
             values,
             is_metrics: winner_is.clone(),
             oos_metrics: winner_oos.clone(),
+            is_smoothed: winner_smoothed,
         });
     }
 
@@ -1374,6 +1930,305 @@ mod tests {
         Subgrid { fixed, axes, combos }
     }
 
+    // -----------------------------------------------------------------------
+    // Neighbourhood smoothing
+    // -----------------------------------------------------------------------
+
+    fn nums(v: &[i64]) -> Vec<Value> {
+        v.iter().map(|n| Value::from(*n)).collect()
+    }
+
+    fn strs(v: &[&str]) -> Vec<Value> {
+        v.iter().map(|s| Value::from(*s)).collect()
+    }
+
+    fn box1(min_support: Real) -> Smoothing {
+        Smoothing::new(SmoothKernel::Box { radius: 1 }, min_support).unwrap()
+    }
+
+    /// `smooth_keys` and `plateau_size` navigate `combos` by index arithmetic
+    /// rather than by searching, so the mixed-radix contract they assume has to
+    /// hold exactly. A stride swap here mis-smooths every 2-D grid silently.
+    #[test]
+    fn subgrid_index_space_is_mixed_radix() {
+        let sg = subgrid(&[], &[("A", nums(&[1, 2, 3])), ("B", nums(&[10, 20, 30, 40]))]);
+        assert_eq!(sg.axis_lens(), vec![3, 4]);
+        // Last axis varies fastest, so B's stride is 1 and A's is 4.
+        assert_eq!(sg.strides(), vec![4, 1]);
+        for (ci, combo) in sg.combos.iter().enumerate() {
+            let digits = sg.digits(ci);
+            assert_eq!(combo[0], sg.axes[0].1[digits[0]], "axis A at combo {ci}");
+            assert_eq!(combo[1], sg.axes[1].1[digits[1]], "axis B at combo {ci}");
+        }
+    }
+
+    /// `argbest` is how each walk-forward fold picks its winner. The tie-break
+    /// is load-bearing: `max_by` kept the *last* maximum, so a table built
+    /// before it was factored out would silently re-select if it flipped.
+    #[test]
+    fn argbest_keeps_the_later_grid_point_on_a_tie() {
+        let tied = vec![Some(1.0), Some(5.0), Some(3.0), Some(5.0), Some(2.0)];
+        assert_eq!(argbest(&tied, Direction::Descending), Some(3));
+        let tied_low = vec![Some(9.0), Some(1.0), Some(4.0), Some(1.0)];
+        assert_eq!(argbest(&tied_low, Direction::Ascending), Some(3));
+        // `None` keys are skipped, not ranked last-but-selectable.
+        assert_eq!(argbest(&[None, Some(2.0), None], Direction::Descending), Some(1));
+        assert_eq!(argbest(&[None, None], Direction::Descending), None);
+    }
+
+    #[test]
+    fn smooth_kernel_parses_every_documented_form() {
+        use std::str::FromStr;
+        assert_eq!(SmoothKernel::from_str("box:2").unwrap(), SmoothKernel::Box { radius: 2 });
+        assert_eq!(SmoothKernel::from_str("box").unwrap(), SmoothKernel::Box { radius: 1 });
+        assert_eq!(
+            SmoothKernel::from_str("triangle:3").unwrap(),
+            SmoothKernel::Triangle { radius: 3 }
+        );
+        assert_eq!(
+            SmoothKernel::from_str("gaussian:1.5").unwrap(),
+            SmoothKernel::Gaussian { bandwidth: 1.5 }
+        );
+        // Round-trips through Display, so the console echo is re-parseable.
+        for spelling in ["box:1", "triangle:2", "gaussian:1.5"] {
+            assert_eq!(SmoothKernel::from_str(spelling).unwrap().to_string(), spelling);
+        }
+        // A bandwidth of zero has no neighbourhood — refuse rather than divide by it.
+        assert!(SmoothKernel::from_str("gaussian:0").is_err());
+        assert!(SmoothKernel::from_str("boxx:1").is_err());
+        assert!(SmoothKernel::from_str("box:wide").is_err());
+    }
+
+    /// The whole point of the flag: an isolated maximum is a noise draw, a
+    /// broad region is signal. Raw argmax picks the spike; smoothed picks the
+    /// plateau.
+    #[test]
+    fn a_lone_spike_loses_to_a_broad_plateau() {
+        let sg = subgrid(&[], &[("P", nums(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))]);
+        //             spike at index 2 ─┐        plateau over 6..=8 ─────┐
+        let keys: Vec<Option<Real>> =
+            [1.0, 1.0, 9.0, 1.0, 1.0, 1.0, 5.0, 5.0, 5.0, 1.0].iter().map(|v| Some(*v)).collect();
+        let smoothed = smooth_keys(&[sg], &keys, &box1(0.0)).unwrap();
+
+        let raw_argmax = rank_positions(&keys, Direction::Descending)
+            .iter()
+            .position(|&r| r == 1)
+            .unwrap();
+        assert_eq!(raw_argmax, 2, "the raw argmax is the spike");
+
+        let values: Vec<Option<Real>> = smoothed.iter().map(|s| s.value).collect();
+        let smooth_argmax = rank_positions(&values, Direction::Descending)
+            .iter()
+            .position(|&r| r == 1)
+            .unwrap();
+        assert_eq!(smooth_argmax, 7, "smoothing picks the plateau centre");
+        // The spike's own smoothed value is (1+9+1)/3, well under the plateau's 5.
+        assert!((smoothed[2].value.unwrap() - 11.0 / 3.0).abs() < 1e-12);
+        assert!((smoothed[7].value.unwrap() - 5.0).abs() < 1e-12);
+    }
+
+    /// Smoothing is a plain average on an already-directed key, so the very
+    /// same call has to pick the low-drawdown *plateau* over the low-drawdown
+    /// *spike* when the metric is minimize-oriented.
+    #[test]
+    fn an_ascending_metric_smooths_identically() {
+        let sg = subgrid(&[], &[("P", nums(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))]);
+        // Mirror of the descending case: lower is better.
+        let keys: Vec<Option<Real>> =
+            [9.0, 9.0, 1.0, 9.0, 9.0, 9.0, 5.0, 5.0, 5.0, 9.0].iter().map(|v| Some(*v)).collect();
+        let smoothed = smooth_keys(&[sg], &keys, &box1(0.0)).unwrap();
+        let values: Vec<Option<Real>> = smoothed.iter().map(|s| s.value).collect();
+        assert_eq!(
+            rank_positions(&keys, Direction::Ascending).iter().position(|&r| r == 1),
+            Some(2),
+            "the raw argmin is the spike"
+        );
+        assert_eq!(
+            rank_positions(&values, Direction::Ascending).iter().position(|&r| r == 1),
+            Some(7),
+            "smoothing picks the plateau centre under Ascending too"
+        );
+    }
+
+    /// `--grid` is repeatable and the point sets are a disjoint union. Two rows
+    /// from different subgrids are never neighbours, even when their
+    /// union-column values are adjacent — smoothing happens before projection.
+    #[test]
+    fn subgrids_never_leak_weight_into_each_other() {
+        // P=[1,2,3] and P=[4,5,6]: 3 and 4 are adjacent in *value* space and in
+        // the stacked CSV, but they live in different lattices.
+        let a = subgrid(&[], &[("P", nums(&[1, 2, 3]))]);
+        let b = subgrid(&[], &[("P", nums(&[4, 5, 6]))]);
+        let keys: Vec<Option<Real>> = [1.0, 1.0, 1.0, 100.0, 100.0, 100.0]
+            .iter()
+            .map(|v| Some(*v))
+            .collect();
+        let both = smooth_keys(&[a, b], &keys, &box1(0.0)).unwrap();
+
+        // Each subgrid smoothed alone must give bit-identical results.
+        let a1 = subgrid(&[], &[("P", nums(&[1, 2, 3]))]);
+        let b1 = subgrid(&[], &[("P", nums(&[4, 5, 6]))]);
+        let alone_a = smooth_keys(&[a1], &keys[..3], &box1(0.0)).unwrap();
+        let alone_b = smooth_keys(&[b1], &keys[3..], &box1(0.0)).unwrap();
+        for i in 0..3 {
+            assert_eq!(both[i], alone_a[i], "subgrid A row {i} saw subgrid B");
+            assert_eq!(both[3 + i], alone_b[i], "subgrid B row {i} saw subgrid A");
+        }
+        // The boundary rows would be visibly dragged if weight had leaked.
+        assert!((both[2].value.unwrap() - 1.0).abs() < 1e-12);
+        assert!((both[3].value.unwrap() - 100.0).abs() < 1e-12);
+    }
+
+    /// A non-numeric axis has no ordering, so lattice distance along it is
+    /// meaningless. It partitions instead: each level is its own lattice.
+    #[test]
+    fn a_categorical_axis_partitions_rather_than_smooths() {
+        // Axes sort by name: MODE then P. MODE is the slow axis (stride 3).
+        let sg = subgrid(
+            &[],
+            &[("MODE", strs(&["none", "atr"])), ("P", nums(&[1, 2, 3]))],
+        );
+        // MODE=none rows are 0..3, MODE=atr rows are 3..6 (axes are name-sorted,
+        // and "atr" < "none" is irrelevant — declaration order is preserved).
+        let keys: Vec<Option<Real>> = [1.0, 1.0, 1.0, 100.0, 100.0, 100.0]
+            .iter()
+            .map(|v| Some(*v))
+            .collect();
+        let smoothed = smooth_keys(&[sg], &keys, &box1(0.0)).unwrap();
+        for i in 0..3 {
+            assert!(
+                (smoothed[i].value.unwrap() - 1.0).abs() < 1e-12,
+                "level 0 row {i} was contaminated by level 1: {:?}",
+                smoothed[i]
+            );
+            assert!(
+                (smoothed[3 + i].value.unwrap() - 100.0).abs() < 1e-12,
+                "level 1 row {i} was contaminated by level 0: {:?}",
+                smoothed[3 + i]
+            );
+        }
+        // Support is full despite the partition: a categorical axis contributes
+        // no weight to the ideal, so it neither helps nor penalizes.
+        assert!((smoothed[1].support - 1.0).abs() < 1e-12);
+    }
+
+    /// Boundary points renormalize over the neighbours that exist, and report
+    /// how much of a full neighbourhood that was. This is why grid maxima like
+    /// to sit on edges, so the reduced support has to be visible.
+    #[test]
+    fn edges_renormalize_and_report_reduced_support() {
+        let sg = subgrid(&[], &[("A", nums(&[1, 2, 3])), ("B", nums(&[1, 2, 3]))]);
+        let keys: Vec<Option<Real>> = (0..9).map(|_| Some(1.0)).collect();
+        let smoothed = smooth_keys(&[sg], &keys, &box1(0.0)).unwrap();
+        // 3x3 lattice, box:1 → ideal is 3*3 = 9 weight units.
+        assert!((smoothed[4].support - 1.0).abs() < 1e-12, "the centre is fully interior");
+        for corner in [0usize, 2, 6, 8] {
+            assert!(
+                (smoothed[corner].support - 4.0 / 9.0).abs() < 1e-12,
+                "corner {corner} should see 4 of 9 weight units, got {}",
+                smoothed[corner].support
+            );
+        }
+        for edge in [1usize, 3, 5, 7] {
+            assert!((smoothed[edge].support - 6.0 / 9.0).abs() < 1e-12);
+        }
+        // Every value is still exactly 1.0 — renormalization, not zero-padding.
+        assert!(smoothed.iter().all(|s| (s.value.unwrap() - 1.0).abs() < 1e-12));
+    }
+
+    #[test]
+    fn min_support_drops_every_non_interior_row() {
+        let sg = subgrid(&[], &[("A", nums(&[1, 2, 3])), ("B", nums(&[1, 2, 3]))]);
+        let keys: Vec<Option<Real>> = (0..9).map(|_| Some(1.0)).collect();
+        let smoothed = smooth_keys(&[sg], &keys, &box1(1.0)).unwrap();
+        let kept: Vec<usize> = smoothed
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.value.is_some())
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(kept, vec![4], "only the fully interior centre clears min-support 1.0");
+        // Support is still reported for the dropped rows — that is the diagnostic.
+        assert!(smoothed.iter().all(|s| s.support > 0.0));
+    }
+
+    /// An axis shorter than the kernel's diameter leaves no interior point at
+    /// all, so a min-support of 1.0 would silently null the entire grid and
+    /// hand back "the first point wins" dressed as a verdict. Refuse instead.
+    #[test]
+    fn a_min_support_that_discards_everything_is_an_error() {
+        let sg = subgrid(&[], &[("A", nums(&[1, 2]))]);
+        let keys = vec![Some(1.0), Some(2.0)];
+        let err = smooth_keys(&[sg], &keys, &box1(1.0)).unwrap_err().to_string();
+        assert!(err.contains("discarded every grid point"), "unhelpful error: {err}");
+        assert!(err.contains("0.667"), "the error should name the best realized support: {err}");
+    }
+
+    /// A `None` neighbour is *absent evidence*, not evidence of zero. It leaves
+    /// the numerator and the denominator alone and shows up as reduced support.
+    #[test]
+    fn a_none_neighbour_reduces_support_without_biasing_the_mean() {
+        let sg = subgrid(&[], &[("P", nums(&[1, 2, 3, 4, 5]))]);
+        let keys = vec![Some(4.0), Some(4.0), Some(4.0), None, Some(4.0)];
+        let smoothed = smooth_keys(&[sg], &keys, &box1(0.0)).unwrap();
+        // Row 2's neighbourhood is {4.0, 4.0, None}: the mean stays 4.0 (not
+        // 8/3, which is what treating None as zero would give) and support drops.
+        assert!((smoothed[2].value.unwrap() - 4.0).abs() < 1e-12);
+        assert!((smoothed[2].support - 2.0 / 3.0).abs() < 1e-12);
+        // A row whose *own* key is None stays None however healthy its neighbours.
+        assert_eq!(smoothed[3].value, None);
+        assert!(smoothed[3].support > 0.0, "support is still measured for it");
+    }
+
+    #[test]
+    fn a_subgrid_with_no_axes_smooths_to_itself() {
+        let sg = subgrid(&[("X", Value::from(1))], &[]);
+        assert_eq!(sg.points(), 1);
+        let smoothed = smooth_keys(&[sg], &[Some(7.0)], &box1(1.0)).unwrap();
+        assert_eq!(smoothed[0].value, Some(7.0));
+        assert!((smoothed[0].support - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn triangle_and_gaussian_weight_by_lattice_distance() {
+        let sg = subgrid(&[], &[("P", nums(&[1, 2, 3]))]);
+        let keys = vec![Some(0.0), Some(0.0), Some(3.0)];
+        // triangle:1 → weights (1/2, 1, 1/2). Row 1 sees 0*.5 + 0*1 + 3*.5 = 1.5
+        // over a found weight of 2.0.
+        let tri = Smoothing::new(SmoothKernel::Triangle { radius: 1 }, 0.0).unwrap();
+        let out = smooth_keys(&[sg], &keys, &tri).unwrap();
+        assert!((out[1].value.unwrap() - 0.75).abs() < 1e-12, "{:?}", out[1]);
+
+        // gaussian truncates at 3S, so a wide bandwidth reaches the whole axis.
+        let sg = subgrid(&[], &[("P", nums(&[1, 2, 3]))]);
+        let g = Smoothing::new(SmoothKernel::Gaussian { bandwidth: 1.0 }, 0.0).unwrap();
+        let out = smooth_keys(&[sg], &keys, &g).unwrap();
+        let w1 = (-0.5f64).exp();
+        let w2 = (-2.0f64).exp();
+        let expected = (0.0 * w2 + 0.0 * w1 + 3.0 * 1.0) / (w2 + w1 + 1.0);
+        assert!((out[2].value.unwrap() - expected).abs() < 1e-12, "{:?}", out[2]);
+    }
+
+    #[test]
+    fn smooth_keys_refuses_a_key_vector_that_is_not_the_grid() {
+        let sg = subgrid(&[], &[("P", nums(&[1, 2, 3]))]);
+        let err = smooth_keys(&[sg], &[Some(1.0)], &box1(0.0)).unwrap_err().to_string();
+        assert!(err.contains("1 ranking keys for 3 grid points"), "{err}");
+    }
+
+    /// The grid's shape is the result; its maximum is not.
+    #[test]
+    fn plateau_size_measures_the_largest_connected_region() {
+        let sg = subgrid(&[], &[("P", nums(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))]);
+        // Best is 5.0 over indices 6..=8 (connected, 3 cells); the 4.99 at index
+        // 0 is inside the 5% band but isolated.
+        let smoothed: Vec<SmoothedKey> = [4.99, 1.0, 1.0, 1.0, 1.0, 1.0, 5.0, 5.0, 5.0, 1.0]
+            .iter()
+            .map(|v| SmoothedKey { value: Some(*v), support: 1.0 })
+            .collect();
+        assert_eq!(plateau_size(&[sg], &smoothed, Direction::Descending, 0.05), 3);
+    }
+
     #[test]
     fn union_columns_include_axes_and_varying_scalars() {
         // Subgrid 1: X="A" fixed, Y axis (1..3). Subgrid 2: X="B" fixed, Z axis (10, 20).
@@ -1478,6 +2333,7 @@ mod tests {
                         Row {
                             values: vec![],
                             eval: Evaluation::Whole(Box::new(m)),
+                            smoothed: None,
                         }
                     })
                     .collect()

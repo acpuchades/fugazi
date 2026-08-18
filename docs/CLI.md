@@ -420,6 +420,7 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
                -m <METRIC>[,<METRIC>…] [-m <METRIC>…]
                -o <FILE> [--best-by <METRIC>] [-j <N>]
                [-w <LEN> [-k <K>] | --walkforward <IS,OS[,E]> [--keep-unstable]]
+               [--smooth[=<KERNEL>] [--smooth-min-support <FRAC>]]
                [--cash <N>]
                [--stocks | --forex | --crypto] [-f <CODE>] [--bars-per-year <N>]
                [--risk-free-rate <RATE>] [-q]
@@ -438,6 +439,8 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
 | `--walkforward <IS,OS[,E]>` | Rolling **walk-forward optimization**: for each fold the grid is scored on the IS window, the `--best-by` winner is applied on the OOS window, and results are written as one row per fold (with `_is`/`_oos`/`_wfe` triples per `-m` metric) plus a composite OOS artifact stitched from every fold's winner. Each component uses the `-w` grammar (bar count or duration). Embargo defaults to `0` bars and only affects OOS metric evaluation (state still flows through). See [Walk-forward optimization](#walk-forward-optimization). Mutually exclusive with `-w`. |
 | `--keep-unstable` | Under `--walkforward`, skip only the grid-wide `max(warm_up_bars)` at the head of the series — letting the IIR settling tail bleed into the first IS window — instead of the safe default `max(stable_bars)`. Opt-out; no-op without `--walkforward`. |
 | `-k`, `--risk-aversion <K>` | Rank `--best-by` conservatively: shift each grid point's cross-window mean *against* it by `K` standard deviations before sorting. Requires `-w` and `--best-by`; `K >= 0`. See [Best-by directions](#best-by-directions). |
+| `--smooth[=<KERNEL>]` | Rank `--best-by` by a **kernel-weighted average over each grid point's parameter neighbourhood**, so a broad plateau outranks a lone spike. `KERNEL` is `box:R`, `triangle:R` or `gaussian:S`; bare `--smooth` means `box:1`. Radii are in *lattice steps*, not parameter units. Requires `--best-by`; composes with `-k` and with `--walkforward`. Pass the value with `=`. See [Neighbourhood smoothing](#neighbourhood-smoothing). |
+| `--smooth-min-support <FRAC>` | Discard a row's smoothed value when the neighbourhood weight it actually found is below `FRAC` of a fully interior point's (`0`–`1`, default `0`). Requires `--smooth`. See [Neighbourhood smoothing](#neighbourhood-smoothing). |
 | `--costs <SPEC>` | Trading-cost model applied uniformly to every grid point. Repeatable. See [--costs](#--costs). |
 | `--from <DATE>` / `--until <DATE>` / `--strict-from` | Restrict which bars the sweep evaluates. Every grid row is warmed to the grid-wide `max(stable_bars)` and evaluates the same bars, so rows stay comparable. Under `--walkforward`, folds are laid out inside the sliced range. See [Date-range selection](#date-range-selection). |
 | `-j`, `--jobs <N>` | Rayon worker count. Default: one worker per logical CPU. |
@@ -507,6 +510,102 @@ block prints the adjusted score next to the `mean ± std`. Caveat: a metric
 defined in only one window has `std = 0` and ranks on its raw mean off a
 single observation — check its `_std` column.
 
+[`--smooth`](#neighbourhood-smoothing) needs no entry in either list above:
+it is **direction-agnostic by construction**. It acts on the already-directed
+ranking key — the value `-k` has already been shifted in the correct direction,
+and which the sort already knows to read largest-first or smallest-first — so
+averaging that key over a neighbourhood is the identical operation for a
+maximize and a minimize metric. A low-drawdown plateau outranks a low-drawdown
+spike for exactly the same reason a high-Sharpe plateau outranks a high-Sharpe
+spike, and the emitted `_smoothed` column stays in the metric's native
+orientation so it reads directly against the raw column beside it.
+
+#### Neighbourhood smoothing
+
+`--best-by` takes the **argmax** over the grid. A grid score is signal plus
+noise, so the argmax selects for the largest noise draw as much as for the
+largest signal — and the bias grows with grid size. A finer grid is not a
+better search: it adds noise draws without adding information, so refining
+`FAST=3..20:2` to `FAST=3..20:1` reliably *raises* the reported winner and
+*lowers* what it delivers out of sample.
+
+`-k/--risk-aversion` already penalizes dispersion across **time**. `--smooth`
+adds the second axis: dispersion across the **parameter neighbourhood**. Each
+grid point is ranked by a kernel-weighted average of its ranking value over
+nearby lattice points, so a lone spike surrounded by mediocrity loses to the
+centre of a broad plateau. A parameter set whose neighbours all work is one
+whose performance doesn't depend on hitting an exact value — which is the
+property you actually wanted when you swept.
+
+| Kernel | Weight | Notes |
+| --- | --- | --- |
+| `box:R` | uniform inside Chebyshev radius `R` | `--smooth` alone means `box:1`, the Moore neighbourhood (self + every adjacent point). `box:0` is the identity. |
+| `triangle:R` | `Π (1 − \|dⱼ\|/(R+1))` | linear falloff; nearer neighbours count more. |
+| `gaussian:S` | `Π exp(−dⱼ²/2S²)` | bandwidth `S`, truncated at `3S` steps. |
+
+Kernels are separable across axes, which is why `box`'s product form is exactly
+the Chebyshev ball.
+
+**Distance is measured in index space, not value space.** Neighbours are
+adjacent *declared positions* on an axis, so a radius of 1 means "one grid step"
+regardless of what the parameter means. This is the only scale-free choice: a
+grid mixing `PERIOD=[10,20,50]` with `ATR_MULT=1.0..4.0:0.5` has no common
+metric in value space. The tradeoff is real and deliberate — an irregularly
+spaced axis like `[10,20,50,200]` smooths over unequal parameter distances by
+construction, weighting the `50→200` jump exactly as much as `10→20`. If that
+matters for your axis, declare it evenly spaced.
+
+**Non-numeric axes partition, they do not smooth.** `SL_MODE=["none","atr"]`
+has no ordering, so lattice distance along it is meaningless. Each combination
+of its levels becomes an independent lattice; nothing bleeds across.
+
+**Each `--grid` subgrid is its own lattice.** Stacked subgrids are a disjoint
+union, and neighbours are computed inside a subgrid before the sparse
+union-column projection — two rows from different subgrids are never neighbours
+even when their CSV cells look adjacent. A point named by two overlapping
+`--grid` flags is therefore evaluated twice and gets two independent smoothed
+values, one per lattice.
+
+**Edges renormalize, and say so.** A boundary point has fewer neighbours; its
+average is divided by the weight it actually found rather than padded or
+reflected. Since grid maxima *like* to sit on edges, the realized weight is
+reported per row as `<metric>_support` — `1.0` for a fully interior point, `4/9`
+for the corner of a 2-D `box:1` grid. `--smooth-min-support FRAC` refuses
+anything thinner: the row's smoothed value is dropped and sorts last, exactly
+like a missing metric, while its support is still written. Caveat: an axis
+shorter than the kernel's diameter has *no* interior point, so nothing on it
+ever reaches support `1.0` — `--smooth-min-support 1.0` on such a grid is an
+error rather than an empty result.
+
+A neighbour whose metric is undefined (didn't trade, zero variance) contributes
+no weight and lowers support, but does not drag the average toward zero. A row
+whose *own* metric is undefined stays undefined however healthy its
+neighbourhood.
+
+**With `-k`.** The two compose, in that order: `-k` shifts each point's
+cross-window mean against it, and `--smooth` averages *that* shifted key over
+the neighbourhood. So the ranking is `avg(mean − K·std)`, not `avg(mean) −
+K·avg(std)`.
+
+**Reading the result.** Two CSV columns are appended — `<metric>_smoothed` and
+`<metric>_support` — and the console `best` block prints the winner's smoothed
+value, its support, and the line that matters:
+
+```
+best
+  params    FAST=11, SLOW=55
+  sharpe    1.4021
+  smoothed  1.1883 · support 1.00 · box:1
+  ranks     raw argmax #37/50 smoothed · smoothed winner #12/50 raw
+  plateau   14 of 50 cells connected within 5% of the best smoothed value
+```
+
+If the raw argmax falls to rank 37 of 50 once its neighbourhood is accounted
+for, that peak was noise — which is the whole reason the flag exists. The
+`plateau` line is the same point from the other side: the grid's *shape* is the
+result, and a one-cell plateau under a wide kernel says the maximum is an
+artifact of this sample.
+
 #### Overfitting and the train/validate workflow
 
 **`optimize` on its own is a tuning aid, not a strategy validator.** It
@@ -521,6 +620,22 @@ sweep. Sharpe 2 on the training slice can be Sharpe 0.3 on the next year.
 parameter sets that hold up across regimes rather than in one lucky
 stretch) but do not eliminate it — the grid is still ranked on the same
 data it was fit on.
+
+[`--smooth`](#neighbourhood-smoothing) attacks the other half of the same
+problem. `-k` asks whether a parameter set held up across *time*; `--smooth`
+asks whether its neighbours held up too. Both matter, because the winner of a
+grid is a maximum over `N` noisy draws, and that maximum is biased upward by an
+amount that grows with `N`. This is the counter-intuitive part worth
+internalizing: **a finer grid makes the overfitting worse, not better.** Halving
+the step on every axis multiplies the number of draws you are taking the maximum
+of without adding any information about the strategy, so the reported winner
+goes up and its out-of-sample performance does not. Smoothing is what lets a
+fine grid stay useful — it turns the extra points into evidence about the
+*neighbourhood* instead of extra lottery tickets.
+
+The three knobs are independent and stack: `-w` for regime consistency, `-k` for
+how conservatively to price that consistency, `--smooth` for parameter
+robustness. None of them replaces the split below.
 
 The recommended workflow is therefore an **explicit train / validate
 split**, with `get` and `file:` doing the plumbing:
@@ -541,7 +656,7 @@ fugazi optimize @strategy.params.yml \
     --series @btc_train.csv \
     --params 'FAST=3..20:2,SLOW=[20,50,100]' \
     -m sharpe,cagr_pct,max_pct --best-by sharpe \
-    -w 252 -k 1.0 \
+    -w 252 -k 1.0 --smooth=box:1 \
     --crypto -f 1d \
     -o grid_train.csv
 
@@ -598,9 +713,24 @@ OOS extends to the end of the input, so trailing bars aren't dropped
 (the IS/OOS sizes are minimums, not exact widths).
 
 **Selection.** `--best-by` picks each fold's winner by its IS metric,
-using the same direction table as the plain grid sweep. Without
-`--best-by` the "winner" is just the first grid point in enumeration
-order — sensible for exploration, not for production.
+using the same direction table as the plain grid sweep. On an exact tie
+the later grid point in enumeration order wins. Without `--best-by` the
+"winner" is just the first grid point in enumeration order — sensible for
+exploration, not for production.
+
+[`--smooth`](#neighbourhood-smoothing) applies here too, per fold, to the
+in-sample keys — and this is the highest-value place to use it. **It changes
+what the composite measures, and that is the point.** The per-fold IS argmax
+*is* the selection rule whose out-of-sample behaviour the composite curve
+estimates, so today's composite is an honest estimate of a biased rule: it
+faithfully reports what "pick the in-sample maximum" delivers, including the
+part of that maximum that was noise. Smoothing the per-fold keys swaps in a
+different rule — "pick the centre of the best in-sample neighbourhood" — and the
+composite then estimates *that*. Comparing the two composite metrics documents,
+with and without `--smooth`, is a direct read on how much of the strategy's
+apparent edge was the selection rule chasing noise. Each fold row gains
+`<metric>_is_smoothed` and `<metric>_is_support` columns, so the choice is
+auditable against the raw `_is` column beside it.
 
 **Outputs.** Given `-o out/wf.csv`, three sibling files are written:
 
@@ -1696,10 +1826,20 @@ One row per grid point:
   `<name>_mean` and `<name>_std`, its cross-window mean and population
   standard deviation over the windows where it is defined.
 
+- **Smoothing columns**, under [`--smooth`](#neighbourhood-smoothing) only:
+  `<best-by>_smoothed` and `<best-by>_support`, appended last. The first is the
+  kernel-weighted neighbourhood average the rows are ranked by, in the metric's
+  native orientation; the second is the fraction of a fully interior
+  neighbourhood that average rests on. A value dropped by
+  `--smooth-min-support` leaves an empty `_smoothed` cell and a populated
+  `_support` one.
+
 Missing metric values (`sharpe` on a run with zero variance,
 `profit_factor` on a run with no losing trade, …) render as **empty
 cells**. When `--best-by` is set, rows are sorted by that metric and empty
-cells sink to the bottom regardless of direction.
+cells sink to the bottom regardless of direction — or by the smoothed key
+under `--smooth`, which changes row *order* only: no pre-existing cell,
+including `selection.deflated_sharpe`, takes a different value.
 
 ## Metrics catalogue
 

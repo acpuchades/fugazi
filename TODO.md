@@ -55,6 +55,29 @@ the caller to choose; the docs currently give both formulas and say to pick one.
 Decide this on evidence: if more than one caller writes the same correction by
 hand, ship the helper with the end-of-period convention and document the other.
 
+## Optimize
+
+### The rest of the plateau summary: "fraction of the grid above baseline"
+
+`--smooth`'s console block reports the largest connected plateau within 5% of
+the best smoothed value. The other half of that readout — what fraction of the
+grid clears a *do-nothing baseline* — is deliberately not shipped.
+
+Deferred because "do-nothing" has no metric-independent definition. For
+`cagr_pct` it is plausibly buy-and-hold, or zero; for `drawdown.max_pct` a
+do-nothing run has a drawdown of zero, which every real strategy loses to, so
+the fraction would read 0% and mean nothing; for `trades.win_rate_pct` there is
+no baseline at all. Picking one per metric would mean a second direction-table-
+shaped thing to maintain, and picking one globally would be quietly wrong for
+most of the catalogue. Worth doing if a concrete baseline lands — the honest
+shape is probably an explicit `--baseline <STRATEGY>` evaluated through the same
+`EvalContext`, compared on the same `--best-by` path, rather than a synthesized
+null.
+
+The plateau *tolerance* is likewise fixed at 5% rather than exposed as a flag:
+it is a readout, not a knob, and one more `--smooth-*` spelling buys nothing
+that reading the `_smoothed` column doesn't.
+
 ## Run resuming
 
 ### No migration path between `RunState` format versions

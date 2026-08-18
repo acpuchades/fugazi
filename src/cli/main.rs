@@ -635,6 +635,43 @@ struct OptimizeArgs {
     )]
     risk_aversion: Option<f64>,
 
+    /// Rank `--best-by` by a kernel-weighted average over each grid point's
+    /// *parameter neighbourhood* (needs `--best-by`), so a broad plateau
+    /// outranks a lone spike. The argmax of a grid selects for the largest
+    /// noise draw as much as the largest signal, and a finer grid makes that
+    /// worse — smoothing is the counterweight.
+    ///
+    /// `KERNEL` is `box:R` (uniform over Chebyshev radius `R`), `triangle:R`,
+    /// or `gaussian:S` (bandwidth `S`, truncated at `3S`). Bare `--smooth`
+    /// means `box:1` — the Moore neighbourhood, self plus every adjacent
+    /// point. Radii and bandwidths are in **lattice steps**, not parameter
+    /// units: distance is measured between declared positions on an axis, so
+    /// `PERIOD=[10,20,50]` and `ATR_MULT=1.0..4.0:0.5` are commensurable.
+    /// A non-numeric axis (`SL_MODE=[none,atr]`) has no ordering, so it
+    /// partitions the grid instead of smoothing across it, and each `--grid`
+    /// subgrid is its own lattice.
+    ///
+    /// Pass a value with `=`: `--smooth=triangle:2`.
+    #[arg(
+        long = "smooth",
+        value_name = "KERNEL",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "box:1",
+        requires = "best_by"
+    )]
+    smooth: Option<optimize::SmoothKernel>,
+
+    /// Drop a row's smoothed value when the neighbourhood weight it actually
+    /// found is below this fraction of the weight a fully interior point would
+    /// have (`0`–`1`, default `0`). Boundary points are renormalized over the
+    /// neighbours that exist — which is precisely why grid maxima like to sit
+    /// on edges — so this is the knob that refuses to trust a thin one. A
+    /// dropped row sorts last, like a missing metric; its realized support is
+    /// still written to the CSV. Requires `--smooth`.
+    #[arg(long = "smooth-min-support", value_name = "FRAC", requires = "smooth")]
+    smooth_min_support: Option<f64>,
+
     /// Suppress console output. The CSV is still written.
     #[arg(short, long)]
     quiet: bool,
@@ -1129,6 +1166,13 @@ fn run(args: RunArgs) -> Result<()> {
 fn optimize(args: OptimizeArgs) -> Result<()> {
     let param_table = params::table(&args.params)?;
     optimize::reject_axes_in_params(&param_table)?;
+    // `--smooth` presence is what turns smoothing on; `--smooth-min-support`
+    // only tunes it, so it collapses to 0.0 the same way `-k` does. Clap
+    // already refused the flag without `--best-by`.
+    let smoothing = args
+        .smooth
+        .map(|kernel| optimize::Smoothing::new(kernel, args.smooth_min_support.unwrap_or(0.0)))
+        .transpose()?;
     let grid_tables: Vec<HashMap<String, serde_json::Value>> = args
         .grid
         .iter()
@@ -1160,6 +1204,7 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         walkforward: args.walkforward,
         keep_unstable: args.keep_unstable,
         risk_aversion: args.risk_aversion.unwrap_or(0.0),
+        smoothing,
         cost_config: &cost_config,
         frequency: &args.frequency,
         costs_supplied: costs_were_supplied,
