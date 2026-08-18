@@ -108,6 +108,25 @@ pub trait DynIndicator<In, Out>: Indicator<Input = In, Output = Out> + Send + Sy
             *o = self.update(i.clone());
         }
     }
+
+    /// Fold a slice, writing each output **flattened** through `flatten` —
+    /// no `Option` in the destination.
+    ///
+    /// The `Option` form above stages 16 bytes per sample (`Option<f64>` has no
+    /// niche) that the caller then reads back, branches on, and writes again.
+    /// Callers whose destination is a plain buffer — the Python bindings, whose
+    /// `None` becomes `NaN` — want to write once. This is the scalar twin of
+    /// `MultiOutput::write_strided`, which removed the same double hop from the
+    /// multi-output path.
+    fn update_slice_flat(&mut self, inputs: &[In], out: &mut [Real])
+    where
+        In: Clone,
+        Out: Into<Real> + Copy,
+    {
+        for (o, i) in out.iter_mut().zip(inputs) {
+            *o = self.update(i.clone()).map_or(Real::NAN, Into::into);
+        }
+    }
 }
 
 /// Wraps a concrete [`Indicator`] so it can be held as a [`Chain`].
@@ -171,6 +190,20 @@ where
     /// The point of the whole method — see the trait. `local` is what lets the
     /// indicator's state live in registers for the loop instead of round-tripping
     /// through memory once per sample.
+    fn update_slice_flat(&mut self, inputs: &[In], out: &mut [Real])
+    where
+        In: Clone,
+        Out: Into<Real> + Copy,
+    {
+        // Same local-state trick as `update_slice` — see there — with the
+        // destination written once instead of staged through an `Option`.
+        let mut local = self.0.clone();
+        for (o, i) in out.iter_mut().zip(inputs) {
+            *o = local.update(i.clone()).map_or(Real::NAN, Into::into);
+        }
+        self.0 = local;
+    }
+
     fn update_slice(&mut self, inputs: &[In], out: &mut [Option<Out>])
     where
         In: Clone,

@@ -2217,8 +2217,8 @@ Recorded so they are not re-attempted:
 
 ### How to measure without fooling yourself
 
-Eleven traps, each of which produced a wrong answer in this codebase before it
-was caught. Note that **five of the eleven are "you measured a stale binary"** —
+Twelve traps, each of which produced a wrong answer in this codebase before it
+was caught. Note that **five of the twelve are "you measured a stale binary"** —
 by far the most common way to be confidently wrong here.
 
 1. **`maturin develop` builds *debug*.** It is 7–10× slower than release and
@@ -2322,6 +2322,22 @@ by far the most common way to be confidently wrong here.
    Note what nearly went wrong: the poisoned reading was the *later* one, so the
    natural conclusion was "the committed figure was too optimistic". It was the
    other way round — the published 8.71 was right, and the instrument had broken.
+
+12. **A callback through a `dyn` boundary is an indirect call per sample, and
+   costs more than most things it is used to avoid.** The scalar `feed` staged
+   each value through `[Option<Real>]` and copied it out — the same double hop
+   `write_strided` had just removed from the multi path — so the fix looked
+   obvious: give `DynIndicator` a slice fold taking `flatten: fn(Option<Out>) ->
+   Real`. It made things **worse**: `atr` 53.78 → 62.93 instructions/sample,
+   `sma_1d` 39.76 → 47.72. The method lives in a vtable, so `flatten` could not
+   be inlined and became a call per sample — 13 to 16 instructions, more than
+   the staging it removed. Hardcoding the flattening in the method body instead
+   turned the same change into a win (`sma_1d` 34.76, `atr` 51.79).
+
+   **A generic parameter is free and a `fn` parameter is not**, once the method
+   is dispatched dynamically. If a `dyn` method needs to vary its behaviour,
+   vary it with a bound the impl resolves, not with a function the caller
+   passes.
 
 The general defence, and the one that actually caught trap 3: **measure the same
 quantity by paths that share as little as possible.** Phase 6's per-level cost

@@ -797,14 +797,19 @@ impl AnySource {
                 let cols = columns_from_frame(data)?;
                 numpy_filled(py, cols.len(py), |slice| {
                     let mut buf = [ZERO_BAR; FOLD_CHUNK];
-                    let mut got = [None; FOLD_CHUNK];
+                    // Folded straight into a `Real` scratch, not staged through
+                    // `[Option<Real>]`: `Option<f64>` has no niche, so that form
+                    // wrote 16 bytes per sample which this loop then read back,
+                    // branched on and wrote again. Same double hop
+                    // `MultiOutput::write_strided` removed from the multi path.
+                    let mut got = [0.0 as Real; FOLD_CHUNK];
                     let mut cells = slice.iter();
                     cols.for_each_chunk(py, &mut buf, |chunk| {
                         let got = &mut got[..chunk.len()];
-                        s.update_slice(chunk, got);
+                        s.update_slice_flat(chunk, got);
                         for v in got.iter() {
                             if let Some(cell) = cells.next() {
-                                cell.set(v.unwrap_or(Real::NAN));
+                                cell.set(*v);
                             }
                         }
                     });
@@ -825,14 +830,14 @@ impl AnySource {
                 let xs = reals_from_series(data)?;
                 numpy_filled(py, xs.len(py), |slice| {
                     let mut buf = [0.0; FOLD_CHUNK];
-                    let mut got = [None; FOLD_CHUNK];
+                    let mut got = [0.0 as Real; FOLD_CHUNK];
                     let mut cells = slice.iter();
                     xs.for_each_chunk(py, &mut buf, |chunk| {
                         let got = &mut got[..chunk.len()];
-                        s.update_slice(chunk, got);
+                        s.update_slice_flat(chunk, got);
                         for v in got.iter() {
                             if let Some(cell) = cells.next() {
-                                cell.set(v.unwrap_or(Real::NAN));
+                                cell.set(*v);
                             }
                         }
                     });
