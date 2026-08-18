@@ -1310,6 +1310,7 @@ candle-field leaves.
 | --- | --- | --- |
 | `!add`, `!sub`, `!mul`, `!div` | `{ lhs, rhs }` | arithmetic over two sources (`div` → none on /0) |
 | `!log` | `{ source = close, base = e }` | logarithm of `source`; `None` on non-positive samples |
+| `!exp` | `{ source = close, base = e }` | exponential of `source` (`base^x`), the inverse of `!log`; `None` where the result overflows to infinity |
 | `!lag`, `!diff`, `!ratio`, `!roc` | `{ source = close, period }` | lookback vs. `period` bars ago |
 | `!rolling_max`, `!rolling_min` | `{ source = close, period }` | rolling extremum over `period` bars — **includes the current bar**, see [below](#extremum-sources-include-the-current-bar) |
 | `!if_else` | `{ cond, then, otherwise }` | ternary: `cond` is a **signal**, the branches are sources — see below |

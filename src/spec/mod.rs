@@ -367,6 +367,54 @@ mod tests {
     }
 
     #[test]
+    fn exp_defaults_to_natural_and_inverts_log() {
+        // Default base: the natural exponential (`e`).
+        let bare: NodeSpec = serde_norway::from_str("!exp").unwrap();
+        let mut e = bare.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), Root::sole()).into_payload();
+        for p in [0.5, 1.0, 2.0, 4.0] {
+            let got = feed_real(&mut e, bar(p)).unwrap();
+            assert!((got - p.exp()).abs() <= 1e-12 * p.exp(), "exp({p})");
+        }
+
+        // Explicit base: 2, and the round trip back through `!log`.
+        let spec: NodeSpec = serde_norway::from_str("!exp { base: 2.0 }").unwrap();
+        let mut exp2 = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), Root::sole()).into_payload();
+        for p in [1.0, 3.0, 10.0] {
+            let got = feed_real(&mut exp2, bar(p)).unwrap();
+            assert!((got - p.exp2()).abs() <= 1e-12 * p.exp2(), "2^{p}");
+        }
+
+        let spec: NodeSpec = serde_norway::from_str("!exp { source: !log }").unwrap();
+        let mut round_trip = spec.build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), Root::sole()).into_payload();
+        for p in [2.0, 42.0, 61_237.25] {
+            let got = feed_real(&mut round_trip, bar(p)).unwrap();
+            assert!((got - p).abs() <= 1e-9 * p, "exp(ln({p}))");
+        }
+    }
+
+    /// The constructors `assert!` on the base; a document naming a bad one is
+    /// bad *input*, so both tags report it rather than aborting the process.
+    #[test]
+    fn a_bad_log_or_exp_base_is_a_build_error_not_a_panic() {
+        for text in [
+            "!log { base: 0.0 }",
+            "!log { base: 1.0 }",
+            "!log { base: -2.0 }",
+            "!exp { base: 0.0 }",
+            "!exp { base: 1.0 }",
+            "!exp { base: -2.0 }",
+        ] {
+            let spec: NodeSpec = serde_norway::from_str(text).unwrap();
+            let Err(err) =
+                spec.try_build(&Position::new(), &Book::new(1.0), None, &Schema::empty(), Root::sole())
+            else {
+                panic!("{text} built instead of reporting its base");
+            };
+            assert!(err.contains("`base` must be"), "{text}: {err}");
+        }
+    }
+
+    #[test]
     fn parses_full_strategy_with_long_and_short() {
         let yaml = r#"
             symbol: BTC

@@ -67,6 +67,41 @@ def test_log_rejects_invalid_base():
         ta.close().log(-2.0)
 
 
+def test_exp_defaults_to_natural_and_inverts_log():
+    # Default base: natural exponential.
+    e = ta.exp(ta.close())
+    out = feed(e, closes([0.0, 1.0, 2.0]))
+    assert out[0] == pytest.approx(1.0)
+    assert out[1] == pytest.approx(math.e)
+    assert out[2] == pytest.approx(math.e**2)
+
+    # Explicit base via the fluent method, and the round trip through `log`.
+    exp2 = ta.close().exp(2.0)
+    assert feed(exp2, closes([1.0, 3.0, 10.0])) == [
+        pytest.approx(2.0),
+        pytest.approx(8.0),
+        pytest.approx(1024.0),
+    ]
+    round_trip = ta.exp(ta.log(ta.close()))
+    assert feed(round_trip, closes([2.0, 42.0])) == [
+        pytest.approx(2.0),
+        pytest.approx(42.0),
+    ]
+
+    # A result too large to represent yields None, an underflow is a value.
+    over = ta.exp(ta.close())
+    assert feed(over, closes([1e6, -1000.0])) == [None, pytest.approx(0.0)]
+
+
+def test_exp_rejects_invalid_base():
+    with pytest.raises(ValueError):
+        ta.exp(ta.close(), base=0.0)
+    with pytest.raises(ValueError):
+        ta.exp(ta.close(), base=1.0)
+    with pytest.raises(ValueError):
+        ta.close().exp(-2.0)
+
+
 def test_composition_ema_of_sma():
     """Composition is construction: an EMA of an SMA of the close."""
     node = ta.ema(ta.sma(ta.close(), 3), 2)

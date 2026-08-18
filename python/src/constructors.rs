@@ -1579,12 +1579,35 @@ pub(crate) fn log(source: PyRef<'_, PyIndicator>, base: f64) -> PyResult<PyIndic
     })))
 }
 
+/// Exponential of `source` in `base` — `base^x`, the inverse of `log`
+/// (defaults to the natural exponential, `e`). Emits `None` on samples whose
+/// result overflows the finite range. Raises `ValueError` if `base` is not a
+/// finite positive number distinct from `1.0`.
+#[pyfunction]
+#[pyo3(signature = (source, base = std::f64::consts::E))]
+pub(crate) fn exp(source: PyRef<'_, PyIndicator>, base: f64) -> PyResult<PyIndicator> {
+    ensure_exp_base(base)?;
+    Ok(PyIndicator::wrap(map_rooted!(&*source, |s| {
+        Exp::new(s, base)
+    })))
+}
+
 pub(crate) fn ensure_log_base(base: f64) -> PyResult<()> {
+    ensure_base("log", base)
+}
+
+pub(crate) fn ensure_exp_base(base: f64) -> PyResult<()> {
+    ensure_base("exp", base)
+}
+
+/// `log` and `exp` admit the same bases, so the pair stays inverse; both Rust
+/// constructors `assert!` on it, and a Python caller gets a `ValueError`.
+fn ensure_base(what: &str, base: f64) -> PyResult<()> {
     if base.is_finite() && base > 0.0 && base != 1.0 {
         Ok(())
     } else {
         Err(PyValueError::new_err(format!(
-            "log base must be a finite positive number distinct from 1.0, got {base}"
+            "{what} base must be a finite positive number distinct from 1.0, got {base}"
         )))
     }
 }

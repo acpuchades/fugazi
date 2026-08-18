@@ -26,10 +26,11 @@ use serde::Deserialize;
 use crate::indicators::{
     Ad, Adx, AdxValue, Aroon, AroonValue, Atr, BarsSince, BarsSinceHigh, BarsSinceLow, Bollinger,
     BollingerValue, Book, Cci, Component, Correlation, Dmi, DmiValue, Donchian, DonchianValue, Ema,
-    GarmanKlass, GetBool, GetReal, GetStr, Hma, IfElse, Keltner, KeltnerValue, Kurtosis, Latch, Log,
-    Macd, MacdValue, Match as MatchIndicator, Mfi, Obv, Parkinson, Percentile, PercentileRank, Pick,
-    PickAny, Position, Resample, Rma, RogersSatchell, Rsi, Sar, Skewness, Sma, StdDev, StochRsi,
-    Stochastic, TrueRange, Value, ValueStr, VarianceRatio, Vwap, WilliamsR, Wma, ZScore,
+    Exp, GarmanKlass, GetBool, GetReal, GetStr, Hma, IfElse, Keltner, KeltnerValue, Kurtosis,
+    Latch, Log, Macd, MacdValue, Match as MatchIndicator, Mfi, Obv, Parkinson, Percentile,
+    PercentileRank, Pick, PickAny, Position, Resample, Rma, RogersSatchell, Rsi, Sar, Skewness,
+    Sma, StdDev, StochRsi, Stochastic, TrueRange, Value, ValueStr, VarianceRatio, Vwap, WilliamsR,
+    Wma, ZScore,
 };
 use crate::prelude::*;
 use crate::types::Snapshot;
@@ -200,6 +201,26 @@ pub(super) fn default_bar_source() -> Box<NodeSpec> {
 /// Default base for `!log`: natural log (`e`).
 pub(super) fn default_log_base() -> Real {
     std::f64::consts::E
+}
+
+/// Default base for `!exp`: natural exponential (`e`).
+pub(super) fn default_exp_base() -> Real {
+    std::f64::consts::E
+}
+
+/// The bases `!log` and `!exp` admit — finite, positive, and distinct from
+/// `1.0`, the same set for both so the pair stays inverse. Both constructors
+/// `assert!` on it; a document naming a bad base is bad *input*, so it is
+/// checked here and reported instead. Serde can't express the constraint, so
+/// there is no earlier gate.
+fn checked_base(base: Real) -> Result<Real, String> {
+    if base.is_finite() && base > 0.0 && base != 1.0 {
+        Ok(base)
+    } else {
+        Err(format!(
+            "`base` must be a finite positive number distinct from 1.0, got {base}"
+        ))
+    }
 }
 
 /// Default annualized risk-free rate for `!sharpe` / `!sortino`: `0.0`.
@@ -1641,6 +1662,18 @@ pub enum NodeSpec {
         #[serde(default = "default_log_base")]
         base: Real,
     },
+    /// Exponential of `source` in `base` — `base^x`, the inverse of `!log`
+    /// (defaults to the natural exponential, `e`). Emits `None` on samples
+    /// whose result overflows the finite range.
+    #[grammar(kind = "operator", since = "0.64")]
+    Exp {
+        /// Series to read; defaults to the bar's `!close` when omitted.
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+        /// Exponential base; defaults to `e` (natural exponential) when omitted.
+        #[serde(default = "default_exp_base")]
+        base: Real,
+    },
     /// Holds the most recent `Some` output of `source`, re-emitting it on
     /// ticks where `source` returns `None`. Wrap the outermost recursive
     /// smoother of a resampled pipeline so per-base-tick consumers see the
@@ -2700,6 +2733,15 @@ enum NodeSpecRaw {
         #[serde(default = "default_log_base")]
         base: Real,
     },
+    /// Exponential of `source` in `base` — `base^x`, the inverse of `!log`
+    /// (defaults to the natural exponential, `e`). Emits `None` on samples
+    /// whose result overflows the finite range.
+    Exp {
+        #[serde(default = "default_source")]
+        source: Box<NodeSpec>,
+        #[serde(default = "default_exp_base")]
+        base: Real,
+    },
     /// Holds the most recent `Some` output of `source`, re-emitting it on
     /// ticks where `source` returns `None`. Wrap the outermost recursive
     /// smoother of a resampled pipeline so per-base-tick consumers see the
@@ -3037,6 +3079,7 @@ impl From<NodeSpecRaw> for NodeSpec {
             NodeSpecRaw::RollingMax { source, period } => NodeSpec::RollingMax { source, period },
             NodeSpecRaw::RollingMin { source, period } => NodeSpec::RollingMin { source, period },
             NodeSpecRaw::Log { source, base } => NodeSpec::Log { source, base },
+            NodeSpecRaw::Exp { source, base } => NodeSpec::Exp { source, base },
             NodeSpecRaw::Latch { source } => NodeSpec::Latch { source },
             NodeSpecRaw::Resample { every, inner, source } => NodeSpec::Resample { every, inner, source },
             NodeSpecRaw::Unstable { source } => NodeSpec::Unstable { source },
@@ -4360,7 +4403,8 @@ impl NodeSpec {
             RollingMin { source, period } => {
                 any(real(source)?.rolling_min(period.get()))
             }
-            Log { source, base } => any(self::Log::new(real(source)?, *base)),
+            Log { source, base } => any(self::Log::new(real(source)?, checked_base(*base)?)),
+            Exp { source, base } => any(self::Exp::new(real(source)?, checked_base(*base)?)),
             Latch { source } => {
                 let inner = {
                     let built = source.try_build(anchor, book, portfolio_book, schema, root)?;

@@ -26,8 +26,8 @@
 //! warm-up only as the `None` prefix of the series it is checking.
 
 use fugazi::indicators::{
-    Ad, Aroon, Bollinger, Cci, Current, Ema, Identity, Mfi, Obv, Percentile, RollingMax, RollingMin,
-    Rma, Rsi, Sma, StdDev, Stochastic, TrueRange, Value, WilliamsR, Wma,
+    Ad, Aroon, Bollinger, Cci, Current, Ema, Exp, Identity, Log, Mfi, Obv, Percentile, RollingMax,
+    RollingMin, Rma, Rsi, Sma, StdDev, Stochastic, TrueRange, Value, WilliamsR, Wma,
 };
 use fugazi::prelude::*;
 
@@ -191,6 +191,29 @@ fn rolling_extrema_track_their_window() {
         &warm(2, &[1.0, 1.0, 1.0, 1.0, 2.0, 2.0]),
         "rolling_min3",
     );
+}
+
+/// `!exp` is `base^x` sample by sample, and the inverse of `!log`. Base 2 over
+/// the ramp `[1,2,3,4,5]` is `[2,4,8,16,32]` — every value a power of two, so
+/// f64 represents each exactly. Round-tripping the same ramp through
+/// `exp(ln(x))` returns it unchanged.
+#[test]
+fn exp_raises_its_base_to_the_sample() {
+    let got = run(Exp::new(Identity::new(), 2.0), RAMP.to_vec());
+    assert_series(&got, &some(&[2.0, 4.0, 8.0, 16.0, 32.0]), "exp2");
+
+    let round_trip = run(Exp::natural(Log::natural(Identity::new())), RAMP.to_vec());
+    assert_series(&round_trip, &some(&RAMP), "exp_of_log");
+}
+
+/// The result of `base^x` can leave the finite range where the input cannot:
+/// `e^1000` overflows, and an unrepresentable answer is reported as no answer
+/// rather than as `inf`. Underflow is not the same case — `e^-1000` is `0.0`,
+/// which is representable, so it is a value.
+#[test]
+fn exp_reports_an_unrepresentable_result_as_none() {
+    let got = run(Exp::natural(Identity::new()), vec![1000.0, -1000.0, 0.0]);
+    assert_series(&got, &[None, Some(0.0), Some(1.0)], "exp_overflow");
 }
 
 /// The stochastic places the newest sample inside its window's range,

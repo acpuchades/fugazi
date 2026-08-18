@@ -4,6 +4,7 @@
 use crate::indicator::Indicator;
 use crate::indicators::compare::{Eq, Ge, Gt, Le, Lt, Ne};
 use crate::indicators::crosses::{CrossesAbove, CrossesBelow};
+use crate::indicators::exp::Exp;
 use crate::indicators::if_else::IfElse;
 use crate::indicators::log::Log;
 use crate::indicators::logic::{And, BecameFalse, BecameTrue, Change, Not, Or, Xor};
@@ -153,6 +154,14 @@ pub trait IndicatorExt: Indicator<Output = Real> + Sized {
     /// distinct from `1.0`.
     fn log(self, base: Real) -> Log<Self> {
         Log::new(self, base)
+    }
+
+    /// Exponential of `self` in `base` — `base^x`, the inverse of
+    /// [`log`](Self::log) (emits `None` on samples whose result overflows the
+    /// finite range). Panics if `base` is not a finite positive number
+    /// distinct from `1.0`.
+    fn exp(self, base: Real) -> Exp<Self> {
+        Exp::new(self, base)
     }
 
     /// Rolling maximum of `self` over `period` steps.

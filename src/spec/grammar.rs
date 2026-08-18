@@ -275,7 +275,7 @@ fn demand_labels(types: Vec<crate::runtime::PayloadType>) -> Vec<String> {
 /// can render the curated grouping and order directly, not just the per-tag
 /// `category` string.
 pub const CATEGORIES: &[(&str, &[&str])] = &[
-    ("arithmetic operators", &["add", "sub", "mul", "div", "log"]),
+    ("arithmetic operators", &["add", "sub", "mul", "div", "log", "exp"]),
     (
         "bands",
         &[

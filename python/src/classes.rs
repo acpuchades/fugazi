@@ -1318,6 +1318,17 @@ impl PyIndicator {
         ))
     }
 
+    /// Exponential of `self` in `base` — `base^x`, the inverse of `log`
+    /// (default: the natural exponential, `e`). Emits `None` on samples whose
+    /// result overflows the finite range.
+    #[pyo3(signature = (base = std::f64::consts::E))]
+    pub(crate) fn exp(&self, base: f64) -> PyResult<PyIndicator> {
+        ensure_exp_base(base)?;
+        Ok(PyIndicator::wrap(
+            map_rooted!(self, |s| Exp::new(s, base))
+        ))
+    }
+
     /// Passthrough that forces this indicator's reported `unstable_bars()` to
     /// `0`. Output and `warm_up_bars()` are unchanged; a downstream reader of
     /// `stable_bars()` (a strategy readiness gate, an overlay trim) no longer

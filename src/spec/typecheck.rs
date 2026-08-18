@@ -237,6 +237,7 @@ pub fn output_type(spec: &NodeSpec) -> Option<PayloadType> {
         | RollingMax { .. }
         | RollingMin { .. }
         | Log { .. }
+        | Exp { .. }
         | Latch { .. }
         | Year { .. }
         | Month { .. }
@@ -303,6 +304,7 @@ fn children(spec: &NodeSpec) -> Vec<(&'static str, Expect, &NodeSpec)> {
         | RollingMax { source, .. }
         | RollingMin { source, .. }
         | Log { source, .. }
+        | Exp { source, .. }
         | Latch { source } => vec![("source", REAL, source)],
 
         // --- Candle-source families (bar indicators) ---
@@ -795,6 +797,7 @@ mod tests {
             "!add { lhs: close, rhs: close }",
             "!lag { period: 1 }",
             "!log { base: 2.718281828459045 }",
+            "!exp { base: 2.718281828459045 }",
             "!rolling_max { period: 3 }",
             "!latch { source: close }",
             "!unstable { source: close }",

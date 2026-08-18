@@ -10,7 +10,7 @@
 
 use fugazi::indicators::{
     Adx, Aroon, Atr, BarsSinceHigh, BarsSinceLow, Bollinger, Cci, Correlation, CurrentTime, Current,
-    Day, DayOfWeek, DayOfYear, Dmi, Donchian, Ema, GarmanKlass, Hma, Hour, Identity, IsWeekday,
+    Day, DayOfWeek, DayOfYear, Dmi, Donchian, Ema, Exp, GarmanKlass, Hma, Hour, Identity, IsWeekday,
     IsWeekend, Keltner, Kurtosis, Latch, Log, Macd, Mfi, Minute, Month, Obv, Parkinson, Percentile,
     PercentileRank, Quarter, Resample, Rma, RogersSatchell, Rsi, Sar, Second, Skewness, Sma, StdDev,
     Stochastic, TrueRange, UnixMillis, UnixSeconds, Value, VarianceRatio, Vwap, WeekOfYear,
@@ -88,6 +88,7 @@ fn real_case(ind: impl Indicator<Input = Real>, name: &str) {
 fn warm_up_is_exact_for_the_catalogue() {
     candle_case(Current::close(), "close");
     candle_case(Log::natural(Current::close()), "log");
+    candle_case(Exp::natural(Current::close()), "exp");
     candle_case(TrueRange::new(Current::candle()), "true_range");
     candle_case(Obv::new(Current::candle()), "obv");
     candle_case(fugazi::indicators::Ad::new(Current::candle()), "ad");
