@@ -214,9 +214,14 @@ pub(crate) fn per_bar_returns(equity_curve: Series, initial_equity: Real) -> Vec
     core_metrics::per_bar_returns(&equity_curve, initial_equity)
 }
 
-/// Walk `fills` with a signed position and a volume-weighted entry price,
-/// producing one `Trade` per closed leg. A reversal fill closes the current
-/// leg and reopens the remainder at the same fill price as a fresh trade.
+/// Walk `fills` **per symbol**, each with its own signed position and a
+/// volume-weighted entry price, producing one `Trade` per closed leg. A
+/// reversal fill closes the current leg and reopens the remainder at the same
+/// fill price as a fresh trade.
+///
+/// Legs never cross instruments: an opposite-side fill in a different symbol
+/// opens its own leg rather than closing this one. Trades come back in the
+/// order they closed.
 #[pyfunction]
 pub(crate) fn reconstruct_trades(fills: Vec<PyFill>) -> Vec<PyTrade> {
     let native: Vec<Fill<Symbol>> = fills.into_iter().map(|f| f.inner).collect();

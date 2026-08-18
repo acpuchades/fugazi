@@ -130,17 +130,35 @@ pub fn per_bar_returns(equity_curve: &[Real], initial_equity: Real) -> Vec<Real>
     out
 }
 
-/// Walk `fills` with a single signed position and a volume-weighted entry
-/// price, producing one [`Trade`] per closed leg.
+/// Walk `fills` **per symbol**, each with its own signed position and
+/// volume-weighted entry price, producing one [`Trade`] per closed leg.
 ///
-/// Same-side fills add to the open leg with a volume-weighted new entry. An
-/// opposite-side fill closes (partially or fully) and — if it crosses zero —
-/// re-opens the remainder at the same fill price as a fresh trade. So one
-/// reversal (`set(Buy, all-in)` while short) yields one closed short plus one
-/// open long, matching how a
+/// Same-side fills add to that symbol's open leg with a volume-weighted new
+/// entry. An opposite-side fill in the *same symbol* closes (partially or
+/// fully) and — if it crosses zero — re-opens the remainder at the same fill
+/// price as a fresh trade. So one reversal (`set(Buy, all-in)` while short)
+/// yields one closed short plus one open long, matching how a
 /// [`SingleAssetStrategy`](crate::strategies::SingleAssetStrategy) reasons
 /// about its position.
-pub fn reconstruct_trades<Sym>(fills: &[Fill<Sym>]) -> Vec<Trade> {
+///
+/// **Legs never cross instruments.** A blotter from a multi-symbol shape
+/// (`pairs`, `basket`, `multi`, `portfolio`) interleaves symbols, and every
+/// emitted [`Trade`] draws its `entry_price` and `exit_price` from fills of one
+/// symbol. Before 0.63.2 this walked the whole blotter with a single position,
+/// so an opposite-side fill in a *different* instrument closed the open leg and
+/// P&L subtracted one asset's price from another's.
+///
+/// **Ordering.** Each trade is emitted as its closing fill is read, so the
+/// result is in non-decreasing `exit_bar` order — the arrival order the
+/// consecutive-win/loss streak metrics read as a time series. Trades closing on
+/// the same bar keep blotter order. Positions still open at the end of the
+/// blotter are not emitted (a run wanting them counted should flatten first —
+/// see [`flatten_open_positions`](crate::backtest::flatten_open_positions)).
+///
+/// `Sym` needs only [`PartialEq`]: the open legs live in a small
+/// insertion-ordered list, keyed by borrowed symbol. Grouping is therefore
+/// deterministic by construction — no hash iteration order enters the result.
+pub fn reconstruct_trades<Sym: PartialEq>(fills: &[Fill<Sym>]) -> Vec<Trade> {
     struct Open {
         signed_units: Real,
         entry_price: Real,
@@ -148,67 +166,77 @@ pub fn reconstruct_trades<Sym>(fills: &[Fill<Sym>]) -> Vec<Trade> {
     }
 
     let mut trades = Vec::new();
-    let mut open: Option<Open> = None;
+    // One open leg per symbol seen so far, in first-appearance order. A linear
+    // scan beats hashing here: the common blotter carries one or two symbols,
+    // and even a wide basket stays far short of the string hash it would pay
+    // on every fill.
+    let mut open: Vec<(&Sym, Open)> = Vec::new();
 
     for f in fills {
         let delta = f.order.signed_units();
         let bar = f.bar;
         let price = f.order.price;
+        let sym = &f.order.symbol;
 
-        match open.as_mut() {
-            None => {
-                open = Some(Open {
+        let Some(slot) = open.iter().position(|(s, _)| *s == sym) else {
+            open.push((
+                sym,
+                Open {
                     signed_units: delta,
                     entry_price: price,
                     entry_bar: bar,
-                });
-            }
-            Some(pos) if pos.signed_units.signum() == delta.signum() => {
-                // Adding to the position: volume-weighted new entry.
-                let new_units = pos.signed_units + delta;
-                let notional = pos.signed_units.abs() * pos.entry_price + delta.abs() * price;
-                pos.entry_price = notional / new_units.abs();
-                pos.signed_units = new_units;
-            }
-            Some(pos) => {
-                // Opposite side: reducing, closing, or reversing.
-                let close_units = pos.signed_units.abs().min(delta.abs());
-                let long = pos.signed_units > 0.0;
-                let side = if long { Side::Buy } else { Side::Sell };
-                let pnl_per_unit = if long {
-                    price - pos.entry_price
-                } else {
-                    pos.entry_price - price
-                };
-                let pnl = pnl_per_unit * close_units;
-                let entry_notional = pos.entry_price * close_units;
-                let return_ratio = if entry_notional > 0.0 {
-                    pnl / entry_notional
-                } else {
-                    0.0
-                };
-                trades.push(Trade {
-                    entry_bar: pos.entry_bar,
-                    exit_bar: bar,
-                    side,
-                    units: close_units,
-                    entry_price: pos.entry_price,
-                    exit_price: price,
-                    pnl,
-                    return_ratio,
-                });
-                let remaining = pos.signed_units + delta;
-                if remaining.abs() <= EPSILON {
-                    open = None;
-                } else {
-                    // Reversed: the remainder is a fresh position at this fill.
-                    open = Some(Open {
-                        signed_units: remaining,
-                        entry_price: price,
-                        entry_bar: bar,
-                    });
-                }
-            }
+                },
+            ));
+            continue;
+        };
+        let pos = &mut open[slot].1;
+
+        if pos.signed_units.signum() == delta.signum() {
+            // Adding to the position: volume-weighted new entry.
+            let new_units = pos.signed_units + delta;
+            let notional = pos.signed_units.abs() * pos.entry_price + delta.abs() * price;
+            pos.entry_price = notional / new_units.abs();
+            pos.signed_units = new_units;
+            continue;
+        }
+
+        // Opposite side, same symbol: reducing, closing, or reversing.
+        let close_units = pos.signed_units.abs().min(delta.abs());
+        let long = pos.signed_units > 0.0;
+        let side = if long { Side::Buy } else { Side::Sell };
+        let pnl_per_unit = if long {
+            price - pos.entry_price
+        } else {
+            pos.entry_price - price
+        };
+        let pnl = pnl_per_unit * close_units;
+        let entry_notional = pos.entry_price * close_units;
+        let return_ratio = if entry_notional > 0.0 {
+            pnl / entry_notional
+        } else {
+            0.0
+        };
+        trades.push(Trade {
+            entry_bar: pos.entry_bar,
+            exit_bar: bar,
+            side,
+            units: close_units,
+            entry_price: pos.entry_price,
+            exit_price: price,
+            pnl,
+            return_ratio,
+        });
+        let remaining = pos.signed_units + delta;
+        if remaining.abs() <= EPSILON {
+            // Flat: drop the slot so the next fill in this symbol opens fresh.
+            open.swap_remove(slot);
+        } else {
+            // Reversed: the remainder is a fresh position at this fill.
+            *pos = Open {
+                signed_units: remaining,
+                entry_price: price,
+                entry_bar: bar,
+            };
         }
     }
 
@@ -2150,6 +2178,153 @@ mod tests {
         assert!(matches!(trades[0].side, Side::Sell));
         assert!((trades[1].pnl - 5.0).abs() < 1e-9);
         assert!(matches!(trades[1].side, Side::Buy));
+    }
+
+    fn order_of(sym: &str, side: Side, units: Real, price: Real) -> Order<Symbol> {
+        Order::new(
+            crate::types::symbol(sym),
+            side,
+            units,
+            price,
+            OrderKind::Market,
+            OrderId(0),
+        )
+    }
+
+    /// The blotter of the two-asset repro in the 0.63.1 report: AAA long
+    /// 100 → 110, BBB short 10 → 9, both opened on bar 1 and closed on bar 5.
+    /// Walked with one shared position this produced *three* trades — pairing
+    /// AAA's entry (100) with BBB's exit (10) for a −4500 loss that never
+    /// happened, and BBB's 9 with AAA's 110 for a +5050 gain to match.
+    #[test]
+    fn interleaved_symbols_do_not_close_each_other() {
+        let fills = indexed_fills(vec![
+            (1, order_of("AAA", Side::Buy, 50.0, 100.0)),
+            (1, order_of("BBB", Side::Sell, 500.0, 10.0)),
+            (5, order_of("BBB", Side::Buy, 500.0, 9.0)),
+            (5, order_of("AAA", Side::Sell, 50.0, 110.0)),
+        ]);
+        let trades = reconstruct_trades(&fills);
+
+        assert_eq!(trades.len(), 2, "one round trip per symbol, not three legs");
+        // Emitted in closing-fill order, so BBB (closed first) leads.
+        let (bbb, aaa) = (&trades[0], &trades[1]);
+
+        assert!(matches!(bbb.side, Side::Sell));
+        assert!((bbb.entry_price - 10.0).abs() < 1e-9);
+        assert!((bbb.exit_price - 9.0).abs() < 1e-9);
+        assert!((bbb.pnl - 500.0).abs() < 1e-9);
+
+        assert!(matches!(aaa.side, Side::Buy));
+        assert!((aaa.entry_price - 100.0).abs() < 1e-9);
+        assert!((aaa.exit_price - 110.0).abs() < 1e-9);
+        assert!((aaa.pnl - 500.0).abs() < 1e-9);
+
+        // Both legs are winners: the fabricated −4500 is gone, and so is the
+        // +5050 that used to offset it into a plausible-looking total.
+        assert!(trades.iter().all(|t| t.pnl > 0.0));
+        assert_eq!(win_rate(&trades), Some(1.0));
+        // Σpnl matched the true total even while every leg was wrong, so it is
+        // deliberately *not* the assertion this test rests on.
+        let total: Real = trades.iter().map(|t| t.pnl).sum();
+        assert!((total - 1000.0).abs() < 1e-9);
+    }
+
+    /// Each symbol carries its own signed position, so a symbol's fills reduce
+    /// only that symbol's leg no matter how the blotter interleaves them.
+    #[test]
+    fn each_symbol_keeps_its_own_running_position() {
+        // AAA: +2 @100, +2 @110 (vwap 105) → close 4 @120.
+        // BBB: -1 @50 → reverse +3 @40, closing the short and opening +2 @40,
+        //      then close 2 @45.
+        let fills = indexed_fills(vec![
+            (0, order_of("AAA", Side::Buy, 2.0, 100.0)),
+            (0, order_of("BBB", Side::Sell, 1.0, 50.0)),
+            (1, order_of("AAA", Side::Buy, 2.0, 110.0)),
+            (1, order_of("BBB", Side::Buy, 3.0, 40.0)),
+            (2, order_of("AAA", Side::Sell, 4.0, 120.0)),
+            (3, order_of("BBB", Side::Sell, 2.0, 45.0)),
+        ]);
+        let trades = reconstruct_trades(&fills);
+        assert_eq!(trades.len(), 3);
+
+        // BBB's short closes first (bar 1), then AAA (bar 2), then BBB's long.
+        assert!(matches!(trades[0].side, Side::Sell));
+        assert!((trades[0].pnl - 10.0).abs() < 1e-9); // (50 - 40) * 1
+
+        assert!(matches!(trades[1].side, Side::Buy));
+        assert!((trades[1].entry_price - 105.0).abs() < 1e-9); // vwap survives
+        assert!((trades[1].pnl - 60.0).abs() < 1e-9); // (120 - 105) * 4
+
+        assert!(matches!(trades[2].side, Side::Buy));
+        assert!((trades[2].entry_price - 40.0).abs() < 1e-9); // reversal remainder
+        assert!((trades[2].pnl - 10.0).abs() < 1e-9); // (45 - 40) * 2
+    }
+
+    /// The structural invariant behind both tests above: no emitted trade may
+    /// draw its entry and exit prices from different instruments. Checked by
+    /// replaying the walk per symbol in isolation — the union of the per-symbol
+    /// reconstructions must be exactly what the interleaved blotter produced.
+    #[test]
+    fn no_trade_mixes_prices_across_symbols() {
+        let fills = indexed_fills(vec![
+            (0, order_of("AAA", Side::Buy, 1.0, 100.0)),
+            (0, order_of("BBB", Side::Buy, 1.0, 7.0)),
+            (1, order_of("CCC", Side::Sell, 4.0, 55.0)),
+            (2, order_of("BBB", Side::Sell, 1.0, 9.0)),
+            (3, order_of("AAA", Side::Sell, 1.0, 90.0)),
+            (3, order_of("CCC", Side::Buy, 4.0, 50.0)),
+            (4, order_of("AAA", Side::Buy, 2.0, 80.0)),
+            (5, order_of("AAA", Side::Sell, 2.0, 85.0)),
+        ]);
+        let mixed = reconstruct_trades(&fills);
+
+        let mut per_symbol = Vec::new();
+        for sym in ["AAA", "BBB", "CCC"] {
+            let only: Vec<Fill<Symbol>> = fills
+                .iter()
+                .filter(|f| f.order.symbol.as_ref() == sym)
+                .cloned()
+                .collect();
+            per_symbol.extend(reconstruct_trades(&only));
+        }
+
+        assert_eq!(mixed.len(), per_symbol.len());
+        // Same multiset of legs: interleaving changes only the emission order.
+        for want in &per_symbol {
+            assert!(
+                mixed.iter().any(|got| got.entry_bar == want.entry_bar
+                    && got.exit_bar == want.exit_bar
+                    && (got.entry_price - want.entry_price).abs() < 1e-9
+                    && (got.exit_price - want.exit_price).abs() < 1e-9
+                    && (got.pnl - want.pnl).abs() < 1e-9),
+                "leg {want:?} has no isolated-walk counterpart — prices crossed symbols",
+            );
+        }
+
+        // And the emission order is non-decreasing in `exit_bar`, which is what
+        // makes the consecutive win/loss streaks a time series rather than a
+        // per-symbol artifact.
+        assert!(mixed.windows(2).all(|w| w[0].exit_bar <= w[1].exit_bar));
+    }
+
+    /// A single-symbol blotter must reconstruct exactly as it did before the
+    /// per-symbol split — the fix may not perturb the single-asset path.
+    #[test]
+    fn single_symbol_blotter_is_unchanged_by_grouping() {
+        let fills = tagged_fills(vec![
+            order(Side::Buy, 1.0, 100.0),
+            order(Side::Buy, 1.0, 120.0),
+            order(Side::Sell, 2.0, 130.0),
+            order(Side::Sell, 1.0, 130.0),
+            order(Side::Buy, 1.0, 125.0),
+        ]);
+        let trades = reconstruct_trades(&fills);
+        assert_eq!(trades.len(), 2);
+        assert!((trades[0].entry_price - 110.0).abs() < 1e-9); // vwap of 100/120
+        assert!((trades[0].pnl - 40.0).abs() < 1e-9);
+        assert!(matches!(trades[1].side, Side::Sell));
+        assert!((trades[1].pnl - 5.0).abs() < 1e-9);
     }
 
     #[test]

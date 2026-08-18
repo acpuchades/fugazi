@@ -115,8 +115,12 @@ Computed from `drawdown_segments(equity)` — one segment per drop
 
 ## `trades.*` — round-trip trade statistics
 
-Trades are reconstructed from the fill blotter by walking a single signed
-position with a volume-weighted entry; each closed leg is one trade.
+Trades are reconstructed from the fill blotter **per symbol** — each symbol
+carries its own signed position and volume-weighted entry, and each closed leg
+is one trade. A leg is only ever closed by a fill in the same instrument, so on
+a multi-symbol document (`pairs`, `basket`, `multi`, `portfolio`) no trade pairs
+one asset's entry price with another's exit. Trades are listed in the order they
+closed.
 
 | Column | Meaning | Notes |
 |---|---|---|

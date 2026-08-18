@@ -1015,7 +1015,7 @@ impl Opts {
 /// The *assembly* is identical across variants — same fields, same presentation
 /// scaling, same `Option` propagation — so a timing difference between two
 /// `Opts` is the piece that changed and nothing else.
-fn reduce<Sym>(
+fn reduce<Sym: PartialEq>(
     report: &RunReport<Sym>,
     bars_per_year: Real,
     risk_free_rate: Real,

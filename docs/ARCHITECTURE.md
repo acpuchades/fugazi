@@ -736,9 +736,15 @@ builders**:
 
 - **`per_bar_returns(equity, initial_equity) -> Vec<Real>`** — for return-moment /
   risk-adjusted metrics.
-- **`reconstruct_trades<Sym>(fills) -> Vec<Trade>`** — walks the blotter with signed
-  position and volume-weighted entry; one closed leg = one `Trade { entry_bar,
-  exit_bar, side, units, entry_price, exit_price, pnl, return_ratio }`.
+- **`reconstruct_trades<Sym: PartialEq>(fills) -> Vec<Trade>`** — walks the blotter
+  **per symbol**, each with its own signed position and volume-weighted entry; one
+  closed leg = one `Trade { entry_bar, exit_bar, side, units, entry_price,
+  exit_price, pnl, return_ratio }`. Open legs live in an insertion-ordered list
+  keyed by borrowed symbol, so grouping needs only `PartialEq` and is deterministic
+  by construction; trades are emitted as they close, hence in non-decreasing
+  `exit_bar` order. Before 0.63.2 this walked every symbol with one shared
+  position, so a multi-symbol blotter fabricated cross-instrument trades — the
+  bound exists to make that class of misuse unrepresentable.
 - **`drawdown_segments(equity) -> Vec<DrawdownSegment>`** — one peak→trough→recovery
   per drop; `{ peak_bar, trough_bar, depth_ratio, duration_bars, underwater_bars }`.
 

@@ -2248,6 +2248,38 @@ def test_order_is_constructible_and_feeds_metrics():
     assert metrics.exposure_ratio(fills, total_bars=2) == pytest.approx(0.5)
 
 
+def test_reconstruct_trades_keeps_symbols_apart():
+    """A multi-symbol blotter reconstructs one leg per symbol, never across.
+
+    Through 0.63.1 this walked every fill with a single shared position, so
+    BBB's sell "closed" AAA's long and P&L subtracted one asset's price from
+    another's — three trades out of these four fills, including a -4500 loss
+    that never happened.
+    """
+    from fugazi import metrics
+
+    rows = [
+        (1, "AAA", "buy", 50.0, 100.0),
+        (1, "BBB", "sell", 500.0, 10.0),
+        (5, "BBB", "buy", 500.0, 9.0),
+        (5, "AAA", "sell", 50.0, 110.0),
+    ]
+    fills = [
+        ta.Fill(bar=bar, order=ta.Order(symbol=sym, side=side, units=u, price=p))
+        for bar, sym, side, u, p in rows
+    ]
+    trades = metrics.reconstruct_trades(fills)
+
+    assert metrics.total_trades(trades) == 2
+    # Emitted in closing order, so BBB's short leads.
+    short, long_ = trades
+    assert (short.entry_price, short.exit_price) == pytest.approx((10.0, 9.0))
+    assert (long_.entry_price, long_.exit_price) == pytest.approx((100.0, 110.0))
+    # Both legs win; the fabricated pairing was the only loser.
+    assert all(t.pnl > 0 for t in trades)
+    assert metrics.win_rate(trades) == pytest.approx(1.0)
+
+
 def test_order_constructor_defaults_and_round_trips():
     o = ta.Order(symbol="BTC", side="buy", units=2.0, price=50.0)
     assert (o.symbol, o.side, o.units, o.price) == ("BTC", "buy", 2.0, 50.0)

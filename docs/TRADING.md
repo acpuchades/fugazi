@@ -261,10 +261,11 @@ pair against.
 
 ## 8. Trades — how fills become the numbers
 
-`metrics::reconstruct_trades` folds the blotter into closed trades: a fill with
-no open position opens one; a same-side fill scales in with a volume-weighted
-entry; an opposite-side fill reduces, closes, or reverses, banking P&L on the
-closed portion. Everything in `metrics.trades.*` derives from that fold, which is
+`metrics::reconstruct_trades` folds the blotter into closed trades, **one signed
+position per symbol**: a fill with no open leg in that symbol opens one; a
+same-side fill scales in with a volume-weighted entry; an opposite-side fill in
+the *same* symbol reduces, closes, or reverses, banking P&L on the closed
+portion. A fill never touches another instrument's leg. Everything in `metrics.trades.*` derives from that fold, which is
 why a run with open positions at the end under-reports trade count and win rate
 unless you `--flatten`.
 

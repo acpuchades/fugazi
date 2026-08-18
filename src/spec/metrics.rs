@@ -329,7 +329,7 @@ pub struct TradeSection {
 /// `average_seconds` / `min_seconds` / `max_seconds` twins of the `_bars`
 /// fields; typically derived via
 /// [`AssetClass::trading_seconds_per_bar`](crate::spec::calendar::AssetClass::trading_seconds_per_bar).
-pub fn from_report<Sym>(
+pub fn from_report<Sym: PartialEq>(
     report: &RunReport<Sym>,
     bars_per_year: Real,
     risk_free_rate: Real,
@@ -604,7 +604,7 @@ fn booked_within<'a, T>(
 /// is the equity marked on the bar before it, and only the fills booked inside
 /// it count — a position carried across a boundary shows up in the entering
 /// window as an unmatched closing fill, the usual windowed-analysis convention.
-pub fn windowed_from_report<Sym: Clone>(
+pub fn windowed_from_report<Sym: Clone + PartialEq>(
     report: &RunReport<Sym>,
     window: usize,
     bars_per_year: Real,
@@ -650,7 +650,7 @@ pub fn windowed_from_report<Sym: Clone>(
 /// grid pool). The non-overlapping [`windowed_from_report`] stays serial: on
 /// `optimize` it runs *inside* the grid's `par_iter`, so an inner par_iter
 /// would just fight for the same threads without wall-clock benefit.
-pub fn rolling_from_report<Sym: Clone + Send + Sync>(
+pub fn rolling_from_report<Sym: Clone + Send + Sync + PartialEq>(
     report: &RunReport<Sym>,
     window: usize,
     bars_per_year: Real,
