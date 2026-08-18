@@ -2049,6 +2049,32 @@ process are not independent when both allocate: **the faster one can make the
 slower one look good, and a change to either moves both.** Fork, or accept that
 the ratio is measuring the pair rather than either.
 
+### `aroon`'s third column, and why removing it is not the answer
+
+`Aroon` emits `{up, down, oscillator}`; `TA_AROON` emits two lines. The extra one
+is derived — `oscillator` is `up - down` — so dropping it looks like the obvious
+way to close the last multi-output gap. Measured, converged, with it removed:
+
+| | `py vs py` |
+|---|---:|
+| three columns (shipped) | 1.37× |
+| two columns (prototype) | **1.28×** |
+
+**−0.09×, and still over the 1.25× budget**, for a break to a documented output
+column. Not taken.
+
+The reason it is so small is worth keeping, because the estimate before
+measuring was −3.5 ns and the truth was −1.27. **The `(lines, n)` allocation had
+already captured most of it.** When each line was its own NumPy array, a third
+column cost a third of ~10.7 ns/sample of allocation; with one shared buffer the
+whole allocation is ~1.6 ns, so a third of it is half a nanosecond. The two
+changes are **substitutes, not complements** — and the second one was measured
+first, which is the only reason the trade looked good on paper.
+
+What remains in `aroon` is structural: one more output column than its TA-Lib
+counterpart, plus an engine at 1.05-1.15× of `TA_AROON`. Neither is a defect,
+and closing the ratio would mean changing what the indicator emits.
+
 ### Ruled out, so nobody re-tries them
 
 Five hypotheses for the multi-output boundary, each plausible, each measured,
