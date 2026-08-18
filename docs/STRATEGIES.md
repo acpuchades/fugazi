@@ -326,13 +326,41 @@ basket the book tracks the aggregate equity across all legs.
 | `!vol_target` | `{ target, window, bars_per_year }` | inverse realized vol: `target / annualized_stddev(log returns, window)` |
 | `!atr_risk` | `{ risk_frac, period, atr_multiple }` | fixed per-trade risk: `risk_frac · close / (atr_multiple · ATR(period))` |
 | `!drawdown_throttle` | `{ max_drawdown }` | de-lever linearly as the drawdown deepens; `0` at `max_drawdown`, clamped to `[0, 1]` |
-| `!equity_vol_target` | `{ target, window, bars_per_year }` | vol targeting on the strategy's **own** per-bar returns |
-| `!fractional_kelly` | `{ kelly_fraction, window }` | Kelly over the last `window` closed-trade returns, scaled by `kelly_fraction`, clamped `>= 0` |
+| `!equity_vol_target` | `{ target, window, bars_per_year, seed = 1.0 }` | vol targeting on the strategy's **own** per-bar returns |
+| `!fractional_kelly` | `{ kelly_fraction, window, seed = 1.0 }` | Kelly over the last `window` closed-trade returns, scaled by `kelly_fraction`, clamped `>= 0` |
 
 The book-anchored three (`!drawdown_throttle`, `!equity_vol_target`,
 `!fractional_kelly`) measure against the book's starting equity — pass
 `--cash` to match it to the wallet's starting funds, or their numbers are
 meaningless.
+
+#### `seed:` — how a self-referential sizer starts
+
+`!equity_vol_target` and `!fractional_kelly` size on something that only exists
+*because* the strategy already traded: a moving equity curve, and closed
+trades. Everywhere else in fugazi a source that isn't ready yet reads `None`
+and the strategy waits — but a sizing slot reading `None` **skips the trade**,
+so here waiting is a deadlock. No entry ⇒ no trade ⇒ no sample ⇒ no entry.
+Both recipes used to report zero fills on every shape with no warning.
+
+`seed:` is the size to use until the recipe can size itself — the base stake
+you would start at and then scale. It defaults to `1.0` (full size), and stops
+applying the moment the recipe has an answer of its own, including an answer of
+`0` ("no edge, stand down"). It is not a floor and not a clamp.
+
+```yaml
+sizing: !fractional_kelly
+  kelly_fraction: 0.5
+  window: 30
+  seed: 0.25      # quarter size for the first 30 trades, then Kelly's own number
+```
+
+`seed: 0.0` restores the never-bootstraps behaviour, if a strategy is composed
+so that something *else* opens the first trades.
+
+The other recipes need no seed: `!vol_target` and `!atr_risk` read prices (which
+arrive without trading), and `!drawdown_throttle` reads a drawdown that is
+well-defined at zero.
 
 ### Choosing a sizing method from the command line
 

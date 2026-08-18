@@ -249,6 +249,7 @@ pub fn equity_vol_target<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static
     target_annualized_vol: Real,
     window: usize,
     bars_per_year: Real,
+    seed: Real,
 ) -> impl Indicator<Input = Snapshot<Sym>, Output = Real> + Clone + 'static {
     assert!(
         target_annualized_vol > 0.0,
@@ -260,7 +261,14 @@ pub fn equity_vol_target<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static
     let returns = book.return_per_bar::<Snapshot<Sym>>();
     let vol = StdDev::new(returns, window);
     let annualized = vol.mul(Value::<Snapshot<Sym>>::new(bars_per_year.sqrt()));
-    Value::<Snapshot<Sym>>::new(target_annualized_vol).div(annualized)
+    // `div` reads `None` on a zero denominator, and a flat equity curve has
+    // exactly zero volatility — so an un-traded account sizes to `None`,
+    // blocks the entry that would move it, and never starts. `seed` is the
+    // size until the curve has some variance to measure.
+    Seeded {
+        source: Value::<Snapshot<Sym>>::new(target_annualized_vol).div(annualized),
+        seed,
+    }
 }
 
 /// **Fractional Kelly sizing** over the last `window` closed trades.
@@ -286,14 +294,21 @@ pub fn fractional_kelly<Sym: Clone + PartialEq + std::hash::Hash + Eq + 'static>
     book: &Book<Sym>,
     kelly_fraction: Real,
     window: usize,
+    seed: Real,
 ) -> impl Indicator<Input = Snapshot<Sym>, Output = Real> + Clone + 'static {
     assert!(kelly_fraction > 0.0, "kelly_fraction must be > 0");
     assert!(window >= 2, "window must be >= 2 (variance needs 2+ samples)");
-    FractionalKelly {
-        source: book.trade_return::<Snapshot<Sym>>(),
-        stats: WindowStats::new(window),
-        kelly_fraction,
-        value: None,
+    // Kelly needs `window` *closed trades*, and nothing closes until something
+    // opens — so without a seed the recipe holds every entry forever. `seed`
+    // is the size until the window has filled.
+    Seeded {
+        source: FractionalKelly {
+            source: book.trade_return::<Snapshot<Sym>>(),
+            stats: WindowStats::new(window),
+            kelly_fraction,
+            value: None,
+        },
+        seed,
     }
 }
 
@@ -342,6 +357,60 @@ impl<Sym: std::hash::Hash + Eq + Clone, In> Indicator for DrawdownThrottle<Sym, 
     }
 
     fn reset(&mut self) {}
+}
+
+/// Substitute `seed` while `source` reads `None`.
+///
+/// The two self-referential sizers need this to start at all. Each measures
+/// something that only exists *because* the strategy traded — Kelly wants
+/// closed trades, equity-vol wants a moving equity curve — while the crate's
+/// "sizing `None` ⇒ skip the trade" safe default means a `None` blocks every
+/// entry. Waiting is normally the right answer to unsettled data, but here the
+/// wait is permanent: no entry ⇒ no trade ⇒ no sample ⇒ no entry. Both recipes
+/// reported zero fills on every shape, with no warning.
+///
+/// So the seed is what the sizer is worth *before it knows better* — the base
+/// size a discretionary trader would start at and then scale. It applies only
+/// while the inner reads `None`; a settled `Some(0.0)` (a negative Kelly
+/// edge, say) is a real answer and passes through untouched, so the recipes
+/// can still size themselves out of the market once they have data.
+#[derive(Debug, Clone, SaveState)]
+struct Seeded<S> {
+    #[state(source)]
+    source: S,
+    seed: Real,
+}
+
+impl<S: Indicator<Output = Real>> Indicator for Seeded<S> {
+    type Input = S::Input;
+    type Output = Real;
+
+    fn update(&mut self, input: S::Input) -> Option<Real> {
+        Some(self.source.update(input).unwrap_or(self.seed))
+    }
+
+    fn value(&self) -> Option<Real> {
+        Some(self.source.value().unwrap_or(self.seed))
+    }
+
+    /// `0` — the seed *is* the warm-up answer, so there is nothing to wait
+    /// for. Reporting the inner's warm-up would reintroduce the deadlock
+    /// through the readiness gate instead of the sizing slot.
+    fn warm_up_bars(&self) -> usize {
+        0
+    }
+
+    fn reset(&mut self) {
+        self.source.reset();
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.save_state_fields()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) -> Result<(), String> {
+        self.load_state_fields(state)
+    }
 }
 
 /// A rolling Kelly-fraction sizer. Owns the source (a
@@ -644,7 +713,7 @@ mod tests {
         let target = 0.20;
         let bpy = 252.0;
         let window = 4;
-        let mut ind = equity_vol_target::<&'static str>(&book, target, window, bpy);
+        let mut ind = equity_vol_target::<&'static str>(&book, target, window, bpy, 1.0);
 
         // Seed a buy-and-hold at 100 units cost, then price oscillates:
         // 100 → 101 → 100 → 101 → 100 → 101, giving a return series of
@@ -662,21 +731,31 @@ mod tests {
         assert!(ind.value().unwrap() > 0.0);
     }
 
+    /// Reads the seed, not `None`, while the equity curve has no variance to
+    /// measure. `None` here used to be a deadlock rather than a safe default:
+    /// sizing `None` skips the trade, an un-traded account has exactly zero
+    /// equity volatility, and `div` reads `None` on a zero denominator — so
+    /// the recipe blocked the entry that would have given it something to
+    /// measure, on every shape, and reported zero fills with no warning.
     #[test]
-    fn equity_vol_target_is_none_until_window_fills() {
+    fn equity_vol_target_seeds_until_the_curve_moves() {
         let book: Book<&'static str> = Book::new(1_000.0);
-        let mut ind = equity_vol_target::<&'static str>(&book, 0.20, 10, 252.0);
+        let mut ind = equity_vol_target::<&'static str>(&book, 0.20, 10, 252.0, 0.25);
         for _ in 0..5 {
             book.update([("X", Candle::new(100.0, 100.0, 100.0, 100.0, 0.0))]);
             ind.update(Snapshot::of_atom(Candle::new(100.0, 100.0, 100.0, 100.0, 0.0).into()));
         }
-        assert_eq!(ind.value(), None, "vol target should be None during warm-up");
+        assert_eq!(
+            ind.value(),
+            Some(0.25),
+            "a flat equity curve must still size, or nothing ever trades"
+        );
     }
 
     #[test]
     fn fractional_kelly_produces_multiplier_after_enough_trades() {
         let book: Book<&'static str> = Book::new(1_000.0);
-        let mut ind = fractional_kelly::<&'static str>(&book, 0.5, 3);
+        let mut ind = fractional_kelly::<&'static str>(&book, 0.5, 3, 1.0);
         // Simulate three closed trades with a stream of trade returns.
         // Bars roll like: enter → update → close → update → enter → ...
         let trades = [
@@ -701,22 +780,57 @@ mod tests {
         assert!(k >= 0.0);
     }
 
+    /// Reads the seed, not `None`, before the window of closed trades fills.
+    /// Kelly needs closed trades and nothing closes until something opens, so
+    /// a `None` here is self-reinforcing: it blocked every entry forever and
+    /// the recipe could never produce a number on any shape.
     #[test]
-    fn fractional_kelly_is_none_until_window_of_trades_closes() {
+    fn fractional_kelly_seeds_until_the_window_of_trades_closes() {
         let book: Book<&'static str> = Book::new(1_000.0);
-        let mut ind = fractional_kelly::<&'static str>(&book, 0.5, 5);
+        let mut ind = fractional_kelly::<&'static str>(&book, 0.5, 5, 0.25);
         // No trades yet.
         for _ in 0..10 {
             book.update([("X", Candle::new(100.0, 100.0, 100.0, 100.0, 0.0))]);
             ind.update(Snapshot::of_atom(Candle::new(100.0, 100.0, 100.0, 100.0, 0.0).into()));
         }
-        assert_eq!(ind.value(), None);
+        assert_eq!(
+            ind.value(),
+            Some(0.25),
+            "no closed trades yet must still size, or none ever close"
+        );
+    }
+
+    /// The seed is a bootstrap, not a floor or a clamp: once the window has
+    /// filled the recipe answers for itself, and the seed is out of the
+    /// picture entirely. A seed that kept applying would cap (or floor) every
+    /// subsequent size and quietly replace the recipe with a constant.
+    #[test]
+    fn the_seed_stops_applying_once_the_recipe_can_answer() {
+        let book: Book<&'static str> = Book::new(1_000.0);
+        let seed = 0.25;
+        let mut ind = fractional_kelly::<&'static str>(&book, 0.5, 2, seed);
+        for exit in [110.0, 130.0] {
+            book.apply_fill(&"X", Side::Buy, 10.0, 100.0);
+            book.update([("X", Candle::new(100.0, 100.0, 100.0, 100.0, 0.0))]);
+            ind.update(Snapshot::of_atom(Candle::new(100.0, 100.0, 100.0, 100.0, 0.0).into()));
+            book.apply_fill(&"X", Side::Sell, 10.0, exit);
+            book.update([("X", Candle::new(exit, exit, exit, exit, 0.0))]);
+            ind.update(Snapshot::of_atom(Candle::new(exit, exit, exit, exit, 0.0).into()));
+            // Next bar drains the trade-close accessor.
+            book.update([("X", Candle::new(exit, exit, exit, exit, 0.0))]);
+            ind.update(Snapshot::of_atom(Candle::new(exit, exit, exit, exit, 0.0).into()));
+        }
+        let settled = ind.value().expect("two closed trades fill the window");
+        assert_ne!(
+            settled, seed,
+            "the recipe's own answer must survive the seed wrapper"
+        );
     }
 
     #[test]
     #[should_panic]
     fn fractional_kelly_rejects_window_below_two() {
         let book: Book<&'static str> = Book::new(1_000.0);
-        let _ = fractional_kelly::<&'static str>(&book, 0.5, 1);
+        let _ = fractional_kelly::<&'static str>(&book, 0.5, 1, 1.0);
     }
 }

@@ -168,6 +168,16 @@ pub(super) fn pick_any_root() -> PickAny<Symbol> {
     PickAny::<Symbol>::new()
 }
 
+/// Default `seed:` for the two self-referential sizers — full base size.
+///
+/// `1.0` rather than `0.0` because a zero seed *is* the deadlock: sizing `0`
+/// skips the trade, so the recipe never gets the closed trade (or the equity
+/// movement) it needs to produce a real number. Full size until it knows
+/// better is also what the recipes approximate once warm.
+fn default_sizing_seed() -> Real {
+    1.0
+}
+
 pub(super) fn default_source() -> Box<NodeSpec> {
     // The default price source for wrapped indicators (`!ema {}`, `!sma {}`, …)
     // is the bar's `close`. Corporate-action adjustment is a data-sourcing
@@ -1400,6 +1410,12 @@ pub enum NodeSpec {
         window: NonZeroUsize,
         /// Bars per year, for annualizing (252 stocks, 365 crypto).
         bars_per_year: Real,
+        /// Size used until the recipe has enough data to size itself.
+        /// Both recipes measure something that only exists because the
+        /// strategy traded, so without this they hold every entry forever
+        /// (`sizing: None` skips the trade) and never trade at all.
+        #[serde(default = "default_sizing_seed")]
+        seed: Real,
     },
     /// Fractional Kelly over the last `window` closed-trade returns —
     /// `kelly_fraction * mean / variance`, clamped to `>= 0`. Reads a book
@@ -1414,6 +1430,12 @@ pub enum NodeSpec {
         kelly_fraction: Real,
         /// Lookback window, in bars.
         window: NonZeroUsize,
+        /// Size used until the recipe has enough data to size itself.
+        /// Both recipes measure something that only exists because the
+        /// strategy traded, so without this they hold every entry forever
+        /// (`sizing: None` skips the trade) and never trade at all.
+        #[serde(default = "default_sizing_seed")]
+        seed: Real,
     },
 
     // --- trailing risk indicators (own an embedded single-asset strategy,
@@ -2531,6 +2553,8 @@ enum NodeSpecRaw {
         target: Real,
         window: NonZeroUsize,
         bars_per_year: Real,
+        #[serde(default = "default_sizing_seed")]
+        seed: Real,
     },
     /// Fractional Kelly over the last `window` closed-trade returns —
     /// `kelly_fraction * mean / variance`, clamped to `>= 0`. Reads a book
@@ -2541,6 +2565,8 @@ enum NodeSpecRaw {
         source: Option<Box<NodeSpec>>,
         kelly_fraction: Real,
         window: NonZeroUsize,
+        #[serde(default = "default_sizing_seed")]
+        seed: Real,
     },
 
     // --- trailing risk indicators (own an embedded single-asset strategy,
@@ -2975,8 +3001,8 @@ impl From<NodeSpecRaw> for NodeSpec {
             NodeSpecRaw::VolTarget { source, target, window, bars_per_year } => NodeSpec::VolTarget { source, target, window, bars_per_year },
             NodeSpecRaw::AtrRisk { source, risk_frac, period, atr_multiple } => NodeSpec::AtrRisk { source, risk_frac, period, atr_multiple },
             NodeSpecRaw::DrawdownThrottle { source, max_drawdown } => NodeSpec::DrawdownThrottle { source, max_drawdown },
-            NodeSpecRaw::EquityVolTarget { source, target, window, bars_per_year } => NodeSpec::EquityVolTarget { source, target, window, bars_per_year },
-            NodeSpecRaw::FractionalKelly { source, kelly_fraction, window } => NodeSpec::FractionalKelly { source, kelly_fraction, window },
+            NodeSpecRaw::EquityVolTarget { source, target, window, bars_per_year, seed } => NodeSpec::EquityVolTarget { source, target, window, bars_per_year, seed },
+            NodeSpecRaw::FractionalKelly { source, kelly_fraction, window, seed } => NodeSpec::FractionalKelly { source, kelly_fraction, window, seed },
             NodeSpecRaw::Sharpe { strategy, period, bars_per_year, risk_free_rate } => NodeSpec::Sharpe { strategy, period, bars_per_year, risk_free_rate },
             NodeSpecRaw::Sortino { strategy, period, bars_per_year, risk_free_rate } => NodeSpec::Sortino { strategy, period, bars_per_year, risk_free_rate },
             NodeSpecRaw::Volatility { strategy, period, bars_per_year } => NodeSpec::Volatility { strategy, period, bars_per_year },
@@ -4214,6 +4240,7 @@ impl NodeSpec {
                 target,
                 window,
                 bars_per_year,
+                seed,
             } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book)?;
                 any(
@@ -4222,6 +4249,7 @@ impl NodeSpec {
                         *target,
                         window.get(),
                         *bars_per_year,
+                        *seed,
                     ),
                 )
             }
@@ -4229,12 +4257,14 @@ impl NodeSpec {
                 source,
                 kelly_fraction,
                 window,
+                seed,
             } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book)?;
                 any(crate::indicators::sizing::fractional_kelly::<Symbol>(
                     b,
                     *kelly_fraction,
                     window.get(),
+                    *seed,
                 ))
             }
 
