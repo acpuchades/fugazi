@@ -2011,6 +2011,52 @@ saving can be nothing**, on the same path, for the same reason. Neither
 instrument is wrong; each answers a question the other cannot, and the mistake
 both times was to let one of them stand in for the verdict.
 
+### Ruled out, so nobody re-tries them
+
+Five hypotheses for the multi-output boundary, each plausible, each measured,
+each wrong. Recorded because four of them were mine and every one looked
+obvious enough to try again.
+
+| hypothesis | measured | verdict |
+|---|---|---|
+| the per-chunk `self.clone()` in `update_slice_flat` | removing it: `aroon` 369.74 → 367.75 instructions/sample | **2 instructions.** No. |
+| `Aroon`'s boundary is anomalous (208.8 vs `adx`'s 94.2) | its engine is data-dependent (1.43× between two input series; `adx` 1.02×) and the two instruments feed different series | **An instrument artifact.** No anomaly. |
+| instruction count is the constraint | −49 to −52 instructions/sample across three changes; converged wall-clock unmoved | **Memory-bound.** No. |
+| we read more input columns than TA-Lib (5 vs 2-3) | `atr` on a 5- vs 3-column frame: −0.09 ns/sample; `dmi` −2.13 | **Negligible.** No. |
+| materialising a 40-byte `Candle` per bar, which TA-Lib never does | same SMA, candle root vs 1-D root: 3.44 vs 2.48 ns/sample | **0.95 ns.** No. |
+
+**And the premise behind two of them was wrong.** The framing was "why do we pay
+an allocator toll TA-Lib avoids?" — TA-Lib does not avoid it. On its own kernels,
+same inputs and window, `talib.AROON` (2 output arrays) costs **7.84 ns/sample
+more** than `talib.AROONOSC` (1 output array), which matches the +7.20 that raw
+NumPy allocation costs going from one array to two. That toll is very nearly
+TA-Lib's *entire* Python wrapper cost.
+
+So the honest decomposition, on `macd`, where both emit three columns:
+
+| | TA-Lib | fugazi |
+|---|---:|---:|
+| engine | 12.47 | 1.51 |
+| total through Python | 21.66 | 22.68 |
+| **boundary** | **9.19** | **21.17** |
+| … output allocation (both pay) | ~8 | ~10 |
+| … **its own work** | **~1** | **~11** |
+
+TA-Lib's wrapper does about a nanosecond of work: one Cython call handing three
+raw pointers to a C kernel. Ours does eleven. Roughly 6 ns of that is per extra
+output column beyond the first and beyond allocation, and it is **not** any of
+the five rows above. It remains unattributed.
+
+The one measured, sizeable win left is on the allocation line, and it is an
+advantage TA-Lib structurally cannot take: `talib.MACD` returns a tuple of
+independent arrays, so it must allocate three; fugazi returns a *frame*, which
+can be one `(lines, n)` buffer with the columns as views. Measured, that is
+**10.70 → 1.61 ns/sample** for three columns. The cost is that the columns then
+share a base, so keeping one retains all of them — 4.6 MB where a caller expects
+1.5 MB, and `sys.getsizeof` reports 112 bytes while it does. That trade is a
+judgement call, not a measurement, which is why it is written here rather than
+taken.
+
 ### The iterator scatter — what it bought, and what it did not
 
 `feed_into_columns` scattered its flat chunk into the output columns with an

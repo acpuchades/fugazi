@@ -400,7 +400,14 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> BasketStrategy<
 
     /// Take the top `longs` and bottom `shorts` symbols by score.
     /// Installs the [`TopBottom`] [`Selection`] impl.
-    pub fn top_bottom(self, longs: usize, shorts: usize) -> Self {
+    ///
+    /// Needs `Sym: Ord` — a rank has to break ties on *some* total order
+    /// over symbols to be reproducible. [`threshold`](Self::threshold)
+    /// truncates nothing and so does not.
+    pub fn top_bottom(self, longs: usize, shorts: usize) -> Self
+    where
+        Sym: Ord,
+    {
         self.selection(TopBottom::new(longs, shorts))
     }
 
@@ -413,7 +420,10 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> BasketStrategy<
     /// Long the top `long_q` fraction, short the bottom `short_q` fraction
     /// of the score distribution. Installs the [`Quantile`] [`Selection`]
     /// impl.
-    pub fn quantile(self, long_q: Real, short_q: Real) -> Self {
+    pub fn quantile(self, long_q: Real, short_q: Real) -> Self
+    where
+        Sym: Ord,
+    {
         self.selection(Quantile::new(long_q, short_q))
     }
 

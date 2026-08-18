@@ -95,9 +95,21 @@ impl<Sym: Clone + Send + Sync> PositionRebalancer<Sym> for Proportional {
         positions: &[PositionInfo<Sym>],
         shortfall: Real,
     ) -> Vec<Units<Sym>> {
-        // Total invested value = Σ |units_i| * price_i. A shortfall of
-        // zero or a fully-cash contributor produces no orders.
-        let invested: Real = positions.iter().map(|p| p.units.abs() * p.price).sum();
+        // Total invested value = Σ |units_i| * price_i, summed in a
+        // **canonical order** rather than `positions`' order — which comes
+        // from a `HashMap` walk over the child's ledger and so varies with
+        // the hash seed. Float addition is not associative, so an unordered
+        // sum moves `invested` by an ULP between runs, and `f` carries that
+        // into every leg's target. The same fix `Book::update` and
+        // `PaperWallet::marked_equity` already apply to their sums.
+        //
+        // A shortfall of zero or a fully-cash contributor produces no orders.
+        let invested: Real = {
+            let mut values: Vec<Real> =
+                positions.iter().map(|p| p.units.abs() * p.price).collect();
+            values.sort_by(|a, b| a.total_cmp(b));
+            values.iter().sum()
+        };
         if invested <= 0.0 || positions.is_empty() {
             return Vec::new();
         }
@@ -132,7 +144,7 @@ impl<Sym: Clone + Send + Sync> PositionRebalancer<Sym> for Proportional {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LargestFirst;
 
-impl<Sym: Clone + Send + Sync> PositionRebalancer<Sym> for LargestFirst {
+impl<Sym: Clone + Send + Sync + Ord> PositionRebalancer<Sym> for LargestFirst {
     fn plan_scaledowns(
         &self,
         positions: &[PositionInfo<Sym>],
@@ -142,11 +154,18 @@ impl<Sym: Clone + Send + Sync> PositionRebalancer<Sym> for LargestFirst {
             return Vec::new();
         }
         let mut sorted: Vec<&PositionInfo<Sym>> = positions.iter().collect();
-        // Largest absolute value first. NaN sorts to the end.
+        // Largest absolute value first, ties broken on the symbol ascending.
+        // Two legs of equal value is ordinary (an equal-weighted child that
+        // has not drifted), and which one gets fully liquidated versus
+        // partially scaled is a *different portfolio* — so leaving the tie to
+        // `positions`' `HashMap` order would make the rebalance vary run to
+        // run. NaN sorts to the end.
         sorted.sort_by(|a, b| {
             let av = a.units.abs() * a.price;
             let bv = b.units.abs() * b.price;
-            bv.partial_cmp(&av).unwrap_or(std::cmp::Ordering::Equal)
+            bv.partial_cmp(&av)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.symbol.cmp(&b.symbol))
         });
         let mut remaining = shortfall;
         let mut out = Vec::new();

@@ -7,6 +7,7 @@
 //! with a raw score map) and a struct impl of [`Selection`] that composes: the
 //! `of:` slot re-roots a rule inside another's candidate set.
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
@@ -172,10 +173,41 @@ where
 }
 
 /// Keep the `count` symbols at one end of `pool` by score: the highest
-/// (`from_top`) or the lowest. Symbols missing from `scores` are dropped;
-/// NaN scores sort to the far end. Shared by [`TopBottom`] and
-/// [`Quantile`], each of which ranks the long and short sides separately.
-fn ranked_take<Sym: Clone + Hash + Eq>(
+/// (`from_top`) or the lowest. Symbols missing from `scores` are dropped.
+/// Shared by [`TopBottom`] and [`Quantile`], each of which ranks the long
+/// and short sides separately.
+///
+/// Ranks the *wanted* end to the front for either side, so both read off
+/// the same `take(count)`.
+///
+/// # Ties break on the symbol, ascending
+///
+/// Equal scores are not exotic — a score saturates (`stoch_rsi` at 0/100),
+/// peaks at a bound (`close / rolling_max` is exactly 1.0 at a new high),
+/// or is a constant sentinel in an [`IfElse`](crate::indicators::IfElse)
+/// branch — and a basket whose whole universe ties is an ordinary bar, not
+/// a pathological one.
+///
+/// The tie-break therefore has to be a *total order on symbols*: sorting
+/// on score alone leaves tied symbols in `pool`'s `HashSet` iteration
+/// order, which `RandomState` reseeds every process, so the same spec over
+/// the same bars picks a different basket — and returns a different equity
+/// curve — on every run. This is the one nondeterminism a backtester
+/// cannot absorb, since nothing downstream can tell a real edge from a
+/// lucky seed.
+///
+/// Ascending symbol is arbitrary but *stable and explicable*, which is the
+/// whole requirement. It costs an `Ord` bound that [`Threshold`] (a cutoff
+/// rule, so nothing to break) and [`Everything`] do not need. Sorting the
+/// values instead — the trick
+/// [`PaperWallet::marked_equity`](crate::wallet::PaperWallet) uses to
+/// canonicalize its sum without an `Ord` bound — cannot work here: the
+/// tied values are equal by definition, and it is the *symbols* that must
+/// be ordered.
+///
+/// NaN is unrankable, so it sorts last at whichever end is wanted, and is
+/// only ever selected when the pool is too small to avoid it.
+fn ranked_take<Sym: Clone + Hash + Eq + Ord>(
     pool: &HashSet<Sym>,
     scores: &HashMap<Sym, Real>,
     count: usize,
@@ -185,21 +217,26 @@ fn ranked_take<Sym: Clone + Hash + Eq>(
         .iter()
         .filter_map(|sym| scores.get(sym).map(|&v| (sym, v)))
         .collect();
-    // Descending by score; NaN sorts to the end (treated as Equal).
     ranked.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        let (x, y) = (a.1, b.1);
+        let by_score = match (x.is_nan(), y.is_nan()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            // Wanted end first: descending for the top, ascending for the
+            // bottom.
+            (false, false) => {
+                let (lhs, rhs) = if from_top { (y, x) } else { (x, y) };
+                lhs.partial_cmp(&rhs).unwrap_or(Ordering::Equal)
+            }
+        };
+        by_score.then_with(|| a.0.cmp(b.0))
     });
-    let n = count.min(ranked.len());
-    if from_top {
-        ranked.iter().take(n).map(|(sym, _)| (*sym).clone()).collect()
-    } else {
-        ranked
-            .iter()
-            .rev()
-            .take(n)
-            .map(|(sym, _)| (*sym).clone())
-            .collect()
-    }
+    ranked
+        .iter()
+        .take(count.min(ranked.len()))
+        .map(|(sym, _)| (*sym).clone())
+        .collect()
 }
 
 /// The ranked "long the highest `longs`, short the lowest `shorts`" rule,
@@ -242,7 +279,7 @@ impl<S> TopBottom<S> {
 
 impl<Sym, S> Selection<Sym> for TopBottom<S>
 where
-    Sym: Clone + Hash + Eq,
+    Sym: Clone + Hash + Eq + Ord,
     S: Selection<Sym>,
 {
     fn select(&self, scores: &HashMap<Sym, Real>) -> Sides<Sym> {
@@ -350,7 +387,7 @@ impl<S> Quantile<S> {
 
 impl<Sym, S> Selection<Sym> for Quantile<S>
 where
-    Sym: Clone + Hash + Eq,
+    Sym: Clone + Hash + Eq + Ord,
     S: Selection<Sym>,
 {
     fn select(&self, scores: &HashMap<Sym, Real>) -> Sides<Sym> {
@@ -369,13 +406,13 @@ where
 ///
 /// The two sides never overlap: when the pool is smaller than
 /// `longs + shorts`, longs are taken first (highest scores) and shorts
-/// drawn from what remains. Ties are broken by `HashMap` iteration order
-/// and are not stable — a caller who needs deterministic tie-breaking
-/// should score unique values (or add a tie-breaker term to the score).
+/// drawn from what remains. **Equal scores break on the symbol,
+/// ascending** — see [`ranked_take`] for why the tie-break has to be a
+/// total order on symbols rather than a property of the scores.
 ///
 /// Symbols not in the returned map are not selected. See [`TopBottom`]
 /// for the [`Selection`] trait wrapper.
-pub fn top_bottom<Sym: Clone + Hash + Eq>(
+pub fn top_bottom<Sym: Clone + Hash + Eq + Ord>(
     scores: &HashMap<Sym, Real>,
     longs: usize,
     shorts: usize,
@@ -410,7 +447,7 @@ pub fn threshold<Sym: Clone + Hash + Eq>(
 ///
 /// See [`Quantile`] for the [`Selection`] trait wrapper. Delegates the
 /// actual rank to [`top_bottom`] once the two counts are resolved.
-pub fn quantile<Sym: Clone + Hash + Eq>(
+pub fn quantile<Sym: Clone + Hash + Eq + Ord>(
     scores: &HashMap<Sym, Real>,
     long_q: Real,
     short_q: Real,
@@ -738,4 +775,102 @@ mod tests {
             "BTC not picked, so flat"
         );
     }
+
+    // -----------------------------------------------------------------
+    // Determinism. A tied score is an ordinary bar — a saturating
+    // oscillator, a ratio pinned at its bound, a constant `!if_else`
+    // branch — so the rank's tie-break is what makes a basket backtest
+    // reproducible at all. These run the rank many times *within* one
+    // process, which is the weaker half of the guarantee: `RandomState`
+    // reseeds per process, so `tests/determinism.rs` re-runs the binary
+    // to cover the half a unit test structurally cannot.
+    // -----------------------------------------------------------------
+
+    /// The reported repro: a whole universe scoring 0.0, top-3 of 6.
+    /// Pre-fix this returned up to five distinct baskets in eight runs.
+    #[test]
+    fn top_bottom_breaks_a_total_tie_on_the_symbol() {
+        let syms = [
+            "BTCUSDT", "ETHUSDT", "SOLUSDT", "ADAUSDT", "BNBUSDT", "LINKUSDT",
+        ];
+        let scores: HashMap<&str, Real> = syms.iter().map(|s| (*s, 0.0)).collect();
+        for _ in 0..64 {
+            let picked = top_bottom(&scores, 3, 0);
+            let mut got: Vec<&str> = picked.keys().copied().collect();
+            got.sort();
+            assert_eq!(got, ["ADAUSDT", "BNBUSDT", "BTCUSDT"]);
+        }
+    }
+
+    /// Both sides tie-break ascending, so the rule stays symmetric: the
+    /// short side is not the long side's tie order reversed.
+    #[test]
+    fn both_sides_break_ties_ascending() {
+        let scores: HashMap<&str, Real> =
+            [("A", 1.0), ("B", 1.0), ("C", 1.0), ("X", -1.0), ("Y", -1.0), ("Z", -1.0)]
+                .into_iter()
+                .collect();
+        for _ in 0..64 {
+            let picked = top_bottom(&scores, 2, 2);
+            assert_eq!(picked.get("A"), Some(&Side::Buy));
+            assert_eq!(picked.get("B"), Some(&Side::Buy));
+            assert_eq!(picked.get("C"), None);
+            assert_eq!(picked.get("X"), Some(&Side::Sell));
+            assert_eq!(picked.get("Y"), Some(&Side::Sell));
+            assert_eq!(picked.get("Z"), None);
+        }
+    }
+
+    /// `quantile` resolves counts then delegates to the same rank, so it
+    /// inherits the tie-break rather than needing its own.
+    #[test]
+    fn quantile_breaks_ties_on_the_symbol_too() {
+        let scores: HashMap<&str, Real> =
+            ["D", "C", "B", "A"].into_iter().map(|s| (s, 5.0)).collect();
+        for _ in 0..64 {
+            let picked = quantile(&scores, 0.5, 0.0);
+            let mut got: Vec<&str> = picked.keys().copied().collect();
+            got.sort();
+            assert_eq!(got, ["A", "B"]);
+        }
+    }
+
+    /// NaN is unrankable, so it sorts last at *either* end rather than
+    /// displacing a symbol that actually scored. The old comparator
+    /// mapped it to `Equal`, which left it wherever the hash landed it.
+    #[test]
+    fn nan_scores_are_ranked_last_at_both_ends() {
+        let scores: HashMap<&str, Real> = [
+            ("A", Real::NAN),
+            ("B", 3.0),
+            ("C", 1.0),
+            ("D", Real::NAN),
+        ]
+        .into_iter()
+        .collect();
+        for _ in 0..64 {
+            let picked = top_bottom(&scores, 1, 1);
+            assert_eq!(picked.get("B"), Some(&Side::Buy), "highest real score");
+            assert_eq!(picked.get("C"), Some(&Side::Sell), "lowest real score");
+            assert_eq!(picked.get("A"), None);
+            assert_eq!(picked.get("D"), None);
+        }
+    }
+
+    /// A pool with nothing but NaN still has to fill the requested count —
+    /// "last" is a rank, not an exclusion — and still deterministically.
+    #[test]
+    fn all_nan_still_ranks_deterministically() {
+        let scores: HashMap<&str, Real> = ["C", "B", "A"]
+            .into_iter()
+            .map(|s| (s, Real::NAN))
+            .collect();
+        for _ in 0..64 {
+            let picked = top_bottom(&scores, 2, 0);
+            let mut got: Vec<&str> = picked.keys().copied().collect();
+            got.sort();
+            assert_eq!(got, ["A", "B"]);
+        }
+    }
+
 }
