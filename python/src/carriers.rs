@@ -152,6 +152,32 @@ pub(crate) trait MultiOutput {
     /// exactly `names().len()` long.
     fn write_row(&self, out: &mut [Real]);
 
+    /// Write this value's lines into `out` `stride` apart — line `j` lands at
+    /// `out[j * stride]`.
+    ///
+    /// The batch path's destination is column-major, so its lines are not
+    /// adjacent and [`write_row`](Self::write_row) does not fit it. Without
+    /// this the fold staged a row contiguously and fanned it out, which wrote
+    /// **every value twice**: cache-simulated, `update_slice_flat` did 19.5
+    /// data writes per sample for a three-line value, six of them that second
+    /// hop, on a loop with no cache misses to hide behind. Writing to the
+    /// stride costs the same three stores and skips the staging.
+    ///
+    /// Defaulted so a new multi-output value only has to implement `write_row`;
+    /// the shipped values override it to store their fields directly.
+    fn write_strided(&self, out: &mut [Real], stride: usize)
+    where
+        Self: Sized,
+    {
+        let lines = Self::names().len();
+        let mut row = [0.0 as Real; MAX_LINES];
+        let row = &mut row[..lines];
+        self.write_row(row);
+        for (j, v) in row.iter().enumerate() {
+            out[j * stride] = *v;
+        }
+    }
+
     /// Replace `out`'s contents with this value's lines, in `names()` order.
     fn write_into(&self, out: &mut Vec<Real>)
     where
@@ -181,6 +207,11 @@ impl MultiOutput for MacdValue {
     fn write_row(&self, out: &mut [Real]) {
         out.copy_from_slice(&[self.macd, self.signal, self.histogram]);
     }
+    fn write_strided(&self, out: &mut [Real], stride: usize) {
+        out[0] = self.macd;
+        out[stride] = self.signal;
+        out[2 * stride] = self.histogram;
+    }
 }
 impl MultiOutput for BollingerValue {
     fn names() -> &'static [&'static str] {
@@ -188,6 +219,11 @@ impl MultiOutput for BollingerValue {
     }
     fn write_row(&self, out: &mut [Real]) {
         out.copy_from_slice(&[self.upper, self.middle, self.lower]);
+    }
+    fn write_strided(&self, out: &mut [Real], stride: usize) {
+        out[0] = self.upper;
+        out[stride] = self.middle;
+        out[2 * stride] = self.lower;
     }
 }
 impl MultiOutput for KeltnerValue {
@@ -197,6 +233,11 @@ impl MultiOutput for KeltnerValue {
     fn write_row(&self, out: &mut [Real]) {
         out.copy_from_slice(&[self.upper, self.middle, self.lower]);
     }
+    fn write_strided(&self, out: &mut [Real], stride: usize) {
+        out[0] = self.upper;
+        out[stride] = self.middle;
+        out[2 * stride] = self.lower;
+    }
 }
 impl MultiOutput for DonchianValue {
     fn names() -> &'static [&'static str] {
@@ -204,6 +245,11 @@ impl MultiOutput for DonchianValue {
     }
     fn write_row(&self, out: &mut [Real]) {
         out.copy_from_slice(&[self.upper, self.middle, self.lower]);
+    }
+    fn write_strided(&self, out: &mut [Real], stride: usize) {
+        out[0] = self.upper;
+        out[stride] = self.middle;
+        out[2 * stride] = self.lower;
     }
 }
 impl MultiOutput for AdxValue {
@@ -213,6 +259,11 @@ impl MultiOutput for AdxValue {
     fn write_row(&self, out: &mut [Real]) {
         out.copy_from_slice(&[self.plus_di, self.minus_di, self.adx]);
     }
+    fn write_strided(&self, out: &mut [Real], stride: usize) {
+        out[0] = self.plus_di;
+        out[stride] = self.minus_di;
+        out[2 * stride] = self.adx;
+    }
 }
 impl MultiOutput for DmiValue {
     fn names() -> &'static [&'static str] {
@@ -221,6 +272,10 @@ impl MultiOutput for DmiValue {
     fn write_row(&self, out: &mut [Real]) {
         out.copy_from_slice(&[self.plus_di, self.minus_di]);
     }
+    fn write_strided(&self, out: &mut [Real], stride: usize) {
+        out[0] = self.plus_di;
+        out[stride] = self.minus_di;
+    }
 }
 impl MultiOutput for AroonValue {
     fn names() -> &'static [&'static str] {
@@ -228,6 +283,11 @@ impl MultiOutput for AroonValue {
     }
     fn write_row(&self, out: &mut [Real]) {
         out.copy_from_slice(&[self.up, self.down, self.oscillator]);
+    }
+    fn write_strided(&self, out: &mut [Real], stride: usize) {
+        out[0] = self.up;
+        out[stride] = self.down;
+        out[2 * stride] = self.oscillator;
     }
 }
 
@@ -290,21 +350,17 @@ where
         // `local` is the whole point — see the trait.
         let mut local = self.clone();
         let rows = inputs.len();
-        // One row of lines at a time, on the stack. `write_row` wants the lines
-        // contiguous and the destination wants them `rows` apart, so the row
-        // lands here first and is fanned out. It is `MAX_LINES` doubles — the
-        // widest value struct in the crate emits three — so it stays in
-        // registers or L1, and the fan-out is a handful of stores into a buffer
-        // measured in kilobytes.
-        let mut row_buf = [0.0 as Real; MAX_LINES];
-        let row_buf = &mut row_buf[..lines];
         for (r, x) in inputs.iter().enumerate() {
+            // Straight to the strided destination: each value is written once,
+            // where staging a contiguous row and fanning it out wrote it twice.
+            let dst = &mut out[r..];
             match Indicator::update(&mut local, x.clone()) {
-                Some(o) => o.write_row(row_buf),
-                None => row_buf.fill(Real::NAN),
-            }
-            for (j, v) in row_buf.iter().enumerate() {
-                out[j * rows + r] = *v;
+                Some(o) => o.write_strided(dst, rows),
+                None => {
+                    for j in 0..lines {
+                        dst[j * rows] = Real::NAN;
+                    }
+                }
             }
         }
         *self = local;
