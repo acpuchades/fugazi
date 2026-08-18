@@ -1115,3 +1115,78 @@ def test_slot_demand_names_the_tags_that_can_fill_a_slot():
     }
     assert {"gt", "crosses_above", "and", "not"} <= fillable
     assert "sma" not in fillable and "atr" not in fillable
+
+
+# ---------------------------------------------------------------------------
+# reads: the series a document needs in its snapshots but never trades
+# ---------------------------------------------------------------------------
+
+
+def test_spec_reads_lists_cross_asset_picks():
+    """A regime gate on another asset shows up in `reads`, sorted and deduped."""
+    yaml = """
+    symbol: ETH
+    long:
+      enter: !gt
+        lhs: !close {source: !pick {symbol: BTC}}
+        rhs: !sma {period: 20, source: !close {source: !pick {symbol: BTC}}}
+      exit: !lt
+        lhs: !close {source: !pick {symbol: SOL}}
+        rhs: !value 100
+    """
+    assert ta.load_spec(yaml).reads == ["BTC", "SOL"]
+
+
+def test_spec_reads_is_empty_without_cross_asset_picks():
+    """The common document reads only what it trades, and says so with `[]`."""
+    spec = ta.load_spec("symbol: BTC\nlong:\n  enter: !value true\n")
+    assert spec.reads == []
+
+
+def test_spec_reads_ignores_the_documents_own_symbol_key():
+    """Only a `symbol:` *inside a* `!pick` counts — not the traded-asset key."""
+    spec = ta.load_spec(
+        "symbol: BTC\nlong:\n  enter: !gt {lhs: !close {source: !pick {symbol: BTC}}, "
+        "rhs: !value 0}\n"
+    )
+    # `BTC` is picked explicitly here, so it *is* a read — the point is that a
+    # document naming no `!pick` at all (above) reports nothing, rather than
+    # reporting its own `symbol:`.
+    assert spec.reads == ["BTC"]
+
+
+def test_spec_reads_are_what_a_cross_asset_run_needs_in_its_snapshots():
+    """The contract: supply every `reads` symbol and the gate resolves; omit one
+    and it silently never fires. `reads` is how a caller assembling snapshots by
+    hand checks which case they are in — the CLI makes the same check against
+    `--series` and refuses the run, but here the snapshots are the caller's."""
+    yaml = """
+    symbol: A
+    long:
+      enter: !gt {lhs: !close {source: !pick {symbol: B}}, rhs: !value 100}
+      exit: !never
+    sizing: !value 1.0
+    """
+    spec = ta.load_spec(yaml)
+    assert spec.reads == ["B"]
+
+    def bar(px):
+        return ta.Candle(px, px, px, px, 1000.0)
+
+    a_closes = [10.0, 11.0, 12.0, 13.0]
+    b_closes = [90.0, 99.0, 101.0, 102.0]
+
+    def snaps(include_b):
+        out = []
+        for i, (a, b) in enumerate(zip(a_closes, b_closes)):
+            s = ta.Snapshot()
+            s.push("A", ta.Atom(bar(a), time=i * 86_400_000))
+            if include_b:
+                s.push("B", ta.Atom(bar(b), time=i * 86_400_000))
+            out.append(s)
+        return out
+
+    with_b = spec.run(ta.PaperWallet(10_000.0), snaps(True))
+    without_b = spec.run(ta.PaperWallet(10_000.0), snaps(False))
+    assert len(with_b.fills) > 0
+    assert len(without_b.fills) == 0

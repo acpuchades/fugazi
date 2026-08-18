@@ -739,6 +739,33 @@ long:
 assert spec.meta["tags"] == ["momentum", "crypto"]
 ```
 
+`spec.reads` lists the symbols the document reads through an explicit
+`!pick { symbol: ... }` but never trades — a regime gate on another asset, a
+spread leg. Those symbols have to be **entries in the snapshots you pass**, or
+the expression resolves `None` on every bar and nothing ever fires: `Pick` reads
+`None` on a bar it does not match, which is right for a listing gap and
+indistinguishable, from the outside, from a series that was never supplied. The
+CLI makes this check against `--series` and refuses the run; here the snapshots
+are yours to construct, so the check is yours too:
+
+```python
+spec = ta.load_spec("""
+symbol: ETH
+long:
+  enter: !gt
+    lhs: !close { source: !pick { symbol: BTC } }
+    rhs: !sma { period: 200, source: !close { source: !pick { symbol: BTC } } }
+""")
+assert spec.reads == ["BTC"]
+
+bar = ta.Candle(100.0, 100.0, 100.0, 100.0, 1.0)
+snap = ta.Snapshot()
+snap.push("ETH", ta.Atom(bar, time=0))
+snap.push("BTC", ta.Atom(bar, time=0))   # ← without this, the gate never fires
+```
+
+`spec.reads` is `[]` for the ordinary document that only reads what it trades.
+
 Pass `windowed=N` to `.evaluate(...)` for the same windowed/rolling reductions
 `run -w N` writes to `metrics.csv`/`rolling.csv`: the returned dict gains
 `windowed` (non-overlapping N-bar spans — independent, for cross-window

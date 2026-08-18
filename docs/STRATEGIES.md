@@ -994,15 +994,66 @@ source on its own:
 Both fields are optional: `symbol` names the asset, `freq` disambiguates a
 cross-frequency snapshot (`!pick { symbol: BTC, freq: 1h }`, the same `N<unit>`
 alphabet `--frequency` uses). An empty `!pick {}` — and every leaf that omits
-`source:` — unpacks the *sole* entry of the snapshot, which is why single-asset
-documents never mention `!pick` at all. That implicit unpack **panics on a
-multi-symbol snapshot**, which is the tripwire for a single-asset spec
-accidentally pointed at multi-asset input; pairs and basket documents must root
-every leaf through an explicit `!pick`.
+`source:` — resolves to the context's **blessed series**: the document's own
+`symbol:` in a single-asset spec, the leg's symbol in a basket or multi-asset
+one. A pairs document has no blessed series — two legs, neither privileged — so
+it must root every leaf through an explicit `!pick`, and so must a portfolio's
+`weights:` and any `rebalance_on:`.
 
 Anything source-generic composes on top of a pick, not just the candle fields:
 `!atr { period: 14, source: !current { source: !pick { symbol: BTC } } }` is
 BTC's ATR, `!year { source: !pick { symbol: BTC } }` reads BTC's bar time.
+
+#### Reading an asset you do not trade
+
+**Any shape may `!pick` any symbol in the input**, including one it never
+trades. This is the regime-gate shape — trade one asset only while another is in
+a given state:
+
+```yaml
+# Trade ETH, but only while BTC is above its 200-day.
+symbol: ETHUSDT
+long:
+  enter: !gt
+    lhs: !close { source: !pick { symbol: BTCUSDT } }
+    rhs: !sma { period: 200, source: !close { source: !pick { symbol: BTCUSDT } } }
+  exit: !lt
+    lhs: !close { source: !pick { symbol: BTCUSDT } }
+    rhs: !sma { period: 200, source: !close { source: !pick { symbol: BTCUSDT } } }
+```
+
+```sh
+fugazi run @gate.yml --series @eth.csv --series @btc.csv -o out/ --crypto -f 1d
+```
+
+The named series has to be **passed with `--series`** — reading it is not
+fetching it. `fugazi check strategy` lists what a document reads, on a `reads`
+line beside `status`, so you can see what a run will need before you have the
+data:
+
+```
+result
+  status  ok · symbol ETHUSDT
+  reads   BTCUSDT (pass with --series)
+```
+
+A `!pick` naming a series the input does not carry is a **hard error**, not an
+empty read. `Pick` resolves `None` on a bar it does not match — right for a
+listing gap, and exactly wrong for a symbol that was never passed, where every
+comparison downstream stays `None`, nothing ever fires, and the run completes
+with zero fills and nothing said.
+
+Two consequences worth being explicit about:
+
+- **A read does not change what is traded.** `symbol:` still names the traded
+  asset, and it is still the blessed series every `source:`-omitted leaf reads.
+  The same holds for a pairs document's two legs and a portfolio's children.
+- **A read does not change the timeline.** The read series is *left-joined* onto
+  the bars the document trades, so a bar the traded asset never had is never
+  manufactured; on a bar where the read series is absent, its `!pick` reads
+  `None` like any other unmatched query. Only the symbols a document actually
+  names are carried, so pointing a one-symbol document at a twenty-symbol CSV
+  costs nothing.
 
 ### Constant
 

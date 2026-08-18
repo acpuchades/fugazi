@@ -970,6 +970,17 @@ Required columns after the join: `symbol`, `time`, `open`, `high`, `low`,
 `close`. `volume` is optional (defaults to 0). Extra columns ride along
 (you can join fundamentals or a per-symbol regime tag as another series).
 
+**Which symbols a run actually carries.** Not necessarily all of them. A run
+carries the symbols its document *trades* — `symbol:` for a single-asset
+document, both legs for a pair, the children's declared symbols for a portfolio,
+every symbol in the input for `basket:` and `multi:`, whose universe is the
+frame by definition — plus any symbol the document *reads* through an explicit
+`!pick { symbol: … }` (see
+[Reading an asset you do not trade](STRATEGIES.md#reading-an-asset-you-do-not-trade)).
+Everything else in the frame is ignored, so pointing a one-symbol document at a
+twenty-symbol CSV costs nothing. A `!pick` naming a symbol the input does not
+carry is an error, not an empty read.
+
 **Examples**
 
 ```sh

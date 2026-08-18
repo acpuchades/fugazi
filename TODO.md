@@ -218,6 +218,13 @@ half first would ship the ambiguity as a feature.
 Revisit when there is a concrete strategy shape asking for it; the answer starts
 with what a cross-cadence leaf reads between bars, not with the tag.
 
+**Not to be confused with cross-*symbol* `!pick`, which does work under `run`.**
+A document of any shape may read a symbol it does not trade — the runners carry
+`traded ∪ !pick`-named and refuse a name the input lacks (see `spec::reads`).
+That case has none of the ambiguity above: two symbols on one cadence share a
+bar grid, so "absent" means absent and there is nothing to forward-fill. The
+`freq` half is still open for exactly the reason stated.
+
 ## Repo hygiene
 
 ### `python/uv.lock` does not lock the `test` extra

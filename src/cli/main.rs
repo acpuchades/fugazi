@@ -735,6 +735,11 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     // built here without inventing columns and failing on every real one. Note
     // it now, while the tree is still in hand.
     let reads_overlay = mentions_tag(&value, "get");
+    // Which series the document reads through an explicit `!pick`. `check` has
+    // no data, so it cannot say whether they are *present* — but it can say
+    // they are *required*, which is the half that turns "why did this never
+    // trade?" into "I forgot to pass BTCUSDT". See `spec::reads`.
+    let picked = spec::reads::picked_symbols(&value);
 
     // Deserialize under the hole-aware guard. `from_json_value` moves the tree
     // into the `serde_norway::Value` shape the bridges buffer through.
@@ -858,16 +863,37 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             Some(types) => format!("{params_label}\n  {types}"),
             None => params_label,
         };
-        print_check_report(description, &label, &params_label, &detail);
+        // Minus whatever this shape already trades: a pairs document naming its
+        // own two legs reads nothing extra, and a basket's `!pick` targets come
+        // out of the traded universe by construction.
+        let traded = parsed.universe(&[]);
+        let reads: Vec<&str> = picked
+            .iter()
+            .map(String::as_str)
+            .filter(|s| !traded.iter().any(|t| t.as_ref() == *s))
+            .collect();
+        print_check_report(description, &label, &params_label, &detail, &reads);
     }
     Ok(())
 }
 
 /// One-shape `check` output: the standard header, an `inputs` block with the
-/// spec label and any resolved params, then a `result` block with `ok` and
-/// the per-kind summary detail (`symbol BTC`, `pair … / …`, `N child …`).
+/// spec label and any resolved params, then a `result` block with `ok`, the
+/// per-kind summary detail (`symbol BTC`, `pair … / …`, `N child …`), and — when
+/// the document has any — the series it *reads* but does not trade.
 /// Mirrors the section shape of `run` / `optimize`.
-fn print_check_report(description: &str, input_label: &str, params: &str, detail: &str) {
+///
+/// The `reads` line is the one thing `check` can say about a cross-asset
+/// document that nothing else does at this stage: `run` errors when one of
+/// these is missing from `--series`, but only once there is data to compare
+/// against, and `check` is where a document is looked at on its own.
+fn print_check_report(
+    description: &str,
+    input_label: &str,
+    params: &str,
+    detail: &str,
+    reads: &[&str],
+) {
     style::print_header("check", description);
     style::print_section("inputs");
     style::print_field("spec", input_label, 8);
@@ -876,6 +902,13 @@ fn print_check_report(description: &str, input_label: &str, params: &str, detail
     style::print_section("result");
     let ok = style::green("ok");
     style::print_field("status", &format!("{ok} · {detail}"), 8);
+    if !reads.is_empty() {
+        style::print_field(
+            "reads",
+            &format!("{} (pass with --series)", reads.join(", ")),
+            8,
+        );
+    }
 }
 
 fn check_costs(args: CheckCostsArgs) -> Result<()> {
@@ -1029,6 +1062,18 @@ fn run(args: RunArgs) -> Result<()> {
             metrics: args.mc_metrics.clone(),
         }
     });
+    // Which series the document *reads* — every `!pick { symbol: … }` in the
+    // tree. Collected here, once, from the same loaded document the shape
+    // loaders below parse, so every runner gets it whatever shape this turns
+    // out to be. See `spec::reads` for why it walks the document rather than
+    // the typed spec.
+    let reads = spec::reads::picked_symbols_of(
+        &text,
+        &param_table,
+        &args.strategy.base_dir(),
+        &strat_label,
+    )
+    .with_context(|| parse_error_hint(&args.strategy))?;
     let opts = run::RunOptions {
         cash: args.cash,
         out_dir: &args.output_dir,
@@ -1048,6 +1093,7 @@ fn run(args: RunArgs) -> Result<()> {
         montecarlo: montecarlo.as_ref(),
         range: args.range.resolve()?,
         from_label: args.range.from.as_deref(),
+        reads: &reads,
     };
     let base = args.strategy.base_dir();
     match args.strategy.kind {

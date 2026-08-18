@@ -176,6 +176,11 @@ arms never mention it — they fan out through the `atom_src` / `atom_src_any` c
 Consequences: **`!arg SYM` is optional, not required** in basket/multi templates (`score:
 !rsi { period: 14 }` and the fully-spelled `!pick { symbol: !arg SYM }` build the same
 chain; the explicit form is the only way to read a *different* symbol per leg).
+**Blessing scopes the *default*, never the reachable set** — any shape may `!pick` any
+symbol in the input, traded or not (a regime gate on BTC inside an ETH document). The
+runners carry `traded ∪ !pick`-named and nothing else; a named symbol absent from the
+input is a hard error, since `Pick::matching` would otherwise read `None` on every bar
+and the run would report a plausible zero-fill backtest. See `spec::reads`.
 **`pick_any_root` ignores the root** (calendar leaves read only `atom.time`, shared by
 every entry). **`Pick::rooted` falls back through `lone_atom`, not `sole_atom`** — in a
 rooted context a 2+ snapshot is ordinary (the blessed leg is absent this bar), so it reads
@@ -346,6 +351,7 @@ If you're about to write a private helper whose name looks like something here, 
 | Build a spec, reporting a bad document instead of aborting | `NodeSpec::try_build` and each shape's `*Spec::try_build` — `Err(String)` with the `!tag > ` breadcrumb. `spec::backtest::build_error(e)` renders as `anyhow`; `spec::backtest::validated(...)` is the discard-value form | `src/spec/expr.rs`, `src/spec/backtest.rs` |
 | Overlay build that errors instead of aborting | `spec::overlay::build_overlay(spec, schema, root) -> Result<..>` | `src/spec/overlay.rs` |
 | CSV delimiter probe | `csv_source::detect_delimiter(path)` | `src/cli/csv_source.rs` |
+| Which series a document **reads but does not trade** (every `!pick { symbol }`) | `spec::reads::{picked_symbols, picked_symbols_of}` — a structural walk of the *loaded document*, not of `NodeSpec`: `!pick` is the only tag naming an asset, so a new tag can't silently fall out of it. Joined in by `cli::run::{read_only_series, attach_read_series}` (**left** join — a read series never adds bars); threaded as `RunOptions::reads`, probed per subgrid in `optimize::probe_reads` | `src/spec/reads.rs`, `src/cli/{run,optimize}.rs` |
 | Shell glob (case-insensitive, whole-string) | `glob::Pattern::from_str(pat)` + `.matches(text)` | `src/cli/glob.rs` |
 | Scope symbol `\:` escape (`BTC/USDT:USDT` vs. the `SYMBOL[FREQ]:` prefix) | `calendar::{unescape_symbol, escape_symbol, is_escaped, looks_like_body}` — only **scope** grammars need it; `get` spec heads take the symbol verbatim | `src/spec/calendar.rs`, `src/cli/overlay.rs`, `src/spec/costs/spec.rs` |
 | Load `@file` or inline; YAML → JSON value | `input::Source::{File, Inline}` + `.read()`; `input::parse_value(text)` | `src/spec/input.rs` |
