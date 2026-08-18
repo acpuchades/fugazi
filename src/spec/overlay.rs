@@ -53,7 +53,7 @@ use crate::snapshot::Selector;
 use crate::time::Frequency;
 use crate::types::Snapshot;
 
-use super::expr::NodeSpec;
+use super::expr::{NodeSpec, Root};
 use crate::types::Symbol;
 
 /// One named overlay column: its output column name, its source expression,
@@ -78,7 +78,7 @@ impl OverlayColumn {
     pub fn build(
         &self,
         schema: &Arc<Schema>,
-        root: Option<&Selector<Symbol>>,
+        root: Root<'_>,
     ) -> Result<Box<dyn PayloadIndicator>> {
         build_overlay(&self.spec, schema, root)
             .map_err(|e| anyhow!("overlay {:?} in {}: {e}", self.name, self.origin))
@@ -97,7 +97,7 @@ impl OverlayColumn {
 pub fn build_overlay(
     spec: &NodeSpec,
     schema: &Arc<Schema>,
-    root: Option<&Selector<Symbol>>,
+    root: Root<'_>,
 ) -> Result<Box<dyn PayloadIndicator>> {
     // Overlay columns are the one consumer that still rides the payload
     // vocabulary: `drive` asks each column what *input* it wants (a whole
@@ -206,7 +206,7 @@ pub fn prepare(
     existing: &Arc<Schema>,
     columns: &[OverlayColumn],
 ) -> Result<(Arc<Schema>, Vec<PreparedColumn>)> {
-    prepare_for(existing, columns, None)
+    prepare_for(existing, columns, Root::sole())
 }
 
 /// [`prepare`] for one blessed series: every `source:`-omitted leaf in every
@@ -216,7 +216,7 @@ pub fn prepare(
 pub fn prepare_for(
     existing: &Arc<Schema>,
     columns: &[OverlayColumn],
-    root: Option<&Selector<Symbol>>,
+    root: Root<'_>,
 ) -> Result<(Arc<Schema>, Vec<PreparedColumn>)> {
     let named: Vec<(String, Box<dyn PayloadIndicator>)> = columns
         .iter()
@@ -315,7 +315,7 @@ pub fn compute_snapshots(
 ) -> Result<(Arc<Schema>, Vec<Snapshot<Symbol>>)> {
     // The output schema doesn't depend on which series drives a column — every
     // instantiation has the same shape — so resolve it once, unrooted.
-    let (out_schema, _) = prepare_for(existing, columns, None)?;
+    let (out_schema, _) = prepare_for(existing, columns, Root::sole())?;
     let existing_len = existing.len();
 
     type Key = (Option<Symbol>, Option<Frequency>);
@@ -334,7 +334,7 @@ pub fn compute_snapshots(
                 // An untagged entry has nothing to be rooted on; it falls back
                 // to the sole-atom unpack, same as the single-series path.
                 let root = (!root.is_empty()).then_some(root);
-                let (_, prepared) = prepare_for(existing, columns, root.as_ref())?;
+                let (_, prepared) = prepare_for(existing, columns, Root::or_sole(root.as_ref()))?;
                 sets.insert(key.clone(), prepared);
             }
             let prepared = sets.get_mut(&key).expect("just inserted");

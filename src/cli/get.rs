@@ -55,6 +55,7 @@ use fugazi::sources::{
 use serde_json::Value as Json;
 
 use crate::dyn_indicator::{PayloadIndicator, PayloadValue};
+use crate::spec::Root;
 use crate::csv_source::{CsvBar, CsvSource};
 use crate::input::Source as InputSource;
 use crate::overlap::{self, Overlap};
@@ -1075,7 +1076,7 @@ fn apply_overlays(
         let mut instances: Vec<Option<Box<dyn PayloadIndicator>>> = Vec::with_capacity(active.len());
         for slot in &active {
             instances.push(match slot {
-                Some(o) => Some(o.build(&schema, Some(&root))?),
+                Some(o) => Some(o.build(&schema, Root::blessed(&root))?),
                 None => None,
             });
         }

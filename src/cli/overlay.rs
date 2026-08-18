@@ -47,7 +47,7 @@ use crate::dyn_indicator::PayloadIndicator;
 use crate::calendar::{is_escaped, looks_like_body, parse_interval, parse_scope_parts};
 use crate::input::{self, Source};
 use crate::params;
-use crate::spec::NodeSpec;
+use crate::spec::{NodeSpec, Root};
 
 /// Which `(symbol, interval)` fetches an overlay applies to. `None` on either
 /// side means "any" — no scope filter at all is `OverlayScope::default()`.
@@ -104,7 +104,7 @@ impl Overlay {
     pub fn build(
         &self,
         schema: &std::sync::Arc<Schema>,
-        root: Option<&Selector<Symbol>>,
+        root: Root<'_>,
     ) -> Result<Box<dyn PayloadIndicator>> {
         // Overlays don't run inside a strategy, so there's no live Position
         // or Book — using them here (`entry`, `peak`, book-anchored sizing)
@@ -203,7 +203,7 @@ pub fn stable_bars_for(
         .into_iter()
         .flatten()
     {
-        max = max.max(o.build(schema, Some(&root))?.stable_bars());
+        max = max.max(o.build(schema, Root::blessed(&root))?.stable_bars());
     }
     Ok(max)
 }
