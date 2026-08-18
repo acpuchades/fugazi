@@ -266,6 +266,41 @@ fn main() {
         black_box(nums.len());
     })));
 
+    // Everything `PyMulti::feed` does on the Rust side of the boundary, with no
+    // Python at all: the chunked fold into a flat row-major buffer, then the
+    // scatter into one output column per line. If this lands near the measured
+    // `feed()` cost the problem is ours; if it lands far below, the rest is
+    // pyo3/NumPy and has to be chased there. The scalar twin is
+    // `feed_rust_side` above, and the pair is the whole point — a fixed ~25
+    // ns/sample appears between a 1-column and a 2-column `feed`, and this says
+    // which side of the boundary it is on.
+    out.push(("feed_multi_rust_side", bench(n, || {
+        const LINES: usize = 3;
+        const CHUNK: usize = 128;
+        let mut ind = Aroon::new(Identity::<fugazi::market::Candle>::new(), AROON_P);
+        let mut cols: Vec<Vec<Real>> = (0..LINES).map(|_| vec![0.0; n]).collect();
+        let mut flat = vec![0.0 as Real; CHUNK * LINES];
+        let mut row = 0usize;
+        for chunk in candles.chunks(CHUNK) {
+            let flat = &mut flat[..chunk.len() * LINES];
+            for (r, c) in chunk.iter().enumerate() {
+                let dst = &mut flat[r * LINES..(r + 1) * LINES];
+                match ind.update(*c) {
+                    Some(v) => dst.copy_from_slice(&[v.up, v.down, v.oscillator]),
+                    None => dst.fill(Real::NAN),
+                }
+            }
+            for (j, col) in cols.iter_mut().enumerate() {
+                let dst = &mut col[row..row + chunk.len()];
+                for (r, cell) in dst.iter_mut().enumerate() {
+                    *cell = flat[r * LINES + j];
+                }
+            }
+            row += chunk.len();
+        }
+        black_box(cols.len());
+    })));
+
     let med = |xs: &[f64]| xs[xs.len() / 2];
     if json {
         for (name, xs) in &out {

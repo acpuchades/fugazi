@@ -59,9 +59,16 @@ SERIES = [
 # produces every line, so its TA-Lib counterpart is the one call that fills every
 # output array (and, for `dmi`/`adx`, the two and three calls TA-Lib needs
 # because it has no combined entry point). See docs/PERFORMANCE.md, Phase 10.
+# `stddev` and `bbands` sit in their own group at the bottom rather than among
+# their peers. They are the only two rows fugazi loses on, they lose for the same
+# single reason — the centred variance pass, chosen over TA-Lib's cancelling
+# O(1) shortcut — and they are the two longest bars. Left in place they read as
+# the punchline of each group; collected at the end they read as what they are,
+# one decision priced twice.
 GROUPS = [
-    ("single output", ["sma", "ema", "rsi", "atr", "stddev"]),
-    ("multi-output — every line, one pass", ["macd", "bbands", "aroon", "dmi", "adx"]),
+    ("single output", ["sma", "ema", "rsi", "atr"]),
+    ("multi-output — every line, one pass", ["macd", "dmi", "adx", "aroon"]),
+    ("centred variance — accuracy bought with speed", ["stddev", "bbands"]),
 ]
 INDICATORS = [i for _, group in GROUPS for i in group]
 

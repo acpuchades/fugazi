@@ -170,6 +170,14 @@ short form, in the order you will hit them.
   indicator nothing compares stays slow quietly. Match the *unit of work*: a
   multi-output indicator's `update` produces every line, so it goes against the
   one TA-Lib call that fills every output array.
+* **Through the bindings, the budget is 1.25× `talib`** — the `py vs py` column,
+  since both sides cross a Python boundary. Over that is a bug in the binding,
+  not a property of the incremental design. One standing exemption: anything
+  whose cost is dominated by a `WindowStats` *dispersion* read, because the Rust
+  engine alone is already 3.35× there and the gap is the centred variance, not
+  the boundary. See *The Python binding budget* in
+  [docs/PERFORMANCE.md](PERFORMANCE.md) — and add a written exemption there
+  rather than letting a row sit over budget unexplained.
 
 **Multi-output indicators** (`Output` is a value struct) carry three extras:
 `component_accessors!` for the per-line `Component` accessors (step 1),

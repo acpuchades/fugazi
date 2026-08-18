@@ -1616,6 +1616,94 @@ the right default, and is now measured rather than assumed. Both workloads stay 
 `benches/three_tier.rs` so the crossover can be re-checked if the cell ever stops
 being a mutex.
 
+## The Python binding budget — 1.25×, with one exemption
+
+**A fugazi indicator through the Python bindings must cost no more than 1.25×
+the same indicator through `talib`, TA-Lib's own bindings.** That is the `py vs
+py` column of the four-tier table: both sides cross a Python boundary, so it is
+the comparison a Python user actually faces, and it is the only one a binding
+change can move. `rs vs C` is a statement about the engine and is not covered by
+this budget.
+
+1.25× rather than parity because TA-Lib is vectorised and fugazi is incremental,
+and the incremental design is bought deliberately — it is what lets the same code
+drive a live stream. A quarter is what that is worth. Anything past it is a bug
+in the binding, not a property of the design.
+
+### Standing against the budget
+
+From the converged run above:
+
+| | `py vs py` | |
+|---|---:|---|
+| `atr` | 0.47× | passes — the frame is read in place and folded once |
+| `ema` | 0.97× | passes |
+| `macd` | 1.08× | passes |
+| `rsi` | 1.14× | passes |
+| `sma` | 1.55× | **over** |
+| `dmi` | 1.87× | **over** |
+| `adx` | 1.99× | **over** |
+| `aroon` | 2.47× | **over** (and see the caveat on this figure above) |
+| `stddev` | 3.72× | **exempt** |
+| `bbands` | 3.89× | **exempt** |
+
+### The exemption, and why it is one
+
+`stddev` and everything whose cost is dominated by a `WindowStats` **dispersion**
+read — `bbands` today, and `ZScore`, the trailing `Sharpe`/`Volatility`
+indicators, `skewness`/`kurtosis` and the Kelly sizer if they are ever added to
+the comparison — are exempt.
+
+The exemption is about the **algorithm, not the binding**, and that is the whole
+of its justification: the Rust engine alone is already 3.35× native TA-Lib on
+`stddev`, before a single line of pyo3 runs. No amount of binding work reaches
+1.25× from there, because the gap is the centred variance pass being chosen over
+TA-Lib's cancelling O(1) shortcut — a correctness decision this document
+re-derives from numbers in two places, most bluntly the 896-of-4981 windows where
+`talib.STDDEV` returns exactly `0.0` on the benchmark's own price series.
+
+So the exemption is not "this one is allowed to be slow". It is "this one's cost
+is not the binding's to answer for". **If the variance algorithm is ever
+revisited, the exemption goes with it** — the budget then applies to whatever the
+new cost is.
+
+An exemption is written here rather than assumed, for the same reason
+`tests/metrics_coverage.rs` demands a written exemption for a metric with no
+reference value: a ratio that is over budget and a ratio that is over budget *on
+purpose* look identical in the table, and the difference is the entire point.
+
+### What is known about the four that are over
+
+Measured, not yet fixed — the reason this is a section and not a changelog entry:
+
+* **The Rust side of the multi-output `feed` is not where it goes.** A probe that
+  does exactly what `feed_into_columns` does — chunked fold into a flat
+  row-major buffer, then scatter into one full-length output column per line —
+  costs **1.8 ns/sample above the raw indicator, in the same binary**. The fold
+  and the scatter are effectively free.
+* **A fixed ~25 ns/sample appears between a one-column `feed` and a two-column
+  one**, and it does not scale with column count after that (1 → 2.3 ns of
+  binding overhead, 2 → ~28, 3 → ~32). It is a property of taking the multi path
+  at all.
+* **About 8 ns of that is NumPy allocation**, and it is a threshold rather than a
+  slope: allocating and first-touching one 1.6 MB array costs 0.5 ns/sample,
+  two cost 8.3, three cost 8.1. `talib` pays a version of the same toll, which is
+  why its own wrapper overhead on `AROON` is ~10 ns.
+* **The remaining ~17 ns is unlocated.** Candidates, in the order they are worth
+  checking: the multi path parses its input frame **twice** (`row_count`, then
+  again in the match arm) where the scalar path parses once; it walks its output
+  by **index** where the scalar path walks a `cells.next()` iterator that cannot
+  run dry; and it acquires a `PyBuffer` per output column. None of these is
+  confirmed, and this document has a standing record of what happens when a cost
+  here is reasoned about rather than measured — see *How to measure without
+  fooling yourself*.
+
+`sma` is a different shape of problem: at 2.17 ns/sample against `talib`'s 1.40
+the whole budget is 1.75 ns and the engine alone is 1.35, so the binding has
+0.4 ns — about a nanosecond and a half of headroom in total. It is the one row
+where the boundary cost is already near the floor and the target may simply be
+unreachable without a batch entry point.
+
 ## The tricks in the codebase, and why they are there
 
 Each of these looks like an odd way to write the code until you know what it is
