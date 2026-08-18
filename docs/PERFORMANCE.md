@@ -58,6 +58,7 @@ instrument, at the cost of a ~50× slowdown.
 | `multi_asset` | Per-*symbol-bar* cost as the universe grows 2 → 64. Flat means linear; climbing means an O(N²) lookup. |
 | `wallet` | `PaperWallet::update` / `equity` / a submit→fill round-trip, swept over held-position count. |
 | `metrics` | `RunReport` → `Metrics`, which `optimize` pays once per grid row per fold. |
+| `metrics_variants` | What that reduction *could* cost — five cumulative candidates (fused equity walk, fused return moments, `select_nth_unstable` quantiles, fused trade pass) against the shipped one, each asserted bit-identical before it is timed. Prototypes, like `breaking`. |
 | `footprint` | Allocation count, bytes, and peak RSS. Not criterion — it installs a counting global allocator, which inside a criterion target would also tally criterion's own bookkeeping. |
 | `icount` | A fixed workload run exactly once, for callgrind. Answers "does this change do more work?" immune to contention and to code layout. Keep `sma_rust`/`macd_rust` in every run even when a change cannot touch them: a control reading 0.00% is what makes a −31% elsewhere in the same table believable. |
 | `breaking` | Prototypes for the proposed breaking changes, so each is a measured number rather than an argument. Currently `update(&Input)` and dropping `Indicator::value()`. |

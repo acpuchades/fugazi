@@ -40,7 +40,7 @@
 //! the reimplementation rather than the optimisation.
 //!
 //! **Every variant is checked for bit-identity against `v0_shipped` before any
-//! timing runs** (`check_equivalence`, called from `main`). Fusing a pass does
+//! timing runs** (`check_equivalence`, from the first bench group). Fusing a pass does
 //! not perturb floating-point results here — each accumulator sees the same
 //! addends in the same order — so *exact* equality is the assertion, not a
 //! tolerance. The one deliberate exception is `select_quantiles` with an
@@ -163,6 +163,16 @@ fn safe_div(num: Real, denom: Real) -> Option<Real> {
         None
     }
 }
+
+/// The seed `impl Sum for f64` folds from.
+///
+/// Not a curiosity: `sum()` over an **empty** iterator returns this verbatim,
+/// and three of the shipped trade metrics sum a filtered subset that is empty
+/// whenever a run has no winner (or no loser). `profit_factor` on a run where
+/// every trade lost is `Some(-0.0)`, and a fused accumulator seeded `0.0`
+/// answers `Some(0.0)` — same number, different bits, and `metrics.yml`
+/// serializes the sign.
+const SIGNED_ZERO: Real = -0.0;
 
 fn rf_per_bar(risk_free_rate: Real, bars_per_year: Real) -> Real {
     if bars_per_year > 0.0 {
@@ -441,7 +451,15 @@ fn return_stats_fused(returns: &[Real], threshold: Real) -> ReturnStats {
     }
 
     // Pass 1 — mean, extrema, sign count.
-    let mut sum = 0.0;
+    //
+    // Every accumulator that stands in for an `Iterator::sum::<f64>()` is
+    // seeded `-0.0`, not `0.0`. `-0.0` is the additive identity f64 actually
+    // has (`x + -0.0 == x` for every `x`, including `x = -0.0`, whereas
+    // `-0.0 + 0.0 == +0.0`), so that is what `impl Sum for f64` folds from —
+    // and the seed survives verbatim when the subset being summed is empty.
+    // Seeding `0.0` here silently changes `profit_factor` from `-0.0` to `0.0`
+    // on a run with no winning trade. See `SIGNED_ZERO` below.
+    let mut sum = SIGNED_ZERO;
     let mut best = returns[0];
     let mut worst = returns[0];
     let mut positive = 0usize;
@@ -456,10 +474,13 @@ fn return_stats_fused(returns: &[Real], threshold: Real) -> ReturnStats {
     let mean = sum / n as Real;
 
     // Pass 2 — centred moments, downside deviation, the Omega integrals.
-    let mut sum_sq = 0.0;
-    let mut sum_cu = 0.0;
-    let mut sum_qu = 0.0;
-    let mut downside_sq = 0.0;
+    let mut sum_sq = SIGNED_ZERO;
+    let mut sum_cu = SIGNED_ZERO;
+    let mut sum_qu = SIGNED_ZERO;
+    let mut downside_sq = SIGNED_ZERO;
+    // `omega` is a hand-written loop in the library, seeded `0.0` — so this one
+    // is `0.0` too. The seed is copied from whatever the shipped code does, not
+    // chosen.
     let mut omega_gains = 0.0;
     let mut omega_losses = 0.0;
     for &r in returns {
@@ -777,13 +798,14 @@ fn trade_stats_fused(trades: &[Trade]) -> TradeStats {
         shorts: 0,
         max_consec_wins: 0,
         max_consec_losses: 0,
-        sum_pnl: 0.0,
-        sum_win_pnl: 0.0,
-        sum_loss_pnl: 0.0,
+        // All five mirror an `Iterator::sum::<f64>()`. See `SIGNED_ZERO`.
+        sum_pnl: SIGNED_ZERO,
+        sum_win_pnl: SIGNED_ZERO,
+        sum_loss_pnl: SIGNED_ZERO,
         largest_win: None,
         largest_loss: None,
-        sum_return_ratio: 0.0,
-        sum_bars: 0.0,
+        sum_return_ratio: SIGNED_ZERO,
+        sum_bars: SIGNED_ZERO,
         min_bars: None,
         max_bars: None,
     };
