@@ -1421,7 +1421,7 @@ caller who wants the pair pays for both calls, so both calls are timed.
 
 ### Results
 
-200 000 samples, **sampled to convergence** — 27 interleaved passes, after which
+200 000 samples, **sampled to convergence** — 19 interleaved passes, after which
 no figure had improved by more than 1% for three consecutive passes. `rs vs C` is
 against native TA-Lib C, `py vs py` against the `talib` Cython bindings — one
 baseline per tier, as above.
@@ -1434,11 +1434,11 @@ column — `after` against `TA-Lib C`, both from the same 11-pass run.
 
 | | TA-Lib C | fugazi rs before | fugazi rs after | **rs vs C** | TA-Lib py | fugazi py before | fugazi py after | **py vs py** |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `macd` | 12.69 | 1.76 | **1.52** | **0.12×** | 21.75 | 24.04 | **23.03** | 1.06× |
-| `dmi` | 9.59 | 6.72 | **5.33** | **0.56×** | 16.44 | 28.76 | **26.90** | 1.64× |
-| `adx` | 14.16 | 10.19 | **8.59** | **0.61×** | 20.44 | 43.97 | **40.99** | 2.01× |
-| `aroon` | 8.64 | 17.31 | **8.92** | 1.03× | 15.33 | 40.06 | **38.00** | 2.48× |
-| `bbands` | 3.87 | 20.40 | **12.83** | 3.32× | 11.32 | 46.40 | **44.24** | 3.91× |
+| `macd` | 12.47 | 1.76 | **1.51** | **0.12×** | 21.66 | 24.04 | **22.68** | 1.05× |
+| `dmi` | 9.04 | 6.72 | **5.62** | **0.62×** | 16.24 | 28.76 | **27.21** | 1.68× |
+| `adx` | 13.59 | 10.19 | **9.03** | **0.66×** | 20.87 | 43.97 | **41.67** | 2.00× |
+| `aroon` | 7.98 | 17.31 | **9.10** | 1.14× | 15.19 | 40.06 | **38.15** | 2.51× |
+| `bbands` | 3.74 | 20.40 | **13.47** | 3.61× | 11.41 | 46.40 | **44.52** | 3.90× |
 
 The Rust engine **beats native TA-Lib C on three of the five** — by 8.5× on
 `macd`, where TA-Lib's own `TA_MACD` is slow (it allocates and fills two
@@ -1838,20 +1838,20 @@ From the converged run above:
 
 | | `py vs py` | was | |
 |---|---:|---:|---|
-| `atr` | 0.47× | 0.47× | passes — the frame is read in place and folded once |
-| `ema` | 0.94× | 0.97× | passes |
-| `macd` | 1.06× | 1.08× | passes |
-| `rsi` | 1.15× | 1.14× | passes |
-| `sma` | 1.58× | 1.55× | **over** |
-| `dmi` | **1.64×** | 1.87× | **over**, but the iterator scatter moved it |
-| `adx` | 2.01× | 1.99× | **over** |
-| `aroon` | 2.48× | 2.47× | **over** |
-| `stddev` | 3.74× | 3.72× | **exempt** |
-| `bbands` | 3.91× | 3.91× | **exempt** |
+| `atr` | 0.46× | 0.47× | passes — the frame is read in place and folded once |
+| `ema` | 0.97× | 0.94× | passes |
+| `macd` | 1.05× | 1.06× | passes |
+| `rsi` | 1.15× | 1.15× | passes |
+| `sma` | 1.59× | 1.58× | **over** |
+| `dmi` | 1.68× | 1.64× | **over** |
+| `adx` | 2.00× | 2.01× | **over** |
+| `aroon` | 2.51× | 2.48× | **over** |
+| `stddev` | 3.72× | 3.74× | **exempt** |
+| `bbands` | 3.90× | 3.91× | **exempt** |
 
-Both columns are converged runs (27 passes and 11). The `was` column predates
-the iterator scatter in `feed_into_columns`; everything else about the two runs
-is the same.
+Both columns are converged runs (19 passes and 27). The `was` column predates
+the column-major fold and the column-at-a-time candle fill. **Nothing moved** —
+see below, because that is the finding, not a null result to skip past.
 
 ### The exemption, and why it is one
 
@@ -1972,6 +1972,44 @@ Measured, not yet fixed — the reason this is a section and not a changelog ent
   confirmed, and this document has a standing record of what happens when a cost
   here is reasoned about rather than measured — see *How to measure without
   fooling yourself*.
+
+### The boundary is memory-bound, and three instruction wins proved it
+
+Three changes landed against the multi-output boundary, each measured with
+callgrind and each real:
+
+| | `dmi` | `adx` | `aroon` |
+|---|---:|---:|---:|
+| iterator scatter, then column-major fold | −18 | −19 | −21 |
+| candle fields filled a column at a time | −31 | −31 | −31 |
+| **total, instructions/sample** | **−49** | **−50** | **−52** |
+
+That is 22% of `dmi`'s instruction count. Converged wall-clock across the same
+two points: **26.90 → 27.21 ns/sample**. `adx` 40.99 → 41.67. `aroon` 38.00 →
+38.15. Nothing moved, in either direction, beyond run-to-run drift.
+
+**So the Python multi-output boundary is not instruction-bound.** Roughly a fifth
+of the instructions came out and the wall-clock did not notice, which means the
+core was waiting on memory rather than retiring work. That is consistent with
+what the very first decomposition said and what nobody followed up on:
+allocating and first-touching output arrays costs **0.5 ns/sample for one array
+and 8.3 for two** — a threshold, not a slope, and the page faults are paid
+*during* the write, so they are attributed to whatever code happens to be doing
+the writing.
+
+The practical consequence is a change of target. **Further instruction-level work
+on this path is not worth doing** — the remaining `update_slice_flat` at 45
+instructions/sample and `for_each_chunk` at 17 could both go to zero and the
+`py vs py` column would not move. What is left to try is memory-side: one
+`(lines, n)` allocation instead of `lines` separate ones, so a three-column
+result costs one mapping and one fault stream rather than three.
+
+Note the shape of the mistake, since trap 8 in *How to measure without fooling
+yourself* is its mirror image. Trap 8 is "instruction counts miss page faults, so
+a real win can look like nothing". This is the converse: **a real instruction
+saving can be nothing**, on the same path, for the same reason. Neither
+instrument is wrong; each answers a question the other cannot, and the mistake
+both times was to let one of them stand in for the verdict.
 
 ### The iterator scatter — what it bought, and what it did not
 
