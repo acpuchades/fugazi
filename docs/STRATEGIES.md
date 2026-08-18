@@ -225,7 +225,11 @@ extreme). They are checked every bar, so they fire intra-bar, independently of
 # Long on a breakout, with a 5% trailing stop and a fixed 15% take-profit.
 symbol: BTC
 long:
-  enter:       !crosses_above { lhs: close, rhs: !rolling_max { source: high, period: 20 } }
+  # `!lag` is load-bearing: the raw channel includes today's bar, so `close`
+  # can never exceed it. See "Extremum sources include the current bar".
+  enter:       !crosses_above
+    lhs: close
+    rhs: !lag { source: !rolling_max { source: high, period: 20 }, period: 1 }
   stop_loss:   !mul { lhs: peak,  rhs: !value 0.95 }   # 5% off the high since entry
   take_profit: !mul { lhs: entry, rhs: !value 1.15 }   # 15% above entry
 ```
@@ -1125,10 +1129,51 @@ Each line of a multi-output indicator is its own source tag:
 | `!macd_line`, `!macd_signal`, `!macd_histogram` | `{ source, fast, slow, signal }` |
 | `!bb_upper`, `!bb_middle`, `!bb_lower` | `{ source, period, k }` |
 | `!keltner_upper`, `!keltner_middle`, `!keltner_lower` | `{ source, candle_source = !current, ema_period, atr_period, multiplier }` |
-| `!donchian_upper`, `!donchian_middle`, `!donchian_lower` | `{ high = high, low = low, period }` |
+| `!donchian_upper`, `!donchian_middle`, `!donchian_lower` | `{ high = high, low = low, period }` — the channel **includes the current bar**, see [below](#extremum-sources-include-the-current-bar) |
 | `!adx`, `!plus_di`, `!minus_di` | `{ period }` (the ADX/DI components) |
 | `!dmi_plus_di`, `!dmi_minus_di` | `{ period }` (raw +DI/−DI, no ADX smoothing) |
 | `!aroon_up`, `!aroon_down`, `!aroon_oscillator` | `{ period }` |
+
+#### Extremum sources include the current bar
+
+`!rolling_max`, `!rolling_min` and the `!donchian_*` channel all compute their
+extremum over a window that **ends on the bar being evaluated**, current bar
+included. That is the conventional definition, and it is not changing — but it
+makes the natural way to write a breakout a guaranteed no-op:
+
+```yaml
+# Never fires. `close <= high <= rolling_max(high)` once the current bar is in
+# the window, so `close` can only ever touch the channel, never cross it.
+enter: !crosses_above { lhs: close, rhs: !donchian_upper { period: 20 } }
+```
+
+The exit leg fails the same way in reverse (`close >= low >= rolling_min(low)`),
+and there is no warning: the strategy builds, runs, and reports zero trades.
+
+Compare the channel against the **previous** bar's value instead — that is what
+a breakout means anyway ("today took out the last 20 days' high"):
+
+```yaml
+enter: !crosses_above
+  lhs: close
+  rhs: !lag { source: !donchian_upper { period: 20 }, period: 1 }
+exit: !crosses_below
+  lhs: close
+  rhs: !lag { source: !donchian_lower { period: 10 }, period: 1 }
+```
+
+The same applies to anything else compared against its own running extremum —
+`!rolling_max { source: close }` versus `close`, a `close / !rolling_max` ratio
+(exactly `1.0` at every new high, so `!gt … 1.0` never fires).
+
+The rule is not "channels need a lag" but **a series never crosses an extremum
+it is inside of**. Anything bounded by the window runs into it — an `!sma` of
+`close` sits below `!rolling_max { source: high }` over the same bars just as
+surely as `close` does, so swapping in a smoother does not rescue the
+comparison. What *is* reachable is a level offset off the channel
+(`!mul { lhs: !rolling_max …, rhs: !value 0.98 }` as a support band) or an
+extremum taken over a **different** asset — neither bounds the series being
+compared.
 
 ### Bar indicators (consume the whole candle)
 
@@ -1187,7 +1232,7 @@ candle-field leaves.
 | `!add`, `!sub`, `!mul`, `!div` | `{ lhs, rhs }` | arithmetic over two sources (`div` → none on /0) |
 | `!log` | `{ source = close, base = e }` | logarithm of `source`; `None` on non-positive samples |
 | `!lag`, `!diff`, `!ratio`, `!roc` | `{ source = close, period }` | lookback vs. `period` bars ago |
-| `!rolling_max`, `!rolling_min` | `{ source = close, period }` | rolling extremum over `period` bars |
+| `!rolling_max`, `!rolling_min` | `{ source = close, period }` | rolling extremum over `period` bars — **includes the current bar**, see [below](#extremum-sources-include-the-current-bar) |
 | `!if_else` | `{ cond, then, otherwise }` | ternary: `cond` is a **signal**, the branches are sources — see below |
 | `!unstable` | `{ source }` | passthrough that reports no unstable period, so the readiness gate stops waiting for this subtree's IIR tail (the signal-side twin is `!unstable { signal }`) |
 | `!resample` | `{ every, inner, source = !current }` | aggregate every N candles of `source` (a `Candle`-output stream, defaulting to `!current`) into one higher-timeframe candle and run `inner` (any Real source) over that HTF candle; emits `inner`'s output on each completed bucket and `None` in between. `inner` is **required** — no default |
@@ -1403,15 +1448,23 @@ long:
   exit:  !above         { source: !rsi { period: 14 }, level: 70 }    # leave on overbought
 ```
 
-A Donchian breakout, always-in:
+A Donchian breakout, always-in. **The channel includes the current bar**, so
+the textbook spelling — `close` crossing above `!donchian_upper` — can never
+fire, and the lag is not optional:
 
 ```yaml
 symbol: BTC
 long:
-  enter: !crosses_above { lhs: close, rhs: !donchian_upper { period: 20 } }
+  enter: !crosses_above
+    lhs: close
+    rhs: !lag { source: !donchian_upper { period: 20 }, period: 1 }
 short:
-  enter: !crosses_below { lhs: close, rhs: !donchian_lower { period: 20 } }
+  enter: !crosses_below
+    lhs: close
+    rhs: !lag { source: !donchian_lower { period: 20 }, period: 1 }
 ```
+
+See [Extremum sources include the current bar](#extremum-sources-include-the-current-bar).
 
 The same SMA crossover as a one-line inline (flow-style) spec — tags work inside
 flow mappings too, so this is handy as an inline `<STRATEGY>` positional literal
