@@ -392,13 +392,105 @@ impl ReturnStats {
     }
 }
 
-/// The accumulators as the shipped code gathers them: one library call per
-/// metric, each with its own walk (and `skewness` / `kurtosis` / `sharpe` /
-/// `sortino` re-deriving the mean, or the mean *and* the second moment, on the
-/// way).
+/// The finished return-side numbers, however they were arrived at.
 ///
-/// Reconstructed into a [`ReturnStats`] so both halves of the A/B feed the
-/// identical downstream code — the point of measurement is the gathering.
+/// The three gatherers below produce this and nothing else, so `reduce` is
+/// blind to which one ran and a timing difference between them is the
+/// gathering strategy alone.
+struct ReturnDerived {
+    mean: Real,
+    best: Real,
+    worst: Real,
+    positive_ratio: Real,
+    stddev: Real,
+    ann_mean: Real,
+    ann_vol: Real,
+    skewness: Option<Real>,
+    kurtosis: Option<Real>,
+    sharpe: Option<Real>,
+    sortino: Option<Real>,
+    omega: Option<Real>,
+    psr: Option<Real>,
+}
+
+/// **The control.** Exactly the call sequence `from_report` makes — every
+/// library function, in the order the shipped reduction calls it.
+///
+/// This is where the redundancy lives, and it is worth spelling out: `sharpe`
+/// walks the series three times (the mean, then the mean and the stddev again
+/// inside `annualized_volatility`); `sortino` walks it twice more; `skewness`
+/// and `kurtosis` each recompute the mean *and* `Σ(x − mean)²` before their own
+/// third and fourth moments; and `probabilistic_sharpe` then calls all three of
+/// `sharpe` / `skewness` / `kurtosis` a second time from scratch. Nothing is
+/// cached between them because each is a standalone `pub fn` over a bare slice —
+/// the right API for the module, and the wrong one for a reducer that wants all
+/// fourteen numbers at once.
+fn return_derived_shipped(
+    returns: &[Real],
+    risk_free_rate: Real,
+    bars_per_year: Real,
+) -> ReturnDerived {
+    let rf_bar = rf_per_bar(risk_free_rate, bars_per_year);
+    ReturnDerived {
+        mean: fugazi::metrics::mean_return(returns),
+        best: fugazi::metrics::best_return(returns),
+        worst: fugazi::metrics::worst_return(returns),
+        positive_ratio: fugazi::metrics::positive_bars_ratio(returns),
+        stddev: fugazi::metrics::stddev_return(returns),
+        ann_mean: fugazi::metrics::annualized_return(returns, bars_per_year),
+        ann_vol: fugazi::metrics::annualized_volatility(returns, bars_per_year),
+        skewness: fugazi::metrics::skewness(returns),
+        kurtosis: fugazi::metrics::kurtosis(returns),
+        sharpe: fugazi::metrics::sharpe(returns, risk_free_rate, bars_per_year),
+        sortino: fugazi::metrics::sortino(returns, risk_free_rate, bars_per_year),
+        omega: fugazi::metrics::omega(returns, rf_bar),
+        psr: fugazi::metrics::probabilistic_sharpe(returns, risk_free_rate, bars_per_year, 0.0),
+    }
+}
+
+/// The same fourteen numbers off a [`ReturnStats`] bundle — each raw
+/// accumulator gathered once, every metric a division away.
+fn return_derived_from_stats(
+    stats: &ReturnStats,
+    risk_free_rate: Real,
+    bars_per_year: Real,
+) -> ReturnDerived {
+    let stddev = stats.stddev();
+    let ann_scale = bars_per_year.max(0.0).sqrt();
+    let ann_mean = stats.mean * bars_per_year;
+    let ann_vol = stddev * ann_scale;
+    let ann_excess = ann_mean - risk_free_rate;
+    let sharpe = safe_div(ann_excess, ann_vol);
+    let skewness = stats.skewness();
+    let kurtosis = stats.kurtosis();
+    ReturnDerived {
+        mean: stats.mean,
+        best: stats.best,
+        worst: stats.worst,
+        positive_ratio: stats.positive_ratio(),
+        stddev,
+        ann_mean,
+        ann_vol,
+        skewness,
+        kurtosis,
+        sharpe,
+        sortino: safe_div(ann_excess, stats.downside_stddev() * ann_scale),
+        omega: safe_div(stats.omega_gains, stats.omega_losses),
+        psr: fugazi::metrics::probabilistic_sharpe_from_stats(
+            sharpe,
+            skewness,
+            kurtosis,
+            stats.n,
+            bars_per_year,
+            0.0,
+        ),
+    }
+}
+
+/// Each raw accumulator gathered exactly once, but still one walk apiece — the
+/// deduplication on its own, before any loop fusion. Splitting this from
+/// [`return_stats_fused`] separates "stop recomputing" from "stop
+/// re-streaming": different mechanisms, and they do not cost the same.
 fn return_stats_separate(returns: &[Real], threshold: Real) -> ReturnStats {
     let n = returns.len();
     if n == 0 {
@@ -858,25 +950,41 @@ fn trade_stats_fused(trades: &[Trade]) -> TradeStats {
 
 /// Which of the four candidate changes a run of [`reduce`] applies. The
 /// cumulative variants turn them on left to right.
+/// How the return-series numbers are gathered — the three-way axis the first
+/// two steps of the waterfall move along.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReturnMode {
+    /// `from_report`'s own call sequence, redundancy included.
+    Shipped,
+    /// Every accumulator gathered once, one walk each.
+    Deduped,
+    /// Every accumulator gathered once, in two walks.
+    Fused,
+}
+
 #[derive(Clone, Copy)]
 struct Opts {
     fused_equity: bool,
-    fused_returns: bool,
+    returns: ReturnMode,
     quantiles: QuantileMode,
     fused_trades: bool,
 }
 
 impl Opts {
-    /// `v1_local` — the shipped reduction's exact shape.
+    /// `v1_faithful` — the shipped reduction's exact call sequence.
     const SHIPPED: Self = Self {
         fused_equity: false,
-        fused_returns: false,
+        returns: ReturnMode::Shipped,
         quantiles: QuantileMode::Sort,
         fused_trades: false,
     };
-    const FUSED_RETURNS: Self = Self {
-        fused_returns: true,
+    const DEDUP_MOMENTS: Self = Self {
+        returns: ReturnMode::Deduped,
         ..Self::SHIPPED
+    };
+    const FUSED_RETURNS: Self = Self {
+        returns: ReturnMode::Fused,
+        ..Self::DEDUP_MOMENTS
     };
     const SELECT_QUANTILES: Self = Self {
         quantiles: QuantileMode::Select,
@@ -920,10 +1028,14 @@ fn reduce<Sym>(
         equity_pass_separate(equity, initial)
     };
 
-    let stats = if opts.fused_returns {
-        return_stats_fused(&returns, rf_bar)
-    } else {
-        return_stats_separate(&returns, rf_bar)
+    let r = match opts.returns {
+        ReturnMode::Shipped => return_derived_shipped(&returns, risk_free_rate, bars_per_year),
+        ReturnMode::Deduped => {
+            return_derived_from_stats(&return_stats_separate(&returns, rf_bar), risk_free_rate, bars_per_year)
+        }
+        ReturnMode::Fused => {
+            return_derived_from_stats(&return_stats_fused(&returns, rf_bar), risk_free_rate, bars_per_year)
+        }
     };
     let quantiles = quantile_reads(&returns, opts.quantiles);
 
@@ -936,16 +1048,8 @@ fn reduce<Sym>(
 
     let total = fugazi::metrics::total_return(equity, initial);
     let cagr = fugazi::metrics::cagr(equity, initial, bars_per_year);
-    let stddev = stats.stddev();
-    let ann_scale = bars_per_year.max(0.0).sqrt();
-    let ann_mean = stats.mean * bars_per_year;
-    let ann_vol = stddev * ann_scale;
-    let ann_excess = ann_mean - risk_free_rate;
     let max_dd = fugazi::metrics::max_drawdown(&segments);
     let avg_dd = fugazi::metrics::average_drawdown(&segments);
-    let sharpe = safe_div(ann_excess, ann_vol);
-    let skewness = stats.skewness();
-    let kurtosis = stats.kurtosis();
 
     // Asked once, spent twice — the `_bars` field and its `_seconds` twin. The
     // shipped reduction calls each of these three a second time inside the
@@ -966,35 +1070,28 @@ fn reduce<Sym>(
             total,
             total_pct: total * 100.0,
             cagr_pct: cagr.map(|c| c * 100.0),
-            mean_bar: stats.mean,
+            mean_bar: r.mean,
             median_bar: quantiles.median,
-            stddev_bar: stddev,
-            best_bar: stats.best,
-            worst_bar: stats.worst,
-            positive_bars_pct: stats.positive_ratio() * 100.0,
-            skewness,
-            kurtosis,
+            stddev_bar: r.stddev,
+            best_bar: r.best,
+            worst_bar: r.worst,
+            positive_bars_pct: r.positive_ratio * 100.0,
+            skewness: r.skewness,
+            kurtosis: r.kurtosis,
             var_95: quantiles.var_95,
             cvar_95: quantiles.cvar_95,
             tail_ratio: quantiles.tail_ratio,
-            annualized_mean_pct: ann_mean * 100.0,
-            annualized_volatility_pct: ann_vol * 100.0,
+            annualized_mean_pct: r.ann_mean * 100.0,
+            annualized_volatility_pct: r.ann_vol * 100.0,
         },
         risk_adjusted: RiskAdjustedSection {
-            sharpe,
-            sortino: safe_div(ann_excess, stats.downside_stddev() * ann_scale),
+            sharpe: r.sharpe,
+            sortino: r.sortino,
             calmar: cagr.and_then(|c| safe_div(c, max_dd)),
-            omega: safe_div(stats.omega_gains, stats.omega_losses),
+            omega: r.omega,
             ulcer_index: ulcer,
             ulcer_performance_index: cagr.and_then(|c| safe_div(c - risk_free_rate, ulcer)),
-            probabilistic_sharpe: fugazi::metrics::probabilistic_sharpe_from_stats(
-                sharpe,
-                skewness,
-                kurtosis,
-                stats.n,
-                bars_per_year,
-                0.0,
-            ),
+            probabilistic_sharpe: r.psr,
         },
         drawdown: DrawdownSection {
             max: max_dd,
@@ -1040,12 +1137,13 @@ fn reduce<Sym>(
     }
 }
 
-const VARIANTS: [(&str, Opts); 5] = [
-    ("v1_local", Opts::SHIPPED),
-    ("v2_fused_returns", Opts::FUSED_RETURNS),
-    ("v3_select_quantiles", Opts::SELECT_QUANTILES),
-    ("v4_fused_trades", Opts::FUSED_TRADES),
-    ("v5_fused_equity", Opts::FUSED_EQUITY),
+const VARIANTS: [(&str, Opts); 6] = [
+    ("v1_faithful", Opts::SHIPPED),
+    ("v2_dedup_moments", Opts::DEDUP_MOMENTS),
+    ("v3_fused_returns", Opts::FUSED_RETURNS),
+    ("v4_select_quantiles", Opts::SELECT_QUANTILES),
+    ("v5_fused_trades", Opts::FUSED_TRADES),
+    ("v6_fused_equity", Opts::FUSED_EQUITY),
 ];
 
 // ---------------------------------------------------------------------------
@@ -1148,7 +1246,10 @@ fn bench_pieces(c: &mut Criterion) {
     g.finish();
 
     let mut g = c.benchmark_group("metrics_variants/return_stats");
-    g.bench_function("separate_passes", |b| {
+    g.bench_function("shipped_calls", |b| {
+        b.iter(|| black_box(return_derived_shipped(&returns, RISK_FREE, BARS_PER_YEAR)));
+    });
+    g.bench_function("dedup_one_walk_each", |b| {
         b.iter(|| black_box(return_stats_separate(&returns, rf_bar)));
     });
     g.bench_function("fused_two_pass", |b| {
