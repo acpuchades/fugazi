@@ -1136,7 +1136,7 @@ library so all four sit on one scale:
 *Lower is better. 200 000 samples, minimum of 7 reps per pass; whiskers run up
 to the 25th percentile, since contention only ever adds time. The run takes
 passes until no figure has improved by more than 1% for three consecutive
-passes — this one converged after 19.*
+passes — this one converged after 10.*
 
 The chart's common baseline is the C library. For a **Python** user the
 like-for-like comparison is against `talib`, TA-Lib's own bindings, since both
@@ -1144,16 +1144,16 @@ cross a Python boundary — that is the last column:
 
 | | TA-Lib C | fugazi (Rust) | **rs vs C** | `talib` py | fugazi (Python) | **py vs py** |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `sma` | 1.36 | 1.34 | **0.99×** | 1.43 | 2.28 | 1.59× |
-| `ema` | 2.02 | 1.35 | **0.67×** | 2.19 | 2.13 | **0.97×** |
-| `rsi` | 4.69 | 4.64 | **0.99×** | 5.01 | 5.75 | 1.15× |
-| `atr` | 4.73 | 4.48 | **0.95×** | 12.55 | 5.80 | **0.46×** |
-| `stddev` | 3.30 | 11.23 | 3.40× | 3.50 | 13.01 | 3.72× |
-| `macd` | 12.47 | 1.51 | **0.12×** | 21.66 | 22.68 | 1.05× |
-| `dmi` | 9.04 | 5.62 | **0.62×** | 16.24 | 27.21 | 1.68× |
-| `adx` | 13.59 | 9.03 | **0.66×** | 20.87 | 41.67 | 2.00× |
-| `aroon` | 7.98 | 9.10 | 1.14× | 15.19 | 38.15 | 2.51× |
-| `bbands` | 3.74 | 13.47 | 3.61× | 11.41 | 44.52 | 3.90× |
+| `sma` | 1.34 | 1.34 | **1.01×** | 1.41 | 2.13 | 1.51× |
+| `ema` | 2.01 | 1.35 | **0.67×** | 2.07 | 2.03 | **0.98×** |
+| `rsi` | 4.71 | 4.60 | **0.98×** | 4.76 | 5.43 | 1.14× |
+| `atr` | 4.72 | 4.28 | **0.91×** | 12.19 | 6.16 | **0.51×** |
+| `stddev` | 3.28 | 10.66 | 3.25× | 3.44 | 12.78 | 3.71× |
+| `macd` | 12.35 | 1.45 | **0.12×** | 20.96 | 5.32 | **0.25×** |
+| `dmi` | 8.63 | 5.05 | **0.59×** | 16.04 | 11.94 | **0.74×** |
+| `adx` | 13.31 | 8.22 | **0.62×** | 20.49 | 21.90 | 1.07× |
+| `aroon` | 7.57 | 8.18 | 1.08× | 14.42 | 19.28 | 1.34× |
+| `bbands` | 3.71 | 12.49 | 3.36× | 10.80 | 19.51 | 1.81× |
 
 ns/sample. The Rust engine is at parity or better on `sma`/`ema`/`rsi`/`atr`
 while staying one-bar-at-a-time, and driving a full backtest allocates **zero
@@ -1169,10 +1169,20 @@ the C library* — the last two structurally, because TA-Lib has no combined ent
 point and must re-derive the same Wilder-smoothed true range once per line, while
 `Dmi`/`Adx` carry one set of states and emit the lines together.
 
-`aroon` is the near miss: 1.14× the C library, down from roughly twice it before
-its rolling-extremum core stopped being a heap-allocating deque. Three converged
-runs put it at 1.03×, 1.14× and 1.15×, so it lands just behind — never ahead, and worth saying plainly rather than rounding in the
-flattering direction.
+`aroon` is the near miss against the C library: 1.08×, down from roughly twice
+it before its rolling-extremum core stopped being a heap-allocating deque. Four
+converged runs put it between 1.03× and 1.15×, so it lands just behind — never
+ahead, and worth saying plainly rather than rounding in the flattering
+direction.
+
+Through the bindings the multi-output rows are the strong ones: `macd` is **4×
+faster** than `talib`, `dmi` and `atr` beat it outright, and `adx` is level.
+That is not the engine — it is that a fugazi `feed` returns a *frame*, so every
+line of an indicator comes out of one `(lines, n)` allocation, while `talib`
+returns a tuple of independent arrays and must allocate one per line. Measured,
+that difference alone is 10.70 ns/sample against 1.61. The columns fugazi hands
+back are therefore **views over one buffer** — `Multi.feed` documents what that
+means if you keep one and drop the rest.
 
 `stddev` — and `bbands`, which inherits it — is the one real loss, and it is
 deliberate: fugazi makes a centred pass over the window instead of TA-Lib's O(1)

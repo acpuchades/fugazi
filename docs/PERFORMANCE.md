@@ -1421,7 +1421,7 @@ caller who wants the pair pays for both calls, so both calls are timed.
 
 ### Results
 
-200 000 samples, **sampled to convergence** — 19 interleaved passes, after which
+200 000 samples, **sampled to convergence** — 10 interleaved passes, after which
 no figure had improved by more than 1% for three consecutive passes. `rs vs C` is
 against native TA-Lib C, `py vs py` against the `talib` Cython bindings — one
 baseline per tier, as above.
@@ -1434,11 +1434,11 @@ column — `after` against `TA-Lib C`, both from the same 11-pass run.
 
 | | TA-Lib C | fugazi rs before | fugazi rs after | **rs vs C** | TA-Lib py | fugazi py before | fugazi py after | **py vs py** |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `macd` | 12.47 | 1.76 | **1.51** | **0.12×** | 21.66 | 24.04 | **22.68** | 1.05× |
-| `dmi` | 9.04 | 6.72 | **5.62** | **0.62×** | 16.24 | 28.76 | **27.21** | 1.68× |
-| `adx` | 13.59 | 10.19 | **9.03** | **0.66×** | 20.87 | 43.97 | **41.67** | 2.00× |
-| `aroon` | 7.98 | 17.31 | **9.10** | 1.14× | 15.19 | 40.06 | **38.15** | 2.51× |
-| `bbands` | 3.74 | 20.40 | **13.47** | 3.61× | 11.41 | 46.40 | **44.52** | 3.90× |
+| `macd` | 12.35 | 1.76 | **1.45** | **0.12×** | 20.96 | 24.04 | **5.32** | **0.25×** |
+| `dmi` | 8.63 | 6.72 | **5.05** | **0.59×** | 16.04 | 28.76 | **11.94** | **0.74×** |
+| `adx` | 13.31 | 10.19 | **8.22** | **0.62×** | 20.49 | 43.97 | **21.90** | **1.07×** |
+| `aroon` | 7.57 | 17.31 | **8.18** | 1.08× | 14.42 | 40.06 | **19.28** | 1.34× |
+| `bbands` | 3.71 | 20.40 | **12.49** | 3.36× | 10.80 | 46.40 | **19.51** | **1.81×** |
 
 The Rust engine **beats native TA-Lib C on three of the five** — by 8.5× on
 `macd`, where TA-Lib's own `TA_MACD` is slow (it allocates and fills two
@@ -1838,16 +1838,22 @@ From the converged run above:
 
 | | `py vs py` | was | |
 |---|---:|---:|---|
-| `atr` | 0.46× | 0.47× | passes — the frame is read in place and folded once |
-| `ema` | 0.97× | 0.94× | passes |
-| `macd` | 1.05× | 1.06× | passes |
-| `rsi` | 1.15× | 1.15× | passes |
-| `sma` | 1.59× | 1.58× | **over** |
-| `dmi` | 1.68× | 1.64× | **over** |
-| `adx` | 2.00× | 2.01× | **over** |
-| `aroon` | 2.51× | 2.48× | **over** |
-| `stddev` | 3.72× | 3.74× | **exempt** |
-| `bbands` | 3.90× | 3.91× | **exempt** |
+| `macd` | **0.25×** | 1.05× | passes — 4× faster than `talib` |
+| `atr` | 0.51× | 0.46× | passes |
+| `dmi` | **0.74×** | 1.68× | passes — faster than `talib` |
+| `ema` | 0.98× | 0.97× | passes |
+| `adx` | **1.07×** | 2.00× | passes |
+| `rsi` | 1.14× | 1.15× | passes |
+| `aroon` | **1.34×** | 2.51× | **over**, and the only multi-output row still over |
+| `sma` | 1.51× | 1.59× | **over** — 1-D scalar path, ~0.4 ns of headroom in total |
+| `bbands` | 1.81× | 3.90× | **exempt** |
+| `stddev` | 3.71× | 3.72× | **exempt** |
+
+**The `was` column is not comparable and is kept only to show direction.** It
+predates the harness fix below, which found that the two Python tiers were
+perturbing each other through a shared heap — so every figure in it was measured
+against a baseline that moved with fugazi's own allocation behaviour. The left
+column is the first set taken with each tier in its own process.
 
 Both columns are converged runs (19 passes and 27). The `was` column predates
 the column-major fold and the column-at-a-time candle fill. **Nothing moved** —
@@ -2010,6 +2016,38 @@ a real win can look like nothing". This is the converse: **a real instruction
 saving can be nothing**, on the same path, for the same reason. Neither
 instrument is wrong; each answers a question the other cannot, and the mistake
 both times was to let one of them stand in for the verdict.
+
+### The `py vs py` column was measuring the wrong thing
+
+The two Python tiers ran in the driver's process, one after the other. They
+interfere through the shared heap, and not slightly — same data, same call, quiet
+machine:
+
+| `talib.MACD` | ns/sample |
+|---|---:|
+| in a fresh process | **29.60** |
+| after fugazi has run in that process | **7.51** |
+
+**A 4× swing in fixed C code behind a Cython wrapper**, caused entirely by what
+the other tier left in the allocator. The `py vs py` column — the one the 1.25×
+budget is expressed in — was therefore coupled to fugazi's own allocation
+behaviour: change how fugazi allocates and its baseline moves with it.
+
+It surfaced as an impossibility rather than as a wrong-looking number. After the
+`(lines, n)` allocation landed, `talib` through Python read **faster than the
+TA-Lib C library it calls** — 7.44 against 12.40 ns/sample on `macd`. A wrapper
+cannot outrun what it wraps, so something was wrong with the measurement, not
+with the library. **That check is free and worth making every time this table is
+read**: `talib_py` must exceed `talib_C` in every row.
+
+Each Python tier now runs in its own interpreter, importing only its own library
+— the shape `rust_tier` and `talib_native` always had. Every row satisfies the
+check afterwards.
+
+The lesson generalises past this harness. Two implementations timed in one
+process are not independent when both allocate: **the faster one can make the
+slower one look good, and a change to either moves both.** Fork, or accept that
+the ratio is measuring the pair rather than either.
 
 ### Ruled out, so nobody re-tries them
 
