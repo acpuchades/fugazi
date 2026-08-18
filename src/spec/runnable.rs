@@ -162,11 +162,45 @@ pub trait RunnableStrategy: Strategy<Input = Snapshot<Symbol>, Symbol = Symbol> 
         resume: Option<&RunState>,
         flatten: bool,
     ) -> Result<(RunReport<Symbol>, RunState), String> {
+        self.drive_resumable_warmed(snapshots, 0, cash, per_symbol_costs, resume, flatten)
+    }
+
+    /// [`drive_resumable`](Self::drive_resumable) with the first `warmup`
+    /// snapshots used to **warm the chains and nothing else**.
+    ///
+    /// Across that prefix [`Strategy::trade`] is never
+    /// called, so no order is submitted and no equity is booked; every
+    /// indicator still advances and the wallet is still marked to market. The
+    /// returned [`RunReport`] therefore covers only `snapshots[warmup..]` — one
+    /// equity point per *evaluated* bar — which is what lets `--from` read bars
+    /// back out of the series to settle a strategy without those bars landing
+    /// in the metrics.
+    ///
+    /// The two halves share one wallet and one strategy instance, so nothing
+    /// round-trips through a [`RunState`] in between: the warmed chains are
+    /// already in memory when the evaluated half begins. `resume` is restored
+    /// once, before the warm-up prefix.
+    fn drive_resumable_warmed(
+        &mut self,
+        snapshots: &[Snapshot<Symbol>],
+        warmup: usize,
+        cash: Real,
+        per_symbol_costs: &[(String, TradingCosts)],
+        resume: Option<&RunState>,
+        flatten: bool,
+    ) -> Result<(RunReport<Symbol>, RunState), String> {
         let mut wallet: PaperWallet<Symbol> = PaperWallet::new(cash);
         for (sym, costs) in per_symbol_costs {
             let _ = wallet.set_costs_for(crate::types::symbol(sym), costs.clone());
         }
-        drive_over(self, snapshots, &mut wallet, resume, flatten)
+        let (warm, evaluated) = snapshots.split_at(warmup.min(snapshots.len()));
+        if warm.is_empty() {
+            return drive_over(self, evaluated, &mut wallet, resume, flatten);
+        }
+        warm_up_over_wallet(self, warm, &mut wallet, resume)?;
+        // `resume` is already applied — restoring it a second time would rewind
+        // the state the warm-up just advanced.
+        drive_over(self, evaluated, &mut wallet, None, flatten)
     }
 
     /// The shape's name, used to stamp and validate a [`RunState`]. Mirrors

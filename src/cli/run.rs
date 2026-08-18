@@ -48,6 +48,7 @@ use fugazi::spec::StrategySpec;
 use crate::calendar::{self, AssetClass, BarsPerYearSpec, ScopedFrequency, WindowSpec};
 use crate::costs::CostConfig;
 use crate::data::DataFrame;
+use crate::daterange::{self, Slice};
 use crate::metrics;
 use crate::overlap::{self, Overlap};
 use crate::spec::{
@@ -111,6 +112,13 @@ pub struct RunOptions<'a> {
     /// backtest and attach a `montecarlo:` block to `metrics.yml` plus a
     /// `montecarlo.csv` of the per-resample values. `None` skips it entirely.
     pub montecarlo: Option<&'a fugazi::spec::montecarlo::McConfig>,
+    /// `--from` / `--until` / `--strict-from`: which bars this run evaluates.
+    /// `None` when neither bound was given, which takes every code path here
+    /// back to evaluating the series end to end. See [`crate::daterange`].
+    pub range: Option<daterange::DateRange>,
+    /// The `--from` value as the user spelled it, for error and warning text
+    /// that has to quote the flag back.
+    pub from_label: Option<&'a str>,
 }
 
 /// Headline numbers returned from a run.
@@ -247,8 +255,6 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
     std::fs::create_dir_all(opts.out_dir)
         .with_context(|| format!("creating output dir `{}`", opts.out_dir.display()))?;
 
-    let start = atoms.first().map_or("", |(t, _)| t.as_str());
-    let end = atoms.last().map_or("", |(t, _)| t.as_str());
     // The effective bar cadence for both annualization and cost-scope
     // matching, best evidence first: a symbol-matching `-f/--frequency` entry,
     // then the input's own `freq` column, then the cadence detected from the
@@ -264,15 +270,7 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
     let bars_per_year = calendar::pick_bars_per_year(opts.bars_per_year, &symbol, effective_freq)
         .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
     let no_cost_warning = !opts.costs_supplied;
-    let inputs = eval_context(opts, effective_freq, bars_per_year)?;
-    // Print the inputs block up front so a long-running run still shows the
-    // user what they asked for while it's working.
-    if !opts.quiet {
-        let costs_active = costs_active(opts.cost_config, [symbol.as_str()], effective_freq);
-        style::print_header("run", "backtest a strategy over CSV series");
-        style::print_warns(&style::collect_warnings(&skipped_overlay_columns, no_cost_warning, "results"));
-        print_inputs_block(opts, start, end, atoms.len(), costs_active);
-    }
+    let mut inputs = eval_context(opts, effective_freq, bars_per_year)?;
 
     // The unified driver is snapshot-shaped; lift the single-symbol atom
     // stream into one tagged entry per bar.
@@ -290,7 +288,20 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
         .map(|(_, a)| fugazi::types::Snapshot::single(sym.clone(), a))
         .collect();
     let spec = StrategySpec::Single(Box::new(strategy.clone()));
-    let iter = iterate(&spec, bars, &snapshots, &inputs, opts)?;
+    // Resolved before the inputs block prints, so the `period` line names the
+    // range that will be *measured* rather than the range the file covers.
+    let sliced = sliced_inputs(&spec, bars, snapshots, &mut inputs, opts)?;
+
+    // Print the inputs block up front so a long-running run still shows the
+    // user what they asked for while it's working.
+    if !opts.quiet {
+        let costs_active = costs_active(opts.cost_config, [symbol.as_str()], effective_freq);
+        style::print_header("run", "backtest a strategy over CSV series");
+        style::print_warns(&style::collect_warnings(&skipped_overlay_columns, no_cost_warning, "results"));
+        print_inputs_block(opts, &sliced, costs_active);
+    }
+
+    let iter = iterate(&spec, sliced.bars, &sliced.snapshots, &inputs, opts)?;
     emit_montecarlo(&iter, opts)?;
 
     // Emit `fills.csv` and echo each fill in the same order the wallet booked
@@ -321,8 +332,6 @@ pub fn run_pairs(
     std::fs::create_dir_all(opts.out_dir)
         .with_context(|| format!("creating output dir `{}`", opts.out_dir.display()))?;
 
-    let start = bars.first().map_or("", |t| t.as_str());
-    let end = bars.last().map_or("", |t| t.as_str());
     // Pick the effective cadence off the left leg (both legs are expected to
     // share one cadence — the inner-join filters to the shared timeline).
     let effective_freq = calendar::pick_frequency(opts.frequency, &spec.left)
@@ -337,17 +346,7 @@ pub fn run_pairs(
             .or_else(|| calendar::pick_bars_per_year(opts.bars_per_year, &spec.right, effective_freq))
             .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));
     let no_cost_warning = !opts.costs_supplied;
-    let inputs = eval_context(opts, effective_freq, bars_per_year)?;
-    if !opts.quiet {
-        let costs_active = costs_active(
-            opts.cost_config,
-            [spec.left.as_str(), spec.right.as_str()],
-            effective_freq,
-        );
-        style::print_header("run", "pair-trade a two-leg strategy over CSV series");
-        style::print_warns(&style::collect_warnings(&[], no_cost_warning, "results"));
-        print_pairs_inputs_block(opts, spec, start, end, bars.len(), costs_active);
-    }
+    let mut inputs = eval_context(opts, effective_freq, bars_per_year)?;
 
     // Both leg names interned once; each bar then tags with a refcount bump.
     let left_sym = fugazi::types::symbol(&spec.left);
@@ -363,7 +362,22 @@ pub fn run_pairs(
         })
         .collect();
     let any = StrategySpec::Pairs(Box::new(spec.clone()));
-    let iter = iterate(&any, bars.clone(), &snapshots, &inputs, opts)?;
+    // The slice lands on the *joined* timeline, so two partially-overlapping
+    // legs behave the way the dates say rather than the way the files do.
+    let sliced = sliced_inputs(&any, bars, snapshots, &mut inputs, opts)?;
+
+    if !opts.quiet {
+        let costs_active = costs_active(
+            opts.cost_config,
+            [spec.left.as_str(), spec.right.as_str()],
+            effective_freq,
+        );
+        style::print_header("run", "pair-trade a two-leg strategy over CSV series");
+        style::print_warns(&style::collect_warnings(&[], no_cost_warning, "results"));
+        print_pairs_inputs_block(opts, spec, &sliced, costs_active);
+    }
+
+    let iter = iterate(&any, sliced.bars, &sliced.snapshots, &inputs, opts)?;
     emit_montecarlo(&iter, opts)?;
 
     emit_run(&iter, opts, started, effective_freq)
@@ -418,13 +432,15 @@ fn run_universe(
     std::fs::create_dir_all(opts.out_dir)
         .with_context(|| format!("creating output dir `{}`", opts.out_dir.display()))?;
 
-    let start = bars.first().map_or("", |t| t.as_str());
-    let end = bars.last().map_or("", |t| t.as_str());
     let representative = &universe[0];
     let (effective_freq, bars_per_year) =
         universe_calendar(opts, frame, representative, &per_symbol);
     let no_cost_warning = !opts.costs_supplied;
-    let inputs = eval_context(opts, effective_freq, bars_per_year)?;
+    let mut inputs = eval_context(opts, effective_freq, bars_per_year)?;
+    // Sliced on the joined timeline, after the outer join — so a symbol that
+    // only lists partway through the range keeps the same relationship to the
+    // others that it has in an unsliced run.
+    let sliced = sliced_inputs(&any, bars, snapshots, &mut inputs, opts)?;
     if !opts.quiet {
         // A portfolio also probes the unscoped `default:` leg with `""` — see
         // `costs_active`.
@@ -435,7 +451,7 @@ fn run_universe(
         let costs_active = costs_active(opts.cost_config, probes, effective_freq);
         style::print_header("run", headline);
         style::print_warns(&style::collect_warnings(&[], no_cost_warning, "results"));
-        print_basket_inputs_block(opts, &universe, start, end, bars.len(), costs_active, &overlap);
+        print_basket_inputs_block(opts, &universe, &sliced, costs_active, &overlap);
     }
     // Deliberately outside the `--quiet` guard, and on stderr rather than in
     // the block above: the other warnings here are advisory (no cost model, a
@@ -444,7 +460,7 @@ fn run_universe(
     // summary, not a finding about the data.
     overlap::warn_if_fragmented(&overlap, overlap.at, overlap::RUN_CONSEQUENCE);
 
-    let iter = iterate(&any, bars.clone(), &snapshots, &inputs, opts)?;
+    let iter = iterate(&any, sliced.bars, &sliced.snapshots, &inputs, opts)?;
     emit_montecarlo(&iter, opts)?;
 
     emit_run(&iter, opts, started, effective_freq)
@@ -594,6 +610,7 @@ fn eval_context<'a>(
         windowed: windowed_bars,
         seconds_per_bar,
         mc: opts.montecarlo.cloned(),
+        warmup_bars: None,
     })
 }
 
@@ -736,9 +753,7 @@ pub(crate) fn join_universe_by_time(
 fn print_basket_inputs_block(
     opts: &RunOptions,
     universe: &[Symbol],
-    start: &str,
-    end: &str,
-    bars: usize,
+    sliced: &Sliced,
     costs_active: bool,
     overlap: &Overlap<&str>,
 ) {
@@ -764,7 +779,7 @@ fn print_basket_inputs_block(
         );
     }
     style::field("params", opts.params);
-    style::field("period", &format!("{start} → {end} ({bars} bars)"));
+    style::field("period", &period_field(sliced));
     style::field("capital", &format!("{:.2}", opts.cash));
     if costs_active {
         style::field("costs", "active (commission/spread/slippage applied)");
@@ -772,6 +787,171 @@ fn print_basket_inputs_block(
         style::field("costs", "none (explicit)");
     }
     style::field("output", &opts.out_dir.display().to_string());
+}
+
+/// How many bars this strategy needs before its chains read settled — the
+/// depth `--from` reads back out of the series to warm them.
+///
+/// Deliberately the same quantity `--walkforward` skips at the head of a
+/// series (`stable_bars`, and `warm_up_bars` is its `--keep-unstable` twin), so
+/// the two features agree on what "settled" means rather than each inventing a
+/// number.
+fn warmup_need(
+    spec: &StrategySpec,
+    snapshots: &[fugazi::types::Snapshot<Symbol>],
+    cash: Real,
+) -> Result<usize> {
+    let schema = backtest::schema_from_snapshots(snapshots);
+    let mut built = spec
+        .try_build(cash, &schema, None)
+        .map_err(backtest::build_error)?;
+    // Basket and multi build their per-symbol chains lazily, on first sight of
+    // a symbol, so `stable_bars()` only reads true once a snapshot has gone
+    // through. The eager shapes must *not* be fed one — a pairs leaf that named
+    // no asset would hit the sole-atom guard on a multi-symbol snapshot. Same
+    // split as `optimize`'s `needs_probe_feed`.
+    if matches!(spec.kind(), "basket" | "multi")
+        && let Some(first) = snapshots.first()
+    {
+        built.update(first.clone());
+    }
+    Ok(built.stable_bars())
+}
+
+/// Refuse a `--from` that would re-run bars the resume state has already seen.
+///
+/// Resuming replays nothing: the state *is* the strategy at its last bar. A
+/// `--from` pointing at or before that bar therefore asks for two incompatible
+/// things at once, and silently replaying is the outcome most likely to be
+/// mistaken for a longer run.
+fn guard_resume_against(slice: &Slice, bars: &[String], opts: &RunOptions) -> Result<()> {
+    let (Some(state), Some(label)) = (opts.resume, opts.from_label) else {
+        return Ok(());
+    };
+    let Some(last) = state.last_bar else {
+        return Ok(());
+    };
+    let Some(first_evaluated) = bars.get(slice.eval_start) else {
+        return Ok(());
+    };
+    if calendar::parse_time_to_millis(first_evaluated).is_some_and(|ms| ms <= last) {
+        anyhow::bail!(
+            "`--from {label}` starts at or before the last bar in `--resume` \
+             ({first_evaluated} is not after the state's last bar) — resuming \
+             continues from that bar, so this would re-run history rather than \
+             extend it. Move `--from` past it, or drop `--resume`."
+        );
+    }
+    Ok(())
+}
+
+/// Resolve `--from`/`--until` against this run's joined bar stream, warning if
+/// evaluation had to start late and refusing a range that fights `--resume`.
+///
+/// Returns the whole stream untouched when neither bound was given, so an
+/// unsliced run takes exactly the path it always did.
+fn resolve_slice(
+    spec: &StrategySpec,
+    bars: &[String],
+    snapshots: &[fugazi::types::Snapshot<Symbol>],
+    opts: &RunOptions,
+) -> Result<Slice> {
+    let Some(range) = opts.range else {
+        return Ok(Slice::everything(bars.len()));
+    };
+    let need = if range.reads_back() {
+        warmup_need(spec, snapshots, opts.cash)?
+    } else {
+        0
+    };
+    let slice = range.resolve(bars, need)?;
+    guard_resume_against(&slice, bars, opts)?;
+    // Ungated by `--quiet`, like the overlap and cadence warnings: a run that
+    // measured a different period than it was asked for must say so even when
+    // the caller asked for silence.
+    if let Some(label) = opts.from_label
+        && let Some(warning) = daterange::short_warmup_warning(&slice, bars, label, need)
+    {
+        eprintln!("  {} {warning}", style::yellow("warn"));
+    }
+    Ok(slice)
+}
+
+/// The `period` line: the range that will be measured, and — when `--from`
+/// read bars back to settle the chains — how many bars went into that.
+///
+/// Naming the warm-up here is what keeps the console honest about the
+/// difference between "this run saw 900 bars" and "this run is *scored* on 700
+/// of them", which is otherwise invisible.
+fn period_field(sliced: &Sliced) -> String {
+    let (start, end, bars) = (sliced.start(), sliced.end(), sliced.evaluated_bars());
+    match sliced.warmup {
+        0 => format!("{start} → {end} ({bars} bars)"),
+        w => format!("{start} → {end} ({bars} bars, {w} warm-up)"),
+    }
+}
+
+/// A run's bar stream after `--from` / `--until`.
+///
+/// The warm-up prefix stays *attached* to both halves:
+/// [`backtest::run_iteration_resumable`] splits it off again using
+/// `EvalContext::warmup_bars`, so the labels and the snapshots cannot drift
+/// out of alignment on the way there.
+struct Sliced {
+    bars: Vec<String>,
+    snapshots: Vec<fugazi::types::Snapshot<Symbol>>,
+    /// Leading bars that warm the chains without being measured.
+    warmup: usize,
+}
+
+impl Sliced {
+    /// The labels that will actually be measured.
+    fn evaluated(&self) -> &[String] {
+        &self.bars[self.warmup.min(self.bars.len())..]
+    }
+
+    fn start(&self) -> &str {
+        self.evaluated().first().map_or("", |s| s.as_str())
+    }
+
+    fn end(&self) -> &str {
+        self.evaluated().last().map_or("", |s| s.as_str())
+    }
+
+    fn evaluated_bars(&self) -> usize {
+        self.evaluated().len()
+    }
+}
+
+/// The one place `--from` / `--until` is applied, shared by every shape's
+/// runner: resolve the range, record the warm-up depth on `inputs`, and hand
+/// back the bars to drive.
+///
+/// Without either bound this is a move and two comparisons — the unsliced run
+/// keeps its single resident copy of the stream.
+fn sliced_inputs(
+    spec: &StrategySpec,
+    bars: Vec<String>,
+    snapshots: Vec<fugazi::types::Snapshot<Symbol>>,
+    inputs: &mut EvalContext,
+    opts: &RunOptions,
+) -> Result<Sliced> {
+    let slice = resolve_slice(spec, &bars, &snapshots, opts)?;
+    let warmup = slice.warmup_bars();
+    inputs.warmup_bars = (warmup > 0).then_some(warmup);
+    if slice.is_everything(bars.len()) {
+        return Ok(Sliced {
+            bars,
+            snapshots,
+            warmup,
+        });
+    }
+    let fed = slice.fed();
+    Ok(Sliced {
+        bars: bars[fed.clone()].to_vec(),
+        snapshots: snapshots[fed].to_vec(),
+        warmup,
+    })
 }
 
 /// Inner-join the two legs' atom streams on their `time` label. Returns
@@ -804,16 +984,14 @@ fn join_pair_by_time(
 fn print_pairs_inputs_block(
     opts: &RunOptions,
     spec: &PairsStrategySpec,
-    start: &str,
-    end: &str,
-    bars: usize,
+    sliced: &Sliced,
     costs_active: bool,
 ) {
     style::print_section("inputs");
     style::field("strategy", opts.strategy_label);
     style::field("pair", &format!("{} / {}", spec.left, spec.right));
     style::field("params", opts.params);
-    style::field("period", &format!("{start} → {end} ({bars} bars)"));
+    style::field("period", &period_field(sliced));
     style::field("capital", &format!("{:.2}", opts.cash));
     if costs_active {
         style::field("costs", "active (commission/spread/slippage applied)");
@@ -1075,11 +1253,11 @@ fn writer(path: &Path) -> Result<csv::Writer<std::fs::File>> {
 
 /// The "inputs" block: what this run was given. Timing (start/finish) lives
 /// in the result block, since it's not an input.
-fn print_inputs_block(opts: &RunOptions, start: &str, end: &str, bars: usize, costs_active: bool) {
+fn print_inputs_block(opts: &RunOptions, sliced: &Sliced, costs_active: bool) {
     style::print_section("inputs");
     style::field("strategy", opts.strategy_label);
     style::field("params", opts.params);
-    style::field("period", &format!("{start} → {end} ({bars} bars)"));
+    style::field("period", &period_field(sliced));
     style::field("capital", &format!("{:.2}", opts.cash));
     if costs_active {
         style::field("costs", "active (commission/spread/slippage applied)");

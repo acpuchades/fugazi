@@ -32,6 +32,7 @@ fn ctx<'a>(cost_config: &'a CostConfig) -> EvalContext<'a> {
         windowed: None,
         seconds_per_bar: None,
         mc: None,
+        warmup_bars: None,
     }
 }
 
