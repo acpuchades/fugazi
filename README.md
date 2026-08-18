@@ -1136,6 +1136,14 @@ library so all four sit on one scale:
 *Lower is better. 200 000 samples, minimum of 7 reps × 5 interleaved passes;
 whiskers run up to the 25th percentile, since contention only ever adds time.*
 
+> **These figures are provisional.** They come from a single five-pass run taken
+> before `tools/bench_three_tier.py` learned to sample until its minima settle,
+> and that run reported a spread of up to 2.5× on the Rust tier. Rows separated
+> by more than ~20% are safe to read; rows inside that band — `sma`, `rsi`,
+> `atr`, `aroon`, and `ema` through the bindings — say "parity" and nothing
+> finer. Re-run `pixi run -e bench bench` on a quiet machine for figures that
+> carry a convergence verdict.
+
 The chart's common baseline is the C library. For a **Python** user the
 like-for-like comparison is against `talib`, TA-Lib's own bindings, since both
 cross a Python boundary — that is the last column:
@@ -1153,11 +1161,12 @@ cross a Python boundary — that is the last column:
 | `aroon` | 8.41 | 9.63 | 1.15× | 14.92 | 37.85 | 2.54× |
 | `bbands` | 4.13 | 13.85 | 3.36× | 11.29 | 44.68 | 3.96× |
 
-ns/sample. The Rust engine is at parity or better on `sma`/`ema`/`rsi`/`atr`
-while staying one-bar-at-a-time, and driving a full backtest allocates **zero
-times per bar** — a 200 000-bar run performs 29 allocations in total. Through the
-bindings `atr` is **faster than `talib`**, because a frame of OHLC columns is read
-in place and folded once, rather than three arrays being scanned separately.
+ns/sample. The Rust engine is at parity on `sma`/`ema`/`rsi`/`atr` while staying
+one-bar-at-a-time, and driving a full backtest allocates **zero times per bar** —
+a 200 000-bar run performs 29 allocations in total. Through the bindings `atr` is
+**faster than `talib`**, because a frame of OHLC columns is read in place and
+folded once, rather than three arrays being scanned separately; that one is a 2×
+gap, comfortably outside the noise.
 
 The **multi-output** block below the line is the same question asked of
 indicators that emit several lines at once. TA-Lib fills every output array in

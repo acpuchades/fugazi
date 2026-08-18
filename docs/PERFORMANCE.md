@@ -1435,10 +1435,27 @@ one pass over shared Wilder states against two and three full re-derivations.
 `aroon` was the one indicator that lost outright and no longer does. `bbands` is
 the deliberate loss, and it is the only one — see below.
 
-**Read the `aroon` row with the spread column in mind.** That pass reported
+**Read the whole table with the spread column in mind.** That pass reported
 `fugazi rs` spread up to 2.49×, and an earlier, quieter pass put the same binary
-at 9.30 against a C tier of 9.03 — i.e. parity. The honest claim is "no longer
-behind", not a specific ratio.
+at `aroon` 9.30 against a C tier of 9.03 — i.e. parity, not the 1.15× printed
+here. The honest claim for that row is "no longer behind", not a ratio.
+
+The five multi-output verdicts that the data *does* decide are the ones with an
+order of magnitude between them and the noise: `macd` at 0.12×, `dmi` and `adx`
+near 0.62×, and `bbands` at 3.36×. Nothing plausible about contention turns a
+0.12× into a loss.
+
+**This is also why `tools/bench_three_tier.py` no longer takes a fixed number of
+passes.** Quoting a table and then discovering a 3.5% row was a 20% row is the
+failure this whole section exists to prevent, and "take five passes" cannot
+detect it — the minimum's justification is that it *converges*, so the stopping
+rule has to be convergence. It now samples until no cell's minimum has improved
+by more than 1% for three consecutive passes, prints that verdict, records it in
+`performance-samples.json`, and prints a loud banner instead of a table if it
+hits its pass cap first. `tools/plot_performance.py` refuses to draw a chart from
+a samples file without a passing verdict, because a chart looks equally confident
+either way. **The numbers in this section predate that rule** and should be
+re-taken on a quiet machine.
 
 ### What changed — the engine
 

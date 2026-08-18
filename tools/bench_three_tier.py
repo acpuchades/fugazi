@@ -23,6 +23,16 @@ runs taken while the machine was loaded. It does not. That figure was wrong in
 fugazi's favour when quoted as a reason the comparison mattered, which is why
 the `repeat`/best-of logic in `main` now exists.)
 
+**The run decides for itself when to stop.** The reported figure is the minimum
+over every sample taken, and the justification for a minimum is that it converges
+with more sampling — so a fixed pass count is the wrong stopping rule, because it
+cannot say whether one more pass would have moved a cell. It does move them: a
+table quoting `aroon` at 9.63 ns/sample was re-measured at 9.30 by the same
+binary on a quieter minute. So `main` keeps taking passes until no cell's minimum
+has improved by more than 1% for three consecutive passes, and says so; if it
+hits `FUGAZI_BENCH_MAX_PASSES` first it prints a loud non-convergence banner
+rather than a table that looks like every other table.
+
 The comparison is deliberately *not* apples-to-apples in one respect, and the
 report says so: TA-Lib is **vectorised** — one call computes a whole array,
 with the loop in C and no per-sample dispatch. fugazi is **incremental** — one
@@ -359,9 +369,30 @@ def main() -> int:
     # polluted. A median folds the contended passes back in.
     repeat = int(os.environ.get("FUGAZI_BENCH_REPEAT", "5"))
 
+    # ...and how many more it may take if the minimum is still falling.
+    #
+    # A fixed pass count is the wrong stopping rule for a statistic whose whole
+    # justification is that more sampling makes it converge. Reporting after
+    # exactly `repeat` passes says nothing about whether pass `repeat + 1` would
+    # have moved a cell by 20%, and on this machine it does: a run quoted at
+    # `aroon` 9.63 ns/sample was re-measured at 9.30 by the same binary, because
+    # the first run's minimum had simply not converged. A number nobody can
+    # reproduce is not a number.
+    #
+    # So: keep taking passes until **no cell's minimum has improved by more than
+    # `TOL` for `STABLE_PASSES` consecutive passes**, then stop. That is a
+    # statement about the reported figures themselves — each one has survived
+    # three further attempts to beat it — rather than about how long the loop ran.
+    max_passes = int(os.environ.get("FUGAZI_BENCH_MAX_PASSES", "30"))
+    TOL = 0.01
+    STABLE_PASSES = 3
+
     o, h, lo, c = synth(N)
 
-    print(f"n = {N:,} samples, {REPS} reps x {repeat} passes, reporting the minimum\n")
+    print(f"n = {N:,} samples, {REPS} reps x >= {repeat} passes, reporting the "
+          f"minimum\nsampling until no cell improves by > {TOL:.0%} for "
+          f"{STABLE_PASSES} consecutive passes\n")
+    print(f"load average at start: {open('/proc/loadavg').read().split()[0]}\n")
 
     # Round-robin, not tier-by-tier: the machine drifts on a timescale of
     # minutes, so measuring all of one tier and then all of another compares two
@@ -369,12 +400,54 @@ def main() -> int:
     passes: dict[str, list[dict[str, list[float]]]] = {
         "talib_c": [], "talib_py": [], "fugazi_rs": [], "fugazi_py": [],
     }
-    for i in range(repeat):
-        print(f"  pass {i + 1}/{repeat}", file=sys.stderr)
+
+    def minima() -> dict[str, float]:
+        """Every tier's per-indicator minimum so far, flattened to one dict."""
+        out = {}
+        for tier, ps in passes.items():
+            for k, xs in pooled(ps).items():
+                out[f"{tier}/{k}"] = xs[0]
+        return out
+
+    stable, taken, converged = 0, 0, False
+    prev = {}
+    while taken < max_passes:
+        taken += 1
+        print(f"  pass {taken}"
+              f"{f' (stable {stable}/{STABLE_PASSES})' if stable else ''}",
+              file=sys.stderr)
         passes["talib_c"].append(talib_native(N))
         passes["fugazi_rs"].append(rust_tier(N))
         passes["talib_py"].append(talib_py_tier(c, h, lo))
         passes["fugazi_py"].append(fugazi_py_tier(c, h, lo, o))
+
+        cur = minima()
+        if taken >= repeat:
+            # Relative improvement of the worst-moving cell. Only cells present
+            # in both snapshots count; a tier that skipped cannot destabilise it.
+            moved = max(
+                ((prev[k] - v) / prev[k] for k, v in cur.items()
+                 if k in prev and prev[k] > 0),
+                default=0.0,
+            )
+            stable = stable + 1 if moved <= TOL else 0
+            if stable >= STABLE_PASSES:
+                converged = True
+                break
+        prev = cur
+
+    print(f"\nload average at end:   {open('/proc/loadavg').read().split()[0]}")
+    if converged:
+        print(f"converged after {taken} passes — no cell improved by more than "
+              f"{TOL:.0%} over the last {STABLE_PASSES}.\n")
+    else:
+        # Never silently. A capped run's figures are upper bounds that were still
+        # falling when the loop gave up, which is a different claim from the one
+        # the table normally makes.
+        print(f"*** DID NOT CONVERGE in {taken} passes (cap "
+              f"FUGAZI_BENCH_MAX_PASSES={max_passes}). The figures below are "
+              f"still falling — treat them as upper bounds, and re-run on a "
+              f"quieter machine before quoting them. ***\n")
 
     pool = {tier: pooled(ps) for tier, ps in passes.items()}
     native_ns = best_of(pool["talib_c"])
@@ -391,8 +464,9 @@ def main() -> int:
     os.makedirs(os.path.dirname(raw_path), exist_ok=True)
     with open(raw_path, "w") as f:
         json.dump(
-            {"n": N, "reps": REPS, "passes": repeat, "unit": "ns_per_sample",
-             "samples": pool},
+            {"n": N, "reps": REPS, "passes": taken, "converged": converged,
+             "tol": TOL, "stable_passes": STABLE_PASSES,
+             "unit": "ns_per_sample", "samples": pool},
             f, indent=1, sort_keys=True,
         )
     print(f"raw samples -> {os.path.relpath(raw_path, ROOT)}\n")

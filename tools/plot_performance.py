@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SAMPLES = os.path.join(REPO, "docs", "assets", "performance-samples.json")
@@ -144,6 +145,20 @@ def main() -> int:
         blob = json.load(f)
     data = blob["samples"]
     n = blob["n"]
+
+    # A chart looks equally confident whether or not the numbers behind it had
+    # settled, which is exactly why this refuses to draw one from a run that did
+    # not converge. `bench_three_tier.py` samples until no cell's minimum has
+    # improved by more than 1% for three consecutive passes and records the
+    # verdict; a samples file without it predates that rule, so its figures are
+    # one contended minute away from being someone's quoted table.
+    if blob.get("converged") is not True and "--allow-unconverged" not in sys.argv:
+        raise SystemExit(
+            f"{os.path.relpath(SAMPLES, REPO)} is not from a converged run"
+            f" ({'converged=' + str(blob['converged']) if 'converged' in blob else 'no convergence record — predates the check'}).\n"
+            "Re-run `pixi run -e bench bench` on a quiet machine, or pass\n"
+            "--allow-unconverged if you knowingly want a chart from provisional data."
+        )
 
     # The benchmark reports the *minimum*: contention only ever adds time, so the
     # fastest observation is the closest to the machine's actual capability.
