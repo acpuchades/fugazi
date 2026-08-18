@@ -1136,7 +1136,7 @@ library so all four sit on one scale:
 *Lower is better. 200 000 samples, minimum of 7 reps per pass; whiskers run up
 to the 25th percentile, since contention only ever adds time. The run takes
 passes until no figure has improved by more than 1% for three consecutive
-passes — this one converged after 10.*
+passes — this one converged after 27.*
 
 The chart's common baseline is the C library. For a **Python** user the
 like-for-like comparison is against `talib`, TA-Lib's own bindings, since both
@@ -1144,16 +1144,16 @@ cross a Python boundary — that is the last column:
 
 | | TA-Lib C | fugazi (Rust) | **rs vs C** | `talib` py | fugazi (Python) | **py vs py** |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `sma` | 1.34 | 1.34 | **1.01×** | 1.41 | 2.13 | 1.51× |
-| `ema` | 2.01 | 1.35 | **0.67×** | 2.07 | 2.03 | **0.98×** |
-| `rsi` | 4.71 | 4.60 | **0.98×** | 4.76 | 5.43 | 1.14× |
-| `atr` | 4.72 | 4.28 | **0.91×** | 12.19 | 6.16 | **0.51×** |
-| `stddev` | 3.28 | 10.66 | 3.25× | 3.44 | 12.78 | 3.71× |
-| `macd` | 12.35 | 1.45 | **0.12×** | 20.96 | 5.32 | **0.25×** |
-| `dmi` | 8.63 | 5.05 | **0.59×** | 16.04 | 11.94 | **0.74×** |
-| `adx` | 13.31 | 8.22 | **0.62×** | 20.49 | 21.90 | 1.07× |
-| `aroon` | 7.57 | 8.18 | 1.08× | 14.42 | 19.28 | 1.34× |
-| `bbands` | 3.71 | 12.49 | 3.36× | 10.80 | 19.51 | 1.81× |
+| `sma` | 1.39 | 1.40 | 1.01× | 1.47 | 1.72 | **1.17×** |
+| `ema` | 2.05 | 1.43 | **0.69×** | 2.22 | 1.65 | **0.74×** |
+| `rsi` | 4.72 | 4.66 | **0.99×** | 5.08 | 5.35 | **1.05×** |
+| `atr` | 4.85 | 4.61 | **0.95×** | 12.98 | 6.09 | **0.47×** |
+| `stddev` | 3.26 | 11.34 | 3.48× | 3.73 | 12.65 | 3.39× |
+| `macd` | 12.95 | 1.57 | **0.12×** | 21.31 | 5.81 | **0.27×** |
+| `dmi` | 9.58 | 5.87 | **0.61×** | 16.65 | 13.04 | **0.78×** |
+| `adx` | 14.33 | 9.43 | **0.66×** | 21.54 | 24.19 | 1.12× |
+| `aroon` | 8.78 | 9.38 | 1.07× | 15.42 | 21.22 | 1.38× |
+| `bbands` | 4.04 | 13.99 | 3.46× | 11.22 | 21.23 | 1.89× |
 
 ns/sample. The Rust engine is at parity or better on `sma`/`ema`/`rsi`/`atr`
 while staying one-bar-at-a-time, and driving a full backtest allocates **zero

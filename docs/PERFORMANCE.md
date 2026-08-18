@@ -121,114 +121,16 @@ usually the question.
 
 ## Baseline — `da252ff`
 
-<!-- BASELINE:START -->
-Saved as criterion baseline `v058` (`scripts/perf-compare.sh diff v058`).
+The pre-optimisation numbers (indicator cores, tree depth, driver, universe
+scaling, wallet, metrics, footprint) are **not reproduced here** — every one has
+been superseded by a later table, and keeping both invites quoting the wrong
+one. They are in git at `da252ff`:
 
-### Indicator cores — ns per `update`, 50 000 scalar samples
+    git show da252ff:docs/PERFORMANCE.md
 
-| Indicator | ns/sample |
-|---|---:|
-| `Ema(20)` | 1.65 |
-| `Macd(12,26,9)` | 1.77 |
-| `Sma(20)` | 5.12 |
-| `Rsi(14)` | 5.59 |
-| `StdDev(20)` | 20.5 |
-| `Bollinger(20)` | 22.6 |
-| `Atr(14)` (candle) | 26.5 |
-| `Percentile(100, p50)` | 49.4 |
-| `StdDev(100)` | 69.3 |
-
-`StdDev` scaling with period is the documented O(period) centred pass, not a
-bug. The `Sma` / `Ema` gap is *not* explained by that — `Sma` reads only `mean`,
-which is O(1); the 3× is `VecDeque` push/pop/index overhead against `Ema`'s two
-scalar registers.
-
-### Expression-tree depth — 2 000 bars, spec-built (dyn) single-asset strategy
-
-| depth | `update` | `is_ready` | `drive` | `is_ready` share of `drive` |
-|---:|---:|---:|---:|---:|
-| 1 | 0.61 ms | 0.077 ms | 0.97 ms | 8% |
-| 2 | 0.97 ms | 0.216 ms | 1.59 ms | 14% |
-| 4 | 1.79 ms | 0.748 ms | 2.98 ms | 25% |
-| 6 | 2.48 ms | 1.575 ms | 4.61 ms | 34% |
-| 8 | 3.28 ms | 2.588 ms | 6.49 ms | **40%** |
-
-The tree is a left spine, so node count is linear in depth. `update` tracks
-that (5.4× for 8× the nodes). `is_ready` does not: **33× for 8× the nodes.**
-That is `Combine::unstable_bars` calling `stable_bars()` on both children *and*
-`warm_up_bars()` on itself — which walks both children again — repeated per bar,
-through `Box<dyn Signal>` calls LLVM cannot fold.
-
-### End-to-end driver — 50 000 bars
-
-| Strategy | Rust | YAML | ratio |
-|---|---:|---:|---:|
-| SMA crossover | 23.0 ms | 63.9 ms | 2.78× |
-| MACD crossover | 36.2 ms | 82.1 ms | 2.27× |
-
-### Universe scaling — 2 000 bars, `MultiAssetStrategy`
-
-| symbols | `update` total | ns per symbol-bar | `drive` total | ns per symbol-bar |
-|---:|---:|---:|---:|---:|
-| 2 | 0.90 ms | 225 | 1.30 ms | 324 |
-| 8 | 4.06 ms | 254 | 5.74 ms | 359 |
-| 16 | 10.5 ms | 329 | 14.5 ms | 454 |
-| 32 | 31.4 ms | 491 | 38.6 ms | 603 |
-| 64 | 102 ms | 793 | 119 ms | 929 |
-
-Per-symbol-bar cost should be **flat**. It rises 3.5× from 2 to 64 symbols —
-the quadratic term is `snap.iter().find_map(...)` *inside* the per-symbol loop
-in `MultiAssetStrategy::update`, an O(N) scan done N times per bar.
-
-### `PaperWallet` — 20 000 calls
-
-| held positions | `equity` | `update` |
-|---:|---:|---:|
-| 1 | 27 ns | 80 ns |
-| 4 | 82 ns | 81 ns |
-| 16 | 291 ns | 87 ns |
-| 64 | 1 192 ns | 87 ns |
-
-`equity` is ~18.6 ns per held position — a SipHash lookup of a `String` key into
-`bars`, per position, per call. The driver calls it once per bar.
-
-### Metrics reduction — `RunReport` → `Metrics`
-
-| bars | total |
-|---:|---:|
-| 10 000 | 0.86 ms |
-| 100 000 | 11.4 ms |
-| 200 000 | 22.8 ms |
-
-Of the 22.8 ms at 200k bars, ~16.8 ms is **four independent sorts of the same
-return series** (`median_return`, `value_at_risk`, `conditional_value_at_risk`,
-`tail_ratio` each call `sorted_asc`, 4.1–4.4 ms apiece) and a further 0.66 ms is
-`drawdown_segments` recomputed by `calmar` and `recovery_factor` on top of the
-copy `from_report` already built.
-
-*(Superseded twice. F8 below removed three of the four sorts; Phase 11 removed
-the fourth — and found that the sorts were never the largest cost. Recomputed
-moments were. This table stays as the baseline it is.)*
-
-### Footprint — 200 000-bar single-asset run
-
-| case | allocs/bar | bytes/bar |
-|---|---:|---:|
-| building `Vec<Snapshot<String>>` | 3.00 | 201.0 |
-| building 8-symbol snapshots | 11.00 | 1 080 |
-| building 32-symbol snapshots | 37.01 | 4 056 |
-| driving the run (Rust strategy) | 5.00 | 44.0 |
-| driving the run (YAML strategy) | 5.00 | 44.0 |
-
-Sizes: `Candle` 40 B · `Atom` 88 B · snapshot entry 120 B · `Snapshot` handle 8 B.
-
-Peak RSS 98.0 MiB = **513 B/bar**, against 7.6 MiB (40 B/bar) of actual OHLCV.
-Snapshot construction alone is three allocations per bar — the `Arc` control
-block, the `Vec` buffer, and a fresh `String` copy of the same symbol.
-
-The Rust and YAML paths allocate **identically**, which is worth noting: the
-2.3–2.8× driver gap above is not allocation, it is the per-bar work.
-<!-- BASELINE:END -->
+What still matters from that commit is the *method*, above: identical codegen on
+both sides (`CARGO_PROFILE_BENCH_LTO=false CARGO_PROFILE_BENCH_CODEGEN_UNITS=16`),
+or you are measuring the profile rather than the change.
 
 ## Results — baseline → released v0.58.0
 
@@ -614,169 +516,14 @@ Not everything should move, and two things deliberately have not:
   so a builder compares what a subtree declared against what it built with no
   translation step. Nothing is paid for this at run time.
 
-## Plan — making the Python bindings efficient
+## The Python bindings plan — executed
 
-> **Superseded by Phase 8**, which found that most of what this plan set out to
-> attribute was page faults from copying the input columns. P1 and P2 below did
-> land and did help; P3 was measured and dismissed as negligible on an
-> instruction count that could not see the real cost. Kept as the record of how
-> the reasoning went, not as a to-do list.
-
-The bindings are the crate's primary interface and its worst tier: 3.4x `talib`
-on the scalar path and 6.5-9.9x on the candle path. This is the prioritised
-account of *why*, measured rather than guessed, and what to do in what order.
-
-### How these numbers were obtained
-
-Every case below was timed **in one process, round-robin, interleaved**, and the
-minimum of 21 rounds is reported. That is not fussiness: this machine has
-produced 5.42, 8.64, 12.04, 13.50 and 17.70 ns/sample for `talib.ATR` — fixed C
-code — within one session at load below 1. Numbers from separate runs cannot be
-compared here at all, and the first attempt at this analysis reached the opposite
-conclusion by doing exactly that.
-
-Per-case spread is 1.24-1.68x even interleaved, so **differences under ~2
-ns/sample in this table are not resolved**. Every item below is larger than that.
-
-### The decomposition
-
-Scalar path, `fz.sma(fz.identity(), 10).feed(1-D array)`:
-
-| | ns/sample |
-|---|---:|
-| `talib.SMA` | 1.50 |
-| input conversion alone | 0.69 |
-| whole `feed()` | **5.06** |
-| the same with a third erased level | 5.99 |
-
-Candle path, `fz.atr(14).feed(dict of OHLC)`:
-
-| | ns/sample | marginal |
-|---|---:|---:|
-| `talib.ATR` | 8.64 | |
-| read the frame's columns | 7.50 | +7.50 |
-| stream candles out of them | 15.09 | +7.59 |
-| ATR over a `Candle` chain, to a NumPy array | 34.51 | +19.42 |
-| the same over an `Atom` chain (what the carriers hold) | 58.82 | **+24.31** |
-| `fz.atr(14).feed(frame)` | 56.04 | — |
-
-The last two agree within spread, which settles an earlier suspicion that
-something extra was hiding in `feed()`. There is not; the probe *is* the product.
-
-### Priorities
-
-**P1 — `Atom` is the boundary type where `Candle` would do. 104 instructions/bar.**
-**Step 1 done** (bar indicators): `fz.atr(14).feed(frame)` went from **9.87× to
-3.08×** `talib.ATR`, measured interleaved in one process, spread 1.07–1.13×.
-`AnySource` now carries a bar-only `Candle` variant beside the `Atom` one, and
-`pair()` **lifts** a bar chain into the atom domain when the two are combined
-rather than rejecting the pair — `close().add(get_real(schema, "adj"))` was valid
-when both were one domain and stays valid. Field leaves (`close()`, `high()`, …)
-followed in **step 2**, via a `BarField` accessor in `python/src` (the core's
-`Field` requires an atom-emitting source, so there is no `Candle -> Real`
-accessor to reuse). Measured by instruction count, which is contention-immune:
-
-| | instr/sample |
-|---|---:|
-| `close()` on a frame, before | 125.3 |
-| `close()` on a frame, after | **48.4** |
-| `atr(14)` on a frame (control, unchanged) | 89.5 → 90.4 |
-
-**2.6× less work for the most common root in the API.** Note `close()` had become
-the *slowest* of the three after step 1 — it was the only one still atom-rooted —
-which is what a negative marginal in an earlier wall-clock run was trying to say
-before it got dismissed as noise.
-
-**Measurement note.** Attributing this by wall-clock failed repeatedly: on this
-machine `sma(identity())` read 5.06, 5.26 and 8.40 ns/sample across runs, and one
-derived marginal came out *negative* (ATR appearing cheaper than the trivial
-indicator it wraps — which turned out to be true, and was dismissed). Instruction
-counts through the Python interpreter work, but only when the measured work
-dominates: 200 iterations of a 200 000-sample feed gives a 4–6 G signal against a
-~0.9 G interpreter-startup control. The same approach **fails for `talib`**, whose
-vectorised C is so cheap that its signal sits under the startup noise — do not
-try to read a talib baseline this way.
-
-
-*Confirmed by instruction count*, because ~24 ns/sample is ~75 cycles and far more
-than an 88-vs-40-byte move should cost. `benches/icount.rs` grew `chain_candle`
-and `chain_atom` — the same ATR, the same single erased level, differing only in
-the boundary type — and net of the control, over 20 000 bars:
-
-| | instr/bar |
-|---|---:|
-| `Chain<Candle, Real>` | **22.0** |
-| `Chain<Atom, Real>` + the per-bar lift | **126.0** |
-
-5.7× the work, so it is work and not layout. `callgrind_annotate` puts 109 of
-those instructions inside `Atr::update` itself — the *callee* — not in the
-caller's construction, and a third workload (`chain_atom_direct`: same `Atom`
-input, but a leaf that keeps only the 40-byte `Candle`) splits it in two:
-
-| | instr/bar |
-|---|---:|
-| `Chain<Candle, _>` | 21.8 |
-| `Chain<Atom, _>`, Atom passed but not retained | 78.8 |
-| `Chain<Atom, _>` via `CurrentBar<Identity<Atom>>` — today | 125.8 |
-
-* **47 instr/bar is `Identity<Atom>`.** Its `update` is
-  `self.value = Some(input); self.value.clone()` — an 88-byte store *and* an
-  88-byte clone every bar, after which `CurrentBar` takes the 40-byte candle out
-  and drops the rest. `CurrentBar::new()` is `CurrentBar::of(Identity::new())`,
-  so every candle-rooted chain pays this.
-* **57 instr/bar is the by-value boundary.** `update(&mut self, input: Atom)`
-  moves 88 bytes into the vtable call and runs drop glue on the far side. This is
-  the same cost the `update(&Input)` breaking candidate would remove globally.
-
-The reason `Atom` is expensive to move at all is its layout:
-`overlays` is `Option<OverlayInfo>` **inlined**, not `Option<Arc<OverlayInfo>>`,
-and `OverlayInfo` holds two `Arc`s. So `Atom` is 88 bytes, `needs_drop` is
-`true`, and per bar the path builds the struct, memcpy's it into the vtable call
-by value, and then runs drop glue branching on two `Arc`s that are *always*
-`None` here. A `Candle` is 40 bytes and `needs_drop` is `false`.
-
-`AnySource::Candle` holds a `Chain<Atom, _>`, so each 40-byte `Candle` read from
-the frame is lifted into an 88-byte `Atom` and moved through the erased boundary
-per bar. `Atom` exists because overlay-reading leaves (`get`, `get_str`) need the
-overlay bundle — but the overwhelming majority of candle-rooted chains never read
-one. The fix is to carry `Chain<Candle, _>` when no overlay leaf is present and
-lift only when one is, which means the domain tag has to record that. Biggest
-single item, and it is the whole of the `atr` outlier.
-
-**P2 — `Vec<Option<Real>>` between the indicator and NumPy. ~10-19 ns/sample.**
-`feed_rows` collects into `Vec<Option<Real>>` (16 bytes/bar, 3.2 MB for 200 000
-bars) which `build_floats` then walks into the NumPy buffer. The output side
-already writes straight into `np.empty`; the intermediate is what is left.
-Streaming `update` results directly into that buffer removes a 3.2 MB write and
-read. Touches every `feed`, scalar and candle alike.
-
-**P3 — reading the columns costs 7.5 ns/sample.** With the buffer fast path a
-`memcpy` of 4 columns should be nearer 1. The suspects are four separate 1.6 MB
-allocations (with first-touch page faults on each call) and the up-to-three
-`get_item` probes per column name — each miss raising and discarding a Python
-`KeyError`. Cheap to attribute, so do it before assuming.
-
-**P4 — candle construction from columns costs 7.6 ns/sample.** Four strided
-reads and a 40-byte struct build per bar. Suggests the zip is not vectorising;
-worth an `icount` look before touching.
-
-**P5 — erasure depth on the scalar path, ~0.9 ns/level** (5.06 -> 5.99 for a
-third level). Already at the floor measured in *Phase 6*; nothing to win without
-fusing common shapes, and at this size it is below the noise. **Do not start
-here** — it is the item that looks most like "optimising the bindings" and is
-worth the least.
-
-### Sequence, and what would change it
-
-P1 then P2, because both are architectural and P1 is the larger; P3 and P4 are
-attribution tasks first and may turn out to be one shared cause (allocation and
-page-faulting the column buffers). Re-measure after each — the estimates above
-are marginal costs from one decomposition, and removing one item can change
-another's.
-
-Expected end state if P1 and P2 land: `atr` from 9.9x to roughly 2-3x `talib`,
-and the scalar path from 3.4x to nearer 2x. That would make the bindings' worst
-row better than their current best.
+This section held a decomposition of the Python boundary and a priority-ordered
+plan. **Every item in it has landed** (Phases 8-10 and the binding-budget section
+below), so it has been replaced by the outcome rather than kept as a to-do list
+that reads as outstanding work. The decomposition method it introduced — measure
+the boundary, subtract the engine, attribute the difference — is the one still
+used, and *The Python binding budget* below is its current form.
 
 ## Breaking candidates — measured, not yet done
 
@@ -1290,39 +1037,10 @@ read data that was already contiguous and already in memory, is visibly wrong on
 inspection. I ranked it third on the strength of an instruction count that said
 5.1/sample, when reading the code should have ranked it first.
 
-### The candle-frame input path — 24 ns/sample (superseded by Phase 8)
+### The candle-frame input path (superseded)
 
-The `atr` row through the Python bindings is 6.6×, against 1.7–3.6× for
-everything else. It is not ATR's fault, and finding out why took asking why the
-chart had a bar missing: `atr` is the only row fed a **frame** of OHLC columns
-rather than a 1-D series, and `feed()`'s frame path never got the
-buffer-protocol treatment the 1-D path did.
-
-Isolated by giving the frame path a trivial indicator, so only the conversion
-remains:
-
-| | ns/sample |
-|---|---:|
-| `fz.sma(fz.identity(), 10).feed(1-D array)` — whole pipeline | 5.61 |
-| `fz.close().feed(frame)` — **frame in, one projection out** | 24.32 |
-| `fz.sma(fz.close(), 10).feed(frame)` | 25.81 |
-| `fz.atr(14).feed(frame)` | 43.03 |
-
-So ~24 ns/sample is the frame conversion itself, and the indicator on top of it
-is 1.5–19. `frame_to_candles` reads each column through `column_to_vec` (which
-*does* take the fast path) and then materialises a `Vec<Candle>` — 8 MB for
-200 000 bars — which is then walked again, lifting each `Candle` into an 88-byte
-`Atom`. The suspects are that intermediate `Vec` and the per-bar `Atom`, in that
-order, but it has not been attributed properly yet.
-
-**Next win on the Python side**, and larger than anything left in the engine: it
-would take `atr` from 6.6× to roughly 2×, and improve every candle-rooted
-indicator a Python caller uses.
-
-Note the shape of the mistake that hid it. The ATR row was simply *absent* from
-the Python tier, which read as "the binding doesn't exist" — it does. A blank in
-a results table is not a neutral gap; it is a claim that something was not
-measurable, and it stopped anyone asking why.
+Superseded by Phase 8, which found the copy that dominated it. Kept only as a
+pointer so the number is not re-derived: `git log -S'24 ns/sample' docs/PERFORMANCE.md`.
 
 ### Where the Python time goes
 
@@ -1400,226 +1118,63 @@ better conditioned than the naive shortcut, but it has no numerically stable
 
 ## Phase 10 — multi-output indicators
 
-The comparison had never covered a multi-output indicator. Every row above is a
-single line of output, and the multi-output ones (`Macd`, `Bollinger`, `Aroon`,
-`Dmi`, `Adx`, `Keltner`, `Donchian`) are a different shape: they emit a value
-struct, several `WindowStats` / `WindowExtreme` cores run inside one `update`,
-and the Python boundary has to produce one array per line rather than one array.
+The comparison had never covered an indicator that emits several lines. TA-Lib
+fills every output array in one call and a fugazi multi-output `update` returns
+the whole value struct, so that is the unit of work on both sides; `dmi`/`adx`
+are deliberately asymmetric in *call count*, because TA-Lib has no combined entry
+point and must re-derive the same Wilder-smoothed true range per line.
 
-### Making it a fair question
+Current figures are in *The Python binding budget* below. What the phase changed:
 
-TA-Lib emits every line of `MACD` / `BBANDS` / `AROON` in **one call**, and a
-fugazi multi-output `update` returns the whole value struct. That is the
-like-for-like unit of work, and it is what the new rows time on both sides.
+**`WindowExtreme` was still a heap `VecDeque`.** Its monotonic deque can never
+hold more than `period` entries — every entry is a distinct sample index inside
+the window — so the capacity was known at construction all along, which is the
+same argument that moved `WindowStats` to a fixed ring years earlier. `Aroon`
+runs two of them: **17.31 → 10.72 ns/sample**, the largest single win here.
+`Donchian`, `Stochastic`, `RollingMax`/`RollingMin` and `BarsSinceHigh`/`Low`
+share the core. The conversion evicts the aged-out front *before* the dominated
+tail; the passes are independent, and that order is what keeps the deque at
+`period` entries rather than momentarily `period + 1`, which is what lets the
+ring be exactly `period` slots.
 
-Two workloads are deliberately asymmetric in *call count*, and that asymmetry is
-the measurement rather than a flaw in it. TA-Lib has no combined DI pair and no
-combined ADX triple, so `TA_PLUS_DI` and `TA_MINUS_DI` each re-derive the same
-Wilder-smoothed true range from scratch, and `TA_ADX` re-derives both DI lines on
-top. `Dmi`/`Adx` carry one set of Wilder states and emit the lines together. A
-caller who wants the pair pays for both calls, so both calls are timed.
+**The centred dispersion pass runs on four accumulators** (`LANES`), reducing the
+*full ring* when the window is full rather than the two halves `slices()`
+returns — at period 10 the split halves put six of ten samples in the scalar
+remainder and the lanes bought nothing. **15.18 → 12.29 ns/sample at period 20.**
+Not bit-identical to a single running total and cannot be (floats do not
+reassociate); it is the better-conditioned arrangement, and
+`variance_is_exact_at_market_scale` pins it against a two-pass reference.
 
-### Results
+**`Bollinger` asked for the mean twice** — `stats.mean()` then `stats.stddev()`,
+and `stddev` recomputes the mean to centre on it. `mean_and_stddev` /
+`mean_and_variance` return the pair from one pass; `ZScore` and the Kelly sizer
+had the same duplication.
 
-200 000 samples, **sampled to convergence** — 10 interleaved passes, after which
-no figure had improved by more than 1% for three consecutive passes. `rs vs C` is
-against native TA-Lib C, `py vs py` against the `talib` Cython bindings — one
-baseline per tier, as above.
+### Two things measured and left alone
 
-**The "before" columns are not converged**, and cannot be: re-measuring them
-would mean reverting the change. They are single-pass readings from the same
-harness on the same machine, so read them for direction and rough magnitude, not
-to two digits. Every *converged* claim in this section is a comparison down a
-column — `after` against `TA-Lib C`, both from the same 11-pass run.
+**`Indicator::value()` costs nothing worth a breaking change.** Every indicator
+stores what it just returned, and multi-output ones store it per line.
+`benches/breaking.rs` prototypes three MACDs over identical arithmetic:
 
-| | TA-Lib C | fugazi rs before | fugazi rs after | **rs vs C** | TA-Lib py | fugazi py before | fugazi py after | **py vs py** |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `macd` | 12.35 | 1.76 | **1.45** | **0.12×** | 20.96 | 24.04 | **5.32** | **0.25×** |
-| `dmi` | 8.63 | 6.72 | **5.05** | **0.59×** | 16.04 | 28.76 | **11.94** | **0.74×** |
-| `adx` | 13.31 | 10.19 | **8.22** | **0.62×** | 20.49 | 43.97 | **21.90** | **1.07×** |
-| `aroon` | 7.57 | 17.31 | **8.18** | 1.08× | 14.42 | 40.06 | **19.28** | 1.34× |
-| `bbands` | 3.71 | 20.40 | **12.49** | 3.36× | 10.80 | 46.40 | **19.51** | **1.81×** |
-
-The Rust engine **beats native TA-Lib C on three of the five** — by 8.5× on
-`macd`, where TA-Lib's own `TA_MACD` is slow (it allocates and fills two
-temporary buffers internally), and by ~1.6× on `dmi`/`adx`, where the win is
-structural: one pass over shared Wilder states against two and three full
-re-derivations.
-
-**`aroon` does not win, and an earlier draft of this section said it did.** That
-claim came from a five-pass run in which the C tier happened to read 9.03 and the
-Rust tier 9.30 — close enough to call parity, and wrong. Sampled to convergence
-the gap is stable and small — **1.15×** on an 11-pass run, **1.03×** on a
-27-pass one, so somewhere between "just behind" and "level", and never ahead. What is true
-is that it was roughly *twice* the C library before the ring-buffer change, so
-that change closed most of a 2× gap without closing all of it.
-
-**That correction is the point of the convergence rule, not an aside.** The
-earlier figure was not noise in the sense of being random — it was a minimum that
-had not finished falling, and it fell by different amounts in different tiers, so
-the *ratio* moved even as each tier's number improved. No amount of care at the
-moment of quoting catches that; only sampling until the minima stop moving does.
-Hence `tools/bench_three_tier.py` no longer takes a fixed number of passes: it
-samples until no cell's minimum has improved by more than 1% for three
-consecutive passes, prints that verdict, records it in
-`performance-samples.json`, and prints a loud banner instead of a table if it
-hits its pass cap first. `tools/plot_performance.py` **refuses** to draw a chart
-from a samples file with no passing verdict — a chart looks equally confident
-either way, which makes it ideal laundry for provisional data.
-
-Load average is echoed at both ends for the same reason. This run went
-0.51 → 1.79, which is why the figures are minima over 11 interleaved passes
-rather than a mean over one.
-
-`bbands` is the deliberate loss, and it is the only one — see below.
-
-### What changed — the engine
-
-**1. `WindowExtreme` was still a heap `VecDeque`.** `WindowStats` was converted
-to a fixed ring years ago and the note explaining why is still in the file; the
-rolling-extremum core beside it never got the same treatment. Its monotonic deque
-can never hold more than `period` entries — every entry is a distinct sample index
-inside the window — so the capacity was known at construction all along, and the
-growth checks and the allocation were paid per bar for flexibility nothing uses.
-`Aroon` runs two of them. **17.31 → 10.72 ns/sample, the single largest win
-here** — a back-to-back A/B in the same harness minutes apart, which is what
-isolates the change; the converged figure for the new code is 8.71, against a
-converged `TA_AROON` of 7.55. `Donchian`, `Stochastic`, `RollingMax`/`RollingMin`
-and `BarsSinceHigh`/`BarsSinceLow` all sit on the same core.
-
-The conversion reorders the two eviction passes — the aged-out front is dropped
-*before* the dominated tail rather than after. The passes are independent (one
-evicts on age, the other on dominance) so the surviving set is identical; doing it
-in this order is what keeps the deque at `period` entries rather than momentarily
-`period + 1`, which is what lets the ring be exactly `period` slots.
-
-**2. The centred dispersion pass runs on four accumulators.** One running total
-makes every add wait on the one before it, so the loop costs `period` × the FPU's
-add latency however tight the rest of it is — and at period 20 that chain was
-essentially the whole cost. Four accumulators cut it to `period / 4`.
-
-This one took two attempts, and the failed one is the instructive part. The
-obvious implementation reduces the window's **two contiguous halves** (the ring is
-rotated, so `slices()` returns a head and a tail). At period 10 that puts six of
-ten samples in the scalar remainder, back on a serial chain, and it measured **no
-improvement at all**. But a *full* window — the only state these reads are
-documented to be meaningful in — has every ring slot live, so the whole buffer is
-one contiguous run and rotation is irrelevant to a sum. Scanning the buffer
-instead of the halves is what made the lanes work: **15.18 → 12.29 ns/sample at
-period 20** (`cargo bench --bench stddev_tradeoff`, which carries the O(1)
-shortcut in the same binary as a control).
-
-This is **not bit-identical** to a single running total, and cannot be —
-floating-point addition does not reassociate. It is the *more* accurate
-arrangement (four partial sums each carry a quarter of the rounding, which is why
-pairwise summation is the standard remedy), and
-`variance_is_exact_at_market_scale` pins the result against a two-pass reference
-at every scale the crate cares about. What moved is the last ulp.
-
-**3. `Bollinger` asked for the mean twice.** `stats.mean()` then
-`stats.stddev()`, and `stddev` computes the mean again to centre on it — two
-`divsd`s for one quotient, and a divide is long-latency enough to show up beside
-a 20-element scan. `WindowStats::mean_and_stddev` / `mean_and_variance` return the
-pair from one pass; `ZScore` and the Kelly sizer had the same duplication.
-
-### What changed — the Python bindings
-
-The multi-output boundary cost was **~25–33 ns/sample** against ~1–1.6 for the
-scalar path — twenty times the price for three columns instead of one. Two causes,
-both in `python/src/carriers.rs`:
-
-**4. Every row was bounced through a `Vec`.** `update_slice_flat` holds a
-`chunks_mut(lines)` destination row that is already exactly the right length, and
-was writing into a scratch `Vec` (a `clear`, a capacity check per line) and then
-`copy_from_slice`-ing back out of it. `MultiOutput`'s primitive is now
-`write_row(&mut [Real])`, writing in place; the `Vec`-shaped `write_into` survives
-as a default for the per-bar `update_into`, which genuinely wants one.
-
-**5. The scatter was column-interleaved with a bounds check per element.** It
-walked the flat chunk in production order — one element into each of `lines`
-arrays megabytes apart, then on to the next row — so every column was touched on a
-fresh cache line every sample. Column-outer / row-inner gives each column one
-contiguous run per chunk and checks its bound once for the run; the strided read
-is off the 3 KB `flat` buffer, which stays in L1.
-
-| | before | after |
-|---|---:|---:|
-| `macd` (3 lines, series in) | 30.29 | **19.00** |
-| `adx` (3 lines, frame in) | 56.66 | **35.10** |
-| `aroon` (3 lines, frame in) | 50.61 | **32.59** |
-| `dmi` (2 lines, frame in) | 36.72 | **30.36** |
-| `bbands` (3 lines, series in) | 42.42 | **35.48** |
-
-**About 9.5 ns/sample of what is left is not ours**: allocating and first-touching
-three 1.6 MB NumPy arrays costs that on its own (0.24 ns/sample for one array,
-9.47 for three — the jump is page-fault, not arithmetic). TA-Lib's Python bindings
-pay it too, which is why `py vs py` on `macd` lands at parity while the absolute
-number stays large.
-
-### `bbands` is the deliberate loss, and the benchmark's own data proves it
-
-`Bollinger` inherits the O(period) centred variance, so it stays ~3.4× behind
-`TA_BBANDS`, which uses the `E[X²] − E[X]²` shortcut. The accuracy table above
-argues that trade from synthetic windows. The benchmark's own price series
-settles it:
-
-| over 4 981 twenty-bar windows of the benchmark walk | |
-|---|---|
-| fugazi, vs an exact float64 reference | **5.5e-15** relative error |
-| `talib.STDDEV`, same windows | **1.0** — it returns exactly `0.0` on **896 of them** |
-
-Not a synthetic corner: the walk drifts down through four orders of magnitude,
-and past a point the shortcut's two terms cancel completely and TA-Lib silently
-reports *no dispersion*. `ZScore` divides by that number. The 9.7 ns/sample is
-buying something.
-
-### Two things that were measured and left alone
-
-**`Indicator::value()` does not cost anything worth a breaking change.** The trait
-promises a `value()` that re-reads the last output without advancing, so every
-indicator stores what it just returned — and the multi-output ones store it per
-line, as separate `Option<Real>` fields. `benches/breaking.rs` prototypes three
-MACDs over identical arithmetic, differing only in the write-back:
-
-| variant | ns/bar | vs ceiling |
-|---|---:|---:|
-| `no_store` — returns and keeps nothing (the ceiling) | 2.351 | — |
-| `stored_lines` — the library's shape | 2.354 | +0.1% |
-| `stored_lines` + a `value()` read every bar | 2.379 | **+1.1%** |
-| `stored_struct` — one `Option<MacdValue>` | 2.289 | −2.6% |
-| `stored_struct` + a `value()` read every bar | 2.315 | −1.6% |
-
-**+1.1% is the ceiling**, and it already includes a `value()` read per bar that
-only the readiness walk performs. The stores are free because the loop is
-latency-bound: three dependent EMA recurrences pace it and the store ports idle in
-that shadow. Removing `value()` would touch `is_ready`, `Component`, every shared
-accessor and the whole Python carrier layer to buy noise.
-
-(The `stored_struct` rows come out *faster than storing nothing*, which cannot be
-a real effect. That is code layout — the same ~2.5% band "A measurement that
-lied" is about. All five sit inside one noise band. It does suggest collapsing the
-per-line `Option<Real>` fields into one `Option<MacdValue>` is free-to-positive if
-`value()` should stop being an N-way match, but that is a tidiness argument, not a
-performance one.)
-
-**`Shared` is a pessimisation for cheap sources.** `Shared`/`SharedComponent`
-exist so several accessors of one multi-output indicator advance it once per bar
-instead of once each. Measured on two MACD lines:
-
-| | ns/sample |
+| variant | ns/bar |
 |---|---:|
-| two independent `Component`s — what `src/spec/expr.rs` builds | 1.64 |
-| the same two lines off a `.shared()` handle | 21.88 |
+| `no_store` — returns and keeps nothing (the ceiling) | 2.351 |
+| `stored_lines` — the library's shape | 2.354 |
+| `stored_lines` + a `value()` read every bar | 2.379 |
 
-The shared cell is an `Arc<Mutex<_>>`, so each accessor pays an uncontended
-lock/unlock per bar — about 12 ns — and the mutex is not optional: `Clone` on the
-handle is an `Arc::clone`, so a strategy cloned onto another thread would
-otherwise race. **`Shared` only pays when the source costs more per bar than the
-lock**, which no leaf indicator in this crate does (`Macd` 1.6, `Bollinger` 13.9,
-`Adx` 8.7). The spec layer's choice to build independent `Component`s is therefore
-the right default, and is now measured rather than assumed. Both workloads stay in
-`benches/three_tier.rs` so the crossover can be re-checked if the cell ever stops
-being a mutex.
+**+1.1% at the ceiling**, and that already includes a `value()` read per bar that
+only the readiness walk performs. The stores are free because the loop is
+latency-bound on dependent EMA recurrences. All five variants sit inside one
+noise band, so the ordering means nothing beyond that.
+
+**`Shared` is a pessimisation for cheap sources.** Two MACD lines: 1.64
+ns/sample as two independent `Component`s (what `src/spec/expr.rs` builds),
+21.88 off a `.shared()` handle. The cell is an `Arc<Mutex<_>>`, so each accessor
+pays an uncontended lock per bar — ~12 ns — and the mutex is not optional, since
+`Clone` on the handle is an `Arc::clone` and a strategy cloned onto another
+thread would otherwise race. **It pays only when the source costs more per bar
+than the lock**, which no leaf indicator here does. Both workloads stay in
+`benches/three_tier.rs`.
 
 ## Phase 11 — the run-metrics reduction
 
@@ -1836,18 +1391,18 @@ in the binding, not a property of the design.
 
 From the converged run above:
 
-| | `py vs py` | was | |
+| | `py vs py` | this morning | |
 |---|---:|---:|---|
-| `macd` | **0.25×** | 1.05× | passes — 4× faster than `talib` |
-| `atr` | 0.51× | 0.46× | passes |
-| `dmi` | **0.74×** | 1.68× | passes — faster than `talib` |
-| `ema` | 0.98× | 0.97× | passes |
-| `adx` | **1.07×** | 2.00× | passes |
-| `rsi` | 1.14× | 1.15× | passes |
-| `aroon` | **1.34×** | 2.51× | **over**, and the only multi-output row still over |
-| `sma` | 1.51× | 1.59× | **over** — 1-D scalar path, ~0.4 ns of headroom in total |
-| `bbands` | 1.81× | 3.90× | **exempt** |
-| `stddev` | 3.71× | 3.72× | **exempt** |
+| `macd` | **0.27×** | 1.05× | passes — ~4× faster than `talib` |
+| `atr` | 0.47× | 0.46× | passes |
+| `ema` | 0.74× | 0.97× | passes |
+| `dmi` | **0.78×** | 1.68× | passes — faster than `talib` |
+| `rsi` | 1.05× | 1.15× | passes |
+| `adx` | **1.12×** | 2.00× | passes |
+| `sma` | **1.17×** | 1.59× | passes |
+| `aroon` | 1.38× | 2.51× | **over** — the only one, and structural |
+| `bbands` | 1.89× | 3.90× | **exempt** |
+| `stddev` | 3.39× | 3.72× | **exempt** |
 
 **The `was` column is not comparable and is kept only to show direction.** It
 predates the harness fix below, which found that the two Python tiers were
@@ -1884,196 +1439,62 @@ An exemption is written here rather than assumed, for the same reason
 reference value: a ratio that is over budget and a ratio that is over budget *on
 purpose* look identical in the table, and the difference is the entire point.
 
-### What is known about the four that are over
+### How the multi-output path got there, in one place
 
-Measured, not yet fixed — the reason this is a section and not a changelog entry:
+Four changes and one measurement fix, in the order they landed:
 
-* **The Rust side of the multi-output `feed` is not where it goes.**
-  `benches/multi_feed.rs` drives `Aroon` the way `feed_into_columns` drives it —
-  chunked fold into a flat row-major buffer, then a scatter into one full-length
-  output column per line — against a bare-indicator control in the same binary:
+| | effect |
+|---|---|
+| iterator scatter, then a **column-major fold** so the scatter is a copy | −18 to −22 instructions/sample |
+| candle fields filled **a column at a time**, hoisting an enum match out of the per-sample path | frame reader 48.2 → 17.1 instructions/sample |
+| **`write_strided`** — each value written once, straight to its slot | first change to move wall-clock: `macd` 1.05× → 0.81×, `dmi` 1.68× → 1.27× |
+| **one `(lines, n)` allocation**, columns as views | NumPy's allocator caches one stable-sized buffer and thrashes on several: 10.70 → 1.61 ns/sample for three columns |
+| **each Python tier in its own process** | the ratios before this are not comparable — see below |
 
-  | | ns/sample |
-  |---|---:|
-  | fold + 3-column scatter, **buffers reused** | **+2.77** over the bare indicator |
-  | first-touching 3 × 1.5 MB of **fresh** output | **+10.30** |
-  | the third output column alone (3 lines vs 2) | **+6.08** |
+Two findings from it are worth carrying forward.
 
-  So the fold and the scatter are nearly free, and what looks like "the cost of
-  the multi path" is mostly **page faults on output memory that has never been
-  written**. Those are paid *during* the scatter and cannot be moved elsewhere —
-  only made smaller, by writing fewer or smaller output arrays. `talib` pays the
-  same toll on its own two `AROON` arrays, which is most of its ~7 ns wrapper
-  cost.
+**The boundary was memory-bound before it was instruction-bound.** The first
+three changes removed 49-52 instructions/sample — a fifth of `dmi`'s total — and
+converged wall-clock did not move at all. The fourth removed *stores* from a loop
+the cache profile showed was store-bound, and moved wall-clock three to five
+times more than it moved instructions. **Removing work only helps if it is the
+work the loop is waiting on**, and the two instruments together are what tell you
+which. This is the mirror image of trap 8.
 
-  (An earlier revision of this list said the fold and scatter cost 1.8 ns and
-  stopped there. The number was not wrong but the framing was: it was measured
-  with the output buffers already warm from fifteen preceding workloads, so it
-  silently excluded the first-touch cost that dominates a real `feed`.)
+**The output allocation is not fugazi's to fix, and `talib` pays it too.**
+`talib.AROON` costs 7.84 ns/sample more than `talib.AROONOSC` purely for its
+second output array — very nearly its entire Python wrapper cost. Returning a
+*frame* rather than a tuple is what lets fugazi allocate once; the cost is that
+the columns share ownership, documented on `Multi.feed`.
 
-* **`Aroon` emits a third column `TA_AROON` does not.** `oscillator` is
-  `up - down`, and it costs **6.08 ns/sample** in output memory to hand the
-  caller a subtraction they could do themselves. Every multi-output indicator
-  should be asked whether each line earns its column.
-* **A fixed ~25 ns/sample appears between a one-column `feed` and a two-column
-  one**, and it does not scale with column count after that (1 → 2.3 ns of
-  binding overhead, 2 → ~28, 3 → ~32). It is a property of taking the multi path
-  at all.
-* **About 8 ns of that is NumPy allocation**, and it is a threshold rather than a
-  slope: allocating and first-touching one 1.6 MB array costs 0.5 ns/sample,
-  two cost 8.3, three cost 8.1. `talib` pays a version of the same toll, which is
-  why its own wrapper overhead on `AROON` is ~10 ns.
-* **Split by callgrind: the boundary is ~19 instructions/sample scalar, ~80-95
-  multi.** `tools/icount_python.py` measures instructions/sample through the
-  Python boundary; `benches/icount.rs` measures the bare engine
-  (`multi_none` / `dmi_candle` / `adx_candle` / `aroon_candle`, subtract the
-  control). Subtracting one from the other:
+**The two Python tiers were perturbing each other through a shared heap.** They
+ran in the driver's process, one after the other. Same data, same call, quiet
+machine: `talib.MACD` costs **29.60 ns/sample in a fresh process and 7.51** in
+one where fugazi has already run — a 4× swing in fixed C code behind a Cython
+wrapper, caused entirely by what the other tier left in the allocator. That
+coupled the `py vs py` column to fugazi's own allocation behaviour: change how
+fugazi allocates and its baseline moves with it.
 
-  | | engine | Python total | boundary |
-  |---|---:|---:|---:|
-  | `atr` (1 column, scalar path) | ~30 | 49.4 | **~19** |
-  | `dmi` (2 columns) | 124.0 | 202.4 | **78.4** |
-  | `adx` (3 columns) | 182.9 | 277.1 | **94.2** |
+It surfaced as an *impossibility*, not a wrong-looking number — `talib` through
+Python reading faster than the TA-Lib C library it calls. **That check is free
+and worth making every time this table is read**: `talib_py` must exceed
+`talib_C` in every row. Each tier now runs in its own interpreter.
 
-  That is the real shape of the problem: **the multi-output boundary costs four
-  to five times the scalar one**, and it is what any further work has to attack.
-  Wall-clock cannot see this — the whole column-major fold saved ~20
-  instructions/sample, well inside this machine's noise.
+The lesson generalises past this harness: **two implementations timed in one
+process are not independent when both allocate.** The faster one can make the
+slower one look good, and a change to either moves both. Fork, or accept that the
+ratio measures the pair.
 
-* **Two hypotheses tested and killed, both of which looked obvious.**
-
-  *The per-chunk `self.clone()`* in `update_slice_flat` — `Aroon` holds two
-  heap-allocating `WindowExtreme` boxes where `Adx`/`Dmi` hold only
-  `WilderState`s, so it looked like the reason `aroon` costs more. Removing the
-  clone entirely: **369.74 → 367.75 instructions/sample, i.e. 2.0.** Not it.
-
-  *That `aroon`'s boundary is 208.8 against `adx`'s 94.2* — which is what the
-  table above says if you run the same subtraction for `aroon`. It is an
-  artifact of the instruments, not a property of the code. **`Aroon`'s engine is
-  data-dependent and the two instruments feed different series**:
-  `benches/icount.rs` uses the LCG price walk, `tools/icount_python.py` a
-  cumulative-normal walk, and the monotonic deque does more work when extremes
-  turn over more often. Measured on the same build, one series against the
-  other:
-
-  | | normal walk | LCG walk | ratio |
-  |---|---:|---:|---:|
-  | `aroon` | 53.02 | 37.15 | **1.43×** |
-  | `adx` | 43.43 | 42.51 | 1.02× |
-  | `dmi` | 26.32 | 25.93 | 1.01× |
-
-  So the `dmi`/`adx` rows of the boundary table stand — those engines are
-  data-independent — and the `aroon` row does not. **Subtracting a cost measured
-  on one input from a total measured on another is only valid when the workload
-  is input-independent, and exactly one of these three is not.** Worth checking
-  before decomposing any indicator whose inner loop has a data-dependent trip
-  count: the rolling extremes, the quantile core, anything with a `while` over
-  a window.
-
-* **The remaining ~17 ns is unlocated.** Candidates, in the order they are worth
-  checking: the multi path parses its input frame **twice** (`row_count`, then
-  again in the match arm) where the scalar path parses once; it walks its output
-  by **index** where the scalar path walks a `cells.next()` iterator that cannot
-  run dry; and it acquires a `PyBuffer` per output column. None of these is
-  confirmed, and this document has a standing record of what happens when a cost
-  here is reasoned about rather than measured — see *How to measure without
-  fooling yourself*.
-
-### The boundary is memory-bound, and three instruction wins proved it
-
-Three changes landed against the multi-output boundary, each measured with
-callgrind and each real:
-
-| | `dmi` | `adx` | `aroon` |
-|---|---:|---:|---:|
-| iterator scatter, then column-major fold | −18 | −19 | −21 |
-| candle fields filled a column at a time | −31 | −31 | −31 |
-| **total, instructions/sample** | **−49** | **−50** | **−52** |
-
-That is 22% of `dmi`'s instruction count. Converged wall-clock across the same
-two points: **26.90 → 27.21 ns/sample**. `adx` 40.99 → 41.67. `aroon` 38.00 →
-38.15. Nothing moved, in either direction, beyond run-to-run drift.
-
-**So the Python multi-output boundary is not instruction-bound.** Roughly a fifth
-of the instructions came out and the wall-clock did not notice, which means the
-core was waiting on memory rather than retiring work. That is consistent with
-what the very first decomposition said and what nobody followed up on:
-allocating and first-touching output arrays costs **0.5 ns/sample for one array
-and 8.3 for two** — a threshold, not a slope, and the page faults are paid
-*during* the write, so they are attributed to whatever code happens to be doing
-the writing.
-
-The practical consequence is a change of target. **Further instruction-level work
-on this path is not worth doing** — the remaining `update_slice_flat` at 45
-instructions/sample and `for_each_chunk` at 17 could both go to zero and the
-`py vs py` column would not move. What is left to try is memory-side: one
-`(lines, n)` allocation instead of `lines` separate ones, so a three-column
-result costs one mapping and one fault stream rather than three.
-
-Note the shape of the mistake, since trap 8 in *How to measure without fooling
-yourself* is its mirror image. Trap 8 is "instruction counts miss page faults, so
-a real win can look like nothing". This is the converse: **a real instruction
-saving can be nothing**, on the same path, for the same reason. Neither
-instrument is wrong; each answers a question the other cannot, and the mistake
-both times was to let one of them stand in for the verdict.
-
-### The `py vs py` column was measuring the wrong thing
-
-The two Python tiers ran in the driver's process, one after the other. They
-interfere through the shared heap, and not slightly — same data, same call, quiet
-machine:
-
-| `talib.MACD` | ns/sample |
-|---|---:|
-| in a fresh process | **29.60** |
-| after fugazi has run in that process | **7.51** |
-
-**A 4× swing in fixed C code behind a Cython wrapper**, caused entirely by what
-the other tier left in the allocator. The `py vs py` column — the one the 1.25×
-budget is expressed in — was therefore coupled to fugazi's own allocation
-behaviour: change how fugazi allocates and its baseline moves with it.
-
-It surfaced as an impossibility rather than as a wrong-looking number. After the
-`(lines, n)` allocation landed, `talib` through Python read **faster than the
-TA-Lib C library it calls** — 7.44 against 12.40 ns/sample on `macd`. A wrapper
-cannot outrun what it wraps, so something was wrong with the measurement, not
-with the library. **That check is free and worth making every time this table is
-read**: `talib_py` must exceed `talib_C` in every row.
-
-Each Python tier now runs in its own interpreter, importing only its own library
-— the shape `rust_tier` and `talib_native` always had. Every row satisfies the
-check afterwards.
-
-The lesson generalises past this harness. Two implementations timed in one
-process are not independent when both allocate: **the faster one can make the
-slower one look good, and a change to either moves both.** Fork, or accept that
-the ratio is measuring the pair rather than either.
-
-### `aroon`'s third column, and why removing it is not the answer
-
-`Aroon` emits `{up, down, oscillator}`; `TA_AROON` emits two lines. The extra one
-is derived — `oscillator` is `up - down` — so dropping it looks like the obvious
-way to close the last multi-output gap. Measured, converged, with it removed:
-
-| | `py vs py` |
-|---|---:|
-| three columns (shipped) | 1.37× |
-| two columns (prototype) | **1.28×** |
-
-**−0.09×, and still over the 1.25× budget**, for a break to a documented output
-column. Not taken.
-
-The reason it is so small is worth keeping, because the estimate before
-measuring was −3.5 ns and the truth was −1.27. **The `(lines, n)` allocation had
-already captured most of it.** When each line was its own NumPy array, a third
-column cost a third of ~10.7 ns/sample of allocation; with one shared buffer the
-whole allocation is ~1.6 ns, so a third of it is half a nanosecond. The two
-changes are **substitutes, not complements** — and the second one was measured
-first, which is the only reason the trade looked good on paper.
-
-What remains in `aroon` is structural: one more output column than its TA-Lib
-counterpart, plus an engine at 1.05-1.15× of `TA_AROON`. Neither is a defect,
-and closing the ratio would mean changing what the indicator emits.
+**`aroon`'s third column is not the answer, and the reason matters.** `Aroon`
+emits `{up, down, oscillator}` where `TA_AROON` emits two, and `oscillator` is
+derived (`up - down`). Prototyped and measured, converged: dropping it takes
+`aroon` from 1.37× to **1.28×** — still over budget, in exchange for breaking a
+documented output column. Not taken. The estimate beforehand was −3.5 ns and the
+truth was −1.27, because **the `(lines, n)` allocation had already captured most
+of it**: with one shared buffer the whole allocation is ~1.6 ns, so a third of it
+is half a nanosecond. The two changes are *substitutes, not complements*, and the
+second was measured first — which is the only reason the trade looked good on
+paper. What remains in `aroon` is structural.
 
 ### Ruled out, so nobody re-tries them
 
