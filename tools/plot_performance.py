@@ -53,19 +53,30 @@ SERIES = [
     ("talib_py", "talib (Python)", "#e3b341"),
     ("fugazi_py", "fugazi (Python)", "#79c0ff"),
 ]
-INDICATORS = ["sma", "ema", "rsi", "atr", "stddev"]
+# Grouped, because the two halves answer different questions and the multi-output
+# rows are not comparable to the scalar ones bar-for-bar: a multi-output `update`
+# produces every line, so its TA-Lib counterpart is the one call that fills every
+# output array (and, for `dmi`/`adx`, the two and three calls TA-Lib needs
+# because it has no combined entry point). See docs/PERFORMANCE.md, Phase 10.
+GROUPS = [
+    ("single output", ["sma", "ema", "rsi", "atr", "stddev"]),
+    ("multi-output — every line, one pass", ["macd", "bbands", "aroon", "dmi", "adx"]),
+]
+INDICATORS = [i for _, group in GROUPS for i in group]
 
 W = 780
 LEFT, RIGHT, TOP = 78, 40, 76
 BAR_H, GAP = 11, 3
 ROW_H = len(SERIES) * (BAR_H + GAP) + 15
+HEAD_H = 22               # vertical space a group heading takes
 
 INK = "#8b949e"          # legible on white and on #0d1117
 
-# No clipping needed at the current numbers (the largest bar is ~3.6x), but the
-# caret logic stays: a future regression should read as clipped rather than as
-# exactly XMAX.
-XMAX = 4.0
+# One bar clips at this scale — `bbands` through the bindings, at ~10.8x — and it
+# reads as clipped (caret, true value in the label) rather than as exactly XMAX.
+# Widening the axis to fit it would compress every other bar into illegibility to
+# accommodate the single row the project has already decided to lose on purpose.
+XMAX = 5.0
 PLOT_W = W - LEFT - RIGHT
 
 
@@ -83,6 +94,45 @@ def percentile(sorted_vals: list[float], p: float) -> float:
     lo = int(h)
     hi = min(lo + 1, len(sorted_vals) - 1)
     return sorted_vals[lo] + (h - lo) * (sorted_vals[hi] - sorted_vals[lo])
+
+
+def render_row(add, stat, name: str, y0: float) -> None:
+    """Emit one indicator's label and its four bars, top-left at `y0`."""
+    base = stat["talib_c"][name][0]
+    add(f'<text x="{LEFT - 10}" y="{y0 + 2 * (BAR_H + GAP) + 2}" fill="{INK}" '
+        f'text-anchor="end" font-family="ui-monospace,SFMono-Regular,'
+        f'Consolas,monospace">{name}</text>')
+
+    for j, (key, _, colour) in enumerate(SERIES):
+        if name not in stat[key]:
+            continue
+        lo, p25 = stat[key][name]
+        val = lo / base
+        by = y0 + j * (BAR_H + GAP)
+        w = max(x(val) - LEFT, 1.0)
+        add(f'<rect x="{LEFT}" y="{by}" width="{w:.1f}" height="{BAR_H}" '
+            f'rx="2" fill="{colour}"/>')
+
+        # Upward whisker to the 25th percentile, drawn only when it is wide
+        # enough to mean anything at this scale.
+        wx = x(p25 / base)
+        if wx - (LEFT + w) > 1.5:
+            cy = by + BAR_H / 2
+            add(f'<line x1="{LEFT + w:.1f}" y1="{cy:.1f}" x2="{wx:.1f}" y2="{cy:.1f}" '
+                f'stroke="{INK}" stroke-width="1" opacity="0.8"/>')
+            add(f'<line x1="{wx:.1f}" y1="{by + 2:.1f}" x2="{wx:.1f}" '
+                f'y2="{by + BAR_H - 2:.1f}" stroke="{INK}" stroke-width="1" '
+                f'opacity="0.8"/>')
+
+        clipped = val > XMAX
+        text = f'{val:.2f}x{" &#8250;" if clipped else ""}'
+        # Inside the bar when it is wide enough, outside when it is not.
+        if w > 52:
+            add(f'<text x="{LEFT + w - 5:.1f}" y="{by + BAR_H - 1}" '
+                f'fill="#ffffff" text-anchor="end" font-size="11">{text}</text>')
+        else:
+            add(f'<text x="{max(wx, LEFT + w) + 5:.1f}" y="{by + BAR_H - 1}" '
+                f'fill="{INK}" font-size="11">{text}</text>')
 
 
 def main() -> int:
@@ -108,11 +158,13 @@ def main() -> int:
             if vals:
                 stat[key][ind] = (vals[0], percentile(vals, 0.25))
 
-    rows = [i for i in INDICATORS if i in stat["talib_c"]]
+    groups = [(title, [i for i in g if i in stat["talib_c"]]) for title, g in GROUPS]
+    groups = [(title, g) for title, g in groups if g]
+    rows = [i for _, g in groups for i in g]
     if not rows:
         raise SystemExit("no overlapping indicators in the samples file")
 
-    H = TOP + len(rows) * ROW_H + 34
+    H = TOP + len(rows) * ROW_H + len(groups) * HEAD_H + 34
     p: list[str] = []
     add = p.append
 
@@ -134,50 +186,27 @@ def main() -> int:
     # Plain gridlines. The 1.0x line used to be drawn dashed and highlighted as
     # "= TA-Lib C"; with the TA-Lib C bar itself in every row that was labelling
     # the same fact twice, so it is an ordinary gridline now.
-    for g in (1, 2, 3, 4):
+    for g in range(1, int(XMAX) + 1):
         gx = x(g)
         add(f'<line x1="{gx:.1f}" y1="{TOP - 8}" x2="{gx:.1f}" y2="{H - 30}" '
             f'stroke="{INK}" stroke-width="0.5" opacity="0.35"/>')
         add(f'<text x="{gx:.1f}" y="{H - 14}" fill="{INK}" '
             f'text-anchor="middle">{g}.0x</text>')
 
-    for i, name in enumerate(rows):
-        y0 = TOP + i * ROW_H
-        base = stat["talib_c"][name][0]
-        add(f'<text x="{LEFT - 10}" y="{y0 + 2 * (BAR_H + GAP) + 2}" fill="{INK}" '
-            f'text-anchor="end" font-family="ui-monospace,SFMono-Regular,'
-            f'Consolas,monospace">{name}</text>')
-
-        for j, (key, _, colour) in enumerate(SERIES):
-            if name not in stat[key]:
-                continue
-            lo, p25 = stat[key][name]
-            val = lo / base
-            by = y0 + j * (BAR_H + GAP)
-            w = max(x(val) - LEFT, 1.0)
-            add(f'<rect x="{LEFT}" y="{by}" width="{w:.1f}" height="{BAR_H}" '
-                f'rx="2" fill="{colour}"/>')
-
-            # Upward whisker to the 25th percentile, drawn only when it is wide
-            # enough to mean anything at this scale.
-            wx = x(p25 / base)
-            if wx - (LEFT + w) > 1.5:
-                cy = by + BAR_H / 2
-                add(f'<line x1="{LEFT + w:.1f}" y1="{cy:.1f}" x2="{wx:.1f}" y2="{cy:.1f}" '
-                    f'stroke="{INK}" stroke-width="1" opacity="0.8"/>')
-                add(f'<line x1="{wx:.1f}" y1="{by + 2:.1f}" x2="{wx:.1f}" '
-                    f'y2="{by + BAR_H - 2:.1f}" stroke="{INK}" stroke-width="1" '
-                    f'opacity="0.8"/>')
-
-            clipped = val > XMAX
-            text = f'{val:.2f}x{" &#8250;" if clipped else ""}'
-            # Inside the bar when it is wide enough, outside when it is not.
-            if w > 52:
-                add(f'<text x="{LEFT + w - 5:.1f}" y="{by + BAR_H - 1}" '
-                    f'fill="#ffffff" text-anchor="end" font-size="11">{text}</text>')
-            else:
-                add(f'<text x="{max(wx, LEFT + w) + 5:.1f}" y="{by + BAR_H - 1}" '
-                    f'fill="{INK}" font-size="11">{text}</text>')
+    y0 = TOP - HEAD_H
+    for title, group in groups:
+        y0 += HEAD_H
+        # Left-aligned from the plot's left edge, not right-aligned into the
+        # label gutter: these titles are sentences, and anchoring them `end` at
+        # `LEFT - 10` runs them off the left of the viewBox. The divider sits
+        # above the title so the title reads as belonging to the rows below it.
+        add(f'<line x1="{LEFT}" y1="{y0 - 18}" x2="{W - RIGHT}" y2="{y0 - 18}" '
+            f'stroke="{INK}" stroke-width="0.5" opacity="0.25"/>')
+        add(f'<text x="{LEFT}" y="{y0 - 5}" fill="{INK}" '
+            f'font-size="11" opacity="0.85">{title}</text>')
+        for name in group:
+            render_row(add, stat, name, y0)
+            y0 += ROW_H
 
     add('</svg>')
 

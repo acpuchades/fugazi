@@ -1142,11 +1142,16 @@ cross a Python boundary — that is the last column:
 
 | | TA-Lib C | fugazi (Rust) | **rs vs C** | `talib` py | fugazi (Python) | **py vs py** |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `sma` | 1.40 | 1.36 | **0.97×** | 1.44 | 2.34 | 1.62× |
-| `ema` | 2.01 | 1.36 | **0.68×** | 2.16 | 2.16 | **1.00×** |
-| `rsi` | 4.72 | 4.61 | **0.98×** | 5.10 | 5.75 | 1.13× |
-| `atr` | 4.68 | 4.58 | **0.98×** | 12.23 | 5.89 | **0.48×** |
-| `stddev` | 3.31 | 9.91 | 2.99× | 3.69 | 11.89 | 3.23× |
+| `sma` | 1.42 | 1.40 | **0.99×** | 1.53 | 2.38 | 1.56× |
+| `ema` | 2.12 | 1.49 | **0.70×** | 2.24 | 2.16 | **0.96×** |
+| `rsi` | 4.92 | 5.10 | 1.04× | 4.94 | 5.73 | 1.16× |
+| `atr` | 5.08 | 4.80 | **0.95×** | 12.52 | 5.89 | **0.47×** |
+| `stddev` | 3.41 | 11.84 | 3.47× | 3.71 | 13.14 | 3.55× |
+| `macd` | 13.54 | 1.60 | **0.12×** | 21.89 | 22.25 | 1.02× |
+| `dmi` | 9.20 | 5.80 | **0.63×** | 16.23 | 27.13 | 1.67× |
+| `adx` | 14.09 | 8.71 | **0.62×** | 21.04 | 42.52 | 2.02× |
+| `aroon` | 8.41 | 9.63 | 1.15× | 14.92 | 37.85 | 2.54× |
+| `bbands` | 4.13 | 13.85 | 3.36× | 11.29 | 44.68 | 3.96× |
 
 ns/sample. The Rust engine is at parity or better on `sma`/`ema`/`rsi`/`atr`
 while staying one-bar-at-a-time, and driving a full backtest allocates **zero
@@ -1154,11 +1159,22 @@ times per bar** — a 200 000-bar run performs 29 allocations in total. Through 
 bindings `atr` is **faster than `talib`**, because a frame of OHLC columns is read
 in place and folded once, rather than three arrays being scanned separately.
 
-`stddev` is the one real loss, and it is deliberate: fugazi makes a centred pass
-over the window instead of TA-Lib's O(1) `E[X²] − E[X]²` shortcut, which cancels
-away significant digits. At a five-figure price quoted to the cent that shortcut
-is already wrong by 1%, and at `mean = 1e9` it clamps the variance to zero. The
-tradeoff is [measured, not asserted](docs/PERFORMANCE.md#what-stddev-buys-with-its-2).
+The **multi-output** block below the line is the same question asked of
+indicators that emit several lines at once. TA-Lib fills every output array in
+one call, and a fugazi multi-output `update` returns the whole value struct, so
+that is the unit of work on both sides. `macd`, `dmi` and `adx` are *faster than
+the C library* — the last two structurally, because TA-Lib has no combined entry
+point and must re-derive the same Wilder-smoothed true range once per line, while
+`Dmi`/`Adx` carry one set of states and emit the lines together.
+
+`stddev` — and `bbands`, which inherits it — is the one real loss, and it is
+deliberate: fugazi makes a centred pass over the window instead of TA-Lib's O(1)
+`E[X²] − E[X]²` shortcut, which cancels away significant digits. It is not a
+corner case. On the very price series these figures are measured over,
+`talib.STDDEV` returns **exactly `0.0` for 896 of 4 981 windows** — silently
+reporting *no dispersion* — where fugazi is accurate to 5.5e-15. `ZScore` divides
+by that number. The tradeoff is
+[measured, not asserted](docs/PERFORMANCE.md#what-stddev-buys-with-its-2).
 
 The `py vs py` column was 1.6× to 7.8× not long ago; `ema` is now at parity and
 `atr` is twice as fast. Neither gain came from the indicator code. The first was
