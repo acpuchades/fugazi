@@ -1857,6 +1857,53 @@ Measured, not yet fixed — the reason this is a section and not a changelog ent
   slope: allocating and first-touching one 1.6 MB array costs 0.5 ns/sample,
   two cost 8.3, three cost 8.1. `talib` pays a version of the same toll, which is
   why its own wrapper overhead on `AROON` is ~10 ns.
+* **Split by callgrind: the boundary is ~19 instructions/sample scalar, ~80-95
+  multi.** `tools/icount_python.py` measures instructions/sample through the
+  Python boundary; `benches/icount.rs` measures the bare engine
+  (`multi_none` / `dmi_candle` / `adx_candle` / `aroon_candle`, subtract the
+  control). Subtracting one from the other:
+
+  | | engine | Python total | boundary |
+  |---|---:|---:|---:|
+  | `atr` (1 column, scalar path) | ~30 | 49.4 | **~19** |
+  | `dmi` (2 columns) | 124.0 | 202.4 | **78.4** |
+  | `adx` (3 columns) | 182.9 | 277.1 | **94.2** |
+
+  That is the real shape of the problem: **the multi-output boundary costs four
+  to five times the scalar one**, and it is what any further work has to attack.
+  Wall-clock cannot see this — the whole column-major fold saved ~20
+  instructions/sample, well inside this machine's noise.
+
+* **Two hypotheses tested and killed, both of which looked obvious.**
+
+  *The per-chunk `self.clone()`* in `update_slice_flat` — `Aroon` holds two
+  heap-allocating `WindowExtreme` boxes where `Adx`/`Dmi` hold only
+  `WilderState`s, so it looked like the reason `aroon` costs more. Removing the
+  clone entirely: **369.74 → 367.75 instructions/sample, i.e. 2.0.** Not it.
+
+  *That `aroon`'s boundary is 208.8 against `adx`'s 94.2* — which is what the
+  table above says if you run the same subtraction for `aroon`. It is an
+  artifact of the instruments, not a property of the code. **`Aroon`'s engine is
+  data-dependent and the two instruments feed different series**:
+  `benches/icount.rs` uses the LCG price walk, `tools/icount_python.py` a
+  cumulative-normal walk, and the monotonic deque does more work when extremes
+  turn over more often. Measured on the same build, one series against the
+  other:
+
+  | | normal walk | LCG walk | ratio |
+  |---|---:|---:|---:|
+  | `aroon` | 53.02 | 37.15 | **1.43×** |
+  | `adx` | 43.43 | 42.51 | 1.02× |
+  | `dmi` | 26.32 | 25.93 | 1.01× |
+
+  So the `dmi`/`adx` rows of the boundary table stand — those engines are
+  data-independent — and the `aroon` row does not. **Subtracting a cost measured
+  on one input from a total measured on another is only valid when the workload
+  is input-independent, and exactly one of these three is not.** Worth checking
+  before decomposing any indicator whose inner loop has a data-dependent trip
+  count: the rolling extremes, the quantile core, anything with a `while` over
+  a window.
+
 * **The remaining ~17 ns is unlocated.** Candidates, in the order they are worth
   checking: the multi path parses its input frame **twice** (`row_count`, then
   again in the match arm) where the scalar path parses once; it walks its output
