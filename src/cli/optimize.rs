@@ -392,6 +392,7 @@ fn run_single(
                 &sweep.rows,
             );
         }
+        warn_if_nothing_traded(&sweep.rows);
         print_result_block(sweep.rows.len(), started, finished);
     }
     Ok(())
@@ -601,6 +602,7 @@ fn run_multi_symbol(
                 &sweep.rows,
             );
         }
+        warn_if_nothing_traded(&sweep.rows);
         print_result_block(sweep.rows.len(), started, finished);
     }
     Ok(())
@@ -928,6 +930,40 @@ fn print_inputs_block(
 /// The "result" block for `optimize`: number of grid points evaluated, then
 /// wall-clock timing. Mirrors `run`'s result block so both commands look the
 /// same at the tail.
+/// Warn when not one grid point opened a trade.
+///
+/// Every cell in the metric columns is empty in that case, which reads exactly
+/// like a metric name that didn't resolve — and for a long time it *was*
+/// reported as one, because the metric catalogue was derived from a serialized
+/// sample and a degenerate run serializes the ratio away entirely. That is
+/// fixed at the source (`spec::metrics::resolve_metric_path`), but a sweep
+/// where nothing traded is still worth saying out loud: the grid is almost
+/// certainly wrong (a period longer than the data, a signal that can't fire),
+/// and an all-empty CSV does not say so.
+///
+/// stderr and ungated by `--quiet`, matching `overlap` / `cadence`: it is a
+/// finding about the result, not part of the summary the user asked to silence.
+fn warn_if_nothing_traded(rows: &[Row]) {
+    if rows.is_empty() {
+        return;
+    }
+    let trades = |m: &metrics::Metrics| m.trades.total;
+    let any_traded = rows.iter().any(|row| match &row.eval {
+        Evaluation::Whole(m) => trades(m) > 0,
+        Evaluation::Windowed(ws) => ws.iter().any(|w| trades(&w.metrics) > 0),
+    });
+    if any_traded {
+        return;
+    }
+    eprintln!(
+        "{} no grid point produced any trades — every metric cell is empty. \
+         Check that the parameter ranges can actually fire the strategy's \
+         signals over this data (a window longer than the series is the usual \
+         cause).",
+        style::yellow("warning:")
+    );
+}
+
 fn print_result_block(points: usize, started: SystemTime, finished: SystemTime) {
     println!();
     style::print_section("result");

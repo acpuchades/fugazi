@@ -237,3 +237,100 @@ fn a_single_point_grid_is_refused_and_points_at_run() {
         out.stderr
     );
 }
+
+// ---------------------------------------------------------------------------
+// A sweep where nothing traded
+//
+// `examples/candles.csv` is 30 bars, so a 400-bar SMA never warms up and no
+// grid point can fire a signal. Every metric cell is then empty — which used
+// to be reported as ``unknown metric `sharpe` ``, blaming a perfectly valid
+// name for an empty result, and pointing at the strategy file (`in: loading
+// strategy …`) when nothing was wrong with it. The same name resolved fine as
+// soon as one grid point traded, which is what made it so confusing to
+// diagnose.
+//
+// The cause was resolving `-m` names against a *serialized sample*: serde drops
+// a `None` metric, so a degenerate run's document has no `risk_adjusted.sharpe`
+// key at all. Names now resolve against `metrics::flatten`'s static catalogue.
+// ---------------------------------------------------------------------------
+
+/// Periods far longer than the series, so no point trades.
+const DEGENERATE_GRID: &str = "FAST=[300,320],SLOW=[400,420]";
+
+#[test]
+fn a_sweep_where_no_point_traded_still_resolves_its_metric_names() {
+    let (out, csv) = sweep(
+        "fugazi_opt_all_degenerate",
+        &["--grid", DEGENERATE_GRID, "-m", "sharpe"],
+    );
+    assert!(
+        !out.stderr.contains("unknown metric"),
+        "a valid metric name was reported as unknown:\n{}",
+        out.stderr
+    );
+
+    // The sweep must still produce its grid: one header + 2 x 2 points, with
+    // the metric column present and every cell empty. That is exactly what a
+    // sweep with *one* healthy point already did for its degenerate rows.
+    let rows = read_csv(&csv);
+    assert_eq!(rows.len(), 5, "expected a header + 4 points:\n{rows:#?}");
+    assert!(
+        rows[0].ends_with("risk_adjusted.sharpe"),
+        "metric column missing from the header: {}",
+        rows[0]
+    );
+    for row in &rows[1..] {
+        assert!(
+            row.ends_with(','),
+            "expected an empty metric cell on a degenerate point: {row}"
+        );
+    }
+}
+
+/// An empty grid is almost always a mistake, and an all-empty CSV does not say
+/// so on its own.
+#[test]
+fn a_sweep_where_no_point_traded_says_so() {
+    let (out, _) = sweep(
+        "fugazi_opt_degenerate_warns",
+        &["--grid", DEGENERATE_GRID, "-m", "sharpe"],
+    );
+    assert!(
+        out.stderr.contains("no grid point produced any trades"),
+        "expected the empty-sweep warning:\n{}",
+        out.stderr
+    );
+}
+
+/// ...and must stay quiet when something did trade, or it is just noise.
+#[test]
+fn a_sweep_that_traded_does_not_warn() {
+    let (out, _) = sweep(
+        "fugazi_opt_traded_no_warn",
+        &["--grid", "FAST=[2,3],SLOW=[5,8]", "-m", "sharpe"],
+    );
+    assert!(
+        !out.stderr.contains("no grid point produced any trades"),
+        "warned about an empty sweep that traded:\n{}",
+        out.stderr
+    );
+}
+
+/// A genuinely unknown name must still be rejected — the fix widens the
+/// catalogue, it does not stop validating against it.
+#[test]
+fn a_misspelled_metric_is_still_unknown() {
+    let (path, _) = scratch_file("fugazi_opt_bad_metric.yml", SWEEPABLE);
+    let out_csv = common::cli::unique_path("fugazi_opt_bad_metric").with_extension("csv");
+    let out = Cmd::new("optimize")
+        .arg(&format!("@{}", path.display()))
+        .series(&at("examples/candles.csv"))
+        .args(&["--output", &out_csv.to_string_lossy()])
+        .args(&["--grid", "FAST=[2,3],SLOW=[5,8]", "-m", "shrape"])
+        .fails();
+    assert!(
+        out.stderr.contains("unknown metric"),
+        "expected a typo to be caught:\n{}",
+        out.stderr
+    );
+}

@@ -901,11 +901,13 @@ pub struct MetricKey {
 }
 
 impl MetricKey {
-    /// Resolve `name` against `sample` — a validation pass that also captures
-    /// the canonical dotted path. Errors on unknown or ambiguous names.
+    /// Resolve `name` to its canonical dotted path. Errors on unknown or
+    /// ambiguous names.
+    ///
+    /// `sample` supplies the metric *catalogue*, not the values — see
+    /// [`resolve_metric_path`] for why the distinction matters.
     pub fn from_name(name: &str, sample: &Metrics) -> Result<Self> {
-        let value = serde_json::to_value(sample).context("serializing metrics")?;
-        let path = resolve_metric_path(&value, name)?;
+        let path = resolve_metric_path(sample, name)?;
         Ok(Self { path })
     }
 
@@ -928,75 +930,61 @@ impl MetricKey {
     }
 }
 
-/// Resolve one metric name to a canonical dotted path against the shape of `root`.
-/// A `.`-containing name is taken as a path verbatim; a short name walks the tree
-/// and errors if it matches zero (unknown) or several leaves (ambiguous).
-fn resolve_metric_path(root: &serde_json::Value, name: &str) -> Result<Vec<String>> {
+/// Resolve one metric name to its canonical dotted path.
+///
+/// Resolved against [`flatten`]'s **static key set**, not against a serialized
+/// [`Metrics`] document. Serde drops a `None` metric from the document, so a
+/// run that produced no trades serializes with no `risk_adjusted.sharpe` key
+/// at all — and resolving against *that* reports a perfectly valid metric name
+/// as unknown. `optimize` hit this whenever every grid point was degenerate:
+/// the sweep aborted with ``unknown metric `sharpe` ``, blaming the name
+/// instead of the empty result, while a sweep with one healthy point resolved
+/// the same name fine.
+///
+/// `flatten` lists every metric whether or not this run populated one, which
+/// is the question actually being asked — "is this a metric?", not "did this
+/// run have one?". It is also the crate's single enumeration of metric names
+/// (`tests/metrics_coverage.rs` fails when a new metric misses it), so there is
+/// no second catalogue to drift.
+///
+/// A `.`-containing name is matched as a whole path; a short name matches on
+/// the last segment and errors if it hits zero (unknown) or several
+/// (ambiguous).
+fn resolve_metric_path(sample: &Metrics, name: &str) -> Result<Vec<String>> {
+    let catalogue = flatten(sample);
+    let split = |key: &str| key.split('.').map(String::from).collect::<Vec<String>>();
+
     if name.contains('.') {
-        // Verify the path exists at a numeric leaf, but tolerate a missing
-        // omitted-because-degenerate metric by only failing when the path's
-        // *intermediate* segments miss.
-        let path: Vec<String> = name.split('.').map(String::from).collect();
-        verify_path(root, &path).with_context(|| format!("unknown metric `{name}`"))?;
-        return Ok(path);
+        return match catalogue.iter().find(|(key, _)| *key == name) {
+            Some((key, _)) => Ok(split(key)),
+            None => Err(anyhow!(
+                "unknown metric `{name}` (see `metrics.yml` for available names)"
+            )),
+        };
     }
-    let mut hits: Vec<Vec<String>> = Vec::new();
-    walk_leaves(root, &mut Vec::new(), name, &mut hits);
-    match hits.len() {
-        0 => Err(anyhow!(
+
+    let mut hits = catalogue
+        .iter()
+        .map(|(key, _)| *key)
+        .filter(|key| key.rsplit('.').next() == Some(name));
+    let Some(first) = hits.next() else {
+        return Err(anyhow!(
             "unknown metric `{name}` (see `metrics.yml` for available names)"
-        )),
-        1 => Ok(hits.pop().unwrap()),
-        _ => {
-            let paths: Vec<String> = hits.iter().map(|p| p.join(".")).collect();
-            bail!(
-                "metric `{name}` is ambiguous ({} matches: {}). Use a dotted path.",
-                hits.len(),
-                paths.join(", ")
-            )
-        }
+        ));
+    };
+    let rest: Vec<&str> = hits.collect();
+    if rest.is_empty() {
+        return Ok(split(first));
     }
+    let mut all = vec![first];
+    all.extend(rest);
+    bail!(
+        "metric `{name}` is ambiguous ({} matches: {}). Use a dotted path.",
+        all.len(),
+        all.join(", ")
+    )
 }
 
-/// Walk `v`, recording each numeric leaf whose immediate key matches `target`.
-fn walk_leaves(
-    v: &serde_json::Value,
-    cur: &mut Vec<String>,
-    target: &str,
-    hits: &mut Vec<Vec<String>>,
-) {
-    if let serde_json::Value::Object(map) = v {
-        for (k, child) in map {
-            cur.push(k.clone());
-            if k == target && child.is_number() {
-                hits.push(cur.clone());
-            }
-            walk_leaves(child, cur, target, hits);
-            cur.pop();
-        }
-    }
-}
-
-/// Follow `path` through the object tree; return `Ok(())` if every non-final
-/// segment resolves to an object (the final segment is allowed to be missing,
-/// which is how an omitted `skip_serializing_if` metric reads).
-fn verify_path(root: &serde_json::Value, path: &[String]) -> Result<()> {
-    let mut cur = root;
-    for (i, key) in path.iter().enumerate() {
-        let obj = cur.as_object().ok_or_else(|| {
-            anyhow!(
-                "path segment `{}` at position {i} isn't an object",
-                path[..i].join(".")
-            )
-        })?;
-        match obj.get(key) {
-            Some(next) => cur = next,
-            None if i + 1 == path.len() => return Ok(()),
-            None => bail!("path segment `{key}` at position {i} doesn't exist"),
-        }
-    }
-    Ok(())
-}
 
 /// Look up a dotted path against `root` and return its numeric value if all
 /// segments exist and the leaf is a number; `None` when any segment is missing
