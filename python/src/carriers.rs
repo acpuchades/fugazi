@@ -54,6 +54,12 @@ use crate::spec::*;
 /// nothing left to win and starts to matter on a thread with a small stack.
 pub(crate) const FOLD_CHUNK: usize = 128;
 
+/// Upper bound on a multi-output value struct's line count, so a single row can
+/// be staged on the stack. Three is the widest in the crate today (`MacdValue`,
+/// `AroonValue`, `AdxValue`, the three channel triples); the cap is checked at
+/// the one place it could be exceeded rather than trusted.
+pub(crate) const MAX_LINES: usize = 8;
+
 /// A neutral bar for initialising a chunk buffer; every slot is overwritten
 /// before it is read.
 pub(crate) const ZERO_BAR: Candle = Candle {
@@ -233,8 +239,16 @@ pub(crate) trait DynMulti<I>: Send + Sync {
     /// scratch — see [`MultiOutput`] for why this is not `-> Option<Vec<Real>>`.
     fn update_into(&mut self, input: I, out: &mut Vec<Real>) -> bool;
 
-    /// Fold a **slice**, writing `lines` values per sample row-major into `out`
+    /// Fold a **slice**, writing `inputs.len()` values per line **column-major**
+    /// into `out` (line `j` occupies `out[j * inputs.len() ..][.. inputs.len()]`)
     /// and `NaN` for warm-up rows.
+    ///
+    /// Column-major, not row-major, because the caller's destination is one
+    /// NumPy array *per line*: with this layout each line is already a
+    /// contiguous run and the scatter is a `copy_from_slice` — a memcpy — rather
+    /// than a strided per-element walk. Row-major made the caller transpose,
+    /// and the transpose was most of the multi-output boundary cost (callgrind:
+    /// ~185-340 instructions/sample against the scalar path's ~19).
     ///
     /// The multi-output twin of `DynIndicator::update_slice`, and it exists for
     /// the same reason: the implementation copies the concrete indicator into a
@@ -275,14 +289,22 @@ where
     fn update_slice_flat(&mut self, inputs: &[I], out: &mut [Real], lines: usize) {
         // `local` is the whole point — see the trait.
         let mut local = self.clone();
-        for (row, x) in out.chunks_mut(lines).zip(inputs) {
-            // Straight into the destination row: it is already exactly `lines`
-            // long, so the `Vec` this used to bounce through was a `clear`, a
-            // capacity check per line and a `copy_from_slice` back out, for a
-            // buffer that was ready to be written.
+        let rows = inputs.len();
+        // One row of lines at a time, on the stack. `write_row` wants the lines
+        // contiguous and the destination wants them `rows` apart, so the row
+        // lands here first and is fanned out. It is `MAX_LINES` doubles — the
+        // widest value struct in the crate emits three — so it stays in
+        // registers or L1, and the fan-out is a handful of stores into a buffer
+        // measured in kilobytes.
+        let mut row_buf = [0.0 as Real; MAX_LINES];
+        let row_buf = &mut row_buf[..lines];
+        for (r, x) in inputs.iter().enumerate() {
             match Indicator::update(&mut local, x.clone()) {
-                Some(o) => o.write_row(row),
-                None => row.fill(Real::NAN),
+                Some(o) => o.write_row(row_buf),
+                None => row_buf.fill(Real::NAN),
+            }
+            for (j, v) in row_buf.iter().enumerate() {
+                out[j * rows + r] = *v;
             }
         }
         *self = local;
@@ -1355,6 +1377,16 @@ impl AnyMulti {
         data: &Bound<'py, PyAny>,
     ) -> PyResult<Vec<Bound<'py, PyAny>>> {
         let lines = self.names().len();
+        // `update_slice_flat` stages one row on the stack; a value struct wider
+        // than that would silently truncate, so refuse instead. Nothing in the
+        // crate is close — three is the widest — and this is the one place a new
+        // one would arrive.
+        if lines > MAX_LINES {
+            return Err(PyTypeError::new_err(format!(
+                "multi-output indicator emits {lines} lines; the fold stages at \
+                 most {MAX_LINES} (raise MAX_LINES in python/src/carriers.rs)"
+            )));
+        }
 
         // Allocate every column first, then borrow all of their buffers at once.
         // The buffers must outlive the slices, hence the two bindings.
@@ -1381,26 +1413,25 @@ impl AnyMulti {
         // stays in L1.
         let mut flat = vec![0.0; FOLD_CHUNK * lines.max(1)];
         let mut row = 0usize;
-        // Column-outer, row-inner. The obvious nesting is the other way round —
-        // walk the flat chunk in the order it was produced — but that writes
-        // one element to each of `lines` arrays megabytes apart before moving
-        // on, so every column is touched on a fresh cache line every sample and
-        // the bounds check is re-paid per element. This way each column gets
-        // one contiguous run per chunk, the bound is checked once for the run,
-        // and the strided read is off `flat`, which is 3 KB and stays in L1.
+        // `flat` arrives **column-major** (see `update_slice_flat`), so each
+        // line is already a contiguous run of `n` values and this is a memcpy
+        // per column per chunk. There is no per-element work left here at all:
+        // no bounds check, no stride, no transpose. That transpose was most of
+        // the multi-output boundary — callgrind put the scalar path at ~19
+        // instructions/sample and this one at 185-340.
+        //
+        // `Cell<Real>` has the same layout as `Real`, so the destination can be
+        // viewed as a plain slice for the copy. That is what makes it one
+        // `memcpy` instead of `n` stores through `Cell::set`.
         let scatter = |flat: &[Real], n: usize, row: &mut usize| {
             for (j, col) in columns.iter().enumerate() {
                 // Clamp once per column per chunk. A caller-supplied frame whose
                 // length disagrees with `row_count` is the only way this bites,
                 // and it truncates rather than panicking, as before.
                 let end = (*row + n).min(col.len());
-                let dst = &col[(*row).min(end)..end];
-                // Both sides walked as iterators, for the reason
-                // `feed_into_numpy` walks its output with `cells.next()`: an
-                // indexed read of `flat` is bounds-checked once per *element*,
-                // and neither iterator can run dry — `flat` holds exactly
-                // `n * lines` values and `dst` at most `n`.
-                let src = flat[j..].iter().step_by(lines);
+                let start = (*row).min(end);
+                let dst = &col[start..end];
+                let src = &flat[j * n..j * n + dst.len()];
                 for (cell, v) in dst.iter().zip(src) {
                     cell.set(*v);
                 }

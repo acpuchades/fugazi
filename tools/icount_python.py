@@ -148,10 +148,43 @@ WORKLOADS: dict[str, tuple[str, str, str | None]] = {
     ),
     # Multi-output, O(1) per sample — the same class of work as `atr`, so the
     # difference between the two is the multi-output path itself.
+    #
+    # `atr` / `dmi` / `aroon` write one, two and three output columns from the
+    # same frame, which is what makes the three of them a progression rather
+    # than three unrelated rows. Wall-clock says a fixed ~25 ns/sample appears
+    # between one column and two and then barely grows for the third, and that
+    # the iterator scatter moved `dmi` but not the three-column pair. Neither
+    # claim is safe at that granularity on this machine; both are exactly what
+    # instruction counts can settle.
     "dmi": (
         "",
         "ta.dmi(14).feed(frame)",
-        None,
+        "(talib.PLUS_DI(high, low, close, 14), talib.MINUS_DI(high, low, close, 14))",
+    ),
+    # Three columns, and `TA_AROON` emits only two — so the reference is the
+    # closest thing a caller could actually call, not a like-for-like column
+    # count. Noted rather than corrected for: the column count is the variable
+    # under study.
+    "aroon": (
+        "",
+        "ta.aroon(14).feed(frame)",
+        "talib.AROON(high, low, 14)",
+    ),
+    # Three columns, and the reference needs three separate calls because
+    # TA-Lib has no combined entry point — each re-deriving the same
+    # Wilder-smoothed true range.
+    "adx": (
+        "",
+        "ta.adx(14).feed(frame)",
+        "(talib.PLUS_DI(high, low, close, 14), talib.MINUS_DI(high, low, close, 14), talib.ADX(high, low, close, 14))",
+    ),
+    # Three columns off a 1-D series rather than a frame, so the frame reader is
+    # out of the comparison entirely: whatever `macd` costs over `sma_1d` is the
+    # multi-output write path and nothing else.
+    "macd_1d": (
+        "",
+        "ta.macd(ta.identity(), 12, 26, 9).feed(close)",
+        "talib.MACD(close, 12, 26, 9)",
     ),
     # The scalar path: a 1-D value stream, no bar fields. `talib` sees the same
     # array, so this is the one comparison with no frame handling on either side.
