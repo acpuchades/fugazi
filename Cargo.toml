@@ -199,6 +199,14 @@ harness = false
 # The Rust half of the Python multi-output `feed` cost. Its own target rather
 # than a workload inside `three_tier`, because sharing an indicator type with a
 # measured row there changed that row by 68% — see the module docs.
+# Per-event latency distributions (p50..p99.9), warm against cold, rather than
+# amortised throughput. Its own target and not criterion: criterion reports a
+# mean with a confidence interval over a warm loop, which is the measure this
+# one exists to *not* produce.
+[[bench]]
+name = "latency"
+harness = false
+
 [[bench]]
 name = "multi_feed"
 harness = false

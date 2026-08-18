@@ -64,6 +64,7 @@ instrument, at the cost of a ~50× slowdown.
 | `breaking` | Prototypes for the proposed breaking changes, so each is a measured number rather than an argument. Currently `update(&Input)` and dropping `Indicator::value()`. |
 | `erasure` | What one level of type erasure costs, `PayloadValue` vs `Chain`, at 2/3/5 levels. The bench that justified Phase 6 — and that has to keep justifying it. |
 | `stddev_tradeoff` | Accuracy *and* cost of the centred variance against TA-Lib's `E[X²] − E[X]²` shortcut, so the choice rests on numbers. |
+| `latency` | Per-event latency distributions (p50…p99.9), warm against cold, for one `update` after an idle gap. The only target that measures latency rather than throughput; carries its own timer noise floor. |
 | `three_tier` | The Rust tier of the TA-Lib comparison, scalar **and** multi-output. Not criterion: it emits machine-readable ns/sample for `tools/bench_three_tier.py` to line up against the other tiers. Also carries the `Component`-vs-`Shared` pair (Phase 10). |
 
 ## Measurement conditions
@@ -1569,6 +1570,59 @@ the whole budget is 1.75 ns and the engine alone is 1.35, so the binding has
 0.4 ns — about a nanosecond and a half of headroom in total. It is the one row
 where the boundary cost is already near the floor and the target may simply be
 unreachable without a batch entry point.
+
+## Per-event latency — what the throughput numbers do not say
+
+Every other figure in this document is amortised throughput: total time over
+200 000 samples, divided. That is right for a backtest, which is a tight loop
+over a warm cache. It is the wrong measure for a live stream, where a bar
+arrives, is handled, and nothing runs until the next one — and between events the
+i-cache, branch predictors and TLB go cold.
+
+`cargo bench --bench latency` measures the other thing: one `update` per timed
+sample, `sleep(gap)` before each cold one, reported as percentiles. 20 000
+events, 1 ms gap, times in ns including one `Instant` bracket:
+
+| | warm p50 | warm p99.9 | cold p50 | cold p99.9 |
+|---|---:|---:|---:|---:|
+| `timer` (the floor) | 20.0 | 31.0 | 70.0 | 211.0 |
+| `sma` | 30.0 | 81.0 | 190.0 | 491.0 |
+| `atr` | 30.0 | 81.0 | 191.0 | 591.0 |
+| `macd` | 30.0 | 90.0 | 190.0 | 411.0 |
+| `rsi` | 40.0 | 101.0 | 211.0 | 561.0 |
+| `sma_erased` | 31.0 | 81.0 | 201.0 | 602.0 |
+
+**The amortised numbers overstate live per-event cost by roughly an order of
+magnitude.** `Sma::update` is 1.4 ns/sample in the four-tier table; the first
+update after a 1 ms gap costs ~190 ns at p50 and ~490 at p99.9. Even against the
+cold timer floor of 70 ns, that is ~120 ns of real work for an operation the
+throughput benchmark bills at 1.4. Nothing is wrong with either number — they
+answer different questions, and only one of them is about a live stream.
+
+Two things the harness has to say about itself, both of which shape how it is
+read:
+
+* **The clock is bigger than the thing being timed.** `Instant::now()` is ~20 ns
+  and an `Sma::update` ~1.4, so the `timer` row is the instrument's own noise
+  floor and is printed first. Rows whose warm p50 is not clear of it are marked
+  `NO` in a `resolved?` column rather than being allowed to read as results —
+  the same discipline `tools/icount_python.py` needed after it reported a
+  negative instruction count.
+* **The clock goes cold too**: 20 ns warm, **70 cold**, p99.9 of 211. So a cold
+  row carries a more expensive bracket than its warm twin, and the cold/warm
+  ratio does *not* fully cancel. `timer` is therefore repeated in the ratio
+  table — 3.5× at p50 — and every other ratio (5.3–6.5× at p50) should be read
+  against it, not alone.
+
+`max` is deliberately not reported as a ratio. It is one observation, and a warm
+run that happened to be preempted once yields a warm max above the cold max: the
+first version printed 0.0× and 308× on the same run.
+
+**What this does not yet cover**, and would need to before any latency claim is
+made: a whole strategy step rather than one indicator, the wallet path, and
+percentiles under a realistic event *arrival* distribution rather than a fixed
+sleep. It also measures a process that is otherwise idle, which flatters it —
+a real system has other work between events keeping some of the cache warm.
 
 ## The tricks in the codebase, and why they are there
 
