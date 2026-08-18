@@ -905,7 +905,7 @@ impl MetricKey {
     /// ambiguous names.
     ///
     /// `sample` supplies the metric *catalogue*, not the values — see
-    /// [`resolve_metric_path`] for why the distinction matters.
+    /// `resolve_metric_path` for why the distinction matters.
     pub fn from_name(name: &str, sample: &Metrics) -> Result<Self> {
         let path = resolve_metric_path(sample, name)?;
         Ok(Self { path })

@@ -65,7 +65,7 @@ use crate::types::Symbol;
 ///
 /// Distinguishing the two lets the ambiguous case be a *build error* instead,
 /// per the crate's "build errors are values" invariant. Every leaf already
-/// funnels through [`pick_root`] / [`build_pick`], so there is no second table
+/// funnels through `pick_root` / `build_pick`, so there is no second table
 /// to keep in sync — a new tag inherits the check for free.
 #[derive(Clone, Copy, Default)]
 pub struct Root<'a> {
