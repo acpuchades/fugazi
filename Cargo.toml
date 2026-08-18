@@ -193,6 +193,13 @@ harness = false
 name = "metrics_variants"
 harness = false
 
+# The Rust half of the Python multi-output `feed` cost. Its own target rather
+# than a workload inside `three_tier`, because sharing an indicator type with a
+# measured row there changed that row by 68% — see the module docs.
+[[bench]]
+name = "multi_feed"
+harness = false
+
 [[bench]]
 name = "footprint"
 harness = false

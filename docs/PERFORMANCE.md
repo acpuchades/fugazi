@@ -1676,11 +1676,33 @@ purpose* look identical in the table, and the difference is the entire point.
 
 Measured, not yet fixed — the reason this is a section and not a changelog entry:
 
-* **The Rust side of the multi-output `feed` is not where it goes.** A probe that
-  does exactly what `feed_into_columns` does — chunked fold into a flat
-  row-major buffer, then scatter into one full-length output column per line —
-  costs **1.8 ns/sample above the raw indicator, in the same binary**. The fold
-  and the scatter are effectively free.
+* **The Rust side of the multi-output `feed` is not where it goes.**
+  `benches/multi_feed.rs` drives `Aroon` the way `feed_into_columns` drives it —
+  chunked fold into a flat row-major buffer, then a scatter into one full-length
+  output column per line — against a bare-indicator control in the same binary:
+
+  | | ns/sample |
+  |---|---:|
+  | fold + 3-column scatter, **buffers reused** | **+2.77** over the bare indicator |
+  | first-touching 3 × 1.5 MB of **fresh** output | **+10.30** |
+  | the third output column alone (3 lines vs 2) | **+6.08** |
+
+  So the fold and the scatter are nearly free, and what looks like "the cost of
+  the multi path" is mostly **page faults on output memory that has never been
+  written**. Those are paid *during* the scatter and cannot be moved elsewhere —
+  only made smaller, by writing fewer or smaller output arrays. `talib` pays the
+  same toll on its own two `AROON` arrays, which is most of its ~7 ns wrapper
+  cost.
+
+  (An earlier revision of this list said the fold and scatter cost 1.8 ns and
+  stopped there. The number was not wrong but the framing was: it was measured
+  with the output buffers already warm from fifteen preceding workloads, so it
+  silently excluded the first-touch cost that dominates a real `feed`.)
+
+* **`Aroon` emits a third column `TA_AROON` does not.** `oscillator` is
+  `up - down`, and it costs **6.08 ns/sample** in output memory to hand the
+  caller a subtraction they could do themselves. Every multi-output indicator
+  should be asked whether each line earns its column.
 * **A fixed ~25 ns/sample appears between a one-column `feed` and a two-column
   one**, and it does not scale with column count after that (1 → 2.3 ns of
   binding overhead, 2 → ~28, 3 → ~32). It is a property of taking the multi path
@@ -1798,8 +1820,8 @@ Recorded so they are not re-attempted:
 
 ### How to measure without fooling yourself
 
-Ten traps, each of which produced a wrong answer in this codebase before it
-was caught. Note that **five of the ten are "you measured a stale binary"** —
+Eleven traps, each of which produced a wrong answer in this codebase before it
+was caught. Note that **five of the eleven are "you measured a stale binary"** —
 by far the most common way to be confidently wrong here.
 
 1. **`maturin develop` builds *debug*.** It is 7–10× slower than release and
@@ -1879,6 +1901,30 @@ by far the most common way to be confidently wrong here.
    confirm a transform applied, put a control in the same binary and A/B it, or
    disassemble the caller you actually benchmarked. A symbol that merely shares
    the function's name proves nothing.
+
+11. **A benchmark file's workloads are not independent — adding one can move the
+   others.** A diagnostic workload was added to the *end* of
+   `benches/three_tier.rs`, after every measured row. It cost that file's
+   `aroon` row **68%**: 9.50 → 15.94 ns/sample, reproducibly, on the same
+   machine minutes apart, with every other row in the table unmoved. Nothing ran
+   differently — the probe cannot perturb a workload that finished before it
+   started. It is a *compile*-time effect: both construct
+   `Aroon<Identity<Candle>>`, and a second call site of the same monomorphisation
+   changes what LLVM inlines.
+
+   This inverts the usual advice about controls. A control is supposed to be the
+   workload the change cannot touch — but *adding* the control is itself a change
+   to the binary, and it bites hardest when the control shares a type with the
+   thing being measured, which is exactly when it is most useful. Two defences:
+   put a diagnostic in **its own bench target** (each is its own crate, so it
+   cannot reach the others), and treat any absolute number from a file whose
+   workload list has changed as a fresh baseline rather than a comparable one.
+   Deltas *within* one binary stay valid, which is what `benches/multi_feed.rs`
+   relies on.
+
+   Note what nearly went wrong: the poisoned reading was the *later* one, so the
+   natural conclusion was "the committed figure was too optimistic". It was the
+   other way round — the published 8.71 was right, and the instrument had broken.
 
 The general defence, and the one that actually caught trap 3: **measure the same
 quantity by paths that share as little as possible.** Phase 6's per-level cost
