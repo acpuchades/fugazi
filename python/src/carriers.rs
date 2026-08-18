@@ -795,70 +795,54 @@ impl AnySource {
         match self {
             AnySource::Candle(s) => {
                 let cols = columns_from_frame(data)?;
-                numpy_filled(py, cols.len(py), |slice| {
+                numpy_filled(py, cols.len(py), |out| {
                     let mut buf = [ZERO_BAR; FOLD_CHUNK];
-                    // Folded straight into a `Real` scratch, not staged through
-                    // `[Option<Real>]`: `Option<f64>` has no niche, so that form
-                    // wrote 16 bytes per sample which this loop then read back,
-                    // branched on and wrote again. Same double hop
-                    // `MultiOutput::write_strided` removed from the multi path.
-                    let mut got = [0.0 as Real; FOLD_CHUNK];
-                    let mut cells = slice.iter();
+                    // Folded **straight into the output buffer** — no scratch,
+                    // no second pass. `numpy_filled` proves the exclusivity that
+                    // makes the `&mut [Real]` sound; see there.
+                    let mut at = 0usize;
                     cols.for_each_chunk(py, &mut buf, |chunk| {
-                        let got = &mut got[..chunk.len()];
-                        s.update_slice_flat(chunk, got);
-                        for v in got.iter() {
-                            if let Some(cell) = cells.next() {
-                                cell.set(*v);
-                            }
-                        }
+                        let take = chunk.len().min(out.len() - at);
+                        s.update_slice_flat(&chunk[..take], &mut out[at..at + take]);
+                        at += take;
                     });
                 })
             }
             AnySource::Atom(s) => {
                 let cols = columns_from_frame(data)?;
-                numpy_filled(py, cols.len(py), |slice| {
-                    let mut cells = slice.iter();
+                numpy_filled(py, cols.len(py), |out| {
+                    let mut it = out.iter_mut();
                     cols.for_each(py, |c| {
-                        if let Some(cell) = cells.next() {
-                            cell.set(Indicator::update(s, c.into()).unwrap_or(Real::NAN));
+                        if let Some(o) = it.next() {
+                            *o = Indicator::update(s, c.into()).unwrap_or(Real::NAN);
                         }
                     });
                 })
             }
             AnySource::Real(s) => {
                 let xs = reals_from_series(data)?;
-                numpy_filled(py, xs.len(py), |slice| {
+                numpy_filled(py, xs.len(py), |out| {
                     let mut buf = [0.0; FOLD_CHUNK];
-                    let mut got = [0.0 as Real; FOLD_CHUNK];
-                    let mut cells = slice.iter();
+                    let mut at = 0usize;
                     xs.for_each_chunk(py, &mut buf, |chunk| {
-                        let got = &mut got[..chunk.len()];
-                        s.update_slice_flat(chunk, got);
-                        for v in got.iter() {
-                            if let Some(cell) = cells.next() {
-                                cell.set(*v);
-                            }
-                        }
+                        let take = chunk.len().min(out.len() - at);
+                        s.update_slice_flat(&chunk[..take], &mut out[at..at + take]);
+                        at += take;
                     });
                 })
             }
             AnySource::Snapshot(s) => {
                 let snaps = snapshots_from_sequence(data)?;
-                numpy_filled(py, snaps.len(), |slice| {
-                    for (cell, snap) in slice.iter().zip(snaps) {
-                        cell.set(Indicator::update(s, snap).unwrap_or(Real::NAN));
+                numpy_filled(py, snaps.len(), |out| {
+                    for (o, snap) in out.iter_mut().zip(snaps) {
+                        *o = Indicator::update(s, snap).unwrap_or(Real::NAN);
                     }
                 })
             }
             AnySource::Const(c) => {
                 let v = *c;
                 let len = columns_from_frame(data)?.len(py);
-                numpy_filled(py, len, |slice| {
-                    for cell in slice {
-                        cell.set(v);
-                    }
-                })
+                numpy_filled(py, len, |out| out.fill(v))
             }
         }
     }

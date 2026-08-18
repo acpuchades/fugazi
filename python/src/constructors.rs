@@ -791,7 +791,7 @@ fn ndarray_from_values<'py>(
 pub(crate) fn numpy_filled<'py>(
     py: Python<'py>,
     len: usize,
-    fill: impl FnOnce(&[std::cell::Cell<f64>]),
+    fill: impl FnOnce(&mut [f64]),
 ) -> PyResult<Bound<'py, PyAny>> {
     let arr = empty_f64_array(py, len)?;
 
@@ -801,7 +801,31 @@ pub(crate) fn numpy_filled<'py>(
     let slice = buf
         .as_mut_slice(py)
         .ok_or_else(|| PyTypeError::new_err("numpy array is not writable"))?;
-    fill(slice);
+
+    // SAFETY: this hands `fill` a `&mut [f64]` over the buffer pyo3 models as
+    // `&[Cell<f64>]`, and the exclusivity that requires is **provable here**
+    // rather than assumed — which is why this is the only `unsafe` in the crate
+    // and why it lives in this function rather than at either call site:
+    //
+    //  * `arr` was created by `np.empty` three lines above. It has not been
+    //    returned, stored, or exposed to Python, so this stack frame holds the
+    //    only reference to it and no aliasing `&[Cell<f64>]` outlives the call.
+    //  * The `py` token proves the GIL is held for the whole of `fill`, so no
+    //    Python code runs and no other thread can obtain a reference to `arr`.
+    //  * `Cell<T>` is `repr(transparent)` over `UnsafeCell<T>`, itself
+    //    `repr(transparent)` over `T`, so the cast is layout-valid; the buffer
+    //    is C-contiguous `float64` of exactly `slice.len()` elements.
+    //
+    // What it buys: the callers write each value **once**, straight into the
+    // NumPy buffer, instead of folding into a scratch array and copying it out.
+    // `Cell::set` cannot be handed a slice, so the safe form forces that second
+    // pass. Measured on `sma` — see docs/PERFORMANCE.md.
+    //
+    // Do not widen this. The *input* side is the same shape and is deliberately
+    // left alone: there the array belongs to the caller, so exclusivity would be
+    // an assumption rather than a proof.
+    let out = unsafe { std::slice::from_raw_parts_mut(slice.as_ptr() as *mut f64, slice.len()) };
+    fill(out);
     Ok(arr)
 }
 
@@ -981,11 +1005,7 @@ pub(crate) fn build_multi(
     let arrays: PyResult<Vec<_>> = columns
         .iter()
         .map(|col| {
-            numpy_filled(py, col.len(), |slice| {
-                for (cell, &v) in slice.iter().zip(col) {
-                    cell.set(v);
-                }
-            })
+            numpy_filled(py, col.len(), |out| out.copy_from_slice(col))
         })
         .collect();
 
