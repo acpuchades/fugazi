@@ -167,31 +167,48 @@ Three snippets, each a step further than the last.
 
 **A signal.** Define it once; feed it one bar at a time.
 
-```rust
+```rust,no_run
 use fugazi::prelude::*;
 use fugazi::indicators::{Current, Ema, Rsi};
+use fugazi::sources::{Binance, SeriesSource, Interval, Timestamp};
 
+# async fn demo() -> Result<(), fugazi::sources::SourceError> {
 // "close crosses above its EMA-20, while RSI-14 is still under 70" — one object.
 let mut entry = Current::close()
     .crosses_above(Ema::new(Current::close(), 20))
     .and(Rsi::new(Current::close(), 14).below(70.0));
 
-# let feed: Vec<Candle> = Vec::new();
+let feed: Vec<Candle> = Binance::new()
+    .atoms("BTCUSDT", Interval::Day(1), Timestamp(1_704_067_200_000), None)
+    .await?
+    .into_iter()
+    .filter_map(|a| a.candle)
+    .collect();
+
 for candle in feed {
     entry.update(candle.into());
     if entry.is_true() { /* fire */ }
 }
+# Ok(()) }
 ```
 
 **A backtest.** Take a strategy off the shelf, hand it a wallet, read the metrics.
 
-```rust
+```rust,no_run
 use fugazi::prelude::*;
 use fugazi::backtest::run;
 use fugazi::metrics::{per_bar_returns, sharpe};
+use fugazi::sources::{Yahoo, SeriesSource, Interval, Timestamp};
 use fugazi::{strategies::trend, Snapshot};
 
-# let candles: Vec<Candle> = Vec::new();
+# async fn demo() -> Result<(), fugazi::sources::SourceError> {
+let candles: Vec<Candle> = Yahoo::new()
+    .atoms("AAPL", Interval::Day(1), Timestamp(1_704_067_200_000), None)
+    .await?
+    .into_iter()
+    .filter_map(|a| a.candle)
+    .collect();
+
 let mut strategy = trend::ma_crossover("AAPL", 10, 30);
 let mut wallet = PaperWallet::new(10_000.0);
 
@@ -203,6 +220,7 @@ let report = run(
 
 let returns = per_bar_returns(&report.equity_curve, report.initial_equity);
 println!("sharpe: {:?}", sharpe(&returns, 0.0, 252.0));
+# Ok(()) }
 ```
 
 **Live.** The same call against a real venue. One type changed.

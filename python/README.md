@@ -6,17 +6,139 @@
 [![License: MIT](https://img.shields.io/pypi/l/fugazi.svg)](https://github.com/acpuchades/fugazi/blob/main/LICENSE)
 [![Sponsor](https://img.shields.io/badge/sponsor-%E2%9D%A4-db61a2)](https://github.com/sponsors/acpuchades)
 
-Python bindings for [`fugazi`](..), a library of **incremental**,
-**composable** technical-analysis primitives.
+**One trading engine for research and production.** fugazi is a library of
+**incremental** technical-analysis primitives, a strategy layer, a backtester and
+a metrics suite — a Rust core, driven entirely from Python. Every indicator owns
+its state and advances one sample at a time in ~O(1), so the object you research
+with *is* the object you stream with. There is no vectorised research path and
+separate live path to keep in sync.
 
-- **Incremental** — every indicator and signal carries its own state and is
-  advanced one sample at a time with `update()`, in ~O(1) and with no
-  full-history recomputation. The same object serves live streaming and batch
-  backtesting.
-- **Composable** — indicators own their input source, so you build complex
-  indicators and signals by **nesting constructors**. There is no pipe or glue
-  step: an "EMA of an SMA of the close" is literally `ta.ema(ta.sma(ta.close(),
-  10), 20)`, and a trade condition is a single object you can feed bars.
+```python
+import fugazi as ta
+
+def golden():
+    return ta.ema(ta.close(), 12).crosses_above(ta.ema(ta.close(), 26))
+
+entries = golden().feed(df)      # research: one boolean column over the whole frame
+
+live = golden()
+for candle in stream:            # production: the same object, one bar at a time
+    if live.update(candle):
+        ...
+```
+
+`feed` is not a second implementation of `update` — it *is* `update`, with the
+loop moved to the Rust side. That is the whole pitch. The rest of this page is
+the evidence, then the manual.
+
+**Jump to:** [Why](#why-fugazi) · [Install](#install) · [Sixty seconds](#sixty-seconds) ·
+[Indicators](#guide-indicators-and-signals) · [Trading](#guide-trading) ·
+[Strategy documents](#guide-strategies-as-documents) · [Metrics](#metrics) ·
+[Data](#fetching-data) · [Performance](#performance)
+
+---
+
+## Why fugazi
+
+### The seam that usually breaks
+
+A Python quant stack is usually two programs wearing one name. Research is
+vectorised — a whole column at a time, the entire history in one C loop, indexed
+by a `DatetimeIndex`. Production is event-driven — a bar arrives on a websocket
+and you react to it. They are written differently, they drift, and the bugs that
+result are the expensive kind: the backtest nobody can reproduce live.
+
+fugazi removes the seam by making the *incremental* form the only form, then
+making it fast enough that you don't miss the vectorised one.
+
+| What you need | The usual answer | What that costs | fugazi |
+| --- | --- | --- | --- |
+| Fast indicators | `talib`, `pandas-ta` | Array-at-a-time. A live bar means recomputing the array, or writing a second implementation you now maintain twice | One `update()` per bar, and [faster than `talib`'s own bindings](#performance) on `ema` / `atr` / `macd` |
+| Only the new bars | Recompute the tail with a lookback fudge factor | You guess the warm-up, and a recursive indicator never fully agrees with the one-pass answer | [`feed` never resets](#batch-api--a-whole-series-at-once): chunked calls continue the same stream, and concatenate exactly |
+| A backtest | `vectorbt`, `backtesting.py` | A fill model expressed as array masks; the loop that trades live is a different program | [`Strategy(...).run(wallet, df)`](#the-declarative-strategy-builder) — the wallet is the only thing that changes |
+| Live execution | A broker SDK plus glue | The strategy gets rewritten against the SDK's callbacks | [`OkxWallet` / `CoinbaseWallet`](#resuming-a-run-and-running-against-a-venue) go where `PaperWallet` went |
+| Several symbols per bar | A DataFrame per symbol, then a join | Joining on the trading *date* manufactures cross-timezone lookahead | [`Snapshot`](#cross-asset-composition--snapshot-selector-and-pick) *is* the bar; `pick(sym)` projects one asset out |
+| Non-price inputs | Bolt on a column, hope | No types, no warm-up accounting | [Overlays](#computing-overlays--deriving-columns-from-a-series): typed `get(schema, key)` readers over any joined series |
+| A parameter sweep | A `for` loop over `itertools.product` | Single-threaded, and it overfits quietly | [`ta.optimize(..., jobs=N)`](#parameter-grid-optimize) with walk-forward and windowed ranking |
+
+### The case, in eight points
+
+**1. One object, batch and streaming.** `feed(df)` computes a whole frame;
+`update(candle)` advances one bar. Same object, same state, same numbers — and
+`feed` is **itself incremental**, so it never auto-resets. Feed it successive
+chunks and the concatenated output equals a single pass over the whole series,
+warm-up paid once. That is the property that lets a notebook and a live process
+share an implementation instead of agreeing to differ.
+
+**2. Incremental costs nothing.** The usual objection to per-bar dispatch is
+speed. Measured against `talib` — TA-Lib's own bindings, the like-for-like
+comparison since both cross a Python boundary — fugazi is **faster** on `macd`
+(0.27×), `atr` (0.47×), `ema` (0.74×) and `dmi` (0.78×), and within noise on
+`sma` (1.17×) and `rsi` (1.05×), while staying one bar at a time.
+[Full table, and the two places it loses →](#performance)
+
+**3. Composition is construction.** No pipe operator, no glue step, no DSL. An
+indicator owns its source, so "EMA-20 of the SMA-10 of the close" is exactly
+`ta.ema(ta.sma(ta.close(), 10), 20)` — one object, which you can feed bars, and
+whose `warm_up_bars()` is computed correctly across the entire nested chain.
+
+**4. It speaks your dataframe library.** pandas in → pandas `Series` out, index
+preserved. polars in → polars out. A `list`/`dict`/NumPy array in → `ndarray`
+out. Multi-line indicators return a `DataFrame`, signals a boolean `Series`.
+Column names match case-insensitively, warm-up bars come back as `NaN`, and the
+result assigns straight into `df[...]` because it lines up with your rows.
+
+**5. Multi-symbol and non-price data are first-class.** The unit of input is a
+`Snapshot` — every symbol's bar for one timestamp, each optionally carrying an
+*overlay* bundle (funding rate, open interest, market cap, a regime label, your
+own precomputed feature). Cross-asset expressions are ordinary indicators:
+`ta.close(ta.pick("BTC")) - ta.close(ta.pick("ETH"))` is a spread you can hand to
+anything that takes a source.
+
+**6. The whole engine is bound, not a sampler of it.** Five strategy shapes
+(single, pairs, basket, multi-asset, and a portfolio of N strategies netting onto
+one account), YAML strategy documents, parameter sweeps with walk-forward
+validation, Monte Carlo significance testing, cost models, bit-identical run
+resuming, live venue wallets, and six data providers. **No CLI, no Rust
+toolchain, no separate service** — `pip install fugazi` is the whole install, and
+the wheel has no required dependencies.
+
+**7. Unsettled numbers are refused by default.** Every indicator reports
+`warm_up_bars()` *and* `unstable_bars()` — the extra samples until an IIR seed's
+influence has decayed below 0.1%. An EMA-20 is defined after 1 bar and *settled*
+after 71. A strategy will not trade until every wired signal is past both, so no
+trade fires on a seed-contaminated value. There is exactly one opt-out,
+`.unstable()`.
+
+**8. Checked against the libraries you would otherwise be using.** Indicators are
+cross-validated against **TA-Lib**, equity-curve metrics against **empyrical**,
+wallet execution against **vectorbt**, and trade statistics against
+**backtesting.py**. Fixtures are committed and CI runs with
+`FUGAZI_REQUIRE_FIXTURES=1`, so a stale fixture fails the build instead of
+silently comparing nothing. Where fugazi deliberately *disagrees* with a
+reference — five of backtesting.py's headline stats answer a different question
+from the field sharing their name — the divergence itself is asserted. Every
+Python block on this page is executed by the test suite, so the docs cannot drift
+from the wheel either.
+
+### When fugazi is the wrong tool
+
+Worth saying plainly, so you don't find out in week three:
+
+- **You want plots.** It returns arrays and frames. Charting is yours —
+  matplotlib over the returned `Series` works fine, but nothing here draws.
+- **You need tick data or L2 microstructure.** The unit of time is a bar.
+- **You want a research *framework*.** No feature store, no sklearn pipeline
+  integration, no notebook widgets, no hyperparameter tracking. It is an engine
+  you call, not a platform you live in.
+- **You want protective stops from the `Strategy` builder.** Position-anchored
+  stops aren't bound yet — [drop to the wallet loop](#guide-trading) or write the
+  strategy as a [document](#guide-strategies-as-documents).
+- **Your hot path is `stddev` on huge windows.** fugazi's is ~3.4× `talib`'s, on
+  purpose — [the shortcut it refuses](#the-one-real-loss) returns exactly `0.0`
+  for 896 of 4 981 windows on the benchmark series.
+
+---
 
 ## Install
 
@@ -25,7 +147,11 @@ pip install fugazi
 ```
 
 Then `import fugazi`. Prebuilt wheels are published for Linux, macOS
-(Intel + Apple Silicon) and Windows.
+(Intel + Apple Silicon) and Windows; the wheel is `abi3-py311`, so one binary
+serves Python 3.11 and up, and it needs **no Rust toolchain and no required
+dependencies**. pandas, polars and NumPy are used when present — `feed` mirrors
+whichever you hand it and falls back to plain Python lists when none is
+installed.
 
 To build from a checkout instead (for development):
 
@@ -34,7 +160,99 @@ pip install maturin
 maturin develop --release   # editable install into the active virtualenv
 ```
 
-## Quick start
+---
+
+## Sixty seconds
+
+Three steps, each one further than the last. Nothing here needs the CLI — the
+data providers are part of the library.
+
+**A signal**, over real candles, computed both ways.
+
+```python
+import fugazi as ta
+
+df = ta.Binance().fetch(symbol="BTCUSDT", freq="1d",
+                        since="2023-01-01", output="pandas")
+
+# "close crosses above its EMA-20, while RSI-14 is still under 70" — one object.
+entry = (
+    ta.close()
+      .crosses_above(ta.ema(ta.close(), 20))
+      .and_(ta.rsi(ta.close(), 14).below(70.0))
+)
+
+df["entry"] = entry.feed(df)     # a boolean column, aligned to df.index
+print(df["entry"].sum(), "entry bars")
+```
+
+**A backtest.** Wire the signals onto a strategy, hand it a wallet, read the
+metrics.
+
+```python
+import fugazi as ta
+from fugazi.metrics import per_bar_returns, sharpe
+
+df = ta.Yahoo().fetch(symbol="AAPL", freq="1d",
+                      since="2020-01-01", output="pandas")
+
+strat = ta.Strategy("AAPL").long_on(
+    ta.sma(ta.close(), 10).crosses_above(ta.sma(ta.close(), 30)),   # enter
+    ta.sma(ta.close(), 10).crosses_below(ta.sma(ta.close(), 30)),   # exit
+)
+
+wallet = ta.PaperWallet(10_000.0)
+report = strat.run(wallet, df)
+
+returns = per_bar_returns(report.equity_curve, report.initial_equity)
+print(len(report.fills), "fills, sharpe", sharpe(returns, 0.0, 252.0))
+```
+
+**Live.** The same call against a real venue. One object changed.
+
+```py
+wallet = ta.OkxWallet.demo(key, secret, passphrase)   # or .mainnet(..) — real funds
+report = strat.run(wallet, live_bars)
+```
+
+That's honest for a one-shot drive — replay a known history against a real
+venue's prices and cost model, say. It is **not** how you keep a strategy
+running: `.run()` rebuilds the strategy from scratch each call, so calling it
+again as new bars arrive would silently re-warm every indicator instead of
+continuing. `.feed()` doesn't reach this layer either — it's an `Indicator`/
+`Signal` method, not a wallet or strategy one. The thing that actually carries
+state across calls is `run_resumable`, and it wants the strategy as a
+document — which is also a nudge toward the next form:
+
+```py
+state = None
+while True:
+    new_bars = poll_new_bars()                              # your own feed
+    report, state = spec.run_resumable(wallet, new_bars, resume=state)
+```
+
+[More on resuming and going live →](#resuming-a-run-and-running-against-a-venue)
+
+Rather keep the strategy as data than as code? The same thing as a document:
+
+```python
+import fugazi as ta
+
+spec = ta.load_spec("""
+symbol: AAPL
+long:
+  enter: !crosses_above { lhs: !sma { period: 2 }, rhs: !sma { period: 5 } }
+  exit:  !crosses_below { lhs: !sma { period: 2 }, rhs: !sma { period: 5 } }
+""")
+wave = [10, 9, 8, 7, 6, 7, 9, 12, 15, 18, 21, 22, 21, 20, 18, 15, 12, 10, 8, 6]
+snaps = [ta.Snapshot({"AAPL": ta.Candle(v, v, v, v, 1.0)}) for v in wave]
+metrics = spec.evaluate(ta.PaperWallet(1000.0), snaps)
+print(metrics["risk_adjusted"]["sharpe"])
+```
+
+---
+
+## Guide: indicators and signals
 
 You build indicators by **nesting constructors**. Every indicator is rooted at
 a leaf source — usually a candle field (`close()`, `high()`, `volume()`, ...):
@@ -149,7 +367,7 @@ node.reset()                   # call reset() to start a fresh, independent pass
 > slow = ta.ema(src, 20)   # `src` is still usable here
 > ```
 
-## Indicators
+### The catalogue
 
 | Constructor | Output |
 | --- | --- |
@@ -387,7 +605,7 @@ schema, out = ta.compute_overlays(snaps, "sma3: !sma { period: 3 }")
 assert out[2]["BTC"].overlays.get_real(schema.index_of("sma3")) == 20.0
 ```
 
-## Operators
+### Operators
 
 Combine value indicators into **other indicators**:
 
@@ -413,32 +631,7 @@ sig = a.and_(b)     # also: or_, xor_, not_(), changed()  — or  a & b | ~c
 sig.update(candle)  # -> bool
 ```
 
-## Example
-
-"Fast EMA crosses above slow EMA while RSI is not already overbought" — one
-signal, usable either way:
-
-```python
-import fugazi as ta
-
-def golden():
-    return (
-        ta.ema(ta.close(), 12)
-          .crosses_above(ta.ema(ta.close(), 26))
-          .and_(ta.rsi(ta.close(), 14).below(70.0))
-    )
-
-# streaming: react bar by bar
-signal = golden()
-for bar in stream:
-    if signal.update(bar):
-        print("entry signal")
-
-# batch: a boolean Series/array over the whole frame
-entries = golden().feed(df)
-```
-
-## Trading: the wallet
+## Guide: trading
 
 The strategy layer is exposed two ways. For the classic single-asset shape
 there's a declarative **`Strategy`** builder you `run` over a wallet (below);
@@ -682,7 +875,7 @@ compare with mirrored sense — the short side stops out when the spread rises
 *above* its level. `on` / `spread_stop_loss` / `spread_take_profit` remain valid
 as aliases for the long-spread side.
 
-## YAML strategy specs — `load_spec`, `optimize`, walkforward
+## Guide: strategies as documents
 
 The CLI's YAML surface (see the crate root's `strategy.yml` examples) is
 available natively from Python. `ta.load_spec(text)` parses a spec
@@ -1259,3 +1452,83 @@ The flat `ta.fetch` carries both trees as their own provider ids —
 `provider="binance-vision"` for spot and `provider="binance-vision-futures"` for
 the USD-M tree — matching the CLI. The explicit `ta.BinanceVision(market=...)`
 constructor stays for the `base_url` override.
+
+## Performance
+
+An incremental engine is usually the slow choice in Python doubly over: a
+vectorised library runs one C loop with no per-sample dispatch *and* no
+per-sample trip across the FFI boundary, while fugazi pays both — a Rust
+function call per bar, wrapped in a Python call per batch. It turns out not to
+cost much, and on four of ten indicators it's outright faster than `talib`.
+
+### Throughput, against `talib`
+
+`talib` — TA-Lib's own Cython bindings — is the fair baseline for a Python
+caller, since both sides cross the same kind of boundary. `tools/bench_three_tier.py`
+drives TA-Lib's C library, the Rust engine, and the Python bindings from one
+input, 200 000 samples, median of 7:
+
+| | TA-Lib C | fugazi (Rust) | `talib` py | fugazi (Python) | **py vs py** |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `sma` | 1.39 | 1.40 | 1.47 | 1.72 | 1.17× |
+| `ema` | 2.05 | 1.43 | 2.22 | 1.65 | **0.74×** |
+| `rsi` | 4.72 | 4.66 | 5.08 | 5.35 | 1.05× |
+| `atr` | 4.85 | 4.61 | 12.98 | 6.09 | **0.47×** |
+| `stddev` | 3.26 | 11.34 | 3.73 | 12.65 | 3.39× |
+| `macd` | 12.95 | 1.57 | 21.31 | 5.81 | **0.27×** |
+| `dmi` | 9.58 | 5.87 | 16.65 | 13.04 | **0.78×** |
+| `adx` | 14.33 | 9.43 | 21.54 | 24.19 | 1.12× |
+| `aroon` | 8.78 | 9.38 | 15.42 | 21.22 | 1.38× |
+| `bbands` | 4.04 | 13.99 | 11.22 | 21.23 | 1.89× |
+
+ns/sample. `atr`, `macd`, `dmi` and `ema` beat `talib` outright. `macd`, `dmi`
+and `adx`'s Rust column already beats the C library — TA-Lib has no combined
+entry point for them and re-derives shared state once per line, where fugazi's
+multi-output indicators carry one set of states and emit every line together —
+and through the bindings a fugazi `feed` returns that whole multi-output block
+as *one* frame from one allocation, where `talib` returns a tuple of
+independently-allocated arrays: measured alone, that difference is 10.70
+ns/sample against 1.61.
+
+### Where the boundary cost went
+
+Early on, crossing into Python cost far more than the indicator itself — a
+`feed()` call copied every input column into a fresh Rust `Vec` (four
+1.6&nbsp;MB copies for an OHLCV frame is mostly page faults, not `memcpy`), and
+each level of erased indicator wrapping cost ~30 ns/sample making a chain like
+`sma(ema(close()))` pay for three levels no Rust caller would. Reading Python's
+buffers in place instead of copying them, and folding the whole call through a
+128-sample chunk rather than per-`update()` dispatch, cut the common case by
+roughly half again on top of the numbers above:
+
+| | ns/sample | vs `talib` |
+| --- | ---: | ---: |
+| `close()` on a frame | 4.38 | — |
+| `sma(close())` on a frame | 7.72 | — |
+| `atr(14)` on a frame | 14.62 | — |
+
+[Full write-up, including the two mistaken conclusions that got corrected on the
+way →](../docs/PERFORMANCE.md)
+
+### The one real loss
+
+`stddev` — and `bbands`, which inherits it — is ~3.4× `talib`, deliberately.
+fugazi makes a centred pass over the window instead of the O(1)
+`E[X²] − E[X]²` shortcut, which cancels away significant digits. Not a corner
+case: on the price series these figures are measured over, `talib.STDDEV`
+returns exactly `0.0` for 896 of 4 981 windows — silently reporting *no
+dispersion* — where fugazi is accurate to 5.5e-15, and `ZScore` divides by
+that number.
+
+### What this doesn't cover
+
+Every figure above is amortised throughput — total time over 200 000 samples,
+divided — which is the right measure for a backtest and overstates the cost of
+a single live `update()` by roughly an order of magnitude (the Rust-side
+latency numbers are in [the root README](../README.md#latency-which-is-a-different-question)).
+There's no equivalent Python-side latency benchmark yet; a `feed()` call
+amortises the boundary crossing across a batch, and a single `.update(candle)`
+in a live loop pays that crossing once per bar with nothing to amortise it
+against.
+
+---
