@@ -266,6 +266,40 @@ def rust_tier(n: int) -> dict[str, float]:
     return out
 
 
+def python_tier(which: str, n: int) -> dict[str, list[float]]:
+    """Run one Python tier in its **own process** and parse its samples back.
+
+    Not a nicety. The two Python tiers used to run in this process, one after
+    the other, and they perturb each other through the shared heap: measured on
+    a quiet machine, `talib.MACD` costs **29.60 ns/sample** in a fresh process
+    and **7.51** in one where fugazi has already run — a 4x swing in fixed C
+    code, caused entirely by what the other tier left in the allocator.
+
+    That silently coupled the `py vs py` column to fugazi's own allocation
+    behaviour, so a change to how fugazi allocates moved its own baseline. It
+    was caught when a `(lines, n)` allocation in `feed_into_columns` dropped
+    `talib`'s reported cost by 3x and produced the impossible reading of
+    `talib` through Python beating the TA-Lib C library it calls.
+
+    So each tier now gets a clean interpreter, imports only its own library, and
+    reports samples on stdout — the same shape `rust_tier` and `talib_native`
+    already used, and for the same reason.
+    """
+    proc = subprocess.run(
+        [sys.executable, os.path.abspath(__file__), f"--tier={which}", f"--n={n}"],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    out: dict[str, list[float]] = {}
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("{") and '"ns_per_sample"' in line:
+            rec = json.loads(line)
+            out[rec["name"]] = rec.get("samples") or [rec["ns_per_sample"]]
+    if not out:
+        print(f"could not read the {which} tier:\n", proc.stderr[-2000:], file=sys.stderr)
+    return out
+
+
 def talib_py_tier(c, h, lo) -> dict[str, float]:
     """TA-Lib through its Cython bindings — the baseline for the Python row."""
     return {
@@ -352,7 +386,33 @@ def best_of(pool: dict[str, list[float]]) -> dict[str, float]:
     return {k: xs[0] for k, xs in pool.items()}
 
 
+def run_worker(which: str, n: int) -> int:
+    """One tier, one process, samples on stdout. See `python_tier`."""
+    global N
+    N = n
+    o, h, lo, c = synth(n)
+    if which == "talib_py":
+        samples = talib_py_tier(c, h, lo)
+    elif which == "fugazi_py":
+        samples = fugazi_py_tier(c, h, lo, o)
+    else:
+        print(f"unknown tier {which!r}", file=sys.stderr)
+        return 2
+    for name, xs in samples.items():
+        listed = ",".join(f"{x:.4f}" for x in xs)
+        print(f'{{"name":"{name}","ns_per_sample":{xs[0]:.4f},"samples":[{listed}]}}')
+    return 0
+
+
 def main() -> int:
+    for arg in sys.argv[1:]:
+        if arg.startswith("--tier="):
+            n = N
+            for a in sys.argv[1:]:
+                if a.startswith("--n="):
+                    n = int(a.split("=", 1)[1])
+            return run_worker(arg.split("=", 1)[1], n)
+
     if check_extension_fresh() != 0:
         return 1
 
@@ -418,8 +478,8 @@ def main() -> int:
               file=sys.stderr)
         passes["talib_c"].append(talib_native(N))
         passes["fugazi_rs"].append(rust_tier(N))
-        passes["talib_py"].append(talib_py_tier(c, h, lo))
-        passes["fugazi_py"].append(fugazi_py_tier(c, h, lo, o))
+        passes["talib_py"].append(python_tier("talib_py", N))
+        passes["fugazi_py"].append(python_tier("fugazi_py", N))
 
         cur = minima()
         if taken >= repeat:
