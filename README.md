@@ -1133,16 +1133,10 @@ library so all four sit on one scale:
 
 ![Indicator throughput: fugazi and TA-Lib, relative to native TA-Lib C](docs/assets/performance.svg)
 
-*Lower is better. 200 000 samples, minimum of 7 reps × 5 interleaved passes;
-whiskers run up to the 25th percentile, since contention only ever adds time.*
-
-> **These figures are provisional.** They come from a single five-pass run taken
-> before `tools/bench_three_tier.py` learned to sample until its minima settle,
-> and that run reported a spread of up to 2.5× on the Rust tier. Rows separated
-> by more than ~20% are safe to read; rows inside that band — `sma`, `rsi`,
-> `atr`, `aroon`, and `ema` through the bindings — say "parity" and nothing
-> finer. Re-run `pixi run -e bench bench` on a quiet machine for figures that
-> carry a convergence verdict.
+*Lower is better. 200 000 samples, minimum of 7 reps per pass; whiskers run up
+to the 25th percentile, since contention only ever adds time. The run takes
+passes until no figure has improved by more than 1% for three consecutive
+passes — this one converged after 11.*
 
 The chart's common baseline is the C library. For a **Python** user the
 like-for-like comparison is against `talib`, TA-Lib's own bindings, since both
@@ -1150,23 +1144,22 @@ cross a Python boundary — that is the last column:
 
 | | TA-Lib C | fugazi (Rust) | **rs vs C** | `talib` py | fugazi (Python) | **py vs py** |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `sma` | 1.42 | 1.40 | **0.99×** | 1.53 | 2.38 | 1.56× |
-| `ema` | 2.12 | 1.49 | **0.70×** | 2.24 | 2.16 | **0.96×** |
-| `rsi` | 4.92 | 5.10 | 1.04× | 4.94 | 5.73 | 1.16× |
-| `atr` | 5.08 | 4.80 | **0.95×** | 12.52 | 5.89 | **0.47×** |
-| `stddev` | 3.41 | 11.84 | 3.47× | 3.71 | 13.14 | 3.55× |
-| `macd` | 13.54 | 1.60 | **0.12×** | 21.89 | 22.25 | 1.02× |
-| `dmi` | 9.20 | 5.80 | **0.63×** | 16.23 | 27.13 | 1.67× |
-| `adx` | 14.09 | 8.71 | **0.62×** | 21.04 | 42.52 | 2.02× |
-| `aroon` | 8.41 | 9.63 | 1.15× | 14.92 | 37.85 | 2.54× |
-| `bbands` | 4.13 | 13.85 | 3.36× | 11.29 | 44.68 | 3.96× |
+| `sma` | 1.34 | 1.35 | **1.00×** | 1.40 | 2.17 | 1.55× |
+| `ema` | 2.02 | 1.35 | **0.67×** | 2.08 | 2.02 | **0.97×** |
+| `rsi` | 4.64 | 4.60 | **0.99×** | 4.80 | 5.49 | 1.14× |
+| `atr` | 4.68 | 4.25 | **0.91×** | 12.10 | 5.63 | **0.47×** |
+| `stddev` | 3.24 | 10.86 | 3.35× | 3.44 | 12.79 | 3.72× |
+| `macd` | 12.33 | 1.45 | **0.12×** | 20.51 | 22.15 | 1.08× |
+| `dmi` | 8.82 | 5.24 | **0.59×** | 15.92 | 29.80 | 1.87× |
+| `adx` | 13.46 | 8.43 | **0.63×** | 20.14 | 40.11 | 1.99× |
+| `aroon` | 7.55 | 8.71 | 1.15× | 14.52 | 35.87 | 2.47× |
+| `bbands` | 3.69 | 12.73 | 3.45× | 10.88 | 42.31 | 3.89× |
 
-ns/sample. The Rust engine is at parity on `sma`/`ema`/`rsi`/`atr` while staying
-one-bar-at-a-time, and driving a full backtest allocates **zero times per bar** —
-a 200 000-bar run performs 29 allocations in total. Through the bindings `atr` is
-**faster than `talib`**, because a frame of OHLC columns is read in place and
-folded once, rather than three arrays being scanned separately; that one is a 2×
-gap, comfortably outside the noise.
+ns/sample. The Rust engine is at parity or better on `sma`/`ema`/`rsi`/`atr`
+while staying one-bar-at-a-time, and driving a full backtest allocates **zero
+times per bar** — a 200 000-bar run performs 29 allocations in total. Through the
+bindings `atr` is **faster than `talib`**, because a frame of OHLC columns is read
+in place and folded once, rather than three arrays being scanned separately.
 
 The **multi-output** block below the line is the same question asked of
 indicators that emit several lines at once. TA-Lib fills every output array in
@@ -1175,6 +1168,11 @@ that is the unit of work on both sides. `macd`, `dmi` and `adx` are *faster than
 the C library* — the last two structurally, because TA-Lib has no combined entry
 point and must re-derive the same Wilder-smoothed true range once per line, while
 `Dmi`/`Adx` carry one set of states and emit the lines together.
+
+`aroon` is the near miss: 1.15× the C library, down from roughly twice it before
+its rolling-extremum core stopped being a heap-allocating deque. Close, not
+ahead — and worth saying plainly, because an earlier uncoverged run had it at
+parity and that reading did not survive sampling to convergence.
 
 `stddev` — and `bbands`, which inherits it — is the one real loss, and it is
 deliberate: fugazi makes a centred pass over the window instead of TA-Lib's O(1)

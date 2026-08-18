@@ -1416,46 +1416,56 @@ caller who wants the pair pays for both calls, so both calls are timed.
 
 ### Results
 
-200 000 samples, best of 5 passes. `rs vs C` is against native TA-Lib C,
-`py vs py` against the `talib` Cython bindings — one baseline per tier, as above.
+200 000 samples, **sampled to convergence** — 11 interleaved passes, after which
+no figure had improved by more than 1% for three consecutive passes. `rs vs C` is
+against native TA-Lib C, `py vs py` against the `talib` Cython bindings — one
+baseline per tier, as above.
+
+**The "before" columns are not converged**, and cannot be: re-measuring them
+would mean reverting the change. They are single-pass readings from the same
+harness on the same machine, so read them for direction and rough magnitude, not
+to two digits. Every *converged* claim in this section is a comparison down a
+column — `after` against `TA-Lib C`, both from the same 11-pass run.
 
 | | TA-Lib C | fugazi rs before | fugazi rs after | **rs vs C** | TA-Lib py | fugazi py before | fugazi py after | **py vs py** |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `macd` | 13.54 | 1.76 | **1.60** | **0.12×** | 21.89 | 24.04 | **22.25** | **1.02×** |
-| `dmi` | 9.20 | 6.72 | **5.80** | **0.63×** | 16.23 | 28.76 | **27.13** | 1.67× |
-| `adx` | 14.09 | 10.19 | **8.71** | **0.62×** | 21.04 | 43.97 | **42.52** | 2.02× |
-| `aroon` | 8.41 | 17.31 | **9.63** | 1.15× | 14.92 | 40.06 | **37.85** | 2.54× |
-| `bbands` | 4.13 | 20.40 | **13.85** | 3.36× | 11.29 | 46.40 | **44.68** | 3.96× |
+| `macd` | 12.33 | 1.76 | **1.45** | **0.12×** | 20.51 | 24.04 | **22.15** | 1.08× |
+| `dmi` | 8.82 | 6.72 | **5.24** | **0.59×** | 15.92 | 28.76 | **29.80** | 1.87× |
+| `adx` | 13.46 | 10.19 | **8.43** | **0.63×** | 20.14 | 43.97 | **40.11** | 1.99× |
+| `aroon` | 7.55 | 17.31 | **8.71** | 1.15× | 14.52 | 40.06 | **35.87** | 2.47× |
+| `bbands` | 3.69 | 20.40 | **12.73** | 3.45× | 10.88 | 46.40 | **42.31** | 3.89× |
 
-The Rust engine **beats native TA-Lib C on three of the five** — by 8× on `macd`,
-where TA-Lib's own `TA_MACD` is slow (it allocates and fills two temporary
-buffers internally), and by ~1.6× on `dmi`/`adx`, where the win is structural:
-one pass over shared Wilder states against two and three full re-derivations.
+The Rust engine **beats native TA-Lib C on three of the five** — by 8.5× on
+`macd`, where TA-Lib's own `TA_MACD` is slow (it allocates and fills two
+temporary buffers internally), and by ~1.6× on `dmi`/`adx`, where the win is
+structural: one pass over shared Wilder states against two and three full
+re-derivations.
 
-`aroon` was the one indicator that lost outright and no longer does. `bbands` is
-the deliberate loss, and it is the only one — see below.
+**`aroon` does not win, and an earlier draft of this section said it did.** That
+claim came from a five-pass run in which the C tier happened to read 9.03 and the
+Rust tier 9.30 — close enough to call parity, and wrong. Sampled to convergence
+the gap is stable at **1.15×**: real, small, and on the losing side. What is true
+is that it was roughly *twice* the C library before the ring-buffer change, so
+that change closed most of a 2× gap without closing all of it.
 
-**Read the whole table with the spread column in mind.** That pass reported
-`fugazi rs` spread up to 2.49×, and an earlier, quieter pass put the same binary
-at `aroon` 9.30 against a C tier of 9.03 — i.e. parity, not the 1.15× printed
-here. The honest claim for that row is "no longer behind", not a ratio.
-
-The five multi-output verdicts that the data *does* decide are the ones with an
-order of magnitude between them and the noise: `macd` at 0.12×, `dmi` and `adx`
-near 0.62×, and `bbands` at 3.36×. Nothing plausible about contention turns a
-0.12× into a loss.
-
-**This is also why `tools/bench_three_tier.py` no longer takes a fixed number of
-passes.** Quoting a table and then discovering a 3.5% row was a 20% row is the
-failure this whole section exists to prevent, and "take five passes" cannot
-detect it — the minimum's justification is that it *converges*, so the stopping
-rule has to be convergence. It now samples until no cell's minimum has improved
-by more than 1% for three consecutive passes, prints that verdict, records it in
+**That correction is the point of the convergence rule, not an aside.** The
+earlier figure was not noise in the sense of being random — it was a minimum that
+had not finished falling, and it fell by different amounts in different tiers, so
+the *ratio* moved even as each tier's number improved. No amount of care at the
+moment of quoting catches that; only sampling until the minima stop moving does.
+Hence `tools/bench_three_tier.py` no longer takes a fixed number of passes: it
+samples until no cell's minimum has improved by more than 1% for three
+consecutive passes, prints that verdict, records it in
 `performance-samples.json`, and prints a loud banner instead of a table if it
-hits its pass cap first. `tools/plot_performance.py` refuses to draw a chart from
-a samples file without a passing verdict, because a chart looks equally confident
-either way. **The numbers in this section predate that rule** and should be
-re-taken on a quiet machine.
+hits its pass cap first. `tools/plot_performance.py` **refuses** to draw a chart
+from a samples file with no passing verdict — a chart looks equally confident
+either way, which makes it ideal laundry for provisional data.
+
+Load average is echoed at both ends for the same reason. This run went
+0.51 → 1.79, which is why the figures are minima over 11 interleaved passes
+rather than a mean over one.
+
+`bbands` is the deliberate loss, and it is the only one — see below.
 
 ### What changed — the engine
 
@@ -1465,8 +1475,10 @@ rolling-extremum core beside it never got the same treatment. Its monotonic dequ
 can never hold more than `period` entries — every entry is a distinct sample index
 inside the window — so the capacity was known at construction all along, and the
 growth checks and the allocation were paid per bar for flexibility nothing uses.
-`Aroon` runs two of them. **17.31 → 10.72 ns/sample, the single largest win here**,
-and it is why `aroon` flipped. `Donchian`, `Stochastic`, `RollingMax`/`RollingMin`
+`Aroon` runs two of them. **17.31 → 10.72 ns/sample, the single largest win
+here** — a back-to-back A/B in the same harness minutes apart, which is what
+isolates the change; the converged figure for the new code is 8.71, against a
+converged `TA_AROON` of 7.55. `Donchian`, `Stochastic`, `RollingMax`/`RollingMin`
 and `BarsSinceHigh`/`BarsSinceLow` all sit on the same core.
 
 The conversion reorders the two eviction passes — the aged-out front is dropped
