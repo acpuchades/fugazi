@@ -320,17 +320,27 @@ symbol via a per-symbol scoring source, applies a `Selection` impl
   gating selection is the natural rebalance semantics.
 - **State.** Per-symbol `Position` (+ per-symbol per-leg protective chains lazily
   built on first sight) + shared `Book<Sym>`. Seed `with_initial_equity(cash)`.
-- **Dollar neutrality.** `.dollar_neutral()` (YAML `dollar_neutral: true`) scales
-  per-symbol sizes at each rebalance so `Σ long_sizes == Σ short_sizes`; the
-  smaller-side sum is the target gross-per-side (never levers up). A one-sided
-  selection this bar skips the whole rebalance.
+- **Side balancing.** `.balance_sides(bool)` (YAML `balance_sides:`), **on by
+  default**, scales per-symbol sizes at each rebalance so `Σ long_sizes ==
+  Σ short_sizes`; the smaller-side sum is the target gross-per-side (never levers
+  up). This is dollar neutrality in the classic sense — named for the mechanism,
+  since fugazi does no FX and takes no view on the numeraire. Default-on because
+  an unbalanced cross-sectional basket carries net exposure its ranking never
+  asked for. A one-sided selection **passes through unscaled**: there is no
+  counter-side to balance against, and a long-only basket (`top_bottom(n, 0)`, or
+  a `threshold` that admits one side this bar) is an ordinary shape. It must not
+  short-circuit `trade()` — the same loop's `None` arm is what closes de-selected
+  symbols, so returning early would hold a stale one-sided book rather than sit.
+  Balancing equalizes *intent* at rebalance, not realized notional: sizes are read
+  on transition only, so the balance holds as legs open and then drifts with price
+  like every other basket size.
 - **Per-leg protective.** `.long_stop_loss(|sym, &Position| level)` /
   `.long_take_profit(...)` / `.short_stop_loss(...)` / `.short_take_profit(...)`
   per-symbol factories, plus YAML `long: { stop_loss: ..., take_profit: ... }` /
   `short: { ... }` using `BasketSideSpec` templates with `!arg SYM` and `!entry` /
   `!peak` / `!trough` anchored to *that* symbol's Position.
 - **Python**: `ta.BasketStrategy().scored_by(fn).sized_by(fn).top_bottom(l, s)`
-  (or `.threshold` / `.quantile`), `.dollar_neutral()`, `.rebalance_on(sig)`,
+  (or `.threshold` / `.quantile`), `.balance_sides(bool)`, `.rebalance_on(sig)`,
   `.all_of` / `.any_of`, `.run(wallet, snapshots)`. Composable selections mirror
   Rust (`of=` inner rule, free constructors `ta.top_bottom`/`ta.threshold`/
   `ta.quantile`/`ta.everything`). The `.selection(closure)` escape hatch and

@@ -207,9 +207,9 @@ pub struct BasketStrategy<Sym> {
     universe: Box<dyn Universe<Sym>>,
     book: Book<Sym>,
     /// If `true`, per-symbol sizes are scaled at each rebalance so
-    /// `Σ long_sizes == Σ short_sizes` (dollar-neutral). Set via
-    /// [`dollar_neutral`](Self::dollar_neutral); defaults to `false`.
-    dollar_neutral: bool,
+    /// `Σ long_sizes == Σ short_sizes`. Set via
+    /// [`balance_sides`](Self::balance_sides); defaults to `true`.
+    balance_sides: bool,
 }
 
 impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> BasketStrategy<Sym> {
@@ -262,7 +262,7 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> BasketStrategy<
             rebalance: Box::new(Every::<Snapshot<Sym>>::new(1)),
             universe: Box::new(Floating),
             book: Book::new(initial_equity),
-            dollar_neutral: false,
+            balance_sides: true,
         }
     }
 
@@ -315,22 +315,41 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> BasketStrategy<
         self
     }
 
-    /// Enforce **dollar-neutrality**: at each rebalance, scale per-symbol
-    /// sizes so that the sum of long weights equals the sum of short
-    /// weights. Concretely, the smaller of the two per-side sums is
-    /// taken as the target gross-per-side (never levers up), and each
-    /// side's sizes are rescaled by `target / side_sum`.
+    /// Whether to **balance the two sides' target sizes** at each
+    /// rebalance, so that the sum of long weights equals the sum of
+    /// short weights. Concretely, the smaller of the two per-side sums
+    /// is taken as the target gross-per-side (never levers up), and each
+    /// side's sizes are rescaled by `target / side_sum`. This is
+    /// "dollar-neutral" in the classic sense, named for the mechanism
+    /// rather than a currency — fugazi does no FX and takes no view on
+    /// the numeraire.
     ///
-    /// If the selection is one-sided on a given fire bar (no longs, or
-    /// no shorts), the basket **skips that rebalance** — dollar-neutral
-    /// with no hedgeable counter-side is undefined; the safe default is
-    /// to sit rather than run an accidental net-long or net-short leg.
+    /// **On by default.** An unbalanced cross-sectional basket carries
+    /// net exposure that its ranking never asked for: `top_bottom(2, 1)`
+    /// at a uniform `0.5` per leg is 1.0 gross long against 0.5 gross
+    /// short, so a market-wide move shows up in the P&L whether or not
+    /// the longs actually outranked the shorts. Pass `false` to keep the
+    /// raw per-leg sizes and accept that exposure deliberately.
     ///
-    /// Off by default. Compose with any selection rule
+    /// **A one-sided selection passes through unscaled.** With no longs
+    /// (or no shorts) on a fire bar there is no counter-side to balance
+    /// against, and a long-only basket — `top_bottom(n, 0)`, or a
+    /// [`threshold`](Self::threshold) whose cutoffs happen to admit one
+    /// side this bar — is an ordinary shape, not an error. Scaling is
+    /// simply skipped for that bar; the selection and its exits still
+    /// run. If you need the book flat whenever the hedge is unavailable,
+    /// express that in the selection rule, not here.
+    ///
+    /// Note that sizes are read **on transition only** — an already-open
+    /// leg is not resized — so the balance holds as legs open and then
+    /// drifts with price, exactly like every other basket size. This
+    /// equalizes *intent* at rebalance, not realized notional every bar.
+    ///
+    /// Compose with any selection rule
     /// ([`top_bottom`](Self::top_bottom) / [`threshold`](Self::threshold) /
     /// [`quantile`](Self::quantile) / [`selection`](Self::selection)).
-    pub fn dollar_neutral(mut self) -> Self {
-        self.dollar_neutral = true;
+    pub fn balance_sides(mut self, balance: bool) -> Self {
+        self.balance_sides = balance;
         self
     }
 
@@ -856,12 +875,19 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Ba
         }
         let selection = self.selection.pick(&self.latest_score);
 
-        // Dollar-neutrality: scale per-side sizes so Σ long_sizes ==
+        // Side balancing: scale per-side sizes so Σ long_sizes ==
         // Σ short_sizes. The smaller side's sum becomes the target
-        // gross-per-side (never levers up). A one-sided selection skips
-        // the whole rebalance — running only one leg would break the
-        // hedge intent.
-        let (long_scale, short_scale) = if self.dollar_neutral {
+        // gross-per-side (never levers up).
+        //
+        // A one-sided selection passes through **unscaled** rather than
+        // skipping: with no counter-side there is nothing to balance
+        // against, and a long-only basket (`top_bottom(n, 0)`, or a
+        // threshold that admits one side this bar) is an ordinary shape.
+        // Returning early here would also skip the `None` arm below,
+        // which is what closes de-selected symbols — so the basket would
+        // hold a stale one-sided book rather than sit, the opposite of
+        // the intent.
+        let (long_scale, short_scale) = if self.balance_sides {
             let long_sum: Real = selection
                 .iter()
                 .filter(|(_, s)| **s == Side::Buy)
@@ -873,10 +899,11 @@ impl<Sym: Clone + PartialEq + Hash + Eq + 'static + Send + Sync> Strategy for Ba
                 .map(|(sym, _)| self.latest_size.get(sym).copied().unwrap_or(0.0))
                 .sum();
             if long_sum <= 0.0 || short_sum <= 0.0 {
-                return;
+                (1.0, 1.0)
+            } else {
+                let target = long_sum.min(short_sum);
+                (target / long_sum, target / short_sum)
             }
-            let target = long_sum.min(short_sum);
-            (target / long_sum, target / short_sum)
         } else {
             (1.0, 1.0)
         };
@@ -1234,7 +1261,7 @@ mod tests {
         // units per leg. A @100 → 50 long units; B @50 → 100 short units.
         tick(&mut strat, &mut wallet, &[("A", 100.0), ("B", 50.0)]);
         tick(&mut strat, &mut wallet, &[("A", 100.0), ("B", 50.0)]);
-        // After the fill bar, book equity = 10_000 (dollar-neutral fills
+        // After the fill bar, book equity = 10_000 (the two balanced fills
         // don't move cash or MTM valuation on the same-close bar).
         assert!(
             (book.equity_value() - 10_000.0).abs() < 1e-6,
@@ -1401,45 +1428,50 @@ mod tests {
         assert!(wallet.orders().is_empty(), "never-rebalance basket must not trade");
     }
 
-    // ---------------- Dollar-neutral ------------------------------------
+    // ---------------- Side balancing ------------------------------------
+
+    /// Drive `strat` one bar: settle fills, `update`, then `trade`.
+    fn tick(
+        strat: &mut BasketStrategy<&'static str>,
+        wallet: &mut PaperWallet<&'static str>,
+        entries: &[(&'static str, Real)],
+    ) {
+        let s = snap(entries);
+        for (sym_opt, _f, atom) in s.iter() {
+            let sym = sym_opt.copied().unwrap();
+            let Some(candle) = atom.candle else { continue };
+            for fill in wallet.update(sym, candle) {
+                strat.on_fill(&fill);
+            }
+        }
+        strat.update(s);
+        strat.trade(wallet);
+    }
+
+    /// A basket scored by price, sized at a flat `size` per leg.
+    fn priced_basket(size: Real) -> BasketStrategy<&'static str> {
+        BasketStrategy::with_initial_equity(10_000.0)
+            .scored_by(|sym: &&'static str| Close::of(Pick::matching(Selector::by_symbol(*sym))))
+            .sized_by(move |_| crate::indicators::Value::<Snapshot<&'static str>>::new(size))
+    }
 
     #[test]
-    fn dollar_neutral_rescales_sides_to_min_gross() {
+    fn balance_sides_rescales_sides_to_min_gross() {
         // Three symbols. Uniform sizing 0.5 per leg. Top-2 long / bottom-1
-        // short: long side sums to 1.0, short side sums to 0.5. Dollar-
-        // neutral should downscale longs from 0.5 each to 0.25 each (so
+        // short: long side sums to 1.0, short side sums to 0.5. Balancing
+        // should downscale longs from 0.5 each to 0.25 each (so
         // Σ longs == Σ shorts == 0.5).
         //
         // Verify via wallet notional (units × price) after fills land.
-        let mut strat: BasketStrategy<&'static str> =
-            BasketStrategy::with_initial_equity(10_000.0)
-                .scored_by(|sym: &&'static str| {
-                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
-                })
-                .sized_by(|_| crate::indicators::Value::<Snapshot<&'static str>>::new(0.5))
-                .top_bottom(2, 1)
-                .dollar_neutral();
+        // No `.balance_sides(..)` call — this is the *default*.
+        let mut strat = priced_basket(0.5).top_bottom(2, 1);
         let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
-        let tick = |strat: &mut BasketStrategy<&'static str>,
-                    wallet: &mut PaperWallet<&'static str>,
-                    entries: &[(&'static str, Real)]| {
-            let s = snap(entries);
-            for (sym_opt, _f, atom) in s.iter() {
-                let sym = sym_opt.copied().unwrap();
-                let Some(candle) = atom.candle else { continue };
-                for fill in wallet.update(sym, candle) {
-                    strat.on_fill(&fill);
-                }
-            }
-            strat.update(s);
-            strat.trade(wallet);
-        };
         // A = 300 (top), B = 200 (mid, long), C = 100 (bottom, short).
         tick(&mut strat, &mut wallet, &[("A", 300.0), ("B", 200.0), ("C", 100.0)]);
         tick(&mut strat, &mut wallet, &[("A", 300.0), ("B", 200.0), ("C", 100.0)]);
 
         // Per-symbol notionals: |units × price|. Longs summed vs shorts summed
-        // should be equal (dollar-neutral) and each side ≈ 0.5 × equity ≈ 5000.
+        // should be equal (balanced) and each side ≈ 0.5 × equity ≈ 5000.
         let notional = |sym: &'static str, price: Real| -> Real {
             wallet.position(&sym).amount.abs() * price
         };
@@ -1449,45 +1481,90 @@ mod tests {
         // unit counts.
         assert!(
             (long_gross - short_gross).abs() < 50.0,
-            "dollar-neutral: longs={long_gross}, shorts={short_gross}",
+            "balanced: longs={long_gross}, shorts={short_gross}",
         );
         // And the target-per-side is the smaller (short) sum ≈ 5000
         // (before any drift for prices set at close = open).
         assert!(
             short_gross > 4_000.0 && short_gross < 6_000.0,
-            "dollar-neutral gross-per-side should be ≈ 5000; got {short_gross}",
+            "balanced gross-per-side should be ≈ 5000; got {short_gross}",
         );
     }
 
     #[test]
-    fn dollar_neutral_skips_one_sided_rebalance() {
-        // Only long side selected → dollar-neutral has no counter-side to
-        // hedge, so the whole rebalance skips (no orders queued).
-        let mut strat: BasketStrategy<&'static str> =
-            BasketStrategy::with_initial_equity(10_000.0)
-                .scored_by(|sym: &&'static str| {
-                    Close::of(Pick::matching(Selector::by_symbol(*sym)))
-                })
-                .sized_by(|_| crate::indicators::Value::<Snapshot<&'static str>>::new(0.5))
-                .top_bottom(2, 0) // longs only
-                .dollar_neutral();
+    fn balance_sides_off_keeps_raw_per_leg_sizes() {
+        // The opt-out: same asymmetric selection, but `balance_sides(false)`
+        // leaves both sides at the raw 0.5 per leg — so the long side is
+        // twice the short side, and the book carries that net exposure.
+        let mut strat = priced_basket(0.5).top_bottom(2, 1).balance_sides(false);
+        let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
+        tick(&mut strat, &mut wallet, &[("A", 300.0), ("B", 200.0), ("C", 100.0)]);
+        tick(&mut strat, &mut wallet, &[("A", 300.0), ("B", 200.0), ("C", 100.0)]);
+
+        let notional = |sym: &'static str, price: Real| -> Real {
+            wallet.position(&sym).amount.abs() * price
+        };
+        let long_gross = notional("A", 300.0) + notional("B", 200.0);
+        let short_gross = notional("C", 100.0);
+        assert!(
+            long_gross > 1.8 * short_gross,
+            "unbalanced: longs should be ≈2× shorts; longs={long_gross}, shorts={short_gross}",
+        );
+    }
+
+    #[test]
+    fn one_sided_selection_trades_unscaled() {
+        // A long-only basket — `top_bottom(n, 0)` is an ordinary shape, not
+        // an error. With balancing on (the default) there is no counter-side
+        // to balance against, so sizes pass through unscaled and the basket
+        // trades normally.
+        //
+        // Regression: balancing used to `return` on a one-sided bar, so this
+        // basket queued no orders at all and reported a zero-fill backtest.
+        let mut strat = priced_basket(0.5).top_bottom(2, 0).balance_sides(true);
         let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
         for _ in 0..3 {
-            let s = snap(&[("A", 300.0), ("B", 200.0), ("C", 100.0)]);
-            for (sym_opt, _f, atom) in s.iter() {
-                let sym = sym_opt.copied().unwrap();
-                let Some(candle) = atom.candle else { continue };
-                for fill in wallet.update(sym, candle) {
-                    strat.on_fill(&fill);
-                }
-            }
-            strat.update(s);
-            strat.trade(&mut wallet);
+            tick(&mut strat, &mut wallet, &[("A", 300.0), ("B", 200.0), ("C", 100.0)]);
         }
         assert!(
-            wallet.orders().is_empty(),
-            "one-sided dollar-neutral basket must not trade; got {} orders",
-            wallet.orders().len(),
+            !wallet.orders().is_empty(),
+            "long-only basket must still trade under the default balancing",
+        );
+        // Unscaled: each leg at the raw 0.5 × 10_000 ≈ 5000 notional.
+        let a_notional = wallet.position(&"A").amount.abs() * 300.0;
+        assert!(
+            a_notional > 4_000.0 && a_notional < 6_000.0,
+            "one-sided legs pass through unscaled; got {a_notional}",
+        );
+        assert_eq!(wallet.position(&"C").amount, 0.0, "C was never selected");
+    }
+
+    #[test]
+    fn one_sided_bar_still_closes_deselected_symbols() {
+        // A data-dependent `threshold` rule that is two-sided on one bar and
+        // one-sided on the next. The symbol that drops out of the selection
+        // must be closed on the one-sided bar.
+        //
+        // Regression: the old one-sided `return` fired *before* the loop
+        // whose `None` arm closes de-selected symbols, so the basket held a
+        // stale one-sided book — precisely the net exposure the flag exists
+        // to prevent.
+        let mut strat = priced_basket(0.5).threshold(250.0, 150.0).balance_sides(true);
+        let mut wallet: PaperWallet<&'static str> = PaperWallet::new(10_000.0);
+
+        // Two-sided: A = 300 ≥ 250 → long, C = 100 ≤ 150 → short.
+        tick(&mut strat, &mut wallet, &[("A", 300.0), ("C", 100.0)]);
+        tick(&mut strat, &mut wallet, &[("A", 300.0), ("C", 100.0)]);
+        assert!(wallet.position(&"C").amount < 0.0, "C should be short by now");
+
+        // C reprices into the dead band (150 < 200 < 250) → selection is
+        // long-only, and C is no longer selected at all.
+        tick(&mut strat, &mut wallet, &[("A", 300.0), ("C", 200.0)]);
+        tick(&mut strat, &mut wallet, &[("A", 300.0), ("C", 200.0)]);
+        assert_eq!(
+            wallet.position(&"C").amount,
+            0.0,
+            "de-selected C must be closed even though the bar is one-sided",
         );
     }
 }

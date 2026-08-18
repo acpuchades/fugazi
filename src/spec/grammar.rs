@@ -704,7 +704,7 @@ fn doc_basket() -> serde_json::Value {
         ("sizing", node_ref(), true),
         ("universe", def_ref("universe"), false),
         ("rebalance_on", node_ref(), false),
-        ("dollar_neutral", serde_json::json!({ "type": "boolean" }), false),
+        ("balance_sides", serde_json::json!({ "type": "boolean" }), false),
         ("long", def_ref("basket_side"), false),
         ("short", def_ref("basket_side"), false),
         ("meta", meta_ref(), false),
