@@ -7,132 +7,249 @@
 [![License: MIT](https://img.shields.io/crates/l/fugazi.svg)](LICENSE)
 [![Sponsor](https://img.shields.io/badge/sponsor-%E2%9D%A4-db61a2)](https://github.com/sponsors/acpuchades)
 
-A Rust library of **incremental** technical-analysis primitives. Every indicator
-and signal owns its internal state and is advanced one sample at a time via
-`update()`, carrying just enough intermediate state to produce the next output in
-~O(1). The same code works for live streaming and for batch backtesting.
+**One trading engine for research and production.** fugazi is a Rust library of
+incremental technical-analysis primitives, a strategy layer, and a backtester —
+where the code that backtests is *literally* the code that trades live. Every
+indicator owns its state and advances one sample at a time in ~O(1), so there is
+no vectorised research path and separate streaming path to keep in sync.
 
-- **Incremental** — feed one bar at a time; no full-history recomputation.
-- **Composable** — indicators own their input source, so you build complex
-  signals by nesting constructors. No glue, no remembering what to feed where.
-- **Fast** — matches or beats TA-Lib's vectorised C on `sma`/`ema`/`rsi`/`atr`
-  while staying one-bar-at-a-time. See [Performance](#performance).
-- **Minimal dependencies**, `edition = "2024"`.
+```rust,ignore
+let report = run(&mut strategy, &mut PaperWallet::new(10_000.0), snapshots);
+//                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^ backtest
+let report = run(&mut strategy, &mut OkxWallet::mainnet(k, s, p), snapshots);
+//                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^ live — same strategy
+```
+
+That is the whole pitch. The rest of this page is the evidence, then the manual.
+
+**Jump to:** [Why](#why-fugazi) · [Install](#install) · [Sixty seconds](#sixty-seconds) ·
+[Rust guide](#guide-the-rust-library) · [CLI guide](#guide-the-command-line) ·
+[Python](#python) · [Performance](#performance) · [What's included](#whats-included)
+
+---
+
+## Why fugazi
+
+### The seam that usually breaks
+
+Most quant stacks are two programs wearing one name. Research is vectorised —
+whole arrays, whole history, one C loop. Production is event-driven — one bar
+arrives, you react. They are written differently, they drift, and the bugs that
+result are the expensive kind: the backtest nobody can reproduce live.
+
+fugazi removes the seam by making the *incremental* form the only form, then
+making it fast enough that you don't miss the vectorised one.
+
+| What you need | The usual answer | What that costs | fugazi |
+| --- | --- | --- | --- |
+| Fast indicators | TA-Lib, pandas-ta | Array-at-a-time. A live bar means recomputing the array, or writing a second implementation you now maintain twice | One `update()` per bar, [at or below TA-Lib C speed](#performance) on `sma`/`ema`/`rsi`/`atr`/`macd` |
+| A backtest | vectorbt, backtesting.py | A fill model expressed as array masks; the loop that trades live is a different program | [`backtest::run`](#backtest--metrics) takes any `impl Wallet` — paper or venue |
+| Live execution | A broker SDK plus glue | The strategy gets rewritten against the SDK's callbacks | `Wallet` is a trait. [Swap the wallet](#live-trading), keep the strategy |
+| Several symbols per bar | A DataFrame per symbol, then a join | Joining on the trading *date* manufactures cross-timezone lookahead | [`Snapshot<Sym>`](#cross-asset-composition) *is* the bar; `Pick` projects one asset out |
+| Non-price inputs | Bolt on a column, hope | No types, no warm-up accounting | [Overlays](#overlays--non-price-columns): typed `!get` readers over any joined series |
+| A parameter sweep | A `for` loop | Single-threaded, and it overfits quietly | [`optimize -j`](#optimize--parameter-sweeps) with walk-forward, windowed ranking, risk aversion |
+
+### The case, in eight points
+
+**1. One engine, research to production.** `backtest::run` is generic over
+`Wallet`, so the same strategy value drives an in-memory `PaperWallet`, an
+`OkxWallet` (OKX perpetual swaps) or a `CoinbaseWallet` (Advanced Trade spot).
+It isn't a backtest function that *also* happens to work live — that's why it is
+called `run`. A whole `Portfolio` runs the same way.
+
+**2. Incremental costs nothing.** The usual objection to per-bar dispatch is
+speed. Measured against TA-Lib's C library over 200 000 samples, fugazi is at
+parity or faster on `sma` (1.01×), `rsi` (0.99×), `atr` (0.95×), `ema` (0.69×)
+and `macd` (**0.12×**) — while staying one bar at a time. A full backtest
+performs **29 allocations in total**, not per bar, and that ceiling is enforced by
+a test (`tests/perf_guard.rs`), not asserted in prose.
+[Full numbers, and the two places it loses →](#performance)
+
+**3. Composition is construction.** No pipe operator, no `Chain` builder, no DSL
+to learn. An indicator owns its source, so "EMA-20 of the SMA-10 of the close" is
+exactly `Ema::new(Sma::new(Current::close(), 10), 20)` — one value, one trait, and
+a `warm_up_bars()` computed correctly across the entire nested chain.
+
+**4. Multi-symbol and non-price data are first-class.** The unit of input is a
+`Snapshot<Sym>`: every symbol's bar for that timestamp, each optionally carrying
+an *overlay* bundle (funding rate, open interest, market cap, a regime label, your
+own precomputed signal). Cross-asset expressions are ordinary indicators —
+`Close::of(Pick::matching(by_symbol("BTC"))).sub(…)` is a spread you can hand to
+anything that takes a source.
+
+**5. Parallelism where it pays.** Enable `parallel` for
+[`backtest::run_many`](#running-an-ensemble-in-parallel), a rayon fan-out over
+`(strategy, wallet)` pairs sharing one snapshot stream — for ensembles, seed
+sweeps and scenario grids. The CLI's `optimize` spreads its grid over a pool sized
+by `-j/--jobs`, and the Monte Carlo permutation pass parallelises too. Per-bar
+state stays single-threaded and cache-resident, which is where the throughput
+comes from; the parallelism sits one level up, where runs are genuinely
+independent.
+
+**6. Five strategy shapes, in Rust *or* YAML, over one engine.** Single asset,
+pairs, cross-sectional basket, per-symbol multi-asset, and a portfolio of N
+different strategies netting onto one account. The YAML surface is not a
+reimplementation — it builds the same types, so `fugazi run @strategy.yml` and a
+hand-written Rust strategy execute identical code.
+
+**7. Unsettled numbers are refused by default.** Every indicator reports
+`warm_up_bars()` *and* `unstable_bars()` — the extra samples until an IIR seed's
+influence has decayed below 0.1%. A strategy will not trade until every wired
+signal and every protective level is past both, so no trade fires on a
+seed-contaminated value. There is exactly one opt-out, `!unstable` / `.unstable()`.
+[Why this shape →](#safe-defaults-opt-in-overrides)
+
+**8. Checked against four reference libraries, not just against itself.**
+Indicators are cross-validated against **TA-Lib**, equity-curve metrics against
+**empyrical**, wallet execution against **vectorbt**, and trade statistics against
+**backtesting.py**. Fixtures are committed and CI runs with
+`FUGAZI_REQUIRE_FIXTURES=1`, so a stale fixture fails the build instead of
+silently comparing nothing. Where fugazi deliberately *disagrees* with a reference
+— five of backtesting.py's headline stats answer a different question from the
+field sharing their name — the divergence itself is asserted, so a library that
+changes convention breaks the generator rather than quietly re-baselining.
+
+### When fugazi is the wrong tool
+
+Worth saying plainly, so you don't find out in week three:
+
+- **You want plots.** It writes CSV and YAML, nothing else. Plotting is post-hoc —
+  [there's an R recipe below](#analyzing-a-run).
+- **You need tick data or L2 microstructure.** The unit of time is a bar.
+- **You want a hosted order-management system.** Two venue wallets ship (OKX
+  swaps, Coinbase spot); anything else is a `Wallet` impl you write.
+- **Your hot path is `stddev` on huge windows.** fugazi's is ~3.5× TA-Lib's, on
+  purpose — [the shortcut it refuses](#performance) returns exactly `0.0` for 896
+  of 4 981 windows on the benchmark series.
+
+---
 
 ## Install
+
+**Rust library**
 
 ```toml
 [dependencies]
 fugazi = "0.63"
 ```
 
-## Documentation
+**Command-line backtester**
 
-Two ways in. If you want the **backtester**, read
-[docs/CLI.md](docs/CLI.md) for the commands and
-[docs/STRATEGIES.md](docs/STRATEGIES.md) for the strategy-file format — no Rust
-required. If you're **building on the library**, the sections above cover the
-shape of it and [docs.rs](https://docs.rs/fugazi) has the API.
+```sh
+cargo install fugazi          # provides the `fugazi` binary
+```
 
-| | |
-| --- | --- |
-| [docs/STRATEGIES.md](docs/STRATEGIES.md) | The strategy-file format — every YAML tag, all five document shapes |
-| [docs/CLI.md](docs/CLI.md) | `run`, `optimize`, `get`, `check`, `list` and their flags |
-| [docs/METRICS.md](docs/METRICS.md) | What each metric means and how it's computed |
-| [docs/COSTS.md](docs/COSTS.md) | Commission, spread and slippage models |
-| [docs/TRADING.md](docs/TRADING.md) | The execution path — how a bar becomes an order, a fill, and a closed trade |
-| [docs/PYTHON.md](docs/PYTHON.md) | The Python API |
-| [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Recipes for adding an indicator, signal, metric or provider |
-| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | How to measure, what each optimisation bought, and which code is fast on purpose |
+**Python**
 
-## Concepts
+```sh
+pip install fugazi            # prebuilt wheels for Linux, macOS, Windows
+```
 
-The crate has three composable layers:
+### Features
 
-- **Indicators** are the numeric *sources*. Each produces a `Real` (`f64`) and
-  **owns its own input source**, so composition is just nesting constructors:
-  `Ema::new(Current::close(), 20)` is the EMA‑20 of the close. Leaf sources
-  terminate the chain — `Identity` (raw value stream), `Value` (a constant), and
-  the candle accessors under `Current` (`Current::close()`, `Current::volume()`,
-  …). Bar indicators (`Atr`, `Adx`, `TrueRange`, …) read the whole bar, so they
-  take a `Candle`-output source too — `Atr::new(Current::candle(), 14)`,
-  `Obv::new(Current::candle())`, etc. Every atom-input leaf (candle field,
-  calendar accessor, overlay `Get*` reader) is **generic over an atom-emitting
-  source `S` with default `Identity<Atom>`**, so the same primitives serve both
-  the single-series hot path and the cross-asset case — see
-  [Cross-asset composition](#cross-asset-composition) below. Every indicator
-  is fed one `Atom` per bar (`Atom { candle, overlays }` — a `Candle` plus an
-  optional overlay bundle); a bare `Candle` lifts to an `Atom` via
-  `From<Candle> for Atom`, so `signal.update(candle.into())` is the streaming
-  pattern.
-- **Signals** are composable booleans. Comparisons are built from two sources, so
-  a condition like "RSI over 70" is a single object. Combine signals with
-  `and`/`or`/`xor`/`not`/`changed`.
-- **Strategies** are the decision layer. A strategy is *your own type*: each bar
-  it reads the input, advances its signals, and opens/closes positions on a
-  `Wallet` it's handed. See [Strategies](#strategies).
+| Feature | Default | What it adds |
+| --- | :---: | --- |
+| `sources` | ✅ | Remote data providers (Binance, OKX, Coinbase, Yahoo, CoinGecko) |
+| `cli` | ✅ | The `fugazi` binary; implies `sources`, `runtime`, `montecarlo`, `parallel` |
+| `runtime` | ✅ | The type-erasure vocabulary the YAML and Python layers build on |
+| `parallel` | — | `backtest::run_many`, the rayon ensemble driver |
+| `montecarlo` | — | Bootstrap resampling and empirical-null p-values (the only use of `rand`) |
+| `live` | — | `OkxWallet` and `CoinbaseWallet` — real order routing |
 
-The first two layers are *pure* value-producers sharing one shape: state lives
-inside, `update(input)` advances one step, outputs are `None` until warmed up.
-Every indicator also reports its exact `warm_up_bars()` (samples until the
-first output, accounting for the whole composed chain) and its
-`unstable_bars()` — `0` for windowed indicators, and for the recursive ones
-(EMA, RSI, ATR, ADX, …) the extra samples until the seeding's influence has
-decayed below 0.1%. `stable_bars()` is their sum: how much history to feed
-before trusting the output. The **default is safe**: a
-`SingleAssetStrategy`'s `is_ready()` compares its bar count against the
-largest `stable_bars()` across every wired signal and every attached
-protective level, and the run driver skips its `trade()` until that clears —
-so no trade fires on a seed-contaminated value. The explicit opt-out is
-[`Unstable`](https://docs.rs/fugazi/latest/fugazi/indicators/struct.Unstable.html):
-`.unstable()` on any source *or* signal (in YAML, `!unstable { source: <s> }`
-/ `!unstable { signal: <s> }`) is a passthrough that reports
-`unstable_bars() = 0`, telling the readiness gate "I'm happy to trade
-through this subtree's IIR settling tail". Safe by default, overridable per
-subtree — the same shape as `fugazi get`'s `--keep-unstable` flag (default
-trims each overlay's pre-`stable_bars()` cells; the flag opts out).
+Want the library alone? `default-features = false` leaves `serde`, `time`,
+`statrs` and the internal derive macro.
 
-## Quick start
+---
 
-"Current close crosses above its EMA‑20" — defined once, fed one `Candle` per bar:
+## Sixty seconds
+
+Three snippets, each a step further than the last.
+
+**A signal.** Define it once; feed it one bar at a time.
 
 ```rust
 use fugazi::prelude::*;
-use fugazi::indicators::{Current, Ema};
+use fugazi::indicators::{Current, Ema, Rsi};
 
-let mut signal = Current::close().crosses_above(Ema::new(Current::close(), 20));
+// "close crosses above its EMA-20, while RSI-14 is still under 70" — one object.
+let mut entry = Current::close()
+    .crosses_above(Ema::new(Current::close(), 20))
+    .and(Rsi::new(Current::close(), 14).below(70.0));
 
 # let feed: Vec<Candle> = Vec::new();
 for candle in feed {
-    signal.update(candle.into());
-    if signal.is_true() {
-        // entry trigger fires on the bar the close crosses above EMA-20
-    }
+    entry.update(candle.into());
+    if entry.is_true() { /* fire */ }
 }
 ```
 
-Indicators name their source explicitly, so the standard definitions read the
-way you'd expect — RSI of the close, fed one `Candle` per bar:
+**A backtest.** Take a strategy off the shelf, hand it a wallet, read the metrics.
 
 ```rust
 use fugazi::prelude::*;
-use fugazi::indicators::{Current, Rsi};
+use fugazi::backtest::run;
+use fugazi::metrics::{per_bar_returns, sharpe};
+use fugazi::{strategies::trend, Snapshot};
 
-// "RSI(14) of the close, over 70" as a single `Signal` (a `Candle`-fed `bool`).
-let mut overbought = Rsi::new(Current::close(), 14).above(70.0);
+# let candles: Vec<Candle> = Vec::new();
+let mut strategy = trend::ma_crossover("AAPL", 10, 30);
+let mut wallet = PaperWallet::new(10_000.0);
 
-# let feed: Vec<Candle> = Vec::new();
-for candle in feed {
-    overbought.update(candle.into());
-    if overbought.is_true() { /* ... */ }
-}
+let report = run(
+    &mut strategy,
+    &mut wallet,
+    candles.into_iter().map(|c| Snapshot::single("AAPL", c.into())),
+);
+
+let returns = per_bar_returns(&report.equity_curve, report.initial_equity);
+println!("sharpe: {:?}", sharpe(&returns, 0.0, 252.0));
 ```
 
-Working on a bare `f64` price stream instead of candles? `Identity` is the leaf
-that passes raw values straight through, so the same indicator consumes `Real`
-directly — `Rsi::new(Identity::new(), 14)`.
+**Live.** The same call against a real venue. One type changed.
 
-## Composition
+```rust,ignore
+use fugazi::live::OkxWallet;
+
+let mut wallet = OkxWallet::demo(key, secret, passphrase);   // or ::mainnet(..)
+let report = run(&mut strategy, &mut wallet, live_snapshots);
+```
+
+Rather not write Rust at all? The same strategy as a one-liner:
+
+```sh
+fugazi run '{ symbol: AAPL, long: { enter: !crosses_above {
+    lhs: !sma { period: 10 }, rhs: !sma { period: 30 } } } }' \
+  --series symbol=AAPL,@candles.csv --output-dir out/
+```
+
+---
+
+## Guide: the Rust library
+
+### The three layers
+
+- **Indicators** are the numeric sources. Each produces a `Real` (`f64`) and
+  **owns its own input source**, so composition is nesting constructors:
+  `Ema::new(Current::close(), 20)` is the EMA-20 of the close. Leaves terminate
+  the chain — `Identity` (a raw value stream), `Value` (a constant), and the
+  candle accessors under `Current`. Bar indicators (`Atr`, `Adx`, `Obv`, …) read
+  the whole bar, so they take a `Candle`-output source: `Atr::new(Current::candle(), 14)`.
+- **Signals** are composable booleans: `Indicator<Output = bool>`. A comparison is
+  built from two sources, so "RSI over 70" is a single object. Combine with
+  `and` / `or` / `xor` / `not` / `changed`.
+- **Strategies** are the decision layer. A strategy reads the input each bar,
+  advances its signals, and opens or closes positions on a `Wallet` it is handed.
+
+The first two layers are *pure* value producers sharing one shape: state lives
+inside, `update(input)` advances one step, and output is `None` until warmed up.
+Every indicator is fed one `Atom` per bar (`Atom { candle, overlays }`); a bare
+`Candle` lifts via `From<Candle> for Atom`, so `signal.update(candle.into())` is
+the streaming pattern.
+
+Working on a bare `f64` price stream instead of candles? `Identity` passes raw
+values straight through: `Rsi::new(Identity::new(), 14)`.
+
+### Composition
 
 Indicators nest — composition *is* construction:
 
@@ -142,7 +259,7 @@ use fugazi::indicators::{Current, Ema, Sma};
 let _ema_of_sma = Ema::new(Sma::new(Current::close(), 10), 20); // EMA of an SMA
 ```
 
-The `IndicatorExt` fluent builders turn sources into other sources and signals:
+`IndicatorExt` turns sources into other sources and into signals:
 
 ```rust
 use fugazi::prelude::*;
@@ -158,7 +275,7 @@ let _above = Current::close().gt(Ema::new(Current::close(), 50));
 let _cross = Ema::new(Current::close(), 10).crosses_above(Ema::new(Current::close(), 30));
 ```
 
-The `BoolIndicatorExt` combinators compose signals:
+`BoolIndicatorExt` composes signals:
 
 ```rust
 use fugazi::prelude::*;
@@ -169,15 +286,22 @@ let _entry = Current::close()
     .and(Rsi::new(Current::close(), 14).below(70.0));
 ```
 
-A *crossover* is not a special type — it is "the comparison is true **and** it
-just changed", i.e. `a.gt(b).and(a.gt(b).changed())`, which `crosses_above`
-builds for you. `changed()` is the single edge primitive (it fires on any
-toggle).
+A *crossover* is not a special type — it is "the comparison is true **and** it just
+changed", i.e. `a.gt(b).and(a.gt(b).changed())`, which `crosses_above` builds for
+you. `changed()` is the single edge primitive; it fires on any toggle.
 
-Multi-output indicators (`Macd`, `Bollinger`, `Adx`, …) produce a small value
-struct, but each output also has a **component accessor** that projects that one
-field back into an ordinary `Indicator<Output = Real>` — so a single line of a
-multi-output indicator composes and compares exactly like any other source:
+Comparisons are tolerance-aware, so floating-point noise doesn't cause spurious
+flips. The default band is **scale-aware** — `max(1e-12, 1e-9 · larger operand)` —
+because operands range from per-bar returns to five-figure prices and no single
+absolute number is right for both. Override with `Gt::with_epsilon(a, b, eps)` for
+a literal deadband in the operands' own units, or `Gt::with_tolerance(a, b, t)`.
+
+### Multi-output indicators
+
+`Macd`, `Bollinger`, `Adx` and friends produce a small value struct, but each
+output also has a **component accessor** projecting that one field back into an
+ordinary `Indicator<Output = Real>` — so a single line composes and compares like
+any other source:
 
 ```rust
 use fugazi::prelude::*;
@@ -192,19 +316,16 @@ let bands = Bollinger::new(Current::close(), 20, 2.0);
 let _breakout = Current::close().gt(bands.upper());
 ```
 
-Each accessor clones its source, so the two operands above are independent,
-self-contained instances (the same clone-the-operands shape `crosses_above`
-already uses) — just feed each the same `Candle` per bar.
+Each accessor clones its source, so those operands are independent instances —
+feed each the same `Candle` per bar.
 
-### Sharing one multi-output indicator across many accessors
+#### Sharing one instance across many accessors
 
-Two accessors on the same `Bollinger` (or `Macd`, …) mean two full copies of
-the indicator running independently — cheap by itself, but a crossover clones
-its operands, and a strategy with a `long_on(up, down)` and `short_on(down,
-up)` ends up asking the compiler to run the same multi-output indicator 8 or
-16 times per bar. When the accessors all target one instance, wrap it in a
-[`Shared`](https://docs.rs/fugazi/latest/fugazi/indicators/struct.Shared.html)
-handle with `.shared()` and use the same accessor methods off the handle:
+Two accessors on the same `Bollinger` mean two full copies running independently.
+Cheap alone, but a crossover clones its operands, and a strategy with
+`long_on(up, down)` and `short_on(down, up)` ends up running the same multi-output
+indicator 8 or 16 times per bar. When the accessors all target one instance, wrap
+it with `.shared()`:
 
 ```rust
 use fugazi::prelude::*;
@@ -216,62 +337,56 @@ let up = || macd.line().crosses_above(macd.signal());
 let down = || macd.line().crosses_below(macd.signal());
 ```
 
-Each `.line()` / `.signal()` off `macd` returns a `SharedComponent` that
-borrows the same source through an `Rc<RefCell<_>>`; whichever accessor is
-updated first each bar drives the underlying MACD, the rest read the cached
-outputs. Behaviour is identical to the independent-clones form
-(component-level tests assert it bit-for-bit); only the per-bar cost goes
-down — the classical strategies (`macd_crossover`, `donchian_breakout`,
-`bollinger_breakout`, `bollinger_reversion`, `keltner_breakout`) opt into
-this by default, and any new strategy that stacks several accessors on one
-indicator should too.
+Each accessor returns a `SharedComponent` borrowing the same source through an
+`Rc<RefCell<_>>`; whichever is updated first each bar drives the underlying MACD
+and the rest read cached outputs. Behaviour is identical to the independent-clones
+form (asserted bit-for-bit in tests); only the per-bar cost drops. The classical
+strategies (`macd_crossover`, `donchian_breakout`, `bollinger_breakout`,
+`bollinger_reversion`, `keltner_breakout`) opt in by default, and any new strategy
+stacking several accessors on one indicator should too.
 
 ### Cross-timeframe composition
 
-Two primitives compose directly for running an indicator on candles **coarser**
-than the base stream — no dedicated wrapper needed. `Resample<S>` buckets
-`every` base candles into a single higher-timeframe [`Candle`] (emits `Some`
-only on the completing tick, `None` between), and `Latch<S>` re-emits the last
-`Some` output on `None` ticks so a per-base-tick consumer sees the finished
-higher-timeframe value between boundaries.
+Two primitives compose to run an indicator on candles **coarser** than the base
+stream — no dedicated wrapper. `Resample<S>` buckets `every` base candles into one
+higher-timeframe `Candle` (emitting `Some` only on the completing tick), and
+`Latch<S>` re-emits the last `Some` on `None` ticks so a per-tick consumer sees the
+finished value between boundaries.
 
 ```rust
 use fugazi::prelude::*;
 use fugazi::indicators::{Current, Ema, Latch, Resample};
 
-// "1× base bar's close crosses above an EMA-20 computed on 4-bar candles."
+// "base close crosses above an EMA-20 computed on 4-bar candles."
 let _sig = Current::close().crosses_above(
     Latch::new(Ema::new(Resample::new(Current::candle(), 4).close(), 20)),
 );
 ```
 
-The **only correct ordering** is Resample → recursive smoother → Latch:
-latching *before* an EMA / RSI / ATR would feed it a held (repeated) value on
-every base tick, distorting the recurrence. Warm-up and unstable-period pass
-through as raw composition arithmetic (higher-timeframe sample counts, not
-base-bar scaled) — if a strategy needs base-bar-correct stability accounting,
-it must feed the pipeline enough leading history for the recursive tail to
-decay in HTF terms.
+The **only correct ordering** is Resample → recursive smoother → Latch. Latching
+*before* an EMA / RSI / ATR would feed it a repeated value on every base tick,
+distorting the recurrence. Warm-up and unstable periods pass through as raw
+composition arithmetic (in higher-timeframe sample counts, not base-bar scaled), so
+a strategy needing base-bar-correct stability accounting must feed enough leading
+history for the recursive tail to decay in HTF terms.
 
 ### Cross-asset composition
 
-For strategies that reason about more than one instrument per bar, feed a
-**`Snapshot<Sym>`** — a series of `(Option<Sym>, Option<Frequency>, Atom)`
-entries — and use `Pick<Sym, S>` to project one asset out. Every atom-input
-leaf composes on top verbatim through its `T::of(source)` constructor:
+For strategies reasoning about more than one instrument per bar, feed a
+**`Snapshot<Sym>`** — a series of `(Option<Sym>, Option<Frequency>, Atom)` entries
+— and use `Pick<Sym, S>` to project one asset out. Every atom-input leaf composes
+on top verbatim through its `T::of(source)` constructor:
 
 ```rust
 use fugazi::prelude::*;
 use fugazi::indicators::{Close, Pick};
 use fugazi::{Frequency, Selector, Snapshot};
 
-// BTC/ETH close spread as a first-class Real-output indicator whose Input is
-// Snapshot<String>. Two symbol-matching `Pick`s + arithmetic — no
-// per-strategy machinery.
+// The BTC/ETH close spread as a first-class Real-output indicator. Two
+// symbol-matching `Pick`s plus arithmetic — no per-strategy machinery.
 let mut spread = Close::of(Pick::<String>::matching(Selector::by_symbol("BTC")))
     .sub(Close::of(Pick::<String>::matching(Selector::by_symbol("ETH"))));
 
-// Feed one snapshot per bar.
 let mut snap = Snapshot::<String>::new();
 snap.push(Some("BTC".into()), None, Atom::new(Candle::new(100.0, 101.0, 99.0, 100.0, 1.0)));
 snap.push(Some("ETH".into()), None, Atom::new(Candle::new(60.0,  61.0, 59.0, 60.0,  1.0)));
@@ -280,23 +395,31 @@ assert_eq!(spread.update(snap), Some(40.0));
 
 `Selector<Sym>` is a **partial-key predicate**, not a snapshot key:
 `by_symbol("BTC")` matches every BTC entry regardless of frequency,
-`by_freq(Frequency::Hour(1))` matches every hourly entry regardless of
-symbol, `exact("BTC", Frequency::Hour(1))` matches a single tagged entry.
-Empty selector (`Selector::default()`, both fields `None`) is the "no query"
-sentinel — [`Pick::new()`](https://docs.rs/fugazi/latest/fugazi/indicators/struct.Pick.html)
-uses it to trigger `Snapshot::sole_atom` (single-entry unpack, panics on 2+),
-so a strategy authored around cross-asset primitives still runs cleanly on a
-single-series driver that feeds size-1 snapshots via `Snapshot::of_atom`.
+`by_freq(Frequency::Hour(1))` matches every hourly entry regardless of symbol, and
+`exact("BTC", Frequency::Hour(1))` matches a single tagged entry. The empty
+selector (`Selector::default()`) is the "no query" sentinel — `Pick::new()` uses it
+to trigger `Snapshot::sole_atom`, so a strategy authored around cross-asset
+primitives still runs cleanly on a single-series driver feeding size-1 snapshots.
 
-## Strategies
+### Overlays — non-price columns
 
-The decision layer turns signals into trades. A **strategy** is *your own type*
-implementing the `Strategy` trait: each bar it reads the input, advances its
-signals, and opens/scales/closes positions on a `Wallet` it is handed. The
-wallet — not the strategy — owns the portfolio (funds, positions, a trade
-blotter), so the *same* strategy runs against the in-memory `PaperWallet` for
-backtests or, because `Wallet` is a trait, a live broker / event-bus
-implementation living in a downstream crate.
+An `Atom` is a `Candle` **plus an optional overlay bundle**, which is how non-price
+data enters the same expression tree: funding rate, open interest, market cap, a
+fundamentals column, a regime label, or a signal you precomputed elsewhere. Read
+one with the typed accessors `GetReal` / `GetBool` / `GetStr` — in YAML, `!get
+{ key: funding_rate }` — and it composes exactly like a price source, warm-up
+accounting included.
+
+That means "trade the perp only while funding is negative" is a comparison against
+an overlay, not a special case in your loop. On the CLI, `fugazi get -x` computes
+overlay columns onto fetched bars, and `--series` full-outer-joins any extra CSV
+onto the price frame. [Overlay columns on the CLI →](#get--data-and-overlays)
+
+### Strategies
+
+A **strategy** is *your own type* implementing the `Strategy` trait. The wallet —
+not the strategy — owns the portfolio (funds, positions, a blotter), which is
+precisely why the same strategy runs against `PaperWallet` or a live venue.
 
 ```rust
 use fugazi::prelude::*;
@@ -306,12 +429,7 @@ use fugazi::Snapshot;
 // Own your signals; act on the wallet. `update` advances the signals; `trade`
 // reads them and acts. `Size` is absolute units or a fraction of funds / equity /
 // current position, and `Side` gives direction — so position sizing,
-// short-selling, and staying always-in-market are just what the code does.
-//
-// `Input = Snapshot<Sym>` — the multi-asset input frame. For a single-series
-// backtest the driver feeds size-1 snapshots (`Snapshot::of_atom(atom)`) and
-// the empty-selector `Pick::<Sym>::new()` inside every leaf unpacks the
-// sole atom.
+// short-selling and staying always-in-market are just what the code does.
 struct GoldenCross {
     symbol: &'static str,
     enter: Box<dyn Signal<Snapshot<&'static str>>>,
@@ -323,8 +441,7 @@ impl Strategy for GoldenCross {
     type Symbol = &'static str;
 
     fn update(&mut self, snap: Snapshot<&'static str>) {
-        // Advance EVERY signal every bar (don't short-circuit, or a skipped one
-        // desyncs from the price stream).
+        // Advance EVERY signal every bar — a skipped one desyncs from the feed.
         self.enter.update(snap.clone());
         self.exit.update(snap);
     }
@@ -354,41 +471,45 @@ let mut wallet = PaperWallet::new(10_000.0);
 
 # let feed: Vec<Candle> = Vec::new();
 for candle in feed {
-    wallet.update("AAPL", candle);                          // feed the wallet
+    wallet.update("AAPL", candle);                          // price the wallet
     strat.update(Snapshot::of_atom(candle.into()));         // advance signals
-    strat.trade(&mut wallet);                                // act
+    strat.trade(&mut wallet);                               // act
 }
-let _orders = wallet.orders();        // the trade blotter — recent fills, for reporting
+let _orders = wallet.orders();   // the blotter — recent fills, for reporting
 ```
+
+`Input = Snapshot<Sym>` even for one symbol: a single-series driver feeds size-1
+snapshots (`Snapshot::of_atom`) and the empty-selector `Pick::<Sym>::new()` inside
+every leaf unpacks the sole atom.
 
 The blotter is an observability accessor, not a ledger: it keeps the last
 `wallet::DEFAULT_RETENTION` fills (opt out with `.with_retention(None)`) and is not
-carried across a run-resume, so keep your own store if you need durable trade history.
+carried across a run-resume. Keep your own store if you need durable history.
 
-### You don't have to write one from scratch
+#### You don't have to write one from scratch
 
 The type above is what a `Strategy` *is*, and worth reading once — but five
-ready-made shapes cover most of what people actually build, each configurable in
-Rust or from a YAML file (see [docs/STRATEGIES.md](docs/STRATEGIES.md)):
+ready-made shapes cover most of what people build, each configurable in Rust or
+from a YAML file (see [docs/STRATEGIES.md](docs/STRATEGIES.md)):
 
 | Type | Shape |
 | --- | --- |
 | [`SingleAssetStrategy`](https://docs.rs/fugazi/latest/fugazi/strategies/struct.SingleAssetStrategy.html) | long / flat / short on one symbol, from four signal slots plus protective levels |
 | [`PairsStrategy`](https://docs.rs/fugazi/latest/fugazi/strategies/struct.PairsStrategy.html) | long / flat / short on the spread between two symbols |
-| [`BasketStrategy`](https://docs.rs/fugazi/latest/fugazi/strategies/struct.BasketStrategy.html) | cross-sectional: score every symbol, go long the top and short the bottom |
+| [`BasketStrategy`](https://docs.rs/fugazi/latest/fugazi/strategies/struct.BasketStrategy.html) | cross-sectional: score every symbol, long the top and short the bottom |
 | [`MultiAssetStrategy`](https://docs.rs/fugazi/latest/fugazi/strategies/struct.MultiAssetStrategy.html) | the same rule applied independently to N symbols |
 | [`Portfolio`](https://docs.rs/fugazi/latest/fugazi/portfolio/struct.Portfolio.html) | N *different* strategies sharing one account |
 
-`fugazi::strategies` also carries a catalogue of named recipes built on the
-first of these, grouped by family — `trend::ma_crossover`,
-`trend::donchian_breakout`, `mean_reversion::rsi_reversal`,
-`momentum::*`, `volume::*`, `composite::*` — so the common cases are one call.
+`fugazi::strategies` also carries a catalogue of named recipes built on the first
+of these, grouped by family — `trend::ma_crossover`, `trend::donchian_breakout`,
+`mean_reversion::rsi_reversal`, `momentum::*`, `volume::*`, `composite::*` — so the
+common cases are one call.
 
-`Portfolio` is the one worth a paragraph, because it answers a question the
-others can't: *what would these strategies have earned together?* It runs each
-child against its own notional book while trading a **single account**,
-combining every child's intent into one order per symbol. That is what a real
-deployment looks like, so the same portfolio backtests and trades live:
+`Portfolio` earns a paragraph, because it answers a question the others can't:
+*what would these strategies have earned together?* It runs each child against its
+own notional book while trading a **single account**, combining every child's
+intent into one order per symbol. That is what a real deployment looks like, so the
+same portfolio backtests and trades live:
 
 ```rust
 use fugazi::portfolio::{Portfolio, policy::EqualWeight};
@@ -412,55 +533,25 @@ internally, one child's stop only takes off its own share — all covered under
 ### Working with the wallet
 
 The wallet is fed each symbol's bar every tick via `wallet.update` (its `close`
-marks to market, its `[low, high]` bounds fills); `set` targets an absolute
-position (an opposite-side `set` reverses, `value_frac(1.0)` is all-in), and
-`close` flattens. Queries return unit-tagged amounts
-(`Reference` cash/equity, `Units` of a symbol). For **multi-asset**
-strategies, make `Input` a snapshot of several symbols, feed the wallet each
-symbol's price, and act on more than one symbol per `trade` — see the `pairs`
-example. The trading/execution/event-bus machinery itself is out of
-scope for this crate; it belongs in a downstream project that implements `Wallet`.
+marks to market, its `[low, high]` bounds fills). `set` targets an absolute
+position — an opposite-side `set` reverses, `value_frac(1.0)` is all-in — and
+`close` flattens. Queries return unit-tagged amounts (`Reference` cash and equity,
+`Units` of a symbol). For multi-asset strategies, feed the wallet each symbol's
+price and act on more than one symbol per `trade`; see the `pairs` example.
 
-## Safe defaults, opt-in overrides
+Trading costs are the wallet's business too: `PaperWallet::with_costs` wires a
+commission / spread / slippage bundle into every fill, and the CLI's `--costs`
+exposes the same models. See [docs/COSTS.md](docs/COSTS.md), and
+[docs/TRADING.md](docs/TRADING.md) for the full path from bar to closed trade —
+including why nothing fills on the bar that caused it.
 
-Numbers this library produces during a source's warm-up or IIR settling tail
-are *unsettled*: they exist, but their value depends on the seed, on the
-segment the window happens to start on, or on both. Every knob that could
-paper over an unsettled bar is therefore biased toward **waiting**, with a
-single-name **flag / wrapper / period** for the caller who has considered the
-tradeoff and would rather trade through it.
+### Backtest & metrics
 
-- **Strategy readiness.** `SingleAssetStrategy::is_ready()` returns `true`
-  only once `bars_seen` reaches the largest `stable_bars()` across every
-  wired signal and every attached protective level, and
-  `fugazi::backtest::run` skips `trade()` until then. Wrap a subtree in
-  [`Unstable`](https://docs.rs/fugazi/latest/fugazi/indicators/struct.Unstable.html)
-  (`.unstable()` in Rust/Python, `!unstable { source }` / `!unstable { signal
-  }` in YAML) to zero its reported `unstable_bars()` and skip the wait for
-  its IIR tail. `update()` and `on_fill()` still run every bar so the warm-up
-  progresses; a custom `Strategy` inherits the default `is_ready() = true` and
-  can override for the same effect.
-- **`fugazi get` overlays.** By default the CLI trims each overlay column's
-  pre-`stable_bars()` cells before writing the CSV, so no downstream reader
-  sees an unsettled value. `--keep-unstable` emits every sample from bar 1 —
-  useful when you want the full trace for debugging or plotting.
-- **Explicit periods.** Every windowed indicator takes a `period` argument
-  and asserts it is strictly positive at construction; there is no "sensible
-  default" that would hide the choice. Similarly `sharpe(..., rf, bpy)` takes
-  an explicit risk-free rate and bars-per-year — an omission would silently
-  pick numbers.
-
-The rule when adding a new knob: pick the value that is safest when the user
-forgets to think about it, and provide *one* mechanism to opt out.
-
-## Backtest & metrics
-
-The per-bar loop above (update the wallet, `on_fill`, `update` the strategy,
-`trade` it, record equity) is what `fugazi::backtest::run` does for you. It
-takes any `impl Wallet<Sym>`, so the same primitive drives a `PaperWallet`
-backtest or a downstream live-broker impl unchanged — it isn't backtest-only,
-hence the neutral `run` name — and returns a `RunReport` with the equity curve
-and every booked `Fill`:
+The per-bar loop above — price the wallet, `on_fill`, `update`, `trade`, record
+equity — is what `fugazi::backtest::run` does for you. It takes any
+`impl Wallet<Sym>`, so the same primitive drives a `PaperWallet` backtest or a live
+broker unchanged (hence the neutral name), and returns a `RunReport` with the
+equity curve and every booked `Fill`:
 
 ```rust
 use fugazi::prelude::*;
@@ -478,25 +569,23 @@ use fugazi::Snapshot;
 # let mut strat = MyStrategy;
 # let candles: Vec<Candle> = vec![];
 let mut wallet = PaperWallet::new(10_000.0);
-// Each bar is a `Snapshot<Sym>` — a keyed collection of tagged atoms. For a
-// single-series run, `Snapshot::single(sym, atom)` tags the sole entry with
-// the trading symbol so `run` prices the wallet each bar.
+// `Snapshot::single(sym, atom)` tags the sole entry with the trading symbol so
+// `run` can price the wallet each bar.
 let snapshots = candles
     .into_iter()
     .map(|c| Snapshot::single("AAPL", c.into()));
 let report = run(&mut strat, &mut wallet, snapshots);
-// report.equity_curve : Vec<Real>   — one mark-to-market point per bar
+// report.equity_curve : Vec<Real>    — one mark-to-market point per bar
 // report.fills        : Vec<Fill<_>> — every booked order, bar-indexed
 ```
 
-The `fugazi::metrics` module then reduces that report to numbers **one function
-per metric** — no aggregate `compute`. Three intermediate builders
-(`per_bar_returns`, `reconstruct_trades`, `drawdown_segments`) turn the raw
-artefacts into the shapes each metric family consumes; the metrics themselves
-are the classic catalogue (`sharpe`, `sortino`, `calmar`, `omega`,
-`ulcer_index` / `ulcer_performance_index`, `max_drawdown`, `win_rate`,
+`fugazi::metrics` reduces that report to numbers **one function per metric** — no
+aggregate `compute`. Three intermediate builders (`per_bar_returns`,
+`reconstruct_trades`, `drawdown_segments`) turn the raw artefacts into the shapes
+each metric family consumes; the metrics themselves are the classic catalogue
+(`sharpe`, `sortino`, `calmar`, `omega`, `ulcer_index`, `max_drawdown`, `win_rate`,
 `profit_factor`, `expectancy`, `value_at_risk` / `conditional_value_at_risk`,
-`skewness`, `kurtosis`, …). Call whichever you need:
+`skewness`, `kurtosis`, …):
 
 ```rust
 use fugazi::backtest::RunReport;
@@ -515,283 +604,383 @@ let _sharpe = sharpe(&returns, /*rf=*/ 0.0, /*bars_per_year=*/ 252.0);
 let _max_dd = max_drawdown(&segments);
 ```
 
-This is what the `fugazi` CLI backtester sits on top of — it drives `run`, then
-aggregates every metric into a YAML report.
+This is what the CLI backtester sits on: it drives `run`, then aggregates every
+metric into a YAML report. See [docs/METRICS.md](docs/METRICS.md) for definitions.
 
-## What's included
+### Running an ensemble in parallel
 
-- **Moving averages / smoothing:** `Sma`, `Ema`, `Rma` (Wilder/SMMA), `Wma`,
-  `Hma` (Hull)
-- **Oscillators / momentum:** `Rsi`, `Macd`, `Stochastic` / `StochRsi`,
-  `WilliamsR`, `Cci`, `Roc`, `StdDev`
-- **Trend / volatility:** `Atr`, `Adx`, `Dmi` (+DI/−DI), `Aroon`, `Bollinger`,
-  `Donchian`, `Keltner`, `Sar` (Parabolic SAR)
-- **Volume:** `Obv`, `Vwap`, `Ad` (Chaikin A/D), `Mfi`
-- **Trailing strategy risk** (own an embedded `Strategy`, reduce its live
-  equity curve to a rolling metric over the last `period` bars): `Sharpe`,
-  `Sortino`, `Volatility`, `MaxDrawdown`, `Calmar`. A trailing risk-adjusted
-  estimate becomes a first-class source — read it as an overlay column
-  (`fugazi get -x`) or compose it into another strategy — instead of the
-  "run a strategy → dump `returns.csv` → re-join it" round-trip.
-- **Sources & transforms:** `Identity`, `Value`, `Current::*` candle accessors,
-  calendar accessors (`Year`/`Month`/`Day`/`Hour`/…/`DayOfWeek`/`WeekOfYear`),
-  overlay readers (`GetReal`/`GetBool`/`GetStr`), `TrueRange`;
-  `Add`/`Sub`/`Mul`/`Div`, `Lag`/`Diff`/`Ratio`/`Roc`,
-  `RollingMax`/`RollingMin`
-- **Signals:** `Gt`/`Lt`/`Ge`/`Le`/`Eq`/`Ne` comparisons, `and`/`or`/`xor`/`not`,
-  `changed`, `crosses_above`/`crosses_below`
-- **Cross-asset primitives:** `Snapshot<Sym>` (per-bar tagged-atom series),
-  `Selector<Sym>` (partial-key matcher), `Pick<Sym, S>` (project one asset out
-  of a snapshot), `Frequency` (bar cadence — `Minute(u32)`/`Hour(u32)`/…). The
-  same atom-input leaves (`Close::of(source)`, `Year::of(source)`, `Atr` on
-  `CurrentBar::of(source)`, `GetReal::of(schema, key, source)`) drop straight
-  on top of a `Pick` for cross-asset composition.
+Enable the `parallel` feature and `backtest::run_many` fans a slice of
+`(strategy, wallet)` pairs across a rayon pool against **one shared snapshot
+stream** — parameter variants, seed sweeps, scenario grids, or an ensemble you
+intend to vote:
 
-Multi-line indicators expose their components as fields and a value struct:
-`Bollinger`/`Donchian`/`Keltner` → `upper`/`middle`/`lower`, `Macd` →
-`macd`/`signal`/`histogram`, `Adx` → `plus_di`/`minus_di`/`adx`, `Dmi` →
-`plus_di`/`minus_di`, `Aroon` → `up`/`down`/`oscillator`. Each component also has
-a same-named **accessor** (`macd.line()`/`.signal()`/`.histogram()`,
-`bands.upper()`/`.middle()`/`.lower()`, `adx.adx()`, …) that returns it as a
-composable `Indicator<Output = Real>` — so any one line can feed the comparison
-and arithmetic builders above (see [Composition](#composition)).
+```rust,ignore
+use fugazi::backtest::run_many;
 
-Comparisons are tolerance-aware so floating-point noise doesn't cause spurious
-flips. The default band is **scale-aware** — `max(1e-12, 1e-9 · larger operand)` —
-because operands range from per-bar returns to five-figure prices and no single
-absolute number is right for both. Override with `Gt::with_epsilon(a, b, eps)` for
-a literal deadband in the operands' own units, or `Gt::with_tolerance(a, b, t)`
-for an explicit [`Tolerance`].
+let mut runs: Vec<(_, PaperWallet<&str>)> = (5..25)
+    .map(|fast| (trend::ma_crossover("BTC", fast, 50), PaperWallet::new(10_000.0)))
+    .collect();
 
-## Command-line backtester
+let reports = run_many(&mut runs, &snapshots);   // one RunReport per pair
+```
 
-The crate ships a `fugazi` binary that loads a strategy from YAML, assembles
-candle data from one or more CSV series, runs it through a `PaperWallet`, and
-writes the result files:
+Each run owns its strategy and its wallet, so there is nothing shared to
+synchronise — the snapshots are read-only. Per-bar state stays single-threaded and
+cache-resident on purpose; that's where the throughput comes from. Parallelism sits
+here, one level up, where runs are genuinely independent.
+
+The CLI applies the same idea: `optimize -j N` sizes the grid's thread pool, and
+the Monte Carlo permutation pass parallelises its resamples.
+
+### Safe defaults, opt-in overrides
+
+Numbers produced during a source's warm-up or IIR settling tail are *unsettled*:
+they exist, but their value depends on the seed, on the segment the window happens
+to start on, or on both. Every knob that could paper over an unsettled bar is
+biased toward **waiting**, with a single named opt-out.
+
+- **Strategy readiness.** `SingleAssetStrategy::is_ready()` returns `true` only
+  once `bars_seen` reaches the largest `stable_bars()` (`warm_up_bars() +
+  unstable_bars()`) across every wired signal and every attached protective level,
+  and `backtest::run` skips `trade()` until then. Wrap a subtree in
+  [`Unstable`](https://docs.rs/fugazi/latest/fugazi/indicators/struct.Unstable.html)
+  — `.unstable()` in Rust/Python, `!unstable { source }` / `!unstable { signal }` in
+  YAML — to zero its reported `unstable_bars()` and skip the wait for its IIR tail.
+  `update()` and `on_fill()` still run every bar so warm-up progresses.
+- **`fugazi get` overlays.** The CLI trims each column's pre-`stable_bars()` cells
+  before writing the CSV, so no downstream reader sees an unsettled value.
+  `--keep-unstable` emits every sample from bar 1.
+- **Duration windows.** `-w 1d` / `1w` demands an explicit asset class and a
+  resolvable cadence; plain bar counts (`-w 200`) don't.
+- **Explicit periods.** Every windowed indicator takes a `period` and asserts it is
+  strictly positive; `sharpe(…, rf, bpy)` takes an explicit risk-free rate and
+  bars-per-year. There is no "sensible default" that would hide the choice.
+
+The rule when adding a knob: pick the value that is safest when the user forgets to
+think about it, and provide *one* mechanism to opt out.
+
+### Live trading
+
+The same `Wallet` a backtest trades into is the seam to a real broker. The `live`
+feature ships `OkxWallet` (OKX V5 perpetual swaps, HMAC-signed REST) and
+`CoinbaseWallet` (Coinbase Advanced Trade **spot**, ES256-JWT-signed REST), each a
+`Wallet<String>`. A strategy driven by `backtest::run` needs no change:
+
+```rust,ignore
+use fugazi::live::OkxWallet;
+
+// Demo trading (free, no real funds) or ::mainnet(key, secret, passphrase) for
+// production. OKX credentials are a key/secret pair plus a passphrase.
+let mut wallet = OkxWallet::demo(key, secret, passphrase);
+// ... then drive any strategy through `fugazi::backtest::run` as usual.
+```
+
+Enable with `features = ["live"]` (off by default). Market orders, `reduceOnly`
+stop / take-profit legs, account-marked equity and fill polling all work through
+the ordinary trait methods; `poll_fills()` drains fills booked between bars and
+`take_rejections()` surfaces venue refusals to `Strategy::on_reject`.
+
+**Units, not contracts.** OKX sizes a swap in contracts (one `BTC-USDT-SWAP`
+contract is `0.01 BTC`) while the trait — and every strategy — speaks base-asset
+units. `OkxWallet` converts at the boundary: a `0.03 BTC` target goes out as `3`
+contracts and comes back as `0.03` units. Nothing above the wallet sees a contract.
+
+**Spot can't short.** `CoinbaseWallet` holds a base-asset balance that can't go
+negative: `set_position` market-buys or -sells the difference, and a negative target
+sells to flat and reports the un-shortable remainder through `take_rejections()`.
+Construct it with `CoinbaseWallet::mainnet(key_name, private_key_pem)`.
+
+That limit is **introspectable**: `Wallet::can_short()` answers `false` on
+`CoinbaseWallet`, `true` on `OkxWallet` and `PaperWallet`, so a caller can degrade
+to a long-only path *before* trading rather than after a clamped order. It reports,
+it doesn't enforce. Wrappers delegate: a `SleeveWallet` answers for the account it
+wraps, and a portfolio child's handle answers for the account the portfolio nets
+onto. `Wallet::quote_ccy()` is the same shape for the numeraire — `None` means
+"does not say", not "no currency"; fugazi does no FX, so a run is sound only if one
+numeraire holds throughout.
+
+A whole `Portfolio` runs live the same way — it is an ordinary strategy that nets
+its children's intents onto the one wallet it is handed:
+
+```rust,ignore
+use fugazi::backtest;
+use fugazi::live::OkxWallet;
+use fugazi::portfolio::Portfolio;
+
+let mut portfolio: Portfolio<String> = Portfolio::builder()
+    // ... children ...
+    .build();
+let mut account = OkxWallet::mainnet(&key, &secret, &passphrase);
+let report = backtest::run(&mut portfolio, &mut account, snapshots);
+```
+
+The account must be the portfolio's **alone**: it drives that wallet to the sum of
+its children's positions, so anything else trading the same account looks like a
+position no child asked for and will be traded back out.
+
+#### Testing against OKX demo trading
+
+OKX runs a free **demo-trading** environment (fake funds) on the same host as
+production, selected by a request header — so the live wallet is exercisable end to
+end without risking money:
+
+1. Under **Demo trading** in your OKX account, create an API key — you get a key, a
+   secret and a **passphrase** (all three required; the passphrase is one you choose
+   at creation, not your login password).
+2. The demo account is pre-funded and runs in **net position mode**, which is what
+   the wallet assumes.
+3. Run the narrated smoke test:
+
+   ```bash
+   OKX_DEMO_KEY=… OKX_DEMO_SECRET=… OKX_DEMO_PASSPHRASE=… \
+     cargo run --example okx_demo --features live
+   ```
+
+   It reads the account, opens a tiny `BTC-USDT-SWAP` position with a market order,
+   polls the fill, then flattens back — leaving the account as it started.
+
+4. Or the opt-in integration test (`#[ignore]`d and gated on the same env vars, so a
+   plain `cargo test` never hits the network):
+
+   ```bash
+   OKX_DEMO_KEY=… OKX_DEMO_SECRET=… OKX_DEMO_PASSPHRASE=… \
+     cargo test --features live --test live_okx -- --ignored live_demo_round_trip
+   ```
+
+Plain `cargo test --features live` runs only the offline `wiremock` tests (signing,
+order encoding, fill decoding, protective dedup, the contracts↔units conversion)
+and never reaches the network. If a signed call is rejected for a timestamp reason,
+your clock has drifted — resync it. Before going to `::mainnet`, note the net-mode
+assumption, and that leverage, rate-limit backoff and clock-offset sync are not
+managed yet.
+
+### Persisting and resuming a run
+
+`RunnableStrategy::save_state` / `restore_state` serialise a run's full state —
+every indicator, every position, the wallet — so a live process can stop and
+resume without replaying history. `backtest::run_iteration_resumable` drives a
+chunk; `flatten_open_positions` closes out through the cost pipeline at the end.
+`warm_up` advances indicators over a pause gap without trading. See *Run resuming*
+in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+---
+
+## Guide: the command line
+
+The `fugazi` binary loads a strategy from YAML, assembles candles from one or more
+CSV series, runs them through a `PaperWallet`, and writes result files. No Rust
+required — and it is the same engine, so anything you prototype here runs live
+unchanged.
 
 ```sh
-cargo run --bin fugazi -- run \
-  @examples/strategy.yml \
+# 1. Fetch data.
+fugazi get binance:BTCUSDT[1d] --since 2023-01-01 -o btc.csv
+
+# 2. Check the strategy parses and builds — no data needed.
+fugazi check strategy @strategy.yml
+
+# 3. Backtest it.
+fugazi run @strategy.yml --series @btc.csv --output-dir out/
+
+# 4. Sweep the parameters, ranked by Sharpe, across all cores.
+fugazi optimize @strategy.params.yml --series @btc.csv \
+  --params FAST=3..15 --params SLOW=20..60:5 \
+  --best-by sharpe -j 8 -o grid.csv
+```
+
+### `run`
+
+```sh
+fugazi run @examples/strategy.yml \
   --series @examples/candles.csv \
   --output-dir out/
-# writes out/fills.csv  (time,symbol,side,units,price,kind — one row per booked order),
-#        out/trades.csv (entry_time,exit_time,side,units,entry_price,exit_price,pnl,return,bars_held — one row per closed round-trip),
-#        out/returns.csv (time,equity,return),
-#        and out/metrics.yml (whole-run summary)
 ```
 
-**No plots.** `fugazi` deliberately emits data files only — plotting is a
-post-hoc analysis (see [Analyzing a run in R](#analyzing-a-run-in-r) below).
+Writes four files:
 
-The strategy is a **positional** argument (not a flag) and follows the same `@`
-convention as `--series`: `@file` loads a file, anything else is treated as inline
-content — handy for quick one-offs, e.g.
-`'{ symbol: BTC, long: { enter: !crosses_above { lhs: !sma { period: 3 }, rhs: !sma { period: 8 } } } }'`. The format is YAML — block or flow
-(inline) style, both fine. (JSON is a subset of YAML, so a JSON-shaped document
-still parses: a `!sma { … }` tag is just the singleton map `{"sma": …}`.)
+| File | One row per | Columns |
+| --- | --- | --- |
+| `fills.csv` | booked order | `time,symbol,side,units,price,kind` |
+| `trades.csv` | closed round-trip | `entry_time,exit_time,side,units,entry_price,exit_price,pnl,return,bars_held` |
+| `returns.csv` | bar | `time,equity,return` |
+| `metrics.yml` | run | the whole metric catalogue |
 
-Flags: `<STRATEGY>` (positional, `@file` or inline), `--series <spec>`
-(repeatable), `--output-dir <dir>`, `--cash <amount>` (default `10000`),
-`--params <spec>` (repeatable — see below), calendar shortcuts
-(`--stocks`/`--forex`/`--crypto` + `--frequency`) or explicit `--bars-per-year`,
-and `--risk-free-rate <rate>` for the annualized rf. `--costs <spec>`
-(repeatable, same `,`-separated `key=value` / `@file.yml` shape as `--params`)
-wires a commission/spread/slippage model into every fill — venue presets ship
-in [`examples/binance.yml`](examples/binance.yml) and
-[`examples/ibkr.yml`](examples/ibkr.yml); omit for a frictionless backtest
-identical to the pre-costs release. `-w/--windowed <N>` reduces the run in
-`N`-bar windows *for post-hoc analysis* — `metrics.yml` (whole-run) is still
-written, and adding `-w N` writes two extra CSVs at window length `N`:
-`metrics.csv` (non-overlapping windows, one row each) and `rolling.csv`
-(rolling stride-1 windows, one row each). Both share the same columns —
-`window_start,window_end,<full metric catalogue under dotted metrics.yml
-names>` — so R/Python can consume them interchangeably. The console prints
-an extra **windowed metrics** block under `-w` showing `mean ± std` across
-the non-overlapping rows, right after the whole-run block — so the single
-estimate and the cross-window dispersion sit side-by-side. Non-overlapping is
-right for cross-window aggregation (independent samples → the sample stddev is
-meaningful); rolling is right for continuous plotting (a smooth curve — the
-metrics.csv equivalent to pyfolio's rolling-Sharpe chart). The same
-`-w/--windowed <N>` exists on `optimize`: each grid point is evaluated in
-non-overlapping windows only (the ranker's mean±k·std needs the independence),
-every `-m` metric becomes two CSV columns (`<name>_mean` / `<name>_std`), and
-`--best-by` ranks by the windowed mean — rewarding parameter sets that perform
-consistently across regimes rather than in one lucky stretch. Add
-`-k/--risk-aversion <K>` to rank conservatively: the mean is shifted *against*
-each grid point by `K` standard deviations before sorting (`mean − K·std` for
-higher-is-better metrics, `mean + K·std` for lower-is-better ones), so
-`sharpe 2.0 ± 3.0` no longer outranks `1.8 ± 0.2`. Output files are
-`,`-delimited.
+**No plots**, deliberately — plotting is post-hoc analysis, and the data files are
+the interface. [An R recipe is below](#analyzing-a-run).
 
-`run --montecarlo` adds a Monte Carlo significance pass after the backtest: is
-the result real, or luck? It writes a `montecarlo:` block into `metrics.yml`
-(and a `montecarlo.csv` of every resample) with, per headline metric, a
-**bootstrap confidence interval** and an empirical-null **p-value**. The null
-(`--mc-null`, default `rerun`; `none` gives only the CIs) re-trades the
-strategy on resampled synthetic price paths — honest across every shape, but
-runs one backtest per permutation. Resampling preserves the serial dependence a
-naive shuffle would destroy: `--mc-scheme stationary` (default) draws geometric
-random block lengths (Politis–Romano), `moving-block` uses fixed blocks, `iid`
-is a plain bootstrap; `--mc-block <L>` sets the (expected) block length.
-`--mc-permutations <N>` (default 1000), `--mc-seed <S>` (reproducible across
-platforms), `--mc-ci <level>` (default 0.95), and `--mc-metrics a,b,…` (default
-a Sharpe/Sortino/Calmar/return/drawdown headline set) round out the knobs. It's
-opt-in because the re-run null is expensive.
+Console output is a two-line banner plus four blocks: **inputs** (strategy, params
+in effect, candle period, starting capital, output dir), **trades** (each fill),
+**result** (bars, trade count, capital start→end with absolute and percent change,
+elapsed runtime), and **metrics** (the headline lines of `metrics.yml`). `-q`
+silences all of it; the files are still written.
 
-`optimize --walkforward IS,OS[,Embargo]` rolls a walk-forward loop instead: on
-each fold the grid is scored on the IS window, the `--best-by` winner is
-recorded together with its OOS realization (with a per-fold `_wfe = OOS/IS`
-column), and a composite OOS equity curve is stitched from every fold's winner —
-a run that is genuinely out-of-sample at every bar. Emits three sibling files
-(per-fold table, composite OOS equity CSV, composite OOS metrics YAML).
-Grid-wide `max(stable_bars)` is skipped at the head by default;
-`--keep-unstable` opts out. Mutually exclusive with `-w`.
+Core flags: `<STRATEGY>` (positional), `--series <spec>` (repeatable),
+`--output-dir`, `--cash <amount>` (default `10000`), `--params <spec>`,
+`--costs <spec>`, calendar shortcuts (`--stocks` / `--forex` / `--crypto` plus
+`--frequency`) or explicit `--bars-per-year`, and `--risk-free-rate`. Full
+reference: [docs/CLI.md](docs/CLI.md).
 
-`run` and `optimize` measure the whole run. The strategy layer's readiness
-default holds entries until every wired signal *and* every attached
-protective level is past its `stable_bars()` (see
-[`SingleAssetStrategy::is_ready`](https://docs.rs/fugazi/latest/fugazi/strategies/struct.SingleAssetStrategy.html)),
-so a seed-contaminated bar never fires a trade. Purely windowed (FIR)
-strategies — SMA crossovers and the like — have `unstable_bars() = 0`
-throughout, so the gate elapses on the last warm-up bar and never lags them.
-Users who explicitly accept the IIR settling tail on a subtree opt out by
-wrapping it in `!unstable`: `!unstable { source: !ema { … } }` /
-`!unstable { signal: !crosses_above { … } }` reports `unstable_bars() = 0`
-for that subtree while forwarding the underlying output. Same shape as
-`fugazi get`'s `--keep-unstable` (default trims pre-`stable_bars()` cells
-from each overlay CSV column; the flag opts out) — see [Safe defaults, opt-in
-overrides](#safe-defaults-opt-in-overrides).
+### `--series` — assembling the data
 
-Console output is a two-line banner (the constant tool identity, then the active
-command) followed by four blocks: an **inputs** block of the execution params
-(strategy, params in effect, candle period start→end, starting capital, output
-dir), a **trades** block listing each fill (time, symbol, side, quantity, price,
-kind — a symbol is per-trade, never a run-level field), a **result** block (bars,
-trade count, capital start→end with absolute and percent change, then start/finish
-timestamps with elapsed runtime), and a **metrics** block echoing the headline
-lines of `metrics.yml`. `-q` silences all of it (the result files are still
-written).
+Each `--series` is a `,`-separated list of terms: `key=value` adds a constant
+column, `@file.csv` loads a CSV's columns and rows (the delimiter — `;`, `,`, tab
+or `|` — is autodetected per file). Within a series, literals broadcast across the
+file's rows; across several `--series`, the tables are **full-outer-joined** on
+`(symbol, freq, time)` into one long frame.
 
-**Data — `--series`.** Each `--series` is a `,`-separated list of terms:
-`key=value` adds a constant column, `@file.csv` loads a CSV's columns and rows
-(each file's column delimiter — `;`, `,`, tab or `|` — is autodetected from its
-header). Within a series the literals broadcast across the file's rows; across
-several `--series` the tables are full-outer-joined on `(symbol, time)` into one
-long frame. So a symbol-less OHLCV file gets `symbol=BTC,@candles.csv`, a file
-with its own `symbol` column loads as `@multi.csv`, and extra fields (e.g.
-fundamentals) ride along on a second series. Required columns: `time`, `symbol`,
-and `open`/`high`/`low`/`close` (`volume` optional); `time` is sorted as an
-opaque token (dates, epochs — anything sortable).
+```sh
+--series symbol=BTC,@candles.csv        # symbol-less OHLCV file: broadcast a symbol
+--series @multi.csv                     # file with its own `symbol` column
+--series @btc.csv --series @funding.csv # two files joined into one frame
+```
 
-**Strategy — `strategy.yml`.** A `symbol` plus `long`/`short` sides (each an
-`enter` signal and an optional `exit`). A side's `exit`
-defaults to never-fire, which is exactly right for an always-in long/short
-reversal (the opposite side's `enter` reverses the position); give an `exit` only
-for a flat rest. Signals and sources are written
-with YAML **tags** — `!sma { source: close, period: 5 }` — while candle-field
-leaves are bare words (`close`, `high`, `volume`, …). Omitted `source` defaults
-to `close`. The vocabulary mirrors the library one-to-one:
+Required columns are `time`, `symbol`, and `open`/`high`/`low`/`close` (`volume`
+optional). `time` sorts as an opaque token — dates, epochs, anything sortable.
+Extra columns ride along as **overlays**, readable with `!get { key: … }`.
 
-- **Sources:** leaves `close`/`high`/`low`/`open`/`volume`/`typical`/`median`,
-  `!value <n>` (and its string twin `!value <str>` — a constant string source,
-  the operand of `!str_eq` / `!str_ne`; quote a numeric-looking one, `!value
-  "70"`, to get the string rather than the scalar);
-  `!sma`/`!ema`/`!rma`/`!wma`/`!hma`/`!rsi`/`!stddev`/`!cci`/
-  `!stochastic { source, period }`, `!stoch_rsi { source, rsi_period,
-  stoch_period }`; windowed statistics `!skewness`/`!kurtosis`/`!zscore
-  { source, period }`, `!correlation { lhs, rhs, period }`, and the
-  Lo-MacKinlay regime classifier `!variance_ratio { source, period, lag }`
-  (`> 1` trending, `< 1` mean-reverting; recomputes O(period)/bar, unlike the
-  incremental rest); `!macd_line`/`!macd_signal`/`!macd_histogram { source, fast,
-  slow, signal }`; `!bb_upper`/`!bb_middle`/`!bb_lower { source, period, k }`;
-  `!keltner_{upper,middle,lower} { source, ema_period, atr_period, multiplier }`;
-  `!donchian_{upper,middle,lower} { high, low, period }`; `!adx`/`!plus_di`/
-  `!minus_di`/`!dmi_plus_di`/`!dmi_minus_di`/`!aroon_{up,down,oscillator}
-  { period }`; bar indicators `!atr`/`!mfi`/`!williams_r`/`!vwap { period }`,
-  range-based volatility `!parkinson`/`!garman_klass`/`!rogers_satchell
-  { period }`, `!obv`/
-  `!ad`/`!true_range`, `!sar { step, max }`; transforms `!add`/`!sub`/
-  `!mul`/`!div { lhs, rhs }`, `!lag`/`!diff`/`!ratio`/`!roc { source, period }`,
-  `!rolling_max`/`!rolling_min { source, period }`; rolling order statistics
-  `!percentile { source, period, pct }` (`pct: 0.5` = rolling median — the
-  adaptive-threshold primitive, e.g. an RSI against its own trailing-year 80th
-  percentile instead of a fixed 70) and `!percentile_rank { source, period }`;
-  event timing `!bars_since { source }` (bars since a **signal** last read true —
-  `None` until it has fired once, so thresholds read false until then) plus the
-  O(1) shorthands `!bars_since_high`/`!bars_since_low { source, period }`.
-- **Signals:** `!gt`/`!lt`/`!ge`/`!le`/`!eq`/`!ne { lhs, rhs, epsilon? }`,
-  `!above`/`!below { source, level }`; `!crosses_above`/`!crosses_below
-  { lhs, rhs }`; `!and`/`!or`/`!xor { lhs, rhs }`, `!all [ … ]`, `!any [ … ]`,
-  `!not <signal>`, `!changed <signal>`, `!unstable { signal: <signal> }`
-  (passthrough that reports `unstable_bars() = 0` for the wrapped subtree —
-  opt-in override of the "wait for the IIR tail" readiness default; there is
-  also a `!unstable { source: <source> }` twin on the source side),
-  `!value <bool>`; `!str_eq`/`!str_ne { lhs, rhs }` compare a `Str` overlay
-  column (`lhs: !get { key: regime }`) against a string — `rhs` takes a bare
-  literal (`rhs: bull`), the same constant as a source (`rhs: !value bull`), or
-  a second `Str` column (`rhs: !get { key: prev_regime }`).
-- **Trailing strategy risk:** `!sharpe` / `!sortino` / `!volatility` /
-  `!max_drawdown` / `!calmar { strategy, period, bars_per_year, risk_free_rate? }`
-  — own an embedded strategy, drive it against a private wallet, and read a
-  rolling risk metric over its live equity curve (see the source list under
-  [What's included](#whats-included)). `strategy:` takes a **single-asset** spec,
-  a catalogue **preset** (`!ma_crossover { symbol, fast, slow }`, …), a **pairs**
-  spec (`left`/`right`), or a **basket** spec (`selection`/`score`/`sizing`) — the
-  embedded engine forwards the whole snapshot, so it runs whichever. A pairs /
-  basket strategy only produces meaningful numbers when the run feeds a tagged
-  multi-asset snapshot each bar (a `pairs:` / `basket:` run, or a multi-symbol
-  `--series` frame).
+Two guards run automatically on the assembled frame, because both failures produce
+plausible-looking nonsense rather than an error:
 
-For example, the trailing Sharpe of a BTC/ETH spread pair — a live "is this
-pair working lately" regime score, readable as an overlay column or composed
-into another strategy:
+- **Cadence** — a symbol carrying two cadences, a `-f` naming an absent one, or
+  untagged rows beside two labelled ones are *refused*; a mixed-cadence universe or
+  a label disagreeing with the observed spacing is *warned*.
+- **Overlap** — how much of a multi-symbol universe ever shares a snapshot. A
+  fragmented universe is reported before the run, not discovered in the metrics.
+  (Joining on the trading *date* to force overlap is rejected permanently: it
+  manufactures cross-timezone lookahead.)
+
+### The strategy file
+
+A `symbol` plus `long` / `short` sides, each with an `enter` signal and an optional
+`exit`. A side's `exit` defaults to never-fire, which is exactly right for an
+always-in reversal — the opposite side's `enter` reverses the position. Give an
+`exit` only when you want a flat rest.
 
 ```yaml
-!sharpe
-strategy:                      # a pairs body: same shape as a pairs: strategy file
-  left: BTC
-  right: ETH
-  enter: !crosses_below
-    lhs: !sub
-      lhs: !close { source: !pick { symbol: BTC } }
-      rhs: !close { source: !pick { symbol: ETH } }
-    rhs: !value 0.0
-period: 60
-bars_per_year: 8760
+symbol: BTC
+long:
+  enter: !crosses_above
+    lhs: !sma { source: close, period: 10 }
+    rhs: !sma { source: close, period: 30 }
+  exit: !crosses_below
+    lhs: !sma { source: close, period: 10 }
+    rhs: !sma { source: close, period: 30 }
+  # Protective levels are price *levels* (sources), not signals. `peak` and
+  # `entry` are position-anchored leaves.
+  stop_loss:   !mul { lhs: peak,  rhs: !value 0.95 }   # 5% off the high since entry
+  take_profit: !mul { lhs: entry, rhs: !value 1.15 }   # 15% above entry
+sizing: !vol_target { target: 0.20, window: 30, bars_per_year: 365 }
 ```
 
-**Parameters — `!param`.** Any value in the strategy can be a placeholder resolved
-at run time with `--params` (repeatable), so one file covers many variations
-(periods, thresholds, the traded symbol):
+Signals and sources are YAML **tags** (`!sma { source: close, period: 5 }`);
+candle-field leaves are bare words (`close`, `high`, `volume`, `typical`, …), and an
+omitted `source` defaults to `close`. JSON parses too, being a subset of YAML.
+
+The vocabulary mirrors the library one-to-one. A representative slice:
+
+- **Sources.** `!sma` `!ema` `!rma` `!wma` `!hma` `!rsi` `!stddev` `!cci`
+  `!stochastic` `!stoch_rsi`; `!macd_line` / `!macd_signal` / `!macd_histogram`;
+  `!bb_upper|middle|lower`; `!keltner_*`; `!donchian_*`; `!adx` `!plus_di`
+  `!minus_di` `!aroon_*`; bar indicators `!atr` `!mfi` `!williams_r` `!vwap` `!obv`
+  `!ad` `!true_range` `!sar`; range volatility `!parkinson` `!garman_klass`
+  `!rogers_satchell`; statistics `!skewness` `!kurtosis` `!zscore` `!correlation`
+  and the Lo–MacKinlay regime classifier `!variance_ratio` (`> 1` trending, `< 1`
+  mean-reverting); transforms `!add` `!sub` `!mul` `!div` `!lag` `!diff` `!ratio`
+  `!roc` `!rolling_max` `!rolling_min`; rolling order statistics `!percentile`
+  (`pct: 0.5` is a rolling median — the adaptive-threshold primitive, e.g. RSI
+  against its own trailing-year 80th percentile rather than a fixed 70) and
+  `!percentile_rank`; event timing `!bars_since`, `!bars_since_high`,
+  `!bars_since_low`; overlay readers `!get { key: … }`; constants `!value`.
+- **Signals.** `!gt` `!lt` `!ge` `!le` `!eq` `!ne { lhs, rhs, epsilon? }`,
+  `!above` / `!below { source, level }`, `!crosses_above` / `!crosses_below`,
+  `!and` `!or` `!xor` `!all [...]` `!any [...]` `!not` `!changed`, `!unstable`, and
+  `!str_eq` / `!str_ne` for string overlay columns (`lhs: !get { key: regime }`,
+  `rhs: bull`).
+- **Trailing strategy risk.** `!sharpe` `!sortino` `!volatility` `!max_drawdown`
+  `!calmar { strategy, period, bars_per_year }` — embed a whole strategy, drive it
+  against a private wallet, and read a rolling risk metric off its live equity
+  curve. A trailing risk-adjusted estimate becomes a first-class *source*, so you
+  can gate one strategy on another's recent performance without the "run it, dump
+  `returns.csv`, re-join it" round-trip:
+
+  ```yaml
+  !sharpe
+  strategy:                      # a pairs body — same shape as a pairs: file
+    left: BTC
+    right: ETH
+    enter: !crosses_below
+      lhs: !sub
+        lhs: !close { source: !pick { symbol: BTC } }
+        rhs: !close { source: !pick { symbol: ETH } }
+      rhs: !value 0.0
+  period: 60
+  bars_per_year: 8760
+  ```
+
+The complete catalogue is in [docs/STRATEGIES.md](docs/STRATEGIES.md), or run
+`fugazi list indicators`. `fugazi grammar` emits the machine-readable descriptor,
+including what each slot *demands*:
+
+```sh
+# what does !and's lhs have to be filled with?
+fugazi grammar | jq -r '.tags[] | select(.name=="and") | .fields[] | "\(.name): \(.node_output)"'
+# lhs: ["bool"]
+# rhs: ["bool"]
+```
+
+### The five document shapes
+
+The strategy positional takes an optional shape prefix:
+
+| Prefix | Shape | Use it when |
+| --- | --- | --- |
+| `single:` (default) | one symbol, long / flat / short | the ordinary case |
+| `pairs:` | long / flat / short the spread `close(left) − close(right)` | a relationship, not a level |
+| `basket:` | score every symbol, long the top and short the bottom | a symbol's fate depends on its *rank* |
+| `multi:` | the same rule applied independently per symbol | a symbol's fate depends only on itself |
+| `portfolio:` | N different strategies netting onto one account | you want the combined equity curve |
+
+So `fugazi run pairs:@spread.yml …`, `basket:@momo.yml`, and so on. Any other
+prefix is rejected.
+
+Two notes that cost people round-trips:
+
+- **Pairs are two-sided.** A mean-reverting spread visits both tails, and the
+  correct position is opposite at each. A document with only `long_spread:`
+  silently skips half the round-trips; wiring `short_spread:` picks them up.
+- **Basket selection rules compose.** A ranked rule nests an `of:` inner:
+  `!top_bottom { longs: 2, shorts: 2, of: !threshold { long_min: 0.5, short_max: -0.5 } }`
+  ranks the top-2 and bottom-2 *of* the threshold survivors.
+
+### `!param` and `!import` — one file, many strategies
+
+Any value can be a placeholder resolved at run time:
 
 ```yaml
 symbol: !param { key: SYM, default: BTC }
 long:
   enter: !crosses_above
-    lhs: !sma { source: close, period: !param { key: FAST } }          # required
+    lhs: !sma { source: close, period: !param { key: FAST } }              # required
     rhs: !sma { source: close, period: !param { key: SLOW, default: 8 } }  # optional
 ```
 
-`--params` is a `,`-separated list of terms, exactly like `--series` (and itself
-repeatable): `NAME=value` sets one, and `@file.yml` loads a whole
-`NAME: value` mapping (see [`examples/params.yml`](examples/params.yml)). Terms
-apply left-to-right, so a later one wins:
+`--params` is a `,`-separated list of terms, exactly like `--series` and itself
+repeatable: `NAME=value` sets one, `@file.yml` loads a whole mapping. Terms apply
+left-to-right, so a later one wins:
 
 ```sh
-cargo run --bin fugazi -- run @examples/strategy.params.yml \
+fugazi run @examples/strategy.params.yml \
   --params @examples/params.yml,FAST=5 \
   --series @examples/candles.csv --output-dir out/
 ```
 
 A `default` makes a param optional; without one, a missing value is an error.
-`!param NAME` is shorthand for `!param { key: NAME }`.
-A `NAME=value` value is parsed as a scalar (so `FAST=5` is a number, `SYM=BTC`
-a string), then substituted before the strategy is typed — so a param can stand in
-anywhere, including where a number is required.
+`!param NAME` is shorthand for `!param { key: NAME }`. Values parse as scalars
+(`FAST=5` is a number, `SYM=BTC` a string) and substitute *before* the strategy is
+typed, so a param can stand anywhere — including where a number is required.
 
-**Imports — `!import`.** Any value in the strategy can instead be loaded from
-another YAML file, so a shared entry rule, a sizing recipe, or a whole side
-lives in one place and is reused across strategies:
+`!import` pulls any value from another file, so a shared entry rule or sizing
+recipe lives in one place:
 
 ```yaml
 symbol: BTC
@@ -801,69 +990,162 @@ long:
 sizing: !import sizing/half-kelly.yml
 ```
 
-**Paths are relative to the importing file**, not to where `fugazi` was invoked
-— `strategies/btc.yml` importing `signals/breakout.yml` finds
-`strategies/signals/breakout.yml` from any working directory. (Inline strategy
-text has no directory of its own, so its imports resolve against the working
-directory.) An imported file is an ordinary spec fragment: it may contain its
-own `!import`s — resolved relative to *itself* — and its own `!param`
-placeholders, because the load order is **parse → `!import` → `!param` → typed
-parse**, so one `--params` table parameterises the whole imported tree. An
-import cycle is an error naming the chain rather than a hang.
+**Paths resolve relative to the importing file**, not the working directory. An
+imported file is an ordinary fragment: it may contain its own `!import`s (relative
+to *itself*) and its own `!param` placeholders, because the load order is
+**parse → `!import` → `!param` → typed parse** — so one `--params` table
+parameterises the whole imported tree. Cycles are an error naming the chain, not a
+hang.
 
-See [`examples/strategy.yml`](examples/strategy.yml) for a complete SMA-crossover
-strategy, and [`examples/strategy.params.yml`](examples/strategy.params.yml) for
-the parameterised version.
+### `--costs` — commissions, spread, slippage
 
-### Strategy shape prefix
+Omit it for a frictionless backtest. Otherwise `--costs` takes the same
+`,`-separated `key=value` / `@file.yml` shape as `--params` and wires a model into
+every fill:
 
-The strategy positional accepts an optional shape prefix:
+```sh
+# 10 bps taker + 5 bps quoted spread on every fill.
+--costs 'commission=!percentage { rate: 0.001 },spread=!bps { bps: 5 }'
 
-- `single:` (or no prefix) — a `SingleAssetStrategy` file
-  (`single:@strategy.yml` ≡ `@strategy.yml`).
-- `pairs:` — a two-symbol `PairsStrategy` file (`pairs:@spread.yml`);
-  the document declares `left`/`right` symbols and cross-asset
-  signal / level expressions rooted through `!pick { symbol, freq }`.
-  The traded instrument is the spread `close(left) − close(right)`, and
-  the strategy is long / flat / short on it: a `long_spread:` block
-  (long `left` / short `right`, profiting as the spread rises) and an
-  optional `short_spread:` block (the mirror). A mean-reverting spread
-  visits both tails and the correct position is opposite at each, so a
-  one-sided document silently skips half the round-trips; wiring
-  `short_spread:` is what picks them up. The flat top-level `enter:` /
-  `exit:` / `stop_loss:` / `take_profit:` keys remain a valid spelling of
-  the long-spread side.
-- `basket:` — an N-symbol cross-sectional `BasketStrategy` file
-  (`basket:@basket.yml`); the document declares a `selection` rule plus
-  per-symbol `score`/`sizing` templates (`!arg SYM` picks the current
-  symbol). Selection rules **compose**: a ranked rule may nest an `of:`
-  inner (default `!everything`), e.g.
-  `!top_bottom { longs: 2, shorts: 2, of: !threshold { long_min: 0.5, short_max: -0.5 } }`
-  ranks the top-2 / bottom-2 *of* the threshold survivors.
-- `multi:` — an N-symbol `MultiAssetStrategy` file (`multi:@multi.yml`);
-  the *same* rule applied independently to every symbol in the input, so
-  any subset can be long / short / flat at once. Reach for it instead of
-  `basket:` when a symbol's fate depends only on its own signals rather
-  than on how it ranks against the rest.
-- `portfolio:` — N *different* strategies sharing one account
-  (`portfolio:@book.yml`); the document lists `children:`, each of which
-  is any of the four shapes above, plus optional `weights:` and
-  `rebalance_on:`. Every child's intent is netted into one order per
-  symbol, behind a single aggregate equity curve and blotter.
+# A venue preset, then one field nudged. The dotted path addresses the spec
+# tree literally, so it names the model's variant too.
+--costs @examples/binance.yml,commission.percentage.rate=0.00075
 
-Any other prefix is rejected as an unknown shape. A single-asset run
-feeds every candle in the input series to the strategy in `time` order.
-A pairs run feeds the paired `(left, right)` atoms as one snapshot per
-bar; each leg is priced and can fill independently, and the strategy
-sees both symbols in the same snapshot. A basket run feeds every
-symbol's atom for that bar as one snapshot, ranks them by `score`, and
-trades the selected legs.
+# Tighter spread for BTC on daily bars only; everything else falls back.
+--costs @examples/binance.yml,'BTCUSDT[1d]:spread=!bps { bps: 3 }'
 
-### Analyzing a run in R
+# Acknowledge the frictionless default and silence the warning banner.
+--costs none
+```
 
-`fugazi` writes the numbers; you plot them in whatever you already use for
-analysis. A minimal R session that produces pyfolio-style
-cumulative-returns / rolling-Sharpe / underwater plots from a `-w 126` run:
+Commission models cover percentage, per-share, tiered minimums and
+exchange-plus-regulatory pass-through; slippage covers flat impact and square-root
+participation impact (a fill of 1% of the bar's volume shifts the tape by
+`coef · sqrt(0.01)`). Costs are **scoped**: a `SYMBOL[FREQ]:` prefix overrides one
+`(symbol, cadence)` leg and everything else falls back to the default leg.
+See [docs/COSTS.md](docs/COSTS.md).
+
+### `-w/--windowed` — one number is not an estimate
+
+`-w N` reduces the run in `N`-bar windows *for post-hoc analysis*. `metrics.yml`
+(whole-run) is still written, plus two CSVs:
+
+- `metrics.csv` — **non-overlapping** windows, one row each. Independent samples,
+  so the sample stddev actually means something. Use it for cross-window statistics.
+- `rolling.csv` — **rolling stride-1** windows. A smooth curve; the `metrics.csv`
+  equivalent of pyfolio's rolling-Sharpe chart. Use it for plots.
+
+Both share columns (`window_start,window_end,` then the full catalogue under dotted
+`metrics.yml` names), so the same downstream code reads either. The console prints
+an extra **windowed metrics** block showing `mean ± std` across the non-overlapping
+rows, right beside the single whole-run estimate.
+
+The rolling series is heavily autocorrelated — adjacent rows share `N-1` of `N`
+bars — so `sd()` on it drastically understates variability. Treat it as a plotting
+artefact, not a sample.
+
+### `run --montecarlo` — is the result real, or luck?
+
+Adds a significance pass after the backtest, writing a `montecarlo:` block into
+`metrics.yml` (plus a `montecarlo.csv` of every resample) with, per headline metric,
+a **bootstrap confidence interval** and an empirical-null **p-value**.
+
+The null (`--mc-null`, default `rerun`) re-trades the strategy on resampled
+synthetic price paths — honest across every shape, but one backtest per
+permutation, which is why it's opt-in. `none` gives only the CIs. Resampling
+preserves the serial dependence a naive shuffle would destroy: `--mc-scheme
+stationary` (default) draws geometric block lengths (Politis–Romano),
+`moving-block` uses fixed blocks, `iid` is a plain bootstrap; `--mc-block <L>` sets
+the (expected) length. Round out with `--mc-permutations <N>` (default 1000),
+`--mc-seed <S>` (reproducible across platforms), `--mc-ci <level>` (default 0.95)
+and `--mc-metrics a,b,…`.
+
+### `optimize` — parameter sweeps
+
+```sh
+fugazi optimize @strategy.params.yml --series @btc.csv \
+  --params FAST=3..15 --params SLOW=20..60:5 \
+  --best-by sharpe -w 126 -k 1.0 -j 8 -o grid.csv
+```
+
+The grid fans out across a rayon pool sized by `-j/--jobs` (default: one worker per
+logical CPU), and every combination lands in a ranked CSV.
+
+Three flags exist because a raw grid maximum is usually an artefact:
+
+- **`-w N`** evaluates each grid point in non-overlapping windows. Every `-m` metric
+  becomes two columns (`<name>_mean` / `<name>_std`) and `--best-by` ranks by the
+  windowed mean — rewarding parameter sets that held up across regimes rather than
+  in one lucky stretch.
+- **`-k/--risk-aversion K`** shifts each point's mean *against* it by `K` standard
+  deviations before sorting (`mean − K·std` for higher-is-better metrics, `mean +
+  K·std` for lower-is-better). So `sharpe 2.0 ± 3.0` stops outranking `1.8 ± 0.2`.
+- **`--walkforward IS,OS[,Embargo]`** rolls a walk-forward loop instead: on each
+  fold the grid is scored on the IS window, the `--best-by` winner is recorded with
+  its OOS realization (and a per-fold `_wfe = OOS/IS` column), and a composite OOS
+  equity curve is stitched from every fold's winner — a run that is genuinely
+  out-of-sample at every bar. Emits a per-fold table, a composite OOS equity CSV
+  and a composite OOS metrics YAML. Mutually exclusive with `-w`.
+
+The honest workflow, in full, is in
+[docs/CLI.md](docs/CLI.md#optimize): fetch once, split into training and validation
+slices with `file:` + `--since`/`--until`, optimize on training with `-w`, then
+`run` the winner on validation — also with `-w`, so the two Sharpes are comparable.
+
+### `get` — data and overlays
+
+```sh
+fugazi get binance:BTCUSDT[1d] --since 2023-01-01 -o btc.csv
+```
+
+Providers: `binance`, `binance-vision`, `binance-vision-futures`, `okx`,
+`coinbase`, `yfinance`, and `cg` (CoinGecko). `file:PATH` re-processes an existing
+CSV instead of fetching. `fugazi list tickers <provider> 'b*usd*t'` browses a
+provider's vocabulary (case-insensitive whole-symbol globs).
+
+`-x/--overlay col=<source>` appends computed columns to the fetched bars, and
+`--params` resolves `!param` placeholders inside those expressions:
+
+```sh
+# Price plus two indicator columns, in one file.
+fugazi get binance:BTCUSDT[1d] --since 2023-01-01 \
+  -x 'sma20=!sma { period: 20 },ema50=!ema { period: 50 }' -o btc.csv
+
+# Re-process a local file to add ATR — no re-download.
+fugazi get file:./btc.csv -x 'atr14=!atr { period: 14 }' -o btc_atr.csv
+
+# Different overlays per symbol.
+fugazi get binance:BTCUSDT[1d],ETHUSDT[1d] \
+  -x 'BTCUSDT:ema=!ema { period: 20 }' \
+  -x 'ETHUSDT:rsi=!rsi { period: 14 }' -o out.csv
+```
+
+Overlay columns are trimmed to each expression's `stable_bars()` by default, so no
+downstream reader sees an unsettled value; `--keep-unstable` opts out.
+
+**Non-price series.** `cg` is overlay-only — market cap, volume, supply, no OHLCV —
+so fetch it to its own file and `--series` both into the run.
+`binance-vision-futures` needs no join: it returns perpetual bars *and*
+`funding_rate`, `open_interest` and the rest in one frame. Either way, a column is
+read in the strategy with `!get { key: funding_rate }`.
+
+### `check`, `list`, `grammar`
+
+- `fugazi check strategy <STRATEGY>` / `check overlay <SPEC>…` — a spec-only lint
+  pass: no data, no wallet. Fails a CI job when a strategy doesn't parse or build.
+  Errors carry a `!tag > ` breadcrumb, so a failure four levels down arrives as
+  `!and > !gt > !sma > !get > <message>` with the path on its own `at:` line.
+- `fugazi list indicators` / `list sources` / `list tickers <PROVIDER> [PATTERN]` —
+  the tag catalogue, the provider table, and (over HTTP) a provider's symbols.
+- `fugazi grammar` / `schema` — the machine-readable tag grammar, including each
+  slot's demanded output type. Useful for editor tooling and for generating specs.
+- `fugazi completions <shell>` — a shell-completion script.
+
+### Analyzing a run
+
+fugazi writes the numbers; you plot them in whatever you already use. A minimal R
+session producing pyfolio-style cumulative-returns, rolling-Sharpe and underwater
+plots from a `-w 126` run:
 
 ```r
 library(readr)
@@ -871,7 +1153,7 @@ library(ggplot2)
 
 returns <- read_delim("out/returns.csv", delim = ";")
 rolling <- read_delim("out/rolling.csv", delim = ";")
-metrics <- read_delim("out/metrics.csv", delim = ";")   # non-overlapping — for cross-window stats
+metrics <- read_delim("out/metrics.csv", delim = ";")   # non-overlapping
 
 # Cumulative returns: equity rebased to the seed cash.
 returns$cum <- returns$equity / returns$equity[1]
@@ -894,180 +1176,18 @@ ggplot(returns, aes(as.Date(time), dd)) + geom_area(alpha = 0.35, fill = "#c44e5
   scale_y_continuous(labels = scales::percent) +
   labs(x = NULL, y = "Drawdown")
 
-# Cross-window Sharpe distribution — independent samples (non-overlapping),
-# so the sample stddev actually means something.
+# Cross-window Sharpe distribution — independent samples, so sd() is meaningful.
 mean(metrics$risk_adjusted.sharpe, na.rm = TRUE)
 sd  (metrics$risk_adjusted.sharpe, na.rm = TRUE)
 ```
 
-**Which CSV do you want?** `rolling.csv` for plots (smooth, continuous
-curve); `metrics.csv` for cross-window statistics (mean ± stddev, quantiles,
-regime-conditioning). The rolling series is heavily autocorrelated —
-adjacent rows share `N-1` of `N` bars — so `sd()` on it drastically
-understates variability; treat it as a plotting artefact, not a sample.
-
-Both files share the same columns (dotted `metrics.yml` names), so the same
-plotting code works on either.
-
-**Other subcommands.** Alongside `run` the binary carries a few utility
-subcommands — briefly listed here, fully documented in
-[docs/CLI.md](docs/CLI.md):
-
-- `fugazi check strategy <STRATEGY>` / `check overlay <SPEC>...` — a spec-only
-  lint pass (no data, no wallet). Fails a CI job if the strategy or overlay
-  doesn't parse and build.
-- `fugazi optimize <STRATEGY> --params NAME=<axis>...` — sweep the strategy
-  over a parameter grid and rank combinations by a metric.
-- `fugazi get <PROVIDER>:<SYMBOL>[<FREQ>] --since ... -o candles.csv` — fetch
-  OHLCV bars from `binance`, `binance-vision`, `binance-vision-futures`, `okx`,
-  `coinbase`, or `yfinance` into a `run`-ready CSV, or
-  re-process an existing CSV with `file:PATH`. `-x/--overlay col=<source>`
-  appends indicator columns computed on the fetched bars; `--params` resolves
-  `!param` placeholders inside those overlay expressions. `cg` (CoinGecko market
-  cap / volume / supply) is **overlay-only** — side-channel columns and no
-  OHLCV; fetch it to its own file and `--series` both into a run.
-  `binance-vision-futures` needs no such join: it returns perpetual bars *and*
-  `funding_rate`, `open_interest` and the rest in one frame. Either way a
-  column is read with `!get { key: funding_rate }`.
-- `fugazi list indicators` / `list sources` / `list tickers <PROVIDER> [PATTERN]`
-  — the YAML tag catalogue, the `get`-provider table, and (via HTTP) the
-  provider's ticker vocabulary. A provider lists thousands of symbols, so
-  `tickers` takes an optional shell-style glob: `fugazi list tickers binance
-  'b*'` (starts with `b`), `'*b*'` (contains `b`), `'b*usd*t'`, `'[a-c]*'`.
-  Matching is case-insensitive and whole-symbol; quote the pattern so your
-  shell doesn't try to expand it against your files.
-- `fugazi completions <shell>` — a shell-completion script (see
-  [docs/CLI.md § Shell completion](docs/CLI.md#shell-completion)).
-
-## Live trading
-
-The same `Wallet` a backtest trades into is the seam to a live broker: the
-`live` feature ships `OkxWallet` (OKX V5 perpetual swaps, HMAC-signed REST) and
-`CoinbaseWallet` (Coinbase Advanced Trade **spot**, ES256-JWT-signed REST), each
-a `Wallet<String>`. A strategy driven by `backtest::run` needs no change — swap
-the `PaperWallet` for a live one:
-
-```rust,ignore
-use fugazi::live::OkxWallet;
-
-// Demo trading (free, no real funds) or ::mainnet(key, secret, passphrase) for
-// production. OKX credentials are a key/secret pair plus a passphrase.
-let mut wallet = OkxWallet::demo(key, secret, passphrase);
-// ... then drive any strategy through `fugazi::backtest::run` as usual.
-```
-
-Enable it in `Cargo.toml` with `features = ["live"]` (off by default). Market
-orders, `reduceOnly` stop / take-profit legs, account-marked equity, and fill
-polling all work through the ordinary trait methods; `poll_fills()` drains
-fills booked between bars and `take_rejections()` surfaces venue refusals to
-`Strategy::on_reject`.
-
-OKX sizes a swap in **contracts** (one `BTC-USDT-SWAP` contract is `0.01 BTC`),
-while the trait — and every strategy — speaks base-asset units. `OkxWallet`
-converts at the boundary, so a `0.03 BTC` target goes out as `3` contracts and a
-fill comes back as `0.03` units; nothing above the wallet ever sees a contract.
-
-`CoinbaseWallet` is **spot**, so a `position` is a base-asset balance that can't
-go negative: `set_position` market-buys or -sells the difference to reach the
-target, and a negative (short) target sells to flat and reports the un-shortable
-remainder through `take_rejections()`. Construct it with
-`CoinbaseWallet::mainnet(key_name, private_key_pem)` (a CDP API key name plus its
-EC private-key PEM).
-
-That limit is also **introspectable**: `Wallet::can_short()` answers `false` on
-`CoinbaseWallet` and `true` on `OkxWallet` and `PaperWallet`, so a caller can
-degrade to a long-only path before trading rather than after a clamped order.
-It reports, it doesn't enforce — a wallet that can't short still has to clamp or
-refuse one itself. Wrappers delegate: a `SleeveWallet` answers for the account it
-wraps, and a portfolio child's handle answers for the account the portfolio nets
-onto.
-
-A whole `Portfolio` runs live the same way — it is an ordinary strategy that
-nets its children's intents onto the one wallet it is handed, so pass it a live
-account through `backtest::run` and its children keep trading their own notional
-books unchanged:
-
-```rust,ignore
-use fugazi::backtest;
-use fugazi::live::OkxWallet;
-use fugazi::portfolio::Portfolio;
-
-let mut portfolio: Portfolio<String> = Portfolio::builder()
-    // ... children ...
-    .build();
-let mut account = OkxWallet::mainnet(&key, &secret, &passphrase);
-let report = backtest::run(&mut portfolio, &mut account, snapshots);
-```
-
-The account must be the portfolio's alone: it drives that wallet to the sum of
-its children's positions, so anything else trading the same account looks like a
-position no child asked for and will be traded back out.
-
-### Testing against OKX demo trading
-
-OKX runs a free **demo-trading** environment (fake funds) on the same host as
-production, selected by a request header — so the live wallet is exercisable end
-to end without risking money:
-
-1. Under **Demo trading** in your OKX account, create an API key — you'll get a
-   key, a secret, and a **passphrase** (all three are required; the passphrase
-   is one you choose at creation, not your login password).
-2. The demo account is pre-funded and runs in **net position mode** (what the
-   wallet assumes).
-3. Run the narrated smoke-test example:
-
-   ```bash
-   OKX_DEMO_KEY=… OKX_DEMO_SECRET=… OKX_DEMO_PASSPHRASE=… \
-     cargo run --example okx_demo --features live
-   ```
-
-   It reads the account, opens a tiny `BTC-USDT-SWAP` position with a market
-   order, polls the fill, then flattens back — leaving the account as it started.
-
-4. Or run the opt-in integration test (`#[ignore]`d and gated on the same env
-   vars, so a plain `cargo test` never hits the network):
-
-   ```bash
-   OKX_DEMO_KEY=… OKX_DEMO_SECRET=… OKX_DEMO_PASSPHRASE=… \
-     cargo test --features live --test live_okx -- --ignored live_demo_round_trip
-   ```
-
-Plain `cargo test --features live` runs only the offline `wiremock` tests
-(signing, order encoding, fill decoding, protective dedup, the contracts↔units
-conversion) and never reaches the network. If a signed call is rejected for a
-timestamp/expiry reason, your machine's clock has drifted — resync it. Before
-going to `::mainnet`, note the net-mode assumption and that leverage / rate-limit
-backoff / clock-offset sync aren't managed yet.
-
-## Examples
-
-Runnable example programs live in [`examples/`](examples) — run any with
-`cargo run --example <name>`:
-
-- `streaming` — an indicator over a bare `f64` price feed (`Identity` source),
-  handling the `Option` warm-up.
-- `candle_signal` — a compound entry rule (EMA crossover gated by an RSI filter)
-  as one object, fed one `Candle` per bar.
-- `multi_output` — the components of multi-line indicators three ways: the
-  `BollingerValue` struct, `Macd`'s per-component public fields, and the
-  component accessors composed into signals (`macd.line().crosses_above(..)`).
-- `backtest` — a batch backtest over bundled monthly AAPL data: a `GoldenCross`
-  strategy trading a `PaperWallet`, long/flat, versus a buy-and-hold benchmark.
-- `strategy` — a long/short, always-in-the-market reversal: one strategy type
-  using `wallet.set` and funds-fraction sizing.
-- `pairs` — a multi-asset strategy: two symbols traded from one wallet, driven by
-  a per-symbol snapshot input.
-- `okx_demo` — a live round-trip against OKX demo trading (needs `--features
-  live` and `OKX_DEMO_{KEY,SECRET,PASSPHRASE}`; see [Live trading](#live-trading)).
-
-A `cargo test` checks that every example still compiles.
+---
 
 ## Python
 
-Python bindings are available in [`python/`](python). Same model — compose by
-nesting constructors, then either feed one `Candle` at a time or compute a whole
-series in one shot with `feed(df)`. The output mirrors the input (pandas in →
-pandas out, polars in → polars out, else a NumPy array):
+Same model — compose by nesting constructors, then either feed one `Candle` at a
+time or compute a whole series in one shot with `feed(df)`. Output mirrors input:
+pandas in → pandas out, polars in → polars out, else a NumPy array.
 
 ```python
 import fugazi as ta
@@ -1082,9 +1202,9 @@ for o, h, l, c, v in bars:
 df["ema20"] = ta.ema(ta.close(), 20).feed(df)
 ```
 
-The strategy layer is exposed too: a `PaperWallet` you feed prices into
-(`update`) and trade with `set`/`set_position`/`close`, plus `Order` and `Size`.
-A "strategy" in Python is just your own code driving the wallet each bar:
+The strategy layer is exposed too: a `PaperWallet` you feed prices into (`update`)
+and trade with `set` / `set_position` / `close`, plus `Order` and `Size`. A
+"strategy" in Python is your own code driving the wallet each bar:
 
 ```python
 import fugazi as ta
@@ -1095,20 +1215,22 @@ wallet = ta.PaperWallet(10_000.0)
 
 for o, h, l, c, v in bars:
     candle = ta.Candle(o, h, l, c, v)
-    wallet.update("AAPL", candle)                             # feed the wallet this bar
-    went_long, went_flat = enter.update(candle), exit_.update(candle)  # advance both
+    wallet.update("AAPL", candle)                                     # price it
+    went_long, went_flat = enter.update(candle), exit_.update(candle) # advance both
     if went_long:
-        wallet.set("AAPL", "buy", ta.Size.value_frac(1.0))   # size: units / funds / equity / position
+        wallet.set("AAPL", "buy", ta.Size.value_frac(1.0))   # units / funds / equity / position
     elif went_flat:
         wallet.close("AAPL")
 
 print(wallet.funds, wallet.position("AAPL"), wallet.orders())
 ```
 
+YAML strategies load from Python too — `load_spec` and `StrategySpec.run` /
+`.run_resumable` / `.warm_up` take any of the three wallet classes, so a spec
+developed on the CLI drives a Python process without translation.
+
 `fugazi.metrics` is the reporting surface — the same one-function-per-metric
-catalogue as [`fugazi::metrics`](src/metrics.rs), for computing Sharpe / Sortino
-/ Calmar, drawdown analytics, and trade statistics from an equity curve and a
-bar-tagged fill blotter (built with `fugazi.Fill(bar, order)`):
+catalogue as `fugazi::metrics`:
 
 ```python
 from fugazi import metrics
@@ -1117,30 +1239,32 @@ returns = metrics.per_bar_returns(equity, initial_equity=10_000.0)
 metrics.sharpe(returns, risk_free_rate=0.0, bars_per_year=252)   # ratio | None
 ```
 
-Install with `pip install fugazi` (prebuilt wheels for Linux, macOS and
-Windows), or build from a checkout with `cd python && maturin develop --release`.
-See the [Python README](docs/PYTHON.md) for the full API.
+Install with `pip install fugazi`, or build from a checkout with
+`cd python && maturin develop --release`. Full API: [docs/PYTHON.md](docs/PYTHON.md).
+
+---
 
 ## Performance
 
-An incremental engine is usually the slow choice: a vectorised library runs one
-C loop over a whole array with no per-sample dispatch, while fugazi pays a
-function call per bar — which is the price of the same code driving a live
-stream. It turns out not to cost anything.
+An incremental engine is usually the slow choice: a vectorised library runs one C
+loop over a whole array with no per-sample dispatch, while fugazi pays a function
+call per bar — the price of the same code driving a live stream. It turns out not
+to cost anything.
 
-Against [TA-Lib](https://ta-lib.org), every bar relative to TA-Lib's **C**
-library so all four sit on one scale:
+### Throughput, against TA-Lib
+
+Every bar relative to TA-Lib's **C** library, so all four columns sit on one scale:
 
 ![Indicator throughput: fugazi and TA-Lib, relative to native TA-Lib C](docs/assets/performance.svg)
 
-*Lower is better. 200 000 samples, minimum of 7 reps per pass; whiskers run up
-to the 25th percentile, since contention only ever adds time. The run takes
-passes until no figure has improved by more than 1% for three consecutive
-passes — this one converged after 27.*
+*Lower is better. 200 000 samples, minimum of 7 reps per pass; whiskers run up to
+the 25th percentile, since contention only ever adds time. The run takes passes
+until no figure has improved by more than 1% for three consecutive passes — this
+one converged after 27.*
 
-The chart's common baseline is the C library. For a **Python** user the
-like-for-like comparison is against `talib`, TA-Lib's own bindings, since both
-cross a Python boundary — that is the last column:
+The chart's baseline is the C library. For a **Python** user the like-for-like
+comparison is against `talib`, TA-Lib's own bindings, since both cross a Python
+boundary — that is the last column:
 
 | | TA-Lib C | fugazi (Rust) | **rs vs C** | `talib` py | fugazi (Python) | **py vs py** |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -1155,66 +1279,169 @@ cross a Python boundary — that is the last column:
 | `aroon` | 8.78 | 9.38 | 1.07× | 15.42 | 21.22 | 1.38× |
 | `bbands` | 4.04 | 13.99 | 3.46× | 11.22 | 21.23 | 1.89× |
 
-ns/sample. The Rust engine is at parity or better on `sma`/`ema`/`rsi`/`atr`
-while staying one-bar-at-a-time, and driving a full backtest allocates **zero
-times per bar** — a 200 000-bar run performs 29 allocations in total. Through the
-bindings `atr` is **faster than `talib`**, because a frame of OHLC columns is read
-in place and folded once, rather than three arrays being scanned separately.
+ns/sample. The Rust engine is at parity or better on `sma`/`ema`/`rsi`/`atr` while
+staying one bar at a time, and driving a full backtest allocates **zero times per
+bar** — a 200 000-bar run performs 29 allocations in total, a ceiling
+`tests/perf_guard.rs` enforces. Through the bindings `atr` is **faster than
+`talib`**, because a frame of OHLC columns is read in place and folded once rather
+than three arrays being scanned separately.
 
-The **multi-output** block below the line is the same question asked of
-indicators that emit several lines at once. TA-Lib fills every output array in
-one call, and a fugazi multi-output `update` returns the whole value struct, so
-that is the unit of work on both sides. `macd`, `dmi` and `adx` are *faster than
-the C library* — the last two structurally, because TA-Lib has no combined entry
-point and must re-derive the same Wilder-smoothed true range once per line, while
-`Dmi`/`Adx` carry one set of states and emit the lines together.
+The **multi-output** block below the line asks the same question of indicators
+emitting several lines at once. TA-Lib fills every output array in one call and a
+fugazi multi-output `update` returns the whole value struct, so that is the unit of
+work on both sides. `macd`, `dmi` and `adx` are *faster than the C library* — the
+last two structurally, because TA-Lib has no combined entry point and must
+re-derive the same Wilder-smoothed true range once per line, while `Dmi`/`Adx`
+carry one set of states and emit the lines together.
 
-`aroon` is the near miss against the C library: 1.08×, down from roughly twice
-it before its rolling-extremum core stopped being a heap-allocating deque. Four
-converged runs put it between 1.03× and 1.15×, so it lands just behind — never
-ahead, and worth saying plainly rather than rounding in the flattering
-direction.
+`aroon` is the near miss: 1.08×, down from roughly twice the C library before its
+rolling-extremum core stopped being a heap-allocating deque. Four converged runs put
+it between 1.03× and 1.15×, so it lands just behind — never ahead, and worth saying
+plainly rather than rounding in the flattering direction.
 
 Through the bindings the multi-output rows are the strong ones: `macd` is **4×
-faster** than `talib`, `dmi` and `atr` beat it outright, and `adx` is level.
-That is not the engine — it is that a fugazi `feed` returns a *frame*, so every
-line of an indicator comes out of one `(lines, n)` allocation, while `talib`
-returns a tuple of independent arrays and must allocate one per line. Measured,
-that difference alone is 10.70 ns/sample against 1.61. The columns fugazi hands
-back are therefore **views over one buffer** — `Multi.feed` documents what that
-means if you keep one and drop the rest.
+faster** than `talib`, `dmi` and `atr` beat it outright, `adx` is level. That is not
+the engine — it is that a fugazi `feed` returns a *frame*, so every line comes out
+of one `(lines, n)` allocation, while `talib` returns a tuple of independent arrays
+and allocates one per line. Measured, that difference alone is 10.70 ns/sample
+against 1.61. The columns fugazi hands back are therefore **views over one buffer**;
+`Multi.feed` documents what that means if you keep one and drop the rest.
 
-`stddev` — and `bbands`, which inherits it — is the one real loss, and it is
-deliberate: fugazi makes a centred pass over the window instead of TA-Lib's O(1)
-`E[X²] − E[X]²` shortcut, which cancels away significant digits. It is not a
-corner case. On the very price series these figures are measured over,
-`talib.STDDEV` returns **exactly `0.0` for 896 of 4 981 windows** — silently
-reporting *no dispersion* — where fugazi is accurate to 5.5e-15. `ZScore` divides
-by that number. The tradeoff is
+### The one real loss
+
+`stddev` — and `bbands`, which inherits it — is ~3.5× TA-Lib, deliberately. fugazi
+makes a centred pass over the window instead of TA-Lib's O(1) `E[X²] − E[X]²`
+shortcut, which cancels away significant digits. It is not a corner case: on the
+very price series these figures are measured over, `talib.STDDEV` returns **exactly
+`0.0` for 896 of 4 981 windows** — silently reporting *no dispersion* — where fugazi
+is accurate to 5.5e-15. `ZScore` divides by that number. The tradeoff is
 [measured, not asserted](docs/PERFORMANCE.md#what-stddev-buys-with-its-2).
 
-The `py vs py` column was 1.6× to 7.8× not long ago; `ema` is now at parity and
-`atr` is twice as fast. Neither gain came from the indicator code. The first was
-that `feed()` copied each input column out of NumPy into its own buffer, and
-those copies — not the arithmetic — were most of the call. The second is subtler:
-an erased chain holds its state behind a box, so the compiler cannot prove it
-does not alias the output buffer and reloads it every sample; folding a *slice*
-with that state in a local removes ~21 instructions/sample. Both stories, and the
-measurement mistakes made on the way to them, are in
-[docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+### Latency, which is a different question
 
-Figures from one machine (16 cores, Linux 6.18, rustc 1.95). Re-run them with
-`pixi run -e bench bench` before relying on them —
-and read [docs/PERFORMANCE.md](docs/PERFORMANCE.md) first if you intend to
-benchmark this yourself, because most of that document is the measurement
+Every figure above is amortised throughput: total time over 200 000 samples,
+divided. That is the right measure for a backtest and the wrong one for a live
+stream, where a bar arrives, is handled, and nothing runs until the next — and
+between events the i-cache, branch predictors and TLB go cold.
+
+`cargo bench --bench latency` measures one `update` per timed sample with a
+`sleep(gap)` before each cold one. 20 000 events, 1 ms gap, ns including one
+`Instant` bracket:
+
+| | warm p50 | warm p99.9 | cold p50 | cold p99.9 |
+|---|---:|---:|---:|---:|
+| `timer` (the floor) | 20.0 | 31.0 | 70.0 | 211.0 |
+| `sma` | 30.0 | 81.0 | 190.0 | 491.0 |
+| `atr` | 30.0 | 81.0 | 191.0 | 591.0 |
+| `macd` | 30.0 | 90.0 | 190.0 | 411.0 |
+| `rsi` | 40.0 | 101.0 | 211.0 | 561.0 |
+
+**The amortised numbers overstate live per-event cost by roughly an order of
+magnitude**, and this is published rather than buried because the honest version is
+more useful than the flattering one. `Sma::update` bills at 1.4 ns/sample in the
+throughput table; the first update after a 1 ms gap costs ~190 ns at p50. Against
+the cold timer floor of 70 ns that is ~120 ns of real work.
+
+Two caveats the harness makes about itself: the clock (~20 ns) is bigger than the
+thing being timed, so the `timer` row is the instrument's noise floor and rows that
+don't clear it are marked unresolved rather than allowed to read as results; and the
+clock goes cold too (20 ns → 70), so cold/warm ratios do not fully cancel. This does
+**not** yet cover a whole strategy step, the wallet path, or a realistic arrival
+distribution — so treat it as a floor, not a latency claim.
+
+Figures from one machine (16 cores, Linux 6.18, rustc 1.95). Re-run with
+`pixi run -e bench bench`, and read [docs/PERFORMANCE.md](docs/PERFORMANCE.md) first
+if you intend to benchmark this yourself — most of that document is the measurement
 mistakes this project has already made and how they were caught.
+
+---
+
+## What's included
+
+- **Moving averages / smoothing:** `Sma`, `Ema`, `Rma` (Wilder/SMMA), `Wma`,
+  `Hma` (Hull)
+- **Oscillators / momentum:** `Rsi`, `Macd`, `Stochastic` / `StochRsi`,
+  `WilliamsR`, `Cci`, `Roc`, `StdDev`
+- **Trend / volatility:** `Atr`, `Adx`, `Dmi` (+DI/−DI), `Aroon`, `Bollinger`,
+  `Donchian`, `Keltner`, `Sar` (Parabolic SAR)
+- **Volume:** `Obv`, `Vwap`, `Ad` (Chaikin A/D), `Mfi`
+- **Trailing strategy risk** — own an embedded `Strategy`, reduce its live equity
+  curve to a rolling metric: `Sharpe`, `Sortino`, `Volatility`, `MaxDrawdown`,
+  `Calmar`. A trailing risk-adjusted estimate becomes a first-class source, read as
+  an overlay column (`fugazi get -x`) or composed into another strategy — instead of
+  the "run a strategy → dump `returns.csv` → re-join it" round-trip.
+- **Sources & transforms:** `Identity`, `Value`, `Current::*` candle accessors,
+  calendar accessors (`Year`/`Month`/`Day`/`Hour`/…/`DayOfWeek`/`WeekOfYear`),
+  overlay readers (`GetReal`/`GetBool`/`GetStr`), `TrueRange`; `Add`/`Sub`/`Mul`/
+  `Div`, `Lag`/`Diff`/`Ratio`/`Roc`, `RollingMax`/`RollingMin`
+- **Signals:** `Gt`/`Lt`/`Ge`/`Le`/`Eq`/`Ne`, `and`/`or`/`xor`/`not`, `changed`,
+  `crosses_above`/`crosses_below`
+- **Cross-asset primitives:** `Snapshot<Sym>`, `Selector<Sym>`, `Pick<Sym, S>`,
+  `Frequency`. The same atom-input leaves (`Close::of(src)`, `Year::of(src)`, `Atr`
+  on `CurrentBar::of(src)`, `GetReal::of(schema, key, src)`) drop straight onto a
+  `Pick`.
+- **Sizing recipes:** `equal_weight`, `vol_target`, `atr_risk`, `drawdown_throttle`,
+  `equity_vol_target`, `fractional_kelly`.
+- **Metrics:** the classic catalogue plus PSR/DSR, drawdown analytics, trade
+  statistics, and Monte Carlo confidence intervals. See
+  [docs/METRICS.md](docs/METRICS.md).
+
+Multi-line indicators expose components as fields *and* as composable accessors:
+`Bollinger`/`Donchian`/`Keltner` → `upper`/`middle`/`lower`, `Macd` →
+`macd`/`signal`/`histogram`, `Adx` → `plus_di`/`minus_di`/`adx`, `Dmi` →
+`plus_di`/`minus_di`, `Aroon` → `up`/`down`/`oscillator`.
+
+---
+
+## Examples
+
+Runnable programs in [`examples/`](examples) — `cargo run --example <name>`:
+
+| Example | What it shows |
+| --- | --- |
+| `streaming` | an indicator over a bare `f64` feed (`Identity`), handling the `Option` warm-up |
+| `candle_signal` | a compound entry rule (EMA crossover gated by RSI) as one object |
+| `multi_output` | multi-line indicators three ways: value struct, public fields, composable accessors |
+| `backtest` | a batch backtest over bundled AAPL data — `GoldenCross` vs buy-and-hold |
+| `strategy` | a long/short always-in reversal using `wallet.set` and funds-fraction sizing |
+| `pairs` | two symbols traded from one wallet, driven by a per-symbol snapshot |
+| `okx_demo` | a live round-trip against OKX demo trading (`--features live`) |
+
+Bundled specs: [`strategy.yml`](examples/strategy.yml),
+[`strategy.params.yml`](examples/strategy.params.yml),
+[`pairs.yml`](examples/pairs.yml), [`basket.yml`](examples/basket.yml),
+[`params.yml`](examples/params.yml), and the cost presets
+[`binance.yml`](examples/binance.yml) / [`ibkr.yml`](examples/ibkr.yml).
+
+A `cargo test` checks that every example still compiles.
+
+---
+
+## Documentation
+
+| | |
+| --- | --- |
+| [docs/STRATEGIES.md](docs/STRATEGIES.md) | The strategy-file format — every YAML tag, all five document shapes |
+| [docs/CLI.md](docs/CLI.md) | `run`, `optimize`, `get`, `check`, `list`, `grammar` and every flag |
+| [docs/TRADING.md](docs/TRADING.md) | The execution path — bar → order → fill → closed trade, and the ordering rules |
+| [docs/METRICS.md](docs/METRICS.md) | What each metric means and how it's computed |
+| [docs/COSTS.md](docs/COSTS.md) | Commission, spread and slippage models |
+| [docs/PYTHON.md](docs/PYTHON.md) | The Python API |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Subsystem internals — indicator taxonomy, wallet, run resuming, Monte Carlo |
+| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | How to measure, what each optimisation bought, and the mistakes made getting there |
+| [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Recipes for adding an indicator, signal, metric or provider |
+| [docs/TESTING.md](docs/TESTING.md) | The five test layers, the drift guards, and the fixture policy |
+| [docs.rs/fugazi](https://docs.rs/fugazi) | Full API reference |
 
 ## Sponsor
 
-fugazi is MIT-licensed and developed in the open. If it saves you time, or if
-you'd like to see a particular provider, metric or strategy shape land sooner,
-you can support the work through [GitHub Sponsors](https://github.com/sponsors/acpuchades).
+fugazi is MIT-licensed and developed in the open. If it saves you time, or if you'd
+like to see a particular provider, metric or strategy shape land sooner, you can
+support the work through [GitHub Sponsors](https://github.com/sponsors/acpuchades).
 
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+
+
