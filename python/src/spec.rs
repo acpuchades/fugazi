@@ -447,6 +447,9 @@ pub(crate) fn load_loaded_spec(
 #[pyclass(name = "StrategySpec", module = "fugazi")]
 pub(crate) struct PyStrategySpec {
     pub(crate) inner: CoreStrategySpec,
+    /// Symbols the document reads through an explicit `!pick { symbol: … }`,
+    /// captured from the loaded document — see the `reads` getter.
+    pub(crate) reads: Vec<String>,
 }
 
 /// Drive one already-loaded spec against `wallet` and return the run report.
@@ -647,6 +650,29 @@ impl PyStrategySpec {
             Some(v) => json_to_py(py, v),
             None => Ok(py.None()),
         }
+    }
+
+    /// The symbols this document **reads but does not trade** — every asset
+    /// named by an explicit `!pick { symbol: … }` anywhere in the tree, sorted.
+    ///
+    /// A cross-asset expression (a regime gate on another asset, a spread leg)
+    /// only resolves if that symbol is an entry in the snapshots you pass to
+    /// `run`. It is not an error for it to be missing — `Pick` reads `None` on
+    /// a bar it doesn't match, which is right for a listing gap — so a spec
+    /// whose reads you never supplied simply never fires. Check this against
+    /// what you're building snapshots from:
+    ///
+    /// ```python
+    /// spec = ta.load_spec(open("gate.yml").read())
+    /// assert set(spec.reads) <= set(df["symbol"].unique())
+    /// ```
+    ///
+    /// The CLI does this check for you against `--series` and refuses the run;
+    /// here the snapshots are yours to construct, so the check is yours too.
+    /// Mirrors Rust's `spec::reads::picked_symbols`.
+    #[getter]
+    pub(crate) fn reads(&self) -> Vec<String> {
+        self.reads.clone()
     }
 
     /// Drive the spec over `snapshots` against `wallet`, returning the full
@@ -1075,7 +1101,12 @@ pub(crate) fn load_spec(
     let params = extract_params(params)?;
     let base = std::path::PathBuf::from(base_dir.unwrap_or("."));
     let inner = load_loaded_spec(text, &params, &base, kind)?;
-    Ok(PyStrategySpec { inner })
+    // Collected from the same document `load_loaded_spec` parses, so a caller
+    // assembling snapshots by hand can see which series the spec will need.
+    let reads = fugazi_core::spec::reads::picked_symbols_of(text, &params, &base, "(python)")
+        .map(|s| s.into_iter().collect())
+        .unwrap_or_default();
+    Ok(PyStrategySpec { inner, reads })
 }
 
 // ---------------------------------------------------------------------------

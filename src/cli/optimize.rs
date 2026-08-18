@@ -5,7 +5,7 @@
 //! `Row` / `Evaluation` / `Subgrid` types — lives in `fugazi::spec::optimize`.
 
 use fugazi::types::Symbol;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::time::SystemTime;
@@ -26,7 +26,7 @@ use crate::input::StrategyKind;
 use crate::input;
 use crate::metrics;
 use crate::overlap;
-use crate::run::join_universe_by_time;
+use crate::run::{attach_read_series, join_universe_by_time, read_only_series};
 use crate::style;
 
 use fugazi::spec::pairs::PairsStrategySpec;
@@ -247,6 +247,26 @@ pub fn run(frame: &DataFrame, opts: OptimizeOptions) -> Result<()> {
     }
 }
 
+/// The symbols the swept document **reads** through an explicit
+/// `!pick { symbol: … }`, probed the same way its traded symbol is.
+///
+/// A sweep varies `!param`s, and a `!pick` head can be one — so the base value
+/// alone would miss a parameterised symbol. Each subgrid's probe point is
+/// resolved and walked, mirroring how [`run_single`] / [`run_multi_symbol`]
+/// probe `symbol:` / `left:` / `right:` and require every subgrid to agree.
+/// A grid axis that varies the *picked* symbol across combos within one subgrid
+/// is outside what the probe sees — the same limit the traded-symbol probe has,
+/// and the not-in-input error below is what catches the fallout.
+fn probe_reads(base_value: &Value, subgrids: &[Subgrid]) -> Result<BTreeSet<String>> {
+    let mut out = BTreeSet::new();
+    for subgrid in subgrids {
+        let resolved =
+            fugazi::spec::params::substitute(base_value.clone(), &probe_params(subgrid))?;
+        out.extend(fugazi::spec::reads::picked_symbols(&resolved));
+    }
+    Ok(out)
+}
+
 /// The single-asset grid path — probes the strategy's symbol once, fetches
 /// its atom slice, and drives the sweep through a
 /// [`SingleStrategySpec`]-typed closure. Handles walk-forward too (which is
@@ -281,6 +301,13 @@ fn run_single(
     let series = frame.atoms(&probe_symbol)?;
     let atoms = series.atoms;
     let skipped_overlay_columns = series.skipped_columns;
+    // Series the document reads but does not trade, resolved once for the whole
+    // sweep — and refused here, before a single grid point runs, when one of
+    // them is not in the input. `run` makes the same check; a sweep that
+    // silently read `None` for a regime gate would produce a whole grid of
+    // plausible zero-trade rows.
+    let reads = probe_reads(base_value, &subgrids)?;
+    let read_only = read_only_series(frame, &[probe_symbol.as_str()], &reads)?;
 
     // The effective bar cadence, now that the strategy's symbol is known, best
     // evidence first: a symbol-matching `-f/--frequency` entry, then the
@@ -359,10 +386,15 @@ fn run_single(
         // Interned once: every bar's `Snapshot::single` then clones a refcount
         // rather than allocating a fresh copy of the same symbol.
         let wf_symbol = fugazi::types::symbol(&probe_symbol);
-        let wf_snapshots: Vec<fugazi::types::Snapshot<Symbol>> = atoms
+        let wf_bars: Vec<String> = atoms.iter().map(|(t, _)| t.clone()).collect();
+        let mut wf_snapshots: Vec<fugazi::types::Snapshot<Symbol>> = atoms
             .iter()
             .map(|(_, a)| fugazi::types::Snapshot::single(wf_symbol.clone(), a.clone()))
             .collect();
+        // Left-joined onto the traded symbol's bars — see `run::attach_read_series`.
+        // The folds slice this stream by index, so a read series has to be on it
+        // before the split, not per fold.
+        attach_read_series(&wf_bars, &mut wf_snapshots, &read_only);
         let wf_snapshots_ref = &wf_snapshots;
         let ctx = backtest::EvalContext {
             cash,
@@ -422,10 +454,12 @@ fn run_single(
     // this inside every call).
     // Interned once — see the walk-forward branch above.
     let symbol = fugazi::types::symbol(&probe_symbol);
-    let snapshots: Vec<fugazi::types::Snapshot<Symbol>> = atoms
+    let sweep_bars: Vec<String> = atoms.iter().map(|(t, _)| t.clone()).collect();
+    let mut snapshots: Vec<fugazi::types::Snapshot<Symbol>> = atoms
         .iter()
         .map(|(_, a)| fugazi::types::Snapshot::single(symbol.clone(), a.clone()))
         .collect();
+    attach_read_series(&sweep_bars, &mut snapshots, &read_only);
     let snapshots_ref = &snapshots;
     let ctx = backtest::EvalContext {
         cash: opts.cash,
@@ -570,7 +604,15 @@ fn run_multi_symbol(
         .iter()
         .map(|sym| Ok::<_, anyhow::Error>((sym.clone(), frame.atoms(sym)?.atoms)))
         .collect::<Result<_>>()?;
-    let (bars, snapshots) = join_universe_by_time(&per_symbol);
+    let (bars, mut snapshots) = join_universe_by_time(&per_symbol);
+    // Empty unless the universe is narrower than the frame (pairs), since every
+    // `!pick` target of a basket / multi / portfolio sweep is already traded —
+    // so for those three this is the "named a symbol that isn't in the input"
+    // check and nothing more.
+    let traded_refs: Vec<&str> = universe.iter().map(|s| s.as_ref()).collect();
+    let reads = probe_reads(base_value, &subgrids)?;
+    let read_only = read_only_series(frame, &traded_refs, &reads)?;
+    attach_read_series(&bars, &mut snapshots, &read_only);
     if snapshots.is_empty() {
         bail!(
             "no bars found in the input series across the {} discovered symbol(s)",

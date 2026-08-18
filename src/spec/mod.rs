@@ -32,6 +32,7 @@ pub mod overlay;
 pub mod pairs;
 pub mod portfolio;
 pub mod preset;
+pub mod reads;
 mod shape;
 pub mod strategy;
 pub mod template;

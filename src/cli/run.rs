@@ -37,6 +37,7 @@
 //! `!all [<entry>, !stable { signal: <entry> }]`.
 
 use fugazi::types::Symbol;
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -119,6 +120,16 @@ pub struct RunOptions<'a> {
     /// The `--from` value as the user spelled it, for error and warning text
     /// that has to quote the flag back.
     pub from_label: Option<&'a str>,
+    /// Symbols the document **reads but does not trade** — every asset named by
+    /// an explicit `!pick { symbol: … }` anywhere in the tree, collected at load
+    /// by [`fugazi::spec::reads::picked_symbols_of`].
+    ///
+    /// The runners join these series into the snapshot stream alongside the
+    /// traded ones, so a regime gate on another asset resolves, and refuse the
+    /// run when one of them is absent from `--series`. Empty for a document
+    /// that names none, which is every document that worked before this
+    /// existed.
+    pub reads: &'a BTreeSet<String>,
 }
 
 /// Headline numbers returned from a run.
@@ -281,12 +292,22 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
     // series resident at peak for no reason, and `Atom` is 88 bytes a bar before
     // its overlays.
     let bars: Vec<String> = atoms.iter().map(|(t, _)| t.clone()).collect();
+    // Series the document reads but does not trade — resolved (and refused, if
+    // absent) before the stream is built, so a missing one is an error rather
+    // than a run of `None`s. Nothing to do for a document that names none,
+    // which is the overwhelmingly common case.
+    let read_only = read_only_series(frame, &[symbol.as_str()], opts.reads)?;
     // Interned once; each bar's tag is then a refcount bump.
     let sym = fugazi::types::symbol(&symbol);
-    let snapshots: Vec<fugazi::types::Snapshot<Symbol>> = atoms
+    let mut snapshots: Vec<fugazi::types::Snapshot<Symbol>> = atoms
         .into_iter()
         .map(|(_, a)| fugazi::types::Snapshot::single(sym.clone(), a))
         .collect();
+    // Left-joined onto the traded symbol's own bars: a read-only series adds
+    // entries to existing snapshots, never snapshots of its own. The traded
+    // symbol is therefore present in every snapshot, which is what keeps the
+    // strategy's `Position` and `Book` reading its own candle.
+    attach_read_series(&bars, &mut snapshots, &read_only);
     let spec = StrategySpec::Single(Box::new(strategy.clone()));
     // Resolved before the inputs block prints, so the `period` line names the
     // range that will be *measured* rather than the range the file covers.
@@ -351,7 +372,7 @@ pub fn run_pairs(
     // Both leg names interned once; each bar then tags with a refcount bump.
     let left_sym = fugazi::types::symbol(&spec.left);
     let right_sym = fugazi::types::symbol(&spec.right);
-    let snapshots: Vec<fugazi::types::Snapshot<Symbol>> = left_atoms
+    let mut snapshots: Vec<fugazi::types::Snapshot<Symbol>> = left_atoms
         .iter()
         .zip(right_atoms.iter())
         .map(|(l, r)| {
@@ -361,6 +382,12 @@ pub fn run_pairs(
             snap
         })
         .collect();
+    // A third series the document reads — a pair hedged against an index level,
+    // say — joins onto the legs' *inner-joined* timeline. Neither leg is
+    // privileged here, so `!pick` is already mandatory on every leaf; this only
+    // widens which assets one can name.
+    let read_only = read_only_series(frame, &[spec.left.as_str(), spec.right.as_str()], opts.reads)?;
+    attach_read_series(&bars, &mut snapshots, &read_only);
     let any = StrategySpec::Pairs(Box::new(spec.clone()));
     // The slice lands on the *joined* timeline, so two partially-overlapping
     // legs behave the way the dates say rather than the way the files do.
@@ -383,15 +410,20 @@ pub fn run_pairs(
     emit_run(&iter, opts, started, effective_freq)
 }
 
-/// The shared driver for the three shapes whose universe is **discovered from
-/// the stream** rather than declared up front.
+/// The shared driver for the three N-symbol shapes.
 ///
 /// Basket, multi-asset and portfolio ran identical bodies: resolve the symbol
-/// set from the frame, build per-symbol atom streams, outer-join them on
-/// `time`, read the calendar off a representative symbol, print the inputs
-/// block, drive, and emit. They differed in five spots — the spec variant, two
-/// strings, and whether the cost probe includes the unscoped `default:` leg —
-/// so those are parameters and the bodies are one.
+/// set, build per-symbol atom streams, outer-join them on `time`, read the
+/// calendar off a representative symbol, print the inputs block, drive, and
+/// emit. They differed in five spots — the spec variant, two strings, and
+/// whether the cost probe includes the unscoped `default:` leg — so those are
+/// parameters and the bodies are one.
+///
+/// `declared` is the sixth: basket and multi-asset **discover** their universe
+/// from the frame and pass `None`, a portfolio passes what its children name
+/// (see [`portfolio_declared_symbols`]). Either way the universe is the *traded*
+/// set; series the document only reads join in through [`read_only_series`]
+/// without extending the timeline.
 ///
 /// Cadence is read from the representative symbol: none of these shapes
 /// declares per-symbol cadences, and a mixed-cadence universe is a follow-up if
@@ -401,12 +433,19 @@ fn run_universe(
     noun: &str,
     headline: &str,
     probe_default_costs: bool,
+    declared: Option<Vec<String>>,
     frame: &DataFrame,
     opts: &RunOptions,
 ) -> Result<Summary> {
     let started = SystemTime::now();
+    // The traded universe: whatever the shape declares, else every symbol the
+    // frame carries. Basket and multi-asset genuinely *discover* theirs — the
+    // frame is the universe, by design — so they pass `None`. A portfolio does
+    // not: its children name what they trade, and a symbol no child mentions
+    // was never going to be traded, only carried.
+    let traded: Vec<String> = declared.unwrap_or_else(|| frame.symbols());
     // Interned once per distinct symbol for the whole run.
-    let universe: Vec<Symbol> = frame.symbols().iter().map(fugazi::types::symbol).collect();
+    let universe: Vec<Symbol> = traded.iter().map(fugazi::types::symbol).collect();
     if universe.is_empty() {
         anyhow::bail!("no symbols found in the input series — {noun} needs at least one traded asset");
     }
@@ -416,7 +455,15 @@ fn run_universe(
         .iter()
         .map(|sym| Ok::<_, anyhow::Error>((sym.clone(), frame.atoms(sym)?.atoms)))
         .collect::<Result<_>>()?;
-    let (bars, snapshots) = join_universe_by_time(&per_symbol);
+    let (bars, mut snapshots) = join_universe_by_time(&per_symbol);
+    // Series read but not traded. Empty whenever the universe is the whole
+    // frame — every `!pick` target is already in it — so for basket and
+    // multi-asset this is purely the "named a symbol that isn't in the input"
+    // check, which those shapes need just as much: a typo in a `score:` reads
+    // `None` forever and scores nothing, silently.
+    let traded_refs: Vec<&str> = traded.iter().map(String::as_str).collect();
+    let read_only = read_only_series(frame, &traded_refs, opts.reads)?;
+    attach_read_series(&bars, &mut snapshots, &read_only);
     if bars.is_empty() {
         anyhow::bail!(
             "no bars found in the input series across the {} discovered symbol(s)",
@@ -490,6 +537,7 @@ pub fn run_basket(
         "a basket",
         "trade a basket across an N-symbol universe",
         false,
+        None,
         frame,
         opts,
     )
@@ -512,6 +560,7 @@ pub fn run_multi(
         "a multi-asset strategy",
         "trade a multi-asset portfolio across an N-symbol universe",
         false,
+        None,
         frame,
         opts,
     )
@@ -539,9 +588,44 @@ pub fn run_portfolio(
         "a portfolio",
         "trade a composite portfolio of heterogeneous child strategies",
         true,
+        portfolio_declared_symbols(spec),
         frame,
         opts,
     )
+}
+
+/// The symbols a portfolio's children *declare* they trade — its traded
+/// universe, when every child has one.
+///
+/// A single-asset child names one symbol, a pairs child names two; both are
+/// known before a bar is read. A **basket or multi-asset child discovers its
+/// universe from the frame**, so a portfolio containing one has no declared
+/// universe either, and `None` sends the runner back to taking the whole frame.
+///
+/// Restricting matters because the alternative is carrying every symbol in the
+/// input through every snapshot of the run: a portfolio of two single-asset
+/// children pointed at a twenty-symbol CSV would build twenty-entry snapshots
+/// for eighteen assets nothing trades or reads, and outer-join their bars onto
+/// a timeline none of its children has. Symbols a child only *reads* come back
+/// through [`read_only_series`] instead, which left-joins them rather than
+/// letting them extend the timeline.
+fn portfolio_declared_symbols(spec: &PortfolioSpec) -> Option<Vec<String>> {
+    use fugazi::spec::portfolio::PortfolioChildStrategy as Child;
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    for child in &spec.children {
+        match &child.strategy {
+            Child::Single(s) => {
+                out.insert(s.symbol().to_string());
+            }
+            Child::Pairs(p) => {
+                out.insert(p.left.clone());
+                out.insert(p.right.clone());
+            }
+            // Discovered, not declared — so the portfolio's is too.
+            Child::Basket(_) | Child::Multi(_) => return None,
+        }
+    }
+    Some(out.into_iter().collect())
 }
 
 /// The bar cadence and annualization factor for an N-symbol run, read off a
@@ -747,6 +831,93 @@ pub(crate) fn join_universe_by_time(
         snaps.push(snap);
     }
     (times, snaps)
+}
+
+/// Per-symbol atom streams, each sorted by its time label — what
+/// [`DataFrame::atoms`] produces per symbol and [`join_universe_by_time`]
+/// consumes.
+pub(crate) type SymbolStreams = Vec<(Symbol, Vec<(String, Atom)>)>;
+
+/// Resolve the series a document **reads but does not trade** — every symbol
+/// `opts.reads` collected from an explicit `!pick { symbol: … }`, minus the ones
+/// `traded` already covers — into per-symbol atom streams ready to be joined in.
+///
+/// A named series that is not in the input is a **hard error**, not an empty
+/// read. `Pick::matching` resolves `None` on a bar it does not match, which is
+/// the right answer for a listing gap and exactly the wrong one for a symbol
+/// that was never passed: every downstream comparison stays `None`, no signal
+/// ever fires, and the run completes with zero fills and nothing said. That
+/// failure reads as "the gate filtered everything out" rather than "the gate
+/// never evaluated", which is the most expensive way for a backtest to be
+/// wrong.
+pub(crate) fn read_only_series(
+    frame: &DataFrame,
+    traded: &[&str],
+    reads: &BTreeSet<String>,
+) -> Result<SymbolStreams> {
+    let mut out = Vec::new();
+    if reads.iter().all(|s| traded.contains(&s.as_str())) {
+        return Ok(out);
+    }
+    let available = frame.symbols();
+    for sym in reads {
+        if traded.contains(&sym.as_str()) {
+            continue;
+        }
+        if !available.iter().any(|s| s == sym) {
+            anyhow::bail!(
+                "`!pick {{ symbol: {sym} }}` names a series that is not in the input.\n\
+                 \n\
+                 The document reads `{sym}` but `--series` carries {}. A `!pick` \
+                 naming another asset reads that asset's bars off the same \
+                 timeline, so the series has to be passed with `-s/--series` \
+                 alongside the traded one — it is read, not traded, and adds no \
+                 bars of its own to the run.",
+                if available.is_empty() {
+                    "no symbols".to_string()
+                } else {
+                    available.join(", ")
+                },
+            );
+        }
+        out.push((fugazi::types::symbol(sym), frame.atoms(sym)?.atoms));
+    }
+    Ok(out)
+}
+
+/// Left-join `read_only` series onto a snapshot stream whose timeline is
+/// already fixed by the *traded* symbols.
+///
+/// **Left, not outer**: a series the document only reads must not create bars.
+/// A regime gate on BTC should not manufacture an ETH bar on a day ETH did not
+/// trade — the traded symbol would be absent from that snapshot, and every
+/// per-bar count the run reports (bars, returns, the annualization divisor)
+/// would describe a timeline the traded asset never had. So `bars` stays what
+/// it was, and a read series simply contributes an entry to the bars it shares.
+///
+/// Both sides are sorted by the time label (`DataFrame::atoms` walks a
+/// `BTreeMap`), which is the same ordering assumption
+/// [`join_universe_by_time`] makes, so one forward cursor per series suffices.
+pub(crate) fn attach_read_series(
+    bars: &[String],
+    snapshots: &mut [fugazi::types::Snapshot<Symbol>],
+    read_only: &[(Symbol, Vec<(String, Atom)>)],
+) {
+    for (sym, atoms) in read_only {
+        let mut cursor = 0usize;
+        for (bar, snap) in bars.iter().zip(snapshots.iter_mut()) {
+            while cursor < atoms.len() && &atoms[cursor].0 < bar {
+                cursor += 1;
+            }
+            match atoms.get(cursor) {
+                Some((t, atom)) if t == bar => {
+                    snap.push(Some(sym.clone()), None, atom.clone());
+                    cursor += 1;
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
