@@ -110,6 +110,7 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
           [--params <SPEC> …] [--cash <N>] [--costs <SPEC> …]
           [--stocks | --forex | --crypto] [-f <CODE>] [--bars-per-year <N>]
           [--risk-free-rate <RATE>] [-w <LEN>] [-q]
+          [--from <DATE>] [--until <DATE>] [--strict-from]
 ```
 
 | Flag | Description |
@@ -125,6 +126,9 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
 | `--bars-per-year <[SYM[FREQ]:]N>` | Explicit override for the annualization denominator. Repeatable; each entry may carry a `SYMBOL[FREQ]:` scope prefix. Wins over the calendar/frequency pair when a scope matches. |
 | `--risk-free-rate <RATE>` | Annualized risk-free rate as a fraction (`0.045` = 4.5% p.a.). Default `0`. See [Risk-free rate](#risk-free-rate). |
 | `-w`, `--windowed <LEN>` | Also reduce the run in `LEN`-sized windows: one row per non-overlapping window in `metrics.csv`, one row per rolling (stride-1) window in `rolling.csv`. `metrics.yml` (whole-run) is always written; the console prints an extra **windowed metrics** block right after the whole-run one, showing `mean ± std` over the non-overlapping rows for the same headline stats. `LEN` is a plain bar count (`10`, `252`) or a duration in the [`-f`](#-f----frequency) alphabet (`1d`, `1w`, `1M`, `4h`) that resolves to a bar count against the trading calendar. The duration form is strict — it requires an explicit `--stocks`/`--forex`/`--crypto` and a resolvable bar cadence (`-f/--frequency`, or a `time` column so the cadence can be auto-detected). See [Windowed metrics](#windowed-metrics). |
+| `--from <DATE>` | Evaluate only bars at or after `DATE`. Bars before it are still read, to warm the chains without trading — see [Date-range selection](#date-range-selection). |
+| `--until <DATE>` | Evaluate only bars strictly before `DATE`. The interval is half-open, so adjacent ranges tile exactly. |
+| `--strict-from` | Make `--from` a hard slice: read nothing before it and start the strategy cold. Requires `--from`. |
 | `-q`, `--quiet` | Silence the console output. Files still get written. |
 
 **Outputs.** Files in `--output-dir`, all documented in
@@ -419,6 +423,7 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
                [--cash <N>]
                [--stocks | --forex | --crypto] [-f <CODE>] [--bars-per-year <N>]
                [--risk-free-rate <RATE>] [-q]
+               [--from <DATE>] [--until <DATE>] [--strict-from]
 ```
 
 | Flag | Description |
@@ -434,6 +439,7 @@ fugazi optimize <STRATEGY> --series <SPEC> [--series <SPEC> …]
 | `--keep-unstable` | Under `--walkforward`, skip only the grid-wide `max(warm_up_bars)` at the head of the series — letting the IIR settling tail bleed into the first IS window — instead of the safe default `max(stable_bars)`. Opt-out; no-op without `--walkforward`. |
 | `-k`, `--risk-aversion <K>` | Rank `--best-by` conservatively: shift each grid point's cross-window mean *against* it by `K` standard deviations before sorting. Requires `-w` and `--best-by`; `K >= 0`. See [Best-by directions](#best-by-directions). |
 | `--costs <SPEC>` | Trading-cost model applied uniformly to every grid point. Repeatable. See [--costs](#--costs). |
+| `--from <DATE>` / `--until <DATE>` / `--strict-from` | Restrict which bars the sweep evaluates. Every grid row is warmed to the grid-wide `max(stable_bars)` and evaluates the same bars, so rows stay comparable. Under `--walkforward`, folds are laid out inside the sliced range. See [Date-range selection](#date-range-selection). |
 | `-j`, `--jobs <N>` | Rayon worker count. Default: one worker per logical CPU. |
 | `-c`, `--cash <N>` | Initial funds for each backtest. Default `10000`. |
 | `--stocks` / `--forex` / `--crypto` | Trading-calendar shortcut. See [Calendar](#calendar-and-annualization). |
@@ -1299,6 +1305,89 @@ flag opts out. See the library's [safe-defaults][safe-defaults] note.
 
 [safe-defaults]: README.md#safe-defaults-opt-in-overrides
 
+### Date-range selection
+
+`--from` / `--until` restrict which bars a `run` or `optimize` **evaluates**.
+Both accept `YYYY-MM-DD`, `YYYY-MM-DD HH:MM:SS`, or an RFC 3339 timestamp, and
+either may be given alone.
+
+```sh
+fugazi run @strategy.yml -s @data.csv -o out/ --from 2020-01-01 --until 2025-02-01
+```
+
+The interval is **half-open** — `[from, until)` — so adjacent ranges tile
+exactly. `--until 2025-02-01` and `--from 2025-02-01` partition a series with no
+bar counted twice and none dropped between them, which is what makes a
+development / held-out split trustworthy.
+
+#### `--from` bounds evaluation, not loading
+
+This distinction is invisible in the output and both readings are defensible, so
+it is worth stating plainly.
+
+Bars *before* `--from` are still **read** when the series carries them. They are
+fed to the strategy with the trade step gated off: every indicator advances, no
+order is submitted, no equity is booked. Evaluation — trading, and every number
+in `metrics.yml` — begins at `--from`, on settled indicators.
+
+Without that, the first `max(stable_bars)` bars of a sliced run would be
+measured on cold chains, and a sliced run would not be comparable to an
+unsliced one — which would defeat the purpose of slicing. How far back it reads
+is exactly `stable_bars`, the same depth [`--walkforward`](#walk-forward-optimization)
+skips at the head of a series, so the two features agree on what "settled"
+means.
+
+The console and the artifact both report the split:
+
+```
+period   2025-02-01 → 2026-07-31 (546 bars, 200 warm-up)
+```
+
+```yaml
+run:
+  bars: 546
+  period_start: 2025-02-01
+  period_end: 2026-07-31
+  warmup_bars: 200
+```
+
+#### When there is not enough history
+
+If the series does not reach far enough back to settle by `--from`, the run
+**warns and starts late**, at the first settled bar:
+
+```
+warn only 34 bars precede `--from 2025-02-01`, but 200 are needed to settle
+     this strategy; evaluation starts 2025-08-19 instead
+```
+
+`period_start` then records where evaluation *actually* began, so the artifact
+describes what happened rather than what was asked for. The warning is not
+suppressed by `--quiet` — a run that measured a different period than requested
+has to say so.
+
+#### `--strict-from`
+
+`--strict-from` makes `--from` a hard slice: nothing before it is read and the
+strategy starts cold. For deliberately simulating a cold start. Every indicator
+then spends its warm-up *inside* the evaluated range, so the leading
+`stable_bars` of the results are unsettled — which is the point, and why it is
+not the default. `warmup_bars` is omitted from `metrics.yml` in this mode.
+
+#### Interactions
+
+| With | Behaviour |
+| --- | --- |
+| `--walkforward` | Folds are laid out **inside** the sliced range. Walk-forward's own prefix skip settles the chains there, so the range is handed over without a warm-up prefix — the skip is applied once, not twice. The first fold therefore opens `max(stable_bars)` after `--from`. |
+| `-w/--windowed` | Windows tile from `--from`, not from the start of the file. |
+| `--resume` | A `--from` at or before the state's last bar is **refused**: resuming continues from that bar, so it would re-run history rather than extend it. |
+| `--save-state` | Unaffected — the state records the last *evaluated* bar. |
+| Multiple `--series` | The slice applies after the join, so partially-overlapping series behave the way the dates say rather than the way any one file happens to start. |
+| `optimize` | Every grid row is warmed to the **grid-wide** `max(stable_bars)` and evaluates exactly the same bars, so a difference between two rows is the parameters and not the window. |
+
+`check` takes no `--series`, so it has no bars to slice and accepts neither
+flag.
+
 ### Windowed metrics
 
 `-w/--windowed <LEN>` reduces the run in **windows of `LEN`** on top of the
@@ -1616,6 +1705,9 @@ Non-metric inputs echoed at the top of the file.
 | Field | Meaning |
 | --- | --- |
 | `bars` | Bar count the metrics were measured over — the run minus the [stability-gated](#stability-gating) prefix (and, windowed, this window's length). |
+| `period_start` | Label of the first **evaluated** bar, after [`--from`/`--until`](#date-range-selection) slicing and any warm-up prefix. What the numbers below actually describe — not what the input file covers. |
+| `period_end` | Label of the last evaluated bar, inclusive. |
+| `warmup_bars` | Bars read *before* `period_start` to settle the chains, and therefore excluded from `bars` and from every metric here. Present only under `--from` without `--strict-from`. |
 | `initial_equity` | Equity at the start of the measured range — the seed cash for a whole run, the prior bar's mark for a window. |
 | `final_equity` | Ending equity (marked to the last bar's close). |
 | `bars_per_year` | Annualization denominator used. |

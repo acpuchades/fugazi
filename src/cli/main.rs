@@ -17,6 +17,7 @@ mod cadence;
 mod completions;
 mod csv_source;
 mod data;
+mod daterange;
 mod get;
 mod glob;
 mod grammar;
@@ -43,6 +44,8 @@ pub(crate) use fugazi::spec::backtest;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -145,6 +148,54 @@ struct SchemaArgs {
     /// single-expression schema.
     #[arg(long)]
     document: bool,
+}
+
+/// `--from` / `--until` / `--strict-from`, shared verbatim by `run` and
+/// `optimize` so the two cannot drift apart on either grammar or meaning.
+#[derive(Args, Clone, Debug)]
+struct DateRangeArgs {
+    /// Evaluate only bars at or after this date. Accepts `YYYY-MM-DD`,
+    /// `YYYY-MM-DD HH:MM:SS`, or an RFC 3339 timestamp.
+    ///
+    /// This bounds **evaluation, not loading**. Bars before it are still read
+    /// when the series carries them, and are fed to the strategy with trading
+    /// gated off — indicators advance, nothing is booked — so the first
+    /// evaluated bar is measured on settled indicators instead of a cold
+    /// chain. That is what makes a sliced run comparable to an unsliced one.
+    /// How far back it reads is the strategy's `stable_bars`, the same depth
+    /// `--walkforward` skips at the head of a series.
+    ///
+    /// When the series does not reach that far back, the run warns and starts
+    /// late, at the first settled bar; `metrics.yml`'s `period_start` records
+    /// where evaluation actually began. Use `--strict-from` for a hard slice.
+    #[arg(long = "from", value_name = "DATE")]
+    from: Option<String>,
+
+    /// Evaluate only bars strictly before this date; same spellings as
+    /// `--from`.
+    ///
+    /// The interval is half-open — `[from, until)` — so adjacent ranges tile
+    /// exactly: `--until 2025-02-01` and `--from 2025-02-01` partition a
+    /// series with no bar counted twice and none dropped between them.
+    #[arg(long = "until", value_name = "DATE")]
+    until: Option<String>,
+
+    /// Make `--from` a hard slice: read nothing before it and start the
+    /// strategy cold.
+    ///
+    /// For deliberately simulating a cold start. Every indicator spends its
+    /// warm-up inside the evaluated range, so the first `stable_bars` bars of
+    /// the results are unsettled — which is the point, and is why it is not
+    /// the default.
+    #[arg(long = "strict-from", requires = "from")]
+    strict_from: bool,
+}
+
+impl DateRangeArgs {
+    /// Parse into the resolved form, or `None` when neither bound was given.
+    fn resolve(&self) -> Result<Option<daterange::DateRange>> {
+        daterange::DateRange::parse(self.from.as_deref(), self.until.as_deref(), self.strict_from)
+    }
 }
 
 #[derive(Args)]
@@ -286,6 +337,9 @@ struct RunArgs {
     /// `--save-state`.
     #[arg(long = "flatten")]
     flatten: bool,
+
+    #[command(flatten)]
+    range: DateRangeArgs,
 
     /// Compute Monte Carlo significance analysis after the run — bootstrap
     /// confidence intervals and empirical-null p-values for a handful of
@@ -563,6 +617,9 @@ struct OptimizeArgs {
     #[arg(long = "keep-unstable", requires = "walkforward")]
     keep_unstable: bool,
 
+    #[command(flatten)]
+    range: DateRangeArgs,
+
     /// Rank `--best-by` conservatively (needs `-w` and `--best-by`): shift each
     /// grid point's cross-window mean *against* it by K standard deviations
     /// before sorting — higher-is-better metrics rank by `mean − K·std`,
@@ -634,6 +691,23 @@ fn print_error(err: &anyhow::Error) {
     }
 }
 
+/// Cash the `check` build is seeded with. `check` never drives the strategy, so
+/// the figure only has to be positive and unremarkable — nothing reads it.
+const DEFAULT_CHECK_CASH: fugazi::Real = 100_000.0;
+
+/// Whether the document mentions `!tag` anywhere. The loader represents a YAML
+/// tag as a single-key map, so this is a plain structural walk — no grammar
+/// knowledge, and nothing to keep in sync when a tag is added.
+fn mentions_tag(value: &serde_json::Value, tag: &str) -> bool {
+    match value {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .any(|(k, v)| k.trim_start_matches('!') == tag || mentions_tag(v, tag)),
+        serde_json::Value::Array(items) => items.iter().any(|v| mentions_tag(v, tag)),
+        _ => false,
+    }
+}
+
 fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     let param_table = params::table(&args.params)?;
 
@@ -656,6 +730,12 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
         .with_context(|| parse_error_hint(&args.strategy))?;
     let params_base = params_label(&param_table);
 
+    // `!get` is the one leaf whose *build* consults the overlay schema, and
+    // `check` has no data to derive one from — so a document using it cannot be
+    // built here without inventing columns and failing on every real one. Note
+    // it now, while the tree is still in hand.
+    let reads_overlay = mentions_tag(&value, "get");
+
     // Deserialize under the hole-aware guard. `from_json_value` moves the tree
     // into the `serde_norway::Value` shape the bridges buffer through.
     let _guard = spec::undefined::check_mode();
@@ -664,21 +744,25 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     // Each arm parses its shape and reports back `(description, detail)`; the
     // placeholder-type checks and the printing are common, and must run *after*
     // the parse, since that is what populates the observations.
-    let (description, detail) = match args.strategy.kind {
+    let (description, detail, parsed) = match args.strategy.kind {
         StrategyKind::Single => {
             let strategy: spec::StrategyRef =
                 spec::undefined::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
+            let detail = format!("symbol {}", strategy.symbol());
             (
                 "parse and validate a strategy spec",
-                format!("symbol {}", strategy.symbol()),
+                detail,
+                spec::StrategySpec::Single(Box::new(strategy)),
             )
         }
         StrategyKind::Pairs => {
-            let spec: spec::PairsStrategySpec =
+            let parsed: spec::PairsStrategySpec =
                 spec::undefined::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
+            let detail = format!("pair {} / {}", parsed.left, parsed.right);
             (
                 "parse and validate a pairs strategy spec",
-                format!("pair {} / {}", spec.left, spec.right),
+                detail,
+                spec::StrategySpec::Pairs(Box::new(parsed)),
             )
         }
         StrategyKind::Basket => {
@@ -687,11 +771,13 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             // `!arg`s held as holes), so an unknown tag or misspelled field
             // inside `score:` / `sizing:` is caught here rather than at the
             // first run that reaches a symbol.
-            let spec: spec::BasketStrategySpec =
+            let parsed: spec::BasketStrategySpec =
                 spec::undefined::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
+            let detail = format!("selection {:?}", parsed.selection);
             (
                 "parse and validate a basket strategy spec",
-                format!("selection {:?}", spec.selection),
+                detail,
+                spec::StrategySpec::Basket(Box::new(parsed)),
             )
         }
         StrategyKind::Multi => {
@@ -710,7 +796,11 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             } else {
                 sides.join(" + ")
             };
-            ("parse and validate a multi-asset strategy spec", sides)
+            (
+                "parse and validate a multi-asset strategy spec",
+                sides,
+                spec::StrategySpec::Multi(Box::new(spec)),
+            )
         }
         StrategyKind::Portfolio => {
             // Portfolio parses eagerly at the top level (children, weights);
@@ -719,9 +809,11 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
             let spec: spec::PortfolioSpec =
                 spec::undefined::from_json_value(value).map_err(anyhow::Error::new).with_context(parse_err)?;
             let n = spec.children.len();
+            let detail = format!("{n} child strateg{}", if n == 1 { "y" } else { "ies" });
             (
                 "parse and validate a portfolio strategy spec",
-                format!("{n} child strateg{}", if n == 1 { "y" } else { "ies" }),
+                detail,
+                spec::StrategySpec::Portfolio(Box::new(spec)),
             )
         }
     };
@@ -733,6 +825,24 @@ fn check_strategy(args: CheckStrategyArgs) -> Result<()> {
     // placeholder has to look like.
     let observations = spec::undefined::take_observations();
     reject_contradictory_params(&observations).with_context(parse_err)?;
+
+    // `check` validates shape, not values, and stops short of a build for two
+    // good reasons: an unresolved `!param` is a *hole* with no value to build
+    // from, and `!get` needs an overlay schema only real data can supply. When
+    // neither applies the document is fully determined, and building it is the
+    // one check that catches an error the typed parse structurally cannot — a
+    // leaf with no asset to read in a shape that holds more than one (see
+    // `spec::expr::Root`), which used to surface as a panic mid-run.
+    let holes = observations
+        .iter()
+        .any(|(o, _, _)| *o == spec::undefined::UndefinedOrigin::Undefined);
+    if !holes && !reads_overlay {
+        let schema = Arc::new(fugazi::Schema::default());
+        parsed
+            .try_build(DEFAULT_CHECK_CASH, &schema, None)
+            .map_err(spec::backtest::build_error)
+            .with_context(|| format!("building {}", args.strategy.label()))?;
+    }
 
     if !args.quiet {
         // Count distinct placeholder *names*, not substitution sites: one name
@@ -936,6 +1046,8 @@ fn run(args: RunArgs) -> Result<()> {
         save_state: args.save_state.as_deref(),
         flatten: args.flatten,
         montecarlo: montecarlo.as_ref(),
+        range: args.range.resolve()?,
+        from_label: args.range.from.as_deref(),
     };
     let base = args.strategy.base_dir();
     match args.strategy.kind {
@@ -1007,6 +1119,8 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         costs_supplied: costs_were_supplied,
         jobs: args.jobs,
         quiet: args.quiet,
+        range: args.range.resolve()?,
+        from_label: args.range.from.as_deref(),
     };
     optimize::run(&frame, opts).with_context(|| parse_error_hint(&args.strategy))?;
     Ok(())

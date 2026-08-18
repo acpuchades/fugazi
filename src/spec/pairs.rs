@@ -14,7 +14,7 @@ use crate::indicators::logic::ValueBool;
 use crate::prelude::*;
 use crate::strategies::PairsStrategy;
 
-use super::expr::{BoolNode, RealNode};
+use super::expr::{BoolNode, RealNode, Root};
 use super::meta::Meta;
 use super::strategy::SideSpec;
 use crate::runtime::AnyChain;
@@ -260,7 +260,7 @@ impl PairsStrategySpec {
         schema: &Arc<Schema>,
     ) -> Result<AnyChain, String> {
         match side.and_then(|s| s.exit.as_ref()) {
-            Some(s) => s.try_build(anchor, book, None, schema, None),
+            Some(s) => s.try_build(anchor, book, None, schema, Root::ambiguous("pairs")),
             None => Ok(crate::runtime::any(ValueBool::<
                 crate::types::Snapshot<Symbol>,
             >::new(false))),
@@ -276,7 +276,7 @@ impl PairsStrategySpec {
         schema: &Arc<Schema>,
     ) -> Result<AnyChain, String> {
         match side {
-            Some(s) => s.enter.try_build(anchor, book, None, schema, None),
+            Some(s) => s.enter.try_build(anchor, book, None, schema, Root::ambiguous("pairs")),
             None => Ok(crate::runtime::any(ValueBool::<
                 crate::types::Snapshot<Symbol>,
             >::new(false))),
@@ -343,25 +343,25 @@ impl PairsStrategySpec {
         }
         if let Some(sl) = long.and_then(|s| s.stop_loss.as_ref()) {
             strat =
-                strat.long_spread_stop_loss((sl.try_build(&anchor, &book, None, schema, None)?).into_real()?);
+                strat.long_spread_stop_loss((sl.try_build(&anchor, &book, None, schema, Root::ambiguous("pairs"))?).into_real()?);
         }
         if let Some(tp) = long.and_then(|s| s.take_profit.as_ref()) {
             strat =
-                strat.long_spread_take_profit((tp.try_build(&anchor, &book, None, schema, None)?).into_real()?);
+                strat.long_spread_take_profit((tp.try_build(&anchor, &book, None, schema, Root::ambiguous("pairs"))?).into_real()?);
         }
         if let Some(sl) = short.and_then(|s| s.stop_loss.as_ref()) {
             strat =
-                strat.short_spread_stop_loss((sl.try_build(&anchor, &book, None, schema, None)?).into_real()?);
+                strat.short_spread_stop_loss((sl.try_build(&anchor, &book, None, schema, Root::ambiguous("pairs"))?).into_real()?);
         }
         if let Some(tp) = short.and_then(|s| s.take_profit.as_ref()) {
             strat =
-                strat.short_spread_take_profit((tp.try_build(&anchor, &book, None, schema, None)?).into_real()?);
+                strat.short_spread_take_profit((tp.try_build(&anchor, &book, None, schema, Root::ambiguous("pairs"))?).into_real()?);
         }
         if let Some(sizing) = &self.sizing {
-            strat = strat.position_sizing((sizing.try_build(&anchor, &book, None, schema, None)?).into_real()?);
+            strat = strat.position_sizing((sizing.try_build(&anchor, &book, None, schema, Root::ambiguous("pairs"))?).into_real()?);
         }
         if let Some(rebalance) = &self.rebalance_on {
-            strat = strat.rebalance_on((rebalance.try_build(&anchor, &book, None, schema, None)?).into_bool()?);
+            strat = strat.rebalance_on((rebalance.try_build(&anchor, &book, None, schema, Root::ambiguous("pairs"))?).into_bool()?);
         }
         Ok(DynPairsStrategy { inner: strat })
     }
@@ -579,4 +579,103 @@ mod tests {
         assert!(spec.sizing.is_some());
         let _built = spec.build(10_000.0, &Schema::empty());
     }
+
+    // -----------------------------------------------------------------
+    // A pair holds two assets and privileges neither, so a leaf with no
+    // `source:` has nothing to read. That used to build a sole-atom
+    // `Pick` and panic on the first 2-entry snapshot — after `check` had
+    // passed the document, so there was no way to find out ahead of the
+    // run. It is a build error now. See `spec::expr::Root`.
+    // -----------------------------------------------------------------
+
+    /// The reported case. `!vol_target` reads prices, but looks like a
+    /// scalar knob, so nothing about the document suggests it needs an
+    /// asset named.
+    #[test]
+    fn vol_target_sizing_is_rejected_rather_than_panicking() {
+        let spec: PairsStrategySpec = serde_norway::from_str(
+            r#"
+left: BTCUSDT
+right: ETHUSDT
+long_spread:
+  enter: !gt { lhs: !close { source: !pick { symbol: BTCUSDT } }, rhs: !value 0.0 }
+  exit: !lt { lhs: !close { source: !pick { symbol: BTCUSDT } }, rhs: !value 0.0 }
+sizing: !vol_target { target: 0.20, window: 30, bars_per_year: 365 }
+"#,
+        )
+        .unwrap();
+        let error = spec
+            .try_build(10_000.0, &Schema::empty())
+            .err()
+            .expect("a rootless price leaf in a pair has no asset to read");
+        assert!(error.contains("ambiguous"), "{error}");
+        assert!(error.contains("pairs"), "{error}");
+        // The breadcrumb has to name the offending tag, or the message is
+        // unactionable in a document with several sizing knobs.
+        assert!(error.contains("!vol_target"), "{error}");
+    }
+
+    /// Not sizing-specific: any bare price leaf in a pair is unanswerable,
+    /// and the breadcrumb walks down to the exact one.
+    #[test]
+    fn a_bare_price_leaf_in_a_signal_is_rejected_too() {
+        let spec: PairsStrategySpec = serde_norway::from_str(
+            r#"
+left: BTCUSDT
+right: ETHUSDT
+long_spread:
+  enter: !gt { lhs: !close, rhs: !value 0.0 }
+  exit: !lt { lhs: !close, rhs: !value 0.0 }
+"#,
+        )
+        .unwrap();
+        let error = spec
+            .try_build(10_000.0, &Schema::empty())
+            .err()
+            .expect("bare !close in a pair");
+        assert!(error.contains("!gt > !close"), "{error}");
+    }
+
+    /// The fix must not reject the documents that already worked: a leaf
+    /// that names its asset is exactly how a pair is supposed to read one.
+    #[test]
+    fn naming_the_asset_still_builds() {
+        let spec: PairsStrategySpec = serde_norway::from_str(
+            r#"
+left: BTCUSDT
+right: ETHUSDT
+long_spread:
+  enter: !gt { lhs: !close { source: !pick { symbol: BTCUSDT } }, rhs: !value 0.0 }
+  exit: !lt { lhs: !close { source: !pick { symbol: BTCUSDT } }, rhs: !value 0.0 }
+sizing: !vol_target
+  source: !pick { symbol: BTCUSDT }
+  target: 0.20
+  window: 30
+  bars_per_year: 365
+"#,
+        )
+        .unwrap();
+        spec.try_build(10_000.0, &Schema::empty())
+            .expect("a leaf that names its asset is unambiguous");
+    }
+
+    /// Book-anchored sizing reads the strategy's book, not a price, so it
+    /// never needed an asset and must keep building.
+    #[test]
+    fn book_anchored_sizing_needs_no_asset() {
+        let spec: PairsStrategySpec = serde_norway::from_str(
+            r#"
+left: BTCUSDT
+right: ETHUSDT
+long_spread:
+  enter: !gt { lhs: !close { source: !pick { symbol: BTCUSDT } }, rhs: !value 0.0 }
+  exit: !lt { lhs: !close { source: !pick { symbol: BTCUSDT } }, rhs: !value 0.0 }
+sizing: !drawdown_throttle { max_drawdown: 0.20 }
+"#,
+        )
+        .unwrap();
+        spec.try_build(10_000.0, &Schema::empty())
+            .expect("a book leaf reads no asset");
+    }
+
 }

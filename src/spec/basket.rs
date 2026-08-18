@@ -38,7 +38,7 @@ use crate::strategies::basket::{
 };
 use crate::types::Snapshot;
 
-use super::expr::NodeSpec;
+use super::expr::{NodeSpec, Root};
 use super::meta::Meta;
 use super::template::SpecTemplate;
 use crate::runtime::AnyChain;
@@ -386,7 +386,7 @@ impl BasketStrategySpec {
             let concrete = build_per_symbol(&score_template, sym, "score");
             let anchor = Position::new();
             let dyn_ind: AnyChain =
-                concrete.build(&anchor, &book_score, None, &schema_score, Some(&leg_root(sym)));
+                concrete.build(&anchor, &book_score, None, &schema_score, Root::blessed(&leg_root(sym)));
             dyn_ind.probed_real("score")
         });
 
@@ -397,7 +397,7 @@ impl BasketStrategySpec {
             let concrete = build_per_symbol(&sizing_template, sym, "sizing");
             let anchor = Position::new();
             let dyn_ind: AnyChain =
-                concrete.build(&anchor, &book_sizing, None, &schema_sizing, Some(&leg_root(sym)));
+                concrete.build(&anchor, &book_sizing, None, &schema_sizing, Root::blessed(&leg_root(sym)));
             dyn_ind.probed_real("sizing")
         });
 
@@ -420,7 +420,7 @@ impl BasketStrategySpec {
             // (`!every`, `!monthly`) need no asset; one that reads a price
             // must name it with `!pick { symbol: ... }`.
             let dyn_ind: AnyChain =
-                rebalance_spec.try_build(&anchor, &book, None, schema, None)?;
+                rebalance_spec.try_build(&anchor, &book, None, schema, Root::sole())?;
             strat.rebalance_on(dyn_ind.into_bool()?)
         } else {
             strat
@@ -439,7 +439,7 @@ impl BasketStrategySpec {
                 strat = strat.long_stop_loss(move |sym: &Symbol, pos: &Position| {
                     let concrete = build_per_symbol(&t, sym, "long.stop_loss");
                     let dyn_ind: AnyChain =
-                        concrete.build(pos, &book_c, None, &schema_c, Some(&leg_root(sym)));
+                        concrete.build(pos, &book_c, None, &schema_c, Root::blessed(&leg_root(sym)));
                     dyn_ind.probed_real("long.stop_loss")
                 });
             }
@@ -449,7 +449,7 @@ impl BasketStrategySpec {
                 strat = strat.long_take_profit(move |sym: &Symbol, pos: &Position| {
                     let concrete = build_per_symbol(&t, sym, "long.take_profit");
                     let dyn_ind: AnyChain =
-                        concrete.build(pos, &book_c, None, &schema_c, Some(&leg_root(sym)));
+                        concrete.build(pos, &book_c, None, &schema_c, Root::blessed(&leg_root(sym)));
                     dyn_ind.probed_real("long.take_profit")
                 });
             }
@@ -465,7 +465,7 @@ impl BasketStrategySpec {
                 strat = strat.short_stop_loss(move |sym: &Symbol, pos: &Position| {
                     let concrete = build_per_symbol(&t, sym, "short.stop_loss");
                     let dyn_ind: AnyChain =
-                        concrete.build(pos, &book_c, None, &schema_c, Some(&leg_root(sym)));
+                        concrete.build(pos, &book_c, None, &schema_c, Root::blessed(&leg_root(sym)));
                     dyn_ind.probed_real("short.stop_loss")
                 });
             }
@@ -475,7 +475,7 @@ impl BasketStrategySpec {
                 strat = strat.short_take_profit(move |sym: &Symbol, pos: &Position| {
                     let concrete = build_per_symbol(&t, sym, "short.take_profit");
                     let dyn_ind: AnyChain =
-                        concrete.build(pos, &book_c, None, &schema_c, Some(&leg_root(sym)));
+                        concrete.build(pos, &book_c, None, &schema_c, Root::blessed(&leg_root(sym)));
                     dyn_ind.probed_real("short.take_profit")
                 });
             }
@@ -561,7 +561,7 @@ fn probe_template(
 ) -> Result<(), String> {
     let concrete = try_build_per_symbol(template, PROBE_SYMBOL, slot)?;
     concrete
-        .try_build(anchor, book, None, schema, Some(&leg_root(PROBE_SYMBOL)))
+        .try_build(anchor, book, None, schema, Root::blessed(&leg_root(PROBE_SYMBOL)))
         .map(|_| ())
 }
 

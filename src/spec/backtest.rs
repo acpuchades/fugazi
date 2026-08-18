@@ -197,6 +197,16 @@ pub struct EvalContext<'a> {
     /// where per-grid-cell resampling would be pathological. Requires the
     /// `montecarlo` feature to actually compute; ignored without it.
     pub mc: Option<crate::spec::montecarlo::McConfig>,
+    /// Bars fed to the strategy *before* the evaluated range, purely to warm
+    /// its chains — the prefix `--from` reads back from the series so a sliced
+    /// run's first evaluated bar is measured on settled indicators. Trading is
+    /// gated off across it, so it contributes no fills and no equity.
+    ///
+    /// Echoed into `metrics.yml` as `run.warmup_bars`, and consumed by
+    /// [`run_iteration_resumable`] to split the snapshot stream. `None` means
+    /// no prefix — every bar handed over is evaluated, which is what an
+    /// unsliced run does.
+    pub warmup_bars: Option<usize>,
 }
 
 impl EvalContext<'_> {
@@ -270,7 +280,15 @@ pub fn measured_report_any(
         ctx.effective_freq,
         &universe,
     )?;
-    Ok(built.drive(snapshots, ctx.cash, &per_symbol_costs))
+    let (report, _) = built.drive_resumable_warmed(
+        snapshots,
+        ctx.warmup_bars.unwrap_or(0),
+        ctx.cash,
+        &per_symbol_costs,
+        None,
+        false,
+    )?;
+    Ok(report)
 }
 
 /// Reduce a whole-run backtest of `spec` to one [`metrics::Metrics`] document
@@ -342,6 +360,13 @@ pub fn run_iteration_resumable(
             spec.kind()
         ));
     }
+    // The warm-up prefix is fed to the strategy but not measured, so it is
+    // charged against `bars` here — everything downstream (the equity curve,
+    // `returns.csv`, the windowed reductions, the stamped period) is indexed
+    // off the evaluated range alone.
+    let warmup = ctx.warmup_bars.unwrap_or(0).min(snapshots.len());
+    let bars: Vec<String> = bars[warmup..].to_vec();
+
     let schema = schema_from_snapshots(snapshots);
     let universe = spec.universe(snapshots);
     let per_symbol_costs = ctx.costs_for(&universe);
@@ -359,14 +384,20 @@ pub fn run_iteration_resumable(
         ctx.effective_freq,
         &universe,
     )?;
-    let (report, final_state) =
-        priced.drive_resumable(snapshots, ctx.cash, &per_symbol_costs, resume, flatten)?;
+    let (report, final_state) = priced.drive_resumable_warmed(
+        snapshots,
+        warmup,
+        ctx.cash,
+        &per_symbol_costs,
+        resume,
+        flatten,
+    )?;
 
     let gross_report = if costs_active {
         let mut gross = spec.try_build(ctx.cash, &schema, None)?;
         Some(
             gross
-                .drive_resumable(snapshots, ctx.cash, &[], None, flatten)?
+                .drive_resumable_warmed(snapshots, warmup, ctx.cash, &[], None, flatten)?
                 .0,
         )
     } else {
@@ -398,6 +429,9 @@ fn reduce_iteration(
         inputs.risk_free_rate,
         inputs.seconds_per_bar,
     );
+    // `bars` labels the *evaluated* range (the caller split any warm-up prefix
+    // off both streams together), so it names the period end to end.
+    metrics::stamp_period(&mut whole, &bars, inputs.warmup_bars);
     if costs_active {
         whole.costs = Some(metrics::costs_section(
             &report,
@@ -406,29 +440,44 @@ fn reduce_iteration(
         ));
     }
     let gross_metrics = gross_report.as_ref().map(|g| {
-        metrics::from_report(
+        let mut m = metrics::from_report(
             g,
             inputs.bars_per_year,
             inputs.risk_free_rate,
             inputs.seconds_per_bar,
-        )
+        );
+        // The gross twin is the same bars with the cost model removed, so it
+        // covers the same period.
+        metrics::stamp_period(&mut m, &bars, inputs.warmup_bars);
+        m
     });
+    // Each window is a slice of the *evaluated* range, so it carries its own
+    // period but no warm-up of its own — the prefix was consumed once, before
+    // the first window began.
+    let stamp_windows = |ws: &mut Vec<metrics::WindowMetrics>| {
+        for w in ws.iter_mut() {
+            let span = bars.get(w.start_bar..=w.end_bar).unwrap_or(&[]);
+            metrics::stamp_period(&mut w.metrics, span, None);
+        }
+    };
     let (windowed, rolling) = match inputs.windowed {
         Some(n) => {
-            let w = metrics::windowed_from_report(
+            let mut w = metrics::windowed_from_report(
                 &report,
                 n.get(),
                 inputs.bars_per_year,
                 inputs.risk_free_rate,
                 inputs.seconds_per_bar,
             );
-            let r = metrics::rolling_from_report(
+            let mut r = metrics::rolling_from_report(
                 &report,
                 n.get(),
                 inputs.bars_per_year,
                 inputs.risk_free_rate,
                 inputs.seconds_per_bar,
             );
+            stamp_windows(&mut w);
+            stamp_windows(&mut r);
             (Some(w), Some(r))
         }
         None => (None, None),

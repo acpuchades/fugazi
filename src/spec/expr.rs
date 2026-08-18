@@ -43,24 +43,104 @@ use crate::{Frequency, Selector};
 use std::str::FromStr;
 use crate::types::Symbol;
 
-/// The implicit atom root of every `source:`-omitted leaf.
+/// Where a `source:`-omitted leaf reads from — the **blessed series** of the
+/// context doing the build, or the reason there isn't one.
 ///
-/// `root` is the **blessed series** of the context doing the build — the
-/// declared `symbol:` of a [`SingleAssetStrategy`](crate::strategies::SingleAssetStrategy),
-/// the leg of a basket / multi-asset factory, the `(symbol, freq)` key of an
-/// overlay column. When one is supplied, a bare `!close` resolves *by name*
-/// out of the snapshot ([`Pick::rooted`]), which is what lets it coexist with
-/// a `!close { source: !pick { symbol: SPY } }` reaching across the same bar.
+/// A blessed series is the declared `symbol:` of a
+/// [`SingleAssetStrategy`](crate::strategies::SingleAssetStrategy), the leg of
+/// a basket / multi-asset factory, the `(symbol, freq)` key of an overlay
+/// column. With one in play a bare `!close` resolves *by name* out of the
+/// snapshot ([`Pick::rooted`]), which is what lets it coexist with a
+/// `!close { source: !pick { symbol: SPY } }` reaching across the same bar.
 ///
-/// A context with no blessed series (a pair — two legs, neither privileged; a
-/// portfolio's `weights:`; a snapshot-level `rebalance_on:` gate) passes
-/// `None` and gets the empty-selector [`Pick::new`], whose sole-atom unpack
-/// panics on a multi-symbol snapshot rather than guessing. Those specs name
-/// their asset explicitly with `!pick { symbol: ... }`.
-pub(super) fn pick_root(root: Option<&Selector<Symbol>>) -> Pick<Symbol> {
-    match root {
-        Some(selector) => Pick::<Symbol>::rooted(selector.clone()),
-        None => Pick::<Symbol>::new(),
+/// # Why the absence of one is two different things
+///
+/// This used to be a plain `Option<&Selector<Symbol>>`, and `None` meant both
+/// "single-series, so unpack the sole entry" and "genuinely multi-asset, so a
+/// bare price leaf has no answer". The second case built a [`Pick::new`]
+/// anyway and **panicked at run time** on the first 2-entry snapshot — after
+/// `check` had passed the document, so there was no way to find out ahead of
+/// the run. A `pairs:` document sizing on `!vol_target` (which reads prices,
+/// though it looks like a scalar knob) hit exactly that.
+///
+/// Distinguishing the two lets the ambiguous case be a *build error* instead,
+/// per the crate's "build errors are values" invariant. Every leaf already
+/// funnels through `pick_root` / `build_pick`, so there is no second table
+/// to keep in sync — a new tag inherits the check for free.
+#[derive(Clone, Copy, Default)]
+pub struct Root<'a> {
+    blessed: Option<&'a Selector<Symbol>>,
+    /// Set only when there is no blessed series *and* the shape guarantees
+    /// more than one asset. Names the shape, for the error message.
+    ambiguous: Option<&'static str>,
+}
+
+impl<'a> Root<'a> {
+    /// This context blesses `selector` — a bare leaf reads that asset.
+    pub fn blessed(selector: &'a Selector<Symbol>) -> Self {
+        Self {
+            blessed: Some(selector),
+            ambiguous: None,
+        }
+    }
+
+    /// No blessed series, but the snapshot is expected to carry one entry, so
+    /// a bare leaf unpacks it. The default, and what every single-series
+    /// context (and every caller that never had a root to give) wants.
+    pub fn sole() -> Self {
+        Self::default()
+    }
+
+    /// No blessed series and **more than one asset by construction**, so a
+    /// bare price leaf is a bad document rather than an unlucky bar. `shape`
+    /// names the document shape for the error.
+    ///
+    /// Reserved for shapes whose arity is known at *build* time. A portfolio
+    /// `rebalance_on:` gate is not one: its universe may well be a single
+    /// symbol, and rejecting a bare `!close` there would break documents that
+    /// work today.
+    pub fn ambiguous(shape: &'static str) -> Self {
+        Self {
+            blessed: None,
+            ambiguous: Some(shape),
+        }
+    }
+
+    /// Bless `selector` when the context has one, else fall back to the
+    /// sole-atom unpack — for callers holding an `Option` already.
+    pub fn or_sole(selector: Option<&'a Selector<Symbol>>) -> Self {
+        Self {
+            blessed: selector,
+            ambiguous: None,
+        }
+    }
+
+    /// The blessed selector, if any.
+    pub(super) fn selector(self) -> Option<&'a Selector<Symbol>> {
+        self.blessed
+    }
+
+    /// The error a bare price leaf earns in this context, if it earns one.
+    fn ambiguity(self) -> Option<String> {
+        let shape = self.ambiguous?;
+        Some(format!(
+            "no `source:` and no blessed series to fall back on — a {shape} \
+             document holds more than one asset, so which one this reads is \
+             ambiguous. Name it explicitly, e.g. \
+             `!close {{ source: !pick {{ symbol: BTCUSDT }} }}`"
+        ))
+    }
+}
+
+/// The implicit atom root of every `source:`-omitted leaf. `Err` when the
+/// context has no blessed series and more than one asset — see [`Root`].
+pub(super) fn pick_root(root: Root<'_>) -> Result<Pick<Symbol>, String> {
+    match root.selector() {
+        Some(selector) => Ok(Pick::<Symbol>::rooted(selector.clone())),
+        None => match root.ambiguity() {
+            Some(error) => Err(error),
+            None => Ok(Pick::<Symbol>::new()),
+        },
     }
 }
 
@@ -76,9 +156,9 @@ pub(super) fn pick_root(root: Option<&Selector<Symbol>>) -> Pick<Symbol> {
 /// [`MultiAssetStrategy`](crate::strategies::MultiAssetStrategy),
 /// [`BasketStrategy`](crate::strategies::BasketStrategy), or a
 /// [`Portfolio`](crate::portfolio::Portfolio) `rebalance_on:` gate.
-/// Contrast with [`pick_root`], which panics on a 2+ entry snapshot
-/// because price-field leaves (`!close`, `!high`, …) genuinely depend on
-/// *which* asset.
+/// Contrast with [`pick_root`], which has to either root, unpack a sole
+/// entry, or refuse — price-field leaves (`!close`, `!high`, …) genuinely
+/// depend on *which* asset.
 ///
 /// Deliberately takes **no** `root`: re-rooting a calendar leaf onto one
 /// symbol would make it read `None` on a bar where that symbol happens to be
@@ -86,6 +166,16 @@ pub(super) fn pick_root(root: Option<&Selector<Symbol>>) -> Pick<Symbol> {
 /// other entry.
 pub(super) fn pick_any_root() -> PickAny<Symbol> {
     PickAny::<Symbol>::new()
+}
+
+/// Default `seed:` for the two self-referential sizers — full base size.
+///
+/// `1.0` rather than `0.0` because a zero seed *is* the deadlock: sizing `0`
+/// skips the trade, so the recipe never gets the closed trade (or the equity
+/// movement) it needs to produce a real number. Full size until it knows
+/// better is also what the recipes approximate once warm.
+fn default_sizing_seed() -> Real {
+    1.0
 }
 
 pub(super) fn default_source() -> Box<NodeSpec> {
@@ -219,7 +309,7 @@ impl StrOperand {
         book: &Book,
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
-        root: Option<&Selector<Symbol>>,
+        root: Root<'_>,
     ) -> Result<AnyChain, String> {
         match self {
             StrOperand::Literal(s) => Ok(any(
@@ -308,7 +398,7 @@ impl RealNode {
         book: &Book,
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
-        root: Option<&Selector<Symbol>>,
+        root: Root<'_>,
     ) -> AnyChain {
         self.0.build(anchor, book, portfolio_book, schema, root)
     }
@@ -318,7 +408,7 @@ impl RealNode {
         book: &Book,
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
-        root: Option<&Selector<Symbol>>,
+        root: Root<'_>,
     ) -> Result<AnyChain, String> {
         self.0.try_build(anchor, book, portfolio_book, schema, root)
     }
@@ -333,7 +423,7 @@ impl BoolNode {
         book: &Book,
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
-        root: Option<&Selector<Symbol>>,
+        root: Root<'_>,
     ) -> AnyChain {
         self.0.build(anchor, book, portfolio_book, schema, root)
     }
@@ -343,7 +433,7 @@ impl BoolNode {
         book: &Book,
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
-        root: Option<&Selector<Symbol>>,
+        root: Root<'_>,
     ) -> Result<AnyChain, String> {
         self.0.try_build(anchor, book, portfolio_book, schema, root)
     }
@@ -1320,6 +1410,12 @@ pub enum NodeSpec {
         window: NonZeroUsize,
         /// Bars per year, for annualizing (252 stocks, 365 crypto).
         bars_per_year: Real,
+        /// Size used until the recipe has enough data to size itself.
+        /// Both recipes measure something that only exists because the
+        /// strategy traded, so without this they hold every entry forever
+        /// (`sizing: None` skips the trade) and never trade at all.
+        #[serde(default = "default_sizing_seed")]
+        seed: Real,
     },
     /// Fractional Kelly over the last `window` closed-trade returns —
     /// `kelly_fraction * mean / variance`, clamped to `>= 0`. Reads a book
@@ -1334,6 +1430,12 @@ pub enum NodeSpec {
         kelly_fraction: Real,
         /// Lookback window, in bars.
         window: NonZeroUsize,
+        /// Size used until the recipe has enough data to size itself.
+        /// Both recipes measure something that only exists because the
+        /// strategy traded, so without this they hold every entry forever
+        /// (`sizing: None` skips the trade) and never trade at all.
+        #[serde(default = "default_sizing_seed")]
+        seed: Real,
     },
 
     // --- trailing risk indicators (own an embedded single-asset strategy,
@@ -2451,6 +2553,8 @@ enum NodeSpecRaw {
         target: Real,
         window: NonZeroUsize,
         bars_per_year: Real,
+        #[serde(default = "default_sizing_seed")]
+        seed: Real,
     },
     /// Fractional Kelly over the last `window` closed-trade returns —
     /// `kelly_fraction * mean / variance`, clamped to `>= 0`. Reads a book
@@ -2461,6 +2565,8 @@ enum NodeSpecRaw {
         source: Option<Box<NodeSpec>>,
         kelly_fraction: Real,
         window: NonZeroUsize,
+        #[serde(default = "default_sizing_seed")]
+        seed: Real,
     },
 
     // --- trailing risk indicators (own an embedded single-asset strategy,
@@ -2895,8 +3001,8 @@ impl From<NodeSpecRaw> for NodeSpec {
             NodeSpecRaw::VolTarget { source, target, window, bars_per_year } => NodeSpec::VolTarget { source, target, window, bars_per_year },
             NodeSpecRaw::AtrRisk { source, risk_frac, period, atr_multiple } => NodeSpec::AtrRisk { source, risk_frac, period, atr_multiple },
             NodeSpecRaw::DrawdownThrottle { source, max_drawdown } => NodeSpec::DrawdownThrottle { source, max_drawdown },
-            NodeSpecRaw::EquityVolTarget { source, target, window, bars_per_year } => NodeSpec::EquityVolTarget { source, target, window, bars_per_year },
-            NodeSpecRaw::FractionalKelly { source, kelly_fraction, window } => NodeSpec::FractionalKelly { source, kelly_fraction, window },
+            NodeSpecRaw::EquityVolTarget { source, target, window, bars_per_year, seed } => NodeSpec::EquityVolTarget { source, target, window, bars_per_year, seed },
+            NodeSpecRaw::FractionalKelly { source, kelly_fraction, window, seed } => NodeSpec::FractionalKelly { source, kelly_fraction, window, seed },
             NodeSpecRaw::Sharpe { strategy, period, bars_per_year, risk_free_rate } => NodeSpec::Sharpe { strategy, period, bars_per_year, risk_free_rate },
             NodeSpecRaw::Sortino { strategy, period, bars_per_year, risk_free_rate } => NodeSpec::Sortino { strategy, period, bars_per_year, risk_free_rate },
             NodeSpecRaw::Volatility { strategy, period, bars_per_year } => NodeSpec::Volatility { strategy, period, bars_per_year },
@@ -3391,7 +3497,7 @@ fn build_polymorphic_eq(
     book: &Book,
     portfolio_book: Option<&Book>,
     schema: &Arc<Schema>,
-    root: Option<&Selector<Symbol>>,
+    root: Root<'_>,
 ) -> Result<AnyChain, String> {
     let lhs_built = lhs.try_build(anchor, book, portfolio_book, schema, root)?;
     Ok(match lhs_built.output_type() {
@@ -3456,7 +3562,7 @@ fn build_match(
     book: &Book,
     portfolio_book: Option<&Book>,
     schema: &Arc<Schema>,
-    root: Option<&Selector<Symbol>>,
+    root: Root<'_>,
 ) -> Result<AnyChain, String> {
     if cases.is_empty() {
         return Err("`cases` must not be empty (use `!if_else` for a single branch, \
@@ -3563,10 +3669,10 @@ fn atom_source_of(
     book: &Book,
     portfolio_book: Option<&Book>,
     schema: &Arc<Schema>,
-    root: Option<&Selector<Symbol>>,
+    root: Root<'_>,
 ) -> Result<AtomChain, String> {
     match source {
-        None => Ok(crate::runtime::erase(pick_root(root))),
+        None => Ok(crate::runtime::erase(pick_root(root)?)),
         Some(s) => {
             let built = s.try_build(anchor, book, portfolio_book, schema, root)?;
             built.into_atom().map_err(|e| trail(s, e))
@@ -3591,7 +3697,7 @@ fn atom_source_any_of(
     book: &Book,
     portfolio_book: Option<&Book>,
     schema: &Arc<Schema>,
-    root: Option<&Selector<Symbol>>,
+    root: Root<'_>,
 ) -> Result<AtomChain, String> {
     match source {
         None => Ok(crate::runtime::erase(pick_any_root())),
@@ -3658,7 +3764,7 @@ impl NodeSpec {
         book: &Book,
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
-        root: Option<&Selector<Symbol>>,
+        root: Root<'_>,
     ) -> AnyChain {
         self.try_build(anchor, book, portfolio_book, schema, root)
             .unwrap_or_else(|e| panic!("{e}"))
@@ -3683,7 +3789,7 @@ impl NodeSpec {
         book: &Book,
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
-        root: Option<&Selector<Symbol>>,
+        root: Root<'_>,
     ) -> Result<AnyChain, String> {
         self.try_build_inner(anchor, book, portfolio_book, schema, root)
             .map_err(|e| trail(self, e))
@@ -3698,7 +3804,7 @@ impl NodeSpec {
         book: &Book,
         portfolio_book: Option<&Book>,
         schema: &Arc<Schema>,
-        root: Option<&Selector<Symbol>>,
+        root: Root<'_>,
     ) -> Result<AnyChain, String> {
         use NodeSpec::*;
         // Recursive-build shorthands: build `s`, view it as a library-typed
@@ -4134,6 +4240,7 @@ impl NodeSpec {
                 target,
                 window,
                 bars_per_year,
+                seed,
             } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book)?;
                 any(
@@ -4142,6 +4249,7 @@ impl NodeSpec {
                         *target,
                         window.get(),
                         *bars_per_year,
+                        *seed,
                     ),
                 )
             }
@@ -4149,12 +4257,14 @@ impl NodeSpec {
                 source,
                 kelly_fraction,
                 window,
+                seed,
             } => {
                 let b = resolve_book_source(source.as_deref(), book, portfolio_book)?;
                 any(crate::indicators::sizing::fractional_kelly::<Symbol>(
                     b,
                     *kelly_fraction,
                     window.get(),
+                    *seed,
                 ))
             }
 
@@ -4456,14 +4566,14 @@ fn trail(spec: &NodeSpec, message: impl std::fmt::Display) -> String {
 fn build_pick(
     symbol: Option<&str>,
     freq: Option<&str>,
-    root: Option<&Selector<Symbol>>,
+    root: Root<'_>,
 ) -> Result<AnyChain, String> {
     let named = symbol.is_some();
     // The document gives a `&str`; interning happens here, once at build time,
     // so the resulting `Selector` clones as a refcount bump for the whole run.
     let sym = symbol
         .map(crate::types::symbol)
-        .or_else(|| root.and_then(|r| r.symbol.clone()));
+        .or_else(|| root.selector().and_then(|r| r.symbol.clone()));
     let f = match freq {
         Some(s) => Some(Frequency::from_str(s).map_err(|e| {
             format!("invalid frequency {s:?}: {e}")
@@ -4475,7 +4585,11 @@ fn build_pick(
         freq: f,
     };
     Ok(if selector.is_empty() {
-        any(Pick::<Symbol>::new())
+        // A bare `!pick {}` naming neither symbol nor freq, with no root to
+        // borrow one from: the same unanswerable question `pick_root` refuses.
+        // (A freq-only selector is fine — `Pick::rooted` falls back through
+        // `lone_atom` and reads `None` rather than panicking.)
+        any(pick_root(root)?)
     } else if named {
         any(Pick::<Symbol>::matching(selector))
     } else {

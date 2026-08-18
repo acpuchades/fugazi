@@ -225,7 +225,11 @@ extreme). They are checked every bar, so they fire intra-bar, independently of
 # Long on a breakout, with a 5% trailing stop and a fixed 15% take-profit.
 symbol: BTC
 long:
-  enter:       !crosses_above { lhs: close, rhs: !rolling_max { source: high, period: 20 } }
+  # `!lag` is load-bearing: the raw channel includes today's bar, so `close`
+  # can never exceed it. See "Extremum sources include the current bar".
+  enter:       !crosses_above
+    lhs: close
+    rhs: !lag { source: !rolling_max { source: high, period: 20 }, period: 1 }
   stop_loss:   !mul { lhs: peak,  rhs: !value 0.95 }   # 5% off the high since entry
   take_profit: !mul { lhs: entry, rhs: !value 1.15 }   # 15% above entry
 ```
@@ -322,13 +326,41 @@ basket the book tracks the aggregate equity across all legs.
 | `!vol_target` | `{ target, window, bars_per_year }` | inverse realized vol: `target / annualized_stddev(log returns, window)` |
 | `!atr_risk` | `{ risk_frac, period, atr_multiple }` | fixed per-trade risk: `risk_frac · close / (atr_multiple · ATR(period))` |
 | `!drawdown_throttle` | `{ max_drawdown }` | de-lever linearly as the drawdown deepens; `0` at `max_drawdown`, clamped to `[0, 1]` |
-| `!equity_vol_target` | `{ target, window, bars_per_year }` | vol targeting on the strategy's **own** per-bar returns |
-| `!fractional_kelly` | `{ kelly_fraction, window }` | Kelly over the last `window` closed-trade returns, scaled by `kelly_fraction`, clamped `>= 0` |
+| `!equity_vol_target` | `{ target, window, bars_per_year, seed = 1.0 }` | vol targeting on the strategy's **own** per-bar returns |
+| `!fractional_kelly` | `{ kelly_fraction, window, seed = 1.0 }` | Kelly over the last `window` closed-trade returns, scaled by `kelly_fraction`, clamped `>= 0` |
 
 The book-anchored three (`!drawdown_throttle`, `!equity_vol_target`,
 `!fractional_kelly`) measure against the book's starting equity — pass
 `--cash` to match it to the wallet's starting funds, or their numbers are
 meaningless.
+
+#### `seed:` — how a self-referential sizer starts
+
+`!equity_vol_target` and `!fractional_kelly` size on something that only exists
+*because* the strategy already traded: a moving equity curve, and closed
+trades. Everywhere else in fugazi a source that isn't ready yet reads `None`
+and the strategy waits — but a sizing slot reading `None` **skips the trade**,
+so here waiting is a deadlock. No entry ⇒ no trade ⇒ no sample ⇒ no entry.
+Both recipes used to report zero fills on every shape with no warning.
+
+`seed:` is the size to use until the recipe can size itself — the base stake
+you would start at and then scale. It defaults to `1.0` (full size), and stops
+applying the moment the recipe has an answer of its own, including an answer of
+`0` ("no edge, stand down"). It is not a floor and not a clamp.
+
+```yaml
+sizing: !fractional_kelly
+  kelly_fraction: 0.5
+  window: 30
+  seed: 0.25      # quarter size for the first 30 trades, then Kelly's own number
+```
+
+`seed: 0.0` restores the never-bootstraps behaviour, if a strategy is composed
+so that something *else* opens the first trades.
+
+The other recipes need no seed: `!vol_target` and `!atr_risk` read prices (which
+arrive without trading), and `!drawdown_throttle` reads a drawdown that is
+well-defined at zero.
 
 ### Choosing a sizing method from the command line
 
@@ -1125,10 +1157,51 @@ Each line of a multi-output indicator is its own source tag:
 | `!macd_line`, `!macd_signal`, `!macd_histogram` | `{ source, fast, slow, signal }` |
 | `!bb_upper`, `!bb_middle`, `!bb_lower` | `{ source, period, k }` |
 | `!keltner_upper`, `!keltner_middle`, `!keltner_lower` | `{ source, candle_source = !current, ema_period, atr_period, multiplier }` |
-| `!donchian_upper`, `!donchian_middle`, `!donchian_lower` | `{ high = high, low = low, period }` |
+| `!donchian_upper`, `!donchian_middle`, `!donchian_lower` | `{ high = high, low = low, period }` — the channel **includes the current bar**, see [below](#extremum-sources-include-the-current-bar) |
 | `!adx`, `!plus_di`, `!minus_di` | `{ period }` (the ADX/DI components) |
 | `!dmi_plus_di`, `!dmi_minus_di` | `{ period }` (raw +DI/−DI, no ADX smoothing) |
 | `!aroon_up`, `!aroon_down`, `!aroon_oscillator` | `{ period }` |
+
+#### Extremum sources include the current bar
+
+`!rolling_max`, `!rolling_min` and the `!donchian_*` channel all compute their
+extremum over a window that **ends on the bar being evaluated**, current bar
+included. That is the conventional definition, and it is not changing — but it
+makes the natural way to write a breakout a guaranteed no-op:
+
+```yaml
+# Never fires. `close <= high <= rolling_max(high)` once the current bar is in
+# the window, so `close` can only ever touch the channel, never cross it.
+enter: !crosses_above { lhs: close, rhs: !donchian_upper { period: 20 } }
+```
+
+The exit leg fails the same way in reverse (`close >= low >= rolling_min(low)`),
+and there is no warning: the strategy builds, runs, and reports zero trades.
+
+Compare the channel against the **previous** bar's value instead — that is what
+a breakout means anyway ("today took out the last 20 days' high"):
+
+```yaml
+enter: !crosses_above
+  lhs: close
+  rhs: !lag { source: !donchian_upper { period: 20 }, period: 1 }
+exit: !crosses_below
+  lhs: close
+  rhs: !lag { source: !donchian_lower { period: 10 }, period: 1 }
+```
+
+The same applies to anything else compared against its own running extremum —
+`!rolling_max { source: close }` versus `close`, a `close / !rolling_max` ratio
+(exactly `1.0` at every new high, so `!gt … 1.0` never fires).
+
+The rule is not "channels need a lag" but **a series never crosses an extremum
+it is inside of**. Anything bounded by the window runs into it — an `!sma` of
+`close` sits below `!rolling_max { source: high }` over the same bars just as
+surely as `close` does, so swapping in a smoother does not rescue the
+comparison. What *is* reachable is a level offset off the channel
+(`!mul { lhs: !rolling_max …, rhs: !value 0.98 }` as a support band) or an
+extremum taken over a **different** asset — neither bounds the series being
+compared.
 
 ### Bar indicators (consume the whole candle)
 
@@ -1187,7 +1260,7 @@ candle-field leaves.
 | `!add`, `!sub`, `!mul`, `!div` | `{ lhs, rhs }` | arithmetic over two sources (`div` → none on /0) |
 | `!log` | `{ source = close, base = e }` | logarithm of `source`; `None` on non-positive samples |
 | `!lag`, `!diff`, `!ratio`, `!roc` | `{ source = close, period }` | lookback vs. `period` bars ago |
-| `!rolling_max`, `!rolling_min` | `{ source = close, period }` | rolling extremum over `period` bars |
+| `!rolling_max`, `!rolling_min` | `{ source = close, period }` | rolling extremum over `period` bars — **includes the current bar**, see [below](#extremum-sources-include-the-current-bar) |
 | `!if_else` | `{ cond, then, otherwise }` | ternary: `cond` is a **signal**, the branches are sources — see below |
 | `!unstable` | `{ source }` | passthrough that reports no unstable period, so the readiness gate stops waiting for this subtree's IIR tail (the signal-side twin is `!unstable { signal }`) |
 | `!resample` | `{ every, inner, source = !current }` | aggregate every N candles of `source` (a `Candle`-output stream, defaulting to `!current`) into one higher-timeframe candle and run `inner` (any Real source) over that HTF candle; emits `inner`'s output on each completed bucket and `None` in between. `inner` is **required** — no default |
@@ -1403,15 +1476,23 @@ long:
   exit:  !above         { source: !rsi { period: 14 }, level: 70 }    # leave on overbought
 ```
 
-A Donchian breakout, always-in:
+A Donchian breakout, always-in. **The channel includes the current bar**, so
+the textbook spelling — `close` crossing above `!donchian_upper` — can never
+fire, and the lag is not optional:
 
 ```yaml
 symbol: BTC
 long:
-  enter: !crosses_above { lhs: close, rhs: !donchian_upper { period: 20 } }
+  enter: !crosses_above
+    lhs: close
+    rhs: !lag { source: !donchian_upper { period: 20 }, period: 1 }
 short:
-  enter: !crosses_below { lhs: close, rhs: !donchian_lower { period: 20 } }
+  enter: !crosses_below
+    lhs: close
+    rhs: !lag { source: !donchian_lower { period: 20 }, period: 1 }
 ```
+
+See [Extremum sources include the current bar](#extremum-sources-include-the-current-bar).
 
 The same SMA crossover as a one-line inline (flow-style) spec — tags work inside
 flow mappings too, so this is handy as an inline `<STRATEGY>` positional literal

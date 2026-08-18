@@ -742,6 +742,7 @@ pub fn slot_demands(tag: &str) -> SlotDemands {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spec::expr::Root;
     use crate::indicators::{Book, Position};
     use crate::types::Schema;
 
@@ -826,7 +827,7 @@ mod tests {
             let Some(declared) = output_type(&spec) else {
                 panic!("{yaml}: expected a declared output type");
             };
-            let built = spec.build(&anchor, &book, None, &schema, None).output_type();
+            let built = spec.build(&anchor, &book, None, &schema, Root::sole()).output_type();
             assert_eq!(
                 declared, built,
                 "{yaml}: declared {declared} but build produced {built}"
@@ -875,7 +876,7 @@ mod tests {
                     continue;
                 };
                 if mutated
-                    .try_build(&anchor, &book, None, &schema, None)
+                    .try_build(&anchor, &book, None, &schema, Root::sole())
                     .is_ok()
                 {
                     stale.push(format!(

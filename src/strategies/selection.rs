@@ -407,7 +407,7 @@ where
 /// The two sides never overlap: when the pool is smaller than
 /// `longs + shorts`, longs are taken first (highest scores) and shorts
 /// drawn from what remains. **Equal scores break on the symbol,
-/// ascending** — see [`ranked_take`] for why the tie-break has to be a
+/// ascending** — see `ranked_take` for why the tie-break has to be a
 /// total order on symbols rather than a property of the scores.
 ///
 /// Symbols not in the returned map are not selected. See [`TopBottom`]

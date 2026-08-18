@@ -12,7 +12,7 @@ use crate::indicators::logic::ValueBool;
 use crate::prelude::*;
 use crate::strategies::SingleAssetStrategy;
 
-use super::expr::{BoolNode, RealNode};
+use super::expr::{BoolNode, RealNode, Root};
 use super::meta::Meta;
 use crate::runtime::{any, AnyChain};
 use crate::types::Symbol;
@@ -54,7 +54,7 @@ impl SideSpec {
         anchor: &Position,
         book: &Book,
         schema: &Arc<Schema>,
-        root: Option<&Selector<Symbol>>,
+        root: Root<'_>,
     ) -> Result<AnyChain, String> {
         match &self.exit {
             Some(s) => s.try_build(anchor, book, None, schema, root),
@@ -191,7 +191,7 @@ impl SingleStrategySpec {
         // lets a single-asset spec run against a multi-symbol `--series`
         // frame instead of tripping the sole-atom panic.
         let root = Selector::by_symbol(self.symbol.clone());
-        let root = Some(&root);
+        let root = Root::blessed(&root);
         if let Some(long) = &self.long {
             strat = strat.long_on(
                 (long.enter.try_build(&anchor, &book, None, schema, root)?).into_bool()?,

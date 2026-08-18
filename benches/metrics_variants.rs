@@ -1071,6 +1071,9 @@ fn reduce<Sym>(
     Metrics {
         run: RunSection {
             bars,
+            period_start: None,
+            period_end: None,
+            warmup_bars: None,
             initial_equity: initial,
             final_equity,
             bars_per_year,

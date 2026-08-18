@@ -20,6 +20,7 @@ use crate::calendar::{
 };
 use crate::costs::CostConfig;
 use crate::data::DataFrame;
+use crate::daterange::{self, Slice};
 use crate::imports;
 use crate::input::StrategyKind;
 use crate::input;
@@ -36,7 +37,7 @@ use fugazi::spec::pairs::PairsStrategySpec;
 // module.
 pub use fugazi::spec::optimize::{
     ColumnPos, Direction, Evaluation, Row, Subgrid,
-    build_any_spec, build_spec, build_typed, cartesian, format_number,
+    build_any_spec, build_spec, build_typed, cartesian, combine_params, format_number,
     format_value, lookup, lookup_windowed,
     mean_std_of, optimize, probe_params, ranking_value, reject_axes_in_params,
     row_dsr_inputs, split_axes,
@@ -120,6 +121,76 @@ pub struct OptimizeOptions<'a> {
     pub costs_supplied: bool,
     pub jobs: Option<usize>,
     pub quiet: bool,
+    /// `--from` / `--until` / `--strict-from`: which bars the sweep evaluates.
+    /// `None` when neither bound was given. See [`crate::daterange`].
+    pub range: Option<daterange::DateRange>,
+    /// The `--from` value as spelled, for messages that quote it back.
+    pub from_label: Option<&'a str>,
+}
+
+/// A synthetic one-bar snapshot carrying every universe symbol.
+///
+/// Basket / multi strategies build their per-symbol chains on first sight of a
+/// symbol, so a freshly-built one reports only the rebalance signal's period
+/// from `stable_bars()`. Feeding this fires every factory first. The atom is a
+/// zero candle with no overlays — safe because a probe never trades, only
+/// exercises chain construction.
+fn universe_probe_snapshot(universe: &[Symbol]) -> fugazi::types::Snapshot<Symbol> {
+    let mut snap = fugazi::types::Snapshot::<Symbol>::new();
+    let dummy = Atom::new(Candle::new(0.0, 0.0, 0.0, 0.0, 0.0));
+    for sym in universe {
+        snap.push(Some(sym.clone()), None, dummy.clone());
+    }
+    snap
+}
+
+/// The grid-wide `max(stable_bars)` — how far back `--from` reads to settle
+/// *every* row of the sweep.
+///
+/// Taking the max rather than each row's own depth is what keeps a sweep's
+/// answers comparable: every row then evaluates exactly the same bars, so a
+/// difference between two rows is the parameters and not the window. It is the
+/// same argument (and the same quantity) as the walk-forward pre-scan in
+/// [`fugazi::spec::optimize::walkforward`], which fixes one grid-wide prefix
+/// skip so every fold's IS/OOS ranges line up.
+///
+/// Serial, unlike that pre-scan: a probe builds a strategy without driving it,
+/// and this runs once per sweep rather than once per fold.
+fn grid_warmup_need(
+    subgrids: &[Subgrid],
+    probe: impl Fn(&HashMap<String, Value>) -> Result<usize>,
+) -> Result<usize> {
+    let mut need = 0;
+    for subgrid in subgrids {
+        for combo in &subgrid.combos {
+            let params = combine_params(&subgrid.fixed, &subgrid.axes, combo);
+            need = need.max(probe(&params)?);
+        }
+    }
+    Ok(need)
+}
+
+/// Resolve `--from` / `--until` for a sweep over `bars`, warning if evaluation
+/// had to start late.
+///
+/// `need` is only asked for when a read-back actually applies, so an unsliced
+/// sweep never pays for the grid-wide probe.
+fn optimize_slice(
+    opts: &OptimizeOptions,
+    bars: &[String],
+    need: impl FnOnce() -> Result<usize>,
+) -> Result<Slice> {
+    let Some(range) = opts.range else {
+        return Ok(Slice::everything(bars.len()));
+    };
+    let need = if range.reads_back() { need()? } else { 0 };
+    let slice = range.resolve(bars, need)?;
+    if let Some(label) = opts.from_label
+        && let Some(warning) = daterange::short_warmup_warning(&slice, bars, label, need)
+    {
+        eprintln!("  {} {warning}", style::yellow("warn"));
+    }
+    Ok(slice)
 }
 
 /// CLI entry for the `optimize` command: marshal `opts` into inputs
@@ -238,6 +309,40 @@ fn run_single(
         .zip(effective_freq)
         .map(|(class, freq)| class.trading_seconds_per_bar(freq));
 
+    // `--from` / `--until`, resolved before the walk-forward branch splits off
+    // so both drivers slice the same bars the same way.
+    //
+    // Walk-forward takes only the evaluated span: its own prefix skip settles
+    // the chains inside that span, so handing it a warm-up prefix as well
+    // would skip warm-up twice and lay the first fold out later than asked.
+    // The sweep takes the prefix and warms across it.
+    let sliced_schema = backtest::schema_from_atoms(&atoms);
+    let bar_labels: Vec<String> = atoms.iter().map(|(t, _)| t.clone()).collect();
+    let slice = optimize_slice(opts, &bar_labels, || {
+        let keep_unstable = opts.keep_unstable;
+        let cash = opts.cash;
+        grid_warmup_need(&subgrids, |params| {
+            let spec = build_any_spec(StrategyKind::Single, base_value, params)?;
+            let built = spec
+                .try_build(cash, &sliced_schema, None)
+                .map_err(backtest::build_error)?;
+            Ok(if keep_unstable {
+                built.warm_up_bars()
+            } else {
+                built.stable_bars()
+            })
+        })
+    })?;
+    let atoms = if slice.is_everything(atoms.len()) {
+        atoms
+    } else if opts.walkforward.is_some() {
+        atoms[slice.eval_start..slice.end].to_vec()
+    } else {
+        atoms[slice.fed()].to_vec()
+    };
+    let sweep_warmup =
+        (opts.walkforward.is_none() && slice.warmup_bars() > 0).then(|| slice.warmup_bars());
+
     // Walk-forward branch: an independent driver — different outputs and a
     // fold-scoped per-row measurement rather than one whole-run reduction. The
     // grid loop shape is similar, but the emitted artifacts have their own
@@ -268,6 +373,7 @@ fn run_single(
             windowed: None,
             seconds_per_bar,
             mc: None,
+            warmup_bars: None,
         };
         let ctx_ref = &ctx;
         let probe = |params: &HashMap<String, Value>| -> Result<usize> {
@@ -330,6 +436,7 @@ fn run_single(
         windowed: windowed_bars,
         seconds_per_bar,
         mc: None,
+        warmup_bars: sweep_warmup,
     };
     let ctx_ref = &ctx;
     let evaluate_row = move |params: &HashMap<String, Value>| -> Result<Evaluation> {
@@ -367,11 +474,8 @@ fn run_single(
 
     if !opts.quiet {
         let finished = SystemTime::now();
-        let period = bar_period_line(
-            atoms.first().map(|(t, _)| t.as_str()),
-            atoms.last().map(|(t, _)| t.as_str()),
-            atoms.len(),
-        );
+        let fed: Vec<String> = atoms.iter().map(|(t, _)| t.clone()).collect();
+        let period = evaluated_period_line(&fed, sweep_warmup.unwrap_or(0));
         style::print_header("optimize", "sweep a strategy over a parameter grid");
         style::print_warns(&style::collect_warnings(&skipped_overlay_columns, !opts.costs_supplied, "grid results"));
         print_inputs_block(
@@ -392,6 +496,7 @@ fn run_single(
                 &sweep.rows,
             );
         }
+        warn_if_nothing_traded(&sweep.rows);
         print_result_block(sweep.rows.len(), started, finished);
     }
     Ok(())
@@ -512,6 +617,50 @@ fn run_multi_symbol(
         .zip(effective_freq)
         .map(|(class, freq)| class.trading_seconds_per_bar(freq));
 
+    // `--from` / `--until` on the *joined* timeline, so a universe whose
+    // symbols list at different times slices the way the dates say rather than
+    // the way any one file happens to start. Same split as `run_single`:
+    // walk-forward gets the evaluated span alone and settles inside it, the
+    // sweep gets the warm-up prefix attached.
+    let slice = {
+        let probe_schema = backtest::schema_from_snapshots(&snapshots);
+        let probe_snapshot = universe_probe_snapshot(&universe);
+        let keep_unstable = opts.keep_unstable;
+        let cash = opts.cash;
+        let kind = opts.strategy_kind;
+        optimize_slice(opts, &bars, || {
+            grid_warmup_need(&subgrids, |params| {
+                let spec = build_any_spec(kind, base_value, params)?;
+                let mut built = spec
+                    .try_build(cash, &probe_schema, None)
+                    .map_err(backtest::build_error)?;
+                // Basket and multi build per-symbol chains lazily; the eager
+                // shapes must not be fed a probe. See `needs_probe_feed`.
+                if matches!(kind, StrategyKind::Basket | StrategyKind::Multi) {
+                    built.update(probe_snapshot.clone());
+                }
+                Ok(if keep_unstable {
+                    built.warm_up_bars()
+                } else {
+                    built.stable_bars()
+                })
+            })
+        })?
+    };
+    let whole = slice.is_everything(bars.len());
+    let sweep_warmup =
+        (opts.walkforward.is_none() && slice.warmup_bars() > 0).then(|| slice.warmup_bars());
+    let keep = if opts.walkforward.is_some() {
+        slice.eval_start..slice.end
+    } else {
+        slice.fed()
+    };
+    let (bars, snapshots) = if whole {
+        (bars, snapshots)
+    } else {
+        (bars[keep.clone()].to_vec(), snapshots[keep].to_vec())
+    };
+
     // Walk-forward branch: same shape as `run_single`'s — closures inject
     // the basket/multi build + backtest, the driver stays strategy-agnostic.
     if let Some(walkforward_spec) = opts.walkforward {
@@ -541,6 +690,7 @@ fn run_multi_symbol(
         windowed: windowed_bars,
         seconds_per_bar,
         mc: None,
+        warmup_bars: sweep_warmup,
     };
     let ctx_ref = &ctx;
 
@@ -582,7 +732,7 @@ fn run_multi_symbol(
 
     if !opts.quiet {
         let finished = SystemTime::now();
-        let period = bar_period_line(bars.first().map(String::as_str), bars.last().map(String::as_str), bars.len());
+        let period = evaluated_period_line(&bars, sweep_warmup.unwrap_or(0));
         style::print_header("optimize", "sweep a strategy over a parameter grid");
         style::print_warns(&style::collect_warnings(&[], !opts.costs_supplied, "grid results"));
         print_inputs_block(
@@ -601,6 +751,7 @@ fn run_multi_symbol(
                 &sweep.rows,
             );
         }
+        warn_if_nothing_traded(&sweep.rows);
         print_result_block(sweep.rows.len(), started, finished);
     }
     Ok(())
@@ -641,14 +792,7 @@ fn run_multi_symbol_walkforward(
     // Synthetic single-snapshot probe: one dummy atom per universe symbol
     // so the strategy's per-symbol factories fire on the first update() call.
     // The probe strategy never trades — just exposes stable/warm-up state.
-    let probe_snapshot: fugazi::types::Snapshot<Symbol> = {
-        let mut s = fugazi::types::Snapshot::<Symbol>::new();
-        let dummy_atom = Atom::new(Candle::new(0.0, 0.0, 0.0, 0.0, 0.0));
-        for sym in universe {
-            s.push(Some(sym.clone()), None, dummy_atom.clone());
-        }
-        s
-    };
+    let probe_snapshot = universe_probe_snapshot(universe);
 
     // `TradingCosts` isn't `Clone` (boxed trait objects inside), so the
     // per-symbol cost bundle is rebuilt inside the run closure for every
@@ -677,6 +821,7 @@ fn run_multi_symbol_walkforward(
         windowed: None,
         seconds_per_bar,
         mc: None,
+        warmup_bars: None,
     };
     let ctx_ref = &ctx;
 
@@ -928,6 +1073,40 @@ fn print_inputs_block(
 /// The "result" block for `optimize`: number of grid points evaluated, then
 /// wall-clock timing. Mirrors `run`'s result block so both commands look the
 /// same at the tail.
+/// Warn when not one grid point opened a trade.
+///
+/// Every cell in the metric columns is empty in that case, which reads exactly
+/// like a metric name that didn't resolve — and for a long time it *was*
+/// reported as one, because the metric catalogue was derived from a serialized
+/// sample and a degenerate run serializes the ratio away entirely. That is
+/// fixed at the source (`spec::metrics::resolve_metric_path`), but a sweep
+/// where nothing traded is still worth saying out loud: the grid is almost
+/// certainly wrong (a period longer than the data, a signal that can't fire),
+/// and an all-empty CSV does not say so.
+///
+/// stderr and ungated by `--quiet`, matching `overlap` / `cadence`: it is a
+/// finding about the result, not part of the summary the user asked to silence.
+fn warn_if_nothing_traded(rows: &[Row]) {
+    if rows.is_empty() {
+        return;
+    }
+    let trades = |m: &metrics::Metrics| m.trades.total;
+    let any_traded = rows.iter().any(|row| match &row.eval {
+        Evaluation::Whole(m) => trades(m) > 0,
+        Evaluation::Windowed(ws) => ws.iter().any(|w| trades(&w.metrics) > 0),
+    });
+    if any_traded {
+        return;
+    }
+    eprintln!(
+        "{} no grid point produced any trades — every metric cell is empty. \
+         Check that the parameter ranges can actually fire the strategy's \
+         signals over this data (a window longer than the series is the usual \
+         cause).",
+        style::yellow("warning:")
+    );
+}
+
 fn print_result_block(points: usize, started: SystemTime, finished: SystemTime) {
     println!();
     style::print_section("result");
@@ -943,9 +1122,19 @@ fn print_result_block(points: usize, started: SystemTime, finished: SystemTime) 
 /// `start → end (N bars)` when the atom stream has at least one entry, else
 /// `None`. Shared by the single-asset and multi-symbol drivers so both echo
 /// the same period line as `run` does.
-fn bar_period_line(start: Option<&str>, end: Option<&str>, bars: usize) -> Option<String> {
-    let (s, e) = (start?, end?);
-    Some(format!("{s} → {e} ({bars} bars)"))
+/// The `period` line, over the bars a sweep will actually *measure*.
+///
+/// `labels` is the fed stream, warm-up prefix included; `warmup` is how much of
+/// its head only settles the chains. Reporting the fed range here would
+/// overstate both the period and the bar count by that prefix.
+fn evaluated_period_line(labels: &[String], warmup: usize) -> Option<String> {
+    let evaluated = labels.get(warmup.min(labels.len())..)?;
+    let (s, e) = (evaluated.first()?, evaluated.last()?);
+    let bars = evaluated.len();
+    Some(match warmup {
+        0 => format!("{s} → {e} ({bars} bars)"),
+        w => format!("{s} → {e} ({bars} bars, {w} warm-up)"),
+    })
 }
 
 /// Short friendly label for the console — strip the section prefix from a

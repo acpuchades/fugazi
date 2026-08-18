@@ -155,4 +155,43 @@ mod tests {
         assert_eq!(b.upper, 12.0);
         assert_eq!(b.lower, 7.0);
     }
+
+    /// The channel's window **ends on the bar being evaluated**, so `close`
+    /// is inside it by construction: `close <= high <= upper` and
+    /// `close >= low >= lower`, on every settled bar. That makes the textbook
+    /// breakout — `close` crossing above `!donchian_upper` — a guaranteed
+    /// no-op, which is a real trap (it builds, runs, and reports zero trades)
+    /// and is why `docs/STRATEGIES.md` documents the `!lag` form next to the
+    /// tag.
+    ///
+    /// Pinned here because it is the *premise* of that documentation: if the
+    /// window is ever changed to exclude the current bar, this fails and the
+    /// docs need rewriting rather than silently becoming wrong.
+    #[test]
+    fn the_channel_always_contains_the_current_bar() {
+        let mut dc = Donchian::new(Current::high(), Current::low(), 5);
+        // A rising sawtooth, so new highs are frequent and each one is the
+        // bar most likely to escape its own channel.
+        for i in 0..60u32 {
+            let mid = 100.0 + Real::from(i) * 0.7 + Real::from(i % 7) * 2.0;
+            let (high, low) = (mid + 1.0, mid - 1.0);
+            let candle = bar(high, low);
+            let close = candle.close;
+            if let Some(v) = dc.update(candle.into()) {
+                assert!(
+                    close <= v.upper,
+                    "bar {i}: close {close} escaped upper {}",
+                    v.upper
+                );
+                assert!(
+                    close >= v.lower,
+                    "bar {i}: close {close} escaped lower {}",
+                    v.lower
+                );
+                assert!(high <= v.upper, "bar {i}: high above its own channel");
+                assert!(low >= v.lower, "bar {i}: low below its own channel");
+            }
+        }
+    }
+
 }

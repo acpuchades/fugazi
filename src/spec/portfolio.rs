@@ -56,7 +56,7 @@ use crate::types::Snapshot;
 use crate::runtime::AnyChain;
 
 use super::basket::BasketStrategySpec;
-use super::expr::NodeSpec;
+use super::expr::{NodeSpec, Root};
 use super::meta::Meta;
 use super::multi_asset::MultiAssetStrategySpec;
 use super::pairs::PairsStrategySpec;
@@ -724,7 +724,7 @@ impl PortfolioSpec {
                     &child_books[i],
                     Some(&agg_book),
                     schema,
-                    child_root.as_ref(),
+                    Root::or_sole(child_root.as_ref()),
                 )?;
                 let real_ind = (dyn_ind).into_real()?;
                 max_stable = max_stable.max(real_ind.stable_bars());
@@ -750,7 +750,7 @@ impl PortfolioSpec {
             // "this series" is undefined; a price leaf inside one must name
             // its asset with `!pick { symbol: ... }`.
             let dyn_ind: AnyChain =
-                rebalance_spec.try_build(&anchor, &agg_book, Some(&agg_book), schema, None)?;
+                rebalance_spec.try_build(&anchor, &agg_book, Some(&agg_book), schema, Root::sole())?;
             let signal = (dyn_ind).into_bool()?;
             max_stable = max_stable.max(signal.stable_bars());
             max_warm_up = max_warm_up.max(signal.warm_up_bars());
