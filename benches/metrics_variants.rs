@@ -148,11 +148,21 @@ fn percentile(sorted: &[Real], p: Real) -> Real {
     sorted[lo] * (1.0 - frac) + sorted[hi] * frac
 }
 
+/// The bottom-`p` tail covers `floor(p·(n−1)) + 1` samples — the `p`-quantile's
+/// lower order statistic, inclusive. Indexed off the same base `percentile`
+/// uses, so it cannot depend on whether 5% arrived as `1.0 - 0.95` or `0.05`.
+fn tail_cutoff(n: usize, p: Real) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    ((p * (n - 1) as Real).floor() as usize + 1).min(n)
+}
+
 fn tail_mean(sorted: &[Real], p: Real) -> Real {
     if sorted.is_empty() {
         return 0.0;
     }
-    let cutoff = ((sorted.len() as Real * p).ceil() as usize).max(1);
+    let cutoff = tail_cutoff(sorted.len(), p);
     sorted[..cutoff].iter().sum::<Real>() / cutoff as Real
 }
 
@@ -643,11 +653,11 @@ const CONFIDENCE: Real = 0.95;
 /// `0.050000000000000044`, not `0.05`. `tail_ratio` writes its `0.05` as a
 /// literal instead.
 ///
-/// The 4.4e-17 gap between the two is not cosmetic: at 10 000 bars,
-/// `p·(n − 1)` floors to index **500** for one and **499** for the other, and
-/// `ceil(n·p)` gives a 501-element CVaR tail rather than 500. So the two spellings
-/// are carried separately here — reproducing the shipped document means
-/// reproducing which order statistic each read lands on.
+/// Both spellings are carried separately here because reproducing the shipped
+/// document means reproducing them. They now differ only in a quantile's
+/// interpolation weight — about one ULP — since the CVaR tail is indexed off
+/// `floor(p·(n−1))`, which both land on. Under the `ceil(n·p)` this used to
+/// mirror, the gap was a whole element of the tail at 10 000 bars.
 const P_TAIL: Real = 1.0 - CONFIDENCE;
 
 fn quantile_reads(returns: &[Real], mode: QuantileMode) -> QuantileReads {
@@ -734,7 +744,7 @@ fn quantile_reads_by_selection(returns: &[Real], sort_tail: bool) -> QuantileRea
     let (lo_var, hi_var) = quantile_pair(P_TAIL);
     let (lo05, hi05) = quantile_pair(0.05);
     let (lo95, hi95) = quantile_pair(0.95);
-    let cutoff = ((n as Real * P_TAIL).ceil() as usize).max(1);
+    let cutoff = tail_cutoff(n, P_TAIL);
 
     let mut ks = vec![lo_var, hi_var, lo05, hi05, lo95, hi95, cutoff - 1];
     if n.is_multiple_of(2) {

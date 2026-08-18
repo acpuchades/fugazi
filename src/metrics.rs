@@ -1146,13 +1146,48 @@ fn percentile(sorted: &[Real], p: Real) -> Real {
     crate::indicators::stats::quantile_of_sorted(sorted, p)
 }
 
-/// Mean of the bottom-`p` fraction of a sorted-ascending slice.
+/// Mean of the bottom-`p` tail of a sorted-ascending slice: the elements up to
+/// and including the `p`-quantile's lower order statistic, `floor(p·(n−1)) + 1`
+/// of them.
+///
+/// **Indexed off `p·(n − 1)`, the same base [`percentile`] uses**, not off
+/// `ceil(n·p)`. Two reasons, and the first is a bug this had:
+///
+/// * `ceil(n·p)` sits on a knife edge whenever `n·p` lands near an integer, and
+///   at the 95% confidence every report asks for, it does. `value_at_risk` and
+///   `conditional_value_at_risk` take a *confidence* and derive the tail as
+///   `1.0 - confidence`, which for `0.95` is `0.050000000000000044` rather than
+///   the `0.05` [`tail_ratio`] writes as a literal — the two are 4.4e-17 apart,
+///   and `1.0 - 0.95` is not even a rounding error in the subtraction (by
+///   Sterbenz's lemma it is exact; the error is already in `fl(0.95)`). Under
+///   `ceil(n·p)` that gap flipped the tail between 500 and 501 elements at
+///   10 000 samples — a ~2e-5 difference in a metric, off 4e-17 of input.
+///   Indexed off `floor(p·(n−1))`, both spellings land on 499 and the tail is
+///   500 either way.
+/// * It is the formula the reference implements. `empyrical`'s
+///   `conditional_value_at_risk` is `int((n - 1) * cutoff)` then the mean of the
+///   first `cutoff_index + 1`, which this now matches exactly rather than
+///   approximately — see `tools/gen_metrics_fixtures.py`.
+///
+/// The knife edge is why the committed fixture never caught this: it is 252
+/// returns, and at `n = 252` both formulas and both spellings agree on 13.
 fn tail_mean(sorted: &[Real], p: Real) -> Real {
     if sorted.is_empty() {
         return 0.0;
     }
-    let cutoff = ((sorted.len() as Real * p).ceil() as usize).max(1);
+    let cutoff = tail_cutoff(sorted.len(), p);
     sorted[..cutoff].iter().sum::<Real>() / cutoff as Real
+}
+
+/// How many of the smallest samples the bottom-`p` tail covers: the lower order
+/// statistic of the `p`-quantile, plus one for inclusivity. At least 1, at most
+/// `n`. See [`tail_mean`] for why it is indexed this way.
+pub(crate) fn tail_cutoff(n: usize, p: Real) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    // A negative `p` saturates to 0 in the cast, so the `+ 1` floors this at 1.
+    ((p * (n - 1) as Real).floor() as usize + 1).min(n)
 }
 
 /// CAGR helper: `(final / initial)^(bars_per_year / bars) − 1`.
@@ -1489,10 +1524,16 @@ pub(crate) struct QuantileReads {
 ///
 /// * [`value_at_risk`] and [`conditional_value_at_risk`] take a *confidence*
 ///   and derive the tail as `1.0 - confidence`, while [`tail_ratio`] writes
-///   `0.05` as a literal. `1.0 - 0.95` is `0.050000000000000044`, and the
-///   4.4e-17 between them is not cosmetic: at 10 000 samples `p·(n − 1)` floors
-///   to index 500 for one and 499 for the other, and `ceil(n·p)` gives a 501-
-///   rather than 500-element CVaR tail. Both spellings are carried.
+///   `0.05` as a literal, and `1.0 - 0.95` is `0.050000000000000044`. Both
+///   spellings are carried because they are 4.4e-17 apart and that is not
+///   recoverable — the error is in `fl(0.95)`, so no amount of care in the
+///   subtraction gets `0.05` back.
+///
+///   What it costs is now bounded: both floor to the *same* order statistic
+///   (499 at 10 000 samples), so `var_95` and `tail_ratio`'s 5th percentile
+///   differ only in the interpolation weight, by about one ULP. It used to cost
+///   more — [`tail_mean`] indexed the CVaR tail off `ceil(n·p)`, which is a
+///   knife edge there, and the two spellings disagreed by a whole element.
 /// * the CVaR tail is sorted before it is averaged, so its mean sums ascending
 ///   exactly as [`tail_mean`] over a fully-sorted copy would. Summing it in
 ///   partition order is ~15% faster again and lands ~1 ULP away; not worth it.
@@ -1529,7 +1570,7 @@ pub(crate) fn quantile_reads(returns: &mut [Real], confidence: Real) -> Quantile
     let (lo_var, hi_var) = straddle(p_tail);
     let (lo05, hi05) = straddle(0.05);
     let (lo95, hi95) = straddle(0.95);
-    let cutoff = ((n as Real * p_tail).ceil() as usize).max(1);
+    let cutoff = tail_cutoff(n, p_tail);
 
     let mut ks = vec![lo_var, hi_var, lo05, hi05, lo95, hi95, cutoff - 1];
     if n.is_multiple_of(2) {
@@ -1780,6 +1821,80 @@ mod tests {
             .enumerate()
             .map(|(bar, order)| Fill { bar, order })
             .collect()
+    }
+
+    /// The 5% tail must not depend on whether its probability was spelled
+    /// `1.0 - 0.95` or `0.05`, and it must be the tail the reference takes.
+    ///
+    /// Both matter and neither was covered. `value_at_risk` /
+    /// `conditional_value_at_risk` derive the tail from a *confidence*, so they
+    /// pass `1.0 - 0.95` = `0.050000000000000044`; `tail_ratio` writes `0.05`.
+    /// The old `ceil(n·p)` cutoff sat on a knife edge at exactly the sizes that
+    /// matter and split those two spellings by a whole element — while the
+    /// committed fixture, at 252 returns, is a size where every candidate
+    /// formula agrees on 13, so nothing went red.
+    ///
+    /// The sizes below are chosen the other way: each is one where `ceil(n·p)`
+    /// *did* differ between the two spellings.
+    #[test]
+    fn the_tail_cutoff_is_spelling_independent_and_matches_empyrical() {
+        for n in [1_000usize, 2_000, 10_000, 20_000, 100_000, 200_000] {
+            let from_confidence = tail_cutoff(n, 1.0 - 0.95);
+            let from_literal = tail_cutoff(n, 0.05);
+            assert_eq!(
+                from_confidence, from_literal,
+                "n={n}: tail size depends on how 5% was spelled"
+            );
+
+            // `empyrical.conditional_value_at_risk`: `int((n - 1) * cutoff)`,
+            // then the mean of the first `cutoff_index + 1` samples.
+            let empyrical = (((n - 1) as Real * 0.05) as usize) + 1;
+            assert_eq!(
+                from_literal, empyrical,
+                "n={n}: diverges from the reference implementation"
+            );
+
+            // The old formula, kept here as the thing that must stay fixed.
+            let old_ceil = |p: Real| ((n as Real * p).ceil() as usize).max(1);
+            assert_ne!(
+                old_ceil(1.0 - 0.95),
+                old_ceil(0.05),
+                "n={n} no longer exercises the bug; pick a size that does"
+            );
+        }
+    }
+
+    /// The whole point of the cutoff change: a report's VaR and CVaR now read
+    /// the same 5% tail `tail_ratio` does, at a size where they used not to.
+    #[test]
+    fn var_and_cvar_agree_with_tail_ratio_on_which_tail_is_the_tail() {
+        let mut s: u64 = 0xfeed_face_dead_beef;
+        let returns: Vec<Real> = (0..10_000)
+            .map(|_| {
+                s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+                ((s >> 33) as Real / u32::MAX as Real - 0.5) * 0.04
+            })
+            .collect();
+        let sorted = sorted_asc(&returns);
+
+        // VaR's 5th percentile and `tail_ratio`'s share an order statistic, so
+        // they agree to within the interpolation weight — one ULP of each
+        // other, not a whole sample apart.
+        let var_p5 = -value_at_risk(&returns, 0.95);
+        let ratio_p5 = percentile(&sorted, 0.05);
+        assert!(
+            (var_p5 - ratio_p5).abs() <= var_p5.abs() * 1e-15,
+            "VaR's 5th percentile {var_p5} and tail_ratio's {ratio_p5} disagree by more than rounding"
+        );
+
+        // And the CVaR tail is the samples at or below that percentile.
+        let cutoff = tail_cutoff(returns.len(), 1.0 - 0.95);
+        let expected = -(sorted[..cutoff].iter().sum::<Real>() / cutoff as Real);
+        assert_eq!(
+            conditional_value_at_risk(&returns, 0.95).to_bits(),
+            expected.to_bits()
+        );
+        assert!(sorted[cutoff - 1] <= ratio_p5.max(var_p5));
     }
 
     #[cfg(feature = "spec")]

@@ -1739,10 +1739,8 @@ as silent one-ULP drift:
   `0.0` answers `Some(0.0)`.
 - **`value_at_risk` / `conditional_value_at_risk` derive their tail as
   `1.0 - confidence`** = `0.050000000000000044`, while `tail_ratio` writes `0.05`
-  as a literal. At 10 000 bars those floor to different order statistics and give
-  a 501- vs 500-element CVaR tail. **This is a live inconsistency in the shipped
-  metrics, reproduced here rather than fixed** — correcting it moves published
-  values and needs its own change with its own fixture regeneration.
+  as a literal. Reproduced exactly here; *fixed* in Phase 12 below, which
+  corrects what this note originally claimed about it.
 
 ### What was measured and rejected
 
@@ -1757,6 +1755,68 @@ rather than re-argued.
 against 0.70 ms for `select_nth_unstable`. A one-token change worth a quarter of
 the sort, kept in the variants bench as the fallback if the ~80 lines of
 introselect ever stop earning their place.
+
+## Phase 12 — a 4e-17 input moving a metric by 2e-5
+
+Not a performance change; found while reading the reduction for one, and fixed
+because the reduction's bit-identity guarantee made it impossible to leave
+ambiguous.
+
+### The bug
+
+`value_at_risk` and `conditional_value_at_risk` take a **confidence** and derive
+the tail as `1.0 - confidence`. `tail_ratio` writes its `0.05` as a **literal**.
+`1.0 - 0.95` is `0.050000000000000044`; the literal is
+`0.05000000000000000277`. They are 4.4e-17 apart, and that gap is not
+recoverable — by Sterbenz's lemma the subtraction is *exact*, so the error is
+already in `fl(0.95)` before any arithmetic happens.
+
+That difference should have been invisible. It was not, because `tail_mean`
+sized the CVaR tail with `ceil(n·p)`, which is discontinuous exactly where `n·p`
+is an integer — and at `p = 0.05` that is every `n` divisible by 20, which is
+every round bar count anyone runs. At 10 000 samples the two spellings gave a
+501- and a 500-element tail: **a ~2e-5 move in a published metric, off 4e-17 of
+input.**
+
+### The fix, and why this formula
+
+The tail is now `floor(p·(n − 1)) + 1` — the `p`-quantile's lower order
+statistic, inclusive.
+
+| | at `n = 10 000`, `p = 0.05` | distance to the discontinuity |
+|---|---:|---:|
+| `ceil(n·p)` | 500.0000000000000277 | **~3e-14 — sitting on it** |
+| `floor(p·(n−1)) + 1` | 499.95 | 0.05 of an index unit |
+
+Three reasons, any one sufficient:
+
+- **It is already the crate's convention.** `p·(n − 1)` is the R type-7 index
+  base `quantile_of_sorted` uses. `ceil(n·p)` was a *second* quantile convention
+  living in a private helper, which CLAUDE.md explicitly forbids.
+- **It is well-conditioned where the old one was not**, and structurally so:
+  `(n − 1)·p` lands near `.95` precisely when `n·p` lands on an integer.
+- **It is what the reference computes.** `empyrical.conditional_value_at_risk`
+  is `int((n - 1) * cutoff)` then the mean of the first `cutoff_index + 1`. The
+  match is now exact rather than approximate.
+
+Both spellings now produce the same tail, and what remains between `var_95` and
+`tail_ratio`'s 5th percentile is one ULP of interpolation weight — the right
+size for a disagreement of this kind.
+
+### Why nothing went red
+
+`tests/data/metrics_returns.csv` is **252 returns, and at `n = 252` every
+candidate formula and both spellings agree on 13**. The cross-validation suite
+could not have caught this at any tolerance. `metrics::tests::
+the_tail_cutoff_is_spelling_independent_and_matches_empyrical` covers the sizes
+that do diverge (1 000 · 2 000 · 10 000 · 20 000 · 100 000 · 200 000), encoding
+the reference formula directly so it needs no reference library — and it asserts
+that each of those sizes *still exercises the old bug*, so a future edit cannot
+quietly pick sizes that prove nothing.
+
+Widening the fixture instead would mean regenerating `metrics_returns.csv`, which
+re-baselines every metric in the file to fix one. The Rust test is the cheaper
+guard and the stricter one.
 
 ## The Python binding budget — 1.25×, with one exemption
 

@@ -68,7 +68,7 @@ from `initial_equity`.
 | `returns.best_bar` / `worst_bar` | Extremes of per-bar returns. | Always defined. |
 | `returns.positive_bars_pct` | Share of bars with a strictly positive return. | |
 | `returns.skewness` / `kurtosis` | Sample skew / excess kurtosis. | `None` when stddev is zero. Kurtosis is excess (normal = 0). |
-| `returns.var_95` / `cvar_95` | Historical 5% VaR / CVaR (Expected Shortfall). | Expressed as a **positive loss fraction** (0.02 = "5% worst case is a −2% return"). Negative when the 5th percentile is itself positive. |
+| `returns.var_95` / `cvar_95` | Historical 5% VaR / CVaR (Expected Shortfall). | Expressed as a **positive loss fraction** (0.02 = "5% worst case is a −2% return"). Negative when the 5th percentile is itself positive. The CVaR tail is `floor(0.05·(n−1)) + 1` samples — the 5th percentile's lower order statistic, inclusive — which is both the crate's single quantile convention and `empyrical`'s. |
 | `returns.tail_ratio` | `|P95| / |P5|`. | `None` when the 5th-percentile magnitude is zero. |
 | `returns.annualized_mean_pct` / `annualized_volatility_pct` | Mean × `bars_per_year`; stddev × √`bars_per_year`. | Only meaningful when the bar cadence matches `bars_per_year`. |
 
