@@ -566,9 +566,30 @@ pub fn ulcer_performance_index(
     risk_free_rate: Real,
     bars_per_year: Real,
 ) -> Option<Real> {
+    ulcer_performance_index_with_ulcer(
+        equity_curve,
+        initial_equity,
+        risk_free_rate,
+        bars_per_year,
+        ulcer_index(equity_curve),
+    )
+}
+
+/// [`ulcer_performance_index`] against an Ulcer Index the caller already has.
+///
+/// A report emits both `ulcer_index` and `ulcer_performance_index`, and the
+/// second recomputing the first is a second full walk of the equity curve —
+/// ~250 µs at 200 000 bars. Same split, and the same reason, as
+/// [`calmar_with_max_drawdown`] and [`recovery_factor_with_max_drawdown`].
+pub(crate) fn ulcer_performance_index_with_ulcer(
+    equity_curve: &[Real],
+    initial_equity: Real,
+    risk_free_rate: Real,
+    bars_per_year: Real,
+    ulcer: Real,
+) -> Option<Real> {
     let c = cagr(equity_curve, initial_equity, bars_per_year)?;
-    let ui = ulcer_index(equity_curve);
-    safe_div(c - risk_free_rate, ui)
+    safe_div(c - risk_free_rate, ulcer)
 }
 
 // ---------------------------------------------------------------------------
@@ -1480,7 +1501,13 @@ pub(crate) struct QuantileReads {
 /// arbitrary placement: with a `NaN` in the series the comparator is not a
 /// total order, and where introselect strands it need not be where a sort
 /// would. A `NaN` here means the equity curve already carried one.
-pub(crate) fn quantile_reads(returns: &[Real], confidence: Real) -> QuantileReads {
+///
+/// **`returns` is left permuted.** Introselect works in place, and the caller
+/// that wants all four reads is reducing a report, where the return series is
+/// dead the moment its moments and its quantiles have been taken — so it hands
+/// over its own buffer rather than paying 1.6 MB of copy (at 200 000 bars) to
+/// protect an order nothing will look at again. Gather any moments *first*.
+pub(crate) fn quantile_reads(returns: &mut [Real], confidence: Real) -> QuantileReads {
     let n = returns.len();
     if n == 0 {
         return QuantileReads {
@@ -1512,9 +1539,8 @@ pub(crate) fn quantile_reads(returns: &[Real], confidence: Real) -> QuantileRead
     ks.sort_unstable();
     ks.dedup();
 
-    let mut v = returns.to_vec();
     let mut found: Vec<(usize, Real)> = Vec::with_capacity(ks.len());
-    select_each(&mut v, &ks, 0, &mut found);
+    select_each(returns, &ks, 0, &mut found);
     let at = |k: usize| -> Real {
         found
             .iter()
@@ -1540,9 +1566,9 @@ pub(crate) fn quantile_reads(returns: &[Real], confidence: Real) -> QuantileRead
         at(n / 2)
     };
 
-    // Selecting index `cutoff - 1` left `v[..cutoff]` holding exactly the
+    // Selecting index `cutoff - 1` left `returns[..cutoff]` holding exactly the
     // `cutoff` smallest elements, as a multiset.
-    let tail = &mut v[..cutoff];
+    let tail = &mut returns[..cutoff];
     tail.sort_unstable_by(crate::indicators::stats::cmp_asc);
 
     QuantileReads {
@@ -1885,7 +1911,10 @@ mod tests {
             same_opt(&format!("{name}/omega"), omega(&r, rf_bar), stats.omega());
             assert_eq!(r.len(), stats.len(), "{name}/len");
 
-            let q = quantile_reads(&r, 0.95);
+            // A scratch copy, because `quantile_reads` permutes what it is
+            // given and the public fronts below must see the original order.
+            let mut scratch = r.clone();
+            let q = quantile_reads(&mut scratch, 0.95);
             same(&format!("{name}/median"), median_return(&r), q.median);
             same(&format!("{name}/var"), value_at_risk(&r, 0.95), q.var);
             same(

@@ -324,7 +324,7 @@ pub fn from_report<Sym>(
     let final_equity = equity.last().copied().unwrap_or(initial);
 
     // Build each intermediate once, hand it to every metric that consumes it.
-    let returns = crate::metrics::per_bar_returns(equity, initial);
+    let mut returns = crate::metrics::per_bar_returns(equity, initial);
     let trades = crate::metrics::reconstruct_trades(&report.fills);
     let segments = crate::metrics::drawdown_segments(equity);
     let rf_per_bar = if bars_per_year > 0.0 {
@@ -342,7 +342,10 @@ pub fn from_report<Sym>(
     // `rf_per_bar` is the threshold `stats` is gathered against because it is
     // the MAR both `sortino` and `omega` read.
     let stats = crate::metrics::ReturnStats::of(&returns, rf_per_bar);
-    let quantiles = crate::metrics::quantile_reads(&returns, 0.95);
+    // Permutes `returns` in place rather than copying it — so it must come
+    // after the moments, and nothing may read `returns` in arrival order after
+    // this line.
+    let quantiles = crate::metrics::quantile_reads(&mut returns, 0.95);
     let t = crate::metrics::TradeStats::of(&trades);
 
     // Return-section values are computed as fractions in the library and
@@ -354,6 +357,7 @@ pub fn from_report<Sym>(
     let sharpe = stats.sharpe(risk_free_rate, bars_per_year);
     let skewness = stats.skewness();
     let kurtosis = stats.kurtosis();
+    let ulcer = crate::metrics::ulcer_index(equity);
     let max_dd = crate::metrics::max_drawdown(&segments);
     let avg_dd = crate::metrics::average_drawdown(&segments);
     let win_rate = t.win_rate();
@@ -402,12 +406,16 @@ pub fn from_report<Sym>(
                 max_dd,
             ),
             omega: stats.omega(),
-            ulcer_index: crate::metrics::ulcer_index(equity),
-            ulcer_performance_index: crate::metrics::ulcer_performance_index(
+            ulcer_index: ulcer,
+            // The `_with_ulcer` back: the public front recomputes the Ulcer
+            // Index, a second full walk of the equity curve for a number the
+            // line above already has.
+            ulcer_performance_index: crate::metrics::ulcer_performance_index_with_ulcer(
                 equity,
                 initial,
                 risk_free_rate,
                 bars_per_year,
+                ulcer,
             ),
             // The stats-only back, so the observed Sharpe / skew / kurt are the
             // ones already computed above rather than three more rescans.
@@ -493,19 +501,16 @@ pub fn report_slice<Sym: Clone>(
     report: &RunReport<Sym>,
     bars: std::ops::Range<usize>,
 ) -> RunReport<Sym> {
-    let fills: Vec<Fill<Sym>> = report
-        .fills
+    let in_range = booked_within(&report.fills, |f| f.bar, &bars);
+    let fills: Vec<Fill<Sym>> = in_range
         .iter()
-        .filter(|f| bars.contains(&f.bar))
         .map(|f| Fill {
             bar: f.bar - bars.start,
             order: f.order.clone(),
         })
         .collect();
-    let rejections: Vec<Rejected<Sym>> = report
-        .rejections
+    let rejections: Vec<Rejected<Sym>> = booked_within(&report.rejections, |r| r.bar, &bars)
         .iter()
-        .filter(|r| bars.contains(&r.bar))
         .map(|r| Rejected {
             bar: r.bar - bars.start,
             rejection: r.rejection.clone(),
@@ -521,6 +526,35 @@ pub fn report_slice<Sym: Clone>(
             report.equity_curve[bars.start - 1]
         },
     }
+}
+
+/// The contiguous run of `items` whose bar falls inside `bars`, found by binary
+/// search rather than by filtering the whole slice.
+///
+/// A blotter is written as the run advances, so it is ordered by bar — which
+/// makes `partition_point` valid and makes the linear filter this replaces pure
+/// waste. It was not waste worth caring about for one slice; it was
+/// [`rolling_from_report`], which takes a slice **per bar**. On a 200 000-bar
+/// run with a 252-bar window and 4 000 fills, the filter evaluated its
+/// predicate ~800 million times across the sweep — `O(bars × fills)` — where
+/// two binary searches per window is `O(bars × log fills)`.
+///
+/// The ordering is an invariant of how `backtest::run` writes the blotter, not
+/// something a caller can arrange, so it is checked in debug builds rather than
+/// documented and hoped for: an unordered input would make `partition_point`
+/// silently return the wrong range instead of failing.
+fn booked_within<'a, T>(
+    items: &'a [T],
+    bar_of: impl Fn(&T) -> usize,
+    bars: &std::ops::Range<usize>,
+) -> &'a [T] {
+    debug_assert!(
+        items.windows(2).all(|w| bar_of(&w[0]) <= bar_of(&w[1])),
+        "blotter must be ordered by bar for the binary search to be valid"
+    );
+    let start = items.partition_point(|i| bar_of(i) < bars.start);
+    let end = items.partition_point(|i| bar_of(i) < bars.end);
+    &items[start..end]
 }
 
 /// Reduce a [`RunReport`] to one [`Metrics`] document per non-overlapping
@@ -1076,6 +1110,52 @@ mod tests {
                 assert!(
                     leaves.iter().any(|(path, _)| path == name),
                     "flatten entry `{name}` is populated but absent from the document"
+                );
+            }
+        }
+    }
+
+    /// `report_slice` carves the blotter with two `partition_point` calls now,
+    /// and the range it must reproduce is half-open: `bars.start` in,
+    /// `bars.end` out. An off-by-one in either search, or a mishandled run of
+    /// fills sharing a bar, would survive the window tests below — they place
+    /// one fill strictly inside one window.
+    ///
+    /// So this is differential rather than illustrative: every range over a
+    /// blotter built to sit on the awkward cases (a fill on bar 0, a repeated
+    /// bar, a gap, a fill on the last bar) is compared against the linear
+    /// filter the binary search replaced.
+    #[test]
+    fn report_slice_matches_a_linear_filter_on_every_range() {
+        const BARS: usize = 8;
+        let fill_bars = [0usize, 2, 2, 3, 5, 7];
+        let report = RunReport {
+            equity_curve: (0..BARS).map(|i| 100.0 + i as Real).collect(),
+            fills: fill_bars
+                .iter()
+                .map(|&bar| Fill {
+                    bar,
+                    order: order(Side::Buy, 1.0, 100.0),
+                })
+                .collect(),
+            rejections: Vec::new(),
+            initial_equity: 100.0,
+        };
+
+        for start in 0..=BARS {
+            for end in start..=BARS {
+                let sliced = report_slice(&report, start..end);
+                let want: Vec<usize> = fill_bars
+                    .iter()
+                    .filter(|&&b| (start..end).contains(&b))
+                    .map(|&b| b - start)
+                    .collect();
+                let got: Vec<usize> = sliced.fills.iter().map(|f| f.bar).collect();
+                assert_eq!(got, want, "fills for range {start}..{end}");
+                assert_eq!(
+                    sliced.equity_curve.len(),
+                    end - start,
+                    "equity length for range {start}..{end}"
                 );
             }
         }
