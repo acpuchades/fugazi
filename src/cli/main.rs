@@ -17,6 +17,7 @@ mod cadence;
 mod completions;
 mod csv_source;
 mod data;
+mod daterange;
 mod get;
 mod glob;
 mod grammar;
@@ -145,6 +146,54 @@ struct SchemaArgs {
     /// single-expression schema.
     #[arg(long)]
     document: bool,
+}
+
+/// `--from` / `--until` / `--strict-from`, shared verbatim by `run` and
+/// `optimize` so the two cannot drift apart on either grammar or meaning.
+#[derive(Args, Clone, Debug)]
+struct DateRangeArgs {
+    /// Evaluate only bars at or after this date. Accepts `YYYY-MM-DD`,
+    /// `YYYY-MM-DD HH:MM:SS`, or an RFC 3339 timestamp.
+    ///
+    /// This bounds **evaluation, not loading**. Bars before it are still read
+    /// when the series carries them, and are fed to the strategy with trading
+    /// gated off — indicators advance, nothing is booked — so the first
+    /// evaluated bar is measured on settled indicators instead of a cold
+    /// chain. That is what makes a sliced run comparable to an unsliced one.
+    /// How far back it reads is the strategy's `stable_bars`, the same depth
+    /// `--walkforward` skips at the head of a series.
+    ///
+    /// When the series does not reach that far back, the run warns and starts
+    /// late, at the first settled bar; `metrics.yml`'s `period_start` records
+    /// where evaluation actually began. Use `--strict-from` for a hard slice.
+    #[arg(long = "from", value_name = "DATE")]
+    from: Option<String>,
+
+    /// Evaluate only bars strictly before this date; same spellings as
+    /// `--from`.
+    ///
+    /// The interval is half-open — `[from, until)` — so adjacent ranges tile
+    /// exactly: `--until 2025-02-01` and `--from 2025-02-01` partition a
+    /// series with no bar counted twice and none dropped between them.
+    #[arg(long = "until", value_name = "DATE")]
+    until: Option<String>,
+
+    /// Make `--from` a hard slice: read nothing before it and start the
+    /// strategy cold.
+    ///
+    /// For deliberately simulating a cold start. Every indicator spends its
+    /// warm-up inside the evaluated range, so the first `stable_bars` bars of
+    /// the results are unsettled — which is the point, and is why it is not
+    /// the default.
+    #[arg(long = "strict-from", requires = "from")]
+    strict_from: bool,
+}
+
+impl DateRangeArgs {
+    /// Parse into the resolved form, or `None` when neither bound was given.
+    fn resolve(&self) -> Result<Option<daterange::DateRange>> {
+        daterange::DateRange::parse(self.from.as_deref(), self.until.as_deref(), self.strict_from)
+    }
 }
 
 #[derive(Args)]
@@ -286,6 +335,9 @@ struct RunArgs {
     /// `--save-state`.
     #[arg(long = "flatten")]
     flatten: bool,
+
+    #[command(flatten)]
+    range: DateRangeArgs,
 
     /// Compute Monte Carlo significance analysis after the run — bootstrap
     /// confidence intervals and empirical-null p-values for a handful of
@@ -562,6 +614,9 @@ struct OptimizeArgs {
     /// `--walkforward`.
     #[arg(long = "keep-unstable", requires = "walkforward")]
     keep_unstable: bool,
+
+    #[command(flatten)]
+    range: DateRangeArgs,
 
     /// Rank `--best-by` conservatively (needs `-w` and `--best-by`): shift each
     /// grid point's cross-window mean *against* it by K standard deviations
@@ -936,6 +991,8 @@ fn run(args: RunArgs) -> Result<()> {
         save_state: args.save_state.as_deref(),
         flatten: args.flatten,
         montecarlo: montecarlo.as_ref(),
+        range: args.range.resolve()?,
+        from_label: args.range.from.as_deref(),
     };
     let base = args.strategy.base_dir();
     match args.strategy.kind {
@@ -1007,6 +1064,8 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         costs_supplied: costs_were_supplied,
         jobs: args.jobs,
         quiet: args.quiet,
+        range: args.range.resolve()?,
+        from_label: args.range.from.as_deref(),
     };
     optimize::run(&frame, opts).with_context(|| parse_error_hint(&args.strategy))?;
     Ok(())
