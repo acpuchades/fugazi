@@ -121,7 +121,7 @@ fugazi run <STRATEGY> --series <SPEC> [--series <SPEC> …] --output-dir <DIR>
 | `-c`, `--cash <N>` | Initial funds for the paper wallet. Default `10000`. |
 | `--costs <SPEC>` | Trading-cost model — commission, spread, slippage — applied to every fill. Repeatable. See [--costs](#--costs). Omit for a frictionless run (matches the pre-costs release byte-for-byte). |
 | `--stocks` / `--forex` / `--crypto` | Trading-calendar shortcut. See [Calendar](#calendar-and-annualization). Mutually exclusive. |
-| `-f`, `--frequency <[SYM:]CODE>` | Bar cadence (`1m`, `5m`, `1h`, `4h`, `1d`, `1w`, `1M`, …). Repeatable; may carry a `SYMBOL:` scope prefix. When omitted, the CLI auto-detects the cadence from the `time` column. Combines with the calendar to derive `bars_per_year`. |
+| `-f`, `--frequency <[SYM:]CODE>` | Bar cadence (`1m`, `5m`, `1h`, `4h`, `1d`, `1w`, `1M`, …). Repeatable; may carry a `SYMBOL:` scope prefix. When omitted, the cadence comes from the input's `freq` column, else is auto-detected from the `time` column. Also **selects** which cadence to trade when a symbol carries more than one — see [Bar cadence](#bar-cadence). Combines with the calendar to derive `bars_per_year`. |
 | `--bars-per-year <[SYM[FREQ]:]N>` | Explicit override for the annualization denominator. Repeatable; each entry may carry a `SYMBOL[FREQ]:` scope prefix. Wins over the calendar/frequency pair when a scope matches. |
 | `--risk-free-rate <RATE>` | Annualized risk-free rate as a fraction (`0.045` = 4.5% p.a.). Default `0`. See [Risk-free rate](#risk-free-rate). |
 | `-w`, `--windowed <LEN>` | Also reduce the run in `LEN`-sized windows: one row per non-overlapping window in `metrics.csv`, one row per rolling (stride-1) window in `rolling.csv`. `metrics.yml` (whole-run) is always written; the console prints an extra **windowed metrics** block right after the whole-run one, showing `mean ± std` over the non-overlapping rows for the same headline stats. `LEN` is a plain bar count (`10`, `252`) or a duration in the [`-f`](#-f----frequency) alphabet (`1d`, `1w`, `1M`, `4h`) that resolves to a bar count against the trading calendar. The duration form is strict — it requires an explicit `--stocks`/`--forex`/`--crypto` and a resolvable bar cadence (`-f/--frequency`, or a `time` column so the cadence can be auto-detected). See [Windowed metrics](#windowed-metrics). |
@@ -948,8 +948,17 @@ of terms:
   `--series` are concatenated.
 
 Across multiple `--series` the tables are **full-outer joined on
-`(symbol, time)`** into one long dataframe. `time` is compared as an
+`(symbol, freq, time)`** into one long dataframe. `time` is compared as an
 opaque, caller-sorted string (dates, epoch timestamps — anything).
+
+The `freq` column is part of the join key so that two cadences of the same
+symbol stay two series. `fugazi get binance:BTCUSDT[1d,1h]` writes both into
+one file with RFC 3339 stamps, so the daily bar and the midnight hourly bar
+share a `time`; joining on `(symbol, time)` alone merged them into one row and
+kept one set of prices. A row with **no** `freq` cell adopts its symbol's sole
+declared cadence, so a hand-written overlay CSV with only `symbol,time,<col>`
+still joins onto a `get`-written price file. See
+[Bar cadence](#bar-cadence).
 
 Required columns after the join: `symbol`, `time`, `open`, `high`, `low`,
 `close`. `volume` is optional (defaults to 0). Extra columns ride along
@@ -964,8 +973,11 @@ Required columns after the join: `symbol`, `time`, `open`, `high`, `low`,
 # A symbol-less OHLCV file: broadcast the symbol as a literal.
 --series 'symbol=BTC,@ohlcv.csv'
 
-# Two files joined on (symbol, time) — candles + a fundamentals series.
+# Two files joined on (symbol, freq, time) — candles + a fundamentals series.
 --series @candles.csv --series @fundamentals.csv
+
+# A file holding two cadences: say which one the run trades.
+--series @candles.csv  # …with  -f BTC:1h
 ```
 
 ### `--params`
@@ -1168,6 +1180,47 @@ cost drag is one line away.
   slippage on triggered stops/take-profits; leave it at `1.0` to model
   stops as identical to market orders.
 
+### Bar cadence
+
+A `--series` frame is a pile of rows; nothing in it says "this is a daily
+backtest". The cadence is what drives annualization, `-w`'s duration form,
+`trading_seconds_per_bar`, and freq-scoped `--costs` matching, and `run` and
+`optimize` settle it **once, at load, before anything reads the frame**.
+
+Precedence, best evidence first:
+
+1. `-f/--frequency` — a `SYMBOL:CODE` entry beats an unscoped `CODE`.
+2. The input's own **`freq` column**.
+3. The cadence **detected** from the median gap between timestamps.
+
+Where the input can't answer, the load stops:
+
+| Refused | Why |
+|---|---|
+| A symbol carrying two or more cadences, with no `-f` choosing between them | A strategy trades one of them, and picking for you produces a plausible-looking number over an interleaved series. Fix with `-f SYM:CODE`. |
+| `-f` naming a cadence the frame does not carry — including one that contradicts the `freq` column | Nothing would be traded at the requested cadence. |
+| Rows with no `freq` label beside a symbol that declares two or more | They can be attached to neither. Label them: `--series "freq=1d,@extra.csv"`. |
+
+Where it can answer but the answer is odd, the run continues and says so on
+stderr (`--quiet` suppresses the success summary, not a finding about the
+data):
+
+| Warned | Why |
+|---|---|
+| The universe runs at more than one cadence | Annualization takes one factor for the whole run, read off the first symbol, so every risk-adjusted metric is scaled for that series and mis-scaled for the rest. |
+| A series' `freq` label disagrees with its timestamp spacing | The label is what freq-scoped `--costs` match on; the spacing is what the run is made of. Reported only from 10 bars up, since a median over a handful of gaps is noise. |
+
+**Examples**
+
+```sh
+# Two cadences in one file — refused, then resolved.
+fugazi run @s.yml --series @both.csv                  # error: BTC carries 2 cadences
+fugazi run @s.yml --series @both.csv -f BTC:1h        # trades the 1h series
+
+# Different cadences per symbol, chosen individually.
+fugazi run basket:@b.yml --series @mixed.csv -f BTC:1h -f ETH:1h
+```
+
 ### Calendar and annualization
 
 `metrics.yml` reports annualized figures (Sharpe, Sortino, CAGR, annualized
@@ -1181,7 +1234,8 @@ shortcuts compose:
 - **Frequency** — `-f`/`--frequency <CODE>`: `N<unit>` where unit is one
   of `m` (minute), `h` (hour), `d` (day), `w` (week), `M` (month) and
   `N` is a positive integer (`1m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d`,
-  `1w`, `1M`).
+  `1w`, `1M`). Omitted, it falls through to the input's `freq` column and
+  then to detection — see [Bar cadence](#bar-cadence).
 
 Explicit `--bars-per-year N` always overrides. Default: `252` (US-equity daily).
 

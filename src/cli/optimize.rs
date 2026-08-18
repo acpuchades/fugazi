@@ -211,12 +211,14 @@ fn run_single(
     let atoms = series.atoms;
     let skipped_overlay_columns = series.skipped_columns;
 
-    // The effective bar cadence, now that the strategy's symbol is known:
-    // a symbol-matching `-f/--frequency` entry wins, else auto-detect from
-    // the atoms' `time` field (populated by the loader). Threaded into both
-    // the annualization (`bars_per_year`) and the per-grid-point cost
-    // resolution so freq-scoped `--costs` entries also see the detected cadence.
+    // The effective bar cadence, now that the strategy's symbol is known, best
+    // evidence first: a symbol-matching `-f/--frequency` entry, then the
+    // input's own `freq` column, then detection from the atoms' `time` field
+    // (populated by the loader). Threaded into both the annualization
+    // (`bars_per_year`) and the per-grid-point cost resolution, so freq-scoped
+    // `--costs` entries see the same cadence the calendar does.
     let effective_freq = calendar::pick_frequency(opts.frequency, &probe_symbol)
+        .or_else(|| frame.declared_frequency(&probe_symbol))
         .or_else(|| calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a)));
     let bars_per_year =
         calendar::pick_bars_per_year(opts.bars_per_year, &probe_symbol, effective_freq)
@@ -477,18 +479,21 @@ fn run_multi_symbol(
     let overlap = overlap::measure_universe(&per_symbol);
     overlap::warn_if_fragmented(&overlap, overlap.at, overlap::RUN_CONSEQUENCE);
 
-    // Cadence: try the representative (first) symbol's --frequency scope, then
-    // fall back to detection from that symbol's timestamps. Matches
-    // `run_basket` / `run_multi`.
+    // Cadence: the representative (first) symbol's `--frequency` scope, then
+    // its declared `freq` column, then detection from its timestamps. Matches
+    // `run_basket` / `run_multi`. A universe whose symbols disagree was warned
+    // about at load — see `crate::cadence`.
     let representative = &universe[0];
-    let effective_freq = calendar::pick_frequency(opts.frequency, representative).or_else(|| {
-        per_symbol
-            .iter()
-            .find(|(s, _)| s.as_ref() == representative.as_ref())
-            .and_then(|(_, atoms)| {
-                calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a))
-            })
-    });
+    let effective_freq = calendar::pick_frequency(opts.frequency, representative)
+        .or_else(|| frame.declared_frequency(representative))
+        .or_else(|| {
+            per_symbol
+                .iter()
+                .find(|(s, _)| s.as_ref() == representative.as_ref())
+                .and_then(|(_, atoms)| {
+                    calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a))
+                })
+        });
     let bars_per_year =
         calendar::pick_bars_per_year(opts.bars_per_year, representative, effective_freq)
             .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));

@@ -250,9 +250,14 @@ pub fn run(strategy: &StrategyRef, frame: &DataFrame, opts: &RunOptions) -> Resu
     let start = atoms.first().map_or("", |(t, _)| t.as_str());
     let end = atoms.last().map_or("", |(t, _)| t.as_str());
     // The effective bar cadence for both annualization and cost-scope
-    // matching: a symbol-matching `-f/--frequency` entry wins, else we
-    // auto-detect from the atoms' `time` field (populated by the loader).
+    // matching, best evidence first: a symbol-matching `-f/--frequency` entry,
+    // then the input's own `freq` column, then the cadence detected from the
+    // atoms' `time` field (populated by the loader). The middle term matters
+    // because a provider that told us the cadence outranks arithmetic on the
+    // gaps between the bars it sent — a thinly-traded name's gaps can median
+    // to the wrong cadence outright.
     let effective_freq = calendar::pick_frequency(opts.frequency, &symbol)
+        .or_else(|| frame.declared_frequency(&symbol))
         .or_else(|| calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a)));
     // Resolve `bars_per_year`: a scope-matching `--bars-per-year` entry wins,
     // else fall through to the class × cadence calendar.
@@ -322,6 +327,8 @@ pub fn run_pairs(
     // share one cadence — the inner-join filters to the shared timeline).
     let effective_freq = calendar::pick_frequency(opts.frequency, &spec.left)
         .or_else(|| calendar::pick_frequency(opts.frequency, &spec.right))
+        .or_else(|| frame.declared_frequency(&spec.left))
+        .or_else(|| frame.declared_frequency(&spec.right))
         .or_else(|| {
             calendar::detect_frequency_from_atoms(left_series.atoms.iter().map(|(_, a)| a))
         });
@@ -414,7 +421,8 @@ fn run_universe(
     let start = bars.first().map_or("", |t| t.as_str());
     let end = bars.last().map_or("", |t| t.as_str());
     let representative = &universe[0];
-    let (effective_freq, bars_per_year) = universe_calendar(opts, representative, &per_symbol);
+    let (effective_freq, bars_per_year) =
+        universe_calendar(opts, frame, representative, &per_symbol);
     let no_cost_warning = !opts.costs_supplied;
     let inputs = eval_context(opts, effective_freq, bars_per_year)?;
     if !opts.quiet {
@@ -525,22 +533,28 @@ pub fn run_portfolio(
 ///
 /// Shared verbatim by the basket, multi-asset and portfolio runners — the three
 /// shapes whose universe is discovered from the stream rather than declared, so
-/// none of them has a single symbol whose calendar is authoritative. A
-/// scope-matching `-f/--frequency` wins; otherwise the cadence is detected from
-/// the representative's own atoms.
+/// none of them has a single symbol whose calendar is authoritative.
+/// A scope-matching `-f/--frequency` wins, then the representative's own `freq`
+/// column, then the cadence detected from its atoms. A universe whose symbols
+/// disagree is a warning rather than an error, raised once at load by
+/// [`crate::cadence`] — this function is where the consequence lands, since one
+/// symbol's answer becomes the whole run's annualization.
 fn universe_calendar(
     opts: &RunOptions<'_>,
+    frame: &DataFrame,
     representative: &str,
     per_symbol: &[(Symbol, Vec<(String, fugazi::types::Atom)>)],
 ) -> (Option<Frequency>, Real) {
-    let effective_freq = calendar::pick_frequency(opts.frequency, representative).or_else(|| {
-        per_symbol
-            .iter()
-            .find(|(s, _)| s.as_ref() == representative)
-            .and_then(|(_, atoms)| {
-                calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a))
-            })
-    });
+    let effective_freq = calendar::pick_frequency(opts.frequency, representative)
+        .or_else(|| frame.declared_frequency(representative))
+        .or_else(|| {
+            per_symbol
+                .iter()
+                .find(|(s, _)| s.as_ref() == representative)
+                .and_then(|(_, atoms)| {
+                    calendar::detect_frequency_from_atoms(atoms.iter().map(|(_, a)| a))
+                })
+        });
     let bars_per_year =
         calendar::pick_bars_per_year(opts.bars_per_year, representative, effective_freq)
             .unwrap_or_else(|| calendar::resolve(None, opts.asset_class, effective_freq));

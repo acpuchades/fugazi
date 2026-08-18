@@ -13,6 +13,7 @@
 //! The strategy (a positional) takes `@file` to load a file, or inline YAML for
 //! anything else — the same `@` convention `--series`/`--params` use.
 
+mod cadence;
 mod completions;
 mod csv_source;
 mod data;
@@ -200,10 +201,16 @@ struct RunArgs {
     /// `-f 1d -f BTC:4h` — so a preset can pre-declare per-symbol cadences.
     /// At run time the symbol-scoped entry matching the strategy's symbol
     /// wins; the unscoped default applies otherwise. Omit entirely and the
-    /// CLI auto-detects the cadence from the input series' `time` column
-    /// (median gap snapped to a named cadence). The effective cadence —
-    /// scope match, plain override, or detected — is used for both
-    /// annualization *and* freq-scoped `--costs` matching.
+    /// cadence comes from the input's own `freq` column, and failing that is
+    /// auto-detected from the `time` column (median gap snapped to a named
+    /// cadence). The effective cadence — scope match, plain override,
+    /// declared column, or detected — is used for both annualization *and*
+    /// freq-scoped `--costs` matching.
+    ///
+    /// It also **selects**: a symbol whose `--series` rows carry two cadences
+    /// is refused until an entry here says which one to trade. Naming a
+    /// cadence the input does not have is an error rather than a silent
+    /// re-annualization.
     #[arg(short, long, value_name = "[SYM:]CODE")]
     frequency: Vec<calendar::ScopedFrequency>,
 
@@ -501,7 +508,8 @@ struct OptimizeArgs {
     crypto: bool,
 
     /// Bar cadence, e.g. `1d` / `4h`. Same semantics as `run --frequency`,
-    /// including repeatable `SYMBOL:CODE` overrides.
+    /// including repeatable `SYMBOL:CODE` overrides and the cadence
+    /// selection a two-cadence input requires.
     #[arg(short, long, value_name = "[SYM:]CODE")]
     frequency: Vec<calendar::ScopedFrequency>,
 
@@ -847,9 +855,26 @@ fn check_overlay(args: CheckOverlayArgs) -> Result<()> {
     Ok(())
 }
 
+/// Load the `--series` frame and settle its cadence before anything reads it.
+///
+/// `run` and `optimize` both do exactly this, and both would be wrong in the
+/// same way without it: the frame can hold two cadences under one symbol, and
+/// every surface downstream — the bar count, the date range, the detected
+/// annualization factor — looks correct over the interleaved wreckage. See
+/// [`cadence`] for what is refused and what is merely reported.
+fn load_frame(
+    series: &[data::SeriesSpec],
+    frequency: &[calendar::ScopedFrequency],
+) -> Result<data::DataFrame> {
+    let mut frame = data::DataFrame::from_series(series)?;
+    let findings = cadence::apply(&mut frame, frequency)?;
+    cadence::warn(&findings);
+    Ok(frame)
+}
+
 fn run(args: RunArgs) -> Result<()> {
     let text = args.strategy.read().context("reading strategy")?;
-    let frame = data::DataFrame::from_series(&args.series)?;
+    let frame = load_frame(&args.series, &args.frequency)?;
 
     let strat_label = args.strategy.label();
     let class = asset_class(args.stocks, args.forex, args.crypto);
@@ -952,7 +977,7 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         .map(|spec| params::table(std::slice::from_ref(spec)))
         .collect::<Result<_>>()?;
     let text = args.strategy.read().context("reading strategy")?;
-    let frame = data::DataFrame::from_series(&args.series)?;
+    let frame = load_frame(&args.series, &args.frequency)?;
 
     let strat_label = args.strategy.label();
     let class = asset_class(args.stocks, args.forex, args.crypto);

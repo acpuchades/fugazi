@@ -23,7 +23,7 @@ places belongs in the narrower one.
 |---|---|---|---|
 | **Unit** | `#[cfg(test)] mod tests` beside the code | `pub(crate)` internals | `cargo test --lib` |
 | **Integration** | `tests/*.rs`, one crate per file | the public API only | `cargo test` |
-| **End-to-end** | `tests/{run,costs,optimize,overlap,examples_validate}.rs` | the `fugazi` binary via `Command` | `cargo test` (needs the `cli` feature) |
+| **End-to-end** | `tests/{run,costs,optimize,overlap,cadence,examples_validate}.rs` | the `fugazi` binary via `Command` | `cargo test` (needs the `cli` feature) |
 | **Cross-validation** | `tests/{talib,metrics,wallet,trade_metrics}_validation.rs` | an external reference library's numbers | `cargo test` (every fixture committed; skips only if one is removed) |
 | **Coverage guard** | `tests/metrics_coverage.rs` | which metrics have a reference at all | `cargo test` (reads key sets only — never skips) |
 | **Performance guards** | `tests/perf_guard.rs` | allocation counts and type widths | `cargo test` |
@@ -133,7 +133,7 @@ A cross-check whose disagreements are undocumented decays into a golden master.
 | `PaperWallet` fill pricing, cash or cost arithmetic | `tests/wallet_validation.rs` — extend the schedule in `tools/gen_wallet_bars.py` or add a cost configuration, then `pixi run gen-wallet` |
 | A metric | a unit test in `src/metrics.rs`, **plus** a reference value in one of the two `(metric, expected)` generators — `tests/metrics_coverage.rs` fails until it has one or an exemption |
 | A CLI flag | `tests/run.rs`, `tests/costs.rs` or `tests/optimize.rs` via `common::cli::Cmd` |
-| A diagnostic one subcommand prints | the file named for that command; one spanning several (like the snapshot-overlap warning) gets a feature-named file — `tests/overlap.rs`, as `tests/costs.rs` already does for `--costs` |
+| A diagnostic one subcommand prints | the file named for that command; one spanning several (like the snapshot-overlap warning or the bar-cadence census) gets a feature-named file — `tests/overlap.rs`, `tests/cadence.rs`, as `tests/costs.rs` already does for `--costs` |
 | An `examples/` file | nothing — `tests/examples_compile.rs` (Rust) and `tests/examples_validate.rs` (YAML) cover the directory, and each refuses to let a new file in uncovered |
 | A hand-maintained mirror (`NodeSpecRaw`, the `fugazi.metrics` registration) | `tests/hand_maintained_mirrors.rs` |
 | Anything on the per-bar path (`update`, `trade`, `on_fill`, the driver) | nothing new — `tests/perf_guard.rs` already asserts that path allocates a constant number of times regardless of bar count, and will fail if you add a per-bar allocation |

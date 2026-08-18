@@ -196,6 +196,28 @@ disjoint pair yields zero bars and fails loudly already. If a third caller of
 joiner stays pure rather than printing, so this is a convention, not a
 guarantee.
 
+### `!pick { freq }` still reads nothing under `run`
+
+`get` tags every snapshot entry with its `(symbol, freq)`, so a `get -x` overlay
+can say `!pick { freq: 1d }`. `run` does not: `join_universe_by_time` and the
+single/pairs paths all push `None` for the freq tag, and `Selector::matches`
+requires equality when the query's freq is `Some`, so the same expression
+resolves to nothing in a backtest. The bar-cadence census made the
+loader *keep* the cadence — `DataFrame` keys on `(symbol, freq, time)` — so the
+tag is now available to push.
+
+**Deliberately not pushed.** It is two lines of code and a whole design
+decision: snapshots group by exact timestamp, so a `1d` bar occupies one
+snapshot in twenty-four and a `!pick { freq: 1d }` leaf would read `None` on the
+other twenty-three. Whether that is an absent sample or a forward-fill is the
+entire multi-cadence-strategy question — a strategy trading hourly against a
+daily filter wants the fill, an indicator averaging daily closes wants the
+absence, and the crate has no vocabulary for the difference. Doing the cheap
+half first would ship the ambiguity as a feature.
+
+Revisit when there is a concrete strategy shape asking for it; the answer starts
+with what a cross-cadence leaf reads between bars, not with the tag.
+
 ## Repo hygiene
 
 ### `python/uv.lock` does not lock the `test` extra

@@ -10,12 +10,33 @@
 //!
 //! Within a series the literals are merged onto every loaded row (a literal wins
 //! a name clash). Across all `--series` flags the resulting tables are
-//! **full-outer-joined on `(symbol, time)`** into one long dataframe: a
-//! `BTreeMap` keyed by `(symbol, time)`, so iteration is ascending by symbol then
-//! by `time` — and `time` is compared as the opaque, caller-sorted string it was
-//! given (dates, epochs, anything).
+//! **full-outer-joined on `(symbol, freq, time)`** into one long dataframe: a
+//! `BTreeMap` keyed by that triple, so iteration is ascending by symbol, then by
+//! cadence, then by `time` — and `time` is compared as the opaque,
+//! caller-sorted string it was given (dates, epochs, anything).
+//!
+//! # Why `freq` is part of the key
+//!
+//! It used to not be, and the join was on `(symbol, time)` alone. `fugazi get
+//! binance:BTCUSDT[1d,1h]` writes both cadences into one file, both stamped
+//! RFC 3339, so the daily bar and the midnight hourly bar carried the *same*
+//! `time` — and merged into one row, last writer winning the OHLCV. The other 23
+//! hourly bars survived alongside, cadence detection then read a ~1h median off
+//! the wreckage, and every visible surface — row count, date range, symbol list —
+//! still looked right. Keying on the cadence keeps the two series apart; what to
+//! *do* about a symbol that carries two of them is [`crate::cadence`]'s job.
+//!
+//! **An absent or empty `freq` cell is not a cadence, it is a missing label.**
+//! Keying it as its own group would break the documented two-`get`-into-two-`-s`
+//! join the moment one side is a hand-written overlay CSV with no `freq` column.
+//! So a row with no cadence adopts its symbol's **sole declared** cadence, if the
+//! symbol declares exactly one across the whole load. That inference happens in a
+//! pass *before* any insert, so the "later `--series` wins a column clash" rule is
+//! preserved exactly: the rows still merge in the order they were given. When a
+//! symbol declares two or more cadences the untagged rows stay in their own `""`
+//! group, where the cadence census reports them rather than guessing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
@@ -193,10 +214,15 @@ impl SeriesSpec {
     }
 }
 
-/// The merged long dataframe: rows keyed by `(symbol, time)`.
+/// The merged long dataframe: rows keyed by `(symbol, freq, time)`.
+///
+/// The middle component is the `freq` **cell as written**, trimmed but never
+/// case-folded — `1M` is a month and `1m` is a minute, so lowercasing the key
+/// would silently fuse them. `""` means the row carried no cadence label and
+/// none could be inferred (see the module docs).
 #[derive(Debug, Default)]
 pub struct DataFrame {
-    rows: BTreeMap<(String, String), Row>,
+    rows: BTreeMap<(String, String, String), Row>,
     /// Memoized frame-wide overlay schema — see
     /// [`shared_schema`](Self::shared_schema). Every atom the frame produces
     /// binds to this one `Arc`, which is what makes a cross-symbol `!get`
@@ -208,11 +234,23 @@ impl DataFrame {
     /// Build the dataframe from the parsed `--series` specs. Each `@file`'s column
     /// delimiter is autodetected from its header.
     pub fn from_series(series: &[SeriesSpec]) -> Result<Self> {
-        let mut frame = DataFrame::default();
+        // Every row is materialised before the first insert, because the
+        // cadence an *untagged* row belongs to is a property of the whole load
+        // (its symbol's sole declared cadence, if there is exactly one) and is
+        // not knowable while streaming. The frame holds them all a moment later
+        // anyway, so this costs ordering, not peak memory — and keeping the
+        // insert order intact is what preserves "the later `--series` wins".
+        let mut loaded: Vec<(&str, Row)> = Vec::new();
         for spec in series {
             for row in spec.rows()? {
-                frame.insert(&spec.raw, row)?;
+                loaded.push((spec.raw.as_str(), row));
             }
+        }
+        let fallback = sole_declared_cadences(&loaded);
+
+        let mut frame = DataFrame::default();
+        for (raw, row) in loaded {
+            frame.insert(raw, row, &fallback)?;
         }
         Ok(frame)
     }
@@ -224,16 +262,100 @@ impl DataFrame {
         let mut out: Vec<String> = self
             .rows
             .keys()
-            .map(|(sym, _)| sym.clone())
-            .collect::<std::collections::BTreeSet<_>>()
+            .map(|(sym, _, _)| sym.clone())
+            .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
         out.sort();
         out
     }
 
-    /// Merge one row into the frame, joining on `(symbol, time)`.
-    fn insert(&mut self, spec: &str, row: Row) -> Result<()> {
+    /// The distinct `freq` cells carried by `symbol`, ascending, `""` for the
+    /// untagged group. Empty when the frame holds no rows for it.
+    ///
+    /// More than one entry means the frame carries two series under one name
+    /// and nothing here can choose between them — [`crate::cadence`] resolves
+    /// that against `-f/--frequency` before anything reads the frame.
+    pub fn frequencies_of(&self, symbol: &str) -> Vec<&str> {
+        // The keys are sorted, so a symbol's cadences are contiguous and
+        // `dedup` is enough — no set needed.
+        let mut out: Vec<&str> = self
+            .rows
+            .keys()
+            .filter(|(sym, _, _)| sym == symbol)
+            .map(|(_, freq, _)| freq.as_str())
+            .collect();
+        out.dedup();
+        out
+    }
+
+    /// The cadence `symbol`'s rows **declare**, parsed — authoritative over
+    /// anything detected from timestamp gaps, because it is what the provider
+    /// (or the user's `freq=` literal) said the bars are.
+    ///
+    /// `None` when the symbol is untagged, carries an unparseable label, or
+    /// carries more than one cadence. The last case is only reachable before
+    /// [`crate::cadence`] has resolved the frame; after it, a symbol has at
+    /// most one.
+    pub fn declared_frequency(&self, symbol: &str) -> Option<Frequency> {
+        match self.frequencies_of(symbol).as_slice() {
+            [only] if !only.is_empty() => Frequency::from_str(only).ok(),
+            _ => None,
+        }
+    }
+
+    /// Every `(symbol, freq cell, sorted bar stamps)` group in the frame — the
+    /// census's one read of the loaded data.
+    ///
+    /// Stamps are the parsed `time` column, ascending **numerically**. The key
+    /// order is ascending by the time *string*, which is the same thing for
+    /// RFC 3339 and for fixed-width dates but not for bare epoch integers, and
+    /// a cadence read off gaps between out-of-order stamps is noise. Rows whose
+    /// `time` matches no known shape contribute nothing — they cannot be spaced
+    /// against anything.
+    pub fn cadence_groups(&self) -> Vec<(String, String, Vec<i64>)> {
+        let mut by_group: BTreeMap<(&str, &str), Vec<i64>> = BTreeMap::new();
+        for (sym, freq, time) in self.rows.keys() {
+            let bucket = by_group.entry((sym.as_str(), freq.as_str())).or_default();
+            if let Some(ms) = calendar::parse_time_to_millis(time) {
+                bucket.push(ms);
+            }
+        }
+        by_group
+            .into_iter()
+            .map(|((sym, freq), mut stamps)| {
+                stamps.sort_unstable();
+                (sym.to_string(), freq.to_string(), stamps)
+            })
+            .collect()
+    }
+
+    /// Drop every row of `symbol` that is not in the `freq` cadence group.
+    ///
+    /// The disambiguation half of the census: once `-f/--frequency` has named
+    /// which of a symbol's cadences the run targets, the others are pruned here
+    /// so nothing downstream has to carry the choice. A symbol the frame does
+    /// not hold, or a cadence it does not have, prunes to nothing rather than
+    /// erroring — the caller checked both before asking.
+    pub fn retain_cadence(&mut self, symbol: &str, freq: &str) {
+        // Pruning can retire the last row carrying some column, so the memoized
+        // schema is stale for the same reason `insert` invalidates it.
+        self.schema.take();
+        self.rows
+            .retain(|(sym, f, _), _| sym != symbol || f == freq);
+    }
+
+    /// Merge one row into the frame, joining on `(symbol, freq, time)`.
+    ///
+    /// `untagged_fallback` maps a symbol to the sole cadence it declares
+    /// elsewhere in this load; a row with no `freq` cell of its own joins that
+    /// group. See the module docs for why that inference exists.
+    fn insert(
+        &mut self,
+        spec: &str,
+        row: Row,
+        untagged_fallback: &HashMap<String, String>,
+    ) -> Result<()> {
         // A new row can introduce a column, so any schema built from the
         // previous contents is stale. In practice every insert happens inside
         // `from_series` before the first `atoms` call, but nothing in the type
@@ -247,7 +369,11 @@ impl DataFrame {
             .get("time")
             .cloned()
             .ok_or_else(|| anyhow!("series `{spec}`: a row is missing a `time` column"))?;
-        self.rows.entry((symbol, time)).or_default().extend(row);
+        let freq = declared_cadence(&row)
+            .map(str::to_string)
+            .or_else(|| untagged_fallback.get(&symbol).cloned())
+            .unwrap_or_default();
+        self.rows.entry((symbol, freq, time)).or_default().extend(row);
         Ok(())
     }
 
@@ -311,8 +437,23 @@ impl DataFrame {
     /// `Bool` column, and `""` for a `Str` column. Schema columns are ordered
     /// alphabetically for determinism.
     pub fn atoms(&self, symbol: &str) -> Result<AtomSeries> {
-        if !self.rows.keys().any(|(sym, _)| sym == symbol) {
-            bail!("no rows found for symbol `{symbol}` across the given --series");
+        // Two cadences under one symbol are two series, and interleaving them
+        // into one atom stream would produce a bar order that is neither. The
+        // caller is expected to have resolved the frame through
+        // `crate::cadence` first; this is the guard for every path that did
+        // not, and it refuses rather than picking.
+        match self.frequencies_of(symbol).as_slice() {
+            [] => bail!("no rows found for symbol `{symbol}` across the given --series"),
+            [_] => {}
+            many => bail!(
+                "symbol `{symbol}` carries {} cadences in the input series ({}) — \
+                 pass `-f/--frequency {symbol}:<CODE>` to say which one to trade",
+                many.len(),
+                many.iter()
+                    .map(|f| if f.is_empty() { "<untagged>" } else { *f })
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
         }
 
         let schema = self.shared_schema();
@@ -330,7 +471,7 @@ impl DataFrame {
         // Second pass: build one atom per row, attaching overlays when the
         // schema has any columns.
         let mut atoms = Vec::new();
-        for ((sym, time), row) in &self.rows {
+        for ((sym, _freq, time), row) in &self.rows {
             if sym != symbol {
                 continue;
             }
@@ -370,6 +511,40 @@ impl DataFrame {
             skipped_columns: Vec::new(),
         })
     }
+}
+
+/// A row's own cadence label: the `freq` cell, trimmed, or `None` when the
+/// column is absent or the cell is blank.
+///
+/// Not case-folded — `Frequency` spells month `1M` and minute `1m`, so the
+/// case *is* the unit.
+fn declared_cadence(row: &Row) -> Option<&str> {
+    row.get("freq").map(|s| s.trim()).filter(|s| !s.is_empty())
+}
+
+/// Per symbol, the one cadence it declares — present only for symbols that
+/// declare exactly one across the whole load.
+///
+/// This is what an untagged row adopts. A symbol declaring two cadences is
+/// absent from the map on purpose: there is no sole cadence to adopt, and
+/// picking one would hide the ambiguity the census exists to report.
+fn sole_declared_cadences(loaded: &[(&str, Row)]) -> HashMap<String, String> {
+    let mut seen: HashMap<&str, BTreeSet<&str>> = HashMap::new();
+    for (_, row) in loaded {
+        // A row with no `symbol` is an error, but `insert` is where it is
+        // reported; skipping it here keeps that diagnostic the one the user
+        // sees.
+        let (Some(symbol), Some(freq)) = (row.get("symbol"), declared_cadence(row)) else {
+            continue;
+        };
+        seen.entry(symbol.as_str()).or_default().insert(freq);
+    }
+    seen.into_iter()
+        .filter_map(|(sym, freqs)| match freqs.into_iter().collect::<Vec<_>>().as_slice() {
+            [only] => Some((sym.to_string(), only.to_string())),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Convert a raw CSV cell to an [`OverlayValue`] of the declared type.
@@ -491,9 +666,22 @@ mod tests {
     use std::io::Write;
     use std::sync::Arc;
 
+    /// Write `contents` to a scratch CSV and hand back its path.
+    ///
+    /// The name is salted with the pid and a counter rather than used
+    /// verbatim: `/tmp` is shared, so a fixed name collides with a concurrent
+    /// `cargo test`, with another checkout, and with another user's leftovers —
+    /// and the failure reads as a data bug rather than as the clash it is.
+    /// Same reasoning as `tests/common/cli.rs::unique_path`.
     fn tmp_csv(name: &str, contents: &str) -> String {
-        let dir = std::env::temp_dir();
-        let path = dir.join(name);
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let unique = format!(
+            "{}_{}_{name}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        );
+        let path = std::env::temp_dir().join(unique);
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(contents.as_bytes()).unwrap();
         path.to_string_lossy().into_owned()
@@ -514,7 +702,7 @@ mod tests {
     }
 
     #[test]
-    fn two_series_full_join_on_symbol_time() {
+    fn two_series_full_join_on_symbol_freq_time() {
         let prices = tmp_csv(
             "fugazi_data_test_p.csv",
             "time;open;high;low;close\n1;10;11;9;10\n2;10;12;10;11\n",
@@ -529,7 +717,7 @@ mod tests {
         ])
         .unwrap();
         // The extra column rode along on the joined rows.
-        assert_eq!(frame.rows[&("BTC".into(), "1".into())]["pe_ratio"], "15.0");
+        assert_eq!(frame.rows[&("BTC".into(), String::new(), "1".into())]["pe_ratio"], "15.0");
         // Candles still build (volume defaulted to 0).
         let series = frame.atoms("BTC").unwrap();
         assert_eq!(series.atoms.len(), 2);
@@ -553,8 +741,8 @@ mod tests {
         // Both files' rows concatenated.
         assert_eq!(frame.atoms("BTC").unwrap().atoms.len(), 4);
         // Both literals broadcast onto rows from either file.
-        assert_eq!(frame.rows[&("BTC".into(), "1".into())]["exchange"], "NYSE");
-        assert_eq!(frame.rows[&("BTC".into(), "4".into())]["exchange"], "NYSE");
+        assert_eq!(frame.rows[&("BTC".into(), String::new(), "1".into())]["exchange"], "NYSE");
+        assert_eq!(frame.rows[&("BTC".into(), String::new(), "4".into())]["exchange"], "NYSE");
     }
 
     #[test]
@@ -834,5 +1022,317 @@ mod tests {
         let frame =
             DataFrame::from_series(&[format!("symbol=BTC,@{path}").parse().unwrap()]).unwrap();
         assert!(frame.atoms("ETH").is_err());
+    }
+
+    // ------------------------------------------------------------- cadences
+
+    /// The bug that put `freq` in the key. `fugazi get SYM[1d,1h]` writes both
+    /// cadences to one file, both stamped RFC 3339, so the daily bar and the
+    /// midnight hourly bar shared a `time`. Under a `(symbol, time)` key they
+    /// merged into one row and one set of OHLCV survived; the other 23 hourly
+    /// bars stayed, so the row count, the date range and the symbol list all
+    /// still looked right over a series that was neither.
+    #[test]
+    fn two_cadences_at_one_timestamp_no_longer_collide() {
+        let path = tmp_csv(
+            "fugazi_cadence_collide.csv",
+            "symbol,freq,time,open,high,low,close,volume\n\
+             BTC,1d,2024-01-01T00:00:00Z,100,100,100,100,1\n\
+             BTC,1h,2024-01-01T00:00:00Z,50,50,50,50,1\n\
+             BTC,1h,2024-01-01T01:00:00Z,51,51,51,51,1\n",
+        );
+        let frame = DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
+        // Three rows in, three rows held — the two midnight bars are distinct.
+        assert_eq!(frame.rows.len(), 3);
+        assert_eq!(
+            frame.rows[&("BTC".into(), "1d".into(), "2024-01-01T00:00:00Z".into())]["close"],
+            "100"
+        );
+        assert_eq!(
+            frame.rows[&("BTC".into(), "1h".into(), "2024-01-01T00:00:00Z".into())]["close"],
+            "50"
+        );
+        assert_eq!(frame.frequencies_of("BTC"), ["1d", "1h"]);
+    }
+
+    /// …and reading it as one stream is refused rather than silently
+    /// interleaved. The message has to name both cadences: knowing *which*
+    /// stray series leaked in is the whole fix.
+    #[test]
+    fn atoms_refuse_a_symbol_carrying_two_cadences() {
+        let path = tmp_csv(
+            "fugazi_cadence_atoms_refuse.csv",
+            "symbol,freq,time,open,high,low,close,volume\n\
+             BTC,1d,2024-01-01T00:00:00Z,100,100,100,100,1\n\
+             BTC,1h,2024-01-01T01:00:00Z,50,50,50,50,1\n",
+        );
+        let frame = DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
+        let err = frame.atoms("BTC").unwrap_err().to_string();
+        assert!(err.contains("carries 2 cadences"), "got {err}");
+        assert!(err.contains("1d, 1h"), "got {err}");
+        assert!(err.contains("-f/--frequency BTC:<CODE>"), "got {err}");
+    }
+
+    /// A frame with one cadence per symbol reads exactly as it did before the
+    /// key grew a component — including the ascending-by-time guarantee every
+    /// caller of `atoms` relies on.
+    #[test]
+    fn one_cadence_per_symbol_reads_unchanged() {
+        let path = tmp_csv(
+            "fugazi_cadence_single.csv",
+            "symbol,freq,time,open,high,low,close,volume\n\
+             BTC,1d,2024-01-02T00:00:00Z,2,2,2,2,1\n\
+             BTC,1d,2024-01-01T00:00:00Z,1,1,1,1,1\n\
+             ETH,1d,2024-01-01T00:00:00Z,9,9,9,9,1\n",
+        );
+        let frame = DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
+        assert_eq!(frame.symbols(), ["BTC", "ETH"]);
+        let series = frame.atoms("BTC").unwrap();
+        assert_eq!(series.atoms.len(), 2);
+        assert_eq!(series.atoms[0].0, "2024-01-01T00:00:00Z");
+        assert_eq!(series.atoms[1].0, "2024-01-02T00:00:00Z");
+    }
+
+    /// The documented two-`get`-into-two-`--series` join, with a hand-written
+    /// overlay CSV that has no `freq` column. Keying the blank cell as its own
+    /// group would put the overlay in a different bucket from the price and
+    /// break the join outright.
+    #[test]
+    fn untagged_rows_join_the_symbols_sole_declared_cadence() {
+        let prices = tmp_csv(
+            "fugazi_cadence_fold_px.csv",
+            "symbol,freq,time,open,high,low,close,volume\n\
+             BTC,1d,2024-01-01T00:00:00Z,100,100,100,100,1\n\
+             BTC,1d,2024-01-02T00:00:00Z,101,101,101,101,1\n",
+        );
+        let overlay = tmp_csv(
+            "fugazi_cadence_fold_ov.csv",
+            "symbol,time,sentiment\n\
+             BTC,2024-01-01T00:00:00Z,0.5\n\
+             BTC,2024-01-02T00:00:00Z,0.7\n",
+        );
+        let frame = DataFrame::from_series(&[
+            format!("@{prices}").parse().unwrap(),
+            format!("@{overlay}").parse().unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(frame.frequencies_of("BTC"), ["1d"]);
+        assert_eq!(frame.rows.len(), 2);
+        let series = frame.atoms("BTC").unwrap();
+        assert_eq!(series.atoms.len(), 2);
+        // The overlay landed on the price rows rather than beside them.
+        let schema = series.atoms[0].1.overlays.as_ref().unwrap();
+        assert_eq!(schema.schema().keys().collect::<Vec<_>>(), ["sentiment"]);
+    }
+
+    /// The fold is a *pre*-pass, so the rows still merge in the order the
+    /// `--series` flags were given and "the later series wins a column clash"
+    /// is unchanged. Folding after the inserts would have made the untagged
+    /// side win regardless of where it was typed.
+    #[test]
+    fn folding_untagged_rows_preserves_series_order() {
+        let tagged = tmp_csv(
+            "fugazi_cadence_order_a.csv",
+            "symbol,freq,time,open,high,low,close,volume,note\n\
+             BTC,1d,2024-01-01T00:00:00Z,100,100,100,100,1,tagged\n",
+        );
+        let untagged = tmp_csv(
+            "fugazi_cadence_order_b.csv",
+            "symbol,time,note\nBTC,2024-01-01T00:00:00Z,untagged\n",
+        );
+        let key = ("BTC".to_string(), "1d".to_string(), "2024-01-01T00:00:00Z".to_string());
+
+        let untagged_last = DataFrame::from_series(&[
+            format!("@{tagged}").parse().unwrap(),
+            format!("@{untagged}").parse().unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(untagged_last.rows[&key]["note"], "untagged");
+
+        let tagged_last = DataFrame::from_series(&[
+            format!("@{untagged}").parse().unwrap(),
+            format!("@{tagged}").parse().unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(tagged_last.rows[&key]["note"], "tagged");
+    }
+
+    /// With two declared cadences there is no sole cadence to adopt, so the
+    /// untagged rows stay in their own group for the census to report. Guessing
+    /// one would re-create the silent-merge bug in a new place.
+    #[test]
+    fn untagged_rows_stay_apart_when_the_symbol_declares_two_cadences() {
+        let path = tmp_csv(
+            "fugazi_cadence_no_fold.csv",
+            "symbol,freq,time,open,high,low,close,volume\n\
+             BTC,1d,2024-01-01T00:00:00Z,100,100,100,100,1\n\
+             BTC,1h,2024-01-01T01:00:00Z,50,50,50,50,1\n",
+        );
+        let overlay = tmp_csv(
+            "fugazi_cadence_no_fold_ov.csv",
+            "symbol,time,sentiment\nBTC,2024-01-01T00:00:00Z,0.5\n",
+        );
+        let frame = DataFrame::from_series(&[
+            format!("@{path}").parse().unwrap(),
+            format!("@{overlay}").parse().unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(frame.frequencies_of("BTC"), ["", "1d", "1h"]);
+    }
+
+    /// The fold is per symbol: BTC's sole cadence says nothing about ETH's.
+    #[test]
+    fn the_untagged_fold_does_not_leak_across_symbols() {
+        let path = tmp_csv(
+            "fugazi_cadence_fold_scope.csv",
+            "symbol,freq,time,open,high,low,close,volume\n\
+             BTC,1d,2024-01-01T00:00:00Z,100,100,100,100,1\n\
+             ETH,,2024-01-01T00:00:00Z,9,9,9,9,1\n",
+        );
+        let frame = DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
+        assert_eq!(frame.frequencies_of("BTC"), ["1d"]);
+        assert_eq!(frame.frequencies_of("ETH"), [""]);
+    }
+
+    /// `1M` is a month and `1m` is a minute — the `freq` cell is the one place
+    /// in this loader where case carries meaning, so it is never folded.
+    #[test]
+    fn the_freq_cell_is_not_case_folded() {
+        let path = tmp_csv(
+            "fugazi_cadence_case.csv",
+            "symbol,freq,time,open,high,low,close,volume\n\
+             BTC,1M,2024-01-01T00:00:00Z,100,100,100,100,1\n\
+             BTC,1m,2024-01-01T00:01:00Z,50,50,50,50,1\n",
+        );
+        let frame = DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
+        assert_eq!(frame.frequencies_of("BTC"), ["1M", "1m"]);
+    }
+
+    /// A blank `freq` cell is a missing label, not a cadence named "".
+    #[test]
+    fn a_blank_freq_cell_is_treated_as_absent() {
+        let path = tmp_csv(
+            "fugazi_cadence_blank.csv",
+            "symbol,freq,time,open,high,low,close,volume\n\
+             BTC,  ,2024-01-01T00:00:00Z,100,100,100,100,1\n\
+             BTC,1d,2024-01-02T00:00:00Z,101,101,101,101,1\n",
+        );
+        let frame = DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
+        assert_eq!(frame.frequencies_of("BTC"), ["1d"]);
+    }
+
+    #[test]
+    fn declared_frequency_reads_a_sole_parseable_label() {
+        let path = tmp_csv(
+            "fugazi_cadence_declared.csv",
+            "symbol,freq,time,open,high,low,close,volume\n\
+             BTC,4h,2024-01-01T00:00:00Z,100,100,100,100,1\n\
+             ETH,weekly,2024-01-01T00:00:00Z,9,9,9,9,1\n\
+             SOL,,2024-01-01T00:00:00Z,9,9,9,9,1\n",
+        );
+        let frame = DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
+        assert_eq!(frame.declared_frequency("BTC"), Some(Frequency::Hour(4)));
+        // Labelled, but not as anything `Frequency` knows.
+        assert_eq!(frame.declared_frequency("ETH"), None);
+        assert_eq!(frame.declared_frequency("SOL"), None);
+        assert_eq!(frame.declared_frequency("DOGE"), None);
+    }
+
+    /// Ambiguity has no declared cadence to report — asking a symbol that
+    /// carries two would otherwise hand back whichever sorted first.
+    #[test]
+    fn declared_frequency_is_none_while_a_symbol_is_ambiguous() {
+        let path = tmp_csv(
+            "fugazi_cadence_declared_ambiguous.csv",
+            "symbol,freq,time,open,high,low,close,volume\n\
+             BTC,1d,2024-01-01T00:00:00Z,100,100,100,100,1\n\
+             BTC,1h,2024-01-01T01:00:00Z,50,50,50,50,1\n",
+        );
+        let mut frame = DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
+        assert_eq!(frame.declared_frequency("BTC"), None);
+        // Once resolved, the survivor answers.
+        frame.retain_cadence("BTC", "1h");
+        assert_eq!(frame.declared_frequency("BTC"), Some(Frequency::Hour(1)));
+    }
+
+    #[test]
+    fn retain_cadence_prunes_only_the_named_symbol() {
+        let path = tmp_csv(
+            "fugazi_cadence_retain.csv",
+            "symbol,freq,time,open,high,low,close,volume\n\
+             BTC,1d,2024-01-01T00:00:00Z,100,100,100,100,1\n\
+             BTC,1h,2024-01-01T01:00:00Z,50,50,50,50,1\n\
+             ETH,1h,2024-01-01T01:00:00Z,9,9,9,9,1\n",
+        );
+        let mut frame = DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
+        frame.retain_cadence("BTC", "1d");
+        assert_eq!(frame.frequencies_of("BTC"), ["1d"]);
+        assert_eq!(frame.frequencies_of("ETH"), ["1h"]);
+        assert_eq!(frame.atoms("BTC").unwrap().atoms.len(), 1);
+    }
+
+    /// Pruning can retire the last row carrying a column, so the memoized
+    /// frame-wide schema has to be rebuilt — a stale `Arc` here would leave
+    /// every `!get` resolving against columns the run no longer has.
+    #[test]
+    fn retain_cadence_rebuilds_the_memoized_schema() {
+        let path = tmp_csv(
+            "fugazi_cadence_retain_schema.csv",
+            "symbol,freq,time,open,high,low,close,volume,funding\n\
+             BTC,1d,2024-01-01T00:00:00Z,100,100,100,100,1,\n\
+             BTC,8h,2024-01-01T08:00:00Z,50,50,50,50,1,0.01\n",
+        );
+        let mut frame = DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
+        // Memoize it first, so the test really exercises the invalidation.
+        assert!(frame.shared_schema().is_some());
+        frame.retain_cadence("BTC", "1d");
+        let schema = frame.shared_schema().expect("the column still exists");
+        assert_eq!(schema.keys().collect::<Vec<_>>(), ["funding"]);
+        assert_eq!(frame.atoms("BTC").unwrap().atoms.len(), 1);
+    }
+
+    #[test]
+    fn cadence_groups_sorts_stamps_and_skips_unparseable_times() {
+        let path = tmp_csv(
+            "fugazi_cadence_groups.csv",
+            "symbol,freq,time,open,high,low,close,volume\n\
+             BTC,1d,1704153600,100,100,100,100,1\n\
+             BTC,1d,1704067200,100,100,100,100,1\n\
+             BTC,1d,not-a-time,100,100,100,100,1\n",
+        );
+        let frame = DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
+        let groups = frame.cadence_groups();
+        assert_eq!(groups.len(), 1);
+        let (symbol, freq, stamps) = &groups[0];
+        assert_eq!((symbol.as_str(), freq.as_str()), ("BTC", "1d"));
+        // Epoch seconds sort lexicographically the wrong way round in the key;
+        // the census gets them ascending, and the unparseable row is absent
+        // rather than counted as a bar it cannot space.
+        assert_eq!(stamps, &[1_704_067_200_000, 1_704_153_600_000]);
+    }
+
+    #[test]
+    fn cadence_groups_separates_every_symbol_and_label() {
+        let path = tmp_csv(
+            "fugazi_cadence_groups_split.csv",
+            "symbol,freq,time,open,high,low,close,volume\n\
+             BTC,1d,2024-01-01T00:00:00Z,100,100,100,100,1\n\
+             BTC,1h,2024-01-01T01:00:00Z,50,50,50,50,1\n\
+             ETH,1d,2024-01-01T00:00:00Z,9,9,9,9,1\n",
+        );
+        let frame = DataFrame::from_series(&[format!("@{path}").parse().unwrap()]).unwrap();
+        let seen: Vec<(String, String, usize)> = frame
+            .cadence_groups()
+            .into_iter()
+            .map(|(s, f, stamps)| (s, f, stamps.len()))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("BTC".to_string(), "1d".to_string(), 1),
+                ("BTC".to_string(), "1h".to_string(), 1),
+                ("ETH".to_string(), "1d".to_string(), 1),
+            ]
+        );
     }
 }
