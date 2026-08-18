@@ -179,11 +179,58 @@ short form, in the order you will hit them.
   [docs/PERFORMANCE.md](PERFORMANCE.md) — and add a written exemption there
   rather than letting a row sit over budget unexplained.
 
-**Multi-output indicators** (`Output` is a value struct) carry three extras:
-`component_accessors!` for the per-line `Component` accessors (step 1),
-a `MultiOutput` impl in `python/src/carriers.rs`, and a `PyMulti` constructor
-(step 6). `MultiOutput`'s primitive is `write_row(&mut [Real])` — write the lines
-straight into the caller's row; do not build a `Vec` per bar.
+#### Multi-output indicators
+
+An `Output` that is a value struct carries three extras: `component_accessors!`
+for the per-line `Component` accessors (step 1), a `MultiOutput` impl in
+`python/src/carriers.rs`, and a `PyMulti` constructor (step 6).
+
+Their cost through the Python bindings is **dominated by writes, and scales with
+the number of output lines** — a batch `feed` materialises one full-length NumPy
+column per line. Measured with callgrind on a three-line value
+(`cs.macd`/`cs.sma`, cache simulation on):
+
+| | 1 line (`sma`) | 3 lines (`macd`) |
+|---|---:|---:|
+| instructions/sample | 38.8 | 154.5 |
+| data writes/sample | 4.7 | 19.5 in the fold alone |
+| D1 write misses/sample | 0.125 | 0.375 |
+
+The misses are already optimal — 0.375 is exactly three columns at one cache
+line per eight doubles — so there is nothing to win there. The fold itself has
+**essentially no cache misses at all** (23 D1 read misses per million samples):
+it is issue-bound on instructions and stores, not memory-stalled. So:
+
+* **`write_row` must be a plain field copy.** No allocation, no `Vec`, no
+  formatting. It is called once per bar per indicator.
+* **Every line you add is a full output column.** Through the bindings that is
+  roughly 0.5-1.6 ns/sample, converged, for the column alone. Cheap per line,
+  but it is the one thing that scales, and a *derived* line — `oscillator` is
+  `up - down`, `histogram` is `macd - signal` — spends it on a subtraction the
+  caller could do. Measured: dropping both bought `aroon` 1.6 ns/sample and
+  `macd` 0.7. Small enough not to be worth an API change, large enough not to
+  add lines carelessly.
+* **`Option<Real>` per line costs two words each** (`Option<f64>` has no niche),
+  so the `pub` per-line fields the `value()` contract needs are `2N` words of
+  stores per bar. That is a third of the fold's writes for a three-line value.
+  It is the accepted price of `value()` — see the write-back measurement in
+  `benches/breaking.rs` — but it is a reason to keep `N` small, not a licence to
+  grow it.
+* **Add the indicator to `tools/icount_python.py` and `benches/icount.rs`.**
+  Those two together are what let the boundary be separated from the engine
+  (subtract one from the other); an indicator in neither cannot be diagnosed
+  when it turns out slow.
+* **If the engine has a data-dependent inner loop** — a rolling extreme, the
+  quantile core, anything with a `while` over a window — say so next to the
+  workload. That subtraction is only valid for input-independent work, and
+  `Aroon` costs 1.43x more on one realistic price series than another. See
+  *Ruled out, so nobody re-tries them* in [docs/PERFORMANCE.md](PERFORMANCE.md).
+
+**The output allocation is not yours to fix and not a fugazi problem.** `lines`
+separate NumPy arrays cost ~8-10 ns/sample against ~0.4 for one, a threshold at
+two arrays rather than a slope. TA-Lib pays the same toll — `talib.AROON` costs
+7.84 ns/sample more than `talib.AROONOSC` for its second output array, which is
+very nearly its whole Python wrapper cost.
 
 ### 2. Re-export — `src/indicators/mod.rs`
 
