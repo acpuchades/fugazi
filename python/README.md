@@ -34,7 +34,7 @@ the evidence, then the manual.
 **Jump to:** [Why](#why-fugazi) · [Install](#install) · [Sixty seconds](#sixty-seconds) ·
 [Indicators](#guide-indicators-and-signals) · [Trading](#guide-trading) ·
 [Strategy documents](#guide-strategies-as-documents) · [Metrics](#metrics) ·
-[Data](#fetching-data) · [Performance](#performance)
+[Data](#fetching-data) · [Performance](#performance) · [Sponsor](#sponsor)
 
 ---
 
@@ -914,7 +914,7 @@ metrics = spec.evaluate(ta.PaperWallet(1000.0), snaps)  # -> nested dict mirrori
 ```
 
 `spec.meta` returns the document's free-form
-[`meta:`](../docs/STRATEGIES.md#metadata--meta) block as ordinary Python data —
+[`meta:`](https://github.com/acpuchades/fugazi/blob/main/docs/STRATEGIES.md#metadata--meta) block as ordinary Python data —
 dicts, lists, and scalars — or `None` when the document sets none. fugazi never
 interprets it; it is the open-schema slot for whatever service produced or
 stores the strategy, and it is available on all five shapes:
@@ -1508,7 +1508,7 @@ roughly half again on top of the numbers above:
 | `atr(14)` on a frame | 14.62 | — |
 
 [Full write-up, including the two mistaken conclusions that got corrected on the
-way →](../docs/PERFORMANCE.md)
+way →](https://github.com/acpuchades/fugazi/blob/main/docs/PERFORMANCE.md)
 
 ### The one real loss
 
@@ -1525,10 +1525,45 @@ that number.
 Every figure above is amortised throughput — total time over 200 000 samples,
 divided — which is the right measure for a backtest and overstates the cost of
 a single live `update()` by roughly an order of magnitude (the Rust-side
-latency numbers are in [the root README](../README.md#latency-which-is-a-different-question)).
+latency numbers are in [the root README](https://github.com/acpuchades/fugazi/blob/main/README.md#latency-which-is-a-different-question)).
 There's no equivalent Python-side latency benchmark yet; a `feed()` call
 amortises the boundary crossing across a batch, and a single `.update(candle)`
 in a live loop pays that crossing once per bar with nothing to amortise it
 against.
 
 ---
+
+## Documentation
+
+| | |
+| --- | --- |
+| [docs/PYTHON.md](https://github.com/acpuchades/fugazi/blob/main/docs/PYTHON.md) | The Python API, in full |
+| [docs/STRATEGIES.md](https://github.com/acpuchades/fugazi/blob/main/docs/STRATEGIES.md) | The strategy-file format — every YAML tag, all five document shapes |
+| [docs/METRICS.md](https://github.com/acpuchades/fugazi/blob/main/docs/METRICS.md) | What each metric means and how it's computed |
+| [docs/COSTS.md](https://github.com/acpuchades/fugazi/blob/main/docs/COSTS.md) | Commission, spread and slippage models |
+| [docs/TRADING.md](https://github.com/acpuchades/fugazi/blob/main/docs/TRADING.md) | The execution path — bar → order → fill → closed trade |
+| [docs/PERFORMANCE.md](https://github.com/acpuchades/fugazi/blob/main/docs/PERFORMANCE.md) | How the numbers above were measured, and the mistakes made getting them |
+| [The Rust README](https://github.com/acpuchades/fugazi/blob/main/README.md) | The same engine from the other side |
+
+## Sponsor
+
+fugazi is MIT-licensed, developed in the open, and stays that way. Sponsorship buys
+**position in the queue** — never access, never a feature someone else can't have.
+
+Most of what people ask for next is bounded work with a known shape: another venue
+wallet, another data provider, a metric, a sixth document shape. Issues tagged
+[`sponsorable`](https://github.com/acpuchades/fugazi/issues?q=is%3Aissue+is%3Aopen+label%3Asponsorable)
+carry that scope written out — funding one moves it to the front, and it ships under
+MIT like the rest.
+
+| Tier | For |
+| --- | --- |
+| **Individual** | It saved you a weekend and you'd like it to keep being maintained. |
+| **Commercial** | You run fugazi in production. Named here, and issues you file get triaged first. |
+| **Funded work** | One `sponsorable` issue, scoped and scheduled with you. |
+
+[**Sponsor fugazi →**](https://github.com/sponsors/acpuchades)
+
+## License
+
+MIT — see [LICENSE](https://github.com/acpuchades/fugazi/blob/main/LICENSE).

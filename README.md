@@ -24,7 +24,8 @@ That is the whole pitch. The rest of this page is the evidence, then the manual.
 
 **Jump to:** [Why](#why-fugazi) · [Install](#install) · [Sixty seconds](#sixty-seconds) ·
 [Rust guide](#guide-the-rust-library) · [CLI guide](#guide-the-command-line) ·
-[Python](#python) · [Performance](#performance) · [What's included](#whats-included)
+[Python](#python) · [Performance](#performance) · [What's included](#whats-included) ·
+[Sponsor](#sponsor)
 
 ---
 
@@ -1372,6 +1373,10 @@ Figures from one machine (16 cores, Linux 6.18, rustc 1.95). Re-run with
 if you intend to benchmark this yourself — most of that document is the measurement
 mistakes this project has already made and how they were caught.
 
+*Those numbers, and the four reference suites that keep them honest, come from one
+maintainer. If fugazi is in your stack and you want a provider, metric or venue
+wallet sooner than the queue would deliver it, see [Sponsor](#sponsor).*
+
 ---
 
 ## What's included
@@ -1453,9 +1458,22 @@ A `cargo test` checks that every example still compiles.
 
 ## Sponsor
 
-fugazi is MIT-licensed and developed in the open. If it saves you time, or if you'd
-like to see a particular provider, metric or strategy shape land sooner, you can
-support the work through [GitHub Sponsors](https://github.com/sponsors/acpuchades).
+fugazi is MIT-licensed, developed in the open, and stays that way. Sponsorship buys
+**position in the queue** — never access, never a feature someone else can't have.
+
+Most of what people ask for next is bounded work with a known shape: another venue
+wallet, another data provider, a metric, a sixth document shape. Issues tagged
+[`sponsorable`](https://github.com/acpuchades/fugazi/issues?q=is%3Aissue+is%3Aopen+label%3Asponsorable)
+carry that scope written out — funding one moves it to the front, and it ships under
+MIT like the rest.
+
+| Tier | For |
+| --- | --- |
+| **Individual** | It saved you a weekend and you'd like it to keep being maintained. |
+| **Commercial** | You run fugazi in production. Named here, and issues you file get triaged first. |
+| **Funded work** | One `sponsorable` issue, scoped and scheduled with you. |
+
+[**Sponsor fugazi →**](https://github.com/sponsors/acpuchades)
 
 ## License
 
