@@ -1630,6 +1630,21 @@ impl PyMulti {
     /// `DataFrame` (index preserved for pandas) when given that library's
     /// frame/series, otherwise a `dict` of NumPy arrays. Warm-up bars are `NaN`.
     /// Fed through the current state — call `reset()` first for a clean pass.
+    ///
+    /// **The NumPy columns are views over one shared buffer.** Every line of a
+    /// call comes out of a single `(lines, n)` allocation, because allocating
+    /// them separately costs 10.70 ns/sample against 1.61 — NumPy's allocator
+    /// caches one buffer of a stable size and thrashes on several. The
+    /// consequence is that they share ownership: keeping one column keeps the
+    /// whole buffer alive, so holding just `adx` out of a three-line result
+    /// retains 3x what its own `nbytes` reports, and `sys.getsizeof` will say
+    /// 112 bytes while it does. `arr.base.nbytes` is what tells the truth.
+    ///
+    /// It is bounded — at most the line count — and everything frees when the
+    /// last column is dropped. If you are keeping one line out of many across a
+    /// large universe, `.copy()` it and the rest is released; that copy costs
+    /// about a tenth of what the sharing saves. The pandas path is unaffected:
+    /// pandas consolidates into its own blocks.
     pub(crate) fn feed(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let kind = OutputKind::detect(data)?;
         let names = self.inner.names();

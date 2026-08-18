@@ -810,6 +810,25 @@ pub(crate) fn numpy_filled<'py>(
 /// Split out of [`numpy_filled`] because the multi-output path needs *several*
 /// arrays live at once (one per output line) before it can start writing, so it
 /// cannot use the fill-in-a-closure form.
+/// An uninitialised `(rows, cols)` float64 array.
+///
+/// One allocation where a caller wants `rows` full-length columns, because
+/// NumPy's allocator caches a *single* buffer of a stable size and thrashes on
+/// several: allocating and first-touching three 1.6 MB arrays costs 10.70
+/// ns/sample against 1.61 for one `(3, n)` array — a threshold at two arrays,
+/// not a slope. C order, so row `j` is a contiguous run of `cols` and
+/// `base[j]` is a contiguous view.
+pub(crate) fn empty_f64_matrix<'py>(
+    py: Python<'py>,
+    rows: usize,
+    cols: usize,
+) -> PyResult<Bound<'py, PyAny>> {
+    let np = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", np.getattr("float64")?)?;
+    np.getattr("empty")?.call(((rows, cols),), Some(&kwargs))
+}
+
 pub(crate) fn empty_f64_array<'py>(py: Python<'py>, len: usize) -> PyResult<Bound<'py, PyAny>> {
     let np = py.import("numpy")?;
     let kwargs = PyDict::new(py);

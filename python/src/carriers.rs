@@ -1444,22 +1444,34 @@ impl AnyMulti {
             )));
         }
 
-        // Allocate every column first, then borrow all of their buffers at once.
-        // The buffers must outlive the slices, hence the two bindings.
+        // **One `(lines, n)` allocation, not `lines` of them.** NumPy's allocator
+        // caches a single buffer of a stable size and thrashes on several:
+        // allocating and first-touching three 1.6 MB arrays costs 10.70
+        // ns/sample against 1.61 for one `(3, n)` — a threshold at two arrays
+        // rather than a slope, and `talib` pays the same toll because its API
+        // returns a tuple of independent arrays and cannot do this. Returning a
+        // frame is what lets fugazi.
+        //
+        // C order, so row `j` is a contiguous run of `n` — exactly the
+        // column-major layout `update_slice_flat` already produces, so the
+        // scatter stays a copy per line.
         let n = self.row_count(py, data)?;
+        let base = empty_f64_matrix(py, lines, n)?;
+        let buffer = pyo3::buffer::PyBuffer::<f64>::get(&base)?;
+        let flat_out = buffer
+            .as_mut_slice(py)
+            .ok_or_else(|| PyTypeError::new_err("numpy array is not writable"))?;
+        // One contiguous destination per line, carved out of the single buffer.
+        let columns: Vec<&[std::cell::Cell<f64>]> = if n == 0 {
+            (0..lines).map(|_| &flat_out[..0]).collect()
+        } else {
+            flat_out.chunks_exact(n).collect()
+        };
+        // The per-line arrays handed back are **views** into `base`, so they
+        // share one allocation: keeping one column keeps all of them alive.
+        // Documented on `PyMulti.feed`, which is where a caller meets it.
         let arrays = (0..lines)
-            .map(|_| empty_f64_array(py, n))
-            .collect::<PyResult<Vec<_>>>()?;
-        let buffers = arrays
-            .iter()
-            .map(pyo3::buffer::PyBuffer::<f64>::get)
-            .collect::<PyResult<Vec<_>>>()?;
-        let columns = buffers
-            .iter()
-            .map(|b| {
-                b.as_mut_slice(py)
-                    .ok_or_else(|| PyTypeError::new_err("numpy array is not writable"))
-            })
+            .map(|j| base.get_item(j))
             .collect::<PyResult<Vec<_>>>()?;
 
         // Folded a chunk at a time with the indicator's state held in a local —
