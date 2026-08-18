@@ -1097,12 +1097,18 @@ fn downside_stddev(xs: &[Real], threshold: Real) -> Real {
 /// pays once per grid row per fold.
 ///
 /// So each of the four splits into a public front (sorts, then delegates) and a
-/// `*_of_sorted` back the reducer calls against one copy. The same shape as the
-/// existing public [`probabilistic_sharpe_from_stats`] /
-/// [`deflated_sharpe_from_stats`] pairs, but kept crate-private: these are an
-/// internal reuse mechanism, not new user-facing metrics, and every `pub fn` in
-/// this module must be mirrored on the Python `fugazi.metrics` module (enforced
-/// by `tests/hand_maintained_mirrors.rs`).
+/// `*_of_sorted` back. The same shape as the existing public
+/// [`probabilistic_sharpe_from_stats`] / [`deflated_sharpe_from_stats`] pairs,
+/// but kept crate-private: these are an internal reuse mechanism, not new
+/// user-facing metrics, and every `pub fn` in this module must be mirrored on
+/// the Python `fugazi.metrics` module (enforced by
+/// `tests/hand_maintained_mirrors.rs`).
+///
+/// **The reducer no longer takes this path at all** — [`quantile_reads`] answers
+/// all four without a total order, for a further 3.76 ms → 0.70 ms at 200 000
+/// bars. The split survives because it is still what the four public fronts are
+/// built from, and because it is the reference `quantile_reads` is pinned
+/// against.
 pub(crate) fn sorted_asc(xs: &[Real]) -> Vec<Real> {
     let mut v = xs.to_vec();
     v.sort_by(crate::indicators::stats::cmp_asc);
@@ -1172,6 +1178,556 @@ fn longest_streak(trades: &[Trade], predicate: impl Fn(&Trade) -> bool) -> usize
     max
 }
 
+// ---------------------------------------------------------------------------
+// Shared reduction cores
+// ---------------------------------------------------------------------------
+//
+// Everything below is `pub(crate)`, and for the same reason `sorted_asc` is:
+// these are an internal reuse mechanism for a caller that wants *all* of the
+// numbers at once, not new user-facing metrics — and every `pub fn` in this
+// module owes a mirror on Python's `fugazi.metrics` (enforced by
+// `tests/hand_maintained_mirrors.rs`).
+//
+// The public per-metric functions above stay the definition of each metric.
+// The cores here re-derive them from shared accumulators, so the two *could*
+// drift; `tests::reduction_cores_match_public_metrics` walks a spread of
+// series (including the degenerate ones) and pins every derivation to its
+// public twin, bit for bit.
+//
+// Delegating the other way — having `mean_return` and friends read off a core —
+// would remove the duplication, and is the wrong trade: a standalone
+// `mean_return` would then pay for a two-pass gather of moments, a downside
+// deviation and two Omega integrals it does not want, and `fugazi.metrics`
+// exposes every one of those functions to Python as a single call.
+//
+// Gated on `spec` because `spec::metrics::from_report` is the only caller, and
+// the feature matrix builds `--no-default-features --lib` (where `spec` is
+// off) with `-D warnings` — so an ungated core is a dead-code error in five of
+// the matrix jobs. If a second caller appears outside `spec`, widen the gate
+// rather than reaching for `#[allow(dead_code)]`.
+
+#[cfg(feature = "spec")]
+/// The seed `impl Sum for f64` folds from.
+///
+/// `-0.0` is the additive identity f64 actually has — `x + -0.0 == x` for every
+/// `x`, including `x = -0.0`, whereas `-0.0 + 0.0` is `+0.0`. That matters here
+/// only because `sum()` over an **empty** iterator returns the seed verbatim,
+/// and three of the trade aggregates below sum a filtered subset that is empty
+/// whenever a run has no winner (or no loser): `profit_factor` on a run where
+/// every trade lost is `Some(-0.0)`, and an accumulator seeded `0.0` would
+/// answer `Some(0.0)`. Same number, different bits, and `metrics.yml`
+/// serializes the sign.
+const SUM_SEED: Real = -0.0;
+
+#[cfg(feature = "spec")]
+/// Every accumulator the return series is asked for, gathered in two passes.
+///
+/// [`from_report`](crate::spec::metrics::from_report) needs fourteen numbers
+/// off one return series, and taken one public function at a time that was
+/// ~30 walks of it: `sharpe` derives the mean and then the mean and stddev
+/// again inside `annualized_volatility`, `sortino` derives the mean twice more,
+/// `skewness` and `kurtosis` each re-derive the mean *and* `Σ(x − mean)²`
+/// before their own moment, and `probabilistic_sharpe` then calls all three of
+/// `sharpe` / `skewness` / `kurtosis` a second time from scratch. Measured on a
+/// 200 000-bar run that was 4.1 ms of a 9.6 ms reduction — 43% of it, and the
+/// largest single cost. Gathering once takes the same fourteen numbers to
+/// 0.57 ms.
+///
+/// Two passes rather than one, because the centred moments need the mean and
+/// this crate does not take the `E[X²] − E[X]²` shortcut — it cancels away the
+/// leading digits, and it was wrong at crypto price scale (see
+/// [`WindowStats`](crate::indicators::stats)).
+///
+/// `threshold` is the Minimum Acceptable Return shared by the downside
+/// deviation ([`sortino`]) and the Omega integrals ([`omega`]); pass the
+/// per-bar risk-free rate.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ReturnStats {
+    n: usize,
+    mean: Real,
+    best: Real,
+    worst: Real,
+    positive: usize,
+    /// `Σ (x − mean)²`
+    sum_sq: Real,
+    /// `Σ (x − mean)³`
+    sum_cu: Real,
+    /// `Σ (x − mean)⁴`
+    sum_qu: Real,
+    /// `Σ min(0, x − threshold)²`
+    downside_sq: Real,
+    /// `Σ max(x − threshold, 0)`
+    omega_gains: Real,
+    /// `Σ max(threshold − x, 0)`
+    omega_losses: Real,
+}
+
+#[cfg(feature = "spec")]
+impl ReturnStats {
+    pub(crate) fn of(returns: &[Real], threshold: Real) -> Self {
+        let n = returns.len();
+        if n == 0 {
+            return Self {
+                n: 0,
+                mean: 0.0,
+                best: 0.0,
+                worst: 0.0,
+                positive: 0,
+                sum_sq: 0.0,
+                sum_cu: 0.0,
+                sum_qu: 0.0,
+                downside_sq: 0.0,
+                omega_gains: 0.0,
+                omega_losses: 0.0,
+            };
+        }
+
+        // Pass 1 — the mean, the extrema, the sign count. `SUM_SEED`, not
+        // `0.0`: this stands in for `returns.iter().sum::<Real>()`.
+        let mut sum = SUM_SEED;
+        let mut best = returns[0];
+        let mut worst = returns[0];
+        let mut positive = 0usize;
+        for &r in returns {
+            sum += r;
+            best = best.max(r);
+            worst = worst.min(r);
+            if r > 0.0 {
+                positive += 1;
+            }
+        }
+        let mean = sum / n as Real;
+
+        // Pass 2 — the centred moments, the downside deviation, the Omega
+        // integrals. `d2 * d` and `d2 * d2` are the same multiplication trees
+        // `powi(3)` / `powi(4)` expand to, so each accumulator sees the same
+        // addends in the same order as the public functions' own folds.
+        let mut sum_sq = SUM_SEED;
+        let mut sum_cu = SUM_SEED;
+        let mut sum_qu = SUM_SEED;
+        let mut downside_sq = SUM_SEED;
+        // `omega` is a hand-written loop seeded `0.0`, not a `sum()` — so these
+        // two are seeded `0.0`. The seed is copied from the public function,
+        // not chosen.
+        let mut omega_gains = 0.0;
+        let mut omega_losses = 0.0;
+        for &r in returns {
+            let d = r - mean;
+            let d2 = d * d;
+            sum_sq += d2;
+            sum_cu += d2 * d;
+            sum_qu += d2 * d2;
+
+            let diff = r - threshold;
+            let below = diff.min(0.0);
+            downside_sq += below * below;
+            if diff >= 0.0 {
+                omega_gains += diff;
+            } else {
+                omega_losses += -diff;
+            }
+        }
+
+        Self {
+            n,
+            mean,
+            best,
+            worst,
+            positive,
+            sum_sq,
+            sum_cu,
+            sum_qu,
+            downside_sq,
+            omega_gains,
+            omega_losses,
+        }
+    }
+
+    /// The observation count — [`probabilistic_sharpe_from_stats`]'s `n_returns`.
+    pub(crate) fn len(&self) -> usize {
+        self.n
+    }
+
+    /// [`mean_return`]
+    pub(crate) fn mean(&self) -> Real {
+        self.mean
+    }
+
+    /// [`best_return`]
+    pub(crate) fn best(&self) -> Real {
+        self.best
+    }
+
+    /// [`worst_return`]
+    pub(crate) fn worst(&self) -> Real {
+        self.worst
+    }
+
+    /// [`positive_bars_ratio`]
+    pub(crate) fn positive_ratio(&self) -> Real {
+        if self.n == 0 {
+            0.0
+        } else {
+            self.positive as Real / self.n as Real
+        }
+    }
+
+    /// [`stddev_return`] — sample (`ddof=1`).
+    pub(crate) fn stddev(&self) -> Real {
+        if self.n < 2 {
+            0.0
+        } else {
+            (self.sum_sq / (self.n - 1) as Real).sqrt()
+        }
+    }
+
+    /// The biased central second moment, the [`skewness`] / [`kurtosis`]
+    /// denominator. `None` when it vanishes, matching both.
+    fn m2(&self) -> Option<Real> {
+        if self.n == 0 {
+            return None;
+        }
+        let m2 = self.sum_sq / self.n as Real;
+        (m2 != 0.0).then_some(m2)
+    }
+
+    /// [`skewness`]
+    pub(crate) fn skewness(&self) -> Option<Real> {
+        let m2 = self.m2()?;
+        Some((self.sum_cu / self.n as Real) / m2.powf(1.5))
+    }
+
+    /// [`kurtosis`]
+    pub(crate) fn kurtosis(&self) -> Option<Real> {
+        let m2 = self.m2()?;
+        Some((self.sum_qu / self.n as Real) / m2.powi(2) - 3.0)
+    }
+
+    /// [`annualized_return`]
+    pub(crate) fn annualized_mean(&self, bars_per_year: Real) -> Real {
+        self.mean * bars_per_year
+    }
+
+    /// [`annualized_volatility`]
+    pub(crate) fn annualized_volatility(&self, bars_per_year: Real) -> Real {
+        self.stddev() * bars_per_year.max(0.0).sqrt()
+    }
+
+    /// [`sharpe`]
+    pub(crate) fn sharpe(&self, risk_free_rate: Real, bars_per_year: Real) -> Option<Real> {
+        safe_div(
+            self.annualized_mean(bars_per_year) - risk_free_rate,
+            self.annualized_volatility(bars_per_year),
+        )
+    }
+
+    /// [`sortino`] — valid only when `self` was gathered with the per-bar
+    /// risk-free rate as its `threshold`, which is that metric's MAR.
+    pub(crate) fn sortino(&self, risk_free_rate: Real, bars_per_year: Real) -> Option<Real> {
+        let downside = if self.n == 0 {
+            0.0
+        } else {
+            (self.downside_sq / self.n as Real).sqrt()
+        };
+        safe_div(
+            self.annualized_mean(bars_per_year) - risk_free_rate,
+            downside * bars_per_year.max(0.0).sqrt(),
+        )
+    }
+
+    /// [`omega`] at the `threshold` `self` was gathered with.
+    pub(crate) fn omega(&self) -> Option<Real> {
+        safe_div(self.omega_gains, self.omega_losses)
+    }
+}
+
+#[cfg(feature = "spec")]
+/// The four quantile answers a report needs off one return distribution.
+pub(crate) struct QuantileReads {
+    /// [`median_return`]
+    pub median: Real,
+    /// [`value_at_risk`]
+    pub var: Real,
+    /// [`conditional_value_at_risk`]
+    pub cvar: Real,
+    /// [`tail_ratio`]
+    pub tail_ratio: Option<Real>,
+}
+
+#[cfg(feature = "spec")]
+/// All four quantile reads without sorting the series.
+///
+/// Between them the four need six order statistics and the mean of one tail —
+/// not a total order. [`sorted_asc`] gave the reducer one sort instead of four,
+/// which was the right first move; this replaces the remaining sort with
+/// introselect. On a 200 000-bar run the four reads go from 3.76 ms (39% of the
+/// whole reduction) to 0.70 ms.
+///
+/// Bit-identical to the sorted path, deliberately, down to two details:
+///
+/// * [`value_at_risk`] and [`conditional_value_at_risk`] take a *confidence*
+///   and derive the tail as `1.0 - confidence`, while [`tail_ratio`] writes
+///   `0.05` as a literal. `1.0 - 0.95` is `0.050000000000000044`, and the
+///   4.4e-17 between them is not cosmetic: at 10 000 samples `p·(n − 1)` floors
+///   to index 500 for one and 499 for the other, and `ceil(n·p)` gives a 501-
+///   rather than 500-element CVaR tail. Both spellings are carried.
+/// * the CVaR tail is sorted before it is averaged, so its mean sums ascending
+///   exactly as [`tail_mean`] over a fully-sorted copy would. Summing it in
+///   partition order is ~15% faster again and lands ~1 ULP away; not worth it.
+///
+/// `NaN` tolerance is the same weak promise [`sorted_asc`] makes — no panic,
+/// via [`cmp_asc`](crate::indicators::stats::cmp_asc) — but *not* the same
+/// arbitrary placement: with a `NaN` in the series the comparator is not a
+/// total order, and where introselect strands it need not be where a sort
+/// would. A `NaN` here means the equity curve already carried one.
+pub(crate) fn quantile_reads(returns: &[Real], confidence: Real) -> QuantileReads {
+    let n = returns.len();
+    if n == 0 {
+        return QuantileReads {
+            median: 0.0,
+            var: 0.0,
+            cvar: 0.0,
+            tail_ratio: None,
+        };
+    }
+
+    let p_tail = 1.0 - confidence;
+    let straddle = |p: Real| -> (usize, usize) {
+        let idx = p * (n - 1) as Real;
+        let lo = idx.floor() as usize;
+        (lo, (lo + 1).min(n - 1))
+    };
+    let (lo_var, hi_var) = straddle(p_tail);
+    let (lo05, hi05) = straddle(0.05);
+    let (lo95, hi95) = straddle(0.95);
+    let cutoff = ((n as Real * p_tail).ceil() as usize).max(1);
+
+    let mut ks = vec![lo_var, hi_var, lo05, hi05, lo95, hi95, cutoff - 1];
+    if n.is_multiple_of(2) {
+        ks.push(n / 2 - 1);
+        ks.push(n / 2);
+    } else {
+        ks.push(n / 2);
+    }
+    ks.sort_unstable();
+    ks.dedup();
+
+    let mut v = returns.to_vec();
+    let mut found: Vec<(usize, Real)> = Vec::with_capacity(ks.len());
+    select_each(&mut v, &ks, 0, &mut found);
+    let at = |k: usize| -> Real {
+        found
+            .iter()
+            .find(|(i, _)| *i == k)
+            .expect("every requested index was selected")
+            .1
+    };
+
+    // R type-7, on the two order statistics the quantile straddles — the same
+    // arithmetic `quantile_of_sorted` does, off selected elements instead of a
+    // sorted slice.
+    let quantile = |p: Real, lo: usize, hi: usize| -> Real {
+        if n == 1 {
+            return at(0);
+        }
+        let frac = p * (n - 1) as Real - lo as Real;
+        at(lo) * (1.0 - frac) + at(hi) * frac
+    };
+
+    let median = if n.is_multiple_of(2) {
+        (at(n / 2 - 1) + at(n / 2)) / 2.0
+    } else {
+        at(n / 2)
+    };
+
+    // Selecting index `cutoff - 1` left `v[..cutoff]` holding exactly the
+    // `cutoff` smallest elements, as a multiset.
+    let tail = &mut v[..cutoff];
+    tail.sort_unstable_by(crate::indicators::stats::cmp_asc);
+
+    QuantileReads {
+        median,
+        var: -quantile(p_tail, lo_var, hi_var),
+        cvar: -(tail.iter().sum::<Real>() / cutoff as Real),
+        tail_ratio: safe_div(
+            quantile(0.95, lo95, hi95).abs(),
+            quantile(0.05, lo05, hi05).abs(),
+        ),
+    }
+}
+
+#[cfg(feature = "spec")]
+/// Place every index in `ks` (ascending, deduped, absolute) at its final
+/// position in `v`, recording the order statistic found there.
+///
+/// `base` is the absolute index of `v[0]`. Selecting the middle wanted index
+/// first and recursing into the two partitions costs `O(len)` per level over
+/// halving lengths, so the six-to-nine indices a report asks for come to ~2n
+/// comparisons against the ~n·log₂n a sort pays.
+///
+/// The partition invariant survives the recursion: every later select
+/// rearranges a contiguous sub-slice whose element *set* is already fixed. So
+/// on return `v[k]` is the k-th order statistic for each `k` in `ks`, and
+/// `v[..k]` holds exactly the k smallest elements.
+fn select_each(v: &mut [Real], ks: &[usize], base: usize, out: &mut Vec<(usize, Real)>) {
+    if ks.is_empty() {
+        return;
+    }
+    let mid = ks.len() / 2;
+    let k = ks[mid];
+    let (lo, at, hi) = v.select_nth_unstable_by(k - base, crate::indicators::stats::cmp_asc);
+    out.push((k, *at));
+    select_each(lo, &ks[..mid], base, out);
+    select_each(hi, &ks[mid + 1..], k + 1, out);
+}
+
+#[cfg(feature = "spec")]
+/// Every aggregate the reconstructed trades are asked for, in one walk.
+///
+/// The same argument as [`ReturnStats`], at a different scale: taken one public
+/// function at a time the trade section is ~20 walks of the vector, two of them
+/// (`average_win`, `average_loss`) collecting the filtered PnLs into a fresh
+/// `Vec` before averaging. That is 23 µs against 5 µs on a 100-trade run —
+/// invisible next to the return series there, and the dominant trade-side cost
+/// on a high-turnover one, where the vector is the long input.
+pub(crate) struct TradeStats {
+    pub total: usize,
+    pub wins: usize,
+    pub losses: usize,
+    pub flat: usize,
+    pub longs: usize,
+    pub shorts: usize,
+    pub max_consec_wins: usize,
+    pub max_consec_losses: usize,
+    pub largest_win: Option<Real>,
+    pub largest_loss: Option<Real>,
+    pub min_bars: Option<usize>,
+    pub max_bars: Option<usize>,
+    sum_pnl: Real,
+    sum_win_pnl: Real,
+    sum_loss_pnl: Real,
+    sum_return_ratio: Real,
+    sum_bars: Real,
+}
+
+#[cfg(feature = "spec")]
+impl TradeStats {
+    pub(crate) fn of(trades: &[Trade]) -> Self {
+        let mut s = Self {
+            total: trades.len(),
+            wins: 0,
+            losses: 0,
+            flat: 0,
+            longs: 0,
+            shorts: 0,
+            max_consec_wins: 0,
+            max_consec_losses: 0,
+            largest_win: None,
+            largest_loss: None,
+            min_bars: None,
+            max_bars: None,
+            // All five stand in for an `Iterator::sum::<Real>()`. See `SUM_SEED`.
+            sum_pnl: SUM_SEED,
+            sum_win_pnl: SUM_SEED,
+            sum_loss_pnl: SUM_SEED,
+            sum_return_ratio: SUM_SEED,
+            sum_bars: SUM_SEED,
+        };
+        let mut win_run = 0usize;
+        let mut loss_run = 0usize;
+
+        for t in trades {
+            s.sum_pnl += t.pnl;
+            s.sum_return_ratio += t.return_ratio;
+            let bars = t.bars_held();
+            s.sum_bars += bars as Real;
+            s.min_bars = Some(s.min_bars.map_or(bars, |m| m.min(bars)));
+            s.max_bars = Some(s.max_bars.map_or(bars, |m| m.max(bars)));
+
+            match t.side {
+                Side::Buy => s.longs += 1,
+                Side::Sell => s.shorts += 1,
+            }
+
+            if t.pnl > 0.0 {
+                s.wins += 1;
+                s.sum_win_pnl += t.pnl;
+                s.largest_win = Some(s.largest_win.map_or(t.pnl, |m: Real| m.max(t.pnl)));
+                win_run += 1;
+                s.max_consec_wins = s.max_consec_wins.max(win_run);
+            } else {
+                win_run = 0;
+            }
+
+            if t.pnl < 0.0 {
+                s.losses += 1;
+                s.sum_loss_pnl += t.pnl;
+                s.largest_loss = Some(s.largest_loss.map_or(t.pnl, |m: Real| m.min(t.pnl)));
+                loss_run += 1;
+                s.max_consec_losses = s.max_consec_losses.max(loss_run);
+            } else {
+                loss_run = 0;
+            }
+
+            if t.pnl == 0.0 {
+                s.flat += 1;
+            }
+        }
+        s
+    }
+
+    /// [`win_rate`]
+    pub(crate) fn win_rate(&self) -> Option<Real> {
+        (self.total > 0).then(|| self.wins as Real / self.total as Real)
+    }
+
+    /// [`profit_factor`]
+    pub(crate) fn profit_factor(&self) -> Option<Real> {
+        safe_div(self.sum_win_pnl, -self.sum_loss_pnl)
+    }
+
+    /// [`average_win`]
+    pub(crate) fn average_win(&self) -> Option<Real> {
+        (self.wins > 0).then(|| self.sum_win_pnl / self.wins as Real)
+    }
+
+    /// [`average_loss`]
+    pub(crate) fn average_loss(&self) -> Option<Real> {
+        (self.losses > 0).then(|| self.sum_loss_pnl / self.losses as Real)
+    }
+
+    /// [`payoff_ratio`]
+    pub(crate) fn payoff_ratio(&self) -> Option<Real> {
+        match (self.average_win(), self.average_loss()) {
+            (Some(w), Some(l)) if l < 0.0 => Some(w / -l),
+            _ => None,
+        }
+    }
+
+    /// [`expectancy`]
+    pub(crate) fn expectancy(&self) -> Option<Real> {
+        (self.total > 0).then(|| self.sum_pnl / self.total as Real)
+    }
+
+    /// [`kelly_fraction`]
+    pub(crate) fn kelly_fraction(&self) -> Option<Real> {
+        match (self.win_rate(), self.payoff_ratio()) {
+            (Some(p), Some(b)) if b > 0.0 => Some(p - (1.0 - p) / b),
+            _ => None,
+        }
+    }
+
+    /// [`average_trade_return`]
+    pub(crate) fn average_return(&self) -> Option<Real> {
+        (self.total > 0).then(|| self.sum_return_ratio / self.total as Real)
+    }
+
+    /// [`average_bars_held`]
+    pub(crate) fn average_bars(&self) -> Option<Real> {
+        (self.total > 0).then(|| self.sum_bars / self.total as Real)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::types::Symbol;
@@ -1195,6 +1751,219 @@ mod tests {
             .enumerate()
             .map(|(bar, order)| Fill { bar, order })
             .collect()
+    }
+
+    #[cfg(feature = "spec")]
+    /// A spread of return series covering the shapes the cores have to agree
+    /// with the public functions on: empty, one and two samples, zero variance,
+    /// one-sided, and both parities of a long noisy series.
+    fn sample_series() -> Vec<(&'static str, Vec<Real>)> {
+        let noisy = |n: usize| -> Vec<Real> {
+            let mut s: u64 = 0x1234_5678_9abc_def0;
+            (0..n)
+                .map(|_| {
+                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    ((s >> 33) as Real / u32::MAX as Real - 0.5) * 0.04
+                })
+                .collect()
+        };
+        vec![
+            ("empty", vec![]),
+            ("one", vec![0.01]),
+            ("two", vec![0.01, -0.02]),
+            ("flat_zero", vec![0.0; 7]),
+            ("flat_nonzero", vec![0.003; 7]),
+            ("all_gains", vec![0.01, 0.02, 0.003, 0.05, 0.001]),
+            ("all_losses", vec![-0.01, -0.02, -0.003, -0.05]),
+            ("odd_noisy", noisy(1_001)),
+            ("even_noisy", noisy(1_000)),
+        ]
+    }
+
+    #[cfg(feature = "spec")]
+    fn trade(side: Side, pnl: Real, return_ratio: Real, entry_bar: usize, exit_bar: usize) -> Trade {
+        Trade {
+            entry_bar,
+            exit_bar,
+            side,
+            units: 1.0,
+            entry_price: 100.0,
+            exit_price: 100.0 + pnl,
+            pnl,
+            return_ratio,
+        }
+    }
+
+    #[cfg(feature = "spec")]
+    /// The same, for the trade vector — including the two subsets that make an
+    /// `Iterator::sum` seed observable (no winner, no loser).
+    fn sample_trades() -> Vec<(&'static str, Vec<Trade>)> {
+        let w = |p: Real, b: usize| trade(Side::Buy, p, p / 100.0, 0, b);
+        let l = |p: Real, b: usize| trade(Side::Sell, -p, -p / 100.0, 0, b);
+        vec![
+            ("empty", vec![]),
+            ("one_win", vec![w(5.0, 3)]),
+            ("all_wins", vec![w(5.0, 3), w(1.0, 1), w(9.0, 12)]),
+            ("all_losses", vec![l(5.0, 3), l(1.0, 1), l(9.0, 12)]),
+            ("all_flat", vec![w(0.0, 2), w(0.0, 5)]),
+            (
+                "mixed",
+                vec![w(5.0, 3), l(2.0, 1), l(7.0, 8), w(1.0, 0), w(4.0, 6), l(3.0, 2)],
+            ),
+        ]
+    }
+
+    #[cfg(feature = "spec")]
+    /// Bit-equality, so a reordered accumulation fails rather than rounding into
+    /// agreement. `-0.0` and `0.0` are different values here, deliberately —
+    /// see `SUM_SEED`.
+    #[track_caller]
+    fn same(label: &str, want: Real, got: Real) {
+        assert_eq!(
+            want.to_bits(),
+            got.to_bits(),
+            "{label}: public {want:?}, core {got:?}"
+        );
+    }
+
+    #[track_caller]
+    #[cfg(feature = "spec")]
+    fn same_opt(label: &str, want: Option<Real>, got: Option<Real>) {
+        assert_eq!(
+            want.map(Real::to_bits),
+            got.map(Real::to_bits),
+            "{label}: public {want:?}, core {got:?}"
+        );
+    }
+
+    #[cfg(feature = "spec")]
+    /// The cores in *Shared reduction cores* duplicate the derivations of the
+    /// public per-metric functions rather than delegating to them — delegation
+    /// would make a standalone `mean_return` pay for a two-pass gather it does
+    /// not need. This is what keeps the duplicates honest: every number
+    /// `from_report` now reads off a core is pinned, bit for bit, to the public
+    /// function it replaced.
+    #[test]
+    fn reduction_cores_match_public_metrics() {
+        const RF: Real = 0.045;
+        const BPY: Real = 365.0;
+        let rf_bar = RF / BPY;
+
+        for (name, r) in sample_series() {
+            let stats = ReturnStats::of(&r, rf_bar);
+            same(&format!("{name}/mean"), mean_return(&r), stats.mean());
+            same(&format!("{name}/best"), best_return(&r), stats.best());
+            same(&format!("{name}/worst"), worst_return(&r), stats.worst());
+            same(
+                &format!("{name}/positive_ratio"),
+                positive_bars_ratio(&r),
+                stats.positive_ratio(),
+            );
+            same(&format!("{name}/stddev"), stddev_return(&r), stats.stddev());
+            same(
+                &format!("{name}/ann_mean"),
+                annualized_return(&r, BPY),
+                stats.annualized_mean(BPY),
+            );
+            same(
+                &format!("{name}/ann_vol"),
+                annualized_volatility(&r, BPY),
+                stats.annualized_volatility(BPY),
+            );
+            same_opt(&format!("{name}/skewness"), skewness(&r), stats.skewness());
+            same_opt(&format!("{name}/kurtosis"), kurtosis(&r), stats.kurtosis());
+            same_opt(
+                &format!("{name}/sharpe"),
+                sharpe(&r, RF, BPY),
+                stats.sharpe(RF, BPY),
+            );
+            same_opt(
+                &format!("{name}/sortino"),
+                sortino(&r, RF, BPY),
+                stats.sortino(RF, BPY),
+            );
+            same_opt(&format!("{name}/omega"), omega(&r, rf_bar), stats.omega());
+            assert_eq!(r.len(), stats.len(), "{name}/len");
+
+            let q = quantile_reads(&r, 0.95);
+            same(&format!("{name}/median"), median_return(&r), q.median);
+            same(&format!("{name}/var"), value_at_risk(&r, 0.95), q.var);
+            same(
+                &format!("{name}/cvar"),
+                conditional_value_at_risk(&r, 0.95),
+                q.cvar,
+            );
+            same_opt(&format!("{name}/tail_ratio"), tail_ratio(&r), q.tail_ratio);
+        }
+
+        for (name, tr) in sample_trades() {
+            let t = TradeStats::of(&tr);
+            assert_eq!(total_trades(&tr), t.total, "{name}/total");
+            assert_eq!(winning_trades(&tr), t.wins, "{name}/wins");
+            assert_eq!(losing_trades(&tr), t.losses, "{name}/losses");
+            assert_eq!(flat_trades(&tr), t.flat, "{name}/flat");
+            assert_eq!(long_trades(&tr), t.longs, "{name}/longs");
+            assert_eq!(short_trades(&tr), t.shorts, "{name}/shorts");
+            assert_eq!(
+                max_consecutive_wins(&tr),
+                t.max_consec_wins,
+                "{name}/consec_wins"
+            );
+            assert_eq!(
+                max_consecutive_losses(&tr),
+                t.max_consec_losses,
+                "{name}/consec_losses"
+            );
+            assert_eq!(min_bars_held(&tr), t.min_bars, "{name}/min_bars");
+            assert_eq!(max_bars_held(&tr), t.max_bars, "{name}/max_bars");
+            same_opt(&format!("{name}/win_rate"), win_rate(&tr), t.win_rate());
+            same_opt(
+                &format!("{name}/profit_factor"),
+                profit_factor(&tr),
+                t.profit_factor(),
+            );
+            same_opt(
+                &format!("{name}/payoff_ratio"),
+                payoff_ratio(&tr),
+                t.payoff_ratio(),
+            );
+            same_opt(
+                &format!("{name}/expectancy"),
+                expectancy(&tr),
+                t.expectancy(),
+            );
+            same_opt(
+                &format!("{name}/kelly"),
+                kelly_fraction(&tr),
+                t.kelly_fraction(),
+            );
+            same_opt(&format!("{name}/avg_win"), average_win(&tr), t.average_win());
+            same_opt(
+                &format!("{name}/avg_loss"),
+                average_loss(&tr),
+                t.average_loss(),
+            );
+            same_opt(
+                &format!("{name}/largest_win"),
+                largest_win(&tr),
+                t.largest_win,
+            );
+            same_opt(
+                &format!("{name}/largest_loss"),
+                largest_loss(&tr),
+                t.largest_loss,
+            );
+            same_opt(
+                &format!("{name}/avg_return"),
+                average_trade_return(&tr),
+                t.average_return(),
+            );
+            same_opt(
+                &format!("{name}/avg_bars"),
+                average_bars_held(&tr),
+                t.average_bars(),
+            );
+        }
     }
 
     fn indexed_fills(pairs: Vec<(usize, Order<Symbol>)>) -> Vec<Fill<Symbol>> {

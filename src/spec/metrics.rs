@@ -327,28 +327,44 @@ pub fn from_report<Sym>(
     let returns = crate::metrics::per_bar_returns(equity, initial);
     let trades = crate::metrics::reconstruct_trades(&report.fills);
     let segments = crate::metrics::drawdown_segments(equity);
-    // The quantile metrics below (median / VaR / CVaR / tail ratio) each sort
-    // their input. Sorting once here and calling their `*_of_sorted` backs is
-    // the difference between four sorts of the return series and one — see
-    // `metrics::sorted_returns`.
-    let sorted_returns = crate::metrics::sorted_asc(&returns);
     let rf_per_bar = if bars_per_year > 0.0 {
         risk_free_rate / bars_per_year
     } else {
         0.0
     };
 
+    // Three shared cores stand in for ~50 walks of the two long inputs. Each is
+    // bit-identical to the public per-metric functions it replaces, and pinned
+    // to them by `metrics::tests::reduction_cores_match_public_metrics` — the
+    // numbers below are the same numbers, gathered once. See `metrics`'
+    // *Shared reduction cores*.
+    //
+    // `rf_per_bar` is the threshold `stats` is gathered against because it is
+    // the MAR both `sortino` and `omega` read.
+    let stats = crate::metrics::ReturnStats::of(&returns, rf_per_bar);
+    let quantiles = crate::metrics::quantile_reads(&returns, 0.95);
+    let t = crate::metrics::TradeStats::of(&trades);
+
     // Return-section values are computed as fractions in the library and
     // scaled to percent here at the presentation boundary.
     let total = crate::metrics::total_return(equity, initial);
     let cagr = crate::metrics::cagr(equity, initial, bars_per_year);
-    let ann_mean = crate::metrics::annualized_return(&returns, bars_per_year);
-    let ann_vol = crate::metrics::annualized_volatility(&returns, bars_per_year);
+    let ann_mean = stats.annualized_mean(bars_per_year);
+    let ann_vol = stats.annualized_volatility(bars_per_year);
+    let sharpe = stats.sharpe(risk_free_rate, bars_per_year);
+    let skewness = stats.skewness();
+    let kurtosis = stats.kurtosis();
     let max_dd = crate::metrics::max_drawdown(&segments);
     let avg_dd = crate::metrics::average_drawdown(&segments);
-    let win_rate = crate::metrics::win_rate(&trades);
-    let avg_trade_return = crate::metrics::average_trade_return(&trades);
+    let win_rate = t.win_rate();
+    let avg_trade_return = t.average_return();
     let exposure = crate::metrics::exposure_ratio(&report.fills, bars);
+
+    // Asked once, spent twice — each of these three feeds a `_bars` field and
+    // its `_seconds` twin.
+    let average_bars = t.average_bars();
+    let min_bars = t.min_bars;
+    let max_bars = t.max_bars;
 
     Metrics {
         run: RunSection {
@@ -362,30 +378,30 @@ pub fn from_report<Sym>(
             total,
             total_pct: total * 100.0,
             cagr_pct: cagr.map(|c| c * 100.0),
-            mean_bar: crate::metrics::mean_return(&returns),
-            median_bar: crate::metrics::median_of_sorted(&sorted_returns),
-            stddev_bar: crate::metrics::stddev_return(&returns),
-            best_bar: crate::metrics::best_return(&returns),
-            worst_bar: crate::metrics::worst_return(&returns),
-            positive_bars_pct: crate::metrics::positive_bars_ratio(&returns) * 100.0,
-            skewness: crate::metrics::skewness(&returns),
-            kurtosis: crate::metrics::kurtosis(&returns),
-            var_95: crate::metrics::value_at_risk_of_sorted(&sorted_returns, 0.95),
-            cvar_95: crate::metrics::conditional_value_at_risk_of_sorted(&sorted_returns, 0.95),
-            tail_ratio: crate::metrics::tail_ratio_of_sorted(&sorted_returns),
+            mean_bar: stats.mean(),
+            median_bar: quantiles.median,
+            stddev_bar: stats.stddev(),
+            best_bar: stats.best(),
+            worst_bar: stats.worst(),
+            positive_bars_pct: stats.positive_ratio() * 100.0,
+            skewness,
+            kurtosis,
+            var_95: quantiles.var,
+            cvar_95: quantiles.cvar,
+            tail_ratio: quantiles.tail_ratio,
             annualized_mean_pct: ann_mean * 100.0,
             annualized_volatility_pct: ann_vol * 100.0,
         },
         risk_adjusted: RiskAdjustedSection {
-            sharpe: crate::metrics::sharpe(&returns, risk_free_rate, bars_per_year),
-            sortino: crate::metrics::sortino(&returns, risk_free_rate, bars_per_year),
+            sharpe,
+            sortino: stats.sortino(risk_free_rate, bars_per_year),
             calmar: crate::metrics::calmar_with_max_drawdown(
                 equity,
                 initial,
                 bars_per_year,
                 max_dd,
             ),
-            omega: crate::metrics::omega(&returns, rf_per_bar),
+            omega: stats.omega(),
             ulcer_index: crate::metrics::ulcer_index(equity),
             ulcer_performance_index: crate::metrics::ulcer_performance_index(
                 equity,
@@ -393,9 +409,13 @@ pub fn from_report<Sym>(
                 risk_free_rate,
                 bars_per_year,
             ),
-            probabilistic_sharpe: crate::metrics::probabilistic_sharpe(
-                &returns,
-                risk_free_rate,
+            // The stats-only back, so the observed Sharpe / skew / kurt are the
+            // ones already computed above rather than three more rescans.
+            probabilistic_sharpe: crate::metrics::probabilistic_sharpe_from_stats(
+                sharpe,
+                skewness,
+                kurtosis,
+                stats.len(),
                 bars_per_year,
                 0.0,
             ),
@@ -418,35 +438,32 @@ pub fn from_report<Sym>(
         costs: None,
         montecarlo: None,
         trades: TradeSection {
-            total: crate::metrics::total_trades(&trades),
-            wins: crate::metrics::winning_trades(&trades),
-            losses: crate::metrics::losing_trades(&trades),
-            flat: crate::metrics::flat_trades(&trades),
-            long_trades: crate::metrics::long_trades(&trades),
-            short_trades: crate::metrics::short_trades(&trades),
+            total: t.total,
+            wins: t.wins,
+            losses: t.losses,
+            flat: t.flat,
+            long_trades: t.longs,
+            short_trades: t.shorts,
             total_fills: report.fills.len(),
-            max_consecutive_wins: crate::metrics::max_consecutive_wins(&trades),
-            max_consecutive_losses: crate::metrics::max_consecutive_losses(&trades),
+            max_consecutive_wins: t.max_consec_wins,
+            max_consecutive_losses: t.max_consec_losses,
             exposure_pct: exposure * 100.0,
             win_rate_pct: win_rate.map(|w| w * 100.0),
-            profit_factor: crate::metrics::profit_factor(&trades),
-            payoff_ratio: crate::metrics::payoff_ratio(&trades),
-            expectancy: crate::metrics::expectancy(&trades),
-            kelly_fraction: crate::metrics::kelly_fraction(&trades),
-            average_win: crate::metrics::average_win(&trades),
-            average_loss: crate::metrics::average_loss(&trades),
-            largest_win: crate::metrics::largest_win(&trades),
-            largest_loss: crate::metrics::largest_loss(&trades),
+            profit_factor: t.profit_factor(),
+            payoff_ratio: t.payoff_ratio(),
+            expectancy: t.expectancy(),
+            kelly_fraction: t.kelly_fraction(),
+            average_win: t.average_win(),
+            average_loss: t.average_loss(),
+            largest_win: t.largest_win,
+            largest_loss: t.largest_loss,
             average_return_pct: avg_trade_return.map(|r| r * 100.0),
-            average_bars: crate::metrics::average_bars_held(&trades),
-            min_bars: crate::metrics::min_bars_held(&trades),
-            max_bars: crate::metrics::max_bars_held(&trades),
-            average_seconds: seconds_per_bar
-                .and_then(|s| crate::metrics::average_bars_held(&trades).map(|b| b * s)),
-            min_seconds: seconds_per_bar
-                .and_then(|s| crate::metrics::min_bars_held(&trades).map(|b| b as Real * s)),
-            max_seconds: seconds_per_bar
-                .and_then(|s| crate::metrics::max_bars_held(&trades).map(|b| b as Real * s)),
+            average_bars,
+            min_bars,
+            max_bars,
+            average_seconds: seconds_per_bar.and_then(|s| average_bars.map(|b| b * s)),
+            min_seconds: seconds_per_bar.and_then(|s| min_bars.map(|b| b as Real * s)),
+            max_seconds: seconds_per_bar.and_then(|s| max_bars.map(|b| b as Real * s)),
         },
     }
 }
