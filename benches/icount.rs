@@ -17,7 +17,7 @@
 //!   valgrind --tool=callgrind --callgrind-out-file=x.out \
 //!       target/release/deps/icount-<hash> <workload>
 //!
-//! Workloads: `sma_rust` · `sma_yaml` · `macd_rust` · `macd_yaml` · `tree8`
+//! Workloads: `metrics_none` · `metrics_reduction` · `sma_rust` · `sma_yaml` · `macd_rust` · `macd_yaml` · `tree8`
 //! · `atr_none` · `atr_atom` · `atr_candle` · `atr_manual_max`
 //! · `chain_candle` · `chain_atom` · `sma_two_levels` · `sma_fused`
 //! · `sma_dyn_per_sample` · `sma_dyn_batch`
@@ -391,13 +391,50 @@ fn fused_scalar_sma() -> fugazi::runtime::Chain<Real, Real> {
     ))
 }
 
+/// Bars for `metrics_reduction`. Smaller than `BARS` elsewhere would be fine —
+/// the reduction is `O(bars)` and the count is per-run, not per-sample — but
+/// 200 000 matches `benches/metrics.rs`, so a wall-clock reading and an
+/// instruction count describe the same workload.
+const REDUCTION_BARS: usize = 200_000;
+
+/// The same synthetic report `benches/metrics.rs` reduces: an equity curve off
+/// the shared price walk, plus an alternating fill every 50 bars.
+fn metrics_report(bars: usize) -> fugazi::backtest::RunReport<Symbol> {
+    use fugazi::backtest::{Fill, RunReport};
+    use fugazi::wallet::{Order, OrderId, OrderKind};
+
+    let candles = common::synth_candles(bars);
+    RunReport {
+        equity_curve: candles.iter().map(|c| c.close * 100.0).collect(),
+        fills: (0..bars)
+            .step_by(50)
+            .enumerate()
+            .map(|(i, bar)| Fill {
+                bar,
+                order: Order {
+                    id: OrderId(i as u64),
+                    symbol: fugazi::types::symbol("X"),
+                    side: if i % 2 == 0 { Side::Buy } else { Side::Sell },
+                    units: 1.0,
+                    price: candles[bar].close,
+                    kind: OrderKind::Market,
+                    commission: 0.0,
+                },
+            })
+            .collect(),
+        rejections: Vec::new(),
+        initial_equity: candles[0].close * 100.0,
+    }
+}
+
 fn main() {
     let workload = std::env::args().nth(1).unwrap_or_else(|| {
         eprintln!(
             "usage: icount <sma_rust|sma_yaml|macd_rust|macd_yaml|tree8\
              |atr_none|atr_atom|atr_candle|atr_manual_max|chain_candle|chain_atom|chain_atom_direct\
              |sma_two_levels|sma_fused|sma_dyn_per_sample|sma_dyn_batch\
-             |sma_scalar_none|sma_scalar_direct|sma_scalar_erased|sma_scalar_fused|sma_scalar_fused_batched|sma_scalar_boxed_local|sma_scalar_boxed_producer|sma_scalar_chunked_local|stddev_scan>"
+             |sma_scalar_none|sma_scalar_direct|sma_scalar_erased|sma_scalar_fused|sma_scalar_fused_batched|sma_scalar_boxed_local|sma_scalar_boxed_producer|sma_scalar_chunked_local|stddev_scan\
+             |multi_none|aroon_candle|adx_candle|dmi_candle|metrics_none|metrics_reduction>"
         );
         std::process::exit(2);
     });
@@ -739,6 +776,75 @@ fn main() {
                     BARS
                 }
             }
+        }
+        // Bare multi-output engines, so the Python boundary cost can be split
+        // from the indicator's own. `tools/icount_python.py` puts `aroon` at
+        // 369.74 instructions/sample through the bindings and `adx` at 277.05 —
+        // 93 apart, on the same output-column count and near-identical
+        // wall-clock (8.92 vs 8.59 ns/sample). Either `Aroon`'s engine is that
+        // much heavier and its wall-clock is hidden by ILP, or something in the
+        // boundary treats it differently. These four answer that: subtract
+        // `multi_none` from the rest.
+        //
+        // All three live in one binary on purpose. Absolute numbers from a
+        // multi-workload file are not comparable to another file's (see
+        // `benches/multi_feed.rs` and trap 11 in docs/PERFORMANCE.md), but a
+        // difference *within* one is, and a difference is the whole question.
+        // The post-run reduction, which `optimize` pays once per grid row per
+        // fold. Deterministic counting is not a luxury here: after two rounds
+        // of deduplication the remaining candidates are worth ~250 µs on a
+        // ~2.8 ms reduction, and this machine's criterion run-to-run spread on
+        // *untouched* code is ±8-17% — larger than the effect. Wall-clock
+        // cannot see these; instruction count can.
+        //
+        // Subtract `metrics_none` from `metrics_reduction`: building the report
+        // is 200 000 candles, an equity curve and 4 000 fills, and this file has
+        // been bitten before by setup swamping the workload it wraps (see the
+        // `atr_*` note above).
+        "metrics_none" | "metrics_reduction" => {
+            let rep = metrics_report(REDUCTION_BARS);
+            if workload == "metrics_reduction" {
+                black_box(fugazi::spec::metrics::from_report(&rep, 365.0, 0.045, None));
+            } else {
+                black_box(&rep);
+            }
+            REDUCTION_BARS
+        }
+        "multi_none" | "aroon_candle" | "adx_candle" | "dmi_candle" => {
+            let candles = common::synth_candles(BARS);
+            match workload.as_str() {
+                "aroon_candle" => {
+                    let mut ind = fugazi::indicators::Aroon::new(
+                        fugazi::indicators::Identity::<fugazi::market::Candle>::new(),
+                        14,
+                    );
+                    for c in &candles {
+                        black_box(ind.update(*c));
+                    }
+                }
+                "adx_candle" => {
+                    let mut ind = fugazi::indicators::Adx::new(
+                        fugazi::indicators::Identity::<fugazi::market::Candle>::new(),
+                        14,
+                    );
+                    for c in &candles {
+                        black_box(ind.update(*c));
+                    }
+                }
+                "dmi_candle" => {
+                    let mut ind = fugazi::indicators::Dmi::new(
+                        fugazi::indicators::Identity::<fugazi::market::Candle>::new(),
+                        14,
+                    );
+                    for c in &candles {
+                        black_box(ind.update(*c));
+                    }
+                }
+                _ => {
+                    black_box(&candles);
+                }
+            }
+            BARS
         }
         other => {
             eprintln!("unknown workload {other:?}");

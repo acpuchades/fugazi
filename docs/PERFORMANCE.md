@@ -206,6 +206,10 @@ return series** (`median_return`, `value_at_risk`, `conditional_value_at_risk`,
 `drawdown_segments` recomputed by `calmar` and `recovery_factor` on top of the
 copy `from_report` already built.
 
+*(Superseded twice. F8 below removed three of the four sorts; Phase 11 removed
+the fourth — and found that the sorts were never the largest cost. Recomputed
+moments were. This table stays as the baseline it is.)*
+
 ### Footprint — 200 000-bar single-asset run
 
 | case | allocs/bar | bytes/bar |
@@ -1616,6 +1620,143 @@ lock**, which no leaf indicator in this crate does (`Macd` 1.6, `Bollinger` 13.9
 the right default, and is now measured rather than assumed. Both workloads stay in
 `benches/three_tier.rs` so the crossover can be re-checked if the cell ever stops
 being a mutex.
+
+## Phase 11 — the run-metrics reduction
+
+`spec::metrics::from_report` reduces one `RunReport` to the `metrics.yml`
+document. Once per run that is invisible; `optimize` pays it **once per grid row
+per fold**, and `rolling_from_report` pays a slice of it once per bar. Phase F8
+(above) had already taken it from 22.6 ms to 9.4 ms at 200 000 bars by sorting
+the return series once instead of four times. This is what was left.
+
+### What it was actually spending
+
+Measured per piece, 200 000 bars, quiet machine:
+
+| piece | cost | share |
+|---|---:|---:|
+| gathering the return-series numbers | 4.10 ms | 43% |
+| one sort of the return series | 3.76 ms | 39% |
+| walking the equity curve (returns + drawdown segments + ulcer) | 0.93 ms | 10% |
+| everything else (trades, exposure, building the document) | ~0.8 ms | 8% |
+
+**The sort was not the biggest cost — recomputation was**, which is the opposite
+of what the F8 note above predicted and the reason this phase exists. Every
+public metric takes a bare slice, so nothing is shared between them: `sharpe`
+derives the mean and then the mean and stddev again inside
+`annualized_volatility`, `sortino` derives the mean twice more, `skewness` and
+`kurtosis` each re-derive the mean *and* `Σ(x − mean)²` before their own moment,
+and `probabilistic_sharpe` then calls all three of `sharpe` / `skewness` /
+`kurtosis` a second time from scratch. Fourteen numbers, ~30 walks.
+
+That is the right API for the module — every one of those is a single call from
+Python — and the wrong one for a reducer that wants all fourteen at once.
+
+### What changed
+
+Three `pub(crate)` cores in `metrics`, gated on `spec` (their only caller):
+
+- **`ReturnStats::of`** — every accumulator in two passes. Two, not one: the
+  `E[X²] − E[X]²` shortcut cancels the leading digits and was wrong at crypto
+  price scale (see `WindowStats`).
+- **`quantile_reads`** — the four quantile reads need six order statistics and
+  one tail mean, not a total order. `select_nth_unstable`, recursing into both
+  partitions, is ~2n comparisons against ~n·log₂n. Permutes in place, so the
+  1.6 MB copy goes too.
+- **`TradeStats::of`** — the trade section in one walk instead of ~20, two of
+  which allocated a `Vec` of filtered PnLs.
+
+Plus three redundancies: `probabilistic_sharpe_from_stats` instead of rescanning,
+`average_bars_held` / `min` / `max` asked once rather than twice, and
+`ulcer_performance_index_with_ulcer` — the document emits both `ulcer_index` and
+`ulcer_performance_index`, and the latter recomputed the former, a second full
+walk of the equity curve.
+
+Separately, **`report_slice` binary-searches the blotter** instead of filtering
+it. A blotter is written as the run advances, so it is bar-ordered and two
+`partition_point` calls give the range. That made `rolling_from_report`
+O(bars × log fills) rather than O(bars × fills).
+
+### Wall-clock
+
+| benchmark | before | after | change |
+|---|---:|---:|---:|
+| `metrics/from_report/200000` | 9.570 ms | 2.82 ms | **−70%** |
+| `metrics/from_report/100000` | 4.745 ms | 1.44 ms | −70% |
+| `metrics/from_report/10000` | 391.4 µs | 137.8 µs | −65% |
+| `metrics/report_slice` (one window) | 3.132 µs | 134.4 ns | **−96%** |
+| rolling sweep, 50k bars, w=252, serial | 271.2 ms | 243.5 ms | −10.2% |
+
+The last two rows are A/B'd **inside one binary** (`linear_filter` vs
+`binary_search` in `benches/metrics.rs`), which is why they are quoted to more
+significant figures than the rest: both sides share a build and a machine state,
+so the ratio survives contention that the absolutes do not.
+
+**The rolling row is the honest end-to-end number, and it is 10%, not 96%.** At a
+252-bar window the reduction of each window dominates the slice that produced it.
+The per-slice win only becomes the story when there are many cheap windows —
+`rolling_from_report` reads 16.7 / 34.7 / 101.0 ms at windows 63 / 252 / 1000
+over 50 000 bars.
+
+### Instruction counts, and one hypothesis killed
+
+The landed reduction measured ~28% above a prototype of the same algorithm, and
+the obvious suspect was cross-crate codegen: `from_report` is generic over `Sym`
+so it monomorphises into the *calling* crate, while the cores stay in `fugazi`'s
+codegen unit. `#[inline]` on the three cores, measured with callgrind
+(`icount metrics_reduction` minus `icount metrics_none`, which subtracts the
+200 000-bar report construction):
+
+| | net instructions | per bar |
+|---|---:|---:|
+| without `#[inline]` | 33,081,786 | 165.41 |
+| with `#[inline]` | 31,875,481 | 159.38 |
+
+**−3.65% — real, kept, and far too small to be the explanation.** Most of that
+28% was the duplicated `ulcer_index` walk, found by reading rather than
+measuring; the rest is inside the run-to-run spread. Which is the point of using
+callgrind here: this machine's criterion spread on *untouched* code was ±8–17%
+across the runs of this phase, so an effect of this size is invisible to
+wall-clock and only a deterministic instrument can rule it in or out.
+
+### Output is unchanged, bit-for-bit
+
+Not "within tolerance" — identical, because none of these changes reorders an
+accumulation. `metrics::tests::reduction_cores_match_public_metrics` pins all 14
+return derivations across nine series (empty, one, two, zero-variance,
+one-sided, both parities of a long noisy series) and all 21 trade derivations
+across six vectors, comparing `to_bits`. `benches/metrics_variants.rs` carries
+the same check end to end against the pre-change call sequence, and
+`report_slice_matches_a_linear_filter_on_every_range` covers all 45 ranges over
+a deliberately awkward blotter.
+
+Two details that requirement forced, both of which would otherwise have shipped
+as silent one-ULP drift:
+
+- **`Iterator::sum::<f64>()` folds from `-0.0`**, the additive identity f64
+  actually has, and returns it verbatim on an empty iterator. `profit_factor` on
+  a run with no winning trade is `Some(-0.0)`; a hand-rolled accumulator seeded
+  `0.0` answers `Some(0.0)`.
+- **`value_at_risk` / `conditional_value_at_risk` derive their tail as
+  `1.0 - confidence`** = `0.050000000000000044`, while `tail_ratio` writes `0.05`
+  as a literal. At 10 000 bars those floor to different order statistics and give
+  a 501- vs 500-element CVaR tail. **This is a live inconsistency in the shipped
+  metrics, reproduced here rather than fixed** — correcting it moves published
+  values and needs its own change with its own fixture regeneration.
+
+### What was measured and rejected
+
+**Fusing the three equity-curve walks into one: 925.6 µs → 926.7 µs.** Flat. The
+pass is store-bound — `per_bar_returns` writes 1.6 MB and `drawdown_segments`
+grows a `Vec` — so removing reads of a buffer that is already resident buys
+nothing. The remaining 0.93 ms is attacked by allocating less, not by fusing
+loops. `benches/metrics_variants.rs` keeps the variant so this stays measured
+rather than re-argued.
+
+**`sort_unstable_by` instead of the selection machinery**: 3.76 ms → 2.80 ms,
+against 0.70 ms for `select_nth_unstable`. A one-token change worth a quarter of
+the sort, kept in the variants bench as the fallback if the ~80 lines of
+introselect ever stop earning their place.
 
 ## The Python binding budget — 1.25×, with one exemption
 

@@ -1285,6 +1285,7 @@ pub(crate) struct ReturnStats {
 
 #[cfg(feature = "spec")]
 impl ReturnStats {
+#[inline]
     pub(crate) fn of(returns: &[Real], threshold: Real) -> Self {
         let n = returns.len();
         if n == 0 {
@@ -1507,6 +1508,7 @@ pub(crate) struct QuantileReads {
 /// dead the moment its moments and its quantiles have been taken — so it hands
 /// over its own buffer rather than paying 1.6 MB of copy (at 200 000 bars) to
 /// protect an order nothing will look at again. Gather any moments *first*.
+#[inline]
 pub(crate) fn quantile_reads(returns: &mut [Real], confidence: Real) -> QuantileReads {
     let n = returns.len();
     if n == 0 {
@@ -1638,6 +1640,7 @@ pub(crate) struct TradeStats {
 
 #[cfg(feature = "spec")]
 impl TradeStats {
+#[inline]
     pub(crate) fn of(trades: &[Trade]) -> Self {
         let mut s = Self {
             total: trades.len(),
