@@ -64,6 +64,7 @@ instrument, at the cost of a ~50× slowdown.
 | `breaking` | Prototypes for the proposed breaking changes, so each is a measured number rather than an argument. Currently `update(&Input)` and dropping `Indicator::value()`. |
 | `erasure` | What one level of type erasure costs, `PayloadValue` vs `Chain`, at 2/3/5 levels. The bench that justified Phase 6 — and that has to keep justifying it. |
 | `stddev_tradeoff` | Accuracy *and* cost of the centred variance against TA-Lib's `E[X²] − E[X]²` shortcut, so the choice rests on numbers. |
+| `snapshot_scan` | Does splitting `Snapshot`'s tags from its atoms make `find` cheaper? It does not — see Phase 13. Kept because it prints the working-set size beside the timing, which is the column that settles it, and because the next person to re-derive the 4.7× cache-line ratio should be able to disprove it in one command. |
 | `window_ring` | `VecDeque` against the `Ring<T>` that replaced it, **all variants in one binary** — the arrangement trap 10/11 forces. Carries the shipped indicators too, and a single-workload `-- <name>` mode for callgrind (which is what settled `vwap`/`correlation`, where wall-clock had the sign wrong). |
 | `latency` | Per-event latency distributions (p50…p99.9), warm against cold, for one `update` after an idle gap. The only target that measures latency rather than throughput; carries its own timer noise floor. |
 | `three_tier` | The Rust tier of the TA-Lib comparison, scalar **and** multi-output. Not criterion: it emits machine-readable ns/sample for `tools/bench_three_tier.py` to line up against the other tiers. Also carries the `Component`-vs-`Shared` pair (Phase 10). |
@@ -1511,15 +1512,9 @@ the trap recorded under `WindowStats::variance`.
 
 Measured but not taken, in descending confidence:
 
-* **`Snapshot` is array-of-structs and `find` scans it to compare a tag.**
-  `Entry<Symbol>` is **112 bytes**, of which `find` reads only the 24-byte
-  `(Option<Symbol>, Option<Frequency>)` prefix — so it touches 112 cache lines at
-  N = 64 where 24 would do, **4.7× at every universe size**. Splitting the
-  storage into a tags vec and an atoms vec keeps the invariant that blocked
-  breaking-candidate #2 fully intact: `Selector` stays a predicate, no
-  `Sym: Eq + Hash`, duplicates still legal, first-match-wins unchanged. It does
-  not fix the asymptotics, but the residual O(N²) is memory-bound, and this is
-  the part of its constant that needs no design decision.
+* **Splitting `Snapshot` into tags and atoms — tried, measured, reverted.**
+  See below; it is the one item on this list that has been settled, and it was
+  settled against.
 * **`WilderState` divides once per bar, and `Adx` holds four of them.** `update`
   is `(prev * (p - 1.0) + input) / p` with `p = self.period as Real` — an
   int→float conversion and a genuine `divsd` every bar, which LLVM cannot
@@ -1543,6 +1538,64 @@ Measured but not taken, in descending confidence:
   `Atom::is_priceable`, the wallet's `close <= 0.0` guards), and it cannot cover
   bool outputs. A register-passed `Some(x)` is already cheap; the win is a store
   width, not a branch.
+
+### The `Snapshot` tag/atom split — a correct number about a bottleneck that did not exist
+
+Recorded at length because the arithmetic behind it is right, is easy to
+re-derive, and is **not a reason to do this**.
+
+`Snapshot::find` runs once per `!pick`-rooted leaf per symbol per bar and reads
+only the `(symbol, freq)` tag. Stored interleaved, `Entry<Symbol>` is **112
+bytes** and the tag is the first **24**, so the scan pulls in 4.7× more cache
+than it looks at — 112 cache lines at a 64-symbol universe where 24 would do.
+Splitting the storage into a tags vector and an atoms vector was implemented in
+full, kept every invariant that blocked breaking-candidate #2 (predicate not key,
+no `Eq + Hash`, duplicates legal, first-match-wins, `Snapshot` still 8 bytes,
+clone still a refcount bump), and passed all 50 test binaries.
+
+It is **slower**, and not marginally:
+
+| | interleaved | split | |
+|---|---:|---:|---:|
+| `find_2` (instructions) | 705 802 | 758 358 | +7.4% |
+| `find_16` | 11 324 334 | 12 933 141 | +14.2% |
+| `find_64` | 153 056 749 | 174 875 611 | +14.3% |
+| `multi_asset/drive/64` (wall-clock) | 79.5 ms | 92.3 ms | +16.1% |
+| `control` | 914 337 | 914 351 | +0.002% |
+
+**The cache-line ratio was arithmetic about a bottleneck that does not exist at
+any universe size this crate targets.** `cargo bench --bench snapshot_scan`
+prints the number that kills it in its own column: at N = 64 the whole
+interleaved array is **7 168 bytes**. It fits in L1 several times over and is
+touched every bar, so there was never a miss to save — and the split then paid
+for a second allocation, a second pointer chase and a second live cache stream
+to halve a footprint that was already resident.
+
+The instruction count says the rest. `find_map` over interleaved entries returns
+the matching reference directly; `position()` over tags followed by an indexed
+fetch adds index bookkeeping to every element scanned and a bounds check to
+every call. That is where the 14% went, and no amount of tuning the split
+recovers it, because the thing it buys cannot be collected.
+
+**The lesson generalises past this change, and it is the one worth keeping: a
+static layout ratio is not a prediction.** Bytes-touched-versus-bytes-needed
+says what a scan *could* save if it were memory-bound. Whether it is memory-bound
+is a separate question, answered by the working set against the cache — and
+that check costs one multiplication. It was not done here, and 4.7× read as a
+forecast for most of a day.
+
+Note also which instrument would have misled: wall-clock reported +1.7% at N = 2
+rising to +16.1% at N = 64, all `p = 0.00`. Under trap 6 those are inside the
+band where layout is not separable from work, so they could not have closed the
+question on their own — but the *shape* was the tell. **A layout artifact does
+not scale monotonically with a runtime parameter.** A delta that tracks N is
+tracking work, and callgrind then said so outright.
+
+What survives is the other half of breaking-candidate #2, untouched by this: at
+N = 64 `find_64` retires **217× the instructions of `find_2`** for 32× the
+lookups, so the scan really is the quadratic term. The win is in **not scanning**
+— the lazily-built `symbol → first index` side table that document proposes —
+not in scanning something narrower.
 
 ## The Python binding budget — 1.25×, with one exemption
 

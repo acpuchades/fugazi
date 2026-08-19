@@ -246,6 +246,12 @@ harness = false
 name = "window_ring"
 harness = false
 
+# Whether the tag/atom split in `Snapshot` makes `find` cheaper. Its own target
+# for the same reason `window_ring` is (trap 11).
+[[bench]]
+name = "snapshot_scan"
+harness = false
+
 # The per-bar hot path is generic code that crosses module boundaries
 # (`Combine<L, R, Op>` over sources defined elsewhere) plus trait objects, so
 # cross-CGU inlining is worth more here than it is for the average crate.

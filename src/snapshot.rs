@@ -156,6 +156,17 @@ impl<Sym: PartialEq> Selector<Sym> {
 /// order, so a driver that pushes entries deterministically gets a
 /// deterministic scan for free.
 ///
+/// It is also deliberately **interleaved** — one `Vec` of
+/// `(tag, tag, atom)` — rather than a tag vector beside an atom vector, and
+/// that is the counter-intuitive half. [`find`](Self::find) reads only the
+/// 24-byte tag out of a 112-byte entry, so a split scan would touch 4.7× less
+/// cache; the ratio is real and the change is still a **14% instruction
+/// regression**, because at every universe size this crate targets the whole
+/// array is L1-resident anyway (7 KB at 64 symbols) and the split then pays
+/// index bookkeeping per element for a miss that never happened. Implemented,
+/// measured and reverted — `cargo bench --bench snapshot_scan`, and
+/// `docs/PERFORMANCE.md` Phase 13. **Don't re-derive the 4.7× and try again.**
+///
 /// # Cloning is a refcount bump
 ///
 /// The entries live behind an [`Arc`], so `clone` costs one atomic increment
