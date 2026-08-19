@@ -14,6 +14,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use fugazi::prelude::*;
+use fugazi::time::Frequency;
 use fugazi::types::{Atom, Candle, Snapshot, Symbol, symbol as intern};
 
 const REPS: usize = 9;
@@ -41,8 +42,26 @@ fn scan_bar(syms: &[Symbol], snap: &Snapshot<Symbol>) {
     }
 }
 
+/// A universe whose symbols differ in *length*, so a `str` comparison rejects on
+/// the length check and never reaches `memcmp`. Everything else is identical to
+/// [`universe`].
+fn universe_ragged(n: usize) -> (Vec<Symbol>, Snapshot<Symbol>) {
+    let syms: Vec<Symbol> = (0..n).map(|i| intern("S".repeat(i + 1))).collect();
+    let mut snap: Snapshot<Symbol> = Snapshot::new();
+    for (i, s) in syms.iter().enumerate() {
+        let px = 100.0 + i as f64;
+        snap.push(
+            Some(s.clone()),
+            None,
+            Atom::new(Candle::new(px, px, px, px, 1_000.0)),
+        );
+    }
+    (syms, snap)
+}
+
 fn workload(name: &str) {
     const BARS: usize = 2_000;
+    const N: usize = 64;
     match name {
         "control" => {
             let mut acc = 0.0f64;
@@ -58,8 +77,122 @@ fn workload(name: &str) {
                 scan_bar(&syms, &snap);
             }
         }
+        // ---- decomposition ------------------------------------------------
+        //
+        // Every row below drives the SAME loop shape — iterate a pre-built
+        // `Vec` of 64 distinct selectors — and differs only in how far each
+        // scan runs and what the per-entry comparison has to do. Sharing the
+        // shape is what makes them comparable: an earlier cut reused one
+        // selector for the miss rows, which lets LLVM CSE a `readonly` call
+        // across the inner loop and made them look 4.5x cheaper per entry than
+        // the hit row for no reason but the optimiser.
+        "hit_prebuilt" | "miss_prebuilt" | "miss_ragged" | "miss_freq" => {
+            let (syms, snap, sels): (_, _, Vec<Selector<Symbol>>) = match name {
+                // Each selector hits at its own index, so the scan runs
+                // 1, 2, .. N entries — average (N+1)/2 = 32.5.
+                "hit_prebuilt" => {
+                    let (syms, snap) = universe(N);
+                    let sels = syms
+                        .iter()
+                        .map(|s| Selector::by_symbol(s.clone()))
+                        .collect();
+                    (syms, snap, sels)
+                }
+                // Nobody matches, so every scan runs the full N and the
+                // per-entry cost is not averaged over a short prefix.
+                "miss_prebuilt" => {
+                    let (syms, snap) = universe(N);
+                    let sels = (0..N)
+                        .map(|i| Selector::by_symbol(intern(format!("X{i:03}"))))
+                        .collect();
+                    (syms, snap, sels)
+                }
+                // Same, but every stored symbol differs in *length* from the
+                // query, so `str`'s length check rejects before `memcmp`. The
+                // gap against `miss_prebuilt` is the memcmp.
+                "miss_ragged" => {
+                    let (syms, snap) = universe_ragged(N);
+                    let sels = (0..N)
+                        .map(|i| Selector::by_symbol(intern("!".repeat(i + 1))))
+                        .collect();
+                    (syms, snap, sels)
+                }
+                // Freq-only queries: `matches` short-circuits the symbol arm on
+                // `is_none()`, so this walks the same N entries doing no string
+                // work at all — the floor for a scan of this shape.
+                _ => {
+                    let (syms, snap) = universe(N);
+                    let sels = (0..N)
+                        .map(|i| Selector::by_freq(Frequency::Minute(i as u32 + 1)))
+                        .collect();
+                    (syms, snap, sels)
+                }
+            };
+            black_box(&syms);
+            for _ in 0..BARS {
+                for sel in &sels {
+                    black_box(snap.find(sel));
+                }
+            }
+        }
+        // ---- what the comparison costs end to end -------------------------
+        //
+        // The same `MultiAssetStrategy` drive as `benches/multi_asset.rs` at
+        // N = 64, over two universes that differ *only* in whether the symbols
+        // share a length. Equal-length symbols reach `memcmp` on every rejected
+        // entry; ragged ones are rejected by the length check first. Neither
+        // needs a library change, so the gap is a clean ceiling on what making
+        // the symbol comparison cheap can be worth to a whole run.
+        "drive_equal" | "drive_ragged" => {
+            use fugazi::strategies::MultiAssetStrategy;
+            let names: Vec<String> = if name == "drive_equal" {
+                (0..N).map(|i| format!("S{i:03}")).collect()
+            } else {
+                (0..N).map(|i| "S".repeat(i + 1)).collect()
+            };
+            let snaps = drive_snapshots(&names, 300);
+            let close = |sym: &Symbol| {
+                fugazi::indicators::Close::of(fugazi::indicators::Pick::matching(
+                    Selector::by_symbol(sym.clone()),
+                ))
+            };
+            let mut strat = MultiAssetStrategy::<Symbol>::with_initial_equity(10_000.0)
+                .long_on(
+                    move |sym: &Symbol| {
+                        fugazi::indicators::Sma::new(close(sym), 5)
+                            .crosses_above(fugazi::indicators::Sma::new(close(sym), 20))
+                    },
+                    move |sym: &Symbol| {
+                        fugazi::indicators::Sma::new(close(sym), 5)
+                            .crosses_below(fugazi::indicators::Sma::new(close(sym), 20))
+                    },
+                );
+            let mut w: PaperWallet<Symbol> = PaperWallet::new(10_000.0);
+            black_box(fugazi::backtest::run(&mut strat, &mut w, snaps.into_iter()));
+        }
         other => panic!("unknown workload `{other}`"),
     }
+}
+
+/// One snapshot per bar carrying every named symbol, phase-shifted so each
+/// chain does real work. Mirrors `benches/common::multi_snapshots`, but takes
+/// the names so the symbol *shape* can be varied.
+fn drive_snapshots(names: &[String], bars: usize) -> Vec<Snapshot<Symbol>> {
+    let syms: Vec<Symbol> = names.iter().map(intern).collect();
+    (0..bars)
+        .map(|b| {
+            let mut snap = Snapshot::new();
+            for (i, s) in syms.iter().enumerate() {
+                let px = 100.0 + ((b + i * 7) % 23) as f64;
+                snap.push(
+                    Some(s.clone()),
+                    None,
+                    Atom::new(Candle::new(px, px * 1.001, px * 0.999, px, 1_000.0)),
+                );
+            }
+            snap
+        })
+        .collect()
 }
 
 fn median(mut v: Vec<f64>) -> f64 {

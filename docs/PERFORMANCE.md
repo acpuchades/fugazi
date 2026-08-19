@@ -1591,11 +1591,70 @@ question on their own — but the *shape* was the tell. **A layout artifact does
 not scale monotonically with a runtime parameter.** A delta that tracks N is
 tracking work, and callgrind then said so outright.
 
-What survives is the other half of breaking-candidate #2, untouched by this: at
-N = 64 `find_64` retires **217× the instructions of `find_2`** for 32× the
-lookups, so the scan really is the quadratic term. The win is in **not scanning**
-— the lazily-built `symbol → first index` side table that document proposes —
-not in scanning something narrower.
+### Where `Snapshot::find` actually spends, and why the index table is the wrong fix
+
+The revert above raised the obvious next question — if not the layout, what? —
+and the answer changes which of breaking-candidate #2's options is worth taking.
+
+`cargo bench --bench snapshot_scan` decomposes the per-entry cost. Every row
+drives the **same loop shape** (iterate a pre-built `Vec` of 64 distinct
+selectors) and differs only in scan length and in what the comparison must do:
+
+| workload | instr/lookup | entries scanned | instr/entry |
+|---|---:|---:|---:|
+| `miss_freq` — freq-only query, no string work | 397.5 | 64 | 6.21 |
+| `miss_ragged` — symbols rejected on length | 554.2 | 64 | 8.66 |
+| `miss_prebuilt` — equal-length symbols | 2 323.1 | 64 | **36.30** |
+| `hit_prebuilt` — equal-length, hits at its own index | 1 183.5 | 32.5 | **36.42** |
+
+`miss_prebuilt` and `hit_prebuilt` reach the same per-entry cost from *different
+scan lengths*, which is the cross-check that the model is right. So:
+
+| | instr/entry | |
+|---|---:|---|
+| the scan itself (iterate, compare `Option<Frequency>`) | 6.21 | |
+| symbol comparison rejected by the **length** check | +2.45 | |
+| **`memcmp`, when the lengths are equal** | **+27.64** | **76% of `find`** |
+
+**Three quarters of `Snapshot::find` is `memcmp` on equal-length symbols**, and
+real universes are overwhelmingly equal-length — `BTCUSDT`/`ETHUSDT`/`SOLUSDT`,
+`AAPL`/`MSFT`. `Arc<str>` compares by *content*: the fat pointer carries the
+length inline so a length mismatch is free, but equal lengths force a deref and a
+byte compare. std's `Arc` specialisation short-circuits on pointer equality, so
+the entry that *matches* is cheap; it is the `N − 1` that do not which pay.
+
+End to end, on the same `MultiAssetStrategy` drive `benches/multi_asset.rs` runs,
+at N = 64 over two universes differing **only** in whether the symbols share a
+length — no library change on either side:
+
+| | instructions | per symbol-bar |
+|---|---:|---:|
+| equal-length symbols | 137 108 116 | 7 141 |
+| ragged-length symbols | 72 583 332 | 3 780 |
+| | **1.89×** | |
+
+**`memcmp` is 47% of a 64-symbol backtest.** Two independent paths agree: 47%
+measured directly, and 50% derived from the table above (`find` is 66% of the
+drive × 76% of `find`). It is if anything an *under*-estimate — the ragged
+universe is penalised on the other side, since the wallet's `HashMap<Symbol, _>`
+hashes 32-character keys where the equal-length one hashes 4.
+
+**This reranks the two options in breaking-candidate #2.** The lazily-built
+`symbol → first index` side table attacks the scan *length*, needs
+`Sym: Eq + Hash`, breaks the documented predicate-not-key invariant — and still
+has to hash the symbol's bytes, which is a pass over exactly the data `memcmp`
+was reading. Making the *comparison* cheap instead attacks 76% of the cost, needs
+no change to the O(N), no new storage layout (the mistake above), and no
+invariant: a fingerprint stored inline in the tag is a sound **negative** filter,
+because a mismatch proves inequality and a match falls through to the real
+compare. Its obstacle is a different one — `Sym` is generic and `Selector`
+requires only `PartialEq`, so an inline fingerprint needs a bound that today's
+API does not ask for.
+
+Both remain open. The measured ceiling on the cheap-comparison route is the 1.89×
+above; the index table's ceiling is higher (it removes the scan rather than
+narrowing it) but it is the more invasive of the two and buys the smaller share
+of what is actually being spent.
 
 ## The Python binding budget — 1.25×, with one exemption
 
